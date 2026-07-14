@@ -35,15 +35,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version: '1.26.5'
-          cache-dependency-path: |
-            api/go.sum
-            agent/go.sum
-            operator/go.sum
-            snapshotctl/go.sum
-            go.work.sum
+      - uses: ./.github/actions/setup-go
       - name: Install tools
         run: GOWORK=off make -f hack/tools.mk install-tools
       - name: Run check
@@ -54,15 +46,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version: '1.26.5'
-          cache-dependency-path: |
-            api/go.sum
-            agent/go.sum
-            operator/go.sum
-            snapshotctl/go.sum
-            go.work.sum
+      - uses: ./.github/actions/setup-go
       - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
 
   govulncheck:
@@ -70,15 +54,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version: '1.26.5'
-          cache-dependency-path: |
-            api/go.sum
-            agent/go.sum
-            operator/go.sum
-            snapshotctl/go.sum
-            go.work.sum
+      - uses: ./.github/actions/setup-go
       - name: Install govulncheck
         run: GOWORK=off go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
       - name: Run govulncheck
@@ -90,15 +66,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version: '1.26.5'
-          cache-dependency-path: |
-            api/go.sum
-            agent/go.sum
-            operator/go.sum
-            snapshotctl/go.sum
-            go.work.sum
+      - uses: ./.github/actions/setup-go
       - run: make -C agent test
 
   test-operator:
@@ -106,15 +74,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version: '1.26.5'
-          cache-dependency-path: |
-            api/go.sum
-            agent/go.sum
-            operator/go.sum
-            snapshotctl/go.sum
-            go.work.sum
+      - uses: ./.github/actions/setup-go
       - run: make -C operator test
 
   test-snapshotctl:
@@ -122,15 +82,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version: '1.26.5'
-          cache-dependency-path: |
-            api/go.sum
-            agent/go.sum
-            operator/go.sum
-            snapshotctl/go.sum
-            go.work.sum
+      - uses: ./.github/actions/setup-go
       - run: make -C snapshotctl test
 
   build-agent:
@@ -139,15 +91,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version: '1.26.5'
-          cache-dependency-path: |
-            api/go.sum
-            agent/go.sum
-            operator/go.sum
-            snapshotctl/go.sum
-            go.work.sum
+      - uses: ./.github/actions/setup-go
       - run: make -C agent build
 
   build-operator:
@@ -156,15 +100,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version: '1.26.5'
-          cache-dependency-path: |
-            api/go.sum
-            agent/go.sum
-            operator/go.sum
-            snapshotctl/go.sum
-            go.work.sum
+      - uses: ./.github/actions/setup-go
       - run: make -C operator build
 
   build-snapshotctl:
@@ -173,15 +109,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version: '1.26.5'
-          cache-dependency-path: |
-            api/go.sum
-            agent/go.sum
-            operator/go.sum
-            snapshotctl/go.sum
-            go.work.sum
+      - uses: ./.github/actions/setup-go
       - run: make -C snapshotctl build
 
   helm-lint:

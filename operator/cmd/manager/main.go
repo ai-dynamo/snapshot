@@ -17,10 +17,10 @@ package main
 import (
 	"os"
 
+	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/ai-dynamo/snapshot/api/v1alpha1"
-	"k8s.io/apimachinery/pkg/runtime"
 )
 
 func main() {
