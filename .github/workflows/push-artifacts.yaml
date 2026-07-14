@@ -17,33 +17,57 @@ name: Publish Artifacts
 on:
   push:
     tags:
-      - 'v*'
+      - '*.*.*'
+  workflow_run:
+    workflows: ["CI"]
+    types:
+      - completed
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
 
 jobs:
-  # Single job so the Helm push reuses the docker login credentials
-  # (helm reads ~/.docker/config.json); a separate job would start on a fresh
-  # runner with no registry auth.
   publish:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+    # Tag push publishes directly; a workflow_run publishes only for a successful CI on main.
+    if: >-
+      ${{ github.event_name == 'push' ||
+          (github.event.workflow_run.event == 'push' &&
+           github.event.workflow_run.head_branch == 'main' &&
+           github.event.workflow_run.conclusion == 'success') }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - name: Derive version (strip leading v for SemVer/OCI)
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.5"
       - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
-        with:
-          version: v3.17.3
-      - name: Build and push images
+      - name: Build & publish images and chart
         run: |
-          make docker-build-agent    TAGS="$VERSION" DOCKER_BUILD_ARGS=--push
-          make docker-build-operator TAGS="$VERSION" DOCKER_BUILD_ARGS=--push
-      - name: Package and push Helm chart
-        run: make chart-package chart-push CHART_VERSION="$VERSION" APP_VERSION="$VERSION"
+          set -euo pipefail
+
+          registry="$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME}"
+          else
+            # 'g' prefix keeps all-numeric short SHAs valid as a semver prerelease.
+            version="v0.0.0-g$(git rev-parse --short HEAD)"
+          fi
+          echo "Publishing registry=${registry} version=${version}"
+
+          make docker-build-agent    REGISTRY="$registry" TAGS="$version" DOCKER_BUILD_ARGS=--push
+          make docker-build-operator REGISTRY="$registry" TAGS="$version" DOCKER_BUILD_ARGS=--push
+
+          helm package charts/snapshot --version "$version" --app-version "$version"
+          helm push "snapshot-${version}.tgz" "oci://${registry}/charts"

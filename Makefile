@@ -10,12 +10,10 @@ include hack/tools.mk
 REGISTRY          ?= ghcr.io/ai-dynamo/snapshot
 VERSION           ?= latest
 TAGS              ?= $(VERSION)
-CHART_VERSION     ?= $(VERSION)
-APP_VERSION       ?= $(VERSION)
 DOCKER_BUILD_ARGS ?=
 
 .PHONY: tidy generate test build lint verify-generate check fmt add-license-headers \
-        govulncheck helm-lint docker-build-agent docker-build-operator chart-package chart-push
+        govulncheck helm-lint docker-build-agent docker-build-operator
 
 tidy:
 	$(MAKE) -C api tidy
@@ -78,9 +76,3 @@ docker-build-agent:
 docker-build-operator:
 	docker buildx build $(DOCKER_BUILD_ARGS) -f operator/Dockerfile \
 	  $(foreach t,$(TAGS),-t $(REGISTRY)/operator:$(t)) .
-
-chart-package: $(HELM)
-	$(HELM) package charts/snapshot --version $(CHART_VERSION) --app-version $(APP_VERSION)
-
-chart-push: $(HELM)
-	$(HELM) push snapshot-$(CHART_VERSION).tgz oci://$(REGISTRY)/charts

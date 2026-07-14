@@ -6,3 +6,6 @@ bin/
 
 # Tooling
 .serena/
+
+# macOS
+.DS_Store
