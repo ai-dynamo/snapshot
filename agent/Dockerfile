@@ -19,10 +19,10 @@ WORKDIR /workspace
 COPY api/ api/
 COPY agent/ agent/
 WORKDIR /workspace/agent
-RUN go build -o /agent ./cmd/agent && go build -o /nsrestore ./cmd/nsrestore
+RUN go build -o bin/agent ./cmd/agent && go build -o bin/nsrestore ./cmd/nsrestore
 
 FROM ubuntu:22.04
 RUN apt-get update && apt-get install -y criu && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /agent /agent
-COPY --from=builder /nsrestore /nsrestore
+COPY --from=builder /workspace/agent/bin/agent /agent
+COPY --from=builder /workspace/agent/bin/nsrestore /nsrestore
 ENTRYPOINT ["/agent"]

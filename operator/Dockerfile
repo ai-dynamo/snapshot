@@ -19,8 +19,8 @@ WORKDIR /workspace
 COPY api/ api/
 COPY operator/ operator/
 WORKDIR /workspace/operator
-RUN go build -o /manager ./cmd/manager
+RUN go build -o bin/manager ./cmd/manager
 
 FROM gcr.io/distroless/static:nonroot
-COPY --from=builder /manager /manager
+COPY --from=builder /workspace/operator/bin/manager /manager
 ENTRYPOINT ["/manager"]

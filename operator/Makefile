@@ -1,7 +1,7 @@
 .PHONY: build test tidy lint fmt
 
 build:
-	go build ./...
+	go build -o bin/manager ./cmd/manager
 
 test:
 	go test ./...
