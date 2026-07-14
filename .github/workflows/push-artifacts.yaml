@@ -41,21 +41,9 @@ jobs:
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
         with:
           version: v3.17.3
-      - name: Build and push agent image
-        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
-        with:
-          context: .
-          file: agent/Dockerfile
-          push: true
-          tags: ghcr.io/ai-dynamo/snapshot/agent:${{ env.VERSION }}
-      - name: Build and push operator image
-        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
-        with:
-          context: .
-          file: operator/Dockerfile
-          push: true
-          tags: ghcr.io/ai-dynamo/snapshot/operator:${{ env.VERSION }}
-      - name: Package and push Helm chart
+      - name: Build and push images
         run: |
-          helm package charts/snapshot --version "$VERSION" --app-version "$VERSION"
-          helm push "snapshot-$VERSION.tgz" oci://ghcr.io/ai-dynamo/snapshot/charts
+          make docker-build-agent    TAGS="$VERSION" DOCKER_BUILD_ARGS=--push
+          make docker-build-operator TAGS="$VERSION" DOCKER_BUILD_ARGS=--push
+      - name: Package and push Helm chart
+        run: make chart-package chart-push CHART_VERSION="$VERSION" APP_VERSION="$VERSION"

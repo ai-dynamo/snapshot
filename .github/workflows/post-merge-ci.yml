@@ -51,24 +51,10 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and push agent image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: agent/Dockerfile
-          push: true
-          tags: |
-            ghcr.io/ai-dynamo/snapshot/agent:latest
-            ghcr.io/ai-dynamo/snapshot/agent:main-${{ steps.vars.outputs.short_sha }}
-      - name: Build and push operator image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: operator/Dockerfile
-          push: true
-          tags: |
-            ghcr.io/ai-dynamo/snapshot/operator:latest
-            ghcr.io/ai-dynamo/snapshot/operator:main-${{ steps.vars.outputs.short_sha }}
+      - name: Build and push images
+        run: |
+          make docker-build-agent    TAGS="latest main-${{ steps.vars.outputs.short_sha }}" DOCKER_BUILD_ARGS=--push
+          make docker-build-operator TAGS="latest main-${{ steps.vars.outputs.short_sha }}" DOCKER_BUILD_ARGS=--push
 
   publish-chart:
     needs: publish-images
@@ -90,7 +76,4 @@ jobs:
       - name: Package and push Helm chart
         # app-version = the image tag we actually pushed, so the chart's
         # appVersion-defaulted image reference resolves to a real image.
-        run: |
-          VERSION="0.1.0-main.${{ steps.vars.outputs.short_sha }}"
-          helm package charts/snapshot --version "$VERSION" --app-version "main-${{ steps.vars.outputs.short_sha }}"
-          helm push "snapshot-$VERSION.tgz" oci://ghcr.io/ai-dynamo/snapshot/charts
+        run: make chart-package chart-push CHART_VERSION="0.1.0-main.${{ steps.vars.outputs.short_sha }}" APP_VERSION="main-${{ steps.vars.outputs.short_sha }}"

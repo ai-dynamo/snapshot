@@ -36,10 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: ./.github/actions/setup-go
-      - name: Install tools
-        run: GOWORK=off make -f hack/tools.mk install-tools
-      - name: Run check
-        run: make check
+      - run: make check
 
   pre-commit:
     runs-on: ubuntu-latest
@@ -55,11 +52,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: ./.github/actions/setup-go
-      - name: Install govulncheck
-        run: GOWORK=off go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
-      - name: Run govulncheck
-        run: |
-          for m in api agent operator snapshotctl; do (cd $m && govulncheck ./...); done
+      - run: make govulncheck
 
   test-api:
     runs-on: ubuntu-latest
@@ -128,7 +121,7 @@ jobs:
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
         with:
           version: v3.17.3
-      - run: helm lint charts/snapshot/
+      - run: make helm-lint
 
   ci-status:
     needs:
