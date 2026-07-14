@@ -18,5 +18,5 @@ spec:
     spec:
       containers:
         - name: agent
-          image: "{{ .Values.image.agent.repository }}:{{ .Values.image.agent.tag }}"
+          image: "{{ .Values.image.agent.repository }}:{{ .Values.image.agent.tag | default .Chart.AppVersion }}"
           imagePullPolicy: IfNotPresent

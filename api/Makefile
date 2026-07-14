@@ -2,6 +2,7 @@
 
 generate:
 	controller-gen object:headerFile=../hack/boilerplate.go.txt paths=./...
+	controller-gen crd paths=./... output:crd:artifacts:config=../charts/snapshot/crds
 
 fmt:
 	gofmt -w .

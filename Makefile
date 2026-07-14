@@ -1,3 +1,12 @@
+# Ensure Go-installed tools (controller-gen, golangci-lint, addlicense,
+# govulncheck) resolve from GOBIN regardless of the caller's PATH ordering.
+GOBIN ?= $(shell go env GOPATH)/bin
+export PATH := $(GOBIN):$(PATH)
+
+# check mutates files across stages (generate, license, fmt, tidy); running
+# them in parallel would let lint observe partially-rewritten files.
+.NOTPARALLEL:
+
 .PHONY: tidy generate test build lint verify-generate check fmt add-license-headers
 
 tidy:

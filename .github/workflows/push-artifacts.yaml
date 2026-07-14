@@ -20,37 +20,42 @@ on:
       - 'v*'
 
 jobs:
-  push-images:
+  # Single job so the Helm push reuses the docker login credentials
+  # (helm reads ~/.docker/config.json); a separate job would start on a fresh
+  # runner with no registry auth.
+  publish:
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       packages: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Derive version (strip leading v for SemVer/OCI)
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
       - name: Log in to GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+        with:
+          version: v3.17.3
       - name: Build and push agent image
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
         with:
-          context: agent
+          context: .
+          file: agent/Dockerfile
           push: true
-          tags: ghcr.io/ai-dynamo/snapshot/agent:${{ github.ref_name }}
+          tags: ghcr.io/ai-dynamo/snapshot/agent:${{ env.VERSION }}
       - name: Build and push operator image
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
         with:
-          context: operator
+          context: .
+          file: operator/Dockerfile
           push: true
-          tags: ghcr.io/ai-dynamo/snapshot/operator:${{ github.ref_name }}
-
-  push-chart:
-    runs-on: ubuntu-latest
-    needs: push-images
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+          tags: ghcr.io/ai-dynamo/snapshot/operator:${{ env.VERSION }}
       - name: Package and push Helm chart
         run: |
-          helm package charts/snapshot --version ${{ github.ref_name }}
-          helm push snapshot-${{ github.ref_name }}.tgz oci://ghcr.io/ai-dynamo/snapshot/charts
+          helm package charts/snapshot --version "$VERSION" --app-version "$VERSION"
+          helm push "snapshot-$VERSION.tgz" oci://ghcr.io/ai-dynamo/snapshot/charts

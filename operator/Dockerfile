@@ -12,13 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Build context is the repository root so the api/ module (referenced via the
+# replace directive in operator/go.mod) is available inside the build.
 FROM golang:1.26-alpine AS builder
 WORKDIR /workspace
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN go build -o manager ./cmd/manager
+COPY api/ api/
+COPY operator/ operator/
+WORKDIR /workspace/operator
+RUN go build -o /manager ./cmd/manager
 
 FROM gcr.io/distroless/static:nonroot
-COPY --from=builder /workspace/manager /manager
+COPY --from=builder /manager /manager
 ENTRYPOINT ["/manager"]

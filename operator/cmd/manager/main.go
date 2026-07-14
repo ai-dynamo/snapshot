@@ -18,6 +18,7 @@ import (
 	"os"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/ai-dynamo/snapshot/api/v1alpha1"
@@ -25,6 +26,10 @@ import (
 
 func main() {
 	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		ctrl.Log.Error(err, "unable to register client-go scheme")
+		os.Exit(1)
+	}
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		ctrl.Log.Error(err, "unable to register API types")
 		os.Exit(1)

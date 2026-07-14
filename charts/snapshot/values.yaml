@@ -1,9 +1,10 @@
 image:
   operator:
     repository: ghcr.io/ai-dynamo/snapshot/operator
-    tag: latest
+    # Defaults to the chart's appVersion when empty (see templates).
+    tag: ""
   agent:
     repository: ghcr.io/ai-dynamo/snapshot/agent
-    tag: latest
+    tag: ""
 
 replicaCount: 1

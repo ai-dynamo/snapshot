@@ -19,5 +19,5 @@ spec:
     spec:
       containers:
         - name: manager
-          image: "{{ .Values.image.operator.repository }}:{{ .Values.image.operator.tag }}"
+          image: "{{ .Values.image.operator.repository }}:{{ .Values.image.operator.tag | default .Chart.AppVersion }}"
           imagePullPolicy: IfNotPresent
