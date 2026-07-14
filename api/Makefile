@@ -1,14 +1,17 @@
+REPO_HACK_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../hack)
+include $(REPO_HACK_DIR)/tools.mk
+
 .PHONY: generate fmt lint tidy test
 
-generate:
-	controller-gen object:headerFile=../hack/boilerplate.go.txt paths=./...
-	controller-gen crd paths=./... output:crd:artifacts:config=../charts/snapshot/crds
+generate: $(CONTROLLER_GEN)
+	$(CONTROLLER_GEN) object:headerFile=../hack/boilerplate.go.txt paths=./...
+	$(CONTROLLER_GEN) crd paths=./... output:crd:artifacts:config=../charts/snapshot/crds
 
 fmt:
 	gofmt -w .
 
-lint:
-	golangci-lint run --timeout=5m ./...
+lint: $(GOLANGCI_LINT)
+	$(GOLANGCI_LINT) run --timeout=5m ./...
 
 tidy:
 	go mod tidy

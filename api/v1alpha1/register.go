@@ -26,9 +26,8 @@ var SchemeGroupVersion = schema.GroupVersion{Group: "nvidia.com", Version: "v1al
 
 func AddToScheme(s *runtime.Scheme) error {
 	s.AddKnownTypes(SchemeGroupVersion,
-		&Snapshot{}, &SnapshotList{},
-		&SnapshotContent{}, &SnapshotContentList{},
-		&SnapshotJob{}, &SnapshotJobList{},
+		&PodSnapshot{}, &PodSnapshotList{},
+		&PodSnapshotContent{}, &PodSnapshotContentList{},
 	)
 	metav1.AddToGroupVersion(s, SchemeGroupVersion)
 	return nil
