@@ -15,15 +15,47 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 )
 
+// version is overridable at build time via -ldflags "-X main.version=<tag>".
+var version = "dev"
+
+// healthAddr is the address the agent's health/version server listens on.
+const healthAddr = ":8080"
+
+// newServer builds the agent's HTTP server exposing /healthz and /version.
+func newServer() *http.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprintln(w, "ok")
+	})
+	mux.HandleFunc("/version", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprintln(w, version)
+	})
+	return &http.Server{Addr: healthAddr, Handler: mux}
+}
+
 func main() {
-	fmt.Println("snapshot agent starting")
+	fmt.Printf("snapshot agent starting, version %s\n", version)
+
+	srv := newServer()
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("health server failed: %v", err)
+		}
+	}()
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
 	<-stop
+
+	_ = srv.Shutdown(context.Background())
 }
