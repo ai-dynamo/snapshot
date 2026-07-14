@@ -1,9 +1,9 @@
 image:
   operator:
-    repository: ghcr.io/dynamo-ai/snapshot/operator
+    repository: ghcr.io/ai-dynamo/snapshot/operator
     tag: latest
   agent:
-    repository: ghcr.io/dynamo-ai/snapshot/agent
+    repository: ghcr.io/ai-dynamo/snapshot/agent
     tag: latest
 
 replicaCount: 1

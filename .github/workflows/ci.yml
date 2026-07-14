@@ -1,74 +1,215 @@
+# Copyright 2026 NVIDIA Corporation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 name: CI
 
 on:
   push:
-    branches: [main, feat/**]
+    branches:
+      - main
+      - 'feat/**'
   pull_request:
-    branches: [main]
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
-  verify-generate:
+  check:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.26'
-      - name: Install controller-gen
-        run: go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.16.0
-      - name: Verify codegen
-        run: make verify-generate
+          cache-dependency-path: |
+            api/go.sum
+            agent/go.sum
+            operator/go.sum
+            snapshotctl/go.sum
+            go.work.sum
+      - name: Install tools
+        run: GOWORK=off make -f hack/tools.mk install-tools
+      - name: Run check
+        run: make check
 
-  lint:
+  pre-commit:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.26'
-      - name: Lint
-        run: make lint
+          cache-dependency-path: |
+            api/go.sum
+            agent/go.sum
+            operator/go.sum
+            snapshotctl/go.sum
+            go.work.sum
+      - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+
+  govulncheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: |
+            api/go.sum
+            agent/go.sum
+            operator/go.sum
+            snapshotctl/go.sum
+            go.work.sum
+      - name: Install govulncheck
+        run: GOWORK=off go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+      - name: Run govulncheck
+        run: |
+          for m in api agent operator snapshotctl; do (cd $m && govulncheck ./...); done
 
   test-agent:
     runs-on: ubuntu-latest
-    if: contains(github.event.head_commit.modified, 'agent/') || contains(github.event.head_commit.modified, 'api/')
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.26'
-      - name: Test agent
-        run: $(MAKE) -C agent test
+          cache-dependency-path: |
+            api/go.sum
+            agent/go.sum
+            operator/go.sum
+            snapshotctl/go.sum
+            go.work.sum
+      - run: make -C agent test
 
   test-operator:
     runs-on: ubuntu-latest
-    if: contains(github.event.head_commit.modified, 'operator/') || contains(github.event.head_commit.modified, 'api/')
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.26'
-      - name: Test operator
-        run: $(MAKE) -C operator test
+          cache-dependency-path: |
+            api/go.sum
+            agent/go.sum
+            operator/go.sum
+            snapshotctl/go.sum
+            go.work.sum
+      - run: make -C operator test
+
+  test-snapshotctl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: |
+            api/go.sum
+            agent/go.sum
+            operator/go.sum
+            snapshotctl/go.sum
+            go.work.sum
+      - run: make -C snapshotctl test
 
   build-agent:
-    runs-on: ubuntu-latest
     needs: test-agent
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.26'
-      - name: Build agent
-        run: $(MAKE) -C agent build
+          cache-dependency-path: |
+            api/go.sum
+            agent/go.sum
+            operator/go.sum
+            snapshotctl/go.sum
+            go.work.sum
+      - run: make -C agent build
 
   build-operator:
-    runs-on: ubuntu-latest
     needs: test-operator
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.26'
-      - name: Build operator
-        run: $(MAKE) -C operator build
+          cache-dependency-path: |
+            api/go.sum
+            agent/go.sum
+            operator/go.sum
+            snapshotctl/go.sum
+            go.work.sum
+      - run: make -C operator build
+
+  build-snapshotctl:
+    needs: test-snapshotctl
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: |
+            api/go.sum
+            agent/go.sum
+            operator/go.sum
+            snapshotctl/go.sum
+            go.work.sum
+      - run: make -C snapshotctl build
+
+  helm-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+        with:
+          version: v3.17.3
+      - run: helm lint charts/snapshot/
+
+  ci-status:
+    needs:
+      - check
+      - pre-commit
+      - govulncheck
+      - test-agent
+      - test-operator
+      - test-snapshotctl
+      - build-agent
+      - build-operator
+      - build-snapshotctl
+      - helm-lint
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: |
+          echo '${{ toJSON(needs) }}' | jq -e 'all(.[]; .result=="success" or .result=="skipped")'

@@ -1,7 +1,13 @@
-.PHONY: build tidy lint
+.PHONY: build test tidy lint fmt
 
 build:
 	go build -o bin/snapshotctl ./cmd/snapshotctl
+
+test:
+	go test ./...
+
+fmt:
+	gofmt -w .
 
 tidy:
 	go mod tidy

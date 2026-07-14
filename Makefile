@@ -1,4 +1,4 @@
-.PHONY: tidy generate test build lint verify-generate
+.PHONY: tidy generate test build lint verify-generate check fmt add-license-headers
 
 tidy:
 	$(MAKE) -C api tidy
@@ -12,10 +12,12 @@ generate:
 test:
 	$(MAKE) -C agent test
 	$(MAKE) -C operator test
+	$(MAKE) -C snapshotctl test
 
 build:
 	$(MAKE) -C agent build
 	$(MAKE) -C operator build
+	$(MAKE) -C snapshotctl build
 
 lint:
 	$(MAKE) -C api lint
@@ -23,5 +25,21 @@ lint:
 	$(MAKE) -C operator lint
 	$(MAKE) -C snapshotctl lint
 
+fmt:
+	$(MAKE) -C api fmt
+	$(MAKE) -C agent fmt
+	$(MAKE) -C operator fmt
+	$(MAKE) -C snapshotctl fmt
+
+add-license-headers:
+	addlicense -c "NVIDIA Corporation" -l apache \
+	  -ignore '**/zz_generated*.go' -ignore '**/.gitkeep' -ignore 'charts/**' \
+	  . .github/workflows
+
+check: generate add-license-headers fmt tidy lint
+	@test -z "$$(git status --porcelain)" || \
+	  (echo "ERROR: tree dirty after check — commit the changes below"; git status --porcelain; git diff; exit 1)
+
 verify-generate: generate
-	git diff --exit-code
+	@test -z "$$(git status --porcelain)" || \
+	  (echo "ERROR: generated files out of date — run 'make generate' and commit"; git status --porcelain; git diff; exit 1)

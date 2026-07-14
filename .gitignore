@@ -1,0 +1,8 @@
+# Build output
+/operator/manager
+/snapshotctl/snapshotctl
+bin/
+*.tgz
+
+# Tooling
+.serena/

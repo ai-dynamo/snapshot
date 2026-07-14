@@ -12,15 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM golang:1.26-alpine AS builder
-WORKDIR /workspace
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN go build -o agent ./cmd/agent && go build -o nsrestore ./cmd/nsrestore
+name: Lint PR Title
 
-FROM ubuntu:22.04
-RUN apt-get update && apt-get install -y criu && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /workspace/agent /agent
-COPY --from=builder /workspace/nsrestore /nsrestore
-ENTRYPOINT ["/agent"]
+on:
+  pull_request_target:
+    types:
+      - opened
+      - edited
+      - reopened
+
+permissions:
+  pull-requests: write
+
+jobs:
+  lint-pr-title:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@e32d7e603df1aa1ba07e981f2a23455dee596825 # v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
