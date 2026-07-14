@@ -54,9 +54,10 @@ add-license-headers: $(ADDLICENSE)
 	  -ignore '**/zz_generated*.go' -ignore '**/.gitkeep' -ignore 'charts/**' \
 	  . .github/workflows
 
-# install-tools makes controller-gen/golangci-lint/addlicense available to the
-# generate/lint/license stages before they run.
-check: install-tools generate add-license-headers fmt tidy lint
+# install-tools makes controller-gen/golangci-lint/addlicense/helm available to
+# the stages before they run. govulncheck + helm-lint are read-only, so they run
+# after the mutating stages and before the clean-tree assert.
+check: install-tools generate add-license-headers fmt tidy lint govulncheck helm-lint
 	@test -z "$$(git status --porcelain)" || \
 	  (echo "ERROR: tree dirty after check — commit the changes below"; git status --porcelain; git diff; exit 1)
 
@@ -67,8 +68,8 @@ verify-generate: generate
 govulncheck: $(GOVULNCHECK)
 	for m in api agent operator snapshotctl; do (cd $$m && $(GOVULNCHECK) ./...); done
 
-helm-lint:
-	helm lint charts/snapshot/
+helm-lint: $(HELM)
+	$(HELM) lint charts/snapshot/
 
 docker-build-agent:
 	docker buildx build $(DOCKER_BUILD_ARGS) -f agent/Dockerfile \
@@ -78,8 +79,8 @@ docker-build-operator:
 	docker buildx build $(DOCKER_BUILD_ARGS) -f operator/Dockerfile \
 	  $(foreach t,$(TAGS),-t $(REGISTRY)/operator:$(t)) .
 
-chart-package:
-	helm package charts/snapshot --version $(CHART_VERSION) --app-version $(APP_VERSION)
+chart-package: $(HELM)
+	$(HELM) package charts/snapshot --version $(CHART_VERSION) --app-version $(APP_VERSION)
 
-chart-push:
-	helm push snapshot-$(CHART_VERSION).tgz oci://$(REGISTRY)/charts
+chart-push: $(HELM)
+	$(HELM) push snapshot-$(CHART_VERSION).tgz oci://$(REGISTRY)/charts

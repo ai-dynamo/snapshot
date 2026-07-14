@@ -1,16 +1,13 @@
-.PHONY: build test generate tidy lint fmt
+.PHONY: build test tidy lint fmt
 
 build:
 	go build ./...
 
 test:
-	go test ./... -v
+	go test ./...
 
 fmt:
 	gofmt -w .
-
-generate:
-	controller-gen object:headerFile="../hack/boilerplate.go.txt" rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd
 
 tidy:
 	go mod tidy
