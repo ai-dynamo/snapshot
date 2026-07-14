@@ -31,7 +31,8 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on:
+      group: Fastchecker
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -50,7 +51,8 @@ jobs:
       - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
 
   govulncheck:
-    runs-on: ubuntu-latest
+    runs-on:
+      group: Fastchecker
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -62,7 +64,8 @@ jobs:
           for m in api agent operator snapshotctl; do (cd $m && govulncheck ./...); done
 
   test-agent:
-    runs-on: ubuntu-latest
+    runs-on:
+      group: Fastchecker
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -70,7 +73,8 @@ jobs:
       - run: make -C agent test
 
   test-operator:
-    runs-on: ubuntu-latest
+    runs-on:
+      group: Fastchecker
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -78,7 +82,8 @@ jobs:
       - run: make -C operator test
 
   test-snapshotctl:
-    runs-on: ubuntu-latest
+    runs-on:
+      group: Fastchecker
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -87,7 +92,8 @@ jobs:
 
   build-agent:
     needs: test-agent
-    runs-on: ubuntu-latest
+    runs-on:
+      group: Fastchecker
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -96,7 +102,8 @@ jobs:
 
   build-operator:
     needs: test-operator
-    runs-on: ubuntu-latest
+    runs-on:
+      group: Fastchecker
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -105,7 +112,8 @@ jobs:
 
   build-snapshotctl:
     needs: test-snapshotctl
-    runs-on: ubuntu-latest
+    runs-on:
+      group: Fastchecker
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
