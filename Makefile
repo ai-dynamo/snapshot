@@ -23,7 +23,7 @@ tidy:
 	$(MAKE) -C operator tidy
 	$(MAKE) -C snapshotctl tidy
 
-generate:
+generate: $(CONTROLLER_GEN)
 	$(MAKE) -C api generate
 
 test:
@@ -37,7 +37,7 @@ build:
 	$(MAKE) -C operator build
 	$(MAKE) -C snapshotctl build
 
-lint:
+lint: $(GOLANGCI_LINT)
 	$(MAKE) -C api lint
 	$(MAKE) -C agent lint
 	$(MAKE) -C operator lint

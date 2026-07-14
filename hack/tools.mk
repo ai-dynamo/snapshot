@@ -35,7 +35,8 @@ $(GOVULNCHECK):
 
 # helm ships as a tarball (<os>-<arch>/helm); extract just the binary.
 $(HELM):
-	curl -fsSL https://get.helm.sh/helm-$(HELM_VERSION)-$(SYSTEM_NAME)-$(SYSTEM_ARCH).tar.gz \
+	mkdir -p $(TOOLS_BIN_DIR)
+	curl -fsSL --retry 3 --retry-connrefused https://get.helm.sh/helm-$(HELM_VERSION)-$(SYSTEM_NAME)-$(SYSTEM_ARCH).tar.gz \
 	  | tar -xzf - -C $(TOOLS_BIN_DIR) --strip-components=1 $(SYSTEM_NAME)-$(SYSTEM_ARCH)/helm
 
 .PHONY: install-tools
