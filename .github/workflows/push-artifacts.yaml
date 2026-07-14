@@ -1,0 +1,42 @@
+name: Publish Artifacts
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  push-images:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push agent image
+        uses: docker/build-push-action@v5
+        with:
+          context: agent
+          push: true
+          tags: ghcr.io/dynamo-ai/snapshot/agent:${{ github.ref_name }}
+      - name: Build and push operator image
+        uses: docker/build-push-action@v5
+        with:
+          context: operator
+          push: true
+          tags: ghcr.io/dynamo-ai/snapshot/operator:${{ github.ref_name }}
+
+  push-chart:
+    runs-on: ubuntu-latest
+    needs: push-images
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package and push Helm chart
+        run: |
+          helm package charts/snapshot --version ${{ github.ref_name }}
+          helm push snapshot-${{ github.ref_name }}.tgz oci://ghcr.io/dynamo-ai/snapshot/charts

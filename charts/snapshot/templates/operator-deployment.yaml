@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "snapshot.fullname" . }}-operator
+  labels:
+    {{- include "snapshot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "snapshot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: operator
+  template:
+    metadata:
+      labels:
+        {{- include "snapshot.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: operator
+    spec:
+      containers:
+        - name: manager
+          image: "{{ .Values.image.operator.repository }}:{{ .Values.image.operator.tag }}"
+          imagePullPolicy: IfNotPresent
