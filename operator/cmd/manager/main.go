@@ -20,11 +20,14 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	"github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
 func main() {
+	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
+
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		ctrl.Log.Error(err, "unable to register client-go scheme")

@@ -14,10 +14,13 @@
 
 name: Post-Merge CI
 
+# Runs only after the CI workflow finishes, so we never publish images from a
+# commit whose tests failed. workflow_dispatch stays for manual re-publish.
 on:
-  push:
-    branches:
-      - main
+  workflow_run:
+    workflows: ["CI"]
+    types:
+      - completed
   workflow_dispatch:
 
 concurrency:
@@ -31,11 +34,17 @@ permissions:
 jobs:
   publish-images:
     runs-on: ubuntu-latest
+    # Publish only on a successful CI run of a push to main (skip PR runs), or a manual dispatch.
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.conclusion == 'success') }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
       - name: Set short SHA
         id: vars
-        run: echo "short_sha=$(echo ${{ github.sha }} | cut -c1-7)" >> "$GITHUB_OUTPUT"
+        run: |
+          SHA="${{ github.event.workflow_run.head_sha || github.sha }}"
+          echo "short_sha=${SHA:0:7}" >> "$GITHUB_OUTPUT"
       - name: Log in to GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -66,15 +75,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
         with:
           version: v3.17.3
       - name: Set short SHA
         id: vars
-        run: echo "short_sha=$(echo ${{ github.sha }} | cut -c1-7)" >> "$GITHUB_OUTPUT"
+        run: |
+          SHA="${{ github.event.workflow_run.head_sha || github.sha }}"
+          echo "short_sha=${SHA:0:7}" >> "$GITHUB_OUTPUT"
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
       - name: Package and push Helm chart
+        # app-version = the image tag we actually pushed, so the chart's
+        # appVersion-defaulted image reference resolves to a real image.
         run: |
-          helm package charts/snapshot --version 0.1.0-main.${{ steps.vars.outputs.short_sha }}
-          helm push snapshot-0.1.0-main.${{ steps.vars.outputs.short_sha }}.tgz oci://ghcr.io/ai-dynamo/snapshot/charts
+          VERSION="0.1.0-main.${{ steps.vars.outputs.short_sha }}"
+          helm package charts/snapshot --version "$VERSION" --app-version "main-${{ steps.vars.outputs.short_sha }}"
+          helm push "snapshot-$VERSION.tgz" oci://ghcr.io/ai-dynamo/snapshot/charts

@@ -19,6 +19,7 @@ generate:
 	$(MAKE) -C api generate
 
 test:
+	$(MAKE) -C api test
 	$(MAKE) -C agent test
 	$(MAKE) -C operator test
 	$(MAKE) -C snapshotctl test

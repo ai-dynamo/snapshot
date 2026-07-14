@@ -61,6 +61,14 @@ jobs:
         run: |
           for m in api agent operator snapshotctl; do (cd $m && govulncheck ./...); done
 
+  test-api:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: ./.github/actions/setup-go
+      - run: make -C api test
+
   test-agent:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -127,6 +135,7 @@ jobs:
       - check
       - pre-commit
       - govulncheck
+      - test-api
       - test-agent
       - test-operator
       - test-snapshotctl
