@@ -1,3 +1,8 @@
+REPO_HACK_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../hack)
+include $(REPO_HACK_DIR)/tools.mk
+
+.DEFAULT_GOAL := build
+
 .PHONY: build test tidy lint fmt
 
 build:
@@ -12,5 +17,5 @@ fmt:
 tidy:
 	go mod tidy
 
-lint:
-	golangci-lint run --timeout=5m ./...
+lint: $(GOLANGCI_LINT)
+	$(GOLANGCI_LINT) run --timeout=5m ./...

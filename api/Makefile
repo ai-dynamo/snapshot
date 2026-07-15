@@ -1,6 +1,8 @@
 REPO_HACK_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../hack)
 include $(REPO_HACK_DIR)/tools.mk
 
+.DEFAULT_GOAL := generate
+
 .PHONY: generate fmt lint tidy test
 
 generate: $(CONTROLLER_GEN)
