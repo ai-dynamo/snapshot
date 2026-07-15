@@ -7,7 +7,6 @@ include $(REPO_HACK_DIR)/tools.mk
 
 build:
 	go build -o bin/agent ./cmd/agent
-	go build -o bin/nsrestore ./cmd/nsrestore
 
 test:
 	go test ./...
