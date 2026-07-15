@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 )
 
 // version is overridable at build time via -ldflags "-X main.version=<tag>".
@@ -40,7 +41,11 @@ func newServer() *http.Server {
 	mux.HandleFunc("/version", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprintln(w, version)
 	})
-	return &http.Server{Addr: healthAddr, Handler: mux}
+	return &http.Server{
+		Addr:              healthAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
 }
 
 func main() {
@@ -57,5 +62,7 @@ func main() {
 	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
 	<-stop
 
-	_ = srv.Shutdown(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(ctx)
 }

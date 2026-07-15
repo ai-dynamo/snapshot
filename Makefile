@@ -64,7 +64,7 @@ verify-generate: generate
 	  (echo "ERROR: generated files out of date — run 'make generate' and commit"; git status --porcelain; git diff; exit 1)
 
 govulncheck: $(GOVULNCHECK)
-	for m in api agent operator snapshotctl; do (cd $$m && $(GOVULNCHECK) ./...); done
+	for m in api agent operator snapshotctl; do (cd $$m && $(GOVULNCHECK) ./...) || exit 1; done
 
 helm-lint: $(HELM)
 	$(HELM) lint charts/snapshot/
