@@ -19,7 +19,6 @@ tidy:
 	$(MAKE) -C api tidy
 	$(MAKE) -C agent tidy
 	$(MAKE) -C operator tidy
-	$(MAKE) -C snapshotctl tidy
 
 generate: $(CONTROLLER_GEN)
 	$(MAKE) -C api generate
@@ -28,24 +27,20 @@ test:
 	$(MAKE) -C api test
 	$(MAKE) -C agent test
 	$(MAKE) -C operator test
-	$(MAKE) -C snapshotctl test
 
 build:
 	$(MAKE) -C agent build
 	$(MAKE) -C operator build
-	$(MAKE) -C snapshotctl build
 
 lint: $(GOLANGCI_LINT)
 	$(MAKE) -C api lint
 	$(MAKE) -C agent lint
 	$(MAKE) -C operator lint
-	$(MAKE) -C snapshotctl lint
 
 fmt:
 	$(MAKE) -C api fmt
 	$(MAKE) -C agent fmt
 	$(MAKE) -C operator fmt
-	$(MAKE) -C snapshotctl fmt
 
 add-license-headers: $(ADDLICENSE)
 	$(ADDLICENSE) -c "NVIDIA Corporation" -l apache \
@@ -64,7 +59,7 @@ verify-generate: generate
 	  (echo "ERROR: generated files out of date — run 'make generate' and commit"; git status --porcelain; git diff; exit 1)
 
 govulncheck: $(GOVULNCHECK)
-	for m in api agent operator snapshotctl; do (cd $$m && $(GOVULNCHECK) ./...) || exit 1; done
+	for m in api agent operator; do (cd $$m && $(GOVULNCHECK) ./...) || exit 1; done
 
 helm-lint: $(HELM)
 	$(HELM) lint charts/snapshot/

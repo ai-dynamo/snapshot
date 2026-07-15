@@ -4,5 +4,4 @@ use (
 	./agent
 	./api
 	./operator
-	./snapshotctl
 )
