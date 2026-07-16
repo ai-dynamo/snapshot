@@ -55,7 +55,7 @@ verify-license-headers: $(ADDLICENSE)
 # install-tools makes controller-gen/golangci-lint/addlicense/helm available to
 # the stages before they run. govulncheck + helm-lint are read-only, so they run
 # after the mutating stages and before the clean-tree assert.
-check: install-tools generate add-license-headers fmt tidy lint govulncheck helm-lint
+check: install-tools generate add-license-headers fmt tidy verify-license-headers lint govulncheck helm-lint
 	@test -z "$$(git status --porcelain)" || \
 	  (echo "ERROR: tree dirty after check — commit the changes below"; git status --porcelain; git diff; exit 1)
 
