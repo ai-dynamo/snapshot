@@ -13,7 +13,7 @@ TAGS              ?= $(VERSION)
 DOCKER_BUILD_ARGS ?=
 
 .PHONY: tidy generate test build lint verify-generate check fmt add-license-headers \
-        govulncheck helm-lint docker-build-agent docker-build-operator
+        verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator
 
 tidy:
 	$(MAKE) -C api tidy
@@ -43,7 +43,12 @@ fmt:
 	$(MAKE) -C operator fmt
 
 add-license-headers: $(ADDLICENSE)
-	$(ADDLICENSE) -c "NVIDIA Corporation" -l apache \
+	$(ADDLICENSE) -f hack/boilerplate.addlicense.txt \
+	  -ignore '**/zz_generated*.go' -ignore '**/.gitkeep' -ignore 'charts/**' \
+	  . .github/workflows
+
+verify-license-headers: $(ADDLICENSE)
+	$(ADDLICENSE) -f hack/boilerplate.addlicense.txt -check \
 	  -ignore '**/zz_generated*.go' -ignore '**/.gitkeep' -ignore 'charts/**' \
 	  . .github/workflows
 
