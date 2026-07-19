@@ -1,0 +1,55 @@
+{{- if .Values.rbac.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "snapshot.operatorServiceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "snapshot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+---
+# ClusterRole for the PodSnapshot reconciler. Mirrors the controller's
+# kubebuilder rbac markers.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "snapshot.fullname" . }}-operator
+  labels:
+    {{- include "snapshot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+rules:
+  - apiGroups: ["nvidia.com"]
+    resources: ["podsnapshots"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["nvidia.com"]
+    resources: ["podsnapshots/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["nvidia.com"]
+    resources: ["podsnapshots/finalizers"]
+    verbs: ["update"]
+  - apiGroups: ["nvidia.com"]
+    resources: ["podsnapshotcontents"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["nvidia.com"]
+    resources: ["podsnapshotcontents/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "snapshot.fullname" . }}-operator
+  labels:
+    {{- include "snapshot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "snapshot.fullname" . }}-operator
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "snapshot.operatorServiceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
