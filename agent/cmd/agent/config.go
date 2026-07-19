@@ -1,4 +1,4 @@
-// Copyright 2026 NVIDIA Corporation
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 // config.go provides configuration loading for the checkpoint agent.

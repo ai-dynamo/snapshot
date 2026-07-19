@@ -13,7 +13,7 @@ TAGS              ?= $(VERSION)
 DOCKER_BUILD_ARGS ?=
 
 .PHONY: tidy generate test build lint verify-generate check fmt add-license-headers \
-        govulncheck helm-lint docker-build-agent docker-build-operator
+        verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator
 
 tidy:
 	$(MAKE) -C api tidy
@@ -43,14 +43,19 @@ fmt:
 	$(MAKE) -C operator fmt
 
 add-license-headers: $(ADDLICENSE)
-	$(ADDLICENSE) -c "NVIDIA Corporation" -l apache -s=only \
+	$(ADDLICENSE) -f hack/boilerplate.addlicense.txt \
+	  -ignore '**/zz_generated*.go' -ignore '**/.gitkeep' -ignore 'charts/**' \
+	  . .github/workflows
+
+verify-license-headers: $(ADDLICENSE)
+	$(ADDLICENSE) -f hack/boilerplate.addlicense.txt -check \
 	  -ignore '**/zz_generated*.go' -ignore '**/.gitkeep' -ignore 'charts/**' \
 	  . .github/workflows
 
 # install-tools makes controller-gen/golangci-lint/addlicense/helm available to
 # the stages before they run. govulncheck + helm-lint are read-only, so they run
 # after the mutating stages and before the clean-tree assert.
-check: install-tools generate add-license-headers fmt tidy lint govulncheck helm-lint
+check: install-tools generate add-license-headers fmt tidy verify-license-headers lint govulncheck helm-lint
 	@test -z "$$(git status --porcelain)" || \
 	  (echo "ERROR: tree dirty after check — commit the changes below"; git status --porcelain; git diff; exit 1)
 
