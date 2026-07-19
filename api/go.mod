@@ -1,6 +1,6 @@
 module github.com/ai-dynamo/snapshot/api
 
-go 1.26
+go 1.26.5
 
 require k8s.io/apimachinery v0.31.0
 

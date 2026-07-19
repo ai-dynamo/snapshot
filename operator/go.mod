@@ -1,6 +1,6 @@
 module github.com/ai-dynamo/snapshot/operator
 
-go 1.26.0
+go 1.26.5
 
 require (
 	github.com/ai-dynamo/snapshot/api v0.0.0
