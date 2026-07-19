@@ -12,57 +12,81 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package main provides the snapshot-agent DaemonSet entrypoint.
+// The agent runs the node-local snapshot controller and delegates CRIU/CUDA
+// execution to the snapshot executor workflows.
 package main
 
 import (
+	"cmp"
 	"context"
-	"errors"
-	"fmt"
-	"log"
-	"net/http"
+	"flag"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
+
+	"github.com/go-logr/logr"
+
+	"github.com/ai-dynamo/snapshot/agent/internal/controller"
+	"github.com/ai-dynamo/snapshot/agent/internal/logging"
+	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 )
 
-// version is overridable at build time via -ldflags "-X main.version=<tag>".
-var version = "dev"
-
-// healthAddr is the address the agent's health/version server listens on.
-const healthAddr = ":8080"
-
-// newServer builds the agent's HTTP server exposing /healthz and /version.
-func newServer() *http.Server {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = fmt.Fprintln(w, "ok")
-	})
-	mux.HandleFunc("/version", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = fmt.Fprintln(w, version)
-	})
-	return &http.Server{
-		Addr:              healthAddr,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-}
-
 func main() {
-	fmt.Printf("snapshot agent starting, version %s\n", version)
+	runtimeType := flag.String("runtime", cmp.Or(os.Getenv("RUNTIME_TYPE"), snapshotruntime.RuntimeContainerd),
+		"Container runtime backend: containerd or crio")
+	runtimeSocket := flag.String("runtime-socket", os.Getenv("RUNTIME_SOCKET"),
+		"Path to the container runtime socket (defaults to per-runtime convention)")
+	flag.Parse()
 
-	srv := newServer()
-	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("health server failed: %v", err)
+	rootLog := logging.ConfigureLogger("stdout")
+	agentLog := rootLog.WithName("agent")
+
+	cfg, err := LoadConfigOrDefault(ConfigMapPath)
+	if err != nil {
+		fatal(agentLog, err, "Failed to load configuration")
+	}
+	if err := cfg.Validate(); err != nil {
+		fatal(agentLog, err, "Invalid configuration")
+	}
+
+	rt, err := snapshotruntime.New(*runtimeType, *runtimeSocket)
+	if err != nil {
+		fatal(agentLog, err, "Failed to initialize container runtime",
+			"runtime", *runtimeType, "socket", *runtimeSocket)
+	}
+	defer func() {
+		if closeErr := rt.Close(); closeErr != nil {
+			agentLog.Error(closeErr, "Failed to close runtime client")
 		}
 	}()
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
-	<-stop
+	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = srv.Shutdown(ctx)
+	agentLog.Info("Starting snapshot agent",
+		"node", cfg.NodeName,
+		"restricted_namespace", cfg.RestrictedNamespace,
+		"runtime", *runtimeType,
+	)
+
+	// The node controller handles both restore and capture paths.
+	nodeController, err := controller.NewNodeController(cfg, rt, rootLog.WithName("controller"))
+	if err != nil {
+		fatal(agentLog, err, "Failed to create snapshot node controller")
+	}
+	if runErr := nodeController.Run(rootCtx); runErr != nil {
+		fatal(agentLog, runErr, "Snapshot node controller exited with error")
+	}
+
+	agentLog.Info("Agent stopped")
+}
+
+func fatal(log logr.Logger, err error, msg string, keysAndValues ...interface{}) {
+	if err != nil {
+		log.Error(err, msg, keysAndValues...)
+	} else {
+		log.Info(msg, keysAndValues...)
+	}
+	os.Exit(1)
 }

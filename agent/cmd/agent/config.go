@@ -1,0 +1,59 @@
+// Copyright 2026 NVIDIA Corporation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// config.go provides configuration loading for the checkpoint agent.
+package main
+
+import (
+	"errors"
+	"fmt"
+	"os"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/ai-dynamo/snapshot/agent/internal/types"
+)
+
+// ConfigMapPath is the default path where the ConfigMap is mounted.
+const ConfigMapPath = "/etc/snapshot/config.yaml"
+
+// LoadConfig loads the agent configuration from a YAML file.
+func LoadConfig(path string) (*types.AgentConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file %s: %w", path, err)
+	}
+
+	cfg := &types.AgentConfig{}
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("failed to parse config file %s: %w", path, err)
+	}
+
+	cfg.LoadEnvOverrides()
+	return cfg, nil
+}
+
+// LoadConfigOrDefault loads configuration from a file, falling back to defaults if the file doesn't exist.
+func LoadConfigOrDefault(path string) (*types.AgentConfig, error) {
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			cfg = &types.AgentConfig{}
+			cfg.LoadEnvOverrides()
+			return cfg, nil
+		}
+		return nil, err
+	}
+	return cfg, nil
+}
