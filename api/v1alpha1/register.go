@@ -24,6 +24,10 @@ import (
 
 var SchemeGroupVersion = schema.GroupVersion{Group: "nvidia.com", Version: "v1alpha1"}
 
+// GroupVersion is an alias for SchemeGroupVersion, used by callers that build
+// typed objects (e.g. the operator setting APIVersion on a PodSnapshotContent).
+var GroupVersion = SchemeGroupVersion
+
 func AddToScheme(s *runtime.Scheme) error {
 	s.AddKnownTypes(SchemeGroupVersion,
 		&PodSnapshot{}, &PodSnapshotList{},
