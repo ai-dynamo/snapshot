@@ -43,7 +43,7 @@ fmt:
 	$(MAKE) -C operator fmt
 
 add-license-headers: $(ADDLICENSE)
-	$(ADDLICENSE) -c "NVIDIA Corporation" -l apache \
+	$(ADDLICENSE) -c "NVIDIA Corporation" -l apache -s=only \
 	  -ignore '**/zz_generated*.go' -ignore '**/.gitkeep' -ignore 'charts/**' \
 	  . .github/workflows
 
