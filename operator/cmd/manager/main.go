@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	"github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/operator/internal/controller"
 )
 
 // version is overridable at build time via -ldflags "-X main.version=<tag>".
@@ -58,6 +59,15 @@ func main() {
 	}
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		ctrl.Log.Error(err, "unable to set up ready check")
+		os.Exit(1)
+	}
+
+	podSnapshotReconciler := &controller.PodSnapshotReconciler{
+		Client:   mgr.GetClient(),
+		Recorder: mgr.GetEventRecorderFor("podsnapshot-controller"),
+	}
+	if err := podSnapshotReconciler.SetupWithManager(mgr); err != nil {
+		ctrl.Log.Error(err, "unable to set up PodSnapshot controller")
 		os.Exit(1)
 	}
 
