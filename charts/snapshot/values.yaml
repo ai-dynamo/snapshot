@@ -3,6 +3,8 @@ image:
     repository: ghcr.io/ai-dynamo/snapshot/operator
     # Defaults to the chart's appVersion when empty (see templates).
     tag: ""
+    pullPolicy: IfNotPresent
+    imagePullSecrets: []
   agent:
     repository: ghcr.io/ai-dynamo/snapshot/agent
     # Defaults to the chart's appVersion when empty (see templates).

@@ -18,7 +18,11 @@ spec:
         app.kubernetes.io/component: operator
     spec:
       serviceAccountName: {{ include "snapshot.operatorServiceAccountName" . }}
+      {{- with .Values.image.operator.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: manager
           image: "{{ .Values.image.operator.repository }}:{{ .Values.image.operator.tag | default .Chart.AppVersion }}"
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: {{ .Values.image.operator.pullPolicy }}
