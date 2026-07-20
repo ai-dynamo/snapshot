@@ -1,0 +1,140 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# Docs: https://docs.coderabbit.ai/getting-started/configure-coderabbit/
+
+version: "2"
+language: "en-US"
+early_access: false
+
+tone_instructions: "Production infrastructure software. Be direct. Flag backward-incompatibility, security implications, resource leaks, and RBAC over-permissions without softening."
+
+reviews:
+  profile: "assertive"
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+  estimate_code_review_effort: true
+  abort_on_close: true
+
+  auto_review:
+    enabled: true
+    drafts: false
+    auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 5
+    base_branches:
+      - main
+    ignore_title_keywords:
+      - "wip"
+      - "draft"
+      - "do not merge"
+      - "dnm"
+      - "[skip review]"
+    ignore_usernames:
+      - "dependabot[bot]"
+      - "renovate[bot]"
+      - "github-actions[bot]"
+
+  suggested_labels: false
+  suggested_reviewers: false
+  sequence_diagrams: false
+  related_issues: false
+  related_prs: false
+
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
+
+  pre_merge_checks:
+    title:
+      mode: "warning"
+      requirements: "Must follow conventional commits: feat/fix/chore/docs/refactor/test/ci. First line under 72 chars."
+    custom_checks:
+      - name: "Breaking API Changes"
+        mode: "error"
+        instructions: "Fail if api/** removes, renames, or changes the type of any existing exported field without an API version bump."
+      - name: "RBAC Least Privilege"
+        mode: "warning"
+        instructions: "Warn if any kubebuilder RBAC marker or Helm RBAC manifest grants wildcard verbs ('*') or resources ('*') without an explicit justification comment."
+
+  path_filters:
+    - "!**/zz_generated*.go"
+    - "!charts/snapshot/crds/**"
+    - "!**/vendor/**"
+    - "!**/go.sum"
+    - "!**/*.pb.go"
+
+  path_instructions:
+    - path: "api/**"
+      instructions: "Review against .ai/api-contract-guidelines.md and .ai/go-guidelines.md"
+    - path: "operator/**"
+      instructions: "Review against .ai/k8s-operator-guidelines.md and .ai/go-guidelines.md"
+    - path: "agent/**"
+      instructions: "Review against .ai/agent-guidelines.md and .ai/go-guidelines.md"
+    - path: "charts/**"
+      instructions: "Review against .ai/k8s-operator-guidelines.md (Helm chart section). Flag missing resource limits/requests, wildcard RBAC verbs or resources, and missing standard app.kubernetes.io/* labels."
+    - path: ".github/workflows/**"
+      instructions: "Flag any job that skips the full 'make check' gate or bypasses golangci-lint/govulncheck. Flag new secrets not stored in GitHub Actions secrets."
+    - path: "**/*_test.go"
+      instructions: "Review against .ai/go-guidelines.md (testing section). Flag constants used in test assertions — must be string literals."
+
+tools:
+  golangci-lint:
+    enabled: true
+  semgrep:
+    enabled: true
+  gitleaks:
+    enabled: true
+  checkov:
+    enabled: true
+  trivy:
+    enabled: true
+  yamllint:
+    enabled: true
+  shellcheck:
+    enabled: true
+  hadolint:
+    enabled: true
+  actionlint:
+    enabled: true
+  markdownlint:
+    enabled: true
+  checkmake:
+    enabled: true
+  osvScanner:
+    enabled: true
+  helm:
+    enabled: true
+  buf:
+    enabled: false
+  eslint:
+    enabled: false
+  ruff:
+    enabled: false
+  pylint:
+    enabled: false
+  flake8:
+    enabled: false
+  rubocop:
+    enabled: false
+  phpstan:
+    enabled: false
+  clippy:
+    enabled: false
+  detekt:
+    enabled: false
+  swiftlint:
+    enabled: false
+
+knowledge_base:
+  code_guidelines:
+    filePatterns:
+      - ".ai/**/*.md"
+
+chat:
+  auto_reply: true
