@@ -3,7 +3,7 @@ include $(REPO_HACK_DIR)/tools.mk
 
 .DEFAULT_GOAL := build
 
-.PHONY: build test tidy lint fmt test-linux
+.PHONY: build test tidy lint fmt
 
 build:
 	GOOS=linux GOARCH=amd64 go build -o bin/agent ./cmd/agent
@@ -19,8 +19,3 @@ tidy:
 
 lint: $(GOLANGCI_LINT)
 	$(GOLANGCI_LINT) run --timeout=5m ./...
-
-test-linux:
-	docker run --rm --platform linux/amd64 \
-		-v "$(abspath $(CURDIR)/..):/workspace" -w /workspace/agent \
-		golang:1.26.5 go test ./...
