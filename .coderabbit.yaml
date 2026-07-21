@@ -51,7 +51,7 @@ reviews:
       enabled: false
 
   pre_merge_checks:
-    override_requested_reviewers_only: true
+    override_requested_reviewers_only: false
     title:
       mode: "warning"
       requirements: "Must follow conventional commits: feat/fix/chore/docs/refactor/test/ci. First line under 72 chars."
