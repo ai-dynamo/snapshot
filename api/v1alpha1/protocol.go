@@ -171,6 +171,7 @@ func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string
 	annotations[CheckpointArtifactVersionAnnotation] = ArtifactVersion(artifactVersion)
 }
 
+// TODO: dead code — remove once no longer synced from Dynamo.
 // ApplyCheckpointStorageMetadata stamps the checkpoint storage annotations.
 func ApplyCheckpointStorageMetadata(annotations map[string]string, storage Storage) {
 	if annotations == nil {

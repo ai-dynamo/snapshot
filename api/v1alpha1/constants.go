@@ -46,12 +46,12 @@ const (
 	CheckpointStorageBasePathAnnotation = "nvidia.com/snapshot-storage-base-path"
 	CheckpointVolumeName                = "checkpoint-storage"
 	DefaultCheckpointArtifactVersion    = "1"
-	DefaultCheckpointJobTTLSeconds      = int32(300)
+	DefaultCheckpointJobTTLSeconds      = int32(300) // TODO: dead code — remove once no longer synced from Dynamo
 	DefaultSeccompLocalhostProfile      = "profiles/block-iouring.json"
 	StorageTypePVC                      = "pvc"
 
-	CheckpointStatusCompleted = "completed"
-	CheckpointStatusFailed    = "failed"
+	CheckpointStatusCompleted = "completed" // TODO: dead code — remove once no longer synced from Dynamo
+	CheckpointStatusFailed    = "failed"    // TODO: dead code — remove once no longer synced from Dynamo
 	RestoreStatusInProgress   = "in_progress"
 	RestoreStatusCompleted    = "completed"
 	RestoreStatusFailed       = "failed"

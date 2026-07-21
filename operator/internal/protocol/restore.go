@@ -313,6 +313,7 @@ func DiscoverStorageFromDaemonSets(namespace string, daemonSets []appsv1.DaemonS
 	)
 }
 
+// TODO: dead code — remove once no longer synced from Dynamo.
 // DiscoverAndResolveStorage lists snapshot-agent DaemonSets in the given
 // namespace, discovers the shared storage configuration, and resolves the
 // checkpoint-specific path for the given checkpoint ID and artifact version.
@@ -345,6 +346,7 @@ func DiscoverAndResolveStorage(
 	return snapshotv1alpha1.ResolveCheckpointStorage(checkpointID, artifactVersion, storage)
 }
 
+// TODO: dead code — remove once no longer synced from Dynamo.
 // PrepareRestorePodSpecForCheckpoint discovers storage, then shapes targets.
 func PrepareRestorePodSpecForCheckpoint(
 	ctx context.Context,

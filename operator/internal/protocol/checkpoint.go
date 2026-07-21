@@ -26,6 +26,7 @@ type CheckpointJobOptions struct {
 	WrapLaunchJob         bool
 }
 
+// TODO: dead code — remove once no longer synced from Dynamo.
 func GetCheckpointJobName(checkpointID string, artifactVersion string) string {
 	return "checkpoint-job-" + checkpointID + "-" + snapshotv1alpha1.ArtifactVersion(artifactVersion)
 }

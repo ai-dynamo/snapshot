@@ -107,6 +107,7 @@ func ReadProcessDetails(procRoot string, pid int) (ProcessDetails, error) {
 	}, nil
 }
 
+// TODO: dead code — remove once no longer synced from Dynamo.
 // ReadProcessDetailsOrDefault preserves pid-scoped logging even when proc parsing fails.
 func ReadProcessDetailsOrDefault(procRoot string, pid int) ProcessDetails {
 	details := ProcessDetails{
