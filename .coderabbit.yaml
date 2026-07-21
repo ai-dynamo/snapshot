@@ -24,7 +24,7 @@ reviews:
     enabled: true
     drafts: false
     auto_incremental_review: true
-    auto_pause_after_reviewed_commits: 5
+    auto_pause_after_reviewed_commits: 10
     base_branches:
       - main
     ignore_title_keywords:
