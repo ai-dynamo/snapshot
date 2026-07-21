@@ -24,7 +24,7 @@ reviews:
     enabled: true
     drafts: false
     auto_incremental_review: true
-    auto_pause_after_reviewed_commits: 10
+    auto_pause_after_reviewed_commits: 0
     base_branches:
       - main
     ignore_title_keywords:
@@ -57,7 +57,7 @@ reviews:
     custom_checks:
       - name: "Breaking API Changes"
         mode: "warning"
-        instructions: "Fail if api/** removes, renames, or changes the type of any existing exported field without an API version bump."
+        instructions: "Warn if api/** removes, renames, changes the Go type of, or renames the json tag on any existing exported field. Also flag new fields missing // +optional or a CEL default — required fields break existing stored CRs. Flag changes to XValidation immutability markers on PodSnapshotSpec or PodSnapshotContentSpec."
       - name: "RBAC Least Privilege"
         mode: "warning"
         instructions: "Warn if any kubebuilder RBAC marker or Helm RBAC manifest grants wildcard verbs ('*') or resources ('*') without an explicit justification comment."
