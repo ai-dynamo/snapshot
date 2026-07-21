@@ -4,7 +4,6 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 # Docs: https://docs.coderabbit.ai/getting-started/configure-coderabbit/
 
-version: "2"
 language: "en-US"
 early_access: false
 
@@ -75,54 +74,6 @@ reviews:
       instructions: "Flag missing resource limits/requests on containers, wildcard RBAC verbs or resources, and missing standard app.kubernetes.io/* labels."
     - path: ".github/workflows/**"
       instructions: "Flag any job that skips the full 'make check' gate or bypasses golangci-lint/govulncheck. Flag new secrets not stored in GitHub Actions secrets."
-
-tools:
-  golangci-lint:
-    enabled: true
-  semgrep:
-    enabled: true
-  gitleaks:
-    enabled: true
-  checkov:
-    enabled: true
-  trivy:
-    enabled: true
-  yamllint:
-    enabled: true
-  shellcheck:
-    enabled: true
-  hadolint:
-    enabled: true
-  actionlint:
-    enabled: true
-  markdownlint:
-    enabled: true
-  checkmake:
-    enabled: true
-  osvScanner:
-    enabled: true
-  helm:
-    enabled: true
-  buf:
-    enabled: false
-  eslint:
-    enabled: false
-  ruff:
-    enabled: false
-  pylint:
-    enabled: false
-  flake8:
-    enabled: false
-  rubocop:
-    enabled: false
-  phpstan:
-    enabled: false
-  clippy:
-    enabled: false
-  detekt:
-    enabled: false
-  swiftlint:
-    enabled: false
 
 knowledge_base:
   code_guidelines:
