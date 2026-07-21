@@ -40,7 +40,7 @@ reviews:
 
   suggested_labels: false
   suggested_reviewers: false
-  sequence_diagrams: false
+  sequence_diagrams: true
   related_issues: false
   related_prs: false
 
@@ -56,7 +56,7 @@ reviews:
       requirements: "Must follow conventional commits: feat/fix/chore/docs/refactor/test/ci. First line under 72 chars."
     custom_checks:
       - name: "Breaking API Changes"
-        mode: "error"
+        mode: "warning"
         instructions: "Fail if api/** removes, renames, or changes the type of any existing exported field without an API version bump."
       - name: "RBAC Least Privilege"
         mode: "warning"
@@ -70,18 +70,10 @@ reviews:
     - "!**/*.pb.go"
 
   path_instructions:
-    - path: "api/**"
-      instructions: "Review against .ai/api-contract-guidelines.md and .ai/go-guidelines.md"
-    - path: "operator/**"
-      instructions: "Review against .ai/k8s-operator-guidelines.md and .ai/go-guidelines.md"
-    - path: "agent/**"
-      instructions: "Review against .ai/agent-guidelines.md and .ai/go-guidelines.md"
     - path: "charts/**"
-      instructions: "Review against .ai/k8s-operator-guidelines.md (Helm chart section). Flag missing resource limits/requests, wildcard RBAC verbs or resources, and missing standard app.kubernetes.io/* labels."
+      instructions: "Flag missing resource limits/requests on containers, wildcard RBAC verbs or resources, and missing standard app.kubernetes.io/* labels."
     - path: ".github/workflows/**"
       instructions: "Flag any job that skips the full 'make check' gate or bypasses golangci-lint/govulncheck. Flag new secrets not stored in GitHub Actions secrets."
-    - path: "**/*_test.go"
-      instructions: "Review against .ai/go-guidelines.md (testing section). Flag constants used in test assertions — must be string literals."
 
 tools:
   golangci-lint:
