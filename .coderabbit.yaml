@@ -51,13 +51,14 @@ reviews:
       enabled: false
 
   pre_merge_checks:
+    override_requested_reviewers_only: true
     title:
       mode: "warning"
       requirements: "Must follow conventional commits: feat/fix/chore/docs/refactor/test/ci. First line under 72 chars."
     custom_checks:
       - name: "Breaking API Changes"
         mode: "warning"
-        instructions: "Warn if api/** removes, renames, changes the Go type of, or renames the json tag on any existing exported field. Also flag new fields missing // +optional or a CEL default — required fields break existing stored CRs. Flag changes to XValidation immutability markers on PodSnapshotSpec or PodSnapshotContentSpec."
+        instructions: "Warn if api/** removes, renames, changes the Go type of, or adds/renames/removes the json tag on any existing exported field. Flag new fields missing // +optional or a +kubebuilder:default marker — required fields without a default break existing stored CRs. Flag changes to XValidation immutability markers on PodSnapshotSpec or PodSnapshotContentSpec."
       - name: "RBAC Least Privilege"
         mode: "warning"
         instructions: "Warn if any kubebuilder RBAC marker or Helm RBAC manifest grants wildcard verbs ('*') or resources ('*') without an explicit justification comment."
