@@ -30,8 +30,7 @@ This artifact is not a container image, a filesystem snapshot, or a volume snaps
 To restore a worker, a new pod references a previously captured snapshot artifact. During pod startup, Snapshot restores the captured process state directly into the container, bypassing model loading, kernel warm-up, and other initialization steps. The restored process resumes execution from the exact point where it was captured.
 Snapshots are portable across compatible machines and can be restored on any node with matching GPU hardware and driver versions. They are not tied to the node where they were originally created.
 
-
-
+&nbsp;
 
 ## APIs
 | Resource | Scope | Role |
@@ -40,6 +39,7 @@ Snapshots are portable across compatible machines and can be restored on any nod
 | `PodSnapshotContent` | Cluster-scoped | System-managed record of the physical artifact, bound to a `PodSnapshot`. Created by the Snapshot operator, never by the caller. |
 | `nvidia.com/restore-from` | Namespaced | Added as a pod annotation to trigger restore from a named `PodSnapshot` in the same namespace. |
 
+&nbsp;
 
 
 ## Architecture
@@ -66,6 +66,8 @@ It performs the actual checkpoint and restore operations by invoking CRIU and cu
 
 The node agent is intentionally an implementation detail. Clients never communicate with it directly.
 
+&nbsp;
+
 ## Design Principles
 
 Snapshot owns the mechanics of checkpoint and restore—not the policy.
@@ -83,7 +85,7 @@ Everything Snapshot manages is represented as Kubernetes resources. Snapshot met
 
 Clients interact exclusively through the Kubernetes API. No platform-specific APIs, direct node communication, or custom protocols are required.
 
-
+&nbsp;
 
 ## Status
 
