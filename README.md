@@ -23,7 +23,7 @@ Snapshot exposes checkpoint and restore as Kubernetes resources.
 #### Capture
 
 To create a snapshot, a caller identifies the pod to checkpoint. Snapshot pauses the running process and captures its complete execution state, including both CPU memory and GPU memory, into a persistent artifact.
-This artifact is not a container image,a filesystem snapshot, or a volume snapshot. Instead, it represents the complete in-memory state of a live, fully initialized GPU worker.
+This artifact is not a container image, a filesystem snapshot, or a volume snapshot. Instead, it represents the complete in-memory state of a live, fully initialized GPU worker.
 
 #### Restore
 
@@ -37,7 +37,7 @@ Snapshots are portable across compatible machines and can be restored on any nod
 | Resource | Scope | Role |
 |----------|-------|------|
 | `PodSnapshot` | Namespaced | Created by callers to request a capture or reference an artifact for restore. |
-| `PodSnapshotContent` | Cluster-scoped | System-managed record of the physical artifact, bound to a `PodSnapshot`. Created by the Snapashot operator, never by the caller. |
+| `PodSnapshotContent` | Cluster-scoped | System-managed record of the physical artifact, bound to a `PodSnapshot`. Created by the Snapshot operator, never by the caller. |
 | `nvidia.com/restore-from` | Namespaced | Added as a pod annotation to trigger restore from a named `PodSnapshot` in the same namespace. |
 
 
