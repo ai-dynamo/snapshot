@@ -65,7 +65,10 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	}
 	hostInspectDuration := time.Since(hostInspectStart)
 
-	// Phase 2: Execute — nsrestore handles rootfs, CRIU restore, and CUDA restore inside namespace
+	// Phase 2: Inject restore binaries into the placeholder container's mount namespace.
+	injectBinaries()
+
+	// Phase 3: Execute — nsrestore handles rootfs, CRIU restore, and CUDA restore inside namespace
 	result, err := execNSRestore(ctx, log, req, snap)
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
