@@ -1,0 +1,165 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Push Artifacts
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_call:
+    inputs:
+      version:
+        description: 'Release version (e.g. v0.1.0)'
+        required: false
+        type: string
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version override (leave empty for dev build)'
+        required: false
+        type: string
+
+concurrency:
+  group: push-artifacts-${{ github.event.workflow_run.head_sha || github.sha }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+
+  # Gate: skip all jobs if triggered by a failed CI run.
+  # All other jobs depend on this one, so they cascade-skip automatically.
+  version:
+    name: Compute version
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_call' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    outputs:
+      version: ${{ steps.compute.outputs.version }}
+      tags: ${{ steps.compute.outputs.tags }}
+      head_sha: ${{ steps.compute.outputs.head_sha }}
+    steps:
+      - name: Compute version and tags
+        id: compute
+        env:
+          # Use the CI run's head SHA for dev builds, not GITHUB_SHA which may
+          # have advanced to a later commit by the time this workflow fires.
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          INPUT="${{ inputs.version }}"
+          if [ -n "${INPUT}" ]; then
+            echo "${INPUT}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
+              || { echo "Invalid version tag: ${INPUT}" >&2; exit 1; }
+            echo "version=${INPUT}" >> "$GITHUB_OUTPUT"
+            # Keep the v prefix in Docker tags (e.g. v0.1.0 latest).
+            # Push 'latest' only on explicit release builds, not dev snapshots.
+            echo "tags=${INPUT} latest" >> "$GITHUB_OUTPUT"
+          else
+            # The 'g' prefix prevents all-numeric SHAs from forming invalid semver.
+            VERSION="v0.0.0-g${HEAD_SHA:0:8}"
+            echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "tags=${VERSION}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+
+  # ── Operator image ──────────────────────────────────────────────────────────
+  build-operator:
+    name: Build and push operator image
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      # Check out the exact commit that passed CI, not whatever is at HEAD now.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.head_sha }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push operator image
+        run: |
+          make docker-build-operator \
+            TAGS="${{ needs.version.outputs.tags }}" \
+            DOCKER_BUILD_ARGS="--push \
+              --cache-from=type=gha,scope=operator \
+              --cache-to=type=gha,scope=operator,mode=max"
+
+  # ── Agent image (slow: CRIU from source + CUDA base) ────────────────────────
+  build-agent:
+    name: Build and push agent image
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.head_sha }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # --platform=linux/amd64: Dockerfile exits 1 on other arches
+      # --build-context=api=./api: go-base stage needs the api module
+      - name: Build and push agent image
+        timeout-minutes: 45
+        run: |
+          make docker-build-agent \
+            TAGS="${{ needs.version.outputs.tags }}" \
+            DOCKER_BUILD_ARGS="--platform=linux/amd64 \
+              --build-context=api=./api \
+              --push \
+              --cache-from=type=gha,scope=agent \
+              --cache-to=type=gha,scope=agent,mode=max"
+
+  # ── Helm chart (OCI push to GHCR) ──────────────────────────────────────────
+  release-helm:
+    name: Package and push Helm chart
+    needs: [version, build-operator, build-agent]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.head_sha }}
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lint chart before packaging
+        run: helm lint ./charts/snapshot
+
+      - name: Log in to GHCR (Helm OCI)
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            helm registry login ghcr.io \
+              --username "${{ github.actor }}" \
+              --password-stdin
+
+      # Chart.yaml on disk stays at dev values. Version is injected at package
+      # time. The values.yaml `tag: ""` fields resolve to appVersion in templates.
+      - name: Package and push Helm chart
+        run: |
+          VERSION="${{ needs.version.outputs.version }}"
+          helm package ./charts/snapshot \
+            --version "${VERSION#v}" \
+            --app-version "${VERSION#v}"
+          helm push "./snapshot-${VERSION#v}.tgz" oci://ghcr.io/ai-dynamo/snapshot

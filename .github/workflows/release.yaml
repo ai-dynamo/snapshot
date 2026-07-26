@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  push-artifacts:
+    name: Push release artifacts
+    uses: ./.github/workflows/push-artifacts.yaml
+    with:
+      version: ${{ github.event.release.tag_name }}
+    secrets: inherit
+
+  # Go module proxy requires sub-path tags for modules not at the repo root.
+  # Without api/v0.1.0, operator/v0.1.0, agent/v0.1.0 — `go get` of any
+  # sub-module by version fails.
+  go-module-tags:
+    name: Create Go module sub-path tags
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure git
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # Force-overwrite local tags and push individual refs so this step is
+      # idempotent on retries or re-published releases.
+      - name: Push sub-path tags
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          git tag -f "api/${TAG}"
+          git tag -f "operator/${TAG}"
+          git tag -f "agent/${TAG}"
+          git push --force origin "api/${TAG}" "operator/${TAG}" "agent/${TAG}"
