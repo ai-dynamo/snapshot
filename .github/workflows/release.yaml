@@ -24,6 +24,7 @@ jobs:
   # sub-module by version fails.
   go-module-tags:
     name: Create Go module sub-path tags
+    needs: push-artifacts
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,15 +34,51 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      # Force-overwrite local tags and push individual refs so this step is
-      # idempotent on retries or re-published releases.
+      # Validate every existing tag before creating anything, then atomically
+      # push only missing tags. Published module versions are immutable.
       - name: Push sub-path tags
         env:
           TAG: ${{ github.event.release.tag_name }}
         run: |
           echo "${TAG}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
             || { echo "Invalid tag: ${TAG}" >&2; exit 1; }
-          git tag -f "api/${TAG}"
-          git tag -f "operator/${TAG}"
-          git tag -f "agent/${TAG}"
-          git push --force origin "api/${TAG}" "operator/${TAG}" "agent/${TAG}"
+
+          release_commit="$(git rev-parse HEAD^{commit})"
+          missing_tags=()
+
+          for module in api operator agent; do
+            module_tag="${module}/${TAG}"
+            remote_refs="$(
+              git ls-remote origin \
+                "refs/tags/${module_tag}" \
+                "refs/tags/${module_tag}^{}"
+            )"
+
+            if [ -z "${remote_refs}" ]; then
+              missing_tags+=("${module_tag}")
+              continue
+            fi
+
+            remote_commit="$(
+              printf '%s\n' "${remote_refs}" |
+                awk '
+                  NR == 1 { first = $1 }
+                  $2 ~ /\^\{\}$/ { print $1; peeled = 1 }
+                  END { if (!peeled) print first }
+                '
+            )"
+            if [ "${remote_commit}" != "${release_commit}" ]; then
+              echo "Tag ${module_tag} already points to ${remote_commit}, not ${release_commit}" >&2
+              exit 1
+            fi
+          done
+
+          if [ "${#missing_tags[@]}" -eq 0 ]; then
+            echo "All Go module tags already point to ${release_commit}"
+            exit 0
+          fi
+
+          for module_tag in "${missing_tags[@]}"; do
+            git tag "${module_tag}" "${release_commit}"
+          done
+          git push --atomic origin "${missing_tags[@]}"

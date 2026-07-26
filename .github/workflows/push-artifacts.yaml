@@ -119,14 +119,12 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # --platform=linux/amd64: Dockerfile exits 1 on other arches
-      # --build-context=api=./api: go-base stage needs the api module
       - name: Build and push agent image
         timeout-minutes: 45
         run: |
           make docker-build-agent \
             TAGS="${{ needs.version.outputs.tags }}" \
             DOCKER_BUILD_ARGS="--platform=linux/amd64 \
-              --build-context=api=./api \
               --push \
               --cache-from=type=gha,scope=agent \
               --cache-to=type=gha,scope=agent,mode=max"
@@ -161,5 +159,5 @@ jobs:
           VERSION="${{ needs.version.outputs.version }}"
           helm package ./charts/snapshot \
             --version "${VERSION#v}" \
-            --app-version "${VERSION#v}"
+            --app-version "${VERSION}"
           helm push "./snapshot-${VERSION#v}.tgz" oci://ghcr.io/ai-dynamo/snapshot

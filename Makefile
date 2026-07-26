@@ -71,7 +71,8 @@ helm-lint: $(HELM)
 
 docker-build-agent:
 	docker buildx build $(DOCKER_BUILD_ARGS) -f agent/Dockerfile \
-	  $(foreach t,$(TAGS),-t $(REGISTRY)/agent:$(t)) .
+	  --build-context=api=./api --target agent \
+	  $(foreach t,$(TAGS),-t $(REGISTRY)/agent:$(t)) agent/
 
 docker-build-operator:
 	docker buildx build $(DOCKER_BUILD_ARGS) -f operator/Dockerfile \
