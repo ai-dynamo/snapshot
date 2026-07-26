@@ -48,11 +48,11 @@ jobs:
       - name: Compute version and tags
         id: compute
         env:
+          INPUT: ${{ inputs.version }}
           # Use the CI run's head SHA for dev builds, not GITHUB_SHA which may
           # have advanced to a later commit by the time this workflow fires.
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
-          INPUT="${{ inputs.version }}"
           if [ -n "${INPUT}" ]; then
             echo "${INPUT}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
               || { echo "Invalid version tag: ${INPUT}" >&2; exit 1; }

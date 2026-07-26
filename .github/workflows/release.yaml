@@ -36,8 +36,11 @@ jobs:
       # Force-overwrite local tags and push individual refs so this step is
       # idempotent on retries or re-published releases.
       - name: Push sub-path tags
+        env:
+          TAG: ${{ github.event.release.tag_name }}
         run: |
-          TAG="${{ github.event.release.tag_name }}"
+          echo "${TAG}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
+            || { echo "Invalid tag: ${TAG}" >&2; exit 1; }
           git tag -f "api/${TAG}"
           git tag -f "operator/${TAG}"
           git tag -f "agent/${TAG}"
