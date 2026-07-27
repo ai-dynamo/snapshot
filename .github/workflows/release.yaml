@@ -7,17 +7,18 @@ on:
   release:
     types: [published]
 
-permissions:
-  contents: write
-  packages: write
+permissions: {}
 
 jobs:
   push-artifacts:
     name: Push release artifacts
+    permissions:
+      # Let the called workflow read source and publish release artifacts.
+      contents: read
+      packages: write
     uses: ./.github/workflows/push-artifacts.yaml
     with:
       version: ${{ github.event.release.tag_name }}
-    secrets: inherit
 
   # Go module proxy requires sub-path tags for modules not at the repo root.
   # Without api/v0.1.0, operator/v0.1.0, agent/v0.1.0 — `go get` of any
@@ -25,9 +26,12 @@ jobs:
   go-module-tags:
     name: Create Go module sub-path tags
     needs: push-artifacts
+    permissions:
+      # Required to push immutable Go module tags after artifacts succeed.
+      contents: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Configure git
         run: |
