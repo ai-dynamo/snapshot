@@ -114,9 +114,51 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `rbac.create` | Create agent and operator RBAC | `true` |
 | `rbac.namespaceRestricted` | Namespace-scoped agent RBAC (required for PVC storage) | `true` |
 | `openshift.enabled` | OpenShift RBAC / SCC-related chart pieces | `false` |
+| `crds.enabled` | Render the CRDs as chart templates (set false to manage them out-of-band) | `true` |
+| `crds.keep` | Add `helm.sh/resource-policy: keep` so uninstall does not delete the CRDs (set false to cascade-delete CRDs and their CRs on uninstall) | `true` |
 
 Reserved `s3` and `oci` values remain chart-owned placeholders for future
 snapshot backends, but only `pvc` is implemented today.
+
+## CRDs
+
+The CRDs render as ordinary chart templates (under `templates/crd/`), so
+`helm upgrade` reapplies the current schema — unlike Helm's `crds/` directory,
+which installs CRDs only on the first `helm install`. By default each CRD carries
+`helm.sh/resource-policy: keep` (`crds.keep=true`), so `helm uninstall` leaves the
+CRDs (and their custom resources) in place rather than cascade-deleting them. Set
+`crds.keep=false` to let uninstall remove the CRDs — which cascade-deletes every
+`PodSnapshot` / `PodSnapshotContent` in the cluster (objects that still hold
+finalizers may sit in `Terminating` until their controller releases them).
+
+They are single-version (`nvidia.com/v1alpha1`) with no conversion webhook, so
+schema changes must stay backward-compatible — the new schema is applied in place
+over the existing one.
+
+Set `crds.enabled=false` to manage the CRDs out-of-band. ArgoCD and similar GitOps
+controllers ignore `helm.sh/resource-policy` and apply/prune CRDs on their own, so
+those users should set `crds.enabled=false` and manage the CRDs in the GitOps tool.
+
+### Upgrading from a build that installed CRDs via `crds/`
+
+If a cluster already has these CRDs — from an earlier chart version that shipped
+them under `crds/`, or from another installer — the first templated `helm upgrade`
+fails with `invalid ownership metadata` because the existing CRDs are not owned by
+this release. Adopt them once before upgrading (or use `helm upgrade --take-ownership`
+where supported):
+
+```bash
+REL=snapshot; NS=<release-namespace>
+for c in podsnapshots.nvidia.com podsnapshotcontents.nvidia.com; do
+  kubectl label  crd "$c" app.kubernetes.io/managed-by=Helm --overwrite
+  kubectl annotate crd "$c" \
+    meta.helm.sh/release-name="$REL" \
+    meta.helm.sh/release-namespace="$NS" --overwrite
+done
+```
+
+Fresh clusters need none of this. The same step applies if you later reinstall
+under a different release name (the kept CRD is again unowned by the new release).
 
 See [values.yaml](./values.yaml) for the full configuration surface.
 

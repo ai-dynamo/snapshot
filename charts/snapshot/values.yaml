@@ -146,6 +146,18 @@ rbac:
   # Note: PVC storage requires namespace-scoped mode (true) as PVCs are namespace-scoped
   namespaceRestricted: true
 
+# CRD lifecycle. The CRDs render as chart templates (under templates/crd/) so
+# `helm upgrade` reapplies the current schema; Helm's crds/ directory would only
+# install them on first install.
+crds:
+  # Render the CRDs with the chart. Set false to manage them out-of-band (e.g. a
+  # GitOps controller applies the CRDs itself).
+  enabled: true
+  # Add helm.sh/resource-policy: keep so `helm uninstall` leaves the CRDs (and the
+  # custom resources) in place. Set false to let uninstall delete the CRDs, which
+  # cascade-deletes every PodSnapshot / PodSnapshotContent in the cluster.
+  keep: true
+
 # Static agent configuration (loaded from ConfigMap)
 # Dynamic values (NODE_NAME, RESTRICTED_NAMESPACE, etc.) come from environment variables
 config:
