@@ -36,8 +36,6 @@ func main() {
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		HealthProbeBindAddress: ":8081",
-		// Single-replica today, but leader election keeps two pods from both
-		// reconciling during a rolling update. Release on cancel for fast failover.
 		LeaderElection:                true,
 		LeaderElectionID:              "snapshot-operator.nvidia.com",
 		LeaderElectionReleaseOnCancel: true,
