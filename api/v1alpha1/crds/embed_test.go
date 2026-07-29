@@ -6,6 +6,7 @@ package crds
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -14,26 +15,70 @@ import (
 // mirrors it from this package's manifests.
 const chartCRDDir = "../../../charts/snapshot/crds"
 
-func TestAllReturnsEveryEmbeddedCRD(t *testing.T) {
-	all := All()
-	if len(all) != 2 {
-		t.Fatalf("All() returned %d manifests, want 2", len(all))
+// readCRDDir returns file name -> contents for every manifest in dir.
+func readCRDDir(t *testing.T, dir string) map[string]string {
+	t.Helper()
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
 	}
-	for _, want := range []string{"podsnapshots.nvidia.com", "podsnapshotcontents.nvidia.com"} {
-		var found bool
-		for _, manifest := range all {
-			if strings.Contains(manifest, "name: "+want) {
-				found = true
-				break
-			}
+	manifests := make(map[string]string)
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".yaml" {
+			continue
 		}
-		if !found {
-			t.Errorf("All() has no manifest for %q", want)
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", entry.Name(), err)
+		}
+		manifests[entry.Name()] = string(data)
+	}
+	return manifests
+}
+
+// All() drives what the operator installs, so every generated CRD has to be in
+// it. Anything missing would never reach the cluster.
+func TestAllCoversEveryGeneratedCRD(t *testing.T) {
+	generated := readCRDDir(t, ".")
+	if len(generated) == 0 {
+		t.Fatal("no generated CRDs found; run 'make generate'")
+	}
+
+	all := All()
+	if len(all) != len(generated) {
+		t.Errorf("All() returns %d manifests but %d CRDs are generated", len(all), len(generated))
+	}
+	for name, manifest := range generated {
+		if !slices.Contains(all, manifest) {
+			t.Errorf("%s is generated but missing from All()", name)
 		}
 	}
 }
 
-func TestEmbeddedManifestsAreCRDs(t *testing.T) {
+// The chart carries its own copy so Helm can install CRDs on a fresh release.
+// Drift means someone edited one side by hand or skipped `make generate`.
+func TestChartCopyMatchesGenerated(t *testing.T) {
+	generated := readCRDDir(t, ".")
+	chart := readCRDDir(t, chartCRDDir)
+
+	for name, want := range generated {
+		got, ok := chart[name]
+		switch {
+		case !ok:
+			t.Errorf("%s is generated but absent from the chart; run 'make generate'", name)
+		case got != want:
+			t.Errorf("%s differs between the chart and this package; run 'make generate'", name)
+		}
+	}
+	for name := range chart {
+		if _, ok := generated[name]; !ok {
+			t.Errorf("%s is in the chart but no longer generated; run 'make generate'", name)
+		}
+	}
+}
+
+func TestNamedAccessorsAreEmbedded(t *testing.T) {
 	for name, manifest := range map[string]string{
 		"podsnapshots.nvidia.com":        PodSnapshotCRD(),
 		"podsnapshotcontents.nvidia.com": PodSnapshotContentCRD(),
@@ -44,23 +89,20 @@ func TestEmbeddedManifestsAreCRDs(t *testing.T) {
 		if !strings.Contains(manifest, "name: "+name) {
 			t.Errorf("%s: manifest does not declare that name", name)
 		}
+		if !slices.Contains(All(), manifest) {
+			t.Errorf("%s: accessor returns a manifest that is not in All()", name)
+		}
 	}
 }
 
-// The chart carries its own copy so Helm can install CRDs on a fresh release.
-// It is generated from these manifests, so any drift means someone edited one
-// side by hand or skipped `make generate`.
-func TestChartCopyMatchesEmbedded(t *testing.T) {
-	for file, embedded := range map[string]string{
-		"nvidia.com_podsnapshots.yaml":        PodSnapshotCRD(),
-		"nvidia.com_podsnapshotcontents.yaml": PodSnapshotContentCRD(),
-	} {
-		onDisk, err := os.ReadFile(filepath.Join(chartCRDDir, file))
-		if err != nil {
-			t.Fatalf("read chart copy %s: %v", file, err)
-		}
-		if string(onDisk) != embedded {
-			t.Errorf("%s differs between the chart and the embedded copy; run 'make generate'", file)
-		}
+func TestAllReturnsACopy(t *testing.T) {
+	first := All()
+	if len(first) == 0 {
+		t.Fatal("All() is empty")
+	}
+	first[0] = "mutated"
+
+	if All()[0] == "mutated" {
+		t.Error("All() exposes its backing array; callers can corrupt the embedded set")
 	}
 }
