@@ -61,6 +61,7 @@ type PodSnapshotReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshotcontents,verbs=create;get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshotcontents/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
 // Reconcile drives a PodSnapshot through binding, status mirroring, and cascade deletion. It is a thin
 // orchestrator: each branch delegates to a helper that owns that path's detail.

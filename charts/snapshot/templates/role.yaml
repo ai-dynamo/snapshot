@@ -23,7 +23,7 @@ rules:
   # Emit operational events on pod/restore lifecycle updates
   - apiGroups: [""]
     resources: ["events"]
-    verbs: ["create"]
+    verbs: ["create", "patch"]
   # Resolve DRA GPU UUIDs via ResourceClaim allocation (namespace-scoped)
   - apiGroups: ["resource.k8s.io"]
     resources: ["resourceclaims"]
@@ -76,7 +76,7 @@ rules:
   # Emit operational events on pod/restore lifecycle updates
   - apiGroups: [""]
     resources: ["events"]
-    verbs: ["create"]
+    verbs: ["create", "patch"]
   # Resolve DRA GPU UUIDs via ResourceClaim and ResourceSlice
   - apiGroups: ["resource.k8s.io"]
     resources: ["resourceclaims", "resourceslices"]
