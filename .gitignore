@@ -1,5 +1,7 @@
 # Build output
 bin/
+agent/pagebroker/pagebroker
+agent/pagebroker/pagebroker-test
 *.tgz
 
 # macOS
