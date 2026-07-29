@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Debug Dynamo Runner
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  tmate:
+    name: tmate on prod-deploy-tester-v1
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Runner preflight
+        run: |
+          hostname
+          uname -a
+          id
+          pwd
+          df -h
+          command -v kubectl || true
+          kubectl config current-context || true
+          kubectl get nodes -o wide || true
+          nvidia-smi || true
+
+      - name: Setup tmate session
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
