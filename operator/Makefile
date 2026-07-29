@@ -7,6 +7,7 @@ include $(REPO_HACK_DIR)/tools.mk
 
 build:
 	go build -o bin/manager ./cmd/manager
+	go build -o bin/crd-installer ./cmd/crdinstaller
 
 test:
 	go test ./...

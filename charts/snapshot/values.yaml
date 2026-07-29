@@ -13,6 +13,37 @@ image:
 
 replicaCount: 1
 
+# Automatic CRD install and upgrade.
+#
+# Helm creates the manifests in this chart's crds/ directory on a fresh install
+# and then never touches them again — `helm upgrade` leaves CRDs alone by
+# design. To close that gap the operator Deployment runs a crd-installer init
+# container that server-side applies the CRDs baked into the operator image on
+# every rollout. It is a no-op when the cluster already has them.
+crdUpgrade:
+  # Disable when CRDs are managed out of band (GitOps, a cluster admin without
+  # apiextensions permissions for the operator).
+  #
+  # NOTICE FOR THE CLUSTER ADMIN: with this off, nothing updates the CRDs on a
+  # `helm upgrade` and the operator can run against stale definitions — new
+  # fields are silently dropped and reconciliation fails in ways that are hard
+  # to trace. Applying them after every chart upgrade becomes your job:
+  #
+  #   kubectl apply --server-side --force-conflicts -f ./charts/snapshot/crds/
+  enabled: true
+
+  # Init container log level (trace, debug, info, warn, error).
+  logLevel: info
+
+  # Init container resources. The installer applies two small manifests and exits.
+  resources:
+    limits:
+      cpu: 500m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
 # Container runtime backend. Leave socketPath empty to use the conventional
 # path for the chosen type.
 runtime:

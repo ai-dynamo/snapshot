@@ -22,6 +22,22 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.crdUpgrade.enabled }}
+      initContainers:
+        # Server-side applies the CRDs baked into the operator image before the
+        # manager starts. A no-op when the cluster already has them.
+        - name: crd-installer
+          image: "{{ .Values.image.operator.repository }}:{{ .Values.image.operator.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.operator.pullPolicy }}
+          command: ["/crd-installer"]
+          env:
+            - name: SNAPSHOT_LOG_LEVEL
+              value: {{ .Values.crdUpgrade.logLevel | quote }}
+          {{- with .Values.crdUpgrade.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- end }}
       containers:
         - name: manager
           image: "{{ .Values.image.operator.repository }}:{{ .Values.image.operator.tag | default .Chart.AppVersion }}"
