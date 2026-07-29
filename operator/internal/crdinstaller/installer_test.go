@@ -7,8 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -19,6 +17,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/ai-dynamo/snapshot/api/v1alpha1/crds"
 )
 
 func crdManifest(name string) string {
@@ -42,6 +42,11 @@ type applyConfigUnstructured interface {
 
 // fakeClient records applies and models the API server's resource version
 // behaviour: it only bumps when the stored definition actually changes.
+//
+// controller-runtime's fake client cannot stand in here. Its Apply bumps the
+// resource version on every call, including an identical re-apply, so the
+// no-op case this installer exists to detect would test the opposite of what a
+// real apiserver does (verified against both).
 type fakeClient struct {
 	stored   map[string]string // CRD name -> resource version
 	nextRV   map[string]string // CRD name -> resource version the apply should yield
@@ -101,11 +106,11 @@ func TestInstallCRDsCreatesMissingDefinition(t *testing.T) {
 	cl := newFakeClient()
 	cl.nextRV["podsnapshots.nvidia.com"] = "1"
 
-	results, err := InstallCRDs(t.Context(), cl, logr.Discard(), [][]byte{[]byte(crdManifest("podsnapshots.nvidia.com"))})
+	results, err := InstallCRDs(t.Context(), cl, logr.Discard(), []string{crdManifest("podsnapshots.nvidia.com")})
 
 	require.NoError(t, err)
-	assert.Equal(t, []Result{{Name: "podsnapshots.nvidia.com", Action: ActionCreated}}, results)
-	assert.True(t, Changed(results))
+	assert.Equal(t, Results{{Name: "podsnapshots.nvidia.com", Action: ActionCreated}}, results)
+	assert.True(t, results.Changed())
 	assert.Equal(t, FieldManager, cl.fieldMgr)
 	assert.True(t, cl.forced, "server-side apply should force ownership away from a previous manager")
 }
@@ -115,11 +120,11 @@ func TestInstallCRDsUpdatesChangedDefinition(t *testing.T) {
 	cl.stored["podsnapshots.nvidia.com"] = "7"
 	cl.nextRV["podsnapshots.nvidia.com"] = "8"
 
-	results, err := InstallCRDs(t.Context(), cl, logr.Discard(), [][]byte{[]byte(crdManifest("podsnapshots.nvidia.com"))})
+	results, err := InstallCRDs(t.Context(), cl, logr.Discard(), []string{crdManifest("podsnapshots.nvidia.com")})
 
 	require.NoError(t, err)
-	assert.Equal(t, []Result{{Name: "podsnapshots.nvidia.com", Action: ActionUpdated}}, results)
-	assert.True(t, Changed(results))
+	assert.Equal(t, Results{{Name: "podsnapshots.nvidia.com", Action: ActionUpdated}}, results)
+	assert.True(t, results.Changed())
 }
 
 func TestInstallCRDsIsNoOpWhenUpToDate(t *testing.T) {
@@ -127,25 +132,25 @@ func TestInstallCRDsIsNoOpWhenUpToDate(t *testing.T) {
 	cl.stored["podsnapshots.nvidia.com"] = "7"
 	cl.stored["podsnapshotcontents.nvidia.com"] = "9"
 
-	docs := [][]byte{
-		[]byte(crdManifest("podsnapshots.nvidia.com")),
-		[]byte(crdManifest("podsnapshotcontents.nvidia.com")),
+	manifests := []string{
+		crdManifest("podsnapshots.nvidia.com"),
+		crdManifest("podsnapshotcontents.nvidia.com"),
 	}
-	results, err := InstallCRDs(t.Context(), cl, logr.Discard(), docs)
+	results, err := InstallCRDs(t.Context(), cl, logr.Discard(), manifests)
 
 	require.NoError(t, err)
-	assert.Equal(t, []Result{
+	assert.Equal(t, Results{
 		{Name: "podsnapshots.nvidia.com", Action: ActionUnchanged},
 		{Name: "podsnapshotcontents.nvidia.com", Action: ActionUnchanged},
 	}, results)
-	assert.False(t, Changed(results))
+	assert.False(t, results.Changed())
 }
 
 func TestInstallCRDsRejectsNonCRDManifest(t *testing.T) {
 	cl := newFakeClient()
-	doc := []byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: nope\n")
+	manifest := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: nope\n"
 
-	_, err := InstallCRDs(t.Context(), cl, logr.Discard(), [][]byte{doc})
+	_, err := InstallCRDs(t.Context(), cl, logr.Discard(), []string{manifest})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "expected kind CustomResourceDefinition")
@@ -156,11 +161,11 @@ func TestInstallCRDsStopsOnApplyError(t *testing.T) {
 	cl := newFakeClient()
 	cl.applyErr = errors.New("boom")
 
-	docs := [][]byte{
-		[]byte(crdManifest("podsnapshots.nvidia.com")),
-		[]byte(crdManifest("podsnapshotcontents.nvidia.com")),
+	manifests := []string{
+		crdManifest("podsnapshots.nvidia.com"),
+		crdManifest("podsnapshotcontents.nvidia.com"),
 	}
-	_, err := InstallCRDs(t.Context(), cl, logr.Discard(), docs)
+	_, err := InstallCRDs(t.Context(), cl, logr.Discard(), manifests)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `apply CRD "podsnapshots.nvidia.com"`)
@@ -171,62 +176,21 @@ func TestInstallCRDsPropagatesGetError(t *testing.T) {
 	cl := newFakeClient()
 	cl.getErr = errors.New("api unreachable")
 
-	_, err := InstallCRDs(t.Context(), cl, logr.Discard(), [][]byte{[]byte(crdManifest("podsnapshots.nvidia.com"))})
+	_, err := InstallCRDs(t.Context(), cl, logr.Discard(), []string{crdManifest("podsnapshots.nvidia.com")})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "api unreachable")
 	assert.Empty(t, cl.applied)
 }
 
-func TestLoadDirReadsYAMLFilesInOrderAndSkipsOthers(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "a_first.yaml"), []byte("---\n"+crdManifest("a.nvidia.com")), 0o600))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "b_second.yml"), []byte(crdManifest("b.nvidia.com")), 0o600))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("not a manifest"), 0o600))
-	require.NoError(t, os.Mkdir(filepath.Join(dir, "nested.yaml"), 0o755))
-
-	docs, err := LoadDir(dir)
-
-	require.NoError(t, err)
-	require.Len(t, docs, 2)
-	assert.Contains(t, string(docs[0]), "a.nvidia.com")
-	assert.Contains(t, string(docs[1]), "b.nvidia.com")
-}
-
-func TestLoadDirSplitsMultiDocumentFiles(t *testing.T) {
-	dir := t.TempDir()
-	content := crdManifest("a.nvidia.com") + "---\n" + crdManifest("b.nvidia.com") + "---\n"
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "both.yaml"), []byte(content), 0o600))
-
-	docs, err := LoadDir(dir)
-
-	require.NoError(t, err)
-	require.Len(t, docs, 2, "the trailing empty document should be dropped")
-}
-
-func TestLoadDirReturnsEmptyForNoManifests(t *testing.T) {
-	docs, err := LoadDir(t.TempDir())
-
-	require.NoError(t, err)
-	assert.Empty(t, docs)
-}
-
-func TestLoadDirErrorsOnMissingDirectory(t *testing.T) {
-	_, err := LoadDir(filepath.Join(t.TempDir(), "absent"))
-
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "read CRD directory")
-}
-
-// The chart's committed CRDs are what the init container mounts, so they must
-// round-trip through the loader and the apply path.
-func TestChartCRDsApplyCleanly(t *testing.T) {
-	docs, err := LoadDir("../../../charts/snapshot/crds")
-	require.NoError(t, err)
-	require.NotEmpty(t, docs)
+// The real generated CRDs must round-trip through the apply path, not just the
+// hand-written fixtures above.
+func TestEmbeddedCRDsApplyCleanly(t *testing.T) {
+	manifests := crds.All()
+	require.NotEmpty(t, manifests)
 
 	cl := newFakeClient()
-	results, err := InstallCRDs(t.Context(), cl, logr.Discard(), docs)
+	results, err := InstallCRDs(t.Context(), cl, logr.Discard(), manifests)
 
 	require.NoError(t, err)
 	assert.ElementsMatch(t,

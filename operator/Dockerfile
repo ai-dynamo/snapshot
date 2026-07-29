@@ -9,15 +9,9 @@ COPY api/ api/
 COPY operator/ operator/
 WORKDIR /workspace/operator
 RUN go build -o bin/manager ./cmd/manager
-# The CRD installer ships in the same image; the chart runs it as the operator's
-# init container by overriding the entrypoint.
 RUN go build -o bin/crd-installer ./cmd/crdinstaller
 
 FROM gcr.io/distroless/static:nonroot
 COPY --from=builder /workspace/operator/bin/manager /manager
 COPY --from=builder /workspace/operator/bin/crd-installer /crd-installer
-# The CRDs controller-gen generates from api/, carried at the path crd-installer
-# reads by default. Baking them in ties the definitions to the binary compiled
-# against the same types, so an image can never apply a schema it disagrees with.
-COPY charts/snapshot/crds/ /etc/snapshot/crds/
 ENTRYPOINT ["/manager"]

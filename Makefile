@@ -42,15 +42,16 @@ fmt:
 	$(MAKE) -C agent fmt
 	$(MAKE) -C operator fmt
 
+# api/v1alpha1/crds holds controller-gen output; a license header there would be
+# stripped by the next generate and fail the clean-tree assert in check.
+LICENSE_IGNORES := -ignore '**/zz_generated*.go' -ignore '**/.gitkeep' \
+                   -ignore 'charts/**' -ignore 'api/v1alpha1/crds/**'
+
 add-license-headers: $(ADDLICENSE)
-	$(ADDLICENSE) -f hack/boilerplate.addlicense.txt \
-	  -ignore '**/zz_generated*.go' -ignore '**/.gitkeep' -ignore 'charts/**' \
-	  . .github/workflows
+	$(ADDLICENSE) -f hack/boilerplate.addlicense.txt $(LICENSE_IGNORES) . .github/workflows
 
 verify-license-headers: $(ADDLICENSE)
-	$(ADDLICENSE) -f hack/boilerplate.addlicense.txt -check \
-	  -ignore '**/zz_generated*.go' -ignore '**/.gitkeep' -ignore 'charts/**' \
-	  . .github/workflows
+	$(ADDLICENSE) -f hack/boilerplate.addlicense.txt -check $(LICENSE_IGNORES) . .github/workflows
 
 # install-tools makes controller-gen/golangci-lint/addlicense/helm available to
 # the stages before they run. govulncheck + helm-lint are read-only, so they run

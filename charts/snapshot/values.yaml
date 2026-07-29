@@ -18,7 +18,7 @@ replicaCount: 1
 # Helm creates the manifests in this chart's crds/ directory on a fresh install
 # and then never touches them again — `helm upgrade` leaves CRDs alone by
 # design. To close that gap the operator Deployment runs a crd-installer init
-# container that server-side applies the CRDs baked into the operator image on
+# container that server-side applies the CRDs embedded in the operator binary on
 # every rollout. It is a no-op when the cluster already has them.
 crdUpgrade:
   # Disable when CRDs are managed out of band (GitOps, a cluster admin without

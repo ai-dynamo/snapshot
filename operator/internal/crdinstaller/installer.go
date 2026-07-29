@@ -8,21 +8,14 @@
 package crdinstaller
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 )
@@ -59,40 +52,25 @@ type Result struct {
 	Action Action
 }
 
-// LoadDir reads every YAML document from the .yaml/.yml files in dir, ordered by
-// file name. Other entries are ignored, which keeps the ConfigMap mount's
-// `..data` symlinks out of the way.
-func LoadDir(dir string) ([][]byte, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, fmt.Errorf("read CRD directory %q: %w", dir, err)
-	}
+// Results is the outcome of a full installer run.
+type Results []Result
 
-	var docs [][]byte
-	for _, entry := range entries {
-		if entry.IsDir() || !isYAML(entry.Name()) {
-			continue
+// Changed reports whether the run created or updated any CRD.
+func (r Results) Changed() bool {
+	for _, res := range r {
+		if res.Action != ActionUnchanged {
+			return true
 		}
-		path := filepath.Join(dir, entry.Name())
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("read %q: %w", path, err)
-		}
-		fileDocs, err := splitDocuments(data)
-		if err != nil {
-			return nil, fmt.Errorf("split %q: %w", path, err)
-		}
-		docs = append(docs, fileDocs...)
 	}
-	return docs, nil
+	return false
 }
 
-// InstallCRDs applies every manifest in docs and reports what each apply
-// changed. Applying a definition the cluster already has is a no-op.
-func InstallCRDs(ctx context.Context, cl Client, log logr.Logger, docs [][]byte) ([]Result, error) {
-	results := make([]Result, 0, len(docs))
-	for _, doc := range docs {
-		res, err := applyCRD(ctx, cl, doc)
+// InstallCRDs applies every manifest and reports what each apply changed.
+// Applying a definition the cluster already has is a no-op.
+func InstallCRDs(ctx context.Context, cl Client, log logr.Logger, manifests []string) (Results, error) {
+	results := make(Results, 0, len(manifests))
+	for _, manifest := range manifests {
+		res, err := applyCRD(ctx, cl, manifest)
 		if err != nil {
 			return results, err
 		}
@@ -102,19 +80,9 @@ func InstallCRDs(ctx context.Context, cl Client, log logr.Logger, docs [][]byte)
 	return results, nil
 }
 
-// Changed reports whether any apply in results created or updated a CRD.
-func Changed(results []Result) bool {
-	for _, res := range results {
-		if res.Action != ActionUnchanged {
-			return true
-		}
-	}
-	return false
-}
-
-func applyCRD(ctx context.Context, cl Client, doc []byte) (Result, error) {
+func applyCRD(ctx context.Context, cl Client, manifest string) (Result, error) {
 	obj := &unstructured.Unstructured{}
-	if err := yaml.Unmarshal(doc, &obj.Object); err != nil {
+	if err := yaml.Unmarshal([]byte(manifest), &obj.Object); err != nil {
 		return Result{}, fmt.Errorf("unmarshal CRD manifest: %w", err)
 	}
 	if kind := obj.GetKind(); kind != crdKind {
@@ -152,32 +120,5 @@ func applyCRD(ctx context.Context, cl Client, doc []byte) (Result, error) {
 		return Result{Name: name, Action: ActionUnchanged}, nil
 	default:
 		return Result{Name: name, Action: ActionUpdated}, nil
-	}
-}
-
-func splitDocuments(data []byte) ([][]byte, error) {
-	reader := utilyaml.NewYAMLReader(bufio.NewReader(bytes.NewReader(data)))
-	var docs [][]byte
-	for {
-		doc, err := reader.Read()
-		if errors.Is(err, io.EOF) {
-			return docs, nil
-		}
-		if err != nil {
-			return nil, err
-		}
-		if len(bytes.TrimSpace(doc)) == 0 {
-			continue
-		}
-		docs = append(docs, doc)
-	}
-}
-
-func isYAML(name string) bool {
-	switch strings.ToLower(filepath.Ext(name)) {
-	case ".yaml", ".yml":
-		return true
-	default:
-		return false
 	}
 }
