@@ -2,9 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package crdinstaller applies CustomResourceDefinition manifests with
-// server-side apply. Helm only creates the chart's crds/ directory on a fresh
-// install and leaves it untouched on `helm upgrade`, so the operator ships an
-// init container that reconciles the definitions on every rollout.
+// server-side apply.
 package crdinstaller
 
 import (
@@ -20,15 +18,12 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// FieldManager owns the CRD fields written by this installer. Server-side apply
-// keeps ownership stable across rollouts so repeated applies converge instead of
-// fighting whatever created the CRDs first.
+// FieldManager owns the CRD fields written by this installer.
 const FieldManager = "snapshot-crd-installer"
 
 const crdKind = "CustomResourceDefinition"
 
-// Client is the subset of client.Client the installer needs. Narrowing it keeps
-// the apply path testable without a live API server.
+// Client is the subset of client.Client the installer needs.
 type Client interface {
 	Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error
 	Apply(ctx context.Context, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error
@@ -38,11 +33,8 @@ type Client interface {
 type Action string
 
 const (
-	// ActionCreated means the cluster had no such CRD.
-	ActionCreated Action = "created"
-	// ActionUpdated means the apply changed the stored definition.
-	ActionUpdated Action = "updated"
-	// ActionUnchanged means the stored definition already matched.
+	ActionCreated   Action = "created"
+	ActionUpdated   Action = "updated"
 	ActionUnchanged Action = "unchanged"
 )
 
@@ -66,7 +58,6 @@ func (r Results) Changed() bool {
 }
 
 // InstallCRDs applies every manifest and reports what each apply changed.
-// Applying a definition the cluster already has is a no-op.
 func InstallCRDs(ctx context.Context, cl Client, log logr.Logger, manifests []string) (Results, error) {
 	results := make(Results, 0, len(manifests))
 	for _, manifest := range manifests {
@@ -93,8 +84,8 @@ func applyCRD(ctx context.Context, cl Client, manifest string) (Result, error) {
 		return Result{}, errors.New("CRD manifest has no metadata.name")
 	}
 
-	// Read the stored resource version first so an apply that changes nothing is
-	// reported as such: the server only bumps it when the definition really moved.
+	// The server only bumps the resource version when the definition really
+	// moved, which is what distinguishes an updated CRD from an unchanged one.
 	current := &unstructured.Unstructured{}
 	current.SetGroupVersionKind(obj.GroupVersionKind())
 	existed := true
@@ -106,8 +97,7 @@ func applyCRD(ctx context.Context, cl Client, manifest string) (Result, error) {
 		return Result{Name: name}, fmt.Errorf("get CRD %q: %w", name, err)
 	}
 
-	// Apply writes the server's response back into obj, so its resource version
-	// after this call is the post-apply one.
+	// Apply writes the server's response back into obj.
 	if err := cl.Apply(ctx, client.ApplyConfigurationFromUnstructured(obj),
 		client.FieldOwner(FieldManager), client.ForceOwnership); err != nil {
 		return Result{Name: name}, fmt.Errorf("apply CRD %q: %w", name, err)

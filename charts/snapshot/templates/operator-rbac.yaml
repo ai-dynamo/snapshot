@@ -40,11 +40,9 @@ rules:
     resources: ["events"]
     verbs: ["create", "patch"]
   {{- if .Values.crdUpgrade.enabled }}
-  # CRD upgrade init container. Server-side apply reads the stored definition and
-  # patches it, so it is scoped to the two definitions this repo owns (see
-  # ../crds). RBAC cannot match resourceNames on create — the name is not known
-  # at admission time — so that verb is necessarily unscoped, and it only lets
-  # the operator add a CRD, never touch an existing one it does not own.
+  # RBAC cannot match resourceNames on create — the name is not known at
+  # authorization time — so create stays unscoped while get/patch are limited to
+  # the definitions this repo owns.
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
     verbs: ["create"]

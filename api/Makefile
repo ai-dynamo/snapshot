@@ -5,11 +5,8 @@ include $(REPO_HACK_DIR)/tools.mk
 
 .PHONY: generate fmt lint tidy test
 
-# CRDs are generated into v1alpha1/crds, where they are embedded into the api
-# module and applied by the operator's init container. The chart needs its own
-# copy under crds/ for Helm to install them on a fresh release, so that is
-# mirrored from the same output rather than generated separately. `make check`
-# fails on a dirty tree, which is what keeps the two in step.
+# The chart needs its own copy for Helm to install CRDs on a fresh release, so
+# it is mirrored from the generated output rather than generated separately.
 CHART_CRD_DIR := ../charts/snapshot/crds
 
 generate: $(CONTROLLER_GEN)

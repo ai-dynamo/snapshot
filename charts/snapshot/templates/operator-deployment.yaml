@@ -24,10 +24,8 @@ spec:
       {{- end }}
       {{- if .Values.crdUpgrade.enabled }}
       initContainers:
-        # Server-side applies the CRDs embedded in the operator binary before the
-        # manager starts. A no-op when the cluster already has them. Failing here
-        # is intentional: it stops the manager rather than let it run against
-        # outdated definitions.
+        # Failing here is intentional: it stops the manager rather than let it
+        # run against outdated definitions.
         - name: crd-installer
           image: "{{ .Values.image.operator.repository }}:{{ .Values.image.operator.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.operator.pullPolicy }}

@@ -1,11 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// crd-installer applies the CustomResourceDefinitions embedded in the api module
-// with server-side apply. It runs as the operator Deployment's init container so
-// a `helm upgrade` — which by design leaves the chart's crds/ directory alone —
-// still lands the definitions the manager expects before it starts. When the
-// cluster already has them the run is a no-op.
+// crd-installer applies the CRDs embedded in the api module with server-side
+// apply. It runs as the operator Deployment's init container because `helm
+// upgrade` leaves the chart's crds/ directory alone by design.
 //
 // Failing here deliberately keeps the manager from starting: an operator running
 // against outdated CRDs is worse than one that has not started.

@@ -2,9 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package crds embeds the CustomResourceDefinitions controller-gen generates
-// from the v1alpha1 types. Shipping them with the api module keeps a schema and
-// the Go types it was generated from in the same artifact, so a binary can never
-// install definitions it disagrees with.
+// from the v1alpha1 types.
 package crds
 
 import (
@@ -14,9 +12,8 @@ import (
 	"slices"
 )
 
-// crdFS holds every generated manifest. The glob is what makes All() complete:
-// a newly generated CRD is picked up without editing this file, so it cannot be
-// silently left out of the set the operator installs.
+// The glob is what keeps All() complete: a newly generated CRD is picked up
+// without editing this file, so it cannot be left uninstalled by omission.
 //
 //go:embed *.yaml
 var crdFS embed.FS
@@ -28,8 +25,8 @@ var (
 	podSnapshotContentCRD string
 )
 
-// all is built once at startup. Reading embedded data cannot fail at runtime,
-// so a failure here means the binary itself is malformed.
+// Embedded data cannot fail to read at runtime, so a panic here means the
+// binary itself is malformed.
 var all = mustLoadAll()
 
 func mustLoadAll() []string {

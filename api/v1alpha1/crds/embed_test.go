@@ -11,11 +11,8 @@ import (
 	"testing"
 )
 
-// chartCRDDir holds the copy Helm installs on a fresh release. `make generate`
-// mirrors it from this package's manifests.
 const chartCRDDir = "../../../charts/snapshot/crds"
 
-// readCRDDir returns file name -> contents for every manifest in dir.
 func readCRDDir(t *testing.T, dir string) map[string]string {
 	t.Helper()
 
@@ -37,8 +34,8 @@ func readCRDDir(t *testing.T, dir string) map[string]string {
 	return manifests
 }
 
-// All() drives what the operator installs, so every generated CRD has to be in
-// it. Anything missing would never reach the cluster.
+// All() drives what the operator installs; anything missing never reaches the
+// cluster.
 func TestAllCoversEveryGeneratedCRD(t *testing.T) {
 	generated := readCRDDir(t, ".")
 	if len(generated) == 0 {
@@ -56,8 +53,6 @@ func TestAllCoversEveryGeneratedCRD(t *testing.T) {
 	}
 }
 
-// The chart carries its own copy so Helm can install CRDs on a fresh release.
-// Drift means someone edited one side by hand or skipped `make generate`.
 func TestChartCopyMatchesGenerated(t *testing.T) {
 	generated := readCRDDir(t, ".")
 	chart := readCRDDir(t, chartCRDDir)
