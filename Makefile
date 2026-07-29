@@ -12,8 +12,14 @@ VERSION           ?= latest
 TAGS              ?= $(VERSION)
 DOCKER_BUILD_ARGS ?=
 
-.PHONY: tidy generate test build lint verify-generate check fmt add-license-headers \
+.PHONY: tidy generate test build lint verify-generate verify-crds check fmt add-license-headers \
         verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator
+
+# controller-gen writes the CRDs to CRD_SRC_DIR, where the api module embeds
+# them; api/Makefile mirrors that output into the chart so Helm can install them
+# on a fresh release.
+CRD_SRC_DIR   := api/v1alpha1/crds
+CHART_CRD_DIR := charts/snapshot/crds
 
 tidy:
 	$(MAKE) -C api tidy
@@ -53,14 +59,22 @@ add-license-headers: $(ADDLICENSE)
 verify-license-headers: $(ADDLICENSE)
 	$(ADDLICENSE) -f hack/boilerplate.addlicense.txt -check $(LICENSE_IGNORES) . .github/workflows
 
+# Assert the chart's CRD copy still matches the generated source. Deliberately
+# ordered before generate in check and verify-generate: afterwards generate has
+# repaired any drift and the comparison proves nothing. Needs no tooling and no
+# Go test run, so it also stands alone on a fresh checkout.
+verify-crds:
+	@diff -r -x '*.go' $(CRD_SRC_DIR) $(CHART_CRD_DIR) || \
+	  (echo "ERROR: $(CHART_CRD_DIR) has drifted from $(CRD_SRC_DIR) — run 'make generate' and commit"; exit 1)
+
 # install-tools makes controller-gen/golangci-lint/addlicense/helm available to
 # the stages before they run. govulncheck + helm-lint are read-only, so they run
 # after the mutating stages and before the clean-tree assert.
-check: install-tools generate add-license-headers fmt tidy verify-license-headers lint govulncheck helm-lint
+check: verify-crds install-tools generate add-license-headers fmt tidy verify-license-headers lint govulncheck helm-lint
 	@test -z "$$(git status --porcelain)" || \
 	  (echo "ERROR: tree dirty after check — commit the changes below"; git status --porcelain; git diff; exit 1)
 
-verify-generate: generate
+verify-generate: verify-crds generate
 	@test -z "$$(git status --porcelain)" || \
 	  (echo "ERROR: generated files out of date — run 'make generate' and commit"; git status --porcelain; git diff; exit 1)
 
