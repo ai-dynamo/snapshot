@@ -1,12 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// crd-installer applies the CRDs embedded in the api module with server-side
-// apply. It runs as the operator Deployment's init container because `helm
-// upgrade` leaves the chart's crds/ directory alone by design.
-//
-// Failing here deliberately keeps the manager from starting: an operator running
-// against outdated CRDs is worse than one that has not started.
+// crd-installer applies the CRDs embedded in the api module, as the operator
+// Deployment's init container. Failing here deliberately keeps the manager from
+// starting: an operator running against outdated CRDs is worse than one that
+// has not started.
 package main
 
 import (

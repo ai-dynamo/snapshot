@@ -13,21 +13,16 @@ image:
 
 replicaCount: 1
 
-# Helm installs this chart's crds/ on a fresh release and never touches them
-# again — `helm upgrade` leaves CRDs alone by design. The crd-installer init
-# container closes that gap on every rollout, and is a no-op when nothing changed.
+# `helm upgrade` leaves CRDs alone by design; the crd-installer init container
+# closes that gap on every rollout, and is a no-op when nothing changed.
 crdUpgrade:
-  # Disable when CRDs are managed out of band (GitOps, or a cluster admin who
-  # does not want the operator holding apiextensions permissions).
-  #
-  # NOTICE FOR THE CLUSTER ADMIN: with this off, keeping the CRDs current after
-  # every chart upgrade becomes your job. The operator will otherwise run
-  # against stale definitions and silently drop new fields.
-  #
+  # NOTICE FOR THE CLUSTER ADMIN: disabling this makes keeping the CRDs current
+  # your job, otherwise the operator runs against stale definitions and silently
+  # drops new fields:
   #   kubectl apply --server-side --force-conflicts -f ./charts/snapshot/crds/
   enabled: true
 
-  # Log level (trace, debug, info, warn, error).
+  # trace, debug, info, warn, error
   logLevel: info
 
   resources:

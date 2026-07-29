@@ -18,18 +18,15 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// FieldManager owns the CRD fields written by this installer.
 const FieldManager = "snapshot-crd-installer"
 
 const crdKind = "CustomResourceDefinition"
 
-// Client is the subset of client.Client the installer needs.
 type Client interface {
 	Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error
 	Apply(ctx context.Context, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error
 }
 
-// Action describes what applying a CRD changed on the server.
 type Action string
 
 const (
@@ -38,16 +35,13 @@ const (
 	ActionUnchanged Action = "unchanged"
 )
 
-// Result reports the outcome of applying a single CRD.
 type Result struct {
 	Name   string
 	Action Action
 }
 
-// Results is the outcome of a full installer run.
 type Results []Result
 
-// Changed reports whether the run created or updated any CRD.
 func (r Results) Changed() bool {
 	for _, res := range r {
 		if res.Action != ActionUnchanged {
@@ -57,7 +51,6 @@ func (r Results) Changed() bool {
 	return false
 }
 
-// InstallCRDs applies every manifest and reports what each apply changed.
 func InstallCRDs(ctx context.Context, cl Client, log logr.Logger, manifests []string) (Results, error) {
 	results := make(Results, 0, len(manifests))
 	for _, manifest := range manifests {
@@ -85,7 +78,7 @@ func applyCRD(ctx context.Context, cl Client, manifest string) (Result, error) {
 	}
 
 	// The server only bumps the resource version when the definition really
-	// moved, which is what distinguishes an updated CRD from an unchanged one.
+	// moved, which is what separates updated from unchanged below.
 	current := &unstructured.Unstructured{}
 	current.SetGroupVersionKind(obj.GroupVersionKind())
 	existed := true

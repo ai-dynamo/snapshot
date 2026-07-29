@@ -40,9 +40,7 @@ rules:
     resources: ["events"]
     verbs: ["create", "patch"]
   {{- if .Values.crdUpgrade.enabled }}
-  # RBAC cannot match resourceNames on create — the name is not known at
-  # authorization time — so create stays unscoped while get/patch are limited to
-  # the definitions this repo owns.
+  # RBAC cannot match resourceNames on create, so only get/patch are scoped.
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
     verbs: ["create"]

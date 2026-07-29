@@ -45,8 +45,7 @@ fmt:
 	$(MAKE) -C agent fmt
 	$(MAKE) -C operator fmt
 
-# A license header on controller-gen output would be stripped by the next
-# generate and fail the clean-tree assert in check.
+# A license header on controller-gen output would be stripped by the next generate.
 LICENSE_IGNORES := -ignore '**/zz_generated*.go' -ignore '**/.gitkeep' \
                    -ignore 'charts/**' -ignore 'api/v1alpha1/crds/**'
 
@@ -56,8 +55,7 @@ add-license-headers: $(ADDLICENSE)
 verify-license-headers: $(ADDLICENSE)
 	$(ADDLICENSE) -f hack/boilerplate.addlicense.txt -check $(LICENSE_IGNORES) . .github/workflows
 
-# Ordered before generate in check and verify-generate: afterwards generate has
-# repaired any drift and the comparison would prove nothing.
+# Ordered before generate: afterwards it would compare freshly repaired copies.
 verify-crds:
 	@diff -r -x '*.go' $(CRD_SRC_DIR) $(CHART_CRD_DIR) || \
 	  (echo "ERROR: $(CHART_CRD_DIR) has drifted from $(CRD_SRC_DIR) — run 'make generate' and commit"; exit 1)

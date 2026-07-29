@@ -32,21 +32,17 @@ spec:
 `
 }
 
-// applyConfigUnstructured recovers the object behind a runtime.ApplyConfiguration
-// built by client.ApplyConfigurationFromUnstructured, which wraps it in an
-// unexported type that promotes the *unstructured.Unstructured methods.
+// client.ApplyConfigurationFromUnstructured wraps the object in an unexported
+// type that promotes the *unstructured.Unstructured methods.
 type applyConfigUnstructured interface {
 	GetName() string
 	SetResourceVersion(string)
 }
 
-// fakeClient records applies and models the API server's resource version
-// behaviour: it only bumps when the stored definition actually changes.
-//
-// controller-runtime's fake client cannot stand in here. Its Apply bumps the
-// resource version on every call, including an identical re-apply, so the
-// no-op case this installer exists to detect would test the opposite of what a
-// real apiserver does (verified against both).
+// Models the apiserver's resource version behaviour: it only bumps when the
+// stored definition actually changes. controller-runtime's fake client cannot
+// stand in, because its Apply bumps on every call including an identical
+// re-apply, inverting the no-op case this installer exists to detect.
 type fakeClient struct {
 	stored   map[string]string // CRD name -> resource version
 	nextRV   map[string]string // CRD name -> resource version the apply should yield
@@ -183,8 +179,6 @@ func TestInstallCRDsPropagatesGetError(t *testing.T) {
 	assert.Empty(t, cl.applied)
 }
 
-// The real generated CRDs must round-trip through the apply path, not just the
-// hand-written fixtures above.
 func TestEmbeddedCRDsApplyCleanly(t *testing.T) {
 	manifests := crds.All()
 	require.NotEmpty(t, manifests)

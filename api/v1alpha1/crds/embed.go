@@ -25,8 +25,6 @@ var (
 	podSnapshotContentCRD string
 )
 
-// Embedded data cannot fail to read at runtime, so a panic here means the
-// binary itself is malformed.
 var all = mustLoadAll()
 
 func mustLoadAll() []string {
@@ -46,17 +44,14 @@ func mustLoadAll() []string {
 	return manifests
 }
 
-// PodSnapshotCRD returns the PodSnapshot CRD manifest.
 func PodSnapshotCRD() string {
 	return podSnapshotCRD
 }
 
-// PodSnapshotContentCRD returns the PodSnapshotContent CRD manifest.
 func PodSnapshotContentCRD() string {
 	return podSnapshotContentCRD
 }
 
-// All returns every CRD manifest owned by this module, ordered by file name.
 func All() []string {
 	return slices.Clone(all)
 }

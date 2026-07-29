@@ -34,8 +34,6 @@ func readCRDDir(t *testing.T, dir string) map[string]string {
 	return manifests
 }
 
-// All() drives what the operator installs; anything missing never reaches the
-// cluster.
 func TestAllCoversEveryGeneratedCRD(t *testing.T) {
 	generated := readCRDDir(t, ".")
 	if len(generated) == 0 {

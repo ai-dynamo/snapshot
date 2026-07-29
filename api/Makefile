@@ -5,8 +5,7 @@ include $(REPO_HACK_DIR)/tools.mk
 
 .PHONY: generate fmt lint tidy test
 
-# The chart needs its own copy for Helm to install CRDs on a fresh release, so
-# it is mirrored from the generated output rather than generated separately.
+# Mirrored, not generated separately, so Helm can install CRDs on a fresh release.
 CHART_CRD_DIR := ../charts/snapshot/crds
 
 generate: $(CONTROLLER_GEN)
