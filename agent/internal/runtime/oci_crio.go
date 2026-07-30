@@ -26,7 +26,8 @@ type CRIORuntime struct {
 }
 
 func NewCRIORuntime(socket string) (*CRIORuntime, error) {
-	svc, err := remote.NewRemoteRuntimeService(socket, crioConnectTimeout, nil, nil)
+	// context.Background()+false: signature added in cri-client v0.36.2 (CVE pin); re-check on Dynamo sync.
+	svc, err := remote.NewRemoteRuntimeService(context.Background(), socket, crioConnectTimeout, nil, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial CRI-O at %s: %w", socket, err)
 	}
