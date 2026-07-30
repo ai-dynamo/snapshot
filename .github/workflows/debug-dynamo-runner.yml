@@ -15,7 +15,7 @@ jobs:
   tmate:
     name: tmate on prod-deploy-tester-v1
     runs-on: prod-deploy-tester-v1
-    timeout-minutes: 60
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
 
