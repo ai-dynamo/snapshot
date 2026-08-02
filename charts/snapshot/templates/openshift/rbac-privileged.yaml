@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # OpenShift: namespace-scoped "use" grant on the built-in privileged SCC for
 # the agent DS ServiceAccount. CRIU needs every knob privileged exposes;
 # using the shipped SCC matches NTO/LSO/GPU-Operator.

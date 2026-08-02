@@ -1,4 +1,7 @@
 {{- if and (eq .Values.storage.type "pvc") (eq .Values.storage.accessMode "agentMount") .Values.storage.pvc.create }}
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

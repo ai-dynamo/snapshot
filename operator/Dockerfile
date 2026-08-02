@@ -13,12 +13,7 @@ WORKDIR /workspace/operator
 RUN CGO_ENABLED=0 go build -o bin/manager ./cmd/manager
 RUN CGO_ENABLED=0 go build -o bin/crd-installer ./cmd/crdinstaller
 
-# NVIDIA-managed distroless base, pulled from nvcr.io. OSRB requires approved
-# base containers to come from an NVIDIA-managed repository; gcr.io/distroless
-# does not qualify even though distroless itself is an approved base (OSRB bugs
-# 4176061 / 4489229). Same image the Dynamo operator uses
-# (deploy/operator/Dockerfile in ai-dynamo/dynamo, pinned there at v4.0.3).
-FROM nvcr.io/nvidia/distroless/go:v4.0.8
+FROM nvcr.io/nvidia/distroless/go:v4.0.8@sha256:938bd28ce4ddb800118a951774203e7563c2067a72b20ae6b85d2c7da165a178
 COPY --from=builder /workspace/operator/bin/manager /manager
 COPY --from=builder /workspace/operator/bin/crd-installer /crd-installer
 # The gcr.io distroless :nonroot tag set this implicitly; nvcr.io's does not.

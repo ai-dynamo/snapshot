@@ -1,5 +1,8 @@
 {{- if .Values.rbac.create }}
 ---
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Bind agent to the cluster-scoped PodSnapshotContent ClusterRole (capture work orders).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

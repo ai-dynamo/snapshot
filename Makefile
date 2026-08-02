@@ -45,9 +45,10 @@ fmt:
 	$(MAKE) -C agent fmt
 	$(MAKE) -C operator fmt
 
-# A license header on controller-gen output would be stripped by the next generate.
+# A license header on controller-gen output would be stripped by the next generate,
+# so both CRD copies are exempt. The rest of the chart carries SPDX headers.
 LICENSE_IGNORES := -ignore '**/zz_generated*.go' -ignore '**/.gitkeep' \
-                   -ignore 'charts/**' -ignore 'api/v1alpha1/crds/**'
+                   -ignore '$(CHART_CRD_DIR)/**' -ignore '$(CRD_SRC_DIR)/**'
 
 add-license-headers: $(ADDLICENSE)
 	$(ADDLICENSE) -f hack/boilerplate.addlicense.txt $(LICENSE_IGNORES) . .github/workflows
