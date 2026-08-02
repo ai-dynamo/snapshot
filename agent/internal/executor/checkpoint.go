@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build linux
+
 // Package executor provides the top-level checkpoint and restore executors.
 // These wire together the lib packages (criu, cuda, etc.) into multi-step workflows.
 package executor
