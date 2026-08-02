@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Install vCluster CLI
+description: Download and install the vCluster CLI binary.
+
+inputs:
+  vcluster_version:
+    description: vCluster CLI version to install.
+    required: false
+    default: v0.33.0
+
+runs:
+  using: composite
+  steps:
+    - name: Install vCluster CLI
+      shell: bash
+      run: |
+        echo "::group::Install vCluster CLI ${{ inputs.vcluster_version }}"
+        set -euo pipefail
+
+        if command -v vcluster >/dev/null 2>&1; then
+          vcluster version
+          echo "::endgroup::"
+          exit 0
+        fi
+
+        arch="$(uname -m)"
+        case "${arch}" in
+          x86_64) vcluster_arch=amd64 ;;
+          aarch64) vcluster_arch=arm64 ;;
+          *) echo "::error::Unsupported architecture: ${arch}"; exit 1 ;;
+        esac
+
+        tmp_bin="$(mktemp -p /tmp vcluster.XXXXXX)"
+        curl --retry 5 --retry-delay 2 \
+          --connect-timeout 10 --max-time 120 \
+          --fail --show-error -sL \
+          -o "${tmp_bin}" \
+          "https://github.com/loft-sh/vcluster/releases/download/${{ inputs.vcluster_version }}/vcluster-linux-${vcluster_arch}"
+        sudo install -m 0755 "${tmp_bin}" /usr/local/bin/vcluster
+        rm -f "${tmp_bin}"
+        vcluster version
+        echo "::endgroup::"
