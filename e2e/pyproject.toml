@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "snapshot-e2e"
+version = "0.0.0"
+description = "Snapshot end-to-end infrastructure helpers"
+requires-python = ">=3.12"
+dependencies = [
+  "kubernetes>=32.0.1,<33.0.0",
+  "packaging>=24.2,<26",
+  "PyYAML>=6.0.2,<7",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
