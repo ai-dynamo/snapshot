@@ -19,7 +19,7 @@ DOCKER_BUILD_ARGS ?=
 CRD_SRC_DIR   := api/v1alpha1/crds
 CHART_CRD_DIR := charts/snapshot/crds
 
-LINUX_GO_IMAGE ?= golang:$(GO_VERSION)-bookworm
+LINUX_GO_IMAGE ?= golang:$(GO_VERSION)
 
 tidy:
 	$(MAKE) -C api tidy
@@ -92,6 +92,8 @@ linux-build:
 
 linux-test:
 	docker run --rm \
+	  --user "$$(id -u):$$(id -g)" \
+	  -e HOME=/tmp -e GOCACHE=/tmp/go-build \
 	  -v "$(CURDIR):/workspace" -w /workspace \
 	  $(LINUX_GO_IMAGE) \
 	  make -C agent test
