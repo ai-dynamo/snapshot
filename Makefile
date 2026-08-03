@@ -81,16 +81,18 @@ helm-lint: $(HELM)
 
 LINUX_GO_IMAGE ?= golang:$(GO_VERSION)-bookworm
 
-# Run build/test inside a Linux container to exercise //go:build linux code paths.
+# Run build/test inside a Linux container (local dev only; CI runs on Linux natively).
 linux-build:
 	docker run --rm \
-	  -v $(CURDIR):/workspace -w /workspace \
+	  --user "$$(id -u):$$(id -g)" \
+	  -e HOME=/tmp -e GOCACHE=/tmp/go-build \
+	  -v "$(CURDIR):/workspace" -w /workspace \
 	  $(LINUX_GO_IMAGE) \
 	  make -C agent build
 
 linux-test:
 	docker run --rm \
-	  -v $(CURDIR):/workspace -w /workspace \
+	  -v "$(CURDIR):/workspace" -w /workspace \
 	  $(LINUX_GO_IMAGE) \
 	  make -C agent test
 
