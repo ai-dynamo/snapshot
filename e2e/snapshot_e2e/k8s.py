@@ -51,6 +51,10 @@ def read_crd(name: str) -> client.V1CustomResourceDefinition:
     return client.ApiextensionsV1Api().read_custom_resource_definition(name)
 
 
+def list_events(namespace: str) -> list[client.CoreV1Event]:
+    return client.CoreV1Api().list_namespaced_event(namespace).items
+
+
 def snapshot_custom_resource_api_is_accessible(namespace: str) -> None:
     api = client.CustomObjectsApi()
     api.list_namespaced_custom_object(

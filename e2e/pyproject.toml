@@ -16,6 +16,9 @@ dependencies = [
 [tool.pytest.ini_options]
 markers = [
   "environment: checks that a prepared Snapshot e2e target is usable",
+  "snapshot_success: functional snapshot/restore success checks",
+  "snapshot_failure: functional snapshot/restore failure checks",
+  "gpu: tests that require a GPU workload",
 ]
 testpaths = ["tests"]
 
