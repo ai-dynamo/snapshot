@@ -15,8 +15,9 @@ struct Request {
   enum class Operation : std::uint32_t {
     Submit = 1,
     WaitReady = 2,
-    Commit = 3,
-    Abort = 4
+    PrepareCheckpoint = 3,
+    Commit = 4,
+    Abort = 5
   };
   Operation operation{};
   std::string transaction_id;
@@ -41,13 +42,16 @@ public:
                      std::filesystem::path scratch_root, std::uint64_t budget);
   Response submit(const Request &request);
   Response wait_ready(const Request &request);
+  Response prepare_checkpoint(const Request &request);
   Response commit(const Request &request);
   Response abort(const Request &request);
   void cleanup();
 
 private:
   struct TransactionState {
+    std::filesystem::path checkpoint;
     std::uint64_t staged_bytes{};
+    bool promote{};
   };
   std::filesystem::path staging_root_, scratch_root_;
   std::uint64_t budget_;

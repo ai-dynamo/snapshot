@@ -157,6 +157,19 @@ TransactionManager::TransactionManager(fs::path staging, fs::path scratch,
   cleanup();
 }
 void TransactionManager::cleanup() {
+  auto transaction_root = staging_root_ / "tx";
+  if (fs::is_directory(transaction_root)) {
+    for (const auto &entry : fs::directory_iterator(transaction_root)) {
+      if (!entry.is_regular_file() ||
+          entry.path().filename().string().rfind(".checkpoint-", 0) != 0)
+        continue;
+      std::ifstream metadata(entry.path());
+      std::string destination;
+      std::getline(metadata, destination);
+      if (!destination.empty())
+        fs::remove_all(destination);
+    }
+  }
   fs::remove_all(staging_root_ / "tx");
   if (fs::is_directory(scratch_root_)) {
     for (const auto &entry : fs::directory_iterator(scratch_root_))
@@ -176,28 +189,65 @@ Response TransactionManager::submit(const Request &r) {
     return fail(r.transaction_id, "invalid transaction id");
   if (!fs::is_directory(r.checkpoint_path))
     return fail(r.transaction_id, "checkpoint path is not a directory");
+  auto path = tx_path(staging_root_, r.transaction_id);
   try {
     auto bytes = tree_size(r.checkpoint_path);
-    if (staged_bytes_ > budget_ || bytes > budget_ - staged_bytes_)
+    if (bytes > budget_)
       return fail(r.transaction_id, "staging budget exceeded");
-    auto path = tx_path(staging_root_, r.transaction_id);
     fs::remove_all(path);
-    if (!copy_tree(r.checkpoint_path, path)) {
+    if (!copy_tree(r.checkpoint_path, path) || tree_size(path) > budget_) {
       fs::remove_all(path);
       return fail(r.transaction_id, "checkpoint copy exceeded staging budget");
     }
     auto copied_bytes = tree_size(path);
-    if (copied_bytes > budget_ - staged_bytes_) {
+    if (staged_bytes_ > budget_ || copied_bytes > budget_ - staged_bytes_) {
       fs::remove_all(path);
-      return fail(r.transaction_id, "checkpoint copy exceeded staging budget");
+      return fail(r.transaction_id, "staging budget exceeded");
     }
-    transactions_.emplace(r.transaction_id, TransactionState{copied_bytes});
+    transactions_.emplace(r.transaction_id,
+                          TransactionState{{}, copied_bytes, false});
     staged_bytes_ += copied_bytes;
     return {true, r.transaction_id, path, scratch_root_ / r.transaction_id,
             {}};
   } catch (const fs::filesystem_error &e) {
     std::error_code cleanup_error;
-    fs::remove_all(tx_path(staging_root_, r.transaction_id), cleanup_error);
+    fs::remove_all(path, cleanup_error);
+    return fail(r.transaction_id, e.what());
+  }
+}
+Response TransactionManager::prepare_checkpoint(const Request &r) {
+
+  std::lock_guard lock(mutex_);
+  if (transactions_.contains(r.transaction_id))
+    return fail(r.transaction_id, "transaction is already active");
+  if (!safe_id(r.transaction_id))
+    return fail(r.transaction_id, "invalid transaction id");
+  fs::path destination = fs::path(r.checkpoint_path);
+  if (!destination.is_absolute() || destination.filename().empty() ||
+      destination.filename() == "." || destination.filename() == "..")
+    return fail(r.transaction_id, "checkpoint path must be an absolute directory path");
+  for (const auto &part : destination)
+    if (part == "..")
+      return fail(r.transaction_id, "checkpoint path must not contain '..'");
+  try {
+    fs::create_directories(destination.parent_path());
+    auto path = destination.parent_path() /
+                ("." + destination.filename().string() + ".pagebroker-" +
+                 r.transaction_id);
+    if (fs::exists(path))
+      return fail(r.transaction_id, "checkpoint transaction path already exists");
+    fs::create_directory(path);
+    std::ofstream metadata(staging_root_ / "tx" /
+                           (".checkpoint-" + r.transaction_id));
+    metadata << path.string() << '\n';
+    if (!metadata) {
+      fs::remove_all(path);
+      return fail(r.transaction_id, "failed to record checkpoint transaction");
+    }
+    transactions_.emplace(r.transaction_id,
+                          TransactionState{destination, 0, true});
+    return {true, r.transaction_id, path, scratch_root_ / r.transaction_id, {}};
+  } catch (const fs::filesystem_error &e) {
     return fail(r.transaction_id, e.what());
   }
 }
@@ -218,7 +268,38 @@ Response TransactionManager::commit(const Request &r) {
   if (transaction == transactions_.end())
     return fail(r.transaction_id, "transaction is not active");
   try {
-    fs::remove_all(tx_path(staging_root_, r.transaction_id));
+    auto &state = transaction->second;
+    if (state.promote) {
+      auto staged = state.checkpoint.parent_path() /
+                    ("." + state.checkpoint.filename().string() +
+                     ".pagebroker-" + r.transaction_id);
+      auto bytes = tree_size(staged);
+      if (bytes >= state.staged_bytes)
+        staged_bytes_ += bytes - state.staged_bytes;
+      else
+        staged_bytes_ -= state.staged_bytes - bytes;
+      state.staged_bytes = bytes;
+      if (staged_bytes_ > budget_)
+        return fail(r.transaction_id, "staging budget exceeded");
+      auto backup = state.checkpoint.parent_path() /
+                    ("." + state.checkpoint.filename().string() +
+                     ".pagebroker-old-" + r.transaction_id);
+      if (fs::exists(backup))
+        fs::remove_all(backup);
+      if (fs::exists(state.checkpoint))
+        fs::rename(state.checkpoint, backup);
+      try {
+        fs::rename(staged, state.checkpoint);
+      } catch (...) {
+        if (fs::exists(backup) && !fs::exists(state.checkpoint))
+          fs::rename(backup, state.checkpoint);
+        throw;
+      }
+      fs::remove_all(backup);
+      fs::remove(staging_root_ / "tx" / (".checkpoint-" + r.transaction_id));
+    } else {
+      fs::remove_all(tx_path(staging_root_, r.transaction_id));
+    }
     fs::remove_all(scratch_root_ / r.transaction_id);
   } catch (const fs::filesystem_error &e) {
     return fail(r.transaction_id, e.what());
@@ -232,7 +313,13 @@ Response TransactionManager::abort(const Request &r) {
   auto transaction = transactions_.find(r.transaction_id);
   if (transaction != transactions_.end()) {
     try {
-      fs::remove_all(tx_path(staging_root_, r.transaction_id));
+      if (transaction->second.promote)
+        fs::remove_all(transaction->second.checkpoint.parent_path() /
+                      ("." + transaction->second.checkpoint.filename().string() +
+                       ".pagebroker-" + r.transaction_id));
+      else
+        fs::remove_all(tx_path(staging_root_, r.transaction_id));
+      fs::remove(staging_root_ / "tx" / (".checkpoint-" + r.transaction_id));
       fs::remove_all(scratch_root_ / r.transaction_id);
     } catch (const fs::filesystem_error &e) {
       return fail(r.transaction_id, e.what());
@@ -310,6 +397,8 @@ int serve(const fs::path &socket_path, const fs::path &staging,
       response = manager.submit(request);
     else if (request.operation == Request::Operation::WaitReady)
       response = manager.wait_ready(request);
+    else if (request.operation == Request::Operation::PrepareCheckpoint)
+      response = manager.prepare_checkpoint(request);
     else if (request.operation == Request::Operation::Commit)
       response = manager.commit(request);
     else if (request.operation == Request::Operation::Abort)

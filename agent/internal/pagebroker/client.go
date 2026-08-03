@@ -14,6 +14,8 @@ import (
 
 type Transaction struct{ socket, id, staging, scratch string }
 
+func (t *Transaction) StagingPath() string { return t.staging }
+
 func Stage(ctx context.Context, socket, checkpoint string) (*Transaction, error) {
 	if socket == "" {
 		socket = "/run/pagebroker/pagebroker.sock"
@@ -28,12 +30,26 @@ func Stage(ctx context.Context, socket, checkpoint string) (*Transaction, error)
 	}
 	r, err = call(ctx, socket, 2, id, "")
 	if err != nil {
-		_, _ = call(context.Background(), socket, 4, id, "")
+		_, _ = call(context.Background(), socket, 5, id, "")
 		return nil, err
 	}
 	if !r.ok {
-		_, _ = call(context.Background(), socket, 4, id, "")
+		_, _ = call(context.Background(), socket, 5, id, "")
 		return nil, fmt.Errorf("wait-ready rejected: %s", r.err)
+	}
+	return &Transaction{socket: socket, id: id, staging: r.staging, scratch: r.scratch}, nil
+}
+func PrepareCheckpoint(ctx context.Context, socket, checkpoint string) (*Transaction, error) {
+	if socket == "" {
+		socket = "/run/pagebroker/pagebroker.sock"
+	}
+	id := "tx-" + uuid.NewString()
+	r, err := call(ctx, socket, 3, id, checkpoint)
+	if err != nil {
+		return nil, err
+	}
+	if !r.ok {
+		return nil, fmt.Errorf("checkpoint prepare rejected: %s", r.err)
 	}
 	return &Transaction{socket: socket, id: id, staging: r.staging, scratch: r.scratch}, nil
 }
@@ -55,7 +71,7 @@ func (t *Transaction) Files() ([]*os.File, error) {
 	return []*os.File{image, work}, nil
 }
 func (t *Transaction) Commit() error {
-	r, err := call(context.Background(), t.socket, 3, t.id, "")
+	r, err := call(context.Background(), t.socket, 4, t.id, "")
 	if err != nil {
 		return err
 	}
@@ -65,7 +81,7 @@ func (t *Transaction) Commit() error {
 	return nil
 }
 func (t *Transaction) Abort() error {
-	r, err := call(context.Background(), t.socket, 4, t.id, "")
+	r, err := call(context.Background(), t.socket, 5, t.id, "")
 	if err != nil {
 		return err
 	}
