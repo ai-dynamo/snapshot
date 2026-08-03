@@ -197,7 +197,6 @@ spec:
             {{- if and (eq .Values.storage.type "pvc") (eq .Values.storage.accessMode "agentMount") }}
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath }}
-              readOnly: true
             {{- end }}
       volumes:
         - name: pagebroker-staging

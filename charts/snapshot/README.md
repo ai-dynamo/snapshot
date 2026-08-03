@@ -40,6 +40,12 @@ agent reaches it through that pod's mount namespace. That allows suitable
 `ReadWriteOnce` storage classes for sequential checkpoint/restore workflows, as
 long as the backend can attach the volume to the node running that workload pod.
 
+Annotated checkpoints using `nvidia.com/snapshot-pagebroker: "true"` require
+`storage.accessMode=agentMount`, because PageBroker must write and promote a
+temporary directory on the checkpoint PVC. With `podMount`, PageBroker cannot
+access the PVC directly and the agent falls back to its existing checkpoint
+staging path. Restore behavior for the annotation is unchanged.
+
 Because `podMount` reaches storage through `/host/proc/<pid>/root`, the target
 container must still be alive and visible through host proc when the agent starts
 checkpoint or restore. A container restart, exited placeholder, runtime PID
