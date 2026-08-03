@@ -13,7 +13,8 @@ TAGS              ?= $(VERSION)
 DOCKER_BUILD_ARGS ?=
 
 .PHONY: tidy generate test build lint verify-generate verify-crds check fmt add-license-headers \
-        verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator
+        verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator \
+        linux-build linux-test
 
 CRD_SRC_DIR   := api/v1alpha1/crds
 CHART_CRD_DIR := charts/snapshot/crds
@@ -77,6 +78,21 @@ govulncheck: $(GOVULNCHECK)
 
 helm-lint: $(HELM)
 	$(HELM) lint charts/snapshot/
+
+LINUX_GO_IMAGE ?= golang:1.26.5-bookworm
+
+# Run build/test inside a Linux container to exercise //go:build linux code paths.
+linux-build:
+	docker run --rm \
+	  -v $(CURDIR):/workspace -w /workspace \
+	  $(LINUX_GO_IMAGE) \
+	  make -C agent build
+
+linux-test:
+	docker run --rm \
+	  -v $(CURDIR):/workspace -w /workspace \
+	  $(LINUX_GO_IMAGE) \
+	  make -C agent test
 
 docker-build-agent:
 	docker buildx build $(DOCKER_BUILD_ARGS) -f agent/Dockerfile \
