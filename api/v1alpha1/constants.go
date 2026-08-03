@@ -44,6 +44,7 @@ const (
 
 	CheckpointStorageTypeAnnotation     = "nvidia.com/snapshot-storage-type"
 	CheckpointStorageBasePathAnnotation = "nvidia.com/snapshot-storage-base-path"
+	PageBrokerAnnotation                = "nvidia.com/snapshot-pagebroker"
 	CheckpointVolumeName                = "checkpoint-storage"
 	DefaultCheckpointArtifactVersion    = "1"
 	DefaultCheckpointJobTTLSeconds      = int32(300) // TODO: dead code — remove once no longer synced from Dynamo

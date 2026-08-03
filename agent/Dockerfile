@@ -81,6 +81,16 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /nsrestore ./cmd/nsrestore
 
 # =============================================================================
+# PageBroker C++23 builder
+# =============================================================================
+FROM ubuntu:24.04 AS pagebroker-builder
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential protobuf-compiler libprotobuf-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /workspace/pagebroker
+COPY pagebroker ./
+RUN make
+
+# =============================================================================
 # Stage: CUDA checkpoint helper builder
 # =============================================================================
 FROM ${AGENT_BASE_IMAGE} AS cuda-helper-builder
@@ -102,7 +112,7 @@ RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
 # =============================================================================
-FROM ubuntu:24.04 AS criu-builder
+FROM ubuntu:22.04 AS criu-builder
 
 ARG CRIU_REPO
 ARG CRIU_REF
@@ -122,6 +132,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-c-compiler \
     protobuf-compiler \
     python3 \
+    python3-pip \
     python3-protobuf \
     libgnutls28-dev \
     libnftables-dev \
@@ -164,6 +175,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnl-3-200 \
     libnl-route-3-200 \
     libprotobuf-c1 \
+    libprotobuf32 \
     libgnutls30t64 \
     libnftables1 \
     iproute2 \
@@ -189,6 +201,7 @@ RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-help
 # Copy the built binaries
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
 COPY --from=builder /nsrestore /usr/local/bin/nsrestore
+COPY --from=pagebroker-builder /workspace/pagebroker/pagebroker /usr/local/bin/pagebroker
 
 # Create directories
 RUN mkdir -p /checkpoints /var/run/snapshot
@@ -217,15 +230,18 @@ RUN if [ "${TARGETARCH}" != "amd64" ]; then \
       echo "ERROR: Snapshot requires x86_64 (cuda-checkpoint has no ${TARGETARCH} binary)" >&2; exit 1; \
     fi
 
-# Install minimal runtime dependencies for CRIU restore (nsrestore runs here via nsenter)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install minimal runtime dependencies for CRIU restore (nsrestore runs here via nsenter).
+# Ubuntu 22.04 calls this library libgnutls30; Ubuntu 24.04 renamed it.
+RUN apt-get update && \
+    if apt-cache show libgnutls30t64 >/dev/null 2>&1; then GNUTLS_PKG=libgnutls30t64; else GNUTLS_PKG=libgnutls30; fi && \
+    apt-get install -y --no-install-recommends \
     libbsd0 \
     libcap2 \
     libnet1 \
     libnl-3-200 \
     libnl-route-3-200 \
     libprotobuf-c1 \
-    libgnutls30t64 \
+    "$GNUTLS_PKG" \
     libnftables1 \
     iproute2 \
     iptables \

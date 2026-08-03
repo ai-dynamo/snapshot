@@ -5,11 +5,17 @@ include $(REPO_HACK_DIR)/tools.mk
 
 .PHONY: build test tidy lint fmt
 
-build:
+build: pagebroker-build
 	GOOS=linux GOARCH=amd64 go build -o bin/agent ./cmd/agent
 
-test:
+pagebroker-build:
+	$(MAKE) -C pagebroker
+
+test: pagebroker-test
 	go test ./...
+
+pagebroker-test:
+	$(MAKE) -C pagebroker test
 
 fmt:
 	gofmt -w .

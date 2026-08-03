@@ -4,6 +4,7 @@
 
 #include <cstring>
 #include <fstream>
+#include <iostream>
 #include <linux/un.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -157,7 +158,10 @@ TransactionManager::TransactionManager(fs::path staging, fs::path scratch,
 }
 void TransactionManager::cleanup() {
   fs::remove_all(staging_root_ / "tx");
-  fs::remove_all(scratch_root_);
+  if (fs::is_directory(scratch_root_)) {
+    for (const auto &entry : fs::directory_iterator(scratch_root_))
+      fs::remove_all(entry.path());
+  }
   fs::create_directories(staging_root_ / "tx");
   fs::create_directories(scratch_root_);
   transactions_.clear();
@@ -288,6 +292,9 @@ int serve(const fs::path &socket_path, const fs::path &staging,
   });
   health.detach();
   TransactionManager manager(staging, scratch, budget);
+  std::cerr << "pagebroker listening on " << socket_path << " (staging="
+            << staging << ", scratch=" << scratch << ", budget=" << budget
+            << ")" << std::endl;
   for (;;) {
     int client = accept(server, nullptr, nullptr);
     if (client < 0)

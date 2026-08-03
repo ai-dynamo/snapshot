@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -21,6 +22,7 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/criu"
 	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/logging"
+	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
@@ -38,7 +40,14 @@ type RestoreRequest struct {
 	TargetPodIP                 string
 	ContainerName               string
 	Clientset                   kubernetes.Interface
+	PageBrokerEnabled           bool
+	PageBrokerSocket            string
 }
+
+type beforeLaunchError struct{ err error }
+
+func (e *beforeLaunchError) Error() string { return e.err.Error() }
+func (e *beforeLaunchError) Unwrap() error { return e.err }
 
 // Restore performs external restore for the given request.
 // Returns the namespace-relative PID of the restored process.
@@ -66,9 +75,35 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	hostInspectDuration := time.Since(hostInspectStart)
 
 	// Phase 2: Execute — nsrestore handles rootfs, CRIU restore, and CUDA restore inside namespace
-	result, err := execNSRestore(ctx, log, req, snap)
+	var transaction *pagebroker.Transaction
+	if req.PageBrokerEnabled {
+		transaction, err = pagebroker.Stage(ctx, req.PageBrokerSocket, req.CheckpointLocation)
+		if err != nil {
+			log.Error(err, "PageBroker unavailable; falling back to PVC restore")
+		}
+	}
+	result, err := execNSRestore(ctx, log, req, snap, transaction)
 	if err != nil {
+		var beforeLaunch *beforeLaunchError
+		if transaction != nil && errors.As(err, &beforeLaunch) {
+			_ = transaction.Abort()
+			transaction = nil
+			result, err = execNSRestore(ctx, log, req, snap, nil)
+		}
+	}
+	if err != nil {
+		if transaction != nil {
+			_ = transaction.Abort()
+		}
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
+	}
+	if transaction != nil {
+		if err := transaction.Commit(); err != nil {
+			log.Error(err, "PageBroker cleanup failed after successful restore")
+			if abortErr := transaction.Abort(); abortErr != nil {
+				log.Error(abortErr, "PageBroker abort cleanup also failed")
+			}
+		}
 	}
 	restoreDuration := hostInspectDuration + result.NSRestoreSetupDuration + result.CRIURestoreDuration + result.CUDADuration
 	log.Info("Restore timing summary",
@@ -195,13 +230,26 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 
 // execNSRestore launches the nsrestore binary inside the placeholder container's
 // namespaces via nsenter and parses the restored PID from stdout JSON.
-func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot) (*RestoreInNamespaceResult, error) {
+func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot, transaction *pagebroker.Transaction) (*RestoreInNamespaceResult, error) {
 	checkpointPath := req.ContainerCheckpointLocation
 	if checkpointPath != "" && !filepath.IsAbs(checkpointPath) {
 		return nil, fmt.Errorf("container checkpoint location must be absolute: %q", checkpointPath)
 	}
 	if checkpointPath == "" {
 		checkpointPath = snap.CheckpointPath
+	}
+	var inherited []*os.File
+	if transaction != nil {
+		var err error
+		inherited, err = transaction.Files()
+		if err != nil {
+			return nil, &beforeLaunchError{err: err}
+		}
+		defer func() {
+			for _, file := range inherited {
+				_ = file.Close()
+			}
+		}()
 	}
 	args := []string{
 		"-t", strconv.Itoa(snap.PlaceholderPID),
@@ -220,10 +268,14 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	if req.TargetPodIP != "" {
 		args = append(args, "--target-pod-ip", req.TargetPodIP)
 	}
+	if transaction != nil {
+		args = append(args, "--pagebroker-image-fd", "3", "--pagebroker-work-fd", "4")
+	}
 
 	cmd := exec.CommandContext(ctx, "nsenter", args...)
 	// Inherit the agent environment so nsrestore uses the same logger settings.
 	cmd.Env = os.Environ()
+	cmd.ExtraFiles = inherited
 	log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())
 
 	var stdout bytes.Buffer
@@ -231,6 +283,10 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
+		var execErr *exec.Error
+		if errors.As(err, &execErr) {
+			return nil, &beforeLaunchError{err: err}
+		}
 		return nil, fmt.Errorf("nsrestore failed: %w\nstdout: %s", err, stdout.String())
 	}
 

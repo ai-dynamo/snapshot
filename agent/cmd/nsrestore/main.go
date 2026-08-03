@@ -23,6 +23,8 @@ func main() {
 	cudaDeviceMap := flag.String("cuda-device-map", "", "CUDA device map for cuda-checkpoint-helper restore")
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
 	targetPodIP := flag.String("target-pod-ip", "", "Restore pod IP for CRIU TCP socket remapping")
+	imageFD := flag.Int("pagebroker-image-fd", -1, "Inherited PageBroker image directory FD")
+	workFD := flag.Int("pagebroker-work-fd", -1, "Inherited PageBroker scratch directory FD")
 	flag.Parse()
 
 	if *checkpointPath == "" {
@@ -30,10 +32,12 @@ func main() {
 	}
 
 	opts := executor.RestoreOptions{
-		CheckpointPath: *checkpointPath,
-		CUDADeviceMap:  *cudaDeviceMap,
-		CgroupRoot:     *cgroupRoot,
-		TargetPodIP:    *targetPodIP,
+		CheckpointPath:    *checkpointPath,
+		CUDADeviceMap:     *cudaDeviceMap,
+		CgroupRoot:        *cgroupRoot,
+		TargetPodIP:       *targetPodIP,
+		PageBrokerImageFD: *imageFD,
+		PageBrokerWorkFD:  *workFD,
 	}
 
 	result, err := executor.RestoreInNamespace(context.Background(), opts, log)

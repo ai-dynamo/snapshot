@@ -20,10 +20,12 @@ import (
 
 // RestoreOptions holds configuration for an in-namespace restore.
 type RestoreOptions struct {
-	CheckpointPath string
-	CUDADeviceMap  string
-	CgroupRoot     string
-	TargetPodIP    string
+	CheckpointPath    string
+	CUDADeviceMap     string
+	CgroupRoot        string
+	TargetPodIP       string
+	PageBrokerImageFD int
+	PageBrokerWorkFD  int
 }
 
 type RestoreInNamespaceResult struct {
@@ -125,7 +127,7 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 
 	// CRIU restore
 	criuRestoreStart := time.Now()
-	restoredPID, cleanup, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, log)
+	restoredPID, cleanup, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, opts.PageBrokerImageFD, opts.PageBrokerWorkFD, log)
 	if err != nil {
 		return nil, 0, err
 	}

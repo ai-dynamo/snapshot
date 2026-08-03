@@ -32,6 +32,8 @@ func ExecuteRestore(
 	criuOpts *criurpc.CriuOpts,
 	m *types.CheckpointManifest,
 	checkpointPath string,
+	imageFD int,
+	workFD int,
 	log logr.Logger,
 ) (int32, func(), error) {
 	settings := m.CRIUDump.CRIU
@@ -47,7 +49,15 @@ func ExecuteRestore(
 	}
 
 	// Open image dir FD
-	imageDir, imageDirFD, err := openPathForCRIU(checkpointPath)
+	var imageDir *os.File
+	var imageDirFD int32
+	var err error
+	if imageFD >= 0 {
+		imageDir, err = os.Open(fmt.Sprintf("/proc/self/fd/%d", imageFD))
+		imageDirFD = int32(imageFD)
+	} else {
+		imageDir, imageDirFD, err = openPathForCRIU(checkpointPath)
+	}
 	if err != nil {
 		return 0, nil, fmt.Errorf("failed to open image directory: %w", err)
 	}
@@ -55,7 +65,15 @@ func ExecuteRestore(
 	criuOpts.ImagesDirFd = proto.Int32(imageDirFD)
 
 	// Open work dir FD
-	if settings.WorkDir != "" {
+	if workFD >= 0 {
+		workDirFile, err := os.Open(fmt.Sprintf("/proc/self/fd/%d", workFD))
+		if err != nil {
+			cleanup()
+			return 0, nil, fmt.Errorf("failed to open inherited PageBroker work directory: %w", err)
+		}
+		openFiles = append(openFiles, workDirFile)
+		criuOpts.WorkDirFd = proto.Int32(int32(workFD))
+	} else if settings.WorkDir != "" {
 		if err := os.MkdirAll(settings.WorkDir, 0755); err != nil {
 			cleanup()
 			return 0, nil, fmt.Errorf("failed to create CRIU work directory: %w", err)
