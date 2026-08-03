@@ -13,8 +13,7 @@ TAGS              ?= $(VERSION)
 DOCKER_BUILD_ARGS ?=
 
 .PHONY: tidy generate test build lint verify-generate verify-crds check fmt add-license-headers \
-        verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator \
-        linux-build linux-test
+        verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator
 
 CRD_SRC_DIR   := api/v1alpha1/crds
 CHART_CRD_DIR := charts/snapshot/crds
