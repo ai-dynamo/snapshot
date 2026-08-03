@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build linux
-
 // Package controller implements the node-local control loop inside snapshot-agent.
 // It does not own CRDs or replace the operator. Instead it watches pod, job, and
 // lease state on the current node and delegates CRIU/CUDA execution to the

@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build linux
-
 // Package main provides the snapshot-agent DaemonSet entrypoint.
 // The agent runs the node-local snapshot controller and delegates CRIU/CUDA
 // execution to the snapshot executor workflows.

@@ -79,7 +79,7 @@ govulncheck: $(GOVULNCHECK)
 helm-lint: $(HELM)
 	$(HELM) lint charts/snapshot/
 
-LINUX_GO_IMAGE ?= golang:1.26.5-bookworm
+LINUX_GO_IMAGE ?= golang:$(GO_VERSION)-bookworm
 
 # Run build/test inside a Linux container to exercise //go:build linux code paths.
 linux-build:
@@ -96,6 +96,7 @@ linux-test:
 
 docker-build-agent:
 	docker buildx build $(DOCKER_BUILD_ARGS) -f agent/Dockerfile \
+	  --build-arg GO_VERSION=$(GO_VERSION) \
 	  --build-context=api=./api --target agent \
 	  $(foreach t,$(TAGS),-t $(REGISTRY)/agent:$(t)) agent/
 
