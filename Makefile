@@ -18,6 +18,8 @@ DOCKER_BUILD_ARGS ?=
 CRD_SRC_DIR   := api/v1alpha1/crds
 CHART_CRD_DIR := charts/snapshot/crds
 
+LINUX_GO_IMAGE ?= golang:$(GO_VERSION)-bookworm
+
 tidy:
 	$(MAKE) -C api tidy
 	$(MAKE) -C agent tidy
@@ -77,8 +79,6 @@ govulncheck: $(GOVULNCHECK)
 
 helm-lint: $(HELM)
 	$(HELM) lint charts/snapshot/
-
-LINUX_GO_IMAGE ?= golang:$(GO_VERSION)-bookworm
 
 # Run build/test inside a Linux container (local dev only; CI runs on Linux natively).
 linux-build:
