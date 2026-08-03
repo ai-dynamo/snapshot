@@ -50,6 +50,11 @@ jobs:
           kubectl get pods -n "${TEST_NAMESPACE}" -o wide
           kubectl get pvc -n "${TEST_NAMESPACE}" -o wide
 
+      - name: Validate prepared e2e environment
+        run: |
+          set -euo pipefail
+          uv run --project e2e pytest e2e/tests -m environment -vv
+
       - name: Debug shell
         if: ${{ always() }}
         uses: mxschmitt/action-tmate@v3
