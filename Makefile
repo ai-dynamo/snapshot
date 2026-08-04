@@ -99,8 +99,7 @@ linux-test:
 	  make -C agent test
 
 # Refresh the agent's base-image package baseline. Run whenever AGENT_BASE_IMAGE
-# moves: the source-collection stage diffs against this file to decide what
-# Snapshot is responsible for shipping source for.
+# changes.
 AGENT_BASE_IMAGE ?= nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04
 
 capture-base-packages:
@@ -110,14 +109,13 @@ capture-base-packages:
 	  '# Captured with:' \
 	  '#   make capture-base-packages' \
 	  '#' \
-	  '# Everything listed here is owned by the NGC base image and NGC provides its' \
-	  '# source. The delta against this file is what Snapshot redistributes on top,' \
-	  '# and is what compliance/collect-sources.sh fetches source for.' \
+	  '# collect-sources.sh diffs the built image against this file to determine' \
+	  '# which packages the image adds, and fetches source for those.' \
 	  '#' \
-	  '# Format: <package>\t<version>\t<source-package>' \
+	  '# Format: <package>\t<version>\t<source-package>\t<source-version>' \
 	  > agent/compliance/base-packages.tsv
 	docker run --rm --platform linux/amd64 --entrypoint dpkg-query $(AGENT_BASE_IMAGE) \
-	  -W -f='$${Package}\t$${Version}\t$${source:Package}\n' | sort \
+	  -W -f='$${Package}\t$${Version}\t$${source:Package}\t$${source:Version}\n' | sort \
 	  >> agent/compliance/base-packages.tsv
 	@echo "baseline: $$(grep -vc '^#' agent/compliance/base-packages.tsv) packages"
 

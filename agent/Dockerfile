@@ -227,7 +227,8 @@ COPY --from=sources /sources /legal/source
 
 # Attribution generated from the delta manifest and the vendored modules.
 COPY compliance/gen-attribution.sh /tmp/gen-attribution.sh
-RUN sh /tmp/gen-attribution.sh /legal/source/dpkg/DELTA.tsv /legal/source/go/vendor /legal/THIRD-PARTY.txt \
+RUN sh /tmp/gen-attribution.sh /legal/source/dpkg/DELTA.tsv /legal/source/go/vendor \
+      /legal/THIRD-PARTY.txt /legal/source/dpkg/SKIPPED.txt \
     && rm -f /tmp/gen-attribution.sh
 
 # Create directories

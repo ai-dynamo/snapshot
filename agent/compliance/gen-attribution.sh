@@ -14,6 +14,7 @@ set -eu
 DELTA=${1:-/sources/dpkg/DELTA.tsv}
 VENDOR=${2:-/sources/go/vendor}
 OUT=${3:-/legal/THIRD-PARTY.txt}
+SKIPPED=${4:-/sources/dpkg/SKIPPED.txt}
 
 mkdir -p "$(dirname "$OUT")"
 
@@ -30,8 +31,9 @@ container image, together with the license text for each component.
 SCOPE: this covers the components this image adds on top of its base image.
 Components belonging to the base image are attributed by that image.
 
-CORRESPONDING SOURCE: upstream source for every component listed below ships
-inside this image under /legal/source/. See /legal/source/README.txt.
+CORRESPONDING SOURCE: upstream source ships inside this image under
+/legal/source/. Components marked [NO SOURCE ARCHIVE] below are the exception
+and are annotated with the reason. See /legal/source/README.txt.
 
 ================================================================================
 HEADER
@@ -41,26 +43,33 @@ HEADER
         echo "SECTION 1 — SYSTEM (DEBIAN/UBUNTU) PACKAGES"
         echo "--------------------------------------------------------------------------------"
         echo
-        while IFS="$(printf '\t')" read -r pkg ver src; do
+        while IFS="$(printf '\t')" read -r pkg ver src srcver; do
             [ -n "$pkg" ] || continue
-            echo "  $pkg ($ver)  [source package: $src]"
+            note=""
+            if [ -f "$SKIPPED" ] && awk -F'\t' -v s="$src" '$1==s{found=1} END{exit !found}' "$SKIPPED"; then
+                note="  [NO SOURCE ARCHIVE: $(awk -F'\t' -v s="$src" '$1==s{print $4; exit}' "$SKIPPED")]"
+            fi
+            echo "  $pkg ($ver)  [source package: $src]$note"
         done < "$DELTA"
 
         echo
         echo "--------------------------------------------------------------------------------"
         echo "FULL LICENSE TEXT — SYSTEM PACKAGES"
         echo "--------------------------------------------------------------------------------"
-        while IFS="$(printf '\t')" read -r pkg ver src; do
+        while IFS="$(printf '\t')" read -r pkg ver src srcver; do
             [ -n "$pkg" ] || continue
             cp_file="/usr/share/doc/$pkg/copyright"
             echo
             echo "================================================================================"
             echo "PACKAGE: $pkg ($ver)"
+            if [ -f "$SKIPPED" ] && awk -F'\t' -v s="$src" '$1==s{found=1} END{exit !found}' "$SKIPPED"; then
+                echo "NO SOURCE ARCHIVE: $(awk -F'\t' -v s="$src" '$1==s{print $4; exit}' "$SKIPPED")"
+            fi
             echo "================================================================================"
             if [ -f "$cp_file" ]; then
                 cat "$cp_file"
             else
-                echo "(copyright file not present; see source package '$src' under /legal/source/)"
+                echo "(no copyright file in this package)"
             fi
         done < "$DELTA"
     fi
