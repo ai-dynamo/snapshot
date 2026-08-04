@@ -105,8 +105,15 @@ linux-test:
 # Refresh the agent's base-image package baseline. Run whenever AGENT_BASE_IMAGE
 # changes.
 
+# Written via a temporary file: a failed docker run would otherwise leave a
+# truncated baseline behind, and the next build would compute its delta against
+# it. LC_ALL=C matches the sort collect-sources.sh uses inside the container, so
+# `comm` sees both sides ordered identically.
 capture-base-packages:
-	@printf '%s\n' \
+	@set -e; \
+	tmp=$$(mktemp); raw=$$(mktemp); \
+	trap 'rm -f "$$tmp" "$$raw"' EXIT; \
+	printf '%s\n' \
 	  '# Baseline dpkg manifest of the agent base image (AGENT_BASE_IMAGE).' \
 	  '#' \
 	  '# Captured with:' \
@@ -116,11 +123,13 @@ capture-base-packages:
 	  '# which packages the image adds, and fetches source for those.' \
 	  '#' \
 	  '# Format: <package>\t<version>\t<source-package>\t<source-version>' \
-	  > agent/compliance/base-packages.tsv
+	  > "$$tmp"; \
 	docker run --rm --platform linux/amd64 --entrypoint dpkg-query "$(AGENT_BASE_IMAGE)" \
-	  -W -f='$${Package}\t$${Version}\t$${source:Package}\t$${source:Version}\n' | sort \
-	  >> agent/compliance/base-packages.tsv
-	@echo "baseline: $$(grep -vc '^#' agent/compliance/base-packages.tsv) packages"
+	  -W -f='$${Package}\t$${Version}\t$${source:Package}\t$${source:Version}\n' > "$$raw"; \
+	test -s "$$raw"; \
+	LC_ALL=C sort "$$raw" >> "$$tmp"; \
+	mv "$$tmp" agent/compliance/base-packages.tsv; \
+	echo "baseline: $$(grep -vc '^#' agent/compliance/base-packages.tsv) packages"
 
 docker-build-agent:
 	docker buildx build $(DOCKER_BUILD_ARGS) -f agent/Dockerfile \

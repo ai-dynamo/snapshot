@@ -35,9 +35,12 @@ apt-get update -qq
 
 # Lines unique to the current manifest: both newly added packages and version
 # upgrades of base packages, since we ship the upgraded version.
-grep -v '^#' "$BASELINE" | sort > /tmp/baseline.sorted
-dpkg-query -W -f="$QUERY" | sort > /tmp/current.sorted
-comm -13 /tmp/baseline.sorted /tmp/current.sorted > /tmp/delta.tsv
+# LC_ALL=C throughout: comm requires both inputs in the same collation, and
+# package names contain '-', '.' and '+', which locale-aware collations order
+# differently from byte order. A mismatch would silently skew the delta.
+grep -v '^#' "$BASELINE" | LC_ALL=C sort > /tmp/baseline.sorted
+dpkg-query -W -f="$QUERY" | LC_ALL=C sort > /tmp/current.sorted
+LC_ALL=C comm -13 /tmp/baseline.sorted /tmp/current.sorted > /tmp/delta.tsv
 
 cp /tmp/delta.tsv "$OUT/DELTA.tsv"
 
