@@ -38,6 +38,17 @@ docker run --rm --platform "$PLATFORM" --entrypoint dpkg-query "$IMAGE" \
 # a base image with no packages.
 test -s "$raw"
 
+# Every row needs all four fields. collect-sources.sh keys source retrieval on
+# the source package and version, and skips rows where they are empty — so a
+# malformed row would drop out of source collection silently, with no fetch and
+# no entry in SKIPPED.txt.
+awk -F'\t' '
+  NF != 4 || $1 == "" || $2 == "" || $3 == "" || $4 == "" {
+    printf "invalid manifest row %d: %s\n", NR, $0 > "/dev/stderr"; bad = 1
+  }
+  END { exit bad ? 1 : 0 }
+' "$raw"
+
 # LC_ALL=C matches the sort collect-sources.sh uses inside the container, so
 # `comm` sees both sides in the same collation.
 LC_ALL=C sort "$raw" >> "$tmp"

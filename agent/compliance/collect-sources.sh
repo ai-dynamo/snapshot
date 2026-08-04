@@ -42,6 +42,16 @@ grep -v '^#' "$BASELINE" | LC_ALL=C sort > /tmp/baseline.sorted
 dpkg-query -W -f="$QUERY" | LC_ALL=C sort > /tmp/current.sorted
 LC_ALL=C comm -13 /tmp/baseline.sorted /tmp/current.sorted > /tmp/delta.tsv
 
+# Source retrieval is keyed on the source package and version below, and rows
+# missing either would be skipped without a fetch or a SKIPPED.txt entry. Fail
+# instead of shipping an image whose source set is quietly incomplete.
+awk -F'\t' '
+  NF != 4 || $1 == "" || $2 == "" || $3 == "" || $4 == "" {
+    printf "invalid delta row %d: %s\n", NR, $0 > "/dev/stderr"; bad = 1
+  }
+  END { exit bad ? 1 : 0 }
+' /tmp/delta.tsv
+
 cp /tmp/delta.tsv "$OUT/DELTA.tsv"
 
 # One row per (source package, source version), keeping a representative binary
