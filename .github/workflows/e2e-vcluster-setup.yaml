@@ -55,16 +55,38 @@ jobs:
         run: |
           echo "kubeconfig=${KUBECONFIG:-}" >> "${GITHUB_OUTPUT}"
 
-      - name: Start debug shell
-        uses: mxschmitt/action-tmate@v3
-        timeout-minutes: 10
-        with:
-          detached: true
-          limit-access-to-actor: true
-
       - name: Install vCluster CLI
         timeout-minutes: 5
         uses: ./.github/actions/install-vcluster-cli
+
+      - name: Cleanup previous e2e namespaces
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+
+          cutoff_epoch="$(date -u -d '2 hours ago' +%s)"
+          kubectl get ns -l snapshot-e2e=true \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.creationTimestamp}{"\n"}{end}' |
+          while IFS=$'\t' read -r namespace created_at; do
+            if [[ -z "${namespace}" ]]; then
+              continue
+            fi
+            if [[ "${namespace}" == "${HOST_NAMESPACE}" ]]; then
+              echo "Keeping current namespace ${namespace}"
+              continue
+            fi
+
+            created_epoch="$(date -u -d "${created_at}" +%s)"
+            if (( created_epoch >= cutoff_epoch )); then
+              echo "Keeping recent namespace ${namespace} created at ${created_at}"
+              continue
+            fi
+
+            echo "Deleting stale Snapshot e2e namespace ${namespace} created at ${created_at}"
+            helm uninstall vcluster-hpm -n "${namespace}" || true
+            vcluster delete "${namespace}" --namespace "${namespace}" || true
+            kubectl delete namespace "${namespace}" --ignore-not-found --wait=false || true
+          done
 
       - name: Install uv
         timeout-minutes: 5
@@ -156,19 +178,13 @@ jobs:
           set -euo pipefail
           uv run --project e2e pytest e2e/tests/test_snapshot_lifecycle.py -vv -s
 
-      - name: Hold debug session
-        if: ${{ always() }}
-        timeout-minutes: 180
-        run: |
-          echo "Detached tmate is active. Holding runner before cleanup."
-          sleep 10800
-
       - name: Cleanup vCluster
         if: ${{ always() }}
         env:
           KUBECONFIG: ${{ steps.host.outputs.kubeconfig }}
         run: |
           set +e
+          helm uninstall vcluster-hpm -n "${HOST_NAMESPACE}"
           if command -v vcluster >/dev/null 2>&1; then
             vcluster delete "${VCLUSTER_NAME}" --namespace "${HOST_NAMESPACE}"
           fi

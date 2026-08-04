@@ -394,8 +394,6 @@ def create_host_namespace(namespace: str) -> None:
         "snapshot-e2e": "true",
         "snapshot.github/run-id": os.environ.get("GITHUB_RUN_ID", "manual"),
         "snapshot.github/run-attempt": os.environ.get("GITHUB_RUN_ATTEMPT", "1"),
-        "nscleanup/enabled": "true",
-        "nscleanup/ttl": "7200",
     }
     ensure_namespace(namespace, labels=labels)
 
