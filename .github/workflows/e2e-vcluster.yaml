@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Snapshot E2E vCluster
+name: E2E Tests
 
 # Temporary PR trigger while the e2e infra is being validated.
 on:
