@@ -117,15 +117,15 @@ capture-base-packages:
 	  '#' \
 	  '# Format: <package>\t<version>\t<source-package>\t<source-version>' \
 	  > agent/compliance/base-packages.tsv
-	docker run --rm --platform linux/amd64 --entrypoint dpkg-query $(AGENT_BASE_IMAGE) \
+	docker run --rm --platform linux/amd64 --entrypoint dpkg-query "$(AGENT_BASE_IMAGE)" \
 	  -W -f='$${Package}\t$${Version}\t$${source:Package}\t$${source:Version}\n' | sort \
 	  >> agent/compliance/base-packages.tsv
 	@echo "baseline: $$(grep -vc '^#' agent/compliance/base-packages.tsv) packages"
 
 docker-build-agent:
 	docker buildx build $(DOCKER_BUILD_ARGS) -f agent/Dockerfile \
-	  --build-arg GO_VERSION=$(GO_VERSION) \
-	  --build-arg AGENT_BASE_IMAGE=$(AGENT_BASE_IMAGE) \
+	  --build-arg "GO_VERSION=$(GO_VERSION)" \
+	  --build-arg "AGENT_BASE_IMAGE=$(AGENT_BASE_IMAGE)" \
 	  --build-context=api=./api --target agent \
 	  $(foreach t,$(TAGS),-t $(REGISTRY)/agent:$(t)) agent/
 
