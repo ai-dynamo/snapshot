@@ -3,19 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Fetches upstream source for every Debian package the agent image adds on top
-# of its NGC base, so the source ships inside the image alongside the binaries.
+# of its base image, so the corresponding source ships with the binaries.
 #
-# OSRB container policy requires source for ALL open-source binaries we
-# redistribute, permissive and copyleft alike — not just the GPL ones — and it
-# must come from an NVIDIA-controlled location. Pointing at Canonical or
-# upstream does not discharge it, which is why the source travels in the image.
-#
-# Base-image packages are excluded: NGC owns those and provides their source.
-# The delta is computed against compliance/base-packages.tsv rather than
-# hardcoded, so adding a package to the Dockerfile automatically pulls its
-# source in too, and a base-image bump surfaces as a delta change.
-#
-# Runs in the `sources` build stage. Expects to be root with apt available.
+# The delta is computed against base-packages.tsv rather than hardcoded, so a
+# package added to the Dockerfile brings its source along automatically.
 
 set -eu
 
@@ -24,9 +15,8 @@ OUT=${2:-/sources/dpkg}
 
 mkdir -p "$OUT"
 
-# Ubuntu 24.04 ships deb822-format sources with `Types: deb` only; apt-get
-# source needs deb-src. The CUDA/NVIDIA repos carry no source and are left
-# alone — they are NVIDIA-proprietary and out of scope for OSS source.
+# apt-get source needs deb-src, which Ubuntu's deb822 sources omit by default.
+# The CUDA/NVIDIA repos publish no source and are left alone.
 for f in /etc/apt/sources.list.d/*.sources; do
     [ -f "$f" ] || continue
     case "$(basename "$f")" in
@@ -40,16 +30,13 @@ fi
 
 apt-get update -qq
 
-# Delta = packages present now but not in the baseline at the same version.
-# comm -13 yields lines unique to the current manifest, which covers both
-# newly added packages and version upgrades of base packages (we ship the
-# upgraded version, so we owe its source).
+# Lines unique to the current manifest: both newly added packages and version
+# upgrades of base packages, since we ship the upgraded version.
 grep -v '^#' "$BASELINE" | sort > /tmp/baseline.sorted
 dpkg-query -W -f='${Package}\t${Version}\t${source:Package}\n' | sort > /tmp/current.sorted
 comm -13 /tmp/baseline.sorted /tmp/current.sorted > /tmp/delta.tsv
 
 cut -f3 /tmp/delta.tsv | sort -u > /tmp/source-packages.txt
-
 cp /tmp/delta.tsv "$OUT/DELTA.tsv"
 
 echo "Source packages to fetch: $(wc -l < /tmp/source-packages.txt)"
@@ -61,29 +48,21 @@ while read -r src; do
     if (cd "$OUT" && apt-get source --only-source --download-only "$src" >/dev/null 2>&1); then
         fetched=$((fetched + 1))
     else
-        # NVIDIA-proprietary packages publish no source. Recorded rather than
-        # failed so an auditor can see exactly what was skipped and why.
         echo "$src" >> "$OUT/SKIPPED.txt"
     fi
 done < /tmp/source-packages.txt
 
 echo "Fetched source for $fetched source package(s)"
-if [ -s "$OUT/SKIPPED.txt" ]; then
-    echo "No public source (expected for NVIDIA-proprietary packages):"
-    sed 's/^/  /' "$OUT/SKIPPED.txt"
-fi
 
-# Fail loudly if an open-source package in the delta yielded no source: that is
-# a compliance gap, not a warning. NVIDIA-owned packages are the only allowed
-# skips and they live in the cuda/nvidia repos.
+# A missing source archive is a packaging bug, not a warning. Only the
+# NVIDIA-proprietary CUDA packages legitimately have none.
 if [ -s "$OUT/SKIPPED.txt" ]; then
+    echo "No public source available for:"
+    sed 's/^/  /' "$OUT/SKIPPED.txt"
     while read -r src; do
         case "$src" in
             cuda*|nvidia*|libcu*|libnv*|libnpp*|tensorrt*|nsight*) continue ;;
-            *)
-                echo "ERROR: no source available for non-NVIDIA package '$src'" >&2
-                exit 1
-                ;;
+            *) echo "ERROR: no source available for '$src'" >&2; exit 1 ;;
         esac
     done < "$OUT/SKIPPED.txt"
 fi

@@ -2,16 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Builds the consolidated third-party attribution file shipped at
-# /legal/THIRD-PARTY.txt.
+# Builds the consolidated third-party attribution file at /legal/THIRD-PARTY.txt
+# from the package delta and the vendored Go modules, so it cannot drift from
+# what is actually installed.
 #
-# Covers everything the image adds on top of its NGC base:
-#   - Debian packages in the delta (full copyright text from the package itself)
-#   - Go modules statically linked into the NVIDIA binaries (LICENSE from vendor)
-#   - CRIU and cuda-checkpoint, whose license texts are copied in separately
-#
-# Base-image components are deliberately excluded and called out as such: they
-# are attributed by the NGC base image, not by us.
+# Components inherited from the base image are attributed by that image and are
+# not repeated here.
 
 set -eu
 
@@ -31,9 +27,8 @@ NVIDIA Dynamo Snapshot
 This file lists third-party open-source software redistributed in this
 container image, together with the license text for each component.
 
-SCOPE: this covers the components this image adds on top of its NVIDIA base
-container. Components belonging to the base image itself are attributed by
-that base image and are not repeated here.
+SCOPE: this covers the components this image adds on top of its base image.
+Components belonging to the base image are attributed by that image.
 
 CORRESPONDING SOURCE: upstream source for every component listed below ships
 inside this image under /legal/source/. See /legal/source/README.txt.
@@ -97,9 +92,8 @@ HEADER
         done
     fi
 
-    # CRIU and cuda-checkpoint license texts are staged into the image by the
-    # Dockerfile; fold them into the consolidated file so /legal/THIRD-PARTY.txt
-    # is genuinely complete rather than pointing elsewhere.
+    # Fold in the license texts the Dockerfile stages separately, so this file
+    # is self-contained.
     for extra in /legal/CRIU/COPYING /legal/cuda-checkpoint/LICENSE; do
         [ -f "$extra" ] || continue
         echo

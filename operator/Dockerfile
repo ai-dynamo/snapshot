@@ -13,12 +13,8 @@ WORKDIR /workspace/operator
 RUN CGO_ENABLED=0 go build -o bin/manager ./cmd/manager
 RUN CGO_ENABLED=0 go build -o bin/crd-installer ./cmd/crdinstaller
 
-# Corresponding source for every Go module compiled into the binaries above.
 # The runtime image is distroless (no shell), so the source tree and the
-# attribution file are both assembled here and copied in ready-made.
-#
-# The operator adds no Debian packages over its base — everything it
-# redistributes on top is Go — so this is the whole of its source obligation.
+# attribution file are assembled here and copied in ready-made.
 FROM builder AS sources
 RUN mkdir -p /sources/go && go mod vendor -o /sources/go/vendor
 COPY operator/compliance/README.source.txt /sources/README.txt

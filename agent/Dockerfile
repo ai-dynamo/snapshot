@@ -80,10 +80,7 @@ ARG TARGETARCH=amd64
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /snapshot-agent ./cmd/agent
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /nsrestore ./cmd/nsrestore
 
-# Corresponding source for every Go module compiled into the two binaries
-# above. `go mod vendor` yields exactly the module set the build used, with
-# each module's LICENSE alongside it, which feeds both the source obligation
-# and the attribution file.
+# Corresponding source for the Go modules compiled into the binaries above.
 RUN mkdir -p /go-src && go mod vendor -o /go-src/vendor
 
 # =============================================================================
@@ -151,18 +148,14 @@ RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \
 
 RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
 
-# Corresponding source for the CRIU we ship, captured at the exact ref this
-# image was built from. CRIU is GPL-2.0 (LGPL-2.1 for lib/), so the source has
-# to travel with the binary; archive.ubuntu.com does not carry this build and
-# the upstream branch moves, so a pointer would not stay valid.
+# CRIU source at the exact ref built from: this is a from-source build, and
+# CRIU_REF may be a moving branch.
 RUN tar -czf /criu-src.tar.gz -C /tmp --exclude-vcs criu
 
 # =============================================================================
-# Stage: Runtime deps - CRIU runtime packages on the base image
+# Stage: Runtime deps - CRIU runtime packages
 #
-# Split out of the agent stage so the `sources` stage below observes exactly
-# the same package set. If these diverged, the collected source would not match
-# the shipped binaries.
+# Shared by the agent and sources stages so both see the same package set.
 # =============================================================================
 FROM ${AGENT_BASE_IMAGE} AS runtime-deps
 
@@ -193,12 +186,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # =============================================================================
 # Stage: Sources - corresponding source for everything added over the base
-#
-# OSRB container policy requires source for ALL open-source binaries we
-# redistribute, not only the copyleft ones, and it must come from an
-# NVIDIA-controlled location — an upstream or Canonical pointer does not
-# discharge it. Shipping it inside the image satisfies that without an
-# external hosting dependency.
 # =============================================================================
 FROM runtime-deps AS sources
 
@@ -236,12 +223,9 @@ RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-help
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
 COPY --from=builder /nsrestore /usr/local/bin/nsrestore
 
-# Corresponding source for every third-party component added over the base.
 COPY --from=sources /sources /legal/source
 
-# Consolidated attribution for the same set. Generated from the delta manifest
-# and the vendored Go modules rather than hand-maintained, so it cannot drift
-# from what is actually installed.
+# Attribution generated from the delta manifest and the vendored modules.
 COPY compliance/gen-attribution.sh /tmp/gen-attribution.sh
 RUN sh /tmp/gen-attribution.sh /legal/source/dpkg/DELTA.tsv /legal/source/go/vendor /legal/THIRD-PARTY.txt \
     && rm -f /tmp/gen-attribution.sh
