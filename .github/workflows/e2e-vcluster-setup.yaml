@@ -3,10 +3,15 @@
 
 name: Snapshot E2E vCluster Setup
 
-# Manual only while the e2e infra is still being validated. Add pull_request,
-# schedule, or other automated triggers when the full e2e flow is ready.
+# Temporary PR trigger while the e2e infra is being validated.
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/e2e-vcluster-setup.yaml"
+      - ".github/actions/setup-snapshot-e2e-vcluster/**"
+      - "e2e/**"
+      - "charts/snapshot/**"
 
 concurrency:
   group: snapshot-e2e-vcluster-${{ github.run_id }}-${{ github.run_attempt }}
