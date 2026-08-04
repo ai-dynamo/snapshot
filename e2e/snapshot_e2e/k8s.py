@@ -70,23 +70,23 @@ def snapshot_custom_resource_api_is_accessible(namespace: str) -> None:
     )
 
 
-def list_snapshot_deployments(
-    namespace: str,
-    release: str,
-    component: str,
-) -> list[client.V1Deployment]:
-    return client.AppsV1Api().list_namespaced_deployment(
-        namespace=namespace,
-        label_selector=snapshot_selector(release, component),
-    ).items
-
-
 def list_snapshot_daemonsets(
     namespace: str,
     release: str,
     component: str,
 ) -> list[client.V1DaemonSet]:
     return client.AppsV1Api().list_namespaced_daemon_set(
+        namespace=namespace,
+        label_selector=snapshot_selector(release, component),
+    ).items
+
+
+def list_snapshot_pods(
+    namespace: str,
+    release: str,
+    component: str,
+) -> list[client.V1Pod]:
+    return client.CoreV1Api().list_namespaced_pod(
         namespace=namespace,
         label_selector=snapshot_selector(release, component),
     ).items
@@ -102,14 +102,21 @@ def snapshot_selector(release: str, component: str) -> str:
     )
 
 
-def deployment_available(deployment: client.V1Deployment) -> bool:
-    desired = deployment.spec.replicas or 1
-    status = deployment.status
-    observed = status.observed_generation or 0
-    generation = deployment.metadata.generation or 0
-    available = status.available_replicas or 0
-    updated = status.updated_replicas or 0
-    return observed >= generation and available >= desired and updated >= desired
+def pod_containers_ready(pod: client.V1Pod) -> bool:
+    statuses = list(pod.status.container_statuses or [])
+    return bool(statuses) and all(status.ready for status in statuses)
+
+
+def pod_readiness_detail(pod: client.V1Pod) -> str:
+    statuses = [
+        f"{status.name}:{status.ready}"
+        for status in pod.status.container_statuses or []
+    ]
+    return (
+        f"{pod.metadata.name} phase={pod.status.phase} "
+        f"node={pod.spec.node_name or '<none>'} "
+        f"containers={','.join(statuses) or '<none>'}"
+    )
 
 
 def daemonset_ready(daemonset: client.V1DaemonSet) -> bool:

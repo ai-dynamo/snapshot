@@ -103,24 +103,14 @@ def pod_logs(namespace: str, name: str, *, tail_lines: int = 120) -> str:
 def wait_for_pod_ready(namespace: str, name: str, timeout: int = 600) -> client.V1Pod:
     def ready() -> client.V1Pod | None:
         pod = read_pod(namespace, name)
-        for condition in pod.status.conditions or []:
-            if condition.type == "Ready" and condition.status == "True":
-                return pod
-        return None
+        return pod if k8s.pod_containers_ready(pod) else None
 
     def detail() -> str:
         try:
             pod = read_pod(namespace, name)
         except ApiException as exc:
             return f"api_error={k8s.api_error_detail(exc)}"
-        statuses = [
-            f"{status.name}:{status.ready}"
-            for status in pod.status.container_statuses or []
-        ]
-        return (
-            f"phase={pod.status.phase} node={pod.spec.node_name or '<none>'} "
-            f"containers={','.join(statuses) or '<none>'}"
-        )
+        return k8s.pod_readiness_detail(pod)
 
     return wait_for(f"pod {namespace}/{name} Ready", ready, timeout, detail=detail)
 

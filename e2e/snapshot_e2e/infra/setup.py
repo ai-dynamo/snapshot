@@ -720,7 +720,7 @@ def wait_for_snapshot_readiness(
             "app.kubernetes.io/component=snapshot-agent",
         ]
     )
-    wait_for_deployment_rollout_by_selector(
+    wait_for_pods_ready(
         namespace=namespace,
         label_selector=operator_selector,
         timeout_seconds=timeout_seconds,
@@ -758,32 +758,6 @@ def wait_for_pods_ready(
         time.sleep(5)
     print_pods(namespace, label_selector)
     raise SetupError(f"timed out waiting for {description}; last state: {last_detail}")
-
-
-def wait_for_deployment_rollout_by_selector(
-    *,
-    namespace: str,
-    label_selector: str,
-    timeout_seconds: int,
-    description: str,
-) -> None:
-    api = client.AppsV1Api()
-    deadline = time.monotonic() + timeout_seconds
-    last_report = 0.0
-    last_detail = "not checked"
-    while time.monotonic() < deadline:
-        deployments = api.list_namespaced_deployment(
-            namespace=namespace, label_selector=label_selector
-        ).items
-        last_detail = deployment_progress(deployments)
-        if deployments and all(deployment_available(item) for item in deployments):
-            log(f"{description} deployment ready: {last_detail}")
-            return
-        last_report = progress(f"{description} deployment", last_detail, last_report)
-        time.sleep(5)
-    raise SetupError(
-        f"timed out waiting for {description} deployment; last state: {last_detail}"
-    )
 
 
 def wait_for_daemonset_rollout_by_selector(
@@ -853,16 +827,6 @@ def wait_for_daemonset_rollout(
     )
 
 
-def deployment_available(deployment: client.V1Deployment) -> bool:
-    desired = deployment.spec.replicas or 1
-    status = deployment.status
-    observed = status.observed_generation or 0
-    generation = deployment.metadata.generation or 0
-    available = status.available_replicas or 0
-    updated = status.updated_replicas or 0
-    return observed >= generation and available >= desired and updated >= desired
-
-
 def daemonset_ready(daemonset: client.V1DaemonSet) -> bool:
     status = daemonset.status
     desired = status.desired_number_scheduled or 0
@@ -900,26 +864,6 @@ def pod_progress(pods: list[client.V1Pod]) -> str:
     return "; ".join(details)
 
 
-def deployment_progress(deployments: list[client.V1Deployment]) -> str:
-    if not deployments:
-        return "no deployments found"
-    return "; ".join(deployment_detail(item) for item in deployments)
-
-
-def deployment_detail(deployment: client.V1Deployment) -> str:
-    desired = deployment.spec.replicas or 1
-    status = deployment.status
-    observed = status.observed_generation or 0
-    generation = deployment.metadata.generation or 0
-    available = status.available_replicas or 0
-    updated = status.updated_replicas or 0
-    return (
-        f"{deployment.metadata.name} desired={desired} available={available} "
-        f"updated={updated} observed={observed} generation={generation} "
-        f"ready={deployment_available(deployment)}"
-    )
-
-
 def daemonset_progress(daemonsets: list[client.V1DaemonSet]) -> str:
     if not daemonsets:
         return "no daemonsets found"
@@ -940,6 +884,10 @@ def daemonset_detail(daemonset: client.V1DaemonSet) -> str:
 
 
 def pod_ready(pod: client.V1Pod) -> bool:
+    statuses = list(pod.status.container_statuses or [])
+    if statuses:
+        return all(status.ready for status in statuses)
+
     for condition in pod.status.conditions or []:
         if condition.type == "Ready":
             return condition.status == "True"

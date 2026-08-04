@@ -45,13 +45,18 @@ def test_snapshot_e2e_environment_is_ready() -> None:
         )
     assert pvc.status.phase != "Lost"
 
-    operators = k8s.list_snapshot_deployments(
+    operators = k8s.list_snapshot_pods(
         config.namespace,
         config.release,
         "operator",
     )
-    assert operators, "Snapshot operator deployment was not found"
-    assert all(k8s.deployment_available(deployment) for deployment in operators)
+    assert operators, "Snapshot operator pod was not found"
+    not_ready = [
+        k8s.pod_readiness_detail(pod)
+        for pod in operators
+        if not k8s.pod_containers_ready(pod)
+    ]
+    assert not not_ready, "Snapshot operator pod is not ready: " + "; ".join(not_ready)
 
     agents = k8s.list_snapshot_daemonsets(
         config.namespace,
