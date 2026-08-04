@@ -17,6 +17,11 @@ DOCKER_BUILD_ARGS ?=
 # committed package baseline would describe a different image than we build on.
 AGENT_BASE_IMAGE ?= $(shell sed -n 's/^ARG AGENT_BASE_IMAGE=//p' agent/Dockerfile)
 
+# The agent is x86_64-only (cuda-checkpoint ships no other arch) and the package
+# baseline is captured for this platform, so pin it rather than inheriting
+# whatever the buildx builder defaults to.
+AGENT_PLATFORM ?= linux/amd64
+
 .PHONY: tidy generate test build lint verify-generate verify-crds check fmt add-license-headers \
         verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator capture-base-packages verify-base-packages \
         linux-build linux-test
@@ -106,7 +111,7 @@ linux-test:
 # Refresh the agent's base-image package baseline. Run whenever AGENT_BASE_IMAGE
 # changes; verify-base-packages fails the agent build if you forget.
 capture-base-packages:
-	@sh hack/capture-base-packages.sh "$(AGENT_BASE_IMAGE)" agent/compliance/base-packages.tsv
+	@sh hack/capture-base-packages.sh "$(AGENT_BASE_IMAGE)" agent/compliance/base-packages.tsv "$(AGENT_PLATFORM)"
 	@echo "baseline: $$(grep -vc '^#' agent/compliance/base-packages.tsv) packages"
 
 # The source delta is computed against the committed baseline, so a base-image
@@ -116,12 +121,12 @@ capture-base-packages:
 verify-base-packages:
 	@set -e; \
 	tmp=$$(mktemp); trap 'rm -f "$$tmp"' EXIT; \
-	sh hack/capture-base-packages.sh "$(AGENT_BASE_IMAGE)" "$$tmp"; \
+	sh hack/capture-base-packages.sh "$(AGENT_BASE_IMAGE)" "$$tmp" "$(AGENT_PLATFORM)"; \
 	diff -u agent/compliance/base-packages.tsv "$$tmp" || \
 	  (echo "ERROR: agent/compliance/base-packages.tsv is stale for $(AGENT_BASE_IMAGE) — run 'make capture-base-packages' and commit"; exit 1)
 
 docker-build-agent: verify-base-packages
-	docker buildx build $(DOCKER_BUILD_ARGS) -f agent/Dockerfile \
+	docker buildx build $(DOCKER_BUILD_ARGS) --platform "$(AGENT_PLATFORM)" -f agent/Dockerfile \
 	  --build-arg "GO_VERSION=$(GO_VERSION)" \
 	  --build-arg "AGENT_BASE_IMAGE=$(AGENT_BASE_IMAGE)" \
 	  --build-context=api=./api --build-context=compliance=./hack/compliance \

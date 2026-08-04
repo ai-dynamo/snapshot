@@ -79,9 +79,16 @@ spec:
       initContainers:
         # Deploy seccomp profile to host before starting the agent
         # This profile blocks io_uring syscalls that CRIU doesn't support
+        {{- $initImage := .Values.daemonset.initContainer.image | default "busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0" }}
         - name: deploy-seccomp
-          image: {{ .Values.daemonset.initContainer.image | default "busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0" }}
-          imagePullPolicy: {{ .Values.daemonset.initContainer.imagePullPolicy }}
+          image: {{ $initImage }}
+          # A digest cannot move, so re-pulling it every start is wasted work;
+          # anything else can, so keep pulling.
+          imagePullPolicy: {{ .Values.daemonset.initContainer.imagePullPolicy | default (contains "@sha256:" $initImage | ternary "IfNotPresent" "Always") }}
+          {{- with .Values.daemonset.initContainer.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           command:
             - sh
             - -c

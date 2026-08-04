@@ -140,7 +140,20 @@ daemonset:
     # the one image the chart pulls that NVIDIA does not build, and a mutable
     # tag would let its contents change under an unchanged chart version.
     image: busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
-    imagePullPolicy: IfNotPresent
+    # Left empty so the template derives it: IfNotPresent for a digest-pinned
+    # image, Always otherwise. Overriding `image` with a mutable tag therefore
+    # keeps pulling, instead of silently reusing a stale cached layer.
+    imagePullPolicy: ""
+    # The agent's resources do not cover this container. Defaults are small: it
+    # copies one file and exits, but a namespace with a ResourceQuota that
+    # requires limits would reject the pod without them.
+    resources:
+      limits:
+        cpu: 100m
+        memory: 64Mi
+      requests:
+        cpu: 10m
+        memory: 16Mi
 
 # Seccomp profile configuration
 # CRIU can't checkpoint io_uring; this gates the block-iouring ConfigMap and

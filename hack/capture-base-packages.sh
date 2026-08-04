@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Writes the package manifest of the agent base image to <output>.
+# Writes the package manifest of the agent base image to <output>, for the
+# platform the agent is built for.
 #
 # Shared by `make capture-base-packages` (writes the committed baseline) and
 # `make verify-base-packages` (writes a temporary copy to diff against it), so
@@ -12,6 +13,7 @@ set -eu
 
 IMAGE=${1:?usage: capture-base-packages.sh <image> <output>}
 OUT=${2:?usage: capture-base-packages.sh <image> <output>}
+PLATFORM=${3:-linux/amd64}
 
 tmp=$(mktemp)
 raw=$(mktemp)
@@ -29,7 +31,7 @@ printf '%s\n' \
   '# Format: <package>\t<version>\t<source-package>\t<source-version>' \
   > "$tmp"
 
-docker run --rm --platform linux/amd64 --entrypoint dpkg-query "$IMAGE" \
+docker run --rm --platform "$PLATFORM" --entrypoint dpkg-query "$IMAGE" \
   -W -f='${Package}\t${Version}\t${source:Package}\t${source:Version}\n' > "$raw"
 
 # A failed docker run must not produce an empty manifest that later looks like
