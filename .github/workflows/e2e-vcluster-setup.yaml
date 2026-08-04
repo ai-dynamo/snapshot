@@ -42,7 +42,7 @@ jobs:
       SNAPSHOT_E2E_VCLUSTER_LOCAL_PORT: "8443"
       SNAPSHOT_E2E_HELM_TIMEOUT: 10m
       SNAPSHOT_E2E_READY_TIMEOUT_SECONDS: "900"
-      SNAPSHOT_E2E_RESULT_FILE: ${{ runner.temp }}/snapshot-e2e-setup-result.json
+      SNAPSHOT_E2E_RESULT_FILE: ${{ github.workspace }}/.snapshot-e2e-setup-result.json
       PYTHONUNBUFFERED: "1"
       UV_LINK_MODE: copy
     steps:
