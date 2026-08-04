@@ -80,6 +80,12 @@ ARG TARGETARCH=amd64
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /snapshot-agent ./cmd/agent
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /nsrestore ./cmd/nsrestore
 
+# Corresponding source for every Go module compiled into the two binaries
+# above. `go mod vendor` yields exactly the module set the build used, with
+# each module's LICENSE alongside it, which feeds both the source obligation
+# and the attribution file.
+RUN mkdir -p /go-src && go mod vendor -o /go-src/vendor
+
 # =============================================================================
 # Stage: CUDA checkpoint helper builder
 # =============================================================================
@@ -145,10 +151,20 @@ RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \
 
 RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
 
+# Corresponding source for the CRIU we ship, captured at the exact ref this
+# image was built from. CRIU is GPL-2.0 (LGPL-2.1 for lib/), so the source has
+# to travel with the binary; archive.ubuntu.com does not carry this build and
+# the upstream branch moves, so a pointer would not stay valid.
+RUN tar -czf /criu-src.tar.gz -C /tmp --exclude-vcs criu
+
 # =============================================================================
-# Stage: Agent - Final snapshot-agent image
+# Stage: Runtime deps - CRIU runtime packages on the base image
+#
+# Split out of the agent stage so the `sources` stage below observes exactly
+# the same package set. If these diverged, the collected source would not match
+# the shipped binaries.
 # =============================================================================
-FROM ${AGENT_BASE_IMAGE} AS agent
+FROM ${AGENT_BASE_IMAGE} AS runtime-deps
 
 ARG TARGETARCH=amd64
 
@@ -175,6 +191,36 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     util-linux \
     && rm -rf /var/lib/apt/lists/*
 
+# =============================================================================
+# Stage: Sources - corresponding source for everything added over the base
+#
+# OSRB container policy requires source for ALL open-source binaries we
+# redistribute, not only the copyleft ones, and it must come from an
+# NVIDIA-controlled location — an upstream or Canonical pointer does not
+# discharge it. Shipping it inside the image satisfies that without an
+# external hosting dependency.
+# =============================================================================
+FROM runtime-deps AS sources
+
+COPY compliance/base-packages.tsv /tmp/base-packages.tsv
+COPY compliance/collect-sources.sh /tmp/collect-sources.sh
+
+# Debian/Ubuntu source for the delta against the NGC base image.
+RUN sh /tmp/collect-sources.sh /tmp/base-packages.tsv /sources/dpkg
+
+# CRIU source, at the exact ref this image was built from.
+COPY --from=criu-builder /criu-src.tar.gz /sources/criu/criu-src.tar.gz
+
+# Go module source for the statically linked binaries.
+COPY --from=builder /go-src/vendor /sources/go/vendor
+
+COPY compliance/README.source.txt /sources/README.txt
+
+# =============================================================================
+# Stage: Agent - Final snapshot-agent image
+# =============================================================================
+FROM runtime-deps AS agent
+
 # Copy CRIU from builder
 COPY --from=criu-builder /criu-install/usr/local /usr/local
 COPY --from=criu-builder /tmp/criu/COPYING /legal/CRIU/COPYING
@@ -189,6 +235,16 @@ RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-help
 # Copy the built binaries
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
 COPY --from=builder /nsrestore /usr/local/bin/nsrestore
+
+# Corresponding source for every third-party component added over the base.
+COPY --from=sources /sources /legal/source
+
+# Consolidated attribution for the same set. Generated from the delta manifest
+# and the vendored Go modules rather than hand-maintained, so it cannot drift
+# from what is actually installed.
+COPY compliance/gen-attribution.sh /tmp/gen-attribution.sh
+RUN sh /tmp/gen-attribution.sh /legal/source/dpkg/DELTA.tsv /legal/source/go/vendor /legal/THIRD-PARTY.txt \
+    && rm -f /tmp/gen-attribution.sh
 
 # Create directories
 RUN mkdir -p /checkpoints /var/run/snapshot

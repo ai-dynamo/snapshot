@@ -13,9 +13,23 @@ WORKDIR /workspace/operator
 RUN CGO_ENABLED=0 go build -o bin/manager ./cmd/manager
 RUN CGO_ENABLED=0 go build -o bin/crd-installer ./cmd/crdinstaller
 
+# Corresponding source for every Go module compiled into the binaries above.
+# The runtime image is distroless (no shell), so the source tree and the
+# attribution file are both assembled here and copied in ready-made.
+#
+# The operator adds no Debian packages over its base — everything it
+# redistributes on top is Go — so this is the whole of its source obligation.
+FROM builder AS sources
+RUN mkdir -p /sources/go && go mod vendor -o /sources/go/vendor
+COPY operator/compliance/README.source.txt /sources/README.txt
+COPY operator/compliance/gen-attribution.sh /tmp/gen-attribution.sh
+RUN sh /tmp/gen-attribution.sh /sources/go/vendor /legal/THIRD-PARTY.txt
+
 FROM nvcr.io/nvidia/distroless/go:v4.0.8@sha256:938bd28ce4ddb800118a951774203e7563c2067a72b20ae6b85d2c7da165a178
 COPY --from=builder /workspace/operator/bin/manager /manager
 COPY --from=builder /workspace/operator/bin/crd-installer /crd-installer
+COPY --from=sources /sources /legal/source
+COPY --from=sources /legal/THIRD-PARTY.txt /legal/THIRD-PARTY.txt
 # The gcr.io distroless :nonroot tag set this implicitly; nvcr.io's does not.
 USER 65532:65532
 ENTRYPOINT ["/manager"]
