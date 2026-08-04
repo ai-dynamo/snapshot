@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Any
 
 from kubernetes import client
 from kubernetes.client import ApiException
+from kubernetes.stream import stream
 
 from snapshot_e2e.infra.preflight import load_config
 
@@ -53,6 +55,52 @@ def read_crd(name: str) -> client.V1CustomResourceDefinition:
 
 def list_events(namespace: str) -> list[client.CoreV1Event]:
     return client.CoreV1Api().list_namespaced_event(namespace).items
+
+
+def create_pod(body: dict[str, Any]) -> client.V1Pod:
+    return client.CoreV1Api().create_namespaced_pod(
+        namespace=body["metadata"]["namespace"],
+        body=body,
+    )
+
+
+def read_pod(namespace: str, name: str) -> client.V1Pod:
+    return client.CoreV1Api().read_namespaced_pod(name=name, namespace=namespace)
+
+
+def delete_pod(namespace: str, name: str) -> bool:
+    try:
+        client.CoreV1Api().delete_namespaced_pod(name=name, namespace=namespace)
+        return True
+    except ApiException as exc:
+        if exc.status == 404:
+            return False
+        raise
+
+
+def pod_logs(namespace: str, name: str, *, tail_lines: int = 120) -> str:
+    try:
+        return client.CoreV1Api().read_namespaced_pod_log(
+            name=name,
+            namespace=namespace,
+            tail_lines=tail_lines,
+            _preload_content=True,
+        )
+    except ApiException as exc:
+        return f"<logs unavailable: {api_error_detail(exc)}>"
+
+
+def exec_command(namespace: str, pod: str, command: str) -> str:
+    return stream(
+        client.CoreV1Api().connect_get_namespaced_pod_exec,
+        pod,
+        namespace,
+        command=["/bin/bash", "-lc", command],
+        stderr=True,
+        stdin=False,
+        stdout=True,
+        tty=False,
+    )
 
 
 def snapshot_custom_resource_api_is_accessible(namespace: str) -> None:

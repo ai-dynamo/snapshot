@@ -28,7 +28,7 @@ jobs:
   e2e:
     name: Run Snapshot e2e tests in vCluster
     runs-on: prod-deploy-tester-v1
-    timeout-minutes: 240
+    timeout-minutes: 60
     env:
       HOST_NAMESPACE: snapshot-e2e-${{ github.run_id }}-${{ github.run_attempt }}
       VCLUSTER_NAME: snapshot-e2e-${{ github.run_id }}-${{ github.run_attempt }}
@@ -43,8 +43,8 @@ jobs:
       SNAPSHOT_E2E_MODE: vcluster
       SNAPSHOT_E2E_VCLUSTER_K8S_VERSION: v1.32.13
       SNAPSHOT_E2E_VCLUSTER_LOCAL_PORT: "8443"
-      SNAPSHOT_E2E_HELM_TIMEOUT: 10m
-      SNAPSHOT_E2E_READY_TIMEOUT_SECONDS: "900"
+      SNAPSHOT_E2E_HELM_TIMEOUT: 6m
+      SNAPSHOT_E2E_READY_TIMEOUT_SECONDS: "480"
       SNAPSHOT_E2E_RESULT_FILE: ${{ github.workspace }}/.snapshot-e2e-setup-result.json
       PYTHONUNBUFFERED: "1"
       UV_LINK_MODE: copy
@@ -60,11 +60,11 @@ jobs:
           echo "kubeconfig=${KUBECONFIG:-}" >> "${GITHUB_OUTPUT}"
 
       - name: Install vCluster CLI
-        timeout-minutes: 5
+        timeout-minutes: 3
         uses: ./.github/actions/install-vcluster-cli
 
       - name: Cleanup stale e2e namespaces
-        timeout-minutes: 15
+        timeout-minutes: 5
         run: |
           set -euo pipefail
 
@@ -93,7 +93,7 @@ jobs:
           done
 
       - name: Install Python tooling
-        timeout-minutes: 5
+        timeout-minutes: 3
         run: |
           echo "::group::Install uv"
           set -euo pipefail
@@ -111,7 +111,7 @@ jobs:
           echo "::endgroup::"
 
       - name: Resolve Snapshot image tag
-        timeout-minutes: 5
+        timeout-minutes: 3
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -164,35 +164,35 @@ jobs:
           PY
 
       - name: Validate host GPU cluster
-        timeout-minutes: 5
+        timeout-minutes: 3
         run: |
           set -euo pipefail
           uv run --project e2e python -m snapshot_e2e.infra.setup \
             --phase host-preflight
 
       - name: Create vCluster target
-        timeout-minutes: 25
+        timeout-minutes: 12
         run: |
           set -euo pipefail
           uv run --project e2e python -m snapshot_e2e.infra.setup \
             --phase vcluster
 
       - name: Install Snapshot in vCluster
-        timeout-minutes: 15
+        timeout-minutes: 8
         run: |
           set -euo pipefail
           uv run --project e2e python -m snapshot_e2e.infra.setup \
             --phase snapshot-install
 
       - name: Wait for Snapshot components
-        timeout-minutes: 20
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           uv run --project e2e python -m snapshot_e2e.infra.setup \
             --phase snapshot-ready
 
       - name: Export vCluster kubeconfig
-        timeout-minutes: 5
+        timeout-minutes: 3
         run: |
           set -euo pipefail
           uv run --project e2e python - <<'PY'
@@ -215,7 +215,7 @@ jobs:
           PY
 
       - name: Inspect vCluster target
-        timeout-minutes: 5
+        timeout-minutes: 3
         run: |
           set -euo pipefail
           kubectl get nodes -o wide
@@ -224,13 +224,13 @@ jobs:
           kubectl get pvc -n "${TEST_NAMESPACE}" -o wide
 
       - name: Run environment validation
-        timeout-minutes: 10
+        timeout-minutes: 5
         run: |
           set -euo pipefail
           uv run --project e2e pytest e2e/tests -m environment -vv
 
       - name: Run snapshot lifecycle tests
-        timeout-minutes: 90
+        timeout-minutes: 35
         run: |
           set -euo pipefail
           uv run --project e2e pytest e2e/tests/test_snapshot_lifecycle.py -vv -s

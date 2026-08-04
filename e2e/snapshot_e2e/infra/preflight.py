@@ -141,6 +141,7 @@ def load_config(kubeconfig: str | None, context: str | None) -> None:
 
 
 def check_runtime_class(runtime_class: str) -> CheckResult:
+    """Verify the host cluster exposes the GPU RuntimeClass used by test pods."""
     try:
         client.NodeV1Api().read_runtime_class(runtime_class)
     except ApiException as exc:
@@ -157,6 +158,7 @@ def check_runtime_class(runtime_class: str) -> CheckResult:
 
 
 def check_gpu_operator(namespace: str, min_version: Version) -> CheckResult:
+    """Verify GPU Operator pods exist, are not obviously failing, and report a new enough Helm chart version."""
     try:
         pods = client.CoreV1Api().list_namespaced_pod(namespace=namespace).items
     except ApiException as exc:
@@ -240,6 +242,7 @@ def check_gpu_nodes(
     min_cuda_driver_major: int,
     required_labels: dict[str, str],
 ) -> CheckResult:
+    """Find usable GPU nodes by node labels, schedulability, Ready state, and CUDA driver major version."""
     try:
         nodes = client.CoreV1Api().list_node().items
     except ApiException as exc:

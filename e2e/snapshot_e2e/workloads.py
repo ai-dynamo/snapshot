@@ -234,6 +234,8 @@ sleep infinity
 """
 
 
+# CPU_SOURCE proves ordinary process state and filesystem state survive restore:
+# it writes a marker file, then keeps appending an incrementing counter.
 CPU_SOURCE = f"""
 echo cpu-state > /tmp/cpu-marker
 echo ready > {SOURCE_READY}
@@ -246,6 +248,9 @@ done
 """
 
 
+# CUDA_SOURCE mirrors the same counter in CPU memory, /tmp/tick.log, and CUDA
+# device memory. After restore, the loop fails if restored GPU memory no longer
+# matches the restored CPU counter.
 CUDA_SOURCE = f"""
 cat >/tmp/cuda_hold.c <<'C_EOF'
 #include <dlfcn.h>
@@ -262,7 +267,9 @@ int main(void) {{
   CUresult (*cuDeviceGet)(CUdevice *, int) = dlsym(cuda, "cuDeviceGet");
   CUresult (*cuCtxCreate)(CUcontext *, unsigned int, CUdevice) = dlsym(cuda, "cuCtxCreate_v2");
   CUresult (*cuMemAlloc)(CUdeviceptr *, size_t) = dlsym(cuda, "cuMemAlloc_v2");
-  if (!cuInit || !cuDeviceGet || !cuCtxCreate || !cuMemAlloc) {{
+  CUresult (*cuMemcpyHtoD)(CUdeviceptr, const void *, size_t) = dlsym(cuda, "cuMemcpyHtoD_v2");
+  CUresult (*cuMemcpyDtoH)(void *, CUdeviceptr, size_t) = dlsym(cuda, "cuMemcpyDtoH_v2");
+  if (!cuInit || !cuDeviceGet || !cuCtxCreate || !cuMemAlloc || !cuMemcpyHtoD || !cuMemcpyDtoH) {{
     fprintf(stderr, "missing CUDA driver symbol\\n");
     return 1;
   }}
@@ -274,14 +281,36 @@ int main(void) {{
     fprintf(stderr, "CUDA setup failed\\n");
     return 1;
   }}
+  int tick = 0;
+  int gpu_tick = tick;
+  if (cuMemcpyHtoD(ptr, &gpu_tick, sizeof(gpu_tick)) != 0) {{
+    fprintf(stderr, "initial CUDA counter copy failed\\n");
+    return 1;
+  }}
   FILE *gpu = fopen("/tmp/gpu-marker", "w");
-  if (gpu) {{ fprintf(gpu, "cuda-allocation-ready\\n"); fclose(gpu); }}
+  if (gpu) {{ fprintf(gpu, "cuda-counter-ready\\n"); fclose(gpu); }}
   FILE *ready = fopen("{SOURCE_READY}", "w");
   if (ready) {{ fprintf(ready, "ready\\n"); fclose(ready); }}
-  int tick = 0;
   while (1) {{
+    gpu_tick = -1;
+    if (cuMemcpyDtoH(&gpu_tick, ptr, sizeof(gpu_tick)) != 0) {{
+      fprintf(stderr, "CUDA counter read failed\\n");
+      return 2;
+    }}
+    if (gpu_tick != tick) {{
+      FILE *error = fopen("/tmp/gpu-marker", "a");
+      if (error) {{ fprintf(error, "counter-mismatch cpu=%d gpu=%d\\n", tick, gpu_tick); fclose(error); }}
+      fprintf(stderr, "CUDA counter mismatch: cpu=%d gpu=%d\\n", tick, gpu_tick);
+      return 2;
+    }}
     FILE *log = fopen("/tmp/tick.log", "a");
-    if (log) {{ fprintf(log, "tick %d\\n", tick++); fclose(log); }}
+    if (log) {{ fprintf(log, "tick %d\\n", tick); fclose(log); }}
+    tick++;
+    gpu_tick = tick;
+    if (cuMemcpyHtoD(ptr, &gpu_tick, sizeof(gpu_tick)) != 0) {{
+      fprintf(stderr, "CUDA counter write failed\\n");
+      return 2;
+    }}
     sleep(5);
   }}
 }}

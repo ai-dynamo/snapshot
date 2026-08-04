@@ -62,12 +62,12 @@ def test_successful_restore_recovers_cpu_gpu_and_fs_from_snapshot(
     run: snap.TestRun,
 ) -> None:
     try:
-        _, source_node = create_valid_gpu_checkpoint(config, run)
+        _, source_node, checkpoint_tick = create_valid_gpu_checkpoint(config, run)
 
-        snap.delete_pod(config.namespace, run.source_pod)
+        k8s.delete_pod(config.namespace, run.source_pod)
         snap.wait_for_pod_deleted(config.namespace, run.source_pod)
 
-        snap.create_pod(
+        k8s.create_pod(
             snap.restore_pod(
                 config=config,
                 run=run,
@@ -80,22 +80,26 @@ def test_successful_restore_recovers_cpu_gpu_and_fs_from_snapshot(
         )
         snap.wait_for_pod_ready(config.namespace, run.restore_pod, timeout=300)
 
-        output = snap.exec_command(
+        output = k8s.exec_command(
             config.namespace,
             run.restore_pod,
-            """
+            f"""
             set -euo pipefail
             test -f /snapshot-control/restore-complete
             test -f /tmp/snapshot-fs-marker
             test -s /tmp/gpu-marker
-            before=$(awk '/^tick / {n=$2} END {print n+0}' /tmp/tick.log)
+            expected={checkpoint_tick}
+            before=$(awk '/^tick / {{n=$2}} END {{print n+0}}' /tmp/tick.log)
             sleep 12
-            after=$(awk '/^tick / {n=$2} END {print n+0}' /tmp/tick.log)
-            echo "tick_before=$before tick_after=$after"
+            after=$(awk '/^tick / {{n=$2}} END {{print n+0}}' /tmp/tick.log)
+            echo "tick_expected=$expected tick_before=$before tick_after=$after"
+            test "$before" -ge "$expected"
             test "$after" -gt "$before"
             """,
         )
-        assert "tick_before=" in output
+        # before >= checkpoint_tick proves the restored filesystem/process state
+        # did not restart from an empty counter; after > before proves it resumed.
+        assert "tick_expected=" in output
         assert_restore_events(
             config.namespace,
             run.restore_pod,
@@ -149,11 +153,11 @@ def test_failed_restore_gpu_checkpoint_into_non_gpu_target(
     run: snap.TestRun,
 ) -> None:
     try:
-        _, source_node = create_valid_gpu_checkpoint(config, run)
-        snap.delete_pod(config.namespace, run.source_pod)
+        _, source_node, _ = create_valid_gpu_checkpoint(config, run)
+        k8s.delete_pod(config.namespace, run.source_pod)
         snap.wait_for_pod_deleted(config.namespace, run.source_pod)
 
-        snap.create_pod(
+        k8s.create_pod(
             snap.restore_pod(
                 config=config,
                 run=run,
@@ -179,14 +183,19 @@ def test_failed_restore_gpu_checkpoint_into_non_gpu_target(
 def create_valid_gpu_checkpoint(
     config: k8s.E2EConfig,
     run: snap.TestRun,
-) -> tuple[object, str]:
+) -> tuple[object, str, int]:
     source, source_node = create_ready_source(config, run, gpu=True)
+    checkpoint_tick = snap.wait_for_tick_at_least(
+        config.namespace,
+        run.source_pod,
+        minimum=2,
+    )
     snap.create_podsnapshot(
         config.namespace, run.snapshot_name, run.source_pod, source.metadata.uid
     )
     pod_snapshot, content = snap.wait_for_snapshot_ready(config.namespace, run.snapshot_name)
     assert_podsnapshot_ready(pod_snapshot, content, source, source_node)
-    return source, source_node
+    return source, source_node, checkpoint_tick
 
 
 def create_ready_source(
@@ -196,7 +205,7 @@ def create_ready_source(
     gpu: bool,
     include_target_annotation: bool = True,
 ) -> tuple[object, str]:
-    snap.create_pod(
+    k8s.create_pod(
         snap.source_pod(
             config=config,
             run=run,

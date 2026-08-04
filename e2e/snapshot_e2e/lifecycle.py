@@ -10,7 +10,6 @@ from typing import Any, Callable
 
 from kubernetes import client
 from kubernetes.client import ApiException
-from kubernetes.stream import stream
 
 from snapshot_e2e import k8s
 from snapshot_e2e.workloads import CHECKPOINT_DIR
@@ -27,27 +26,10 @@ PODSNAPSHOTCONTENTS = "podsnapshotcontents"
 PROGRESS_INTERVAL_SECONDS = 30
 
 
-def create_pod(body: dict[str, Any]) -> client.V1Pod:
-    return client.CoreV1Api().create_namespaced_pod(
-        namespace=body["metadata"]["namespace"],
-        body=body,
-    )
-
-
-def delete_pod(namespace: str, name: str) -> bool:
-    try:
-        client.CoreV1Api().delete_namespaced_pod(name=name, namespace=namespace)
-        return True
-    except ApiException as exc:
-        if exc.status == 404:
-            return False
-        raise
-
-
 def wait_for_pod_deleted(namespace: str, name: str, timeout: int = 180) -> None:
     def gone() -> bool:
         try:
-            read_pod(namespace, name)
+            k8s.read_pod(namespace, name)
         except ApiException as exc:
             if exc.status == 404:
                 return True
@@ -56,7 +38,7 @@ def wait_for_pod_deleted(namespace: str, name: str, timeout: int = 180) -> None:
 
     def detail() -> str:
         try:
-            pod = read_pod(namespace, name)
+            pod = k8s.read_pod(namespace, name)
         except ApiException as exc:
             return f"api_error={k8s.api_error_detail(exc)}"
         return f"phase={pod.status.phase} node={pod.spec.node_name or '<none>'}"
@@ -85,30 +67,14 @@ def create_podsnapshot(
     )
 
 
-def read_pod(namespace: str, name: str) -> client.V1Pod:
-    return client.CoreV1Api().read_namespaced_pod(name=name, namespace=namespace)
-
-
-def pod_logs(namespace: str, name: str, *, tail_lines: int = 120) -> str:
-    try:
-        return client.CoreV1Api().read_namespaced_pod_log(
-            name=name,
-            namespace=namespace,
-            tail_lines=tail_lines,
-            _preload_content=True,
-        )
-    except ApiException as exc:
-        return f"<logs unavailable: {k8s.api_error_detail(exc)}>"
-
-
 def wait_for_pod_ready(namespace: str, name: str, timeout: int = 600) -> client.V1Pod:
     def ready() -> client.V1Pod | None:
-        pod = read_pod(namespace, name)
+        pod = k8s.read_pod(namespace, name)
         return pod if k8s.pod_containers_ready(pod) else None
 
     def detail() -> str:
         try:
-            pod = read_pod(namespace, name)
+            pod = k8s.read_pod(namespace, name)
         except ApiException as exc:
             return f"api_error={k8s.api_error_detail(exc)}"
         return k8s.pod_readiness_detail(pod)
@@ -119,12 +85,40 @@ def wait_for_pod_ready(namespace: str, name: str, timeout: int = 600) -> client.
 def wait_for_file(namespace: str, pod: str, path: str, timeout: int = 180) -> None:
     def exists() -> bool:
         try:
-            response = exec_command(namespace, pod, f"test -f {path}")
+            response = k8s.exec_command(namespace, pod, f"test -f {path}")
             return response == "" or response is None
         except Exception:
             return False
 
     wait_for(f"{namespace}/{pod}:{path}", exists, timeout)
+
+
+def last_tick(namespace: str, pod: str) -> int:
+    output = k8s.exec_command(
+        namespace,
+        pod,
+        "test -f /tmp/tick.log || { echo 0; exit 0; }; "
+        "awk '/^tick / {n=$2} END {print n+0}' /tmp/tick.log",
+    )
+    return int(output.strip() or "0")
+
+
+def wait_for_tick_at_least(
+    namespace: str,
+    pod: str,
+    minimum: int,
+    timeout: int = 180,
+) -> int:
+    def check() -> int | None:
+        tick = last_tick(namespace, pod)
+        return tick if tick >= minimum else None
+
+    return wait_for(
+        f"{namespace}/{pod} tick >= {minimum}",
+        check,
+        timeout,
+        detail=lambda: f"last_tick={last_tick(namespace, pod)}",
+    )
 
 
 def wait_for_snapshot_ready(
@@ -239,7 +233,7 @@ def wait_for_restore_status(
     key = "nvidia.com/snapshot-restore-status.main"
 
     def check() -> client.V1Pod | None:
-        pod = read_pod(namespace, pod_name)
+        pod = k8s.read_pod(namespace, pod_name)
         actual = (pod.metadata.annotations or {}).get(key)
         if actual == status:
             return pod
@@ -249,7 +243,7 @@ def wait_for_restore_status(
 
     def detail() -> str:
         try:
-            pod = read_pod(namespace, pod_name)
+            pod = k8s.read_pod(namespace, pod_name)
         except ApiException as exc:
             return f"api_error={k8s.api_error_detail(exc)}"
         actual = (pod.metadata.annotations or {}).get(key, "<unset>")
@@ -264,7 +258,7 @@ def wait_for_restore_status(
 
 
 def checkpoint_artifact_manifest(namespace: str, pod: str, checkpoint_id: str) -> str:
-    return exec_command(
+    return k8s.exec_command(
         namespace,
         pod,
         f"cat {CHECKPOINT_DIR}/{checkpoint_id}/versions/1/manifest.yaml",
@@ -272,27 +266,13 @@ def checkpoint_artifact_manifest(namespace: str, pod: str, checkpoint_id: str) -
 
 
 def checkpoint_artifact_listing(namespace: str, pod: str, checkpoint_id: str) -> str:
-    return exec_command(
+    return k8s.exec_command(
         namespace,
         pod,
         f"cd {CHECKPOINT_DIR}/{checkpoint_id}/versions/1 && "
         "find . -maxdepth 1 -type f -print | sort && "
         "tar -tf rootfs-diff.tar | sort",
     )
-
-
-def exec_command(namespace: str, pod: str, command: str) -> str:
-    return stream(
-        client.CoreV1Api().connect_get_namespaced_pod_exec,
-        pod,
-        namespace,
-        command=["/bin/bash", "-lc", command],
-        stderr=True,
-        stdin=False,
-        stdout=True,
-        tty=False,
-    )
-
 
 def debug_dump(config: k8s.E2EConfig, run: TestRun) -> None:
     print("\n--- snapshot e2e debug ---")
@@ -304,7 +284,7 @@ def debug_dump(config: k8s.E2EConfig, run: TestRun) -> None:
     for pod in pods:
         print(f"pod {pod.metadata.name} phase={pod.status.phase} node={pod.spec.node_name}")
         print(f"annotations={pod.metadata.annotations or {}}")
-        print(pod_logs(config.namespace, pod.metadata.name, tail_lines=80))
+        print(k8s.pod_logs(config.namespace, pod.metadata.name, tail_lines=80))
     print_custom_objects(config, run)
     print_snapshot_controller_logs(config)
     events = core.list_namespaced_event(config.namespace).items
@@ -346,13 +326,13 @@ def print_snapshot_controller_logs(config: k8s.E2EConfig) -> None:
         return
     for pod in pods[:8]:
         print(f"snapshot pod {pod.metadata.name} phase={pod.status.phase}")
-        print(pod_logs(config.namespace, pod.metadata.name, tail_lines=50))
+        print(k8s.pod_logs(config.namespace, pod.metadata.name, tail_lines=50))
 
 
 def cleanup(config: k8s.E2EConfig, run: TestRun) -> None:
     api = client.CustomObjectsApi()
     for pod_name in (run.restore_pod, run.source_pod):
-        if delete_pod(config.namespace, pod_name):
+        if k8s.delete_pod(config.namespace, pod_name):
             try:
                 wait_for_pod_deleted(config.namespace, pod_name)
             except AssertionError as exc:

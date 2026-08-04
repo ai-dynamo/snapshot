@@ -19,6 +19,19 @@ there, runs the environment check, then runs the snapshot lifecycle tests.
 The workflow resolves the latest published Snapshot operator/agent image tag and
 passes it through `SNAPSHOT_E2E_SNAPSHOT_TAG`.
 
+## Restore Verification
+
+The success tests use a small long-running source process instead of a one-shot
+command. Before taking the snapshot, the test waits until the source has appended
+at least a few `tick N` lines to `/tmp/tick.log`. After restore, it checks that
+the restored tick value is at least the pre-snapshot value, then waits and checks
+that the counter continues to increase.
+
+The GPU variant uses the same counter logic and also mirrors the next tick value
+inside CUDA device memory. The restored process reads the CUDA value on each loop
+and exits if it no longer matches the restored CPU-side counter, so a successful
+post-restore counter advance also exercises CUDA memory restore.
+
 ## Local Direct Mode
 
 Use direct mode when `KUBECONFIG` already points at the cluster where Snapshot

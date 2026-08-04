@@ -48,12 +48,17 @@ class SetupError(RuntimeError):
 
 @dataclass(frozen=True)
 class SetupResult:
+    """Setup outputs consumed by the workflow and local commands.
+
+    target_kubeconfig is always the kubeconfig tests should use. In direct mode
+    it points at the original cluster; in vCluster mode it points at the vCluster.
+    """
+
     mode: str
     host_namespace: str
     vcluster_name: str
     test_namespace: str
     target_kubeconfig: str
-    vcluster_kubeconfig: str
     snapshot_release: str
     pvc_name: str
 
@@ -64,7 +69,6 @@ class SetupContext:
     host_namespace: str
     vcluster_name: str
     target_kubeconfig_value: str
-    vcluster_kubeconfig_value: str
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -213,6 +217,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def setup_context(args: argparse.Namespace) -> SetupContext:
+    """Resolve run-scoped names and kubeconfig paths before any cluster mutation."""
     workspace = Path(args.workspace).resolve()
     run_id = os.environ.get("GITHUB_RUN_ID", "manual")
     run_attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "1")
@@ -226,17 +231,14 @@ def setup_context(args: argparse.Namespace) -> SetupContext:
             args.target_kubeconfig or workspace / ".kubeconfig-snapshot-e2e"
         ).resolve()
         target_kubeconfig_value = str(target_kubeconfig)
-        vcluster_kubeconfig_value = str(target_kubeconfig)
     else:
         target_kubeconfig_value = args.target_kubeconfig or args.kubeconfig or ""
-        vcluster_kubeconfig_value = ""
 
     return SetupContext(
         workspace=workspace,
         host_namespace=host_namespace,
         vcluster_name=vcluster_name,
         target_kubeconfig_value=target_kubeconfig_value,
-        vcluster_kubeconfig_value=vcluster_kubeconfig_value,
     )
 
 
@@ -280,6 +282,7 @@ def setup_host_preflight(args: argparse.Namespace) -> None:
 
 
 def setup_vcluster(args: argparse.Namespace, context: SetupContext) -> None:
+    """Create the virtual test cluster and write the kubeconfig used by later phases."""
     log("Loading host kubeconfig")
     preflight.load_config(args.kubeconfig, args.context)
     target_kubeconfig = Path(context.target_kubeconfig_value)
@@ -341,7 +344,6 @@ def setup_result(args: argparse.Namespace, context: SetupContext) -> SetupResult
         vcluster_name=context.vcluster_name if args.mode == "vcluster" else "",
         test_namespace=args.test_namespace,
         target_kubeconfig=context.target_kubeconfig_value,
-        vcluster_kubeconfig=context.vcluster_kubeconfig_value,
         snapshot_release=args.snapshot_release,
         pvc_name=args.pvc_name,
     )
@@ -500,6 +502,11 @@ def create_vcluster(namespace: str, name: str, k8s_version: str) -> None:
 
 
 def install_hostpath_mapper(namespace: str, vcluster_name: str, helm_timeout: str) -> None:
+    """Install HostPath Mapper so vCluster hostPath volumes map to real host paths.
+
+    Snapshot agents mount kubelet/containerd host paths; without this mapper,
+    vCluster rewrites those paths under /tmp/vcluster and the DaemonSet cannot start.
+    """
     log(f"Installing vCluster HostPath Mapper in {namespace}")
     values = {
         "nodeSelector": {
@@ -551,6 +558,7 @@ def connect_vcluster(
     local_port: int,
     workspace: Path,
 ) -> None:
+    """Create a local API tunnel and render a kubeconfig that points at the vCluster."""
     log(f"Connecting to vCluster {host_namespace}/{vcluster_name}")
     target_kubeconfig.parent.mkdir(parents=True, exist_ok=True)
 
