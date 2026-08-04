@@ -39,6 +39,13 @@ jobs:
         run: |
           echo "kubeconfig=${KUBECONFIG:-}" >> "${GITHUB_OUTPUT}"
 
+      - name: Start debug shell
+        uses: mxschmitt/action-tmate@v3
+        timeout-minutes: 10
+        with:
+          detached: true
+          limit-access-to-actor: true
+
       - name: Setup Snapshot e2e vCluster
         id: setup
         uses: ./.github/actions/setup-snapshot-e2e-vcluster
@@ -60,7 +67,7 @@ jobs:
           set -euo pipefail
           uv run --project e2e pytest e2e/tests -m environment -vv
 
-      - name: Debug shell
+      - name: Debug shell after setup
         if: ${{ always() }}
         uses: mxschmitt/action-tmate@v3
         timeout-minutes: 180
