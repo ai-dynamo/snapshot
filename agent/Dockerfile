@@ -3,10 +3,14 @@
 #
 # Unified Dockerfile for snapshot-agent and placeholder images.
 #
-# Build targets (the `api` build context is required — the agent module depends on the
-# api module via `replace => ../api`):
-#   docker build --platform linux/amd64 --target agent --build-context api=../api -t snapshot-agent:latest .
-#   docker build --platform linux/amd64 --target placeholder --build-context api=../api --build-arg BASE_IMAGE=<app-image> -t placeholder:latest .
+# Build targets. Two named build contexts are required for the agent: `api`
+# (the agent module depends on it via `replace => ../api`) and `compliance`
+# (attribution helpers shared with the operator image):
+#   docker build --platform linux/amd64 --target agent \
+#     --build-context api=../api --build-context compliance=../hack/compliance \
+#     -t snapshot-agent:latest .
+#   docker build --platform linux/amd64 --target placeholder --build-context api=../api \
+#     --build-arg BASE_IMAGE=<app-image> -t placeholder:latest .
 #
 # Optional targets for CI:
 #   docker build --target linter --build-context api=../api .   # Run linting
@@ -227,8 +231,9 @@ COPY --from=sources /sources /legal/source
 
 # Attribution generated from the delta manifest and the vendored modules.
 COPY compliance/gen-attribution.sh /tmp/gen-attribution.sh
+COPY --from=compliance go-licenses.sh /tmp/go-licenses.sh
 RUN sh /tmp/gen-attribution.sh /legal/source/dpkg/DELTA.tsv /legal/source/go/vendor \
-      /legal/THIRD-PARTY.txt /legal/source/dpkg/SKIPPED.txt \
+      /legal/THIRD-PARTY.txt /legal/source/dpkg/SKIPPED.txt /tmp/go-licenses.sh \
     && rm -f /tmp/gen-attribution.sh
 
 # Create directories

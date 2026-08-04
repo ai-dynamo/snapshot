@@ -15,6 +15,7 @@ DELTA=${1:-/sources/dpkg/DELTA.tsv}
 VENDOR=${2:-/sources/go/vendor}
 OUT=${3:-/legal/THIRD-PARTY.txt}
 SKIPPED=${4:-/sources/dpkg/SKIPPED.txt}
+GO_LICENSES=${5:-/tmp/go-licenses.sh}
 
 mkdir -p "$(dirname "$OUT")"
 
@@ -40,7 +41,7 @@ HEADER
 
     if [ -f "$DELTA" ]; then
         echo
-        echo "SECTION 1 — SYSTEM (DEBIAN/UBUNTU) PACKAGES"
+        echo "SYSTEM (DEBIAN/UBUNTU) PACKAGES"
         echo "--------------------------------------------------------------------------------"
         echo
         while IFS="$(printf '\t')" read -r pkg ver src srcver; do
@@ -74,32 +75,7 @@ HEADER
         done < "$DELTA"
     fi
 
-    if [ -d "$VENDOR" ]; then
-        echo
-        echo "================================================================================"
-        echo "SECTION 2 — GO MODULES (STATICALLY LINKED)"
-        echo "--------------------------------------------------------------------------------"
-        echo
-        # vendor/modules.txt lists the exact module set and versions the build used.
-        if [ -f "$VENDOR/modules.txt" ]; then
-            grep '^# ' "$VENDOR/modules.txt" | sed 's/^# /  /'
-        fi
-
-        echo
-        echo "--------------------------------------------------------------------------------"
-        echo "FULL LICENSE TEXT — GO MODULES"
-        echo "--------------------------------------------------------------------------------"
-        find "$VENDOR" -type f \
-            \( -iname 'LICENSE*' -o -iname 'LICENCE*' -o -iname 'COPYING*' -o -iname 'NOTICE*' \) \
-            | sort | while read -r lf; do
-            mod=$(dirname "${lf#"$VENDOR"/}")
-            echo
-            echo "================================================================================"
-            echo "MODULE: $mod  ($(basename "$lf"))"
-            echo "================================================================================"
-            cat "$lf"
-        done
-    fi
+    sh "$GO_LICENSES" "$VENDOR"
 
     # Fold in the license texts the Dockerfile stages separately, so this file
     # is self-contained.

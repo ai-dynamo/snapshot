@@ -11,6 +11,7 @@ set -eu
 
 VENDOR=${1:-/sources/go/vendor}
 OUT=${2:-/legal/THIRD-PARTY.txt}
+GO_LICENSES=${3:-/tmp/go-licenses.sh}
 
 mkdir -p "$(dirname "$OUT")"
 
@@ -33,29 +34,9 @@ inside this image under /legal/source/. See /legal/source/README.txt.
 
 ================================================================================
 
-SECTION 1 — GO MODULES (STATICALLY LINKED)
---------------------------------------------------------------------------------
-
 HEADER
 
-    if [ -f "$VENDOR/modules.txt" ]; then
-        grep '^# ' "$VENDOR/modules.txt" | sed 's/^# /  /'
-    fi
-
-    echo
-    echo "--------------------------------------------------------------------------------"
-    echo "FULL LICENSE TEXT"
-    echo "--------------------------------------------------------------------------------"
-    find "$VENDOR" -type f \
-        \( -iname 'LICENSE*' -o -iname 'LICENCE*' -o -iname 'COPYING*' -o -iname 'NOTICE*' \) \
-        | sort | while read -r lf; do
-        mod=$(dirname "${lf#"$VENDOR"/}")
-        echo
-        echo "================================================================================"
-        echo "MODULE: $mod  ($(basename "$lf"))"
-        echo "================================================================================"
-        cat "$lf"
-    done
+    sh "$GO_LICENSES" "$VENDOR"
 } > "$OUT"
 
 echo "Wrote $OUT ($(wc -l < "$OUT") lines)"

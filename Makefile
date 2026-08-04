@@ -12,12 +12,13 @@ VERSION           ?= latest
 TAGS              ?= $(VERSION)
 DOCKER_BUILD_ARGS ?=
 
-# Base image for the agent. Pinned by digest so the package baseline captured by
-# capture-base-packages always describes the image docker-build-agent builds on.
-AGENT_BASE_IMAGE ?= nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04@sha256:8315e2455736c4f9b597f15c5fb4d31f834e798e0c6b66bbdbdbac491ce26bd1
+# Base image for the agent, read from the Dockerfile so the digest lives in one
+# place. capture-base-packages and docker-build-agent must agree on it, or the
+# committed package baseline would describe a different image than we build on.
+AGENT_BASE_IMAGE ?= $(shell sed -n 's/^ARG AGENT_BASE_IMAGE=//p' agent/Dockerfile)
 
 .PHONY: tidy generate test build lint verify-generate verify-crds check fmt add-license-headers \
-        verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator capture-base-packages \
+        verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator capture-base-packages verify-base-packages \
         linux-build linux-test
 
 CRD_SRC_DIR   := api/v1alpha1/crds
@@ -103,39 +104,28 @@ linux-test:
 	  make -C agent test
 
 # Refresh the agent's base-image package baseline. Run whenever AGENT_BASE_IMAGE
-# changes.
-
-# Written via a temporary file: a failed docker run would otherwise leave a
-# truncated baseline behind, and the next build would compute its delta against
-# it. LC_ALL=C matches the sort collect-sources.sh uses inside the container, so
-# `comm` sees both sides ordered identically.
+# changes; verify-base-packages fails the agent build if you forget.
 capture-base-packages:
-	@set -e; \
-	tmp=$$(mktemp); raw=$$(mktemp); \
-	trap 'rm -f "$$tmp" "$$raw"' EXIT; \
-	printf '%s\n' \
-	  '# Baseline dpkg manifest of the agent base image (AGENT_BASE_IMAGE).' \
-	  '#' \
-	  '# Captured with:' \
-	  '#   make capture-base-packages' \
-	  '#' \
-	  '# collect-sources.sh diffs the built image against this file to determine' \
-	  '# which packages the image adds, and fetches source for those.' \
-	  '#' \
-	  '# Format: <package>\t<version>\t<source-package>\t<source-version>' \
-	  > "$$tmp"; \
-	docker run --rm --platform linux/amd64 --entrypoint dpkg-query "$(AGENT_BASE_IMAGE)" \
-	  -W -f='$${Package}\t$${Version}\t$${source:Package}\t$${source:Version}\n' > "$$raw"; \
-	test -s "$$raw"; \
-	LC_ALL=C sort "$$raw" >> "$$tmp"; \
-	mv "$$tmp" agent/compliance/base-packages.tsv; \
-	echo "baseline: $$(grep -vc '^#' agent/compliance/base-packages.tsv) packages"
+	@sh hack/capture-base-packages.sh "$(AGENT_BASE_IMAGE)" agent/compliance/base-packages.tsv
+	@echo "baseline: $$(grep -vc '^#' agent/compliance/base-packages.tsv) packages"
 
-docker-build-agent:
+# The source delta is computed against the committed baseline, so a base-image
+# bump without a re-capture would silently skew it: packages the new base added
+# would look like ours, and packages it dropped would vanish from the delta. The
+# build would still succeed, with wrong compliance content. Fail instead.
+verify-base-packages:
+	@set -e; \
+	tmp=$$(mktemp); trap 'rm -f "$$tmp"' EXIT; \
+	sh hack/capture-base-packages.sh "$(AGENT_BASE_IMAGE)" "$$tmp"; \
+	diff -u agent/compliance/base-packages.tsv "$$tmp" || \
+	  (echo "ERROR: agent/compliance/base-packages.tsv is stale for $(AGENT_BASE_IMAGE) — run 'make capture-base-packages' and commit"; exit 1)
+
+docker-build-agent: verify-base-packages
 	docker buildx build $(DOCKER_BUILD_ARGS) -f agent/Dockerfile \
 	  --build-arg "GO_VERSION=$(GO_VERSION)" \
 	  --build-arg "AGENT_BASE_IMAGE=$(AGENT_BASE_IMAGE)" \
-	  --build-context=api=./api --target agent \
+	  --build-context=api=./api --build-context=compliance=./hack/compliance \
+	  --target agent \
 	  $(foreach t,$(TAGS),-t $(REGISTRY)/agent:$(t)) agent/
 
 docker-build-operator:

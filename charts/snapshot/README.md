@@ -201,7 +201,7 @@ Materials this chart causes to be retrieved:
 |---|---|---|---|
 | Snapshot operator | `ghcr.io/ai-dynamo/snapshot/operator` | Apache-2.0 (NVIDIA) | GHCR |
 | Snapshot agent | `ghcr.io/ai-dynamo/snapshot/agent` | Apache-2.0 (NVIDIA) | GHCR |
-| busybox init container | `busybox:latest` | GPL-2.0 | Docker Hub |
+| busybox init container | `busybox:1.37.0` (digest-pinned) | GPL-2.0 | Docker Hub |
 
 Third-party attribution and corresponding source for the two NVIDIA images are
 shipped inside those images, at `/legal/THIRD-PARTY.txt` and `/legal/source/`.

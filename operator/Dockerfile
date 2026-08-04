@@ -19,7 +19,8 @@ FROM builder AS sources
 RUN mkdir -p /sources/go && go mod vendor -o /sources/go/vendor
 COPY operator/compliance/README.source.txt /sources/README.txt
 COPY operator/compliance/gen-attribution.sh /tmp/gen-attribution.sh
-RUN sh /tmp/gen-attribution.sh /sources/go/vendor /legal/THIRD-PARTY.txt
+COPY hack/compliance/go-licenses.sh /tmp/go-licenses.sh
+RUN sh /tmp/gen-attribution.sh /sources/go/vendor /legal/THIRD-PARTY.txt /tmp/go-licenses.sh
 
 FROM nvcr.io/nvidia/distroless/go:v4.0.8@sha256:938bd28ce4ddb800118a951774203e7563c2067a72b20ae6b85d2c7da165a178
 COPY --from=builder /workspace/operator/bin/manager /manager

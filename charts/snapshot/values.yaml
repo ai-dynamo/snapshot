@@ -136,9 +136,11 @@ daemonset:
 
   # Init container configuration
   initContainer:
-    # Busybox image for seccomp profile deployment
-    image: busybox:latest
-    imagePullPolicy: Always
+    # Busybox image for seccomp profile deployment. Pinned by digest: this is
+    # the one image the chart pulls that NVIDIA does not build, and a mutable
+    # tag would let its contents change under an unchanged chart version.
+    image: busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
+    imagePullPolicy: IfNotPresent
 
 # Seccomp profile configuration
 # CRIU can't checkpoint io_uring; this gates the block-iouring ConfigMap and
