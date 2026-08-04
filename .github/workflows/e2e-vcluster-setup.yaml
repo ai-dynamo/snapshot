@@ -29,6 +29,12 @@ jobs:
       HOST_NAMESPACE: snapshot-e2e-${{ github.run_id }}-${{ github.run_attempt }}
       VCLUSTER_NAME: snapshot-e2e-${{ github.run_id }}-${{ github.run_attempt }}
       TEST_NAMESPACE: snapshot-e2e
+      SNAPSHOT_E2E_HOST_NAMESPACE: snapshot-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+      SNAPSHOT_E2E_VCLUSTER_NAME: snapshot-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+      SNAPSHOT_E2E_TEST_NAMESPACE: snapshot-e2e
+      SNAPSHOT_E2E_TARGET_KUBECONFIG: ${{ github.workspace }}/.kubeconfig-snapshot-e2e
+      SNAPSHOT_E2E_SNAPSHOT_RELEASE: snapshot
+      SNAPSHOT_E2E_PVC_NAME: snapshot-pvc
     steps:
       - uses: actions/checkout@v7
         with:
