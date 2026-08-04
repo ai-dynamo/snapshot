@@ -46,8 +46,8 @@ HEADER
         while IFS="$(printf '\t')" read -r pkg ver src srcver; do
             [ -n "$pkg" ] || continue
             note=""
-            if [ -f "$SKIPPED" ] && awk -F'\t' -v s="$src" '$1==s{found=1} END{exit !found}' "$SKIPPED"; then
-                note="  [NO SOURCE ARCHIVE: $(awk -F'\t' -v s="$src" '$1==s{print $4; exit}' "$SKIPPED")]"
+            if [ -f "$SKIPPED" ] && awk -F'\t' -v s="$src" -v v="$srcver" '$1==s && $2==v{found=1} END{exit !found}' "$SKIPPED"; then
+                note="  [NO SOURCE ARCHIVE: $(awk -F'\t' -v s="$src" -v v="$srcver" '$1==s && $2==v{print $4; exit}' "$SKIPPED")]"
             fi
             echo "  $pkg ($ver)  [source package: $src]$note"
         done < "$DELTA"
@@ -62,8 +62,8 @@ HEADER
             echo
             echo "================================================================================"
             echo "PACKAGE: $pkg ($ver)"
-            if [ -f "$SKIPPED" ] && awk -F'\t' -v s="$src" '$1==s{found=1} END{exit !found}' "$SKIPPED"; then
-                echo "NO SOURCE ARCHIVE: $(awk -F'\t' -v s="$src" '$1==s{print $4; exit}' "$SKIPPED")"
+            if [ -f "$SKIPPED" ] && awk -F'\t' -v s="$src" -v v="$srcver" '$1==s && $2==v{found=1} END{exit !found}' "$SKIPPED"; then
+                echo "NO SOURCE ARCHIVE: $(awk -F'\t' -v s="$src" -v v="$srcver" '$1==s && $2==v{print $4; exit}' "$SKIPPED")"
             fi
             echo "================================================================================"
             if [ -f "$cp_file" ]; then
