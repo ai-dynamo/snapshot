@@ -73,6 +73,11 @@ jobs:
           set -euo pipefail
           uv run --project e2e pytest e2e/tests -m environment -vv
 
+      - name: Run Snapshot lifecycle e2e tests
+        run: |
+          set -euo pipefail
+          uv run --project e2e pytest e2e/tests/test_snapshot_lifecycle.py -vv -s
+
       - name: Hold debug session
         if: ${{ always() }}
         timeout-minutes: 180
