@@ -150,11 +150,18 @@ def test_failed_restore_gpu_checkpoint_into_non_gpu_target(
     test_run: snap.TestRun,
 ) -> None:
     try:
-        create_valid_gpu_checkpoint(e2e_config, test_run)
+        _, source_node = create_valid_gpu_checkpoint(e2e_config, test_run)
         snap.delete_pod(e2e_config.namespace, test_run.source_pod)
         snap.wait_for_pod_deleted(e2e_config.namespace, test_run.source_pod)
 
-        snap.create_pod(snap.restore_pod(config=e2e_config, run=test_run, gpu=False))
+        snap.create_pod(
+            snap.restore_pod(
+                config=e2e_config,
+                run=test_run,
+                gpu=False,
+                source_node=source_node,
+            )
+        )
         snap.wait_for_restore_status(e2e_config.namespace, test_run.restore_pod, "failed")
 
         pod_snapshot, content = snap.wait_for_snapshot_ready(

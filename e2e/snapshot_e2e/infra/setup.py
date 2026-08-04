@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 from kubernetes import client
@@ -38,6 +38,7 @@ DEFAULT_VCLUSTER_K8S_VERSION = "v1.32.13"
 DEFAULT_VCLUSTER_LOCAL_PORT = 8443
 DEFAULT_HELM_TIMEOUT = "10m"
 DEFAULT_READY_TIMEOUT_SECONDS = 900
+PROGRESS_INTERVAL_SECONDS = 30
 
 SNAPSHOT_LABEL = "app.kubernetes.io/name=snapshot"
 
@@ -58,29 +59,57 @@ class SetupResult:
     pvc_name: str
 
 
+@dataclass(frozen=True)
+class SetupContext:
+    workspace: Path
+    host_namespace: str
+    vcluster_name: str
+    target_kubeconfig_value: str
+    vcluster_kubeconfig_value: str
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        result = setup(args)
+        result = setup(args) if args.phase == "all" else setup_phase(args)
     except SetupError as exc:
         print(f"ERROR {exc}", file=sys.stderr)
         return 1
 
+    if result is None:
+        return 0
+
+    write_setup_result(args, result)
+    return 0
+
+
+def write_setup_result(args: argparse.Namespace, result: SetupResult) -> None:
     result_data = asdict(result)
     if args.result_file:
         result_path = Path(args.result_file)
         result_path.parent.mkdir(parents=True, exist_ok=True)
         result_path.write_text(json.dumps(result_data, indent=2) + "\n", encoding="utf-8")
 
-    print("\nSnapshot e2e setup result:")
+    log("Snapshot e2e setup result:")
     for key, value in result_data.items():
-        print(f"  {key}: {value}")
-    return 0
+        log(f"  {key}: {value}")
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Prepare a Snapshot e2e target cluster."
+    )
+    parser.add_argument(
+        "--phase",
+        choices=(
+            "all",
+            "host-preflight",
+            "vcluster",
+            "snapshot-install",
+            "snapshot-ready",
+        ),
+        default=os.environ.get("SNAPSHOT_E2E_SETUP_PHASE", "all"),
+        help="Run one setup phase. Default: all.",
     )
     parser.add_argument(
         "--mode",
@@ -184,7 +213,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def setup(args: argparse.Namespace) -> SetupResult:
+def setup_context(args: argparse.Namespace) -> SetupContext:
     workspace = Path(args.workspace).resolve()
     run_id = os.environ.get("GITHUB_RUN_ID", "manual")
     run_attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "1")
@@ -193,35 +222,92 @@ def setup(args: argparse.Namespace) -> SetupResult:
     host_namespace = args.host_namespace or default_run_name
     vcluster_name = args.vcluster_name or host_namespace
 
-    print("Loading host kubeconfig")
-    preflight.load_config(args.kubeconfig, args.context)
-    if not args.skip_host_preflight:
-        run_host_preflight()
-
     if args.mode == "vcluster":
         target_kubeconfig = Path(
             args.target_kubeconfig or workspace / ".kubeconfig-snapshot-e2e"
         ).resolve()
-        create_host_namespace(host_namespace)
-        ensure_vcluster_unused(host_namespace, vcluster_name)
-        create_vcluster(host_namespace, vcluster_name, args.vcluster_k8s_version)
-        install_hostpath_mapper(host_namespace, vcluster_name, args.helm_timeout)
-        connect_vcluster(
-            host_namespace=host_namespace,
-            vcluster_name=vcluster_name,
-            target_kubeconfig=target_kubeconfig,
-            local_port=args.vcluster_local_port,
-            workspace=workspace,
-        )
         target_kubeconfig_value = str(target_kubeconfig)
         vcluster_kubeconfig_value = str(target_kubeconfig)
     else:
         target_kubeconfig_value = args.target_kubeconfig or args.kubeconfig or ""
         vcluster_kubeconfig_value = ""
 
-    print("Loading target kubeconfig")
-    preflight.load_config(target_kubeconfig_value or None, None)
+    return SetupContext(
+        workspace=workspace,
+        host_namespace=host_namespace,
+        vcluster_name=vcluster_name,
+        target_kubeconfig_value=target_kubeconfig_value,
+        vcluster_kubeconfig_value=vcluster_kubeconfig_value,
+    )
 
+
+def setup(args: argparse.Namespace) -> SetupResult:
+    context = setup_context(args)
+
+    run_timed("host preflight", lambda: setup_host_preflight(args))
+    if args.mode == "vcluster":
+        run_timed("vCluster", lambda: setup_vcluster(args, context))
+    run_timed("Snapshot install", lambda: setup_snapshot_install(args, context))
+    run_timed("Snapshot readiness", lambda: setup_snapshot_readiness(args, context))
+    return setup_result(args, context)
+
+
+def setup_phase(args: argparse.Namespace) -> SetupResult | None:
+    context = setup_context(args)
+    if args.phase == "host-preflight":
+        run_timed("host preflight", lambda: setup_host_preflight(args))
+        return None
+    if args.phase == "vcluster":
+        if args.mode != "vcluster":
+            raise SetupError("--phase vcluster requires --mode vcluster")
+        run_timed("vCluster", lambda: setup_vcluster(args, context))
+        return None
+    if args.phase == "snapshot-install":
+        run_timed("Snapshot install", lambda: setup_snapshot_install(args, context))
+        return None
+    if args.phase == "snapshot-ready":
+        run_timed("Snapshot readiness", lambda: setup_snapshot_readiness(args, context))
+        return setup_result(args, context)
+    raise SetupError(f"unsupported setup phase: {args.phase}")
+
+
+def setup_host_preflight(args: argparse.Namespace) -> None:
+    log("Loading host kubeconfig")
+    preflight.load_config(args.kubeconfig, args.context)
+    if args.skip_host_preflight:
+        log("Skipping host preflight")
+        return
+    run_host_preflight()
+
+
+def setup_vcluster(args: argparse.Namespace, context: SetupContext) -> None:
+    log("Loading host kubeconfig")
+    preflight.load_config(args.kubeconfig, args.context)
+    target_kubeconfig = Path(context.target_kubeconfig_value)
+    create_host_namespace(context.host_namespace)
+    ensure_vcluster_unused(context.host_namespace, context.vcluster_name)
+    create_vcluster(
+        context.host_namespace,
+        context.vcluster_name,
+        args.vcluster_k8s_version,
+    )
+    install_hostpath_mapper(
+        context.host_namespace,
+        context.vcluster_name,
+        args.helm_timeout,
+    )
+    connect_vcluster(
+        host_namespace=context.host_namespace,
+        vcluster_name=context.vcluster_name,
+        target_kubeconfig=target_kubeconfig,
+        local_port=args.vcluster_local_port,
+        workspace=context.workspace,
+    )
+
+
+def setup_snapshot_install(args: argparse.Namespace, context: SetupContext) -> None:
+    log("Loading target kubeconfig")
+    preflight.load_config(context.target_kubeconfig_value or None, None)
     ensure_target_namespace(args.test_namespace)
     ensure_checkpoint_pvc(
         namespace=args.test_namespace,
@@ -229,32 +315,59 @@ def setup(args: argparse.Namespace) -> SetupResult:
         size=args.pvc_size,
     )
     install_snapshot_chart(
-        kubeconfig=target_kubeconfig_value or None,
+        kubeconfig=context.target_kubeconfig_value or None,
         namespace=args.test_namespace,
         release=args.snapshot_release,
         image_tag=args.snapshot_tag,
         timeout=args.helm_timeout,
     )
+
+
+def setup_snapshot_readiness(args: argparse.Namespace, context: SetupContext) -> None:
+    log("Loading target kubeconfig")
+    preflight.load_config(context.target_kubeconfig_value or None, None)
     wait_for_snapshot_readiness(
         namespace=args.test_namespace,
         release=args.snapshot_release,
         timeout_seconds=args.ready_timeout_seconds,
     )
 
+
+def setup_result(args: argparse.Namespace, context: SetupContext) -> SetupResult:
     return SetupResult(
         mode=args.mode,
-        host_namespace=host_namespace if args.mode == "vcluster" else "",
-        vcluster_name=vcluster_name if args.mode == "vcluster" else "",
+        host_namespace=context.host_namespace if args.mode == "vcluster" else "",
+        vcluster_name=context.vcluster_name if args.mode == "vcluster" else "",
         test_namespace=args.test_namespace,
-        target_kubeconfig=target_kubeconfig_value,
-        vcluster_kubeconfig=vcluster_kubeconfig_value,
+        target_kubeconfig=context.target_kubeconfig_value,
+        vcluster_kubeconfig=context.vcluster_kubeconfig_value,
         snapshot_release=args.snapshot_release,
         pvc_name=args.pvc_name,
     )
 
 
+def log(message: str) -> None:
+    print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
+
+
+def run_timed(label: str, fn: Callable[[], Any]) -> Any:
+    start = time.monotonic()
+    log(f"Starting {label}")
+    try:
+        result = fn()
+    except Exception:
+        log(f"Failed {label} after {elapsed(start)}")
+        raise
+    log(f"Finished {label} in {elapsed(start)}")
+    return result
+
+
+def elapsed(start: float) -> str:
+    return f"{time.monotonic() - start:.1f}s"
+
+
 def run_host_preflight() -> None:
-    print("Running host preflight")
+    log("Running host preflight")
     checks = [
         preflight.check_runtime_class(preflight.DEFAULT_RUNTIME_CLASS),
         preflight.check_gpu_operator(
@@ -270,7 +383,7 @@ def run_host_preflight() -> None:
     failed = False
     for result in checks:
         status = "PASS" if result.ok else "FAIL"
-        print(f"{status} {result.name}: {result.detail}")
+        log(f"{status} {result.name}: {result.detail}")
         failed = failed or not result.ok
     if failed:
         raise SetupError("host preflight failed")
@@ -294,11 +407,11 @@ def ensure_namespace(namespace: str, labels: dict[str, str] | None = None) -> No
     )
     try:
         api.create_namespace(body)
-        print(f"Created namespace {namespace}")
+        log(f"Created namespace {namespace}")
     except ApiException as exc:
         if exc.status != 409:
             raise SetupError(f"failed to create namespace {namespace}: {exc}") from exc
-        print(f"Namespace {namespace} already exists")
+        log(f"Namespace {namespace} already exists")
 
     if labels:
         try:
@@ -327,11 +440,11 @@ def ensure_vcluster_unused(namespace: str, name: str) -> None:
     )
     if completed.returncode == 0:
         raise SetupError(f"vCluster Helm release {namespace}/{name} already exists")
-    print(f"vCluster name {namespace}/{name} is available")
+    log(f"vCluster name {namespace}/{name} is available")
 
 
 def create_vcluster(namespace: str, name: str, k8s_version: str) -> None:
-    print(f"Creating vCluster {namespace}/{name}")
+    log(f"Creating vCluster {namespace}/{name}")
     values = {
         "controlPlane": {
             "hostPathMapper": {
@@ -388,7 +501,7 @@ def create_vcluster(namespace: str, name: str, k8s_version: str) -> None:
 
 
 def install_hostpath_mapper(namespace: str, vcluster_name: str, helm_timeout: str) -> None:
-    print(f"Installing vCluster HostPath Mapper in {namespace}")
+    log(f"Installing vCluster HostPath Mapper in {namespace}")
     values = {
         "nodeSelector": {
             "nvidia.com/gpu.present": "true",
@@ -439,7 +552,7 @@ def connect_vcluster(
     local_port: int,
     workspace: Path,
 ) -> None:
-    print(f"Connecting to vCluster {host_namespace}/{vcluster_name}")
+    log(f"Connecting to vCluster {host_namespace}/{vcluster_name}")
     target_kubeconfig.parent.mkdir(parents=True, exist_ok=True)
 
     log_path = workspace / ".snapshot-e2e-vcluster-port-forward.log"
@@ -464,20 +577,37 @@ def connect_vcluster(
 
     try:
         wait_for_https(f"https://127.0.0.1:{local_port}/healthz", process, log_path)
-        with target_kubeconfig.open("w", encoding="utf-8") as output:
-            run(
-                [
-                    "vcluster",
-                    "connect",
-                    vcluster_name,
-                    "--namespace",
-                    host_namespace,
-                    "--server",
-                    f"https://127.0.0.1:{local_port}",
-                    "--print",
-                ],
-                stdout=output,
-            )
+        temp_kubeconfig = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=target_kubeconfig.parent,
+                prefix=f".{target_kubeconfig.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as output:
+                temp_kubeconfig = Path(output.name)
+                run(
+                    [
+                        "vcluster",
+                        "connect",
+                        vcluster_name,
+                        "--namespace",
+                        host_namespace,
+                        "--server",
+                        f"https://127.0.0.1:{local_port}",
+                        "--print",
+                    ],
+                    stdout=output,
+                )
+            if temp_kubeconfig.stat().st_size == 0:
+                raise SetupError("vcluster connect produced an empty kubeconfig")
+            temp_kubeconfig.replace(target_kubeconfig)
+        except Exception:
+            if temp_kubeconfig:
+                temp_kubeconfig.unlink(missing_ok=True)
+            raise
         target_kubeconfig.chmod(0o600)
     finally:
         log_file.close()
@@ -485,6 +615,7 @@ def connect_vcluster(
 
 def wait_for_https(url: str, process: subprocess.Popen[Any], log_path: Path) -> None:
     context = ssl._create_unverified_context()
+    last_report = 0.0
     for _ in range(60):
         if process.poll() is not None:
             raise SetupError(
@@ -492,8 +623,14 @@ def wait_for_https(url: str, process: subprocess.Popen[Any], log_path: Path) -> 
             )
         try:
             with urllib.request.urlopen(url, timeout=2, context=context):
+                log(f"vCluster API reachable at {url}")
                 return
         except (urllib.error.URLError, TimeoutError):
+            last_report = progress(
+                "vCluster API",
+                f"waiting for {url}; port-forward pid={process.pid}",
+                last_report,
+            )
             time.sleep(2)
     raise SetupError(
         "vCluster API was not reachable through the local port-forward; tail:\n"
@@ -516,7 +653,7 @@ def ensure_checkpoint_pvc(namespace: str, name: str, size: str) -> None:
     )
     try:
         pvc = api.create_namespaced_persistent_volume_claim(namespace, body)
-        print(f"Created PVC {namespace}/{name}: phase={pvc.status.phase}")
+        log(f"Created PVC {namespace}/{name}: phase={pvc.status.phase}")
     except ApiException as exc:
         if exc.status != 409:
             raise SetupError(f"failed to create PVC {namespace}/{name}: {exc}") from exc
@@ -525,7 +662,7 @@ def ensure_checkpoint_pvc(namespace: str, name: str, size: str) -> None:
         detail = f"phase={pvc.status.phase}"
         if requested != size:
             detail += f", requested storage={requested}, configured size={size}"
-        print(f"PVC {namespace}/{name} already exists: {detail}")
+        log(f"PVC {namespace}/{name} already exists: {detail}")
 
 
 def install_snapshot_chart(
@@ -536,7 +673,7 @@ def install_snapshot_chart(
     image_tag: str,
     timeout: str,
 ) -> None:
-    print(f"Installing Snapshot chart release {namespace}/{release}")
+    log(f"Installing Snapshot chart release {namespace}/{release}")
     command = [
         "helm",
         "upgrade",
@@ -607,16 +744,20 @@ def wait_for_pods_ready(
 ) -> None:
     api = client.CoreV1Api()
     deadline = time.monotonic() + timeout_seconds
+    last_report = 0.0
+    last_detail = "not checked"
     while time.monotonic() < deadline:
         pods = api.list_namespaced_pod(
             namespace=namespace, label_selector=label_selector
         ).items
+        last_detail = pod_progress(pods)
         if pods and all(pod_ready(pod) for pod in pods):
-            print(f"{description} ready")
+            log(f"{description} ready: {last_detail}")
             return
+        last_report = progress(description, last_detail, last_report)
         time.sleep(5)
     print_pods(namespace, label_selector)
-    raise SetupError(f"timed out waiting for {description}")
+    raise SetupError(f"timed out waiting for {description}; last state: {last_detail}")
 
 
 def wait_for_deployment_rollout_by_selector(
@@ -628,15 +769,21 @@ def wait_for_deployment_rollout_by_selector(
 ) -> None:
     api = client.AppsV1Api()
     deadline = time.monotonic() + timeout_seconds
+    last_report = 0.0
+    last_detail = "not checked"
     while time.monotonic() < deadline:
         deployments = api.list_namespaced_deployment(
             namespace=namespace, label_selector=label_selector
         ).items
+        last_detail = deployment_progress(deployments)
         if deployments and all(deployment_available(item) for item in deployments):
-            print(f"{description} deployment ready")
+            log(f"{description} deployment ready: {last_detail}")
             return
+        last_report = progress(f"{description} deployment", last_detail, last_report)
         time.sleep(5)
-    raise SetupError(f"timed out waiting for {description} deployment")
+    raise SetupError(
+        f"timed out waiting for {description} deployment; last state: {last_detail}"
+    )
 
 
 def wait_for_daemonset_rollout_by_selector(
@@ -648,15 +795,21 @@ def wait_for_daemonset_rollout_by_selector(
 ) -> None:
     api = client.AppsV1Api()
     deadline = time.monotonic() + timeout_seconds
+    last_report = 0.0
+    last_detail = "not checked"
     while time.monotonic() < deadline:
         daemonsets = api.list_namespaced_daemon_set(
             namespace=namespace, label_selector=label_selector
         ).items
+        last_detail = daemonset_progress(daemonsets)
         if daemonsets and all(daemonset_ready(item) for item in daemonsets):
-            print(f"{description} daemonset ready")
+            log(f"{description} daemonset ready: {last_detail}")
             return
+        last_report = progress(f"{description} daemonset", last_detail, last_report)
         time.sleep(5)
-    raise SetupError(f"timed out waiting for {description} daemonset")
+    raise SetupError(
+        f"timed out waiting for {description} daemonset; last state: {last_detail}"
+    )
 
 
 def wait_for_daemonset_rollout(
@@ -667,6 +820,8 @@ def wait_for_daemonset_rollout(
 ) -> None:
     api = client.AppsV1Api()
     deadline = time.monotonic() + timeout_seconds
+    last_report = 0.0
+    last_detail = "not checked"
     while time.monotonic() < deadline:
         try:
             daemonset = api.read_namespaced_daemon_set(name=name, namespace=namespace)
@@ -675,13 +830,27 @@ def wait_for_daemonset_rollout(
                 raise SetupError(
                     f"failed to read daemonset {namespace}/{name}: {exc}"
                 ) from exc
+            last_detail = "not found"
+            last_report = progress(
+                f"daemonset {namespace}/{name}",
+                last_detail,
+                last_report,
+            )
             time.sleep(5)
             continue
+        last_detail = daemonset_progress([daemonset])
         if daemonset_ready(daemonset):
-            print(f"DaemonSet {namespace}/{name} ready")
+            log(f"DaemonSet {namespace}/{name} ready: {last_detail}")
             return
+        last_report = progress(
+            f"daemonset {namespace}/{name}",
+            last_detail,
+            last_report,
+        )
         time.sleep(5)
-    raise SetupError(f"timed out waiting for daemonset {namespace}/{name}")
+    raise SetupError(
+        f"timed out waiting for daemonset {namespace}/{name}; last state: {last_detail}"
+    )
 
 
 def deployment_available(deployment: client.V1Deployment) -> bool:
@@ -702,6 +871,74 @@ def daemonset_ready(daemonset: client.V1DaemonSet) -> bool:
     return desired > 0 and ready >= desired and updated >= desired
 
 
+def progress(description: str, detail: str, last_report: float) -> float:
+    now = time.monotonic()
+    if last_report == 0.0 or now - last_report >= PROGRESS_INTERVAL_SECONDS:
+        log(f"Waiting for {description}: {detail}")
+        return now
+    return last_report
+
+
+def pod_progress(pods: list[client.V1Pod]) -> str:
+    if not pods:
+        return "no pods found"
+    details = []
+    for pod in pods[:10]:
+        statuses = []
+        for status in pod.status.container_statuses or []:
+            statuses.append(f"{status.name}:{status.ready}")
+        if not statuses:
+            statuses.append("no container statuses")
+        details.append(
+            f"{pod.metadata.name} phase={pod.status.phase} "
+            f"ready={pod_ready(pod)} node={pod.spec.node_name or '<none>'} "
+            f"containers={','.join(statuses)}"
+        )
+    remaining = len(pods) - len(details)
+    if remaining > 0:
+        details.append(f"... {remaining} more pod(s)")
+    return "; ".join(details)
+
+
+def deployment_progress(deployments: list[client.V1Deployment]) -> str:
+    if not deployments:
+        return "no deployments found"
+    return "; ".join(deployment_detail(item) for item in deployments)
+
+
+def deployment_detail(deployment: client.V1Deployment) -> str:
+    desired = deployment.spec.replicas or 1
+    status = deployment.status
+    observed = status.observed_generation or 0
+    generation = deployment.metadata.generation or 0
+    available = status.available_replicas or 0
+    updated = status.updated_replicas or 0
+    return (
+        f"{deployment.metadata.name} desired={desired} available={available} "
+        f"updated={updated} observed={observed} generation={generation} "
+        f"ready={deployment_available(deployment)}"
+    )
+
+
+def daemonset_progress(daemonsets: list[client.V1DaemonSet]) -> str:
+    if not daemonsets:
+        return "no daemonsets found"
+    return "; ".join(daemonset_detail(item) for item in daemonsets)
+
+
+def daemonset_detail(daemonset: client.V1DaemonSet) -> str:
+    status = daemonset.status
+    desired = status.desired_number_scheduled or 0
+    ready = status.number_ready or 0
+    updated = status.updated_number_scheduled or 0
+    unavailable = status.number_unavailable or 0
+    return (
+        f"{daemonset.metadata.name} desired={desired} ready={ready} "
+        f"updated={updated} unavailable={unavailable} "
+        f"ready_status={daemonset_ready(daemonset)}"
+    )
+
+
 def pod_ready(pod: client.V1Pod) -> bool:
     for condition in pod.status.conditions or []:
         if condition.type == "Ready":
@@ -718,10 +955,10 @@ def print_pods(namespace: str, label_selector: str) -> None:
     except ApiException as exc:
         print(f"Could not list pods in {namespace}: {exc}")
         return
-    print(f"Pods in {namespace} matching {label_selector}:")
+    log(f"Pods in {namespace} matching {label_selector}:")
     for pod in pods:
         ready = "True" if pod_ready(pod) else "False"
-        print(
+        log(
             f"  {pod.metadata.name}\tphase={pod.status.phase}\t"
             f"ready={ready}\tnode={pod.spec.node_name or ''}"
         )
@@ -740,7 +977,7 @@ def run(
     env: dict[str, str] | None = None,
     stdout: Any | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    print("+ " + shlex.join(command))
+    log("+ " + shlex.join(command))
     try:
         return subprocess.run(
             command,

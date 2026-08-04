@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import sys
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -129,18 +128,16 @@ def load_config(kubeconfig: str | None, context: str | None) -> None:
     try:
         config.load_kube_config(config_file=kubeconfig, context=context)
     except Exception as kube_config_error:
+        if kubeconfig:
+            raise RuntimeError(
+                f"failed to load kubeconfig {kubeconfig}"
+            ) from kube_config_error
         try:
             config.load_incluster_config()
         except Exception as incluster_error:
             raise RuntimeError(
                 "failed to load Kubernetes config from kubeconfig or in-cluster config"
             ) from incluster_error
-        if kubeconfig:
-            print(
-                f"WARN kubeconfig load failed ({kube_config_error}); "
-                "using in-cluster config",
-                file=sys.stderr,
-            )
 
 
 def check_runtime_class(runtime_class: str) -> CheckResult:

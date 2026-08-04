@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 from kubernetes import client
@@ -25,6 +25,7 @@ GROUP = "nvidia.com"
 VERSION = "v1alpha1"
 PODSNAPSHOTS = "podsnapshots"
 PODSNAPSHOTCONTENTS = "podsnapshotcontents"
+PROGRESS_INTERVAL_SECONDS = 30
 
 
 def create_pod(body: dict[str, Any]) -> client.V1Pod:
@@ -52,7 +53,14 @@ def wait_for_pod_deleted(namespace: str, name: str, timeout: int = 180) -> None:
             raise
         return False
 
-    wait_for(f"pod {namespace}/{name} deleted", gone, timeout)
+    def detail() -> str:
+        try:
+            pod = read_pod(namespace, name)
+        except ApiException as exc:
+            return f"api_error={k8s.api_error_detail(exc)}"
+        return f"phase={pod.status.phase} node={pod.spec.node_name or '<none>'}"
+
+    wait_for(f"pod {namespace}/{name} deleted", gone, timeout, detail=detail)
 
 
 def create_podsnapshot(
@@ -100,7 +108,21 @@ def wait_for_pod_ready(namespace: str, name: str, timeout: int = 600) -> client.
                 return pod
         return None
 
-    return wait_for(f"pod {namespace}/{name} Ready", ready, timeout)
+    def detail() -> str:
+        try:
+            pod = read_pod(namespace, name)
+        except ApiException as exc:
+            return f"api_error={k8s.api_error_detail(exc)}"
+        statuses = [
+            f"{status.name}:{status.ready}"
+            for status in pod.status.container_statuses or []
+        ]
+        return (
+            f"phase={pod.status.phase} node={pod.spec.node_name or '<none>'} "
+            f"containers={','.join(statuses) or '<none>'}"
+        )
+
+    return wait_for(f"pod {namespace}/{name} Ready", ready, timeout, detail=detail)
 
 
 def wait_for_file(namespace: str, pod: str, path: str, timeout: int = 180) -> None:
@@ -184,7 +206,19 @@ def wait_for_condition(
             raise AssertionError(f"{plural}/{name} failed: {failed}")
         return None
 
-    return wait_for(f"{plural}/{name} {condition_type}=True", check, timeout)
+    def detail() -> str:
+        try:
+            obj = get_custom_object(api, namespace, name, plural)
+        except ApiException as exc:
+            return f"api_error={k8s.api_error_detail(exc)}"
+        return f"conditions={obj.get('status', {}).get('conditions', [])}"
+
+    return wait_for(
+        f"{plural}/{name} {condition_type}=True",
+        check,
+        timeout,
+        detail=detail,
+    )
 
 
 def get_custom_object(
@@ -222,7 +256,20 @@ def wait_for_restore_status(
             raise AssertionError(f"restore failed for {namespace}/{pod_name}")
         return None
 
-    return wait_for(f"restore status {status} on {namespace}/{pod_name}", check, timeout)
+    def detail() -> str:
+        try:
+            pod = read_pod(namespace, pod_name)
+        except ApiException as exc:
+            return f"api_error={k8s.api_error_detail(exc)}"
+        actual = (pod.metadata.annotations or {}).get(key, "<unset>")
+        return f"{key}={actual}"
+
+    return wait_for(
+        f"restore status {status} on {namespace}/{pod_name}",
+        check,
+        timeout,
+        detail=detail,
+    )
 
 
 def checkpoint_artifact_manifest(namespace: str, pod: str, checkpoint_id: str) -> str:
@@ -343,12 +390,30 @@ def cleanup(config: k8s.E2EConfig, run: TestRun) -> None:
                     raise
 
 
-def wait_for(description: str, fn: Any, timeout: int) -> Any:
+def wait_for(
+    description: str,
+    fn: Any,
+    timeout: int,
+    *,
+    detail: Callable[[], str] | None = None,
+) -> Any:
+    start = time.monotonic()
     deadline = time.monotonic() + timeout
+    last_report = 0.0
     while time.monotonic() < deadline:
         result = fn()
         if result:
             return result
+        now = time.monotonic()
+        if last_report == 0.0 or now - last_report >= PROGRESS_INTERVAL_SECONDS:
+            suffix = f": {detail()}" if detail else ""
+            elapsed = now - start
+            print(
+                f"[{time.strftime('%H:%M:%S')}] waiting for {description} "
+                f"({elapsed:.0f}s/{timeout}s){suffix}",
+                flush=True,
+            )
+            last_report = now
         time.sleep(5)
     raise AssertionError(f"timed out waiting for {description}")
 

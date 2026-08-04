@@ -146,6 +146,7 @@ def base_pod_spec(
     spec: dict[str, Any] = {
         "restartPolicy": "Never",
         "containers": [container],
+        **workload_scheduling(),
         "volumes": [
             {"name": "snapshot-control", "emptyDir": {}},
             {
@@ -155,14 +156,13 @@ def base_pod_spec(
         ],
     }
     if gpu:
-        spec.update(gpu_scheduling())
+        spec["runtimeClassName"] = "nvidia"
         container["resources"] = {"limits": {"nvidia.com/gpu": "1"}}
     return spec
 
 
-def gpu_scheduling() -> dict[str, Any]:
+def workload_scheduling() -> dict[str, Any]:
     return {
-        "runtimeClassName": "nvidia",
         "nodeSelector": {
             "nvidia.com/gpu.present": "true",
             "nvidia.com/mig.config": "all-disabled",
@@ -170,6 +170,11 @@ def gpu_scheduling() -> dict[str, Any]:
         "tolerations": [
             {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"},
             {"key": "dedicated", "operator": "Exists", "effect": "NoSchedule"},
+            {
+                "key": "CriticalAddonsOnly",
+                "operator": "Exists",
+                "effect": "NoSchedule",
+            },
         ],
     }
 
