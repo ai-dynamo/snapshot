@@ -32,17 +32,13 @@ class TestRun:
     @classmethod
     def new(cls, prefix: str) -> "TestRun":
         suffix = f"{prefix}-{uuid.uuid4().hex[:6]}"
-        tag = os.environ.get("SNAPSHOT_E2E_SNAPSHOT_TAG", "v0.0.0-g71827d8e")
         return cls(
             suffix=suffix,
             checkpoint_id=suffix,
             snapshot_name=f"{suffix}-snapshot",
             source_pod=f"{suffix}-source",
             restore_pod=f"{suffix}-restore",
-            image=os.environ.get(
-                "SNAPSHOT_E2E_WORKLOAD_IMAGE",
-                f"ghcr.io/ai-dynamo/snapshot/agent:{tag}",
-            ),
+            image=workload_image(),
         )
 
     @property
@@ -162,6 +158,8 @@ def base_pod_spec(
 
 
 def workload_scheduling() -> dict[str, Any]:
+    # Keep all workload pods on GPU nodes so the shared RWO checkpoint PVC binds in
+    # a zone where both source and restore pods can schedule.
     return {
         "nodeSelector": {
             "nvidia.com/gpu.present": "true",
@@ -177,6 +175,19 @@ def workload_scheduling() -> dict[str, Any]:
             },
         ],
     }
+
+
+def workload_image() -> str:
+    image = os.environ.get("SNAPSHOT_E2E_WORKLOAD_IMAGE")
+    if image:
+        return image
+
+    tag = os.environ.get("SNAPSHOT_E2E_SNAPSHOT_TAG")
+    if not tag:
+        raise RuntimeError(
+            "SNAPSHOT_E2E_SNAPSHOT_TAG or SNAPSHOT_E2E_WORKLOAD_IMAGE is required"
+        )
+    return f"ghcr.io/ai-dynamo/snapshot/agent:{tag}"
 
 
 def same_node_affinity(node: str) -> dict[str, Any]:

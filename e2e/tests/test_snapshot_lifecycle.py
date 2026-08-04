@@ -12,37 +12,37 @@ from snapshot_e2e import lifecycle as snap
 @pytest.mark.snapshot_success
 @pytest.mark.gpu
 def test_successful_snapshot_captures_cpu_gpu_and_fs(
-    e2e_config: k8s.E2EConfig,
-    test_run: snap.TestRun,
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
 ) -> None:
     try:
-        source, source_node = create_ready_source(e2e_config, test_run, gpu=True)
+        source, source_node = create_ready_source(config, run, gpu=True)
         snap.create_podsnapshot(
-            e2e_config.namespace,
-            test_run.snapshot_name,
-            test_run.source_pod,
+            config.namespace,
+            run.snapshot_name,
+            run.source_pod,
             source.metadata.uid,
         )
 
         pod_snapshot, content = snap.wait_for_snapshot_ready(
-            e2e_config.namespace,
-            test_run.snapshot_name,
+            config.namespace,
+            run.snapshot_name,
         )
         assert_podsnapshot_ready(pod_snapshot, content, source, source_node)
 
         manifest = snap.checkpoint_artifact_manifest(
-            e2e_config.namespace,
-            test_run.source_pod,
-            test_run.checkpoint_id,
+            config.namespace,
+            run.source_pod,
+            run.checkpoint_id,
         )
         assert "criuDump:" in manifest
         assert "cudaRestore:" in manifest
-        assert f"podName: {test_run.source_pod}" in manifest
+        assert f"podName: {run.source_pod}" in manifest
 
         artifact_listing = snap.checkpoint_artifact_listing(
-            e2e_config.namespace,
-            test_run.source_pod,
-            test_run.checkpoint_id,
+            config.namespace,
+            run.source_pod,
+            run.checkpoint_id,
         )
         assert "./inventory.img" in artifact_listing
         assert "./manifest.yaml" in artifact_listing
@@ -51,38 +51,38 @@ def test_successful_snapshot_captures_cpu_gpu_and_fs(
         assert "./tmp/tick.log" in artifact_listing
         assert "./tmp/gpu-marker" in artifact_listing
     except Exception:
-        snap.debug_dump(e2e_config, test_run)
+        snap.debug_dump(config, run)
         raise
 
 
 @pytest.mark.snapshot_success
 @pytest.mark.gpu
 def test_successful_restore_recovers_cpu_gpu_and_fs_from_snapshot(
-    e2e_config: k8s.E2EConfig,
-    test_run: snap.TestRun,
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
 ) -> None:
     try:
-        source, source_node = create_valid_gpu_checkpoint(e2e_config, test_run)
+        _, source_node = create_valid_gpu_checkpoint(config, run)
 
-        snap.delete_pod(e2e_config.namespace, test_run.source_pod)
-        snap.wait_for_pod_deleted(e2e_config.namespace, test_run.source_pod)
+        snap.delete_pod(config.namespace, run.source_pod)
+        snap.wait_for_pod_deleted(config.namespace, run.source_pod)
 
         snap.create_pod(
             snap.restore_pod(
-                config=e2e_config,
-                run=test_run,
+                config=config,
+                run=run,
                 gpu=True,
                 source_node=source_node,
             )
         )
         snap.wait_for_restore_status(
-            e2e_config.namespace, test_run.restore_pod, "completed"
+            config.namespace, run.restore_pod, "completed"
         )
-        snap.wait_for_pod_ready(e2e_config.namespace, test_run.restore_pod, timeout=300)
+        snap.wait_for_pod_ready(config.namespace, run.restore_pod, timeout=300)
 
         output = snap.exec_command(
-            e2e_config.namespace,
-            test_run.restore_pod,
+            config.namespace,
+            run.restore_pod,
             """
             set -euo pipefail
             test -f /snapshot-control/restore-complete
@@ -97,38 +97,37 @@ def test_successful_restore_recovers_cpu_gpu_and_fs_from_snapshot(
         )
         assert "tick_before=" in output
         assert_restore_events(
-            e2e_config.namespace,
-            test_run.restore_pod,
+            config.namespace,
+            run.restore_pod,
             {"RestoreRequested", "RestoreSucceeded"},
         )
-        assert source.metadata.uid
     except Exception:
-        snap.debug_dump(e2e_config, test_run)
+        snap.debug_dump(config, run)
         raise
 
 
 @pytest.mark.snapshot_failure
 def test_failed_snapshot_missing_target_container_annotation(
-    e2e_config: k8s.E2EConfig,
-    test_run: snap.TestRun,
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
 ) -> None:
     try:
         source, _ = create_ready_source(
-            e2e_config,
-            test_run,
+            config,
+            run,
             gpu=False,
             include_target_annotation=False,
         )
         snap.create_podsnapshot(
-            e2e_config.namespace,
-            test_run.snapshot_name,
-            test_run.source_pod,
+            config.namespace,
+            run.snapshot_name,
+            run.source_pod,
             source.metadata.uid,
         )
 
         pod_snapshot, content = snap.wait_for_snapshot_failed(
-            e2e_config.namespace,
-            test_run.snapshot_name,
+            config.namespace,
+            run.snapshot_name,
         )
         failed = snap.condition(pod_snapshot, "Failed")
         ready = snap.condition(pod_snapshot, "Ready")
@@ -139,41 +138,41 @@ def test_failed_snapshot_missing_target_container_annotation(
         assert content_failed and content_failed.get("reason") == "MissingTargetContainer"
         assert "target" in content_failed.get("message", "").lower()
     except Exception:
-        snap.debug_dump(e2e_config, test_run)
+        snap.debug_dump(config, run)
         raise
 
 
 @pytest.mark.snapshot_failure
 @pytest.mark.gpu
 def test_failed_restore_gpu_checkpoint_into_non_gpu_target(
-    e2e_config: k8s.E2EConfig,
-    test_run: snap.TestRun,
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
 ) -> None:
     try:
-        _, source_node = create_valid_gpu_checkpoint(e2e_config, test_run)
-        snap.delete_pod(e2e_config.namespace, test_run.source_pod)
-        snap.wait_for_pod_deleted(e2e_config.namespace, test_run.source_pod)
+        _, source_node = create_valid_gpu_checkpoint(config, run)
+        snap.delete_pod(config.namespace, run.source_pod)
+        snap.wait_for_pod_deleted(config.namespace, run.source_pod)
 
         snap.create_pod(
             snap.restore_pod(
-                config=e2e_config,
-                run=test_run,
+                config=config,
+                run=run,
                 gpu=False,
                 source_node=source_node,
             )
         )
-        snap.wait_for_restore_status(e2e_config.namespace, test_run.restore_pod, "failed")
+        snap.wait_for_restore_status(config.namespace, run.restore_pod, "failed")
 
         pod_snapshot, content = snap.wait_for_snapshot_ready(
-            e2e_config.namespace,
-            test_run.snapshot_name,
+            config.namespace,
+            run.snapshot_name,
             timeout=60,
         )
         assert snap.condition(pod_snapshot, "Ready")["status"] == "True"
         assert snap.condition(content, "Ready")["status"] == "True"
-        assert_restore_events(e2e_config.namespace, test_run.restore_pod, {"RestoreFailed"})
+        assert_restore_events(config.namespace, run.restore_pod, {"RestoreFailed"})
     except Exception:
-        snap.debug_dump(e2e_config, test_run)
+        snap.debug_dump(config, run)
         raise
 
 

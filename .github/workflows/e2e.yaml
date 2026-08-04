@@ -6,6 +6,9 @@ name: E2E Tests
 # Temporary PR trigger while the e2e infra is being validated.
 on:
   workflow_dispatch:
+  schedule:
+    # 23:00 Pacific Standard Time.
+    - cron: "0 7 * * *"
   pull_request:
     paths:
       - ".github/workflows/e2e.yaml"
@@ -19,6 +22,7 @@ concurrency:
 
 permissions:
   contents: read
+  packages: read
 
 jobs:
   e2e:
@@ -34,7 +38,6 @@ jobs:
       SNAPSHOT_E2E_TEST_NAMESPACE: snapshot-e2e
       SNAPSHOT_E2E_TARGET_KUBECONFIG: ${{ github.workspace }}/.kubeconfig-snapshot-e2e
       SNAPSHOT_E2E_SNAPSHOT_RELEASE: snapshot
-      SNAPSHOT_E2E_SNAPSHOT_TAG: v0.0.0-g71827d8e
       SNAPSHOT_E2E_PVC_NAME: snapshot-pvc
       SNAPSHOT_E2E_PVC_SIZE: 2Gi
       SNAPSHOT_E2E_MODE: vcluster
@@ -65,7 +68,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          cutoff_epoch="$(date -u -d '2 hours ago' +%s)"
+          cutoff_epoch="$(date -u -d '12 hours ago' +%s)"
           kubectl get ns -l snapshot-e2e=true \
             -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.creationTimestamp}{"\n"}{end}' |
           while IFS=$'\t' read -r namespace created_at; do
@@ -106,6 +109,59 @@ jobs:
 
           uv --version
           echo "::endgroup::"
+
+      - name: Resolve Snapshot image tag
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.parse
+          import urllib.request
+
+          token = os.environ.get("GH_TOKEN")
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+          if token:
+              headers["Authorization"] = f"Bearer {token}"
+
+          def package_tags(package: str) -> list[str]:
+              tags = []
+              encoded = urllib.parse.quote(package, safe="")
+              for page in range(1, 6):
+                  url = (
+                      "https://api.github.com/orgs/ai-dynamo/packages/container/"
+                      f"{encoded}/versions?per_page=100&page={page}"
+                  )
+                  request = urllib.request.Request(url, headers=headers)
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      versions = json.load(response)
+                  if not versions:
+                      break
+                  for version in versions:
+                      for tag in version.get("metadata", {}).get("container", {}).get("tags", []):
+                          if tag.startswith("v0.0.0-g"):
+                              tags.append(tag)
+              return tags
+
+          operator_tags = package_tags("snapshot/operator")
+          agent_tags = set(package_tags("snapshot/agent"))
+          for tag in operator_tags:
+              if tag in agent_tags:
+                  with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+                      env.write(f"SNAPSHOT_E2E_SNAPSHOT_TAG={tag}\n")
+                  print(f"Resolved Snapshot image tag: {tag}")
+                  break
+          else:
+              print("No shared published Snapshot operator/agent tag found", file=sys.stderr)
+              sys.exit(1)
+          PY
 
       - name: Validate host GPU cluster
         timeout-minutes: 5

@@ -8,7 +8,6 @@ from __future__ import annotations
 import time
 from typing import Any, Callable
 
-import pytest
 from kubernetes import client
 from kubernetes.client import ApiException
 from kubernetes.stream import stream
@@ -35,12 +34,14 @@ def create_pod(body: dict[str, Any]) -> client.V1Pod:
     )
 
 
-def delete_pod(namespace: str, name: str) -> None:
+def delete_pod(namespace: str, name: str) -> bool:
     try:
         client.CoreV1Api().delete_namespaced_pod(name=name, namespace=namespace)
+        return True
     except ApiException as exc:
-        if exc.status != 404:
-            raise
+        if exc.status == 404:
+            return False
+        raise
 
 
 def wait_for_pod_deleted(namespace: str, name: str, timeout: int = 180) -> None:
@@ -350,8 +351,12 @@ def print_snapshot_controller_logs(config: k8s.E2EConfig) -> None:
 
 def cleanup(config: k8s.E2EConfig, run: TestRun) -> None:
     api = client.CustomObjectsApi()
-    delete_pod(config.namespace, run.restore_pod)
-    delete_pod(config.namespace, run.source_pod)
+    for pod_name in (run.restore_pod, run.source_pod):
+        if delete_pod(config.namespace, pod_name):
+            try:
+                wait_for_pod_deleted(config.namespace, pod_name)
+            except AssertionError as exc:
+                print(f"cleanup warning: {exc}")
     try:
         api.delete_namespaced_custom_object(
             GROUP,
@@ -406,17 +411,3 @@ def wait_for(
             last_report = now
         time.sleep(5)
     raise AssertionError(f"timed out waiting for {description}")
-
-
-@pytest.fixture
-def e2e_config() -> k8s.E2EConfig:
-    config = k8s.E2EConfig.from_env()
-    k8s.configure(config)
-    return config
-
-
-@pytest.fixture
-def test_run(request: pytest.FixtureRequest, e2e_config: k8s.E2EConfig) -> TestRun:
-    run = TestRun.new(request.node.name.replace("_", "-")[:24])
-    yield run
-    cleanup(e2e_config, run)

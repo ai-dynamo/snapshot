@@ -31,7 +31,6 @@ from snapshot_e2e.infra import preflight
 DEFAULT_MODE = "direct"
 DEFAULT_TEST_NAMESPACE = "snapshot-e2e"
 DEFAULT_SNAPSHOT_RELEASE = "snapshot"
-DEFAULT_SNAPSHOT_TAG = "v0.0.0-g71827d8e"
 DEFAULT_PVC_NAME = "snapshot-pvc"
 DEFAULT_PVC_SIZE = "2Gi"
 DEFAULT_VCLUSTER_K8S_VERSION = "v1.32.13"
@@ -145,7 +144,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--snapshot-tag",
-        default=os.environ.get("SNAPSHOT_E2E_SNAPSHOT_TAG", DEFAULT_SNAPSHOT_TAG),
+        default=os.environ.get("SNAPSHOT_E2E_SNAPSHOT_TAG"),
         help="Operator and agent image tag for the Snapshot chart.",
     )
     parser.add_argument(
@@ -307,6 +306,8 @@ def setup_vcluster(args: argparse.Namespace, context: SetupContext) -> None:
 
 def setup_snapshot_install(args: argparse.Namespace, context: SetupContext) -> None:
     log("Loading target kubeconfig")
+    if not args.snapshot_tag:
+        raise SetupError("--snapshot-tag or SNAPSHOT_E2E_SNAPSHOT_TAG is required")
     preflight.load_config(context.target_kubeconfig_value or None, None)
     ensure_target_namespace(args.test_namespace)
     ensure_checkpoint_pvc(
