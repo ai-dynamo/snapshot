@@ -12,6 +12,10 @@ VERSION           ?= latest
 TAGS              ?= $(VERSION)
 DOCKER_BUILD_ARGS ?=
 
+# Base image for the agent. Pinned by digest so the package baseline captured by
+# capture-base-packages always describes the image docker-build-agent builds on.
+AGENT_BASE_IMAGE ?= nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04@sha256:8315e2455736c4f9b597f15c5fb4d31f834e798e0c6b66bbdbdbac491ce26bd1
+
 .PHONY: tidy generate test build lint verify-generate verify-crds check fmt add-license-headers \
         verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator capture-base-packages \
         linux-build linux-test
@@ -100,7 +104,6 @@ linux-test:
 
 # Refresh the agent's base-image package baseline. Run whenever AGENT_BASE_IMAGE
 # changes.
-AGENT_BASE_IMAGE ?= nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04@sha256:8315e2455736c4f9b597f15c5fb4d31f834e798e0c6b66bbdbdbac491ce26bd1
 
 capture-base-packages:
 	@printf '%s\n' \
@@ -122,6 +125,7 @@ capture-base-packages:
 docker-build-agent:
 	docker buildx build $(DOCKER_BUILD_ARGS) -f agent/Dockerfile \
 	  --build-arg GO_VERSION=$(GO_VERSION) \
+	  --build-arg AGENT_BASE_IMAGE=$(AGENT_BASE_IMAGE) \
 	  --build-context=api=./api --target agent \
 	  $(foreach t,$(TAGS),-t $(REGISTRY)/agent:$(t)) agent/
 
