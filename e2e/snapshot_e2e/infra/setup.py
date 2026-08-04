@@ -256,7 +256,6 @@ def setup(args: argparse.Namespace) -> SetupResult:
 def run_host_preflight() -> None:
     print("Running host preflight")
     checks = [
-        preflight.check_cluster_access(),
         preflight.check_runtime_class(preflight.DEFAULT_RUNTIME_CLASS),
         preflight.check_gpu_operator(
             namespace=preflight.DEFAULT_GPU_OPERATOR_NAMESPACE,

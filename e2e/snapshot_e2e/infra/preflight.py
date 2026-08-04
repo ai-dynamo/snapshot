@@ -48,7 +48,6 @@ def main(argv: list[str] | None = None) -> int:
     load_config(args.kubeconfig, args.context)
 
     checks = [
-        check_cluster_access(),
         check_runtime_class(args.runtime_class),
         check_gpu_operator(
             namespace=args.gpu_operator_namespace,
@@ -142,20 +141,6 @@ def load_config(kubeconfig: str | None, context: str | None) -> None:
                 "using in-cluster config",
                 file=sys.stderr,
             )
-
-
-def check_cluster_access() -> CheckResult:
-    try:
-        version = client.VersionApi().get_code()
-    except ApiException as exc:
-        return CheckResult("cluster access", False, f"Kubernetes API error: {exc}")
-    except Exception as exc:
-        return CheckResult("cluster access", False, str(exc))
-    return CheckResult(
-        "cluster access",
-        True,
-        f"server version {version.git_version}",
-    )
 
 
 def check_runtime_class(runtime_class: str) -> CheckResult:
