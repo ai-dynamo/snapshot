@@ -100,7 +100,7 @@ linux-test:
 
 # Refresh the agent's base-image package baseline. Run whenever AGENT_BASE_IMAGE
 # changes.
-AGENT_BASE_IMAGE ?= nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04
+AGENT_BASE_IMAGE ?= nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04@sha256:8315e2455736c4f9b597f15c5fb4d31f834e798e0c6b66bbdbdbac491ce26bd1
 
 capture-base-packages:
 	@printf '%s\n' \
