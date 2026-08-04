@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Snapshot E2E vCluster Setup
+name: Snapshot E2E vCluster
 
 # Temporary PR trigger while the e2e infra is being validated.
 on:
   workflow_dispatch:
   pull_request:
     paths:
-      - ".github/workflows/e2e-vcluster-setup.yaml"
+      - ".github/workflows/e2e-vcluster.yaml"
       - ".github/actions/install-vcluster-cli/**"
       - "e2e/**"
       - "charts/snapshot/**"
@@ -21,8 +21,8 @@ permissions:
   contents: read
 
 jobs:
-  setup:
-    name: Prepare Snapshot e2e vCluster
+  e2e:
+    name: Run Snapshot e2e tests in vCluster
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 240
     env:
@@ -46,11 +46,12 @@ jobs:
       PYTHONUNBUFFERED: "1"
       UV_LINK_MODE: copy
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout repository
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
-      - name: Preserve host kubeconfig
+      - name: Capture host kubeconfig
         id: host
         run: |
           echo "kubeconfig=${KUBECONFIG:-}" >> "${GITHUB_OUTPUT}"
@@ -59,7 +60,7 @@ jobs:
         timeout-minutes: 5
         uses: ./.github/actions/install-vcluster-cli
 
-      - name: Cleanup previous e2e namespaces
+      - name: Cleanup stale e2e namespaces
         timeout-minutes: 15
         run: |
           set -euo pipefail
@@ -88,7 +89,7 @@ jobs:
             kubectl delete namespace "${namespace}" --ignore-not-found --wait=false || true
           done
 
-      - name: Install uv
+      - name: Install Python tooling
         timeout-minutes: 5
         run: |
           echo "::group::Install uv"
@@ -106,35 +107,35 @@ jobs:
           uv --version
           echo "::endgroup::"
 
-      - name: Run host preflight
+      - name: Validate host GPU cluster
         timeout-minutes: 5
         run: |
           set -euo pipefail
           uv run --project e2e python -m snapshot_e2e.infra.setup \
             --phase host-preflight
 
-      - name: Create and connect vCluster
+      - name: Create vCluster target
         timeout-minutes: 25
         run: |
           set -euo pipefail
           uv run --project e2e python -m snapshot_e2e.infra.setup \
             --phase vcluster
 
-      - name: Install Snapshot chart
+      - name: Install Snapshot in vCluster
         timeout-minutes: 15
         run: |
           set -euo pipefail
           uv run --project e2e python -m snapshot_e2e.infra.setup \
             --phase snapshot-install
 
-      - name: Wait for Snapshot readiness
+      - name: Wait for Snapshot components
         timeout-minutes: 20
         run: |
           set -euo pipefail
           uv run --project e2e python -m snapshot_e2e.infra.setup \
             --phase snapshot-ready
 
-      - name: Export target kubeconfig
+      - name: Export vCluster kubeconfig
         timeout-minutes: 5
         run: |
           set -euo pipefail
@@ -157,7 +158,7 @@ jobs:
           print(f"Target kubeconfig: {result['target_kubeconfig']}")
           PY
 
-      - name: Inspect prepared target
+      - name: Inspect vCluster target
         timeout-minutes: 5
         run: |
           set -euo pipefail
@@ -166,19 +167,19 @@ jobs:
           kubectl get pods -n "${TEST_NAMESPACE}" -o wide
           kubectl get pvc -n "${TEST_NAMESPACE}" -o wide
 
-      - name: Validate prepared e2e environment
+      - name: Run environment validation
         timeout-minutes: 10
         run: |
           set -euo pipefail
           uv run --project e2e pytest e2e/tests -m environment -vv
 
-      - name: Run Snapshot lifecycle e2e tests
+      - name: Run snapshot lifecycle tests
         timeout-minutes: 90
         run: |
           set -euo pipefail
           uv run --project e2e pytest e2e/tests/test_snapshot_lifecycle.py -vv -s
 
-      - name: Cleanup vCluster
+      - name: Cleanup e2e vCluster
         if: ${{ always() }}
         env:
           KUBECONFIG: ${{ steps.host.outputs.kubeconfig }}
