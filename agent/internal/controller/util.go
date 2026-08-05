@@ -66,12 +66,12 @@ func isContainerReady(pod *corev1.Pod, containerName string) bool {
 	return false
 }
 
-func annotatePod(ctx context.Context, clientset kubernetes.Interface, log logr.Logger, pod *corev1.Pod, annotations map[string]string) error {
+func getPatchPodAnnotations(pod *corev1.Pod, annotations map[string]string) ([]byte, error) {
 	if pod.UID == "" {
-		return fmt.Errorf("pod %s/%s has no UID", pod.Namespace, pod.Name)
+		return nil, fmt.Errorf("pod %s/%s has no UID", pod.Namespace, pod.Name)
 	}
 	if pod.Annotations == nil {
-		return fmt.Errorf("pod %s/%s has no annotations map", pod.Namespace, pod.Name)
+		return nil, fmt.Errorf("pod %s/%s has no annotations map", pod.Namespace, pod.Name)
 	}
 
 	// Test the immutable UID in the same API request as the annotation writes. A
@@ -96,9 +96,16 @@ func annotatePod(ctx context.Context, clientset kubernetes.Interface, log logr.L
 	}
 	patchBytes, err := json.Marshal(patch)
 	if err != nil {
-		return fmt.Errorf("failed to build annotation patch payload: %w", err)
+		return nil, fmt.Errorf("failed to build annotation patch payload: %w", err)
 	}
+	return patchBytes, nil
+}
 
+func annotatePod(ctx context.Context, clientset kubernetes.Interface, log logr.Logger, pod *corev1.Pod, annotations map[string]string) error {
+	patchBytes, err := getPatchPodAnnotations(pod, annotations)
+	if err != nil {
+		return err
+	}
 	_, err = clientset.CoreV1().Pods(pod.Namespace).Patch(
 		ctx, pod.Name, ktypes.JSONPatchType, patchBytes, metav1.PatchOptions{},
 	)
