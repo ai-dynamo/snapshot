@@ -166,7 +166,6 @@ def workload_scheduling() -> dict[str, Any]:
     return {
         "nodeSelector": {
             "nvidia.com/gpu.present": "true",
-            "nvidia.com/mig.config": "all-disabled",
         },
         "tolerations": [
             {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"},

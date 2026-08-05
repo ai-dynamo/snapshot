@@ -40,6 +40,8 @@ DEFAULT_READY_TIMEOUT_SECONDS = 900
 PROGRESS_INTERVAL_SECONDS = 30
 
 SNAPSHOT_LABEL = "app.kubernetes.io/name=snapshot"
+AKS_USER_NODE_LABEL = "kubernetes.azure.com/mode"
+AKS_USER_NODE_VALUE = "user"
 
 
 class SetupError(RuntimeError):
@@ -110,6 +112,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
             "vcluster",
             "snapshot-install",
             "snapshot-ready",
+            "snapshot-uninstall",
         ),
         default=os.environ.get("SNAPSHOT_E2E_SETUP_PHASE", "all"),
         help="Run one setup phase. Default: all.",
@@ -269,6 +272,9 @@ def setup_phase(args: argparse.Namespace) -> SetupResult | None:
     if args.phase == "snapshot-ready":
         run_timed("Snapshot readiness", lambda: setup_snapshot_readiness(args, context))
         return setup_result(args, context)
+    if args.phase == "snapshot-uninstall":
+        run_timed("Snapshot uninstall", lambda: setup_snapshot_uninstall(args, context))
+        return None
     raise SetupError(f"unsupported setup phase: {args.phase}")
 
 
@@ -312,6 +318,10 @@ def setup_snapshot_install(args: argparse.Namespace, context: SetupContext) -> N
     if not args.snapshot_tag:
         raise SetupError("--snapshot-tag or SNAPSHOT_E2E_SNAPSHOT_TAG is required")
     preflight.load_config(context.target_kubeconfig_value or None, None)
+    ensure_snapshot_release_can_own_cluster_resources(
+        args.test_namespace,
+        args.snapshot_release,
+    )
     ensure_target_namespace(args.test_namespace)
     ensure_checkpoint_pvc(
         namespace=args.test_namespace,
@@ -335,6 +345,18 @@ def setup_snapshot_readiness(args: argparse.Namespace, context: SetupContext) ->
         release=args.snapshot_release,
         timeout_seconds=args.ready_timeout_seconds,
     )
+
+
+def setup_snapshot_uninstall(args: argparse.Namespace, context: SetupContext) -> None:
+    log("Loading target kubeconfig")
+    preflight.load_config(context.target_kubeconfig_value or None, None)
+    uninstall_snapshot_chart(
+        kubeconfig=context.target_kubeconfig_value or None,
+        namespace=args.test_namespace,
+        release=args.snapshot_release,
+        timeout=args.helm_timeout,
+    )
+    delete_checkpoint_pvc(namespace=args.test_namespace, name=args.pvc_name)
 
 
 def setup_result(args: argparse.Namespace, context: SetupContext) -> SetupResult:
@@ -446,6 +468,17 @@ def ensure_vcluster_unused(namespace: str, name: str) -> None:
 
 def create_vcluster(namespace: str, name: str, k8s_version: str) -> None:
     log(f"Creating vCluster {namespace}/{name}")
+    synced_nodes = {
+        "enabled": True,
+        "clearImageStatus": True,
+        "selector": {
+            "all": True,
+        },
+    }
+    node_selector = vcluster_node_sync_selector_labels()
+    if node_selector:
+        synced_nodes["selector"]["labels"] = node_selector
+
     values = {
         "controlPlane": {
             "hostPathMapper": {
@@ -454,15 +487,7 @@ def create_vcluster(namespace: str, name: str, k8s_version: str) -> None:
         },
         "sync": {
             "fromHost": {
-                "nodes": {
-                    "enabled": True,
-                    "clearImageStatus": True,
-                    "selector": {
-                        "labels": {
-                            "kubernetes.azure.com/mode": "user",
-                        },
-                    },
-                },
+                "nodes": synced_nodes,
                 "runtimeClasses": {
                     "enabled": True,
                 },
@@ -499,6 +524,26 @@ def create_vcluster(namespace: str, name: str, k8s_version: str) -> None:
         timeout_seconds=900,
         description=f"vCluster pod {namespace}/{name}",
     )
+
+
+def vcluster_node_sync_selector_labels() -> dict[str, str]:
+    """Keep the AKS CI node filter when available; local clusters usually lack it."""
+    try:
+        nodes = client.CoreV1Api().list_node().items
+    except ApiException as exc:
+        raise SetupError(f"failed to list nodes for vCluster node sync: {exc}") from exc
+
+    for node in nodes:
+        labels = node.metadata.labels or {}
+        if labels.get(AKS_USER_NODE_LABEL) == AKS_USER_NODE_VALUE:
+            log(
+                "Using AKS user-node selector for vCluster node sync: "
+                f"{AKS_USER_NODE_LABEL}={AKS_USER_NODE_VALUE}"
+            )
+            return {AKS_USER_NODE_LABEL: AKS_USER_NODE_VALUE}
+
+    log("No AKS user-node label found; vCluster will sync all host nodes")
+    return {}
 
 
 def install_hostpath_mapper(namespace: str, vcluster_name: str, helm_timeout: str) -> None:
@@ -649,6 +694,74 @@ def ensure_target_namespace(namespace: str) -> None:
     ensure_namespace(namespace)
 
 
+def ensure_snapshot_release_can_own_cluster_resources(
+    namespace: str,
+    release: str,
+) -> None:
+    """Fail clearly when another Snapshot Helm release owns cluster-scoped RBAC.
+
+    Direct-cluster mode can share a real cluster with older manual installs.
+    Snapshot creates ClusterRoles/ClusterRoleBindings, so Helm cannot install a
+    second release with the same names in a different namespace.
+    """
+    api = client.RbacAuthorizationV1Api()
+    fullname = snapshot_chart_fullname(release)
+    resources = [
+        ("ClusterRole", f"{fullname}-operator", api.read_cluster_role),
+        ("ClusterRole", f"{fullname}-agent-podsnapshotcontents", api.read_cluster_role),
+        ("ClusterRole", f"{fullname}-agent-resourceslices", api.read_cluster_role),
+        ("ClusterRole", f"{fullname}-agent", api.read_cluster_role),
+        ("ClusterRoleBinding", f"{fullname}-operator", api.read_cluster_role_binding),
+        (
+            "ClusterRoleBinding",
+            f"{fullname}-agent-podsnapshotcontents",
+            api.read_cluster_role_binding,
+        ),
+        (
+            "ClusterRoleBinding",
+            f"{fullname}-agent-resourceslices",
+            api.read_cluster_role_binding,
+        ),
+        ("ClusterRoleBinding", f"{fullname}-agent", api.read_cluster_role_binding),
+    ]
+
+    conflicts = []
+    for kind, name, read in resources:
+        try:
+            resource = read(name)
+        except ApiException as exc:
+            if exc.status == 404:
+                continue
+            raise SetupError(f"failed to check {kind} {name}: {exc}") from exc
+
+        annotations = resource.metadata.annotations or {}
+        owner_name = annotations.get("meta.helm.sh/release-name")
+        owner_namespace = annotations.get("meta.helm.sh/release-namespace")
+        if owner_name == release and owner_namespace == namespace:
+            continue
+
+        owner = (
+            f"Helm release {owner_namespace}/{owner_name}"
+            if owner_name or owner_namespace
+            else "no Helm owner annotations"
+        )
+        conflicts.append(f"{kind}/{name} owned by {owner}")
+
+    if conflicts:
+        raise SetupError(
+            "Snapshot cluster-scoped resources already exist for this release name. "
+            "Uninstall the old Snapshot Helm release, or run direct mode with the "
+            "same SNAPSHOT_E2E_TEST_NAMESPACE/SNAPSHOT_E2E_SNAPSHOT_RELEASE. "
+            "Conflicts: "
+            + "; ".join(conflicts[:5])
+        )
+
+
+def snapshot_chart_fullname(release: str) -> str:
+    name = release if "snapshot" in release else f"{release}-snapshot"
+    return name[:63].rstrip("-")
+
+
 def ensure_checkpoint_pvc(namespace: str, name: str, size: str) -> None:
     api = client.CoreV1Api()
     body = client.V1PersistentVolumeClaim(
@@ -705,6 +818,43 @@ def install_snapshot_chart(
     if kubeconfig:
         env["KUBECONFIG"] = kubeconfig
     run(command, env=env)
+
+
+def uninstall_snapshot_chart(
+    *,
+    kubeconfig: str | None,
+    namespace: str,
+    release: str,
+    timeout: str,
+) -> None:
+    log(f"Uninstalling Snapshot chart release {namespace}/{release}")
+    command = [
+        "helm",
+        "uninstall",
+        release,
+        "--namespace",
+        namespace,
+        "--ignore-not-found",
+        "--wait",
+        "--timeout",
+        timeout,
+    ]
+    env = os.environ.copy()
+    if kubeconfig:
+        env["KUBECONFIG"] = kubeconfig
+    run(command, env=env)
+
+
+def delete_checkpoint_pvc(namespace: str, name: str) -> None:
+    api = client.CoreV1Api()
+    try:
+        api.delete_namespaced_persistent_volume_claim(name=name, namespace=namespace)
+        log(f"Deleted PVC {namespace}/{name}")
+    except ApiException as exc:
+        if exc.status == 404:
+            log(f"PVC {namespace}/{name} does not exist")
+            return
+        raise SetupError(f"failed to delete PVC {namespace}/{name}: {exc}") from exc
 
 
 def wait_for_snapshot_readiness(
@@ -774,16 +924,25 @@ def wait_for_daemonset_rollout_by_selector(
     timeout_seconds: int,
     description: str,
 ) -> None:
-    api = client.AppsV1Api()
+    apps_api = client.AppsV1Api()
+    core_api = client.CoreV1Api()
     deadline = time.monotonic() + timeout_seconds
     last_report = 0.0
     last_detail = "not checked"
     while time.monotonic() < deadline:
-        daemonsets = api.list_namespaced_daemon_set(
+        daemonsets = apps_api.list_namespaced_daemon_set(
             namespace=namespace, label_selector=label_selector
         ).items
-        last_detail = daemonset_progress(daemonsets)
-        if daemonsets and all(daemonset_ready(item) for item in daemonsets):
+        pods = core_api.list_namespaced_pod(
+            namespace=namespace, label_selector=label_selector
+        ).items
+        last_detail = f"{daemonset_progress(daemonsets)}; pods: {pod_progress(pods)}"
+        if (
+            daemonsets
+            and all(daemonset_scheduled(item) for item in daemonsets)
+            and pods
+            and all(pod_ready(pod) for pod in pods)
+        ):
             log(f"{description} daemonset ready: {last_detail}")
             return
         last_report = progress(f"{description} daemonset", last_detail, last_report)
@@ -840,6 +999,14 @@ def daemonset_ready(daemonset: client.V1DaemonSet) -> bool:
     ready = status.number_ready or 0
     updated = status.updated_number_scheduled or 0
     return desired > 0 and ready >= desired and updated >= desired
+
+
+def daemonset_scheduled(daemonset: client.V1DaemonSet) -> bool:
+    status = daemonset.status
+    desired = status.desired_number_scheduled or 0
+    current = status.current_number_scheduled or 0
+    updated = status.updated_number_scheduled or 0
+    return desired > 0 and current >= desired and updated >= desired
 
 
 def progress(description: str, detail: str, last_report: float) -> float:

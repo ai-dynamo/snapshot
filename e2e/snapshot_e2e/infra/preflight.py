@@ -6,9 +6,13 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import os
 import re
+import subprocess
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable
 
 from kubernetes import client, config
@@ -24,6 +28,8 @@ DEFAULT_NODE_SELECTOR = {
     "nvidia.com/gpu.present": "true",
     "nvidia.com/mig.config": "all-disabled",
 }
+MIG_CONFIG_LABEL = "nvidia.com/mig.config"
+MIG_CAPABLE_LABEL = "nvidia.com/mig.capable"
 
 BAD_CONTAINER_WAITING_REASONS = {
     "CrashLoopBackOff",
@@ -33,6 +39,8 @@ BAD_CONTAINER_WAITING_REASONS = {
     "InvalidImageName",
     "RunContainerError",
 }
+
+_NORMALIZED_KUBECONFIGS: list[Path] = []
 
 
 @dataclass(frozen=True)
@@ -125,19 +133,63 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def load_config(kubeconfig: str | None, context: str | None) -> None:
+    config_error: Exception | None = None
     try:
-        config.load_kube_config(config_file=kubeconfig, context=context)
+        normalized_kubeconfig = write_normalized_kubeconfig(kubeconfig, context)
+        config.load_kube_config(config_file=str(normalized_kubeconfig), context=None)
+        return
     except Exception as kube_config_error:
+        config_error = kube_config_error
+        try:
+            config.load_kube_config(config_file=kubeconfig, context=context)
+            return
+        except Exception as direct_kube_config_error:
+            config_error = direct_kube_config_error
+
         if kubeconfig:
             raise RuntimeError(
-                f"failed to load kubeconfig {kubeconfig}"
-            ) from kube_config_error
+                f"failed to load kubeconfig {kubeconfig}: {type(config_error).__name__}"
+            ) from None
         try:
             config.load_incluster_config()
         except Exception as incluster_error:
             raise RuntimeError(
                 "failed to load Kubernetes config from kubeconfig or in-cluster config"
             ) from incluster_error
+
+
+def write_normalized_kubeconfig(kubeconfig: str | None, context: str | None) -> Path:
+    """Render kubeconfig through kubectl before the Python client reads it.
+
+    kubectl tolerates and normalizes kubeconfig shapes the Python client rejects,
+    for example a cert/key user entry that also contains `token: null`.
+    """
+    command = ["kubectl"]
+    if kubeconfig:
+        command.extend(["--kubeconfig", kubeconfig])
+    if context:
+        command.extend(["--context", context])
+    command.extend(["config", "view", "--raw", "--flatten", "--minify"])
+
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        prefix="snapshot-e2e-kubeconfig-",
+        delete=False,
+    ) as output:
+        path = Path(output.name)
+        subprocess.run(command, stdout=output, text=True, check=True)
+
+    _NORMALIZED_KUBECONFIGS.append(path)
+    return path
+
+
+def cleanup_normalized_kubeconfigs() -> None:
+    for path in _NORMALIZED_KUBECONFIGS:
+        path.unlink(missing_ok=True)
+
+
+atexit.register(cleanup_normalized_kubeconfigs)
 
 
 def check_runtime_class(runtime_class: str) -> CheckResult:
@@ -289,6 +341,8 @@ def gpu_node_rejection(
     labels = node.metadata.labels or {}
     for key, expected in required_labels.items():
         actual = labels.get(key)
+        if key == MIG_CONFIG_LABEL and actual is None and not node_is_mig_capable(labels):
+            continue
         if actual != expected:
             return f"label {key}={actual!r}, want {expected!r}"
 
@@ -310,6 +364,10 @@ def gpu_node_rejection(
             f"want >= {min_cuda_driver_major}"
         )
     return None
+
+
+def node_is_mig_capable(labels: dict[str, str]) -> bool:
+    return labels.get(MIG_CAPABLE_LABEL) == "true"
 
 
 def node_is_ready(node: client.V1Node) -> bool:

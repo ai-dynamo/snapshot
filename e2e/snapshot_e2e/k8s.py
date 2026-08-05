@@ -175,5 +175,27 @@ def daemonset_ready(daemonset: client.V1DaemonSet) -> bool:
     return desired > 0 and ready >= desired and updated >= desired
 
 
+def daemonset_scheduled(daemonset: client.V1DaemonSet) -> bool:
+    status = daemonset.status
+    desired = status.desired_number_scheduled or 0
+    current = status.current_number_scheduled or 0
+    updated = status.updated_number_scheduled or 0
+    return desired > 0 and current >= desired and updated >= desired
+
+
+def daemonset_readiness_detail(daemonset: client.V1DaemonSet) -> str:
+    status = daemonset.status
+    desired = status.desired_number_scheduled or 0
+    current = status.current_number_scheduled or 0
+    ready = status.number_ready or 0
+    updated = status.updated_number_scheduled or 0
+    available = status.number_available or 0
+    selector = daemonset.spec.template.spec.node_selector or {}
+    return (
+        f"{daemonset.metadata.name} desired={desired} current={current} ready={ready} "
+        f"updated={updated} available={available} nodeSelector={selector}"
+    )
+
+
 def api_error_detail(exc: ApiException) -> str:
     return f"status={exc.status}, reason={exc.reason}, body={exc.body}"

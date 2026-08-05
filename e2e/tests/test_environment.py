@@ -64,4 +64,22 @@ def test_snapshot_e2e_environment_is_ready() -> None:
         "snapshot-agent",
     )
     assert agents, "Snapshot agent daemonset was not found"
-    assert all(k8s.daemonset_ready(daemonset) for daemonset in agents)
+    not_ready = [
+        k8s.daemonset_readiness_detail(daemonset)
+        for daemonset in agents
+        if not k8s.daemonset_scheduled(daemonset)
+    ]
+    assert not not_ready, "Snapshot agent daemonset did not schedule pods: " + "; ".join(not_ready)
+
+    agent_pods = k8s.list_snapshot_pods(
+        config.namespace,
+        config.release,
+        "snapshot-agent",
+    )
+    assert agent_pods, "Snapshot agent pod was not found"
+    not_ready = [
+        k8s.pod_readiness_detail(pod)
+        for pod in agent_pods
+        if not k8s.pod_containers_ready(pod)
+    ]
+    assert not not_ready, "Snapshot agent pod is not ready: " + "; ".join(not_ready)
