@@ -115,6 +115,7 @@ func makePod(name, namespace, nodeName string, phase corev1.PodPhase, ready bool
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
 			Namespace:   namespace,
+			UID:         "test-pod-uid",
 			Labels:      labels,
 			Annotations: merged,
 		},
@@ -132,6 +133,51 @@ func makePod(name, namespace, nodeName string, phase corev1.PodPhase, ready bool
 			},
 		},
 	}
+}
+
+func TestAnnotatePodUsesUIDPrecondition(t *testing.T) {
+	statusKey := snapshotv1alpha1.RestoreStatusAnnotationPrefix + "main"
+	annotations := map[string]string{statusKey: snapshotv1alpha1.RestoreStatusInProgress}
+
+	t.Run("matching UID updates only requested annotations", func(t *testing.T) {
+		pod := makePod("test-pod", "default", testNodeName, corev1.PodRunning, false, nil, nil)
+		clientset := fake.NewClientset(pod.DeepCopy())
+
+		if err := annotatePod(context.Background(), clientset, testr.New(t), pod, annotations); err != nil {
+			t.Fatalf("annotatePod() error = %v", err)
+		}
+
+		updated, err := clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("get updated pod: %v", err)
+		}
+		if got := updated.Annotations[statusKey]; got != snapshotv1alpha1.RestoreStatusInProgress {
+			t.Fatalf("restore status annotation = %q, want %q", got, snapshotv1alpha1.RestoreStatusInProgress)
+		}
+		if got := updated.Annotations[snapshotv1alpha1.TargetContainersAnnotation]; got != "main" {
+			t.Fatalf("target-container annotation = %q, want main", got)
+		}
+	})
+
+	t.Run("recreated pod is not modified", func(t *testing.T) {
+		observed := makePod("test-pod", "default", testNodeName, corev1.PodRunning, false, nil, nil)
+		observed.UID = "observed-uid"
+		live := observed.DeepCopy()
+		live.UID = "replacement-uid"
+		clientset := fake.NewClientset(live)
+
+		if err := annotatePod(context.Background(), clientset, testr.New(t), observed, annotations); err == nil {
+			t.Fatal("annotatePod() succeeded for a same-named replacement pod")
+		}
+
+		unchanged, err := clientset.CoreV1().Pods(live.Namespace).Get(context.Background(), live.Name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("get replacement pod: %v", err)
+		}
+		if _, ok := unchanged.Annotations[statusKey]; ok {
+			t.Fatalf("replacement pod received restore status: %#v", unchanged.Annotations)
+		}
+	})
 }
 
 func TestCheckpointLocationsFromPod(t *testing.T) {
@@ -638,6 +684,83 @@ func TestReconcileRestorePodPollsRuntimeBeforePodRunning(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("expected RestoreRequested event from runtime polling before PodRunning; actions=%#v", clientset.Actions())
+}
+
+func TestRefreshRestorePodForStartRevalidatesIdentityAndMetadata(t *testing.T) {
+	const checkpointID = "abc123"
+	tests := []struct {
+		name           string
+		mutateObserved func(*corev1.Pod)
+		mutateLive     func(*corev1.Pod)
+		wantEligible   bool
+	}{
+		{name: "unchanged pod", wantEligible: true},
+		{
+			name: "same-named replacement pod",
+			mutateLive: func(pod *corev1.Pod) {
+				pod.UID = "replacement-uid"
+			},
+		},
+		{
+			name: "missing observed UID",
+			mutateObserved: func(pod *corev1.Pod) {
+				pod.UID = ""
+			},
+		},
+		{
+			name: "checkpoint identity changed",
+			mutateLive: func(pod *corev1.Pod) {
+				pod.Labels[snapshotv1alpha1.CheckpointIDLabel] = "other-checkpoint"
+			},
+		},
+		{
+			name: "container no longer targeted",
+			mutateLive: func(pod *corev1.Pod) {
+				pod.Annotations[snapshotv1alpha1.TargetContainersAnnotation] = "sidecar"
+			},
+		},
+		{
+			name: "pod moved off node",
+			mutateLive: func(pod *corev1.Pod) {
+				pod.Spec.NodeName = "other-node"
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			observed := makePod(
+				"test-pod",
+				"default",
+				testNodeName,
+				corev1.PodRunning,
+				false,
+				map[string]string{snapshotv1alpha1.CheckpointIDLabel: checkpointID},
+				nil,
+			)
+			live := observed.DeepCopy()
+			if tc.mutateObserved != nil {
+				tc.mutateObserved(observed)
+			}
+			if tc.mutateLive != nil {
+				tc.mutateLive(live)
+			}
+			w := makeTestController(t, live)
+
+			got, eligible := w.refreshRestorePodForStart(
+				context.Background(), observed, "default/test-pod", "main", checkpointID,
+			)
+			if eligible != tc.wantEligible {
+				t.Fatalf("eligible = %v, want %v", eligible, tc.wantEligible)
+			}
+			if eligible && got == nil {
+				t.Fatal("eligible refresh returned a nil pod")
+			}
+			if !eligible && got != nil {
+				t.Fatalf("ineligible refresh returned pod UID %q", got.UID)
+			}
+		})
+	}
 }
 
 func TestPollForContainerIDSkipsTerminalLivePod(t *testing.T) {
