@@ -163,10 +163,16 @@ def base_pod_spec(
 def workload_scheduling() -> dict[str, Any]:
     # Keep all workload pods on GPU nodes so the shared RWO checkpoint PVC binds in
     # a zone where both source and restore pods can schedule.
+    node_selector = {
+        "nvidia.com/gpu.present": "true",
+    }
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        # Dynamo CI has MIG-capable and non-MIG GPU pools. Match preflight there,
+        # while allowing local clusters that do not expose this label.
+        node_selector["nvidia.com/mig.config"] = "all-disabled"
+
     return {
-        "nodeSelector": {
-            "nvidia.com/gpu.present": "true",
-        },
+        "nodeSelector": node_selector,
         "tolerations": [
             {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"},
             {"key": "dedicated", "operator": "Exists", "effect": "NoSchedule"},
