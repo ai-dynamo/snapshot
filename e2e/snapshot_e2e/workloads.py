@@ -141,6 +141,9 @@ def base_pod_spec(
     }
     spec: dict[str, Any] = {
         "restartPolicy": "Never",
+        # These are throwaway test pods; keep cleanup from waiting on the
+        # Kubernetes default 30s graceful termination window between tests.
+        "terminationGracePeriodSeconds": 1,
         "containers": [container],
         **workload_scheduling(),
         "volumes": [
