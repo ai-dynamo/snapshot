@@ -53,7 +53,8 @@ class SetupResult:
     """Setup outputs consumed by the workflow and local commands.
 
     target_kubeconfig is always the kubeconfig tests should use. In direct mode
-    it points at the original cluster; in vCluster mode it points at the vCluster.
+    it points at the configured cluster; in vCluster mode it points at the
+    generated vCluster kubeconfig.
     """
 
     mode: str
@@ -235,7 +236,9 @@ def setup_context(args: argparse.Namespace) -> SetupContext:
         ).resolve()
         target_kubeconfig_value = str(target_kubeconfig)
     else:
-        target_kubeconfig_value = args.target_kubeconfig or args.kubeconfig or ""
+        # SNAPSHOT_E2E_TARGET_KUBECONFIG is vCluster-only. Ignore it in direct
+        # mode so a stale localhost vCluster kubeconfig cannot shadow KUBECONFIG.
+        target_kubeconfig_value = args.kubeconfig or ""
 
     return SetupContext(
         workspace=workspace,

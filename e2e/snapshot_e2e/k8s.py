@@ -28,12 +28,19 @@ class E2EConfig:
 
     @classmethod
     def from_env(cls) -> "E2EConfig":
+        mode = os.environ.get("SNAPSHOT_E2E_MODE", "direct")
+        if mode == "vcluster":
+            kubeconfig = os.environ.get(
+                "SNAPSHOT_E2E_TARGET_KUBECONFIG"
+            ) or os.environ.get("KUBECONFIG")
+        else:
+            kubeconfig = os.environ.get("KUBECONFIG")
+
         return cls(
             namespace=os.environ.get("SNAPSHOT_E2E_TEST_NAMESPACE", "snapshot-e2e"),
             release=os.environ.get("SNAPSHOT_E2E_SNAPSHOT_RELEASE", "snapshot"),
             pvc_name=os.environ.get("SNAPSHOT_E2E_PVC_NAME", "snapshot-pvc"),
-            kubeconfig=os.environ.get("SNAPSHOT_E2E_TARGET_KUBECONFIG")
-            or os.environ.get("KUBECONFIG"),
+            kubeconfig=kubeconfig,
         )
 
 

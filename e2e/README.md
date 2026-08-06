@@ -35,6 +35,7 @@ those from a release in another namespace.
 export SNAPSHOT_E2E_MODE=direct
 export SNAPSHOT_E2E_TEST_NAMESPACE=snapshot-e2e
 export SNAPSHOT_E2E_SNAPSHOT_TAG=<published-snapshot-tag>
+unset SNAPSHOT_E2E_TARGET_KUBECONFIG
 
 uv run --project e2e python -m snapshot_e2e.infra.setup --phase host-preflight
 uv run --project e2e python -m snapshot_e2e.infra.setup --phase snapshot-install

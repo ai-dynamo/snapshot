@@ -243,6 +243,11 @@ mkdir -p {STATE_DIR}
 
 
 def restore_command(image: str, gpu: bool) -> str:
+    # Restore starts from a live placeholder container. The agent nsenters into
+    # it later, so this command may run briefly; record the initial restore token
+    # and then wait for restore-complete. The agent may start restore soon after
+    # the placeholder starts, so use an init container if this pre-restore write
+    # ever needs to be guaranteed.
     return f"""set -euo pipefail
 echo "[restore] image={image}"
 restore_token="${{{RESTORE_TOKEN_ENV}}}"
