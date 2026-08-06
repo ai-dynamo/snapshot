@@ -68,7 +68,7 @@ export KUBECONFIG="$SNAPSHOT_E2E_HOST_KUBECONFIG"
 export SNAPSHOT_E2E_HOST_NAMESPACE=snapshot-e2e-manual-$(date +%s)
 export SNAPSHOT_E2E_VCLUSTER_NAME="$SNAPSHOT_E2E_HOST_NAMESPACE"
 export SNAPSHOT_E2E_TEST_NAMESPACE=snapshot-e2e
-export SNAPSHOT_E2E_TARGET_KUBECONFIG="$PWD/.kubeconfig-snapshot-e2e"
+export SNAPSHOT_E2E_TARGET_KUBECONFIG="$(mktemp -t snapshot-e2e-kubeconfig.XXXXXX)"
 export SNAPSHOT_E2E_SNAPSHOT_TAG=<published-snapshot-tag>
 
 uv run --project e2e python -m snapshot_e2e.infra.setup --phase host-preflight
@@ -98,15 +98,19 @@ vcluster connect "$SNAPSHOT_E2E_VCLUSTER_NAME" \
   --namespace "$SNAPSHOT_E2E_HOST_NAMESPACE" \
   --server https://127.0.0.1:8443 \
   --print > "$SNAPSHOT_E2E_TARGET_KUBECONFIG"
+chmod 0600 "$SNAPSHOT_E2E_TARGET_KUBECONFIG"
 ```
 
 When finished with a local vCluster run, clean up explicitly:
 
 ```bash
 uv run --project e2e python -m snapshot_e2e.infra.setup --phase snapshot-uninstall
+
+export KUBECONFIG="$SNAPSHOT_E2E_HOST_KUBECONFIG"
 helm uninstall vcluster-hpm -n "$SNAPSHOT_E2E_HOST_NAMESPACE" --ignore-not-found
 vcluster delete "$SNAPSHOT_E2E_VCLUSTER_NAME" -n "$SNAPSHOT_E2E_HOST_NAMESPACE"
 kubectl delete namespace "$SNAPSHOT_E2E_HOST_NAMESPACE" --ignore-not-found
+rm -f "$SNAPSHOT_E2E_TARGET_KUBECONFIG"
 ```
 
 ## Restore Verification

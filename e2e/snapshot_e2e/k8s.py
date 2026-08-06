@@ -175,6 +175,8 @@ def pod_readiness_detail(pod: client.V1Pod) -> str:
 
 
 def daemonset_ready(daemonset: client.V1DaemonSet) -> bool:
+    if not daemonset_observed(daemonset):
+        return False
     status = daemonset.status
     desired = status.desired_number_scheduled or 0
     ready = status.number_ready or 0
@@ -183,11 +185,19 @@ def daemonset_ready(daemonset: client.V1DaemonSet) -> bool:
 
 
 def daemonset_scheduled(daemonset: client.V1DaemonSet) -> bool:
+    if not daemonset_observed(daemonset):
+        return False
     status = daemonset.status
     desired = status.desired_number_scheduled or 0
     current = status.current_number_scheduled or 0
     updated = status.updated_number_scheduled or 0
     return desired > 0 and current >= desired and updated >= desired
+
+
+def daemonset_observed(daemonset: client.V1DaemonSet) -> bool:
+    observed = daemonset.status.observed_generation or 0
+    generation = daemonset.metadata.generation or 0
+    return observed >= generation
 
 
 def daemonset_readiness_detail(daemonset: client.V1DaemonSet) -> str:

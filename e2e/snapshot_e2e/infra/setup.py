@@ -25,6 +25,7 @@ from kubernetes import client
 from kubernetes.client import ApiException
 from packaging.version import Version
 
+from snapshot_e2e import k8s
 from snapshot_e2e.infra import preflight
 
 
@@ -353,13 +354,24 @@ def setup_snapshot_readiness(args: argparse.Namespace, context: SetupContext) ->
 def setup_snapshot_uninstall(args: argparse.Namespace, context: SetupContext) -> None:
     log("Loading target kubeconfig")
     preflight.load_config(context.target_kubeconfig_value or None, None)
-    uninstall_snapshot_chart(
-        kubeconfig=context.target_kubeconfig_value or None,
-        namespace=args.test_namespace,
-        release=args.snapshot_release,
-        timeout=args.helm_timeout,
-    )
-    delete_checkpoint_pvc(namespace=args.test_namespace, name=args.pvc_name)
+    failures = []
+    try:
+        uninstall_snapshot_chart(
+            kubeconfig=context.target_kubeconfig_value or None,
+            namespace=args.test_namespace,
+            release=args.snapshot_release,
+            timeout=args.helm_timeout,
+        )
+    except SetupError as exc:
+        failures.append(f"chart uninstall: {exc}")
+
+    try:
+        delete_checkpoint_pvc(namespace=args.test_namespace, name=args.pvc_name)
+    except SetupError as exc:
+        failures.append(f"PVC deletion: {exc}")
+
+    if failures:
+        raise SetupError("snapshot uninstall incomplete: " + "; ".join(failures))
 
 
 def setup_result(args: argparse.Namespace, context: SetupContext) -> SetupResult:
@@ -539,6 +551,8 @@ def vcluster_node_sync_selector_labels() -> dict[str, str]:
     for node in nodes:
         labels = node.metadata.labels or {}
         if labels.get(AKS_USER_NODE_LABEL) == AKS_USER_NODE_VALUE:
+            # This matches the current Dynamo AKS runner layout. If that cluster
+            # layout changes, revisit which host nodes the vCluster should sync.
             log(
                 "Using AKS user-node selector for vCluster node sync: "
                 f"{AKS_USER_NODE_LABEL}={AKS_USER_NODE_VALUE}"
@@ -664,8 +678,22 @@ def connect_vcluster(
                 temp_kubeconfig.unlink(missing_ok=True)
             raise
         target_kubeconfig.chmod(0o600)
+    except Exception:
+        terminate_process(process)
+        raise
     finally:
         log_file.close()
+
+
+def terminate_process(process: subprocess.Popen[Any]) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=10)
 
 
 def wait_for_https(url: str, process: subprocess.Popen[Any], log_path: Path) -> None:
@@ -782,9 +810,18 @@ def ensure_checkpoint_pvc(namespace: str, name: str, size: str) -> None:
             raise SetupError(f"failed to create PVC {namespace}/{name}: {exc}") from exc
         pvc = api.read_namespaced_persistent_volume_claim(name, namespace)
         requested = (pvc.spec.resources.requests or {}).get("storage")
+        access_modes = list(pvc.spec.access_modes or [])
         detail = f"phase={pvc.status.phase}"
+        mismatches = []
         if requested != size:
-            detail += f", requested storage={requested}, configured size={size}"
+            mismatches.append(f"requested storage={requested}, configured size={size}")
+        if access_modes != ["ReadWriteOnce"]:
+            mismatches.append(f"accessModes={access_modes}, expected ['ReadWriteOnce']")
+        if mismatches:
+            raise SetupError(
+                f"PVC {namespace}/{name} already exists with incompatible spec: "
+                + ", ".join(mismatches)
+            )
         log(f"PVC {namespace}/{name} already exists: {detail}")
 
 
@@ -942,7 +979,7 @@ def wait_for_daemonset_rollout_by_selector(
         last_detail = f"{daemonset_progress(daemonsets)}; pods: {pod_progress(pods)}"
         if (
             daemonsets
-            and all(daemonset_scheduled(item) for item in daemonsets)
+            and all(k8s.daemonset_scheduled(item) for item in daemonsets)
             and pods
             and all(pod_ready(pod) for pod in pods)
         ):
@@ -982,7 +1019,7 @@ def wait_for_daemonset_rollout(
             time.sleep(5)
             continue
         last_detail = daemonset_progress([daemonset])
-        if daemonset_ready(daemonset):
+        if k8s.daemonset_ready(daemonset):
             log(f"DaemonSet {namespace}/{name} ready: {last_detail}")
             return
         last_report = progress(
@@ -994,22 +1031,6 @@ def wait_for_daemonset_rollout(
     raise SetupError(
         f"timed out waiting for daemonset {namespace}/{name}; last state: {last_detail}"
     )
-
-
-def daemonset_ready(daemonset: client.V1DaemonSet) -> bool:
-    status = daemonset.status
-    desired = status.desired_number_scheduled or 0
-    ready = status.number_ready or 0
-    updated = status.updated_number_scheduled or 0
-    return desired > 0 and ready >= desired and updated >= desired
-
-
-def daemonset_scheduled(daemonset: client.V1DaemonSet) -> bool:
-    status = daemonset.status
-    desired = status.desired_number_scheduled or 0
-    current = status.current_number_scheduled or 0
-    updated = status.updated_number_scheduled or 0
-    return desired > 0 and current >= desired and updated >= desired
 
 
 def progress(description: str, detail: str, last_report: float) -> float:
@@ -1056,7 +1077,7 @@ def daemonset_detail(daemonset: client.V1DaemonSet) -> str:
     return (
         f"{daemonset.metadata.name} desired={desired} ready={ready} "
         f"updated={updated} unavailable={unavailable} "
-        f"ready_status={daemonset_ready(daemonset)}"
+        f"ready_status={k8s.daemonset_ready(daemonset)}"
     )
 
 

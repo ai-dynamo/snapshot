@@ -29,17 +29,18 @@ VERSION = "v1alpha1"
 PODSNAPSHOTS = "podsnapshots"
 PODSNAPSHOTCONTENTS = "podsnapshotcontents"
 PROGRESS_INTERVAL_SECONDS = 30
+TERMINAL_POD_PHASES = {"Failed", "Succeeded"}
 
 
 def wait_for_pod_deleted(namespace: str, name: str, timeout: int = 180) -> None:
-    def gone() -> bool:
+    def gone() -> bool | None:
         try:
             k8s.read_pod(namespace, name)
         except ApiException as exc:
             if exc.status == 404:
                 return True
             raise
-        return False
+        return None
 
     def detail() -> str:
         try:
@@ -75,7 +76,13 @@ def create_podsnapshot(
 def wait_for_pod_ready(namespace: str, name: str, timeout: int = 600) -> client.V1Pod:
     def ready() -> client.V1Pod | None:
         pod = k8s.read_pod(namespace, name)
-        return pod if k8s.pod_containers_ready(pod) else None
+        if k8s.pod_containers_ready(pod):
+            return pod
+        if pod.status.phase in TERMINAL_POD_PHASES:
+            raise AssertionError(
+                f"pod {namespace}/{name} reached phase {pod.status.phase} before Ready"
+            )
+        return None
 
     def detail() -> str:
         try:
@@ -88,12 +95,12 @@ def wait_for_pod_ready(namespace: str, name: str, timeout: int = 600) -> client.
 
 
 def wait_for_file(namespace: str, pod: str, path: str, timeout: int = 180) -> None:
-    def exists() -> bool:
+    def exists() -> bool | None:
         try:
             response = k8s.exec_command(namespace, pod, f"test -f {path}")
-            return response == "" or response is None
+            return True if response == "" or response is None else None
         except Exception:
-            return False
+            return None
 
     wait_for(f"{namespace}/{pod}:{path}", exists, timeout)
 
@@ -452,7 +459,7 @@ def wait_for(
     last_report = 0.0
     while time.monotonic() < deadline:
         result = fn()
-        if result:
+        if result is not None:
             return result
         now = time.monotonic()
         if last_report == 0.0 or now - last_report >= PROGRESS_INTERVAL_SECONDS:

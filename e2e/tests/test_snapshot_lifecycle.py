@@ -248,12 +248,34 @@ def assert_podsnapshot_ready(
     assert content["metadata"].get("labels", {}).get("nvidia.com/snapshot-node") == source_node
 
 
-def assert_restore_events(namespace: str, pod_name: str, expected_reasons: set[str]) -> None:
+def assert_restore_events(
+    namespace: str,
+    pod_name: str,
+    expected_reasons: set[str],
+    *,
+    timeout: int = 45,
+) -> None:
+    def observed() -> set[str] | None:
+        reasons = restore_event_reasons(namespace, pod_name)
+        return reasons if expected_reasons.issubset(reasons) else None
+
+    def detail() -> str:
+        return f"saw={sorted(restore_event_reasons(namespace, pod_name))}"
+
+    reasons = snap.wait_for(
+        f"restore events {sorted(expected_reasons)} for {namespace}/{pod_name}",
+        observed,
+        timeout,
+        detail=detail,
+    )
+    missing = expected_reasons - reasons
+    assert not missing, f"missing restore events {missing}; saw {sorted(reasons)}"
+
+
+def restore_event_reasons(namespace: str, pod_name: str) -> set[str]:
     events = k8s.list_events(namespace)
-    reasons = {
+    return {
         event.reason
         for event in events
         if event.involved_object and event.involved_object.name == pod_name
     }
-    missing = expected_reasons - reasons
-    assert not missing, f"missing restore events {missing}; saw {sorted(reasons)}"
