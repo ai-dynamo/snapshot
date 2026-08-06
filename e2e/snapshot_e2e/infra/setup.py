@@ -36,7 +36,7 @@ DEFAULT_PVC_NAME = "snapshot-pvc"
 DEFAULT_PVC_SIZE = "2Gi"
 DEFAULT_VCLUSTER_K8S_VERSION = "v1.32.13"
 DEFAULT_VCLUSTER_LOCAL_PORT = 8443
-DEFAULT_HELM_TIMEOUT = "10m"
+DEFAULT_HELM_TIMEOUT = "6m"
 DEFAULT_READY_TIMEOUT_SECONDS = 900
 PROGRESS_INTERVAL_SECONDS = 30
 
@@ -697,7 +697,9 @@ def terminate_process(process: subprocess.Popen[Any]) -> None:
 
 
 def wait_for_https(url: str, process: subprocess.Popen[Any], log_path: Path) -> None:
-    context = ssl._create_unverified_context()
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
     last_report = 0.0
     for _ in range(60):
         if process.poll() is not None:

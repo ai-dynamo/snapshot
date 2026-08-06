@@ -95,14 +95,22 @@ def wait_for_pod_ready(namespace: str, name: str, timeout: int = 600) -> client.
 
 
 def wait_for_file(namespace: str, pod: str, path: str, timeout: int = 180) -> None:
+    last_error: str | None = None
+
     def exists() -> bool | None:
+        nonlocal last_error
         try:
             response = k8s.exec_command(namespace, pod, f"test -f {path}")
+            last_error = None
             return True if response == "" or response is None else None
-        except Exception:
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
             return None
 
-    wait_for(f"{namespace}/{pod}:{path}", exists, timeout)
+    def detail() -> str:
+        return f"last_error={last_error}" if last_error else "file not observed yet"
+
+    wait_for(f"{namespace}/{pod}:{path}", exists, timeout, detail=detail)
 
 
 def matching_observation_count(
@@ -457,13 +465,15 @@ def wait_for(
     start = time.monotonic()
     deadline = time.monotonic() + timeout
     last_report = 0.0
+    last_detail = ""
     while time.monotonic() < deadline:
         result = fn()
         if result is not None:
             return result
         now = time.monotonic()
         if last_report == 0.0 or now - last_report >= PROGRESS_INTERVAL_SECONDS:
-            suffix = f": {detail()}" if detail else ""
+            last_detail = detail() if detail else ""
+            suffix = f": {last_detail}" if last_detail else ""
             elapsed = now - start
             print(
                 f"[{time.strftime('%H:%M:%S')}] waiting for {description} "
@@ -472,4 +482,5 @@ def wait_for(
             )
             last_report = now
         time.sleep(5)
-    raise AssertionError(f"timed out waiting for {description}")
+    suffix = f": {last_detail}" if last_detail else ""
+    raise AssertionError(f"timed out waiting for {description}{suffix}")

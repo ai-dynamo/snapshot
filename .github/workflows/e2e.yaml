@@ -50,7 +50,7 @@ jobs:
       UV_LINK_MODE: copy
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
@@ -92,23 +92,31 @@ jobs:
             kubectl delete namespace "${namespace}" --ignore-not-found --wait=false || true
           done
 
-      - name: Install Python tooling
+      - name: Install Python tooling (ARM64)
+        if: ${{ runner.arch == 'ARM64' }}
         timeout-minutes: 3
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.10.11"
+          checksum: "23003df007937dd607409c8ddf010baa82bad2673e60e254632ca5b04edcce13"
+          enable-cache: "false"
+          download-from-astral-mirror: "false"
+
+      - name: Install Python tooling (X64)
+        if: ${{ runner.arch == 'X64' }}
+        timeout-minutes: 3
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.10.11"
+          checksum: "5a360b0de092ddf4131f5313d0411b48c4e95e8107e40c3f8f2e9fcb636b3583"
+          enable-cache: "false"
+          download-from-astral-mirror: "false"
+
+      - name: Validate Python tooling
+        timeout-minutes: 1
         run: |
-          echo "::group::Install uv"
           set -euo pipefail
-
-          if ! command -v uv >/dev/null 2>&1; then
-            curl --retry 5 --retry-delay 2 \
-              --connect-timeout 10 --max-time 120 \
-              --fail --show-error -LsSf \
-              https://astral.sh/uv/install.sh | sh
-            echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
-            export PATH="${HOME}/.local/bin:${PATH}"
-          fi
-
           uv --version
-          echo "::endgroup::"
 
       - name: Resolve Snapshot image tag
         timeout-minutes: 3
@@ -167,35 +175,35 @@ jobs:
         timeout-minutes: 3
         run: |
           set -euo pipefail
-          uv run --project e2e python -m snapshot_e2e.infra.setup \
+          uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
             --phase host-preflight
 
       - name: Create vCluster target
         timeout-minutes: 12
         run: |
           set -euo pipefail
-          uv run --project e2e python -m snapshot_e2e.infra.setup \
+          uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
             --phase vcluster
 
       - name: Install Snapshot in vCluster
         timeout-minutes: 8
         run: |
           set -euo pipefail
-          uv run --project e2e python -m snapshot_e2e.infra.setup \
+          uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
             --phase snapshot-install
 
       - name: Wait for Snapshot components
         timeout-minutes: 10
         run: |
           set -euo pipefail
-          uv run --project e2e python -m snapshot_e2e.infra.setup \
+          uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
             --phase snapshot-ready
 
       - name: Export vCluster kubeconfig
         timeout-minutes: 3
         run: |
           set -euo pipefail
-          uv run --project e2e python - <<'PY'
+          uv run --locked --project e2e python - <<'PY'
           import json
           import os
           from pathlib import Path
@@ -227,13 +235,13 @@ jobs:
         timeout-minutes: 5
         run: |
           set -euo pipefail
-          uv run --project e2e pytest e2e/tests -m environment -vv
+          uv run --locked --project e2e pytest e2e/tests -m environment -vv
 
       - name: Run snapshot lifecycle tests
         timeout-minutes: 35
         run: |
           set -euo pipefail
-          uv run --project e2e pytest e2e/tests/test_snapshot_lifecycle.py -vv -s
+          uv run --locked --project e2e pytest e2e/tests/test_snapshot_lifecycle.py -vv -s
 
       - name: Cleanup e2e vCluster
         if: ${{ always() }}
