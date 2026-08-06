@@ -18,6 +18,12 @@ CONTROL_DIR = "/snapshot-control"
 CHECKPOINT_DIR = "/checkpoints"
 SOURCE_READY = f"{CONTROL_DIR}/ready-for-snapshot"
 RESTORE_DONE = f"{CONTROL_DIR}/restore-complete"
+RESTORE_INITIAL_TOKEN = f"{CONTROL_DIR}/initial-restore-token"
+STATE_DIR = "/tmp/e2e-state"
+FILE_TOKEN = f"{STATE_DIR}/file-token"
+OBSERVATIONS = f"{STATE_DIR}/observations.log"
+SOURCE_TOKEN_ENV = "SNAPSHOT_E2E_SOURCE_TOKEN"
+RESTORE_TOKEN_ENV = "SNAPSHOT_E2E_RESTORE_TOKEN"
 
 
 @dataclass(frozen=True)
@@ -28,6 +34,8 @@ class TestRun:
     source_pod: str
     restore_pod: str
     image: str
+    source_token: str
+    restore_token: str
 
     @classmethod
     def new(cls, prefix: str) -> "TestRun":
@@ -39,6 +47,8 @@ class TestRun:
             source_pod=f"{suffix}-source",
             restore_pod=f"{suffix}-restore",
             image=workload_image(),
+            source_token=f"{suffix}-source-state",
+            restore_token=f"{suffix}-restore-state",
         )
 
     @property
@@ -68,11 +78,15 @@ def source_pod(
     }
     if include_target_annotation:
         metadata["annotations"]["nvidia.com/snapshot-target-containers"] = CONTAINER
+    spec = base_pod_spec(config, run, source_command(run.image, gpu), gpu)
+    spec["containers"][0]["env"] = [
+        {"name": SOURCE_TOKEN_ENV, "value": run.source_token},
+    ]
     return {
         "apiVersion": "v1",
         "kind": "Pod",
         "metadata": metadata,
-        "spec": base_pod_spec(config, run, source_command(run.image, gpu), gpu),
+        "spec": spec,
     }
 
 
@@ -93,6 +107,7 @@ def restore_pod(
     spec["containers"][0]["env"] = [
         {"name": "DYN_SNAPSHOT_RESTORE_STANDBY", "value": "1"},
         {"name": "DYN_SNAPSHOT_CONTROL_DIR", "value": CONTROL_DIR},
+        {"name": RESTORE_TOKEN_ENV, "value": run.restore_token},
     ]
     spec["containers"][0]["startupProbe"] = {
         "exec": {"command": ["/bin/bash", "-lc", f"test -f {RESTORE_DONE}"]},
@@ -222,53 +237,92 @@ def source_command(image: str, gpu: bool) -> str:
     state_loop = CUDA_SOURCE if gpu else CPU_SOURCE
     return f"""set -euo pipefail
 echo "[source] image={image}"
-echo "fs-marker-before-snapshot" > /tmp/snapshot-fs-marker
+mkdir -p {STATE_DIR}
 {state_loop}
 """
 
 
 def restore_command(image: str, gpu: bool) -> str:
-    gpu_validation = "test -s /tmp/gpu-marker" if gpu else "true"
     return f"""set -euo pipefail
 echo "[restore] image={image}"
+restore_token="${{{RESTORE_TOKEN_ENV}}}"
+echo "[restore] initial_restore_token=$restore_token"
+printf '%s\\n' "$restore_token" > {RESTORE_INITIAL_TOKEN}
 echo "[restore] waiting for restore-complete"
 while [ ! -f {RESTORE_DONE} ]; do sleep 1; done
 echo "[restore] restore-complete"
-test -f /tmp/snapshot-fs-marker
-test -s /tmp/tick.log
-{gpu_validation}
-cat /tmp/tick.log
+test -f {FILE_TOKEN}
+test -s {OBSERVATIONS}
+cat {OBSERVATIONS}
 sleep infinity
 """
 
 
-# CPU_SOURCE proves ordinary process state and filesystem state survive restore:
-# it writes a marker file, then keeps appending an incrementing counter.
+# CPU_SOURCE stores one token in two places: a shell variable, which is process
+# memory, and {FILE_TOKEN}, which is filesystem state. The loop only provides
+# post-restore liveness: every observation must keep reporting the source token.
 CPU_SOURCE = f"""
-echo cpu-state > /tmp/cpu-marker
+cpu_token="${{{SOURCE_TOKEN_ENV}}}"
+unset {SOURCE_TOKEN_ENV}
+printf '%s\\n' "$cpu_token" > {FILE_TOKEN}
 echo ready > {SOURCE_READY}
-i=0
+seq=0
 while true; do
-  echo "tick $i" >> /tmp/tick.log
-  i=$((i + 1))
+  file_token="$(cat {FILE_TOKEN} 2>/dev/null || true)"
+  printf 'observation seq=%s cpu=%s file=%s gpu=disabled\\n' "$seq" "$cpu_token" "$file_token" >> {OBSERVATIONS}
+  seq=$((seq + 1))
   sleep 5
 done
 """
 
 
-# CUDA_SOURCE mirrors the same counter in CPU memory, /tmp/tick.log, and CUDA
-# device memory. After restore, the loop fails if restored GPU memory no longer
-# matches the restored CPU counter.
+# CUDA_SOURCE stores the source token in CPU memory, {FILE_TOKEN}, and a CUDA
+# device allocation. On each loop it reads GPU memory back, compares it with CPU
+# memory, then logs all three values. After restore, seeing the source token here
+# proves the target pod's different restore token was replaced by snapshot state.
 CUDA_SOURCE = f"""
 cat >/tmp/cuda_hold.c <<'C_EOF'
 #include <dlfcn.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
+#define TOKEN_SIZE 256
 typedef int CUdevice;
 typedef void *CUcontext;
 typedef void *CUdeviceptr;
 typedef int CUresult;
+
+static void read_file_token(char *buffer, size_t size) {{
+  FILE *file = fopen("{FILE_TOKEN}", "r");
+  if (!file) {{ buffer[0] = '\\0'; return; }}
+  if (!fgets(buffer, size, file)) {{ buffer[0] = '\\0'; }}
+  buffer[strcspn(buffer, "\\n")] = '\\0';
+  fclose(file);
+}}
+
 int main(void) {{
+  /* Copy the source token out of the environment into ordinary process memory,
+     then remove the env var so observations depend on restored memory state. */
+  const char *initial_token = getenv("{SOURCE_TOKEN_ENV}");
+  if (!initial_token || initial_token[0] == '\\0') {{
+    fprintf(stderr, "{SOURCE_TOKEN_ENV} is required\\n");
+    return 1;
+  }}
+  char cpu_token[TOKEN_SIZE];
+  memset(cpu_token, 0, sizeof(cpu_token));
+  strncpy(cpu_token, initial_token, sizeof(cpu_token) - 1);
+  unsetenv("{SOURCE_TOKEN_ENV}");
+
+  /* Store the same token in the container filesystem; rootfs diff restore
+     should bring this file into the restore pod. */
+  FILE *file = fopen("{FILE_TOKEN}", "w");
+  if (!file) {{ perror("open file token"); return 1; }}
+  fprintf(file, "%s\\n", cpu_token);
+  fclose(file);
+
+  /* Resolve CUDA driver symbols dynamically so the workload does not need to
+     link against CUDA at build time. */
   void *cuda = dlopen("libcuda.so.1", RTLD_NOW);
   if (!cuda) {{ fprintf(stderr, "dlopen libcuda.so.1 failed: %s\\n", dlerror()); return 1; }}
   CUresult (*cuInit)(unsigned int) = dlsym(cuda, "cuInit");
@@ -284,41 +338,42 @@ int main(void) {{
   CUdevice device = 0;
   CUcontext context = NULL;
   CUdeviceptr ptr = NULL;
+  /* Allocate a tiny GPU buffer and copy the source token into device memory.
+     The loop below reads it back after restore to prove GPU memory survived. */
   if (cuInit(0) != 0 || cuDeviceGet(&device, 0) != 0 ||
-      cuCtxCreate(&context, 0, device) != 0 || cuMemAlloc(&ptr, 4096) != 0) {{
+      cuCtxCreate(&context, 0, device) != 0 ||
+      cuMemAlloc(&ptr, sizeof(cpu_token)) != 0) {{
     fprintf(stderr, "CUDA setup failed\\n");
     return 1;
   }}
-  int tick = 0;
-  int gpu_tick = tick;
-  if (cuMemcpyHtoD(ptr, &gpu_tick, sizeof(gpu_tick)) != 0) {{
-    fprintf(stderr, "initial CUDA counter copy failed\\n");
+  if (cuMemcpyHtoD(ptr, cpu_token, sizeof(cpu_token)) != 0) {{
+    fprintf(stderr, "initial CUDA token copy failed\\n");
     return 1;
   }}
-  FILE *gpu = fopen("/tmp/gpu-marker", "w");
-  if (gpu) {{ fprintf(gpu, "cuda-counter-ready\\n"); fclose(gpu); }}
   FILE *ready = fopen("{SOURCE_READY}", "w");
   if (ready) {{ fprintf(ready, "ready\\n"); fclose(ready); }}
+  int seq = 0;
   while (1) {{
-    gpu_tick = -1;
-    if (cuMemcpyDtoH(&gpu_tick, ptr, sizeof(gpu_tick)) != 0) {{
-      fprintf(stderr, "CUDA counter read failed\\n");
+    char gpu_token[TOKEN_SIZE];
+    char file_token[TOKEN_SIZE];
+    memset(gpu_token, 0, sizeof(gpu_token));
+    memset(file_token, 0, sizeof(file_token));
+    if (cuMemcpyDtoH(gpu_token, ptr, sizeof(gpu_token)) != 0) {{
+      fprintf(stderr, "CUDA token read failed\\n");
       return 2;
     }}
-    if (gpu_tick != tick) {{
-      FILE *error = fopen("/tmp/gpu-marker", "a");
-      if (error) {{ fprintf(error, "counter-mismatch cpu=%d gpu=%d\\n", tick, gpu_tick); fclose(error); }}
-      fprintf(stderr, "CUDA counter mismatch: cpu=%d gpu=%d\\n", tick, gpu_tick);
+    gpu_token[TOKEN_SIZE - 1] = '\\0';
+    read_file_token(file_token, sizeof(file_token));
+    if (strcmp(gpu_token, cpu_token) != 0) {{
+      fprintf(stderr, "CUDA token mismatch: cpu=%s gpu=%s\\n", cpu_token, gpu_token);
       return 2;
     }}
-    FILE *log = fopen("/tmp/tick.log", "a");
-    if (log) {{ fprintf(log, "tick %d\\n", tick); fclose(log); }}
-    tick++;
-    gpu_tick = tick;
-    if (cuMemcpyHtoD(ptr, &gpu_tick, sizeof(gpu_tick)) != 0) {{
-      fprintf(stderr, "CUDA counter write failed\\n");
-      return 2;
+    FILE *log = fopen("{OBSERVATIONS}", "a");
+    if (log) {{
+      fprintf(log, "observation seq=%d cpu=%s file=%s gpu=%s\\n", seq, cpu_token, file_token, gpu_token);
+      fclose(log);
     }}
+    seq++;
     sleep(5);
   }}
 }}

@@ -17,6 +17,13 @@ def test_successful_snapshot_captures_cpu_gpu_and_fs(
 ) -> None:
     try:
         source, source_node = create_ready_source(config, run, gpu=True)
+        snap.wait_for_state_observations(
+            config.namespace,
+            run.source_pod,
+            run.source_token,
+            gpu=True,
+            minimum=2,
+        )
         snap.create_podsnapshot(
             config.namespace,
             run.snapshot_name,
@@ -47,9 +54,16 @@ def test_successful_snapshot_captures_cpu_gpu_and_fs(
         assert "./inventory.img" in artifact_listing
         assert "./manifest.yaml" in artifact_listing
         assert "./rootfs-diff.tar" in artifact_listing
-        assert "./tmp/snapshot-fs-marker" in artifact_listing
-        assert "./tmp/tick.log" in artifact_listing
-        assert "./tmp/gpu-marker" in artifact_listing
+        assert "./tmp/e2e-state/file-token" in artifact_listing
+        assert "./tmp/e2e-state/observations.log" in artifact_listing
+
+        file_token = snap.checkpoint_rootfs_file(
+            config.namespace,
+            run.source_pod,
+            run.checkpoint_id,
+            "./tmp/e2e-state/file-token",
+        )
+        assert file_token.strip() == run.source_token
     except Exception:
         snap.debug_dump(config, run)
         raise
@@ -62,7 +76,7 @@ def test_successful_restore_recovers_cpu_gpu_and_fs_from_snapshot(
     run: snap.TestRun,
 ) -> None:
     try:
-        _, source_node, checkpoint_tick = create_valid_gpu_checkpoint(config, run)
+        _, source_node, checkpoint_observations = create_valid_gpu_checkpoint(config, run)
 
         k8s.delete_pod(config.namespace, run.source_pod)
         snap.wait_for_pod_deleted(config.namespace, run.source_pod)
@@ -80,26 +94,16 @@ def test_successful_restore_recovers_cpu_gpu_and_fs_from_snapshot(
         )
         snap.wait_for_pod_ready(config.namespace, run.restore_pod, timeout=300)
 
-        output = k8s.exec_command(
+        output = snap.assert_restored_state(
             config.namespace,
             run.restore_pod,
-            f"""
-            set -euo pipefail
-            test -f /snapshot-control/restore-complete
-            test -f /tmp/snapshot-fs-marker
-            test -s /tmp/gpu-marker
-            expected={checkpoint_tick}
-            before=$(awk '/^tick / {{n=$2}} END {{print n+0}}' /tmp/tick.log)
-            sleep 12
-            after=$(awk '/^tick / {{n=$2}} END {{print n+0}}' /tmp/tick.log)
-            echo "tick_expected=$expected tick_before=$before tick_after=$after"
-            test "$before" -ge "$expected"
-            test "$after" -gt "$before"
-            """,
+            source_token=run.source_token,
+            restore_token=run.restore_token,
+            checkpoint_observations=checkpoint_observations,
+            gpu=True,
         )
-        # before >= checkpoint_tick proves the restored filesystem/process state
-        # did not restart from an empty counter; after > before proves it resumed.
-        assert "tick_expected=" in output
+        assert f"source_token={run.source_token}" in output
+        assert f"restore_token={run.restore_token}" in output
         assert_restore_events(
             config.namespace,
             run.restore_pod,
@@ -185,9 +189,11 @@ def create_valid_gpu_checkpoint(
     run: snap.TestRun,
 ) -> tuple[object, str, int]:
     source, source_node = create_ready_source(config, run, gpu=True)
-    checkpoint_tick = snap.wait_for_tick_at_least(
+    checkpoint_observations = snap.wait_for_state_observations(
         config.namespace,
         run.source_pod,
+        run.source_token,
+        gpu=True,
         minimum=2,
     )
     snap.create_podsnapshot(
@@ -195,7 +201,7 @@ def create_valid_gpu_checkpoint(
     )
     pod_snapshot, content = snap.wait_for_snapshot_ready(config.namespace, run.snapshot_name)
     assert_podsnapshot_ready(pod_snapshot, content, source, source_node)
-    return source, source_node, checkpoint_tick
+    return source, source_node, checkpoint_observations
 
 
 def create_ready_source(

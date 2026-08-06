@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import shlex
 import time
 from typing import Any, Callable
 
@@ -13,6 +14,10 @@ from kubernetes.client import ApiException
 
 from snapshot_e2e import k8s
 from snapshot_e2e.workloads import CHECKPOINT_DIR
+from snapshot_e2e.workloads import FILE_TOKEN
+from snapshot_e2e.workloads import OBSERVATIONS
+from snapshot_e2e.workloads import RESTORE_DONE
+from snapshot_e2e.workloads import RESTORE_INITIAL_TOKEN
 from snapshot_e2e.workloads import SOURCE_READY
 from snapshot_e2e.workloads import TestRun
 from snapshot_e2e.workloads import restore_pod
@@ -93,32 +98,52 @@ def wait_for_file(namespace: str, pod: str, path: str, timeout: int = 180) -> No
     wait_for(f"{namespace}/{pod}:{path}", exists, timeout)
 
 
-def last_tick(namespace: str, pod: str) -> int:
-    output = k8s.exec_command(
-        namespace,
-        pod,
-        "test -f /tmp/tick.log || { echo 0; exit 0; }; "
-        "awk '/^tick / {n=$2} END {print n+0}' /tmp/tick.log",
+def matching_observation_count(
+    namespace: str,
+    pod: str,
+    token: str,
+    *,
+    gpu: bool,
+) -> int:
+    expected_gpu = token if gpu else "disabled"
+    command = (
+        f"test -f {OBSERVATIONS} || {{ echo 0; exit 0; }}; "
+        f"grep -F {shlex.quote('cpu=' + token)} {OBSERVATIONS} | "
+        f"grep -F {shlex.quote('file=' + token)} | "
+        f"grep -F {shlex.quote('gpu=' + expected_gpu)} | "
+        "wc -l"
     )
+    output = k8s.exec_command(namespace, pod, command)
     return int(output.strip() or "0")
 
 
-def wait_for_tick_at_least(
+def wait_for_state_observations(
     namespace: str,
     pod: str,
+    token: str,
+    *,
+    gpu: bool,
     minimum: int,
     timeout: int = 180,
 ) -> int:
     def check() -> int | None:
-        tick = last_tick(namespace, pod)
-        return tick if tick >= minimum else None
+        count = matching_observation_count(namespace, pod, token, gpu=gpu)
+        return count if count >= minimum else None
 
     return wait_for(
-        f"{namespace}/{pod} tick >= {minimum}",
+        f"{namespace}/{pod} observations for source token >= {minimum}",
         check,
         timeout,
-        detail=lambda: f"last_tick={last_tick(namespace, pod)}",
+        detail=lambda: observations_tail(namespace, pod),
     )
+
+
+def observations_tail(namespace: str, pod: str) -> str:
+    return k8s.exec_command(
+        namespace,
+        pod,
+        f"test -f {OBSERVATIONS} && tail -5 {OBSERVATIONS} || echo '<no observations>'",
+    ).strip()
 
 
 def wait_for_snapshot_ready(
@@ -273,6 +298,56 @@ def checkpoint_artifact_listing(namespace: str, pod: str, checkpoint_id: str) ->
         "find . -maxdepth 1 -type f -print | sort && "
         "tar -tf rootfs-diff.tar | sort",
     )
+
+
+def checkpoint_rootfs_file(
+    namespace: str,
+    pod: str,
+    checkpoint_id: str,
+    path: str,
+) -> str:
+    return k8s.exec_command(
+        namespace,
+        pod,
+        f"cd {CHECKPOINT_DIR}/{checkpoint_id}/versions/1 && "
+        f"tar -xOf rootfs-diff.tar {path}",
+    )
+
+
+def assert_restored_state(
+    namespace: str,
+    pod: str,
+    *,
+    source_token: str,
+    restore_token: str,
+    checkpoint_observations: int,
+    gpu: bool,
+) -> str:
+    expected_gpu = source_token if gpu else "disabled"
+    command = f"""
+    set -euo pipefail
+    source_token={shlex.quote(source_token)}
+    restore_token={shlex.quote(restore_token)}
+    expected_gpu={shlex.quote(expected_gpu)}
+    test -f {RESTORE_DONE}
+    test "$(cat {RESTORE_INITIAL_TOKEN})" = "$restore_token"
+    test "$(cat {FILE_TOKEN})" = "$source_token"
+    grep -F "cpu=$source_token" {OBSERVATIONS}
+    grep -F "file=$source_token" {OBSERVATIONS}
+    grep -F "gpu=$expected_gpu" {OBSERVATIONS}
+    if grep -F "$restore_token" {OBSERVATIONS}; then
+      echo "restore token appeared in restored observations"
+      exit 1
+    fi
+    before=$(awk '/^observation / {{count++}} END {{print count+0}}' {OBSERVATIONS})
+    sleep 12
+    after=$(awk '/^observation / {{count++}} END {{print count+0}}' {OBSERVATIONS})
+    echo "source_token=$source_token restore_token=$restore_token checkpoint_observations={checkpoint_observations} before=$before after=$after"
+    test "$before" -ge "{checkpoint_observations}"
+    test "$after" -gt "$before"
+    """
+    return k8s.exec_command(namespace, pod, command)
+
 
 def debug_dump(config: k8s.E2EConfig, run: TestRun) -> None:
     print("\n--- snapshot e2e debug ---")

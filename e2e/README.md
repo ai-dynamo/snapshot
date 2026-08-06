@@ -110,13 +110,15 @@ kubectl delete namespace "$SNAPSHOT_E2E_HOST_NAMESPACE" --ignore-not-found
 
 ## Restore Verification
 
-The success tests use a small long-running source process instead of a one-shot
-command. Before taking the snapshot, the test waits until the source has appended
-at least a few `tick N` lines to `/tmp/tick.log`. After restore, it checks that
-the restored tick value is at least the pre-snapshot value, then waits and checks
-that the counter continues to increase.
+The success tests prove restore with explicit source and restore state tokens.
+The source pod starts with a source token and stores it in three places:
 
-The GPU variant uses the same counter logic and also mirrors the next tick value
-inside CUDA device memory. The restored process reads the CUDA value on each loop
-and exits if it no longer matches the restored CPU-side counter, so a successful
-post-restore counter advance also exercises CUDA memory restore.
+- CPU memory, as the worker process' in-memory token.
+- Filesystem state, in `/tmp/e2e-state/file-token`.
+- GPU memory, for GPU tests, in a small CUDA device allocation.
+
+The restore pod starts with a different restore token. After restore completes,
+the test verifies that the restored process and files report the source token,
+not the restore token. The worker also appends periodic observations to
+`/tmp/e2e-state/observations.log`; the observation count is only a liveness
+check that the restored process continues running after restore.
