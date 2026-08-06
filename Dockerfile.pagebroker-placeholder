@@ -1,0 +1,4 @@
+FROM nvcr.io/nvidian/dynamo-dev/snapshot-placeholder@sha256:b00023b1668bbc680dd037bcf9859518ef789d4b995a68224a91ed12dd35e1e4
+
+COPY --chmod=0755 pagebroker /usr/local/bin/pagebroker
+COPY --chmod=0755 criu /usr/local/sbin/criu

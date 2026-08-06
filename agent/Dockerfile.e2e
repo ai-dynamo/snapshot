@@ -1,0 +1,20 @@
+# Local E2E overlay. The named contexts contain binaries built from the checked-out
+# CRIU and PageBroker branches; production builds continue to use Dockerfile.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+COPY --from=agent-bin /agent /usr/local/bin/snapshot-agent
+COPY --from=nsrestore-bin /nsrestore /usr/local/bin/nsrestore
+COPY --from=pagebroker-bin /pagebroker /usr/local/bin/pagebroker
+COPY --from=criu-install /usr/local/sbin/criu /usr/local/sbin/criu
+COPY --from=cuda-tools /usr/local/bin/cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
+COPY --from=cuda-tools /usr/local/sbin/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
+COPY --from=criu-runtime /lib/x86_64-linux-gnu/libnftables.so.1* /lib/x86_64-linux-gnu/
+COPY --from=criu-runtime /lib/x86_64-linux-gnu/libprotobuf-c.so.1* /lib/x86_64-linux-gnu/
+COPY --from=criu-runtime /lib/x86_64-linux-gnu/libnet.so.1* /lib/x86_64-linux-gnu/
+COPY --from=criu-runtime /lib/x86_64-linux-gnu/libmnl.so.0* /lib/x86_64-linux-gnu/
+COPY --from=criu-runtime /lib/x86_64-linux-gnu/libnftnl.so.11* /lib/x86_64-linux-gnu/
+COPY --from=criu-runtime /lib/x86_64-linux-gnu/libxtables.so.12* /lib/x86_64-linux-gnu/
+COPY --from=criu-runtime /lib/x86_64-linux-gnu/libjansson.so.4* /lib/x86_64-linux-gnu/
+COPY --from=criu-runtime /usr/local/lib/criu /usr/local/lib/criu
+COPY --from=criu-runtime /usr/local/lib/snapshot/criu-plugins /usr/local/lib/snapshot/criu-plugins
+RUN chmod +x /usr/local/bin/snapshot-agent /usr/local/bin/nsrestore /usr/local/bin/pagebroker /usr/local/bin/cuda-checkpoint-helper /usr/local/sbin/cuda-checkpoint /usr/local/sbin/criu

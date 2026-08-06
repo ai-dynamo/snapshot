@@ -83,12 +83,12 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s
 # =============================================================================
 # PageBroker C++23 builder
 # =============================================================================
-FROM ubuntu:24.04 AS pagebroker-builder
+FROM ubuntu:22.04 AS pagebroker-builder
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential protobuf-compiler libprotobuf-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /workspace/pagebroker
 COPY pagebroker ./
-RUN make
+RUN make clean && make
 
 # =============================================================================
 # Stage: CUDA checkpoint helper builder

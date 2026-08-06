@@ -49,14 +49,20 @@ func LogProcessDiagnostics(procRoot string, pid int, restoreLogPath string, log 
 
 // LogRestoreErrors finds the CRIU restore.log and logs key lines from it.
 func LogRestoreErrors(checkpointPath, workDir string, log logr.Logger) {
-	// Try workdir first, then checkpoint dir
-	for _, dir := range []string{workDir, checkpointPath} {
-		if dir == "" {
-			continue
-		}
-		logPath := filepath.Join(dir, "restore.log")
-		if _, err := os.Stat(logPath); err == nil {
-			logRestoreLog(logPath, log)
+	var paths []string
+	if workDir != "" {
+		paths = append(paths, filepath.Join(workDir, "restore.log"))
+	}
+	if checkpointPath != "" {
+		paths = append(paths,
+			filepath.Join(checkpointPath, "restore.log.failed"),
+			filepath.Join(checkpointPath, "restore.log"),
+		)
+	}
+	// Try workdir first, then the preserved failure log in checkpoint dir.
+	for _, path := range paths {
+		if _, err := os.Stat(path); err == nil {
+			logRestoreLog(path, log)
 			return
 		}
 	}

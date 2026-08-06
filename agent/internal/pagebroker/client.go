@@ -12,7 +12,10 @@ import (
 	"github.com/google/uuid"
 )
 
-type Transaction struct{ socket, id, staging, scratch string }
+type Transaction struct {
+	socket, id, staging, scratch string
+	provider                     *os.File
+}
 
 func (t *Transaction) StagingPath() string { return t.staging }
 
@@ -21,23 +24,22 @@ func Stage(ctx context.Context, socket, checkpoint string) (*Transaction, error)
 		socket = "/run/pagebroker/pagebroker.sock"
 	}
 	id := "tx-" + uuid.NewString()
-	r, err := call(ctx, socket, 1, id, checkpoint)
+	r, provider, err := submit(ctx, socket, id, checkpoint)
 	if err != nil {
 		return nil, err
 	}
 	if !r.ok {
 		return nil, fmt.Errorf("submit rejected: %s", r.err)
 	}
-	r, err = call(ctx, socket, 2, id, "")
-	if err != nil {
+	// PageBroker stages CRIU images asynchronously. Keep nsrestore on the
+	// complete source tree for manifest/rootfs reads; provider requests use the
+	// private staged tree and wait for individual files as needed.
+	if _, err := os.Stat(checkpoint); err != nil {
+		_ = provider.Close()
 		_, _ = call(context.Background(), socket, 5, id, "")
-		return nil, err
+		return nil, fmt.Errorf("checkpoint is unavailable after submit: %w", err)
 	}
-	if !r.ok {
-		_, _ = call(context.Background(), socket, 5, id, "")
-		return nil, fmt.Errorf("wait-ready rejected: %s", r.err)
-	}
-	return &Transaction{socket: socket, id: id, staging: r.staging, scratch: r.scratch}, nil
+	return &Transaction{socket: socket, id: id, staging: checkpoint, scratch: r.scratch, provider: provider}, nil
 }
 func PrepareCheckpoint(ctx context.Context, socket, checkpoint string) (*Transaction, error) {
 	if socket == "" {
@@ -54,6 +56,9 @@ func PrepareCheckpoint(ctx context.Context, socket, checkpoint string) (*Transac
 	return &Transaction{socket: socket, id: id, staging: r.staging, scratch: r.scratch}, nil
 }
 func (t *Transaction) Files() ([]*os.File, error) {
+	if t.provider == nil {
+		return nil, fmt.Errorf("PageBroker provider connection is unavailable")
+	}
 	image, err := os.Open(t.staging)
 	if err != nil {
 		return nil, fmt.Errorf("open staged checkpoint: %w", err)
@@ -68,9 +73,12 @@ func (t *Transaction) Files() ([]*os.File, error) {
 		image.Close()
 		return nil, fmt.Errorf("open PageBroker scratch: %w", err)
 	}
-	return []*os.File{image, work}, nil
+	provider := t.provider
+	t.provider = nil
+	return []*os.File{image, work, provider}, nil
 }
 func (t *Transaction) Commit() error {
+	t.closeProvider()
 	r, err := call(context.Background(), t.socket, 4, t.id, "")
 	if err != nil {
 		return err
@@ -81,6 +89,7 @@ func (t *Transaction) Commit() error {
 	return nil
 }
 func (t *Transaction) Abort() error {
+	t.closeProvider()
 	r, err := call(context.Background(), t.socket, 5, t.id, "")
 	if err != nil {
 		return err
@@ -89,6 +98,13 @@ func (t *Transaction) Abort() error {
 		return fmt.Errorf("abort rejected: %s", r.err)
 	}
 	return nil
+}
+
+func (t *Transaction) closeProvider() {
+	if t.provider != nil {
+		_ = t.provider.Close()
+		t.provider = nil
+	}
 }
 
 type response struct {
@@ -117,6 +133,36 @@ func request(op int, id, path string) []byte {
 	}
 	return b
 }
+
+func submit(ctx context.Context, socket, id, checkpoint string) (response, *os.File, error) {
+	connection, err := (&net.Dialer{}).DialContext(ctx, "unixpacket", socket)
+	if err != nil {
+		return response{}, nil, err
+	}
+	defer connection.Close()
+	unixConnection, ok := connection.(*net.UnixConn)
+	if !ok {
+		return response{}, nil, fmt.Errorf("PageBroker connection is %T, want UnixConn", connection)
+	}
+	if _, err := connection.Write(request(1, id, checkpoint)); err != nil {
+		return response{}, nil, err
+	}
+	buf := make([]byte, 65536)
+	n, err := connection.Read(buf)
+	if err != nil {
+		return response{}, nil, err
+	}
+	r, err := parse(buf[:n])
+	if err != nil || !r.ok {
+		return r, nil, err
+	}
+	provider, err := unixConnection.File()
+	if err != nil {
+		return response{}, nil, fmt.Errorf("duplicate PageBroker provider connection: %w", err)
+	}
+	return r, provider, nil
+}
+
 func call(ctx context.Context, socket string, op int, id, path string) (response, error) {
 	c, err := (&net.Dialer{}).DialContext(ctx, "unixpacket", socket)
 	if err != nil {

@@ -69,25 +69,32 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	}
 
 	finalDir := req.CheckpointLocation
+	pagebrokerPreparation := "disabled"
 	if req.PageBrokerEnabled {
 		transaction, prepareErr := pagebroker.PrepareCheckpoint(ctx, req.PageBrokerSocket, finalDir)
 		if prepareErr == nil {
+			pagebrokerPreparation = "succeeded"
+			log.Info("PageBroker checkpoint preparation succeeded",
+				"checkpoint_dir", finalDir, "staging_dir", transaction.StagingPath())
 			captureTimings, captureErr, criuLaunched := captureCheckpointTo(ctx, rt, log, req, cfg, transaction.StagingPath(), prepareStart)
 			if captureErr == nil {
 				if err := transaction.Commit(); err != nil {
 					_ = transaction.Abort()
-					return fmt.Errorf("commit checkpoint through PageBroker: %w", err)
+					return fmt.Errorf("commit checkpoint through PageBroker (checkpoint_dir=%q, pagebroker_prepare=%s, criu_launched=%t): %w", finalDir, pagebrokerPreparation, criuLaunched, err)
 				}
 				log.Info("Checkpoint committed through PageBroker", "duration", time.Since(checkpointStart), "prepare_duration", captureTimings.PrepareDuration.String())
 				return nil
 			}
 			_ = transaction.Abort()
 			if criuLaunched {
-				return captureErr
+				return fmt.Errorf("checkpoint capture failed (checkpoint_dir=%q, pagebroker_prepare=%s, criu_launched=%t): %w", transaction.StagingPath(), pagebrokerPreparation, criuLaunched, captureErr)
 			}
-			log.Error(captureErr, "Checkpoint failed before CRIU launch; falling back to local staging")
+			log.Error(captureErr, "Checkpoint failed before CRIU launch; falling back to local staging",
+				"checkpoint_dir", transaction.StagingPath(), "pagebroker_prepare", pagebrokerPreparation, "criu_launched", criuLaunched)
 		} else {
-			log.Error(prepareErr, "PageBroker unavailable; falling back to local checkpoint staging")
+			pagebrokerPreparation = "failed"
+			log.Error(prepareErr, "PageBroker unavailable; falling back to local checkpoint staging",
+				"checkpoint_dir", finalDir, "pagebroker_prepare", pagebrokerPreparation, "criu_launched", false)
 		}
 	}
 	tmpRoot := filepath.Join(filepath.Dir(finalDir), "tmp")
@@ -103,7 +110,7 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	// Phase 1: Inspect container state
 	captureTimings, err, _ := captureCheckpointTo(ctx, rt, log, req, cfg, tmpDir, prepareStart)
 	if err != nil {
-		return err
+		return fmt.Errorf("checkpoint capture failed (checkpoint_dir=%q, pagebroker_prepare=%s, criu_launched=unknown): %w", tmpDir, pagebrokerPreparation, err)
 	}
 	phaseTimings.CUDADuration = captureTimings.CUDADuration
 	phaseTimings.CRIUDumpDuration = captureTimings.CRIUDumpDuration
@@ -145,15 +152,15 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 func captureCheckpointTo(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req CheckpointRequest, cfg *types.AgentConfig, checkpointDir string, prepareStart time.Time) (*checkpointPhaseTimings, error, bool) {
 	state, err := inspectContainer(ctx, rt, log, req)
 	if err != nil {
-		return nil, err, false
+		return nil, fmt.Errorf("inspect container (checkpoint_dir=%q, criu_launched=false): %w", checkpointDir, err), false
 	}
 	criuOpts, data, err := configureCheckpoint(log, state, req, cfg, checkpointDir)
 	if err != nil {
-		return nil, err, false
+		return nil, fmt.Errorf("configure checkpoint (checkpoint_dir=%q, criu_launched=false): %w", checkpointDir, err), false
 	}
 	timings, err, criuLaunched := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, checkpointDir, log)
 	if err != nil {
-		return nil, err, criuLaunched
+		return nil, fmt.Errorf("capture checkpoint (checkpoint_dir=%q, criu_launched=%t): %w", checkpointDir, criuLaunched, err), criuLaunched
 	}
 	timings.PrepareDuration = time.Since(prepareStart)
 	return timings, nil, false

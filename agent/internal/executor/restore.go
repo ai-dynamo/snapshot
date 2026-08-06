@@ -65,6 +65,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		"namespace", req.PodNamespace,
 		"container", req.ContainerName,
 	)
+	log.Info("PageBroker restore mode", "enabled", req.PageBrokerEnabled, "socket", req.PageBrokerSocket)
 
 	// Phase 1: Host inspect — resolve placeholder, discover target GPUs, build device map
 	hostInspectStart := time.Now()
@@ -79,18 +80,10 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if req.PageBrokerEnabled {
 		transaction, err = pagebroker.Stage(ctx, req.PageBrokerSocket, req.CheckpointLocation)
 		if err != nil {
-			log.Error(err, "PageBroker unavailable; falling back to PVC restore")
+			return 0, fmt.Errorf("PageBroker staging failed: %w", err)
 		}
 	}
 	result, err := execNSRestore(ctx, log, req, snap, transaction)
-	if err != nil {
-		var beforeLaunch *beforeLaunchError
-		if transaction != nil && errors.As(err, &beforeLaunch) {
-			_ = transaction.Abort()
-			transaction = nil
-			result, err = execNSRestore(ctx, log, req, snap, nil)
-		}
-	}
 	if err != nil {
 		if transaction != nil {
 			_ = transaction.Abort()
@@ -256,6 +249,10 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 		// Intentionally exclude cgroup namespace (-C): CRIU must manage cgroups
 		// from the host-visible hierarchy so --cgroup-root remap works.
 		"-m", "-u", "-i", "-n", "-p",
+		// nsenter preserves its caller's cwd across setns. CRIU creates its
+		// cgroup yard with a relative path, so make it resolve inside the
+		// target mount namespace rather than the agent's old root.
+		"--wdns=/",
 		"--", req.NSRestorePath,
 		"--checkpoint-path", checkpointPath,
 	}
@@ -269,7 +266,11 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 		args = append(args, "--target-pod-ip", req.TargetPodIP)
 	}
 	if transaction != nil {
-		args = append(args, "--pagebroker-image-fd", "3", "--pagebroker-work-fd", "4")
+		args = append(args,
+			"--pagebroker-image-fd", "3",
+			"--pagebroker-work-fd", "4",
+			"--pagebroker-provider-fd", "5",
+		)
 	}
 
 	cmd := exec.CommandContext(ctx, "nsenter", args...)

@@ -1,0 +1,3 @@
+FROM nvcr.io/nvidian/dynamo-dev/snapshot-agent@sha256:63913c1c979c6b2e4aaca084109500f5306b817f57c9afa6556e597cae0d4229
+
+COPY --chmod=0755 criu /usr/local/sbin/criu

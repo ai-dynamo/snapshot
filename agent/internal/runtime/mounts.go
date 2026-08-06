@@ -116,6 +116,13 @@ func BuildMountPolicy(mounts []types.MountInfo, rootFS string, maskedPaths []str
 
 // RemountProcSys remounts /proc/sys read-write or read-only.
 func RemountProcSys(rw bool) error {
+	mounts, err := mountinfo.GetMounts(nil)
+	if err != nil {
+		return fmt.Errorf("read mountinfo before remounting /proc/sys: %w", err)
+	}
+	if !hasProcSysMount(mounts) {
+		return nil
+	}
 	flags := uintptr(syscall.MS_BIND | syscall.MS_REMOUNT)
 	if !rw {
 		flags |= syscall.MS_RDONLY
@@ -128,4 +135,13 @@ func RemountProcSys(rw bool) error {
 		return fmt.Errorf("failed to remount /proc/sys %s: %w", mode, err)
 	}
 	return nil
+}
+
+func hasProcSysMount(mounts []*mountinfo.Info) bool {
+	for _, mount := range mounts {
+		if mount.Mountpoint == "/proc/sys" {
+			return true
+		}
+	}
+	return false
 }

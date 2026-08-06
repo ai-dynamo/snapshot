@@ -8,10 +8,20 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/moby/sys/mountinfo"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
+
+func TestHasProcSysMount(t *testing.T) {
+	if hasProcSysMount([]*mountinfo.Info{{Mountpoint: "/proc"}}) {
+		t.Fatal("/proc must not be treated as a separate /proc/sys mount")
+	}
+	if !hasProcSysMount([]*mountinfo.Info{{Mountpoint: "/proc"}, {Mountpoint: "/proc/sys"}}) {
+		t.Fatal("separate /proc/sys mount was not found")
+	}
+}
 
 func TestClassifyMounts(t *testing.T) {
 	tests := []struct {
