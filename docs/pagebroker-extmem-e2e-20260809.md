@@ -53,6 +53,10 @@ Only these repositories are part of this archive:
 | `/home/dfeigin/Work/checkpoints/snapshot` | `archive/pagebroker-extmem-e2e-20260809` | `d20e86743f1b94e055b3b61e626e443016723182` |
 | `/home/dfeigin/Work/checkpoints/criu-upstream` | `archive/pagebroker-extmem-e2e-20260809` | `b7a28e147b3094145f8e79c1763930d235498c58` |
 
+The initial source archive commits are
+`f0bf185` (Snapshot) and `4f2779d0a` (CRIU). This document's follow-up commit
+only records those refs; use the branch tips when checking out the full state.
+
 The separate `/home/dfeigin/Work/checkpoints/criu` checkout was not changed.
 
 The Snapshot archive includes the agent-owned CUDA path, PageBroker manifest
