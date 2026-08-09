@@ -79,12 +79,13 @@ ARG TARGETARCH=amd64
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /snapshot-agent ./cmd/agent
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /nsrestore ./cmd/nsrestore
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /pagebroker-packager ./cmd/pagebroker-packager
 
 # =============================================================================
 # PageBroker C++23 builder
 # =============================================================================
 FROM ubuntu:22.04 AS pagebroker-builder
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential protobuf-compiler libprotobuf-dev \
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential protobuf-compiler libprotobuf-dev libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /workspace/pagebroker
 COPY pagebroker ./
@@ -110,7 +111,7 @@ RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
     -lcuda
 
 # =============================================================================
-# Stage: CRIU Builder - Build CRIU with CUDA plugin
+# Stage: CRIU Builder
 # =============================================================================
 FROM ubuntu:22.04 AS criu-builder
 
@@ -143,13 +144,17 @@ RUN git init /tmp/criu \
     && cd /tmp/criu \
     && git remote add origin ${CRIU_REPO} \
     && git fetch --depth 1 origin ${CRIU_REF} \
-    && git checkout FETCH_HEAD \
+    && git checkout FETCH_HEAD
+
+COPY patches/disable-binfmt-sandbox.patch /tmp/disable-binfmt-sandbox.patch
+RUN cd /tmp/criu \
+    && git apply /tmp/disable-binfmt-sandbox.patch \
     && make -j$(nproc) \
-    && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
+    && make DESTDIR=/criu-install install-criu install-lib
 
 COPY plugins/inet-remap/snapshot_inet_remap.c /tmp/snapshot_inet_remap.c
 RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \
-    && gcc -O2 -Wall -Wextra -fPIC -shared \
+	&& gcc -O2 -Wall -Wextra -fPIC -shared \
       -idirafter /tmp/criu/criu/include \
       -o /criu-install/usr/local/lib/snapshot/criu-plugins/snapshot_inet_remap.so \
       /tmp/snapshot_inet_remap.c
@@ -176,6 +181,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnl-route-3-200 \
     libprotobuf-c1 \
     libprotobuf32 \
+    libssl3t64 \
     libgnutls30t64 \
     libnftables1 \
     iproute2 \
@@ -201,6 +207,7 @@ RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-help
 # Copy the built binaries
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
 COPY --from=builder /nsrestore /usr/local/bin/nsrestore
+COPY --from=builder /pagebroker-packager /usr/local/bin/pagebroker-packager
 COPY --from=pagebroker-builder /workspace/pagebroker/pagebroker /usr/local/bin/pagebroker
 
 # Create directories
@@ -209,6 +216,27 @@ RUN mkdir -p /checkpoints /var/run/snapshot
 USER root
 
 ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
+
+# Local custom-CRIU target for PageBroker external-memory validation. The
+# standard `agent` target deliberately remains on the configured upstream CRIU.
+# Build the local external-memory CRIU source on Ubuntu 22.04.  CRIU executes
+# inside the restored workload mount namespace, which is Ubuntu 22.04 for the
+# vLLM placeholder; copying a host-built binary here would require its newer
+# glibc there and fail before the provider handshake.
+FROM ubuntu:22.04 AS criu-local-builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential pkg-config libbsd-dev libcap-dev libnet1-dev \
+    libnl-3-dev libnl-route-3-dev libprotobuf-dev libprotobuf-c-dev \
+    protobuf-c-compiler protobuf-compiler python3 python3-pip \
+    python3-protobuf libgnutls28-dev libnftables-dev uuid-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=criu-local . /tmp/criu
+RUN cd /tmp/criu && make clean && make -j$(nproc) \
+    && make DESTDIR=/criu-local-install install-criu install-lib
+
+FROM agent AS agent-extmem
+COPY --from=criu-local-builder /criu-local-install/usr/local /usr/local
+RUN criu --version
 
 # =============================================================================
 # Stage: Placeholder - Runtime-compatible restore image (requires BASE_IMAGE arg)

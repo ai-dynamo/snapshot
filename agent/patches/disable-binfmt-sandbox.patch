@@ -1,0 +1,15 @@
+diff --git a/criu/filesystems.c b/criu/filesystems.c
+index f6816f43..4f1c4d64 100644
+--- a/criu/filesystems.c
++++ b/criu/filesystems.c
+@@ -264,5 +264,10 @@ int binfmt_misc_dump_sandboxed(pid_t pid, BinfmtMiscEntry ***pb_bmes)
+ 	struct binfmt_misc_dump_arg dump_arg;
+ 	BinfmtMiscEntry **bmes = NULL;
+ 
++	/* Kubernetes restore targets cannot create detached binfmt_misc mounts. */
++	(void)pid;
++	(void)pb_bmes;
++	return 0;
++
+ 	if (!kdat.has_binfmt_misc_sandboxing)
+ 		return 0;

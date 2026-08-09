@@ -1,350 +1,319 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
+
 #include "pagebroker.hpp"
+
 #include <cassert>
-#include <cstdio>
-#include <fstream>
-#include <poll.h>
-#include <signal.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <sys/wait.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <cstring>
 #include <cerrno>
+#include <cstring>
+#include <filesystem>
+#include <fcntl.h>
+#include <fstream>
+#include <future>
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
+
+namespace fs = std::filesystem;
+
+namespace {
+void append_varint(std::string &message, std::uint64_t value) {
+  while (value >= 128) {
+    message.push_back(static_cast<char>((value & 127) | 128));
+    value >>= 7;
+  }
+  message.push_back(static_cast<char>(value));
+}
+
+void append_field(std::string &message, int field, std::uint64_t value) {
+  append_varint(message, static_cast<std::uint64_t>(field * 8));
+  append_varint(message, value);
+}
+
+void append_field(std::string &message, int field, const std::string &value) {
+  append_varint(message, static_cast<std::uint64_t>(field * 8 + 2));
+  append_varint(message, value.size());
+  message += value;
+}
+
+std::int32_t receive_response(int connection, int *received_fd = nullptr) {
+  char response[128] = {};
+  char control[CMSG_SPACE(sizeof(int))] = {};
+  iovec iov{response, sizeof(response)};
+  msghdr msg{};
+  msg.msg_iov = &iov;
+  msg.msg_iovlen = 1;
+  msg.msg_control = control;
+  msg.msg_controllen = sizeof(control);
+  auto n = recvmsg(connection, &msg, 0);
+  assert(n > 0);
+  if (received_fd) {
+    auto *cmsg = CMSG_FIRSTHDR(&msg);
+    assert(cmsg && cmsg->cmsg_type == SCM_RIGHTS);
+    std::memcpy(received_fd, CMSG_DATA(cmsg), sizeof(int));
+  }
+  std::uint64_t value = 0;
+  for (int i = 1, shift = 0; i < n && shift < 64; ++i, shift += 7) {
+    auto byte = static_cast<unsigned char>(response[i]);
+    value |= static_cast<std::uint64_t>(byte & 127) << shift;
+    if (!(byte & 128))
+      return static_cast<std::int32_t>(value);
+  }
+  std::abort();
+}
+
+std::string get_vma_request(std::uint64_t pid, std::uint64_t vma_id,
+                            std::uint64_t address, std::uint64_t length) {
+  std::string fields;
+  append_field(fields, 1, pid);
+  if (vma_id)
+    append_field(fields, 2, vma_id);
+  append_field(fields, 3, address);
+  append_field(fields, 4, length);
+  std::string request;
+  append_field(request, 1, 3);
+  append_field(request, 3, fields);
+  return request;
+}
+
+std::string get_shared_request(std::uint64_t shmid, std::uint64_t length) {
+  std::string fields;
+  append_field(fields, 1, shmid);
+  append_field(fields, 2, length);
+  std::string request;
+  append_field(request, 1, 4);
+  append_field(request, 4, fields);
+  return request;
+}
+
+std::string operation_request(std::uint64_t operation) {
+  std::string request;
+  append_field(request, 1, operation);
+  return request;
+}
+
+pagebroker::Request restore_request(const fs::path &root,
+                                    const std::string &transaction) {
+  pagebroker::Request request{pagebroker::Request::Operation::Submit,
+                              transaction, root};
+  request.manifest_ref = (root / "pagebroker-manifest.yaml").string();
+  request.resident_bytes = 20;
+  request.images.push_back({"pages-1.img", "pages-1.img", 10});
+  pagebroker::HostMemoryObject object;
+  object.memory_id = 1;
+  object.name = "private-1-2";
+  object.pid = 1;
+  object.vma_id = 0;
+  object.dst_addr = 4096;
+  object.length = 32;
+  object.semantics = "private_anon";
+  object.map_mode = "private";
+  object.source_ranges.push_back({"pages-1.img", 0, 8, 10});
+  request.host_memory_objects.push_back(std::move(object));
+
+  pagebroker::HostMemoryObject shared;
+  shared.memory_id = 2;
+  shared.name = "shared-memfd-55";
+  shared.shmid = 55;
+  shared.length = 16;
+  shared.semantics = "shared_memfd";
+  shared.map_mode = "shared";
+  shared.source_ranges.push_back({"pages-1.img", 0, 0, 10});
+  request.host_memory_objects.push_back(std::move(shared));
+
+  std::string wire;
+  append_field(wire, 1, 1);
+  append_field(wire, 5, request.resident_bytes);
+  for (const auto &image : request.images) {
+    std::string encoded;
+    append_field(encoded, 1, image.name);
+    append_field(encoded, 2, image.uri);
+    append_field(encoded, 3, image.size);
+    append_field(wire, 6, encoded);
+  }
+  for (const auto &item : request.host_memory_objects) {
+    std::string encoded;
+    append_field(encoded, 1, item.memory_id);
+    append_field(encoded, 2, item.name);
+    append_field(encoded, 3, item.pid);
+    append_field(encoded, 4, item.vma_id);
+    append_field(encoded, 5, item.shmid);
+    append_field(encoded, 6, item.dst_addr);
+    append_field(encoded, 7, item.length);
+    append_field(encoded, 8, item.semantics);
+    append_field(encoded, 9, item.map_mode);
+    for (const auto &source : item.source_ranges) {
+      std::string range;
+      append_field(range, 1, source.object);
+      append_field(range, 2, source.source_offset);
+      append_field(range, 3, source.dst_offset);
+      append_field(range, 4, source.length);
+      append_field(encoded, 10, range);
+    }
+    append_field(wire, 7, encoded);
+  }
+  std::ofstream output(root / "pagebroker-manifest.pb", std::ios::binary);
+  output.write(wire.data(), static_cast<std::streamsize>(wire.size()));
+  output.close();
+  return request;
+}
+} // namespace
+
 int main() {
   assert(pagebroker::test_copy_pool_priority());
-  auto root = std::filesystem::temp_directory_path() /
+  auto root = fs::temp_directory_path() /
               ("pagebroker-test-" + std::to_string(getpid()));
-  std::filesystem::remove_all(root);
+  fs::remove_all(root);
+  auto checkpoint = root / "checkpoint";
+  fs::create_directories(checkpoint);
+  std::ofstream(checkpoint / "pagebroker-manifest.yaml") << "version: 1\n";
+  std::ofstream(checkpoint / "pages-1.img") << "range-data";
 
-  auto provider_root = root / "provider";
-  std::filesystem::create_directories(provider_root);
-  std::ofstream(provider_root / "image.img") << "provider-image";
+  pagebroker::test_set_fill_delay(150);
+  pagebroker::TransactionManager manager(root / "staging", root / "scratch",
+                                         64);
+  auto request = restore_request(checkpoint, "tx-1");
+  auto submitted = manager.submit(request);
+  assert(submitted.ok);
+  assert(fs::equivalent(submitted.staging_path, checkpoint));
+  assert(!fs::exists(root / "staging/tx/tx-1/pages-1.img"));
+
+  auto wait = std::async(std::launch::async, [&] { return manager.wait_ready(request); });
+  assert(wait.wait_for(std::chrono::milliseconds(25)) == std::future_status::timeout);
+
+  auto state = manager.staging_state("tx-1");
+  assert(state);
   int sockets[2];
   assert(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sockets) == 0);
-  auto child = fork();
-  assert(child >= 0);
-  if (child == 0) {
-    close(sockets[0]);
-    _exit(pagebroker::serve_provider(provider_root, sockets[1], -1));
-  }
-  close(sockets[1]);
-  auto receive_response = [](int connection, int *received_fd = nullptr) {
-    char response[128] = {};
-    char control[CMSG_SPACE(sizeof(int))] = {};
-    iovec iov{response, sizeof(response)};
-    msghdr msg{};
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = control;
-    msg.msg_controllen = sizeof(control);
-    auto n = recvmsg(connection, &msg, 0);
-    assert(n > 0);
-    if (received_fd) {
-      auto *cmsg = CMSG_FIRSTHDR(&msg);
-      assert(cmsg && cmsg->cmsg_type == SCM_RIGHTS);
-      std::memcpy(received_fd, CMSG_DATA(cmsg), sizeof(int));
-    }
-    std::uint64_t value = 0;
-    for (int i = 1, shift = 0; i < n && shift < 64; ++i, shift += 7) {
-      auto byte = static_cast<unsigned char>(response[i]);
-      value |= static_cast<std::uint64_t>(byte & 127) << shift;
-      if (!(byte & 128))
-        return static_cast<std::int32_t>(value);
-    }
-    std::abort();
-  };
-  auto roundtrip = [&](const std::string &request, int *received_fd = nullptr) {
-    auto sent = send(sockets[0], request.data(), request.size(), 0);
-    if (sent != static_cast<ssize_t>(request.size())) {
-      std::fprintf(stderr, "provider send failed: %s\n", std::strerror(errno));
-      std::abort();
-    }
-    return receive_response(sockets[0], received_fd);
-  };
-  assert(roundtrip("\x08\x01") == 0);
-  std::string open = "\x08\x02\x12\x0d\x0a\x09";
-  open += "image.img";
-  open.push_back('\x10');
-  open.push_back('\0');
-  int image_fd = -1;
-  assert(roundtrip(open, &image_fd) == 0);
-  char contents[32] = {};
-  assert(read(image_fd, contents, sizeof(contents)) == 14);
-  assert(std::string(contents, 14) == "provider-image");
-  close(image_fd);
-  std::string missing = "\x08\x02\x12\x13\x0a\x0f";
-  missing += "not-present.img";
-  missing.push_back('\x10');
-  missing.push_back('\0');
-  assert(roundtrip(missing) == -ENOTSUP);
+  std::thread provider([&] {
+    assert(pagebroker::serve_provider(checkpoint, sockets[1], -1, state) == 0);
+    close(sockets[1]);
+  });
+  auto get = get_vma_request(1, 0, 4096, 32);
+  assert(send(sockets[0], get.data(), get.size(), 0) ==
+         static_cast<ssize_t>(get.size()));
   int vma_fd = -1;
-  assert(roundtrip("\x08\x03\x1a\x07\x08\x01\x10\x80\x20\x18\x10",
-                   &vma_fd) == 0);
-  struct stat vma_stat = {};
-  assert(fstat(vma_fd, &vma_stat) == 0 && vma_stat.st_size == 16);
-  assert(vma_stat.st_blocks == 0);
-  assert((fcntl(vma_fd, F_GET_SEALS) & (F_SEAL_GROW | F_SEAL_SHRINK)) ==
-         (F_SEAL_GROW | F_SEAL_SHRINK));
-  close(vma_fd);
+  assert(receive_response(sockets[0], &vma_fd) == 0);
+  struct stat returned{}, owned{};
+  assert(fstat(vma_fd, &returned) == 0);
+  assert(fstat(state->vmas.begin()->second->fd, &owned) == 0);
+  assert(returned.st_ino == owned.st_ino);
+  assert(returned.st_size == 32);
+
+  auto get_shared = get_shared_request(55, 16);
+  assert(send(sockets[0], get_shared.data(), get_shared.size(), 0) ==
+         static_cast<ssize_t>(get_shared.size()));
   int shared_fd = -1;
-  assert(roundtrip("\x08\x04\x22\x04\x08\x07\x10\x20", &shared_fd) == 0);
-  struct stat shared_stat = {};
-  assert(fstat(shared_fd, &shared_stat) == 0 && shared_stat.st_size == 32);
-  assert(shared_stat.st_blocks == 0);
-  assert(fcntl(shared_fd, F_GET_SEALS) >= 0);
-  assert(write(shared_fd, "shared", 6) == 6);
-  int same_shared_fd = -1;
-  assert(roundtrip("\x08\x04\x22\x04\x08\x07\x10\x40", &same_shared_fd) == 0);
-  assert(fstat(same_shared_fd, &shared_stat) == 0 && shared_stat.st_size == 64);
-  char shared_contents[7] = {};
-  assert(pread(same_shared_fd, shared_contents, 6, 0) == 6);
-  assert(std::string(shared_contents, 6) == "shared");
-  close(same_shared_fd);
-  int other_shared_fd = -1;
-  assert(roundtrip("\x08\x04\x22\x04\x08\x08\x10\x20", &other_shared_fd) == 0);
-  std::memset(shared_contents, 0xff, sizeof(shared_contents));
-  assert(pread(other_shared_fd, shared_contents, 6, 0) == 6);
-  assert(std::string(shared_contents, 6) == std::string(6, '\0'));
-  close(other_shared_fd);
+  assert(receive_response(sockets[0], &shared_fd) == 0);
+  struct stat returned_shared{}, owned_shared{};
+  assert(fstat(shared_fd, &returned_shared) == 0);
+  assert(fstat(state->shared.begin()->second->fd, &owned_shared) == 0);
+  assert(returned_shared.st_ino == owned_shared.st_ino);
+  assert(returned_shared.st_size == 16);
+  assert(fcntl(shared_fd, F_GET_SEALS) == 0);
+
+  auto provider_wait = std::async(std::launch::async, [&] {
+    auto request = operation_request(7);
+    assert(send(sockets[0], request.data(), request.size(), 0) ==
+           static_cast<ssize_t>(request.size()));
+    return receive_response(sockets[0]);
+  });
+  assert(provider_wait.wait_for(std::chrono::milliseconds(25)) ==
+         std::future_status::timeout);
+
+  auto ready = wait.get();
+  assert(ready.ok);
+  assert(provider_wait.get() == 0);
+  char data[11] = {};
+  assert(pread(vma_fd, data, 10, 8) == 10);
+  assert(std::string(data, 10) == "range-data");
+  char hole[8];
+  std::memset(hole, 1, sizeof(hole));
+  assert(pread(vma_fd, hole, sizeof(hole), 0) == 8);
+  assert(std::string(hole, sizeof(hole)) == std::string(sizeof(hole), '\0'));
+  close(vma_fd);
+  assert(pread(shared_fd, data, 10, 0) == 10);
+  assert(std::string(data, 10) == "range-data");
   close(shared_fd);
-  assert(roundtrip("\x08\x05") == 0);
+
+  assert(setenv("PAGEBROKER_DEFER_FILL", "1", 1) == 0);
+  pagebroker::TransactionManager deferred(root / "staging-deferred",
+                                          root / "scratch-deferred", 64);
+  assert(unsetenv("PAGEBROKER_DEFER_FILL") == 0);
+  auto deferred_request = restore_request(checkpoint, "tx-deferred");
+  auto deferred_submit = deferred.submit(deferred_request);
+  assert(deferred_submit.ok);
+  auto deferred_state = deferred.staging_state("tx-deferred");
+  assert(deferred_state);
+  {
+    std::lock_guard lock(deferred_state->mutex);
+    assert(!deferred_state->fill_started);
+    assert(!deferred_state->complete);
+  }
+  auto deferred_ready = deferred.wait_ready(deferred_request);
+  assert(deferred_ready.ok);
+  {
+    std::lock_guard lock(deferred_state->mutex);
+    assert(deferred_state->fill_started);
+    assert(deferred_state->complete);
+  }
+
+  std::string provider_commit;
+  append_field(provider_commit, 1, 5);
+  assert(send(sockets[0], provider_commit.data(), provider_commit.size(), 0) ==
+         static_cast<ssize_t>(provider_commit.size()));
+  assert(receive_response(sockets[0]) == 0);
   close(sockets[0]);
-  int status = 0;
-  assert(waitpid(child, &status, 0) == child && WIFEXITED(status));
+  provider.join();
+  assert(manager.commit(request).ok);
 
-  auto delayed_root = root / "delayed-provider";
-  std::filesystem::create_directories(delayed_root);
-  int delayed_sockets[2];
-  assert(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, delayed_sockets) == 0);
-  auto delayed_state = std::make_shared<pagebroker::StagingState>();
-  delayed_state->planned_files.insert("image.img");
-  std::thread delayed_provider([&] {
-    assert(pagebroker::serve_provider(delayed_root, delayed_sockets[1], -1,
-                                      delayed_state) == 0);
-    close(delayed_sockets[1]);
-  });
-  assert(send(delayed_sockets[0], open.data(), open.size(), 0) ==
-         static_cast<ssize_t>(open.size()));
-  pollfd delayed_poll{delayed_sockets[0], POLLIN, 0};
-  assert(poll(&delayed_poll, 1, 25) == 0);
-  std::ofstream(delayed_root / "image.img.partial") << "delayed-image";
-  std::filesystem::rename(delayed_root / "image.img.partial",
-                          delayed_root / "image.img");
-  {
-    std::lock_guard lock(delayed_state->mutex);
-    delayed_state->ready_files.insert("image.img");
-  }
-  delayed_state->changed.notify_all();
-  int delayed_fd = -1;
-  assert(receive_response(delayed_sockets[0], &delayed_fd) == 0);
-  std::memset(contents, 0, sizeof(contents));
-  assert(read(delayed_fd, contents, sizeof(contents)) == 13);
-  assert(std::string(contents, 13) == "delayed-image");
-  close(delayed_fd);
+  pagebroker::TransactionManager disconnected(root / "staging-disconnected",
+                                               root / "scratch-disconnected", 64);
+  auto disconnected_request = restore_request(checkpoint, "tx-disconnected");
+  assert(disconnected.submit(disconnected_request).ok);
+  auto disconnected_state = disconnected.staging_state("tx-disconnected");
+  assert(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sockets) == 0);
+  close(sockets[0]);
+  assert(pagebroker::serve_provider(checkpoint, sockets[1], -1,
+                                    disconnected_state) == ECONNRESET);
+  close(sockets[1]);
+  auto disconnect_failure = disconnected.wait_ready(disconnected_request);
+  assert(!disconnect_failure.ok);
+  assert(disconnect_failure.error.find("provider disconnected") !=
+         std::string::npos);
+  assert(disconnected.abort(disconnected_request).ok);
 
-  assert(send(delayed_sockets[0], missing.data(), missing.size(), 0) ==
-         static_cast<ssize_t>(missing.size()));
-  assert(receive_response(delayed_sockets[0]) == -ENOTSUP);
-  close(delayed_sockets[0]);
-  delayed_provider.join();
+  pagebroker::test_set_fill_delay(150);
+  pagebroker::TransactionManager failing(root / "staging-fail",
+                                         root / "scratch-fail", 64);
+  auto backend_failure = restore_request(checkpoint, "tx-backend-failure");
+  assert(failing.submit(backend_failure).ok);
+  fs::remove(checkpoint / "pages-1.img");
+  auto failed = failing.wait_ready(backend_failure);
+  assert(!failed.ok);
+  assert(failed.error.find("open manifest source image") != std::string::npos);
+  assert(failing.abort(backend_failure).ok);
+  std::ofstream(checkpoint / "pages-1.img") << "range-data";
+  pagebroker::test_set_fill_delay(0);
 
-  int cancelled_sockets[2];
-  assert(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, cancelled_sockets) == 0);
-  auto cancelled_state = std::make_shared<pagebroker::StagingState>();
-  cancelled_state->planned_files.insert("not-present.img");
-  std::thread cancelled_provider([&] {
-    assert(pagebroker::serve_provider(delayed_root, cancelled_sockets[1], -1,
-                                      cancelled_state) == 0);
-    close(cancelled_sockets[1]);
-  });
-  assert(send(cancelled_sockets[0], missing.data(), missing.size(), 0) ==
-         static_cast<ssize_t>(missing.size()));
-  pollfd cancelled_poll{cancelled_sockets[0], POLLIN, 0};
-  assert(poll(&cancelled_poll, 1, 25) == 0);
-  {
-    std::lock_guard lock(cancelled_state->mutex);
-    cancelled_state->cancelled = true;
-  }
-  cancelled_state->changed.notify_all();
-  assert(receive_response(cancelled_sockets[0]) == -ECANCELED);
-  close(cancelled_sockets[0]);
-  cancelled_provider.join();
+  pagebroker::TransactionManager budget(root / "staging-budget",
+                                        root / "scratch-budget", 19);
+  auto rejected = budget.submit(restore_request(checkpoint, "tx-budget"));
+  assert(!rejected.ok);
+  assert(rejected.error.find("budget") != std::string::npos);
 
-  auto source = root / "source";
-  std::filesystem::create_directories(source);
-  std::ofstream(source / "image").write("checkpoint", 10);
-  pagebroker::TransactionManager manager(root / "staging", root / "scratch",
-                                         10);
-  pagebroker::Request submit{pagebroker::Request::Operation::Submit, "tx-1",
-                             source};
-  auto ok = manager.submit(submit);
-  assert(ok.ok);
-  assert(manager.wait_ready(submit).ok);
-  assert(std::filesystem::exists(root / "staging/tx/tx-1/image"));
-  pagebroker::TransactionManager concurrent_manager(root / "staging-concurrent",
-                                                    root / "scratch-concurrent",
-                                                    15);
-  auto first = concurrent_manager.submit(submit);
-  assert(first.ok);
-  auto second = concurrent_manager.submit(
-      pagebroker::Request{pagebroker::Request::Operation::Submit, "tx-2",
-                          source});
-  assert(!second.ok);
-  assert(concurrent_manager.abort(submit).ok);
-  auto duplicate = manager.submit(submit);
-  assert(!duplicate.ok);
-  auto second_rejected = manager.submit(
-      pagebroker::Request{pagebroker::Request::Operation::Submit, "tx-2",
-                          source});
-  assert(!second_rejected.ok);
-  auto committed = manager.commit(submit);
-  assert(committed.ok);
-  assert(!std::filesystem::exists(root / "staging/tx/tx-1"));
-  auto too_big =
-      pagebroker::TransactionManager(root / "staging2", root / "scratch2", 1)
-          .submit(submit);
-  assert(!too_big.ok);
-
-  auto destination = root / "checkpoints" / "nested" / "final";
-  pagebroker::TransactionManager checkpoint_manager(root / "staging3",
-                                                     root / "scratch3", 100);
+  auto destination = root / "checkpoints/final";
+  pagebroker::TransactionManager checkpoint_manager(root / "staging-checkpoint",
+                                                     root / "scratch-checkpoint",
+                                                     100);
   pagebroker::Request prepare{pagebroker::Request::Operation::PrepareCheckpoint,
-                              "tx-2", destination};
+                              "tx-checkpoint", destination};
   auto prepared = checkpoint_manager.prepare_checkpoint(prepare);
   assert(prepared.ok);
-  std::ofstream(std::filesystem::path(prepared.staging_path) / "manifest")
-      .write("ok", 2);
+  std::ofstream(fs::path(prepared.staging_path) / "manifest") << "ok";
   assert(checkpoint_manager.commit(prepare).ok);
-  assert(std::filesystem::exists(destination / "manifest"));
+  assert(fs::exists(destination / "manifest"));
 
-  auto leaked = checkpoint_manager.prepare_checkpoint(
-      pagebroker::Request{pagebroker::Request::Operation::PrepareCheckpoint,
-                          "tx-3", root / "checkpoints" / "leaked"});
-  if (!leaked.ok)
-    std::fprintf(stderr, "prepare leaked failed: %s\n", leaked.error.c_str());
-  assert(leaked.ok);
-  pagebroker::TransactionManager restarted(root / "staging3", root / "scratch3",
-                                           100);
-  assert(!std::filesystem::exists(
-      std::filesystem::path(leaked.staging_path)));
-
-  auto budget_destination = root / "checkpoints" / "budget";
-  pagebroker::TransactionManager budget_manager(root / "staging4",
-                                                root / "scratch4", 1);
-  auto budget_tx = budget_manager.prepare_checkpoint(
-      pagebroker::Request{pagebroker::Request::Operation::PrepareCheckpoint,
-                          "tx-4", budget_destination});
-  assert(budget_tx.ok);
-  std::ofstream(std::filesystem::path(budget_tx.staging_path) / "large")
-      .write("12", 2);
-  assert(!budget_manager.commit(
-                   pagebroker::Request{
-                       pagebroker::Request::Operation::Commit, "tx-4", {}})
-              .ok);
-  assert(budget_manager.abort(
-                 pagebroker::Request{
-                       pagebroker::Request::Operation::Abort, "tx-4", {}})
-             .ok);
-
-  auto server_root = root / "server";
-  auto server_source = server_root / "source";
-  auto server_socket = server_root / "pagebroker.sock";
-  std::filesystem::create_directories(server_source);
-  std::ofstream(server_source / "image.img") << "sidecar-provider";
-  auto server_pid = fork();
-  assert(server_pid >= 0);
-  if (server_pid == 0)
-    _exit(pagebroker::serve(server_socket, server_root / "staging",
-                            server_root / "scratch", 1 << 20));
-  for (int i = 0; i < 500 && !std::filesystem::exists(server_socket); ++i)
-    usleep(10000);
-  assert(std::filesystem::exists(server_socket));
-
-  auto connect_server = [&] {
-    int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
-    assert(fd >= 0);
-    sockaddr_un address{};
-    address.sun_family = AF_UNIX;
-    std::snprintf(address.sun_path, sizeof(address.sun_path), "%s",
-                  server_socket.c_str());
-    assert(connect(fd, reinterpret_cast<sockaddr *>(&address),
-                   sizeof(address)) == 0);
-    return fd;
-  };
-  auto append_varint = [](std::string &message, std::uint64_t value) {
-    while (value >= 128) {
-      message.push_back(static_cast<char>((value & 127) | 128));
-      value >>= 7;
-    }
-    message.push_back(static_cast<char>(value));
-  };
-  auto append_string = [&](std::string &message, int field,
-                           const std::string &value) {
-    append_varint(message, field * 8 + 2);
-    append_varint(message, value.size());
-    message += value;
-  };
-
-  int provider = connect_server();
-  std::string submit_message = "\x08\x01";
-  append_string(submit_message, 2, "tx-sidecar");
-  append_string(submit_message, 3, server_source.string());
-  assert(send(provider, submit_message.data(), submit_message.size(), 0) ==
-         static_cast<ssize_t>(submit_message.size()));
-  char control_response[1024] = {};
-  assert(recv(provider, control_response, sizeof(control_response), 0) > 0);
-  assert(control_response[0] == 0x08 && control_response[1] == 0x01);
-
-  assert(send(provider, "\x08\x01", 2, 0) == 2);
-  char provider_response[128] = {};
-  assert(recv(provider, provider_response, sizeof(provider_response), 0) == 2);
-  assert(provider_response[0] == 0x08 && provider_response[1] == 0x00);
-
-  std::string open_fields;
-  append_string(open_fields, 1, "image.img");
-  append_varint(open_fields, 2 * 8);
-  append_varint(open_fields, 0);
-  std::string open_request = "\x08\x02";
-  append_string(open_request, 2, open_fields);
-  assert(send(provider, open_request.data(), open_request.size(), 0) ==
-         static_cast<ssize_t>(open_request.size()));
-  char open_response[128] = {};
-  char open_control[CMSG_SPACE(sizeof(int))] = {};
-  iovec open_iov{open_response, sizeof(open_response)};
-  msghdr open_message{};
-  open_message.msg_iov = &open_iov;
-  open_message.msg_iovlen = 1;
-  open_message.msg_control = open_control;
-  open_message.msg_controllen = sizeof(open_control);
-  assert(recvmsg(provider, &open_message, 0) == 2);
-  assert(open_response[0] == 0x08 && open_response[1] == 0x00);
-  auto *open_cmsg = CMSG_FIRSTHDR(&open_message);
-  assert(open_cmsg && open_cmsg->cmsg_type == SCM_RIGHTS);
-  int staged_image = -1;
-  std::memcpy(&staged_image, CMSG_DATA(open_cmsg), sizeof(staged_image));
-  char staged_contents[32] = {};
-  assert(read(staged_image, staged_contents, sizeof(staged_contents)) == 16);
-  assert(std::string(staged_contents, 16) == "sidecar-provider");
-  close(staged_image);
-
-  assert(send(provider, "\x08\x05", 2, 0) == 2);
-  assert(recv(provider, provider_response, sizeof(provider_response), 0) == 2);
-  close(provider);
-
-  int control = connect_server();
-  std::string commit = "\x08\x04";
-  append_string(commit, 2, "tx-sidecar");
-  assert(send(control, commit.data(), commit.size(), 0) ==
-         static_cast<ssize_t>(commit.size()));
-  assert(recv(control, control_response, sizeof(control_response), 0) > 0);
-  assert(control_response[0] == 0x08 && control_response[1] == 0x01);
-  close(control);
-  kill(server_pid, SIGTERM);
-  assert(waitpid(server_pid, nullptr, 0) == server_pid);
-
-  std::filesystem::remove_all(root);
+  fs::remove_all(root);
 }

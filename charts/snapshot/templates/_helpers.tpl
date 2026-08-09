@@ -96,5 +96,7 @@ Host directory holding per-container storage (overlay upperdirs the agent
 reads for rootfs-diff capture, and CRI-O config.json fallback).
 */}}
 {{- define "snapshot.runtimeStorageDir" -}}
-{{- if eq .Values.runtime.type "crio" -}}/var/lib/containers{{- else -}}/var/lib/containerd{{- end -}}
+{{- if .Values.runtime.storagePath -}}
+{{- .Values.runtime.storagePath -}}
+{{- else if eq .Values.runtime.type "crio" -}}/var/lib/containers{{- else -}}/var/lib/containerd{{- end -}}
 {{- end }}

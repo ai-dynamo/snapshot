@@ -120,7 +120,7 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 	}
 
 	snapName := podSnapshotName(checkpointJobName)
-	snap, err := createPodSnapshot(waitCtx, crClient, namespace, snapName, sourcePod.Name, sourcePod.UID, checkpointID)
+	snap, err := createPodSnapshot(waitCtx, crClient, namespace, snapName, sourcePod.Name, sourcePod.UID, strings.Split(targetValue, ","), checkpointID)
 	if err != nil {
 		return nil, err
 	}

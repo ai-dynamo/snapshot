@@ -190,9 +190,6 @@ func ResolveManifestPIDsToObservedPIDs(processes []ProcessDetails, restoredPID i
 		if !ok {
 			continue
 		}
-		if len(process.NamespacePIDs) != 2 {
-			return nil, fmt.Errorf("restored process %d has namespace depth %d, want 2", pid, len(process.NamespacePIDs))
-		}
 		if existingPID, ok := innermostToObservedPID[process.InnermostPID]; ok {
 			return nil, fmt.Errorf("multiple restored processes map to innermost pid %d: %d and %d", process.InnermostPID, existingPID, process.ObservedPID)
 		}

@@ -20,26 +20,33 @@ func main() {
 	log := logging.ConfigureLogger("stderr").WithName("nsrestore")
 
 	checkpointPath := flag.String("checkpoint-path", "", "Path to checkpoint directory")
-	cudaDeviceMap := flag.String("cuda-device-map", "", "CUDA device map for cuda-checkpoint-helper restore")
+	criuBinaryFD := flag.Int("criu-binary-fd", -1, "Inherited CRIU executable FD")
+	cudaHelperFD := flag.Int("cuda-helper-fd", -1, "Inherited agent CUDA helper executable FD")
+	cudaDeviceMap := flag.String("cuda-device-map", "", "CUDA device map for agent restore")
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
 	targetPodIP := flag.String("target-pod-ip", "", "Restore pod IP for CRIU TCP socket remapping")
 	imageFD := flag.Int("pagebroker-image-fd", -1, "Inherited PageBroker image directory FD")
 	workFD := flag.Int("pagebroker-work-fd", -1, "Inherited PageBroker scratch directory FD")
 	providerFD := flag.Int("pagebroker-provider-fd", -1, "Inherited PageBroker provider socket FD")
+	controlFD := flag.Int("pagebroker-control-fd", -1, "Inherited PageBroker readiness control FD")
+	transactionID := flag.String("pagebroker-transaction-id", "", "PageBroker restore transaction ID")
 	flag.Parse()
 
 	if *checkpointPath == "" {
 		fatal(log, nil, "--checkpoint-path is required")
 	}
-
 	opts := executor.RestoreOptions{
-		CheckpointPath:       *checkpointPath,
-		CUDADeviceMap:        *cudaDeviceMap,
-		CgroupRoot:           *cgroupRoot,
-		TargetPodIP:          *targetPodIP,
-		PageBrokerImageFD:    *imageFD,
-		PageBrokerWorkFD:     *workFD,
-		PageBrokerProviderFD: *providerFD,
+		CheckpointPath:          *checkpointPath,
+		CRIUBinaryFD:            *criuBinaryFD,
+		CUDAHelperFD:            *cudaHelperFD,
+		CUDADeviceMap:           *cudaDeviceMap,
+		CgroupRoot:              *cgroupRoot,
+		TargetPodIP:             *targetPodIP,
+		PageBrokerImageFD:       *imageFD,
+		PageBrokerWorkFD:        *workFD,
+		PageBrokerProviderFD:    *providerFD,
+		PageBrokerControlFD:     *controlFD,
+		PageBrokerTransactionID: *transactionID,
 	}
 
 	result, err := executor.RestoreInNamespace(context.Background(), opts, log)

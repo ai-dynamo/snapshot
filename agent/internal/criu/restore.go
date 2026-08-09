@@ -43,9 +43,11 @@ func ExecuteRestore(
 	criuOpts *criurpc.CriuOpts,
 	m *types.CheckpointManifest,
 	checkpointPath string,
+	criuBinaryFD int,
 	imageFD int,
 	workFD int,
 	providerFD *os.File,
+	preResume func(int32) error,
 	log logr.Logger,
 ) (int32, func(), error) {
 	settings := m.CRIUDump.CRIU
@@ -95,7 +97,15 @@ func ExecuteRestore(
 		openFiles = append(openFiles, workDirFile)
 	}
 
-	if _, err := os.Stat(settings.BinaryPath); err != nil {
+	var criuBinary *os.File
+	if criuBinaryFD >= 0 {
+		criuBinary, err = os.Open(fmt.Sprintf("/proc/self/fd/%d", criuBinaryFD))
+		if err != nil {
+			cleanup()
+			return 0, nil, fmt.Errorf("open inherited CRIU executable: %w", err)
+		}
+		openFiles = append(openFiles, criuBinary)
+	} else if _, err := os.Stat(settings.BinaryPath); err != nil {
 		cleanup()
 		return 0, nil, fmt.Errorf("criu binary not found at %s: %w", settings.BinaryPath, err)
 	}
@@ -105,10 +115,9 @@ func ExecuteRestore(
 		return 0, nil, fmt.Errorf("failed to open net NS at %s: %w", netNsPath, err)
 	}
 	openFiles = append(openFiles, netNsFile)
-	layout := restoreFDLayout{files: []*os.File{imageDir}, opts: criuOpts}
+	layout := restoreFDLayout{opts: criuOpts}
 	criuOpts.ImagesDirFd = proto.Int32(int32(imageDir.Fd()))
 	if workDirFile != nil {
-		layout.appendFile("work-dir", workDirFile)
 		criuOpts.WorkDirFd = proto.Int32(int32(workDirFile.Fd()))
 	}
 	if providerFD != nil {
@@ -131,14 +140,12 @@ func ExecuteRestore(
 		"transport_fd", swrkTransportFD,
 		"rpc_image_fd", criuOpts.GetImagesDirFd(),
 		"rpc_work_fd", criuOpts.GetWorkDirFd(),
-		"child_image_fd", firstInheritedFD,
-		"child_work_fd", layout.fd("work-dir"),
 		"provider_fd", layout.fd("0-extmem-provider"),
 	)
 
-	notify := &restoreNotify{log: log}
+	notify := &restoreNotify{log: log, preResume: preResume}
 	log.V(1).Info("Executing CRIU swrk restore")
-	if err := restoreWithSWRK(settings.BinaryPath, criuOpts, layout.files, notify); err != nil {
+	if err := restoreWithSWRK(settings.BinaryPath, criuBinary, criuOpts, layout.files, notify); err != nil {
 		log.Error(err, "go-criu Restore returned error")
 		if copiedPath, copyErr := copyRestoreLog(checkpointPath, workFD, settings.WorkDir); copyErr != nil {
 			log.Error(copyErr, "Failed to copy CRIU restore log from namespace work directory")
@@ -148,6 +155,13 @@ func ExecuteRestore(
 		logging.LogRestoreErrors(checkpointPath, settings.WorkDir, log)
 		cleanup()
 		return 0, nil, fmt.Errorf("CRIU restore failed: %w", err)
+	}
+	if os.Getenv("SNAPSHOT_PRESERVE_CRIU_RESTORE_LOG") != "" {
+		if copiedPath, copyErr := copyRestoreLogTo(checkpointPath, workFD, settings.WorkDir, RestoreLogFilename+".completed"); copyErr != nil {
+			log.Error(copyErr, "Failed to preserve completed CRIU restore log")
+		} else if copiedPath != "" {
+			log.Info("Preserved completed CRIU restore log", "path", copiedPath)
+		}
 	}
 
 	return notify.restoredPID, cleanup, nil
@@ -192,7 +206,7 @@ func (l *restoreFDLayout) validate() error {
 	return nil
 }
 
-func restoreWithSWRK(binaryPath string, opts *criurpc.CriuOpts, files []*os.File, nfy criulib.Notify) (retErr error) {
+func restoreWithSWRK(binaryPath string, binary *os.File, opts *criurpc.CriuOpts, files []*os.File, nfy criulib.Notify) (retErr error) {
 	fds, err := syscall.Socketpair(syscall.AF_LOCAL, syscall.SOCK_SEQPACKET|syscall.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return err
@@ -206,8 +220,13 @@ func restoreWithSWRK(binaryPath string, opts *criurpc.CriuOpts, files []*os.File
 		return err
 	}
 
+	extraFiles := append([]*os.File{serverFile}, files...)
+	if binary != nil {
+		binaryPath = fmt.Sprintf("/proc/self/fd/%d", firstInheritedFD+len(files))
+		extraFiles = append(extraFiles, binary)
+	}
 	cmd := exec.Command(binaryPath, "swrk", strconv.Itoa(swrkTransportFD))
-	cmd.ExtraFiles = append([]*os.File{serverFile}, files...)
+	cmd.ExtraFiles = extraFiles
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
 		conn.Close()
@@ -271,11 +290,23 @@ func restoreWithSWRK(binaryPath string, opts *criurpc.CriuOpts, files []*os.File
 			err = nfy.SetupNamespaces(notify.GetPid())
 		case "post-setup-namespaces":
 			err = nfy.PostSetupNamespaces()
+		case "pre-resume":
+			if preResume, ok := nfy.(interface{ PreResume() error }); ok {
+				err = preResume.PreResume()
+			} else {
+				err = errors.New("CRIU pre-resume notification is unsupported by the caller")
+			}
 		case "post-resume":
 			err = nfy.PostResume()
 		}
 		if err != nil {
-			return err
+			notifyType := response.GetType()
+			failed := &criurpc.CriuReq{Type: &notifyType, NotifySuccess: proto.Bool(false)}
+			data, marshalErr := failed.MarshalVT()
+			if marshalErr == nil {
+				_, _ = conn.(*net.UnixConn).Write(data)
+			}
+			return fmt.Errorf("CRIU %s notification failed: %w", notify.GetScript(), err)
 		}
 		notifyType := response.GetType()
 		request = &criurpc.CriuReq{Type: &notifyType, NotifySuccess: proto.Bool(true)}
@@ -286,6 +317,10 @@ func restoreWithSWRK(binaryPath string, opts *criurpc.CriuOpts, files []*os.File
 // restore agent can read it after nsrestore exits. PageBroker work FDs refer to
 // a sidecar-private directory, so prefer the inherited descriptor when set.
 func copyRestoreLog(checkpointPath string, workFD int, workDir string) (string, error) {
+	return copyRestoreLogTo(checkpointPath, workFD, workDir, RestoreLogFilename+".failed")
+}
+
+func copyRestoreLogTo(checkpointPath string, workFD int, workDir, filename string) (string, error) {
 	if checkpointPath == "" {
 		return "", nil
 	}
@@ -302,7 +337,7 @@ func copyRestoreLog(checkpointPath string, workFD int, workDir string) (string, 
 	}
 	defer source.Close()
 
-	destination := filepath.Join(checkpointPath, RestoreLogFilename+".failed")
+	destination := filepath.Join(checkpointPath, filename)
 	target, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return "", fmt.Errorf("create shared restore log: %w", err)
@@ -419,6 +454,7 @@ type restoreNotify struct {
 	criulib.NoNotify
 	restoredPID int32
 	log         logr.Logger
+	preResume   func(int32) error
 }
 
 func (n *restoreNotify) PreRestore() error {
@@ -430,4 +466,12 @@ func (n *restoreNotify) PostRestore(pid int32) error {
 	n.restoredPID = pid
 	n.log.Info("CRIU post-restore: process restored", "pid", pid)
 	return nil
+}
+
+func (n *restoreNotify) PreResume() error {
+	n.log.Info("CRIU pre-resume: restored tasks remain frozen", "pid", n.restoredPID)
+	if n.preResume == nil {
+		return nil
+	}
+	return n.preResume(n.restoredPID)
 }

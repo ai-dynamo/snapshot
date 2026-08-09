@@ -3,6 +3,8 @@
 package criu
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -20,9 +22,8 @@ func TestRestoreFDLayoutUsesSWRKAndInheritedFDs(t *testing.T) {
 	}
 	image, work, provider, netns := os.NewFile(10, "image"), os.NewFile(11, "work"), os.NewFile(12, "provider"), os.NewFile(13, "netns")
 	opts := new(criurpc.CriuOpts)
-	layout := restoreFDLayout{files: []*os.File{image}, opts: opts}
+	layout := restoreFDLayout{opts: opts}
 	opts.ImagesDirFd = proto.Int32(int32(image.Fd()))
-	layout.appendFile("work-dir", work)
 	opts.WorkDirFd = proto.Int32(int32(work.Fd()))
 	layout.add("0-extmem-provider", provider)
 	layout.add("extNetNs", netns)
@@ -35,14 +36,33 @@ func TestRestoreFDLayoutUsesSWRKAndInheritedFDs(t *testing.T) {
 	if got := opts.GetWorkDirFd(); got != int32(work.Fd()) {
 		t.Fatalf("RPC work fd = %d, want parent fd %d", got, work.Fd())
 	}
-	if got := layout.fd("work-dir"); got != 5 {
-		t.Fatalf("child work fd = %d, want 5", got)
+	if got := opts.GetInheritFd()[0].GetFd(); got != 4 {
+		t.Fatalf("provider fd = %d, want 4", got)
 	}
-	if got := opts.GetInheritFd()[0].GetFd(); got != 6 {
-		t.Fatalf("provider fd = %d, want 6", got)
+	if got := opts.GetInheritFd()[1].GetFd(); got != 5 {
+		t.Fatalf("netns fd = %d, want 5", got)
 	}
-	if got := opts.GetInheritFd()[1].GetFd(); got != 7 {
-		t.Fatalf("netns fd = %d, want 7", got)
+}
+
+func TestRestoreNotifyPreResumePropagatesFailure(t *testing.T) {
+	want := fmt.Errorf("host memory fill failed")
+	called := false
+	notify := &restoreNotify{
+		log: logr.Discard(),
+		preResume: func(pid int32) error {
+			called = true
+			if pid != 42 {
+				t.Fatalf("pre-resume pid = %d, want 42", pid)
+			}
+			return want
+		},
+	}
+	notify.restoredPID = 42
+	if err := notify.PreResume(); !errors.Is(err, want) {
+		t.Fatalf("PreResume error = %v, want %v", err, want)
+	}
+	if !called {
+		t.Fatal("pre-resume callback was not called")
 	}
 }
 
@@ -90,5 +110,21 @@ func TestCopyRestoreLogFromInheritedWorkFD(t *testing.T) {
 	}
 	if string(got) != want {
 		t.Fatalf("copied log = %q, want %q", got, want)
+	}
+}
+
+func TestCopyRestoreLogToCompletedFilename(t *testing.T) {
+	workDir := t.TempDir()
+	checkpointDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, RestoreLogFilename), []byte("completed\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	gotPath, err := copyRestoreLogTo(checkpointDir, -1, workDir, RestoreLogFilename+".completed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wantPath := filepath.Join(checkpointDir, RestoreLogFilename+".completed"); gotPath != wantPath {
+		t.Fatalf("copied log path = %q, want %q", gotPath, wantPath)
 	}
 }

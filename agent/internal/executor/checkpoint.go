@@ -219,8 +219,8 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 		if err != nil {
 			return nil, fmt.Errorf("failed to read process details for CUDA process %d: %w", cudaHostPID, err)
 		}
-		if len(process.NamespacePIDs) != 2 {
-			return nil, fmt.Errorf("CUDA process %d has namespace depth %d, want 2", cudaHostPID, len(process.NamespacePIDs))
+		if len(process.NamespacePIDs) < 2 {
+			return nil, fmt.Errorf("CUDA process %d has namespace depth %d, want at least 2", cudaHostPID, len(process.NamespacePIDs))
 		}
 		cudaNamespacePIDs = append(cudaNamespacePIDs, process.InnermostPID)
 	}
@@ -305,6 +305,24 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 		return nil, err, true
 	}
 	timings.CRIUDumpDuration = criuDumpDuration
+
+	packagingStart := time.Now()
+	pagebrokerManifest, err := pagebroker.GenerateManifest(checkpointDir, data.CheckpointID)
+	if err != nil {
+		if pagebroker.IsUnsupported(err) {
+			log.Info("Skipping PageBroker manifest for checkpoint format that requires legacy restore",
+				"error", err.Error(), "duration", time.Since(packagingStart))
+		} else {
+			return nil, fmt.Errorf("generate PageBroker manifest: %w", err), true
+		}
+	} else {
+		log.Info("Generated PageBroker restore manifest",
+			"path", filepath.Join(checkpointDir, pagebroker.ManifestFilename),
+			"resident_bytes", pagebrokerManifest.ResidentBytes,
+			"host_memory_objects", len(pagebrokerManifest.HostMemoryObjects),
+			"duration", time.Since(packagingStart),
+		)
+	}
 
 	// Overlay rootfs diff capture is best-effort. Failures are logged but not
 	// propagated — a checkpoint without overlay diffs is still valid for restore

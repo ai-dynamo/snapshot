@@ -6,8 +6,10 @@ package executor
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr/testr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -54,6 +56,65 @@ func TestExecNSRestoreRejectsRelativeContainerCheckpointLocation(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "absolute") {
 		t.Fatalf("expected absolute-path validation error, got: %v", err)
+	}
+}
+
+func TestNSRestoreInheritedFDLayout(t *testing.T) {
+	if got, want := nsrestoreCUDAHelperFD, 5; got != want {
+		t.Fatalf("CUDA helper FD = %d, want %d", got, want)
+	}
+	want := []string{
+		"--pagebroker-image-fd", "6",
+		"--pagebroker-work-fd", "7",
+		"--pagebroker-provider-fd", "8",
+		"--pagebroker-control-fd", "9",
+		"--pagebroker-transaction-id", "tx-test",
+	}
+	got := nsrestorePageBrokerArgs(nsrestoreCUDAHelperFD+1, "tx-test")
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("PageBroker nsrestore args = %q, want %q", got, want)
+	}
+}
+
+func TestRestorePreResumeWaitsForPageBroker(t *testing.T) {
+	control, err := os.CreateTemp(t.TempDir(), "pagebroker-control")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+
+	var calls []string
+	timings := &nsrestorePhaseTimings{}
+	preResume := restorePreResume(control, "tx-test", func(gotControl *os.File, transactionID string) error {
+		calls = append(calls, "ready")
+		if gotControl != control {
+			t.Fatal("readiness wait received a different control file")
+		}
+		if transactionID != "tx-test" {
+			t.Fatalf("transaction ID = %q, want tx-test", transactionID)
+		}
+		return nil
+	}, time.Now(), timings, testr.New(t))
+	if err := preResume(42); err != nil {
+		t.Fatalf("pre-resume callback: %v", err)
+	}
+	if got, want := strings.Join(calls, ","), "ready"; got != want {
+		t.Fatalf("pre-resume calls = %q, want %q", got, want)
+	}
+}
+
+func TestRestorePreResumePropagatesReadinessFailure(t *testing.T) {
+	want := errors.New("host memory fill failed")
+	control, err := os.CreateTemp(t.TempDir(), "pagebroker-control")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+	preResume := restorePreResume(control, "tx-test", func(*os.File, string) error {
+		return want
+	}, time.Now(), &nsrestorePhaseTimings{}, testr.New(t))
+	if err := preResume(42); !errors.Is(err, want) {
+		t.Fatalf("pre-resume error = %v, want %v", err, want)
 	}
 }
 

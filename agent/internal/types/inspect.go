@@ -4,6 +4,8 @@
 package types
 
 import (
+	"time"
+
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
 
@@ -35,9 +37,11 @@ type CheckpointContainerSnapshot struct {
 
 // RestoreContainerSnapshot holds inspected state for the restore target.
 type RestoreContainerSnapshot struct {
-	CheckpointPath string
-	PlaceholderPID int
-	TargetRoot     string
-	CgroupRoot     string
-	CUDADeviceMap  string
+	CheckpointPath        string
+	CRIUBinaryPath        string
+	PlaceholderPID        int
+	TargetRoot            string
+	CgroupRoot            string
+	CUDADeviceMap         string
+	CUDADeviceMapDuration time.Duration
 }

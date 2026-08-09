@@ -48,6 +48,12 @@ type PodSnapshotSource struct {
 
 // PodReference names a pod in the same namespace as the referencing PodSnapshot.
 type PodReference struct {
+	// Containers narrows the capture to these containers of the source pod.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=1
+	Containers []string `json:"containers"`
+
 	// Name of the source pod.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1

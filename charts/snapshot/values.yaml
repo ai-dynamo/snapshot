@@ -38,6 +38,7 @@ crdUpgrade:
 runtime:
   type: containerd  # containerd | crio
   socketPath: ""
+  storagePath: ""
 
 # Gates the OCP RBAC template and the DS required-scc annotation. Keep false
 # on vanilla Kubernetes (it references an OCP-only built-in SCC).
@@ -108,6 +109,19 @@ daemonset:
     requests:
       cpu: 2
       memory: 1Gi
+
+  pagebroker:
+    # Admission reserves manifest-derived resident bytes against this cap.
+    # 140 GiB covers the measured 120B host checkpoint while leaving cgroup
+    # headroom below the container's 160 GiB limit.
+    memoryBudgetBytes: "150323855360"
+    resources:
+      limits:
+        cpu: 4
+        memory: 160Gi
+      requests:
+        cpu: 2
+        memory: 160Gi
 
   # Node selector - target GPU nodes
   nodeSelector:

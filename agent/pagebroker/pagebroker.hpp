@@ -5,17 +5,42 @@
 #include <cstdint>
 #include <condition_variable>
 #include <filesystem>
-#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
-#include <optional>
-#include <set>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace pagebroker {
 
 class CopyPool;
+
+struct ImageSpec {
+  std::string name;
+  std::string uri;
+  std::uint64_t size{};
+};
+
+struct SourceRange {
+  std::string object;
+  std::uint64_t source_offset{};
+  std::uint64_t dst_offset{};
+  std::uint64_t length{};
+};
+
+struct HostMemoryObject {
+  std::uint64_t memory_id{};
+  std::string name;
+  std::uint32_t pid{};
+  std::uint32_t vma_id{};
+  std::uint64_t shmid{};
+  std::uint64_t dst_addr{};
+  std::uint64_t length{};
+  std::string semantics;
+  std::string map_mode;
+  std::vector<SourceRange> source_ranges;
+};
 
 struct Request {
   enum class Operation : std::uint32_t {
@@ -28,6 +53,15 @@ struct Request {
   Operation operation{};
   std::string transaction_id;
   std::string checkpoint_path;
+  std::string manifest_ref;
+  std::uint64_t resident_bytes{};
+  std::vector<ImageSpec> images;
+  std::vector<HostMemoryObject> host_memory_objects;
+
+  Request() = default;
+  Request(Operation op, std::string id, std::filesystem::path checkpoint)
+      : operation(op), transaction_id(std::move(id)),
+        checkpoint_path(checkpoint.string()) {}
 };
 
 struct Response {
@@ -39,19 +73,24 @@ struct Response {
 };
 
 struct StagingState {
+  struct MaterializedObject {
+    HostMemoryObject spec;
+    int fd{-1};
+    ~MaterializedObject();
+  };
   std::mutex mutex;
   std::condition_variable changed;
-  std::set<std::string> planned_files;
-  std::set<std::string> ready_files;
-  std::map<std::string, std::size_t> remaining_chunks;
-  std::function<bool(const std::string &)> prioritize_file;
-  std::uint64_t copied_bytes{};
   std::size_t remaining_tasks{};
+  bool fill_started{};
   bool complete{};
   bool cancelled{};
   bool provider_running{};
-  int error_code{};
   std::string error;
+  std::filesystem::path checkpoint_root;
+  std::string manifest_ref;
+  std::map<std::string, ImageSpec> images;
+  std::map<std::string, std::shared_ptr<MaterializedObject>> vmas;
+  std::map<std::uint64_t, std::shared_ptr<MaterializedObject>> shared;
 };
 
 bool decode_request(const void *data, std::size_t size, Request &request,
@@ -82,6 +121,7 @@ private:
   static void stop_staging(TransactionState &state, bool cancel);
   std::filesystem::path staging_root_, scratch_root_;
   std::uint64_t budget_;
+  bool defer_fill_{};
   std::unique_ptr<CopyPool> copy_pool_;
   std::map<std::string, TransactionState> transactions_;
   std::uint64_t staged_bytes_{};
@@ -96,5 +136,6 @@ int serve_provider(const std::filesystem::path &root, int socket_fd,
                    std::shared_ptr<StagingState> staging = {});
 #ifdef PAGEBROKER_TEST
 bool test_copy_pool_priority();
+void test_set_fill_delay(unsigned milliseconds);
 #endif
 } // namespace pagebroker

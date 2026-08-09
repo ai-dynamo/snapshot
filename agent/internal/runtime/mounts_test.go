@@ -164,6 +164,18 @@ func TestBuildMountPolicy(t *testing.T) {
 			wantNotInExt: []string{"/run/some-daemon"},
 		},
 		{
+			name: "binfmt_misc is skipped even when OCI-managed",
+			mounts: []types.MountInfo{
+				{MountPoint: "/proc/sys/fs/binfmt_misc", IsOCIManaged: true},
+			},
+			wantSkipped:  []string{"/proc/sys/fs/binfmt_misc"},
+			wantNotInExt: []string{"/proc/sys/fs/binfmt_misc"},
+		},
+		{
+			name: "binfmt_misc is skipped when absent from mountinfo",
+			wantSkipped: []string{"/proc/sys/fs/binfmt_misc"},
+		},
+		{
 			name: "OCI-managed /proc submount is externalized, not skipped",
 			mounts: []types.MountInfo{
 				{MountPoint: "/proc/acpi", IsOCIManaged: true},

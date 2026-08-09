@@ -59,7 +59,7 @@ func makeSnapshotForReconcile() *snapshotv1alpha1.PodSnapshot {
 			Finalizers: []string{podSnapshotFinalizer},
 		},
 		Spec: snapshotv1alpha1.PodSnapshotSpec{
-			Source: snapshotv1alpha1.PodSnapshotSource{PodRef: snapshotv1alpha1.PodReference{Name: "worker-0"}},
+			Source: snapshotv1alpha1.PodSnapshotSource{PodRef: snapshotv1alpha1.PodReference{Name: "worker-0", Containers: []string{"main"}}},
 		},
 	}
 }
@@ -118,6 +118,7 @@ func TestSnapshotReconciler_BuildsWorkOrderAndBinds(t *testing.T) {
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "podsnapshotcontent-snap-uid"}, content))
 	assert.Equal(t, "worker-0", content.Spec.Source.PodRef.Name)
 	assert.Equal(t, types.UID("pod-uid-9"), content.Spec.Source.PodRef.UID)
+	assert.Equal(t, []string{"main"}, content.Spec.Source.PodRef.Containers)
 	assert.Equal(t, "node-a", content.Spec.Source.NodeName)
 	assert.Equal(t, "node-a", content.Labels[snapshotv1alpha1.SnapshotNodeLabel])
 	assert.NotContains(t, content.Labels, snapshotv1alpha1.CheckpointIDLabel)

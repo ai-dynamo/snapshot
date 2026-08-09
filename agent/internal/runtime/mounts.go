@@ -80,10 +80,17 @@ func ClassifyMounts(mounts []types.MountInfo, ociSpec *specs.Spec, rootFS string
 //  4. Externalize: everything else (OCI mounts the runtime recreates in placeholder)
 func BuildMountPolicy(mounts []types.MountInfo, rootFS string, maskedPaths []string) (map[string]string, []string) {
 	extMap := make(map[string]string, len(mounts))
-	var skipped []string
+	// binfmt_misc is inherited from the host and may not be listed in the
+	// container's mountinfo. CRIU must never attempt to recreate it on restore.
+	skipped := []string{"/proc/sys/fs/binfmt_misc"}
 
 	for _, m := range mounts {
 		if m.MountPoint == "" {
+			continue
+		}
+
+		// Already included above even when it is absent from mountinfo.
+		if m.MountPoint == "/proc/sys/fs/binfmt_misc" {
 			continue
 		}
 

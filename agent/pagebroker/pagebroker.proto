@@ -12,6 +12,38 @@ message Request {
   required Operation operation = 1;
   optional string transaction_id = 2;
   optional string checkpoint_path = 3;
+  optional string manifest_ref = 4;
+  optional uint64 resident_bytes = 5;
+  repeated Image images = 6;
+  repeated HostMemoryObject host_memory_objects = 7;
+}
+
+message Image {
+  required string name = 1;
+  required string uri = 2;
+  required uint64 size = 3;
+  reserved 4;
+}
+
+message SourceRange {
+  required string object = 1;
+  required uint64 source_offset = 2;
+  required uint64 dst_offset = 3;
+  required uint64 length = 4;
+  reserved 5;
+}
+
+message HostMemoryObject {
+  required uint64 memory_id = 1;
+  required string name = 2;
+  optional uint32 pid = 3;
+  optional uint32 vma_id = 4;
+  optional uint64 shmid = 5;
+  optional uint64 dst_addr = 6;
+  required uint64 length = 7;
+  required string mem_semantics = 8;
+  required string map_mode = 9;
+  repeated SourceRange source_ranges = 10;
 }
 
 message Response {

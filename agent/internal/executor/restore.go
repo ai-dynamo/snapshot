@@ -46,6 +46,12 @@ type RestoreRequest struct {
 
 type beforeLaunchError struct{ err error }
 
+const (
+	nsrestoreExecutableFD = 3
+	nsrestoreCRIUBinaryFD = nsrestoreExecutableFD + 1
+	nsrestoreCUDAHelperFD = nsrestoreCRIUBinaryFD + 1
+)
+
 func (e *beforeLaunchError) Error() string { return e.err.Error() }
 func (e *beforeLaunchError) Unwrap() error { return e.err }
 
@@ -80,7 +86,12 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if req.PageBrokerEnabled {
 		transaction, err = pagebroker.Stage(ctx, req.PageBrokerSocket, req.CheckpointLocation)
 		if err != nil {
-			return 0, fmt.Errorf("PageBroker staging failed: %w", err)
+			if pagebroker.IsUnsupported(err) {
+				log.Info("Checkpoint format is unsupported by PageBroker; using legacy restore before CRIU launch", "error", err.Error())
+				transaction = nil
+			} else {
+				return 0, fmt.Errorf("PageBroker staging failed: %w", err)
+			}
 		}
 	}
 	result, err := execNSRestore(ctx, log, req, snap, transaction)
@@ -98,15 +109,18 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 			}
 		}
 	}
-	restoreDuration := hostInspectDuration + result.NSRestoreSetupDuration + result.CRIURestoreDuration + result.CUDADuration
+	restoreDuration := hostInspectDuration + result.NSRestoreSetupDuration + result.CRIURestoreDuration
 	log.Info("Restore timing summary",
 		"restore", map[string]any{
 			"duration": restoreDuration.String(),
 			"phases": map[string]string{
-				"host_inspect_duration":    hostInspectDuration.String(),
-				"nsrestore_setup_duration": result.NSRestoreSetupDuration.String(),
-				"criu_restore_duration":    result.CRIURestoreDuration.String(),
-				"cuda_duration":            result.CUDADuration.String(),
+				"host_inspect_duration":      hostInspectDuration.String(),
+				"nsrestore_setup_duration":   result.NSRestoreSetupDuration.String(),
+				"criu_core_duration":         result.CRIUCoreDuration.String(),
+				"host_memory_ready_duration": result.HostMemoryReadyDuration.String(),
+				"criu_restore_wall_duration": result.CRIURestoreDuration.String(),
+				"gpu_device_map_duration":    snap.CUDADeviceMapDuration.String(),
+				"cuda_restore_duration":      result.CUDARestoreDuration.String(),
 			},
 		},
 	)
@@ -181,10 +195,12 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 	}
 
 	cudaDeviceMap := ""
+	var cudaDeviceMapDuration time.Duration
 	if !m.CUDA.IsEmpty() {
 		if len(m.CUDA.SourceGPUUUIDs) == 0 {
 			return nil, fmt.Errorf("missing source GPU UUIDs in checkpoint manifest")
 		}
+		cudaDeviceMapStart := time.Now()
 		targetGPUUUIDs, err := cuda.DiscoverGPUUUIDs(
 			ctx,
 			req.Clientset,
@@ -210,14 +226,17 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 			"target_uuids", targetGPUUUIDs,
 			"device_map", cudaDeviceMap,
 		)
+		cudaDeviceMapDuration = time.Since(cudaDeviceMapStart)
 	}
 
 	return &types.RestoreContainerSnapshot{
-		CheckpointPath: checkpointPath,
-		PlaceholderPID: placeholderPID,
-		TargetRoot:     fmt.Sprintf("%s/%d/root", snapshotruntime.HostProcPath, placeholderPID),
-		CgroupRoot:     cgroupRoot,
-		CUDADeviceMap:  cudaDeviceMap,
+		CheckpointPath:        checkpointPath,
+		CRIUBinaryPath:        m.CRIUDump.CRIU.BinaryPath,
+		PlaceholderPID:        placeholderPID,
+		TargetRoot:            fmt.Sprintf("%s/%d/root", snapshotruntime.HostProcPath, placeholderPID),
+		CgroupRoot:            cgroupRoot,
+		CUDADeviceMap:         cudaDeviceMap,
+		CUDADeviceMapDuration: cudaDeviceMapDuration,
 	}, nil
 }
 
@@ -231,6 +250,21 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	if checkpointPath == "" {
 		checkpointPath = snap.CheckpointPath
 	}
+	nsrestoreBinary, err := os.Open(req.NSRestorePath)
+	if err != nil {
+		return nil, &beforeLaunchError{err: fmt.Errorf("open nsrestore executable: %w", err)}
+	}
+	defer nsrestoreBinary.Close()
+	criuBinary, err := os.Open(snap.CRIUBinaryPath)
+	if err != nil {
+		return nil, &beforeLaunchError{err: fmt.Errorf("open CRIU executable: %w", err)}
+	}
+	defer criuBinary.Close()
+	cudaHelper, err := os.Open(cuda.CheckpointHelperBinary)
+	if err != nil {
+		return nil, &beforeLaunchError{err: fmt.Errorf("open agent CUDA helper: %w", err)}
+	}
+	defer cudaHelper.Close()
 	var inherited []*os.File
 	if transaction != nil {
 		var err error
@@ -253,9 +287,12 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 		// cgroup yard with a relative path, so make it resolve inside the
 		// target mount namespace rather than the agent's old root.
 		"--wdns=/",
-		"--", req.NSRestorePath,
+		"--", fmt.Sprintf("/proc/self/fd/%d", nsrestoreExecutableFD),
 		"--checkpoint-path", checkpointPath,
+		"--criu-binary-fd", strconv.Itoa(nsrestoreCRIUBinaryFD),
+		"--cuda-helper-fd", strconv.Itoa(nsrestoreCUDAHelperFD),
 	}
+	firstPageBrokerFD := nsrestoreCUDAHelperFD + 1
 	if snap.CUDADeviceMap != "" {
 		args = append(args, "--cuda-device-map", snap.CUDADeviceMap)
 	}
@@ -266,17 +303,13 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 		args = append(args, "--target-pod-ip", req.TargetPodIP)
 	}
 	if transaction != nil {
-		args = append(args,
-			"--pagebroker-image-fd", "3",
-			"--pagebroker-work-fd", "4",
-			"--pagebroker-provider-fd", "5",
-		)
+		args = append(args, nsrestorePageBrokerArgs(firstPageBrokerFD, transaction.ID())...)
 	}
 
 	cmd := exec.CommandContext(ctx, "nsenter", args...)
 	// Inherit the agent environment so nsrestore uses the same logger settings.
 	cmd.Env = os.Environ()
-	cmd.ExtraFiles = inherited
+	cmd.ExtraFiles = append([]*os.File{nsrestoreBinary, criuBinary, cudaHelper}, inherited...)
 	log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())
 
 	var stdout bytes.Buffer
@@ -300,4 +333,14 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	}
 
 	return &result, nil
+}
+
+func nsrestorePageBrokerArgs(firstPageBrokerFD int, transactionID string) []string {
+	return []string{
+		"--pagebroker-image-fd", strconv.Itoa(firstPageBrokerFD),
+		"--pagebroker-work-fd", strconv.Itoa(firstPageBrokerFD + 1),
+		"--pagebroker-provider-fd", strconv.Itoa(firstPageBrokerFD + 2),
+		"--pagebroker-control-fd", strconv.Itoa(firstPageBrokerFD + 3),
+		"--pagebroker-transaction-id", transactionID,
+	}
 }

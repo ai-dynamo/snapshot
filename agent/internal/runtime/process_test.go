@@ -4,6 +4,7 @@
 package runtime
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -191,15 +192,18 @@ func TestResolveManifestPIDsToObservedPIDsFailsWhenManifestPIDMissingFromRestore
 	}
 }
 
-func TestResolveManifestPIDsToObservedPIDsFailsWhenNamespaceDepthIsNotTwo(t *testing.T) {
+func TestResolveManifestPIDsToObservedPIDsAcceptsNestedNamespaces(t *testing.T) {
 	processes := []ProcessDetails{
 		{ObservedPID: 50, ParentPID: 0, OutermostPID: 50, InnermostPID: 50, NamespacePIDs: []int{50}, Cmdline: "nsrestore"},
 		{ObservedPID: 74, ParentPID: 50, OutermostPID: 74, InnermostPID: 1, NamespacePIDs: []int{900, 74, 1}, Cmdline: "python3 -m vllm"},
 		{ObservedPID: 80, ParentPID: 74, OutermostPID: 80, InnermostPID: 750, NamespacePIDs: []int{900, 80, 750}, Cmdline: "VLLM::EngineCore"},
 	}
 
-	_, err := ResolveManifestPIDsToObservedPIDs(processes, 74, []int{1, 750})
-	if err == nil {
-		t.Fatal("ResolveManifestPIDsToObservedPIDs(...) unexpectedly succeeded")
+	resolved, err := ResolveManifestPIDsToObservedPIDs(processes, 74, []int{1, 750})
+	if err != nil {
+		t.Fatalf("ResolveManifestPIDsToObservedPIDs(...) error = %v", err)
+	}
+	if got, want := fmt.Sprint(resolved), "[74 80]"; got != want {
+		t.Fatalf("resolved PIDs = %s, want %s", got, want)
 	}
 }

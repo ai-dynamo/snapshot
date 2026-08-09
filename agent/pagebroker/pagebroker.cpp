@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cassert>
 #include <cerrno>
@@ -16,6 +17,7 @@
 #include <functional>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <linux/un.h>
 #include <linux/memfd.h>
@@ -31,6 +33,18 @@
 
 namespace fs = std::filesystem;
 namespace pagebroker {
+
+#ifdef PAGEBROKER_TEST
+static std::atomic<unsigned> test_fill_delay_ms{};
+void test_set_fill_delay(unsigned milliseconds) {
+  test_fill_delay_ms.store(milliseconds);
+}
+#endif
+
+StagingState::MaterializedObject::~MaterializedObject() {
+  if (fd >= 0)
+    close(fd);
+}
 
 class CopyPool {
 public:
@@ -216,178 +230,203 @@ std::uint64_t tree_size(const fs::path &path) {
       total += e.file_size();
   return total;
 }
-struct CopyEntry {
-  fs::path source;
-  fs::path destination;
-  std::string relative;
-  std::uint64_t bytes;
-};
-struct CopyPlan {
-  std::vector<CopyEntry> files;
-  std::uint64_t bytes{};
-};
-CopyPlan plan_copy_tree(const fs::path &from, const fs::path &to) {
-  CopyPlan plan;
-  fs::create_directories(to);
-  for (const auto &entry : fs::recursive_directory_iterator(from)) {
-    auto relative = fs::relative(entry.path(), from);
-    auto destination = to / relative;
-    if (entry.is_directory()) {
-      fs::create_directories(destination);
-    } else if (entry.is_regular_file()) {
-      auto bytes = entry.file_size();
-      fs::create_directories(destination.parent_path());
-      plan.files.push_back(
-          {entry.path(), destination, relative.generic_string(), bytes});
-      plan.bytes += bytes;
-    }
-  }
-  std::sort(plan.files.begin(), plan.files.end(),
-            [](const CopyEntry &left, const CopyEntry &right) {
-              if (left.bytes != right.bytes)
-                return left.bytes < right.bytes;
-              return left.relative < right.relative;
-            });
-  return plan;
-}
 unsigned copy_worker_count() {
   auto cpus = std::max(1u, std::thread::hardware_concurrency());
   return std::min(32u, std::max(8u, cpus * 2));
 }
-constexpr std::uint64_t copy_task_bytes = 16ULL << 20;
-constexpr std::size_t copy_buffer_bytes = 1ULL << 20;
-void set_staging_error(const std::shared_ptr<StagingState> &state, int error,
+constexpr std::size_t copy_buffer_bytes = 4ULL << 20;
+constexpr std::size_t direct_io_alignment = 4096;
+
+char *copy_buffer() {
+  thread_local std::unique_ptr<char, decltype(&std::free)> buffer{
+      [] {
+        void *storage = nullptr;
+        if (posix_memalign(&storage, direct_io_alignment, copy_buffer_bytes) != 0)
+          throw std::bad_alloc();
+        return static_cast<char *>(storage);
+      }(),
+      &std::free};
+  return buffer.get();
+}
+
+void coalesce_ranges(HostMemoryObject &object) {
+  std::vector<SourceRange> coalesced;
+  coalesced.reserve(object.source_ranges.size());
+  for (auto &range : object.source_ranges) {
+    if (!coalesced.empty()) {
+      auto &previous = coalesced.back();
+      if (previous.object == range.object &&
+          previous.source_offset + previous.length == range.source_offset &&
+          previous.dst_offset + previous.length == range.dst_offset) {
+        previous.length += range.length;
+        continue;
+      }
+    }
+    coalesced.push_back(std::move(range));
+  }
+  object.source_ranges = std::move(coalesced);
+}
+void set_staging_error(const std::shared_ptr<StagingState> &state,
                        const std::string &message) {
   {
     std::lock_guard lock(state->mutex);
     if (state->error.empty()) {
-      state->error_code = error ? error : EIO;
       state->error = message;
     }
   }
   state->changed.notify_all();
 }
-void finish_copy_task(const CopyEntry &entry,
-                      const std::string &transaction_id,
-                      const fs::path &staging,
-                      const std::shared_ptr<StagingState> &state,
-                      std::chrono::steady_clock::time_point started,
-                      bool copied) {
+std::string vma_key(std::uint64_t pid, std::uint64_t vma_id,
+                    std::uint64_t address, std::uint64_t length) {
+  return std::to_string(pid) + ":" + std::to_string(vma_id) + ":" +
+         std::to_string(address) + ":" + std::to_string(length);
+}
+
+void finish_range(const std::string &transaction_id,
+                  const std::shared_ptr<StagingState> &state,
+                  std::chrono::steady_clock::time_point transaction_started) {
   bool complete = false;
-  bool file_ready = false;
-  std::uint64_t copied_bytes = 0;
-  std::string error;
   bool cancelled = false;
+  std::string error;
   {
     std::lock_guard lock(state->mutex);
-    if (copied) {
-      auto remaining = state->remaining_chunks.find(entry.relative);
-      if (remaining != state->remaining_chunks.end() &&
-          --remaining->second == 0) {
-        auto partial = entry.destination.string() + ".partial";
-        std::error_code rename_error;
-        fs::rename(partial, entry.destination, rename_error);
-        if (rename_error) {
-          if (state->error.empty()) {
-            state->error_code = rename_error.value();
-            state->error = rename_error.message();
-          }
-        } else {
-          state->copied_bytes += entry.bytes;
-          state->ready_files.insert(entry.relative);
-          file_ready = true;
-        }
-      }
-    }
     if (state->remaining_tasks > 0)
       --state->remaining_tasks;
     if (state->remaining_tasks == 0) {
       state->complete = true;
       complete = true;
-      copied_bytes = state->copied_bytes;
-      error = state->error;
       cancelled = state->cancelled;
+      error = state->error;
     }
   }
   state->changed.notify_all();
-  if (file_ready)
-    std::osyncstream(std::cerr)
-        << "pagebroker stage file transaction="
-        << std::quoted(transaction_id) << " path="
-        << std::quoted(entry.relative) << " bytes=" << entry.bytes
-        << std::endl;
   if (!complete)
     return;
-  auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-      std::chrono::steady_clock::now() - started);
-  if (error.empty() && !cancelled) {
-    std::osyncstream(std::cerr)
-        << "pagebroker stage complete transaction="
-        << std::quoted(transaction_id) << " staging="
-        << std::quoted(staging.string()) << " bytes=" << copied_bytes
-        << " duration_ms=" << elapsed.count() << std::endl;
-  } else if (!cancelled) {
-    std::osyncstream(std::cerr)
-        << "pagebroker stage failed transaction="
-        << std::quoted(transaction_id) << " error="
-        << std::quoted(error) << std::endl;
-  }
+  auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - transaction_started);
+  std::osyncstream output(std::cerr);
+  output << "pagebroker readiness transaction=" << std::quoted(transaction_id)
+         << " state=" << (!error.empty() ? "failed" : cancelled ? "cancelled" : "ready")
+         << " duration_ms=" << duration.count();
+  if (!error.empty())
+    output << " error=" << std::quoted(error);
+  output << std::endl;
 }
-void copy_chunk(CopyEntry entry, std::uint64_t offset, std::size_t bytes,
-                const std::string &transaction_id, const fs::path &staging,
+
+void fill_range(const std::string &transaction_id,
                 const std::shared_ptr<StagingState> &state,
-                std::chrono::steady_clock::time_point started) {
-  bool skip_copy = false;
+                const std::shared_ptr<StagingState::MaterializedObject> &object,
+                SourceRange range,
+                std::chrono::steady_clock::time_point transaction_started) {
+  auto started = std::chrono::steady_clock::now();
+#ifdef PAGEBROKER_TEST
+  if (auto delay = test_fill_delay_ms.load())
+    std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+#endif
+  bool skip_fill;
   {
     std::lock_guard lock(state->mutex);
-    skip_copy = state->cancelled || !state->error.empty();
+    skip_fill = state->cancelled || !state->error.empty();
   }
-  bool copied = false;
-  if (!skip_copy) {
-    auto partial = entry.destination.string() + ".partial";
-    int source = open(entry.source.c_str(), O_RDONLY);
-    int destination = source < 0 ? -1 : open(partial.c_str(), O_WRONLY);
-    int error = source < 0 || destination < 0 ? errno : 0;
-    std::array<char, copy_buffer_bytes> buffer;
-    std::size_t done = 0;
-    while (!error && done < bytes) {
-      auto wanted = std::min(buffer.size(), bytes - done);
-      auto read_bytes = pread(source, buffer.data(), wanted,
-                              static_cast<off_t>(offset + done));
-      if (read_bytes <= 0) {
-        error = read_bytes < 0 ? errno : EIO;
-        break;
-      }
-      std::size_t written = 0;
-      while (written < static_cast<std::size_t>(read_bytes)) {
-        auto n = pwrite(destination, buffer.data() + written,
-                        static_cast<std::size_t>(read_bytes) - written,
-                        static_cast<off_t>(offset + done + written));
-        if (n <= 0) {
-          error = n < 0 ? errno : EIO;
-          break;
-        }
+  std::uint64_t copied = 0;
+  int error = 0;
+  std::string message;
+  auto image = state->images.find(range.object);
+  if (!skip_fill && image == state->images.end()) {
+    error = ENOENT;
+    message = "manifest source image is missing";
+  }
+  int source = -1;
+  if (!skip_fill && !error) {
+    auto direct = range.source_offset % direct_io_alignment == 0 &&
+                  range.length % direct_io_alignment == 0;
+    source = open((state->checkpoint_root / image->second.uri).c_str(),
+                  O_RDONLY | O_CLOEXEC | (direct ? O_DIRECT : 0));
+    if (source < 0) {
+      error = errno;
+      message = "open manifest source image";
+    }
+  }
+  auto *buffer = copy_buffer();
+  while (!skip_fill && !error && copied < range.length) {
+    {
+      std::lock_guard lock(state->mutex);
+      skip_fill = state->cancelled || !state->error.empty();
+    }
+    if (skip_fill)
+      break;
+    auto wanted = static_cast<std::size_t>(
+        std::min<std::uint64_t>(copy_buffer_bytes, range.length - copied));
+    auto count = pread(source, buffer, wanted,
+                       static_cast<off_t>(range.source_offset + copied));
+    if (count <= 0) {
+      error = count < 0 ? errno : EIO;
+      message = "read manifest source range";
+      break;
+    }
+    std::size_t written = 0;
+    while (!error && written < static_cast<std::size_t>(count)) {
+      auto n = pwrite(object->fd, buffer + written,
+                      static_cast<std::size_t>(count) - written,
+                      static_cast<off_t>(range.dst_offset + copied + written));
+      if (n <= 0) {
+        error = n < 0 ? errno : EIO;
+        message = "write materialized memory range";
+      } else {
         written += static_cast<std::size_t>(n);
       }
-      done += written;
     }
-    if (source >= 0)
-      close(source);
-    if (destination >= 0)
-      close(destination);
-    if (error) {
-      std::error_code ignored;
-      fs::remove(partial, ignored);
-      set_staging_error(state, error,
-                        std::system_error(error, std::generic_category(),
-                                          "copy checkpoint chunk")
-                            .what());
-    } else {
-      copied = true;
+    copied += written;
+  }
+  if (source >= 0)
+    close(source);
+  if (error)
+    set_staging_error(state,
+                      std::system_error(error, std::generic_category(), message).what());
+  auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - started);
+  std::osyncstream(std::cerr)
+      << "pagebroker range transaction=" << std::quoted(transaction_id)
+      << " pid=" << object->spec.pid << " vma_id=" << object->spec.vma_id
+      << " address=0x" << std::hex << object->spec.dst_addr << std::dec
+      << " length=" << object->spec.length
+      << " source_image=" << std::quoted(range.object)
+      << " source_offset=" << range.source_offset
+      << " dst_offset=" << range.dst_offset << " bytes=" << copied
+      << " state=" << (skip_fill ? "cancelled" : error ? "failed" : "ready")
+      << " duration_ms=" << duration.count() << std::endl;
+  finish_range(transaction_id, state, transaction_started);
+}
+
+bool start_fills(CopyPool &pool, const std::string &transaction_id,
+                 const std::shared_ptr<StagingState> &staging) {
+  auto started = std::chrono::steady_clock::now();
+  {
+    std::lock_guard lock(staging->mutex);
+    if (staging->fill_started || staging->cancelled || !staging->error.empty())
+      return false;
+    staging->fill_started = true;
+    if (staging->remaining_tasks == 0) {
+      staging->complete = true;
+      staging->changed.notify_all();
+      return true;
     }
   }
-  finish_copy_task(entry, transaction_id, staging, state, started, copied);
+  for (const auto &[key, object] : staging->vmas)
+    for (const auto &range : object->spec.source_ranges)
+      pool.submit(transaction_id, key,
+                  [id = transaction_id, staging, object, range, started] {
+                    fill_range(id, staging, object, range, started);
+                  });
+  for (const auto &[shmid, object] : staging->shared)
+    for (const auto &range : object->spec.source_ranges)
+      pool.submit(transaction_id, std::to_string(shmid),
+                  [id = transaction_id, staging, object, range, started] {
+                    fill_range(id, staging, object, range, started);
+                  });
+  return true;
 }
+
 void response_status(std::string &out, std::int32_t status) {
   field_varint(out, 1, static_cast<std::uint64_t>(static_cast<std::int64_t>(status)));
 }
@@ -420,7 +459,8 @@ bool nested_varint(const char *data, std::size_t size, int wanted,
 bool request_fields(const char *data, std::size_t size, std::uint64_t &op,
                     std::string &name, std::uint64_t &flags,
                     std::uint64_t &pid, std::uint64_t &vaddr,
-                    std::uint64_t &length, std::uint64_t &shared_id) {
+                    std::uint64_t &length, std::uint64_t &shared_id,
+                    std::uint64_t &vma_id) {
   const char *p = data, *end = data + size;
   while (p < end) {
     std::uint64_t tag, n;
@@ -433,8 +473,11 @@ bool request_fields(const char *data, std::size_t size, std::uint64_t &op,
         if (!nested_string(p, n, 1, name) || !nested_varint(p, n, 2, flags)) return false;
       } else if ((tag >> 3) == 3) {
         if (!nested_varint(p, n, 1, pid) ||
-            !nested_varint(p, n, 2, vaddr) ||
-            !nested_varint(p, n, 3, length)) return false;
+            !nested_varint(p, n, 3, vaddr) ||
+            !nested_varint(p, n, 4, length)) return false;
+        // protobuf-c may omit a scalar whose required value is zero.
+        // Missing vma_id therefore denotes CRIU's first VMA, ID 0.
+        (void)nested_varint(p, n, 2, vma_id);
       } else {
         if (!nested_varint(p, n, 1, shared_id) ||
             !nested_varint(p, n, 2, length)) return false;
@@ -443,6 +486,92 @@ bool request_fields(const char *data, std::size_t size, std::uint64_t &op,
     } else if (!skip(p, end, tag & 7)) return false;
   }
   return true;
+}
+
+bool decode_image(const char *data, std::size_t size, ImageSpec &image) {
+  const char *p = data, *end = data + size;
+  while (p < end) {
+    std::uint64_t tag, n;
+    if (!get_varint(p, end, tag)) return false;
+    auto field = tag >> 3;
+    auto wire = tag & 7;
+    if ((field == 1 || field == 2) && wire == 2) {
+      if (!get_varint(p, end, n) || n > static_cast<std::uint64_t>(end - p)) return false;
+      std::string value(p, p + n);
+      p += n;
+      if (field == 1) image.name = std::move(value);
+      else image.uri = std::move(value);
+    } else if (field == 3 && wire == 0) {
+      if (!get_varint(p, end, image.size)) return false;
+    } else if (!skip(p, end, wire)) {
+      return false;
+    }
+  }
+  return !image.name.empty() && !image.uri.empty();
+}
+
+bool decode_source_range(const char *data, std::size_t size,
+                         SourceRange &range) {
+  const char *p = data, *end = data + size;
+  while (p < end) {
+    std::uint64_t tag, n;
+    if (!get_varint(p, end, tag)) return false;
+    auto field = tag >> 3;
+    auto wire = tag & 7;
+    if (field == 1 && wire == 2) {
+      if (!get_varint(p, end, n) || n > static_cast<std::uint64_t>(end - p)) return false;
+      std::string value(p, p + n);
+      p += n;
+      range.object = std::move(value);
+    } else if (field >= 2 && field <= 4 && wire == 0) {
+      std::uint64_t value;
+      if (!get_varint(p, end, value)) return false;
+      if (field == 2) range.source_offset = value;
+      else if (field == 3) range.dst_offset = value;
+      else range.length = value;
+    } else if (!skip(p, end, wire)) {
+      return false;
+    }
+  }
+  return !range.object.empty() && range.length;
+}
+
+bool decode_memory_object(const char *data, std::size_t size,
+                          HostMemoryObject &object) {
+  const char *p = data, *end = data + size;
+  while (p < end) {
+    std::uint64_t tag, n;
+    if (!get_varint(p, end, tag)) return false;
+    auto field = tag >> 3;
+    auto wire = tag & 7;
+    if ((field == 2 || field == 8 || field == 9) && wire == 2) {
+      if (!get_varint(p, end, n) || n > static_cast<std::uint64_t>(end - p)) return false;
+      std::string value(p, p + n);
+      p += n;
+      if (field == 2) object.name = std::move(value);
+      else if (field == 8) object.semantics = std::move(value);
+      else if (field == 9) object.map_mode = std::move(value);
+    } else if (field >= 1 && field <= 7 && wire == 0) {
+      std::uint64_t value;
+      if (!get_varint(p, end, value)) return false;
+      if (field == 1) object.memory_id = value;
+      else if (field == 3) object.pid = static_cast<std::uint32_t>(value);
+      else if (field == 4) object.vma_id = static_cast<std::uint32_t>(value);
+      else if (field == 5) object.shmid = value;
+      else if (field == 6) object.dst_addr = value;
+      else if (field == 7) object.length = value;
+    } else if (field == 10 && wire == 2) {
+      if (!get_varint(p, end, n) || n > static_cast<std::uint64_t>(end - p)) return false;
+      SourceRange range;
+      if (!decode_source_range(p, n, range)) return false;
+      object.source_ranges.push_back(std::move(range));
+      p += n;
+    } else if (!skip(p, end, wire)) {
+      return false;
+    }
+  }
+  return object.memory_id && !object.name.empty() && object.length &&
+         !object.semantics.empty() && !object.map_mode.empty();
 }
 } // namespace
 
@@ -465,15 +594,39 @@ bool decode_request(const void *data, std::size_t size, Request &request,
         return false;
       request.operation = static_cast<Request::Operation>(n);
       operation = true;
-    } else if ((field == 2 || field == 3) && wire == 2) {
+    } else if ((field >= 2 && field <= 4) && wire == 2) {
       if (!get_varint(p, end, n) || n > static_cast<std::uint64_t>(end - p))
         return false;
       std::string v(p, p + n);
       p += n;
       if (field == 2)
         request.transaction_id = v;
-      else
+      else if (field == 3)
         request.checkpoint_path = v;
+      else
+        request.manifest_ref = v;
+    } else if (field == 5 && wire == 0) {
+      if (!get_varint(p, end, request.resident_bytes))
+        return false;
+    } else if ((field == 6 || field == 7) && wire == 2) {
+      if (!get_varint(p, end, n) || n > static_cast<std::uint64_t>(end - p))
+        return false;
+      if (field == 6) {
+        ImageSpec image;
+        if (!decode_image(p, n, image)) {
+          error = "invalid manifest image";
+          return false;
+        }
+        request.images.push_back(std::move(image));
+      } else {
+        HostMemoryObject object;
+        if (!decode_memory_object(p, n, object)) {
+          error = "invalid host memory object";
+          return false;
+        }
+        request.host_memory_objects.push_back(std::move(object));
+      }
+      p += n;
     } else if (!skip(p, end, wire)) {
       error = "invalid protobuf field";
       return false;
@@ -503,7 +656,9 @@ std::string encode_response(const Response &r) {
 TransactionManager::TransactionManager(fs::path staging, fs::path scratch,
                                        std::uint64_t budget)
     : staging_root_(std::move(staging)), scratch_root_(std::move(scratch)),
-      budget_(budget), copy_pool_(std::make_unique<CopyPool>(copy_worker_count())) {
+      budget_(budget),
+      defer_fill_(std::getenv("PAGEBROKER_DEFER_FILL") != nullptr),
+      copy_pool_(std::make_unique<CopyPool>(copy_worker_count())) {
   cleanup();
 }
 TransactionManager::~TransactionManager() {
@@ -515,6 +670,10 @@ void TransactionManager::stop_staging(TransactionState &state, bool cancel) {
     {
       std::lock_guard lock(state.staging->mutex);
       state.staging->cancelled = true;
+      if (!state.staging->fill_started) {
+        state.staging->remaining_tasks = 0;
+        state.staging->complete = true;
+      }
     }
     state.staging->changed.notify_all();
   }
@@ -552,7 +711,6 @@ void TransactionManager::cleanup() {
   staged_bytes_ = 0;
 }
 Response TransactionManager::submit(const Request &r) {
-
   std::lock_guard lock(mutex_);
   if (transactions_.contains(r.transaction_id))
     return fail(r.transaction_id, "transaction is already active");
@@ -560,86 +718,135 @@ Response TransactionManager::submit(const Request &r) {
     return fail(r.transaction_id, "invalid transaction id");
   if (!fs::is_directory(r.checkpoint_path))
     return fail(r.transaction_id, "checkpoint path is not a directory");
-  auto path = tx_path(staging_root_, r.transaction_id);
+  if (r.manifest_ref.empty() || !fs::is_regular_file(r.manifest_ref))
+    return fail(r.transaction_id, "manifest_ref is not a regular file");
+  std::error_code canonical_error;
+  auto checkpoint = fs::weakly_canonical(r.checkpoint_path, canonical_error);
+  auto manifest = fs::weakly_canonical(r.manifest_ref, canonical_error);
+  if (canonical_error || manifest.parent_path() != checkpoint)
+    return fail(r.transaction_id, "manifest_ref is outside the checkpoint directory");
   try {
     auto submit_started = std::chrono::steady_clock::now();
-    fs::remove_all(path);
-    auto plan = plan_copy_tree(r.checkpoint_path, path);
-    if (staged_bytes_ > budget_ || plan.bytes > budget_ - staged_bytes_) {
-      fs::remove_all(path);
-      return fail(r.transaction_id, "staging budget exceeded");
-    }
+    auto wire_manifest = manifest;
+    wire_manifest.replace_extension(".pb");
+    std::ifstream wire(wire_manifest, std::ios::binary);
+    if (!wire)
+      return fail(r.transaction_id, "PageBroker wire manifest is missing");
+    std::string wire_data((std::istreambuf_iterator<char>(wire)),
+                          std::istreambuf_iterator<char>());
+    Request admitted;
+    std::string decode_error;
+    if (!decode_request(wire_data.data(), wire_data.size(), admitted,
+                        decode_error) ||
+        admitted.operation != Request::Operation::Submit)
+      return fail(r.transaction_id,
+                  "invalid PageBroker wire manifest: " + decode_error);
+    std::uint64_t required = 0;
+    for (const auto &object : admitted.host_memory_objects)
+      for (const auto &range : object.source_ranges) {
+        if (range.length > std::numeric_limits<std::uint64_t>::max() - required)
+          return fail(r.transaction_id, "manifest resident bytes overflow");
+        required += range.length;
+      }
+    if (required != admitted.resident_bytes)
+      return fail(r.transaction_id, "manifest resident bytes do not match object total");
+    if (staged_bytes_ > budget_ || required > budget_ - staged_bytes_)
+      return fail(r.transaction_id, "PageBroker memory budget exceeded");
+
     auto workers = copy_pool_->worker_count();
-    auto files = plan.files.size();
     auto staging = std::make_shared<StagingState>();
-    staging->prioritize_file =
-        [pool = copy_pool_.get(), id = r.transaction_id](const std::string &key) {
-          return pool->prioritize(id, key);
-        };
-    for (const auto &entry : plan.files) {
-      staging->planned_files.insert(entry.relative);
-      auto chunks = static_cast<std::size_t>(
-          std::max<std::uint64_t>(1, (entry.bytes + copy_task_bytes - 1) /
-                                         copy_task_bytes));
-      staging->remaining_chunks.emplace(entry.relative, chunks);
-      staging->remaining_tasks += chunks;
-      auto partial = entry.destination.string() + ".partial";
-      std::ofstream output(partial, std::ios::binary | std::ios::trunc);
-      if (!output)
-        throw std::system_error(errno ? errno : EIO,
-                                std::generic_category(),
-                                "create checkpoint partial");
-      output.close();
-      fs::resize_file(partial, entry.bytes);
+    staging->checkpoint_root = checkpoint;
+    staging->manifest_ref = manifest.string();
+    for (const auto &image : admitted.images) {
+      fs::path uri(image.uri);
+      if (image.name.empty() || image.uri.empty() || uri.is_absolute() ||
+          std::find(uri.begin(), uri.end(), fs::path("..")) != uri.end())
+        return fail(r.transaction_id, "invalid manifest image path");
+      auto path = checkpoint / uri;
+      if (!fs::is_regular_file(path) || fs::file_size(path) != image.size)
+        return fail(r.transaction_id, "manifest image size mismatch: " + image.name);
+      if (!staging->images.emplace(image.name, image).second)
+        return fail(r.transaction_id, "duplicate manifest image: " + image.name);
     }
+
+    for (auto &spec : admitted.host_memory_objects) {
+      if ((spec.map_mode != "private" && spec.map_mode != "shared") ||
+          (spec.map_mode == "private" && spec.semantics != "private_anon") ||
+          (spec.map_mode == "shared" && spec.semantics != "shared_anon" &&
+           spec.semantics != "shared_memfd"))
+        return fail(r.transaction_id, "unsupported manifest memory semantics");
+      for (const auto &range : spec.source_ranges) {
+        auto image = staging->images.find(range.object);
+        if (image == staging->images.end() || !range.length ||
+            range.source_offset > image->second.size ||
+            range.length > image->second.size - range.source_offset ||
+            range.dst_offset > spec.length ||
+            range.length > spec.length - range.dst_offset)
+          return fail(r.transaction_id, "invalid manifest source range");
+      }
+      coalesce_ranges(spec);
+      auto object = std::make_shared<StagingState::MaterializedObject>();
+      object->spec = spec;
+      object->fd = syscall(SYS_memfd_create, "pagebroker-host-memory",
+                           MFD_ALLOW_SEALING);
+      if (object->fd < 0 ||
+          ftruncate(object->fd, static_cast<off_t>(spec.length)) < 0)
+        throw std::system_error(errno, std::generic_category(),
+                                "allocate host memory object");
+      if (spec.semantics != "shared_memfd" &&
+          fcntl(object->fd, F_ADD_SEALS, F_SEAL_GROW | F_SEAL_SHRINK) < 0)
+        throw std::system_error(errno, std::generic_category(),
+                                "seal host memory object size");
+      if (spec.map_mode == "shared") {
+        if (!spec.shmid || !staging->shared.emplace(spec.shmid, object).second)
+          return fail(r.transaction_id, "duplicate or missing shared-memory id");
+      } else {
+        auto key = vma_key(spec.pid, spec.vma_id, spec.dst_addr, spec.length);
+        if (!spec.pid || !staging->vmas.emplace(key, object).second)
+          return fail(r.transaction_id, "duplicate or missing private VMA identity");
+      }
+      staging->remaining_tasks += spec.source_ranges.size();
+    }
+
     auto [transaction, inserted] = transactions_.emplace(
         std::piecewise_construct, std::forward_as_tuple(r.transaction_id),
         std::forward_as_tuple());
+    (void)inserted;
     auto &state = transaction->second;
-    state.staged_bytes = plan.bytes;
+    state.checkpoint = checkpoint;
+    state.staged_bytes = required;
     state.staging = staging;
     auto tasks = staging->remaining_tasks;
-    staged_bytes_ += plan.bytes;
-    auto copy_started = std::chrono::steady_clock::now();
-    if (plan.files.empty()) {
-      staging->complete = true;
-    } else {
-      for (const auto &entry : plan.files) {
-        auto chunks = staging->remaining_chunks.at(entry.relative);
-        for (std::size_t chunk = 0; chunk < chunks; ++chunk) {
-          auto offset = static_cast<std::uint64_t>(chunk) * copy_task_bytes;
-          auto bytes = static_cast<std::size_t>(std::min<std::uint64_t>(
-              copy_task_bytes, entry.bytes > offset ? entry.bytes - offset : 0));
-          copy_pool_->submit(
-              r.transaction_id, entry.relative,
-              [entry, offset, bytes, id = r.transaction_id, path, staging,
-               copy_started] {
-                copy_chunk(entry, offset, bytes, id, path, staging,
-                           copy_started);
-              });
-        }
-      }
-    }
+    staged_bytes_ += required;
+    if (!defer_fill_)
+      start_fills(*copy_pool_, r.transaction_id, staging);
     std::osyncstream(std::cerr)
-        << "pagebroker stage scheduled transaction="
-        << std::quoted(r.transaction_id) << " source="
-        << std::quoted(r.checkpoint_path) << " staging="
-        << std::quoted(path.string()) << " bytes=" << state.staged_bytes
-        << " files=" << files << " tasks=" << tasks
-        << " chunk_bytes=" << copy_task_bytes << " workers=" << workers
-        << " submit_duration_ms="
+        << "pagebroker manifest loaded transaction="
+        << std::quoted(r.transaction_id) << " manifest_ref="
+        << std::quoted(r.manifest_ref) << " checkpoint="
+        << std::quoted(checkpoint.string()) << " images=" << admitted.images.size()
+        << " host_memory_objects=" << admitted.host_memory_objects.size()
+        << " resident_bytes=" << required << " tasks=" << tasks
+        << " workers=" << workers << " submit_duration_ms="
         << std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::steady_clock::now() - submit_started)
                .count()
+        << " fill_mode=" << (defer_fill_ ? "pre-resume" : "eager")
         << std::endl;
-    return {true, r.transaction_id, path, scratch_root_ / r.transaction_id,
+    for (const auto &[name, image] : staging->images) {
+      if (name.rfind("pages-", 0) != 0)
+        std::osyncstream(std::cerr)
+            << "pagebroker image direct transaction="
+            << std::quoted(r.transaction_id) << " name=" << std::quoted(name)
+            << " path=" << std::quoted((checkpoint / image.uri).string())
+            << " size=" << image.size << std::endl;
+      }
+    return {true, r.transaction_id, checkpoint, scratch_root_ / r.transaction_id,
             {}};
   } catch (const std::exception &e) {
-    std::cerr << "pagebroker stage failed transaction="
+    std::cerr << "pagebroker submit failed transaction="
               << std::quoted(r.transaction_id) << " error="
               << std::quoted(e.what()) << std::endl;
-    std::error_code cleanup_error;
-    fs::remove_all(path, cleanup_error);
     return fail(r.transaction_id, e.what());
   }
 }
@@ -693,6 +900,10 @@ Response TransactionManager::wait_ready(const Request &r) {
     staging = transaction->second.staging;
   }
   if (staging) {
+    if (defer_fill_ && start_fills(*copy_pool_, r.transaction_id, staging))
+      std::osyncstream(std::cerr)
+          << "pagebroker deferred fill released at pre-resume transaction="
+          << std::quoted(r.transaction_id) << std::endl;
     std::unique_lock lock(staging->mutex);
     staging->changed.wait(lock, [&] {
       return staging->complete || staging->cancelled ||
@@ -705,7 +916,7 @@ Response TransactionManager::wait_ready(const Request &r) {
   }
   return {true,
           r.transaction_id,
-          tx_path(staging_root_, r.transaction_id),
+          staging ? staging->checkpoint_root : fs::path{},
           scratch_root_ / r.transaction_id,
           {}};
 }
@@ -862,63 +1073,68 @@ int serve(const fs::path &socket_path, const fs::path &staging,
     int client = accept(server, nullptr, nullptr);
     if (client < 0)
       continue;
-    char buffer[65536];
-    auto n = recv(client, buffer, sizeof(buffer), 0);
-    Request request;
-    std::string error;
-    Response response;
-    bool provider_session = false;
-    fs::path provider_root;
-    if (n < 0 || !decode_request(buffer, n, request, error))
-      response = fail({}, error.empty() ? "read failed" : error);
-    else if (request.operation == Request::Operation::Submit) {
-      response = manager.submit(request);
-      if (response.ok) {
-        provider_session = true;
-        provider_root = response.staging_path;
-      }
-    } else if (request.operation == Request::Operation::WaitReady)
-      response = manager.wait_ready(request);
-    else if (request.operation == Request::Operation::PrepareCheckpoint)
-      response = manager.prepare_checkpoint(request);
-    else if (request.operation == Request::Operation::Commit)
-      response = manager.commit(request);
-    else if (request.operation == Request::Operation::Abort)
-      response = manager.abort(request);
-    else
-      response = fail(request.transaction_id, "unknown operation");
-    auto encoded = encode_response(response);
-    auto sent = send(client, encoded.data(), encoded.size(), MSG_NOSIGNAL);
-    if (provider_session && sent == static_cast<ssize_t>(encoded.size())) {
-      auto staging_state = manager.staging_state(request.transaction_id);
-      if (staging_state) {
-        {
-          std::lock_guard lock(staging_state->mutex);
-          staging_state->provider_running = true;
+    std::thread([client, &manager] {
+      char buffer[65536];
+      auto n = recv(client, buffer, sizeof(buffer), 0);
+      Request request;
+      std::string error;
+      Response response;
+      bool provider_session = false;
+      fs::path provider_root;
+      if (n < 0 || !decode_request(buffer, n, request, error))
+        response = fail({}, error.empty() ? "read failed" : error);
+      else if (request.operation == Request::Operation::Submit) {
+        response = manager.submit(request);
+        if (response.ok) {
+          provider_session = true;
+          provider_root = response.staging_path;
         }
-        auto transaction_id = request.transaction_id;
-        std::thread([provider_root, client, transaction_id, staging_state] {
+      } else if (request.operation == Request::Operation::WaitReady)
+        response = manager.wait_ready(request);
+      else if (request.operation == Request::Operation::PrepareCheckpoint)
+        response = manager.prepare_checkpoint(request);
+      else if (request.operation == Request::Operation::Commit)
+        response = manager.commit(request);
+      else if (request.operation == Request::Operation::Abort)
+        response = manager.abort(request);
+      else
+        response = fail(request.transaction_id, "unknown operation");
+      auto encoded = encode_response(response);
+      auto sent = send(client, encoded.data(), encoded.size(), MSG_NOSIGNAL);
+      if (provider_session && sent == static_cast<ssize_t>(encoded.size())) {
+        auto staging_state = manager.staging_state(request.transaction_id);
+        if (staging_state) {
+          {
+            std::lock_guard lock(staging_state->mutex);
+            staging_state->provider_running = true;
+          }
           std::osyncstream(std::cerr)
               << "pagebroker provider session start transaction="
-              << std::quoted(transaction_id) << " root="
+              << std::quoted(request.transaction_id) << " root="
               << std::quoted(provider_root.string()) << std::endl;
-          auto status = serve_provider(provider_root, client, -1,
-                                       staging_state);
+          auto status = serve_provider(provider_root, client, -1, staging_state);
           std::osyncstream(std::cerr)
               << "pagebroker provider session stop transaction="
-              << std::quoted(transaction_id) << " status=" << status
+              << std::quoted(request.transaction_id) << " status=" << status
               << std::endl;
-          close(client);
           {
             std::lock_guard lock(staging_state->mutex);
             staging_state->provider_running = false;
           }
           staging_state->changed.notify_all();
-        }).detach();
-        continue;
+          if (status != 0) {
+            Request abort{Request::Operation::Abort, request.transaction_id,
+                          fs::path{}};
+            auto aborted = manager.abort(abort);
+            std::osyncstream(std::cerr)
+                << "pagebroker provider disconnect abort transaction="
+                << std::quoted(request.transaction_id)
+                << " ok=" << aborted.ok << std::endl;
+          }
+        }
       }
-    }
-    close(client);
+      close(client);
+    }).detach();
   }
 }
 
@@ -945,7 +1161,7 @@ int serve_provider(const fs::path &root, int socket_fd, int diagnostic_fd,
     std::uint64_t seal_ns{};
     std::uint64_t send_ns{};
   };
-  std::array<ProviderTiming, 7> timings{};
+  std::array<ProviderTiming, 8> timings{};
   bool timings_printed = false;
   auto elapsed_ns = [](auto started) {
     return static_cast<std::uint64_t>(
@@ -964,6 +1180,7 @@ int serve_provider(const fs::path &root, int socket_fd, int diagnostic_fd,
     case 4: return "GET_SHARED";
     case 5: return "COMMIT";
     case 6: return "ABORT";
+    case 7: return "WAIT_READY";
     default: return "UNKNOWN";
     }
   };
@@ -1000,17 +1217,25 @@ int serve_provider(const fs::path &root, int socket_fd, int diagnostic_fd,
   if (diagnostic_fd >= 0)
     dprintf(diagnostic_fd, "ready socket_fd=%d fstat=ok\n", socket_fd);
 
-  std::map<std::uint64_t, int> shared_fds;
-  std::uint64_t request_counts[7] = {};
+  std::uint64_t request_counts[8] = {};
+  bool terminal_request = false;
   char buffer[1 << 20];
   for (;;) {
     auto n = recv(socket_fd, buffer, sizeof(buffer), 0);
     if (n == 0) {
+      if (staging && !terminal_request) {
+        set_staging_error(staging,
+                          "provider disconnected before COMMIT or ABORT");
+        print_timings();
+        return ECONNRESET;
+      }
       print_timings();
-      for (const auto &[_, fd] : shared_fds) close(fd);
       return 0;
     }
     if (n < 0) {
+      if (staging && !terminal_request)
+        set_staging_error(staging,
+                          "provider connection failed before COMMIT or ABORT");
       print_timings();
       return provider_failure(diagnostic_fd, "recv", errno);
     }
@@ -1018,11 +1243,11 @@ int serve_provider(const fs::path &root, int socket_fd, int diagnostic_fd,
     std::string name;
     std::string response;
     int fd = -1;
-    std::uint64_t length = 0, shared_id = 0;
+    std::uint64_t length = 0, shared_id = 0, vma_id = 0;
     auto request_started = std::chrono::steady_clock::now();
     auto decode_started = std::chrono::steady_clock::now();
     auto decoded = request_fields(buffer, n, op, name, flags, pid, vaddr,
-                                  length, shared_id);
+                                  length, shared_id, vma_id);
     auto decode_ns = elapsed_ns(decode_started);
     ProviderTiming *timing = op < timings.size() ? &timings[op] : nullptr;
     if (timing) {
@@ -1036,7 +1261,7 @@ int serve_provider(const fs::path &root, int socket_fd, int diagnostic_fd,
           << "pagebroker provider request decode_failed root="
           << std::quoted(root.string()) << " bytes=" << n << std::endl;
       response_status(response, -EBADMSG);
-    } else if (op < 7) {
+    } else if (op < 8) {
       request_counts[op]++;
       auto log_started = std::chrono::steady_clock::now();
       std::ostringstream request_log;
@@ -1048,8 +1273,9 @@ int serve_provider(const fs::path &root, int socket_fd, int diagnostic_fd,
         request_log << "OPEN_IMAGE path=" << std::quoted(name) << " flags=0x"
                     << std::hex << flags << std::dec;
       else if (op == 3)
-        request_log << "GET_VMA pid=" << pid << " vaddr=0x" << std::hex
-                    << vaddr << std::dec << " length=" << length;
+        request_log << "GET_VMA pid=" << pid << " vma_id=" << vma_id
+                    << " vaddr=0x" << std::hex << vaddr << std::dec
+                    << " length=" << length;
       else if (op == 4)
         request_log << "GET_SHARED shm_id=" << shared_id
                     << " length=" << length;
@@ -1057,54 +1283,60 @@ int serve_provider(const fs::path &root, int socket_fd, int diagnostic_fd,
         request_log << "COMMIT";
       else if (op == 6)
         request_log << "ABORT";
+      else if (op == 7)
+        request_log << "WAIT_READY";
       std::osyncstream(std::cerr) << request_log.str() << std::endl;
       timing->log_ns += elapsed_ns(log_started);
       if (op == 1 || op == 5 || op == 6) {
+        if (op == 5) {
+          terminal_request = true;
+        } else if (op == 6 && staging) {
+          terminal_request = true;
+          {
+            std::lock_guard lock(staging->mutex);
+            staging->cancelled = true;
+          }
+          staging->changed.notify_all();
+        }
         response_status(response, 0);
       } else if (op == 3) {
-        auto phase_started = std::chrono::steady_clock::now();
-        fd = syscall(SYS_memfd_create, "pagebroker-extmem", MFD_ALLOW_SEALING);
-        timing->memfd_ns += elapsed_ns(phase_started);
-        int truncate_result = -1;
-        if (fd >= 0) {
-          phase_started = std::chrono::steady_clock::now();
-          truncate_result = ftruncate(fd, static_cast<off_t>(length));
-          timing->truncate_ns += elapsed_ns(phase_started);
-        }
-        if (fd < 0 || truncate_result < 0) {
-          response_status(response, -errno);
-          if (fd >= 0) close(fd);
-          fd = -1;
+        if (!staging) {
+          response_status(response, -ENOTSUP);
         } else {
-          response_status(response, 0);
-          phase_started = std::chrono::steady_clock::now();
-          fcntl(fd, F_ADD_SEALS, F_SEAL_GROW | F_SEAL_SHRINK);
-          timing->seal_ns += elapsed_ns(phase_started);
+          std::shared_ptr<StagingState::MaterializedObject> object;
+          {
+            std::lock_guard lock(staging->mutex);
+            auto found = staging->vmas.find(vma_key(pid, vma_id, vaddr, length));
+            if (found != staging->vmas.end())
+              object = found->second;
+          }
+          fd = object ? dup(object->fd) : -1;
+          response_status(response, object ? (fd < 0 ? -errno : 0) : -ENOTSUP);
         }
       } else if (op == 4) {
-        auto existing = shared_fds.find(shared_id);
-        if (existing == shared_fds.end()) {
-          int shared_fd = syscall(SYS_memfd_create, "pagebroker-extmem-shared",
-                                  MFD_ALLOW_SEALING);
-          if (shared_fd < 0 ||
-              ftruncate(shared_fd, static_cast<off_t>(length)) < 0) {
-            response_status(response, -errno);
-            if (shared_fd >= 0) close(shared_fd);
-          } else {
-            existing = shared_fds.emplace(shared_id, shared_fd).first;
-          }
-        } else {
-          struct stat shared_stat {};
-          if (fstat(existing->second, &shared_stat) < 0 ||
-              (shared_stat.st_size < static_cast<off_t>(length) &&
-               ftruncate(existing->second, static_cast<off_t>(length)) < 0)) {
-            response_status(response, -errno);
-            existing = shared_fds.end();
-          }
+        std::shared_ptr<StagingState::MaterializedObject> object;
+        if (staging) {
+          std::lock_guard lock(staging->mutex);
+          auto found = staging->shared.find(shared_id);
+          if (found != staging->shared.end() && found->second->spec.length == length)
+            object = found->second;
         }
-        if (existing != shared_fds.end()) {
-          fd = dup(existing->second);
-          response_status(response, fd < 0 ? -errno : 0);
+        fd = object ? dup(object->fd) : -1;
+        response_status(response, object ? (fd < 0 ? -errno : 0) : -ENOTSUP);
+      } else if (op == 7) {
+        if (!staging) {
+          response_status(response, -ENOTSUP);
+        } else {
+          auto readiness_started = std::chrono::steady_clock::now();
+          std::unique_lock lock(staging->mutex);
+          staging->changed.wait(lock, [&] {
+            return staging->complete || staging->cancelled ||
+                   !staging->error.empty();
+          });
+          timing->readiness_ns += elapsed_ns(readiness_started);
+          response_status(response, !staging->error.empty()
+                                        ? -EIO
+                                        : staging->cancelled ? -ECANCELED : 0);
         }
       } else if (op == 2) {
         fs::path relative(name);
@@ -1114,42 +1346,13 @@ int serve_provider(const fs::path &root, int socket_fd, int diagnostic_fd,
         } else {
           int ready = 0;
           if (staging) {
-            auto wait_started = std::chrono::steady_clock::now();
-            auto key = relative.generic_string();
-            std::unique_lock lock(staging->mutex);
-            if (!staging->planned_files.contains(key)) {
+            std::lock_guard lock(staging->mutex);
+            auto image = staging->images.find(relative.generic_string());
+            if (image == staging->images.end()) {
               ready = -ENOENT;
             } else {
-              auto prioritize = staging->prioritize_file;
-              lock.unlock();
-              auto prioritized = prioritize && prioritize(key);
-              lock.lock();
-              if (prioritized)
-                std::osyncstream(std::cerr)
-                    << "pagebroker stage prioritized path="
-                    << std::quoted(name) << std::endl;
-              staging->changed.wait(lock, [&] {
-                return staging->ready_files.contains(key) ||
-                       staging->complete || staging->cancelled ||
-                       !staging->error.empty();
-              });
+              relative = image->second.uri;
             }
-            if (ready == 0 && !staging->ready_files.contains(key)) {
-              if (!staging->error.empty())
-                ready = -(staging->error_code ? staging->error_code : EIO);
-              else if (staging->cancelled)
-                ready = -ECANCELED;
-              else
-                ready = -ENOENT;
-            }
-            auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - wait_started);
-            timing->readiness_ns += elapsed_ns(wait_started);
-            if (waited.count() > 0)
-              std::osyncstream(std::cerr)
-                  << "pagebroker provider file wait path="
-                  << std::quoted(name) << " duration_ms=" << waited.count()
-                  << " status=" << ready << std::endl;
           }
           if (ready < 0) {
             response_status(response, ready == -ENOENT ? -ENOTSUP : ready);
@@ -1178,7 +1381,8 @@ int serve_provider(const fs::path &root, int socket_fd, int diagnostic_fd,
       std::cerr << "pagebroker provider requests init=" << request_counts[1]
                 << " image=" << request_counts[2]
                 << " vma=" << request_counts[3]
-                << " shared=" << request_counts[4] << std::endl;
+                << " shared=" << request_counts[4]
+                << " wait_ready=" << request_counts[7] << std::endl;
     }
     struct iovec iov{response.data(), response.size()};
     char control[CMSG_SPACE(sizeof(int))] = {};
@@ -1207,8 +1411,10 @@ int serve_provider(const fs::path &root, int socket_fd, int diagnostic_fd,
       return provider_failure(diagnostic_fd, "sendmsg", errno);
     }
     if (fd >= 0) close(fd);
-    if (op == 5 || op == 6)
+    if (op == 5 || op == 6) {
       print_timings();
+      return op == 6 ? ECANCELED : 0;
+    }
   }
 }
 
@@ -1220,7 +1426,9 @@ int main(int argc, char **argv) {
     return pagebroker::serve_provider(argv[2], std::stoi(argv[3]), std::stoi(argv[4]));
   if (argc != 2 || std::string(argv[1]) != "serve")
     return 2;
+  const char *configured = std::getenv("PAGEBROKER_MEMORY_BUDGET_BYTES");
+  std::uint64_t budget = configured ? std::stoull(configured) : 150323855360ULL;
   return pagebroker::serve("/run/pagebroker/pagebroker.sock", "/staging",
-                           "/scratch", 1ULL << 40);
+                           "/scratch", budget);
 }
 #endif

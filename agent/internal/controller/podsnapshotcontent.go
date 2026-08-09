@@ -167,23 +167,31 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		return err
 	}
 
-	containerName, err := snapshotv1alpha1.TargetContainersFromAnnotations(pod.Annotations, 1, 1)
-	if err != nil {
-		return w.setSnapshotContentFailed(ctx, content, "MissingTargetContainer", err)
+	containers := content.Spec.Source.PodRef.Containers
+	if len(containers) == 0 {
+		containers, err = snapshotv1alpha1.TargetContainersFromAnnotations(pod.Annotations, 1, 1)
+		if err != nil {
+			return w.setSnapshotContentFailed(ctx, content, "InvalidTargetContainer", err)
+		}
 	}
-	if !isContainerReady(pod, containerName[0]) {
-		logger.V(1).Info("Source container not ready, awaiting quiesce", "pod", pod.Name, "container", containerName[0])
+	if len(containers) != 1 || containers[0] == "" {
+		return w.setSnapshotContentFailed(ctx, content, "InvalidTargetContainer",
+			fmt.Errorf("PodSnapshotContent must select exactly one container, got %q", containers))
+	}
+	containerName := containers[0]
+	if !isContainerReady(pod, containerName) {
+		logger.V(1).Info("Source container not ready, awaiting quiesce", "pod", pod.Name, "container", containerName)
 		return nil
 	}
 
-	containerID := containerIDForName(pod, containerName[0])
+	containerID := containerIDForName(pod, containerName)
 	if containerID == "" {
 		return w.setSnapshotContentFailed(ctx, content, "ContainerNotResolved",
-			fmt.Errorf("could not resolve container %q ID", containerName[0]))
+			fmt.Errorf("could not resolve container %q ID", containerName))
 	}
 	containerPID, _, err := w.runtime.ResolveContainer(ctx, containerID)
 	if err != nil {
-		return w.setSnapshotContentFailed(ctx, content, "ContainerNotResolved", fmt.Errorf("resolve container %q: %w", containerName[0], err))
+		return w.setSnapshotContentFailed(ctx, content, "ContainerNotResolved", fmt.Errorf("resolve container %q: %w", containerName, err))
 	}
 	loc, err := w.checkpointLocationsFromPod(pod, id, containerPID)
 	if err != nil {
@@ -210,7 +218,7 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	}
 
 	releaseInFlight = false
-	go w.runCheckpoint(ctx, content, pod, containerName[0], containerID, containerPID, id, loc, leaseKey, id)
+	go w.runCheckpoint(ctx, content, pod, containerName, containerID, containerPID, id, loc, leaseKey, id)
 	return nil
 }
 
