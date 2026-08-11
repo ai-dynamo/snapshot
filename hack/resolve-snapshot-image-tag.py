@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import json
 import os
 import sys
@@ -18,8 +19,12 @@ ORG = "ai-dynamo"
 TAG_PREFIX = "v0.0.0-g"
 
 
-def package_tags(package: str, headers: dict[str, str]) -> list[str]:
-    tags: list[str] = []
+def parse_created_at(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def package_tags(package: str, headers: dict[str, str]) -> dict[str, datetime]:
+    tags: dict[str, datetime] = {}
     encoded = urllib.parse.quote(package, safe="")
 
     for page in range(1, MAX_PAGES + 1):
@@ -35,10 +40,29 @@ def package_tags(package: str, headers: dict[str, str]) -> list[str]:
             break
 
         for version in versions:
+            created_at = parse_created_at(version["created_at"])
             version_tags = version.get("metadata", {}).get("container", {}).get("tags", [])
-            tags.extend(tag for tag in version_tags if tag.startswith(TAG_PREFIX))
+            for tag in version_tags:
+                if not tag.startswith(TAG_PREFIX):
+                    continue
+                if tag not in tags or created_at > tags[tag]:
+                    tags[tag] = created_at
 
     return tags
+
+
+def newest_shared_tag(
+    operator_tags: dict[str, datetime],
+    agent_tags: dict[str, datetime],
+) -> str | None:
+    shared_tags = operator_tags.keys() & agent_tags.keys()
+    if not shared_tags:
+        return None
+
+    return max(
+        shared_tags,
+        key=lambda tag: (min(operator_tags[tag], agent_tags[tag]), tag),
+    )
 
 
 def write_github_env(tag: str) -> None:
@@ -60,13 +84,13 @@ def main() -> int:
         headers["Authorization"] = f"Bearer {token}"
 
     operator_tags = package_tags("snapshot/operator", headers)
-    agent_tags = set(package_tags("snapshot/agent", headers))
+    agent_tags = package_tags("snapshot/agent", headers)
 
-    for tag in operator_tags:
-        if tag in agent_tags:
-            write_github_env(tag)
-            print(f"Resolved Snapshot image tag: {tag}")
-            return 0
+    tag = newest_shared_tag(operator_tags, agent_tags)
+    if tag:
+        write_github_env(tag)
+        print(f"Resolved Snapshot image tag: {tag}")
+        return 0
 
     print("No shared published Snapshot operator/agent tag found", file=sys.stderr)
     return 1
