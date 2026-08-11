@@ -4,3 +4,9 @@ bin/
 
 # macOS
 .DS_Store
+
+# E2E Python workspace
+e2e/.venv/
+e2e/__pycache__/
+e2e/**/*.py[cod]
+e2e/.pytest_cache/
