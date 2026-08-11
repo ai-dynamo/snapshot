@@ -13,10 +13,6 @@ inputs:
     description: SHA256 for the linux amd64 vCluster CLI binary.
     required: false
     default: c3c16d9b425bf6a77b8cee0136c64a3f000b7440793c0f712564e1cb26d1f824
-  vcluster_sha256_arm64:
-    description: SHA256 for the linux arm64 vCluster CLI binary.
-    required: false
-    default: 7d81d6e59c0981bcd2010cddb554d95f85f6b856ccdc17550dd92f0071bd0dfb
 
 runs:
   using: composite
@@ -27,24 +23,39 @@ runs:
         echo "::group::Install vCluster CLI ${{ inputs.vcluster_version }}"
         set -euo pipefail
 
-        if command -v vcluster >/dev/null 2>&1; then
-          vcluster version
-          echo "::endgroup::"
-          exit 0
-        fi
-
         arch="$(uname -m)"
         case "${arch}" in
           x86_64)
-            vcluster_arch=amd64
             vcluster_sha256="${{ inputs.vcluster_sha256_amd64 }}"
             ;;
-          aarch64)
-            vcluster_arch=arm64
-            vcluster_sha256="${{ inputs.vcluster_sha256_arm64 }}"
-            ;;
-          *) echo "::error::Unsupported architecture: ${arch}"; exit 1 ;;
+          *) echo "::error::Snapshot e2e currently supports only x86_64 runners; got ${arch}"; exit 1 ;;
         esac
+
+        requested_version="${{ inputs.vcluster_version }}"
+        requested_version="${requested_version#v}"
+
+        if command -v vcluster >/dev/null 2>&1; then
+          installed_bin="$(command -v vcluster)"
+          installed_output="$(vcluster --version 2>/dev/null || vcluster version 2>/dev/null || true)"
+          installed_version="$(
+            printf '%s\n' "${installed_output}" |
+            grep -Eo 'v?[0-9]+\.[0-9]+\.[0-9]+' |
+            head -n 1 |
+            sed 's/^v//' || true
+          )"
+          installed_sha256="$(sha256sum "${installed_bin}" | awk '{print $1}')"
+
+          echo "Found preinstalled vCluster CLI at ${installed_bin}: ${installed_output}"
+          if [[ "${installed_version}" == "${requested_version}" && "${installed_sha256}" == "${vcluster_sha256}" ]]; then
+            echo "Preinstalled vCluster CLI matches requested version and SHA256."
+            echo "::endgroup::"
+            exit 0
+          fi
+
+          echo "Preinstalled vCluster CLI does not match requested version/SHA256; installing requested binary."
+          echo "Requested version: ${requested_version}; installed version: ${installed_version:-unknown}"
+          echo "Requested SHA256: ${vcluster_sha256}; installed SHA256: ${installed_sha256}"
+        fi
 
         tmp_bin="$(mktemp -p /tmp vcluster.XXXXXX)"
         trap 'rm -f "${tmp_bin}"' EXIT
@@ -52,7 +63,7 @@ runs:
           --connect-timeout 10 --max-time 120 \
           --fail --show-error -sL \
           -o "${tmp_bin}" \
-          "https://github.com/loft-sh/vcluster/releases/download/${{ inputs.vcluster_version }}/vcluster-linux-${vcluster_arch}"
+          "https://github.com/loft-sh/vcluster/releases/download/${{ inputs.vcluster_version }}/vcluster-linux-amd64"
         echo "${vcluster_sha256}  ${tmp_bin}" | sha256sum -c -
         sudo install -m 0755 "${tmp_bin}" /usr/local/bin/vcluster
         rm -f "${tmp_bin}"
