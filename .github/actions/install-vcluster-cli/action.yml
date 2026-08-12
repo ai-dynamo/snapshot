@@ -13,6 +13,10 @@ inputs:
     description: SHA256 for the linux amd64 vCluster CLI binary.
     required: false
     default: c3c16d9b425bf6a77b8cee0136c64a3f000b7440793c0f712564e1cb26d1f824
+  vcluster_sha256_arm64:
+    description: SHA256 for the linux arm64 vCluster CLI binary.
+    required: false
+    default: 7d81d6e59c0981bcd2010cddb554d95f85f6b856ccdc17550dd92f0071bd0dfb
 
 runs:
   using: composite
@@ -26,9 +30,14 @@ runs:
         arch="$(uname -m)"
         case "${arch}" in
           x86_64)
+            vcluster_arch="amd64"
             vcluster_sha256="${{ inputs.vcluster_sha256_amd64 }}"
             ;;
-          *) echo "::error::Snapshot e2e currently supports only x86_64 runners; got ${arch}"; exit 1 ;;
+          aarch64)
+            vcluster_arch="arm64"
+            vcluster_sha256="${{ inputs.vcluster_sha256_arm64 }}"
+            ;;
+          *) echo "::error::Unsupported runner architecture for vCluster CLI: ${arch}"; exit 1 ;;
         esac
 
         requested_version="${{ inputs.vcluster_version }}"
@@ -63,7 +72,7 @@ runs:
           --connect-timeout 10 --max-time 120 \
           --fail --show-error -sL \
           -o "${tmp_bin}" \
-          "https://github.com/loft-sh/vcluster/releases/download/${{ inputs.vcluster_version }}/vcluster-linux-amd64"
+          "https://github.com/loft-sh/vcluster/releases/download/${{ inputs.vcluster_version }}/vcluster-linux-${vcluster_arch}"
         echo "${vcluster_sha256}  ${tmp_bin}" | sha256sum -c -
         sudo install -m 0755 "${tmp_bin}" /usr/local/bin/vcluster
         rm -f "${tmp_bin}"
