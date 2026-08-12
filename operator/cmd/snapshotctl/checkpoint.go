@@ -13,20 +13,21 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	snapshotprotocol "github.com/ai-dynamo/snapshot/operator/internal/protocol"
+
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
 const defaultGeneratedCheckpointIDPrefix = "manual-snapshot"
 
 type checkpointOptions struct {
-	ManifestPath                 string
-	Namespace                    string
-	KubeContext                  string
-	CheckpointID                 string
-	Container                    string
-	DisableCudaCheckpointJobFile bool
-	Timeout                      time.Duration
+	ManifestPath       string
+	Namespace          string
+	KubeContext        string
+	CheckpointID       string
+	Container          string
+	CudaCheckpointWrap bool
+	Timeout            time.Duration
 }
 
 type result struct {
@@ -59,7 +60,7 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 		checkpointID = fmt.Sprintf("%s-%d", defaultGeneratedCheckpointIDPrefix, time.Now().UTC().UnixNano())
 	}
 	resolvedStorage, err := snapshotv1alpha1.ResolveCheckpointStorage(checkpointID, "", snapshotv1alpha1.Storage{
-		Type:     snapshotv1alpha1.StorageTypePVC,
+		Type:     snapshotprotocol.StorageTypePVC,
 		PVCName:  storage.PVCName,
 		BasePath: storage.BasePath,
 	})
@@ -83,10 +84,10 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 		Namespace:       namespace,
 		TargetContainer: containers[0],
 		CheckpointID:    checkpointID,
-		ArtifactVersion: snapshotv1alpha1.DefaultCheckpointArtifactVersion,
-		SeccompProfile:  snapshotv1alpha1.DefaultSeccompLocalhostProfile,
+		ArtifactVersion: snapshotprotocol.DefaultCheckpointArtifactVersion,
+		SeccompProfile:  snapshotprotocol.DefaultSeccompLocalhostProfile,
 		Name:            checkpointJobName,
-		WrapLaunchJob:   !opts.DisableCudaCheckpointJobFile,
+		WrapLaunchJob:   opts.CudaCheckpointWrap,
 	})
 	if err != nil {
 		return nil, err

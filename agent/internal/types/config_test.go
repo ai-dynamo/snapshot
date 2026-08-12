@@ -12,7 +12,6 @@ func validAgentConfig() *AgentConfig {
 			BasePath: "/checkpoints",
 		},
 		Restore: RestoreSpec{
-			NSRestorePath:         "/usr/local/bin/nsrestore",
 			RestoreTimeoutSeconds: 60,
 		},
 	}
