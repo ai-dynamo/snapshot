@@ -35,8 +35,7 @@ jobs:
     name: Compute version
     runs-on: ubuntu-latest
     if: >
-      github.event_name == 'workflow_call' ||
-      github.event_name == 'workflow_dispatch' ||
+      github.event_name != 'workflow_run' ||
       github.event.workflow_run.conclusion == 'success'
     outputs:
       version: ${{ steps.compute.outputs.version }}
