@@ -5,10 +5,13 @@ package cuda
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -17,13 +20,16 @@ import (
 )
 
 const (
-	cudaCheckpointHelperBinary = "/usr/local/bin/cuda-checkpoint-helper"
+	defaultCUDAHelperBinary = "/usr/local/bin/cuda-checkpoint-helper"
+	helperWaitDelay         = 2 * time.Second
 
 	actionLock       = "lock"
 	actionCheckpoint = "checkpoint"
 	actionRestore    = "restore"
 	actionUnlock     = "unlock"
 )
+
+var cudaCheckpointHelperBinary = defaultCUDAHelperBinary
 
 func lock(ctx context.Context, pid int, log logr.Logger) error {
 	return runAction(ctx, pid, actionLock, "", log)
@@ -60,6 +66,11 @@ func runAction(ctx context.Context, pid int, action, deviceMap string, log logr.
 		args = append(args, "--device-map", deviceMap)
 	}
 	cmd := exec.CommandContext(ctx, cudaCheckpointHelperBinary, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return normalizeProcessGroupKillError(syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL))
+	}
+	cmd.WaitDelay = helperWaitDelay
 	details := snapshotruntime.ProcessDetails{
 		ObservedPID:   pid,
 		OutermostPID:  pid,
@@ -74,6 +85,9 @@ func runAction(ctx context.Context, pid int, action, deviceMap string, log logr.
 	duration := time.Since(start)
 	out := strings.TrimSpace(string(output))
 	if err != nil {
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
 		log.Error(err, "cuda-checkpoint-helper command failed",
 			"pid", pid,
 			"outermost_pid", details.OutermostPID,
@@ -95,4 +109,11 @@ func runAction(ctx context.Context, pid int, action, deviceMap string, log logr.
 		"output", out,
 	)
 	return nil
+}
+
+func normalizeProcessGroupKillError(err error) error {
+	if errors.Is(err, syscall.ESRCH) {
+		return os.ErrProcessDone
+	}
+	return err
 }
