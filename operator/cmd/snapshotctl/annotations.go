@@ -6,48 +6,50 @@ package main
 import (
 	"fmt"
 
-	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	snapshotprotocol "github.com/ai-dynamo/snapshot/operator/internal/protocol"
 )
 
-// reconcileTargetContainers returns the normalized target-container annotation.
-// A flag value and manifest annotation may both be present only when they match.
-func reconcileTargetContainers(annotations map[string]string, flagValue string, minCount, maxCount int) (string, error) {
-	flagNames, flagErr := snapshotv1alpha1.ParseTargetContainers(flagValue)
+// reconcileTargetContainers returns the normalized target-container list. A flag value and
+// manifest annotation may both be present only when they match. Callers format the result for
+// the target-containers annotation (restore) or set it on PodReference.Containers (capture).
+func reconcileTargetContainers(annotations map[string]string, flagValue string, maxCount int) ([]string, error) {
+	const minCount = 1
+	flagNames, flagErr := snapshotprotocol.ParseTargetContainers(flagValue)
 	if flagErr != nil {
-		return "", fmt.Errorf("--container(s) flag: %w", flagErr)
+		return nil, fmt.Errorf("--container(s) flag: %w", flagErr)
 	}
 
 	manifestRaw := ""
 	if annotations != nil {
-		manifestRaw = annotations[snapshotv1alpha1.TargetContainersAnnotation]
+		manifestRaw = annotations[snapshotprotocol.TargetContainersAnnotation]
 	}
-	manifestNames, manifestErr := snapshotv1alpha1.ParseTargetContainers(manifestRaw)
+	manifestNames, manifestErr := snapshotprotocol.ParseTargetContainers(manifestRaw)
 	if manifestErr != nil {
-		return "", fmt.Errorf("manifest %s annotation: %w", snapshotv1alpha1.TargetContainersAnnotation, manifestErr)
+		return nil, fmt.Errorf("manifest %s annotation: %w", snapshotprotocol.TargetContainersAnnotation, manifestErr)
 	}
 
 	chosen := flagNames
 	if len(flagNames) == 0 {
 		chosen = manifestNames
 	} else if len(manifestNames) > 0 {
-		if snapshotv1alpha1.FormatTargetContainers(flagNames) != snapshotv1alpha1.FormatTargetContainers(manifestNames) {
-			return "", fmt.Errorf(
+		if snapshotprotocol.FormatTargetContainers(flagNames) != snapshotprotocol.FormatTargetContainers(manifestNames) {
+			return nil, fmt.Errorf(
 				"--container(s) flag %q does not match manifest %s %q; pass one or the other",
-				snapshotv1alpha1.FormatTargetContainers(flagNames),
-				snapshotv1alpha1.TargetContainersAnnotation,
-				snapshotv1alpha1.FormatTargetContainers(manifestNames),
+				snapshotprotocol.FormatTargetContainers(flagNames),
+				snapshotprotocol.TargetContainersAnnotation,
+				snapshotprotocol.FormatTargetContainers(manifestNames),
 			)
 		}
 	}
 
 	if len(chosen) == 0 {
-		return "", fmt.Errorf("target containers are required: pass --container(s) or set %s on the manifest", snapshotv1alpha1.TargetContainersAnnotation)
+		return nil, fmt.Errorf("target containers are required: pass --container(s) or set %s on the manifest", snapshotprotocol.TargetContainersAnnotation)
 	}
 	if minCount > 0 && len(chosen) < minCount {
-		return "", fmt.Errorf("expected at least %d target container(s), got %d", minCount, len(chosen))
+		return nil, fmt.Errorf("expected at least %d target container(s), got %d", minCount, len(chosen))
 	}
 	if maxCount > 0 && len(chosen) > maxCount {
-		return "", fmt.Errorf("expected at most %d target container(s), got %d", maxCount, len(chosen))
+		return nil, fmt.Errorf("expected at most %d target container(s), got %d", maxCount, len(chosen))
 	}
-	return snapshotv1alpha1.FormatTargetContainers(chosen), nil
+	return chosen, nil
 }
