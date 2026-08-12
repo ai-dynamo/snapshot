@@ -9,12 +9,13 @@ import (
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
-// reconcileTargetContainers returns the normalized target-container annotation.
+// reconcileTargetContainers returns the normalized target-container list.
 // A flag value and manifest annotation may both be present only when they match.
-func reconcileTargetContainers(annotations map[string]string, flagValue string, minCount, maxCount int) (string, error) {
+// At least one container is always required; maxCount caps the list (0 means uncapped).
+func reconcileTargetContainers(annotations map[string]string, flagValue string, maxCount int) ([]string, error) {
 	flagNames, flagErr := snapshotv1alpha1.ParseTargetContainers(flagValue)
 	if flagErr != nil {
-		return "", fmt.Errorf("--container(s) flag: %w", flagErr)
+		return nil, fmt.Errorf("--container(s) flag: %w", flagErr)
 	}
 
 	manifestRaw := ""
@@ -23,7 +24,7 @@ func reconcileTargetContainers(annotations map[string]string, flagValue string, 
 	}
 	manifestNames, manifestErr := snapshotv1alpha1.ParseTargetContainers(manifestRaw)
 	if manifestErr != nil {
-		return "", fmt.Errorf("manifest %s annotation: %w", snapshotv1alpha1.TargetContainersAnnotation, manifestErr)
+		return nil, fmt.Errorf("manifest %s annotation: %w", snapshotv1alpha1.TargetContainersAnnotation, manifestErr)
 	}
 
 	chosen := flagNames
@@ -31,7 +32,7 @@ func reconcileTargetContainers(annotations map[string]string, flagValue string, 
 		chosen = manifestNames
 	} else if len(manifestNames) > 0 {
 		if snapshotv1alpha1.FormatTargetContainers(flagNames) != snapshotv1alpha1.FormatTargetContainers(manifestNames) {
-			return "", fmt.Errorf(
+			return nil, fmt.Errorf(
 				"--container(s) flag %q does not match manifest %s %q; pass one or the other",
 				snapshotv1alpha1.FormatTargetContainers(flagNames),
 				snapshotv1alpha1.TargetContainersAnnotation,
@@ -41,13 +42,10 @@ func reconcileTargetContainers(annotations map[string]string, flagValue string, 
 	}
 
 	if len(chosen) == 0 {
-		return "", fmt.Errorf("target containers are required: pass --container(s) or set %s on the manifest", snapshotv1alpha1.TargetContainersAnnotation)
-	}
-	if minCount > 0 && len(chosen) < minCount {
-		return "", fmt.Errorf("expected at least %d target container(s), got %d", minCount, len(chosen))
+		return nil, fmt.Errorf("target containers are required: pass --container(s) or set %s on the manifest", snapshotv1alpha1.TargetContainersAnnotation)
 	}
 	if maxCount > 0 && len(chosen) > maxCount {
-		return "", fmt.Errorf("expected at most %d target container(s), got %d", maxCount, len(chosen))
+		return nil, fmt.Errorf("expected at most %d target container(s), got %d", maxCount, len(chosen))
 	}
-	return snapshotv1alpha1.FormatTargetContainers(chosen), nil
+	return chosen, nil
 }

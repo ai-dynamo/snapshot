@@ -1,3 +1,5 @@
+//go:build linux
+
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -19,14 +21,14 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	nvidiacomv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
 // snapshotScheme returns a scheme with the operator CRD and core types registered.
 func snapshotScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
-	require.NoError(t, snapshotv1alpha1.AddToScheme(s))
+	require.NoError(t, nvidiacomv1alpha1.AddToScheme(s))
 	require.NoError(t, corev1.AddToScheme(s))
 	return s
 }
@@ -103,10 +105,11 @@ func TestPodSnapshotNameUIDPinned(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			crClient := crfake.NewClientBuilder().WithScheme(s).Build()
-			snap, err := createPodSnapshot(context.Background(), crClient, "default", tt.snapName, "my-pod", podUID, "ckpt-123")
+			snap, err := createPodSnapshot(context.Background(), crClient, "default", tt.snapName, "my-pod", podUID, []string{"main"}, "ckpt-123")
 			require.NoError(t, err)
 			assert.Equal(t, podUID, snap.Spec.Source.PodRef.UID, "source pod UID must be pinned")
 			assert.Equal(t, "my-pod", snap.Spec.Source.PodRef.Name)
+			assert.Equal(t, []string{"main"}, snap.Spec.Source.PodRef.Containers, "target container must be set on the PodSnapshot")
 		})
 	}
 }
@@ -115,17 +118,17 @@ func TestPodSnapshotNameUIDPinned(t *testing.T) {
 // a PodSnapshot with the derived name already exists.
 func TestPodSnapshotAlreadyExists(t *testing.T) {
 	s := snapshotScheme(t)
-	existing := &snapshotv1alpha1.PodSnapshot{
+	existing := &nvidiacomv1alpha1.PodSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "my-snap", Namespace: "default"},
-		Spec: snapshotv1alpha1.PodSnapshotSpec{
-			Source: snapshotv1alpha1.PodSnapshotSource{
-				PodRef: snapshotv1alpha1.PodReference{Name: "other-pod"},
+		Spec: nvidiacomv1alpha1.PodSnapshotSpec{
+			Source: nvidiacomv1alpha1.PodSnapshotSource{
+				PodRef: nvidiacomv1alpha1.PodReference{Name: "other-pod"},
 			},
 		},
 	}
 	crClient := crfake.NewClientBuilder().WithScheme(s).WithObjects(existing).Build()
 
-	_, err := createPodSnapshot(context.Background(), crClient, "default", "my-snap", "my-pod", "uid-1", "ckpt-1")
+	_, err := createPodSnapshot(context.Background(), crClient, "default", "my-snap", "my-pod", "uid-1", []string{"main"}, "ckpt-1")
 	require.Error(t, err)
 	assert.True(t, apierrors.IsAlreadyExists(err) || strings.Contains(err.Error(), "already exists"),
 		"error should report AlreadyExists: %v", err)
@@ -136,14 +139,14 @@ func TestPodSnapshotAlreadyExists(t *testing.T) {
 func TestWaitForPodSnapshotReady(t *testing.T) {
 	s := snapshotScheme(t)
 	content := "my-content"
-	snap := &snapshotv1alpha1.PodSnapshot{
+	snap := &nvidiacomv1alpha1.PodSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "snap-1", Namespace: "default"},
-		Spec: snapshotv1alpha1.PodSnapshotSpec{
-			Source: snapshotv1alpha1.PodSnapshotSource{
-				PodRef: snapshotv1alpha1.PodReference{Name: "pod-1"},
+		Spec: nvidiacomv1alpha1.PodSnapshotSpec{
+			Source: nvidiacomv1alpha1.PodSnapshotSource{
+				PodRef: nvidiacomv1alpha1.PodReference{Name: "pod-1"},
 			},
 		},
-		Status: snapshotv1alpha1.PodSnapshotStatus{
+		Status: nvidiacomv1alpha1.PodSnapshotStatus{
 			BoundPodSnapshotContentName: &content,
 			Conditions: []metav1.Condition{
 				{
@@ -167,7 +170,7 @@ func TestWaitForPodSnapshotReady(t *testing.T) {
 	result, err := waitForPodSnapshot(ctx, crClient, "default", "snap-1")
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	assert.True(t, snapshotv1alpha1.IsPodSnapshotSucceeded(result))
+	assert.True(t, nvidiacomv1alpha1.IsPodSnapshotSucceeded(result))
 	assert.NotNil(t, result.Status.BoundPodSnapshotContentName)
 }
 
@@ -175,14 +178,14 @@ func TestWaitForPodSnapshotReady(t *testing.T) {
 // Failed condition's Reason and Message when the PodSnapshot fails.
 func TestWaitForPodSnapshotFailed(t *testing.T) {
 	s := snapshotScheme(t)
-	snap := &snapshotv1alpha1.PodSnapshot{
+	snap := &nvidiacomv1alpha1.PodSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "snap-fail", Namespace: "default"},
-		Spec: snapshotv1alpha1.PodSnapshotSpec{
-			Source: snapshotv1alpha1.PodSnapshotSource{
-				PodRef: snapshotv1alpha1.PodReference{Name: "pod-1"},
+		Spec: nvidiacomv1alpha1.PodSnapshotSpec{
+			Source: nvidiacomv1alpha1.PodSnapshotSource{
+				PodRef: nvidiacomv1alpha1.PodReference{Name: "pod-1"},
 			},
 		},
-		Status: snapshotv1alpha1.PodSnapshotStatus{
+		Status: nvidiacomv1alpha1.PodSnapshotStatus{
 			Conditions: []metav1.Condition{
 				{
 					Type:               "Failed",
@@ -256,11 +259,11 @@ func TestWaitForSourcePodUnscheduled(t *testing.T) {
 func TestWaitForPodSnapshotContextDeadline(t *testing.T) {
 	s := snapshotScheme(t)
 	// Non-terminal PodSnapshot: no Ready or Failed condition.
-	snap := &snapshotv1alpha1.PodSnapshot{
+	snap := &nvidiacomv1alpha1.PodSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "snap-pending", Namespace: "default"},
-		Spec: snapshotv1alpha1.PodSnapshotSpec{
-			Source: snapshotv1alpha1.PodSnapshotSource{
-				PodRef: snapshotv1alpha1.PodReference{Name: "pod-1"},
+		Spec: nvidiacomv1alpha1.PodSnapshotSpec{
+			Source: nvidiacomv1alpha1.PodSnapshotSource{
+				PodRef: nvidiacomv1alpha1.PodReference{Name: "pod-1"},
 			},
 		},
 	}

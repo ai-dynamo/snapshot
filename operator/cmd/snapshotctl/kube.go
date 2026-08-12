@@ -150,7 +150,7 @@ func podSnapshotName(jobName string) string {
 // createPodSnapshot creates a PodSnapshot in the given namespace, pinning the source pod's UID.
 // On AlreadyExists it returns an actionable error naming the existing object.
 // On Forbidden it surfaces a clear RBAC error.
-func createPodSnapshot(ctx context.Context, crClient client.Client, namespace, snapName, podName string, podUID types.UID, checkpointID string) (*snapshotv1alpha1.PodSnapshot, error) {
+func createPodSnapshot(ctx context.Context, crClient client.Client, namespace, snapName, podName string, podUID types.UID, containers []string, checkpointID string) (*snapshotv1alpha1.PodSnapshot, error) {
 	snap := &snapshotv1alpha1.PodSnapshot{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: snapshotv1alpha1.GroupVersion.String(),
@@ -166,8 +166,9 @@ func createPodSnapshot(ctx context.Context, crClient client.Client, namespace, s
 		Spec: snapshotv1alpha1.PodSnapshotSpec{
 			Source: snapshotv1alpha1.PodSnapshotSource{
 				PodRef: snapshotv1alpha1.PodReference{
-					Name: podName,
-					UID:  podUID,
+					Name:       podName,
+					UID:        podUID,
+					Containers: containers,
 				},
 			},
 		},

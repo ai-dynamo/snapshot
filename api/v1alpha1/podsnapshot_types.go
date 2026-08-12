@@ -1,5 +1,19 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-// SPDX-License-Identifier: Apache-2.0
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package v1alpha1
 
@@ -40,8 +54,9 @@ type PodSnapshotSpec struct {
 // PodSnapshotSource identifies the workload captured by a PodSnapshot.
 type PodSnapshotSource struct {
 	// PodRef references the pod, in the PodSnapshot's namespace, that is captured.
-	// The operator prepares the pod (control volume, target-container annotation,
-	// checkpoint storage mount) before creating the PodSnapshot.
+	// The operator prepares the pod (control volume, checkpoint storage mount)
+	// before creating the PodSnapshot. The capture target container is carried on
+	// PodRef.Containers, not a pod annotation.
 	// +kubebuilder:validation:Required
 	PodRef PodReference `json:"podRef"`
 }
@@ -57,6 +72,18 @@ type PodReference struct {
 	// pod and not a same-named recreation.
 	// +optional
 	UID types.UID `json:"uid,omitempty"`
+
+	// Containers narrows the capture to these containers of the source pod. The
+	// node agent reads this instead of the source pod's target-container
+	// annotation. v1alpha1 supports exactly one container; the cap is lifted when
+	// the runtime supports multi-container capture.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=1
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Containers []string `json:"containers"`
 }
 
 // PodSnapshotStatus defines the observed state of PodSnapshot.

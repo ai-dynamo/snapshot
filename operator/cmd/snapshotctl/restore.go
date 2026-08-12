@@ -79,7 +79,7 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 	if createPodFromManifest {
 		// Stamp (or validate) the required snapshot-target-containers
 		// annotation on the manifest before handing it to the protocol.
-		targetValue, err := reconcileTargetContainers(pod.Annotations, opts.Containers, 1, 0)
+		targetContainers, err := reconcileTargetContainers(pod.Annotations, opts.Containers, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -87,7 +87,7 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 		for k, v := range pod.Annotations {
 			annotations[k] = v
 		}
-		annotations[snapshotv1alpha1.TargetContainersAnnotation] = targetValue
+		annotations[snapshotv1alpha1.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers(targetContainers)
 
 		restorePod, err := snapshotprotocol.NewRestorePod(&corev1.Pod{
 			TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
@@ -124,7 +124,7 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 		if len(pod.Spec.Containers) == 0 {
 			return nil, fmt.Errorf("restore target pod %s/%s has no containers", namespace, podName)
 		}
-		targetValue, err := reconcileTargetContainers(pod.Annotations, opts.Containers, 1, 0)
+		targetContainers, err := reconcileTargetContainers(pod.Annotations, opts.Containers, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -137,7 +137,7 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 			annotations[key] = value
 		}
 		snapshotv1alpha1.ApplyRestoreTargetMetadata(labels, annotations, true, checkpointID, snapshotv1alpha1.DefaultCheckpointArtifactVersion)
-		annotations[snapshotv1alpha1.TargetContainersAnnotation] = targetValue
+		annotations[snapshotv1alpha1.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers(targetContainers)
 		if err := snapshotprotocol.ValidateRestorePodSpec(&pod.Spec, annotations, resolvedStorage, snapshotv1alpha1.DefaultSeccompLocalhostProfile); err != nil {
 			return nil, fmt.Errorf("restore target pod %s/%s is not snapshot-compatible: %w", namespace, podName, err)
 		}

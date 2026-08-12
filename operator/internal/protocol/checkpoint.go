@@ -17,6 +17,7 @@ import (
 
 type CheckpointJobOptions struct {
 	Namespace             string
+	TargetContainer       string
 	CheckpointID          string
 	ArtifactVersion       string
 	SeccompProfile        string
@@ -26,9 +27,8 @@ type CheckpointJobOptions struct {
 	WrapLaunchJob         bool
 }
 
-// TODO: dead code — remove once no longer synced from Dynamo.
 func GetCheckpointJobName(checkpointID string, artifactVersion string) string {
-	return "checkpoint-job-" + checkpointID + "-" + snapshotv1alpha1.ArtifactVersion(artifactVersion)
+	return "checkpoint-job-" + checkpointID + "-" + ArtifactVersion(artifactVersion)
 }
 
 func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOptions) (*batchv1.Job, error) {
@@ -49,15 +49,13 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 		return nil, fmt.Errorf("checkpoint job requires at least one container")
 	}
 
-	// Checkpoint contract: exactly one target container per Job. The
-	// annotation is required — callers (the operator, snapshotctl) stamp
-	// nvidia.com/snapshot-target-containers before handing the template
-	// to us so there is no Containers[0]-vs-"main" ambiguity.
-	targets, err := snapshotv1alpha1.TargetContainersFromAnnotations(podTemplate.Annotations, 1, 1)
-	if err != nil {
-		return nil, fmt.Errorf("checkpoint job pod template: %w", err)
+	// Checkpoint contract: exactly one target container per Job. The caller (the operator,
+	// snapshotctl) resolves the single target and passes it in opts so there is no
+	// Containers[0]-vs-"main" ambiguity.
+	targetName := opts.TargetContainer
+	if targetName == "" {
+		return nil, fmt.Errorf("checkpoint job pod template: opts.TargetContainer is required")
 	}
-	targetName := targets[0]
 	var targetContainer *corev1.Container
 	for i := range podTemplate.Spec.Containers {
 		if podTemplate.Spec.Containers[i].Name == targetName {
@@ -66,7 +64,7 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 		}
 	}
 	if targetContainer == nil {
-		return nil, fmt.Errorf("checkpoint job pod template has no container named %q (from %s annotation)", targetName, snapshotv1alpha1.TargetContainersAnnotation)
+		return nil, fmt.Errorf("checkpoint job pod template has no container named %q (from opts.TargetContainer)", targetName)
 	}
 
 	// Snapshot contract: control volume + ready-file readiness probe. The
@@ -103,7 +101,7 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 			Name:      opts.Name,
 			Namespace: opts.Namespace,
 			Labels: map[string]string{
-				snapshotv1alpha1.CheckpointIDLabel: opts.CheckpointID,
+				CheckpointIDLabel: opts.CheckpointID,
 			},
 		},
 		Spec: batchv1.JobSpec{
@@ -132,13 +130,6 @@ func EnsureLocalhostSeccompProfile(podSpec *corev1.PodSpec, profile string) {
 		LocalhostProfile: &profile,
 	}
 }
-
-const (
-	linkerdInjectAnnotation      = "linkerd.io/inject"
-	linkerdInjectDisabled        = "disabled"
-	istioSidecarInjectAnnotation = "sidecar.istio.io/inject"
-	istioSidecarInjectDisabled   = "false"
-)
 
 // DisableCheckpointJobSidecarInjection stamps sidecar opt-out annotations on a
 // pod annotation map. Checkpoint Jobs must complete when the target container
