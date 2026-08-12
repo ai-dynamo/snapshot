@@ -62,15 +62,19 @@ def source_pod(
     run: TestRun,
     gpu: bool,
     include_target_annotation: bool = True,
+    include_checkpoint_label: bool = True,
 ) -> dict[str, Any]:
+    labels = {
+        **run.labels,
+        "nvidia.com/snapshot-is-checkpoint-source": "true",
+    }
+    if include_checkpoint_label:
+        labels["nvidia.com/snapshot-checkpoint-id"] = run.checkpoint_id
+
     metadata = {
         "name": run.source_pod,
         "namespace": config.namespace,
-        "labels": {
-            **run.labels,
-            "nvidia.com/snapshot-checkpoint-id": run.checkpoint_id,
-            "nvidia.com/snapshot-is-checkpoint-source": "true",
-        },
+        "labels": labels,
         "annotations": {
             "nvidia.com/snapshot-storage-type": "pvc",
             "nvidia.com/snapshot-storage-base-path": CHECKPOINT_DIR,

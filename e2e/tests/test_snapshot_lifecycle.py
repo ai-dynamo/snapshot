@@ -115,7 +115,7 @@ def test_successful_restore_recovers_cpu_gpu_and_fs_from_snapshot(
 
 
 @pytest.mark.snapshot_failure
-def test_failed_snapshot_missing_target_container_annotation(
+def test_failed_snapshot_missing_checkpoint_id_label(
     config: k8s.E2EConfig,
     run: snap.TestRun,
 ) -> None:
@@ -124,7 +124,7 @@ def test_failed_snapshot_missing_target_container_annotation(
             config,
             run,
             gpu=False,
-            include_target_annotation=False,
+            include_checkpoint_label=False,
         )
         snap.create_podsnapshot(
             config.namespace,
@@ -143,8 +143,8 @@ def test_failed_snapshot_missing_target_container_annotation(
         assert ready is None or ready.get("status") != "True"
         assert content is not None
         content_failed = snap.condition(content, "Failed")
-        assert content_failed and content_failed.get("reason") == "MissingTargetContainer"
-        assert "target" in content_failed.get("message", "").lower()
+        assert content_failed and content_failed.get("reason") == "MissingCheckpointID"
+        assert "checkpoint" in content_failed.get("message", "").lower()
     except Exception:
         snap.debug_dump(config, run)
         raise
@@ -210,6 +210,7 @@ def create_ready_source(
     *,
     gpu: bool,
     include_target_annotation: bool = True,
+    include_checkpoint_label: bool = True,
 ) -> tuple[object, str]:
     k8s.create_pod(
         snap.source_pod(
@@ -217,6 +218,7 @@ def create_ready_source(
             run=run,
             gpu=gpu,
             include_target_annotation=include_target_annotation,
+            include_checkpoint_label=include_checkpoint_label,
         )
     )
     pod = snap.wait_for_pod_ready(config.namespace, run.source_pod)
@@ -244,6 +246,7 @@ def assert_podsnapshot_ready(
 
     assert content["spec"]["source"]["podRef"]["name"] == source.metadata.name
     assert content["spec"]["source"]["podRef"]["uid"] == source.metadata.uid
+    assert content["spec"]["source"]["podRef"]["containers"] == [snap.CONTAINER]
     assert content["spec"]["source"]["nodeName"] == source_node
     assert content["metadata"].get("labels", {}).get("nvidia.com/snapshot-node") == source_node
 

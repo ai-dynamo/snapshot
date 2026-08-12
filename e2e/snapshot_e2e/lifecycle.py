@@ -14,6 +14,7 @@ from kubernetes.client import ApiException
 
 from snapshot_e2e import k8s
 from snapshot_e2e.workloads import CHECKPOINT_DIR
+from snapshot_e2e.workloads import CONTAINER
 from snapshot_e2e.workloads import FILE_TOKEN
 from snapshot_e2e.workloads import OBSERVATIONS
 from snapshot_e2e.workloads import RESTORE_DONE
@@ -57,12 +58,21 @@ def create_podsnapshot(
     name: str,
     pod_name: str,
     pod_uid: str,
+    container: str = CONTAINER,
 ) -> dict[str, Any]:
     body = {
         "apiVersion": f"{GROUP}/{VERSION}",
         "kind": "PodSnapshot",
         "metadata": {"name": name, "namespace": namespace},
-        "spec": {"source": {"podRef": {"name": pod_name, "uid": pod_uid}}},
+        "spec": {
+            "source": {
+                "podRef": {
+                    "name": pod_name,
+                    "uid": pod_uid,
+                    "containers": [container],
+                }
+            }
+        },
     }
     return client.CustomObjectsApi().create_namespaced_custom_object(
         GROUP,
