@@ -44,6 +44,7 @@ def test_snapshot_e2e_environment_is_ready() -> None:
             f"is not readable: {k8s.api_error_detail(exc)}"
         )
     assert pvc.status.phase != "Lost"
+    assert pvc.spec.access_modes == ["ReadWriteMany"]
 
     operators = k8s.list_snapshot_pods(
         config.namespace,

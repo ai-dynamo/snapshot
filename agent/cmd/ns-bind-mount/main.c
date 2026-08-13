@@ -61,29 +61,27 @@ struct mount_attr {
 };
 #endif
 
-/* Paths the caller is allowed to pass as src and dst.  Both the Go layer and
- * this binary enforce these prefixes so that a bug in the controller cannot
- * cause arbitrary host paths to be mounted into (or unmounted from) a foreign
- * namespace.
- *
- * These values mirror the Go constants in internal/nsmount/injector.go:
- *   SnapshotBinSrc = "/snapshot-binaries"       → ALLOWED_SRC_PREFIX
- *   SnapshotBinDst = "/tmp/snapshot-binaries"   → ALLOWED_DST_PREFIX
- * Keep them in sync when either changes. */
-#define ALLOWED_SRC_PREFIX "/snapshot-binaries"     /* = nsmount.SnapshotBinSrc */
-#define ALLOWED_DST_PREFIX "/tmp/snapshot-binaries" /* = nsmount.SnapshotBinDst */
+/* Destinations mirror the Go constants in internal/nsmount/injector.go. The
+ * source may be either the fixed binary bundle or an artifact below the
+ * operator-configured checkpoint base path, so source policy stays in Go. */
+#define ALLOWED_BUNDLE_DST "/tmp/snapshot-binaries"
+#define ALLOWED_CHECKPOINT_DST "/tmp/checkpoint"
 
-/* Returns 0 if path is absolute and begins with allowed_prefix, -1 otherwise. */
 static int
-check_path_prefix(const char* path, const char* allowed_prefix, const char* label)
+check_source(const char* path)
 {
   if (path[0] != '/') {
-    fprintf(stderr, "%s must be an absolute path: %s\n", label, path);
+    fprintf(stderr, "src must be an absolute path: %s\n", path);
     return -1;
   }
-  size_t plen = strlen(allowed_prefix);
-  if (strncmp(path, allowed_prefix, plen) != 0 || (path[plen] != '\0' && path[plen] != '/')) {
-    fprintf(stderr, "%s must start with %s: %s\n", label, allowed_prefix, path);
+  return 0;
+}
+
+static int
+check_destination(const char* path)
+{
+  if (strcmp(path, ALLOWED_BUNDLE_DST) != 0 && strcmp(path, ALLOWED_CHECKPOINT_DST) != 0) {
+    fprintf(stderr, "dst must be %s or %s: %s\n", ALLOWED_BUNDLE_DST, ALLOWED_CHECKPOINT_DST, path);
     return -1;
   }
   return 0;
@@ -205,7 +203,7 @@ do_umount(int argc, char* argv[])
     fprintf(stderr, "dst must not contain '..' components: %s\n", dst);
     return 1;
   }
-  if (check_path_prefix(dst, ALLOWED_DST_PREFIX, "dst") < 0)
+  if (check_destination(dst) < 0)
     return 1;
 
   if (enter_mnt_ns(pid) < 0)
@@ -253,7 +251,7 @@ do_umount_fd(int argc, char* argv[])
     fprintf(stderr, "dst must not contain '..' components: %s\n", dst);
     return 1;
   }
-  if (check_path_prefix(dst, ALLOWED_DST_PREFIX, "dst") < 0)
+  if (check_destination(dst) < 0)
     return 1;
 
   if (setns(ns_fd, CLONE_NEWNS) < 0) {
@@ -302,13 +300,13 @@ do_mount_fd(int argc, char* argv[])
     fprintf(stderr, "src must not contain '..' components: %s\n", src);
     return 1;
   }
-  if (check_path_prefix(src, ALLOWED_SRC_PREFIX, "src") < 0)
+  if (check_source(src) < 0)
     return 1;
   if (has_dotdot_component(dst)) {
     fprintf(stderr, "dst must not contain '..' components: %s\n", dst);
     return 1;
   }
-  if (check_path_prefix(dst, ALLOWED_DST_PREFIX, "dst") < 0)
+  if (check_destination(dst) < 0)
     return 1;
 
   /* Clone the source mount tree before entering the target namespace. */
@@ -385,13 +383,13 @@ main(int argc, char* argv[])
     fprintf(stderr, "src must not contain '..' components: %s\n", src);
     return 1;
   }
-  if (check_path_prefix(src, ALLOWED_SRC_PREFIX, "src") < 0)
+  if (check_source(src) < 0)
     return 1;
   if (has_dotdot_component(dst)) {
     fprintf(stderr, "dst must not contain '..' components: %s\n", dst);
     return 1;
   }
-  if (check_path_prefix(dst, ALLOWED_DST_PREFIX, "dst") < 0)
+  if (check_destination(dst) < 0)
     return 1;
 
   /* Clone the source mount tree before entering the target namespace. */

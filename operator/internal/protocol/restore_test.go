@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -99,11 +98,11 @@ func TestNewRestorePod(t *testing.T) {
 	if restorePod.Spec.SecurityContext == nil || restorePod.Spec.SecurityContext.SeccompProfile == nil {
 		t.Fatalf("expected seccomp profile to be injected: %#v", restorePod.Spec.SecurityContext)
 	}
-	if len(restorePod.Spec.Volumes) != 2 {
-		t.Fatalf("expected checkpoint and snapshot-control volumes, got %#v", restorePod.Spec.Volumes)
+	if len(restorePod.Spec.Volumes) != 1 {
+		t.Fatalf("expected only the snapshot-control volume, got %#v", restorePod.Spec.Volumes)
 	}
-	if len(main.VolumeMounts) != 2 {
-		t.Fatalf("expected checkpoint and snapshot-control mounts, got %#v", main.VolumeMounts)
+	if len(main.VolumeMounts) != 1 {
+		t.Fatalf("expected only the snapshot-control mount, got %#v", main.VolumeMounts)
 	}
 	foundMount := false
 	for _, m := range main.VolumeMounts {
@@ -287,12 +286,12 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 	if podSpec.SecurityContext == nil || podSpec.SecurityContext.SeccompProfile == nil {
 		t.Fatalf("expected seccomp profile to be injected: %#v", podSpec.SecurityContext)
 	}
-	if len(podSpec.Volumes) != 2 {
-		t.Fatalf("expected checkpoint and snapshot-control volumes, got %#v", podSpec.Volumes)
+	if len(podSpec.Volumes) != 1 {
+		t.Fatalf("expected only the snapshot-control volume, got %#v", podSpec.Volumes)
 	}
 	container := &podSpec.Containers[0]
-	if len(container.VolumeMounts) != 2 {
-		t.Fatalf("expected checkpoint and snapshot-control mounts, got %#v", container.VolumeMounts)
+	if len(container.VolumeMounts) != 1 {
+		t.Fatalf("expected only the snapshot-control mount, got %#v", container.VolumeMounts)
 	}
 	volCount := 0
 	for _, v := range podSpec.Volumes {
@@ -486,12 +485,9 @@ func validRestoreSpecFixture(profile string, targets ...string) (*corev1.PodSpec
 	containers := make([]corev1.Container, 0, len(targets))
 	for _, name := range targets {
 		container := corev1.Container{
-			Name: name,
-			VolumeMounts: []corev1.VolumeMount{
-				{Name: snapshotv1alpha1.CheckpointVolumeName, MountPath: "/checkpoints"},
-				{Name: snapshotv1alpha1.SnapshotControlVolumeName, MountPath: snapshotv1alpha1.SnapshotControlMountPath, SubPath: name},
-			},
-			Env: []corev1.EnvVar{{Name: snapshotv1alpha1.SnapshotControlDirEnv, Value: snapshotv1alpha1.SnapshotControlMountPath}},
+			Name:         name,
+			VolumeMounts: []corev1.VolumeMount{{Name: snapshotv1alpha1.SnapshotControlVolumeName, MountPath: snapshotv1alpha1.SnapshotControlMountPath, SubPath: name}},
+			Env:          []corev1.EnvVar{{Name: snapshotv1alpha1.SnapshotControlDirEnv, Value: snapshotv1alpha1.SnapshotControlMountPath}},
 		}
 		ensureRestoreStartupProbe(&container)
 		containers = append(containers, container)
@@ -504,14 +500,6 @@ func validRestoreSpecFixture(profile string, targets ...string) (*corev1.PodSpec
 			},
 		},
 		Volumes: []corev1.Volume{
-			{
-				Name: snapshotv1alpha1.CheckpointVolumeName,
-				VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: "snapshot-pvc",
-					},
-				},
-			},
 			{
 				Name:         snapshotv1alpha1.SnapshotControlVolumeName,
 				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
@@ -535,25 +523,13 @@ func TestValidateRestorePodSpec(t *testing.T) {
 	}
 
 	badSpec := podSpec.DeepCopy()
-	badSpec.Volumes = []corev1.Volume{badSpec.Volumes[1]}
-	if err := ValidateRestorePodSpec(badSpec, annotations, storage, snapshotv1alpha1.DefaultSeccompLocalhostProfile); err == nil || err.Error() != "missing checkpoint-storage volume for PVC snapshot-pvc" {
-		t.Fatalf("expected missing volume error, got %v", err)
-	}
-
-	badSpec = podSpec.DeepCopy()
-	badSpec.Containers[0].VolumeMounts = []corev1.VolumeMount{badSpec.Containers[0].VolumeMounts[1]}
-	if err := ValidateRestorePodSpec(badSpec, annotations, storage, snapshotv1alpha1.DefaultSeccompLocalhostProfile); err == nil || err.Error() != `missing checkpoint-storage mount at /checkpoints on container "main"` {
-		t.Fatalf("expected missing mount error, got %v", err)
-	}
-
-	badSpec = podSpec.DeepCopy()
-	badSpec.Volumes = []corev1.Volume{badSpec.Volumes[0]}
+	badSpec.Volumes = nil
 	if err := ValidateRestorePodSpec(badSpec, annotations, storage, snapshotv1alpha1.DefaultSeccompLocalhostProfile); err == nil || err.Error() != fmt.Sprintf("missing %s emptyDir volume; add it via snapshotprotocol.EnsureControlVolume", snapshotv1alpha1.SnapshotControlVolumeName) {
 		t.Fatalf("expected missing control volume error, got %v", err)
 	}
 
 	badSpec = podSpec.DeepCopy()
-	badSpec.Containers[0].VolumeMounts = []corev1.VolumeMount{badSpec.Containers[0].VolumeMounts[0]}
+	badSpec.Containers[0].VolumeMounts = nil
 	if err := ValidateRestorePodSpec(badSpec, annotations, storage, snapshotv1alpha1.DefaultSeccompLocalhostProfile); err == nil || err.Error() != fmt.Sprintf(`missing %s mount at %s on container "main"`, snapshotv1alpha1.SnapshotControlVolumeName, snapshotv1alpha1.SnapshotControlMountPath) {
 		t.Fatalf("expected missing control mount error, got %v", err)
 	}
@@ -611,7 +587,7 @@ func TestValidateRestorePodSpecMultipleTargets(t *testing.T) {
 	bad := podSpec.DeepCopy()
 	for i := range bad.Containers {
 		if bad.Containers[i].Name == "engine-1" {
-			bad.Containers[i].VolumeMounts = []corev1.VolumeMount{bad.Containers[i].VolumeMounts[0]}
+			bad.Containers[i].VolumeMounts = nil
 		}
 	}
 	if err := ValidateRestorePodSpec(bad, annotations, storage, snapshotv1alpha1.DefaultSeccompLocalhostProfile); err == nil || !strings.Contains(err.Error(), `"engine-1"`) {
@@ -645,47 +621,6 @@ func TestValidateRestorePodSpecAllowsWorkerWithSidecars(t *testing.T) {
 
 	if err := ValidateRestorePodSpec(podSpec, annotations, storage, snapshotv1alpha1.DefaultSeccompLocalhostProfile); err != nil {
 		t.Fatalf("expected worker with sidecars to validate, got %v", err)
-	}
-}
-
-func TestDiscoverStorageFromDaemonSetsUsesCheckpointsVolume(t *testing.T) {
-	daemonSet := appsv1.DaemonSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "snapshot-agent", Namespace: "test-ns"},
-		Spec: appsv1.DaemonSetSpec{
-			Template: corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{
-						Name: SnapshotAgentContainerName,
-						VolumeMounts: []corev1.VolumeMount{
-							{Name: "cache", MountPath: "/cache"},
-							{Name: SnapshotAgentVolumeName, MountPath: "/checkpoints"},
-						},
-					}},
-					Volumes: []corev1.Volume{
-						{
-							Name: "cache",
-							VolumeSource: corev1.VolumeSource{
-								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "cache-pvc"},
-							},
-						},
-						{
-							Name: SnapshotAgentVolumeName,
-							VolumeSource: corev1.VolumeSource{
-								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "snapshot-pvc"},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	storage, err := DiscoverStorageFromDaemonSets("test-ns", []appsv1.DaemonSet{daemonSet})
-	if err != nil {
-		t.Fatalf("expected daemonset storage discovery to succeed, got %v", err)
-	}
-	if storage.PVCName != "snapshot-pvc" || storage.BasePath != "/checkpoints" {
-		t.Fatalf("expected snapshot PVC discovery, got %#v", storage)
 	}
 }
 

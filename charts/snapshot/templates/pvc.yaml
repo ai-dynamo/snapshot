@@ -1,4 +1,4 @@
-{{- if and (eq .Values.storage.type "pvc") (eq .Values.storage.accessMode "agentMount") .Values.storage.pvc.create }}
+{{- if and (eq .Values.storage.type "pvc") .Values.storage.pvc.create }}
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -11,9 +11,11 @@ metadata:
     app.kubernetes.io/name: {{ include "snapshot.name" . }}
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/component: storage
+  annotations:
+    helm.sh/resource-policy: keep
 spec:
   accessModes:
-    - {{ .Values.storage.pvc.accessMode }}
+    - ReadWriteMany
   resources:
     requests:
       storage: {{ .Values.storage.pvc.size }}
