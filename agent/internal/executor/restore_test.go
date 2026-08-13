@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"strings"
 	"testing"
 
 	"github.com/go-logr/logr/testr"
@@ -47,52 +46,26 @@ func (r *restoreFakeRuntime) ResolveContainerByPod(ctx context.Context, pod, ns,
 
 func (r *restoreFakeRuntime) Close() error { return nil }
 
-func TestExecNSRestoreRejectsRelativeContainerCheckpointLocation(t *testing.T) {
-	_, err := execNSRestore(
-		context.Background(),
-		testr.New(t),
-		RestoreRequest{
-			ContainerCheckpointLocation: "relative/checkpoint",
-		},
-		&types.RestoreContainerSnapshot{
-			CheckpointPath: "/host/checkpoints/abc123",
-			PlaceholderPID: 1,
-		},
-		testMountPoint{dst: "/tmp/snapshot-binaries"},
-	)
-	if err == nil {
-		t.Fatal("expected relative container checkpoint location to be rejected")
-	}
-	if !strings.Contains(err.Error(), "absolute") {
-		t.Fatalf("expected absolute-path validation error, got: %v", err)
-	}
-}
-
 func TestInspectRestoreUsesContainerIDWhenProvided(t *testing.T) {
-	checkpointDir := t.TempDir()
 	manifest := types.NewCheckpointManifest(
 		"checkpoint-123",
 		types.CRIUDumpManifest{},
 		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
 		types.OverlayManifest{},
 	)
-	if err := types.WriteManifest(checkpointDir, manifest); err != nil {
-		t.Fatalf("WriteManifest: %v", err)
-	}
-
 	rt := &restoreFakeRuntime{}
 	_, err := inspectRestore(
 		context.Background(),
 		rt,
 		testr.New(t),
 		RestoreRequest{
-			CheckpointID:       "checkpoint-123",
-			CheckpointLocation: checkpointDir,
-			ContainerID:        "placeholder-id",
-			PodName:            "virtual-pod-name",
-			PodNamespace:       "default",
-			ContainerName:      "main",
+			CheckpointID:  "checkpoint-123",
+			ContainerID:   "placeholder-id",
+			PodName:       "virtual-pod-name",
+			PodNamespace:  "default",
+			ContainerName: "main",
 		},
+		manifest,
 	)
 	if err != nil {
 		t.Fatalf("inspectRestore: %v", err)

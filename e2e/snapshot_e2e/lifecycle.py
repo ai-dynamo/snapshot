@@ -13,7 +13,6 @@ from kubernetes import client
 from kubernetes.client import ApiException
 
 from snapshot_e2e import k8s
-from snapshot_e2e.workloads import CHECKPOINT_DIR
 from snapshot_e2e.workloads import CONTAINER
 from snapshot_e2e.workloads import FILE_TOKEN
 from snapshot_e2e.workloads import OBSERVATIONS
@@ -31,6 +30,7 @@ PODSNAPSHOTS = "podsnapshots"
 PODSNAPSHOTCONTENTS = "podsnapshotcontents"
 PROGRESS_INTERVAL_SECONDS = 30
 TERMINAL_POD_PHASES = {"Failed", "Succeeded"}
+AGENT_CHECKPOINT_DIR = "/checkpoints"
 
 
 def wait_for_pod_deleted(namespace: str, name: str, timeout: int = 180) -> None:
@@ -313,36 +313,60 @@ def wait_for_restore_status(
     )
 
 
-def checkpoint_artifact_manifest(namespace: str, pod: str, checkpoint_id: str) -> str:
+def checkpoint_artifact_manifest(
+    config: k8s.E2EConfig, node: str, checkpoint_id: str
+) -> str:
     return k8s.exec_command(
-        namespace,
-        pod,
-        f"cat {CHECKPOINT_DIR}/{checkpoint_id}/versions/1/manifest.yaml",
+        config.namespace,
+        checkpoint_agent_pod(config, node),
+        f"cat {checkpoint_artifact_path(checkpoint_id)}/manifest.yaml",
     )
 
 
-def checkpoint_artifact_listing(namespace: str, pod: str, checkpoint_id: str) -> str:
+def checkpoint_artifact_listing(
+    config: k8s.E2EConfig, node: str, checkpoint_id: str
+) -> str:
     return k8s.exec_command(
-        namespace,
-        pod,
-        f"cd {CHECKPOINT_DIR}/{checkpoint_id}/versions/1 && "
+        config.namespace,
+        checkpoint_agent_pod(config, node),
+        f"cd {checkpoint_artifact_path(checkpoint_id)} && "
         "find . -maxdepth 1 -type f -print | sort && "
         "tar -tf rootfs-diff.tar | sort",
     )
 
 
 def checkpoint_rootfs_file(
-    namespace: str,
-    pod: str,
+    config: k8s.E2EConfig,
+    node: str,
     checkpoint_id: str,
     path: str,
 ) -> str:
     return k8s.exec_command(
-        namespace,
-        pod,
-        f"cd {CHECKPOINT_DIR}/{checkpoint_id}/versions/1 && "
+        config.namespace,
+        checkpoint_agent_pod(config, node),
+        f"cd {checkpoint_artifact_path(checkpoint_id)} && "
         f"tar -xOf rootfs-diff.tar {path}",
     )
+
+
+def checkpoint_artifact_path(checkpoint_id: str) -> str:
+    return shlex.quote(f"{AGENT_CHECKPOINT_DIR}/{checkpoint_id}/versions/1")
+
+
+def checkpoint_agent_pod(config: k8s.E2EConfig, node: str) -> str:
+    agents = [
+        pod
+        for pod in k8s.list_snapshot_pods(
+            config.namespace, config.release, "snapshot-agent"
+        )
+        if pod.spec.node_name == node
+    ]
+    if len(agents) != 1:
+        names = [pod.metadata.name for pod in agents]
+        raise AssertionError(
+            f"expected one snapshot agent on node {node!r}, found {names}"
+        )
+    return agents[0].metadata.name
 
 
 def assert_restored_state(

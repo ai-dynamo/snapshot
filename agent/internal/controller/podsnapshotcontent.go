@@ -24,6 +24,7 @@ import (
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
+	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -41,9 +42,6 @@ type CheckpointParams struct {
 	CheckpointID string
 	// HostPath is the agent-resolved destination directory for the dump.
 	HostPath string
-	// ContainerPath is the destination as seen inside the workload container's mount
-	// namespace (equal to HostPath under agentMount storage).
-	ContainerPath string
 	// StartedAt marks when the controller observed the work order, for timing.
 	StartedAt time.Time
 }
@@ -199,18 +197,15 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	if err != nil {
 		return w.setSnapshotContentFailed(ctx, content, "ContainerNotResolved", fmt.Errorf("resolve container %q: %w", containerName, err))
 	}
-	loc, err := w.checkpointLocationsFromPod(pod, id, containerPID)
+	artifactPath, err := w.artifactPathForPod(pod, id)
 	if err != nil {
 		return w.setSnapshotContentFailed(ctx, content, "InvalidDestination", err)
-	}
-	if err := w.validatePodMountContainerPID(ctx, containerID, containerPID); err != nil {
-		return w.setSnapshotContentFailed(ctx, content, "ContainerChanged", err)
 	}
 
 	// Resume: a present artifact with unwritten status means a prior dump finished but the
 	// status write did not. The artifact dir exists only after the executor's atomic rename,
 	// so its presence means a completed dump.
-	if artifactPresent(loc.HostPath) {
+	if artifactPresent(artifactPath, id) {
 		return w.setSnapshotContentSucceeded(ctx, content)
 	}
 
@@ -224,7 +219,7 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	}
 
 	releaseInFlight = false
-	go w.runCheckpoint(ctx, content, pod, containerName, containerID, containerPID, id, loc, leaseKey, id)
+	go w.runCheckpoint(ctx, content, pod, containerName, containerID, containerPID, id, artifactPath, leaseKey, id)
 	return nil
 }
 
@@ -238,7 +233,7 @@ func (w *NodeController) runCheckpoint(
 	containerName, containerID string,
 	containerPID int,
 	checkpointID string,
-	loc checkpointLocations,
+	artifactPath string,
 	leaseKey client.ObjectKey,
 	inFlightKey string,
 ) {
@@ -263,8 +258,7 @@ func (w *NodeController) runCheckpoint(
 		ContainerID:   containerID,
 		ContainerPID:  containerPID,
 		CheckpointID:  checkpointID,
-		HostPath:      loc.HostPath,
-		ContainerPath: loc.ContainerPath,
+		HostPath:      artifactPath,
 		StartedAt:     time.Now(),
 	}
 	if err := w.checkpointFn(leaseCtx, params); err != nil {
@@ -497,9 +491,13 @@ func isContentTerminal(content *snapshotv1alpha1.PodSnapshotContent) bool {
 }
 
 // artifactPresent reports whether a completed checkpoint directory already exists on disk.
-func artifactPresent(destination string) bool {
+func artifactPresent(destination, checkpointID string) bool {
 	info, err := os.Stat(destination)
-	return err == nil && info.IsDir()
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	manifest, err := types.ReadManifest(destination)
+	return err == nil && manifest.CheckpointID == checkpointID
 }
 
 // contentNameFromInformerObj extracts the object name from a dynamic informer object,

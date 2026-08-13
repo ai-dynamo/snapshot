@@ -25,7 +25,6 @@ import (
 	"sigs.k8s.io/yaml"
 
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
-	snapshotprotocol "github.com/ai-dynamo/snapshot/operator/internal/protocol"
 )
 
 const (
@@ -34,15 +33,15 @@ const (
 	podSnapshotPollInterval = 3 * time.Second
 )
 
-func loadRunContext(ctx context.Context, manifestPath string, namespaceOverride string, kubeContext string) (*corev1.Pod, kubernetes.Interface, client.Client, string, snapshotv1alpha1.Storage, error) {
+func loadRunContext(manifestPath string, namespaceOverride string, kubeContext string) (*corev1.Pod, kubernetes.Interface, client.Client, string, error) {
 	pod, err := loadPod(manifestPath)
 	if err != nil {
-		return nil, nil, nil, "", snapshotv1alpha1.Storage{}, err
+		return nil, nil, nil, "", err
 	}
 
 	clientset, restConfig, currentNamespace, err := loadClientset(kubeContext)
 	if err != nil {
-		return nil, nil, nil, "", snapshotv1alpha1.Storage{}, err
+		return nil, nil, nil, "", err
 	}
 
 	namespace := currentNamespace
@@ -61,14 +60,9 @@ func loadRunContext(ctx context.Context, manifestPath string, namespaceOverride 
 	utilruntime.Must(snapshotv1alpha1.AddToScheme(scheme))
 	crClient, err := client.New(restConfig, client.Options{Scheme: scheme})
 	if err != nil {
-		return nil, nil, nil, "", snapshotv1alpha1.Storage{}, fmt.Errorf("create controller-runtime client: %w", err)
+		return nil, nil, nil, "", fmt.Errorf("create controller-runtime client: %w", err)
 	}
-
-	storage, err := discoverSnapshotStorage(ctx, clientset, namespace)
-	if err != nil {
-		return nil, nil, nil, "", snapshotv1alpha1.Storage{}, err
-	}
-	return pod, clientset, crClient, namespace, storage, nil
+	return pod, clientset, crClient, namespace, nil
 }
 
 func loadClientset(kubeContext string) (kubernetes.Interface, *rest.Config, string, error) {
@@ -231,17 +225,6 @@ func ctxRemaining(ctx context.Context) time.Duration {
 		return time.Until(d)
 	}
 	return time.Hour
-}
-
-func discoverSnapshotStorage(ctx context.Context, clientset kubernetes.Interface, namespace string) (snapshotv1alpha1.Storage, error) {
-	daemonSets, err := clientset.AppsV1().DaemonSets(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: snapshotprotocol.SnapshotAgentLabelSelector,
-	})
-	if err != nil {
-		return snapshotv1alpha1.Storage{}, fmt.Errorf("list snapshot-agent daemonsets in %s: %w", namespace, err)
-	}
-
-	return snapshotprotocol.DiscoverStorageFromDaemonSets(namespace, daemonSets.Items)
 }
 
 func loadPod(manifestPath string) (*corev1.Pod, error) {

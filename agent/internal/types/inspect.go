@@ -35,7 +35,6 @@ type CheckpointContainerSnapshot struct {
 
 // RestoreContainerSnapshot holds inspected state for the restore target.
 type RestoreContainerSnapshot struct {
-	CheckpointPath string
 	PlaceholderPID int
 	TargetRoot     string
 	CgroupRoot     string

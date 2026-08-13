@@ -66,7 +66,7 @@ func (r *fakeRuntime) Close() error { return nil }
 // reached by a test that was previously relying on Phase 1 failing first.
 type noopInjector struct{}
 
-func (noopInjector) Mount(_ context.Context, _ int) (nsmount.MountPoint, error) {
+func (noopInjector) Mount(_ context.Context, _ int, _, _ string) (nsmount.MountPoint, error) {
 	return noopMountPoint{}, nil
 }
 
@@ -79,7 +79,7 @@ func (noopMountPoint) NsFd() *os.File                   { return nil }
 // errorInjector always returns the wrapped error from Mount.
 type errorInjector struct{ err error }
 
-func (e errorInjector) Mount(_ context.Context, _ int) (nsmount.MountPoint, error) {
+func (e errorInjector) Mount(_ context.Context, _ int, _, _ string) (nsmount.MountPoint, error) {
 	return nil, e.err
 }
 
@@ -101,7 +101,7 @@ func makeTestController(t *testing.T, objs ...runtime.Object) *NodeController {
 		},
 		clientset: fake.NewClientset(objs...),
 		runtime:   &fakeRuntime{},
-		injector:  noopInjector{},
+		injector:  executor.Mounters{Bundle: noopInjector{}, Artifact: noopInjector{}},
 		log:       testr.New(t),
 		holderID:  "test-holder",
 		inFlight:  make(map[string]struct{}),
@@ -163,7 +163,7 @@ func makePod(name, namespace, nodeName string, phase corev1.PodPhase, ready bool
 	}
 }
 
-func TestCheckpointLocationsFromPod(t *testing.T) {
+func TestArtifactPathForPod(t *testing.T) {
 	pod := makePod(
 		"test-pod",
 		"default",
@@ -176,119 +176,55 @@ func TestCheckpointLocationsFromPod(t *testing.T) {
 		},
 	)
 
-	t.Run("agent mount uses the agent-visible path", func(t *testing.T) {
+	t.Run("uses the agent base path and pod version", func(t *testing.T) {
 		w := makeTestController(t)
 		w.config.Storage.BasePath = "/checkpoints"
 
-		locations, err := w.checkpointLocationsFromPod(pod, "abc123", 0)
+		got, err := w.artifactPathForPod(pod, "abc123")
 		if err != nil {
-			t.Fatalf("checkpointLocationsFromPod() error = %v", err)
+			t.Fatalf("artifactPathForPod() error = %v", err)
 		}
-
 		expected := "/checkpoints/abc123/versions/2"
-		if locations.HostPath != expected {
-			t.Fatalf("HostPath = %q, want %q", locations.HostPath, expected)
-		}
-		if locations.ContainerPath != expected {
-			t.Fatalf("ContainerPath = %q, want %q", locations.ContainerPath, expected)
+		if got != expected {
+			t.Fatalf("artifact path = %q, want %q", got, expected)
 		}
 	})
 
-	t.Run("pod mount uses the target container root from host proc", func(t *testing.T) {
+	t.Run("defaults the artifact version", func(t *testing.T) {
+		unversioned := pod.DeepCopy()
+		delete(unversioned.Annotations, snapshotv1alpha1.CheckpointArtifactVersionAnnotation)
 		w := makeTestController(t)
 		w.config.Storage.BasePath = "/checkpoints"
-		w.config.Storage.AccessMode = types.StorageAccessModePodMount
-
-		locations, err := w.checkpointLocationsFromPod(pod, "abc123", 1234)
+		got, err := w.artifactPathForPod(unversioned, "abc123")
 		if err != nil {
-			t.Fatalf("checkpointLocationsFromPod() error = %v", err)
+			t.Fatalf("artifactPathForPod() error = %v", err)
 		}
-
-		expectedContainerPath := "/checkpoints/abc123/versions/2"
-		expectedHostPath := filepath.Join(snapshotruntime.HostProcPath, "1234", "root", "checkpoints/abc123/versions/2")
-		if locations.HostPath != expectedHostPath {
-			t.Fatalf("HostPath = %q, want %q", locations.HostPath, expectedHostPath)
-		}
-		if locations.ContainerPath != expectedContainerPath {
-			t.Fatalf("ContainerPath = %q, want %q", locations.ContainerPath, expectedContainerPath)
+		expected := "/checkpoints/abc123/versions/" + snapshotv1alpha1.DefaultCheckpointArtifactVersion
+		if got != expected {
+			t.Fatalf("artifact path = %q, want %q", got, expected)
 		}
 	})
 
-	t.Run("pod storage annotation overrides agent base path", func(t *testing.T) {
+	t.Run("ignores legacy pod storage base path", func(t *testing.T) {
 		annotatedPod := pod.DeepCopy()
 		annotatedPod.Annotations[snapshotv1alpha1.CheckpointStorageBasePathAnnotation] = "/pod-checkpoints/"
-
 		w := makeTestController(t)
 		w.config.Storage.BasePath = "/agent-checkpoints"
-
-		locations, err := w.checkpointLocationsFromPod(annotatedPod, "abc123", 0)
+		got, err := w.artifactPathForPod(annotatedPod, "abc123")
 		if err != nil {
-			t.Fatalf("checkpointLocationsFromPod() error = %v", err)
+			t.Fatalf("artifactPathForPod() error = %v", err)
 		}
-
-		expected := "/pod-checkpoints/abc123/versions/2"
-		if locations.HostPath != expected {
-			t.Fatalf("HostPath = %q, want %q", locations.HostPath, expected)
-		}
-		if locations.ContainerPath != expected {
-			t.Fatalf("ContainerPath = %q, want %q", locations.ContainerPath, expected)
-		}
-	})
-
-	t.Run("blank pod storage annotation falls back to agent base path", func(t *testing.T) {
-		annotatedPod := pod.DeepCopy()
-		annotatedPod.Annotations[snapshotv1alpha1.CheckpointStorageBasePathAnnotation] = "   "
-
-		w := makeTestController(t)
-		w.config.Storage.BasePath = "/agent-checkpoints"
-
-		locations, err := w.checkpointLocationsFromPod(annotatedPod, "abc123", 0)
-		if err != nil {
-			t.Fatalf("checkpointLocationsFromPod() error = %v", err)
-		}
-
 		expected := "/agent-checkpoints/abc123/versions/2"
-		if locations.HostPath != expected {
-			t.Fatalf("HostPath = %q, want %q", locations.HostPath, expected)
-		}
-		if locations.ContainerPath != expected {
-			t.Fatalf("ContainerPath = %q, want %q", locations.ContainerPath, expected)
+		if got != expected {
+			t.Fatalf("artifact path = %q, want %q", got, expected)
 		}
 	})
 
-	t.Run("missing base path returns an error", func(t *testing.T) {
-		w := makeTestController(t)
-		w.config.Storage.BasePath = ""
-
-		if _, err := w.checkpointLocationsFromPod(pod, "abc123", 0); err == nil {
-			t.Fatal("expected error for missing base path")
-		}
-	})
-
-	t.Run("non-clean base path returns an error", func(t *testing.T) {
-		annotatedPod := pod.DeepCopy()
-		annotatedPod.Annotations[snapshotv1alpha1.CheckpointStorageBasePathAnnotation] = "/checkpoints/../escape"
-
-		w := makeTestController(t)
-		w.config.Storage.BasePath = "/agent-checkpoints"
-		w.config.Storage.AccessMode = types.StorageAccessModePodMount
-
-		_, err := w.checkpointLocationsFromPod(annotatedPod, "abc123", 1234)
-		if err == nil {
-			t.Fatal("expected error for non-clean checkpoint location")
-		}
-		if !strings.Contains(err.Error(), "absolute, clean") {
-			t.Fatalf("expected clean-path validation error, got: %v", err)
-		}
-	})
-
-	t.Run("pod mount requires a host PID", func(t *testing.T) {
+	t.Run("rejects unsafe components", func(t *testing.T) {
 		w := makeTestController(t)
 		w.config.Storage.BasePath = "/checkpoints"
-		w.config.Storage.AccessMode = types.StorageAccessModePodMount
-
-		if _, err := w.checkpointLocationsFromPod(pod, "abc123", 0); err == nil {
-			t.Fatal("expected error for missing host PID")
+		if _, err := w.artifactPathForPod(pod, "../escape"); err == nil {
+			t.Fatal("expected unsafe checkpoint ID to fail")
 		}
 	})
 }
@@ -752,7 +688,8 @@ func TestRunRestoreEmitsRestoreFailedEventOnInjectError(t *testing.T) {
 		map[string]string{snapshotv1alpha1.CheckpointIDLabel: checkpointID}, nil)
 
 	// Write a minimal manifest so inspectRestore can load it.
-	checkpointDir := filepath.Join(t.TempDir(), checkpointID)
+	basePath := t.TempDir()
+	checkpointDir := filepath.Join(basePath, checkpointID, "versions", snapshotv1alpha1.DefaultCheckpointArtifactVersion)
 	if err := os.MkdirAll(checkpointDir, 0o755); err != nil {
 		t.Fatalf("create checkpoint dir: %v", err)
 	}
@@ -762,14 +699,14 @@ func TestRunRestoreEmitsRestoreFailedEventOnInjectError(t *testing.T) {
 
 	injectErr := errors.New("injector unavailable")
 	w := makeTestController(t, pod)
+	w.config.Storage.BasePath = basePath
 	// math.MaxInt32 is above any real kernel pid_max (≤4194304) so SendSignalToPID
 	// returns ESRCH instead of killing the test process.
 	w.runtime = &fakeRuntime{resolveContainerPID: math.MaxInt32}
-	w.injector = errorInjector{err: injectErr}
+	w.injector = executor.Mounters{Bundle: errorInjector{err: injectErr}, Artifact: noopInjector{}}
 
 	_ = w.runRestore(
 		context.Background(), pod, "main", "ctr-abc", checkpointID,
-		checkpointLocations{HostPath: checkpointDir, ContainerPath: checkpointDir},
 		"default/test-pod/main/ctr-abc",
 		time.Time{},
 	)

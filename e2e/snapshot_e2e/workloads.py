@@ -15,7 +15,6 @@ from snapshot_e2e import k8s
 
 CONTAINER = "main"
 CONTROL_DIR = "/snapshot-control"
-CHECKPOINT_DIR = "/checkpoints"
 SOURCE_READY = f"{CONTROL_DIR}/ready-for-snapshot"
 RESTORE_DONE = f"{CONTROL_DIR}/restore-complete"
 RESTORE_INITIAL_TOKEN = f"{CONTROL_DIR}/initial-restore-token"
@@ -75,10 +74,7 @@ def source_pod(
         "name": run.source_pod,
         "namespace": config.namespace,
         "labels": labels,
-        "annotations": {
-            "nvidia.com/snapshot-storage-type": "pvc",
-            "nvidia.com/snapshot-storage-base-path": CHECKPOINT_DIR,
-        },
+        "annotations": {},
     }
     if include_target_annotation:
         metadata["annotations"]["nvidia.com/snapshot-target-containers"] = CONTAINER
@@ -134,8 +130,6 @@ def restore_pod(
             "annotations": {
                 "nvidia.com/snapshot-target-containers": CONTAINER,
                 "nvidia.com/snapshot-artifact-version": "1",
-                "nvidia.com/snapshot-storage-type": "pvc",
-                "nvidia.com/snapshot-storage-base-path": CHECKPOINT_DIR,
             },
         },
         "spec": spec,
@@ -155,7 +149,6 @@ def base_pod_spec(
         "command": ["/bin/bash", "-lc", command],
         "volumeMounts": [
             {"name": "snapshot-control", "mountPath": CONTROL_DIR},
-            {"name": "checkpoint-storage", "mountPath": CHECKPOINT_DIR},
         ],
     }
     spec: dict[str, Any] = {
@@ -167,10 +160,6 @@ def base_pod_spec(
         **workload_scheduling(),
         "volumes": [
             {"name": "snapshot-control", "emptyDir": {}},
-            {
-                "name": "checkpoint-storage",
-                "persistentVolumeClaim": {"claimName": config.pvc_name},
-            },
         ],
     }
     if gpu:
@@ -180,8 +169,7 @@ def base_pod_spec(
 
 
 def workload_scheduling() -> dict[str, Any]:
-    # Keep all workload pods on GPU nodes so the shared RWO checkpoint PVC binds in
-    # a zone where both source and restore pods can schedule.
+    # Snapshot agents run on GPU nodes, so keep workloads within their coverage.
     node_selector = {
         "nvidia.com/gpu.present": "true",
     }
