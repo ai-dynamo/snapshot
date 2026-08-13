@@ -1,5 +1,7 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-// SPDX-License-Identifier: Apache-2.0
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include <ctype.h>
 #include <cuda.h>
@@ -14,10 +16,10 @@ print_usage(FILE* stream)
   return fprintf(
              stream,
              "Usage:\n"
-             "  cuda-checkpoint-helper --get-state --pid <pid>\n"
-             "  cuda-checkpoint-helper --get-restore-tid --pid <pid>\n"
+             "  cuda-checkpoint-helper --get-state --pid <pid> [--job-file <path>]\n"
+             "  cuda-checkpoint-helper --get-restore-tid --pid <pid> [--job-file <path>]\n"
              "  cuda-checkpoint-helper --action lock|checkpoint|restore|unlock --pid <pid> [--timeout <ms>] "
-             "[--device-map <uuids>]\n") < 0
+             "[--device-map <uuids>] [--job-file <path>]\n") < 0
              ? 1
              : 0;
 }
@@ -272,6 +274,7 @@ main(int argc, char** argv)
 {
   const char* action = NULL;
   const char* device_map = "";
+  const char* job_file = "";
   int pid = 0;
   int have_pid = 0;
   int do_get_state_flag = 0;
@@ -320,6 +323,13 @@ main(int argc, char** argv)
       device_map = argv[i];
       continue;
     }
+    if (strcmp(argv[i], "--job-file") == 0) {
+      if (++i >= argc || argv[i][0] == '\0') {
+        return print_usage(stderr);
+      }
+      job_file = argv[i];
+      continue;
+    }
     if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
       return print_usage(stdout);
     }
@@ -331,6 +341,11 @@ main(int argc, char** argv)
   }
   if (!have_pid) {
     return print_usage(stderr);
+  }
+
+  if (job_file[0] != '\0' && setenv("CUDA_CHECKPOINT_JOB_FILE", job_file, 1) != 0) {
+    perror("setenv CUDA_CHECKPOINT_JOB_FILE");
+    return 1;
   }
 
   if (do_get_state_flag) {

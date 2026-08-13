@@ -93,4 +93,14 @@ const (
 	// checkpoint. Observed by the checkpoint job's kubelet readiness probe
 	// on the worker container.
 	ReadyForSnapshotFile = "ready-for-snapshot"
+
+	// CUDAJobFileName is the stable name the cuda-checkpoint-helper launch-job
+	// wrapper persists the CUDA checkpoint job file under, inside the control
+	// volume. The stable location survives past the transient path the CUDA
+	// driver reports via CUDA_CHECKPOINT_JOB_FILE.
+	CUDAJobFileName = "cuda-checkpoint-job"
+
+	// CUDAJobFilePath is the full stable path to the persisted CUDA checkpoint
+	// job file.
+	CUDAJobFilePath = SnapshotControlMountPath + "/" + CUDAJobFileName
 )
