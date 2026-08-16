@@ -1,4 +1,4 @@
-GO_VERSION             ?= 1.26.5
+GO_VERSION             ?= 1.26.6
 
 CONTROLLER_GEN_VERSION ?= v0.19.0
 GOLANGCI_LINT_VERSION  ?= v1.62.2
