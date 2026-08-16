@@ -1,6 +1,6 @@
 module github.com/ai-dynamo/snapshot/agent
 
-go 1.26.5
+go 1.26.6
 
 require (
 	github.com/ai-dynamo/snapshot/api v0.0.0
