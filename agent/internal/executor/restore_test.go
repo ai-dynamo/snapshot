@@ -50,7 +50,8 @@ func (r *restoreFakeRuntime) Close() error { return nil }
 
 func TestInspectRestoreUsesContainerIDWhenProvided(t *testing.T) {
 	manifest := types.NewCheckpointManifest(
-		"checkpoint-123",
+		"content-uid-123",
+		"main",
 		types.CRIUDumpManifest{},
 		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
 		types.OverlayManifest{},
@@ -61,7 +62,7 @@ func TestInspectRestoreUsesContainerIDWhenProvided(t *testing.T) {
 		rt,
 		testr.New(t),
 		RestoreRequest{
-			CheckpointID:  "checkpoint-123",
+			ContentUID:    "content-uid-123",
 			ContainerID:   "placeholder-id",
 			PodName:       "virtual-pod-name",
 			PodNamespace:  "default",
@@ -94,7 +95,8 @@ func TestNewRestoreCleanupError(t *testing.T) {
 
 func TestValidateRestoreManifest(t *testing.T) {
 	manifest := types.NewCheckpointManifest(
-		"checkpoint-123",
+		"content-uid-123",
+		"main",
 		types.CRIUDumpManifest{},
 		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "team-a", "10.0.0.11", nil),
 		types.OverlayManifest{},
@@ -105,13 +107,17 @@ func TestValidateRestoreManifest(t *testing.T) {
 		req  RestoreRequest
 		want string
 	}{
-		{name: "matching identity", req: RestoreRequest{CheckpointID: "checkpoint-123", PodNamespace: "team-a"}},
+		{name: "matching identity", req: RestoreRequest{ContentUID: "content-uid-123", ContainerName: "main"}},
 		{
-			name: "checkpoint ID mismatch",
-			req:  RestoreRequest{CheckpointID: "other", PodNamespace: "team-a"},
-			want: "does not match requested ID",
+			name: "content UID mismatch",
+			req:  RestoreRequest{ContentUID: "other", ContainerName: "main"},
+			want: "does not match requested artifact",
 		},
-		{name: "cross namespace", req: RestoreRequest{CheckpointID: "checkpoint-123", PodNamespace: "team-b"}},
+		{
+			name: "container mismatch",
+			req:  RestoreRequest{ContentUID: "content-uid-123", ContainerName: "worker"},
+			want: "does not match requested artifact",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := validateRestoreManifest(tc.req, manifest)
@@ -128,7 +134,8 @@ func TestValidateRestoreManifest(t *testing.T) {
 func TestRestoreInNamespaceRejectsMultiGPUCheckpointWithoutLaunchJobState(t *testing.T) {
 	checkpointDir := t.TempDir()
 	manifest := types.NewCheckpointManifest(
-		"checkpoint-123",
+		"content-uid-123",
+		"main",
 		types.CRIUDumpManifest{},
 		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
 		types.OverlayManifest{},

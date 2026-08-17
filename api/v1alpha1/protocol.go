@@ -5,148 +5,51 @@ package v1alpha1
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
-// RestoreStatusAnnotationKeys holds the per-container restore status annotation keys.
-type RestoreStatusAnnotationKeys struct {
-	Status      string
-	ContainerID string
-}
+const snapshotAnnotationPrefix = "nvidia.com/snapshot-"
 
-// ArtifactVersion normalizes an artifact version, defaulting when empty.
-func ArtifactVersion(version string) string {
-	version = strings.TrimSpace(version)
-	if version == "" {
-		return DefaultCheckpointArtifactVersion
-	}
-	return version
-}
-
-// FormatTargetContainers renders the canonical annotation value.
-func FormatTargetContainers(names []string) string {
-	cleaned := make([]string, 0, len(names))
-	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		cleaned = append(cleaned, name)
-	}
-	return strings.Join(cleaned, ",")
-}
-
-// ParseTargetContainers trims names and rejects empty or duplicate entries.
-func ParseTargetContainers(value string) ([]string, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil, nil
-	}
-	parts := strings.Split(value, ",")
-	seen := make(map[string]struct{}, len(parts))
-	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		name := strings.TrimSpace(part)
-		if name == "" {
-			return nil, fmt.Errorf("empty container name in %s=%q", TargetContainersAnnotation, value)
-		}
-		if _, dup := seen[name]; dup {
-			return nil, fmt.Errorf("duplicate container name %q in %s=%q", name, TargetContainersAnnotation, value)
-		}
-		seen[name] = struct{}{}
-		out = append(out, name)
-	}
-	return out, nil
-}
-
-// TargetContainersFromAnnotations requires the target list and enforces bounds.
-func TargetContainersFromAnnotations(annotations map[string]string, minCount, maxCount int) ([]string, error) {
-	raw, ok := annotations[TargetContainersAnnotation]
-	if !ok || strings.TrimSpace(raw) == "" {
-		return nil, fmt.Errorf("missing required %s annotation", TargetContainersAnnotation)
-	}
-	names, err := ParseTargetContainers(raw)
-	if err != nil {
-		return nil, err
-	}
-	if minCount > 0 && len(names) < minCount {
-		return nil, fmt.Errorf("%s must list at least %d container name(s), got %d", TargetContainersAnnotation, minCount, len(names))
-	}
-	if maxCount > 0 && len(names) > maxCount {
-		return nil, fmt.Errorf("%s must list at most %d container name(s), got %d", TargetContainersAnnotation, maxCount, len(names))
-	}
-	return names, nil
-}
-
-// RestoreStatusAnnotationKeysFor builds the per-container restore status keys, validating the name.
-func RestoreStatusAnnotationKeysFor(containerName string) (RestoreStatusAnnotationKeys, error) {
-	keys := RestoreStatusAnnotationKeys{
-		Status:      RestoreStatusAnnotationPrefix + containerName,
-		ContainerID: RestoreContainerIDAnnotationPrefix + containerName,
-	}
-	for _, annotationKey := range []string{keys.Status, keys.ContainerID} {
-		if errs := validation.IsQualifiedName(annotationKey); len(errs) > 0 {
-			return RestoreStatusAnnotationKeys{}, fmt.Errorf("container name %q cannot be used in restore status annotation key %q: %s", containerName, annotationKey, strings.Join(errs, "; "))
-		}
-	}
-	return keys, nil
-}
-
-// RestoreStatusAnnotations builds the per-container restore status annotation map.
-func RestoreStatusAnnotations(containerName, status, containerID string) (map[string]string, error) {
-	keys, err := RestoreStatusAnnotationKeysFor(containerName)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]string{
-		keys.Status:      status,
-		keys.ContainerID: containerID,
-	}, nil
-}
-
-func clearRestoreStatusKeys(annotations map[string]string) {
-	delete(annotations, RestoreStatusAnnotation)
-	delete(annotations, RestoreContainerIDAnnotation)
+// SnapshotAnnotations returns the sorted snapshot-owned annotation keys on a
+// pod. Platform and workload annotations are intentionally ignored.
+func SnapshotAnnotations(annotations map[string]string) []string {
+	keys := make([]string, 0)
 	for key := range annotations {
-		if strings.HasPrefix(key, RestoreStatusAnnotationPrefix) ||
-			strings.HasPrefix(key, RestoreContainerIDAnnotationPrefix) {
-			delete(annotations, key)
+		if key == RestoreFromAnnotation || strings.HasPrefix(key, snapshotAnnotationPrefix) {
+			keys = append(keys, key)
 		}
 	}
+	sort.Strings(keys)
+	return keys
 }
 
-// ApplyRestoreTargetMetadata resets restore metadata and stamps checkpoint ID.
-// The caller owns TargetContainersAnnotation.
-func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string]string, enabled bool, checkpointID string, artifactVersion string) {
-	delete(labels, CheckpointSourceLabel)
-	delete(labels, RestoreTargetLabel)
-	delete(labels, CheckpointIDLabel)
-	delete(annotations, CheckpointArtifactVersionAnnotation)
-	delete(annotations, CheckpointStatusAnnotation)
-	clearRestoreStatusKeys(annotations)
-
-	if !enabled {
-		return
+// ValidateCaptureAnnotations enforces that capture pods carry no
+// snapshot-owned annotations. Capture identity and target container are carried
+// by PodSnapshot and PodSnapshotContent instead.
+func ValidateCaptureAnnotations(annotations map[string]string) error {
+	if keys := SnapshotAnnotations(annotations); len(keys) != 0 {
+		return fmt.Errorf("capture pod must not carry snapshot annotations: %s", strings.Join(keys, ", "))
 	}
-
-	labels[RestoreTargetLabel] = "true"
-	if checkpointID != "" {
-		labels[CheckpointIDLabel] = checkpointID
-	}
-	annotations[CheckpointArtifactVersionAnnotation] = ArtifactVersion(artifactVersion)
+	return nil
 }
 
-// ApplyCheckpointSourceMetadata stamps checkpoint-source labels/annotations.
-func ApplyCheckpointSourceMetadata(labels map[string]string, annotations map[string]string, checkpointID string, artifactVersion string) {
-	delete(labels, RestoreTargetLabel)
-	delete(labels, CheckpointIDLabel)
-	delete(annotations, CheckpointArtifactVersionAnnotation)
-
-	labels[CheckpointSourceLabel] = "true"
-	if checkpointID != "" {
-		labels[CheckpointIDLabel] = checkpointID
+// RestoreFromAnnotations validates the restore annotation contract and returns
+// the same-namespace PodSnapshot name. Exactly one snapshot-owned annotation is
+// accepted; unrelated workload and platform annotations remain valid.
+func RestoreFromAnnotations(annotations map[string]string) (string, error) {
+	keys := SnapshotAnnotations(annotations)
+	if len(keys) != 1 || keys[0] != RestoreFromAnnotation {
+		return "", fmt.Errorf("restore pod must carry exactly one snapshot annotation, %s; found %v", RestoreFromAnnotation, keys)
 	}
-	annotations[CheckpointArtifactVersionAnnotation] = ArtifactVersion(artifactVersion)
+	snapshotName := strings.TrimSpace(annotations[RestoreFromAnnotation])
+	if snapshotName == "" {
+		return "", fmt.Errorf("%s must name a PodSnapshot", RestoreFromAnnotation)
+	}
+	if errs := validation.IsDNS1123Subdomain(snapshotName); len(errs) != 0 {
+		return "", fmt.Errorf("%s value %q is not a valid PodSnapshot name: %s", RestoreFromAnnotation, snapshotName, strings.Join(errs, "; "))
+	}
+	return snapshotName, nil
 }

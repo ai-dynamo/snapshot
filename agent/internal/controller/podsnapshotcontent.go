@@ -17,14 +17,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	contentvalidation "k8s.io/apimachinery/pkg/api/validate/content"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
+	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
+	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -38,8 +38,8 @@ type CheckpointParams struct {
 	ContainerID string
 	// ContainerPID is the agent-resolved host PID of the running container.
 	ContainerPID int
-	// CheckpointID is the stable artifact identity.
-	CheckpointID string
+	// ContentUID is the immutable PodSnapshotContent identity owning the artifact.
+	ContentUID string
 	// HostPath is the agent-resolved destination directory for the dump.
 	HostPath string
 	// StartedAt marks when the controller observed the work order, for timing.
@@ -150,35 +150,27 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		return nil
 	}
 
-	// Capture parameters come from the source pod, which is the single source of truth. The
-	// checkpoint ID is the pod label; the work order name is treated as opaque (never parsed).
-	id := strings.TrimSpace(pod.Labels[snapshotv1alpha1.CheckpointIDLabel])
-	if id == "" {
-		return w.setSnapshotContentFailed(ctx, content, "MissingCheckpointID",
-			fmt.Errorf("source pod %q missing %s label", pod.Name, snapshotv1alpha1.CheckpointIDLabel))
+	contentUID := strings.TrimSpace(string(content.UID))
+	if contentUID == "" {
+		return w.setSnapshotContentFailed(ctx, content, "MissingContentUID",
+			fmt.Errorf("PodSnapshotContent %q has no UID", content.Name))
 	}
-	// Label-value rules, not the stricter DNS-1123-label rules: dots are valid here.
-	if errs := contentvalidation.IsLabelValue(id); len(errs) > 0 {
-		return w.setSnapshotContentFailed(ctx, content, "InvalidCheckpointID",
-			fmt.Errorf("checkpoint ID %q is not a valid label value: %s", id, strings.Join(errs, "; ")))
+	containerName, err := singleTargetContainer(content)
+	if err != nil {
+		return w.setSnapshotContentFailed(ctx, content, "InvalidTargetContainer", err)
 	}
-	leaseName := checkpointLeaseName(id)
-	if errs := validation.IsDNS1123Subdomain(leaseName); len(errs) > 0 {
-		return w.setSnapshotContentFailed(ctx, content, "InvalidCheckpointID",
-			fmt.Errorf("checkpoint ID %q produces invalid Lease name %q: %s", id, leaseName, strings.Join(errs, "; ")))
-	}
+	artifactKey := contentUID + "/" + containerName
 
-	// The checkpoint ID is the artifact identity, so the in-flight guard and lease key on it:
-	// a PodSnapshot delete/recreate changes the work-order name but must not admit a second dump
-	// into the same artifact path. tryAcquire must stay after the terminal-content check and ID
-	// validation so the guard is never held by a terminal work order.
-	if !w.tryAcquire(id) {
+	// The immutable content UID and container own the artifact, in-flight guard,
+	// and lease. A recreated content object receives a new UID and cannot adopt a
+	// stale path from the deleted object.
+	if !w.tryAcquire(artifactKey) {
 		return nil
 	}
 	releaseInFlight := true
 	defer func() {
 		if releaseInFlight {
-			w.release(id)
+			w.release(artifactKey)
 		}
 	}()
 
@@ -191,10 +183,6 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		return err
 	}
 
-	containerName, err := singleTargetContainer(content)
-	if err != nil {
-		return w.setSnapshotContentFailed(ctx, content, "InvalidTargetContainer", err)
-	}
 	if !isContainerReady(pod, containerName) {
 		logger.V(1).Info("Source container not ready, awaiting quiesce", "pod", pod.Name, "container", containerName)
 		return nil
@@ -209,7 +197,7 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	if err != nil {
 		return w.setSnapshotContentFailed(ctx, content, "ContainerNotResolved", fmt.Errorf("resolve container %q: %w", containerName, err))
 	}
-	artifactPath, err := w.artifactPathForPod(pod, id)
+	artifactPath, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, contentUID, containerName)
 	if err != nil {
 		return w.setSnapshotContentFailed(ctx, content, "InvalidDestination", err)
 	}
@@ -217,11 +205,11 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	// Resume: a present artifact with unwritten status means a prior dump finished before the
 	// Ready-and-release sequence completed. The artifact dir exists only after the executor's
 	// atomic rename, so its presence means a completed dump.
-	if artifactPresent(artifactPath) {
+	if artifactPresent(artifactPath, contentUID, containerName) {
 		return w.markCheckpointReadyAndRelease(ctx, content, containerPID)
 	}
 
-	leaseKey := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: leaseName}
+	leaseKey := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: checkpointLeaseName(contentUID, containerName)}
 	acquired, err := w.acquireLease(ctx, leaseKey)
 	if err != nil {
 		return fmt.Errorf("acquire checkpoint lease %s: %w", leaseKey.String(), err)
@@ -229,8 +217,9 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	if !acquired {
 		return nil
 	}
+
 	releaseInFlight = false
-	go w.runCheckpoint(ctx, content, pod, containerName, containerID, containerPID, id, artifactPath, leaseKey, id)
+	go w.runCheckpoint(ctx, content, pod, containerName, containerID, containerPID, contentUID, artifactPath, leaseKey, artifactKey)
 	return nil
 }
 
@@ -300,7 +289,7 @@ func (w *NodeController) runCheckpoint(
 	pod *corev1.Pod,
 	containerName, containerID string,
 	containerPID int,
-	checkpointID string,
+	contentUID string,
 	artifactPath string,
 	leaseKey client.ObjectKey,
 	inFlightKey string,
@@ -325,7 +314,7 @@ func (w *NodeController) runCheckpoint(
 		ContainerName: containerName,
 		ContainerID:   containerID,
 		ContainerPID:  containerPID,
-		CheckpointID:  checkpointID,
+		ContentUID:    contentUID,
 		HostPath:      artifactPath,
 		StartedAt:     time.Now(),
 	}
@@ -383,6 +372,9 @@ func classifySourcePod(content *snapshotv1alpha1.PodSnapshotContent, pod *corev1
 	if pod.DeletionTimestamp != nil || pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
 		return "SourcePodGone",
 			fmt.Sprintf("source pod %q is no longer running (phase %s)", pod.Name, pod.Status.Phase)
+	}
+	if err := snapshotv1alpha1.ValidateCaptureAnnotations(pod.Annotations); err != nil {
+		return "UnexpectedSnapshotAnnotation", err.Error()
 	}
 	return "", ""
 }
@@ -566,7 +558,7 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 	req := executor.CheckpointRequest{
 		ContainerID:        params.ContainerID,
 		ContainerName:      params.ContainerName,
-		CheckpointID:       params.CheckpointID,
+		ContentUID:         params.ContentUID,
 		CheckpointLocation: params.HostPath,
 		StartedAt:          params.StartedAt,
 		NodeName:           w.config.NodeName,
@@ -636,9 +628,15 @@ func isContentFailed(content *snapshotv1alpha1.PodSnapshotContent) bool {
 }
 
 // artifactPresent reports whether a completed checkpoint directory already exists on disk.
-func artifactPresent(destination string) bool {
+func artifactPresent(destination, contentUID, containerName string) bool {
 	info, err := os.Stat(destination)
-	return err == nil && info.IsDir()
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	manifest, err := types.ReadManifest(destination)
+	return err == nil &&
+		manifest.Artifact.ContentUID == contentUID &&
+		manifest.Artifact.ContainerName == containerName
 }
 
 // contentNameFromInformerObj extracts the object name from a dynamic informer object,

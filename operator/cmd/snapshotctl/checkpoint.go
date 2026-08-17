@@ -12,17 +12,18 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/apimachinery/pkg/util/validation"
 
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	snapshotprotocol "github.com/ai-dynamo/snapshot/operator/internal/protocol"
 )
-
-const defaultGeneratedCheckpointIDPrefix = "manual-snapshot"
 
 type checkpointOptions struct {
 	ManifestPath       string
 	Namespace          string
 	KubeContext        string
-	CheckpointID       string
+	SnapshotName       string
 	Container          string
 	CudaCheckpointWrap bool
 	Timeout            time.Duration
@@ -31,7 +32,6 @@ type checkpointOptions struct {
 type result struct {
 	Name          string
 	Namespace     string
-	CheckpointID  string
 	CheckpointJob string
 	PodSnapshot   string
 	BoundContent  string
@@ -46,22 +46,24 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 	if opts.Timeout <= 0 {
 		return nil, fmt.Errorf("--timeout must be greater than zero")
 	}
+	snapshotName := strings.TrimSpace(opts.SnapshotName)
+	if snapshotName == "" {
+		return nil, fmt.Errorf("missing required flags: --snapshot")
+	}
+	if errs := validation.IsDNS1123Subdomain(snapshotName); len(errs) != 0 {
+		return nil, fmt.Errorf("--snapshot %q is invalid: %s", snapshotName, strings.Join(errs, "; "))
+	}
+	containerName := strings.TrimSpace(opts.Container)
+	if containerName == "" {
+		return nil, fmt.Errorf("missing required flags: --container")
+	}
 
 	pod, clientset, crClient, namespace, err := loadRunContext(opts.ManifestPath, opts.Namespace, opts.KubeContext)
 	if err != nil {
 		return nil, err
 	}
 
-	checkpointID := strings.TrimSpace(opts.CheckpointID)
-	if checkpointID == "" {
-		checkpointID = fmt.Sprintf("%s-%d", defaultGeneratedCheckpointIDPrefix, time.Now().UTC().UnixNano())
-	}
-	containers, err := reconcileTargetContainers(pod.Annotations, opts.Container, 1)
-	if err != nil {
-		return nil, err
-	}
-
-	checkpointJobName := pod.Name + "-checkpoint"
+	checkpointJobName := captureJobName(snapshotName)
 	job, err := snapshotprotocol.NewCheckpointJob(&corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels:      pod.Labels,
@@ -70,10 +72,8 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 		Spec: *pod.Spec.DeepCopy(),
 	}, snapshotprotocol.CheckpointJobOptions{
 		Namespace:       namespace,
-		TargetContainer: containers[0],
-		CheckpointID:    checkpointID,
-		ArtifactVersion: snapshotprotocol.DefaultCheckpointArtifactVersion,
-		SeccompProfile:  snapshotprotocol.DefaultSeccompLocalhostProfile,
+		TargetContainer: containerName,
+		SeccompProfile:  snapshotv1alpha1.DefaultSeccompLocalhostProfile,
 		Name:            checkpointJobName,
 		WrapLaunchJob:   opts.CudaCheckpointWrap,
 	})
@@ -104,8 +104,7 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 		return nil, err
 	}
 
-	snapName := podSnapshotName(checkpointJobName)
-	snap, err := createPodSnapshot(waitCtx, crClient, namespace, snapName, sourcePod.Name, sourcePod.UID, containers, checkpointID)
+	snap, err := createPodSnapshot(waitCtx, crClient, namespace, snapshotName, sourcePod.Name, sourcePod.UID, []string{containerName})
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +117,6 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 	res := &result{
 		Name:          pod.Name,
 		Namespace:     namespace,
-		CheckpointID:  checkpointID,
 		CheckpointJob: checkpointJobName,
 		PodSnapshot:   snap.Name,
 		Status:        "completed",
@@ -127,4 +125,13 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 		res.BoundContent = strings.TrimSpace(*snap.Status.BoundPodSnapshotContentName)
 	}
 	return res, nil
+}
+
+func captureJobName(snapshotName string) string {
+	const suffixLength = len("-capture-") + 5
+	prefix := snapshotName
+	if len(prefix) > 63-suffixLength {
+		prefix = strings.TrimRight(prefix[:63-suffixLength], "-.")
+	}
+	return prefix + "-capture-" + rand.String(5)
 }

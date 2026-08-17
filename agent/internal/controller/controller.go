@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -20,12 +21,14 @@ import (
 	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	corev1apply "k8s.io/client-go/applyconfigurations/core/v1"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/informers"
@@ -75,12 +78,16 @@ const (
 	containerResolveAttemptTimeout  = 1 * time.Second
 	restoreContainerResolveInterval = 50 * time.Millisecond
 	restoreContainerResolveTimeout  = 30 * time.Second
+	restoreFailureStatusTimeout     = 10 * time.Second
 	restoreFailedReason             = "RestoreFailed"
+	restoreStatusFieldManager       = "snapshot-agent-restore"
 
 	// snapshotContentResyncInterval re-drives every PodSnapshotContent work order so a
 	// not-yet-Ready source pod is re-checked for quiesce without a busy loop.
 	snapshotContentResyncInterval = 10 * time.Second
 )
+
+var restoreFailureStatusInterval = 250 * time.Millisecond
 
 // podSnapshotContentGVR is the cluster-scoped resource the capture informer watches.
 var podSnapshotContentGVR = snapshotv1alpha1.GroupVersion.WithResource("podsnapshotcontents")
@@ -156,23 +163,15 @@ func (w *NodeController) Run(ctx context.Context) error {
 	ctx = logr.NewContext(ctx, w.log)
 	w.log.Info("Starting snapshot node controller",
 		"node", w.config.NodeName,
-		"checkpoint_source_label", snapshotv1alpha1.CheckpointSourceLabel,
-		"checkpoint_id_label", snapshotv1alpha1.CheckpointIDLabel,
+		"restore_annotation", snapshotv1alpha1.RestoreFromAnnotation,
 	)
 
 	w.log.Info("Watching pods cluster-wide (all namespaces)")
 
 	var syncFuncs []cache.InformerSynced
 
-	// Restore pods carry a checkpoint ID but are not checkpoint sources.
-	restoreSel, err := labels.Parse(snapshotv1alpha1.CheckpointIDLabel + ",!" + snapshotv1alpha1.CheckpointSourceLabel)
-	if err != nil {
-		return fmt.Errorf("failed to build restore label selector: %w", err)
-	}
-	restoreSelector := restoreSel.String()
-
 	restoreFactoryOpts := []informers.SharedInformerOption{
-		informers.WithTweakListOptions(tweakNodePodListOptions(restoreSelector, w.config.NodeName)),
+		informers.WithTweakListOptions(tweakNodePodListOptions("", w.config.NodeName)),
 	}
 
 	restoreFactory := informers.NewSharedInformerFactoryWithOptions(
@@ -296,75 +295,156 @@ func tweakNodePodListOptions(labelSelector, nodeName string) func(*metav1.ListOp
 	}
 }
 
+type restoreArtifact struct {
+	SnapshotName  string
+	ContentName   string
+	ContentUID    string
+	ContainerName string
+	Path          string
+}
+
 func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Pod) {
-	if pod.Spec.NodeName != w.config.NodeName {
+	if pod.Spec.NodeName != w.config.NodeName || pod.DeletionTimestamp != nil ||
+		(pod.Status.Phase != corev1.PodPending && pod.Status.Phase != corev1.PodRunning) {
+		return
+	}
+	if _, requested := pod.Annotations[snapshotv1alpha1.RestoreFromAnnotation]; !requested {
+		return
+	}
+	if restoreConditionTerminal(pod) {
 		return
 	}
 
 	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
-
-	if pod.DeletionTimestamp != nil ||
-		(pod.Status.Phase != corev1.PodPending && pod.Status.Phase != corev1.PodRunning) {
-		return
-	}
-
-	checkpointID, ok := pod.Labels[snapshotv1alpha1.CheckpointIDLabel]
-	if !ok || checkpointID == "" {
-		w.log.Info("Restore pod has no checkpoint-id label", "pod", podKey)
-		return
-	}
-
-	if _, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, checkpointID, artifactVersionFromPod(pod)); err != nil {
-		w.log.Error(err, "Invalid checkpoint coordinates on restore pod", "pod", podKey)
-		return
-	}
-
-	targets, err := snapshotv1alpha1.TargetContainersFromAnnotations(pod.Annotations, 1, 0)
+	artifact, pendingReason, pendingMessage, err := w.resolveRestoreArtifact(ctx, pod)
 	if err != nil {
-		w.log.Error(err, "Restore pod missing target-containers annotation", "pod", podKey)
+		w.failRestorePod(ctx, pod, err)
 		return
 	}
-	for _, containerName := range targets {
-		if _, err := snapshotv1alpha1.RestoreStatusAnnotationKeysFor(containerName); err != nil {
-			w.log.Error(
-				err,
-				"Restore target container name cannot be used in restore status annotation key",
-				"pod", podKey,
-				"container", containerName,
-			)
-			return
+	if artifact == nil {
+		if applyErr := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, pendingReason, pendingMessage); applyErr != nil {
+			w.log.Error(applyErr, "Failed to apply pending restore condition", "pod", podKey)
+		}
+		return
+	}
+	if err := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, "RestoreInProgress", "Snapshot resolved; waiting for the target container"); err != nil {
+		w.log.Error(err, "Failed to apply in-progress restore condition", "pod", podKey)
+		return
+	}
+	w.maybeStartRestoreForContainer(ctx, pod, artifact, podKey)
+}
+
+// resolveRestoreArtifact turns the public PodSnapshot reference into the one
+// physical artifact owned by its bound PodSnapshotContent. A nil artifact with
+// no error is retryable eventual-consistency state; an error is terminal input
+// or binding corruption.
+func (w *NodeController) resolveRestoreArtifact(ctx context.Context, pod *corev1.Pod) (*restoreArtifact, string, string, error) {
+	snapshotName, err := snapshotv1alpha1.RestoreFromAnnotations(pod.Annotations)
+	if err != nil {
+		return nil, "", "", err
+	}
+	snapshot := &snapshotv1alpha1.PodSnapshot{}
+	key := client.ObjectKey{Namespace: pod.Namespace, Name: snapshotName}
+	if err := w.client.Get(ctx, key, snapshot); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, "SnapshotPending", fmt.Sprintf("Waiting for PodSnapshot %s", key.String()), nil
+		}
+		return nil, "SnapshotPending", fmt.Sprintf("Unable to read PodSnapshot %s: %v", key.String(), err), nil
+	}
+	if snapshotv1alpha1.IsPodSnapshotFailed(snapshot) {
+		cond := meta.FindStatusCondition(snapshot.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+		message := fmt.Sprintf("PodSnapshot %s failed", key.String())
+		if cond != nil && cond.Message != "" {
+			message += ": " + cond.Message
+		}
+		return nil, "", "", fmt.Errorf("%s", message)
+	}
+	if !snapshotv1alpha1.IsPodSnapshotSucceeded(snapshot) || snapshot.Status.BoundPodSnapshotContentName == nil ||
+		strings.TrimSpace(*snapshot.Status.BoundPodSnapshotContentName) == "" {
+		return nil, "SnapshotPending", fmt.Sprintf("Waiting for PodSnapshot %s to become Ready", key.String()), nil
+	}
+
+	contentName := strings.TrimSpace(*snapshot.Status.BoundPodSnapshotContentName)
+	content := &snapshotv1alpha1.PodSnapshotContent{}
+	if err := w.client.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, "SnapshotPending", fmt.Sprintf("Waiting for bound PodSnapshotContent %s", contentName), nil
+		}
+		return nil, "SnapshotPending", fmt.Sprintf("Unable to read bound PodSnapshotContent %s: %v", contentName, err), nil
+	}
+	ref := content.Spec.PodSnapshotRef
+	if ref.Namespace != snapshot.Namespace || ref.Name != snapshot.Name || ref.UID == "" || ref.UID != snapshot.UID {
+		return nil, "", "", fmt.Errorf("PodSnapshotContent %s has a stale backlink to %s/%s uid %q", content.Name, ref.Namespace, ref.Name, ref.UID)
+	}
+	if snapshotv1alpha1.IsPodSnapshotContentFailed(content) {
+		cond := meta.FindStatusCondition(content.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+		message := fmt.Sprintf("PodSnapshotContent %s failed", content.Name)
+		if cond != nil && cond.Message != "" {
+			message += ": " + cond.Message
+		}
+		return nil, "", "", fmt.Errorf("%s", message)
+	}
+	if !snapshotv1alpha1.IsPodSnapshotContentSucceeded(content) {
+		return nil, "SnapshotPending", fmt.Sprintf("Waiting for PodSnapshotContent %s to become Ready", content.Name), nil
+	}
+	contentUID := strings.TrimSpace(string(content.UID))
+	if contentUID == "" {
+		return nil, "", "", fmt.Errorf("PodSnapshotContent %s has no UID", content.Name)
+	}
+	containerName, err := singleTargetContainer(content)
+	if err != nil {
+		return nil, "", "", err
+	}
+	if !podSpecHasContainer(&pod.Spec, containerName) {
+		return nil, "", "", fmt.Errorf("restore pod has no container named %q captured by PodSnapshot %s", containerName, snapshotName)
+	}
+	path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, contentUID, containerName)
+	if err != nil {
+		return nil, "", "", err
+	}
+	ready, err := w.restoreCheckpointReady(w.log, fmt.Sprintf("%s/%s", pod.Namespace, pod.Name), path)
+	if err != nil {
+		return nil, "", "", err
+	}
+	if !ready {
+		return nil, "ArtifactPending", fmt.Sprintf("Waiting for artifact %s", path), nil
+	}
+	return &restoreArtifact{
+		SnapshotName:  snapshotName,
+		ContentName:   contentName,
+		ContentUID:    contentUID,
+		ContainerName: containerName,
+		Path:          path,
+	}, "", "", nil
+}
+
+func podSpecHasContainer(spec *corev1.PodSpec, name string) bool {
+	for i := range spec.Containers {
+		if spec.Containers[i].Name == name {
+			return true
 		}
 	}
-
-	for _, containerName := range targets {
-		w.maybeStartRestoreForContainer(ctx, pod, containerName, checkpointID, podKey)
-	}
+	return false
 }
 
 // maybeStartRestoreForContainer starts one restore worker per fresh container.
 // Falls back to polling the OCI runtime when pod.Status hasn't published the
 // ContainerID yet (the kubelet status patch can lag exec by 1-5 s).
-func (w *NodeController) maybeStartRestoreForContainer(
-	ctx context.Context,
-	pod *corev1.Pod,
-	containerName string,
-	checkpointID string,
-	podKey string,
-) {
-	if containerID := restoreContainerIDFromStatus(pod, containerName); containerID != "" {
-		w.startRestoreForContainer(ctx, pod, containerName, containerID, checkpointID, podKey)
+func (w *NodeController) maybeStartRestoreForContainer(ctx context.Context, pod *corev1.Pod, artifact *restoreArtifact, podKey string) {
+	if containerID := restoreContainerIDFromStatus(pod, artifact.ContainerName); containerID != "" {
+		w.startRestoreForContainer(ctx, pod, artifact, containerID, podKey)
 		return
 	}
 
-	resolveKey := fmt.Sprintf("%s/%s/resolve", podKey, containerName)
+	resolveKey := fmt.Sprintf("%s/%s/resolve", podKey, artifact.ContainerName)
 	if !w.tryAcquire(resolveKey) {
 		return
 	}
 	w.log.V(1).Info("Restore pod has no running container in Kubernetes status yet; polling node runtime",
 		"pod", podKey,
-		"container", containerName,
+		"container", artifact.ContainerName,
 	)
-	go w.pollForContainerID(ctx, pod.DeepCopy(), containerName, checkpointID, podKey, resolveKey)
+	go w.pollForContainerID(ctx, pod.DeepCopy(), artifact, podKey, resolveKey)
 }
 
 func restoreContainerIDFromStatus(pod *corev1.Pod, containerName string) string {
@@ -407,7 +487,8 @@ func (w *NodeController) refreshRestorePodForStart(ctx context.Context, pod *cor
 func (w *NodeController) pollForContainerID(
 	ctx context.Context,
 	pod *corev1.Pod,
-	containerName, checkpointID, podKey, resolveKey string,
+	artifact *restoreArtifact,
+	podKey, resolveKey string,
 ) {
 	defer w.release(resolveKey)
 	deadlineAt := time.Now().Add(restoreContainerResolveTimeout)
@@ -417,19 +498,19 @@ func (w *NodeController) pollForContainerID(
 	defer tick.Stop()
 	for {
 		resolveCtx, cancel := restoreContainerResolveAttemptContext(ctx, deadlineAt)
-		containerID, err := w.runtime.ResolveContainerIDByPod(resolveCtx, pod.Name, pod.Namespace, containerName)
+		containerID, err := w.runtime.ResolveContainerIDByPod(resolveCtx, pod.Name, pod.Namespace, artifact.ContainerName)
 		cancel()
 		if err == nil && containerID != "" {
-			livePod, ok := w.refreshRestorePodForStart(ctx, pod, podKey, containerName)
+			livePod, ok := w.refreshRestorePodForStart(ctx, pod, podKey, artifact.ContainerName)
 			if !ok {
 				return
 			}
 			w.log.V(1).Info("Resolved restore container via node runtime",
 				"pod", podKey,
-				"container", containerName,
+				"container", artifact.ContainerName,
 				"container_id", containerID,
 			)
-			w.startRestoreForContainer(ctx, livePod, containerName, containerID, checkpointID, podKey)
+			w.startRestoreForContainer(ctx, livePod, artifact, containerID, podKey)
 			return
 		}
 
@@ -437,7 +518,7 @@ func (w *NodeController) pollForContainerID(
 		case <-deadline.C:
 			w.log.V(1).Info("Timed out polling node runtime for restore container",
 				"pod", podKey,
-				"container", containerName,
+				"container", artifact.ContainerName,
 			)
 			return
 		case <-ctx.Done():
@@ -458,44 +539,18 @@ func restoreContainerResolveAttemptContext(ctx context.Context, deadlineAt time.
 func (w *NodeController) startRestoreForContainer(
 	ctx context.Context,
 	pod *corev1.Pod,
-	containerName string,
+	artifact *restoreArtifact,
 	containerID string,
-	checkpointID string,
 	podKey string,
 ) {
-	annotationKeys, err := snapshotv1alpha1.RestoreStatusAnnotationKeysFor(containerName)
-	if err != nil {
-		w.log.Error(err, "Restore target container name cannot be used in restore status annotation key", "pod", podKey, "container", containerName)
-		return
-	}
-	annotationStatus := pod.Annotations[annotationKeys.Status]
-	annotationContainerID := pod.Annotations[annotationKeys.ContainerID]
-	if annotationContainerID == containerID && (annotationStatus == snapshotv1alpha1.RestoreStatusCompleted || annotationStatus == snapshotv1alpha1.RestoreStatusFailed) {
-		return
-	}
 	if w.config.CRIU.TcpEstablished && pod.Status.PodIP == "" {
 		w.log.V(1).Info("Restore pod has no PodIP yet; waiting before TCP-established restore",
 			"pod", podKey,
-			"container", containerName,
+			"container", artifact.ContainerName,
 		)
 		return
 	}
-
-	artifactPath, err := w.artifactPathForPod(pod, checkpointID)
-	if err != nil {
-		w.log.Error(err, "Restore pod names an unusable checkpoint artifact", "pod", podKey, "checkpoint_id", checkpointID)
-		return
-	}
-	checkpointReady, err := w.restoreCheckpointReady(w.log, podKey, checkpointID, artifactPath)
-	if err != nil {
-		w.log.Error(err, "Restore checkpoint path is invalid", "pod", podKey, "checkpoint_id", checkpointID, "checkpoint_location", artifactPath)
-		return
-	}
-	if !checkpointReady {
-		return
-	}
-
-	restoreAttemptKey := fmt.Sprintf("%s/%s/%s", podKey, containerName, containerID)
+	restoreAttemptKey := fmt.Sprintf("%s/%s/%s", podKey, artifact.ContainerName, containerID)
 	if !w.tryAcquire(restoreAttemptKey) {
 		return
 	}
@@ -503,14 +558,15 @@ func (w *NodeController) startRestoreForContainer(
 	startedAt := time.Now()
 	w.log.Info("Restore target detected, triggering external restore",
 		"pod", podKey,
-		"checkpoint_id", checkpointID,
-		"container", containerName,
+		"snapshot", artifact.SnapshotName,
+		"content_uid", artifact.ContentUID,
+		"container", artifact.ContainerName,
 	)
-	emitPodEvent(ctx, w.clientset, w.log, pod, "snapshot", corev1.EventTypeNormal, "RestoreRequested", fmt.Sprintf("Restore requested from checkpoint %s for container %s", checkpointID, containerName))
+	emitPodEvent(ctx, w.clientset, w.log, pod, "snapshot", corev1.EventTypeNormal, "RestoreRequested", fmt.Sprintf("Restore requested from PodSnapshot %s for container %s", artifact.SnapshotName, artifact.ContainerName))
 
 	go func() {
-		if err := w.runRestore(ctx, pod, containerName, containerID, checkpointID, restoreAttemptKey, startedAt); err != nil {
-			opLog := w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID, "container", containerName)
+		if err := w.runRestore(ctx, pod, artifact, containerID, restoreAttemptKey, startedAt); err != nil {
+			opLog := w.log.WithValues("pod", podKey, "snapshot", artifact.SnapshotName, "container", artifact.ContainerName)
 			opLog.Error(err, "Restore controller worker failed")
 			emitPodEvent(ctx, w.clientset, opLog, pod, "snapshot", corev1.EventTypeWarning, "RestoreWorkerFailed", err.Error())
 		}
@@ -518,7 +574,7 @@ func (w *NodeController) startRestoreForContainer(
 }
 
 // runRestore runs the full restore workflow for one target container:
-//  1. Annotate the pod with restore in_progress
+//  1. Apply Restored=False/RestoreInProgress to pod status
 //  2. Call executor.Restore (inspect placeholder → nsrestore inside namespace).
 //     nsrestore clears any stale restore-complete sentinel on the pod control
 //     volume before CRIU, so a prior incarnation cannot release the restored
@@ -526,14 +582,10 @@ func (w *NodeController) startRestoreForContainer(
 //  3. Write a restore-complete sentinel: the CRIU-restored process resumes
 //     inside the polling loop that waits on this file, exits quiescence,
 //     and resumes the engine
-//  4. Annotate the pod with restore completed
-func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, containerName, containerID, checkpointID string, restoreAttemptKey string, startedAt time.Time) error {
-	releaseOnExit := true
-	defer func() {
-		if releaseOnExit {
-			w.release(restoreAttemptKey)
-		}
-	}()
+//  4. Apply Restored=True/RestoreSucceeded to pod status
+func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, artifact *restoreArtifact, containerID, restoreAttemptKey string, startedAt time.Time) error {
+	op := w.newRestoreOperation(pod, artifact, containerID, restoreAttemptKey, startedAt)
+	defer op.release()
 
 	restoreCtx := ctx
 	if timeout := w.config.Restore.RestoreTimeout(); timeout > 0 {
@@ -542,80 +594,237 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		defer cancel()
 	}
 
-	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
-	log := w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID, "container_id", containerID)
-	setRestoreStatus := func(value string) error {
-		annotations, err := snapshotv1alpha1.RestoreStatusAnnotations(containerName, value, containerID)
-		if err != nil {
-			return err
-		}
-		if err := annotatePod(ctx, w.clientset, log, pod, annotations); err != nil {
-			if value == snapshotv1alpha1.RestoreStatusCompleted || value == snapshotv1alpha1.RestoreStatusFailed {
-				releaseOnExit = false
-				return fmt.Errorf("failed to persist terminal restore status %q: %w", value, err)
-			}
-			return fmt.Errorf("failed to update restore status %q: %w", value, err)
-		}
-		if value == snapshotv1alpha1.RestoreStatusCompleted || value == snapshotv1alpha1.RestoreStatusFailed {
-			releaseOnExit = false
-		}
-		return nil
+	ready, err := op.beginRestore(ctx)
+	if err != nil || !ready {
+		return err
 	}
-
-	if err := setRestoreStatus(snapshotv1alpha1.RestoreStatusInProgress); err != nil {
-		return fmt.Errorf("failed to annotate pod with restore in_progress: %w", err)
-	}
-
-	req := executor.RestoreRequest{
-		CheckpointID:    checkpointID,
-		ArtifactVersion: artifactVersionFromPod(pod),
-		BasePath:        w.config.Storage.BasePath,
-		ContainerID:     containerID,
-		StartedAt:       startedAt,
-		PodName:         pod.Name,
-		PodNamespace:    pod.Namespace,
-		TargetPodIP:     pod.Status.PodIP,
-		ContainerName:   containerName,
-		Clientset:       w.clientset,
-	}
-	placeholderHostPID, err := w.restoreFn(restoreCtx, w.runtime, log, req, w.injector)
+	placeholderHostPID, err := op.executeRestore(restoreCtx)
 	if err != nil {
 		var cleanupErr *executor.RestoreCleanupError
 		if !errors.As(err, &cleanupErr) {
-			log.Error(err, "External restore failed")
-			emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, restoreFailedReason, err.Error())
-			if statusErr := setRestoreStatus(snapshotv1alpha1.RestoreStatusFailed); statusErr != nil {
-				return statusErr
-			}
-			placeholderHostPID, _, pidErr := w.runtime.ResolveContainer(ctx, containerID)
-			if pidErr != nil {
-				return fmt.Errorf("restore failed and placeholder PID could not be resolved: %w", pidErr)
-			}
-			if killErr := snapshotruntime.SendSignalToPID(log, placeholderHostPID, syscall.SIGKILL, "restore failed"); killErr != nil {
-				return fmt.Errorf("restore failed and placeholder could not be killed: %w", killErr)
-			}
-			return nil
+			return op.failRestore(ctx, err)
 		}
-		log.Error(cleanupErr, "Restore completed with cleanup errors")
-		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreCleanupFailed", cleanupErr.Error())
+		op.log.Error(cleanupErr, "Restore completed with cleanup errors")
+		emitPodEvent(ctx, w.clientset, op.log, pod, "snapshot", corev1.EventTypeWarning, "RestoreCleanupFailed", cleanupErr.Error())
 	}
+	return op.completeRestore(ctx, placeholderHostPID)
+}
 
+type restoreOperation struct {
+	controller        *NodeController
+	pod               *corev1.Pod
+	artifact          *restoreArtifact
+	containerID       string
+	restoreAttemptKey string
+	startedAt         time.Time
+	log               logr.Logger
+	releaseOnExit     bool
+}
+
+func (w *NodeController) newRestoreOperation(
+	pod *corev1.Pod,
+	artifact *restoreArtifact,
+	containerID, restoreAttemptKey string,
+	startedAt time.Time,
+) *restoreOperation {
+	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+	return &restoreOperation{
+		controller:        w,
+		pod:               pod,
+		artifact:          artifact,
+		containerID:       containerID,
+		restoreAttemptKey: restoreAttemptKey,
+		startedAt:         startedAt,
+		log:               w.log.WithValues("pod", podKey, "snapshot", artifact.SnapshotName, "content_uid", artifact.ContentUID, "container_id", containerID),
+		releaseOnExit:     true,
+	}
+}
+
+func (op *restoreOperation) release() {
+	if op.releaseOnExit {
+		op.controller.release(op.restoreAttemptKey)
+	}
+}
+
+func (op *restoreOperation) beginRestore(ctx context.Context) (bool, error) {
+	podKey := fmt.Sprintf("%s/%s", op.pod.Namespace, op.pod.Name)
+	ready, err := op.controller.restoreCheckpointReady(op.log, podKey, op.artifact.Path)
+	if err != nil {
+		return false, fmt.Errorf("validate checkpoint artifact path: %w", err)
+	}
+	if !ready {
+		return false, nil
+	}
+	if err := op.setRestoredCondition(ctx, corev1.ConditionFalse, "RestoreInProgress", "Restoring captured process state"); err != nil {
+		return false, fmt.Errorf("apply restore in-progress condition: %w", err)
+	}
+	return true, nil
+}
+
+func (op *restoreOperation) executeRestore(ctx context.Context) (int, error) {
+	w := op.controller
+	req := executor.RestoreRequest{
+		ContentUID:    op.artifact.ContentUID,
+		BasePath:      w.config.Storage.BasePath,
+		ContainerID:   op.containerID,
+		StartedAt:     op.startedAt,
+		PodName:       op.pod.Name,
+		PodNamespace:  op.pod.Namespace,
+		TargetPodIP:   op.pod.Status.PodIP,
+		ContainerName: op.artifact.ContainerName,
+		Clientset:     w.clientset,
+	}
+	return w.restoreFn(ctx, w.runtime, op.log, req, w.injector)
+}
+
+func (op *restoreOperation) failRestore(ctx context.Context, restoreErr error) error {
+	w := op.controller
+	op.log.Error(restoreErr, "External restore failed")
+	reason := restoreFailedReason
+	emitPodEvent(ctx, w.clientset, op.log, op.pod, "snapshot", corev1.EventTypeWarning, reason, restoreErr.Error())
+	if err := op.setRestoredCondition(ctx, corev1.ConditionFalse, reason, restoreErr.Error()); err != nil {
+		return fmt.Errorf("persist failed restore condition: %w", err)
+	}
+	// Re-resolve because restore may fail before discovering the placeholder PID.
+	placeholderHostPID, _, err := w.runtime.ResolveContainer(ctx, op.containerID)
+	if err != nil {
+		return fmt.Errorf("restore failed and placeholder PID could not be resolved: %w", err)
+	}
+	if err := snapshotruntime.SendSignalToPID(op.log, placeholderHostPID, syscall.SIGKILL, "restore failed"); err != nil {
+		return fmt.Errorf("restore failed and placeholder could not be killed: %w", err)
+	}
+	if err := w.convergeRestoredFailureCondition(ctx, op.pod, op.artifact.ContainerName, reason, restoreErr); err != nil {
+		return fmt.Errorf("re-persist failed restore condition after stopping placeholder: %w", err)
+	}
+	return nil
+}
+
+func (op *restoreOperation) completeRestore(ctx context.Context, placeholderHostPID int) error {
+	w := op.controller
 	// Any PID inside the container mount namespace reaches the control
 	// volume through /host/proc/<pid>/root.
 	if err := w.writeControlSentinelFn(placeholderHostPID, snapshotv1alpha1.RestoreCompleteFile); err != nil {
-		log.Error(err, "Failed to write restore-complete sentinel")
-		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, restoreFailedReason, err.Error())
-		if statusErr := setRestoreStatus(snapshotv1alpha1.RestoreStatusFailed); statusErr != nil {
-			return statusErr
+		op.log.Error(err, "Failed to write restore-complete sentinel")
+		emitPodEvent(ctx, w.clientset, op.log, op.pod, "snapshot", corev1.EventTypeWarning, restoreFailedReason, err.Error())
+		if statusErr := op.setRestoredCondition(ctx, corev1.ConditionFalse, restoreFailedReason, err.Error()); statusErr != nil {
+			return fmt.Errorf("persist failed restore condition: %w", statusErr)
 		}
-		if killErr := snapshotruntime.SendSignalToPID(log, placeholderHostPID, syscall.SIGKILL, "restore sentinel failed"); killErr != nil {
-			log.Error(killErr, "Failed to kill placeholder after restore sentinel failure")
+		if killErr := snapshotruntime.SendSignalToPID(op.log, placeholderHostPID, syscall.SIGKILL, "restore sentinel failed"); killErr != nil {
+			op.log.Error(killErr, "Failed to kill placeholder after restore sentinel failure")
+		}
+		if statusErr := w.convergeRestoredFailureCondition(ctx, op.pod, op.artifact.ContainerName, restoreFailedReason, err); statusErr != nil {
+			return fmt.Errorf("re-persist failed restore condition after restore sentinel failure: %w", statusErr)
 		}
 		return fmt.Errorf("failed to write restore-complete sentinel: %w", err)
 	}
 
-	emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeNormal, "RestoreSucceeded", fmt.Sprintf("Restore completed from checkpoint %s", checkpointID))
-	return setRestoreStatus(snapshotv1alpha1.RestoreStatusCompleted)
+	emitPodEvent(ctx, w.clientset, op.log, op.pod, "snapshot", corev1.EventTypeNormal, "RestoreSucceeded", fmt.Sprintf("Restore completed from PodSnapshot %s", op.artifact.SnapshotName))
+	return op.setRestoredCondition(ctx, corev1.ConditionTrue, "RestoreSucceeded", fmt.Sprintf("Restored from PodSnapshot %s", op.artifact.SnapshotName))
+}
+
+func (op *restoreOperation) setRestoredCondition(ctx context.Context, status corev1.ConditionStatus, reason, message string) error {
+	if terminalRestoredCondition(status, reason) {
+		// Keep the attempt key for this controller lifetime so a stale runtime
+		// resolver cannot restart a terminal restore, including when the status
+		// write itself fails.
+		op.releaseOnExit = false
+	}
+	return op.controller.applyRestoredCondition(ctx, op.pod, status, reason, message)
+}
+
+func restoreConditionTerminal(pod *corev1.Pod) bool {
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type != corev1.PodConditionType(snapshotv1alpha1.RestoredCondition) {
+			continue
+		}
+		return terminalRestoredCondition(condition.Status, condition.Reason)
+	}
+	return false
+}
+
+func terminalRestoredCondition(status corev1.ConditionStatus, reason string) bool {
+	return status == corev1.ConditionTrue || reason == restoreFailedReason
+}
+
+// applyRestoredCondition uses server-side apply against the status subresource.
+// Pod conditions are an associative list keyed by type, so this field manager
+// owns only Restored and never replaces kubelet-owned conditions.
+func (w *NodeController) applyRestoredCondition(ctx context.Context, pod *corev1.Pod, status corev1.ConditionStatus, reason, message string) error {
+	transition := metav1.Now()
+	for _, existing := range pod.Status.Conditions {
+		if existing.Type == corev1.PodConditionType(snapshotv1alpha1.RestoredCondition) &&
+			existing.Status == status && !existing.LastTransitionTime.IsZero() {
+			transition = existing.LastTransitionTime
+			break
+		}
+	}
+	condition := corev1apply.PodCondition().
+		WithType(corev1.PodConditionType(snapshotv1alpha1.RestoredCondition)).
+		WithStatus(status).
+		WithReason(reason).
+		WithMessage(message).
+		WithLastTransitionTime(transition)
+	configuration := corev1apply.Pod(pod.Name, pod.Namespace).
+		WithStatus(corev1apply.PodStatus().WithConditions(condition))
+	_, err := w.clientset.CoreV1().Pods(pod.Namespace).ApplyStatus(ctx, configuration, metav1.ApplyOptions{
+		FieldManager: restoreStatusFieldManager,
+	})
+	return err
+}
+
+// convergeRestoredFailureCondition re-applies the terminal condition after the
+// placeholder exits. Kubelet publishes a final container status in response to
+// SIGKILL and that concurrent status update can race the first server-side
+// apply above. Waiting for a non-running container and applying once more makes
+// the agent-owned Restored condition converge after the runtime-owned fields.
+func (w *NodeController) convergeRestoredFailureCondition(ctx context.Context, pod *corev1.Pod, containerName, reason string, cause error) error {
+	settleCtx, cancel := context.WithTimeout(ctx, restoreFailureStatusTimeout)
+	defer cancel()
+
+	ticker := time.NewTicker(restoreFailureStatusInterval)
+	defer ticker.Stop()
+
+	var lastApplyErr error
+	for {
+		livePod, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(settleCtx, pod.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err == nil {
+			lastApplyErr = w.applyRestoredCondition(settleCtx, livePod, corev1.ConditionFalse, reason, cause.Error())
+			if lastApplyErr == nil && !containerIsRunning(livePod, containerName) {
+				return nil
+			}
+		}
+
+		select {
+		case <-settleCtx.Done():
+			if lastApplyErr != nil {
+				return lastApplyErr
+			}
+			return settleCtx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func containerIsRunning(pod *corev1.Pod, containerName string) bool {
+	for i := range pod.Status.ContainerStatuses {
+		status := &pod.Status.ContainerStatuses[i]
+		if status.Name == containerName {
+			return status.State.Running != nil
+		}
+	}
+	return false
+}
+
+func (w *NodeController) failRestorePod(ctx context.Context, pod *corev1.Pod, cause error) {
+	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+	w.log.Error(cause, "Restore request failed", "pod", podKey)
+	emitPodEvent(ctx, w.clientset, w.log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", cause.Error())
+	if err := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, "RestoreFailed", cause.Error()); err != nil {
+		w.log.Error(err, "Failed to apply terminal restore condition", "pod", podKey)
+	}
 }
 
 func (w *NodeController) tryAcquire(podKey string) bool {
@@ -692,25 +901,11 @@ func chooseActiveContent(objs []interface{}) string {
 	return chosen.Name
 }
 
-func artifactVersionFromPod(pod *corev1.Pod) string {
-	version := pod.Annotations[snapshotv1alpha1.CheckpointArtifactVersionAnnotation]
-	if version == "" {
-		return snapshotv1alpha1.DefaultCheckpointArtifactVersion
-	}
-	return version
-}
-
-// artifactPathForPod resolves an artifact from agent-owned configuration. Pods
-// select only an ID and version; they never supply an agent-visible base path.
-func (w *NodeController) artifactPathForPod(pod *corev1.Pod, checkpointID string) (string, error) {
-	return nsmount.ResolveArtifactPath(w.config.Storage.BasePath, checkpointID, artifactVersionFromPod(pod))
-}
-
-func (w *NodeController) restoreCheckpointReady(log logr.Logger, podKey, checkpointID, checkpointLocation string) (bool, error) {
+func (w *NodeController) restoreCheckpointReady(log logr.Logger, podKey, checkpointLocation string) (bool, error) {
 	info, err := os.Stat(checkpointLocation)
 	if err != nil {
 		if os.IsNotExist(err) {
-			log.V(1).Info("Checkpoint not ready on disk, skipping restore", "pod", podKey, "checkpoint_id", checkpointID, "checkpoint_location", checkpointLocation)
+			log.V(1).Info("Checkpoint not ready on disk, skipping restore", "pod", podKey, "checkpoint_location", checkpointLocation)
 			return false, nil
 		}
 		return false, fmt.Errorf("stat checkpoint location %s: %w", checkpointLocation, err)

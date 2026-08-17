@@ -5,14 +5,13 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	snapshotprotocol "github.com/ai-dynamo/snapshot/operator/internal/protocol"
@@ -20,132 +19,59 @@ import (
 
 type restoreOptions struct {
 	ManifestPath string
-	PodName      string
 	Namespace    string
 	KubeContext  string
-	CheckpointID string
-	Containers   string
+	SnapshotName string
 }
 
 func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
-	createPodFromManifest := strings.TrimSpace(opts.ManifestPath) != ""
-	targetExistingPod := strings.TrimSpace(opts.PodName) != ""
-	if createPodFromManifest == targetExistingPod {
-		return nil, fmt.Errorf("restore requires exactly one of --manifest or --pod")
+	if strings.TrimSpace(opts.ManifestPath) == "" || strings.TrimSpace(opts.SnapshotName) == "" {
+		return nil, fmt.Errorf("restore requires --manifest and --snapshot")
 	}
-	if strings.TrimSpace(opts.CheckpointID) == "" {
-		return nil, fmt.Errorf("missing required flags: --checkpoint-id")
-	}
-
-	checkpointID := strings.TrimSpace(opts.CheckpointID)
-	clientset, _, currentNamespace, err := loadClientset(opts.KubeContext)
+	pod, clientset, crClient, namespace, err := loadRunContext(opts.ManifestPath, opts.Namespace, opts.KubeContext)
 	if err != nil {
 		return nil, err
 	}
-	namespace := currentNamespace
-	if namespace == "" {
-		namespace = corev1.NamespaceDefault
+	snapshotName := strings.TrimSpace(opts.SnapshotName)
+	snapshot := &snapshotv1alpha1.PodSnapshot{}
+	if err := crClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: snapshotName}, snapshot); err != nil {
+		return nil, fmt.Errorf("get PodSnapshot %s/%s: %w", namespace, snapshotName, err)
 	}
-	if strings.TrimSpace(opts.Namespace) != "" {
-		namespace = strings.TrimSpace(opts.Namespace)
-	}
-
-	podName := strings.TrimSpace(opts.PodName)
-	pod := &corev1.Pod{}
-	if createPodFromManifest {
-		pod, err = loadPod(opts.ManifestPath)
-		if err != nil {
-			return nil, err
-		}
-		if strings.TrimSpace(pod.Namespace) != "" && strings.TrimSpace(opts.Namespace) == "" {
-			namespace = strings.TrimSpace(pod.Namespace)
-		}
-		podName = pod.Name
+	containers := snapshot.Spec.Source.PodRef.Containers
+	if len(containers) != 1 || strings.TrimSpace(containers[0]) == "" {
+		return nil, fmt.Errorf("PodSnapshot %s/%s must capture exactly one container", namespace, snapshotName)
 	}
 
-	if createPodFromManifest {
-		// Stamp (or validate) the required snapshot-target-containers
-		// annotation on the manifest before handing it to the protocol.
-		targetContainers, err := reconcileTargetContainers(pod.Annotations, opts.Containers, 0)
-		if err != nil {
-			return nil, err
-		}
-		annotations := map[string]string{}
-		for k, v := range pod.Annotations {
-			annotations[k] = v
-		}
-		annotations[snapshotv1alpha1.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers(targetContainers)
-
-		restorePod, err := snapshotprotocol.NewRestorePod(&corev1.Pod{
-			TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
-			ObjectMeta: metav1.ObjectMeta{
-				Name:         pod.Name,
-				GenerateName: pod.GenerateName,
-				Labels:       pod.Labels,
-				Annotations:  annotations,
-			},
-			Spec: *pod.Spec.DeepCopy(),
-		}, snapshotprotocol.PodOptions{
-			Namespace:       namespace,
-			CheckpointID:    checkpointID,
-			ArtifactVersion: snapshotv1alpha1.DefaultCheckpointArtifactVersion,
-			SeccompProfile:  snapshotv1alpha1.DefaultSeccompLocalhostProfile,
-		})
-		if err != nil {
-			return nil, err
-		}
-		restorePod, err = clientset.CoreV1().Pods(namespace).Create(ctx, restorePod, metav1.CreateOptions{})
-		if apierrors.IsAlreadyExists(err) {
-			return nil, fmt.Errorf("restore pod %s/%s already exists", namespace, pod.Name)
-		}
-		if err != nil {
-			return nil, err
-		}
-		podName = restorePod.Name
-	} else {
-		pod, err = clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
-		if err != nil {
-			return nil, fmt.Errorf("get restore target pod %s/%s: %w", namespace, podName, err)
-		}
-		if len(pod.Spec.Containers) == 0 {
-			return nil, fmt.Errorf("restore target pod %s/%s has no containers", namespace, podName)
-		}
-		targetContainers, err := reconcileTargetContainers(pod.Annotations, opts.Containers, 0)
-		if err != nil {
-			return nil, err
-		}
-		labels := map[string]string{}
-		for key, value := range pod.Labels {
-			labels[key] = value
-		}
-		annotations := map[string]string{}
-		for key, value := range pod.Annotations {
-			annotations[key] = value
-		}
-		snapshotv1alpha1.ApplyRestoreTargetMetadata(labels, annotations, true, checkpointID, snapshotv1alpha1.DefaultCheckpointArtifactVersion)
-		annotations[snapshotv1alpha1.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers(targetContainers)
-		if err := snapshotprotocol.ValidateRestorePodSpec(&pod.Spec, annotations, snapshotv1alpha1.DefaultSeccompLocalhostProfile); err != nil {
-			return nil, fmt.Errorf("restore target pod %s/%s is not snapshot-compatible: %w", namespace, podName, err)
-		}
-		patch, err := json.Marshal(map[string]any{
-			"metadata": map[string]any{
-				"labels":      labels,
-				"annotations": annotations,
-			},
-		})
-		if err != nil {
-			return nil, fmt.Errorf("encode restore target metadata patch: %w", err)
-		}
-		if _, err := clientset.CoreV1().Pods(namespace).Patch(ctx, podName, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
-			return nil, fmt.Errorf("patch restore target pod %s/%s: %w", namespace, podName, err)
-		}
+	restorePod, err := snapshotprotocol.NewRestorePod(&corev1.Pod{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:         pod.Name,
+			GenerateName: pod.GenerateName,
+			Labels:       pod.Labels,
+			Annotations:  pod.Annotations,
+		},
+		Spec: *pod.Spec.DeepCopy(),
+	}, snapshotprotocol.PodOptions{
+		Namespace:       namespace,
+		SnapshotName:    snapshotName,
+		TargetContainer: containers[0],
+		SeccompProfile:  snapshotv1alpha1.DefaultSeccompLocalhostProfile,
+	})
+	if err != nil {
+		return nil, err
 	}
-
+	restorePod, err = clientset.CoreV1().Pods(namespace).Create(ctx, restorePod, metav1.CreateOptions{})
+	if apierrors.IsAlreadyExists(err) {
+		return nil, fmt.Errorf("restore pod %s/%s already exists", namespace, pod.Name)
+	}
+	if err != nil {
+		return nil, err
+	}
 	return &result{
-		Name:         podName,
-		Namespace:    namespace,
-		CheckpointID: checkpointID,
-		RestorePod:   podName,
-		Status:       "requested",
+		Name:        restorePod.Name,
+		Namespace:   namespace,
+		PodSnapshot: snapshotName,
+		RestorePod:  restorePod.Name,
+		Status:      "requested",
 	}, nil
 }

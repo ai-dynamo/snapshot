@@ -17,7 +17,7 @@ func makeArtifactTree(t *testing.T) (string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	artifact := filepath.Join(base, "checkpoint-123", "versions", "1")
+	artifact := filepath.Join(base, "artifacts", "content-uid-123", "containers", "main")
 	if err := os.MkdirAll(artifact, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -26,7 +26,7 @@ func makeArtifactTree(t *testing.T) (string, string) {
 
 func TestResolveArtifact(t *testing.T) {
 	base, artifact := makeArtifactTree(t)
-	got, err := ResolveArtifact(base, "checkpoint-123", "1")
+	got, err := ResolveArtifact(base, "content-uid-123", "main")
 	if err != nil || got != artifact {
 		t.Fatalf("ResolveArtifact() = %q, %v; want %q", got, err, artifact)
 	}
@@ -38,7 +38,10 @@ func TestResolveArtifact(t *testing.T) {
 		{"symlink", func(t *testing.T) string {
 			base := t.TempDir()
 			outside, _ := makeArtifactTree(t)
-			if err := os.Symlink(filepath.Join(outside, "checkpoint-123"), filepath.Join(base, "checkpoint-123")); err != nil {
+			if err := os.MkdirAll(filepath.Join(base, "artifacts"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(outside, "artifacts", "content-uid-123"), filepath.Join(base, "artifacts", "content-uid-123")); err != nil {
 				t.Fatal(err)
 			}
 			return base
@@ -46,7 +49,7 @@ func TestResolveArtifact(t *testing.T) {
 		{"missing", func(t *testing.T) string { return t.TempDir() }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := ResolveArtifact(tc.setup(t), "checkpoint-123", "1"); err == nil {
+			if _, err := ResolveArtifact(tc.setup(t), "content-uid-123", "main"); err == nil {
 				t.Fatal("expected artifact validation error")
 			}
 		})
