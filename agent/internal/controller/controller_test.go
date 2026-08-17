@@ -74,7 +74,7 @@ func (noopInjector) Mount(_ context.Context, _ int, _, _ string) (nsmount.MountP
 type noopMountPoint struct{}
 
 func (noopMountPoint) Path(name string) (string, error) { return "/noop/" + name, nil }
-func (noopMountPoint) Unmount(_ context.Context) error  { return nil }
+func (noopMountPoint) Unmount() error                   { return nil }
 func (noopMountPoint) NsFd() *os.File                   { return nil }
 
 var _ executor.Mounter = noopInjector{}
