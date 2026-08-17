@@ -64,18 +64,12 @@ func makeSnapshotForReconcile() *snapshotv1alpha1.PodSnapshot {
 	}
 }
 
-// scheduledPod builds a scheduled source pod named "worker-0" on node "node-a". The checkpoint ID
-// lives on the pod label (the reconciler reads it from there); pass "" to omit the label and exercise
-// the missing-id path.
-func scheduledPod(checkpointID string) *corev1.Pod {
-	pod := &corev1.Pod{
+// scheduledPod builds a scheduled source pod named "worker-0" on node "node-a".
+func scheduledPod(_ string) *corev1.Pod {
+	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid-9")},
 		Spec:       corev1.PodSpec{NodeName: "node-a"},
 	}
-	if checkpointID != "" {
-		pod.Labels = map[string]string{snapshotv1alpha1.CheckpointIDLabel: checkpointID}
-	}
-	return pod
 }
 
 func reconcileSnapshot(t *testing.T, r *PodSnapshotReconciler, name string) ctrl.Result {
@@ -121,8 +115,7 @@ func TestSnapshotReconciler_BuildsWorkOrderAndBinds(t *testing.T) {
 	assert.Equal(t, types.UID("pod-uid-9"), content.Spec.Source.PodRef.UID)
 	assert.Equal(t, "node-a", content.Spec.Source.NodeName)
 	assert.Equal(t, "node-a", content.Labels[snapshotv1alpha1.SnapshotNodeLabel])
-	assert.NotContains(t, content.Labels, snapshotv1alpha1.CheckpointIDLabel)
-	assert.NotContains(t, content.Annotations, snapshotv1alpha1.CheckpointArtifactVersionAnnotation)
+	assert.Empty(t, snapshotv1alpha1.SnapshotAnnotations(content.Annotations))
 	assert.Empty(t, content.Finalizers)
 	assert.Equal(t, "inference", content.Spec.PodSnapshotRef.Namespace)
 	assert.Equal(t, snap.Name, content.Spec.PodSnapshotRef.Name)
@@ -166,6 +159,26 @@ func TestSnapshotReconciler_StalePodReferenceFails(t *testing.T) {
 	cond := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
 	require.NotNil(t, cond)
 	assert.Equal(t, "StalePodReference", cond.Reason)
+
+	var contents snapshotv1alpha1.PodSnapshotContentList
+	require.NoError(t, r.List(context.Background(), &contents))
+	assert.Empty(t, contents.Items)
+}
+
+func TestSnapshotReconciler_SnapshotAnnotationOnSourceFails(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	snap := makeSnapshotForReconcile()
+	pod := scheduledPod("")
+	pod.Annotations = map[string]string{"nvidia.com/snapshot-target-containers": "main"}
+	r := makeSnapshotReconciler(s, snap, pod)
+
+	reconcileSnapshot(t, r, snap.Name)
+
+	updated := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
+	cond := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, "UnexpectedSnapshotAnnotation", cond.Reason)
 
 	var contents snapshotv1alpha1.PodSnapshotContentList
 	require.NoError(t, r.List(context.Background(), &contents))
@@ -410,11 +423,10 @@ func TestSnapshotReconciler_MirrorsReadyAndFailed(t *testing.T) {
 	}
 }
 
-func TestSnapshotReconciler_ProceedsWithoutCheckpointIDLabel(t *testing.T) {
+func TestSnapshotReconciler_ProceedsWithoutCaptureAnnotations(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	snap := makeSnapshotForReconcile()
-	// The source pod carries no checkpoint-id label: the content is named from the PodSnapshot
-	// UID, not the ID, so reconcile proceeds and binds rather than failing.
+	// Capture identity and target selection come entirely from the snapshot API.
 	r := makeSnapshotReconciler(s, snap, scheduledPod(""))
 
 	reconcileSnapshot(t, r, snap.Name)

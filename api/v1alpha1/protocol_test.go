@@ -4,251 +4,73 @@
 package v1alpha1
 
 import (
-	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
 
-func TestApplyRestoreTargetMetadata(t *testing.T) {
-	labels := map[string]string{
-		CheckpointSourceLabel: "true",
-		CheckpointIDLabel:     "old",
+func TestValidateCaptureAnnotations(t *testing.T) {
+	if err := ValidateCaptureAnnotations(nil); err != nil {
+		t.Fatalf("nil annotations: %v", err)
 	}
-	annotations := map[string]string{
-		CheckpointArtifactVersionAnnotation:             "old",
-		CheckpointStatusAnnotation:                      "completed",
-		RestoreStatusAnnotationPrefix + "main":          "failed",
-		RestoreStatusAnnotationPrefix + "engine-1":      "completed",
-		RestoreContainerIDAnnotationPrefix + "main":     "dead-container",
-		RestoreContainerIDAnnotationPrefix + "engine-1": "dead-container",
-		RestoreReasonAnnotationPrefix + "main":          "RestoreCleanupFailed",
-		"nvidia.com/snapshot-restore-status":            "completed",
-		"nvidia.com/snapshot-restore-container-id":      "dead-container",
-		// Preserve the target-containers annotation across ApplyRestoreTargetMetadata.
-		TargetContainersAnnotation: "main",
+	if err := ValidateCaptureAnnotations(map[string]string{
+		"linkerd.io/inject": "disabled",
+		"example.com/team":  "inference",
+	}); err != nil {
+		t.Fatalf("unrelated annotations: %v", err)
 	}
 
-	ApplyRestoreTargetMetadata(labels, annotations, true, "hash", "2")
-
-	if labels[CheckpointIDLabel] != "hash" {
-		t.Fatalf("expected checkpoint hash label, got %#v", labels)
-	}
-	if _, ok := labels[CheckpointSourceLabel]; ok {
-		t.Fatalf("checkpoint source label was not cleared: %#v", labels)
-	}
-	if annotations[CheckpointArtifactVersionAnnotation] != "2" {
-		t.Fatalf("expected checkpoint artifact version annotation, got %#v", annotations)
-	}
-	if _, ok := annotations[CheckpointStatusAnnotation]; ok {
-		t.Fatalf("checkpoint status annotation was not cleared: %#v", annotations)
-	}
-	for _, key := range []string{
-		RestoreStatusAnnotationPrefix + "main",
-		RestoreStatusAnnotationPrefix + "engine-1",
-		RestoreContainerIDAnnotationPrefix + "main",
-		RestoreContainerIDAnnotationPrefix + "engine-1",
-		RestoreReasonAnnotationPrefix + "main",
-		"nvidia.com/snapshot-restore-status",
-		"nvidia.com/snapshot-restore-container-id",
+	for _, annotations := range []map[string]string{
+		{RestoreFromAnnotation: "snapshot-a"},
+		{"nvidia.com/snapshot-target-containers": "main"},
 	} {
-		if _, ok := annotations[key]; ok {
-			t.Fatalf("restore annotation %s was not cleared: %#v", key, annotations)
+		err := ValidateCaptureAnnotations(annotations)
+		if err == nil || !strings.Contains(err.Error(), "must not carry snapshot annotations") {
+			t.Fatalf("ValidateCaptureAnnotations(%v) error = %v", annotations, err)
 		}
 	}
-	if got := annotations[TargetContainersAnnotation]; got != "main" {
-		t.Fatalf("target-containers annotation must be preserved, got %q", got)
-	}
 }
 
-func TestApplyRestoreTargetMetadataDisabledClearsState(t *testing.T) {
-	labels := map[string]string{
-		CheckpointIDLabel: "hash",
-	}
-	annotations := map[string]string{
-		CheckpointArtifactVersionAnnotation:         "2",
-		CheckpointStatusAnnotation:                  "completed",
-		RestoreStatusAnnotationPrefix + "main":      "failed",
-		RestoreContainerIDAnnotationPrefix + "main": "dead-container",
-		RestoreReasonAnnotationPrefix + "main":      "RestoreCleanupFailed",
-	}
+func TestRestoreFromAnnotations(t *testing.T) {
+	t.Run("only snapshot annotation with unrelated metadata", func(t *testing.T) {
+		name, err := RestoreFromAnnotations(map[string]string{
+			RestoreFromAnnotation: "snapshot-a",
+			"example.com/team":    "inference",
+		})
+		if err != nil || name != "snapshot-a" {
+			t.Fatalf("RestoreFromAnnotations() = %q, %v", name, err)
+		}
+	})
 
-	ApplyRestoreTargetMetadata(labels, annotations, false, "", "")
-
-	if _, ok := labels[CheckpointIDLabel]; ok {
-		t.Fatalf("checkpoint hash label was not cleared: %#v", labels)
-	}
-	if _, ok := annotations[CheckpointArtifactVersionAnnotation]; ok {
-		t.Fatalf("checkpoint artifact version annotation was not cleared: %#v", annotations)
-	}
-	if _, ok := annotations[CheckpointStatusAnnotation]; ok {
-		t.Fatalf("checkpoint status annotation was not cleared: %#v", annotations)
-	}
-	if _, ok := annotations[RestoreStatusAnnotationPrefix+"main"]; ok {
-		t.Fatalf("per-container restore status was not cleared: %#v", annotations)
-	}
-	if _, ok := annotations[RestoreContainerIDAnnotationPrefix+"main"]; ok {
-		t.Fatalf("per-container restore container id was not cleared: %#v", annotations)
-	}
-	if _, ok := annotations[RestoreReasonAnnotationPrefix+"main"]; ok {
-		t.Fatalf("per-container restore reason was not cleared: %#v", annotations)
-	}
-}
-
-func TestParseTargetContainers(t *testing.T) {
-	cases := []struct {
-		name    string
-		in      string
-		want    []string
-		wantErr bool
-	}{
-		{name: "empty", in: "", want: nil},
-		{name: "whitespace", in: "   ", want: nil},
-		{name: "single", in: "main", want: []string{"main"}},
-		{name: "two", in: "engine-0,engine-1", want: []string{"engine-0", "engine-1"}},
-		{name: "whitespace preserved in split", in: " engine-0 , engine-1 ", want: []string{"engine-0", "engine-1"}},
-		{name: "duplicate rejected", in: "a,a", wantErr: true},
-		{name: "empty token rejected", in: "a,,b", wantErr: true},
-		{name: "trailing comma rejected", in: "a,", wantErr: true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := ParseTargetContainers(tc.in)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got %v", got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("got %#v, want %#v", got, tc.want)
+	for name, annotations := range map[string]map[string]string{
+		"missing": {},
+		"empty":   {RestoreFromAnnotation: " "},
+		"invalid": {RestoreFromAnnotation: "Bad_Name"},
+		"legacy extra": {
+			RestoreFromAnnotation:                  "snapshot-a",
+			"nvidia.com/snapshot-artifact-version": "1",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := RestoreFromAnnotations(annotations)
+			if err == nil {
+				t.Fatal("RestoreFromAnnotations() unexpectedly succeeded")
 			}
 		})
 	}
 }
 
-func TestFormatTargetContainers(t *testing.T) {
-	if got := FormatTargetContainers([]string{"a", " b ", "", "c"}); got != "a,b,c" {
-		t.Fatalf("got %q", got)
+func TestSnapshotAnnotationsSorted(t *testing.T) {
+	want := []string{
+		RestoreFromAnnotation,
+		"nvidia.com/snapshot-z",
 	}
-	if got := FormatTargetContainers(nil); got != "" {
-		t.Fatalf("got %q", got)
-	}
-}
-
-func TestTargetContainersFromAnnotationsMissing(t *testing.T) {
-	_, err := TargetContainersFromAnnotations(map[string]string{}, 1, 1)
-	if err == nil {
-		t.Fatalf("expected missing annotation error")
-	}
-	if _, err := TargetContainersFromAnnotations(map[string]string{TargetContainersAnnotation: ""}, 1, 1); err == nil {
-		t.Fatalf("expected missing annotation error for empty value")
-	}
-}
-
-func TestTargetContainersFromAnnotationsBounds(t *testing.T) {
-	annotations := map[string]string{TargetContainersAnnotation: "engine-0,engine-1"}
-	if _, err := TargetContainersFromAnnotations(annotations, 1, 1); err == nil {
-		t.Fatalf("expected max-1 enforcement to reject 2 containers")
-	}
-	got, err := TargetContainersFromAnnotations(annotations, 1, 0)
-	if err != nil {
-		t.Fatalf("unexpected error for unbounded max: %v", err)
-	}
-	if !reflect.DeepEqual(got, []string{"engine-0", "engine-1"}) {
-		t.Fatalf("got %#v", got)
-	}
-	if _, err := TargetContainersFromAnnotations(map[string]string{TargetContainersAnnotation: "a,a"}, 1, 0); err == nil {
-		t.Fatalf("expected dup rejection")
-	}
-}
-
-func TestRestoreStatusAnnotations(t *testing.T) {
-	got, err := RestoreStatusAnnotationsWithReason("engine-1", RestoreStatusFailed, "container-id", "RestoreCleanupFailed")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	want := map[string]string{
-		RestoreStatusAnnotationPrefix + "engine-1":      RestoreStatusFailed,
-		RestoreContainerIDAnnotationPrefix + "engine-1": "container-id",
-		RestoreReasonAnnotationPrefix + "engine-1":      "RestoreCleanupFailed",
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %#v, want %#v", got, want)
-	}
-}
-
-func TestRestoreStatusAnnotationsRejectsInvalidContainerName(t *testing.T) {
-	_, err := RestoreStatusAnnotations(strings.Repeat("a", 200), RestoreStatusInProgress, "container-id")
-	if err == nil {
-		t.Fatalf("expected invalid annotation key error")
-	}
-	if !strings.Contains(err.Error(), "restore status annotation key") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestApplyCheckpointStorageMetadata(t *testing.T) {
-	annotations := map[string]string{
-		CheckpointStorageTypeAnnotation:     "old",
-		CheckpointStorageBasePathAnnotation: "/old",
-	}
-
-	ApplyCheckpointStorageMetadata(annotations, Storage{
-		Type:     StorageTypePVC,
-		BasePath: "/checkpoints/",
+	got := SnapshotAnnotations(map[string]string{
+		"nvidia.com/snapshot-z": "x",
+		RestoreFromAnnotation:   "snapshot-a",
+		"example.com/a":         "y",
 	})
-
-	if annotations[CheckpointStorageTypeAnnotation] != StorageTypePVC {
-		t.Fatalf("expected storage type annotation, got %#v", annotations)
+	if !slices.Equal(got, want) {
+		t.Fatalf("SnapshotAnnotations() = %v, want %v", got, want)
 	}
-	if annotations[CheckpointStorageBasePathAnnotation] != "/checkpoints" {
-		t.Fatalf("expected normalized storage base path annotation, got %#v", annotations)
-	}
-}
-
-func TestResolveCheckpointStorageValidatesBasePath(t *testing.T) {
-	t.Run("rejects relative base path", func(t *testing.T) {
-		_, err := ResolveCheckpointStorage("hash", "", Storage{
-			Type:     StorageTypePVC,
-			BasePath: "checkpoints",
-		})
-		if err == nil {
-			t.Fatal("expected error for relative base path")
-		}
-	})
-
-	t.Run("normalizes trailing slash", func(t *testing.T) {
-		storage, err := ResolveCheckpointStorage("hash", "2", Storage{
-			Type:     StorageTypePVC,
-			BasePath: "/checkpoints/",
-		})
-		if err != nil {
-			t.Fatalf("ResolveCheckpointStorage() error = %v", err)
-		}
-		if storage.BasePath != "/checkpoints" {
-			t.Fatalf("BasePath = %q, want /checkpoints", storage.BasePath)
-		}
-		if storage.Location != "/checkpoints/hash/versions/2" {
-			t.Fatalf("Location = %q, want /checkpoints/hash/versions/2", storage.Location)
-		}
-	})
-
-	t.Run("allows root base path", func(t *testing.T) {
-		storage, err := ResolveCheckpointStorage("hash", "", Storage{
-			Type:     StorageTypePVC,
-			BasePath: "/",
-		})
-		if err != nil {
-			t.Fatalf("ResolveCheckpointStorage() error = %v", err)
-		}
-		if storage.BasePath != "/" {
-			t.Fatalf("BasePath = %q, want /", storage.BasePath)
-		}
-		if storage.Location != "/hash/versions/1" {
-			t.Fatalf("Location = %q, want /hash/versions/1", storage.Location)
-		}
-	})
 }

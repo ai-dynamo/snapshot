@@ -21,9 +21,9 @@ import (
 func makeArtifactTree(t *testing.T) (basePath, artifactPath string) {
 	t.Helper()
 	basePath = t.TempDir()
-	artifactPath = filepath.Join(basePath, "checkpoint-123", "versions", "1")
+	artifactPath = filepath.Join(basePath, "artifacts", "content-uid-123", "containers", "main")
 	require.NoError(t, os.MkdirAll(artifactPath, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(artifactPath, "manifest.yaml"), []byte("checkpointId: checkpoint-123\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(artifactPath, "manifest.yaml"), []byte("artifact:\n  contentUID: content-uid-123\n  containerName: main\n"), 0o600))
 	return basePath, artifactPath
 }
 
@@ -31,7 +31,7 @@ func TestResolveArtifactReturnsTheComposedPath(t *testing.T) {
 	t.Parallel()
 
 	basePath, artifactPath := makeArtifactTree(t)
-	got, err := ResolveArtifact(basePath, "checkpoint-123", "1")
+	got, err := ResolveArtifact(basePath, "content-uid-123", "main")
 	require.NoError(t, err)
 	assert.Equal(t, artifactPath, got)
 }
@@ -50,11 +50,12 @@ func TestResolveArtifactRejectsUnusablePaths(t *testing.T) {
 		{
 			// A symlink anywhere in the path would let the mount source be
 			// somewhere other than the composed location.
-			name: "symlinked checkpoint component",
+			name: "symlinked content component",
 			setup: func(t *testing.T) string {
 				basePath := t.TempDir()
 				outside, _ := makeArtifactTree(t)
-				require.NoError(t, os.Symlink(filepath.Join(outside, "checkpoint-123"), filepath.Join(basePath, "checkpoint-123")))
+				require.NoError(t, os.MkdirAll(filepath.Join(basePath, "artifacts"), 0o755))
+				require.NoError(t, os.Symlink(filepath.Join(outside, "artifacts", "content-uid-123"), filepath.Join(basePath, "artifacts", "content-uid-123")))
 				return basePath
 			},
 		},
@@ -62,9 +63,9 @@ func TestResolveArtifactRejectsUnusablePaths(t *testing.T) {
 			name: "artifact itself is a symlink",
 			setup: func(t *testing.T) string {
 				basePath := t.TempDir()
-				versions := filepath.Join(basePath, "checkpoint-123", "versions")
-				require.NoError(t, os.MkdirAll(versions, 0o755))
-				require.NoError(t, os.Symlink(t.TempDir(), filepath.Join(versions, "1")))
+				containers := filepath.Join(basePath, "artifacts", "content-uid-123", "containers")
+				require.NoError(t, os.MkdirAll(containers, 0o755))
+				require.NoError(t, os.Symlink(t.TempDir(), filepath.Join(containers, "main")))
 				return basePath
 			},
 		},
@@ -72,9 +73,9 @@ func TestResolveArtifactRejectsUnusablePaths(t *testing.T) {
 			name: "artifact is a regular file",
 			setup: func(t *testing.T) string {
 				basePath := t.TempDir()
-				versions := filepath.Join(basePath, "checkpoint-123", "versions")
-				require.NoError(t, os.MkdirAll(versions, 0o755))
-				require.NoError(t, os.WriteFile(filepath.Join(versions, "1"), []byte("not a directory"), 0o600))
+				containers := filepath.Join(basePath, "artifacts", "content-uid-123", "containers")
+				require.NoError(t, os.MkdirAll(containers, 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(containers, "main"), []byte("not a directory"), 0o600))
 				return basePath
 			},
 		},
@@ -87,7 +88,7 @@ func TestResolveArtifactRejectsUnusablePaths(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := ResolveArtifact(tc.setup(t), "checkpoint-123", "1")
+			_, err := ResolveArtifact(tc.setup(t), "content-uid-123", "main")
 			require.Error(t, err)
 		})
 	}
@@ -101,13 +102,13 @@ func TestResolveArtifactRejectsUnusablePaths(t *testing.T) {
 func TestNestedMountFilterSemantics(t *testing.T) {
 	t.Parallel()
 
-	const artifact = "/checkpoints/abc/versions/1"
+	const artifact = "/checkpoints/artifacts/content-uid-123/containers/main"
 	// Field order matches /proc/<pid>/mountinfo: id, parent, dev, root,
 	// mountpoint, options, separator, fstype, source, superblock options.
 	const table = `21 20 0:20 / / rw,relatime - overlay overlay rw
 22 21 0:21 / /checkpoints rw,relatime - nfs4 nfs rw
-23 22 0:22 / /checkpoints/abc/versions/10 rw,relatime - tmpfs tmpfs rw
-24 22 0:23 / /checkpoints/abcdef rw,relatime - tmpfs tmpfs rw
+23 22 0:22 / /checkpoints/artifacts/content-uid-123/containers/main-2 rw,relatime - tmpfs tmpfs rw
+24 22 0:23 / /checkpoints/artifacts/content-uid-1234 rw,relatime - tmpfs tmpfs rw
 `
 
 	tests := []struct {
@@ -132,7 +133,7 @@ func TestNestedMountFilterSemantics(t *testing.T) {
 			want:  []string{artifact},
 		},
 		{
-			// /checkpoints/abc/versions/10 and /checkpoints/abcdef both share a
+			// main-2 and content-uid-1234 both share a
 			// string prefix with the artifact path and must not match.
 			name:  "sibling paths that share a string prefix are not nested",
 			extra: "",

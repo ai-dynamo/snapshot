@@ -16,7 +16,8 @@ func TestManifestRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 
 	original := NewCheckpointManifest(
-		"sha256:abc123",
+		"content-uid-123",
+		"main",
 		CRIUDumpManifest{
 			CRIU: CRIUSettings{
 				LogLevel: 4,
@@ -47,8 +48,8 @@ func TestManifestRoundTrip(t *testing.T) {
 	}
 
 	// Verify key fields survived the round-trip
-	if loaded.CheckpointID != original.CheckpointID {
-		t.Errorf("CheckpointID = %q, want %q", loaded.CheckpointID, original.CheckpointID)
+	if loaded.Artifact != original.Artifact {
+		t.Errorf("Artifact = %#v, want %#v", loaded.Artifact, original.Artifact)
 	}
 	if loaded.CRIUDump.CRIU.LogLevel != 4 {
 		t.Errorf("CRIU.LogLevel = %d, want 4", loaded.CRIUDump.CRIU.LogLevel)
@@ -147,16 +148,16 @@ func TestNewCRIUDumpManifest(t *testing.T) {
 	})
 }
 
-func TestWriteManifestRejectsMissingCheckpointID(t *testing.T) {
+func TestWriteManifestRejectsMissingArtifactIdentity(t *testing.T) {
 	dir := t.TempDir()
 
 	err := WriteManifest(dir, &CheckpointManifest{})
-	if err == nil || err.Error() != "checkpoint manifest is missing checkpointId" {
-		t.Fatalf("expected missing checkpointId error, got %v", err)
+	if err == nil || err.Error() != "checkpoint manifest is missing artifact.contentUID" {
+		t.Fatalf("expected missing artifact identity error, got %v", err)
 	}
 }
 
-func TestReadManifestRejectsMissingCheckpointID(t *testing.T) {
+func TestReadManifestRejectsMissingArtifactIdentity(t *testing.T) {
 	dir := t.TempDir()
 
 	content := []byte("createdAt: 2026-03-31T00:00:00Z\n")
@@ -165,7 +166,14 @@ func TestReadManifestRejectsMissingCheckpointID(t *testing.T) {
 	}
 
 	_, err := ReadManifest(dir)
-	if err == nil || err.Error() != "checkpoint manifest is missing checkpointId" {
-		t.Fatalf("expected missing checkpointId error, got %v", err)
+	if err == nil || err.Error() != "checkpoint manifest is missing artifact.contentUID" {
+		t.Fatalf("expected missing artifact identity error, got %v", err)
+	}
+}
+
+func TestManifestRequiresContainerName(t *testing.T) {
+	err := WriteManifest(t.TempDir(), &CheckpointManifest{Artifact: ArtifactManifest{ContentUID: "content-uid-123"}})
+	if err == nil || err.Error() != "checkpoint manifest is missing artifact.containerName" {
+		t.Fatalf("expected missing container name error, got %v", err)
 	}
 }

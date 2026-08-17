@@ -14,33 +14,33 @@ import (
 func TestResolveArtifactPath(t *testing.T) {
 	t.Parallel()
 
-	got, err := ResolveArtifactPath("/checkpoints", "checkpoint-123", "2")
+	got, err := ResolveArtifactPath("/checkpoints", "content-uid-123", "main")
 	require.NoError(t, err)
-	assert.Equal(t, filepath.Join("/checkpoints", "checkpoint-123", "versions", "2"), got)
+	assert.Equal(t, filepath.Join("/checkpoints", "artifacts", "content-uid-123", "containers", "main"), got)
 
-	got, err = ResolveArtifactPath("/checkpoints", "checkpoint-123", "")
+	staging, err := ResolveArtifactStagingRoot("/checkpoints", "content-uid-123")
 	require.NoError(t, err)
-	assert.Equal(t, filepath.Join("/checkpoints", "checkpoint-123", "versions", "1"), got)
+	assert.Equal(t, filepath.Join("/checkpoints", "artifacts", "content-uid-123", ".tmp"), staging)
 }
 
 func TestResolveArtifactPathRejectsUnsafeCoordinates(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name, basePath, checkpointID, version string
+		name, basePath, contentUID, containerName string
 	}{
-		{name: "relative base", basePath: "checkpoints", checkpointID: "checkpoint-123", version: "1"},
-		{name: "unclean base", basePath: "/checkpoints/../etc", checkpointID: "checkpoint-123", version: "1"},
-		{name: "checkpoint traversal", basePath: "/checkpoints", checkpointID: "..", version: "1"},
-		{name: "checkpoint separator", basePath: "/checkpoints", checkpointID: "a/b", version: "1"},
-		{name: "version traversal", basePath: "/checkpoints", checkpointID: "checkpoint-123", version: ".."},
-		{name: "version separator", basePath: "/checkpoints", checkpointID: "checkpoint-123", version: "1/2"},
+		{name: "relative base", basePath: "checkpoints", contentUID: "content-uid-123", containerName: "main"},
+		{name: "unclean base", basePath: "/checkpoints/../etc", contentUID: "content-uid-123", containerName: "main"},
+		{name: "content traversal", basePath: "/checkpoints", contentUID: "..", containerName: "main"},
+		{name: "content separator", basePath: "/checkpoints", contentUID: "a/b", containerName: "main"},
+		{name: "container traversal", basePath: "/checkpoints", contentUID: "content-uid-123", containerName: ".."},
+		{name: "container separator", basePath: "/checkpoints", contentUID: "content-uid-123", containerName: "a/b"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := ResolveArtifactPath(tc.basePath, tc.checkpointID, tc.version)
+			_, err := ResolveArtifactPath(tc.basePath, tc.contentUID, tc.containerName)
 			require.Error(t, err)
 		})
 	}
