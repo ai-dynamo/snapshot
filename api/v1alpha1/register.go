@@ -21,6 +21,7 @@ func AddToScheme(s *runtime.Scheme) error {
 	s.AddKnownTypes(SchemeGroupVersion,
 		&PodSnapshot{}, &PodSnapshotList{},
 		&PodSnapshotContent{}, &PodSnapshotContentList{},
+		&SnapshotJob{}, &SnapshotJobList{},
 	)
 	metav1.AddToGroupVersion(s, SchemeGroupVersion)
 	return nil

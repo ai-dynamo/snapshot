@@ -187,12 +187,17 @@ func TestEmbeddedCRDsApplyCleanly(t *testing.T) {
 	results, err := InstallCRDs(t.Context(), cl, logr.Discard(), manifests)
 
 	require.NoError(t, err)
-	assert.ElementsMatch(t,
-		[]string{"podsnapshots.nvidia.com", "podsnapshotcontents.nvidia.com"},
-		cl.applied)
+	require.Len(t, results, len(manifests), "expected one result per embedded CRD manifest")
+
+	// Derive expected names from the results themselves rather than a hardcoded
+	// list, so adding a new embedded CRD doesn't require updating this test.
+	names := make([]string, 0, len(results))
 	for _, res := range results {
 		assert.Equal(t, ActionCreated, res.Action)
+		assert.NotEmpty(t, res.Name)
+		names = append(names, res.Name)
 	}
+	assert.ElementsMatch(t, names, cl.applied)
 }
 
 var _ Client = (*fakeClient)(nil)

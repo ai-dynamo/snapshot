@@ -75,6 +75,7 @@ func TestNamedAccessorsAreEmbedded(t *testing.T) {
 	for name, manifest := range map[string]string{
 		"podsnapshots.nvidia.com":        PodSnapshotCRD(),
 		"podsnapshotcontents.nvidia.com": PodSnapshotContentCRD(),
+		"snapshotjobs.nvidia.com":        SnapshotJobCRD(),
 	} {
 		if !strings.Contains(manifest, "kind: CustomResourceDefinition") {
 			t.Errorf("%s: not a CustomResourceDefinition", name)
