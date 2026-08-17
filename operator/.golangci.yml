@@ -34,6 +34,12 @@ issues:
     - linters:
         - staticcheck
       text: "SA1019:.*GetEventRecorderFor.*deprecated"
+    # LegacySnapshotControlDirEnv is deprecated for new callers, but
+    # EnsureControlVolume must keep injecting it during the migration window
+    # so existing workload images that read the old name keep working.
+    - linters:
+        - staticcheck
+      text: "SA1019:.*LegacySnapshotControlDirEnv.*deprecated"
 
 linters:
   disable-all: true
