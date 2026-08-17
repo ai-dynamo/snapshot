@@ -16,8 +16,8 @@ import (
 // this replaced let a pod name any agent-visible directory, so the components
 // are validated and the result must contain no symlink. Reading the manifest is
 // left to the caller, which uses the ordinary types.ReadManifest.
-func ResolveArtifact(basePath, artifactID, version string) (string, error) {
-	artifactPath, err := ResolveArtifactPath(basePath, artifactID, version)
+func ResolveArtifact(basePath, contentUID, containerName string) (string, error) {
+	artifactPath, err := ResolveArtifactPath(basePath, contentUID, containerName)
 	if err != nil {
 		return "", err
 	}

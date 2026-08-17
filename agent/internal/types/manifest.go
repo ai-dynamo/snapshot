@@ -19,8 +19,8 @@ const manifestFilename = "manifest.yaml"
 
 // CheckpointManifest is saved as manifest.yaml at checkpoint time and loaded at restore.
 type CheckpointManifest struct {
-	CheckpointID string    `yaml:"checkpointId"`
-	CreatedAt    time.Time `yaml:"createdAt"`
+	Artifact  ArtifactManifest `yaml:"artifact"`
+	CreatedAt time.Time        `yaml:"createdAt"`
 
 	CRIUDump CRIUDumpManifest  `yaml:"criuDump"`
 	K8s      SourcePodManifest `yaml:"k8s"`
@@ -28,18 +28,29 @@ type CheckpointManifest struct {
 	CUDA     CUDAManifest      `yaml:"cudaRestore,omitempty"`
 }
 
+// ArtifactManifest pins an on-disk checkpoint to the Kubernetes content object
+// and container whose immutable identity determines its path.
+type ArtifactManifest struct {
+	ContentUID    string `yaml:"contentUID"`
+	ContainerName string `yaml:"containerName"`
+}
+
 func NewCheckpointManifest(
-	checkpointID string,
+	contentUID string,
+	containerName string,
 	criuDump CRIUDumpManifest,
 	k8s SourcePodManifest,
 	overlay OverlayManifest,
 ) *CheckpointManifest {
 	return &CheckpointManifest{
-		CheckpointID: checkpointID,
-		CreatedAt:    time.Now().UTC(),
-		CRIUDump:     criuDump,
-		K8s:          k8s,
-		Overlay:      overlay,
+		Artifact: ArtifactManifest{
+			ContentUID:    contentUID,
+			ContainerName: containerName,
+		},
+		CreatedAt: time.Now().UTC(),
+		CRIUDump:  criuDump,
+		K8s:       k8s,
+		Overlay:   overlay,
 	}
 }
 
@@ -149,8 +160,8 @@ func WriteManifest(checkpointDir string, data *CheckpointManifest) error {
 	if data == nil {
 		return fmt.Errorf("checkpoint manifest is required")
 	}
-	if strings.TrimSpace(data.CheckpointID) == "" {
-		return fmt.Errorf("checkpoint manifest is missing checkpointId")
+	if err := validateArtifactManifest(data.Artifact); err != nil {
+		return err
 	}
 
 	content, err := yaml.Marshal(data)
@@ -179,9 +190,19 @@ func ReadManifest(checkpointDir string) (*CheckpointManifest, error) {
 	if err := yaml.Unmarshal(content, &data); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal checkpoint manifest: %w", err)
 	}
-	if strings.TrimSpace(data.CheckpointID) == "" {
-		return nil, fmt.Errorf("checkpoint manifest is missing checkpointId")
+	if err := validateArtifactManifest(data.Artifact); err != nil {
+		return nil, err
 	}
 
 	return &data, nil
+}
+
+func validateArtifactManifest(artifact ArtifactManifest) error {
+	if strings.TrimSpace(artifact.ContentUID) == "" {
+		return fmt.Errorf("checkpoint manifest is missing artifact.contentUID")
+	}
+	if strings.TrimSpace(artifact.ContainerName) == "" {
+		return fmt.Errorf("checkpoint manifest is missing artifact.containerName")
+	}
+	return nil
 }

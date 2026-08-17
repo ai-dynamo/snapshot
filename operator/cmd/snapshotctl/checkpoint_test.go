@@ -33,58 +33,14 @@ func snapshotScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
-// TestPodSnapshotName verifies the DNS-1123-safe name derivation from Job names.
-func TestPodSnapshotName(t *testing.T) {
-	tests := []struct {
-		name    string
-		jobName string
-		wantLen int
-		wantEq  string // exact match when non-empty
-	}{
-		{
-			name:    "short name passes through unchanged",
-			jobName: "my-worker-checkpoint",
-			wantEq:  "my-worker-checkpoint",
-		},
-		{
-			name:    "exactly 63 chars passes through unchanged",
-			jobName: strings.Repeat("a", 63),
-			wantEq:  strings.Repeat("a", 63),
-		},
-		{
-			name:    "64-char name is capped to 63",
-			jobName: strings.Repeat("b", 64),
-			wantEq:  strings.Repeat("b", 63),
-		},
-		{
-			name:    "100-char name is capped to 63",
-			jobName: strings.Repeat("c", 100),
-			wantEq:  strings.Repeat("c", 63),
-		},
-		{
-			name:    "trailing hyphen is stripped after truncation",
-			jobName: strings.Repeat("e", 62) + "-extra",
-			wantLen: 62, // the hyphen at position 62 is stripped
-		},
-		{
-			name:    "capped name is deterministic",
-			jobName: strings.Repeat("d", 80),
-			wantEq:  strings.Repeat("d", 63),
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := podSnapshotName(tt.jobName)
-			if tt.wantEq != "" {
-				assert.Equal(t, tt.wantEq, got)
-			}
-			if tt.wantLen > 0 {
-				assert.Equal(t, tt.wantLen, len(got), "capped name must be exactly 63 chars")
-			}
-			// Verify determinism: calling twice yields the same result.
-			assert.Equal(t, got, podSnapshotName(tt.jobName), "podSnapshotName must be deterministic")
-		})
-	}
+func TestCaptureJobName(t *testing.T) {
+	short := captureJobName("my-snapshot")
+	assert.True(t, strings.HasPrefix(short, "my-snapshot-capture-"))
+	assert.LessOrEqual(t, len(short), 63)
+
+	long := captureJobName(strings.Repeat("x", 100))
+	assert.Len(t, long, 63)
+	assert.Contains(t, long, "-capture-")
 }
 
 // TestPodSnapshotNameUIDPinned verifies that createPodSnapshot stamps the source pod's UID
@@ -98,14 +54,13 @@ func TestPodSnapshotNameUIDPinned(t *testing.T) {
 		snapName string
 	}{
 		{name: "short name", snapName: "my-snap"},
-		// Name derived from a >63-char job name is truncated; UID must still be pinned.
-		{name: "long name from >63-char job", snapName: podSnapshotName(strings.Repeat("x", 80))},
+		{name: "long PodSnapshot name", snapName: strings.Repeat("x", 80)},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			crClient := crfake.NewClientBuilder().WithScheme(s).Build()
-			snap, err := createPodSnapshot(context.Background(), crClient, "default", tt.snapName, "my-pod", podUID, []string{"main"}, "ckpt-123")
+			snap, err := createPodSnapshot(context.Background(), crClient, "default", tt.snapName, "my-pod", podUID, []string{"main"})
 			require.NoError(t, err)
 			assert.Equal(t, podUID, snap.Spec.Source.PodRef.UID, "source pod UID must be pinned")
 			assert.Equal(t, "my-pod", snap.Spec.Source.PodRef.Name)
@@ -128,7 +83,7 @@ func TestPodSnapshotAlreadyExists(t *testing.T) {
 	}
 	crClient := crfake.NewClientBuilder().WithScheme(s).WithObjects(existing).Build()
 
-	_, err := createPodSnapshot(context.Background(), crClient, "default", "my-snap", "my-pod", "uid-1", []string{"main"}, "ckpt-1")
+	_, err := createPodSnapshot(context.Background(), crClient, "default", "my-snap", "my-pod", "uid-1", []string{"main"})
 	require.Error(t, err)
 	assert.True(t, apierrors.IsAlreadyExists(err) || strings.Contains(err.Error(), "already exists"),
 		"error should report AlreadyExists: %v", err)

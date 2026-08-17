@@ -8,27 +8,40 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
-
-	snapshotprotocol "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
-// ResolveArtifactPath returns the existing checkpoint artifact layout rooted
-// at the agent-owned base path. All variable components must be single clean
-// path elements.
-func ResolveArtifactPath(basePath, artifactID, version string) (string, error) {
+const (
+	artifactsDirectory  = "artifacts"
+	containersDirectory = "containers"
+)
+
+// ResolveArtifactPath returns the checkpoint artifact path owned by one
+// PodSnapshotContent and captured container. All variable components must be
+// single safe path elements.
+func ResolveArtifactPath(basePath, contentUID, containerName string) (string, error) {
 	if err := validateAbsolutePath(basePath); err != nil {
 		return "", err
 	}
-	if err := validatePathElement("artifact ID", artifactID); err != nil {
+	if err := validatePathElement("PodSnapshotContent UID", contentUID); err != nil {
 		return "", err
 	}
-	if version == "" {
-		version = snapshotprotocol.DefaultCheckpointArtifactVersion
-	}
-	if err := validatePathElement("artifact version", version); err != nil {
+	if err := validatePathElement("container name", containerName); err != nil {
 		return "", err
 	}
-	return filepath.Join(basePath, artifactID, "versions", version), nil
+	return filepath.Join(basePath, artifactsDirectory, contentUID, containersDirectory, containerName), nil
+}
+
+// ResolveArtifactStagingRoot returns the private staging root for one
+// PodSnapshotContent. Keeping it under the same content directory guarantees
+// the final rename stays on the same filesystem as the artifact.
+func ResolveArtifactStagingRoot(basePath, contentUID string) (string, error) {
+	if err := validateAbsolutePath(basePath); err != nil {
+		return "", err
+	}
+	if err := validatePathElement("PodSnapshotContent UID", contentUID); err != nil {
+		return "", err
+	}
+	return filepath.Join(basePath, artifactsDirectory, contentUID, ".tmp"), nil
 }
 
 func validateAbsolutePath(value string) error {

@@ -17,39 +17,19 @@ const (
 	// informer keys on CaptureEligibleLabel so only gate-validated pods drive the capture path.
 	CaptureEligibleLabel = "nvidia.com/snapshot-capture-eligible"
 
-	// Restore pods carry CheckpointIDLabel without CheckpointSourceLabel.
-	CheckpointIDLabel  = "nvidia.com/snapshot-checkpoint-id"
-	RestoreTargetLabel = "nvidia.com/snapshot-is-restore-target"
-
-	CheckpointArtifactVersionAnnotation = "nvidia.com/snapshot-artifact-version"
-
 	// SnapshotNodeLabel mirrors PodSnapshotContent.spec.source.nodeName onto the
 	// object so the per-node agent's cache can label-select work for its node.
 	SnapshotNodeLabel = "nvidia.com/snapshot-node"
 
-	// Required comma-separated checkpoint/restore target container list.
-	TargetContainersAnnotation = "nvidia.com/snapshot-target-containers"
+	// RestoreFromAnnotation is the only snapshot-owned annotation accepted on a
+	// restore pod. Its value names a PodSnapshot in the pod's namespace.
+	RestoreFromAnnotation = "nvidia.com/restore-from"
 
-	CheckpointStatusAnnotation = "nvidia.com/snapshot-checkpoint-status"
+	// RestoredCondition is the Pod status condition owned by the node agent.
+	RestoredCondition = "Restored"
 
-	// Full keys are nvidia.com/snapshot-restore-status.<containerName>.
-	RestoreStatusAnnotationPrefix = "nvidia.com/snapshot-restore-status."
-
-	// Full keys are nvidia.com/snapshot-restore-container-id.<containerName>.
-	RestoreContainerIDAnnotationPrefix = "nvidia.com/snapshot-restore-container-id."
-	// Legacy unscoped restore status keys, cleared when stamping fresh metadata.
-	RestoreStatusAnnotation      = "nvidia.com/snapshot-restore-status"
-	RestoreContainerIDAnnotation = "nvidia.com/snapshot-restore-container-id"
-
-	DefaultCheckpointArtifactVersion = "1"
-	DefaultCheckpointJobTTLSeconds   = int32(300) // TODO: dead code — remove once no longer synced from Dynamo
-	DefaultSeccompLocalhostProfile   = "profiles/block-iouring.json"
-
-	CheckpointStatusCompleted = "completed" // TODO: dead code — remove once no longer synced from Dynamo
-	CheckpointStatusFailed    = "failed"    // TODO: dead code — remove once no longer synced from Dynamo
-	RestoreStatusInProgress   = "in_progress"
-	RestoreStatusCompleted    = "completed"
-	RestoreStatusFailed       = "failed"
+	CheckpointVolumeName           = "checkpoint-storage"
+	DefaultSeccompLocalhostProfile = "profiles/block-iouring.json"
 )
 
 // Control-volume contract: the per-pod emptyDir carrying checkpoint/restore
