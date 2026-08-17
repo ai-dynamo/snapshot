@@ -12,9 +12,14 @@ import (
 // EnsureControlVolume adds the snapshot-control emptyDir to the pod spec,
 // mounts it on the given container at SnapshotControlMountPath (using
 // subPath=<containerName> so concurrent target containers in a failover pod
-// each see an isolated view), and sets DYN_SNAPSHOT_CONTROL_DIR on the
-// container's env. Idempotent — safe to call from multiple code paths
-// (operator checkpoint job, restore pod shaping, etc.).
+// each see an isolated view), and sets both SnapshotControlDirEnv (canonical)
+// and LegacySnapshotControlDirEnv (deprecated) on the container's env, so
+// workload images can migrate off the legacy name independently of the
+// operator release. Idempotent — safe to call from multiple code paths
+// (operator checkpoint job, restore pod shaping, etc.); each env var is
+// guarded independently so a pod that already carries one (e.g. a
+// hand-crafted template with only the legacy name) still gets the other
+// injected without duplicating either.
 //
 // Callers must pass the container's own name; the subPath makes the mount
 // container-scoped on disk even though the in-container path is the same.
@@ -58,17 +63,18 @@ func EnsureControlVolume(podSpec *corev1.PodSpec, container *corev1.Container) {
 		})
 	}
 
-	hasEnv := false
+	ensureEnv(container, snapshotv1alpha1.SnapshotControlDirEnv, snapshotv1alpha1.SnapshotControlMountPath)
+	ensureEnv(container, snapshotv1alpha1.LegacySnapshotControlDirEnv, snapshotv1alpha1.SnapshotControlMountPath)
+}
+
+// ensureEnv sets name=value on the container if name is not already present,
+// so repeated calls (e.g. dual-injecting the canonical and legacy control-dir
+// env var names) never duplicate an entry.
+func ensureEnv(container *corev1.Container, name, value string) {
 	for _, e := range container.Env {
-		if e.Name == snapshotv1alpha1.SnapshotControlDirEnv {
-			hasEnv = true
-			break
+		if e.Name == name {
+			return
 		}
 	}
-	if !hasEnv {
-		container.Env = append(container.Env, corev1.EnvVar{
-			Name:  snapshotv1alpha1.SnapshotControlDirEnv,
-			Value: snapshotv1alpha1.SnapshotControlMountPath,
-		})
-	}
+	container.Env = append(container.Env, corev1.EnvVar{Name: name, Value: value})
 }

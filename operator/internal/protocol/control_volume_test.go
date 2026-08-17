@@ -26,8 +26,22 @@ func TestEnsureControlVolume(t *testing.T) {
 		if c.VolumeMounts[0].SubPath != "main" {
 			t.Fatalf("expected subPath=%q, got %q", "main", c.VolumeMounts[0].SubPath)
 		}
-		if len(c.Env) != 1 || c.Env[0].Name != snapshotv1alpha1.SnapshotControlDirEnv || c.Env[0].Value != snapshotv1alpha1.SnapshotControlMountPath {
-			t.Fatalf("expected env %s=%s, got %#v", snapshotv1alpha1.SnapshotControlDirEnv, snapshotv1alpha1.SnapshotControlMountPath, c.Env)
+		if len(c.Env) != 2 {
+			t.Fatalf("expected two control-dir env vars, got %#v", c.Env)
+		}
+		for _, name := range []string{snapshotv1alpha1.SnapshotControlDirEnv, snapshotv1alpha1.LegacySnapshotControlDirEnv} {
+			found := false
+			for _, e := range c.Env {
+				if e.Name == name {
+					found = true
+					if e.Value != snapshotv1alpha1.SnapshotControlMountPath {
+						t.Fatalf("expected env %s=%s, got %#v", name, snapshotv1alpha1.SnapshotControlMountPath, e)
+					}
+				}
+			}
+			if !found {
+				t.Fatalf("expected env %s, got %#v", name, c.Env)
+			}
 		}
 	})
 
@@ -55,8 +69,50 @@ func TestEnsureControlVolume(t *testing.T) {
 		EnsureControlVolume(ps, &ps.Containers[0])
 		EnsureControlVolume(ps, &ps.Containers[0])
 		c := ps.Containers[0]
-		if len(ps.Volumes) != 1 || len(c.VolumeMounts) != 1 || len(c.Env) != 1 {
-			t.Fatalf("expected single volume/mount/env after two calls, got volumes=%d mounts=%d env=%d", len(ps.Volumes), len(c.VolumeMounts), len(c.Env))
+		if len(ps.Volumes) != 1 || len(c.VolumeMounts) != 1 || len(c.Env) != 2 {
+			t.Fatalf("expected single volume/mount and two envs after two calls, got volumes=%d mounts=%d env=%d", len(ps.Volumes), len(c.VolumeMounts), len(c.Env))
+		}
+	})
+
+	t.Run("legacy env pre-set backfills canonical", func(t *testing.T) {
+		ps := &corev1.PodSpec{Containers: []corev1.Container{{
+			Name: "main",
+			Env:  []corev1.EnvVar{{Name: snapshotv1alpha1.LegacySnapshotControlDirEnv, Value: snapshotv1alpha1.SnapshotControlMountPath}},
+		}}}
+		EnsureControlVolume(ps, &ps.Containers[0])
+		c := ps.Containers[0]
+		if len(c.Env) != 2 {
+			t.Fatalf("expected legacy env preserved and canonical env added, got %#v", c.Env)
+		}
+		legacyCount := 0
+		for _, e := range c.Env {
+			if e.Name == snapshotv1alpha1.LegacySnapshotControlDirEnv {
+				legacyCount++
+			}
+		}
+		if legacyCount != 1 {
+			t.Fatalf("expected legacy env not duplicated, got %#v", c.Env)
+		}
+	})
+
+	t.Run("canonical env pre-set backfills legacy", func(t *testing.T) {
+		ps := &corev1.PodSpec{Containers: []corev1.Container{{
+			Name: "main",
+			Env:  []corev1.EnvVar{{Name: snapshotv1alpha1.SnapshotControlDirEnv, Value: snapshotv1alpha1.SnapshotControlMountPath}},
+		}}}
+		EnsureControlVolume(ps, &ps.Containers[0])
+		c := ps.Containers[0]
+		if len(c.Env) != 2 {
+			t.Fatalf("expected canonical env preserved and legacy env added, got %#v", c.Env)
+		}
+		canonicalCount := 0
+		for _, e := range c.Env {
+			if e.Name == snapshotv1alpha1.SnapshotControlDirEnv {
+				canonicalCount++
+			}
+		}
+		if canonicalCount != 1 {
+			t.Fatalf("expected canonical env not duplicated, got %#v", c.Env)
 		}
 	})
 
@@ -91,7 +147,7 @@ func TestEnsureControlVolume(t *testing.T) {
 		}
 		EnsureControlVolume(ps, &ps.Containers[0])
 		c := ps.Containers[0]
-		if len(ps.Volumes) != 2 || len(c.VolumeMounts) != 2 || len(c.Env) != 2 {
+		if len(ps.Volumes) != 2 || len(c.VolumeMounts) != 2 || len(c.Env) != 3 {
 			t.Fatalf("expected existing + control entries, got volumes=%#v mounts=%#v env=%#v", ps.Volumes, c.VolumeMounts, c.Env)
 		}
 	})
