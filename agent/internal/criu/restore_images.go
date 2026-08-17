@@ -12,7 +12,6 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 
 	"github.com/checkpoint-restore/go-criu/v8/crit"
@@ -38,7 +37,9 @@ type tcpPortRewrite struct {
 	port   uint32
 }
 
-func prepareRestoreImageDir(checkpointPath string) (string, func(), error) {
+type mountFilesImageFunc func(checkpointPath, replacementFilesImagePath string) (func() error, error)
+
+func prepareRestoreImageDir(checkpointPath string) (string, func() error, error) {
 	// The placeholder mount namespace remains container-specific with shareProcessNamespace.
 	var stat unix.Stat_t
 	if err := unix.Stat(placeholderMountNamespacePath, &stat); err != nil {
@@ -47,7 +48,19 @@ func prepareRestoreImageDir(checkpointPath string) (string, func(), error) {
 	return prepareRestoreImageDirForRestoreID(checkpointPath, stat.Ino)
 }
 
-func prepareRestoreImageDirForRestoreID(checkpointPath string, restoreID uint64) (string, func(), error) {
+func prepareRestoreImageDirForRestoreID(checkpointPath string, restoreID uint64) (string, func() error, error) {
+	return prepareRestoreImageDirForRestoreIDWithMount(
+		checkpointPath,
+		restoreID,
+		mountFilesImage,
+	)
+}
+
+func prepareRestoreImageDirForRestoreIDWithMount(
+	checkpointPath string,
+	restoreID uint64,
+	mountReplacement mountFilesImageFunc,
+) (string, func() error, error) {
 	checkpointPath, err := filepath.Abs(checkpointPath)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to resolve checkpoint path: %w", err)
@@ -110,55 +123,59 @@ func prepareRestoreImageDirForRestoreID(checkpointPath string, restoreID uint64)
 		rewritten = true
 	}
 	if !rewritten {
-		return checkpointPath, func() {}, nil
+		return checkpointPath, func() error { return nil }, nil
 	}
 
-	privateDir, err := os.MkdirTemp(filepath.Dir(checkpointPath), ".dynamo-criu-restore-*")
+	replacementFilesImage, err := os.CreateTemp("", ".dynamo-criu-files-*.img")
 	if err != nil {
 		closeFDs(reservationFDs)
-		return "", nil, fmt.Errorf("failed to create private CRIU image directory: %w", err)
+		return "", nil, fmt.Errorf("failed to create private %s: %w", filesImageFilename, err)
 	}
+	replacementFilesImagePath := replacementFilesImage.Name()
+	replacementRemoved := false
+	defer func() {
+		if !replacementRemoved {
+			_ = os.Remove(replacementFilesImagePath)
+		}
+	}()
+
+	var removeImageView func() error
 	var cleanupOnce sync.Once
-	cleanup := func() {
+	var cleanupErr error
+	cleanup := func() error {
 		cleanupOnce.Do(func() {
 			closeFDs(reservationFDs)
-			_ = os.RemoveAll(privateDir)
+			if removeImageView != nil {
+				cleanupErr = removeImageView()
+			}
 		})
+		return cleanupErr
 	}
-	fail := func(err error) (string, func(), error) {
-		cleanup()
+	fail := func(err error) (string, func() error, error) {
+		if cleanupErr := cleanup(); cleanupErr != nil {
+			return "", nil, fmt.Errorf("%w (cleanup failed: %v)", err, cleanupErr)
+		}
 		return "", nil, err
 	}
 
-	entries, err := os.ReadDir(checkpointPath)
-	if err != nil {
-		return fail(fmt.Errorf("failed to read checkpoint directory: %w", err))
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if name == filesImageFilename || !strings.HasSuffix(name, ".img") {
-			continue
-		}
-		// CRIU does not modify restore images; hard links keep them visible after it
-		// enters the restored mount namespace without copying large page images.
-		if err := os.Link(filepath.Join(checkpointPath, name), filepath.Join(privateDir, name)); err != nil {
-			return fail(fmt.Errorf("failed to hard-link CRIU image %s: %w", name, err))
-		}
-	}
-
-	privateFilesImage, err := os.OpenFile(filepath.Join(privateDir, filesImageFilename), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err != nil {
-		return fail(fmt.Errorf("failed to create private %s: %w", filesImageFilename, err))
-	}
-	if err := crit.New(nil, privateFilesImage, "", false, false).Encode(image); err != nil {
-		_ = privateFilesImage.Close()
+	if err := crit.New(nil, replacementFilesImage, "", false, false).Encode(image); err != nil {
+		_ = replacementFilesImage.Close()
 		return fail(fmt.Errorf("failed to encode private %s: %w", filesImageFilename, err))
 	}
-	if err := privateFilesImage.Close(); err != nil {
+	if err := replacementFilesImage.Close(); err != nil {
 		return fail(fmt.Errorf("failed to close private %s: %w", filesImageFilename, err))
 	}
 
-	return privateDir, cleanup, nil
+	removeImageView, err = mountReplacement(checkpointPath, replacementFilesImagePath)
+	if err != nil {
+		return fail(fmt.Errorf("failed to mount private %s: %w", filesImageFilename, err))
+	}
+	if err := os.Remove(replacementFilesImagePath); err != nil {
+		return fail(fmt.Errorf("failed to unlink mounted private %s: %w", filesImageFilename, err))
+	}
+	replacementRemoved = true
+
+	return checkpointPath, cleanup, nil
 }
 
 func planTCPPortRewrites(image *crit.CriuImage) (

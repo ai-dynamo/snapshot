@@ -42,7 +42,7 @@ func ExecuteRestore(
 	// and unlock. That keeps the window where the restored process runs with CUDA
 	// still locked as short as possible. cleanup is called on the error paths below.
 	var openFiles, inheritedFiles []*os.File
-	imageDirPath, removeImageDir, err := prepareRestoreImageDir(checkpointPath)
+	imageDirPath, removeImageView, err := prepareRestoreImageDir(checkpointPath)
 	if err != nil {
 		return 0, nil, fmt.Errorf("failed to prepare CRIU image directory: %w", err)
 	}
@@ -50,7 +50,9 @@ func ExecuteRestore(
 	cleanup := func() {
 		closeFiles(inheritedFiles)
 		closeFiles(openFiles)
-		removeImageDir()
+		if err := removeImageView(); err != nil {
+			log.Error(err, "failed to remove private CRIU image view", "path", imageDirPath)
+		}
 		if err := os.RemoveAll(confTmpDir); err != nil {
 			log.Error(err, "failed to remove criu config temp dir", "path", confTmpDir)
 		}
