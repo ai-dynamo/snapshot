@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/yaml"
 
 	"github.com/ai-dynamo/snapshot/api/v1alpha1/crds"
 )
@@ -183,21 +184,31 @@ func TestEmbeddedCRDsApplyCleanly(t *testing.T) {
 	manifests := crds.All()
 	require.NotEmpty(t, manifests)
 
+	// Derive expected names by parsing each manifest directly — independent of
+	// InstallCRDs, so a bug that mislabels every applied CRD the same way
+	// couldn't slip past this test.
+	wantNames := make([]string, 0, len(manifests))
+	for _, manifest := range manifests {
+		obj := &unstructured.Unstructured{}
+		require.NoError(t, yaml.Unmarshal([]byte(manifest), &obj.Object))
+		name := obj.GetName()
+		require.NotEmpty(t, name, "manifest has no metadata.name: %s", manifest)
+		wantNames = append(wantNames, name)
+	}
+
 	cl := newFakeClient()
 	results, err := InstallCRDs(t.Context(), cl, logr.Discard(), manifests)
 
 	require.NoError(t, err)
 	require.Len(t, results, len(manifests), "expected one result per embedded CRD manifest")
 
-	// Derive expected names from the results themselves rather than a hardcoded
-	// list, so adding a new embedded CRD doesn't require updating this test.
-	names := make([]string, 0, len(results))
+	gotNames := make([]string, 0, len(results))
 	for _, res := range results {
 		assert.Equal(t, ActionCreated, res.Action)
-		assert.NotEmpty(t, res.Name)
-		names = append(names, res.Name)
+		gotNames = append(gotNames, res.Name)
 	}
-	assert.ElementsMatch(t, names, cl.applied)
+	assert.ElementsMatch(t, wantNames, gotNames)
+	assert.ElementsMatch(t, wantNames, cl.applied)
 }
 
 var _ Client = (*fakeClient)(nil)

@@ -32,15 +32,15 @@ const (
 	ReasonPodReady   = "PodReady"
 
 	// Captured
-	ReasonDumpInProgress = "DumpInProgress"
-	ReasonDumpCompleted  = "DumpCompleted"
+	ReasonCaptureInProgress = "CaptureInProgress"
+	ReasonCaptureCompleted  = "CaptureCompleted"
 
 	// Completed
 	ReasonWaitingForPodCompletion = "WaitingForPodCompletion"
 	ReasonJobCompleted            = "JobCompleted"
 
 	// Failed=True
-	ReasonDumpFailed              = "DumpFailed"
+	ReasonCaptureFailed           = "CaptureFailed"
 	ReasonPodSnapshotFailed       = "PodSnapshotFailed"
 	ReasonJobFailed               = "JobFailed"
 	ReasonDeadlineExceeded        = "DeadlineExceeded"
@@ -71,6 +71,8 @@ func IsSnapshotJobFailed(j *SnapshotJob) bool {
 func IsSnapshotJobTerminal(j *SnapshotJob) bool {
 	return IsSnapshotJobCompleted(j) || IsSnapshotJobFailed(j)
 }
+
+// +kubebuilder:validation:XValidation:rule="self.podSnapshotTemplate.targetContainers.all(c, c in self.podTemplate.spec.containers.map(x, x.name))",message="targetContainers must name containers present in podTemplate"
 
 // SnapshotJobSpec defines the desired state of SnapshotJob.
 type SnapshotJobSpec struct {
@@ -117,16 +119,6 @@ type PodSnapshotTemplate struct {
 	// +kubebuilder:validation:items:MaxLength=63
 	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	TargetContainers []string `json:"targetContainers,omitempty"`
-
-	// WrapLaunchJob wraps the target container's entrypoint with
-	// cuda-checkpoint --launch-job. This is a pass-through of Dynamo's existing
-	// mechanism, carried forward so migrating from DynamoCheckpoint does not
-	// regress it — general multi-GPU capture is not supported or validated in
-	// v1alpha1. Requires targetContainer.command to be non-empty — the command
-	// is the entrypoint that gets prepended. The controller fails with
-	// Failed=True if this is true and command is absent.
-	// +optional
-	WrapLaunchJob bool `json:"wrapLaunchJob,omitempty"`
 }
 
 // SnapshotJobStatus defines the observed state of SnapshotJob.
@@ -160,7 +152,6 @@ type SnapshotJobStatus struct {
 // +kubebuilder:printcolumn:name="PodSnapshot",type="string",JSONPath=".status.podSnapshotName"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.spec) || self.spec == oldSelf.spec",message="spec is immutable"
-// +kubebuilder:validation:XValidation:rule="self.spec.podSnapshotTemplate.targetContainers.all(c, c in self.spec.podTemplate.spec.containers.map(x, x.name))",message="targetContainers must name containers present in podTemplate"
 
 // SnapshotJob is the Schema for the snapshotjobs API. It fuses running a
 // checkpoint-ready workload pod and capturing it into a PodSnapshot into one

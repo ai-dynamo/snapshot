@@ -100,16 +100,6 @@ spec:
                     maxItems: 1
                     minItems: 1
                     type: array
-                  wrapLaunchJob:
-                    description: |-
-                      WrapLaunchJob wraps the target container's entrypoint with
-                      cuda-checkpoint --launch-job. This is a pass-through of Dynamo's existing
-                      mechanism, carried forward so migrating from DynamoCheckpoint does not
-                      regress it — general multi-GPU capture is not supported or validated in
-                      v1alpha1. Requires targetContainer.command to be non-empty — the command
-                      is the entrypoint that gets prepended. The controller fails with
-                      Failed=True if this is true and command is absent.
-                    type: boolean
                 type: object
               podTemplate:
                 description: |-
@@ -8591,6 +8581,10 @@ spec:
             - podSnapshotTemplate
             - podTemplate
             type: object
+            x-kubernetes-validations:
+            - message: targetContainers must name containers present in podTemplate
+              rule: self.podSnapshotTemplate.targetContainers.all(c, c in self.podTemplate.spec.containers.map(x,
+                x.name))
           status:
             description: SnapshotJobStatus defines the observed state of SnapshotJob.
             properties:
@@ -8673,9 +8667,6 @@ spec:
         x-kubernetes-validations:
         - message: spec is immutable
           rule: '!has(oldSelf.spec) || self.spec == oldSelf.spec'
-        - message: targetContainers must name containers present in podTemplate
-          rule: self.spec.podSnapshotTemplate.targetContainers.all(c, c in self.spec.podTemplate.spec.containers.map(x,
-            x.name))
     served: true
     storage: true
     subresources:
