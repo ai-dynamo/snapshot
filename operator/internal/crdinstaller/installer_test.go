@@ -207,8 +207,13 @@ func TestEmbeddedCRDsApplyCleanly(t *testing.T) {
 		assert.Equal(t, ActionCreated, res.Action)
 		gotNames = append(gotNames, res.Name)
 	}
-	assert.ElementsMatch(t, wantNames, gotNames)
-	assert.ElementsMatch(t, wantNames, cl.applied)
+	// InstallCRDs processes manifests in order and fakeClient.Apply records
+	// calls in the order they happen, so ordered equality is both correct and
+	// strictly stronger than ElementsMatch — it also catches a manifest being
+	// applied under the wrong name (e.g. an index mix-up), which membership
+	// alone would miss.
+	assert.Equal(t, wantNames, gotNames)
+	assert.Equal(t, wantNames, cl.applied)
 }
 
 var _ Client = (*fakeClient)(nil)
