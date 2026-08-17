@@ -4,8 +4,8 @@
  *
  * ns-bind-mount: bind-mount or unmount a directory in another process's mount namespace.
  *
- * Mount:      ns-bind-mount <pid> <src> <dst> [ro]
- * Mount-fd:   ns-bind-mount mount-fd <ns_fd> <src> <dst> [ro]
+ * Mount:      ns-bind-mount <pid> <src> <dst> [ro] [noexec]
+ * Mount-fd:   ns-bind-mount mount-fd <ns_fd> <src> <dst> [ro] [noexec]
  * Unmount:    ns-bind-mount umount <pid> <dst>
  * Unmount-fd: ns-bind-mount umount-fd <ns_fd> <dst> [created]
  *
@@ -15,7 +15,8 @@
  * the helper.  Both mount paths apply mount_setattr(MOUNT_ATTR_RDONLY) to the
  * cloned tree *before* attaching so the mount is never visible as writable
  * inside the target namespace.  Unmount enters the namespace the same way and
- * calls umount2(MNT_DETACH).  Both subcommands run as single-threaded C
+ * calls umount2(MNT_DETACH). Optional noexec policy is applied to checkpoint
+ * artifacts while the binary bundle remains executable. Both subcommands run as single-threaded C
  * processes so setns(CLONE_NEWNS) is allowed (prohibited in multithreaded Go
  * programs).
  *
@@ -59,6 +60,9 @@ struct mount_attr {
   uint64_t propagation;
   uint64_t userns_fd;
 };
+#endif
+#ifndef MOUNT_ATTR_NOEXEC
+#define MOUNT_ATTR_NOEXEC 0x00000008
 #endif
 
 /* Destinations mirror the Go constants in internal/nsmount/injector.go. The
@@ -147,16 +151,44 @@ parse_pid(const char* str)
   return (int)val;
 }
 
-/* Apply read-only attributes to tree_fd before attaching it so the mount is
- * never visible as writable inside the target namespace. */
+struct mount_options {
+  int readonly;
+  int noexec;
+};
+
 static int
-apply_rdonly_attrs(int tree_fd)
+parse_mount_options(int argc, char* argv[], int first, struct mount_options* options)
+{
+  memset(options, 0, sizeof(*options));
+  for (int i = first; i < argc; i++) {
+    if (strcmp(argv[i], "ro") == 0) {
+      options->readonly = 1;
+    } else if (strcmp(argv[i], "noexec") == 0) {
+      options->noexec = 1;
+    } else {
+      fprintf(stderr, "unknown mount option: %s\n", argv[i]);
+      return -1;
+    }
+  }
+  return 0;
+}
+
+/* Apply mount attributes to tree_fd before attaching it so the mount is never
+ * visible with weaker policy inside the target namespace. */
+static int
+apply_mount_attrs(int tree_fd, const struct mount_options* options)
 {
   struct mount_attr attr = {
-      .attr_set = MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV,
+      .attr_set = 0,
   };
+  if (options->readonly)
+    attr.attr_set |= MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV;
+  if (options->noexec)
+    attr.attr_set |= MOUNT_ATTR_NOEXEC;
+  if (attr.attr_set == 0)
+    return 0;
   if (syscall(__NR_mount_setattr, tree_fd, "", AT_EMPTY_PATH, &attr, sizeof attr) < 0) {
-    fprintf(stderr, "mount_setattr ro: %s\n", strerror(errno));
+    fprintf(stderr, "mount_setattr: %s\n", strerror(errno));
     return -1;
   }
   return 0;
@@ -282,7 +314,7 @@ static int
 do_mount_fd(int argc, char* argv[])
 {
   if (argc < 5) {
-    fprintf(stderr, "usage: ns-bind-mount mount-fd <ns_fd> <src> <dst> [ro]\n");
+    fprintf(stderr, "usage: ns-bind-mount mount-fd <ns_fd> <src> <dst> [ro] [noexec]\n");
     return 1;
   }
   char* end;
@@ -294,7 +326,9 @@ do_mount_fd(int argc, char* argv[])
   int ns_fd = (int)fd_val;
   const char* src = argv[3];
   const char* dst = argv[4];
-  int readonly = (argc >= 6 && strcmp(argv[5], "ro") == 0);
+  struct mount_options options;
+  if (parse_mount_options(argc, argv, 5, &options) < 0)
+    return 1;
 
   if (has_dotdot_component(src)) {
     fprintf(stderr, "src must not contain '..' components: %s\n", src);
@@ -316,13 +350,9 @@ do_mount_fd(int argc, char* argv[])
     return 1;
   }
 
-  /* Apply read-only attributes before attaching so the mount is never
-   * visible as writable inside the target namespace. */
-  if (readonly) {
-    if (apply_rdonly_attrs(tree_fd) < 0) {
-      close(tree_fd);
-      return 1;
-    }
+  if (apply_mount_attrs(tree_fd, &options) < 0) {
+    close(tree_fd);
+    return 1;
   }
 
   /* Enter the target namespace via the inherited fd. */
@@ -365,8 +395,8 @@ main(int argc, char* argv[])
   if (argc < 4) {
     fprintf(
         stderr,
-        "usage: ns-bind-mount <pid> <src> <dst> [ro]\n"
-        "       ns-bind-mount mount-fd <ns_fd> <src> <dst> [ro]\n"
+        "usage: ns-bind-mount <pid> <src> <dst> [ro] [noexec]\n"
+        "       ns-bind-mount mount-fd <ns_fd> <src> <dst> [ro] [noexec]\n"
         "       ns-bind-mount umount <pid> <dst>\n"
         "       ns-bind-mount umount-fd <ns_fd> <dst> [created]\n");
     return 1;
@@ -377,7 +407,9 @@ main(int argc, char* argv[])
     return 1;
   const char* src = argv[2];
   const char* dst = argv[3];
-  int readonly = (argc >= 5 && strcmp(argv[4], "ro") == 0);
+  struct mount_options options;
+  if (parse_mount_options(argc, argv, 4, &options) < 0)
+    return 1;
 
   if (has_dotdot_component(src)) {
     fprintf(stderr, "src must not contain '..' components: %s\n", src);
@@ -399,13 +431,9 @@ main(int argc, char* argv[])
     return 1;
   }
 
-  /* Apply read-only attributes before attaching so the mount is never
-   * visible as writable inside the target namespace. */
-  if (readonly) {
-    if (apply_rdonly_attrs(tree_fd) < 0) {
-      close(tree_fd);
-      return 1;
-    }
+  if (apply_mount_attrs(tree_fd, &options) < 0) {
+    close(tree_fd);
+    return 1;
   }
 
   /* Enter the target process's mount namespace. */

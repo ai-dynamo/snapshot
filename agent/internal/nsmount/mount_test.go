@@ -55,11 +55,11 @@ func TestExecMounterMountArgs(t *testing.T) {
 	bin := writeFakeBinary(t, `printf '%s\n' "$@" >> `+logFile)
 	m := newMounterForTest(t, bin)
 
-	_, err := m.Mount(context.Background(), os.Getpid(), "/src", CheckpointDst, MountOptions{ReadOnly: true})
+	_, err := m.Mount(context.Background(), os.Getpid(), "/src", CheckpointDst, MountOptions{ReadOnly: true, NoExec: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"mount-fd", fmt.Sprintf("%d", nsFdChildNum), "/src", CheckpointDst, "ro"}
+	want := []string{"mount-fd", fmt.Sprintf("%d", nsFdChildNum), "/src", CheckpointDst, "ro", "noexec"}
 	got := readLines(t, logFile)
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("args = %v, want %v", got, want)

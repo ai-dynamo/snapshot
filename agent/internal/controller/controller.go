@@ -23,6 +23,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -115,7 +116,7 @@ func NewNodeController(
 	if err != nil {
 		return nil, fmt.Errorf("failed to create binary injector: %w", err)
 	}
-	injector := executor.Mounters{Bundle: nsm, Artifact: nsm}
+	injector := executor.Mounters{Bundle: nsm, Artifact: nsm.WithNoExec()}
 
 	w := &NodeController{
 		config:    cfg,
@@ -155,9 +156,7 @@ func (w *NodeController) Run(ctx context.Context) error {
 	restoreSelector := restoreSel.String()
 
 	restoreFactoryOpts := []informers.SharedInformerOption{
-		informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
-			opts.LabelSelector = restoreSelector
-		}),
+		informers.WithTweakListOptions(tweakNodePodListOptions(restoreSelector, w.config.NodeName)),
 	}
 
 	restoreFactory := informers.NewSharedInformerFactoryWithOptions(
@@ -229,9 +228,7 @@ func (w *NodeController) Run(ctx context.Context) error {
 	// informer's.
 	sourceSelector := labels.SelectorFromSet(labels.Set{snapshotv1alpha1.CaptureEligibleLabel: "true"}).String()
 	sourceFactoryOpts := []informers.SharedInformerOption{
-		informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
-			opts.LabelSelector = sourceSelector
-		}),
+		informers.WithTweakListOptions(tweakNodePodListOptions(sourceSelector, w.config.NodeName)),
 	}
 	sourceFactory := informers.NewSharedInformerFactoryWithOptions(
 		w.clientset, 30*time.Second, sourceFactoryOpts...,
@@ -274,6 +271,13 @@ func (w *NodeController) Run(ctx context.Context) error {
 	<-ctx.Done()
 	stopOnce.Do(func() { close(w.stopCh) })
 	return nil
+}
+
+func tweakNodePodListOptions(labelSelector, nodeName string) func(*metav1.ListOptions) {
+	return func(opts *metav1.ListOptions) {
+		opts.LabelSelector = labelSelector
+		opts.FieldSelector = fields.OneTermEqualSelector("spec.nodeName", nodeName).String()
+	}
 }
 
 func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Pod) {

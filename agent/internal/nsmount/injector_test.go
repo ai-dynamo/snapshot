@@ -57,18 +57,21 @@ func TestMountUsesCallerPathsAndReadOnlyPolicy(t *testing.T) {
 	m := &mockMounter{}
 	nsm := newMounter(t, m)
 
-	for _, tc := range []struct{ src, dst string }{
-		{SnapshotBinSrc, SnapshotBinDst},
-		{"/checkpoints/abc/versions/1", CheckpointDst},
+	for _, tc := range []struct {
+		mounter  *NSMounter
+		src, dst string
+	}{
+		{nsm, SnapshotBinSrc, SnapshotBinDst},
+		{nsm.WithNoExec(), "/checkpoints/abc/versions/1", CheckpointDst},
 	} {
-		if _, err := nsm.Mount(context.Background(), testPID, tc.src, tc.dst); err != nil {
+		if _, err := tc.mounter.Mount(context.Background(), testPID, tc.src, tc.dst); err != nil {
 			t.Fatalf("Mount(%s, %s): %v", tc.src, tc.dst, err)
 		}
 	}
 
 	want := []mountCall{
 		{pid: testPID, src: SnapshotBinSrc, dst: SnapshotBinDst, opts: MountOptions{ReadOnly: true}},
-		{pid: testPID, src: "/checkpoints/abc/versions/1", dst: CheckpointDst, opts: MountOptions{ReadOnly: true}},
+		{pid: testPID, src: "/checkpoints/abc/versions/1", dst: CheckpointDst, opts: MountOptions{ReadOnly: true, NoExec: true}},
 	}
 	if len(m.calls) != len(want) {
 		t.Fatalf("got %d calls, want %d", len(m.calls), len(want))
