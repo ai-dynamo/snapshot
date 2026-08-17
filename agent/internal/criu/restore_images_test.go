@@ -25,16 +25,24 @@ func TestPrepareRestoreImageDirRewritesObservedSocketTopology(t *testing.T) {
 	entries := observedSocketTopology()
 	canonical := writeFilesImage(t, checkpointPath, entries)
 
-	imageDir, cleanup, err := prepareRestoreImageDirForRestoreID(checkpointPath, 987654321)
+	mounter := &capturingFilesImageMounter{}
+	imageDir, cleanup, err := prepareRestoreImageDirForRestoreIDWithMount(
+		checkpointPath,
+		987654321,
+		mounter.mount,
+	)
 	if err != nil {
 		t.Fatalf("prepare restore image directory: %v", err)
 	}
-	defer cleanup()
-	if imageDir == checkpointPath {
-		t.Fatal("socket conflicts did not produce a private restore image")
+	if imageDir != checkpointPath {
+		t.Fatalf("image directory = %q, want checkpoint %q", imageDir, checkpointPath)
 	}
 
-	restored := readFilesImage(t, imageDir)
+	capturedImages := mounter.capturedImages()
+	if len(capturedImages) != 1 {
+		t.Fatalf("captured files images = %d, want 1", len(capturedImages))
+	}
+	restored := decodeFilesImage(t, capturedImages[0])
 	if got := restored[0].Usk.Name; !bytes.HasPrefix(got, []byte("\x00dynamo-")) {
 		t.Fatalf("CUDA listener address = %q, want Dynamo abstract address", got)
 	}
@@ -89,38 +97,89 @@ func TestPrepareRestoreImageDirRewritesObservedSocketTopology(t *testing.T) {
 	if !bytes.Equal(gotCanonical, canonical) {
 		t.Fatal("canonical files.img was modified")
 	}
+	if err := cleanup(); err != nil {
+		t.Fatalf("cleanup restore image directory: %v", err)
+	}
+	if err := cleanup(); err != nil {
+		t.Fatalf("second cleanup restore image directory: %v", err)
+	}
+	if mounter.cleanupCalls != 1 {
+		t.Fatalf("mount cleanup calls = %d, want 1", mounter.cleanupCalls)
+	}
 }
 
-func TestPrepareRestoreImageDirConcurrentRestoresAreIndependent(t *testing.T) {
+func TestPrepareRestoreImageDirWithoutRewritesUsesCheckpointDirectly(t *testing.T) {
+	checkpointPath := t.TempDir()
+	writeFilesImage(t, checkpointPath, []*fdinfo.FileEntry{
+		newUnixSocketEntry(1, []byte("/tmp/non-conflicting.sock\x00"), 101, unix.SOCK_STREAM, linuxUnixSocketStateListen),
+	})
+	mounter := &capturingFilesImageMounter{}
+
+	imageDir, cleanup, err := prepareRestoreImageDirForRestoreIDWithMount(
+		checkpointPath,
+		987654321,
+		mounter.mount,
+	)
+	if err != nil {
+		t.Fatalf("prepare restore image directory: %v", err)
+	}
+	if imageDir != checkpointPath {
+		t.Fatalf("image directory = %q, want original checkpoint %q", imageDir, checkpointPath)
+	}
+	if err := cleanup(); err != nil {
+		t.Fatalf("cleanup no-op image view: %v", err)
+	}
+	if len(mounter.capturedImages()) != 0 {
+		t.Fatalf("mounted replacement images = %d, want 0", len(mounter.capturedImages()))
+	}
+}
+
+func TestPrepareRestoreImageDirConcurrentRewriteMetadataIsIndependent(t *testing.T) {
 	checkpointPath := t.TempDir()
 	writeFilesImage(t, checkpointPath, observedSocketTopology())
 
 	type result struct {
 		path    string
-		cleanup func()
+		cleanup func() error
 		err     error
 	}
+	mounter := &capturingFilesImageMounter{}
 	results := make(chan result, 2)
 	var wait sync.WaitGroup
 	for _, restoreID := range []uint64{111, 222} {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			path, cleanup, err := prepareRestoreImageDirForRestoreID(checkpointPath, restoreID)
+			path, cleanup, err := prepareRestoreImageDirForRestoreIDWithMount(
+				checkpointPath,
+				restoreID,
+				mounter.mount,
+			)
 			results <- result{path: path, cleanup: cleanup, err: err}
 		}()
 	}
 	wait.Wait()
 	close(results)
 
-	addresses := make(map[string]struct{})
-	ports := make(map[uint32]struct{})
 	for result := range results {
 		if result.err != nil {
 			t.Fatalf("prepare restore image directory: %v", result.err)
 		}
-		t.Cleanup(result.cleanup)
-		entries := readFilesImage(t, result.path)
+		cleanup := result.cleanup
+		t.Cleanup(func() {
+			if err := cleanup(); err != nil {
+				t.Errorf("cleanup restore image directory: %v", err)
+			}
+		})
+		if result.path != checkpointPath {
+			t.Fatalf("image directory = %q, want checkpoint %q", result.path, checkpointPath)
+		}
+	}
+
+	addresses := make(map[string]struct{})
+	ports := make(map[uint32]struct{})
+	for _, capturedImage := range mounter.capturedImages() {
+		entries := decodeFilesImage(t, capturedImage)
 		addresses[string(entries[0].Usk.Name)] = struct{}{}
 		ports[entries[5].Isk.GetSrcPort()] = struct{}{}
 	}
@@ -130,6 +189,39 @@ func TestPrepareRestoreImageDirConcurrentRestoresAreIndependent(t *testing.T) {
 	if len(ports) != 2 {
 		t.Fatalf("concurrent restores used %d TCP client ports, want 2", len(ports))
 	}
+}
+
+type capturingFilesImageMounter struct {
+	mu sync.Mutex
+
+	images       [][]byte
+	cleanupCalls int
+}
+
+func (m *capturingFilesImageMounter) mount(
+	_ string,
+	replacementFilesImagePath string,
+) (func() error, error) {
+	data, err := os.ReadFile(replacementFilesImagePath)
+	if err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	m.images = append(m.images, data)
+	m.mu.Unlock()
+	cleanup := func() error {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.cleanupCalls++
+		return nil
+	}
+	return cleanup, nil
+}
+
+func (m *capturingFilesImageMounter) capturedImages() [][]byte {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([][]byte(nil), m.images...)
 }
 
 func observedSocketTopology() []*fdinfo.FileEntry {
@@ -257,15 +349,19 @@ func writeFilesImage(t *testing.T, dir string, entries []*fdinfo.FileEntry) []by
 	return data
 }
 
-func readFilesImage(t *testing.T, dir string) []*fdinfo.FileEntry {
+func decodeFilesImage(t *testing.T, data []byte) []*fdinfo.FileEntry {
 	t.Helper()
-	file, err := os.Open(filepath.Join(dir, filesImageFilename))
+	path := filepath.Join(t.TempDir(), filesImageFilename)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatalf("write captured files image: %v", err)
+	}
+	file, err := os.Open(path)
 	if err != nil {
-		t.Fatalf("open files image: %v", err)
+		t.Fatalf("open captured files image: %v", err)
 	}
 	defer func() {
 		if err := file.Close(); err != nil {
-			t.Errorf("close files image: %v", err)
+			t.Errorf("close captured files image: %v", err)
 		}
 	}()
 	image, err := crit.New(file, nil, "", false, false).Decode(&fdinfo.FileEntry{})
