@@ -97,6 +97,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	defer func() {
 		if cleanupErr := bundleMount.Unmount(context.Background()); cleanupErr != nil {
 			log.Error(cleanupErr, "failed to clean bundle mount from placeholder namespace")
+			setCleanupErrorIfSuccessful(&retErr, "unmount agent bundle from placeholder", cleanupErr)
 		}
 	}()
 	artifactMount, err := mounts.Artifact.Mount(ctx, snap.PlaceholderPID, artifactPath, nsmount.CheckpointDst)
@@ -106,6 +107,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	defer func() {
 		if cleanupErr := artifactMount.Unmount(context.Background()); cleanupErr != nil {
 			log.Error(cleanupErr, "failed to clean artifact mount from placeholder namespace")
+			setCleanupErrorIfSuccessful(&retErr, "unmount checkpoint artifact from placeholder", cleanupErr)
 		}
 	}()
 	injectDuration := time.Since(injectStart)
@@ -147,6 +149,12 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	)
 
 	return snap.PlaceholderPID, nil
+}
+
+func setCleanupErrorIfSuccessful(retErr *error, action string, cleanupErr error) {
+	if *retErr == nil {
+		*retErr = fmt.Errorf("%s: %w", action, cleanupErr)
+	}
 }
 
 func validateRestoredProcess(targetRoot string, restoredPID int, log logr.Logger) error {

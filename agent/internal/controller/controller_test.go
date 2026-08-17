@@ -83,8 +83,27 @@ func (e errorInjector) Mount(_ context.Context, _ int, _, _ string) (nsmount.Mou
 	return nil, e.err
 }
 
+type recordedMountCall struct {
+	src string
+	dst string
+}
+
+type recordingInjector struct {
+	calls *[]recordedMountCall
+	err   error
+}
+
+func (r recordingInjector) Mount(_ context.Context, _ int, src, dst string) (nsmount.MountPoint, error) {
+	*r.calls = append(*r.calls, recordedMountCall{src: src, dst: dst})
+	if r.err != nil {
+		return nil, r.err
+	}
+	return noopMountPoint{}, nil
+}
+
 var _ executor.Mounter = noopInjector{}
 var _ executor.Mounter = errorInjector{}
+var _ executor.Mounter = recordingInjector{}
 
 // makeTestController creates a NodeController with a fake k8s client and nil executors.
 // The fake clientset is empty so any goroutine launched by the restore path will fail on
@@ -226,7 +245,24 @@ func TestArtifactPathForPod(t *testing.T) {
 		if _, err := w.artifactPathForPod(pod, "../escape"); err == nil {
 			t.Fatal("expected unsafe checkpoint ID to fail")
 		}
+		unsafeVersion := pod.DeepCopy()
+		unsafeVersion.Annotations[snapshotv1alpha1.CheckpointArtifactVersionAnnotation] = "../escape"
+		if _, err := w.artifactPathForPod(unsafeVersion, "abc123"); err == nil {
+			t.Fatal("expected unsafe artifact version to fail")
+		}
 	})
+}
+
+func TestTweakNodePodListOptions(t *testing.T) {
+	opts := &metav1.ListOptions{}
+	tweakNodePodListOptions("snapshot.nvidia.com/checkpoint-id", testNodeName)(opts)
+
+	if opts.LabelSelector != "snapshot.nvidia.com/checkpoint-id" {
+		t.Fatalf("label selector = %q", opts.LabelSelector)
+	}
+	if opts.FieldSelector != "spec.nodeName="+testNodeName {
+		t.Fatalf("field selector = %q", opts.FieldSelector)
+	}
 }
 
 func TestRestoreCheckpointReady(t *testing.T) {
@@ -697,21 +733,50 @@ func TestRunRestoreEmitsRestoreFailedEventOnInjectError(t *testing.T) {
 		t.Fatalf("write manifest: %v", err)
 	}
 
-	injectErr := errors.New("injector unavailable")
-	w := makeTestController(t, pod)
-	w.config.Storage.BasePath = basePath
-	// math.MaxInt32 is above any real kernel pid_max (≤4194304) so SendSignalToPID
-	// returns ESRCH instead of killing the test process.
-	w.runtime = &fakeRuntime{resolveContainerPID: math.MaxInt32}
-	w.injector = executor.Mounters{Bundle: errorInjector{err: injectErr}, Artifact: noopInjector{}}
-
-	_ = w.runRestore(
-		context.Background(), pod, "main", "ctr-abc", checkpointID,
-		"default/test-pod/main/ctr-abc",
-		time.Time{},
-	)
-
-	if !sawEventReason(w.clientset.(*fake.Clientset), "RestoreFailed") {
-		t.Fatal("expected RestoreFailed event when injector returns an error")
+	runRestore := func(t *testing.T, mounters executor.Mounters) *NodeController {
+		t.Helper()
+		w := makeTestController(t, pod)
+		w.config.Storage.BasePath = basePath
+		// math.MaxInt32 is above any real kernel pid_max (≤4194304) so SendSignalToPID
+		// returns ESRCH instead of killing the test process.
+		w.runtime = &fakeRuntime{resolveContainerPID: math.MaxInt32}
+		w.injector = mounters
+		_ = w.runRestore(
+			context.Background(), pod, "main", "ctr-abc", checkpointID,
+			"default/test-pod/main/ctr-abc",
+			time.Time{},
+		)
+		return w
 	}
+
+	injectErr := errors.New("injector unavailable")
+	t.Run("bundle mount failure", func(t *testing.T) {
+		w := runRestore(t, executor.Mounters{Bundle: errorInjector{err: injectErr}, Artifact: noopInjector{}})
+		if !sawEventReason(w.clientset.(*fake.Clientset), "RestoreFailed") {
+			t.Fatal("expected RestoreFailed event when bundle mount fails")
+		}
+	})
+
+	t.Run("artifact mount failure and role paths", func(t *testing.T) {
+		var calls []recordedMountCall
+		w := runRestore(t, executor.Mounters{
+			Bundle:   recordingInjector{calls: &calls},
+			Artifact: recordingInjector{calls: &calls, err: injectErr},
+		})
+		if !sawEventReason(w.clientset.(*fake.Clientset), "RestoreFailed") {
+			t.Fatal("expected RestoreFailed event when artifact mount fails")
+		}
+		want := []recordedMountCall{
+			{src: nsmount.SnapshotBinSrc, dst: nsmount.SnapshotBinDst},
+			{src: checkpointDir, dst: nsmount.CheckpointDst},
+		}
+		if len(calls) != len(want) {
+			t.Fatalf("mount calls = %#v, want %#v", calls, want)
+		}
+		for i := range want {
+			if calls[i] != want[i] {
+				t.Errorf("mount call[%d] = %#v, want %#v", i, calls[i], want[i])
+			}
+		}
+	})
 }

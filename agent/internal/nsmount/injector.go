@@ -49,6 +49,7 @@ type MountPoint interface {
 type NSMounter struct {
 	mounter mounter
 	log     logr.Logger
+	options MountOptions
 }
 
 // probeKernelMountAPI verifies that mount_setattr (Linux 5.12) is available.
@@ -74,14 +75,26 @@ func New(log logr.Logger) (*NSMounter, error) {
 }
 
 func newWithMounter(m mounter, log logr.Logger) *NSMounter {
-	return &NSMounter{mounter: m, log: log}
+	return &NSMounter{
+		mounter: m,
+		log:     log,
+		options: MountOptions{ReadOnly: true},
+	}
+}
+
+// WithNoExec returns a mounter that shares the same helper but prevents
+// execution from its mounted tree. The receiver remains executable.
+func (nsm *NSMounter) WithNoExec() *NSMounter {
+	clone := *nsm
+	clone.options.NoExec = true
+	return &clone
 }
 
 // Mount exposes src read-only at dst inside pid's mount namespace.
 func (nsm *NSMounter) Mount(ctx context.Context, pid int, src, dst string) (MountPoint, error) {
 	nsm.log.Info("mounting into placeholder namespace", "pid", pid, "src", src, "dst", dst)
 
-	ref, err := nsm.mounter.Mount(ctx, pid, src, dst, MountOptions{ReadOnly: true})
+	ref, err := nsm.mounter.Mount(ctx, pid, src, dst, nsm.options)
 	if err != nil {
 		return nil, err
 	}

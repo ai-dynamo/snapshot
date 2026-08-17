@@ -107,6 +107,15 @@ func GetGPUUUIDsViaNvidiaSmi(ctx context.Context, hostProcPath string, pid int) 
 	)
 	output, err := cmd.Output()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+			return nil, fmt.Errorf(
+				"nvidia-smi via nsenter (pid %d) failed: %w; stderr: %s",
+				pid,
+				err,
+				strings.TrimSpace(string(exitErr.Stderr)),
+			)
+		}
 		return nil, fmt.Errorf("nvidia-smi via nsenter (pid %d) failed: %w", pid, err)
 	}
 	var uuids []string

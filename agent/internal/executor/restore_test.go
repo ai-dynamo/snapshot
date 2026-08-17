@@ -79,6 +79,27 @@ func TestInspectRestoreUsesContainerIDWhenProvided(t *testing.T) {
 	}
 }
 
+func TestSetCleanupErrorIfSuccessful(t *testing.T) {
+	cleanupErr := errors.New("unmount failed")
+
+	t.Run("reports cleanup failure after successful restore", func(t *testing.T) {
+		var retErr error
+		setCleanupErrorIfSuccessful(&retErr, "unmount artifact", cleanupErr)
+		if !errors.Is(retErr, cleanupErr) || !strings.Contains(retErr.Error(), "unmount artifact") {
+			t.Fatalf("cleanup error = %v", retErr)
+		}
+	})
+
+	t.Run("preserves existing restore failure", func(t *testing.T) {
+		restoreErr := errors.New("restore failed")
+		retErr := restoreErr
+		setCleanupErrorIfSuccessful(&retErr, "unmount artifact", cleanupErr)
+		if retErr != restoreErr {
+			t.Fatalf("cleanup replaced restore error: %v", retErr)
+		}
+	})
+}
+
 func TestRestoreInNamespaceRejectsMultiGPUCheckpointWithoutLaunchJobState(t *testing.T) {
 	checkpointDir := t.TempDir()
 	manifest := types.NewCheckpointManifest(

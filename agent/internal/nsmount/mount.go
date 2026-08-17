@@ -26,6 +26,7 @@ const (
 
 type MountOptions struct {
 	ReadOnly bool
+	NoExec   bool
 }
 
 type mountRef interface {
@@ -96,6 +97,9 @@ func (m *execMounter) Mount(ctx context.Context, pid int, src, dst string, opts 
 	if opts.ReadOnly {
 		args = append(args, "ro")
 	}
+	if opts.NoExec {
+		args = append(args, "noexec")
+	}
 	cmd := exec.CommandContext(ctx, m.binaryPath, args...)
 	cmd.ExtraFiles = []*os.File{nsFd}
 	var stdout strings.Builder
@@ -107,12 +111,14 @@ func (m *execMounter) Mount(ctx context.Context, pid int, src, dst string, opts 
 		nsFd.Close()
 		return nil, fmt.Errorf("ns-bind-mount mount-fd %s -> %s: %w\noutput: %s", src, dst, err, strings.TrimSpace(stderr.String()))
 	}
-	m.log.Info("mounted into namespace", "src", src, "dst", dst, "readonly", opts.ReadOnly, "pid", pid)
+	m.log.Info("mounted into namespace", "src", src, "dst", dst, "readonly", opts.ReadOnly, "noexec", opts.NoExec, "pid", pid)
 
 	return &execMountRef{
 		binaryPath: m.binaryPath,
 		nsFd:       nsFd,
 		dst:        dst,
+		// mount-fd emits created_dst=1 after it attaches the mount. Preserve
+		// that contract so umount-fd removes only directories the helper made.
 		createdDst: strings.Contains(stdout.String(), "created_dst=1"),
 		log:        m.log,
 	}, nil

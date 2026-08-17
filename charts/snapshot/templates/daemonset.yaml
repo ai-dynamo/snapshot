@@ -1,4 +1,5 @@
 {{- include "snapshot.validateRuntime" . -}}
+{{- include "snapshot.validateCheckpointPVC" . -}}
 {{- if hasKey .Values.rbac "namespaceRestricted" -}}
 {{- fail "rbac.namespaceRestricted has been removed; snapshot-agent always watches cluster-wide" -}}
 {{- end -}}

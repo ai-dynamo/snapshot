@@ -26,6 +26,13 @@ The checkpoint PVC must support `ReadWriteMany` because agents on multiple nodes
 mount it concurrently. Chart-created claims always request `ReadWriteMany` and
 are retained when the Helm release is removed.
 
+An existing `ReadWriteOnce` claim cannot be upgraded in place because PVC access
+modes are immutable. The chart rejects retained and externally supplied claims
+that do not advertise `ReadWriteMany`. To migrate, create a new RWX claim, copy
+the retained checkpoint data once if it must be preserved, then set
+`storage.pvc.create=false` and `storage.pvc.name` to the new claim. The old
+retained claim remains untouched.
+
 ## CRI-O and OpenShift
 
 For CRI-O nodes set `runtime.type=crio`. Only set `runtime.socketPath` if the CRI
@@ -108,7 +115,8 @@ kubectl apply --server-side --force-conflicts -f ./charts/snapshot/crds/
 ## Verify
 
 ```bash
-kubectl get pvc snapshot-pvc -n ${NAMESPACE}
+PVC_NAME="${PVC_NAME:-snapshot-pvc}" # match storage.pvc.name
+kubectl get pvc "${PVC_NAME}" -n "${NAMESPACE}"
 kubectl rollout status daemonset/snapshot-agent -n ${NAMESPACE}
 kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 ```
@@ -149,7 +157,8 @@ The chart does not delete checkpoint data automatically. Remove the PVC yourself
 if you want to clear stored checkpoints:
 
 ```bash
-kubectl delete pvc snapshot-pvc -n ${NAMESPACE}
+PVC_NAME="${PVC_NAME:-snapshot-pvc}" # match storage.pvc.name
+kubectl delete pvc "${PVC_NAME}" -n "${NAMESPACE}"
 ```
 
 ## Notice and disclaimer
