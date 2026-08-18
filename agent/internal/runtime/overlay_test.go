@@ -250,6 +250,32 @@ func TestApplyRootfsDiff(t *testing.T) {
 			t.Fatal("ApplyRootfsDiff should propagate non-ENOENT stat error")
 		}
 	})
+
+	t.Run("staged local copy is removed after extract", func(t *testing.T) {
+		upperDir := t.TempDir()
+		checkpointDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(upperDir, "generated.txt"), []byte("runtime data"), 0644); err != nil {
+			t.Fatalf("write upperdir file: %v", err)
+		}
+		if _, err := CaptureRootfsDiff(upperDir, checkpointDir, types.OverlaySettings{}, nil); err != nil {
+			t.Fatalf("CaptureRootfsDiff: %v", err)
+		}
+
+		before, err := filepath.Glob(filepath.Join(os.TempDir(), rootfsDiffFilename+".*.tmp"))
+		if err != nil {
+			t.Fatalf("glob staged copies: %v", err)
+		}
+		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), testr.New(t)); err != nil {
+			t.Fatalf("ApplyRootfsDiff: %v", err)
+		}
+		after, err := filepath.Glob(filepath.Join(os.TempDir(), rootfsDiffFilename+".*.tmp"))
+		if err != nil {
+			t.Fatalf("glob staged copies: %v", err)
+		}
+		if len(after) != len(before) {
+			t.Fatalf("staged local copies leaked: before %v after %v", before, after)
+		}
+	})
 }
 
 func TestCaptureDeletedFiles(t *testing.T) {

@@ -6,6 +6,7 @@ package runtime
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -153,6 +154,10 @@ func CaptureDeletedFiles(upperDir, checkpointDir string) (bool, error) {
 }
 
 // ApplyRootfsDiff extracts rootfs-diff.tar into the target root.
+//
+// The archive is copied to local disk first. tar walks members with many small
+// reads; doing that directly from NFS is much slower than one sequential copy
+// plus a local extract.
 func ApplyRootfsDiff(checkpointPath, targetRoot string, log logr.Logger) error {
 	rootfsDiffPath := filepath.Join(checkpointPath, rootfsDiffFilename)
 	info, err := os.Stat(rootfsDiffPath)
@@ -168,17 +173,49 @@ func ApplyRootfsDiff(checkpointPath, targetRoot string, log logr.Logger) error {
 		return nil
 	}
 
+	localPath, cleanup, err := stageRootfsDiffLocally(rootfsDiffPath)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
 	// --skip-old-files: silently skip files that already exist in the restore target.
 	// The rootfs diff only contains overlay upperdir changes (runtime-generated files
 	// like triton caches, tmp files) — base image files should not be overwritten.
-	log.Info("Applying rootfs diff", "target", targetRoot)
-	cmd := exec.Command("tar", "--skip-old-files", "--blocking-factor=2048", "-C", targetRoot, "-xf", rootfsDiffPath)
+	log.Info("Applying rootfs diff", "target", targetRoot, "bytes", info.Size())
+	cmd := exec.Command("tar", "--skip-old-files", "--blocking-factor=2048", "-C", targetRoot, "-xf", localPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("tar extract failed: %w", err)
 	}
 	return nil
+}
+
+func stageRootfsDiffLocally(src string) (string, func(), error) {
+	in, err := os.Open(src)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to open rootfs diff: %w", err)
+	}
+	defer in.Close()
+
+	tmp, err := os.CreateTemp("", rootfsDiffFilename+".*.tmp")
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to create local rootfs diff: %w", err)
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpPath) }
+
+	if _, err := io.Copy(tmp, in); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return "", nil, fmt.Errorf("failed to stage rootfs diff locally: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("failed to close local rootfs diff: %w", err)
+	}
+	return tmpPath, cleanup, nil
 }
 
 // ApplyDeletedFiles removes files marked as deleted in the checkpoint.
