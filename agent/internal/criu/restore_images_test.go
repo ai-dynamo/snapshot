@@ -25,7 +25,7 @@ func TestPrepareRestoreImageDirRewritesObservedSocketTopology(t *testing.T) {
 	entries := observedSocketTopology()
 	canonical := writeFilesImage(t, checkpointPath, entries)
 
-	imageDir, cleanup, err := prepareRestoreImageDirForRestoreID(checkpointPath, 987654321)
+	imageDir, cleanup, err := prepareRestoreImageDirForRestoreID(checkpointPath, 987654321, t.TempDir())
 	if err != nil {
 		t.Fatalf("prepare restore image directory: %v", err)
 	}
@@ -99,7 +99,8 @@ func TestPrepareRestoreImageDirUsesLocalSymlinks(t *testing.T) {
 		t.Fatalf("write pages image: %v", err)
 	}
 
-	imageDir, cleanup, err := prepareRestoreImageDirForRestoreID(checkpointPath, 987654321)
+	scratchDir := t.TempDir()
+	imageDir, cleanup, err := prepareRestoreImageDirForRestoreID(checkpointPath, 987654321, scratchDir)
 	if err != nil {
 		t.Fatalf("prepare restore image directory: %v", err)
 	}
@@ -107,8 +108,8 @@ func TestPrepareRestoreImageDirUsesLocalSymlinks(t *testing.T) {
 	if imageDir == checkpointPath {
 		t.Fatal("socket conflicts did not produce a private restore image")
 	}
-	if filepath.Dir(imageDir) != os.TempDir() {
-		t.Fatalf("private image dir %q is not under %q", imageDir, os.TempDir())
+	if filepath.Dir(imageDir) != scratchDir {
+		t.Fatalf("private image dir %q is not under scratch %q", imageDir, scratchDir)
 	}
 
 	linkPath := filepath.Join(imageDir, "pages-1.img")
@@ -150,6 +151,7 @@ func TestPrepareRestoreImageDirUsesLocalSymlinks(t *testing.T) {
 func TestPrepareRestoreImageDirConcurrentRestoresAreIndependent(t *testing.T) {
 	checkpointPath := t.TempDir()
 	writeFilesImage(t, checkpointPath, observedSocketTopology())
+	scratchDir := t.TempDir()
 
 	type result struct {
 		path    string
@@ -162,7 +164,7 @@ func TestPrepareRestoreImageDirConcurrentRestoresAreIndependent(t *testing.T) {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			path, cleanup, err := prepareRestoreImageDirForRestoreID(checkpointPath, restoreID)
+			path, cleanup, err := prepareRestoreImageDirForRestoreID(checkpointPath, restoreID, scratchDir)
 			results <- result{path: path, cleanup: cleanup, err: err}
 		}()
 	}

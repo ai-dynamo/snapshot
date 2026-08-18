@@ -39,16 +39,16 @@ type tcpPortRewrite struct {
 	port   uint32
 }
 
-func prepareRestoreImageDir(checkpointPath string) (string, func(), error) {
+func prepareRestoreImageDir(checkpointPath, scratchDir string) (string, func(), error) {
 	// The placeholder mount namespace remains container-specific with shareProcessNamespace.
 	var stat unix.Stat_t
 	if err := unix.Stat(placeholderMountNamespacePath, &stat); err != nil {
 		return "", nil, fmt.Errorf("failed to stat placeholder mount namespace at %s: %w", placeholderMountNamespacePath, err)
 	}
-	return prepareRestoreImageDirForRestoreID(checkpointPath, stat.Ino)
+	return prepareRestoreImageDirForRestoreID(checkpointPath, stat.Ino, scratchDir)
 }
 
-func prepareRestoreImageDirForRestoreID(checkpointPath string, restoreID uint64) (string, func(), error) {
+func prepareRestoreImageDirForRestoreID(checkpointPath string, restoreID uint64, scratchDir string) (string, func(), error) {
 	checkpointPath, err := filepath.Abs(checkpointPath)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to resolve checkpoint path: %w", err)
@@ -114,10 +114,15 @@ func prepareRestoreImageDirForRestoreID(checkpointPath string, restoreID uint64)
 		return checkpointPath, func() {}, nil
 	}
 
-	// Keep the private view on local disk. Hard-linking thousands of *.img
-	// names onto the checkpoint PVC is one NFS RPC per link and again per
-	// unlink in cleanup(); the page inodes stay in the original checkpoint.
-	privateDir, err := os.MkdirTemp("", restoreImagesTempDirPattern)
+	// Keep the private view on local scratch (CRIU workDir, or a criu-restore-*
+	// temp when workDir is unset). Hard-linking thousands of *.img names onto
+	// the checkpoint PVC is one NFS RPC per link and again per unlink in
+	// cleanup(); the page inodes stay in the original checkpoint.
+	if scratchDir == "" {
+		closeFDs(reservationFDs)
+		return "", nil, fmt.Errorf("CRIU restore scratch directory is empty")
+	}
+	privateDir, err := os.MkdirTemp(scratchDir, restoreImagesTempDirPattern)
 	if err != nil {
 		closeFDs(reservationFDs)
 		return "", nil, fmt.Errorf("failed to create private CRIU image directory: %w", err)

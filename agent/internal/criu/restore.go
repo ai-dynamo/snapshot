@@ -22,8 +22,9 @@ import (
 const RestoreLogFilename = "restore.log"
 
 const (
-	netNsPath        = "/proc/1/ns/net"
-	placeholderFDDir = "/proc/1/fd"
+	netNsPath                    = "/proc/1/ns/net"
+	placeholderFDDir             = "/proc/1/fd"
+	restoreScratchTempDirPattern = "criu-restore-*"
 )
 
 // ExecuteRestore opens the image/work directory FDs, configures inherited
@@ -42,18 +43,20 @@ func ExecuteRestore(
 	// and unlock. That keeps the window where the restored process runs with CUDA
 	// still locked as short as possible. cleanup is called on the error paths below.
 	var openFiles, inheritedFiles []*os.File
-	imageDirPath, removeImageDir, err := prepareRestoreImageDir(checkpointPath)
+	scratchDir, removeScratch, err := restoreScratchDir(settings.WorkDir)
 	if err != nil {
+		return 0, nil, err
+	}
+	imageDirPath, removeImageDir, err := prepareRestoreImageDir(checkpointPath, scratchDir)
+	if err != nil {
+		removeScratch()
 		return 0, nil, fmt.Errorf("failed to prepare CRIU image directory: %w", err)
 	}
-	var confTmpDir string
 	cleanup := func() {
 		closeFiles(inheritedFiles)
 		closeFiles(openFiles)
 		removeImageDir()
-		if err := os.RemoveAll(confTmpDir); err != nil {
-			log.Error(err, "failed to remove criu config temp dir", "path", confTmpDir)
-		}
+		removeScratch()
 	}
 
 	// Open image dir FD
@@ -67,10 +70,6 @@ func ExecuteRestore(
 
 	// Open work dir FD
 	if settings.WorkDir != "" {
-		if err := os.MkdirAll(settings.WorkDir, 0755); err != nil {
-			cleanup()
-			return 0, nil, fmt.Errorf("failed to create CRIU work directory: %w", err)
-		}
 		workDirFile, workDirFD, err := openPathForCRIU(settings.WorkDir)
 		if err != nil {
 			cleanup()
@@ -80,7 +79,7 @@ func ExecuteRestore(
 		criuOpts.WorkDirFd = proto.Int32(workDirFD)
 	}
 
-	overridePath, confTmpDir, err := rewriteCRIULibDir(criuOpts.ConfigFile, settings.WorkDir, bundleDir)
+	overridePath, err := rewriteCRIULibDir(criuOpts.ConfigFile, scratchDir, bundleDir)
 	if err != nil {
 		cleanup()
 		return 0, nil, err
@@ -213,42 +212,51 @@ func registerInheritFDs(c *criulib.Criu, stdioFDs []string, log logr.Logger) []*
 	return openFiles
 }
 
+// restoreScratchDir is the local parent for per-restore CRIU files that must
+// not live on the checkpoint PVC: criu-restore.conf and criu-restore-images-*.
+// When workDir is set (typically /var/criu-work) that durable directory is
+// used and not removed. When it is unset, a criu-restore-* temp is created.
+func restoreScratchDir(workDir string) (string, func(), error) {
+	if workDir != "" {
+		if err := os.MkdirAll(workDir, 0755); err != nil {
+			return "", nil, fmt.Errorf("failed to create CRIU work directory: %w", err)
+		}
+		return workDir, func() {}, nil
+	}
+	dir, err := os.MkdirTemp("", restoreScratchTempDirPattern)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to create CRIU restore scratch directory: %w", err)
+	}
+	return dir, func() { _ = os.RemoveAll(dir) }, nil
+}
+
 // rewriteCRIULibDir writes a criu.conf override that redirects the plugin libdir
 // to the injected bundle. The dump-time libdir points to the agent filesystem and
 // is unreachable inside the placeholder namespace; the override replaces it.
 // existingConfigFile is nil when the checkpoint was dumped without a criu.conf;
 // in that case the override is written from an empty base so CRIU always finds
-// its plugins at the injected path.
-// Returns (overridePath, tmpDir, err). tmpDir is non-empty only when workDir was
-// empty and a temporary directory was created; the caller must os.RemoveAll(tmpDir).
-func rewriteCRIULibDir(existingConfigFile *string, workDir, criuBundleDir string) (string, string, error) {
-	var tmpDir string
-	if workDir == "" {
-		// Older checkpoints may not have a WorkDir in their manifest. Fall back
-		// to a temp dir so the libdir override can still be written.
-		tmp, err := os.MkdirTemp("", "criu-restore-conf-*")
-		if err != nil {
-			return "", "", fmt.Errorf("rewriteCRIULibDir: no workDir and failed to create temp dir: %w", err)
-		}
-		workDir = tmp
-		tmpDir = tmp
+// its plugins at the injected path. scratchDir is the restore scratch from
+// restoreScratchDir (workDir or a criu-restore-* temp).
+func rewriteCRIULibDir(existingConfigFile *string, scratchDir, criuBundleDir string) (string, error) {
+	if scratchDir == "" {
+		return "", fmt.Errorf("CRIU restore scratch directory is empty")
 	}
 
 	var baseConf string
 	if existingConfigFile != nil {
 		data, err := os.ReadFile(*existingConfigFile)
 		if err != nil {
-			return "", tmpDir, fmt.Errorf("read criu config %s: %w", *existingConfigFile, err)
+			return "", fmt.Errorf("read criu config %s: %w", *existingConfigFile, err)
 		}
 		baseConf = string(data)
 	}
 
-	overridePath := filepath.Join(workDir, "criu-restore.conf")
+	overridePath := filepath.Join(scratchDir, "criu-restore.conf")
 	conf := overrideLibDir(baseConf, filepath.Join(criuBundleDir, "criu-plugins"))
 	if err := os.WriteFile(overridePath, []byte(conf), 0644); err != nil {
-		return "", tmpDir, fmt.Errorf("write criu libdir override to %s: %w", overridePath, err)
+		return "", fmt.Errorf("write criu libdir override to %s: %w", overridePath, err)
 	}
-	return overridePath, tmpDir, nil
+	return overridePath, nil
 }
 
 // bundledCRIUPath returns the path to the criu binary inside bundleDir.
