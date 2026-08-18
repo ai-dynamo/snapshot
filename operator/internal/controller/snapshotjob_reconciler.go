@@ -78,12 +78,7 @@ func (r *SnapshotJobReconciler) reconcileJob(ctx context.Context, sj *snapshotv1
 	case err != nil:
 		return ctrl.Result{}, fmt.Errorf("get source Job %q: %w", sj.Name, err)
 	case !metav1.IsControlledBy(job, sj):
-		// A foreign object already holds our deterministic Job name. Classified
-		// here so we don't try to create or observe a Job that isn't ours; the
-		// terminal Failed=True/JobNameConflict write is added by the completion
-		// gate (a later phase), so this reconciler stops without taking an
-		// action it can't yet finish recording.
-		return ctrl.Result{}, nil
+		return r.reportJobNameConflict(sj)
 	}
 	return r.observeJob(ctx, sj, job)
 }
@@ -123,16 +118,28 @@ func (r *SnapshotJobReconciler) createJob(ctx context.Context, sj *snapshotv1alp
 // missed it because the local watch cache hadn't caught up yet (a stale-cache
 // race, not a real naming conflict). Re-Get and classify exactly like
 // reconcileJob's Job-exists branch does — ours, observe it for Running; foreign,
-// classify without acting (see reconcileJob's comment on JobNameConflict).
+// report the conflict (see reportJobNameConflict).
 func (r *SnapshotJobReconciler) adoptExistingJob(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob) (ctrl.Result, error) {
 	existing := &batchv1.Job{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: sj.Namespace, Name: sj.Name}, existing); err != nil {
 		return ctrl.Result{}, fmt.Errorf("get existing source Job %q after AlreadyExists: %w", sj.Name, err)
 	}
 	if !metav1.IsControlledBy(existing, sj) {
-		return ctrl.Result{}, nil
+		return r.reportJobNameConflict(sj)
 	}
 	return r.observeJob(ctx, sj, existing)
+}
+
+// reportJobNameConflict handles a foreign object holding our deterministic Job
+// name: it emits a Warning event so the conflict is visible to an operator (e.g.
+// via `kubectl describe`) without writing to sj.Status. The terminal
+// Failed=True/JobNameConflict status write is added by the completion gate (a
+// later phase), so this reconciler stops without taking an action it can't yet
+// finish recording — the event is a cheap interim signal, not a substitute.
+func (r *SnapshotJobReconciler) reportJobNameConflict(sj *snapshotv1alpha1.SnapshotJob) (ctrl.Result, error) {
+	r.Recorder.Event(sj, corev1.EventTypeWarning, snapshotv1alpha1.ReasonJobNameConflict,
+		fmt.Sprintf("an object not controlled by this SnapshotJob already holds the name %q", sj.Name))
+	return ctrl.Result{}, nil
 }
 
 // observeJob derives Running from job.status.ready (GA in Kubernetes 1.29; beta-on
@@ -165,16 +172,15 @@ func (r *SnapshotJobReconciler) observeJob(ctx context.Context, sj *snapshotv1al
 	return ctrl.Result{}, nil
 }
 
-// failSnapshotJob records a terminal Failed=True condition and an event. It does
-// not set completedAt itself — that belongs to the completion gate (a later
-// phase), which owns the full Failed=True reason matrix; this phase only ever
-// reaches it via InvalidSpec.
+// failSnapshotJob records a terminal Failed=True condition, an event, and
+// completedAt. This phase only ever reaches it via InvalidSpec — the completion
+// gate (a later phase) owns the rest of the Failed=True reason matrix, but
+// completedAt must be set here regardless: IsSnapshotJobTerminal short-circuits
+// every later reconcile once Failed=True is persisted, so this is the only
+// chance to record it for an InvalidSpec failure.
 func (r *SnapshotJobReconciler) failSnapshotJob(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, reason string, cause error) (ctrl.Result, error) {
 	r.Recorder.Event(sj, corev1.EventTypeWarning, reason, cause.Error())
 	setCondition(sj, snapshotv1alpha1.SnapshotJobConditionFailed, metav1.ConditionTrue, reason, cause.Error())
-	// completedAt must be set here: IsSnapshotJobTerminal short-circuits every
-	// later reconcile once Failed=True is persisted, so this is the only chance
-	// to record it for an InvalidSpec failure.
 	if sj.Status.CompletedAt == nil {
 		now := metav1.Now()
 		sj.Status.CompletedAt = &now

@@ -209,6 +209,7 @@ func TestSnapshotJobReconcileClassifiesForeignJobOnAlreadyExistsRace(t *testing.
 	got := &batchv1.Job{}
 	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, got))
 	assert.Empty(t, got.OwnerReferences, "the foreign Job must be left untouched")
+	assertJobNameConflictEventRecorded(t, r)
 }
 
 func TestSnapshotJobReconcileAdoptsOwnedJob(t *testing.T) {
@@ -259,6 +260,21 @@ func TestSnapshotJobReconcileRunningTransitionsOnJobReady(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
 	assert.Equal(t, startedAt, *updated.Status.StartedAt)
+
+	// The pod going unready again (e.g. a container restart) must flip Running
+	// back to False, but must not touch the already-recorded startedAt.
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, job))
+	job.Status.Ready = ptr.To(int32(0))
+	require.NoError(t, r.Status().Update(context.Background(), job))
+
+	_, err = r.Reconcile(context.Background(), reconcileRequest(updated))
+	require.NoError(t, err)
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	cond = meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, snapshotv1alpha1.ReasonPodPending, cond.Reason)
+	assert.Equal(t, startedAt, *updated.Status.StartedAt)
 }
 
 func TestSnapshotJobReconcileClassifiesForeignJob(t *testing.T) {
@@ -290,6 +306,22 @@ func TestSnapshotJobReconcileClassifiesForeignJob(t *testing.T) {
 	got := &batchv1.Job{}
 	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, got))
 	assert.Empty(t, got.OwnerReferences, "the foreign Job must be left untouched, not adopted")
+	assertJobNameConflictEventRecorded(t, r)
+}
+
+// assertJobNameConflictEventRecorded confirms a JobNameConflict event was
+// emitted — the only operator-visible signal for a foreign Job name conflict
+// until the completion gate (a later phase) adds a terminal status write.
+func assertJobNameConflictEventRecorded(t *testing.T, r *SnapshotJobReconciler) {
+	t.Helper()
+	fr, ok := r.Recorder.(*record.FakeRecorder)
+	require.True(t, ok)
+	select {
+	case e := <-fr.Events:
+		assert.Contains(t, e, snapshotv1alpha1.ReasonJobNameConflict)
+	default:
+		t.Fatal("expected a JobNameConflict event to be recorded")
+	}
 }
 
 func TestSnapshotJobReconcileSkipsTerminalAndDeleted(t *testing.T) {
@@ -297,7 +329,7 @@ func TestSnapshotJobReconcileSkipsTerminalAndDeleted(t *testing.T) {
 		s := snapshotJobReconcilerScheme()
 		sj := minimalSnapshotJob()
 		meta.SetStatusCondition(&sj.Status.Conditions, metav1.Condition{
-			Type: snapshotv1alpha1.SnapshotJobConditionFailed, Status: metav1.ConditionTrue, Reason: "JobFailed",
+			Type: snapshotv1alpha1.SnapshotJobConditionFailed, Status: metav1.ConditionTrue, Reason: snapshotv1alpha1.ReasonJobFailed,
 		})
 		r := makeSnapshotJobReconciler(s, sj)
 
