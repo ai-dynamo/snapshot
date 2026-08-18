@@ -29,6 +29,10 @@ spec:
       jsonPath: .status.conditions[?(@.type=='Ready')].status
       name: Ready
       type: string
+    - description: Declared volumes required for restore
+      jsonPath: .status.source.nvidia.declaredVolumeCount
+      name: DeclaredVolumes
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -198,6 +202,72 @@ spec:
                   - type
                   type: object
                 type: array
+              source:
+                description: Source records the checkpoint inputs needed to configure
+                  a restore.
+                properties:
+                  nvidia:
+                    description: Nvidia records the NVIDIA source facts.
+                    properties:
+                      declaredVolumeCount:
+                        description: DeclaredVolumeCount is the number of declared
+                          volumes required for restore.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      declaredVolumes:
+                        description: DeclaredVolumes lists source workload volume
+                          declarations required for restore.
+                        items:
+                          description: CheckpointSourceDeclaredVolume identifies a
+                            source workload volume required for restore.
+                          properties:
+                            path:
+                              description: Path is where the volume was exposed in
+                                the source container.
+                              type: string
+                            volume:
+                              description: Volume is the name from the source pod's
+                                volume declarations.
+                              type: string
+                            volumeSource:
+                              description: VolumeSource identifies the original source
+                                as kind[/identifier].
+                              type: string
+                          required:
+                          - path
+                          - volume
+                          - volumeSource
+                          type: object
+                        type: array
+                      hardware:
+                        description: Hardware records source GPU resources.
+                        properties:
+                          gpuCount:
+                            description: GPUCount is the number of source GPUs.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                          gpus:
+                            description: GPUs identifies the source GPUs.
+                            items:
+                              description: CheckpointSourceGPU identifies a source
+                                GPU.
+                              properties:
+                                uuid:
+                                  description: UUID is the source GPU UUID.
+                                  type: string
+                              type: object
+                            type: array
+                        type: object
+                      node:
+                        description: Node is the source node name.
+                        type: string
+                    type: object
+                  type:
+                    description: Type names the vendor whose source facts are recorded.
+                    type: string
+                type: object
             type: object
         type: object
         x-kubernetes-validations:

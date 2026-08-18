@@ -75,6 +75,8 @@ func TestSnapshotDeepCopyIsIndependent(t *testing.T) {
 // TestSnapshotContentDeepCopyIsIndependent verifies the generated deepcopy for
 // the cluster-scoped PodSnapshotContent is equal but independent.
 func TestSnapshotContentDeepCopyIsIndependent(t *testing.T) {
+	gpuCount := int32(1)
+	declaredVolumeCount := int32(1)
 	original := &PodSnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "content-a"},
 		Spec: PodSnapshotContentSpec{
@@ -86,6 +88,21 @@ func TestSnapshotContentDeepCopyIsIndependent(t *testing.T) {
 		},
 		Status: PodSnapshotContentStatus{
 			Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Bound"}},
+			Source: &CheckpointSource{
+				Type: CheckpointSourceTypeNvidia,
+				Nvidia: &NvidiaCheckpointSource{
+					Hardware: &CheckpointSourceHardware{
+						GPUCount: &gpuCount,
+						GPUs:     []CheckpointSourceGPU{{UUID: "GPU-a"}},
+					},
+					DeclaredVolumes: []CheckpointSourceDeclaredVolume{{
+						Path:         "/model-cache",
+						Volume:       "model",
+						VolumeSource: "PersistentVolumeClaim/model-pvc",
+					}},
+					DeclaredVolumeCount: &declaredVolumeCount,
+				},
+			},
 		},
 	}
 
@@ -97,6 +114,9 @@ func TestSnapshotContentDeepCopyIsIndependent(t *testing.T) {
 	clone.Spec.Source.PodRef.Name = "mutated"
 	clone.Spec.Source.PodRef.Containers[0] = "mutated-container"
 	clone.Status.Conditions[0].Reason = "Changed"
+	clone.Status.Source.Nvidia.Hardware.GPUs[0].UUID = "GPU-b"
+	clone.Status.Source.Nvidia.DeclaredVolumes[0].Volume = "other"
+	*clone.Status.Source.Nvidia.DeclaredVolumeCount = 2
 	if original.Spec.Source.PodRef.Name != "worker-0" {
 		t.Errorf("mutating clone changed original podRef name: got %q", original.Spec.Source.PodRef.Name)
 	}
@@ -105,5 +125,14 @@ func TestSnapshotContentDeepCopyIsIndependent(t *testing.T) {
 	}
 	if original.Status.Conditions[0].Reason != "Bound" {
 		t.Errorf("mutating clone condition changed original: got %q", original.Status.Conditions[0].Reason)
+	}
+	if original.Status.Source.Nvidia.Hardware.GPUs[0].UUID != "GPU-a" {
+		t.Errorf("mutating clone GPU changed original: got %q", original.Status.Source.Nvidia.Hardware.GPUs[0].UUID)
+	}
+	if original.Status.Source.Nvidia.DeclaredVolumes[0].Volume != "model" {
+		t.Errorf("mutating clone declared volume changed original: got %q", original.Status.Source.Nvidia.DeclaredVolumes[0].Volume)
+	}
+	if *original.Status.Source.Nvidia.DeclaredVolumeCount != 1 {
+		t.Errorf("mutating clone declared volume count changed original: got %d", *original.Status.Source.Nvidia.DeclaredVolumeCount)
 	}
 }
