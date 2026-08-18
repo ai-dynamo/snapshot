@@ -33,6 +33,7 @@ func TestResolveArtifactPathRejectsUnsafeCoordinates(t *testing.T) {
 		{name: "unclean base", basePath: "/checkpoints/../etc", checkpointID: "checkpoint-123", version: "1"},
 		{name: "checkpoint traversal", basePath: "/checkpoints", checkpointID: "..", version: "1"},
 		{name: "checkpoint separator", basePath: "/checkpoints", checkpointID: "a/b", version: "1"},
+		{name: "checkpoint backslash", basePath: "/checkpoints", checkpointID: `a\b`, version: "1"},
 		{name: "version traversal", basePath: "/checkpoints", checkpointID: "checkpoint-123", version: ".."},
 		{name: "version separator", basePath: "/checkpoints", checkpointID: "checkpoint-123", version: "1/2"},
 	}

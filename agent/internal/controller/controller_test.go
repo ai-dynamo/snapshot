@@ -122,6 +122,21 @@ var _ executor.RestoreMounter = noopInjector{}
 var _ executor.RestoreMounter = errorInjector{}
 var _ executor.RestoreMounter = recordingInjector{}
 
+func TestNewDefaultControllerSetsDefaultOperations(t *testing.T) {
+	w := newDefaultController(
+		&types.AgentConfig{},
+		fake.NewClientset(),
+		nil,
+		nil,
+		&fakeRuntime{},
+		noopInjector{},
+		testr.New(t),
+	)
+	if w.checkpointFn == nil || w.restoreFn == nil || w.writeControlSentinelFn == nil {
+		t.Fatal("default controller operations must be initialized")
+	}
+}
+
 // makeTestController creates a NodeController with a fake k8s client and nil executors.
 // The fake clientset is empty so any goroutine launched by the restore path will fail on
 // the first annotatePod call and exit cleanly.

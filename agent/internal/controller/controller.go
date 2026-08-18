@@ -118,22 +118,54 @@ func NewNodeController(
 	if err != nil {
 		return nil, fmt.Errorf("failed to create binary injector: %w", err)
 	}
+	return newDefaultController(cfg, clientset, typedClient, dynClient, rt, nsm, log), nil
+}
+
+func newDefaultController(
+	cfg *types.AgentConfig,
+	clientset kubernetes.Interface,
+	typedClient client.Client,
+	dynClient dynamic.Interface,
+	rt snapshotruntime.Runtime,
+	injector executor.RestoreMounter,
+	log logr.Logger,
+) *NodeController {
 	w := &NodeController{
 		config:    cfg,
 		clientset: clientset,
 		client:    typedClient,
 		dynClient: dynClient,
 		runtime:   rt,
-		injector:  nsm,
+		injector:  injector,
 		log:       log,
 		holderID:  "snapshot-agent/" + uuid.NewString(),
 		inFlight:  make(map[string]struct{}),
 		stopCh:    make(chan struct{}),
+
+		restoreFn:              executor.Restore,
+		writeControlSentinelFn: snapshotruntime.WriteControlSentinel,
 	}
 	w.checkpointFn = w.executorCheckpoint
-	w.restoreFn = executor.Restore
-	w.writeControlSentinelFn = snapshotruntime.WriteControlSentinel
-	return w, nil
+	return w
+}
+
+func (w *NodeController) newRestoreOperation(
+	pod *corev1.Pod,
+	containerName, containerID, checkpointID, restoreAttemptKey string,
+	startedAt time.Time,
+) *restoreOperation {
+	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+	return &restoreOperation{
+		controller:        w,
+		pod:               pod,
+		containerName:     containerName,
+		containerID:       containerID,
+		checkpointID:      checkpointID,
+		restoreAttemptKey: restoreAttemptKey,
+		startedAt:         startedAt,
+		log:               w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID, "container_id", containerID),
+		releaseOnExit:     true,
+	}
 }
 
 // Run starts the local pod informers and processes checkpoint/restore events.
@@ -545,25 +577,6 @@ type restoreOperation struct {
 	startedAt         time.Time
 	log               logr.Logger
 	releaseOnExit     bool
-}
-
-func (w *NodeController) newRestoreOperation(
-	pod *corev1.Pod,
-	containerName, containerID, checkpointID, restoreAttemptKey string,
-	startedAt time.Time,
-) *restoreOperation {
-	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
-	return &restoreOperation{
-		controller:        w,
-		pod:               pod,
-		containerName:     containerName,
-		containerID:       containerID,
-		checkpointID:      checkpointID,
-		restoreAttemptKey: restoreAttemptKey,
-		startedAt:         startedAt,
-		log:               w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID, "container_id", containerID),
-		releaseOnExit:     true,
-	}
 }
 
 func (op *restoreOperation) release() {

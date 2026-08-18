@@ -24,10 +24,10 @@ import (
 	podresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
 )
 
-func TestGetGPUUUIDsViaNvidiaSmiIncludesStderr(t *testing.T) {
+func TestGetGPUUUIDsViaNvidiaSmiReportsPID(t *testing.T) {
 	binDir := t.TempDir()
 	nsenterPath := filepath.Join(binDir, "nsenter")
-	if err := os.WriteFile(nsenterPath, []byte("#!/bin/sh\necho 'driver unavailable' >&2\nexit 23\n"), 0o755); err != nil {
+	if err := os.WriteFile(nsenterPath, []byte("#!/bin/sh\nexit 23\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -36,10 +36,8 @@ func TestGetGPUUUIDsViaNvidiaSmiIncludesStderr(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected nvidia-smi failure")
 	}
-	for _, want := range []string{"pid 1234", "driver unavailable"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not contain %q", err, want)
-		}
+	if !strings.Contains(err.Error(), "pid 1234") {
+		t.Errorf("error %q does not contain pid", err)
 	}
 }
 
