@@ -77,8 +77,8 @@ func (noopInjector) MountArtifact(_ context.Context, _ int, _ string) (nsmount.M
 
 type noopMountPoint struct{}
 
-func (noopMountPoint) Unmount() error { return nil }
-func (noopMountPoint) NsFd() *os.File { return nil }
+func (noopMountPoint) Unmount(context.Context) error { return nil }
+func (noopMountPoint) NsFd() *os.File                { return nil }
 
 // errorInjector always returns the wrapped error from either mount role.
 type errorInjector struct{ err error }

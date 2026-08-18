@@ -20,8 +20,8 @@ import (
 // testMountPoint satisfies nsmount.MountPoint for executor unit tests.
 type testMountPoint struct{}
 
-func (m testMountPoint) Unmount() error { return nil }
-func (m testMountPoint) NsFd() *os.File { return nil }
+func (m testMountPoint) Unmount(context.Context) error { return nil }
+func (m testMountPoint) NsFd() *os.File                { return nil }
 
 var _ nsmount.MountPoint = testMountPoint{}
 

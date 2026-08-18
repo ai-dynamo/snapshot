@@ -18,7 +18,7 @@ type fakeMountRef struct {
 }
 
 func (h *fakeMountRef) NsFd() *os.File { return nil }
-func (h *fakeMountRef) Unmount() error {
+func (h *fakeMountRef) Unmount(context.Context) error {
 	*h.unmountLog = append(*h.unmountLog, h.dst)
 	return nil
 }
@@ -105,7 +105,7 @@ func TestMountPointUnmount(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := mp.Unmount(); err != nil {
+	if err := mp.Unmount(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(m.unmountLog) != 1 || m.unmountLog[0] != SnapshotBinDst {

@@ -109,7 +109,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		return 0, fmt.Errorf("mount agent bundle into placeholder: %w", err)
 	}
 	defer func() {
-		if cleanupErr := bundleMount.Unmount(); cleanupErr != nil {
+		if cleanupErr := bundleMount.Unmount(ctx); cleanupErr != nil {
 			log.Error(cleanupErr, "failed to clean bundle mount from placeholder namespace")
 			if retErr == nil {
 				retErr = NewRestoreCleanupError("unmount agent bundle from placeholder", cleanupErr)
@@ -121,7 +121,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		return 0, fmt.Errorf("mount checkpoint artifact into placeholder: %w", err)
 	}
 	defer func() {
-		if cleanupErr := artifactMount.Unmount(); cleanupErr != nil {
+		if cleanupErr := artifactMount.Unmount(ctx); cleanupErr != nil {
 			log.Error(cleanupErr, "failed to clean artifact mount from placeholder namespace")
 			if retErr == nil {
 				retErr = NewRestoreCleanupError("unmount checkpoint artifact from placeholder", cleanupErr)

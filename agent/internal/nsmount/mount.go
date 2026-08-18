@@ -30,7 +30,7 @@ type MountOptions struct {
 }
 
 type mountRef interface {
-	Unmount() error
+	Unmount(ctx context.Context) error
 	NsFd() *os.File
 }
 
@@ -59,10 +59,10 @@ type execMountRef struct {
 
 func (h *execMountRef) NsFd() *os.File { return h.nsFd }
 
-func (h *execMountRef) Unmount() error {
+func (h *execMountRef) Unmount(ctx context.Context) error {
 	h.once.Do(func() {
 		defer h.nsFd.Close()
-		ctx, cancel := context.WithTimeout(context.Background(), unmountTimeout)
+		ctx, cancel := context.WithTimeout(ctx, unmountTimeout)
 		defer cancel()
 		args := []string{"umount-fd", strconv.Itoa(nsFdChildNum), h.dst}
 		if h.createdDst {

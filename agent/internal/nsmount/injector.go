@@ -30,9 +30,8 @@ const (
 // namespace. The caller must call Unmount when done.
 type MountPoint interface {
 	// Unmount removes the bind-mount from the target namespace.
-	// It is idempotent and uses an implementation-owned timeout so cleanup is
-	// not cancelled with the restore request.
-	Unmount() error
+	// It is idempotent and bounds the supplied context with an internal timeout.
+	Unmount(ctx context.Context) error
 
 	// NsFd returns the pinned mount-namespace fd opened at Mount time.
 	// Valid until Unmount is called. Test mocks may return nil.
@@ -102,8 +101,8 @@ type mountPoint struct {
 	mount mountRef
 }
 
-func (h *mountPoint) Unmount() error {
-	return h.mount.Unmount()
+func (h *mountPoint) Unmount(ctx context.Context) error {
+	return h.mount.Unmount(ctx)
 }
 
 func (h *mountPoint) NsFd() *os.File {
