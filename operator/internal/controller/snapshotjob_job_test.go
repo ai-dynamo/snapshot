@@ -141,9 +141,9 @@ func requireContainer(t *testing.T, containers []corev1.Container, name string) 
 	return nil
 }
 
-// batchJobByName finds a Job in a fake client's tracked objects by name — used by
-// reconciler-level tests below that only care whether/what got created, not the
-// full build matrix already covered above.
+// batchJobByName finds a Job in a fake client's tracked objects by name. Shared
+// across this file and snapshotjob_reconciler_test.go — those tests only care
+// whether/what got created, not the full build matrix already covered above.
 func batchJobByName(jobs *batchv1.JobList, name string) *batchv1.Job {
 	for i := range jobs.Items {
 		if jobs.Items[i].Name == name {

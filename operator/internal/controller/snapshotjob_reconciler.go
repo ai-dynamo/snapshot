@@ -30,8 +30,8 @@ import (
 // +kubebuilder:rbac:groups=nvidia.com,resources=snapshotjobs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=snapshotjobs/finalizers,verbs=update
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=create;get;list;watch
-// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;get;list;watch;delete
-// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;get;list;watch
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=list
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
 // SnapshotJobReconciler reconciles a SnapshotJob.
@@ -310,6 +310,11 @@ func (r *SnapshotJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				DeleteFunc:  func(event.DeleteEvent) bool { return true },
 				GenericFunc: func(event.GenericEvent) bool { return false },
 			})).
+		// MaxConcurrentReconciles: 1 is a deliberate choice for this phase (design
+		// spec §5.1), not a scalability constraint discovered later — nothing in
+		// this reconciler's logic requires serialization (deterministic per-object
+		// names, no shared mutable state). Revisit once the controller is
+		// registered in main.go and real concurrency needs are measured.
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(r)
 }
