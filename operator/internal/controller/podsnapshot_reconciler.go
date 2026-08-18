@@ -44,6 +44,10 @@ var errPodSnapshotPodUnscheduled = errors.New("source pod is not yet scheduled t
 // terminal mismatch, not a retryable condition.
 var errPodSnapshotStalePodRef = errors.New("source pod UID does not match the pinned PodSnapshot source")
 
+// errPodSnapshotInvalidAnnotations marks a capture pod that violates the
+// zero-snapshot-annotations API contract.
+var errPodSnapshotInvalidAnnotations = errors.New("source pod carries snapshot annotations")
+
 // errContentConflict marks an existing PodSnapshotContent that does not belong to this PodSnapshot.
 var errContentConflict = errors.New("existing PodSnapshotContent belongs to another PodSnapshot")
 
@@ -144,6 +148,9 @@ func (sr *PodSnapshotReconciler) captureFromSourcePod(ctx context.Context, snap 
 		if errors.Is(err, errPodSnapshotStalePodRef) {
 			return sr.failPodSnapshot(ctx, snap, "StalePodReference", err)
 		}
+		if errors.Is(err, errPodSnapshotInvalidAnnotations) {
+			return sr.failPodSnapshot(ctx, snap, "UnexpectedSnapshotAnnotation", err)
+		}
 		return ctrl.Result{}, fmt.Errorf("validate source pod: %w", err)
 	}
 
@@ -188,6 +195,9 @@ func validateSourcePod(snap *snapshotv1alpha1.PodSnapshot, pod *corev1.Pod) erro
 	}
 	if wantUID := snap.Spec.Source.PodRef.UID; wantUID != "" && pod.UID != wantUID {
 		return fmt.Errorf("%w: live pod %q UID %q, want %q", errPodSnapshotStalePodRef, pod.Name, pod.UID, wantUID)
+	}
+	if err := snapshotv1alpha1.ValidateCaptureAnnotations(pod.Annotations); err != nil {
+		return fmt.Errorf("%w: %v", errPodSnapshotInvalidAnnotations, err)
 	}
 	return nil
 }

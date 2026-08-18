@@ -48,7 +48,8 @@ func (r *restoreFakeRuntime) Close() error { return nil }
 
 func TestInspectRestoreUsesContainerIDWhenProvided(t *testing.T) {
 	manifest := types.NewCheckpointManifest(
-		"checkpoint-123",
+		"content-uid-123",
+		"main",
 		types.CRIUDumpManifest{},
 		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
 		types.OverlayManifest{},
@@ -59,7 +60,7 @@ func TestInspectRestoreUsesContainerIDWhenProvided(t *testing.T) {
 		rt,
 		testr.New(t),
 		RestoreRequest{
-			CheckpointID:  "checkpoint-123",
+			ContentUID:    "content-uid-123",
 			ContainerID:   "placeholder-id",
 			PodName:       "virtual-pod-name",
 			PodNamespace:  "default",
@@ -106,7 +107,8 @@ func TestSetCleanupErrorIfSuccessful(t *testing.T) {
 func TestRestoreInNamespaceRejectsMultiGPUCheckpointWithoutLaunchJobState(t *testing.T) {
 	checkpointDir := t.TempDir()
 	manifest := types.NewCheckpointManifest(
-		"checkpoint-123",
+		"content-uid-123",
+		"main",
 		types.CRIUDumpManifest{},
 		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
 		types.OverlayManifest{},

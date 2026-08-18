@@ -23,9 +23,15 @@ metadata:
   labels:
     {{- include "snapshot.labels" . | nindent 4 }}
 rules:
+  - apiGroups: ["nvidia.com"]
+    resources: ["podsnapshots"]
+    verbs: ["get"]
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["patch"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["get", "patch", "update"]

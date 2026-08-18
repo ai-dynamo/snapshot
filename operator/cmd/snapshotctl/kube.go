@@ -134,17 +134,10 @@ func isControlledByUID(pod *corev1.Pod, uid types.UID) bool {
 	return false
 }
 
-func podSnapshotName(jobName string) string {
-	if len(jobName) <= 63 {
-		return jobName
-	}
-	return strings.TrimRight(jobName[:63], "-.")
-}
-
 // createPodSnapshot creates a PodSnapshot in the given namespace, pinning the source pod's UID.
 // On AlreadyExists it returns an actionable error naming the existing object.
 // On Forbidden it surfaces a clear RBAC error.
-func createPodSnapshot(ctx context.Context, crClient client.Client, namespace, snapName, podName string, podUID types.UID, containers []string, checkpointID string) (*snapshotv1alpha1.PodSnapshot, error) {
+func createPodSnapshot(ctx context.Context, crClient client.Client, namespace, snapName, podName string, podUID types.UID, containers []string) (*snapshotv1alpha1.PodSnapshot, error) {
 	snap := &snapshotv1alpha1.PodSnapshot{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: snapshotv1alpha1.GroupVersion.String(),
@@ -153,9 +146,6 @@ func createPodSnapshot(ctx context.Context, crClient client.Client, namespace, s
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      snapName,
 			Namespace: namespace,
-			Labels: map[string]string{
-				snapshotv1alpha1.CheckpointIDLabel: checkpointID,
-			},
 		},
 		Spec: snapshotv1alpha1.PodSnapshotSpec{
 			Source: snapshotv1alpha1.PodSnapshotSource{
@@ -246,10 +236,8 @@ func loadPod(manifestPath string) (*corev1.Pod, error) {
 			manifestPath,
 		)
 	}
-	// snapshotctl no longer guesses the workload container. Callers pass
-	// --container / --containers (or pre-stamp the
-	// nvidia.com/snapshot-target-containers annotation), which the protocol
-	// layer then validates against the pod spec.
+	// snapshotctl never guesses the workload container. Callers pass the
+	// explicit --container selected in the PodSnapshot spec.
 	if strings.TrimSpace(pod.Name) == "" {
 		return nil, fmt.Errorf("manifest %s: metadata.name is required", manifestPath)
 	}

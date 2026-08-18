@@ -60,7 +60,7 @@ func TestMountUsesCallerPathsAndReadOnlyPolicy(t *testing.T) {
 		src, dst string
 	}{
 		{nsm, SnapshotBinSrc, SnapshotBinDst},
-		{nsm.WithNoExec(), "/checkpoints/abc/versions/1", CheckpointDst},
+		{nsm.WithNoExec(), "/checkpoints/artifacts/content-uid/containers/main", CheckpointDst},
 	} {
 		if _, err := tc.mounter.Mount(context.Background(), testPID, tc.src, tc.dst); err != nil {
 			t.Fatalf("Mount(%s, %s): %v", tc.src, tc.dst, err)
@@ -69,7 +69,7 @@ func TestMountUsesCallerPathsAndReadOnlyPolicy(t *testing.T) {
 
 	want := []mountCall{
 		{pid: testPID, src: SnapshotBinSrc, dst: SnapshotBinDst, opts: MountOptions{ReadOnly: true}},
-		{pid: testPID, src: "/checkpoints/abc/versions/1", dst: CheckpointDst, opts: MountOptions{ReadOnly: true, NoExec: true}},
+		{pid: testPID, src: "/checkpoints/artifacts/content-uid/containers/main", dst: CheckpointDst, opts: MountOptions{ReadOnly: true, NoExec: true}},
 	}
 	if len(m.calls) != len(want) {
 		t.Fatalf("got %d calls, want %d", len(m.calls), len(want))
