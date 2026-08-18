@@ -125,8 +125,12 @@ func rewriteSocketMetadata(image *crit.CriuImage, restoreID uint64) ([]int, bool
 	}
 
 	rewritten := false
-	for _, entry := range image.Entries {
-		fileEntry := entry.Message.(*fdinfo.FileEntry)
+	for i, entry := range image.Entries {
+		fileEntry, ok := entry.Message.(*fdinfo.FileEntry)
+		if !ok {
+			closeFDs(reservationFDs)
+			return nil, false, fmt.Errorf("unexpected %s entry %d type %T", filesImageFilename, i, entry.Message)
+		}
 		if fileEntry.GetType() == fdinfo.FdTypes_UNIXSK && fileEntry.Usk != nil &&
 			rewriteCloneConflictingUnixSocketAddress(fileEntry.Usk, restoreID) {
 			rewritten = true

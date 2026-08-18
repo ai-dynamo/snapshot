@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -131,6 +132,19 @@ func TestPrepareRestoreImageDirWithoutRewritesUsesCheckpointDirectly(t *testing.
 	}
 	if len(mounter.capturedImages()) != 0 {
 		t.Fatalf("mounted replacement images = %d, want 0", len(mounter.capturedImages()))
+	}
+}
+
+func TestRewriteSocketMetadataRejectsUnexpectedEntryTypes(t *testing.T) {
+	image := &crit.CriuImage{
+		Entries: []*crit.CriuEntry{{Message: &sk_unix.UnixSkEntry{}}},
+	}
+	reservationFDs, rewritten, err := rewriteSocketMetadata(image, 987654321)
+	if err == nil || !strings.Contains(err.Error(), "unexpected files.img entry 0 type") {
+		t.Fatalf("rewrite socket metadata error = %v", err)
+	}
+	if rewritten || reservationFDs != nil {
+		t.Fatalf("rewrite result = (%v, %v), want no reservations or rewrite", reservationFDs, rewritten)
 	}
 }
 
