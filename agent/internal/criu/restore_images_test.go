@@ -91,6 +91,62 @@ func TestPrepareRestoreImageDirRewritesObservedSocketTopology(t *testing.T) {
 	}
 }
 
+func TestPrepareRestoreImageDirUsesLocalSymlinks(t *testing.T) {
+	checkpointPath := t.TempDir()
+	writeFilesImage(t, checkpointPath, observedSocketTopology())
+	pagePath := filepath.Join(checkpointPath, "pages-1.img")
+	if err := os.WriteFile(pagePath, []byte("page-bytes"), 0600); err != nil {
+		t.Fatalf("write pages image: %v", err)
+	}
+
+	imageDir, cleanup, err := prepareRestoreImageDirForRestoreID(checkpointPath, 987654321)
+	if err != nil {
+		t.Fatalf("prepare restore image directory: %v", err)
+	}
+	defer cleanup()
+	if imageDir == checkpointPath {
+		t.Fatal("socket conflicts did not produce a private restore image")
+	}
+	if filepath.Dir(imageDir) != os.TempDir() {
+		t.Fatalf("private image dir %q is not under %q", imageDir, os.TempDir())
+	}
+
+	linkPath := filepath.Join(imageDir, "pages-1.img")
+	info, err := os.Lstat(linkPath)
+	if err != nil {
+		t.Fatalf("lstat pages image: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("pages-1.img mode = %v, want symlink", info.Mode())
+	}
+	got, err := os.Readlink(linkPath)
+	if err != nil {
+		t.Fatalf("readlink pages image: %v", err)
+	}
+	want, err := filepath.Abs(pagePath)
+	if err != nil {
+		t.Fatalf("abs pages image: %v", err)
+	}
+	if got != want {
+		t.Fatalf("pages-1.img symlink = %q, want %q", got, want)
+	}
+	data, err := os.ReadFile(linkPath)
+	if err != nil {
+		t.Fatalf("read through symlink: %v", err)
+	}
+	if string(data) != "page-bytes" {
+		t.Fatalf("symlink target data = %q, want %q", string(data), "page-bytes")
+	}
+
+	cleanup()
+	if _, err := os.Stat(imageDir); !os.IsNotExist(err) {
+		t.Fatalf("private image dir still exists after cleanup: %v", err)
+	}
+	if _, err := os.Stat(pagePath); err != nil {
+		t.Fatalf("canonical pages image was removed: %v", err)
+	}
+}
+
 func TestPrepareRestoreImageDirConcurrentRestoresAreIndependent(t *testing.T) {
 	checkpointPath := t.TempDir()
 	writeFilesImage(t, checkpointPath, observedSocketTopology())

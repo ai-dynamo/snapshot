@@ -113,7 +113,10 @@ func prepareRestoreImageDirForRestoreID(checkpointPath string, restoreID uint64)
 		return checkpointPath, func() {}, nil
 	}
 
-	privateDir, err := os.MkdirTemp(filepath.Dir(checkpointPath), ".dynamo-criu-restore-*")
+	// Keep the private view on local disk. Hard-linking thousands of *.img
+	// names onto the checkpoint PVC is one NFS RPC per link and again per
+	// unlink in cleanup(); the page inodes stay in the original checkpoint.
+	privateDir, err := os.MkdirTemp("", ".dynamo-criu-restore-*")
 	if err != nil {
 		closeFDs(reservationFDs)
 		return "", nil, fmt.Errorf("failed to create private CRIU image directory: %w", err)
@@ -139,10 +142,12 @@ func prepareRestoreImageDirForRestoreID(checkpointPath string, restoreID uint64)
 		if name == filesImageFilename || !strings.HasSuffix(name, ".img") {
 			continue
 		}
-		// CRIU does not modify restore images; hard links keep them visible after it
-		// enters the restored mount namespace without copying large page images.
-		if err := os.Link(filepath.Join(checkpointPath, name), filepath.Join(privateDir, name)); err != nil {
-			return fail(fmt.Errorf("failed to hard-link CRIU image %s: %w", name, err))
+		// CRIU does not modify restore images. Absolute symlinks let it open
+		// the original page files via the images-dir FD without copying them
+		// and without creating NFS directory entries for the private view.
+		target := filepath.Join(checkpointPath, name)
+		if err := os.Symlink(target, filepath.Join(privateDir, name)); err != nil {
+			return fail(fmt.Errorf("failed to symlink CRIU image %s: %w", name, err))
 		}
 	}
 
