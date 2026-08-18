@@ -4,6 +4,7 @@
 package controller
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -92,6 +93,19 @@ func TestBuildSourceJob(t *testing.T) {
 		main := requireContainer(t, job.Spec.Template.Spec.Containers, "worker")
 		assert.Equal(t, []string{"python3", "-m", "worker"}, main.Command,
 			"PodSnapshotTemplate has no multi-GPU field (spec §5.4) — command must never be wrapped")
+	})
+
+	t.Run("SnapshotJob name longer than a DNS-1123 label is a terminal spec error", func(t *testing.T) {
+		// The CRD does not constrain metadata.name length (up to 253 chars, RFC
+		// 1123 subdomain), but sj.Name becomes a label VALUE (capped at 63, RFC
+		// 1123 label) via SnapshotJobOwnerLabel and CheckpointIDLabel. Without
+		// this check, a long-named SnapshotJob would fail Job creation with an
+		// apiserver error and retry forever, since that's not an AlreadyExists.
+		sj := minimalSnapshotJob()
+		sj.Name = strings.Repeat("a", 64)
+
+		_, err := buildSourceJob(sj)
+		require.Error(t, err)
 	})
 
 	t.Run("empty targetContainers is a terminal spec error, not a panic", func(t *testing.T) {

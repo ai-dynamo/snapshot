@@ -5,8 +5,10 @@ package controller
 
 import (
 	"fmt"
+	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/snapshot/operator/internal/protocol"
@@ -28,6 +30,16 @@ const sourceJobArtifactVersion = "1"
 // source it from — a caller needing cuda-checkpoint --launch-job wrapping sets it
 // up themselves in spec.podTemplate).
 func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, error) {
+	// sj.Name becomes a label value (SnapshotJobOwnerLabel, CheckpointIDLabel) as
+	// well as the source Job's own name. Kubernetes object names allow up to 253
+	// characters (RFC 1123 subdomain), but label values are capped at 63 (RFC 1123
+	// label) — the CRD does not constrain metadata.name, so this must be checked
+	// here. Without it, a long-named SnapshotJob would fail Job creation with an
+	// apiserver validation error on every retry, forever.
+	if errs := validation.IsDNS1123Label(sj.Name); len(errs) > 0 {
+		return nil, fmt.Errorf("metadata.name %q is not a valid DNS-1123 label: %s", sj.Name, strings.Join(errs, "; "))
+	}
+
 	targetContainers := sj.Spec.PodSnapshotTemplate.TargetContainers
 	if len(targetContainers) != 1 {
 		return nil, fmt.Errorf("spec.podSnapshotTemplate.targetContainers must have exactly one entry, got %d", len(targetContainers))

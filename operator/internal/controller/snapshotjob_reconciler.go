@@ -172,6 +172,13 @@ func (r *SnapshotJobReconciler) observeJob(ctx context.Context, sj *snapshotv1al
 func (r *SnapshotJobReconciler) failSnapshotJob(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, reason string, cause error) (ctrl.Result, error) {
 	r.Recorder.Event(sj, corev1.EventTypeWarning, reason, cause.Error())
 	setCondition(sj, snapshotv1alpha1.SnapshotJobConditionFailed, metav1.ConditionTrue, reason, cause.Error())
+	// completedAt must be set here: IsSnapshotJobTerminal short-circuits every
+	// later reconcile once Failed=True is persisted, so this is the only chance
+	// to record it for an InvalidSpec failure.
+	if sj.Status.CompletedAt == nil {
+		now := metav1.Now()
+		sj.Status.CompletedAt = &now
+	}
 	if err := r.Status().Update(ctx, sj); err != nil {
 		return ctrl.Result{}, fmt.Errorf("mark SnapshotJob failed: %w", err)
 	}

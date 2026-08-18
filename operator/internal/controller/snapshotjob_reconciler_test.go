@@ -103,6 +103,8 @@ func TestSnapshotJobReconcileInvalidSpecIsTerminal(t *testing.T) {
 	cond := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
 	require.NotNil(t, cond)
 	assert.Equal(t, snapshotv1alpha1.ReasonInvalidSpec, cond.Reason)
+	assert.NotNil(t, updated.Status.CompletedAt,
+		"completedAt must be set on this terminal transition — IsSnapshotJobTerminal short-circuits every later reconcile, so this is the only chance")
 }
 
 func TestSnapshotJobReconcilePropagatesJobGetError(t *testing.T) {
