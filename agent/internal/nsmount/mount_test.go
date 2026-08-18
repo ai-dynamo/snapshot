@@ -29,11 +29,7 @@ func writeFakeBinary(t *testing.T, script string) string {
 
 func newMounterForTest(t *testing.T, bin string) *execMounter {
 	t.Helper()
-	m, err := newExecMounter(bin, logr.Discard())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return m
+	return newExecMounter(bin, logr.Discard())
 }
 
 func readLines(t *testing.T, path string) []string {

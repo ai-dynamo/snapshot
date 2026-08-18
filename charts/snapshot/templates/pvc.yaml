@@ -1,4 +1,3 @@
-{{- include "snapshot.validateCheckpointPVC" . -}}
 {{- if and (eq .Values.storage.type "pvc") .Values.storage.pvc.create }}
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0

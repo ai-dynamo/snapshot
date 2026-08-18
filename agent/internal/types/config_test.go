@@ -17,39 +17,12 @@ func validAgentConfig() *AgentConfig {
 	}
 }
 
-func TestAgentConfigValidateRequiresAbsoluteStorageBasePath(t *testing.T) {
-	cfg := validAgentConfig()
-	cfg.Storage.BasePath = "checkpoints"
-
-	err := cfg.Validate()
-	if err == nil {
-		t.Fatal("expected error for relative storage base path")
-	}
-}
-
-func TestAgentConfigValidateRejectsWhitespaceInStorageBasePath(t *testing.T) {
-	cfg := validAgentConfig()
-	cfg.Storage.BasePath = " /checkpoints "
-
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error for storage base path containing whitespace")
-	}
-}
-
-func TestAgentConfigValidateRejectsUncleanStorageBasePath(t *testing.T) {
-	cfg := validAgentConfig()
-	cfg.Storage.BasePath = "/checkpoints/../other"
-
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error for unclean storage base path")
-	}
-}
-
 func TestAgentConfigValidateRequiresFixedStorageBasePath(t *testing.T) {
-	cfg := validAgentConfig()
-	cfg.Storage.BasePath = "/other"
-
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error for non-standard storage base path")
+	for _, basePath := range []string{"checkpoints", " /checkpoints ", "/checkpoints/../other", "/other"} {
+		cfg := validAgentConfig()
+		cfg.Storage.BasePath = basePath
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("Validate accepted storage base path %q", basePath)
+		}
 	}
 }

@@ -7,15 +7,11 @@ package nsmount
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
-	"syscall"
 
-	"github.com/ai-dynamo/snapshot/agent/internal/safepath"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/go-logr/logr"
-	"golang.org/x/sys/unix"
 )
 
 const (
@@ -50,26 +46,10 @@ type NSMounter struct {
 	log     logr.Logger
 }
 
-// probeKernelMountAPI verifies that mount_setattr (Linux 5.12) is available.
-func probeKernelMountAPI() error {
-	err := unix.MountSetattr(-1, "", 0, nil)
-	if errors.Is(err, syscall.ENOSYS) {
-		return fmt.Errorf("ns-bind-mount requires Linux 5.12+ (mount_setattr): kernel does not support it")
-	}
-	return nil
-}
-
 // New returns an NSMounter backed by the ns-bind-mount binary at its default
 // location.
-func New(log logr.Logger) (*NSMounter, error) {
-	if err := probeKernelMountAPI(); err != nil {
-		return nil, err
-	}
-	m, err := newExecMounter(defaultBinaryPath, log)
-	if err != nil {
-		return nil, err
-	}
-	return newWithMounter(m, log), nil
+func New(log logr.Logger) *NSMounter {
+	return newWithMounter(newExecMounter(defaultBinaryPath, log), log)
 }
 
 func newWithMounter(m mounter, log logr.Logger) *NSMounter {
@@ -115,7 +95,7 @@ func validateMountSource(src, dst string) error {
 	default:
 		return fmt.Errorf("unsupported mount destination %q", dst)
 	}
-	return safepath.ValidateWithin("mount source", root, src)
+	return validateWithin(root, src)
 }
 
 type mountPoint struct {

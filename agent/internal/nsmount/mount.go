@@ -43,11 +43,8 @@ type execMounter struct {
 	log        logr.Logger
 }
 
-func newExecMounter(path string, log logr.Logger) (*execMounter, error) {
-	if _, err := os.Stat(path); err != nil {
-		return nil, fmt.Errorf("%s binary not found at %s: %w", binaryName, path, err)
-	}
-	return &execMounter{binaryPath: path, log: log}, nil
+func newExecMounter(path string, log logr.Logger) *execMounter {
+	return &execMounter{binaryPath: path, log: log}
 }
 
 type execMountRef struct {

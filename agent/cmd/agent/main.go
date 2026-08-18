@@ -35,8 +35,8 @@ func main() {
 	if err != nil {
 		fatal(agentLog, err, "Failed to load configuration")
 	}
-	if err := validatePreflight(cfg); err != nil {
-		fatal(agentLog, err, "Agent preflight validation failed")
+	if err := cfg.Validate(); err != nil {
+		fatal(agentLog, err, "Invalid configuration")
 	}
 
 	rt, err := snapshotruntime.New(*runtimeType, *runtimeSocket)

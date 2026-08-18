@@ -9,8 +9,6 @@ import (
 	"os"
 	"strings"
 	"time"
-
-	"github.com/ai-dynamo/snapshot/agent/internal/safepath"
 )
 
 // CheckpointBasePath is the fixed agent-side checkpoint mount. The privileged
@@ -42,9 +40,6 @@ func (c *AgentConfig) Validate() error {
 		return &ConfigError{Field: "storage.type", Message: fmt.Sprintf("unsupported storage type %q; only pvc is implemented today", storageType)}
 	}
 	basePath := c.Storage.BasePath
-	if err := safepath.ValidateAbsolute("storage.basePath", basePath); err != nil {
-		return &ConfigError{Field: "storage.basePath", Message: err.Error()}
-	}
 	if basePath != CheckpointBasePath {
 		return &ConfigError{Field: "storage.basePath", Message: fmt.Sprintf("storage.basePath must be %q", CheckpointBasePath)}
 	}

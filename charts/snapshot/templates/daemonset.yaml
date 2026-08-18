@@ -1,14 +1,4 @@
 {{- include "snapshot.validateRuntime" . -}}
-{{- include "snapshot.validateCheckpointPVC" . -}}
-{{- if hasKey .Values.rbac "namespaceRestricted" -}}
-{{- fail "rbac.namespaceRestricted has been removed; snapshot-agent always watches cluster-wide" -}}
-{{- end -}}
-{{- if hasKey .Values.storage "accessMode" -}}
-{{- fail "storage.accessMode has been removed; every snapshot-agent mounts the shared RWX PVC" -}}
-{{- end -}}
-{{- if hasKey .Values.storage.pvc "accessMode" -}}
-{{- fail "storage.pvc.accessMode has been removed; chart-created checkpoint PVCs are always ReadWriteMany" -}}
-{{- end -}}
 {{- $socket := include "snapshot.runtimeSocket" . -}}
 {{- $socketDir := $socket | dir -}}
 {{- $storageDir := include "snapshot.runtimeStorageDir" . -}}

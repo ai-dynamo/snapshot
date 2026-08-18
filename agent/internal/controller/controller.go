@@ -114,10 +114,7 @@ func NewNodeController(
 		return nil, fmt.Errorf("failed to create dynamic client: %w", err)
 	}
 
-	nsm, err := nsmount.New(log)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create binary injector: %w", err)
-	}
+	nsm := nsmount.New(log)
 	return newDefaultController(cfg, clientset, typedClient, dynClient, rt, nsm, log), nil
 }
 

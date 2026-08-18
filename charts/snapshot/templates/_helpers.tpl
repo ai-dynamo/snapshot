@@ -81,23 +81,6 @@ Fail fast on unsupported runtime.type values. Called once from daemonset.yaml.
 {{- end }}
 
 {{/*
-Reject retained chart claims and reused external claims that cannot be mounted
-concurrently by every node agent. PersistentVolumeClaim access modes are not
-mutated in place; users must migrate retained RWO data to a new RWX claim.
-*/}}
-{{- define "snapshot.validateCheckpointPVC" -}}
-{{- if eq .Values.storage.type "pvc" }}
-{{- $pvc := lookup "v1" "PersistentVolumeClaim" .Release.Namespace .Values.storage.pvc.name }}
-{{- if $pvc }}
-{{- $accessModes := $pvc.spec.accessModes | default (list) }}
-{{- if not (has "ReadWriteMany" $accessModes) }}
-{{- fail (printf "checkpoint PVC %s/%s has accessModes [%s]; snapshot-agent requires ReadWriteMany. PVC access modes cannot be migrated in place: create a new RWX claim, copy retained checkpoint data if needed, and set storage.pvc.name to the new claim" .Release.Namespace .Values.storage.pvc.name (join "," $accessModes)) }}
-{{- end }}
-{{- end }}
-{{- end }}
-{{- end }}
-
-{{/*
 Resolve the runtime socket path. Uses .Values.runtime.socketPath when set,
 otherwise falls back to the per-runtime default.
 */}}
