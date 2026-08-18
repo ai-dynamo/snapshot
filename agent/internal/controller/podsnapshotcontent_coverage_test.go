@@ -195,7 +195,7 @@ func TestSetSnapshotContentSucceeded_StatusPatchErrorReturnsError(t *testing.T) 
 	}
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content)
 
-	err := w.setSnapshotContentSucceeded(context.Background(), content)
+	err := w.setSnapshotContentSucceeded(context.Background(), content, "")
 
 	require.Error(t, err)
 	assert.Nil(t, meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
