@@ -16,3 +16,17 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: "storage.pvc.basePath is fixed at /checkpoints"
+
+  - it: rejects removed storage access mode
+    set:
+      storage.accessMode: ReadWriteMany
+    asserts:
+      - failedTemplate:
+          errorPattern: "storage.accessMode has been removed"
+
+  - it: rejects removed PVC access mode
+    set:
+      storage.pvc.accessMode: ReadWriteMany
+    asserts:
+      - failedTemplate:
+          errorPattern: "storage.pvc.accessMode has been removed"

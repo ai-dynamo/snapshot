@@ -134,7 +134,7 @@ func TestCHelperRejectsUnsafeSourcesBeforeMountSyscalls(t *testing.T) {
 			if destination == "" {
 				destination = CheckpointDst
 			}
-			cmd := exec.Command(binary, fmt.Sprintf("%d", os.Getpid()), tc.source, destination, "ro", "noexec")
+			cmd := exec.Command(binary, "mount-fd", fmt.Sprintf("%d", nsFdChildNum), tc.source, destination, "ro", "noexec")
 			output, err := cmd.CombinedOutput()
 			if err == nil {
 				t.Fatalf("helper accepted source %q", tc.source)

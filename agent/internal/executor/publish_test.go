@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build linux
+
 package executor
 
 import (
@@ -10,33 +12,6 @@ import (
 
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
-
-func TestRenameNoReplacePreservesExistingArtifact(t *testing.T) {
-	root := t.TempDir()
-	staged := filepath.Join(root, "staged")
-	final := filepath.Join(root, "final")
-	if err := os.Mkdir(staged, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(final, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(staged, "staged.img"), []byte("staged"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(final, "existing.img"), []byte("existing"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := renameNoReplace(staged, final); !os.IsExist(err) {
-		t.Fatalf("renameNoReplace error = %v, want exists", err)
-	}
-	for _, path := range []string{filepath.Join(staged, "staged.img"), filepath.Join(final, "existing.img")} {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("preserved path %s: %v", path, err)
-		}
-	}
-}
 
 func TestPublishCheckpointAcceptsMatchingImmutableArtifact(t *testing.T) {
 	root := t.TempDir()

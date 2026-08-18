@@ -133,6 +133,12 @@ func TestArtifactPresent(t *testing.T) {
 		assert.False(t, present)
 	})
 
+	t.Run("existing directory without manifest is invalid", func(t *testing.T) {
+		present, err := artifactPresent(t.TempDir(), "checkpoint-123")
+		require.Error(t, err)
+		assert.False(t, present)
+	})
+
 	for _, readErr := range []error{syscall.EIO, syscall.ESTALE} {
 		t.Run("storage read error "+readErr.Error(), func(t *testing.T) {
 			present, err := artifactPresentWithManifestReader(

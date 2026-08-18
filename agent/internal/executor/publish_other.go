@@ -5,16 +5,8 @@
 
 package executor
 
-import (
-	"os"
-	"syscall"
-)
+import "syscall"
 
-func renameNoReplace(oldPath, newPath string) error {
-	if _, err := os.Lstat(newPath); err == nil {
-		return syscall.EEXIST
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	return os.Rename(oldPath, newPath)
+func renameNoReplace(_, _ string) error {
+	return syscall.ENOTSUP
 }

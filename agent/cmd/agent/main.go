@@ -17,6 +17,7 @@ import (
 	"github.com/go-logr/logr"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/controller"
+	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	"github.com/ai-dynamo/snapshot/agent/internal/logging"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
@@ -41,6 +42,9 @@ func main() {
 	}
 	if err := nsmount.ValidateBasePathMount(cfg.Storage.BasePath); err != nil {
 		fatal(agentLog, err, "Invalid checkpoint storage mount")
+	}
+	if err := executor.ValidateCheckpointStorage(cfg.Storage.BasePath); err != nil {
+		fatal(agentLog, err, "Checkpoint storage does not support safe publication")
 	}
 
 	rt, err := snapshotruntime.New(*runtimeType, *runtimeSocket)

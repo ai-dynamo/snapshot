@@ -830,8 +830,10 @@ def ensure_checkpoint_pvc(
         mismatches = []
         if requested != size:
             mismatches.append(f"requested storage={requested}, configured size={size}")
-        if access_modes != ["ReadWriteMany"]:
-            mismatches.append(f"accessModes={access_modes}, expected ['ReadWriteMany']")
+        if "ReadWriteMany" not in access_modes:
+            mismatches.append(
+                f"accessModes={access_modes}, expected to contain ReadWriteMany"
+            )
         if storage_class and actual_storage_class != storage_class:
             mismatches.append(
                 f"storageClassName={actual_storage_class!r}, expected {storage_class!r}"
