@@ -24,7 +24,7 @@ import (
 
 const (
 	filesImageFilename            = "files.img"
-	restoreImageDirPattern        = "criu-restore-images-*"
+	restoreImagesTempDirPattern   = "criu-restore-images-*"
 	placeholderMountNamespacePath = "/proc/self/ns/mnt"
 	cudaUVMFDSocketNamePrefix     = "\x00cuda-uvmfd-"
 	linuxUnixSocketStateListen    = 10
@@ -117,7 +117,7 @@ func prepareRestoreImageDirForRestoreID(checkpointPath string, restoreID uint64)
 	// Keep the private view on local disk. Hard-linking thousands of *.img
 	// names onto the checkpoint PVC is one NFS RPC per link and again per
 	// unlink in cleanup(); the page inodes stay in the original checkpoint.
-	privateDir, err := os.MkdirTemp("", restoreImageDirPattern)
+	privateDir, err := os.MkdirTemp("", restoreImagesTempDirPattern)
 	if err != nil {
 		closeFDs(reservationFDs)
 		return "", nil, fmt.Errorf("failed to create private CRIU image directory: %w", err)
