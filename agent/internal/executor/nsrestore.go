@@ -215,11 +215,24 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 			"criu_callback_pid", restoredPID,
 		)
 		cudaStart := time.Now()
-		_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, log)
-		timings.cudaRestoreDuration = time.Since(cudaStart)
+		_, err = cuda.RestoreProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, log)
 		if err != nil {
 			return nil, 0, fmt.Errorf("CUDA restore failed: %w", err)
 		}
+		// CUDA APIs must be available for VMM replay. Application progress
+		// remains gated by the restore-complete sentinel.
+		if err := cuda.UnlockProcessTree(ctx, restorePIDs, cudaHelperFdPath, log); err != nil {
+			return nil, 0, fmt.Errorf("CUDA unlock failed: %w", err)
+		}
+		if err := cuda.RestoreVMM(
+			ctx,
+			opts.CheckpointPath,
+			restorePIDs,
+			m.CUDA.PIDs,
+		); err != nil {
+			return nil, 0, fmt.Errorf("restore CUDA VMM interpose state: %w", err)
+		}
+		timings.cudaRestoreDuration = time.Since(cudaStart)
 	}
 
 	return timings, int(restoredPID), nil
