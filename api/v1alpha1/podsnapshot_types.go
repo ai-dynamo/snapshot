@@ -106,7 +106,6 @@ type PodSnapshotStatus struct {
 // +kubebuilder:printcolumn:name="Content",type="string",JSONPath=".status.boundSnapshotContentName",description="Bound PodSnapshotContent"
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status",description="Ready condition"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.spec) || self.spec == oldSelf.spec",message="spec is immutable"
 
 // PodSnapshot is the Schema for the snapshots API. It is the namespaced binding
 // for a captured container checkpoint and is consumed by restore paths.
@@ -117,6 +116,7 @@ type PodSnapshot struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
 	Spec   PodSnapshotSpec   `json:"spec,omitempty"`
 	Status PodSnapshotStatus `json:"status,omitempty"`
 }

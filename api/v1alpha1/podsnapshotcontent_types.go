@@ -80,7 +80,6 @@ type PodSnapshotContentStatus struct {
 // +kubebuilder:printcolumn:name="Namespace",type="string",JSONPath=".spec.snapshotRef.namespace",description="PodSnapshot namespace"
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status",description="Ready condition"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.spec) || self.spec == oldSelf.spec",message="spec is immutable"
 
 // PodSnapshotContent is the Schema for the snapshotcontents API. It is the
 // cluster-scoped artifact-of-record for a captured container checkpoint.
@@ -91,6 +90,7 @@ type PodSnapshotContent struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
 	Spec   PodSnapshotContentSpec   `json:"spec,omitempty"`
 	Status PodSnapshotContentStatus `json:"status,omitempty"`
 }

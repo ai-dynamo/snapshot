@@ -8582,6 +8582,8 @@ spec:
             - podTemplate
             type: object
             x-kubernetes-validations:
+            - message: spec is immutable
+              rule: self == oldSelf
             - message: targetContainers must name containers present in podTemplate
               rule: self.podSnapshotTemplate.targetContainers.all(c, c in self.podTemplate.spec.containers.map(x,
                 x.name))
@@ -8664,9 +8666,6 @@ spec:
                 type: string
             type: object
         type: object
-        x-kubernetes-validations:
-        - message: spec is immutable
-          rule: '!has(oldSelf.spec) || self.spec == oldSelf.spec'
     served: true
     storage: true
     subresources:

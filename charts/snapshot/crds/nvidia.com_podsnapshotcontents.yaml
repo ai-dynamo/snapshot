@@ -136,6 +136,9 @@ spec:
             - snapshotRef
             - source
             type: object
+            x-kubernetes-validations:
+            - message: spec is immutable
+              rule: self == oldSelf
           status:
             description: PodSnapshotContentStatus defines the observed state of PodSnapshotContent.
             properties:
@@ -200,9 +203,6 @@ spec:
                 type: array
             type: object
         type: object
-        x-kubernetes-validations:
-        - message: spec is immutable
-          rule: '!has(oldSelf.spec) || self.spec == oldSelf.spec'
     served: true
     storage: true
     subresources:

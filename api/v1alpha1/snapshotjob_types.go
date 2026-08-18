@@ -151,7 +151,6 @@ type SnapshotJobStatus struct {
 // +kubebuilder:printcolumn:name="Completed",type="string",JSONPath=".status.conditions[?(@.type=='Completed')].status"
 // +kubebuilder:printcolumn:name="PodSnapshot",type="string",JSONPath=".status.podSnapshotName"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.spec) || self.spec == oldSelf.spec",message="spec is immutable"
 
 // SnapshotJob is the Schema for the snapshotjobs API. It fuses running a
 // checkpoint-ready workload pod and capturing it into a PodSnapshot into one
@@ -164,6 +163,7 @@ type SnapshotJob struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
 	Spec   SnapshotJobSpec   `json:"spec,omitempty"`
 	Status SnapshotJobStatus `json:"status,omitempty"`
 }
