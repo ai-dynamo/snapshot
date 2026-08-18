@@ -348,6 +348,10 @@ func TestReconcileSourcePod_DottedCheckpointIDIsValid(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-dotted", "node-a", "warm.worker")
 	pod := makeSourcePod("warm.worker")
 	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+	// Seed the in-flight guard so reconcileSourcePod returns right after ID
+	// validation instead of proceeding into the full dump pipeline — this test
+	// only cares whether validation itself accepts the dotted ID.
+	w.inFlight["warm.worker"] = struct{}{}
 
 	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
 
