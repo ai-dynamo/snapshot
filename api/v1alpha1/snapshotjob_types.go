@@ -47,6 +47,12 @@ const (
 	ReasonPodSnapshotNameConflict = "PodSnapshotNameConflict"
 	ReasonJobNameConflict         = "JobNameConflict"
 	ReasonJobDeleted              = "JobDeleted"
+	// ReasonInvalidSpec is a defense-in-depth reason for spec-level validation
+	// failures caught by the controller before building the source Job (e.g. no
+	// container named by spec.podSnapshotTemplate.targetContainers[0]). The CEL
+	// XValidation rule on SnapshotJobSpec already rejects most of these at
+	// admission time; this reason only fires for objects that bypassed it.
+	ReasonInvalidSpec = "InvalidSpec"
 )
 
 // SnapshotJobOwnerLabel maps a produced PodSnapshot back to the SnapshotJob that
