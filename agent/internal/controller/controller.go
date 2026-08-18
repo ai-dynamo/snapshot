@@ -48,15 +48,16 @@ import (
 // informer over PodSnapshotContent work orders filtered to this node, with typed
 // reads/writes via an uncached controller-runtime client.
 type NodeController struct {
-	config       *types.AgentConfig
-	clientset    kubernetes.Interface
-	client       client.Client
-	dynClient    dynamic.Interface
-	runtime      snapshotruntime.Runtime
-	injector     executor.Mounter
-	log          logr.Logger
-	holderID     string
-	checkpointFn func(ctx context.Context, params CheckpointParams) error
+	config              *types.AgentConfig
+	clientset           kubernetes.Interface
+	client              client.Client
+	dynClient           dynamic.Interface
+	runtime             snapshotruntime.Runtime
+	injector            executor.Mounter
+	log                 logr.Logger
+	holderID            string
+	checkpointFn        func(ctx context.Context, params CheckpointParams) error
+	releaseCheckpointFn func(containerPID int) error
 
 	inFlight   map[string]struct{}
 	inFlightMu sync.Mutex
@@ -134,6 +135,9 @@ func NewNodeController(
 		stopCh:    make(chan struct{}),
 	}
 	w.checkpointFn = w.executorCheckpoint
+	w.releaseCheckpointFn = func(containerPID int) error {
+		return snapshotruntime.WriteControlSentinel(containerPID, snapshotv1alpha1.SnapshotCompleteFile)
+	}
 	return w, nil
 }
 
