@@ -22,7 +22,8 @@ type Storage struct {
 type RestoreStatusAnnotationKeys struct {
 	Status      string
 	ContainerID string
-	Reason      string
+	// +optional
+	Reason string
 }
 
 // ArtifactVersion normalizes an artifact version, defaulting when empty.
