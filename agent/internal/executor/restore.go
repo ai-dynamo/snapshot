@@ -36,6 +36,16 @@ type Mounters struct {
 	Artifact Mounter
 }
 
+// RestoreCleanupError reports that restore work completed but a required
+// namespace mount could not be removed. The controller treats it as fatal.
+type RestoreCleanupError struct {
+	Action string
+	Err    error
+}
+
+func (e *RestoreCleanupError) Error() string { return fmt.Sprintf("%s: %v", e.Action, e.Err) }
+func (e *RestoreCleanupError) Unwrap() error { return e.Err }
+
 // RestoreRequest holds the parameters for a restore operation.
 type RestoreRequest struct {
 	CheckpointID    string
@@ -95,7 +105,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		return 0, fmt.Errorf("mount agent bundle into placeholder: %w", err)
 	}
 	defer func() {
-		if cleanupErr := bundleMount.Unmount(context.Background()); cleanupErr != nil {
+		if cleanupErr := bundleMount.Unmount(); cleanupErr != nil {
 			log.Error(cleanupErr, "failed to clean bundle mount from placeholder namespace")
 			setCleanupErrorIfSuccessful(&retErr, "unmount agent bundle from placeholder", cleanupErr)
 		}
@@ -105,7 +115,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		return 0, fmt.Errorf("mount checkpoint artifact into placeholder: %w", err)
 	}
 	defer func() {
-		if cleanupErr := artifactMount.Unmount(context.Background()); cleanupErr != nil {
+		if cleanupErr := artifactMount.Unmount(); cleanupErr != nil {
 			log.Error(cleanupErr, "failed to clean artifact mount from placeholder namespace")
 			setCleanupErrorIfSuccessful(&retErr, "unmount checkpoint artifact from placeholder", cleanupErr)
 		}
@@ -152,8 +162,10 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 }
 
 func setCleanupErrorIfSuccessful(retErr *error, action string, cleanupErr error) {
+	// Namespace mount cleanup is part of restore correctness. Returning this
+	// failure makes the controller mark the restore failed and kill the workload.
 	if *retErr == nil {
-		*retErr = fmt.Errorf("%s: %w", action, cleanupErr)
+		*retErr = &RestoreCleanupError{Action: action, Err: cleanupErr}
 	}
 }
 

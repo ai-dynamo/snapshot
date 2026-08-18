@@ -10,8 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 	"syscall"
 
 	"github.com/go-logr/logr"
@@ -31,13 +29,10 @@ const (
 // MountPoint represents an active bind-mount of a directory inside a foreign
 // namespace. The caller must call Unmount when done.
 type MountPoint interface {
-	// Path returns an in-namespace path below the mount point. name must be a
-	// single path element with no separators or dot-dot components.
-	Path(name string) (string, error)
-
 	// Unmount removes the bind-mount from the target namespace.
-	// Idempotent — safe to call multiple times.
-	Unmount(ctx context.Context) error
+	// It is idempotent and uses an implementation-owned timeout so cleanup is
+	// not cancelled with the restore request.
+	Unmount() error
 
 	// NsFd returns the pinned mount-namespace fd opened at Mount time.
 	// Valid until Unmount is called. Test mocks may return nil.
@@ -99,7 +94,7 @@ func (nsm *NSMounter) Mount(ctx context.Context, pid int, src, dst string) (Moun
 		return nil, err
 	}
 
-	nsm.log.Info("mounted into placeholder namespace", "pid", pid, "dst", ref.TargetPath())
+	nsm.log.Info("mounted into placeholder namespace", "pid", pid, "dst", dst)
 	return &mountPoint{mount: ref}, nil
 }
 
@@ -107,15 +102,8 @@ type mountPoint struct {
 	mount mountRef
 }
 
-func (h *mountPoint) Path(name string) (string, error) {
-	if name == "" || name == "." || name == ".." || strings.ContainsRune(name, os.PathSeparator) {
-		return "", fmt.Errorf("nsmount: invalid path element %q", name)
-	}
-	return filepath.Join(h.mount.TargetPath(), name), nil
-}
-
-func (h *mountPoint) Unmount(ctx context.Context) error {
-	return h.mount.Unmount(ctx)
+func (h *mountPoint) Unmount() error {
+	return h.mount.Unmount()
 }
 
 func (h *mountPoint) NsFd() *os.File {

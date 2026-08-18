@@ -37,6 +37,8 @@ const (
 
 	// Full keys are nvidia.com/snapshot-restore-container-id.<containerName>.
 	RestoreContainerIDAnnotationPrefix = "nvidia.com/snapshot-restore-container-id."
+	// Full keys are nvidia.com/snapshot-restore-reason.<containerName>.
+	RestoreReasonAnnotationPrefix = "nvidia.com/snapshot-restore-reason."
 
 	// Legacy unscoped restore status keys, cleared when stamping fresh metadata.
 	RestoreStatusAnnotation      = "nvidia.com/snapshot-restore-status"

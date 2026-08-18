@@ -42,7 +42,7 @@ func TestPrepareRestoreImageDirRewritesObservedSocketTopology(t *testing.T) {
 	if len(capturedImages) != 1 {
 		t.Fatalf("captured files images = %d, want 1", len(capturedImages))
 	}
-	restored := decodeFilesImage(t, capturedImages[0])
+	restored := decodeFilesImageEntries(t, capturedImages[0])
 	if got := restored[0].Usk.Name; !bytes.HasPrefix(got, []byte("\x00dynamo-")) {
 		t.Fatalf("CUDA listener address = %q, want Dynamo abstract address", got)
 	}
@@ -179,7 +179,7 @@ func TestPrepareRestoreImageDirConcurrentRewriteMetadataIsIndependent(t *testing
 	addresses := make(map[string]struct{})
 	ports := make(map[uint32]struct{})
 	for _, capturedImage := range mounter.capturedImages() {
-		entries := decodeFilesImage(t, capturedImage)
+		entries := decodeFilesImageEntries(t, capturedImage)
 		addresses[string(entries[0].Usk.Name)] = struct{}{}
 		ports[entries[5].Isk.GetSrcPort()] = struct{}{}
 	}
@@ -349,7 +349,7 @@ func writeFilesImage(t *testing.T, dir string, entries []*fdinfo.FileEntry) []by
 	return data
 }
 
-func decodeFilesImage(t *testing.T, data []byte) []*fdinfo.FileEntry {
+func decodeFilesImageEntries(t *testing.T, data []byte) []*fdinfo.FileEntry {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), filesImageFilename)
 	if err := os.WriteFile(path, data, 0600); err != nil {
