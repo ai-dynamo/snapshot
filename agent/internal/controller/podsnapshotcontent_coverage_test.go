@@ -14,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
@@ -49,6 +50,7 @@ func makeNodeControllerWithInterceptor(t *testing.T, fc *fakeCheckpointer, funcs
 		contentIndexer: idx,
 	}
 	w.checkpointFn = fc.fn
+	w.releaseCheckpointFn = func(int) error { return nil }
 	return w
 }
 
@@ -199,6 +201,132 @@ func TestSetSnapshotContentSucceeded_StatusPatchErrorReturnsError(t *testing.T) 
 
 	require.Error(t, err)
 	assert.Nil(t, meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+}
+
+func TestSetSnapshotContentSucceeded_ConflictReturnsError(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	funcs := interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			return conflictErr()
+		},
+	}
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content)
+
+	err := w.setSnapshotContentSucceeded(context.Background(), content)
+
+	require.Error(t, err)
+	assert.True(t, apierrors.IsConflict(err))
+	assert.Nil(t, meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+}
+
+func TestRunCheckpoint_ReadyPatchErrorDoesNotRelease(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	funcs := interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			return errors.New("status patch rejected")
+		},
+	}
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content)
+	released := false
+	w.releaseCheckpointFn = func(int) error {
+		released = true
+		return nil
+	}
+	pod := &corev1.Pod{}
+	leaseKey := client.ObjectKey{Namespace: "inference", Name: "checkpoint-lease-x"}
+	loc := checkpointLocations{
+		HostPath:      w.config.Storage.BasePath,
+		ContainerPath: w.config.Storage.BasePath,
+	}
+
+	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, "x", loc, leaseKey, "x")
+
+	assert.False(t, released)
+	assert.Nil(t, meta.FindStatusCondition(
+		getContent(t, w, content.Name).Status.Conditions,
+		snapshotv1alpha1.PodSnapshotConditionReady,
+	))
+}
+
+func TestMarkCheckpointReadyAndRelease_FailedBeforeReadyDoesNotRelease(t *testing.T) {
+	stored := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	meta.SetStatusCondition(&stored.Status.Conditions, metav1.Condition{
+		Type:    snapshotv1alpha1.PodSnapshotConditionFailed,
+		Status:  metav1.ConditionTrue,
+		Reason:  "SourcePodGone",
+		Message: "source pod is gone",
+	})
+	funcs := interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			sc, ok := obj.(*snapshotv1alpha1.PodSnapshotContent)
+			if ok {
+				if cond := meta.FindStatusCondition(sc.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady); cond != nil && cond.Status == metav1.ConditionTrue {
+					return conflictErr()
+				}
+			}
+			return c.Status().Patch(ctx, obj, patch, opts...)
+		},
+	}
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, stored)
+	released := false
+	w.releaseCheckpointFn = func(int) error {
+		released = true
+		return nil
+	}
+	stale := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+
+	err := w.markCheckpointReadyAndRelease(context.Background(), stale, 7)
+
+	require.NoError(t, err)
+	assert.False(t, released)
+	got := getContent(t, w, stored.Name)
+	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+	failed := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, "SourcePodGone", failed.Reason)
+}
+
+func TestRunCheckpoint_FailedBeforeReadyDoesNotRelease(t *testing.T) {
+	stored := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	meta.SetStatusCondition(&stored.Status.Conditions, metav1.Condition{
+		Type:    snapshotv1alpha1.PodSnapshotConditionFailed,
+		Status:  metav1.ConditionTrue,
+		Reason:  "SourcePodGone",
+		Message: "source pod is gone",
+	})
+	funcs := interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			sc, ok := obj.(*snapshotv1alpha1.PodSnapshotContent)
+			if ok {
+				if cond := meta.FindStatusCondition(sc.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady); cond != nil && cond.Status == metav1.ConditionTrue {
+					return conflictErr()
+				}
+			}
+			return c.Status().Patch(ctx, obj, patch, opts...)
+		},
+	}
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, stored)
+	released := false
+	w.releaseCheckpointFn = func(int) error {
+		released = true
+		return nil
+	}
+	stale := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	pod := &corev1.Pod{}
+	leaseKey := client.ObjectKey{Namespace: "inference", Name: "checkpoint-lease-x"}
+	loc := checkpointLocations{
+		HostPath:      w.config.Storage.BasePath,
+		ContainerPath: w.config.Storage.BasePath,
+	}
+
+	w.runCheckpoint(context.Background(), stale, pod, "main", "abc123", 7, "x", loc, leaseKey, "x")
+
+	assert.False(t, released)
+	got := getContent(t, w, stored.Name)
+	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+	failed := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, "SourcePodGone", failed.Reason)
 }
 
 func TestSetSnapshotContentFailed_StatusPatchErrorReturnsError(t *testing.T) {
