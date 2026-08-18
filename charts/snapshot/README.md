@@ -11,9 +11,11 @@ This chart installs the snapshot infrastructure:
 - cluster-scoped agent and operator RBAC
 - the seccomp profile CRIU needs
 
-Install one Snapshot release for the cluster. Every node agent mounts the same
-shared checkpoint PVC directly and watches checkpoint/restore pods in all
-namespaces. Workload pods never mount checkpoint storage.
+Install one Snapshot release for the cluster. The operator and every node agent
+mount the same shared checkpoint PVC directly; agents watch checkpoint/restore
+pods in all namespaces. Workload pods never mount checkpoint storage. When a
+`PodSnapshot` is deleted, the operator removes the complete artifact tree owned
+by its bound `PodSnapshotContent` before allowing either resource to disappear.
 
 ## Prerequisites
 
@@ -38,7 +40,9 @@ retained claim remains untouched.
 For CRI-O nodes set `runtime.type=crio`. Only set `runtime.socketPath` if the CRI
 socket is not the default for that type (see `values.yaml`). On OpenShift, set
 `openshift.enabled=true` so the chart emits the extra RBAC and pod annotations
-the agent needs. Example:
+the agent needs. It also grants the operator service account the built-in
+`anyuid` SCC so the cleanup controller can remove root-owned CRIU artifacts
+from the shared PVC. Example:
 
 ```bash
 helm upgrade --install snapshot ./charts/snapshot \
@@ -133,7 +137,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `storage.pvc.name` | Shared RWX checkpoint PVC mounted by every agent | `snapshot-pvc` |
 | `storage.pvc.size` | Requested PVC size | `1Ti` |
 | `storage.pvc.storageClass` | Storage class name | `""` |
-| `storage.pvc.basePath` | Checkpoint storage mount path inside every agent | `/checkpoints` |
+| `storage.pvc.basePath` | Checkpoint storage mount path inside the operator and every agent | `/checkpoints` |
 | `seccomp.deploy` | Deploy the CRIU seccomp profile ConfigMap and init container. Use this field name; `seccomp.enabled` is not a chart value | `true` |
 | `runtime.type` | CRI backend: `containerd` or `crio` | `containerd` |
 | `runtime.socketPath` | CRI socket (empty = default for `runtime.type`) | `""` |
@@ -153,8 +157,9 @@ See [values.yaml](./values.yaml) for the full configuration surface.
 helm uninstall snapshot -n ${NAMESPACE}
 ```
 
-The chart does not delete checkpoint data automatically. Remove the PVC yourself
-if you want to clear stored checkpoints:
+Deleting an individual `PodSnapshot` automatically removes its artifact from
+the shared PVC. Uninstalling the chart does not delete the retained PVC or any
+remaining data; remove the PVC yourself if you want to clear all storage:
 
 ```bash
 PVC_NAME="${PVC_NAME:-snapshot-pvc}" # match storage.pvc.name

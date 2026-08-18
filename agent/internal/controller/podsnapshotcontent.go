@@ -67,6 +67,9 @@ func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name s
 	if content.Spec.Source.NodeName != w.config.NodeName {
 		return
 	}
+	if !content.DeletionTimestamp.IsZero() {
+		return
+	}
 	if isContentTerminal(content) {
 		return
 	}
@@ -140,7 +143,7 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		}
 		return fmt.Errorf("get PodSnapshotContent %q: %w", name, err)
 	}
-	if isContentTerminal(content) {
+	if !content.DeletionTimestamp.IsZero() || isContentTerminal(content) {
 		return nil
 	}
 
@@ -203,7 +206,7 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		return w.setSnapshotContentSucceeded(ctx, content)
 	}
 
-	leaseKey := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: checkpointLeaseName(contentUID, containerName)}
+	leaseKey := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: snapshotv1alpha1.CaptureLeaseName(contentUID, containerName)}
 	acquired, err := w.acquireLease(ctx, leaseKey)
 	if err != nil {
 		return fmt.Errorf("acquire checkpoint lease %s: %w", leaseKey.String(), err)
@@ -211,6 +214,26 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	if !acquired {
 		return nil
 	}
+
+	// The content may have been deleted after the informer selected it but
+	// before this worker acquired the Lease. Re-read while holding the Lease:
+	// deletion cleanup observes the same Lease and cannot remove the artifact
+	// between this check and runCheckpoint releasing it.
+	liveContent := &snapshotv1alpha1.PodSnapshotContent{}
+	if err := w.client.Get(ctx, client.ObjectKey{Name: content.Name}, liveContent); err != nil {
+		releaseErr := w.releaseLease(ctx, leaseKey)
+		if apierrors.IsNotFound(err) {
+			return releaseErr
+		}
+		if releaseErr != nil {
+			return fmt.Errorf("refresh PodSnapshotContent %q: %w (release lease: %v)", content.Name, err, releaseErr)
+		}
+		return fmt.Errorf("refresh PodSnapshotContent %q: %w", content.Name, err)
+	}
+	if !liveContent.DeletionTimestamp.IsZero() {
+		return w.releaseLease(ctx, leaseKey)
+	}
+	content = liveContent
 
 	releaseInFlight = false
 	go w.runCheckpoint(ctx, content, pod, containerName, containerID, containerPID, contentUID, artifactPath, leaseKey, artifactKey)

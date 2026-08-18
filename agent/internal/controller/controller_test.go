@@ -384,8 +384,8 @@ func TestRestoreCheckpointReady(t *testing.T) {
 }
 
 func TestCheckpointLeaseNameUsesContentAndContainer(t *testing.T) {
-	a := checkpointLeaseName("content-uid", "main")
-	b := checkpointLeaseName("content-uid", "worker")
+	a := snapshotv1alpha1.CaptureLeaseName("content-uid", "main")
+	b := snapshotv1alpha1.CaptureLeaseName("content-uid", "worker")
 	assert.NotEqual(t, a, b)
 	assert.True(t, strings.HasPrefix(a, "snapshot-capture-"))
 }

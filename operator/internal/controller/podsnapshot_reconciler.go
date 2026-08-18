@@ -31,6 +31,9 @@ const (
 	// podSnapshotFinalizer is set on the PodSnapshot so its bound PodSnapshotContent is
 	// deleted before the PodSnapshot is removed.
 	podSnapshotFinalizer = "nvidia.com/podsnapshotcontent-cleanup"
+	// podSnapshotContentArtifactFinalizer keeps the content identity available until
+	// the operator has removed its physical artifact from the shared checkpoint PVC.
+	podSnapshotContentArtifactFinalizer = "nvidia.com/podsnapshotcontent-artifact-cleanup"
 
 	// snapshotContentDeleteRequeue is the delay between cascade-delete progress checks.
 	snapshotContentDeleteRequeue = time.Second
@@ -56,7 +59,9 @@ var errContentConflict = errors.New("existing PodSnapshotContent belongs to anot
 // back to the PodSnapshot, and cascades deletion to the PodSnapshotContent.
 type PodSnapshotReconciler struct {
 	client.Client
-	Recorder record.EventRecorder
+	Recorder         record.EventRecorder
+	ArtifactBasePath string
+	removeAll        func(string) error
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=get;list;watch;update;patch
@@ -64,8 +69,10 @@ type PodSnapshotReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots/finalizers,verbs=update
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshotcontents,verbs=create;get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshotcontents/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshotcontents/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;delete
 
 // Reconcile drives a PodSnapshot through binding, status mirroring, and cascade deletion. It is a thin
 // orchestrator: each branch delegates to a helper that owns that path's detail.
@@ -126,6 +133,9 @@ func (sr *PodSnapshotReconciler) mirrorBoundContent(ctx context.Context, snap *s
 	// no-op after the first pass; it never triggers an extra API read (the Get above is needed anyway).
 	if err := verifyContentBacklink(snap, content); err != nil {
 		return sr.failPodSnapshot(ctx, snap, "ContentConflict", err)
+	}
+	if _, err := sr.ensureContentArtifactFinalizer(ctx, content); err != nil {
+		return ctrl.Result{}, err
 	}
 	return sr.propagateStatus(ctx, snap, content)
 }
@@ -220,6 +230,9 @@ func (sr *PodSnapshotReconciler) ensurePodSnapshotContent(ctx context.Context, s
 				// %v on the inner: only errContentConflict needs to be unwrappable by the caller.
 				return nil, fmt.Errorf("%w: %v", errContentConflict, err)
 			}
+			if _, err := sr.ensureContentArtifactFinalizer(ctx, existing); err != nil {
+				return nil, err
+			}
 			return existing, nil
 		}
 		sr.Recorder.Event(snap, corev1.EventTypeWarning, "SnapshotContentCreateFailed", err.Error())
@@ -236,7 +249,8 @@ func (sr *PodSnapshotReconciler) buildPodSnapshotContent(snap *snapshotv1alpha1.
 			Kind:       "PodSnapshotContent",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name: contentName,
+			Name:       contentName,
+			Finalizers: []string{podSnapshotContentArtifactFinalizer},
 			Labels: map[string]string{
 				snapshotv1alpha1.SnapshotNodeLabel: pod.Spec.NodeName,
 			},
@@ -335,9 +349,8 @@ func (sr *PodSnapshotReconciler) failPodSnapshot(ctx context.Context, snap *snap
 	return ctrl.Result{}, nil
 }
 
-// handleDelete cascades deletion to the bound PodSnapshotContent and blocks (requeues) until
-// it is gone before dropping the PodSnapshot finalizer. The PodSnapshotContent carries no
-// finalizer of its own, so the Delete takes effect immediately.
+// handleDelete cascades deletion to the bound PodSnapshotContent and blocks until the
+// operator has removed its content-UID-owned artifact and the content is gone.
 func (sr *PodSnapshotReconciler) handleDelete(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot) (ctrl.Result, error) {
 	if !controllerutil.ContainsFinalizer(snap, podSnapshotFinalizer) {
 		return ctrl.Result{}, nil
@@ -360,18 +373,32 @@ func (sr *PodSnapshotReconciler) handleDelete(ctx context.Context, snap *snapsho
 		return ctrl.Result{}, nil
 	}
 
-	content := &snapshotv1alpha1.PodSnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: contentName}}
-	if err := sr.Delete(ctx, content); err != nil && !apierrors.IsNotFound(err) {
-		return ctrl.Result{}, fmt.Errorf("delete PodSnapshotContent %q: %w", contentName, err)
-	}
-
-	// Block until the content is confirmed gone before releasing the PodSnapshot.
-	if err := sr.Get(ctx, client.ObjectKey{Name: contentName}, &snapshotv1alpha1.PodSnapshotContent{}); err == nil {
-		return ctrl.Result{RequeueAfter: snapshotContentDeleteRequeue}, nil
-	} else if !apierrors.IsNotFound(err) {
+	content := &snapshotv1alpha1.PodSnapshotContent{}
+	if err := sr.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
+		if apierrors.IsNotFound(err) {
+			return sr.removeSnapshotFinalizer(ctx, snap)
+		}
 		return ctrl.Result{}, fmt.Errorf("confirm PodSnapshotContent %q deleted: %w", contentName, err)
 	}
+	if err := verifyContentBacklink(snap, content); err != nil {
+		return ctrl.Result{}, err
+	}
 
+	// Backfill the artifact finalizer before requesting deletion so snapshots
+	// created by an older operator version receive the same cleanup guarantee.
+	if added, err := sr.ensureContentArtifactFinalizer(ctx, content); err != nil || added {
+		return ctrl.Result{}, err
+	}
+	if content.DeletionTimestamp.IsZero() {
+		if err := sr.Delete(ctx, content); err != nil && !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("delete PodSnapshotContent %q: %w", contentName, err)
+		}
+		return ctrl.Result{RequeueAfter: snapshotContentDeleteRequeue}, nil
+	}
+	return sr.finalizeContentArtifacts(ctx, content)
+}
+
+func (sr *PodSnapshotReconciler) removeSnapshotFinalizer(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot) (ctrl.Result, error) {
 	controllerutil.RemoveFinalizer(snap, podSnapshotFinalizer)
 	if err := sr.Update(ctx, snap); err != nil {
 		return ctrl.Result{}, fmt.Errorf("remove snapshot finalizer: %w", err)

@@ -873,7 +873,7 @@ func chooseActiveContent(objs []interface{}) string {
 	var chosen *snapshotv1alpha1.PodSnapshotContent
 	for _, obj := range objs {
 		content, ok := contentFromInformerObj(obj)
-		if !ok || isContentTerminal(content) {
+		if !ok || !content.DeletionTimestamp.IsZero() || isContentTerminal(content) {
 			continue
 		}
 		if chosen == nil ||

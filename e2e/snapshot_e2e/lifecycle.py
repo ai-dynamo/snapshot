@@ -31,6 +31,7 @@ PODSNAPSHOTCONTENTS = "podsnapshotcontents"
 PROGRESS_INTERVAL_SECONDS = 30
 TERMINAL_POD_PHASES = {"Failed", "Succeeded"}
 AGENT_CHECKPOINT_DIR = "/checkpoints"
+CONTENT_ARTIFACT_FINALIZER = "nvidia.com/podsnapshotcontent-artifact-cleanup"
 
 
 def wait_for_pod_deleted(namespace: str, name: str, timeout: int = 180) -> None:
@@ -81,6 +82,37 @@ def create_podsnapshot(
         PODSNAPSHOTS,
         body,
     )
+
+
+def delete_podsnapshot(namespace: str, name: str) -> None:
+    client.CustomObjectsApi().delete_namespaced_custom_object(
+        GROUP,
+        VERSION,
+        namespace,
+        PODSNAPSHOTS,
+        name,
+    )
+
+
+def wait_for_custom_object_deleted(
+    namespace: str | None,
+    name: str,
+    *,
+    plural: str,
+    timeout: int = 180,
+) -> None:
+    api = client.CustomObjectsApi()
+
+    def gone() -> bool | None:
+        try:
+            get_custom_object(api, namespace, name, plural)
+        except ApiException as exc:
+            if exc.status == 404:
+                return True
+            raise
+        return None
+
+    wait_for(f"{plural}/{name} deleted", gone, timeout)
 
 
 def wait_for_pod_ready(namespace: str, name: str, timeout: int = 600) -> client.V1Pod:
@@ -360,6 +392,59 @@ def checkpoint_rootfs_file(
 def checkpoint_artifact_path(content_uid: str) -> str:
     return shlex.quote(
         f"{AGENT_CHECKPOINT_DIR}/artifacts/{content_uid}/containers/{CONTAINER}"
+    )
+
+
+def checkpoint_content_root(content_uid: str) -> str:
+    return shlex.quote(f"{AGENT_CHECKPOINT_DIR}/artifacts/{content_uid}")
+
+
+def seed_checkpoint_cleanup_marker(
+    config: k8s.E2EConfig,
+    node: str,
+    content_uid: str,
+) -> None:
+    root = checkpoint_content_root(content_uid)
+    k8s.exec_command(
+        config.namespace,
+        checkpoint_agent_pod(config, node),
+        f"mkdir -p {root}/.tmp && printf '%s' cleanup-marker > {root}/.tmp/e2e-cleanup-sentinel",
+    )
+
+
+def wait_for_checkpoint_content_root_deleted(
+    config: k8s.E2EConfig,
+    node: str,
+    content_uid: str,
+    timeout: int = 180,
+) -> None:
+    agent = checkpoint_agent_pod(config, node)
+    root = checkpoint_content_root(content_uid)
+    marker = "__snapshot_e2e_artifact_root_deleted__"
+    last_error: str | None = None
+
+    def gone() -> bool | None:
+        nonlocal last_error
+        try:
+            response = k8s.exec_command(
+                config.namespace,
+                agent,
+                f"[[ ! -e {root} ]] && printf '%s' {shlex.quote(marker)}",
+            )
+            last_error = None
+            return True if response == marker else None
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            return None
+
+    def detail() -> str:
+        return last_error or f"artifact root still exists: {root}"
+
+    wait_for(
+        f"checkpoint artifact root {content_uid} deleted",
+        gone,
+        timeout,
+        detail=detail,
     )
 
 

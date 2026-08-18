@@ -63,7 +63,7 @@ storage:
     size: 1Ti
     # Storage class (leave empty for default)
     storageClass: ""
-    # PVC mount path inside every snapshot-agent pod.
+    # PVC mount path inside the operator and every snapshot-agent pod.
     basePath: /checkpoints
 
   # Reserved for future snapshot-owned backends. Unsupported today.
