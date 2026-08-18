@@ -41,7 +41,7 @@ type SnapshotJobReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=snapshotjobs,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=snapshotjobs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=snapshotjobs/finalizers,verbs=update
-// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;get;list;watch;delete
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;get;list;watch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
 // Reconcile drives a SnapshotJob's source Job into existence and derives Running

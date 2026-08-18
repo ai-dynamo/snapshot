@@ -326,8 +326,9 @@ func TestReconcileSourcePod_GuardSurvivesWorkOrderRecreation(t *testing.T) {
 func TestReconcileSourcePod_InvalidCheckpointIDFails(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	pod := makeSourcePod("x")
-	// Replace the valid ID with one that contains an uppercase letter — not a valid DNS-1123 label.
-	pod.Labels[snapshotv1alpha1.CheckpointIDLabel] = "Bad_ID"
+	// A label value must start and end with an alphanumeric character — a leading
+	// dash is invalid regardless of the rest of the content.
+	pod.Labels[snapshotv1alpha1.CheckpointIDLabel] = "-bad-id"
 	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
 
 	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
@@ -336,6 +337,23 @@ func TestReconcileSourcePod_InvalidCheckpointIDFails(t *testing.T) {
 	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
 	require.NotNil(t, cond)
 	assert.Equal(t, "InvalidCheckpointID", cond.Reason)
+}
+
+func TestReconcileSourcePod_DottedCheckpointIDIsValid(t *testing.T) {
+	// A SnapshotJob name like "warm.worker" is a valid Kubernetes object name (RFC
+	// 1123 subdomain) and a valid label value, but not a valid DNS-1123 label — the
+	// checkpoint ID validation must use label-value rules, not the stricter
+	// DNS-1123-label rules, or a dotted name would be wrongly rejected here even
+	// though the operator already accepted it when creating the source Job.
+	content := makeWorkOrder("podsnapshotcontent-dotted", "node-a", "warm.worker")
+	pod := makeSourcePod("warm.worker")
+	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+
+	got := getContent(t, w, content.Name)
+	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	assert.Nil(t, cond, "a dotted checkpoint ID must not be rejected as InvalidCheckpointID")
 }
 
 func TestReconcileSnapshotContent_FailedContainerUnsticksAndFails(t *testing.T) {
