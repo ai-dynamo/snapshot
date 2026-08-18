@@ -71,7 +71,12 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if err != nil {
 		return 0, err
 	}
-	defer func() {
+	mountActive := true
+	unmount := func() {
+		if !mountActive {
+			return
+		}
+		mountActive = false
 		// Pass a background context: mp.Unmount has its own internal timeout
 		// (nsmount.unmountTimeout) around the ns-bind-mount subprocess.
 		if cleanupErr := mp.Unmount(context.Background()); cleanupErr != nil {
@@ -81,7 +86,8 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 			// already restored successfully. Log it and let the pod continue.
 			log.Error(cleanupErr, "failed to unmount agent bundle from placeholder namespace")
 		}
-	}()
+	}
+	defer unmount()
 
 	result, err := execNSRestore(ctx, log, req, snap, mp)
 	if err != nil {
@@ -91,6 +97,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		return 0, err
 	}
 
+	unmount()
 	wall := time.Since(restoreStart)
 	unaccounted := remainingDuration(wall,
 		gpuDeviceMapDuration,
