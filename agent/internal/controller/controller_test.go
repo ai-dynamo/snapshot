@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/testr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	corev1 "k8s.io/api/core/v1"
@@ -72,9 +73,8 @@ func (noopInjector) Mount(_ context.Context, _ int, _, _ string) (nsmount.MountP
 
 type noopMountPoint struct{}
 
-func (noopMountPoint) Path(name string) (string, error) { return "/noop/" + name, nil }
-func (noopMountPoint) Unmount(_ context.Context) error  { return nil }
-func (noopMountPoint) NsFd() *os.File                   { return nil }
+func (noopMountPoint) Unmount() error { return nil }
+func (noopMountPoint) NsFd() *os.File { return nil }
 
 // errorInjector always returns the wrapped error from Mount.
 type errorInjector struct{ err error }
@@ -121,6 +121,7 @@ func makeTestController(t *testing.T, objs ...runtime.Object) *NodeController {
 		clientset: fake.NewClientset(objs...),
 		runtime:   &fakeRuntime{},
 		injector:  executor.Mounters{Bundle: noopInjector{}, Artifact: noopInjector{}},
+		restoreFn: executor.Restore,
 		log:       testr.New(t),
 		holderID:  "test-holder",
 		inFlight:  make(map[string]struct{}),
@@ -140,6 +141,34 @@ func sawEventReason(clientset *fake.Clientset, reason string) bool {
 		}
 	}
 	return false
+}
+
+func observeEventReason(clientset *fake.Clientset, reason string) <-chan struct{} {
+	seen := make(chan struct{}, 1)
+	clientset.PrependReactor("create", "events", func(action clientgotesting.Action) (bool, runtime.Object, error) {
+		create, ok := action.(clientgotesting.CreateAction)
+		if !ok {
+			return false, nil, nil
+		}
+		event, ok := create.GetObject().(*corev1.Event)
+		if ok && event.Reason == reason {
+			select {
+			case seen <- struct{}{}:
+			default:
+			}
+		}
+		return false, nil, nil
+	})
+	return seen
+}
+
+func waitForSignal(t *testing.T, signal <-chan struct{}, description string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for %s", description)
+	}
 }
 
 func makePod(name, namespace, nodeName string, phase corev1.PodPhase, ready bool, labels, annotations map[string]string) *corev1.Pod {
@@ -498,7 +527,6 @@ func TestReconcileRestorePod(t *testing.T) {
 				labels[snapshotv1alpha1.CheckpointIDLabel] = tc.hash
 			}
 
-			w := makeTestController(t)
 			var annotations map[string]string
 			if tc.annotationStatus != "" {
 				annotations = map[string]string{
@@ -513,6 +541,11 @@ func TestReconcileRestorePod(t *testing.T) {
 				Ready:       tc.ready,
 				ContainerID: "containerd://" + testContainerID,
 			}}
+			w := makeTestController(t, pod)
+			w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.Mounters) (int, error) {
+				return 0, errors.New("test restore stopped")
+			}
+			workerFinished := observeEventReason(w.clientset.(*fake.Clientset), "RestoreWorkerFailed")
 
 			if tc.createDir && tc.hash != "" {
 				dir := filepath.Join(w.config.Storage.BasePath, tc.hash, "versions", snapshotv1alpha1.DefaultCheckpointArtifactVersion)
@@ -535,9 +568,8 @@ func TestReconcileRestorePod(t *testing.T) {
 				t.Errorf("triggered = %v, want %v (inFlight=%d, preSeed=%v, actions=%#v)", triggered, tc.want, len(w.inFlight), tc.preSeed, w.clientset.(*fake.Clientset).Actions())
 			}
 
-			// Let the background goroutine (if any) finish before the test ends
 			if tc.want {
-				time.Sleep(50 * time.Millisecond)
+				waitForSignal(t, workerFinished, "restore worker completion")
 			}
 		})
 	}
@@ -582,29 +614,20 @@ func TestReconcileRestorePodResolvesContainerBeforePodStatus(t *testing.T) {
 	pod.Status.ContainerStatuses = nil
 	w := makeTestController(t, pod)
 	w.runtime = &fakeRuntime{containerIDByPod: testContainerID}
+	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.Mounters) (int, error) {
+		return 0, errors.New("test restore stopped")
+	}
 	clientset := w.clientset.(*fake.Clientset)
+	restoreRequested := observeEventReason(clientset, "RestoreRequested")
+	workerFinished := observeEventReason(clientset, "RestoreWorkerFailed")
 	dir := filepath.Join(w.config.Storage.BasePath, "abc123", "versions", snapshotv1alpha1.DefaultCheckpointArtifactVersion)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("failed to create checkpoint dir: %v", err)
 	}
 
 	w.reconcileRestorePod(context.Background(), pod)
-
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		for _, action := range clientset.Actions() {
-			create, ok := action.(clientgotesting.CreateAction)
-			if !ok || create.GetResource().Resource != "events" {
-				continue
-			}
-			event, ok := create.GetObject().(*corev1.Event)
-			if ok && event.Reason == "RestoreRequested" {
-				return
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("expected RestoreRequested event after node-runtime container resolution; actions=%#v", clientset.Actions())
+	waitForSignal(t, restoreRequested, "RestoreRequested event after node-runtime container resolution")
+	waitForSignal(t, workerFinished, "restore worker completion")
 }
 
 func TestReconcileRestorePodPollsRuntimeBeforePodRunning(t *testing.T) {
@@ -616,29 +639,20 @@ func TestReconcileRestorePodPollsRuntimeBeforePodRunning(t *testing.T) {
 	pod.Status.ContainerStatuses = nil
 	w := makeTestController(t, pod)
 	w.runtime = &fakeRuntime{containerIDByPod: testContainerID}
+	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.Mounters) (int, error) {
+		return 0, errors.New("test restore stopped")
+	}
 	clientset := w.clientset.(*fake.Clientset)
+	restoreRequested := observeEventReason(clientset, "RestoreRequested")
+	workerFinished := observeEventReason(clientset, "RestoreWorkerFailed")
 	dir := filepath.Join(w.config.Storage.BasePath, "abc123", "versions", snapshotv1alpha1.DefaultCheckpointArtifactVersion)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("failed to create checkpoint dir: %v", err)
 	}
 
 	w.reconcileRestorePod(context.Background(), pod)
-
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		for _, action := range clientset.Actions() {
-			create, ok := action.(clientgotesting.CreateAction)
-			if !ok || create.GetResource().Resource != "events" {
-				continue
-			}
-			event, ok := create.GetObject().(*corev1.Event)
-			if ok && event.Reason == "RestoreRequested" {
-				return
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("expected RestoreRequested event from runtime polling before PodRunning; actions=%#v", clientset.Actions())
+	waitForSignal(t, restoreRequested, "RestoreRequested event from runtime polling before PodRunning")
+	waitForSignal(t, workerFinished, "restore worker completion")
 }
 
 func TestPollForContainerIDSkipsTerminalLivePod(t *testing.T) {
@@ -718,7 +732,7 @@ func TestPollForContainerIDSkipsWhenRestoreAttemptAlreadyHeld(t *testing.T) {
 	}
 }
 
-func TestRunRestoreEmitsRestoreFailedEventOnInjectError(t *testing.T) {
+func TestRunRestoreFailureEvents(t *testing.T) {
 	checkpointID := "test-checkpoint"
 	pod := makePod("test-pod", "default", testNodeName, corev1.PodRunning, true,
 		map[string]string{snapshotv1alpha1.CheckpointIDLabel: checkpointID}, nil)
@@ -777,6 +791,49 @@ func TestRunRestoreEmitsRestoreFailedEventOnInjectError(t *testing.T) {
 			if calls[i] != want[i] {
 				t.Errorf("mount call[%d] = %#v, want %#v", i, calls[i], want[i])
 			}
+		}
+	})
+
+	t.Run("cleanup failure has dedicated event and status reason", func(t *testing.T) {
+		w := makeTestController(t, pod)
+		w.config.Storage.BasePath = basePath
+		rt := &fakeRuntime{resolveContainerPID: math.MaxInt32}
+		w.runtime = rt
+		w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.Mounters) (int, error) {
+			return 0, &executor.RestoreCleanupError{
+				Action: "unmount checkpoint artifact from placeholder",
+				Err:    errors.New("unmount failed"),
+			}
+		}
+
+		err := w.runRestore(
+			context.Background(), pod, "main", "ctr-abc", checkpointID,
+			"default/test-pod/main/ctr-abc",
+			time.Time{},
+		)
+		if err == nil || !strings.Contains(err.Error(), "placeholder could not be killed") {
+			t.Fatalf("cleanup failure did not reach fatal kill path: %v", err)
+		}
+		if len(rt.resolvedContainerIDs) != 1 || rt.resolvedContainerIDs[0] != "ctr-abc" {
+			t.Fatalf("resolved container IDs = %v, want [ctr-abc]", rt.resolvedContainerIDs)
+		}
+
+		if !sawEventReason(w.clientset.(*fake.Clientset), restoreCleanupFailedReason) {
+			t.Fatalf("expected %s event for cleanup failure", restoreCleanupFailedReason)
+		}
+		updated, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("get restore pod: %v", err)
+		}
+		keys, err := snapshotv1alpha1.RestoreStatusAnnotationKeysFor("main")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := updated.Annotations[keys.Status]; got != snapshotv1alpha1.RestoreStatusFailed {
+			t.Fatalf("restore status = %q, want %q", got, snapshotv1alpha1.RestoreStatusFailed)
+		}
+		if got := updated.Annotations[keys.Reason]; got != restoreCleanupFailedReason {
+			t.Fatalf("restore reason = %q, want %q", got, restoreCleanupFailedReason)
 		}
 	})
 }

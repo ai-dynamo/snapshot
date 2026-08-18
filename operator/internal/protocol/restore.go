@@ -16,7 +16,6 @@ type PodOptions struct {
 	Namespace       string
 	CheckpointID    string
 	ArtifactVersion string
-	Storage         snapshotv1alpha1.Storage
 	SeccompProfile  string
 }
 
@@ -39,7 +38,7 @@ func NewRestorePod(pod *corev1.Pod, opts PodOptions) (*corev1.Pod, error) {
 		pod.Annotations = map[string]string{}
 	}
 	snapshotv1alpha1.ApplyRestoreTargetMetadata(pod.Labels, pod.Annotations, true, opts.CheckpointID, opts.ArtifactVersion)
-	if err := PrepareRestorePodSpec(&pod.Spec, pod.Annotations, opts.Storage, opts.SeccompProfile, true); err != nil {
+	if err := PrepareRestorePodSpec(&pod.Spec, pod.Annotations, opts.SeccompProfile, true); err != nil {
 		return nil, err
 	}
 	pod.Namespace = opts.Namespace
@@ -55,7 +54,6 @@ func NewRestorePod(pod *corev1.Pod, opts PodOptions) (*corev1.Pod, error) {
 func PrepareRestorePodSpec(
 	podSpec *corev1.PodSpec,
 	annotations map[string]string,
-	_ snapshotv1alpha1.Storage,
 	seccompProfile string,
 	isCheckpointReady bool,
 ) error {
@@ -143,7 +141,6 @@ func ensureRestoreStartupProbe(container *corev1.Container) {
 func ValidateRestorePodSpec(
 	podSpec *corev1.PodSpec,
 	annotations map[string]string,
-	_ snapshotv1alpha1.Storage,
 	seccompProfile string,
 ) error {
 	if podSpec == nil {

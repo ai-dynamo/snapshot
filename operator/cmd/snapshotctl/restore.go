@@ -124,7 +124,7 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 		}
 		snapshotv1alpha1.ApplyRestoreTargetMetadata(labels, annotations, true, checkpointID, snapshotv1alpha1.DefaultCheckpointArtifactVersion)
 		annotations[snapshotv1alpha1.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers(targetContainers)
-		if err := snapshotprotocol.ValidateRestorePodSpec(&pod.Spec, annotations, snapshotv1alpha1.Storage{}, snapshotv1alpha1.DefaultSeccompLocalhostProfile); err != nil {
+		if err := snapshotprotocol.ValidateRestorePodSpec(&pod.Spec, annotations, snapshotv1alpha1.DefaultSeccompLocalhostProfile); err != nil {
 			return nil, fmt.Errorf("restore target pod %s/%s is not snapshot-compatible: %w", namespace, podName, err)
 		}
 		patch, err := json.Marshal(map[string]any{

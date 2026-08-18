@@ -93,11 +93,11 @@ func TestExecMounterUnmountErrorAndIdempotence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = handle.Unmount(context.Background())
+	err = handle.Unmount()
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("unexpected unmount error: %v", err)
 	}
-	if err2 := handle.Unmount(context.Background()); err2 != err {
+	if err2 := handle.Unmount(); err2 != err {
 		t.Fatalf("second Unmount() = %v, want same error %v", err2, err)
 	}
 }

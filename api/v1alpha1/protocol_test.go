@@ -21,6 +21,7 @@ func TestApplyRestoreTargetMetadata(t *testing.T) {
 		RestoreStatusAnnotationPrefix + "engine-1":      "completed",
 		RestoreContainerIDAnnotationPrefix + "main":     "dead-container",
 		RestoreContainerIDAnnotationPrefix + "engine-1": "dead-container",
+		RestoreReasonAnnotationPrefix + "main":          "RestoreCleanupFailed",
 		"nvidia.com/snapshot-restore-status":            "completed",
 		"nvidia.com/snapshot-restore-container-id":      "dead-container",
 		// Preserve the target-containers annotation across ApplyRestoreTargetMetadata.
@@ -46,6 +47,7 @@ func TestApplyRestoreTargetMetadata(t *testing.T) {
 		RestoreStatusAnnotationPrefix + "engine-1",
 		RestoreContainerIDAnnotationPrefix + "main",
 		RestoreContainerIDAnnotationPrefix + "engine-1",
+		RestoreReasonAnnotationPrefix + "main",
 		"nvidia.com/snapshot-restore-status",
 		"nvidia.com/snapshot-restore-container-id",
 	} {
@@ -67,6 +69,7 @@ func TestApplyRestoreTargetMetadataDisabledClearsState(t *testing.T) {
 		CheckpointStatusAnnotation:                  "completed",
 		RestoreStatusAnnotationPrefix + "main":      "failed",
 		RestoreContainerIDAnnotationPrefix + "main": "dead-container",
+		RestoreReasonAnnotationPrefix + "main":      "RestoreCleanupFailed",
 	}
 
 	ApplyRestoreTargetMetadata(labels, annotations, false, "", "")
@@ -85,6 +88,9 @@ func TestApplyRestoreTargetMetadataDisabledClearsState(t *testing.T) {
 	}
 	if _, ok := annotations[RestoreContainerIDAnnotationPrefix+"main"]; ok {
 		t.Fatalf("per-container restore container id was not cleared: %#v", annotations)
+	}
+	if _, ok := annotations[RestoreReasonAnnotationPrefix+"main"]; ok {
+		t.Fatalf("per-container restore reason was not cleared: %#v", annotations)
 	}
 }
 
@@ -160,13 +166,14 @@ func TestTargetContainersFromAnnotationsBounds(t *testing.T) {
 }
 
 func TestRestoreStatusAnnotations(t *testing.T) {
-	got, err := RestoreStatusAnnotations("engine-1", RestoreStatusCompleted, "container-id")
+	got, err := RestoreStatusAnnotationsWithReason("engine-1", RestoreStatusFailed, "container-id", "RestoreCleanupFailed")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	want := map[string]string{
-		RestoreStatusAnnotationPrefix + "engine-1":      RestoreStatusCompleted,
+		RestoreStatusAnnotationPrefix + "engine-1":      RestoreStatusFailed,
 		RestoreContainerIDAnnotationPrefix + "engine-1": "container-id",
+		RestoreReasonAnnotationPrefix + "engine-1":      "RestoreCleanupFailed",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %#v, want %#v", got, want)

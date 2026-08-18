@@ -18,11 +18,10 @@ import (
 )
 
 // testMountPoint satisfies nsmount.MountPoint for executor unit tests.
-type testMountPoint struct{ dst string }
+type testMountPoint struct{}
 
-func (m testMountPoint) Path(name string) (string, error) { return m.dst + "/" + name, nil }
-func (m testMountPoint) Unmount(_ context.Context) error  { return nil }
-func (m testMountPoint) NsFd() *os.File                   { return nil }
+func (m testMountPoint) Unmount() error { return nil }
+func (m testMountPoint) NsFd() *os.File { return nil }
 
 var _ nsmount.MountPoint = testMountPoint{}
 
@@ -87,6 +86,10 @@ func TestSetCleanupErrorIfSuccessful(t *testing.T) {
 		setCleanupErrorIfSuccessful(&retErr, "unmount artifact", cleanupErr)
 		if !errors.Is(retErr, cleanupErr) || !strings.Contains(retErr.Error(), "unmount artifact") {
 			t.Fatalf("cleanup error = %v", retErr)
+		}
+		var typedErr *RestoreCleanupError
+		if !errors.As(retErr, &typedErr) {
+			t.Fatalf("cleanup error type = %T, want *RestoreCleanupError", retErr)
 		}
 	})
 

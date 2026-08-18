@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -18,9 +17,8 @@ type fakeMountRef struct {
 	unmountLog *[]string
 }
 
-func (h *fakeMountRef) TargetPath() string { return h.dst }
-func (h *fakeMountRef) NsFd() *os.File     { return nil }
-func (h *fakeMountRef) Unmount(_ context.Context) error {
+func (h *fakeMountRef) NsFd() *os.File { return nil }
+func (h *fakeMountRef) Unmount() error {
 	*h.unmountLog = append(*h.unmountLog, h.dst)
 	return nil
 }
@@ -83,26 +81,14 @@ func TestMountUsesCallerPathsAndReadOnlyPolicy(t *testing.T) {
 	}
 }
 
-func TestMountPointPathAndUnmount(t *testing.T) {
+func TestMountPointUnmount(t *testing.T) {
 	m := &mockMounter{}
 	mp, err := newMounter(t, m).Mount(context.Background(), testPID, SnapshotBinSrc, SnapshotBinDst)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := mp.Path("nsrestore")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := filepath.Join(SnapshotBinDst, "nsrestore"); got != want {
-		t.Fatalf("Path() = %q, want %q", got, want)
-	}
-	for _, name := range []string{"", ".", "..", "foo/bar", "../../etc/passwd"} {
-		if _, err := mp.Path(name); err == nil {
-			t.Errorf("Path(%q) unexpectedly succeeded", name)
-		}
-	}
-	if err := mp.Unmount(context.Background()); err != nil {
+	if err := mp.Unmount(); err != nil {
 		t.Fatal(err)
 	}
 	if len(m.unmountLog) != 1 || m.unmountLog[0] != SnapshotBinDst {
