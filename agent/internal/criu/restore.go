@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	criulib "github.com/checkpoint-restore/go-criu/v8"
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
@@ -35,8 +36,9 @@ func ExecuteRestore(
 	checkpointPath string,
 	bundleDir string,
 	log logr.Logger,
-) (int32, func(), error) {
+) (int32, func(), time.Duration, time.Duration, error) {
 	settings := m.CRIUDump.CRIU
+	var prepare, restore time.Duration
 
 	// Return the FD closers as cleanup() rather than deferring them here, so the
 	// caller can run them after cuda unlock instead of between the CRIU restore
@@ -45,12 +47,14 @@ func ExecuteRestore(
 	var openFiles, inheritedFiles []*os.File
 	scratchDir, removeScratch, err := restoreScratchDir(settings.WorkDir)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, 0, 0, err
 	}
+	prepareStart := time.Now()
 	imageDirPath, removeImageDir, err := prepareRestoreImageDir(checkpointPath, scratchDir)
+	prepare = time.Since(prepareStart)
 	if err != nil {
 		removeScratch()
-		return 0, nil, fmt.Errorf("failed to prepare CRIU image directory: %w", err)
+		return 0, nil, prepare, 0, fmt.Errorf("failed to prepare CRIU image directory: %w", err)
 	}
 	cleanup := func() {
 		closeFiles(inheritedFiles)
@@ -63,7 +67,7 @@ func ExecuteRestore(
 	imageDir, imageDirFD, err := openPathForCRIU(imageDirPath)
 	if err != nil {
 		cleanup()
-		return 0, nil, fmt.Errorf("failed to open image directory: %w", err)
+		return 0, nil, prepare, 0, fmt.Errorf("failed to open image directory: %w", err)
 	}
 	openFiles = append(openFiles, imageDir)
 	criuOpts.ImagesDirFd = proto.Int32(imageDirFD)
@@ -73,7 +77,7 @@ func ExecuteRestore(
 		workDirFile, workDirFD, err := openPathForCRIU(settings.WorkDir)
 		if err != nil {
 			cleanup()
-			return 0, nil, fmt.Errorf("failed to open CRIU work directory: %w", err)
+			return 0, nil, prepare, 0, fmt.Errorf("failed to open CRIU work directory: %w", err)
 		}
 		openFiles = append(openFiles, workDirFile)
 		criuOpts.WorkDirFd = proto.Int32(workDirFD)
@@ -82,14 +86,14 @@ func ExecuteRestore(
 	overridePath, err := rewriteCRIULibDir(criuOpts.ConfigFile, scratchDir, bundleDir)
 	if err != nil {
 		cleanup()
-		return 0, nil, err
+		return 0, nil, prepare, 0, err
 	}
 	criuOpts.ConfigFile = proto.String(overridePath)
 
 	criuBin, err := bundledCRIUPath(bundleDir)
 	if err != nil {
 		cleanup()
-		return 0, nil, err
+		return 0, nil, prepare, 0, err
 	}
 	c := criulib.MakeCriu()
 	c.SetCriuPath(criuBin)
@@ -97,7 +101,7 @@ func ExecuteRestore(
 	netNsFile, err := os.Open(netNsPath)
 	if err != nil {
 		cleanup()
-		return 0, nil, fmt.Errorf("failed to open net NS at %s: %w", netNsPath, err)
+		return 0, nil, prepare, 0, fmt.Errorf("failed to open net NS at %s: %w", netNsPath, err)
 	}
 	openFiles = append(openFiles, netNsFile)
 	c.AddInheritFd("extNetNs", netNsFile)
@@ -106,14 +110,17 @@ func ExecuteRestore(
 
 	notify := &restoreNotify{log: log}
 	log.V(1).Info("Executing go-criu Restore call")
+	restoreStart := time.Now()
 	if err := c.Restore(criuOpts, notify); err != nil {
+		restore = time.Since(restoreStart)
 		log.Error(err, "go-criu Restore returned error")
 		logging.LogRestoreErrors(imageDirPath, settings.WorkDir, log)
 		cleanup()
-		return 0, nil, fmt.Errorf("CRIU restore failed: %w", err)
+		return 0, nil, prepare, restore, fmt.Errorf("CRIU restore failed: %w", err)
 	}
+	restore = time.Since(restoreStart)
 
-	return notify.restoredPID, cleanup, nil
+	return notify.restoredPID, cleanup, prepare, restore, nil
 }
 
 // BuildRestoreOpts assembles CriuOpts for a CRIU restore from the checkpoint manifest.

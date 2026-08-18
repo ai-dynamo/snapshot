@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr/testr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -81,7 +82,7 @@ func TestInspectRestoreUsesContainerIDWhenProvided(t *testing.T) {
 	}
 
 	rt := &restoreFakeRuntime{}
-	_, err := inspectRestore(
+	_, _, err := inspectRestore(
 		context.Background(),
 		rt,
 		testr.New(t),
@@ -121,5 +122,15 @@ func TestRestoreInNamespaceRejectsMultiGPUCheckpointWithoutLaunchJobState(t *tes
 	_, err := RestoreInNamespace(context.Background(), RestoreOptions{CheckpointPath: checkpointDir}, testr.New(t))
 	if err == nil || !strings.Contains(err.Error(), "missing CUDA launch-job state") {
 		t.Fatalf("expected missing multi-GPU launch-job error, got %v", err)
+	}
+}
+
+func TestRemainingDuration(t *testing.T) {
+	got := remainingDuration(10*time.Second, 4*time.Second, 3*time.Second)
+	if got != 3*time.Second {
+		t.Fatalf("remainingDuration = %s, want 3s", got)
+	}
+	if remainingDuration(5*time.Second, 4*time.Second, 3*time.Second) != 0 {
+		t.Fatal("remainingDuration should not go negative")
 	}
 }
