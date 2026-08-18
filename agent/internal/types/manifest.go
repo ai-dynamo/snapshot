@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"gopkg.in/yaml.v3"
@@ -74,12 +75,13 @@ func NewCRIUDumpManifest(criuOpts *criurpc.CriuOpts, settings CRIUSettings) CRIU
 
 // SourcePodManifest records the source pod identity at checkpoint time.
 type SourcePodManifest struct {
-	ContainerID  string `yaml:"containerId"`
-	PID          int    `yaml:"pid"`
-	SourceNode   string `yaml:"sourceNode"`
-	PodName      string `yaml:"podName"`
-	PodNamespace string `yaml:"podNamespace"`
-	PodIP        string `yaml:"podIP,omitempty"`
+	ContainerID     string                                            `yaml:"containerId"`
+	PID             int                                               `yaml:"pid"`
+	SourceNode      string                                            `yaml:"sourceNode"`
+	PodName         string                                            `yaml:"podName"`
+	PodNamespace    string                                            `yaml:"podNamespace"`
+	PodIP           string                                            `yaml:"podIP,omitempty"`
+	DeclaredVolumes []snapshotv1alpha1.CheckpointSourceDeclaredVolume `yaml:"declaredVolumes"`
 
 	// StdioFDs holds readlink targets for FDs 0, 1, 2 (e.g. "pipe:[12345]").
 	StdioFDs []string `yaml:"stdioFDs,omitempty"`

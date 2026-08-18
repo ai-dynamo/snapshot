@@ -25,6 +25,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	snapshottypes "github.com/ai-dynamo/snapshot/agent/internal/types"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
@@ -792,4 +793,166 @@ func TestReconcileSourcePod_IndexErrorReturned(t *testing.T) {
 
 	require.Error(t, w.reconcileSourcePod(context.Background(), pod))
 	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
+}
+
+func TestCheckpointSourceFromManifest(t *testing.T) {
+	manifest := &snapshottypes.CheckpointManifest{
+		CheckpointID: "checkpoint-1",
+		K8s: snapshottypes.SourcePodManifest{
+			SourceNode: "node-a",
+			DeclaredVolumes: []snapshotv1alpha1.CheckpointSourceDeclaredVolume{
+				{Path: "/model-cache", Volume: "model", VolumeSource: "PersistentVolumeClaim/model-pvc"},
+			},
+		},
+		CUDA: snapshottypes.CUDAManifest{SourceGPUUUIDs: []string{"GPU-a", "", "GPU-b"}},
+	}
+
+	source := checkpointSourceFromManifest(manifest)
+
+	require.NotNil(t, source)
+	assert.Equal(t, snapshotv1alpha1.CheckpointSourceTypeNvidia, source.Type)
+	require.NotNil(t, source.Nvidia)
+	require.NotNil(t, source.Nvidia.Hardware)
+	require.NotNil(t, source.Nvidia.Hardware.GPUCount)
+	assert.Equal(t, int32(2), *source.Nvidia.Hardware.GPUCount)
+	assert.Equal(t, []snapshotv1alpha1.CheckpointSourceGPU{{UUID: "GPU-a"}, {UUID: "GPU-b"}}, source.Nvidia.Hardware.GPUs)
+	assert.Equal(t, "node-a", source.Nvidia.Node)
+	require.Len(t, source.Nvidia.DeclaredVolumes, 1)
+	require.NotNil(t, source.Nvidia.DeclaredVolumeCount)
+	assert.Equal(t, int32(1), *source.Nvidia.DeclaredVolumeCount)
+}
+
+func TestCheckpointSourceFromManifestKeepsAvailableFacts(t *testing.T) {
+	manifest := &snapshottypes.CheckpointManifest{
+		CheckpointID: "checkpoint-1",
+		K8s:          snapshottypes.SourcePodManifest{SourceNode: "node-a"},
+	}
+
+	source := checkpointSourceFromManifest(manifest)
+
+	require.NotNil(t, source)
+	require.NotNil(t, source.Nvidia)
+	assert.Nil(t, source.Nvidia.Hardware)
+	assert.Equal(t, "node-a", source.Nvidia.Node)
+	assert.Nil(t, source.Nvidia.DeclaredVolumeCount)
+}
+
+func TestCheckpointSourceFromManifestKeepsDeclaredVolumeOnlyFacts(t *testing.T) {
+	manifest := &snapshottypes.CheckpointManifest{
+		CheckpointID: "checkpoint-1",
+		K8s: snapshottypes.SourcePodManifest{
+			DeclaredVolumes: []snapshotv1alpha1.CheckpointSourceDeclaredVolume{{
+				Path:         "/model-cache",
+				Volume:       "model",
+				VolumeSource: "PersistentVolumeClaim/model-pvc",
+			}},
+		},
+	}
+
+	source := checkpointSourceFromManifest(manifest)
+
+	require.NotNil(t, source)
+	require.NotNil(t, source.Nvidia)
+	require.Len(t, source.Nvidia.DeclaredVolumes, 1)
+	require.NotNil(t, source.Nvidia.DeclaredVolumeCount)
+	assert.Equal(t, int32(1), *source.Nvidia.DeclaredVolumeCount)
+}
+
+func TestCheckpointSourceFromManifestKeepsKnownZeroDeclaredVolumeCount(t *testing.T) {
+	manifest := &snapshottypes.CheckpointManifest{
+		CheckpointID: "checkpoint-1",
+		K8s: snapshottypes.SourcePodManifest{
+			DeclaredVolumes: []snapshotv1alpha1.CheckpointSourceDeclaredVolume{},
+		},
+	}
+
+	source := checkpointSourceFromManifest(manifest)
+
+	require.NotNil(t, source)
+	require.NotNil(t, source.Nvidia)
+	require.NotNil(t, source.Nvidia.DeclaredVolumeCount)
+	assert.Zero(t, *source.Nvidia.DeclaredVolumeCount)
+}
+
+func TestCheckpointSourceReadFailurePreservesReady(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	w := makeNodeController(t, &fakeCheckpointer{}, content)
+
+	require.NoError(t, w.setSnapshotContentSucceeded(context.Background(), content, t.TempDir()))
+
+	updated := getContent(t, w, content.Name)
+	assert.True(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+	assert.False(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
+	assert.Nil(t, updated.Status.Source)
+}
+
+func TestSnapshotContentSuccessPublishesSourceWithOnePatchAndNoGet(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	getCalls := 0
+	statusPatches := 0
+	funcs := interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			getCalls++
+			return c.Get(ctx, key, obj, opts...)
+		},
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			statusPatches++
+			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
+		},
+	}
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content)
+	checkpointPath := t.TempDir()
+	require.NoError(t, snapshottypes.WriteManifest(checkpointPath, &snapshottypes.CheckpointManifest{
+		CheckpointID: "checkpoint-1",
+		K8s:          snapshottypes.SourcePodManifest{SourceNode: "node-a"},
+	}))
+
+	require.NoError(t, w.setSnapshotContentSucceeded(context.Background(), content, checkpointPath))
+	assert.Zero(t, getCalls)
+	assert.Equal(t, 1, statusPatches)
+
+	updated := getContent(t, w, content.Name)
+	assert.True(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+	require.NotNil(t, updated.Status.Source)
+	require.NotNil(t, updated.Status.Source.Nvidia)
+	assert.Equal(t, "node-a", updated.Status.Source.Nvidia.Node)
+}
+
+func TestReadyCheckpointSourceRetriesWithoutRevalidatingCheckpointID(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
+		Type:   snapshotv1alpha1.PodSnapshotConditionReady,
+		Status: metav1.ConditionTrue,
+		Reason: "Captured",
+	})
+	pod := makeSourcePod("Bad_ID")
+	failuresRemaining := 1
+	funcs := interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if got, ok := obj.(*snapshotv1alpha1.PodSnapshotContent); ok && got.Status.Source != nil && failuresRemaining > 0 {
+				failuresRemaining--
+				return errors.New("source status rejected")
+			}
+			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
+		},
+	}
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content, pod)
+	checkpointPath := filepath.Join(w.config.Storage.BasePath, "Bad_ID", "versions", "1")
+	require.NoError(t, os.MkdirAll(checkpointPath, 0o755))
+	require.NoError(t, snapshottypes.WriteManifest(checkpointPath, &snapshottypes.CheckpointManifest{
+		CheckpointID: "checkpoint-1",
+		K8s:          snapshottypes.SourcePodManifest{SourceNode: "node-a"},
+	}))
+
+	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+	afterFailure := getContent(t, w, content.Name)
+	assert.True(t, meta.IsStatusConditionTrue(afterFailure.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+	assert.Nil(t, afterFailure.Status.Source)
+
+	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+	afterRetry := getContent(t, w, content.Name)
+	assert.True(t, meta.IsStatusConditionTrue(afterRetry.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+	require.NotNil(t, afterRetry.Status.Source)
+	require.NotNil(t, afterRetry.Status.Source.Nvidia)
+	assert.Equal(t, "node-a", afterRetry.Status.Source.Nvidia.Node)
 }
