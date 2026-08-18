@@ -5,6 +5,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -19,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
@@ -27,18 +29,22 @@ import (
 // +kubebuilder:rbac:groups=nvidia.com,resources=snapshotjobs,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=snapshotjobs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=snapshotjobs/finalizers,verbs=update
-// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;get;list;watch
+// +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=create;get;list;watch
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;get;list;watch;delete
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
 // SnapshotJobReconciler reconciles a SnapshotJob.
 //
-// This phase (source Job creation + Running) only handles the batch/v1 Job it
-// creates: build/create it, adopt an existing one it already owns, classify a
-// foreign object holding its deterministic name, and derive Running from
-// job.status.ready. PodSnapshot creation (Captured), the completion gate
-// (Completed/Failed beyond spec validation), and cleanup are added in later
-// phases — this reconciler is not registered in main.go yet, so none of this
-// runs in production until the feature is complete.
+// This phase (source Job creation, PodSnapshot creation, Running, Captured)
+// handles the batch/v1 Job and PodSnapshot it creates: build/create the Job,
+// adopt an existing one it already owns, classify a foreign object holding its
+// deterministic name, derive Running from job.status.ready, create the
+// PodSnapshot once the source pod exists, and mirror the PodSnapshot's
+// Ready/Failed into Captured. The completion gate (Completed, and Failed beyond
+// spec validation/PodSnapshot failure) and cleanup are added in a later phase —
+// this reconciler is not registered in main.go yet, so none of this runs in
+// production until the feature is complete.
 type SnapshotJobReconciler struct {
 	client.Client
 	Recorder record.EventRecorder
@@ -79,7 +85,7 @@ func (r *SnapshotJobReconciler) reconcileJob(ctx context.Context, sj *snapshotv1
 		return r.failSnapshotJob(ctx, sj, snapshotv1alpha1.ReasonJobNameConflict,
 			fmt.Errorf("an object not controlled by this SnapshotJob already holds the name %q", sj.Name))
 	}
-	return r.observeJob(ctx, sj, job)
+	return r.reconcilePodSnapshot(ctx, sj, job)
 }
 
 // createJob validates the spec, builds the source Job, and creates it with a
@@ -116,7 +122,8 @@ func (r *SnapshotJobReconciler) createJob(ctx context.Context, sj *snapshotv1alp
 // Create already landed the Job server-side, but this reconcile's earlier Get
 // missed it because the local watch cache hadn't caught up yet (a stale-cache
 // race, not a real naming conflict). Re-Get and classify exactly like
-// reconcileJob's Job-exists branch does.
+// reconcileJob's Job-exists branch does — ours, continue into the PodSnapshot
+// phase; foreign, fail the SnapshotJob (see failSnapshotJob).
 func (r *SnapshotJobReconciler) adoptExistingJob(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob) (ctrl.Result, error) {
 	existing := &batchv1.Job{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: sj.Namespace, Name: sj.Name}, existing); err != nil {
@@ -126,15 +133,75 @@ func (r *SnapshotJobReconciler) adoptExistingJob(ctx context.Context, sj *snapsh
 		return r.failSnapshotJob(ctx, sj, snapshotv1alpha1.ReasonJobNameConflict,
 			fmt.Errorf("an object not controlled by this SnapshotJob already holds the name %q", sj.Name))
 	}
-	return r.observeJob(ctx, sj, existing)
+	return r.reconcilePodSnapshot(ctx, sj, existing)
 }
 
-// observeJob derives Running from job.status.ready (GA in Kubernetes 1.29; beta-on
-// since 1.24 behind the JobReadyPods feature gate) — the controller watches only
-// the Job, not the pod, per the design's "SnapshotJob observes the Job, not the
-// Pod, for failure status." startedAt is recorded once, the first time the pod is
-// observed ready, and never rewritten afterward.
-func (r *SnapshotJobReconciler) observeJob(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) (ctrl.Result, error) {
+// reconcilePodSnapshot is the PodSnapshot phase of Reconcile, entered once the
+// source Job is confirmed to exist and be owned: create the PodSnapshot as soon
+// as the source pod exists (scheduled or not — PodSnapshotReconciler owns
+// waiting for scheduling), or, once it exists, observe both the Job (Running)
+// and the PodSnapshot (Captured).
+func (r *SnapshotJobReconciler) reconcilePodSnapshot(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) (ctrl.Result, error) {
+	snap, err := r.findOwnedPodSnapshot(ctx, sj)
+	switch {
+	case apierrors.IsNotFound(err):
+		return r.createPodSnapshotPhase(ctx, sj, job)
+	case err != nil:
+		return ctrl.Result{}, fmt.Errorf("find owned PodSnapshot: %w", err)
+	}
+	return r.observe(ctx, sj, job, snap)
+}
+
+// createPodSnapshotPhase looks up the source pod and, once it exists, creates
+// the PodSnapshot. The pod may not exist yet even after the Job does (Job
+// creation and pod creation are not atomic); in that case Running=False/PodPending
+// is (re)set and this reconcile stops — the next Job status change (job.status.active
+// 0→1 when the pod is assigned) re-enqueues, since the controller watches only
+// the Job, not the pod.
+func (r *SnapshotJobReconciler) createPodSnapshotPhase(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) (ctrl.Result, error) {
+	pod, err := findSourcePod(ctx, r.Client, job)
+	if apierrors.IsNotFound(err) {
+		if setCondition(sj, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse,
+			snapshotv1alpha1.ReasonPodPending, "waiting for the source pod to be created") {
+			if err := r.Status().Update(ctx, sj); err != nil {
+				return ctrl.Result{}, fmt.Errorf("update SnapshotJob status: %w", err)
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("find source pod for Job %q: %w", job.Name, err)
+	}
+
+	snap, err := r.createPodSnapshot(ctx, sj, pod)
+	if err != nil {
+		if errors.Is(err, errPodSnapshotNameConflict) {
+			return r.failSnapshotJob(ctx, sj, snapshotv1alpha1.ReasonPodSnapshotNameConflict, err)
+		}
+		return ctrl.Result{}, err
+	}
+
+	sj.Status.PodSnapshotName = snap.Name
+	setCondition(sj, snapshotv1alpha1.SnapshotJobConditionCaptured, metav1.ConditionFalse,
+		snapshotv1alpha1.ReasonCaptureInProgress, "waiting for the node agent to capture the checkpoint")
+	if err := r.Status().Update(ctx, sj); err != nil {
+		return ctrl.Result{}, fmt.Errorf("record PodSnapshot %q: %w", snap.Name, err)
+	}
+	return ctrl.Result{}, nil
+}
+
+// observe derives Running from job.status.ready and Captured from the
+// PodSnapshot's own Ready/Failed conditions. Running: GA in Kubernetes 1.29
+// (beta-on since 1.24 behind the JobReadyPods feature gate) — the controller
+// watches only the Job, not the pod, per the design's "SnapshotJob observes the
+// Job, not the Pod, for failure status." startedAt is recorded once, the first
+// time the pod is observed ready, and never rewritten afterward. A capture
+// failure (PodSnapshot Failed=True) is immediately terminal — Failed=True/
+// CaptureFailed — independent of the Job's own completion, since it is fully
+// determined by the PodSnapshot's own signal (unlike a Job failure after a
+// successful capture, which needs the completion gate's Job-tracking, added in
+// a later phase).
+func (r *SnapshotJobReconciler) observe(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job, snap *snapshotv1alpha1.PodSnapshot) (ctrl.Result, error) {
 	ready := job.Status.Ready != nil && *job.Status.Ready > 0
 
 	var changed bool
@@ -148,7 +215,22 @@ func (r *SnapshotJobReconciler) observeJob(ctx context.Context, sj *snapshotv1al
 			snapshotv1alpha1.ReasonPodReady, "source pod is ready") || changed
 	} else {
 		changed = setCondition(sj, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse,
-			snapshotv1alpha1.ReasonPodPending, "waiting for the source pod to become ready")
+			snapshotv1alpha1.ReasonPodPending, "waiting for the source pod to become ready") || changed
+	}
+
+	switch {
+	case snapshotv1alpha1.IsPodSnapshotFailed(snap):
+		changed = setCondition(sj, snapshotv1alpha1.SnapshotJobConditionCaptured, metav1.ConditionFalse,
+			snapshotv1alpha1.ReasonCaptureFailed, "node agent failed to capture the checkpoint") || changed
+		changed = setCondition(sj, snapshotv1alpha1.SnapshotJobConditionFailed, metav1.ConditionTrue,
+			snapshotv1alpha1.ReasonCaptureFailed, "node agent failed to capture the checkpoint") || changed
+		if sj.Status.CompletedAt == nil {
+			now := metav1.Now()
+			sj.Status.CompletedAt = &now
+		}
+	case snapshotv1alpha1.IsPodSnapshotSucceeded(snap):
+		changed = setCondition(sj, snapshotv1alpha1.SnapshotJobConditionCaptured, metav1.ConditionTrue,
+			snapshotv1alpha1.ReasonCaptureCompleted, "CRIU dump of the target container is complete") || changed
 	}
 
 	if !changed {
@@ -204,9 +286,13 @@ func setCondition(sj *snapshotv1alpha1.SnapshotJob, condType string, status meta
 	})
 }
 
-// SetupWithManager wires the controller: it owns the batch/v1 Job it creates (the
-// Job carries a controller ownerRef, so this is the built-in mapping; Create is
-// filtered since we just made it). PodSnapshot watching is added in a later phase.
+// SetupWithManager wires the controller: it owns the batch/v1 Job it creates
+// (the Job carries a controller ownerRef, so this is the built-in mapping;
+// Create is filtered since we just made it), and watches PodSnapshot via a
+// label map function rather than Owns, since the produced PodSnapshot
+// deliberately carries no ownerReference (§5.2 — artifacts must outlive the
+// SnapshotJob). Create is filtered there too for the same reason: we just made
+// it, so only later Update/Delete events carry new information.
 func (r *SnapshotJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&snapshotv1alpha1.SnapshotJob{}).
@@ -216,6 +302,14 @@ func (r *SnapshotJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			DeleteFunc:  func(event.DeleteEvent) bool { return true },
 			GenericFunc: func(event.GenericEvent) bool { return true },
 		})).
+		Watches(&snapshotv1alpha1.PodSnapshot{},
+			handler.EnqueueRequestsFromMapFunc(mapPodSnapshotToSnapshotJob),
+			builder.WithPredicates(predicate.Funcs{
+				CreateFunc:  func(event.CreateEvent) bool { return false },
+				UpdateFunc:  func(event.UpdateEvent) bool { return true },
+				DeleteFunc:  func(event.DeleteEvent) bool { return true },
+				GenericFunc: func(event.GenericEvent) bool { return false },
+			})).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(r)
 }
