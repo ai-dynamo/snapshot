@@ -6,8 +6,10 @@ package types
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
 	"google.golang.org/protobuf/proto"
 )
@@ -36,9 +38,22 @@ func TestManifestRoundTrip(t *testing.T) {
 		},
 	)
 	original.CUDA = NewCUDAManifest([]int{42, 43}, []string{"GPU-aaa", "GPU-bbb"})
+	original.K8s.DeclaredVolumes = []snapshotv1alpha1.CheckpointSourceDeclaredVolume{{
+		Path:         "/data",
+		Volume:       "model-cache",
+		VolumeSource: "PersistentVolumeClaim/model-cache",
+	}}
 
 	if err := WriteManifest(dir, original); err != nil {
 		t.Fatalf("WriteManifest: %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(dir, manifestFilename))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(content), "declaredVolumes:") ||
+		!strings.Contains(string(content), "volumeSource: PersistentVolumeClaim/model-cache") {
+		t.Errorf("manifest declared volumes missing:\n%s", content)
 	}
 
 	loaded, err := ReadManifest(dir)
@@ -77,6 +92,9 @@ func TestManifestRoundTrip(t *testing.T) {
 	if len(loaded.K8s.StdioFDs) != 3 {
 		t.Errorf("StdioFDs count = %d, want 3", len(loaded.K8s.StdioFDs))
 	}
+	if len(loaded.K8s.DeclaredVolumes) != 1 || loaded.K8s.DeclaredVolumes[0] != original.K8s.DeclaredVolumes[0] {
+		t.Errorf("K8s.DeclaredVolumes = %v, want %v", loaded.K8s.DeclaredVolumes, original.K8s.DeclaredVolumes)
+	}
 	if loaded.Overlay.UpperDir != "/var/lib/containerd/upper" {
 		t.Errorf("Overlay.UpperDir = %q", loaded.Overlay.UpperDir)
 	}
@@ -88,6 +106,27 @@ func TestManifestRoundTrip(t *testing.T) {
 	}
 	if len(loaded.CUDA.SourceGPUUUIDs) != 2 || loaded.CUDA.SourceGPUUUIDs[0] != "GPU-aaa" {
 		t.Errorf("CUDA.SourceGPUUUIDs = %v", loaded.CUDA.SourceGPUUUIDs)
+	}
+}
+
+func TestManifestPreservesKnownEmptyDeclaredVolumes(t *testing.T) {
+	dir := t.TempDir()
+	manifest := &CheckpointManifest{
+		CheckpointID: "checkpoint-1",
+		K8s: SourcePodManifest{
+			DeclaredVolumes: []snapshotv1alpha1.CheckpointSourceDeclaredVolume{},
+		},
+	}
+
+	if err := WriteManifest(dir, manifest); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
+	}
+	loaded, err := ReadManifest(dir)
+	if err != nil {
+		t.Fatalf("ReadManifest: %v", err)
+	}
+	if loaded.K8s.DeclaredVolumes == nil {
+		t.Error("K8s.DeclaredVolumes is nil, want known empty declared volumes")
 	}
 }
 

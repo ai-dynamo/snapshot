@@ -6,12 +6,35 @@ package runtime
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
+
+func TestEquivalentRunMountPaths(t *testing.T) {
+	tests := []struct {
+		path string
+		want []string
+	}{
+		{path: "/run", want: []string{"/run", "/var/run"}},
+		{path: "/var/run", want: []string{"/var/run", "/run"}},
+		{path: "/run/data", want: []string{"/run/data", "/var/run/data"}},
+		{path: "/var/run/data", want: []string{"/var/run/data", "/run/data"}},
+		{path: "/data", want: []string{"/data"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.path, func(t *testing.T) {
+			got := EquivalentRunMountPaths(tc.path)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("EquivalentRunMountPaths(%q) = %v, want %v", tc.path, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestClassifyMounts(t *testing.T) {
 	tests := []struct {

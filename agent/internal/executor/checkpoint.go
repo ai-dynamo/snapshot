@@ -22,6 +22,7 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
 // CheckpointRequest holds per-checkpoint identifiers for a checkpoint operation.
@@ -35,6 +36,7 @@ type CheckpointRequest struct {
 	PodName            string
 	PodNamespace       string
 	PodIP              string
+	DeclaredVolumes    []snapshotv1alpha1.CheckpointSourceDeclaredVolume
 	Clientset          kubernetes.Interface
 }
 
@@ -249,6 +251,7 @@ func configureCheckpoint(
 		types.NewSourcePodManifest(req.ContainerID, state.PID, req.NodeName, req.PodName, req.PodNamespace, req.PodIP, state.StdioFDs),
 		types.NewOverlayManifest(cfg.Overlay, state.UpperDir, state.OCISpec),
 	)
+	m.K8s.DeclaredVolumes = requiredDeclaredVolumes(req.DeclaredVolumes, m.CRIUDump.ExtMnt)
 	if len(state.CUDANSPIDs) > 0 {
 		m.CUDA = types.NewCUDAManifest(state.CUDANSPIDs, state.GPUUUIDs)
 	}
@@ -258,6 +261,20 @@ func configureCheckpoint(
 	}
 
 	return criuOpts, m, nil
+}
+
+func requiredDeclaredVolumes(candidates []snapshotv1alpha1.CheckpointSourceDeclaredVolume, externalMounts map[string]string) []snapshotv1alpha1.CheckpointSourceDeclaredVolume {
+	volumes := make([]snapshotv1alpha1.CheckpointSourceDeclaredVolume, 0, len(candidates))
+	for _, candidate := range candidates {
+		for _, path := range snapshotruntime.EquivalentRunMountPaths(candidate.Path) {
+			if _, required := externalMounts[path]; !required {
+				continue
+			}
+			volumes = append(volumes, candidate)
+			break
+		}
+	}
+	return volumes
 }
 
 func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger) (*checkpointPhaseTimings, error) {
