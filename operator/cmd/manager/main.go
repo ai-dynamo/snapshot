@@ -63,6 +63,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	snapshotJobReconciler := &controller.SnapshotJobReconciler{
+		Client:   mgr.GetClient(),
+		Recorder: mgr.GetEventRecorderFor("snapshotjob-controller"),
+	}
+	if err := snapshotJobReconciler.SetupWithManager(mgr); err != nil {
+		ctrl.Log.Error(err, "unable to set up SnapshotJob controller")
+		os.Exit(1)
+	}
+
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		ctrl.Log.Error(err, "unable to start manager")
 		os.Exit(1)
