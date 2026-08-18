@@ -25,22 +25,23 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
 
-// Mounter mounts src at dst inside a placeholder container's mount namespace.
-type Mounter interface {
-	Mount(ctx context.Context, pid int, src, dst string) (nsmount.MountPoint, error)
+// RestoreMounter mounts the fixed binary bundle and one validated checkpoint
+// artifact inside a placeholder container's mount namespace.
+type RestoreMounter interface {
+	MountBundle(ctx context.Context, pid int) (nsmount.MountPoint, error)
+	MountArtifact(ctx context.Context, pid int, artifactPath string) (nsmount.MountPoint, error)
 }
 
-// Mounters carries the executable bundle and non-executable artifact policies.
-type Mounters struct {
-	Bundle   Mounter
-	Artifact Mounter
-}
-
-// RestoreCleanupError reports that restore work completed but a required
-// namespace mount could not be removed. The controller treats it as fatal.
+// RestoreCleanupError reports that restore work completed but a namespace
+// mount could not be removed. The controller currently logs it as non-fatal.
 type RestoreCleanupError struct {
 	Action string
 	Err    error
+}
+
+// NewRestoreCleanupError creates a typed cleanup failure for controller policy.
+func NewRestoreCleanupError(action string, err error) *RestoreCleanupError {
+	return &RestoreCleanupError{Action: action, Err: err}
 }
 
 func (e *RestoreCleanupError) Error() string { return fmt.Sprintf("%s: %v", e.Action, e.Err) }
@@ -68,7 +69,10 @@ type RestoreRequest struct {
 // Returns the placeholder container's host PID so callers can reach into the
 // container's mount namespace (e.g. to write sentinels under /snapshot-control)
 // without re-resolving via the runtime.
-func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest, mounts Mounters) (placeholderPID int, retErr error) {
+func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest, mounts RestoreMounter) (placeholderPID int, retErr error) {
+	if mounts == nil {
+		return 0, fmt.Errorf("restore mounter is required")
+	}
 	restoreStart := time.Now()
 	log.Info("=== Starting external restore ===",
 		"checkpoint_id", req.CheckpointID,
@@ -85,8 +89,8 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if err != nil {
 		return 0, fmt.Errorf("read checkpoint manifest: %w", err)
 	}
-	if manifest.CheckpointID != req.CheckpointID {
-		return 0, fmt.Errorf("checkpoint manifest ID %q does not match requested ID %q", manifest.CheckpointID, req.CheckpointID)
+	if err := validateRestoreManifest(req, manifest); err != nil {
+		return 0, err
 	}
 
 	// Phase 1: Host inspect — resolve placeholder, discover target GPUs, build device map.
@@ -100,24 +104,28 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	// Phase 2: Mount agent binaries and the checkpoint artifact. Deferred
 	// cleanup unwinds in reverse order: artifact first, then bundle.
 	injectStart := time.Now()
-	bundleMount, err := mounts.Bundle.Mount(ctx, snap.PlaceholderPID, nsmount.SnapshotBinSrc, nsmount.SnapshotBinDst)
+	bundleMount, err := mounts.MountBundle(ctx, snap.PlaceholderPID)
 	if err != nil {
 		return 0, fmt.Errorf("mount agent bundle into placeholder: %w", err)
 	}
 	defer func() {
 		if cleanupErr := bundleMount.Unmount(); cleanupErr != nil {
 			log.Error(cleanupErr, "failed to clean bundle mount from placeholder namespace")
-			setCleanupErrorIfSuccessful(&retErr, "unmount agent bundle from placeholder", cleanupErr)
+			if retErr == nil {
+				retErr = NewRestoreCleanupError("unmount agent bundle from placeholder", cleanupErr)
+			}
 		}
 	}()
-	artifactMount, err := mounts.Artifact.Mount(ctx, snap.PlaceholderPID, artifactPath, nsmount.CheckpointDst)
+	artifactMount, err := mounts.MountArtifact(ctx, snap.PlaceholderPID, artifactPath)
 	if err != nil {
 		return 0, fmt.Errorf("mount checkpoint artifact into placeholder: %w", err)
 	}
 	defer func() {
 		if cleanupErr := artifactMount.Unmount(); cleanupErr != nil {
 			log.Error(cleanupErr, "failed to clean artifact mount from placeholder namespace")
-			setCleanupErrorIfSuccessful(&retErr, "unmount checkpoint artifact from placeholder", cleanupErr)
+			if retErr == nil {
+				retErr = NewRestoreCleanupError("unmount checkpoint artifact from placeholder", cleanupErr)
+			}
 		}
 	}()
 	injectDuration := time.Since(injectStart)
@@ -161,12 +169,18 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	return snap.PlaceholderPID, nil
 }
 
-func setCleanupErrorIfSuccessful(retErr *error, action string, cleanupErr error) {
-	// Namespace mount cleanup is part of restore correctness. Returning this
-	// failure makes the controller mark the restore failed and kill the workload.
-	if *retErr == nil {
-		*retErr = &RestoreCleanupError{Action: action, Err: cleanupErr}
+func validateRestoreManifest(req RestoreRequest, manifest *types.CheckpointManifest) error {
+	if manifest.CheckpointID != req.CheckpointID {
+		return fmt.Errorf("checkpoint manifest ID %q does not match requested ID %q", manifest.CheckpointID, req.CheckpointID)
 	}
+	if manifest.K8s.PodNamespace != req.PodNamespace {
+		return fmt.Errorf(
+			"checkpoint manifest source namespace %q does not match restore namespace %q",
+			manifest.K8s.PodNamespace,
+			req.PodNamespace,
+		)
+	}
+	return nil
 }
 
 func validateRestoredProcess(targetRoot string, restoredPID int, log logr.Logger) error {

@@ -133,7 +133,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `storage.pvc.name` | Shared RWX checkpoint PVC mounted by every agent | `snapshot-pvc` |
 | `storage.pvc.size` | Requested PVC size | `1Ti` |
 | `storage.pvc.storageClass` | Storage class name | `""` |
-| `storage.pvc.basePath` | Checkpoint storage mount path inside every agent | `/checkpoints` |
+| `storage.pvc.basePath` | Fixed checkpoint mount path enforced by the privileged helper | `/checkpoints` |
 | `seccomp.deploy` | Deploy the CRIU seccomp profile ConfigMap and init container. Use this field name; `seccomp.enabled` is not a chart value | `true` |
 | `runtime.type` | CRI backend: `containerd` or `crio` | `containerd` |
 | `runtime.socketPath` | CRI socket (empty = default for `runtime.type`) | `""` |

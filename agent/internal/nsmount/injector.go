@@ -12,6 +12,8 @@ import (
 	"os"
 	"syscall"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/safepath"
+	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/go-logr/logr"
 	"golang.org/x/sys/unix"
 )
@@ -21,6 +23,8 @@ const (
 	SnapshotBinSrc = "/snapshot-binaries"
 	// SnapshotBinDst is the mount destination inside the placeholder namespace.
 	SnapshotBinDst = "/tmp/snapshot-binaries"
+	// CheckpointSrc is the fixed agent-side checkpoint mount.
+	CheckpointSrc = types.CheckpointBasePath
 	// CheckpointDst is the mount destination for checkpoint data inside the
 	// placeholder namespace.
 	CheckpointDst = "/tmp/checkpoint"
@@ -44,7 +48,6 @@ type MountPoint interface {
 type NSMounter struct {
 	mounter mounter
 	log     logr.Logger
-	options MountOptions
 }
 
 // probeKernelMountAPI verifies that mount_setattr (Linux 5.12) is available.
@@ -73,29 +76,46 @@ func newWithMounter(m mounter, log logr.Logger) *NSMounter {
 	return &NSMounter{
 		mounter: m,
 		log:     log,
-		options: MountOptions{ReadOnly: true},
 	}
 }
 
-// WithNoExec returns a mounter that shares the same helper but prevents
-// execution from its mounted tree. The receiver remains executable.
-func (nsm *NSMounter) WithNoExec() *NSMounter {
-	clone := *nsm
-	clone.options.NoExec = true
-	return &clone
+// MountBundle exposes the agent binary bundle read-only and executable.
+func (nsm *NSMounter) MountBundle(ctx context.Context, pid int) (MountPoint, error) {
+	return nsm.mount(ctx, pid, SnapshotBinSrc, SnapshotBinDst, MountOptions{ReadOnly: true})
 }
 
-// Mount exposes src read-only at dst inside pid's mount namespace.
-func (nsm *NSMounter) Mount(ctx context.Context, pid int, src, dst string) (MountPoint, error) {
+// MountArtifact exposes one validated checkpoint artifact read-only and
+// non-executable.
+func (nsm *NSMounter) MountArtifact(ctx context.Context, pid int, src string) (MountPoint, error) {
+	return nsm.mount(ctx, pid, src, CheckpointDst, MountOptions{ReadOnly: true, NoExec: true})
+}
+
+func (nsm *NSMounter) mount(ctx context.Context, pid int, src, dst string, options MountOptions) (MountPoint, error) {
+	if err := validateMountSource(src, dst); err != nil {
+		return nil, err
+	}
 	nsm.log.Info("mounting into placeholder namespace", "pid", pid, "src", src, "dst", dst)
 
-	ref, err := nsm.mounter.Mount(ctx, pid, src, dst, nsm.options)
+	ref, err := nsm.mounter.Mount(ctx, pid, src, dst, options)
 	if err != nil {
 		return nil, err
 	}
 
 	nsm.log.Info("mounted into placeholder namespace", "pid", pid, "dst", dst)
 	return &mountPoint{mount: ref}, nil
+}
+
+func validateMountSource(src, dst string) error {
+	var root string
+	switch dst {
+	case SnapshotBinDst:
+		root = SnapshotBinSrc
+	case CheckpointDst:
+		root = CheckpointSrc
+	default:
+		return fmt.Errorf("unsupported mount destination %q", dst)
+	}
+	return safepath.ValidateWithin("mount source", root, src)
 }
 
 type mountPoint struct {

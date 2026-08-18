@@ -7,10 +7,15 @@ package types
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/ai-dynamo/snapshot/agent/internal/safepath"
 )
+
+// CheckpointBasePath is the fixed agent-side checkpoint mount. The privileged
+// helper independently enforces the same path.
+const CheckpointBasePath = "/checkpoints"
 
 // AgentConfig holds the full agent configuration: static checkpoint settings
 // from the ConfigMap YAML, plus runtime fields from environment variables.
@@ -36,15 +41,12 @@ func (c *AgentConfig) Validate() error {
 	if storageType != "pvc" {
 		return &ConfigError{Field: "storage.type", Message: fmt.Sprintf("unsupported storage type %q; only pvc is implemented today", storageType)}
 	}
-	basePath := strings.TrimSpace(c.Storage.BasePath)
-	if basePath == "" {
-		return &ConfigError{Field: "storage.basePath", Message: "storage.basePath is required"}
+	basePath := c.Storage.BasePath
+	if err := safepath.ValidateAbsolute("storage.basePath", basePath); err != nil {
+		return &ConfigError{Field: "storage.basePath", Message: err.Error()}
 	}
-	if !strings.HasPrefix(basePath, "/") {
-		return &ConfigError{Field: "storage.basePath", Message: "storage.basePath must be an absolute path"}
-	}
-	if filepath.Clean(basePath) != basePath {
-		return &ConfigError{Field: "storage.basePath", Message: "storage.basePath must be a clean path"}
+	if basePath != CheckpointBasePath {
+		return &ConfigError{Field: "storage.basePath", Message: fmt.Sprintf("storage.basePath must be %q", CheckpointBasePath)}
 	}
 	c.Storage.BasePath = basePath
 	if c.CRIU.TcpClose && c.CRIU.TcpEstablished {

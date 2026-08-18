@@ -62,12 +62,16 @@ func (r *fakeRuntime) ResolveContainerByPod(ctx context.Context, pod, ns, ctr st
 }
 func (r *fakeRuntime) Close() error { return nil }
 
-// noopInjector is a no-op Mounter used in tests that do not exercise
+// noopInjector is a no-op RestoreMounter used in tests that do not exercise
 // the injection path. It prevents a nil-pointer panic if runRestore is ever
 // reached by a test that was previously relying on Phase 1 failing first.
 type noopInjector struct{}
 
-func (noopInjector) Mount(_ context.Context, _ int, _, _ string) (nsmount.MountPoint, error) {
+func (noopInjector) MountBundle(_ context.Context, _ int) (nsmount.MountPoint, error) {
+	return noopMountPoint{}, nil
+}
+
+func (noopInjector) MountArtifact(_ context.Context, _ int, _ string) (nsmount.MountPoint, error) {
 	return noopMountPoint{}, nil
 }
 
@@ -76,10 +80,14 @@ type noopMountPoint struct{}
 func (noopMountPoint) Unmount() error { return nil }
 func (noopMountPoint) NsFd() *os.File { return nil }
 
-// errorInjector always returns the wrapped error from Mount.
+// errorInjector always returns the wrapped error from either mount role.
 type errorInjector struct{ err error }
 
-func (e errorInjector) Mount(_ context.Context, _ int, _, _ string) (nsmount.MountPoint, error) {
+func (e errorInjector) MountBundle(_ context.Context, _ int) (nsmount.MountPoint, error) {
+	return nil, e.err
+}
+
+func (e errorInjector) MountArtifact(_ context.Context, _ int, _ string) (nsmount.MountPoint, error) {
 	return nil, e.err
 }
 
@@ -89,21 +97,30 @@ type recordedMountCall struct {
 }
 
 type recordingInjector struct {
-	calls *[]recordedMountCall
-	err   error
+	calls       *[]recordedMountCall
+	bundleErr   error
+	artifactErr error
 }
 
-func (r recordingInjector) Mount(_ context.Context, _ int, src, dst string) (nsmount.MountPoint, error) {
-	*r.calls = append(*r.calls, recordedMountCall{src: src, dst: dst})
-	if r.err != nil {
-		return nil, r.err
+func (r recordingInjector) MountBundle(_ context.Context, _ int) (nsmount.MountPoint, error) {
+	*r.calls = append(*r.calls, recordedMountCall{src: nsmount.SnapshotBinSrc, dst: nsmount.SnapshotBinDst})
+	if r.bundleErr != nil {
+		return nil, r.bundleErr
 	}
 	return noopMountPoint{}, nil
 }
 
-var _ executor.Mounter = noopInjector{}
-var _ executor.Mounter = errorInjector{}
-var _ executor.Mounter = recordingInjector{}
+func (r recordingInjector) MountArtifact(_ context.Context, _ int, src string) (nsmount.MountPoint, error) {
+	*r.calls = append(*r.calls, recordedMountCall{src: src, dst: nsmount.CheckpointDst})
+	if r.artifactErr != nil {
+		return nil, r.artifactErr
+	}
+	return noopMountPoint{}, nil
+}
+
+var _ executor.RestoreMounter = noopInjector{}
+var _ executor.RestoreMounter = errorInjector{}
+var _ executor.RestoreMounter = recordingInjector{}
 
 // makeTestController creates a NodeController with a fake k8s client and nil executors.
 // The fake clientset is empty so any goroutine launched by the restore path will fail on
@@ -114,18 +131,19 @@ func makeTestController(t *testing.T, objs ...runtime.Object) *NodeController {
 		config: &types.AgentConfig{
 			NodeName: testNodeName,
 			Storage: types.StorageSpec{
-				Type:     snapshotv1alpha1.StorageTypePVC,
+				Type:     "pvc",
 				BasePath: t.TempDir(),
 			},
 		},
-		clientset: fake.NewClientset(objs...),
-		runtime:   &fakeRuntime{},
-		injector:  executor.Mounters{Bundle: noopInjector{}, Artifact: noopInjector{}},
-		restoreFn: executor.Restore,
-		log:       testr.New(t),
-		holderID:  "test-holder",
-		inFlight:  make(map[string]struct{}),
-		stopCh:    make(chan struct{}),
+		clientset:              fake.NewClientset(objs...),
+		runtime:                &fakeRuntime{},
+		injector:               noopInjector{},
+		restoreFn:              executor.Restore,
+		writeControlSentinelFn: func(int, string) error { return nil },
+		log:                    testr.New(t),
+		holderID:               "test-holder",
+		inFlight:               make(map[string]struct{}),
+		stopCh:                 make(chan struct{}),
 	}
 }
 
@@ -255,7 +273,7 @@ func TestArtifactPathForPod(t *testing.T) {
 
 	t.Run("ignores legacy pod storage base path", func(t *testing.T) {
 		annotatedPod := pod.DeepCopy()
-		annotatedPod.Annotations[snapshotv1alpha1.CheckpointStorageBasePathAnnotation] = "/pod-checkpoints/"
+		annotatedPod.Annotations["nvidia.com/snapshot-storage-base-path"] = "/pod-checkpoints/"
 		w := makeTestController(t)
 		w.config.Storage.BasePath = "/agent-checkpoints"
 		got, err := w.artifactPathForPod(annotatedPod, "abc123")
@@ -542,7 +560,7 @@ func TestReconcileRestorePod(t *testing.T) {
 				ContainerID: "containerd://" + testContainerID,
 			}}
 			w := makeTestController(t, pod)
-			w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.Mounters) (int, error) {
+			w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
 				return 0, errors.New("test restore stopped")
 			}
 			workerFinished := observeEventReason(w.clientset.(*fake.Clientset), "RestoreWorkerFailed")
@@ -614,7 +632,7 @@ func TestReconcileRestorePodResolvesContainerBeforePodStatus(t *testing.T) {
 	pod.Status.ContainerStatuses = nil
 	w := makeTestController(t, pod)
 	w.runtime = &fakeRuntime{containerIDByPod: testContainerID}
-	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.Mounters) (int, error) {
+	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
 		return 0, errors.New("test restore stopped")
 	}
 	clientset := w.clientset.(*fake.Clientset)
@@ -639,7 +657,7 @@ func TestReconcileRestorePodPollsRuntimeBeforePodRunning(t *testing.T) {
 	pod.Status.ContainerStatuses = nil
 	w := makeTestController(t, pod)
 	w.runtime = &fakeRuntime{containerIDByPod: testContainerID}
-	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.Mounters) (int, error) {
+	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
 		return 0, errors.New("test restore stopped")
 	}
 	clientset := w.clientset.(*fake.Clientset)
@@ -743,18 +761,21 @@ func TestRunRestoreFailureEvents(t *testing.T) {
 	if err := os.MkdirAll(checkpointDir, 0o755); err != nil {
 		t.Fatalf("create checkpoint dir: %v", err)
 	}
-	if err := types.WriteManifest(checkpointDir, &types.CheckpointManifest{CheckpointID: checkpointID}); err != nil {
+	if err := types.WriteManifest(checkpointDir, &types.CheckpointManifest{
+		CheckpointID: checkpointID,
+		K8s:          types.SourcePodManifest{PodNamespace: "default"},
+	}); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
 
-	runRestore := func(t *testing.T, mounters executor.Mounters) *NodeController {
+	runRestore := func(t *testing.T, mounter executor.RestoreMounter) *NodeController {
 		t.Helper()
 		w := makeTestController(t, pod)
 		w.config.Storage.BasePath = basePath
 		// math.MaxInt32 is above any real kernel pid_max (≤4194304) so SendSignalToPID
 		// returns ESRCH instead of killing the test process.
 		w.runtime = &fakeRuntime{resolveContainerPID: math.MaxInt32}
-		w.injector = mounters
+		w.injector = mounter
 		_ = w.runRestore(
 			context.Background(), pod, "main", "ctr-abc", checkpointID,
 			"default/test-pod/main/ctr-abc",
@@ -765,7 +786,7 @@ func TestRunRestoreFailureEvents(t *testing.T) {
 
 	injectErr := errors.New("injector unavailable")
 	t.Run("bundle mount failure", func(t *testing.T) {
-		w := runRestore(t, executor.Mounters{Bundle: errorInjector{err: injectErr}, Artifact: noopInjector{}})
+		w := runRestore(t, errorInjector{err: injectErr})
 		if !sawEventReason(w.clientset.(*fake.Clientset), "RestoreFailed") {
 			t.Fatal("expected RestoreFailed event when bundle mount fails")
 		}
@@ -773,10 +794,7 @@ func TestRunRestoreFailureEvents(t *testing.T) {
 
 	t.Run("artifact mount failure and role paths", func(t *testing.T) {
 		var calls []recordedMountCall
-		w := runRestore(t, executor.Mounters{
-			Bundle:   recordingInjector{calls: &calls},
-			Artifact: recordingInjector{calls: &calls, err: injectErr},
-		})
+		w := runRestore(t, recordingInjector{calls: &calls, artifactErr: injectErr})
 		if !sawEventReason(w.clientset.(*fake.Clientset), "RestoreFailed") {
 			t.Fatal("expected RestoreFailed event when artifact mount fails")
 		}
@@ -794,16 +812,16 @@ func TestRunRestoreFailureEvents(t *testing.T) {
 		}
 	})
 
-	t.Run("cleanup failure has dedicated event and status reason", func(t *testing.T) {
+	t.Run("cleanup failure is log-only and restore completes", func(t *testing.T) {
 		w := makeTestController(t, pod)
 		w.config.Storage.BasePath = basePath
-		rt := &fakeRuntime{resolveContainerPID: math.MaxInt32}
+		rt := &fakeRuntime{}
 		w.runtime = rt
-		w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.Mounters) (int, error) {
-			return 0, &executor.RestoreCleanupError{
-				Action: "unmount checkpoint artifact from placeholder",
-				Err:    errors.New("unmount failed"),
-			}
+		w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
+			return 4242, executor.NewRestoreCleanupError(
+				"unmount checkpoint artifact from placeholder",
+				errors.New("unmount failed"),
+			)
 		}
 
 		err := w.runRestore(
@@ -811,15 +829,17 @@ func TestRunRestoreFailureEvents(t *testing.T) {
 			"default/test-pod/main/ctr-abc",
 			time.Time{},
 		)
-		if err == nil || !strings.Contains(err.Error(), "placeholder could not be killed") {
-			t.Fatalf("cleanup failure did not reach fatal kill path: %v", err)
+		if err != nil {
+			t.Fatalf("cleanup failure should not fail restore: %v", err)
 		}
-		if len(rt.resolvedContainerIDs) != 1 || rt.resolvedContainerIDs[0] != "ctr-abc" {
-			t.Fatalf("resolved container IDs = %v, want [ctr-abc]", rt.resolvedContainerIDs)
+		if len(rt.resolvedContainerIDs) != 0 {
+			t.Fatalf("cleanup failure reached kill path: resolved container IDs = %v", rt.resolvedContainerIDs)
 		}
-
-		if !sawEventReason(w.clientset.(*fake.Clientset), restoreCleanupFailedReason) {
-			t.Fatalf("expected %s event for cleanup failure", restoreCleanupFailedReason)
+		if !sawEventReason(w.clientset.(*fake.Clientset), "RestoreSucceeded") {
+			t.Fatal("expected RestoreSucceeded event after cleanup failure")
+		}
+		if sawEventReason(w.clientset.(*fake.Clientset), restoreFailedReason) {
+			t.Fatal("unexpected RestoreFailed event after cleanup failure")
 		}
 		updated, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
 		if err != nil {
@@ -829,11 +849,11 @@ func TestRunRestoreFailureEvents(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := updated.Annotations[keys.Status]; got != snapshotv1alpha1.RestoreStatusFailed {
-			t.Fatalf("restore status = %q, want %q", got, snapshotv1alpha1.RestoreStatusFailed)
+		if got := updated.Annotations[keys.Status]; got != snapshotv1alpha1.RestoreStatusCompleted {
+			t.Fatalf("restore status = %q, want %q", got, snapshotv1alpha1.RestoreStatusCompleted)
 		}
-		if got := updated.Annotations[keys.Reason]; got != restoreCleanupFailedReason {
-			t.Fatalf("restore reason = %q, want %q", got, restoreCleanupFailedReason)
+		if got := updated.Annotations[keys.Reason]; got != "" {
+			t.Fatalf("restore reason = %q, want empty", got)
 		}
 	})
 }

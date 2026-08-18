@@ -12,8 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -50,16 +48,17 @@ import (
 // informer over PodSnapshotContent work orders filtered to this node, with typed
 // reads/writes via an uncached controller-runtime client.
 type NodeController struct {
-	config       *types.AgentConfig
-	clientset    kubernetes.Interface
-	client       client.Client
-	dynClient    dynamic.Interface
-	runtime      snapshotruntime.Runtime
-	injector     executor.Mounters
-	log          logr.Logger
-	holderID     string
-	checkpointFn func(ctx context.Context, params CheckpointParams) error
-	restoreFn    func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.Mounters) (int, error)
+	config                 *types.AgentConfig
+	clientset              kubernetes.Interface
+	client                 client.Client
+	dynClient              dynamic.Interface
+	runtime                snapshotruntime.Runtime
+	injector               executor.RestoreMounter
+	log                    logr.Logger
+	holderID               string
+	checkpointFn           func(ctx context.Context, params CheckpointParams) error
+	restoreFn              func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error)
+	writeControlSentinelFn func(int, string) error
 
 	inFlight   map[string]struct{}
 	inFlightMu sync.Mutex
@@ -76,7 +75,6 @@ const (
 	restoreContainerResolveInterval = 50 * time.Millisecond
 	restoreContainerResolveTimeout  = 30 * time.Second
 	restoreFailedReason             = "RestoreFailed"
-	restoreCleanupFailedReason      = "RestoreCleanupFailed"
 
 	// snapshotContentResyncInterval re-drives every PodSnapshotContent work order so a
 	// not-yet-Ready source pod is re-checked for quiesce without a busy loop.
@@ -120,15 +118,13 @@ func NewNodeController(
 	if err != nil {
 		return nil, fmt.Errorf("failed to create binary injector: %w", err)
 	}
-	injector := executor.Mounters{Bundle: nsm, Artifact: nsm.WithNoExec()}
-
 	w := &NodeController{
 		config:    cfg,
 		clientset: clientset,
 		client:    typedClient,
 		dynClient: dynClient,
 		runtime:   rt,
-		injector:  injector,
+		injector:  nsm,
 		log:       log,
 		holderID:  "snapshot-agent/" + uuid.NewString(),
 		inFlight:  make(map[string]struct{}),
@@ -136,6 +132,7 @@ func NewNodeController(
 	}
 	w.checkpointFn = w.executorCheckpoint
 	w.restoreFn = executor.Restore
+	w.writeControlSentinelFn = snapshotruntime.WriteControlSentinel
 	return w, nil
 }
 
@@ -303,8 +300,8 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 		return
 	}
 
-	if strings.ContainsAny(checkpointID, "/\\") || strings.Contains(checkpointID, "..") || filepath.Clean(checkpointID) != checkpointID {
-		w.log.Error(fmt.Errorf("invalid checkpoint id %q", checkpointID), "Invalid checkpoint id on restore pod", "pod", podKey)
+	if _, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, checkpointID, artifactVersionFromPod(pod)); err != nil {
+		w.log.Error(err, "Invalid checkpoint coordinates on restore pod", "pod", podKey)
 		return
 	}
 
@@ -530,7 +527,10 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 	}
 	placeholderHostPID, err := op.executeRestore(restoreCtx)
 	if err != nil {
-		return op.failRestore(ctx, err)
+		var cleanupErr *executor.RestoreCleanupError
+		if !errors.As(err, &cleanupErr) {
+			return op.failRestore(ctx, err)
+		}
 	}
 	return op.completeRestore(ctx, placeholderHostPID)
 }
@@ -611,9 +611,8 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (int, error) {
 func (op *restoreOperation) failRestore(ctx context.Context, restoreErr error) error {
 	w := op.controller
 	op.log.Error(restoreErr, "External restore failed")
-	reason := restoreFailureReason(restoreErr)
-	emitPodEvent(ctx, w.clientset, op.log, op.pod, "snapshot", corev1.EventTypeWarning, reason, restoreErr.Error())
-	if err := op.setRestoreStatus(ctx, snapshotv1alpha1.RestoreStatusFailed, reason); err != nil {
+	emitPodEvent(ctx, w.clientset, op.log, op.pod, "snapshot", corev1.EventTypeWarning, restoreFailedReason, restoreErr.Error())
+	if err := op.setRestoreStatus(ctx, snapshotv1alpha1.RestoreStatusFailed, restoreFailedReason); err != nil {
 		return err
 	}
 	// Re-resolve because restore may fail before discovering the placeholder PID.
@@ -631,7 +630,7 @@ func (op *restoreOperation) completeRestore(ctx context.Context, placeholderHost
 	w := op.controller
 	// Any PID inside the container mount namespace reaches the control
 	// volume through /host/proc/<pid>/root.
-	if err := snapshotruntime.WriteControlSentinel(placeholderHostPID, snapshotv1alpha1.RestoreCompleteFile); err != nil {
+	if err := w.writeControlSentinelFn(placeholderHostPID, snapshotv1alpha1.RestoreCompleteFile); err != nil {
 		op.log.Error(err, "Failed to write restore-complete sentinel")
 		emitPodEvent(ctx, w.clientset, op.log, op.pod, "snapshot", corev1.EventTypeWarning, restoreFailedReason, err.Error())
 		if statusErr := op.setRestoreStatus(ctx, snapshotv1alpha1.RestoreStatusFailed, restoreFailedReason); statusErr != nil {
@@ -669,14 +668,6 @@ func (op *restoreOperation) setRestoreStatus(ctx context.Context, value, reason 
 
 func terminalRestoreStatus(value string) bool {
 	return value == snapshotv1alpha1.RestoreStatusCompleted || value == snapshotv1alpha1.RestoreStatusFailed
-}
-
-func restoreFailureReason(err error) string {
-	var cleanupErr *executor.RestoreCleanupError
-	if errors.As(err, &cleanupErr) {
-		return restoreCleanupFailedReason
-	}
-	return restoreFailedReason
 }
 
 func (w *NodeController) tryAcquire(podKey string) bool {
@@ -754,7 +745,11 @@ func chooseActiveContent(objs []interface{}) string {
 }
 
 func artifactVersionFromPod(pod *corev1.Pod) string {
-	return snapshotv1alpha1.ArtifactVersion(strings.TrimSpace(pod.Annotations[snapshotv1alpha1.CheckpointArtifactVersionAnnotation]))
+	version := pod.Annotations[snapshotv1alpha1.CheckpointArtifactVersionAnnotation]
+	if version == "" {
+		return snapshotv1alpha1.DefaultCheckpointArtifactVersion
+	}
+	return version
 }
 
 // artifactPathForPod resolves an artifact from agent-owned configuration. Pods

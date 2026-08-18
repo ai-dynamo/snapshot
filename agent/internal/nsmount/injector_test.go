@@ -51,20 +51,15 @@ func newMounter(t *testing.T, m *mockMounter) *NSMounter {
 	return newWithMounter(m, logr.Discard())
 }
 
-func TestMountUsesCallerPathsAndReadOnlyPolicy(t *testing.T) {
+func TestRoleMountsUseFixedPathsAndPolicies(t *testing.T) {
 	m := &mockMounter{}
 	nsm := newMounter(t, m)
 
-	for _, tc := range []struct {
-		mounter  *NSMounter
-		src, dst string
-	}{
-		{nsm, SnapshotBinSrc, SnapshotBinDst},
-		{nsm.WithNoExec(), "/checkpoints/abc/versions/1", CheckpointDst},
-	} {
-		if _, err := tc.mounter.Mount(context.Background(), testPID, tc.src, tc.dst); err != nil {
-			t.Fatalf("Mount(%s, %s): %v", tc.src, tc.dst, err)
-		}
+	if _, err := nsm.MountBundle(context.Background(), testPID); err != nil {
+		t.Fatalf("MountBundle: %v", err)
+	}
+	if _, err := nsm.MountArtifact(context.Background(), testPID, "/checkpoints/abc/versions/1"); err != nil {
+		t.Fatalf("MountArtifact: %v", err)
 	}
 
 	want := []mountCall{
@@ -81,9 +76,31 @@ func TestMountUsesCallerPathsAndReadOnlyPolicy(t *testing.T) {
 	}
 }
 
+func TestMountArtifactRejectsUnsafeSourceBeforeHelper(t *testing.T) {
+	for _, source := range []string{
+		"/etc",
+		"/proc",
+		"/checkpoints-other/abc",
+		"/checkpoints/../etc",
+		"/checkpoints/abc;id",
+		"/checkpoints/abc id",
+		"/checkpoints/é",
+	} {
+		t.Run(source, func(t *testing.T) {
+			m := &mockMounter{}
+			if _, err := newMounter(t, m).MountArtifact(context.Background(), testPID, source); err == nil {
+				t.Fatalf("MountArtifact(%q) succeeded", source)
+			}
+			if len(m.calls) != 0 {
+				t.Fatalf("helper called for invalid source %q", source)
+			}
+		})
+	}
+}
+
 func TestMountPointUnmount(t *testing.T) {
 	m := &mockMounter{}
-	mp, err := newMounter(t, m).Mount(context.Background(), testPID, SnapshotBinSrc, SnapshotBinDst)
+	mp, err := newMounter(t, m).MountBundle(context.Background(), testPID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +116,7 @@ func TestMountPointUnmount(t *testing.T) {
 func TestMountFailure(t *testing.T) {
 	wantErr := errors.New("mount failed")
 	m := &mockMounter{results: []error{wantErr}}
-	_, err := newMounter(t, m).Mount(context.Background(), testPID, SnapshotBinSrc, SnapshotBinDst)
+	_, err := newMounter(t, m).MountBundle(context.Background(), testPID)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("Mount() error = %v, want %v", err, wantErr)
 	}

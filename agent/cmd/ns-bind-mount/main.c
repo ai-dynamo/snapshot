@@ -65,17 +65,68 @@ struct mount_attr {
 #define MOUNT_ATTR_NOEXEC 0x00000008
 #endif
 
-/* Destinations mirror the Go constants in internal/nsmount/injector.go. The
- * source may be either the fixed binary bundle or an artifact below the
- * operator-configured checkpoint base path, so source policy stays in Go. */
+/* Destinations mirror the Go constants in internal/nsmount/injector.go. */
 #define ALLOWED_BUNDLE_DST "/tmp/snapshot-binaries"
 #define ALLOWED_CHECKPOINT_DST "/tmp/checkpoint"
+#define ALLOWED_BUNDLE_SRC "/snapshot-binaries"
+#define ALLOWED_CHECKPOINT_SRC "/checkpoints"
 
 static int
-check_source(const char* path)
+is_portable_path_char(char value)
 {
-  if (path[0] != '/') {
-    fprintf(stderr, "src must be an absolute path: %s\n", path);
+  return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') ||
+         (value >= '0' && value <= '9') || value == '_' || value == '-' || value == '.';
+}
+
+static int
+check_absolute_path(const char* path, const char* label)
+{
+  if (path[0] != '/' || path[1] == '\0') {
+    fprintf(stderr, "%s must be a non-root absolute path: %s\n", label, path);
+    return -1;
+  }
+
+  const char* component = path + 1;
+  for (const char* p = component;; p++) {
+    if (*p != '/' && *p != '\0') {
+      if (!is_portable_path_char(*p)) {
+        fprintf(stderr, "%s contains unsupported character: %s\n", label, path);
+        return -1;
+      }
+      continue;
+    }
+
+    size_t len = (size_t)(p - component);
+    if (len == 0 || (len == 1 && component[0] == '.') ||
+        (len == 2 && component[0] == '.' && component[1] == '.')) {
+      fprintf(stderr, "%s contains an empty or traversing component: %s\n", label, path);
+      return -1;
+    }
+    if (*p == '\0')
+      break;
+    component = p + 1;
+  }
+  return 0;
+}
+
+static int
+check_source(const char* path, const char* dst)
+{
+  if (check_absolute_path(path, "src") < 0)
+    return -1;
+
+  const char* allowed_root;
+  if (strcmp(dst, ALLOWED_BUNDLE_DST) == 0) {
+    allowed_root = ALLOWED_BUNDLE_SRC;
+  } else if (strcmp(dst, ALLOWED_CHECKPOINT_DST) == 0) {
+    allowed_root = ALLOWED_CHECKPOINT_SRC;
+  } else {
+    fprintf(stderr, "unsupported destination for source validation: %s\n", dst);
+    return -1;
+  }
+  size_t root_len = strlen(allowed_root);
+  if (strncmp(path, allowed_root, root_len) != 0 || (path[root_len] != '\0' && path[root_len] != '/')) {
+    fprintf(stderr, "src must be within allowed source root %s: %s\n", allowed_root, path);
     return -1;
   }
   return 0;
@@ -87,21 +138,6 @@ check_destination(const char* path)
   if (strcmp(path, ALLOWED_BUNDLE_DST) != 0 && strcmp(path, ALLOWED_CHECKPOINT_DST) != 0) {
     fprintf(stderr, "dst must be %s or %s: %s\n", ALLOWED_BUNDLE_DST, ALLOWED_CHECKPOINT_DST, path);
     return -1;
-  }
-  return 0;
-}
-
-/* Returns 1 if path contains a ".." path component, 0 otherwise. */
-static int
-has_dotdot_component(const char* path)
-{
-  for (const char* p = path; *p;) {
-    const char* seg = p;
-    while (*p && *p != '/') p++;
-    size_t len = (size_t)(p - seg);
-    if (len == 2 && seg[0] == '.' && seg[1] == '.')
-      return 1;
-    while (*p == '/') p++;
   }
   return 0;
 }
@@ -231,10 +267,6 @@ do_umount(int argc, char* argv[])
     return 1;
   const char* dst = argv[3];
 
-  if (has_dotdot_component(dst)) {
-    fprintf(stderr, "dst must not contain '..' components: %s\n", dst);
-    return 1;
-  }
   if (check_destination(dst) < 0)
     return 1;
 
@@ -279,10 +311,6 @@ do_umount_fd(int argc, char* argv[])
   const char* dst = argv[3];
   int created_dst = (argc >= 5 && strcmp(argv[4], "created") == 0);
 
-  if (has_dotdot_component(dst)) {
-    fprintf(stderr, "dst must not contain '..' components: %s\n", dst);
-    return 1;
-  }
   if (check_destination(dst) < 0)
     return 1;
 
@@ -330,17 +358,9 @@ do_mount_fd(int argc, char* argv[])
   if (parse_mount_options(argc, argv, 5, &options) < 0)
     return 1;
 
-  if (has_dotdot_component(src)) {
-    fprintf(stderr, "src must not contain '..' components: %s\n", src);
-    return 1;
-  }
-  if (check_source(src) < 0)
-    return 1;
-  if (has_dotdot_component(dst)) {
-    fprintf(stderr, "dst must not contain '..' components: %s\n", dst);
-    return 1;
-  }
   if (check_destination(dst) < 0)
+    return 1;
+  if (check_source(src, dst) < 0)
     return 1;
 
   /* Clone the source mount tree before entering the target namespace. */
@@ -411,17 +431,9 @@ main(int argc, char* argv[])
   if (parse_mount_options(argc, argv, 4, &options) < 0)
     return 1;
 
-  if (has_dotdot_component(src)) {
-    fprintf(stderr, "src must not contain '..' components: %s\n", src);
-    return 1;
-  }
-  if (check_source(src) < 0)
-    return 1;
-  if (has_dotdot_component(dst)) {
-    fprintf(stderr, "dst must not contain '..' components: %s\n", dst);
-    return 1;
-  }
   if (check_destination(dst) < 0)
+    return 1;
+  if (check_source(src, dst) < 0)
     return 1;
 
   /* Clone the source mount tree before entering the target namespace. */

@@ -49,9 +49,8 @@ type checkpointPhaseTimings struct {
 // Checkpoint performs a CRIU dump of a container.
 // The operation has three phases: inspect, configure, capture.
 //
-// The checkpoint directory is staged under tmp/<uuid> during the operation.
-// On success, the previous checkpoint is removed and the staged directory is
-// renamed into place at the base path root.
+// The checkpoint directory is staged under tmp/<uuid> during the operation and
+// published atomically without replacing an existing artifact.
 func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req CheckpointRequest, cfg *types.AgentConfig) error {
 	checkpointStart := time.Now()
 	phaseTimings := checkpointPhaseTimings{}
@@ -105,13 +104,10 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	phaseTimings.CRIUDumpDuration = captureTimings.CRIUDumpDuration
 	phaseTimings.OverlayCaptureDuration = captureTimings.OverlayCaptureDuration
 
-	// Remove any previous checkpoint with the same identity hash, then
-	// promote the staged checkpoint directory into place.
+	// Publish the immutable staged checkpoint without replacing an artifact
+	// another agent may already be restoring.
 	finalizeStart := time.Now()
-	if err := os.RemoveAll(finalDir); err != nil {
-		return fmt.Errorf("failed to remove previous checkpoint directory: %w", err)
-	}
-	if err := os.Rename(tmpDir, finalDir); err != nil {
+	if err := publishCheckpoint(tmpDir, finalDir, req.CheckpointID); err != nil {
 		return fmt.Errorf("failed to finalize checkpoint directory: %w", err)
 	}
 	phaseTimings.FinalizeDuration = time.Since(finalizeStart)
@@ -135,6 +131,23 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		)
 	}
 
+	return nil
+}
+
+func publishCheckpoint(stagedDir, finalDir, checkpointID string) error {
+	if err := renameNoReplace(stagedDir, finalDir); err != nil {
+		if !os.IsExist(err) {
+			return err
+		}
+		manifest, manifestErr := types.ReadManifest(finalDir)
+		if manifestErr != nil {
+			return fmt.Errorf("artifact already exists and cannot be validated: %w", manifestErr)
+		}
+		if manifest.CheckpointID != checkpointID {
+			return fmt.Errorf("artifact already exists with checkpoint ID %q, expected %q", manifest.CheckpointID, checkpointID)
+		}
+		return nil
+	}
 	return nil
 }
 

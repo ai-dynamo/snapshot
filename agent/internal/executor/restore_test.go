@@ -78,29 +78,56 @@ func TestInspectRestoreUsesContainerIDWhenProvided(t *testing.T) {
 	}
 }
 
-func TestSetCleanupErrorIfSuccessful(t *testing.T) {
+func TestNewRestoreCleanupError(t *testing.T) {
 	cleanupErr := errors.New("unmount failed")
+	retErr := NewRestoreCleanupError("unmount artifact", cleanupErr)
+	if !errors.Is(retErr, cleanupErr) || !strings.Contains(retErr.Error(), "unmount artifact") {
+		t.Fatalf("cleanup error = %v", retErr)
+	}
+	var typedErr *RestoreCleanupError
+	if !errors.As(retErr, &typedErr) {
+		t.Fatalf("cleanup error type = %T, want *RestoreCleanupError", retErr)
+	}
+}
 
-	t.Run("reports cleanup failure after successful restore", func(t *testing.T) {
-		var retErr error
-		setCleanupErrorIfSuccessful(&retErr, "unmount artifact", cleanupErr)
-		if !errors.Is(retErr, cleanupErr) || !strings.Contains(retErr.Error(), "unmount artifact") {
-			t.Fatalf("cleanup error = %v", retErr)
-		}
-		var typedErr *RestoreCleanupError
-		if !errors.As(retErr, &typedErr) {
-			t.Fatalf("cleanup error type = %T, want *RestoreCleanupError", retErr)
-		}
-	})
+func TestValidateRestoreManifest(t *testing.T) {
+	manifest := types.NewCheckpointManifest(
+		"checkpoint-123",
+		types.CRIUDumpManifest{},
+		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "team-a", "10.0.0.11", nil),
+		types.OverlayManifest{},
+	)
 
-	t.Run("preserves existing restore failure", func(t *testing.T) {
-		restoreErr := errors.New("restore failed")
-		retErr := restoreErr
-		setCleanupErrorIfSuccessful(&retErr, "unmount artifact", cleanupErr)
-		if retErr != restoreErr {
-			t.Fatalf("cleanup replaced restore error: %v", retErr)
-		}
-	})
+	for _, tc := range []struct {
+		name string
+		req  RestoreRequest
+		want string
+	}{
+		{
+			name: "matching identity and namespace",
+			req:  RestoreRequest{CheckpointID: "checkpoint-123", PodNamespace: "team-a"},
+		},
+		{
+			name: "checkpoint ID mismatch",
+			req:  RestoreRequest{CheckpointID: "other", PodNamespace: "team-a"},
+			want: "does not match requested ID",
+		},
+		{
+			name: "namespace mismatch",
+			req:  RestoreRequest{CheckpointID: "checkpoint-123", PodNamespace: "team-b"},
+			want: "does not match restore namespace",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateRestoreManifest(tc.req, manifest)
+			if tc.want == "" && err != nil {
+				t.Fatalf("validateRestoreManifest() error = %v", err)
+			}
+			if tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+				t.Fatalf("validateRestoreManifest() error = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
 }
 
 func TestRestoreInNamespaceRejectsMultiGPUCheckpointWithoutLaunchJobState(t *testing.T) {

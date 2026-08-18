@@ -6,6 +6,9 @@ kind: ConfigMap
 {{- if ne .Values.storage.type "pvc" }}
 {{- fail (printf "snapshot.storage.type=%q is not supported yet; only pvc is currently implemented" .Values.storage.type) }}
 {{- end }}
+{{- if ne .Values.storage.pvc.basePath "/checkpoints" }}
+{{- fail "snapshot.storage.pvc.basePath is fixed at /checkpoints so the privileged mount helper can enforce its source allowlist" }}
+{{- end }}
 {{- if hasKey .Values.storage "accessMode" }}
 {{- fail "snapshot.storage.accessMode has been removed; every snapshot-agent mounts the shared RWX PVC" }}
 {{- end }}

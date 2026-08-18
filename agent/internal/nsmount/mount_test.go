@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -55,11 +56,11 @@ func TestExecMounterMountArgs(t *testing.T) {
 	bin := writeFakeBinary(t, `printf '%s\n' "$@" >> `+logFile)
 	m := newMounterForTest(t, bin)
 
-	_, err := m.Mount(context.Background(), os.Getpid(), "/src", CheckpointDst, MountOptions{ReadOnly: true, NoExec: true})
+	_, err := m.Mount(context.Background(), os.Getpid(), "/src/artifact", CheckpointDst, MountOptions{ReadOnly: true, NoExec: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"mount-fd", fmt.Sprintf("%d", nsFdChildNum), "/src", CheckpointDst, "ro", "noexec"}
+	want := []string{"mount-fd", fmt.Sprintf("%d", nsFdChildNum), "/src/artifact", CheckpointDst, "ro", "noexec"}
 	got := readLines(t, logFile)
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("args = %v, want %v", got, want)
@@ -68,11 +69,11 @@ func TestExecMounterMountArgs(t *testing.T) {
 
 func TestExecMounterMountErrorWrapped(t *testing.T) {
 	bin := writeFakeBinary(t, `echo "subprocess boom" >&2; exit 1`)
-	_, err := newMounterForTest(t, bin).Mount(context.Background(), os.Getpid(), "/src", "/dst", MountOptions{})
+	_, err := newMounterForTest(t, bin).Mount(context.Background(), os.Getpid(), "/src/artifact", "/dst", MountOptions{})
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	for _, want := range []string{"/src", "/dst", "subprocess boom"} {
+	for _, want := range []string{"/src/artifact", "/dst", "subprocess boom"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error missing %q: %v", want, err)
 		}
@@ -81,7 +82,7 @@ func TestExecMounterMountErrorWrapped(t *testing.T) {
 
 func TestExecMounterMountNsFdOpenFailure(t *testing.T) {
 	bin := writeFakeBinary(t, `exit 0`)
-	_, err := newMounterForTest(t, bin).Mount(context.Background(), math.MaxInt32, "/src", "/dst", MountOptions{})
+	_, err := newMounterForTest(t, bin).Mount(context.Background(), math.MaxInt32, "/src/artifact", "/dst", MountOptions{})
 	if err == nil || !strings.Contains(err.Error(), "ns/mnt") {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -89,7 +90,7 @@ func TestExecMounterMountNsFdOpenFailure(t *testing.T) {
 
 func TestExecMounterUnmountErrorAndIdempotence(t *testing.T) {
 	bin := writeFakeBinary(t, `if [ "$1" = "umount-fd" ]; then echo "boom" >&2; exit 1; fi`)
-	handle, err := newMounterForTest(t, bin).Mount(context.Background(), os.Getpid(), "/src", "/dst", MountOptions{})
+	handle, err := newMounterForTest(t, bin).Mount(context.Background(), os.Getpid(), "/src/artifact", "/dst", MountOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,5 +100,48 @@ func TestExecMounterUnmountErrorAndIdempotence(t *testing.T) {
 	}
 	if err2 := handle.Unmount(); err2 != err {
 		t.Fatalf("second Unmount() = %v, want same error %v", err2, err)
+	}
+}
+
+func TestCHelperRejectsUnsafeSourcesBeforeMountSyscalls(t *testing.T) {
+	gcc, err := exec.LookPath("gcc")
+	if err != nil {
+		t.Skip("gcc is required to validate the C helper")
+	}
+	binary := filepath.Join(t.TempDir(), "ns-bind-mount")
+	source := filepath.Join("..", "..", "cmd", "ns-bind-mount", "main.c")
+	compile := exec.Command(gcc, "-O2", "-Wall", "-Wextra", "-o", binary, source)
+	if output, err := compile.CombinedOutput(); err != nil {
+		t.Fatalf("compile C helper: %v\n%s", err, output)
+	}
+
+	for _, tc := range []struct {
+		name, source, destination string
+	}{
+		{name: "outside root", source: "/etc"},
+		{name: "proc", source: "/proc"},
+		{name: "sibling prefix", source: "/checkpoints-other/id"},
+		{name: "traversal", source: "/checkpoints/../etc"},
+		{name: "repeated separator", source: "/checkpoints//id"},
+		{name: "whitespace", source: "/checkpoints/bad id"},
+		{name: "shell punctuation", source: "/checkpoints/bad;id"},
+		{name: "unicode", source: "/checkpoints/é"},
+		{name: "checkpoint source for bundle role", source: "/checkpoints/id", destination: SnapshotBinDst},
+		{name: "bundle source for checkpoint role", source: SnapshotBinSrc},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			destination := tc.destination
+			if destination == "" {
+				destination = CheckpointDst
+			}
+			cmd := exec.Command(binary, fmt.Sprintf("%d", os.Getpid()), tc.source, destination, "ro", "noexec")
+			output, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("helper accepted source %q", tc.source)
+			}
+			if strings.Contains(string(output), "open_tree") || strings.Contains(string(output), "setns") {
+				t.Fatalf("helper reached mount syscall for invalid source: %s", output)
+			}
+		})
 	}
 }
