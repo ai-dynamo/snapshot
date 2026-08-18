@@ -18,6 +18,7 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
 // RestoreOptions holds configuration for an in-namespace restore.
@@ -168,6 +169,15 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 		}
 		defer f.Close()
 		cudaHelperFdPath = fmt.Sprintf("/proc/self/fd/%d", f.Fd())
+	}
+
+	// The restore-complete sentinel lives on the pod emptyDir mounted at
+	// SnapshotControlMountPath. Clear it here, in that mount namespace, so a
+	// leftover from an earlier incarnation cannot release the restored process
+	// before this CRIU/CUDA attempt finishes. A missing file is already gone;
+	// a missing mount is a hard error.
+	if err := snapshotruntime.RemoveControlSentinel(snapshotv1alpha1.SnapshotControlMountPath, snapshotv1alpha1.RestoreCompleteFile); err != nil {
+		return nil, 0, fmt.Errorf("remove stale restore-complete sentinel: %w", err)
 	}
 
 	// CRIU restore
