@@ -90,6 +90,7 @@ type PodSnapshotContent struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
+	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
 	Spec   PodSnapshotContentSpec   `json:"spec,omitempty"`
 	Status PodSnapshotContentStatus `json:"status,omitempty"`
