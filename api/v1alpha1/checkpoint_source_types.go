@@ -12,9 +12,12 @@ const CheckpointSourceTypeNvidia CheckpointSourceType = "Nvidia"
 // CheckpointSource records source workload facts needed to configure a restore.
 // Type names the vendor whose facts are recorded, and the matching vendor field
 // carries them, so a vendor can record its own fact set without disturbing another's.
+// +kubebuilder:validation:XValidation:rule="(self.type == 'Nvidia') == has(self.nvidia)",message="source payload must match type"
 type CheckpointSource struct {
 	// Type names the vendor whose source facts are recorded.
 	// +optional
+	// +kubebuilder:default=Nvidia
+	// +kubebuilder:validation:Enum=Nvidia
 	Type CheckpointSourceType `json:"type,omitempty"`
 
 	// Nvidia records the NVIDIA source facts.

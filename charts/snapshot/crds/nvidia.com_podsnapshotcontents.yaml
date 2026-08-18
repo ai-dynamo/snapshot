@@ -265,9 +265,15 @@ spec:
                         type: string
                     type: object
                   type:
+                    default: Nvidia
                     description: Type names the vendor whose source facts are recorded.
+                    enum:
+                    - Nvidia
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - message: source payload must match type
+                  rule: (self.type == 'Nvidia') == has(self.nvidia)
             type: object
         type: object
         x-kubernetes-validations:
