@@ -78,6 +78,24 @@ func TestSourceTypeAndPayloadMustAgree(t *testing.T) {
 	t.Errorf("status.source has no validation with rule %q, got %v", wantRule, validations)
 }
 
+func TestSourceNvidiaPreservesUnknownFieldsWithoutLosingItsSchema(t *testing.T) {
+	nvidia := objectAt(t, sourceSchema(t), "properties", "nvidia")
+
+	if nvidia["x-kubernetes-preserve-unknown-fields"] != true {
+		t.Error("nvidia does not preserve unknown fields, so facts a newer writer records would be dropped against this CRD")
+	}
+
+	declared := objectAt(t, nvidia, "properties")
+	for _, fact := range []string{"node", "hardware", "declaredVolumes", "declaredVolumeCount"} {
+		if _, ok := declared[fact]; !ok {
+			t.Errorf("nvidia no longer declares %q; preserving unknown fields must not replace the known schema", fact)
+		}
+	}
+	if got := objectAt(t, declared, "declaredVolumeCount")["minimum"]; got != float64(0) {
+		t.Errorf("declaredVolumeCount minimum is %v, want 0; declared facts must keep their validation", got)
+	}
+}
+
 func TestSourceTypeIsAnEnumWithADefault(t *testing.T) {
 	sourceType := objectAt(t, sourceSchema(t), "properties", "type")
 

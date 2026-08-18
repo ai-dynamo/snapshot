@@ -22,6 +22,7 @@ type CheckpointSource struct {
 
 	// Nvidia records the NVIDIA source facts.
 	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
 	Nvidia *NvidiaCheckpointSource `json:"nvidia,omitempty"`
 }
 

@@ -264,6 +264,7 @@ spec:
                         description: Node is the source node name.
                         type: string
                     type: object
+                    x-kubernetes-preserve-unknown-fields: true
                   type:
                     default: Nvidia
                     description: Type names the vendor whose source facts are recorded.
