@@ -73,6 +73,61 @@ def test_successful_snapshot_captures_cpu_gpu_and_fs(
 
 
 @pytest.mark.snapshot_success
+def test_deleting_snapshot_removes_complete_content_artifact_root(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    try:
+        source, source_node = create_ready_source(config, run, gpu=False)
+        snap.wait_for_state_observations(
+            config.namespace,
+            run.source_pod,
+            run.source_token,
+            gpu=False,
+            minimum=2,
+        )
+        snap.create_podsnapshot(
+            config.namespace,
+            run.snapshot_name,
+            run.source_pod,
+            source.metadata.uid,
+        )
+        _, content = snap.wait_for_snapshot_ready(
+            config.namespace,
+            run.snapshot_name,
+        )
+        content_name = content["metadata"]["name"]
+        content_uid = content["metadata"]["uid"]
+        assert snap.CONTENT_ARTIFACT_FINALIZER in content["metadata"].get(
+            "finalizers", []
+        )
+
+        # Add a file outside the finalized per-container directory. Deletion must
+        # remove the complete content UID root, including abandoned staging data.
+        snap.seed_checkpoint_cleanup_marker(config, source_node, content_uid)
+        snap.delete_podsnapshot(config.namespace, run.snapshot_name)
+
+        snap.wait_for_checkpoint_content_root_deleted(
+            config,
+            source_node,
+            content_uid,
+        )
+        snap.wait_for_custom_object_deleted(
+            None,
+            content_name,
+            plural=snap.PODSNAPSHOTCONTENTS,
+        )
+        snap.wait_for_custom_object_deleted(
+            config.namespace,
+            run.snapshot_name,
+            plural=snap.PODSNAPSHOTS,
+        )
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
+@pytest.mark.snapshot_success
 @pytest.mark.gpu
 def test_successful_restore_recovers_cpu_gpu_and_fs_from_snapshot(
     config: k8s.E2EConfig,
