@@ -67,3 +67,12 @@ func TestWriteControlSentinel_RejectsInvalidPID(t *testing.T) {
 		t.Fatal("expected error for negative PID")
 	}
 }
+
+func TestRemoveControlSentinel_RejectsInvalidPID(t *testing.T) {
+	if err := RemoveControlSentinel(0, "restore-complete"); err == nil {
+		t.Fatal("expected error for PID 0")
+	}
+	if err := RemoveControlSentinel(-1, "restore-complete"); err == nil {
+		t.Fatal("expected error for negative PID")
+	}
+}
