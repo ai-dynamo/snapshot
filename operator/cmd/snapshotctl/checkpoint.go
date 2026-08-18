@@ -14,8 +14,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	snapshotprotocol "github.com/ai-dynamo/snapshot/operator/internal/protocol"
-
-	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
 const defaultGeneratedCheckpointIDPrefix = "manual-snapshot"
@@ -31,15 +29,14 @@ type checkpointOptions struct {
 }
 
 type result struct {
-	Name               string
-	Namespace          string
-	CheckpointID       string
-	CheckpointLocation string
-	CheckpointJob      string
-	PodSnapshot        string
-	BoundContent       string
-	RestorePod         string
-	Status             string
+	Name          string
+	Namespace     string
+	CheckpointID  string
+	CheckpointJob string
+	PodSnapshot   string
+	BoundContent  string
+	RestorePod    string
+	Status        string
 }
 
 func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, retErr error) {
@@ -50,7 +47,7 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 		return nil, fmt.Errorf("--timeout must be greater than zero")
 	}
 
-	pod, clientset, crClient, namespace, storage, err := loadRunContext(ctx, opts.ManifestPath, opts.Namespace, opts.KubeContext)
+	pod, clientset, crClient, namespace, err := loadRunContext(opts.ManifestPath, opts.Namespace, opts.KubeContext)
 	if err != nil {
 		return nil, err
 	}
@@ -59,15 +56,6 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 	if checkpointID == "" {
 		checkpointID = fmt.Sprintf("%s-%d", defaultGeneratedCheckpointIDPrefix, time.Now().UTC().UnixNano())
 	}
-	resolvedStorage, err := snapshotv1alpha1.ResolveCheckpointStorage(checkpointID, "", snapshotv1alpha1.Storage{
-		Type:     snapshotprotocol.StorageTypePVC,
-		PVCName:  storage.PVCName,
-		BasePath: storage.BasePath,
-	})
-	if err != nil {
-		return nil, err
-	}
-
 	containers, err := reconcileTargetContainers(pod.Annotations, opts.Container, 1)
 	if err != nil {
 		return nil, err
@@ -128,16 +116,15 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 	}
 
 	res := &result{
-		Name:               pod.Name,
-		Namespace:          namespace,
-		CheckpointID:       checkpointID,
-		CheckpointLocation: resolvedStorage.Location,
-		CheckpointJob:      checkpointJobName,
-		PodSnapshot:        snap.Name,
-		Status:             "completed",
+		Name:          pod.Name,
+		Namespace:     namespace,
+		CheckpointID:  checkpointID,
+		CheckpointJob: checkpointJobName,
+		PodSnapshot:   snap.Name,
+		Status:        "completed",
 	}
-	if snap.Status.BoundPodSnapshotContentName != nil && *snap.Status.BoundPodSnapshotContentName != "" {
-		res.BoundContent = *snap.Status.BoundPodSnapshotContentName
+	if snap.Status.BoundPodSnapshotContentName != nil {
+		res.BoundContent = strings.TrimSpace(*snap.Status.BoundPodSnapshotContentName)
 	}
 	return res, nil
 }

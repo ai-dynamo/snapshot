@@ -22,6 +22,8 @@ type Storage struct {
 type RestoreStatusAnnotationKeys struct {
 	Status      string
 	ContainerID string
+	// +optional
+	Reason string
 }
 
 // ArtifactVersion normalizes an artifact version, defaulting when empty.
@@ -118,8 +120,9 @@ func RestoreStatusAnnotationKeysFor(containerName string) (RestoreStatusAnnotati
 	keys := RestoreStatusAnnotationKeys{
 		Status:      RestoreStatusAnnotationPrefix + containerName,
 		ContainerID: RestoreContainerIDAnnotationPrefix + containerName,
+		Reason:      RestoreReasonAnnotationPrefix + containerName,
 	}
-	for _, annotationKey := range []string{keys.Status, keys.ContainerID} {
+	for _, annotationKey := range []string{keys.Status, keys.ContainerID, keys.Reason} {
 		if errs := validation.IsQualifiedName(annotationKey); len(errs) > 0 {
 			return RestoreStatusAnnotationKeys{}, fmt.Errorf("container name %q cannot be used in restore status annotation key %q: %s", containerName, annotationKey, strings.Join(errs, "; "))
 		}
@@ -129,6 +132,11 @@ func RestoreStatusAnnotationKeysFor(containerName string) (RestoreStatusAnnotati
 
 // RestoreStatusAnnotations builds the per-container restore status annotation map.
 func RestoreStatusAnnotations(containerName, status, containerID string) (map[string]string, error) {
+	return RestoreStatusAnnotationsWithReason(containerName, status, containerID, "")
+}
+
+// RestoreStatusAnnotationsWithReason includes the controller-facing condition reason.
+func RestoreStatusAnnotationsWithReason(containerName, status, containerID, reason string) (map[string]string, error) {
 	keys, err := RestoreStatusAnnotationKeysFor(containerName)
 	if err != nil {
 		return nil, err
@@ -136,6 +144,7 @@ func RestoreStatusAnnotations(containerName, status, containerID string) (map[st
 	return map[string]string{
 		keys.Status:      status,
 		keys.ContainerID: containerID,
+		keys.Reason:      reason,
 	}, nil
 }
 
@@ -144,7 +153,8 @@ func clearRestoreStatusKeys(annotations map[string]string) {
 	delete(annotations, RestoreContainerIDAnnotation)
 	for key := range annotations {
 		if strings.HasPrefix(key, RestoreStatusAnnotationPrefix) ||
-			strings.HasPrefix(key, RestoreContainerIDAnnotationPrefix) {
+			strings.HasPrefix(key, RestoreContainerIDAnnotationPrefix) ||
+			strings.HasPrefix(key, RestoreReasonAnnotationPrefix) {
 			delete(annotations, key)
 		}
 	}

@@ -42,7 +42,7 @@ func ExecuteRestore(
 	// and unlock. That keeps the window where the restored process runs with CUDA
 	// still locked as short as possible. cleanup is called on the error paths below.
 	var openFiles, inheritedFiles []*os.File
-	imageDirPath, removeImageDir, err := prepareRestoreImageDir(checkpointPath)
+	imageDirPath, removeImageView, err := prepareRestoreImageDir(checkpointPath)
 	if err != nil {
 		return 0, nil, fmt.Errorf("failed to prepare CRIU image directory: %w", err)
 	}
@@ -50,7 +50,9 @@ func ExecuteRestore(
 	cleanup := func() {
 		closeFiles(inheritedFiles)
 		closeFiles(openFiles)
-		removeImageDir()
+		if err := removeImageView(); err != nil {
+			log.Error(err, "failed to remove private CRIU image view", "path", imageDirPath)
+		}
 		if err := os.RemoveAll(confTmpDir); err != nil {
 			log.Error(err, "failed to remove criu config temp dir", "path", confTmpDir)
 		}
@@ -65,27 +67,27 @@ func ExecuteRestore(
 	openFiles = append(openFiles, imageDir)
 	criuOpts.ImagesDirFd = proto.Int32(imageDirFD)
 
-	// Open work dir FD
-	if settings.WorkDir != "" {
-		if err := os.MkdirAll(settings.WorkDir, 0755); err != nil {
-			cleanup()
-			return 0, nil, fmt.Errorf("failed to create CRIU work directory: %w", err)
-		}
-		workDirFile, workDirFD, err := openPathForCRIU(settings.WorkDir)
-		if err != nil {
-			cleanup()
-			return 0, nil, fmt.Errorf("failed to open CRIU work directory: %w", err)
-		}
-		openFiles = append(openFiles, workDirFile)
-		criuOpts.WorkDirFd = proto.Int32(workDirFD)
-	}
-
-	overridePath, confTmpDir, err := rewriteCRIULibDir(criuOpts.ConfigFile, settings.WorkDir, bundleDir)
+	overridePath, effectiveWorkDir, confTmpDir, err := prepareCRIURestoreConfig(
+		criuOpts.ConfigFile,
+		settings.WorkDir,
+		bundleDir,
+	)
 	if err != nil {
 		cleanup()
 		return 0, nil, err
 	}
 	criuOpts.ConfigFile = proto.String(overridePath)
+
+	// CRIU defaults its work directory to the image directory when WorkDirFd is
+	// unset. Always provide a writable directory because checkpoint artifacts
+	// are mounted read-only.
+	workDirFile, workDirFD, err := openPathForCRIU(effectiveWorkDir)
+	if err != nil {
+		cleanup()
+		return 0, nil, fmt.Errorf("failed to open CRIU work directory: %w", err)
+	}
+	openFiles = append(openFiles, workDirFile)
+	criuOpts.WorkDirFd = proto.Int32(workDirFD)
 
 	criuBin, err := bundledCRIUPath(bundleDir)
 	if err != nil {
@@ -109,7 +111,7 @@ func ExecuteRestore(
 	log.V(1).Info("Executing go-criu Restore call")
 	if err := c.Restore(criuOpts, notify); err != nil {
 		log.Error(err, "go-criu Restore returned error")
-		logging.LogRestoreErrors(imageDirPath, settings.WorkDir, log)
+		logging.LogRestoreErrors(imageDirPath, effectiveWorkDir, log)
 		cleanup()
 		return 0, nil, fmt.Errorf("CRIU restore failed: %w", err)
 	}
@@ -249,6 +251,32 @@ func rewriteCRIULibDir(existingConfigFile *string, workDir, criuBundleDir string
 		return "", tmpDir, fmt.Errorf("write criu libdir override to %s: %w", overridePath, err)
 	}
 	return overridePath, tmpDir, nil
+}
+
+// prepareCRIURestoreConfig selects a writable work directory and writes the
+// restore-only CRIU configuration into it. Older manifests may omit WorkDir;
+// in that case rewriteCRIULibDir creates the temporary directory returned as
+// both effectiveWorkDir and tmpDir.
+func prepareCRIURestoreConfig(
+	existingConfigFile *string,
+	configuredWorkDir string,
+	criuBundleDir string,
+) (overridePath, effectiveWorkDir, tmpDir string, err error) {
+	if configuredWorkDir != "" {
+		if err := os.MkdirAll(configuredWorkDir, 0o755); err != nil {
+			return "", "", "", fmt.Errorf("failed to create CRIU work directory: %w", err)
+		}
+	}
+
+	overridePath, tmpDir, err = rewriteCRIULibDir(existingConfigFile, configuredWorkDir, criuBundleDir)
+	if err != nil {
+		return "", "", tmpDir, err
+	}
+	effectiveWorkDir = configuredWorkDir
+	if effectiveWorkDir == "" {
+		effectiveWorkDir = tmpDir
+	}
+	return overridePath, effectiveWorkDir, tmpDir, nil
 }
 
 // bundledCRIUPath returns the path to the criu binary inside bundleDir.

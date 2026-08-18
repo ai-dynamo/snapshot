@@ -9,7 +9,8 @@ end-to-end checks against a Kubernetes cluster.
 - `kubectl` and `helm`
 - For CI/vCluster mode: `vcluster`
 - A GPU Kubernetes cluster with `RuntimeClass/nvidia`, GPU Operator `26.3.0+`,
-  MIG disabled on the target GPU nodes, and CUDA driver `580+`
+  MIG disabled on the target GPU nodes, CUDA driver `580+`, and a default
+  storage class that can provision `ReadWriteMany` volumes
 
 ## Modes
 

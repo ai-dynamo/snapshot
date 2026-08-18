@@ -18,11 +18,10 @@ import (
 )
 
 // testMountPoint satisfies nsmount.MountPoint for executor unit tests.
-type testMountPoint struct{ dst string }
+type testMountPoint struct{}
 
-func (m testMountPoint) Path(name string) (string, error) { return m.dst + "/" + name, nil }
-func (m testMountPoint) Unmount(_ context.Context) error  { return nil }
-func (m testMountPoint) NsFd() *os.File                   { return nil }
+func (m testMountPoint) Unmount() error { return nil }
+func (m testMountPoint) NsFd() *os.File { return nil }
 
 var _ nsmount.MountPoint = testMountPoint{}
 
@@ -47,52 +46,26 @@ func (r *restoreFakeRuntime) ResolveContainerByPod(ctx context.Context, pod, ns,
 
 func (r *restoreFakeRuntime) Close() error { return nil }
 
-func TestExecNSRestoreRejectsRelativeContainerCheckpointLocation(t *testing.T) {
-	_, err := execNSRestore(
-		context.Background(),
-		testr.New(t),
-		RestoreRequest{
-			ContainerCheckpointLocation: "relative/checkpoint",
-		},
-		&types.RestoreContainerSnapshot{
-			CheckpointPath: "/host/checkpoints/abc123",
-			PlaceholderPID: 1,
-		},
-		testMountPoint{dst: "/tmp/snapshot-binaries"},
-	)
-	if err == nil {
-		t.Fatal("expected relative container checkpoint location to be rejected")
-	}
-	if !strings.Contains(err.Error(), "absolute") {
-		t.Fatalf("expected absolute-path validation error, got: %v", err)
-	}
-}
-
 func TestInspectRestoreUsesContainerIDWhenProvided(t *testing.T) {
-	checkpointDir := t.TempDir()
 	manifest := types.NewCheckpointManifest(
 		"checkpoint-123",
 		types.CRIUDumpManifest{},
 		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
 		types.OverlayManifest{},
 	)
-	if err := types.WriteManifest(checkpointDir, manifest); err != nil {
-		t.Fatalf("WriteManifest: %v", err)
-	}
-
 	rt := &restoreFakeRuntime{}
 	_, err := inspectRestore(
 		context.Background(),
 		rt,
 		testr.New(t),
 		RestoreRequest{
-			CheckpointID:       "checkpoint-123",
-			CheckpointLocation: checkpointDir,
-			ContainerID:        "placeholder-id",
-			PodName:            "virtual-pod-name",
-			PodNamespace:       "default",
-			ContainerName:      "main",
+			CheckpointID:  "checkpoint-123",
+			ContainerID:   "placeholder-id",
+			PodName:       "virtual-pod-name",
+			PodNamespace:  "default",
+			ContainerName: "main",
 		},
+		manifest,
 	)
 	if err != nil {
 		t.Fatalf("inspectRestore: %v", err)
@@ -103,6 +76,31 @@ func TestInspectRestoreUsesContainerIDWhenProvided(t *testing.T) {
 	if rt.resolveByPodHit {
 		t.Fatal("ResolveContainerByPod should not be used when ContainerID is provided")
 	}
+}
+
+func TestSetCleanupErrorIfSuccessful(t *testing.T) {
+	cleanupErr := errors.New("unmount failed")
+
+	t.Run("reports cleanup failure after successful restore", func(t *testing.T) {
+		var retErr error
+		setCleanupErrorIfSuccessful(&retErr, "unmount artifact", cleanupErr)
+		if !errors.Is(retErr, cleanupErr) || !strings.Contains(retErr.Error(), "unmount artifact") {
+			t.Fatalf("cleanup error = %v", retErr)
+		}
+		var typedErr *RestoreCleanupError
+		if !errors.As(retErr, &typedErr) {
+			t.Fatalf("cleanup error type = %T, want *RestoreCleanupError", retErr)
+		}
+	})
+
+	t.Run("preserves existing restore failure", func(t *testing.T) {
+		restoreErr := errors.New("restore failed")
+		retErr := restoreErr
+		setCleanupErrorIfSuccessful(&retErr, "unmount artifact", cleanupErr)
+		if retErr != restoreErr {
+			t.Fatalf("cleanup replaced restore error: %v", retErr)
+		}
+	})
 }
 
 func TestRestoreInNamespaceRejectsMultiGPUCheckpointWithoutLaunchJobState(t *testing.T) {

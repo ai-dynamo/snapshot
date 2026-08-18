@@ -337,6 +337,7 @@ def setup_snapshot_install(args: argparse.Namespace, context: SetupContext) -> N
         namespace=args.test_namespace,
         release=args.snapshot_release,
         image_tag=args.snapshot_tag,
+        pvc_name=args.pvc_name,
         timeout=args.helm_timeout,
     )
 
@@ -742,17 +743,11 @@ def ensure_snapshot_release_can_own_cluster_resources(
     resources = [
         ("ClusterRole", f"{fullname}-operator", api.read_cluster_role),
         ("ClusterRole", f"{fullname}-agent-podsnapshotcontents", api.read_cluster_role),
-        ("ClusterRole", f"{fullname}-agent-resourceslices", api.read_cluster_role),
         ("ClusterRole", f"{fullname}-agent", api.read_cluster_role),
         ("ClusterRoleBinding", f"{fullname}-operator", api.read_cluster_role_binding),
         (
             "ClusterRoleBinding",
             f"{fullname}-agent-podsnapshotcontents",
-            api.read_cluster_role_binding,
-        ),
-        (
-            "ClusterRoleBinding",
-            f"{fullname}-agent-resourceslices",
             api.read_cluster_role_binding,
         ),
         ("ClusterRoleBinding", f"{fullname}-agent", api.read_cluster_role_binding),
@@ -800,7 +795,7 @@ def ensure_checkpoint_pvc(namespace: str, name: str, size: str) -> None:
     body = client.V1PersistentVolumeClaim(
         metadata=client.V1ObjectMeta(name=name, namespace=namespace),
         spec=client.V1PersistentVolumeClaimSpec(
-            access_modes=["ReadWriteOnce"],
+            access_modes=["ReadWriteMany"],
             resources=client.V1ResourceRequirements(requests={"storage": size}),
         ),
     )
@@ -817,8 +812,8 @@ def ensure_checkpoint_pvc(namespace: str, name: str, size: str) -> None:
         mismatches = []
         if requested != size:
             mismatches.append(f"requested storage={requested}, configured size={size}")
-        if access_modes != ["ReadWriteOnce"]:
-            mismatches.append(f"accessModes={access_modes}, expected ['ReadWriteOnce']")
+        if access_modes != ["ReadWriteMany"]:
+            mismatches.append(f"accessModes={access_modes}, expected ['ReadWriteMany']")
         if mismatches:
             raise SetupError(
                 f"PVC {namespace}/{name} already exists with incompatible spec: "
@@ -833,6 +828,7 @@ def install_snapshot_chart(
     namespace: str,
     release: str,
     image_tag: str,
+    pvc_name: str,
     timeout: str,
 ) -> None:
     log(f"Installing Snapshot chart release {namespace}/{release}")
@@ -852,7 +848,9 @@ def install_snapshot_chart(
         "--set",
         f"image.agent.tag={image_tag}",
         "--set",
-        "storage.accessMode=podMount",
+        "storage.pvc.create=false",
+        "--set",
+        f"storage.pvc.name={pvc_name}",
         "--set-json",
         "daemonset.imagePullSecrets=[]",
     ]

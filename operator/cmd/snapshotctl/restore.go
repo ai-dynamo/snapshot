@@ -63,19 +63,6 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 		podName = pod.Name
 	}
 
-	storage, err := discoverSnapshotStorage(ctx, clientset, namespace)
-	if err != nil {
-		return nil, err
-	}
-	resolvedStorage, err := snapshotv1alpha1.ResolveRestoreStorage(checkpointID, snapshotv1alpha1.DefaultCheckpointArtifactVersion, "", snapshotv1alpha1.Storage{
-		Type:     snapshotv1alpha1.StorageTypePVC,
-		PVCName:  storage.PVCName,
-		BasePath: storage.BasePath,
-	})
-	if err != nil {
-		return nil, err
-	}
-
 	if createPodFromManifest {
 		// Stamp (or validate) the required snapshot-target-containers
 		// annotation on the manifest before handing it to the protocol.
@@ -102,7 +89,6 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 			Namespace:       namespace,
 			CheckpointID:    checkpointID,
 			ArtifactVersion: snapshotv1alpha1.DefaultCheckpointArtifactVersion,
-			Storage:         resolvedStorage,
 			SeccompProfile:  snapshotv1alpha1.DefaultSeccompLocalhostProfile,
 		})
 		if err != nil {
@@ -138,7 +124,7 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 		}
 		snapshotv1alpha1.ApplyRestoreTargetMetadata(labels, annotations, true, checkpointID, snapshotv1alpha1.DefaultCheckpointArtifactVersion)
 		annotations[snapshotv1alpha1.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers(targetContainers)
-		if err := snapshotprotocol.ValidateRestorePodSpec(&pod.Spec, annotations, resolvedStorage, snapshotv1alpha1.DefaultSeccompLocalhostProfile); err != nil {
+		if err := snapshotprotocol.ValidateRestorePodSpec(&pod.Spec, annotations, snapshotv1alpha1.DefaultSeccompLocalhostProfile); err != nil {
 			return nil, fmt.Errorf("restore target pod %s/%s is not snapshot-compatible: %w", namespace, podName, err)
 		}
 		patch, err := json.Marshal(map[string]any{
@@ -156,11 +142,10 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 	}
 
 	return &result{
-		Name:               podName,
-		Namespace:          namespace,
-		CheckpointID:       checkpointID,
-		CheckpointLocation: resolvedStorage.Location,
-		RestorePod:         podName,
-		Status:             "requested",
+		Name:         podName,
+		Namespace:    namespace,
+		CheckpointID: checkpointID,
+		RestorePod:   podName,
+		Status:       "requested",
 	}, nil
 }

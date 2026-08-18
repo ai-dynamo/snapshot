@@ -27,10 +27,9 @@ func TestAgentConfigValidateRequiresAbsoluteStorageBasePath(t *testing.T) {
 	}
 }
 
-func TestAgentConfigValidateNormalizesStorageFields(t *testing.T) {
+func TestAgentConfigValidateNormalizesStorageBasePath(t *testing.T) {
 	cfg := validAgentConfig()
 	cfg.Storage.BasePath = " /checkpoints "
-	cfg.Storage.AccessMode = " podMount "
 
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
@@ -38,18 +37,13 @@ func TestAgentConfigValidateNormalizesStorageFields(t *testing.T) {
 	if cfg.Storage.BasePath != "/checkpoints" {
 		t.Fatalf("Storage.BasePath = %q, want %q", cfg.Storage.BasePath, "/checkpoints")
 	}
-	if cfg.Storage.AccessMode != StorageAccessModePodMount {
-		t.Fatalf("Storage.AccessMode = %q, want %q", cfg.Storage.AccessMode, StorageAccessModePodMount)
-	}
 }
 
-func TestAgentConfigValidateDefaultsStorageAccessMode(t *testing.T) {
+func TestAgentConfigValidateRejectsUncleanStorageBasePath(t *testing.T) {
 	cfg := validAgentConfig()
+	cfg.Storage.BasePath = "/checkpoints/../other"
 
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate() error = %v", err)
-	}
-	if cfg.Storage.AccessMode != StorageAccessModeAgentMount {
-		t.Fatalf("Storage.AccessMode = %q, want %q", cfg.Storage.AccessMode, StorageAccessModeAgentMount)
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for unclean storage base path")
 	}
 }
