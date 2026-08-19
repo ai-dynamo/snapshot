@@ -14,6 +14,10 @@ on:
         description: 'Release version (e.g. v0.1.0)'
         required: false
         type: string
+    outputs:
+      version:
+        description: 'Computed image tag (the input version, or an auto-generated v0.0.0-g<sha> dev tag)'
+        value: ${{ jobs.version.outputs.version }}
   workflow_dispatch:
     inputs:
       version:
