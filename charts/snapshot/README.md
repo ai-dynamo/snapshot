@@ -27,11 +27,11 @@ mount it concurrently. Chart-created claims always request `ReadWriteMany` and
 are retained when the Helm release is removed.
 
 An existing `ReadWriteOnce` claim cannot be upgraded in place because PVC access
-modes are immutable. The chart rejects retained and externally supplied claims
-that do not advertise `ReadWriteMany`. To migrate, create a new RWX claim, copy
-the retained checkpoint data once if it must be preserved, then set
-`storage.pvc.create=false` and `storage.pvc.name` to the new claim. The old
-retained claim remains untouched.
+modes are immutable. When `storage.pvc.create=false`, the chart assumes the named
+existing claim supports `ReadWriteMany`; verify its access mode before installing
+or upgrading. To migrate, create a new RWX claim, copy the retained checkpoint
+data once if it must be preserved, then set `storage.pvc.create=false` and
+`storage.pvc.name` to the new claim. The old retained claim remains untouched.
 
 ## CRI-O and OpenShift
 
