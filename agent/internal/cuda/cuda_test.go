@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"net"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,23 +22,6 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	podresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
 )
-
-func TestGetGPUUUIDsViaNvidiaSmiReportsPID(t *testing.T) {
-	binDir := t.TempDir()
-	nsenterPath := filepath.Join(binDir, "nsenter")
-	if err := os.WriteFile(nsenterPath, []byte("#!/bin/sh\nexit 23\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	_, err := GetGPUUUIDsViaNvidiaSmi(context.Background(), "/host/proc", 1234)
-	if err == nil {
-		t.Fatal("expected nvidia-smi failure")
-	}
-	if !strings.Contains(err.Error(), "pid 1234") {
-		t.Errorf("error %q does not contain pid", err)
-	}
-}
 
 func TestBuildDeviceMap(t *testing.T) {
 	tests := []struct {

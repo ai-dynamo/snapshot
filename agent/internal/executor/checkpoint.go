@@ -46,8 +46,9 @@ type checkpointPhaseTimings struct {
 
 // Checkpoint performs a CRIU dump of a container.
 //
-// The checkpoint directory is staged under tmp/<uuid> during the operation and
-// published atomically without replacing an existing artifact.
+// The checkpoint directory is staged under tmp/<uuid> during the operation.
+// On success, the previous checkpoint is removed and the staged directory is
+// renamed into place at the base path root.
 func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req CheckpointRequest, cfg *types.AgentConfig) error {
 	checkpointStart := time.Now()
 	log.Info("=== Starting checkpoint operation ===")

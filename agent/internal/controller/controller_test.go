@@ -6,6 +6,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -71,7 +72,7 @@ func (noopInjector) MountBundle(_ context.Context, _ int) (nsmount.MountPoint, e
 	return noopMountPoint{}, nil
 }
 
-func (noopInjector) MountArtifact(_ context.Context, _ int, _ string) (nsmount.MountPoint, error) {
+func (noopInjector) MountArtifact(_ context.Context, _ nsmount.MountPoint, _ string) (nsmount.MountPoint, error) {
 	return noopMountPoint{}, nil
 }
 
@@ -87,7 +88,7 @@ func (e errorInjector) MountBundle(_ context.Context, _ int) (nsmount.MountPoint
 	return nil, e.err
 }
 
-func (e errorInjector) MountArtifact(_ context.Context, _ int, _ string) (nsmount.MountPoint, error) {
+func (e errorInjector) MountArtifact(_ context.Context, _ nsmount.MountPoint, _ string) (nsmount.MountPoint, error) {
 	return nil, e.err
 }
 
@@ -110,7 +111,7 @@ func (r recordingInjector) MountBundle(_ context.Context, _ int) (nsmount.MountP
 	return noopMountPoint{}, nil
 }
 
-func (r recordingInjector) MountArtifact(_ context.Context, _ int, src string) (nsmount.MountPoint, error) {
+func (r recordingInjector) MountArtifact(_ context.Context, _ nsmount.MountPoint, src string) (nsmount.MountPoint, error) {
 	*r.calls = append(*r.calls, recordedMountCall{src: src, dst: nsmount.CheckpointDst})
 	if r.artifactErr != nil {
 		return nil, r.artifactErr
@@ -833,10 +834,10 @@ func TestRunRestoreFailureEvents(t *testing.T) {
 		rt := &fakeRuntime{}
 		w.runtime = rt
 		w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
-			return 4242, executor.NewRestoreCleanupError(
-				"unmount checkpoint artifact from placeholder",
+			return 4242, executor.NewRestoreCleanupError(fmt.Errorf(
+				"unmount checkpoint artifact from placeholder: %w",
 				errors.New("unmount failed"),
-			)
+			))
 		}
 
 		err := w.runRestore(
@@ -853,6 +854,9 @@ func TestRunRestoreFailureEvents(t *testing.T) {
 		if !sawEventReason(w.clientset.(*fake.Clientset), "RestoreSucceeded") {
 			t.Fatal("expected RestoreSucceeded event after cleanup failure")
 		}
+		if !sawEventReason(w.clientset.(*fake.Clientset), "RestoreCleanupFailed") {
+			t.Fatal("expected RestoreCleanupFailed warning event")
+		}
 		if sawEventReason(w.clientset.(*fake.Clientset), restoreFailedReason) {
 			t.Fatal("unexpected RestoreFailed event after cleanup failure")
 		}
@@ -866,9 +870,6 @@ func TestRunRestoreFailureEvents(t *testing.T) {
 		}
 		if got := updated.Annotations[keys.Status]; got != snapshotv1alpha1.RestoreStatusCompleted {
 			t.Fatalf("restore status = %q, want %q", got, snapshotv1alpha1.RestoreStatusCompleted)
-		}
-		if got := updated.Annotations[keys.Reason]; got != "" {
-			t.Fatalf("restore reason = %q, want empty", got)
 		}
 	})
 }

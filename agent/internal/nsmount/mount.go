@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -24,18 +25,14 @@ const (
 	unmountTimeout    = 10 * time.Second
 )
 
-type MountOptions struct {
-	ReadOnly bool
-	NoExec   bool
-}
-
 type mountRef interface {
 	Unmount(ctx context.Context) error
 	NsFd() *os.File
 }
 
 type mounter interface {
-	Mount(ctx context.Context, pid int, src, dst string, opts MountOptions) (mountRef, error)
+	MountBundle(ctx context.Context, pid int) (mountRef, error)
+	MountCheckpoint(ctx context.Context, nsFd *os.File, checkpointPath string) (mountRef, error)
 }
 
 type execMounter struct {
@@ -50,7 +47,7 @@ func newExecMounter(path string, log logr.Logger) *execMounter {
 type execMountRef struct {
 	binaryPath string
 	nsFd       *os.File
-	dst        string
+	unmountCmd string
 	createdDst bool
 	log        logr.Logger
 	once       sync.Once
@@ -62,9 +59,9 @@ func (h *execMountRef) NsFd() *os.File { return h.nsFd }
 func (h *execMountRef) Unmount(ctx context.Context) error {
 	h.once.Do(func() {
 		defer h.nsFd.Close()
-		ctx, cancel := context.WithTimeout(ctx, unmountTimeout)
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), unmountTimeout)
 		defer cancel()
-		args := []string{"umount-fd", strconv.Itoa(nsFdChildNum), h.dst}
+		args := []string{h.unmountCmd, strconv.Itoa(nsFdChildNum)}
 		if h.createdDst {
 			args = append(args, "created")
 		}
@@ -72,30 +69,40 @@ func (h *execMountRef) Unmount(ctx context.Context) error {
 		cmd.ExtraFiles = []*os.File{h.nsFd}
 		out, err := cmd.CombinedOutput()
 		if err != nil {
-			h.log.Error(err, "failed to unmount from namespace", "dst", h.dst, "output", strings.TrimSpace(string(out)))
-			h.unmountErr = fmt.Errorf("ns-bind-mount umount-fd %s: %w\noutput: %s", h.dst, err, strings.TrimSpace(string(out)))
+			h.log.Error(err, "failed to unmount from namespace", "command", h.unmountCmd, "output", strings.TrimSpace(string(out)))
+			h.unmountErr = fmt.Errorf("ns-bind-mount %s: %w\noutput: %s", h.unmountCmd, err, strings.TrimSpace(string(out)))
 			return
 		}
-		h.log.Info("unmounted from namespace", "dst", h.dst)
+		h.log.Info("unmounted from namespace", "command", h.unmountCmd)
 	})
 	return h.unmountErr
 }
 
-func (m *execMounter) Mount(ctx context.Context, pid int, src, dst string, opts MountOptions) (mountRef, error) {
+func (m *execMounter) MountBundle(ctx context.Context, pid int) (mountRef, error) {
 	nsFdPath := fmt.Sprintf(nsMntNsPathFmt, pid)
 	nsFd, err := os.Open(nsFdPath)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", nsFdPath, err)
 	}
+	return m.mount(ctx, nsFd, "mount-bundle-fd", "unmount-bundle-fd")
+}
 
-	args := []string{"mount-fd", strconv.Itoa(nsFdChildNum), src, dst}
-	if opts.ReadOnly {
-		args = append(args, "ro")
+func (m *execMounter) MountCheckpoint(ctx context.Context, nsFd *os.File, checkpointPath string) (mountRef, error) {
+	if nsFd == nil {
+		return nil, fmt.Errorf("mount namespace fd is required")
 	}
-	if opts.NoExec {
-		args = append(args, "noexec")
+	dupFd, err := unix.Dup(int(nsFd.Fd()))
+	if err != nil {
+		return nil, fmt.Errorf("duplicate mount namespace fd: %w", err)
 	}
-	cmd := exec.CommandContext(ctx, m.binaryPath, args...)
+	unix.CloseOnExec(dupFd)
+	return m.mount(ctx, os.NewFile(uintptr(dupFd), nsFd.Name()), "mount-checkpoint-fd", "unmount-checkpoint-fd", checkpointPath)
+}
+
+func (m *execMounter) mount(ctx context.Context, nsFd *os.File, mountCmd, unmountCmd string, args ...string) (mountRef, error) {
+	commandArgs := []string{mountCmd, strconv.Itoa(nsFdChildNum)}
+	commandArgs = append(commandArgs, args...)
+	cmd := exec.CommandContext(ctx, m.binaryPath, commandArgs...)
 	cmd.ExtraFiles = []*os.File{nsFd}
 	var stdout strings.Builder
 	var stderr strings.Builder
@@ -104,16 +111,16 @@ func (m *execMounter) Mount(ctx context.Context, pid int, src, dst string, opts 
 
 	if err := cmd.Run(); err != nil {
 		nsFd.Close()
-		return nil, fmt.Errorf("ns-bind-mount mount-fd %s -> %s: %w\noutput: %s", src, dst, err, strings.TrimSpace(stderr.String()))
+		return nil, fmt.Errorf("ns-bind-mount %s: %w\noutput: %s", mountCmd, err, strings.TrimSpace(stderr.String()))
 	}
-	m.log.Info("mounted into namespace", "src", src, "dst", dst, "readonly", opts.ReadOnly, "noexec", opts.NoExec, "pid", pid)
+	m.log.Info("mounted into namespace", "command", mountCmd)
 
 	return &execMountRef{
 		binaryPath: m.binaryPath,
 		nsFd:       nsFd,
-		dst:        dst,
-		// mount-fd emits created_dst=1 after it attaches the mount. Preserve
-		// that contract so umount-fd removes only directories the helper made.
+		unmountCmd: unmountCmd,
+		// The role command emits created_dst=1 after it attaches the mount.
+		// Preserve that contract so unmount removes only helper-created dirs.
 		createdDst: strings.Contains(stdout.String(), "created_dst=1"),
 		log:        m.log,
 	}, nil

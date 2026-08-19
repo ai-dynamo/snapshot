@@ -27,7 +27,7 @@ func TestMountFilesImageWithOps(t *testing.T) {
 			return mountFD, nil
 		},
 		mountSetattr: func(fd int, path string, flags uint, attr *unix.MountAttr) error {
-			want := uint64(unix.MOUNT_ATTR_RDONLY | unix.MOUNT_ATTR_NOSUID | unix.MOUNT_ATTR_NODEV)
+			want := uint64(unix.MOUNT_ATTR_RDONLY | unix.MOUNT_ATTR_NOSUID | unix.MOUNT_ATTR_NODEV | unix.MOUNT_ATTR_NOEXEC)
 			if fd != mountFD || path != "" || flags != unix.AT_EMPTY_PATH || attr.Attr_set != want {
 				t.Fatalf("unexpected mount_setattr arguments: %d %q %#x %#x", fd, path, flags, attr.Attr_set)
 			}

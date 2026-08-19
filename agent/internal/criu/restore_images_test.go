@@ -26,7 +26,13 @@ func TestPrepareRestoreImageDirRewritesObservedSocketTopology(t *testing.T) {
 	entries := observedSocketTopology()
 	canonical := writeFilesImage(t, checkpointPath, entries)
 
-	imageDir, cleanup, err := prepareRestoreImageDirForRestoreID(checkpointPath, 987654321, t.TempDir())
+	mounter := &capturingFilesImageMounter{}
+	imageDir, cleanup, err := prepareRestoreImageDirForRestoreIDWithMount(
+		checkpointPath,
+		987654321,
+		t.TempDir(),
+		mounter.mount,
+	)
 	if err != nil {
 		t.Fatalf("prepare restore image directory: %v", err)
 	}
@@ -104,67 +110,66 @@ func TestPrepareRestoreImageDirRewritesObservedSocketTopology(t *testing.T) {
 	}
 }
 
-func TestPrepareRestoreImageDirUsesLocalSymlinks(t *testing.T) {
+func TestPrepareRestoreImageDirWithoutRewritesUsesCheckpointDirectly(t *testing.T) {
 	checkpointPath := t.TempDir()
-	writeFilesImage(t, checkpointPath, observedSocketTopology())
-	pagePath := filepath.Join(checkpointPath, "pages-1.img")
-	if err := os.WriteFile(pagePath, []byte("page-bytes"), 0600); err != nil {
-		t.Fatalf("write pages image: %v", err)
-	}
+	writeFilesImage(t, checkpointPath, []*fdinfo.FileEntry{
+		newUnixSocketEntry(1, []byte("/tmp/non-conflicting.sock\x00"), 101, unix.SOCK_STREAM, linuxUnixSocketStateListen),
+	})
+	mounter := &capturingFilesImageMounter{}
 
-	scratchDir := t.TempDir()
-	imageDir, cleanup, err := prepareRestoreImageDirForRestoreID(checkpointPath, 987654321, scratchDir)
+	imageDir, cleanup, err := prepareRestoreImageDirForRestoreIDWithMount(
+		checkpointPath,
+		987654321,
+		t.TempDir(),
+		mounter.mount,
+	)
 	if err != nil {
 		t.Fatalf("prepare restore image directory: %v", err)
 	}
-	defer cleanup()
-	if imageDir == checkpointPath {
-		t.Fatal("socket conflicts did not produce a private restore image")
+	if imageDir != checkpointPath {
+		t.Fatalf("image directory = %q, want original checkpoint %q", imageDir, checkpointPath)
 	}
-	if filepath.Dir(imageDir) != scratchDir {
-		t.Fatalf("private image dir %q is not under scratch %q", imageDir, scratchDir)
+	if err := cleanup(); err != nil {
+		t.Fatalf("cleanup no-op image view: %v", err)
 	}
-
-	linkPath := filepath.Join(imageDir, "pages-1.img")
-	info, err := os.Lstat(linkPath)
-	if err != nil {
-		t.Fatalf("lstat pages image: %v", err)
-	}
-	if info.Mode()&os.ModeSymlink == 0 {
-		t.Fatalf("pages-1.img mode = %v, want symlink", info.Mode())
-	}
-	got, err := os.Readlink(linkPath)
-	if err != nil {
-		t.Fatalf("readlink pages image: %v", err)
-	}
-	want, err := filepath.Abs(pagePath)
-	if err != nil {
-		t.Fatalf("abs pages image: %v", err)
-	}
-	if got != want {
-		t.Fatalf("pages-1.img symlink = %q, want %q", got, want)
-	}
-	data, err := os.ReadFile(linkPath)
-	if err != nil {
-		t.Fatalf("read through symlink: %v", err)
-	}
-	if string(data) != "page-bytes" {
-		t.Fatalf("symlink target data = %q, want %q", string(data), "page-bytes")
-	}
-
-	cleanup()
-	if _, err := os.Stat(imageDir); !os.IsNotExist(err) {
-		t.Fatalf("private image dir still exists after cleanup: %v", err)
-	}
-	if _, err := os.Stat(pagePath); err != nil {
-		t.Fatalf("canonical pages image was removed: %v", err)
+	if len(mounter.capturedImages()) != 0 {
+		t.Fatalf("mounted replacement images = %d, want 0", len(mounter.capturedImages()))
 	}
 }
 
-func TestPrepareRestoreImageDirConcurrentRestoresAreIndependent(t *testing.T) {
+func TestDecodeFilesImageRejectsSymlink(t *testing.T) {
+	checkpointPath := t.TempDir()
+	realCheckpointPath := t.TempDir()
+	writeFilesImage(t, realCheckpointPath, []*fdinfo.FileEntry{
+		newUnixSocketEntry(1, []byte("/tmp/socket\x00"), 101, unix.SOCK_STREAM, linuxUnixSocketStateListen),
+	})
+	if err := os.Symlink(
+		filepath.Join(realCheckpointPath, filesImageFilename),
+		filepath.Join(checkpointPath, filesImageFilename),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeFilesImage(checkpointPath); err == nil {
+		t.Fatal("expected files.img symlink to be rejected")
+	}
+}
+
+func TestRewriteSocketMetadataRejectsUnexpectedEntryTypes(t *testing.T) {
+	image := &crit.CriuImage{
+		Entries: []*crit.CriuEntry{{Message: &sk_unix.UnixSkEntry{}}},
+	}
+	reservationFDs, rewritten, err := rewriteSocketMetadata(image, 987654321)
+	if err == nil || !strings.Contains(err.Error(), "unexpected files.img entry 0 type") {
+		t.Fatalf("rewrite socket metadata error = %v", err)
+	}
+	if rewritten || reservationFDs != nil {
+		t.Fatalf("rewrite result = (%v, %v), want no reservations or rewrite", reservationFDs, rewritten)
+	}
+}
+
+func TestPrepareRestoreImageDirConcurrentRewriteMetadataIsIndependent(t *testing.T) {
 	checkpointPath := t.TempDir()
 	writeFilesImage(t, checkpointPath, observedSocketTopology())
-	scratchDir := t.TempDir()
 
 	type result struct {
 		path    string
@@ -178,7 +183,12 @@ func TestPrepareRestoreImageDirConcurrentRestoresAreIndependent(t *testing.T) {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			path, cleanup, err := prepareRestoreImageDirForRestoreID(checkpointPath, restoreID, scratchDir)
+			path, cleanup, err := prepareRestoreImageDirForRestoreIDWithMount(
+				checkpointPath,
+				restoreID,
+				t.TempDir(),
+				mounter.mount,
+			)
 			results <- result{path: path, cleanup: cleanup, err: err}
 		}()
 	}

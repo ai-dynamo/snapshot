@@ -58,7 +58,7 @@ func mountFilesImageWithOps(
 	// Apply immutable data-mount attributes before the mount becomes visible in
 	// the restore namespace.
 	attr := &unix.MountAttr{
-		Attr_set: unix.MOUNT_ATTR_RDONLY | unix.MOUNT_ATTR_NOSUID | unix.MOUNT_ATTR_NODEV,
+		Attr_set: unix.MOUNT_ATTR_RDONLY | unix.MOUNT_ATTR_NOSUID | unix.MOUNT_ATTR_NODEV | unix.MOUNT_ATTR_NOEXEC,
 	}
 	if err := ops.mountSetattr(mountFD, "", unix.AT_EMPTY_PATH, attr); err != nil {
 		return nil, fmt.Errorf("make rewritten %s mount read-only: %w", filesImageFilename, err)

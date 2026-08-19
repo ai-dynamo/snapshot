@@ -51,12 +51,18 @@ func TestExecMounterMountArgs(t *testing.T) {
 	logFile := filepath.Join(t.TempDir(), "args.log")
 	bin := writeFakeBinary(t, `printf '%s\n' "$@" >> `+logFile)
 	m := newMounterForTest(t, bin)
-
-	_, err := m.Mount(context.Background(), os.Getpid(), "/src/artifact", CheckpointDst, MountOptions{ReadOnly: true, NoExec: true})
+	nsFd, err := os.Open("/proc/self/ns/mnt")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"mount-fd", fmt.Sprintf("%d", nsFdChildNum), "/src/artifact", CheckpointDst, "ro", "noexec"}
+	defer nsFd.Close()
+
+	handle, err := m.MountCheckpoint(context.Background(), nsFd, "/checkpoints/abc/versions/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer handle.Unmount(context.Background())
+	want := []string{"mount-checkpoint-fd", fmt.Sprintf("%d", nsFdChildNum), "/checkpoints/abc/versions/1"}
 	got := readLines(t, logFile)
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("args = %v, want %v", got, want)
@@ -65,28 +71,63 @@ func TestExecMounterMountArgs(t *testing.T) {
 
 func TestExecMounterMountErrorWrapped(t *testing.T) {
 	bin := writeFakeBinary(t, `echo "subprocess boom" >&2; exit 1`)
-	_, err := newMounterForTest(t, bin).Mount(context.Background(), os.Getpid(), "/src/artifact", "/dst", MountOptions{})
+	nsFd, openErr := os.Open("/proc/self/ns/mnt")
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	defer nsFd.Close()
+	_, err := newMounterForTest(t, bin).MountCheckpoint(context.Background(), nsFd, "/checkpoints/abc/versions/1")
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	for _, want := range []string{"/src/artifact", "/dst", "subprocess boom"} {
+	for _, want := range []string{"mount-checkpoint-fd", "subprocess boom"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error missing %q: %v", want, err)
 		}
 	}
 }
 
+func TestExecMounterCheckpointUsesPinnedBundleNamespace(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "namespaces.log")
+	bin := writeFakeBinary(t, `printf '%s %s\n' "$1" "$(readlink /proc/self/fd/$2)" >> `+logFile)
+	m := newMounterForTest(t, bin)
+
+	bundle, err := m.MountBundle(context.Background(), os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bundle.Unmount(context.Background())
+	checkpoint, err := m.MountCheckpoint(context.Background(), bundle.NsFd(), "/checkpoints/abc/versions/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer checkpoint.Unmount(context.Background())
+
+	lines := readLines(t, logFile)
+	if len(lines) != 2 {
+		t.Fatalf("mount helper calls = %v, want bundle and checkpoint", lines)
+	}
+	bundleFields := strings.Fields(lines[0])
+	checkpointFields := strings.Fields(lines[1])
+	if len(bundleFields) != 2 || len(checkpointFields) != 2 {
+		t.Fatalf("unexpected mount helper output: %v", lines)
+	}
+	if bundleFields[1] != checkpointFields[1] {
+		t.Fatalf("namespace fds resolve to %q and %q, want the same namespace", bundleFields[1], checkpointFields[1])
+	}
+}
+
 func TestExecMounterMountNsFdOpenFailure(t *testing.T) {
 	bin := writeFakeBinary(t, `exit 0`)
-	_, err := newMounterForTest(t, bin).Mount(context.Background(), math.MaxInt32, "/src/artifact", "/dst", MountOptions{})
+	_, err := newMounterForTest(t, bin).MountBundle(context.Background(), math.MaxInt32)
 	if err == nil || !strings.Contains(err.Error(), "ns/mnt") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
 func TestExecMounterUnmountErrorAndIdempotence(t *testing.T) {
-	bin := writeFakeBinary(t, `if [ "$1" = "umount-fd" ]; then echo "boom" >&2; exit 1; fi`)
-	handle, err := newMounterForTest(t, bin).Mount(context.Background(), os.Getpid(), "/src/artifact", "/dst", MountOptions{})
+	bin := writeFakeBinary(t, `if [ "$1" = "unmount-bundle-fd" ]; then echo "boom" >&2; exit 1; fi`)
+	handle, err := newMounterForTest(t, bin).MountBundle(context.Background(), os.Getpid())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +153,7 @@ func TestCHelperRejectsUnsafeSourcesBeforeMountSyscalls(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		name, source, destination string
+		name, source string
 	}{
 		{name: "outside root", source: "/etc"},
 		{name: "proc", source: "/proc"},
@@ -122,15 +163,9 @@ func TestCHelperRejectsUnsafeSourcesBeforeMountSyscalls(t *testing.T) {
 		{name: "whitespace", source: "/checkpoints/bad id"},
 		{name: "shell punctuation", source: "/checkpoints/bad;id"},
 		{name: "unicode", source: "/checkpoints/é"},
-		{name: "checkpoint source for bundle role", source: "/checkpoints/id", destination: SnapshotBinDst},
-		{name: "bundle source for checkpoint role", source: SnapshotBinSrc},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			destination := tc.destination
-			if destination == "" {
-				destination = CheckpointDst
-			}
-			cmd := exec.Command(binary, "mount-fd", fmt.Sprintf("%d", nsFdChildNum), tc.source, destination, "ro", "noexec")
+			cmd := exec.Command(binary, "mount-checkpoint-fd", fmt.Sprintf("%d", nsFdChildNum), tc.source)
 			output, err := cmd.CombinedOutput()
 			if err == nil {
 				t.Fatalf("helper accepted source %q", tc.source)
@@ -139,5 +174,15 @@ func TestCHelperRejectsUnsafeSourcesBeforeMountSyscalls(t *testing.T) {
 				t.Fatalf("helper reached mount syscall for invalid source: %s", output)
 			}
 		})
+	}
+
+	for _, args := range [][]string{
+		{"mount-fd", "3", "/etc", "/tmp/checkpoint"},
+		{"mount-bundle-fd", "3", "/etc"},
+		{"unmount-checkpoint-fd", "3", "unexpected"},
+	} {
+		if output, err := exec.Command(binary, args...).CombinedOutput(); err == nil {
+			t.Fatalf("helper accepted %v: %s", args, output)
+		}
 	}
 }

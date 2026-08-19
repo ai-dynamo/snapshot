@@ -24,7 +24,6 @@ import (
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
-	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -204,11 +203,7 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 
 	// Resume: a present artifact with unwritten status means a prior dump
 	// finished but the status write did not.
-	present, err := artifactPresent(artifactPath, id)
-	if err != nil {
-		return fmt.Errorf("inspect checkpoint artifact %s: %w", artifactPath, err)
-	}
-	if present {
+	if artifactPresent(artifactPath) {
 		return w.setSnapshotContentSucceeded(ctx, content)
 	}
 
@@ -220,20 +215,6 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	if !acquired {
 		return nil
 	}
-	// Close the race between the pre-lease check and another agent publishing
-	// the artifact before this agent acquires the distributed lease.
-	present, artifactErr := artifactPresent(artifactPath, id)
-	if artifactErr != nil || present {
-		releaseErr := w.releaseLease(ctx, leaseKey)
-		if artifactErr != nil {
-			return errors.Join(fmt.Errorf("recheck checkpoint artifact %s: %w", artifactPath, artifactErr), releaseErr)
-		}
-		if releaseErr != nil {
-			return fmt.Errorf("release checkpoint lease %s: %w", leaseKey.String(), releaseErr)
-		}
-		return w.setSnapshotContentSucceeded(ctx, content)
-	}
-
 	releaseInFlight = false
 	go w.runCheckpoint(ctx, content, pod, containerName, containerID, containerPID, id, artifactPath, leaseKey, id)
 	return nil
@@ -506,35 +487,10 @@ func isContentTerminal(content *snapshotv1alpha1.PodSnapshotContent) bool {
 	return false
 }
 
-// artifactPresent reports whether a valid completed checkpoint exists. Only a
-// missing final directory is absence; existing invalid artifacts are preserved
-// and surfaced for retry or operator intervention.
-func artifactPresent(destination, checkpointID string) (bool, error) {
-	return artifactPresentWithManifestReader(destination, checkpointID, types.ReadManifest)
-}
-
-func artifactPresentWithManifestReader(
-	destination, checkpointID string,
-	readManifest func(string) (*types.CheckpointManifest, error),
-) (bool, error) {
+// artifactPresent reports whether a completed checkpoint directory already exists on disk.
+func artifactPresent(destination string) bool {
 	info, err := os.Stat(destination)
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if !info.IsDir() {
-		return false, fmt.Errorf("artifact path is not a directory")
-	}
-	manifest, err := readManifest(destination)
-	if err != nil {
-		return false, err
-	}
-	if manifest.CheckpointID != checkpointID {
-		return false, fmt.Errorf("manifest checkpoint ID %q does not match %q", manifest.CheckpointID, checkpointID)
-	}
-	return true, nil
+	return err == nil && info.IsDir()
 }
 
 // contentNameFromInformerObj extracts the object name from a dynamic informer object,

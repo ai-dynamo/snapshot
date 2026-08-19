@@ -36,7 +36,7 @@ func ExecuteRestore(
 	checkpointPath string,
 	bundleDir string,
 	log logr.Logger,
-) (int32, func(), time.Duration, time.Duration, error) {
+) (int32, func() error, time.Duration, time.Duration, error) {
 	settings := m.CRIUDump.CRIU
 	var prepare, restore time.Duration
 
@@ -56,17 +56,23 @@ func ExecuteRestore(
 		removeScratch()
 		return 0, nil, prepare, 0, fmt.Errorf("failed to prepare CRIU image directory: %w", err)
 	}
-	cleanup := func() {
+	cleanup := func() error {
 		closeFiles(inheritedFiles)
 		closeFiles(openFiles)
-		removeImageDir()
+		cleanupErr := removeImageDir()
 		removeScratch()
+		return cleanupErr
+	}
+	cleanupAfterError := func() {
+		if err := cleanup(); err != nil {
+			log.Error(err, "failed to clean CRIU restore resources")
+		}
 	}
 
 	// Open image dir FD
 	imageDir, imageDirFD, err := openPathForCRIU(imageDirPath)
 	if err != nil {
-		cleanup()
+		cleanupAfterError()
 		return 0, nil, prepare, 0, fmt.Errorf("failed to open image directory: %w", err)
 	}
 	openFiles = append(openFiles, imageDir)
@@ -76,7 +82,7 @@ func ExecuteRestore(
 	if settings.WorkDir != "" {
 		workDirFile, workDirFD, err := openPathForCRIU(settings.WorkDir)
 		if err != nil {
-			cleanup()
+			cleanupAfterError()
 			return 0, nil, prepare, 0, fmt.Errorf("failed to open CRIU work directory: %w", err)
 		}
 		openFiles = append(openFiles, workDirFile)
@@ -85,25 +91,14 @@ func ExecuteRestore(
 
 	overridePath, err := rewriteCRIULibDir(criuOpts.ConfigFile, scratchDir, bundleDir)
 	if err != nil {
-		cleanup()
+		cleanupAfterError()
 		return 0, nil, prepare, 0, err
 	}
 	criuOpts.ConfigFile = proto.String(overridePath)
 
-	// CRIU defaults its work directory to the image directory when WorkDirFd is
-	// unset. Always provide a writable directory because checkpoint artifacts
-	// are mounted read-only.
-	workDirFile, workDirFD, err := openPathForCRIU(effectiveWorkDir)
-	if err != nil {
-		cleanup()
-		return 0, nil, fmt.Errorf("failed to open CRIU work directory: %w", err)
-	}
-	openFiles = append(openFiles, workDirFile)
-	criuOpts.WorkDirFd = proto.Int32(workDirFD)
-
 	criuBin, err := bundledCRIUPath(bundleDir)
 	if err != nil {
-		cleanup()
+		cleanupAfterError()
 		return 0, nil, prepare, 0, err
 	}
 	c := criulib.MakeCriu()
@@ -111,7 +106,7 @@ func ExecuteRestore(
 
 	netNsFile, err := os.Open(netNsPath)
 	if err != nil {
-		cleanup()
+		cleanupAfterError()
 		return 0, nil, prepare, 0, fmt.Errorf("failed to open net NS at %s: %w", netNsPath, err)
 	}
 	openFiles = append(openFiles, netNsFile)
@@ -125,8 +120,8 @@ func ExecuteRestore(
 	if err := c.Restore(criuOpts, notify); err != nil {
 		restore = time.Since(restoreStart)
 		log.Error(err, "go-criu Restore returned error")
-		logging.LogRestoreErrors(imageDirPath, effectiveWorkDir, log)
-		cleanup()
+		logging.LogRestoreErrors(imageDirPath, settings.WorkDir, log)
+		cleanupAfterError()
 		return 0, nil, prepare, restore, fmt.Errorf("CRIU restore failed: %w", err)
 	}
 	restore = time.Since(restoreStart)
@@ -275,32 +270,6 @@ func rewriteCRIULibDir(existingConfigFile *string, scratchDir, criuBundleDir str
 		return "", fmt.Errorf("write criu libdir override to %s: %w", overridePath, err)
 	}
 	return overridePath, nil
-}
-
-// prepareCRIURestoreConfig selects a writable work directory and writes the
-// restore-only CRIU configuration into it. Older manifests may omit WorkDir;
-// in that case rewriteCRIULibDir creates the temporary directory returned as
-// both effectiveWorkDir and tmpDir.
-func prepareCRIURestoreConfig(
-	existingConfigFile *string,
-	configuredWorkDir string,
-	criuBundleDir string,
-) (overridePath, effectiveWorkDir, tmpDir string, err error) {
-	if configuredWorkDir != "" {
-		if err := os.MkdirAll(configuredWorkDir, 0o755); err != nil {
-			return "", "", "", fmt.Errorf("failed to create CRIU work directory: %w", err)
-		}
-	}
-
-	overridePath, tmpDir, err = rewriteCRIULibDir(existingConfigFile, configuredWorkDir, criuBundleDir)
-	if err != nil {
-		return "", "", tmpDir, err
-	}
-	effectiveWorkDir = configuredWorkDir
-	if effectiveWorkDir == "" {
-		effectiveWorkDir = tmpDir
-	}
-	return overridePath, effectiveWorkDir, tmpDir, nil
 }
 
 // bundledCRIUPath returns the path to the criu binary inside bundleDir.

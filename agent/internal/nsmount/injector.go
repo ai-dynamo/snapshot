@@ -38,8 +38,8 @@ type MountPoint interface {
 	NsFd() *os.File
 }
 
-// NSMounter mounts a caller-selected source directory at one of the helper's
-// fixed destinations in a placeholder container's mount namespace.
+// NSMounter installs the binary bundle and a selected checkpoint artifact at
+// their fixed destinations in a placeholder container's mount namespace.
 type NSMounter struct {
 	mounter mounter
 	log     logr.Logger
@@ -60,41 +60,29 @@ func newWithMounter(m mounter, log logr.Logger) *NSMounter {
 
 // MountBundle exposes the agent binary bundle read-only and executable.
 func (nsm *NSMounter) MountBundle(ctx context.Context, pid int) (MountPoint, error) {
-	return nsm.mount(ctx, pid, SnapshotBinSrc, SnapshotBinDst, MountOptions{ReadOnly: true})
-}
-
-// MountArtifact exposes one validated checkpoint artifact read-only and
-// non-executable.
-func (nsm *NSMounter) MountArtifact(ctx context.Context, pid int, src string) (MountPoint, error) {
-	return nsm.mount(ctx, pid, src, CheckpointDst, MountOptions{ReadOnly: true, NoExec: true})
-}
-
-func (nsm *NSMounter) mount(ctx context.Context, pid int, src, dst string, options MountOptions) (MountPoint, error) {
-	if err := validateMountSource(src, dst); err != nil {
-		return nil, err
-	}
-	nsm.log.Info("mounting into placeholder namespace", "pid", pid, "src", src, "dst", dst)
-
-	ref, err := nsm.mounter.Mount(ctx, pid, src, dst, options)
+	nsm.log.Info("mounting bundle into placeholder namespace", "pid", pid)
+	ref, err := nsm.mounter.MountBundle(ctx, pid)
 	if err != nil {
 		return nil, err
 	}
-
-	nsm.log.Info("mounted into placeholder namespace", "pid", pid, "dst", dst)
 	return &mountPoint{mount: ref}, nil
 }
 
-func validateMountSource(src, dst string) error {
-	var root string
-	switch dst {
-	case SnapshotBinDst:
-		root = SnapshotBinSrc
-	case CheckpointDst:
-		root = CheckpointSrc
-	default:
-		return fmt.Errorf("unsupported mount destination %q", dst)
+// MountArtifact exposes one validated checkpoint artifact read-only and
+// non-executable in the namespace pinned by namespaceMount.
+func (nsm *NSMounter) MountArtifact(ctx context.Context, namespaceMount MountPoint, src string) (MountPoint, error) {
+	if err := validateWithin(CheckpointSrc, src); err != nil {
+		return nil, err
 	}
-	return validateWithin(root, src)
+	if namespaceMount == nil || namespaceMount.NsFd() == nil {
+		return nil, fmt.Errorf("mount artifact: pinned mount namespace is required")
+	}
+	nsm.log.Info("mounting checkpoint into placeholder namespace", "src", src)
+	ref, err := nsm.mounter.MountCheckpoint(ctx, namespaceMount.NsFd(), src)
+	if err != nil {
+		return nil, err
+	}
+	return &mountPoint{mount: ref}, nil
 }
 
 type mountPoint struct {

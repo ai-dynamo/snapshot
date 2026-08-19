@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -100,56 +99,8 @@ func makeNodeController(t *testing.T, fc *fakeCheckpointer, objs ...client.Objec
 }
 
 func TestArtifactPresent(t *testing.T) {
-	t.Run("missing directory is absent", func(t *testing.T) {
-		present, err := artifactPresent(filepath.Join(t.TempDir(), "missing"), "checkpoint-123")
-		require.NoError(t, err)
-		assert.False(t, present)
-	})
-
-	t.Run("matching manifest is present", func(t *testing.T) {
-		destination := t.TempDir()
-		require.NoError(t, snapshottypes.WriteManifest(destination, &snapshottypes.CheckpointManifest{CheckpointID: "checkpoint-123"}))
-
-		present, err := artifactPresent(destination, "checkpoint-123")
-		require.NoError(t, err)
-		assert.True(t, present)
-	})
-
-	t.Run("regular file is invalid", func(t *testing.T) {
-		destination := filepath.Join(t.TempDir(), "artifact")
-		require.NoError(t, os.WriteFile(destination, []byte("not a directory"), 0o600))
-
-		present, err := artifactPresent(destination, "checkpoint-123")
-		require.Error(t, err)
-		assert.False(t, present)
-	})
-
-	t.Run("mismatched manifest is invalid", func(t *testing.T) {
-		destination := t.TempDir()
-		require.NoError(t, snapshottypes.WriteManifest(destination, &snapshottypes.CheckpointManifest{CheckpointID: "other"}))
-
-		present, err := artifactPresent(destination, "checkpoint-123")
-		require.ErrorContains(t, err, "does not match")
-		assert.False(t, present)
-	})
-
-	t.Run("existing directory without manifest is invalid", func(t *testing.T) {
-		present, err := artifactPresent(t.TempDir(), "checkpoint-123")
-		require.Error(t, err)
-		assert.False(t, present)
-	})
-
-	for _, readErr := range []error{syscall.EIO, syscall.ESTALE} {
-		t.Run("storage read error "+readErr.Error(), func(t *testing.T) {
-			present, err := artifactPresentWithManifestReader(
-				t.TempDir(),
-				"checkpoint-123",
-				func(string) (*snapshottypes.CheckpointManifest, error) { return nil, readErr },
-			)
-			require.ErrorIs(t, err, readErr)
-			assert.False(t, present)
-		})
-	}
+	assert.False(t, artifactPresent(filepath.Join(t.TempDir(), "missing")))
+	assert.True(t, artifactPresent(t.TempDir()))
 }
 
 // makeWorkOrder builds a PodSnapshotContent work order pinned to a node and checkpoint id.

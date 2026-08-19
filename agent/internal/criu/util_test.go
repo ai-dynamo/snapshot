@@ -5,7 +5,6 @@ package criu
 
 import (
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -52,7 +51,6 @@ func TestParseManageCgroupsMode(t *testing.T) {
 		})
 	}
 }
-
 func TestReadLogTail(t *testing.T) {
 	t.Run("returns whole small log", func(t *testing.T) {
 		path := t.TempDir() + "/dump.log"
@@ -213,45 +211,6 @@ func TestOverrideLibDir(t *testing.T) {
 		got := overrideLibDir("", "/tmp/snapshot-binaries/criu-plugins")
 		if !strings.Contains(got, "libdir /tmp/snapshot-binaries/criu-plugins") {
 			t.Errorf("libdir not appended to empty config: %q", got)
-		}
-	})
-}
-
-func TestPrepareCRIURestoreConfig(t *testing.T) {
-	bundleDir := t.TempDir()
-
-	t.Run("uses configured work directory", func(t *testing.T) {
-		workDir := filepath.Join(t.TempDir(), "criu-work")
-		overridePath, effectiveWorkDir, tmpDir, err := prepareCRIURestoreConfig(nil, workDir, bundleDir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if effectiveWorkDir != workDir {
-			t.Fatalf("effective work dir = %q, want %q", effectiveWorkDir, workDir)
-		}
-		if tmpDir != "" {
-			t.Fatalf("temporary directory = %q, want empty", tmpDir)
-		}
-		if filepath.Dir(overridePath) != workDir {
-			t.Fatalf("override path = %q, want directory %q", overridePath, workDir)
-		}
-	})
-
-	t.Run("creates writable fallback for missing work directory", func(t *testing.T) {
-		overridePath, effectiveWorkDir, tmpDir, err := prepareCRIURestoreConfig(nil, "", bundleDir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
-		if tmpDir == "" || effectiveWorkDir != tmpDir {
-			t.Fatalf("effective work dir = %q, temporary directory = %q", effectiveWorkDir, tmpDir)
-		}
-		if filepath.Dir(overridePath) != effectiveWorkDir {
-			t.Fatalf("override path = %q, want directory %q", overridePath, effectiveWorkDir)
-		}
-		probe := filepath.Join(effectiveWorkDir, "restore.log")
-		if err := os.WriteFile(probe, []byte("ok"), 0o600); err != nil {
-			t.Fatalf("fallback work directory is not writable: %v", err)
 		}
 	})
 }

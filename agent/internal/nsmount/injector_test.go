@@ -17,16 +17,17 @@ type fakeMountRef struct {
 	unmountLog *[]string
 }
 
-func (h *fakeMountRef) NsFd() *os.File { return nil }
+func (h *fakeMountRef) NsFd() *os.File { return os.Stdin }
 func (h *fakeMountRef) Unmount(context.Context) error {
 	*h.unmountLog = append(*h.unmountLog, h.dst)
 	return nil
 }
 
 type mountCall struct {
-	pid      int
-	src, dst string
-	opts     MountOptions
+	role string
+	pid  int
+	nsFd *os.File
+	src  string
 }
 
 type mockMounter struct {
@@ -35,13 +36,26 @@ type mockMounter struct {
 	unmountLog []string
 }
 
-func (m *mockMounter) Mount(_ context.Context, pid int, src, dst string, opts MountOptions) (mountRef, error) {
+func (m *mockMounter) mount(role string, pid int, src string) (mountRef, error) {
 	i := len(m.calls)
-	m.calls = append(m.calls, mountCall{pid: pid, src: src, dst: dst, opts: opts})
+	m.calls = append(m.calls, mountCall{role: role, pid: pid, src: src})
 	if i < len(m.results) && m.results[i] != nil {
 		return nil, m.results[i]
 	}
-	return &fakeMountRef{dst: dst, unmountLog: &m.unmountLog}, nil
+	return &fakeMountRef{dst: role, unmountLog: &m.unmountLog}, nil
+}
+
+func (m *mockMounter) MountBundle(_ context.Context, pid int) (mountRef, error) {
+	return m.mount("bundle", pid, "")
+}
+
+func (m *mockMounter) MountCheckpoint(_ context.Context, nsFd *os.File, src string) (mountRef, error) {
+	i := len(m.calls)
+	m.calls = append(m.calls, mountCall{role: "checkpoint", nsFd: nsFd, src: src})
+	if i < len(m.results) && m.results[i] != nil {
+		return nil, m.results[i]
+	}
+	return &fakeMountRef{dst: "checkpoint", unmountLog: &m.unmountLog}, nil
 }
 
 const testPID = 42
@@ -55,24 +69,28 @@ func TestRoleMountsUseFixedPathsAndPolicies(t *testing.T) {
 	m := &mockMounter{}
 	nsm := newMounter(t, m)
 
-	if _, err := nsm.MountBundle(context.Background(), testPID); err != nil {
+	bundle, err := nsm.MountBundle(context.Background(), testPID)
+	if err != nil {
 		t.Fatalf("MountBundle: %v", err)
 	}
-	if _, err := nsm.MountArtifact(context.Background(), testPID, "/checkpoints/abc/versions/1"); err != nil {
+	if _, err := nsm.MountArtifact(context.Background(), bundle, "/checkpoints/abc/versions/1"); err != nil {
 		t.Fatalf("MountArtifact: %v", err)
 	}
 
 	want := []mountCall{
-		{pid: testPID, src: SnapshotBinSrc, dst: SnapshotBinDst, opts: MountOptions{ReadOnly: true}},
-		{pid: testPID, src: "/checkpoints/abc/versions/1", dst: CheckpointDst, opts: MountOptions{ReadOnly: true, NoExec: true}},
+		{role: "bundle", pid: testPID},
+		{role: "checkpoint", src: "/checkpoints/abc/versions/1"},
 	}
 	if len(m.calls) != len(want) {
 		t.Fatalf("got %d calls, want %d", len(m.calls), len(want))
 	}
 	for i := range want {
-		if m.calls[i] != want[i] {
+		if m.calls[i].role != want[i].role || m.calls[i].pid != want[i].pid || m.calls[i].src != want[i].src {
 			t.Errorf("call[%d] = %+v, want %+v", i, m.calls[i], want[i])
 		}
+	}
+	if m.calls[1].nsFd != bundle.NsFd() {
+		t.Fatal("checkpoint mount did not reuse the bundle's pinned namespace fd")
 	}
 }
 
@@ -88,7 +106,7 @@ func TestMountArtifactRejectsUnsafeSourceBeforeHelper(t *testing.T) {
 	} {
 		t.Run(source, func(t *testing.T) {
 			m := &mockMounter{}
-			if _, err := newMounter(t, m).MountArtifact(context.Background(), testPID, source); err == nil {
+			if _, err := newMounter(t, m).MountArtifact(context.Background(), noopNamespaceMount{}, source); err == nil {
 				t.Fatalf("MountArtifact(%q) succeeded", source)
 			}
 			if len(m.calls) != 0 {
@@ -97,6 +115,11 @@ func TestMountArtifactRejectsUnsafeSourceBeforeHelper(t *testing.T) {
 		})
 	}
 }
+
+type noopNamespaceMount struct{}
+
+func (noopNamespaceMount) Unmount(context.Context) error { return nil }
+func (noopNamespaceMount) NsFd() *os.File                { return nil }
 
 func TestMountPointUnmount(t *testing.T) {
 	m := &mockMounter{}
@@ -108,7 +131,7 @@ func TestMountPointUnmount(t *testing.T) {
 	if err := mp.Unmount(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(m.unmountLog) != 1 || m.unmountLog[0] != SnapshotBinDst {
+	if len(m.unmountLog) != 1 || m.unmountLog[0] != "bundle" {
 		t.Fatalf("unmount log = %v", m.unmountLog)
 	}
 }

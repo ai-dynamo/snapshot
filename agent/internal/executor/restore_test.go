@@ -6,6 +6,7 @@ package executor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -81,7 +82,7 @@ func TestInspectRestoreUsesContainerIDWhenProvided(t *testing.T) {
 
 func TestNewRestoreCleanupError(t *testing.T) {
 	cleanupErr := errors.New("unmount failed")
-	retErr := NewRestoreCleanupError("unmount artifact", cleanupErr)
+	retErr := NewRestoreCleanupError(fmt.Errorf("unmount artifact: %w", cleanupErr))
 	if !errors.Is(retErr, cleanupErr) || !strings.Contains(retErr.Error(), "unmount artifact") {
 		t.Fatalf("cleanup error = %v", retErr)
 	}
@@ -104,20 +105,13 @@ func TestValidateRestoreManifest(t *testing.T) {
 		req  RestoreRequest
 		want string
 	}{
-		{
-			name: "matching identity and namespace",
-			req:  RestoreRequest{CheckpointID: "checkpoint-123", PodNamespace: "team-a"},
-		},
+		{name: "matching identity", req: RestoreRequest{CheckpointID: "checkpoint-123", PodNamespace: "team-a"}},
 		{
 			name: "checkpoint ID mismatch",
 			req:  RestoreRequest{CheckpointID: "other", PodNamespace: "team-a"},
 			want: "does not match requested ID",
 		},
-		{
-			name: "namespace mismatch",
-			req:  RestoreRequest{CheckpointID: "checkpoint-123", PodNamespace: "team-b"},
-			want: "does not match restore namespace",
-		},
+		{name: "cross namespace", req: RestoreRequest{CheckpointID: "checkpoint-123", PodNamespace: "team-b"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := validateRestoreManifest(tc.req, manifest)
