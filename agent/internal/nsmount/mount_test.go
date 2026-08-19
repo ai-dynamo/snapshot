@@ -61,7 +61,11 @@ func TestExecMounterMountArgs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer handle.Unmount(context.Background())
+	t.Cleanup(func() {
+		if err := handle.Unmount(context.Background()); err != nil {
+			t.Errorf("Unmount: %v", err)
+		}
+	})
 	want := []string{"mount-checkpoint-fd", fmt.Sprintf("%d", nsFdChildNum), "/checkpoints/abc/versions/1"}
 	got := readLines(t, logFile)
 	if strings.Join(got, "|") != strings.Join(want, "|") {
@@ -96,12 +100,20 @@ func TestExecMounterCheckpointUsesPinnedBundleNamespace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer bundle.Unmount(context.Background())
+	t.Cleanup(func() {
+		if err := bundle.Unmount(context.Background()); err != nil {
+			t.Errorf("unmount bundle: %v", err)
+		}
+	})
 	checkpoint, err := m.MountCheckpoint(context.Background(), bundle.NsFd(), "/checkpoints/abc/versions/1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer checkpoint.Unmount(context.Background())
+	t.Cleanup(func() {
+		if err := checkpoint.Unmount(context.Background()); err != nil {
+			t.Errorf("unmount checkpoint: %v", err)
+		}
+	})
 
 	lines := readLines(t, logFile)
 	if len(lines) != 2 {
