@@ -36,3 +36,13 @@ func TestResolveArtifactPathRejectsUnsafeCoordinates(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateWithinRejectsUnsafeRoot(t *testing.T) {
+	for _, root := range []string{"checkpoints", "/checkpoints/", "/checkpoints/../etc"} {
+		t.Run(root, func(t *testing.T) {
+			if err := validateWithin(root, "/checkpoints/checkpoint-123"); err == nil {
+				t.Fatal("expected root validation error")
+			}
+		})
+	}
+}

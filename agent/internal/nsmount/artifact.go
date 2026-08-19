@@ -57,6 +57,9 @@ func validatePathElement(label, value string) error {
 }
 
 func validateWithin(root, source string) error {
+	if err := validateAbsolutePath(root); err != nil {
+		return err
+	}
 	if err := validateAbsolutePath(source); err != nil {
 		return err
 	}

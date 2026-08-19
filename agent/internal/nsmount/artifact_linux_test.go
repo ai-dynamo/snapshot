@@ -13,7 +13,10 @@ import (
 
 func makeArtifactTree(t *testing.T) (string, string) {
 	t.Helper()
-	base := t.TempDir()
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	artifact := filepath.Join(base, "checkpoint-123", "versions", "1")
 	if err := os.MkdirAll(artifact, 0o755); err != nil {
 		t.Fatal(err)

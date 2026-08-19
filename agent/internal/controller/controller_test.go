@@ -93,12 +93,14 @@ func (e errorInjector) MountArtifact(_ context.Context, _ nsmount.MountPoint, _ 
 }
 
 type recordedMountCall struct {
-	src string
-	dst string
+	src            string
+	dst            string
+	namespaceMount nsmount.MountPoint
 }
 
 type recordingInjector struct {
 	calls       *[]recordedMountCall
+	bundleMount nsmount.MountPoint
 	bundleErr   error
 	artifactErr error
 }
@@ -108,11 +110,11 @@ func (r recordingInjector) MountBundle(_ context.Context, _ int) (nsmount.MountP
 	if r.bundleErr != nil {
 		return nil, r.bundleErr
 	}
-	return noopMountPoint{}, nil
+	return r.bundleMount, nil
 }
 
-func (r recordingInjector) MountArtifact(_ context.Context, _ nsmount.MountPoint, src string) (nsmount.MountPoint, error) {
-	*r.calls = append(*r.calls, recordedMountCall{src: src, dst: nsmount.CheckpointDst})
+func (r recordingInjector) MountArtifact(_ context.Context, namespaceMount nsmount.MountPoint, src string) (nsmount.MountPoint, error) {
+	*r.calls = append(*r.calls, recordedMountCall{src: src, dst: nsmount.CheckpointDst, namespaceMount: namespaceMount})
 	if r.artifactErr != nil {
 		return nil, r.artifactErr
 	}
@@ -810,7 +812,8 @@ func TestRunRestoreFailureEvents(t *testing.T) {
 
 	t.Run("artifact mount failure and role paths", func(t *testing.T) {
 		var calls []recordedMountCall
-		w := runRestore(t, recordingInjector{calls: &calls, artifactErr: injectErr})
+		bundleMount := &noopMountPoint{}
+		w := runRestore(t, recordingInjector{calls: &calls, bundleMount: bundleMount, artifactErr: injectErr})
 		if !sawEventReason(w.clientset.(*fake.Clientset), "RestoreFailed") {
 			t.Fatal("expected RestoreFailed event when artifact mount fails")
 		}
@@ -822,9 +825,12 @@ func TestRunRestoreFailureEvents(t *testing.T) {
 			t.Fatalf("mount calls = %#v, want %#v", calls, want)
 		}
 		for i := range want {
-			if calls[i] != want[i] {
+			if calls[i].src != want[i].src || calls[i].dst != want[i].dst {
 				t.Errorf("mount call[%d] = %#v, want %#v", i, calls[i], want[i])
 			}
+		}
+		if calls[1].namespaceMount != bundleMount {
+			t.Fatalf("artifact namespace mount = %T %p, want bundle mount %p", calls[1].namespaceMount, calls[1].namespaceMount, bundleMount)
 		}
 	})
 

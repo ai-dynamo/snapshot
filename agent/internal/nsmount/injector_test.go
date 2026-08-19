@@ -14,10 +14,11 @@ import (
 
 type fakeMountRef struct {
 	dst        string
+	nsFd       *os.File
 	unmountLog *[]string
 }
 
-func (h *fakeMountRef) NsFd() *os.File { return os.Stdin }
+func (h *fakeMountRef) NsFd() *os.File { return h.nsFd }
 func (h *fakeMountRef) Unmount(context.Context) error {
 	*h.unmountLog = append(*h.unmountLog, h.dst)
 	return nil
@@ -33,6 +34,7 @@ type mountCall struct {
 type mockMounter struct {
 	results    []error
 	calls      []mountCall
+	bundleNsFd *os.File
 	unmountLog []string
 }
 
@@ -42,7 +44,7 @@ func (m *mockMounter) mount(role string, pid int, src string) (mountRef, error) 
 	if i < len(m.results) && m.results[i] != nil {
 		return nil, m.results[i]
 	}
-	return &fakeMountRef{dst: role, unmountLog: &m.unmountLog}, nil
+	return &fakeMountRef{dst: role, nsFd: m.bundleNsFd, unmountLog: &m.unmountLog}, nil
 }
 
 func (m *mockMounter) MountBundle(_ context.Context, pid int) (mountRef, error) {
@@ -66,7 +68,16 @@ func newMounter(t *testing.T, m *mockMounter) *NSMounter {
 }
 
 func TestRoleMountsUseFixedPathsAndPolicies(t *testing.T) {
-	m := &mockMounter{}
+	namespaceFd, err := os.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := namespaceFd.Close(); err != nil {
+			t.Errorf("close namespace fd: %v", err)
+		}
+	})
+	m := &mockMounter{bundleNsFd: namespaceFd}
 	nsm := newMounter(t, m)
 
 	bundle, err := nsm.MountBundle(context.Background(), testPID)
