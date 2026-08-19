@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# TEMPORARY: scoped to this branch only, to validate the SnapshotJob e2e
+# suite (test_snapshotjob.py) against this branch's own build without a
+# human babysitting a manual push-artifacts.yaml -> e2e.yaml dispatch chain.
+# Remove this file before merging RUN-39806-snapshotjob-e2e-docs to main.
+name: Build and E2E (branch)
+
+on:
+  push:
+    branches:
+      - RUN-39806-snapshotjob-e2e-docs
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version override for push-artifacts (leave empty for a dev build tagged from this push)'
+        required: false
+        type: string
+
+concurrency:
+  group: build-and-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build and push images
+    uses: ./.github/workflows/push-artifacts.yaml
+    with:
+      version: ${{ inputs.version }}
+    secrets: inherit
+
+  e2e:
+    name: Run e2e against the built images
+    needs: build
+    uses: ./.github/workflows/e2e.yaml
+    with:
+      snapshot_tag: ${{ needs.build.outputs.version }}
+    secrets: inherit
