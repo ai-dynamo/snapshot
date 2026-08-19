@@ -23,6 +23,7 @@ import (
 
 const (
 	filesImageFilename            = "files.img"
+	restoreImagesTempDirPattern   = "criu-restore-images-*"
 	placeholderMountNamespacePath = "/proc/self/ns/mnt"
 	cudaUVMFDSocketNamePrefix     = "\x00cuda-uvmfd-"
 	linuxUnixSocketStateListen    = 10
@@ -37,30 +38,16 @@ type tcpPortRewrite struct {
 	port   uint32
 }
 
-type mountFilesImageFunc func(checkpointPath, replacementFilesImagePath string) (func() error, error)
-
-func prepareRestoreImageDir(checkpointPath string) (string, func() error, error) {
+func prepareRestoreImageDir(checkpointPath, scratchDir string) (string, func(), error) {
 	// The placeholder mount namespace remains container-specific with shareProcessNamespace.
 	var stat unix.Stat_t
 	if err := unix.Stat(placeholderMountNamespacePath, &stat); err != nil {
 		return "", nil, fmt.Errorf("failed to stat placeholder mount namespace at %s: %w", placeholderMountNamespacePath, err)
 	}
-	return prepareRestoreImageDirForRestoreID(checkpointPath, stat.Ino)
+	return prepareRestoreImageDirForRestoreID(checkpointPath, stat.Ino, scratchDir)
 }
 
-func prepareRestoreImageDirForRestoreID(checkpointPath string, restoreID uint64) (string, func() error, error) {
-	return prepareRestoreImageDirForRestoreIDWithMount(
-		checkpointPath,
-		restoreID,
-		mountFilesImage,
-	)
-}
-
-func prepareRestoreImageDirForRestoreIDWithMount(
-	checkpointPath string,
-	restoreID uint64,
-	mountReplacement mountFilesImageFunc,
-) (string, func() error, error) {
+func prepareRestoreImageDirForRestoreID(checkpointPath string, restoreID uint64, scratchDir string) (string, func(), error) {
 	checkpointPath, err := filepath.Abs(checkpointPath)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to resolve checkpoint path: %w", err)
@@ -156,8 +143,15 @@ func rewriteSocketMetadata(image *crit.CriuImage, restoreID uint64) ([]int, bool
 	return reservationFDs, rewritten, nil
 }
 
-func encodeReplacementFilesImage(image *crit.CriuImage) (string, error) {
-	filesImage, err := os.CreateTemp("", ".dynamo-criu-files-*.img")
+	// Keep the private view on local scratch (CRIU workDir, or a criu-restore-*
+	// temp when workDir is unset). Hard-linking thousands of *.img names onto
+	// the checkpoint PVC is one NFS RPC per link and again per unlink in
+	// cleanup(); the page inodes stay in the original checkpoint.
+	if scratchDir == "" {
+		closeFDs(reservationFDs)
+		return "", nil, fmt.Errorf("CRIU restore scratch directory is empty")
+	}
+	privateDir, err := os.MkdirTemp(scratchDir, restoreImagesTempDirPattern)
 	if err != nil {
 		return "", fmt.Errorf("failed to create private %s: %w", filesImageFilename, err)
 	}
@@ -204,6 +198,42 @@ func restoreImageCleanup(reservationFDs []int, removeImageView func() error) fun
 		})
 		return cleanupErr
 	}
+	fail := func(err error) (string, func(), error) {
+		cleanup()
+		return "", nil, err
+	}
+
+	entries, err := os.ReadDir(checkpointPath)
+	if err != nil {
+		return fail(fmt.Errorf("failed to read checkpoint directory: %w", err))
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == filesImageFilename || !strings.HasSuffix(name, ".img") {
+			continue
+		}
+		// CRIU does not modify restore images. Absolute symlinks let it open
+		// the original page files via the images-dir FD without copying them
+		// and without creating NFS directory entries for the private view.
+		target := filepath.Join(checkpointPath, name)
+		if err := os.Symlink(target, filepath.Join(privateDir, name)); err != nil {
+			return fail(fmt.Errorf("failed to symlink CRIU image %s: %w", name, err))
+		}
+	}
+
+	privateFilesImage, err := os.OpenFile(filepath.Join(privateDir, filesImageFilename), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return fail(fmt.Errorf("failed to create private %s: %w", filesImageFilename, err))
+	}
+	if err := crit.New(nil, privateFilesImage, "", false, false).Encode(image); err != nil {
+		_ = privateFilesImage.Close()
+		return fail(fmt.Errorf("failed to encode private %s: %w", filesImageFilename, err))
+	}
+	if err := privateFilesImage.Close(); err != nil {
+		return fail(fmt.Errorf("failed to close private %s: %w", filesImageFilename, err))
+	}
+
+	return privateDir, cleanup, nil
 }
 
 func planTCPPortRewrites(image *crit.CriuImage) (

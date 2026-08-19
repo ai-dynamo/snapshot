@@ -534,7 +534,10 @@ func (w *NodeController) startRestoreForContainer(
 
 // runRestore runs the full restore workflow for one target container:
 //  1. Annotate the pod with restore in_progress
-//  2. Call executor.Restore (inspect placeholder → nsrestore inside namespace)
+//  2. Call executor.Restore (inspect placeholder → nsrestore inside namespace).
+//     nsrestore clears any stale restore-complete sentinel on the pod control
+//     volume before CRIU, so a prior incarnation cannot release the restored
+//     process early.
 //  3. Write a restore-complete sentinel: the CRIU-restored process resumes
 //     inside the polling loop that waits on this file, exits quiescence,
 //     and resumes the engine

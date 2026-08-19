@@ -39,22 +39,17 @@ type CheckpointRequest struct {
 }
 
 type checkpointPhaseTimings struct {
-	PrepareDuration        time.Duration
-	CUDADuration           time.Duration
+	CUDACheckpointDuration time.Duration
 	CRIUDumpDuration       time.Duration
 	OverlayCaptureDuration time.Duration
-	FinalizeDuration       time.Duration
 }
 
 // Checkpoint performs a CRIU dump of a container.
-// The operation has three phases: inspect, configure, capture.
 //
 // The checkpoint directory is staged under tmp/<uuid> during the operation and
 // published atomically without replacing an existing artifact.
 func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req CheckpointRequest, cfg *types.AgentConfig) error {
 	checkpointStart := time.Now()
-	phaseTimings := checkpointPhaseTimings{}
-	prepareStart := time.Now()
 	log.Info("=== Starting checkpoint operation ===")
 
 	if strings.TrimSpace(req.CheckpointID) == "" {
@@ -75,8 +70,7 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Phase 1: Inspect container state
-	state, err := inspectContainer(ctx, rt, log, req)
+	state, gpuDeviceMapDuration, err := inspectContainer(ctx, rt, log, req)
 	if err != nil {
 		return err
 	}
@@ -88,74 +82,59 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		}
 	}
 
-	// Phase 2: Configure CRIU options and build checkpoint manifest
 	criuOpts, data, err := configureCheckpoint(log, state, req, cfg, tmpDir)
 	if err != nil {
 		return err
 	}
-	phaseTimings.PrepareDuration = time.Since(prepareStart)
 
-	// Phase 3: Capture — CRIU dump, rootfs diff
 	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log)
 	if err != nil {
 		return err
 	}
-	phaseTimings.CUDADuration = captureTimings.CUDADuration
-	phaseTimings.CRIUDumpDuration = captureTimings.CRIUDumpDuration
-	phaseTimings.OverlayCaptureDuration = captureTimings.OverlayCaptureDuration
 
-	// Publish the immutable staged checkpoint without replacing an artifact
-	// another agent may already be restoring.
-	finalizeStart := time.Now()
-	if err := publishCheckpoint(tmpDir, finalDir, req.CheckpointID); err != nil {
+	// Remove any previous checkpoint with the same identity hash, then
+	// promote the staged checkpoint directory into place.
+	switchStart := time.Now()
+	if err := os.RemoveAll(finalDir); err != nil {
+		return fmt.Errorf("failed to remove previous checkpoint directory: %w", err)
+	}
+	if err := os.Rename(tmpDir, finalDir); err != nil {
 		return fmt.Errorf("failed to finalize checkpoint directory: %w", err)
 	}
-	phaseTimings.FinalizeDuration = time.Since(finalizeStart)
+	switchDuration := time.Since(switchStart)
 
-	totalDuration := time.Since(checkpointStart)
-	log.Info("Checkpoint timing summary",
-		"checkpoint", map[string]any{
-			"duration": totalDuration.String(),
-			"phases": map[string]string{
-				"prepare_duration":         phaseTimings.PrepareDuration.String(),
-				"cuda_duration":            phaseTimings.CUDADuration.String(),
-				"criu_dump_duration":       phaseTimings.CRIUDumpDuration.String(),
-				"overlay_capture_duration": phaseTimings.OverlayCaptureDuration.String(),
-				"finalize_duration":        phaseTimings.FinalizeDuration.String(),
-			},
-		},
+	wall := time.Since(checkpointStart)
+	unaccounted := remainingDuration(wall,
+		gpuDeviceMapDuration,
+		captureTimings.CUDACheckpointDuration,
+		captureTimings.CRIUDumpDuration,
+		captureTimings.OverlayCaptureDuration,
+		switchDuration,
 	)
+	summary := map[string]any{
+		"duration": wall.String(),
+		"phases": map[string]string{
+			"gpu_device_map":                gpuDeviceMapDuration.String(),
+			"cuda_checkpoint":               captureTimings.CUDACheckpointDuration.String(),
+			"criu_dump":                     captureTimings.CRIUDumpDuration.String(),
+			"overlay_capture":               captureTimings.OverlayCaptureDuration.String(),
+			"remove_old_version_and_switch": switchDuration.String(),
+			"unaccounted":                   unaccounted.String(),
+		},
+	}
 	if !req.StartedAt.IsZero() {
-		log.Info("Checkpoint wall time from agent detection",
-			"started_to_checkpoint_complete", time.Since(req.StartedAt),
-		)
+		summary["started_to_complete"] = time.Since(req.StartedAt).String()
 	}
+	log.Info("Checkpoint timing summary", "checkpoint", summary)
 
 	return nil
 }
 
-func publishCheckpoint(stagedDir, finalDir, checkpointID string) error {
-	if err := renameNoReplace(stagedDir, finalDir); err != nil {
-		if !os.IsExist(err) {
-			return err
-		}
-		manifest, manifestErr := types.ReadManifest(finalDir)
-		if manifestErr != nil {
-			return fmt.Errorf("artifact already exists and cannot be validated: %w", manifestErr)
-		}
-		if manifest.CheckpointID != checkpointID {
-			return fmt.Errorf("artifact already exists with checkpoint ID %q, expected %q", manifest.CheckpointID, checkpointID)
-		}
-		return nil
-	}
-	return nil
-}
-
-func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req CheckpointRequest) (*types.CheckpointContainerSnapshot, error) {
+func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req CheckpointRequest) (*types.CheckpointContainerSnapshot, time.Duration, error) {
 	containerID := req.ContainerID
 	pid, ociSpec, err := rt.ResolveContainer(ctx, containerID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve container: %w", err)
+		return nil, 0, fmt.Errorf("failed to resolve container: %w", err)
 	}
 
 	var hostCgroupPath string
@@ -165,23 +144,23 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 
 	rootFS, err := snapshotruntime.GetRootFS(pid)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get rootfs: %w", err)
+		return nil, 0, fmt.Errorf("failed to get rootfs: %w", err)
 	}
 
 	upperDir, err := snapshotruntime.GetOverlayUpperDir(pid)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get overlay upperdir: %w", err)
+		return nil, 0, fmt.Errorf("failed to get overlay upperdir: %w", err)
 	}
 
 	mountInfo, err := snapshotruntime.ReadMountInfo(pid)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse mountinfo: %w", err)
+		return nil, 0, fmt.Errorf("failed to parse mountinfo: %w", err)
 	}
 	mounts := snapshotruntime.ClassifyMounts(mountInfo, ociSpec, rootFS)
 
 	netNSInode, err := snapshotruntime.GetNetNSInode(pid)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get net namespace inode: %w", err)
+		return nil, 0, fmt.Errorf("failed to get net namespace inode: %w", err)
 	}
 
 	// Read stdio FD targets (like runc's getPipeFds / descriptors.json).
@@ -202,10 +181,10 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 	for _, cudaHostPID := range cudaHostPIDs {
 		process, err := snapshotruntime.ReadProcessDetails(snapshotruntime.HostProcPath, cudaHostPID)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read process details for CUDA process %d: %w", cudaHostPID, err)
+			return nil, 0, fmt.Errorf("failed to read process details for CUDA process %d: %w", cudaHostPID, err)
 		}
 		if len(process.NamespacePIDs) != 2 {
-			return nil, fmt.Errorf("CUDA process %d has namespace depth %d, want 2", cudaHostPID, len(process.NamespacePIDs))
+			return nil, 0, fmt.Errorf("CUDA process %d has namespace depth %d, want 2", cudaHostPID, len(process.NamespacePIDs))
 		}
 		cudaNamespacePIDs = append(cudaNamespacePIDs, process.InnermostPID)
 	}
@@ -213,7 +192,9 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 		log.V(1).Info("Resolved checkpoint CUDA PID mapping", "host_pids", cudaHostPIDs, "namespace_pids", cudaNamespacePIDs)
 	}
 	var gpuUUIDs []string
+	var gpuDeviceMapDuration time.Duration
 	if len(cudaHostPIDs) > 0 {
+		gpuStart := time.Now()
 		gpuUUIDs, err = cuda.DiscoverGPUUUIDs(
 			ctx,
 			req.Clientset,
@@ -224,8 +205,9 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 			pid,
 			log,
 		)
+		gpuDeviceMapDuration = time.Since(gpuStart)
 		if err != nil {
-			return nil, fmt.Errorf("failed to discover source GPU UUIDs: %w", err)
+			return nil, 0, fmt.Errorf("failed to discover source GPU UUIDs: %w", err)
 		}
 	}
 
@@ -241,7 +223,7 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 		CUDAHostPIDs:   cudaHostPIDs,
 		CUDANSPIDs:     cudaNamespacePIDs,
 		GPUUUIDs:       gpuUUIDs,
-	}, nil
+	}, gpuDeviceMapDuration, nil
 }
 
 func configureCheckpoint(
@@ -282,7 +264,7 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 		if err != nil {
 			return nil, fmt.Errorf("CUDA checkpoint failed: %w", err)
 		}
-		timings.CUDADuration = cudaTimings.TotalDuration
+		timings.CUDACheckpointDuration = cudaTimings.TotalDuration
 	}
 
 	criuDumpDuration, err := criu.ExecuteDump(criuOpts, checkpointDir, criuSettings, log)

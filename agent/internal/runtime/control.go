@@ -32,6 +32,14 @@ func WriteControlSentinel(hostPID int, name string) error {
 	return writeSentinelInDir(dir, name)
 }
 
+// RemoveControlSentinel removes a sentinel from the snapshot-control mount at
+// dir. The directory must exist: a missing file is already removed, but a
+// missing mount is an error so callers do not confuse "cannot see the volume"
+// with "volume is clean".
+func RemoveControlSentinel(dir, name string) error {
+	return removeSentinelInDir(dir, name)
+}
+
 func writeSentinelInDir(dir, name string) error {
 	tmpPath := filepath.Join(dir, "."+name+".tmp")
 	finalPath := filepath.Join(dir, name)
@@ -41,6 +49,21 @@ func writeSentinelInDir(dir, name string) error {
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename sentinel %s -> %s: %w", tmpPath, finalPath, err)
+	}
+	return nil
+}
+
+func removeSentinelInDir(dir, name string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("control sentinel dir %s: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("control sentinel dir %s: not a directory", dir)
+	}
+	path := filepath.Join(dir, name)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove control sentinel %s: %w", path, err)
 	}
 	return nil
 }

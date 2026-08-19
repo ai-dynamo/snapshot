@@ -81,97 +81,88 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		"container", req.ContainerName,
 	)
 
-	artifactPath, err := nsmount.ResolveArtifact(req.BasePath, req.CheckpointID, req.ArtifactVersion)
-	if err != nil {
-		return 0, fmt.Errorf("resolve checkpoint artifact: %w", err)
-	}
-	manifest, err := types.ReadManifest(artifactPath)
-	if err != nil {
-		return 0, fmt.Errorf("read checkpoint manifest: %w", err)
-	}
-	if err := validateRestoreManifest(req, manifest); err != nil {
-		return 0, err
-	}
-
-	// Phase 1: Host inspect — resolve placeholder, discover target GPUs, build device map.
-	hostInspectStart := time.Now()
-	snap, err := inspectRestore(ctx, rt, log, req, manifest)
+	snap, gpuDeviceMapDuration, err := inspectRestore(ctx, rt, log, req)
 	if err != nil {
 		return 0, err
 	}
-	hostInspectDuration := time.Since(hostInspectStart)
 
-	// Phase 2: Mount agent binaries and the checkpoint artifact. Deferred
-	// cleanup unwinds in reverse order: artifact first, then bundle.
-	injectStart := time.Now()
-	bundleMount, err := mounts.MountBundle(ctx, snap.PlaceholderPID)
+	mp, err := mountBundle(ctx, mounter, snap.PlaceholderPID)
 	if err != nil {
 		return 0, fmt.Errorf("mount agent bundle into placeholder: %w", err)
 	}
-	defer func() {
-		if cleanupErr := bundleMount.Unmount(ctx); cleanupErr != nil {
-			log.Error(cleanupErr, "failed to clean bundle mount from placeholder namespace")
-			if retErr == nil {
-				retErr = NewRestoreCleanupError("unmount agent bundle from placeholder", cleanupErr)
-			}
+	mountActive := true
+	unmount := func() {
+		if !mountActive {
+			return
 		}
-	}()
-	artifactMount, err := mounts.MountArtifact(ctx, snap.PlaceholderPID, artifactPath)
-	if err != nil {
-		return 0, fmt.Errorf("mount checkpoint artifact into placeholder: %w", err)
+		mountActive = false
+		// Pass a background context: mp.Unmount has its own internal timeout
+		// (nsmount.unmountTimeout) around the ns-bind-mount subprocess.
+		if cleanupErr := mp.Unmount(context.Background()); cleanupErr != nil {
+			// Deliberately not promoted to retErr. The controller treats any
+			// error from Restore as a failed restore and SIGKILLs the placeholder,
+			// so surfacing a cleanup failure here would destroy a workload that
+			// already restored successfully. Log it and let the pod continue.
+			log.Error(cleanupErr, "failed to unmount agent bundle from placeholder namespace")
+		}
 	}
-	defer func() {
-		if cleanupErr := artifactMount.Unmount(ctx); cleanupErr != nil {
-			log.Error(cleanupErr, "failed to clean artifact mount from placeholder namespace")
-			if retErr == nil {
-				retErr = NewRestoreCleanupError("unmount checkpoint artifact from placeholder", cleanupErr)
-			}
-		}
-	}()
-	injectDuration := time.Since(injectStart)
+	defer unmount()
 
-	// Phase 3: Execute — nsrestore handles rootfs, CRIU restore, and CUDA restore inside namespace.
-	result, err := execNSRestore(ctx, log, req, snap, bundleMount, nsmount.CheckpointDst)
+	result, err := execNSRestore(ctx, log, req, snap, mp)
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
 	}
-	restoreDuration := hostInspectDuration + injectDuration + result.TotalDuration()
-	log.Info("Restore timing summary",
-		"restore", map[string]any{
-			"duration": restoreDuration.String(),
-			"phases": map[string]string{
-				"host_inspect_duration":    hostInspectDuration.String(),
-				"inject_duration":          injectDuration.String(),
-				"nsrestore_setup_duration": result.NSRestoreSetupDuration.String(),
-				"criu_restore_duration":    result.CRIURestoreDuration.String(),
-				"cuda_duration":            result.CUDADuration.String(),
-			},
-		},
-	)
-	if !req.StartedAt.IsZero() {
-		log.Info("Restore wall time from agent detection",
-			"started_to_restore_complete", time.Since(req.StartedAt),
-		)
-	}
-
-	validationStart := time.Now()
 	if err := validateRestoredProcess(snap.TargetRoot, result.RestoredPID, log); err != nil {
 		return 0, err
 	}
 
+	unmount()
+	wall := time.Since(restoreStart)
+	unaccounted := remainingDuration(wall,
+		gpuDeviceMapDuration,
+		result.OverlayCaptureDuration,
+		result.CRIUPrepareDuration,
+		result.CRIURestoreDuration,
+		result.CUDARestoreDuration,
+	)
+	summary := map[string]any{
+		"duration": wall.String(),
+		"phases": map[string]string{
+			"gpu_device_map":  gpuDeviceMapDuration.String(),
+			"overlay_capture": result.OverlayCaptureDuration.String(),
+			"criu_prepare":    result.CRIUPrepareDuration.String(),
+			"criu_restore":    result.CRIURestoreDuration.String(),
+			"cuda_restore":    result.CUDARestoreDuration.String(),
+			"unaccounted":     unaccounted.String(),
+		},
+	}
+	if !req.StartedAt.IsZero() {
+		summary["started_to_complete"] = time.Since(req.StartedAt).String()
+	}
+	log.Info("Restore timing summary", "restore", summary)
 	log.Info("=== External restore completed ===",
 		"restored_pid", result.RestoredPID,
 		"placeholder_host_pid", snap.PlaceholderPID,
-		"validation_duration", time.Since(validationStart),
-		"total_duration", time.Since(restoreStart),
 	)
 
 	return snap.PlaceholderPID, nil
 }
 
-func validateRestoreManifest(req RestoreRequest, manifest *types.CheckpointManifest) error {
-	if manifest.CheckpointID != req.CheckpointID {
-		return fmt.Errorf("checkpoint manifest ID %q does not match requested ID %q", manifest.CheckpointID, req.CheckpointID)
+func remainingDuration(wall time.Duration, parts ...time.Duration) time.Duration {
+	var sum time.Duration
+	for _, part := range parts {
+		sum += part
+	}
+	if wall <= sum {
+		return 0
+	}
+	return wall - sum
+}
+
+func mountBundle(ctx context.Context, mounter Mounter, pid int) (nsmount.MountPoint, error) {
+	mp, err := mounter.Mount(ctx, pid)
+	if err != nil {
+		return nil, fmt.Errorf("mount agent bundle into placeholder: %w", err)
 	}
 	if manifest.K8s.PodNamespace != req.PodNamespace {
 		return fmt.Errorf(
@@ -193,7 +184,29 @@ func validateRestoredProcess(targetRoot string, restoredPID int, log logr.Logger
 	return nil
 }
 
-func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest, m *types.CheckpointManifest) (*types.RestoreContainerSnapshot, error) {
+func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest) (*types.RestoreContainerSnapshot, time.Duration, error) {
+	if req.CheckpointLocation == "" {
+		return nil, 0, fmt.Errorf("checkpoint location is required")
+	}
+
+	checkpointPath := req.CheckpointLocation
+	baseAbs, err := filepath.Abs(filepath.Dir(checkpointPath))
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to resolve checkpoint base path: %w", err)
+	}
+	checkpointAbs, err := filepath.Abs(checkpointPath)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to resolve checkpoint path: %w", err)
+	}
+	if checkpointAbs != baseAbs && !strings.HasPrefix(checkpointAbs, baseAbs+string(os.PathSeparator)) {
+		return nil, 0, fmt.Errorf("invalid checkpoint id %q", req.CheckpointID)
+	}
+
+	m, err := types.ReadManifest(checkpointPath)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to read checkpoint manifest: %w", err)
+	}
+
 	containerName := req.ContainerName
 	if containerName == "" {
 		containerName = "main"
@@ -209,7 +222,7 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 		placeholderPID, _, err = rt.ResolveContainerByPod(ctx, req.PodName, req.PodNamespace, containerName)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve placeholder container: %w", err)
+		return nil, 0, fmt.Errorf("failed to resolve placeholder container: %w", err)
 	}
 	log.V(1).Info("Resolved placeholder container", "pid", placeholderPID)
 
@@ -220,10 +233,12 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 	}
 
 	cudaDeviceMap := ""
+	var gpuDeviceMapDuration time.Duration
 	if !m.CUDA.IsEmpty() {
 		if len(m.CUDA.SourceGPUUUIDs) == 0 {
-			return nil, fmt.Errorf("missing source GPU UUIDs in checkpoint manifest")
+			return nil, 0, fmt.Errorf("missing source GPU UUIDs in checkpoint manifest")
 		}
+		gpuStart := time.Now()
 		targetGPUUUIDs, err := cuda.DiscoverGPUUUIDs(
 			ctx,
 			req.Clientset,
@@ -235,14 +250,15 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 			log,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get target GPU UUIDs: %w", err)
+			return nil, 0, fmt.Errorf("failed to get target GPU UUIDs: %w", err)
 		}
 		if len(targetGPUUUIDs) == 0 {
-			return nil, fmt.Errorf("missing target GPU UUIDs for %s/%s container %s", req.PodNamespace, req.PodName, containerName)
+			return nil, 0, fmt.Errorf("missing target GPU UUIDs for %s/%s container %s", req.PodNamespace, req.PodName, containerName)
 		}
 		cudaDeviceMap, err = cuda.BuildDeviceMap(m.CUDA.SourceGPUUUIDs, targetGPUUUIDs, log)
+		gpuDeviceMapDuration = time.Since(gpuStart)
 		if err != nil {
-			return nil, fmt.Errorf("failed to build CUDA device map: %w", err)
+			return nil, 0, fmt.Errorf("failed to build CUDA device map: %w", err)
 		}
 		log.V(1).Info("GPU UUIDs for device map",
 			"source_uuids", m.CUDA.SourceGPUUUIDs,
@@ -256,7 +272,7 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 		TargetRoot:     fmt.Sprintf("%s/%d/root", snapshotruntime.HostProcPath, placeholderPID),
 		CgroupRoot:     cgroupRoot,
 		CUDADeviceMap:  cudaDeviceMap,
-	}, nil
+	}, gpuDeviceMapDuration, nil
 }
 
 // execNSRestore launches the nsrestore binary inside the placeholder container's
