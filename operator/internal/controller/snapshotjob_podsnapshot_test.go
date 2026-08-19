@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -256,13 +257,27 @@ func TestSnapshotJobReconcileFailedOnPodSnapshotFailed(t *testing.T) {
 
 	r := makeSnapshotJobReconciler(s, sj, job, pod, snap)
 
+	// First pass: no Job failure yet, so this defers instead of finalizing.
+	res, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+	assert.Equal(t, captureFailureRequeueBackstop, res.RequeueAfter)
+
+	deferred := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, deferred))
+	captured := meta.FindStatusCondition(deferred.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured)
+	require.NotNil(t, captured)
+	assert.Equal(t, metav1.ConditionFalse, captured.Status)
+	assert.Equal(t, snapshotv1alpha1.ReasonCaptureFailed, captured.Reason)
+	assert.Nil(t, meta.FindStatusCondition(deferred.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed))
+
+	// Second pass: same failure, still no Job failure — now it finalizes.
 	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
 	require.NoError(t, err)
 
 	updated := &snapshotv1alpha1.SnapshotJob{}
 	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
 
-	captured := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured)
+	captured = meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured)
 	require.NotNil(t, captured)
 	assert.Equal(t, metav1.ConditionFalse, captured.Status)
 	assert.Equal(t, snapshotv1alpha1.ReasonCaptureFailed, captured.Reason)
@@ -272,6 +287,47 @@ func TestSnapshotJobReconcileFailedOnPodSnapshotFailed(t *testing.T) {
 	assert.Equal(t, metav1.ConditionTrue, failed.Status)
 	assert.Equal(t, snapshotv1alpha1.ReasonCaptureFailed, failed.Reason)
 	require.NotNil(t, updated.Status.CompletedAt)
+}
+
+// TestSnapshotJobReconcileJobFailureWinsAfterDeferredCapture: a raced Job
+// DeadlineExceeded that lands during the deferral must win over CaptureFailed.
+func TestSnapshotJobReconcileJobFailureWinsAfterDeferredCapture(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+	sj.UID = types.UID("sj-uid")
+
+	job, err := buildSourceJob(sj)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	pod := sourcePodForJob(job)
+	snap, err := buildPodSnapshot(sj, pod)
+	require.NoError(t, err)
+	meta.SetStatusCondition(&snap.Status.Conditions, metav1.Condition{
+		Type: snapshotv1alpha1.PodSnapshotConditionFailed, Status: metav1.ConditionTrue,
+		Reason: "SourcePodGone", Message: `source pod "x" is no longer running (phase Running)`,
+	})
+
+	r := makeSnapshotJobReconciler(s, sj, job, pod, snap)
+
+	// First pass: no Job failure yet — defers instead of finalizing.
+	res, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+	assert.Equal(t, captureFailureRequeueBackstop, res.RequeueAfter)
+
+	// The Job controller's own condition lands before the deferred pass runs.
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, job))
+	failJob(job, batchv1.JobReasonDeadlineExceeded, "Job was active longer than specified deadline")
+	require.NoError(t, r.Status().Update(context.Background(), job))
+
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, snapshotv1alpha1.ReasonDeadlineExceeded, failed.Reason,
+		"the Job's own DeadlineExceeded must win over the raced CaptureFailed")
 }
 
 // ---- AlreadyExists classification (ours = adopt, foreign = conflict, cache-lag = requeue) ----
