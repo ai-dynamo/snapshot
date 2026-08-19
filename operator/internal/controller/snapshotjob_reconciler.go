@@ -31,7 +31,7 @@ import (
 // +kubebuilder:rbac:groups=nvidia.com,resources=snapshotjobs/finalizers,verbs=update
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=create;get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;get;list;watch
-// +kubebuilder:rbac:groups=core,resources=pods,verbs=list
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=list;watch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
 // SnapshotJobReconciler reconciles a SnapshotJob.
@@ -205,6 +205,14 @@ func (r *SnapshotJobReconciler) observe(ctx context.Context, sj *snapshotv1alpha
 	ready := job.Status.Ready != nil && *job.Status.Ready > 0
 
 	var changed bool
+	// Re-assert the recorded PodSnapshot name: createPodSnapshotPhase's write can
+	// be lost to a Status().Update conflict after the PodSnapshot was already
+	// created server-side, and that phase is unreachable once findOwnedPodSnapshot
+	// finds it — this is the only other place that observes an owned PodSnapshot.
+	if sj.Status.PodSnapshotName != snap.Name {
+		sj.Status.PodSnapshotName = snap.Name
+		changed = true
+	}
 	if ready {
 		if sj.Status.StartedAt == nil {
 			now := metav1.Now()

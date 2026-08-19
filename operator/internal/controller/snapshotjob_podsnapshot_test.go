@@ -62,6 +62,29 @@ func TestBuildPodSnapshot(t *testing.T) {
 		_, err := buildPodSnapshot(bad, pod)
 		require.Error(t, err)
 	})
+
+	t.Run("more than one targetContainers entry is a terminal spec error", func(t *testing.T) {
+		// buildSourceJob rejects this on the create path, but a Job that already
+		// exists (the adopt/observe paths) skips buildSourceJob entirely — this is
+		// the only other place that reads targetContainers, so it must enforce the
+		// same exactly-one constraint independently.
+		bad := minimalSnapshotJob()
+		bad.Spec.PodSnapshotTemplate.TargetContainers = []string{"worker", "helper"}
+		_, err := buildPodSnapshot(bad, pod)
+		require.Error(t, err)
+	})
+
+	t.Run("does not share a backing array with the SnapshotJob's own slice", func(t *testing.T) {
+		src := minimalSnapshotJob()
+		original := append([]string(nil), src.Spec.PodSnapshotTemplate.TargetContainers...)
+
+		got, err := buildPodSnapshot(src, pod)
+		require.NoError(t, err)
+		got.Spec.Source.PodRef.Containers[0] = "mutated"
+
+		assert.Equal(t, original, src.Spec.PodSnapshotTemplate.TargetContainers,
+			"mutating the PodSnapshot's copy must not affect the SnapshotJob's own spec slice")
+	})
 }
 
 // ---- reconciler-level PodSnapshot creation ----
@@ -124,6 +147,38 @@ func TestSnapshotJobReconcileSetsPodPendingWhenPodDoesNotExistYet(t *testing.T) 
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	assert.Equal(t, snapshotv1alpha1.ReasonPodPending, cond.Reason)
+}
+
+// TestSnapshotJobReconcileObserveRecoversPodSnapshotName covers the case where
+// createPodSnapshotPhase's Status().Update (which records status.podSnapshotName
+// alongside Captured) failed or conflicted after the PodSnapshot was already
+// created server-side. On the next reconcile, findOwnedPodSnapshot finds the
+// PodSnapshot and takes the observe() path directly — createPodSnapshotPhase is
+// never reached again — so observe() must independently reconcile the name
+// rather than leaving it permanently empty.
+func TestSnapshotJobReconcileObserveRecoversPodSnapshotName(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+	sj.UID = types.UID("sj-uid")
+
+	job, err := buildSourceJob(sj)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	pod := sourcePodForJob(job)
+	snap, err := buildPodSnapshot(sj, pod)
+	require.NoError(t, err)
+
+	// sj.Status.PodSnapshotName is deliberately left empty, simulating a lost
+	// write, even though the PodSnapshot already exists.
+	r := makeSnapshotJobReconciler(s, sj, job, pod, snap)
+
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	assert.Equal(t, snap.Name, updated.Status.PodSnapshotName,
+		"observe() must recover the PodSnapshot name, not just createPodSnapshotPhase")
 }
 
 // ---- Captured mirroring ----
