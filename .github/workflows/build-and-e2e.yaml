@@ -5,12 +5,15 @@
 # suite (test_snapshotjob.py) against this branch's own build without a
 # human babysitting a manual push-artifacts.yaml -> e2e.yaml dispatch chain.
 # Remove this file before merging RUN-39806-snapshotjob-e2e-docs to main.
+#
+# workflow_dispatch only, deliberately: the e2e job runs on a self-hosted GPU
+# runner pool (prod-deploy-tester-v1) gated by a Velonix admission policy that
+# only approves workflow_dispatch/schedule events (matching e2e.yaml's own
+# original triggers) — a `push` trigger here gets rejected before a runner is
+# even assigned, since reusable-workflow calls inherit the caller's event name.
 name: Build and E2E (branch)
 
 on:
-  push:
-    branches:
-      - RUN-39806-snapshotjob-e2e-docs
   workflow_dispatch:
     inputs:
       version:
