@@ -210,6 +210,18 @@ func (r *SnapshotJobReconciler) reconcilePodSnapshotResources(ctx context.Contex
 	}
 
 	observed.podSnapshot = snap
+	if snapshotv1alpha1.IsPodSnapshotFailed(snap) {
+		// A Job failure can land after the cached Job read but before the
+		// PodSnapshot failure is observed. Re-read before making Failed terminal
+		// so the Job-level reason wins that race.
+		latestJob := &batchv1.Job{}
+		if err := r.sourcePodReader().Get(ctx, client.ObjectKeyFromObject(job), latestJob); err == nil {
+			if reason, cause := jobFailureReason(latestJob); reason != "" {
+				observed.job = latestJob
+				observed.failure = &snapshotJobFailure{reason: reason, cause: cause}
+			}
+		}
+	}
 	return observed, ctrl.Result{}, nil
 }
 
@@ -294,8 +306,10 @@ func deriveCapturedStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJ
 		next.Status.PodSnapshotName = observed.podSnapshot.Name
 		switch {
 		case snapshotv1alpha1.IsPodSnapshotFailed(observed.podSnapshot):
-			reason, message := captureFailureReason(observed.podSnapshot)
-			failure = &snapshotJobFailure{reason: reason, cause: errors.New(message)}
+			if failure == nil {
+				reason, message := captureFailureReason(observed.podSnapshot)
+				failure = &snapshotJobFailure{reason: reason, cause: errors.New(message)}
+			}
 		case snapshotv1alpha1.IsPodSnapshotSucceeded(observed.podSnapshot):
 			setCondition(next, snapshotv1alpha1.SnapshotJobConditionCaptured, metav1.ConditionTrue,
 				snapshotv1alpha1.ReasonCaptureCompleted, "CRIU dump of the target container is complete")
