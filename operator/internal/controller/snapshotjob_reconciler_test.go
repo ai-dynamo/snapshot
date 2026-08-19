@@ -105,6 +105,11 @@ func TestSnapshotJobReconcileInvalidSpecIsTerminal(t *testing.T) {
 	assert.Equal(t, snapshotv1alpha1.ReasonInvalidSpec, cond.Reason)
 	assert.NotNil(t, updated.Status.CompletedAt,
 		"completedAt must be set on this terminal transition — IsSnapshotJobTerminal short-circuits every later reconcile, so this is the only chance")
+
+	running := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning)
+	require.NotNil(t, running, "Running must not be entirely absent alongside a terminal Failed=True — missing is not the same as known False")
+	assert.Equal(t, metav1.ConditionFalse, running.Status)
+	assert.Equal(t, snapshotv1alpha1.ReasonPodPending, running.Reason)
 }
 
 func TestSnapshotJobReconcilePropagatesJobGetError(t *testing.T) {
@@ -167,9 +172,9 @@ func TestSnapshotJobReconcileAdoptsJobOnAlreadyExistsRace(t *testing.T) {
 	require.NotNil(t, cond, "adopting the existing Job on the AlreadyExists path must still observe it for Running")
 }
 
-// TestSnapshotJobReconcileClassifiesForeignJobOnAlreadyExistsRace is the same
+// TestSnapshotJobReconcileFailsForeignJobOnAlreadyExistsRace is the same
 // race as above, but the Job that already exists is not ours.
-func TestSnapshotJobReconcileClassifiesForeignJobOnAlreadyExistsRace(t *testing.T) {
+func TestSnapshotJobReconcileFailsForeignJobOnAlreadyExistsRace(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
@@ -203,8 +208,14 @@ func TestSnapshotJobReconcileClassifiesForeignJobOnAlreadyExistsRace(t *testing.
 
 	updated := &snapshotv1alpha1.SnapshotJob{}
 	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
-	assert.Empty(t, updated.Status.Conditions,
+	assert.True(t, snapshotv1alpha1.IsSnapshotJobFailed(updated),
 		"a foreign Job hit via the AlreadyExists race must be classified the same as one found by the initial Get")
+	cond := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, snapshotv1alpha1.ReasonJobNameConflict, cond.Reason)
+	running := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning)
+	require.NotNil(t, running, "Running must not be entirely absent alongside a terminal Failed=True")
+	assert.Equal(t, metav1.ConditionFalse, running.Status)
 
 	got := &batchv1.Job{}
 	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, got))
@@ -277,7 +288,39 @@ func TestSnapshotJobReconcileRunningTransitionsOnJobReady(t *testing.T) {
 	assert.Equal(t, startedAt, *updated.Status.StartedAt)
 }
 
-func TestSnapshotJobReconcileClassifiesForeignJob(t *testing.T) {
+// TestSnapshotJobReconcileSetsStartedAtWhenRunningAlreadyPersisted covers a case
+// setCondition's return value alone can't catch: Running=True/PodReady is
+// already persisted (e.g. status was pre-loaded, or a prior write raced) while
+// StartedAt is still nil. setCondition would then report no change, and without
+// explicitly OR-ing in the StartedAt assignment, that timestamp would be
+// silently dropped on every reconcile from then on.
+func TestSnapshotJobReconcileSetsStartedAtWhenRunningAlreadyPersisted(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+	sj.UID = types.UID("sj-uid")
+	meta.SetStatusCondition(&sj.Status.Conditions, metav1.Condition{
+		Type: snapshotv1alpha1.SnapshotJobConditionRunning, Status: metav1.ConditionTrue,
+		Reason: snapshotv1alpha1.ReasonPodReady, Message: "source pod is ready",
+	})
+	require.Nil(t, sj.Status.StartedAt, "precondition: StartedAt must start nil")
+
+	job, err := buildSourceJob(sj)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	job.Status.Ready = ptr.To(int32(1))
+
+	r := makeSnapshotJobReconciler(s, sj, job)
+
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	require.NotNil(t, updated.Status.StartedAt,
+		"StartedAt must be persisted even though Running=True/PodReady was already set and setCondition reports no change")
+}
+
+func TestSnapshotJobReconcileFailsForeignJob(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
@@ -300,8 +343,13 @@ func TestSnapshotJobReconcileClassifiesForeignJob(t *testing.T) {
 
 	updated := &snapshotv1alpha1.SnapshotJob{}
 	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
-	assert.Empty(t, updated.Status.Conditions,
-		"the terminal Failed=True/JobNameConflict write is added by the completion gate; PR3 only classifies")
+	assert.True(t, snapshotv1alpha1.IsSnapshotJobFailed(updated))
+	cond := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, snapshotv1alpha1.ReasonJobNameConflict, cond.Reason)
+	running := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning)
+	require.NotNil(t, running, "Running must not be entirely absent alongside a terminal Failed=True")
+	assert.Equal(t, metav1.ConditionFalse, running.Status)
 
 	got := &batchv1.Job{}
 	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, got))

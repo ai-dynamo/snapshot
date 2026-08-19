@@ -30,14 +30,9 @@ const sourceJobArtifactVersion = "1"
 // source it from — a caller needing cuda-checkpoint --launch-job wrapping sets it
 // up themselves in spec.podTemplate).
 func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, error) {
-	// sj.Name becomes a label value (SnapshotJobOwnerLabel, CheckpointIDLabel) as
-	// well as the source Job's own name. Kubernetes object names allow dots and up
-	// to 253 characters (RFC 1123 subdomain), but label values are capped at 63
-	// chars with a looser charset (RFC 1123 label plus '_' and '.') — the CRD does
-	// not constrain metadata.name, so this must be checked here. A stricter
-	// DNS-1123-label check would wrongly reject a valid dotted name like
-	// "warm.worker"; without any check, a long-named SnapshotJob would fail Job
-	// creation with an apiserver validation error on every retry, forever.
+	// sj.Name is also used as a label value (SnapshotJobOwnerLabel,
+	// CheckpointIDLabel); the CRD doesn't cap metadata.name length, so this must
+	// be checked here or a long name fails Job creation forever.
 	if errs := contentvalidation.IsLabelValue(sj.Name); len(errs) > 0 {
 		return nil, fmt.Errorf("metadata.name %q is not a valid label value: %s", sj.Name, strings.Join(errs, "; "))
 	}

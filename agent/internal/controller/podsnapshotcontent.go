@@ -150,10 +150,7 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		return w.setSnapshotContentFailed(ctx, content, "MissingCheckpointID",
 			fmt.Errorf("source pod %q missing %s label", pod.Name, snapshotv1alpha1.CheckpointIDLabel))
 	}
-	// The checkpoint ID is a label value (CheckpointIDLabel), not a DNS-1123 label —
-	// dots are valid in a label value, so a stricter DNS-1123-label check would
-	// wrongly reject a valid SnapshotJob name like "warm.worker" that made it this
-	// far as a pod label.
+	// Label-value rules, not the stricter DNS-1123-label rules: dots are valid here.
 	if errs := contentvalidation.IsLabelValue(id); len(errs) > 0 {
 		return w.setSnapshotContentFailed(ctx, content, "InvalidCheckpointID",
 			fmt.Errorf("checkpoint ID %q is not a valid label value: %s", id, strings.Join(errs, "; ")))

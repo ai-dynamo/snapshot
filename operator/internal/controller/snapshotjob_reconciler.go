@@ -53,9 +53,7 @@ func (r *SnapshotJobReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// No finalizer: the batch/v1 Job's ownerReference cascade reaps it when the
-	// SnapshotJob is deleted, and the PodSnapshot (added in PR 4) must survive
-	// deletion anyway, so there is nothing to clean up synchronously here.
+	// No finalizer: GC cascade-deletes the owned Job; nothing else to clean up here.
 	if !sj.GetDeletionTimestamp().IsZero() {
 		return ctrl.Result{}, nil
 	}
@@ -78,7 +76,8 @@ func (r *SnapshotJobReconciler) reconcileJob(ctx context.Context, sj *snapshotv1
 	case err != nil:
 		return ctrl.Result{}, fmt.Errorf("get source Job %q: %w", sj.Name, err)
 	case !metav1.IsControlledBy(job, sj):
-		return r.reportJobNameConflict(sj)
+		return r.failSnapshotJob(ctx, sj, snapshotv1alpha1.ReasonJobNameConflict,
+			fmt.Errorf("an object not controlled by this SnapshotJob already holds the name %q", sj.Name))
 	}
 	return r.observeJob(ctx, sj, job)
 }
@@ -117,29 +116,17 @@ func (r *SnapshotJobReconciler) createJob(ctx context.Context, sj *snapshotv1alp
 // Create already landed the Job server-side, but this reconcile's earlier Get
 // missed it because the local watch cache hadn't caught up yet (a stale-cache
 // race, not a real naming conflict). Re-Get and classify exactly like
-// reconcileJob's Job-exists branch does — ours, observe it for Running; foreign,
-// report the conflict (see reportJobNameConflict).
+// reconcileJob's Job-exists branch does.
 func (r *SnapshotJobReconciler) adoptExistingJob(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob) (ctrl.Result, error) {
 	existing := &batchv1.Job{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: sj.Namespace, Name: sj.Name}, existing); err != nil {
 		return ctrl.Result{}, fmt.Errorf("get existing source Job %q after AlreadyExists: %w", sj.Name, err)
 	}
 	if !metav1.IsControlledBy(existing, sj) {
-		return r.reportJobNameConflict(sj)
+		return r.failSnapshotJob(ctx, sj, snapshotv1alpha1.ReasonJobNameConflict,
+			fmt.Errorf("an object not controlled by this SnapshotJob already holds the name %q", sj.Name))
 	}
 	return r.observeJob(ctx, sj, existing)
-}
-
-// reportJobNameConflict handles a foreign object holding our deterministic Job
-// name: it emits a Warning event so the conflict is visible to an operator (e.g.
-// via `kubectl describe`) without writing to sj.Status. The terminal
-// Failed=True/JobNameConflict status write is added by the completion gate (a
-// later phase), so this reconciler stops without taking an action it can't yet
-// finish recording — the event is a cheap interim signal, not a substitute.
-func (r *SnapshotJobReconciler) reportJobNameConflict(sj *snapshotv1alpha1.SnapshotJob) (ctrl.Result, error) {
-	r.Recorder.Event(sj, corev1.EventTypeWarning, snapshotv1alpha1.ReasonJobNameConflict,
-		fmt.Sprintf("an object not controlled by this SnapshotJob already holds the name %q", sj.Name))
-	return ctrl.Result{}, nil
 }
 
 // observeJob derives Running from job.status.ready (GA in Kubernetes 1.29; beta-on
@@ -155,9 +142,10 @@ func (r *SnapshotJobReconciler) observeJob(ctx context.Context, sj *snapshotv1al
 		if sj.Status.StartedAt == nil {
 			now := metav1.Now()
 			sj.Status.StartedAt = &now
+			changed = true
 		}
 		changed = setCondition(sj, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionTrue,
-			snapshotv1alpha1.ReasonPodReady, "source pod is ready")
+			snapshotv1alpha1.ReasonPodReady, "source pod is ready") || changed
 	} else {
 		changed = setCondition(sj, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse,
 			snapshotv1alpha1.ReasonPodPending, "waiting for the source pod to become ready")
@@ -173,13 +161,22 @@ func (r *SnapshotJobReconciler) observeJob(ctx context.Context, sj *snapshotv1al
 }
 
 // failSnapshotJob records a terminal Failed=True condition, an event, and
-// completedAt. This phase only ever reaches it via InvalidSpec — the completion
-// gate (a later phase) owns the rest of the Failed=True reason matrix, but
-// completedAt must be set here regardless: IsSnapshotJobTerminal short-circuits
+// completedAt. completedAt must be set here: IsSnapshotJobTerminal short-circuits
 // every later reconcile once Failed=True is persisted, so this is the only
-// chance to record it for an InvalidSpec failure.
+// chance to record it.
+//
+// Also backfills Running=False/PodPending if it was never set — every call site
+// in this phase reaches failSnapshotJob before ever observing an owned Job's
+// readiness, so a consumer must not see Failed=True with Running entirely
+// absent from status.conditions (missing is not the same as "known False").
+// An already-set Running is left untouched, since it may already reflect a
+// real observation.
 func (r *SnapshotJobReconciler) failSnapshotJob(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, reason string, cause error) (ctrl.Result, error) {
 	r.Recorder.Event(sj, corev1.EventTypeWarning, reason, cause.Error())
+	if meta.FindStatusCondition(sj.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning) == nil {
+		setCondition(sj, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse,
+			snapshotv1alpha1.ReasonPodPending, "waiting for the source pod to become ready")
+	}
 	setCondition(sj, snapshotv1alpha1.SnapshotJobConditionFailed, metav1.ConditionTrue, reason, cause.Error())
 	if sj.Status.CompletedAt == nil {
 		now := metav1.Now()
