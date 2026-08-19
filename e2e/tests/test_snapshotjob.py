@@ -50,18 +50,19 @@ def test_snapshotjob_completes_and_restore_recovers_state(
         source_pod = snap.wait_for_job_source_pod(config.namespace, snapshotjob_name)
         source_pod_name = source_pod.metadata.name
         snap.wait_for_pod_ready(config.namespace, source_pod_name, timeout=300)
-        # This count is a lower bound as of "pod ready," not "dump happened" —
-        # the controller creates the PodSnapshot and the agent performs the
-        # dump only after this point, so more observations will have
-        # accumulated by dump time. assert_restored_state only needs
-        # before >= checkpoint_observations, so an earlier, smaller count is
-        # still a valid (if conservative) baseline.
+        # minimum=1, not 2: the controller creates the PodSnapshot and the
+        # agent freezes the pod for the CRIU dump within well under a second
+        # of readiness (observed in e2e), faster than any workload poll
+        # interval can reliably beat — so only one pre-dump observation is
+        # ever actually written. assert_restored_state only needs
+        # before >= checkpoint_observations, so this lower, achievable count
+        # is still a valid (if conservative) baseline.
         checkpoint_observations = snap.wait_for_state_observations(
             config.namespace,
             source_pod_name,
             run.source_token,
             gpu=True,
-            minimum=2,
+            minimum=1,
         )
 
         sj = snap.wait_for_condition(
