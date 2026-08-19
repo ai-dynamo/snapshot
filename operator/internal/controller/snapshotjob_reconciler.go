@@ -56,10 +56,11 @@ type snapshotJobFailure struct {
 }
 
 type snapshotJobObservation struct {
-	job              *batchv1.Job
-	podSnapshot      *snapshotv1alpha1.PodSnapshot
-	sourcePodMissing bool
-	failure          *snapshotJobFailure
+	job                 *batchv1.Job
+	podSnapshot         *snapshotv1alpha1.PodSnapshot
+	sourcePodMissing    bool
+	deferCaptureFailure bool
+	failure             *snapshotJobFailure
 }
 
 // Reconcile first drives child resources toward the desired state, then derives
@@ -219,7 +220,13 @@ func (r *SnapshotJobReconciler) reconcilePodSnapshotResources(ctx context.Contex
 			if reason, cause := jobFailureReason(latestJob); reason != "" {
 				observed.job = latestJob
 				observed.failure = &snapshotJobFailure{reason: reason, cause: cause}
+				return observed, ctrl.Result{}, nil
 			}
+		}
+		reason, _ := captureFailureReason(snap)
+		if reason == snapshotv1alpha1.ReasonCaptureFailed && !alreadyObservedCaptureFailure(sj, reason) {
+			observed.deferCaptureFailure = true
+			return observed, ctrl.Result{RequeueAfter: captureFailureRequeueBackstop}, nil
 		}
 	}
 	return observed, ctrl.Result{}, nil
@@ -306,8 +313,11 @@ func deriveCapturedStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJ
 		next.Status.PodSnapshotName = observed.podSnapshot.Name
 		switch {
 		case snapshotv1alpha1.IsPodSnapshotFailed(observed.podSnapshot):
-			if failure == nil {
-				reason, message := captureFailureReason(observed.podSnapshot)
+			reason, message := captureFailureReason(observed.podSnapshot)
+			if observed.deferCaptureFailure {
+				setCondition(desired, snapshotv1alpha1.SnapshotJobConditionCaptured, metav1.ConditionFalse,
+					reason, message)
+			} else if failure == nil {
 				failure = &snapshotJobFailure{reason: reason, cause: errors.New(message)}
 			}
 		case snapshotv1alpha1.IsPodSnapshotSucceeded(observed.podSnapshot):
@@ -356,6 +366,18 @@ func deriveCompletionStatus(next *snapshotv1alpha1.SnapshotJob, observed snapsho
 				snapshotv1alpha1.ReasonWaitingForPodCompletion, "CRIU dump complete; waiting for helper containers to finish")
 		}
 	}
+}
+
+// captureFailureRequeueBackstop bounds the deferred re-check.
+// A backstop only: .Owns(&batchv1.Job{}) normally requeues sooner.
+const captureFailureRequeueBackstop = 2 * time.Second
+
+// alreadyObservedCaptureFailure reports whether this capture-failure reason
+// was already recorded on Captured, so observe() finalizes instead of
+// deferring again.
+func alreadyObservedCaptureFailure(sj *snapshotv1alpha1.SnapshotJob, reason string) bool {
+	cond := meta.FindStatusCondition(sj.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured)
+	return cond != nil && cond.Status == metav1.ConditionFalse && cond.Reason == reason
 }
 
 // captureFailureReason separates bind-stage PodSnapshot failures from failures
