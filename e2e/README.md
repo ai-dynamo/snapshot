@@ -48,6 +48,7 @@ uv run --project e2e python -m snapshot_e2e.infra.setup --phase snapshot-ready
 
 uv run --project e2e pytest e2e/tests -m environment -vv
 uv run --project e2e pytest e2e/tests/test_snapshot_lifecycle.py -vv -s
+uv run --project e2e pytest e2e/tests/test_snapshotjob.py -vv -s
 ```
 
 When finished, uninstall the Snapshot release and delete the checkpoint PVC:
@@ -86,6 +87,7 @@ KUBECONFIG="$SNAPSHOT_E2E_TARGET_KUBECONFIG" kubectl get pods -n "$SNAPSHOT_E2E_
 export KUBECONFIG="$SNAPSHOT_E2E_TARGET_KUBECONFIG"
 uv run --project e2e pytest e2e/tests -m environment -vv
 uv run --project e2e pytest e2e/tests/test_snapshot_lifecycle.py -vv -s
+uv run --project e2e pytest e2e/tests/test_snapshotjob.py -vv -s
 ```
 
 If the generated target kubeconfig is missing or points at the host context,

@@ -5,6 +5,16 @@ name: E2E Tests
 
 on:
   workflow_dispatch:
+    inputs:
+      snapshot_tag:
+        description: >-
+          Operator/agent image tag to install (e.g. from a manual
+          push-artifacts.yaml dispatch on a feature branch). Leave empty to
+          auto-resolve the newest tag published for both images in GHCR,
+          which is not necessarily built from the branch this workflow runs
+          against.
+        required: false
+        type: string
   schedule:
     # 23:00 Pacific Standard Time.
     - cron: "0 7 * * *"
@@ -113,12 +123,21 @@ jobs:
           uv --version
 
       - name: Resolve Snapshot image tag
+        if: ${{ (github.event.inputs.snapshot_tag || '') == '' }}
         timeout-minutes: 3
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           python3 hack/resolve-snapshot-image-tag.py
+
+      - name: Use provided Snapshot image tag
+        if: ${{ (github.event.inputs.snapshot_tag || '') != '' }}
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          echo "SNAPSHOT_E2E_SNAPSHOT_TAG=${{ github.event.inputs.snapshot_tag }}" >> "$GITHUB_ENV"
+          echo "Using provided Snapshot image tag: ${{ github.event.inputs.snapshot_tag }}"
 
       - name: Validate host GPU cluster
         timeout-minutes: 3
@@ -191,6 +210,12 @@ jobs:
         run: |
           set -euo pipefail
           uv run --locked --project e2e pytest e2e/tests/test_snapshot_lifecycle.py -vv -s
+
+      - name: Run SnapshotJob lifecycle tests
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e pytest e2e/tests/test_snapshotjob.py -vv -s
 
       - name: Cleanup e2e vCluster
         if: ${{ always() }}
