@@ -4,6 +4,7 @@
 #include <fstream>
 #include <optional>
 #include <string>
+#include <thread>
 
 #include "broker.hpp"
 
@@ -22,7 +23,7 @@ class BrokerTest : public ::testing::Test {
     source_ = root_ / "storage" / "source";
     fs::create_directories(source_);
     std::ofstream(source_ / "image") << "image";
-    broker_.emplace(root_ / "tmpfs");
+    broker_.emplace(root_ / "tmpfs", root_ / "storage");
   }
 
   void TearDown() override { fs::remove_all(root_); }
@@ -77,6 +78,80 @@ TEST_F(BrokerTest, StagesRestoreAndCleansUpOnCommit)
   EXPECT_EQ(abort_response.failure().code(), Failure::TRANSACTION_NOT_FOUND);
 }
 
+TEST_F(BrokerTest, StagesIndependentRestoresConcurrently)
+{
+  auto first = RequestFor("first");
+  auto second = RequestFor("second");
+  Configure(
+      first.mutable_staged_restore()->mutable_source(), first.mutable_staged_restore()->mutable_io_engine(), source_);
+  Configure(
+      second.mutable_staged_restore()->mutable_source(), second.mutable_staged_restore()->mutable_io_engine(), source_);
+
+  Response first_response;
+  Response second_response;
+  std::thread first_request([&] { first_response = broker().HandleRequest(first); });
+  std::thread second_request([&] { second_response = broker().HandleRequest(second); });
+  first_request.join();
+  second_request.join();
+
+  ASSERT_TRUE(first_response.has_staged_restore_directory());
+  ASSERT_TRUE(second_response.has_staged_restore_directory());
+  EXPECT_NE(
+      first_response.staged_restore_directory().image_directory(),
+      second_response.staged_restore_directory().image_directory());
+}
+
+TEST_F(BrokerTest, RejectsConcurrentRestoreForSameTransaction)
+{
+  auto first = RequestFor("restore");
+  auto second = RequestFor("restore");
+  Configure(
+      first.mutable_staged_restore()->mutable_source(), first.mutable_staged_restore()->mutable_io_engine(), source_);
+  Configure(
+      second.mutable_staged_restore()->mutable_source(), second.mutable_staged_restore()->mutable_io_engine(), source_);
+
+  Response first_response;
+  Response second_response;
+  std::thread first_request([&] { first_response = broker().HandleRequest(first); });
+  std::thread second_request([&] { second_response = broker().HandleRequest(second); });
+  first_request.join();
+  second_request.join();
+
+  EXPECT_NE(first_response.has_staged_restore_directory(), second_response.has_staged_restore_directory());
+}
+
+TEST_F(BrokerTest, ReapsExpiredStagedTransactions)
+{
+  auto restore = RequestFor("expired");
+  Configure(
+      restore.mutable_staged_restore()->mutable_source(), restore.mutable_staged_restore()->mutable_io_engine(), source_);
+  const auto staged = broker().HandleRequest(restore);
+  ASSERT_TRUE(staged.has_staged_restore_directory());
+  const fs::path staging_directory(staged.staged_restore_directory().image_directory());
+
+  broker().ReapExpiredTransactions(std::chrono::steady_clock::now() + std::chrono::hours(1));
+  EXPECT_FALSE(fs::exists(staging_directory));
+
+  auto commit = RequestFor("expired");
+  commit.mutable_commit();
+  EXPECT_EQ(broker().HandleRequest(commit).failure().code(), Failure::TRANSACTION_NOT_FOUND);
+
+  auto retry = RequestFor("expired");
+  Configure(retry.mutable_staged_restore()->mutable_source(), retry.mutable_staged_restore()->mutable_io_engine(), source_);
+  EXPECT_TRUE(broker().HandleRequest(retry).has_staged_restore_directory());
+}
+
+TEST_F(BrokerTest, CleansStaleStagingOnStart)
+{
+  broker_.reset();
+  const fs::path stale = root_ / "tmpfs" / "restore" / "stale";
+  fs::create_directories(stale);
+  std::ofstream(stale / "image") << "image";
+
+  broker_.emplace(root_ / "tmpfs", root_ / "storage");
+  EXPECT_FALSE(fs::exists(stale));
+}
+
 TEST_F(BrokerTest, RejectsUnsafeTransactionIDs)
 {
   for (const auto& id :
@@ -100,6 +175,162 @@ TEST_F(BrokerTest, RejectsSymlinkInRestoreSource)
   const auto response = broker().HandleRequest(restore);
   ASSERT_TRUE(response.has_failure());
   EXPECT_EQ(response.failure().code(), Failure::STORAGE_ERROR);
+}
+
+TEST_F(BrokerTest, InvalidRestoreDoesNotReserveTransaction)
+{
+  auto invalid = RequestFor("restore");
+  Configure(
+      invalid.mutable_staged_restore()->mutable_source(), invalid.mutable_staged_restore()->mutable_io_engine(),
+      "relative");
+  EXPECT_EQ(broker().HandleRequest(invalid).failure().code(), Failure::INVALID_REQUEST);
+
+  auto restore = RequestFor("restore");
+  Configure(
+      restore.mutable_staged_restore()->mutable_source(), restore.mutable_staged_restore()->mutable_io_engine(),
+      source_);
+  EXPECT_TRUE(broker().HandleRequest(restore).has_staged_restore_directory());
+}
+
+TEST_F(BrokerTest, RejectsPathsOutsideStorageRoot)
+{
+  const fs::path outside = root_ / "outside";
+  fs::create_directories(outside);
+  std::ofstream(outside / "image") << "image";
+
+  auto restore = RequestFor("outside-restore");
+  Configure(
+      restore.mutable_staged_restore()->mutable_source(), restore.mutable_staged_restore()->mutable_io_engine(), outside);
+  EXPECT_EQ(broker().HandleRequest(restore).failure().code(), Failure::INVALID_REQUEST);
+
+  auto checkpoint = RequestFor("outside-checkpoint");
+  Configure(
+      checkpoint.mutable_prepare_staged_checkpoint()->mutable_destination(),
+      checkpoint.mutable_prepare_staged_checkpoint()->mutable_io_engine(),
+      outside / "checkpoint");
+  EXPECT_EQ(broker().HandleRequest(checkpoint).failure().code(), Failure::INVALID_REQUEST);
+
+  fs::create_directory_symlink(outside, root_ / "storage" / "link");
+  auto symlinked = RequestFor("symlinked-checkpoint");
+  Configure(
+      symlinked.mutable_prepare_staged_checkpoint()->mutable_destination(),
+      symlinked.mutable_prepare_staged_checkpoint()->mutable_io_engine(),
+      root_ / "storage" / "link" / "checkpoint");
+  EXPECT_EQ(broker().HandleRequest(symlinked).failure().code(), Failure::INVALID_REQUEST);
+
+  auto root_destination = RequestFor("root-destination");
+  Configure(
+      root_destination.mutable_prepare_staged_checkpoint()->mutable_destination(),
+      root_destination.mutable_prepare_staged_checkpoint()->mutable_io_engine(), root_ / "storage");
+  EXPECT_EQ(broker().HandleRequest(root_destination).failure().code(), Failure::INVALID_REQUEST);
+}
+
+TEST_F(BrokerTest, InsufficientStagingDoesNotReserveTransaction)
+{
+  const fs::path large = root_ / "storage" / "large";
+  fs::create_directories(large);
+  std::ofstream file(large / "image");
+  file.seekp(1LL << 40);
+  file.put('\0');
+  file.close();
+
+  auto insufficient = RequestFor("restore");
+  Configure(
+      insufficient.mutable_staged_restore()->mutable_source(), insufficient.mutable_staged_restore()->mutable_io_engine(),
+      large);
+  EXPECT_EQ(broker().HandleRequest(insufficient).failure().code(), Failure::INSUFFICIENT_STORAGE);
+
+  auto retry = RequestFor("restore");
+  Configure(
+      retry.mutable_staged_restore()->mutable_source(), retry.mutable_staged_restore()->mutable_io_engine(), source_);
+  EXPECT_TRUE(broker().HandleRequest(retry).has_staged_restore_directory());
+}
+
+TEST_F(BrokerTest, RejectsInvalidStagedRestore)
+{
+  auto restore = RequestFor("restore");
+  restore.mutable_staged_restore();
+  const auto response = broker().HandleRequest(restore);
+  ASSERT_TRUE(response.has_failure());
+  EXPECT_EQ(response.failure().code(), Failure::INVALID_REQUEST);
+}
+
+TEST_F(BrokerTest, UnknownCommitAndAbortDoNotReserveTransactions)
+{
+  auto commit = RequestFor("unknown-commit");
+  commit.mutable_commit();
+  EXPECT_EQ(broker().HandleRequest(commit).failure().code(), Failure::TRANSACTION_NOT_FOUND);
+
+  auto restore = RequestFor("unknown-commit");
+  Configure(
+      restore.mutable_staged_restore()->mutable_source(), restore.mutable_staged_restore()->mutable_io_engine(),
+      source_);
+  EXPECT_TRUE(broker().HandleRequest(restore).has_staged_restore_directory());
+
+  auto abort = RequestFor("unknown-abort");
+  abort.mutable_abort();
+  EXPECT_EQ(broker().HandleRequest(abort).failure().code(), Failure::TRANSACTION_NOT_FOUND);
+
+  auto prepare = RequestFor("unknown-abort");
+  Configure(
+      prepare.mutable_prepare_staged_checkpoint()->mutable_destination(),
+      prepare.mutable_prepare_staged_checkpoint()->mutable_io_engine(), root_ / "storage" / "published");
+  EXPECT_TRUE(broker().HandleRequest(prepare).has_staged_checkpoint_directory());
+}
+
+TEST_F(BrokerTest, EvictsOldTerminalTransactionsButRetainsRecentCompletions)
+{
+  auto oldest = RequestFor("oldest");
+  Configure(
+      oldest.mutable_prepare_staged_checkpoint()->mutable_destination(),
+      oldest.mutable_prepare_staged_checkpoint()->mutable_io_engine(), root_ / "storage" / "oldest");
+  ASSERT_TRUE(broker().HandleRequest(oldest).has_staged_checkpoint_directory());
+  auto oldest_commit = RequestFor("oldest");
+  oldest_commit.mutable_commit();
+  ASSERT_TRUE(broker().HandleRequest(oldest_commit).has_commit_complete());
+
+  for (size_t index = 0; index < 1024; ++index) {
+    const auto id = "terminal-" + std::to_string(index);
+    auto prepare = RequestFor(id);
+    Configure(
+        prepare.mutable_prepare_staged_checkpoint()->mutable_destination(),
+        prepare.mutable_prepare_staged_checkpoint()->mutable_io_engine(), root_ / "storage" / id);
+    ASSERT_TRUE(broker().HandleRequest(prepare).has_staged_checkpoint_directory());
+    auto commit = RequestFor(id);
+    commit.mutable_commit();
+    ASSERT_TRUE(broker().HandleRequest(commit).has_commit_complete());
+  }
+
+  auto recent_commit = RequestFor("terminal-1023");
+  recent_commit.mutable_commit();
+  EXPECT_TRUE(broker().HandleRequest(recent_commit).has_commit_complete());
+
+  auto reuse = RequestFor("oldest");
+  Configure(
+      reuse.mutable_staged_restore()->mutable_source(), reuse.mutable_staged_restore()->mutable_io_engine(), source_);
+  EXPECT_TRUE(broker().HandleRequest(reuse).has_staged_restore_directory());
+}
+
+TEST_F(BrokerTest, AbortsFailedCheckpointStaging)
+{
+  const fs::path destination = root_ / "storage" / "published";
+  const fs::path staging_directory = root_ / "tmpfs" / "checkpoint" / "checkpoint";
+  fs::create_symlink(root_ / "missing", staging_directory);
+  auto prepare = RequestFor("checkpoint");
+  Configure(
+      prepare.mutable_prepare_staged_checkpoint()->mutable_destination(),
+      prepare.mutable_prepare_staged_checkpoint()->mutable_io_engine(), destination);
+  const auto failed = broker().HandleRequest(prepare);
+  ASSERT_TRUE(failed.has_failure());
+  EXPECT_EQ(failed.failure().code(), Failure::STORAGE_ERROR);
+
+  auto abort = RequestFor("checkpoint");
+  abort.mutable_abort();
+  EXPECT_TRUE(broker().HandleRequest(abort).has_abort_complete());
+
+  const auto retry = broker().HandleRequest(prepare);
+  ASSERT_TRUE(retry.has_failure());
+  EXPECT_EQ(retry.failure().code(), Failure::TRANSACTION_CONFLICT);
 }
 
 TEST_F(BrokerTest, PublishesCheckpoint)
