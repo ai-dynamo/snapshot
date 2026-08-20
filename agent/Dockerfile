@@ -82,6 +82,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN go test ./... -v && make -C pagebroker test
 
 # =============================================================================
+# Stage: PageBroker Builder
+# =============================================================================
+FROM go-base AS pagebroker-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libprotobuf-dev \
+    protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN make -C pagebroker daemon
+
+# =============================================================================
 # Stage: Builder - Build Go binaries
 # =============================================================================
 FROM go-base AS builder
@@ -189,6 +202,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnet1 \
     libnl-3-200 \
     libnl-route-3-200 \
+    libprotobuf32t64 \
     libprotobuf-c1 \
     libgnutls30t64 \
     libnftables1 \
@@ -242,6 +256,10 @@ RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-help
 
 # Copy the built binaries
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
+COPY --from=pagebroker-builder /workspace/pagebroker/pagebroker /usr/local/bin/pagebroker
+RUN output=$(/usr/local/bin/pagebroker 2>&1); status=$?; \
+    [ "$status" -eq 2 ]; \
+    [ "$output" = "usage: pagebroker socket_path staging_directory storage_root --max-concurrent-requests max_concurrent_requests" ]
 
 # Assemble the injection bundle: bind-mounted read-only into the placeholder's
 # mount namespace at /tmp/snapshot-binaries during restore (internal/nsmount).
