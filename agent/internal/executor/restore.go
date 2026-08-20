@@ -151,6 +151,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	transactionID := ""
 	var broker pagebroker.Client
 	committed := false
+	var pageBrokerStageDuration, pageBrokerMountDuration, pageBrokerCommitDuration time.Duration
 	if brokered {
 		transactionID = uuid.NewString()
 		broker = pagebroker.Client{ControlSocketPath: req.PageBrokerControlSocketPath}
@@ -161,11 +162,15 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 				_ = broker.Abort(abortCtx, transactionID)
 			}
 		}()
+		stageStart := time.Now()
 		staged, err := broker.StagedRestore(ctx, transactionID, artifactPath)
+		pageBrokerStageDuration = time.Since(stageStart)
 		if err != nil {
 			return 0, fmt.Errorf("stage PageBroker restore: %w", err)
 		}
+		mountStart := time.Now()
 		stagingMount, err := mounts.MountPageBroker(ctx, bundleMount, staged)
+		pageBrokerMountDuration = time.Since(mountStart)
 		if err != nil {
 			return 0, fmt.Errorf("mount PageBroker staging: %w", err)
 		}
@@ -190,11 +195,13 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
 	}
 	if brokered {
+		commitStart := time.Now()
 		if err := broker.Commit(ctx, transactionID); err != nil {
 			log.Error(err, "failed to commit PageBroker restore")
 		} else {
 			committed = true
 		}
+		pageBrokerCommitDuration = time.Since(commitStart)
 	}
 	if result.CleanupError != nil {
 		cleanupErr = errors.Join(cleanupErr, result.CleanupError)
@@ -206,6 +213,9 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	cleanup()
 	wall := time.Since(restoreStart)
 	unaccounted := remainingDuration(wall,
+		pageBrokerStageDuration,
+		pageBrokerMountDuration,
+		pageBrokerCommitDuration,
 		gpuDeviceMapDuration,
 		result.OverlayCaptureDuration,
 		result.CRIUPrepareDuration,
@@ -215,6 +225,9 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	summary := map[string]any{
 		"duration": wall.String(),
 		"phases": map[string]string{
+			"pagebroker_stage": pageBrokerStageDuration.String(),
+			"pagebroker_mount": pageBrokerMountDuration.String(),
+			"pagebroker_commit": pageBrokerCommitDuration.String(),
 			"gpu_device_map":  gpuDeviceMapDuration.String(),
 			"overlay_capture": result.OverlayCaptureDuration.String(),
 			"criu_prepare":    result.CRIUPrepareDuration.String(),
