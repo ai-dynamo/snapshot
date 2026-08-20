@@ -280,11 +280,14 @@ func (w *NodeController) runCheckpoint(
 		}
 		// Dump succeeded but the sentinel is no longer written inside checkpointFn. Kill the
 		// still-blocked target so a terminal Failed cannot leave it polling forever.
-		w.killCheckpointProcess(logger, containerPID, "checkpoint lease cancelled")
+		if killErr := w.killCheckpointProcess(logger, containerPID, "checkpoint lease cancelled"); killErr != nil {
+			logger.Error(killErr, "Failed to kill target after lease cancellation", "content", content.Name)
+		}
 		return
 	}
 
 	if err := w.markCheckpointReadyAndRelease(ctx, content, containerPID); err != nil {
+		logger.Error(err, "Failed to finalize checkpoint ready-and-release", "content", content.Name)
 		return
 	}
 }
@@ -434,7 +437,7 @@ func (w *NodeController) markCheckpointReadyAndRelease(ctx context.Context, cont
 				// sentinel (isContentTerminal short-circuits), so kill the still-blocked target.
 				if meta.IsStatusConditionTrue(current.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed) &&
 					!meta.IsStatusConditionTrue(current.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady) {
-					w.killCheckpointProcess(logger, containerPID, "checkpoint content already failed")
+					return w.killCheckpointProcess(logger, containerPID, "checkpoint content already failed")
 				}
 				return nil
 			}
@@ -444,7 +447,9 @@ func (w *NodeController) markCheckpointReadyAndRelease(ctx context.Context, cont
 	}
 	if err := w.releaseCheckpointFn(containerPID); err != nil {
 		logger.Error(err, "Failed to write snapshot-complete sentinel", "content", content.Name)
-		w.killCheckpointProcess(logger, containerPID, "checkpoint sentinel failed")
+		if killErr := w.killCheckpointProcess(logger, containerPID, "checkpoint sentinel failed"); killErr != nil {
+			return fmt.Errorf("write snapshot-complete sentinel: %w; kill target: %v", err, killErr)
+		}
 		return fmt.Errorf("write snapshot-complete sentinel: %w", err)
 	}
 	return nil
@@ -499,11 +504,17 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 	return nil
 }
 
-// killCheckpointProcess signals the CUDA-locked process so it does not hang after a failed dump.
-func (w *NodeController) killCheckpointProcess(log logr.Logger, pid int, reason string) {
+// killCheckpointProcess SIGKILLs the CUDA-locked process so it does not hang after a failed dump.
+// ESRCH (already exited) is success. Any other signal error is returned so callers can fail closed.
+func (w *NodeController) killCheckpointProcess(log logr.Logger, pid int, reason string) error {
 	if err := snapshotruntime.SendSignalToPID(log, pid, syscall.SIGKILL, reason); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
 		log.Error(err, "Failed to signal checkpoint process", "reason", reason)
+		return err
 	}
+	return nil
 }
 
 // containerIDForName returns the running container's CRI-stripped ID, or "" if absent.
