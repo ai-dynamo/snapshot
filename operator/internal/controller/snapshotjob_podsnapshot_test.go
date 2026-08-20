@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -248,6 +249,9 @@ func TestSnapshotJobReconcileFailedOnPodSnapshotFailed(t *testing.T) {
 	job, err := buildSourceJob(sj)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	// No job.Status.StartTime set: nearActiveDeadline is false, so this is
+	// "far from any deadline" — a genuine capture failure finalizes on the
+	// very first pass, per the documented immediate-terminal behavior.
 	pod := sourcePodForJob(job)
 	snap, err := buildPodSnapshot(sj, pod)
 	require.NoError(t, err)
@@ -257,27 +261,13 @@ func TestSnapshotJobReconcileFailedOnPodSnapshotFailed(t *testing.T) {
 
 	r := makeSnapshotJobReconciler(s, sj, job, pod, snap)
 
-	// First pass: no Job failure yet, so this defers instead of finalizing.
-	res, err := r.Reconcile(context.Background(), reconcileRequest(sj))
-	require.NoError(t, err)
-	assert.Equal(t, captureFailureRequeueBackstop, res.RequeueAfter)
-
-	deferred := &snapshotv1alpha1.SnapshotJob{}
-	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, deferred))
-	captured := meta.FindStatusCondition(deferred.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured)
-	require.NotNil(t, captured)
-	assert.Equal(t, metav1.ConditionFalse, captured.Status)
-	assert.Equal(t, snapshotv1alpha1.ReasonCaptureFailed, captured.Reason)
-	assert.Nil(t, meta.FindStatusCondition(deferred.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed))
-
-	// Second pass: same failure, still no Job failure — now it finalizes.
 	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
 	require.NoError(t, err)
 
 	updated := &snapshotv1alpha1.SnapshotJob{}
 	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
 
-	captured = meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured)
+	captured := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured)
 	require.NotNil(t, captured)
 	assert.Equal(t, metav1.ConditionFalse, captured.Status)
 	assert.Equal(t, snapshotv1alpha1.ReasonCaptureFailed, captured.Reason)
@@ -299,6 +289,10 @@ func TestSnapshotJobReconcileJobFailureWinsAfterDeferredCapture(t *testing.T) {
 	job, err := buildSourceJob(sj)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	// StartTime + ActiveDeadlineSeconds == now: puts the Job right at its
+	// deadline boundary, so nearActiveDeadline holds and observe() defers.
+	startTime := metav1.NewTime(time.Now().Add(-time.Duration(*sj.Spec.ActiveDeadlineSeconds) * time.Second))
+	job.Status.StartTime = &startTime
 	pod := sourcePodForJob(job)
 	snap, err := buildPodSnapshot(sj, pod)
 	require.NoError(t, err)
@@ -309,10 +303,13 @@ func TestSnapshotJobReconcileJobFailureWinsAfterDeferredCapture(t *testing.T) {
 
 	r := makeSnapshotJobReconciler(s, sj, job, pod, snap)
 
-	// First pass: no Job failure yet — defers instead of finalizing.
+	// First pass: near the deadline but no Job failure yet — defers.
 	res, err := r.Reconcile(context.Background(), reconcileRequest(sj))
 	require.NoError(t, err)
 	assert.Equal(t, captureFailureRequeueBackstop, res.RequeueAfter)
+	deferred := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, deferred))
+	assert.Nil(t, meta.FindStatusCondition(deferred.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed))
 
 	// The Job controller's own condition lands before the deferred pass runs.
 	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, job))

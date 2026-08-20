@@ -217,14 +217,14 @@ func (r *SnapshotJobReconciler) reconcilePodSnapshotResources(ctx context.Contex
 		// so the Job-level reason wins that race.
 		latestJob := &batchv1.Job{}
 		if err := r.sourcePodReader().Get(ctx, client.ObjectKeyFromObject(job), latestJob); err == nil {
+			observed.job = latestJob
 			if reason, cause := jobFailureReason(latestJob); reason != "" {
-				observed.job = latestJob
 				observed.failure = &snapshotJobFailure{reason: reason, cause: cause}
 				return observed, ctrl.Result{}, nil
 			}
 		}
 		reason, _ := captureFailureReason(snap)
-		if reason == snapshotv1alpha1.ReasonCaptureFailed && !alreadyObservedCaptureFailure(sj, reason) {
+		if reason == snapshotv1alpha1.ReasonCaptureFailed && nearActiveDeadline(observed.job) {
 			observed.deferCaptureFailure = true
 			return observed, ctrl.Result{RequeueAfter: captureFailureRequeueBackstop}, nil
 		}
@@ -282,6 +282,9 @@ func deriveSnapshotJobStatus(sj *snapshotv1alpha1.SnapshotJob, observed snapshot
 		deriveFailureStatus(next, failure)
 		return next.Status
 	}
+	if observed.deferCaptureFailure {
+		return next.Status
+	}
 	deriveCompletionStatus(next, observed)
 	return next.Status
 }
@@ -314,10 +317,7 @@ func deriveCapturedStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJ
 		switch {
 		case snapshotv1alpha1.IsPodSnapshotFailed(observed.podSnapshot):
 			reason, message := captureFailureReason(observed.podSnapshot)
-			if observed.deferCaptureFailure {
-				setCondition(desired, snapshotv1alpha1.SnapshotJobConditionCaptured, metav1.ConditionFalse,
-					reason, message)
-			} else if failure == nil {
+			if !observed.deferCaptureFailure && failure == nil {
 				failure = &snapshotJobFailure{reason: reason, cause: errors.New(message)}
 			}
 		case snapshotv1alpha1.IsPodSnapshotSucceeded(observed.podSnapshot):
@@ -368,16 +368,29 @@ func deriveCompletionStatus(next *snapshotv1alpha1.SnapshotJob, observed snapsho
 	}
 }
 
-// captureFailureRequeueBackstop bounds the deferred re-check.
-// A backstop only: .Owns(&batchv1.Job{}) normally requeues sooner.
+// captureFailureRequeueBackstop bounds how often reconciliation re-checks while
+// nearActiveDeadline holds. A backstop only: .Owns(&batchv1.Job{}) normally
+// wakes this up sooner.
 const captureFailureRequeueBackstop = 2 * time.Second
 
-// alreadyObservedCaptureFailure reports whether this capture-failure reason
-// was already recorded on Captured, so observe() finalizes instead of
-// deferring again.
-func alreadyObservedCaptureFailure(sj *snapshotv1alpha1.SnapshotJob, reason string) bool {
-	cond := meta.FindStatusCondition(sj.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured)
-	return cond != nil && cond.Status == metav1.ConditionFalse && cond.Reason == reason
+// captureFailureDeadlineGrace is how close to the Job's activeDeadlineSeconds
+// boundary (on either side) counts as "a raced deadline failure is plausible."
+const captureFailureDeadlineGrace = 5 * time.Second
+
+// nearActiveDeadline reports whether the Job's activeDeadlineSeconds boundary
+// is within captureFailureDeadlineGrace of now — the window in which deadline
+// expiry deleting the pod can race the Job controller's own Failed condition
+// write. False (no deferral) if the Job never started or has no deadline.
+func nearActiveDeadline(job *batchv1.Job) bool {
+	if job.Spec.ActiveDeadlineSeconds == nil || job.Status.StartTime == nil {
+		return false
+	}
+	deadline := job.Status.StartTime.Add(time.Duration(*job.Spec.ActiveDeadlineSeconds) * time.Second)
+	diff := time.Since(deadline)
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff < captureFailureDeadlineGrace
 }
 
 // captureFailureReason separates bind-stage PodSnapshot failures from failures
