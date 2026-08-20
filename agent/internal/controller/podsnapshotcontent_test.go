@@ -106,6 +106,17 @@ func TestArtifactPresent(t *testing.T) {
 	assert.True(t, artifactPresent(t.TempDir()))
 }
 
+func TestExecutorCheckpoint_DumpFailureSurfacesKillError(t *testing.T) {
+	w := makeNodeController(t, &fakeCheckpointer{})
+	err := w.executorCheckpoint(context.Background(), CheckpointParams{
+		Pod:          &corev1.Pod{},
+		ContainerPID: 0,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "checkpoint")
+	assert.Contains(t, err.Error(), "kill target")
+}
+
 // makeWorkOrder builds a PodSnapshotContent work order pinned to a node and checkpoint id.
 // Capture parameters now live on the source pod, so the work order carries only the node
 // label and spec.

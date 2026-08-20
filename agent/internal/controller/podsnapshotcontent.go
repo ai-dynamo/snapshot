@@ -557,17 +557,25 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		Clientset:          w.clientset,
 	}
 	if err := executor.Checkpoint(ctx, w.runtime, log, req, w.config); err != nil {
-		w.killCheckpointProcess(log, params.ContainerPID, "checkpoint failed")
-		return fmt.Errorf("checkpoint: %w", err)
+		dumpErr := fmt.Errorf("checkpoint: %w", err)
+		if killErr := w.killCheckpointProcess(log, params.ContainerPID, "checkpoint failed"); killErr != nil {
+			return fmt.Errorf("%w; kill target: %v", dumpErr, killErr)
+		}
+		return dumpErr
 	}
 
 	info, statErr := os.Stat(params.HostPath)
 	if statErr != nil || !info.IsDir() {
-		w.killCheckpointProcess(log, params.ContainerPID, "checkpoint verification failed")
+		var verifyErr error
 		if statErr != nil {
-			return fmt.Errorf("verify checkpoint path %s: %w", params.HostPath, statErr)
+			verifyErr = fmt.Errorf("verify checkpoint path %s: %w", params.HostPath, statErr)
+		} else {
+			verifyErr = fmt.Errorf("verify checkpoint path %s: not a directory", params.HostPath)
 		}
-		return fmt.Errorf("verify checkpoint path %s: not a directory", params.HostPath)
+		if killErr := w.killCheckpointProcess(log, params.ContainerPID, "checkpoint verification failed"); killErr != nil {
+			return fmt.Errorf("%w; kill target: %v", verifyErr, killErr)
+		}
+		return verifyErr
 	}
 
 	return nil
