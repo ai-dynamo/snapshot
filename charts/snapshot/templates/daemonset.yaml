@@ -108,7 +108,7 @@ spec:
       containers:
         {{- if .Values.pageBroker.enabled }}
         - name: pagebroker
-          image: "{{ .Values.pageBroker.image.repository }}:{{ .Values.pageBroker.image.tag }}"
+          image: "{{ .Values.pageBroker.image.repository }}:{{ .Values.pageBroker.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.pageBroker.image.pullPolicy }}
           command:
           {{- with .Values.pageBroker.command }}
@@ -211,7 +211,6 @@ spec:
         - name: pagebroker
           emptyDir:
             medium: Memory
-            sizeLimit: {{ .Values.pageBroker.stagingSizeLimit | quote }}
         {{- end }}
         {{- if .Values.seccomp.deploy }}
         # Seccomp profile ConfigMap (used by initContainer)

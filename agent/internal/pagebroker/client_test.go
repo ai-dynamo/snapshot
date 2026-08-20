@@ -126,6 +126,52 @@ func TestCommitRetriesLostResponses(t *testing.T) {
 	}
 }
 
+func TestCommitStopsWhenRetryResponseHangs(t *testing.T) {
+	previousLimit := commitRetryLimit
+	commitRetryLimit = 200 * time.Millisecond
+	t.Cleanup(func() { commitRetryLimit = previousLimit })
+
+	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "pagebroker.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	accepted := make(chan net.Conn, 2)
+	go func() {
+		for range 2 {
+			connection, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			accepted <- connection
+		}
+	}()
+
+	result := make(chan error, 1)
+	go func() {
+		result <- (Client{ControlSocketPath: listener.Addr().String()}).Commit(context.Background(), "transaction")
+	}()
+
+	first := <-accepted
+	if _, err := readMessage(first); err != nil {
+		t.Fatal(err)
+	}
+	_ = first.Close()
+
+	second := <-accepted
+	defer second.Close()
+	if _, err := readMessage(second); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-result; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Commit() error = %v, want retry deadline", err)
+	}
+	if _, err := readMessage(second); err == nil {
+		t.Fatal("retry connection did not close")
+	}
+}
+
 func TestAbortRequiresAbortComplete(t *testing.T) {
 	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "pagebroker.sock"))
 	if err != nil {
