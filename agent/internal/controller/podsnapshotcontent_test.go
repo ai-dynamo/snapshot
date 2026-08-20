@@ -343,6 +343,22 @@ func TestReconcileSourcePod_InvalidCheckpointIDFails(t *testing.T) {
 	assert.Equal(t, "InvalidCheckpointID", cond.Reason)
 }
 
+func TestReconcileSourcePod_CheckpointIDWithInvalidLeaseNameFails(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	pod := makeSourcePod("x")
+	// Underscores are valid in label values but invalid in DNS-1123 Lease names.
+	pod.Labels[snapshotv1alpha1.CheckpointIDLabel] = "bad_id"
+	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+
+	got := getContent(t, w, content.Name)
+	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, "InvalidCheckpointID", cond.Reason)
+	assert.Contains(t, cond.Message, "invalid Lease name")
+}
+
 func TestReconcileSourcePod_DottedCheckpointIDIsValid(t *testing.T) {
 	// A SnapshotJob name like "warm.worker" is a valid Kubernetes object name (RFC
 	// 1123 subdomain) and a valid label value, but not a valid DNS-1123 label — the

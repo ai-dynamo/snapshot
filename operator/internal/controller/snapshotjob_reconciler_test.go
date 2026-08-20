@@ -115,7 +115,7 @@ func TestSnapshotJobReconcileInvalidSpecIsTerminal(t *testing.T) {
 
 	jobs := &batchv1.JobList{}
 	require.NoError(t, r.List(context.Background(), jobs))
-	assert.Nil(t, batchJobByName(jobs, sj.Name), "no Job should be created for an invalid spec")
+	assert.Nil(t, getBatchJobByName(jobs, sj.Name), "no Job should be created for an invalid spec")
 
 	updated := &snapshotv1alpha1.SnapshotJob{}
 	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
@@ -276,6 +276,44 @@ func TestSnapshotJobReconcileAdoptsOwnedJob(t *testing.T) {
 	jobs := &batchv1.JobList{}
 	require.NoError(t, r.List(context.Background(), jobs))
 	assert.Len(t, jobs.Items, 1, "an already-owned Job must not be recreated")
+}
+
+func TestSnapshotJobReconcileObservesTerminalPodSnapshotFromAlreadyExistsRace(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+	sj.UID = types.UID("sj-uid")
+	job, err := buildSourceJob(sj)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	pod := sourcePodForJob(job)
+	snap, err := buildPodSnapshot(sj, pod)
+	require.NoError(t, err)
+	meta.SetStatusCondition(&snap.Status.Conditions, metav1.Condition{
+		Type: snapshotv1alpha1.PodSnapshotConditionReady, Status: metav1.ConditionTrue, Reason: "Captured",
+	})
+
+	listCalls := 0
+	funcs := interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+		if snaps, ok := list.(*snapshotv1alpha1.PodSnapshotList); ok {
+			listCalls++
+			if listCalls == 1 {
+				snaps.Items = nil // informer cache misses the already-created object
+				return nil
+			}
+		}
+		return c.List(ctx, list, opts...)
+	}}
+	r := makeSnapshotJobReconcilerWithInterceptor(s, funcs, sj, job, pod, snap)
+
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	captured := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured)
+	require.NotNil(t, captured)
+	assert.Equal(t, metav1.ConditionTrue, captured.Status)
+	assert.Equal(t, snapshotv1alpha1.ReasonCaptureCompleted, captured.Reason)
 }
 
 func TestSnapshotJobReconcileRunningTransitionsOnJobReady(t *testing.T) {
@@ -439,7 +477,7 @@ func TestSnapshotJobReconcileSkipsTerminalAndDeleted(t *testing.T) {
 
 		jobs := &batchv1.JobList{}
 		require.NoError(t, r.List(context.Background(), jobs))
-		assert.Nil(t, batchJobByName(jobs, sj.Name), "a terminal SnapshotJob must not create a Job")
+		assert.Nil(t, getBatchJobByName(jobs, sj.Name), "a terminal SnapshotJob must not create a Job")
 	})
 
 	t.Run("SnapshotJob with a deletion timestamp is not reconciled", func(t *testing.T) {
@@ -455,7 +493,7 @@ func TestSnapshotJobReconcileSkipsTerminalAndDeleted(t *testing.T) {
 
 		jobs := &batchv1.JobList{}
 		require.NoError(t, r.List(context.Background(), jobs))
-		assert.Nil(t, batchJobByName(jobs, sj.Name))
+		assert.Nil(t, getBatchJobByName(jobs, sj.Name))
 	})
 
 	t.Run("SnapshotJob not found is a no-op", func(t *testing.T) {

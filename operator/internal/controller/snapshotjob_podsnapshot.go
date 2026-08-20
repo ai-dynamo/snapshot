@@ -14,7 +14,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -32,20 +31,28 @@ var errPodSnapshotNameConflict = errors.New("existing PodSnapshot is not owned b
 // This is a read triggered by a Job status change, not a pod watch — the
 // controller does not watch pods (design: "SnapshotJob observes the Job, not the
 // Pod, for failure status").
-func findSourcePod(ctx context.Context, c client.Client, job *batchv1.Job) (*corev1.Pod, error) {
+func findSourcePod(ctx context.Context, reader client.Reader, job *batchv1.Job) (*corev1.Pod, error) {
 	var pods corev1.PodList
-	if err := c.List(ctx, &pods,
+	if err := reader.List(ctx, &pods,
 		client.InNamespace(job.Namespace),
 		client.MatchingLabels{batchv1.JobNameLabel: job.Name},
 	); err != nil {
 		return nil, err
 	}
+	var controlled []*corev1.Pod
 	for i := range pods.Items {
 		if metav1.IsControlledBy(&pods.Items[i], job) {
-			return &pods.Items[i], nil
+			controlled = append(controlled, &pods.Items[i])
 		}
 	}
-	return nil, apierrors.NewNotFound(corev1.Resource("pods"), job.Name)
+	switch len(controlled) {
+	case 0:
+		return nil, apierrors.NewNotFound(corev1.Resource("pods"), job.Name)
+	case 1:
+		return controlled[0], nil
+	default:
+		return nil, fmt.Errorf("source Job %q controls %d pods; expected exactly one", job.Name, len(controlled))
+	}
 }
 
 // findOwnedPodSnapshot returns this SnapshotJob's PodSnapshot, located by
@@ -71,6 +78,10 @@ func (r *SnapshotJobReconciler) findOwnedPodSnapshot(ctx context.Context, sj *sn
 			sj.Name,
 		)
 	case 1:
+		if !podSnapshotBelongsToSnapshotJob(&snaps.Items[0], sj) {
+			return nil, fmt.Errorf("%w: PodSnapshot %q belongs to a different SnapshotJob incarnation",
+				errPodSnapshotNameConflict, snaps.Items[0].Name)
+		}
 		return &snaps.Items[0], nil
 	default:
 		err := fmt.Errorf("multiple PodSnapshots owned by SnapshotJob %q; expected at most one", sj.Name)
@@ -106,6 +117,9 @@ func buildPodSnapshot(sj *snapshotv1alpha1.SnapshotJob, pod *corev1.Pod) (*snaps
 			Namespace: sj.Namespace,
 			Labels: map[string]string{
 				snapshotv1alpha1.SnapshotJobOwnerLabel: sj.Name,
+			},
+			Annotations: map[string]string{
+				snapshotv1alpha1.SnapshotJobOwnerUIDAnnotation: string(sj.UID),
 			},
 		},
 		Spec: snapshotv1alpha1.PodSnapshotSpec{
@@ -150,17 +164,19 @@ func (r *SnapshotJobReconciler) classifyExistingPodSnapshot(ctx context.Context,
 		}
 		return nil, fmt.Errorf("get existing PodSnapshot %q: %w", name, err)
 	}
-	if existing.Labels[snapshotv1alpha1.SnapshotJobOwnerLabel] != sj.Name {
+	if !podSnapshotBelongsToSnapshotJob(existing, sj) {
 		return nil, fmt.Errorf("%w: PodSnapshot %q", errPodSnapshotNameConflict, name)
 	}
 	return existing, nil
 }
 
-// mapPodSnapshotToSnapshotJob maps a PodSnapshot (including a delete-event
-// tombstone) back to the SnapshotJob that owns it via SnapshotJobOwnerLabel. It
-// MUST unwrap cache.DeletedFinalStateUnknown so a PodSnapshot delete still
-// re-enqueues its SnapshotJob, mirroring podSnapshotRefFromContentObj's tombstone
-// handling for PodSnapshotContent.
+func podSnapshotBelongsToSnapshotJob(snap *snapshotv1alpha1.PodSnapshot, sj *snapshotv1alpha1.SnapshotJob) bool {
+	return snap.Labels[snapshotv1alpha1.SnapshotJobOwnerLabel] == sj.Name &&
+		snap.Annotations[snapshotv1alpha1.SnapshotJobOwnerUIDAnnotation] == string(sj.UID)
+}
+
+// mapPodSnapshotToSnapshotJob maps the already-unwrapped client.Object back to
+// its SnapshotJob via SnapshotJobOwnerLabel.
 func mapPodSnapshotToSnapshotJob(ctx context.Context, obj client.Object) []reconcile.Request {
 	ref, err := snapshotJobOwnerFromPodSnapshotObj(obj)
 	if err != nil {
@@ -174,13 +190,9 @@ func mapPodSnapshotToSnapshotJob(ctx context.Context, obj client.Object) []recon
 }
 
 // snapshotJobOwnerFromPodSnapshotObj extracts the owning SnapshotJob's
-// namespace/name from a PodSnapshot's SnapshotJobOwnerLabel, unwrapping a
-// cache.DeletedFinalStateUnknown tombstone first. It errors when the object is
-// not a PodSnapshot (a malformed watch event, not a control-flow skip).
-func snapshotJobOwnerFromPodSnapshotObj(obj any) (types.NamespacedName, error) {
-	if tombstone, isTombstone := obj.(cache.DeletedFinalStateUnknown); isTombstone {
-		obj = tombstone.Obj
-	}
+// namespace/name. controller-runtime unwraps delete tombstones before invoking
+// EnqueueRequestsFromMapFunc.
+func snapshotJobOwnerFromPodSnapshotObj(obj client.Object) (types.NamespacedName, error) {
 	snap, ok := obj.(*snapshotv1alpha1.PodSnapshot)
 	if !ok {
 		return types.NamespacedName{}, fmt.Errorf("expected *PodSnapshot, got %T", obj)
