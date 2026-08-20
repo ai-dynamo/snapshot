@@ -861,16 +861,19 @@ func (w *NodeController) newRestoreOperation(
 func (op *restoreOperation) executeRestore(ctx context.Context) (int, error) {
 	w := op.controller
 	req := executor.RestoreRequest{
-		ContentUID:               op.artifact.ContentUID,
-		BasePath:                 w.config.Storage.BasePath,
-		ContainerID:              op.containerID,
-		StartedAt:                op.startedAt,
-		PodName:                  op.pod.Name,
-		PodNamespace:             op.pod.Namespace,
-		TargetPodIP:              op.pod.Status.PodIP,
-		ArtifactContainerName:    op.artifact.SourceContainerName,
-		DestinationContainerName: op.destination,
-		Clientset:                w.clientset,
+		ContentUID:                  op.artifact.ContentUID,
+		BasePath:                    w.config.Storage.BasePath,
+		ContainerID:                 op.containerID,
+		StartedAt:                   op.startedAt,
+		PodName:                     op.pod.Name,
+		PodNamespace:                op.pod.Namespace,
+		TargetPodIP:                 op.pod.Status.PodIP,
+		ArtifactContainerName:       op.artifact.SourceContainerName,
+		DestinationContainerName:    op.destination,
+		Clientset:                   w.clientset,
+		PageBrokerRequested:         op.pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] == snapshotv1alpha1.PageBrokerAnnotationEnabled,
+		PageBrokerEnabled:           w.config.PageBroker.Enabled,
+		PageBrokerControlSocketPath: w.config.PageBroker.ControlSocketPath,
 	}
 	return w.restoreFn(ctx, w.runtime, op.log, req, w.injector)
 }
