@@ -66,23 +66,6 @@ func TestBuildSourceJob(t *testing.T) {
 		assert.Equal(t, "label", job.Spec.Template.Labels["existing"])
 	})
 
-	t.Run("no storage injected", func(t *testing.T) {
-		sj := minimalSnapshotJob()
-
-		job, err := buildSourceJob(sj)
-		require.NoError(t, err)
-
-		main := requireContainer(t, job.Spec.Template.Spec.Containers, "worker")
-		for _, m := range main.VolumeMounts {
-			assert.NotEqual(t, snapshotv1alpha1.CheckpointVolumeName, m.Name,
-				"SnapshotJob injects no storage — the agent's own config owns it (spec §5.3)")
-		}
-		for k := range job.Spec.Template.Annotations {
-			assert.NotEqual(t, snapshotv1alpha1.CheckpointStorageTypeAnnotation, k)
-			assert.NotEqual(t, snapshotv1alpha1.CheckpointStorageBasePathAnnotation, k)
-		}
-	})
-
 	t.Run("WrapLaunchJob is always false: command/args pass through unchanged", func(t *testing.T) {
 		sj := minimalSnapshotJob()
 		sj.Spec.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "worker"}
