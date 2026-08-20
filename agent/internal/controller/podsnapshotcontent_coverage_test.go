@@ -379,6 +379,39 @@ func setupFailedBeforeReady(t *testing.T) (*NodeController, *snapshotv1alpha1.Po
 	return w, makeWorkOrder("podsnapshotcontent-x", "node-a", "x"), func() bool { return released }
 }
 
+func TestMarkCheckpointReadyAndRelease_AlreadyReadyReleases(t *testing.T) {
+	stored := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	meta.SetStatusCondition(&stored.Status.Conditions, metav1.Condition{
+		Type:    snapshotv1alpha1.PodSnapshotConditionReady,
+		Status:  metav1.ConditionTrue,
+		Reason:  "Captured",
+		Message: "Checkpoint captured and verified",
+	})
+	funcs := interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			sc, ok := obj.(*snapshotv1alpha1.PodSnapshotContent)
+			if ok {
+				if cond := meta.FindStatusCondition(sc.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady); cond != nil && cond.Status == metav1.ConditionTrue {
+					return conflictErr()
+				}
+			}
+			return c.Status().Patch(ctx, obj, patch, opts...)
+		},
+	}
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, stored)
+	released := false
+	w.releaseCheckpointFn = func(int) error {
+		released = true
+		return nil
+	}
+	stale := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+
+	err := w.markCheckpointReadyAndRelease(context.Background(), stale, 7)
+
+	require.NoError(t, err)
+	assert.True(t, released)
+}
+
 func TestSetSnapshotContentFailed_StatusPatchErrorReturnsError(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	funcs := interceptor.Funcs{
