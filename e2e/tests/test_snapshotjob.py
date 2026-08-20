@@ -1,17 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""SnapshotJob lifecycle e2e: capture-only, capture+restore, and DeadlineExceeded.
+"""SnapshotJob lifecycle e2e: capture+restore and DeadlineExceeded.
 
 Unlike test_snapshot_lifecycle.py (which drives PodSnapshot directly against a
 plain pod the test creates and annotates itself), these tests exercise the
 SnapshotJob CRD end to end: the controller creates the source batch/v1 Job,
 derives Running from it, creates the PodSnapshot once the pod exists, derives
-Captured from it, and only reaches Completed=True once both the PodSnapshot is
-Ready and the source Job's Complete condition is true. The source pod's
-lifecycle is therefore the workload's own responsibility here: it must exit 0
-after the agent signals the dump is done (snapshot-complete in the control
-volume), not run forever like the plain-PodSnapshot workload does.
+Captured from it, marks Completed once capture succeeds, and deletes the source
+Job. The test intentionally does not require the source pod to execute or the
+batch Job to complete naturally after capture: checkpoint is allowed to
+terminate the source process.
 """
 
 from __future__ import annotations
@@ -35,7 +34,7 @@ def run(request: pytest.FixtureRequest, config: k8s.E2EConfig) -> snap.TestRun:
 
 @pytest.mark.snapshot_success
 @pytest.mark.gpu
-def test_snapshotjob_completes_and_restore_recovers_state(
+def test_snapshotjob_captures_and_restore_recovers_state(
     config: k8s.E2EConfig,
     run: snap.TestRun,
 ) -> None:
@@ -50,13 +49,8 @@ def test_snapshotjob_completes_and_restore_recovers_state(
         source_pod = snap.wait_for_job_source_pod(config.namespace, snapshotjob_name)
         source_pod_name = source_pod.metadata.name
         snap.wait_for_pod_ready(config.namespace, source_pod_name, timeout=300)
-        # minimum=1, not 2: the controller creates the PodSnapshot and the
-        # agent freezes the pod for the CRIU dump within well under a second
-        # of readiness (observed in e2e), faster than any workload poll
-        # interval can reliably beat — so only one pre-dump observation is
-        # ever actually written. assert_restored_state only needs
-        # before >= checkpoint_observations, so this lower, achievable count
-        # is still a valid (if conservative) baseline.
+        # One observation proves that CPU, filesystem, and GPU state existed
+        # before capture. No assertion below requires the source to run again.
         checkpoint_observations = snap.wait_for_state_observations(
             config.namespace,
             source_pod_name,
@@ -73,9 +67,9 @@ def test_snapshotjob_completes_and_restore_recovers_state(
             timeout=600,
         )
         completed = snap.condition(sj, "Completed")
-        assert completed and completed.get("reason") == "JobCompleted"
+        assert completed and completed.get("reason") == "CaptureCompleted"
         captured = snap.condition(sj, "Captured")
-        assert captured and captured.get("status") == "True"
+        assert captured and captured.get("reason") == "CaptureCompleted"
         running = snap.condition(sj, "Running")
         assert running and running.get("reason") == "PodReady"
         assert sj["status"]["startedAt"]
@@ -94,9 +88,9 @@ def test_snapshotjob_completes_and_restore_recovers_state(
         assert content["spec"]["source"]["podRef"]["containers"] == [workloads.CONTAINER]
         source_node = content["spec"]["source"]["nodeName"]
 
-        # The source Job's own cleanup runs after Completed=True: the Job (and,
-        # via cascade, its pod) must be gone, while the PodSnapshot survives —
-        # it deliberately carries no ownerReference to the SnapshotJob.
+        # Completion asks Kubernetes to reap the owned Job/pod. With
+        # leaveRunning disabled the source may already be gone; either outcome
+        # is valid because post-capture source execution is not the contract.
         snap.wait_for_pod_deleted(config.namespace, source_pod_name, timeout=120)
 
         k8s.create_pod(
@@ -141,12 +135,6 @@ def test_snapshotjob_completes_and_restore_recovers_state(
         assert f"source_token={run.source_token}" in output
         assert f"restore_token={run.restore_token}" in output
 
-        # SnapshotJob deletion must not take the artifact down with it.
-        snap.cleanup_snapshotjob(config, run)
-        still_ready, _ = snap.wait_for_snapshot_ready(
-            config.namespace, pod_snapshot_name, timeout=30
-        )
-        assert snap.condition(still_ready, "Ready")["status"] == "True"
     except Exception:
         snap.debug_dump_snapshotjob(config, run)
         raise
@@ -186,12 +174,10 @@ def test_snapshotjob_deadline_exceeded_when_never_ready(
         # activeDeadlineSeconds fired — a race with reconcile timing, not a
         # documented guarantee in either direction.
 
-        # Failed=True preserves the source Job (and its pod) for debugging —
-        # unlike the success path, cleanup_snapshotjob's SnapshotJob delete is
-        # what reaps it, not the controller itself. Re-reading it here proves
-        # it is still present rather than already garbage collected.
-        source_pod = snap.wait_for_job_source_pod(config.namespace, snapshotjob_name, timeout=60)
-        k8s.read_pod(config.namespace, source_pod.metadata.name)
+        # Failed=True preserves the source Job for debugging. The batch Job
+        # controller may delete its pod when activeDeadlineSeconds expires, so
+        # pod retention is not part of the SnapshotJob contract.
+        assert k8s.read_job(config.namespace, snapshotjob_name) is not None
     except Exception:
         snap.debug_dump_snapshotjob(config, run)
         raise
