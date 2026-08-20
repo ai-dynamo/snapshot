@@ -84,13 +84,13 @@ func TestRoleMountsUseFixedPathsAndPolicies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MountBundle: %v", err)
 	}
-	if _, err := nsm.MountArtifact(context.Background(), bundle, "/checkpoints/abc/versions/1"); err != nil {
+	if _, err := nsm.MountArtifact(context.Background(), bundle, "/checkpoints/artifacts/content-uid/containers/main"); err != nil {
 		t.Fatalf("MountArtifact: %v", err)
 	}
 
 	want := []mountCall{
 		{role: "bundle", pid: testPID},
-		{role: "checkpoint", src: "/checkpoints/abc/versions/1"},
+		{role: "checkpoint", src: "/checkpoints/artifacts/content-uid/containers/main"},
 	}
 	if len(m.calls) != len(want) {
 		t.Fatalf("got %d calls, want %d", len(m.calls), len(want))

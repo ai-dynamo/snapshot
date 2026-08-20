@@ -28,7 +28,6 @@ RESTORE_TOKEN_ENV = "SNAPSHOT_E2E_RESTORE_TOKEN"
 @dataclass(frozen=True)
 class TestRun:
     suffix: str
-    checkpoint_id: str
     snapshot_name: str
     source_pod: str
     restore_pod: str
@@ -41,7 +40,6 @@ class TestRun:
         suffix = f"{prefix}-{uuid.uuid4().hex[:6]}"
         return cls(
             suffix=suffix,
-            checkpoint_id=suffix,
             snapshot_name=f"{suffix}-snapshot",
             source_pod=f"{suffix}-source",
             restore_pod=f"{suffix}-restore",
@@ -60,24 +58,19 @@ def source_pod(
     config: k8s.E2EConfig,
     run: TestRun,
     gpu: bool,
-    include_target_annotation: bool = True,
-    include_checkpoint_label: bool = True,
+    annotations: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     labels = {
         **run.labels,
         "nvidia.com/snapshot-is-checkpoint-source": "true",
     }
-    if include_checkpoint_label:
-        labels["nvidia.com/snapshot-checkpoint-id"] = run.checkpoint_id
 
     metadata = {
         "name": run.source_pod,
         "namespace": config.namespace,
         "labels": labels,
-        "annotations": {},
+        "annotations": annotations or {},
     }
-    if include_target_annotation:
-        metadata["annotations"]["nvidia.com/snapshot-target-containers"] = CONTAINER
     spec = base_pod_spec(config, run, source_command(run.image, gpu), gpu)
     spec["containers"][0]["env"] = [
         {"name": SOURCE_TOKEN_ENV, "value": run.source_token},
@@ -124,12 +117,9 @@ def restore_pod(
             "namespace": config.namespace,
             "labels": {
                 **run.labels,
-                "nvidia.com/snapshot-checkpoint-id": run.checkpoint_id,
-                "nvidia.com/snapshot-is-restore-target": "true",
             },
             "annotations": {
-                "nvidia.com/snapshot-target-containers": CONTAINER,
-                "nvidia.com/snapshot-artifact-version": "1",
+                "nvidia.com/restore-from": run.snapshot_name,
             },
         },
         "spec": spec,

@@ -48,8 +48,8 @@ func runCheckpoint(args []string) error {
 	manifest := flags.String("manifest", "", "Path to a worker Pod manifest")
 	namespace := flags.String("namespace", "", "Namespace override; defaults to the manifest namespace or current kube context namespace")
 	kubeContext := flags.String("kube-context", "", "Kubernetes context override")
-	checkpointID := flags.String("checkpoint-id", "", "Explicit checkpoint ID; defaults to a generated value")
-	container := flags.String("container", "", "Required. Name of the workload container inside the manifest to checkpoint. May be omitted if the manifest already sets the nvidia.com/snapshot-target-containers annotation")
+	snapshotName := flags.String("snapshot", "", "Required. Name of the PodSnapshot to create")
+	container := flags.String("container", "", "Required. Name of the workload container inside the manifest to checkpoint")
 	cudaCheckpointWrap := flags.Bool("cuda-checkpoint-wrap", false, "Wrap the container command with cuda-checkpoint --launch-job (required for multi-GPU checkpoints; the placeholder image must have cuda-checkpoint at the same path as the source container)")
 	timeout := flags.Duration("timeout", 45*time.Minute, "Maximum time to wait for checkpoint completion")
 
@@ -62,13 +62,16 @@ func runCheckpoint(args []string) error {
 	if *manifest == "" {
 		return fmt.Errorf("--manifest is required")
 	}
+	if *snapshotName == "" {
+		return fmt.Errorf("--snapshot is required")
+	}
 
 	snapshotctlLog.Info("Running checkpoint", "manifest", *manifest, "namespace", *namespace)
 	result, err := runCheckpointFlow(context.Background(), checkpointOptions{
 		ManifestPath:       *manifest,
 		Namespace:          *namespace,
 		KubeContext:        *kubeContext,
-		CheckpointID:       *checkpointID,
+		SnapshotName:       *snapshotName,
 		Container:          *container,
 		CudaCheckpointWrap: *cudaCheckpointWrap,
 		Timeout:            *timeout,
@@ -76,13 +79,12 @@ func runCheckpoint(args []string) error {
 	if err != nil {
 		return err
 	}
-	snapshotctlLog.Info("Checkpoint completed", "job", result.CheckpointJob, "checkpoint_id", result.CheckpointID, "pod_snapshot", result.PodSnapshot)
+	snapshotctlLog.Info("Checkpoint completed", "job", result.CheckpointJob, "pod_snapshot", result.PodSnapshot)
 
 	fmt.Printf("status=%s\n", result.Status)
 	fmt.Printf("namespace=%s\n", result.Namespace)
 	fmt.Printf("name=%s\n", result.Name)
 	fmt.Printf("checkpoint_job=%s\n", result.CheckpointJob)
-	fmt.Printf("checkpoint_id=%s\n", result.CheckpointID)
 	fmt.Printf("pod_snapshot=%s\n", result.PodSnapshot)
 	if result.BoundContent != "" {
 		fmt.Printf("bound_content=%s\n", result.BoundContent)
@@ -95,11 +97,9 @@ func runRestore(args []string) error {
 	flags.SetOutput(os.Stderr)
 
 	manifest := flags.String("manifest", "", "Path to a worker Pod manifest used to create a new restore pod")
-	podName := flags.String("pod", "", "Existing restore target pod name")
 	namespace := flags.String("namespace", "", "Namespace override; defaults to the manifest namespace or current kube context namespace")
 	kubeContext := flags.String("kube-context", "", "Kubernetes context override")
-	checkpointID := flags.String("checkpoint-id", "", "Checkpoint ID to restore")
-	containers := flags.String("containers", "", "Required. Comma-separated target container names to restore the checkpoint into. May be omitted if the manifest/pod already sets the nvidia.com/snapshot-target-containers annotation")
+	snapshotName := flags.String("snapshot", "", "Required. PodSnapshot name in the restore pod namespace")
 
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -107,29 +107,30 @@ func runRestore(args []string) error {
 	if len(flags.Args()) != 0 {
 		return fmt.Errorf("unexpected arguments: %v", flags.Args())
 	}
-	if (*manifest == "") == (*podName == "") {
-		return fmt.Errorf("must specify exactly one of --manifest or --pod")
+	if *manifest == "" {
+		return fmt.Errorf("--manifest is required")
+	}
+	if *snapshotName == "" {
+		return fmt.Errorf("--snapshot is required")
 	}
 
-	snapshotctlLog.Info("Running restore", "manifest", *manifest, "pod", *podName, "namespace", *namespace, "checkpoint_id", *checkpointID)
+	snapshotctlLog.Info("Running restore", "manifest", *manifest, "namespace", *namespace, "pod_snapshot", *snapshotName)
 	result, err := runRestoreFlow(context.Background(), restoreOptions{
 		ManifestPath: *manifest,
-		PodName:      *podName,
 		Namespace:    *namespace,
 		KubeContext:  *kubeContext,
-		CheckpointID: *checkpointID,
-		Containers:   *containers,
+		SnapshotName: *snapshotName,
 	})
 	if err != nil {
 		return err
 	}
-	snapshotctlLog.Info("Restore requested", "pod", result.RestorePod, "checkpoint_id", result.CheckpointID)
+	snapshotctlLog.Info("Restore requested", "pod", result.RestorePod, "pod_snapshot", result.PodSnapshot)
 
 	fmt.Printf("status=%s\n", result.Status)
 	fmt.Printf("namespace=%s\n", result.Namespace)
 	fmt.Printf("name=%s\n", result.Name)
 	fmt.Printf("restore_pod=%s\n", result.RestorePod)
-	fmt.Printf("checkpoint_id=%s\n", result.CheckpointID)
+	fmt.Printf("pod_snapshot=%s\n", result.PodSnapshot)
 	return nil
 }
 
@@ -141,8 +142,7 @@ Subcommands:
   restore
 
 Examples:
-  snapshotctl checkpoint --manifest /tmp/vllm-worker-pod.yaml --container main
-  snapshotctl restore --manifest /tmp/sglang-worker-pod.yaml --checkpoint-id manual-snapshot-123 --containers main
-  snapshotctl restore --pod existing-restore-target --checkpoint-id manual-snapshot-123 --containers engine-0,engine-1
+  snapshotctl checkpoint --manifest /tmp/vllm-worker-pod.yaml --snapshot worker-snapshot --container main
+  snapshotctl restore --manifest /tmp/sglang-worker-pod.yaml --snapshot worker-snapshot
 `)
 }
