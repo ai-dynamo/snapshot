@@ -14,6 +14,7 @@ from kubernetes.client import ApiException
 
 from snapshot_e2e import k8s
 from snapshot_e2e.workloads import CONTAINER
+from snapshot_e2e.workloads import CONTROL_DIR
 from snapshot_e2e.workloads import FILE_TOKEN
 from snapshot_e2e.workloads import OBSERVATIONS
 from snapshot_e2e.workloads import RESTORE_DONE
@@ -603,13 +604,41 @@ def debug_dump_snapshotjob(config: k8s.E2EConfig, run: TestRun) -> None:
     print("\n--- snapshotjob e2e debug ---")
     print(f"namespace={config.namespace} test={run.suffix}")
     core = client.CoreV1Api()
-    pods = core.list_namespaced_pod(
-        config.namespace, label_selector=f"snapshot-e2e-test={run.suffix}"
-    ).items
-    for pod in pods:
-        print(f"pod {pod.metadata.name} phase={pod.status.phase} node={pod.spec.node_name}")
+    # Union of both selectors: the e2e label comes from the caller's pod
+    # template, the job-name label from the Job controller. Relying on the
+    # e2e label alone has already produced dumps with no pods at all, which
+    # hides the single most useful signal (the source container's log).
+    pods = {
+        pod.metadata.name: pod
+        for pod in core.list_namespaced_pod(
+            config.namespace, label_selector=f"snapshot-e2e-test={run.suffix}"
+        ).items
+    }
+    for pod in k8s.list_job_pods(config.namespace, run.checkpoint_id):
+        pods.setdefault(pod.metadata.name, pod)
+    if not pods:
+        print("no pods matched either the e2e label or the job-name label")
+    for name, pod in pods.items():
+        print(f"pod {name} phase={pod.status.phase} node={pod.spec.node_name}")
         print(f"annotations={pod.metadata.annotations or {}}")
-        print(k8s.pod_logs(config.namespace, pod.metadata.name, tail_lines=80))
+        print(f"labels={pod.metadata.labels or {}}")
+        print(f"deletionTimestamp={pod.metadata.deletion_timestamp}")
+        # phase alone cannot distinguish "target exited 0, Job should be
+        # complete" from "target still running" — the exit codes can.
+        for cs in (pod.status.container_statuses or []):
+            print(f"  container {cs.name} ready={cs.ready} state={cs.state}")
+        print(f"control dir: {snapshot_control_listing(config.namespace, name)}")
+        print(k8s.pod_logs(config.namespace, name, tail_lines=80))
+    # The source Job's own status is what the completion gate reads.
+    job = k8s.read_job(config.namespace, run.checkpoint_id)
+    if job is None:
+        print(f"source Job {run.checkpoint_id} not found")
+    else:
+        print(
+            f"source Job {job.metadata.name} active={job.status.active} "
+            f"succeeded={job.status.succeeded} failed={job.status.failed} "
+            f"startTime={job.status.start_time} conditions={job.status.conditions}"
+        )
     api = client.CustomObjectsApi()
     try:
         sj = api.get_namespaced_custom_object(
@@ -622,11 +651,32 @@ def debug_dump_snapshotjob(config: k8s.E2EConfig, run: TestRun) -> None:
     print_custom_objects_named(config, run.checkpoint_id)
     print_snapshot_controller_logs(config)
     events = core.list_namespaced_event(config.namespace).items
-    for event in events[-30:]:
+    # Job-generated pods are named <checkpoint_id>-<suffix>, so an exact-name
+    # filter silently drops every pod-level event (container termination in
+    # particular) and keeps only the Job's own.
+    for event in events[-40:]:
         involved = event.involved_object
-        if involved and involved.name in {run.source_pod, run.restore_pod, run.checkpoint_id}:
-            print(f"event {event.reason}: {event.message}")
+        if not involved or not involved.name:
+            continue
+        if involved.name.startswith(run.checkpoint_id) or involved.name in {
+            run.source_pod,
+            run.restore_pod,
+        }:
+            print(f"event {involved.kind}/{involved.name} {event.reason}: {event.message}")
     print("--- end debug ---\n")
+
+
+def snapshot_control_listing(namespace: str, pod: str) -> str:
+    """Lists the control volume, best-effort.
+
+    Whether the agent's snapshot-complete sentinel actually landed where the
+    workload polls for it is the hinge for the whole completion gate: no
+    sentinel means the workload never exits, so the Job never completes.
+    """
+    try:
+        return k8s.exec_command(namespace, pod, f"ls -la {CONTROL_DIR} 2>&1").strip()
+    except Exception as exc:  # noqa: BLE001 - debug helper must never mask the real failure
+        return f"<unavailable: {type(exc).__name__}: {exc}>"
 
 
 def print_custom_objects_named(config: k8s.E2EConfig, snapshot_name: str) -> None:
