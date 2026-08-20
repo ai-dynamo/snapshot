@@ -46,3 +46,9 @@ func TestValidateWithinRejectsUnsafeRoot(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateWithinRejectsRoot(t *testing.T) {
+	if err := validateWithin("/checkpoints", "/checkpoints"); err == nil {
+		t.Fatal("expected root mount source validation error")
+	}
+}
