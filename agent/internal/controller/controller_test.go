@@ -76,6 +76,10 @@ func (noopInjector) MountArtifact(_ context.Context, _ nsmount.MountPoint, _ str
 	return noopMountPoint{}, nil
 }
 
+func (noopInjector) MountPageBroker(_ context.Context, _ nsmount.MountPoint, _ string) (nsmount.MountPoint, error) {
+	return noopMountPoint{}, nil
+}
+
 type noopMountPoint struct{}
 
 func (noopMountPoint) Unmount(context.Context) error { return nil }
@@ -89,6 +93,10 @@ func (e errorInjector) MountBundle(_ context.Context, _ int) (nsmount.MountPoint
 }
 
 func (e errorInjector) MountArtifact(_ context.Context, _ nsmount.MountPoint, _ string) (nsmount.MountPoint, error) {
+	return nil, e.err
+}
+
+func (e errorInjector) MountPageBroker(_ context.Context, _ nsmount.MountPoint, _ string) (nsmount.MountPoint, error) {
 	return nil, e.err
 }
 
@@ -115,6 +123,14 @@ func (r recordingInjector) MountBundle(_ context.Context, _ int) (nsmount.MountP
 
 func (r recordingInjector) MountArtifact(_ context.Context, namespaceMount nsmount.MountPoint, src string) (nsmount.MountPoint, error) {
 	*r.calls = append(*r.calls, recordedMountCall{src: src, dst: nsmount.CheckpointDst, namespaceMount: namespaceMount})
+	if r.artifactErr != nil {
+		return nil, r.artifactErr
+	}
+	return noopMountPoint{}, nil
+}
+
+func (r recordingInjector) MountPageBroker(_ context.Context, namespaceMount nsmount.MountPoint, src string) (nsmount.MountPoint, error) {
+	*r.calls = append(*r.calls, recordedMountCall{src: src, dst: nsmount.PageBrokerDst, namespaceMount: namespaceMount})
 	if r.artifactErr != nil {
 		return nil, r.artifactErr
 	}

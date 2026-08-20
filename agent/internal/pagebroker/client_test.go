@@ -174,6 +174,17 @@ func TestStagingRequestsRejectEmptyDirectory(t *testing.T) {
 		reply func(*Request) *Response
 	}{
 		{
+			name: "restore",
+			call: func(client Client, ctx context.Context) error {
+				_, err := client.StagedRestore(ctx, "transaction", "/checkpoints/source")
+				return err
+			},
+			reply: func(request *Request) *Response {
+				return &Response{RequestId: request.RequestId, TransactionId: request.TransactionId,
+					Result: &Response_StagedRestoreDirectory{StagedRestoreDirectory: &StagedRestoreDirectory{}}}
+			},
+		},
+		{
 			name: "checkpoint",
 			call: func(client Client, ctx context.Context) error {
 				_, err := client.PrepareCheckpoint(ctx, "transaction", "/checkpoints/destination")

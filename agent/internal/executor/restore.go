@@ -16,12 +16,14 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/google/uuid"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/criu"
 	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/logging"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
+	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
@@ -31,6 +33,7 @@ import (
 type RestoreMounter interface {
 	MountBundle(ctx context.Context, pid int) (nsmount.MountPoint, error)
 	MountArtifact(ctx context.Context, namespaceMount nsmount.MountPoint, artifactPath string) (nsmount.MountPoint, error)
+	MountPageBroker(ctx context.Context, namespaceMount nsmount.MountPoint, stagingPath string) (nsmount.MountPoint, error)
 }
 
 // RestoreCleanupError reports a successful restore whose cleanup did not fully
@@ -64,16 +67,19 @@ func cleanupRestoreMounts(ctx context.Context, mounts []restoreMount) error {
 
 // RestoreRequest holds the parameters for a restore operation.
 type RestoreRequest struct {
-	CheckpointID    string
-	ArtifactVersion string
-	BasePath        string
-	ContainerID     string
-	StartedAt       time.Time
-	PodName         string
-	PodNamespace    string
-	TargetPodIP     string
-	ContainerName   string
-	Clientset       kubernetes.Interface
+	CheckpointID                string
+	ArtifactVersion             string
+	BasePath                    string
+	ContainerID                 string
+	StartedAt                   time.Time
+	PodName                     string
+	PodNamespace                string
+	TargetPodIP                 string
+	ContainerName               string
+	Clientset                   kubernetes.Interface
+	PageBrokerRequested         bool
+	PageBrokerEnabled           bool
+	PageBrokerControlSocketPath string
 }
 
 // Restore performs external restore for the given request.
@@ -140,18 +146,55 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		point:  bundleMount,
 	})
 
-	artifactMount, err := mounts.MountArtifact(ctx, bundleMount, artifactPath)
-	if err != nil {
-		return 0, fmt.Errorf("mount checkpoint artifact into placeholder: %w", err)
+	containerCheckpointPath := nsmount.CheckpointDst
+	brokered := req.PageBrokerRequested && req.PageBrokerEnabled
+	transactionID := ""
+	var broker pagebroker.Client
+	committed := false
+	if brokered {
+		transactionID = uuid.NewString()
+		broker = pagebroker.Client{ControlSocketPath: req.PageBrokerControlSocketPath}
+		defer func() {
+			if !committed {
+				abortCtx, cancel := context.WithTimeout(context.Background(), pageBrokerAbortTimeout)
+				defer cancel()
+				_ = broker.Abort(abortCtx, transactionID)
+			}
+		}()
+		staged, err := broker.StagedRestore(ctx, transactionID, artifactPath)
+		if err != nil {
+			return 0, fmt.Errorf("stage PageBroker restore: %w", err)
+		}
+		stagingMount, err := mounts.MountPageBroker(ctx, bundleMount, staged)
+		if err != nil {
+			return 0, fmt.Errorf("mount PageBroker staging: %w", err)
+		}
+		activeMounts = append(activeMounts, restoreMount{
+			action: "unmount PageBroker staging from placeholder",
+			point:  stagingMount,
+		})
+		containerCheckpointPath = nsmount.PageBrokerDst
+	} else {
+		artifactMount, err := mounts.MountArtifact(ctx, bundleMount, artifactPath)
+		if err != nil {
+			return 0, fmt.Errorf("mount checkpoint artifact into placeholder: %w", err)
+		}
+		activeMounts = append(activeMounts, restoreMount{
+			action: "unmount checkpoint artifact from placeholder",
+			point:  artifactMount,
+		})
 	}
-	activeMounts = append(activeMounts, restoreMount{
-		action: "unmount checkpoint artifact from placeholder",
-		point:  artifactMount,
-	})
 
-	result, err := execNSRestore(ctx, log, req, snap, bundleMount, nsmount.CheckpointDst)
+	result, err := execNSRestore(ctx, log, req, snap, bundleMount, containerCheckpointPath)
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
+	}
+	if brokered {
+		if err := broker.Commit(ctx, transactionID); err != nil {
+			log.Error(err, "failed to commit PageBroker restore")
+		} else {
+			committed = true
+		}
 	}
 	if result.CleanupError != nil {
 		cleanupErr = errors.Join(cleanupErr, result.CleanupError)
