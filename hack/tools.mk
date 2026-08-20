@@ -23,18 +23,13 @@ HELM           := $(TOOLS_BIN_DIR)/helm
 
 # Each tool installs on demand (only when its binary is missing), so targets can
 # depend on it as a prerequisite without a separate install step in CI.
-# Retry go install to absorb transient proxy.golang.org HTTP/2 INTERNAL_ERROR,
-# matching helm's curl --retry 3.
+# Retry go install to absorb transient proxy.golang.org HTTP/2 INTERNAL_ERROR.
+# Three retries after the first attempt, matching helm's curl --retry 3.
+# One recipe line so GNU Make runs the until-loop in a single shell.
 GO_INSTALL_RETRIES := 3
 
 define go-install
-n=0; \
-until GOBIN=$(TOOLS_BIN_DIR) GOWORK=off go install $(1); do \
-  n=$$((n+1)); \
-  [ $$n -ge $(GO_INSTALL_RETRIES) ] && exit 1; \
-  echo "go install $(1) failed (attempt $$n/$(GO_INSTALL_RETRIES)); retrying..."; \
-  sleep $$((n*2)); \
-done
+n=0; until GOBIN=$(TOOLS_BIN_DIR) GOWORK=off go install $(1); do n=$$((n+1)); [ $$n -gt $(GO_INSTALL_RETRIES) ] && exit 1; echo "go install $(1) failed (attempt $$n/$(GO_INSTALL_RETRIES)); retrying..."; sleep $$((n*2)); done
 endef
 
 $(CONTROLLER_GEN):
