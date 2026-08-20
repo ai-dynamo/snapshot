@@ -2,6 +2,8 @@
 {{- $socket := include "snapshot.runtimeSocket" . -}}
 {{- $socketDir := $socket | dir -}}
 {{- $storageDir := include "snapshot.runtimeStorageDir" . -}}
+{{- $pageBrokerControlPath := include "snapshot.pageBrokerControlPath" . -}}
+{{- $pageBrokerStagingPath := include "snapshot.pageBrokerStagingPath" . -}}
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -104,6 +106,24 @@ spec:
               mountPath: /host-seccomp
       {{- end }}
       containers:
+        {{- if .Values.pageBroker.enabled }}
+        - name: pagebroker
+          image: "{{ .Values.pageBroker.image.repository }}:{{ .Values.pageBroker.image.tag }}"
+          imagePullPolicy: {{ .Values.pageBroker.image.pullPolicy }}
+          args:
+            - {{ printf "%s/pagebroker.sock" $pageBrokerControlPath | quote }}
+            - {{ $pageBrokerStagingPath | quote }}
+            - {{ .Values.storage.pvc.basePath | quote }}
+            - --max-concurrent-requests
+            - {{ .Values.pageBroker.maxConcurrentRequests | quote }}
+          resources:
+            {{- toYaml .Values.pageBroker.resources | nindent 12 }}
+          volumeMounts:
+            - name: pagebroker
+              mountPath: /pagebroker
+            - name: checkpoints
+              mountPath: {{ .Values.storage.pvc.basePath }}
+        {{- end }}
         - name: agent
           image: "{{ .Values.image.agent.repository }}:{{ .Values.image.agent.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.agent.pullPolicy }}
@@ -127,6 +147,10 @@ spec:
             - name: config
               mountPath: /etc/snapshot
               readOnly: true
+            {{- if .Values.pageBroker.enabled }}
+            - name: pagebroker
+              mountPath: /pagebroker
+            {{- end }}
             {{- if eq .Values.storage.type "pvc" }}
             # Every agent owns direct access to the shared checkpoint store.
             - name: checkpoints
@@ -173,6 +197,12 @@ spec:
         - name: config
           configMap:
             name: {{ include "snapshot.fullname" . }}-config
+        {{- if .Values.pageBroker.enabled }}
+        - name: pagebroker
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.pageBroker.stagingSizeLimit | quote }}
+        {{- end }}
         {{- if .Values.seccomp.deploy }}
         # Seccomp profile ConfigMap (used by initContainer)
         - name: seccomp-profiles
