@@ -18,11 +18,12 @@ const CheckpointBasePath = "/checkpoints"
 // AgentConfig holds the full agent configuration: static checkpoint settings
 // from the ConfigMap YAML, plus runtime fields from environment variables.
 type AgentConfig struct {
-	NodeName string          `yaml:"-"`
-	Storage  StorageSpec     `yaml:"storage"`
-	Overlay  OverlaySettings `yaml:"overlay"`
-	Restore  RestoreSpec     `yaml:"restore"`
-	CRIU     CRIUSettings    `yaml:"criu"`
+	NodeName   string          `yaml:"-"`
+	Storage    StorageSpec     `yaml:"storage"`
+	Overlay    OverlaySettings `yaml:"overlay"`
+	PageBroker PageBrokerSpec  `yaml:"pageBroker"`
+	Restore    RestoreSpec     `yaml:"restore"`
+	CRIU       CRIUSettings    `yaml:"criu"`
 }
 
 func (c *AgentConfig) LoadEnvOverrides() {
@@ -65,6 +66,11 @@ func (c *AgentConfig) Validate() error {
 type StorageSpec struct {
 	Type     string `yaml:"type"`
 	BasePath string `yaml:"basePath"`
+}
+
+type PageBrokerSpec struct {
+	Enabled           bool   `yaml:"enabled"`
+	ControlSocketPath string `yaml:"controlSocketPath"`
 }
 
 // RestoreSpec holds settings for the CRIU restore process.
