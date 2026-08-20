@@ -33,6 +33,9 @@ func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, error) {
 	// sj.Name is also used as a label value (SnapshotJobOwnerLabel,
 	// CheckpointIDLabel); the CRD doesn't cap metadata.name length, so this must
 	// be checked here or a long name fails Job creation forever.
+	// IsLabelValue reports the reasons sj.Name fails Kubernetes label-value
+	// syntax (RFC 1123: <=63 chars, alphanumeric/'-'/'_'/'.', start/end
+	// alphanumeric); empty means valid.
 	if errs := contentvalidation.IsLabelValue(sj.Name); len(errs) > 0 {
 		return nil, fmt.Errorf("metadata.name %q is not a valid label value: %s", sj.Name, strings.Join(errs, "; "))
 	}

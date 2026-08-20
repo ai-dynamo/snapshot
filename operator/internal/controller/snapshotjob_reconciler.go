@@ -170,12 +170,18 @@ func (r *SnapshotJobReconciler) observeJob(ctx context.Context, sj *snapshotv1al
 // readiness, so a consumer must not see Failed=True with Running entirely
 // absent from status.conditions (missing is not the same as "known False").
 // An already-set Running is left untouched, since it may already reflect a
-// real observation.
+// real observation. The backfilled message says the pod was never observed
+// ready rather than reusing the non-terminal "waiting for..." wording, since
+// by the time this runs the SnapshotJob is already failed, not still waiting.
+//
+// Captured and Completed are not touched here: neither condition exists yet in
+// this phase (PodSnapshot creation lands in PR 4, the completion gate in PR 5),
+// so there is nothing yet to set them to.
 func (r *SnapshotJobReconciler) failSnapshotJob(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, reason string, cause error) (ctrl.Result, error) {
 	r.Recorder.Event(sj, corev1.EventTypeWarning, reason, cause.Error())
 	if meta.FindStatusCondition(sj.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning) == nil {
 		setCondition(sj, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse,
-			snapshotv1alpha1.ReasonPodPending, "waiting for the source pod to become ready")
+			snapshotv1alpha1.ReasonPodPending, "source pod was never observed ready before this SnapshotJob failed")
 	}
 	setCondition(sj, snapshotv1alpha1.SnapshotJobConditionFailed, metav1.ConditionTrue, reason, cause.Error())
 	if sj.Status.CompletedAt == nil {
