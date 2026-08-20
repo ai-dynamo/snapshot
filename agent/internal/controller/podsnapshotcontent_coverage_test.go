@@ -234,12 +234,9 @@ func TestRunCheckpoint_ReadyPatchErrorDoesNotRelease(t *testing.T) {
 	}
 	pod := &corev1.Pod{}
 	leaseKey := client.ObjectKey{Namespace: "inference", Name: "checkpoint-lease-x"}
-	loc := checkpointLocations{
-		HostPath:      w.config.Storage.BasePath,
-		ContainerPath: w.config.Storage.BasePath,
-	}
+	artifactPath := w.config.Storage.BasePath
 
-	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, "x", loc, leaseKey, "x")
+	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, "x", artifactPath, leaseKey, "x")
 
 	assert.False(t, released)
 	assert.Nil(t, meta.FindStatusCondition(
@@ -314,12 +311,9 @@ func TestRunCheckpoint_FailedBeforeReadyDoesNotRelease(t *testing.T) {
 	stale := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	pod := &corev1.Pod{}
 	leaseKey := client.ObjectKey{Namespace: "inference", Name: "checkpoint-lease-x"}
-	loc := checkpointLocations{
-		HostPath:      w.config.Storage.BasePath,
-		ContainerPath: w.config.Storage.BasePath,
-	}
+	artifactPath := w.config.Storage.BasePath
 
-	w.runCheckpoint(context.Background(), stale, pod, "main", "abc123", 7, "x", loc, leaseKey, "x")
+	w.runCheckpoint(context.Background(), stale, pod, "main", "abc123", 7, "x", artifactPath, leaseKey, "x")
 
 	assert.False(t, released)
 	got := getContent(t, w, stored.Name)

@@ -37,18 +37,13 @@ const (
 
 	// Full keys are nvidia.com/snapshot-restore-container-id.<containerName>.
 	RestoreContainerIDAnnotationPrefix = "nvidia.com/snapshot-restore-container-id."
-
 	// Legacy unscoped restore status keys, cleared when stamping fresh metadata.
 	RestoreStatusAnnotation      = "nvidia.com/snapshot-restore-status"
 	RestoreContainerIDAnnotation = "nvidia.com/snapshot-restore-container-id"
 
-	CheckpointStorageTypeAnnotation     = "nvidia.com/snapshot-storage-type"
-	CheckpointStorageBasePathAnnotation = "nvidia.com/snapshot-storage-base-path"
-	CheckpointVolumeName                = "checkpoint-storage"
-	DefaultCheckpointArtifactVersion    = "1"
-	DefaultCheckpointJobTTLSeconds      = int32(300)
-	DefaultSeccompLocalhostProfile      = "profiles/block-iouring.json"
-	StorageTypePVC                      = "pvc"
+	DefaultCheckpointArtifactVersion = "1"
+	DefaultCheckpointJobTTLSeconds   = int32(300)
+	DefaultSeccompLocalhostProfile   = "profiles/block-iouring.json"
 
 	RestoreStatusInProgress = "in_progress"
 	RestoreStatusCompleted  = "completed"
@@ -59,13 +54,6 @@ const (
 	istioSidecarInjectAnnotation = "sidecar.istio.io/inject"
 	istioSidecarInjectDisabled   = "false"
 )
-
-type Storage struct {
-	Type     string
-	Location string
-	PVCName  string
-	BasePath string
-}
 
 type RestoreStatusAnnotationKeys struct {
 	Status      string
@@ -78,28 +66,6 @@ func ArtifactVersion(version string) string {
 		return DefaultCheckpointArtifactVersion
 	}
 	return version
-}
-
-func ResolveCheckpointStorage(checkpointID string, version string, storage Storage) (Storage, error) {
-	resolved, err := resolveStorageConfig(storage)
-	if err != nil {
-		return Storage{}, err
-	}
-	resolved.Location = strings.TrimRight(resolved.BasePath, "/") + "/" + checkpointID + "/versions/" + ArtifactVersion(version)
-	return resolved, nil
-}
-
-func ResolveRestoreStorage(checkpointID string, version string, location string, storage Storage) (Storage, error) {
-	resolved, err := resolveStorageConfig(storage)
-	if err != nil {
-		return Storage{}, err
-	}
-	location = strings.TrimSpace(location)
-	if location == "" {
-		return ResolveCheckpointStorage(checkpointID, version, storage)
-	}
-	resolved.Location = location
-	return resolved, nil
 }
 
 // FormatTargetContainers renders the canonical annotation value.
@@ -210,50 +176,4 @@ func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string
 		labels[CheckpointIDLabel] = checkpointID
 	}
 	annotations[CheckpointArtifactVersionAnnotation] = ArtifactVersion(artifactVersion)
-}
-
-func ApplyCheckpointStorageMetadata(annotations map[string]string, storage Storage) {
-	if annotations == nil {
-		return
-	}
-	delete(annotations, CheckpointStorageTypeAnnotation)
-	delete(annotations, CheckpointStorageBasePathAnnotation)
-	storageType := strings.TrimSpace(storage.Type)
-	if storageType != "" {
-		annotations[CheckpointStorageTypeAnnotation] = storageType
-	}
-	basePath := strings.TrimSpace(storage.BasePath)
-	if basePath != "" {
-		basePath = strings.TrimRight(basePath, "/")
-		if basePath == "" {
-			basePath = "/"
-		}
-		annotations[CheckpointStorageBasePathAnnotation] = basePath
-	}
-}
-
-func resolveStorageConfig(storage Storage) (Storage, error) {
-	storageType := strings.TrimSpace(storage.Type)
-	if storageType == "" {
-		storageType = StorageTypePVC
-	}
-	if storageType != StorageTypePVC {
-		return Storage{}, fmt.Errorf("checkpoint storage type %q is not supported", storageType)
-	}
-	basePath := strings.TrimSpace(storage.BasePath)
-	if basePath == "" {
-		return Storage{}, fmt.Errorf("checkpoint base path is required")
-	}
-	if !strings.HasPrefix(basePath, "/") {
-		return Storage{}, fmt.Errorf("checkpoint base path %q must be absolute", basePath)
-	}
-	basePath = strings.TrimRight(basePath, "/")
-	if basePath == "" {
-		basePath = "/"
-	}
-	return Storage{
-		Type:     storageType,
-		PVCName:  strings.TrimSpace(storage.PVCName),
-		BasePath: basePath,
-	}, nil
 }

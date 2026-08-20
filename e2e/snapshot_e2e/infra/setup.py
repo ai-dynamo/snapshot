@@ -34,6 +34,7 @@ DEFAULT_TEST_NAMESPACE = "snapshot-e2e"
 DEFAULT_SNAPSHOT_RELEASE = "snapshot"
 DEFAULT_PVC_NAME = "snapshot-pvc"
 DEFAULT_PVC_SIZE = "2Gi"
+DEFAULT_STORAGE_CLASS = ""
 DEFAULT_VCLUSTER_K8S_VERSION = "v1.32.13"
 DEFAULT_VCLUSTER_LOCAL_PORT = 8443
 DEFAULT_HELM_TIMEOUT = "6m"
@@ -165,6 +166,13 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--pvc-size",
         default=os.environ.get("SNAPSHOT_E2E_PVC_SIZE", DEFAULT_PVC_SIZE),
         help=f"Checkpoint PVC size. Default: {DEFAULT_PVC_SIZE}.",
+    )
+    parser.add_argument(
+        "--storage-class",
+        default=os.environ.get(
+            "SNAPSHOT_E2E_STORAGE_CLASS", DEFAULT_STORAGE_CLASS
+        ),
+        help="RWX storage class for the checkpoint PVC. Default: cluster default.",
     )
     parser.add_argument(
         "--vcluster-k8s-version",
@@ -331,12 +339,14 @@ def setup_snapshot_install(args: argparse.Namespace, context: SetupContext) -> N
         namespace=args.test_namespace,
         name=args.pvc_name,
         size=args.pvc_size,
+        storage_class=args.storage_class,
     )
     install_snapshot_chart(
         kubeconfig=context.target_kubeconfig_value or None,
         namespace=args.test_namespace,
         release=args.snapshot_release,
         image_tag=args.snapshot_tag,
+        pvc_name=args.pvc_name,
         timeout=args.helm_timeout,
     )
 
@@ -742,17 +752,11 @@ def ensure_snapshot_release_can_own_cluster_resources(
     resources = [
         ("ClusterRole", f"{fullname}-operator", api.read_cluster_role),
         ("ClusterRole", f"{fullname}-agent-podsnapshotcontents", api.read_cluster_role),
-        ("ClusterRole", f"{fullname}-agent-resourceslices", api.read_cluster_role),
         ("ClusterRole", f"{fullname}-agent", api.read_cluster_role),
         ("ClusterRoleBinding", f"{fullname}-operator", api.read_cluster_role_binding),
         (
             "ClusterRoleBinding",
             f"{fullname}-agent-podsnapshotcontents",
-            api.read_cluster_role_binding,
-        ),
-        (
-            "ClusterRoleBinding",
-            f"{fullname}-agent-resourceslices",
             api.read_cluster_role_binding,
         ),
         ("ClusterRoleBinding", f"{fullname}-agent", api.read_cluster_role_binding),
@@ -795,30 +799,45 @@ def snapshot_chart_fullname(release: str) -> str:
     return name[:63].rstrip("-")
 
 
-def ensure_checkpoint_pvc(namespace: str, name: str, size: str) -> None:
+def ensure_checkpoint_pvc(
+    namespace: str, name: str, size: str, storage_class: str
+) -> None:
     api = client.CoreV1Api()
     body = client.V1PersistentVolumeClaim(
         metadata=client.V1ObjectMeta(name=name, namespace=namespace),
         spec=client.V1PersistentVolumeClaimSpec(
-            access_modes=["ReadWriteOnce"],
+            access_modes=["ReadWriteMany"],
             resources=client.V1ResourceRequirements(requests={"storage": size}),
+            storage_class_name=storage_class or None,
         ),
     )
     try:
         pvc = api.create_namespaced_persistent_volume_claim(namespace, body)
-        log(f"Created PVC {namespace}/{name}: phase={pvc.status.phase}")
+        log(
+            f"Created PVC {namespace}/{name}: phase={pvc.status.phase} "
+            f"storageClass={pvc.spec.storage_class_name}"
+        )
     except ApiException as exc:
         if exc.status != 409:
             raise SetupError(f"failed to create PVC {namespace}/{name}: {exc}") from exc
         pvc = api.read_namespaced_persistent_volume_claim(name, namespace)
         requested = (pvc.spec.resources.requests or {}).get("storage")
         access_modes = list(pvc.spec.access_modes or [])
-        detail = f"phase={pvc.status.phase}"
+        actual_storage_class = pvc.spec.storage_class_name or ""
+        detail = (
+            f"phase={pvc.status.phase} storageClass={pvc.spec.storage_class_name}"
+        )
         mismatches = []
         if requested != size:
             mismatches.append(f"requested storage={requested}, configured size={size}")
-        if access_modes != ["ReadWriteOnce"]:
-            mismatches.append(f"accessModes={access_modes}, expected ['ReadWriteOnce']")
+        if "ReadWriteMany" not in access_modes:
+            mismatches.append(
+                f"accessModes={access_modes}, expected to contain ReadWriteMany"
+            )
+        if storage_class and actual_storage_class != storage_class:
+            mismatches.append(
+                f"storageClassName={actual_storage_class!r}, expected {storage_class!r}"
+            )
         if mismatches:
             raise SetupError(
                 f"PVC {namespace}/{name} already exists with incompatible spec: "
@@ -833,6 +852,7 @@ def install_snapshot_chart(
     namespace: str,
     release: str,
     image_tag: str,
+    pvc_name: str,
     timeout: str,
 ) -> None:
     log(f"Installing Snapshot chart release {namespace}/{release}")
@@ -852,7 +872,9 @@ def install_snapshot_chart(
         "--set",
         f"image.agent.tag={image_tag}",
         "--set",
-        "storage.accessMode=podMount",
+        "storage.pvc.create=false",
+        "--set",
+        f"storage.pvc.name={pvc_name}",
         "--set-json",
         "daemonset.imagePullSecrets=[]",
     ]

@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: snapshot agent configuration validation
+templates:
+  - templates/configmap.yaml
+tests:
+  - it: rejects a caller-selected checkpoint mount path
+    set:
+      storage.pvc.basePath: /other
+    asserts:
+      - failedTemplate:
+          errorPattern: "storage.pvc.basePath is fixed at /checkpoints"

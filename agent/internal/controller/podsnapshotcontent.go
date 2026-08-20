@@ -17,8 +17,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	contentvalidation "k8s.io/apimachinery/pkg/api/validate/content"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -41,9 +41,6 @@ type CheckpointParams struct {
 	CheckpointID string
 	// HostPath is the agent-resolved destination directory for the dump.
 	HostPath string
-	// ContainerPath is the destination as seen inside the workload container's mount
-	// namespace (equal to HostPath under agentMount storage).
-	ContainerPath string
 	// StartedAt marks when the controller observed the work order, for timing.
 	StartedAt time.Time
 }
@@ -153,9 +150,10 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		return w.setSnapshotContentFailed(ctx, content, "MissingCheckpointID",
 			fmt.Errorf("source pod %q missing %s label", pod.Name, snapshotv1alpha1.CheckpointIDLabel))
 	}
-	if errs := validation.IsDNS1123Label(id); len(errs) > 0 {
+	// Label-value rules, not the stricter DNS-1123-label rules: dots are valid here.
+	if errs := contentvalidation.IsLabelValue(id); len(errs) > 0 {
 		return w.setSnapshotContentFailed(ctx, content, "InvalidCheckpointID",
-			fmt.Errorf("checkpoint ID %q is not a valid DNS-1123 label: %s", id, strings.Join(errs, "; ")))
+			fmt.Errorf("checkpoint ID %q is not a valid label value: %s", id, strings.Join(errs, "; ")))
 	}
 
 	// The checkpoint ID is the artifact identity, so the in-flight guard and lease key on it:
@@ -199,18 +197,15 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	if err != nil {
 		return w.setSnapshotContentFailed(ctx, content, "ContainerNotResolved", fmt.Errorf("resolve container %q: %w", containerName, err))
 	}
-	loc, err := w.checkpointLocationsFromPod(pod, id, containerPID)
+	artifactPath, err := w.artifactPathForPod(pod, id)
 	if err != nil {
 		return w.setSnapshotContentFailed(ctx, content, "InvalidDestination", err)
-	}
-	if err := w.validatePodMountContainerPID(ctx, containerID, containerPID); err != nil {
-		return w.setSnapshotContentFailed(ctx, content, "ContainerChanged", err)
 	}
 
 	// Resume: a present artifact with unwritten status means a prior dump finished before the
 	// Ready-and-release sequence completed. The artifact dir exists only after the executor's
 	// atomic rename, so its presence means a completed dump.
-	if artifactPresent(loc.HostPath) {
+	if artifactPresent(artifactPath) {
 		return w.markCheckpointReadyAndRelease(ctx, content, containerPID)
 	}
 
@@ -222,9 +217,8 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	if !acquired {
 		return nil
 	}
-
 	releaseInFlight = false
-	go w.runCheckpoint(ctx, content, pod, containerName, containerID, containerPID, id, loc, leaseKey, id)
+	go w.runCheckpoint(ctx, content, pod, containerName, containerID, containerPID, id, artifactPath, leaseKey, id)
 	return nil
 }
 
@@ -238,7 +232,7 @@ func (w *NodeController) runCheckpoint(
 	containerName, containerID string,
 	containerPID int,
 	checkpointID string,
-	loc checkpointLocations,
+	artifactPath string,
 	leaseKey client.ObjectKey,
 	inFlightKey string,
 ) {
@@ -263,8 +257,7 @@ func (w *NodeController) runCheckpoint(
 		ContainerID:   containerID,
 		ContainerPID:  containerPID,
 		CheckpointID:  checkpointID,
-		HostPath:      loc.HostPath,
-		ContainerPath: loc.ContainerPath,
+		HostPath:      artifactPath,
 		StartedAt:     time.Now(),
 	}
 	if err := w.checkpointFn(leaseCtx, params); err != nil {

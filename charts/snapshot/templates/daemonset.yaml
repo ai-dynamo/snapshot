@@ -122,20 +122,13 @@ spec:
                   fieldPath: spec.nodeName
             - name: SNAPSHOT_LOG_LEVEL
               value: {{ .Values.daemonset.snapshotLogLevel | quote }}
-            {{- if .Values.rbac.namespaceRestricted }}
-            # Restrict pod watching to this namespace (namespace-scoped RBAC)
-            - name: RESTRICTED_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-            {{- end }}
           volumeMounts:
             # Mount configuration ConfigMap
             - name: config
               mountPath: /etc/snapshot
               readOnly: true
-            {{- if and (eq .Values.storage.type "pvc") (eq .Values.storage.accessMode "agentMount") }}
-            # Mount the checkpoint PVC directly in namespace-local agent mode
+            {{- if eq .Values.storage.type "pvc" }}
+            # Every agent owns direct access to the shared checkpoint store.
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath }}
             {{- end }}
@@ -191,7 +184,7 @@ spec:
             path: /var/lib/kubelet/seccomp
             type: DirectoryOrCreate
         {{- end }}
-        {{- if and (eq .Values.storage.type "pvc") (eq .Values.storage.accessMode "agentMount") }}
+        {{- if eq .Values.storage.type "pvc" }}
         - name: checkpoints
           persistentVolumeClaim:
             claimName: {{ .Values.storage.pvc.name }}

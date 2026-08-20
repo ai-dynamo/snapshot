@@ -37,18 +37,13 @@ const (
 
 	// Full keys are nvidia.com/snapshot-restore-container-id.<containerName>.
 	RestoreContainerIDAnnotationPrefix = "nvidia.com/snapshot-restore-container-id."
-
 	// Legacy unscoped restore status keys, cleared when stamping fresh metadata.
 	RestoreStatusAnnotation      = "nvidia.com/snapshot-restore-status"
 	RestoreContainerIDAnnotation = "nvidia.com/snapshot-restore-container-id"
 
-	CheckpointStorageTypeAnnotation     = "nvidia.com/snapshot-storage-type"
-	CheckpointStorageBasePathAnnotation = "nvidia.com/snapshot-storage-base-path"
-	CheckpointVolumeName                = "checkpoint-storage"
-	DefaultCheckpointArtifactVersion    = "1"
-	DefaultCheckpointJobTTLSeconds      = int32(300) // TODO: dead code — remove once no longer synced from Dynamo
-	DefaultSeccompLocalhostProfile      = "profiles/block-iouring.json"
-	StorageTypePVC                      = "pvc"
+	DefaultCheckpointArtifactVersion = "1"
+	DefaultCheckpointJobTTLSeconds   = int32(300) // TODO: dead code — remove once no longer synced from Dynamo
+	DefaultSeccompLocalhostProfile   = "profiles/block-iouring.json"
 
 	CheckpointStatusCompleted = "completed" // TODO: dead code — remove once no longer synced from Dynamo
 	CheckpointStatusFailed    = "failed"    // TODO: dead code — remove once no longer synced from Dynamo

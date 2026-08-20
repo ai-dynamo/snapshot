@@ -12,7 +12,6 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 
 	"github.com/checkpoint-restore/go-criu/v8/crit"
@@ -38,57 +37,115 @@ type tcpPortRewrite struct {
 	port   uint32
 }
 
-func prepareRestoreImageDir(checkpointPath string) (string, func(), error) {
+type mountFilesImageFunc func(checkpointPath, replacementFilesImagePath string) (func() error, error)
+
+func prepareRestoreImageDir(checkpointPath, scratchDir string) (string, func() error, error) {
 	// The placeholder mount namespace remains container-specific with shareProcessNamespace.
 	var stat unix.Stat_t
 	if err := unix.Stat(placeholderMountNamespacePath, &stat); err != nil {
 		return "", nil, fmt.Errorf("failed to stat placeholder mount namespace at %s: %w", placeholderMountNamespacePath, err)
 	}
-	return prepareRestoreImageDirForRestoreID(checkpointPath, stat.Ino)
+	return prepareRestoreImageDirForRestoreID(checkpointPath, stat.Ino, scratchDir)
 }
 
-func prepareRestoreImageDirForRestoreID(checkpointPath string, restoreID uint64) (string, func(), error) {
+func prepareRestoreImageDirForRestoreID(checkpointPath string, restoreID uint64, scratchDir string) (string, func() error, error) {
+	return prepareRestoreImageDirForRestoreIDWithMount(
+		checkpointPath,
+		restoreID,
+		scratchDir,
+		mountFilesImage,
+	)
+}
+
+func prepareRestoreImageDirForRestoreIDWithMount(
+	checkpointPath string,
+	restoreID uint64,
+	scratchDir string,
+	mountReplacement mountFilesImageFunc,
+) (string, func() error, error) {
 	checkpointPath, err := filepath.Abs(checkpointPath)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to resolve checkpoint path: %w", err)
 	}
 
-	filesImage, err := os.Open(filepath.Join(checkpointPath, filesImageFilename))
+	image, err := decodeFilesImage(checkpointPath)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to open %s: %w", filesImageFilename, err)
+		return "", nil, err
+	}
+	reservationFDs, rewritten, err := rewriteSocketMetadata(image, restoreID)
+	if err != nil {
+		return "", nil, err
+	}
+	if !rewritten {
+		closeFDs(reservationFDs)
+		return checkpointPath, func() error { return nil }, nil
 	}
 
-	image, err := crit.New(filesImage, nil, "", false, false).Decode(&fdinfo.FileEntry{})
-	closeErr := filesImage.Close()
+	replacementFilesImagePath, err := encodeReplacementFilesImage(image, scratchDir)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to decode %s: %w", filesImageFilename, err)
+		closeFDs(reservationFDs)
+		return "", nil, err
+	}
+	removeImageView, err := mountReplacementFilesImage(checkpointPath, replacementFilesImagePath, mountReplacement)
+	if err != nil {
+		closeFDs(reservationFDs)
+		return "", nil, err
+	}
+	return checkpointPath, restoreImageCleanup(reservationFDs, removeImageView), nil
+}
+
+func decodeFilesImage(checkpointPath string) (*crit.CriuImage, error) {
+	path := filepath.Join(checkpointPath, filesImageFilename)
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open %s: %w", filesImageFilename, err)
+	}
+	filesImage := os.NewFile(uintptr(fd), path)
+	info, err := filesImage.Stat()
+	if err != nil {
+		_ = filesImage.Close()
+		return nil, fmt.Errorf("failed to stat %s: %w", filesImageFilename, err)
+	}
+	if !info.Mode().IsRegular() {
+		_ = filesImage.Close()
+		return nil, fmt.Errorf("%s is not a regular file", filesImageFilename)
+	}
+	image, decodeErr := crit.New(filesImage, nil, "", false, false).Decode(&fdinfo.FileEntry{})
+	closeErr := filesImage.Close()
+	if decodeErr != nil {
+		return nil, fmt.Errorf("failed to decode %s: %w", filesImageFilename, decodeErr)
 	}
 	if closeErr != nil {
-		return "", nil, fmt.Errorf("failed to close %s: %w", filesImageFilename, closeErr)
+		return nil, fmt.Errorf("failed to close %s: %w", filesImageFilename, closeErr)
 	}
+	return image, nil
+}
 
-	// CRIU recreates bound sockets from files.img. Give each clone a private
-	// view so containers sharing a Pod network namespace get unique identities.
+// rewriteSocketMetadata gives each clone private socket identities while
+// preserving listeners. The caller owns the returned reservation descriptors.
+func rewriteSocketMetadata(image *crit.CriuImage, restoreID uint64) ([]int, bool, error) {
 	tcpRewrites, tcpDisconnects, forbiddenPorts := planTCPPortRewrites(image)
 	var reservationFDs []int
 	for i := range tcpRewrites {
-		var reservationFD int
-		tcpRewrites[i].port, reservationFD, err = reserveDualStackTCPPort(forbiddenPorts)
+		port, reservationFD, err := reserveDualStackTCPPort(forbiddenPorts)
 		if err != nil {
 			closeFDs(reservationFDs)
-			return "", nil, fmt.Errorf("failed to reserve replacement TCP port: %w", err)
+			return nil, false, fmt.Errorf("failed to reserve replacement TCP port: %w", err)
 		}
+		tcpRewrites[i].port = port
 		reservationFDs = append(reservationFDs, reservationFD)
-		forbiddenPorts[tcpRewrites[i].port] = struct{}{}
+		forbiddenPorts[port] = struct{}{}
 	}
 
 	rewritten := false
-	for _, entry := range image.Entries {
-		fileEntry := entry.Message.(*fdinfo.FileEntry)
-		if fileEntry.GetType() != fdinfo.FdTypes_UNIXSK || fileEntry.Usk == nil {
-			continue
+	for i, entry := range image.Entries {
+		fileEntry, ok := entry.Message.(*fdinfo.FileEntry)
+		if !ok {
+			closeFDs(reservationFDs)
+			return nil, false, fmt.Errorf("unexpected %s entry %d type %T", filesImageFilename, i, entry.Message)
 		}
-		if rewriteCloneConflictingUnixSocketAddress(fileEntry.Usk, restoreID) {
+		if fileEntry.GetType() == fdinfo.FdTypes_UNIXSK && fileEntry.Usk != nil &&
+			rewriteCloneConflictingUnixSocketAddress(fileEntry.Usk, restoreID) {
 			rewritten = true
 		}
 	}
@@ -109,56 +166,57 @@ func prepareRestoreImageDirForRestoreID(checkpointPath string, restoreID uint64)
 		clear(socket.DstAddr)
 		rewritten = true
 	}
-	if !rewritten {
-		return checkpointPath, func() {}, nil
-	}
+	return reservationFDs, rewritten, nil
+}
 
-	privateDir, err := os.MkdirTemp(filepath.Dir(checkpointPath), ".dynamo-criu-restore-*")
+func encodeReplacementFilesImage(image *crit.CriuImage, scratchDir string) (string, error) {
+	filesImage, err := os.CreateTemp(scratchDir, ".dynamo-criu-files-*.img")
 	if err != nil {
-		closeFDs(reservationFDs)
-		return "", nil, fmt.Errorf("failed to create private CRIU image directory: %w", err)
+		return "", fmt.Errorf("failed to create private %s: %w", filesImageFilename, err)
 	}
-	var cleanupOnce sync.Once
-	cleanup := func() {
-		cleanupOnce.Do(func() {
+	path := filesImage.Name()
+	if err := crit.New(nil, filesImage, "", false, false).Encode(image); err != nil {
+		_ = filesImage.Close()
+		_ = os.Remove(path)
+		return "", fmt.Errorf("failed to encode private %s: %w", filesImageFilename, err)
+	}
+	if err := filesImage.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("failed to close private %s: %w", filesImageFilename, err)
+	}
+	return path, nil
+}
+
+func mountReplacementFilesImage(
+	checkpointPath string,
+	replacementFilesImagePath string,
+	mountReplacement mountFilesImageFunc,
+) (func() error, error) {
+	removeImageView, err := mountReplacement(checkpointPath, replacementFilesImagePath)
+	if err != nil {
+		_ = os.Remove(replacementFilesImagePath)
+		return nil, fmt.Errorf("failed to mount private %s: %w", filesImageFilename, err)
+	}
+	if err := os.Remove(replacementFilesImagePath); err != nil {
+		cleanupErr := removeImageView()
+		if cleanupErr != nil {
+			return nil, fmt.Errorf("failed to unlink mounted private %s: %w (cleanup failed: %v)", filesImageFilename, err, cleanupErr)
+		}
+		return nil, fmt.Errorf("failed to unlink mounted private %s: %w", filesImageFilename, err)
+	}
+	return removeImageView, nil
+}
+
+func restoreImageCleanup(reservationFDs []int, removeImageView func() error) func() error {
+	var once sync.Once
+	var cleanupErr error
+	return func() error {
+		once.Do(func() {
 			closeFDs(reservationFDs)
-			_ = os.RemoveAll(privateDir)
+			cleanupErr = removeImageView()
 		})
+		return cleanupErr
 	}
-	fail := func(err error) (string, func(), error) {
-		cleanup()
-		return "", nil, err
-	}
-
-	entries, err := os.ReadDir(checkpointPath)
-	if err != nil {
-		return fail(fmt.Errorf("failed to read checkpoint directory: %w", err))
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if name == filesImageFilename || !strings.HasSuffix(name, ".img") {
-			continue
-		}
-		// CRIU does not modify restore images; hard links keep them visible after it
-		// enters the restored mount namespace without copying large page images.
-		if err := os.Link(filepath.Join(checkpointPath, name), filepath.Join(privateDir, name)); err != nil {
-			return fail(fmt.Errorf("failed to hard-link CRIU image %s: %w", name, err))
-		}
-	}
-
-	privateFilesImage, err := os.OpenFile(filepath.Join(privateDir, filesImageFilename), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err != nil {
-		return fail(fmt.Errorf("failed to create private %s: %w", filesImageFilename, err))
-	}
-	if err := crit.New(nil, privateFilesImage, "", false, false).Encode(image); err != nil {
-		_ = privateFilesImage.Close()
-		return fail(fmt.Errorf("failed to encode private %s: %w", filesImageFilename, err))
-	}
-	if err := privateFilesImage.Close(); err != nil {
-		return fail(fmt.Errorf("failed to close private %s: %w", filesImageFilename, err))
-	}
-
-	return privateDir, cleanup, nil
 }
 
 func planTCPPortRewrites(image *crit.CriuImage) (

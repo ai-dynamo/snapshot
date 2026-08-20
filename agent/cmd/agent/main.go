@@ -55,7 +55,6 @@ func main() {
 
 	agentLog.Info("Starting snapshot agent",
 		"node", cfg.NodeName,
-		"restricted_namespace", cfg.RestrictedNamespace,
 		"runtime", *runtimeType,
 	)
 

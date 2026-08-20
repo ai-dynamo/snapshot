@@ -152,12 +152,12 @@ func TestTargetContainersFromAnnotationsBounds(t *testing.T) {
 }
 
 func TestRestoreStatusAnnotations(t *testing.T) {
-	got, err := RestoreStatusAnnotations("engine-1", RestoreStatusCompleted, "container-id")
+	got, err := RestoreStatusAnnotations("engine-1", RestoreStatusFailed, "container-id")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	want := map[string]string{
-		RestoreStatusAnnotationPrefix + "engine-1":      RestoreStatusCompleted,
+		RestoreStatusAnnotationPrefix + "engine-1":      RestoreStatusFailed,
 		RestoreContainerIDAnnotationPrefix + "engine-1": "container-id",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -173,67 +173,4 @@ func TestRestoreStatusAnnotationsRejectsInvalidContainerName(t *testing.T) {
 	if !strings.Contains(err.Error(), "restore status annotation key") {
 		t.Fatalf("unexpected error: %v", err)
 	}
-}
-
-func TestApplyCheckpointStorageMetadata(t *testing.T) {
-	annotations := map[string]string{
-		CheckpointStorageTypeAnnotation:     "old",
-		CheckpointStorageBasePathAnnotation: "/old",
-	}
-
-	ApplyCheckpointStorageMetadata(annotations, Storage{
-		Type:     StorageTypePVC,
-		BasePath: "/checkpoints/",
-	})
-
-	if annotations[CheckpointStorageTypeAnnotation] != StorageTypePVC {
-		t.Fatalf("expected storage type annotation, got %#v", annotations)
-	}
-	if annotations[CheckpointStorageBasePathAnnotation] != "/checkpoints" {
-		t.Fatalf("expected normalized storage base path annotation, got %#v", annotations)
-	}
-}
-
-func TestResolveCheckpointStorageValidatesBasePath(t *testing.T) {
-	t.Run("rejects relative base path", func(t *testing.T) {
-		_, err := ResolveCheckpointStorage("hash", "", Storage{
-			Type:     StorageTypePVC,
-			BasePath: "checkpoints",
-		})
-		if err == nil {
-			t.Fatal("expected error for relative base path")
-		}
-	})
-
-	t.Run("normalizes trailing slash", func(t *testing.T) {
-		storage, err := ResolveCheckpointStorage("hash", "2", Storage{
-			Type:     StorageTypePVC,
-			BasePath: "/checkpoints/",
-		})
-		if err != nil {
-			t.Fatalf("ResolveCheckpointStorage() error = %v", err)
-		}
-		if storage.BasePath != "/checkpoints" {
-			t.Fatalf("BasePath = %q, want /checkpoints", storage.BasePath)
-		}
-		if storage.Location != "/checkpoints/hash/versions/2" {
-			t.Fatalf("Location = %q, want /checkpoints/hash/versions/2", storage.Location)
-		}
-	})
-
-	t.Run("allows root base path", func(t *testing.T) {
-		storage, err := ResolveCheckpointStorage("hash", "", Storage{
-			Type:     StorageTypePVC,
-			BasePath: "/",
-		})
-		if err != nil {
-			t.Fatalf("ResolveCheckpointStorage() error = %v", err)
-		}
-		if storage.BasePath != "/" {
-			t.Fatalf("BasePath = %q, want /", storage.BasePath)
-		}
-		if storage.Location != "/hash/versions/1" {
-			t.Fatalf("Location = %q, want /hash/versions/1", storage.Location)
-		}
-	})
 }

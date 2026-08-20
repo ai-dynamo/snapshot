@@ -36,10 +36,9 @@ def test_successful_snapshot_captures_cpu_gpu_and_fs(
             run.snapshot_name,
         )
         assert_podsnapshot_ready(pod_snapshot, content, source, source_node)
-
         manifest = snap.checkpoint_artifact_manifest(
-            config.namespace,
-            run.source_pod,
+            config,
+            source_node,
             run.checkpoint_id,
         )
         assert "criuDump:" in manifest
@@ -47,8 +46,8 @@ def test_successful_snapshot_captures_cpu_gpu_and_fs(
         assert f"podName: {run.source_pod}" in manifest
 
         artifact_listing = snap.checkpoint_artifact_listing(
-            config.namespace,
-            run.source_pod,
+            config,
+            source_node,
             run.checkpoint_id,
         )
         assert "./inventory.img" in artifact_listing
@@ -58,8 +57,8 @@ def test_successful_snapshot_captures_cpu_gpu_and_fs(
         assert "./tmp/e2e-state/observations.log" in artifact_listing
 
         file_token = snap.checkpoint_rootfs_file(
-            config.namespace,
-            run.source_pod,
+            config,
+            source_node,
             run.checkpoint_id,
             "./tmp/e2e-state/file-token",
         )
@@ -243,7 +242,6 @@ def assert_podsnapshot_ready(
     assert content_ready.get("reason") == "Captured"
     content_failed = snap.condition(content, "Failed")
     assert content_failed is None or content_failed.get("status") != "True"
-
     assert content["spec"]["source"]["podRef"]["name"] == source.metadata.name
     assert content["spec"]["source"]["podRef"]["uid"] == source.metadata.uid
     assert content["spec"]["source"]["podRef"]["containers"] == [snap.CONTAINER]

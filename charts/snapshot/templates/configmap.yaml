@@ -6,8 +6,8 @@ kind: ConfigMap
 {{- if ne .Values.storage.type "pvc" }}
 {{- fail (printf "snapshot.storage.type=%q is not supported yet; only pvc is currently implemented" .Values.storage.type) }}
 {{- end }}
-{{- if not (has .Values.storage.accessMode (list "agentMount" "podMount")) }}
-{{- fail (printf "snapshot.storage.accessMode=%q is not supported; expected agentMount or podMount" .Values.storage.accessMode) }}
+{{- if ne .Values.storage.pvc.basePath "/checkpoints" }}
+{{- fail "snapshot.storage.pvc.basePath is fixed at /checkpoints so the privileged mount helper can enforce its source allowlist" }}
 {{- end }}
 metadata:
   name: {{ include "snapshot.fullname" . }}-config
@@ -18,7 +18,6 @@ data:
   config.yaml: |
     storage:
       type: {{ .Values.storage.type | quote }}
-      accessMode: {{ .Values.storage.accessMode | quote }}
       {{- if eq .Values.storage.type "pvc" }}
       basePath: {{ .Values.storage.pvc.basePath | quote }}
       {{- end }}

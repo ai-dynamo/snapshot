@@ -101,6 +101,11 @@ func makeNodeController(t *testing.T, fc *fakeCheckpointer, objs ...client.Objec
 	return w
 }
 
+func TestArtifactPresent(t *testing.T) {
+	assert.False(t, artifactPresent(filepath.Join(t.TempDir(), "missing")))
+	assert.True(t, artifactPresent(t.TempDir()))
+}
+
 // makeWorkOrder builds a PodSnapshotContent work order pinned to a node and checkpoint id.
 // Capture parameters now live on the source pod, so the work order carries only the node
 // label and spec.
@@ -324,8 +329,9 @@ func TestReconcileSourcePod_GuardSurvivesWorkOrderRecreation(t *testing.T) {
 func TestReconcileSourcePod_InvalidCheckpointIDFails(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	pod := makeSourcePod("x")
-	// Replace the valid ID with one that contains an uppercase letter — not a valid DNS-1123 label.
-	pod.Labels[snapshotv1alpha1.CheckpointIDLabel] = "Bad_ID"
+	// A label value must start and end with an alphanumeric character — a leading
+	// dash is invalid regardless of the rest of the content.
+	pod.Labels[snapshotv1alpha1.CheckpointIDLabel] = "-bad-id"
 	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
 
 	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
@@ -334,6 +340,27 @@ func TestReconcileSourcePod_InvalidCheckpointIDFails(t *testing.T) {
 	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
 	require.NotNil(t, cond)
 	assert.Equal(t, "InvalidCheckpointID", cond.Reason)
+}
+
+func TestReconcileSourcePod_DottedCheckpointIDIsValid(t *testing.T) {
+	// A SnapshotJob name like "warm.worker" is a valid Kubernetes object name (RFC
+	// 1123 subdomain) and a valid label value, but not a valid DNS-1123 label — the
+	// checkpoint ID validation must use label-value rules, not the stricter
+	// DNS-1123-label rules, or a dotted name would be wrongly rejected here even
+	// though the operator already accepted it when creating the source Job.
+	content := makeWorkOrder("podsnapshotcontent-dotted", "node-a", "warm.worker")
+	pod := makeSourcePod("warm.worker")
+	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+	// Seed the in-flight guard so reconcileSourcePod returns right after ID
+	// validation instead of proceeding into the full dump pipeline — this test
+	// only cares whether validation itself accepts the dotted ID.
+	w.inFlight["warm.worker"] = struct{}{}
+
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+
+	got := getContent(t, w, content.Name)
+	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	assert.Nil(t, cond, "a dotted checkpoint ID must not be rejected as InvalidCheckpointID")
 }
 
 func TestReconcileSnapshotContent_FailedContainerUnsticksAndFails(t *testing.T) {
@@ -427,6 +454,7 @@ func TestReconcileSnapshotContent_ResumeWritesReadyAndReleases(t *testing.T) {
 	// Pre-create the artifact directory at the resolved destination so the resume check fires.
 	dest := filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1")
 	require.NoError(t, os.MkdirAll(dest, 0o755))
+	require.NoError(t, snapshottypes.WriteManifest(dest, &snapshottypes.CheckpointManifest{CheckpointID: "abc"}))
 
 	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
 	assert.False(t, fc.wasCalled())
@@ -434,29 +462,6 @@ func TestReconcileSnapshotContent_ResumeWritesReadyAndReleases(t *testing.T) {
 	got := getContent(t, w, content.Name)
 	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady)
 	require.NotNil(t, cond)
-}
-
-func TestReconcileSnapshotContent_PodMountResolvesContainerPID(t *testing.T) {
-	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
-	pod := makeSourcePod("abc")
-	fc := &fakeCheckpointer{}
-	w := makeNodeController(t, fc, content, pod)
-	w.config.Storage.AccessMode = snapshottypes.StorageAccessModePodMount
-	rt := &fakeRuntime{resolveContainerPID: 4242}
-	w.runtime = rt
-
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
-
-	// podMount mode resolves the container PID and feeds it through checkpointLocationsFromPod
-	// (a zero PID would fail there with a different reason). The subsequent live-PID validation
-	// fails in a unit test because /host/proc/<pid> does not exist, which proves the non-zero
-	// PID flowed through to validatePodMountContainerPID.
-	assert.Contains(t, rt.resolvedContainerIDs, "abc123")
-	assert.False(t, fc.wasCalled())
-	got := getContent(t, w, content.Name)
-	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
-	require.NotNil(t, cond)
-	assert.Equal(t, "ContainerChanged", cond.Reason)
 }
 
 func TestReconcileSnapshotContent_PodNotFoundFails(t *testing.T) {
@@ -566,10 +571,8 @@ func TestReconcileSnapshotContent_CapturesFromPod(t *testing.T) {
 	assert.Equal(t, "main", params.ContainerName)
 	assert.Equal(t, "abc123", params.ContainerID)
 	assert.Equal(t, 7, params.ContainerPID)
-	// agentMount: HostPath == ContainerPath == resolved destination.
 	dest := filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1")
 	assert.Equal(t, dest, params.HostPath)
-	assert.Equal(t, dest, params.ContainerPath)
 
 	// setSnapshotContentSucceeded runs after checkpointFn returns, so poll for the Ready condition rather than reading once.
 	require.Eventually(t, func() bool {
@@ -622,10 +625,7 @@ func TestRunCheckpoint_WritesReadyBeforeRelease(t *testing.T) {
 	w := makeNodeController(t, fc, content)
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")}}
 	leaseKey := client.ObjectKey{Namespace: "inference", Name: "checkpoint-lease-abc"}
-	loc := checkpointLocations{
-		HostPath:      filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1"),
-		ContainerPath: filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1"),
-	}
+	artifactPath := filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1")
 	released := false
 	w.releaseCheckpointFn = func(containerPID int) error {
 		assert.Equal(t, 7, containerPID)
@@ -638,7 +638,7 @@ func TestRunCheckpoint_WritesReadyBeforeRelease(t *testing.T) {
 		return nil
 	}
 
-	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, "abc", loc, leaseKey, "abc")
+	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, "abc", artifactPath, leaseKey, "abc")
 
 	assert.True(t, fc.wasCalled())
 	assert.True(t, released)
@@ -650,12 +650,9 @@ func TestRunCheckpoint_WritesFailedOnError(t *testing.T) {
 	w := makeNodeController(t, fc, content)
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")}}
 	leaseKey := client.ObjectKey{Namespace: "inference", Name: "checkpoint-lease-abc"}
-	loc := checkpointLocations{
-		HostPath:      filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1"),
-		ContainerPath: filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1"),
-	}
+	artifactPath := filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1")
 
-	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, "abc", loc, leaseKey, "abc")
+	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, "abc", artifactPath, leaseKey, "abc")
 
 	got := getContent(t, w, content.Name)
 	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
@@ -679,12 +676,9 @@ func TestRunCheckpoint_ReleaseFailureKillsTarget(t *testing.T) {
 	w.releaseCheckpointFn = func(int) error { return errors.New("sentinel write rejected") }
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")}}
 	leaseKey := client.ObjectKey{Namespace: "inference", Name: "checkpoint-lease-abc"}
-	loc := checkpointLocations{
-		HostPath:      filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1"),
-		ContainerPath: filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1"),
-	}
+	artifactPath := filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1")
 
-	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", target.Process.Pid, "abc", loc, leaseKey, "abc")
+	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", target.Process.Pid, "abc", artifactPath, leaseKey, "abc")
 
 	err := target.Wait()
 	require.NoError(t, ctx.Err(), "killCheckpointProcess did not terminate the target before the test deadline")

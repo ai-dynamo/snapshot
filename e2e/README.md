@@ -9,7 +9,12 @@ end-to-end checks against a Kubernetes cluster.
 - `kubectl` and `helm`
 - For CI/vCluster mode: `vcluster`
 - A GPU Kubernetes cluster with `RuntimeClass/nvidia`, GPU Operator `26.3.0+`,
-  MIG disabled on the target GPU nodes, and CUDA driver `580+`
+  MIG disabled on the target GPU nodes, CUDA driver `580+`, and a storage class
+  that can provision `ReadWriteMany` volumes
+
+Set `SNAPSHOT_E2E_STORAGE_CLASS` when the cluster default cannot provision RWX
+claims. The AKS workflow uses `azurefile-csi`; local runs default to the
+cluster's default storage class.
 
 ## Modes
 
