@@ -488,6 +488,51 @@ func TestReconcileSourcePod_ReadyRetriesSentinel(t *testing.T) {
 	assert.True(t, released, "crash after Ready must retry snapshot-complete")
 }
 
+func TestReconcileSourcePod_ReadyReleaseSkipsStalePodUID(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
+		Type:    snapshotv1alpha1.PodSnapshotConditionReady,
+		Status:  metav1.ConditionTrue,
+		Reason:  "Captured",
+		Message: "Checkpoint captured and verified",
+	})
+	pod := makeSourcePod("abc")
+	pod.UID = types.UID("replacement-pod-uid")
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
+	released := false
+	w.releaseCheckpointFn = func(int) error {
+		released = true
+		return nil
+	}
+
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	assert.False(t, fc.wasCalled())
+	assert.False(t, released, "must not write snapshot-complete into a recreated pod")
+}
+
+func TestReconcileSourcePod_ReadyReleaseFailureKillsTarget(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
+		Type:    snapshotv1alpha1.PodSnapshotConditionReady,
+		Status:  metav1.ConditionTrue,
+		Reason:  "Captured",
+		Message: "Checkpoint captured and verified",
+	})
+	pod := makeSourcePod("abc")
+	ctx, target := startKillableTarget(t)
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: target.Process.Pid}
+	w.releaseCheckpointFn = func(int) error { return errors.New("sentinel write rejected") }
+
+	err := w.reconcileSourcePod(context.Background(), pod)
+	require.Error(t, err)
+	assert.False(t, fc.wasCalled())
+	requireKilledBySIGKILL(t, ctx, target)
+}
+
 func TestReconcileSourcePod_ReadyDoesNotStarveNewDump(t *testing.T) {
 	ready := makeWorkOrder("podsnapshotcontent-old", "node-a", "abc")
 	ready.CreationTimestamp = metav1.Unix(1000, 0)

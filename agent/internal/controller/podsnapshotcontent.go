@@ -253,6 +253,11 @@ func (w *NodeController) releaseReadyContents(ctx context.Context, pod *corev1.P
 }
 
 func (w *NodeController) releaseReadyContent(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, pod *corev1.Pod) error {
+	logger := logr.FromContextOrDiscard(ctx)
+	if content.Spec.Source.PodRef.UID != "" && content.Spec.Source.PodRef.UID != pod.UID {
+		logger.V(1).Info("Skipping Ready release for stale source pod", "content", content.Name)
+		return nil
+	}
 	containerName, err := singleTargetContainer(content)
 	if err != nil {
 		return err
@@ -267,11 +272,11 @@ func (w *NodeController) releaseReadyContent(ctx context.Context, content *snaps
 	containerPID, _, err := w.runtime.ResolveContainer(ctx, containerID)
 	if err != nil {
 		// The capture already succeeded; if the container is gone the process is not blocked.
-		logr.FromContextOrDiscard(ctx).V(1).Info("Skipping Ready release; container not resolvable",
+		logger.V(1).Info("Skipping Ready release; container not resolvable",
 			"content", content.Name, "container", containerName)
 		return nil
 	}
-	return w.releaseCheckpointFn(containerPID)
+	return w.writeSentinelOrKill(logger, containerPID, content.Name)
 }
 
 // runCheckpoint executes the dump under a renewed lease, writes the Ready status, then releases
@@ -493,7 +498,7 @@ func (w *NodeController) markCheckpointReadyAndRelease(ctx context.Context, cont
 				// Ready is already durable (crash between Ready and sentinel, or a racing
 				// success path). Write the sentinel; the write is idempotent.
 				if isContentReady(current) && !isContentFailed(current) {
-					return w.releaseCheckpointFn(containerPID)
+					return w.writeSentinelOrKill(logger, containerPID, content.Name)
 				}
 				return nil
 			}
@@ -501,8 +506,16 @@ func (w *NodeController) markCheckpointReadyAndRelease(ctx context.Context, cont
 		logger.Error(err, "Failed to write PodSnapshotContent ready status", "content", content.Name)
 		return err
 	}
+	if err := w.writeSentinelOrKill(logger, containerPID, content.Name); err != nil {
+		return err
+	}
+	return nil
+}
+
+// writeSentinelOrKill writes snapshot-complete, or SIGKILLs the still-blocked target if that write fails.
+func (w *NodeController) writeSentinelOrKill(logger logr.Logger, containerPID int, contentName string) error {
 	if err := w.releaseCheckpointFn(containerPID); err != nil {
-		logger.Error(err, "Failed to write snapshot-complete sentinel", "content", content.Name)
+		logger.Error(err, "Failed to write snapshot-complete sentinel", "content", contentName)
 		if killErr := w.killCheckpointProcess(logger, containerPID, "checkpoint sentinel failed"); killErr != nil {
 			return fmt.Errorf("write snapshot-complete sentinel: %w; kill target: %v", err, killErr)
 		}
