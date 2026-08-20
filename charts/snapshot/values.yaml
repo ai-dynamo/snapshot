@@ -80,6 +80,8 @@ storage:
 
 pageBroker:
   enabled: false
+  command: []
+  args: []
   maxConcurrentRequests: 16
   stagingSizeLimit: 64Gi
   resources:
