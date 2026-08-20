@@ -63,7 +63,7 @@ func validateWithin(root, source string) error {
 	if err := validateAbsolutePath(source); err != nil {
 		return err
 	}
-	if source != root && !strings.HasPrefix(source, root+"/") {
+	if source == root || !strings.HasPrefix(source, root+"/") {
 		return fmt.Errorf("mount source %q must be within %q", source, root)
 	}
 	return nil
