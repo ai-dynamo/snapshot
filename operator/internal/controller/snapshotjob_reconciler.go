@@ -24,6 +24,12 @@ import (
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
+// +kubebuilder:rbac:groups=nvidia.com,resources=snapshotjobs,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=nvidia.com,resources=snapshotjobs/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=nvidia.com,resources=snapshotjobs/finalizers,verbs=update
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;get;list;watch
+// +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
+
 // SnapshotJobReconciler reconciles a SnapshotJob.
 //
 // This phase (source Job creation + Running) only handles the batch/v1 Job it
@@ -37,12 +43,6 @@ type SnapshotJobReconciler struct {
 	client.Client
 	Recorder record.EventRecorder
 }
-
-// +kubebuilder:rbac:groups=nvidia.com,resources=snapshotjobs,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=nvidia.com,resources=snapshotjobs/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=nvidia.com,resources=snapshotjobs/finalizers,verbs=update
-// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;get;list;watch
-// +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
 // Reconcile drives a SnapshotJob's source Job into existence and derives Running
 // from it. It is a thin orchestrator: each branch delegates to a helper that owns
