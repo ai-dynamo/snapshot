@@ -132,7 +132,9 @@ type SnapshotJobStatus struct {
 	// +optional
 	PodSnapshotName string `json:"podSnapshotName,omitempty"`
 
-	// StartedAt is when the source pod became Ready.
+	// StartedAt is when the controller first observed the source pod Ready
+	// (job.status.ready > 0), not the pod's own Ready transition time — it can
+	// lag the pod's actual transition by up to one reconcile interval.
 	// +optional
 	StartedAt *metav1.Time `json:"startedAt,omitempty"`
 
