@@ -15,7 +15,7 @@ RUN make daemon
 
 FROM ubuntu:24.04
 
-RUN apt-get update && apt-get install -y --no-install-recommends libprotobuf32 \
+RUN apt-get update && apt-get install -y --no-install-recommends libprotobuf32t64 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /src/pagebroker /usr/local/bin/pagebroker
