@@ -75,6 +75,22 @@ storage:
   oci:
     uri: ""
 
+pageBroker:
+  enabled: false
+  maxConcurrentRequests: 16
+  stagingSizeLimit: 64Gi
+  resources:
+    requests:
+      cpu: 8
+      memory: 64Gi
+    limits:
+      cpu: 32
+      memory: 72Gi
+  image:
+    repository: nvcr.io/nvidia/ai-dynamo/pagebroker
+    tag: 1.4.0
+    pullPolicy: Always
+
 # DaemonSet configuration for the checkpoint/restore agent
 daemonset:
   # Agent and nsrestore log level (trace, debug, info, warn, error)
