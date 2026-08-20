@@ -110,6 +110,16 @@ func TestSnapshotJobReconcileInvalidSpecIsTerminal(t *testing.T) {
 	require.NotNil(t, running, "Running must not be entirely absent alongside a terminal Failed=True — missing is not the same as known False")
 	assert.Equal(t, metav1.ConditionFalse, running.Status)
 	assert.Equal(t, snapshotv1alpha1.ReasonPodPending, running.Reason)
+
+	captured := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured)
+	require.NotNil(t, captured, "Captured must not be entirely absent alongside a terminal Failed=True — missing is not the same as known False")
+	assert.Equal(t, metav1.ConditionFalse, captured.Status)
+	assert.Equal(t, snapshotv1alpha1.ReasonInvalidSpec, captured.Reason)
+
+	completed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCompleted)
+	require.NotNil(t, completed, "Completed must not be entirely absent alongside a terminal Failed=True — missing is not the same as known False")
+	assert.Equal(t, metav1.ConditionFalse, completed.Status)
+	assert.Equal(t, snapshotv1alpha1.ReasonInvalidSpec, completed.Reason)
 }
 
 func TestSnapshotJobReconcilePropagatesJobGetError(t *testing.T) {
@@ -213,6 +223,12 @@ func TestSnapshotJobReconcileFailsForeignJobOnAlreadyExistsRace(t *testing.T) {
 	cond := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
 	require.NotNil(t, cond)
 	assert.Equal(t, snapshotv1alpha1.ReasonJobNameConflict, cond.Reason)
+	captured := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured)
+	require.NotNil(t, captured, "Captured must not be entirely absent alongside a terminal Failed=True")
+	assert.Equal(t, metav1.ConditionFalse, captured.Status)
+	completed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCompleted)
+	require.NotNil(t, completed, "Completed must not be entirely absent alongside a terminal Failed=True")
+	assert.Equal(t, metav1.ConditionFalse, completed.Status)
 	running := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning)
 	require.NotNil(t, running, "Running must not be entirely absent alongside a terminal Failed=True")
 	assert.Equal(t, metav1.ConditionFalse, running.Status)
@@ -347,6 +363,12 @@ func TestSnapshotJobReconcileFailsForeignJob(t *testing.T) {
 	cond := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
 	require.NotNil(t, cond)
 	assert.Equal(t, snapshotv1alpha1.ReasonJobNameConflict, cond.Reason)
+	captured := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured)
+	require.NotNil(t, captured, "Captured must not be entirely absent alongside a terminal Failed=True")
+	assert.Equal(t, metav1.ConditionFalse, captured.Status)
+	completed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCompleted)
+	require.NotNil(t, completed, "Completed must not be entirely absent alongside a terminal Failed=True")
+	assert.Equal(t, metav1.ConditionFalse, completed.Status)
 	running := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning)
 	require.NotNil(t, running, "Running must not be entirely absent alongside a terminal Failed=True")
 	assert.Equal(t, metav1.ConditionFalse, running.Status)

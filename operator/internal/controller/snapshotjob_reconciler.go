@@ -161,27 +161,27 @@ func (r *SnapshotJobReconciler) observeJob(ctx context.Context, sj *snapshotv1al
 }
 
 // failSnapshotJob records a terminal Failed=True condition, an event, and
-// completedAt. completedAt must be set here: IsSnapshotJobTerminal short-circuits
-// every later reconcile once Failed=True is persisted, so this is the only
-// chance to record it.
+// completedAt (the only chance to set it, since IsSnapshotJobTerminal
+// short-circuits every later reconcile once Failed=True is persisted).
 //
-// Also backfills Running=False/PodPending if it was never set — every call site
-// in this phase reaches failSnapshotJob before ever observing an owned Job's
-// readiness, so a consumer must not see Failed=True with Running entirely
-// absent from status.conditions (missing is not the same as "known False").
-// An already-set Running is left untouched, since it may already reflect a
-// real observation. The backfilled message says the pod was never observed
-// ready rather than reusing the non-terminal "waiting for..." wording, since
-// by the time this runs the SnapshotJob is already failed, not still waiting.
-//
-// Captured and Completed are not touched here: neither condition exists yet in
-// this phase (PodSnapshot creation lands in PR 4, the completion gate in PR 5),
-// so there is nothing yet to set them to.
+// It also backfills any of Running/Captured/Completed that was never set, to
+// False — missing is not the same as known-False. Already-set conditions are
+// left untouched. Running backfills with its own PodPending reason; Captured
+// and Completed have no "never reached" reason of their own, so they reuse
+// Failed's reason/cause.
 func (r *SnapshotJobReconciler) failSnapshotJob(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, reason string, cause error) (ctrl.Result, error) {
 	r.Recorder.Event(sj, corev1.EventTypeWarning, reason, cause.Error())
 	if meta.FindStatusCondition(sj.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning) == nil {
 		setCondition(sj, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse,
 			snapshotv1alpha1.ReasonPodPending, "source pod was never observed ready before this SnapshotJob failed")
+	}
+	if meta.FindStatusCondition(sj.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured) == nil {
+		setCondition(sj, snapshotv1alpha1.SnapshotJobConditionCaptured, metav1.ConditionFalse,
+			reason, "capture was never started before this SnapshotJob failed: "+cause.Error())
+	}
+	if meta.FindStatusCondition(sj.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCompleted) == nil {
+		setCondition(sj, snapshotv1alpha1.SnapshotJobConditionCompleted, metav1.ConditionFalse,
+			reason, "the SnapshotJob failed before completing: "+cause.Error())
 	}
 	setCondition(sj, snapshotv1alpha1.SnapshotJobConditionFailed, metav1.ConditionTrue, reason, cause.Error())
 	if sj.Status.CompletedAt == nil {
