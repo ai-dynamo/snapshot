@@ -104,21 +104,19 @@ def test_snapshotjob_captures_and_restore_recovers_state(
         snap.wait_for_restore_status(config.namespace, run.restore_pod, "completed")
         snap.wait_for_pod_ready(config.namespace, run.restore_pod, timeout=300)
 
-        # Assert the artifact directly via the restore pod (which mounts the
-        # same PVC): the source pod is already gone by this point, so this is
-        # the only safe place left to inspect <basePath>/<name>/versions/1
-        # without racing the source container's own exit.
+        # Inspect the shared artifact through the snapshot agent on the source
+        # node. The source pod is already gone, but the agent and PVC remain.
         manifest = snap.checkpoint_artifact_manifest(
-            config.namespace,
-            run.restore_pod,
+            config,
+            source_node,
             snapshotjob_name,
         )
         assert "criuDump:" in manifest
         assert f"podName: {source_pod_name}" in manifest
 
         artifact_listing = snap.checkpoint_artifact_listing(
-            config.namespace,
-            run.restore_pod,
+            config,
+            source_node,
             snapshotjob_name,
         )
         assert "./inventory.img" in artifact_listing
