@@ -106,17 +106,6 @@ func TestArtifactPresent(t *testing.T) {
 	assert.True(t, artifactPresent(t.TempDir()))
 }
 
-func TestExecutorCheckpoint_DumpFailureSurfacesKillError(t *testing.T) {
-	w := makeNodeController(t, &fakeCheckpointer{})
-	err := w.executorCheckpoint(context.Background(), CheckpointParams{
-		Pod:          &corev1.Pod{},
-		ContainerPID: 0,
-	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "checkpoint")
-	assert.Contains(t, err.Error(), "kill target")
-}
-
 // makeWorkOrder builds a PodSnapshotContent work order pinned to a node and checkpoint id.
 // Capture parameters now live on the source pod, so the work order carries only the node
 // label and spec.
@@ -473,75 +462,6 @@ func TestReconcileSnapshotContent_ResumeWritesReadyAndReleases(t *testing.T) {
 	got := getContent(t, w, content.Name)
 	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady)
 	require.NotNil(t, cond)
-}
-
-func TestReconcileSourcePod_ReadyRetriesSentinel(t *testing.T) {
-	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
-	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
-		Type:    snapshotv1alpha1.PodSnapshotConditionReady,
-		Status:  metav1.ConditionTrue,
-		Reason:  "Captured",
-		Message: "Checkpoint captured and verified",
-	})
-	pod := makeSourcePod("abc")
-	fc := &fakeCheckpointer{}
-	w := makeNodeController(t, fc, content, pod)
-	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
-	released := false
-	w.releaseCheckpointFn = func(containerPID int) error {
-		assert.Equal(t, 4242, containerPID)
-		released = true
-		return nil
-	}
-
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
-	assert.False(t, fc.wasCalled(), "a Ready work order must not start another dump")
-	assert.True(t, released, "crash after Ready must retry snapshot-complete")
-}
-
-func TestReconcileSourcePod_ReadyReleaseSkipsStalePodUID(t *testing.T) {
-	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
-	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
-		Type:    snapshotv1alpha1.PodSnapshotConditionReady,
-		Status:  metav1.ConditionTrue,
-		Reason:  "Captured",
-		Message: "Checkpoint captured and verified",
-	})
-	pod := makeSourcePod("abc")
-	pod.UID = types.UID("replacement-pod-uid")
-	fc := &fakeCheckpointer{}
-	w := makeNodeController(t, fc, content, pod)
-	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
-	released := false
-	w.releaseCheckpointFn = func(int) error {
-		released = true
-		return nil
-	}
-
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
-	assert.False(t, fc.wasCalled())
-	assert.False(t, released, "must not write snapshot-complete into a recreated pod")
-}
-
-func TestReconcileSourcePod_ReadyReleaseFailureKillsTarget(t *testing.T) {
-	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
-	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
-		Type:    snapshotv1alpha1.PodSnapshotConditionReady,
-		Status:  metav1.ConditionTrue,
-		Reason:  "Captured",
-		Message: "Checkpoint captured and verified",
-	})
-	pod := makeSourcePod("abc")
-	ctx, target := startKillableTarget(t)
-	fc := &fakeCheckpointer{}
-	w := makeNodeController(t, fc, content, pod)
-	w.runtime = &fakeRuntime{resolveContainerPID: target.Process.Pid}
-	w.releaseCheckpointFn = func(int) error { return errors.New("sentinel write rejected") }
-
-	err := w.reconcileSourcePod(context.Background(), pod)
-	require.Error(t, err)
-	assert.False(t, fc.wasCalled())
-	requireKilledBySIGKILL(t, ctx, target)
 }
 
 func TestReconcileSourcePod_ReadyDoesNotStarveNewDump(t *testing.T) {

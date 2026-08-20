@@ -349,7 +349,7 @@ func TestMarkCheckpointReadyAndRelease_FailedBeforeReadyKillError(t *testing.T) 
 }
 
 // setupFailedBeforeReady builds a controller whose Ready status patch conflicts against a
-// stored Failed condition, so markCheckpointReadyAndRelease takes the skip-release kill path.
+// stored Failed condition, so markCheckpointReadyAndRelease SIGKILLs and does not write the sentinel.
 func setupFailedBeforeReady(t *testing.T) (*NodeController, *snapshotv1alpha1.PodSnapshotContent, func() bool) {
 	t.Helper()
 	stored := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
