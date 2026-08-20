@@ -89,6 +89,21 @@ def list_job_pods(namespace: str, job_name: str) -> list[client.V1Pod]:
     ).items
 
 
+def read_job(namespace: str, name: str) -> client.V1Job | None:
+    """Reads the source batch/v1 Job, or None if it is gone.
+
+    The Job's own status is what the SnapshotJob completion gate reads
+    (`jobComplete`), so it is the first thing to inspect when Completed never
+    flips despite a successful capture.
+    """
+    try:
+        return client.BatchV1Api().read_namespaced_job(name=name, namespace=namespace)
+    except ApiException as exc:
+        if exc.status == 404:
+            return None
+        raise
+
+
 def delete_pod(namespace: str, name: str) -> bool:
     try:
         client.CoreV1Api().delete_namespaced_pod(name=name, namespace=namespace)
