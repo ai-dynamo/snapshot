@@ -29,6 +29,16 @@ type Client struct {
 	ControlSocketPath string
 }
 
+func (c Client) StagedRestore(ctx context.Context, transactionID, source string) (string, error) {
+	response, err := c.request(ctx, transactionID, &Request_StagedRestore{
+		StagedRestore: &StagedRestoreRequest{Source: filesystem(source), IoEngine: posixCopy()},
+	})
+	if err != nil {
+		return "", err
+	}
+	return imageDirectory(response.GetStagedRestoreDirectory().GetImageDirectory())
+}
+
 func (c Client) PrepareCheckpoint(ctx context.Context, transactionID, destination string) (string, error) {
 	response, err := c.request(ctx, transactionID, &Request_PrepareStagedCheckpoint{
 		PrepareStagedCheckpoint: &PrepareStagedCheckpointRequest{Destination: filesystem(destination), IoEngine: posixCopy()},

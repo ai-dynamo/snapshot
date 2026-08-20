@@ -563,16 +563,19 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 	}
 
 	req := executor.RestoreRequest{
-		CheckpointID:    checkpointID,
-		ArtifactVersion: artifactVersionFromPod(pod),
-		BasePath:        w.config.Storage.BasePath,
-		ContainerID:     containerID,
-		StartedAt:       startedAt,
-		PodName:         pod.Name,
-		PodNamespace:    pod.Namespace,
-		TargetPodIP:     pod.Status.PodIP,
-		ContainerName:   containerName,
-		Clientset:       w.clientset,
+		CheckpointID:                checkpointID,
+		ArtifactVersion:             artifactVersionFromPod(pod),
+		BasePath:                    w.config.Storage.BasePath,
+		ContainerID:                 containerID,
+		StartedAt:                   startedAt,
+		PodName:                     pod.Name,
+		PodNamespace:                pod.Namespace,
+		TargetPodIP:                 pod.Status.PodIP,
+		ContainerName:               containerName,
+		Clientset:                   w.clientset,
+		PageBrokerRequested:         pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] == snapshotv1alpha1.PageBrokerAnnotationEnabled,
+		PageBrokerEnabled:           w.config.PageBroker.Enabled,
+		PageBrokerControlSocketPath: w.config.PageBroker.ControlSocketPath,
 	}
 	placeholderHostPID, err := w.restoreFn(restoreCtx, w.runtime, log, req, w.injector)
 	if err != nil {
