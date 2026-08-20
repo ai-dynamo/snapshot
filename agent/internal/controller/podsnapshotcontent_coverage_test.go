@@ -271,11 +271,13 @@ func TestMarkCheckpointReadyAndRelease_FailedBeforeReadyDoesNotRelease(t *testin
 		return nil
 	}
 	stale := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	ctx, target := startKillableTarget(t)
 
-	err := w.markCheckpointReadyAndRelease(context.Background(), stale, 7)
+	err := w.markCheckpointReadyAndRelease(context.Background(), stale, target.Process.Pid)
 
 	require.NoError(t, err)
 	assert.False(t, released)
+	requireKilledBySIGKILL(t, ctx, target)
 	got := getContent(t, w, stored.Name)
 	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
 	failed := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
@@ -312,10 +314,12 @@ func TestRunCheckpoint_FailedBeforeReadyDoesNotRelease(t *testing.T) {
 	pod := &corev1.Pod{}
 	leaseKey := client.ObjectKey{Namespace: "inference", Name: "checkpoint-lease-x"}
 	artifactPath := w.config.Storage.BasePath
+	ctx, target := startKillableTarget(t)
 
-	w.runCheckpoint(context.Background(), stale, pod, "main", "abc123", 7, "x", artifactPath, leaseKey, "x")
+	w.runCheckpoint(context.Background(), stale, pod, "main", "abc123", target.Process.Pid, "x", artifactPath, leaseKey, "x")
 
 	assert.False(t, released)
+	requireKilledBySIGKILL(t, ctx, target)
 	got := getContent(t, w, stored.Name)
 	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
 	failed := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)

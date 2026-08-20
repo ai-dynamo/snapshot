@@ -413,9 +413,11 @@ func (w *NodeController) setSnapshotContentSucceeded(ctx context.Context, conten
 }
 
 // markCheckpointReadyAndRelease makes Ready durable before allowing the target process to exit.
-// A failed Ready patch leaves the target blocked. A conflict against an already-terminal object
-// skips release so a stale success path cannot unblock a Failed capture. A failed release kills
-// the target so the Job cannot report success with an unreleased process.
+// A failed Ready patch leaves the target blocked so a later reconcile can retry. A conflict
+// against an already-terminal object skips release so a stale success path cannot unblock a
+// Failed capture; if Failed won and Ready did not, the still-blocked target is killed so it
+// cannot poll forever. A failed release kills the target so the Job cannot report success
+// with an unreleased process.
 func (w *NodeController) markCheckpointReadyAndRelease(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, containerPID int) error {
 	logger := logr.FromContextOrDiscard(ctx)
 	if err := w.setSnapshotContentSucceeded(ctx, content); err != nil {
@@ -424,10 +426,16 @@ func (w *NodeController) markCheckpointReadyAndRelease(ctx context.Context, cont
 			if getErr := w.client.Get(ctx, client.ObjectKey{Name: content.Name}, current); getErr != nil {
 				logger.Error(err, "Failed to write PodSnapshotContent ready status", "content", content.Name)
 				logger.Error(getErr, "Failed to re-read PodSnapshotContent after Ready conflict", "content", content.Name)
-				return err
+				return getErr
 			}
 			if isContentTerminal(current) {
 				logger.Info("Skipping checkpoint release; PodSnapshotContent already terminal", "content", content.Name)
+				// Failed won the race and Ready is not set: no later reconcile will write the
+				// sentinel (isContentTerminal short-circuits), so kill the still-blocked target.
+				if meta.IsStatusConditionTrue(current.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed) &&
+					!meta.IsStatusConditionTrue(current.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady) {
+					w.killCheckpointProcess(logger, containerPID, "checkpoint content already failed")
+				}
 				return nil
 			}
 		}

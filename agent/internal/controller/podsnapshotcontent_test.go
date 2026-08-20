@@ -661,15 +661,7 @@ func TestRunCheckpoint_WritesFailedOnError(t *testing.T) {
 }
 
 func TestRunCheckpoint_ReleaseFailureKillsTarget(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	target := exec.CommandContext(ctx, "sleep", "30")
-	require.NoError(t, target.Start())
-	t.Cleanup(func() {
-		if target.ProcessState == nil {
-			_ = target.Process.Kill()
-		}
-	})
+	ctx, target := startKillableTarget(t)
 
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	w := makeNodeController(t, &fakeCheckpointer{}, content)
@@ -680,16 +672,36 @@ func TestRunCheckpoint_ReleaseFailureKillsTarget(t *testing.T) {
 
 	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", target.Process.Pid, "abc", artifactPath, leaseKey, "abc")
 
+	requireKilledBySIGKILL(t, ctx, target)
+	require.NotNil(t, meta.FindStatusCondition(
+		getContent(t, w, content.Name).Status.Conditions,
+		snapshotv1alpha1.PodSnapshotConditionReady,
+	))
+}
+
+// startKillableTarget starts a short-lived sleep process the test can assert was SIGKILLed.
+func startKillableTarget(t *testing.T) (context.Context, *exec.Cmd) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	target := exec.CommandContext(ctx, "sleep", "30")
+	require.NoError(t, target.Start())
+	t.Cleanup(func() {
+		if target.ProcessState == nil {
+			_ = target.Process.Kill()
+		}
+	})
+	return ctx, target
+}
+
+func requireKilledBySIGKILL(t *testing.T, ctx context.Context, target *exec.Cmd) {
+	t.Helper()
 	err := target.Wait()
 	require.NoError(t, ctx.Err(), "killCheckpointProcess did not terminate the target before the test deadline")
 	require.Error(t, err)
 	waitStatus, ok := target.ProcessState.Sys().(syscall.WaitStatus)
 	require.True(t, ok)
 	assert.Equal(t, syscall.SIGKILL, waitStatus.Signal())
-	require.NotNil(t, meta.FindStatusCondition(
-		getContent(t, w, content.Name).Status.Conditions,
-		snapshotv1alpha1.PodSnapshotConditionReady,
-	))
 }
 
 // mustUnstructured converts a typed object to the *unstructured.Unstructured the dynamic informer
