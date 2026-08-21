@@ -239,9 +239,6 @@ func executeRestore(
 			if err != nil {
 				return nil, 0, nil, fmt.Errorf("capture restored CUDA process identity for PID %d: %w", pid, err)
 			}
-			if process.StartTimeTicks == 0 || process.Cgroup == "" {
-				return nil, 0, nil, fmt.Errorf("capture restored CUDA process identity for PID %d: incomplete proc identity", pid)
-			}
 			timings.deferredCUDAProcesses = append(timings.deferredCUDAProcesses, process)
 		}
 	}

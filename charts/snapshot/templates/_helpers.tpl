@@ -101,3 +101,11 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
 {{- define "snapshot.runtimeStorageDir" -}}
 {{- if eq .Values.runtime.type "crio" -}}/var/lib/containers{{- else -}}/var/lib/containerd{{- end -}}
 {{- end }}
+
+{{/* Require an integer-valued Helm number and reject strings, booleans, and null. */}}
+{{- define "snapshot.requireIntegral" -}}
+{{- $value := .value -}}
+{{- if not (or (kindIs "int" $value) (kindIs "int64" $value) (and (kindIs "float64" $value) (eq $value (floor $value)))) -}}
+{{- fail (printf "snapshot.%s must be an integral numeric value; fractional numbers, booleans, strings, and null are not accepted" .path) -}}
+{{- end -}}
+{{- end }}

@@ -107,13 +107,13 @@ func prefetchCustomStorageFile(ctx context.Context, path string, buffer []byte) 
 			return 0, fmt.Errorf("prefetch CUDA CustomStorage extent %s: %w", path, err)
 		}
 		read, err := unix.Read(fd, buffer)
-		total += int64(read)
 		if errors.Is(err, unix.EINTR) {
 			continue
 		}
 		if err != nil {
 			return 0, fmt.Errorf("read CUDA CustomStorage extent %s: %w", path, err)
 		}
+		total += int64(read)
 		if read == 0 {
 			break
 		}

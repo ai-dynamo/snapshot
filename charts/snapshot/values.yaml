@@ -171,6 +171,10 @@ config:
     daemon:
       # Conservative watchdog for a single CUDA operation.
       maxOperationSeconds: 21600
+      # Pinned transfer memory is bufferCount * chunkBytes per active CUDA
+      # device. Increase this limit when increasing those settings or the
+      # number of GPUs used by one operation; the helper also needs room for
+      # NIXL, CUDA, and process overhead beyond the pinned buffers.
       resources:
         limits:
           cpu: 2

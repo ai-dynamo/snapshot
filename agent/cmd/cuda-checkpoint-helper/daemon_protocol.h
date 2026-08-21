@@ -191,7 +191,8 @@ int32_t FinishHandledOperation(bool post_handle_succeeded,
                                const CompletionExecutor &completion,
                                OperationState *state);
 int PollForInputOrStop(int input_fd, int stop_fd,
-                       const std::function<void()> &before_poll = {});
+                       const std::function<void()> &before_poll = {},
+                       int timeout_milliseconds = -1);
 const char *ActionName(Action action);
 Response HealthResponse(const OperationHealth &health);
 

@@ -360,6 +360,19 @@ void TestPollDoesNotConsumeStopWake() {
   close(stop_pipe[1]);
 }
 
+void TestPollTimesOutWithoutInput() {
+  int stop_pipe[2];
+  int silent_client[2];
+  assert(pipe2(stop_pipe, O_CLOEXEC | O_NONBLOCK) == 0);
+  assert(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, silent_client) ==
+         0);
+  assert(PollForInputOrStop(silent_client[0], stop_pipe[0], {}, 1) == -1);
+  close(silent_client[0]);
+  close(silent_client[1]);
+  close(stop_pipe[0]);
+  close(stop_pipe[1]);
+}
+
 } // namespace
 
 int main() {
@@ -370,5 +383,6 @@ int main() {
   TestExternalSignalWakesIndependentWaiters();
   TestInternalStopJoinsSignalOwnerAndWakesIndependentWaiters();
   TestPollDoesNotConsumeStopWake();
+  TestPollTimesOutWithoutInput();
   return 0;
 }

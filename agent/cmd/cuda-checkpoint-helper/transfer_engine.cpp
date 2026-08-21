@@ -29,6 +29,7 @@ namespace cuda_checkpoint_transfer {
 namespace {
 
 using Clock = std::chrono::steady_clock;
+constexpr auto kNixlTransferTimeout = std::chrono::minutes(30);
 
 double ElapsedSeconds(Clock::time_point start) {
   return std::chrono::duration<double>(Clock::now() - start).count();
@@ -234,8 +235,43 @@ bool OpenStorageFiles(const StorageLayout &storage, TransferOperation operation,
                " is too large for POSIX offsets";
       return false;
     }
-    FileDescriptor descriptor(
-        open(file.path.c_str(), StorageFileOpenFlags(operation), 0600));
+    const std::filesystem::path normalized = file.path.lexically_normal();
+    if (!normalized.is_absolute() || normalized.filename().empty()) {
+      *error = "storage file " + std::to_string(index) +
+               " does not have a valid absolute path";
+      return false;
+    }
+
+    // Resolve every parent component through directory descriptors. O_NOFOLLOW
+    // on the final open alone does not prevent a writable parent directory from
+    // being replaced by a symlink between validation and use.
+    FileDescriptor root(open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+    if (root.get() < 0) {
+      *error = "open storage root failed: " + std::string(std::strerror(errno));
+      return false;
+    }
+    std::vector<FileDescriptor> parents;
+    int parent_fd = root.get();
+    for (const auto &component : normalized.relative_path().parent_path()) {
+      const std::string name = component.string();
+      if (name.empty() || name == "." || name == "..") {
+        *error = "storage file " + std::to_string(index) +
+                 " contains an unsafe path component";
+        return false;
+      }
+      const int next_fd = openat(parent_fd, name.c_str(),
+                                 O_RDONLY | O_DIRECTORY | O_NOFOLLOW |
+                                     O_CLOEXEC);
+      if (next_fd < 0) {
+        *error = "open storage parent for file " + std::to_string(index) +
+                 " failed: " + std::strerror(errno);
+        return false;
+      }
+      parents.emplace_back(next_fd);
+      parent_fd = parents.back().get();
+    }
+    FileDescriptor descriptor(openat(parent_fd, normalized.filename().c_str(),
+                                     StorageFileOpenFlags(operation), 0600));
     if (descriptor.get() < 0) {
       *error = "open storage file " + std::to_string(index) +
                " failed: " + std::strerror(errno);
@@ -265,7 +301,8 @@ bool OpenStorageFiles(const StorageLayout &storage, TransferOperation operation,
 
 bool NixlTransfer(nixlAgent *agent, const std::string &agent_name,
                   nixl_xfer_op_t operation, void *buffer, int file_fd,
-                  size_t file_offset, size_t length, std::string *error) {
+                  size_t file_offset, size_t length,
+                  TransferCancellation *cancellation, std::string *error) {
   nixl_xfer_dlist_t dram(DRAM_SEG);
   nixl_xfer_dlist_t file(FILE_SEG);
   dram.addDesc(nixlBlobDesc(reinterpret_cast<uintptr_t>(buffer), length, 0));
@@ -278,13 +315,43 @@ bool NixlTransfer(nixlAgent *agent, const std::string &agent_name,
     return false;
   }
   status = agent->postXferReq(request);
+  const auto deadline = Clock::now() + kNixlTransferTimeout;
+  bool cancellation_requested = false;
+  std::chrono::microseconds poll_delay(50);
   while (status == NIXL_IN_PROG) {
+    if (!cancellation_requested &&
+        ((cancellation != nullptr && cancellation->IsCancelled()) ||
+         Clock::now() >= deadline)) {
+      cancellation_requested = true;
+      *error = Clock::now() >= deadline
+                   ? "NIXL transfer exceeded the 30-minute deadline"
+                   : "NIXL transfer canceled after another extent failed";
+      // releaseXferReq is the NIXL cancellation API. A successful release
+      // transfers ownership back to NIXL and frees the handle. If cancellation
+      // cannot complete immediately, retain the request and keep polling until
+      // it reaches a terminal state; abandoning it would leave NIXL using the
+      // registered buffer and file descriptor after their owners are destroyed.
+      const nixl_status_t cancel_status = agent->releaseXferReq(request);
+      if (cancel_status == NIXL_SUCCESS) {
+        return false;
+      }
+      AppendError(error, "NIXL cancellation is pending with status " +
+                             std::to_string(cancel_status));
+    }
     status = agent->getXferStatus(request);
     if (status == NIXL_IN_PROG) {
-      std::this_thread::yield();
+      std::this_thread::sleep_for(poll_delay);
+      poll_delay = std::min(poll_delay * 2, std::chrono::microseconds(5000));
     }
   }
   const nixl_status_t release_status = agent->releaseXferReq(request);
+  if (cancellation_requested) {
+    if (release_status != NIXL_SUCCESS) {
+      AppendError(error, "releaseXferReq after cancellation failed with status " +
+                             std::to_string(release_status));
+    }
+    return false;
+  }
   if (status != NIXL_SUCCESS) {
     *error = "NIXL transfer failed with status " + std::to_string(status);
     if (release_status != NIXL_SUCCESS) {
@@ -406,7 +473,7 @@ bool TransferPipeline(const std::vector<TransferChunk> &chunks,
       const bool transferred =
           NixlTransfer(agent, agent_name, NIXL_READ, slot->data(),
                        files[chunk.file_index].get(), chunk.file_offset,
-                       chunk.size, &transfer_error);
+                       chunk.size, cancellation, &transfer_error);
       const double storage_seconds = ElapsedSeconds(storage_start);
       metrics->storage_seconds += storage_seconds;
       metrics->files[chunk.file_index].storage_seconds += storage_seconds;
@@ -479,7 +546,7 @@ bool TransferPipeline(const std::vector<TransferChunk> &chunks,
       const bool transferred =
           NixlTransfer(agent, agent_name, NIXL_WRITE, slot->data(),
                        files[chunk.file_index].get(), chunk.file_offset,
-                       chunk.size, &transfer_error);
+                       chunk.size, cancellation, &transfer_error);
       const double storage_seconds = ElapsedSeconds(storage_start);
       metrics->storage_seconds += storage_seconds;
       metrics->files[chunk.file_index].storage_seconds += storage_seconds;

@@ -210,9 +210,13 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		cleanupErr = errors.Join(cleanupErr, result.CleanupError)
 	}
 	if len(result.DeferredCUDAProcesses) > 0 {
+		processTable, err := snapshotruntime.ReadProcessTable(snapshotruntime.HostProcPath)
+		if err != nil {
+			return 0, fmt.Errorf("snapshot restored host process table: %w", err)
+		}
 		hostProcesses := make([]snapshotruntime.ProcessDetails, 0, len(result.DeferredCUDAProcesses))
 		for _, namespaceProcess := range result.DeferredCUDAProcesses {
-			process, err := snapshotruntime.ResolveHostProcessIdentity(snapshotruntime.HostProcPath, namespaceProcess)
+			process, err := snapshotruntime.ResolveHostProcessIdentityFromTable(processTable, namespaceProcess)
 			if err != nil {
 				return 0, fmt.Errorf("resolve restored CUDA host process identity: %w", err)
 			}

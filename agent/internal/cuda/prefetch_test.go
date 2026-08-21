@@ -74,3 +74,52 @@ func TestPrefetchCustomStorageArtifactsHonorsCancellation(t *testing.T) {
 		t.Fatalf("expected cancellation, got %v", err)
 	}
 }
+
+func TestPrefetchCustomStorageArtifactsRejectsIncompleteArtifacts(t *testing.T) {
+	tests := []struct {
+		name      string
+		prepare   func(t *testing.T, checkpointDir string)
+		wantError string
+	}{
+		{
+			name:      "missing artifact directory",
+			prepare:   func(*testing.T, string) {},
+			wantError: "inspect CUDA CustomStorage artifact directory",
+		},
+		{
+			name: "no extent files",
+			prepare: func(t *testing.T, checkpointDir string) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Join(checkpointDir, "cuda-custom-storage"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantError: "contains no extent files",
+		},
+		{
+			name: "empty extent",
+			prepare: func(t *testing.T, checkpointDir string) {
+				t.Helper()
+				processDir := filepath.Join(checkpointDir, "cuda-custom-storage", "process-0000")
+				if err := os.MkdirAll(processDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(processDir, "device-0000.bin"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantError: "not a nonempty regular file",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			checkpointDir := t.TempDir()
+			test.prepare(t, checkpointDir)
+			_, err := PrefetchCustomStorageArtifacts(context.Background(), checkpointDir)
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("expected error containing %q, got %v", test.wantError, err)
+			}
+		})
+	}
+}

@@ -148,6 +148,11 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 Reserved `s3` and `oci` values remain chart-owned placeholders for future
 snapshot backends, but only `pvc` is implemented today.
 
+`transferBufferCount * transferChunkBytes` must not exceed 1 GiB
+(1073741824 bytes) of pinned memory per CUDA device. Increase the CUDA helper's
+memory limit when increasing either transfer setting or the number of GPUs used
+by one operation.
+
 See [values.yaml](./values.yaml) for the full configuration surface.
 
 ## Uninstall

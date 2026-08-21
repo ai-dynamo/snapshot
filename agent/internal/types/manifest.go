@@ -134,15 +134,11 @@ type CUDAManifest struct {
 	StorageMode    string   `yaml:"storageMode,omitempty"`
 }
 
-func NewCUDAManifest(pids []int, sourceGPUUUIDs []string, storageMode ...string) CUDAManifest {
-	mode := ""
-	if len(storageMode) > 0 {
-		mode = storageMode[0]
-	}
+func NewCUDAManifest(pids []int, sourceGPUUUIDs []string, storageMode string) CUDAManifest {
 	return CUDAManifest{
 		PIDs:           append([]int(nil), pids...),
 		SourceGPUUUIDs: append([]string(nil), sourceGPUUUIDs...),
-		StorageMode:    mode,
+		StorageMode:    storageMode,
 	}
 }
 
@@ -172,6 +168,14 @@ func WriteManifest(checkpointDir string, data *CheckpointManifest) error {
 	}
 	if strings.TrimSpace(data.CheckpointID) == "" {
 		return fmt.Errorf("checkpoint manifest is missing checkpointId")
+	}
+	if !data.CUDA.IsEmpty() && strings.TrimSpace(data.CUDA.StorageMode) == "" {
+		return fmt.Errorf("checkpoint manifest CUDA section is missing storageMode")
+	}
+	if !data.CUDA.IsEmpty() {
+		if _, err := data.CUDA.EffectiveStorageMode(); err != nil {
+			return err
+		}
 	}
 
 	content, err := yaml.Marshal(data)

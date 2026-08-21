@@ -8,8 +8,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
+	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"golang.org/x/sys/unix"
 )
@@ -24,8 +26,8 @@ func HostJobFilePath(hostPID int) (string, error) {
 		return "", fmt.Errorf("invalid host PID %d", hostPID)
 	}
 	return filepath.Join(
-		"/host/proc",
-		fmt.Sprintf("%d", hostPID),
+		snapshotruntime.HostProcPath,
+		strconv.Itoa(hostPID),
 		"root",
 		strings.TrimPrefix(snapshotv1alpha1.CUDAJobFilePath, string(os.PathSeparator)),
 	), nil

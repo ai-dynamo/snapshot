@@ -92,8 +92,12 @@ func TestCommandRunnerSendsDaemonOperations(t *testing.T) {
 				_, _ = conn.Write(daemonTestResponse(0, 0))
 			})
 			if err := (commandHelperActionRunner{}).run(
-				context.Background(), 42, test.action, test.deviceMap, test.backend, test.storageDir,
-				"/host/proc/42/root/tmp/cuda-job", transfer, identity, logr.Discard(),
+				context.Background(), helperAction{
+					PID: 42, Action: test.action, DeviceMap: test.deviceMap,
+					StorageMode: test.backend, StorageDir: test.storageDir,
+					JobFile: "/host/proc/42/root/tmp/cuda-job", Transfer: transfer,
+					Identity: identity,
+				}, logr.Discard(),
 			); err != nil {
 				t.Fatalf("run() error = %v", err)
 			}

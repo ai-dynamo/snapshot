@@ -54,7 +54,7 @@ func main() {
 	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if err := cuda.WaitForDaemon(rootCtx); err != nil {
-		fatal(agentLog, err, "CUDA helper daemon did not become ready")
+		agentLog.Error(err, "CUDA helper daemon did not become ready; CUDA checkpoint and restore are unavailable")
 	}
 
 	agentLog.Info("Starting snapshot agent",

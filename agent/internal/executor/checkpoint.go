@@ -7,10 +7,12 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
@@ -307,7 +309,13 @@ func captureCheckpoint(
 			log,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("CUDA checkpoint failed: %w", err)
+			checkpointErr := fmt.Errorf("CUDA checkpoint failed: %w", err)
+			cleanupErr := terminateCUDAProcessesAfterCheckpointFailure(
+				state.CUDAHostPIDs,
+				log,
+				snapshotruntime.SendSignalToPID,
+			)
+			return nil, errors.Join(checkpointErr, cleanupErr)
 		}
 		timings.CUDACheckpointDuration = cudaTimings.TotalDuration
 	}
@@ -333,4 +341,23 @@ func captureCheckpoint(
 	}
 
 	return timings, nil
+}
+
+type signalProcessFunc func(logr.Logger, int, syscall.Signal, string) error
+
+func terminateCUDAProcessesAfterCheckpointFailure(
+	pids []int,
+	log logr.Logger,
+	signalProcess signalProcessFunc,
+) error {
+	var cleanupErr error
+	for _, pid := range pids {
+		if err := signalProcess(log, pid, syscall.SIGKILL, "CUDA checkpoint failed"); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
+	}
+	if cleanupErr != nil {
+		return fmt.Errorf("failed to terminate one or more CUDA processes after checkpoint failure: %w", cleanupErr)
+	}
+	return nil
 }

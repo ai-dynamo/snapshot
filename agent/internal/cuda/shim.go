@@ -26,18 +26,18 @@ const (
 )
 
 type helperActionRunner interface {
-	run(
-		context.Context,
-		int,
-		string,
-		string,
-		string,
-		string,
-		string,
-		types.CUDATransferSettings,
-		snapshotruntime.ProcessDetails,
-		logr.Logger,
-	) error
+	run(context.Context, helperAction, logr.Logger) error
+}
+
+type helperAction struct {
+	PID         int
+	Action      string
+	DeviceMap   string
+	StorageMode string
+	StorageDir  string
+	JobFile     string
+	Transfer    types.CUDATransferSettings
+	Identity    snapshotruntime.ProcessDetails
 }
 
 type commandHelperActionRunner struct{}
@@ -103,47 +103,35 @@ func parseCustomStorageTelemetry(output string, processWall time.Duration) custo
 
 func (commandHelperActionRunner) run(
 	ctx context.Context,
-	pid int,
-	action,
-	deviceMap,
-	storageMode,
-	storageDir,
-	jobFile string,
-	transferSettings types.CUDATransferSettings,
-	identity snapshotruntime.ProcessDetails,
+	request helperAction,
 	log logr.Logger,
 ) error {
-	if identity.StartTimeTicks == 0 || identity.Cgroup == "" {
-		captured, err := snapshotruntime.ReadProcessDetails(snapshotruntime.HostProcPath, pid)
-		if err != nil {
-			return fmt.Errorf("capture host PID %d identity for CUDA helper daemon: %w", pid, err)
-		}
-		identity = captured
+	if request.Identity.OutermostPID != request.PID ||
+		request.Identity.StartTimeTicks == 0 || request.Identity.Cgroup == "" {
+		return fmt.Errorf("incomplete process identity for host PID %d", request.PID)
 	}
-	if action == actionLock || action == actionUnlock || storageMode == types.CUDAStorageModeLegacy {
-		storageDir = ""
+	if request.Action == actionLock || request.Action == actionUnlock ||
+		request.StorageMode == types.CUDAStorageModeLegacy {
+		request.StorageDir = ""
 	}
-	return runDaemonAction(ctx, pid, action, deviceMap, storageMode, storageDir, jobFile, transferSettings, identity, log)
+	return runDaemonAction(
+		ctx, request.PID, request.Action, request.DeviceMap, request.StorageMode,
+		request.StorageDir, request.JobFile, request.Transfer, request.Identity, log,
+	)
 }
 
 func (r identityValidatingRunner) run(
 	ctx context.Context,
-	pid int,
-	action,
-	deviceMap,
-	storageMode,
-	storageDir,
-	jobFile string,
-	transferSettings types.CUDATransferSettings,
-	_ snapshotruntime.ProcessDetails,
+	request helperAction,
 	log logr.Logger,
 ) error {
-	expected, ok := r.identities[pid]
+	expected, ok := r.identities[request.PID]
 	if !ok {
-		return fmt.Errorf("missing expected process identity for host PID %d", pid)
+		return fmt.Errorf("missing expected process identity for host PID %d", request.PID)
 	}
 	if err := snapshotruntime.ValidateProcessIdentity(r.procRoot, expected); err != nil {
-		return fmt.Errorf("validate host PID %d immediately before CUDA %s: %w", pid, action, err)
+		return fmt.Errorf("validate host PID %d immediately before CUDA %s: %w", request.PID, request.Action, err)
 	}
-	return r.runner.run(ctx, pid, action, deviceMap, storageMode, storageDir, jobFile, transferSettings, expected, log)
+	request.Identity = expected
+	return r.runner.run(ctx, request, log)
 }

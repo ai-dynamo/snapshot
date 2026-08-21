@@ -43,6 +43,16 @@ func ResolveHostProcessIdentity(procRoot string, expected ProcessDetails) (Proce
 	if err != nil {
 		return ProcessDetails{}, err
 	}
+	return ResolveHostProcessIdentityFromTable(processes, expected)
+}
+
+// ResolveHostProcessIdentityFromTable maps a restored identity against one
+// host-process snapshot. Callers resolving multiple targets should reuse the
+// same table and then revalidate each live PID before a destructive operation.
+func ResolveHostProcessIdentityFromTable(processes []ProcessDetails, expected ProcessDetails) (ProcessDetails, error) {
+	if expected.InnermostPID <= 0 || expected.StartTimeTicks == 0 || expected.Cgroup == "" {
+		return ProcessDetails{}, fmt.Errorf("incomplete restored process identity")
+	}
 	var match ProcessDetails
 	for _, process := range processes {
 		if process.InnermostPID != expected.InnermostPID ||
@@ -172,17 +182,21 @@ func ReadProcessDetails(procRoot string, pid int) (ProcessDetails, error) {
 			cmdline = strings.TrimSpace(string(comm))
 		}
 	}
-	var startTimeTicks uint64
-	if statBytes, readErr := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "stat")); readErr == nil {
-		startTimeTicks, err = ParseProcStartTime(string(statBytes))
-		if err != nil {
-			return ProcessDetails{}, fmt.Errorf("failed to parse process start time: %w", err)
-		}
+	statPath := filepath.Join(procRoot, strconv.Itoa(pid), "stat")
+	statBytes, err := os.ReadFile(statPath)
+	if err != nil {
+		return ProcessDetails{}, fmt.Errorf("failed to read %s: %w", statPath, err)
 	}
-	cgroup := ""
-	if cgroupBytes, readErr := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "cgroup")); readErr == nil {
-		cgroup = string(cgroupBytes)
+	startTimeTicks, err := ParseProcStartTime(string(statBytes))
+	if err != nil {
+		return ProcessDetails{}, fmt.Errorf("failed to parse process start time: %w", err)
 	}
+	cgroupPath := filepath.Join(procRoot, strconv.Itoa(pid), "cgroup")
+	cgroupBytes, err := os.ReadFile(cgroupPath)
+	if err != nil {
+		return ProcessDetails{}, fmt.Errorf("failed to read %s: %w", cgroupPath, err)
+	}
+	cgroup := string(cgroupBytes)
 
 	return ProcessDetails{
 		ObservedPID:    pid,

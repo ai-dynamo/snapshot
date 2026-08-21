@@ -61,8 +61,29 @@ func TestAgentConfigValidateDefaultsCUDATransferSettings(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
+	if cfg.CUDACheckpoint.TransferBufferCount == nil || cfg.CUDACheckpoint.TransferChunkBytes == nil {
+		t.Fatal("Validate() did not populate unset CUDA transfer fields")
+	}
 	settings := cfg.CUDACheckpoint.TransferSettings()
 	if settings.BufferCount != DefaultCUDATransferBufferCount || settings.ChunkBytes != DefaultCUDATransferChunkBytes {
 		t.Fatalf("CUDA transfer settings = %+v, want defaults", settings)
+	}
+}
+
+func TestCUDATransferSettingsValidateRejectsBadChunkBytes(t *testing.T) {
+	tests := []struct {
+		name  string
+		chunk uint64
+	}{
+		{name: "below minimum", chunk: minCUDATransferChunkBytes - cudaTransferBufferAlignment},
+		{name: "misaligned", chunk: minCUDATransferChunkBytes + 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := (CUDATransferSettings{BufferCount: 1, ChunkBytes: test.chunk}).Validate()
+			if err == nil {
+				t.Fatalf("Validate accepted chunk size %d", test.chunk)
+			}
+		})
 	}
 }

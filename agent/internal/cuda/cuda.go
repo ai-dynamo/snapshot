@@ -56,10 +56,6 @@ func LockAndCheckpointProcessTreeValidated(
 	transferSettings types.CUDATransferSettings,
 	log logr.Logger,
 ) (CheckpointPhaseTimings, error) {
-	transferSettings = transferSettings.WithDefaults()
-	if err := transferSettings.Validate(); err != nil {
-		return CheckpointPhaseTimings{}, fmt.Errorf("invalid CUDA transfer settings: %w", err)
-	}
 	pids, identities, err := validatedProcessIdentities(processes)
 	if err != nil {
 		return CheckpointPhaseTimings{}, err
@@ -384,15 +380,12 @@ func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string,
 	return strings.Join(pairs, ","), nil
 }
 
-// CheckpointProcessTree locks and checkpoints CUDA state for all given PIDs,
-// then persists the launch-job state needed to restore them.
-// On failure, the caller is expected to fail the operation and terminate the workload.
-func CheckpointProcessTree(ctx context.Context, cudaPIDs []int, jobFile, storageMode, checkpointDir string, transferSettings types.CUDATransferSettings, log logr.Logger) (CheckpointPhaseTimings, error) {
+func validateTransferSettings(transferSettings types.CUDATransferSettings) (types.CUDATransferSettings, error) {
 	transferSettings = transferSettings.WithDefaults()
 	if err := transferSettings.Validate(); err != nil {
-		return CheckpointPhaseTimings{}, fmt.Errorf("invalid CUDA transfer settings: %w", err)
+		return types.CUDATransferSettings{}, fmt.Errorf("invalid CUDA transfer settings: %w", err)
 	}
-	return lockAndCheckpointProcessTree(ctx, cudaPIDs, jobFile, storageMode, checkpointDir, transferSettings, commandHelperActionRunner{}, log)
+	return transferSettings, nil
 }
 
 func lockAndCheckpointProcessTree(
@@ -406,10 +399,15 @@ func lockAndCheckpointProcessTree(
 	log logr.Logger,
 ) (CheckpointPhaseTimings, error) {
 	var timings CheckpointPhaseTimings
+	var err error
+	transferSettings, err = validateTransferSettings(transferSettings)
+	if err != nil {
+		return timings, err
+	}
 
 	start := time.Now()
 	for _, pid := range cudaPIDs {
-		if err := runner.run(ctx, pid, actionLock, "", storageMode, "", jobFile, transferSettings, snapshotruntime.ProcessDetails{}, log); err != nil {
+		if err := runner.run(ctx, helperAction{PID: pid, Action: actionLock, StorageMode: storageMode, JobFile: jobFile, Transfer: transferSettings}, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
@@ -420,7 +418,7 @@ func lockAndCheckpointProcessTree(
 		if storageMode == types.CUDAStorageModePOSIX {
 			processDir = customStorageProcessDir(checkpointDir, index)
 		}
-		if err := runner.run(ctx, pid, actionCheckpoint, "", storageMode, processDir, jobFile, transferSettings, snapshotruntime.ProcessDetails{}, log); err != nil {
+		if err := runner.run(ctx, helperAction{PID: pid, Action: actionCheckpoint, StorageMode: storageMode, StorageDir: processDir, JobFile: jobFile, Transfer: transferSettings}, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
@@ -450,10 +448,6 @@ func RestoreAndUnlockProcessTreeValidated(
 	transferSettings types.CUDATransferSettings,
 	log logr.Logger,
 ) (RestorePhaseTimings, error) {
-	transferSettings = transferSettings.WithDefaults()
-	if err := transferSettings.Validate(); err != nil {
-		return RestorePhaseTimings{}, fmt.Errorf("invalid CUDA transfer settings: %w", err)
-	}
 	pids, identities, err := validatedProcessIdentities(processes)
 	if err != nil {
 		return RestorePhaseTimings{}, err
@@ -475,14 +469,6 @@ func RestoreAndUnlockProcessTreeValidated(
 	)
 }
 
-func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap, storageMode, checkpointDir, jobFile string, transferSettings types.CUDATransferSettings, log logr.Logger) (RestorePhaseTimings, error) {
-	transferSettings = transferSettings.WithDefaults()
-	if err := transferSettings.Validate(); err != nil {
-		return RestorePhaseTimings{}, fmt.Errorf("invalid CUDA transfer settings: %w", err)
-	}
-	return restoreAndUnlockProcessTree(ctx, cudaPIDs, deviceMap, storageMode, checkpointDir, jobFile, transferSettings, commandHelperActionRunner{}, log)
-}
-
 func restoreAndUnlockProcessTree(
 	ctx context.Context,
 	cudaPIDs []int,
@@ -495,6 +481,11 @@ func restoreAndUnlockProcessTree(
 	log logr.Logger,
 ) (RestorePhaseTimings, error) {
 	var timings RestorePhaseTimings
+	var err error
+	transferSettings, err = validateTransferSettings(transferSettings)
+	if err != nil {
+		return timings, err
+	}
 
 	start := time.Now()
 	for index, pid := range cudaPIDs {
@@ -502,14 +493,14 @@ func restoreAndUnlockProcessTree(
 		if storageMode == types.CUDAStorageModePOSIX {
 			processDir = customStorageProcessDir(checkpointDir, index)
 		}
-		if err := runner.run(ctx, pid, actionRestore, deviceMap, storageMode, processDir, jobFile, transferSettings, snapshotruntime.ProcessDetails{}, log); err != nil {
+		if err := runner.run(ctx, helperAction{PID: pid, Action: actionRestore, DeviceMap: deviceMap, StorageMode: storageMode, StorageDir: processDir, JobFile: jobFile, Transfer: transferSettings}, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
 	}
 
 	for _, pid := range cudaPIDs {
-		if err := runner.run(ctx, pid, actionUnlock, "", storageMode, "", jobFile, transferSettings, snapshotruntime.ProcessDetails{}, log); err != nil {
+		if err := runner.run(ctx, helperAction{PID: pid, Action: actionUnlock, StorageMode: storageMode, JobFile: jobFile, Transfer: transferSettings}, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}

@@ -14,7 +14,6 @@ import (
 	"github.com/go-logr/logr"
 	"golang.org/x/sys/unix"
 
-	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
@@ -26,18 +25,11 @@ type jobFileRunner struct {
 
 func (r *jobFileRunner) run(
 	_ context.Context,
-	pid int,
-	action,
-	_,
-	_,
-	_,
-	_ string,
-	_ types.CUDATransferSettings,
-	_ snapshotruntime.ProcessDetails,
+	request helperAction,
 	_ logr.Logger,
 ) error {
-	r.trace = append(r.trace, fmt.Sprintf("%s %d", action, pid))
-	if action != actionCheckpoint {
+	r.trace = append(r.trace, fmt.Sprintf("%s %d", request.Action, request.PID))
+	if request.Action != actionCheckpoint {
 		return nil
 	}
 	file, err := os.OpenFile(r.jobFile, os.O_APPEND|os.O_WRONLY, 0600)
@@ -45,7 +37,7 @@ func (r *jobFileRunner) run(
 		return err
 	}
 	defer file.Close()
-	_, err = fmt.Fprintf(file, "|%d", pid)
+	_, err = fmt.Fprintf(file, "|%d", request.PID)
 	return err
 }
 

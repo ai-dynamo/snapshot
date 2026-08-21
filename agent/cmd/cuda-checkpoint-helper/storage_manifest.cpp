@@ -14,6 +14,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -109,6 +110,22 @@ bool NormalizeManifest(const std::vector<ManifestExtent> &extents,
 void RemoveTemporaryManifest(const std::filesystem::path &directory) {
   std::error_code ignored;
   std::filesystem::remove(directory / "manifest.txt.tmp", ignored);
+}
+
+bool WriteAll(int fd, const std::string &contents) {
+  size_t offset = 0;
+  while (offset < contents.size()) {
+    const ssize_t written =
+        write(fd, contents.data() + offset, contents.size() - offset);
+    if (written < 0 && errno == EINTR) {
+      continue;
+    }
+    if (written <= 0) {
+      return false;
+    }
+    offset += static_cast<size_t>(written);
+  }
+  return true;
 }
 
 } // namespace
@@ -313,42 +330,25 @@ bool WriteManifest(const std::filesystem::path &directory,
 
   const auto temporary = directory / "manifest.txt.tmp";
   const auto final = directory / kManifestName;
-  RemoveTemporaryManifest(directory);
-  {
-    std::ofstream output(temporary, std::ios::out | std::ios::trunc);
-    if (!output) {
-      *error = "open helper manifest";
-      return false;
-    }
-    output << "version 2\n";
-    output << "device_count " << normalized.size() << "\n";
-    for (size_t index = 0; index < normalized.size(); ++index) {
-      output << "device " << index << " " << normalized[index].source_uuid
-             << " " << normalized[index].size << " "
-             << normalized[index].filename << "\n";
-    }
-    output.flush();
-    if (!output) {
-      RemoveTemporaryManifest(directory);
-      *error = "write helper manifest";
-      return false;
-    }
-  }
-  if (chmod(temporary.c_str(), 0600) != 0) {
-    RemoveTemporaryManifest(directory);
-    *error = "set helper manifest permissions";
-    return false;
+  std::ostringstream serialized;
+  serialized << "version 2\n";
+  serialized << "device_count " << normalized.size() << "\n";
+  for (size_t index = 0; index < normalized.size(); ++index) {
+    serialized << "device " << index << " " << normalized[index].source_uuid
+               << " " << normalized[index].size << " "
+               << normalized[index].filename << "\n";
   }
 
-  FileDescriptor fd(open(temporary.c_str(), O_RDONLY | O_CLOEXEC));
+  FileDescriptor fd(open(temporary.c_str(),
+                         O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600));
   if (fd.get() < 0) {
-    RemoveTemporaryManifest(directory);
-    *error = "open helper manifest for fsync";
+    *error = "open helper manifest";
     return false;
   }
-  if (fsync(fd.get()) != 0 || !fd.Close()) {
+  if (!WriteAll(fd.get(), serialized.str()) || fsync(fd.get()) != 0 ||
+      !fd.Close()) {
     RemoveTemporaryManifest(directory);
-    *error = "fsync helper manifest";
+    *error = "write helper manifest";
     return false;
   }
   if (rename(temporary.c_str(), final.c_str()) != 0) {

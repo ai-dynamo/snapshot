@@ -41,6 +41,7 @@ const (
 	daemonCapabilityCustomStorage = uint32(1 << 2)
 	daemonHealthWait              = 30 * time.Second
 	daemonHealthRetryInterval     = 100 * time.Millisecond
+	daemonRPCTimeout              = 6*time.Hour + 5*time.Minute
 )
 
 var errDaemonUnavailable = errors.New("CUDA helper daemon unavailable")
@@ -175,6 +176,13 @@ func daemonRPC(
 	defer conn.Close()
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
+	deadline := time.Now().Add(daemonRPCTimeout)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		return 0, 0, "", "", 0, fmt.Errorf("set CUDA helper daemon RPC deadline: %w", err)
+	}
 
 	start := time.Now()
 	written, err := conn.Write(packet)
@@ -187,7 +195,12 @@ func daemonRPC(
 	rpcWall := time.Since(start)
 	if err != nil {
 		if errors.Is(err, os.ErrDeadlineExceeded) || ctx.Err() != nil {
-			return 0, 0, "", "", rpcWall, fmt.Errorf("CUDA helper daemon RPC canceled after %s: %w", rpcWall, ctx.Err())
+			cause := ctx.Err()
+			if cause == nil {
+				cause = err
+			}
+			return 0, 0, "", "", rpcWall,
+				fmt.Errorf("CUDA helper daemon RPC ended after %s; operation outcome is unknown and will not be replayed: %w", rpcWall, cause)
 		}
 		return 0, 0, "", "", rpcWall,
 			fmt.Errorf("CUDA helper daemon disconnected after request; operation outcome is unknown and will not be replayed: %w", err)

@@ -153,6 +153,12 @@ func TestReadLegacyManifestWithoutStorageModeDefaultsLegacy(t *testing.T) {
 	if err != nil || mode != CUDAStorageModeLegacy {
 		t.Fatalf("EffectiveStorageMode() = %q, %v, want %q, nil", mode, err, CUDAStorageModeLegacy)
 	}
+	if len(manifest.CUDA.PIDs) != 1 || manifest.CUDA.PIDs[0] != 42 {
+		t.Fatalf("CUDA.PIDs = %v, want [42]; legacy CUDA section was not parsed", manifest.CUDA.PIDs)
+	}
+	if manifest.CUDA.StorageMode != "" {
+		t.Fatalf("CUDA.StorageMode = %q, want empty", manifest.CUDA.StorageMode)
+	}
 }
 
 func TestNewCRIUDumpManifest(t *testing.T) {
@@ -217,6 +223,17 @@ func TestWriteManifestRejectsMissingCheckpointID(t *testing.T) {
 	err := WriteManifest(dir, &CheckpointManifest{})
 	if err == nil || err.Error() != "checkpoint manifest is missing checkpointId" {
 		t.Fatalf("expected missing checkpointId error, got %v", err)
+	}
+}
+
+func TestWriteManifestRequiresCUDAStorageMode(t *testing.T) {
+	dir := t.TempDir()
+	manifest := NewCheckpointManifest("checkpoint", CRIUDumpManifest{}, SourcePodManifest{}, OverlayManifest{})
+	manifest.CUDA = NewCUDAManifest([]int{42}, []string{"GPU-aaa"}, "")
+
+	err := WriteManifest(dir, manifest)
+	if err == nil || !strings.Contains(err.Error(), "missing storageMode") {
+		t.Fatalf("expected missing CUDA storageMode error, got %v", err)
 	}
 }
 

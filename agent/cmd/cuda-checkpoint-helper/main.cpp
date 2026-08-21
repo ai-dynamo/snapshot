@@ -43,6 +43,7 @@ namespace storage = cuda_checkpoint_storage;
 namespace transfer = cuda_checkpoint_transfer;
 using Clock = std::chrono::steady_clock;
 namespace daemon_protocol = cuda_checkpoint_daemon;
+constexpr int kClientReceiveTimeoutMilliseconds = 5000;
 
 class ScopedFd {
 public:
@@ -827,7 +828,6 @@ daemon_protocol::Response RunDaemonOperation(
   if (output_restore_failed) {
     response.cuda_status = CUDA_ERROR_OPERATING_SYSTEM;
     response.flags |= daemon_protocol::kResponseFatal;
-    response.error = "failed to restore daemon output descriptors";
   }
   if (!ReadCapturedFile(output_file, &response.output) ||
       !ReadCapturedFile(error_file, &response.error)) {
@@ -835,6 +835,12 @@ daemon_protocol::Response RunDaemonOperation(
     response.flags |= daemon_protocol::kResponseFatal;
     response.output.clear();
     response.error = "daemon operation output exceeded protocol limit";
+  }
+  if (output_restore_failed) {
+    if (!response.error.empty()) {
+      response.error += '\n';
+    }
+    response.error += "failed to restore daemon output descriptors";
   }
   std::fclose(output_file);
   std::fclose(error_file);
@@ -919,9 +925,13 @@ void RunHealthServer(daemon_protocol::OwnedUnixSocket *socket, int shutdown_fd,
       break;
     }
     ScopedFd client_fd(accepted_fd);
-    if (daemon_protocol::PollForInputOrStop(client_fd.get(), shutdown_fd) ==
-        0) {
+    const int client_poll = daemon_protocol::PollForInputOrStop(
+        client_fd.get(), shutdown_fd, {}, kClientReceiveTimeoutMilliseconds);
+    if (client_poll == 0) {
       break;
+    }
+    if (client_poll < 0) {
+      continue;
     }
     const ssize_t received =
         recv(client_fd.get(), packet.data(), packet.size(), MSG_TRUNC);
@@ -1066,9 +1076,14 @@ int RunDaemon(const std::string &socket_path, uint64_t max_operation_seconds) {
           break;
         }
         ScopedFd client_fd(accepted_fd);
-        if (daemon_protocol::PollForInputOrStop(
-                client_fd.get(), signal_owner.operation_stop_fd()) == 0) {
+        const int client_poll = daemon_protocol::PollForInputOrStop(
+            client_fd.get(), signal_owner.operation_stop_fd(), {},
+            kClientReceiveTimeoutMilliseconds);
+        if (client_poll == 0) {
           break;
+        }
+        if (client_poll < 0) {
+          continue;
         }
         const ssize_t received =
             recv(client_fd.get(), packet.data(), packet.size(), MSG_TRUNC);

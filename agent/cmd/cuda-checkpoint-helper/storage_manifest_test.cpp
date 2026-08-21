@@ -204,13 +204,66 @@ bool TestDuplicateCheckpointUUIDRejected() {
                "checkpoint accepted duplicate source UUIDs");
 }
 
+bool TestValidateExtentFiles() {
+  char path[] = "/tmp/cuda-storage-extent-test-XXXXXX";
+  const char *directory = mkdtemp(path);
+  if (!Check(directory != nullptr, "mkdtemp failed")) {
+    return false;
+  }
+  const std::filesystem::path extent_path =
+      std::filesystem::path(directory) / storage::DeviceFilename(0);
+  {
+    std::ofstream extent(extent_path, std::ios::binary);
+    extent << "bad";
+  }
+  const std::vector<storage::ManifestExtent> extents{
+      {kSourceA, 4, storage::DeviceFilename(0)},
+  };
+  std::string error;
+  const bool rejected_wrong_size =
+      !storage::ValidateExtentFiles(directory, extents, &error);
+  const bool resized = truncate(extent_path.c_str(), 4) == 0;
+  const bool accepted_exact_size =
+      resized && storage::ValidateExtentFiles(directory, extents, &error);
+  std::filesystem::remove_all(directory);
+  return Check(rejected_wrong_size,
+               "ValidateExtentFiles accepted an incorrect extent size") &&
+         Check(resized, "failed to resize extent fixture") &&
+         Check(accepted_exact_size,
+               "ValidateExtentFiles rejected the exact extent size");
+}
+
+bool TestRemoveManifest() {
+  char path[] = "/tmp/cuda-storage-remove-test-XXXXXX";
+  const char *directory = mkdtemp(path);
+  if (!Check(directory != nullptr, "mkdtemp failed")) {
+    return false;
+  }
+  const auto manifest = std::filesystem::path(directory) / "manifest.txt";
+  const auto temporary =
+      std::filesystem::path(directory) / "manifest.txt.tmp";
+  {
+    std::ofstream(manifest) << "manifest";
+    std::ofstream(temporary) << "temporary";
+  }
+  std::string error;
+  const bool first = storage::RemoveManifest(directory, &error);
+  const bool removed = !std::filesystem::exists(manifest) &&
+                       !std::filesystem::exists(temporary);
+  const bool second = storage::RemoveManifest(directory, &error);
+  std::filesystem::remove_all(directory);
+  return Check(first, error) && Check(removed, "manifest files remain") &&
+         Check(second, "repeated RemoveManifest failed");
+}
+
 } // namespace
 
 int main() {
   if (!TestEqualSizeNonOrderPreservingMap() || !TestEmptyV2Manifest() ||
       !TestNonemptyV2ManifestRoundTrip() || !TestV1Rejected() ||
       !TestUnconsumedExtentRejected() || !TestUnsafeMappingsRejected() ||
-      !TestDuplicateCheckpointUUIDRejected()) {
+      !TestDuplicateCheckpointUUIDRejected() || !TestValidateExtentFiles() ||
+      !TestRemoveManifest()) {
     return 1;
   }
   std::cout << "cuda checkpoint storage manifest tests passed\n";

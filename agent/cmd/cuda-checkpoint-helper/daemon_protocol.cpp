@@ -504,6 +504,7 @@ bool OwnedUnixSocket::Bind(const std::string &path, int backlog,
   fd_ = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
   if (fd_ < 0) {
     *error = std::strerror(errno);
+    Close();
     return false;
   }
   struct stat existing{};
@@ -538,8 +539,12 @@ bool OwnedUnixSocket::Bind(const std::string &path, int backlog,
   }
   device_ = bound_stat.st_dev;
   inode_ = bound_stat.st_ino;
-  if (backlog < 0 || chmod(path.c_str(), 0600) != 0 ||
-      listen(fd_, backlog) != 0) {
+  if (backlog < 0) {
+    *error = "invalid backlog";
+    Close();
+    return false;
+  }
+  if (chmod(path.c_str(), 0600) != 0 || listen(fd_, backlog) != 0) {
     *error = std::strerror(errno);
     Close();
     return false;
@@ -745,7 +750,8 @@ void ShutdownSignalOwner::Run() noexcept {
 }
 
 int PollForInputOrStop(int input_fd, int stop_fd,
-                       const std::function<void()> &before_poll) {
+                       const std::function<void()> &before_poll,
+                       int timeout_milliseconds) {
   pollfd descriptors[2]{
       {.fd = input_fd, .events = POLLIN, .revents = 0},
       {.fd = stop_fd, .events = POLLIN, .revents = 0},
@@ -754,11 +760,14 @@ int PollForInputOrStop(int input_fd, int stop_fd,
     before_poll();
   }
   for (;;) {
-    const int result = poll(descriptors, 2, -1);
+    const int result = poll(descriptors, 2, timeout_milliseconds);
     if (result < 0 && errno == EINTR) {
       continue;
     }
-    if (result <= 0 || (descriptors[1].revents & POLLIN) != 0) {
+    if (result == 0) {
+      return -1;
+    }
+    if (result < 0 || (descriptors[1].revents & POLLIN) != 0) {
       return 0;
     }
     if ((descriptors[0].revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL)) !=

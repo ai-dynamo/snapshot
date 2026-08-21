@@ -27,7 +27,32 @@ are sums across workers and can overlap in wall time; the `timing_scope` field
 records these rules.
 
 The helper resolves CustomStorage capability once at daemon startup. It retains
-primary contexts only for GPUs returned by the active CustomStorage operation
-and releases them before responding. The payload records release success and
-status. A release failure is logged and reported but is not retried after the
-operation has been acknowledged.
+primary contexts only for the current target GPU set and reuses them across
+adjacent per-process calls in the same process-tree checkpoint or restore. The
+cache is replaced when a different target set arrives and released after 60
+seconds idle or at daemon shutdown. This keeps unrelated GPUs untouched while
+avoiding context teardown between restore and unlock. Transfer telemetry marks
+the context as cached; cache-release events report the final release status.
+
+## Running
+
+The Snapshot agent image runs the helper as a privileged sidecar and shares its
+Unix socket at `/run/cuda-checkpoint-helper/helper.sock` with the agent. Start a
+standalone daemon only on a Linux CUDA host with the required host process and
+checkpoint mounts:
+
+```sh
+cuda-checkpoint-helper --daemon \
+  --socket /run/cuda-checkpoint-helper/helper.sock \
+  --max-operation-seconds 21600
+```
+
+Check readiness with:
+
+```sh
+cuda-checkpoint-helper --health \
+  --socket /run/cuda-checkpoint-helper/helper.sock
+```
+
+Production checkpoint and restore requests are sent by the Snapshot agent over
+that socket; the helper CLI is not a user-facing checkpoint interface.
