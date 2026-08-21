@@ -5,114 +5,145 @@ package cuda
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
-	"os"
-	"os/exec"
+	"math"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/go-logr/logr"
 
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
+	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
 
 const (
-	helperWaitDelay = 2 * time.Second
-
 	actionLock       = "lock"
 	actionCheckpoint = "checkpoint"
 	actionRestore    = "restore"
 	actionUnlock     = "unlock"
 )
 
-var cudaCheckpointHelperBinary = DefaultHelperBinaryPath
-
-func lock(ctx context.Context, pid int, log logr.Logger) error {
-	return runAction(ctx, pid, actionLock, "", DefaultHelperBinaryPath, log)
+type helperActionRunner interface {
+	run(
+		context.Context,
+		int,
+		string,
+		string,
+		string,
+		string,
+		string,
+		types.CUDATransferSettings,
+		snapshotruntime.ProcessDetails,
+		logr.Logger,
+	) error
 }
 
-func checkpoint(ctx context.Context, pid int, log logr.Logger) error {
-	return runAction(ctx, pid, actionCheckpoint, "", DefaultHelperBinaryPath, log)
+type commandHelperActionRunner struct{}
+
+type identityValidatingRunner struct {
+	runner     helperActionRunner
+	procRoot   string
+	identities map[int]snapshotruntime.ProcessDetails
 }
 
-func restoreProcess(ctx context.Context, pid int, deviceMap, helperBinaryPath string, log logr.Logger) error {
-	return runAction(ctx, pid, actionRestore, deviceMap, helperBinaryPath, log)
+type customStorageTelemetry struct {
+	Event                        string          `json:"event"`
+	HelperMainToTelemetrySeconds json.RawMessage `json:"helper_main_to_telemetry_seconds"`
 }
 
-func unlock(ctx context.Context, pid int, helperBinaryPath string, log logr.Logger) error {
-	return runAction(ctx, pid, actionUnlock, "", helperBinaryPath, log)
+type customStorageTelemetryParse struct {
+	status             string
+	err                string
+	helperMainDuration time.Duration
 }
 
-func getState(ctx context.Context, pid int, helperBinaryPath string) (string, error) {
-	cmd := exec.CommandContext(ctx, helperBinaryPath, "--get-state", "--pid", strconv.Itoa(pid))
-	output, err := cmd.CombinedOutput()
-	state := strings.TrimSpace(string(output))
-	if err != nil {
-		return "", fmt.Errorf("cuda-checkpoint-helper --get-state failed for pid %d: %w (output: %s)", pid, err, state)
-	}
-	if state == "" {
-		return "", fmt.Errorf("cuda-checkpoint-helper --get-state returned empty state for pid %d", pid)
-	}
-	return state, nil
-}
-
-func runAction(ctx context.Context, pid int, action, deviceMap, helperBinaryPath string, log logr.Logger) error {
-	args := []string{"--action", action, "--pid", strconv.Itoa(pid)}
-	if action == actionRestore && deviceMap != "" {
-		args = append(args, "--device-map", deviceMap)
-	}
-	cmd := exec.CommandContext(ctx, helperBinaryPath, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		return normalizeProcessGroupKillError(syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL))
-	}
-	cmd.WaitDelay = helperWaitDelay
-	details := snapshotruntime.ProcessDetails{
-		ObservedPID:   pid,
-		OutermostPID:  pid,
-		InnermostPID:  pid,
-		NamespacePIDs: []int{pid},
-	}
-	if process, err := snapshotruntime.ReadProcessDetails("/proc", pid); err == nil {
-		details = process
-	}
-	start := time.Now()
-	output, err := cmd.CombinedOutput()
-	duration := time.Since(start)
-	out := strings.TrimSpace(string(output))
-	if err != nil {
-		if ctx.Err() != nil {
-			err = ctx.Err()
+func parseCustomStorageTelemetry(output string, processWall time.Duration) customStorageTelemetryParse {
+	sawMalformedJSON := false
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "{") {
+			continue
 		}
-		log.Error(err, "cuda-checkpoint-helper command failed",
-			"pid", pid,
-			"outermost_pid", details.OutermostPID,
-			"innermost_pid", details.InnermostPID,
-			"cmdline", details.Cmdline,
-			"action", action,
-			"duration", duration,
-			"output", out,
-		)
-		return fmt.Errorf("cuda-checkpoint-helper %v failed for pid %d after %s: %w (output: %s)", args, pid, duration, err, out)
+		var telemetry customStorageTelemetry
+		if err := json.Unmarshal([]byte(line), &telemetry); err != nil {
+			sawMalformedJSON = true
+			continue
+		}
+		if telemetry.Event != "cuda_custom_storage_transfer" {
+			continue
+		}
+		if len(telemetry.HelperMainToTelemetrySeconds) == 0 || string(telemetry.HelperMainToTelemetrySeconds) == "null" {
+			return customStorageTelemetryParse{status: "missing-duration", err: "expected helper_main_to_telemetry_seconds"}
+		}
+		var seconds json.Number
+		if err := json.Unmarshal(telemetry.HelperMainToTelemetrySeconds, &seconds); err != nil {
+			return customStorageTelemetryParse{status: "invalid-duration", err: "helper_main_to_telemetry_seconds is not a number"}
+		}
+		value, err := strconv.ParseFloat(seconds.String(), 64)
+		if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+			return customStorageTelemetryParse{status: "invalid-duration", err: "helper_main_to_telemetry_seconds is not a finite non-negative number"}
+		}
+		const roundingToleranceSeconds = 1e-6
+		processWallSeconds := processWall.Seconds()
+		if value > processWallSeconds+roundingToleranceSeconds {
+			return customStorageTelemetryParse{status: "duration-exceeds-process-wall", err: "helper_main_to_telemetry_seconds exceeds process wall duration"}
+		}
+		if value >= processWallSeconds || value*float64(time.Second) >= float64(math.MaxInt64) {
+			return customStorageTelemetryParse{status: "valid", helperMainDuration: processWall}
+		}
+		return customStorageTelemetryParse{status: "valid", helperMainDuration: time.Duration(value * float64(time.Second))}
 	}
-	log.V(1).Info("cuda-checkpoint-helper command succeeded",
-		"pid", pid,
-		"outermost_pid", details.OutermostPID,
-		"innermost_pid", details.InnermostPID,
-		"cmdline", details.Cmdline,
-		"action", action,
-		"duration", duration,
-		"output", out,
-	)
-	return nil
+	if sawMalformedJSON {
+		return customStorageTelemetryParse{status: "malformed-json", err: "malformed JSON telemetry output"}
+	}
+	return customStorageTelemetryParse{status: "event-absent", err: "cuda_custom_storage_transfer event not found"}
 }
 
-func normalizeProcessGroupKillError(err error) error {
-	if errors.Is(err, syscall.ESRCH) {
-		return os.ErrProcessDone
+func (commandHelperActionRunner) run(
+	ctx context.Context,
+	pid int,
+	action,
+	deviceMap,
+	storageMode,
+	storageDir,
+	jobFile string,
+	transferSettings types.CUDATransferSettings,
+	identity snapshotruntime.ProcessDetails,
+	log logr.Logger,
+) error {
+	if identity.StartTimeTicks == 0 || identity.Cgroup == "" {
+		captured, err := snapshotruntime.ReadProcessDetails(snapshotruntime.HostProcPath, pid)
+		if err != nil {
+			return fmt.Errorf("capture host PID %d identity for CUDA helper daemon: %w", pid, err)
+		}
+		identity = captured
 	}
-	return err
+	if action == actionLock || action == actionUnlock || storageMode == types.CUDAStorageModeLegacy {
+		storageDir = ""
+	}
+	return runDaemonAction(ctx, pid, action, deviceMap, storageMode, storageDir, jobFile, transferSettings, identity, log)
+}
+
+func (r identityValidatingRunner) run(
+	ctx context.Context,
+	pid int,
+	action,
+	deviceMap,
+	storageMode,
+	storageDir,
+	jobFile string,
+	transferSettings types.CUDATransferSettings,
+	_ snapshotruntime.ProcessDetails,
+	log logr.Logger,
+) error {
+	expected, ok := r.identities[pid]
+	if !ok {
+		return fmt.Errorf("missing expected process identity for host PID %d", pid)
+	}
+	if err := snapshotruntime.ValidateProcessIdentity(r.procRoot, expected); err != nil {
+		return fmt.Errorf("validate host PID %d immediately before CUDA %s: %w", pid, action, err)
+	}
+	return r.runner.run(ctx, pid, action, deviceMap, storageMode, storageDir, jobFile, transferSettings, expected, log)
 }

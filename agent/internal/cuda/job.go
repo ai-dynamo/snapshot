@@ -17,6 +17,20 @@ import (
 // JobFileEnv is the CUDA launch-job environment variable consumed by the driver.
 const JobFileEnv = "CUDA_CHECKPOINT_JOB_FILE"
 
+// HostJobFilePath returns the host-visible path to the fixed launch-job file
+// inside a restored CUDA process's mount namespace.
+func HostJobFilePath(hostPID int) (string, error) {
+	if hostPID <= 0 {
+		return "", fmt.Errorf("invalid host PID %d", hostPID)
+	}
+	return filepath.Join(
+		"/host/proc",
+		fmt.Sprintf("%d", hostPID),
+		"root",
+		strings.TrimPrefix(snapshotv1alpha1.CUDAJobFilePath, string(os.PathSeparator)),
+	), nil
+}
+
 // StageJobFile copies a launch-job file into the checkpoint artifact and
 // returns the host-visible path to the source pod's live job file. Capture
 // helpers must use that live file so they join the same CUDA job as the target

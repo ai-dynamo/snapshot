@@ -162,6 +162,23 @@ rbac:
 # Static agent configuration (loaded from ConfigMap)
 # Dynamic values such as NODE_NAME come from environment variables.
 config:
+  cudaCheckpoint:
+    # Pinned transfer slots per CUDA device. More slots add pipeline depth,
+    # not worker threads. The default preserves the proven #11584 behavior.
+    transferBufferCount: 1
+    # Bytes in each pinned transfer slot (1-256 MiB, 4096-byte aligned).
+    transferChunkBytes: 67108864
+    daemon:
+      # Conservative watchdog for a single CUDA operation.
+      maxOperationSeconds: 21600
+      resources:
+        limits:
+          cpu: 2
+          memory: 1Gi
+        requests:
+          cpu: 250m
+          memory: 256Mi
+
   overlay:
     # Rootfs diff tar exclusions. Absolute-looking paths are normalized
     # relative to the tar root, and patterns starting with * are passed

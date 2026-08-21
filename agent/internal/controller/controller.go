@@ -577,6 +577,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		TargetPodIP:     pod.Status.PodIP,
 		ContainerName:   containerName,
 		Clientset:       w.clientset,
+		CUDATransfer:    w.config.CUDACheckpoint.TransferSettings(),
 	}
 	placeholderHostPID, err := w.restoreFn(restoreCtx, w.runtime, log, req, w.injector)
 	if err != nil {

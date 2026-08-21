@@ -5,6 +5,7 @@ package cuda
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,8 +14,40 @@ import (
 	"github.com/go-logr/logr"
 	"golang.org/x/sys/unix"
 
+	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
+	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
+
+type jobFileRunner struct {
+	jobFile string
+	trace   []string
+}
+
+func (r *jobFileRunner) run(
+	_ context.Context,
+	pid int,
+	action,
+	_,
+	_,
+	_,
+	_ string,
+	_ types.CUDATransferSettings,
+	_ snapshotruntime.ProcessDetails,
+	_ logr.Logger,
+) error {
+	r.trace = append(r.trace, fmt.Sprintf("%s %d", action, pid))
+	if action != actionCheckpoint {
+		return nil
+	}
+	file, err := os.OpenFile(r.jobFile, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	_, err = fmt.Fprintf(file, "|%d", pid)
+	return err
+}
 
 func TestStageJobFile(t *testing.T) {
 	sourceRoot := t.TempDir()
@@ -42,6 +75,20 @@ func TestStageJobFile(t *testing.T) {
 	}
 	if string(content) != "job-state" {
 		t.Fatalf("staged content = %q", content)
+	}
+}
+
+func TestHostJobFilePath(t *testing.T) {
+	got, err := HostJobFilePath(42)
+	if err != nil {
+		t.Fatalf("HostJobFilePath() error = %v", err)
+	}
+	want := filepath.Join("/host/proc/42/root", snapshotv1alpha1.CUDAJobFilePath)
+	if got != want {
+		t.Fatalf("HostJobFilePath() = %q, want %q", got, want)
+	}
+	if _, err := HostJobFilePath(0); err == nil {
+		t.Fatal("HostJobFilePath() accepted an invalid PID")
 	}
 }
 
@@ -109,36 +156,8 @@ func TestStageJobFileRequiresLaunchJobStateForMultiGPU(t *testing.T) {
 	}
 }
 
-func TestCheckpointProcessTreePersistsStateAfterEveryProcessCheckpoint(t *testing.T) {
+func TestCheckpointProcessTreePersistsPostCheckpointJobState(t *testing.T) {
 	tempDir := t.TempDir()
-	trace := filepath.Join(tempDir, "trace")
-	helper := filepath.Join(tempDir, "cuda-checkpoint-helper")
-	script := `#!/bin/sh
-action=""
-pid=""
-job_file=""
-while [ "$#" -gt 0 ]; do
-    case "$1" in
-        --action) action="$2"; shift 2 ;;
-        --pid) pid="$2"; shift 2 ;;
-        --job-file) job_file="$2"; shift 2 ;;
-        *) shift ;;
-    esac
-done
-if [ "$job_file" != "$DYNAMO_TEST_JOB_FILE" ]; then
-    printf 'job file = %s, want %s\n' "$job_file" "$DYNAMO_TEST_JOB_FILE" >&2
-    exit 1
-fi
-printf '%s %s\n' "$action" "$pid" >> "$DYNAMO_TEST_TRACE"
-if [ "$action" = checkpoint ]; then printf '|%s' "$pid" >> "$job_file"; fi
-`
-	if err := os.WriteFile(helper, []byte(script), 0700); err != nil {
-		t.Fatal(err)
-	}
-	originalHelper := cudaCheckpointHelperBinary
-	cudaCheckpointHelperBinary = helper
-	t.Cleanup(func() { cudaCheckpointHelperBinary = originalHelper })
-
 	liveJobFile := filepath.Join(tempDir, "live-job")
 	checkpointDir := filepath.Join(tempDir, "checkpoint")
 	if err := os.Mkdir(checkpointDir, 0700); err != nil {
@@ -150,17 +169,20 @@ if [ "$action" = checkpoint ]; then printf '|%s' "$pid" >> "$job_file"; fi
 	if err := os.WriteFile(filepath.Join(checkpointDir, snapshotv1alpha1.CUDAJobFileName), []byte("validation-copy"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("DYNAMO_TEST_TRACE", trace)
-	t.Setenv("DYNAMO_TEST_JOB_FILE", liveJobFile)
-
-	if _, err := CheckpointProcessTree(context.Background(), []int{101, 202}, liveJobFile, checkpointDir, logr.Discard()); err != nil {
-		t.Fatalf("CheckpointProcessTree() error = %v", err)
+	runner := &jobFileRunner{jobFile: liveJobFile}
+	if _, err := lockAndCheckpointProcessTree(
+		context.Background(),
+		[]int{101, 202},
+		liveJobFile,
+		types.CUDAStorageModeLegacy,
+		checkpointDir,
+		types.CUDATransferSettings{}.WithDefaults(),
+		runner,
+		logr.Discard(),
+	); err != nil {
+		t.Fatalf("lockAndCheckpointProcessTree() error = %v", err)
 	}
-	traceContent, err := os.ReadFile(trace)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := string(traceContent), "lock 101\nlock 202\ncheckpoint 101\ncheckpoint 202\n"; got != want {
+	if got, want := strings.Join(runner.trace, "\n")+"\n", "lock 101\nlock 202\ncheckpoint 101\ncheckpoint 202\n"; got != want {
 		t.Fatalf("helper call order = %q, want %q", got, want)
 	}
 	artifact, err := os.ReadFile(filepath.Join(checkpointDir, snapshotv1alpha1.CUDAJobFileName))

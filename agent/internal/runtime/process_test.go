@@ -99,6 +99,50 @@ func TestParseProcExitCode(t *testing.T) {
 	}
 }
 
+func TestResolveHostProcessIdentity(t *testing.T) {
+	procRoot := t.TempDir()
+	procDir := filepath.Join(procRoot, "900")
+	if err := os.MkdirAll(procDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"status": "Name:\tworker\nPPid:\t1\nNSpid:\t900 77\n",
+		"stat":   "900 (worker with spaces) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 424242 20\n",
+		"cgroup": "0::/kubepods/pod/container\n",
+		"comm":   "worker\n",
+	}
+	for name, data := range files {
+		if err := os.WriteFile(filepath.Join(procDir, name), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := ResolveHostProcessIdentity(procRoot, ProcessDetails{
+		InnermostPID:   77,
+		StartTimeTicks: 424242,
+		Cgroup:         "0::/kubepods/pod/container\n",
+	})
+	if err != nil {
+		t.Fatalf("ResolveHostProcessIdentity() error = %v", err)
+	}
+	if got.OutermostPID != 900 {
+		t.Fatalf("OutermostPID = %d, want 900", got.OutermostPID)
+	}
+	if err := ValidateProcessIdentity(procRoot, got); err != nil {
+		t.Fatalf("ValidateProcessIdentity() error = %v", err)
+	}
+	changedStart := got
+	changedStart.StartTimeTicks++
+	if err := ValidateProcessIdentity(procRoot, changedStart); err == nil {
+		t.Fatal("ValidateProcessIdentity() accepted changed start time")
+	}
+	changedCgroup := got
+	changedCgroup.Cgroup = "0::/different\n"
+	if err := ValidateProcessIdentity(procRoot, changedCgroup); err == nil {
+		t.Fatal("ValidateProcessIdentity() accepted changed cgroup")
+	}
+}
+
 func TestReadProcessDetails(t *testing.T) {
 	procRoot := t.TempDir()
 	pid := 1018
