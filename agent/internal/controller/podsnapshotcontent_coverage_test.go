@@ -452,6 +452,7 @@ func TestMarkCheckpointReadyAndRelease_SecondConflictObservesFailed(t *testing.T
 	err := w.markCheckpointReadyAndRelease(context.Background(), makeWorkOrder("podsnapshotcontent-x", "node-a", "x"), target.Process.Pid)
 
 	require.NoError(t, err)
+	assert.Equal(t, 2, readyPatches, "Failed must be observed on the second Ready conflict")
 	assert.False(t, released)
 	requireKilledBySIGKILL(t, ctx, target)
 }

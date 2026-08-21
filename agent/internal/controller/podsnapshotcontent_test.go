@@ -484,6 +484,27 @@ func TestReconcileSourcePod_ReadyDoesNotStarveNewDump(t *testing.T) {
 	require.Eventually(t, fc.wasCalled, time.Second, 5*time.Millisecond)
 }
 
+func TestReconcileSourcePod_InvalidReadySpecDoesNotStarveNewDump(t *testing.T) {
+	ready := makeWorkOrder("podsnapshotcontent-old", "node-a", "abc")
+	ready.CreationTimestamp = metav1.Unix(1000, 0)
+	ready.Spec.Source.PodRef.Containers = nil
+	meta.SetStatusCondition(&ready.Status.Conditions, metav1.Condition{
+		Type:    snapshotv1alpha1.PodSnapshotConditionReady,
+		Status:  metav1.ConditionTrue,
+		Reason:  "Captured",
+		Message: "Checkpoint captured and verified",
+	})
+	pending := makeWorkOrder("podsnapshotcontent-new", "node-a", "abc")
+	pending.CreationTimestamp = metav1.Unix(2000, 0)
+	pod := makeSourcePod("abc")
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, ready, pending, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 7}
+
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	require.Eventually(t, fc.wasCalled, time.Second, 5*time.Millisecond)
+}
+
 func TestReconcileSourcePod_ReadyRetriesSentinel(t *testing.T) {
 	ready := makeWorkOrder("podsnapshotcontent-ready", "node-a", "abc")
 	meta.SetStatusCondition(&ready.Status.Conditions, metav1.Condition{

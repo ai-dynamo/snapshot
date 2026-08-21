@@ -264,7 +264,9 @@ func (w *NodeController) releaseReadyContent(ctx context.Context, content *snaps
 	}
 	containerName, err := singleTargetContainer(content)
 	if err != nil {
-		return err
+		// Spec cannot release this content; do not block a newer dump on the same pod.
+		logger.Error(err, "Skipping Ready release; invalid target container", "content", content.Name)
+		return nil
 	}
 	if !isContainerReady(pod, containerName) {
 		return nil
@@ -496,7 +498,6 @@ func (w *NodeController) markCheckpointReadyAndRelease(ctx context.Context, cont
 			}
 			current := &snapshotv1alpha1.PodSnapshotContent{}
 			if getErr := w.client.Get(ctx, client.ObjectKey{Name: content.Name}, current); getErr != nil {
-				logger.Error(err, "Failed to write PodSnapshotContent ready status", "content", content.Name)
 				logger.Error(getErr, "Failed to re-read PodSnapshotContent after Ready conflict", "content", content.Name)
 				return getErr
 			}
