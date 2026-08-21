@@ -633,7 +633,11 @@ func TestRunCheckpoint_LeaseCancelledConflictReadyDoesNotKill(t *testing.T) {
 		},
 	}
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, stored)
-	w.releaseCheckpointFn = func(int) error { return nil }
+	releaseCalls := 0
+	w.releaseCheckpointFn = func(int) error {
+		releaseCalls++
+		return nil
+	}
 	w.checkpointFn = func(ctx context.Context, params CheckpointParams) error {
 		select {
 		case <-ctx.Done():
@@ -651,6 +655,7 @@ func TestRunCheckpoint_LeaseCancelledConflictReadyDoesNotKill(t *testing.T) {
 	w.runCheckpoint(context.Background(), makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc"), pod, "main", "abc123", target.Process.Pid, "abc", artifactPath, leaseKey, "abc")
 
 	require.NoError(t, target.Process.Signal(syscall.Signal(0)), "stale holder must not SIGKILL after another holder marked Ready")
+	require.Zero(t, releaseCalls, "stale holder must not release after Ready wins the conflict")
 	require.NotNil(t, meta.FindStatusCondition(
 		getContent(t, w, stored.Name).Status.Conditions,
 		snapshotv1alpha1.PodSnapshotConditionReady,
