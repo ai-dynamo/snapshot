@@ -12,7 +12,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -55,39 +54,20 @@ func findSourcePod(ctx context.Context, reader client.Reader, job *batchv1.Job) 
 	}
 }
 
-// findOwnedPodSnapshot returns this SnapshotJob's PodSnapshot, located by
-// SnapshotJobOwnerLabel. It returns a NotFound error when none exists. The
-// produced PodSnapshot carries no ownerReference (artifacts must outlive the
-// SnapshotJob — see buildPodSnapshot), so the label match from List *is* the
-// ownership check; there is no IsControlledBy to additionally verify. More than
-// one match is a controller invariant violation (deterministic naming makes it
-// impossible under normal operation), so it emits a warning and returns a
-// non-terminal error to requeue rather than silently picking one.
+// findOwnedPodSnapshot returns the PodSnapshot at this SnapshotJob's deterministic
+// namespace/name and verifies that it belongs to this SnapshotJob incarnation.
+// Differently named objects are unrelated even if they carry the same owner
+// labels; a same-name object with mismatched ownership is a terminal conflict.
 func (r *SnapshotJobReconciler) findOwnedPodSnapshot(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob) (*snapshotv1alpha1.PodSnapshot, error) {
-	var snaps snapshotv1alpha1.PodSnapshotList
-	if err := r.List(ctx, &snaps,
-		client.InNamespace(sj.Namespace),
-		client.MatchingLabels{snapshotv1alpha1.SnapshotJobOwnerLabel: sj.Name},
-	); err != nil {
+	snap := &snapshotv1alpha1.PodSnapshot{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: sj.Namespace, Name: sj.Name}, snap); err != nil {
 		return nil, err
 	}
-	switch len(snaps.Items) {
-	case 0:
-		return nil, apierrors.NewNotFound(
-			schema.GroupResource{Group: snapshotv1alpha1.GroupVersion.Group, Resource: "podsnapshots"},
-			sj.Name,
-		)
-	case 1:
-		if !podSnapshotBelongsToSnapshotJob(&snaps.Items[0], sj) {
-			return nil, fmt.Errorf("%w: PodSnapshot %q belongs to a different SnapshotJob incarnation",
-				errPodSnapshotNameConflict, snaps.Items[0].Name)
-		}
-		return &snaps.Items[0], nil
-	default:
-		err := fmt.Errorf("multiple PodSnapshots owned by SnapshotJob %q; expected at most one", sj.Name)
-		r.Recorder.Event(sj, corev1.EventTypeWarning, "PodSnapshotLookupAmbiguous", err.Error())
-		return nil, err
+	if !podSnapshotBelongsToSnapshotJob(snap, sj) {
+		return nil, fmt.Errorf("%w: PodSnapshot %q belongs to a different SnapshotJob incarnation",
+			errPodSnapshotNameConflict, snap.Name)
 	}
+	return snap, nil
 }
 
 // buildPodSnapshot constructs the desired PodSnapshot for a SnapshotJob's source
@@ -116,10 +96,8 @@ func buildPodSnapshot(sj *snapshotv1alpha1.SnapshotJob, pod *corev1.Pod) (*snaps
 			Name:      sj.Name,
 			Namespace: sj.Namespace,
 			Labels: map[string]string{
-				snapshotv1alpha1.SnapshotJobOwnerLabel: sj.Name,
-			},
-			Annotations: map[string]string{
-				snapshotv1alpha1.SnapshotJobOwnerUIDAnnotation: string(sj.UID),
+				snapshotv1alpha1.SnapshotJobOwnerLabel:    sj.Name,
+				snapshotv1alpha1.SnapshotJobOwnerUIDLabel: string(sj.UID),
 			},
 		},
 		Spec: snapshotv1alpha1.PodSnapshotSpec{
@@ -172,7 +150,7 @@ func (r *SnapshotJobReconciler) classifyExistingPodSnapshot(ctx context.Context,
 
 func podSnapshotBelongsToSnapshotJob(snap *snapshotv1alpha1.PodSnapshot, sj *snapshotv1alpha1.SnapshotJob) bool {
 	return snap.Labels[snapshotv1alpha1.SnapshotJobOwnerLabel] == sj.Name &&
-		snap.Annotations[snapshotv1alpha1.SnapshotJobOwnerUIDAnnotation] == string(sj.UID)
+		snap.Labels[snapshotv1alpha1.SnapshotJobOwnerUIDLabel] == string(sj.UID)
 }
 
 // mapPodSnapshotToSnapshotJob maps the already-unwrapped client.Object back to

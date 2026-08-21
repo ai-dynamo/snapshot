@@ -58,10 +58,10 @@ const (
 // instead of an owner-based watch.
 const SnapshotJobOwnerLabel = "nvidia.com/snapshot-job"
 
-// SnapshotJobOwnerUIDAnnotation binds a produced PodSnapshot to one concrete
+// SnapshotJobOwnerUIDLabel binds a produced PodSnapshot to one concrete
 // SnapshotJob incarnation. The name label alone is insufficient because capture
 // artifacts outlive their SnapshotJob and names can be reused.
-const SnapshotJobOwnerUIDAnnotation = "nvidia.com/snapshot-job-uid"
+const SnapshotJobOwnerUIDLabel = "nvidia.com/snapshot-job-uid"
 
 // IsSnapshotJobCompleted reports whether the SnapshotJob's Completed condition is True.
 func IsSnapshotJobCompleted(j *SnapshotJob) bool {

@@ -40,7 +40,7 @@ func TestBuildPodSnapshot(t *testing.T) {
 
 	t.Run("carries the owner label instead", func(t *testing.T) {
 		assert.Equal(t, sj.Name, snap.Labels[snapshotv1alpha1.SnapshotJobOwnerLabel])
-		assert.Equal(t, string(sj.UID), snap.Annotations[snapshotv1alpha1.SnapshotJobOwnerUIDAnnotation])
+		assert.Equal(t, string(sj.UID), snap.Labels[snapshotv1alpha1.SnapshotJobOwnerUIDLabel])
 	})
 
 	t.Run("pins the source pod name and UID", func(t *testing.T) {
@@ -309,7 +309,7 @@ func TestClassifyExistingPodSnapshot(t *testing.T) {
 	t.Run("stale SnapshotJob UID: PodSnapshotNameConflict", func(t *testing.T) {
 		stale, err := buildPodSnapshot(sj, pod)
 		require.NoError(t, err)
-		stale.Annotations[snapshotv1alpha1.SnapshotJobOwnerUIDAnnotation] = "old-sj-uid"
+		stale.Labels[snapshotv1alpha1.SnapshotJobOwnerUIDLabel] = "old-sj-uid"
 		r := makeSnapshotJobReconciler(s, stale)
 
 		_, err = r.classifyExistingPodSnapshot(context.Background(), sj, stale.Name, errors.New("AlreadyExists"))
@@ -320,12 +320,35 @@ func TestClassifyExistingPodSnapshot(t *testing.T) {
 	t.Run("lookup rejects a stale SnapshotJob UID", func(t *testing.T) {
 		stale, err := buildPodSnapshot(sj, pod)
 		require.NoError(t, err)
-		stale.Annotations[snapshotv1alpha1.SnapshotJobOwnerUIDAnnotation] = "old-sj-uid"
+		stale.Labels[snapshotv1alpha1.SnapshotJobOwnerUIDLabel] = "old-sj-uid"
 		r := makeSnapshotJobReconciler(s, stale)
 
 		_, err = r.findOwnedPodSnapshot(context.Background(), sj)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, errPodSnapshotNameConflict)
+	})
+
+	t.Run("lookup ignores a differently named PodSnapshot with the same owner labels", func(t *testing.T) {
+		unrelated, err := buildPodSnapshot(sj, pod)
+		require.NoError(t, err)
+		unrelated.Name = "unrelated-capture"
+		r := makeSnapshotJobReconciler(s, unrelated)
+
+		_, err = r.findOwnedPodSnapshot(context.Background(), sj)
+		require.Error(t, err)
+		assert.True(t, apierrors.IsNotFound(err))
+	})
+
+	t.Run("lookup returns the deterministic artifact alongside an unrelated labeled object", func(t *testing.T) {
+		owned, err := buildPodSnapshot(sj, pod)
+		require.NoError(t, err)
+		unrelated := owned.DeepCopy()
+		unrelated.Name = "unrelated-capture"
+		r := makeSnapshotJobReconciler(s, owned, unrelated)
+
+		got, err := r.findOwnedPodSnapshot(context.Background(), sj)
+		require.NoError(t, err)
+		assert.Equal(t, owned.Name, got.Name)
 	})
 
 	t.Run("cache lag: NotFound surfaces the original AlreadyExists for requeue", func(t *testing.T) {
