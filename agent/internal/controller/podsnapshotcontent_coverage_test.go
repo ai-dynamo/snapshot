@@ -412,6 +412,50 @@ func TestMarkCheckpointReadyAndRelease_AlreadyReadyReleases(t *testing.T) {
 	assert.True(t, released)
 }
 
+func TestMarkCheckpointReadyAndRelease_SecondConflictObservesFailed(t *testing.T) {
+	stored := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	readyPatches := 0
+	funcs := interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if err := c.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			if sc, ok := obj.(*snapshotv1alpha1.PodSnapshotContent); ok && readyPatches >= 2 {
+				meta.SetStatusCondition(&sc.Status.Conditions, metav1.Condition{
+					Type:    snapshotv1alpha1.PodSnapshotConditionFailed,
+					Status:  metav1.ConditionTrue,
+					Reason:  "SourcePodGone",
+					Message: "source pod is gone",
+				})
+			}
+			return nil
+		},
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			sc, ok := obj.(*snapshotv1alpha1.PodSnapshotContent)
+			if ok {
+				if cond := meta.FindStatusCondition(sc.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady); cond != nil && cond.Status == metav1.ConditionTrue {
+					readyPatches++
+					return conflictErr()
+				}
+			}
+			return c.Status().Patch(ctx, obj, patch, opts...)
+		},
+	}
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, stored)
+	released := false
+	w.releaseCheckpointFn = func(int) error {
+		released = true
+		return nil
+	}
+	ctx, target := startKillableTarget(t)
+
+	err := w.markCheckpointReadyAndRelease(context.Background(), makeWorkOrder("podsnapshotcontent-x", "node-a", "x"), target.Process.Pid)
+
+	require.NoError(t, err)
+	assert.False(t, released)
+	requireKilledBySIGKILL(t, ctx, target)
+}
+
 func TestSetSnapshotContentFailed_StatusPatchErrorReturnsError(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	funcs := interceptor.Funcs{
