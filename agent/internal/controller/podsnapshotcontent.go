@@ -342,6 +342,16 @@ func (w *NodeController) runCheckpoint(
 		logger.Error(cause, "Lease cancelled during checkpoint")
 		if patchErr := w.setSnapshotContentFailed(ctx, content, "LeaseCancelled", cause); patchErr != nil {
 			logger.Error(patchErr, "Failed to write PodSnapshotContent failed status", "content", content.Name)
+			// Another holder may already have marked Ready and be about to release.
+			// Killing here would terminate a successfully checkpointed workload.
+			if apierrors.IsConflict(patchErr) {
+				current := &snapshotv1alpha1.PodSnapshotContent{}
+				if getErr := w.client.Get(ctx, client.ObjectKey{Name: content.Name}, current); getErr != nil {
+					logger.Error(getErr, "Failed to re-read PodSnapshotContent after LeaseCancelled conflict", "content", content.Name)
+				} else if isContentReady(current) {
+					return
+				}
+			}
 		}
 		if killErr := w.killCheckpointProcess(logger, containerPID, "checkpoint lease cancelled"); killErr != nil {
 			logger.Error(killErr, "Failed to kill target after lease cancellation", "content", content.Name)

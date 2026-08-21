@@ -27,6 +27,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	snapshottypes "github.com/ai-dynamo/snapshot/agent/internal/types"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
@@ -606,6 +607,54 @@ func TestRunCheckpoint_LeaseCancelledAfterDumpFailsAndKills(t *testing.T) {
 	failed := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
 	require.NotNil(t, failed)
 	assert.Equal(t, "LeaseCancelled", failed.Reason)
+}
+
+func TestRunCheckpoint_LeaseCancelledConflictReadyDoesNotKill(t *testing.T) {
+	orig := checkpointLeaseRenewInterval
+	checkpointLeaseRenewInterval = time.Millisecond
+	t.Cleanup(func() { checkpointLeaseRenewInterval = orig })
+
+	stored := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	meta.SetStatusCondition(&stored.Status.Conditions, metav1.Condition{
+		Type:    snapshotv1alpha1.PodSnapshotConditionReady,
+		Status:  metav1.ConditionTrue,
+		Reason:  "Captured",
+		Message: "Checkpoint captured and verified",
+	})
+	funcs := interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			sc, ok := obj.(*snapshotv1alpha1.PodSnapshotContent)
+			if ok {
+				if cond := meta.FindStatusCondition(sc.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed); cond != nil && cond.Status == metav1.ConditionTrue {
+					return conflictErr()
+				}
+			}
+			return c.Status().Patch(ctx, obj, patch, opts...)
+		},
+	}
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, stored)
+	w.releaseCheckpointFn = func(int) error { return nil }
+	w.checkpointFn = func(ctx context.Context, params CheckpointParams) error {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(2 * time.Second):
+			t.Fatal("lease ctx was not cancelled")
+			return nil
+		}
+	}
+	_, target := startKillableTarget(t)
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")}}
+	leaseKey := client.ObjectKey{Namespace: "inference", Name: "checkpoint-lease-abc"}
+	artifactPath := filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1")
+
+	w.runCheckpoint(context.Background(), makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc"), pod, "main", "abc123", target.Process.Pid, "abc", artifactPath, leaseKey, "abc")
+
+	require.NoError(t, target.Process.Signal(syscall.Signal(0)), "stale holder must not SIGKILL after another holder marked Ready")
+	require.NotNil(t, meta.FindStatusCondition(
+		getContent(t, w, stored.Name).Status.Conditions,
+		snapshotv1alpha1.PodSnapshotConditionReady,
+	))
 }
 
 func TestReconcileSnapshotContent_PodNotFoundFails(t *testing.T) {
