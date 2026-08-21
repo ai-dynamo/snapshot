@@ -753,13 +753,27 @@ func TestReconcileSnapshotContent_CapturesFromPod(t *testing.T) {
 	fc := &fakeCheckpointer{}
 	w := makeNodeController(t, fc, content, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: 7}
+	unblocked := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-unblocked:
+		default:
+			close(unblocked)
+		}
+	})
+	w.checkpointFn = func(ctx context.Context, params CheckpointParams) error {
+		err := fc.fn(ctx, params)
+		<-unblocked
+		return err
+	}
 
 	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
 
-	// acquireLease runs synchronously in reconcileSourcePod before the goroutine is launched, so
-	// the Lease exists immediately after the function returns.
+	// acquireLease runs synchronously in reconcileSourcePod before the goroutine is launched.
+	// Hold the dump so releaseLease cannot delete the Lease before this assertion.
 	_, err := w.clientset.CoordinationV1().Leases("inference").Get(context.Background(), "checkpoint-lease-abc", metav1.GetOptions{})
-	assert.NoError(t, err, "Lease checkpoint-lease-abc must exist in namespace inference")
+	require.NoError(t, err, "Lease checkpoint-lease-abc must exist in namespace inference")
+	close(unblocked)
 
 	require.Eventually(t, fc.wasCalled, time.Second, 5*time.Millisecond)
 
