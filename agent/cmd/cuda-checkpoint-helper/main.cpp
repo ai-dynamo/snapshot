@@ -101,41 +101,11 @@ double SecondsBetween(Clock::time_point start, Clock::time_point end) {
   return std::chrono::duration<double>(end - start).count();
 }
 
-class RetainedContexts {
+class OperationContexts {
 public:
-  RetainedContexts() = default;
-  RetainedContexts(const RetainedContexts &) = delete;
-  RetainedContexts &operator=(const RetainedContexts &) = delete;
-
-  CUresult RetainAll(int *device_count, double *enumeration_seconds,
-                     double *retain_seconds) {
-    const auto enumeration_start = Clock::now();
-    int count = 0;
-    CUresult status = cuDeviceGetCount(&count);
-    *enumeration_seconds = SecondsSince(enumeration_start);
-    *device_count = count;
-    if (status != CUDA_SUCCESS) {
-      return status;
-    }
-    contexts_.reserve(count);
-    for (int ordinal = 0; ordinal < count; ++ordinal) {
-      const auto retain_start = Clock::now();
-      CUdevice device = 0;
-      status = cuDeviceGet(&device, ordinal);
-      if (status != CUDA_SUCCESS) {
-        *retain_seconds += SecondsSince(retain_start);
-        return status;
-      }
-      CUcontext context = nullptr;
-      status = cuDevicePrimaryCtxRetain(&context, device);
-      *retain_seconds += SecondsSince(retain_start);
-      if (status != CUDA_SUCCESS) {
-        return status;
-      }
-      contexts_.push_back({device, context});
-    }
-    return CUDA_SUCCESS;
-  }
+  OperationContexts() = default;
+  OperationContexts(const OperationContexts &) = delete;
+  OperationContexts &operator=(const OperationContexts &) = delete;
 
   CUresult ReleaseAll() {
     CUresult first_error = CUDA_SUCCESS;
@@ -150,26 +120,55 @@ public:
     return first_error;
   }
 
-  size_t size() const { return contexts_.size(); }
-
-  CUresult ContextAndDeviceForStream(CUstream stream, CUcontext *context_out,
-                                     CUdevice *device_out) const {
+  CUresult RetainForStream(CUstream stream, CUcontext *context_out,
+                           CUdevice *device_out,
+                           double *context_discovery_seconds,
+                           double *retain_seconds) {
+    // CustomStorage returns a stream in the primary context of each target
+    // GPU. Discover the device from that stream, then retain only that primary
+    // context for the lifetime of this operation.
+    const auto discovery_start = Clock::now();
     CUcontext stream_context = nullptr;
     CUresult status = cuStreamGetCtx(stream, &stream_context);
+    if (status != CUDA_SUCCESS) {
+      *context_discovery_seconds += SecondsSince(discovery_start);
+      return status;
+    }
+    CUdevice stream_device = 0;
+    status = cuCtxGetDevice_v2(&stream_device, stream_context);
+    *context_discovery_seconds += SecondsSince(discovery_start);
     if (status != CUDA_SUCCESS) {
       return status;
     }
     for (const auto &retained : contexts_) {
-      if (retained.context == stream_context) {
+      if (retained.device == stream_device) {
+        if (retained.context != stream_context) {
+          return CUDA_ERROR_INVALID_CONTEXT;
+        }
         *context_out = retained.context;
         *device_out = retained.device;
         return CUDA_SUCCESS;
       }
     }
-    return CUDA_ERROR_INVALID_CONTEXT;
+
+    const auto retain_start = Clock::now();
+    CUcontext retained_context = nullptr;
+    status = cuDevicePrimaryCtxRetain(&retained_context, stream_device);
+    *retain_seconds += SecondsSince(retain_start);
+    if (status != CUDA_SUCCESS) {
+      return status;
+    }
+    if (retained_context != stream_context) {
+      (void)cuDevicePrimaryCtxRelease(stream_device);
+      return CUDA_ERROR_INVALID_CONTEXT;
+    }
+    contexts_.push_back({stream_device, retained_context});
+    *context_out = retained_context;
+    *device_out = stream_device;
+    return CUDA_SUCCESS;
   }
 
-  ~RetainedContexts() { (void)ReleaseAll(); }
+  ~OperationContexts() { (void)ReleaseAll(); }
 
 private:
   struct Entry {
@@ -292,7 +291,6 @@ DoCustomStorage(int pid, bool checkpoint, const std::string &device_map,
                 const transfer::TransferOptions &transfer_options,
                 Clock::time_point helper_main_start,
                 cuda_checkpoint_compat::OperationCompleteFn operation_complete,
-                RetainedContexts *daemon_contexts,
                 const daemon_protocol::Request *daemon_request) {
   const auto custom_storage_start = Clock::now();
   if (operation_complete == nullptr) {
@@ -333,29 +331,17 @@ DoCustomStorage(int pid, bool checkpoint, const std::string &device_map,
   const double storage_directory_validation_seconds =
       SecondsSince(storage_directory_start);
 
-  double cuda_init_seconds = 0.0;
-  int cuda_device_count = 0;
+  const double cuda_init_seconds = 0.0;
+  int visible_cuda_device_count = 0;
   double device_enumeration_seconds = 0.0;
+  double target_context_discovery_seconds = 0.0;
   double primary_context_retain_seconds = 0.0;
-  RetainedContexts operation_contexts;
-  RetainedContexts *retained_contexts = daemon_contexts;
-  CUresult status = CUDA_SUCCESS;
-  if (retained_contexts == nullptr) {
-    const auto cuda_init_start = Clock::now();
-    status = cuInit(0);
-    cuda_init_seconds = SecondsSince(cuda_init_start);
-    if (status != CUDA_SUCCESS) {
-      return {status, {}};
-    }
-    retained_contexts = &operation_contexts;
-    status = retained_contexts->RetainAll(&cuda_device_count,
-                                          &device_enumeration_seconds,
-                                          &primary_context_retain_seconds);
-    if (status != CUDA_SUCCESS) {
-      return {status, {}};
-    }
-  } else {
-    cuda_device_count = retained_contexts->size();
+  OperationContexts operation_contexts;
+  const auto device_enumeration_start = Clock::now();
+  CUresult status = cuDeviceGetCount(&visible_cuda_device_count);
+  device_enumeration_seconds = SecondsSince(device_enumeration_start);
+  if (status != CUDA_SUCCESS) {
+    return {status, {}};
   }
 
   const auto manifest_validation_start = Clock::now();
@@ -409,16 +395,27 @@ DoCustomStorage(int pid, bool checkpoint, const std::string &device_map,
     return {status, {}};
   }
   daemon_protocol::OperationState operation{.handle_returned = true};
-  const auto post_handle_failure = [&operation](CUresult failure) {
-    const CUresult status =
-        static_cast<CUresult>(daemon_protocol::FinishHandledOperation(
-            false, failure, [] { return static_cast<int32_t>(CUDA_SUCCESS); },
-            &operation));
-    return CustomStorageResult{.status = status, .operation = operation};
-  };
+  const auto post_handle_failure =
+      [&operation, &operation_contexts](CUresult failure) {
+        const CUresult status =
+            static_cast<CUresult>(daemon_protocol::FinishHandledOperation(
+                false, failure,
+                [] { return static_cast<int32_t>(CUDA_SUCCESS); },
+                &operation));
+        const CUresult release_status = operation_contexts.ReleaseAll();
+        if (release_status != CUDA_SUCCESS) {
+          std::fprintf(
+              stderr,
+              "failed to release operation CUDA contexts with status %d "
+              "while handling status %d\n",
+              static_cast<int>(release_status), static_cast<int>(status));
+        }
+        return CustomStorageResult{.status = status, .operation = operation};
+      };
   const auto metadata_job_construction_start = Clock::now();
   if (info == nullptr || info->handle == nullptr ||
-      info->deviceCount > retained_contexts->size() ||
+      info->deviceCount >
+          static_cast<unsigned int>(visible_cuda_device_count) ||
       (info->deviceCount > 0 && info->perDeviceData == nullptr)) {
     std::fprintf(stderr, "CUDA returned invalid custom storage information\n");
     return post_handle_failure(CUDA_ERROR_INVALID_VALUE);
@@ -438,8 +435,9 @@ DoCustomStorage(int pid, bool checkpoint, const std::string &device_map,
   std::vector<storage::DeviceExtent> device_extents;
   device_extents.reserve(info->deviceCount);
   for (unsigned int index = 0; index < info->deviceCount; ++index) {
-    status = retained_contexts->ContextAndDeviceForStream(
-        info->perDeviceData[index].stream, &contexts[index], &devices[index]);
+    status = operation_contexts.RetainForStream(
+        info->perDeviceData[index].stream, &contexts[index], &devices[index],
+        &target_context_discovery_seconds, &primary_context_retain_seconds);
     if (status != CUDA_SUCCESS) {
       return post_handle_failure(status);
     }
@@ -617,8 +615,7 @@ DoCustomStorage(int pid, bool checkpoint, const std::string &device_map,
                                           (1024.0 * 1024.0 * 1024.0) / seconds;
   const auto primary_context_release_start = Clock::now();
   const CUresult primary_context_release_status =
-      daemon_contexts == nullptr ? retained_contexts->ReleaseAll()
-                                 : CUDA_SUCCESS;
+      operation_contexts.ReleaseAll();
   const auto telemetry_end = Clock::now();
   const double primary_context_release_seconds =
       SecondsBetween(primary_context_release_start, telemetry_end);
@@ -643,6 +640,7 @@ DoCustomStorage(int pid, bool checkpoint, const std::string &device_map,
       "\"storage_directory_validation_seconds\":%.6f,"
       "\"cuda_init_seconds\":%.6f,\"cuda_device_count\":%d,"
       "\"device_enumeration_seconds\":%.6f,"
+      "\"target_context_discovery_seconds\":%.6f,"
       "\"primary_context_retain_seconds\":%.6f,"
       "\"manifest_validation_seconds\":%.6f,"
       "\"device_map_preparation_seconds\":%.6f,"
@@ -663,20 +661,15 @@ DoCustomStorage(int pid, bool checkpoint, const std::string &device_map,
       cuda_wait_service_seconds, fsync_service_seconds, cleanup_service_seconds,
       helper_main_to_telemetry_seconds, custom_storage_total_seconds,
       storage_directory_validation_seconds, cuda_init_seconds,
-      cuda_device_count, device_enumeration_seconds,
-      primary_context_retain_seconds, manifest_validation_seconds,
+      visible_cuda_device_count, device_enumeration_seconds,
+      target_context_discovery_seconds, primary_context_retain_seconds,
+      manifest_validation_seconds,
       device_map_preparation_seconds, cuda_process_api_seconds,
       metadata_job_construction_seconds, worker_orchestration_seconds,
       post_transfer_validation_seconds, cuda_operation_complete_seconds,
-      primary_context_release_seconds,
-      daemon_contexts == nullptr ? "completed" : "deferred",
-      daemon_contexts == nullptr
-          ? (primary_context_release_status == CUDA_SUCCESS ? "true" : "false")
-          : "null",
-      daemon_contexts == nullptr
-          ? static_cast<int>(primary_context_release_status)
-          : -1,
-      daemon_contexts == nullptr ? "operation" : "daemon");
+      primary_context_release_seconds, "completed",
+      primary_context_release_status == CUDA_SUCCESS ? "true" : "false",
+      static_cast<int>(primary_context_release_status), "operation");
   if (primary_context_release_status != CUDA_SUCCESS) {
     std::fprintf(
         stderr,
@@ -722,7 +715,7 @@ bool ReadCapturedFile(FILE *file, std::string *output) {
 }
 
 daemon_protocol::Response RunDaemonOperation(
-    const daemon_protocol::Request &request, RetainedContexts *contexts,
+    const daemon_protocol::Request &request,
     cuda_checkpoint_compat::OperationCompleteFn operation_complete) {
   daemon_protocol::Response response;
   FILE *output_file = std::tmpfile();
@@ -808,7 +801,7 @@ daemon_protocol::Response RunDaemonOperation(
         const CustomStorageResult result = DoCustomStorage(
             request.pid, request.action == daemon_protocol::Action::kCheckpoint,
             request.device_map, request.storage_dir, options, Clock::now(),
-            operation_complete, contexts, &request);
+            operation_complete, &request);
         response.cuda_status = result.status;
         if (result.operation.fatal()) {
           response.flags |= daemon_protocol::kResponseFatal;
@@ -956,9 +949,6 @@ void RunHealthServer(daemon_protocol::OwnedUnixSocket *socket, int shutdown_fd,
 }
 
 int RunDaemon(const std::string &socket_path, uint64_t max_operation_seconds) {
-  // Construct contexts first so signal ownership is stopped before contexts
-  // are released on every return path.
-  RetainedContexts contexts;
   daemon_protocol::ShutdownSignalOwner signal_owner;
   std::string setup_error;
   if (!signal_owner.Start(&setup_error)) {
@@ -988,9 +978,9 @@ int RunDaemon(const std::string &socket_path, uint64_t max_operation_seconds) {
   }
   int device_count = 0;
   double enumeration_seconds = 0.0;
-  double retain_seconds = 0.0;
-  status =
-      contexts.RetainAll(&device_count, &enumeration_seconds, &retain_seconds);
+  const auto enumeration_start = Clock::now();
+  status = cuDeviceGetCount(&device_count);
+  enumeration_seconds = SecondsSince(enumeration_start);
   if (status != CUDA_SUCCESS) {
     PrintCudaError(status);
     return 1;
@@ -1051,8 +1041,9 @@ int RunDaemon(const std::string &socket_path, uint64_t max_operation_seconds) {
           "\"cuda_device_count\":%d,\"device_enumeration_seconds\":%.6f,"
           "\"primary_context_retain_seconds\":%.6f,\"cuda_driver_version\":%"
           "d,"
-          "\"custom_storage_available\":%s}\n",
-          init_seconds, device_count, enumeration_seconds, retain_seconds,
+          "\"custom_storage_available\":%s,"
+          "\"context_lifecycle\":\"operation\"}\n",
+          init_seconds, device_count, enumeration_seconds, 0.0,
           driver_version, custom_storage_available ? "true" : "false");
       std::fflush(stdout);
 
@@ -1099,10 +1090,8 @@ int RunDaemon(const std::string &socket_path, uint64_t max_operation_seconds) {
           operation_health.Begin(request.action, request.pid);
           daemon_fatal = !daemon_protocol::ExecuteValidated(
               request, "/host/proc",
-              [&contexts,
-               operation_complete](const daemon_protocol::Request &validated) {
-                return RunDaemonOperation(validated, &contexts,
-                                          operation_complete);
+              [operation_complete](const daemon_protocol::Request &validated) {
+                return RunDaemonOperation(validated, operation_complete);
               },
               &response);
           operation_health.End();
@@ -1159,12 +1148,12 @@ int RunDaemon(const std::string &socket_path, uint64_t max_operation_seconds) {
   health_socket.Close();
   operation_socket.Close();
   const auto release_start = Clock::now();
-  status = contexts.ReleaseAll();
+  status = CUDA_SUCCESS;
   std::fprintf(
       stdout,
       "{\"event\":\"cuda_checkpoint_daemon_stopped\",\"schema_version\":1,"
       "\"primary_context_release_seconds\":%.6f,\"primary_context_release_"
-      "status\":%d}\n",
+      "status\":%d,\"context_lifecycle\":\"operation\"}\n",
       SecondsSince(release_start), static_cast<int>(status));
   return status == CUDA_SUCCESS && !daemon_fatal ? 0 : 1;
 }

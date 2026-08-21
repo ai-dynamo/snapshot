@@ -26,7 +26,8 @@ Totals contain subphases and must not be added to them. Worker service times
 are sums across workers and can overlap in wall time; the `timing_scope` field
 records these rules.
 
-The helper resolves CustomStorage capability once at daemon startup. Primary
-contexts are released after CUDA acknowledges a successful operation, and the
-payload records release success and status. A release failure is logged and
-reported but is not retried after the operation has been acknowledged.
+The helper resolves CustomStorage capability once at daemon startup. It retains
+primary contexts only for GPUs returned by the active CustomStorage operation
+and releases them before responding. The payload records release success and
+status. A release failure is logged and reported but is not retried after the
+operation has been acknowledged.
