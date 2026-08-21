@@ -7,10 +7,12 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
@@ -76,19 +78,35 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		return err
 	}
 	cudaJobFile := ""
+	cudaStorageMode := types.CUDAStorageModeLegacy
 	if len(state.CUDAHostPIDs) > 0 {
 		cudaJobFile, err = cuda.StageJobFile(state.RootFS, tmpDir, len(state.GPUUUIDs))
 		if err != nil {
 			return err
 		}
+		cudaStorageMode, err = cuda.SelectCUDAStorageMode(ctx)
+		if err != nil {
+			return fmt.Errorf("select CUDA storage mode before locking target: %w", err)
+		}
 	}
 
-	criuOpts, data, err := configureCheckpoint(log, state, req, cfg, tmpDir)
+	criuOpts, data, err := configureCheckpoint(log, state, req, cfg, tmpDir, cudaStorageMode)
 	if err != nil {
 		return err
 	}
 
-	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log)
+	captureTimings, err := captureCheckpoint(
+		ctx,
+		criuOpts,
+		&cfg.CRIU,
+		cfg.CUDACheckpoint.TransferSettings(),
+		data,
+		state,
+		tmpDir,
+		cudaJobFile,
+		cudaStorageMode,
+		log,
+	)
 	if err != nil {
 		return err
 	}
@@ -233,6 +251,7 @@ func configureCheckpoint(
 	req CheckpointRequest,
 	cfg *types.AgentConfig,
 	checkpointDir string,
+	cudaStorageMode string,
 ) (*criurpc.CriuOpts, *types.CheckpointManifest, error) {
 	criuOpts, err := criu.BuildDumpOptions(state, &cfg.CRIU, checkpointDir, log)
 	if err != nil {
@@ -246,7 +265,7 @@ func configureCheckpoint(
 		types.NewOverlayManifest(cfg.Overlay, state.UpperDir, state.OCISpec),
 	)
 	if len(state.CUDANSPIDs) > 0 {
-		m.CUDA = types.NewCUDAManifest(state.CUDANSPIDs, state.GPUUUIDs)
+		m.CUDA = types.NewCUDAManifest(state.CUDANSPIDs, state.GPUUUIDs, cudaStorageMode)
 	}
 
 	if err := types.WriteManifest(checkpointDir, m); err != nil {
@@ -256,14 +275,47 @@ func configureCheckpoint(
 	return criuOpts, m, nil
 }
 
-func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger) (*checkpointPhaseTimings, error) {
+func captureCheckpoint(
+	ctx context.Context,
+	criuOpts *criurpc.CriuOpts,
+	criuSettings *types.CRIUSettings,
+	cudaTransfer types.CUDATransferSettings,
+	data *types.CheckpointManifest,
+	state *types.CheckpointContainerSnapshot,
+	checkpointDir,
+	cudaJobFile,
+	cudaStorageMode string,
+	log logr.Logger,
+) (*checkpointPhaseTimings, error) {
 	timings := &checkpointPhaseTimings{}
 
 	// CUDA lock+checkpoint must happen before CRIU dump
 	if len(state.CUDAHostPIDs) > 0 {
-		cudaTimings, err := cuda.CheckpointProcessTree(ctx, state.CUDAHostPIDs, cudaJobFile, checkpointDir, log)
+		processes := make([]snapshotruntime.ProcessDetails, 0, len(state.CUDAHostPIDs))
+		for _, pid := range state.CUDAHostPIDs {
+			process, err := snapshotruntime.ReadProcessDetails(snapshotruntime.HostProcPath, pid)
+			if err != nil {
+				return nil, fmt.Errorf("capture CUDA process identity for PID %d: %w", pid, err)
+			}
+			processes = append(processes, process)
+		}
+		cudaTimings, err := cuda.LockAndCheckpointProcessTreeValidated(
+			ctx,
+			processes,
+			cudaJobFile,
+			cudaStorageMode,
+			checkpointDir,
+			cudaTransfer,
+			log,
+		)
 		if err != nil {
-			return nil, fmt.Errorf("CUDA checkpoint failed: %w", err)
+			checkpointErr := fmt.Errorf("CUDA checkpoint failed: %w", err)
+			cleanupErr := terminateCUDAProcessesAfterCheckpointFailure(
+				state.CUDAHostPIDs,
+				log,
+				snapshotruntime.SendSignalToPID,
+			)
+			return nil, errors.Join(checkpointErr, cleanupErr)
 		}
 		timings.CUDACheckpointDuration = cudaTimings.TotalDuration
 	}
@@ -289,4 +341,23 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 	}
 
 	return timings, nil
+}
+
+type signalProcessFunc func(logr.Logger, int, syscall.Signal, string) error
+
+func terminateCUDAProcessesAfterCheckpointFailure(
+	pids []int,
+	log logr.Logger,
+	signalProcess signalProcessFunc,
+) error {
+	var cleanupErr error
+	for _, pid := range pids {
+		if err := signalProcess(log, pid, syscall.SIGKILL, "CUDA checkpoint failed"); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
+	}
+	if cleanupErr != nil {
+		return fmt.Errorf("failed to terminate one or more CUDA processes after checkpoint failure: %w", cleanupErr)
+	}
+	return nil
 }

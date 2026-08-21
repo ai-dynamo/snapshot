@@ -8,14 +8,30 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
+	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"golang.org/x/sys/unix"
 )
 
 // JobFileEnv is the CUDA launch-job environment variable consumed by the driver.
 const JobFileEnv = "CUDA_CHECKPOINT_JOB_FILE"
+
+// HostJobFilePath returns the host-visible path to the fixed launch-job file
+// inside a restored CUDA process's mount namespace.
+func HostJobFilePath(hostPID int) (string, error) {
+	if hostPID <= 0 {
+		return "", fmt.Errorf("invalid host PID %d", hostPID)
+	}
+	return filepath.Join(
+		snapshotruntime.HostProcPath,
+		strconv.Itoa(hostPID),
+		"root",
+		strings.TrimPrefix(snapshotv1alpha1.CUDAJobFilePath, string(os.PathSeparator)),
+	), nil
+}
 
 // StageJobFile copies a launch-job file into the checkpoint artifact and
 // returns the host-visible path to the source pod's live job file. Capture

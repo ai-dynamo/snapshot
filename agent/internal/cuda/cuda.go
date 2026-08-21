@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -19,6 +20,9 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"k8s.io/client-go/kubernetes"
 	podresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
+
+	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
+	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
 
 const (
@@ -38,6 +42,54 @@ var gpuUUIDPattern = regexp.MustCompile(`^GPU-[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-f
 
 type CheckpointPhaseTimings struct {
 	TotalDuration time.Duration
+}
+
+// LockAndCheckpointProcessTreeValidated locks and checkpoints the identities
+// captured before any destructive CUDA operation and revalidates each identity
+// immediately before every driver call.
+func LockAndCheckpointProcessTreeValidated(
+	ctx context.Context,
+	processes []snapshotruntime.ProcessDetails,
+	jobFile,
+	storageMode,
+	checkpointDir string,
+	transferSettings types.CUDATransferSettings,
+	log logr.Logger,
+) (CheckpointPhaseTimings, error) {
+	pids, identities, err := validatedProcessIdentities(processes)
+	if err != nil {
+		return CheckpointPhaseTimings{}, err
+	}
+	return lockAndCheckpointProcessTree(
+		ctx,
+		pids,
+		jobFile,
+		storageMode,
+		checkpointDir,
+		transferSettings,
+		identityValidatingRunner{
+			runner:     commandHelperActionRunner{},
+			procRoot:   snapshotruntime.HostProcPath,
+			identities: identities,
+		},
+		log,
+	)
+}
+
+func validatedProcessIdentities(processes []snapshotruntime.ProcessDetails) ([]int, map[int]snapshotruntime.ProcessDetails, error) {
+	pids := make([]int, 0, len(processes))
+	identities := make(map[int]snapshotruntime.ProcessDetails, len(processes))
+	for _, process := range processes {
+		if process.OutermostPID <= 0 || process.StartTimeTicks == 0 || process.Cgroup == "" {
+			return nil, nil, fmt.Errorf("invalid host process identity")
+		}
+		if _, exists := identities[process.OutermostPID]; exists {
+			return nil, nil, fmt.Errorf("duplicate host PID %d", process.OutermostPID)
+		}
+		pids = append(pids, process.OutermostPID)
+		identities[process.OutermostPID] = process
+	}
+	return pids, identities, nil
 }
 
 type RestorePhaseTimings struct {
@@ -328,22 +380,45 @@ func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string,
 	return strings.Join(pairs, ","), nil
 }
 
-// CheckpointProcessTree locks and checkpoints CUDA state for all given PIDs,
-// then persists the launch-job state needed to restore them.
-// On failure, the caller is expected to fail the operation and terminate the workload.
-func CheckpointProcessTree(ctx context.Context, cudaPIDs []int, jobFile, checkpointDir string, log logr.Logger) (CheckpointPhaseTimings, error) {
+func validateTransferSettings(transferSettings types.CUDATransferSettings) (types.CUDATransferSettings, error) {
+	transferSettings = transferSettings.WithDefaults()
+	if err := transferSettings.Validate(); err != nil {
+		return types.CUDATransferSettings{}, fmt.Errorf("invalid CUDA transfer settings: %w", err)
+	}
+	return transferSettings, nil
+}
+
+func lockAndCheckpointProcessTree(
+	ctx context.Context,
+	cudaPIDs []int,
+	jobFile,
+	storageMode,
+	checkpointDir string,
+	transferSettings types.CUDATransferSettings,
+	runner helperActionRunner,
+	log logr.Logger,
+) (CheckpointPhaseTimings, error) {
 	var timings CheckpointPhaseTimings
+	var err error
+	transferSettings, err = validateTransferSettings(transferSettings)
+	if err != nil {
+		return timings, err
+	}
 
 	start := time.Now()
 	for _, pid := range cudaPIDs {
-		if err := lockWithJobFile(ctx, pid, jobFile, log); err != nil {
+		if err := runner.run(ctx, helperAction{PID: pid, Action: actionLock, StorageMode: storageMode, JobFile: jobFile, Transfer: transferSettings}, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
 	}
 
-	for _, pid := range cudaPIDs {
-		if err := checkpointWithJobFile(ctx, pid, jobFile, log); err != nil {
+	for index, pid := range cudaPIDs {
+		processDir := ""
+		if storageMode == types.CUDAStorageModePOSIX {
+			processDir = customStorageProcessDir(checkpointDir, index)
+		}
+		if err := runner.run(ctx, helperAction{PID: pid, Action: actionCheckpoint, StorageMode: storageMode, StorageDir: processDir, JobFile: jobFile, Transfer: transferSettings}, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
@@ -357,28 +432,76 @@ func CheckpointProcessTree(ctx context.Context, cudaPIDs []int, jobFile, checkpo
 	return timings, nil
 }
 
-// RestoreAndUnlockProcessTree restores and unlocks CUDA state for the given PIDs.
-// helperBinaryPath must be the absolute path to cuda-checkpoint-helper: DefaultHelperBinaryPath
-// on the agent, or filepath.Join(bundleDir, HelperBinaryName) inside the placeholder namespace.
-func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap, helperBinaryPath string, log logr.Logger) (RestorePhaseTimings, error) {
+func customStorageProcessDir(checkpointDir string, processIndex int) string {
+	return filepath.Join(checkpointDir, "cuda-custom-storage", fmt.Sprintf("process-%04d", processIndex))
+}
+
+// RestoreAndUnlockProcessTreeValidated restores and unlocks identities resolved
+// after CRIU and revalidates them immediately before every CUDA driver call.
+func RestoreAndUnlockProcessTreeValidated(
+	ctx context.Context,
+	processes []snapshotruntime.ProcessDetails,
+	deviceMap,
+	storageMode,
+	checkpointDir,
+	jobFile string,
+	transferSettings types.CUDATransferSettings,
+	log logr.Logger,
+) (RestorePhaseTimings, error) {
+	pids, identities, err := validatedProcessIdentities(processes)
+	if err != nil {
+		return RestorePhaseTimings{}, err
+	}
+	return restoreAndUnlockProcessTree(
+		ctx,
+		pids,
+		deviceMap,
+		storageMode,
+		checkpointDir,
+		jobFile,
+		transferSettings,
+		identityValidatingRunner{
+			runner:     commandHelperActionRunner{},
+			procRoot:   snapshotruntime.HostProcPath,
+			identities: identities,
+		},
+		log,
+	)
+}
+
+func restoreAndUnlockProcessTree(
+	ctx context.Context,
+	cudaPIDs []int,
+	deviceMap,
+	storageMode,
+	checkpointDir,
+	jobFile string,
+	transferSettings types.CUDATransferSettings,
+	runner helperActionRunner,
+	log logr.Logger,
+) (RestorePhaseTimings, error) {
 	var timings RestorePhaseTimings
+	var err error
+	transferSettings, err = validateTransferSettings(transferSettings)
+	if err != nil {
+		return timings, err
+	}
 
 	start := time.Now()
-	for _, pid := range cudaPIDs {
-		if err := restoreProcess(ctx, pid, deviceMap, helperBinaryPath, log); err != nil {
+	for index, pid := range cudaPIDs {
+		processDir := ""
+		if storageMode == types.CUDAStorageModePOSIX {
+			processDir = customStorageProcessDir(checkpointDir, index)
+		}
+		if err := runner.run(ctx, helperAction{PID: pid, Action: actionRestore, DeviceMap: deviceMap, StorageMode: storageMode, StorageDir: processDir, JobFile: jobFile, Transfer: transferSettings}, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
 	}
 
 	for _, pid := range cudaPIDs {
-		if err := unlock(ctx, pid, helperBinaryPath, log); err != nil {
+		if err := runner.run(ctx, helperAction{PID: pid, Action: actionUnlock, StorageMode: storageMode, JobFile: jobFile, Transfer: transferSettings}, log); err != nil {
 			timings.TotalDuration = time.Since(start)
-			state, stateErr := getState(ctx, pid, helperBinaryPath)
-			if stateErr == nil && state == "running" {
-				log.Info("cuda-checkpoint-helper unlock returned error but process is already running", "pid", pid)
-				continue
-			}
 			return timings, err
 		}
 	}

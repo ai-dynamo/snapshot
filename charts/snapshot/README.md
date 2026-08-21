@@ -134,6 +134,9 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `storage.pvc.size` | Requested PVC size | `1Ti` |
 | `storage.pvc.storageClass` | Storage class name | `""` |
 | `storage.pvc.basePath` | Fixed checkpoint mount path enforced by the privileged helper | `/checkpoints` |
+| `config.cudaCheckpoint.transferBufferCount` | Pinned CustomStorage pipeline slots per CUDA device (1-8) | `1` |
+| `config.cudaCheckpoint.transferChunkBytes` | Bytes per pinned slot (1-256 MiB, 4096-byte aligned) | `67108864` |
+| `config.cudaCheckpoint.daemon.maxOperationSeconds` | Watchdog deadline for one CUDA helper operation | `21600` |
 | `seccomp.deploy` | Deploy the CRIU seccomp profile ConfigMap and init container. Use this field name; `seccomp.enabled` is not a chart value | `true` |
 | `runtime.type` | CRI backend: `containerd` or `crio` | `containerd` |
 | `runtime.socketPath` | CRI socket (empty = default for `runtime.type`) | `""` |
@@ -144,6 +147,11 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 
 Reserved `s3` and `oci` values remain chart-owned placeholders for future
 snapshot backends, but only `pvc` is implemented today.
+
+`transferBufferCount * transferChunkBytes` must not exceed 1 GiB
+(1073741824 bytes) of pinned memory per CUDA device. Increase the CUDA helper's
+memory limit when increasing either transfer setting or the number of GPUs used
+by one operation.
 
 See [values.yaml](./values.yaml) for the full configuration surface.
 

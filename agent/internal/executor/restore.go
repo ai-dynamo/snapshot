@@ -51,6 +51,11 @@ type restoreMount struct {
 	point  nsmount.MountPoint
 }
 
+type customStoragePrefetchOutcome struct {
+	result cuda.CustomStoragePrefetchResult
+	err    error
+}
+
 func cleanupRestoreMounts(ctx context.Context, mounts []restoreMount) error {
 	var cleanupErr error
 	cleanupCtx := context.WithoutCancel(ctx)
@@ -74,7 +79,10 @@ type RestoreRequest struct {
 	TargetPodIP     string
 	ContainerName   string
 	Clientset       kubernetes.Interface
+	CUDATransfer    types.CUDATransferSettings
 }
+
+var validateCUDAStorageMode = cuda.ValidateCUDAStorageMode
 
 // Restore performs external restore for the given request.
 // Returns the namespace-relative PID of the restored process.
@@ -149,12 +157,97 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		point:  artifactMount,
 	})
 
+	var prefetch <-chan customStoragePrefetchOutcome
+	var cancelPrefetch context.CancelFunc
+	if snap.CUDAStorageMode == types.CUDAStorageModePOSIX {
+		prefetchCtx, cancel := context.WithCancel(ctx)
+		cancelPrefetch = cancel
+		outcomes := make(chan customStoragePrefetchOutcome, 1)
+		prefetch = outcomes
+		go func() {
+			result, err := cuda.PrefetchCustomStorageArtifacts(prefetchCtx, artifactPath)
+			outcomes <- customStoragePrefetchOutcome{result: result, err: err}
+		}()
+	}
+	awaitPrefetch := func(cancel bool) (cuda.CustomStoragePrefetchResult, error) {
+		if prefetch == nil {
+			return cuda.CustomStoragePrefetchResult{}, nil
+		}
+		if cancel {
+			cancelPrefetch()
+		}
+		outcome := <-prefetch
+		prefetch = nil
+		cancelPrefetch()
+		return outcome.result, outcome.err
+	}
+	defer func() {
+		if prefetch != nil {
+			_, _ = awaitPrefetch(true)
+		}
+	}()
+
 	result, err := execNSRestore(ctx, log, req, snap, bundleMount, nsmount.CheckpointDst)
 	if err != nil {
+		_, _ = awaitPrefetch(true)
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
+	}
+	prefetchResult, err := awaitPrefetch(false)
+	if err != nil {
+		// Prefetch only overlaps durable-storage reads with CRIU. The CUDA
+		// helper performs the authoritative read and validation, so an
+		// optimization failure must not strand a process after CRIU restore.
+		log.Error(err, "CUDA CustomStorage artifact prefetch failed; continuing with authoritative restore")
+	} else if prefetchResult.Files > 0 {
+		log.Info("CUDA CustomStorage artifact prefetch completed",
+			"files", prefetchResult.Files,
+			"bytes", prefetchResult.Bytes,
+			"service_duration", prefetchResult.Duration,
+			"overlapped_with_criu", true,
+		)
 	}
 	if result.CleanupError != nil {
 		cleanupErr = errors.Join(cleanupErr, result.CleanupError)
+	}
+	if len(result.DeferredCUDAProcesses) > 0 {
+		processTable, err := snapshotruntime.ReadProcessTable(snapshotruntime.HostProcPath)
+		if err != nil {
+			return 0, fmt.Errorf("snapshot restored host process table: %w", err)
+		}
+		hostProcesses := make([]snapshotruntime.ProcessDetails, 0, len(result.DeferredCUDAProcesses))
+		for _, namespaceProcess := range result.DeferredCUDAProcesses {
+			process, err := snapshotruntime.ResolveHostProcessIdentityFromTable(processTable, namespaceProcess)
+			if err != nil {
+				return 0, fmt.Errorf("resolve restored CUDA host process identity: %w", err)
+			}
+			if err := snapshotruntime.ValidateProcessIdentity(snapshotruntime.HostProcPath, process); err != nil {
+				return 0, fmt.Errorf("validate restored CUDA process identity: %w", err)
+			}
+			hostProcesses = append(hostProcesses, process)
+		}
+		cudaJobFile := ""
+		if stagedJobFile, err := cuda.JobFileFromCheckpoint(artifactPath); err != nil {
+			return 0, err
+		} else if stagedJobFile != "" {
+			cudaJobFile, err = cuda.HostJobFilePath(hostProcesses[0].OutermostPID)
+			if err != nil {
+				return 0, err
+			}
+		}
+		cudaTimings, err := cuda.RestoreAndUnlockProcessTreeValidated(
+			ctx,
+			hostProcesses,
+			snap.CUDADeviceMap,
+			snap.CUDAStorageMode,
+			artifactPath,
+			cudaJobFile,
+			req.CUDATransfer,
+			log,
+		)
+		if err != nil {
+			return 0, fmt.Errorf("host CUDA restore failed: %w", err)
+		}
+		result.CUDARestoreDuration += cudaTimings.TotalDuration
 	}
 	if err := validateRestoredProcess(snap.TargetRoot, result.RestoredPID, log); err != nil {
 		return 0, err
@@ -227,6 +320,17 @@ func inspectRestore(
 	req RestoreRequest,
 	manifest *types.CheckpointManifest,
 ) (*types.RestoreContainerSnapshot, time.Duration, error) {
+	cudaStorageMode := types.CUDAStorageModeLegacy
+	if !manifest.CUDA.IsEmpty() {
+		var err error
+		cudaStorageMode, err = manifest.CUDA.EffectiveStorageMode()
+		if err != nil {
+			return nil, 0, fmt.Errorf("invalid CUDA artifact metadata: %w", err)
+		}
+		if err := validateCUDAStorageMode(ctx, cudaStorageMode); err != nil {
+			return nil, 0, fmt.Errorf("CUDA storage mode %q is unavailable before restore: %w", cudaStorageMode, err)
+		}
+	}
 	containerName := req.ContainerName
 	if containerName == "" {
 		containerName = "main"
@@ -288,10 +392,11 @@ func inspectRestore(
 	}
 
 	return &types.RestoreContainerSnapshot{
-		PlaceholderPID: placeholderPID,
-		TargetRoot:     fmt.Sprintf("%s/%d/root", snapshotruntime.HostProcPath, placeholderPID),
-		CgroupRoot:     cgroupRoot,
-		CUDADeviceMap:  cudaDeviceMap,
+		PlaceholderPID:  placeholderPID,
+		TargetRoot:      fmt.Sprintf("%s/%d/root", snapshotruntime.HostProcPath, placeholderPID),
+		CgroupRoot:      cgroupRoot,
+		CUDADeviceMap:   cudaDeviceMap,
+		CUDAStorageMode: cudaStorageMode,
 	}, gpuDeviceMapDuration, nil
 }
 

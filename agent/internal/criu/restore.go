@@ -40,10 +40,10 @@ func ExecuteRestore(
 	settings := m.CRIUDump.CRIU
 	var prepare, restore time.Duration
 
-	// Return the FD closers as cleanup() rather than deferring them here, so the
-	// caller can run them after cuda unlock instead of between the CRIU restore
-	// and unlock. That keeps the window where the restored process runs with CUDA
-	// still locked as short as possible. cleanup is called on the error paths below.
+	// Return the FD closers as cleanup() rather than deferring them here so the
+	// caller controls their lifetime. The current nsrestore path releases these
+	// CRIU-only resources before returning the restored process identities to the
+	// host agent for deferred CUDA restore. cleanup is called on error paths below.
 	var openFiles, inheritedFiles []*os.File
 	scratchDir, removeScratch, err := restoreScratchDir(settings.WorkDir)
 	if err != nil {
