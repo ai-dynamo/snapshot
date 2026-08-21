@@ -199,7 +199,7 @@ func withHealthServer(t *testing.T, flags uint32) {
 	}()
 }
 
-func TestSelectCheckpointBackendFromCapability(t *testing.T) {
+func TestSelectCUDAStorageModeFromCapability(t *testing.T) {
 	for _, test := range []struct {
 		name  string
 		flags uint32
@@ -210,9 +210,9 @@ func TestSelectCheckpointBackendFromCapability(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			withHealthServer(t, test.flags)
-			got, err := SelectCheckpointBackend(context.Background())
+			got, err := SelectCUDAStorageMode(context.Background())
 			if err != nil || got != test.want {
-				t.Fatalf("SelectCheckpointBackend() = %q, %v; want %q", got, err, test.want)
+				t.Fatalf("SelectCUDAStorageMode() = %q, %v; want %q", got, err, test.want)
 			}
 			manifest := types.NewCUDAManifest([]int{42}, []string{"GPU-aaa"}, got)
 			if test.want == types.CUDAStorageModePOSIX && manifest.StorageMode != types.CUDAStorageModePOSIX {
@@ -225,14 +225,14 @@ func TestSelectCheckpointBackendFromCapability(t *testing.T) {
 	}
 }
 
-func TestValidateRestoreBackendObeysManifest(t *testing.T) {
+func TestValidateCUDAStorageModeObeysManifest(t *testing.T) {
 	withHealthServer(t, daemonCapabilityCustomStorage)
-	if err := ValidateRestoreBackend(context.Background(), types.CUDAStorageModeLegacy); err != nil {
+	if err := ValidateCUDAStorageMode(context.Background(), types.CUDAStorageModeLegacy); err != nil {
 		t.Fatalf("legacy restore on capable daemon failed: %v", err)
 	}
 
 	withHealthServer(t, 0)
-	err := ValidateRestoreBackend(context.Background(), types.CUDAStorageModePOSIX)
+	err := ValidateCUDAStorageMode(context.Background(), types.CUDAStorageModePOSIX)
 	if err == nil || !strings.Contains(err.Error(), "requires daemon CustomStorage capability") {
 		t.Fatalf("POSIX restore error = %v, want capability rejection", err)
 	}

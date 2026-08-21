@@ -82,9 +82,9 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		if err != nil {
 			return err
 		}
-		cudaStorageMode, err = cuda.SelectCheckpointBackend(ctx)
+		cudaStorageMode, err = cuda.SelectCUDAStorageMode(ctx)
 		if err != nil {
-			return fmt.Errorf("select CUDA checkpoint backend before locking target: %w", err)
+			return fmt.Errorf("select CUDA storage mode before locking target: %w", err)
 		}
 	}
 

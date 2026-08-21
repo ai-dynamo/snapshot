@@ -82,7 +82,7 @@ type RestoreRequest struct {
 	CUDATransfer    types.CUDATransferSettings
 }
 
-var validateCUDARestoreBackend = cuda.ValidateRestoreBackend
+var validateCUDAStorageMode = cuda.ValidateCUDAStorageMode
 
 // Restore performs external restore for the given request.
 // Returns the namespace-relative PID of the restored process.
@@ -323,8 +323,8 @@ func inspectRestore(
 		if err != nil {
 			return nil, 0, fmt.Errorf("invalid CUDA artifact metadata: %w", err)
 		}
-		if err := validateCUDARestoreBackend(ctx, cudaStorageMode); err != nil {
-			return nil, 0, fmt.Errorf("CUDA artifact backend %q is unavailable before restore: %w", cudaStorageMode, err)
+		if err := validateCUDAStorageMode(ctx, cudaStorageMode); err != nil {
+			return nil, 0, fmt.Errorf("CUDA storage mode %q is unavailable before restore: %w", cudaStorageMode, err)
 		}
 	}
 	containerName := req.ContainerName

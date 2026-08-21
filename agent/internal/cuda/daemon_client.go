@@ -81,7 +81,7 @@ func daemonRequest(
 	case types.CUDAStorageModePOSIX:
 		backend = 2
 	default:
-		return nil, fmt.Errorf("unsupported CUDA checkpoint backend %q", storageMode)
+		return nil, fmt.Errorf("unsupported CUDA storage mode %q", storageMode)
 	}
 	if health {
 		pid = 0
@@ -283,9 +283,9 @@ func daemonCapabilities(ctx context.Context) (uint32, error) {
 	return flags, nil
 }
 
-// SelectCheckpointBackend chooses one backend for an entire checkpoint before
-// any CUDA process is locked.
-func SelectCheckpointBackend(ctx context.Context) (string, error) {
+// SelectCUDAStorageMode chooses one CUDA artifact storage mode for an entire
+// checkpoint before any CUDA process is locked.
+func SelectCUDAStorageMode(ctx context.Context) (string, error) {
 	flags, err := daemonCapabilities(ctx)
 	if err != nil {
 		return "", err
@@ -296,14 +296,14 @@ func SelectCheckpointBackend(ctx context.Context) (string, error) {
 	return types.CUDAStorageModeLegacy, nil
 }
 
-// ValidateRestoreBackend rejects unsupported artifacts before rootfs or CRIU
+// ValidateCUDAStorageMode rejects unsupported artifacts before rootfs or CRIU
 // restore changes the placeholder.
-func ValidateRestoreBackend(ctx context.Context, backend string) error {
+func ValidateCUDAStorageMode(ctx context.Context, storageMode string) error {
 	flags, err := daemonCapabilities(ctx)
 	if err != nil {
 		return err
 	}
-	switch backend {
+	switch storageMode {
 	case types.CUDAStorageModeLegacy:
 		return nil
 	case types.CUDAStorageModePOSIX:
@@ -312,7 +312,7 @@ func ValidateRestoreBackend(ctx context.Context, backend string) error {
 		}
 		return nil
 	default:
-		return fmt.Errorf("unsupported CUDA checkpoint backend %q", backend)
+		return fmt.Errorf("unsupported CUDA storage mode %q", storageMode)
 	}
 }
 
