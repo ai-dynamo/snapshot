@@ -32,6 +32,25 @@ jobs:
             go.work.sum
       - run: make test
 
+  # Cluster-free checks of the e2e workload scripts. The SnapshotJob
+  # completion gate depends on the agent/workload sentinel handshake, which no
+  # Go unit test can cover (they hand-write Job.Complete against a fake
+  # client). Running here means a broken handshake fails in seconds on every
+  # push instead of surfacing as a 10-minute timeout in the GPU e2e job.
+  workload-scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Python tooling
+        timeout-minutes: 3
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.10.11"
+          checksum: "5a360b0de092ddf4131f5313d0411b48c4e95e8107e40c3f8f2e9fcb636b3583"
+          enable-cache: "false"
+          download-from-astral-mirror: "false"
+      - run: uv run --locked --project e2e pytest e2e/tests/test_workload_scripts.py -m workload -vv
+
   build:
     runs-on: ubuntu-latest
     steps:

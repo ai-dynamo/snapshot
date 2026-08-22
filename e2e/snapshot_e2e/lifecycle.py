@@ -14,6 +14,7 @@ from kubernetes.client import ApiException
 
 from snapshot_e2e import k8s
 from snapshot_e2e.workloads import CONTAINER
+from snapshot_e2e.workloads import CONTROL_DIR
 from snapshot_e2e.workloads import FILE_TOKEN
 from snapshot_e2e.workloads import OBSERVATIONS
 from snapshot_e2e.workloads import RESTORE_DONE
@@ -28,6 +29,7 @@ GROUP = "nvidia.com"
 VERSION = "v1alpha1"
 PODSNAPSHOTS = "podsnapshots"
 PODSNAPSHOTCONTENTS = "podsnapshotcontents"
+SNAPSHOTJOBS = "snapshotjobs"
 PROGRESS_INTERVAL_SECONDS = 30
 TERMINAL_POD_PHASES = {"Failed", "Succeeded"}
 AGENT_CHECKPOINT_DIR = "/checkpoints"
@@ -81,6 +83,50 @@ def create_podsnapshot(
         PODSNAPSHOTS,
         body,
     )
+
+
+def create_snapshotjob(
+    namespace: str,
+    name: str,
+    pod_template: dict[str, Any],
+    *,
+    target_containers: list[str] | None = None,
+    active_deadline_seconds: int | None = None,
+) -> dict[str, Any]:
+    spec: dict[str, Any] = {
+        "podTemplate": pod_template,
+        "podSnapshotTemplate": {"targetContainers": target_containers or [CONTAINER]},
+    }
+    if active_deadline_seconds is not None:
+        spec["activeDeadlineSeconds"] = active_deadline_seconds
+    body = {
+        "apiVersion": f"{GROUP}/{VERSION}",
+        "kind": "SnapshotJob",
+        "metadata": {"name": name, "namespace": namespace},
+        "spec": spec,
+    }
+    return client.CustomObjectsApi().create_namespaced_custom_object(
+        GROUP,
+        VERSION,
+        namespace,
+        SNAPSHOTJOBS,
+        body,
+    )
+
+
+def wait_for_job_source_pod(namespace: str, job_name: str, timeout: int = 300) -> client.V1Pod:
+    """Waits for the batch/v1 Job's pod to exist and returns it, by name unknown
+    in advance (the Job controller appends a random suffix to job_name).
+    """
+
+    def found() -> client.V1Pod | None:
+        pods = k8s.list_job_pods(namespace, job_name)
+        return pods[0] if pods else None
+
+    def detail() -> str:
+        return f"pods={[p.metadata.name for p in k8s.list_job_pods(namespace, job_name)]}"
+
+    return wait_for(f"pod for Job {namespace}/{job_name}", found, timeout, detail=detail)
 
 
 def wait_for_pod_ready(namespace: str, name: str, timeout: int = 600) -> client.V1Pod:
@@ -493,6 +539,165 @@ def cleanup(config: k8s.E2EConfig, run: TestRun) -> None:
             except ApiException as exc:
                 if exc.status != 404:
                     raise
+
+
+def cleanup_snapshotjob(config: k8s.E2EConfig, run: TestRun) -> None:
+    """Cleanup for a SnapshotJob-driven test run.
+
+    Deleting the SnapshotJob cascades to its source Job (controller
+    ownerReference) and that Job's pod. The PodSnapshot it produces
+    deliberately carries no ownerReference (artifacts must outlive the
+    SnapshotJob), so it — and its bound PodSnapshotContent — need the same
+    explicit cleanup as the plain PodSnapshot flow. The SnapshotJob's own name
+    and its produced PodSnapshot's name are both run.checkpoint_id: buildSourceJob
+    passes CheckpointID: sj.Name, and buildPodSnapshot names the PodSnapshot
+    after the SnapshotJob.
+    """
+    api = client.CustomObjectsApi()
+    if k8s.delete_pod(config.namespace, run.restore_pod):
+        try:
+            wait_for_pod_deleted(config.namespace, run.restore_pod)
+        except AssertionError as exc:
+            print(f"cleanup warning: {exc}")
+
+    try:
+        api.delete_namespaced_custom_object(
+            GROUP,
+            VERSION,
+            config.namespace,
+            SNAPSHOTJOBS,
+            run.checkpoint_id,
+        )
+    except ApiException as exc:
+        if exc.status != 404:
+            raise
+
+    try:
+        api.delete_namespaced_custom_object(
+            GROUP,
+            VERSION,
+            config.namespace,
+            PODSNAPSHOTS,
+            run.checkpoint_id,
+        )
+    except ApiException as exc:
+        if exc.status != 404:
+            raise
+
+    contents = api.list_cluster_custom_object(GROUP, VERSION, PODSNAPSHOTCONTENTS)
+    for item in contents.get("items", []):
+        ref = item.get("spec", {}).get("snapshotRef", {})
+        if ref.get("namespace") == config.namespace and ref.get("name") == run.checkpoint_id:
+            try:
+                api.delete_cluster_custom_object(
+                    GROUP,
+                    VERSION,
+                    PODSNAPSHOTCONTENTS,
+                    item["metadata"]["name"],
+                )
+            except ApiException as exc:
+                if exc.status != 404:
+                    raise
+
+
+def debug_dump_snapshotjob(config: k8s.E2EConfig, run: TestRun) -> None:
+    print("\n--- snapshotjob e2e debug ---")
+    print(f"namespace={config.namespace} test={run.suffix}")
+    core = client.CoreV1Api()
+    # Union of both selectors: the e2e label comes from the caller's pod
+    # template, the job-name label from the Job controller. Relying on the
+    # e2e label alone has already produced dumps with no pods at all, which
+    # hides the single most useful signal (the source container's log).
+    pods = {
+        pod.metadata.name: pod
+        for pod in core.list_namespaced_pod(
+            config.namespace, label_selector=f"snapshot-e2e-test={run.suffix}"
+        ).items
+    }
+    for pod in k8s.list_job_pods(config.namespace, run.checkpoint_id):
+        pods.setdefault(pod.metadata.name, pod)
+    if not pods:
+        print("no pods matched either the e2e label or the job-name label")
+    for name, pod in pods.items():
+        print(f"pod {name} phase={pod.status.phase} node={pod.spec.node_name}")
+        print(f"annotations={pod.metadata.annotations or {}}")
+        print(f"labels={pod.metadata.labels or {}}")
+        print(f"deletionTimestamp={pod.metadata.deletion_timestamp}")
+        # phase alone cannot distinguish "target exited 0, Job should be
+        # complete" from "target still running" — the exit codes can.
+        for cs in (pod.status.container_statuses or []):
+            print(f"  container {cs.name} ready={cs.ready} state={cs.state}")
+        print(f"control dir: {snapshot_control_listing(config.namespace, name)}")
+        print(k8s.pod_logs(config.namespace, name, tail_lines=80))
+    # The source Job's own status is what the completion gate reads.
+    job = k8s.read_job(config.namespace, run.checkpoint_id)
+    if job is None:
+        print(f"source Job {run.checkpoint_id} not found")
+    else:
+        print(
+            f"source Job {job.metadata.name} active={job.status.active} "
+            f"succeeded={job.status.succeeded} failed={job.status.failed} "
+            f"startTime={job.status.start_time} conditions={job.status.conditions}"
+        )
+    api = client.CustomObjectsApi()
+    try:
+        sj = api.get_namespaced_custom_object(
+            GROUP, VERSION, config.namespace, SNAPSHOTJOBS, run.checkpoint_id
+        )
+        print(f"SnapshotJob status={sj.get('status', {})}")
+    except ApiException as exc:
+        if exc.status != 404:
+            print(f"SnapshotJob debug unavailable: {k8s.api_error_detail(exc)}")
+    print_custom_objects_named(config, run.checkpoint_id)
+    print_snapshot_controller_logs(config)
+    events = core.list_namespaced_event(config.namespace).items
+    # Job-generated pods are named <checkpoint_id>-<suffix>, so an exact-name
+    # filter silently drops every pod-level event (container termination in
+    # particular) and keeps only the Job's own.
+    for event in events[-40:]:
+        involved = event.involved_object
+        if not involved or not involved.name:
+            continue
+        if involved.name.startswith(run.checkpoint_id) or involved.name in {
+            run.source_pod,
+            run.restore_pod,
+        }:
+            print(f"event {involved.kind}/{involved.name} {event.reason}: {event.message}")
+    print("--- end debug ---\n")
+
+
+def snapshot_control_listing(namespace: str, pod: str) -> str:
+    """Lists the control volume, best-effort.
+
+    Whether the agent's snapshot-complete sentinel actually landed where the
+    workload polls for it is the hinge for the whole completion gate: no
+    sentinel means the workload never exits, so the Job never completes.
+    """
+    try:
+        return k8s.exec_command(namespace, pod, f"ls -la {CONTROL_DIR} 2>&1").strip()
+    except Exception as exc:  # noqa: BLE001 - debug helper must never mask the real failure
+        return f"<unavailable: {type(exc).__name__}: {exc}>"
+
+
+def print_custom_objects_named(config: k8s.E2EConfig, snapshot_name: str) -> None:
+    api = client.CustomObjectsApi()
+    try:
+        snap = api.get_namespaced_custom_object(
+            GROUP, VERSION, config.namespace, PODSNAPSHOTS, snapshot_name
+        )
+        print(f"PodSnapshot conditions={snap.get('status', {}).get('conditions', [])}")
+        content_name = snap.get("status", {}).get("boundSnapshotContentName")
+        if content_name:
+            content = api.get_cluster_custom_object(
+                GROUP, VERSION, PODSNAPSHOTCONTENTS, content_name
+            )
+            print(
+                "PodSnapshotContent "
+                f"{content_name} conditions={content.get('status', {}).get('conditions', [])}"
+            )
+    except ApiException as exc:
+        if exc.status != 404:
+            print(f"Snapshot CR debug unavailable: {k8s.api_error_detail(exc)}")
 
 
 def wait_for(

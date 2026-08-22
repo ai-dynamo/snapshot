@@ -15,6 +15,7 @@ from snapshot_e2e import k8s
 
 CONTAINER = "main"
 CONTROL_DIR = "/snapshot-control"
+CHECKPOINT_DIR = "/checkpoints"
 SOURCE_READY = f"{CONTROL_DIR}/ready-for-snapshot"
 RESTORE_DONE = f"{CONTROL_DIR}/restore-complete"
 RESTORE_INITIAL_TOKEN = f"{CONTROL_DIR}/initial-restore-token"
@@ -74,7 +75,10 @@ def source_pod(
         "name": run.source_pod,
         "namespace": config.namespace,
         "labels": labels,
-        "annotations": {},
+        "annotations": {
+            "nvidia.com/snapshot-storage-type": "pvc",
+            "nvidia.com/snapshot-storage-base-path": CHECKPOINT_DIR,
+        },
     }
     if include_target_annotation:
         metadata["annotations"]["nvidia.com/snapshot-target-containers"] = CONTAINER
@@ -88,6 +92,43 @@ def source_pod(
         "metadata": metadata,
         "spec": spec,
     }
+
+
+def snapshotjob_pod_template(
+    *,
+    config: k8s.E2EConfig,
+    run: TestRun,
+    gpu: bool,
+) -> dict[str, Any]:
+    # No snapshot-* labels/annotations here: unlike source_pod (the plain
+    # PodSnapshot flow, which the test must annotate itself), a SnapshotJob's
+    # controller derives everything — the checkpoint ID, the target container,
+    # storage — from spec.podTemplate and spec.podSnapshotTemplate. That is the
+    # feature's whole point, so this template is what a real caller would write.
+    spec = base_pod_spec(
+        config,
+        run,
+        snapshotjob_source_command(run.image, gpu),
+        gpu,
+        control_volume=False,
+    )
+    spec["containers"][0]["env"] = [
+        {"name": SOURCE_TOKEN_ENV, "value": run.source_token},
+    ]
+    return {"metadata": {"labels": {**run.labels}}, "spec": spec}
+
+
+def snapshotjob_hang_pod_template(
+    *,
+    config: k8s.E2EConfig,
+    run: TestRun,
+) -> dict[str, Any]:
+    # Never writes ready-for-snapshot, so the SnapshotJob's Running condition
+    # never flips True and the source Job runs to its activeDeadlineSeconds —
+    # the negative DeadlineExceeded path.
+    command = 'set -euo pipefail\necho "[snapshotjob-hang] never signaling ready"\nsleep infinity\n'
+    spec = base_pod_spec(config, run, command, gpu=False, control_volume=False)
+    return {"metadata": {"labels": {**run.labels}}, "spec": spec}
 
 
 def restore_pod(
@@ -130,6 +171,8 @@ def restore_pod(
             "annotations": {
                 "nvidia.com/snapshot-target-containers": CONTAINER,
                 "nvidia.com/snapshot-artifact-version": "1",
+                "nvidia.com/snapshot-storage-type": "pvc",
+                "nvidia.com/snapshot-storage-base-path": CHECKPOINT_DIR,
             },
         },
         "spec": spec,
@@ -141,16 +184,31 @@ def base_pod_spec(
     run: TestRun,
     command: str,
     gpu: bool,
+    *,
+    control_volume: bool = True,
 ) -> dict[str, Any]:
+    # control_volume=False for a SnapshotJob's spec.podTemplate: the operator
+    # injects the snapshot-control emptyDir, mount, and env var itself
+    # (EnsureControlVolume) — a caller-provided one would be redundant with
+    # what the feature actually promises callers they do not have to set up.
     container: dict[str, Any] = {
         "name": CONTAINER,
         "image": run.image,
         "imagePullPolicy": "IfNotPresent",
         "command": ["/bin/bash", "-lc", command],
         "volumeMounts": [
-            {"name": "snapshot-control", "mountPath": CONTROL_DIR},
+            {"name": "checkpoint-storage", "mountPath": CHECKPOINT_DIR},
         ],
     }
+    volumes: list[dict[str, Any]] = [
+        {
+            "name": "checkpoint-storage",
+            "persistentVolumeClaim": {"claimName": config.pvc_name},
+        },
+    ]
+    if control_volume:
+        container["volumeMounts"].insert(0, {"name": "snapshot-control", "mountPath": CONTROL_DIR})
+        volumes.insert(0, {"name": "snapshot-control", "emptyDir": {}})
     spec: dict[str, Any] = {
         "restartPolicy": "Never",
         # These are throwaway test pods; keep cleanup from waiting on the
@@ -158,9 +216,7 @@ def base_pod_spec(
         "terminationGracePeriodSeconds": 1,
         "containers": [container],
         **workload_scheduling(),
-        "volumes": [
-            {"name": "snapshot-control", "emptyDir": {}},
-        ],
+        "volumes": volumes,
     }
     if gpu:
         spec["runtimeClassName"] = "nvidia"
@@ -169,7 +225,8 @@ def base_pod_spec(
 
 
 def workload_scheduling() -> dict[str, Any]:
-    # Snapshot agents run on GPU nodes, so keep workloads within their coverage.
+    # Keep all workload pods on GPU nodes so the shared RWO checkpoint PVC binds in
+    # a zone where both source and restore pods can schedule.
     node_selector = {
         "nvidia.com/gpu.present": "true",
     }
@@ -229,6 +286,15 @@ def source_command(image: str, gpu: bool) -> str:
     state_loop = CUDA_SOURCE if gpu else CPU_SOURCE
     return f"""set -euo pipefail
 echo "[source] image={image}"
+mkdir -p {STATE_DIR}
+{state_loop}
+"""
+
+
+def snapshotjob_source_command(image: str, gpu: bool) -> str:
+    state_loop = CUDA_SOURCE if gpu else CPU_SOURCE
+    return f"""set -euo pipefail
+echo "[snapshotjob-source] image={image}"
 mkdir -p {STATE_DIR}
 {state_loop}
 """
