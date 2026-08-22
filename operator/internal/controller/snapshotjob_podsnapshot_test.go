@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -249,9 +248,6 @@ func TestSnapshotJobReconcileFailedOnPodSnapshotFailed(t *testing.T) {
 	job, err := buildSourceJob(sj)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
-	// No job.Status.StartTime set: nearActiveDeadline is false, so this is
-	// "far from any deadline" — a genuine capture failure finalizes on the
-	// very first pass, per the documented immediate-terminal behavior.
 	pod := sourcePodForJob(job)
 	snap, err := buildPodSnapshot(sj, pod)
 	require.NoError(t, err)
@@ -279,9 +275,10 @@ func TestSnapshotJobReconcileFailedOnPodSnapshotFailed(t *testing.T) {
 	require.NotNil(t, updated.Status.CompletedAt)
 }
 
-// TestSnapshotJobReconcileJobFailureWinsAfterDeferredCapture: a raced Job
-// DeadlineExceeded that lands during the deferral must win over CaptureFailed.
-func TestSnapshotJobReconcileJobFailureWinsAfterDeferredCapture(t *testing.T) {
+// TestSnapshotJobReconcileFailureTargetWinsOverCaptureFailure verifies the
+// condition Kubernetes publishes before terminal Failed=True is sufficient to
+// classify a raced deadline expiry.
+func TestSnapshotJobReconcileFailureTargetWinsOverCaptureFailure(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
@@ -289,10 +286,10 @@ func TestSnapshotJobReconcileJobFailureWinsAfterDeferredCapture(t *testing.T) {
 	job, err := buildSourceJob(sj)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
-	// StartTime + ActiveDeadlineSeconds == now: puts the Job right at its
-	// deadline boundary, so nearActiveDeadline holds and observe() defers.
-	startTime := metav1.NewTime(time.Now().Add(-time.Duration(*sj.Spec.ActiveDeadlineSeconds) * time.Second))
-	job.Status.StartTime = &startTime
+	job.Status.Conditions = append(job.Status.Conditions, batchv1.JobCondition{
+		Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue,
+		Reason: batchv1.JobReasonDeadlineExceeded, Message: "Job was active longer than specified deadline",
+	})
 	pod := sourcePodForJob(job)
 	snap, err := buildPodSnapshot(sj, pod)
 	require.NoError(t, err)
@@ -303,28 +300,16 @@ func TestSnapshotJobReconcileJobFailureWinsAfterDeferredCapture(t *testing.T) {
 
 	r := makeSnapshotJobReconciler(s, sj, job, pod, snap)
 
-	// First pass: near the deadline but no Job failure yet — defers.
 	res, err := r.Reconcile(context.Background(), reconcileRequest(sj))
 	require.NoError(t, err)
-	assert.Equal(t, captureFailureRequeueBackstop, res.RequeueAfter)
-	deferred := &snapshotv1alpha1.SnapshotJob{}
-	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, deferred))
-	assert.Nil(t, meta.FindStatusCondition(deferred.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed))
-
-	// The Job controller's own condition lands before the deferred pass runs.
-	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, job))
-	failJob(job, batchv1.JobReasonDeadlineExceeded, "Job was active longer than specified deadline")
-	require.NoError(t, r.Status().Update(context.Background(), job))
-
-	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
-	require.NoError(t, err)
+	assert.Zero(t, res.RequeueAfter)
 
 	updated := &snapshotv1alpha1.SnapshotJob{}
 	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
 	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
 	require.NotNil(t, failed)
 	assert.Equal(t, snapshotv1alpha1.ReasonDeadlineExceeded, failed.Reason,
-		"the Job's own DeadlineExceeded must win over the raced CaptureFailed")
+		"FailureTarget/DeadlineExceeded must win over the raced CaptureFailed")
 }
 
 // ---- AlreadyExists classification (ours = adopt, foreign = conflict, cache-lag = requeue) ----
