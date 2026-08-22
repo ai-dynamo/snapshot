@@ -68,8 +68,7 @@ spec:
                 default: 3600
                 description: |-
                   ActiveDeadlineSeconds bounds the total time allowed for pod scheduling,
-                  quiesce, dump, and all containers exiting. Applied verbatim to the
-                  batch/v1 Job.
+                  quiesce, and dump. Applied verbatim to the batch/v1 Job.
                 format: int64
                 minimum: 1
                 type: integer
