@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -272,6 +273,43 @@ func TestSnapshotJobReconcileFailedOnPodSnapshotFailed(t *testing.T) {
 	assert.Equal(t, metav1.ConditionTrue, failed.Status)
 	assert.Equal(t, snapshotv1alpha1.ReasonCaptureFailed, failed.Reason)
 	require.NotNil(t, updated.Status.CompletedAt)
+}
+
+// TestSnapshotJobReconcileFailureTargetWinsOverCaptureFailure verifies the
+// condition Kubernetes publishes before terminal Failed=True is sufficient to
+// classify a raced deadline expiry.
+func TestSnapshotJobReconcileFailureTargetWinsOverCaptureFailure(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+	sj.UID = types.UID("sj-uid")
+
+	job, err := buildSourceJob(sj)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	job.Status.Conditions = append(job.Status.Conditions, batchv1.JobCondition{
+		Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue,
+		Reason: batchv1.JobReasonDeadlineExceeded, Message: "Job was active longer than specified deadline",
+	})
+	pod := sourcePodForJob(job)
+	snap, err := buildPodSnapshot(sj, pod)
+	require.NoError(t, err)
+	meta.SetStatusCondition(&snap.Status.Conditions, metav1.Condition{
+		Type: snapshotv1alpha1.PodSnapshotConditionFailed, Status: metav1.ConditionTrue,
+		Reason: "SourcePodGone", Message: `source pod "x" is no longer running (phase Running)`,
+	})
+
+	r := makeSnapshotJobReconciler(s, sj, job, pod, snap)
+
+	res, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+	assert.Zero(t, res.RequeueAfter)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, snapshotv1alpha1.ReasonDeadlineExceeded, failed.Reason,
+		"FailureTarget/DeadlineExceeded must win over the raced CaptureFailed")
 }
 
 // ---- AlreadyExists classification (ours = adopt, foreign = conflict, cache-lag = requeue) ----

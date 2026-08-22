@@ -17,11 +17,11 @@ const (
 	// SnapshotJobConditionCaptured is True when the CRIU dump of the target
 	// container is complete (PodSnapshot Ready=True).
 	SnapshotJobConditionCaptured = "Captured"
-	// SnapshotJobConditionCompleted is True when all pod containers have exited 0
-	// (batch/v1 Job Complete=True) and the CRIU dump has been observed complete.
+	// SnapshotJobConditionCompleted is True when the PodSnapshot is ready and
+	// cleanup of the source batch/v1 Job has been requested.
 	SnapshotJobConditionCompleted = "Completed"
 	// SnapshotJobConditionFailed is True on terminal failure. The batch/v1 Job is
-	// preserved (not deleted) so the pod and its container logs stay available.
+	// preserved for status and debugging; Kubernetes controls failed pod retention.
 	SnapshotJobConditionFailed = "Failed"
 )
 
@@ -34,10 +34,10 @@ const (
 	// Captured
 	ReasonCaptureInProgress = "CaptureInProgress"
 	ReasonCaptureCompleted  = "CaptureCompleted"
-
-	// Completed
+	// Deprecated: capture success no longer waits for source pod completion.
 	ReasonWaitingForPodCompletion = "WaitingForPodCompletion"
-	ReasonJobCompleted            = "JobCompleted"
+	// Deprecated: SnapshotJob now emits ReasonCaptureCompleted on completion.
+	ReasonJobCompleted = "JobCompleted"
 
 	// Failed=True
 	ReasonCaptureFailed           = "CaptureFailed"
@@ -74,8 +74,8 @@ func IsSnapshotJobFailed(j *SnapshotJob) bool {
 }
 
 // IsSnapshotJobTerminal reports whether the SnapshotJob has reached a terminal
-// state (Completed=True or Failed=True). Terminal SnapshotJobs are not
-// reconciled further.
+// state (Completed=True or Failed=True). Completed objects may still reconcile
+// to retry source Job cleanup.
 func IsSnapshotJobTerminal(j *SnapshotJob) bool {
 	return IsSnapshotJobCompleted(j) || IsSnapshotJobFailed(j)
 }
@@ -93,8 +93,7 @@ type SnapshotJobSpec struct {
 	PodTemplate corev1.PodTemplateSpec `json:"podTemplate"`
 
 	// ActiveDeadlineSeconds bounds the total time allowed for pod scheduling,
-	// quiesce, dump, and all containers exiting. Applied verbatim to the
-	// batch/v1 Job.
+	// quiesce, and dump. Applied verbatim to the batch/v1 Job.
 	// +optional
 	// +kubebuilder:default=3600
 	// +kubebuilder:validation:Minimum=1

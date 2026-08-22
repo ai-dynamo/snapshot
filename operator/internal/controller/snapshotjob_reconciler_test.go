@@ -441,6 +441,7 @@ func TestSnapshotJobReconcileFailsForeignJob(t *testing.T) {
 	running := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning)
 	require.NotNil(t, running, "Running must not be entirely absent alongside a terminal Failed=True")
 	assert.Equal(t, metav1.ConditionFalse, running.Status)
+	require.NotNil(t, updated.Status.CompletedAt)
 
 	got := &batchv1.Job{}
 	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, got))

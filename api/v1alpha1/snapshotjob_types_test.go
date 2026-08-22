@@ -80,7 +80,7 @@ func TestIsSnapshotJobCompleted(t *testing.T) {
 	if IsSnapshotJobCompleted(j) {
 		t.Fatal("expected false for a SnapshotJob with no conditions")
 	}
-	setCondition(j, SnapshotJobConditionCompleted, metav1.ConditionTrue, ReasonJobCompleted)
+	setCondition(j, SnapshotJobConditionCompleted, metav1.ConditionTrue, ReasonCaptureCompleted)
 	if !IsSnapshotJobCompleted(j) {
 		t.Fatal("expected true after Completed=True")
 	}

@@ -32,7 +32,7 @@ import (
 // +kubebuilder:rbac:groups=nvidia.com,resources=snapshotjobs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=snapshotjobs/finalizers,verbs=update
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=create;get;list;watch
-// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;get;list;watch
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;get;list;watch;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=list
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
@@ -40,15 +40,19 @@ import (
 //
 // Resource helpers create, find, and classify the Job, source Pod, and
 // PodSnapshot without mutating SnapshotJob status. Reconcile then derives the
-// complete status from those observations and persists it once. This makes
-// every resource-create/status-write race recoverable on the next reconcile.
+// complete status from those observations and persists it once. Capture success
+// is terminal and triggers source Job cleanup; failures preserve the Job for
+// debugging.
 type SnapshotJobReconciler struct {
 	client.Client
 	APIReader client.Reader
 	Recorder  record.EventRecorder
 }
 
-const sourcePodRequeueBackstop = 2 * time.Second
+const (
+	sourcePodRequeueBackstop     = 2 * time.Second
+	captureResultRequeueBackstop = 2 * time.Second
+)
 
 type snapshotJobFailure struct {
 	reason string
@@ -56,22 +60,31 @@ type snapshotJobFailure struct {
 }
 
 type snapshotJobObservation struct {
-	job              *batchv1.Job
-	podSnapshot      *snapshotv1alpha1.PodSnapshot
-	sourcePodMissing bool
-	failure          *snapshotJobFailure
+	job                     *batchv1.Job
+	podSnapshot             *snapshotv1alpha1.PodSnapshot
+	sourcePodMissing        bool
+	waitingForCaptureResult bool
+	failure                 *snapshotJobFailure
 }
 
 // Reconcile first drives child resources toward the desired state, then derives
-// and patches SnapshotJob status once from the resulting observation.
+// and patches SnapshotJob status once from the resulting observation. Failed is
+// terminal, while Completed keeps retrying successful Job cleanup until it is
+// confirmed gone.
 func (r *SnapshotJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	sj := &snapshotv1alpha1.SnapshotJob{}
 	if err := r.Get(ctx, req.NamespacedName, sj); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	if !sj.GetDeletionTimestamp().IsZero() || snapshotv1alpha1.IsSnapshotJobTerminal(sj) {
+	if !sj.GetDeletionTimestamp().IsZero() {
 		return ctrl.Result{}, nil
+	}
+	if snapshotv1alpha1.IsSnapshotJobFailed(sj) {
+		return ctrl.Result{}, nil
+	}
+	if snapshotv1alpha1.IsSnapshotJobCompleted(sj) {
+		return r.ensureJobDeleted(ctx, sj)
 	}
 
 	observed, result, err := r.reconcileResources(ctx, sj)
@@ -85,6 +98,9 @@ func (r *SnapshotJobReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	desiredStatus := deriveSnapshotJobStatus(sj, observed)
 	if err := r.patchSnapshotJobStatus(ctx, sj, desiredStatus); err != nil {
 		return ctrl.Result{}, err
+	}
+	if meta.IsStatusConditionTrue(desiredStatus.Conditions, snapshotv1alpha1.SnapshotJobConditionCompleted) {
+		return r.ensureJobDeleted(ctx, sj)
 	}
 	return result, nil
 }
@@ -102,6 +118,10 @@ func (r *SnapshotJobReconciler) reconcileResources(ctx context.Context, sj *snap
 	err = r.Get(ctx, client.ObjectKey{Namespace: sj.Namespace, Name: sj.Name}, job)
 	switch {
 	case apierrors.IsNotFound(err):
+		if sj.Status.PodSnapshotName != "" {
+			return terminalObservation(snapshotv1alpha1.ReasonJobDeleted,
+				fmt.Errorf("source Job %q no longer exists", sj.Name)), ctrl.Result{}, nil
+		}
 		return r.createSourceJob(ctx, sj, desiredJob)
 	case err != nil:
 		return snapshotJobObservation{}, ctrl.Result{}, fmt.Errorf("get source Job %q: %w", sj.Name, err)
@@ -144,8 +164,27 @@ func (r *SnapshotJobReconciler) observeExistingSourceJob(ctx context.Context, sj
 	return r.reconcilePodSnapshotResources(ctx, sj, job)
 }
 
-// reconcilePodSnapshotResources observes an existing PodSnapshot or creates it
-// once exactly one controlled source Pod exists.
+// jobFailureReason classifies the Job's failure conditions. FailureTarget is
+// considered because Kubernetes publishes it before Failed while terminating
+// the Job's pods; Failed takes precedence when both exist.
+func jobFailureReason(job *batchv1.Job) (reason string, cause error) {
+	for _, conditionType := range []batchv1.JobConditionType{batchv1.JobFailed, batchv1.JobFailureTarget} {
+		for _, condition := range job.Status.Conditions {
+			if condition.Type != conditionType || condition.Status != corev1.ConditionTrue {
+				continue
+			}
+			if condition.Reason == batchv1.JobReasonDeadlineExceeded {
+				return snapshotv1alpha1.ReasonDeadlineExceeded,
+					fmt.Errorf("source Job exceeded activeDeadlineSeconds: %s", condition.Message)
+			}
+			return snapshotv1alpha1.ReasonJobFailed, fmt.Errorf("source Job failed: %s", condition.Message)
+		}
+	}
+	return "", nil
+}
+
+// reconcilePodSnapshotResources evaluates PodSnapshot state before Job failure:
+// a successful checkpoint can be expected to terminate the source process.
 func (r *SnapshotJobReconciler) reconcilePodSnapshotResources(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) (snapshotJobObservation, ctrl.Result, error) {
 	observed := snapshotJobObservation{job: job}
 	snap, err := r.findOwnedPodSnapshot(ctx, sj)
@@ -154,12 +193,36 @@ func (r *SnapshotJobReconciler) reconcilePodSnapshotResources(ctx context.Contex
 		observed.failure = &snapshotJobFailure{reason: snapshotv1alpha1.ReasonPodSnapshotNameConflict, cause: err}
 		return observed, ctrl.Result{}, nil
 	case apierrors.IsNotFound(err):
+		if reason, cause := jobFailureReason(job); reason != "" {
+			observed.failure = &snapshotJobFailure{reason: reason, cause: cause}
+			return observed, ctrl.Result{}, nil
+		}
 		return r.createPodSnapshotForSourceJob(ctx, sj, job)
 	case err != nil:
 		return snapshotJobObservation{}, ctrl.Result{}, fmt.Errorf("find owned PodSnapshot: %w", err)
 	}
 
 	observed.podSnapshot = snap
+	switch {
+	case snapshotv1alpha1.IsPodSnapshotFailed(snap):
+		// FailureTarget or Failed can race the PodSnapshot update; re-read through
+		// the API reader before deciding which failure is authoritative.
+		latestJob := &batchv1.Job{}
+		if err := r.sourcePodReader().Get(ctx, client.ObjectKeyFromObject(job), latestJob); err == nil {
+			observed.job = latestJob
+			if reason, cause := jobFailureReason(latestJob); reason != "" {
+				observed.failure = &snapshotJobFailure{reason: reason, cause: cause}
+			}
+		}
+	case snapshotv1alpha1.IsPodSnapshotSucceeded(snap):
+		// Capture success is authoritative even if checkpointing terminated the
+		// source process and the Job concurrently reports failure.
+	default:
+		if reason, _ := jobFailureReason(job); reason != "" {
+			observed.waitingForCaptureResult = true
+			return observed, ctrl.Result{RequeueAfter: captureResultRequeueBackstop}, nil
+		}
+	}
 	return observed, ctrl.Result{}, nil
 }
 
@@ -209,14 +272,22 @@ func deriveSnapshotJobStatus(sj *snapshotv1alpha1.SnapshotJob, observed snapshot
 	next := sj.DeepCopy()
 	deriveRunningStatus(next, observed)
 	failure := deriveCapturedStatus(next, observed)
-	deriveFailureStatus(next, failure)
+	if failure != nil {
+		deriveFailureStatus(next, failure)
+		return next.Status
+	}
+	if observed.waitingForCaptureResult {
+		return next.Status
+	}
+	deriveCompletionStatus(next, observed)
 	return next.Status
 }
 
 func deriveRunningStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJobObservation) {
 	if observed.job != nil {
 		ready := observed.job.Status.Ready != nil && *observed.job.Status.Ready > 0
-		if ready {
+		captured := observed.podSnapshot != nil && snapshotv1alpha1.IsPodSnapshotSucceeded(observed.podSnapshot)
+		if ready || captured {
 			if next.Status.StartedAt == nil {
 				now := metav1.Now()
 				next.Status.StartedAt = &now
@@ -240,8 +311,10 @@ func deriveCapturedStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJ
 		next.Status.PodSnapshotName = observed.podSnapshot.Name
 		switch {
 		case snapshotv1alpha1.IsPodSnapshotFailed(observed.podSnapshot):
-			failure = &snapshotJobFailure{reason: snapshotv1alpha1.ReasonCaptureFailed,
-				cause: errors.New("node agent failed to capture the checkpoint")}
+			if failure == nil {
+				reason, message := captureFailureReason(observed.podSnapshot)
+				failure = &snapshotJobFailure{reason: reason, cause: errors.New(message)}
+			}
 		case snapshotv1alpha1.IsPodSnapshotSucceeded(observed.podSnapshot):
 			setCondition(next, snapshotv1alpha1.SnapshotJobConditionCaptured, metav1.ConditionTrue,
 				snapshotv1alpha1.ReasonCaptureCompleted, "CRIU dump of the target container is complete")
@@ -254,22 +327,50 @@ func deriveCapturedStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJ
 }
 
 func deriveFailureStatus(next *snapshotv1alpha1.SnapshotJob, failure *snapshotJobFailure) {
-	if failure == nil {
-		return
-	}
 	if meta.FindStatusCondition(next.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning) == nil {
 		setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse,
 			snapshotv1alpha1.ReasonPodPending, "source pod was never observed ready before this SnapshotJob failed")
 	}
-	setCondition(next, snapshotv1alpha1.SnapshotJobConditionCaptured, metav1.ConditionFalse,
-		failure.reason, "capture did not complete: "+failure.cause.Error())
-	setCondition(next, snapshotv1alpha1.SnapshotJobConditionCompleted, metav1.ConditionFalse,
-		failure.reason, "the SnapshotJob failed before completing: "+failure.cause.Error())
+	if !meta.IsStatusConditionTrue(next.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured) {
+		setCondition(next, snapshotv1alpha1.SnapshotJobConditionCaptured, metav1.ConditionFalse,
+			failure.reason, "capture did not complete: "+failure.cause.Error())
+	}
+	if !meta.IsStatusConditionTrue(next.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCompleted) {
+		setCondition(next, snapshotv1alpha1.SnapshotJobConditionCompleted, metav1.ConditionFalse,
+			failure.reason, "the SnapshotJob failed before completing: "+failure.cause.Error())
+	}
 	setCondition(next, snapshotv1alpha1.SnapshotJobConditionFailed, metav1.ConditionTrue,
 		failure.reason, failure.cause.Error())
 	if next.Status.CompletedAt == nil {
 		now := metav1.Now()
 		next.Status.CompletedAt = &now
+	}
+}
+
+func deriveCompletionStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJobObservation) {
+	captured := observed.podSnapshot != nil && snapshotv1alpha1.IsPodSnapshotSucceeded(observed.podSnapshot)
+	if captured {
+		setCondition(next, snapshotv1alpha1.SnapshotJobConditionCompleted, metav1.ConditionTrue,
+			snapshotv1alpha1.ReasonCaptureCompleted, "checkpoint captured; source Job cleanup requested")
+		if next.Status.CompletedAt == nil {
+			now := metav1.Now()
+			next.Status.CompletedAt = &now
+		}
+	}
+}
+
+// captureFailureReason separates bind-stage PodSnapshot failures from failures
+// reported by the node agent while capturing the checkpoint.
+func captureFailureReason(snap *snapshotv1alpha1.PodSnapshot) (reason, message string) {
+	condition := meta.FindStatusCondition(snap.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	if condition == nil {
+		return snapshotv1alpha1.ReasonCaptureFailed, "PodSnapshot Failed=True with no condition detail"
+	}
+	switch condition.Reason {
+	case "ContentConflict", "SourcePodNotFound", "StalePodReference":
+		return snapshotv1alpha1.ReasonPodSnapshotFailed, condition.Message
+	default:
+		return snapshotv1alpha1.ReasonCaptureFailed, condition.Message
 	}
 }
 
@@ -283,6 +384,26 @@ func (r *SnapshotJobReconciler) patchSnapshotJobStatus(ctx context.Context, sj *
 		return fmt.Errorf("patch SnapshotJob status: %w", err)
 	}
 	return nil
+}
+
+// ensureJobDeleted deletes the owned source Job after successful completion.
+// Failed SnapshotJobs never enter this path, preserving their Jobs for debugging.
+func (r *SnapshotJobReconciler) ensureJobDeleted(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob) (ctrl.Result, error) {
+	job := &batchv1.Job{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: sj.Namespace, Name: sj.Name}, job); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if !metav1.IsControlledBy(job, sj) {
+		return ctrl.Result{}, nil
+	}
+	uid := job.UID
+	if err := r.Delete(ctx, job,
+		client.Preconditions{UID: &uid},
+		client.PropagationPolicy(metav1.DeletePropagationBackground),
+	); err != nil && !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, fmt.Errorf("delete source Job %q: %w", job.Name, err)
+	}
+	return ctrl.Result{}, nil
 }
 
 // setCondition sets a status condition on the SnapshotJob and reports whether it changed.
