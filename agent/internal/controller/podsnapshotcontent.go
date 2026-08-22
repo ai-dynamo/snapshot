@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	contentvalidation "k8s.io/apimachinery/pkg/api/validate/content"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -161,6 +162,11 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		return w.setSnapshotContentFailed(ctx, content, "InvalidCheckpointID",
 			fmt.Errorf("checkpoint ID %q is not a valid label value: %s", id, strings.Join(errs, "; ")))
 	}
+	leaseName := checkpointLeaseName(id)
+	if errs := validation.IsDNS1123Subdomain(leaseName); len(errs) > 0 {
+		return w.setSnapshotContentFailed(ctx, content, "InvalidCheckpointID",
+			fmt.Errorf("checkpoint ID %q produces invalid Lease name %q: %s", id, leaseName, strings.Join(errs, "; ")))
+	}
 
 	// The checkpoint ID is the artifact identity, so the in-flight guard and lease key on it:
 	// a PodSnapshot delete/recreate changes the work-order name but must not admit a second dump
@@ -215,7 +221,7 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		return w.markCheckpointReadyAndRelease(ctx, content, containerPID)
 	}
 
-	leaseKey := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: checkpointLeaseName(id)}
+	leaseKey := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: leaseName}
 	acquired, err := w.acquireLease(ctx, leaseKey)
 	if err != nil {
 		return fmt.Errorf("acquire checkpoint lease %s: %w", leaseKey.String(), err)

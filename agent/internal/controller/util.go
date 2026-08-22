@@ -89,7 +89,7 @@ func annotatePod(ctx context.Context, clientset kubernetes.Interface, log logr.L
 // checkpointLeaseName returns the Lease guarding the artifact identified by checkpointID. The
 // checkpoint ID is the cluster-global artifact identity (the artifact path has no namespace
 // segment), so the lease name derives from it, not from the work-order name. Lease names are
-// DNS-1123 subdomains (253 max), so no length cap is needed beyond the label validation upstream.
+// DNS-1123 subdomains; reconcileSourcePod validates the generated name before use.
 func checkpointLeaseName(checkpointID string) string { return "checkpoint-lease-" + checkpointID }
 
 // acquireLease acquires or renews a checkpoint lease at an arbitrary namespace/name key,

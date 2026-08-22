@@ -51,8 +51,11 @@ func TestBuildSourceJob(t *testing.T) {
 
 		main := requireContainer(t, job.Spec.Template.Spec.Containers, "worker")
 		require.NotNil(t, main.ReadinessProbe, "target container must get the ready-for-snapshot probe")
-		assert.NotNil(t, job.Spec.Template.Spec.SecurityContext.SeccompProfile,
-			"SeccompProfile must be set from DefaultSeccompLocalhostProfile")
+		require.NotNil(t, job.Spec.Template.Spec.SecurityContext)
+		require.NotNil(t, job.Spec.Template.Spec.SecurityContext.SeccompProfile)
+		profile := job.Spec.Template.Spec.SecurityContext.SeccompProfile
+		assert.Equal(t, corev1.SeccompProfileTypeLocalhost, profile.Type)
+		assert.Equal(t, ptr.To(snapshotv1alpha1.DefaultSeccompLocalhostProfile), profile.LocalhostProfile)
 	})
 
 	t.Run("stamps the owner label without clobbering existing pod template labels", func(t *testing.T) {
@@ -90,6 +93,16 @@ func TestBuildSourceJob(t *testing.T) {
 
 		_, err := buildSourceJob(sj)
 		require.Error(t, err)
+	})
+
+	t.Run("valid dotted and 63-character SnapshotJob names are accepted", func(t *testing.T) {
+		for _, name := range []string{"warm.worker", strings.Repeat("a", 63)} {
+			sj := minimalSnapshotJob()
+			sj.Name = name
+
+			_, err := buildSourceJob(sj)
+			require.NoError(t, err)
+		}
 	})
 
 	t.Run("empty targetContainers is a terminal spec error, not a panic", func(t *testing.T) {
@@ -141,10 +154,10 @@ func requireContainer(t *testing.T, containers []corev1.Container, name string) 
 	return nil
 }
 
-// batchJobByName finds a Job in a fake client's tracked objects by name — used by
-// reconciler-level tests below that only care whether/what got created, not the
-// full build matrix already covered above.
-func batchJobByName(jobs *batchv1.JobList, name string) *batchv1.Job {
+// getBatchJobByName finds a Job in a fake client's tracked objects by name. Shared
+// across this file and snapshotjob_reconciler_test.go — those tests only care
+// whether/what got created, not the full build matrix already covered above.
+func getBatchJobByName(jobs *batchv1.JobList, name string) *batchv1.Job {
 	for i := range jobs.Items {
 		if jobs.Items[i].Name == name {
 			return &jobs.Items[i]

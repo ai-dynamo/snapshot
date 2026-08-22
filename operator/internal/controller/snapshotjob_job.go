@@ -14,9 +14,13 @@ import (
 	"github.com/ai-dynamo/snapshot/operator/internal/protocol"
 )
 
-// sourceJobArtifactVersion satisfies protocol.CheckpointJobOptions.ArtifactVersion.
-// SnapshotJob has no concept of artifact versioning; the constant exists only
-// because the shared option struct still carries the field.
+// sourceJobArtifactVersion satisfies protocol.CheckpointJobOptions.ArtifactVersion,
+// which the agent uses as the versions/<N> path segment under the artifact's
+// base path (see ResolveCheckpointStorage). SnapshotJob has no concept of
+// artifact versioning; the constant exists only because the shared option
+// struct still carries the field. If ArtifactVersion is ever repurposed for
+// real multi-version artifacts, this call site needs a real value here, not
+// a hardcoded "1".
 const sourceJobArtifactVersion = "1"
 
 // buildSourceJob constructs the desired batch/v1 Job for a SnapshotJob's source pod.
