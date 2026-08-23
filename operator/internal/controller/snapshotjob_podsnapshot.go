@@ -35,7 +35,7 @@ const sourcePodRequeueBackstop = 2 * time.Second
 // concrete missing-capture failure.
 func (r *SnapshotJobReconciler) createPodSnapshotForSourceJob(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) (snapshotJobObservation, ctrl.Result, error) {
 	observed := snapshotJobObservation{job: job}
-	pod, err := findSourcePod(ctx, r.sourcePodReader(), job)
+	pod, err := findSourcePod(ctx, r.APIReader, job)
 	if apierrors.IsNotFound(err) {
 		observed.sourcePodMissing = true
 		if classifySourceJobTerminal(job).state == sourceJobComplete {
@@ -98,15 +98,56 @@ func findSourcePod(ctx context.Context, reader client.Reader, job *batchv1.Job) 
 // Differently named objects are unrelated even if they carry the same owner
 // labels; a same-name object with mismatched ownership is a terminal conflict.
 func (r *SnapshotJobReconciler) findOwnedPodSnapshot(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob) (*snapshotv1alpha1.PodSnapshot, error) {
-	snap := &snapshotv1alpha1.PodSnapshot{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: sj.Namespace, Name: sj.Name}, snap); err != nil {
-		return nil, err
-	}
-	if !podSnapshotBelongsToSnapshotJob(snap, sj) {
-		return nil, fmt.Errorf("%w: PodSnapshot %q belongs to a different SnapshotJob incarnation",
-			errPodSnapshotNameConflict, snap.Name)
+	return readOwnedPodSnapshot(ctx, r.Client, sj)
+}
+
+func (r *SnapshotJobReconciler) readAuthoritativeOwnedPodSnapshot(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob) (*snapshotv1alpha1.PodSnapshot, error) {
+	snap, err := readOwnedPodSnapshot(ctx, r.APIReader, sj)
+	if err != nil {
+		return nil, fmt.Errorf("authoritatively read recorded PodSnapshot %q: %w", sj.Name, err)
 	}
 	return snap, nil
+}
+
+func readOwnedPodSnapshot(ctx context.Context, reader client.Reader, sj *snapshotv1alpha1.SnapshotJob) (*snapshotv1alpha1.PodSnapshot, error) {
+	snap := &snapshotv1alpha1.PodSnapshot{}
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: sj.Namespace, Name: sj.Name}, snap); err != nil {
+		return nil, err
+	}
+	if err := validatePodSnapshotOwnership(sj, snap); err != nil {
+		return nil, err
+	}
+	return snap, nil
+}
+
+// validatePodSnapshotForAdoption closes the create/status-write crash window.
+// Before the child UID has been persisted, mutable owner labels are insufficient:
+// the immutable source identity must also match the Pod controlled by this Job.
+func (r *SnapshotJobReconciler) validatePodSnapshotForAdoption(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job, snap *snapshotv1alpha1.PodSnapshot) (*snapshotJobFailure, error) {
+	pod, err := findSourcePod(ctx, r.APIReader, job)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return &snapshotJobFailure{
+				reason: snapshotv1alpha1.ReasonPodSnapshotNameConflict,
+				cause: fmt.Errorf("cannot safely adopt PodSnapshot %q because its source Pod is no longer available",
+					snap.Name),
+			}, nil
+		}
+		return nil, fmt.Errorf("find source Pod before adopting PodSnapshot %q: %w", snap.Name, err)
+	}
+
+	desired, err := buildPodSnapshot(sj, pod)
+	if err != nil {
+		return &snapshotJobFailure{reason: snapshotv1alpha1.ReasonInvalidSpec, cause: err}, nil
+	}
+	if !podSnapshotHasExpectedIdentity(snap, desired) {
+		return &snapshotJobFailure{
+			reason: snapshotv1alpha1.ReasonPodSnapshotNameConflict,
+			cause: fmt.Errorf("existing PodSnapshot %q does not carry the immutable source identity expected for this SnapshotJob",
+				snap.Name),
+		}, nil
+	}
+	return nil, nil
 }
 
 // buildPodSnapshot constructs the desired PodSnapshot for a SnapshotJob's source
@@ -158,7 +199,7 @@ func (r *SnapshotJobReconciler) createPodSnapshot(ctx context.Context, sj *snaps
 	}
 	if err := r.Create(ctx, snap); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			return r.classifyExistingPodSnapshot(ctx, sj, snap.Name, err)
+			return r.classifyExistingPodSnapshot(ctx, sj, snap, err)
 		}
 		r.Recorder.Event(sj, corev1.EventTypeWarning, "PodSnapshotCreateFailed", err.Error())
 		return nil, fmt.Errorf("create PodSnapshot %q: %w", snap.Name, err)
@@ -173,18 +214,49 @@ func (r *SnapshotJobReconciler) createPodSnapshot(ctx context.Context, sj *snaps
 // permanent name collision: return errPodSnapshotNameConflict (terminal). A
 // re-read NotFound means the cache is still behind: surface the original
 // AlreadyExists so the caller requeues.
-func (r *SnapshotJobReconciler) classifyExistingPodSnapshot(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, name string, createErr error) (*snapshotv1alpha1.PodSnapshot, error) {
+func (r *SnapshotJobReconciler) classifyExistingPodSnapshot(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, desired *snapshotv1alpha1.PodSnapshot, createErr error) (*snapshotv1alpha1.PodSnapshot, error) {
 	existing := &snapshotv1alpha1.PodSnapshot{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: sj.Namespace, Name: name}, existing); err != nil {
+	if err := r.Get(ctx, client.ObjectKeyFromObject(desired), existing); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, fmt.Errorf("PodSnapshot %q already exists but is not yet in cache, requeueing: %w", name, createErr)
+			return nil, fmt.Errorf("PodSnapshot %q already exists but is not yet in cache, requeueing: %w", desired.Name, createErr)
 		}
-		return nil, fmt.Errorf("get existing PodSnapshot %q: %w", name, err)
+		return nil, fmt.Errorf("get existing PodSnapshot %q: %w", desired.Name, err)
 	}
-	if !podSnapshotBelongsToSnapshotJob(existing, sj) {
-		return nil, fmt.Errorf("%w: PodSnapshot %q", errPodSnapshotNameConflict, name)
+	if err := validatePodSnapshotOwnership(sj, existing); err != nil {
+		return nil, err
+	}
+	if !podSnapshotHasExpectedIdentity(existing, desired) {
+		return nil, fmt.Errorf("%w: PodSnapshot %q does not match the expected source identity",
+			errPodSnapshotNameConflict, desired.Name)
 	}
 	return existing, nil
+}
+
+func validatePodSnapshotOwnership(sj *snapshotv1alpha1.SnapshotJob, snap *snapshotv1alpha1.PodSnapshot) error {
+	if !podSnapshotBelongsToSnapshotJob(snap, sj) {
+		return fmt.Errorf("%w: PodSnapshot %q belongs to a different SnapshotJob incarnation",
+			errPodSnapshotNameConflict, snap.Name)
+	}
+	if expectedUID := sj.Status.PodSnapshotUID; expectedUID != "" && snap.UID != expectedUID {
+		return fmt.Errorf("%w: PodSnapshot %q was replaced: found uid %q, expected %q",
+			errPodSnapshotNameConflict, snap.Name, snap.UID, expectedUID)
+	}
+	return nil
+}
+
+func podSnapshotHasExpectedIdentity(actual, desired *snapshotv1alpha1.PodSnapshot) bool {
+	actualSource := actual.Spec.Source.PodRef
+	desiredSource := desired.Spec.Source.PodRef
+	if actualSource.Name != desiredSource.Name || actualSource.UID != desiredSource.UID ||
+		len(actualSource.Containers) != len(desiredSource.Containers) {
+		return false
+	}
+	for i := range actualSource.Containers {
+		if actualSource.Containers[i] != desiredSource.Containers[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func podSnapshotBelongsToSnapshotJob(snap *snapshotv1alpha1.PodSnapshot, sj *snapshotv1alpha1.SnapshotJob) bool {

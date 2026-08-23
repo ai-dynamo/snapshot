@@ -43,11 +43,13 @@ func makeSnapshotJobReconciler(s *runtime.Scheme, objs ...client.Object) *Snapsh
 // makeSnapshotJobReconcilerWithInterceptor builds a reconciler whose fake client routes calls
 // through interceptor.Funcs, letting tests inject API errors on specific code paths.
 func makeSnapshotJobReconcilerWithInterceptor(s *runtime.Scheme, funcs interceptor.Funcs, objs ...client.Object) *SnapshotJobReconciler {
+	testClient := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).
+		WithStatusSubresource(&snapshotv1alpha1.SnapshotJob{}).
+		WithInterceptorFuncs(funcs).Build()
 	return &SnapshotJobReconciler{
-		Client: fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).
-			WithStatusSubresource(&snapshotv1alpha1.SnapshotJob{}).
-			WithInterceptorFuncs(funcs).Build(),
-		Recorder: record.NewFakeRecorder(10),
+		Client:    testClient,
+		APIReader: testClient,
+		Recorder:  record.NewFakeRecorder(10),
 	}
 }
 

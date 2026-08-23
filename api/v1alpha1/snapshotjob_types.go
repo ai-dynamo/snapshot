@@ -51,6 +51,9 @@ const (
 	// missing after the source exited.
 	ReasonSourceCompletedWithoutCapture = "SourceCompletedWithoutCapture"
 	ReasonPodSnapshotNameConflict       = "PodSnapshotNameConflict"
+	// ReasonPodSnapshotDeleted means a previously recorded PodSnapshot no
+	// longer exists. SnapshotJob is one-shot, so the capture is not recreated.
+	ReasonPodSnapshotDeleted = "PodSnapshotDeleted"
 	// ReasonJobNameConflict means the deterministic Job name is held by a
 	// foreign object or by a different Job UID than the one already recorded.
 	ReasonJobNameConflict = "JobNameConflict"
@@ -150,6 +153,12 @@ type SnapshotJobStatus struct {
 	// from "created but missing" (set, not found).
 	// +optional
 	PodSnapshotName string `json:"podSnapshotName,omitempty"`
+
+	// PodSnapshotUID identifies the one PodSnapshot incarnation accepted for
+	// this one-shot capture. Once set, a missing PodSnapshot or a same-name
+	// object with another UID is terminal and must never start another capture.
+	// +optional
+	PodSnapshotUID types.UID `json:"podSnapshotUID,omitempty"`
 
 	// StartedAt is when the controller first observed the source pod Ready
 	// (job.status.ready > 0), not the pod's own Ready transition time — it can

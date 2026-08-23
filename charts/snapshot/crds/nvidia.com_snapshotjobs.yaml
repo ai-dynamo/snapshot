@@ -8659,6 +8659,12 @@ spec:
                   when the PodSnapshot is created. Distinguishes "never created" (empty)
                   from "created but missing" (set, not found).
                 type: string
+              podSnapshotUID:
+                description: |-
+                  PodSnapshotUID identifies the one PodSnapshot incarnation accepted for
+                  this one-shot capture. Once set, a missing PodSnapshot or a same-name
+                  object with another UID is terminal and must never start another capture.
+                type: string
               sourceJobUID:
                 description: |-
                   SourceJobUID identifies the one source batch/v1 Job incarnation accepted

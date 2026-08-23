@@ -140,6 +140,22 @@ func (r *SnapshotJobReconciler) reconcileResources(ctx context.Context, sj *snap
 func (r *SnapshotJobReconciler) reconcilePodSnapshotResources(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) (snapshotJobObservation, ctrl.Result, error) {
 	observed := snapshotJobObservation{job: job}
 	snap, err := r.findOwnedPodSnapshot(ctx, sj)
+	if apierrors.IsNotFound(err) && (sj.Status.PodSnapshotName != "" || sj.Status.PodSnapshotUID != "") {
+		terminal := classifySourceJobTerminal(job)
+		if terminal.failure != nil {
+			observed.failure = terminal.failure
+			return observed, ctrl.Result{}, nil
+		}
+		snap, err = r.readAuthoritativeOwnedPodSnapshot(ctx, sj)
+		if apierrors.IsNotFound(err) {
+			observed.failure = &snapshotJobFailure{
+				reason: snapshotv1alpha1.ReasonPodSnapshotDeleted,
+				cause: fmt.Errorf("PodSnapshot %q (uid %q) no longer exists",
+					sj.Status.PodSnapshotName, sj.Status.PodSnapshotUID),
+			}
+			return observed, ctrl.Result{}, nil
+		}
+	}
 	switch {
 	case errors.Is(err, errPodSnapshotNameConflict):
 		observed.failure = &snapshotJobFailure{reason: snapshotv1alpha1.ReasonPodSnapshotNameConflict, cause: err}
@@ -161,6 +177,16 @@ func (r *SnapshotJobReconciler) reconcilePodSnapshotResources(ctx context.Contex
 	case err != nil:
 		return snapshotJobObservation{}, ctrl.Result{}, fmt.Errorf("find owned PodSnapshot: %w", err)
 	}
+	if sj.Status.PodSnapshotUID == "" {
+		failure, err := r.validatePodSnapshotForAdoption(ctx, sj, job, snap)
+		if err != nil {
+			return snapshotJobObservation{}, ctrl.Result{}, err
+		}
+		if failure != nil {
+			observed.failure = failure
+			return observed, ctrl.Result{}, nil
+		}
+	}
 
 	observed.podSnapshot = snap
 	switch {
@@ -168,7 +194,7 @@ func (r *SnapshotJobReconciler) reconcilePodSnapshotResources(ctx context.Contex
 		// FailureTarget or Failed can race the PodSnapshot update; re-read through
 		// the API reader before deciding which failure is authoritative.
 		latestJob := &batchv1.Job{}
-		if err := r.sourcePodReader().Get(ctx, client.ObjectKeyFromObject(job), latestJob); err != nil {
+		if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(job), latestJob); err != nil {
 			return snapshotJobObservation{}, ctrl.Result{}, fmt.Errorf("re-read source Job %q before terminal decision: %w", job.Name, err)
 		}
 		observed.job = latestJob
@@ -179,14 +205,6 @@ func (r *SnapshotJobReconciler) reconcilePodSnapshotResources(ctx context.Contex
 	}
 	observed.failure = snapshotJobTerminalFailure(observed.job, observed.podSnapshot)
 	return observed, ctrl.Result{}, nil
-}
-
-func (r *SnapshotJobReconciler) sourcePodReader() client.Reader {
-	if r.APIReader != nil {
-		return r.APIReader
-	}
-	// Tests construct the reconciler directly without SetupWithManager.
-	return r.Client
 }
 
 func terminalObservation(reason string, cause error) snapshotJobObservation {
@@ -237,6 +255,9 @@ func deriveCapturedStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJ
 	failure := observed.failure
 	if observed.podSnapshot != nil {
 		next.Status.PodSnapshotName = observed.podSnapshot.Name
+		if next.Status.PodSnapshotUID == "" {
+			next.Status.PodSnapshotUID = observed.podSnapshot.UID
+		}
 		switch {
 		case snapshotv1alpha1.IsPodSnapshotFailed(observed.podSnapshot):
 			if failure == nil {
@@ -336,7 +357,9 @@ func setCondition(sj *snapshotv1alpha1.SnapshotJob, condType string, status meta
 // and watches PodSnapshot via a label map function because capture artifacts
 // deliberately carry no ownerReference and must outlive the SnapshotJob.
 func (r *SnapshotJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	r.APIReader = mgr.GetAPIReader()
+	if r.APIReader == nil {
+		return errors.New("snapshot job reconciler requires an API reader")
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&snapshotv1alpha1.SnapshotJob{}).
 		Owns(&batchv1.Job{}, builder.WithPredicates(predicate.Funcs{

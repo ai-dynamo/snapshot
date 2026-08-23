@@ -43,6 +43,7 @@ func TestSnapshotJobDeepCopyIsIndependent(t *testing.T) {
 		},
 		Status: SnapshotJobStatus{
 			PodSnapshotName: "warm-worker-snapshot",
+			PodSnapshotUID:  "pod-snapshot-uid",
 			SourceJobUID:    "source-job-uid",
 			Conditions:      []metav1.Condition{{Type: SnapshotJobConditionRunning, Status: metav1.ConditionTrue, Reason: ReasonPodReady}},
 		},

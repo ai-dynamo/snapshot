@@ -16,7 +16,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
@@ -153,10 +155,10 @@ func TestSnapshotJobReconcileSetsPodPendingWhenPodDoesNotExistYet(t *testing.T) 
 	assert.Equal(t, "waiting for the source Job to create a pod", cond.Message)
 }
 
-// TestSnapshotJobReconcileObserveRecoversPodSnapshotName covers a status-write
+// TestSnapshotJobReconcileObserveRecoversPodSnapshotIdentity covers a status-write
 // conflict after PodSnapshot creation. The next reconcile must reconstruct the
-// reference from the observed resource.
-func TestSnapshotJobReconcileObserveRecoversPodSnapshotName(t *testing.T) {
+// name and UID from the observed resource.
+func TestSnapshotJobReconcileObserveRecoversPodSnapshotIdentity(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
@@ -167,6 +169,7 @@ func TestSnapshotJobReconcileObserveRecoversPodSnapshotName(t *testing.T) {
 	pod := sourcePodForJob(job)
 	snap, err := buildPodSnapshot(sj, pod)
 	require.NoError(t, err)
+	snap.UID = types.UID("pod-snapshot-uid")
 
 	// sj.Status.PodSnapshotName is deliberately left empty, simulating a lost
 	// write, even though the PodSnapshot already exists.
@@ -179,6 +182,8 @@ func TestSnapshotJobReconcileObserveRecoversPodSnapshotName(t *testing.T) {
 	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
 	assert.Equal(t, snap.Name, updated.Status.PodSnapshotName,
 		"status derivation must recover the PodSnapshot name")
+	assert.Equal(t, snap.UID, updated.Status.PodSnapshotUID,
+		"status derivation must recover the PodSnapshot UID")
 }
 
 func TestSnapshotJobReconcileRecoversPendingCapturedCondition(t *testing.T) {
@@ -325,7 +330,7 @@ func TestClassifyExistingPodSnapshot(t *testing.T) {
 		require.NoError(t, err)
 		r := makeSnapshotJobReconciler(s, owned)
 
-		got, err := r.classifyExistingPodSnapshot(context.Background(), sj, owned.Name, errors.New("AlreadyExists"))
+		got, err := r.classifyExistingPodSnapshot(context.Background(), sj, owned, errors.New("AlreadyExists"))
 		require.NoError(t, err)
 		assert.Equal(t, owned.Name, got.Name)
 	})
@@ -338,8 +343,10 @@ func TestClassifyExistingPodSnapshot(t *testing.T) {
 			},
 		}
 		r := makeSnapshotJobReconciler(s, foreign)
+		desired, err := buildPodSnapshot(sj, pod)
+		require.NoError(t, err)
 
-		_, err := r.classifyExistingPodSnapshot(context.Background(), sj, foreign.Name, errors.New("AlreadyExists"))
+		_, err = r.classifyExistingPodSnapshot(context.Background(), sj, desired, errors.New("AlreadyExists"))
 		require.Error(t, err)
 		assert.True(t, errors.Is(err, errPodSnapshotNameConflict))
 	})
@@ -349,8 +356,10 @@ func TestClassifyExistingPodSnapshot(t *testing.T) {
 		require.NoError(t, err)
 		stale.Labels[snapshotv1alpha1.SnapshotJobOwnerUIDLabel] = "old-sj-uid"
 		r := makeSnapshotJobReconciler(s, stale)
+		desired, err := buildPodSnapshot(sj, pod)
+		require.NoError(t, err)
 
-		_, err = r.classifyExistingPodSnapshot(context.Background(), sj, stale.Name, errors.New("AlreadyExists"))
+		_, err = r.classifyExistingPodSnapshot(context.Background(), sj, desired, errors.New("AlreadyExists"))
 		require.Error(t, err)
 		assert.ErrorIs(t, err, errPodSnapshotNameConflict)
 	})
@@ -389,14 +398,211 @@ func TestClassifyExistingPodSnapshot(t *testing.T) {
 		assert.Equal(t, owned.Name, got.Name)
 	})
 
+	t.Run("lookup rejects a same-name replacement UID", func(t *testing.T) {
+		tracked := sj.DeepCopy()
+		tracked.Status.PodSnapshotUID = types.UID("original-snapshot-uid")
+		replacement, err := buildPodSnapshot(tracked, pod)
+		require.NoError(t, err)
+		replacement.UID = types.UID("replacement-snapshot-uid")
+		r := makeSnapshotJobReconciler(s, replacement)
+
+		_, err = r.findOwnedPodSnapshot(context.Background(), tracked)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, errPodSnapshotNameConflict)
+	})
+
+	t.Run("AlreadyExists rejects owned PodSnapshot with different source identity", func(t *testing.T) {
+		desired, err := buildPodSnapshot(sj, pod)
+		require.NoError(t, err)
+		existing := desired.DeepCopy()
+		existing.Spec.Source.PodRef.UID = types.UID("different-pod-uid")
+		r := makeSnapshotJobReconciler(s, existing)
+
+		_, err = r.classifyExistingPodSnapshot(context.Background(), sj, desired, errors.New("AlreadyExists"))
+		require.Error(t, err)
+		assert.ErrorIs(t, err, errPodSnapshotNameConflict)
+	})
+
 	t.Run("cache lag: NotFound surfaces the original AlreadyExists for requeue", func(t *testing.T) {
 		r := makeSnapshotJobReconciler(s) // nothing seeded
+		desired, err := buildPodSnapshot(sj, pod)
+		require.NoError(t, err)
 
 		createErr := errors.New("AlreadyExists")
-		_, err := r.classifyExistingPodSnapshot(context.Background(), sj, sj.Name, createErr)
+		_, err = r.classifyExistingPodSnapshot(context.Background(), sj, desired, createErr)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, createErr)
 	})
+}
+
+func TestSnapshotJobReconcileRecordedPodSnapshotMissingFailsWithoutRecreation(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+	sj.Status.SourceJobUID = types.UID("source-job-uid")
+	sj.Status.PodSnapshotName = sj.Name
+	sj.Status.PodSnapshotUID = types.UID("original-snapshot-uid")
+
+	job, err := buildSourceJob(sj)
+	require.NoError(t, err)
+	job.UID = sj.Status.SourceJobUID
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	r := makeSnapshotJobReconciler(s, sj, job) // the recorded PodSnapshot is gone
+
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, snapshotv1alpha1.ReasonPodSnapshotDeleted, failed.Reason)
+	assert.Equal(t, types.UID("original-snapshot-uid"), updated.Status.PodSnapshotUID)
+
+	snaps := &snapshotv1alpha1.PodSnapshotList{}
+	require.NoError(t, r.List(context.Background(), snaps))
+	assert.Empty(t, snaps.Items, "a one-shot capture must not be recreated after its recorded PodSnapshot disappears")
+}
+
+func TestSnapshotJobReconcileRecordedPodSnapshotCacheMissUsesAuthoritativeReader(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+	sj.Status.SourceJobUID = types.UID("source-job-uid")
+	sj.Status.PodSnapshotName = sj.Name
+	sj.Status.PodSnapshotUID = types.UID("pod-snapshot-uid")
+
+	job, err := buildSourceJob(sj)
+	require.NoError(t, err)
+	job.UID = sj.Status.SourceJobUID
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	pod := sourcePodForJob(job)
+	snap, err := buildPodSnapshot(sj, pod)
+	require.NoError(t, err)
+	snap.UID = sj.Status.PodSnapshotUID
+
+	// The cached client does not contain the PodSnapshot, simulating informer lag.
+	// The authoritative reader does, so the recorded child must remain valid.
+	r := makeSnapshotJobReconciler(s, sj, job, pod)
+	r.APIReader = fake.NewClientBuilder().WithScheme(s).WithObjects(snap).Build()
+
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobFailed(updated),
+		"a stale cached NotFound must not become permanent PodSnapshotDeleted")
+	assert.Equal(t, snap.UID, updated.Status.PodSnapshotUID)
+}
+
+func TestSnapshotJobReconcileRecordedPodSnapshotAuthoritativeReadErrorRetries(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+	sj.Status.SourceJobUID = types.UID("source-job-uid")
+	sj.Status.PodSnapshotName = sj.Name
+	sj.Status.PodSnapshotUID = types.UID("pod-snapshot-uid")
+
+	job, err := buildSourceJob(sj)
+	require.NoError(t, err)
+	job.UID = sj.Status.SourceJobUID
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	r := makeSnapshotJobReconciler(s, sj, job) // cached PodSnapshot lookup misses
+	r.APIReader = fake.NewClientBuilder().WithScheme(s).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+			return errors.New("transient API read failure")
+		},
+	}).Build()
+
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.Error(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobFailed(updated),
+		"an incomplete authoritative observation must be retried, not persisted as terminal")
+}
+
+func TestSnapshotJobReconcileRejectsSameNamePodSnapshotReplacement(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+	sj.Status.SourceJobUID = types.UID("source-job-uid")
+	sj.Status.PodSnapshotName = sj.Name
+	sj.Status.PodSnapshotUID = types.UID("original-snapshot-uid")
+
+	job, err := buildSourceJob(sj)
+	require.NoError(t, err)
+	job.UID = sj.Status.SourceJobUID
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	pod := sourcePodForJob(job)
+	replacement, err := buildPodSnapshot(sj, pod)
+	require.NoError(t, err)
+	replacement.UID = types.UID("replacement-snapshot-uid")
+	r := makeSnapshotJobReconciler(s, sj, job, pod, replacement)
+
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, snapshotv1alpha1.ReasonPodSnapshotNameConflict, failed.Reason)
+	assert.Equal(t, types.UID("original-snapshot-uid"), updated.Status.PodSnapshotUID,
+		"a replacement UID must never overwrite the recorded capture identity")
+}
+
+func TestSnapshotJobReconcileRejectsPodSnapshotSpecDriftBeforeUIDBinding(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*snapshotv1alpha1.PodSnapshot)
+	}{
+		{
+			name: "source pod name",
+			mutate: func(snap *snapshotv1alpha1.PodSnapshot) {
+				snap.Spec.Source.PodRef.Name = "other-pod"
+			},
+		},
+		{
+			name: "source pod UID",
+			mutate: func(snap *snapshotv1alpha1.PodSnapshot) {
+				snap.Spec.Source.PodRef.UID = types.UID("other-pod-uid")
+			},
+		},
+		{
+			name: "target containers",
+			mutate: func(snap *snapshotv1alpha1.PodSnapshot) {
+				snap.Spec.Source.PodRef.Containers = []string{"other-container"}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			s := snapshotJobReconcilerScheme()
+			sj := minimalSnapshotJob()
+			sj.Status.SourceJobUID = types.UID("source-job-uid")
+			job, err := buildSourceJob(sj)
+			require.NoError(t, err)
+			job.UID = sj.Status.SourceJobUID
+			require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+			pod := sourcePodForJob(job)
+			snap, err := buildPodSnapshot(sj, pod)
+			require.NoError(t, err)
+			snap.UID = types.UID("pod-snapshot-uid")
+			test.mutate(snap)
+			r := makeSnapshotJobReconciler(s, sj, job, pod, snap)
+
+			_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+			require.NoError(t, err)
+
+			updated := &snapshotv1alpha1.SnapshotJob{}
+			require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+			failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+			require.NotNil(t, failed)
+			assert.Equal(t, snapshotv1alpha1.ReasonPodSnapshotNameConflict, failed.Reason)
+			assert.Empty(t, updated.Status.PodSnapshotUID,
+				"an unverified PodSnapshot UID must not be persisted")
+		})
+	}
 }
 
 // ---- findSourcePod ----
