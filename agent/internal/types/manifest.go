@@ -11,10 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ai-dynamo/snapshot/api/compat"
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"gopkg.in/yaml.v3"
+
+	"github.com/ai-dynamo/snapshot/api/compat"
 )
 
 const manifestFilename = "manifest.yaml"
@@ -144,13 +145,33 @@ func NewOverlayManifest(exclusions OverlaySettings, upperDir string, ociSpec *sp
 type CUDAManifest struct {
 	PIDs           []int    `yaml:"pids"`
 	SourceGPUUUIDs []string `yaml:"sourceGpuUuids"`
+
+	// SourceGPUs describes the same GPUs as SourceGPUUUIDs, in the same order.
+	// The UUIDs stay where they are because the device map is built from them
+	// and artifacts written before this field exists still restore.
+	SourceGPUs          []GPUManifest `yaml:"sourceGpus,omitempty"`
+	SourceDriverVersion string        `yaml:"sourceDriverVersion,omitempty"`
 }
 
-func NewCUDAManifest(pids []int, sourceGPUUUIDs []string) CUDAManifest {
-	return CUDAManifest{
-		PIDs:           append([]int(nil), pids...),
-		SourceGPUUUIDs: append([]string(nil), sourceGPUUUIDs...),
+// GPUManifest is one GPU the checkpointed process could see.
+type GPUManifest struct {
+	UUID        string `yaml:"uuid"`
+	ProductName string `yaml:"productName,omitempty"`
+}
+
+func NewCUDAManifest(pids []int, gpus compat.GPUFacts) CUDAManifest {
+	m := CUDAManifest{
+		PIDs:                append([]int(nil), pids...),
+		SourceDriverVersion: gpus.DriverVersion,
 	}
+	for _, device := range gpus.Devices {
+		m.SourceGPUUUIDs = append(m.SourceGPUUUIDs, device.UUID)
+		m.SourceGPUs = append(m.SourceGPUs, GPUManifest{
+			UUID:        device.UUID,
+			ProductName: device.ProductName,
+		})
+	}
+	return m
 }
 
 func (m CUDAManifest) IsEmpty() bool {
@@ -213,9 +234,31 @@ func validateArtifactManifest(artifact ArtifactManifest) error {
 // compare. Both gates read it from here, so the two cannot disagree about what
 // the checkpoint recorded.
 func (m *CheckpointManifest) CompatFacts() compat.Facts {
+	gpus := m.gpuFacts()
 	return compat.Facts{
+		DriverVersion:      gpus.DriverVersion,
+		GPUDevices:         gpus.Devices,
 		ExternalizedMounts: m.externalizedMounts(),
 	}
+}
+
+// gpuFacts prefers the described GPUs and falls back to the UUID list, so an
+// artifact captured before the models were recorded still reports its GPU count.
+func (m *CheckpointManifest) gpuFacts() compat.GPUFacts {
+	facts := compat.GPUFacts{DriverVersion: m.CUDA.SourceDriverVersion}
+	if len(m.CUDA.SourceGPUs) > 0 {
+		for _, gpu := range m.CUDA.SourceGPUs {
+			facts.Devices = append(facts.Devices, compat.GPUDevice{
+				UUID:        gpu.UUID,
+				ProductName: gpu.ProductName,
+			})
+		}
+		return facts
+	}
+	for _, uuid := range m.CUDA.SourceGPUUUIDs {
+		facts.Devices = append(facts.Devices, compat.GPUDevice{UUID: uuid})
+	}
+	return facts
 }
 
 // externalizedMounts returns the destinations CRIU externalized at capture, in a
