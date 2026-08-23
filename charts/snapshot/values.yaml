@@ -190,7 +190,8 @@ config:
     workDir: /var/criu-work
 
     # K8s-specific options (recommended defaults for containers)
-    leaveRunning: true      # Keep process running after checkpoint
+    # Note: the source process is always terminated by a checkpoint; there is
+    # no leave-running mode.
     shellJob: true          # Containers are often session leaders
     tcpClose: false         # Do not close non-listening TCP sockets on restore
     tcpEstablished: true    # Preserve established TCP sockets during restore

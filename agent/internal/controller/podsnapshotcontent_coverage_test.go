@@ -6,6 +6,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"syscall"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -50,7 +51,6 @@ func makeNodeControllerWithInterceptor(t *testing.T, fc *fakeCheckpointer, funcs
 		contentIndexer: idx,
 	}
 	w.checkpointFn = fc.fn
-	w.releaseCheckpointFn = func(int) error { return nil }
 	return w
 }
 
@@ -219,7 +219,7 @@ func TestSetSnapshotContentSucceeded_ConflictReturnsError(t *testing.T) {
 	assert.Nil(t, meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
 }
 
-func TestRunCheckpoint_ReadyPatchErrorDoesNotRelease(t *testing.T) {
+func TestRunCheckpoint_ReadyPatchErrorLeavesNotReady(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	funcs := interceptor.Funcs{
 		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
@@ -227,33 +227,23 @@ func TestRunCheckpoint_ReadyPatchErrorDoesNotRelease(t *testing.T) {
 		},
 	}
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content)
-	released := false
-	w.releaseCheckpointFn = func(int) error {
-		released = true
-		return nil
-	}
 	pod := &corev1.Pod{}
 	leaseKey := client.ObjectKey{Namespace: "inference", Name: "checkpoint-lease-x"}
 	artifactPath := w.config.Storage.BasePath
 
 	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, "x", artifactPath, leaseKey, "x")
 
-	assert.False(t, released)
+	// The artifact resume path retries the Ready write later; nothing is written now.
 	assert.Nil(t, meta.FindStatusCondition(
 		getContent(t, w, content.Name).Status.Conditions,
 		snapshotv1alpha1.PodSnapshotConditionReady,
 	))
 }
 
-func TestMarkCheckpointReadyAndRelease_FailedBeforeReadyDoesNotRelease(t *testing.T) {
-	stored := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
-	meta.SetStatusCondition(&stored.Status.Conditions, metav1.Condition{
-		Type:    snapshotv1alpha1.PodSnapshotConditionFailed,
-		Status:  metav1.ConditionTrue,
-		Reason:  "SourcePodGone",
-		Message: "source pod is gone",
-	})
-	funcs := interceptor.Funcs{
+// failedBeforeReadyInterceptor rejects Ready patches with a conflict, simulating a Failed
+// condition that landed first (its optimistic lock wins).
+func failedBeforeReadyInterceptor() interceptor.Funcs {
+	return interceptor.Funcs{
 		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			sc, ok := obj.(*snapshotv1alpha1.PodSnapshotContent)
 			if ok {
@@ -264,20 +254,22 @@ func TestMarkCheckpointReadyAndRelease_FailedBeforeReadyDoesNotRelease(t *testin
 			return c.Status().Patch(ctx, obj, patch, opts...)
 		},
 	}
-	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, stored)
-	released := false
-	w.releaseCheckpointFn = func(int) error {
-		released = true
-		return nil
-	}
+}
+
+func TestMarkCheckpointReady_FailedBeforeReadyIsSticky(t *testing.T) {
+	stored := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	meta.SetStatusCondition(&stored.Status.Conditions, metav1.Condition{
+		Type:    snapshotv1alpha1.PodSnapshotConditionFailed,
+		Status:  metav1.ConditionTrue,
+		Reason:  "SourcePodGone",
+		Message: "source pod is gone",
+	})
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, failedBeforeReadyInterceptor(), stored)
 	stale := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
-	ctx, target := startKillableTarget(t)
 
-	err := w.markCheckpointReadyAndRelease(context.Background(), stale, target.Process.Pid)
+	err := w.markCheckpointReady(context.Background(), stale)
 
-	require.NoError(t, err)
-	assert.False(t, released)
-	requireKilledBySIGKILL(t, ctx, target)
+	require.NoError(t, err, "a sticky Failed condition is an accepted outcome, not a retryable error")
 	got := getContent(t, w, stored.Name)
 	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
 	failed := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
@@ -285,7 +277,7 @@ func TestMarkCheckpointReadyAndRelease_FailedBeforeReadyDoesNotRelease(t *testin
 	assert.Equal(t, "SourcePodGone", failed.Reason)
 }
 
-func TestRunCheckpoint_FailedBeforeReadyDoesNotRelease(t *testing.T) {
+func TestRunCheckpoint_FailedBeforeReadyDoesNotKill(t *testing.T) {
 	stored := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	meta.SetStatusCondition(&stored.Status.Conditions, metav1.Condition{
 		Type:    snapshotv1alpha1.PodSnapshotConditionFailed,
@@ -293,33 +285,18 @@ func TestRunCheckpoint_FailedBeforeReadyDoesNotRelease(t *testing.T) {
 		Reason:  "SourcePodGone",
 		Message: "source pod is gone",
 	})
-	funcs := interceptor.Funcs{
-		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
-			sc, ok := obj.(*snapshotv1alpha1.PodSnapshotContent)
-			if ok {
-				if cond := meta.FindStatusCondition(sc.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady); cond != nil && cond.Status == metav1.ConditionTrue {
-					return conflictErr()
-				}
-			}
-			return c.Status().Patch(ctx, obj, patch, opts...)
-		},
-	}
-	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, stored)
-	released := false
-	w.releaseCheckpointFn = func(int) error {
-		released = true
-		return nil
-	}
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, failedBeforeReadyInterceptor(), stored)
 	stale := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	pod := &corev1.Pod{}
 	leaseKey := client.ObjectKey{Namespace: "inference", Name: "checkpoint-lease-x"}
 	artifactPath := w.config.Storage.BasePath
-	ctx, target := startKillableTarget(t)
+	_, target := startKillableTarget(t)
 
 	w.runCheckpoint(context.Background(), stale, pod, "main", "abc123", target.Process.Pid, "x", artifactPath, leaseKey, "x")
 
-	assert.False(t, released)
-	requireKilledBySIGKILL(t, ctx, target)
+	// The dump itself terminates the source; a raced Failed condition must not
+	// trigger an extra kill of an unrelated PID.
+	require.NoError(t, target.Process.Signal(syscall.Signal(0)), "target must not be signalled on the Failed-before-Ready path")
 	got := getContent(t, w, stored.Name)
 	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
 	failed := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
@@ -327,59 +304,7 @@ func TestRunCheckpoint_FailedBeforeReadyDoesNotRelease(t *testing.T) {
 	assert.Equal(t, "SourcePodGone", failed.Reason)
 }
 
-func TestMarkCheckpointReadyAndRelease_FailedBeforeReadyAlreadyExited(t *testing.T) {
-	w, stale, released := setupFailedBeforeReady(t)
-	_, target := startKillableTarget(t)
-	require.NoError(t, target.Process.Kill())
-	_ = target.Wait()
-
-	err := w.markCheckpointReadyAndRelease(context.Background(), stale, target.Process.Pid)
-
-	require.NoError(t, err, "ESRCH from an already-exited target must count as successful cleanup")
-	assert.False(t, released())
-}
-
-func TestMarkCheckpointReadyAndRelease_FailedBeforeReadyKillError(t *testing.T) {
-	w, stale, released := setupFailedBeforeReady(t)
-
-	err := w.markCheckpointReadyAndRelease(context.Background(), stale, 0)
-
-	require.Error(t, err)
-	assert.False(t, released())
-}
-
-// setupFailedBeforeReady builds a controller whose Ready status patch conflicts against a
-// stored Failed condition, so markCheckpointReadyAndRelease SIGKILLs and does not write the sentinel.
-func setupFailedBeforeReady(t *testing.T) (*NodeController, *snapshotv1alpha1.PodSnapshotContent, func() bool) {
-	t.Helper()
-	stored := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
-	meta.SetStatusCondition(&stored.Status.Conditions, metav1.Condition{
-		Type:    snapshotv1alpha1.PodSnapshotConditionFailed,
-		Status:  metav1.ConditionTrue,
-		Reason:  "SourcePodGone",
-		Message: "source pod is gone",
-	})
-	funcs := interceptor.Funcs{
-		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
-			sc, ok := obj.(*snapshotv1alpha1.PodSnapshotContent)
-			if ok {
-				if cond := meta.FindStatusCondition(sc.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady); cond != nil && cond.Status == metav1.ConditionTrue {
-					return conflictErr()
-				}
-			}
-			return c.Status().Patch(ctx, obj, patch, opts...)
-		},
-	}
-	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, stored)
-	released := false
-	w.releaseCheckpointFn = func(int) error {
-		released = true
-		return nil
-	}
-	return w, makeWorkOrder("podsnapshotcontent-x", "node-a", "x"), func() bool { return released }
-}
-
-func TestMarkCheckpointReadyAndRelease_AlreadyReadyReleases(t *testing.T) {
+func TestMarkCheckpointReady_AlreadyReadyNoOp(t *testing.T) {
 	stored := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	meta.SetStatusCondition(&stored.Status.Conditions, metav1.Condition{
 		Type:    snapshotv1alpha1.PodSnapshotConditionReady,
@@ -387,32 +312,15 @@ func TestMarkCheckpointReadyAndRelease_AlreadyReadyReleases(t *testing.T) {
 		Reason:  "Captured",
 		Message: "Checkpoint captured and verified",
 	})
-	funcs := interceptor.Funcs{
-		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
-			sc, ok := obj.(*snapshotv1alpha1.PodSnapshotContent)
-			if ok {
-				if cond := meta.FindStatusCondition(sc.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady); cond != nil && cond.Status == metav1.ConditionTrue {
-					return conflictErr()
-				}
-			}
-			return c.Status().Patch(ctx, obj, patch, opts...)
-		},
-	}
-	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, stored)
-	released := false
-	w.releaseCheckpointFn = func(int) error {
-		released = true
-		return nil
-	}
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, failedBeforeReadyInterceptor(), stored)
 	stale := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 
-	err := w.markCheckpointReadyAndRelease(context.Background(), stale, 7)
+	err := w.markCheckpointReady(context.Background(), stale)
 
-	require.NoError(t, err)
-	assert.True(t, released)
+	require.NoError(t, err, "another holder's Ready write is success, not a conflict to escalate")
 }
 
-func TestMarkCheckpointReadyAndRelease_SecondConflictObservesFailed(t *testing.T) {
+func TestMarkCheckpointReady_SecondConflictObservesFailed(t *testing.T) {
 	stored := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	readyPatches := 0
 	funcs := interceptor.Funcs{
@@ -442,19 +350,11 @@ func TestMarkCheckpointReadyAndRelease_SecondConflictObservesFailed(t *testing.T
 		},
 	}
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, stored)
-	released := false
-	w.releaseCheckpointFn = func(int) error {
-		released = true
-		return nil
-	}
-	ctx, target := startKillableTarget(t)
 
-	err := w.markCheckpointReadyAndRelease(context.Background(), makeWorkOrder("podsnapshotcontent-x", "node-a", "x"), target.Process.Pid)
+	err := w.markCheckpointReady(context.Background(), makeWorkOrder("podsnapshotcontent-x", "node-a", "x"))
 
 	require.NoError(t, err)
 	assert.Equal(t, 2, readyPatches, "Failed must be observed on the second Ready conflict")
-	assert.False(t, released)
-	requireKilledBySIGKILL(t, ctx, target)
 }
 
 func TestSetSnapshotContentFailed_StatusPatchErrorReturnsError(t *testing.T) {

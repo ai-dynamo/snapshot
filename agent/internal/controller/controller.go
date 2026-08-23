@@ -69,7 +69,6 @@ type NodeController struct {
 	writeControlSentinelFn  func(int, string) error
 	controlSentinelExistsFn func(int, string) (bool, error)
 	sendSignalFn            func(logr.Logger, int, syscall.Signal, string) error
-	releaseCheckpointFn     func(containerPID int) error
 	restoreQueue            workqueue.TypedDelayingInterface[client.ObjectKey]
 	restorePodLister        corev1listers.PodLister
 
@@ -205,9 +204,6 @@ func newDefaultController(
 		sendSignalFn:            snapshotruntime.SendSignalToPID,
 	}
 	w.checkpointFn = w.executorCheckpoint
-	w.releaseCheckpointFn = func(containerPID int) error {
-		return snapshotruntime.WriteControlSentinel(containerPID, snapshotv1alpha1.SnapshotCompleteFile)
-	}
 	return w
 }
 
@@ -997,6 +993,15 @@ func (w *NodeController) release(key string) {
 	w.inFlightMu.Lock()
 	defer w.inFlightMu.Unlock()
 	delete(w.inFlight, key)
+}
+
+// checkpointInFlight reports whether a capture currently holds the in-flight
+// guard for key without acquiring it.
+func (w *NodeController) checkpointInFlight(key string) bool {
+	w.inFlightMu.Lock()
+	defer w.inFlightMu.Unlock()
+	_, held := w.inFlight[key]
+	return held
 }
 
 // podRefIndex is the PodSnapshotContent informer index keyed by source pod ("<namespace>/<name>").

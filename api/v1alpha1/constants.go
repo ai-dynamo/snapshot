@@ -64,8 +64,12 @@ const (
 	// image depends on this name.
 	LegacySnapshotControlDirEnv = "DYN_SNAPSHOT_CONTROL_DIR"
 
-	// SnapshotCompleteFile is written by the snapshot agent inside the
-	// control volume when a checkpoint has completed successfully.
+	// SnapshotCompleteFile named the sentinel the agent used to release a
+	// checkpointed workload when leave-running dumps existed. A checkpoint now
+	// always terminates the source process, so the agent no longer writes it;
+	// a workload polling for this file is killed instead of released.
+	//
+	// Deprecated: no longer written. Remove once no workload image waits on it.
 	SnapshotCompleteFile = "snapshot-complete"
 
 	// RestoreCompleteFile is written by the snapshot agent inside the
