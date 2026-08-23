@@ -8682,7 +8682,13 @@ spec:
                 format: date-time
                 type: string
             type: object
+        required:
+        - spec
         type: object
+        x-kubernetes-validations:
+        - message: metadata.name must be no more than 63 characters because SnapshotJob
+            uses it as a label value
+          rule: size(self.metadata.name) <= 63
     served: true
     storage: true
     subresources:

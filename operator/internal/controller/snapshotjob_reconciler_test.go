@@ -555,11 +555,9 @@ func TestSnapshotJobReconcileRunningTransitionsOnJobReady(t *testing.T) {
 }
 
 // TestSnapshotJobReconcileSetsStartedAtWhenRunningAlreadyPersisted covers a case
-// setCondition's return value alone can't catch: Running=True/PodReady is
-// already persisted (e.g. status was pre-loaded, or a prior write raced) while
-// StartedAt is still nil. setCondition would then report no change, and without
-// explicitly OR-ing in the StartedAt assignment, that timestamp would be
-// silently dropped on every reconcile from then on.
+// condition updates alone cannot catch: Running=True/PodReady is already
+// persisted (e.g. status was pre-loaded, or a prior write raced) while StartedAt
+// is still nil. The timestamp must be derived independently and persisted.
 func TestSnapshotJobReconcileSetsStartedAtWhenRunningAlreadyPersisted(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
@@ -594,9 +592,8 @@ func TestSnapshotJobConditionTracksObservedGeneration(t *testing.T) {
 	sj.Generation = 7
 	reconciliationTime := metav1.NewTime(time.Date(2026, time.August, 23, 12, 34, 56, 0, time.UTC))
 
-	changed := setCondition(sj, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse, reconciliationTime,
+	setCondition(sj, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse, reconciliationTime,
 		snapshotv1alpha1.ReasonPodPending, "waiting for the source pod")
-	require.True(t, changed)
 	condition := meta.FindStatusCondition(sj.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning)
 	require.NotNil(t, condition)
 	assert.Equal(t, int64(7), condition.ObservedGeneration)
@@ -604,9 +601,8 @@ func TestSnapshotJobConditionTracksObservedGeneration(t *testing.T) {
 	// A generation change must refresh the condition even when its state and
 	// message are otherwise unchanged.
 	sj.Generation = 8
-	changed = setCondition(sj, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse, reconciliationTime,
+	setCondition(sj, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse, reconciliationTime,
 		snapshotv1alpha1.ReasonPodPending, "waiting for the source pod")
-	require.True(t, changed)
 	condition = meta.FindStatusCondition(sj.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning)
 	require.NotNil(t, condition)
 	assert.Equal(t, int64(8), condition.ObservedGeneration)

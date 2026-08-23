@@ -137,12 +137,8 @@ func TestBuildSourceJob(t *testing.T) {
 	})
 
 	t.Run("SnapshotJob name longer than a label value is a terminal spec error", func(t *testing.T) {
-		// The CRD does not constrain metadata.name length (up to 253 chars, RFC
-		// 1123 subdomain), but sj.Name becomes a label VALUE (capped at 63, RFC
-		// 1123 label value) via SnapshotJobOwnerLabel and CheckpointIDLabel.
-		// Without this check, a long-named SnapshotJob would fail Job creation
-		// with an apiserver error and retry forever, since that's not an
-		// AlreadyExists.
+		// Admission rejects this today, but construction keeps the check for
+		// objects that predate or bypass the current CRD schema.
 		sj := minimalSnapshotJob()
 		sj.Name = strings.Repeat("a", 64)
 

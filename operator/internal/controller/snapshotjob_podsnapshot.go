@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -172,12 +173,9 @@ func (r *SnapshotJobReconciler) validatePodSnapshotForAdoption(ctx context.Conte
 // ownerRef would make Kubernetes GC delete this artifact along with its owner.
 func buildPodSnapshot(sj *snapshotv1alpha1.SnapshotJob, pod *corev1.Pod) (*snapshotv1alpha1.PodSnapshot, error) {
 	targetContainers := sj.Spec.PodSnapshotTemplate.TargetContainers
-	if len(targetContainers) != 1 {
-		return nil, fmt.Errorf("spec.podSnapshotTemplate.targetContainers must have exactly one entry, got %d", len(targetContainers))
+	if _, err := snapshotJobTargetContainer(sj); err != nil {
+		return nil, err
 	}
-	// Copy: the produced PodSnapshot must not share a backing array with the
-	// SnapshotJob's own spec slice.
-	containers := append([]string(nil), targetContainers...)
 	return &snapshotv1alpha1.PodSnapshot{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: snapshotv1alpha1.GroupVersion.String(),
@@ -193,7 +191,11 @@ func buildPodSnapshot(sj *snapshotv1alpha1.SnapshotJob, pod *corev1.Pod) (*snaps
 		},
 		Spec: snapshotv1alpha1.PodSnapshotSpec{
 			Source: snapshotv1alpha1.PodSnapshotSource{
-				PodRef: snapshotv1alpha1.PodReference{Name: pod.Name, UID: pod.UID, Containers: containers},
+				PodRef: snapshotv1alpha1.PodReference{
+					Name:       pod.Name,
+					UID:        pod.UID,
+					Containers: slices.Clone(targetContainers),
+				},
 			},
 		},
 	}, nil

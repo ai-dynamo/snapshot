@@ -181,6 +181,7 @@ type SnapshotJobStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=snapjob
+// +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63",message="metadata.name must be no more than 63 characters because SnapshotJob uses it as a label value"
 // +kubebuilder:printcolumn:name="Running",type="string",JSONPath=".status.conditions[?(@.type=='Running')].status"
 // +kubebuilder:printcolumn:name="Captured",type="string",JSONPath=".status.conditions[?(@.type=='Captured')].status"
 // +kubebuilder:printcolumn:name="Completed",type="string",JSONPath=".status.conditions[?(@.type=='Completed')].status"
@@ -198,8 +199,9 @@ type SnapshotJob struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
+	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
-	Spec   SnapshotJobSpec   `json:"spec,omitempty"`
+	Spec   SnapshotJobSpec   `json:"spec"`
 	Status SnapshotJobStatus `json:"status,omitempty"`
 }
 

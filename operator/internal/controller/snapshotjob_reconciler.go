@@ -58,6 +58,15 @@ type snapshotJobObservation struct {
 	failure          *snapshotJobFailure
 }
 
+// PodSnapshot failure reasons consumed by SnapshotJob. These values are part
+// of the downstream condition contract; keep their classification in one place
+// until PodSnapshot exposes shared reason constants.
+const (
+	podSnapshotReasonContentConflict   = "ContentConflict"
+	podSnapshotReasonSourcePodNotFound = "SourcePodNotFound"
+	podSnapshotReasonStalePodReference = "StalePodReference"
+)
+
 // Reconcile first drives child resources toward the desired state, then derives
 // and patches SnapshotJob status once from the resulting observation. Failed is
 // terminal, while Completed keeps retrying successful Job cleanup until it is
@@ -343,7 +352,9 @@ func captureFailureReason(snap *snapshotv1alpha1.PodSnapshot) (reason, message s
 		return snapshotv1alpha1.ReasonCaptureFailed, "PodSnapshot Failed=True with no condition detail"
 	}
 	switch condition.Reason {
-	case "ContentConflict", "SourcePodNotFound", "StalePodReference":
+	case podSnapshotReasonContentConflict,
+		podSnapshotReasonSourcePodNotFound,
+		podSnapshotReasonStalePodReference:
 		return snapshotv1alpha1.ReasonPodSnapshotFailed, condition.Message
 	case snapshotv1alpha1.ReasonSourceCompletedWithoutCapture:
 		return snapshotv1alpha1.ReasonSourceCompletedWithoutCapture, condition.Message
@@ -364,9 +375,9 @@ func (r *SnapshotJobReconciler) patchSnapshotJobStatus(ctx context.Context, sj *
 	return nil
 }
 
-// setCondition sets a status condition on the SnapshotJob and reports whether it changed.
-func setCondition(sj *snapshotv1alpha1.SnapshotJob, condType string, status metav1.ConditionStatus, reconciliationTime metav1.Time, reason, message string) bool {
-	return meta.SetStatusCondition(&sj.Status.Conditions, metav1.Condition{
+// setCondition sets a status condition on the SnapshotJob.
+func setCondition(sj *snapshotv1alpha1.SnapshotJob, condType string, status metav1.ConditionStatus, reconciliationTime metav1.Time, reason, message string) {
+	meta.SetStatusCondition(&sj.Status.Conditions, metav1.Condition{
 		Type:               condType,
 		Status:             status,
 		ObservedGeneration: sj.Generation,

@@ -110,7 +110,11 @@ func classifyExistingSourceJob(sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Jo
 	if err != nil {
 		return &snapshotJobFailure{reason: snapshotv1alpha1.ReasonInvalidSpec, cause: err}
 	}
-	if !sourceJobHasExpectedIdentity(desired, job, sj.Spec.PodSnapshotTemplate.TargetContainers[0]) {
+	targetContainer, err := snapshotJobTargetContainer(sj)
+	if err != nil {
+		return &snapshotJobFailure{reason: snapshotv1alpha1.ReasonInvalidSpec, cause: err}
+	}
+	if !sourceJobHasExpectedIdentity(desired, job, targetContainer) {
 		return &snapshotJobFailure{
 			reason: snapshotv1alpha1.ReasonJobNameConflict,
 			cause: fmt.Errorf("existing source Job %q does not carry the immutable identity expected for this SnapshotJob",
