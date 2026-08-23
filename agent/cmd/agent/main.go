@@ -59,7 +59,8 @@ func main() {
 	)
 
 	// The node controller handles both restore and capture paths.
-	nodeController, err := controller.NewNodeController(cfg, rt, rootLog.WithName("controller"))
+	nodeController, err := controller.NewNodeController(cfg, rt, rootLog.WithName("controller"),
+		NewSkipCompatCheckFn(ConfigMapPath, cfg.Restore.SkipCompatCheck, agentLog))
 	if err != nil {
 		fatal(agentLog, err, "Failed to create snapshot node controller")
 	}

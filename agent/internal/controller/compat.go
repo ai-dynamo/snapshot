@@ -28,7 +28,7 @@ func (w *NodeController) refuseRestore(pod *corev1.Pod, incompatible *compat.Inc
 // skipCompatCheckRequested reports whether this restore was asked to skip the
 // compatibility gates.
 func (w *NodeController) skipCompatCheckRequested(pod *corev1.Pod) bool {
-	return w.config.Restore.SkipCompatCheck ||
+	return w.skipCompatCheckFn() ||
 		snapshotv1alpha1.SkipCompatCheckFromAnnotations(pod.Annotations)
 }
 
