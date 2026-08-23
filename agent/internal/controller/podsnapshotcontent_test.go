@@ -243,8 +243,10 @@ func TestReconcileSnapshotContent_GateLabelsPodOnSuccess(t *testing.T) {
 }
 
 func TestReconcileSourcePod_InFlightGuard(t *testing.T) {
-	// Content name differs from ID to prove the guard is keyed on the ID, not the content name.
+	// The UID is unrelated to the content name, proving the guard is keyed on the
+	// immutable content UID and target container, not the content name.
 	content := makeWorkOrder("podsnapshotcontent-mywork", "node-a", "x")
+	content.UID = types.UID("unrelated-content-uid")
 	pod := makeSourcePod()
 	pod.Labels[snapshotv1alpha1.CaptureEligibleLabel] = "true"
 	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)

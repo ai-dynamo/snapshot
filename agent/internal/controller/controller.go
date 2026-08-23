@@ -457,7 +457,8 @@ func (w *NodeController) getPodSnapshotFromPod(ctx context.Context, pod *corev1.
 		if apierrors.IsNotFound(err) {
 			return nil, newRestorePendingError("SnapshotPending", fmt.Sprintf("Waiting for PodSnapshot %s", key.String()))
 		}
-		return nil, newRestorePendingError("SnapshotPending", fmt.Sprintf("Unable to read PodSnapshot %s: %v", key.String(), err))
+		w.log.Error(err, "Failed to read PodSnapshot during restore preflight", "pod", client.ObjectKeyFromObject(pod).String(), "snapshot", key.String())
+		return nil, newRestorePendingError("SnapshotPending", fmt.Sprintf("Unable to read PodSnapshot %s; retrying", key.String()))
 	}
 	return snapshot, nil
 }
@@ -486,7 +487,8 @@ func (w *NodeController) getPodSnapshotContentFromSnapshot(ctx context.Context, 
 		if apierrors.IsNotFound(err) {
 			return nil, newRestorePendingError("ContentPending", fmt.Sprintf("Waiting for bound PodSnapshotContent %s", contentName))
 		}
-		return nil, newRestorePendingError("ContentPending", fmt.Sprintf("Unable to read bound PodSnapshotContent %s: %v", contentName, err))
+		w.log.Error(err, "Failed to read PodSnapshotContent during restore preflight", "snapshot", client.ObjectKeyFromObject(snapshot).String(), "content", contentName)
+		return nil, newRestorePendingError("ContentPending", fmt.Sprintf("Unable to read bound PodSnapshotContent %s; retrying", contentName))
 	}
 	ref := content.Spec.PodSnapshotRef
 	if ref.Namespace != snapshot.Namespace || ref.Name != snapshot.Name || ref.UID == "" || ref.UID != snapshot.UID {

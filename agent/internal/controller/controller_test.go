@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -416,6 +417,58 @@ func TestPreflightRestorePendingStates(t *testing.T) {
 		assert.Nil(t, artifact)
 		assert.Equal(t, "ArtifactPending", pendingRestoreReason(t, err))
 	})
+}
+
+func TestRestorePreflightAPIErrorsUseStablePendingMessages(t *testing.T) {
+	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	snapshot, _ := readySnapshotObjects()
+
+	tests := []struct {
+		name        string
+		objects     []runtime.Object
+		failType    client.Object
+		wantReason  string
+		wantMessage string
+	}{
+		{
+			name:        "snapshot read",
+			failType:    &snapshotv1alpha1.PodSnapshot{},
+			wantReason:  "SnapshotPending",
+			wantMessage: "Unable to read PodSnapshot inference/snapshot-a; retrying",
+		},
+		{
+			name:        "content read",
+			objects:     []runtime.Object{snapshot},
+			failType:    &snapshotv1alpha1.PodSnapshotContent{},
+			wantReason:  "ContentPending",
+			wantMessage: "Unable to read bound PodSnapshotContent podsnapshotcontent-snapshot-uid; retrying",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			w := makeTestController(t, pod)
+			w.client = ctrlfake.NewClientBuilder().
+				WithScheme(testScheme(t)).
+				WithRuntimeObjects(tc.objects...).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, delegated client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						if reflect.TypeOf(obj) == reflect.TypeOf(tc.failType) {
+							return errors.New("transient apiserver detail")
+						}
+						return delegated.Get(ctx, key, obj, opts...)
+					},
+				}).
+				Build()
+
+			artifact, err := w.preflightRestore(context.Background(), pod)
+
+			assert.Nil(t, artifact)
+			assert.Equal(t, tc.wantReason, pendingRestoreReason(t, err))
+			assert.EqualError(t, err, tc.wantMessage)
+			assert.NotContains(t, err.Error(), "transient apiserver detail")
+		})
+	}
 }
 
 func TestPreflightRestoreWaitsForPodIPBeforeTCPRestore(t *testing.T) {

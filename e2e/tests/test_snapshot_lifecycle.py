@@ -205,7 +205,7 @@ def snapshot_annotations(pod: object) -> dict[str, str]:
     return {
         key: value
         for key, value in annotations.items()
-        if key == "nvidia.com/restore-from" or key.startswith("nvidia.com/snapshot-")
+        if key.startswith(("nvidia.com/restore-", "nvidia.com/snapshot-"))
     }
 
 
