@@ -111,10 +111,50 @@ func TestSnapshotJobTerminalFailure(t *testing.T) {
 	}
 }
 
+// ---- condition lifecycle: present from the start, append-only ----
+
+func TestSnapshotJobConditionsPresentFromFirstReconcileAndNeverRemoved(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+	sj.UID = types.UID("sj-uid")
+	r := makeSnapshotJobReconciler(s, sj)
+
+	// First reconcile creates the source Job and must already write all four
+	// conditions, so a consumer can always distinguish "known False" from
+	// "not yet evaluated".
+	_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	want := map[string]string{
+		snapshotv1alpha1.SnapshotJobConditionRunning:   snapshotv1alpha1.ReasonPodPending,
+		snapshotv1alpha1.SnapshotJobConditionCaptured:  snapshotv1alpha1.ReasonCaptureInProgress,
+		snapshotv1alpha1.SnapshotJobConditionCompleted: snapshotv1alpha1.ReasonCaptureInProgress,
+		snapshotv1alpha1.SnapshotJobConditionFailed:    snapshotv1alpha1.ReasonNoFailure,
+	}
+	require.Len(t, updated.Status.Conditions, len(want))
+	for conditionType, reason := range want {
+		cond := meta.FindStatusCondition(updated.Status.Conditions, conditionType)
+		require.NotNil(t, cond, "%s must be present from the first status write", conditionType)
+		assert.Equal(t, metav1.ConditionFalse, cond.Status, conditionType)
+		assert.Equal(t, reason, cond.Reason, conditionType)
+	}
+
+	// Later reconciles only update conditions — none may disappear.
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	require.Len(t, updated.Status.Conditions, len(want), "conditions are append-only, never removed")
+	for conditionType := range want {
+		require.NotNil(t, meta.FindStatusCondition(updated.Status.Conditions, conditionType), conditionType)
+	}
+}
+
 // ---- two-signal completion ----
 
 func TestSnapshotJobReconcileCompletionGate(t *testing.T) {
-	t.Run("neither signal: Completed untouched", func(t *testing.T) {
+	t.Run("neither signal: all four conditions present and non-terminal", func(t *testing.T) {
 		s := snapshotJobReconcilerScheme()
 		sj := minimalSnapshotJob()
 		sj.UID = types.UID("sj-uid")
@@ -131,7 +171,14 @@ func TestSnapshotJobReconcileCompletionGate(t *testing.T) {
 
 		updated := &snapshotv1alpha1.SnapshotJob{}
 		require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
-		assert.Nil(t, meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCompleted))
+		completed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCompleted)
+		require.NotNil(t, completed, "all conditions are present from the first status write")
+		assert.Equal(t, metav1.ConditionFalse, completed.Status)
+		assert.Equal(t, snapshotv1alpha1.ReasonCaptureInProgress, completed.Reason)
+		failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+		require.NotNil(t, failed)
+		assert.Equal(t, metav1.ConditionFalse, failed.Status)
+		assert.Equal(t, snapshotv1alpha1.ReasonNoFailure, failed.Reason)
 	})
 
 	t.Run("Job complete only: waits for capture", func(t *testing.T) {
@@ -155,8 +202,11 @@ func TestSnapshotJobReconcileCompletionGate(t *testing.T) {
 		updated := &snapshotv1alpha1.SnapshotJob{}
 		require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
 		assert.False(t, snapshotv1alpha1.IsSnapshotJobCompleted(updated))
-		assert.Nil(t, meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCompleted),
-			"completion is set only after capture has succeeded")
+		completed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCompleted)
+		require.NotNil(t, completed)
+		assert.Equal(t, metav1.ConditionFalse, completed.Status)
+		assert.Equal(t, snapshotv1alpha1.ReasonCaptureInProgress, completed.Reason,
+			"WaitingForPodCompletion applies only after capture has succeeded")
 
 		jobs := &batchv1.JobList{}
 		require.NoError(t, r.List(context.Background(), jobs))

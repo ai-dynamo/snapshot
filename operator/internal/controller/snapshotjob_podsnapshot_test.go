@@ -282,10 +282,11 @@ func TestSnapshotJobReconcileFailedOnPodSnapshotFailed(t *testing.T) {
 	require.NotNil(t, updated.Status.CompletedAt)
 	running := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning)
 	require.NotNil(t, running)
-	assert.Equal(t, metav1.ConditionTrue, running.Status,
-		"capture failure must not override the independently ready source Job")
-	assert.Equal(t, snapshotv1alpha1.ReasonPodReady, running.Reason)
-	require.NotNil(t, updated.Status.StartedAt)
+	assert.Equal(t, metav1.ConditionFalse, running.Status,
+		"a terminal object never reconciles again, so a leftover Running=True would advertise a live source forever")
+	assert.Equal(t, snapshotv1alpha1.ReasonCaptureFailed, running.Reason)
+	require.NotNil(t, updated.Status.StartedAt,
+		"the readiness observation made before the failure must survive it")
 }
 
 // TestSnapshotJobReconcileFailureTargetWinsOverCaptureFailure verifies the
