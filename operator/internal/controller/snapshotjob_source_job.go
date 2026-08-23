@@ -43,10 +43,18 @@ func (r *SnapshotJobReconciler) observeExistingSourceJob(ctx context.Context, sj
 	if err := r.Get(ctx, client.ObjectKey{Namespace: sj.Namespace, Name: sj.Name}, job); err != nil {
 		return snapshotJobObservation{}, ctrl.Result{}, fmt.Errorf("get existing source Job %q after AlreadyExists: %w", sj.Name, err)
 	}
+	return r.reconcileExistingSourceJob(ctx, sj, job)
+}
+
+// reconcileExistingSourceJob applies the one-shot Job identity gate shared by
+// steady-state reconciliation and Create-AlreadyExists recovery.
+func (r *SnapshotJobReconciler) reconcileExistingSourceJob(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) (snapshotJobObservation, ctrl.Result, error) {
 	if failure := classifyExistingSourceJob(sj, job); failure != nil {
 		return snapshotJobObservation{failure: failure}, ctrl.Result{}, nil
 	}
 	if sj.Status.SourceJobUID == "" && job.UID != "" {
+		// Bind the one-shot Job incarnation before creating or adopting any
+		// downstream capture resource.
 		return snapshotJobObservation{job: job}, ctrl.Result{}, nil
 	}
 	return r.reconcilePodSnapshotResources(ctx, sj, job)

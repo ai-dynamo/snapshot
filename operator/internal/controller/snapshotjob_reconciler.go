@@ -122,15 +122,7 @@ func (r *SnapshotJobReconciler) reconcileResources(ctx context.Context, sj *snap
 	case err != nil:
 		return snapshotJobObservation{}, ctrl.Result{}, fmt.Errorf("get source Job %q: %w", sj.Name, err)
 	default:
-		if failure := classifyExistingSourceJob(sj, job); failure != nil {
-			return snapshotJobObservation{failure: failure}, ctrl.Result{}, nil
-		}
-		if sj.Status.SourceJobUID == "" && job.UID != "" {
-			// Bind the one-shot Job incarnation before creating or adopting any
-			// downstream capture resource.
-			return snapshotJobObservation{job: job}, ctrl.Result{}, nil
-		}
-		return r.reconcilePodSnapshotResources(ctx, sj, job)
+		return r.reconcileExistingSourceJob(ctx, sj, job)
 	}
 }
 

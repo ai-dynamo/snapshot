@@ -27,7 +27,9 @@ import (
 // collision, not a cache race.
 var errPodSnapshotNameConflict = errors.New("existing PodSnapshot is not owned by this SnapshotJob")
 
-const sourcePodRequeueBackstop = 2 * time.Second
+// sourcePodRequeueBackstop is only a safety net for a missed Job event; the
+// owned-Job watch is the normal signal that a source Pod may now exist.
+const sourcePodRequeueBackstop = 30 * time.Second
 
 // createPodSnapshotForSourceJob waits for the source Pod, then creates or
 // classifies the deterministic PodSnapshot. A missing active source Pod gets a

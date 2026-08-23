@@ -160,6 +160,8 @@ func TestSnapshotJobReconcileCompletionGate(t *testing.T) {
 		job, err := buildSourceJob(sj)
 		require.NoError(t, err)
 		require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+		job.UID = types.UID("source-job-uid")
+		sj.Status.SourceJobUID = job.UID
 		pod := sourcePodForJob(job)
 		snap := readySnapshot(t, sj, pod)
 
@@ -445,6 +447,8 @@ func TestSnapshotJobReconcileCompletedRetriesCleanupUntilJobGone(t *testing.T) {
 	job, err := buildSourceJob(sj)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	job.UID = types.UID("source-job-uid")
+	sj.Status.SourceJobUID = job.UID
 
 	r := makeSnapshotJobReconciler(s, sj, job)
 
