@@ -5,6 +5,8 @@ package types
 
 import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+
+	"github.com/ai-dynamo/snapshot/api/compat"
 )
 
 // MountInfo holds parsed mount information from /proc/pid/mountinfo.
@@ -30,7 +32,10 @@ type CheckpointContainerSnapshot struct {
 	HostCgroupPath string   // host filesystem path for CRIU's --freeze-cgroup
 	CUDAHostPIDs   []int    // host-visible PIDs used for checkpoint-side CUDA actions
 	CUDANSPIDs     []int    // namespace-relative PIDs stored in the checkpoint manifest
-	GPUUUIDs       []string // source GPU UUIDs from kubelet PodResources API
+
+	// GPUs holds the GPUs the checkpointed container could see, in allocation
+	// order, with the model and driver version where they could be read.
+	GPUs compat.GPUFacts
 }
 
 // RestoreContainerSnapshot holds inspected state for the restore target.
