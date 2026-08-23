@@ -10,6 +10,7 @@ import (
 
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
 // refuseRestore records one restore this node will not attempt. Both gates
@@ -24,10 +25,20 @@ func (w *NodeController) refuseRestore(pod *corev1.Pod, incompatible *compat.Inc
 	return false
 }
 
+// skipCompatCheckRequested reports whether this restore was asked to skip the
+// compatibility gates.
+func (w *NodeController) skipCompatCheckRequested(pod *corev1.Pod) bool {
+	return snapshotv1alpha1.SkipCompatCheckFromAnnotations(pod.Annotations)
+}
+
 // preflightCompatibility runs the pre-flight compatibility gate for one restore.
 // A nil error means the restore may be attempted.
 func (w *NodeController) preflightCompatibility(pod *corev1.Pod, artifact *restoreArtifact) error {
 	log := w.log.WithValues("pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name), "container", artifact.SourceContainerName)
+	if artifact.SkipCompatCheck {
+		log.Info("Restore compatibility check skipped by request", "gate", string(compat.GatePreflight))
+		return nil
+	}
 
 	manifest, err := types.ReadManifest(artifact.Path)
 	if err != nil {
