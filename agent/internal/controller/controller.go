@@ -862,6 +862,15 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, artifa
 
 	placeholderHostPID, err := op.executeRestore(restoreCtx)
 	if err != nil {
+		var incompatible *compat.IncompatibleError
+		if errors.As(err, &incompatible) {
+			// Nothing was attempted, so there is no half-restored process to
+			// clean up. The placeholder is deliberately left running: killing it
+			// would restart the container straight back into the same answer.
+			// Reporting comes next.
+			return nil
+		}
+
 		var cleanupErr *executor.RestoreCleanupError
 		if !errors.As(err, &cleanupErr) {
 			return op.failRestore(ctx, err)
