@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -37,9 +38,11 @@ import (
 //
 // Resource helpers create, find, and classify the Job, source Pod, and
 // PodSnapshot without mutating SnapshotJob status. Reconcile then derives the
-// complete status from those observations and persists it once. Completion
-// requires both capture success and source Job completion; failures preserve
-// the Job for debugging.
+// complete status from those observations and persists it once. Completion is
+// capture-driven: a durably Ready PodSnapshot completes the SnapshotJob and the
+// source Job is deleted, without waiting for the Job's own terminal state (the
+// checkpoint terminates the source process, so the Job is expected to fail
+// after a successful capture). Failures preserve the Job for debugging.
 type SnapshotJobReconciler struct {
 	client.Client
 	NonCacheReadClient client.Reader
@@ -126,7 +129,7 @@ func (r *SnapshotJobReconciler) reconcileResources(ctx context.Context, sj *snap
 					"confirm source Job %q after cached NotFound: %w", sj.Name, readErr)
 			}
 			if failure != nil {
-				return snapshotJobObservation{failure: failure}, ctrl.Result{}, nil
+				return r.observeCaptureAfterSourceJobFailure(ctx, sj, failure)
 			}
 			return r.reconcileAcceptedSourceJob(ctx, sj, authoritativeJob)
 		}
@@ -142,18 +145,20 @@ func (r *SnapshotJobReconciler) reconcileResources(ctx context.Context, sj *snap
 	}
 }
 
-// reconcilePodSnapshotResources evaluates the capture and source Job as two
-// independent signals. Capture success does not override unsuccessful
-// post-capture workload completion.
+// reconcilePodSnapshotResources drives the capture and arbitrates it against
+// the source Job. Once a PodSnapshot exists, its terminal result decides the
+// SnapshotJob: Ready completes it (regardless of the Job's state), Failed fails
+// it with the capture's own reason, and a pending capture is waited on with a
+// bounded requeue even when the Job is already terminal — the checkpoint
+// terminates the source process, so a Job failure racing a committed artifact
+// is the expected success sequence, not an error. Only before a capture exists
+// does a terminal source Job fail the SnapshotJob directly.
 func (r *SnapshotJobReconciler) reconcilePodSnapshotResources(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) (snapshotJobObservation, ctrl.Result, error) {
 	observed := snapshotJobObservation{job: job}
 	snap, err := r.findOwnedPodSnapshot(ctx, sj)
 	if apierrors.IsNotFound(err) && (sj.Status.PodSnapshotName != "" || sj.Status.PodSnapshotUID != "") {
-		terminal := classifySourceJobTerminal(job)
-		if terminal.failure != nil {
-			observed.failure = terminal.failure
-			return observed, ctrl.Result{}, nil
-		}
+		// The recorded capture arbitrates even against a terminal source Job, so
+		// the cache miss must be authoritatively confirmed before any decision.
 		snap, err = r.readAuthoritativeOwnedPodSnapshot(ctx, sj)
 		if apierrors.IsNotFound(err) {
 			observed.failure = &snapshotJobFailure{
@@ -216,22 +221,42 @@ func (r *SnapshotJobReconciler) reconcilePodSnapshotResources(ctx context.Contex
 	}
 
 	observed.podSnapshot = snap
-	switch {
-	case snapshotv1alpha1.IsPodSnapshotFailed(snap):
-		// FailureTarget or Failed can race the PodSnapshot update; re-read through
-		// the non-cache read client before deciding which failure is authoritative.
-		latestJob, failure, readErr := r.readAuthoritativeSourceJob(ctx, sj)
-		if readErr != nil {
-			return snapshotJobObservation{}, ctrl.Result{}, fmt.Errorf("re-read source Job %q before terminal decision: %w", job.Name, readErr)
-		}
-		observed.job = latestJob
-		if failure != nil {
-			observed.failure = failure
-			return observed, ctrl.Result{}, nil
-		}
+	observed.failure = snapshotJobTerminalFailure(observed.job, snap)
+	if observed.failure == nil && !snapshotv1alpha1.IsPodSnapshotSucceeded(snap) &&
+		classifySourceJobTerminal(observed.job).state != sourceJobActive {
+		// The source Job is terminal but the capture is still resolving. The
+		// PodSnapshot watch is the normal wake-up; the requeue is a backstop for
+		// a missed event. The wait itself is bounded by the PodSnapshot
+		// reconciler, which fails an abandoned pending capture once the source
+		// pod has been terminal past its grace window.
+		return observed, ctrl.Result{RequeueAfter: captureResolutionBackstop}, nil
 	}
-	observed.failure = snapshotJobTerminalFailure(observed.job, observed.podSnapshot)
 	return observed, ctrl.Result{}, nil
+}
+
+// captureResolutionBackstop re-checks a pending capture whose source Job is
+// already terminal, in case the PodSnapshot watch event is missed.
+const captureResolutionBackstop = 30 * time.Second
+
+// observeCaptureAfterSourceJobFailure lets a durable successful capture win
+// when the accepted source Job is gone. Only ReasonJobDeleted is eligible: a
+// name-conflict failure is an identity violation and stays terminal. Anything
+// short of a Ready capture keeps the Job failure — SnapshotJob is one-shot, so
+// a deleted Job with an unresolved capture can never complete.
+func (r *SnapshotJobReconciler) observeCaptureAfterSourceJobFailure(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, failure *snapshotJobFailure) (snapshotJobObservation, ctrl.Result, error) {
+	if failure.reason != snapshotv1alpha1.ReasonJobDeleted ||
+		(sj.Status.PodSnapshotName == "" && sj.Status.PodSnapshotUID == "") {
+		return snapshotJobObservation{failure: failure}, ctrl.Result{}, nil
+	}
+	snap, err := r.readAuthoritativeOwnedPodSnapshot(ctx, sj)
+	switch {
+	case err == nil && snapshotv1alpha1.IsPodSnapshotSucceeded(snap):
+		return snapshotJobObservation{podSnapshot: snap}, ctrl.Result{}, nil
+	case err == nil, apierrors.IsNotFound(err), errors.Is(err, errPodSnapshotNameConflict):
+		return snapshotJobObservation{failure: failure}, ctrl.Result{}, nil
+	default:
+		return snapshotJobObservation{}, ctrl.Result{}, err
+	}
 }
 
 func terminalObservation(reason string, cause error) snapshotJobObservation {
@@ -346,18 +371,19 @@ func deriveFailureStatus(next *snapshotv1alpha1.SnapshotJob, failure *snapshotJo
 	}
 }
 
+// deriveCompletionStatus makes a durable successful capture the SnapshotJob's
+// success signal. The source Job is not consulted — once the artifact is
+// committed it exists only for cleanup (Reconcile deletes it after the
+// Completed status is persisted) — and Running is closed out here so a
+// terminal SnapshotJob does not advertise a live or alarming source state.
 func deriveCompletionStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJobObservation, reconciliationTime metav1.Time) {
-	if observed.job == nil || observed.podSnapshot == nil || !snapshotv1alpha1.IsPodSnapshotSucceeded(observed.podSnapshot) {
+	if observed.podSnapshot == nil || !snapshotv1alpha1.IsPodSnapshotSucceeded(observed.podSnapshot) {
 		return
 	}
-	if classifySourceJobTerminal(observed.job).state != sourceJobComplete {
-		setCondition(next, snapshotv1alpha1.SnapshotJobConditionCompleted, metav1.ConditionFalse, reconciliationTime,
-			snapshotv1alpha1.ReasonWaitingForPodCompletion, "checkpoint captured; waiting for the source pod to complete")
-		return
-	}
-
+	setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse, reconciliationTime,
+		snapshotv1alpha1.ReasonCaptureCompleted, "checkpoint captured; the source Job is no longer needed")
 	setCondition(next, snapshotv1alpha1.SnapshotJobConditionCompleted, metav1.ConditionTrue, reconciliationTime,
-		snapshotv1alpha1.ReasonJobCompleted, "checkpoint captured and source Job completed")
+		snapshotv1alpha1.ReasonCaptureCompleted, "checkpoint captured; source Job cleanup initiated")
 	if next.Status.CompletedAt == nil {
 		next.Status.CompletedAt = &reconciliationTime
 	}

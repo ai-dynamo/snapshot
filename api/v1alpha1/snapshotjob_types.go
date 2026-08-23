@@ -18,8 +18,11 @@ const (
 	// SnapshotJobConditionCaptured is True when the CRIU dump of the target
 	// container is complete (PodSnapshot Ready=True).
 	SnapshotJobConditionCaptured = "Captured"
-	// SnapshotJobConditionCompleted is True when the checkpoint is captured and
-	// the source batch/v1 Job has completed its post-capture workload logic.
+	// SnapshotJobConditionCompleted is True when the checkpoint artifact is
+	// durably captured (PodSnapshot Ready=True) and source Job cleanup has been
+	// initiated. Completion is capture-driven: it does not mean the source
+	// workload ran post-capture logic or exited successfully — the checkpoint is
+	// expected to terminate the source process.
 	SnapshotJobConditionCompleted = "Completed"
 	// SnapshotJobConditionFailed is True on terminal failure. The batch/v1 Job is
 	// preserved for status and debugging; Kubernetes controls failed pod retention.
@@ -32,13 +35,14 @@ const (
 	ReasonPodPending = "PodPending"
 	ReasonPodReady   = "PodReady"
 
-	// Captured
+	// Captured / Completed. A durable capture is the SnapshotJob's success
+	// signal, so ReasonCaptureCompleted is also the Completed=True reason.
 	ReasonCaptureInProgress = "CaptureInProgress"
 	ReasonCaptureCompleted  = "CaptureCompleted"
 
-	// Completed
-	ReasonWaitingForPodCompletion = "WaitingForPodCompletion"
-	ReasonJobCompleted            = "JobCompleted"
+	// ReasonJobCompleted reports the source Job's own Complete=True on the
+	// Running condition. It does not gate or report SnapshotJob completion.
+	ReasonJobCompleted = "JobCompleted"
 
 	// Failed=True
 	ReasonCaptureFailed     = "CaptureFailed"
