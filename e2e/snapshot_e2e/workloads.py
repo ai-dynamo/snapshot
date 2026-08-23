@@ -350,6 +350,28 @@ mkdir -p {STATE_DIR}
 """
 
 
+def snapshotjob_helper_pod_template(
+    *,
+    config: k8s.E2EConfig,
+    run: TestRun,
+    helper_command: str,
+) -> dict[str, Any]:
+    # Two containers: the CRIU target plus a helper doing independent work
+    # (the design's GMS-saver pattern). The dump kills only the target; the
+    # SnapshotJob must wait for the helper before completing, and a helper
+    # failure must fail the run even though the capture succeeded.
+    template = snapshotjob_pod_template(config=config, run=run, gpu=False)
+    template["spec"]["containers"].append(
+        {
+            "name": "helper",
+            "image": run.image,
+            "imagePullPolicy": "IfNotPresent",
+            "command": ["/bin/bash", "-lc", helper_command],
+        }
+    )
+    return template
+
+
 def snapshotjob_unschedulable_pod_template(
     *,
     config: k8s.E2EConfig,

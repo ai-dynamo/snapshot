@@ -5,12 +5,15 @@
 
 Unlike test_snapshot_lifecycle.py (which drives PodSnapshot directly against a
 plain pod the test creates and annotates itself), these tests exercise the
-SnapshotJob CRD end to end. The contract under test: the controller creates
-the source batch/v1 Job; once the pod is ready, the agent dumps it and the
-dump terminates the source process (there is no leave-running mode); the pod's
-death is the expected success sequence, the capture result alone decides the
-outcome (Completed=True/CaptureCompleted), and the source Job is deleted on
-completion. Failure paths preserve the Job and stamp all four conditions.
+SnapshotJob CRD end to end. The contract under test is a two-stage completion
+gate: the controller creates the source batch/v1 Job; once the pod is ready,
+the agent dumps it and the dump terminates the target container (there is no
+leave-running mode) — that death is the expected success sequence. A Ready
+capture sets Captured=True and WaitingForPodCompletion; the SnapshotJob then
+waits for the source Job to finish so helper containers can complete their
+work, requires every non-target container to exit 0, and only then flips
+Completed=True/JobCompleted and deletes the Job. Failure paths preserve the
+Job and stamp all four conditions.
 
 Terminal reasons that race (the Job controller vs. the capture pipeline
 observing the same dead workload) are asserted as reason *sets* via
@@ -42,17 +45,17 @@ def run(request: pytest.FixtureRequest, config: k8s.E2EConfig) -> snap.TestRun:
 
 
 def assert_snapshotjob_completed(sj: dict[str, Any]) -> None:
-    """Asserts the full success vector: completion is capture-driven."""
+    """Asserts the full success vector of the two-stage completion gate."""
     completed = snap.condition(sj, "Completed")
-    assert completed and completed.get("reason") == "CaptureCompleted"
+    assert completed and completed.get("reason") == "JobCompleted"
     captured = snap.condition(sj, "Captured")
     assert captured and captured.get("status") == "True"
     assert captured.get("reason") == "CaptureCompleted"
-    # The source Job fails by design (the dump kills its process); a completed
-    # SnapshotJob must not advertise that as JobFailed.
+    # The source Job fails by design (the dump kills the target container); a
+    # completed SnapshotJob must not advertise that as JobFailed.
     running = snap.condition(sj, "Running")
     assert running and running.get("status") == "False"
-    assert running.get("reason") == "CaptureCompleted"
+    assert running.get("reason") == "JobCompleted"
     failed = snap.condition(sj, "Failed")
     assert failed is None or failed.get("status") != "True"
     assert sj["status"]["completedAt"]
@@ -197,6 +200,126 @@ def test_snapshotjob_cpu_only_captures(
 
         snap.wait_for_pod_deleted(config.namespace, source_pod_name, timeout=120)
         assert k8s.read_job(config.namespace, snapshotjob_name) is None
+    except Exception:
+        snap.debug_dump_snapshotjob(config, run)
+        raise
+
+
+@pytest.mark.snapshot_success
+def test_snapshotjob_waits_for_helper_then_completes(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    # The design's GMS-saver pattern: a helper works past the capture and must
+    # be allowed to finish (exit 0) before the SnapshotJob completes and the
+    # Job is deleted. 20s keeps the helper alive well past the dump.
+    try:
+        snapshotjob_name = run.checkpoint_id
+        snap.create_snapshotjob(
+            config.namespace,
+            snapshotjob_name,
+            workloads.snapshotjob_helper_pod_template(
+                config=config,
+                run=run,
+                helper_command="sleep 20; echo '[helper] done'; exit 0",
+            ),
+        )
+
+        sj = snap.wait_for_condition(
+            config.namespace,
+            snapshotjob_name,
+            plural=snap.SNAPSHOTJOBS,
+            condition_type="Completed",
+            timeout=600,
+        )
+        assert_snapshotjob_completed(sj)
+        assert k8s.read_job(config.namespace, snapshotjob_name) is None
+    except Exception:
+        snap.debug_dump_snapshotjob(config, run)
+        raise
+
+
+@pytest.mark.snapshot_failure
+def test_snapshotjob_fails_when_helper_fails_after_capture(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    # A helper that exits non-zero after the capture is an incomplete
+    # deliverable: the SnapshotJob must fail with JobFailed while Captured
+    # stays True and the artifact remains usable.
+    try:
+        snapshotjob_name = run.checkpoint_id
+        snap.create_snapshotjob(
+            config.namespace,
+            snapshotjob_name,
+            workloads.snapshotjob_helper_pod_template(
+                config=config,
+                run=run,
+                helper_command="sleep 20; echo '[helper] failing'; exit 3",
+            ),
+        )
+
+        sj = snap.wait_for_condition(
+            config.namespace,
+            snapshotjob_name,
+            plural=snap.SNAPSHOTJOBS,
+            condition_type="Failed",
+            timeout=600,
+        )
+        failed = snap.condition(sj, "Failed")
+        assert failed and failed.get("reason") == "JobFailed"
+        assert "helper" in failed.get("message", "")
+        captured = snap.condition(sj, "Captured")
+        assert captured and captured.get("status") == "True", (
+            "capture success must remain independently visible when a helper fails"
+        )
+        completed = snap.condition(sj, "Completed")
+        assert completed is not None and completed.get("status") != "True"
+        assert sj["status"]["completedAt"]
+        assert k8s.read_job(config.namespace, snapshotjob_name) is not None
+
+        # The artifact survives the failure: the capture itself succeeded.
+        snap.wait_for_snapshot_ready(config.namespace, sj["status"]["podSnapshotName"], timeout=60)
+    except Exception:
+        snap.debug_dump_snapshotjob(config, run)
+        raise
+
+
+@pytest.mark.snapshot_failure
+def test_snapshotjob_deadline_exceeded_when_helper_overruns(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    # The deadline bounds the whole source lifecycle, helpers included: a
+    # helper that never exits keeps the SnapshotJob in WaitingForPodCompletion
+    # until activeDeadlineSeconds fires, even though the capture succeeded.
+    try:
+        snapshotjob_name = run.checkpoint_id
+        snap.create_snapshotjob(
+            config.namespace,
+            snapshotjob_name,
+            workloads.snapshotjob_helper_pod_template(
+                config=config,
+                run=run,
+                helper_command="sleep infinity",
+            ),
+            active_deadline_seconds=60,
+        )
+
+        sj = snap.wait_for_condition(
+            config.namespace,
+            snapshotjob_name,
+            plural=snap.SNAPSHOTJOBS,
+            condition_type="Failed",
+            timeout=300,
+        )
+        failed = snap.condition(sj, "Failed")
+        assert failed and failed.get("reason") == "DeadlineExceeded"
+        captured = snap.condition(sj, "Captured")
+        assert captured and captured.get("status") == "True", (
+            "the capture finished long before the deadline; only the helper overran"
+        )
+        assert k8s.read_job(config.namespace, snapshotjob_name) is not None
     except Exception:
         snap.debug_dump_snapshotjob(config, run)
         raise
