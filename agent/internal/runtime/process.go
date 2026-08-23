@@ -19,6 +19,21 @@ import (
 // HostProcPath is the mount point for the host's /proc in DaemonSet pods.
 const HostProcPath = "/host/proc"
 
+// ReadKernelVersion reads the host's /proc/sys/kernel/osrelease entry documented at
+// https://man7.org/linux/man-pages/man5/proc_sys_kernel.5.html.
+func ReadKernelVersion(hostProcPath string) (string, error) {
+	releasePath := filepath.Join(hostProcPath, "sys", "kernel", "osrelease")
+	content, err := os.ReadFile(releasePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read kernel version from %s: %w", releasePath, err)
+	}
+	release := strings.TrimSpace(string(content))
+	if release == "" {
+		return "", fmt.Errorf("kernel version at %s is empty", releasePath)
+	}
+	return release, nil
+}
+
 // ProcessDetails captures the parent link plus the observed, outermost, and innermost
 // PID views for one proc entry. ObservedPID is relative to the proc root being read.
 type ProcessDetails struct {
