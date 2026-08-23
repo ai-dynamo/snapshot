@@ -271,3 +271,68 @@ func TestMemoryLimitCheck(t *testing.T) {
 		})
 	}
 }
+
+func TestCPULimitCheck(t *testing.T) {
+	cpu := func(limit string) Facts {
+		return Facts{CPULimit: limit}
+	}
+
+	tests := []struct {
+		name   string
+		source Facts
+		target Facts
+		want   []Mismatch
+	}{
+		{
+			name:   "the same limit",
+			source: cpu("4"),
+			target: cpu("4"),
+		},
+		{
+			name:   "a larger limit",
+			source: cpu("4"),
+			target: cpu("8"),
+		},
+		{
+			name:   "a smaller limit",
+			source: cpu("4"),
+			target: cpu("1"),
+			want:   []Mismatch{{Check: CheckCPULimit, Source: "4", Target: "1"}},
+		},
+		{
+			// Millicores and whole cores are the same scale, so the comparison
+			// has to see through the notation.
+			name:   "millicores below whole cores",
+			source: cpu("4"),
+			target: cpu("500m"),
+			want:   []Mismatch{{Check: CheckCPULimit, Source: "4", Target: "500m"}},
+		},
+		{
+			name:   "millicores above whole cores",
+			source: cpu("1"),
+			target: cpu("4500m"),
+		},
+		{
+			name:   "the same limit written as millicores",
+			source: cpu("4"),
+			target: cpu("4000m"),
+		},
+		{
+			name:   "the target has no limit",
+			source: cpu("4"),
+		},
+		{
+			name:   "the checkpoint recorded no limit",
+			target: cpu("1"),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Compare(GatePreflight, tc.source, tc.target)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("Compare = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
