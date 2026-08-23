@@ -74,6 +74,11 @@ type NodeController struct {
 	restorePodLister        corev1listers.PodLister
 	compareFn               func(compat.Gate, compat.Facts, compat.Facts) []compat.Mismatch
 
+	// skipCompatCheckFn is read once per restore rather than at startup, so the
+	// node-wide switch can be flipped without a DaemonSet rollout. Injected so
+	// the controller never learns where the config file lives.
+	skipCompatCheckFn func() bool
+
 	inFlight   map[string]struct{}
 	inFlightMu sync.Mutex
 
@@ -167,10 +172,13 @@ const (
 var podSnapshotContentGVR = snapshotv1alpha1.GroupVersion.WithResource("podsnapshotcontents")
 
 // NewNodeController creates the node-local controller that runs inside snapshot-agent.
+// skipCompatCheckFn is read per restore; passing nil pins the switch to the
+// configuration the agent started with.
 func NewNodeController(
 	cfg *types.AgentConfig,
 	rt snapshotruntime.Runtime,
 	log logr.Logger,
+	skipCompatCheckFn func() bool,
 ) (*NodeController, error) {
 	restConfig, err := rest.InClusterConfig()
 	if err != nil {
@@ -197,7 +205,7 @@ func NewNodeController(
 	}
 
 	nsm := nsmount.New(log)
-	return newDefaultController(cfg, clientset, typedClient, dynClient, rt, nsm, log), nil
+	return newDefaultController(cfg, clientset, typedClient, dynClient, rt, nsm, log, skipCompatCheckFn), nil
 }
 
 func newDefaultController(
@@ -208,6 +216,7 @@ func newDefaultController(
 	rt snapshotruntime.Runtime,
 	injector executor.RestoreMounter,
 	log logr.Logger,
+	skipCompatCheckFn func() bool,
 ) *NodeController {
 	w := &NodeController{
 		config:    cfg,
@@ -231,6 +240,10 @@ func newDefaultController(
 		compareFn:               compat.Compare,
 	}
 	w.checkpointFn = w.executorCheckpoint
+	w.skipCompatCheckFn = skipCompatCheckFn
+	if w.skipCompatCheckFn == nil {
+		w.skipCompatCheckFn = func() bool { return w.config.Restore.SkipCompatCheck }
+	}
 	return w
 }
 
