@@ -17,6 +17,7 @@ import (
 func inspectCompatibility(
 	log logr.Logger,
 	manifest *types.CheckpointManifest,
+	targetGPUs compat.GPUFacts,
 	targetRoot string,
 	skipCompatCheck bool,
 ) error {
@@ -27,6 +28,8 @@ func inspectCompatibility(
 
 	sourceFacts := manifest.CompatFacts()
 	targetFacts := compat.Facts{
+		DriverVersion:  targetGPUs.DriverVersion,
+		GPUDevices:     targetGPUs.Devices,
 		ExistingMounts: existingMounts(targetRoot, sourceFacts.ExternalizedMounts),
 	}
 	mismatches := compat.Compare(compat.GateInspect, sourceFacts, targetFacts)
