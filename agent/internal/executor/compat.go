@@ -13,10 +13,11 @@ import (
 // inspectCompatibility runs the inspect gate for one restore, the counterpart of
 // the controller's preflightCompatibility. A nil error means the restore may go
 // ahead. It gathers the target facts this gate can read, which the earlier gate
-// cannot: the runtime image ID and mounts under its rootfs.
+// cannot: the runtime image ID, GPUs, and mounts under its rootfs.
 func inspectCompatibility(
 	log logr.Logger,
 	manifest *types.CheckpointManifest,
+	targetGPUs compat.GPUFacts,
 	targetRoot string,
 	targetImageID string,
 	skipCompatCheck bool,
@@ -29,6 +30,8 @@ func inspectCompatibility(
 	sourceFacts := manifest.CompatFacts()
 	targetFacts := compat.Facts{
 		ImageID:        targetImageID,
+		DriverVersion:  targetGPUs.DriverVersion,
+		GPUDevices:     targetGPUs.Devices,
 		ExistingMounts: existingMounts(targetRoot, sourceFacts.ExternalizedMounts),
 	}
 	mismatches := compat.Compare(compat.GateInspect, sourceFacts, targetFacts)
