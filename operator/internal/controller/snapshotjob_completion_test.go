@@ -14,6 +14,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -162,7 +163,7 @@ func TestSnapshotJobReconcileCompletionGate(t *testing.T) {
 		assert.NotNil(t, getBatchJobByName(jobs, sj.Name), "must not delete the Job before Captured is also True")
 	})
 
-	t.Run("capture success completes immediately without waiting for the source Job", func(t *testing.T) {
+	t.Run("capture success waits for the source Job to finish before completing", func(t *testing.T) {
 		s := snapshotJobReconcilerScheme()
 		sj := minimalSnapshotJob()
 		sj.UID = types.UID("sj-uid")
@@ -175,30 +176,48 @@ func TestSnapshotJobReconcileCompletionGate(t *testing.T) {
 		snap := readySnapshot(t, sj, pod)
 
 		r := makeSnapshotJobReconciler(s, sj, job, pod, snap)
-		_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+		result, err := r.Reconcile(context.Background(), reconcileRequest(sj))
 		require.NoError(t, err)
+		assert.Equal(t, captureResolutionBackstop, result.RequeueAfter,
+			"a Ready capture with a still-running source Job schedules a backstop re-check")
 
 		updated := &snapshotv1alpha1.SnapshotJob{}
 		require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
 		assert.True(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured))
 		cond := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCompleted)
 		require.NotNil(t, cond)
+		assert.Equal(t, metav1.ConditionFalse, cond.Status)
+		assert.Equal(t, snapshotv1alpha1.ReasonWaitingForPodCompletion, cond.Reason,
+			"cleanup must wait for helper containers; deleting the Job now would kill them mid-work")
+		assert.Nil(t, updated.Status.CompletedAt)
+
+		jobs := &batchv1.JobList{}
+		require.NoError(t, r.List(context.Background(), jobs))
+		storedJob := getBatchJobByName(jobs, sj.Name)
+		require.NotNil(t, storedJob, "Job must remain while its containers are still running")
+
+		// The owned-Job update watch drives this second reconcile in production.
+		completeJob(storedJob)
+		require.NoError(t, r.Status().Update(context.Background(), storedJob))
+		_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+		require.NoError(t, err)
+
+		updated = &snapshotv1alpha1.SnapshotJob{}
+		require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+		cond = meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCompleted)
+		require.NotNil(t, cond)
 		assert.Equal(t, metav1.ConditionTrue, cond.Status)
-		assert.Equal(t, snapshotv1alpha1.ReasonCaptureCompleted, cond.Reason,
-			"completion is capture-driven; the still-active source Job must not gate it")
+		assert.Equal(t, snapshotv1alpha1.ReasonJobCompleted, cond.Reason)
 		require.NotNil(t, updated.Status.CompletedAt)
 		running := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning)
 		require.NotNil(t, running)
 		assert.Equal(t, metav1.ConditionFalse, running.Status)
-		assert.Equal(t, snapshotv1alpha1.ReasonCaptureCompleted, running.Reason)
-		assert.Nil(t, updated.Status.StartedAt,
-			"capture success must not invent a source-readiness observation")
+		assert.Equal(t, snapshotv1alpha1.ReasonJobCompleted, running.Reason)
 		assert.False(t, snapshotv1alpha1.IsSnapshotJobFailed(updated))
 
-		jobs := &batchv1.JobList{}
+		jobs = &batchv1.JobList{}
 		require.NoError(t, r.List(context.Background(), jobs))
-		assert.Nil(t, getBatchJobByName(jobs, sj.Name),
-			"the source Job must be cleaned up in the same reconcile that persists completion")
+		assert.Nil(t, getBatchJobByName(jobs, sj.Name), "Job is deleted only after capture and source completion")
 
 		snaps := &snapshotv1alpha1.PodSnapshotList{}
 		require.NoError(t, r.List(context.Background(), snaps))
@@ -311,11 +330,11 @@ func TestSnapshotJobReconcileCaptureSuccessOverridesJobFailure(t *testing.T) {
 	assert.True(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured))
 	completed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCompleted)
 	require.NotNil(t, completed)
-	assert.Equal(t, snapshotv1alpha1.ReasonCaptureCompleted, completed.Reason)
+	assert.Equal(t, snapshotv1alpha1.ReasonJobCompleted, completed.Reason)
 	running := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning)
 	require.NotNil(t, running)
 	assert.Equal(t, metav1.ConditionFalse, running.Status)
-	assert.Equal(t, snapshotv1alpha1.ReasonCaptureCompleted, running.Reason,
+	assert.Equal(t, snapshotv1alpha1.ReasonJobCompleted, running.Reason,
 		"a completed SnapshotJob must not advertise the expected source exit as JobFailed")
 	require.NotNil(t, updated.Status.StartedAt)
 	require.NotNil(t, updated.Status.CompletedAt)
@@ -323,6 +342,135 @@ func TestSnapshotJobReconcileCaptureSuccessOverridesJobFailure(t *testing.T) {
 	jobs := &batchv1.JobList{}
 	require.NoError(t, r.List(context.Background(), jobs))
 	assert.Nil(t, getBatchJobByName(jobs, sj.Name), "the failed-but-successful source Job is cleaned up on completion")
+}
+
+// helperSnapshotJob builds a SnapshotJob whose pod template carries a helper
+// container next to the target, plus the matching source pod with the target
+// already killed by the checkpoint (exit 137) and the helper in the given state.
+func helperSnapshotJob(t *testing.T, s *runtime.Scheme, helperState corev1.ContainerState) (*snapshotv1alpha1.SnapshotJob, *batchv1.Job, *corev1.Pod, *snapshotv1alpha1.PodSnapshot) {
+	t.Helper()
+	sj := minimalSnapshotJob()
+	sj.UID = types.UID("sj-uid")
+	sj.Spec.PodTemplate.Spec.Containers = append(sj.Spec.PodTemplate.Spec.Containers,
+		corev1.Container{Name: "helper", Image: "test:latest"})
+	job, err := buildSourceJob(sj)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	pod := sourcePodForJob(job)
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+		{Name: "worker", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137}}},
+		{Name: "helper", State: helperState},
+	}
+	snap := readySnapshot(t, sj, pod)
+	setJobFailureCondition(job, batchv1.JobFailed, "BackoffLimitExceeded", "checkpoint terminated the target container")
+	return sj, job, pod, snap
+}
+
+func TestSnapshotJobReconcileHelperExitZeroCompletes(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj, job, pod, snap := helperSnapshotJob(t, s,
+		corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}})
+
+	r := makeSnapshotJobReconciler(s, sj, job, pod, snap)
+	_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	assert.True(t, snapshotv1alpha1.IsSnapshotJobCompleted(updated),
+		"a helper that finished its work with exit 0 must not block completion; only the target's kill exit is in the Job failure")
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobFailed(updated))
+}
+
+func TestSnapshotJobReconcileHelperFailureFailsAfterCapture(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj, job, pod, snap := helperSnapshotJob(t, s,
+		corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 3}})
+
+	r := makeSnapshotJobReconciler(s, sj, job, pod, snap)
+	_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobCompleted(updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, snapshotv1alpha1.ReasonJobFailed, failed.Reason,
+		"an incomplete helper deliverable fails the SnapshotJob even though the capture succeeded")
+	assert.Contains(t, failed.Message, "helper")
+	assert.True(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured),
+		"capture success remains independently visible")
+
+	jobs := &batchv1.JobList{}
+	require.NoError(t, r.List(context.Background(), jobs))
+	assert.NotNil(t, getBatchJobByName(jobs, sj.Name), "failed source Job must be preserved for debugging")
+}
+
+func TestSnapshotJobReconcileHelperStillRunningWaits(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	// FailureTarget can land before the helper's final container state.
+	sj, job, pod, snap := helperSnapshotJob(t, s,
+		corev1.ContainerState{Running: &corev1.ContainerStateRunning{}})
+
+	r := makeSnapshotJobReconciler(s, sj, job, pod, snap)
+	result, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+	assert.Equal(t, captureResolutionBackstop, result.RequeueAfter)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobCompleted(updated))
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobFailed(updated))
+	completed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCompleted)
+	require.NotNil(t, completed)
+	assert.Equal(t, snapshotv1alpha1.ReasonWaitingForPodCompletion, completed.Reason)
+}
+
+func TestSnapshotJobReconcileHelperUnverifiableFails(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj, job, _, snap := helperSnapshotJob(t, s,
+		corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}})
+	// Pin the adopted PodSnapshot so the missing pod exercises helper
+	// verification, not the pre-adoption identity check.
+	snap.UID = types.UID("pod-snapshot-uid")
+	sj.Status.PodSnapshotName = snap.Name
+	sj.Status.PodSnapshotUID = snap.UID
+
+	// The source pod is gone: helper completion cannot be verified.
+	r := makeSnapshotJobReconciler(s, sj, job, snap)
+	_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, snapshotv1alpha1.ReasonJobFailed, failed.Reason)
+	assert.Contains(t, failed.Message, "verified")
+}
+
+func TestSnapshotJobReconcileReadyCaptureWithDeadlineFails(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+	sj.UID = types.UID("sj-uid")
+	job, err := buildSourceJob(sj)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	pod := sourcePodForJob(job)
+	snap := readySnapshot(t, sj, pod)
+	setJobFailureCondition(job, batchv1.JobFailureTarget, batchv1.JobReasonDeadlineExceeded, "Job was active longer than specified deadline")
+
+	r := makeSnapshotJobReconciler(s, sj, job, pod, snap)
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, snapshotv1alpha1.ReasonDeadlineExceeded, failed.Reason,
+		"the deadline bounds the whole source lifecycle, helpers included, even after a successful capture")
 }
 
 func TestSnapshotJobReconcileWaitsForCaptureWhenJobFailsDuringPendingCapture(t *testing.T) {
@@ -482,9 +630,9 @@ func TestSnapshotJobReconcileFailedPodSnapshotAndDeletedJobUsesJobDeleted(t *tes
 		"the capture's own failure detail must be preserved over the source Job's fate")
 }
 
-// ---- a durable capture survives losing its source Job ----
+// ---- a deleted source Job is terminal even with a Ready capture ----
 
-func TestSnapshotJobReconcileReadyCaptureCompletesAfterJobDeleted(t *testing.T) {
+func TestSnapshotJobReconcileReadyCaptureStaysJobDeletedWhenJobGone(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
@@ -498,8 +646,10 @@ func TestSnapshotJobReconcileReadyCaptureCompletesAfterJobDeleted(t *testing.T) 
 	snap := readySnapshot(t, sj, pod)
 	snap.UID = sj.Status.PodSnapshotUID
 
-	// The Job is gone from both the cache and the API server, but the capture
-	// artifact is durably Ready — success must win over JobDeleted.
+	// The Job is gone from both the cache and the API server. Even with the
+	// capture durably Ready, completion cannot be declared: the two-stage gate
+	// requires the source Job to finish, and a deleted Job can never confirm
+	// that its helper containers completed their work.
 	r := makeSnapshotJobReconciler(s, sj, snap)
 	r.NonCacheReadClient = fake.NewClientBuilder().WithScheme(s).WithObjects(snap).Build()
 
@@ -508,11 +658,10 @@ func TestSnapshotJobReconcileReadyCaptureCompletesAfterJobDeleted(t *testing.T) 
 
 	updated := &snapshotv1alpha1.SnapshotJob{}
 	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
-	assert.True(t, snapshotv1alpha1.IsSnapshotJobCompleted(updated))
-	assert.False(t, snapshotv1alpha1.IsSnapshotJobFailed(updated))
-	completed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCompleted)
-	require.NotNil(t, completed)
-	assert.Equal(t, snapshotv1alpha1.ReasonCaptureCompleted, completed.Reason)
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobCompleted(updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, snapshotv1alpha1.ReasonJobDeleted, failed.Reason)
 }
 
 func TestSnapshotJobReconcilePendingCaptureStaysJobDeletedWhenJobGone(t *testing.T) {
