@@ -350,6 +350,20 @@ mkdir -p {STATE_DIR}
 """
 
 
+def snapshotjob_unschedulable_pod_template(
+    *,
+    config: k8s.E2EConfig,
+    run: TestRun,
+) -> dict[str, Any]:
+    # A nodeSelector no node satisfies: the pod stays Pending forever, so the
+    # PodSnapshot reconciler never creates a work order (unscheduled-pod
+    # backoff) and no agent is ever involved — the deadline is the only thing
+    # that can resolve the run.
+    spec = base_pod_spec(config, run, "sleep infinity", gpu=False, control_volume=False)
+    spec["nodeSelector"] = {"snapshot-e2e/unschedulable": "true"}
+    return {"metadata": {"labels": {**run.labels}}, "spec": spec}
+
+
 def snapshotjob_exit_pod_template(
     *,
     config: k8s.E2EConfig,

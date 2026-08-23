@@ -237,6 +237,43 @@ def test_snapshotjob_deadline_exceeded_when_never_ready(
 
 
 @pytest.mark.snapshot_failure
+def test_snapshotjob_deadline_exceeded_when_pod_unschedulable(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    try:
+        snapshotjob_name = run.checkpoint_id
+        # Unlike the never-ready test (whose pod schedules and runs), this pod
+        # never leaves Pending: the PodSnapshot reconciler backs off on the
+        # unscheduled source, no PodSnapshotContent work order exists, and no
+        # agent ever touches the run. The Job's activeDeadlineSeconds is the
+        # only resolver, and the explicit deadline must win over the
+        # collateral capture failure it causes (the deadline deletes the
+        # Pending pod, failing the still-pending capture).
+        snap.create_snapshotjob(
+            config.namespace,
+            snapshotjob_name,
+            workloads.snapshotjob_unschedulable_pod_template(config=config, run=run),
+            active_deadline_seconds=30,
+        )
+
+        sj = snap.wait_for_condition(
+            config.namespace,
+            snapshotjob_name,
+            plural=snap.SNAPSHOTJOBS,
+            condition_type="Failed",
+            timeout=180,
+        )
+        snap.assert_snapshotjob_failure_vector(sj, allowed_reasons={"DeadlineExceeded"})
+        running = snap.condition(sj, "Running")
+        assert running and running.get("status") == "False", "the pod never ran"
+        assert k8s.read_job(config.namespace, snapshotjob_name) is not None
+    except Exception:
+        snap.debug_dump_snapshotjob(config, run)
+        raise
+
+
+@pytest.mark.snapshot_failure
 def test_snapshotjob_fails_on_job_name_conflict(
     config: k8s.E2EConfig,
     run: snap.TestRun,
