@@ -55,3 +55,88 @@ func TestCPUArchCheck(t *testing.T) {
 		t.Errorf("the second gate repeated the architecture check: %+v", got)
 	}
 }
+
+func TestKernelVersionCheck(t *testing.T) {
+	kernel := func(value string) Facts {
+		return Facts{KernelVersion: value}
+	}
+
+	tests := []struct {
+		name   string
+		source Facts
+		target Facts
+		want   []Mismatch
+	}{
+		{
+			name:   "same kernel release",
+			source: kernel("5.15.0-1071-aws"),
+			target: kernel("5.15.0-1071-aws"),
+		},
+		{
+			// A kernel upgrade alone is enough to break a restore that worked,
+			// so the same major.minor on a different release is not good enough.
+			name:   "same major and minor, different release",
+			source: kernel("5.15.0-1071-aws"),
+			target: kernel("5.15.0-1082-aws"),
+			want: []Mismatch{{
+				Check:  CheckKernelVersion,
+				Source: "5.15.0-1071-aws",
+				Target: "5.15.0-1082-aws",
+			}},
+		},
+		{
+			name:   "checkpoint taken before the kernel was recorded",
+			target: kernel("5.15.0-1071-aws"),
+		},
+		{
+			name:   "target kernel unknown",
+			source: kernel("5.15.0-1071-aws"),
+		},
+		{
+			// Both rules fire: the node runs a different kernel, and one no
+			// restore of a modern glibc can succeed on.
+			name:   "target below the floor",
+			source: kernel("5.15.0-1071-aws"),
+			target: kernel("5.4.0-150-generic"),
+			want: []Mismatch{
+				{Check: CheckKernelVersion, Source: "5.15.0-1071-aws", Target: "5.4.0-150-generic"},
+				{Check: CheckKernelMinimum, Source: "5.13 or newer", Target: "5.4.0-150-generic"},
+			},
+		},
+		{
+			name:   "both sides below the floor",
+			source: kernel("4.19.0-25-amd64"),
+			target: kernel("4.19.0-25-amd64"),
+			want: []Mismatch{
+				{Check: CheckKernelMinimum, Source: "5.13 or newer", Target: "4.19.0-25-amd64"},
+			},
+		},
+		{
+			name:   "exactly at the floor",
+			source: kernel("5.13.0-52-generic"),
+			target: kernel("5.13.0-52-generic"),
+		},
+		{
+			name:   "a newer major is above the floor",
+			source: kernel("6.8.0-45-generic"),
+			target: kernel("6.8.0-45-generic"),
+		},
+		{
+			// A release the floor cannot read is unknown rather than old, so a
+			// kernel string in a form nobody anticipated does not refuse every
+			// restore on the node.
+			name:   "unreadable release",
+			source: kernel("custom-build"),
+			target: kernel("custom-build"),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Compare(GatePreflight, tc.source, tc.target)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("Compare = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
