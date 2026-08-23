@@ -116,6 +116,7 @@ var checksByGate = registerChecks(
 	imageDigestCheck,
 	memoryLimitCheck,
 	cpuLimitCheck,
+	mountCheck,
 )
 
 // registerChecks partitions the policy table by the gate each rule runs at, so

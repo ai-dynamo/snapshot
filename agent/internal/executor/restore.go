@@ -257,6 +257,8 @@ func inspectRestore(
 		cgroupRoot = ""
 	}
 
+	targetRoot := fmt.Sprintf("%s/%d/root", snapshotruntime.HostProcPath, placeholderPID)
+
 	var (
 		targetGPUUUIDs    []string
 		discoverDuration  time.Duration
@@ -289,7 +291,7 @@ func inspectRestore(
 	// Gate B, once the placeholder is resolved and this node's own facts are
 	// readable. It runs ahead of BuildDeviceMap, whose positional pairing turns
 	// a GPU difference into a device-map error that names neither GPU.
-	if err := inspectCompatibility(log, manifest, req.SkipCompatCheck); err != nil {
+	if err := inspectCompatibility(log, manifest, targetRoot, req.SkipCompatCheck); err != nil {
 		return nil, 0, err
 	}
 
@@ -310,10 +312,27 @@ func inspectRestore(
 
 	return &types.RestoreContainerSnapshot{
 		PlaceholderPID: placeholderPID,
-		TargetRoot:     fmt.Sprintf("%s/%d/root", snapshotruntime.HostProcPath, placeholderPID),
+		TargetRoot:     targetRoot,
 		CgroupRoot:     cgroupRoot,
 		CUDADeviceMap:  cudaDeviceMap,
 	}, discoverDuration + deviceMapDuration, nil
+}
+
+// existingMounts reports which of the recorded destinations resolve inside the
+// placeholder's rootfs. Only what the checkpoint recorded is looked up, so a gate
+// on this path costs one stat per volume the checkpoint actually used.
+//
+// Only a path that is definitely absent is left out. Any other stat failure is
+// this agent failing to look rather than the pod missing a volume, and reporting
+// it as missing would refuse a restore that would have worked.
+func existingMounts(targetRoot string, destinations []string) []string {
+	existing := make([]string, 0, len(destinations))
+	for _, destination := range destinations {
+		if _, err := os.Stat(filepath.Join(targetRoot, destination)); !os.IsNotExist(err) {
+			existing = append(existing, destination)
+		}
+	}
+	return existing
 }
 
 // execNSRestore launches the nsrestore binary inside the placeholder container's
