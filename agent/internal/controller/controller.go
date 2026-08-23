@@ -867,7 +867,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, artifa
 			// Nothing was attempted, so there is no half-restored process to
 			// clean up. The placeholder is deliberately left running: killing it
 			// would restart the container straight back into the same answer.
-			// Reporting comes next.
+			w.refuseRestore(pod, incompatible)
 			return nil
 		}
 
@@ -1090,6 +1090,11 @@ func (w *NodeController) failRestorePod(ctx context.Context, pod *corev1.Pod, ca
 }
 
 func (w *NodeController) handleRestorePreflightError(ctx context.Context, pod *corev1.Pod, cause error) bool {
+	var incompatible *compat.IncompatibleError
+	if errors.As(cause, &incompatible) {
+		return w.refuseRestore(pod, incompatible)
+	}
+
 	var pending *restorePendingError
 	if !errors.As(cause, &pending) {
 		return w.failRestorePod(ctx, pod, cause)

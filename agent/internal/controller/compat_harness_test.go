@@ -157,6 +157,29 @@ func (r *logRecorder) add(message string, inherited, keysAndValues []any) {
 	r.records = append(r.records, logRecord{message: message, fields: fields})
 }
 
+// fieldsOf returns the fields of every record logged under one message,
+// including the ones inherited from the logger.
+func (r *logRecorder) fieldsOf(message string) []map[string]any {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var matched []map[string]any
+	for _, record := range r.records {
+		if record.message == message {
+			matched = append(matched, record.fields)
+		}
+	}
+	return matched
+}
+
+// refusalLog returns the fields of the one refusal the agent logged, which is
+// what an operator reads to learn why a restore was turned down.
+func (r *gatedRestore) refusalLog(t *testing.T) map[string]any {
+	t.Helper()
+	logged := r.logs.fieldsOf("Refusing restore; this node cannot run the checkpoint")
+	require.Len(t, logged, 1)
+	return logged[0]
+}
+
 type recordingSink struct {
 	recorder *logRecorder
 	values   []any
