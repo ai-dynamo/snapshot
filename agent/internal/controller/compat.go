@@ -25,8 +25,47 @@ func (w *NodeController) refuseRestore(pod *corev1.Pod, incompatible *compat.Inc
 	return false
 }
 
-// skipCompatCheckRequested reports whether this restore was asked to skip the
-// compatibility gates.
+// podFacts reads what one container of a pod runs as and is allowed. It serves
+// both sides of a comparison: what a capture records about the source pod, and
+// what a restore target offers.
+//
+// A container that is not in the pod, or a status the kubelet has not published
+// yet, leaves the facts it would have supplied unknown.
+func podFacts(pod *corev1.Pod, containerName string) compat.Facts {
+	if pod == nil {
+		return compat.Facts{}
+	}
+
+	facts := compat.Facts{}
+	for _, container := range pod.Spec.Containers {
+		if container.Name != containerName {
+			continue
+		}
+		facts.Image = container.Image
+		facts.CPULimit = limitString(container.Resources.Limits, corev1.ResourceCPU)
+		facts.MemoryLimit = limitString(container.Resources.Limits, corev1.ResourceMemory)
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == containerName {
+			facts.ImageID = status.ImageID
+		}
+	}
+	return facts
+}
+
+// limitString keeps an unset limit unset. A missing quantity formats as "0",
+// which would otherwise read as a container limited to nothing.
+func limitString(limits corev1.ResourceList, name corev1.ResourceName) string {
+	quantity, ok := limits[name]
+	if !ok {
+		return ""
+	}
+	return quantity.String()
+}
+
+// skipCompatCheckRequested reports whether this restore was asked to skip
+// the compatibility gates, by the pod that is being restored or by the node
+// it landed on.
 func (w *NodeController) skipCompatCheckRequested(pod *corev1.Pod) bool {
 	return w.skipCompatCheckFn() ||
 		snapshotv1alpha1.SkipCompatCheckFromAnnotations(pod.Annotations)

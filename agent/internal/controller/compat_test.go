@@ -10,6 +10,8 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
@@ -130,4 +132,59 @@ func refuseWith(mismatches ...compat.Mismatch) func(context.Context, snapshotrun
 	return func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
 		return 0, compat.NewIncompatibleError(compat.GateInspect, mismatches)
 	}
+}
+
+// The facts recorded at capture describe one container, so a multi-container pod
+// must not contribute another container's image or limits.
+func TestPodFactsReadTheTargetContainer(t *testing.T) {
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{Containers: []corev1.Container{
+			{
+				Name:  "sidecar",
+				Image: "busybox:1.36",
+				Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1"),
+					corev1.ResourceMemory: resource.MustParse("256Mi"),
+				}},
+			},
+			{
+				Name:  "main",
+				Image: "nvcr.io/nvidia/tritonserver:24.09-py3",
+				Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("4"),
+					corev1.ResourceMemory: resource.MustParse("16Gi"),
+				}},
+			},
+		}},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+			{Name: "sidecar", ImageID: "sha256:sidecar"},
+			{Name: "main", ImageID: "docker-pullable://nvcr.io/nvidia/tritonserver@sha256:deadbeef"},
+		}},
+	}
+
+	assert.Equal(t, compat.Facts{
+		Image:       "nvcr.io/nvidia/tritonserver:24.09-py3",
+		ImageID:     "docker-pullable://nvcr.io/nvidia/tritonserver@sha256:deadbeef",
+		CPULimit:    "4",
+		MemoryLimit: "16Gi",
+	}, podFacts(pod, "main"))
+}
+
+// A fact the pod does not carry stays unknown. An unlimited container is not a
+// container limited to zero, and a status the kubelet has not published yet is
+// not an image ID of "".
+func TestPodFactsLeaveWhatThePodDoesNotSayUnknown(t *testing.T) {
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name:  "main",
+			Image: "busybox:1.36",
+			Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+				corev1.ResourceMemory: resource.MustParse("16Gi"),
+			}},
+		}}},
+	}
+
+	assert.Equal(t, compat.Facts{Image: "busybox:1.36", MemoryLimit: "16Gi"}, podFacts(pod, "main"))
+	assert.Equal(t, compat.Facts{}, podFacts(pod, "absent"), "a container not in the pod")
+	assert.Equal(t, compat.Facts{}, podFacts(nil, "main"), "no pod at all")
 }
