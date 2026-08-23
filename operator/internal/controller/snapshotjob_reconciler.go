@@ -89,19 +89,19 @@ func (r *SnapshotJobReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	return result, nil
 }
 
-// reconcileResources validates immutable input, then creates or observes the
-// source Job and its PodSnapshot. Retryable API failures are returned as errors;
-// immutable validation and deterministic-name conflicts are typed observations.
+// reconcileResources observes an existing source Job or builds and creates it
+// when absent, then reconciles its PodSnapshot. Retryable API failures are
+// returned as errors; invalid input on the create path and deterministic-name
+// conflicts are typed observations.
 func (r *SnapshotJobReconciler) reconcileResources(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob) (snapshotJobObservation, ctrl.Result, error) {
-	desiredJob, err := buildSourceJob(sj)
-	if err != nil {
-		return terminalObservation(snapshotv1alpha1.ReasonInvalidSpec, err), ctrl.Result{}, nil
-	}
-
 	job := &batchv1.Job{}
-	err = r.Get(ctx, client.ObjectKey{Namespace: sj.Namespace, Name: sj.Name}, job)
+	err := r.Get(ctx, client.ObjectKey{Namespace: sj.Namespace, Name: sj.Name}, job)
 	switch {
 	case apierrors.IsNotFound(err):
+		desiredJob, buildErr := buildSourceJob(sj)
+		if buildErr != nil {
+			return terminalObservation(snapshotv1alpha1.ReasonInvalidSpec, buildErr), ctrl.Result{}, nil
+		}
 		return r.createSourceJob(ctx, sj, desiredJob)
 	case err != nil:
 		return snapshotJobObservation{}, ctrl.Result{}, fmt.Errorf("get source Job %q: %w", sj.Name, err)

@@ -278,6 +278,35 @@ func TestSnapshotJobReconcileAdoptsOwnedJob(t *testing.T) {
 	assert.Len(t, jobs.Items, 1, "an already-owned Job must not be recreated")
 }
 
+func TestSnapshotJobReconcileDoesNotRebuildExistingOwnedJob(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+	sj.UID = types.UID("sj-uid")
+
+	job, err := buildSourceJob(sj)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+
+	// The existing Job is the source of truth for the already-started workload.
+	// Make the current SnapshotJob impossible to rebuild to prove that the
+	// observe path does not construct an unused desired Job.
+	sj.Spec.PodSnapshotTemplate.TargetContainers = []string{"does-not-exist"}
+	r := makeSnapshotJobReconciler(s, sj, job)
+
+	result, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+	assert.Equal(t, sourcePodRequeueBackstop, result.RequeueAfter)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobFailed(updated),
+		"an existing owned Job must be observed without rebuilding it")
+
+	jobs := &batchv1.JobList{}
+	require.NoError(t, r.List(context.Background(), jobs))
+	assert.Len(t, jobs.Items, 1, "the existing owned Job must not be recreated")
+}
+
 func TestSnapshotJobReconcileObservesTerminalPodSnapshotFromAlreadyExistsRace(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
