@@ -140,3 +140,66 @@ func TestKernelVersionCheck(t *testing.T) {
 		})
 	}
 }
+
+func TestImageDigestCheck(t *testing.T) {
+	const (
+		captured = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+		rebuilt  = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+	)
+	imageID := func(id string) Facts {
+		return Facts{ImageID: id}
+	}
+
+	tests := []struct {
+		name   string
+		source Facts
+		target Facts
+		want   []Mismatch
+	}{
+		{
+			name:   "same content",
+			source: imageID(captured),
+			target: imageID(captured),
+		},
+		{
+			// The same reference resolved to different content, which is what a
+			// rebuilt or moved tag looks like from here.
+			name:   "same reference, rebuilt content",
+			source: imageID(captured),
+			target: imageID(rebuilt),
+			want:   []Mismatch{{Check: CheckImageDigest, Source: captured, Target: rebuilt}},
+		},
+		{
+			// Runtimes wrap the digest differently, and the artifact keeps
+			// whatever it was given. The same content must not read as a
+			// mismatch because one side spells it out and the other does not.
+			name:   "the same digest wrapped differently",
+			source: imageID("docker-pullable://nvcr.io/nvidia/tritonserver@" + captured),
+			target: imageID(captured),
+		},
+		{
+			name:   "different content, wrapped differently",
+			source: imageID("docker-pullable://nvcr.io/nvidia/tritonserver@" + captured),
+			target: imageID(rebuilt),
+			want:   []Mismatch{{Check: CheckImageDigest, Source: captured, Target: rebuilt}},
+		},
+		{
+			name:   "checkpoint taken before the image ID was recorded",
+			target: imageID(captured),
+		},
+		{
+			// The kubelet has not published a status for the placeholder yet.
+			name:   "target image ID not published yet",
+			source: imageID(captured),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Compare(GatePreflight, tc.source, tc.target)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("Compare = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}

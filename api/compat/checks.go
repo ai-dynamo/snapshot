@@ -85,6 +85,34 @@ func leadingNumber(field string) (int, bool) {
 	return value, err == nil
 }
 
+// CheckImageDigest refuses a restore into image content other than what was
+// captured. The reference is not compared: the same content is reachable under
+// more than one, and a rebuilt or moved tag is one reference over two contents.
+const CheckImageDigest Check = "image-digest"
+
+var imageDigestCheck = check{
+	name: CheckImageDigest,
+	gate: GatePreflight,
+	compare: func(source, target Facts) []Mismatch {
+		return mustMatch(imageDigest(source.ImageID), imageDigest(target.ImageID))
+	},
+}
+
+// imageDigest reduces a container status image ID to the digest inside it.
+// Runtimes disagree on the wrapping - containerd reports a bare "sha256:...",
+// others a scheme and a repository around it - and the artifact keeps whichever
+// form it was given, so the two are only comparable after this.
+func imageDigest(imageID string) string {
+	digest := strings.TrimSpace(imageID)
+	if scheme := strings.Index(digest, "://"); scheme >= 0 {
+		digest = digest[scheme+len("://"):]
+	}
+	if at := strings.LastIndex(digest, "@"); at >= 0 {
+		digest = digest[at+1:]
+	}
+	return digest
+}
+
 // mustMatch reports a mismatch unless the two values are identical. A value
 // absent on either side is unknown, and an unknown fact never refuses a restore:
 // a checkpoint captured before it was ever recorded has to stay restorable.
