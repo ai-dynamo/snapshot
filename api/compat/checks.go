@@ -244,6 +244,40 @@ var gpuCountCheck = check{
 	},
 }
 
+// CheckDriverVersion refuses a restore on a driver build other than the captured
+// one. Build granularity is not caution for its own sake: upstream reproduces a
+// restore failure between 560.35.03 and 560.35.05.
+const CheckDriverVersion Check = "driver-version"
+
+// CheckDriverMinimum refuses a driver older than CUDA checkpoint and restore is
+// supported on at all.
+const CheckDriverMinimum Check = "driver-minimum"
+
+const minDriverMajor = 580
+
+var driverVersionCheck = check{
+	name: CheckDriverVersion,
+	gate: GateInspect,
+	compare: func(source, target Facts) []Mismatch {
+		return mustMatch(source.DriverVersion, target.DriverVersion)
+	},
+}
+
+var driverMinimumCheck = check{
+	name: CheckDriverMinimum,
+	gate: GateInspect,
+	compare: func(_, target Facts) []Mismatch {
+		major, ok := leadingNumber(target.DriverVersion)
+		if !ok || major >= minDriverMajor {
+			return nil
+		}
+		return []Mismatch{{
+			Source: strconv.Itoa(minDriverMajor) + " or newer",
+			Target: target.DriverVersion,
+		}}
+	},
+}
+
 // gpuModels builds a stable model summary: sorting ignores allocation order,
 // while "xN" preserves how many GPUs have each name. ProductName comes from
 // nvidia-smi --query-gpu=name, documented as the GPU's official product name:

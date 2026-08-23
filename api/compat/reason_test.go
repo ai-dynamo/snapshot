@@ -20,13 +20,13 @@ func TestMismatchReason(t *testing.T) {
 		},
 		{
 			name:     "source unrecorded",
-			mismatch: Mismatch{Check: "agent-version", Target: "v0.4.0"},
-			want:     "agent-version: source unknown, target v0.4.0",
+			mismatch: Mismatch{Check: CheckImageDigest, Target: "sha256:beef"},
+			want:     "image-digest: source unknown, target sha256:beef",
 		},
 		{
 			name:     "target unreadable",
-			mismatch: Mismatch{Check: "gpu-driver-version", Source: "580.82.07"},
-			want:     "gpu-driver-version: source 580.82.07, target unknown",
+			mismatch: Mismatch{Check: CheckDriverVersion, Source: "580.82.07"},
+			want:     "driver-version: source 580.82.07, target unknown",
 		},
 		{
 			name:     "blank values are unknown",
