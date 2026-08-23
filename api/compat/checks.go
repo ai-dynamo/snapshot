@@ -218,6 +218,32 @@ var gpuModelCheck = check{
 	},
 }
 
+// CheckGPUCount refuses a restore onto a different number of GPUs. A multi-GPU
+// checkpoint holds one piece of device state per GPU with a rank each, and there
+// is no meaning to be given to a rank that has nowhere to land - or to a GPU no
+// rank was recorded for.
+//
+// A target with no GPUs at all is that same refusal and is reported as one. It
+// reaches here only once discovery has run, so none found means none, and the
+// alternative is the unnamed device-map error further in.
+const CheckGPUCount Check = "gpu-count"
+
+var gpuCountCheck = check{
+	name: CheckGPUCount,
+	gate: GateInspect,
+	compare: func(source, target Facts) []Mismatch {
+		sourceCount := len(source.GPUDevices)
+		targetCount := len(target.GPUDevices)
+		if sourceCount == 0 || sourceCount == targetCount {
+			return nil
+		}
+		return []Mismatch{{
+			Source: strconv.Itoa(sourceCount),
+			Target: strconv.Itoa(targetCount),
+		}}
+	},
+}
+
 // gpuModels builds a stable model summary: sorting ignores allocation order,
 // while "xN" preserves how many GPUs have each name. ProductName comes from
 // nvidia-smi --query-gpu=name, documented as the GPU's official product name:

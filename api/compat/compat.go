@@ -118,6 +118,7 @@ var checksByGate = registerChecks(
 	cpuLimitCheck,
 	mountCheck,
 	gpuModelCheck,
+	gpuCountCheck,
 )
 
 // registerChecks partitions the policy table by the gate each rule runs at, so

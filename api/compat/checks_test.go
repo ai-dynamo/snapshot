@@ -469,8 +469,11 @@ func TestGPUModelCheck(t *testing.T) {
 			target: Facts{GPUDevices: []GPUDevice{{UUID: "GPU-a"}}},
 		},
 		{
-			name:   "no GPUs at all",
+			// Nothing to name is not another name, so the model rule stays
+			// quiet and the count rule is the one that refuses.
+			name:   "no GPUs on the target at all",
 			source: gpus("NVIDIA L4"),
+			want:   []Mismatch{{Check: CheckGPUCount, Source: "1", Target: "0"}},
 		},
 	}
 
@@ -487,5 +490,72 @@ func TestGPUModelCheck(t *testing.T) {
 	// first gate has nothing to compare.
 	if got := Compare(GatePreflight, gpus("NVIDIA L4"), gpus("Tesla T4")); len(got) != 0 {
 		t.Errorf("the first gate judged a GPU it cannot see: %+v", got)
+	}
+}
+
+func TestGPUCountCheck(t *testing.T) {
+	tests := []struct {
+		name   string
+		source Facts
+		target Facts
+		want   []Mismatch
+	}{
+		{
+			name:   "the same number of GPUs",
+			source: gpus("NVIDIA L4", "NVIDIA L4"),
+			target: gpus("NVIDIA L4", "NVIDIA L4"),
+		},
+		{
+			// Both rules speak: the set of models differs by a count, and so
+			// does the number of GPUs. Each says something the other does not,
+			// and a refusal names every rule it failed.
+			name:   "fewer GPUs than were captured",
+			source: gpus("NVIDIA L4", "NVIDIA L4"),
+			target: gpus("NVIDIA L4"),
+			want: []Mismatch{
+				{Check: CheckGPUModel, Source: "NVIDIA L4 x2", Target: "NVIDIA L4 x1"},
+				{Check: CheckGPUCount, Source: "2", Target: "1"},
+			},
+		},
+		{
+			// More is not better here: a checkpoint records one piece of device
+			// state per GPU, and a spare GPU has no rank to take.
+			name:   "more GPUs than were captured",
+			source: gpus("NVIDIA L4"),
+			target: gpus("NVIDIA L4", "NVIDIA L4"),
+			want: []Mismatch{
+				{Check: CheckGPUModel, Source: "NVIDIA L4 x1", Target: "NVIDIA L4 x2"},
+				{Check: CheckGPUCount, Source: "1", Target: "2"},
+			},
+		},
+		{
+			name:   "the checkpoint recorded no GPUs",
+			target: gpus("NVIDIA L4"),
+		},
+		{
+			// The device map pairs source and target UUIDs by position, so a
+			// target with none of its own fails there over a GPU it cannot
+			// name. Refuse it here, where it can be named.
+			name:   "no GPUs were discovered on the target",
+			source: gpus("NVIDIA L4"),
+			want:   []Mismatch{{Check: CheckGPUCount, Source: "1", Target: "0"}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Compare(GateInspect, tc.source, tc.target)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("Compare = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+
+	// A checkpoint from before the models were recorded still knows how many
+	// GPUs it used, so the count keeps applying where the model rule cannot.
+	unnamed := Facts{GPUDevices: []GPUDevice{{UUID: "GPU-a"}, {UUID: "GPU-b"}}}
+	want := []Mismatch{{Check: CheckGPUCount, Source: "2", Target: "1"}}
+	if got := Compare(GateInspect, unnamed, gpus("NVIDIA L4")); !reflect.DeepEqual(got, want) {
+		t.Errorf("Compare = %+v, want %+v", got, want)
 	}
 }
