@@ -56,6 +56,28 @@ func TestPreflightCompatibilityComparesRecordedFacts(t *testing.T) {
 	assert.Equal(t, []string{"/etc/hosts", "/model-cache"}, r.comparison.calls[0].source.ExternalizedMounts)
 }
 
+// A refusal from the second gate is not a CRIU failure, so it neither reports
+// one nor kills the placeholder: killing it would restart the container straight
+// back into the same answer.
+func TestRunRestoreTreatsIncompatibleAsTerminal(t *testing.T) {
+	r := newGatedRestore(t)
+	rt := &fakeRuntime{}
+	r.controller.runtime = rt
+	sentinels := 0
+	r.controller.writeControlSentinelFn = func(int, string) error {
+		sentinels++
+		return nil
+	}
+	r.controller.restoreFn = refuseWith(compat.Mismatch{Check: "cpu-arch", Source: "amd64", Target: "arm64"})
+
+	requeue := r.runRestore(t)
+
+	assert.False(t, requeue, "a refusal asked to be driven again")
+	assert.Empty(t, r.events(t, restoreFailedReason), "refusal reported itself as a restore failure")
+	assert.Zero(t, sentinels, "refusal released the workload")
+	assert.Empty(t, rt.resolvedContainerIDs, "refusal reached the placeholder kill path")
+}
+
 // The gate runs in preflight, before the restore is entered at all, so a refusal
 // leaves no in-flight entry and no restore worker behind.
 func TestReconcileRestorePodRefusesBeforeEnteringRestore(t *testing.T) {
@@ -70,4 +92,10 @@ func TestReconcileRestorePodRefusesBeforeEnteringRestore(t *testing.T) {
 	assert.Len(t, r.comparison.calls, 1)
 	assert.Empty(t, r.events(t, restoreRequestedReason), "refused restore still announced a request")
 	assert.Empty(t, r.controller.inFlight, "refused restore claimed an attempt")
+}
+
+func refuseWith(mismatches ...compat.Mismatch) func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
+	return func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
+		return 0, compat.NewIncompatibleError(compat.GateInspect, mismatches)
+	}
 }

@@ -190,17 +190,11 @@ func sawEventReason(clientset *fake.Clientset, reason string) bool {
 }
 
 func eventForReason(clientset *fake.Clientset, reason string) *corev1.Event {
-	for _, action := range clientset.Actions() {
-		create, ok := action.(clientgotesting.CreateAction)
-		if !ok || create.GetResource().Resource != "events" {
-			continue
-		}
-		event, ok := create.GetObject().(*corev1.Event)
-		if ok && event.Reason == reason {
-			return event
-		}
+	events := eventsForReason(clientset, reason)
+	if len(events) == 0 {
+		return nil
 	}
-	return nil
+	return events[0]
 }
 
 // eventsForReason returns every event created under one reason, so a test can

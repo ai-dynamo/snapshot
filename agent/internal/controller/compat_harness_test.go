@@ -4,9 +4,13 @@
 package controller
 
 import (
+	"context"
 	"os"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -45,6 +49,7 @@ type gatedRestore struct {
 	controller *NodeController
 	pod        *corev1.Pod
 	artifact   *restoreArtifact
+	logs       *logRecorder
 	comparison *comparisonSpy
 }
 
@@ -53,6 +58,8 @@ func newGatedRestore(t *testing.T, mismatches ...compat.Mismatch) *gatedRestore 
 	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
 	snapshot, content := readySnapshotObjects()
 	w := makeTestController(t, pod, snapshot, content)
+	logs := &logRecorder{}
+	w.log = logr.New(&recordingSink{recorder: logs})
 	comparison := &comparisonSpy{mismatches: mismatches}
 	w.compareFn = comparison.compare
 
@@ -69,6 +76,7 @@ func newGatedRestore(t *testing.T, mismatches ...compat.Mismatch) *gatedRestore 
 			SourceContainerName: gatedRestoreContainer,
 			Path:                path,
 		},
+		logs:       logs,
 		comparison: comparison,
 	}
 }
@@ -92,6 +100,23 @@ func (r *gatedRestore) reconcile(t *testing.T) {
 	processQueuedRestorePod(t, r.controller, r.pod)
 }
 
+// runRestore drives the restore worker directly, which is where the second gate
+// reports from.
+func (r *gatedRestore) runRestore(t *testing.T) bool {
+	t.Helper()
+	err := r.controller.runRestore(
+		context.Background(),
+		r.pod,
+		r.artifact,
+		gatedRestoreContainer,
+		testContainerID,
+		time.Time{},
+		false,
+	)
+	require.NoError(t, err)
+	return false
+}
+
 func (r *gatedRestore) clientset(t *testing.T) *fake.Clientset {
 	t.Helper()
 	clientset, ok := r.controller.clientset.(*fake.Clientset)
@@ -105,3 +130,59 @@ func (r *gatedRestore) events(t *testing.T, reason string) []*corev1.Event {
 	t.Helper()
 	return eventsForReason(r.clientset(t), reason)
 }
+
+type logRecord struct {
+	message string
+	fields  map[string]any
+}
+
+// logRecorder captures what the agent logged, so a test can assert on the field
+// an operator greps for rather than on a formatted sentence.
+type logRecorder struct {
+	mu      sync.Mutex
+	records []logRecord
+}
+
+func (r *logRecorder) add(message string, inherited, keysAndValues []any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	fields := map[string]any{}
+	for _, pairs := range [][]any{inherited, keysAndValues} {
+		for i := 0; i+1 < len(pairs); i += 2 {
+			if key, ok := pairs[i].(string); ok {
+				fields[key] = pairs[i+1]
+			}
+		}
+	}
+	r.records = append(r.records, logRecord{message: message, fields: fields})
+}
+
+type recordingSink struct {
+	recorder *logRecorder
+	values   []any
+}
+
+var _ logr.LogSink = (*recordingSink)(nil)
+
+func (s *recordingSink) Init(logr.RuntimeInfo) {}
+func (s *recordingSink) Enabled(int) bool      { return true }
+
+func (s *recordingSink) Info(_ int, message string, keysAndValues ...any) {
+	s.recorder.add(message, s.values, keysAndValues)
+}
+
+func (s *recordingSink) Error(err error, message string, keysAndValues ...any) {
+	s.recorder.add(message, s.values, append(keysAndValues, "error", err))
+}
+
+// WithValues has to accumulate: the gates log through a logger that already
+// carries the pod and container, and a test asserting on those must still see
+// them on the record.
+func (s *recordingSink) WithValues(keysAndValues ...any) logr.LogSink {
+	values := make([]any, 0, len(s.values)+len(keysAndValues))
+	values = append(values, s.values...)
+	values = append(values, keysAndValues...)
+	return &recordingSink{recorder: s.recorder, values: values}
+}
+
+func (s *recordingSink) WithName(string) logr.LogSink { return s }

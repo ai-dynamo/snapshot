@@ -254,14 +254,17 @@ func inspectRestore(
 		cgroupRoot = ""
 	}
 
-	cudaDeviceMap := ""
-	var gpuDeviceMapDuration time.Duration
+	var (
+		targetGPUUUIDs    []string
+		discoverDuration  time.Duration
+		deviceMapDuration time.Duration
+	)
 	if !manifest.CUDA.IsEmpty() {
 		if len(manifest.CUDA.SourceGPUUUIDs) == 0 {
 			return nil, 0, fmt.Errorf("missing source GPU UUIDs in checkpoint manifest")
 		}
-		gpuStart := time.Now()
-		targetGPUUUIDs, err := cuda.DiscoverGPUUUIDs(
+		discoverStart := time.Now()
+		targetGPUUUIDs, err = cuda.DiscoverGPUUUIDs(
 			ctx,
 			req.Clientset,
 			req.PodName,
@@ -271,14 +274,27 @@ func inspectRestore(
 			placeholderPID,
 			log,
 		)
+		discoverDuration = time.Since(discoverStart)
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to get target GPU UUIDs: %w", err)
 		}
 		if len(targetGPUUUIDs) == 0 {
 			return nil, 0, fmt.Errorf("missing target GPU UUIDs for %s/%s container %s", req.PodNamespace, req.PodName, req.DestinationContainerName)
 		}
+	}
+
+	// Gate B, once the placeholder is resolved and this node's own facts are
+	// readable. It runs ahead of BuildDeviceMap, whose positional pairing turns
+	// a GPU difference into a device-map error that names neither GPU.
+	if err := inspectCompatibility(manifest); err != nil {
+		return nil, 0, err
+	}
+
+	cudaDeviceMap := ""
+	if len(targetGPUUUIDs) > 0 {
+		deviceMapStart := time.Now()
 		cudaDeviceMap, err = cuda.BuildDeviceMap(manifest.CUDA.SourceGPUUUIDs, targetGPUUUIDs, log)
-		gpuDeviceMapDuration = time.Since(gpuStart)
+		deviceMapDuration = time.Since(deviceMapStart)
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to build CUDA device map: %w", err)
 		}
@@ -294,7 +310,7 @@ func inspectRestore(
 		TargetRoot:     fmt.Sprintf("%s/%d/root", snapshotruntime.HostProcPath, placeholderPID),
 		CgroupRoot:     cgroupRoot,
 		CUDADeviceMap:  cudaDeviceMap,
-	}, gpuDeviceMapDuration, nil
+	}, discoverDuration + deviceMapDuration, nil
 }
 
 // execNSRestore launches the nsrestore binary inside the placeholder container's
