@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -294,5 +295,25 @@ func TestRemainingDuration(t *testing.T) {
 	}
 	if remainingDuration(5*time.Second, 4*time.Second, 3*time.Second) != 0 {
 		t.Fatal("remainingDuration should not go negative")
+	}
+}
+
+func TestExistingMounts(t *testing.T) {
+	targetRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(targetRoot, "model-cache"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(targetRoot, "etc-hostname"), nil, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	got := existingMounts(targetRoot, []string{"/model-cache", "/data", "/etc-hostname"})
+	want := []string{"/model-cache", "/etc-hostname"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("existingMounts = %#v, want %#v", got, want)
+	}
+
+	if got := existingMounts(targetRoot, nil); len(got) != 0 {
+		t.Errorf("existingMounts of nothing = %#v, want empty", got)
 	}
 }
