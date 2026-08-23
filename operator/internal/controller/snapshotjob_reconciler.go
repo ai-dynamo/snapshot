@@ -92,7 +92,11 @@ func (r *SnapshotJobReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 	if meta.IsStatusConditionTrue(desiredStatus.Conditions, snapshotv1alpha1.SnapshotJobConditionCompleted) {
-		return r.ensureJobDeleted(ctx, sj)
+		// Cleanup in this reconcile must use the UID that was just persisted,
+		// even though sj is the pre-patch object returned by the original Get.
+		completed := sj.DeepCopy()
+		completed.Status = desiredStatus
+		return r.ensureJobDeleted(ctx, completed)
 	}
 	return result, nil
 }
@@ -106,9 +110,9 @@ func (r *SnapshotJobReconciler) reconcileResources(ctx context.Context, sj *snap
 	err := r.Get(ctx, client.ObjectKey{Namespace: sj.Namespace, Name: sj.Name}, job)
 	switch {
 	case apierrors.IsNotFound(err):
-		if sj.Status.PodSnapshotName != "" {
+		if sj.Status.SourceJobUID != "" || sj.Status.PodSnapshotName != "" {
 			return terminalObservation(snapshotv1alpha1.ReasonJobDeleted,
-				fmt.Errorf("source Job %q no longer exists", sj.Name)), ctrl.Result{}, nil
+				fmt.Errorf("source Job %q (uid %q) no longer exists", sj.Name, sj.Status.SourceJobUID)), ctrl.Result{}, nil
 		}
 		desiredJob, buildErr := buildSourceJob(sj)
 		if buildErr != nil {
@@ -117,10 +121,15 @@ func (r *SnapshotJobReconciler) reconcileResources(ctx context.Context, sj *snap
 		return r.createSourceJob(ctx, sj, desiredJob)
 	case err != nil:
 		return snapshotJobObservation{}, ctrl.Result{}, fmt.Errorf("get source Job %q: %w", sj.Name, err)
-	case !metav1.IsControlledBy(job, sj):
-		return terminalObservation(snapshotv1alpha1.ReasonJobNameConflict,
-			fmt.Errorf("an object not controlled by this SnapshotJob already holds the name %q", sj.Name)), ctrl.Result{}, nil
 	default:
+		if failure := classifyExistingSourceJob(sj, job); failure != nil {
+			return snapshotJobObservation{failure: failure}, ctrl.Result{}, nil
+		}
+		if sj.Status.SourceJobUID == "" && job.UID != "" {
+			// Bind the one-shot Job incarnation before creating or adopting any
+			// downstream capture resource.
+			return snapshotJobObservation{job: job}, ctrl.Result{}, nil
+		}
 		return r.reconcilePodSnapshotResources(ctx, sj, job)
 	}
 }
@@ -163,6 +172,10 @@ func (r *SnapshotJobReconciler) reconcilePodSnapshotResources(ctx context.Contex
 			return snapshotJobObservation{}, ctrl.Result{}, fmt.Errorf("re-read source Job %q before terminal decision: %w", job.Name, err)
 		}
 		observed.job = latestJob
+		if failure := classifyExistingSourceJob(sj, latestJob); failure != nil {
+			observed.failure = failure
+			return observed, ctrl.Result{}, nil
+		}
 	}
 	observed.failure = snapshotJobTerminalFailure(observed.job, observed.podSnapshot)
 	return observed, ctrl.Result{}, nil
@@ -185,6 +198,9 @@ func terminalObservation(reason string, cause error) snapshotJobObservation {
 // reconstructed whenever their source resource is observed.
 func deriveSnapshotJobStatus(sj *snapshotv1alpha1.SnapshotJob, observed snapshotJobObservation) snapshotv1alpha1.SnapshotJobStatus {
 	next := sj.DeepCopy()
+	if next.Status.SourceJobUID == "" && observed.job != nil {
+		next.Status.SourceJobUID = observed.job.UID
+	}
 	deriveRunningStatus(next, observed)
 	failure := deriveCapturedStatus(next, observed)
 	if failure != nil {

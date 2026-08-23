@@ -8659,6 +8659,12 @@ spec:
                   when the PodSnapshot is created. Distinguishes "never created" (empty)
                   from "created but missing" (set, not found).
                 type: string
+              sourceJobUID:
+                description: |-
+                  SourceJobUID identifies the one source batch/v1 Job incarnation accepted
+                  for this one-shot SnapshotJob. Once set, a missing Job or a same-name Job
+                  with another UID is terminal and must never cause the workload to run again.
+                type: string
               startedAt:
                 description: |-
                   StartedAt is when the controller first observed the source pod Ready

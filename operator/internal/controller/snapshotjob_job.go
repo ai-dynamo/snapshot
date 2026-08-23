@@ -54,6 +54,7 @@ func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, error) {
 		podTemplate.Labels = map[string]string{}
 	}
 	podTemplate.Labels[snapshotv1alpha1.SnapshotJobOwnerLabel] = sj.Name
+	podTemplate.Labels[snapshotv1alpha1.SnapshotJobOwnerUIDLabel] = string(sj.UID)
 
 	return protocol.NewCheckpointJob(podTemplate, protocol.CheckpointJobOptions{
 		Namespace:             sj.Namespace,

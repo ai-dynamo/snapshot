@@ -86,8 +86,13 @@ func sourcePodForJob(job *batchv1.Job) *corev1.Pod {
 func TestSnapshotJobReconcileFirstPass(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
-	sj.UID = types.UID("sj-uid")
-	r := makeSnapshotJobReconciler(s, sj)
+	funcs := interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+		if job, ok := obj.(*batchv1.Job); ok {
+			job.UID = types.UID("source-job-uid")
+		}
+		return c.Create(ctx, obj, opts...)
+	}}
+	r := makeSnapshotJobReconcilerWithInterceptor(s, funcs, sj)
 
 	_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
 	require.NoError(t, err)
@@ -102,6 +107,47 @@ func TestSnapshotJobReconcileFirstPass(t *testing.T) {
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	assert.Equal(t, snapshotv1alpha1.ReasonPodPending, cond.Reason)
 	assert.Nil(t, updated.Status.StartedAt)
+	assert.Equal(t, types.UID("source-job-uid"), updated.Status.SourceJobUID)
+}
+
+func TestSnapshotJobReconcileRecoversAfterSourceJobUIDStatusWriteFailure(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+
+	jobCreates := 0
+	statusPatches := 0
+	funcs := interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if job, ok := obj.(*batchv1.Job); ok {
+				jobCreates++
+				job.UID = types.UID("source-job-uid")
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+		SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if subResourceName == "status" {
+				statusPatches++
+				if statusPatches == 1 {
+					return errors.New("injected status write failure")
+				}
+			}
+			return c.SubResource(subResourceName).Patch(ctx, obj, patch, opts...)
+		},
+	}
+	r := makeSnapshotJobReconcilerWithInterceptor(s, funcs, sj)
+
+	_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.Error(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	assert.Empty(t, updated.Status.SourceJobUID, "the injected failed status patch must not appear persisted")
+
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	assert.Equal(t, types.UID("source-job-uid"), updated.Status.SourceJobUID)
+	assert.Equal(t, 1, jobCreates, "the existing matching Job must be adopted, not recreated after the failed status write")
 }
 
 func TestSnapshotJobReconcileInvalidSpecIsTerminal(t *testing.T) {
@@ -176,6 +222,7 @@ func TestSnapshotJobReconcileAdoptsJobOnAlreadyExistsRace(t *testing.T) {
 	job, err := buildSourceJob(sj)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	job.UID = types.UID("source-job-uid")
 
 	getCalls := 0
 	funcs := interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -200,6 +247,7 @@ func TestSnapshotJobReconcileAdoptsJobOnAlreadyExistsRace(t *testing.T) {
 	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
 	cond := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning)
 	require.NotNil(t, cond, "adopting the existing Job on the AlreadyExists path must still observe it for Running")
+	assert.Equal(t, job.UID, updated.Status.SourceJobUID)
 }
 
 // TestSnapshotJobReconcileFailsForeignJobOnAlreadyExistsRace is the same
@@ -267,6 +315,7 @@ func TestSnapshotJobReconcileAdoptsOwnedJob(t *testing.T) {
 	job, err := buildSourceJob(sj)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	job.UID = types.UID("source-job-uid")
 
 	r := makeSnapshotJobReconciler(s, sj, job)
 
@@ -276,35 +325,61 @@ func TestSnapshotJobReconcileAdoptsOwnedJob(t *testing.T) {
 	jobs := &batchv1.JobList{}
 	require.NoError(t, r.List(context.Background(), jobs))
 	assert.Len(t, jobs.Items, 1, "an already-owned Job must not be recreated")
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	assert.Equal(t, job.UID, updated.Status.SourceJobUID)
 }
 
-func TestSnapshotJobReconcileDoesNotRebuildExistingOwnedJob(t *testing.T) {
+func TestSnapshotJobReconcileRejectsOwnedJobWithoutImmutableUIDStamp(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
-	sj.UID = types.UID("sj-uid")
 
 	job, err := buildSourceJob(sj)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
-
-	// The existing Job is the source of truth for the already-started workload.
-	// Make the current SnapshotJob impossible to rebuild to prove that the
-	// observe path does not construct an unused desired Job.
-	sj.Spec.PodSnapshotTemplate.TargetContainers = []string{"does-not-exist"}
+	delete(job.Spec.Template.Labels, snapshotv1alpha1.SnapshotJobOwnerUIDLabel)
 	r := makeSnapshotJobReconciler(s, sj, job)
 
-	result, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
 	require.NoError(t, err)
-	assert.Equal(t, sourcePodRequeueBackstop, result.RequeueAfter)
 
 	updated := &snapshotv1alpha1.SnapshotJob{}
 	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
-	assert.False(t, snapshotv1alpha1.IsSnapshotJobFailed(updated),
-		"an existing owned Job must be observed without rebuilding it")
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, snapshotv1alpha1.ReasonJobNameConflict, failed.Reason)
 
 	jobs := &batchv1.JobList{}
 	require.NoError(t, r.List(context.Background(), jobs))
-	assert.Len(t, jobs.Items, 1, "the existing owned Job must not be recreated")
+	assert.Len(t, jobs.Items, 1, "the mismatched Job must be preserved for inspection")
+}
+
+func TestSnapshotJobReconcileRejectsSameNameJobWithDifferentUID(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+	sj.Status.SourceJobUID = types.UID("original-job-uid")
+
+	replacement, err := buildSourceJob(sj)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(sj, replacement, s))
+	replacement.UID = types.UID("replacement-job-uid")
+	r := makeSnapshotJobReconciler(s, sj, replacement)
+
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, snapshotv1alpha1.ReasonJobNameConflict, failed.Reason)
+	assert.Equal(t, types.UID("original-job-uid"), updated.Status.SourceJobUID,
+		"the replacement UID must never overwrite the persisted source Job identity")
+
+	snaps := &snapshotv1alpha1.PodSnapshotList{}
+	require.NoError(t, r.List(context.Background(), snaps))
+	assert.Empty(t, snaps.Items, "a replacement Job must be rejected before capture resources are created")
 }
 
 func TestSnapshotJobReconcileObservesTerminalPodSnapshotFromAlreadyExistsRace(t *testing.T) {

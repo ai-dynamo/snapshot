@@ -7,6 +7,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // SnapshotJob condition types. The controller sets these via meta.SetStatusCondition.
@@ -50,8 +51,10 @@ const (
 	// missing after the source exited.
 	ReasonSourceCompletedWithoutCapture = "SourceCompletedWithoutCapture"
 	ReasonPodSnapshotNameConflict       = "PodSnapshotNameConflict"
-	ReasonJobNameConflict               = "JobNameConflict"
-	ReasonJobDeleted                    = "JobDeleted"
+	// ReasonJobNameConflict means the deterministic Job name is held by a
+	// foreign object or by a different Job UID than the one already recorded.
+	ReasonJobNameConflict = "JobNameConflict"
+	ReasonJobDeleted      = "JobDeleted"
 	// ReasonInvalidSpec covers spec-level validation failures caught before
 	// building the source Job, for objects that bypassed CEL admission.
 	ReasonInvalidSpec = "InvalidSpec"
@@ -63,9 +66,10 @@ const (
 // instead of an owner-based watch.
 const SnapshotJobOwnerLabel = "nvidia.com/snapshot-job"
 
-// SnapshotJobOwnerUIDLabel binds a produced PodSnapshot to one concrete
-// SnapshotJob incarnation. The name label alone is insufficient because capture
-// artifacts outlive their SnapshotJob and names can be reused.
+// SnapshotJobOwnerUIDLabel binds SnapshotJob-created resources to one concrete
+// SnapshotJob incarnation. It is stamped into the source Job's immutable pod
+// template and onto the produced PodSnapshot; the name label alone is
+// insufficient because names can be reused.
 const SnapshotJobOwnerUIDLabel = "nvidia.com/snapshot-job-uid"
 
 // IsSnapshotJobCompleted reports whether the SnapshotJob's Completed condition is True.
@@ -135,6 +139,12 @@ type PodSnapshotTemplate struct {
 
 // SnapshotJobStatus defines the observed state of SnapshotJob.
 type SnapshotJobStatus struct {
+	// SourceJobUID identifies the one source batch/v1 Job incarnation accepted
+	// for this one-shot SnapshotJob. Once set, a missing Job or a same-name Job
+	// with another UID is terminal and must never cause the workload to run again.
+	// +optional
+	SourceJobUID types.UID `json:"sourceJobUID,omitempty"`
+
 	// PodSnapshotName is the name of the PodSnapshot produced by this job. Set
 	// when the PodSnapshot is created. Distinguishes "never created" (empty)
 	// from "created but missing" (set, not found).

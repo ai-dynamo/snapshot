@@ -43,11 +43,79 @@ func (r *SnapshotJobReconciler) observeExistingSourceJob(ctx context.Context, sj
 	if err := r.Get(ctx, client.ObjectKey{Namespace: sj.Namespace, Name: sj.Name}, job); err != nil {
 		return snapshotJobObservation{}, ctrl.Result{}, fmt.Errorf("get existing source Job %q after AlreadyExists: %w", sj.Name, err)
 	}
-	if !metav1.IsControlledBy(job, sj) {
-		return terminalObservation(snapshotv1alpha1.ReasonJobNameConflict,
-			fmt.Errorf("an object not controlled by this SnapshotJob already holds the name %q", sj.Name)), ctrl.Result{}, nil
+	if failure := classifyExistingSourceJob(sj, job); failure != nil {
+		return snapshotJobObservation{failure: failure}, ctrl.Result{}, nil
+	}
+	if sj.Status.SourceJobUID == "" && job.UID != "" {
+		return snapshotJobObservation{job: job}, ctrl.Result{}, nil
 	}
 	return r.reconcilePodSnapshotResources(ctx, sj, job)
+}
+
+// classifyExistingSourceJob proves that a deterministic-name Job is the one
+// source execution this SnapshotJob is allowed to observe. A persisted UID is
+// authoritative. Before the UID has been persisted (for example, after Create
+// succeeded and the status patch failed), adoption additionally requires the
+// expected owner and immutable identity-bearing protocol fields.
+func classifyExistingSourceJob(sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) *snapshotJobFailure {
+	if !metav1.IsControlledBy(job, sj) {
+		return &snapshotJobFailure{
+			reason: snapshotv1alpha1.ReasonJobNameConflict,
+			cause:  fmt.Errorf("an object not controlled by this SnapshotJob already holds the name %q", sj.Name),
+		}
+	}
+	if expectedUID := sj.Status.SourceJobUID; expectedUID != "" {
+		if job.UID != expectedUID {
+			return &snapshotJobFailure{
+				reason: snapshotv1alpha1.ReasonJobNameConflict,
+				cause: fmt.Errorf("source Job %q was replaced: found uid %q, expected %q",
+					job.Name, job.UID, expectedUID),
+			}
+		}
+		return nil
+	}
+
+	desired, err := buildSourceJob(sj)
+	if err != nil {
+		return &snapshotJobFailure{reason: snapshotv1alpha1.ReasonInvalidSpec, cause: err}
+	}
+	if !sourceJobHasExpectedIdentity(desired, job, sj.Spec.PodSnapshotTemplate.TargetContainers[0]) {
+		return &snapshotJobFailure{
+			reason: snapshotv1alpha1.ReasonJobNameConflict,
+			cause: fmt.Errorf("existing source Job %q does not carry the immutable identity expected for this SnapshotJob",
+				job.Name),
+		}
+	}
+	return nil
+}
+
+// sourceJobHasExpectedIdentity checks only the immutable identity and capture
+// protocol fields needed for safe adoption. API defaults and unrelated
+// admission mutations are deliberately outside this narrow recovery check.
+func sourceJobHasExpectedIdentity(desired, actual *batchv1.Job, targetContainer string) bool {
+	if actual.Labels[snapshotv1alpha1.CheckpointIDLabel] != desired.Labels[snapshotv1alpha1.CheckpointIDLabel] {
+		return false
+	}
+	for _, key := range []string{
+		snapshotv1alpha1.SnapshotJobOwnerLabel,
+		snapshotv1alpha1.SnapshotJobOwnerUIDLabel,
+		snapshotv1alpha1.CheckpointSourceLabel,
+		snapshotv1alpha1.CheckpointIDLabel,
+	} {
+		if actual.Spec.Template.Labels[key] != desired.Spec.Template.Labels[key] {
+			return false
+		}
+	}
+	if actual.Spec.Template.Annotations[snapshotv1alpha1.CheckpointArtifactVersionAnnotation] !=
+		desired.Spec.Template.Annotations[snapshotv1alpha1.CheckpointArtifactVersionAnnotation] {
+		return false
+	}
+	for i := range actual.Spec.Template.Spec.Containers {
+		if actual.Spec.Template.Spec.Containers[i].Name == targetContainer {
+			return true
+		}
+	}
+	return false
 }
 
 type sourceJobTerminalState int
@@ -129,6 +197,11 @@ func (r *SnapshotJobReconciler) ensureJobDeleted(ctx context.Context, sj *snapsh
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !metav1.IsControlledBy(job, sj) {
+		return ctrl.Result{}, nil
+	}
+	if expectedUID := sj.Status.SourceJobUID; expectedUID != "" && job.UID != expectedUID {
+		r.Recorder.Eventf(sj, corev1.EventTypeWarning, snapshotv1alpha1.ReasonJobNameConflict,
+			"Refusing to delete replacement source Job %q with uid %q; expected %q", job.Name, job.UID, expectedUID)
 		return ctrl.Result{}, nil
 	}
 	uid := job.UID

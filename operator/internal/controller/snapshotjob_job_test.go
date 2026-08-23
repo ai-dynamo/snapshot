@@ -19,7 +19,7 @@ import (
 
 func minimalSnapshotJob() *snapshotv1alpha1.SnapshotJob {
 	return &snapshotv1alpha1.SnapshotJob{
-		ObjectMeta: metav1.ObjectMeta{Name: "warm-worker", Namespace: "inference"},
+		ObjectMeta: metav1.ObjectMeta{Name: "warm-worker", Namespace: "inference", UID: "sj-uid"},
 		Spec: snapshotv1alpha1.SnapshotJobSpec{
 			PodTemplate: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
@@ -66,6 +66,7 @@ func TestBuildSourceJob(t *testing.T) {
 		require.NoError(t, err)
 
 		assert.Equal(t, "warm-worker", job.Spec.Template.Labels[snapshotv1alpha1.SnapshotJobOwnerLabel])
+		assert.Equal(t, "sj-uid", job.Spec.Template.Labels[snapshotv1alpha1.SnapshotJobOwnerUIDLabel])
 		assert.Equal(t, "label", job.Spec.Template.Labels["existing"])
 	})
 

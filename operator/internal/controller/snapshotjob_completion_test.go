@@ -331,8 +331,8 @@ func TestSnapshotJobReconcileDeadlineExceeded(t *testing.T) {
 func TestSnapshotJobReconcileJobDeleted(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
-	sj.UID = types.UID("sj-uid")
-	sj.Status.PodSnapshotName = sj.Name // "already progressed" — the Job existed at least this long
+	sj.Status.SourceJobUID = types.UID("deleted-job-uid")
+	require.Empty(t, sj.Status.PodSnapshotName, "the UID must detect deletion before PodSnapshot status is recorded")
 
 	r := makeSnapshotJobReconciler(s, sj) // no Job seeded: it has vanished
 	_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
@@ -483,6 +483,29 @@ func TestSnapshotJobReconcileFailedNeverDeletesTheJob(t *testing.T) {
 }
 
 // ---- ordering: the terminal status write must persist before the Job delete is attempted ----
+
+func TestSnapshotJobReconcileCompletionDoesNotDeleteReplacementJob(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+	sj.Status.SourceJobUID = types.UID("original-job-uid")
+	meta.SetStatusCondition(&sj.Status.Conditions, metav1.Condition{
+		Type: snapshotv1alpha1.SnapshotJobConditionCompleted, Status: metav1.ConditionTrue,
+		Reason: snapshotv1alpha1.ReasonJobCompleted,
+	})
+
+	replacement, err := buildSourceJob(sj)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(sj, replacement, s))
+	replacement.UID = types.UID("replacement-job-uid")
+	r := makeSnapshotJobReconciler(s, sj, replacement)
+
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	remaining := &batchv1.Job{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(replacement), remaining))
+	assert.Equal(t, replacement.UID, remaining.UID, "cleanup must not delete a different Job incarnation")
+}
 
 func TestSnapshotJobReconcileCompletionPersistsStatusBeforeDeleting(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
