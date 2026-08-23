@@ -39,6 +39,17 @@ func (w *NodeController) logRestoreRefusal(pod *corev1.Pod, incompatible *compat
 	)
 }
 
+// reopenedAfterRefusal reports a pod that the gates turned down and that has
+// since asked for them to be skipped. Nothing else reopens a terminal restore,
+// which is what makes the skip request an escape hatch and not a retry.
+func (w *NodeController) reopenedAfterRefusal(pod *corev1.Pod) bool {
+	condition := findRestoredCondition(pod)
+	if condition == nil || condition.Status != corev1.ConditionFalse || condition.Reason != restoreIncompatibleReason {
+		return false
+	}
+	return w.skipCompatCheckRequested(pod)
+}
+
 // podFacts reads what one container of a pod runs as and is allowed. It serves
 // both sides of a comparison: what a capture records about the source pod, and
 // what a restore target offers.

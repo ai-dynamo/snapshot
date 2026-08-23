@@ -451,11 +451,14 @@ func (w *NodeController) processRestoreQueueItem(ctx context.Context, key client
 		return
 	}
 	pod = pod.DeepCopy()
-	if w.restoreHandled(pod) {
+	if w.reopenedAfterRefusal(pod) {
+		// The skip request is the way back for a pod the gates turned down, so
+		// it has to clear the in-process marker as well as the condition below.
+		w.handledRestores.Delete(string(pod.UID))
+	} else if w.restoreHandled(pod) {
 		requeue = w.removeRestoreFinalizerWithEvent(ctx, pod)
 		return
-	}
-	if isRestoreTerminal(pod) {
+	} else if isRestoreTerminal(pod) {
 		requeue = w.handleTerminalRestorePod(ctx, pod)
 		return
 	}
@@ -1309,8 +1312,13 @@ func isRestorePartiallySucceeded(pod *corev1.Pod) bool {
 
 func isRestoreTerminal(pod *corev1.Pod) bool {
 	condition := findRestoredCondition(pod)
-	return isRestoreSucceeded(pod) || isRestorePartiallySucceeded(pod) ||
-		(condition != nil && condition.Status == corev1.ConditionFalse && condition.Reason == restoreFailedReason)
+	if isRestoreSucceeded(pod) || isRestorePartiallySucceeded(pod) {
+		return true
+	}
+	if condition == nil || condition.Status != corev1.ConditionFalse {
+		return false
+	}
+	return condition.Reason == restoreFailedReason || condition.Reason == restoreIncompatibleReason
 }
 
 func isRestorePodActive(pod *corev1.Pod) bool {
