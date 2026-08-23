@@ -33,7 +33,6 @@ data:
       ghostLimit: {{ .Values.config.criu.ghostLimit }}
       logLevel: {{ .Values.config.criu.logLevel }}
       workDir: {{ .Values.config.criu.workDir | quote }}
-      leaveRunning: {{ .Values.config.criu.leaveRunning }}
       shellJob: {{ .Values.config.criu.shellJob }}
       tcpClose: {{ .Values.config.criu.tcpClose }}
       tcpEstablished: {{ .Values.config.criu.tcpEstablished }}

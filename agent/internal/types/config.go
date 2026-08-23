@@ -93,7 +93,6 @@ type CRIUSettings struct {
 	WorkDir           string `yaml:"workDir"`
 	AutoDedup         bool   `yaml:"autoDedup"`
 	LazyPages         bool   `yaml:"lazyPages"`
-	LeaveRunning      bool   `yaml:"leaveRunning"`
 	ShellJob          bool   `yaml:"shellJob"`
 	TcpClose          bool   `yaml:"tcpClose"`
 	TcpEstablished    bool   `yaml:"tcpEstablished"`

@@ -86,7 +86,28 @@ func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name s
 		logger.Error(err, "Failed to get source pod", "pod", key.String())
 		return
 	}
-	if reason, msg := classifySourcePod(content, pod); reason != "" {
+	if reason, msg := classifySourcePodIdentity(content, pod); reason != "" {
+		if err := w.setSnapshotContentFailed(ctx, content, reason, errors.New(msg)); err != nil {
+			logger.Error(err, "Failed to write PodSnapshotContent failed status", "content", content.Name)
+		}
+		return
+	}
+	if reason, msg := classifySourcePodLiveness(pod); reason != "" {
+		// The dump terminates the source process, so a terminal pod may mean a
+		// capture just succeeded: while the capture goroutine holds the
+		// in-flight guard it owns the outcome, and a committed artifact only
+		// needs its Ready write. Only a dead source with neither is a failure.
+		if id := strings.TrimSpace(pod.Labels[snapshotv1alpha1.CheckpointIDLabel]); id != "" {
+			if w.checkpointInFlight(id) {
+				return
+			}
+			if path, pathErr := w.artifactPathForPod(pod, id); pathErr == nil && artifactPresent(path) {
+				if err := w.markCheckpointReady(ctx, content); err != nil {
+					logger.Error(err, "Failed to recover committed artifact to Ready", "content", content.Name)
+				}
+				return
+			}
+		}
 		if err := w.setSnapshotContentFailed(ctx, content, reason, errors.New(msg)); err != nil {
 			logger.Error(err, "Failed to write PodSnapshotContent failed status", "content", content.Name)
 		}
@@ -125,12 +146,6 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	objs, err := w.contentIndexer.ByIndex(podRefIndex, pod.Namespace+"/"+pod.Name)
 	if err != nil {
 		return fmt.Errorf("look up PodSnapshotContent by source pod %s/%s: %w", pod.Namespace, pod.Name, err)
-	}
-	// Ready content is terminal for chooseActiveContent so it cannot starve a new dump.
-	// Still retry snapshot-complete for Ready, non-Failed work orders: the agent can
-	// crash after the Ready patch and before the sentinel.
-	if err := w.releaseReadyContents(ctx, pod, objs); err != nil {
-		return err
 	}
 	name := chooseActiveContent(objs)
 	if name == "" {
@@ -182,10 +197,29 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		}
 	}()
 
+	if reason, msg := classifySourcePodIdentity(content, pod); reason != "" {
+		err := w.setSnapshotContentFailed(ctx, content, reason, errors.New(msg))
+		w.removeCaptureEligibleLabel(ctx, pod)
+		return err
+	}
+
+	// Artifact recovery must precede every liveness-derived classification below: the dump
+	// terminates the source process, so after a success the pod is failed, the target container
+	// is terminated, and its PID is unresolvable — all expected, none of it a capture failure.
+	// The artifact dir exists only after the executor's atomic rename, so its presence means a
+	// completed dump whose Ready write did not land yet.
+	artifactPath, err := w.artifactPathForPod(pod, id)
+	if err != nil {
+		return w.setSnapshotContentFailed(ctx, content, "InvalidDestination", err)
+	}
+	if artifactPresent(artifactPath) {
+		return w.markCheckpointReady(ctx, content)
+	}
+
 	if w.failCheckpointOnContainerExit(ctx, content, pod) {
 		return nil
 	}
-	if reason, msg := classifySourcePod(content, pod); reason != "" {
+	if reason, msg := classifySourcePodLiveness(pod); reason != "" {
 		err := w.setSnapshotContentFailed(ctx, content, reason, errors.New(msg))
 		w.removeCaptureEligibleLabel(ctx, pod)
 		return err
@@ -209,17 +243,6 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	if err != nil {
 		return w.setSnapshotContentFailed(ctx, content, "ContainerNotResolved", fmt.Errorf("resolve container %q: %w", containerName, err))
 	}
-	artifactPath, err := w.artifactPathForPod(pod, id)
-	if err != nil {
-		return w.setSnapshotContentFailed(ctx, content, "InvalidDestination", err)
-	}
-
-	// Resume: a present artifact with unwritten status means a prior dump finished before the
-	// Ready-and-release sequence completed. The artifact dir exists only after the executor's
-	// atomic rename, so its presence means a completed dump.
-	if artifactPresent(artifactPath) {
-		return w.markCheckpointReadyAndRelease(ctx, content, containerPID)
-	}
 
 	leaseKey := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: leaseName}
 	acquired, err := w.acquireLease(ctx, leaseKey)
@@ -234,66 +257,10 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	return nil
 }
 
-// releaseReadyContents writes snapshot-complete for Ready, non-Failed work orders on this pod.
-// chooseActiveContent ignores terminal objects so a leftover Ready capture cannot starve a new
-// dump; this path recovers the crash window where Ready is durable but the process is still blocked.
-func (w *NodeController) releaseReadyContents(ctx context.Context, pod *corev1.Pod, objs []interface{}) error {
-	logger := logr.FromContextOrDiscard(ctx)
-	for _, obj := range objs {
-		indexed, ok := contentFromInformerObj(obj)
-		if !ok || !isContentReady(indexed) || isContentFailed(indexed) {
-			continue
-		}
-		content := &snapshotv1alpha1.PodSnapshotContent{}
-		if err := w.client.Get(ctx, client.ObjectKey{Name: indexed.Name}, content); err != nil {
-			if apierrors.IsNotFound(err) {
-				continue
-			}
-			return fmt.Errorf("get Ready PodSnapshotContent %q: %w", indexed.Name, err)
-		}
-		if !isContentReady(content) || isContentFailed(content) {
-			continue
-		}
-		if err := w.releaseReadyContent(ctx, content, pod); err != nil {
-			logger.Error(err, "Failed to write snapshot-complete for Ready content", "content", content.Name)
-			return err
-		}
-	}
-	return nil
-}
-
-func (w *NodeController) releaseReadyContent(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, pod *corev1.Pod) error {
-	logger := logr.FromContextOrDiscard(ctx)
-	if content.Spec.Source.PodRef.UID != "" && content.Spec.Source.PodRef.UID != pod.UID {
-		logger.V(1).Info("Skipping Ready release for stale source pod", "content", content.Name)
-		return nil
-	}
-	containerName, err := singleTargetContainer(content)
-	if err != nil {
-		// Spec cannot release this content; do not block a newer dump on the same pod.
-		logger.Error(err, "Skipping Ready release; invalid target container", "content", content.Name)
-		return nil
-	}
-	if !isContainerReady(pod, containerName) {
-		return nil
-	}
-	containerID := containerIDForName(pod, containerName)
-	if containerID == "" {
-		return nil
-	}
-	containerPID, _, err := w.runtime.ResolveContainer(ctx, containerID)
-	if err != nil {
-		// The capture already succeeded; if the container is gone the process is not blocked.
-		logger.V(1).Info("Skipping Ready release; container not resolvable",
-			"content", content.Name, "container", containerName)
-		return nil
-	}
-	return w.writeSentinelOrKill(logger, containerPID, content.Name)
-}
-
-// runCheckpoint executes the dump under a renewed lease, writes the Ready status, then releases
-// the target process. The container ID, host PID, and resolved locations are pre-resolved by the
-// reconciler so the dump does not re-resolve them.
+// runCheckpoint executes the dump under a renewed lease, then writes the Ready status. The dump
+// terminates the target process, so there is no post-Ready release step. The container ID, host
+// PID, and resolved locations are pre-resolved by the reconciler so the dump does not re-resolve
+// them.
 func (w *NodeController) runCheckpoint(
 	ctx context.Context,
 	content *snapshotv1alpha1.PodSnapshotContent,
@@ -341,9 +308,9 @@ func (w *NodeController) runCheckpoint(
 	}
 
 	// CRIU dump is not context-aware, so checkpointFn can return nil after the lease
-	// was lost. A stale holder must not mark Ready or write snapshot-complete: another
-	// holder may already be writing the same artifact. A clean context.Canceled (outer
-	// ctx shutdown) is not a lease failure.
+	// was lost. A stale holder must not mark Ready: another holder may already be
+	// writing the same artifact. A clean context.Canceled (outer ctx shutdown) is not
+	// a lease failure.
 	if cause := context.Cause(leaseCtx); cause != nil && !errors.Is(cause, context.Canceled) {
 		logger.Error(cause, "Lease cancelled during checkpoint")
 		if patchErr := w.setSnapshotContentFailed(ctx, content, "LeaseCancelled", cause); patchErr != nil {
@@ -365,21 +332,30 @@ func (w *NodeController) runCheckpoint(
 		return
 	}
 
-	if err := w.markCheckpointReadyAndRelease(ctx, content, containerPID); err != nil {
-		logger.Error(err, "Failed to finalize checkpoint ready-and-release", "content", content.Name)
+	if err := w.markCheckpointReady(ctx, content); err != nil {
+		logger.Error(err, "Failed to finalize checkpoint Ready status", "content", content.Name)
 		return
 	}
 }
 
-// classifySourcePod reports whether the source pod is unusable for capture, returning a terminal
-// failure reason and message ("" reason means the pod is valid). It is pure: callers decide whether
-// to setSnapshotContentFailed (reconcilePodSnapshotContent, pre-bind) or merely skip capture (reconcileSourcePod
-// guard). Pod existence (NotFound) is handled by the caller, which holds the Get error.
-func classifySourcePod(content *snapshotv1alpha1.PodSnapshotContent, pod *corev1.Pod) (string, string) {
+// classifySourcePodIdentity reports whether the live pod is the work order's pinned source
+// ("" reason means it is). Identity is checked separately from liveness because only a
+// same-identity source may recover a committed artifact: a same-named replacement pod must
+// never validate another incarnation's capture. Pod existence (NotFound) is handled by the
+// caller, which holds the Get error.
+func classifySourcePodIdentity(content *snapshotv1alpha1.PodSnapshotContent, pod *corev1.Pod) (string, string) {
 	if content.Spec.Source.PodRef.UID != "" && pod.UID != content.Spec.Source.PodRef.UID {
 		return "StalePodReference",
 			fmt.Sprintf("source pod %q UID %q does not match work order UID %q", pod.Name, pod.UID, content.Spec.Source.PodRef.UID)
 	}
+	return "", ""
+}
+
+// classifySourcePodLiveness reports whether the source pod can still host a new dump
+// ("" reason means it can). A terminal pod is not by itself a capture failure — the dump
+// terminates the source process — so callers must check for an in-flight capture or a
+// committed artifact before treating this as terminal.
+func classifySourcePodLiveness(pod *corev1.Pod) (string, string) {
 	if pod.DeletionTimestamp != nil || pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
 		return "SourcePodGone",
 			fmt.Sprintf("source pod %q is no longer running (phase %s)", pod.Name, pod.Status.Phase)
@@ -498,12 +474,13 @@ func (w *NodeController) setSnapshotContentSucceeded(ctx context.Context, conten
 // livelock of non-terminal status writes cannot spin forever.
 const readyStatusConflictLimit = 8
 
-// markCheckpointReadyAndRelease makes Ready durable before allowing the target process to exit.
-// A failed Ready patch leaves the target blocked so a later artifact resume can retry. On a
-// Ready-patch conflict, re-read and retry until Ready succeeds or a terminal state is observed:
-// Failed means SIGKILL and no sentinel; Ready already set means write the sentinel. A failed
-// sentinel write kills the still-blocked target.
-func (w *NodeController) markCheckpointReadyAndRelease(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, containerPID int) error {
+// markCheckpointReady makes the committed capture durable in the API. The source process is
+// already dead — the dump terminates it — so no release step follows and no live PID is needed,
+// which lets the artifact-recovery paths call this after the source pod turned terminal. On a
+// Ready-patch conflict, re-read and retry until Ready lands or a terminal state is observed: an
+// already-Failed work order is sticky and wins; Ready already set means another holder finished
+// the write.
+func (w *NodeController) markCheckpointReady(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent) error {
 	logger := logr.FromContextOrDiscard(ctx)
 	ready := content
 	for attempt := 0; attempt < readyStatusConflictLimit; attempt++ {
@@ -518,29 +495,18 @@ func (w *NodeController) markCheckpointReadyAndRelease(ctx context.Context, cont
 				return getErr
 			}
 			if isContentFailed(current) {
-				return w.killCheckpointProcess(logger, containerPID, "checkpoint content already failed")
+				logger.Info("Skipping Ready write; work order already failed", "content", content.Name)
+				return nil
 			}
 			if isContentReady(current) {
-				return w.writeSentinelOrKill(logger, containerPID, content.Name)
+				return nil
 			}
 			ready = current
 			continue
 		}
-		return w.writeSentinelOrKill(logger, containerPID, ready.Name)
+		return nil
 	}
 	return fmt.Errorf("write PodSnapshotContent ready status %q: exceeded conflict retries", content.Name)
-}
-
-// writeSentinelOrKill writes snapshot-complete, or SIGKILLs the still-blocked target if that write fails.
-func (w *NodeController) writeSentinelOrKill(logger logr.Logger, containerPID int, contentName string) error {
-	if err := w.releaseCheckpointFn(containerPID); err != nil {
-		logger.Error(err, "Failed to write snapshot-complete sentinel", "content", contentName)
-		if killErr := w.killCheckpointProcess(logger, containerPID, "checkpoint sentinel failed"); killErr != nil {
-			logger.Error(killErr, "Failed to kill target after sentinel failure", "content", contentName)
-		}
-		return fmt.Errorf("write snapshot-complete sentinel: %w", err)
-	}
-	return nil
 }
 
 // setSnapshotContentFailed patches status with the Failed condition. Uses optimistic locking so
@@ -559,7 +525,7 @@ func (w *NodeController) setSnapshotContentFailed(ctx context.Context, content *
 // executorCheckpoint is the production checkpointFn. The reconciler has already resolved the
 // container ID and host PID. It runs executor.Checkpoint to the destination and verifies the
 // artifact directory. On dump or verification failure it SIGKILLs the CUDA-locked process before
-// returning the error. The snapshot-complete sentinel is written after Ready is durable.
+// returning the error; on success the dump itself has already terminated the source process.
 func (w *NodeController) executorCheckpoint(ctx context.Context, params CheckpointParams) error {
 	log := logr.FromContextOrDiscard(ctx)
 

@@ -135,7 +135,7 @@ func TestNewDefaultControllerSetsDefaultOperations(t *testing.T) {
 		noopInjector{},
 		testr.New(t),
 	)
-	if w.checkpointFn == nil || w.restoreFn == nil || w.writeControlSentinelFn == nil || w.releaseCheckpointFn == nil {
+	if w.checkpointFn == nil || w.restoreFn == nil || w.writeControlSentinelFn == nil {
 		t.Fatal("default controller operations must be initialized")
 	}
 }
