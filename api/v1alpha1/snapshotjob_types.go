@@ -19,10 +19,12 @@ const (
 	// container is complete (PodSnapshot Ready=True).
 	SnapshotJobConditionCaptured = "Captured"
 	// SnapshotJobConditionCompleted is True when the checkpoint artifact is
-	// durably captured (PodSnapshot Ready=True) and source Job cleanup has been
-	// initiated. Completion is capture-driven: it does not mean the source
-	// workload ran post-capture logic or exited successfully — the checkpoint is
-	// expected to terminate the source process.
+	// durably captured (PodSnapshot Ready=True) AND the source Job has
+	// finished. The checkpoint terminates the target container (its exit is
+	// expected and never required to be zero), but every other container must
+	// run to completion and exit 0 before cleanup: deleting the Job earlier
+	// would kill helper containers (e.g. a GMS saver writing weight artifacts
+	// concurrently with the dump) mid-work.
 	SnapshotJobConditionCompleted = "Completed"
 	// SnapshotJobConditionFailed is True on terminal failure. The batch/v1 Job is
 	// preserved for status and debugging; Kubernetes controls failed pod retention.
@@ -35,14 +37,17 @@ const (
 	ReasonPodPending = "PodPending"
 	ReasonPodReady   = "PodReady"
 
-	// Captured / Completed. A durable capture is the SnapshotJob's success
-	// signal, so ReasonCaptureCompleted is also the Completed=True reason.
+	// Captured
 	ReasonCaptureInProgress = "CaptureInProgress"
 	ReasonCaptureCompleted  = "CaptureCompleted"
 
-	// ReasonJobCompleted reports the source Job's own Complete=True on the
-	// Running condition. It does not gate or report SnapshotJob completion.
-	ReasonJobCompleted = "JobCompleted"
+	// Completed. WaitingForPodCompletion covers the window where the capture
+	// artifact is Ready but the source pod's other containers (helpers such as
+	// a GMS saver) are still running. JobCompleted means the source Job
+	// finished with every non-target container exiting 0; the target
+	// container's own exit is expected to be the checkpoint's kill.
+	ReasonWaitingForPodCompletion = "WaitingForPodCompletion"
+	ReasonJobCompleted            = "JobCompleted"
 
 	// Failed=True
 	ReasonCaptureFailed     = "CaptureFailed"

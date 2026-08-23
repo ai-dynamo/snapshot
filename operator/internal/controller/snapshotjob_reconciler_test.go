@@ -633,6 +633,7 @@ func TestDeriveSnapshotJobStatusUsesSingleReconciliationTime(t *testing.T) {
 						Type: snapshotv1alpha1.PodSnapshotConditionReady, Status: metav1.ConditionTrue,
 					}},
 				}},
+				sourceJobFinished: true,
 			},
 			conditionTypes: []string{
 				snapshotv1alpha1.SnapshotJobConditionRunning,
@@ -641,7 +642,7 @@ func TestDeriveSnapshotJobStatusUsesSingleReconciliationTime(t *testing.T) {
 			},
 			wantStartedAt:     true,
 			wantRunningStatus: metav1.ConditionFalse,
-			wantRunningReason: snapshotv1alpha1.ReasonCaptureCompleted,
+			wantRunningReason: snapshotv1alpha1.ReasonJobCompleted,
 		},
 		{
 			name: "terminal failure",
