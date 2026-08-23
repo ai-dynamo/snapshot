@@ -24,6 +24,7 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
+	"github.com/ai-dynamo/snapshot/api/compat"
 )
 
 // RestoreMounter installs the fixed binary bundle and one validated checkpoint
@@ -273,6 +274,7 @@ func inspectRestore(
 	targetRoot := fmt.Sprintf("%s/%d/root", snapshotruntime.HostProcPath, placeholderPID)
 
 	var (
+		targetGPUs        compat.GPUFacts
 		targetGPUUUIDs    []string
 		discoverDuration  time.Duration
 		deviceMapDuration time.Duration
@@ -282,7 +284,7 @@ func inspectRestore(
 			return nil, 0, fmt.Errorf("missing source GPU UUIDs in checkpoint manifest")
 		}
 		discoverStart := time.Now()
-		targetGPUUUIDs, err = cuda.DiscoverGPUUUIDs(
+		targetGPUs, err = cuda.DiscoverGPUFacts(
 			ctx,
 			req.Clientset,
 			req.PodName,
@@ -296,6 +298,9 @@ func inspectRestore(
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to get target GPU UUIDs: %w", err)
 		}
+		for _, device := range targetGPUs.Devices {
+			targetGPUUUIDs = append(targetGPUUUIDs, device.UUID)
+		}
 		if len(targetGPUUUIDs) == 0 {
 			return nil, 0, fmt.Errorf("missing target GPU UUIDs for %s/%s container %s", req.PodNamespace, req.PodName, req.DestinationContainerName)
 		}
@@ -304,7 +309,7 @@ func inspectRestore(
 	// Gate B, once the placeholder is resolved and this node's own facts are
 	// readable. It runs ahead of BuildDeviceMap, whose positional pairing turns
 	// a GPU difference into a device-map error that names neither GPU.
-	if err := inspectCompatibility(log, manifest, targetRoot, targetImageID, req.SkipCompatCheck); err != nil {
+	if err := inspectCompatibility(log, manifest, targetGPUs, targetRoot, targetImageID, req.SkipCompatCheck); err != nil {
 		return nil, 0, err
 	}
 

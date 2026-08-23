@@ -4,6 +4,7 @@
 package compat
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 
@@ -196,6 +197,56 @@ var mountCheck = check{
 		}
 		return mismatches
 	},
+}
+
+// CheckGPUModel refuses a restore onto a different GPU model. A CUDA checkpoint
+// carries device state built for one architecture's memory layout and
+// capabilities, and no amount of driver compatibility makes an A100 replay what
+// an L4 was doing.
+const CheckGPUModel Check = "gpu-model"
+
+var gpuModelCheck = check{
+	name: CheckGPUModel,
+	gate: GateInspect,
+	compare: func(source, target Facts) []Mismatch {
+		sourceModels, sourceOK := gpuModels(source.GPUDevices)
+		targetModels, targetOK := gpuModels(target.GPUDevices)
+		if !sourceOK || !targetOK || sourceModels == targetModels {
+			return nil
+		}
+		return []Mismatch{{Source: sourceModels, Target: targetModels}}
+	},
+}
+
+// gpuModels builds a stable model summary: sorting ignores allocation order,
+// while "xN" preserves how many GPUs have each name. ProductName comes from
+// nvidia-smi --query-gpu=name, documented as the GPU's official product name:
+// https://docs.nvidia.com/deploy/nvidia-smi/index.html#product-name
+//
+// It returns unknown if any GPU has no name because partial data cannot prove
+// that the source and target models differ.
+func gpuModels(devices []GPUDevice) (string, bool) {
+	if len(devices) == 0 {
+		return "", false
+	}
+	counts := make(map[string]int, len(devices))
+	for _, device := range devices {
+		model := strings.TrimSpace(device.ProductName)
+		if model == "" {
+			return "", false
+		}
+		counts[model]++
+	}
+
+	models := make([]string, 0, len(counts))
+	for model := range counts {
+		models = append(models, model)
+	}
+	sort.Strings(models)
+	for i, model := range models {
+		models[i] = model + " x" + strconv.Itoa(counts[model])
+	}
+	return strings.Join(models, ", "), true
 }
 
 // mustMatch reports a mismatch unless the two values are identical. A value
