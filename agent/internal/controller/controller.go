@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 	"sync"
@@ -28,7 +29,6 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	corev1apply "k8s.io/client-go/applyconfigurations/core/v1"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/informers"
@@ -36,6 +36,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
@@ -87,7 +88,6 @@ const (
 	restoreContainerResolveTimeout  = 30 * time.Second
 	restoreFailureStatusTimeout     = 10 * time.Second
 	restoreFailedReason             = "RestoreFailed"
-	restoreStatusFieldManager       = "snapshot-agent-restore"
 
 	// snapshotContentResyncInterval re-drives every PodSnapshotContent work order so a
 	// not-yet-Ready source pod is re-checked for quiesce without a busy loop.
@@ -180,6 +180,7 @@ func (w *NodeController) Run(ctx context.Context) error {
 
 	restoreFactoryOpts := []informers.SharedInformerOption{
 		informers.WithTweakListOptions(tweakNodePodListOptions(w.config.NodeName)),
+		informers.WithTransform(trimRestorePod),
 	}
 
 	restoreFactory := informers.NewSharedInformerFactoryWithOptions(
@@ -309,6 +310,54 @@ func tweakLabeledNodePodListOptions(labelSelector, nodeName string) func(*metav1
 	}
 }
 
+// trimRestorePod keeps only fields consumed by the restore path. The restore
+// informer watches every pod assigned to this node because annotations cannot
+// be used in a server-side field selector.
+func trimRestorePod(obj interface{}) (interface{}, error) {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok {
+		return obj, nil
+	}
+	var deletionTimestamp *metav1.Time
+	if pod.DeletionTimestamp != nil {
+		deletionTimestamp = pod.DeletionTimestamp.DeepCopy()
+	}
+
+	trimmed := &corev1.Pod{
+		TypeMeta: pod.TypeMeta,
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              pod.Name,
+			Namespace:         pod.Namespace,
+			UID:               pod.UID,
+			ResourceVersion:   pod.ResourceVersion,
+			DeletionTimestamp: deletionTimestamp,
+			Annotations:       maps.Clone(pod.Annotations),
+		},
+		Spec: corev1.PodSpec{
+			NodeName: pod.Spec.NodeName,
+		},
+		Status: corev1.PodStatus{
+			Phase:      pod.Status.Phase,
+			PodIP:      pod.Status.PodIP,
+			Conditions: append([]corev1.PodCondition(nil), pod.Status.Conditions...),
+		},
+	}
+	trimmed.Spec.Containers = make([]corev1.Container, len(pod.Spec.Containers))
+	for i := range pod.Spec.Containers {
+		trimmed.Spec.Containers[i].Name = pod.Spec.Containers[i].Name
+	}
+	trimmed.Status.ContainerStatuses = make([]corev1.ContainerStatus, len(pod.Status.ContainerStatuses))
+	for i := range pod.Status.ContainerStatuses {
+		status := &pod.Status.ContainerStatuses[i]
+		trimmed.Status.ContainerStatuses[i] = corev1.ContainerStatus{
+			Name:        status.Name,
+			ContainerID: status.ContainerID,
+			State:       *status.State.DeepCopy(),
+		}
+	}
+	return trimmed, nil
+}
+
 func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Pod) {
 	if pod.Spec.NodeName != w.config.NodeName || pod.DeletionTimestamp != nil ||
 		(pod.Status.Phase != corev1.PodPending && pod.Status.Phase != corev1.PodRunning) {
@@ -328,13 +377,17 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 		return
 	}
 	if artifact == nil {
-		if applyErr := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, pendingReason, pendingMessage); applyErr != nil {
+		if _, applyErr := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, pendingReason, pendingMessage); applyErr != nil {
 			w.log.Error(applyErr, "Failed to apply pending restore condition", "pod", podKey)
 		}
 		return
 	}
-	if err := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, "RestoreInProgress", "Snapshot resolved; waiting for the target container"); err != nil {
+	proceed, err := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, "RestoreInProgress", "Snapshot resolved; waiting for the target container")
+	if err != nil {
 		w.log.Error(err, "Failed to apply in-progress restore condition", "pod", podKey)
+		return
+	}
+	if !proceed {
 		return
 	}
 	w.maybeStartRestoreForContainer(ctx, pod, artifact, podKey)
@@ -342,8 +395,8 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 
 // resolveRestoreArtifact turns the public PodSnapshot reference into the one
 // physical artifact owned by its bound PodSnapshotContent. A nil artifact with
-// no error is retryable eventual-consistency state; an error is terminal input
-// or binding corruption.
+// no error is retryable eventual-consistency state; an error is invalid input
+// or binding corruption reported through the retryable RestoreFailed state.
 func (w *NodeController) resolveRestoreArtifact(ctx context.Context, pod *corev1.Pod) (*restoreArtifact, string, string, error) {
 	snapshotName, err := snapshotv1alpha1.GetRestoreFromSnapshotName(pod.Annotations)
 	if err != nil {
@@ -660,10 +713,11 @@ func (op *restoreOperation) beginRestore(ctx context.Context) (bool, error) {
 	if !ready {
 		return false, nil
 	}
-	if err := op.setRestoredCondition(ctx, corev1.ConditionFalse, "RestoreInProgress", "Restoring captured process state"); err != nil {
+	proceed, err := op.setRestoredCondition(ctx, corev1.ConditionFalse, "RestoreInProgress", "Restoring captured process state")
+	if err != nil {
 		return false, fmt.Errorf("apply restore in-progress condition: %w", err)
 	}
-	return true, nil
+	return proceed, nil
 }
 
 func (op *restoreOperation) executeRestore(ctx context.Context) (int, error) {
@@ -687,7 +741,7 @@ func (op *restoreOperation) failRestore(ctx context.Context, restoreErr error) e
 	op.log.Error(restoreErr, "External restore failed")
 	reason := restoreFailedReason
 	emitPodEvent(ctx, w.clientset, op.log, op.pod, "snapshot", corev1.EventTypeWarning, reason, restoreErr.Error())
-	if err := op.setRestoredCondition(ctx, corev1.ConditionFalse, reason, restoreErr.Error()); err != nil {
+	if _, err := op.setRestoredCondition(ctx, corev1.ConditionFalse, reason, restoreErr.Error()); err != nil {
 		return fmt.Errorf("persist failed restore condition: %w", err)
 	}
 	// Re-resolve because restore may fail before discovering the placeholder PID.
@@ -711,7 +765,7 @@ func (op *restoreOperation) completeRestore(ctx context.Context, placeholderHost
 	if err := w.writeControlSentinelFn(placeholderHostPID, snapshotv1alpha1.RestoreCompleteFile); err != nil {
 		op.log.Error(err, "Failed to write restore-complete sentinel")
 		emitPodEvent(ctx, w.clientset, op.log, op.pod, "snapshot", corev1.EventTypeWarning, restoreFailedReason, err.Error())
-		if statusErr := op.setRestoredCondition(ctx, corev1.ConditionFalse, restoreFailedReason, err.Error()); statusErr != nil {
+		if _, statusErr := op.setRestoredCondition(ctx, corev1.ConditionFalse, restoreFailedReason, err.Error()); statusErr != nil {
 			return fmt.Errorf("persist failed restore condition: %w", statusErr)
 		}
 		if killErr := snapshotruntime.SendSignalToPID(op.log, placeholderHostPID, syscall.SIGKILL, "restore sentinel failed"); killErr != nil {
@@ -724,13 +778,14 @@ func (op *restoreOperation) completeRestore(ctx context.Context, placeholderHost
 	}
 
 	emitPodEvent(ctx, w.clientset, op.log, op.pod, "snapshot", corev1.EventTypeNormal, "RestoreSucceeded", fmt.Sprintf("Restore completed from PodSnapshot %s", op.artifact.SnapshotName))
-	return op.setRestoredCondition(ctx, corev1.ConditionTrue, "RestoreSucceeded", fmt.Sprintf("Restored from PodSnapshot %s", op.artifact.SnapshotName))
+	_, err := op.setRestoredCondition(ctx, corev1.ConditionTrue, "RestoreSucceeded", fmt.Sprintf("Restored from PodSnapshot %s", op.artifact.SnapshotName))
+	return err
 }
 
-func (op *restoreOperation) setRestoredCondition(ctx context.Context, status corev1.ConditionStatus, reason, message string) error {
-	if terminalRestoredCondition(status, reason) {
+func (op *restoreOperation) setRestoredCondition(ctx context.Context, status corev1.ConditionStatus, reason, message string) (bool, error) {
+	if terminalRestoredCondition(status) {
 		// Keep the attempt key for this controller lifetime so a stale runtime
-		// resolver cannot restart a terminal restore, including when the status
+		// resolver cannot restart a successful restore, including when the status
 		// write itself fails.
 		op.releaseOnExit = false
 	}
@@ -742,46 +797,72 @@ func restoreConditionTerminal(pod *corev1.Pod) bool {
 		if condition.Type != corev1.PodConditionType(snapshotv1alpha1.RestoredCondition) {
 			continue
 		}
-		return terminalRestoredCondition(condition.Status, condition.Reason)
+		return terminalRestoredCondition(condition.Status)
 	}
 	return false
 }
 
-func terminalRestoredCondition(status corev1.ConditionStatus, reason string) bool {
-	return status == corev1.ConditionTrue || reason == restoreFailedReason
+func terminalRestoredCondition(status corev1.ConditionStatus) bool {
+	return status == corev1.ConditionTrue
 }
 
-// applyRestoredCondition uses server-side apply against the status subresource.
-// Pod conditions are an associative list keyed by type, so this field manager
-// owns only Restored and never replaces kubelet-owned conditions.
-func (w *NodeController) applyRestoredCondition(ctx context.Context, pod *corev1.Pod, status corev1.ConditionStatus, reason, message string) error {
-	transition := metav1.Now()
-	for _, existing := range pod.Status.Conditions {
-		if existing.Type == corev1.PodConditionType(snapshotv1alpha1.RestoredCondition) &&
-			existing.Status == status && !existing.LastTransitionTime.IsZero() {
-			transition = existing.LastTransitionTime
-			break
+// applyRestoredCondition updates the status subresource with optimistic locking.
+// It returns false without writing when the live pod is already restored.
+func (w *NodeController) applyRestoredCondition(ctx context.Context, pod *corev1.Pod, status corev1.ConditionStatus, reason, message string) (bool, error) {
+	proceed := true
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		livePod := &corev1.Pod{}
+		if err := w.client.Get(ctx, client.ObjectKeyFromObject(pod), livePod); err != nil {
+			return err
 		}
-	}
-	condition := corev1apply.PodCondition().
-		WithType(corev1.PodConditionType(snapshotv1alpha1.RestoredCondition)).
-		WithStatus(status).
-		WithReason(reason).
-		WithMessage(message).
-		WithLastTransitionTime(transition)
-	configuration := corev1apply.Pod(pod.Name, pod.Namespace).
-		WithStatus(corev1apply.PodStatus().WithConditions(condition))
-	_, err := w.clientset.CoreV1().Pods(pod.Namespace).ApplyStatus(ctx, configuration, metav1.ApplyOptions{
-		FieldManager: restoreStatusFieldManager,
+		if restoreConditionTerminal(livePod) {
+			proceed = false
+			return nil
+		}
+
+		base := livePod.DeepCopy()
+		setRestoredCondition(livePod, status, reason, message)
+		patch := client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})
+		return w.client.Status().Patch(ctx, livePod, patch)
 	})
-	return err
+	return proceed, err
 }
 
-// convergeRestoredFailureCondition re-applies the terminal condition after the
+func setRestoredCondition(pod *corev1.Pod, status corev1.ConditionStatus, reason, message string) {
+	transition := metav1.Now()
+	conditionType := corev1.PodConditionType(snapshotv1alpha1.RestoredCondition)
+	for i := range pod.Status.Conditions {
+		existing := &pod.Status.Conditions[i]
+		if existing.Type != conditionType {
+			continue
+		}
+		if existing.Status == status && !existing.LastTransitionTime.IsZero() {
+			transition = existing.LastTransitionTime
+		}
+		*existing = corev1.PodCondition{
+			Type:               conditionType,
+			Status:             status,
+			Reason:             reason,
+			Message:            message,
+			LastProbeTime:      existing.LastProbeTime,
+			LastTransitionTime: transition,
+		}
+		return
+	}
+	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+		Type:               conditionType,
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		LastTransitionTime: transition,
+	})
+}
+
+// convergeRestoredFailureCondition re-applies the failure condition after the
 // placeholder exits. Kubelet publishes a final container status in response to
-// SIGKILL and that concurrent status update can race the first server-side
-// apply above. Waiting for a non-running container and applying once more makes
-// the agent-owned Restored condition converge after the runtime-owned fields.
+// SIGKILL and that concurrent status update can race the first optimistic
+// patch. Waiting for a non-running container and patching once more makes the
+// Restored condition converge after the runtime-owned fields.
 func (w *NodeController) convergeRestoredFailureCondition(ctx context.Context, pod *corev1.Pod, containerName, reason string, cause error) error {
 	settleCtx, cancel := context.WithTimeout(ctx, restoreFailureStatusTimeout)
 	defer cancel()
@@ -796,7 +877,11 @@ func (w *NodeController) convergeRestoredFailureCondition(ctx context.Context, p
 			return nil
 		}
 		if err == nil {
-			lastApplyErr = w.applyRestoredCondition(settleCtx, livePod, corev1.ConditionFalse, reason, cause.Error())
+			proceed, applyErr := w.applyRestoredCondition(settleCtx, livePod, corev1.ConditionFalse, reason, cause.Error())
+			lastApplyErr = applyErr
+			if !proceed {
+				return nil
+			}
 			if lastApplyErr == nil && !containerIsRunning(livePod, containerName) {
 				return nil
 			}
@@ -826,9 +911,9 @@ func containerIsRunning(pod *corev1.Pod, containerName string) bool {
 func (w *NodeController) failRestorePod(ctx context.Context, pod *corev1.Pod, cause error) {
 	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
 	w.log.Error(cause, "Restore request failed", "pod", podKey)
-	emitPodEvent(ctx, w.clientset, w.log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", cause.Error())
-	if err := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, "RestoreFailed", cause.Error()); err != nil {
-		w.log.Error(err, "Failed to apply terminal restore condition", "pod", podKey)
+	emitPodEvent(ctx, w.clientset, w.log, pod, "snapshot", corev1.EventTypeWarning, restoreFailedReason, cause.Error())
+	if _, err := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, restoreFailedReason, cause.Error()); err != nil {
+		w.log.Error(err, "Failed to apply restore failure condition", "pod", podKey)
 	}
 }
 

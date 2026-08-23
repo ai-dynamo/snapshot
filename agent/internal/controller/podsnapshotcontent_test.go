@@ -119,7 +119,7 @@ func makeWorkOrder(name, node, suffix string) *snapshotv1alpha1.PodSnapshotConte
 
 // makeSourcePod builds a ready source pod with no snapshot annotations. The
 // target and artifact identity come from the work order.
-func makeSourcePod(_ string) *corev1.Pod {
+func makeSourcePod() *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "worker-0",
@@ -187,7 +187,7 @@ func TestReconcileSourcePod_InvalidTargetContainerFails(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 			content.Spec.Source.PodRef.Containers = tc.containers
-			pod := makeSourcePod("x")
+			pod := makeSourcePod()
 			w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
 
 			require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
@@ -230,7 +230,7 @@ func TestReconcileSnapshotContent_IgnoresOtherNode(t *testing.T) {
 
 func TestReconcileSnapshotContent_GateLabelsPodOnSuccess(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
-	pod := makeSourcePod("x")
+	pod := makeSourcePod()
 	fc := &fakeCheckpointer{}
 	w := makeNodeController(t, fc, content, pod)
 
@@ -245,7 +245,7 @@ func TestReconcileSnapshotContent_GateLabelsPodOnSuccess(t *testing.T) {
 func TestReconcileSourcePod_InFlightGuard(t *testing.T) {
 	// Content name differs from ID to prove the guard is keyed on the ID, not the content name.
 	content := makeWorkOrder("podsnapshotcontent-mywork", "node-a", "x")
-	pod := makeSourcePod("x")
+	pod := makeSourcePod()
 	pod.Labels[snapshotv1alpha1.CaptureEligibleLabel] = "true"
 	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
 	w.inFlight[string(content.UID)+"/main"] = struct{}{}
@@ -257,7 +257,7 @@ func TestReconcileSourcePod_InFlightGuard(t *testing.T) {
 
 func TestReconcileSourcePod_ProvenanceInvalidFailsAndUnlabels(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
-	pod := makeSourcePod("x")
+	pod := makeSourcePod()
 	pod.UID = types.UID("stale-uid") // UID mismatch vs the work order's pinned source UID
 	pod.Labels[snapshotv1alpha1.CaptureEligibleLabel] = "true"
 	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
@@ -274,7 +274,7 @@ func TestReconcileSourcePod_ProvenanceInvalidFailsAndUnlabels(t *testing.T) {
 func TestReconcileSourcePod_InFlightShortCircuits(t *testing.T) {
 	// The guard is keyed on the immutable content UID and container.
 	content := makeWorkOrder("podsnapshotcontent-mywork", "node-a", "x")
-	pod := makeSourcePod("x")
+	pod := makeSourcePod()
 	pod.Labels[snapshotv1alpha1.CaptureEligibleLabel] = "true"
 	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
 	// A dump is already in flight: tryAcquire short-circuits before any further work, so a second
@@ -338,7 +338,7 @@ func TestFailCheckpointOnContainerExit_IgnoresCleanExit(t *testing.T) {
 
 func TestReconcileSnapshotContent_UsesContentUIDArtifactIdentity(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-unrelated-name", "node-a", "abc")
-	pod := makeSourcePod("abc")
+	pod := makeSourcePod()
 	fc := &fakeCheckpointer{}
 	w := makeNodeController(t, fc, content, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: 7}
@@ -362,7 +362,7 @@ func TestReconcileSnapshotContent_UsesContentUIDArtifactIdentity(t *testing.T) {
 
 func TestReconcileSnapshotContent_ResumeWritesReadyAndReleases(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
-	pod := makeSourcePod("abc")
+	pod := makeSourcePod()
 	fc := &fakeCheckpointer{}
 	w := makeNodeController(t, fc, content, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
@@ -396,7 +396,7 @@ func TestReconcileSourcePod_ReadyDoesNotStarveNewDump(t *testing.T) {
 	})
 	pending := makeWorkOrder("podsnapshotcontent-new", "node-a", "abc")
 	pending.CreationTimestamp = metav1.Unix(2000, 0)
-	pod := makeSourcePod("abc")
+	pod := makeSourcePod()
 	fc := &fakeCheckpointer{}
 	w := makeNodeController(t, fc, ready, pending, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: 7}
@@ -417,7 +417,7 @@ func TestReconcileSourcePod_InvalidReadySpecDoesNotStarveNewDump(t *testing.T) {
 	})
 	pending := makeWorkOrder("podsnapshotcontent-new", "node-a", "abc")
 	pending.CreationTimestamp = metav1.Unix(2000, 0)
-	pod := makeSourcePod("abc")
+	pod := makeSourcePod()
 	fc := &fakeCheckpointer{}
 	w := makeNodeController(t, fc, ready, pending, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: 7}
@@ -434,7 +434,7 @@ func TestReconcileSourcePod_ReadyRetriesSentinel(t *testing.T) {
 		Reason:  "Captured",
 		Message: "Checkpoint captured and verified",
 	})
-	pod := makeSourcePod("abc")
+	pod := makeSourcePod()
 	fc := &fakeCheckpointer{}
 	w := makeNodeController(t, fc, ready, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: 11}
@@ -458,7 +458,7 @@ func TestReconcileSourcePod_ReadyReleaseSkipsStalePodUID(t *testing.T) {
 		Reason:  "Captured",
 		Message: "Checkpoint captured and verified",
 	})
-	pod := makeSourcePod("abc")
+	pod := makeSourcePod()
 	pod.UID = types.UID("other-uid")
 	fc := &fakeCheckpointer{}
 	w := makeNodeController(t, fc, ready, pod)
@@ -482,7 +482,7 @@ func TestReconcileSourcePod_ReadyReleaseFailureKillsTarget(t *testing.T) {
 		Reason:  "Captured",
 		Message: "Checkpoint captured and verified",
 	})
-	pod := makeSourcePod("abc")
+	pod := makeSourcePod()
 	ctx, target := startKillableTarget(t)
 	w := makeNodeController(t, &fakeCheckpointer{}, ready, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: target.Process.Pid}
@@ -656,7 +656,7 @@ func TestReconcileSnapshotContent_PodFailedFails(t *testing.T) {
 
 func TestReconcileSnapshotContent_NotReadyQuiesceNoOp(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
-	pod := makeSourcePod("x")
+	pod := makeSourcePod()
 	pod.Status.ContainerStatuses[0].Ready = false
 	fc := &fakeCheckpointer{}
 	w := makeNodeController(t, fc, content, pod)
@@ -669,7 +669,7 @@ func TestReconcileSnapshotContent_NotReadyQuiesceNoOp(t *testing.T) {
 
 func TestReconcileSnapshotContent_CapturesFromPod(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
-	pod := makeSourcePod("abc")
+	pod := makeSourcePod()
 	fc := &fakeCheckpointer{}
 	w := makeNodeController(t, fc, content, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: 7}

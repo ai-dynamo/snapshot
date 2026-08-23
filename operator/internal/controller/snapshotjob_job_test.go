@@ -46,8 +46,7 @@ func TestBuildSourceJob(t *testing.T) {
 		assert.Equal(t, ptr.To(int64(1800)), job.Spec.ActiveDeadlineSeconds)
 		assert.Equal(t, ptr.To(int32(0)), job.Spec.BackoffLimit)
 		assert.Nil(t, job.Spec.TTLSecondsAfterFinished, "SnapshotJob cleanup is controller-driven, not TTL-driven")
-		assert.Equal(t, "warm-worker", job.Labels[snapshotv1alpha1.CheckpointIDLabel],
-			"CheckpointID must be sj.Name, matching the artifact path <basePath>/<sj.Name>/versions/1")
+		assert.Equal(t, "true", job.Spec.Template.Labels[snapshotv1alpha1.CheckpointSourceLabel])
 
 		main := requireContainer(t, job.Spec.Template.Spec.Containers, "worker")
 		require.NotNil(t, main.ReadinessProbe, "target container must get the ready-for-snapshot probe")

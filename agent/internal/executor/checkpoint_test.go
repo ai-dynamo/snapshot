@@ -40,21 +40,33 @@ func TestCheckpointPreparesContentArtifactParents(t *testing.T) {
 	require.NoError(t, err)
 
 	err = Checkpoint(context.Background(), checkpointPathRuntime{}, logr.Discard(), CheckpointRequest{
-		ContentUID:         "content-uid",
-		ContainerName:      "main",
-		CheckpointLocation: finalDir,
+		ContentUID:    "content-uid",
+		ContainerName: "main",
 	}, cfg)
 	require.ErrorContains(t, err, "stop after path preparation")
 	assert.DirExists(t, filepath.Dir(finalDir))
 	assert.DirExists(t, filepath.Join(cfg.Storage.BasePath, "artifacts", "content-uid", ".tmp"))
 }
 
-func TestCheckpointRejectsMismatchedArtifactPath(t *testing.T) {
+func TestCheckpointRejectsMissingIdentity(t *testing.T) {
 	cfg := &types.AgentConfig{Storage: types.StorageSpec{BasePath: t.TempDir()}}
-	err := Checkpoint(context.Background(), checkpointPathRuntime{}, logr.Discard(), CheckpointRequest{
-		ContentUID:         "content-uid",
-		ContainerName:      "main",
-		CheckpointLocation: filepath.Join(cfg.Storage.BasePath, "wrong"),
-	}, cfg)
-	require.ErrorContains(t, err, "does not match content artifact path")
+	tests := map[string]struct {
+		req  CheckpointRequest
+		want string
+	}{
+		"content UID": {
+			req:  CheckpointRequest{ContainerName: "main"},
+			want: "PodSnapshotContent UID is required",
+		},
+		"container name": {
+			req:  CheckpointRequest{ContentUID: "content-uid"},
+			want: "container name is required",
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			err := Checkpoint(context.Background(), checkpointPathRuntime{}, logr.Discard(), tc.req, cfg)
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
 }

@@ -56,7 +56,7 @@ func makeNodeControllerWithInterceptor(t *testing.T, fc *fakeCheckpointer, funcs
 
 func TestReconcilePodSnapshotContent_ContentGetErrorReturns(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
-	pod := makeSourcePod("x")
+	pod := makeSourcePod()
 	funcs := interceptor.Funcs{
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 			if _, ok := obj.(*snapshotv1alpha1.PodSnapshotContent); ok {
@@ -76,7 +76,7 @@ func TestReconcilePodSnapshotContent_ContentGetErrorReturns(t *testing.T) {
 
 func TestReconcilePodSnapshotContent_SourcePodGetErrorReturns(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
-	pod := makeSourcePod("x")
+	pod := makeSourcePod()
 	funcs := interceptor.Funcs{
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 			if _, ok := obj.(*corev1.Pod); ok {
@@ -95,7 +95,7 @@ func TestReconcilePodSnapshotContent_SourcePodGetErrorReturns(t *testing.T) {
 
 func TestReconcilePodSnapshotContent_LabelErrorLeavesPodUnlabeled(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
-	pod := makeSourcePod("x")
+	pod := makeSourcePod()
 	funcs := interceptor.Funcs{
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 			return errors.New("patch rejected")
@@ -112,7 +112,7 @@ func TestReconcilePodSnapshotContent_LabelErrorLeavesPodUnlabeled(t *testing.T) 
 
 func TestReconcileSourcePod_ContentGetErrorReturns(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
-	pod := makeSourcePod("x")
+	pod := makeSourcePod()
 	pod.Labels[snapshotv1alpha1.CaptureEligibleLabel] = "true"
 	fc := &fakeCheckpointer{}
 	funcs := interceptor.Funcs{
@@ -131,7 +131,7 @@ func TestReconcileSourcePod_ContentGetErrorReturns(t *testing.T) {
 }
 
 func TestLabelCaptureEligible_AlreadyLabeledNoOp(t *testing.T) {
-	pod := makeSourcePod("x")
+	pod := makeSourcePod()
 	pod.Labels[snapshotv1alpha1.CaptureEligibleLabel] = "true"
 	funcs := interceptor.Funcs{
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
@@ -145,7 +145,7 @@ func TestLabelCaptureEligible_AlreadyLabeledNoOp(t *testing.T) {
 }
 
 func TestLabelCaptureEligible_PatchErrorReturned(t *testing.T) {
-	pod := makeSourcePod("x")
+	pod := makeSourcePod()
 	funcs := interceptor.Funcs{
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 			return errors.New("patch rejected")
@@ -158,7 +158,7 @@ func TestLabelCaptureEligible_PatchErrorReturned(t *testing.T) {
 }
 
 func TestRemoveCaptureEligibleLabel_AbsentNoOp(t *testing.T) {
-	pod := makeSourcePod("x") // no CaptureEligibleLabel
+	pod := makeSourcePod() // no CaptureEligibleLabel
 	funcs := interceptor.Funcs{
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 			return errors.New("patch must not be called")
@@ -173,7 +173,7 @@ func TestRemoveCaptureEligibleLabel_AbsentNoOp(t *testing.T) {
 }
 
 func TestRemoveCaptureEligibleLabel_PatchErrorLeavesLabel(t *testing.T) {
-	pod := makeSourcePod("x")
+	pod := makeSourcePod()
 	pod.Labels[snapshotv1alpha1.CaptureEligibleLabel] = "true"
 	funcs := interceptor.Funcs{
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {

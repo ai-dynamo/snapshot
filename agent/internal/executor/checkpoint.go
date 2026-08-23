@@ -27,16 +27,15 @@ import (
 
 // CheckpointRequest holds the content-owned inputs for a checkpoint operation.
 type CheckpointRequest struct {
-	ContainerID        string
-	ContainerName      string
-	ContentUID         string
-	CheckpointLocation string
-	StartedAt          time.Time
-	NodeName           string
-	PodName            string
-	PodNamespace       string
-	PodIP              string
-	Clientset          kubernetes.Interface
+	ContainerID   string
+	ContainerName string
+	ContentUID    string
+	StartedAt     time.Time
+	NodeName      string
+	PodName       string
+	PodNamespace  string
+	PodIP         string
+	Clientset     kubernetes.Interface
 }
 
 type checkpointPhaseTimings struct {
@@ -60,16 +59,9 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	if strings.TrimSpace(req.ContainerName) == "" {
 		return fmt.Errorf("container name is required")
 	}
-	if req.CheckpointLocation == "" {
-		return fmt.Errorf("checkpoint location is required")
-	}
-
 	finalDir, err := nsmount.ResolveArtifactPath(cfg.Storage.BasePath, req.ContentUID, req.ContainerName)
 	if err != nil {
 		return fmt.Errorf("resolve checkpoint artifact path: %w", err)
-	}
-	if req.CheckpointLocation != finalDir {
-		return fmt.Errorf("checkpoint location %q does not match content artifact path %q", req.CheckpointLocation, finalDir)
 	}
 	tmpRoot, err := nsmount.ResolveArtifactStagingRoot(cfg.Storage.BasePath, req.ContentUID)
 	if err != nil {
