@@ -3,10 +3,10 @@
 
 """Fast, cluster-free checks of the workload scripts themselves.
 
-The SnapshotJob source establishes restorable state and declares readiness.
-It does not own a post-capture handshake: checkpoint may terminate it, and the
-SnapshotJob controller deletes the owned source Job after capture. These checks
-therefore cover only the pre-capture source contract.
+The SnapshotJob source establishes restorable state, declares readiness, and
+exits successfully once the agent reports capture through snapshot-complete.
+That post-capture exit lets the source batch Job complete, which is the second
+signal required for SnapshotJob completion.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ def render_cpu_source(control_dir: Path, state_dir: Path) -> str:
 
 
 @pytest.mark.workload
-def test_snapshotjob_cpu_source_establishes_state_before_capture(tmp_path: Path) -> None:
+def test_snapshotjob_cpu_source_establishes_state_and_exits_after_capture(tmp_path: Path) -> None:
     control_dir = tmp_path / "snapshot-control"
     state_dir = tmp_path / "e2e-state"
     control_dir.mkdir()
@@ -61,6 +61,9 @@ def test_snapshotjob_cpu_source_establishes_state_before_capture(tmp_path: Path)
         assert "observation seq=" in text
         assert f"cpu={token}" in text
         assert f"file={token}" in text
+
+        (control_dir / "snapshot-complete").write_text("complete\n")
+        assert proc.wait(timeout=10) == 0
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -69,10 +72,14 @@ def test_snapshotjob_cpu_source_establishes_state_before_capture(tmp_path: Path)
 
 @pytest.mark.workload
 @pytest.mark.parametrize("gpu", [False, True])
-def test_snapshotjob_source_has_no_post_capture_handshake(gpu: bool) -> None:
+def test_only_snapshotjob_source_opts_into_post_capture_exit(gpu: bool) -> None:
     script = workloads.snapshotjob_source_command("test-image", gpu=gpu)
+    direct_script = workloads.source_command("test-image", gpu=gpu)
 
-    assert "snapshot-complete" not in script
+    opt_in = f"export {workloads.EXIT_AFTER_SNAPSHOT_ENV}=true"
+    assert opt_in in script
+    assert opt_in not in direct_script
+    assert workloads.SNAPSHOT_COMPLETE in script
     expected_source = workloads.CUDA_SOURCE if gpu else workloads.CPU_SOURCE
     assert expected_source in script
 
@@ -117,6 +124,9 @@ def test_workload_paths_match_the_operator_contract() -> None:
     assert workloads.CONTROL_DIR == go_const("SnapshotControlMountPath")
     assert workloads.SOURCE_READY == (
         f"{go_const('SnapshotControlMountPath')}/{go_const('ReadyForSnapshotFile')}"
+    )
+    assert workloads.SNAPSHOT_COMPLETE == (
+        f"{go_const('SnapshotControlMountPath')}/{go_const('SnapshotCompleteFile')}"
     )
     assert workloads.RESTORE_DONE == (
         f"{go_const('SnapshotControlMountPath')}/{go_const('RestoreCompleteFile')}"

@@ -7,10 +7,8 @@ Unlike test_snapshot_lifecycle.py (which drives PodSnapshot directly against a
 plain pod the test creates and annotates itself), these tests exercise the
 SnapshotJob CRD end to end: the controller creates the source batch/v1 Job,
 derives Running from it, creates the PodSnapshot once the pod exists, derives
-Captured from it, marks Completed once capture succeeds, and deletes the source
-Job. The test intentionally does not require the source pod to execute or the
-batch Job to complete naturally after capture: checkpoint is allowed to
-terminate the source process.
+Captured from it, waits for the workload to exit after snapshot-complete, marks
+Completed once the source Job completes, and deletes the source Job.
 """
 
 from __future__ import annotations
@@ -67,7 +65,7 @@ def test_snapshotjob_captures_and_restore_recovers_state(
             timeout=600,
         )
         completed = snap.condition(sj, "Completed")
-        assert completed and completed.get("reason") == "CaptureCompleted"
+        assert completed and completed.get("reason") == "JobCompleted"
         captured = snap.condition(sj, "Captured")
         assert captured and captured.get("reason") == "CaptureCompleted"
         running = snap.condition(sj, "Running")
@@ -88,9 +86,8 @@ def test_snapshotjob_captures_and_restore_recovers_state(
         assert content["spec"]["source"]["podRef"]["containers"] == [workloads.CONTAINER]
         source_node = content["spec"]["source"]["nodeName"]
 
-        # Completion asks Kubernetes to reap the owned Job/pod. With
-        # leaveRunning disabled the source may already be gone; either outcome
-        # is valid because post-capture source execution is not the contract.
+        # The workload exits after snapshot-complete; once the Job reports
+        # Complete, the SnapshotJob controller deletes the owned Job and pod.
         snap.wait_for_pod_deleted(config.namespace, source_pod_name, timeout=120)
 
         k8s.create_pod(
