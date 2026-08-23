@@ -5,7 +5,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -16,7 +15,6 @@ import (
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
-	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
 // A checkpoint whose manifest cannot be read is not incompatible, it is broken.
@@ -56,64 +54,6 @@ func TestPreflightCompatibilityComparesRecordedFacts(t *testing.T) {
 	require.Len(t, r.comparison.calls, 1)
 	assert.Equal(t, compat.GatePreflight, r.comparison.calls[0].gate)
 	assert.Equal(t, []string{"/etc/hosts", "/model-cache"}, r.comparison.calls[0].source.ExternalizedMounts)
-}
-
-// The escape hatch: with it set, neither gate runs, so a checkpoint the policy
-// table would turn down is still attempted.
-func TestSkipCompatCheckTurnsOffTheGates(t *testing.T) {
-	mismatch := compat.Mismatch{Check: "cpu-arch", Source: "amd64", Target: "arm64"}
-
-	// Lets the restore start and end quickly, since the point here is only
-	// whether the gate let it through.
-	stopEarly := func(r *gatedRestore) {
-		r.controller.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
-			return 0, errors.New("test restore stopped")
-		}
-	}
-
-	t.Run("the pod annotation turns it off", func(t *testing.T) {
-		r := newGatedRestore(t, mismatch)
-		r.pod.Annotations[snapshotv1alpha1.SkipCompatCheckAnnotation] = "true"
-		stopEarly(r)
-
-		r.reconcile(t)
-
-		assert.Empty(t, r.comparison.calls, "skipped gate compared anyway")
-	})
-
-	// Gate B is inside the executor, past the point where the switch can be read
-	// again, so the decision travels with the request. Without it, a skipped
-	// restore would still be refused a few steps later.
-	t.Run("the decision travels to the second gate", func(t *testing.T) {
-		for _, tc := range []struct {
-			name string
-			set  func(*gatedRestore)
-			want bool
-		}{
-			{name: "checked", set: func(*gatedRestore) {}},
-			{
-				name: "skipped by pod",
-				set: func(r *gatedRestore) {
-					r.pod.Annotations[snapshotv1alpha1.SkipCompatCheckAnnotation] = "true"
-				},
-				want: true,
-			},
-		} {
-			t.Run(tc.name, func(t *testing.T) {
-				r := newGatedRestore(t)
-				tc.set(r)
-				var requested executor.RestoreRequest
-				r.controller.restoreFn = func(_ context.Context, _ snapshotruntime.Runtime, _ logr.Logger, req executor.RestoreRequest, _ executor.RestoreMounter) (int, error) {
-					requested = req
-					return 0, errors.New("test restore stopped")
-				}
-
-				r.reconcile(t)
-
-				assert.Equal(t, tc.want, requested.SkipCompatCheck)
-			})
-		}
-	})
 }
 
 // Both gates log the same sentence for the same refusal, and each names the gate

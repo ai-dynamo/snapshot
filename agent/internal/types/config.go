@@ -70,6 +70,11 @@ type StorageSpec struct {
 // RestoreSpec holds settings for the CRIU restore process.
 type RestoreSpec struct {
 	RestoreTimeoutSeconds int `yaml:"restoreTimeoutSeconds"`
+
+	// SkipCompatCheck turns the restore compatibility gate off for every
+	// restore this agent handles. It is the per-node escape hatch, for a
+	// cluster admin who would otherwise be stuck annotating pods one by one.
+	SkipCompatCheck bool `yaml:"skipCompatCheck"`
 }
 
 func (c *RestoreSpec) RestoreTimeout() time.Duration {

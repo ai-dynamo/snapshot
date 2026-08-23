@@ -27,6 +27,7 @@ data:
 
     restore:
       restoreTimeoutSeconds: {{ .Values.config.restore.restoreTimeoutSeconds }}
+      skipCompatCheck: {{ .Values.config.restore.skipCompatCheck }}
 
     criu:
       binaryPath: {{ .Values.config.criu.binaryPath | quote }}

@@ -177,6 +177,13 @@ config:
   restore:
     # Maximum seconds to allow a restore attempt before the agent marks it failed
     restoreTimeoutSeconds: 7200
+    # Skip the restore compatibility check on every restore this agent handles.
+    # The gate refuses a restore whose checkpoint was captured somewhere the
+    # target node cannot reproduce; turning it off means those restores are
+    # attempted and fail inside CRIU instead. Per-node escape hatch; a single
+    # restore can opt out with the nvidia.com/snapshot-skip-compat-check
+    # annotation on the restore pod.
+    skipCompatCheck: false
 
   criu:
     # Path to the criu binary
