@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -253,6 +254,7 @@ func TestSnapshotJobReconcileFailedOnPodSnapshotFailed(t *testing.T) {
 	job, err := buildSourceJob(sj)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	job.Status.Ready = ptr.To(int32(1))
 	pod := sourcePodForJob(job)
 	snap, err := buildPodSnapshot(sj, pod)
 	require.NoError(t, err)
@@ -278,6 +280,12 @@ func TestSnapshotJobReconcileFailedOnPodSnapshotFailed(t *testing.T) {
 	assert.Equal(t, metav1.ConditionTrue, failed.Status)
 	assert.Equal(t, snapshotv1alpha1.ReasonCaptureFailed, failed.Reason)
 	require.NotNil(t, updated.Status.CompletedAt)
+	running := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning)
+	require.NotNil(t, running)
+	assert.Equal(t, metav1.ConditionTrue, running.Status,
+		"capture failure must not override the independently ready source Job")
+	assert.Equal(t, snapshotv1alpha1.ReasonPodReady, running.Reason)
+	require.NotNil(t, updated.Status.StartedAt)
 }
 
 // TestSnapshotJobReconcileFailureTargetWinsOverCaptureFailure verifies the

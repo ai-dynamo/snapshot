@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -178,6 +179,12 @@ func TestSnapshotJobReconcileCompletionGate(t *testing.T) {
 		assert.Equal(t, metav1.ConditionFalse, cond.Status)
 		assert.Equal(t, snapshotv1alpha1.ReasonWaitingForPodCompletion, cond.Reason)
 		assert.Nil(t, updated.Status.CompletedAt)
+		running := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning)
+		require.NotNil(t, running)
+		assert.Equal(t, metav1.ConditionFalse, running.Status)
+		assert.Equal(t, snapshotv1alpha1.ReasonPodPending, running.Reason)
+		assert.Nil(t, updated.Status.StartedAt,
+			"capture success must not invent a source-readiness observation")
 
 		jobs := &batchv1.JobList{}
 		require.NoError(t, r.List(context.Background(), jobs))
@@ -198,6 +205,11 @@ func TestSnapshotJobReconcileCompletionGate(t *testing.T) {
 		assert.Equal(t, metav1.ConditionTrue, cond.Status)
 		assert.Equal(t, snapshotv1alpha1.ReasonJobCompleted, cond.Reason)
 		require.NotNil(t, updated.Status.CompletedAt)
+		running = meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning)
+		require.NotNil(t, running)
+		assert.Equal(t, metav1.ConditionFalse, running.Status)
+		assert.Equal(t, snapshotv1alpha1.ReasonJobCompleted, running.Reason)
+		assert.Nil(t, updated.Status.StartedAt)
 
 		jobs = &batchv1.JobList{}
 		require.NoError(t, r.List(context.Background(), jobs))
@@ -240,6 +252,7 @@ func TestSnapshotJobReconcileCaptureDoesNotOverrideJobFailure(t *testing.T) {
 	job, err := buildSourceJob(sj)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	job.Status.Ready = ptr.To(int32(1))
 	pod := sourcePodForJob(job)
 	snap := readySnapshot(t, sj, pod)
 	setJobFailureCondition(job, batchv1.JobFailureTarget, "BackoffLimitExceeded", "checkpoint terminated the source process")
@@ -254,8 +267,10 @@ func TestSnapshotJobReconcileCaptureDoesNotOverrideJobFailure(t *testing.T) {
 	assert.True(t, snapshotv1alpha1.IsSnapshotJobFailed(updated))
 	assert.True(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured),
 		"capture success remains independently visible when post-capture logic fails")
-	assert.True(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning),
-		"successful capture proves the source reached readiness before it failed")
+	running := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning)
+	require.NotNil(t, running)
+	assert.Equal(t, metav1.ConditionFalse, running.Status)
+	assert.Equal(t, snapshotv1alpha1.ReasonJobFailed, running.Reason)
 	require.NotNil(t, updated.Status.StartedAt)
 	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
 	require.NotNil(t, failed)
@@ -335,6 +350,12 @@ func TestSnapshotJobReconcileJobDeleted(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
 	sj.Status.SourceJobUID = types.UID("deleted-job-uid")
+	startedAt := metav1.Unix(1_700_000_000, 0)
+	sj.Status.StartedAt = &startedAt
+	meta.SetStatusCondition(&sj.Status.Conditions, metav1.Condition{
+		Type: snapshotv1alpha1.SnapshotJobConditionRunning, Status: metav1.ConditionTrue,
+		Reason: snapshotv1alpha1.ReasonPodReady, Message: "source pod is ready",
+	})
 	require.Empty(t, sj.Status.PodSnapshotName, "the UID must detect deletion before PodSnapshot status is recorded")
 
 	r := makeSnapshotJobReconciler(s, sj)                       // cached Job lookup misses
@@ -347,6 +368,12 @@ func TestSnapshotJobReconcileJobDeleted(t *testing.T) {
 	cond := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
 	require.NotNil(t, cond)
 	assert.Equal(t, snapshotv1alpha1.ReasonJobDeleted, cond.Reason)
+	running := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning)
+	require.NotNil(t, running)
+	assert.Equal(t, metav1.ConditionFalse, running.Status)
+	assert.Equal(t, snapshotv1alpha1.ReasonJobDeleted, running.Reason)
+	require.NotNil(t, updated.Status.StartedAt)
+	assert.Equal(t, startedAt, *updated.Status.StartedAt)
 
 	jobs := &batchv1.JobList{}
 	require.NoError(t, r.List(context.Background(), jobs))

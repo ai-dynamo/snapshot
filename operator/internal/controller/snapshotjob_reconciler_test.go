@@ -178,7 +178,7 @@ func TestSnapshotJobReconcileInvalidSpecIsTerminal(t *testing.T) {
 	running := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning)
 	require.NotNil(t, running, "Running must not be entirely absent alongside a terminal Failed=True — missing is not the same as known False")
 	assert.Equal(t, metav1.ConditionFalse, running.Status)
-	assert.Equal(t, snapshotv1alpha1.ReasonPodPending, running.Reason)
+	assert.Equal(t, snapshotv1alpha1.ReasonInvalidSpec, running.Reason)
 
 	captured := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured)
 	require.NotNil(t, captured, "Captured must not be entirely absent alongside a terminal Failed=True — missing is not the same as known False")
@@ -616,10 +616,12 @@ func TestDeriveSnapshotJobStatusUsesSingleReconciliationTime(t *testing.T) {
 	reconciliationTime := metav1.NewTime(time.Date(2026, time.August, 23, 12, 34, 56, 0, time.UTC))
 
 	tests := []struct {
-		name           string
-		observed       snapshotJobObservation
-		conditionTypes []string
-		wantStartedAt  bool
+		name              string
+		observed          snapshotJobObservation
+		conditionTypes    []string
+		wantStartedAt     bool
+		wantRunningStatus metav1.ConditionStatus
+		wantRunningReason string
 	}{
 		{
 			name: "successful completion",
@@ -641,7 +643,9 @@ func TestDeriveSnapshotJobStatusUsesSingleReconciliationTime(t *testing.T) {
 				snapshotv1alpha1.SnapshotJobConditionCaptured,
 				snapshotv1alpha1.SnapshotJobConditionCompleted,
 			},
-			wantStartedAt: true,
+			wantStartedAt:     true,
+			wantRunningStatus: metav1.ConditionFalse,
+			wantRunningReason: snapshotv1alpha1.ReasonJobCompleted,
 		},
 		{
 			name: "terminal failure",
@@ -655,6 +659,8 @@ func TestDeriveSnapshotJobStatusUsesSingleReconciliationTime(t *testing.T) {
 				snapshotv1alpha1.SnapshotJobConditionCompleted,
 				snapshotv1alpha1.SnapshotJobConditionFailed,
 			},
+			wantRunningStatus: metav1.ConditionFalse,
+			wantRunningReason: snapshotv1alpha1.ReasonInvalidSpec,
 		},
 	}
 
@@ -675,6 +681,10 @@ func TestDeriveSnapshotJobStatusUsesSingleReconciliationTime(t *testing.T) {
 				require.NotNil(t, condition)
 				assert.Equal(t, reconciliationTime, condition.LastTransitionTime)
 			}
+			running := meta.FindStatusCondition(status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning)
+			require.NotNil(t, running)
+			assert.Equal(t, test.wantRunningStatus, running.Status)
+			assert.Equal(t, test.wantRunningReason, running.Reason)
 		})
 	}
 }

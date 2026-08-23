@@ -229,24 +229,49 @@ func deriveSnapshotJobStatus(sj *snapshotv1alpha1.SnapshotJob, observed snapshot
 }
 
 func deriveRunningStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJobObservation, reconciliationTime metav1.Time) {
-	if observed.job != nil {
-		ready := observed.job.Status.Ready != nil && *observed.job.Status.Ready > 0
-		captured := observed.podSnapshot != nil && snapshotv1alpha1.IsPodSnapshotSucceeded(observed.podSnapshot)
-		if ready || captured {
-			if next.Status.StartedAt == nil {
-				next.Status.StartedAt = &reconciliationTime
-			}
-			setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionTrue, reconciliationTime,
-				snapshotv1alpha1.ReasonPodReady, "source pod is ready")
-		} else {
-			message := "waiting for the source pod to become ready"
-			if observed.sourcePodMissing {
-				message = "waiting for the source Job to create a pod"
-			}
+	if observed.job == nil {
+		if observed.failure != nil {
 			setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse, reconciliationTime,
-				snapshotv1alpha1.ReasonPodPending, message)
+				observed.failure.reason, "source pod is unavailable: "+observed.failure.cause.Error())
 		}
+		return
 	}
+
+	ready := observed.job.Status.Ready != nil && *observed.job.Status.Ready > 0
+	if ready && next.Status.StartedAt == nil {
+		next.Status.StartedAt = &reconciliationTime
+	}
+
+	terminal := classifySourceJobTerminal(observed.job)
+	switch terminal.state {
+	case sourceJobActive:
+		// Continue below and derive current readiness.
+	case sourceJobComplete:
+		setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse, reconciliationTime,
+			snapshotv1alpha1.ReasonJobCompleted, "source Job completed")
+		return
+	case sourceJobFailed, sourceJobDeadlineExceeded:
+		setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse, reconciliationTime,
+			terminal.failure.reason, terminal.failure.cause.Error())
+		return
+	default:
+		setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse, reconciliationTime,
+			snapshotv1alpha1.ReasonPodPending, fmt.Sprintf("source Job has unknown state %d", terminal.state))
+		return
+	}
+
+	if ready {
+		setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionTrue, reconciliationTime,
+			snapshotv1alpha1.ReasonPodReady, "source pod is ready")
+		return
+	}
+
+	message := "waiting for the source pod to become ready"
+	if observed.sourcePodMissing {
+		message = "waiting for the source Job to create a pod"
+	}
+	setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse, reconciliationTime,
+		snapshotv1alpha1.ReasonPodPending, message)
 }
 
 func deriveCapturedStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJobObservation, reconciliationTime metav1.Time) *snapshotJobFailure {
@@ -276,7 +301,7 @@ func deriveCapturedStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJ
 func deriveFailureStatus(next *snapshotv1alpha1.SnapshotJob, failure *snapshotJobFailure, reconciliationTime metav1.Time) {
 	if meta.FindStatusCondition(next.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning) == nil {
 		setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse, reconciliationTime,
-			snapshotv1alpha1.ReasonPodPending, "source pod was never observed ready before this SnapshotJob failed")
+			failure.reason, "source pod is unavailable: "+failure.cause.Error())
 	}
 	if !meta.IsStatusConditionTrue(next.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured) {
 		setCondition(next, snapshotv1alpha1.SnapshotJobConditionCaptured, metav1.ConditionFalse, reconciliationTime,
