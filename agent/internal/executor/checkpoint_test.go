@@ -47,26 +47,3 @@ func TestCheckpointPreparesContentArtifactParents(t *testing.T) {
 	assert.DirExists(t, filepath.Dir(finalDir))
 	assert.DirExists(t, filepath.Join(cfg.Storage.BasePath, "artifacts", "content-uid", ".tmp"))
 }
-
-func TestCheckpointRejectsMissingIdentity(t *testing.T) {
-	cfg := &types.AgentConfig{Storage: types.StorageSpec{BasePath: t.TempDir()}}
-	tests := map[string]struct {
-		req  CheckpointRequest
-		want string
-	}{
-		"content UID": {
-			req:  CheckpointRequest{ContainerName: "main"},
-			want: "PodSnapshotContent UID is required",
-		},
-		"container name": {
-			req:  CheckpointRequest{ContentUID: "content-uid"},
-			want: "container name is required",
-		},
-	}
-	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) {
-			err := Checkpoint(context.Background(), checkpointPathRuntime{}, logr.Discard(), tc.req, cfg)
-			require.ErrorContains(t, err, tc.want)
-		})
-	}
-}

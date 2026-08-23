@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
@@ -53,12 +52,6 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	checkpointStart := time.Now()
 	log.Info("=== Starting checkpoint operation ===")
 
-	if strings.TrimSpace(req.ContentUID) == "" {
-		return fmt.Errorf("PodSnapshotContent UID is required")
-	}
-	if strings.TrimSpace(req.ContainerName) == "" {
-		return fmt.Errorf("container name is required")
-	}
 	finalDir, err := nsmount.ResolveArtifactPath(cfg.Storage.BasePath, req.ContentUID, req.ContainerName)
 	if err != nil {
 		return fmt.Errorf("resolve checkpoint artifact path: %w", err)

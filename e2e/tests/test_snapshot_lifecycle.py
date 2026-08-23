@@ -150,7 +150,11 @@ def test_failed_restore_gpu_checkpoint_into_non_gpu_target(
         )
         assert snap.condition(pod_snapshot, "Ready")["status"] == "True"
         assert snap.condition(content, "Ready")["status"] == "True"
-        assert_restore_events(config.namespace, run.restore_pod, {"RestoreFailed"})
+        assert_restore_events(
+            config.namespace,
+            run.restore_pod,
+            {"RestoreFailed", "RestoreAlreadyFailed"},
+        )
     except Exception:
         snap.debug_dump(config, run)
         raise

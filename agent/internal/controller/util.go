@@ -216,3 +216,20 @@ func emitPodEvent(ctx context.Context, clientset kubernetes.Interface, log logr.
 		)
 	}
 }
+
+func setPodCondition(status *corev1.PodStatus, condition corev1.PodCondition) {
+	condition.LastTransitionTime = metav1.Now()
+	for i := range status.Conditions {
+		existing := &status.Conditions[i]
+		if existing.Type != condition.Type {
+			continue
+		}
+		if existing.Status == condition.Status && !existing.LastTransitionTime.IsZero() {
+			condition.LastTransitionTime = existing.LastTransitionTime
+		}
+		condition.LastProbeTime = existing.LastProbeTime
+		*existing = condition
+		return
+	}
+	status.Conditions = append(status.Conditions, condition)
+}

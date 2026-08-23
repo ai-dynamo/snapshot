@@ -32,8 +32,10 @@ func ResolveArtifactPath(basePath, contentUID, containerName string) (string, er
 }
 
 // ResolveArtifactStagingRoot returns the private staging root for one
-// PodSnapshotContent. Keeping it under the same content directory guarantees
-// the final rename stays on the same filesystem as the artifact.
+// PodSnapshotContent. Checkpoint writes a complete artifact beneath this root
+// before renaming it into the final container path. Keeping staging inside the
+// content directory guarantees that rename stays on one filesystem, so the
+// artifact is published atomically and restore never observes a partial dump.
 func ResolveArtifactStagingRoot(basePath, contentUID string) (string, error) {
 	if err := validateAbsolutePath(basePath); err != nil {
 		return "", err

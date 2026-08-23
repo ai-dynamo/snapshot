@@ -31,7 +31,7 @@ To restore a worker, a new pod names a ready `PodSnapshot` in the `nvidia.com/re
 Snapshots are portable across compatible machines and can be restored on any node with matching GPU hardware and driver versions. They are not tied to the node where they were originally created.
 
 Restore progress is exposed only through the pod status condition
-`type: Restored`, with reasons `SnapshotPending`, `ArtifactPending`,
+`type: Restored`, with reasons `SnapshotPending`, `ContentPending`, `ArtifactPending`,
 `RestoreInProgress`, `RestoreFailed`, or `RestoreSucceeded` and a descriptive
 message.
 

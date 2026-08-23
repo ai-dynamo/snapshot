@@ -32,6 +32,18 @@ func WriteControlSentinel(hostPID int, name string) error {
 	return writeSentinelInDir(dir, name)
 }
 
+// ControlSentinelExists reports whether a sentinel exists in the workload
+// container's snapshot-control volume. It returns an error when the container's
+// control mount cannot be inspected, so callers do not mistake an inaccessible
+// volume for a missing sentinel.
+func ControlSentinelExists(hostPID int, name string) (bool, error) {
+	if hostPID <= 0 {
+		return false, fmt.Errorf("invalid host PID %d for control sentinel %q", hostPID, name)
+	}
+	dir := filepath.Join(HostProcPath, strconv.Itoa(hostPID), "root", snapshotv1alpha1.SnapshotControlMountPath)
+	return controlSentinelExistsInDir(dir, name)
+}
+
 // RemoveControlSentinel removes a sentinel from the snapshot-control mount at
 // dir. The directory must exist: a missing file is already removed, but a
 // missing mount is an error so callers do not confuse "cannot see the volume"
@@ -66,4 +78,22 @@ func removeSentinelInDir(dir, name string) error {
 		return fmt.Errorf("remove control sentinel %s: %w", path, err)
 	}
 	return nil
+}
+
+func controlSentinelExistsInDir(dir, name string) (bool, error) {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return false, fmt.Errorf("control sentinel dir %s: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return false, fmt.Errorf("control sentinel dir %s: not a directory", dir)
+	}
+	path := filepath.Join(dir, name)
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat control sentinel %s: %w", path, err)
+	}
+	return true, nil
 }

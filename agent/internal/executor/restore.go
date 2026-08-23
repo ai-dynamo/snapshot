@@ -232,11 +232,6 @@ func inspectRestore(
 	req RestoreRequest,
 	manifest *types.CheckpointManifest,
 ) (*types.RestoreContainerSnapshot, time.Duration, error) {
-	containerName := req.ContainerName
-	if containerName == "" {
-		containerName = "main"
-	}
-
 	var (
 		placeholderPID int
 		err            error
@@ -244,7 +239,7 @@ func inspectRestore(
 	if req.ContainerID != "" {
 		placeholderPID, _, err = rt.ResolveContainer(ctx, req.ContainerID)
 	} else {
-		placeholderPID, _, err = rt.ResolveContainerByPod(ctx, req.PodName, req.PodNamespace, containerName)
+		placeholderPID, _, err = rt.ResolveContainerByPod(ctx, req.PodName, req.PodNamespace, req.ContainerName)
 	}
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to resolve placeholder container: %w", err)
@@ -269,7 +264,7 @@ func inspectRestore(
 			req.Clientset,
 			req.PodName,
 			req.PodNamespace,
-			containerName,
+			req.ContainerName,
 			snapshotruntime.HostProcPath,
 			placeholderPID,
 			log,
@@ -278,7 +273,7 @@ func inspectRestore(
 			return nil, 0, fmt.Errorf("failed to get target GPU UUIDs: %w", err)
 		}
 		if len(targetGPUUUIDs) == 0 {
-			return nil, 0, fmt.Errorf("missing target GPU UUIDs for %s/%s container %s", req.PodNamespace, req.PodName, containerName)
+			return nil, 0, fmt.Errorf("missing target GPU UUIDs for %s/%s container %s", req.PodNamespace, req.PodName, req.ContainerName)
 		}
 		cudaDeviceMap, err = cuda.BuildDeviceMap(manifest.CUDA.SourceGPUUUIDs, targetGPUUUIDs, log)
 		gpuDeviceMapDuration = time.Since(gpuStart)
