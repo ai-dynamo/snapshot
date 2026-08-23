@@ -27,13 +27,8 @@ This artifact is not a container image, a filesystem snapshot, or a volume snaps
 
 #### Restore
 
-To restore a worker, a new pod names a ready `PodSnapshot` in the `nvidia.com/restore-from` annotation. During pod startup, the node agent resolves that snapshot through its bound `PodSnapshotContent` and restores the captured process state directly into the container, bypassing model loading, kernel warm-up, and other initialization steps. The restored process resumes execution from the exact point where it was captured.
+To restore a worker, a new pod references a previously captured snapshot artifact. During pod startup, Snapshot restores the captured process state directly into the container, bypassing model loading, kernel warm-up, and other initialization steps. The restored process resumes execution from the exact point where it was captured.
 Snapshots are portable across compatible machines and can be restored on any node with matching GPU hardware and driver versions. They are not tied to the node where they were originally created.
-
-Restore progress is exposed only through the pod status condition
-`type: Restored`, with reasons `SnapshotPending`, `ContentPending`, `ArtifactPending`,
-`RestoreInProgress`, `RestoreFailed`, or `RestoreSucceeded` and a descriptive
-message.
 
 &nbsp;
 
@@ -57,7 +52,7 @@ The Kubernetes operator manages the control plane.
 
 It is responsible for:
 
-* Orchestrating checkpoint operations.
+* Orchestrating checkpoint and restore operations.
 * Tracking snapshot lifecycle.
 * Exposing status through Kubernetes resources.
 * Managing cleanup.
@@ -67,7 +62,7 @@ It is responsible for:
 
 A privileged node agent runs on every GPU node.
 
-It performs the actual checkpoint and restore operations by invoking CRIU and cuda-checkpoint against live processes. For restore pods, each agent watches only pods assigned to its node through `spec.nodeName` and resolves `nvidia.com/restore-from` directly.
+It performs the actual checkpoint and restore operations by invoking CRIU and cuda-checkpoint against live processes.
 
 The node agent is intentionally an implementation detail. Clients never communicate with it directly.
 
@@ -86,9 +81,6 @@ Systems integrating with Snapshot decide:
 
 Snapshot executes those requests and exposes the resulting state.
 
-Checkpoint artifacts are owned by the immutable `PodSnapshotContent` UID and
-stored as `<base>/artifacts/<content-uid>/containers/<container-name>`.
-
 Everything Snapshot manages is represented as Kubernetes resources. Snapshot metadata, capture progress, restore status, and lifecycle information are all observable through the Kubernetes API using standard Kubernetes tooling.
 
 Clients interact exclusively through the Kubernetes API. No platform-specific APIs, direct node communication, or custom protocols are required.
@@ -98,3 +90,4 @@ Clients interact exclusively through the Kubernetes API. No platform-specific AP
 ## Status
 
 The project is in early development. API types and control plane components are scaffolded but not yet feature-complete. Not ready for production use.
+

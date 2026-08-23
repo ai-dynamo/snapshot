@@ -799,6 +799,7 @@ func (w *NodeController) applyRestoredCondition(ctx context.Context, pod *corev1
 		WithStatus(corev1apply.PodStatus().WithConditions(condition))
 	_, err := w.clientset.CoreV1().Pods(pod.Namespace).ApplyStatus(ctx, configuration, metav1.ApplyOptions{
 		FieldManager: restoreStatusFieldManager,
+		Force:        true,
 	})
 	return err
 }
