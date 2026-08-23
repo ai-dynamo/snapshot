@@ -113,5 +113,6 @@ func (w *NodeController) preflightTargetFacts(pod *corev1.Pod, containerName str
 	// The agent's own architecture, which is the node's: this binary could not
 	// be running here otherwise.
 	facts.CPUArch = runtime.GOARCH
+	facts.KernelVersion = w.config.HostKernelVersion
 	return facts
 }

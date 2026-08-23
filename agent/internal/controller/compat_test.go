@@ -63,6 +63,7 @@ func TestPreflightCompatibilityComparesRecordedFacts(t *testing.T) {
 // target side has to describe this node and this pod rather than stay empty.
 func TestPreflightCompatibilityDescribesTheRestoreTarget(t *testing.T) {
 	r := newGatedRestore(t)
+	r.controller.config.HostKernelVersion = "5.15.0-1071-aws"
 	r.pod.Spec.Containers[0].Image = "nvcr.io/nvidia/tritonserver:24.09-py3"
 	r.pod.Status.ContainerStatuses[0].ImageID = "sha256:deadbeef"
 
@@ -70,9 +71,10 @@ func TestPreflightCompatibilityDescribesTheRestoreTarget(t *testing.T) {
 
 	require.Len(t, r.comparison.calls, 1)
 	assert.Equal(t, compat.Facts{
-		CPUArch: runtime.GOARCH,
-		Image:   "nvcr.io/nvidia/tritonserver:24.09-py3",
-		ImageID: "sha256:deadbeef",
+		CPUArch:       runtime.GOARCH,
+		KernelVersion: "5.15.0-1071-aws",
+		Image:         "nvcr.io/nvidia/tritonserver:24.09-py3",
+		ImageID:       "sha256:deadbeef",
 	}, r.comparison.calls[0].target)
 }
 
