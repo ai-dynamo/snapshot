@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -514,8 +515,9 @@ func TestSnapshotJobReconcileSetsStartedAtWhenRunningAlreadyPersisted(t *testing
 func TestSnapshotJobConditionTracksObservedGeneration(t *testing.T) {
 	sj := minimalSnapshotJob()
 	sj.Generation = 7
+	reconciliationTime := metav1.NewTime(time.Date(2026, time.August, 23, 12, 34, 56, 0, time.UTC))
 
-	changed := setCondition(sj, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse,
+	changed := setCondition(sj, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse, reconciliationTime,
 		snapshotv1alpha1.ReasonPodPending, "waiting for the source pod")
 	require.True(t, changed)
 	condition := meta.FindStatusCondition(sj.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning)
@@ -525,12 +527,79 @@ func TestSnapshotJobConditionTracksObservedGeneration(t *testing.T) {
 	// A generation change must refresh the condition even when its state and
 	// message are otherwise unchanged.
 	sj.Generation = 8
-	changed = setCondition(sj, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse,
+	changed = setCondition(sj, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse, reconciliationTime,
 		snapshotv1alpha1.ReasonPodPending, "waiting for the source pod")
 	require.True(t, changed)
 	condition = meta.FindStatusCondition(sj.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning)
 	require.NotNil(t, condition)
 	assert.Equal(t, int64(8), condition.ObservedGeneration)
+}
+
+func TestDeriveSnapshotJobStatusUsesSingleReconciliationTime(t *testing.T) {
+	reconciliationTime := metav1.NewTime(time.Date(2026, time.August, 23, 12, 34, 56, 0, time.UTC))
+
+	tests := []struct {
+		name           string
+		observed       snapshotJobObservation
+		conditionTypes []string
+		wantStartedAt  bool
+	}{
+		{
+			name: "successful completion",
+			observed: snapshotJobObservation{
+				job: &batchv1.Job{Status: batchv1.JobStatus{
+					Ready: ptr.To(int32(1)),
+					Conditions: []batchv1.JobCondition{{
+						Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+					}},
+				}},
+				podSnapshot: &snapshotv1alpha1.PodSnapshot{Status: snapshotv1alpha1.PodSnapshotStatus{
+					Conditions: []metav1.Condition{{
+						Type: snapshotv1alpha1.PodSnapshotConditionReady, Status: metav1.ConditionTrue,
+					}},
+				}},
+			},
+			conditionTypes: []string{
+				snapshotv1alpha1.SnapshotJobConditionRunning,
+				snapshotv1alpha1.SnapshotJobConditionCaptured,
+				snapshotv1alpha1.SnapshotJobConditionCompleted,
+			},
+			wantStartedAt: true,
+		},
+		{
+			name: "terminal failure",
+			observed: snapshotJobObservation{failure: &snapshotJobFailure{
+				reason: snapshotv1alpha1.ReasonInvalidSpec,
+				cause:  errors.New("invalid target container"),
+			}},
+			conditionTypes: []string{
+				snapshotv1alpha1.SnapshotJobConditionRunning,
+				snapshotv1alpha1.SnapshotJobConditionCaptured,
+				snapshotv1alpha1.SnapshotJobConditionCompleted,
+				snapshotv1alpha1.SnapshotJobConditionFailed,
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			status := deriveSnapshotJobStatus(minimalSnapshotJob(), test.observed, reconciliationTime)
+
+			if test.wantStartedAt {
+				require.NotNil(t, status.StartedAt)
+				assert.Equal(t, reconciliationTime, *status.StartedAt)
+			} else {
+				assert.Nil(t, status.StartedAt)
+			}
+			require.NotNil(t, status.CompletedAt)
+			assert.Equal(t, reconciliationTime, *status.CompletedAt)
+			for _, conditionType := range test.conditionTypes {
+				condition := meta.FindStatusCondition(status.Conditions, conditionType)
+				require.NotNil(t, condition)
+				assert.Equal(t, reconciliationTime, condition.LastTransitionTime)
+			}
+		})
+	}
 }
 
 func TestSnapshotJobReconcileFailsForeignJob(t *testing.T) {

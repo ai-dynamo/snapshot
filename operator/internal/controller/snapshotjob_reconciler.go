@@ -86,7 +86,8 @@ func (r *SnapshotJobReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		r.Recorder.Event(sj, corev1.EventTypeWarning, observed.failure.reason, observed.failure.cause.Error())
 	}
 
-	desiredStatus := deriveSnapshotJobStatus(sj, observed)
+	reconciliationTime := metav1.Now()
+	desiredStatus := deriveSnapshotJobStatus(sj, observed, reconciliationTime)
 	if err := r.patchSnapshotJobStatus(ctx, sj, desiredStatus); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -213,44 +214,43 @@ func terminalObservation(reason string, cause error) snapshotJobObservation {
 // deriveSnapshotJobStatus is a pure derivation over current status and observed
 // resources. Existing timestamps are monotonic; conditions and references are
 // reconstructed whenever their source resource is observed.
-func deriveSnapshotJobStatus(sj *snapshotv1alpha1.SnapshotJob, observed snapshotJobObservation) snapshotv1alpha1.SnapshotJobStatus {
+func deriveSnapshotJobStatus(sj *snapshotv1alpha1.SnapshotJob, observed snapshotJobObservation, reconciliationTime metav1.Time) snapshotv1alpha1.SnapshotJobStatus {
 	next := sj.DeepCopy()
 	if next.Status.SourceJobUID == "" && observed.job != nil {
 		next.Status.SourceJobUID = observed.job.UID
 	}
-	deriveRunningStatus(next, observed)
-	failure := deriveCapturedStatus(next, observed)
+	deriveRunningStatus(next, observed, reconciliationTime)
+	failure := deriveCapturedStatus(next, observed, reconciliationTime)
 	if failure != nil {
-		deriveFailureStatus(next, failure)
+		deriveFailureStatus(next, failure, reconciliationTime)
 		return next.Status
 	}
-	deriveCompletionStatus(next, observed)
+	deriveCompletionStatus(next, observed, reconciliationTime)
 	return next.Status
 }
 
-func deriveRunningStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJobObservation) {
+func deriveRunningStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJobObservation, reconciliationTime metav1.Time) {
 	if observed.job != nil {
 		ready := observed.job.Status.Ready != nil && *observed.job.Status.Ready > 0
 		captured := observed.podSnapshot != nil && snapshotv1alpha1.IsPodSnapshotSucceeded(observed.podSnapshot)
 		if ready || captured {
 			if next.Status.StartedAt == nil {
-				now := metav1.Now()
-				next.Status.StartedAt = &now
+				next.Status.StartedAt = &reconciliationTime
 			}
-			setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionTrue,
+			setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionTrue, reconciliationTime,
 				snapshotv1alpha1.ReasonPodReady, "source pod is ready")
 		} else {
 			message := "waiting for the source pod to become ready"
 			if observed.sourcePodMissing {
 				message = "waiting for the source Job to create a pod"
 			}
-			setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse,
+			setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse, reconciliationTime,
 				snapshotv1alpha1.ReasonPodPending, message)
 		}
 	}
 }
 
-func deriveCapturedStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJobObservation) *snapshotJobFailure {
+func deriveCapturedStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJobObservation, reconciliationTime metav1.Time) *snapshotJobFailure {
 	failure := observed.failure
 	if observed.podSnapshot != nil {
 		next.Status.PodSnapshotName = observed.podSnapshot.Name
@@ -264,52 +264,50 @@ func deriveCapturedStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJ
 				failure = &snapshotJobFailure{reason: reason, cause: errors.New(message)}
 			}
 		case snapshotv1alpha1.IsPodSnapshotSucceeded(observed.podSnapshot):
-			setCondition(next, snapshotv1alpha1.SnapshotJobConditionCaptured, metav1.ConditionTrue,
+			setCondition(next, snapshotv1alpha1.SnapshotJobConditionCaptured, metav1.ConditionTrue, reconciliationTime,
 				snapshotv1alpha1.ReasonCaptureCompleted, "CRIU dump of the target container is complete")
 		default:
-			setCondition(next, snapshotv1alpha1.SnapshotJobConditionCaptured, metav1.ConditionFalse,
+			setCondition(next, snapshotv1alpha1.SnapshotJobConditionCaptured, metav1.ConditionFalse, reconciliationTime,
 				snapshotv1alpha1.ReasonCaptureInProgress, "waiting for the node agent to capture the checkpoint")
 		}
 	}
 	return failure
 }
 
-func deriveFailureStatus(next *snapshotv1alpha1.SnapshotJob, failure *snapshotJobFailure) {
+func deriveFailureStatus(next *snapshotv1alpha1.SnapshotJob, failure *snapshotJobFailure, reconciliationTime metav1.Time) {
 	if meta.FindStatusCondition(next.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning) == nil {
-		setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse,
+		setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse, reconciliationTime,
 			snapshotv1alpha1.ReasonPodPending, "source pod was never observed ready before this SnapshotJob failed")
 	}
 	if !meta.IsStatusConditionTrue(next.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured) {
-		setCondition(next, snapshotv1alpha1.SnapshotJobConditionCaptured, metav1.ConditionFalse,
+		setCondition(next, snapshotv1alpha1.SnapshotJobConditionCaptured, metav1.ConditionFalse, reconciliationTime,
 			failure.reason, "capture did not complete: "+failure.cause.Error())
 	}
 	if !meta.IsStatusConditionTrue(next.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCompleted) {
-		setCondition(next, snapshotv1alpha1.SnapshotJobConditionCompleted, metav1.ConditionFalse,
+		setCondition(next, snapshotv1alpha1.SnapshotJobConditionCompleted, metav1.ConditionFalse, reconciliationTime,
 			failure.reason, "the SnapshotJob failed before completing: "+failure.cause.Error())
 	}
-	setCondition(next, snapshotv1alpha1.SnapshotJobConditionFailed, metav1.ConditionTrue,
+	setCondition(next, snapshotv1alpha1.SnapshotJobConditionFailed, metav1.ConditionTrue, reconciliationTime,
 		failure.reason, failure.cause.Error())
 	if next.Status.CompletedAt == nil {
-		now := metav1.Now()
-		next.Status.CompletedAt = &now
+		next.Status.CompletedAt = &reconciliationTime
 	}
 }
 
-func deriveCompletionStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJobObservation) {
+func deriveCompletionStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJobObservation, reconciliationTime metav1.Time) {
 	if observed.job == nil || observed.podSnapshot == nil || !snapshotv1alpha1.IsPodSnapshotSucceeded(observed.podSnapshot) {
 		return
 	}
 	if classifySourceJobTerminal(observed.job).state != sourceJobComplete {
-		setCondition(next, snapshotv1alpha1.SnapshotJobConditionCompleted, metav1.ConditionFalse,
+		setCondition(next, snapshotv1alpha1.SnapshotJobConditionCompleted, metav1.ConditionFalse, reconciliationTime,
 			snapshotv1alpha1.ReasonWaitingForPodCompletion, "checkpoint captured; waiting for the source pod to complete")
 		return
 	}
 
-	setCondition(next, snapshotv1alpha1.SnapshotJobConditionCompleted, metav1.ConditionTrue,
+	setCondition(next, snapshotv1alpha1.SnapshotJobConditionCompleted, metav1.ConditionTrue, reconciliationTime,
 		snapshotv1alpha1.ReasonJobCompleted, "checkpoint captured and source Job completed")
 	if next.Status.CompletedAt == nil {
-		now := metav1.Now()
-		next.Status.CompletedAt = &now
+		next.Status.CompletedAt = &reconciliationTime
 	}
 }
 
@@ -343,11 +341,12 @@ func (r *SnapshotJobReconciler) patchSnapshotJobStatus(ctx context.Context, sj *
 }
 
 // setCondition sets a status condition on the SnapshotJob and reports whether it changed.
-func setCondition(sj *snapshotv1alpha1.SnapshotJob, condType string, status metav1.ConditionStatus, reason, message string) bool {
+func setCondition(sj *snapshotv1alpha1.SnapshotJob, condType string, status metav1.ConditionStatus, reconciliationTime metav1.Time, reason, message string) bool {
 	return meta.SetStatusCondition(&sj.Status.Conditions, metav1.Condition{
 		Type:               condType,
 		Status:             status,
 		ObservedGeneration: sj.Generation,
+		LastTransitionTime: reconciliationTime,
 		Reason:             reason,
 		Message:            message,
 	})
