@@ -107,6 +107,7 @@ func TestNewDefaultControllerSetsDefaultOperations(t *testing.T) {
 		&fakeRuntime{},
 		noopInjector{},
 		testr.New(t),
+		nil,
 	)
 	t.Cleanup(w.restoreQueue.ShutDown)
 	if w.checkpointFn == nil || w.restoreFn == nil || w.writeControlSentinelFn == nil || w.controlSentinelExistsFn == nil || w.sendSignalFn == nil || w.restoreQueue == nil {
@@ -114,6 +115,15 @@ func TestNewDefaultControllerSetsDefaultOperations(t *testing.T) {
 	}
 	if w.compareFn == nil {
 		t.Fatal("default controller must compare restore compatibility")
+	}
+	// Without an injected read there is still one to make: the copy the agent
+	// started with, rather than a nil call on the restore path.
+	if w.skipCompatCheckFn == nil {
+		t.Fatal("default controller must resolve the node compatibility switch")
+	}
+	w.config.Restore.SkipCompatCheck = true
+	if !w.skipCompatCheckFn() {
+		t.Fatal("default controller ignored the configured node compatibility switch")
 	}
 }
 
@@ -159,6 +169,7 @@ func makeTestController(t *testing.T, pod *corev1.Pod, apiObjects ...runtime.Obj
 		inFlight:                make(map[string]struct{}),
 		stopCh:                  make(chan struct{}),
 	}
+	w.skipCompatCheckFn = func() bool { return w.config.Restore.SkipCompatCheck }
 	t.Cleanup(w.restoreQueue.ShutDown)
 	return w
 }
