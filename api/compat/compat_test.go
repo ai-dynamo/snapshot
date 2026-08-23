@@ -43,12 +43,14 @@ func differentFacts() Facts {
 	}
 }
 
-// deliberatelyNotSilent is the one rule that does refuse on a fact the target
-// side does not carry, for the reason given where it is defined: the mount rule
-// is handed a target list resolved from the source list, so an absence there
-// means the path was looked for and not found.
+// deliberatelyNotSilent holds the rules that do refuse on a fact the target side
+// does not carry, for the reasons given where each is defined: the mount rule is
+// handed a target list resolved from the source list, and the GPU count is only
+// ever compared after discovery has run. An absence in either is a thing looked
+// for and not found rather than a thing nobody read.
 var deliberatelyNotSilent = map[Check]bool{
-	CheckMount: true,
+	CheckMount:    true,
+	CheckGPUCount: true,
 }
 
 // Whatever rules are registered, a fact nobody recorded cannot refuse anything:
