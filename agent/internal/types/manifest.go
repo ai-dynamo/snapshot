@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/ai-dynamo/snapshot/api/compat"
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"gopkg.in/yaml.v3"
@@ -205,4 +207,27 @@ func validateArtifactManifest(artifact ArtifactManifest) error {
 		return fmt.Errorf("checkpoint manifest is missing artifact.containerName")
 	}
 	return nil
+}
+
+// CompatFacts maps the manifest onto the fact model the compatibility gates
+// compare. Both gates read it from here, so the two cannot disagree about what
+// the checkpoint recorded.
+func (m *CheckpointManifest) CompatFacts() compat.Facts {
+	return compat.Facts{
+		ExternalizedMounts: m.externalizedMounts(),
+	}
+}
+
+// externalizedMounts returns the destinations CRIU externalized at capture, in a
+// stable order so a refusal always names them the same way.
+func (m *CheckpointManifest) externalizedMounts() []string {
+	if len(m.CRIUDump.ExtMnt) == 0 {
+		return nil
+	}
+	destinations := make([]string, 0, len(m.CRIUDump.ExtMnt))
+	for destination := range m.CRIUDump.ExtMnt {
+		destinations = append(destinations, destination)
+	}
+	sort.Strings(destinations)
+	return destinations
 }

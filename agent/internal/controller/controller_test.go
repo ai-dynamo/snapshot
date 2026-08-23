@@ -38,6 +38,7 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
+	"github.com/ai-dynamo/snapshot/api/compat"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -111,6 +112,9 @@ func TestNewDefaultControllerSetsDefaultOperations(t *testing.T) {
 	if w.checkpointFn == nil || w.restoreFn == nil || w.writeControlSentinelFn == nil || w.controlSentinelExistsFn == nil || w.sendSignalFn == nil || w.restoreQueue == nil {
 		t.Fatal("default controller operations must be initialized")
 	}
+	if w.compareFn == nil {
+		t.Fatal("default controller must compare restore compatibility")
+	}
 }
 
 func testScheme(t *testing.T) *runtime.Scheme {
@@ -149,6 +153,7 @@ func makeTestController(t *testing.T, pod *corev1.Pod, apiObjects ...runtime.Obj
 		controlSentinelExistsFn: func(int, string) (bool, error) { return false, nil },
 		sendSignalFn:            func(logr.Logger, int, syscall.Signal, string) error { return nil },
 		restoreQueue:            workqueue.NewTypedDelayingQueue[client.ObjectKey](),
+		compareFn:               compat.Compare,
 		log:                     testr.New(t),
 		holderID:                "test-holder",
 		inFlight:                make(map[string]struct{}),
@@ -196,6 +201,23 @@ func eventForReason(clientset *fake.Clientset, reason string) *corev1.Event {
 		}
 	}
 	return nil
+}
+
+// eventsForReason returns every event created under one reason, so a test can
+// assert on how many there are and not only that there was one.
+func eventsForReason(clientset *fake.Clientset, reason string) []*corev1.Event {
+	var events []*corev1.Event
+	for _, action := range clientset.Actions() {
+		create, ok := action.(clientgotesting.CreateAction)
+		if !ok || create.GetResource().Resource != "events" {
+			continue
+		}
+		event, ok := create.GetObject().(*corev1.Event)
+		if ok && event.Reason == reason {
+			events = append(events, event)
+		}
+	}
+	return events
 }
 
 func pendingRestoreReason(t *testing.T, err error) string {
