@@ -309,6 +309,57 @@ def wait_for_condition(
     )
 
 
+def wait_for_status_field(
+    namespace: str | None,
+    name: str,
+    *,
+    plural: str,
+    field: str,
+    timeout: int = 120,
+) -> dict[str, Any]:
+    """Waits for a non-empty scalar field in the object's status and returns the object."""
+    api = client.CustomObjectsApi()
+
+    def check() -> dict[str, Any] | None:
+        obj = get_custom_object(api, namespace, name, plural)
+        if obj.get("status", {}).get(field):
+            return obj
+        return None
+
+    def detail() -> str:
+        try:
+            obj = get_custom_object(api, namespace, name, plural)
+        except ApiException as exc:
+            return f"api_error={k8s.api_error_detail(exc)}"
+        return f"status={obj.get('status', {})}"
+
+    return wait_for(f"{plural}/{name} status.{field} set", check, timeout, detail=detail)
+
+
+def assert_snapshotjob_failure_vector(
+    sj: dict[str, Any],
+    *,
+    allowed_reasons: set[str],
+) -> str:
+    """Asserts the invariant parts of a terminal failure vector and returns the reason.
+
+    Every failure path backfills all four conditions, `Completed` never flips
+    `True`, and `completedAt` is stamped. Where the exact reason is a genuine
+    race (e.g. the Job controller vs. the capture pipeline observing the same
+    dead workload), callers pass the allowed reason set instead of pinning one.
+    """
+    failed = condition(sj, "Failed")
+    assert failed and failed.get("status") == "True", f"Failed condition: {failed}"
+    reason = failed.get("reason")
+    assert reason in allowed_reasons, f"reason {reason!r} not in {sorted(allowed_reasons)}"
+    for condition_type in ("Running", "Captured", "Completed"):
+        cond = condition(sj, condition_type)
+        assert cond is not None, f"{condition_type} must be present on a terminal object"
+        assert cond.get("status") == "False", f"{condition_type} must be False: {cond}"
+    assert sj["status"]["completedAt"]
+    return reason
+
+
 def get_custom_object(
     api: client.CustomObjectsApi,
     namespace: str | None,
@@ -683,9 +734,9 @@ def debug_dump_snapshotjob(config: k8s.E2EConfig, run: TestRun) -> None:
 def snapshot_control_listing(namespace: str, pod: str) -> str:
     """Lists the control volume, best-effort.
 
-    Whether the agent's snapshot-complete sentinel actually landed where the
-    workload polls for it is the hinge for the whole completion gate: no
-    sentinel means the workload never exits, so the Job never completes.
+    Shows whether ready-for-snapshot was written (the quiesce hinge for the
+    capture). The snapshot-complete sentinel no longer exists: the capture
+    terminates the source process instead of releasing it.
     """
     try:
         return k8s.exec_command(namespace, pod, f"ls -la {CONTROL_DIR} 2>&1").strip()

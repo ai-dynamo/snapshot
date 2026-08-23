@@ -104,6 +104,27 @@ def read_job(namespace: str, name: str) -> client.V1Job | None:
         raise
 
 
+def create_job(body: dict[str, Any]) -> client.V1Job:
+    return client.BatchV1Api().create_namespaced_job(
+        namespace=body["metadata"]["namespace"],
+        body=body,
+    )
+
+
+def delete_job(namespace: str, name: str) -> bool:
+    try:
+        client.BatchV1Api().delete_namespaced_job(
+            name=name,
+            namespace=namespace,
+            propagation_policy="Background",
+        )
+        return True
+    except ApiException as exc:
+        if exc.status == 404:
+            return False
+        raise
+
+
 def delete_pod(namespace: str, name: str) -> bool:
     try:
         client.CoreV1Api().delete_namespaced_pod(name=name, namespace=namespace)

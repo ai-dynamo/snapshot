@@ -17,6 +17,9 @@ CONTAINER = "main"
 CONTROL_DIR = "/snapshot-control"
 CHECKPOINT_DIR = "/checkpoints"
 SOURCE_READY = f"{CONTROL_DIR}/ready-for-snapshot"
+# Legacy release sentinel: the agent no longer writes it (a capture always
+# terminates the source). Kept only so tests can assert workloads do NOT
+# depend on it.
 SNAPSHOT_COMPLETE = f"{CONTROL_DIR}/snapshot-complete"
 RESTORE_DONE = f"{CONTROL_DIR}/restore-complete"
 RESTORE_INITIAL_TOKEN = f"{CONTROL_DIR}/initial-restore-token"
@@ -334,25 +337,35 @@ mkdir -p {STATE_DIR}
 
 
 def snapshotjob_source_command(image: str, gpu: bool) -> str:
+    # No supervisor, no snapshot-complete wait: the capture terminates the
+    # source process (leaveRunning is removed), so there is no post-capture
+    # phase to orchestrate. The workload establishes state and loops until the
+    # dump kills it; the pod then fails, and the SnapshotJob completes from
+    # the capture result alone.
     state_loop = CUDA_SOURCE if gpu else CPU_SOURCE
     return f"""set -euo pipefail
 echo "[snapshotjob-source] image={image}"
 mkdir -p {STATE_DIR}
-(
 {state_loop}
-) &
-workload_pid=$!
-while [ ! -f {SNAPSHOT_COMPLETE} ]; do
-  if ! kill -0 "$workload_pid" 2>/dev/null; then
-    wait "$workload_pid"
-    exit $?
-  fi
-  sleep 1
-done
-echo "[snapshotjob-source] snapshot complete; stopping source workload"
-kill -KILL "$workload_pid" 2>/dev/null || true
-wait "$workload_pid" 2>/dev/null || true
 """
+
+
+def snapshotjob_exit_pod_template(
+    *,
+    config: k8s.E2EConfig,
+    run: TestRun,
+    exit_code: int,
+) -> dict[str, Any]:
+    # Exits immediately without ever signalling ready-for-snapshot: the
+    # workload-died-before-capture paths. exit_code=0 drives the
+    # SourceCompletedWithoutCapture class, non-zero the JobFailed class.
+    command = (
+        "set -euo pipefail\n"
+        f'echo "[snapshotjob-exit] exiting with {exit_code} before capture"\n'
+        f"exit {exit_code}\n"
+    )
+    spec = base_pod_spec(config, run, command, gpu=False, control_volume=False)
+    return {"metadata": {"labels": {**run.labels}}, "spec": spec}
 
 
 def restore_command(image: str, gpu: bool) -> str:
@@ -379,15 +392,22 @@ sleep infinity
 # CPU_SOURCE stores one token in two places: a shell variable, which is process
 # memory, and {FILE_TOKEN}, which is filesystem state. The loop only provides
 # post-restore liveness: every observation must keep reporting the source token.
+#
+# ready-for-snapshot is written only after observation seq=0: the dump can
+# start within a second of readiness and terminates the process, so "at least
+# one pre-capture observation exists" must be a workload ordering guarantee —
+# a test cannot poll for it against a pod that dies with the dump.
 CPU_SOURCE = f"""
 cpu_token="${{{SOURCE_TOKEN_ENV}}}"
 unset {SOURCE_TOKEN_ENV}
 printf '%s\\n' "$cpu_token" > {FILE_TOKEN}
-echo ready > {SOURCE_READY}
 seq=0
 while true; do
   file_token="$(cat {FILE_TOKEN} 2>/dev/null || true)"
   printf 'observation seq=%s cpu=%s file=%s gpu=disabled\\n' "$seq" "$cpu_token" "$file_token" >> {OBSERVATIONS}
+  if [ "$seq" -eq 0 ]; then
+    echo ready > {SOURCE_READY}
+  fi
   seq=$((seq + 1))
   sleep 5
 done
@@ -468,8 +488,9 @@ int main(void) {{
     fprintf(stderr, "initial CUDA token copy failed\\n");
     return 1;
   }}
-  FILE *ready = fopen("{SOURCE_READY}", "w");
-  if (ready) {{ fprintf(ready, "ready\\n"); fclose(ready); }}
+  /* ready-for-snapshot is written inside the loop after observation seq=0:
+     the dump starts on readiness and kills this process, so the first
+     observation must be ordered before the signal that admits the dump. */
   int seq = 0;
   while (1) {{
     char gpu_token[TOKEN_SIZE];
@@ -490,6 +511,10 @@ int main(void) {{
     if (log) {{
       fprintf(log, "observation seq=%d cpu=%s file=%s gpu=%s\\n", seq, cpu_token, file_token, gpu_token);
       fclose(log);
+    }}
+    if (seq == 0) {{
+      FILE *ready = fopen("{SOURCE_READY}", "w");
+      if (ready) {{ fprintf(ready, "ready\\n"); fclose(ready); }}
     }}
     seq++;
     sleep(5);

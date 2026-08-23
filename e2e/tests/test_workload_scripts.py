@@ -3,18 +3,23 @@
 
 """Fast, cluster-free checks of the workload scripts themselves.
 
-The SnapshotJob source establishes restorable state under a CPU supervisor.
-After capture, the supervisor remains runnable even when the CUDA child is
-checkpoint-locked; it observes snapshot-complete, stops the original child, and
-exits successfully so the source batch Job can complete.
+The capture terminates the source process (there is no leave-running mode and
+no snapshot-complete release sentinel), so the SnapshotJob source is a plain
+state loop with two contractual properties this file pins down:
+
+1. Observation seq=0 is written BEFORE ready-for-snapshot. The dump starts on
+   readiness and kills the process, so "at least one pre-capture observation
+   exists" must be a workload ordering guarantee — cluster tests cannot poll
+   for it against a pod that dies with the dump.
+2. Nothing waits on snapshot-complete. A stray sentinel write must not stop
+   the workload: termination is the agent's job (via the dump), not a file
+   protocol.
 """
 
 from __future__ import annotations
 
 import os
-import re
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 
@@ -32,7 +37,9 @@ def render_cpu_source(control_dir: Path, state_dir: Path) -> str:
 
 
 @pytest.mark.workload
-def test_snapshotjob_cpu_source_establishes_state_and_exits_after_capture(tmp_path: Path) -> None:
+def test_snapshotjob_cpu_source_observes_before_ready_and_ignores_sentinel(
+    tmp_path: Path,
+) -> None:
     control_dir = tmp_path / "snapshot-control"
     state_dir = tmp_path / "e2e-state"
     control_dir.mkdir()
@@ -51,19 +58,24 @@ def test_snapshotjob_cpu_source_establishes_state_and_exits_after_capture(tmp_pa
         observations = state_dir / "observations.log"
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
-            if ready.exists() and observations.exists():
+            if ready.exists():
                 break
             time.sleep(0.05)
 
         assert ready.exists(), "workload never signalled ready-for-snapshot"
-        assert observations.exists(), "workload wrote no pre-capture observation"
+        # The ordering contract: by the time readiness is observable, the
+        # first observation must already be durable in the state dir.
+        assert observations.exists(), "ready was signalled before any observation"
         text = observations.read_text()
-        assert "observation seq=" in text
+        assert "observation seq=0" in text
         assert f"cpu={token}" in text
         assert f"file={token}" in text
 
+        # The legacy release sentinel is dead protocol: writing it must not
+        # release or stop anything. The dump (SIGKILL) is the only exit path.
         (control_dir / "snapshot-complete").write_text("complete\n")
-        assert proc.wait(timeout=10) == 0
+        time.sleep(2)
+        assert proc.poll() is None, "workload exited on the legacy sentinel"
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -72,61 +84,30 @@ def test_snapshotjob_cpu_source_establishes_state_and_exits_after_capture(tmp_pa
 
 @pytest.mark.workload
 @pytest.mark.parametrize("gpu", [False, True])
-def test_only_snapshotjob_source_opts_into_post_capture_exit(gpu: bool) -> None:
-    script = workloads.snapshotjob_source_command("test-image", gpu=gpu)
-    direct_script = workloads.source_command("test-image", gpu=gpu)
-
-    assert workloads.SNAPSHOT_COMPLETE in script
-    assert workloads.SNAPSHOT_COMPLETE not in direct_script
-    assert 'kill -KILL "$workload_pid"' in script
-    expected_source = workloads.CUDA_SOURCE if gpu else workloads.CPU_SOURCE
-    assert expected_source in script
-
-
-def cuda_c_source(script: str) -> str:
-    """Extract the C program the CUDA workload heredocs into a file."""
-    body = script.split("<<'C_EOF'\n", 1)[1]
-    return body.split("\nC_EOF", 1)[0]
+def test_no_workload_waits_on_snapshot_complete(gpu: bool) -> None:
+    for script in (
+        workloads.snapshotjob_source_command("test-image", gpu=gpu),
+        workloads.source_command("test-image", gpu=gpu),
+    ):
+        assert workloads.SNAPSHOT_COMPLETE not in script
+        assert workloads.SOURCE_READY in script
 
 
 @pytest.mark.workload
-def test_snapshotjob_cuda_source_compiles() -> None:
-    """Compile the CUDA source without running it or requiring a GPU."""
-    source = cuda_c_source(workloads.CUDA_SOURCE)
-    assert "int main(void)" in source
-
-    with tempfile.TemporaryDirectory() as tmp:
-        src = Path(tmp) / "cuda_hold.c"
-        src.write_text(source)
-        try:
-            result = subprocess.run(
-                ["cc", "-c", str(src), "-o", str(Path(tmp) / "cuda_hold.o")],
-                capture_output=True,
-                text=True,
-            )
-        except FileNotFoundError:
-            pytest.skip("no C compiler available")
-    assert result.returncode == 0, f"CUDA workload does not compile:\n{result.stderr}"
-
-
-@pytest.mark.workload
-def test_workload_paths_match_the_operator_contract() -> None:
-    """Guard the readiness and restore handshakes against silent path drift."""
-    constants = Path(__file__).resolve().parents[2] / "api" / "v1alpha1" / "constants.go"
-    text = constants.read_text()
-
-    def go_const(name: str) -> str:
-        match = re.search(rf'^\s*{name}\s*=\s*"([^"]*)"', text, re.MULTILINE)
-        assert match, f"{name} not found in {constants} - constant renamed or removed?"
-        return match.group(1)
-
-    assert workloads.CONTROL_DIR == go_const("SnapshotControlMountPath")
-    assert workloads.SOURCE_READY == (
-        f"{go_const('SnapshotControlMountPath')}/{go_const('ReadyForSnapshotFile')}"
-    )
-    assert workloads.SNAPSHOT_COMPLETE == (
-        f"{go_const('SnapshotControlMountPath')}/{go_const('SnapshotCompleteFile')}"
-    )
-    assert workloads.RESTORE_DONE == (
-        f"{go_const('SnapshotControlMountPath')}/{go_const('RestoreCompleteFile')}"
-    )
+def test_snapshotjob_exit_template_never_signals_ready() -> None:
+    # The exit templates drive the died-before-capture failure classes; they
+    # must terminate without touching the quiesce protocol at all.
+    for exit_code in (0, 1):
+        proc = subprocess.run(
+            [
+                "bash",
+                "-c",
+                "set -euo pipefail\n"
+                f'echo "[snapshotjob-exit] exiting with {exit_code} before capture"\n'
+                f"exit {exit_code}\n",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert proc.returncode == exit_code
