@@ -26,9 +26,8 @@ import (
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
-// +kubebuilder:rbac:groups=nvidia.com,resources=snapshotjobs,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=nvidia.com,resources=snapshotjobs/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=nvidia.com,resources=snapshotjobs/finalizers,verbs=update
+// +kubebuilder:rbac:groups=nvidia.com,resources=snapshotjobs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=nvidia.com,resources=snapshotjobs/status,verbs=patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=create;get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;get;list;watch;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=list
@@ -346,10 +345,11 @@ func (r *SnapshotJobReconciler) patchSnapshotJobStatus(ctx context.Context, sj *
 // setCondition sets a status condition on the SnapshotJob and reports whether it changed.
 func setCondition(sj *snapshotv1alpha1.SnapshotJob, condType string, status metav1.ConditionStatus, reason, message string) bool {
 	return meta.SetStatusCondition(&sj.Status.Conditions, metav1.Condition{
-		Type:    condType,
-		Status:  status,
-		Reason:  reason,
-		Message: message,
+		Type:               condType,
+		Status:             status,
+		ObservedGeneration: sj.Generation,
+		Reason:             reason,
+		Message:            message,
 	})
 }
 

@@ -4,11 +4,14 @@
 package crds
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 )
 
 const chartCRDDir = "../../../charts/snapshot/crds"
@@ -99,4 +102,57 @@ func TestAllReturnsACopy(t *testing.T) {
 	if All()[0] == "mutated" {
 		t.Error("All() exposes its backing array; callers can corrupt the embedded set")
 	}
+}
+
+func TestSnapshotJobConditionsUseMapListSchema(t *testing.T) {
+	manifestJSON, err := utilyaml.ToJSON([]byte(SnapshotJobCRD()))
+	if err != nil {
+		t.Fatalf("convert SnapshotJob CRD to JSON: %v", err)
+	}
+	var crd map[string]any
+	if err := json.Unmarshal(manifestJSON, &crd); err != nil {
+		t.Fatalf("decode SnapshotJob CRD: %v", err)
+	}
+
+	versions := nestedSlice(t, crd, "spec", "versions")
+	if len(versions) == 0 {
+		t.Fatal("SnapshotJob CRD has no versions")
+	}
+	version, ok := versions[0].(map[string]any)
+	if !ok {
+		t.Fatalf("SnapshotJob CRD version has type %T, want object", versions[0])
+	}
+	conditions := nestedMap(t, version, "schema", "openAPIV3Schema", "properties", "status", "properties", "conditions")
+
+	if got := conditions["x-kubernetes-list-type"]; got != "map" {
+		t.Errorf("conditions x-kubernetes-list-type = %v, want map", got)
+	}
+	keys, ok := conditions["x-kubernetes-list-map-keys"].([]any)
+	if !ok || len(keys) != 1 || keys[0] != "type" {
+		t.Errorf("conditions x-kubernetes-list-map-keys = %v, want [type]", conditions["x-kubernetes-list-map-keys"])
+	}
+}
+
+func nestedMap(t *testing.T, object map[string]any, fields ...string) map[string]any {
+	t.Helper()
+	current := object
+	for _, field := range fields {
+		next, ok := current[field].(map[string]any)
+		if !ok {
+			t.Fatalf("field %q in path %q has type %T, want object", field, strings.Join(fields, "."), current[field])
+		}
+		current = next
+	}
+	return current
+}
+
+func nestedSlice(t *testing.T, object map[string]any, fields ...string) []any {
+	t.Helper()
+	parent := nestedMap(t, object, fields[:len(fields)-1]...)
+	field := fields[len(fields)-1]
+	value, ok := parent[field].([]any)
+	if !ok {
+		t.Fatalf("field %q in path %q has type %T, want array", field, strings.Join(fields, "."), parent[field])
+	}
+	return value
 }

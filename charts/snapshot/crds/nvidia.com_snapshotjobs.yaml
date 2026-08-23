@@ -8653,6 +8653,9 @@ spec:
                   - type
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
               podSnapshotName:
                 description: |-
                   PodSnapshotName is the name of the PodSnapshot produced by this job. Set

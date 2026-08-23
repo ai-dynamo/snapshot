@@ -511,6 +511,28 @@ func TestSnapshotJobReconcileSetsStartedAtWhenRunningAlreadyPersisted(t *testing
 		"StartedAt must be persisted even though Running=True/PodReady was already set and setCondition reports no change")
 }
 
+func TestSnapshotJobConditionTracksObservedGeneration(t *testing.T) {
+	sj := minimalSnapshotJob()
+	sj.Generation = 7
+
+	changed := setCondition(sj, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse,
+		snapshotv1alpha1.ReasonPodPending, "waiting for the source pod")
+	require.True(t, changed)
+	condition := meta.FindStatusCondition(sj.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning)
+	require.NotNil(t, condition)
+	assert.Equal(t, int64(7), condition.ObservedGeneration)
+
+	// A generation change must refresh the condition even when its state and
+	// message are otherwise unchanged.
+	sj.Generation = 8
+	changed = setCondition(sj, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse,
+		snapshotv1alpha1.ReasonPodPending, "waiting for the source pod")
+	require.True(t, changed)
+	condition = meta.FindStatusCondition(sj.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning)
+	require.NotNil(t, condition)
+	assert.Equal(t, int64(8), condition.ObservedGeneration)
+}
+
 func TestSnapshotJobReconcileFailsForeignJob(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()

@@ -173,6 +173,8 @@ type SnapshotJobStatus struct {
 	// Conditions reflect the current state of the SnapshotJob. Types: Running,
 	// Captured, Completed, Failed.
 	// +optional
+	// +listType=map
+	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
