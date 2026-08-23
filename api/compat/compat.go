@@ -81,6 +81,23 @@ type Mismatch struct {
 	Target string
 }
 
+// IncompatibleError reports a restore the target cannot run. It is terminal and
+// distinct from every other restore error: no CRIU work was attempted, and
+// retrying on this node cannot change the answer. Both gates raise it, so the
+// caller reports one refusal whichever gate turned the restore down.
+type IncompatibleError struct {
+	Gate       Gate
+	Mismatches []Mismatch
+}
+
+func NewIncompatibleError(gate Gate, mismatches []Mismatch) *IncompatibleError {
+	return &IncompatibleError{Gate: gate, Mismatches: append([]Mismatch(nil), mismatches...)}
+}
+
+func (e *IncompatibleError) Error() string {
+	return "restore refused as incompatible: " + Reasons(e.Mismatches)
+}
+
 // check is one row of the policy table. compare returns nil when the rule passes
 // or when a fact it needs is unknown, and may report more than one mismatch when
 // a rule covers several values.
