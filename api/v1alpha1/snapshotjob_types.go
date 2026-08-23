@@ -17,8 +17,8 @@ const (
 	// SnapshotJobConditionCaptured is True when the CRIU dump of the target
 	// container is complete (PodSnapshot Ready=True).
 	SnapshotJobConditionCaptured = "Captured"
-	// SnapshotJobConditionCompleted is True when the PodSnapshot is ready and
-	// cleanup of the source batch/v1 Job has been requested.
+	// SnapshotJobConditionCompleted is True when the checkpoint is captured and
+	// the source batch/v1 Job has completed its post-capture workload logic.
 	SnapshotJobConditionCompleted = "Completed"
 	// SnapshotJobConditionFailed is True on terminal failure. The batch/v1 Job is
 	// preserved for status and debugging; Kubernetes controls failed pod retention.
@@ -34,10 +34,10 @@ const (
 	// Captured
 	ReasonCaptureInProgress = "CaptureInProgress"
 	ReasonCaptureCompleted  = "CaptureCompleted"
-	// Deprecated: capture success no longer waits for source pod completion.
+
+	// Completed
 	ReasonWaitingForPodCompletion = "WaitingForPodCompletion"
-	// Deprecated: SnapshotJob now emits ReasonCaptureCompleted on completion.
-	ReasonJobCompleted = "JobCompleted"
+	ReasonJobCompleted            = "JobCompleted"
 
 	// Failed=True
 	ReasonCaptureFailed           = "CaptureFailed"

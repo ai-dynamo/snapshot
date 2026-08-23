@@ -46,7 +46,7 @@ func setJobFailureCondition(job *batchv1.Job, conditionType batchv1.JobCondition
 	})
 }
 
-// ---- capture-driven completion ----
+// ---- two-signal completion ----
 
 func TestSnapshotJobReconcileCompletionGate(t *testing.T) {
 	t.Run("neither signal: Completed untouched", func(t *testing.T) {
@@ -88,13 +88,15 @@ func TestSnapshotJobReconcileCompletionGate(t *testing.T) {
 		updated := &snapshotv1alpha1.SnapshotJob{}
 		require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
 		assert.False(t, snapshotv1alpha1.IsSnapshotJobCompleted(updated))
+		assert.Nil(t, meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCompleted),
+			"WaitingForPodCompletion applies only after capture has succeeded")
 
 		jobs := &batchv1.JobList{}
 		require.NoError(t, r.List(context.Background(), jobs))
 		assert.NotNil(t, getBatchJobByName(jobs, sj.Name), "must not delete the Job before Captured is also True")
 	})
 
-	t.Run("capture success: Completed=True, completedAt set, Job deleted", func(t *testing.T) {
+	t.Run("capture success only: waits for source Job completion", func(t *testing.T) {
 		s := snapshotJobReconcilerScheme()
 		sj := minimalSnapshotJob()
 		sj.UID = types.UID("sj-uid")
@@ -113,13 +115,33 @@ func TestSnapshotJobReconcileCompletionGate(t *testing.T) {
 		assert.True(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured))
 		cond := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCompleted)
 		require.NotNil(t, cond)
-		assert.Equal(t, metav1.ConditionTrue, cond.Status)
-		assert.Equal(t, snapshotv1alpha1.ReasonCaptureCompleted, cond.Reason)
-		require.NotNil(t, updated.Status.CompletedAt)
+		assert.Equal(t, metav1.ConditionFalse, cond.Status)
+		assert.Equal(t, snapshotv1alpha1.ReasonWaitingForPodCompletion, cond.Reason)
+		assert.Nil(t, updated.Status.CompletedAt)
 
 		jobs := &batchv1.JobList{}
 		require.NoError(t, r.List(context.Background(), jobs))
-		assert.Nil(t, getBatchJobByName(jobs, sj.Name), "Job must be deleted after capture")
+		storedJob := getBatchJobByName(jobs, sj.Name)
+		require.NotNil(t, storedJob, "Job must remain while post-capture logic runs")
+
+		// The owned-Job update watch drives this second reconcile in production.
+		completeJob(storedJob)
+		require.NoError(t, r.Status().Update(context.Background(), storedJob))
+		_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+		require.NoError(t, err)
+
+		updated = &snapshotv1alpha1.SnapshotJob{}
+		require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+		assert.True(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured))
+		cond = meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCompleted)
+		require.NotNil(t, cond)
+		assert.Equal(t, metav1.ConditionTrue, cond.Status)
+		assert.Equal(t, snapshotv1alpha1.ReasonJobCompleted, cond.Reason)
+		require.NotNil(t, updated.Status.CompletedAt)
+
+		jobs = &batchv1.JobList{}
+		require.NoError(t, r.List(context.Background(), jobs))
+		assert.Nil(t, getBatchJobByName(jobs, sj.Name), "Job must be deleted only after capture and Job completion")
 
 		snaps := &snapshotv1alpha1.PodSnapshotList{}
 		require.NoError(t, r.List(context.Background(), snaps))
@@ -127,9 +149,9 @@ func TestSnapshotJobReconcileCompletionGate(t *testing.T) {
 	})
 }
 
-// ---- capture success wins over checkpoint-induced Job failure ----
+// ---- capture success does not override source Job failure ----
 
-func TestSnapshotJobReconcileCaptureWinsOverJobFailure(t *testing.T) {
+func TestSnapshotJobReconcileCaptureDoesNotOverrideJobFailure(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
@@ -146,17 +168,20 @@ func TestSnapshotJobReconcileCaptureWinsOverJobFailure(t *testing.T) {
 
 	updated := &snapshotv1alpha1.SnapshotJob{}
 	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
-	assert.True(t, snapshotv1alpha1.IsSnapshotJobCompleted(updated))
-	assert.False(t, snapshotv1alpha1.IsSnapshotJobFailed(updated))
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobCompleted(updated))
+	assert.True(t, snapshotv1alpha1.IsSnapshotJobFailed(updated))
 	assert.True(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured),
-		"PodSnapshot Ready=True is authoritative even if source termination races Job status")
+		"capture success remains independently visible when post-capture logic fails")
 	assert.True(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning),
-		"successful capture proves the source reached readiness before it was terminated")
+		"successful capture proves the source reached readiness before it failed")
 	require.NotNil(t, updated.Status.StartedAt)
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, snapshotv1alpha1.ReasonJobFailed, failed.Reason)
 
 	jobs := &batchv1.JobList{}
 	require.NoError(t, r.List(context.Background(), jobs))
-	assert.Nil(t, getBatchJobByName(jobs, sj.Name), "the completed SnapshotJob must clean up the failed source Job")
+	assert.NotNil(t, getBatchJobByName(jobs, sj.Name), "failed source Job must be preserved for debugging")
 }
 
 func TestSnapshotJobReconcileDefersJobFailureUntilCaptureSettles(t *testing.T) {
@@ -192,12 +217,13 @@ func TestSnapshotJobReconcileDefersJobFailureUntilCaptureSettles(t *testing.T) {
 			_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
 			require.NoError(t, err)
 			require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
-			assert.True(t, snapshotv1alpha1.IsSnapshotJobCompleted(updated))
-			assert.False(t, snapshotv1alpha1.IsSnapshotJobFailed(updated))
+			assert.False(t, snapshotv1alpha1.IsSnapshotJobCompleted(updated))
+			assert.True(t, snapshotv1alpha1.IsSnapshotJobFailed(updated))
+			assert.True(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured))
 
 			jobs := &batchv1.JobList{}
 			require.NoError(t, r.List(context.Background(), jobs))
-			assert.Nil(t, getBatchJobByName(jobs, sj.Name))
+			assert.NotNil(t, getBatchJobByName(jobs, sj.Name))
 		})
 	}
 }
@@ -343,7 +369,7 @@ func TestSnapshotJobReconcileCompletedRetriesCleanupUntilJobGone(t *testing.T) {
 	now := metav1.Now()
 	sj.Status.CompletedAt = &now
 	meta.SetStatusCondition(&sj.Status.Conditions, metav1.Condition{
-		Type: snapshotv1alpha1.SnapshotJobConditionCompleted, Status: metav1.ConditionTrue, Reason: snapshotv1alpha1.ReasonCaptureCompleted,
+		Type: snapshotv1alpha1.SnapshotJobConditionCompleted, Status: metav1.ConditionTrue, Reason: snapshotv1alpha1.ReasonJobCompleted,
 	})
 	job, err := buildSourceJob(sj)
 	require.NoError(t, err)
@@ -394,6 +420,7 @@ func TestSnapshotJobReconcileCompletionPersistsStatusBeforeDeleting(t *testing.T
 	job, err := buildSourceJob(sj)
 	require.NoError(t, err)
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	completeJob(job)
 	pod := sourcePodForJob(job)
 	snap := readySnapshot(t, sj, pod)
 

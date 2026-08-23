@@ -40,9 +40,9 @@ import (
 //
 // Resource helpers create, find, and classify the Job, source Pod, and
 // PodSnapshot without mutating SnapshotJob status. Reconcile then derives the
-// complete status from those observations and persists it once. Capture success
-// is terminal and triggers source Job cleanup; failures preserve the Job for
-// debugging.
+// complete status from those observations and persists it once. Completion
+// requires both capture success and source Job completion; failures preserve
+// the Job for debugging.
 type SnapshotJobReconciler struct {
 	client.Client
 	APIReader client.Reader
@@ -183,8 +183,18 @@ func jobFailureReason(job *batchv1.Job) (reason string, cause error) {
 	return "", nil
 }
 
-// reconcilePodSnapshotResources evaluates PodSnapshot state before Job failure:
-// a successful checkpoint can be expected to terminate the source process.
+func jobComplete(job *batchv1.Job) bool {
+	for _, condition := range job.Status.Conditions {
+		if condition.Type == batchv1.JobComplete && condition.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+
+// reconcilePodSnapshotResources evaluates the capture and source Job as two
+// independent signals. Capture success does not override unsuccessful
+// post-capture workload completion.
 func (r *SnapshotJobReconciler) reconcilePodSnapshotResources(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) (snapshotJobObservation, ctrl.Result, error) {
 	observed := snapshotJobObservation{job: job}
 	snap, err := r.findOwnedPodSnapshot(ctx, sj)
@@ -215,8 +225,9 @@ func (r *SnapshotJobReconciler) reconcilePodSnapshotResources(ctx context.Contex
 			}
 		}
 	case snapshotv1alpha1.IsPodSnapshotSucceeded(snap):
-		// Capture success is authoritative even if checkpointing terminated the
-		// source process and the Job concurrently reports failure.
+		if reason, cause := jobFailureReason(job); reason != "" {
+			observed.failure = &snapshotJobFailure{reason: reason, cause: cause}
+		}
 	default:
 		if reason, _ := jobFailureReason(job); reason != "" {
 			observed.waitingForCaptureResult = true
@@ -348,14 +359,20 @@ func deriveFailureStatus(next *snapshotv1alpha1.SnapshotJob, failure *snapshotJo
 }
 
 func deriveCompletionStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJobObservation) {
-	captured := observed.podSnapshot != nil && snapshotv1alpha1.IsPodSnapshotSucceeded(observed.podSnapshot)
-	if captured {
-		setCondition(next, snapshotv1alpha1.SnapshotJobConditionCompleted, metav1.ConditionTrue,
-			snapshotv1alpha1.ReasonCaptureCompleted, "checkpoint captured; source Job cleanup requested")
-		if next.Status.CompletedAt == nil {
-			now := metav1.Now()
-			next.Status.CompletedAt = &now
-		}
+	if observed.job == nil || observed.podSnapshot == nil || !snapshotv1alpha1.IsPodSnapshotSucceeded(observed.podSnapshot) {
+		return
+	}
+	if !jobComplete(observed.job) {
+		setCondition(next, snapshotv1alpha1.SnapshotJobConditionCompleted, metav1.ConditionFalse,
+			snapshotv1alpha1.ReasonWaitingForPodCompletion, "checkpoint captured; waiting for the source pod to complete")
+		return
+	}
+
+	setCondition(next, snapshotv1alpha1.SnapshotJobConditionCompleted, metav1.ConditionTrue,
+		snapshotv1alpha1.ReasonJobCompleted, "checkpoint captured and source Job completed")
+	if next.Status.CompletedAt == nil {
+		now := metav1.Now()
+		next.Status.CompletedAt = &now
 	}
 }
 
