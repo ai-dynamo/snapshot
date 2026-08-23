@@ -52,6 +52,11 @@ func (r *SnapshotJobReconciler) reconcileExistingSourceJob(ctx context.Context, 
 	if failure := classifyExistingSourceJob(sj, job); failure != nil {
 		return snapshotJobObservation{failure: failure}, ctrl.Result{}, nil
 	}
+	return r.reconcileAcceptedSourceJob(ctx, sj, job)
+}
+
+// reconcileAcceptedSourceJob continues after validating the source Job.
+func (r *SnapshotJobReconciler) reconcileAcceptedSourceJob(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) (snapshotJobObservation, ctrl.Result, error) {
 	if sj.Status.SourceJobUID == "" && job.UID != "" {
 		// Bind the one-shot Job incarnation before creating or adopting any
 		// downstream capture resource.
@@ -60,11 +65,29 @@ func (r *SnapshotJobReconciler) reconcileExistingSourceJob(ctx context.Context, 
 	return r.reconcilePodSnapshotResources(ctx, sj, job)
 }
 
-// classifyExistingSourceJob proves that a deterministic-name Job is the one
-// source execution this SnapshotJob is allowed to observe. A persisted UID is
-// authoritative. Before the UID has been persisted (for example, after Create
-// succeeded and the status patch failed), adoption additionally requires the
-// expected owner and immutable identity-bearing protocol fields.
+// readAuthoritativeSourceJob directly reads and classifies the source Job.
+func (r *SnapshotJobReconciler) readAuthoritativeSourceJob(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, *snapshotJobFailure, error) {
+	job := &batchv1.Job{}
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: sj.Namespace, Name: sj.Name}, job); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, sourceJobDeletedFailure(sj), nil
+		}
+		return nil, nil, err
+	}
+	if failure := classifyExistingSourceJob(sj, job); failure != nil {
+		return job, failure, nil
+	}
+	return job, nil, nil
+}
+
+func sourceJobDeletedFailure(sj *snapshotv1alpha1.SnapshotJob) *snapshotJobFailure {
+	return &snapshotJobFailure{
+		reason: snapshotv1alpha1.ReasonJobDeleted,
+		cause:  fmt.Errorf("source Job %q (uid %q) no longer exists", sj.Name, sj.Status.SourceJobUID),
+	}
+}
+
+// classifyExistingSourceJob validates ownership and one-shot Job identity.
 func classifyExistingSourceJob(sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) *snapshotJobFailure {
 	if !metav1.IsControlledBy(job, sj) {
 		return &snapshotJobFailure{

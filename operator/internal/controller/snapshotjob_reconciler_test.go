@@ -211,6 +211,83 @@ func TestSnapshotJobReconcilePropagatesJobGetError(t *testing.T) {
 	assert.Empty(t, updated.Status.Conditions, "no status should be written on a retryable Get error")
 }
 
+func TestSnapshotJobReconcileRecordedJobCacheMissUsesAPIReader(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+	sj.UID = types.UID("sj-uid")
+	sj.Status.SourceJobUID = types.UID("source-job-uid")
+
+	job, err := buildSourceJob(sj)
+	require.NoError(t, err)
+	job.UID = sj.Status.SourceJobUID
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+
+	// The cached client deliberately lacks the Job while the direct reader sees
+	// the API-server object, reproducing informer lag after the UID status patch.
+	r := makeSnapshotJobReconciler(s, sj)
+	r.APIReader = fake.NewClientBuilder().WithScheme(s).WithObjects(job).Build()
+
+	result, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+	assert.Equal(t, sourcePodRequeueBackstop, result.RequeueAfter,
+		"an authoritative Job hit must continue normal reconciliation while its Pod is pending")
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobFailed(updated),
+		"a stale cached NotFound must not become permanent JobDeleted")
+	assert.Equal(t, job.UID, updated.Status.SourceJobUID)
+	running := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning)
+	require.NotNil(t, running)
+	assert.Equal(t, snapshotv1alpha1.ReasonPodPending, running.Reason)
+}
+
+func TestSnapshotJobReconcileRecordedJobAuthoritativeReadErrorRetries(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+	sj.Status.SourceJobUID = types.UID("source-job-uid")
+
+	r := makeSnapshotJobReconciler(s, sj) // cached Job lookup misses
+	r.APIReader = fake.NewClientBuilder().WithScheme(s).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+			return errors.New("transient authoritative read failure")
+		},
+	}).Build()
+
+	_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.Error(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	assert.Empty(t, updated.Status.Conditions,
+		"an incomplete authoritative observation must be retried, not persisted as terminal")
+}
+
+func TestSnapshotJobReconcileRecordedJobDirectReadRejectsReplacement(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+	sj.UID = types.UID("sj-uid")
+	sj.Status.SourceJobUID = types.UID("original-job-uid")
+
+	replacement, err := buildSourceJob(sj)
+	require.NoError(t, err)
+	replacement.UID = types.UID("replacement-job-uid")
+	require.NoError(t, controllerutil.SetControllerReference(sj, replacement, s))
+
+	r := makeSnapshotJobReconciler(s, sj) // cached Job lookup misses
+	r.APIReader = fake.NewClientBuilder().WithScheme(s).WithObjects(replacement).Build()
+
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, snapshotv1alpha1.ReasonJobNameConflict, failed.Reason,
+		"an authoritative same-name replacement must not be accepted after a cached miss")
+}
+
 // TestSnapshotJobReconcileAdoptsJobOnAlreadyExistsRace simulates the
 // stale-informer-cache race: a prior reconcile's Create already landed the Job
 // server-side, but this reconcile's own Get misses it (returns NotFound from a

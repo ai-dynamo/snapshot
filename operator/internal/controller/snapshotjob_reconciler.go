@@ -111,8 +111,15 @@ func (r *SnapshotJobReconciler) reconcileResources(ctx context.Context, sj *snap
 	switch {
 	case apierrors.IsNotFound(err):
 		if sj.Status.SourceJobUID != "" || sj.Status.PodSnapshotName != "" {
-			return terminalObservation(snapshotv1alpha1.ReasonJobDeleted,
-				fmt.Errorf("source Job %q (uid %q) no longer exists", sj.Name, sj.Status.SourceJobUID)), ctrl.Result{}, nil
+			authoritativeJob, failure, readErr := r.readAuthoritativeSourceJob(ctx, sj)
+			if readErr != nil {
+				return snapshotJobObservation{}, ctrl.Result{}, fmt.Errorf(
+					"confirm source Job %q after cached NotFound: %w", sj.Name, readErr)
+			}
+			if failure != nil {
+				return snapshotJobObservation{failure: failure}, ctrl.Result{}, nil
+			}
+			return r.reconcileAcceptedSourceJob(ctx, sj, authoritativeJob)
 		}
 		desiredJob, buildErr := buildSourceJob(sj)
 		if buildErr != nil {
@@ -185,12 +192,12 @@ func (r *SnapshotJobReconciler) reconcilePodSnapshotResources(ctx context.Contex
 	case snapshotv1alpha1.IsPodSnapshotFailed(snap):
 		// FailureTarget or Failed can race the PodSnapshot update; re-read through
 		// the API reader before deciding which failure is authoritative.
-		latestJob := &batchv1.Job{}
-		if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(job), latestJob); err != nil {
-			return snapshotJobObservation{}, ctrl.Result{}, fmt.Errorf("re-read source Job %q before terminal decision: %w", job.Name, err)
+		latestJob, failure, readErr := r.readAuthoritativeSourceJob(ctx, sj)
+		if readErr != nil {
+			return snapshotJobObservation{}, ctrl.Result{}, fmt.Errorf("re-read source Job %q before terminal decision: %w", job.Name, readErr)
 		}
 		observed.job = latestJob
-		if failure := classifyExistingSourceJob(sj, latestJob); failure != nil {
+		if failure != nil {
 			observed.failure = failure
 			return observed, ctrl.Result{}, nil
 		}

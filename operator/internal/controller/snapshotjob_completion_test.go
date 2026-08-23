@@ -16,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -336,7 +337,8 @@ func TestSnapshotJobReconcileJobDeleted(t *testing.T) {
 	sj.Status.SourceJobUID = types.UID("deleted-job-uid")
 	require.Empty(t, sj.Status.PodSnapshotName, "the UID must detect deletion before PodSnapshot status is recorded")
 
-	r := makeSnapshotJobReconciler(s, sj) // no Job seeded: it has vanished
+	r := makeSnapshotJobReconciler(s, sj)                       // cached Job lookup misses
+	r.APIReader = fake.NewClientBuilder().WithScheme(s).Build() // the Job is authoritatively gone too
 	_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
 	require.NoError(t, err)
 
@@ -349,6 +351,43 @@ func TestSnapshotJobReconcileJobDeleted(t *testing.T) {
 	jobs := &batchv1.JobList{}
 	require.NoError(t, r.List(context.Background(), jobs))
 	assert.Empty(t, jobs.Items, "nothing to preserve — it was already gone")
+}
+
+func TestSnapshotJobReconcileFailedPodSnapshotAndDeletedJobUsesJobDeleted(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+	sj.UID = types.UID("sj-uid")
+	sj.Status.SourceJobUID = types.UID("source-job-uid")
+	sj.Status.PodSnapshotName = sj.Name
+	sj.Status.PodSnapshotUID = types.UID("pod-snapshot-uid")
+
+	job, err := buildSourceJob(sj)
+	require.NoError(t, err)
+	job.UID = sj.Status.SourceJobUID
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	pod := sourcePodForJob(job)
+	snap, err := buildPodSnapshot(sj, pod)
+	require.NoError(t, err)
+	snap.UID = sj.Status.PodSnapshotUID
+	meta.SetStatusCondition(&snap.Status.Conditions, metav1.Condition{
+		Type: snapshotv1alpha1.PodSnapshotConditionFailed, Status: metav1.ConditionTrue,
+		Reason: "SourcePodGone", Message: "source pod disappeared",
+	})
+
+	// The cached Job is stale enough to reach PodSnapshot failure arbitration,
+	// while the direct reader proves that the recorded Job is now deleted.
+	r := makeSnapshotJobReconciler(s, sj, job, snap)
+	r.APIReader = fake.NewClientBuilder().WithScheme(s).Build()
+
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, snapshotv1alpha1.ReasonJobDeleted, failed.Reason,
+		"authoritative Job deletion must be terminal instead of a retryable NotFound loop")
 }
 
 func TestSnapshotJobReconcilePodSnapshotNameConflict(t *testing.T) {
