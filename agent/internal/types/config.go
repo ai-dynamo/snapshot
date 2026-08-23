@@ -15,14 +15,14 @@ import (
 // helper independently enforces the same path.
 const CheckpointBasePath = "/checkpoints"
 
-// AgentConfig holds the full agent configuration: static checkpoint settings
-// from the ConfigMap YAML, plus runtime fields from environment variables.
+// AgentConfig holds static checkpoint settings plus runtime fields populated at startup.
 type AgentConfig struct {
-	NodeName string          `yaml:"-"`
-	Storage  StorageSpec     `yaml:"storage"`
-	Overlay  OverlaySettings `yaml:"overlay"`
-	Restore  RestoreSpec     `yaml:"restore"`
-	CRIU     CRIUSettings    `yaml:"criu"`
+	NodeName          string          `yaml:"-"`
+	HostKernelVersion string          `yaml:"-"`
+	Storage           StorageSpec     `yaml:"storage"`
+	Overlay           OverlaySettings `yaml:"overlay"`
+	Restore           RestoreSpec     `yaml:"restore"`
+	CRIU              CRIUSettings    `yaml:"criu"`
 }
 
 func (c *AgentConfig) LoadEnvOverrides() {
