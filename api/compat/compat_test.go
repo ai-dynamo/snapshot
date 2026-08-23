@@ -4,6 +4,8 @@
 package compat
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -102,4 +104,34 @@ func TestRegisterChecksRejectsAGateNothingCalls(t *testing.T) {
 	}()
 
 	registerChecks(check{name: "fixture", gate: "nowhere"})
+}
+
+// A refusal has to survive the trip back to the caller that reports it: it
+// crosses the restore call chain and is wrapped on the way, and the reader still
+// has to tell it apart from a CRIU failure and learn which gate produced it.
+func TestNewIncompatibleError(t *testing.T) {
+	mismatches := []Mismatch{
+		{Check: "cpu-arch", Source: "amd64", Target: "arm64"},
+		{Check: "memory-limit", Source: "32Gi", Target: "1Gi"},
+	}
+	err := NewIncompatibleError(GateInspect, mismatches)
+
+	var incompatible *IncompatibleError
+	if !errors.As(fmt.Errorf("restore worker: %w", err), &incompatible) {
+		t.Fatal("wrapped incompatible error did not unwrap to *IncompatibleError")
+	}
+	if incompatible.Gate != GateInspect {
+		t.Fatalf("gate = %q, want %q", incompatible.Gate, GateInspect)
+	}
+	want := "restore refused as incompatible: cpu-arch: source amd64, target arm64; memory-limit: source 32Gi, target 1Gi"
+	if got := err.Error(); got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+
+	// The caller's slice keeps changing after the refusal is built, and the
+	// refusal is what gets reported.
+	mismatches[0].Target = "mutated"
+	if incompatible.Mismatches[0].Target != "arm64" {
+		t.Fatalf("error kept a reference to the caller's slice: %#v", incompatible.Mismatches)
+	}
 }
