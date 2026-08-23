@@ -14,7 +14,7 @@ state, the behavior and API shapes below are not implemented yet.
 | ------------------------------ | ----- |
 | **Status**                     | Proposed design |
 | **Author(s)**                  | @lirane |
-| **Reviewers**                  | *Badger team - names TBD; include one snapshot-agent owner* |
+| **Reviewers**                  | Chen Amiel, Dan Feigin, Oleg Kofman, Ron Kahn, Shay Asoolin, Shmuel Goldklang |
 | **Approver**                   | *TBD* |
 | **Created**                    | 2026-08-12 |
 | **Last updated**               | 2026-08-23 |
