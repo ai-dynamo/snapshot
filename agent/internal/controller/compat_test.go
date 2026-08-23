@@ -56,6 +56,38 @@ func TestPreflightCompatibilityComparesRecordedFacts(t *testing.T) {
 	assert.Equal(t, []string{"/etc/hosts", "/model-cache"}, r.comparison.calls[0].source.ExternalizedMounts)
 }
 
+// Both gates log the same sentence for the same refusal, and each names the gate
+// it came from, so an operator greps one field and learns how far the restore got
+// before the node turned it down.
+func TestRefusalIsLoggedWithTheSameReasonAtBothGates(t *testing.T) {
+	mismatch := compat.Mismatch{Check: "memory-limit", Source: "32Gi", Target: "1Gi"}
+	wantReason := "memory-limit: source 32Gi, target 1Gi"
+
+	t.Run("preflight gate", func(t *testing.T) {
+		r := newGatedRestore(t, mismatch)
+
+		r.reconcile(t)
+
+		refusal := r.refusalLog(t)
+		assert.Equal(t, wantReason, refusal["reason"])
+		assert.Equal(t, string(compat.GatePreflight), refusal["gate"])
+		// The refusal names the pod it belongs to, so a reader does not have to
+		// correlate on time.
+		assert.Equal(t, "inference/restore-worker", refusal["pod"])
+	})
+
+	t.Run("inspect gate", func(t *testing.T) {
+		r := newGatedRestore(t)
+		r.controller.restoreFn = refuseWith(mismatch)
+
+		r.runRestore(t)
+
+		refusal := r.refusalLog(t)
+		assert.Equal(t, wantReason, refusal["reason"])
+		assert.Equal(t, string(compat.GateInspect), refusal["gate"])
+	})
+}
+
 // A refusal from the second gate is not a CRIU failure, so it neither reports
 // one nor kills the placeholder: killing it would restart the container straight
 // back into the same answer.

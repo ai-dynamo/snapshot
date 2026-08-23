@@ -12,6 +12,18 @@ import (
 	"github.com/ai-dynamo/snapshot/api/compat"
 )
 
+// refuseRestore records one restore this node will not attempt. Both gates
+// report through here, so a refusal reads the same whichever one turned it down,
+// and nothing is requeued: retrying on this node cannot change the answer.
+func (w *NodeController) refuseRestore(pod *corev1.Pod, incompatible *compat.IncompatibleError) bool {
+	w.log.Info("Refusing restore; this node cannot run the checkpoint",
+		"pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name),
+		"gate", string(incompatible.Gate),
+		"reason", compat.Reasons(incompatible.Mismatches),
+	)
+	return false
+}
+
 // preflightCompatibility runs the pre-flight compatibility gate for one restore.
 // A nil error means the restore may be attempted.
 func (w *NodeController) preflightCompatibility(pod *corev1.Pod, artifact *restoreArtifact) error {
