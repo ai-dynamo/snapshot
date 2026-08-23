@@ -31,6 +31,12 @@ const (
 	// RestoredCondition is the Pod status condition owned by the node agent.
 	RestoredCondition = "nvidia.com/Restored"
 
+	// SkipCompatCheckAnnotation turns the restore compatibility gate off for
+	// one restore pod, whether it is stamped on the pod template up front or
+	// added to a pod the gate already turned down. It is the per-restore escape
+	// hatch; restore.skipCompatCheck in the agent ConfigMap is the per-node one.
+	SkipCompatCheckAnnotation = "nvidia.com/snapshot-skip-compat-check"
+
 	CheckpointVolumeName           = "checkpoint-storage"
 	DefaultSeccompLocalhostProfile = "profiles/block-iouring.json"
 )

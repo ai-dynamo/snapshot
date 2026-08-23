@@ -107,3 +107,31 @@ func TestValidateRestoreContainerMappings(t *testing.T) {
 		})
 	}
 }
+
+func TestSkipCompatCheckFromAnnotations(t *testing.T) {
+	cases := map[string]bool{
+		"true":  true,
+		"True":  true,
+		"1":     true,
+		"false": false,
+		"0":     false,
+		" true": true,
+		// A value nobody parses as a boolean leaves the gate on. Turning it off
+		// by accident is the expensive direction: a restore that should have
+		// been refused instead fails somewhere inside CRIU.
+		"yes":         false,
+		"":            false,
+		"TRUE-ISH":    false,
+		"true please": false,
+	}
+	for value, want := range cases {
+		annotations := map[string]string{SkipCompatCheckAnnotation: value}
+		if got := SkipCompatCheckFromAnnotations(annotations); got != want {
+			t.Errorf("SkipCompatCheckFromAnnotations(%q) = %v, want %v", value, got, want)
+		}
+	}
+
+	if SkipCompatCheckFromAnnotations(nil) {
+		t.Error("an unannotated pod asked to skip the compatibility gate")
+	}
+}

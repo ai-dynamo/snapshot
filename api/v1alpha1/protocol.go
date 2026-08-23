@@ -5,6 +5,7 @@ package v1alpha1
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -83,4 +84,12 @@ func ValidateRestoreContainerMappings(mappings []RestoreContainerMapping, captur
 		destinations[destination] = struct{}{}
 	}
 	return nil
+}
+
+// SkipCompatCheckFromAnnotations reports whether this pod asks for the restore
+// compatibility gate to be skipped. Anything that is not a recognized true
+// keeps the gate on, so a typo cannot silently disable it.
+func SkipCompatCheckFromAnnotations(annotations map[string]string) bool {
+	skip, err := strconv.ParseBool(strings.TrimSpace(annotations[SkipCompatCheckAnnotation]))
+	return err == nil && skip
 }
