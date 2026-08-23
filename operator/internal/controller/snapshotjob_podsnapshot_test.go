@@ -614,11 +614,12 @@ func TestFindSourcePod(t *testing.T) {
 	require.NoError(t, err)
 	job.UID = types.UID("job-uid")
 
-	t.Run("not found when no pod exists", func(t *testing.T) {
+	t.Run("reports pending domain state when no pod exists", func(t *testing.T) {
 		r := makeSnapshotJobReconciler(s)
-		_, err := findSourcePod(context.Background(), r.Client, job)
-		require.Error(t, err)
-		assert.True(t, apierrors.IsNotFound(err))
+		pod, found, err := findSourcePod(context.Background(), r.Client, job)
+		require.NoError(t, err)
+		assert.False(t, found)
+		assert.Nil(t, pod)
 	})
 
 	t.Run("finds the pod owned by the job, ignoring same-labeled foreign pods", func(t *testing.T) {
@@ -628,8 +629,9 @@ func TestFindSourcePod(t *testing.T) {
 		foreign.OwnerReferences = nil // same job-name label, but not controlled by this Job
 		r := makeSnapshotJobReconciler(s, owned, foreign)
 
-		got, err := findSourcePod(context.Background(), r.Client, job)
+		got, found, err := findSourcePod(context.Background(), r.Client, job)
 		require.NoError(t, err)
+		assert.True(t, found)
 		assert.Equal(t, owned.Name, got.Name)
 	})
 
@@ -639,9 +641,25 @@ func TestFindSourcePod(t *testing.T) {
 		second.Name = "warm-worker-fghij"
 		r := makeSnapshotJobReconciler(s, first, second)
 
-		_, err := findSourcePod(context.Background(), r.Client, job)
+		pod, found, err := findSourcePod(context.Background(), r.Client, job)
 		require.Error(t, err)
+		assert.False(t, found)
+		assert.Nil(t, pod)
 		assert.Contains(t, err.Error(), "controls 2 pods")
+	})
+
+	t.Run("returns list errors as retryable API failures", func(t *testing.T) {
+		listErr := errors.New("transient list failure")
+		r := makeSnapshotJobReconcilerWithInterceptor(s, interceptor.Funcs{
+			List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+				return listErr
+			},
+		})
+
+		pod, found, err := findSourcePod(context.Background(), r.Client, job)
+		assert.ErrorIs(t, err, listErr)
+		assert.False(t, found)
+		assert.Nil(t, pod)
 	})
 }
 

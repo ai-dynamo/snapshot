@@ -35,8 +35,11 @@ const sourcePodRequeueBackstop = 2 * time.Second
 // concrete missing-capture failure.
 func (r *SnapshotJobReconciler) createPodSnapshotForSourceJob(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) (snapshotJobObservation, ctrl.Result, error) {
 	observed := snapshotJobObservation{job: job}
-	pod, err := findSourcePod(ctx, r.APIReader, job)
-	if apierrors.IsNotFound(err) {
+	pod, found, err := findSourcePod(ctx, r.APIReader, job)
+	if err != nil {
+		return snapshotJobObservation{}, ctrl.Result{}, fmt.Errorf("find source pod for Job %q: %w", job.Name, err)
+	}
+	if !found {
 		observed.sourcePodMissing = true
 		if classifySourceJobTerminal(job).state == sourceJobComplete {
 			observed.failure = &snapshotJobFailure{
@@ -46,9 +49,6 @@ func (r *SnapshotJobReconciler) createPodSnapshotForSourceJob(ctx context.Contex
 			return observed, ctrl.Result{}, nil
 		}
 		return observed, ctrl.Result{RequeueAfter: sourcePodRequeueBackstop}, nil
-	}
-	if err != nil {
-		return snapshotJobObservation{}, ctrl.Result{}, fmt.Errorf("find source pod for Job %q: %w", job.Name, err)
 	}
 
 	snap, err := r.createPodSnapshot(ctx, sj, pod)
@@ -64,32 +64,41 @@ func (r *SnapshotJobReconciler) createPodSnapshotForSourceJob(ctx context.Contex
 	return observed, ctrl.Result{}, nil
 }
 
-// findSourcePod returns the source Job's pod, or a NotFound error if the Job has
-// not created it yet (callers use apierrors.IsNotFound to decide how to proceed).
-// This is a read triggered by a Job status change, not a pod watch — the
-// controller does not watch pods (design: "SnapshotJob observes the Job, not the
-// Pod, for failure status").
-func findSourcePod(ctx context.Context, reader client.Reader, job *batchv1.Job) (*corev1.Pod, error) {
+// findSourcePod returns the source Job's pod and whether it exists yet. A
+// successful list with no controlled Pod is expected pending domain state, not
+// an API NotFound error. This is a read triggered by a Job status change, not a
+// pod watch — the controller does not watch pods (design: "SnapshotJob observes
+// the Job, not the Pod, for failure status").
+func findSourcePod(ctx context.Context, reader client.Reader, job *batchv1.Job) (*corev1.Pod, bool, error) {
 	var pods corev1.PodList
 	if err := reader.List(ctx, &pods,
 		client.InNamespace(job.Namespace),
 		client.MatchingLabels{batchv1.JobNameLabel: job.Name},
 	); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	var controlled []*corev1.Pod
-	for i := range pods.Items {
-		if metav1.IsControlledBy(&pods.Items[i], job) {
-			controlled = append(controlled, &pods.Items[i])
+	return controlledPodForJob(pods.Items, job)
+}
+
+// controlledPodForJob selects the Pod controlled by job from the label-matched
+// candidates and rejects the invalid case where the Job controls multiple Pods.
+func controlledPodForJob(pods []corev1.Pod, job *batchv1.Job) (*corev1.Pod, bool, error) {
+	var controlledPod *corev1.Pod
+	controlledCount := 0
+	for i := range pods {
+		pod := &pods[i]
+		if metav1.IsControlledBy(pod, job) {
+			controlledPod = pod
+			controlledCount++
 		}
 	}
-	switch len(controlled) {
+	switch controlledCount {
 	case 0:
-		return nil, apierrors.NewNotFound(corev1.Resource("pods"), job.Name)
+		return nil, false, nil
 	case 1:
-		return controlled[0], nil
+		return controlledPod, true, nil
 	default:
-		return nil, fmt.Errorf("source Job %q controls %d pods; expected exactly one", job.Name, len(controlled))
+		return nil, false, fmt.Errorf("source Job %q controls %d pods; expected exactly one", job.Name, controlledCount)
 	}
 }
 
@@ -124,16 +133,16 @@ func readOwnedPodSnapshot(ctx context.Context, reader client.Reader, sj *snapsho
 // Before the child UID has been persisted, mutable owner labels are insufficient:
 // the immutable source identity must also match the Pod controlled by this Job.
 func (r *SnapshotJobReconciler) validatePodSnapshotForAdoption(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job, snap *snapshotv1alpha1.PodSnapshot) (*snapshotJobFailure, error) {
-	pod, err := findSourcePod(ctx, r.APIReader, job)
+	pod, found, err := findSourcePod(ctx, r.APIReader, job)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return &snapshotJobFailure{
-				reason: snapshotv1alpha1.ReasonPodSnapshotNameConflict,
-				cause: fmt.Errorf("cannot safely adopt PodSnapshot %q because its source Pod is no longer available",
-					snap.Name),
-			}, nil
-		}
 		return nil, fmt.Errorf("find source Pod before adopting PodSnapshot %q: %w", snap.Name, err)
+	}
+	if !found {
+		return &snapshotJobFailure{
+			reason: snapshotv1alpha1.ReasonPodSnapshotNameConflict,
+			cause: fmt.Errorf("cannot safely adopt PodSnapshot %q because its source Pod is no longer available",
+				snap.Name),
+		}, nil
 	}
 
 	desired, err := buildPodSnapshot(sj, pod)
