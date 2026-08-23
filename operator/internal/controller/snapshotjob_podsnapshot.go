@@ -7,12 +7,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -24,6 +26,43 @@ import (
 // deterministic name that is not owned by this SnapshotJob — a terminal name
 // collision, not a cache race.
 var errPodSnapshotNameConflict = errors.New("existing PodSnapshot is not owned by this SnapshotJob")
+
+const sourcePodRequeueBackstop = 2 * time.Second
+
+// createPodSnapshotForSourceJob waits for the source Pod, then creates or
+// classifies the deterministic PodSnapshot. A missing active source Pod gets a
+// bounded backstop requeue; completed source work with no remaining Pod is a
+// concrete missing-capture failure.
+func (r *SnapshotJobReconciler) createPodSnapshotForSourceJob(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) (snapshotJobObservation, ctrl.Result, error) {
+	observed := snapshotJobObservation{job: job}
+	pod, err := findSourcePod(ctx, r.sourcePodReader(), job)
+	if apierrors.IsNotFound(err) {
+		observed.sourcePodMissing = true
+		if classifySourceJobTerminal(job).state == sourceJobComplete {
+			observed.failure = &snapshotJobFailure{
+				reason: snapshotv1alpha1.ReasonSourceCompletedWithoutCapture,
+				cause:  fmt.Errorf("source Job completed and its pod is gone before a PodSnapshot capture result was recorded"),
+			}
+			return observed, ctrl.Result{}, nil
+		}
+		return observed, ctrl.Result{RequeueAfter: sourcePodRequeueBackstop}, nil
+	}
+	if err != nil {
+		return snapshotJobObservation{}, ctrl.Result{}, fmt.Errorf("find source pod for Job %q: %w", job.Name, err)
+	}
+
+	snap, err := r.createPodSnapshot(ctx, sj, pod)
+	if errors.Is(err, errPodSnapshotNameConflict) {
+		observed.failure = &snapshotJobFailure{reason: snapshotv1alpha1.ReasonPodSnapshotNameConflict, cause: err}
+		return observed, ctrl.Result{}, nil
+	}
+	if err != nil {
+		return snapshotJobObservation{}, ctrl.Result{}, err
+	}
+
+	observed.podSnapshot = snap
+	return observed, ctrl.Result{}, nil
+}
 
 // findSourcePod returns the source Job's pod, or a NotFound error if the Job has
 // not created it yet (callers use apierrors.IsNotFound to decide how to proceed).

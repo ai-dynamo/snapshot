@@ -18,10 +18,13 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
@@ -34,6 +37,10 @@ const (
 
 	// snapshotContentDeleteRequeue is the delay between cascade-delete progress checks.
 	snapshotContentDeleteRequeue = time.Second
+
+	// podSnapshotSourcePodNameField indexes PodSnapshots by their namespaced source-pod name.
+	// List calls using this field are also scoped to the pod's namespace.
+	podSnapshotSourcePodNameField = "spec.source.podRef.name"
 )
 
 // errPodSnapshotPodUnscheduled signals that the source pod is not yet scheduled to a node; the
@@ -52,7 +59,8 @@ var errContentConflict = errors.New("existing PodSnapshotContent belongs to anot
 // back to the PodSnapshot, and cascades deletion to the PodSnapshotContent.
 type PodSnapshotReconciler struct {
 	client.Client
-	Recorder record.EventRecorder
+	APIReader client.Reader
+	Recorder  record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=get;list;watch;update;patch
@@ -81,8 +89,8 @@ func (sr *PodSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
-	// Once a PodSnapshotContent is bound it drives the snapshot; the live source pod is consulted
-	// only on the path that has not yet created one.
+	// Once a PodSnapshotContent is bound it drives the capture result. Its pending path also observes
+	// source-pod termination so an abandoned capture reaches a concrete terminal state.
 	if boundName := ptr.Deref(snap.Status.BoundPodSnapshotContentName, ""); boundName != "" {
 		return sr.mirrorBoundContent(ctx, snap, boundName)
 	}
@@ -112,7 +120,8 @@ func (sr *PodSnapshotReconciler) ensureFinalizer(ctx context.Context, snap *snap
 }
 
 // mirrorBoundContent loads the bound PodSnapshotContent and mirrors its status onto the PodSnapshot.
-// It does not resolve the source pod (the binding already exists).
+// A terminal content result is sufficient on its own. While content is pending, the source pod is
+// also observed so its terminal event can close a capture whose agent never published a result.
 func (sr *PodSnapshotReconciler) mirrorBoundContent(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot, boundName string) (ctrl.Result, error) {
 	content := &snapshotv1alpha1.PodSnapshotContent{}
 	if err := sr.Get(ctx, client.ObjectKey{Name: boundName}, content); err != nil {
@@ -123,7 +132,107 @@ func (sr *PodSnapshotReconciler) mirrorBoundContent(ctx context.Context, snap *s
 	if err := verifyContentBacklink(snap, content); err != nil {
 		return sr.failPodSnapshot(ctx, snap, "ContentConflict", err)
 	}
+	if snapshotv1alpha1.IsPodSnapshotContentSucceeded(content) || snapshotv1alpha1.IsPodSnapshotContentFailed(content) {
+		return sr.propagateStatus(ctx, snap, content)
+	}
+	return sr.resolvePendingBoundContent(ctx, snap, content)
+}
+
+// resolvePendingBoundContent uses the cache while the source still looks live because staying
+// Pending is reversible. Only a cached terminal or missing source needs authoritative confirmation
+// before it can cause a permanent capture failure.
+func (sr *PodSnapshotReconciler) resolvePendingBoundContent(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot, cachedContent *snapshotv1alpha1.PodSnapshotContent) (ctrl.Result, error) {
+	pod, err := sr.getSourcePod(ctx, snap)
+	if err == nil {
+		if _, cause := pendingCaptureSourceFailure(snap, cachedContent, pod); cause == nil {
+			return sr.propagateStatus(ctx, snap, cachedContent)
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, fmt.Errorf("get source pod for pending capture: %w", err)
+	}
+
+	return sr.confirmPendingCaptureTerminal(ctx, snap, cachedContent)
+}
+
+// confirmPendingCaptureTerminal bypasses the informer cache before writing sticky failure. The
+// agent persists Content Ready before releasing the source process, so a fresh content result wins
+// over a raced source-pod terminal event.
+func (sr *PodSnapshotReconciler) confirmPendingCaptureTerminal(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot, cachedContent *snapshotv1alpha1.PodSnapshotContent) (ctrl.Result, error) {
+	content, err := sr.readAuthoritativeBoundContent(ctx, snap, cachedContent)
+	if err != nil {
+		if errors.Is(err, errContentConflict) {
+			return sr.failPodSnapshot(ctx, snap, "ContentConflict", err)
+		}
+		return ctrl.Result{}, err
+	}
+	if snapshotv1alpha1.IsPodSnapshotContentSucceeded(content) || snapshotv1alpha1.IsPodSnapshotContentFailed(content) {
+		return sr.propagateStatus(ctx, snap, content)
+	}
+	return sr.resolveAuthoritativePendingSource(ctx, snap, content)
+}
+
+func (sr *PodSnapshotReconciler) resolveAuthoritativePendingSource(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot, content *snapshotv1alpha1.PodSnapshotContent) (ctrl.Result, error) {
+	pod, err := sr.readAuthoritativeSourcePod(ctx, snap)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			key := client.ObjectKey{Namespace: snap.Namespace, Name: snap.Spec.Source.PodRef.Name}
+			return sr.failPodSnapshot(ctx, snap, "SourcePodNotFound",
+				fmt.Errorf("source pod %q disappeared before capture success or failure was recorded", key.String()))
+		}
+		return ctrl.Result{}, err
+	}
+
+	reason, cause := pendingCaptureSourceFailure(snap, content, pod)
+	if cause != nil {
+		return sr.failPodSnapshot(ctx, snap, reason, cause)
+	}
 	return sr.propagateStatus(ctx, snap, content)
+}
+
+func (sr *PodSnapshotReconciler) readAuthoritativeBoundContent(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot, cachedContent *snapshotv1alpha1.PodSnapshotContent) (*snapshotv1alpha1.PodSnapshotContent, error) {
+	content := &snapshotv1alpha1.PodSnapshotContent{}
+	if err := sr.APIReader.Get(ctx, client.ObjectKeyFromObject(cachedContent), content); err != nil {
+		return nil, fmt.Errorf("re-read pending PodSnapshotContent %q: %w", cachedContent.Name, err)
+	}
+	if err := verifyContentBacklink(snap, content); err != nil {
+		return nil, fmt.Errorf("%w: %v", errContentConflict, err)
+	}
+	return content, nil
+}
+
+func (sr *PodSnapshotReconciler) readAuthoritativeSourcePod(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot) (*corev1.Pod, error) {
+	pod := &corev1.Pod{}
+	key := client.ObjectKey{Namespace: snap.Namespace, Name: snap.Spec.Source.PodRef.Name}
+	if err := sr.APIReader.Get(ctx, key, pod); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("re-read source pod %q for pending capture: %w", key.String(), err)
+	}
+	return pod, nil
+}
+
+func pendingCaptureSourceFailure(snap *snapshotv1alpha1.PodSnapshot, content *snapshotv1alpha1.PodSnapshotContent, pod *corev1.Pod) (string, error) {
+	key := client.ObjectKeyFromObject(pod)
+	wantUID := snap.Spec.Source.PodRef.UID
+	if wantUID == "" {
+		wantUID = content.Spec.Source.PodRef.UID
+	}
+	if wantUID != "" && pod.UID != wantUID {
+		return "StalePodReference",
+			fmt.Errorf("source pod %q UID %q does not match capture UID %q", key.String(), pod.UID, wantUID)
+	}
+
+	switch {
+	case pod.Status.Phase == corev1.PodSucceeded:
+		return snapshotv1alpha1.ReasonSourceCompletedWithoutCapture,
+			fmt.Errorf("source pod %q completed before PodSnapshotContent %q reported capture success or failure", key.String(), content.Name)
+	case pod.Status.Phase == corev1.PodFailed || pod.DeletionTimestamp != nil:
+		return "SourcePodGone",
+			fmt.Errorf("source pod %q became unavailable before PodSnapshotContent %q reported capture success or failure", key.String(), content.Name)
+	default:
+		return "", nil
+	}
 }
 
 // captureFromSourcePod is the no-content path: it resolves and validates the live source pod, then
@@ -369,16 +478,87 @@ func (sr *PodSnapshotReconciler) handleDelete(ctx context.Context, snap *snapsho
 	return ctrl.Result{}, nil
 }
 
-// SetupWithManager wires the controller: it owns Snapshots and watches SnapshotContents,
-// mapping a PodSnapshotContent back to its bound PodSnapshot via spec.snapshotRef.
+// SetupWithManager wires content and source-pod events to their PodSnapshots. The source-pod
+// index keeps pod-event mapping namespace-scoped and avoids scanning all PodSnapshots.
 func (sr *PodSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if sr.APIReader == nil {
+		return errors.New("pod snapshot reconciler requires an API reader")
+	}
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&snapshotv1alpha1.PodSnapshot{},
+		podSnapshotSourcePodNameField,
+		podSnapshotSourcePodIndexValues,
+	); err != nil {
+		return fmt.Errorf("index PodSnapshots by source pod: %w", err)
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&snapshotv1alpha1.PodSnapshot{}).
 		Watches(
 			&snapshotv1alpha1.PodSnapshotContent{},
 			handler.EnqueueRequestsFromMapFunc(podSnapshotContentToPodSnapshot),
 		).
+		Watches(
+			&corev1.Pod{},
+			handler.EnqueueRequestsFromMapFunc(sr.sourcePodToPodSnapshots),
+			builder.WithPredicates(sourcePodCapturePredicate()),
+		).
 		Complete(sr)
+}
+
+func podSnapshotSourcePodIndexValues(obj client.Object) []string {
+	snap, ok := obj.(*snapshotv1alpha1.PodSnapshot)
+	if !ok || snap.Spec.Source.PodRef.Name == "" {
+		return nil
+	}
+	return []string{snap.Spec.Source.PodRef.Name}
+}
+
+// sourcePodToPodSnapshots maps a pod event to PodSnapshots in the same namespace that pin that
+// source name. UID validation remains in reconciliation so a same-name recreation wakes and fails
+// a stale work order instead of being silently ignored.
+func (sr *PodSnapshotReconciler) sourcePodToPodSnapshots(ctx context.Context, obj client.Object) []reconcile.Request {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok {
+		log.FromContext(ctx).Error(fmt.Errorf("expected *Pod, got %T", obj), "Failed to map source Pod to PodSnapshots")
+		return nil
+	}
+
+	snaps := &snapshotv1alpha1.PodSnapshotList{}
+	if err := sr.List(ctx, snaps,
+		client.InNamespace(pod.Namespace),
+		client.MatchingFields{podSnapshotSourcePodNameField: pod.Name},
+	); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list PodSnapshots for source Pod", "pod", client.ObjectKeyFromObject(pod))
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(snaps.Items))
+	for i := range snaps.Items {
+		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&snaps.Items[i])})
+	}
+	return requests
+}
+
+// sourcePodCapturePredicate admits only events that can unblock initial binding or close a pending
+// capture. Ordinary pod status churn does not need to re-read PodSnapshotContent.
+func sourcePodCapturePredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc: func(event.CreateEvent) bool { return true },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldPod, oldOK := e.ObjectOld.(*corev1.Pod)
+			newPod, newOK := e.ObjectNew.(*corev1.Pod)
+			if !oldOK || !newOK {
+				return false
+			}
+			return oldPod.Spec.NodeName != newPod.Spec.NodeName ||
+				oldPod.Status.Phase != newPod.Status.Phase ||
+				(oldPod.DeletionTimestamp == nil) != (newPod.DeletionTimestamp == nil)
+		},
+		DeleteFunc:  func(event.DeleteEvent) bool { return true },
+		GenericFunc: func(event.GenericEvent) bool { return false },
+	}
 }
 
 // podSnapshotContentToPodSnapshot maps a PodSnapshotContent (including a delete-event tombstone) back

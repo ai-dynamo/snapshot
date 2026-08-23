@@ -40,13 +40,18 @@ const (
 	ReasonJobCompleted            = "JobCompleted"
 
 	// Failed=True
-	ReasonCaptureFailed           = "CaptureFailed"
-	ReasonPodSnapshotFailed       = "PodSnapshotFailed"
-	ReasonJobFailed               = "JobFailed"
-	ReasonDeadlineExceeded        = "DeadlineExceeded"
-	ReasonPodSnapshotNameConflict = "PodSnapshotNameConflict"
-	ReasonJobNameConflict         = "JobNameConflict"
-	ReasonJobDeleted              = "JobDeleted"
+	ReasonCaptureFailed     = "CaptureFailed"
+	ReasonPodSnapshotFailed = "PodSnapshotFailed"
+	ReasonJobFailed         = "JobFailed"
+	ReasonDeadlineExceeded  = "DeadlineExceeded"
+	// ReasonSourceCompletedWithoutCapture means the BatchJob reported Complete=True,
+	// but the authoritative PodSnapshotContent remained nonterminal after the source
+	// pod exited. There is no observed capture error; the required capture result is
+	// missing after the source exited.
+	ReasonSourceCompletedWithoutCapture = "SourceCompletedWithoutCapture"
+	ReasonPodSnapshotNameConflict       = "PodSnapshotNameConflict"
+	ReasonJobNameConflict               = "JobNameConflict"
+	ReasonJobDeleted                    = "JobDeleted"
 	// ReasonInvalidSpec covers spec-level validation failures caught before
 	// building the source Job, for objects that bypassed CEL admission.
 	ReasonInvalidSpec = "InvalidSpec"

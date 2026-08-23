@@ -46,6 +46,63 @@ func setJobFailureCondition(job *batchv1.Job, conditionType batchv1.JobCondition
 	})
 }
 
+func TestSnapshotJobTerminalFailure(t *testing.T) {
+	ready := &snapshotv1alpha1.PodSnapshot{Status: snapshotv1alpha1.PodSnapshotStatus{Conditions: []metav1.Condition{{
+		Type: snapshotv1alpha1.PodSnapshotConditionReady, Status: metav1.ConditionTrue, Reason: "Captured",
+	}}}}
+	failed := &snapshotv1alpha1.PodSnapshot{Status: snapshotv1alpha1.PodSnapshotStatus{Conditions: []metav1.Condition{{
+		Type: snapshotv1alpha1.PodSnapshotConditionFailed, Status: metav1.ConditionTrue, Reason: "CRIUDumpFailed", Message: "dump failed",
+	}}}}
+	sourceCompletedWithoutCapture := &snapshotv1alpha1.PodSnapshot{Status: snapshotv1alpha1.PodSnapshotStatus{Conditions: []metav1.Condition{{
+		Type: snapshotv1alpha1.PodSnapshotConditionFailed, Status: metav1.ConditionTrue,
+		Reason: snapshotv1alpha1.ReasonSourceCompletedWithoutCapture, Message: "source exited without a capture result",
+	}}}}
+	pending := &snapshotv1alpha1.PodSnapshot{}
+
+	complete := func() batchv1.JobCondition {
+		return batchv1.JobCondition{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}
+	}
+	failedCondition := func(conditionType batchv1.JobConditionType, reason string) batchv1.JobCondition {
+		return batchv1.JobCondition{Type: conditionType, Status: corev1.ConditionTrue, Reason: reason, Message: "source stopped"}
+	}
+
+	tests := []struct {
+		name       string
+		conditions []batchv1.JobCondition
+		snapshot   *snapshotv1alpha1.PodSnapshot
+		wantReason string
+	}{
+		{name: "active Job and pending capture keep waiting", snapshot: pending},
+		{name: "Complete=False is not terminal", conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionFalse}}, snapshot: pending},
+		{name: "completed Job and pending capture wait for a source or capture event", conditions: []batchv1.JobCondition{complete()}, snapshot: pending},
+		{name: "completed Job and missing PodSnapshot wait for resource reconciliation", conditions: []batchv1.JobCondition{complete()}},
+		{name: "FailureTarget and pending capture fail immediately", conditions: []batchv1.JobCondition{failedCondition(batchv1.JobFailureTarget, "BackoffLimitExceeded")}, snapshot: pending, wantReason: snapshotv1alpha1.ReasonJobFailed},
+		{name: "Failed and pending capture fail immediately", conditions: []batchv1.JobCondition{failedCondition(batchv1.JobFailed, "BackoffLimitExceeded")}, snapshot: pending, wantReason: snapshotv1alpha1.ReasonJobFailed},
+		{name: "deadline fails immediately with pending capture", conditions: []batchv1.JobCondition{failedCondition(batchv1.JobFailureTarget, batchv1.JobReasonDeadlineExceeded)}, snapshot: pending, wantReason: snapshotv1alpha1.ReasonDeadlineExceeded},
+		{name: "deadline takes precedence over generic failure", conditions: []batchv1.JobCondition{failedCondition(batchv1.JobFailed, "BackoffLimitExceeded"), failedCondition(batchv1.JobFailureTarget, batchv1.JobReasonDeadlineExceeded)}, snapshot: pending, wantReason: snapshotv1alpha1.ReasonDeadlineExceeded},
+		{name: "completed Job and ready capture are successful signals", conditions: []batchv1.JobCondition{complete()}, snapshot: ready},
+		{name: "active Job and ready capture wait for Job completion", snapshot: ready},
+		{name: "Job failure is immediate after successful capture", conditions: []batchv1.JobCondition{failedCondition(batchv1.JobFailed, "BackoffLimitExceeded")}, snapshot: ready, wantReason: snapshotv1alpha1.ReasonJobFailed},
+		{name: "PodSnapshot failure reports capture failure", snapshot: failed, wantReason: snapshotv1alpha1.ReasonCaptureFailed},
+		{name: "source completion without capture preserves its specific reason", conditions: []batchv1.JobCondition{complete()}, snapshot: sourceCompletedWithoutCapture, wantReason: snapshotv1alpha1.ReasonSourceCompletedWithoutCapture},
+		{name: "Job failure takes precedence when both fail", conditions: []batchv1.JobCondition{failedCondition(batchv1.JobFailed, "BackoffLimitExceeded")}, snapshot: failed, wantReason: snapshotv1alpha1.ReasonJobFailed},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			job := &batchv1.Job{Status: batchv1.JobStatus{Conditions: test.conditions}}
+			failure := snapshotJobTerminalFailure(job, test.snapshot)
+			if test.wantReason == "" {
+				assert.Nil(t, failure)
+				return
+			}
+			require.NotNil(t, failure)
+			assert.Equal(t, test.wantReason, failure.reason)
+			assert.NotNil(t, failure.cause)
+		})
+	}
+}
+
 // ---- two-signal completion ----
 
 func TestSnapshotJobReconcileCompletionGate(t *testing.T) {
@@ -149,6 +206,28 @@ func TestSnapshotJobReconcileCompletionGate(t *testing.T) {
 	})
 }
 
+func TestSnapshotJobReconcileCompletedJobWithMissingSourcePodFailsWithoutPolling(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+	sj.UID = types.UID("sj-uid")
+	job, err := buildSourceJob(sj)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	completeJob(job)
+
+	r := makeSnapshotJobReconciler(s, sj, job)
+	result, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+	assert.Zero(t, result.RequeueAfter)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, snapshotv1alpha1.ReasonSourceCompletedWithoutCapture, failed.Reason)
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobCompleted(updated))
+}
+
 // ---- capture success does not override source Job failure ----
 
 func TestSnapshotJobReconcileCaptureDoesNotOverrideJobFailure(t *testing.T) {
@@ -184,7 +263,7 @@ func TestSnapshotJobReconcileCaptureDoesNotOverrideJobFailure(t *testing.T) {
 	assert.NotNil(t, getBatchJobByName(jobs, sj.Name), "failed source Job must be preserved for debugging")
 }
 
-func TestSnapshotJobReconcileDefersJobFailureUntilCaptureSettles(t *testing.T) {
+func TestSnapshotJobReconcileFailsImmediatelyWhenJobFailsDuringPendingCapture(t *testing.T) {
 	for _, conditionType := range []batchv1.JobConditionType{batchv1.JobFailureTarget, batchv1.JobFailed} {
 		t.Run(string(conditionType), func(t *testing.T) {
 			s := snapshotJobReconcilerScheme()
@@ -201,25 +280,16 @@ func TestSnapshotJobReconcileDefersJobFailureUntilCaptureSettles(t *testing.T) {
 			r := makeSnapshotJobReconciler(s, sj, job, pod, snap)
 			result, err := r.Reconcile(context.Background(), reconcileRequest(sj))
 			require.NoError(t, err)
-			assert.Equal(t, captureResultRequeueBackstop, result.RequeueAfter)
+			assert.Zero(t, result.RequeueAfter)
 
 			updated := &snapshotv1alpha1.SnapshotJob{}
 			require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
-			assert.False(t, snapshotv1alpha1.IsSnapshotJobFailed(updated))
-			assert.False(t, snapshotv1alpha1.IsSnapshotJobCompleted(updated))
-
-			require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), snap))
-			meta.SetStatusCondition(&snap.Status.Conditions, metav1.Condition{
-				Type: snapshotv1alpha1.PodSnapshotConditionReady, Status: metav1.ConditionTrue, Reason: "Captured",
-			})
-			require.NoError(t, r.Update(context.Background(), snap))
-
-			_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
-			require.NoError(t, err)
-			require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
-			assert.False(t, snapshotv1alpha1.IsSnapshotJobCompleted(updated))
 			assert.True(t, snapshotv1alpha1.IsSnapshotJobFailed(updated))
-			assert.True(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured))
+			assert.False(t, snapshotv1alpha1.IsSnapshotJobCompleted(updated))
+			assert.False(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured))
+			failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+			require.NotNil(t, failed)
+			assert.Equal(t, snapshotv1alpha1.ReasonJobFailed, failed.Reason)
 
 			jobs := &batchv1.JobList{}
 			require.NoError(t, r.List(context.Background(), jobs))
@@ -321,6 +391,7 @@ func TestCaptureFailureReason(t *testing.T) {
 		{"bind-stage: ContentConflict maps to PodSnapshotFailed", "ContentConflict", snapshotv1alpha1.ReasonPodSnapshotFailed},
 		{"bind-stage: SourcePodNotFound maps to PodSnapshotFailed", "SourcePodNotFound", snapshotv1alpha1.ReasonPodSnapshotFailed},
 		{"bind-stage: StalePodReference maps to PodSnapshotFailed", "StalePodReference", snapshotv1alpha1.ReasonPodSnapshotFailed},
+		{"source completion without result keeps its specific reason", snapshotv1alpha1.ReasonSourceCompletedWithoutCapture, snapshotv1alpha1.ReasonSourceCompletedWithoutCapture},
 		{"agent-mirrored reason maps to CaptureFailed", "CRIUDumpFailed", snapshotv1alpha1.ReasonCaptureFailed},
 	}
 	for _, tc := range cases {
