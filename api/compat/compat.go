@@ -111,6 +111,8 @@ type check struct {
 // gate that can evaluate it and kept in the order they are reported.
 var checksByGate = registerChecks(
 	cpuArchCheck,
+	kernelVersionCheck,
+	kernelMinimumCheck,
 )
 
 // registerChecks partitions the policy table by the gate each rule runs at, so
