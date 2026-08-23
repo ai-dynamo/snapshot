@@ -310,9 +310,9 @@ func inspectRestore(
 //  2. nsrestore binary fd: we open nsrestore from the agent host side (SnapshotBinSrc)
 //     before entering any namespace and exec it via /proc/self/fd/N. This protects
 //     the nsrestore binary itself against path-based substitution inside the
-//     container. Binaries that nsrestore subsequently loads (criu, ip, tar, .so
-//     files) are still resolved by PATH/LD_LIBRARY_PATH inside the container's
-//     mount namespace.
+//     container. CRIU, ip, and shared objects that nsrestore subsequently loads
+//     are resolved by PATH/LD_LIBRARY_PATH inside the container's mount
+//     namespace. The restore tar is invoked by its explicit bundle path.
 func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot, mp nsmount.MountPoint, checkpointPath string) (*RestoreInNamespaceResult, error) {
 
 	// Open nsrestore from the agent host side before entering the container

@@ -11,6 +11,8 @@ Upstream source for the third-party components redistributed in this image.
                a package published without source by an NVIDIA repository; any
                other fetch failure fails the build.
   criu/        CRIU source at the commit this image was built from.
+  gnu-tar/     Pinned GNU tar source used to build the statically linked
+               restore-time tar binary.
   go/vendor/   Source for the Go modules linked into the binaries in this
                image; modules.txt records the exact module set.
 

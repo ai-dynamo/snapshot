@@ -158,7 +158,7 @@ func CaptureDeletedFiles(upperDir, checkpointDir string) (bool, error) {
 // The archive is copied to local disk first. tar walks members with many small
 // reads; doing that directly from NFS is much slower than one sequential copy
 // plus a local extract.
-func ApplyRootfsDiff(checkpointPath, targetRoot string, log logr.Logger) error {
+func ApplyRootfsDiff(checkpointPath, targetRoot, tarBinary string, log logr.Logger) error {
 	rootfsDiffPath := filepath.Join(checkpointPath, rootfsDiffFilename)
 	info, err := os.Stat(rootfsDiffPath)
 	if os.IsNotExist(err) {
@@ -183,11 +183,11 @@ func ApplyRootfsDiff(checkpointPath, targetRoot string, log logr.Logger) error {
 	// The rootfs diff only contains overlay upperdir changes (runtime-generated files
 	// like triton caches, tmp files) — base image files should not be overwritten.
 	log.Info("Applying rootfs diff", "target", targetRoot, "bytes", info.Size())
-	cmd := exec.Command("tar", "--skip-old-files", "--blocking-factor=2048", "-C", targetRoot, "-xf", localPath)
+	cmd := exec.Command(tarBinary, "--skip-old-files", "--blocking-factor=2048", "-C", targetRoot, "-xf", localPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("tar extract failed: %w", err)
+		return fmt.Errorf("tar extract with %s failed: %w", tarBinary, err)
 	}
 	return nil
 }
