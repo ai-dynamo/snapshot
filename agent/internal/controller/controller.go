@@ -47,6 +47,7 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
+	"github.com/ai-dynamo/snapshot/api/compat"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -71,6 +72,7 @@ type NodeController struct {
 	sendSignalFn            func(logr.Logger, int, syscall.Signal, string) error
 	restoreQueue            workqueue.TypedDelayingInterface[client.ObjectKey]
 	restorePodLister        corev1listers.PodLister
+	compareFn               func(compat.Gate, compat.Facts, compat.Facts) []compat.Mismatch
 
 	inFlight   map[string]struct{}
 	inFlightMu sync.Mutex
@@ -202,6 +204,7 @@ func newDefaultController(
 		writeControlSentinelFn:  snapshotruntime.WriteControlSentinel,
 		controlSentinelExistsFn: snapshotruntime.ControlSentinelExists,
 		sendSignalFn:            snapshotruntime.SendSignalToPID,
+		compareFn:               compat.Compare,
 	}
 	w.checkpointFn = w.executorCheckpoint
 	return w
@@ -473,7 +476,16 @@ func (w *NodeController) preflightRestore(ctx context.Context, pod *corev1.Pod) 
 	if err != nil {
 		return nil, err
 	}
-	return w.resolveRestoreArtifact(fmt.Sprintf("%s/%s", pod.Namespace, pod.Name), target)
+	artifact, err := w.resolveRestoreArtifact(fmt.Sprintf("%s/%s", pod.Namespace, pod.Name), target)
+	if err != nil {
+		return nil, err
+	}
+	// Gate A: the earliest point the checkpoint's own record of what it was
+	// captured on is readable, and still before any of the restore is attempted.
+	if err := w.preflightCompatibility(pod, artifact); err != nil {
+		return nil, err
+	}
+	return artifact, nil
 }
 
 func (w *NodeController) getPodSnapshotFromPod(ctx context.Context, pod *corev1.Pod) (*snapshotv1alpha1.PodSnapshot, error) {
