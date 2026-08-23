@@ -151,6 +151,26 @@ func TestRefusalPublishesTheRestoredConditionAtBothGates(t *testing.T) {
 	})
 }
 
+// A refusal is terminal like any other restore failure: the pod is not compared
+// again on the next resync, and the queue worker says why rather than silently
+// dropping it.
+func TestReconcileRestorePodLeavesARefusedPodAlone(t *testing.T) {
+	r := newGatedRestore(t, compat.Mismatch{Check: "cpu-arch", Source: "amd64", Target: "arm64"})
+	r.pod.Status.Conditions = append(r.pod.Status.Conditions, corev1.PodCondition{
+		Type:    corev1.PodConditionType(snapshotv1alpha1.RestoredCondition),
+		Status:  corev1.ConditionFalse,
+		Reason:  restoreIncompatibleReason,
+		Message: "cpu-arch: source amd64, target arm64",
+	})
+
+	r.reconcile(t)
+
+	assert.Empty(t, r.comparison.calls, "already refused restore was compared again")
+	assert.Empty(t, r.events(t, restoreIncompatibleReason), "already refused restore was refused again")
+	assert.Len(t, r.events(t, restoreAlreadyFailedReason), 1)
+	assert.Empty(t, r.controller.inFlight, "already refused restore claimed an attempt")
+}
+
 // The escape hatches: with either one set, neither gate runs, so a checkpoint
 // the policy table would turn down is still attempted.
 func TestSkipCompatCheckTurnsOffTheGates(t *testing.T) {
