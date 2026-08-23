@@ -18,7 +18,6 @@ state, the behavior and API shapes below are not implemented yet.
 | **Approver**                   | *TBD* |
 | **Created**                    | 2026-08-12 |
 | **Last updated**               | 2026-08-23 |
-| **Target release / milestone** | *TBD* |
 | **Affected services / repos**  | `ai-dynamo/snapshot`: node agent, shared API and protocol, operator, and snapshot Helm chart |
 | **On-call / ownership**        | Badger team |
 
