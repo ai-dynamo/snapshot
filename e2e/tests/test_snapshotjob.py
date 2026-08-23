@@ -56,8 +56,12 @@ def assert_snapshotjob_completed(sj: dict[str, Any]) -> None:
     running = snap.condition(sj, "Running")
     assert running and running.get("status") == "False"
     assert running.get("reason") == "JobCompleted"
+    # All four conditions are present from the first reconcile and are only
+    # updated, never removed: success must carry an explicit Failed=False.
     failed = snap.condition(sj, "Failed")
-    assert failed is None or failed.get("status") != "True"
+    assert failed is not None, "Failed must be present (known False), not absent"
+    assert failed.get("status") == "False"
+    assert failed.get("reason") == "NoFailure"
     assert sj["status"]["completedAt"]
     # status.startedAt is deliberately not asserted: it is recorded only if a
     # reconcile observes job.status.ready > 0, and under kill-based capture
