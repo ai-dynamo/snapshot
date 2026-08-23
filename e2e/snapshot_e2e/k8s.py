@@ -60,6 +60,10 @@ def read_crd(name: str) -> client.V1CustomResourceDefinition:
     return client.ApiextensionsV1Api().read_custom_resource_definition(name)
 
 
+def read_node(name: str) -> client.V1Node:
+    return client.CoreV1Api().read_node(name)
+
+
 def list_events(namespace: str) -> list[client.CoreV1Event]:
     return client.CoreV1Api().list_namespaced_event(namespace).items
 
@@ -108,6 +112,23 @@ def exec_command(namespace: str, pod: str, command: str) -> str:
         stdout=True,
         tty=False,
     )
+
+
+PAYLOAD_MARKER = "e2e-payload-follows"
+
+
+def exec_payload(namespace: str, pod: str, command: str) -> str:
+    """Exec output with whatever the login shell printed first dropped.
+
+    exec_command merges stderr into the stream, so a container whose profile
+    writes anything breaks every caller that parses the result rather than
+    matching a substring in it.
+    """
+    output = exec_command(namespace, pod, f"echo {PAYLOAD_MARKER}; {command}")
+    _, marker, payload = output.partition(PAYLOAD_MARKER)
+    if not marker:
+        raise AssertionError(f"exec output carried no payload marker: {output!r}")
+    return payload.lstrip("\n")
 
 
 def snapshot_custom_resource_api_is_accessible(namespace: str) -> None:

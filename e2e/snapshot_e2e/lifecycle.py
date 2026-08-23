@@ -9,6 +9,7 @@ import shlex
 import time
 from typing import Any, Callable
 
+import yaml
 from kubernetes import client
 from kubernetes.client import ApiException
 
@@ -324,11 +325,38 @@ def pod_condition(pod: client.V1Pod, condition_type: str) -> client.V1PodConditi
 def checkpoint_artifact_manifest(
     config: k8s.E2EConfig, node: str, content_uid: str
 ) -> str:
-    return k8s.exec_command(
+    return k8s.exec_payload(
         config.namespace,
         checkpoint_agent_pod(config, node),
         f"cat {checkpoint_artifact_path(content_uid)}/manifest.yaml",
     )
+
+
+def checkpoint_manifest(
+    config: k8s.E2EConfig, node: str, content_uid: str
+) -> dict[str, Any]:
+    """The manifest as the agent will read it back, rather than as text."""
+    return yaml.safe_load(checkpoint_artifact_manifest(config, node, content_uid))
+
+
+def visible_gpus(namespace: str, pod: str) -> list[dict[str, str]]:
+    """The GPUs a pod can see, as nvidia-smi inside that pod reports them.
+
+    The same query the agent runs, so a test comparing the two is comparing what
+    the machine says against what the artifact recorded, not two spellings of it.
+    """
+    output = k8s.exec_payload(
+        namespace,
+        pod,
+        "nvidia-smi --query-gpu=gpu_uuid,name,driver_version --format=csv,noheader",
+    )
+    gpus = []
+    for line in output.strip().splitlines():
+        fields = [field.strip() for field in line.split(",")]
+        if len(fields) != 3:
+            raise AssertionError(f"unexpected nvidia-smi row {line!r}")
+        gpus.append({"uuid": fields[0], "name": fields[1], "driver": fields[2]})
+    return gpus
 
 
 def checkpoint_artifact_listing(
