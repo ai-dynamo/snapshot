@@ -203,3 +203,63 @@ func TestImageDigestCheck(t *testing.T) {
 		})
 	}
 }
+
+func TestMemoryLimitCheck(t *testing.T) {
+	memory := func(limit string) Facts {
+		return Facts{MemoryLimit: limit}
+	}
+
+	tests := []struct {
+		name   string
+		source Facts
+		target Facts
+		want   []Mismatch
+	}{
+		{
+			name:   "the same limit",
+			source: memory("32Gi"),
+			target: memory("32Gi"),
+		},
+		{
+			name:   "a larger limit",
+			source: memory("32Gi"),
+			target: memory("64Gi"),
+		},
+		{
+			name:   "a smaller limit",
+			source: memory("32Gi"),
+			target: memory("1Gi"),
+			want:   []Mismatch{{Check: CheckMemoryLimit, Source: "32Gi", Target: "1Gi"}},
+		},
+		{
+			// The same amount written another way is the same amount.
+			name:   "the same limit in different units",
+			source: memory("32Gi"),
+			target: memory("34359738368"),
+		},
+		{
+			// A pod with no limit records none, so this is also how a restore
+			// into an unlimited pod reads: nothing to compare.
+			name:   "the target has no limit",
+			source: memory("32Gi"),
+		},
+		{
+			name:   "the checkpoint recorded no limit",
+			target: memory("1Gi"),
+		},
+		{
+			name:   "an unreadable quantity",
+			source: memory("32Gi"),
+			target: memory("plenty"),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Compare(GatePreflight, tc.source, tc.target)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("Compare = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
