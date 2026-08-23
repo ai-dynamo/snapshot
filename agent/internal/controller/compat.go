@@ -5,6 +5,7 @@ package controller
 
 import (
 	"fmt"
+	"runtime"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -92,11 +93,25 @@ func (w *NodeController) preflightCompatibility(pod *corev1.Pod, artifact *resto
 		return nil
 	}
 
-	// Target facts are read by the rules that need them, since each one costs a
-	// syscall or an API read on a path that runs before every restore.
-	mismatches := w.compareFn(compat.GatePreflight, manifest.CompatFacts(), compat.Facts{})
+	mismatches := w.compareFn(
+		compat.GatePreflight,
+		manifest.CompatFacts(),
+		w.preflightTargetFacts(pod, artifact.ContainerName),
+	)
 	if len(mismatches) == 0 {
 		return nil
 	}
 	return compat.NewIncompatibleError(compat.GatePreflight, mismatches)
+}
+
+// preflightTargetFacts describes what this node and this pod offer a restore, as
+// far as it is knowable before the placeholder container exists. It is assembled
+// per restore from facts the agent already holds, so the gate costs no syscalls
+// and no API reads.
+func (w *NodeController) preflightTargetFacts(pod *corev1.Pod, containerName string) compat.Facts {
+	facts := podFacts(pod, containerName)
+	// The agent's own architecture, which is the node's: this binary could not
+	// be running here otherwise.
+	facts.CPUArch = runtime.GOARCH
+	return facts
 }

@@ -5,6 +5,7 @@ package controller
 
 import (
 	"context"
+	"runtime"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -56,6 +57,23 @@ func TestPreflightCompatibilityComparesRecordedFacts(t *testing.T) {
 	require.Len(t, r.comparison.calls, 1)
 	assert.Equal(t, compat.GatePreflight, r.comparison.calls[0].gate)
 	assert.Equal(t, []string{"/etc/hosts", "/model-cache"}, r.comparison.calls[0].source.ExternalizedMounts)
+}
+
+// The gate compares the checkpoint against where it would be restored, so the
+// target side has to describe this node and this pod rather than stay empty.
+func TestPreflightCompatibilityDescribesTheRestoreTarget(t *testing.T) {
+	r := newGatedRestore(t)
+	r.pod.Spec.Containers[0].Image = "nvcr.io/nvidia/tritonserver:24.09-py3"
+	r.pod.Status.ContainerStatuses[0].ImageID = "sha256:deadbeef"
+
+	require.NoError(t, r.controller.preflightCompatibility(r.pod, r.artifact))
+
+	require.Len(t, r.comparison.calls, 1)
+	assert.Equal(t, compat.Facts{
+		CPUArch: runtime.GOARCH,
+		Image:   "nvcr.io/nvidia/tritonserver:24.09-py3",
+		ImageID: "sha256:deadbeef",
+	}, r.comparison.calls[0].target)
 }
 
 // Both gates log the same sentence for the same refusal, and each names the gate
