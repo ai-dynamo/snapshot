@@ -200,20 +200,28 @@ func classifySourceJobTerminal(job *batchv1.Job) sourceJobTerminalResult {
 	return sourceJobTerminalResult{state: sourceJobActive}
 }
 
-// snapshotJobTerminalFailure combines the source Job and PodSnapshot terminal
-// signals. A source Job failure always makes the two-signal SnapshotJob fail.
-// Successful Job completion with a pending capture remains nonterminal: the
-// PodSnapshot controller resolves that state from source-pod and content events.
+// snapshotJobTerminalFailure arbitrates the terminal signals. Once a capture
+// exists, its result is authoritative: Ready is success regardless of how the
+// source Job ended (the checkpoint terminates the source process, so a failed
+// source Job is the expected outcome of a successful capture), a Failed capture
+// keeps its specific reason even when the Job also failed, and a pending
+// capture is never failed on the source Job's word alone — the caller waits for
+// the agent's terminal result. Only before any capture exists does a source Job
+// failure fail the SnapshotJob immediately. One exception on the failure side:
+// an explicit deadline expiry is the root cause of a capture that died with it,
+// so DeadlineExceeded wins over the collateral capture failure.
 func snapshotJobTerminalFailure(job *batchv1.Job, snap *snapshotv1alpha1.PodSnapshot) *snapshotJobFailure {
-	terminal := classifySourceJobTerminal(job)
-	if terminal.failure != nil {
-		return terminal.failure
+	if snap != nil {
+		if snapshotv1alpha1.IsPodSnapshotFailed(snap) {
+			if terminal := classifySourceJobTerminal(job); terminal.state == sourceJobDeadlineExceeded {
+				return terminal.failure
+			}
+			reason, message := captureFailureReason(snap)
+			return &snapshotJobFailure{reason: reason, cause: errors.New(message)}
+		}
+		return nil
 	}
-	if snap != nil && snapshotv1alpha1.IsPodSnapshotFailed(snap) {
-		reason, message := captureFailureReason(snap)
-		return &snapshotJobFailure{reason: reason, cause: errors.New(message)}
-	}
-	return nil
+	return classifySourceJobTerminal(job).failure
 }
 
 // ensureJobDeleted deletes the owned source Job after successful completion.
