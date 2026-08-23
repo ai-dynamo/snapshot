@@ -13,14 +13,25 @@ import (
 // inspectCompatibility runs the inspect gate for one restore, the counterpart of
 // the controller's preflightCompatibility. A nil error means the restore may go
 // ahead. It gathers the target facts this gate can read, which the earlier gate
-// cannot: the runtime image ID.
-func inspectCompatibility(log logr.Logger, manifest *types.CheckpointManifest, targetImageID string, skipCompatCheck bool) error {
+// cannot: the runtime image ID and mounts under its rootfs.
+func inspectCompatibility(
+	log logr.Logger,
+	manifest *types.CheckpointManifest,
+	targetRoot string,
+	targetImageID string,
+	skipCompatCheck bool,
+) error {
 	if skipCompatCheck {
 		log.Info("Restore compatibility check skipped by request", "gate", string(compat.GateInspect))
 		return nil
 	}
 
-	mismatches := compat.Compare(compat.GateInspect, manifest.CompatFacts(), compat.Facts{ImageID: targetImageID})
+	sourceFacts := manifest.CompatFacts()
+	targetFacts := compat.Facts{
+		ImageID:        targetImageID,
+		ExistingMounts: existingMounts(targetRoot, sourceFacts.ExternalizedMounts),
+	}
+	mismatches := compat.Compare(compat.GateInspect, sourceFacts, targetFacts)
 	if len(mismatches) == 0 {
 		return nil
 	}

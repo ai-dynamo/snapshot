@@ -43,6 +43,14 @@ func differentFacts() Facts {
 	}
 }
 
+// deliberatelyNotSilent is the one rule that does refuse on a fact the target
+// side does not carry, for the reason given where it is defined: the mount rule
+// is handed a target list resolved from the source list, so an absence there
+// means the path was looked for and not found.
+var deliberatelyNotSilent = map[Check]bool{
+	CheckMount: true,
+}
+
 // Whatever rules are registered, a fact nobody recorded cannot refuse anything:
 // every checkpoint captured before a fact existed has to stay restorable, and a
 // target the agent could not read has to be given the benefit of the doubt.
@@ -73,8 +81,11 @@ func TestCompareIgnoresUnknownFacts(t *testing.T) {
 	for _, gate := range []Gate{GatePreflight, GateInspect} {
 		for _, tc := range tests {
 			t.Run(string(gate)+" "+tc.name, func(t *testing.T) {
-				if mismatches := Compare(gate, tc.source, tc.target); len(mismatches) != 0 {
-					t.Fatalf("Compare(%q) reported %v, want no mismatches", gate, mismatches)
+				for _, mismatch := range Compare(gate, tc.source, tc.target) {
+					if deliberatelyNotSilent[mismatch.Check] {
+						continue
+					}
+					t.Errorf("Compare(%q) reported %+v, want no mismatches", gate, mismatch)
 				}
 			})
 		}
