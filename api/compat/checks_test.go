@@ -559,3 +559,87 @@ func TestGPUCountCheck(t *testing.T) {
 		t.Errorf("Compare = %+v, want %+v", got, want)
 	}
 }
+
+func TestDriverVersionCheck(t *testing.T) {
+	driver := func(version string) Facts {
+		return Facts{DriverVersion: version}
+	}
+
+	tests := []struct {
+		name   string
+		source Facts
+		target Facts
+		want   []Mismatch
+	}{
+		{
+			name:   "the same driver build",
+			source: driver("580.65.06"),
+			target: driver("580.65.06"),
+		},
+		{
+			// Two builds of the same release are not interchangeable: upstream
+			// reproduces a restore failure across exactly this distance.
+			name:   "a different build of the same release",
+			source: driver("580.65.06"),
+			target: driver("580.65.08"),
+			want: []Mismatch{{
+				Check:  CheckDriverVersion,
+				Source: "580.65.06",
+				Target: "580.65.08",
+			}},
+		},
+		{
+			name:   "a newer driver",
+			source: driver("580.65.06"),
+			target: driver("585.10.01"),
+			want: []Mismatch{{
+				Check:  CheckDriverVersion,
+				Source: "580.65.06",
+				Target: "585.10.01",
+			}},
+		},
+		{
+			// Both rules speak: a different driver, and one CUDA checkpoint and
+			// restore is not supported on at all.
+			name:   "a driver below the floor",
+			source: driver("580.65.06"),
+			target: driver("560.35.03"),
+			want: []Mismatch{
+				{Check: CheckDriverVersion, Source: "580.65.06", Target: "560.35.03"},
+				{Check: CheckDriverMinimum, Source: "580 or newer", Target: "560.35.03"},
+			},
+		},
+		{
+			name:   "both sides below the floor",
+			source: driver("560.35.03"),
+			target: driver("560.35.03"),
+			want: []Mismatch{
+				{Check: CheckDriverMinimum, Source: "580 or newer", Target: "560.35.03"},
+			},
+		},
+		{
+			name:   "checkpoint taken before the driver was recorded",
+			target: driver("580.65.06"),
+		},
+		{
+			name:   "the target driver could not be read",
+			source: driver("580.65.06"),
+		},
+		{
+			// A version in a form the floor cannot read is unknown rather than
+			// old, so it does not refuse every restore on the node.
+			name:   "an unreadable version",
+			source: driver("vendor-build"),
+			target: driver("vendor-build"),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Compare(GateInspect, tc.source, tc.target)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("Compare = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
