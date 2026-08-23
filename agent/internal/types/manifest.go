@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -29,6 +30,7 @@ type CheckpointManifest struct {
 	K8s      SourcePodManifest `yaml:"k8s"`
 	Overlay  OverlayManifest   `yaml:"overlay"`
 	CUDA     CUDAManifest      `yaml:"cudaRestore,omitempty"`
+	Host     HostManifest      `yaml:"host,omitempty"`
 }
 
 // ArtifactManifest pins an on-disk checkpoint to the Kubernetes content object
@@ -44,6 +46,7 @@ func NewCheckpointManifest(
 	criuDump CRIUDumpManifest,
 	k8s SourcePodManifest,
 	overlay OverlayManifest,
+	host HostManifest,
 ) *CheckpointManifest {
 	return &CheckpointManifest{
 		Artifact: ArtifactManifest{
@@ -54,6 +57,24 @@ func NewCheckpointManifest(
 		CRIUDump:  criuDump,
 		K8s:       k8s,
 		Overlay:   overlay,
+		Host:      host,
+	}
+}
+
+// HostManifest records the machine a checkpoint was captured on. A fact the
+// agent could not read is left out rather than written empty, so it reads as
+// unknown instead of as a value that happens to be blank.
+type HostManifest struct {
+	KernelVersion string `yaml:"kernelVersion,omitempty"`
+	CPUArch       string `yaml:"cpuArch,omitempty"`
+}
+
+// NewHostManifest takes the architecture from the agent binary rather than
+// asking the node: this binary is running on that node, so they agree.
+func NewHostManifest(kernelVersion string) HostManifest {
+	return HostManifest{
+		KernelVersion: kernelVersion,
+		CPUArch:       runtime.GOARCH,
 	}
 }
 
@@ -236,6 +257,8 @@ func validateArtifactManifest(artifact ArtifactManifest) error {
 func (m *CheckpointManifest) CompatFacts() compat.Facts {
 	gpus := m.gpuFacts()
 	return compat.Facts{
+		KernelVersion:      m.Host.KernelVersion,
+		CPUArch:            m.Host.CPUArch,
 		DriverVersion:      gpus.DriverVersion,
 		GPUDevices:         gpus.Devices,
 		ExternalizedMounts: m.externalizedMounts(),

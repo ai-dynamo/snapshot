@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"strings"
 	"testing"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
@@ -38,6 +40,7 @@ func TestManifestRoundTrip(t *testing.T) {
 			ExternalPaths:  []string{"/proc/acpi"},
 			BindMountDests: []string{"/data"},
 		},
+		NewHostManifest("5.15.0-1071-aws"),
 	)
 	original.CUDA = NewCUDAManifest([]int{42, 43}, compat.GPUFacts{
 		DriverVersion: "580.65.06",
@@ -109,6 +112,33 @@ func TestManifestRoundTrip(t *testing.T) {
 	if !reflect.DeepEqual(loaded.CUDA.SourceGPUs, wantGPUs) {
 		t.Errorf("CUDA.SourceGPUs = %#v, want %#v", loaded.CUDA.SourceGPUs, wantGPUs)
 	}
+	wantHost := HostManifest{
+		KernelVersion: "5.15.0-1071-aws",
+		CPUArch:       runtime.GOARCH,
+	}
+	if !reflect.DeepEqual(loaded.Host, wantHost) {
+		t.Errorf("Host = %#v, want %#v", loaded.Host, wantHost)
+	}
+}
+
+// A host fact the agent could not read has to stay absent in the file, because a
+// comparison treats absent as unknown and an empty string as a value.
+func TestHostManifestOmitsWhatTheAgentCouldNotRead(t *testing.T) {
+	dir := t.TempDir()
+	manifest := &CheckpointManifest{Artifact: ArtifactManifest{ContentUID: "content-uid-123", ContainerName: "main"}}
+	if err := WriteManifest(dir, manifest); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(dir, manifestFilename))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	for _, key := range []string{"kernelVersion", "cpuArch"} {
+		if strings.Contains(string(content), key) {
+			t.Errorf("manifest wrote an unknown %s:\n%s", key, content)
+		}
+	}
 }
 
 // The facts are recorded to be compared, so what a manifest carries has to come
@@ -119,6 +149,13 @@ func TestManifestFactsSurviveIntoTheComparison(t *testing.T) {
 		manifest *CheckpointManifest
 		want     compat.Facts
 	}{
+		{
+			name: "host facts",
+			manifest: &CheckpointManifest{
+				Host: NewHostManifest("5.15.0-1071-aws"),
+			},
+			want: compat.Facts{KernelVersion: "5.15.0-1071-aws", CPUArch: runtime.GOARCH},
+		},
 		{
 			name: "GPU facts",
 			manifest: &CheckpointManifest{
