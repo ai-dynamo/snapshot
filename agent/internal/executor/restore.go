@@ -288,9 +288,6 @@ func inspectRestore(
 		for _, device := range targetGPUs.Devices {
 			targetGPUUUIDs = append(targetGPUUUIDs, device.UUID)
 		}
-		if len(targetGPUUUIDs) == 0 {
-			return nil, 0, fmt.Errorf("missing target GPU UUIDs for %s/%s container %s", req.PodNamespace, req.PodName, req.ContainerName)
-		}
 	}
 
 	// Gate B, once the placeholder is resolved and this node's own facts are
@@ -298,6 +295,12 @@ func inspectRestore(
 	// a GPU difference into a device-map error that names neither GPU.
 	if err := inspectCompatibility(log, manifest, targetGPUs, targetRoot, req.SkipCompatCheck); err != nil {
 		return nil, 0, err
+	}
+
+	// Behind the gate, which names a target with no GPUs as a count refusal.
+	// This is what is left when the gate is skipped.
+	if !manifest.CUDA.IsEmpty() && len(targetGPUUUIDs) == 0 {
+		return nil, 0, fmt.Errorf("missing target GPU UUIDs for %s/%s container %s", req.PodNamespace, req.PodName, req.ContainerName)
 	}
 
 	cudaDeviceMap := ""
