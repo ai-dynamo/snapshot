@@ -73,6 +73,11 @@ type RestoreRequest struct {
 	TargetPodIP   string
 	ContainerName string
 	Clientset     kubernetes.Interface
+
+	// SkipCompatCheck carries the decision the caller already made, so the
+	// second gate cannot reach a different answer than the first: one restore
+	// is either checked or it is not.
+	SkipCompatCheck bool
 }
 
 // Restore performs external restore for the given request.
@@ -284,7 +289,7 @@ func inspectRestore(
 	// Gate B, once the placeholder is resolved and this node's own facts are
 	// readable. It runs ahead of BuildDeviceMap, whose positional pairing turns
 	// a GPU difference into a device-map error that names neither GPU.
-	if err := inspectCompatibility(manifest); err != nil {
+	if err := inspectCompatibility(log, manifest, req.SkipCompatCheck); err != nil {
 		return nil, 0, err
 	}
 

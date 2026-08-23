@@ -91,6 +91,9 @@ type restoreArtifact struct {
 	ContentUID    string
 	ContainerName string
 	Path          string
+	// SkipCompatCheck is decided once in preflight and carried from there, so
+	// the gate inside the restore reaches the same answer as the one before it.
+	SkipCompatCheck bool
 }
 
 type restoreTarget struct {
@@ -482,6 +485,7 @@ func (w *NodeController) preflightRestore(ctx context.Context, pod *corev1.Pod) 
 	}
 	// Gate A: the earliest point the checkpoint's own record of what it was
 	// captured on is readable, and still before any of the restore is attempted.
+	artifact.SkipCompatCheck = w.skipCompatCheckRequested(pod)
 	if err := w.preflightCompatibility(pod, artifact); err != nil {
 		return nil, err
 	}
@@ -779,15 +783,16 @@ func (op *restoreOperation) beginRestore(ctx context.Context) error {
 func (op *restoreOperation) executeRestore(ctx context.Context) (int, error) {
 	w := op.controller
 	req := executor.RestoreRequest{
-		ContentUID:    op.artifact.ContentUID,
-		BasePath:      w.config.Storage.BasePath,
-		ContainerID:   op.containerID,
-		StartedAt:     op.startedAt,
-		PodName:       op.pod.Name,
-		PodNamespace:  op.pod.Namespace,
-		TargetPodIP:   op.pod.Status.PodIP,
-		ContainerName: op.artifact.ContainerName,
-		Clientset:     w.clientset,
+		ContentUID:      op.artifact.ContentUID,
+		BasePath:        w.config.Storage.BasePath,
+		ContainerID:     op.containerID,
+		StartedAt:       op.startedAt,
+		PodName:         op.pod.Name,
+		PodNamespace:    op.pod.Namespace,
+		TargetPodIP:     op.pod.Status.PodIP,
+		ContainerName:   op.artifact.ContainerName,
+		SkipCompatCheck: op.artifact.SkipCompatCheck,
+		Clientset:       w.clientset,
 	}
 	return w.restoreFn(ctx, w.runtime, op.log, req, w.injector)
 }
