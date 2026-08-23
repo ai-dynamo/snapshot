@@ -32,6 +32,11 @@ const (
 	// DefaultHelperBinaryPath is the agent-side cuda-checkpoint-helper absolute path.
 	// In the placeholder namespace pass filepath.Join(bundleDir, HelperBinaryName) instead.
 	DefaultHelperBinaryPath = "/usr/local/bin/" + HelperBinaryName
+
+	// nvidiaSMITimeout bounds every nsenter nvidia-smi call. The agent's own
+	// context carries no deadline, so a hung one would block the worker for good
+	// and cost the node every restore that followed.
+	nvidiaSMITimeout = 30 * time.Second
 )
 
 var podResourcesSocketPath = "/var/lib/kubelet/pod-resources/kubelet.sock"
@@ -95,6 +100,9 @@ func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName st
 // gets to look at the source node's GPUs, so what is not read here cannot be
 // compared later.
 func DiscoverVisibleGPUFacts(ctx context.Context, hostProcPath string, pid int) (compat.GPUFacts, error) {
+	ctx, cancel := context.WithTimeout(ctx, nvidiaSMITimeout)
+	defer cancel()
+
 	mountPath := fmt.Sprintf("%s/%d/ns/mnt", strings.TrimRight(hostProcPath, "/"), pid)
 	pidPath := fmt.Sprintf("%s/%d/ns/pid", strings.TrimRight(hostProcPath, "/"), pid)
 	cmd := exec.CommandContext(
