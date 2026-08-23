@@ -34,7 +34,7 @@ func restorePodFixture() *corev1.Pod {
 	}
 }
 
-func TestNewRestorePodUsesOnlyRestoreFromAnnotation(t *testing.T) {
+func TestNewRestorePodSetsRestoreFromAnnotation(t *testing.T) {
 	pod, err := NewRestorePod(restorePodFixture(), PodOptions{
 		Namespace:       "inference",
 		SnapshotName:    "snapshot-a",
@@ -45,7 +45,6 @@ func TestNewRestorePodUsesOnlyRestoreFromAnnotation(t *testing.T) {
 
 	assert.Equal(t, "inference", pod.Namespace)
 	assert.Equal(t, corev1.RestartPolicyNever, pod.Spec.RestartPolicy)
-	assert.Equal(t, []string{snapshotv1alpha1.RestoreFromAnnotation}, snapshotv1alpha1.SnapshotAnnotations(pod.Annotations))
 	assert.Equal(t, "snapshot-a", pod.Annotations[snapshotv1alpha1.RestoreFromAnnotation])
 	assert.Equal(t, "inference", pod.Annotations["example.com/team"])
 
@@ -62,14 +61,6 @@ func TestNewRestorePodUsesOnlyRestoreFromAnnotation(t *testing.T) {
 	assert.Empty(t, sidecar.Env)
 	assert.Nil(t, sidecar.StartupProbe)
 	require.NoError(t, ValidateRestorePodSpec(&pod.Spec, "main", snapshotv1alpha1.DefaultSeccompLocalhostProfile))
-}
-
-func TestNewRestorePodRejectsLegacySnapshotAnnotations(t *testing.T) {
-	pod := restorePodFixture()
-	pod.Annotations["nvidia.com/snapshot-target-containers"] = "main"
-	_, err := NewRestorePod(pod, PodOptions{SnapshotName: "snapshot-a", TargetContainer: "main"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "must not carry snapshot annotations")
 }
 
 func TestPrepareRestorePodSpecRequiresCapturedContainer(t *testing.T) {

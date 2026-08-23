@@ -27,10 +27,13 @@ This artifact is not a container image, a filesystem snapshot, or a volume snaps
 
 #### Restore
 
-To restore a worker, a new pod names a ready `PodSnapshot` in the single `nvidia.com/restore-from` annotation. During pod startup, the node agent resolves that snapshot through its bound `PodSnapshotContent` and restores the captured process state directly into the container, bypassing model loading, kernel warm-up, and other initialization steps. The restored process resumes execution from the exact point where it was captured.
+To restore a worker, a new pod names a ready `PodSnapshot` in the `nvidia.com/restore-from` annotation. During pod startup, the node agent resolves that snapshot through its bound `PodSnapshotContent` and restores the captured process state directly into the container, bypassing model loading, kernel warm-up, and other initialization steps. The restored process resumes execution from the exact point where it was captured.
 Snapshots are portable across compatible machines and can be restored on any node with matching GPU hardware and driver versions. They are not tied to the node where they were originally created.
 
-Restore progress is exposed through the pod status condition `type: Restored`.
+Restore progress is exposed only through the pod status condition
+`type: Restored`, with reasons `SnapshotPending`, `ArtifactPending`,
+`RestoreInProgress`, `RestoreFailed`, or `RestoreSucceeded` and a descriptive
+message.
 
 &nbsp;
 

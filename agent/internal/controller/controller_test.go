@@ -204,10 +204,19 @@ func readySnapshotObjects() (*snapshotv1alpha1.PodSnapshot, *snapshotv1alpha1.Po
 }
 
 func TestTweakNodePodListOptions(t *testing.T) {
-	opts := &metav1.ListOptions{}
-	tweakNodePodListOptions("", testNodeName)(opts)
-	assert.Empty(t, opts.LabelSelector)
-	assert.Equal(t, "spec.nodeName="+testNodeName, opts.FieldSelector)
+	t.Run("node only", func(t *testing.T) {
+		opts := &metav1.ListOptions{}
+		tweakNodePodListOptions(testNodeName)(opts)
+		assert.Empty(t, opts.LabelSelector)
+		assert.Equal(t, "spec.nodeName="+testNodeName, opts.FieldSelector)
+	})
+
+	t.Run("label and node", func(t *testing.T) {
+		opts := &metav1.ListOptions{}
+		tweakLabeledNodePodListOptions("capture-eligible=true", testNodeName)(opts)
+		assert.Equal(t, "capture-eligible=true", opts.LabelSelector)
+		assert.Equal(t, "spec.nodeName="+testNodeName, opts.FieldSelector)
+	})
 }
 
 func TestResolveRestoreArtifact(t *testing.T) {
@@ -250,15 +259,73 @@ func TestResolveRestoreArtifactPendingStates(t *testing.T) {
 	})
 }
 
-func TestResolveRestoreArtifactRejectsExtraSnapshotAnnotation(t *testing.T) {
+func TestResolveRestoreArtifactValidatesContentBacklink(t *testing.T) {
+	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	tests := map[string]func(*snapshotv1alpha1.PodSnapshotContent){
+		"namespace": func(content *snapshotv1alpha1.PodSnapshotContent) {
+			content.Spec.PodSnapshotRef.Namespace = "other"
+		},
+		"name": func(content *snapshotv1alpha1.PodSnapshotContent) {
+			content.Spec.PodSnapshotRef.Name = "other"
+		},
+		"missing UID": func(content *snapshotv1alpha1.PodSnapshotContent) {
+			content.Spec.PodSnapshotRef.UID = ""
+		},
+		"mismatched UID": func(content *snapshotv1alpha1.PodSnapshotContent) {
+			content.Spec.PodSnapshotRef.UID = "other-uid"
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			snapshot, content := readySnapshotObjects()
+			mutate(content)
+			w := makeTestController(t, pod, snapshot, content)
+			_, _, _, err := w.resolveRestoreArtifact(context.Background(), pod)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "stale backlink")
+		})
+	}
+}
+
+func TestReconcileRestorePodReportsInvalidBacklinkAsFailedCondition(t *testing.T) {
+	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	snapshot, content := readySnapshotObjects()
+	content.Spec.PodSnapshotRef.UID = "other-uid"
+	w := makeTestController(t, pod, snapshot, content)
+
+	w.reconcileRestorePod(context.Background(), pod)
+
+	var statusPatch clientgotesting.PatchAction
+	for _, action := range w.clientset.(*fake.Clientset).Actions() {
+		patch, ok := action.(clientgotesting.PatchAction)
+		if ok && patch.GetSubresource() == "status" {
+			statusPatch = patch
+		}
+	}
+	require.NotNil(t, statusPatch)
+	payload := string(statusPatch.GetPatch())
+	assert.Contains(t, payload, `"type":"Restored"`)
+	assert.Contains(t, payload, `"status":"False"`)
+	assert.Contains(t, payload, `"reason":"RestoreFailed"`)
+}
+
+func TestResolveRestoreArtifactAllowsUnrelatedAnnotations(t *testing.T) {
 	pod := restorePod(map[string]string{
 		snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a",
-		"nvidia.com/snapshot-artifact-version": "1",
+		"example.com/team":                     "inference",
 	})
-	w := makeTestController(t, pod)
-	_, _, _, err := w.resolveRestoreArtifact(context.Background(), pod)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "exactly one snapshot annotation")
+	snapshot, content := readySnapshotObjects()
+	w := makeTestController(t, pod, snapshot, content)
+	path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, string(content.UID), "main")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(path, 0o700))
+
+	artifact, pendingReason, _, err := w.resolveRestoreArtifact(context.Background(), pod)
+	require.NoError(t, err)
+	require.NotNil(t, artifact)
+	assert.Empty(t, pendingReason)
+	assert.Equal(t, string(content.UID), artifact.ContentUID)
+	assert.Equal(t, "main", artifact.ContainerName)
 }
 
 func TestApplyRestoredConditionUsesServerSideApplyStatus(t *testing.T) {
@@ -279,6 +346,7 @@ func TestApplyRestoredConditionUsesServerSideApplyStatus(t *testing.T) {
 	assert.Contains(t, payload, `"type":"Restored"`)
 	assert.Contains(t, payload, `"reason":"SnapshotPending"`)
 	assert.NotContains(t, payload, `"type":"Ready"`)
+	assert.NotContains(t, payload, `"annotations"`)
 }
 
 func TestApplyRestoredConditionPreservesTransitionTimeForSameStatus(t *testing.T) {
@@ -300,9 +368,9 @@ func TestConvergeRestoredFailureConditionReappliesAfterContainerExit(t *testing.
 	pod.Status.ContainerStatuses[0].State.Running = &corev1.ContainerStateRunning{}
 	w := makeTestController(t, pod)
 
-	originalInterval := restoreFailureStatusInterval
-	restoreFailureStatusInterval = time.Millisecond
-	t.Cleanup(func() { restoreFailureStatusInterval = originalInterval })
+	originalInterval := restoreFailureStatusRetryInterval
+	restoreFailureStatusRetryInterval = time.Millisecond
+	t.Cleanup(func() { restoreFailureStatusRetryInterval = originalInterval })
 
 	getCount := 0
 	w.clientset.(*fake.Clientset).PrependReactor("get", "pods", func(_ clientgotesting.Action) (bool, runtime.Object, error) {
@@ -393,15 +461,15 @@ func TestRunRestoreCleanupFailureStillCompletesRestore(t *testing.T) {
 	assert.Contains(t, string(succeededPatch.GetPatch()), `"status":"True"`)
 }
 
-func TestRestoreCheckpointReady(t *testing.T) {
+func TestRestoreArtifactReady(t *testing.T) {
 	w := makeTestController(t, nil)
-	ready, err := w.restoreCheckpointReady(testr.New(t), "inference/restore-worker", w.config.Storage.BasePath+"/missing")
+	ready, err := w.restoreArtifactReady(testr.New(t), "inference/restore-worker", w.config.Storage.BasePath+"/missing")
 	require.NoError(t, err)
 	assert.False(t, ready)
 
 	file := w.config.Storage.BasePath + "/file"
 	require.NoError(t, os.WriteFile(file, []byte("x"), 0o600))
-	_, err = w.restoreCheckpointReady(testr.New(t), "inference/restore-worker", file)
+	_, err = w.restoreArtifactReady(testr.New(t), "inference/restore-worker", file)
 	require.Error(t, err)
 }
 

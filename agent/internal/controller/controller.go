@@ -74,6 +74,13 @@ type NodeController struct {
 	stopCh chan struct{}
 }
 
+type restoreArtifact struct {
+	SnapshotName  string
+	ContentUID    string
+	ContainerName string
+	Path          string
+}
+
 const (
 	containerResolveAttemptTimeout  = 1 * time.Second
 	restoreContainerResolveInterval = 50 * time.Millisecond
@@ -87,7 +94,8 @@ const (
 	snapshotContentResyncInterval = 10 * time.Second
 )
 
-var restoreFailureStatusInterval = 250 * time.Millisecond
+// Keep this configurable so failure-convergence tests can shorten the retry cadence.
+var restoreFailureStatusRetryInterval = 250 * time.Millisecond
 
 // podSnapshotContentGVR is the cluster-scoped resource the capture informer watches.
 var podSnapshotContentGVR = snapshotv1alpha1.GroupVersion.WithResource("podsnapshotcontents")
@@ -163,7 +171,7 @@ func (w *NodeController) Run(ctx context.Context) error {
 	ctx = logr.NewContext(ctx, w.log)
 	w.log.Info("Starting snapshot node controller",
 		"node", w.config.NodeName,
-		"restore_annotation", snapshotv1alpha1.RestoreFromAnnotation,
+		"restore_from_annotation", snapshotv1alpha1.RestoreFromAnnotation,
 	)
 
 	w.log.Info("Watching pods cluster-wide (all namespaces)")
@@ -171,7 +179,7 @@ func (w *NodeController) Run(ctx context.Context) error {
 	var syncFuncs []cache.InformerSynced
 
 	restoreFactoryOpts := []informers.SharedInformerOption{
-		informers.WithTweakListOptions(tweakNodePodListOptions("", w.config.NodeName)),
+		informers.WithTweakListOptions(tweakNodePodListOptions(w.config.NodeName)),
 	}
 
 	restoreFactory := informers.NewSharedInformerFactoryWithOptions(
@@ -243,7 +251,7 @@ func (w *NodeController) Run(ctx context.Context) error {
 	// informer's.
 	sourceSelector := labels.SelectorFromSet(labels.Set{snapshotv1alpha1.CaptureEligibleLabel: "true"}).String()
 	sourceFactoryOpts := []informers.SharedInformerOption{
-		informers.WithTweakListOptions(tweakNodePodListOptions(sourceSelector, w.config.NodeName)),
+		informers.WithTweakListOptions(tweakLabeledNodePodListOptions(sourceSelector, w.config.NodeName)),
 	}
 	sourceFactory := informers.NewSharedInformerFactoryWithOptions(
 		w.clientset, 30*time.Second, sourceFactoryOpts...,
@@ -288,19 +296,17 @@ func (w *NodeController) Run(ctx context.Context) error {
 	return nil
 }
 
-func tweakNodePodListOptions(labelSelector, nodeName string) func(*metav1.ListOptions) {
+func tweakNodePodListOptions(nodeName string) func(*metav1.ListOptions) {
 	return func(opts *metav1.ListOptions) {
-		opts.LabelSelector = labelSelector
 		opts.FieldSelector = fields.OneTermEqualSelector("spec.nodeName", nodeName).String()
 	}
 }
 
-type restoreArtifact struct {
-	SnapshotName  string
-	ContentName   string
-	ContentUID    string
-	ContainerName string
-	Path          string
+func tweakLabeledNodePodListOptions(labelSelector, nodeName string) func(*metav1.ListOptions) {
+	return func(opts *metav1.ListOptions) {
+		tweakNodePodListOptions(nodeName)(opts)
+		opts.LabelSelector = labelSelector
+	}
 }
 
 func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Pod) {
@@ -339,7 +345,7 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 // no error is retryable eventual-consistency state; an error is terminal input
 // or binding corruption.
 func (w *NodeController) resolveRestoreArtifact(ctx context.Context, pod *corev1.Pod) (*restoreArtifact, string, string, error) {
-	snapshotName, err := snapshotv1alpha1.RestoreFromAnnotations(pod.Annotations)
+	snapshotName, err := snapshotv1alpha1.GetRestoreFromSnapshotName(pod.Annotations)
 	if err != nil {
 		return nil, "", "", err
 	}
@@ -402,7 +408,7 @@ func (w *NodeController) resolveRestoreArtifact(ctx context.Context, pod *corev1
 	if err != nil {
 		return nil, "", "", err
 	}
-	ready, err := w.restoreCheckpointReady(w.log, fmt.Sprintf("%s/%s", pod.Namespace, pod.Name), path)
+	ready, err := w.restoreArtifactReady(w.log, fmt.Sprintf("%s/%s", pod.Namespace, pod.Name), path)
 	if err != nil {
 		return nil, "", "", err
 	}
@@ -411,7 +417,6 @@ func (w *NodeController) resolveRestoreArtifact(ctx context.Context, pod *corev1
 	}
 	return &restoreArtifact{
 		SnapshotName:  snapshotName,
-		ContentName:   contentName,
 		ContentUID:    contentUID,
 		ContainerName: containerName,
 		Path:          path,
@@ -648,9 +653,9 @@ func (op *restoreOperation) release() {
 
 func (op *restoreOperation) beginRestore(ctx context.Context) (bool, error) {
 	podKey := fmt.Sprintf("%s/%s", op.pod.Namespace, op.pod.Name)
-	ready, err := op.controller.restoreCheckpointReady(op.log, podKey, op.artifact.Path)
+	ready, err := op.controller.restoreArtifactReady(op.log, podKey, op.artifact.Path)
 	if err != nil {
-		return false, fmt.Errorf("validate checkpoint artifact path: %w", err)
+		return false, fmt.Errorf("validate restore artifact path: %w", err)
 	}
 	if !ready {
 		return false, nil
@@ -781,7 +786,7 @@ func (w *NodeController) convergeRestoredFailureCondition(ctx context.Context, p
 	settleCtx, cancel := context.WithTimeout(ctx, restoreFailureStatusTimeout)
 	defer cancel()
 
-	ticker := time.NewTicker(restoreFailureStatusInterval)
+	ticker := time.NewTicker(restoreFailureStatusRetryInterval)
 	defer ticker.Stop()
 
 	var lastApplyErr error
@@ -901,17 +906,17 @@ func chooseActiveContent(objs []interface{}) string {
 	return chosen.Name
 }
 
-func (w *NodeController) restoreCheckpointReady(log logr.Logger, podKey, checkpointLocation string) (bool, error) {
-	info, err := os.Stat(checkpointLocation)
+func (w *NodeController) restoreArtifactReady(log logr.Logger, podKey, artifactPath string) (bool, error) {
+	info, err := os.Stat(artifactPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			log.V(1).Info("Checkpoint not ready on disk, skipping restore", "pod", podKey, "checkpoint_location", checkpointLocation)
+			log.V(1).Info("Artifact not ready on disk, skipping restore", "pod", podKey, "artifact_path", artifactPath)
 			return false, nil
 		}
-		return false, fmt.Errorf("stat checkpoint location %s: %w", checkpointLocation, err)
+		return false, fmt.Errorf("stat artifact path %s: %w", artifactPath, err)
 	}
 	if !info.IsDir() {
-		return false, fmt.Errorf("checkpoint location %s is not a directory", checkpointLocation)
+		return false, fmt.Errorf("artifact path %s is not a directory", artifactPath)
 	}
 	return true, nil
 }

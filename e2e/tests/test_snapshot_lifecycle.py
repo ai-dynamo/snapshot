@@ -121,41 +121,6 @@ def test_successful_restore_recovers_cpu_gpu_and_fs_from_snapshot(
 
 
 @pytest.mark.snapshot_failure
-def test_failed_snapshot_source_has_snapshot_annotation(
-    config: k8s.E2EConfig,
-    run: snap.TestRun,
-) -> None:
-    try:
-        source, _ = create_ready_source(
-            config,
-            run,
-            gpu=False,
-            annotations={"nvidia.com/snapshot-target-containers": snap.CONTAINER},
-        )
-        snap.create_podsnapshot(
-            config.namespace,
-            run.snapshot_name,
-            run.source_pod,
-            source.metadata.uid,
-        )
-
-        pod_snapshot, content = snap.wait_for_snapshot_failed(
-            config.namespace,
-            run.snapshot_name,
-        )
-        failed = snap.condition(pod_snapshot, "Failed")
-        ready = snap.condition(pod_snapshot, "Ready")
-        assert failed and failed.get("status") == "True"
-        assert ready is None or ready.get("status") != "True"
-        assert failed.get("reason") == "UnexpectedSnapshotAnnotation"
-        assert "annotation" in failed.get("message", "").lower()
-        assert content is None
-    except Exception:
-        snap.debug_dump(config, run)
-        raise
-
-
-@pytest.mark.snapshot_failure
 @pytest.mark.gpu
 def test_failed_restore_gpu_checkpoint_into_non_gpu_target(
     config: k8s.E2EConfig,

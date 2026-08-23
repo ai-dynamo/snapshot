@@ -33,9 +33,6 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 	if podTemplate.Annotations == nil {
 		podTemplate.Annotations = map[string]string{}
 	}
-	if err := snapshotv1alpha1.ValidateCaptureAnnotations(podTemplate.Annotations); err != nil {
-		return nil, err
-	}
 	podTemplate.Annotations = DisableCheckpointJobSidecarInjection(podTemplate.Annotations)
 	podTemplate.Labels[snapshotv1alpha1.CheckpointSourceLabel] = "true"
 	podTemplate.Spec.RestartPolicy = corev1.RestartPolicyNever

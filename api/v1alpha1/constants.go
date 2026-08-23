@@ -21,8 +21,8 @@ const (
 	// object so the per-node agent's cache can label-select work for its node.
 	SnapshotNodeLabel = "nvidia.com/snapshot-node"
 
-	// RestoreFromAnnotation is the only snapshot-owned annotation accepted on a
-	// restore pod. Its value names a PodSnapshot in the pod's namespace.
+	// RestoreFromAnnotation names the PodSnapshot to restore in the pod's
+	// namespace. Other annotations are ignored by the snapshot protocol.
 	RestoreFromAnnotation = "nvidia.com/restore-from"
 
 	// RestoredCondition is the Pod status condition owned by the node agent.

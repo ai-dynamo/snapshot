@@ -34,11 +34,8 @@ func NewRestorePod(pod *corev1.Pod, opts PodOptions) (*corev1.Pod, error) {
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}
 	}
-	if err := snapshotv1alpha1.ValidateCaptureAnnotations(pod.Annotations); err != nil {
-		return nil, fmt.Errorf("restore pod manifest: %w", err)
-	}
 	pod.Annotations[snapshotv1alpha1.RestoreFromAnnotation] = opts.SnapshotName
-	if _, err := snapshotv1alpha1.RestoreFromAnnotations(pod.Annotations); err != nil {
+	if _, err := snapshotv1alpha1.GetRestoreFromSnapshotName(pod.Annotations); err != nil {
 		return nil, err
 	}
 	if err := PrepareRestorePodSpec(&pod.Spec, opts.TargetContainer, opts.SeccompProfile, true); err != nil {

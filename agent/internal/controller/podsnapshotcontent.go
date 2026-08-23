@@ -373,9 +373,6 @@ func classifySourcePod(content *snapshotv1alpha1.PodSnapshotContent, pod *corev1
 		return "SourcePodGone",
 			fmt.Sprintf("source pod %q is no longer running (phase %s)", pod.Name, pod.Status.Phase)
 	}
-	if err := snapshotv1alpha1.ValidateCaptureAnnotations(pod.Annotations); err != nil {
-		return "UnexpectedSnapshotAnnotation", err.Error()
-	}
 	return "", ""
 }
 

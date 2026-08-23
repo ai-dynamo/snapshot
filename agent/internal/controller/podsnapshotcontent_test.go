@@ -716,35 +716,6 @@ func TestReconcileSnapshotContent_CapturesFromPod(t *testing.T) {
 	}, time.Second, 5*time.Millisecond)
 }
 
-func TestReconcileSourcePod_RejectsSnapshotAnnotations(t *testing.T) {
-	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
-	content.Spec.Source.PodRef.Containers = []string{"engine"}
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        "worker-0",
-			Namespace:   "inference",
-			UID:         types.UID("pod-uid"),
-			Annotations: map[string]string{"nvidia.com/snapshot-target-containers": "main"},
-		},
-		Spec: corev1.PodSpec{NodeName: "node-a"},
-		Status: corev1.PodStatus{
-			Phase: corev1.PodRunning,
-			ContainerStatuses: []corev1.ContainerStatus{
-				{Name: "engine", Ready: true, ContainerID: "containerd://engine123"},
-			},
-		},
-	}
-	fc := &fakeCheckpointer{}
-	w := makeNodeController(t, fc, content, pod)
-	w.runtime = &fakeRuntime{resolveContainerPID: 7}
-
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
-	assert.False(t, fc.wasCalled())
-	cond := meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
-	require.NotNil(t, cond)
-	assert.Equal(t, "UnexpectedSnapshotAnnotation", cond.Reason)
-}
-
 func TestRunCheckpoint_WritesReadyBeforeRelease(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	fc := &fakeCheckpointer{}
