@@ -339,6 +339,7 @@ func deriveSnapshotJobStatus(sj *snapshotv1alpha1.SnapshotJob, observed snapshot
 	if next.Status.SourceJobUID == "" && observed.job != nil {
 		next.Status.SourceJobUID = observed.job.UID
 	}
+	initializeConditions(next, reconciliationTime)
 	deriveRunningStatus(next, observed, reconciliationTime)
 	failure := deriveCapturedStatus(next, observed, reconciliationTime)
 	if failure != nil {
@@ -347,6 +348,29 @@ func deriveSnapshotJobStatus(sj *snapshotv1alpha1.SnapshotJob, observed snapshot
 	}
 	deriveCompletionStatus(next, observed, reconciliationTime)
 	return next.Status
+}
+
+// initializeConditions makes every condition type present from the first
+// status write. Conditions are append-only: once present they are only
+// updated (status/reason/message), never removed, so consumers can always
+// distinguish "known False" from "not yet evaluated". Reconcile passes after
+// the first are no-ops here because SetStatusCondition never deletes.
+func initializeConditions(next *snapshotv1alpha1.SnapshotJob, reconciliationTime metav1.Time) {
+	defaults := []struct {
+		conditionType string
+		reason        string
+		message       string
+	}{
+		{snapshotv1alpha1.SnapshotJobConditionRunning, snapshotv1alpha1.ReasonPodPending, "waiting for the source pod to become ready"},
+		{snapshotv1alpha1.SnapshotJobConditionCaptured, snapshotv1alpha1.ReasonCaptureInProgress, "waiting for the checkpoint capture to start"},
+		{snapshotv1alpha1.SnapshotJobConditionCompleted, snapshotv1alpha1.ReasonCaptureInProgress, "waiting for the checkpoint capture to complete"},
+		{snapshotv1alpha1.SnapshotJobConditionFailed, snapshotv1alpha1.ReasonNoFailure, "no failure observed"},
+	}
+	for _, def := range defaults {
+		if meta.FindStatusCondition(next.Status.Conditions, def.conditionType) == nil {
+			setCondition(next, def.conditionType, metav1.ConditionFalse, reconciliationTime, def.reason, def.message)
+		}
+	}
 }
 
 func deriveRunningStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJobObservation, reconciliationTime metav1.Time) {
@@ -420,9 +444,12 @@ func deriveCapturedStatus(next *snapshotv1alpha1.SnapshotJob, observed snapshotJ
 }
 
 func deriveFailureStatus(next *snapshotv1alpha1.SnapshotJob, failure *snapshotJobFailure, reconciliationTime metav1.Time) {
-	if meta.FindStatusCondition(next.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning) == nil {
+	// A terminal object never reconciles again, so a Running=True left over
+	// from the last observation would advertise a live source forever. Close
+	// it out; an already-False Running keeps its more specific last reason.
+	if meta.IsStatusConditionTrue(next.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionRunning) {
 		setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse, reconciliationTime,
-			failure.reason, "source pod is unavailable: "+failure.cause.Error())
+			failure.reason, "the SnapshotJob failed terminally; the source Job is preserved for debugging")
 	}
 	if !meta.IsStatusConditionTrue(next.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionCaptured) {
 		setCondition(next, snapshotv1alpha1.SnapshotJobConditionCaptured, metav1.ConditionFalse, reconciliationTime,
@@ -451,6 +478,12 @@ func deriveCompletionStatus(next *snapshotv1alpha1.SnapshotJob, observed snapsho
 		return
 	}
 	if !observed.sourceJobFinished {
+		// The target is dead by design, so deriveRunningStatus's job-derived
+		// view ("waiting for the source pod to become ready" / "source Job
+		// failed") misdescribes this phase; say what is actually happening.
+		setCondition(next, snapshotv1alpha1.SnapshotJobConditionRunning, metav1.ConditionFalse, reconciliationTime,
+			snapshotv1alpha1.ReasonWaitingForPodCompletion,
+			"checkpoint captured; the source pod's remaining containers are finishing")
 		setCondition(next, snapshotv1alpha1.SnapshotJobConditionCompleted, metav1.ConditionFalse, reconciliationTime,
 			snapshotv1alpha1.ReasonWaitingForPodCompletion,
 			"checkpoint captured; waiting for the source pod's remaining containers to finish")

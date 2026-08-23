@@ -49,6 +49,14 @@ const (
 	ReasonWaitingForPodCompletion = "WaitingForPodCompletion"
 	ReasonJobCompleted            = "JobCompleted"
 
+	// Failed=False. ReasonNoFailure means no failure has been observed
+	// (metav1.Condition requires a non-empty reason, so the condition cannot
+	// be present without one). All four conditions are present from the first
+	// status write and are only updated afterwards (status/reason/message),
+	// never removed, so consumers can always distinguish "known False" from
+	// "not yet evaluated".
+	ReasonNoFailure = "NoFailure"
+
 	// Failed=True
 	ReasonCaptureFailed     = "CaptureFailed"
 	ReasonPodSnapshotFailed = "PodSnapshotFailed"
