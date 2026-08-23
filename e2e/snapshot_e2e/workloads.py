@@ -25,7 +25,6 @@ FILE_TOKEN = f"{STATE_DIR}/file-token"
 OBSERVATIONS = f"{STATE_DIR}/observations.log"
 SOURCE_TOKEN_ENV = "SNAPSHOT_E2E_SOURCE_TOKEN"
 RESTORE_TOKEN_ENV = "SNAPSHOT_E2E_RESTORE_TOKEN"
-EXIT_AFTER_SNAPSHOT_ENV = "SNAPSHOT_E2E_EXIT_AFTER_SNAPSHOT"
 
 
 @dataclass(frozen=True)
@@ -338,9 +337,21 @@ def snapshotjob_source_command(image: str, gpu: bool) -> str:
     state_loop = CUDA_SOURCE if gpu else CPU_SOURCE
     return f"""set -euo pipefail
 echo "[snapshotjob-source] image={image}"
-export {EXIT_AFTER_SNAPSHOT_ENV}=true
 mkdir -p {STATE_DIR}
+(
 {state_loop}
+) &
+workload_pid=$!
+while [ ! -f {SNAPSHOT_COMPLETE} ]; do
+  if ! kill -0 "$workload_pid" 2>/dev/null; then
+    wait "$workload_pid"
+    exit $?
+  fi
+  sleep 1
+done
+echo "[snapshotjob-source] snapshot complete; stopping source workload"
+kill -KILL "$workload_pid" 2>/dev/null || true
+wait "$workload_pid" 2>/dev/null || true
 """
 
 
@@ -370,17 +381,11 @@ sleep infinity
 # post-restore liveness: every observation must keep reporting the source token.
 CPU_SOURCE = f"""
 cpu_token="${{{SOURCE_TOKEN_ENV}}}"
-exit_after_snapshot="${{{EXIT_AFTER_SNAPSHOT_ENV}:-false}}"
 unset {SOURCE_TOKEN_ENV}
-unset {EXIT_AFTER_SNAPSHOT_ENV}
 printf '%s\\n' "$cpu_token" > {FILE_TOKEN}
 echo ready > {SOURCE_READY}
 seq=0
 while true; do
-  if [ "$exit_after_snapshot" = true ] && [ -f {SNAPSHOT_COMPLETE} ]; then
-    echo "[source] snapshot complete; exiting"
-    exit 0
-  fi
   file_token="$(cat {FILE_TOKEN} 2>/dev/null || true)"
   printf 'observation seq=%s cpu=%s file=%s gpu=disabled\\n' "$seq" "$cpu_token" "$file_token" >> {OBSERVATIONS}
   seq=$((seq + 1))
@@ -425,10 +430,7 @@ int main(void) {{
   char cpu_token[TOKEN_SIZE];
   memset(cpu_token, 0, sizeof(cpu_token));
   strncpy(cpu_token, initial_token, sizeof(cpu_token) - 1);
-  const char *exit_setting = getenv("{EXIT_AFTER_SNAPSHOT_ENV}");
-  int exit_after_snapshot = exit_setting && strcmp(exit_setting, "true") == 0;
   unsetenv("{SOURCE_TOKEN_ENV}");
-  unsetenv("{EXIT_AFTER_SNAPSHOT_ENV}");
 
   /* Store the same token in the container filesystem; rootfs diff restore
      should bring this file into the restore pod. */
@@ -470,10 +472,6 @@ int main(void) {{
   if (ready) {{ fprintf(ready, "ready\\n"); fclose(ready); }}
   int seq = 0;
   while (1) {{
-    if (exit_after_snapshot && access("{SNAPSHOT_COMPLETE}", F_OK) == 0) {{
-      fprintf(stdout, "[source] snapshot complete; exiting\\n");
-      return 0;
-    }}
     char gpu_token[TOKEN_SIZE];
     char file_token[TOKEN_SIZE];
     memset(gpu_token, 0, sizeof(gpu_token));

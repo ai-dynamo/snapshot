@@ -3,10 +3,10 @@
 
 """Fast, cluster-free checks of the workload scripts themselves.
 
-The SnapshotJob source establishes restorable state, declares readiness, and
-exits successfully once the agent reports capture through snapshot-complete.
-That post-capture exit lets the source batch Job complete, which is the second
-signal required for SnapshotJob completion.
+The SnapshotJob source establishes restorable state under a CPU supervisor.
+After capture, the supervisor remains runnable even when the CUDA child is
+checkpoint-locked; it observes snapshot-complete, stops the original child, and
+exits successfully so the source batch Job can complete.
 """
 
 from __future__ import annotations
@@ -76,10 +76,9 @@ def test_only_snapshotjob_source_opts_into_post_capture_exit(gpu: bool) -> None:
     script = workloads.snapshotjob_source_command("test-image", gpu=gpu)
     direct_script = workloads.source_command("test-image", gpu=gpu)
 
-    opt_in = f"export {workloads.EXIT_AFTER_SNAPSHOT_ENV}=true"
-    assert opt_in in script
-    assert opt_in not in direct_script
     assert workloads.SNAPSHOT_COMPLETE in script
+    assert workloads.SNAPSHOT_COMPLETE not in direct_script
+    assert 'kill -KILL "$workload_pid"' in script
     expected_source = workloads.CUDA_SOURCE if gpu else workloads.CPU_SOURCE
     assert expected_source in script
 
