@@ -33,11 +33,11 @@ var errPodSnapshotNameConflict = errors.New("existing PodSnapshot is not owned b
 const sourcePodRequeueBackstop = 30 * time.Second
 
 // createPodSnapshotForSourceJob waits for the source Pod, then creates the
-// deterministic PodSnapshot. A missing Pod just requeues with a bounded
-// backstop: the caller has already ruled out a terminal source Job.
+// deterministic PodSnapshot. The lookup is cache-first: waiting is reversible,
+// so a cached miss just requeues (the caller already ruled out a terminal Job).
 func (r *SnapshotJobReconciler) createPodSnapshotForSourceJob(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) (snapshotJobObservation, ctrl.Result, error) {
 	observed := snapshotJobObservation{job: job}
-	pod, found, err := findSourcePod(ctx, r.NonCacheReadClient, job)
+	pod, found, err := findSourcePod(ctx, r.Client, job)
 	if err != nil {
 		return snapshotJobObservation{}, ctrl.Result{}, fmt.Errorf("find source pod for Job %q: %w", job.Name, err)
 	}

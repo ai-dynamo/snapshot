@@ -671,7 +671,7 @@ func TestFindSourcePod(t *testing.T) {
 	})
 }
 
-func TestSnapshotJobReconcileUsesNonCacheReadClientForSourcePod(t *testing.T) {
+func TestSnapshotJobReconcileSourcePodLookupIsCacheFirst(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
@@ -680,14 +680,20 @@ func TestSnapshotJobReconcileUsesNonCacheReadClientForSourcePod(t *testing.T) {
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	pod := sourcePodForJob(job)
 
+	// The pod exists on the API server but has not reached the informer. Waiting
+	// is reversible, so the creation path must requeue on the cached miss rather
+	// than mix an API-server read into an otherwise cache-consistent pass.
 	r := makeSnapshotJobReconciler(s, sj, job) // cached client deliberately lacks the pod
 	r.NonCacheReadClient = fake.NewClientBuilder().WithScheme(s).WithObjects(pod).Build()
 
-	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	result, err := r.Reconcile(context.Background(), reconcileRequest(sj))
 	require.NoError(t, err)
+	assert.Equal(t, sourcePodRequeueBackstop, result.RequeueAfter)
 
 	snap := &snapshotv1alpha1.PodSnapshot{}
-	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, snap))
+	err = r.Get(context.Background(), reconcileRequest(sj).NamespacedName, snap)
+	assert.True(t, apierrors.IsNotFound(err),
+		"the capture waits for the cached pod; it is not created from an API-server read")
 }
 
 // ---- mapPodSnapshotToSnapshotJob ----
