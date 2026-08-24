@@ -41,6 +41,12 @@ const (
 	// podSnapshotSourcePodNameField indexes PodSnapshots by their namespaced source-pod name.
 	// List calls using this field are also scoped to the pod's namespace.
 	podSnapshotSourcePodNameField = "spec.source.podRef.name"
+
+	// podSnapshotReasonSourcePodGone is the pending-capture failure written when the source pod
+	// turned terminal (Failed or deleting) with no capture result. It is failed only after
+	// sourcePodTerminalGrace, because a checkpoint that terminates its source produces exactly this
+	// pod state shortly before the agent writes content Ready.
+	podSnapshotReasonSourcePodGone = "SourcePodGone"
 )
 
 // errPodSnapshotPodUnscheduled signals that the source pod is not yet scheduled to a node; the
@@ -183,10 +189,51 @@ func (sr *PodSnapshotReconciler) resolveAuthoritativePendingSource(ctx context.C
 	}
 
 	reason, cause := pendingCaptureSourceFailure(snap, content, pod)
-	if cause != nil {
-		return sr.failPodSnapshot(ctx, snap, reason, cause)
+	if cause == nil {
+		return sr.propagateStatus(ctx, snap, content)
 	}
-	return sr.propagateStatus(ctx, snap, content)
+	if reason == podSnapshotReasonSourcePodGone {
+		// A checkpoint that terminates its source fails the pod before the agent
+		// writes content Ready; wait out the grace window instead of racing it.
+		if wait := sourcePodTerminalGraceRemaining(pod, time.Now()); wait > 0 {
+			return ctrl.Result{RequeueAfter: wait}, nil
+		}
+	}
+	return sr.failPodSnapshot(ctx, snap, reason, cause)
+}
+
+// sourcePodTerminalGrace is how long a pending capture may stay unresolved
+// after its source pod turned terminal before the pod's state becomes the
+// capture failure — the backstop for an agent that never publishes a result.
+const sourcePodTerminalGrace = 5 * time.Minute
+
+// sourcePodTerminalGraceRemaining returns how much of the grace window is left
+// for a terminal source pod. An unknown transition time returns zero — failing
+// immediately — rather than requeueing on a clock that can never expire.
+func sourcePodTerminalGraceRemaining(pod *corev1.Pod, now time.Time) time.Duration {
+	terminalAt := podTerminalTime(pod)
+	if terminalAt.IsZero() {
+		return 0
+	}
+	return sourcePodTerminalGrace - now.Sub(terminalAt)
+}
+
+// podTerminalTime returns the latest observable time at which the source pod
+// turned terminal: the newest container termination, else the deletion stamp.
+// Zero means the transition time is not observable from pod status.
+func podTerminalTime(pod *corev1.Pod) time.Time {
+	var latest time.Time
+	for _, statuses := range [][]corev1.ContainerStatus{pod.Status.ContainerStatuses, pod.Status.InitContainerStatuses} {
+		for i := range statuses {
+			if terminated := statuses[i].State.Terminated; terminated != nil && terminated.FinishedAt.Time.After(latest) {
+				latest = terminated.FinishedAt.Time
+			}
+		}
+	}
+	if latest.IsZero() && pod.DeletionTimestamp != nil {
+		latest = pod.DeletionTimestamp.Time
+	}
+	return latest
 }
 
 func (sr *PodSnapshotReconciler) readAuthoritativeBoundContent(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot, cachedContent *snapshotv1alpha1.PodSnapshotContent) (*snapshotv1alpha1.PodSnapshotContent, error) {
@@ -228,7 +275,7 @@ func pendingCaptureSourceFailure(snap *snapshotv1alpha1.PodSnapshot, content *sn
 		return snapshotv1alpha1.ReasonSourceCompletedWithoutCapture,
 			fmt.Errorf("source pod %q completed before PodSnapshotContent %q reported capture success or failure", key.String(), content.Name)
 	case pod.Status.Phase == corev1.PodFailed || pod.DeletionTimestamp != nil:
-		return "SourcePodGone",
+		return podSnapshotReasonSourcePodGone,
 			fmt.Errorf("source pod %q became unavailable before PodSnapshotContent %q reported capture success or failure", key.String(), content.Name)
 	default:
 		return "", nil
