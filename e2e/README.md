@@ -50,14 +50,24 @@ uv run --project e2e pytest e2e/tests -m environment -vv
 uv run --project e2e pytest e2e/tests/test_snapshot_lifecycle.py -vv -s
 ```
 
-Run the standalone vLLM checkpoint test with:
+Run the standalone vLLM checkpoint and restore test with:
 
 ```bash
+export SNAPSHOT_E2E_VLLM_IMAGE=<registry>/snapshot-vllm:v0.27.1
+
+docker buildx build --platform linux/amd64 \
+  --tag "$SNAPSHOT_E2E_VLLM_IMAGE" \
+  --push \
+  e2e/images/vllm
+
 uv run --project e2e pytest e2e/tests/test_vllm_checkpoint.py -vv -s
 ```
 
-The test defaults to `vllm/vllm-openai:v0.27.1` and `Qwen/Qwen3-0.6B`.
-Override them with `SNAPSHOT_E2E_VLLM_IMAGE` and `SNAPSHOT_E2E_VLLM_MODEL`.
+The test checkpoints a sleeping vLLM engine, restores it, wakes it, and verifies
+post-restore inference. The test image upgrades the upstream Ubuntu 22.04
+image's glibc to match the Snapshot agent's Ubuntu 24.04 restore bundle.
+The model defaults to `Qwen/Qwen3-0.6B`; override it with
+`SNAPSHOT_E2E_VLLM_MODEL`.
 
 When finished, uninstall the Snapshot release and delete the checkpoint PVC:
 

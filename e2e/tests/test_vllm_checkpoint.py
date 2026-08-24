@@ -9,11 +9,12 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
+from kubernetes import client
 from snapshot_e2e import k8s, workloads
 from snapshot_e2e import lifecycle as snap
 
-DEFAULT_VLLM_IMAGE = "vllm/vllm-openai:v0.27.1"
 DEFAULT_VLLM_MODEL = "Qwen/Qwen3-0.6B"
+VLLM_RESTORE_READY = f"{workloads.CONTROL_DIR}/vllm-restore-ready"
 
 
 @dataclass(frozen=True)
@@ -29,13 +30,16 @@ class VllmCheckpointRun:
     @classmethod
     def new(cls) -> VllmCheckpointRun:
         suffix = f"vllm-checkpoint-{uuid.uuid4().hex[:6]}"
+        image = os.environ.get("SNAPSHOT_E2E_VLLM_IMAGE")
+        if not image:
+            pytest.skip("SNAPSHOT_E2E_VLLM_IMAGE is required")
         return cls(
             suffix=suffix,
             checkpoint_id=suffix,
             snapshot_name=f"{suffix}-snapshot",
             source_pod=f"{suffix}-source",
             restore_pod=f"{suffix}-restore",
-            image=os.environ.get("SNAPSHOT_E2E_VLLM_IMAGE", DEFAULT_VLLM_IMAGE),
+            image=image,
             model=os.environ.get("SNAPSHOT_E2E_VLLM_MODEL", DEFAULT_VLLM_MODEL),
         )
 
@@ -43,7 +47,7 @@ class VllmCheckpointRun:
 @pytest.mark.snapshot_success
 @pytest.mark.gpu
 @pytest.mark.vllm
-def test_vllm_checkpoint_captures_quiesced_engine(
+def test_vllm_checkpoint_restores_quiesced_engine(
     config: k8s.E2EConfig,
 ) -> None:
     run = VllmCheckpointRun.new()
@@ -87,6 +91,33 @@ def test_vllm_checkpoint_captures_quiesced_engine(
         assert "vLLM generation paused" in logs
         assert "vLLM engine sleeping" in logs
         assert "ready for snapshot" in logs
+
+        k8s.delete_pod(config.namespace, run.source_pod)
+        snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+        k8s.create_pod(vllm_restore_pod(config, run, source_node))
+        snap.wait_for_restore_status(
+            config.namespace,
+            run.restore_pod,
+            "completed",
+            timeout=1200,
+        )
+        snap.wait_for_pod_ready(config.namespace, run.restore_pod, timeout=1200)
+        snap.wait_for_file(
+            config.namespace,
+            run.restore_pod,
+            VLLM_RESTORE_READY,
+            timeout=1200,
+        )
+
+        restored_content = snap.get_custom_object(
+            client.CustomObjectsApi(),
+            None,
+            content["metadata"]["name"],
+            snap.PODSNAPSHOTCONTENTS,
+        )
+        restored_content_ready = snap.condition(restored_content, "Ready")
+        assert restored_content_ready
+        assert restored_content_ready.get("reason") == "Captured"
     except Exception:
         snap.debug_dump(config, run)
         raise
@@ -135,6 +166,7 @@ def vllm_source_pod(
                             "name": "SNAPSHOT_CONTROL_DIR",
                             "value": workloads.CONTROL_DIR,
                         },
+                        {"name": "HF_HUB_DISABLE_XET", "value": "1"},
                         {"name": "NCCL_CUMEM_ENABLE", "value": "0"},
                         {"name": "NCCL_NVLS_ENABLE", "value": "0"},
                         {"name": "NCCL_IB_DISABLE", "value": "1"},
@@ -153,6 +185,10 @@ def vllm_source_pod(
                             "name": "snapshot-control",
                             "mountPath": workloads.CONTROL_DIR,
                         },
+                        {
+                            "name": "tun",
+                            "mountPath": "/dev/net/tun",
+                        },
                     ],
                 },
             ],
@@ -161,9 +197,51 @@ def vllm_source_pod(
                     "name": "snapshot-control",
                     "emptyDir": {},
                 },
+                {
+                    "name": "tun",
+                    "hostPath": {
+                        "path": "/dev/net/tun",
+                        "type": "CharDevice",
+                    },
+                },
             ],
         },
     }
+
+
+def vllm_restore_pod(
+    config: k8s.E2EConfig,
+    run: VllmCheckpointRun,
+    source_node: str,
+) -> dict[str, Any]:
+    pod = vllm_source_pod(config, run)
+    pod["metadata"] = {
+        "name": run.restore_pod,
+        "namespace": config.namespace,
+        "labels": {
+            "snapshot-e2e-test": run.suffix,
+            "nvidia.com/snapshot-checkpoint-id": run.checkpoint_id,
+            "nvidia.com/snapshot-is-restore-target": "true",
+        },
+        "annotations": {
+            "nvidia.com/snapshot-target-containers": workloads.CONTAINER,
+            "nvidia.com/snapshot-artifact-version": "1",
+        },
+    }
+    pod["spec"]["affinity"] = workloads.same_node_affinity(source_node)
+    container = pod["spec"]["containers"][0]
+    container["command"] = ["/bin/bash", "-lc", "sleep infinity"]
+    container["startupProbe"] = {
+        "exec": {"command": ["cat", workloads.RESTORE_DONE]},
+        "periodSeconds": 1,
+        "failureThreshold": 1200,
+    }
+    container["readinessProbe"] = {
+        "exec": {"command": ["cat", VLLM_RESTORE_READY]},
+        "periodSeconds": 1,
+        "failureThreshold": 1200,
+    }
+    return pod
 
 
 def vllm_source_command(run: VllmCheckpointRun) -> str:
@@ -173,6 +251,7 @@ import asyncio
 import os
 from pathlib import Path
 
+from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -200,7 +279,32 @@ async def main():
     print("vLLM engine sleeping", flush=True)
     (control_dir / "ready-for-snapshot").write_text("ready\\n", encoding="utf-8")
     print("ready for snapshot", flush=True)
-    while not (control_dir / "snapshot-complete").exists():
+    while True:
+        if (control_dir / "snapshot-complete").exists():
+            return
+        if (control_dir / "restore-complete").exists():
+            await engine.wake_up()
+            await engine.resume_generation()
+            await engine.check_health()
+            result = None
+            async for output in engine.generate(
+                "Reply with one word: ready",
+                SamplingParams(temperature=0.0, max_tokens=4),
+                "snapshot-restore-smoke",
+            ):
+                result = output
+            if result is None or not result.outputs:
+                raise RuntimeError("vLLM produced no output after restore")
+            text = result.outputs[0].text.strip()
+            if not text:
+                raise RuntimeError("vLLM produced empty output after restore")
+            (control_dir / "vllm-restore-ready").write_text(
+                text + "\\n",
+                encoding="utf-8",
+            )
+            print(f"vLLM restored output={{text!r}}", flush=True)
+            while True:
+                await asyncio.sleep(3600)
         await asyncio.sleep(1)
 
 if __name__ == "__main__":
