@@ -128,22 +128,14 @@ func classifyExistingSourceJob(sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Jo
 // protocol fields needed for safe adoption. API defaults and unrelated
 // admission mutations are deliberately outside this narrow recovery check.
 func sourceJobHasExpectedIdentity(desired, actual *batchv1.Job, targetContainer string) bool {
-	if actual.Labels[snapshotv1alpha1.CheckpointIDLabel] != desired.Labels[snapshotv1alpha1.CheckpointIDLabel] {
-		return false
-	}
 	for _, key := range []string{
 		snapshotv1alpha1.SnapshotJobOwnerLabel,
 		snapshotv1alpha1.SnapshotJobOwnerUIDLabel,
 		snapshotv1alpha1.CheckpointSourceLabel,
-		snapshotv1alpha1.CheckpointIDLabel,
 	} {
 		if actual.Spec.Template.Labels[key] != desired.Spec.Template.Labels[key] {
 			return false
 		}
-	}
-	if actual.Spec.Template.Annotations[snapshotv1alpha1.CheckpointArtifactVersionAnnotation] !=
-		desired.Spec.Template.Annotations[snapshotv1alpha1.CheckpointArtifactVersionAnnotation] {
-		return false
 	}
 	for i := range actual.Spec.Template.Spec.Containers {
 		if actual.Spec.Template.Spec.Containers[i].Name == targetContainer {

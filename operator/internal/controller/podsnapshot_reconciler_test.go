@@ -246,7 +246,7 @@ func TestSnapshotReconciler_ReadySnapRevertsToPendingWhenContentPending(t *testi
 			Source:         snapshotv1alpha1.PodSnapshotContentSource{PodRef: snapshotv1alpha1.PodReference{Name: "worker-0", UID: "pod-uid-9"}, NodeName: "node-a"},
 		},
 	}
-	r := makeSnapshotReconciler(s, snap, content, scheduledPod("abc123"))
+	r := makeSnapshotReconciler(s, snap, content, scheduledPod())
 
 	reconcileSnapshot(t, r, snap.Name)
 
@@ -296,7 +296,7 @@ func TestSnapshotReconciler_BoundContentPendingNoRequeue(t *testing.T) {
 	snap, content := pendingBoundSnapshotContent()
 	// Bound content exists but the agent hasn't written a result yet (no conditions): the dominant
 	// live steady-state. A live cached source keeps the capture Pending without an API-server read.
-	r := makeSnapshotReconciler(s, snap, content, scheduledPod("abc123"))
+	r := makeSnapshotReconciler(s, snap, content, scheduledPod())
 	apiReads := 0
 	r.NonCacheReadClient = fake.NewClientBuilder().WithScheme(s).WithInterceptorFuncs(interceptor.Funcs{
 		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
@@ -318,7 +318,7 @@ func TestSnapshotReconciler_BoundContentPendingNoRequeue(t *testing.T) {
 func TestSnapshotReconciler_SourceCompletesWithoutCaptureResult(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	snap, content := pendingBoundSnapshotContent()
-	pod := scheduledPod("abc123")
+	pod := scheduledPod()
 	pod.Status.Phase = corev1.PodSucceeded
 	r := makeSnapshotReconciler(s, snap, content, pod)
 
@@ -338,7 +338,7 @@ func TestSnapshotReconciler_SourceCompletesWithoutCaptureResult(t *testing.T) {
 func TestSnapshotReconciler_FailedSourcePodWaitsForCaptureResultWithinGrace(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	snap, content := pendingBoundSnapshotContent()
-	pod := scheduledPod("abc123")
+	pod := scheduledPod()
 	pod.Status.Phase = corev1.PodFailed
 	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
 		Name: "main",
@@ -376,7 +376,7 @@ func TestSnapshotReconciler_FailedSourcePodWaitsForCaptureResultWithinGrace(t *t
 func TestSnapshotReconciler_FailedSourcePodFailsCaptureAfterGraceExpires(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	snap, content := pendingBoundSnapshotContent()
-	pod := scheduledPod("abc123")
+	pod := scheduledPod()
 	pod.Status.Phase = corev1.PodFailed
 	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
 		Name: "main",
@@ -399,7 +399,7 @@ func TestSnapshotReconciler_FailedSourcePodFailsCaptureAfterGraceExpires(t *test
 func TestSnapshotReconciler_FailedSourcePodWithoutTerminalTimeFailsImmediately(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	snap, content := pendingBoundSnapshotContent()
-	pod := scheduledPod("abc123")
+	pod := scheduledPod()
 	pod.Status.Phase = corev1.PodFailed // no container statuses, no deletion stamp
 
 	r := makeSnapshotReconciler(s, snap, content, pod)
@@ -431,7 +431,7 @@ func TestSnapshotReconciler_CachedSourceMissingAuthoritativeSourceLiveRemainsPen
 	s := snapshotReconcilerScheme()
 	snap, content := pendingBoundSnapshotContent()
 	r := makeSnapshotReconciler(s, snap, content) // source pod is absent from the cache
-	r.NonCacheReadClient = fake.NewClientBuilder().WithScheme(s).WithObjects(content, scheduledPod("abc123")).Build()
+	r.NonCacheReadClient = fake.NewClientBuilder().WithScheme(s).WithObjects(content, scheduledPod()).Build()
 
 	reconcileSnapshot(t, r, snap.Name)
 
@@ -449,7 +449,7 @@ func TestSnapshotReconciler_AuthoritativeReadyWinsSourceTerminalRace(t *testing.
 		Type: snapshotv1alpha1.PodSnapshotConditionReady, Status: metav1.ConditionTrue,
 		Reason: "Captured", Message: "checkpoint is durable",
 	})
-	pod := scheduledPod("abc123")
+	pod := scheduledPod()
 	pod.Status.Phase = corev1.PodSucceeded
 	r := makeSnapshotReconciler(s, snap, pendingContent, pod)
 	r.NonCacheReadClient = fake.NewClientBuilder().WithScheme(s).WithObjects(readyContent, pod).Build()
@@ -468,7 +468,7 @@ func TestSnapshotReconciler_AuthoritativeReadyWinsSourceTerminalRace(t *testing.
 func TestSnapshotReconciler_TerminalPodReadBeforeContentReadKeepsRacedCapture(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	snap, pendingContent := pendingBoundSnapshotContent()
-	pod := scheduledPod("abc123")
+	pod := scheduledPod()
 	pod.Status.Phase = corev1.PodSucceeded
 	r := makeSnapshotReconciler(s, snap, pendingContent, pod)
 
@@ -520,7 +520,7 @@ func TestSourcePodToPodSnapshotsUsesNamespaceAndSourceIndex(t *testing.T) {
 	otherNamespace.UID = "other-namespace-uid"
 	r := makeSnapshotReconciler(s, matching, otherSource, otherNamespace)
 
-	requests := r.sourcePodToPodSnapshots(context.Background(), scheduledPod("abc123"))
+	requests := r.sourcePodToPodSnapshots(context.Background(), scheduledPod())
 	require.Len(t, requests, 1)
 	assert.Equal(t, client.ObjectKeyFromObject(matching), requests[0].NamespacedName)
 	assert.Empty(t, r.sourcePodToPodSnapshots(context.Background(), &snapshotv1alpha1.PodSnapshot{}))
