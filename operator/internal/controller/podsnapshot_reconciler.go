@@ -161,9 +161,14 @@ func (sr *PodSnapshotReconciler) resolvePendingBoundContent(ctx context.Context,
 }
 
 // confirmPendingCaptureTerminal bypasses the informer cache before writing sticky failure. The
-// agent persists Content Ready before releasing the source process, so a fresh content result wins
-// over a raced source-pod terminal event.
+// pod is read before the content: the agent persists content Ready before releasing the source
+// process, so a pod observed terminal guarantees the content read cannot miss a raced Ready.
 func (sr *PodSnapshotReconciler) confirmPendingCaptureTerminal(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot, cachedContent *snapshotv1alpha1.PodSnapshotContent) (ctrl.Result, error) {
+	pod, podErr := sr.readAuthoritativeSourcePod(ctx, snap)
+	if podErr != nil && !apierrors.IsNotFound(podErr) {
+		return ctrl.Result{}, podErr
+	}
+
 	content, err := sr.readAuthoritativeBoundContent(ctx, snap, cachedContent)
 	if err != nil {
 		if errors.Is(err, errContentConflict) {
@@ -174,18 +179,11 @@ func (sr *PodSnapshotReconciler) confirmPendingCaptureTerminal(ctx context.Conte
 	if snapshotv1alpha1.IsPodSnapshotContentSucceeded(content) || snapshotv1alpha1.IsPodSnapshotContentFailed(content) {
 		return sr.propagateStatus(ctx, snap, content)
 	}
-	return sr.resolveAuthoritativePendingSource(ctx, snap, content)
-}
 
-func (sr *PodSnapshotReconciler) resolveAuthoritativePendingSource(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot, content *snapshotv1alpha1.PodSnapshotContent) (ctrl.Result, error) {
-	pod, err := sr.readAuthoritativeSourcePod(ctx, snap)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			key := client.ObjectKey{Namespace: snap.Namespace, Name: snap.Spec.Source.PodRef.Name}
-			return sr.failPodSnapshot(ctx, snap, "SourcePodNotFound",
-				fmt.Errorf("source pod %q disappeared before capture success or failure was recorded", key.String()))
-		}
-		return ctrl.Result{}, err
+	if apierrors.IsNotFound(podErr) {
+		key := client.ObjectKey{Namespace: snap.Namespace, Name: snap.Spec.Source.PodRef.Name}
+		return sr.failPodSnapshot(ctx, snap, "SourcePodNotFound",
+			fmt.Errorf("source pod %q disappeared before capture success or failure was recorded", key.String()))
 	}
 
 	reason, cause := pendingCaptureSourceFailure(snap, content, pod)

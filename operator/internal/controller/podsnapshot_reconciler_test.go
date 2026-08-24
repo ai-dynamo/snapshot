@@ -472,6 +472,49 @@ func TestSnapshotReconciler_AuthoritativeReadyWinsSourceTerminalRace(t *testing.
 	assert.False(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
 }
 
+func TestSnapshotReconciler_TerminalPodReadBeforeContentReadKeepsRacedCapture(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	snap, pendingContent := pendingBoundSnapshotContent()
+	pod := scheduledPod("abc123")
+	pod.Status.Phase = corev1.PodSucceeded
+	r := makeSnapshotReconciler(s, snap, pendingContent, pod)
+
+	// The agent commits content Ready between the two authoritative reads. Ready is
+	// persisted before the source process is released, so a pod observed terminal
+	// guarantees the Ready write is already visible — but only when the pod is read
+	// first. This interceptor makes Ready visible only after the pod read; reading
+	// the content first would see a pending capture and fail it as abandoned.
+	podObserved := false
+	authoritative := fake.NewClientBuilder().WithScheme(s).WithObjects(pendingContent, pod).Build()
+	r.NonCacheReadClient = fake.NewClientBuilder().WithScheme(s).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(ctx context.Context, _ client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if err := authoritative.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			switch typed := obj.(type) {
+			case *corev1.Pod:
+				podObserved = true
+			case *snapshotv1alpha1.PodSnapshotContent:
+				if podObserved {
+					meta.SetStatusCondition(&typed.Status.Conditions, metav1.Condition{
+						Type: snapshotv1alpha1.PodSnapshotConditionReady, Status: metav1.ConditionTrue,
+						Reason: "Captured", Message: "checkpoint is durable",
+					})
+				}
+			}
+			return nil
+		},
+	}).Build()
+
+	reconcileSnapshot(t, r, snap.Name)
+
+	updated := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), updated))
+	assert.True(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady),
+		"a capture committed between the authoritative reads must be propagated, not failed as abandoned")
+	assert.False(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
+}
+
 func TestSourcePodToPodSnapshotsUsesNamespaceAndSourceIndex(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	matching := makeSnapshotForReconcile()
