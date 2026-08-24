@@ -8,6 +8,9 @@ SPDX-License-Identifier: Apache-2.0
 This guide shows how to checkpoint and restore a standalone vLLM process with
 Snapshot. Dynamo is not installed or used.
 
+The flow uses `PodSnapshot`, the Snapshot operator, and the node agent directly.
+It does not use `SnapshotJob` or `snapshotctl`.
+
 Snapshot is under active development and is not production-ready. Pin immutable
 Snapshot and workload image versions, and validate the complete flow on the
 target GPU and driver combination.
@@ -236,20 +239,7 @@ docker buildx build \
 For a production image, build vLLM on an Ubuntu 24.04 base instead of upgrading
 glibc across Ubuntu releases.
 
-## 5. Build `snapshotctl`
-
-From the Snapshot repository root:
-
-```bash
-mkdir -p bin
-go build -o bin/snapshotctl ./operator/cmd/snapshotctl
-```
-
-`snapshotctl checkpoint` creates the checkpoint Job and `PodSnapshot`.
-`snapshotctl restore` creates and marks the inert restore pod. The operator and
-agent still perform the actual capture and restore.
-
-## 6. Create the pod manifests
+## 5. Create the pod manifests
 
 Create `/tmp/vllm-source.yaml`:
 
@@ -260,59 +250,26 @@ kind: Pod
 metadata:
   name: vllm-source
   namespace: ${NAMESPACE}
+  labels:
+    nvidia.com/snapshot-is-checkpoint-source: "true"
+    nvidia.com/snapshot-checkpoint-id: ${CHECKPOINT_ID}
+  annotations:
+    nvidia.com/snapshot-target-containers: main
 spec:
   restartPolicy: Never
   runtimeClassName: nvidia
+  securityContext:
+    seccompProfile:
+      type: Localhost
+      localhostProfile: profiles/block-iouring.json
   containers:
   - name: main
     image: ${VLLM_IMAGE}
     imagePullPolicy: Always
     command: ["python3", "/opt/snapshot_vllm.py"]
     env:
-    - name: MODEL
-      value: ${MODEL}
-    - name: HF_HUB_DISABLE_XET
-      value: "1"
-    - name: NCCL_CUMEM_ENABLE
-      value: "0"
-    - name: NCCL_NVLS_ENABLE
-      value: "0"
-    - name: NCCL_IB_DISABLE
-      value: "1"
-    - name: NCCL_RAS_ENABLE
-      value: "0"
-    resources:
-      limits:
-        nvidia.com/gpu: "1"
-    volumeMounts:
-    - name: tun
-      mountPath: /dev/net/tun
-  volumes:
-  - name: tun
-    hostPath:
-      path: /dev/net/tun
-      type: CharDevice
-EOF
-```
-
-Create `/tmp/vllm-restore.yaml`:
-
-```bash
-cat >/tmp/vllm-restore.yaml <<EOF
-apiVersion: v1
-kind: Pod
-metadata:
-  name: vllm-restore
-  namespace: ${NAMESPACE}
-spec:
-  restartPolicy: Never
-  runtimeClassName: nvidia
-  containers:
-  - name: main
-    image: ${VLLM_IMAGE}
-    imagePullPolicy: Always
-    command: ["/bin/bash", "-lc", "sleep infinity"]
-    env:
+    - name: SNAPSHOT_CONTROL_DIR
+      value: /snapshot-control
     - name: MODEL
       value: ${MODEL}
     - name: HF_HUB_DISABLE_XET
@@ -331,15 +288,18 @@ spec:
     readinessProbe:
       exec:
         command:
-        - /bin/bash
-        - -lc
-        - test -s /snapshot-control/vllm-restore-ready
+        - cat
+        - /snapshot-control/ready-for-snapshot
       periodSeconds: 1
       failureThreshold: 1200
     volumeMounts:
+    - name: snapshot-control
+      mountPath: /snapshot-control
     - name: tun
       mountPath: /dev/net/tun
   volumes:
+  - name: snapshot-control
+    emptyDir: {}
   - name: tun
     hostPath:
       path: /dev/net/tun
@@ -347,40 +307,53 @@ spec:
 EOF
 ```
 
-`snapshotctl` adds the Snapshot labels, annotations, seccomp profile, control
-volume, control-directory environment variable, and lifecycle probes.
+## 6. Capture the vLLM process
 
-The restore container must remain inert until the node agent replaces it with
-the restored process tree. Starting a second vLLM engine in the restore pod can
-consume the GPU and race the restore.
-
-## 7. Capture the vLLM process
-
-Start the checkpoint flow with an explicit checkpoint ID:
+Start the source pod and wait until vLLM has quiesced:
 
 ```bash
-bin/snapshotctl checkpoint \
-  --manifest /tmp/vllm-source.yaml \
-  --container main \
+kubectl apply -f /tmp/vllm-source.yaml
+kubectl wait \
+  --for=condition=Ready \
+  pod/vllm-source \
   --namespace "$NAMESPACE" \
-  --checkpoint-id "$CHECKPOINT_ID" \
-  --timeout 30m
+  --timeout=20m
 ```
 
-Wait for the source Job to exit and release the GPU:
+Create `/tmp/vllm-snapshot.yaml`, pinning the source pod UID:
 
 ```bash
+cat >/tmp/vllm-snapshot.yaml <<EOF
+apiVersion: nvidia.com/v1alpha1
+kind: PodSnapshot
+metadata:
+  name: vllm-source-snapshot
+  namespace: ${NAMESPACE}
+  labels:
+    nvidia.com/snapshot-checkpoint-id: ${CHECKPOINT_ID}
+spec:
+  source:
+    podRef:
+      name: vllm-source
+      uid: $(kubectl get pod vllm-source \
+        --namespace "$NAMESPACE" \
+        --output jsonpath='{.metadata.uid}')
+      containers:
+      - main
+EOF
+
+kubectl apply -f /tmp/vllm-snapshot.yaml
 kubectl wait \
-  --for=condition=complete \
-  job/vllm-source-checkpoint \
+  --for=condition=Ready \
+  podsnapshot/vllm-source-snapshot \
   --namespace "$NAMESPACE" \
-  --timeout=10m
+  --timeout=20m
 ```
 
 Inspect the API objects:
 
 ```bash
-kubectl get podsnapshot vllm-source-checkpoint \
+kubectl get podsnapshot vllm-source-snapshot \
   --namespace "$NAMESPACE" \
   -o wide
 kubectl get podsnapshotcontent
@@ -390,16 +363,97 @@ The `PodSnapshot` must report `Ready=True`. Its
 `status.boundSnapshotContentName` identifies the system-created
 `PodSnapshotContent`. Do not create `PodSnapshotContent` yourself.
 
-## 8. Restore the checkpoint
+## 7. Restore the checkpoint
 
-Create the restore target:
+Create `/tmp/vllm-restore.yaml` while the source pod still records its node:
 
 ```bash
-bin/snapshotctl restore \
-  --manifest /tmp/vllm-restore.yaml \
-  --containers main \
+cat >/tmp/vllm-restore.yaml <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vllm-restore
+  namespace: ${NAMESPACE}
+  labels:
+    nvidia.com/snapshot-checkpoint-id: ${CHECKPOINT_ID}
+    nvidia.com/snapshot-is-restore-target: "true"
+  annotations:
+    nvidia.com/snapshot-target-containers: main
+    nvidia.com/snapshot-artifact-version: "1"
+spec:
+  restartPolicy: Never
+  runtimeClassName: nvidia
+  nodeName: $(kubectl get pod vllm-source \
+    --namespace "$NAMESPACE" \
+    --output jsonpath='{.spec.nodeName}')
+  securityContext:
+    seccompProfile:
+      type: Localhost
+      localhostProfile: profiles/block-iouring.json
+  containers:
+  - name: main
+    image: ${VLLM_IMAGE}
+    imagePullPolicy: Always
+    command: ["/bin/bash", "-lc", "sleep infinity"]
+    env:
+    - name: SNAPSHOT_CONTROL_DIR
+      value: /snapshot-control
+    - name: MODEL
+      value: ${MODEL}
+    - name: HF_HUB_DISABLE_XET
+      value: "1"
+    - name: NCCL_CUMEM_ENABLE
+      value: "0"
+    - name: NCCL_NVLS_ENABLE
+      value: "0"
+    - name: NCCL_IB_DISABLE
+      value: "1"
+    - name: NCCL_RAS_ENABLE
+      value: "0"
+    resources:
+      limits:
+        nvidia.com/gpu: "1"
+    startupProbe:
+      exec:
+        command:
+        - cat
+        - /snapshot-control/restore-complete
+      periodSeconds: 1
+      failureThreshold: 1200
+    readinessProbe:
+      exec:
+        command:
+        - /bin/bash
+        - -lc
+        - test -s /snapshot-control/vllm-restore-ready
+      periodSeconds: 1
+      failureThreshold: 1200
+    volumeMounts:
+    - name: snapshot-control
+      mountPath: /snapshot-control
+    - name: tun
+      mountPath: /dev/net/tun
+  volumes:
+  - name: snapshot-control
+    emptyDir: {}
+  - name: tun
+    hostPath:
+      path: /dev/net/tun
+      type: CharDevice
+EOF
+```
+
+The restore container must remain inert until the node agent replaces it with
+the restored process tree. Starting a second vLLM engine in the restore pod can
+consume the GPU and race the restore.
+
+Delete the source pod to release the GPU, then create the restore target:
+
+```bash
+kubectl delete pod vllm-source \
   --namespace "$NAMESPACE" \
-  --checkpoint-id "$CHECKPOINT_ID"
+  --wait=true
+kubectl apply -f /tmp/vllm-restore.yaml
 ```
 
 Wait for restore and post-restore inference:
@@ -424,7 +478,7 @@ kubectl exec vllm-restore \
 The restore status must be `completed`, and the result file must contain the
 post-restore model response.
 
-## 9. Inspect the artifact
+## 8. Inspect the artifact
 
 The agent stores version 1 under
 `/checkpoints/<checkpoint-id>/versions/1` on the Snapshot PVC.
@@ -443,16 +497,16 @@ kubectl exec \
 checkpoint settings, and restore inputs. The remaining files contain CRIU
 images, process memory, CUDA state, and captured root filesystem changes.
 
-## 10. Clean up
+## 9. Clean up
 
 ```bash
+kubectl delete pod vllm-source \
+  --namespace "$NAMESPACE" \
+  --ignore-not-found
 kubectl delete pod vllm-restore \
   --namespace "$NAMESPACE" \
   --ignore-not-found
-kubectl delete job vllm-source-checkpoint \
-  --namespace "$NAMESPACE" \
-  --ignore-not-found
-kubectl delete podsnapshot vllm-source-checkpoint \
+kubectl delete podsnapshot vllm-source-snapshot \
   --namespace "$NAMESPACE" \
   --ignore-not-found
 ```
