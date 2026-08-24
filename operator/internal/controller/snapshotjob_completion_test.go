@@ -358,8 +358,8 @@ func TestSnapshotJobReconcileJobDeleted(t *testing.T) {
 	})
 	require.Empty(t, sj.Status.PodSnapshotName, "the UID must detect deletion before PodSnapshot status is recorded")
 
-	r := makeSnapshotJobReconciler(s, sj)                       // cached Job lookup misses
-	r.APIReader = fake.NewClientBuilder().WithScheme(s).Build() // the Job is authoritatively gone too
+	r := makeSnapshotJobReconciler(s, sj)                                // cached Job lookup misses
+	r.NonCacheReadClient = fake.NewClientBuilder().WithScheme(s).Build() // the Job is authoritatively gone too
 	_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
 	require.NoError(t, err)
 
@@ -404,7 +404,7 @@ func TestSnapshotJobReconcileFailedPodSnapshotAndDeletedJobUsesJobDeleted(t *tes
 	// The cached Job is stale enough to reach PodSnapshot failure arbitration,
 	// while the direct reader proves that the recorded Job is now deleted.
 	r := makeSnapshotJobReconciler(s, sj, job, snap)
-	r.APIReader = fake.NewClientBuilder().WithScheme(s).Build()
+	r.NonCacheReadClient = fake.NewClientBuilder().WithScheme(s).Build()
 
 	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
 	require.NoError(t, err)

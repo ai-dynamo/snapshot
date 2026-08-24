@@ -59,8 +59,8 @@ var errContentConflict = errors.New("existing PodSnapshotContent belongs to anot
 // back to the PodSnapshot, and cascades deletion to the PodSnapshotContent.
 type PodSnapshotReconciler struct {
 	client.Client
-	APIReader client.Reader
-	Recorder  record.EventRecorder
+	NonCacheReadClient client.Reader
+	Recorder           record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=get;list;watch;update;patch
@@ -191,7 +191,7 @@ func (sr *PodSnapshotReconciler) resolveAuthoritativePendingSource(ctx context.C
 
 func (sr *PodSnapshotReconciler) readAuthoritativeBoundContent(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot, cachedContent *snapshotv1alpha1.PodSnapshotContent) (*snapshotv1alpha1.PodSnapshotContent, error) {
 	content := &snapshotv1alpha1.PodSnapshotContent{}
-	if err := sr.APIReader.Get(ctx, client.ObjectKeyFromObject(cachedContent), content); err != nil {
+	if err := sr.NonCacheReadClient.Get(ctx, client.ObjectKeyFromObject(cachedContent), content); err != nil {
 		return nil, fmt.Errorf("re-read pending PodSnapshotContent %q: %w", cachedContent.Name, err)
 	}
 	if err := verifyContentBacklink(snap, content); err != nil {
@@ -203,7 +203,7 @@ func (sr *PodSnapshotReconciler) readAuthoritativeBoundContent(ctx context.Conte
 func (sr *PodSnapshotReconciler) readAuthoritativeSourcePod(ctx context.Context, snap *snapshotv1alpha1.PodSnapshot) (*corev1.Pod, error) {
 	pod := &corev1.Pod{}
 	key := client.ObjectKey{Namespace: snap.Namespace, Name: snap.Spec.Source.PodRef.Name}
-	if err := sr.APIReader.Get(ctx, key, pod); err != nil {
+	if err := sr.NonCacheReadClient.Get(ctx, key, pod); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, err
 		}
@@ -481,8 +481,8 @@ func (sr *PodSnapshotReconciler) handleDelete(ctx context.Context, snap *snapsho
 // SetupWithManager wires content and source-pod events to their PodSnapshots. The source-pod
 // index keeps pod-event mapping namespace-scoped and avoids scanning all PodSnapshots.
 func (sr *PodSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if sr.APIReader == nil {
-		return errors.New("pod snapshot reconciler requires an API reader")
+	if sr.NonCacheReadClient == nil {
+		return errors.New("pod snapshot reconciler requires a non-cache read client")
 	}
 	if err := mgr.GetFieldIndexer().IndexField(
 		context.Background(),

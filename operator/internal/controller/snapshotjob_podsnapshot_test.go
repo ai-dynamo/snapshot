@@ -490,7 +490,7 @@ func TestSnapshotJobReconcileRecordedPodSnapshotCacheMissUsesAuthoritativeReader
 	// The cached client does not contain the PodSnapshot, simulating informer lag.
 	// The authoritative reader does, so the recorded child must remain valid.
 	r := makeSnapshotJobReconciler(s, sj, job, pod)
-	r.APIReader = fake.NewClientBuilder().WithScheme(s).WithObjects(snap).Build()
+	r.NonCacheReadClient = fake.NewClientBuilder().WithScheme(s).WithObjects(snap).Build()
 
 	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
 	require.NoError(t, err)
@@ -514,7 +514,7 @@ func TestSnapshotJobReconcileRecordedPodSnapshotAuthoritativeReadErrorRetries(t 
 	job.UID = sj.Status.SourceJobUID
 	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
 	r := makeSnapshotJobReconciler(s, sj, job) // cached PodSnapshot lookup misses
-	r.APIReader = fake.NewClientBuilder().WithScheme(s).WithInterceptorFuncs(interceptor.Funcs{
+	r.NonCacheReadClient = fake.NewClientBuilder().WithScheme(s).WithInterceptorFuncs(interceptor.Funcs{
 		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
 			return errors.New("transient API read failure")
 		},
@@ -671,7 +671,7 @@ func TestFindSourcePod(t *testing.T) {
 	})
 }
 
-func TestSnapshotJobReconcileUsesAPIReaderForSourcePod(t *testing.T) {
+func TestSnapshotJobReconcileUsesNonCacheReadClientForSourcePod(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
@@ -681,7 +681,7 @@ func TestSnapshotJobReconcileUsesAPIReaderForSourcePod(t *testing.T) {
 	pod := sourcePodForJob(job)
 
 	r := makeSnapshotJobReconciler(s, sj, job) // cached client deliberately lacks the pod
-	r.APIReader = fake.NewClientBuilder().WithScheme(s).WithObjects(pod).Build()
+	r.NonCacheReadClient = fake.NewClientBuilder().WithScheme(s).WithObjects(pod).Build()
 
 	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
 	require.NoError(t, err)

@@ -48,9 +48,9 @@ func makeSnapshotJobReconcilerWithInterceptor(s *runtime.Scheme, funcs intercept
 		WithStatusSubresource(&snapshotv1alpha1.SnapshotJob{}).
 		WithInterceptorFuncs(funcs).Build()
 	return &SnapshotJobReconciler{
-		Client:    testClient,
-		APIReader: testClient,
-		Recorder:  record.NewFakeRecorder(10),
+		Client:             testClient,
+		NonCacheReadClient: testClient,
+		Recorder:           record.NewFakeRecorder(10),
 	}
 }
 
@@ -211,7 +211,7 @@ func TestSnapshotJobReconcilePropagatesJobGetError(t *testing.T) {
 	assert.Empty(t, updated.Status.Conditions, "no status should be written on a retryable Get error")
 }
 
-func TestSnapshotJobReconcileRecordedJobCacheMissUsesAPIReader(t *testing.T) {
+func TestSnapshotJobReconcileRecordedJobCacheMissUsesNonCacheReadClient(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj := minimalSnapshotJob()
 	sj.UID = types.UID("sj-uid")
@@ -225,7 +225,7 @@ func TestSnapshotJobReconcileRecordedJobCacheMissUsesAPIReader(t *testing.T) {
 	// The cached client deliberately lacks the Job while the direct reader sees
 	// the API-server object, reproducing informer lag after the UID status patch.
 	r := makeSnapshotJobReconciler(s, sj)
-	r.APIReader = fake.NewClientBuilder().WithScheme(s).WithObjects(job).Build()
+	r.NonCacheReadClient = fake.NewClientBuilder().WithScheme(s).WithObjects(job).Build()
 
 	result, err := r.Reconcile(context.Background(), reconcileRequest(sj))
 	require.NoError(t, err)
@@ -248,7 +248,7 @@ func TestSnapshotJobReconcileRecordedJobAuthoritativeReadErrorRetries(t *testing
 	sj.Status.SourceJobUID = types.UID("source-job-uid")
 
 	r := makeSnapshotJobReconciler(s, sj) // cached Job lookup misses
-	r.APIReader = fake.NewClientBuilder().WithScheme(s).WithInterceptorFuncs(interceptor.Funcs{
+	r.NonCacheReadClient = fake.NewClientBuilder().WithScheme(s).WithInterceptorFuncs(interceptor.Funcs{
 		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
 			return errors.New("transient authoritative read failure")
 		},
@@ -275,7 +275,7 @@ func TestSnapshotJobReconcileRecordedJobDirectReadRejectsReplacement(t *testing.
 	require.NoError(t, controllerutil.SetControllerReference(sj, replacement, s))
 
 	r := makeSnapshotJobReconciler(s, sj) // cached Job lookup misses
-	r.APIReader = fake.NewClientBuilder().WithScheme(s).WithObjects(replacement).Build()
+	r.NonCacheReadClient = fake.NewClientBuilder().WithScheme(s).WithObjects(replacement).Build()
 
 	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
 	require.NoError(t, err)

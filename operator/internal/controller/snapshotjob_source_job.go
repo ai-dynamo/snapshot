@@ -68,7 +68,7 @@ func (r *SnapshotJobReconciler) reconcileAcceptedSourceJob(ctx context.Context, 
 // readAuthoritativeSourceJob directly reads and classifies the source Job.
 func (r *SnapshotJobReconciler) readAuthoritativeSourceJob(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, *snapshotJobFailure, error) {
 	job := &batchv1.Job{}
-	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: sj.Namespace, Name: sj.Name}, job); err != nil {
+	if err := r.NonCacheReadClient.Get(ctx, client.ObjectKey{Namespace: sj.Namespace, Name: sj.Name}, job); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, sourceJobDeletedFailure(sj), nil
 		}

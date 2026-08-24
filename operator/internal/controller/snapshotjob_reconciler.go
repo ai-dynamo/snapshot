@@ -42,8 +42,8 @@ import (
 // the Job for debugging.
 type SnapshotJobReconciler struct {
 	client.Client
-	APIReader client.Reader
-	Recorder  record.EventRecorder
+	NonCacheReadClient client.Reader
+	Recorder           record.EventRecorder
 }
 
 type snapshotJobFailure struct {
@@ -200,7 +200,7 @@ func (r *SnapshotJobReconciler) reconcilePodSnapshotResources(ctx context.Contex
 	switch {
 	case snapshotv1alpha1.IsPodSnapshotFailed(snap):
 		// FailureTarget or Failed can race the PodSnapshot update; re-read through
-		// the API reader before deciding which failure is authoritative.
+		// the non-cache read client before deciding which failure is authoritative.
 		latestJob, failure, readErr := r.readAuthoritativeSourceJob(ctx, sj)
 		if readErr != nil {
 			return snapshotJobObservation{}, ctrl.Result{}, fmt.Errorf("re-read source Job %q before terminal decision: %w", job.Name, readErr)
@@ -391,8 +391,8 @@ func setCondition(sj *snapshotv1alpha1.SnapshotJob, condType string, status meta
 // and watches PodSnapshot via a label map function because capture artifacts
 // deliberately carry no ownerReference and must outlive the SnapshotJob.
 func (r *SnapshotJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if r.APIReader == nil {
-		return errors.New("snapshot job reconciler requires an API reader")
+	if r.NonCacheReadClient == nil {
+		return errors.New("snapshot job reconciler requires a non-cache read client")
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&snapshotv1alpha1.SnapshotJob{}).

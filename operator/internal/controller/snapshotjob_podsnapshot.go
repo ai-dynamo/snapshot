@@ -38,7 +38,7 @@ const sourcePodRequeueBackstop = 30 * time.Second
 // concrete missing-capture failure.
 func (r *SnapshotJobReconciler) createPodSnapshotForSourceJob(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) (snapshotJobObservation, ctrl.Result, error) {
 	observed := snapshotJobObservation{job: job}
-	pod, found, err := findSourcePod(ctx, r.APIReader, job)
+	pod, found, err := findSourcePod(ctx, r.NonCacheReadClient, job)
 	if err != nil {
 		return snapshotJobObservation{}, ctrl.Result{}, fmt.Errorf("find source pod for Job %q: %w", job.Name, err)
 	}
@@ -114,7 +114,7 @@ func (r *SnapshotJobReconciler) findOwnedPodSnapshot(ctx context.Context, sj *sn
 }
 
 func (r *SnapshotJobReconciler) readAuthoritativeOwnedPodSnapshot(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob) (*snapshotv1alpha1.PodSnapshot, error) {
-	snap, err := readOwnedPodSnapshot(ctx, r.APIReader, sj)
+	snap, err := readOwnedPodSnapshot(ctx, r.NonCacheReadClient, sj)
 	if err != nil {
 		return nil, fmt.Errorf("authoritatively read recorded PodSnapshot %q: %w", sj.Name, err)
 	}
@@ -136,7 +136,7 @@ func readOwnedPodSnapshot(ctx context.Context, reader client.Reader, sj *snapsho
 // Before the child UID has been persisted, mutable owner labels are insufficient:
 // the immutable source identity must also match the Pod controlled by this Job.
 func (r *SnapshotJobReconciler) validatePodSnapshotForAdoption(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job, snap *snapshotv1alpha1.PodSnapshot) (*snapshotJobFailure, error) {
-	pod, found, err := findSourcePod(ctx, r.APIReader, job)
+	pod, found, err := findSourcePod(ctx, r.NonCacheReadClient, job)
 	if err != nil {
 		return nil, fmt.Errorf("find source Pod before adopting PodSnapshot %q: %w", snap.Name, err)
 	}

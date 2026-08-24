@@ -47,9 +47,9 @@ func makeSnapshotReconcilerWithInterceptor(s *runtime.Scheme, funcs interceptor.
 		WithStatusSubresource(&snapshotv1alpha1.PodSnapshot{}, &snapshotv1alpha1.PodSnapshotContent{}).
 		WithInterceptorFuncs(funcs).Build()
 	return &PodSnapshotReconciler{
-		Client:    testClient,
-		APIReader: testClient,
-		Recorder:  record.NewFakeRecorder(10),
+		Client:             testClient,
+		NonCacheReadClient: testClient,
+		Recorder:           record.NewFakeRecorder(10),
 	}
 }
 
@@ -304,7 +304,7 @@ func TestSnapshotReconciler_BoundContentPendingNoRequeue(t *testing.T) {
 	// live steady-state. A live cached source keeps the capture Pending without an API-server read.
 	r := makeSnapshotReconciler(s, snap, content, scheduledPod("abc123"))
 	apiReads := 0
-	r.APIReader = fake.NewClientBuilder().WithScheme(s).WithInterceptorFuncs(interceptor.Funcs{
+	r.NonCacheReadClient = fake.NewClientBuilder().WithScheme(s).WithInterceptorFuncs(interceptor.Funcs{
 		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
 			apiReads++
 			return errors.New("unexpected API-reader call")
@@ -359,7 +359,7 @@ func TestSnapshotReconciler_CachedSourceMissingAuthoritativeSourceLiveRemainsPen
 	s := snapshotReconcilerScheme()
 	snap, content := pendingBoundSnapshotContent()
 	r := makeSnapshotReconciler(s, snap, content) // source pod is absent from the cache
-	r.APIReader = fake.NewClientBuilder().WithScheme(s).WithObjects(content, scheduledPod("abc123")).Build()
+	r.NonCacheReadClient = fake.NewClientBuilder().WithScheme(s).WithObjects(content, scheduledPod("abc123")).Build()
 
 	reconcileSnapshot(t, r, snap.Name)
 
@@ -380,7 +380,7 @@ func TestSnapshotReconciler_AuthoritativeReadyWinsSourceTerminalRace(t *testing.
 	pod := scheduledPod("abc123")
 	pod.Status.Phase = corev1.PodSucceeded
 	r := makeSnapshotReconciler(s, snap, pendingContent, pod)
-	r.APIReader = fake.NewClientBuilder().WithScheme(s).WithObjects(readyContent, pod).Build()
+	r.NonCacheReadClient = fake.NewClientBuilder().WithScheme(s).WithObjects(readyContent, pod).Build()
 
 	reconcileSnapshot(t, r, snap.Name)
 
