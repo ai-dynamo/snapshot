@@ -836,6 +836,70 @@ func TestRestoreFinalizerProtectsExecutionAndIsRemovedAfterSuccess(t *testing.T)
 	assert.Contains(t, string(lastPodStatusApply(t, w).GetPatch()), `"reason":"RestoreSucceeded"`)
 }
 
+func TestRestoreStatusRetryUsesCompletionSentinelWithoutReplayingRestore(t *testing.T) {
+	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	snapshot, content := readySnapshotObjects()
+	w := makeTestController(t, pod, snapshot, content)
+	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
+	path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, string(content.UID), "main")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(path, 0o700))
+
+	restoreCalls := 0
+	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
+		restoreCalls++
+		return 4242, nil
+	}
+	sentinelWritten := false
+	w.writeControlSentinelFn = func(pid int, name string) error {
+		assert.Equal(t, 4242, pid)
+		assert.Equal(t, snapshotv1alpha1.RestoreCompleteFile, name)
+		sentinelWritten = true
+		return nil
+	}
+	w.controlSentinelExistsFn = func(pid int, name string) (bool, error) {
+		assert.Equal(t, 4242, pid)
+		assert.Equal(t, snapshotv1alpha1.RestoreCompleteFile, name)
+		return sentinelWritten, nil
+	}
+	statusPatches := 0
+	w.clientset.(*fake.Clientset).PrependReactor("patch", "pods", func(action clientgotesting.Action) (bool, runtime.Object, error) {
+		patch := action.(clientgotesting.PatchAction)
+		if patch.GetSubresource() != "status" {
+			return false, nil, nil
+		}
+		statusPatches++
+		if statusPatches == 2 {
+			return true, nil, errors.New("terminal status failed")
+		}
+		return false, nil, nil
+	})
+
+	processQueuedRestorePod(t, w, pod)
+	assert.Equal(t, 1, restoreCalls)
+	assert.False(t, w.restoreHandled(pod))
+	assert.True(t, sawEventReason(w.clientset.(*fake.Clientset), restoreStatusUpdateFailedReason))
+
+	live, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.True(t, hasFinalizer(live, restorePodFinalizer))
+	condition := restoredPodCondition(live)
+	require.NotNil(t, condition)
+	assert.Equal(t, restoreInProgressReason, condition.Reason)
+
+	processQueuedRestorePod(t, w, live)
+	assert.Equal(t, 1, restoreCalls, "completion sentinel must prevent CRIU replay")
+	assert.True(t, w.restoreHandled(live))
+
+	live, err = w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.False(t, hasFinalizer(live, restorePodFinalizer))
+	condition = restoredPodCondition(live)
+	require.NotNil(t, condition)
+	assert.Equal(t, corev1.ConditionTrue, condition.Status)
+	assert.Equal(t, restoreSucceededReason, condition.Reason)
+}
+
 func TestRestoreFinalizerRemovalRetriesWithoutReplayingRestore(t *testing.T) {
 	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
 	snapshot, content := readySnapshotObjects()
@@ -979,8 +1043,9 @@ func TestRunRestoreRetriesFullRestoreUntilFailureCleanupSucceeds(t *testing.T) {
 	assert.Contains(t, string(lastPodStatusApply(t, w).GetPatch()), `"reason":"RestoreFailed"`)
 }
 
-func TestRestoreFailureStatusErrorDoesNotReplayAfterCleanup(t *testing.T) {
+func TestRestoreFailureStatusErrorRemainsRetryableAfterCleanup(t *testing.T) {
 	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod.Finalizers = []string{restorePodFinalizer}
 	w := makeTestController(t, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
 	artifact := &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", ContainerName: "main"}
@@ -1002,10 +1067,10 @@ func TestRestoreFailureStatusErrorDoesNotReplayAfterCleanup(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, requeue)
 	assert.Equal(t, 1, restoreCalls)
-	assert.True(t, w.restoreHandled(pod))
-
-	processQueuedRestorePod(t, w, pod)
-	assert.Equal(t, 1, restoreCalls)
+	assert.False(t, w.restoreHandled(pod), "restore must remain retryable until terminal status is persisted")
+	live, getErr := w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, getErr)
+	assert.True(t, hasFinalizer(live, restorePodFinalizer), "restore protection must remain until terminal status is persisted")
 }
 
 func TestRunRestoreFinalizesExistingCompletionSentinelWithoutReplay(t *testing.T) {

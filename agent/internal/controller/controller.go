@@ -931,20 +931,16 @@ func (w *NodeController) finishRestore(
 	status corev1.ConditionStatus,
 	reason, message, eventType, eventReason, eventMessage string,
 ) error {
-	w.markRestoreHandled(pod)
-	statusErr := w.applyRestoredCondition(ctx, pod, status, reason, message)
-	if statusErr != nil {
-		emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeWarning, restoreStatusUpdateFailedReason, fmt.Sprintf("Failed to record %s restore status: %v", reason, statusErr))
-	} else {
-		emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, eventType, eventReason, eventMessage)
+	if err := w.applyRestoredCondition(ctx, pod, status, reason, message); err != nil {
+		emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeWarning, restoreStatusUpdateFailedReason, fmt.Sprintf("Failed to record %s restore status: %v", reason, err))
+		return err
 	}
+	w.markRestoreHandled(pod)
+	emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, eventType, eventReason, eventMessage)
 	finalizerErr := w.removeRestoreFinalizer(ctx, pod)
 	if finalizerErr != nil {
 		w.log.Error(finalizerErr, "Failed to remove restore protection finalizer", "pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
 		emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeWarning, restoreFinalizerUpdateFailedReason, finalizerErr.Error())
-	}
-	if statusErr != nil {
-		return statusErr
 	}
 	return finalizerErr
 }
