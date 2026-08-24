@@ -42,6 +42,12 @@ Snapshots are portable across compatible machines and can be restored on any nod
 &nbsp;
 
 
+## Guides
+
+- [Checkpoint and restore vLLM](docs/vllm/README.md)
+
+&nbsp;
+
 ## Architecture
 
 Snapshot consists of two main components.
