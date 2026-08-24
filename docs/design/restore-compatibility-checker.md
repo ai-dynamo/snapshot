@@ -206,39 +206,42 @@ The object and signal used by each part are explicit:
 
 ### 7.1 The new status block
 
-The facts land on the `PodSnapshotContent` the agent already updates. The selected Option C shape
-separates node and pod facts and keeps device facts behind a vendor selector:
+The facts land on the `PodSnapshotContent` the agent already updates. The selected shape separates
+node and pod facts and groups device facts in a map keyed by vendor:
 
 ```yaml
 status:
   source:
-    nodeInfo:
+    devices:
+      nvidia:
+        driverVersion: 580.82.07        # gate B
+        instances:                      # gate B - one entry per GPU
+          - productName: NVIDIA A100-SXM4-80GB
+          - productName: NVIDIA A100-SXM4-80GB
+      mystorage:
+        instances:
+          - productName: Example Storage Device
+    node:
       name: gpu-node-3
       architecture: amd64              # gate A
       kernelVersion: 5.15.0-1071-aws   # gate A
       agentVersion: 1.4.2              # recorded for future format mapping
-    podInfo:
+    pod:
       image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1
       imageDigest: sha256:9f2c...
-      memoryLimit: 64Gi
-      cpuLimit: "16"
-      gpuCount: 2
-    devices: Nvidia                    # which vendor's device facts follow
-    nvidia:
-      driverVersion: 580.82.07          # gate B
-      devices:                          # gate B - one entry per GPU
-        - productName: NVIDIA A100-SXM4-80GB
-        - productName: NVIDIA A100-SXM4-80GB
+      memory: 64Gi
+      cpu: "16"
 ```
 
-`devices[].productName` and `driverVersion` are the names the NVIDIA DRA driver publishes for these
-values on a `ResourceSlice`.
+`instances[].productName` and `driverVersion` are the names the NVIDIA DRA driver publishes for
+these values on a `ResourceSlice`.
 
-The `devices` selector replaces the earlier `type` key. It names the vendor whose device facts
-follow, so only the matching payload is filled in and another vendor can record its own set without
-disturbing this one. The agent writes the block on `PodSnapshotContent` when the checkpoint goes
-ready. Every field is additive, optional, generated from the manifest, and never read back by the
-checks.
+Each supported vendor is an explicit property under `devices`, so its payload remains typed,
+validated by the API server, and visible through `kubectl explain`. More than one vendor can be
+present without a discriminator or selector-to-payload CEL rule. The `mystorage` block illustrates
+the extension point and is not part of this increment. The agent writes the block on
+`PodSnapshotContent` when the checkpoint goes ready. Every field is additive, optional, generated
+from the manifest, and never read back by the checks.
 
 ### 7.2 Architecture diagram
 
