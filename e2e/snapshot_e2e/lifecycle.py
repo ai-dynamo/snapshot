@@ -289,7 +289,7 @@ def wait_for_restored_condition(
 ) -> client.V1Pod:
     def check() -> client.V1Pod | None:
         pod = k8s.read_pod(namespace, pod_name)
-        restored = pod_condition(pod, "Restored")
+        restored = pod_condition(pod, "snapshot/Restored")
         if restored and restored.status == status and restored.reason == reason:
             return pod
         if reason != "RestoreFailed" and restored and restored.reason == "RestoreFailed":
@@ -303,11 +303,11 @@ def wait_for_restored_condition(
             pod = k8s.read_pod(namespace, pod_name)
         except ApiException as exc:
             return f"api_error={k8s.api_error_detail(exc)}"
-        restored = pod_condition(pod, "Restored")
-        return f"Restored={restored or '<unset>'}"
+        restored = pod_condition(pod, "snapshot/Restored")
+        return f"snapshot/Restored={restored or '<unset>'}"
 
     return wait_for(
-        f"Restored={status}/{reason} on {namespace}/{pod_name}",
+        f"snapshot/Restored={status}/{reason} on {namespace}/{pod_name}",
         check,
         timeout,
         detail=detail,

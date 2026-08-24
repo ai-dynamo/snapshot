@@ -9,6 +9,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -100,7 +101,7 @@ func TestNewDefaultControllerSetsDefaultOperations(t *testing.T) {
 		testr.New(t),
 	)
 	t.Cleanup(w.restoreQueue.ShutDown)
-	if w.checkpointFn == nil || w.restoreFn == nil || w.writeControlSentinelFn == nil || w.controlSentinelExistsFn == nil || w.releaseCheckpointFn == nil || w.restoreQueue == nil {
+	if w.checkpointFn == nil || w.restoreFn == nil || w.writeControlSentinelFn == nil || w.controlSentinelExistsFn == nil || w.sendSignalFn == nil || w.releaseCheckpointFn == nil || w.restoreQueue == nil {
 		t.Fatal("default controller operations must be initialized")
 	}
 }
@@ -139,6 +140,7 @@ func makeTestController(t *testing.T, pod *corev1.Pod, apiObjects ...runtime.Obj
 		restoreFn:               executor.Restore,
 		writeControlSentinelFn:  func(int, string) error { return nil },
 		controlSentinelExistsFn: func(int, string) (bool, error) { return false, nil },
+		sendSignalFn:            func(logr.Logger, int, syscall.Signal, string) error { return nil },
 		restoreQueue:            workqueue.NewTypedDelayingQueue[client.ObjectKey](),
 		log:                     testr.New(t),
 		holderID:                "test-holder",
@@ -419,6 +421,22 @@ func TestPreflightRestorePendingStates(t *testing.T) {
 	})
 }
 
+func TestPreflightRestoreFailsWhenInProgressSnapshotDisappears(t *testing.T) {
+	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+		Type: corev1.PodConditionType(snapshotv1alpha1.RestoredCondition), Status: corev1.ConditionFalse, Reason: restoreInProgressReason,
+	})
+	w := makeTestController(t, pod)
+
+	artifact, err := w.preflightRestore(context.Background(), pod)
+
+	assert.Nil(t, artifact)
+	require.Error(t, err)
+	var pending *restorePendingError
+	assert.False(t, errors.As(err, &pending))
+	assert.Contains(t, err.Error(), "disappeared while restore was in progress")
+}
+
 func TestRestorePreflightAPIErrorsUseStablePendingMessages(t *testing.T) {
 	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
 	snapshot, _ := readySnapshotObjects()
@@ -493,6 +511,21 @@ func TestReconcileRestorePodReportsPendingPreflightConditionAndEvent(t *testing.
 	assert.Contains(t, payload, `"status":"False"`)
 	assert.Contains(t, payload, `"reason":"SnapshotPending"`)
 	assert.True(t, sawEventReason(w.clientset.(*fake.Clientset), "SnapshotPending"))
+}
+
+func TestPendingDependencyDoesNotOverwriteRestoreInProgress(t *testing.T) {
+	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+		Type: corev1.PodConditionType(snapshotv1alpha1.RestoredCondition), Status: corev1.ConditionFalse, Reason: restoreInProgressReason,
+	})
+	w := makeTestController(t, pod)
+
+	requeue := w.handleRestorePreflightError(context.Background(), pod, newRestorePendingError("ArtifactPending", "waiting"))
+
+	assert.True(t, requeue)
+	assert.False(t, hasPodStatusApply(w))
+	assert.Equal(t, restoreInProgressReason, restoredPodCondition(pod).Reason)
+	assert.True(t, sawEventReason(w.clientset.(*fake.Clientset), "ArtifactPending"))
 }
 
 func TestProcessRestoreQueueItemReportsNonRunningPhaseAsFailed(t *testing.T) {
@@ -624,6 +657,7 @@ func TestReconcileRestorePodReportsInvalidBacklinkAsFailedCondition(t *testing.T
 
 func TestProcessRestoreQueueItemEmitsEventWhenRestoreAlreadyCompleted(t *testing.T) {
 	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod.Finalizers = []string{restorePodFinalizer}
 	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
 		Type: corev1.PodConditionType(snapshotv1alpha1.RestoredCondition), Status: corev1.ConditionTrue, Reason: "RestoreSucceeded",
 	})
@@ -632,10 +666,14 @@ func TestProcessRestoreQueueItemEmitsEventWhenRestoreAlreadyCompleted(t *testing
 	processQueuedRestorePod(t, w, pod)
 
 	assert.True(t, sawEventReason(w.clientset.(*fake.Clientset), "RestoreAlreadyCompleted"))
+	live, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.False(t, hasFinalizer(live, restorePodFinalizer))
 }
 
 func TestProcessRestoreQueueItemIgnoresFailedRestoreDuringPreflight(t *testing.T) {
 	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod.Finalizers = []string{restorePodFinalizer}
 	pod.Status.Phase = corev1.PodFailed
 	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
 		Type:    corev1.PodConditionType(snapshotv1alpha1.RestoredCondition),
@@ -668,6 +706,27 @@ func TestProcessRestoreQueueItemIgnoresFailedRestoreDuringPreflight(t *testing.T
 	require.NotNil(t, event)
 	assert.Equal(t, corev1.EventTypeWarning, event.Type)
 	assert.Equal(t, "original restore failure", event.Message)
+	live, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.False(t, hasFinalizer(live, restorePodFinalizer))
+}
+
+func TestDeletingInProgressRestoreRemovesFinalizer(t *testing.T) {
+	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod.Finalizers = []string{restorePodFinalizer}
+	now := metav1.Now()
+	pod.DeletionTimestamp = &now
+	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+		Type: corev1.PodConditionType(snapshotv1alpha1.RestoredCondition), Status: corev1.ConditionFalse, Reason: restoreInProgressReason,
+	})
+	w := makeTestController(t, pod)
+
+	processQueuedRestorePod(t, w, pod)
+
+	live, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.False(t, hasFinalizer(live, restorePodFinalizer))
+	assert.False(t, hasPodStatusApply(w))
 }
 
 func TestReconcileRestorePodEmitsEventWhenStatusUpdateFails(t *testing.T) {
@@ -730,6 +789,91 @@ func TestReconcileRestorePodRunsPreflightOnce(t *testing.T) {
 	assert.Equal(t, 2, getCalls, "preflight should read PodSnapshot and PodSnapshotContent once")
 }
 
+func TestRestoreFinalizerIsPatchedBeforePreflight(t *testing.T) {
+	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "missing-snapshot"})
+	w := makeTestController(t, pod)
+
+	processQueuedRestorePod(t, w, pod)
+
+	live, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.True(t, hasFinalizer(live, restorePodFinalizer))
+	for _, action := range w.clientset.(*fake.Clientset).Actions() {
+		if update, ok := action.(clientgotesting.UpdateAction); ok && update.GetResource().Resource == "pods" {
+			t.Fatal("restore finalizer must be patched, not updated")
+		}
+		patch, ok := action.(clientgotesting.PatchAction)
+		if ok && patch.GetSubresource() == "" {
+			assert.Equal(t, ktypes.MergePatchType, patch.GetPatchType())
+			return
+		}
+	}
+	t.Fatal("no Pod finalizer patch found")
+}
+
+func TestRestoreFinalizerProtectsExecutionAndIsRemovedAfterSuccess(t *testing.T) {
+	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	snapshot, content := readySnapshotObjects()
+	w := makeTestController(t, pod, snapshot, content)
+	path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, string(content.UID), "main")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(path, 0o700))
+	restoreCalls := 0
+	w.restoreFn = func(ctx context.Context, _ snapshotruntime.Runtime, _ logr.Logger, _ executor.RestoreRequest, _ executor.RestoreMounter) (int, error) {
+		restoreCalls++
+		live, getErr := w.clientset.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+		require.NoError(t, getErr)
+		assert.True(t, hasFinalizer(live, restorePodFinalizer))
+		return 4242, nil
+	}
+
+	processQueuedRestorePod(t, w, pod)
+
+	assert.Equal(t, 1, restoreCalls)
+	live, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.False(t, hasFinalizer(live, restorePodFinalizer))
+	assert.Contains(t, string(lastPodStatusApply(t, w).GetPatch()), `"reason":"RestoreSucceeded"`)
+}
+
+func TestRestoreFinalizerRemovalRetriesWithoutReplayingRestore(t *testing.T) {
+	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	snapshot, content := readySnapshotObjects()
+	w := makeTestController(t, pod, snapshot, content)
+	path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, string(content.UID), "main")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(path, 0o700))
+	restoreCalls := 0
+	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
+		restoreCalls++
+		return 4242, nil
+	}
+	metadataPatches := 0
+	w.clientset.(*fake.Clientset).PrependReactor("patch", "pods", func(action clientgotesting.Action) (bool, runtime.Object, error) {
+		patch := action.(clientgotesting.PatchAction)
+		if patch.GetSubresource() != "" {
+			return false, nil, nil
+		}
+		metadataPatches++
+		if metadataPatches == 2 {
+			return true, nil, errors.New("finalizer update failed")
+		}
+		return false, nil, nil
+	})
+
+	processQueuedRestorePod(t, w, pod)
+	assert.Equal(t, 1, restoreCalls)
+	assert.True(t, sawEventReason(w.clientset.(*fake.Clientset), restoreFinalizerUpdateFailedReason))
+
+	live, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	processQueuedRestorePod(t, w, live)
+	assert.Equal(t, 1, restoreCalls)
+	live, err = w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.False(t, hasFinalizer(live, restorePodFinalizer))
+}
+
 func TestApplyRestoredConditionUsesServerSideApply(t *testing.T) {
 	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
 	w := makeTestController(t, pod)
@@ -739,7 +883,7 @@ func TestApplyRestoredConditionUsesServerSideApply(t *testing.T) {
 	patch := lastPodStatusApply(t, w)
 	assert.Equal(t, ktypes.ApplyPatchType, patch.GetPatchType())
 	payload := string(patch.GetPatch())
-	assert.Contains(t, payload, `"type":"Restored"`)
+	assert.Contains(t, payload, `"type":"snapshot/Restored"`)
 	assert.Contains(t, payload, `"reason":"SnapshotPending"`)
 	assert.Contains(t, payload, `"message":"waiting"`)
 	assert.NotContains(t, payload, `"type":"Ready"`)
@@ -801,6 +945,67 @@ func TestRunRestoreCleanupFailureStillCompletesRestore(t *testing.T) {
 	assert.True(t, sawEventReason(w.clientset.(*fake.Clientset), "RestoreCleanupFailed"))
 
 	assert.Contains(t, string(lastPodStatusApply(t, w).GetPatch()), `"reason":"RestoreSucceeded"`)
+}
+
+func TestRunRestoreRetriesFullRestoreUntilFailureCleanupSucceeds(t *testing.T) {
+	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	w := makeTestController(t, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
+	artifact := &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", ContainerName: "main"}
+	restoreCalls := 0
+	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
+		restoreCalls++
+		return 0, errors.New("criu restore failed")
+	}
+	signalCalls := 0
+	w.sendSignalFn = func(logr.Logger, int, syscall.Signal, string) error {
+		signalCalls++
+		if signalCalls == 1 {
+			return errors.New("placeholder still busy")
+		}
+		return nil
+	}
+
+	requeue, err := w.runRestore(context.Background(), pod, artifact, "ctr-abc", time.Time{})
+	require.Error(t, err)
+	assert.True(t, requeue)
+	assert.Equal(t, 1, restoreCalls)
+	assert.False(t, w.restoreHandled(pod), "terminal failure must not be cached before cleanup succeeds")
+
+	requeue, err = w.runRestore(context.Background(), pod, artifact, "ctr-abc", time.Time{})
+	require.NoError(t, err)
+	assert.False(t, requeue)
+	assert.Equal(t, 2, restoreCalls, "CRIU restore should retry when the previous cleanup did not finish")
+	assert.Contains(t, string(lastPodStatusApply(t, w).GetPatch()), `"reason":"RestoreFailed"`)
+}
+
+func TestRestoreFailureStatusErrorDoesNotReplayAfterCleanup(t *testing.T) {
+	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	w := makeTestController(t, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
+	artifact := &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", ContainerName: "main"}
+	restoreCalls := 0
+	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
+		restoreCalls++
+		return 0, errors.New("criu restore failed")
+	}
+	patches := 0
+	w.clientset.(*fake.Clientset).PrependReactor("patch", "pods", func(clientgotesting.Action) (bool, runtime.Object, error) {
+		patches++
+		if patches == 2 {
+			return true, nil, errors.New("terminal status failed")
+		}
+		return false, nil, nil
+	})
+
+	requeue, err := w.runRestore(context.Background(), pod, artifact, "ctr-abc", time.Time{})
+	require.Error(t, err)
+	assert.True(t, requeue)
+	assert.Equal(t, 1, restoreCalls)
+	assert.True(t, w.restoreHandled(pod))
+
+	processQueuedRestorePod(t, w, pod)
+	assert.Equal(t, 1, restoreCalls)
 }
 
 func TestRunRestoreFinalizesExistingCompletionSentinelWithoutReplay(t *testing.T) {

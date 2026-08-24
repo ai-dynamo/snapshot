@@ -26,7 +26,7 @@ const (
 	RestoreFromAnnotation = "nvidia.com/restore-from"
 
 	// RestoredCondition is the Pod status condition owned by the node agent.
-	RestoredCondition = "Restored"
+	RestoredCondition = "snapshot/Restored"
 
 	CheckpointVolumeName           = "checkpoint-storage"
 	DefaultSeccompLocalhostProfile = "profiles/block-iouring.json"

@@ -9,6 +9,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -27,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	ktypes "k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	corev1apply "k8s.io/client-go/applyconfigurations/core/v1"
 	"k8s.io/client-go/dynamic"
@@ -66,12 +68,15 @@ type NodeController struct {
 	restoreFn               func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error)
 	writeControlSentinelFn  func(int, string) error
 	controlSentinelExistsFn func(int, string) (bool, error)
+	sendSignalFn            func(logr.Logger, int, syscall.Signal, string) error
 	releaseCheckpointFn     func(containerPID int) error
 	restoreQueue            workqueue.TypedDelayingInterface[client.ObjectKey]
 	restorePodLister        corev1listers.PodLister
 
 	inFlight   map[string]struct{}
 	inFlightMu sync.Mutex
+
+	handledRestores sync.Map
 
 	// contentIndexer is the PodSnapshotContent informer's indexer, indexed by source pod
 	// (podRefIndex). The source-pod informer uses it to map a pod event back to its work order.
@@ -102,16 +107,6 @@ func (e *restorePendingError) Error() string {
 	return e.message
 }
 
-type restoreIgnoredError struct {
-	eventType string
-	reason    string
-	message   string
-}
-
-func (e *restoreIgnoredError) Error() string {
-	return e.message
-}
-
 type restoreOperation struct {
 	controller  *NodeController
 	pod         *corev1.Pod
@@ -122,18 +117,21 @@ type restoreOperation struct {
 }
 
 const (
-	containerResolveAttemptTimeout  = 1 * time.Second
-	restoreContainerResolveInterval = 50 * time.Millisecond
-	restoreContainerResolveTimeout  = 30 * time.Second
-	restoreFailedReason             = "RestoreFailed"
-	restoreInProgressReason         = "RestoreInProgress"
-	restoreSucceededReason          = "RestoreSucceeded"
-	restoreAlreadyCompletedReason   = "RestoreAlreadyCompleted"
-	restoreAlreadyFailedReason      = "RestoreAlreadyFailed"
-	restoreStatusUpdateFailedReason = "RestoreStatusUpdateFailed"
-	restoreRequestedReason          = "RestoreRequested"
-	restoreStatusFieldManager       = "snapshot-agent-restore"
-	restoreSafetyRequeueInterval    = 30 * time.Second
+	containerResolveAttemptTimeout     = 1 * time.Second
+	restoreContainerResolveInterval    = 50 * time.Millisecond
+	restoreContainerResolveTimeout     = 30 * time.Second
+	restoreFailedReason                = "RestoreFailed"
+	restoreInProgressReason            = "RestoreInProgress"
+	restoreSucceededReason             = "RestoreSucceeded"
+	restoreAlreadyCompletedReason      = "RestoreAlreadyCompleted"
+	restoreAlreadyFailedReason         = "RestoreAlreadyFailed"
+	restoreFinalizerUpdateFailedReason = "RestoreFinalizerUpdateFailed"
+	restoreStatusUpdateFailedReason    = "RestoreStatusUpdateFailed"
+	restoreRequestedReason             = "RestoreRequested"
+	restoreStatusFieldManager          = "snapshot-agent-restore"
+	restorePodFinalizer                = "snapshot/restore-protection"
+	snapshotEventComponent             = "snapshot"
+	restoreSafetyRequeueInterval       = 30 * time.Second
 
 	// snapshotContentResyncInterval re-drives every PodSnapshotContent work order so a
 	// not-yet-Ready source pod is re-checked for quiesce without a busy loop.
@@ -204,6 +202,7 @@ func newDefaultController(
 		restoreFn:               executor.Restore,
 		writeControlSentinelFn:  snapshotruntime.WriteControlSentinel,
 		controlSentinelExistsFn: snapshotruntime.ControlSentinelExists,
+		sendSignalFn:            snapshotruntime.SendSignalToPID,
 	}
 	w.checkpointFn = w.executorCheckpoint
 	w.releaseCheckpointFn = func(containerPID int) error {
@@ -242,6 +241,7 @@ func (w *NodeController) Run(ctx context.Context) error {
 		UpdateFunc: func(_, newObj interface{}) {
 			w.enqueueRestorePod(newObj)
 		},
+		DeleteFunc: w.forgetRestorePod,
 	}); err != nil {
 		return fmt.Errorf("failed to add restore informer handler: %w", err)
 	}
@@ -353,10 +353,18 @@ func tweakLabeledNodePodListOptions(labelSelector, nodeName string) func(*metav1
 
 func (w *NodeController) enqueueRestorePod(obj interface{}) {
 	pod, ok := podFromInformerObj(obj)
-	if !ok || !w.restorePodRequested(pod) {
+	if !ok || !w.restorePodRelevant(pod) {
 		return
 	}
 	w.restoreQueue.Add(client.ObjectKeyFromObject(pod))
+}
+
+func (w *NodeController) forgetRestorePod(obj interface{}) {
+	pod, ok := podFromInformerObj(obj)
+	if !ok {
+		return
+	}
+	w.handledRestores.Delete(string(pod.UID))
 }
 
 func (w *NodeController) restorePodRequested(pod *corev1.Pod) bool {
@@ -365,6 +373,11 @@ func (w *NodeController) restorePodRequested(pod *corev1.Pod) bool {
 	}
 	_, requested := pod.Annotations[snapshotv1alpha1.RestoreFromAnnotation]
 	return requested
+}
+
+func (w *NodeController) restorePodRelevant(pod *corev1.Pod) bool {
+	return pod.Spec.NodeName == w.config.NodeName &&
+		(hasFinalizer(pod, restorePodFinalizer) || w.restorePodRequested(pod))
 }
 
 func (w *NodeController) runRestoreQueue(ctx context.Context) {
@@ -395,18 +408,39 @@ func (w *NodeController) processRestoreQueueItem(ctx context.Context, key client
 		requeue = true
 		return
 	}
-	if err := terminalRestoreConditionError(pod); err != nil {
-		requeue = w.handleRestorePreflightError(ctx, pod.DeepCopy(), err)
+	pod = pod.DeepCopy()
+	if w.restoreHandled(pod) {
+		requeue = w.removeRestoreFinalizerWithEvent(ctx, pod)
+		return
+	}
+	if isRestoreTerminal(pod) {
+		if isRestoreSucceeded(pod) {
+			emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeNormal, restoreAlreadyCompletedReason, "Pod restore already completed; no further action is required")
+		} else {
+			message := findRestoredCondition(pod).Message
+			if message == "" {
+				message = "Pod restore previously failed; create a new restore Pod to retry"
+			}
+			emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeWarning, restoreAlreadyFailedReason, message)
+		}
+		requeue = w.removeRestoreFinalizerWithEvent(ctx, pod)
 		return
 	}
 	if pod.DeletionTimestamp != nil {
+		requeue = w.removeRestoreFinalizerWithEvent(ctx, pod)
 		return
 	}
-	if pod.Status.Phase != corev1.PodPending && pod.Status.Phase != corev1.PodRunning {
-		requeue = w.failRestorePod(ctx, pod.DeepCopy(), fmt.Errorf("Pod %s/%s is not eligible for restore in phase %s; expected Pending or Running", pod.Namespace, pod.Name, pod.Status.Phase))
+	if err := w.addRestoreFinalizer(ctx, pod); err != nil {
+		w.log.Error(err, "Failed to protect restore Pod", "pod", key.String())
+		emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeWarning, restoreFinalizerUpdateFailedReason, err.Error())
+		requeue = true
 		return
 	}
-	requeue = w.reconcileRestorePod(ctx, pod.DeepCopy())
+	if !isRestorePodActive(pod) {
+		requeue = w.failRestorePod(ctx, pod, fmt.Errorf("Pod %s/%s is not eligible for restore in phase %s; expected Pending or Running", pod.Namespace, pod.Name, pod.Status.Phase))
+		return
+	}
+	requeue = w.reconcileRestorePod(ctx, pod)
 }
 
 func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Pod) bool {
@@ -432,7 +466,7 @@ func (w *NodeController) preflightRestore(ctx context.Context, pod *corev1.Pod) 
 	if err := validatePodSnapshotForRestore(snapshot); err != nil {
 		return nil, err
 	}
-	content, err := w.getPodSnapshotContentFromSnapshot(ctx, snapshot)
+	content, err := w.getPodSnapshotContentFromSnapshot(ctx, pod, snapshot)
 	if err != nil {
 		return nil, err
 	}
@@ -455,6 +489,9 @@ func (w *NodeController) getPodSnapshotFromPod(ctx context.Context, pod *corev1.
 	key := client.ObjectKey{Namespace: pod.Namespace, Name: snapshotName}
 	if err := w.client.Get(ctx, key, snapshot); err != nil {
 		if apierrors.IsNotFound(err) {
+			if restoreInProgress(pod) {
+				return nil, fmt.Errorf("PodSnapshot %s disappeared while restore was in progress", key.String())
+			}
 			return nil, newRestorePendingError("SnapshotPending", fmt.Sprintf("Waiting for PodSnapshot %s", key.String()))
 		}
 		w.log.Error(err, "Failed to read PodSnapshot during restore preflight", "pod", client.ObjectKeyFromObject(pod).String(), "snapshot", key.String())
@@ -480,11 +517,14 @@ func validatePodSnapshotForRestore(snapshot *snapshotv1alpha1.PodSnapshot) error
 	return nil
 }
 
-func (w *NodeController) getPodSnapshotContentFromSnapshot(ctx context.Context, snapshot *snapshotv1alpha1.PodSnapshot) (*snapshotv1alpha1.PodSnapshotContent, error) {
+func (w *NodeController) getPodSnapshotContentFromSnapshot(ctx context.Context, pod *corev1.Pod, snapshot *snapshotv1alpha1.PodSnapshot) (*snapshotv1alpha1.PodSnapshotContent, error) {
 	contentName := strings.TrimSpace(ptr.Deref(snapshot.Status.BoundPodSnapshotContentName, ""))
 	content := &snapshotv1alpha1.PodSnapshotContent{}
 	if err := w.client.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
 		if apierrors.IsNotFound(err) {
+			if restoreInProgress(pod) {
+				return nil, fmt.Errorf("bound PodSnapshotContent %s disappeared while restore was in progress", contentName)
+			}
 			return nil, newRestorePendingError("ContentPending", fmt.Sprintf("Waiting for bound PodSnapshotContent %s", contentName))
 		}
 		w.log.Error(err, "Failed to read PodSnapshotContent during restore preflight", "snapshot", client.ObjectKeyFromObject(snapshot).String(), "content", contentName)
@@ -532,6 +572,11 @@ func (w *NodeController) resolveRestoreArtifact(podKey string, target *restoreTa
 	}
 	ready, err := w.restoreArtifactReady(w.log, podKey, path)
 	if err != nil {
+		var pathErr *os.PathError
+		if errors.As(err, &pathErr) {
+			w.log.Error(err, "Unable to inspect restore artifact", "pod", podKey, "artifact_path", path)
+			return nil, newRestorePendingError("ArtifactPending", fmt.Sprintf("Unable to inspect artifact %s; retrying", path))
+		}
 		return nil, err
 	}
 	if !ready {
@@ -550,7 +595,13 @@ func (w *NodeController) resolveRestoreArtifact(podKey string, target *restoreTa
 func (w *NodeController) restorePodContainer(ctx context.Context, pod *corev1.Pod, artifact *restoreArtifact, podKey string) bool {
 	containerID, requeue := w.resolveRestoreContainerID(ctx, pod, artifact, podKey)
 	if containerID == "" {
-		return requeue
+		if requeue {
+			return w.handleRestorePreflightError(ctx, pod, newRestorePendingError(
+				"ContainerPending",
+				fmt.Sprintf("Waiting for restore container %s in Pod %s", artifact.ContainerName, podKey),
+			))
+		}
+		return false
 	}
 
 	startedAt := time.Now()
@@ -566,7 +617,7 @@ func (w *NodeController) restorePodContainer(ctx context.Context, pod *corev1.Po
 	}
 	opLog := w.log.WithValues("pod", podKey, "snapshot", artifact.SnapshotName, "container", artifact.ContainerName)
 	opLog.Error(err, "Restore controller worker failed")
-	emitPodEvent(ctx, w.clientset, opLog, pod, "snapshot", corev1.EventTypeWarning, "RestoreWorkerFailed", err.Error())
+	emitPodEvent(ctx, w.clientset, opLog, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreWorkerFailed", err.Error())
 	return true
 }
 
@@ -614,7 +665,7 @@ func (w *NodeController) resolveRestoreContainerID(ctx context.Context, pod *cor
 }
 
 // runRestore runs the full restore workflow for one target container:
-//  1. Apply Restored=False/RestoreInProgress to pod status
+//  1. Apply snapshot/Restored=False/RestoreInProgress to pod status
 //  2. Call executor.Restore (inspect placeholder → nsrestore inside namespace).
 //     nsrestore clears any stale restore-complete sentinel on the pod control
 //     volume before CRIU, so a prior incarnation cannot release the restored
@@ -622,7 +673,7 @@ func (w *NodeController) resolveRestoreContainerID(ctx context.Context, pod *cor
 //  3. Write a restore-complete sentinel: the CRIU-restored process resumes
 //     inside the polling loop that waits on this file, exits quiescence,
 //     and resumes the engine
-//  4. Apply Restored=True/RestoreSucceeded to pod status
+//  4. Apply snapshot/Restored=True/RestoreSucceeded to pod status
 func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, artifact *restoreArtifact, containerID string, startedAt time.Time) (bool, error) {
 	op := w.newRestoreOperation(pod, artifact, containerID, startedAt)
 	completed, err := op.recoverCompletedRestore(ctx)
@@ -643,7 +694,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, artifa
 	if err := op.beginRestore(ctx); err != nil {
 		return true, err
 	}
-	emitPodEvent(ctx, w.clientset, op.log, pod, "snapshot", corev1.EventTypeNormal, restoreRequestedReason, fmt.Sprintf("Restore requested from PodSnapshot %s for container %s", artifact.SnapshotName, artifact.ContainerName))
+	emitPodEvent(ctx, w.clientset, op.log, pod, snapshotEventComponent, corev1.EventTypeNormal, restoreRequestedReason, fmt.Sprintf("Restore requested from PodSnapshot %s for container %s", artifact.SnapshotName, artifact.ContainerName))
 	placeholderHostPID, err := op.executeRestore(restoreCtx)
 	if err != nil {
 		var cleanupErr *executor.RestoreCleanupError
@@ -652,7 +703,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, artifa
 			return err != nil, err
 		}
 		op.log.Error(cleanupErr, "Restore completed with cleanup errors")
-		emitPodEvent(ctx, w.clientset, op.log, pod, "snapshot", corev1.EventTypeWarning, "RestoreCleanupFailed", cleanupErr.Error())
+		emitPodEvent(ctx, w.clientset, op.log, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreCleanupFailed", cleanupErr.Error())
 	}
 	err = op.completeRestore(ctx, placeholderHostPID)
 	return err != nil, err
@@ -661,7 +712,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, artifa
 // recoverCompletedRestore finalizes an interrupted status update without
 // replaying CRIU. RestoreInProgress is normally retryable after an agent
 // restart, but the restore-complete sentinel proves that execution already
-// finished and only the Restored=True status write remains.
+// finished and only the snapshot/Restored=True status write remains.
 func (op *restoreOperation) recoverCompletedRestore(ctx context.Context) (bool, error) {
 	condition := findRestoredCondition(op.pod)
 	if condition == nil || condition.Status != corev1.ConditionFalse || condition.Reason != restoreInProgressReason {
@@ -728,20 +779,15 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (int, error) {
 func (op *restoreOperation) failRestore(ctx context.Context, restoreErr error) error {
 	w := op.controller
 	op.log.Error(restoreErr, "External restore failed")
-	reason := restoreFailedReason
-	emitPodEvent(ctx, w.clientset, op.log, op.pod, "snapshot", corev1.EventTypeWarning, reason, restoreErr.Error())
-	if err := op.setRestoredCondition(ctx, corev1.ConditionFalse, reason, restoreErr.Error()); err != nil {
-		return fmt.Errorf("persist failed restore condition: %w", err)
-	}
 	// Re-resolve because restore may fail before discovering the placeholder PID.
 	placeholderHostPID, _, err := w.runtime.ResolveContainer(ctx, op.containerID)
 	if err != nil {
 		return fmt.Errorf("restore failed and placeholder PID could not be resolved: %w", err)
 	}
-	if err := snapshotruntime.SendSignalToPID(op.log, placeholderHostPID, syscall.SIGKILL, "restore failed"); err != nil {
+	if err := w.sendSignalFn(op.log, placeholderHostPID, syscall.SIGKILL, "restore failed"); err != nil {
 		return fmt.Errorf("restore failed and placeholder could not be killed: %w", err)
 	}
-	return nil
+	return op.markRestoreFailed(ctx, restoreErr)
 }
 
 func (op *restoreOperation) completeRestore(ctx context.Context, placeholderHostPID int) error {
@@ -750,14 +796,10 @@ func (op *restoreOperation) completeRestore(ctx context.Context, placeholderHost
 	// volume through /host/proc/<pid>/root.
 	if err := w.writeControlSentinelFn(placeholderHostPID, snapshotv1alpha1.RestoreCompleteFile); err != nil {
 		op.log.Error(err, "Failed to write restore-complete sentinel")
-		emitPodEvent(ctx, w.clientset, op.log, op.pod, "snapshot", corev1.EventTypeWarning, restoreFailedReason, err.Error())
-		if statusErr := op.setRestoredCondition(ctx, corev1.ConditionFalse, restoreFailedReason, err.Error()); statusErr != nil {
-			return fmt.Errorf("persist failed restore condition: %w", statusErr)
+		if killErr := w.sendSignalFn(op.log, placeholderHostPID, syscall.SIGKILL, "restore sentinel failed"); killErr != nil {
+			return fmt.Errorf("write restore-complete sentinel failed and placeholder could not be killed: %w", killErr)
 		}
-		if killErr := snapshotruntime.SendSignalToPID(op.log, placeholderHostPID, syscall.SIGKILL, "restore sentinel failed"); killErr != nil {
-			op.log.Error(killErr, "Failed to kill placeholder after restore sentinel failure")
-		}
-		return fmt.Errorf("failed to write restore-complete sentinel: %w", err)
+		return op.markRestoreFailed(ctx, fmt.Errorf("failed to write restore-complete sentinel: %w", err))
 	}
 
 	return op.markRestoreSucceeded(ctx)
@@ -765,24 +807,42 @@ func (op *restoreOperation) completeRestore(ctx context.Context, placeholderHost
 
 func (op *restoreOperation) markRestoreSucceeded(ctx context.Context) error {
 	message := fmt.Sprintf("Restored from PodSnapshot %s", op.artifact.SnapshotName)
-	if err := op.setRestoredCondition(ctx, corev1.ConditionTrue, restoreSucceededReason, message); err != nil {
-		return err
-	}
-	emitPodEvent(ctx, op.controller.clientset, op.log, op.pod, "snapshot", corev1.EventTypeNormal, restoreSucceededReason, fmt.Sprintf("Restore completed from PodSnapshot %s", op.artifact.SnapshotName))
-	return nil
+	return op.controller.finishRestore(
+		ctx,
+		op.pod,
+		corev1.ConditionTrue,
+		restoreSucceededReason,
+		message,
+		corev1.EventTypeNormal,
+		restoreSucceededReason,
+		fmt.Sprintf("Restore completed from PodSnapshot %s", op.artifact.SnapshotName),
+	)
+}
+
+func (op *restoreOperation) markRestoreFailed(ctx context.Context, cause error) error {
+	return op.controller.finishRestore(
+		ctx,
+		op.pod,
+		corev1.ConditionFalse,
+		restoreFailedReason,
+		cause.Error(),
+		corev1.EventTypeWarning,
+		restoreFailedReason,
+		cause.Error(),
+	)
 }
 
 func (op *restoreOperation) setRestoredCondition(ctx context.Context, status corev1.ConditionStatus, reason, message string) error {
 	err := op.controller.applyRestoredCondition(ctx, op.pod, status, reason, message)
 	if err != nil {
-		emitPodEvent(ctx, op.controller.clientset, op.log, op.pod, "snapshot", corev1.EventTypeWarning, restoreStatusUpdateFailedReason, fmt.Sprintf("Failed to record %s restore status: %v", reason, err))
+		emitPodEvent(ctx, op.controller.clientset, op.log, op.pod, snapshotEventComponent, corev1.EventTypeWarning, restoreStatusUpdateFailedReason, fmt.Sprintf("Failed to record %s restore status: %v", reason, err))
 	}
 	return err
 }
 
 // applyRestoredCondition uses server-side apply against the status subresource.
 // Pod conditions are an associative list keyed by type, so this field manager
-// owns only Restored and does not replace kubelet-owned conditions.
+// owns only snapshot/Restored and does not replace kubelet-owned conditions.
 func (w *NodeController) applyRestoredCondition(ctx context.Context, pod *corev1.Pod, status corev1.ConditionStatus, reason, message string) error {
 	setPodCondition(&pod.Status, corev1.PodCondition{
 		Type:    corev1.PodConditionType(snapshotv1alpha1.RestoredCondition),
@@ -806,40 +866,124 @@ func (w *NodeController) applyRestoredCondition(ctx context.Context, pod *corev1
 	return err
 }
 
+func (w *NodeController) addRestoreFinalizer(ctx context.Context, pod *corev1.Pod) error {
+	if hasFinalizer(pod, restorePodFinalizer) {
+		return nil
+	}
+	finalizers := append(append([]string{}, pod.Finalizers...), restorePodFinalizer)
+	if err := w.patchRestoreFinalizers(ctx, pod, finalizers); err != nil {
+		return fmt.Errorf("add restore protection finalizer: %w", err)
+	}
+	pod.Finalizers = finalizers
+	return nil
+}
+
+func (w *NodeController) removeRestoreFinalizer(ctx context.Context, pod *corev1.Pod) error {
+	if !hasFinalizer(pod, restorePodFinalizer) {
+		return nil
+	}
+	finalizers := make([]string, 0, len(pod.Finalizers)-1)
+	for _, finalizer := range pod.Finalizers {
+		if finalizer != restorePodFinalizer {
+			finalizers = append(finalizers, finalizer)
+		}
+	}
+	if err := w.patchRestoreFinalizers(ctx, pod, finalizers); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("remove restore protection finalizer: %w", err)
+	}
+	pod.Finalizers = finalizers
+	return nil
+}
+
+func (w *NodeController) patchRestoreFinalizers(ctx context.Context, pod *corev1.Pod, finalizers []string) error {
+	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{"finalizers": finalizers}})
+	if err != nil {
+		return err
+	}
+	_, err = w.clientset.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, ktypes.MergePatchType, patch, metav1.PatchOptions{})
+	return err
+}
+
+func (w *NodeController) restoreHandled(pod *corev1.Pod) bool {
+	_, handled := w.handledRestores.Load(string(pod.UID))
+	return handled
+}
+
+func (w *NodeController) markRestoreHandled(pod *corev1.Pod) {
+	w.handledRestores.Store(string(pod.UID), struct{}{})
+}
+
+func (w *NodeController) removeRestoreFinalizerWithEvent(ctx context.Context, pod *corev1.Pod) bool {
+	if err := w.removeRestoreFinalizer(ctx, pod); err != nil {
+		w.log.Error(err, "Failed to remove restore protection finalizer", "pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
+		emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeWarning, restoreFinalizerUpdateFailedReason, err.Error())
+		return true
+	}
+	return false
+}
+
+func (w *NodeController) finishRestore(
+	ctx context.Context,
+	pod *corev1.Pod,
+	status corev1.ConditionStatus,
+	reason, message, eventType, eventReason, eventMessage string,
+) error {
+	w.markRestoreHandled(pod)
+	statusErr := w.applyRestoredCondition(ctx, pod, status, reason, message)
+	if statusErr != nil {
+		emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeWarning, restoreStatusUpdateFailedReason, fmt.Sprintf("Failed to record %s restore status: %v", reason, statusErr))
+	} else {
+		emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, eventType, eventReason, eventMessage)
+	}
+	finalizerErr := w.removeRestoreFinalizer(ctx, pod)
+	if finalizerErr != nil {
+		w.log.Error(finalizerErr, "Failed to remove restore protection finalizer", "pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
+		emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeWarning, restoreFinalizerUpdateFailedReason, finalizerErr.Error())
+	}
+	if statusErr != nil {
+		return statusErr
+	}
+	return finalizerErr
+}
+
 func (w *NodeController) failRestorePod(ctx context.Context, pod *corev1.Pod, cause error) bool {
 	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
-	err := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, restoreFailedReason, cause.Error())
-	if err != nil {
-		w.log.Error(err, "Failed to apply restore failure condition", "pod", podKey)
-		emitPodEvent(ctx, w.clientset, w.log, pod, "snapshot", corev1.EventTypeWarning, restoreStatusUpdateFailedReason, fmt.Sprintf("Failed to record restore failure status: %v", err))
-	}
 	w.log.Error(cause, "Restore request failed", "pod", podKey)
-	emitPodEvent(ctx, w.clientset, w.log, pod, "snapshot", corev1.EventTypeWarning, restoreFailedReason, cause.Error())
+	err := w.finishRestore(
+		ctx,
+		pod,
+		corev1.ConditionFalse,
+		restoreFailedReason,
+		cause.Error(),
+		corev1.EventTypeWarning,
+		restoreFailedReason,
+		cause.Error(),
+	)
 	return err != nil
 }
 
 func (w *NodeController) handleRestorePreflightError(ctx context.Context, pod *corev1.Pod, cause error) bool {
-	var ignored *restoreIgnoredError
-	if errors.As(cause, &ignored) {
-		if ignored.reason != "" {
-			emitPodEvent(ctx, w.clientset, w.log, pod, "snapshot", ignored.eventType, ignored.reason, ignored.message)
-		}
-		return false
-	}
-
 	var pending *restorePendingError
 	if !errors.As(cause, &pending) {
 		return w.failRestorePod(ctx, pod, cause)
 	}
 
 	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+	if restoreInProgress(pod) {
+		w.log.V(1).Info("Restore remains in progress while a dependency is pending", "pod", podKey, "reason", pending.reason, "message", pending.message)
+		emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeNormal, pending.reason, pending.message)
+		return true
+	}
 	err := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, pending.reason, pending.message)
 	if err != nil {
 		w.log.Error(err, "Failed to apply pending restore condition", "pod", podKey)
-		emitPodEvent(ctx, w.clientset, w.log, pod, "snapshot", corev1.EventTypeWarning, restoreStatusUpdateFailedReason, fmt.Sprintf("Failed to record pending restore status: %v", err))
+		emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeWarning, restoreStatusUpdateFailedReason, fmt.Sprintf("Failed to record pending restore status: %v", err))
 	}
 	w.log.V(1).Info("Restore preflight is pending", "pod", podKey, "reason", pending.reason, "message", pending.message)
-	emitPodEvent(ctx, w.clientset, w.log, pod, "snapshot", corev1.EventTypeNormal, pending.reason, pending.message)
+	emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeNormal, pending.reason, pending.message)
 	return true
 }
 
@@ -971,28 +1115,35 @@ func findRestoredCondition(pod *corev1.Pod) *corev1.PodCondition {
 	return nil
 }
 
-func terminalRestoreConditionError(pod *corev1.Pod) error {
+func restoreInProgress(pod *corev1.Pod) bool {
 	condition := findRestoredCondition(pod)
-	if condition == nil {
-		return nil
+	return condition != nil && condition.Status == corev1.ConditionFalse && condition.Reason == restoreInProgressReason
+}
+
+func isRestoreSucceeded(pod *corev1.Pod) bool {
+	condition := findRestoredCondition(pod)
+	return condition != nil && condition.Status == corev1.ConditionTrue
+}
+
+func isRestoreTerminal(pod *corev1.Pod) bool {
+	condition := findRestoredCondition(pod)
+	return isRestoreSucceeded(pod) ||
+		(condition != nil && condition.Status == corev1.ConditionFalse && condition.Reason == restoreFailedReason)
+}
+
+func isRestorePodActive(pod *corev1.Pod) bool {
+	return pod.Status.Phase == corev1.PodPending || pod.Status.Phase == corev1.PodRunning
+}
+
+func hasFinalizer(pod *corev1.Pod, finalizer string) bool {
+	for _, item := range pod.Finalizers {
+		if item == finalizer {
+			return true
+		}
 	}
-	if condition.Status == corev1.ConditionTrue {
-		return newRestoreIgnoredError(corev1.EventTypeNormal, restoreAlreadyCompletedReason, "Pod restore already completed; no further action is required")
-	}
-	if condition.Status != corev1.ConditionFalse || condition.Reason != restoreFailedReason {
-		return nil
-	}
-	message := condition.Message
-	if message == "" {
-		message = "Pod restore previously failed; create a new restore Pod to retry"
-	}
-	return newRestoreIgnoredError(corev1.EventTypeWarning, restoreAlreadyFailedReason, message)
+	return false
 }
 
 func newRestorePendingError(reason, message string) error {
 	return &restorePendingError{reason: reason, message: message}
-}
-
-func newRestoreIgnoredError(eventType, reason, message string) error {
-	return &restoreIgnoredError{eventType: eventType, reason: reason, message: message}
 }

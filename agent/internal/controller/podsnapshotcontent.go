@@ -400,7 +400,7 @@ func (w *NodeController) failCheckpointOnContainerExit(ctx context.Context, cont
 	}
 	logger := logr.FromContextOrDiscard(ctx).WithValues("container", failed.Name)
 	logger.Info("Checkpoint container failed", "exit_code", term.ExitCode, "reason", term.Reason)
-	emitPodEvent(ctx, w.clientset, logger, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", message)
+	emitPodEvent(ctx, w.clientset, logger, pod, snapshotEventComponent, corev1.EventTypeWarning, "CheckpointFailed", message)
 	w.killRunningContainers(ctx, logger, pod, fmt.Sprintf("checkpoint container %s failed", failed.Name))
 	if err := w.setSnapshotContentFailed(ctx, content, "CheckpointContainerFailed", errors.New(message)); err != nil {
 		logr.FromContextOrDiscard(ctx).Error(err, "Failed to write PodSnapshotContent failed status", "content", content.Name)
