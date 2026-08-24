@@ -88,6 +88,7 @@ def test_vllm_checkpoint_restores_quiesced_engine(
 
         logs = k8s.pod_logs(config.namespace, run.source_pod)
         assert "vLLM engine initialized" in logs
+        assert logs.count("vLLM pre-snapshot output=") == 2
         assert "vLLM generation paused" in logs
         assert "vLLM engine sleeping" in logs
         assert "ready for snapshot" in logs
@@ -258,6 +259,21 @@ from vllm.v1.engine.async_llm import AsyncLLM
 
 control_dir = Path(os.environ["SNAPSHOT_CONTROL_DIR"])
 
+async def generate_text(engine, prompt, request_id):
+    result = None
+    async for output in engine.generate(
+        prompt,
+        SamplingParams(temperature=0.0, max_tokens=8),
+        request_id,
+    ):
+        result = output
+    if result is None or not result.outputs:
+        raise RuntimeError(f"vLLM produced no output for {{request_id}}")
+    text = result.outputs[0].text.strip()
+    if not text:
+        raise RuntimeError(f"vLLM produced empty output for {{request_id}}")
+    return text
+
 async def main():
     engine_args = AsyncEngineArgs(
         model={run.model!r},
@@ -273,6 +289,18 @@ async def main():
         usage_context=UsageContext.LLM_CLASS,
     )
     print("vLLM engine initialized", flush=True)
+    for request_id, prompt in (
+        (
+            "snapshot-preflight-1",
+            "Summarize why checkpoint and restore testing matters.",
+        ),
+        (
+            "snapshot-preflight-2",
+            "Continue this sequence with four numbers: 1, 2, 3, 4,",
+        ),
+    ):
+        text = await generate_text(engine, prompt, request_id)
+        print(f"vLLM pre-snapshot output={{text!r}}", flush=True)
     await engine.pause_generation()
     print("vLLM generation paused", flush=True)
     await engine.sleep()
@@ -286,18 +314,11 @@ async def main():
             await engine.wake_up()
             await engine.resume_generation()
             await engine.check_health()
-            result = None
-            async for output in engine.generate(
+            text = await generate_text(
+                engine,
                 "Reply with one word: ready",
-                SamplingParams(temperature=0.0, max_tokens=4),
                 "snapshot-restore-smoke",
-            ):
-                result = output
-            if result is None or not result.outputs:
-                raise RuntimeError("vLLM produced no output after restore")
-            text = result.outputs[0].text.strip()
-            if not text:
-                raise RuntimeError("vLLM produced empty output after restore")
+            )
             (control_dir / "vllm-restore-ready").write_text(
                 text + "\\n",
                 encoding="utf-8",
