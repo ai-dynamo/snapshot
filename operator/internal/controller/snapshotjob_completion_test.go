@@ -656,6 +656,27 @@ func TestSnapshotJobReconcileCapturedKeepsCaptureReasonUnderDeadline(t *testing.
 	assert.Contains(t, captured.Message, "dump failed")
 }
 
+func TestSnapshotJobReconcileHelperVerificationCacheMissDoesNotFail(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj, job, pod, snap := helperSnapshotJob(t, s,
+		corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}})
+
+	// The pod exists on the API server but not in the informer yet. Helper
+	// verification must confirm the cached miss authoritatively instead of
+	// writing the sticky unverifiable failure.
+	r := makeSnapshotJobReconciler(s, sj, job, snap)
+	r.NonCacheReadClient = fake.NewClientBuilder().WithScheme(s).WithObjects(pod).Build()
+
+	_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobFailed(updated),
+		"a pod hidden by informer lag must not fail helper verification")
+	assert.True(t, snapshotv1alpha1.IsSnapshotJobCompleted(updated))
+}
+
 func TestDeriveCapturedStatusDoesNotDowngradeCapturedTrue(t *testing.T) {
 	sj := minimalSnapshotJob()
 	now := metav1.Now()

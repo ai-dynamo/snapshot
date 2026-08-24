@@ -309,15 +309,24 @@ func (r *SnapshotJobReconciler) classifyHelperContainers(ctx context.Context, sj
 	if len(helpers) == 0 && len(sidecars) == 0 {
 		return nil, false, nil // the target is the only container
 	}
-	pod, found, err := findSourcePod(ctx, r.NonCacheReadClient, job)
+	// Cache-first: terminated container states are immutable, so staleness can
+	// only report helpersStillRunning — a reversible requeue. Only the sticky
+	// absence failure below needs the cached miss confirmed against the API.
+	pod, found, err := findSourcePod(ctx, r.Client, job)
 	if err != nil {
 		return nil, false, fmt.Errorf("find source pod to verify helper containers: %w", err)
 	}
 	if !found {
-		return &snapshotJobFailure{
-			reason: snapshotv1alpha1.ReasonJobFailed,
-			cause:  errors.New("source pod is gone before its helper containers could be verified"),
-		}, false, nil
+		pod, found, err = findSourcePod(ctx, r.NonCacheReadClient, job)
+		if err != nil {
+			return nil, false, fmt.Errorf("confirm source pod absence for helper verification: %w", err)
+		}
+		if !found {
+			return &snapshotJobFailure{
+				reason: snapshotv1alpha1.ReasonJobFailed,
+				cause:  errors.New("source pod is gone before its helper containers could be verified"),
+			}, false, nil
+		}
 	}
 	for _, name := range helpers {
 		terminated := containerTerminatedState(pod.Status.ContainerStatuses, name)
