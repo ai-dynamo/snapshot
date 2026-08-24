@@ -200,16 +200,12 @@ func classifySourceJobTerminal(job *batchv1.Job) sourceJobTerminalResult {
 	return sourceJobTerminalResult{state: sourceJobActive}
 }
 
-// snapshotJobTerminalFailure arbitrates the terminal signals. Once a capture
-// exists, its result is authoritative: Ready is success regardless of how the
-// source Job ended (the checkpoint terminates the source process, so a failed
-// source Job is the expected outcome of a successful capture), a Failed capture
-// keeps its specific reason even when the Job also failed, and a pending
-// capture is never failed on the source Job's word alone — the caller waits for
-// the agent's terminal result. Only before any capture exists does a source Job
-// failure fail the SnapshotJob immediately. One exception on the failure side:
-// an explicit deadline expiry is the root cause of a capture that died with it,
-// so DeadlineExceeded wins over the collateral capture failure.
+// snapshotJobTerminalFailure derives the aggregate failure only; Captured is
+// owned by deriveCapturedStatus. Once a capture exists its result decides: a
+// Failed capture keeps its own reason, a pending one is never failed on the
+// Job's word alone. Before any capture exists a Job failure fails the
+// SnapshotJob immediately. One exception: a deadline expiry is the root cause
+// of a capture that died with it, so DeadlineExceeded wins the aggregate.
 func snapshotJobTerminalFailure(job *batchv1.Job, snap *snapshotv1alpha1.PodSnapshot) *snapshotJobFailure {
 	if snap != nil {
 		if snapshotv1alpha1.IsPodSnapshotFailed(snap) {
