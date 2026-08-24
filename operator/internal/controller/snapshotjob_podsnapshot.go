@@ -32,10 +32,9 @@ var errPodSnapshotNameConflict = errors.New("existing PodSnapshot is not owned b
 // owned-Job watch is the normal signal that a source Pod may now exist.
 const sourcePodRequeueBackstop = 30 * time.Second
 
-// createPodSnapshotForSourceJob waits for the source Pod, then creates or
-// classifies the deterministic PodSnapshot. A missing active source Pod gets a
-// bounded backstop requeue; completed source work with no remaining Pod is a
-// concrete missing-capture failure.
+// createPodSnapshotForSourceJob waits for the source Pod, then creates the
+// deterministic PodSnapshot. A missing Pod just requeues with a bounded
+// backstop: the caller has already ruled out a terminal source Job.
 func (r *SnapshotJobReconciler) createPodSnapshotForSourceJob(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) (snapshotJobObservation, ctrl.Result, error) {
 	observed := snapshotJobObservation{job: job}
 	pod, found, err := findSourcePod(ctx, r.NonCacheReadClient, job)
@@ -44,13 +43,6 @@ func (r *SnapshotJobReconciler) createPodSnapshotForSourceJob(ctx context.Contex
 	}
 	if !found {
 		observed.sourcePodMissing = true
-		if classifySourceJobTerminal(job).state == sourceJobComplete {
-			observed.failure = &snapshotJobFailure{
-				reason: snapshotv1alpha1.ReasonSourceCompletedWithoutCapture,
-				cause:  fmt.Errorf("source Job completed and its pod is gone before a PodSnapshot capture result was recorded"),
-			}
-			return observed, ctrl.Result{}, nil
-		}
 		return observed, ctrl.Result{RequeueAfter: sourcePodRequeueBackstop}, nil
 	}
 

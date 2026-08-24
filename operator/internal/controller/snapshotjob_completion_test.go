@@ -243,6 +243,63 @@ func TestSnapshotJobReconcileCompletedJobWithMissingSourcePodFailsWithoutPolling
 	assert.False(t, snapshotv1alpha1.IsSnapshotJobCompleted(updated))
 }
 
+func TestSnapshotJobReconcileCompletedJobWithRetainedPodFailsWithoutCreatingCapture(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+	sj.UID = types.UID("sj-uid")
+	job, err := buildSourceJob(sj)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	completeJob(job)
+	pod := sourcePodForJob(job)
+	pod.Status.Phase = corev1.PodSucceeded
+
+	// A complete source Job without a capture is the same logical state whether
+	// or not its succeeded pod is still retained: the containers have exited, so
+	// a capture created now can never succeed.
+	r := makeSnapshotJobReconciler(s, sj, job, pod)
+	result, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+	assert.Zero(t, result.RequeueAfter)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+	require.NotNil(t, failed, "pod retention timing must not change the outcome of a complete Job without a capture")
+	assert.Equal(t, snapshotv1alpha1.ReasonSourceCompletedWithoutCapture, failed.Reason)
+
+	snaps := &snapshotv1alpha1.PodSnapshotList{}
+	require.NoError(t, r.List(context.Background(), snaps))
+	assert.Empty(t, snaps.Items, "no capture may be created against a source whose containers have exited")
+}
+
+func TestSnapshotJobReconcileCompletedJobConfirmsCaptureAbsenceAuthoritatively(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := minimalSnapshotJob()
+	sj.UID = types.UID("sj-uid")
+	job, err := buildSourceJob(sj)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	completeJob(job)
+	pod := sourcePodForJob(job)
+	snap, err := buildPodSnapshot(sj, pod)
+	require.NoError(t, err)
+
+	// The capture was created but the crash window left it unrecorded in status,
+	// and the informer has not caught up: only the authoritative reader sees it.
+	// The cached miss must not become a SourceCompletedWithoutCapture failure.
+	r := makeSnapshotJobReconciler(s, sj, job, pod)
+	r.NonCacheReadClient = fake.NewClientBuilder().WithScheme(s).WithObjects(snap, pod).Build()
+
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobFailed(updated),
+		"a capture hidden by informer lag must not be classified as never created")
+}
+
 // ---- capture success does not override source Job failure ----
 
 func TestSnapshotJobReconcileCaptureDoesNotOverrideJobFailure(t *testing.T) {

@@ -174,14 +174,33 @@ func (r *SnapshotJobReconciler) reconcilePodSnapshotResources(ctx context.Contex
 			observed.failure = terminal.failure
 			return observed, ctrl.Result{}, nil
 		}
-		observed, result, err := r.createPodSnapshotForSourceJob(ctx, sj, job)
-		if err != nil {
-			return observed, result, err
+		if terminal.state != sourceJobComplete {
+			observed, result, err := r.createPodSnapshotForSourceJob(ctx, sj, job)
+			if err != nil {
+				return observed, result, err
+			}
+			if observed.failure == nil {
+				observed.failure = snapshotJobTerminalFailure(observed.job, observed.podSnapshot)
+			}
+			return observed, result, nil
 		}
-		if observed.failure == nil {
-			observed.failure = snapshotJobTerminalFailure(observed.job, observed.podSnapshot)
+		// The source Job is complete, so a capture created now can never succeed.
+		// Confirm the capture's absence authoritatively before the sticky failure.
+		snap, err = r.readAuthoritativeOwnedPodSnapshot(ctx, sj)
+		switch {
+		case apierrors.IsNotFound(err):
+			observed.failure = &snapshotJobFailure{
+				reason: snapshotv1alpha1.ReasonSourceCompletedWithoutCapture,
+				cause:  fmt.Errorf("source Job completed before a PodSnapshot capture was created"),
+			}
+			return observed, ctrl.Result{}, nil
+		case errors.Is(err, errPodSnapshotNameConflict):
+			observed.failure = &snapshotJobFailure{reason: snapshotv1alpha1.ReasonPodSnapshotNameConflict, cause: err}
+			return observed, ctrl.Result{}, nil
+		case err != nil:
+			return snapshotJobObservation{}, ctrl.Result{}, err
 		}
-		return observed, result, nil
+		// The capture exists after all; fall through and treat it as authoritative.
 	case err != nil:
 		return snapshotJobObservation{}, ctrl.Result{}, fmt.Errorf("find owned PodSnapshot: %w", err)
 	}
