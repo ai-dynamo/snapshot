@@ -205,6 +205,9 @@ in [step 3](#3-quiesce-tensorrt-llm) confirms when it can be captured.
 Add these fields to the existing TensorRT-LLM pod template:
 
 ```yaml
+metadata:
+  labels:
+    nvidia.com/snapshot-is-checkpoint-source: "true"
 spec:
   runtimeClassName: nvidia
   securityContext:
@@ -243,6 +246,7 @@ spec:
       type: CharDevice
 ```
 
+The label identifies the pod as a prepared capture source.
 `TLLM_NCCL_SYMMETRIC_ZERO_COPY=0` is set on the TensorRT-LLM container before
 its process starts. `UCX_TLS=tcp,self` avoids RDMA mappings that CRIU cannot
 restore. The control volume carries lifecycle files, and `/dev/net/tun` allows
