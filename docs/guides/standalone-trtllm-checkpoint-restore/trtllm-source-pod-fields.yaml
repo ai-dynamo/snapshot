@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+spec:
+  runtimeClassName: nvidia
+  securityContext:
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: Localhost
+      localhostProfile: profiles/block-iouring.json
+  containers:
+  - name: ${CONTAINER}
+    env:
+    - name: SNAPSHOT_CONTROL_DIR
+      value: /snapshot-control
+    - name: TLLM_NCCL_SYMMETRIC_ZERO_COPY
+      value: "0"
+    - name: UCX_TLS
+      value: tcp,self
+    readinessProbe:
+      exec:
+        command:
+        - cat
+        - /snapshot-control/ready-for-snapshot
+      periodSeconds: 1
+      failureThreshold: 1800
+    volumeMounts:
+    - name: snapshot-control
+      mountPath: /snapshot-control
+    - name: tun
+      mountPath: /dev/net/tun
+  volumes:
+  - name: snapshot-control
+    emptyDir: {}
+  - name: tun
+    hostPath:
+      path: /dev/net/tun
+      type: CharDevice

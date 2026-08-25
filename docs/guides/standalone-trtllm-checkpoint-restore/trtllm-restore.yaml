@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${RESTORE_POD}
+  namespace: ${NAMESPACE}
+  annotations:
+    nvidia.com/restore-from: ${SOURCE_POD}-snapshot
+spec:
+  restartPolicy: Never
+  runtimeClassName: nvidia
+  nodeName: ${SOURCE_NODE}
+  securityContext:
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: Localhost
+      localhostProfile: profiles/block-iouring.json
+  containers:
+  - name: ${CONTAINER}
+    image: ${TRTLLM_IMAGE}
+    imagePullPolicy: IfNotPresent
+    command: ["/bin/bash", "-lc", "sleep infinity"]
+    env:
+    - name: SNAPSHOT_CONTROL_DIR
+      value: /snapshot-control
+    - name: TLLM_NCCL_SYMMETRIC_ZERO_COPY
+      value: "0"
+    - name: UCX_TLS
+      value: tcp,self
+    resources:
+      limits:
+        nvidia.com/gpu: "1"
+    startupProbe:
+      exec:
+        command:
+        - cat
+        - /snapshot-control/restore-complete
+      periodSeconds: 1
+      failureThreshold: 1800
+    readinessProbe:
+      exec:
+        command:
+        - cat
+        - /snapshot-control/trtllm-restore-ready
+      periodSeconds: 1
+      failureThreshold: 1800
+    volumeMounts:
+    - name: snapshot-control
+      mountPath: /snapshot-control
+    - name: tun
+      mountPath: /dev/net/tun
+  volumes:
+  - name: snapshot-control
+    emptyDir: {}
+  - name: tun
+    hostPath:
+      path: /dev/net/tun
+      type: CharDevice

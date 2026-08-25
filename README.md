@@ -32,6 +32,12 @@ Snapshots are portable across compatible machines and can be restored on any nod
 
 &nbsp;
 
+## Guides
+
+- [Checkpoint and restore TensorRT-LLM](docs/guides/standalone-trtllm-checkpoint-restore/README.md)
+
+&nbsp;
+
 ## APIs
 | Resource | Scope | Role |
 |----------|-------|------|
