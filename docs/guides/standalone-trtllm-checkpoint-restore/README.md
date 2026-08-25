@@ -5,13 +5,12 @@ SPDX-License-Identifier: Apache-2.0
 
 # Checkpoint and restore TensorRT-LLM with Snapshot
 
-This guide shows how to stop a TensorRT-LLM application at an idle engine
-boundary, capture its Kubernetes pod with Snapshot, and verify inference from
-the restored process.
+This guide shows how to quiesce a TensorRT-LLM engine, capture its Kubernetes
+pod with Snapshot, and resume inference in a restored pod.
 
-Snapshot must already be installed in the cluster. The guide covers a
-single-GPU Python application that owns a TensorRT-LLM `LLM` instance. A server
-must provide its own request-draining hook before using the same lifecycle.
+Snapshot must already be installed in the cluster. The guide only covers the
+TensorRT-LLM workload and the Kubernetes resources needed for capture and
+restore.
 
 Companion examples:
 
@@ -20,26 +19,43 @@ Companion examples:
 - [`PodSnapshot`](trtllm-snapshot.yaml)
 - [Restore pod](trtllm-restore.yaml)
 
+The YAML files are reference templates. The commands below resolve runtime
+values such as the source pod UID and node name.
+
 ## Prerequisites
 
 - An x86_64 Kubernetes cluster with an NVIDIA Ampere, Ada Lovelace, Hopper, or
   Blackwell GPU node.
-- Snapshot installed, including its operator, node agent, and CRDs.
-- NVIDIA driver 580 or newer with MIG disabled on the target node.
+- Snapshot installed, including the operator, node agent, and
+  `PodSnapshot` and `PodSnapshotContent` CRDs.
 - A TensorRT-LLM Python application and pod manifest that you can modify.
-- A single-GPU text model that the selected TensorRT-LLM image supports.
-- The same immutable image and source GPU node available for restore.
+- `kubectl` access to create pods and `PodSnapshot` resources.
+- A single-GPU text model supported by the TensorRT-LLM image.
+- The same immutable workload image for capture and restore.
+- The source GPU node available for restore. This guide restores to the same
+  node.
 
-Use the namespace from the current context, or set `NAMESPACE` before running
-this block. Select the TensorRT-LLM pod; the remaining values are derived:
+The currently tested configuration uses NVIDIA driver 580 or newer, MIG
+disabled, and a workload image compatible with the Snapshot restore utilities.
+
+Use the namespace from the current `kubectl` context, or set `NAMESPACE`
+beforehand to override it:
 
 ```bash
 NAMESPACE="${NAMESPACE:-$(kubectl config view --minify --output 'jsonpath={..namespace}')}"
 NAMESPACE="${NAMESPACE:-default}"
+kubectl get pods --namespace "$NAMESPACE"
+```
+
+Select the TensorRT-LLM pod. For a pod with sidecars, set `CONTAINER`
+beforehand to the TensorRT-LLM container name; otherwise the first container is
+used. All other values are derived:
+
+```bash
 SOURCE_POD="<trtllm-pod-name>"
-CONTAINER="$(kubectl get pod "$SOURCE_POD" \
+CONTAINER="${CONTAINER:-$(kubectl get pod "$SOURCE_POD" \
   --namespace "$NAMESPACE" \
-  --output jsonpath='{.spec.containers[0].name}')"
+  --output jsonpath='{.spec.containers[0].name}')}"
 RESTORE_POD="${SOURCE_POD}-restore"
 SOURCE_NODE="$(kubectl get pod "$SOURCE_POD" \
   --namespace "$NAMESPACE" \
@@ -50,32 +66,103 @@ TRTLLM_IMAGE="$(kubectl get pod "$SOURCE_POD" \
 TRTLLM_IMAGE="${TRTLLM_IMAGE#*://}"
 ```
 
-## 1. Add the TensorRT-LLM lifecycle
+## 1. Configure the TensorRT-LLM lifecycle
 
-TensorRT-LLM does not need the vLLM sleep and wake sequence for this snapshot
-path. The application instead:
+This snapshot flow does not call TensorRT-LLM's sleep or wake APIs. A
+synchronous `llm.generate()` call returns after that generation finishes. A
+server must stop accepting requests and wait for its active generations before
+calling the lifecycle below.
 
-1. Disables NCCL symmetric zero-copy before importing TensorRT-LLM.
-2. Creates the engine and finishes every in-flight `generate()` call.
-3. Stops admitting requests and runs Python garbage collection.
-4. Signals that the idle, GPU-resident engine is ready for capture.
-5. Waits until the restored pod reports `restore-complete`.
-6. Uses the same restored `LLM` object for inference.
+Add `TLLM_NCCL_SYMMETRIC_ZERO_COPY=0` to the source pod's container environment
+as shown in [step 2](#2-prepare-the-source-pod). Kubernetes sets it before the
+application starts, so it is present before TensorRT-LLM is imported or the
+engine is created. This disables NCCL registered windows, which CUDA checkpoint
+cannot capture.
 
-`TLLM_NCCL_SYMMETRIC_ZERO_COPY=0` is required because CUDA checkpoint cannot
-capture NCCL registered windows. Do not call TensorRT-LLM sleep for this flow:
-releasing the allocations would remove the initialized state that Snapshot is
-meant to preserve.
+`snapshot_lifecycle.py` does not create the snapshot. It adapts the
+TensorRT-LLM application to Snapshot's file-based lifecycle: mark the engine as
+ready to capture, wait for restore, and verify the restored engine.
 
-Copy [`snapshot_lifecycle.py`](snapshot_lifecycle.py) into the application
-source. In the entrypoint, set the environment before any TensorRT-LLM import,
-create the engine, and call the two lifecycle phases:
+Create [`snapshot_lifecycle.py`](snapshot_lifecycle.py) next to the application
+entrypoint.
+
+### Snapshot phase
 
 ```python
-import os
+import gc
+import time
+from pathlib import Path
 
-os.environ["TLLM_NCCL_SYMMETRIC_ZERO_COPY"] = "0"
+from tensorrt_llm import LLM, SamplingParams
 
+CONTROL_DIR = Path("/snapshot-control")
+
+
+def quiesce_for_snapshot() -> None:
+    gc.collect()
+    CONTROL_DIR.joinpath("ready-for-snapshot").write_text(
+        "ready\n",
+        encoding="utf-8",
+    )
+    while not CONTROL_DIR.joinpath("restore-complete").exists():
+        time.sleep(1)
+```
+
+The snapshot phase has no TensorRT-LLM pause call:
+
+- `gc.collect()` releases unreachable Python objects before capture.
+- `ready-for-snapshot` tells the pod readiness probe that the application has
+  reached the capture point.
+- The loop keeps the process at that point. Snapshot terminates the source
+  process after capture; the restored process leaves the loop after Snapshot
+  writes `restore-complete`.
+- `time.sleep(1)` prevents the wait loop from continuously using CPU.
+
+Do not call TensorRT-LLM sleep for this flow. Releasing the engine allocations
+would remove the initialized GPU state that Snapshot is intended to preserve.
+
+### Restore phase
+
+Add the restore function to the same file:
+
+```python
+def resume_after_restore(llm: LLM) -> str:
+    outputs = llm.generate(
+        ["Reply with one word: ready"],
+        SamplingParams(temperature=0.0, max_tokens=16),
+        use_tqdm=False,
+    )
+    text = outputs[0].outputs[0].text.strip()
+    if not text:
+        raise RuntimeError("TensorRT-LLM produced empty output after restore")
+    CONTROL_DIR.joinpath("trtllm-restore-ready").write_text(
+        text + "\n",
+        encoding="utf-8",
+    )
+    return text
+```
+
+`llm.generate()` is the TensorRT-LLM call that proves the restored `LLM` object
+can still generate text. `trtllm-restore-ready` tells the restored pod's
+readiness probe that this validation succeeded.
+
+### Call the lifecycle from the application
+
+The application calls these functions in order:
+
+1. `LLM(...)` creates the TensorRT-LLM engine.
+2. `llm.generate(...)` warms the engine and returns after the generation
+   finishes.
+3. `quiesce_for_snapshot()` runs garbage collection, writes
+   `ready-for-snapshot`, and waits at the capture point.
+4. The restored `quiesce_for_snapshot()` returns after it sees
+   `restore-complete`.
+5. `resume_after_restore(llm)` calls `llm.generate(...)` on the restored engine
+   and writes `trtllm-restore-ready`.
+
+Import and call the lifecycle in the existing application entrypoint:
+
+```python
 from tensorrt_llm import LLM, SamplingParams
 
 from snapshot_lifecycle import quiesce_for_snapshot, resume_after_restore
@@ -105,30 +192,80 @@ quiesce_for_snapshot()
 resume_after_restore(llm)
 ```
 
-`quiesce_for_snapshot()` blocks. In the source pod, Snapshot terminates the
-captured process after the artifact is committed. In the restore pod, the
-restored process resumes inside the same function, observes
-`restore-complete`, and returns to `resume_after_restore(llm)`.
+The source process waits in `quiesce_for_snapshot()` and is terminated after
+capture. The restored process resumes from that same loop, sees
+`restore-complete`, and calls `resume_after_restore(llm)`.
 
-Rebuild the application image after adding this code.
+Build a new workload image containing these source changes and use that image
+when [preparing the source pod](#2-prepare-the-source-pod). The readiness check
+in [step 3](#3-quiesce-tensorrt-llm) confirms when it can be captured.
 
 ## 2. Prepare the source pod
 
-Apply the fields from
-[`trtllm-source-pod-fields.yaml`](trtllm-source-pod-fields.yaml) to the
-TensorRT-LLM pod manifest before deploying it.
+Add these fields to the existing TensorRT-LLM pod template:
 
-The important fields are:
+```yaml
+spec:
+  runtimeClassName: nvidia
+  securityContext:
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: Localhost
+      localhostProfile: profiles/block-iouring.json
+  containers:
+  - name: <trtllm-container-name>
+    env:
+    - name: SNAPSHOT_CONTROL_DIR
+      value: /snapshot-control
+    - name: TLLM_NCCL_SYMMETRIC_ZERO_COPY
+      value: "0"
+    - name: UCX_TLS
+      value: tcp,self
+    readinessProbe:
+      exec:
+        command:
+        - cat
+        - /snapshot-control/ready-for-snapshot
+      periodSeconds: 1
+      failureThreshold: 1800
+    volumeMounts:
+    - name: snapshot-control
+      mountPath: /snapshot-control
+    - name: tun
+      mountPath: /dev/net/tun
+  volumes:
+  - name: snapshot-control
+    emptyDir: {}
+  - name: tun
+    hostPath:
+      path: /dev/net/tun
+      type: CharDevice
+```
 
-- `TLLM_NCCL_SYMMETRIC_ZERO_COPY=0` before engine creation.
-- `UCX_TLS=tcp,self` to avoid RDMA mappings that CRIU cannot restore.
-- `/snapshot-control` for lifecycle signals.
-- `/dev/net/tun` for restoring network devices created by the
-  TensorRT-LLM, OpenMPI, and PyTorch stack.
-- A readiness probe that waits for `ready-for-snapshot`.
+`TLLM_NCCL_SYMMETRIC_ZERO_COPY=0` is set on the TensorRT-LLM container before
+its process starts. `UCX_TLS=tcp,self` avoids RDMA mappings that CRIU cannot
+restore. The control volume carries lifecycle files, and `/dev/net/tun` allows
+Snapshot to restore network devices created by the TensorRT-LLM, OpenMPI, and
+PyTorch stack.
 
-Deploy the updated image and wait for the lifecycle to reach the capture
-boundary:
+Redeploy the pod with the updated image and fields. Wait until its container is
+running:
+
+```bash
+kubectl wait \
+  --namespace "$NAMESPACE" \
+  --for=jsonpath='{.status.phase}'=Running \
+  "pod/$SOURCE_POD" \
+  --timeout=30m
+```
+
+## 3. Quiesce TensorRT-LLM
+
+The application calls `quiesce_for_snapshot()` after engine initialization and
+warm-up. No additional TensorRT-LLM command is needed.
+
+Wait for the readiness probe and confirm the lifecycle file:
 
 ```bash
 kubectl wait \
@@ -143,13 +280,16 @@ kubectl exec "$SOURCE_POD" \
   -- test -f /snapshot-control/ready-for-snapshot
 ```
 
-At this point the `LLM` object, model weights, CUDA state, and initialized
-TensorRT-LLM runtime remain resident, but the application has no in-flight
-generation.
+The pod is now idle and ready to capture. Its model and initialized GPU state
+remain in memory, but no generation request is running.
 
-## 3. Capture the pod
+## 4. Capture the pod
 
-Create a `PodSnapshot` to ask Snapshot to capture the selected container:
+A `PodSnapshot` is the capture request. Snapshot creates the corresponding
+`PodSnapshotContent`, which records the captured artifact. Do not create the
+`PodSnapshotContent` yourself.
+
+Create the capture request using the live pod UID:
 
 ```bash
 SOURCE_POD_UID="$(kubectl get pod "$SOURCE_POD" \
@@ -178,8 +318,7 @@ kubectl wait \
   --timeout=30m
 ```
 
-Snapshot creates the cluster-scoped `PodSnapshotContent` that records the
-physical artifact. Inspect both resources:
+Inspect both resources:
 
 ```bash
 kubectl get podsnapshot "${SOURCE_POD}-snapshot" \
@@ -195,9 +334,12 @@ kubectl get podsnapshotcontent \
 
 The source process is expected to terminate after a successful capture.
 
-## 4. Create the restore pod
+## 5. Create the restore pod
 
-The restore pod uses the same immutable image and GPU node. Its
+The restore pod supplies the target container, GPU, and mounts. Snapshot
+replaces its inert process with the captured TensorRT-LLM process.
+
+Use the same image and workload settings as the source pod. The
 `nvidia.com/restore-from` annotation references the `PodSnapshot`:
 
 ```bash
@@ -260,7 +402,7 @@ EOF
 Snapshot starts the placeholder container, restores the captured process tree,
 and writes `restore-complete` into the new control volume.
 
-## 5. Verify restored inference
+## 6. Resume TensorRT-LLM
 
 The restored lifecycle calls `resume_after_restore(llm)`. No engine
 reconstruction or wake call occurs: inference uses the captured `LLM` object.
