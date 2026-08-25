@@ -767,6 +767,38 @@ func TestReconcilePodSnapshotContent_TerminalPodInFlightWritesNothing(t *testing
 	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
 }
 
+// TestReconcilePodSnapshotContent_PodNotFoundWithArtifactRecoversReady covers the source pod
+// being deleted (not just terminal) after the dump committed the artifact but before the Ready
+// write landed: the gate must recover Ready instead of writing SourcePodNotFound.
+func TestReconcilePodSnapshotContent_PodNotFoundWithArtifactRecoversReady(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	w := makeNodeController(t, &fakeCheckpointer{}, content) // no pod
+	dest := filepath.Join(w.config.Storage.BasePath, "artifacts", string(content.UID), "containers", "main")
+	require.NoError(t, os.MkdirAll(dest, 0o755))
+	require.NoError(t, snapshottypes.WriteManifest(dest, &snapshottypes.CheckpointManifest{Artifact: snapshottypes.ArtifactManifest{ContentUID: string(content.UID), ContainerName: "main"}}))
+
+	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+
+	got := getContent(t, w, content.Name)
+	assert.NotNil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
+}
+
+// TestReconcilePodSnapshotContent_PodNotFoundInFlightWritesNothing covers the source pod being
+// deleted while the capture goroutine still holds the in-flight guard: the goroutine owns the
+// outcome, so the gate must not write SourcePodNotFound under it.
+func TestReconcilePodSnapshotContent_PodNotFoundInFlightWritesNothing(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	w := makeNodeController(t, &fakeCheckpointer{}, content) // no pod
+	artifactKey := string(content.UID) + "/main"
+	require.True(t, w.tryAcquire(artifactKey))
+	t.Cleanup(func() { w.release(artifactKey) })
+
+	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+
+	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
+}
+
 // startKillableTarget starts a short-lived sleep process the test can assert was SIGKILLed.
 func startKillableTarget(t *testing.T) (context.Context, *exec.Cmd) {
 	t.Helper()

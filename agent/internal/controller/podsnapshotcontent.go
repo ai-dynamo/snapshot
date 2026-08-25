@@ -76,10 +76,12 @@ func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name s
 	if err := w.client.Get(ctx, key, pod); err != nil {
 		if apierrors.IsNotFound(err) {
 			// The operator creates the PodSnapshotContent only after the source pod exists, and this
-			// is a linearizable (quorum) Get, so NotFound means the pod was deleted, not a
-			// creation race: fail the work order terminally.
-			if err := w.setSnapshotContentFailed(ctx, content, "SourcePodNotFound", fmt.Errorf("source pod %q not found", key.String())); err != nil {
-				logger.Error(err, "Failed to write PodSnapshotContent failed status", "content", content.Name)
+			// is a linearizable (quorum) Get, so NotFound means the pod was deleted, not a creation
+			// race. The dump kills the source, so deletion can also trail a successful capture
+			// (Job cleanup, eviction): only a gone pod with neither an in-flight capture nor a
+			// committed artifact fails the work order terminally.
+			if !w.deferToCommittedCapture(ctx, content) {
+				w.failContentFromGate(ctx, content, "SourcePodNotFound", fmt.Errorf("source pod %q not found", key.String()))
 			}
 			return
 		}
@@ -87,31 +89,15 @@ func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name s
 		return
 	}
 	if reason, msg := classifySourcePodIdentity(content, pod); reason != "" {
-		if err := w.setSnapshotContentFailed(ctx, content, reason, errors.New(msg)); err != nil {
-			logger.Error(err, "Failed to write PodSnapshotContent failed status", "content", content.Name)
-		}
+		w.failContentFromGate(ctx, content, reason, errors.New(msg))
 		return
 	}
 	if reason, msg := classifySourcePodLiveness(pod); reason != "" {
 		// The dump terminates the source process, so a terminal pod may mean a
-		// capture just succeeded: while the capture goroutine holds the
-		// in-flight guard it owns the outcome, and a committed artifact only
-		// needs its Ready write. Only a dead source with neither is a failure.
-		if contentUID := strings.TrimSpace(string(content.UID)); contentUID != "" {
-			if containerName, cErr := singleTargetContainer(content); cErr == nil {
-				if w.checkpointInFlight(contentUID + "/" + containerName) {
-					return
-				}
-				if path, pathErr := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, contentUID, containerName); pathErr == nil && artifactPresent(path, contentUID, containerName) {
-					if err := w.markCheckpointReady(ctx, content); err != nil {
-						logger.Error(err, "Failed to recover committed artifact to Ready", "content", content.Name)
-					}
-					return
-				}
-			}
-		}
-		if err := w.setSnapshotContentFailed(ctx, content, reason, errors.New(msg)); err != nil {
-			logger.Error(err, "Failed to write PodSnapshotContent failed status", "content", content.Name)
+		// capture just succeeded. Only a dead source with neither an in-flight
+		// capture nor a committed artifact is a failure.
+		if !w.deferToCommittedCapture(ctx, content) {
+			w.failContentFromGate(ctx, content, reason, errors.New(msg))
 		}
 		return
 	}
@@ -120,6 +106,41 @@ func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name s
 	// the capture path — the gate never calls reconcileSourcePod directly.
 	if err := w.labelCaptureEligible(ctx, pod); err != nil {
 		logger.Error(err, "Failed to mark source pod capture-eligible", "pod", pod.Name)
+	}
+}
+
+// deferToCommittedCapture reports whether a dead or deleted source pod is explained by a capture
+// that already succeeded: while the capture goroutine holds the in-flight guard it owns the
+// outcome, and a committed artifact only needs its Ready write, which is performed here. A false
+// return means neither exists and the caller owns the failure.
+func (w *NodeController) deferToCommittedCapture(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent) bool {
+	contentUID := strings.TrimSpace(string(content.UID))
+	if contentUID == "" {
+		return false
+	}
+	containerName, err := singleTargetContainer(content)
+	if err != nil {
+		return false
+	}
+	if w.checkpointInFlight(contentUID + "/" + containerName) {
+		return true
+	}
+	path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, contentUID, containerName)
+	if err != nil || !artifactPresent(path, contentUID, containerName) {
+		return false
+	}
+	if err := w.markCheckpointReady(ctx, content); err != nil {
+		// Not terminal, so the content informer resync retries the recovery.
+		logr.FromContextOrDiscard(ctx).Error(err, "Failed to recover committed artifact to Ready", "content", content.Name)
+	}
+	return true
+}
+
+// failContentFromGate records a terminal failure from the pre-bind gate, which has no workqueue
+// to surface errors to: a failed status write is logged and left to the informer resync.
+func (w *NodeController) failContentFromGate(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, reason string, cause error) {
+	if err := w.setSnapshotContentFailed(ctx, content, reason, cause); err != nil {
+		logr.FromContextOrDiscard(ctx).Error(err, "Failed to write PodSnapshotContent failed status", "content", content.Name)
 	}
 }
 
