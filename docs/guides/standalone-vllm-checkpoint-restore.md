@@ -101,7 +101,11 @@ engine = AsyncLLM.from_engine_args(
 `ready-for-snapshot` only after `await engine.sleep()` succeeds, so capture
 cannot start if sleep mode is unavailable.
 
-Create `snapshot_lifecycle.py` next to that entrypoint. Add the capture phase:
+`snapshot_lifecycle.py` does not create the snapshot. It adapts vLLM to
+Snapshot's file-based lifecycle: make the engine safe to capture, wait for a
+capture or restore result, and make a restored engine ready to serve.
+
+Create the file next to the application entrypoint. Add the capture phase:
 
 ```python
 import asyncio
@@ -125,6 +129,18 @@ async def quiesce_for_snapshot(engine):
         await asyncio.sleep(1)
 ```
 
+The capture calls run in this order:
+
+- `pause_generation()` stops new generation work from changing engine state.
+- `sleep()` uses vLLM's default level 1 sleep: model weights move to CPU memory
+  and the KV cache is discarded, releasing most GPU memory.
+- `ready-for-snapshot` tells the pod readiness probe that both calls completed.
+  Snapshot does not begin capture before the pod is ready.
+- The loop keeps the process alive at the captured execution point.
+  `snapshot-complete` identifies the original source process;
+  `restore-complete` identifies the restored process.
+- `asyncio.sleep(1)` prevents the wait loop from continuously using CPU.
+
 Add the restore phase to the same file:
 
 ```python
@@ -138,6 +154,13 @@ async def resume_after_restore(engine):
         encoding="utf-8",
     )
 ```
+
+The restore calls reverse the vLLM-specific preparation:
+
+- `wake_up()` returns the sleeping model weights to GPU memory.
+- `resume_generation()` allows the scheduler to process generation requests.
+- `vllm-restore-ready` tells the restored pod's readiness probe that vLLM can
+  serve requests again.
 
 Import the functions in the existing entrypoint and call them immediately
 after engine initialization and warm-up:
