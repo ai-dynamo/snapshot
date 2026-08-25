@@ -13,10 +13,10 @@ vLLM workload and the Kubernetes resources needed for capture and restore.
 
 Companion examples:
 
-- [`snapshot_lifecycle.py`](standalone-vllm-checkpoint-restore/snapshot_lifecycle.py)
-- [Source pod fields](standalone-vllm-checkpoint-restore/vllm-source-pod-fields.yaml)
-- [`PodSnapshot`](standalone-vllm-checkpoint-restore/vllm-snapshot.yaml)
-- [Restore pod](standalone-vllm-checkpoint-restore/vllm-restore.yaml)
+- [`snapshot_lifecycle.py`](snapshot_lifecycle.py)
+- [Source pod fields](vllm-source-pod-fields.yaml)
+- [`PodSnapshot`](vllm-snapshot.yaml)
+- [Restore pod](vllm-restore.yaml)
 
 The YAML files are reference templates. The commands below resolve runtime
 values such as the source pod UID and node name.

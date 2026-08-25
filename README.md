@@ -44,7 +44,7 @@ Snapshots are portable across compatible machines and can be restored on any nod
 
 ## Guides
 
-- [Checkpoint and restore vLLM](docs/guides/standalone-vllm-checkpoint-restore.md)
+- [Checkpoint and restore vLLM](docs/guides/standalone-vllm-checkpoint-restore/README.md)
 
 &nbsp;
 
