@@ -59,10 +59,9 @@ VLLM_IMAGE="${VLLM_IMAGE#*://}"
 vLLM must stop generation and enter sleep mode before capture. After restore,
 it must wake up before accepting generation requests.
 
-Sleep mode is opt-in; vLLM does not enable it by default. Enable it through the
-[Python API](#python-api) or [HTTP API](#vllm-server-http-api).
-
-Check how the container starts vLLM:
+This command reads the startup command of the selected container's main
+process. It does not change the pod. The output identifies which vLLM interface
+the pod uses:
 
 ```bash
 kubectl exec "$SOURCE_POD" \
