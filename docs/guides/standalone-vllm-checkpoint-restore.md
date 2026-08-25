@@ -54,7 +54,7 @@ VLLM_IMAGE="$(kubectl get pod "$SOURCE_POD" \
 VLLM_IMAGE="${VLLM_IMAGE#*://}"
 ```
 
-## 1. Add the vLLM lifecycle
+## 1. Configure the vLLM lifecycle
 
 vLLM must stop generation and enter sleep mode before capture. After restore,
 it must wake up before accepting generation requests.
@@ -80,10 +80,11 @@ kubectl exec "$SOURCE_POD" \
 ### Python API
 
 Use this option only when your team can edit the Python program shown by the
-command above. Add the code to that program; do not run it as a separate
-script.
+command above. This is a source-code change; do not paste the Python into a
+terminal or edit files inside the running pod.
 
-Create the engine with sleep mode enabled:
+In the application source repository, find the Python entrypoint that creates
+the `AsyncLLM` engine and enable sleep mode:
 
 ```python
 engine_args = AsyncEngineArgs(
@@ -100,7 +101,7 @@ engine = AsyncLLM.from_engine_args(
 `ready-for-snapshot` only after `await engine.sleep()` succeeds, so capture
 cannot start if sleep mode is unavailable.
 
-Quiesce for capture:
+Create `snapshot_lifecycle.py` next to that entrypoint. Add the capture phase:
 
 ```python
 import asyncio
@@ -124,7 +125,7 @@ async def quiesce_for_snapshot(engine):
         await asyncio.sleep(1)
 ```
 
-Resume after restore:
+Add the restore phase to the same file:
 
 ```python
 from pathlib import Path
@@ -138,10 +139,12 @@ async def resume_after_restore(engine):
     )
 ```
 
-For a dedicated checkpoint-source pod, call the two phases from its async
-entrypoint immediately after engine initialization and warm-up:
+Import the functions in the existing entrypoint and call them immediately
+after engine initialization and warm-up:
 
 ```python
+from snapshot_lifecycle import quiesce_for_snapshot, resume_after_restore
+
 restored = await quiesce_for_snapshot(engine)
 if not restored:
     return
@@ -154,9 +157,10 @@ sees `restore-complete`, and runs `resume_after_restore()`. The application's
 existing request-serving code should follow this block, so only the restored
 process reaches it.
 
-To checkpoint an already-serving custom application, invoke
-`quiesce_for_snapshot()` from a private administrative handler after removing
-the pod from traffic.
+Build a new workload image containing these source changes and use that image
+when [preparing the source pod](#2-prepare-the-source-pod). The code runs when
+the container starts the application. The readiness check in
+[step 3](#3-quiesce-vllm) confirms when it can be captured.
 
 ### vLLM server HTTP API
 
@@ -168,43 +172,8 @@ VLLM_SERVER_DEV_MODE=1 vllm serve <model> --enable-sleep-mode
 
 Both settings are required: `--enable-sleep-mode` enables the engine feature,
 and `VLLM_SERVER_DEV_MODE=1` exposes its administrative endpoints. Do not expose
-these endpoints outside a trusted network.
-
-Confirm that the endpoint is available. An active server initially returns
-`false`:
-
-```bash
-kubectl exec "$SOURCE_POD" \
-  --namespace "$NAMESPACE" \
-  --container "$CONTAINER" \
-  -- curl -fsS "http://127.0.0.1:8000/is_sleeping"
-```
-
-Quiesce the server:
-
-```bash
-kubectl exec "$SOURCE_POD" \
-  --namespace "$NAMESPACE" \
-  --container "$CONTAINER" \
-  -- curl -fsS -X POST "http://127.0.0.1:8000/pause"
-
-kubectl exec "$SOURCE_POD" \
-  --namespace "$NAMESPACE" \
-  --container "$CONTAINER" \
-  -- curl -fsS -X POST "http://127.0.0.1:8000/sleep?level=1"
-
-kubectl exec "$SOURCE_POD" \
-  --namespace "$NAMESPACE" \
-  --container "$CONTAINER" \
-  -- curl -fsS "http://127.0.0.1:8000/is_sleeping"
-
-kubectl exec "$SOURCE_POD" \
-  --namespace "$NAMESPACE" \
-  --container "$CONTAINER" \
-  -- sh -c 'printf "ready\n" > /snapshot-control/ready-for-snapshot'
-```
-
-The second state check must return `true`.
+these endpoints outside a trusted network. Apply these settings to the pod
+startup command when [preparing the source pod](#2-prepare-the-source-pod).
 
 The [Python](#python-api) and [HTTP](#vllm-server-http-api) options execute the
 same lifecycle. Use only the option that matches how the vLLM process is
@@ -255,8 +224,62 @@ spec:
       type: CharDevice
 ```
 
-Redeploy the pod, run the quiesce calls from
-[step 1](#1-add-the-vllm-lifecycle), and wait for the readiness probe:
+Redeploy the pod with the lifecycle configuration from step 1 and the pod
+fields above. Wait until its container is running:
+
+```bash
+kubectl wait \
+  --for=jsonpath='{.status.phase}'=Running \
+  "pod/$SOURCE_POD" \
+  --namespace "$NAMESPACE" \
+  --timeout=20m
+```
+
+## 3. Quiesce vLLM
+
+For the [Python API](#python-api), the application calls
+`quiesce_for_snapshot()` after initialization and writes the readiness file
+without another command.
+
+For the [HTTP API](#vllm-server-http-api), wait for the server endpoint:
+
+```bash
+until kubectl exec "$SOURCE_POD" \
+  --namespace "$NAMESPACE" \
+  --container "$CONTAINER" \
+  -- curl -fsS "http://127.0.0.1:8000/is_sleeping"
+do
+  sleep 2
+done
+```
+
+An active server returns `false`. Pause generation, enter sleep mode, confirm
+the new state, and write the readiness file:
+
+```bash
+kubectl exec "$SOURCE_POD" \
+  --namespace "$NAMESPACE" \
+  --container "$CONTAINER" \
+  -- curl -fsS -X POST "http://127.0.0.1:8000/pause"
+
+kubectl exec "$SOURCE_POD" \
+  --namespace "$NAMESPACE" \
+  --container "$CONTAINER" \
+  -- curl -fsS -X POST "http://127.0.0.1:8000/sleep?level=1"
+
+kubectl exec "$SOURCE_POD" \
+  --namespace "$NAMESPACE" \
+  --container "$CONTAINER" \
+  -- curl -fsS "http://127.0.0.1:8000/is_sleeping"
+
+kubectl exec "$SOURCE_POD" \
+  --namespace "$NAMESPACE" \
+  --container "$CONTAINER" \
+  -- sh -c 'printf "ready\n" > /snapshot-control/ready-for-snapshot'
+```
+
+The state check must return `true`. For either API, wait for the pod readiness
+probe and confirm the file:
 
 ```bash
 kubectl wait \
@@ -264,9 +287,16 @@ kubectl wait \
   "pod/$SOURCE_POD" \
   --namespace "$NAMESPACE" \
   --timeout=20m
+
+kubectl exec "$SOURCE_POD" \
+  --namespace "$NAMESPACE" \
+  --container "$CONTAINER" \
+  -- cat /snapshot-control/ready-for-snapshot
 ```
 
-## 3. Capture the pod
+The final command must print `ready`. The pod is now ready for capture.
+
+## 4. Capture the pod
 
 A `PodSnapshot` is the capture request. Snapshot creates the corresponding
 `PodSnapshotContent`, which records the captured artifact. Do not create the
@@ -318,7 +348,7 @@ kubectl get "podsnapshot/${SOURCE_POD}-snapshot" \
 The command must print `True` followed by a
 `podsnapshotcontent-<identifier>` name.
 
-## 4. Create the restore pod
+## 5. Create the restore pod
 
 The restore pod supplies the target container, GPU, and mounts. Snapshot
 replaces its inert process with the captured vLLM process.
@@ -400,7 +430,7 @@ kubectl delete pod "$SOURCE_POD" \
 kubectl apply -f /tmp/vllm-restore.yaml
 ```
 
-## 5. Resume vLLM
+## 6. Resume vLLM
 
 Wait until Snapshot has restored the process:
 
@@ -414,9 +444,16 @@ do
 done
 ```
 
-The [Python lifecycle](#python-api) wakes and resumes the engine automatically.
+### Resume with the Python API
 
-For a `vllm serve` process, run the HTTP calls:
+The restored Python process continues from `quiesce_for_snapshot()` and calls
+`resume_after_restore()` automatically. That function wakes the engine, resumes
+generation, and writes `vllm-restore-ready`. No additional command is needed.
+
+### Resume with the HTTP API
+
+For a restored `vllm serve` process, wake the engine, resume generation, and
+write the readiness file:
 
 ```bash
 kubectl exec "$RESTORE_POD" \
@@ -457,21 +494,6 @@ kubectl get pod "$RESTORE_POD" \
 
 The status must be `completed`. Send a normal inference request to the restored
 vLLM process to complete the validation.
-
-## Clean up
-
-```bash
-kubectl delete pod "$SOURCE_POD" "$RESTORE_POD" \
-  --namespace "$NAMESPACE" \
-  --ignore-not-found
-
-kubectl delete "podsnapshot/${SOURCE_POD}-snapshot" \
-  --namespace "$NAMESPACE" \
-  --ignore-not-found
-```
-
-Deleting the `PodSnapshot` removes its API record. Retained checkpoint data is
-managed by the Snapshot installation's storage policy.
 
 For the vLLM lifecycle APIs, see
 [Sleep Mode](https://docs.vllm.ai/en/v0.27.1/features/sleep_mode/) and
