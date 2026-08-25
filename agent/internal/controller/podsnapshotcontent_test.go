@@ -17,6 +17,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -795,6 +796,121 @@ func TestReconcilePodSnapshotContent_PodNotFoundInFlightWritesNothing(t *testing
 	t.Cleanup(func() { w.release(artifactKey) })
 
 	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+
+	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
+}
+
+// foreignCaptureLease installs an unexpired (or expired) capture Lease held by another agent
+// instance into w's fake clientset, simulating an overlapping holder mid-dump.
+func foreignCaptureLease(t *testing.T, w *NodeController, content *snapshotv1alpha1.PodSnapshotContent, expired bool) {
+	t.Helper()
+	renewed := metav1.NewMicroTime(time.Now())
+	if expired {
+		renewed = metav1.NewMicroTime(time.Now().Add(-2 * checkpointLeaseDuration))
+	}
+	holder := "snapshot-agent/other-instance"
+	duration := int32(checkpointLeaseDuration.Seconds())
+	lease := &coordinationv1.Lease{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      checkpointLeaseName(string(content.UID), "main"),
+			Namespace: content.Spec.PodSnapshotRef.Namespace,
+		},
+		Spec: coordinationv1.LeaseSpec{
+			HolderIdentity:       &holder,
+			LeaseDurationSeconds: &duration,
+			AcquireTime:          &renewed,
+			RenewTime:            &renewed,
+		},
+	}
+	_, err := w.clientset.CoordinationV1().Leases(lease.Namespace).Create(context.Background(), lease, metav1.CreateOptions{})
+	require.NoError(t, err)
+}
+
+// TestReconcilePodSnapshotContent_ForeignLeaseDefersTerminalPodFailure covers two overlapping
+// agent instances: holder A owns the capture Lease and is between killing the source and
+// committing the artifact; B's gate sees the dead pod with no local in-flight entry and no
+// artifact, and must defer to the Lease instead of writing a sticky SourcePodGone. Once A
+// commits the artifact, B recovers it to Ready.
+func TestReconcilePodSnapshotContent_ForeignLeaseDefersTerminalPodFailure(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	pod := makeSourcePod()
+	pod.Status.Phase = corev1.PodFailed
+	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+	foreignCaptureLease(t, w, content, false)
+
+	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions,
+		"a foreign unexpired Lease means a capture is in flight; no terminal write is allowed")
+
+	// Holder A commits the artifact; B's next resync recovers Ready.
+	dest := filepath.Join(w.config.Storage.BasePath, "artifacts", string(content.UID), "containers", "main")
+	require.NoError(t, os.MkdirAll(dest, 0o755))
+	require.NoError(t, snapshottypes.WriteManifest(dest, &snapshottypes.CheckpointManifest{Artifact: snapshottypes.ArtifactManifest{ContentUID: string(content.UID), ContainerName: "main"}}))
+	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+
+	got := getContent(t, w, content.Name)
+	assert.NotNil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
+}
+
+// TestReconcilePodSnapshotContent_ForeignLeaseDefersPodNotFoundFailure is the same overlap with
+// the source pod fully deleted rather than terminal.
+func TestReconcilePodSnapshotContent_ForeignLeaseDefersPodNotFoundFailure(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	w := makeNodeController(t, &fakeCheckpointer{}, content) // no pod
+	foreignCaptureLease(t, w, content, false)
+
+	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+
+	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
+}
+
+// TestReconcilePodSnapshotContent_ExpiredForeignLeaseStillFails keeps the failure bounded: a
+// dead source whose Lease holder stopped renewing must not defer forever.
+func TestReconcilePodSnapshotContent_ExpiredForeignLeaseStillFails(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	pod := makeSourcePod()
+	pod.Status.Phase = corev1.PodFailed
+	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+	foreignCaptureLease(t, w, content, true)
+
+	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+
+	cond := meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, "SourcePodGone", cond.Reason)
+}
+
+// TestReconcileSourcePod_ForeignLeaseDefersContainerExitFailure covers the capture path's window:
+// B's reconcileSourcePod sees the target already killed by A's in-flight dump (exit 137, no
+// artifact yet) and must not write CheckpointContainerFailed or SIGKILL anything under A's Lease.
+func TestReconcileSourcePod_ForeignLeaseDefersContainerExitFailure(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	pod := makeSourcePod()
+	pod.Status.ContainerStatuses[0].Ready = false
+	pod.Status.ContainerStatuses[0].State = corev1.ContainerState{
+		Terminated: &corev1.ContainerStateTerminated{ExitCode: 137},
+	}
+	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+	foreignCaptureLease(t, w, content, false)
+
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+
+	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions,
+		"the target's kill-exit under a foreign unexpired Lease is A's dump in progress, not a failure")
+}
+
+// TestReconcileSourcePod_ForeignLeaseDefersLivenessFailure is the same window observed through
+// the pod-phase liveness check instead of the container exit.
+func TestReconcileSourcePod_ForeignLeaseDefersLivenessFailure(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	pod := makeSourcePod()
+	pod.Status.Phase = corev1.PodFailed
+	pod.Status.ContainerStatuses[0].Ready = false
+	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+	foreignCaptureLease(t, w, content, false)
+
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
 
 	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
 }

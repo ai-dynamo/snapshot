@@ -110,9 +110,9 @@ func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name s
 }
 
 // deferToCommittedCapture reports whether a dead or deleted source pod is explained by a capture
-// that already succeeded: while the capture goroutine holds the in-flight guard it owns the
-// outcome, and a committed artifact only needs its Ready write, which is performed here. A false
-// return means neither exists and the caller owns the failure.
+// that already succeeded or is still in flight: a capture goroutine owning the in-flight guard or
+// the shared Lease owns the outcome, and a committed artifact only needs its Ready write, which is
+// performed here. A false return means none exist and the caller owns the failure.
 func (w *NodeController) deferToCommittedCapture(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent) bool {
 	// The UID keys the artifact path and the in-flight guard; empty must not
 	// alias onto a shared path (same invariant as MissingContentUID).
@@ -128,14 +128,36 @@ func (w *NodeController) deferToCommittedCapture(ctx context.Context, content *s
 		return true
 	}
 	path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, contentUID, containerName)
-	if err != nil || !artifactPresent(path, contentUID, containerName) {
-		return false
+	if err == nil && artifactPresent(path, contentUID, containerName) {
+		if err := w.markCheckpointReady(ctx, content); err != nil {
+			// Not terminal, so the content informer resync retries the recovery.
+			logr.FromContextOrDiscard(ctx).Error(err, "Failed to recover committed artifact to Ready", "content", content.Name)
+		}
+		return true
 	}
-	if err := w.markCheckpointReady(ctx, content); err != nil {
-		// Not terminal, so the content informer resync retries the recovery.
-		logr.FromContextOrDiscard(ctx).Error(err, "Failed to recover committed artifact to Ready", "content", content.Name)
+	return w.captureLeaseHeldElsewhere(ctx, content, contentUID, containerName)
+}
+
+// captureLeaseHeldElsewhere reports whether another agent instance holds an unexpired capture
+// Lease for this work order. The in-flight guard is process-local, so overlapping agent
+// instances (e.g. a surge rollout) arbitrate through the Lease: a foreign unexpired holder may
+// be between killing the source and committing the artifact, and no liveness-derived terminal
+// failure may be written under it. Lease expiry keeps a genuinely dead capture bounded.
+func (w *NodeController) captureLeaseHeldElsewhere(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, contentUID, containerName string) bool {
+	key := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: checkpointLeaseName(contentUID, containerName)}
+	lease, err := w.clientset.CoordinationV1().Leases(key.Namespace).Get(ctx, key.Name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return false
+		}
+		// Fail toward waiting: an unreadable Lease must not let a sticky
+		// failure race an in-flight capture; the informer resync retries.
+		logr.FromContextOrDiscard(ctx).Error(err, "Failed to read checkpoint lease", "lease", key.String())
+		return true
 	}
-	return true
+	return !checkpointLeaseExpired(lease, time.Now()) &&
+		lease.Spec.HolderIdentity != nil &&
+		*lease.Spec.HolderIdentity != w.holderID
 }
 
 // failContentFromGate records a terminal failure from the pre-bind gate, which has no workqueue
@@ -232,11 +254,21 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		return w.markCheckpointReady(ctx, content)
 	}
 
+	// The in-flight guard held above is process-local; overlapping agent instances arbitrate
+	// through the shared capture Lease. A foreign unexpired holder may be between killing the
+	// source and committing the artifact — exactly the state the exit and liveness checks below
+	// would misread as a failure — so any such terminal write defers to the Lease first.
+	livenessReason, livenessMsg := classifySourcePodLiveness(pod)
+	if failedCheckpointContainer(pod) != nil || livenessReason != "" {
+		if w.captureLeaseHeldElsewhere(ctx, content, contentUID, containerName) {
+			return nil
+		}
+	}
 	if w.failCheckpointOnContainerExit(ctx, content, pod) {
 		return nil
 	}
-	if reason, msg := classifySourcePodLiveness(pod); reason != "" {
-		err := w.setSnapshotContentFailed(ctx, content, reason, errors.New(msg))
+	if livenessReason != "" {
+		err := w.setSnapshotContentFailed(ctx, content, livenessReason, errors.New(livenessMsg))
 		w.removeCaptureEligibleLabel(ctx, pod)
 		return err
 	}
@@ -380,14 +412,7 @@ func classifySourcePodLiveness(pod *corev1.Pod) (string, string) {
 // true when a failure was handled and the caller must stop. Init containers
 // (pod.Status.InitContainerStatuses) are intentionally out of scope.
 func (w *NodeController) failCheckpointOnContainerExit(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, pod *corev1.Pod) bool {
-	var failed *corev1.ContainerStatus
-	for i := range pod.Status.ContainerStatuses {
-		cs := &pod.Status.ContainerStatuses[i]
-		if cs.State.Terminated != nil && cs.State.Terminated.ExitCode != 0 {
-			failed = cs
-			break
-		}
-	}
+	failed := failedCheckpointContainer(pod)
 	if failed == nil {
 		return false
 	}
@@ -405,6 +430,18 @@ func (w *NodeController) failCheckpointOnContainerExit(ctx context.Context, cont
 		logr.FromContextOrDiscard(ctx).Error(err, "Failed to write PodSnapshotContent failed status", "content", content.Name)
 	}
 	return true
+}
+
+// failedCheckpointContainer returns the first checkpoint container that terminated non-zero, or
+// nil. Init containers (pod.Status.InitContainerStatuses) are intentionally out of scope.
+func failedCheckpointContainer(pod *corev1.Pod) *corev1.ContainerStatus {
+	for i := range pod.Status.ContainerStatuses {
+		cs := &pod.Status.ContainerStatuses[i]
+		if cs.State.Terminated != nil && cs.State.Terminated.ExitCode != 0 {
+			return cs
+		}
+	}
+	return nil
 }
 
 // killRunningContainers SIGKILLs every still-running container in the pod, resolving each
