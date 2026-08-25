@@ -193,6 +193,14 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 	if len(cudaHostPIDs) > 0 {
 		log.V(1).Info("Resolved checkpoint CUDA PID mapping", "host_pids", cudaHostPIDs, "namespace_pids", cudaNamespacePIDs)
 	}
+	cudaInterposition, err := cuda.DetectCUDAInterposition(
+		snapshotruntime.HostProcPath,
+		cudaHostPIDs,
+		cudaNamespacePIDs,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("detect CUDA interposition: %w", err)
+	}
 	var gpuUUIDs []string
 	var gpuDeviceMapDuration time.Duration
 	if len(cudaHostPIDs) > 0 {
@@ -214,17 +222,18 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 	}
 
 	return &types.CheckpointContainerSnapshot{
-		PID:            pid,
-		RootFS:         rootFS,
-		UpperDir:       upperDir,
-		OCISpec:        ociSpec,
-		Mounts:         mounts,
-		NetNSInode:     netNSInode,
-		StdioFDs:       stdioFDs,
-		HostCgroupPath: hostCgroupPath,
-		CUDAHostPIDs:   cudaHostPIDs,
-		CUDANSPIDs:     cudaNamespacePIDs,
-		GPUUUIDs:       gpuUUIDs,
+		PID:               pid,
+		RootFS:            rootFS,
+		UpperDir:          upperDir,
+		OCISpec:           ociSpec,
+		Mounts:            mounts,
+		NetNSInode:        netNSInode,
+		StdioFDs:          stdioFDs,
+		HostCgroupPath:    hostCgroupPath,
+		CUDAHostPIDs:      cudaHostPIDs,
+		CUDANSPIDs:        cudaNamespacePIDs,
+		GPUUUIDs:          gpuUUIDs,
+		CUDAInterposition: cudaInterposition,
 	}, gpuDeviceMapDuration, nil
 }
 
@@ -263,6 +272,18 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 
 	// CUDA lock+checkpoint must happen before CRIU dump
 	if len(state.CUDAHostPIDs) > 0 {
+		if state.CUDAInterposition {
+			if err := cuda.PrepareCUDAInterposition(
+				ctx,
+				checkpointDir,
+				snapshotruntime.HostProcPath,
+				state.CUDAHostPIDs,
+				state.CUDANSPIDs,
+				log,
+			); err != nil {
+				return nil, fmt.Errorf("prepare CUDA interposition: %w", err)
+			}
+		}
 		cudaTimings, err := cuda.CheckpointProcessTree(ctx, state.CUDAHostPIDs, cudaJobFile, checkpointDir, log)
 		if err != nil {
 			return nil, fmt.Errorf("CUDA checkpoint failed: %w", err)
