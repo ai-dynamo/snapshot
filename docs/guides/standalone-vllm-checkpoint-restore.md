@@ -60,13 +60,29 @@ vLLM must stop generation and enter sleep mode before capture. After restore,
 it must wake up before accepting generation requests.
 
 Sleep mode is opt-in; vLLM does not enable it by default. Enable it through the
-Python API or server option below.
+[Python API](#python-api) or [HTTP API](#vllm-server-http-api).
+
+Check how the container starts vLLM:
+
+```bash
+kubectl exec "$SOURCE_POD" \
+  --namespace "$NAMESPACE" \
+  --container "$CONTAINER" \
+  -- sh -c 'tr "\000" " " < /proc/1/cmdline; echo'
+```
+
+- If the output contains `vllm serve` or `vllm.entrypoints`, use the
+  [HTTP API](#vllm-server-http-api).
+- If the output names a Python program that your team maintains, use the
+  [Python API](#python-api).
+- If the output is a shell wrapper or remains unclear, check the workload
+  manifest or ask the image owner which program starts vLLM.
 
 ### Python API
 
-Use this option only when a custom Python application creates and owns the
-`AsyncLLM` instance. Add the code to that application; do not run it as a
-separate script. If the pod runs `vllm serve`, skip to the HTTP option.
+Use this option only when your team can edit the Python program shown by the
+command above. Add the code to that program; do not run it as a separate
+script.
 
 Create the engine with sleep mode enabled:
 
@@ -191,8 +207,9 @@ kubectl exec "$SOURCE_POD" \
 
 The second state check must return `true`.
 
-The Python and HTTP options execute the same lifecycle. Use only the option
-that matches how the vLLM process is started.
+The [Python](#python-api) and [HTTP](#vllm-server-http-api) options execute the
+same lifecycle. Use only the option that matches how the vLLM process is
+started.
 
 ## 2. Prepare the source pod
 
@@ -239,8 +256,8 @@ spec:
       type: CharDevice
 ```
 
-Redeploy the pod, run the quiesce calls from step 1, and wait for the readiness
-probe:
+Redeploy the pod, run the quiesce calls from
+[step 1](#1-add-the-vllm-lifecycle), and wait for the readiness probe:
 
 ```bash
 kubectl wait \
@@ -398,7 +415,7 @@ do
 done
 ```
 
-The Python lifecycle from step 1 wakes and resumes the engine automatically.
+The [Python lifecycle](#python-api) wakes and resumes the engine automatically.
 
 For a `vllm serve` process, run the HTTP calls:
 
