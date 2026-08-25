@@ -81,13 +81,13 @@ engine = AsyncLLM.from_engine_args(
 `ready-for-snapshot` only after `await engine.sleep()` succeeds, so capture
 cannot start if sleep mode is unavailable.
 
-When the application is ready to be captured, run this lifecycle:
+Quiesce for capture:
 
 ```python
 import asyncio
 from pathlib import Path
 
-async def checkpoint_lifecycle(engine):
+async def quiesce_for_snapshot(engine):
     control_dir = Path("/snapshot-control")
 
     await engine.pause_generation()
@@ -101,18 +101,36 @@ async def checkpoint_lifecycle(engine):
         if control_dir.joinpath("snapshot-complete").exists():
             return False
         if control_dir.joinpath("restore-complete").exists():
-            await engine.wake_up()
-            await engine.resume_generation()
-            control_dir.joinpath("vllm-restore-ready").write_text(
-                "ready\n",
-                encoding="utf-8",
-            )
             return True
         await asyncio.sleep(1)
 ```
 
-Exit the source process when the function returns `False`. When it returns
-`True`, the process was restored and can resume serving requests.
+Resume after restore:
+
+```python
+from pathlib import Path
+
+async def resume_after_restore(engine):
+    await engine.wake_up()
+    await engine.resume_generation()
+    Path("/snapshot-control/vllm-restore-ready").write_text(
+        "ready\n",
+        encoding="utf-8",
+    )
+```
+
+Call the two phases from the application lifecycle:
+
+```python
+restored = await quiesce_for_snapshot(engine)
+if not restored:
+    return
+await resume_after_restore(engine)
+```
+
+The source process returns after `snapshot-complete`. The restored process
+resumes from the same wait loop, sees `restore-complete`, and runs the restore
+phase.
 
 ### vLLM server HTTP API
 
