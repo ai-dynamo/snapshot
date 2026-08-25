@@ -64,6 +64,10 @@ Python API or server option below.
 
 ### Python API
 
+Use this option only when a custom Python application creates and owns the
+`AsyncLLM` instance. Add the code to that application; do not run it as a
+separate script. If the pod runs `vllm serve`, skip to the HTTP option.
+
 Create the engine with sleep mode enabled:
 
 ```python
@@ -119,7 +123,8 @@ async def resume_after_restore(engine):
     )
 ```
 
-Call the two phases from the application lifecycle:
+For a dedicated checkpoint-source pod, call the two phases from its async
+entrypoint immediately after engine initialization and warm-up:
 
 ```python
 restored = await quiesce_for_snapshot(engine)
@@ -128,9 +133,15 @@ if not restored:
 await resume_after_restore(engine)
 ```
 
-The source process returns after `snapshot-complete`. The restored process
-resumes from the same wait loop, sees `restore-complete`, and runs the restore
-phase.
+The source process waits in `quiesce_for_snapshot()` and exits after
+`snapshot-complete`. The restored process resumes from that same wait loop,
+sees `restore-complete`, and runs `resume_after_restore()`. The application's
+existing request-serving code should follow this block, so only the restored
+process reaches it.
+
+To checkpoint an already-serving custom application, invoke
+`quiesce_for_snapshot()` from a private administrative handler after removing
+the pod from traffic.
 
 ### vLLM server HTTP API
 
