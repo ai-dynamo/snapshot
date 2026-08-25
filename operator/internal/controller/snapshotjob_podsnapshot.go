@@ -75,6 +75,28 @@ func findSourcePod(ctx context.Context, reader client.Reader, job *batchv1.Job) 
 	return controlledPodForJob(pods.Items, job)
 }
 
+// findSourcePodConfirmed resolves the source pod cache-first, only paying for
+// a live read when accept reports the cached result cannot be trusted for
+// what the caller does next. accept sees the cached (pod, found) and returns
+// whether that result is safe to act on as-is; returning false triggers one
+// authoritative re-read via nonCache, whose result is returned unconditionally
+// (accept is not consulted again — the live read is always trusted).
+func findSourcePodConfirmed(
+	ctx context.Context,
+	cache, nonCache client.Reader,
+	job *batchv1.Job,
+	accept func(pod *corev1.Pod, found bool) bool,
+) (*corev1.Pod, bool, error) {
+	pod, found, err := findSourcePod(ctx, cache, job)
+	if err != nil {
+		return nil, false, err
+	}
+	if accept(pod, found) {
+		return pod, found, nil
+	}
+	return findSourcePod(ctx, nonCache, job)
+}
+
 // controlledPodForJob selects the Pod controlled by job from the label-matched
 // candidates and rejects the invalid case where the Job controls multiple Pods.
 func controlledPodForJob(pods []corev1.Pod, job *batchv1.Job) (*corev1.Pod, bool, error) {

@@ -309,44 +309,57 @@ func (r *SnapshotJobReconciler) classifyHelperContainers(ctx context.Context, sj
 	if len(helpers) == 0 && len(sidecars) == 0 {
 		return nil, false, nil // the target is the only container
 	}
-	// Cache-first: terminated container states are immutable, so staleness can
-	// only report helpersStillRunning — a reversible requeue. Only the sticky
-	// absence failure below needs the cached miss confirmed against the API.
-	pod, found, err := findSourcePod(ctx, r.Client, job)
+	// Cache-first, but a cached result is only trustworthy for the reversible
+	// outcome (helpersStillRunning): a regular helper's terminated state is
+	// immutable, but a native sidecar's is not — the kubelet can restart it
+	// (Terminated -> Running) on a crash, so a cached Terminated can be stale.
+	// Any terminal-looking verdict (success or a helper failure) is therefore
+	// re-derived from a live read before it is trusted, since acting on it
+	// (deleting the Job) is irreversible.
+	pod, found, err := findSourcePodConfirmed(ctx, r.Client, r.NonCacheReadClient, job,
+		func(pod *corev1.Pod, found bool) bool {
+			if !found {
+				return false
+			}
+			_, stillRunning := classifyHelperPod(pod, helpers, sidecars)
+			return stillRunning
+		})
 	if err != nil {
 		return nil, false, fmt.Errorf("find source pod to verify helper containers: %w", err)
 	}
 	if !found {
-		pod, found, err = findSourcePod(ctx, r.NonCacheReadClient, job)
-		if err != nil {
-			return nil, false, fmt.Errorf("confirm source pod absence for helper verification: %w", err)
-		}
-		if !found {
-			return &snapshotJobFailure{
-				reason: snapshotv1alpha1.ReasonJobFailed,
-				cause:  errors.New("source pod is gone before its helper containers could be verified"),
-			}, false, nil
-		}
+		return &snapshotJobFailure{
+			reason: snapshotv1alpha1.ReasonJobFailed,
+			cause:  errors.New("source pod is gone before its helper containers could be verified"),
+		}, false, nil
 	}
+	failure, helpersStillRunning = classifyHelperPod(pod, helpers, sidecars)
+	return failure, helpersStillRunning, nil
+}
+
+// classifyHelperPod derives the helper/sidecar verdict from a single observed
+// pod. Pure over its input so the same logic can both produce a tentative,
+// cache-derived verdict and be re-run against an authoritative read.
+func classifyHelperPod(pod *corev1.Pod, helpers, sidecars []string) (failure *snapshotJobFailure, helpersStillRunning bool) {
 	for _, name := range helpers {
 		terminated := containerTerminatedState(pod.Status.ContainerStatuses, name)
 		if terminated == nil {
-			return nil, true, nil
+			return nil, true
 		}
 		if terminated.ExitCode != 0 {
 			return &snapshotJobFailure{
 				reason: snapshotv1alpha1.ReasonJobFailed,
 				cause: fmt.Errorf("helper container %q exited with code %d after the capture succeeded",
 					name, terminated.ExitCode),
-			}, false, nil
+			}, false
 		}
 	}
 	for _, name := range sidecars {
 		if containerTerminatedState(pod.Status.InitContainerStatuses, name) == nil {
-			return nil, true, nil
+			return nil, true
 		}
 	}
-	return nil, false, nil
+	return nil, false
 }
 
 // expectedHelperContainers splits the pod template's non-target containers into

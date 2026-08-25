@@ -575,6 +575,35 @@ func TestSnapshotJobReconcileSidecarTerminatedNonZeroCompletes(t *testing.T) {
 	assert.False(t, snapshotv1alpha1.IsSnapshotJobFailed(updated))
 }
 
+func TestSnapshotJobReconcileSidecarRestartAfterCacheReadIsNotTrusted(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	// The cache observed the sidecar mid-restart-cycle Terminated; the kubelet
+	// has since brought it back up (native sidecars can cycle
+	// Terminated -> Running, unlike regular containers). A terminal-looking
+	// cache read is irreversible here (it drives Job deletion), so it must be
+	// re-confirmed against a live read rather than trusted outright.
+	sj, job, pod, snap := sidecarSnapshotJob(t, s,
+		&corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}})
+
+	livePod := pod.DeepCopy()
+	livePod.Status.InitContainerStatuses = []corev1.ContainerStatus{
+		{Name: "sidecar", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+	}
+
+	r := makeSnapshotJobReconciler(s, sj, job, pod, snap)
+	r.NonCacheReadClient = fake.NewClientBuilder().WithScheme(s).WithObjects(livePod).Build()
+
+	result, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+	assert.Equal(t, captureResolutionBackstop, result.RequeueAfter)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobCompleted(updated),
+		"a stale cached Terminated must not complete the SnapshotJob when the sidecar is actually still running")
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobFailed(updated))
+}
+
 func TestSnapshotJobReconcileHelperUnverifiableFails(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj, job, _, snap := helperSnapshotJob(t, s,
