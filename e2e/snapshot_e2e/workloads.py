@@ -100,6 +100,7 @@ def snapshotjob_pod_template(
         snapshotjob_source_command(run.image, gpu),
         gpu,
         control_volume=False,
+        checkpoint_pvc=False,
     )
     spec["containers"][0]["env"] = [
         {"name": SOURCE_TOKEN_ENV, "value": run.source_token},
@@ -116,7 +117,7 @@ def snapshotjob_hang_pod_template(
     # never flips True and the source Job runs to its activeDeadlineSeconds —
     # the negative DeadlineExceeded path.
     command = 'set -euo pipefail\necho "[snapshotjob-hang] never signaling ready"\nsleep infinity\n'
-    spec = base_pod_spec(config, run, command, gpu=False, control_volume=False)
+    spec = base_pod_spec(config, run, command, gpu=False, control_volume=False, checkpoint_pvc=False)
     return {"metadata": {"labels": {**run.labels}}, "spec": spec}
 
 
@@ -231,26 +232,34 @@ def base_pod_spec(
     gpu: bool,
     *,
     control_volume: bool = True,
+    checkpoint_pvc: bool = True,
 ) -> dict[str, Any]:
     # control_volume=False for a SnapshotJob's spec.podTemplate: the operator
     # injects the snapshot-control emptyDir, mount, and env var itself
     # (EnsureControlVolume) — a caller-provided one would be redundant with
     # what the feature actually promises callers they do not have to set up.
+    #
+    # checkpoint_pvc=False likewise for a SnapshotJob's spec.podTemplate: since
+    # the agent owns the checkpoint-storage mount itself (mounted on the
+    # agent's own pod, not the workload pod — see checkpoint_agent_pod() /
+    # checkpoint_artifact_path() in lifecycle.py), a real caller's pod no
+    # longer needs to carry this volume at all.
     container: dict[str, Any] = {
         "name": CONTAINER,
         "image": run.image,
         "imagePullPolicy": "IfNotPresent",
         "command": ["/bin/bash", "-lc", command],
-        "volumeMounts": [
-            {"name": "checkpoint-storage", "mountPath": CHECKPOINT_DIR},
-        ],
+        "volumeMounts": [],
     }
-    volumes: list[dict[str, Any]] = [
-        {
-            "name": "checkpoint-storage",
-            "persistentVolumeClaim": {"claimName": config.pvc_name},
-        },
-    ]
+    volumes: list[dict[str, Any]] = []
+    if checkpoint_pvc:
+        container["volumeMounts"].append({"name": "checkpoint-storage", "mountPath": CHECKPOINT_DIR})
+        volumes.append(
+            {
+                "name": "checkpoint-storage",
+                "persistentVolumeClaim": {"claimName": config.pvc_name},
+            }
+        )
     if control_volume:
         container["volumeMounts"].insert(0, {"name": "snapshot-control", "mountPath": CONTROL_DIR})
         volumes.insert(0, {"name": "snapshot-control", "emptyDir": {}})
