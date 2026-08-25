@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: PodSnapshot
+metadata:
+  name: ${SOURCE_POD}-snapshot
+  namespace: ${NAMESPACE}
+  labels:
+    nvidia.com/snapshot-checkpoint-id: ${CHECKPOINT_ID}
+spec:
+  source:
+    podRef:
+      name: ${SOURCE_POD}
+      uid: ${SOURCE_POD_UID}
+      containers:
+      - ${CONTAINER}

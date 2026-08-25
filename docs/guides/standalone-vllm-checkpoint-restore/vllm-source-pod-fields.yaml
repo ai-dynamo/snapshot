@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+metadata:
+  labels:
+    nvidia.com/snapshot-is-checkpoint-source: "true"
+    nvidia.com/snapshot-checkpoint-id: ${CHECKPOINT_ID}
+  annotations:
+    nvidia.com/snapshot-target-containers: ${CONTAINER}
+spec:
+  runtimeClassName: nvidia
+  securityContext:
+    seccompProfile:
+      type: Localhost
+      localhostProfile: profiles/block-iouring.json
+  containers:
+  - name: ${CONTAINER}
+    env:
+    - name: SNAPSHOT_CONTROL_DIR
+      value: /snapshot-control
+    readinessProbe:
+      exec:
+        command:
+        - cat
+        - /snapshot-control/ready-for-snapshot
+      periodSeconds: 1
+      failureThreshold: 1200
+    volumeMounts:
+    - name: snapshot-control
+      mountPath: /snapshot-control
+    - name: tun
+      mountPath: /dev/net/tun
+  volumes:
+  - name: snapshot-control
+    emptyDir: {}
+  - name: tun
+    hostPath:
+      path: /dev/net/tun
+      type: CharDevice

@@ -11,6 +11,16 @@ Snapshot, and resume inference in a restored pod.
 Snapshot must already be installed in the cluster. The guide only covers the
 vLLM workload and the Kubernetes resources needed for capture and restore.
 
+Companion examples:
+
+- [`snapshot_lifecycle.py`](standalone-vllm-checkpoint-restore/snapshot_lifecycle.py)
+- [Source pod fields](standalone-vllm-checkpoint-restore/vllm-source-pod-fields.yaml)
+- [`PodSnapshot`](standalone-vllm-checkpoint-restore/vllm-snapshot.yaml)
+- [Restore pod](standalone-vllm-checkpoint-restore/vllm-restore.yaml)
+
+The YAML files are reference templates. The commands below resolve runtime
+values such as the source pod UID and node name.
+
 ## Prerequisites
 
 - An x86_64 Kubernetes cluster with an NVIDIA GPU node.
