@@ -273,7 +273,8 @@ func (r *SnapshotJobReconciler) reconcileCapturedSourceJob(ctx context.Context, 
 			return snapshotJobObservation{}, ctrl.Result{}, err
 		}
 		if helpersStillRunning {
-			// FailureTarget can land before the pod's final container states.
+			// The Job can report Failed before the kubelet publishes the
+			// helpers' final states, so wait for pod status to converge.
 			return observed, ctrl.Result{RequeueAfter: captureResolutionBackstop}, nil
 		}
 		observed.failure = failure

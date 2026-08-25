@@ -114,7 +114,9 @@ func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name s
 // outcome, and a committed artifact only needs its Ready write, which is performed here. A false
 // return means neither exists and the caller owns the failure.
 func (w *NodeController) deferToCommittedCapture(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent) bool {
-	contentUID := strings.TrimSpace(string(content.UID))
+	// The UID keys the artifact path and the in-flight guard; empty must not
+	// alias onto a shared path (same invariant as MissingContentUID).
+	contentUID := string(content.UID)
 	if contentUID == "" {
 		return false
 	}
@@ -188,7 +190,7 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		return nil
 	}
 
-	contentUID := strings.TrimSpace(string(content.UID))
+	contentUID := string(content.UID)
 	if contentUID == "" {
 		return w.setSnapshotContentFailed(ctx, content, "MissingContentUID",
 			fmt.Errorf("PodSnapshotContent %q has no UID", content.Name))
@@ -218,11 +220,10 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		return err
 	}
 
-	// Artifact recovery must precede every liveness-derived classification below: the dump
-	// terminates the source process, so after a success the pod is failed, the target container
-	// is terminated, and its PID is unresolvable — all expected, none of it a capture failure.
-	// The artifact dir exists only after the executor's atomic rename, so its presence means a
-	// completed dump whose Ready write did not land yet.
+	// Artifact recovery must precede the liveness checks below: the dump kills the source, so a
+	// dead pod with a committed artifact is a success awaiting its Ready write — the write that
+	// publishes the checkpoint for restore. The artifact dir exists only after the executor's
+	// atomic rename.
 	artifactPath, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, contentUID, containerName)
 	if err != nil {
 		return w.setSnapshotContentFailed(ctx, content, "InvalidDestination", err)
