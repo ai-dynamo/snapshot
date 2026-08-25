@@ -150,10 +150,16 @@ def test_failed_restore_gpu_checkpoint_into_non_gpu_target(
         )
         assert snap.condition(pod_snapshot, "Ready")["status"] == "True"
         assert snap.condition(content, "Ready")["status"] == "True"
+        # RestoreAlreadyFailed is deliberately not asserted: the agent marks a
+        # failed restore as handled in-process, so that event only fires when a
+        # fresh agent process re-encounters the already-failed pod (e.g. after
+        # an agent restart) — unreachable in this single-agent flow. The sticky
+        # failure itself is covered by the Restored=False/RestoreFailed
+        # condition asserted above.
         assert_restore_events(
             config.namespace,
             run.restore_pod,
-            {"RestoreFailed", "RestoreAlreadyFailed"},
+            {"RestoreFailed"},
         )
     except Exception:
         snap.debug_dump(config, run)
