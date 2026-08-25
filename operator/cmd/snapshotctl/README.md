@@ -65,19 +65,22 @@ Checkpoint targets are part of the `PodSnapshot` request, not pod annotations.
 `snapshotctl checkpoint` requires `--container <name>` and records that one
 container in `PodSnapshot.spec.source.podRef.containers`.
 
-Restore uses the single container captured by that `PodSnapshot`. The restore
-manifest must contain a container with the same name. `snapshotctl` shapes it
-for restore and adds only this snapshot-owned annotation:
+Restore uses the single container captured by that `PodSnapshot`. By default,
+the restore manifest must contain a container with the same name. To clone the
+same checkpoint into multiple containers, add a flat source-to-destination map:
 
 ```yaml
 metadata:
   annotations:
     nvidia.com/restore-from: worker-snapshot
+    nvidia.com/restore-container-map: main=engine-0,main=engine-1
 ```
 
-Capture pods must have no snapshot-owned annotations. Restore pods must have
-exactly one: `nvidia.com/restore-from`. Unrelated platform annotations are
-preserved.
+Every mapping source must match the one container captured by the
+`PodSnapshot`, and every destination must exist in the restore manifest.
+`snapshotctl` validates the full map before creating the Pod. Without the map,
+same-name single-container restore remains unchanged. Unrelated platform
+annotations are preserved.
 
 ## Commands
 
@@ -106,5 +109,8 @@ snapshotctl restore \
 - `restore` returns after the restore request is submitted; it does not wait for completion
 - observe restore progress through the pod's `Restored` status condition,
   readiness, events, and agent logs
+- `RestoreSucceeded` means every destination restored, `RestorePartiallySucceeded`
+  means only some restored, and `RestoreFailed` means none restored
+- partial and failed outcomes are terminal; retry them with a new restore Pod
 - `snapshotctl` is useful for debugging and lower-level validation, but it does
   not replace the operator-managed checkpoint flow

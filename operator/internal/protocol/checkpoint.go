@@ -27,8 +27,13 @@ type CheckpointJobOptions struct {
 
 func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOptions) (*batchv1.Job, error) {
 	podTemplate = podTemplate.DeepCopy()
-	if _, restoreRequested := podTemplate.Annotations[snapshotv1alpha1.RestoreFromAnnotation]; restoreRequested {
-		return nil, fmt.Errorf("checkpoint job pod template must not set %s", snapshotv1alpha1.RestoreFromAnnotation)
+	for _, annotation := range []string{
+		snapshotv1alpha1.RestoreFromAnnotation,
+		snapshotv1alpha1.RestoreContainerMapAnnotation,
+	} {
+		if _, restoreRequested := podTemplate.Annotations[annotation]; restoreRequested {
+			return nil, fmt.Errorf("checkpoint job pod template must not set %s", annotation)
+		}
 	}
 	if podTemplate.Labels == nil {
 		podTemplate.Labels = map[string]string{}

@@ -120,6 +120,78 @@ def test_successful_restore_recovers_cpu_gpu_and_fs_from_snapshot(
         raise
 
 
+@pytest.mark.snapshot_success
+def test_one_cpu_snapshot_restores_into_two_containers(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    try:
+        source, source_node = create_ready_source(config, run, gpu=False)
+        checkpoint_observations = snap.wait_for_state_observations(
+            config.namespace,
+            run.source_pod,
+            run.source_token,
+            gpu=False,
+            minimum=2,
+        )
+        snap.create_podsnapshot(
+            config.namespace,
+            run.snapshot_name,
+            run.source_pod,
+            source.metadata.uid,
+        )
+        snap.wait_for_snapshot_ready(config.namespace, run.snapshot_name)
+
+        k8s.delete_pod(config.namespace, run.source_pod)
+        snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+
+        restore_pod, restore_tokens = snap.multi_restore_pod(
+            config=config,
+            run=run,
+            source_node=source_node,
+        )
+        k8s.create_pod(restore_pod)
+        restored_pod = snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "True", "RestoreSucceeded"
+        )
+        assert snapshot_annotations(restored_pod) == {
+            "nvidia.com/restore-from": run.snapshot_name,
+            "nvidia.com/restore-container-map": "main=engine-0,main=engine-1",
+        }
+        snap.wait_for_pod_ready(config.namespace, run.restore_pod, timeout=300)
+
+        for destination in ("engine-0", "engine-1"):
+            output = snap.assert_restored_state(
+                config.namespace,
+                run.restore_pod,
+                source_token=run.source_token,
+                restore_token=restore_tokens[destination],
+                checkpoint_observations=checkpoint_observations,
+                gpu=False,
+                container=destination,
+            )
+            assert f"source_token={run.source_token}" in output
+            assert f"restore_token={restore_tokens[destination]}" in output
+
+        assert_restore_events(
+            config.namespace,
+            run.restore_pod,
+            {"RestoreRequested", "RestoreSucceeded"},
+        )
+        requested_messages = [
+            event.message or ""
+            for event in k8s.list_events(config.namespace)
+            if event.involved_object
+            and event.involved_object.name == run.restore_pod
+            and event.reason == "RestoreRequested"
+        ]
+        for destination in ("engine-0", "engine-1"):
+            assert any(destination in message for message in requested_messages)
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
 @pytest.mark.snapshot_failure
 @pytest.mark.gpu
 def test_failed_restore_gpu_checkpoint_into_non_gpu_target(
@@ -153,7 +225,7 @@ def test_failed_restore_gpu_checkpoint_into_non_gpu_target(
         assert_restore_events(
             config.namespace,
             run.restore_pod,
-            {"RestoreFailed", "RestoreAlreadyFailed"},
+            {"RestoreFailed"},
         )
     except Exception:
         snap.debug_dump(config, run)

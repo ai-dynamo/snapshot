@@ -38,6 +38,7 @@ Snapshots are portable across compatible machines and can be restored on any nod
 | `PodSnapshot` | Namespaced | Created by callers to request a capture or reference an artifact for restore. |
 | `PodSnapshotContent` | Cluster-scoped | System-managed record of the physical artifact, bound to a `PodSnapshot`. Created by the Snapshot operator, never by the caller. |
 | `nvidia.com/restore-from` | Namespaced | Added as a pod annotation to trigger restore from a named `PodSnapshot` in the same namespace. |
+| `nvidia.com/restore-container-map` | Namespaced | Optional comma-separated `source=destination` mappings used to clone the single captured container into one or more restore containers. |
 
 &nbsp;
 
@@ -90,4 +91,3 @@ Clients interact exclusively through the Kubernetes API. No platform-specific AP
 ## Status
 
 The project is in early development. API types and control plane components are scaffolded but not yet feature-complete. Not ready for production use.
-

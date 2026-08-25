@@ -54,7 +54,7 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 	}, snapshotprotocol.PodOptions{
 		Namespace:       namespace,
 		SnapshotName:    snapshotName,
-		TargetContainer: containers[0],
+		SourceContainer: containers[0],
 		SeccompProfile:  snapshotv1alpha1.DefaultSeccompLocalhostProfile,
 	})
 	if err != nil {

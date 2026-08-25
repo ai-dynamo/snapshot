@@ -20,6 +20,7 @@ from snapshot_e2e.workloads import RESTORE_DONE
 from snapshot_e2e.workloads import RESTORE_INITIAL_TOKEN
 from snapshot_e2e.workloads import SOURCE_READY
 from snapshot_e2e.workloads import TestRun
+from snapshot_e2e.workloads import multi_restore_pod
 from snapshot_e2e.workloads import restore_pod
 from snapshot_e2e.workloads import source_pod
 
@@ -289,12 +290,14 @@ def wait_for_restored_condition(
 ) -> client.V1Pod:
     def check() -> client.V1Pod | None:
         pod = k8s.read_pod(namespace, pod_name)
-        restored = pod_condition(pod, "snapshot/Restored")
+        restored = pod_condition(pod, "nvidia.com/Restored")
         if restored and restored.status == status and restored.reason == reason:
             return pod
-        if reason != "RestoreFailed" and restored and restored.reason == "RestoreFailed":
+        terminal_reasons = {"RestoreSucceeded", "RestorePartiallySucceeded", "RestoreFailed"}
+        if restored and restored.reason in terminal_reasons and restored.reason != reason:
             raise AssertionError(
-                f"restore failed for {namespace}/{pod_name}: {restored.message}"
+                f"restore reached unexpected terminal condition for "
+                f"{namespace}/{pod_name}: {restored.reason}: {restored.message}"
             )
         return None
 
@@ -303,11 +306,11 @@ def wait_for_restored_condition(
             pod = k8s.read_pod(namespace, pod_name)
         except ApiException as exc:
             return f"api_error={k8s.api_error_detail(exc)}"
-        restored = pod_condition(pod, "snapshot/Restored")
-        return f"snapshot/Restored={restored or '<unset>'}"
+        restored = pod_condition(pod, "nvidia.com/Restored")
+        return f"nvidia.com/Restored={restored or '<unset>'}"
 
     return wait_for(
-        f"snapshot/Restored={status}/{reason} on {namespace}/{pod_name}",
+        f"nvidia.com/Restored={status}/{reason} on {namespace}/{pod_name}",
         check,
         timeout,
         detail=detail,
@@ -387,6 +390,7 @@ def assert_restored_state(
     restore_token: str,
     checkpoint_observations: int,
     gpu: bool,
+    container: str | None = None,
 ) -> str:
     expected_gpu = source_token if gpu else "disabled"
     command = f"""
@@ -411,7 +415,7 @@ def assert_restored_state(
     test "$before" -ge "{checkpoint_observations}"
     test "$after" -gt "$before"
     """
-    return k8s.exec_command(namespace, pod, command)
+    return k8s.exec_command(namespace, pod, command, container=container)
 
 
 def debug_dump(config: k8s.E2EConfig, run: TestRun) -> None:

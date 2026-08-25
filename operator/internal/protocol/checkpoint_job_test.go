@@ -263,12 +263,19 @@ func TestNewCheckpointJobRequiresTarget(t *testing.T) {
 	}
 }
 
-func TestNewCheckpointJobRejectsRestoreAnnotation(t *testing.T) {
-	for _, value := range []string{"snapshot-a", ""} {
-		t.Run(value, func(t *testing.T) {
+func TestNewCheckpointJobRejectsRestoreAnnotations(t *testing.T) {
+	for _, annotation := range []string{
+		snapshotv1alpha1.RestoreFromAnnotation,
+		snapshotv1alpha1.RestoreContainerMapAnnotation,
+	} {
+		t.Run(annotation, func(t *testing.T) {
+			value := ""
+			if annotation == snapshotv1alpha1.RestoreFromAnnotation {
+				value = "snapshot-a"
+			}
 			_, err := NewCheckpointJob(&corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Annotations: map[string]string{snapshotv1alpha1.RestoreFromAnnotation: value},
+					Annotations: map[string]string{annotation: value},
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "main", Command: []string{"python3"}}},
@@ -279,7 +286,7 @@ func TestNewCheckpointJobRejectsRestoreAnnotation(t *testing.T) {
 				Name:            "test-job",
 			})
 
-			if err == nil || !strings.Contains(err.Error(), snapshotv1alpha1.RestoreFromAnnotation) {
+			if err == nil || !strings.Contains(err.Error(), annotation) {
 				t.Fatalf("expected restore annotation rejection, got %v", err)
 			}
 		})

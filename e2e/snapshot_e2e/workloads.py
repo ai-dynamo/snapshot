@@ -126,6 +126,67 @@ def restore_pod(
     }
 
 
+def multi_restore_pod(
+    *,
+    config: k8s.E2EConfig,
+    run: TestRun,
+    source_node: str,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    destinations = ("engine-0", "engine-1")
+    restore_tokens = {
+        destination: f"{run.restore_token}-{destination}"
+        for destination in destinations
+    }
+    spec = base_pod_spec(config, run, restore_command(run.image, False), False)
+    spec["securityContext"] = {
+        "seccompProfile": {
+            "type": "Localhost",
+            "localhostProfile": "profiles/block-iouring.json",
+        }
+    }
+    template = spec["containers"][0]
+    containers = []
+    for destination in destinations:
+        container = {
+            **template,
+            "name": destination,
+            "volumeMounts": [
+                {
+                    "name": "snapshot-control",
+                    "mountPath": CONTROL_DIR,
+                    "subPath": destination,
+                }
+            ],
+            "env": [
+                {"name": "DYN_SNAPSHOT_RESTORE_STANDBY", "value": "1"},
+                {"name": "SNAPSHOT_CONTROL_DIR", "value": CONTROL_DIR},
+                {"name": RESTORE_TOKEN_ENV, "value": restore_tokens[destination]},
+            ],
+            "startupProbe": {
+                "exec": {"command": ["/bin/bash", "-lc", f"test -f {RESTORE_DONE}"]},
+                "periodSeconds": 1,
+                "failureThreshold": 1200,
+            },
+        }
+        containers.append(container)
+    spec["containers"] = containers
+    spec["affinity"] = same_node_affinity(source_node)
+    return {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": run.restore_pod,
+            "namespace": config.namespace,
+            "labels": {**run.labels},
+            "annotations": {
+                "nvidia.com/restore-from": run.snapshot_name,
+                "nvidia.com/restore-container-map": "main=engine-0,main=engine-1",
+            },
+        },
+        "spec": spec,
+    }, restore_tokens
+
+
 def base_pod_spec(
     config: k8s.E2EConfig,
     run: TestRun,

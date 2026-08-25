@@ -64,15 +64,16 @@ func cleanupRestoreMounts(ctx context.Context, mounts []restoreMount) error {
 
 // RestoreRequest holds the parameters for a restore operation.
 type RestoreRequest struct {
-	ContentUID    string
-	BasePath      string
-	ContainerID   string
-	StartedAt     time.Time
-	PodName       string
-	PodNamespace  string
-	TargetPodIP   string
-	ContainerName string
-	Clientset     kubernetes.Interface
+	ContentUID               string
+	BasePath                 string
+	ContainerID              string
+	StartedAt                time.Time
+	PodName                  string
+	PodNamespace             string
+	TargetPodIP              string
+	ArtifactContainerName    string
+	DestinationContainerName string
+	Clientset                kubernetes.Interface
 }
 
 // Restore performs external restore for the given request.
@@ -110,10 +111,11 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		"content_uid", req.ContentUID,
 		"pod", req.PodName,
 		"namespace", req.PodNamespace,
-		"container", req.ContainerName,
+		"source_container", req.ArtifactContainerName,
+		"destination_container", req.DestinationContainerName,
 	)
 
-	artifactPath, err := nsmount.ResolveArtifact(req.BasePath, req.ContentUID, req.ContainerName)
+	artifactPath, err := nsmount.ResolveArtifact(req.BasePath, req.ContentUID, req.ArtifactContainerName)
 	if err != nil {
 		return 0, fmt.Errorf("resolve checkpoint artifact: %w", err)
 	}
@@ -213,13 +215,13 @@ func validateRestoredProcess(targetRoot string, restoredPID int, log logr.Logger
 }
 
 func validateRestoreManifest(req RestoreRequest, manifest *types.CheckpointManifest) error {
-	if manifest.Artifact.ContentUID != req.ContentUID || manifest.Artifact.ContainerName != req.ContainerName {
+	if manifest.Artifact.ContentUID != req.ContentUID || manifest.Artifact.ContainerName != req.ArtifactContainerName {
 		return fmt.Errorf(
 			"checkpoint manifest artifact %s/%s does not match requested artifact %s/%s",
 			manifest.Artifact.ContentUID,
 			manifest.Artifact.ContainerName,
 			req.ContentUID,
-			req.ContainerName,
+			req.ArtifactContainerName,
 		)
 	}
 	return nil
@@ -239,7 +241,7 @@ func inspectRestore(
 	if req.ContainerID != "" {
 		placeholderPID, _, err = rt.ResolveContainer(ctx, req.ContainerID)
 	} else {
-		placeholderPID, _, err = rt.ResolveContainerByPod(ctx, req.PodName, req.PodNamespace, req.ContainerName)
+		placeholderPID, _, err = rt.ResolveContainerByPod(ctx, req.PodName, req.PodNamespace, req.DestinationContainerName)
 	}
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to resolve placeholder container: %w", err)
@@ -264,7 +266,7 @@ func inspectRestore(
 			req.Clientset,
 			req.PodName,
 			req.PodNamespace,
-			req.ContainerName,
+			req.DestinationContainerName,
 			snapshotruntime.HostProcPath,
 			placeholderPID,
 			log,
@@ -273,7 +275,7 @@ func inspectRestore(
 			return nil, 0, fmt.Errorf("failed to get target GPU UUIDs: %w", err)
 		}
 		if len(targetGPUUUIDs) == 0 {
-			return nil, 0, fmt.Errorf("missing target GPU UUIDs for %s/%s container %s", req.PodNamespace, req.PodName, req.ContainerName)
+			return nil, 0, fmt.Errorf("missing target GPU UUIDs for %s/%s container %s", req.PodNamespace, req.PodName, req.DestinationContainerName)
 		}
 		cudaDeviceMap, err = cuda.BuildDeviceMap(manifest.CUDA.SourceGPUUUIDs, targetGPUUUIDs, log)
 		gpuDeviceMapDuration = time.Since(gpuStart)

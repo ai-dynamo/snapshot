@@ -22,11 +22,17 @@ const (
 	SnapshotNodeLabel = "nvidia.com/snapshot-node"
 
 	// RestoreFromAnnotation names the PodSnapshot to restore in the pod's
-	// namespace. Other annotations are ignored by the snapshot protocol.
+	// namespace.
 	RestoreFromAnnotation = "nvidia.com/restore-from"
 
+	// RestoreContainerMapAnnotation optionally maps the single captured source
+	// container to one or more restore destinations. Its value is a comma-separated
+	// list of source=destination pairs. When absent, restore uses the captured
+	// container name as the destination.
+	RestoreContainerMapAnnotation = "nvidia.com/restore-container-map"
+
 	// RestoredCondition is the Pod status condition owned by the node agent.
-	RestoredCondition = "snapshot/Restored"
+	RestoredCondition = "nvidia.com/Restored"
 
 	CheckpointVolumeName           = "checkpoint-storage"
 	DefaultSeccompLocalhostProfile = "profiles/block-iouring.json"

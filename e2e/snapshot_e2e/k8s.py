@@ -97,12 +97,19 @@ def pod_logs(namespace: str, name: str, *, tail_lines: int = 120) -> str:
         return f"<logs unavailable: {api_error_detail(exc)}>"
 
 
-def exec_command(namespace: str, pod: str, command: str) -> str:
+def exec_command(
+    namespace: str,
+    pod: str,
+    command: str,
+    *,
+    container: str | None = None,
+) -> str:
     return stream(
         client.CoreV1Api().connect_get_namespaced_pod_exec,
         pod,
         namespace,
         command=["/bin/bash", "-lc", command],
+        container=container,
         stderr=True,
         stdin=False,
         stdout=True,

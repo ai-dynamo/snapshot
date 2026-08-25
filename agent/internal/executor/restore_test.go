@@ -28,8 +28,9 @@ func (m testMountPoint) NsFd() *os.File                { return nil }
 var _ nsmount.MountPoint = testMountPoint{}
 
 type restoreFakeRuntime struct {
-	resolvedID      string
-	resolveByPodHit bool
+	resolvedID             string
+	resolvedByPodContainer string
+	resolveByPodHit        bool
 }
 
 func (r *restoreFakeRuntime) ResolveContainer(ctx context.Context, id string) (int, *specs.Spec, error) {
@@ -43,6 +44,7 @@ func (r *restoreFakeRuntime) ResolveContainerIDByPod(ctx context.Context, pod, n
 
 func (r *restoreFakeRuntime) ResolveContainerByPod(ctx context.Context, pod, ns, ctr string) (int, *specs.Spec, error) {
 	r.resolveByPodHit = true
+	r.resolvedByPodContainer = ctr
 	return 0, nil, errors.New("pod lookup should not be used")
 }
 
@@ -62,11 +64,12 @@ func TestInspectRestoreUsesContainerIDWhenProvided(t *testing.T) {
 		rt,
 		testr.New(t),
 		RestoreRequest{
-			ContentUID:    "content-uid-123",
-			ContainerID:   "placeholder-id",
-			PodName:       "virtual-pod-name",
-			PodNamespace:  "default",
-			ContainerName: "main",
+			ContentUID:               "content-uid-123",
+			ContainerID:              "placeholder-id",
+			PodName:                  "virtual-pod-name",
+			PodNamespace:             "default",
+			ArtifactContainerName:    "main",
+			DestinationContainerName: "engine-0",
 		},
 		manifest,
 	)
@@ -78,6 +81,36 @@ func TestInspectRestoreUsesContainerIDWhenProvided(t *testing.T) {
 	}
 	if rt.resolveByPodHit {
 		t.Fatal("ResolveContainerByPod should not be used when ContainerID is provided")
+	}
+}
+
+func TestInspectRestoreUsesDestinationNameForPodLookup(t *testing.T) {
+	manifest := types.NewCheckpointManifest(
+		"content-uid-123",
+		"main",
+		types.CRIUDumpManifest{},
+		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
+		types.OverlayManifest{},
+	)
+	rt := &restoreFakeRuntime{}
+	_, _, err := inspectRestore(
+		context.Background(),
+		rt,
+		testr.New(t),
+		RestoreRequest{
+			ContentUID:               "content-uid-123",
+			PodName:                  "virtual-pod-name",
+			PodNamespace:             "default",
+			ArtifactContainerName:    "main",
+			DestinationContainerName: "engine-0",
+		},
+		manifest,
+	)
+	if err == nil {
+		t.Fatal("inspectRestore should report the fake pod lookup error")
+	}
+	if rt.resolvedByPodContainer != "engine-0" {
+		t.Fatalf("ResolveContainerByPod called with container %q, want engine-0", rt.resolvedByPodContainer)
 	}
 }
 
@@ -107,15 +140,15 @@ func TestValidateRestoreManifest(t *testing.T) {
 		req  RestoreRequest
 		want string
 	}{
-		{name: "matching identity", req: RestoreRequest{ContentUID: "content-uid-123", ContainerName: "main"}},
+		{name: "matching identity", req: RestoreRequest{ContentUID: "content-uid-123", ArtifactContainerName: "main", DestinationContainerName: "engine-0"}},
 		{
 			name: "content UID mismatch",
-			req:  RestoreRequest{ContentUID: "other", ContainerName: "main"},
+			req:  RestoreRequest{ContentUID: "other", ArtifactContainerName: "main", DestinationContainerName: "engine-0"},
 			want: "does not match requested artifact",
 		},
 		{
 			name: "container mismatch",
-			req:  RestoreRequest{ContentUID: "content-uid-123", ContainerName: "worker"},
+			req:  RestoreRequest{ContentUID: "content-uid-123", ArtifactContainerName: "worker", DestinationContainerName: "engine-0"},
 			want: "does not match requested artifact",
 		},
 	} {
