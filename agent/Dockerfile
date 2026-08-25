@@ -100,6 +100,16 @@ WORKDIR /workspace
 
 COPY cmd/cuda-checkpoint-helper/main.c ./cmd/cuda-checkpoint-helper/main.c
 COPY cmd/ns-bind-mount/main.c ./cmd/ns-bind-mount/main.c
+COPY cmd/cuinterpose/interpose.c ./cmd/cuinterpose/interpose.c
+COPY cmd/cuinterpose/coordinator.c ./cmd/cuinterpose/coordinator.c
+COPY cmd/cuinterpose/posix.c ./cmd/cuinterpose/posix.c
+COPY cmd/cuinterpose/posix.h ./cmd/cuinterpose/posix.h
+COPY cmd/cuinterpose/protocol.h ./cmd/cuinterpose/protocol.h
+COPY cmd/cuinterpose/symbols.c ./cmd/cuinterpose/symbols.c
+COPY cmd/cuinterpose/symbols.h ./cmd/cuinterpose/symbols.h
+COPY cmd/cuinterpose/util.c ./cmd/cuinterpose/util.c
+COPY cmd/cuinterpose/util.h ./cmd/cuinterpose/util.h
+COPY cmd/cuinterpose/Makefile ./cmd/cuinterpose/Makefile
 
 RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
     ./cmd/cuda-checkpoint-helper/main.c \
@@ -110,6 +120,10 @@ RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
 # ns-bind-mount bind-mounts the snapshot binaries into a target container's mount
 # namespace. It needs no CUDA headers, only mount_setattr (Linux 5.12+).
 RUN gcc -O2 -Wall -Wextra -o /ns-bind-mount ./cmd/ns-bind-mount/main.c
+
+RUN make -C ./cmd/cuinterpose BUILD_DIR=/cuinterpose-build \
+    && cp /cuinterpose-build/libcuinterposer.so /libcuinterposer.so \
+    && cp /cuinterpose-build/cuinterposer-coordinator /cuinterposer-coordinator
 
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
@@ -229,8 +243,9 @@ COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-chec
 # nsmount resolves this helper at /usr/local/sbin/ns-bind-mount (see
 # agent/internal/nsmount/mount.go defaultBinaryPath).
 COPY --from=cuda-helper-builder /ns-bind-mount /usr/local/sbin/ns-bind-mount
+COPY --from=cuda-helper-builder /cuinterposer-coordinator /usr/local/bin/cuinterposer-coordinator
 RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper \
-    /usr/local/sbin/ns-bind-mount
+    /usr/local/sbin/ns-bind-mount /usr/local/bin/cuinterposer-coordinator
 
 # Copy the built binaries
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
@@ -335,6 +350,10 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 #     EROFS. An emptyDir at /tmp (either medium) makes it work again, since
 #     volume mounts stay writable independently of the root filesystem.
 #
+# cuinterposer artifacts are installed below because they must exist
+# before the workload creates shared allocations. The remaining restore
+# toolchain is still injected from the agent bundle.
+#
 # cuda-checkpoint wrapping is opt-in (--cuda-checkpoint-wrap in snapshotctl).
 # When used, the source workload image must have cuda-checkpoint at the same
 # path as it runs from — CRIU restores file-backed mappings by path, not via
@@ -359,3 +378,8 @@ RUN if [ "${TARGETARCH}" != "amd64" ]; then \
 # Checkpoint volume mount point. This is a storage concern — no restore tooling
 # is provisioned here; see the stage comment above.
 RUN mkdir -p /checkpoints
+
+COPY --from=cuda-helper-builder /cuinterposer-coordinator /usr/local/bin/cuinterposer-coordinator
+COPY --from=cuda-helper-builder /libcuinterposer.so /usr/local/lib/snapshot/libcuinterposer.so
+RUN chmod 0755 /usr/local/bin/cuinterposer-coordinator \
+    && chmod 0644 /usr/local/lib/snapshot/libcuinterposer.so
