@@ -249,10 +249,24 @@ func executeRestore(
 		)
 		cudaStart := time.Now()
 		_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, log)
-		timings.cudaRestoreDuration = time.Since(cudaStart)
 		if err != nil {
 			return nil, 0, nil, fmt.Errorf("CUDA restore failed: %w", err)
 		}
+		hasInterposition, err := cuda.HasCUDAInterpositionState(opts.CheckpointPath)
+		if err != nil {
+			return nil, 0, nil, fmt.Errorf("stat CUDA interposition state: %w", err)
+		}
+		if hasInterposition {
+			if err := cuda.RestoreCUDAInterposition(
+				ctx,
+				opts.CheckpointPath,
+				restorePIDs,
+				m.CUDA.PIDs,
+			); err != nil {
+				return nil, 0, nil, fmt.Errorf("restore CUDA interposition: %w", err)
+			}
+		}
+		timings.cudaRestoreDuration = time.Since(cudaStart)
 	}
 
 	return timings, restoredPID, nil, nil
