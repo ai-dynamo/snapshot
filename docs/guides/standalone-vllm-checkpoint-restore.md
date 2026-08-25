@@ -16,12 +16,13 @@ vLLM workload and the Kubernetes resources needed for capture and restore.
 - An x86_64 Kubernetes cluster with an NVIDIA GPU node.
 - Snapshot installed, including the operator, node agent, and
   `PodSnapshot` and `PodSnapshotContent` CRDs.
-- A vLLM workload image with sleep mode enabled.
+- A vLLM workload configured for
+  [Sleep Mode](https://docs.vllm.ai/en/v0.27.1/features/sleep_mode/).
 - A vLLM pod manifest that you can modify and redeploy.
 - `kubectl` access to create pods and `PodSnapshot` resources.
 - The same immutable workload image for capture and restore.
-- A restore node compatible with the source node's GPU, driver, kernel, and
-  mounts.
+- The source GPU node available for restore. This guide restores to the same
+  node.
 
 The currently tested configuration uses NVIDIA driver 580 or newer, MIG
 disabled, and a workload image compatible with the Snapshot restore utilities.
@@ -42,6 +43,9 @@ export VLLM_IMAGE=<immutable-vllm-image>
 vLLM must stop generation and enter sleep mode before capture. After restore,
 it must wake up before accepting generation requests.
 
+Sleep mode is opt-in; vLLM does not enable it by default. Enable it through the
+Python API or server option below.
+
 ### Python API
 
 Create the engine with sleep mode enabled:
@@ -56,6 +60,10 @@ engine = AsyncLLM.from_engine_args(
     usage_context=UsageContext.LLM_CLASS,
 )
 ```
+
+`enable_sleep_mode=True` enables the feature. The application writes
+`ready-for-snapshot` only after `await engine.sleep()` succeeds, so capture
+cannot start if sleep mode is unavailable.
 
 When the application is ready to be captured, run this lifecycle:
 
@@ -98,7 +106,21 @@ If the pod runs `vllm serve`, enable the administrative endpoints:
 VLLM_SERVER_DEV_MODE=1 vllm serve <model> --enable-sleep-mode
 ```
 
-Do not expose these endpoints outside a trusted network. Quiesce the server:
+Both settings are required: `--enable-sleep-mode` enables the engine feature,
+and `VLLM_SERVER_DEV_MODE=1` exposes its administrative endpoints. Do not expose
+these endpoints outside a trusted network.
+
+Confirm that the endpoint is available. An active server initially returns
+`false`:
+
+```bash
+kubectl exec "$SOURCE_POD" \
+  --namespace "$NAMESPACE" \
+  --container "$CONTAINER" \
+  -- curl -fsS "http://127.0.0.1:8000/is_sleeping"
+```
+
+Quiesce the server:
 
 ```bash
 kubectl exec "$SOURCE_POD" \
@@ -114,8 +136,15 @@ kubectl exec "$SOURCE_POD" \
 kubectl exec "$SOURCE_POD" \
   --namespace "$NAMESPACE" \
   --container "$CONTAINER" \
+  -- curl -fsS "http://127.0.0.1:8000/is_sleeping"
+
+kubectl exec "$SOURCE_POD" \
+  --namespace "$NAMESPACE" \
+  --container "$CONTAINER" \
   -- sh -c 'printf "ready\n" > /snapshot-control/ready-for-snapshot'
 ```
+
+The second state check must return `true`.
 
 The Python and HTTP options execute the same lifecycle. Use only the option
 that matches how the vLLM process is started.
