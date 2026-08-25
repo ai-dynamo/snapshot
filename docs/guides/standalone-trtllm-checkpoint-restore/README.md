@@ -22,7 +22,8 @@ Companion examples:
 
 ## Prerequisites
 
-- An x86_64 Kubernetes cluster with an NVIDIA GPU node.
+- An x86_64 Kubernetes cluster with an NVIDIA Ampere, Ada Lovelace, Hopper, or
+  Blackwell GPU node.
 - Snapshot installed, including its operator, node agent, and CRDs.
 - NVIDIA driver 580 or newer with MIG disabled on the target node.
 - A TensorRT-LLM Python application and pod manifest that you can modify.
