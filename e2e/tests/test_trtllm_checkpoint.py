@@ -141,7 +141,10 @@ def trtllm_source_pod(
         "metadata": {
             "name": run.source_pod,
             "namespace": config.namespace,
-            "labels": {"snapshot-e2e-test": run.suffix},
+            "labels": {
+                "snapshot-e2e-test": run.suffix,
+                "nvidia.com/snapshot-is-checkpoint-source": "true",
+            },
         },
         "spec": {
             "restartPolicy": "Never",
