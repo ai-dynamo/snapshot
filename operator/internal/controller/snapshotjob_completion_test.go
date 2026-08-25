@@ -477,6 +477,103 @@ func TestSnapshotJobReconcileHelperStillRunningWaits(t *testing.T) {
 	assert.Equal(t, snapshotv1alpha1.ReasonWaitingForPodCompletion, completed.Reason)
 }
 
+func TestSnapshotJobReconcileHelperMissingStatusWaits(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj, job, pod, snap := helperSnapshotJob(t, s,
+		corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}})
+	// The kubelet has not reported the helper at all yet: only the target's
+	// status is present. An absent entry must count as still running.
+	pod.Status.ContainerStatuses = pod.Status.ContainerStatuses[:1]
+
+	r := makeSnapshotJobReconciler(s, sj, job, pod, snap)
+	result, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+	assert.Equal(t, captureResolutionBackstop, result.RequeueAfter)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobCompleted(updated),
+		"a helper with no status entry must not be treated as finished")
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobFailed(updated))
+}
+
+// sidecarSnapshotJob builds a SnapshotJob whose pod template carries a native
+// sidecar (init container with restartPolicy Always) as the only non-target
+// container, plus the matching source pod with the target already killed by
+// the checkpoint and the sidecar in the given state (nil = no status entry).
+func sidecarSnapshotJob(t *testing.T, s *runtime.Scheme, sidecarState *corev1.ContainerState) (*snapshotv1alpha1.SnapshotJob, *batchv1.Job, *corev1.Pod, *snapshotv1alpha1.PodSnapshot) {
+	t.Helper()
+	sj := minimalSnapshotJob()
+	sj.UID = types.UID("sj-uid")
+	always := corev1.ContainerRestartPolicyAlways
+	sj.Spec.PodTemplate.Spec.InitContainers = append(sj.Spec.PodTemplate.Spec.InitContainers,
+		corev1.Container{Name: "sidecar", Image: "test:latest", RestartPolicy: &always})
+	job, err := buildSourceJob(sj)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	pod := sourcePodForJob(job)
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+		{Name: "worker", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137}}},
+	}
+	if sidecarState != nil {
+		pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: "sidecar", State: *sidecarState}}
+	}
+	snap := readySnapshot(t, sj, pod)
+	setJobFailureCondition(job, batchv1.JobFailed, "BackoffLimitExceeded", "checkpoint terminated the target container")
+	return sj, job, pod, snap
+}
+
+func TestSnapshotJobReconcileSidecarStillRunningWaits(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	// A sidecar-only pod also exercises the removed single-container shortcut:
+	// with no regular helpers, the sidecar must still gate completion.
+	sj, job, pod, snap := sidecarSnapshotJob(t, s,
+		&corev1.ContainerState{Running: &corev1.ContainerStateRunning{}})
+
+	r := makeSnapshotJobReconciler(s, sj, job, pod, snap)
+	result, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+	assert.Equal(t, captureResolutionBackstop, result.RequeueAfter)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobCompleted(updated),
+		"a still-running native sidecar must block completion so cleanup cannot kill it mid-work")
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobFailed(updated))
+}
+
+func TestSnapshotJobReconcileSidecarMissingStatusWaits(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj, job, pod, snap := sidecarSnapshotJob(t, s, nil)
+
+	r := makeSnapshotJobReconciler(s, sj, job, pod, snap)
+	result, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+	assert.Equal(t, captureResolutionBackstop, result.RequeueAfter)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobCompleted(updated))
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobFailed(updated))
+}
+
+func TestSnapshotJobReconcileSidecarTerminatedNonZeroCompletes(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	// The kubelet SIGTERMs sidecars after the regular containers finish, so a
+	// non-zero exit is normal shutdown, not a failed helper deliverable.
+	sj, job, pod, snap := sidecarSnapshotJob(t, s,
+		&corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 143}})
+
+	r := makeSnapshotJobReconciler(s, sj, job, pod, snap)
+	_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	assert.True(t, snapshotv1alpha1.IsSnapshotJobCompleted(updated))
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobFailed(updated))
+}
+
 func TestSnapshotJobReconcileHelperUnverifiableFails(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj, job, _, snap := helperSnapshotJob(t, s,

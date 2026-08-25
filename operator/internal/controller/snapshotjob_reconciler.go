@@ -286,16 +286,22 @@ func (r *SnapshotJobReconciler) reconcileCapturedSourceJob(ctx context.Context, 
 	}
 }
 
-// classifyHelperContainers verifies that every non-target container of the
-// failed source Job exited 0. The target container's exit is ignored — the
-// checkpoint terminates it by design, which is also why the source Job reports
-// Failed on every successful capture.
+// classifyHelperContainers verifies that every expected non-target container of
+// the failed source Job finished cleanly. The target container's exit is
+// ignored — the checkpoint terminates it by design, which is also why the
+// source Job reports Failed on every successful capture. Expected helpers are
+// enumerated from the pod template, not from the observed statuses, so a
+// helper the kubelet has not reported yet counts as still running rather than
+// silently done. Regular helpers must exit 0; native sidecars only need a
+// terminated state — the kubelet SIGTERMs them after the regular containers
+// finish, so their exit code reflects shutdown, not helper work.
 func (r *SnapshotJobReconciler) classifyHelperContainers(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) (failure *snapshotJobFailure, helpersStillRunning bool, err error) {
 	targetContainer, err := snapshotJobTargetContainer(sj)
 	if err != nil {
 		return &snapshotJobFailure{reason: snapshotv1alpha1.ReasonInvalidSpec, cause: err}, false, nil
 	}
-	if len(sj.Spec.PodTemplate.Spec.Containers) <= 1 {
+	helpers, sidecars := expectedHelperContainers(&sj.Spec.PodTemplate.Spec, targetContainer)
+	if len(helpers) == 0 && len(sidecars) == 0 {
 		return nil, false, nil // the target is the only container
 	}
 	pod, found, err := findSourcePod(ctx, r.NonCacheReadClient, job)
@@ -308,12 +314,8 @@ func (r *SnapshotJobReconciler) classifyHelperContainers(ctx context.Context, sj
 			cause:  errors.New("source pod is gone before its helper containers could be verified"),
 		}, false, nil
 	}
-	for i := range pod.Status.ContainerStatuses {
-		status := &pod.Status.ContainerStatuses[i]
-		if status.Name == targetContainer {
-			continue
-		}
-		terminated := status.State.Terminated
+	for _, name := range helpers {
+		terminated := containerTerminatedState(pod.Status.ContainerStatuses, name)
 		if terminated == nil {
 			return nil, true, nil
 		}
@@ -321,11 +323,45 @@ func (r *SnapshotJobReconciler) classifyHelperContainers(ctx context.Context, sj
 			return &snapshotJobFailure{
 				reason: snapshotv1alpha1.ReasonJobFailed,
 				cause: fmt.Errorf("helper container %q exited with code %d after the capture succeeded",
-					status.Name, terminated.ExitCode),
+					name, terminated.ExitCode),
 			}, false, nil
 		}
 	}
+	for _, name := range sidecars {
+		if containerTerminatedState(pod.Status.InitContainerStatuses, name) == nil {
+			return nil, true, nil
+		}
+	}
 	return nil, false, nil
+}
+
+// expectedHelperContainers splits the pod template's non-target containers into
+// regular helpers and native sidecars (init containers with restartPolicy
+// Always, which report under InitContainerStatuses).
+func expectedHelperContainers(spec *corev1.PodSpec, targetContainer string) (helpers, sidecars []string) {
+	for i := range spec.Containers {
+		if spec.Containers[i].Name != targetContainer {
+			helpers = append(helpers, spec.Containers[i].Name)
+		}
+	}
+	for i := range spec.InitContainers {
+		c := &spec.InitContainers[i]
+		if c.RestartPolicy != nil && *c.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+			sidecars = append(sidecars, c.Name)
+		}
+	}
+	return helpers, sidecars
+}
+
+// containerTerminatedState returns the named container's terminated state, or
+// nil when the container has no status entry yet or has not terminated.
+func containerTerminatedState(statuses []corev1.ContainerStatus, name string) *corev1.ContainerStateTerminated {
+	for i := range statuses {
+		if statuses[i].Name == name {
+			return statuses[i].State.Terminated
+		}
+	}
+	return nil
 }
 
 func terminalObservation(reason string, cause error) snapshotJobObservation {
