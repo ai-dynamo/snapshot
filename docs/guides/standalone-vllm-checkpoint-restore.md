@@ -16,8 +16,6 @@ vLLM workload and the Kubernetes resources needed for capture and restore.
 - An x86_64 Kubernetes cluster with an NVIDIA GPU node.
 - Snapshot installed, including the operator, node agent, and
   `PodSnapshot` and `PodSnapshotContent` CRDs.
-- A vLLM workload configured for
-  [Sleep Mode](https://docs.vllm.ai/en/v0.27.1/features/sleep_mode/).
 - A vLLM pod manifest that you can modify and redeploy.
 - `kubectl` access to create pods and `PodSnapshot` resources.
 - The same immutable workload image for capture and restore.
@@ -27,15 +25,33 @@ vLLM workload and the Kubernetes resources needed for capture and restore.
 The currently tested configuration uses NVIDIA driver 580 or newer, MIG
 disabled, and a workload image compatible with the Snapshot restore utilities.
 
-Set the values used by the commands:
+Use the namespace from the current `kubectl` context, or set `NAMESPACE`
+beforehand to override it:
 
 ```bash
-export NAMESPACE=<vllm-namespace>
-export SOURCE_POD=<vllm-source-pod>
-export RESTORE_POD=<vllm-restore-pod>
-export CONTAINER=<vllm-container-name>
-export CHECKPOINT_ID=<checkpoint-id>
-export VLLM_IMAGE=<immutable-vllm-image>
+NAMESPACE="${NAMESPACE:-$(kubectl config view --minify --output 'jsonpath={..namespace}')}"
+NAMESPACE="${NAMESPACE:-default}"
+kubectl get pods --namespace "$NAMESPACE"
+```
+
+Select the vLLM pod. For a pod with sidecars, set `CONTAINER` beforehand to the
+vLLM container name; otherwise the first container is used. All other values
+are derived:
+
+```bash
+SOURCE_POD="<vllm-pod-name>"
+CONTAINER="${CONTAINER:-$(kubectl get pod "$SOURCE_POD" \
+  --namespace "$NAMESPACE" \
+  --output jsonpath='{.spec.containers[0].name}')}"
+RESTORE_POD="${SOURCE_POD}-restore"
+CHECKPOINT_ID="vllm-$(kubectl get pod "$SOURCE_POD" \
+  --namespace "$NAMESPACE" \
+  --output jsonpath='{.metadata.uid}' |
+  cut -c1-8)"
+VLLM_IMAGE="$(kubectl get pod "$SOURCE_POD" \
+  --namespace "$NAMESPACE" \
+  --output "jsonpath={.status.containerStatuses[?(@.name=='${CONTAINER}')].imageID}")"
+VLLM_IMAGE="${VLLM_IMAGE#*://}"
 ```
 
 ## 1. Add the vLLM lifecycle
