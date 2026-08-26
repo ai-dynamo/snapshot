@@ -33,6 +33,9 @@ RESTORE_TOKEN_ENV = "SNAPSHOT_E2E_RESTORE_TOKEN"
 @dataclass(frozen=True)
 class TestRun:
     suffix: str
+    # The SnapshotJob's name; the operator reuses it for the source Job and
+    # the produced PodSnapshot (buildSourceJob / buildPodSnapshot).
+    snapshotjob_name: str
     snapshot_name: str
     source_pod: str
     restore_pod: str
@@ -45,6 +48,7 @@ class TestRun:
         suffix = f"{prefix}-{uuid.uuid4().hex[:6]}"
         return cls(
             suffix=suffix,
+            snapshotjob_name=suffix,
             snapshot_name=f"{suffix}-snapshot",
             source_pod=f"{suffix}-source",
             restore_pod=f"{suffix}-restore",

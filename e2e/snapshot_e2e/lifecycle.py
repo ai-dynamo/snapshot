@@ -614,7 +614,7 @@ def cleanup_snapshotjob(config: k8s.E2EConfig, run: TestRun) -> None:
     deliberately carries no ownerReference (artifacts must outlive the
     SnapshotJob), so it — and its bound PodSnapshotContent — need the same
     explicit cleanup as the plain PodSnapshot flow. The SnapshotJob's own name
-    and its produced PodSnapshot's name are both run.checkpoint_id: buildSourceJob
+    and its produced PodSnapshot's name are both run.snapshotjob_name: buildSourceJob
     passes CheckpointID: sj.Name, and buildPodSnapshot names the PodSnapshot
     after the SnapshotJob.
     """
@@ -631,7 +631,7 @@ def cleanup_snapshotjob(config: k8s.E2EConfig, run: TestRun) -> None:
             VERSION,
             config.namespace,
             SNAPSHOTJOBS,
-            run.checkpoint_id,
+            run.snapshotjob_name,
         )
     except ApiException as exc:
         if exc.status != 404:
@@ -643,7 +643,7 @@ def cleanup_snapshotjob(config: k8s.E2EConfig, run: TestRun) -> None:
             VERSION,
             config.namespace,
             PODSNAPSHOTS,
-            run.checkpoint_id,
+            run.snapshotjob_name,
         )
     except ApiException as exc:
         if exc.status != 404:
@@ -652,7 +652,7 @@ def cleanup_snapshotjob(config: k8s.E2EConfig, run: TestRun) -> None:
     contents = api.list_cluster_custom_object(GROUP, VERSION, PODSNAPSHOTCONTENTS)
     for item in contents.get("items", []):
         ref = item.get("spec", {}).get("snapshotRef", {})
-        if ref.get("namespace") == config.namespace and ref.get("name") == run.checkpoint_id:
+        if ref.get("namespace") == config.namespace and ref.get("name") == run.snapshotjob_name:
             try:
                 api.delete_cluster_custom_object(
                     GROUP,
@@ -679,7 +679,7 @@ def debug_dump_snapshotjob(config: k8s.E2EConfig, run: TestRun) -> None:
             config.namespace, label_selector=f"snapshot-e2e-test={run.suffix}"
         ).items
     }
-    for pod in k8s.list_job_pods(config.namespace, run.checkpoint_id):
+    for pod in k8s.list_job_pods(config.namespace, run.snapshotjob_name):
         pods.setdefault(pod.metadata.name, pod)
     if not pods:
         print("no pods matched either the e2e label or the job-name label")
@@ -695,9 +695,9 @@ def debug_dump_snapshotjob(config: k8s.E2EConfig, run: TestRun) -> None:
         print(f"control dir: {snapshot_control_listing(config.namespace, name)}")
         print(k8s.pod_logs(config.namespace, name, tail_lines=80))
     # The source Job's own status is what the completion gate reads.
-    job = k8s.read_job(config.namespace, run.checkpoint_id)
+    job = k8s.read_job(config.namespace, run.snapshotjob_name)
     if job is None:
-        print(f"source Job {run.checkpoint_id} not found")
+        print(f"source Job {run.snapshotjob_name} not found")
     else:
         print(
             f"source Job {job.metadata.name} active={job.status.active} "
@@ -707,23 +707,23 @@ def debug_dump_snapshotjob(config: k8s.E2EConfig, run: TestRun) -> None:
     api = client.CustomObjectsApi()
     try:
         sj = api.get_namespaced_custom_object(
-            GROUP, VERSION, config.namespace, SNAPSHOTJOBS, run.checkpoint_id
+            GROUP, VERSION, config.namespace, SNAPSHOTJOBS, run.snapshotjob_name
         )
         print(f"SnapshotJob status={sj.get('status', {})}")
     except ApiException as exc:
         if exc.status != 404:
             print(f"SnapshotJob debug unavailable: {k8s.api_error_detail(exc)}")
-    print_custom_objects_named(config, run.checkpoint_id)
+    print_custom_objects_named(config, run.snapshotjob_name)
     print_snapshot_controller_logs(config)
     events = core.list_namespaced_event(config.namespace).items
-    # Job-generated pods are named <checkpoint_id>-<suffix>, so an exact-name
+    # Job-generated pods are named <snapshotjob_name>-<suffix>, so an exact-name
     # filter silently drops every pod-level event (container termination in
     # particular) and keeps only the Job's own.
     for event in events[-40:]:
         involved = event.involved_object
         if not involved or not involved.name:
             continue
-        if involved.name.startswith(run.checkpoint_id) or involved.name in {
+        if involved.name.startswith(run.snapshotjob_name) or involved.name in {
             run.source_pod,
             run.restore_pod,
         }:

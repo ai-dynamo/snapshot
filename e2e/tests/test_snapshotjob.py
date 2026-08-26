@@ -75,7 +75,7 @@ def test_snapshotjob_captures_and_restore_recovers_state(
     run: snap.TestRun,
 ) -> None:
     try:
-        snapshotjob_name = run.checkpoint_id
+        snapshotjob_name = run.snapshotjob_name
         snap.create_snapshotjob(
             config.namespace,
             snapshotjob_name,
@@ -174,7 +174,7 @@ def test_snapshotjob_cpu_only_captures(
     # First non-GPU SnapshotJob coverage: capture and artifact only, no
     # restore round trip (that is the GPU test's job).
     try:
-        snapshotjob_name = run.checkpoint_id
+        snapshotjob_name = run.snapshotjob_name
         snap.create_snapshotjob(
             config.namespace,
             snapshotjob_name,
@@ -218,7 +218,7 @@ def test_snapshotjob_waits_for_helper_then_completes(
     # be allowed to finish (exit 0) before the SnapshotJob completes and the
     # Job is deleted. 20s keeps the helper alive well past the dump.
     try:
-        snapshotjob_name = run.checkpoint_id
+        snapshotjob_name = run.snapshotjob_name
         snap.create_snapshotjob(
             config.namespace,
             snapshotjob_name,
@@ -252,7 +252,7 @@ def test_snapshotjob_fails_when_helper_fails_after_capture(
     # deliverable: the SnapshotJob must fail with JobFailed while Captured
     # stays True and the artifact remains usable.
     try:
-        snapshotjob_name = run.checkpoint_id
+        snapshotjob_name = run.snapshotjob_name
         snap.create_snapshotjob(
             config.namespace,
             snapshotjob_name,
@@ -298,7 +298,7 @@ def test_snapshotjob_deadline_exceeded_when_helper_overruns(
     # helper that never exits keeps the SnapshotJob in WaitingForPodCompletion
     # until activeDeadlineSeconds fires, even though the capture succeeded.
     try:
-        snapshotjob_name = run.checkpoint_id
+        snapshotjob_name = run.snapshotjob_name
         snap.create_snapshotjob(
             config.namespace,
             snapshotjob_name,
@@ -335,7 +335,7 @@ def test_snapshotjob_deadline_exceeded_when_never_ready(
     run: snap.TestRun,
 ) -> None:
     try:
-        snapshotjob_name = run.checkpoint_id
+        snapshotjob_name = run.snapshotjob_name
         snap.create_snapshotjob(
             config.namespace,
             snapshotjob_name,
@@ -369,7 +369,7 @@ def test_snapshotjob_deadline_exceeded_when_pod_unschedulable(
     run: snap.TestRun,
 ) -> None:
     try:
-        snapshotjob_name = run.checkpoint_id
+        snapshotjob_name = run.snapshotjob_name
         # Unlike the never-ready test (whose pod schedules and runs), this pod
         # never leaves Pending: the PodSnapshot reconciler backs off on the
         # unscheduled source, no PodSnapshotContent work order exists, and no
@@ -405,7 +405,7 @@ def test_snapshotjob_fails_on_job_name_conflict(
     config: k8s.E2EConfig,
     run: snap.TestRun,
 ) -> None:
-    snapshotjob_name = run.checkpoint_id
+    snapshotjob_name = run.snapshotjob_name
     foreign_job = {
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -465,7 +465,7 @@ def test_snapshotjob_fails_on_podsnapshot_name_conflict(
     config: k8s.E2EConfig,
     run: snap.TestRun,
 ) -> None:
-    snapshotjob_name = run.checkpoint_id
+    snapshotjob_name = run.snapshotjob_name
     try:
         # A pre-existing PodSnapshot at the SnapshotJob's deterministic name,
         # owned by nobody. Its own fate (it fails on a missing source pod) is
@@ -502,7 +502,7 @@ def test_snapshotjob_fails_when_job_deleted(
     run: snap.TestRun,
 ) -> None:
     try:
-        snapshotjob_name = run.checkpoint_id
+        snapshotjob_name = run.snapshotjob_name
         # The hang workload never becomes ready, so the capture stays pending
         # forever — deleting the Job mid-capture is deterministic, not a race
         # against a dump that could complete first.
@@ -542,7 +542,7 @@ def test_snapshotjob_fails_when_workload_exits_nonzero_before_capture(
     run: snap.TestRun,
 ) -> None:
     try:
-        snapshotjob_name = run.checkpoint_id
+        snapshotjob_name = run.snapshotjob_name
         snap.create_snapshotjob(
             config.namespace,
             snapshotjob_name,
@@ -574,7 +574,7 @@ def test_snapshotjob_fails_when_workload_exits_zero_before_capture(
     run: snap.TestRun,
 ) -> None:
     try:
-        snapshotjob_name = run.checkpoint_id
+        snapshotjob_name = run.snapshotjob_name
         snap.create_snapshotjob(
             config.namespace,
             snapshotjob_name,
@@ -605,7 +605,7 @@ def test_snapshotjob_spec_admission(
     config: k8s.E2EConfig,
     run: snap.TestRun,
 ) -> None:
-    snapshotjob_name = run.checkpoint_id
+    snapshotjob_name = run.snapshotjob_name
 
     # targetContainers must name containers present in podTemplate (CEL).
     with pytest.raises(ApiException) as excinfo:
