@@ -167,30 +167,39 @@ from tensorrt_llm import LLM, SamplingParams
 
 from snapshot_lifecycle import quiesce_for_snapshot, resume_after_restore
 
-llm = LLM(
-    model="Qwen/Qwen3-0.6B",
-    backend="pytorch",
-    dtype="float16",
-    trust_remote_code=True,
-    tensor_parallel_size=1,
-    max_num_tokens=1024,
-    max_seq_len=512,
-    max_batch_size=1,
-    enable_chunked_prefill=False,
-    kv_cache_config={"free_gpu_memory_fraction": 0.10},
-)
 
-outputs = llm.generate(
-    ["Warm up the engine."],
-    SamplingParams(temperature=0.0, max_tokens=16),
-    use_tqdm=False,
-)
-if not outputs[0].outputs[0].text.strip():
-    raise RuntimeError("TensorRT-LLM warmup produced empty output")
+def main() -> None:
+    llm = LLM(
+        model="Qwen/Qwen3-0.6B",
+        backend="pytorch",
+        dtype="float16",
+        trust_remote_code=True,
+        tensor_parallel_size=1,
+        max_num_tokens=1024,
+        max_seq_len=512,
+        max_batch_size=1,
+        enable_chunked_prefill=False,
+        kv_cache_config={"free_gpu_memory_fraction": 0.10},
+    )
 
-quiesce_for_snapshot()
-resume_after_restore(llm)
+    outputs = llm.generate(
+        ["Warm up the engine."],
+        SamplingParams(temperature=0.0, max_tokens=16),
+        use_tqdm=False,
+    )
+    if not outputs[0].outputs[0].text.strip():
+        raise RuntimeError("TensorRT-LLM warmup produced empty output")
+
+    quiesce_for_snapshot()
+    resume_after_restore(llm)
+
+
+if __name__ == "__main__":
+    main()
 ```
+
+The `__main__` guard prevents TensorRT-LLM's spawned MPI workers from running
+the application entrypoint again.
 
 The source process waits in `quiesce_for_snapshot()` and is terminated after
 capture. The restored process resumes from that same loop, sees
