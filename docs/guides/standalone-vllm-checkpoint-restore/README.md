@@ -379,17 +379,6 @@ A `PodSnapshot` is the capture request. Snapshot creates the corresponding
 Create the capture request using the live pod UID:
 
 ```bash
-(
-set -euo pipefail
-
-SOURCE_POD_UID="$(kubectl get pod "$SOURCE_POD" \
-  --namespace "$NAMESPACE" \
-  --output jsonpath='{.metadata.uid}')"
-if [[ -z "$SOURCE_POD_UID" ]]; then
-  echo "Could not resolve the source pod UID" >&2
-  exit 1
-fi
-
 cat >/tmp/vllm-snapshot.yaml <<EOF
 apiVersion: nvidia.com/v1alpha1
 kind: PodSnapshot
@@ -400,13 +389,14 @@ spec:
   source:
     podRef:
       name: ${SOURCE_POD}
-      uid: ${SOURCE_POD_UID}
+      uid: $(kubectl get pod "$SOURCE_POD" \
+        --namespace "$NAMESPACE" \
+        --output jsonpath='{.metadata.uid}')
       containers:
       - ${CONTAINER}
 EOF
 
 kubectl apply -f /tmp/vllm-snapshot.yaml
-)
 ```
 
 Wait for capture to finish:
