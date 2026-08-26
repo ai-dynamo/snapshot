@@ -160,7 +160,7 @@ from pathlib import Path
 async def quiesce_for_snapshot(engine):
     control_dir = Path("/snapshot-control")
 
-    await engine.pause_generation()
+    await engine.pause_generation(mode="wait")
     await engine.sleep()
     control_dir.joinpath("ready-for-snapshot").write_text(
         "ready\n",
@@ -177,7 +177,8 @@ async def quiesce_for_snapshot(engine):
 
 The capture calls run in this order:
 
-- `pause_generation()` stops new generation work from changing engine state.
+- `pause_generation(mode="wait")` blocks new requests and waits for accepted
+  requests to finish.
 - `sleep()` uses vLLM's default level 1 sleep: model weights move to CPU memory
   and the KV cache is discarded, releasing most GPU memory.
 - `ready-for-snapshot` tells the pod readiness probe that both calls completed.
@@ -364,7 +365,7 @@ the new state, and write the readiness file:
 kubectl exec "$SOURCE_POD" \
   --namespace "$NAMESPACE" \
   --container "$CONTAINER" \
-  -- curl -fsS -X POST "http://127.0.0.1:8000/pause"
+  -- curl -fsS -X POST "http://127.0.0.1:8000/pause?mode=wait"
 
 kubectl exec "$SOURCE_POD" \
   --namespace "$NAMESPACE" \

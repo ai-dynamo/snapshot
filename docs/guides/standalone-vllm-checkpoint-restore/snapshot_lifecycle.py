@@ -13,7 +13,7 @@ CONTROL_DIR = Path("/snapshot-control")
 async def quiesce_for_snapshot(
     engine: AsyncLLM,
 ) -> Literal["snapshot", "restore"]:
-    await engine.pause_generation()
+    await engine.pause_generation(mode="wait")
     await engine.sleep()
     CONTROL_DIR.joinpath("ready-for-snapshot").write_text(
         "ready\n",
