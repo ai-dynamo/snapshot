@@ -232,6 +232,12 @@ and `VLLM_SERVER_DEV_MODE=1` exposes its administrative endpoints. Do not expose
 these endpoints outside a trusted network. Apply these settings to the pod
 startup command when [preparing the source pod](#2-prepare-the-source-pod).
 
+For this HTTP path, an operator runs the documented `kubectl exec` and `curl`
+commands once from an administrative shell immediately before capture and
+after restore. Do not add these commands to the workload Dockerfile. Production
+automation should invoke the same operations from an external controller or
+maintenance workflow.
+
 The [Python](#python-api) and [HTTP](#vllm-server-http-api) options execute the
 same lifecycle. Use only the option that matches how the vLLM process is
 started.
