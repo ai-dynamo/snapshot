@@ -375,18 +375,16 @@ kubectl exec "$SOURCE_POD" \
 kubectl exec "$SOURCE_POD" \
   --namespace "$NAMESPACE" \
   --container "$CONTAINER" \
-  -- sh -c '
-    sleeping="$(curl -fsS http://127.0.0.1:8000/is_sleeping)"
-    if [ "$sleeping" != "true" ]; then
-      echo "vLLM is not sleeping: $sleeping" >&2
-      exit 1
-    fi
-    printf "ready\n" > /snapshot-control/ready-for-snapshot
-  '
+  -- curl -fsS "http://127.0.0.1:8000/is_sleeping"
+
+kubectl exec "$SOURCE_POD" \
+  --namespace "$NAMESPACE" \
+  --container "$CONTAINER" \
+  -- sh -c 'printf "ready\n" > /snapshot-control/ready-for-snapshot'
 ```
 
-The final command creates the marker only when `/is_sleeping` returns exactly
-`true`. For either API, wait for the pod readiness probe and confirm the file:
+The state check must return `true`. For either API, wait for the pod readiness
+probe and confirm the file:
 
 ```bash
 kubectl wait \
