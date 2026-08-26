@@ -547,13 +547,14 @@ kubectl wait \
   "pod/$RESTORE_POD" \
   --namespace "$NAMESPACE" \
   --timeout=20m
-```
 
-Do not continue if the bounded wait fails. Inspect the restore condition and pod
-events before retrying:
-
-```bash
-kubectl describe pod "$RESTORE_POD" --namespace "$NAMESPACE"
+until kubectl exec "$RESTORE_POD" \
+  --namespace "$NAMESPACE" \
+  --container "$CONTAINER" \
+  -- test -f /snapshot-control/restore-complete
+do
+  sleep 2
+done
 ```
 
 ### Resume with the Python API
