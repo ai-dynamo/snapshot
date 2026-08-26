@@ -28,9 +28,7 @@ values such as the source pod UID.
   `PodSnapshot` and `PodSnapshotContent` CRDs, with a Bound shared
   ReadWriteMany checkpoint PVC.
 - A vLLM pod manifest that you can modify and redeploy.
-- `kubectl` permissions to get and list PVCs; get, list, watch, create, patch,
-  and delete pods; create `pods/exec`; and get, list, watch, create, patch, and
-  delete `nvidia.com/podsnapshots`.
+- `kubectl` access to create pods and `PodSnapshot` resources.
 - The same immutable workload image for capture and restore.
 - Restore nodes with compatible GPU, NVIDIA driver, kernel, container runtime,
   and workload mounts.
