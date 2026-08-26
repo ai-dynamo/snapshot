@@ -80,16 +80,35 @@ VLLM_IMAGE="${VLLM_IMAGE#*://}"
 vLLM must stop generation and enter sleep mode before capture. After restore,
 it must wake up before accepting generation requests.
 
-This command reads the startup command of the selected container's main
-process. It does not change the pod. Use its output to choose exactly one
-integration path:
+This command inspects the selected container's main process without printing
+all of its arguments. It reports only the executable and, when recognizable,
+the Python module, vLLM subcommand, or script path:
 
 ```bash
-kubectl exec "$SOURCE_POD" \
+kubectl exec --stdin "$SOURCE_POD" \
   --namespace "$NAMESPACE" \
   --container "$CONTAINER" \
-  -- sh -c 'tr "\000" " " < /proc/1/cmdline; echo'
+  -- python3 - <<'PY'
+from pathlib import Path
+
+args = [
+    value.decode(errors="replace")
+    for value in Path("/proc/1/cmdline").read_bytes().split(b"\0")
+    if value
+]
+print(f"executable: {args[0]}")
+if "-m" in args and args.index("-m") + 1 < len(args):
+    print(f"module: {args[args.index('-m') + 1]}")
+elif Path(args[0]).name == "vllm" and len(args) > 1:
+    print(f"subcommand: {args[1]}")
+elif len(args) > 1 and args[1].endswith(".py"):
+    print(f"script: {args[1]}")
+PY
 ```
+
+Use the workload manifest instead when a wrapper obscures the result. Do not
+print or share the full process command line because it may contain credentials.
+Choose exactly one integration path:
 
 - A team-owned Python program that imports vLLM uses the
   [Python API](#python-api) only.
