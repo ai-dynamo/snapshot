@@ -3,13 +3,16 @@
 
 import asyncio
 from pathlib import Path
+from typing import Literal
 
 from vllm.v1.engine.async_llm import AsyncLLM
 
 CONTROL_DIR = Path("/snapshot-control")
 
 
-async def quiesce_for_snapshot(engine: AsyncLLM) -> bool:
+async def quiesce_for_snapshot(
+    engine: AsyncLLM,
+) -> Literal["snapshot", "restore"]:
     await engine.pause_generation()
     await engine.sleep()
     CONTROL_DIR.joinpath("ready-for-snapshot").write_text(
@@ -19,9 +22,9 @@ async def quiesce_for_snapshot(engine: AsyncLLM) -> bool:
 
     while True:
         if CONTROL_DIR.joinpath("snapshot-complete").exists():
-            return False
+            return "snapshot"
         if CONTROL_DIR.joinpath("restore-complete").exists():
-            return True
+            return "restore"
         await asyncio.sleep(1)
 
 

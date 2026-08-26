@@ -132,9 +132,9 @@ async def quiesce_for_snapshot(engine):
 
     while True:
         if control_dir.joinpath("snapshot-complete").exists():
-            return False
+            return "snapshot"
         if control_dir.joinpath("restore-complete").exists():
-            return True
+            return "restore"
         await asyncio.sleep(1)
 ```
 
@@ -177,8 +177,8 @@ after engine initialization and warm-up:
 ```python
 from snapshot_lifecycle import quiesce_for_snapshot, resume_after_restore
 
-restored = await quiesce_for_snapshot(engine)
-if not restored:
+outcome = await quiesce_for_snapshot(engine)
+if outcome == "snapshot":
     return
 await resume_after_restore(engine)
 ```
