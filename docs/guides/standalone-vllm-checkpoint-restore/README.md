@@ -171,17 +171,41 @@ The restore calls reverse the vLLM-specific preparation:
 - `vllm-restore-ready` tells the restored pod's readiness probe that vLLM can
   serve requests again.
 
-Import the functions in the existing entrypoint and call them immediately
-after engine initialization and warm-up:
+#### Wire the lifecycle into your entrypoint
+
+> [!IMPORTANT]
+> Adding `snapshot_lifecycle.py` alone does not change vLLM's behavior. The
+> application entrypoint must call its functions.
+
+In the same entrypoint that calls `AsyncLLM.from_engine_args()`, place the
+lifecycle after engine creation and warm-up, but before the application begins
+accepting requests:
 
 ```python
 from snapshot_lifecycle import quiesce_for_snapshot, resume_after_restore
 
-outcome = await quiesce_for_snapshot(engine)
-if outcome == "snapshot":
-    return
-await resume_after_restore(engine)
+async def main():
+    engine_args = AsyncEngineArgs(
+        model=model,
+        enable_sleep_mode=True,
+    )
+    engine = AsyncLLM.from_engine_args(
+        engine_args,
+        usage_context=UsageContext.LLM_CLASS,
+    )
+    await warm_up(engine)
+
+    outcome = await quiesce_for_snapshot(engine)
+    if outcome == "snapshot":
+        return
+
+    await resume_after_restore(engine)
+    await serve_requests(engine)
 ```
+
+`warm_up()` and `serve_requests()` represent the application's existing
+initialization and serving code; do not create duplicate functions or a second
+engine if the application structures these steps differently.
 
 The source process waits in `quiesce_for_snapshot()` and exits after
 `snapshot-complete`. The restored process resumes from that same wait loop,
