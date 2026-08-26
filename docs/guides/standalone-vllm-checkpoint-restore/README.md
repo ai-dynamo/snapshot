@@ -19,7 +19,7 @@ Companion examples:
 - [Restore pod](vllm-restore.yaml)
 
 The YAML files are reference templates. The commands below resolve runtime
-values such as the source pod UID and node name.
+values such as the source pod UID.
 
 ## Prerequisites
 
@@ -29,8 +29,8 @@ values such as the source pod UID and node name.
 - A vLLM pod manifest that you can modify and redeploy.
 - `kubectl` access to create pods and `PodSnapshot` resources.
 - The same immutable workload image for capture and restore.
-- The source GPU node available for restore. This guide restores to the same
-  node.
+- Restore nodes with compatible GPU, NVIDIA driver, kernel, container runtime,
+  and workload mounts.
 
 The currently tested configuration uses NVIDIA driver 580 or newer, MIG
 disabled, and a workload image compatible with the Snapshot restore utilities.
@@ -410,9 +410,9 @@ The command must print `True` followed by a
 The restore pod supplies the target container, GPU, and mounts. Snapshot
 replaces its inert process with the captured vLLM process.
 
-Use the same image and workload settings as the source pod. This minimal
-manifest restores to the source node. The `nvidia.com/restore-from` annotation
-references the `PodSnapshot`:
+Use the same image and workload settings as the source pod. Kubernetes may
+schedule this manifest on any compatible restore node. The
+`nvidia.com/restore-from` annotation references the `PodSnapshot`:
 
 ```bash
 cat >/tmp/vllm-restore.yaml <<EOF
@@ -426,9 +426,6 @@ metadata:
 spec:
   restartPolicy: Never
   runtimeClassName: nvidia
-  nodeName: $(kubectl get pod "$SOURCE_POD" \
-    --namespace "$NAMESPACE" \
-    --output jsonpath='{.spec.nodeName}')
   securityContext:
     seccompProfile:
       type: Localhost
@@ -473,8 +470,9 @@ spec:
 EOF
 ```
 
-Create the manifest before deleting the source pod so its node name is still
-available. Then release the source GPU and create the restore target:
+After capture is Ready, delete the source pod and wait for its deletion before
+creating the restore target. This order releases the source GPU and prevents a
+restore pod from remaining Pending when no other GPU is available:
 
 ```bash
 kubectl delete pod "$SOURCE_POD" \
