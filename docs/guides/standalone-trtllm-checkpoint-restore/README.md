@@ -422,6 +422,12 @@ Wait for its post-restore generation result:
 ```bash
 kubectl wait \
   --namespace "$NAMESPACE" \
+  --for='jsonpath={.status.conditions[?(@.type=="snapshot/Restored")].status}=True' \
+  "pod/$RESTORE_POD" \
+  --timeout=30m
+
+kubectl wait \
+  --namespace "$NAMESPACE" \
   --for=condition=Ready \
   "pod/$RESTORE_POD" \
   --timeout=30m
