@@ -326,7 +326,7 @@ func TestExtractRootfsDiff(t *testing.T) {
 
 // requireGNUTar skips the test unless the system tar is GNU tar — the tool
 // CaptureRootfsDiff actually runs. Non-GNU hosts (macOS bsdtar) skip.
-func requireGNUTar(t *testing.T) {
+func requireGNUTar(t testing.TB) {
 	t.Helper()
 	out, err := exec.Command("tar", "--version").CombinedOutput()
 	if err != nil || !strings.Contains(string(out), "GNU tar") {
