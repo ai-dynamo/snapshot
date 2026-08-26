@@ -9,11 +9,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 )
@@ -21,6 +24,13 @@ import (
 const FieldManager = "snapshot-crd-installer"
 
 const crdKind = "CustomResourceDefinition"
+
+// Apply only persists the CRD; the API server registers it asynchronously.
+// Vars, not consts, so tests can shrink them.
+var (
+	establishedPollInterval = 200 * time.Millisecond
+	establishedTimeout      = 30 * time.Second
+)
 
 type Client interface {
 	Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error
@@ -96,6 +106,10 @@ func applyCRD(ctx context.Context, cl Client, manifest string) (Result, error) {
 		return Result{Name: name}, fmt.Errorf("apply CRD %q: %w", name, err)
 	}
 
+	if err := waitForEstablished(ctx, cl, obj.GroupVersionKind(), name); err != nil {
+		return Result{Name: name}, fmt.Errorf("wait for CRD %q to become established: %w", name, err)
+	}
+
 	switch {
 	case !existed:
 		return Result{Name: name, Action: ActionCreated}, nil
@@ -104,4 +118,45 @@ func applyCRD(ctx context.Context, cl Client, manifest string) (Result, error) {
 	default:
 		return Result{Name: name, Action: ActionUpdated}, nil
 	}
+}
+
+// waitForEstablished blocks until the CRD's Established condition is True,
+// so callers never observe a CRD that the API server has accepted but isn't
+// serving yet.
+func waitForEstablished(ctx context.Context, cl Client, gvk schema.GroupVersionKind, name string) error {
+	var lastErr error
+	err := wait.PollUntilContextTimeout(ctx, establishedPollInterval, establishedTimeout, true,
+		func(ctx context.Context) (bool, error) {
+			current := &unstructured.Unstructured{}
+			current.SetGroupVersionKind(gvk)
+			// A transient Get failure must not abort the wait; the timeout is
+			// the only terminal condition.
+			if err := cl.Get(ctx, client.ObjectKey{Name: name}, current); err != nil {
+				lastErr = err
+				return false, nil
+			}
+			lastErr = nil
+			return crdEstablished(current), nil
+		})
+	if err != nil && lastErr != nil {
+		return fmt.Errorf("%w (last error: %w)", err, lastErr)
+	}
+	return err
+}
+
+func crdEstablished(obj *unstructured.Unstructured) bool {
+	conditions, found, err := unstructured.NestedSlice(obj.Object, "status", "conditions")
+	if err != nil || !found {
+		return false
+	}
+	for _, c := range conditions {
+		condition, ok := c.(map[string]any)
+		if !ok {
+			continue
+		}
+		if condition["type"] == "Established" && condition["status"] == "True" {
+			return true
+		}
+	}
+	return false
 }
