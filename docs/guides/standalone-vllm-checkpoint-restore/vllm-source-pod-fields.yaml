@@ -4,9 +4,6 @@
 metadata:
   labels:
     nvidia.com/snapshot-is-checkpoint-source: "true"
-    nvidia.com/snapshot-checkpoint-id: ${CHECKPOINT_ID}
-  annotations:
-    nvidia.com/snapshot-target-containers: ${CONTAINER}
 spec:
   runtimeClassName: nvidia
   securityContext:

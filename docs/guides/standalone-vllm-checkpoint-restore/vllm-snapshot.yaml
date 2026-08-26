@@ -6,8 +6,6 @@ kind: PodSnapshot
 metadata:
   name: ${SOURCE_POD}-snapshot
   namespace: ${NAMESPACE}
-  labels:
-    nvidia.com/snapshot-checkpoint-id: ${CHECKPOINT_ID}
 spec:
   source:
     podRef:

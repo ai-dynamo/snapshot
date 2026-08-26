@@ -6,12 +6,8 @@ kind: Pod
 metadata:
   name: ${RESTORE_POD}
   namespace: ${NAMESPACE}
-  labels:
-    nvidia.com/snapshot-checkpoint-id: ${CHECKPOINT_ID}
-    nvidia.com/snapshot-is-restore-target: "true"
   annotations:
-    nvidia.com/snapshot-target-containers: ${CONTAINER}
-    nvidia.com/snapshot-artifact-version: "1"
+    nvidia.com/restore-from: ${SOURCE_POD}-snapshot
 spec:
   restartPolicy: Never
   runtimeClassName: nvidia

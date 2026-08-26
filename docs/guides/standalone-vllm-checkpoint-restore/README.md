@@ -54,10 +54,6 @@ CONTAINER="${CONTAINER:-$(kubectl get pod "$SOURCE_POD" \
   --namespace "$NAMESPACE" \
   --output jsonpath='{.spec.containers[0].name}')}"
 RESTORE_POD="${SOURCE_POD}-restore"
-CHECKPOINT_ID="vllm-$(kubectl get pod "$SOURCE_POD" \
-  --namespace "$NAMESPACE" \
-  --output jsonpath='{.metadata.uid}' |
-  cut -c1-8)"
 VLLM_IMAGE="$(kubectl get pod "$SOURCE_POD" \
   --namespace "$NAMESPACE" \
   --output "jsonpath={.status.containerStatuses[?(@.name=='${CONTAINER}')].imageID}")"
@@ -214,17 +210,13 @@ started.
 
 ## 2. Prepare the source pod
 
-Add the following fields to the existing vLLM pod template. The labels identify
-the checkpoint, the annotation selects the vLLM container, and the control
-volume carries the lifecycle files.
+Add the following fields to the existing vLLM pod template. The label identifies
+the pod as a capture source, and the control volume carries the lifecycle files.
 
 ```yaml
 metadata:
   labels:
     nvidia.com/snapshot-is-checkpoint-source: "true"
-    nvidia.com/snapshot-checkpoint-id: <checkpoint-id>
-  annotations:
-    nvidia.com/snapshot-target-containers: <vllm-container-name>
 spec:
   runtimeClassName: nvidia
   securityContext:
@@ -344,8 +336,6 @@ kind: PodSnapshot
 metadata:
   name: ${SOURCE_POD}-snapshot
   namespace: ${NAMESPACE}
-  labels:
-    nvidia.com/snapshot-checkpoint-id: ${CHECKPOINT_ID}
 spec:
   source:
     podRef:
@@ -387,7 +377,8 @@ The restore pod supplies the target container, GPU, and mounts. Snapshot
 replaces its inert process with the captured vLLM process.
 
 Use the same image and workload settings as the source pod. This minimal
-manifest restores to the source node:
+manifest restores to the source node. The `nvidia.com/restore-from` annotation
+references the `PodSnapshot`:
 
 ```bash
 cat >/tmp/vllm-restore.yaml <<EOF
@@ -396,12 +387,8 @@ kind: Pod
 metadata:
   name: ${RESTORE_POD}
   namespace: ${NAMESPACE}
-  labels:
-    nvidia.com/snapshot-checkpoint-id: ${CHECKPOINT_ID}
-    nvidia.com/snapshot-is-restore-target: "true"
   annotations:
-    nvidia.com/snapshot-target-containers: ${CONTAINER}
-    nvidia.com/snapshot-artifact-version: "1"
+    nvidia.com/restore-from: ${SOURCE_POD}-snapshot
 spec:
   restartPolicy: Never
   runtimeClassName: nvidia
@@ -468,6 +455,12 @@ kubectl apply -f /tmp/vllm-restore.yaml
 Wait until Snapshot has restored the process:
 
 ```bash
+kubectl wait \
+  --for='jsonpath={.status.conditions[?(@.type=="snapshot/Restored")].status}=True' \
+  "pod/$RESTORE_POD" \
+  --namespace "$NAMESPACE" \
+  --timeout=20m
+
 until kubectl exec "$RESTORE_POD" \
   --namespace "$NAMESPACE" \
   --container "$CONTAINER" \
@@ -520,13 +513,11 @@ Confirm the restore status:
 ```bash
 kubectl get pod "$RESTORE_POD" \
   --namespace "$NAMESPACE" \
-  --output json |
-  jq -r --arg container "$CONTAINER" \
-    '.metadata.annotations["nvidia.com/snapshot-restore-status." + $container]'
+  --output jsonpath='{range .status.conditions[?(@.type=="snapshot/Restored")]}{.status}{"\t"}{.reason}{"\n"}{end}'
 ```
 
-The status must be `completed`. Send a normal inference request to the restored
-vLLM process to complete the validation.
+The command must print `True` and `RestoreSucceeded`. Send a normal inference
+request to the restored vLLM process to complete the validation.
 
 For the vLLM lifecycle APIs, see
 [Sleep Mode](https://docs.vllm.ai/en/v0.27.1/features/sleep_mode/) and
