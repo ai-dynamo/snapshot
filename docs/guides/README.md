@@ -26,6 +26,7 @@ Using Snapshot is a two-step model:
 
 - [Checkpoint a replica](checkpoint.md)
 - [Restore a replica](restore.md)
+- [Use CUDA CustomStorage](custom-storage.md) — explicitly externalize CUDA checkpoint state through the Snapshot-local NIXL POSIX path.
 
 See [Installation](../operations/install.md) for cluster prerequisites and the
 [API reference](../reference/api.md) for full resource detail.

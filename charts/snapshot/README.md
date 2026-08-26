@@ -72,6 +72,19 @@ helm upgrade --install snapshot ./charts/snapshot \
   --set storage.pvc.name=my-snapshot-pvc
 ```
 
+## CUDA CustomStorage
+
+New checkpoints use the legacy CUDA driver-managed storage path by default. To externalize CUDA checkpoint state through the Snapshot-local NIXL POSIX adapter, set `config.cudaCheckpoint.storageMode=posix`. This requires a driver that exports the CUDA 13.4 CustomStorage API and is initially supported only for one-GPU workloads.
+
+```bash
+helm upgrade --install snapshot ./charts/snapshot \
+  --namespace ${NAMESPACE} \
+  --create-namespace \
+  --set config.cudaCheckpoint.storageMode=posix
+```
+
+The mode is recorded in each checkpoint manifest, and restore follows the artifact rather than the current creation setting. Snapshot does not silently fall back from an explicitly requested `posix` checkpoint to `legacy`. See [Use CUDA CustomStorage](../../docs/guides/custom-storage.md) before enabling it.
+
 ## CRD upgrades
 
 Helm creates the CRDs in [crds/](./crds) on a fresh install and then leaves them
@@ -137,6 +150,11 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `seccomp.deploy` | Deploy the CRIU seccomp profile ConfigMap and init container. Use this field name; `seccomp.enabled` is not a chart value | `true` |
 | `runtime.type` | CRI backend: `containerd` or `crio` | `containerd` |
 | `runtime.socketPath` | CRI socket (empty = default for `runtime.type`) | `""` |
+| `config.cudaCheckpoint.storageMode` | Storage policy for newly created CUDA checkpoints: `legacy` or `posix` | `legacy` |
+| `config.cudaCheckpoint.transferBufferCount` | Pinned transfer slots per active CUDA device | `4` |
+| `config.cudaCheckpoint.transferChunkBytes` | Bytes per pinned transfer slot | `67108864` |
+| `config.cudaCheckpoint.daemon.maxOperationSeconds` | Cooperative watchdog for one CUDA helper operation | `3600` |
+| `config.cudaCheckpoint.daemon.resources` | CUDA helper CPU and memory requests and limits | See `values.yaml` |
 | `crdUpgrade.enabled` | Install and upgrade the CRDs from an operator init container (see below) | `true` |
 | `crdUpgrade.logLevel` | Init container log level | `info` |
 | `rbac.create` | Create agent and operator RBAC | `true` |

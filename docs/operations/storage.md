@@ -50,6 +50,12 @@ you need the existing checkpoints, copy them over once.
 Chart-created PVCs are retained when the Helm release is removed, so checkpoints
 survive an uninstall.
 
+## CUDA CustomStorage capacity
+
+When CUDA CustomStorage is enabled, the checkpoint volume also stores the CUDA extent files. Plan for approximately the checkpointed CUDA allocation bytes in addition to CRIU images, the root filesystem diff, and temporary checkpoint staging. The default CustomStorage transfer pipeline uses 256 MiB of pinned host memory for the supported one-GPU operation; pinned memory is helper working memory and does not reduce the required PVC capacity.
+
+See [Use CUDA CustomStorage](../guides/custom-storage.md) for enablement, memory sizing, compatibility, and verification.
+
 ## Other backends
 
 `storage.type` currently supports `pvc`. Object-storage backends (`s3`, `oci`) are
