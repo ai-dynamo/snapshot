@@ -76,10 +76,10 @@ kubectl exec "$SOURCE_POD" \
   -- sh -c 'tr "\000" " " < /proc/1/cmdline; echo'
 ```
 
-- If the output contains `vllm serve` or `vllm.entrypoints`, use the
-  [HTTP API](#vllm-server-http-api).
 - If the output names a Python program that your team maintains, use the
   [Python API](#python-api).
+- If the output contains `vllm serve` or `vllm.entrypoints`, use the
+  [HTTP API](#vllm-server-http-api).
 - If the output is a shell wrapper or remains unclear, check the workload
   manifest or ask the image owner which program starts vLLM.
 
