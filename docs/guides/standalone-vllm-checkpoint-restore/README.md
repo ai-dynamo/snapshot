@@ -262,9 +262,14 @@ VLLM_SERVER_DEV_MODE=1 vllm serve <model> --enable-sleep-mode
 ```
 
 Both settings are required: `--enable-sleep-mode` enables the engine feature,
-and `VLLM_SERVER_DEV_MODE=1` exposes its administrative endpoints. Do not expose
-these endpoints outside a trusted network. Apply these settings to the pod
-startup command when [preparing the source pod](#2-prepare-the-source-pod).
+and `VLLM_SERVER_DEV_MODE=1` exposes unauthenticated development endpoints,
+including administrative RPC operations. Use the HTTP path only for an isolated
+maintenance workload. If the endpoint is reachable from outside that boundary,
+place it behind authentication and allowlist only the lifecycle endpoints used
+here. Development mode remains enabled in the restored process; use the Python
+path when the restored workload cannot retain these controls. Apply the settings
+to the pod startup command when
+[preparing the source pod](#2-prepare-the-source-pod).
 
 For this HTTP path, an operator runs the documented `kubectl exec` and `curl`
 commands once from an administrative shell immediately before capture and
