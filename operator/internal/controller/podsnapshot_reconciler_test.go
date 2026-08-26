@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -42,11 +43,14 @@ func makeSnapshotReconciler(s *runtime.Scheme, objs ...client.Object) *PodSnapsh
 // makeSnapshotReconcilerWithInterceptor builds a reconciler whose fake client routes calls through
 // interceptor.Funcs, letting tests inject API errors or count calls on specific code paths.
 func makeSnapshotReconcilerWithInterceptor(s *runtime.Scheme, funcs interceptor.Funcs, objs ...client.Object) *PodSnapshotReconciler {
+	testClient := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).
+		WithIndex(&snapshotv1alpha1.PodSnapshot{}, podSnapshotSourcePodNameField, podSnapshotSourcePodIndexValues).
+		WithStatusSubresource(&snapshotv1alpha1.PodSnapshot{}, &snapshotv1alpha1.PodSnapshotContent{}).
+		WithInterceptorFuncs(funcs).Build()
 	return &PodSnapshotReconciler{
-		Client: fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).
-			WithStatusSubresource(&snapshotv1alpha1.PodSnapshot{}, &snapshotv1alpha1.PodSnapshotContent{}).
-			WithInterceptorFuncs(funcs).Build(),
-		Recorder: record.NewFakeRecorder(10),
+		Client:             testClient,
+		NonCacheReadClient: testClient,
+		Recorder:           record.NewFakeRecorder(10),
 	}
 }
 
@@ -64,18 +68,27 @@ func makeSnapshotForReconcile() *snapshotv1alpha1.PodSnapshot {
 	}
 }
 
-// scheduledPod builds a scheduled source pod named "worker-0" on node "node-a". The checkpoint ID
-// lives on the pod label (the reconciler reads it from there); pass "" to omit the label and exercise
-// the missing-id path.
-func scheduledPod(checkpointID string) *corev1.Pod {
-	pod := &corev1.Pod{
+// scheduledPod builds a scheduled source pod named "worker-0" on node "node-a".
+func scheduledPod() *corev1.Pod {
+	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid-9")},
 		Spec:       corev1.PodSpec{NodeName: "node-a"},
 	}
-	if checkpointID != "" {
-		pod.Labels = map[string]string{snapshotv1alpha1.CheckpointIDLabel: checkpointID}
+}
+
+func pendingBoundSnapshotContent() (*snapshotv1alpha1.PodSnapshot, *snapshotv1alpha1.PodSnapshotContent) {
+	snap := makeSnapshotForReconcile()
+	snap.Status.BoundPodSnapshotContentName = ptr.To("podsnapshotcontent-snap-uid")
+	content := &snapshotv1alpha1.PodSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "podsnapshotcontent-snap-uid"},
+		Spec: snapshotv1alpha1.PodSnapshotContentSpec{
+			PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{Namespace: "inference", Name: snap.Name, UID: "snap-uid"},
+			Source: snapshotv1alpha1.PodSnapshotContentSource{
+				PodRef: snapshotv1alpha1.PodReference{Name: "worker-0", UID: "pod-uid-9"}, NodeName: "node-a",
+			},
+		},
 	}
-	return pod
+	return snap, content
 }
 
 func reconcileSnapshot(t *testing.T, r *PodSnapshotReconciler, name string) ctrl.Result {
@@ -108,7 +121,7 @@ func TestSnapshotReconciler_BuildsWorkOrderAndBinds(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	snap := makeSnapshotForReconcile()
 	snap.Spec.Source.PodRef.Containers = []string{"main"}
-	r := makeSnapshotReconciler(s, snap, scheduledPod("abc123"))
+	r := makeSnapshotReconciler(s, snap, scheduledPod())
 
 	// Creation path records the binding and returns without a requeue; conditions are mirrored on the
 	// next (bound-path) reconcile that the content watch drives.
@@ -121,8 +134,7 @@ func TestSnapshotReconciler_BuildsWorkOrderAndBinds(t *testing.T) {
 	assert.Equal(t, types.UID("pod-uid-9"), content.Spec.Source.PodRef.UID)
 	assert.Equal(t, "node-a", content.Spec.Source.NodeName)
 	assert.Equal(t, "node-a", content.Labels[snapshotv1alpha1.SnapshotNodeLabel])
-	assert.NotContains(t, content.Labels, snapshotv1alpha1.CheckpointIDLabel)
-	assert.NotContains(t, content.Annotations, snapshotv1alpha1.CheckpointArtifactVersionAnnotation)
+	assert.Empty(t, content.Annotations)
 	assert.Empty(t, content.Finalizers)
 	assert.Equal(t, "inference", content.Spec.PodSnapshotRef.Namespace)
 	assert.Equal(t, snap.Name, content.Spec.PodSnapshotRef.Name)
@@ -144,7 +156,7 @@ func TestSnapshotReconciler_BuildPodSnapshotContentCopiesContainersVerbatim(t *t
 	r := makeSnapshotReconciler(s)
 	snap := makeSnapshotForReconcile()
 	snap.Spec.Source.PodRef.Containers = []string{"engine-0"}
-	pod := scheduledPod("abc123")
+	pod := scheduledPod()
 
 	content := r.buildPodSnapshotContent(snap, "content-x", pod)
 	assert.Equal(t, []string{"engine-0"}, content.Spec.Source.PodRef.Containers,
@@ -157,7 +169,7 @@ func TestSnapshotReconciler_StalePodReferenceFails(t *testing.T) {
 	// The PodSnapshot pins a source pod UID that does not match the live pod (pod-uid-9):
 	// a same-named recreation must not be captured as the wrong workload.
 	snap.Spec.Source.PodRef.UID = types.UID("old-pod-uid")
-	r := makeSnapshotReconciler(s, snap, scheduledPod("abc123"))
+	r := makeSnapshotReconciler(s, snap, scheduledPod())
 
 	reconcileSnapshot(t, r, snap.Name)
 
@@ -234,7 +246,7 @@ func TestSnapshotReconciler_ReadySnapRevertsToPendingWhenContentPending(t *testi
 			Source:         snapshotv1alpha1.PodSnapshotContentSource{PodRef: snapshotv1alpha1.PodReference{Name: "worker-0", UID: "pod-uid-9"}, NodeName: "node-a"},
 		},
 	}
-	r := makeSnapshotReconciler(s, snap, content)
+	r := makeSnapshotReconciler(s, snap, content, scheduledPod())
 
 	reconcileSnapshot(t, r, snap.Name)
 
@@ -250,7 +262,7 @@ func TestSnapshotReconciler_AlreadyFailedShortCircuits(t *testing.T) {
 	meta.SetStatusCondition(&snap.Status.Conditions, metav1.Condition{
 		Type: snapshotv1alpha1.PodSnapshotConditionFailed, Status: metav1.ConditionTrue, Reason: "SourcePodNotFound", Message: "gone"})
 	// Failed is terminal & sticky: even with a (now) live pod present, it never becomes Ready.
-	r := makeSnapshotReconciler(s, snap, scheduledPod("abc123"))
+	r := makeSnapshotReconciler(s, snap, scheduledPod())
 
 	reconcileSnapshot(t, r, snap.Name)
 
@@ -281,26 +293,237 @@ func TestSnapshotReconciler_BoundContentMissingRequeuesError(t *testing.T) {
 
 func TestSnapshotReconciler_BoundContentPendingNoRequeue(t *testing.T) {
 	s := snapshotReconcilerScheme()
-	snap := makeSnapshotForReconcile()
-	snap.Status.BoundPodSnapshotContentName = ptr.To("podsnapshotcontent-snap-uid")
+	snap, content := pendingBoundSnapshotContent()
 	// Bound content exists but the agent hasn't written a result yet (no conditions): the dominant
-	// live steady-state. Mirror Pending, no requeue, no pod resolved.
-	content := &snapshotv1alpha1.PodSnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: "podsnapshotcontent-snap-uid"},
-		Spec: snapshotv1alpha1.PodSnapshotContentSpec{
-			PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{Namespace: "inference", Name: snap.Name, UID: "snap-uid"},
-			Source:         snapshotv1alpha1.PodSnapshotContentSource{PodRef: snapshotv1alpha1.PodReference{Name: "worker-0", UID: "pod-uid-9"}, NodeName: "node-a"},
+	// live steady-state. A live cached source keeps the capture Pending without an API-server read.
+	r := makeSnapshotReconciler(s, snap, content, scheduledPod())
+	apiReads := 0
+	r.NonCacheReadClient = fake.NewClientBuilder().WithScheme(s).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+			apiReads++
+			return errors.New("unexpected API-reader call")
 		},
-	}
-	r := makeSnapshotReconciler(s, snap, content) // no source pod
+	}).Build()
 
 	res := reconcileSnapshot(t, r, snap.Name)
 	assert.Zero(t, res.RequeueAfter)
+	assert.Zero(t, apiReads)
 
 	updated := &snapshotv1alpha1.PodSnapshot{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
 	assert.False(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
 	assert.Nil(t, meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
+}
+
+func TestSnapshotReconciler_SourceCompletesWithoutCaptureResult(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	snap, content := pendingBoundSnapshotContent()
+	pod := scheduledPod()
+	pod.Status.Phase = corev1.PodSucceeded
+	r := makeSnapshotReconciler(s, snap, content, pod)
+
+	res := reconcileSnapshot(t, r, snap.Name)
+	assert.Zero(t, res.RequeueAfter)
+
+	updated := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, metav1.ConditionTrue, failed.Status)
+	assert.Equal(t, snapshotv1alpha1.ReasonSourceCompletedWithoutCapture, failed.Reason)
+	assert.Contains(t, failed.Message, "completed before")
+	assert.False(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+}
+
+func TestSnapshotReconciler_FailedSourcePodWaitsForCaptureResultWithinGrace(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	snap, content := pendingBoundSnapshotContent()
+	pod := scheduledPod()
+	pod.Status.Phase = corev1.PodFailed
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: "main",
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			ExitCode: 137, FinishedAt: metav1.Now(),
+		}},
+	}}
+	r := makeSnapshotReconciler(s, snap, content, pod)
+
+	// The checkpoint terminates the source process before the agent writes
+	// content Ready, so a freshly failed pod with a pending capture must wait
+	// out the grace window instead of racing the agent's Ready write.
+	res := reconcileSnapshot(t, r, snap.Name)
+	assert.Greater(t, res.RequeueAfter, time.Duration(0))
+	assert.LessOrEqual(t, res.RequeueAfter, sourcePodTerminalGrace)
+
+	updated := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), updated))
+	assert.Nil(t, meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
+
+	// The agent then publishes the committed artifact: the capture becomes
+	// Ready even though the source pod stays Failed.
+	storedContent := &snapshotv1alpha1.PodSnapshotContent{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(content), storedContent))
+	meta.SetStatusCondition(&storedContent.Status.Conditions, metav1.Condition{
+		Type: snapshotv1alpha1.PodSnapshotConditionReady, Status: metav1.ConditionTrue, Reason: "Captured", Message: "done"})
+	require.NoError(t, r.Status().Update(context.Background(), storedContent))
+
+	reconcileSnapshot(t, r, snap.Name)
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), updated))
+	assert.True(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+	assert.False(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
+}
+
+func TestSnapshotReconciler_FailedSourcePodFailsCaptureAfterGraceExpires(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	snap, content := pendingBoundSnapshotContent()
+	pod := scheduledPod()
+	pod.Status.Phase = corev1.PodFailed
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: "main",
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			ExitCode: 137, FinishedAt: metav1.NewTime(time.Now().Add(-sourcePodTerminalGrace - time.Minute)),
+		}},
+	}}
+	r := makeSnapshotReconciler(s, snap, content, pod)
+
+	res := reconcileSnapshot(t, r, snap.Name)
+	assert.Zero(t, res.RequeueAfter)
+
+	updated := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, failed, "an agent that never publishes a result must not hold the capture pending forever")
+	assert.Equal(t, podSnapshotReasonSourcePodGone, failed.Reason)
+}
+
+func TestSnapshotReconciler_FailedSourcePodWithoutTerminalTimeFailsImmediately(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	snap, content := pendingBoundSnapshotContent()
+	pod := scheduledPod()
+	pod.Status.Phase = corev1.PodFailed // no container statuses, no deletion stamp
+
+	r := makeSnapshotReconciler(s, snap, content, pod)
+	res := reconcileSnapshot(t, r, snap.Name)
+	assert.Zero(t, res.RequeueAfter, "an unknown terminal time must not requeue on a clock that can never expire")
+
+	updated := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, podSnapshotReasonSourcePodGone, failed.Reason)
+}
+
+func TestSnapshotReconciler_PendingContentWithMissingSourceFails(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	snap, content := pendingBoundSnapshotContent()
+	r := makeSnapshotReconciler(s, snap, content)
+
+	reconcileSnapshot(t, r, snap.Name)
+
+	updated := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, "SourcePodNotFound", failed.Reason)
+}
+
+func TestSnapshotReconciler_CachedSourceMissingAuthoritativeSourceLiveRemainsPending(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	snap, content := pendingBoundSnapshotContent()
+	r := makeSnapshotReconciler(s, snap, content) // source pod is absent from the cache
+	r.NonCacheReadClient = fake.NewClientBuilder().WithScheme(s).WithObjects(content, scheduledPod()).Build()
+
+	reconcileSnapshot(t, r, snap.Name)
+
+	updated := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), updated))
+	assert.Nil(t, meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
+	assert.False(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+}
+
+func TestSnapshotReconciler_AuthoritativeReadyWinsSourceTerminalRace(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	snap, pendingContent := pendingBoundSnapshotContent()
+	readyContent := pendingContent.DeepCopy()
+	meta.SetStatusCondition(&readyContent.Status.Conditions, metav1.Condition{
+		Type: snapshotv1alpha1.PodSnapshotConditionReady, Status: metav1.ConditionTrue,
+		Reason: "Captured", Message: "checkpoint is durable",
+	})
+	pod := scheduledPod()
+	pod.Status.Phase = corev1.PodSucceeded
+	r := makeSnapshotReconciler(s, snap, pendingContent, pod)
+	r.NonCacheReadClient = fake.NewClientBuilder().WithScheme(s).WithObjects(readyContent, pod).Build()
+
+	reconcileSnapshot(t, r, snap.Name)
+
+	updated := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), updated))
+	ready := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady)
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionTrue, ready.Status)
+	assert.Equal(t, "Captured", ready.Reason)
+	assert.False(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
+}
+
+func TestSnapshotReconciler_TerminalPodReadBeforeContentReadKeepsRacedCapture(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	snap, pendingContent := pendingBoundSnapshotContent()
+	pod := scheduledPod()
+	pod.Status.Phase = corev1.PodSucceeded
+	r := makeSnapshotReconciler(s, snap, pendingContent, pod)
+
+	// The agent commits content Ready between the two authoritative reads. Ready is
+	// persisted before the source process is released, so a pod observed terminal
+	// guarantees the Ready write is already visible — but only when the pod is read
+	// first. This interceptor makes Ready visible only after the pod read; reading
+	// the content first would see a pending capture and fail it as abandoned.
+	podObserved := false
+	authoritative := fake.NewClientBuilder().WithScheme(s).WithObjects(pendingContent, pod).Build()
+	r.NonCacheReadClient = fake.NewClientBuilder().WithScheme(s).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(ctx context.Context, _ client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if err := authoritative.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			switch typed := obj.(type) {
+			case *corev1.Pod:
+				podObserved = true
+			case *snapshotv1alpha1.PodSnapshotContent:
+				if podObserved {
+					meta.SetStatusCondition(&typed.Status.Conditions, metav1.Condition{
+						Type: snapshotv1alpha1.PodSnapshotConditionReady, Status: metav1.ConditionTrue,
+						Reason: "Captured", Message: "checkpoint is durable",
+					})
+				}
+			}
+			return nil
+		},
+	}).Build()
+
+	reconcileSnapshot(t, r, snap.Name)
+
+	updated := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), updated))
+	assert.True(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady),
+		"a capture committed between the authoritative reads must be propagated, not failed as abandoned")
+	assert.False(t, meta.IsStatusConditionTrue(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
+}
+
+func TestSourcePodToPodSnapshotsUsesNamespaceAndSourceIndex(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	matching := makeSnapshotForReconcile()
+	otherSource := makeSnapshotForReconcile()
+	otherSource.Name = "other-source"
+	otherSource.UID = "other-source-uid"
+	otherSource.Spec.Source.PodRef.Name = "worker-1"
+	otherNamespace := makeSnapshotForReconcile()
+	otherNamespace.Namespace = "other"
+	otherNamespace.UID = "other-namespace-uid"
+	r := makeSnapshotReconciler(s, matching, otherSource, otherNamespace)
+
+	requests := r.sourcePodToPodSnapshots(context.Background(), scheduledPod())
+	require.Len(t, requests, 1)
+	assert.Equal(t, client.ObjectKeyFromObject(matching), requests[0].NamespacedName)
+	assert.Empty(t, r.sourcePodToPodSnapshots(context.Background(), &snapshotv1alpha1.PodSnapshot{}))
 }
 
 func TestSnapshotReconciler_ContentConflictFails(t *testing.T) {
@@ -315,7 +538,7 @@ func TestSnapshotReconciler_ContentConflictFails(t *testing.T) {
 			Source:         snapshotv1alpha1.PodSnapshotContentSource{PodRef: snapshotv1alpha1.PodReference{Name: "worker-0", UID: "pod-uid-9"}, NodeName: "node-a"},
 		},
 	}
-	r := makeSnapshotReconciler(s, snap, content, scheduledPod("abc123"))
+	r := makeSnapshotReconciler(s, snap, content, scheduledPod())
 
 	reconcileSnapshot(t, r, snap.Name)
 
@@ -342,7 +565,7 @@ func TestSnapshotReconciler_AdoptsExistingContentAndMirrors(t *testing.T) {
 			Conditions: []metav1.Condition{{Type: snapshotv1alpha1.PodSnapshotConditionReady, Status: metav1.ConditionTrue, Reason: "Agent", Message: "done"}},
 		},
 	}
-	r := makeSnapshotReconciler(s, snap, content, scheduledPod("abc123"))
+	r := makeSnapshotReconciler(s, snap, content, scheduledPod())
 
 	// First pass: adopt and bind, no mirroring yet (no ContentConflict).
 	reconcileSnapshot(t, r, snap.Name)
@@ -410,12 +633,11 @@ func TestSnapshotReconciler_MirrorsReadyAndFailed(t *testing.T) {
 	}
 }
 
-func TestSnapshotReconciler_ProceedsWithoutCheckpointIDLabel(t *testing.T) {
+func TestSnapshotReconciler_ProceedsWithoutCaptureAnnotations(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	snap := makeSnapshotForReconcile()
-	// The source pod carries no checkpoint-id label: the content is named from the PodSnapshot
-	// UID, not the ID, so reconcile proceeds and binds rather than failing.
-	r := makeSnapshotReconciler(s, snap, scheduledPod(""))
+	// Capture identity and target selection come entirely from the snapshot API.
+	r := makeSnapshotReconciler(s, snap, scheduledPod())
 
 	reconcileSnapshot(t, r, snap.Name)
 
@@ -516,7 +738,7 @@ func TestSnapshotReconciler_EnsureFinalizerAddsThenProceeds(t *testing.T) {
 			Source: snapshotv1alpha1.PodSnapshotSource{PodRef: snapshotv1alpha1.PodReference{Name: "worker-0"}},
 		},
 	}
-	r := makeSnapshotReconciler(s, snap, scheduledPod("abc123"))
+	r := makeSnapshotReconciler(s, snap, scheduledPod())
 
 	res := reconcileSnapshot(t, r, snap.Name)
 	assert.Zero(t, res.RequeueAfter)
@@ -583,6 +805,28 @@ func TestSnapshotReconciler_BoundContentConflictFails(t *testing.T) {
 	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
 	require.NotNil(t, failed)
 	assert.Equal(t, "ContentConflict", failed.Reason)
+}
+
+func TestSnapshotReconciler_BoundContentMissingBacklinkUIDFails(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	snap := makeSnapshotForReconcile()
+	snap.Status.BoundPodSnapshotContentName = ptr.To("podsnapshotcontent-snap-uid")
+	content := &snapshotv1alpha1.PodSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "podsnapshotcontent-snap-uid"},
+		Spec: snapshotv1alpha1.PodSnapshotContentSpec{
+			PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{Namespace: snap.Namespace, Name: snap.Name},
+		},
+	}
+	r := makeSnapshotReconciler(s, snap, content)
+
+	reconcileSnapshot(t, r, snap.Name)
+
+	updated := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: snap.Namespace, Name: snap.Name}, updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, "ContentConflict", failed.Reason)
+	assert.Contains(t, failed.Message, `uid ""`)
 }
 
 func TestSnapshotReconciler_PropagateStatusIsIdempotent(t *testing.T) {
@@ -654,7 +898,7 @@ func TestSnapshotReconciler_SourcePodGetErrorRequeues(t *testing.T) {
 		}
 		return c.Get(ctx, key, obj, opts...)
 	}}
-	r := makeSnapshotReconcilerWithInterceptor(s, funcs, snap, scheduledPod("abc123"))
+	r := makeSnapshotReconcilerWithInterceptor(s, funcs, snap, scheduledPod())
 
 	_, err := r.Reconcile(context.Background(),
 		ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "inference", Name: snap.Name}})
@@ -676,7 +920,7 @@ func TestSnapshotReconciler_ContentCreateErrorEmitsEventAndRequeues(t *testing.T
 		}
 		return c.Create(ctx, obj, opts...)
 	}}
-	r := makeSnapshotReconcilerWithInterceptor(s, funcs, snap, scheduledPod("abc123"))
+	r := makeSnapshotReconcilerWithInterceptor(s, funcs, snap, scheduledPod())
 
 	_, err := r.Reconcile(context.Background(),
 		ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "inference", Name: snap.Name}})

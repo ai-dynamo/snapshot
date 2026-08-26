@@ -11,8 +11,7 @@ metadata:
     {{- include "snapshot.labels" . | nindent 4 }}
     app.kubernetes.io/component: operator
 ---
-# ClusterRole for the PodSnapshot reconciler. Mirrors the controller's
-# kubebuilder rbac markers.
+# ClusterRole for the operator reconcilers. Mirrors their kubebuilder RBAC markers.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -23,7 +22,7 @@ metadata:
 rules:
   - apiGroups: ["nvidia.com"]
     resources: ["podsnapshots"]
-    verbs: ["get", "list", "watch", "update", "patch"]
+    verbs: ["create", "get", "list", "watch", "update", "patch"]
   - apiGroups: ["nvidia.com"]
     resources: ["podsnapshots/status"]
     verbs: ["get", "update", "patch"]
@@ -36,6 +35,15 @@ rules:
   - apiGroups: ["nvidia.com"]
     resources: ["podsnapshotcontents/status"]
     verbs: ["get", "update", "patch"]
+  - apiGroups: ["nvidia.com"]
+    resources: ["snapshotjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["nvidia.com"]
+    resources: ["snapshotjobs/status"]
+    verbs: ["patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
@@ -52,6 +60,7 @@ rules:
     resourceNames:
       - podsnapshots.nvidia.com
       - podsnapshotcontents.nvidia.com
+      - snapshotjobs.nvidia.com
     verbs: ["get", "patch"]
   {{- end }}
 ---

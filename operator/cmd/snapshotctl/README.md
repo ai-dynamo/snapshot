@@ -61,28 +61,23 @@ keep only the pod-level fields needed to recreate that worker accurately.
 
 ## Target containers
 
-Which container(s) the operation acts on is controlled by a single annotation
-that the snapshot layer treats as mandatory:
+Checkpoint targets are part of the `PodSnapshot` request, not pod annotations.
+`snapshotctl checkpoint` requires `--container <name>` and records that one
+container in `PodSnapshot.spec.source.podRef.containers`.
+
+Restore uses the single container captured by that `PodSnapshot`. The restore
+manifest must contain a container with the same name. `snapshotctl` shapes it
+for restore and adds only this snapshot-owned annotation:
 
 ```yaml
 metadata:
   annotations:
-    nvidia.com/snapshot-target-containers: "main"
-    # or "engine-0,engine-1" for a failover-style restore
+    nvidia.com/restore-from: worker-snapshot
 ```
 
-- Checkpoints must target **exactly one** container.
-- Restores must target **at least one** container; the same checkpoint is
-  replayed into every named container.
-
-`snapshotctl` will stamp the annotation for you from the CLI flag:
-
-- `--container <name>` on the `checkpoint` subcommand (single name)
-- `--containers <name>[,<name>...]` on the `restore` subcommand (one or more)
-
-You can also pre-stamp the annotation on the manifest and omit the flag. If
-both are provided they must agree — `snapshotctl` rejects mismatches instead
-of silently picking one.
+Capture pods must have no snapshot-owned annotations. Restore pods must have
+exactly one: `nvidia.com/restore-from`. Unrelated platform annotations are
+preserved.
 
 ## Commands
 
@@ -91,48 +86,25 @@ Checkpoint from a manifest:
 ```bash
 snapshotctl checkpoint \
   --manifest ./worker-pod.yaml \
+  --snapshot worker-snapshot \
   --container main \
   --namespace ${NAMESPACE}
 ```
-
-If `--checkpoint-id` is omitted, `snapshotctl` generates one.
 
 Restore by creating a new pod from a manifest:
 
 ```bash
 snapshotctl restore \
   --manifest ./worker-pod.yaml \
-  --containers main \
   --namespace ${NAMESPACE} \
-  --checkpoint-id manual-snapshot-123
-```
-
-For an intra-pod failover restore, list every engine container:
-
-```bash
-snapshotctl restore \
-  --manifest ./failover-pod.yaml \
-  --containers engine-0,engine-1 \
-  --namespace ${NAMESPACE} \
-  --checkpoint-id manual-snapshot-123
-```
-
-Restore an existing snapshot-compatible pod in place:
-
-```bash
-snapshotctl restore \
-  --pod existing-restore-target \
-  --containers main \
-  --namespace ${NAMESPACE} \
-  --checkpoint-id manual-snapshot-123
+  --snapshot worker-snapshot
 ```
 
 ## Notes
 
-- `restore --pod` expects a pod that is already compatible with snapshot restore
 - `restore --manifest` creates a new restore target pod from the manifest you provide
 - `restore` returns after the restore request is submitted; it does not wait for completion
-- observe restore progress with pod readiness, events/logs, and per-container
-  `nvidia.com/snapshot-restore-status.<container>` annotations
+- observe restore progress through the pod's `Restored` status condition,
+  readiness, events, and agent logs
 - `snapshotctl` is useful for debugging and lower-level validation, but it does
   not replace the operator-managed checkpoint flow

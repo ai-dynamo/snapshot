@@ -6,9 +6,13 @@ package main
 import (
 	"os"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
@@ -34,7 +38,13 @@ func main() {
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                        scheme,
+		Scheme: scheme,
+		Cache: cache.Options{ByObject: map[client.Object]cache.ByObject{
+			// Cache only prepared checkpoint source Pods.
+			&corev1.Pod{}: {
+				Label: labels.SelectorFromSet(labels.Set{v1alpha1.CheckpointSourceLabel: "true"}),
+			},
+		}},
 		HealthProbeBindAddress:        ":8081",
 		LeaderElection:                true,
 		LeaderElectionID:              "snapshot-operator.nvidia.com",
@@ -55,11 +65,22 @@ func main() {
 	}
 
 	podSnapshotReconciler := &controller.PodSnapshotReconciler{
-		Client:   mgr.GetClient(),
-		Recorder: mgr.GetEventRecorderFor("podsnapshot-controller"),
+		Client:             mgr.GetClient(),
+		NonCacheReadClient: mgr.GetAPIReader(),
+		Recorder:           mgr.GetEventRecorderFor("podsnapshot-controller"),
 	}
 	if err := podSnapshotReconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up PodSnapshot controller")
+		os.Exit(1)
+	}
+
+	snapshotJobReconciler := &controller.SnapshotJobReconciler{
+		Client:             mgr.GetClient(),
+		NonCacheReadClient: mgr.GetAPIReader(),
+		Recorder:           mgr.GetEventRecorderFor("snapshotjob-controller"),
+	}
+	if err := snapshotJobReconciler.SetupWithManager(mgr); err != nil {
+		ctrl.Log.Error(err, "unable to set up SnapshotJob controller")
 		os.Exit(1)
 	}
 

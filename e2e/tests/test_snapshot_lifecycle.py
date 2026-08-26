@@ -17,6 +17,7 @@ def test_successful_snapshot_captures_cpu_gpu_and_fs(
 ) -> None:
     try:
         source, source_node = create_ready_source(config, run, gpu=True)
+        assert snapshot_annotations(source) == {}
         snap.wait_for_state_observations(
             config.namespace,
             run.source_pod,
@@ -36,11 +37,14 @@ def test_successful_snapshot_captures_cpu_gpu_and_fs(
             run.snapshot_name,
         )
         assert_podsnapshot_ready(pod_snapshot, content, source, source_node)
+        content_uid = content["metadata"]["uid"]
         manifest = snap.checkpoint_artifact_manifest(
             config,
             source_node,
-            run.checkpoint_id,
+            content_uid,
         )
+        assert f"contentUID: {content_uid}" in manifest
+        assert "containerName: main" in manifest
         assert "criuDump:" in manifest
         assert "cudaRestore:" in manifest
         assert f"podName: {run.source_pod}" in manifest
@@ -48,7 +52,7 @@ def test_successful_snapshot_captures_cpu_gpu_and_fs(
         artifact_listing = snap.checkpoint_artifact_listing(
             config,
             source_node,
-            run.checkpoint_id,
+            content_uid,
         )
         assert "./inventory.img" in artifact_listing
         assert "./manifest.yaml" in artifact_listing
@@ -59,7 +63,7 @@ def test_successful_snapshot_captures_cpu_gpu_and_fs(
         file_token = snap.checkpoint_rootfs_file(
             config,
             source_node,
-            run.checkpoint_id,
+            content_uid,
             "./tmp/e2e-state/file-token",
         )
         assert file_token.strip() == run.source_token
@@ -88,9 +92,12 @@ def test_successful_restore_recovers_cpu_gpu_and_fs_from_snapshot(
                 source_node=source_node,
             )
         )
-        snap.wait_for_restore_status(
-            config.namespace, run.restore_pod, "completed"
+        restored_pod = snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "True", "RestoreSucceeded"
         )
+        assert snapshot_annotations(restored_pod) == {
+            "nvidia.com/restore-from": run.snapshot_name
+        }
         snap.wait_for_pod_ready(config.namespace, run.restore_pod, timeout=300)
 
         output = snap.assert_restored_state(
@@ -108,42 +115,6 @@ def test_successful_restore_recovers_cpu_gpu_and_fs_from_snapshot(
             run.restore_pod,
             {"RestoreRequested", "RestoreSucceeded"},
         )
-    except Exception:
-        snap.debug_dump(config, run)
-        raise
-
-
-@pytest.mark.snapshot_failure
-def test_failed_snapshot_missing_checkpoint_id_label(
-    config: k8s.E2EConfig,
-    run: snap.TestRun,
-) -> None:
-    try:
-        source, _ = create_ready_source(
-            config,
-            run,
-            gpu=False,
-            include_checkpoint_label=False,
-        )
-        snap.create_podsnapshot(
-            config.namespace,
-            run.snapshot_name,
-            run.source_pod,
-            source.metadata.uid,
-        )
-
-        pod_snapshot, content = snap.wait_for_snapshot_failed(
-            config.namespace,
-            run.snapshot_name,
-        )
-        failed = snap.condition(pod_snapshot, "Failed")
-        ready = snap.condition(pod_snapshot, "Ready")
-        assert failed and failed.get("status") == "True"
-        assert ready is None or ready.get("status") != "True"
-        assert content is not None
-        content_failed = snap.condition(content, "Failed")
-        assert content_failed and content_failed.get("reason") == "MissingCheckpointID"
-        assert "checkpoint" in content_failed.get("message", "").lower()
     except Exception:
         snap.debug_dump(config, run)
         raise
@@ -168,7 +139,9 @@ def test_failed_restore_gpu_checkpoint_into_non_gpu_target(
                 source_node=source_node,
             )
         )
-        snap.wait_for_restore_status(config.namespace, run.restore_pod, "failed")
+        snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "False", "RestoreFailed"
+        )
 
         pod_snapshot, content = snap.wait_for_snapshot_ready(
             config.namespace,
@@ -177,7 +150,11 @@ def test_failed_restore_gpu_checkpoint_into_non_gpu_target(
         )
         assert snap.condition(pod_snapshot, "Ready")["status"] == "True"
         assert snap.condition(content, "Ready")["status"] == "True"
-        assert_restore_events(config.namespace, run.restore_pod, {"RestoreFailed"})
+        assert_restore_events(
+            config.namespace,
+            run.restore_pod,
+            {"RestoreFailed", "RestoreAlreadyFailed"},
+        )
     except Exception:
         snap.debug_dump(config, run)
         raise
@@ -208,21 +185,28 @@ def create_ready_source(
     run: snap.TestRun,
     *,
     gpu: bool,
-    include_target_annotation: bool = True,
-    include_checkpoint_label: bool = True,
+    annotations: dict[str, str] | None = None,
 ) -> tuple[object, str]:
     k8s.create_pod(
         snap.source_pod(
             config=config,
             run=run,
             gpu=gpu,
-            include_target_annotation=include_target_annotation,
-            include_checkpoint_label=include_checkpoint_label,
+            annotations=annotations,
         )
     )
     pod = snap.wait_for_pod_ready(config.namespace, run.source_pod)
     snap.wait_for_file(config.namespace, run.source_pod, snap.SOURCE_READY)
     return pod, pod.spec.node_name
+
+
+def snapshot_annotations(pod: object) -> dict[str, str]:
+    annotations = pod.metadata.annotations or {}
+    return {
+        key: value
+        for key, value in annotations.items()
+        if key.startswith(("nvidia.com/restore-", "nvidia.com/snapshot-"))
+    }
 
 
 def assert_podsnapshot_ready(

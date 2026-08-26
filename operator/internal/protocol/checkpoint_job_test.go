@@ -64,9 +64,7 @@ func TestNewCheckpointJob(t *testing.T) {
 	}, CheckpointJobOptions{
 		Namespace:             "test-ns",
 		TargetContainer:       "main",
-		CheckpointID:          "hash",
-		ArtifactVersion:       "2",
-		SeccompProfile:        DefaultSeccompLocalhostProfile,
+		SeccompProfile:        snapshotv1alpha1.DefaultSeccompLocalhostProfile,
 		Name:                  "test-job",
 		ActiveDeadlineSeconds: ptr.To(int64(60)),
 		TTLSecondsAfterFinish: ptr.To(int32(300)),
@@ -79,19 +77,8 @@ func TestNewCheckpointJob(t *testing.T) {
 	if job.Name != "test-job" || job.Namespace != "test-ns" {
 		t.Fatalf("unexpected job identity: %#v", job.ObjectMeta)
 	}
-	if job.Labels[CheckpointIDLabel] != "hash" {
-		t.Fatalf("expected checkpoint hash label on job: %#v", job.Labels)
-	}
-	if job.Spec.Template.Labels[CheckpointSourceLabel] != "true" {
+	if job.Spec.Template.Labels[snapshotv1alpha1.CheckpointSourceLabel] != "true" {
 		t.Fatalf("expected checkpoint source label on template: %#v", job.Spec.Template.Labels)
-	}
-	if job.Spec.Template.Annotations[CheckpointArtifactVersionAnnotation] != "2" {
-		t.Fatalf("expected checkpoint artifact version annotation on template: %#v", job.Spec.Template.Annotations)
-	}
-	// The capture Job must not stamp the target-containers annotation; the target flows via
-	// CheckpointJobOptions.TargetContainer. A regression that re-introduces the capture stamp fails here.
-	if _, ok := job.Spec.Template.Annotations[TargetContainersAnnotation]; ok {
-		t.Fatalf("capture job must not stamp %s annotation: %#v", TargetContainersAnnotation, job.Spec.Template.Annotations)
 	}
 	if len(job.Spec.Template.Spec.Volumes) != 1 || job.Spec.Template.Spec.Volumes[0].Name != snapshotv1alpha1.SnapshotControlVolumeName {
 		t.Fatalf("expected only %s volume, got %#v", snapshotv1alpha1.SnapshotControlVolumeName, job.Spec.Template.Spec.Volumes)
@@ -143,8 +130,6 @@ func TestNewCheckpointJobWrapsTargetContainer(t *testing.T) {
 	}, CheckpointJobOptions{
 		Namespace:             "test-ns",
 		TargetContainer:       "worker",
-		CheckpointID:          "hash",
-		ArtifactVersion:       "2",
 		Name:                  "test-job",
 		TTLSecondsAfterFinish: ptr.To(int32(300)),
 		WrapLaunchJob:         true,
@@ -222,7 +207,6 @@ func TestNewCheckpointJobDisablesServiceMeshInjection(t *testing.T) {
 
 			job, err := NewCheckpointJob(source, CheckpointJobOptions{
 				Namespace:       "test-ns",
-				CheckpointID:    "hash",
 				Name:            "test-job",
 				TargetContainer: "main",
 			})
@@ -271,12 +255,34 @@ func TestNewCheckpointJobRequiresTarget(t *testing.T) {
 			Containers: []corev1.Container{{Name: "worker", Command: []string{"python3"}}},
 		},
 	}, CheckpointJobOptions{
-		Namespace:    "test-ns",
-		CheckpointID: "hash",
-		Name:         "test-job",
+		Namespace: "test-ns",
+		Name:      "test-job",
 	})
 	if err == nil || !strings.Contains(err.Error(), "TargetContainer is required") {
 		t.Fatalf("expected missing-target error, got %v", err)
+	}
+}
+
+func TestNewCheckpointJobRejectsRestoreAnnotation(t *testing.T) {
+	for _, value := range []string{"snapshot-a", ""} {
+		t.Run(value, func(t *testing.T) {
+			_, err := NewCheckpointJob(&corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{snapshotv1alpha1.RestoreFromAnnotation: value},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Command: []string{"python3"}}},
+				},
+			}, CheckpointJobOptions{
+				Namespace:       "test-ns",
+				TargetContainer: "main",
+				Name:            "test-job",
+			})
+
+			if err == nil || !strings.Contains(err.Error(), snapshotv1alpha1.RestoreFromAnnotation) {
+				t.Fatalf("expected restore annotation rejection, got %v", err)
+			}
+		})
 	}
 }
 
@@ -288,7 +294,6 @@ func TestNewCheckpointJobRejectsUnknownTarget(t *testing.T) {
 	}, CheckpointJobOptions{
 		Namespace:       "test-ns",
 		TargetContainer: "missing",
-		CheckpointID:    "hash",
 		Name:            "test-job",
 	})
 	if err == nil || !strings.Contains(err.Error(), `"missing"`) {
@@ -317,8 +322,6 @@ func TestNewCheckpointJobNoWrapByDefault(t *testing.T) {
 	}, CheckpointJobOptions{
 		Namespace:       "test-ns",
 		TargetContainer: "main",
-		CheckpointID:    "hash",
-		ArtifactVersion: "2",
 		Name:            "test-job",
 		WrapLaunchJob:   false, // explicit: this is the default from snapshotctl
 	})
@@ -335,17 +338,5 @@ func TestNewCheckpointJobNoWrapByDefault(t *testing.T) {
 	}
 	if len(main.Command) > 0 && main.Command[0] == "cuda-checkpoint" {
 		t.Errorf("command must not be wrapped with cuda-checkpoint by default")
-	}
-}
-
-func TestGetCheckpointJobName(t *testing.T) {
-	name := GetCheckpointJobName("abc123def4567890", "2")
-	if name != "checkpoint-job-abc123def4567890-2" {
-		t.Fatalf("unexpected checkpoint job name: %s", name)
-	}
-
-	defaultName := GetCheckpointJobName("abc123def4567890", "")
-	if defaultName != "checkpoint-job-abc123def4567890-"+DefaultCheckpointArtifactVersion {
-		t.Fatalf("unexpected default checkpoint job name: %s", defaultName)
 	}
 }

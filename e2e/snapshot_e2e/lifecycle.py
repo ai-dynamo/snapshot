@@ -280,21 +280,22 @@ def condition(obj: dict[str, Any], condition_type: str) -> dict[str, Any] | None
     return None
 
 
-def wait_for_restore_status(
+def wait_for_restored_condition(
     namespace: str,
     pod_name: str,
     status: str,
+    reason: str,
     timeout: int = 600,
 ) -> client.V1Pod:
-    key = "nvidia.com/snapshot-restore-status.main"
-
     def check() -> client.V1Pod | None:
         pod = k8s.read_pod(namespace, pod_name)
-        actual = (pod.metadata.annotations or {}).get(key)
-        if actual == status:
+        restored = pod_condition(pod, "snapshot/Restored")
+        if restored and restored.status == status and restored.reason == reason:
             return pod
-        if status != "failed" and actual == "failed":
-            raise AssertionError(f"restore failed for {namespace}/{pod_name}")
+        if reason != "RestoreFailed" and restored and restored.reason == "RestoreFailed":
+            raise AssertionError(
+                f"restore failed for {namespace}/{pod_name}: {restored.message}"
+            )
         return None
 
     def detail() -> str:
@@ -302,34 +303,41 @@ def wait_for_restore_status(
             pod = k8s.read_pod(namespace, pod_name)
         except ApiException as exc:
             return f"api_error={k8s.api_error_detail(exc)}"
-        actual = (pod.metadata.annotations or {}).get(key, "<unset>")
-        return f"{key}={actual}"
+        restored = pod_condition(pod, "snapshot/Restored")
+        return f"snapshot/Restored={restored or '<unset>'}"
 
     return wait_for(
-        f"restore status {status} on {namespace}/{pod_name}",
+        f"snapshot/Restored={status}/{reason} on {namespace}/{pod_name}",
         check,
         timeout,
         detail=detail,
     )
 
 
+def pod_condition(pod: client.V1Pod, condition_type: str) -> client.V1PodCondition | None:
+    for item in pod.status.conditions or []:
+        if item.type == condition_type:
+            return item
+    return None
+
+
 def checkpoint_artifact_manifest(
-    config: k8s.E2EConfig, node: str, checkpoint_id: str
+    config: k8s.E2EConfig, node: str, content_uid: str
 ) -> str:
     return k8s.exec_command(
         config.namespace,
         checkpoint_agent_pod(config, node),
-        f"cat {checkpoint_artifact_path(checkpoint_id)}/manifest.yaml",
+        f"cat {checkpoint_artifact_path(content_uid)}/manifest.yaml",
     )
 
 
 def checkpoint_artifact_listing(
-    config: k8s.E2EConfig, node: str, checkpoint_id: str
+    config: k8s.E2EConfig, node: str, content_uid: str
 ) -> str:
     return k8s.exec_command(
         config.namespace,
         checkpoint_agent_pod(config, node),
-        f"cd {checkpoint_artifact_path(checkpoint_id)} && "
+        f"cd {checkpoint_artifact_path(content_uid)} && "
         "find . -maxdepth 1 -type f -print | sort && "
         "tar -tf rootfs-diff.tar | sort",
     )
@@ -338,19 +346,21 @@ def checkpoint_artifact_listing(
 def checkpoint_rootfs_file(
     config: k8s.E2EConfig,
     node: str,
-    checkpoint_id: str,
+    content_uid: str,
     path: str,
 ) -> str:
     return k8s.exec_command(
         config.namespace,
         checkpoint_agent_pod(config, node),
-        f"cd {checkpoint_artifact_path(checkpoint_id)} && "
+        f"cd {checkpoint_artifact_path(content_uid)} && "
         f"tar -xOf rootfs-diff.tar {path}",
     )
 
 
-def checkpoint_artifact_path(checkpoint_id: str) -> str:
-    return shlex.quote(f"{AGENT_CHECKPOINT_DIR}/{checkpoint_id}/versions/1")
+def checkpoint_artifact_path(content_uid: str) -> str:
+    return shlex.quote(
+        f"{AGENT_CHECKPOINT_DIR}/artifacts/{content_uid}/containers/{CONTAINER}"
+    )
 
 
 def checkpoint_agent_pod(config: k8s.E2EConfig, node: str) -> str:

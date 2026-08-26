@@ -5,7 +5,7 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
+	"crypto/sha256"
 	"fmt"
 	"time"
 
@@ -14,7 +14,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	ktypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -64,33 +63,12 @@ func isContainerReady(pod *corev1.Pod, containerName string) bool {
 	return false
 }
 
-func annotatePod(ctx context.Context, clientset kubernetes.Interface, log logr.Logger, pod *corev1.Pod, annotations map[string]string) error {
-	patchBytes, err := json.Marshal(map[string]any{
-		"metadata": map[string]any{
-			"annotations": annotations,
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("failed to build annotation patch payload: %w", err)
-	}
-
-	_, err = clientset.CoreV1().Pods(pod.Namespace).Patch(
-		ctx, pod.Name, ktypes.MergePatchType, patchBytes, metav1.PatchOptions{},
-	)
-	if err != nil {
-		log.Error(err, "Failed to annotate pod",
-			"pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name),
-			"annotations", annotations,
-		)
-	}
-	return err
+// checkpointLeaseName returns a DNS-safe Lease name derived from the immutable
+// content/container artifact identity.
+func checkpointLeaseName(contentUID, containerName string) string {
+	digest := sha256.Sum256([]byte(contentUID + "\x00" + containerName))
+	return fmt.Sprintf("snapshot-capture-%x", digest[:16])
 }
-
-// checkpointLeaseName returns the Lease guarding the artifact identified by checkpointID. The
-// checkpoint ID is the cluster-global artifact identity (the artifact path has no namespace
-// segment), so the lease name derives from it, not from the work-order name. Lease names are
-// DNS-1123 subdomains; reconcileSourcePod validates the generated name before use.
-func checkpointLeaseName(checkpointID string) string { return "checkpoint-lease-" + checkpointID }
 
 // acquireLease acquires or renews a checkpoint lease at an arbitrary namespace/name key,
 // returning false when another live holder owns it.
@@ -237,4 +215,21 @@ func emitPodEvent(ctx context.Context, clientset kubernetes.Interface, log logr.
 			"message", message,
 		)
 	}
+}
+
+func setPodCondition(status *corev1.PodStatus, condition corev1.PodCondition) {
+	condition.LastTransitionTime = metav1.Now()
+	for i := range status.Conditions {
+		existing := &status.Conditions[i]
+		if existing.Type != condition.Type {
+			continue
+		}
+		if existing.Status == condition.Status && !existing.LastTransitionTime.IsZero() {
+			condition.LastTransitionTime = existing.LastTransitionTime
+		}
+		condition.LastProbeTime = existing.LastProbeTime
+		*existing = condition
+		return
+	}
+	status.Conditions = append(status.Conditions, condition)
 }

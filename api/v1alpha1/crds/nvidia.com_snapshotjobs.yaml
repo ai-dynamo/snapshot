@@ -68,8 +68,7 @@ spec:
                 default: 3600
                 description: |-
                   ActiveDeadlineSeconds bounds the total time allowed for pod scheduling,
-                  quiesce, dump, and all containers exiting. Applied verbatim to the
-                  batch/v1 Job.
+                  quiesce, and dump. Applied verbatim to the batch/v1 Job.
                 format: int64
                 minimum: 1
                 type: integer
@@ -8654,11 +8653,26 @@ spec:
                   - type
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
               podSnapshotName:
                 description: |-
                   PodSnapshotName is the name of the PodSnapshot produced by this job. Set
                   when the PodSnapshot is created. Distinguishes "never created" (empty)
                   from "created but missing" (set, not found).
+                type: string
+              podSnapshotUID:
+                description: |-
+                  PodSnapshotUID identifies the one PodSnapshot incarnation accepted for
+                  this one-shot capture. Once set, a missing PodSnapshot or a same-name
+                  object with another UID is terminal and must never start another capture.
+                type: string
+              sourceJobUID:
+                description: |-
+                  SourceJobUID identifies the one source batch/v1 Job incarnation accepted
+                  for this one-shot SnapshotJob. Once set, a missing Job or a same-name Job
+                  with another UID is terminal and must never cause the workload to run again.
                 type: string
               startedAt:
                 description: |-
@@ -8668,7 +8682,13 @@ spec:
                 format: date-time
                 type: string
             type: object
+        required:
+        - spec
         type: object
+        x-kubernetes-validations:
+        - message: metadata.name must be no more than 63 characters because SnapshotJob
+            uses it as a label value
+          rule: size(self.metadata.name) <= 63
     served: true
     storage: true
     subresources:

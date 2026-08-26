@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
@@ -20,22 +19,22 @@ import (
 
 	"github.com/ai-dynamo/snapshot/agent/internal/criu"
 	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
+	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
 
-// CheckpointRequest holds per-checkpoint identifiers for a checkpoint operation.
+// CheckpointRequest holds the content-owned inputs for a checkpoint operation.
 type CheckpointRequest struct {
-	ContainerID        string
-	ContainerName      string
-	CheckpointID       string
-	CheckpointLocation string
-	StartedAt          time.Time
-	NodeName           string
-	PodName            string
-	PodNamespace       string
-	PodIP              string
-	Clientset          kubernetes.Interface
+	ContainerID   string
+	ContainerName string
+	ContentUID    string
+	StartedAt     time.Time
+	NodeName      string
+	PodName       string
+	PodNamespace  string
+	PodIP         string
+	Clientset     kubernetes.Interface
 }
 
 type checkpointPhaseTimings struct {
@@ -46,24 +45,26 @@ type checkpointPhaseTimings struct {
 
 // Checkpoint performs a CRIU dump of a container.
 //
-// The checkpoint directory is staged under tmp/<uuid> during the operation.
+// The checkpoint directory is staged under the content-owned .tmp directory.
 // On success, the previous checkpoint is removed and the staged directory is
-// renamed into place at the base path root.
+// renamed atomically into the content/container artifact path.
 func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req CheckpointRequest, cfg *types.AgentConfig) error {
 	checkpointStart := time.Now()
 	log.Info("=== Starting checkpoint operation ===")
 
-	if strings.TrimSpace(req.CheckpointID) == "" {
-		return fmt.Errorf("checkpoint ID is required")
+	finalDir, err := nsmount.ResolveArtifactPath(cfg.Storage.BasePath, req.ContentUID, req.ContainerName)
+	if err != nil {
+		return fmt.Errorf("resolve checkpoint artifact path: %w", err)
 	}
-	if req.CheckpointLocation == "" {
-		return fmt.Errorf("checkpoint location is required")
+	tmpRoot, err := nsmount.ResolveArtifactStagingRoot(cfg.Storage.BasePath, req.ContentUID)
+	if err != nil {
+		return fmt.Errorf("resolve checkpoint staging root: %w", err)
 	}
-
-	finalDir := req.CheckpointLocation
-	tmpRoot := filepath.Join(filepath.Dir(finalDir), "tmp")
 	if err := os.MkdirAll(tmpRoot, 0700); err != nil {
 		return fmt.Errorf("failed to create checkpoint staging root: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(finalDir), 0700); err != nil {
+		return fmt.Errorf("failed to create checkpoint container root: %w", err)
 	}
 	tmpDir := filepath.Join(tmpRoot, uuid.NewString())
 	if err := os.Mkdir(tmpDir, 0700); err != nil {
@@ -240,7 +241,8 @@ func configureCheckpoint(
 	}
 
 	m := types.NewCheckpointManifest(
-		req.CheckpointID,
+		req.ContentUID,
+		req.ContainerName,
 		types.NewCRIUDumpManifest(criuOpts, cfg.CRIU),
 		types.NewSourcePodManifest(req.ContainerID, state.PID, req.NodeName, req.PodName, req.PodNamespace, req.PodIP, state.StdioFDs),
 		types.NewOverlayManifest(cfg.Overlay, state.UpperDir, state.OCISpec),

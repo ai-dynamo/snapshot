@@ -49,6 +49,11 @@ func BuildDumpOptions(
 		Pid:     proto.Int32(int32(state.PID)),
 		Root:    proto.String(state.RootFS),
 		LogFile: proto.String(dumpLogFilename),
+		// The dump always terminates the source process. Leaving it running is
+		// not a supported mode (a CUDA-locked source is never resumed), and the
+		// operator treats the source's death as the expected outcome of a
+		// successful capture.
+		LeaveRunning: proto.Bool(false),
 		// Always externalize network namespace
 		External: []string{fmt.Sprintf("net[%d]:extNetNs", state.NetNSInode)},
 	}
@@ -68,7 +73,6 @@ func BuildDumpOptions(
 	}
 
 	// Dump-only options
-	criuOpts.LeaveRunning = proto.Bool(settings.LeaveRunning)
 	criuOpts.OrphanPtsMaster = proto.Bool(settings.OrphanPtsMaster)
 	criuOpts.ExtMasters = proto.Bool(settings.ExtMasters)
 	criuOpts.AutoDedup = proto.Bool(settings.AutoDedup)

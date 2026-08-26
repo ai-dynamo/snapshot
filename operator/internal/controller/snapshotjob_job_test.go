@@ -19,7 +19,7 @@ import (
 
 func minimalSnapshotJob() *snapshotv1alpha1.SnapshotJob {
 	return &snapshotv1alpha1.SnapshotJob{
-		ObjectMeta: metav1.ObjectMeta{Name: "warm-worker", Namespace: "inference"},
+		ObjectMeta: metav1.ObjectMeta{Name: "warm-worker", Namespace: "inference", UID: "sj-uid"},
 		Spec: snapshotv1alpha1.SnapshotJobSpec{
 			PodTemplate: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
@@ -46,8 +46,7 @@ func TestBuildSourceJob(t *testing.T) {
 		assert.Equal(t, ptr.To(int64(1800)), job.Spec.ActiveDeadlineSeconds)
 		assert.Equal(t, ptr.To(int32(0)), job.Spec.BackoffLimit)
 		assert.Nil(t, job.Spec.TTLSecondsAfterFinished, "SnapshotJob cleanup is controller-driven, not TTL-driven")
-		assert.Equal(t, "warm-worker", job.Labels[snapshotv1alpha1.CheckpointIDLabel],
-			"CheckpointID must be sj.Name, matching the artifact path <basePath>/<sj.Name>/versions/1")
+		assert.Equal(t, "true", job.Spec.Template.Labels[snapshotv1alpha1.CheckpointSourceLabel])
 
 		main := requireContainer(t, job.Spec.Template.Spec.Containers, "worker")
 		require.NotNil(t, main.ReadinessProbe, "target container must get the ready-for-snapshot probe")
@@ -66,7 +65,62 @@ func TestBuildSourceJob(t *testing.T) {
 		require.NoError(t, err)
 
 		assert.Equal(t, "warm-worker", job.Spec.Template.Labels[snapshotv1alpha1.SnapshotJobOwnerLabel])
+		assert.Equal(t, "sj-uid", job.Spec.Template.Labels[snapshotv1alpha1.SnapshotJobOwnerUIDLabel])
 		assert.Equal(t, "label", job.Spec.Template.Labels["existing"])
+	})
+
+	// SnapshotJob must preserve the caller's pod shape. In particular, it may
+	// not inject another long-running container that has an independent
+	// lifecycle or changes the capture target.
+	t.Run("no extra workload containers are injected", func(t *testing.T) {
+		sj := minimalSnapshotJob()
+		sj.Spec.PodTemplate.Spec.Containers = append(sj.Spec.PodTemplate.Spec.Containers,
+			corev1.Container{Name: "helper", Image: "test:latest"})
+
+		job, err := buildSourceJob(sj)
+		require.NoError(t, err)
+
+		var names []string
+		for _, c := range job.Spec.Template.Spec.Containers {
+			names = append(names, c.Name)
+		}
+		assert.ElementsMatch(t, []string{"worker", "helper"}, names,
+			"only the caller's containers may run; an injected extra container would never exit")
+		assert.Empty(t, job.Spec.Template.Spec.InitContainers)
+
+		// A restartPolicy other than Never would restart the target after it
+		// exits 0, so the pod never reaches Succeeded.
+		assert.Equal(t, corev1.RestartPolicyNever, job.Spec.Template.Spec.RestartPolicy)
+
+		// Service-mesh sidecars are the classic cause of a Job that captures
+		// fine and then hangs forever: they never exit on their own.
+		assert.Equal(t, "disabled", job.Spec.Template.Annotations["linkerd.io/inject"])
+		assert.Equal(t, "false", job.Spec.Template.Annotations["sidecar.istio.io/inject"])
+	})
+
+	// The workload signals readiness by writing this file, and the agent
+	// writes its post-dump sentinel next to it. If the probe and the workload
+	// ever disagree on the path, the pod never goes Ready and the capture
+	// never starts — a silent hang rather than a failure.
+	t.Run("readiness probe reads the ready file from the control mount", func(t *testing.T) {
+		sj := minimalSnapshotJob()
+
+		job, err := buildSourceJob(sj)
+		require.NoError(t, err)
+
+		main := requireContainer(t, job.Spec.Template.Spec.Containers, "worker")
+		require.NotNil(t, main.ReadinessProbe)
+		require.NotNil(t, main.ReadinessProbe.Exec)
+		assert.Equal(t,
+			[]string{"cat", snapshotv1alpha1.SnapshotControlMountPath + "/" + snapshotv1alpha1.ReadyForSnapshotFile},
+			main.ReadinessProbe.Exec.Command)
+
+		var mountPaths []string
+		for _, m := range main.VolumeMounts {
+			mountPaths = append(mountPaths, m.MountPath)
+		}
+		assert.Contains(t, mountPaths, snapshotv1alpha1.SnapshotControlMountPath,
+			"the target container must mount the control volume the probe and sentinel live in")
 	})
 
 	t.Run("WrapLaunchJob is always false: command/args pass through unchanged", func(t *testing.T) {
@@ -82,12 +136,8 @@ func TestBuildSourceJob(t *testing.T) {
 	})
 
 	t.Run("SnapshotJob name longer than a label value is a terminal spec error", func(t *testing.T) {
-		// The CRD does not constrain metadata.name length (up to 253 chars, RFC
-		// 1123 subdomain), but sj.Name becomes a label VALUE (capped at 63, RFC
-		// 1123 label value) via SnapshotJobOwnerLabel and CheckpointIDLabel.
-		// Without this check, a long-named SnapshotJob would fail Job creation
-		// with an apiserver error and retry forever, since that's not an
-		// AlreadyExists.
+		// Admission rejects this today, but construction keeps the check for
+		// objects that predate or bypass the current CRD schema.
 		sj := minimalSnapshotJob()
 		sj.Name = strings.Repeat("a", 64)
 

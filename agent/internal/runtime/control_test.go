@@ -68,6 +68,35 @@ func TestWriteControlSentinel_RejectsInvalidPID(t *testing.T) {
 	}
 }
 
+func TestControlSentinelExistsInDir(t *testing.T) {
+	dir := t.TempDir()
+	exists, err := controlSentinelExistsInDir(dir, "restore-complete")
+	if err != nil {
+		t.Fatalf("check missing sentinel: %v", err)
+	}
+	if exists {
+		t.Fatal("missing sentinel reported as present")
+	}
+
+	if err := writeSentinelInDir(dir, "restore-complete"); err != nil {
+		t.Fatalf("writeSentinelInDir: %v", err)
+	}
+	exists, err = controlSentinelExistsInDir(dir, "restore-complete")
+	if err != nil {
+		t.Fatalf("check existing sentinel: %v", err)
+	}
+	if !exists {
+		t.Fatal("existing sentinel reported as missing")
+	}
+}
+
+func TestControlSentinelExistsInDir_MissingDir(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	if _, err := controlSentinelExistsInDir(missing, "restore-complete"); err == nil {
+		t.Fatal("expected error for missing control mount")
+	}
+}
+
 func TestRemoveControlSentinel_MissingFile(t *testing.T) {
 	dir := t.TempDir()
 	if err := RemoveControlSentinel(dir, "restore-complete"); err != nil {
