@@ -155,9 +155,9 @@ func CaptureDeletedFiles(upperDir, checkpointDir string) (bool, error) {
 
 // ApplyRootfsDiff extracts rootfs-diff.tar into the target root.
 //
-// The archive is copied to local disk first. tar walks members with many small
-// reads; doing that directly from NFS is much slower than one sequential copy
-// plus a local extract.
+// The archive is copied to local disk first. Extraction walks members with
+// many small reads; doing that directly from NFS is much slower than one
+// sequential copy plus a local extract.
 func ApplyRootfsDiff(checkpointPath, targetRoot string, log logr.Logger) error {
 	rootfsDiffPath := filepath.Join(checkpointPath, rootfsDiffFilename)
 	info, err := os.Stat(rootfsDiffPath)
@@ -179,15 +179,9 @@ func ApplyRootfsDiff(checkpointPath, targetRoot string, log logr.Logger) error {
 	}
 	defer cleanup()
 
-	// --skip-old-files: silently skip files that already exist in the restore target.
-	// The rootfs diff only contains overlay upperdir changes (runtime-generated files
-	// like triton caches, tmp files) — base image files should not be overwritten.
 	log.Info("Applying rootfs diff", "target", targetRoot, "bytes", info.Size())
-	cmd := exec.Command("tar", "--skip-old-files", "--blocking-factor=2048", "-C", targetRoot, "-xf", localPath)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("tar extract failed: %w", err)
+	if err := ExtractRootfsDiff(localPath, targetRoot, log); err != nil {
+		return fmt.Errorf("rootfs diff extract failed: %w", err)
 	}
 	return nil
 }

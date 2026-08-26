@@ -249,17 +249,17 @@ COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-
 
 # Network binaries needed during restore:
 #   ip  — address/route restore (criu/net.c)
-#   tar — used by runtime.ApplyRootfsDiff
 # Network lock is set to SKIP (--network-lock skip) in BuildRestoreOpts, so
 # criu never forks iptables-restore/ip6tables-restore on this path and neither
 # binary needs to be in the bundle. See BuildRestoreOpts for why SKIP is safe
-# for restore specifically.
-# All resolve through PATH inside the namespace.
+# for restore specifically. The rootfs diff is extracted in-process by
+# nsrestore (runtime.ExtractRootfsDiff), so no tar binary is bundled.
+# ip resolves through PATH inside the namespace.
 RUN set -eu; \
-    cp -L "$(command -v ip)" "$(command -v tar)" /snapshot-binaries/; \
+    cp -L "$(command -v ip)" /snapshot-binaries/; \
     chmod +x /snapshot-binaries/criu /snapshot-binaries/nsrestore \
              /snapshot-binaries/cuda-checkpoint /snapshot-binaries/cuda-checkpoint-helper \
-             /snapshot-binaries/ip /snapshot-binaries/tar
+             /snapshot-binaries/ip
 
 # Shared-library closure of the bundled binaries and plugins.
 #
@@ -285,7 +285,7 @@ RUN set -eu; \
 # a silent ldd failure leaves lib/ empty; asserting here catches that.
 RUN set -eu; \
     for f in /snapshot-binaries/criu /snapshot-binaries/ip \
-             /snapshot-binaries/tar /snapshot-binaries/criu-plugins/*.so; do \
+             /snapshot-binaries/criu-plugins/*.so; do \
       [ -f "$f" ] || continue; \
       if LD_LIBRARY_PATH=/snapshot-binaries/lib ldd "$f" 2>&1 | grep -q 'not found'; then \
         echo "ERROR: unresolved shared libraries in $f:" >&2; \
