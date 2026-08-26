@@ -198,9 +198,6 @@ if __name__ == "__main__":
     main()
 ```
 
-The `__main__` guard prevents TensorRT-LLM's spawned MPI workers from running
-the application entrypoint again.
-
 The source process waits in `quiesce_for_snapshot()` and is terminated after
 capture. The restored process resumes from that same loop, sees
 `restore-complete`, and calls `resume_after_restore(llm)`.
