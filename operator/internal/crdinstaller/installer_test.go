@@ -7,13 +7,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apiextensionsfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
+	apiextensionsv1client "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/typed/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -24,10 +29,16 @@ import (
 )
 
 func init() {
-	// Real intervals would make the establishment-wait tests slow; polling
-	// faster than the fake client can possibly change state is safe in tests.
-	establishedPollInterval = time.Millisecond
-	establishedTimeout = 200 * time.Millisecond
+	// client-go's WatchListClient feature makes reflectors fetch initial state
+	// through the watch (SendInitialEvents) instead of list+watch. The fake
+	// clientset's watch ignores SendInitialEvents, so an informer never syncs
+	// against it — force the legacy list+watch protocol in tests. Must be set
+	// before client-go first reads its feature gates.
+	os.Setenv("KUBE_FEATURE_WatchListClient", "false")
+
+	// The real timeout would make the establishment-timeout tests slow; the
+	// fake clientset delivers watch events in milliseconds.
+	establishedTimeout = 2 * time.Second
 }
 
 func crdManifest(name string) string {
@@ -39,6 +50,31 @@ spec:
   group: nvidia.com
   scope: Namespaced
 `
+}
+
+func crdWithEstablished(name string, established bool) *apiextensionsv1.CustomResourceDefinition {
+	status := apiextensionsv1.ConditionFalse
+	if established {
+		status = apiextensionsv1.ConditionTrue
+	}
+	return &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Status: apiextensionsv1.CustomResourceDefinitionStatus{
+			Conditions: []apiextensionsv1.CustomResourceDefinitionCondition{
+				{Type: apiextensionsv1.Established, Status: status},
+			},
+		},
+	}
+}
+
+// establishedCRDClient returns a CRD watch client whose tracker already holds
+// an Established CRD for every given name, so waits succeed immediately.
+func establishedCRDClient(names ...string) apiextensionsv1client.CustomResourceDefinitionInterface {
+	objs := make([]runtime.Object, 0, len(names))
+	for _, name := range names {
+		objs = append(objs, crdWithEstablished(name, true))
+	}
+	return apiextensionsfake.NewSimpleClientset(objs...).ApiextensionsV1().CustomResourceDefinitions()
 }
 
 // client.ApplyConfigurationFromUnstructured wraps the object in an unexported
@@ -53,21 +89,17 @@ type applyConfigUnstructured interface {
 // stand in, because its Apply bumps on every call including an identical
 // re-apply, inverting the no-op case this installer exists to detect.
 type fakeClient struct {
-	stored               map[string]string // CRD name -> resource version
-	nextRV               map[string]string // CRD name -> resource version the apply should yield
-	applied              []string
-	fieldMgr             string
-	forced               bool
-	applyErr             error
-	getErr               error
-	transientGetErrs     int // fail this many Gets of stored CRDs, then succeed
-	failStoredGetsAfter  int // >0: fail Gets of stored CRDs after this many succeeded
-	getsUntilEstablished int // 0 means "established from the first Get"
-	gets                 map[string]int
+	stored   map[string]string // CRD name -> resource version
+	nextRV   map[string]string // CRD name -> resource version the apply should yield
+	applied  []string
+	fieldMgr string
+	forced   bool
+	applyErr error
+	getErr   error
 }
 
 func newFakeClient() *fakeClient {
-	return &fakeClient{stored: map[string]string{}, nextRV: map[string]string{}, gets: map[string]int{}}
+	return &fakeClient{stored: map[string]string{}, nextRV: map[string]string{}}
 }
 
 func (f *fakeClient) Get(_ context.Context, key client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
@@ -80,31 +112,8 @@ func (f *fakeClient) Get(_ context.Context, key client.ObjectKey, obj client.Obj
 			Group: "apiextensions.k8s.io", Resource: "customresourcedefinitions",
 		}, key.Name)
 	}
-	// Only Gets of stored CRDs fail, so the pre-apply existence check (which
-	// hits the NotFound branch above for new CRDs) is unaffected and these
-	// errors land in the establishment wait.
-	if f.transientGetErrs > 0 {
-		f.transientGetErrs--
-		return errors.New("transient: connection reset")
-	}
-	// f.gets counts successful Gets, so this fails every Get once the first
-	// failStoredGetsAfter have gone through.
-	if f.failStoredGetsAfter > 0 && f.gets[key.Name] >= f.failStoredGetsAfter {
-		return errors.New("transient: connection reset")
-	}
 	obj.SetName(key.Name)
 	obj.SetResourceVersion(rv)
-
-	f.gets[key.Name]++
-	if u, ok := obj.(*unstructured.Unstructured); ok {
-		status := "False"
-		if f.gets[key.Name] > f.getsUntilEstablished {
-			status = "True"
-		}
-		_ = unstructured.SetNestedSlice(u.Object, []any{
-			map[string]any{"type": "Established", "status": status},
-		}, "status", "conditions")
-	}
 	return nil
 }
 
@@ -137,8 +146,9 @@ func (f *fakeClient) Apply(_ context.Context, obj runtime.ApplyConfiguration, op
 func TestInstallCRDsCreatesMissingDefinition(t *testing.T) {
 	cl := newFakeClient()
 	cl.nextRV["podsnapshots.nvidia.com"] = "1"
+	crdClient := establishedCRDClient("podsnapshots.nvidia.com")
 
-	results, err := InstallCRDs(t.Context(), cl, logr.Discard(), []string{crdManifest("podsnapshots.nvidia.com")})
+	results, err := InstallCRDs(t.Context(), cl, crdClient, logr.Discard(), []string{crdManifest("podsnapshots.nvidia.com")})
 
 	require.NoError(t, err)
 	assert.Equal(t, Results{{Name: "podsnapshots.nvidia.com", Action: ActionCreated}}, results)
@@ -151,8 +161,9 @@ func TestInstallCRDsUpdatesChangedDefinition(t *testing.T) {
 	cl := newFakeClient()
 	cl.stored["podsnapshots.nvidia.com"] = "7"
 	cl.nextRV["podsnapshots.nvidia.com"] = "8"
+	crdClient := establishedCRDClient("podsnapshots.nvidia.com")
 
-	results, err := InstallCRDs(t.Context(), cl, logr.Discard(), []string{crdManifest("podsnapshots.nvidia.com")})
+	results, err := InstallCRDs(t.Context(), cl, crdClient, logr.Discard(), []string{crdManifest("podsnapshots.nvidia.com")})
 
 	require.NoError(t, err)
 	assert.Equal(t, Results{{Name: "podsnapshots.nvidia.com", Action: ActionUpdated}}, results)
@@ -163,12 +174,13 @@ func TestInstallCRDsIsNoOpWhenUpToDate(t *testing.T) {
 	cl := newFakeClient()
 	cl.stored["podsnapshots.nvidia.com"] = "7"
 	cl.stored["podsnapshotcontents.nvidia.com"] = "9"
+	crdClient := establishedCRDClient("podsnapshots.nvidia.com", "podsnapshotcontents.nvidia.com")
 
 	manifests := []string{
 		crdManifest("podsnapshots.nvidia.com"),
 		crdManifest("podsnapshotcontents.nvidia.com"),
 	}
-	results, err := InstallCRDs(t.Context(), cl, logr.Discard(), manifests)
+	results, err := InstallCRDs(t.Context(), cl, crdClient, logr.Discard(), manifests)
 
 	require.NoError(t, err)
 	assert.Equal(t, Results{
@@ -182,7 +194,7 @@ func TestInstallCRDsRejectsNonCRDManifest(t *testing.T) {
 	cl := newFakeClient()
 	manifest := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: nope\n"
 
-	_, err := InstallCRDs(t.Context(), cl, logr.Discard(), []string{manifest})
+	_, err := InstallCRDs(t.Context(), cl, establishedCRDClient(), logr.Discard(), []string{manifest})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "expected kind CustomResourceDefinition")
@@ -197,7 +209,7 @@ func TestInstallCRDsStopsOnApplyError(t *testing.T) {
 		crdManifest("podsnapshots.nvidia.com"),
 		crdManifest("podsnapshotcontents.nvidia.com"),
 	}
-	_, err := InstallCRDs(t.Context(), cl, logr.Discard(), manifests)
+	_, err := InstallCRDs(t.Context(), cl, establishedCRDClient(), logr.Discard(), manifests)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `apply CRD "podsnapshots.nvidia.com"`)
@@ -208,7 +220,7 @@ func TestInstallCRDsPropagatesGetError(t *testing.T) {
 	cl := newFakeClient()
 	cl.getErr = errors.New("api unreachable")
 
-	_, err := InstallCRDs(t.Context(), cl, logr.Discard(), []string{crdManifest("podsnapshots.nvidia.com")})
+	_, err := InstallCRDs(t.Context(), cl, establishedCRDClient(), logr.Discard(), []string{crdManifest("podsnapshots.nvidia.com")})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "api unreachable")
@@ -218,22 +230,32 @@ func TestInstallCRDsPropagatesGetError(t *testing.T) {
 func TestInstallCRDsWaitsForEstablished(t *testing.T) {
 	cl := newFakeClient()
 	cl.nextRV["podsnapshots.nvidia.com"] = "1"
-	cl.getsUntilEstablished = 3 // first three post-apply Gets report not-yet-established
+	fcs := apiextensionsfake.NewSimpleClientset(crdWithEstablished("podsnapshots.nvidia.com", false))
+	crdClient := fcs.ApiextensionsV1().CustomResourceDefinitions()
 
-	results, err := InstallCRDs(t.Context(), cl, logr.Discard(), []string{crdManifest("podsnapshots.nvidia.com")})
+	// Flip Established to True after the wait has started; the update arrives
+	// as a watch event.
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		_, err := crdClient.Update(context.Background(), crdWithEstablished("podsnapshots.nvidia.com", true), metav1.UpdateOptions{})
+		if err != nil {
+			t.Errorf("update CRD status: %v", err)
+		}
+	}()
+
+	results, err := InstallCRDs(t.Context(), cl, crdClient, logr.Discard(), []string{crdManifest("podsnapshots.nvidia.com")})
 
 	require.NoError(t, err)
 	assert.Equal(t, Results{{Name: "podsnapshots.nvidia.com", Action: ActionCreated}}, results)
-	assert.Greater(t, cl.gets["podsnapshots.nvidia.com"], 3,
-		"installer should have polled past the not-established responses")
 }
 
 func TestInstallCRDsTimesOutWaitingForEstablished(t *testing.T) {
 	cl := newFakeClient()
 	cl.nextRV["podsnapshots.nvidia.com"] = "1"
-	cl.getsUntilEstablished = 1 << 30 // never reports Established within the test timeout
+	fcs := apiextensionsfake.NewSimpleClientset(crdWithEstablished("podsnapshots.nvidia.com", false))
 
-	_, err := InstallCRDs(t.Context(), cl, logr.Discard(), []string{crdManifest("podsnapshots.nvidia.com")})
+	_, err := InstallCRDs(t.Context(), cl, fcs.ApiextensionsV1().CustomResourceDefinitions(), logr.Discard(),
+		[]string{crdManifest("podsnapshots.nvidia.com")})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `wait for CRD "podsnapshots.nvidia.com" to become established`)
@@ -241,41 +263,23 @@ func TestInstallCRDsTimesOutWaitingForEstablished(t *testing.T) {
 	assert.Contains(t, err.Error(), `"status":"False"`)
 }
 
-func TestInstallCRDsToleratesTransientGetErrorsWhileWaiting(t *testing.T) {
+func TestInstallCRDsFailsWhenCRDDeletedWhileWaiting(t *testing.T) {
 	cl := newFakeClient()
 	cl.nextRV["podsnapshots.nvidia.com"] = "1"
-	cl.transientGetErrs = 2 // first two polls of the establishment wait fail
+	fcs := apiextensionsfake.NewSimpleClientset(crdWithEstablished("podsnapshots.nvidia.com", false))
+	crdClient := fcs.ApiextensionsV1().CustomResourceDefinitions()
 
-	results, err := InstallCRDs(t.Context(), cl, logr.Discard(), []string{crdManifest("podsnapshots.nvidia.com")})
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		if err := crdClient.Delete(context.Background(), "podsnapshots.nvidia.com", metav1.DeleteOptions{}); err != nil {
+			t.Errorf("delete CRD: %v", err)
+		}
+	}()
 
-	require.NoError(t, err)
-	assert.Equal(t, Results{{Name: "podsnapshots.nvidia.com", Action: ActionCreated}}, results)
-}
-
-func TestInstallCRDsTimeoutReportsLastGetError(t *testing.T) {
-	cl := newFakeClient()
-	cl.nextRV["podsnapshots.nvidia.com"] = "1"
-	cl.transientGetErrs = 1 << 30 // every poll fails until the wait times out
-
-	_, err := InstallCRDs(t.Context(), cl, logr.Discard(), []string{crdManifest("podsnapshots.nvidia.com")})
+	_, err := InstallCRDs(t.Context(), cl, crdClient, logr.Discard(), []string{crdManifest("podsnapshots.nvidia.com")})
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), `wait for CRD "podsnapshots.nvidia.com" to become established`)
-	assert.Contains(t, err.Error(), "transient: connection reset")
-}
-
-func TestInstallCRDsTimeoutReportsConditionsAndLastGetError(t *testing.T) {
-	cl := newFakeClient()
-	cl.nextRV["podsnapshots.nvidia.com"] = "1"
-	cl.getsUntilEstablished = 1 << 30 // never establishes
-	cl.failStoredGetsAfter = 2        // two polls observe Established=False, then Gets fail
-
-	_, err := InstallCRDs(t.Context(), cl, logr.Discard(), []string{crdManifest("podsnapshots.nvidia.com")})
-
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "last error: transient: connection reset")
-	assert.Contains(t, err.Error(), `last observed conditions`)
-	assert.Contains(t, err.Error(), `"status":"False"`)
+	assert.Contains(t, err.Error(), "was deleted while waiting")
 }
 
 func TestEmbeddedCRDsApplyCleanly(t *testing.T) {
@@ -295,7 +299,7 @@ func TestEmbeddedCRDsApplyCleanly(t *testing.T) {
 	}
 
 	cl := newFakeClient()
-	results, err := InstallCRDs(t.Context(), cl, logr.Discard(), manifests)
+	results, err := InstallCRDs(t.Context(), cl, establishedCRDClient(wantNames...), logr.Discard(), manifests)
 
 	require.NoError(t, err)
 	require.Len(t, results, len(manifests), "expected one result per embedded CRD manifest")

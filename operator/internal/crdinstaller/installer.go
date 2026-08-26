@@ -13,11 +13,16 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apiextensionsv1client "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/typed/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/tools/cache"
+	watchtools "k8s.io/client-go/tools/watch"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 )
@@ -27,11 +32,8 @@ const FieldManager = "snapshot-crd-installer"
 const crdKind = "CustomResourceDefinition"
 
 // Apply only persists the CRD; the API server registers it asynchronously.
-// Vars, not consts, so tests can shrink them.
-var (
-	establishedPollInterval = 200 * time.Millisecond
-	establishedTimeout      = 30 * time.Second
-)
+// A var, not a const, so tests can shrink it.
+var establishedTimeout = 30 * time.Second
 
 type Client interface {
 	Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error
@@ -62,10 +64,10 @@ func (r Results) Changed() bool {
 	return false
 }
 
-func InstallCRDs(ctx context.Context, cl Client, log logr.Logger, manifests []string) (Results, error) {
+func InstallCRDs(ctx context.Context, cl Client, crdClient apiextensionsv1client.CustomResourceDefinitionInterface, log logr.Logger, manifests []string) (Results, error) {
 	results := make(Results, 0, len(manifests))
 	for _, manifest := range manifests {
-		res, err := applyCRD(ctx, cl, log, manifest)
+		res, err := applyCRD(ctx, cl, crdClient, log, manifest)
 		if err != nil {
 			return results, err
 		}
@@ -75,7 +77,7 @@ func InstallCRDs(ctx context.Context, cl Client, log logr.Logger, manifests []st
 	return results, nil
 }
 
-func applyCRD(ctx context.Context, cl Client, log logr.Logger, manifest string) (Result, error) {
+func applyCRD(ctx context.Context, cl Client, crdClient apiextensionsv1client.CustomResourceDefinitionInterface, log logr.Logger, manifest string) (Result, error) {
 	obj := &unstructured.Unstructured{}
 	if err := yaml.Unmarshal([]byte(manifest), &obj.Object); err != nil {
 		return Result{}, fmt.Errorf("unmarshal CRD manifest: %w", err)
@@ -107,7 +109,7 @@ func applyCRD(ctx context.Context, cl Client, log logr.Logger, manifest string) 
 		return Result{Name: name}, fmt.Errorf("apply CRD %q: %w", name, err)
 	}
 
-	if err := waitForEstablished(ctx, cl, log, obj.GroupVersionKind(), name); err != nil {
+	if err := waitForEstablished(ctx, crdClient, log, name); err != nil {
 		return Result{Name: name}, fmt.Errorf("wait for CRD %q to become established: %w", name, err)
 	}
 
@@ -121,26 +123,43 @@ func applyCRD(ctx context.Context, cl Client, log logr.Logger, manifest string) 
 	}
 }
 
-// waitForEstablished blocks until the CRD's Established condition is True,
-// so callers never observe a CRD that the API server has accepted but isn't
-// serving yet.
-func waitForEstablished(ctx context.Context, cl Client, log logr.Logger, gvk schema.GroupVersionKind, name string) error {
-	var lastErr error
-	var lastConditions []any
+// waitForEstablished blocks until the CRD's Established condition is True, so
+// callers never observe a CRD that the API server has accepted but isn't
+// serving yet. It watches rather than polls: the initial list delivers the
+// current state, updates arrive as watch events, and the underlying informer
+// relists after disconnections or expired resource versions.
+func waitForEstablished(ctx context.Context, crdClient apiextensionsv1client.CustomResourceDefinitionInterface, log logr.Logger, name string) error {
+	ctx, cancel := context.WithTimeout(ctx, establishedTimeout)
+	defer cancel()
+
+	selector := fields.OneTermEqualSelector("metadata.name", name).String()
+	lw := &cache.ListWatch{
+		ListFunc: func(opts metav1.ListOptions) (runtime.Object, error) {
+			opts.FieldSelector = selector
+			return crdClient.List(ctx, opts)
+		},
+		WatchFunc: func(opts metav1.ListOptions) (watch.Interface, error) {
+			opts.FieldSelector = selector
+			return crdClient.Watch(ctx, opts)
+		},
+	}
+
+	// On timeout the bare error says nothing about the cause; the last
+	// observation distinguishes a slow apiserver from e.g. a NamesAccepted
+	// conflict that will never resolve.
+	var lastConditions []apiextensionsv1.CustomResourceDefinitionCondition
 	waiting := false
-	err := wait.PollUntilContextTimeout(ctx, establishedPollInterval, establishedTimeout, true,
-		func(ctx context.Context) (bool, error) {
-			current := &unstructured.Unstructured{}
-			current.SetGroupVersionKind(gvk)
-			// A transient Get failure must not abort the wait; the timeout is
-			// the only terminal condition.
-			if err := cl.Get(ctx, client.ObjectKey{Name: name}, current); err != nil {
-				lastErr = err
+	_, err := watchtools.UntilWithSync(ctx, lw, &apiextensionsv1.CustomResourceDefinition{}, nil,
+		func(event watch.Event) (bool, error) {
+			if event.Type == watch.Deleted {
+				return false, fmt.Errorf("CRD %q was deleted while waiting", name)
+			}
+			crd, ok := event.Object.(*apiextensionsv1.CustomResourceDefinition)
+			if !ok || crd.Name != name {
 				return false, nil
 			}
-			lastErr = nil
-			lastConditions, _, _ = unstructured.NestedSlice(current.Object, "status", "conditions")
-			if crdEstablished(lastConditions) {
+			lastConditions = crd.Status.Conditions
+			if crdEstablished(crd.Status.Conditions) {
 				return true, nil
 			}
 			if !waiting {
@@ -149,38 +168,25 @@ func waitForEstablished(ctx context.Context, cl Client, log logr.Logger, gvk sch
 			}
 			return false, nil
 		})
-	// The bare timeout says nothing about the cause; the last observation
-	// distinguishes a flaky API server from e.g. a NamesAccepted conflict
-	// that will never resolve.
-	switch {
-	case err == nil:
+	if err == nil {
 		return nil
-	case lastErr != nil && len(lastConditions) > 0:
-		return fmt.Errorf("%w (last error: %w; last observed conditions: %s)",
-			err, lastErr, formatConditions(lastConditions))
-	case lastErr != nil:
-		return fmt.Errorf("%w (last error: %w)", err, lastErr)
-	case len(lastConditions) > 0:
-		return fmt.Errorf("%w (last observed conditions: %s)", err, formatConditions(lastConditions))
-	default:
-		return err
 	}
+	if len(lastConditions) > 0 {
+		return fmt.Errorf("%w (last observed conditions: %s)", err, formatConditions(lastConditions))
+	}
+	return err
 }
 
-func crdEstablished(conditions []any) bool {
+func crdEstablished(conditions []apiextensionsv1.CustomResourceDefinitionCondition) bool {
 	for _, c := range conditions {
-		condition, ok := c.(map[string]any)
-		if !ok {
-			continue
-		}
-		if condition["type"] == "Established" && condition["status"] == "True" {
+		if c.Type == apiextensionsv1.Established && c.Status == apiextensionsv1.ConditionTrue {
 			return true
 		}
 	}
 	return false
 }
 
-func formatConditions(conditions []any) string {
+func formatConditions(conditions []apiextensionsv1.CustomResourceDefinitionCondition) string {
 	b, err := json.Marshal(conditions)
 	if err != nil {
 		return fmt.Sprintf("%v", conditions)

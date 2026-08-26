@@ -10,6 +10,7 @@ package main
 import (
 	"os"
 
+	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -33,8 +34,14 @@ func main() {
 		log.Error(err, "unable to create API client")
 		os.Exit(1)
 	}
+	cs, err := apiextensionsclientset.NewForConfig(cfg)
+	if err != nil {
+		log.Error(err, "unable to create apiextensions client")
+		os.Exit(1)
+	}
 
-	results, err := crdinstaller.InstallCRDs(ctrl.SetupSignalHandler(), cl, log, crds.All())
+	results, err := crdinstaller.InstallCRDs(ctrl.SetupSignalHandler(), cl,
+		cs.ApiextensionsV1().CustomResourceDefinitions(), log, crds.All())
 	if err != nil {
 		log.Error(err, "CRD installation failed")
 		os.Exit(1)
