@@ -126,15 +126,20 @@ def test_snapshotjob_captures_and_restore_recovers_state(
                 source_node=source_node,
             )
         )
-        snap.wait_for_restore_status(config.namespace, run.restore_pod, "completed")
+        snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "True", "RestoreSucceeded"
+        )
         snap.wait_for_pod_ready(config.namespace, run.restore_pod, timeout=300)
 
         # Inspect the shared artifact through the snapshot agent on the source
         # node. The source pod is already gone, but the agent and PVC remain.
+        # Artifacts are keyed by the PodSnapshotContent UID, not the
+        # SnapshotJob name.
+        content_uid = content["metadata"]["uid"]
         manifest = snap.checkpoint_artifact_manifest(
             config,
             source_node,
-            snapshotjob_name,
+            content_uid,
         )
         assert "criuDump:" in manifest
         assert f"podName: {source_pod_name}" in manifest
@@ -142,7 +147,7 @@ def test_snapshotjob_captures_and_restore_recovers_state(
         artifact_listing = snap.checkpoint_artifact_listing(
             config,
             source_node,
-            snapshotjob_name,
+            content_uid,
         )
         assert "./inventory.img" in artifact_listing
         assert "./manifest.yaml" in artifact_listing
@@ -199,7 +204,9 @@ def test_snapshotjob_cpu_only_captures(
             timeout=60,
         )
         source_node = content["spec"]["source"]["nodeName"]
-        manifest = snap.checkpoint_artifact_manifest(config, source_node, snapshotjob_name)
+        manifest = snap.checkpoint_artifact_manifest(
+            config, source_node, content["metadata"]["uid"]
+        )
         assert f"podName: {source_pod_name}" in manifest
 
         snap.wait_for_pod_deleted(config.namespace, source_pod_name, timeout=120)
