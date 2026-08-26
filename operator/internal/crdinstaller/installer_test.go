@@ -90,10 +90,13 @@ func (f *fakeClient) Get(_ context.Context, key client.ObjectKey, obj client.Obj
 	obj.SetResourceVersion(rv)
 
 	f.gets[key.Name]++
-	established := f.gets[key.Name] > f.getsUntilEstablished
-	if u, ok := obj.(*unstructured.Unstructured); ok && established {
+	if u, ok := obj.(*unstructured.Unstructured); ok {
+		status := "False"
+		if f.gets[key.Name] > f.getsUntilEstablished {
+			status = "True"
+		}
 		_ = unstructured.SetNestedSlice(u.Object, []any{
-			map[string]any{"type": "Established", "status": "True"},
+			map[string]any{"type": "Established", "status": status},
 		}, "status", "conditions")
 	}
 	return nil
@@ -228,6 +231,8 @@ func TestInstallCRDsTimesOutWaitingForEstablished(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `wait for CRD "podsnapshots.nvidia.com" to become established`)
+	assert.Contains(t, err.Error(), "last observed conditions")
+	assert.Contains(t, err.Error(), `"status":"False"`)
 }
 
 func TestInstallCRDsToleratesTransientGetErrorsWhileWaiting(t *testing.T) {

@@ -7,6 +7,7 @@ package crdinstaller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -64,7 +65,7 @@ func (r Results) Changed() bool {
 func InstallCRDs(ctx context.Context, cl Client, log logr.Logger, manifests []string) (Results, error) {
 	results := make(Results, 0, len(manifests))
 	for _, manifest := range manifests {
-		res, err := applyCRD(ctx, cl, manifest)
+		res, err := applyCRD(ctx, cl, log, manifest)
 		if err != nil {
 			return results, err
 		}
@@ -74,7 +75,7 @@ func InstallCRDs(ctx context.Context, cl Client, log logr.Logger, manifests []st
 	return results, nil
 }
 
-func applyCRD(ctx context.Context, cl Client, manifest string) (Result, error) {
+func applyCRD(ctx context.Context, cl Client, log logr.Logger, manifest string) (Result, error) {
 	obj := &unstructured.Unstructured{}
 	if err := yaml.Unmarshal([]byte(manifest), &obj.Object); err != nil {
 		return Result{}, fmt.Errorf("unmarshal CRD manifest: %w", err)
@@ -106,7 +107,7 @@ func applyCRD(ctx context.Context, cl Client, manifest string) (Result, error) {
 		return Result{Name: name}, fmt.Errorf("apply CRD %q: %w", name, err)
 	}
 
-	if err := waitForEstablished(ctx, cl, obj.GroupVersionKind(), name); err != nil {
+	if err := waitForEstablished(ctx, cl, log, obj.GroupVersionKind(), name); err != nil {
 		return Result{Name: name}, fmt.Errorf("wait for CRD %q to become established: %w", name, err)
 	}
 
@@ -123,8 +124,10 @@ func applyCRD(ctx context.Context, cl Client, manifest string) (Result, error) {
 // waitForEstablished blocks until the CRD's Established condition is True,
 // so callers never observe a CRD that the API server has accepted but isn't
 // serving yet.
-func waitForEstablished(ctx context.Context, cl Client, gvk schema.GroupVersionKind, name string) error {
+func waitForEstablished(ctx context.Context, cl Client, log logr.Logger, gvk schema.GroupVersionKind, name string) error {
 	var lastErr error
+	var lastConditions []any
+	waiting := false
 	err := wait.PollUntilContextTimeout(ctx, establishedPollInterval, establishedTimeout, true,
 		func(ctx context.Context) (bool, error) {
 			current := &unstructured.Unstructured{}
@@ -136,19 +139,32 @@ func waitForEstablished(ctx context.Context, cl Client, gvk schema.GroupVersionK
 				return false, nil
 			}
 			lastErr = nil
-			return crdEstablished(current), nil
+			lastConditions, _, _ = unstructured.NestedSlice(current.Object, "status", "conditions")
+			if crdEstablished(lastConditions) {
+				return true, nil
+			}
+			if !waiting {
+				log.Info("Waiting for CRD to become established", "name", name)
+				waiting = true
+			}
+			return false, nil
 		})
-	if err != nil && lastErr != nil {
+	// The bare timeout says nothing about the cause; the last observation
+	// distinguishes a flaky API server from e.g. a NamesAccepted conflict
+	// that will never resolve.
+	switch {
+	case err == nil:
+		return nil
+	case lastErr != nil:
 		return fmt.Errorf("%w (last error: %w)", err, lastErr)
+	case len(lastConditions) > 0:
+		return fmt.Errorf("%w (last observed conditions: %s)", err, formatConditions(lastConditions))
+	default:
+		return err
 	}
-	return err
 }
 
-func crdEstablished(obj *unstructured.Unstructured) bool {
-	conditions, found, err := unstructured.NestedSlice(obj.Object, "status", "conditions")
-	if err != nil || !found {
-		return false
-	}
+func crdEstablished(conditions []any) bool {
 	for _, c := range conditions {
 		condition, ok := c.(map[string]any)
 		if !ok {
@@ -159,4 +175,12 @@ func crdEstablished(obj *unstructured.Unstructured) bool {
 		}
 	}
 	return false
+}
+
+func formatConditions(conditions []any) string {
+	b, err := json.Marshal(conditions)
+	if err != nil {
+		return fmt.Sprintf("%v", conditions)
+	}
+	return string(b)
 }
