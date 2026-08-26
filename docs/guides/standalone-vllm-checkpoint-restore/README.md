@@ -34,6 +34,7 @@ values such as the source pod UID.
 - The same immutable workload image for capture and restore.
 - Restore nodes with compatible GPU, NVIDIA driver, kernel, container runtime,
   and workload mounts.
+- Host CPU RAM sufficient to hold the model weights during level 1 sleep.
 
 The currently tested configuration uses NVIDIA driver 580 or newer, MIG
 disabled, and a workload image compatible with the Snapshot restore utilities.
@@ -145,7 +146,8 @@ engine = AsyncLLM.from_engine_args(
 
 `enable_sleep_mode=True` enables the feature. The application writes
 `ready-for-snapshot` only after `await engine.sleep()` succeeds, so capture
-cannot start if sleep mode is unavailable.
+cannot start if sleep mode is unavailable. Level 1 sleep moves the model weights
+to host memory, which must have enough free capacity for the complete model.
 
 `snapshot_lifecycle.py` does not create the snapshot. It adapts vLLM to
 Snapshot's file-based lifecycle: make the engine safe to capture, wait for a
@@ -371,8 +373,9 @@ do
 done
 ```
 
-An active server returns `false`. Pause generation, enter sleep mode, confirm
-the new state, and write the readiness file:
+An active server returns `false`. Confirm that the node has enough free host
+memory for the complete model weights, then pause generation, enter level 1
+sleep, confirm the new state, and write the readiness file:
 
 ```bash
 kubectl exec "$SOURCE_POD" \
