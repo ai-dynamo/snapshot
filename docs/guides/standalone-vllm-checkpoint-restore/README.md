@@ -13,9 +13,9 @@ vLLM workload and the Kubernetes resources needed for capture and restore.
 
 Companion examples:
 
-- [`snapshot_lifecycle.py`](snapshot_lifecycle.py)
+- [snapshot_lifecycle.py](snapshot_lifecycle.py)
 - [Source pod fields](vllm-source-pod-fields.yaml)
-- [`PodSnapshot`](vllm-snapshot.yaml)
+- [PodSnapshot](vllm-snapshot.yaml)
 - [Restore pod](vllm-restore.yaml)
 
 The YAML files are reference templates. The commands below resolve runtime
