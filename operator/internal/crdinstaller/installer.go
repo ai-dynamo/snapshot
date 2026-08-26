@@ -155,6 +155,9 @@ func waitForEstablished(ctx context.Context, cl Client, log logr.Logger, gvk sch
 	switch {
 	case err == nil:
 		return nil
+	case lastErr != nil && len(lastConditions) > 0:
+		return fmt.Errorf("%w (last error: %w; last observed conditions: %s)",
+			err, lastErr, formatConditions(lastConditions))
 	case lastErr != nil:
 		return fmt.Errorf("%w (last error: %w)", err, lastErr)
 	case len(lastConditions) > 0:

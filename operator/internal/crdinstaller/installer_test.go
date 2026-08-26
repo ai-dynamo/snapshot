@@ -61,6 +61,7 @@ type fakeClient struct {
 	applyErr             error
 	getErr               error
 	transientGetErrs     int // fail this many Gets of stored CRDs, then succeed
+	failStoredGetsAfter  int // >0: fail Gets of stored CRDs after this many succeeded
 	getsUntilEstablished int // 0 means "established from the first Get"
 	gets                 map[string]int
 }
@@ -84,6 +85,11 @@ func (f *fakeClient) Get(_ context.Context, key client.ObjectKey, obj client.Obj
 	// errors land in the establishment wait.
 	if f.transientGetErrs > 0 {
 		f.transientGetErrs--
+		return errors.New("transient: connection reset")
+	}
+	// f.gets counts successful Gets, so this fails every Get once the first
+	// failStoredGetsAfter have gone through.
+	if f.failStoredGetsAfter > 0 && f.gets[key.Name] >= f.failStoredGetsAfter {
 		return errors.New("transient: connection reset")
 	}
 	obj.SetName(key.Name)
@@ -256,6 +262,20 @@ func TestInstallCRDsTimeoutReportsLastGetError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `wait for CRD "podsnapshots.nvidia.com" to become established`)
 	assert.Contains(t, err.Error(), "transient: connection reset")
+}
+
+func TestInstallCRDsTimeoutReportsConditionsAndLastGetError(t *testing.T) {
+	cl := newFakeClient()
+	cl.nextRV["podsnapshots.nvidia.com"] = "1"
+	cl.getsUntilEstablished = 1 << 30 // never establishes
+	cl.failStoredGetsAfter = 2        // two polls observe Established=False, then Gets fail
+
+	_, err := InstallCRDs(t.Context(), cl, logr.Discard(), []string{crdManifest("podsnapshots.nvidia.com")})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "last error: transient: connection reset")
+	assert.Contains(t, err.Error(), `last observed conditions`)
+	assert.Contains(t, err.Error(), `"status":"False"`)
 }
 
 func TestEmbeddedCRDsApplyCleanly(t *testing.T) {
