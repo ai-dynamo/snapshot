@@ -25,8 +25,7 @@ values such as the source pod UID.
 
 - An x86_64 Kubernetes cluster with an NVIDIA GPU node.
 - Snapshot installed, including the operator, node agent, and
-  `PodSnapshot` and `PodSnapshotContent` CRDs, with a Bound shared
-  ReadWriteMany checkpoint PVC.
+  `PodSnapshot` and `PodSnapshotContent` CRDs.
 - A vLLM pod manifest that you can modify and redeploy.
 - `kubectl` access to create pods and `PodSnapshot` resources.
 - The same immutable workload image for capture and restore.
@@ -35,18 +34,6 @@ values such as the source pod UID.
 
 The currently tested configuration uses NVIDIA driver 580 or newer, MIG
 disabled, and a workload image compatible with the Snapshot restore utilities.
-
-Set `SNAPSHOT_NAMESPACE` to the namespace where Snapshot is installed and
-verify its checkpoint PVC before continuing:
-
-```bash
-SNAPSHOT_NAMESPACE="${SNAPSHOT_NAMESPACE:-snapshot-system}"
-kubectl get pvc --namespace "$SNAPSHOT_NAMESPACE"
-```
-
-The checkpoint PVC must show `Bound` and `RWX`. See the
-[Snapshot Helm chart](../../../charts/snapshot/README.md) for storage
-configuration.
 
 Use the namespace from the current `kubectl` context, or set `NAMESPACE`
 beforehand to override it:
