@@ -159,6 +159,12 @@ func CaptureDeletedFiles(upperDir, checkpointDir string) (bool, error) {
 // reads; doing that directly from NFS is much slower than one sequential copy
 // plus a local extract.
 func ApplyRootfsDiff(checkpointPath, targetRoot, tarBinary string, log logr.Logger) error {
+	// A relative path would resolve through PATH inside the placeholder —
+	// exactly the fallback the bundled static tar exists to prevent.
+	if !filepath.IsAbs(tarBinary) {
+		return fmt.Errorf("tar binary path %q is not absolute", tarBinary)
+	}
+
 	rootfsDiffPath := filepath.Join(checkpointPath, rootfsDiffFilename)
 	info, err := os.Stat(rootfsDiffPath)
 	if os.IsNotExist(err) {
@@ -182,8 +188,16 @@ func ApplyRootfsDiff(checkpointPath, targetRoot, tarBinary string, log logr.Logg
 	// --skip-old-files: silently skip files that already exist in the restore target.
 	// The rootfs diff only contains overlay upperdir changes (runtime-generated files
 	// like triton caches, tmp files) — base image files should not be overwritten.
+	//
+	// The capture side archives with --xattrs; restore them, but only the user
+	// and security namespaces. The archive is cut from the overlay upperdir, so
+	// it can carry trusted.overlay.* entries that must never be re-applied
+	// through the restored container's overlay mount. These flags are mirrored
+	// by the tar-builder smoke test in the Dockerfile — keep them in sync.
 	log.Info("Applying rootfs diff", "target", targetRoot, "bytes", info.Size())
-	cmd := exec.Command(tarBinary, "--skip-old-files", "--blocking-factor=2048", "-C", targetRoot, "-xf", localPath)
+	cmd := exec.Command(tarBinary, "--skip-old-files", "--blocking-factor=2048",
+		"--xattrs", "--xattrs-include=user.*", "--xattrs-include=security.*",
+		"-C", targetRoot, "-xf", localPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {

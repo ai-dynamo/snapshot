@@ -103,6 +103,7 @@ ARG GNU_TAR_VERSION
 ARG GNU_TAR_SHA256
 
 RUN apk add --no-cache \
+    attr \
     build-base \
     ca-certificates \
     curl \
@@ -143,11 +144,14 @@ RUN set -eu; \
     echo preserved > /tmp/tar-smoke/target/existing; \
     echo replaced > /tmp/tar-smoke/source/existing; \
     echo created > /tmp/tar-smoke/source/created; \
-    /out/tar -C /tmp/tar-smoke/source -cf /tmp/tar-smoke/archive.tar .; \
+    setfattr -n user.snapshot-smoke -v smoke /tmp/tar-smoke/source/created; \
+    /out/tar --xattrs -C /tmp/tar-smoke/source -cf /tmp/tar-smoke/archive.tar .; \
     /out/tar --skip-old-files --blocking-factor=2048 \
+      --xattrs --xattrs-include='user.*' --xattrs-include='security.*' \
       -C /tmp/tar-smoke/target -xf /tmp/tar-smoke/archive.tar; \
     grep -qx preserved /tmp/tar-smoke/target/existing; \
-    grep -qx created /tmp/tar-smoke/target/created
+    grep -qx created /tmp/tar-smoke/target/created; \
+    test "$(getfattr --only-values -n user.snapshot-smoke /tmp/tar-smoke/target/created)" = smoke
 
 # =============================================================================
 # Stage: CUDA checkpoint helper builder
