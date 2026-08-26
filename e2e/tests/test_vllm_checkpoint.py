@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
-from kubernetes import client
 from snapshot_e2e import k8s, workloads
 from snapshot_e2e import lifecycle as snap
 
@@ -20,7 +19,6 @@ VLLM_RESTORE_READY = f"{workloads.CONTROL_DIR}/vllm-restore-ready"
 @dataclass(frozen=True)
 class VllmCheckpointRun:
     suffix: str
-    checkpoint_id: str
     snapshot_name: str
     source_pod: str
     restore_pod: str
@@ -35,7 +33,6 @@ class VllmCheckpointRun:
             pytest.skip("SNAPSHOT_E2E_VLLM_IMAGE is required")
         return cls(
             suffix=suffix,
-            checkpoint_id=suffix,
             snapshot_name=f"{suffix}-snapshot",
             source_pod=f"{suffix}-source",
             restore_pod=f"{suffix}-restore",
@@ -77,11 +74,14 @@ def test_vllm_checkpoint_restores_quiesced_engine(
             workloads.CONTAINER
         ]
 
+        content_uid = content["metadata"]["uid"]
         manifest = snap.checkpoint_artifact_manifest(
             config,
             source_node,
-            run.checkpoint_id,
+            content_uid,
         )
+        assert f"contentUID: {content_uid}" in manifest
+        assert "containerName: main" in manifest
         assert "criuDump:" in manifest
         assert "cudaRestore:" in manifest
         assert f"podName: {run.source_pod}" in manifest
@@ -96,10 +96,11 @@ def test_vllm_checkpoint_restores_quiesced_engine(
         k8s.delete_pod(config.namespace, run.source_pod)
         snap.wait_for_pod_deleted(config.namespace, run.source_pod)
         k8s.create_pod(vllm_restore_pod(config, run, source_node))
-        snap.wait_for_restore_status(
+        snap.wait_for_restored_condition(
             config.namespace,
             run.restore_pod,
-            "completed",
+            "True",
+            "RestoreSucceeded",
             timeout=1200,
         )
         snap.wait_for_pod_ready(config.namespace, run.restore_pod, timeout=1200)
@@ -109,16 +110,6 @@ def test_vllm_checkpoint_restores_quiesced_engine(
             VLLM_RESTORE_READY,
             timeout=1200,
         )
-
-        restored_content = snap.get_custom_object(
-            client.CustomObjectsApi(),
-            None,
-            content["metadata"]["name"],
-            snap.PODSNAPSHOTCONTENTS,
-        )
-        restored_content_ready = snap.condition(restored_content, "Ready")
-        assert restored_content_ready
-        assert restored_content_ready.get("reason") == "Captured"
     except Exception:
         snap.debug_dump(config, run)
         raise
@@ -139,10 +130,6 @@ def vllm_source_pod(
             "labels": {
                 "snapshot-e2e-test": run.suffix,
                 "nvidia.com/snapshot-is-checkpoint-source": "true",
-                "nvidia.com/snapshot-checkpoint-id": run.checkpoint_id,
-            },
-            "annotations": {
-                "nvidia.com/snapshot-target-containers": workloads.CONTAINER,
             },
         },
         "spec": {
@@ -221,12 +208,9 @@ def vllm_restore_pod(
         "namespace": config.namespace,
         "labels": {
             "snapshot-e2e-test": run.suffix,
-            "nvidia.com/snapshot-checkpoint-id": run.checkpoint_id,
-            "nvidia.com/snapshot-is-restore-target": "true",
         },
         "annotations": {
-            "nvidia.com/snapshot-target-containers": workloads.CONTAINER,
-            "nvidia.com/snapshot-artifact-version": "1",
+            "nvidia.com/restore-from": run.snapshot_name,
         },
     }
     pod["spec"]["affinity"] = workloads.same_node_affinity(source_node)
