@@ -66,8 +66,8 @@ vLLM must stop generation and enter sleep mode before capture. After restore,
 it must wake up before accepting generation requests.
 
 This command reads the startup command of the selected container's main
-process. It does not change the pod. The output identifies which vLLM interface
-the pod uses:
+process. It does not change the pod. Use its output to choose exactly one
+integration path:
 
 ```bash
 kubectl exec "$SOURCE_POD" \
@@ -76,12 +76,13 @@ kubectl exec "$SOURCE_POD" \
   -- sh -c 'tr "\000" " " < /proc/1/cmdline; echo'
 ```
 
-- If the output names a Python program that your team maintains, use the
-  [Python API](#python-api).
-- If the output contains `vllm serve` or `vllm.entrypoints`, use the
-  [HTTP API](#vllm-server-http-api).
+- A team-owned Python program that imports vLLM uses the
+  [Python API](#python-api) only.
+- The built-in `vllm serve` command or a `vllm.entrypoints` module uses the
+  [HTTP API](#vllm-server-http-api) only; do not make the Python changes.
 - If the output is a shell wrapper or remains unclear, check the workload
-  manifest or ask the image owner which program starts vLLM.
+  manifest or ask the image owner what command the wrapper ultimately starts
+  before choosing a path.
 
 ### Python API
 
