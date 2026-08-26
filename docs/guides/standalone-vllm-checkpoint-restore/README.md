@@ -89,8 +89,11 @@ Use this option only when your team can edit the Python program shown by the
 command above. This is a source-code change; do not paste the Python into a
 terminal or edit files inside the running pod.
 
-In the application source repository, find the Python entrypoint that creates
-the `AsyncLLM` engine and enable sleep mode:
+Edit your own application's source, not the vLLM repository. In particular,
+`vllm/entrypoints/cli/serve.py` is not an integration point; a pod that uses
+the built-in `vllm serve` command must use the
+[HTTP API](#vllm-server-http-api). In your application, find the entrypoint
+that calls `AsyncLLM.from_engine_args()` and enable sleep mode:
 
 ```python
 engine_args = AsyncEngineArgs(
