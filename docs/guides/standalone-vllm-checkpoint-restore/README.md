@@ -342,12 +342,6 @@ kubectl wait \
 
 ## 3. Quiesce vLLM
 
-> [!IMPORTANT]
-> Remove the source pod from normal serving traffic before quiescing it, or use
-> a dedicated capture replica. The `ready-for-snapshot` probe represents
-> capture readiness, not serving readiness: it succeeds only after vLLM is
-> paused and sleeping, so it must not add the pod to Service endpoints.
-
 For the [Python API](#python-api), the application calls
 `quiesce_for_snapshot()` after initialization and writes the readiness file
 without another command.
