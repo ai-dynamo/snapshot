@@ -392,10 +392,7 @@ kubectl exec "$SOURCE_POD" \
   --namespace "$NAMESPACE" \
   --container "$CONTAINER" \
   -- sh -c '
-    sleeping="$(
-      curl -fsS http://127.0.0.1:8000/is_sleeping |
-        python3 -c "import json,sys; print(str(json.load(sys.stdin)[\"is_sleeping\"]).lower())"
-    )"
+    sleeping="$(curl -fsS http://127.0.0.1:8000/is_sleeping)"
     if [ "$sleeping" != "true" ]; then
       echo "vLLM is not sleeping: $sleeping" >&2
       exit 1
