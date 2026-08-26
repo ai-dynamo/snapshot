@@ -59,6 +59,8 @@ NAMESPACE="${NAMESPACE:-default}"
 kubectl get pods --namespace "$NAMESPACE"
 ```
 
+### Select the source pod
+
 Select the vLLM pod. For a pod with sidecars, set `CONTAINER` beforehand to the
 vLLM container name; otherwise the first container is used. All other values
 are derived:
@@ -323,7 +325,11 @@ spec:
 ```
 
 Redeploy the pod with the lifecycle configuration from step 1 and the pod
-fields above. Wait until its container is running:
+fields above. A Deployment or another controller may give the replacement pod
+a new name. Repeat [Select the source pod](#select-the-source-pod) after
+redeployment to refresh `SOURCE_POD`, `CONTAINER`, `RESTORE_POD`, and
+`VLLM_IMAGE`; do not continue with the deleted pod's values. Then wait until the
+selected container is running:
 
 ```bash
 kubectl wait \
