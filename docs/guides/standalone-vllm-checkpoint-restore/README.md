@@ -220,7 +220,10 @@ lifecycle after engine creation and warm-up, but before the application begins
 accepting requests:
 
 ```python
+import asyncio
+
 from snapshot_lifecycle import quiesce_for_snapshot, resume_after_restore
+
 
 async def main():
     engine_args = AsyncEngineArgs(
@@ -239,6 +242,10 @@ async def main():
 
     await resume_after_restore(engine)
     await serve_requests(engine)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 `warm_up()` and `serve_requests()` represent the application's existing
