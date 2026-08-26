@@ -456,7 +456,7 @@ Wait until Snapshot has restored the process:
 
 ```bash
 kubectl wait \
-  --for='jsonpath={.status.conditions[?(@.type=="snapshot/Restored")].status}=True' \
+  --for=condition=snapshot/Restored=True \
   "pod/$RESTORE_POD" \
   --namespace "$NAMESPACE" \
   --timeout=20m
