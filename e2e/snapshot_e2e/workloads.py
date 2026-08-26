@@ -131,7 +131,11 @@ def restore_pod(
     run: TestRun,
     gpu: bool,
     source_node: str | None = None,
+    snapshot_name: str | None = None,
 ) -> dict[str, Any]:
+    # snapshot_name defaults to the lifecycle flow's test-created PodSnapshot
+    # (run.snapshot_name); a SnapshotJob-produced PodSnapshot is named after
+    # the SnapshotJob instead, so those tests pass it explicitly.
     spec = base_pod_spec(config, run, restore_command(run.image, gpu), gpu)
     spec["securityContext"] = {
         "seccompProfile": {
@@ -161,7 +165,7 @@ def restore_pod(
                 **run.labels,
             },
             "annotations": {
-                "nvidia.com/restore-from": run.snapshot_name,
+                "nvidia.com/restore-from": snapshot_name or run.snapshot_name,
             },
         },
         "spec": spec,

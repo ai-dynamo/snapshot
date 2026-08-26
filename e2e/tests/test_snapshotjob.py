@@ -124,6 +124,7 @@ def test_snapshotjob_captures_and_restore_recovers_state(
                 run=run,
                 gpu=True,
                 source_node=source_node,
+                snapshot_name=pod_snapshot_name,
             )
         )
         snap.wait_for_restored_condition(
