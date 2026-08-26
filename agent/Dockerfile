@@ -111,47 +111,13 @@ RUN apk add --no-cache \
 
 WORKDIR /tmp
 
-RUN set -eu; \
-    curl -fsSLo gnu-tar.tar.xz \
-      "https://ftp.gnu.org/gnu/tar/tar-${GNU_TAR_VERSION}.tar.xz"; \
-    echo "${GNU_TAR_SHA256}  gnu-tar.tar.xz" | sha256sum -c -; \
-    cp gnu-tar.tar.xz /gnu-tar-source.tar.xz; \
-    xz -d gnu-tar.tar.xz; \
-    tar -xf gnu-tar.tar
+COPY scripts/fetch-gnu-tar.sh scripts/build-gnu-tar.sh /tmp/scripts/
+
+RUN sh /tmp/scripts/fetch-gnu-tar.sh "${GNU_TAR_VERSION}" "${GNU_TAR_SHA256}"
 
 WORKDIR /tmp/tar-${GNU_TAR_VERSION}
 
-RUN set -eu; \
-    FORCE_UNSAFE_CONFIGURE=1 LDFLAGS=-static ./configure \
-      --disable-nls \
-      --without-posix-acls \
-      --without-selinux; \
-    make -j"$(nproc)"; \
-    mkdir -p /out; \
-    cp src/tar /out/tar; \
-    cp COPYING /out/COPYING; \
-    chmod 0755 /out/tar; \
-    strip /out/tar; \
-    if readelf -l /out/tar | grep -q 'INTERP'; then \
-      echo "ERROR: restore tar has a dynamic ELF interpreter" >&2; \
-      exit 1; \
-    fi; \
-    if readelf -d /out/tar | grep -q '(NEEDED)'; then \
-      echo "ERROR: restore tar has shared-library dependencies" >&2; \
-      exit 1; \
-    fi; \
-    mkdir -p /tmp/tar-smoke/source /tmp/tar-smoke/target; \
-    echo preserved > /tmp/tar-smoke/target/existing; \
-    echo replaced > /tmp/tar-smoke/source/existing; \
-    echo created > /tmp/tar-smoke/source/created; \
-    setfattr -n user.snapshot-smoke -v smoke /tmp/tar-smoke/source/created; \
-    /out/tar --xattrs -C /tmp/tar-smoke/source -cf /tmp/tar-smoke/archive.tar .; \
-    /out/tar --skip-old-files --blocking-factor=2048 \
-      --xattrs --xattrs-include='user.*' --xattrs-include='security.*' \
-      -C /tmp/tar-smoke/target -xf /tmp/tar-smoke/archive.tar; \
-    grep -qx preserved /tmp/tar-smoke/target/existing; \
-    grep -qx created /tmp/tar-smoke/target/created; \
-    test "$(getfattr --only-values -n user.snapshot-smoke /tmp/tar-smoke/target/created)" = smoke
+RUN sh /tmp/scripts/build-gnu-tar.sh
 
 # =============================================================================
 # Stage: CUDA checkpoint helper builder

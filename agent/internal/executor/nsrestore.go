@@ -127,7 +127,7 @@ func executeRestore(
 	timings = &nsrestorePhaseTimings{}
 
 	overlayStart := time.Now()
-	tarBinary := filepath.Join(opts.BundleDir, "tar")
+	tarBinary := filepath.Join(opts.BundleDir, snapshotruntime.RestoreTarBinaryName)
 	if err := snapshotruntime.ApplyRootfsDiff(opts.CheckpointPath, "/", tarBinary, log); err != nil {
 		return nil, 0, nil, fmt.Errorf("rootfs diff failed: %w", err)
 	}

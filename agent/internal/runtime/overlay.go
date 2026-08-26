@@ -20,6 +20,11 @@ import (
 const (
 	rootfsDiffFilename   = "rootfs-diff.tar"
 	deletedFilesFilename = "deleted-files.json"
+
+	// RestoreTarBinaryName is the file name of the statically linked GNU tar
+	// in the agent binary bundle. Must match the name the Dockerfile bundle
+	// stage copies into /snapshot-binaries/.
+	RestoreTarBinaryName = "tar"
 )
 
 // GetRootFS returns the container's root filesystem path via /host/proc.
@@ -193,7 +198,7 @@ func ApplyRootfsDiff(checkpointPath, targetRoot, tarBinary string, log logr.Logg
 	// and security namespaces. The archive is cut from the overlay upperdir, so
 	// it can carry trusted.overlay.* entries that must never be re-applied
 	// through the restored container's overlay mount. These flags are mirrored
-	// by the tar-builder smoke test in the Dockerfile — keep them in sync.
+	// by the smoke test in scripts/build-gnu-tar.sh — keep them in sync.
 	log.Info("Applying rootfs diff", "target", targetRoot, "bytes", info.Size())
 	cmd := exec.Command(tarBinary, "--skip-old-files", "--blocking-factor=2048",
 		"--xattrs", "--xattrs-include=user.*", "--xattrs-include=security.*",
