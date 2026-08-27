@@ -77,9 +77,6 @@ func TestNewCheckpointJob(t *testing.T) {
 	if job.Name != "test-job" || job.Namespace != "test-ns" {
 		t.Fatalf("unexpected job identity: %#v", job.ObjectMeta)
 	}
-	if job.Spec.Template.Labels[snapshotv1alpha1.CheckpointSourceLabel] != "true" {
-		t.Fatalf("expected checkpoint source label on template: %#v", job.Spec.Template.Labels)
-	}
 	if len(job.Spec.Template.Spec.Volumes) != 1 || job.Spec.Template.Spec.Volumes[0].Name != snapshotv1alpha1.SnapshotControlVolumeName {
 		t.Fatalf("expected only %s volume, got %#v", snapshotv1alpha1.SnapshotControlVolumeName, job.Spec.Template.Spec.Volumes)
 	}

@@ -60,15 +60,10 @@ def source_pod(
     gpu: bool,
     annotations: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    labels = {
-        **run.labels,
-        "nvidia.com/snapshot-is-checkpoint-source": "true",
-    }
-
     metadata = {
         "name": run.source_pod,
         "namespace": config.namespace,
-        "labels": labels,
+        "labels": run.labels,
         "annotations": annotations or {},
     }
     spec = base_pod_spec(config, run, source_command(run.image, gpu), gpu)

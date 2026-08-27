@@ -131,7 +131,6 @@ func sourceJobHasExpectedIdentity(desired, actual *batchv1.Job, targetContainer 
 	for _, key := range []string{
 		snapshotv1alpha1.SnapshotJobOwnerLabel,
 		snapshotv1alpha1.SnapshotJobOwnerUIDLabel,
-		snapshotv1alpha1.CheckpointSourceLabel,
 	} {
 		if actual.Spec.Template.Labels[key] != desired.Spec.Template.Labels[key] {
 			return false

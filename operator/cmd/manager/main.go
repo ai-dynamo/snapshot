@@ -6,13 +6,9 @@ package main
 import (
 	"os"
 
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
@@ -38,13 +34,7 @@ func main() {
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme: scheme,
-		Cache: cache.Options{ByObject: map[client.Object]cache.ByObject{
-			// Cache only prepared checkpoint source Pods.
-			&corev1.Pod{}: {
-				Label: labels.SelectorFromSet(labels.Set{v1alpha1.CheckpointSourceLabel: "true"}),
-			},
-		}},
+		Scheme:                        scheme,
 		HealthProbeBindAddress:        ":8081",
 		LeaderElection:                true,
 		LeaderElectionID:              "snapshot-operator.nvidia.com",

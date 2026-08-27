@@ -9,12 +9,9 @@ package v1alpha1
 // single versioned home for these constants so both sides pin them from the api
 // module.
 const (
-	CheckpointSourceLabel = "nvidia.com/snapshot-is-checkpoint-source"
-
-	// CaptureEligibleLabel is the gate-applied promotion label. The operator stamps
-	// CheckpointSourceLabel on the checkpoint Job pod at creation; the node agent's pre-bind gate adds
-	// CaptureEligibleLabel only after the source pod passes validation. The source-pod capture
-	// informer keys on CaptureEligibleLabel so only gate-validated pods drive the capture path.
+	// CaptureEligibleLabel is the gate-applied promotion label: the node agent's pre-bind gate
+	// adds it only after the source pod passes validation. The agent's source-pod capture
+	// informer keys on it so only gate-validated pods drive the capture path.
 	CaptureEligibleLabel = "nvidia.com/snapshot-capture-eligible"
 
 	// SnapshotNodeLabel mirrors PodSnapshotContent.spec.source.nodeName onto the

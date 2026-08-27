@@ -37,7 +37,6 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 		podTemplate.Annotations = map[string]string{}
 	}
 	podTemplate.Annotations = DisableCheckpointJobSidecarInjection(podTemplate.Annotations)
-	podTemplate.Labels[snapshotv1alpha1.CheckpointSourceLabel] = "true"
 	podTemplate.Spec.RestartPolicy = corev1.RestartPolicyNever
 	if opts.SeccompProfile != "" {
 		EnsureLocalhostSeccompProfile(&podTemplate.Spec, opts.SeccompProfile)
