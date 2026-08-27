@@ -76,17 +76,21 @@ type RestoreRequest struct {
 	Clientset                kubernetes.Interface
 }
 
+type RestoreResult struct {
+	PlaceholderPID int
+	RestoredPID    int
+}
+
 // Restore performs external restore for the given request.
-// Returns the namespace-relative PID of the restored process.
 // The DaemonSet side inspects the placeholder and launches nsrestore,
 // which handles rootfs application, CRIU restore, and CUDA restore inside the namespace.
 //
 // Returns the placeholder container's host PID so callers can reach into the
-// container's mount namespace (e.g. to write sentinels under /snapshot-control)
-// without re-resolving via the runtime.
-func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest, mounts RestoreMounter) (placeholderPID int, retErr error) {
+// container's mount namespace, and the restored process PID as seen from inside
+// that namespace.
+func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest, mounts RestoreMounter) (restoreResult *RestoreResult, retErr error) {
 	if mounts == nil {
-		return 0, fmt.Errorf("restore mounter is required")
+		return nil, fmt.Errorf("restore mounter is required")
 	}
 
 	var cleanupErr error
@@ -117,24 +121,24 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 
 	artifactPath, err := nsmount.ResolveArtifact(req.BasePath, req.ContentUID, req.ArtifactContainerName)
 	if err != nil {
-		return 0, fmt.Errorf("resolve checkpoint artifact: %w", err)
+		return nil, fmt.Errorf("resolve checkpoint artifact: %w", err)
 	}
 	manifest, err := types.ReadManifest(artifactPath)
 	if err != nil {
-		return 0, fmt.Errorf("read checkpoint manifest: %w", err)
+		return nil, fmt.Errorf("read checkpoint manifest: %w", err)
 	}
 	if err := validateRestoreManifest(req, manifest); err != nil {
-		return 0, err
+		return nil, err
 	}
 
 	snap, gpuDeviceMapDuration, err := inspectRestore(ctx, rt, log, req, manifest)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 
 	bundleMount, err := mounts.MountBundle(ctx, snap.PlaceholderPID)
 	if err != nil {
-		return 0, fmt.Errorf("mount agent bundle into placeholder: %w", err)
+		return nil, fmt.Errorf("mount agent bundle into placeholder: %w", err)
 	}
 	activeMounts = append(activeMounts, restoreMount{
 		action: "unmount agent bundle from placeholder",
@@ -143,7 +147,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 
 	artifactMount, err := mounts.MountArtifact(ctx, bundleMount, artifactPath)
 	if err != nil {
-		return 0, fmt.Errorf("mount checkpoint artifact into placeholder: %w", err)
+		return nil, fmt.Errorf("mount checkpoint artifact into placeholder: %w", err)
 	}
 	activeMounts = append(activeMounts, restoreMount{
 		action: "unmount checkpoint artifact from placeholder",
@@ -152,13 +156,13 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 
 	result, err := execNSRestore(ctx, log, req, snap, bundleMount, nsmount.CheckpointDst)
 	if err != nil {
-		return 0, fmt.Errorf("nsrestore failed: %w", err)
+		return nil, fmt.Errorf("nsrestore failed: %w", err)
 	}
 	if result.CleanupError != nil {
 		cleanupErr = errors.Join(cleanupErr, result.CleanupError)
 	}
 	if err := validateRestoredProcess(snap.TargetRoot, result.RestoredPID, log); err != nil {
-		return 0, err
+		return nil, err
 	}
 
 	cleanup()
@@ -190,7 +194,10 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		"placeholder_host_pid", snap.PlaceholderPID,
 	)
 
-	return snap.PlaceholderPID, nil
+	return &RestoreResult{
+		PlaceholderPID: snap.PlaceholderPID,
+		RestoredPID:    result.RestoredPID,
+	}, nil
 }
 
 func remainingDuration(wall time.Duration, parts ...time.Duration) time.Duration {

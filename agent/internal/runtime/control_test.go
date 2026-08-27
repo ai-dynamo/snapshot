@@ -12,7 +12,7 @@ import (
 func TestWriteSentinelInDir_CreatesFileAtomically(t *testing.T) {
 	dir := t.TempDir()
 
-	if err := writeSentinelInDir(dir, "snapshot-complete"); err != nil {
+	if err := writeSentinelInDir(dir, "snapshot-complete", []byte("done\n")); err != nil {
 		t.Fatalf("writeSentinelInDir failed: %v", err)
 	}
 
@@ -37,10 +37,10 @@ func TestWriteSentinelInDir_CreatesFileAtomically(t *testing.T) {
 
 func TestWriteSentinelInDir_Overwrites(t *testing.T) {
 	dir := t.TempDir()
-	if err := writeSentinelInDir(dir, "restore-complete"); err != nil {
+	if err := writeSentinelInDir(dir, "restore-complete", []byte("done\n")); err != nil {
 		t.Fatalf("first write failed: %v", err)
 	}
-	if err := writeSentinelInDir(dir, "restore-complete"); err != nil {
+	if err := writeSentinelInDir(dir, "restore-complete", []byte("done\n")); err != nil {
 		t.Fatalf("second write failed: %v", err)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "restore-complete"))
@@ -52,9 +52,23 @@ func TestWriteSentinelInDir_Overwrites(t *testing.T) {
 	}
 }
 
+func TestReadSentinelInDir_ReadsPayload(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeSentinelInDir(dir, "restore-complete", []byte("43\n")); err != nil {
+		t.Fatalf("writeSentinelInDir: %v", err)
+	}
+	data, err := readSentinelInDir(dir, "restore-complete")
+	if err != nil {
+		t.Fatalf("readSentinelInDir: %v", err)
+	}
+	if string(data) != "43\n" {
+		t.Fatalf("readSentinelInDir() = %q, want 43\\n", data)
+	}
+}
+
 func TestWriteSentinelInDir_DirMissing(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
-	if err := writeSentinelInDir(missing, "snapshot-complete"); err == nil {
+	if err := writeSentinelInDir(missing, "snapshot-complete", []byte("done\n")); err == nil {
 		t.Fatal("expected error writing into missing directory")
 	}
 }
@@ -78,7 +92,7 @@ func TestControlSentinelExistsInDir(t *testing.T) {
 		t.Fatal("missing sentinel reported as present")
 	}
 
-	if err := writeSentinelInDir(dir, "restore-complete"); err != nil {
+	if err := writeSentinelInDir(dir, "restore-complete", []byte("done\n")); err != nil {
 		t.Fatalf("writeSentinelInDir: %v", err)
 	}
 	exists, err = controlSentinelExistsInDir(dir, "restore-complete")
@@ -106,7 +120,7 @@ func TestRemoveControlSentinel_MissingFile(t *testing.T) {
 
 func TestRemoveControlSentinel_RemovesExisting(t *testing.T) {
 	dir := t.TempDir()
-	if err := writeSentinelInDir(dir, "restore-complete"); err != nil {
+	if err := writeSentinelInDir(dir, "restore-complete", []byte("done\n")); err != nil {
 		t.Fatalf("writeSentinelInDir: %v", err)
 	}
 	if err := RemoveControlSentinel(dir, "restore-complete"); err != nil {

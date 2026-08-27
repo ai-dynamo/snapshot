@@ -13,6 +13,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -65,10 +67,13 @@ type NodeController struct {
 	log                     logr.Logger
 	holderID                string
 	checkpointFn            func(ctx context.Context, params CheckpointParams) error
-	restoreFn               func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error)
-	writeControlSentinelFn  func(int, string) error
+	restoreFn               func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (*executor.RestoreResult, error)
+	writeControlSentinelFn  func(int, string, []byte) error
 	controlSentinelExistsFn func(int, string) (bool, error)
+	readControlSentinelFn   func(int, string) ([]byte, error)
+	validateProcessStateFn  func(string, int) error
 	sendSignalFn            func(logr.Logger, int, syscall.Signal, string) error
+	restoreMonitorInterval  time.Duration
 	restoreQueue            workqueue.TypedDelayingInterface[client.ObjectKey]
 	restorePodLister        corev1listers.PodLister
 
@@ -76,6 +81,7 @@ type NodeController struct {
 	inFlightMu sync.Mutex
 
 	handledRestores sync.Map
+	restoreMonitors sync.Map
 
 	// contentIndexer is the PodSnapshotContent informer's indexer, indexed by source pod
 	// (podRefIndex). The source-pod informer uses it to map a pod event back to its work order.
@@ -152,6 +158,7 @@ const (
 	restorePodFinalizer                = "snapshot/restore-protection"
 	snapshotEventComponent             = "snapshot"
 	restoreSafetyRequeueInterval       = 30 * time.Second
+	restoredProcessMonitorInterval     = 1 * time.Second
 
 	// snapshotContentResyncInterval re-drives every PodSnapshotContent work order so a
 	// not-yet-Ready source pod is re-checked for quiesce without a busy loop.
@@ -220,9 +227,12 @@ func newDefaultController(
 		),
 
 		restoreFn:               executor.Restore,
-		writeControlSentinelFn:  snapshotruntime.WriteControlSentinel,
+		writeControlSentinelFn:  snapshotruntime.WriteControlSentinelData,
 		controlSentinelExistsFn: snapshotruntime.ControlSentinelExists,
+		readControlSentinelFn:   snapshotruntime.ReadControlSentinel,
+		validateProcessStateFn:  snapshotruntime.ValidateProcessState,
 		sendSignalFn:            snapshotruntime.SendSignalToPID,
+		restoreMonitorInterval:  restoredProcessMonitorInterval,
 	}
 	w.checkpointFn = w.executorCheckpoint
 	return w
@@ -852,7 +862,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, artifa
 		defer cancel()
 	}
 
-	placeholderHostPID, err := op.executeRestore(restoreCtx)
+	result, err := op.executeRestore(restoreCtx)
 	if err != nil {
 		var cleanupErr *executor.RestoreCleanupError
 		if !errors.As(err, &cleanupErr) {
@@ -861,7 +871,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, artifa
 		op.log.Error(cleanupErr, "Restore completed with cleanup errors")
 		emitPodEvent(ctx, w.clientset, op.log, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreCleanupFailed", cleanupErr.Error())
 	}
-	return op.completeRestore(ctx, placeholderHostPID)
+	return op.completeRestore(ctx, result)
 }
 
 // recoverCompletedRestore avoids replaying CRIU when the destination-scoped
@@ -876,12 +886,22 @@ func (op *restoreOperation) recoverCompletedRestore(ctx context.Context) (bool, 
 	if err != nil {
 		return false, fmt.Errorf("resolve restore container before checking completion sentinel: %w", err)
 	}
-	exists, err := op.controller.controlSentinelExistsFn(hostPID, snapshotv1alpha1.RestoreCompleteFile)
+	w := op.controller
+	exists, err := w.controlSentinelExistsFn(hostPID, snapshotv1alpha1.RestoreCompleteFile)
 	if err != nil {
 		return false, fmt.Errorf("check restore completion sentinel: %w", err)
 	}
 	if !exists {
 		return false, nil
+	}
+	if data, err := w.readControlSentinelFn(hostPID, snapshotv1alpha1.RestoreCompleteFile); err == nil {
+		if restoredPID, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil && restoredPID > 0 {
+			w.monitorRestoredProcess(ctx, op.log, op.monitorKey(hostPID, restoredPID), hostPID, restoredPID)
+		} else {
+			op.log.Info("Restore completion sentinel does not include a restored PID; lifecycle monitor cannot be recovered", "sentinel", snapshotv1alpha1.RestoreCompleteFile, "value", strings.TrimSpace(string(data)))
+		}
+	} else {
+		op.log.Error(err, "Failed to read restore completion sentinel; lifecycle monitor cannot be recovered", "sentinel", snapshotv1alpha1.RestoreCompleteFile)
 	}
 	return true, nil
 }
@@ -905,7 +925,7 @@ func (w *NodeController) newRestoreOperation(
 	}
 }
 
-func (op *restoreOperation) executeRestore(ctx context.Context) (int, error) {
+func (op *restoreOperation) executeRestore(ctx context.Context) (*executor.RestoreResult, error) {
 	w := op.controller
 	req := executor.RestoreRequest{
 		ContentUID:               op.artifact.ContentUID,
@@ -936,18 +956,63 @@ func (op *restoreOperation) failRestore(ctx context.Context, restoreErr error) e
 	return restoreErr
 }
 
-func (op *restoreOperation) completeRestore(ctx context.Context, placeholderHostPID int) error {
+func (op *restoreOperation) completeRestore(ctx context.Context, result *executor.RestoreResult) error {
 	w := op.controller
+	if result == nil {
+		return fmt.Errorf("restore completed without result")
+	}
 	// Any PID inside the container mount namespace reaches the control
 	// volume through /host/proc/<pid>/root.
-	if err := w.writeControlSentinelFn(placeholderHostPID, snapshotv1alpha1.RestoreCompleteFile); err != nil {
+	sentinelData := []byte(strconv.Itoa(result.RestoredPID) + "\n")
+	if err := w.writeControlSentinelFn(result.PlaceholderPID, snapshotv1alpha1.RestoreCompleteFile, sentinelData); err != nil {
 		op.log.Error(err, "Failed to write restore-complete sentinel")
-		if killErr := w.sendSignalFn(op.log, placeholderHostPID, syscall.SIGKILL, "restore sentinel failed"); killErr != nil {
+		if killErr := w.sendSignalFn(op.log, result.PlaceholderPID, syscall.SIGKILL, "restore sentinel failed"); killErr != nil {
 			return errors.Join(fmt.Errorf("failed to write restore-complete sentinel: %w", err), fmt.Errorf("placeholder could not be killed: %w", killErr))
 		}
 		return fmt.Errorf("failed to write restore-complete sentinel: %w", err)
 	}
+	w.monitorRestoredProcess(ctx, op.log, op.monitorKey(result.PlaceholderPID, result.RestoredPID), result.PlaceholderPID, result.RestoredPID)
 	return nil
+}
+
+func (op *restoreOperation) monitorKey(placeholderHostPID, restoredPID int) string {
+	return fmt.Sprintf("%s/%s/%d/%d", op.pod.UID, op.destination, placeholderHostPID, restoredPID)
+}
+
+func (w *NodeController) monitorRestoredProcess(ctx context.Context, log logr.Logger, key string, placeholderHostPID, restoredPID int) {
+	if placeholderHostPID <= 0 || restoredPID <= 0 {
+		log.Error(fmt.Errorf("invalid restore process ids"), "Cannot monitor restored process lifecycle", "placeholder_host_pid", placeholderHostPID, "restored_pid", restoredPID)
+		return
+	}
+	if _, loaded := w.restoreMonitors.LoadOrStore(key, struct{}{}); loaded {
+		return
+	}
+	procRoot := filepath.Join(snapshotruntime.HostProcPath, strconv.Itoa(placeholderHostPID), "root", "proc")
+	interval := w.restoreMonitorInterval
+	if interval <= 0 {
+		interval = restoredProcessMonitorInterval
+	}
+	go func() {
+		defer w.restoreMonitors.Delete(key)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			if err := w.validateProcessStateFn(procRoot, restoredPID); err == nil {
+				continue
+			} else {
+				log.Info("Restored process exited; terminating restore placeholder", "restored_pid", restoredPID, "placeholder_host_pid", placeholderHostPID, "error", err)
+				if signalErr := w.sendSignalFn(log, placeholderHostPID, syscall.SIGKILL, "restored process exited"); signalErr != nil {
+					log.Error(signalErr, "Failed to terminate restore placeholder after restored process exit", "restored_pid", restoredPID, "placeholder_host_pid", placeholderHostPID)
+				}
+				return
+			}
+		}
+	}()
 }
 
 // applyRestoredCondition uses server-side apply against the status subresource.
