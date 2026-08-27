@@ -5,8 +5,9 @@
 # Fetches upstream source for every Debian package the agent image adds on top
 # of its base image, so the corresponding source ships with the binaries.
 #
-# The delta is computed against base-packages.tsv rather than hardcoded, so a
-# package added to the Dockerfile brings its source along automatically.
+# The delta is computed against a manifest captured from the exact base-image
+# stage used for this target architecture, so a package added to the Dockerfile
+# brings its source along automatically.
 
 set -eu
 

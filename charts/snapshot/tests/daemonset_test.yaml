@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: snapshot agent architecture scheduling
+templates:
+  - templates/daemonset.yaml
+tests:
+  - it: allows amd64 and arm64 agent pods by default
+    asserts:
+      - equal:
+          path: spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0]
+          value:
+            key: kubernetes.io/arch
+            operator: In
+            values:
+              - amd64
+              - arm64
+
+  - it: supports restricting agent pods to arm64
+    set:
+      daemonset.supportedArchitectures:
+        - arm64
+    asserts:
+      - equal:
+          path: spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0]
+          value:
+            key: kubernetes.io/arch
+            operator: In
+            values:
+              - arm64
+
+  - it: supports caller-managed node affinity when architecture affinity is disabled
+    set:
+      daemonset.supportedArchitectures: []
+      daemonset.affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: example.com/custom
+                    operator: Exists
+    asserts:
+      - equal:
+          path: spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0]
+          value:
+            key: example.com/custom
+            operator: Exists
+
+  - it: rejects caller-managed node affinity while architecture affinity is enabled
+    set:
+      daemonset.affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: example.com/custom
+                    operator: Exists
+    asserts:
+      - failedTemplate:
+          errorPattern: "daemonset.affinity.nodeAffinity is not supported while daemonset.supportedArchitectures is set"
+
+  - it: rejects unsupported architecture values
+    set:
+      daemonset.supportedArchitectures:
+        - ppc64le
+    asserts:
+      - failedTemplate:
+          errorPattern: "daemonset.supportedArchitectures contains unsupported architecture"
