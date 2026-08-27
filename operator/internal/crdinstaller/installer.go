@@ -133,10 +133,6 @@ func waitForEstablished(ctx context.Context, crdClient apiextensionsv1client.Cus
 	ctx, cancel := context.WithTimeout(ctx, establishedTimeout)
 	defer cancel()
 
-	// UntilWithSync retries list/watch failures internally and would surface
-	// them only as a bare timeout. Record the most recent failure for the
-	// timeout diagnostics, and abort the wait outright on an authorization
-	// error, which retrying cannot resolve.
 	var (
 		reflectorMu  sync.Mutex
 		reflectorErr error
@@ -158,21 +154,7 @@ func waitForEstablished(ctx context.Context, crdClient apiextensionsv1client.Cus
 		}
 	}
 
-	selector := fields.OneTermEqualSelector("metadata.name", name).String()
-	lw := &cache.ListWatch{
-		ListWithContextFunc: func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
-			opts.FieldSelector = selector
-			list, err := crdClient.List(ctx, opts)
-			observe(err)
-			return list, err
-		},
-		WatchFuncWithContext: func(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error) {
-			opts.FieldSelector = selector
-			w, err := crdClient.Watch(ctx, opts)
-			observe(err)
-			return w, err
-		},
-	}
+	lw := newCRDListWatch(crdClient, name, observe)
 
 	// On timeout the bare error says nothing about the cause; the last
 	// observation distinguishes a slow apiserver from e.g. a NamesAccepted
@@ -213,6 +195,26 @@ func waitForEstablished(ctx context.Context, crdClient apiextensionsv1client.Cus
 		err = fmt.Errorf("%w (last observed conditions: %s)", err, formatConditions(lastConditions))
 	}
 	return err
+}
+
+// newCRDListWatch lists and watches the single named CRD, reporting every
+// list/watch error to observe.
+func newCRDListWatch(crdClient apiextensionsv1client.CustomResourceDefinitionInterface, name string, observe func(error)) *cache.ListWatch {
+	selector := fields.OneTermEqualSelector("metadata.name", name).String()
+	return &cache.ListWatch{
+		ListWithContextFunc: func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
+			opts.FieldSelector = selector
+			list, err := crdClient.List(ctx, opts)
+			observe(err)
+			return list, err
+		},
+		WatchFuncWithContext: func(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error) {
+			opts.FieldSelector = selector
+			w, err := crdClient.Watch(ctx, opts)
+			observe(err)
+			return w, err
+		},
+	}
 }
 
 func crdEstablished(conditions []apiextensionsv1.CustomResourceDefinitionCondition) bool {

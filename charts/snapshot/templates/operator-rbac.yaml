@@ -51,10 +51,6 @@ rules:
     resources: ["events"]
     verbs: ["create", "patch"]
   {{- if .Values.crdUpgrade.enabled }}
-  # RBAC cannot match resourceNames on create, and list/watch requests are
-  # only authorized against resourceNames on servers with the
-  # AuthorizeWithSelectors feature, so these three are granted unscoped.
-  # The installer watches each applied CRD until it is Established.
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
     verbs: ["create", "list", "watch"]
