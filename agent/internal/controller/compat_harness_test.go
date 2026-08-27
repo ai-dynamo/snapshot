@@ -5,10 +5,11 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
@@ -111,17 +112,12 @@ func (r *gatedRestore) reconcile(t *testing.T) {
 // reports from.
 func (r *gatedRestore) runRestore(t *testing.T) bool {
 	t.Helper()
-	err := r.controller.runRestore(
+	return r.controller.restorePodContainers(
 		context.Background(),
 		r.pod,
-		r.artifact,
-		gatedRestoreContainer,
-		testContainerID,
-		time.Time{},
-		false,
+		&restorePlan{artifact: r.artifact, mappings: gatedRestoreMappings()},
+		fmt.Sprintf("%s/%s", r.pod.Namespace, r.pod.Name),
 	)
-	require.NoError(t, err)
-	return false
 }
 
 func (r *gatedRestore) clientset(t *testing.T) *fake.Clientset {
@@ -129,6 +125,20 @@ func (r *gatedRestore) clientset(t *testing.T) *fake.Clientset {
 	clientset, ok := r.controller.clientset.(*fake.Clientset)
 	require.Truef(t, ok, "controller clientset is %T, want *fake.Clientset", r.controller.clientset)
 	return clientset
+}
+
+// condition reads the condition off the last status apply, which is how the
+// agent publishes a verdict.
+func (r *gatedRestore) condition(t *testing.T) corev1.PodCondition {
+	t.Helper()
+	var applied struct {
+		Status struct {
+			Conditions []corev1.PodCondition `json:"conditions"`
+		} `json:"status"`
+	}
+	require.NoError(t, json.Unmarshal(lastPodStatusApply(t, r.controller).GetPatch(), &applied))
+	require.Len(t, applied.Status.Conditions, 1)
+	return applied.Status.Conditions[0]
 }
 
 // events returns every event emitted under one reason, so a test can assert on
