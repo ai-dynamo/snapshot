@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	clientgotesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
@@ -261,6 +262,45 @@ func TestInstallCRDsTimesOutWaitingForEstablished(t *testing.T) {
 	assert.Contains(t, err.Error(), `wait for CRD "podsnapshots.nvidia.com" to become established`)
 	assert.Contains(t, err.Error(), "last observed conditions")
 	assert.Contains(t, err.Error(), `"status":"False"`)
+}
+
+func TestInstallCRDsFailsFastOnForbiddenListWatch(t *testing.T) {
+	cl := newFakeClient()
+	cl.nextRV["podsnapshots.nvidia.com"] = "1"
+	fcs := apiextensionsfake.NewSimpleClientset()
+	forbidden := apierrors.NewForbidden(schema.GroupResource{
+		Group: "apiextensions.k8s.io", Resource: "customresourcedefinitions",
+	}, "", errors.New("crd-installer lacks list/watch RBAC"))
+	fcs.PrependReactor("list", "customresourcedefinitions", func(clientgotesting.Action) (bool, runtime.Object, error) {
+		return true, nil, forbidden
+	})
+
+	start := time.Now()
+	_, err := InstallCRDs(t.Context(), cl, fcs.ApiextensionsV1().CustomResourceDefinitions(), logr.Discard(),
+		[]string{crdManifest("podsnapshots.nvidia.com")})
+
+	require.Error(t, err)
+	assert.True(t, apierrors.IsForbidden(err), "underlying Forbidden must survive wrapping, got: %v", err)
+	assert.Contains(t, err.Error(), "lacks list/watch RBAC")
+	assert.Less(t, time.Since(start), establishedTimeout,
+		"an authorization error must fail the wait immediately, not ride out the timeout")
+}
+
+func TestInstallCRDsTimeoutIncludesLastListWatchError(t *testing.T) {
+	cl := newFakeClient()
+	cl.nextRV["podsnapshots.nvidia.com"] = "1"
+	fcs := apiextensionsfake.NewSimpleClientset()
+	fcs.PrependReactor("list", "customresourcedefinitions", func(clientgotesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("connection refused")
+	})
+
+	_, err := InstallCRDs(t.Context(), cl, fcs.ApiextensionsV1().CustomResourceDefinitions(), logr.Discard(),
+		[]string{crdManifest("podsnapshots.nvidia.com")})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `wait for CRD "podsnapshots.nvidia.com" to become established`)
+	assert.Contains(t, err.Error(), "last list/watch error")
+	assert.Contains(t, err.Error(), "connection refused")
 }
 
 func TestInstallCRDsFailsWhenCRDDeletedWhileWaiting(t *testing.T) {

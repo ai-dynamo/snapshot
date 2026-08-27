@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -132,15 +133,44 @@ func waitForEstablished(ctx context.Context, crdClient apiextensionsv1client.Cus
 	ctx, cancel := context.WithTimeout(ctx, establishedTimeout)
 	defer cancel()
 
+	// UntilWithSync retries list/watch failures internally and would surface
+	// them only as a bare timeout. Record the most recent failure for the
+	// timeout diagnostics, and abort the wait outright on an authorization
+	// error, which retrying cannot resolve.
+	var (
+		reflectorMu  sync.Mutex
+		reflectorErr error
+		failFast     error
+	)
+	observe := func(err error) {
+		if err == nil {
+			return
+		}
+		reflectorMu.Lock()
+		reflectorErr = err
+		if failFast == nil && (apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err)) {
+			failFast = err
+		}
+		abort := failFast != nil
+		reflectorMu.Unlock()
+		if abort {
+			cancel()
+		}
+	}
+
 	selector := fields.OneTermEqualSelector("metadata.name", name).String()
 	lw := &cache.ListWatch{
-		ListFunc: func(opts metav1.ListOptions) (runtime.Object, error) {
+		ListWithContextFunc: func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
 			opts.FieldSelector = selector
-			return crdClient.List(ctx, opts)
+			list, err := crdClient.List(ctx, opts)
+			observe(err)
+			return list, err
 		},
-		WatchFunc: func(opts metav1.ListOptions) (watch.Interface, error) {
+		WatchFuncWithContext: func(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error) {
 			opts.FieldSelector = selector
-			return crdClient.Watch(ctx, opts)
+			w, err := crdClient.Watch(ctx, opts)
+			observe(err)
+			return w, err
 		},
 	}
 
@@ -171,8 +201,16 @@ func waitForEstablished(ctx context.Context, crdClient apiextensionsv1client.Cus
 	if err == nil {
 		return nil
 	}
+	reflectorMu.Lock()
+	defer reflectorMu.Unlock()
+	if failFast != nil {
+		return fmt.Errorf("list/watch CRDs: %w", failFast)
+	}
+	if reflectorErr != nil {
+		err = fmt.Errorf("%w (last list/watch error: %v)", err, reflectorErr)
+	}
 	if len(lastConditions) > 0 {
-		return fmt.Errorf("%w (last observed conditions: %s)", err, formatConditions(lastConditions))
+		err = fmt.Errorf("%w (last observed conditions: %s)", err, formatConditions(lastConditions))
 	}
 	return err
 }
