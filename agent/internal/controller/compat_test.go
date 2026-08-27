@@ -5,6 +5,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"runtime"
 	"testing"
 
@@ -93,6 +94,220 @@ func TestPreflightCompatibilityDescribesEveryRestoreTarget(t *testing.T) {
 		KernelVersion: "5.15.0-1071-aws",
 		Image:         "nvcr.io/nvidia/tritonserver:25.01-py3",
 	}, r.comparison.calls[1].target)
+}
+
+// The refusal event is its own reason, so alerting that pages on restore
+// failures does not fire on a restore that was never attempted.
+func TestRefusalEmitsOneIncompatibleEventAtBothGates(t *testing.T) {
+	mismatch := compat.Mismatch{Check: "cpu-arch", Source: "amd64", Target: "arm64"}
+	wantMessage := "cpu-arch: source amd64, target arm64"
+
+	assertOneEvent := func(t *testing.T, r *gatedRestore) {
+		t.Helper()
+		events := r.events(t, restoreIncompatibleReason)
+		require.Len(t, events, 1)
+		assert.Equal(t, wantMessage, events[0].Message)
+		assert.Equal(t, corev1.EventTypeWarning, events[0].Type)
+		assert.Empty(t, r.events(t, restoreFailedReason), "refusal also reported a restore failure")
+	}
+
+	t.Run("preflight gate", func(t *testing.T) {
+		r := newGatedRestore(t, mismatch)
+
+		r.reconcile(t)
+
+		assertOneEvent(t, r)
+		assert.Empty(t, r.events(t, restoreRequestedReason), "refused restore still announced a request")
+	})
+
+	t.Run("inspect gate", func(t *testing.T) {
+		r := newGatedRestore(t)
+		r.controller.restoreFn = refuseWith(mismatch)
+
+		r.runRestore(t)
+
+		assertOneEvent(t, r)
+	})
+}
+
+// The pod carries its own verdict on the condition every other restore outcome
+// is published on, so a refusal is visible to anything that reads pods and is
+// told apart from a failure by its reason alone.
+func TestRefusalPublishesTheRestoredConditionAtBothGates(t *testing.T) {
+	mismatch := compat.Mismatch{Check: "gpu-model", Source: "Tesla T4", Target: "NVIDIA A100-SXM4-40GB"}
+	wantMessage := "gpu-model: source Tesla T4, target NVIDIA A100-SXM4-40GB"
+
+	assertPublished := func(t *testing.T, r *gatedRestore) {
+		t.Helper()
+		condition := r.condition(t)
+		assert.Equal(t, corev1.PodConditionType(snapshotv1alpha1.RestoredCondition), condition.Type)
+		assert.Equal(t, corev1.ConditionFalse, condition.Status)
+		assert.Equal(t, restoreIncompatibleReason, condition.Reason)
+		// The same sentence the log line and the event carry, so a reader who
+		// starts from the pod does not get a different answer.
+		assert.Equal(t, wantMessage, condition.Message)
+		assert.Equal(t, wantMessage, r.refusalLog(t)["reason"])
+	}
+
+	t.Run("preflight gate", func(t *testing.T) {
+		r := newGatedRestore(t, mismatch)
+
+		r.reconcile(t)
+
+		assertPublished(t, r)
+	})
+
+	t.Run("inspect gate", func(t *testing.T) {
+		r := newGatedRestore(t)
+		r.controller.restoreFn = refuseWith(mismatch)
+
+		r.runRestore(t)
+
+		assertPublished(t, r)
+	})
+}
+
+func TestRecordRestoreResultsReportsEveryIncompatibleDestination(t *testing.T) {
+	r := newGatedRestore(t)
+	requeue := r.controller.recordRestoreResults(
+		context.Background(),
+		r.pod,
+		r.artifact,
+		[]restoreResult{
+			{destination: "engine-0", state: restoreResultIncompatible, reason: "gpu-model: source Tesla T4, target NVIDIA A100"},
+			{destination: "engine-1", state: restoreResultIncompatible, reason: "gpu-count: source 1, target 0"},
+		},
+	)
+
+	assert.False(t, requeue)
+	condition := r.condition(t)
+	assert.Equal(t, restoreIncompatibleReason, condition.Reason)
+	assert.Contains(t, condition.Message, "engine-0: gpu-model")
+	assert.Contains(t, condition.Message, "engine-1: gpu-count")
+	assert.Empty(t, r.events(t, restoreSucceededReason))
+}
+
+// The escape hatches: with either one set, neither gate runs, so a checkpoint
+// the policy table would turn down is still attempted.
+func TestSkipCompatCheckTurnsOffTheGates(t *testing.T) {
+	mismatch := compat.Mismatch{Check: "cpu-arch", Source: "amd64", Target: "arm64"}
+
+	// Lets the restore start and end quickly, since the point here is only
+	// whether the gate let it through.
+	stopEarly := func(r *gatedRestore) {
+		r.controller.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
+			return 0, errors.New("test restore stopped")
+		}
+	}
+
+	t.Run("the pod annotation turns it off", func(t *testing.T) {
+		r := newGatedRestore(t, mismatch)
+		r.pod.Annotations[snapshotv1alpha1.SkipCompatCheckAnnotation] = "true"
+		stopEarly(r)
+
+		r.reconcile(t)
+
+		assert.Empty(t, r.comparison.calls, "skipped gate compared anyway")
+		assert.Empty(t, r.events(t, restoreIncompatibleReason), "skipped gate refused the restore")
+	})
+
+	// A node with the gate off skips every restore it handles, whether or not
+	// the pod asked for it.
+	t.Run("the node config turns it off for an unannotated pod", func(t *testing.T) {
+		r := newGatedRestore(t, mismatch)
+		r.controller.config.Restore.SkipCompatCheck = true
+		stopEarly(r)
+
+		r.reconcile(t)
+
+		assert.Empty(t, r.comparison.calls, "skipped gate compared anyway")
+		assert.Empty(t, r.events(t, restoreIncompatibleReason), "skipped gate refused the restore")
+	})
+
+	// Gate B is inside the executor, past the point where either switch can be
+	// read again, so the decision travels with the request. Without it, a
+	// skipped restore would still be refused a few steps later.
+	t.Run("the decision travels to the second gate", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			set  func(*gatedRestore)
+			want bool
+		}{
+			{name: "checked", set: func(*gatedRestore) {}},
+			{
+				name: "skipped by pod",
+				set: func(r *gatedRestore) {
+					r.pod.Annotations[snapshotv1alpha1.SkipCompatCheckAnnotation] = "true"
+				},
+				want: true,
+			},
+			{
+				name: "skipped by node",
+				set:  func(r *gatedRestore) { r.controller.config.Restore.SkipCompatCheck = true },
+				want: true,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				r := newGatedRestore(t)
+				tc.set(r)
+				var requested executor.RestoreRequest
+				r.controller.restoreFn = func(_ context.Context, _ snapshotruntime.Runtime, _ logr.Logger, req executor.RestoreRequest, _ executor.RestoreMounter) (int, error) {
+					requested = req
+					return 0, errors.New("test restore stopped")
+				}
+
+				r.reconcile(t)
+
+				assert.Equal(t, tc.want, requested.SkipCompatCheck)
+			})
+		}
+	})
+
+	// The node switch is read per restore, not once at startup, which is what
+	// makes flipping the ConfigMap enough to be heard.
+	t.Run("the node config is re-read for every restore", func(t *testing.T) {
+		r := newGatedRestore(t, mismatch)
+		reads := 0
+		r.controller.skipCompatCheckFn = func() bool {
+			reads++
+			return reads > 1
+		}
+		stopEarly(r)
+
+		r.reconcile(t)
+		require.Len(t, r.comparison.calls, 1, "gate did not run while the switch was off")
+
+		r.pod.Status.Conditions = nil
+		r.controller.handledRestores.Delete(string(r.pod.UID))
+		r.reconcile(t)
+
+		assert.Len(t, r.comparison.calls, 1, "gate ran after the switch was flipped on")
+		assert.Equal(t, 2, reads)
+	})
+
+	// The annotation has to reach a pod the gate already turned down, or the
+	// only way out of a wrong refusal is deleting and recreating the pod.
+	t.Run("it reopens a pod that was already refused", func(t *testing.T) {
+		r := newGatedRestore(t, mismatch)
+		stopEarly(r)
+
+		r.reconcile(t)
+		require.Len(t, r.events(t, restoreIncompatibleReason), 1, "the gate did not refuse the restore")
+
+		r.pod.Status.Conditions = append(r.pod.Status.Conditions, corev1.PodCondition{
+			Type:    corev1.PodConditionType(snapshotv1alpha1.RestoredCondition),
+			Status:  corev1.ConditionFalse,
+			Reason:  restoreIncompatibleReason,
+			Message: mismatch.Reason(),
+		})
+		r.pod.Annotations[snapshotv1alpha1.SkipCompatCheckAnnotation] = "true"
+		r.comparison.calls = nil
+
+		r.reconcile(t)
+
+		assert.Empty(t, r.comparison.calls, "the reopened restore was compared anyway")
+		assert.Len(t, r.events(t, restoreIncompatibleReason), 1, "the reopened restore was refused again")
+	})
 }
 
 // Both gates log the same sentence for the same refusal, and each names the gate
