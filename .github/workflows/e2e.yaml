@@ -167,26 +167,6 @@ jobs:
           uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
             --phase snapshot-ready
 
-      - name: Dump Snapshot operator diagnostics
-        if: ${{ failure() }}
-        timeout-minutes: 3
-        env:
-          KUBECONFIG: ${{ env.SNAPSHOT_E2E_TARGET_KUBECONFIG }}
-        run: |
-          set +e
-          echo "--- pods ---"
-          kubectl get pods -n "${TEST_NAMESPACE}" -o wide
-          echo "--- operator pod describe ---"
-          kubectl describe pods -n "${TEST_NAMESPACE}" -l app.kubernetes.io/component=operator
-          echo "--- crd-installer logs (current) ---"
-          kubectl logs -n "${TEST_NAMESPACE}" -l app.kubernetes.io/component=operator -c crd-installer --all-containers=false
-          echo "--- crd-installer logs (previous) ---"
-          kubectl logs -n "${TEST_NAMESPACE}" -l app.kubernetes.io/component=operator -c crd-installer --previous
-          echo "--- manager logs ---"
-          kubectl logs -n "${TEST_NAMESPACE}" -l app.kubernetes.io/component=operator -c manager
-          echo "--- CRDs ---"
-          kubectl get crd -o wide
-
       - name: Export vCluster kubeconfig
         timeout-minutes: 3
         run: |
