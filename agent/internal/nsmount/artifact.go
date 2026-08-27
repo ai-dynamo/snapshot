@@ -8,10 +8,11 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
 const (
-	artifactsDirectory  = "artifacts"
 	containersDirectory = "containers"
 )
 
@@ -19,16 +20,14 @@ const (
 // PodSnapshotContent and captured container. All variable components must be
 // single safe path elements.
 func ResolveArtifactPath(basePath, contentUID, containerName string) (string, error) {
-	if err := validateAbsolutePath(basePath); err != nil {
-		return "", err
-	}
-	if err := validatePathElement("PodSnapshotContent UID", contentUID); err != nil {
+	root, err := snapshotv1alpha1.ResolveArtifactRoot(basePath, contentUID)
+	if err != nil {
 		return "", err
 	}
 	if err := validatePathElement("container name", containerName); err != nil {
 		return "", err
 	}
-	return filepath.Join(basePath, artifactsDirectory, contentUID, containersDirectory, containerName), nil
+	return filepath.Join(root, containersDirectory, containerName), nil
 }
 
 // ResolveArtifactStagingRoot returns the private staging root for one
@@ -37,13 +36,11 @@ func ResolveArtifactPath(basePath, contentUID, containerName string) (string, er
 // content directory guarantees that rename stays on one filesystem, so the
 // artifact is published atomically and restore never observes a partial dump.
 func ResolveArtifactStagingRoot(basePath, contentUID string) (string, error) {
-	if err := validateAbsolutePath(basePath); err != nil {
+	root, err := snapshotv1alpha1.ResolveArtifactRoot(basePath, contentUID)
+	if err != nil {
 		return "", err
 	}
-	if err := validatePathElement("PodSnapshotContent UID", contentUID); err != nil {
-		return "", err
-	}
-	return filepath.Join(basePath, artifactsDirectory, contentUID, ".tmp"), nil
+	return filepath.Join(root, ".tmp"), nil
 }
 
 func validateAbsolutePath(value string) error {

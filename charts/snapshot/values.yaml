@@ -63,8 +63,8 @@ storage:
     size: 1Ti
     # Storage class (leave empty for default)
     storageClass: ""
-    # Fixed PVC mount path inside every snapshot-agent pod. The privileged
-    # mount helper independently enforces this source root.
+    # Fixed PVC mount path inside the operator and every snapshot-agent pod.
+    # The privileged mount helper independently enforces this source root.
     basePath: /checkpoints
 
   # Reserved for future snapshot-owned backends. Unsupported today.

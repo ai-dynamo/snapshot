@@ -5,7 +5,6 @@ package controller
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"time"
 
@@ -61,13 +60,6 @@ func isContainerReady(pod *corev1.Pod, containerName string) bool {
 		}
 	}
 	return false
-}
-
-// checkpointLeaseName returns a DNS-safe Lease name derived from the immutable
-// content/container artifact identity.
-func checkpointLeaseName(contentUID, containerName string) string {
-	digest := sha256.Sum256([]byte(contentUID + "\x00" + containerName))
-	return fmt.Sprintf("snapshot-capture-%x", digest[:16])
 }
 
 // acquireLease acquires or renews a checkpoint lease at an arbitrary namespace/name key,

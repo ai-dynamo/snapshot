@@ -19,6 +19,12 @@ spec:
       labels:
         {{- include "snapshot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: operator
+      {{- if .Values.openshift.enabled }}
+      annotations:
+        # Artifact cleanup must use the same root identity as the agent that
+        # created the CRIU tree on the PVC.
+        openshift.io/required-scc: anyuid
+      {{- end }}
     spec:
       serviceAccountName: {{ include "snapshot.operatorServiceAccountName" . }}
       {{- with .Values.image.operator.imagePullSecrets }}
@@ -45,3 +51,19 @@ spec:
         - name: manager
           image: "{{ .Values.image.operator.repository }}:{{ .Values.image.operator.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.operator.pullPolicy }}
+          # Checkpoint artifacts are created by the privileged agent. Run the
+          # cleanup controller with the same filesystem identity so it can
+          # remove every CRIU-created entry from the shared PVC.
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+          env:
+            - name: SNAPSHOT_STORAGE_BASE_PATH
+              value: {{ .Values.storage.pvc.basePath | quote }}
+          volumeMounts:
+            - name: checkpoints
+              mountPath: {{ .Values.storage.pvc.basePath | quote }}
+      volumes:
+        - name: checkpoints
+          persistentVolumeClaim:
+            claimName: {{ .Values.storage.pvc.name }}

@@ -82,6 +82,12 @@ Systems integrating with Snapshot decide:
 
 Snapshot executes those requests and exposes the resulting state.
 
+Checkpoint artifacts are owned by the immutable `PodSnapshotContent` UID and
+stored as `<base>/artifacts/<content-uid>/containers/<container-name>`.
+Deleting a `PodSnapshot` also deletes its bound content and the complete
+`<base>/artifacts/<content-uid>` tree. Finalizers keep both API objects present
+until the operator has removed the artifact from the shared PVC.
+
 Everything Snapshot manages is represented as Kubernetes resources. Snapshot metadata, capture progress, restore status, and lifecycle information are all observable through the Kubernetes API using standard Kubernetes tooling.
 
 Clients interact exclusively through the Kubernetes API. No platform-specific APIs, direct node communication, or custom protocols are required.

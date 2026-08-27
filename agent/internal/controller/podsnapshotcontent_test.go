@@ -228,6 +228,21 @@ func TestReconcileSnapshotContent_IgnoresOtherNode(t *testing.T) {
 	assert.Empty(t, got.Status.Conditions)
 }
 
+func TestReconcileSnapshotContent_IgnoresDeletingContent(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	content.Finalizers = []string{"nvidia.com/podsnapshotcontent-artifact-cleanup"}
+	deletedAt := metav1.Now()
+	content.DeletionTimestamp = &deletedAt
+	pod := makeSourcePod()
+	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+
+	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+
+	_, labeled := getPod(t, w, "inference", "worker-0").Labels[snapshotv1alpha1.CaptureEligibleLabel]
+	assert.False(t, labeled)
+	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
+}
+
 func TestReconcileSnapshotContent_GateLabelsPodOnSuccess(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	pod := makeSourcePod()
@@ -674,7 +689,7 @@ func TestReconcileSnapshotContent_CapturesFromPod(t *testing.T) {
 
 	// acquireLease runs synchronously before the goroutine starts. Hold the dump so
 	// releaseLease cannot delete the Lease before this assertion.
-	leaseName := checkpointLeaseName(string(content.UID), "main")
+	leaseName := snapshotv1alpha1.CaptureLeaseName(string(content.UID), "main")
 	_, err := w.clientset.CoordinationV1().Leases("inference").Get(context.Background(), leaseName, metav1.GetOptions{})
 	require.NoError(t, err, "capture Lease must exist in namespace inference")
 	close(unblocked)
@@ -704,7 +719,7 @@ func TestRunCheckpoint_WritesReady(t *testing.T) {
 	fc := &fakeCheckpointer{}
 	w := makeNodeController(t, fc, content)
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")}}
-	leaseKey := client.ObjectKey{Namespace: "inference", Name: checkpointLeaseName(string(content.UID), "main")}
+	leaseKey := client.ObjectKey{Namespace: "inference", Name: snapshotv1alpha1.CaptureLeaseName(string(content.UID), "main")}
 	artifactPath := filepath.Join(w.config.Storage.BasePath, "artifacts", string(content.UID), "containers", "main")
 
 	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, string(content.UID), artifactPath, leaseKey, string(content.UID)+"/main")
@@ -721,7 +736,7 @@ func TestRunCheckpoint_WritesFailedOnError(t *testing.T) {
 	fc := &fakeCheckpointer{err: errors.New("criu boom")}
 	w := makeNodeController(t, fc, content)
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")}}
-	leaseKey := client.ObjectKey{Namespace: "inference", Name: checkpointLeaseName(string(content.UID), "main")}
+	leaseKey := client.ObjectKey{Namespace: "inference", Name: snapshotv1alpha1.CaptureLeaseName(string(content.UID), "main")}
 	artifactPath := filepath.Join(w.config.Storage.BasePath, "artifacts", string(content.UID), "containers", "main")
 
 	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, string(content.UID), artifactPath, leaseKey, string(content.UID)+"/main")
@@ -812,7 +827,7 @@ func foreignCaptureLease(t *testing.T, w *NodeController, content *snapshotv1alp
 	duration := int32(checkpointLeaseDuration.Seconds())
 	lease := &coordinationv1.Lease{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      checkpointLeaseName(string(content.UID), "main"),
+			Name:      snapshotv1alpha1.CaptureLeaseName(string(content.UID), "main"),
 			Namespace: content.Spec.PodSnapshotRef.Namespace,
 		},
 		Spec: coordinationv1.LeaseSpec{
@@ -1016,6 +1031,18 @@ func TestChooseActiveContent_AllTerminalReturnsEmpty(t *testing.T) {
 	ready := mustUnstructured(t, contentForWorker0("podsnapshotcontent-a", metav1.Unix(1000, 0), snapshotv1alpha1.PodSnapshotConditionReady))
 	failed := mustUnstructured(t, contentForWorker0("podsnapshotcontent-b", metav1.Unix(2000, 0), snapshotv1alpha1.PodSnapshotConditionFailed))
 	assert.Equal(t, "", chooseActiveContent([]interface{}{ready, failed}))
+}
+
+func TestChooseActiveContent_SkipsDeletingContent(t *testing.T) {
+	deleting := contentForWorker0("podsnapshotcontent-old", metav1.Unix(1000, 0), "")
+	deletedAt := metav1.Unix(3000, 0)
+	deleting.DeletionTimestamp = &deletedAt
+	active := contentForWorker0("podsnapshotcontent-active", metav1.Unix(2000, 0), "")
+
+	assert.Equal(t, active.Name, chooseActiveContent([]interface{}{
+		mustUnstructured(t, deleting),
+		mustUnstructured(t, active),
+	}))
 }
 
 // podWithFailedSibling builds the inference/worker-0 source pod with the target Running and a

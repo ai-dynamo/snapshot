@@ -4,6 +4,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -19,6 +20,8 @@ import (
 // version is overridable at build time via -ldflags "-X main.version=<tag>".
 var version = "dev"
 
+const storageBasePathEnv = "SNAPSHOT_STORAGE_BASE_PATH"
+
 func main() {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 	ctrl.Log.Info("starting snapshot operator", "version", version)
@@ -30,6 +33,11 @@ func main() {
 	}
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		ctrl.Log.Error(err, "unable to register API types")
+		os.Exit(1)
+	}
+	artifactBasePath := os.Getenv(storageBasePathEnv)
+	if _, err := v1alpha1.ResolveArtifactRoot(artifactBasePath, "validation"); err != nil {
+		ctrl.Log.Error(fmt.Errorf("invalid %s: %w", storageBasePathEnv, err), "unable to configure artifact cleanup")
 		os.Exit(1)
 	}
 
@@ -58,6 +66,7 @@ func main() {
 		Client:             mgr.GetClient(),
 		NonCacheReadClient: mgr.GetAPIReader(),
 		Recorder:           mgr.GetEventRecorderFor("podsnapshot-controller"),
+		ArtifactBasePath:   artifactBasePath,
 	}
 	if err := podSnapshotReconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up PodSnapshot controller")

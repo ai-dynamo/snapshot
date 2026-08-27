@@ -6,11 +6,14 @@ package controller
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -33,6 +36,7 @@ func snapshotReconcilerScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = snapshotv1alpha1.AddToScheme(s)
 	_ = corev1.AddToScheme(s)
+	_ = coordinationv1.AddToScheme(s)
 	return s
 }
 
@@ -51,6 +55,8 @@ func makeSnapshotReconcilerWithInterceptor(s *runtime.Scheme, funcs interceptor.
 		Client:             testClient,
 		NonCacheReadClient: testClient,
 		Recorder:           record.NewFakeRecorder(10),
+		ArtifactBasePath:   "/checkpoints",
+		removeAll:          func(string) error { return nil },
 	}
 }
 
@@ -135,7 +141,7 @@ func TestSnapshotReconciler_BuildsWorkOrderAndBinds(t *testing.T) {
 	assert.Equal(t, "node-a", content.Spec.Source.NodeName)
 	assert.Equal(t, "node-a", content.Labels[snapshotv1alpha1.SnapshotNodeLabel])
 	assert.Empty(t, content.Annotations)
-	assert.Empty(t, content.Finalizers)
+	assert.Equal(t, []string{podSnapshotContentArtifactFinalizer}, content.Finalizers)
 	assert.Equal(t, "inference", content.Spec.PodSnapshotRef.Namespace)
 	assert.Equal(t, snap.Name, content.Spec.PodSnapshotRef.Name)
 	assert.Equal(t, []string{"main"}, content.Spec.Source.PodRef.Containers,
@@ -676,21 +682,45 @@ func TestSnapshotReconciler_CascadeDelete(t *testing.T) {
 	snap := makeSnapshotForReconcile()
 	snap.DeletionTimestamp = &now
 	snap.Status.BoundPodSnapshotContentName = ptr.To("podsnapshotcontent-snap-uid")
+	basePath := t.TempDir()
+	artifactRoot, err := snapshotv1alpha1.ResolveArtifactRoot(basePath, "content-uid")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(artifactRoot, ".tmp"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(artifactRoot, ".tmp", "staged"), []byte("data"), 0o600))
 	content := &snapshotv1alpha1.PodSnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: "podsnapshotcontent-snap-uid"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "podsnapshotcontent-snap-uid",
+			UID:        types.UID("content-uid"),
+			Finalizers: []string{podSnapshotContentArtifactFinalizer},
+		},
 		Spec: snapshotv1alpha1.PodSnapshotContentSpec{
-			PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{Namespace: "inference", Name: snap.Name},
-			Source:         snapshotv1alpha1.PodSnapshotContentSource{PodRef: snapshotv1alpha1.PodReference{Name: "worker-0"}, NodeName: "node-a"},
+			PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{Namespace: "inference", Name: snap.Name, UID: snap.UID},
+			Source: snapshotv1alpha1.PodSnapshotContentSource{
+				PodRef:   snapshotv1alpha1.PodReference{Name: "worker-0", Containers: []string{"main"}},
+				NodeName: "node-a",
+			},
 		},
 	}
 	r := makeSnapshotReconciler(s, snap, content)
+	r.ArtifactBasePath = basePath
+	r.removeAll = os.RemoveAll
 
-	// The content carries no finalizer, so it is deleted immediately; one pass deletes
-	// the content and, once confirmed gone, drops the PodSnapshot finalizer.
+	// Pass 1 requests content deletion, leaving the artifact finalizer in place.
 	reconcileSnapshot(t, r, snap.Name)
-	err := r.Get(context.Background(), types.NamespacedName{Name: "podsnapshotcontent-snap-uid"}, &snapshotv1alpha1.PodSnapshotContent{})
+	deleting := &snapshotv1alpha1.PodSnapshotContent{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: content.Name}, deleting))
+	assert.False(t, deleting.DeletionTimestamp.IsZero())
+	assert.True(t, controllerutil.ContainsFinalizer(deleting, podSnapshotContentArtifactFinalizer))
+
+	// Pass 2 removes the complete UID root and releases the content finalizer.
+	reconcileSnapshot(t, r, snap.Name)
+	_, err = os.Stat(artifactRoot)
+	assert.True(t, os.IsNotExist(err))
+	err = r.Get(context.Background(), types.NamespacedName{Name: content.Name}, &snapshotv1alpha1.PodSnapshotContent{})
 	assert.True(t, apierrors.IsNotFound(err))
 
+	// Pass 3 observes the content gone and releases the PodSnapshot finalizer.
+	reconcileSnapshot(t, r, snap.Name)
 	gone := &snapshotv1alpha1.PodSnapshot{}
 	err = r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, gone)
 	if err == nil {
@@ -939,52 +969,146 @@ func TestSnapshotReconciler_ContentCreateErrorEmitsEventAndRequeues(t *testing.T
 	}
 }
 
-func TestSnapshotReconciler_CascadeDeleteRequeuesUntilContentGone(t *testing.T) {
+func TestSnapshotReconciler_CascadeDeleteWaitsForActiveCaptureLease(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	now := metav1.Now()
+	snap := makeSnapshotForReconcile()
+	snap.DeletionTimestamp = &now
+	snap.Status.BoundPodSnapshotContentName = ptr.To("podsnapshotcontent-snap-uid")
+	leaseDuration := int32(30)
+	renewed := metav1.NewMicroTime(time.Now())
+	content := &snapshotv1alpha1.PodSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "podsnapshotcontent-snap-uid",
+			UID:        types.UID("content-uid"),
+			Finalizers: []string{podSnapshotContentArtifactFinalizer},
+		},
+		Spec: snapshotv1alpha1.PodSnapshotContentSpec{
+			PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{Namespace: "inference", Name: snap.Name, UID: snap.UID},
+			Source: snapshotv1alpha1.PodSnapshotContentSource{
+				PodRef: snapshotv1alpha1.PodReference{Containers: []string{"main"}},
+			},
+		},
+	}
+	lease := &coordinationv1.Lease{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      snapshotv1alpha1.CaptureLeaseName("content-uid", "main"),
+			Namespace: "inference",
+		},
+		Spec: coordinationv1.LeaseSpec{LeaseDurationSeconds: &leaseDuration, RenewTime: &renewed},
+	}
+	r := makeSnapshotReconciler(s, snap, content, lease)
+
+	// Pass 1 requests deletion. Pass 2 observes the active capture Lease and waits.
+	reconcileSnapshot(t, r, snap.Name)
+	res := reconcileSnapshot(t, r, snap.Name)
+	assert.Equal(t, snapshotContentDeleteRequeue, res.RequeueAfter)
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: content.Name}, &snapshotv1alpha1.PodSnapshotContent{}))
+	stillDeleting := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, stillDeleting))
+	assert.True(t, controllerutil.ContainsFinalizer(stillDeleting, podSnapshotFinalizer))
+
+	// Releasing the Lease allows artifact cleanup and then the snapshot cascade to finish.
+	require.NoError(t, r.Delete(context.Background(), lease))
+	reconcileSnapshot(t, r, snap.Name)
+	assert.True(t, apierrors.IsNotFound(r.Get(context.Background(), types.NamespacedName{Name: content.Name}, &snapshotv1alpha1.PodSnapshotContent{})))
+	reconcileSnapshot(t, r, snap.Name)
+	gone := &snapshotv1alpha1.PodSnapshot{}
+	err := r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, gone)
+	if err == nil {
+		assert.False(t, controllerutil.ContainsFinalizer(gone, podSnapshotFinalizer))
+	} else {
+		assert.True(t, apierrors.IsNotFound(err))
+	}
+}
+
+func TestSnapshotReconciler_CascadeDeleteRetainsFinalizersOnArtifactCleanupError(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	now := metav1.Now()
 	snap := makeSnapshotForReconcile()
 	snap.DeletionTimestamp = &now
 	snap.Status.BoundPodSnapshotContentName = ptr.To("podsnapshotcontent-snap-uid")
 	content := &snapshotv1alpha1.PodSnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: "podsnapshotcontent-snap-uid"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "podsnapshotcontent-snap-uid",
+			UID:               types.UID("content-uid"),
+			Finalizers:        []string{podSnapshotContentArtifactFinalizer},
+			DeletionTimestamp: &now,
+		},
 		Spec: snapshotv1alpha1.PodSnapshotContentSpec{
-			PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{Namespace: "inference", Name: snap.Name},
+			PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{Namespace: "inference", Name: snap.Name, UID: snap.UID},
+			Source: snapshotv1alpha1.PodSnapshotContentSource{
+				PodRef: snapshotv1alpha1.PodReference{Containers: []string{"main"}},
+			},
 		},
 	}
-	// No-op the FIRST Delete only, so the content survives one pass and the requeue-while-present arm
-	// fires; subsequent Deletes pass through. handleDelete calls Delete exactly once per pass — adjust
-	// the threshold if that ever changes.
-	deleteCalls := 0
-	funcs := interceptor.Funcs{Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
-		if _, ok := obj.(*snapshotv1alpha1.PodSnapshotContent); ok {
-			deleteCalls++
-			if deleteCalls == 1 {
-				return nil // swallow the first delete: content remains present
-			}
-		}
-		return c.Delete(ctx, obj, opts...)
-	}}
-	r := makeSnapshotReconcilerWithInterceptor(s, funcs, snap, content)
-
-	// Pass 1: content still present → requeue, finalizer retained.
-	res, err := r.Reconcile(context.Background(),
-		ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "inference", Name: snap.Name}})
-	require.NoError(t, err)
-	assert.Equal(t, 1, deleteCalls)
-	assert.Equal(t, snapshotContentDeleteRequeue, res.RequeueAfter)
-	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "podsnapshotcontent-snap-uid"}, &snapshotv1alpha1.PodSnapshotContent{}))
-	stillDeleting := &snapshotv1alpha1.PodSnapshot{}
-	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, stillDeleting))
-	assert.True(t, controllerutil.ContainsFinalizer(stillDeleting, podSnapshotFinalizer))
-
-	// Pass 2: real delete removes the content → finalizer dropped (snapshot gone).
-	reconcileSnapshot(t, r, snap.Name)
-	assert.True(t, apierrors.IsNotFound(r.Get(context.Background(), types.NamespacedName{Name: "podsnapshotcontent-snap-uid"}, &snapshotv1alpha1.PodSnapshotContent{})))
-	gone := &snapshotv1alpha1.PodSnapshot{}
-	err = r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, gone)
-	if err == nil {
-		assert.False(t, controllerutil.ContainsFinalizer(gone, podSnapshotFinalizer))
-	} else {
-		assert.True(t, apierrors.IsNotFound(err))
+	r := makeSnapshotReconciler(s, snap, content)
+	r.removeAll = func(path string) error {
+		assert.Equal(t, "/checkpoints/artifacts/content-uid", path)
+		return errors.New("PVC unavailable")
 	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "inference", Name: snap.Name},
+	})
+	require.ErrorContains(t, err, "PVC unavailable")
+
+	stillContent := &snapshotv1alpha1.PodSnapshotContent{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: content.Name}, stillContent))
+	assert.True(t, controllerutil.ContainsFinalizer(stillContent, podSnapshotContentArtifactFinalizer))
+	stillSnapshot := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, stillSnapshot))
+	assert.True(t, controllerutil.ContainsFinalizer(stillSnapshot, podSnapshotFinalizer))
+
+	r.removeAll = func(string) error { return nil }
+	reconcileSnapshot(t, r, snap.Name)
+	assert.True(t, apierrors.IsNotFound(r.Get(context.Background(), types.NamespacedName{Name: content.Name}, &snapshotv1alpha1.PodSnapshotContent{})))
+	reconcileSnapshot(t, r, snap.Name)
+}
+
+func TestSnapshotReconciler_CascadeDeleteExpiresCaptureLeaseBeforeArtifactCleanup(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	now := metav1.Now()
+	snap := makeSnapshotForReconcile()
+	snap.DeletionTimestamp = &now
+	snap.Status.BoundPodSnapshotContentName = ptr.To("podsnapshotcontent-snap-uid")
+	content := &snapshotv1alpha1.PodSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "podsnapshotcontent-snap-uid",
+			UID:               types.UID("content-uid"),
+			Finalizers:        []string{podSnapshotContentArtifactFinalizer},
+			DeletionTimestamp: &now,
+		},
+		Spec: snapshotv1alpha1.PodSnapshotContentSpec{
+			PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{Namespace: "inference", Name: snap.Name, UID: snap.UID},
+			Source: snapshotv1alpha1.PodSnapshotContentSource{
+				PodRef: snapshotv1alpha1.PodReference{Containers: []string{"main"}},
+			},
+		},
+	}
+	leaseDuration := int32(30)
+	expiredRenewTime := metav1.NewMicroTime(time.Now().Add(-time.Minute))
+	lease := &coordinationv1.Lease{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      snapshotv1alpha1.CaptureLeaseName("content-uid", "main"),
+			Namespace: "inference",
+		},
+		Spec: coordinationv1.LeaseSpec{LeaseDurationSeconds: &leaseDuration, RenewTime: &expiredRenewTime},
+	}
+	removeCalls := 0
+	r := makeSnapshotReconciler(s, snap, content, lease)
+	r.removeAll = func(string) error {
+		removeCalls++
+		return nil
+	}
+
+	result := reconcileSnapshot(t, r, snap.Name)
+	assert.Equal(t, captureLeaseSettleRequeue, result.RequeueAfter)
+	assert.Zero(t, removeCalls, "artifact cleanup must wait after evicting an expired lease")
+	assert.True(t, apierrors.IsNotFound(r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: lease.Name}, &coordinationv1.Lease{})))
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: content.Name}, &snapshotv1alpha1.PodSnapshotContent{}))
+
+	reconcileSnapshot(t, r, snap.Name)
+	assert.Equal(t, 1, removeCalls)
+	assert.True(t, apierrors.IsNotFound(r.Get(context.Background(), types.NamespacedName{Name: content.Name}, &snapshotv1alpha1.PodSnapshotContent{})))
 }

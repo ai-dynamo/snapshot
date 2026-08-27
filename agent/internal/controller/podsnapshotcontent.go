@@ -67,6 +67,9 @@ func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name s
 	if content.Spec.Source.NodeName != w.config.NodeName {
 		return
 	}
+	if !content.DeletionTimestamp.IsZero() {
+		return
+	}
 	if isContentTerminal(content) {
 		return
 	}
@@ -144,7 +147,7 @@ func (w *NodeController) deferToCommittedCapture(ctx context.Context, content *s
 // be between killing the source and committing the artifact, and no liveness-derived terminal
 // failure may be written under it. Lease expiry keeps a genuinely dead capture bounded.
 func (w *NodeController) captureLeaseHeldElsewhere(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, contentUID, containerName string) bool {
-	key := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: checkpointLeaseName(contentUID, containerName)}
+	key := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: snapshotv1alpha1.CaptureLeaseName(contentUID, containerName)}
 	lease, err := w.clientset.CoordinationV1().Leases(key.Namespace).Get(ctx, key.Name, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -208,7 +211,7 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		}
 		return fmt.Errorf("get PodSnapshotContent %q: %w", name, err)
 	}
-	if isContentTerminal(content) {
+	if !content.DeletionTimestamp.IsZero() || isContentTerminal(content) {
 		return nil
 	}
 
@@ -287,7 +290,7 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	if err != nil {
 		return w.setSnapshotContentFailed(ctx, content, "ContainerNotResolved", fmt.Errorf("resolve container %q: %w", containerName, err))
 	}
-	leaseKey := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: checkpointLeaseName(contentUID, containerName)}
+	leaseKey := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: snapshotv1alpha1.CaptureLeaseName(contentUID, containerName)}
 	acquired, err := w.acquireLease(ctx, leaseKey)
 	if err != nil {
 		return fmt.Errorf("acquire checkpoint lease %s: %w", leaseKey.String(), err)
@@ -295,6 +298,25 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	if !acquired {
 		return nil
 	}
+
+	// The content may have started deleting after the informer selected it but
+	// before this worker acquired the Lease. Re-read while holding the Lease so
+	// artifact cleanup cannot race a newly-started checkpoint.
+	liveContent := &snapshotv1alpha1.PodSnapshotContent{}
+	if err := w.client.Get(ctx, client.ObjectKey{Name: content.Name}, liveContent); err != nil {
+		releaseErr := w.releaseLease(ctx, leaseKey)
+		if apierrors.IsNotFound(err) {
+			return releaseErr
+		}
+		if releaseErr != nil {
+			return fmt.Errorf("refresh PodSnapshotContent %q: %w (release lease: %v)", content.Name, err, releaseErr)
+		}
+		return fmt.Errorf("refresh PodSnapshotContent %q: %w", content.Name, err)
+	}
+	if !liveContent.DeletionTimestamp.IsZero() {
+		return w.releaseLease(ctx, leaseKey)
+	}
+	content = liveContent
 
 	releaseInFlight = false
 	go w.runCheckpoint(ctx, content, pod, containerName, containerID, containerPID, contentUID, artifactPath, leaseKey, artifactKey)
