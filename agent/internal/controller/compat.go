@@ -4,6 +4,7 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"runtime"
 
@@ -14,16 +15,28 @@ import (
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
-// refuseRestore records one restore this node will not attempt. Both gates
-// report through here, so a refusal reads the same whichever one turned it down,
-// and nothing is requeued: retrying on this node cannot change the answer.
-func (w *NodeController) refuseRestore(pod *corev1.Pod, incompatible *compat.IncompatibleError) bool {
+// refuseRestore records a restore this node will not attempt. It is terminal
+// like any other restore failure and reports through the same condition, with
+// its own reason so an operator can tell a checkpoint that cannot run here from
+// one that tried and broke.
+func (w *NodeController) refuseRestore(ctx context.Context, pod *corev1.Pod, incompatible *compat.IncompatibleError) bool {
+	reason := compat.Reasons(incompatible.Mismatches)
 	w.log.Info("Refusing restore; this node cannot run the checkpoint",
 		"pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name),
 		"gate", string(incompatible.Gate),
-		"reason", compat.Reasons(incompatible.Mismatches),
+		"reason", reason,
 	)
-	return false
+	err := w.finishRestore(
+		ctx,
+		pod,
+		corev1.ConditionFalse,
+		restoreIncompatibleReason,
+		reason,
+		corev1.EventTypeWarning,
+		restoreIncompatibleReason,
+		reason,
+	)
+	return err != nil
 }
 
 // podFacts reads what one container of a pod runs as and is allowed. It serves

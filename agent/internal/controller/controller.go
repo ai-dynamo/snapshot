@@ -142,6 +142,10 @@ const (
 	snapshotEventComponent             = "snapshot"
 	restoreSafetyRequeueInterval       = 30 * time.Second
 
+	// restoreIncompatibleReason marks a restore the node turned down before
+	// attempting it, because the checkpoint cannot run here.
+	restoreIncompatibleReason = "RestoreIncompatible"
+
 	// snapshotContentResyncInterval re-drives every PodSnapshotContent work order so a
 	// not-yet-Ready source pod is re-checked for quiesce without a busy loop.
 	snapshotContentResyncInterval = 10 * time.Second
@@ -727,7 +731,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, artifa
 			// Nothing was attempted, so there is no half-restored process to
 			// clean up. The placeholder is deliberately left running: killing it
 			// would restart the container straight back into the same answer.
-			return w.refuseRestore(pod, incompatible), nil
+			return w.refuseRestore(ctx, pod, incompatible), nil
 		}
 
 		var cleanupErr *executor.RestoreCleanupError
@@ -998,7 +1002,7 @@ func (w *NodeController) failRestorePod(ctx context.Context, pod *corev1.Pod, ca
 func (w *NodeController) handleRestorePreflightError(ctx context.Context, pod *corev1.Pod, cause error) bool {
 	var incompatible *compat.IncompatibleError
 	if errors.As(cause, &incompatible) {
-		return w.refuseRestore(pod, incompatible)
+		return w.refuseRestore(ctx, pod, incompatible)
 	}
 
 	var pending *restorePendingError

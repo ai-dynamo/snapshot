@@ -5,6 +5,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"sync"
 	"testing"
@@ -114,6 +115,20 @@ func (r *gatedRestore) clientset(t *testing.T) *fake.Clientset {
 	clientset, ok := r.controller.clientset.(*fake.Clientset)
 	require.Truef(t, ok, "controller clientset is %T, want *fake.Clientset", r.controller.clientset)
 	return clientset
+}
+
+// condition reads the condition off the last status apply, which is how the
+// agent publishes a verdict.
+func (r *gatedRestore) condition(t *testing.T) corev1.PodCondition {
+	t.Helper()
+	var applied struct {
+		Status struct {
+			Conditions []corev1.PodCondition `json:"conditions"`
+		} `json:"status"`
+	}
+	require.NoError(t, json.Unmarshal(lastPodStatusApply(t, r.controller).GetPatch(), &applied))
+	require.Len(t, applied.Status.Conditions, 1)
+	return applied.Status.Conditions[0]
 }
 
 // events returns every event emitted under one reason, so a test can assert on
