@@ -7,8 +7,8 @@ BUILD_DIR ?= build
 
 INTERPOSER := $(BUILD_DIR)/libcuinterposer.so
 COORDINATOR := $(BUILD_DIR)/cuinterposer-coordinator
-INTERPOSER_SOURCES := interpose.c posix.c symbols.c util.c
-INTERPOSER_HEADERS := posix.h protocol.h symbols.h util.h
+INTERPOSER_SOURCES := interpose.c multicast.c posix.c symbols.c util.c
+INTERPOSER_HEADERS := multicast.h posix.h protocol.h symbols.h util.h
 COORDINATOR_SOURCES := coordinator.c util.c
 COORDINATOR_HEADERS := protocol.h util.h
 COMMON_FLAGS := -std=gnu11 -O2 -Wall -Wextra -Werror

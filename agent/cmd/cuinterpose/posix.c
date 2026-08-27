@@ -69,7 +69,18 @@ cuinterposer_posix_read_ticket(int fd, struct cuinterposer_posix_ticket* ticket)
       ticket->creator_endpoint[0] != '/' ||
       memchr(ticket->creator_endpoint, '\0', sizeof(ticket->creator_endpoint)) == NULL ||
       zero_bytes(ticket->authorization, sizeof(ticket->authorization)) ||
+      !zero_bytes(ticket->reserved_alignment, sizeof(ticket->reserved_alignment)) ||
+      (ticket->resource_kind != CUINTERPOSER_RESOURCE_UNICAST &&
+       ticket->resource_kind != CUINTERPOSER_RESOURCE_MULTICAST) ||
       !zero_bytes(ticket->reserved_identity, sizeof(ticket->reserved_identity)))
+    return -1;
+  if (ticket->resource_kind == CUINTERPOSER_RESOURCE_UNICAST &&
+      (ticket->num_devices != 0 || ticket->allocation_size != 0 || ticket->handle_types != 0 ||
+       ticket->object_flags != 0))
+    return -1;
+  if (ticket->resource_kind == CUINTERPOSER_RESOURCE_MULTICAST &&
+      (ticket->num_devices == 0 || ticket->allocation_size == 0 ||
+       ticket->handle_types != CUINTERPOSER_POSIX_HANDLE_TYPE))
     return -1;
   return 0;
 }
@@ -91,6 +102,7 @@ cuinterposer_posix_request_export(
   request.magic = CUINTERPOSER_MAGIC;
   request.version = CUINTERPOSER_VERSION;
   request.operation = CUINTERPOSER_EXPORT;
+  request.resource_kind = ticket->resource_kind;
   snprintf(request.participant_id, sizeof(request.participant_id), "%s", ticket->creator_participant);
   memcpy(request.authorization, ticket->authorization, sizeof(request.authorization));
   memcpy(request.allocation_id, ticket->allocation_id, sizeof(request.allocation_id));
@@ -106,7 +118,8 @@ cuinterposer_posix_request_export(
   }
   if (!header_strings_terminated(&response) || response.magic != CUINTERPOSER_MAGIC ||
       response.version != CUINTERPOSER_VERSION || response.operation != CUINTERPOSER_EXPORT || response.count != 0 ||
-      response.payload_size != 0 || strcmp(response.participant_id, ticket->creator_participant) != 0) {
+      response.payload_size != 0 || strcmp(response.participant_id, ticket->creator_participant) != 0 ||
+      response.resource_kind != ticket->resource_kind) {
     if (error != NULL && error_size != 0)
       snprintf(error, error_size, "%s", "invalid creator export response");
     if (*output >= 0) {

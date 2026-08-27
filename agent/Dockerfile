@@ -102,6 +102,8 @@ COPY cmd/cuda-checkpoint-helper/main.c ./cmd/cuda-checkpoint-helper/main.c
 COPY cmd/ns-bind-mount/main.c ./cmd/ns-bind-mount/main.c
 COPY cmd/cuinterpose/interpose.c ./cmd/cuinterpose/interpose.c
 COPY cmd/cuinterpose/coordinator.c ./cmd/cuinterpose/coordinator.c
+COPY cmd/cuinterpose/multicast.c ./cmd/cuinterpose/multicast.c
+COPY cmd/cuinterpose/multicast.h ./cmd/cuinterpose/multicast.h
 COPY cmd/cuinterpose/posix.c ./cmd/cuinterpose/posix.c
 COPY cmd/cuinterpose/posix.h ./cmd/cuinterpose/posix.h
 COPY cmd/cuinterpose/protocol.h ./cmd/cuinterpose/protocol.h
