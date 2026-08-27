@@ -1,10 +1,12 @@
-# Use CUDA CustomStorage
+# Configure CUDA CustomStorage with NIXL POSIX
 
-CUDA CustomStorage externalizes CUDA checkpoint state into Snapshot-managed files instead of relying on the CUDA driver's default checkpoint storage. Snapshot's `posix` mode moves those CUDA extents through its local NIXL POSIX adapter into the same checkpoint volume that stores the CRIU and root filesystem artifacts.
+CUDA CustomStorage externalizes CUDA checkpoint state into Snapshot-managed files instead of relying on the CUDA driver's default checkpoint storage. Snapshot's `posix` mode moves those CUDA extents through its local NIXL POSIX adapter into the same checkpoint volume that stores the CRIU and root filesystem artifacts. CRIU remains the process-state checkpoint and restore engine in both storage modes; NIXL does not replace CRIU.
 
 ```mermaid
 flowchart LR
-    A["Snapshot node agent"] --> H["CUDA checkpoint helper"]
+    A["Snapshot node agent"] --> R["CRIU"]
+    R --> P["Shared checkpoint PVC"]
+    A --> H["CUDA checkpoint helper"]
     H --> C["CUDA 13.4 CustomStorage"]
     C --> N["NIXL POSIX adapter"]
     N --> P["Shared checkpoint PVC"]
@@ -26,7 +28,7 @@ In addition to Snapshot's normal [prerequisites](../../README.md#prerequisites),
 
 The Snapshot agent image may be built against CUDA 13.0 headers because the helper dynamically resolves the public CUDA 13.4 entry point. The node driver, not the image's toolkit version, determines whether CustomStorage is available at runtime.
 
-## Enable CustomStorage
+## Select the CustomStorage path
 
 Set `config.cudaCheckpoint.storageMode` to `posix` in the Helm values used for the Snapshot release:
 
@@ -34,17 +36,6 @@ Set `config.cudaCheckpoint.storageMode` to `posix` in the Helm values used for t
 config:
   cudaCheckpoint:
     storageMode: posix
-    transferBufferCount: 4
-    transferChunkBytes: 67108864
-    daemon:
-      maxOperationSeconds: 3600
-      resources:
-        requests:
-          cpu: 250m
-          memory: 256Mi
-        limits:
-          cpu: 2
-          memory: 1Gi
 ```
 
 Apply the values to the existing release:
@@ -69,12 +60,11 @@ The setting applies to every new CUDA checkpoint created by that agent deploymen
 
 | Value | Meaning | Default | Valid values |
 |---|---|---:|---|
-| `config.cudaCheckpoint.storageMode` | Storage policy for newly created CUDA checkpoints | `legacy` | `legacy`, `posix` |
+| `config.cudaCheckpoint.storageMode` | CUDA checkpoint storage mode for newly created checkpoints | `legacy` | `legacy`, `posix` |
 | `config.cudaCheckpoint.transferBufferCount` | Pinned transfer slots per active CUDA device; this controls pipeline depth, not the number of worker threads | `4` | `1`-`8` |
 | `config.cudaCheckpoint.transferChunkBytes` | Bytes in each pinned transfer slot | `67108864` (64 MiB) | 1-256 MiB, 4096-byte aligned |
-| `config.cudaCheckpoint.daemon.maxOperationSeconds` | Cooperative transfer watchdog for one helper operation | `3600` | `1`-`3600` |
-| `config.cudaCheckpoint.daemon.resources` | CPU and memory requests and limits for the helper container | See the example above | Kubernetes resource values |
-| `config.restore.restoreTimeoutSeconds` | Overall restore budget in the Snapshot agent | `8100` | Positive integer |
+| `config.cudaCheckpoint.daemon.maxOperationSeconds` | Maximum time allowed for one CUDA checkpoint or restore helper request; a CUDA driver call already in progress cannot be forcibly interrupted | `3600` | `1`-`3600` |
+| `config.cudaCheckpoint.daemon.resources` | CPU and memory requests and limits for the helper container | See `values.yaml` | Kubernetes resource values |
 
 Snapshot rejects a transfer configuration that allocates more than 1 GiB of pinned host memory per active CUDA device. The pinned allocation is:
 
@@ -84,7 +74,7 @@ transferBufferCount * transferChunkBytes * active CUDA devices
 
 The qualified initial configuration uses four 64 MiB buffers, or 256 MiB of pinned host memory for the supported one-GPU operation. The helper memory limit must also leave room for CUDA, NIXL, and process overhead. Increase it if you increase the buffer allocation.
 
-`maxOperationSeconds` is a cooperative watchdog for extent transfer work. CUDA driver calls are not forcibly interruptible. Do not reduce the overall restore timeout below the time needed for CRIU plus every CUDA-owning process and the helper's response margin.
+`maxOperationSeconds` bounds one helper checkpoint or restore request through cooperative deadline checks. A CUDA driver call already in progress cannot be forcibly interrupted. Snapshot's general `config.restore.restoreTimeoutSeconds` setting must still leave enough time for CRIU, every CUDA-owning process, and the helper's response margin.
 
 ## Checkpoint and restore behavior
 

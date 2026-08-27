@@ -83,7 +83,7 @@ helm upgrade --install snapshot ./charts/snapshot \
   --set config.cudaCheckpoint.storageMode=posix
 ```
 
-The mode is recorded in each checkpoint manifest, and restore follows the artifact rather than the current creation setting. Snapshot does not silently fall back from an explicitly requested `posix` checkpoint to `legacy`. See [Use CUDA CustomStorage](../../docs/guides/custom-storage.md) before enabling it.
+The mode is recorded in each checkpoint manifest, and restore follows the artifact rather than the current creation setting. Snapshot does not silently fall back from an explicitly requested `posix` checkpoint to `legacy`. See [Configure CUDA CustomStorage with NIXL POSIX](../../docs/guides/custom-storage.md) before enabling it.
 
 ## CRD upgrades
 
@@ -150,10 +150,10 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `seccomp.deploy` | Deploy the CRIU seccomp profile ConfigMap and init container. Use this field name; `seccomp.enabled` is not a chart value | `true` |
 | `runtime.type` | CRI backend: `containerd` or `crio` | `containerd` |
 | `runtime.socketPath` | CRI socket (empty = default for `runtime.type`) | `""` |
-| `config.cudaCheckpoint.storageMode` | Storage policy for newly created CUDA checkpoints: `legacy` or `posix` | `legacy` |
+| `config.cudaCheckpoint.storageMode` | CUDA checkpoint storage mode for newly created checkpoints: `legacy` or `posix` | `legacy` |
 | `config.cudaCheckpoint.transferBufferCount` | Pinned transfer slots per active CUDA device | `4` |
 | `config.cudaCheckpoint.transferChunkBytes` | Bytes per pinned transfer slot | `67108864` |
-| `config.cudaCheckpoint.daemon.maxOperationSeconds` | Cooperative watchdog for one CUDA helper operation | `3600` |
+| `config.cudaCheckpoint.daemon.maxOperationSeconds` | Maximum time allowed for one CUDA checkpoint or restore helper request; does not forcibly interrupt a CUDA driver call already in progress | `3600` |
 | `config.cudaCheckpoint.daemon.resources` | CUDA helper CPU and memory requests and limits | See `values.yaml` |
 | `crdUpgrade.enabled` | Install and upgrade the CRDs from an operator init container (see below) | `true` |
 | `crdUpgrade.logLevel` | Init container log level | `info` |

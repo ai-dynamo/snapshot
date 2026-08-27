@@ -71,7 +71,7 @@ Before installing Snapshot, make sure you have:
 - The [Helm](https://helm.sh/docs/intro/install) CLI
 - A cluster that permits privileged pods for the node agent — see [Security](docs/operations/security.md)
 
-The default CUDA checkpoint path works with the general driver prerequisite above. Enabling [CUDA CustomStorage](docs/guides/custom-storage.md) additionally requires a driver that exports the CUDA 13.4 CustomStorage API; CUDA 13.x compatibility alone is not a capability check.
+The default CUDA checkpoint path works with the general driver prerequisite above. The optional [CUDA CustomStorage path](docs/guides/custom-storage.md) uses the CUDA 13.4 Developer Preview API and additionally requires a driver that exports that API; CUDA 13.x compatibility alone is not a capability check.
 
 <!-- TODO(eng): open items for the team to validate (feed Support matrix / Limitations):
      - minimum Kubernetes version (any non-EOL release, or a specific floor?)

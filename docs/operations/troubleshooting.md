@@ -56,6 +56,6 @@ Restore follows the checkpoint manifest, not the current `storageMode` setting. 
 
 ### The helper times out or is unhealthy after an operation
 
-Check both agent and helper logs for the same target PID. An absent helper response after a state-changing CUDA request is an unknown outcome and is not replayed automatically. Do not resume the workload based only on storage cleanup. See [Use CUDA CustomStorage](../guides/custom-storage.md#configuration-values) before changing watchdog, restore-timeout, or pinned-buffer settings.
+Check both agent and helper logs for the same target PID. An absent helper response after a state-changing CUDA request is an unknown outcome and is not replayed automatically. Do not resume the workload based only on storage cleanup. See [Configure CUDA CustomStorage with NIXL POSIX](../guides/custom-storage.md#configuration-values) before changing the helper deadline, restore timeout, or pinned-buffer settings.
 
 <!-- TODO(eng): expand with real failure modes and messages (CRIU / cuda-checkpoint errors, RWX PVC access, driver/runtime mismatches). The Dynamo snapshot doc's troubleshooting section is a good source. -->
