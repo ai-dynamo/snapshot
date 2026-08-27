@@ -15,7 +15,7 @@ after restore. Select the model when deploying the source pod.
 
 Download [`app.py`](vllm/app.py),
 [`Dockerfile.vllm`](vllm/Dockerfile.vllm), and
-[`pod.yaml`](vllm/pod.yaml) from the repository:
+[`deployment.yaml`](vllm/deployment.yaml) from the repository:
 
 ```bash
 mkdir -p vllm-snapshot-image
@@ -30,11 +30,11 @@ curl --fail --location \
   https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/vllm/Dockerfile.vllm
 
 curl --fail --location \
-  --output pod.yaml \
-  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/vllm/pod.yaml
+  --output deployment.yaml \
+  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/vllm/deployment.yaml
 ```
 
-The program loads the model selected in `pod.yaml`, runs one
+The program loads the model selected in `deployment.yaml`, runs one
 generation to initialize vLLM, and then calls `pause_generation()` and
 `sleep()`. It writes
 `ready-for-snapshot` only when the process is safe to checkpoint. In a restore
@@ -84,7 +84,7 @@ docker run --rm \
 The command produces no output when both vLLM and `/app/app.py` are present.
 Any failure prints an error and returns a non-zero exit status.
 
-### 3. Deploy the vLLM pod
+### 3. Deploy vLLM
 
 Set the namespace where the vLLM pod will run:
 
@@ -93,7 +93,7 @@ export VLLM_NAMESPACE=<namespace>
 ```
 
 Set the model through the `SNAPSHOT_MODEL` environment variable in
-[`pod.yaml`](vllm/pod.yaml):
+[`deployment.yaml`](vllm/deployment.yaml):
 
 ```yaml
 env:
@@ -105,12 +105,13 @@ Other values include `TinyLlama/TinyLlama-1.1B-Chat-v1.0` or a mounted model
 path such as `/models/Qwen3-0.6B`. A mounted path must be available to both the
 source and restored containers.
 
-Use [`pod.yaml`](vllm/pod.yaml) to deploy the image built in step 2:
+Use [`deployment.yaml`](vllm/deployment.yaml) to deploy the image built in
+step 2:
 
 ```bash
 kubectl set image \
   --local \
-  --filename pod.yaml \
+  --filename deployment.yaml \
   main="$VLLM_SNAPSHOT_IMAGE" \
   --output yaml |
   kubectl apply \
@@ -118,26 +119,45 @@ kubectl set image \
     --filename -
 ```
 
-The command replaces the example image value in `pod.yaml` with
-`$VLLM_SNAPSHOT_IMAGE` before creating the pod. It does not modify the local
-file.
+The command replaces the example image value in `deployment.yaml` with
+`$VLLM_SNAPSHOT_IMAGE` before creating the Deployment. It does not modify the
+local file.
 
-Wait until vLLM finishes initialization and becomes safe to checkpoint:
+Wait until the vLLM replica finishes initialization and becomes safe to
+checkpoint:
 
 ```bash
-kubectl wait \
+kubectl rollout status \
   --namespace "$VLLM_NAMESPACE" \
-  --for=condition=Ready \
-  pod/vllm-source \
+  deployment/vllm-source \
   --timeout=30m
 ```
 
-The readiness probe succeeds after `app.py` writes `ready-for-snapshot`.
+List the generated Pod:
+
+```bash
+kubectl get pods \
+  --namespace "$VLLM_NAMESPACE" \
+  --selector app=vllm-source
+```
+
+Use that Pod name in the `PodSnapshot` created during the next step. The
+readiness probe succeeds after `app.py` writes `ready-for-snapshot`.
 
 ## Next steps
 
-- [Checkpoint a replica](checkpoint.md)
-- [Restore a replica](restore.md)
+1. [Checkpoint the generated Pod](checkpoint.md).
+2. After the checkpoint is ready, scale the source Deployment to zero before
+   restoring on the same GPU:
+
+   ```bash
+   kubectl scale \
+     --namespace "$VLLM_NAMESPACE" \
+     deployment/vllm-source \
+     --replicas=0
+   ```
+
+3. [Restore a replica](restore.md).
 
 ## Send a request after restore
 

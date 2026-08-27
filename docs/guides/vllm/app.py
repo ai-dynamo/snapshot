@@ -80,6 +80,8 @@ async def main() -> None:
     if os.environ.get("DYN_SNAPSHOT_RESTORE_STANDBY") == "1":
         await asyncio.Event().wait()
 
+    CONTROL_DIR.joinpath("ready-for-snapshot").unlink(missing_ok=True)
+
     engine = AsyncLLM.from_engine_args(
         AsyncEngineArgs(
             model=MODEL,
