@@ -101,7 +101,9 @@ RUN case "${TARGETARCH}" in \
 
 RUN set -eu; \
     dpkg-query -W -f='${Package}\t${Version}\t${source:Package}\t${source:Version}\n' \
-      | LC_ALL=C sort > /base-packages.tsv; \
+      > /base-packages.raw.tsv; \
+    LC_ALL=C sort /base-packages.raw.tsv > /base-packages.tsv; \
+    rm /base-packages.raw.tsv; \
     test -s /base-packages.tsv; \
     awk -F'\t' \
       'NF != 4 || $1 == "" || $2 == "" || $3 == "" || $4 == "" { \
