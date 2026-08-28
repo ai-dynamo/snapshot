@@ -38,8 +38,8 @@ ARG BASE_IMAGE=placeholder-requires-base-image-arg
 # =============================================================================
 FROM ${DOCKER_PROXY}library/golang:${GO_VERSION} AS go-base
 
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETOS
+ARG TARGETARCH
 
 RUN echo "Building for ${TARGETOS}/${TARGETARCH}"
 
@@ -78,8 +78,8 @@ RUN go test ./... -v
 # =============================================================================
 FROM go-base AS builder
 
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETOS
+ARG TARGETARCH
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /snapshot-agent ./cmd/agent
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /nsrestore ./cmd/nsrestore
@@ -92,7 +92,7 @@ RUN mkdir -p /go-src && go mod vendor -o /go-src/vendor
 # =============================================================================
 FROM ${AGENT_BASE_IMAGE} AS agent-base
 
-ARG TARGETARCH=amd64
+ARG TARGETARCH
 
 RUN case "${TARGETARCH}" in \
       amd64|arm64) ;; \
@@ -238,7 +238,7 @@ COPY --from=criu-builder /tmp/criu/COPYING /legal/CRIU/COPYING
 RUN criu --version
 
 # Copy CUDA checkpoint binaries
-ARG TARGETARCH=amd64
+ARG TARGETARCH
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin /tmp/cuda-checkpoint-bin
 RUN set -eu; \
     case "${TARGETARCH}" in \
@@ -257,6 +257,7 @@ RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-help
 
 # Copy the built binaries
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
+RUN /usr/local/bin/snapshot-agent -h >/dev/null 2>&1
 
 # Assemble the injection bundle: bind-mounted read-only into the placeholder's
 # mount namespace at /tmp/snapshot-binaries during restore (internal/nsmount).
@@ -288,6 +289,7 @@ RUN set -eu; \
     chmod +x /snapshot-binaries/criu /snapshot-binaries/nsrestore \
              /snapshot-binaries/cuda-checkpoint /snapshot-binaries/cuda-checkpoint-helper \
              /snapshot-binaries/ip /snapshot-binaries/tar
+RUN /snapshot-binaries/nsrestore -h >/dev/null 2>&1
 
 # Shared-library closure of the bundled binaries and plugins.
 #
@@ -375,7 +377,7 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 FROM ${BASE_IMAGE} AS placeholder
 
 ARG BASE_IMAGE
-ARG TARGETARCH=amd64
+ARG TARGETARCH
 ENV ORIGINAL_BASE_IMAGE=${BASE_IMAGE}
 
 USER root
