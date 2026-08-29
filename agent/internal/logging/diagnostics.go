@@ -15,6 +15,9 @@ import (
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 )
 
+// keyLineLimit caps how many CRIU log lines the diagnostics summary emits.
+const keyLineLimit = 80
+
 // LogProcessDiagnostics logs process state and CRIU restore log for debugging a failed restore.
 func LogProcessDiagnostics(procRoot string, pid int, restoreLogPath string, log logr.Logger) {
 	entry := log.WithValues("restored_pid", pid)
@@ -71,24 +74,40 @@ func logRestoreLog(path string, log logr.Logger) {
 
 	lines := strings.Split(string(data), "\n")
 
-	// Extract error/warning/notable lines
-	var keyLines []string
+	// Extract error/warning/notable lines. CRIU emits one informational
+	// "Collected [...]" line per mapped file, and a CUDA workload maps
+	// thousands of paths with "cuda" in them, so an unordered scan fills the
+	// cap with noise and truncates the actual failure -- which CRIU logs last,
+	// right before it gives up. Collect errors and failures first so they
+	// always survive the cap.
+	var errorLines []string
+	var noticeLines []string
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
 			continue
 		}
 		lower := strings.ToLower(trimmed)
-		if strings.Contains(lower, "error") ||
-			strings.Contains(lower, "warn") ||
-			strings.Contains(lower, "fail") ||
+		switch {
+		case strings.Contains(lower, "error") || strings.Contains(lower, "fail"):
+			errorLines = append(errorLines, trimmed)
+		case strings.Contains(lower, "warn") ||
 			strings.Contains(lower, "cuda") ||
-			strings.Contains(lower, "restore finished successfully") {
-			keyLines = append(keyLines, trimmed)
-			if len(keyLines) >= 80 {
-				break
+			strings.Contains(lower, "restore finished successfully"):
+			if len(noticeLines) < keyLineLimit {
+				noticeLines = append(noticeLines, trimmed)
 			}
 		}
+	}
+	keyLines := errorLines
+	if len(keyLines) > keyLineLimit {
+		keyLines = keyLines[len(keyLines)-keyLineLimit:]
+	}
+	if room := keyLineLimit - len(keyLines); room > 0 {
+		if len(noticeLines) > room {
+			noticeLines = noticeLines[:room]
+		}
+		keyLines = append(keyLines, noticeLines...)
 	}
 	if len(keyLines) > 0 {
 		log.Info("CRIU restore key lines", "path", path, "lines", strings.Join(keyLines, " | "))
