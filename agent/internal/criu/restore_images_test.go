@@ -21,6 +21,34 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// A connected abstract socket keeps its address: a counterpart that is not in
+// this image still resolves the original name.
+func TestRewriteCloneConflictingUnixSocketAddressSkipsConnected(t *testing.T) {
+	connected := newUnixSocketEntry(1, []byte("\x00047f9"), 101, unix.SOCK_DGRAM, linuxUnixSocketStateClose)
+	connected.Usk.Peer = proto.Uint32(4242)
+	original := append([]byte(nil), connected.Usk.Name...)
+
+	if rewriteCloneConflictingUnixSocketAddress(connected.Usk, 987654321) {
+		t.Fatal("connected abstract socket must keep its address")
+	}
+	if !bytes.Equal(connected.Usk.Name, original) {
+		t.Fatalf("address = %q, want %q", connected.Usk.Name, original)
+	}
+}
+
+// An unbound socket has nothing to make private.
+func TestRewriteCloneConflictingUnixSocketAddressSkipsUnbound(t *testing.T) {
+	for name, raw := range map[string][]byte{
+		"empty":    {},
+		"bare NUL": {0},
+	} {
+		entry := newUnixSocketEntry(1, raw, 101, unix.SOCK_DGRAM, linuxUnixSocketStateClose)
+		if rewriteCloneConflictingUnixSocketAddress(entry.Usk, 987654321) {
+			t.Fatalf("%s address must not be rewritten", name)
+		}
+	}
+}
+
 func TestPrepareRestoreImageDirRewritesObservedSocketTopology(t *testing.T) {
 	checkpointPath := t.TempDir()
 	entries := observedSocketTopology()
@@ -48,6 +76,19 @@ func TestPrepareRestoreImageDirRewritesObservedSocketTopology(t *testing.T) {
 	if got := restored[0].Usk.Name; !bytes.HasPrefix(got, []byte("\x00dynamo-")) {
 		t.Fatalf("CUDA listener address = %q, want Dynamo abstract address", got)
 	}
+	// Bound, peerless abstract datagram sockets collide between clones exactly
+	// like the CUDA listener does: the abstract namespace is per-netns and Pod
+	// containers share one. A real DeepSeek restore failed here with
+	// "unix: Can't bind ... Address already in use" from sk-unix.c.
+	for _, i := range []int{2, 3} {
+		if got := restored[i].Usk.Name; !bytes.HasPrefix(got, []byte("\x00dynamo-")) {
+			t.Fatalf("abstract datagram address %d = %q, want Dynamo abstract address", i, got)
+		}
+	}
+	// Pathname sockets stay put: the mount namespace already isolates them.
+	if got := restored[1].Usk.Name; !bytes.Equal(got, entries[1].Usk.Name) {
+		t.Fatalf("pathname socket address = %q, want it unchanged", got)
+	}
 	clientPort := restored[5].Isk.GetSrcPort()
 	if clientPort == entries[5].Isk.GetSrcPort() {
 		t.Fatalf("TCP client port was not rewritten")
@@ -70,7 +111,7 @@ func TestPrepareRestoreImageDirRewritesObservedSocketTopology(t *testing.T) {
 	for i, original := range entries {
 		want := proto.Clone(original).(*fdinfo.FileEntry)
 		switch i {
-		case 0:
+		case 0, 2, 3:
 			want.Usk.Name = restored[i].Usk.Name
 		case 5:
 			want.Isk.SrcPort = proto.Uint32(clientPort)

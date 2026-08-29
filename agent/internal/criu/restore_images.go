@@ -4,7 +4,6 @@
 package criu
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -24,8 +23,8 @@ import (
 const (
 	filesImageFilename            = "files.img"
 	placeholderMountNamespacePath = "/proc/self/ns/mnt"
-	cudaUVMFDSocketNamePrefix     = "\x00cuda-uvmfd-"
 	linuxUnixSocketStateListen    = 10
+	linuxUnixSocketStateClose     = 7
 	linuxTCPStateEstablished      = 1
 	linuxTCPStateClose            = 7
 	linuxTCPStateListen           = 10
@@ -402,12 +401,24 @@ func closeFDs(fds []int) {
 	}
 }
 
+// rewriteCloneConflictingUnixSocketAddress gives a clone its own abstract
+// socket address. Abstract AF_UNIX names are scoped to the network namespace,
+// and every container in a Pod shares one, so two clones restored from the same
+// checkpoint bind identical names and the second fails:
+//
+//	unix: Can't bind id 0x31d ino 1765794461 addr : Address already in use
+//
+// Only bound, peerless sockets qualify. An address matters to a remote only
+// while something is connected to it, and peer == 0 means nothing in the image
+// is: CUDA and NCCL both retain these FDs across the checkpoint, and an
+// unconnected datagram socket hands its address to senders in each message's
+// source address rather than through the name. Pathname sockets are left alone
+// because the mount namespace already makes them clone-private.
 func rewriteCloneConflictingUnixSocketAddress(entry *sk_unix.UnixSkEntry, restoreID uint64) bool {
-	if !isCUDAUVMFDListener(entry) {
+	if !isCloneConflictingUnixSocket(entry) {
 		return false
 	}
 
-	// CUDA retains this listener's FD, so only its clone-private address changes.
 	input := make([]byte, 8+len(entry.Name))
 	binary.BigEndian.PutUint64(input, restoreID)
 	copy(input[8:], entry.Name)
@@ -416,13 +427,19 @@ func rewriteCloneConflictingUnixSocketAddress(entry *sk_unix.UnixSkEntry, restor
 	return true
 }
 
-func isCUDAUVMFDListener(entry *sk_unix.UnixSkEntry) bool {
-	return entry != nil &&
-		entry.Type != nil &&
-		entry.State != nil &&
-		entry.Peer != nil &&
-		*entry.Type == uint32(unix.SOCK_SEQPACKET) &&
-		*entry.State == linuxUnixSocketStateListen &&
-		*entry.Peer == 0 &&
-		bytes.HasPrefix(entry.Name, []byte(cudaUVMFDSocketNamePrefix))
+// isCloneConflictingUnixSocket reports whether an abstract socket's address is
+// safe to make clone-private. Established sockets keep their address so a
+// counterpart outside the image can still resolve it.
+func isCloneConflictingUnixSocket(entry *sk_unix.UnixSkEntry) bool {
+	if entry == nil || entry.State == nil || entry.Peer == nil {
+		return false
+	}
+	if *entry.Peer != 0 {
+		return false
+	}
+	if *entry.State != linuxUnixSocketStateListen && *entry.State != linuxUnixSocketStateClose {
+		return false
+	}
+	// The leading NUL is the abstract-namespace marker; a bare NUL is unbound.
+	return len(entry.Name) > 1 && entry.Name[0] == 0
 }
