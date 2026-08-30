@@ -22,6 +22,12 @@ const (
 	// uses the captured container name as the destination.
 	RestoreContainerMapAnnotation = "nvidia.com/restore-container-map"
 
+	// RestoredContainerIDAnnotationPrefix records, per restore destination, the
+	// container incarnation into which the agent restored the process. A live
+	// container ID that differs from this record is a kubelet-restarted
+	// incarnation that is eligible for replenishment.
+	RestoredContainerIDAnnotationPrefix = "nvidia.com/restored-container-id."
+
 	// CUDAInterposerAnnotation opts checkpoint targets into CUDA interposition.
 	// The only supported value is "enabled". Snapshot supplies its configured
 	// agent image; workload users do not select an interposer image.
@@ -78,6 +84,12 @@ const (
 	// completed and the workload may resume.
 	RestoreCompleteFile = "restore-complete"
 )
+
+// RestoredContainerIDAnnotationKey returns the annotation key for a restore
+// destination's most recently restored container incarnation.
+func RestoredContainerIDAnnotationKey(destination string) string {
+	return RestoredContainerIDAnnotationPrefix + destination
+}
 
 // ContainerMapping maps the one captured source container to a restore
 // destination in the target Pod.
