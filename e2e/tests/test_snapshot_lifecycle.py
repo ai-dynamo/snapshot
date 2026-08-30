@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from snapshot_e2e import k8s
@@ -316,11 +318,67 @@ def test_failed_restore_gpu_checkpoint_into_non_gpu_target(
         raise
 
 
+# A checkpoint captured with more memory than the target offers is the cheapest
+# real mismatch to build: nothing about the node has to change for it.
+CAPTURE_MEMORY_LIMIT = "4Gi"
+SMALLER_MEMORY_LIMIT = "1Gi"
+
+# The restore informer resyncs every 30s, which is what would re-drive a refused
+# pod. Waiting past two of them is how a retry loop would show itself.
+RESTORE_RESYNC_SECONDS = 30
+
+
+@pytest.mark.snapshot_failure
+@pytest.mark.gpu
+def test_refused_restore_says_why_and_does_no_criu_work(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    try:
+        _, source_node, _ = create_valid_gpu_checkpoint(
+            config, run, memory_limit=CAPTURE_MEMORY_LIMIT
+        )
+        k8s.delete_pod(config.namespace, run.source_pod)
+        snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+
+        k8s.create_pod(
+            snap.restore_pod(
+                config=config,
+                run=run,
+                gpu=True,
+                source_node=source_node,
+                memory_limit=SMALLER_MEMORY_LIMIT,
+            )
+        )
+        pod = snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "False", "RestoreIncompatible"
+        )
+
+        refusal = snap.pod_condition(pod, snap.RESTORED_CONDITION)
+        assert "memory-limit" in refusal.message
+        assert CAPTURE_MEMORY_LIMIT in refusal.message
+        assert SMALLER_MEMORY_LIMIT in refusal.message
+
+        assert_restore_events(config.namespace, run.restore_pod, {"RestoreIncompatible"})
+        time.sleep(2 * RESTORE_RESYNC_SECONDS + 5)
+        assert restore_event_count(config.namespace, run.restore_pod, "RestoreIncompatible") == 1
+        assert "RestoreFailed" not in restore_event_reasons(config.namespace, run.restore_pod)
+
+        # The placeholder is still the placeholder: a refusal costs no CRIU work,
+        # so the workload never sees restore-complete.
+        assert not snap.file_present(config.namespace, run.restore_pod, snap.RESTORE_DONE)
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
 def create_valid_gpu_checkpoint(
     config: k8s.E2EConfig,
     run: snap.TestRun,
+    *,
+    memory_limit: str | None = None,
 ) -> tuple[object, str, int]:
-    source, source_node = create_ready_source(config, run, gpu=True)
+    source, source_node = create_ready_source(config, run, gpu=True, memory_limit=memory_limit)
     checkpoint_observations = snap.wait_for_state_observations(
         config.namespace,
         run.source_pod,
@@ -342,6 +400,7 @@ def create_ready_source(
     *,
     gpu: bool,
     annotations: dict[str, str] | None = None,
+    memory_limit: str | None = None,
 ) -> tuple[object, str]:
     k8s.create_pod(
         snap.source_pod(
@@ -349,6 +408,7 @@ def create_ready_source(
             run=run,
             gpu=gpu,
             annotations=annotations,
+            memory_limit=memory_limit,
         )
     )
     pod = snap.wait_for_pod_ready(config.namespace, run.source_pod)
@@ -420,3 +480,18 @@ def restore_event_reasons(namespace: str, pod_name: str) -> set[str]:
         for event in events
         if event.involved_object and event.involved_object.name == pod_name
     }
+
+
+def restore_event_count(namespace: str, pod_name: str, reason: str) -> int:
+    """How many times the pod was told this, not how many objects say it.
+
+    Repeated events are aggregated into one object with a count, so counting
+    objects would report one no matter how often the agent repeated itself.
+    """
+    return sum(
+        event.count or 1
+        for event in k8s.list_events(namespace)
+        if event.involved_object
+        and event.involved_object.name == pod_name
+        and event.reason == reason
+    )
