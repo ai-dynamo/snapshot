@@ -76,8 +76,6 @@ type NodeController struct {
 	inFlight   map[string]struct{}
 	inFlightMu sync.Mutex
 
-	handledRestores sync.Map
-
 	// contentIndexer is the PodSnapshotContent informer's indexer, indexed by source pod
 	// (podRefIndex). The source-pod informer uses it to map a pod event back to its work order.
 	contentIndexer cache.Indexer
@@ -257,7 +255,6 @@ func (w *NodeController) Run(ctx context.Context) error {
 		UpdateFunc: func(_, newObj interface{}) {
 			w.enqueueRestorePod(newObj)
 		},
-		DeleteFunc: w.forgetRestorePod,
 	}); err != nil {
 		return fmt.Errorf("failed to add restore informer handler: %w", err)
 	}
@@ -375,14 +372,6 @@ func (w *NodeController) enqueueRestorePod(obj interface{}) {
 	w.restoreQueue.Add(client.ObjectKeyFromObject(pod))
 }
 
-func (w *NodeController) forgetRestorePod(obj interface{}) {
-	pod, ok := podFromInformerObj(obj)
-	if !ok {
-		return
-	}
-	w.handledRestores.Delete(string(pod.UID))
-}
-
 func (w *NodeController) restorePodRequested(pod *corev1.Pod) bool {
 	if pod.Spec.NodeName != w.config.NodeName {
 		return false
@@ -425,11 +414,7 @@ func (w *NodeController) processRestoreQueueItem(ctx context.Context, key client
 		return
 	}
 	pod = pod.DeepCopy()
-	if w.restoreHandled(pod) {
-		requeue = w.removeRestoreFinalizerWithEvent(ctx, pod)
-		return
-	}
-	if isRestoreTerminal(pod) {
+	if isRestoreTerminal(pod) && !w.hasPendingRestoreIncarnation(pod) {
 		requeue = w.handleTerminalRestorePod(ctx, pod)
 		return
 	}
@@ -727,6 +712,12 @@ func (w *NodeController) restoreDestination(
 	if containerID == "" {
 		return result
 	}
+	// Replaying CRIU into an already restored, live engine would destroy it, so
+	// only a fresh incarnation of this destination is restored again.
+	if restoreIncarnationRestored(pod, destination, containerID) {
+		result.state = restoreResultSucceeded
+		return result
+	}
 
 	startedAt := time.Now()
 	log := w.log.WithValues("pod", podKey, "snapshot", artifact.SnapshotName, "destination", destination)
@@ -741,6 +732,14 @@ func (w *NodeController) restoreDestination(
 		result.state = restoreResultFailed
 		log.Error(err, "Restore controller worker failed")
 		emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreWorkerFailed", err.Error())
+		return result
+	}
+	// Without a persisted incarnation record the next pass would replay CRIU
+	// into this live restored engine, so a failed record fails the destination.
+	if err := w.recordRestoredIncarnation(ctx, pod, destination, containerID); err != nil {
+		result.state = restoreResultFailed
+		log.Error(err, "Failed to record restored container incarnation")
+		emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreRecordFailed", err.Error())
 		return result
 	}
 	result.state = restoreResultSucceeded
@@ -983,13 +982,96 @@ func (w *NodeController) patchRestoreFinalizers(ctx context.Context, pod *corev1
 	return err
 }
 
-func (w *NodeController) restoreHandled(pod *corev1.Pod) bool {
-	_, handled := w.handledRestores.Load(string(pod.UID))
-	return handled
+// restoreIncarnationRestored reports whether a destination container's live
+// incarnation already holds a restored process.
+//
+// The recorded annotation is authoritative when present. It is absent for
+// restores performed by agent builds that predate the record, so fall back to
+// the structural fact that a restore never restarts its destination: an
+// unrestarted destination on a Pod whose restore already reached a terminal
+// outcome still holds that restore, and replaying CRIU into it would destroy a
+// live engine. A restarted destination is a fresh standby placeholder instead.
+func restoreIncarnationRestored(pod *corev1.Pod, containerName, containerID string) bool {
+	if recorded := pod.Annotations[podcontract.RestoredContainerIDAnnotationKey(containerName)]; recorded != "" {
+		return recorded == containerID
+	}
+	if !isRestoreTerminal(pod) {
+		return false
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == containerName {
+			return status.RestartCount == 0
+		}
+	}
+	return false
 }
 
-func (w *NodeController) markRestoreHandled(pod *corev1.Pod) {
-	w.handledRestores.Store(string(pod.UID), struct{}{})
+// restoreDestinationContainers returns the names of the Pod's restore
+// destination containers. A destination is identified structurally by its
+// snapshot control mount rather than by an annotation: the operator injects
+// that mount on every destination, both restore validators require it, and the
+// restore-complete sentinel is written through it, so a container without it
+// can never be a restore destination. Reading it from the spec keeps this gate
+// free of API calls, and free of annotations owned by other repositories.
+func restoreDestinationContainers(pod *corev1.Pod) map[string]struct{} {
+	destinations := make(map[string]struct{}, len(pod.Spec.Containers))
+	for _, container := range pod.Spec.Containers {
+		for _, mount := range container.VolumeMounts {
+			if mount.Name == podcontract.SnapshotControlVolumeName &&
+				mount.MountPath == podcontract.SnapshotControlMountPath {
+				destinations[container.Name] = struct{}{}
+				break
+			}
+		}
+	}
+	return destinations
+}
+
+// hasPendingRestoreIncarnation reports whether any restore destination is
+// running a container incarnation that this Pod's records do not account for.
+// Two cases qualify, and both mean the destination is inert standby that
+// nothing will ever release:
+//
+//   - a destination whose recorded incarnation differs from the live one:
+//     kubelet restarted a previously restored container in place;
+//   - a destination with no record at all that kubelet has restarted: the
+//     restore failed, the agent killed the placeholder, and the terminal
+//     condition would otherwise hide the fresh incarnation forever.
+func (w *NodeController) hasPendingRestoreIncarnation(pod *corev1.Pod) bool {
+	destinations := restoreDestinationContainers(pod)
+	// ContainerStatuses covers regular containers only, so init containers and
+	// native sidecars are never mistaken for restore destinations.
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.State.Running == nil || status.ContainerID == "" {
+			continue
+		}
+		if _, isDestination := destinations[status.Name]; !isDestination {
+			continue
+		}
+		if !restoreIncarnationRestored(pod, status.Name, snapshotruntime.StripCRIScheme(status.ContainerID)) {
+			return true
+		}
+	}
+	return false
+}
+
+// recordRestoredIncarnation persists which container incarnation this
+// destination was restored into. A merge patch touches only this key, so
+// destinations completing concurrently do not clobber each other.
+func (w *NodeController) recordRestoredIncarnation(ctx context.Context, pod *corev1.Pod, destination, containerID string) error {
+	key := podcontract.RestoredContainerIDAnnotationKey(destination)
+	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]string{key: containerID}}})
+	if err != nil {
+		return err
+	}
+	if _, err := w.clientset.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, ktypes.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+		return fmt.Errorf("record restored container incarnation: %w", err)
+	}
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+	}
+	pod.Annotations[key] = containerID
+	return nil
 }
 
 func (w *NodeController) removeRestoreFinalizerWithEvent(ctx context.Context, pod *corev1.Pod) bool {
@@ -1011,7 +1093,6 @@ func (w *NodeController) finishRestore(
 		emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeWarning, restoreStatusUpdateFailedReason, fmt.Sprintf("Failed to record %s restore status: %v", reason, err))
 		return err
 	}
-	w.markRestoreHandled(pod)
 	eventType := corev1.EventTypeWarning
 	if status == corev1.ConditionTrue {
 		eventType = corev1.EventTypeNormal

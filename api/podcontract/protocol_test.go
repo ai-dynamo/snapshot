@@ -33,6 +33,13 @@ func TestGetRestoreFromSnapshotName(t *testing.T) {
 	}
 }
 
+func TestRestoredContainerIDAnnotationKey(t *testing.T) {
+	const want = "nvidia.com/restored-container-id.engine-1"
+	if got := RestoredContainerIDAnnotationKey("engine-1"); got != want {
+		t.Fatalf("RestoredContainerIDAnnotationKey() = %q, want %q", got, want)
+	}
+}
+
 func TestContainerMappingsFromAnnotations(t *testing.T) {
 	t.Run("defaults to captured container", func(t *testing.T) {
 		got, err := ContainerMappingsFromAnnotations(nil, "main")
