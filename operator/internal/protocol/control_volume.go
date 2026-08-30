@@ -16,7 +16,7 @@ import (
 // and LegacySnapshotControlDirEnv (deprecated) on the container's env, so
 // workload images can migrate off the legacy name independently of the
 // operator release. Idempotent — safe to call from multiple code paths
-// (operator checkpoint job, restore pod shaping, etc.); each env var is
+// (operator source job, restore pod shaping, etc.); each env var is
 // guarded independently so a pod that already carries one (e.g. a
 // hand-crafted template with only the legacy name) still gets the other
 // injected without duplicating either.

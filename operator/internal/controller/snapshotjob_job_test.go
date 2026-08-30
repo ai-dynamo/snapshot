@@ -35,7 +35,7 @@ func minimalSnapshotJob() *snapshotv1alpha1.SnapshotJob {
 }
 
 func TestBuildSourceJob(t *testing.T) {
-	t.Run("wires identity, target, and options through to NewCheckpointJob", func(t *testing.T) {
+	t.Run("wires identity, target, and options through to NewSourceJob", func(t *testing.T) {
 		sj := minimalSnapshotJob()
 
 		job, err := buildSourceJob(sj)

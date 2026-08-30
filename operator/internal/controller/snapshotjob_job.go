@@ -15,7 +15,7 @@ import (
 )
 
 // buildSourceJob constructs the desired batch/v1 Job for a SnapshotJob's source pod.
-// It reuses protocol.NewCheckpointJob unchanged — that function's body is the agent
+// It reuses protocol.NewSourceJob unchanged — that function's body is the agent
 // contract (control volume, readiness probe, labels, seccomp, sidecar opt-outs), not
 // Dynamo-specific code — and adds only the owner label so the PodSnapshot created
 // later (PR 4) can be mapped back to this SnapshotJob without an ownerReference.
@@ -47,7 +47,7 @@ func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, error) {
 	podTemplate.Labels[snapshotv1alpha1.SnapshotJobOwnerLabel] = sj.Name
 	podTemplate.Labels[snapshotv1alpha1.SnapshotJobOwnerUIDLabel] = string(sj.UID)
 
-	return protocol.NewCheckpointJob(podTemplate, protocol.CheckpointJobOptions{
+	return protocol.NewSourceJob(podTemplate, protocol.SourceJobOptions{
 		Namespace:             sj.Namespace,
 		Name:                  sj.Name,
 		TargetContainer:       targetContainer,

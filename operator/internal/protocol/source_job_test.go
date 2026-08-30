@@ -44,8 +44,8 @@ func requireStableLaunchJobWrapper(t *testing.T, container *corev1.Container, or
 	}
 }
 
-func TestNewCheckpointJob(t *testing.T) {
-	job, err := NewCheckpointJob(&corev1.PodTemplateSpec{
+func TestNewSourceJob(t *testing.T) {
+	job, err := NewSourceJob(&corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels: map[string]string{"existing": "label"},
 			Annotations: map[string]string{
@@ -61,7 +61,7 @@ func TestNewCheckpointJob(t *testing.T) {
 				Args:    []string{"--model", "Qwen"},
 			}},
 		},
-	}, CheckpointJobOptions{
+	}, SourceJobOptions{
 		Namespace:             "test-ns",
 		TargetContainer:       "main",
 		SeccompProfile:        snapshotv1alpha1.DefaultSeccompLocalhostProfile,
@@ -71,7 +71,7 @@ func TestNewCheckpointJob(t *testing.T) {
 		WrapLaunchJob:         true,
 	})
 	if err != nil {
-		t.Fatalf("expected checkpoint job, got error: %v", err)
+		t.Fatalf("expected source job, got error: %v", err)
 	}
 
 	if job.Name != "test-job" || job.Namespace != "test-ns" {
@@ -115,8 +115,8 @@ func TestNewCheckpointJob(t *testing.T) {
 	}
 }
 
-func TestNewCheckpointJobWrapsTargetContainer(t *testing.T) {
-	job, err := NewCheckpointJob(&corev1.PodTemplateSpec{
+func TestNewSourceJobWrapsTargetContainer(t *testing.T) {
+	job, err := NewSourceJob(&corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
@@ -124,7 +124,7 @@ func TestNewCheckpointJobWrapsTargetContainer(t *testing.T) {
 				{Name: "worker", Command: []string{"python3", "-m", "dynamo.vllm"}, Args: []string{"--model", "Qwen"}},
 			},
 		},
-	}, CheckpointJobOptions{
+	}, SourceJobOptions{
 		Namespace:             "test-ns",
 		TargetContainer:       "worker",
 		Name:                  "test-job",
@@ -132,7 +132,7 @@ func TestNewCheckpointJobWrapsTargetContainer(t *testing.T) {
 		WrapLaunchJob:         true,
 	})
 	if err != nil {
-		t.Fatalf("expected checkpoint job, got error: %v", err)
+		t.Fatalf("expected source job, got error: %v", err)
 	}
 
 	worker := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, "worker")
@@ -161,7 +161,7 @@ func TestNewCheckpointJobWrapsTargetContainer(t *testing.T) {
 	}
 }
 
-func TestNewCheckpointJobDisablesServiceMeshInjection(t *testing.T) {
+func TestNewSourceJobDisablesServiceMeshInjection(t *testing.T) {
 	cases := []struct {
 		name        string
 		annotations map[string]string
@@ -202,13 +202,13 @@ func TestNewCheckpointJobDisablesServiceMeshInjection(t *testing.T) {
 				},
 			}
 
-			job, err := NewCheckpointJob(source, CheckpointJobOptions{
+			job, err := NewSourceJob(source, SourceJobOptions{
 				Namespace:       "test-ns",
 				Name:            "test-job",
 				TargetContainer: "main",
 			})
 			if err != nil {
-				t.Fatalf("NewCheckpointJob() error = %v", err)
+				t.Fatalf("NewSourceJob() error = %v", err)
 			}
 
 			got := job.Spec.Template.Annotations
@@ -233,8 +233,8 @@ func TestNewCheckpointJobDisablesServiceMeshInjection(t *testing.T) {
 	}
 }
 
-func TestDisableCheckpointJobSidecarInjectionNilMap(t *testing.T) {
-	got := DisableCheckpointJobSidecarInjection(nil)
+func TestDisableSidecarInjectionNilMap(t *testing.T) {
+	got := DisableSidecarInjection(nil)
 	if got == nil {
 		t.Fatal("expected non-nil map, got nil")
 	}
@@ -246,12 +246,12 @@ func TestDisableCheckpointJobSidecarInjectionNilMap(t *testing.T) {
 	}
 }
 
-func TestNewCheckpointJobRequiresTarget(t *testing.T) {
-	_, err := NewCheckpointJob(&corev1.PodTemplateSpec{
+func TestNewSourceJobRequiresTarget(t *testing.T) {
+	_, err := NewSourceJob(&corev1.PodTemplateSpec{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{Name: "worker", Command: []string{"python3"}}},
 		},
-	}, CheckpointJobOptions{
+	}, SourceJobOptions{
 		Namespace: "test-ns",
 		Name:      "test-job",
 	})
@@ -260,7 +260,7 @@ func TestNewCheckpointJobRequiresTarget(t *testing.T) {
 	}
 }
 
-func TestNewCheckpointJobRejectsRestoreAnnotations(t *testing.T) {
+func TestNewSourceJobRejectsRestoreAnnotations(t *testing.T) {
 	for _, annotation := range []string{
 		snapshotv1alpha1.RestoreFromAnnotation,
 		snapshotv1alpha1.RestoreContainerMapAnnotation,
@@ -270,14 +270,14 @@ func TestNewCheckpointJobRejectsRestoreAnnotations(t *testing.T) {
 			if annotation == snapshotv1alpha1.RestoreFromAnnotation {
 				value = "snapshot-a"
 			}
-			_, err := NewCheckpointJob(&corev1.PodTemplateSpec{
+			_, err := NewSourceJob(&corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{annotation: value},
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "main", Command: []string{"python3"}}},
 				},
-			}, CheckpointJobOptions{
+			}, SourceJobOptions{
 				Namespace:       "test-ns",
 				TargetContainer: "main",
 				Name:            "test-job",
@@ -290,12 +290,12 @@ func TestNewCheckpointJobRejectsRestoreAnnotations(t *testing.T) {
 	}
 }
 
-func TestNewCheckpointJobRejectsUnknownTarget(t *testing.T) {
-	_, err := NewCheckpointJob(&corev1.PodTemplateSpec{
+func TestNewSourceJobRejectsUnknownTarget(t *testing.T) {
+	_, err := NewSourceJob(&corev1.PodTemplateSpec{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{Name: "worker", Command: []string{"python3"}}},
 		},
-	}, CheckpointJobOptions{
+	}, SourceJobOptions{
 		Namespace:       "test-ns",
 		TargetContainer: "missing",
 		Name:            "test-job",
@@ -305,16 +305,16 @@ func TestNewCheckpointJobRejectsUnknownTarget(t *testing.T) {
 	}
 }
 
-// TestNewCheckpointJobNoWrapByDefault verifies that the container command is
+// TestNewSourceJobNoWrapByDefault verifies that the container command is
 // preserved unchanged when WrapLaunchJob is false (the default). This guards
 // against accidentally re-introducing cuda-checkpoint wrapping as the default,
 // which would require cuda-checkpoint to be present in the placeholder image
 // at the exact path CRIU checkpointed it from.
-func TestNewCheckpointJobNoWrapByDefault(t *testing.T) {
+func TestNewSourceJobNoWrapByDefault(t *testing.T) {
 	originalCmd := []string{"python3", "-m", "dynamo.vllm"}
 	originalArgs := []string{"--model", "Qwen"}
 
-	job, err := NewCheckpointJob(&corev1.PodTemplateSpec{
+	job, err := NewSourceJob(&corev1.PodTemplateSpec{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{
 				Name:    "main",
@@ -323,7 +323,7 @@ func TestNewCheckpointJobNoWrapByDefault(t *testing.T) {
 				Args:    originalArgs,
 			}},
 		},
-	}, CheckpointJobOptions{
+	}, SourceJobOptions{
 		Namespace:       "test-ns",
 		TargetContainer: "main",
 		Name:            "test-job",
