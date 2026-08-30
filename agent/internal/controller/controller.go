@@ -923,7 +923,7 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (int, error) {
 }
 
 func (op *restoreOperation) failRestore(ctx context.Context, restoreErr error) error {
-	w := op.controller
+	//w := op.controller
 	op.log.Error(restoreErr, "External restore failed")
 	// Re-resolve because restore may fail before discovering the placeholder PID.
 	//placeholderHostPID, _, err := w.runtime.ResolveContainer(ctx, op.containerID)
