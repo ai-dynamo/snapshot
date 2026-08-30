@@ -4,11 +4,17 @@
 package controller
 
 import (
+	"context"
+	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
@@ -150,4 +156,103 @@ func TestCheckpointSourceAtPathReportsAnUnreadableManifest(t *testing.T) {
 	source, err := checkpointSourceAtPath(t.TempDir())
 	require.Error(t, err)
 	assert.Nil(t, source)
+}
+
+// committedArtifact writes a manifest carrying facts where the agent will look
+// for the artifact of one work order.
+func committedArtifact(t *testing.T, w *NodeController, contentUID string) string {
+	t.Helper()
+
+	path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, contentUID, "main")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(path, 0o755))
+
+	manifest := recordedManifest()
+	manifest.Artifact = types.ArtifactManifest{ContentUID: contentUID, ContainerName: "main"}
+	require.NoError(t, types.WriteManifest(path, manifest))
+	return path
+}
+
+func assertPublishedTheRecordedSource(t *testing.T, content *snapshotv1alpha1.PodSnapshotContent) {
+	t.Helper()
+
+	require.NotNil(t, meta.FindStatusCondition(content.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+	assert.Equal(t, recordedSource(), content.Status.Source)
+}
+
+func TestMarkCheckpointReadyPublishesWhatTheCaptureRecorded(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	w := makeNodeController(t, &fakeCheckpointer{}, content)
+	path := committedArtifact(t, w, string(content.UID))
+
+	require.NoError(t, w.markCheckpointReady(context.Background(), content, path))
+
+	assertPublishedTheRecordedSource(t, getContent(t, w, content.Name))
+}
+
+// The artifact is already committed by the time this runs, so losing the facts
+// must not cost the capture its Ready.
+func TestMarkCheckpointReadyGoesReadyWhenTheManifestCannotBeRead(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	w := makeNodeController(t, &fakeCheckpointer{}, content)
+
+	require.NoError(t, w.markCheckpointReady(context.Background(), content, t.TempDir()))
+
+	got := getContent(t, w, content.Name)
+	assert.NotNil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+	assert.Nil(t, got.Status.Source)
+}
+
+func TestFreshCapturePublishesTheSourceItRecorded(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	pod := makeSourcePod()
+	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 7}
+	w.checkpointFn = func(_ context.Context, params CheckpointParams) error {
+		committedArtifact(t, w, params.ContentUID)
+		return nil
+	}
+
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+
+	require.Eventually(t, func() bool {
+		return getContent(t, w, content.Name).Status.Source != nil
+	}, time.Second, 5*time.Millisecond)
+	assertPublishedTheRecordedSource(t, getContent(t, w, content.Name))
+}
+
+// The agent can die between committing the artifact and writing Ready, and the
+// facts have to survive that: they come from the artifact, not from memory.
+func TestArtifactRecoveryPublishesTheSourceItRecorded(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	pod := makeSourcePod()
+	pod.Status.Phase = corev1.PodFailed
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:  "main",
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "Error"}},
+	}}
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+	committedArtifact(t, w, string(content.UID))
+
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+
+	assert.False(t, fc.wasCalled())
+	assertPublishedTheRecordedSource(t, getContent(t, w, content.Name))
+}
+
+// The dump kills the source, so the pod can be gone by the time the work order
+// is reconciled again; a committed artifact still publishes.
+func TestDeferredCommittedCapturePublishesTheSourceItRecorded(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content)
+	committedArtifact(t, w, string(content.UID))
+
+	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+
+	assert.False(t, fc.wasCalled())
+	got := getContent(t, w, content.Name)
+	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
+	assertPublishedTheRecordedSource(t, got)
 }
