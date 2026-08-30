@@ -105,21 +105,24 @@ def wait_for_pod_ready(namespace: str, name: str, timeout: int = 600) -> client.
     return wait_for(f"pod {namespace}/{name} Ready", ready, timeout, detail=detail)
 
 
+def file_present(namespace: str, pod: str, path: str) -> bool:
+    # Require a stdout marker because exec does not expose remote exit status,
+    # and look for it rather than match on it: exec returns stderr too, and a
+    # login shell is free to write to it.
+    marker = "__snapshot_e2e_file_present__"
+    command = f"[[ -f {shlex.quote(path)} ]] && printf '%s' {shlex.quote(marker)}"
+    return marker in k8s.exec_command(namespace, pod, command)
+
+
 def wait_for_file(namespace: str, pod: str, path: str, timeout: int = 180) -> None:
     last_error: str | None = None
-    marker = "__snapshot_e2e_file_present__"
 
     def exists() -> bool | None:
         nonlocal last_error
         try:
-            # Require a stdout marker because exec does not expose remote exit status.
-            command = (
-                f"[[ -f {shlex.quote(path)} ]] && "
-                f"printf '%s' {shlex.quote(marker)}"
-            )
-            response = k8s.exec_command(namespace, pod, command)
+            present = file_present(namespace, pod, path)
             last_error = None
-            return True if response == marker else None
+            return True if present else None
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
             return None
@@ -452,6 +455,15 @@ def debug_dump(config: k8s.E2EConfig, run: TestRun) -> None:
     for pod in pods:
         print(f"pod {pod.metadata.name} phase={pod.status.phase} node={pod.spec.node_name}")
         print(f"annotations={pod.metadata.annotations or {}}")
+        print(
+            "conditions="
+            + str(
+                [
+                    (c.type, c.status, c.reason, c.message)
+                    for c in pod.status.conditions or []
+                ]
+            )
+        )
         print(k8s.pod_logs(config.namespace, pod.metadata.name, tail_lines=80))
     print_custom_objects(config, run)
     print_snapshot_controller_logs(config)
