@@ -8,7 +8,8 @@ from __future__ import annotations
 import json
 import shlex
 import time
-from typing import Any, Callable
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator
 
 import yaml
 from kubernetes import client
@@ -427,6 +428,39 @@ def pod_condition(pod: client.V1Pod, condition_type: str) -> client.V1PodConditi
     return None
 
 
+def wait_for_restore_past_the_gate(
+    namespace: str,
+    pod_name: str,
+    timeout: int = 600,
+) -> client.V1Pod:
+    """Wait for any reason the agent only records once the gate has let the restore through.
+
+    RestoreInProgress is transient, so waiting for it alone is a race a fast
+    restore wins. A restore refused at the gate never reaches any of these.
+    """
+    past = ("RestoreInProgress", "RestoreSucceeded", "RestoreFailed")
+
+    def check() -> client.V1Pod | None:
+        pod = k8s.read_pod(namespace, pod_name)
+        restored = pod_condition(pod, RESTORED_CONDITION)
+        return pod if restored and restored.reason in past else None
+
+    def detail() -> str:
+        try:
+            pod = k8s.read_pod(namespace, pod_name)
+        except ApiException as exc:
+            return f"api_error={k8s.api_error_detail(exc)}"
+        restored = pod_condition(pod, RESTORED_CONDITION)
+        return f"{RESTORED_CONDITION}={restored.reason if restored else '<unset>'}"
+
+    return wait_for(
+        f"restore past the gate on {namespace}/{pod_name}",
+        check,
+        timeout,
+        detail=detail,
+    )
+
+
 def checkpoint_artifact_manifest(
     config: k8s.E2EConfig, node: str, content_uid: str
 ) -> str:
@@ -523,6 +557,85 @@ def checkpoint_agent_pod(config: k8s.E2EConfig, node: str) -> str:
             f"expected one snapshot agent on node {node!r}, found {names}"
         )
     return agents[0].metadata.name
+
+
+AGENT_CONFIG_VOLUME = "config"
+AGENT_CONFIG_KEY = "config.yaml"
+
+
+def agent_config_source(config: k8s.E2EConfig) -> tuple[str, str]:
+    """The ConfigMap the agent reads from and the path it reads it at.
+
+    Read off the DaemonSet so a test edits the file the agent is actually
+    mounting rather than one the chart happens to name the same way.
+    """
+    daemonsets = k8s.list_snapshot_daemonsets(
+        config.namespace, config.release, "snapshot-agent"
+    )
+    if len(daemonsets) != 1:
+        raise AssertionError(f"expected one snapshot agent DaemonSet, found {len(daemonsets)}")
+
+    spec = daemonsets[0].spec.template.spec
+    volume = next(v for v in spec.volumes if v.name == AGENT_CONFIG_VOLUME)
+    mount = next(
+        m
+        for container in spec.containers
+        for m in container.volume_mounts or []
+        if m.name == AGENT_CONFIG_VOLUME
+    )
+    return volume.config_map.name, f"{mount.mount_path}/{AGENT_CONFIG_KEY}"
+
+
+def wait_for_agent_config(config: k8s.E2EConfig, expected: str, timeout: int = 180) -> None:
+    """Wait for a ConfigMap edit to reach every agent in the release.
+
+    The ConfigMap belongs to the release, so an edit reaches the whole
+    DaemonSet; waiting on one node would leave the others holding the old value.
+    The kubelet refreshes projected ConfigMaps on its own schedule, so the file
+    inside each container is the only honest signal that an edit has landed.
+    """
+    _, path = agent_config_source(config)
+    command = f"cat {shlex.quote(path)}"
+    agents = [
+        pod.metadata.name
+        for pod in k8s.list_snapshot_pods(config.namespace, config.release, "snapshot-agent")
+    ]
+    if not agents:
+        raise AssertionError("no snapshot agent pods to wait on")
+
+    for agent in agents:
+        def projected(agent: str = agent) -> bool | None:
+            content = k8s.exec_command(config.namespace, agent, command)
+            return True if expected in content else None
+
+        wait_for(
+            f"{expected!r} in {agent}:{path}",
+            projected,
+            timeout,
+            detail=lambda agent=agent: k8s.exec_command(config.namespace, agent, command),
+        )
+
+
+@contextmanager
+def node_skip_compat_check(config: k8s.E2EConfig) -> Iterator[None]:
+    """Turn the node switch on for the body, and put it back afterwards.
+
+    Waits for the projection on both edges: leaving the switch on would let a
+    later test's restore through the very gate it means to exercise.
+    """
+    name, _ = agent_config_source(config)
+    original = k8s.read_config_map(config.namespace, name).data[AGENT_CONFIG_KEY]
+    off, on = "skipCompatCheck: false", "skipCompatCheck: true"
+    if off not in original:
+        raise AssertionError(f"{name}:{AGENT_CONFIG_KEY} does not carry {off!r}")
+
+    k8s.patch_config_map(config.namespace, name, {AGENT_CONFIG_KEY: original.replace(off, on)})
+    try:
+        wait_for_agent_config(config, on)
+        yield
+    finally:
+        k8s.patch_config_map(config.namespace, name, {AGENT_CONFIG_KEY: original})
+        wait_for_agent_config(config, off)
 
 
 def assert_restored_state(
