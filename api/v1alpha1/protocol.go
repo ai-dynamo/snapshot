@@ -31,6 +31,12 @@ func GetRestoreFromSnapshotName(annotations map[string]string) (string, error) {
 	return snapshotName, nil
 }
 
+// RestoredContainerIDAnnotationKey names the annotation that records the
+// container incarnation a restore destination was restored into.
+func RestoredContainerIDAnnotationKey(destination string) string {
+	return RestoredContainerIDAnnotationPrefix + destination
+}
+
 // RestoreContainerMappingsFromAnnotations parses the optional flat restore
 // mapping. Absence keeps the existing same-name restore behavior.
 func RestoreContainerMappingsFromAnnotations(annotations map[string]string, capturedSource string) ([]RestoreContainerMapping, error) {

@@ -31,6 +31,15 @@ const (
 	// RestoredCondition is the Pod status condition owned by the node agent.
 	RestoredCondition = "nvidia.com/Restored"
 
+	// RestoredContainerIDAnnotationPrefix records, per restore destination, the
+	// container incarnation that was restored: the annotation
+	// <prefix><destination> holds that container's ID. A destination whose live
+	// container ID differs from its recorded value is a fresh incarnation that
+	// kubelet restarted in place, and is eligible for restore again. Keeping this
+	// on the Pod rather than in agent memory is what lets replenishment survive an
+	// agent restart.
+	RestoredContainerIDAnnotationPrefix = "nvidia.com/restored-container-id."
+
 	CheckpointVolumeName           = "checkpoint-storage"
 	DefaultSeccompLocalhostProfile = "profiles/block-iouring.json"
 )
