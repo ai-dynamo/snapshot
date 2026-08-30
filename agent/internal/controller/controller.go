@@ -930,9 +930,9 @@ func (op *restoreOperation) failRestore(ctx context.Context, restoreErr error) e
 	if err != nil {
 		return errors.Join(restoreErr, fmt.Errorf("placeholder PID could not be resolved after restore failure: %w", err))
 	}
-	if err := w.sendSignalFn(op.log, placeholderHostPID, syscall.SIGKILL, "restore failed"); err != nil {
-		return errors.Join(restoreErr, fmt.Errorf("placeholder could not be killed after restore failure: %w", err))
-	}
+	//if err := w.sendSignalFn(op.log, placeholderHostPID, syscall.SIGKILL, "restore failed"); err != nil {
+	//	return errors.Join(restoreErr, fmt.Errorf("placeholder could not be killed after restore failure: %w", err))
+	//}
 	return restoreErr
 }
 
