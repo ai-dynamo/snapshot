@@ -219,6 +219,18 @@ func TestSetSnapshotContentSucceeded_ConflictReturnsError(t *testing.T) {
 	assert.Nil(t, meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
 }
 
+// An unreadable manifest publishes no facts, and no facts must not erase the
+// ones an earlier Ready write already published.
+func TestSetSnapshotContentSucceeded_NoSourceLeavesAPublishedOneAlone(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	content.Status.Source = recordedSource()
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, interceptor.Funcs{}, content)
+
+	require.NoError(t, w.setSnapshotContentSucceeded(context.Background(), content, nil))
+
+	assert.Equal(t, recordedSource(), getContent(t, w, content.Name).Status.Source)
+}
+
 func TestRunCheckpoint_ReadyPatchErrorLeavesNotReady(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	funcs := interceptor.Funcs{
@@ -272,9 +284,35 @@ func TestMarkCheckpointReady_FailedBeforeReadyIsSticky(t *testing.T) {
 	require.NoError(t, err, "a sticky Failed condition is an accepted outcome, not a retryable error")
 	got := getContent(t, w, stored.Name)
 	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+	assert.Nil(t, got.Status.Source, "a work order that failed never captured anything to publish")
 	failed := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
 	require.NotNil(t, failed)
 	assert.Equal(t, "SourcePodGone", failed.Reason)
+}
+
+// The manifest is read once, before the retry loop, so a Ready write that only
+// lands on a later attempt still carries the facts.
+func TestMarkCheckpointReady_PublishesAfterAReadyConflict(t *testing.T) {
+	stored := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	conflicts := 0
+	funcs := interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if conflicts == 0 {
+				conflicts++
+				return conflictErr()
+			}
+			return c.Status().Patch(ctx, obj, patch, opts...)
+		},
+	}
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, stored)
+	path := committedArtifact(t, w, string(stored.UID))
+
+	require.NoError(t, w.markCheckpointReady(context.Background(), stored, path))
+
+	assert.Equal(t, 1, conflicts, "the first Ready write has to be the rejected one")
+	got := getContent(t, w, stored.Name)
+	assert.NotNil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+	assert.Equal(t, recordedSource(), got.Status.Source)
 }
 
 func TestRunCheckpoint_FailedBeforeReadyDoesNotKill(t *testing.T) {
