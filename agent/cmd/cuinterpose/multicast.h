@@ -32,6 +32,12 @@ struct cuinterposer_multicast_callbacks {
   void (*mark_member_shared)(const uint8_t id[CUINTERPOSER_ALLOCATION_ID_SIZE]);
   void (*release_state_lock)(void);
   void (*acquire_state_lock)(void);
+  /*
+   * True while the interposer is in PHASE_ACTIVE. Callers that drop
+   * state_lock across a long driver call must revalidate with this on
+   * reacquire: a checkpoint may have started in the window.
+   */
+  bool (*state_is_active)(void);
 };
 
 void cuinterposer_multicast_initialize(

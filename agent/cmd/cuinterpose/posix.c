@@ -17,9 +17,34 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <stdlib.h>
+
 #include "util.h"
 
-#define EXPORT_TIMEOUT_SECONDS 30
+/*
+ * Deadline for contacting the creating process to export a shared handle.
+ *
+ * This was a hard-coded 30 s. Under concurrent multi-rank startup the creator's
+ * control server can be blocked far longer than that, and the timeout surfaces
+ * as a per-rank CUDA_ERROR_INVALID_HANDLE -- a non-deterministic, rank-divergent
+ * failure that frameworks are not built to handle. Default generously and allow
+ * an operator override.
+ */
+#define EXPORT_TIMEOUT_SECONDS_DEFAULT 300
+
+static unsigned
+export_timeout_seconds(void)
+{
+  static unsigned cached;
+
+  if (cached == 0) {
+    const char* value = getenv("DYN_SNAPSHOT_EXPORT_TIMEOUT_SECONDS");
+    long parsed = value != NULL ? strtol(value, NULL, 10) : 0;
+
+    cached = (parsed > 0 && parsed <= 86400) ? (unsigned)parsed : EXPORT_TIMEOUT_SECONDS_DEFAULT;
+  }
+  return cached;
+}
 
 static bool
 zero_bytes(const void* value, size_t size)
@@ -108,7 +133,7 @@ cuinterposer_posix_request_export(
   memcpy(request.allocation_id, ticket->allocation_id, sizeof(request.allocation_id));
   snprintf(address.sun_path, sizeof(address.sun_path), "%s", ticket->creator_endpoint);
   client = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-  if (client < 0 || set_socket_timeouts(client, EXPORT_TIMEOUT_SECONDS) != 0 ||
+  if (client < 0 || set_socket_timeouts(client, export_timeout_seconds()) != 0 ||
       connect(client, (const struct sockaddr*)&address, sizeof(address)) != 0 ||
       send_header(client, &request, -1) != 0 ||
       receive_header(client, &response, output) != 0) {

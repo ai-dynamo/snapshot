@@ -28,7 +28,8 @@
 #undef cuMulticastBindMem
 
 #define CONTROL_DIR "/snapshot-control"
-#define CONTROL_TIMEOUT_SECONDS 30
+/* See export_timeout_seconds() in posix.c for why 30 s was too tight. */
+#define CONTROL_TIMEOUT_SECONDS_DEFAULT 300
 #define LOGICAL_HANDLE_TAG UINT64_C(0xd94d000000000000)
 #define LOGICAL_HANDLE_TAG_MASK UINT64_C(0xffff000000000000)
 #define LOGICAL_HANDLE_VALUE_MASK UINT64_C(0x0000ffffffffffff)
@@ -131,6 +132,13 @@ static void
 acquire_state_lock(void)
 {
   pthread_mutex_lock(&state_lock);
+}
+
+/* Caller must hold state_lock. Used to revalidate after a lock drop. */
+static bool
+state_is_active(void)
+{
+  return current_phase == PHASE_ACTIVE;
 }
 
 static void
@@ -979,20 +987,57 @@ done:
   free(records);
 }
 
+static unsigned
+control_timeout_seconds(void)
+{
+  static unsigned cached;
+
+  if (cached == 0) {
+    const char* value = getenv("DYN_SNAPSHOT_CONTROL_TIMEOUT_SECONDS");
+    long parsed = value != NULL ? strtol(value, NULL, 10) : 0;
+
+    cached = (parsed > 0 && parsed <= 86400) ? (unsigned)parsed : CONTROL_TIMEOUT_SECONDS_DEFAULT;
+  }
+  return cached;
+}
+
+static void*
+control_connection(void* argument)
+{
+  int client = (int)(intptr_t)argument;
+
+  if (set_socket_timeouts(client, control_timeout_seconds()) == 0)
+    serve(client);
+  close(client);
+  return NULL;
+}
+
 static void*
 control_agent(void* unused)
 {
   (void)unused;
   for (;;) {
     int client = accept4(listener, NULL, NULL, SOCK_CLOEXEC);
+    pthread_t worker;
+
     if (client < 0) {
       if (errno == EINTR)
         continue;
       return NULL;
     }
-    if (set_socket_timeouts(client, CONTROL_TIMEOUT_SECONDS) == 0)
-      serve(client);
-    close(client);
+    /*
+     * Serve each connection on its own detached thread so the accept loop never
+     * stalls. serve() still takes state_lock for its whole body, so requests
+     * remain serialised -- the win is that a slow request no longer blocks
+     * accept(), which previously left peers stuck in connect() burning their
+     * export deadline before they were ever heard. Participant count is small
+     * and bounded, so thread churn is not a concern. Fall back to inline
+     * service if a thread cannot be created.
+     */
+    if (pthread_create(&worker, NULL, control_connection, (void*)(intptr_t)client) == 0)
+      (void)pthread_detach(worker);
+    else
+      (void)control_connection((void*)(intptr_t)client);
   }
 }
 
@@ -1090,6 +1135,7 @@ initialize(void)
       .mark_member_shared = multicast_mark_member_shared,
       .release_state_lock = release_state_lock,
       .acquire_state_lock = acquire_state_lock,
+      .state_is_active = state_is_active,
   };
   const char* control;
   const char* configured_participant;
