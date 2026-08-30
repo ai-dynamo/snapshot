@@ -97,7 +97,7 @@ var imageDigestCheck = check{
 	name: CheckImageDigest,
 	gate: GateInspect,
 	compare: func(source, target Facts) []Mismatch {
-		return mustMatch(imageDigest(source.ImageID), imageDigest(target.ImageID))
+		return mustMatch(ImageDigest(source.ImageID), ImageDigest(target.ImageID))
 	},
 }
 
@@ -151,11 +151,14 @@ func atLeastSource(source, target string) []Mismatch {
 	return []Mismatch{{Source: source, Target: target}}
 }
 
-// imageDigest reduces a container status image ID to the digest inside it.
+// ImageDigest reduces a container status image ID to the digest inside it.
 // Runtimes disagree on the wrapping - containerd reports a bare "sha256:...",
 // others a scheme and a repository around it - and the artifact keeps whichever
 // form it was given, so the two are only comparable after this.
-func imageDigest(imageID string) string {
+//
+// Exported so that what a checkpoint publishes is the same reduction this
+// compares, rather than a second one that can disagree with it.
+func ImageDigest(imageID string) string {
 	digest := strings.TrimSpace(imageID)
 	if scheme := strings.Index(digest, "://"); scheme >= 0 {
 		digest = digest[scheme+len("://"):]
