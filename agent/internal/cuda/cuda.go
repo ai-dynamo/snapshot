@@ -133,7 +133,11 @@ func parseNvidiaSmiGPUFacts(output string) compat.GPUFacts {
 			continue
 		}
 		fields := strings.SplitN(line, ",", 3)
-		device := compat.GPUDevice{UUID: strings.TrimSpace(fields[0])}
+		uuid := strings.TrimSpace(fields[0])
+		if uuid == "" {
+			continue
+		}
+		device := compat.GPUDevice{UUID: uuid}
 		if len(fields) == 3 {
 			device.ProductName = strings.TrimSpace(fields[1])
 			if driverVersion := strings.TrimSpace(fields[2]); driverVersion != "" {

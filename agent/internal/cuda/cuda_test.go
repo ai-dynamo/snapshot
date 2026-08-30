@@ -66,6 +66,14 @@ func TestParseNvidiaSmiGPUFacts(t *testing.T) {
 			},
 		},
 		{
+			name:   "rows without UUIDs are not GPUs",
+			output: ", NVIDIA L4, 580.65.06\nGPU-aaa, NVIDIA L4, 580.65.06\n",
+			want: compat.GPUFacts{
+				DriverVersion: "580.65.06",
+				Devices:       []compat.GPUDevice{{UUID: "GPU-aaa", ProductName: "NVIDIA L4"}},
+			},
+		},
+		{
 			name:   "a node with no GPUs reports nothing",
 			output: "\n",
 			want:   compat.GPUFacts{},
