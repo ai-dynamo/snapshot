@@ -12,6 +12,11 @@ package v1alpha1
 // than empty, and an artifact captured before a fact was recorded publishes
 // without it.
 type CheckpointSource struct {
+	// Devices records the devices the capture could see, grouped by vendor.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	Devices *CheckpointSourceDevices `json:"devices,omitempty"`
+
 	// Node records the machine the checkpoint was captured on.
 	// +optional
 	Node *CheckpointSourceNode `json:"node,omitempty"`
@@ -19,6 +24,40 @@ type CheckpointSource struct {
 	// Pod records the container the checkpoint was captured from.
 	// +optional
 	Pod *CheckpointSourcePod `json:"pod,omitempty"`
+}
+
+// CheckpointSourceDevices groups source device facts under one property per
+// vendor, so each vendor's payload stays typed and validated and several can be
+// present at once without a discriminator. A vendor this CRD has not heard of
+// yet is preserved rather than pruned, so a newer agent's facts survive an older
+// installed CRD.
+type CheckpointSourceDevices struct {
+	// Nvidia records the NVIDIA GPUs the capture could see.
+	// +optional
+	Nvidia *NvidiaCheckpointSource `json:"nvidia,omitempty"`
+}
+
+// NvidiaCheckpointSource is what the capture saw of the node's NVIDIA GPUs. The
+// field names are the ones the NVIDIA DRA driver publishes on a ResourceSlice,
+// so the same GPU reads the same way in both places.
+type NvidiaCheckpointSource struct {
+	// DriverVersion is the NVIDIA driver the capture ran against.
+	// +optional
+	DriverVersion string `json:"driverVersion,omitempty"`
+
+	// Instances lists one entry per GPU the captured container could see, so
+	// the count is the length of this list.
+	// +optional
+	Instances []NvidiaCheckpointSourceInstance `json:"instances,omitempty"`
+}
+
+// NvidiaCheckpointSourceInstance is one GPU. UUIDs are deliberately left out:
+// they identify a physical card rather than describe what a restore target has
+// to match.
+type NvidiaCheckpointSourceInstance struct {
+	// ProductName is the GPU model, as nvidia-smi reports it.
+	// +optional
+	ProductName string `json:"productName,omitempty"`
 }
 
 // CheckpointSourceNode is the machine a checkpoint was captured on.
