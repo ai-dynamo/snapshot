@@ -1341,24 +1341,82 @@ cuMemUnmap(CUdeviceptr address, size_t size)
   return result;
 }
 
+/*
+ * Record the access descriptors on every tracked mapping that `[address,size)`
+ * covers.
+ *
+ * Restore replays access only when `mapping->access_count != 0` (see
+ * restore_mappings). Matching solely on an exact (address, size) pair meant any
+ * caller that mapped at one granularity and set access at another -- which
+ * PyTorch's caching allocator routinely does, and which is legal CUDA -- left
+ * `access_count == 0`. Such a mapping was restored mapped but with NO device
+ * access, so the VA resolved and the first kernel to touch it died with
+ * CUDA_ERROR_ILLEGAL_ADDRESS. Observed on an 8-rank GLM-5.2 restore: 192 of 336
+ * recorded mappings had access_count == 0.
+ *
+ * Returns false if the range partially overlaps a tracked mapping, i.e. the
+ * request cannot be represented per-mapping. The caller then fails closed
+ * rather than passing it through and silently losing the access on restore.
+ *
+ * When `descriptors` is NULL nothing is mutated; the walk only classifies the
+ * range. `*matched` receives the number of tracked mappings fully covered.
+ */
+static bool
+record_access_over_range(
+    CUdeviceptr address, size_t size, const CUmemAccessDesc* descriptors, size_t count, size_t* matched)
+{
+  struct mapping* mapping;
+  CUdeviceptr end = address + size;
+
+  *matched = 0;
+  for (mapping = mappings; mapping != NULL; mapping = mapping->next) {
+    CUdeviceptr mapping_end;
+
+    if (!mapping->mapped)
+      continue;
+    mapping_end = mapping->address + mapping->size;
+    if (mapping_end <= address || mapping->address >= end)
+      continue; /* disjoint */
+    if (mapping->address < address || mapping_end > end)
+      return false; /* partial overlap: not representable per-mapping */
+    if (descriptors != NULL) {
+      memcpy(mapping->access, descriptors, count * sizeof(*descriptors));
+      mapping->access_count = count;
+    }
+    (*matched)++;
+  }
+  return true;
+}
+
 CUresult CUDAAPI
 cuMemSetAccess(CUdeviceptr address, size_t size, const CUmemAccessDesc* descriptors, size_t count)
 {
   access_fn function = (access_fn)lookup_real_symbol("cuMemSetAccess");
-  struct mapping* mapping;
+  size_t matched;
   CUresult result;
 
   if ((result = ensure_process_endpoint()) != CUDA_SUCCESS)
     return result;
   pthread_mutex_lock(&state_lock);
-  mapping = find_mapping(address, size);
-  if (mapping == NULL) {
-    if (cuinterposer_multicast_has_mapping(address, size)) {
-      result = current_phase == PHASE_ACTIVE ? cuinterposer_multicast_set_access(address, size, descriptors, count)
-                                             : CUDA_ERROR_NOT_READY;
-      pthread_mutex_unlock(&state_lock);
-      return result;
-    }
+
+  /* Multicast ranges keep their own bookkeeping. */
+  if (find_mapping(address, size) == NULL && cuinterposer_multicast_has_mapping(address, size)) {
+    result = current_phase == PHASE_ACTIVE ? cuinterposer_multicast_set_access(address, size, descriptors, count)
+                                           : CUDA_ERROR_NOT_READY;
+    pthread_mutex_unlock(&state_lock);
+    return result;
+  }
+
+  /*
+   * Classify first (NULL descriptors => no mutation) so a range that touches
+   * nothing we track stays a pure passthrough, and so an unrepresentable range
+   * is rejected before the device is modified.
+   */
+  if (!record_access_over_range(address, size, NULL, 0, &matched)) {
+    pthread_mutex_unlock(&state_lock);
+    return CUDA_ERROR_NOT_SUPPORTED;
+  }
+  if (matched == 0) {
     pthread_mutex_unlock(&state_lock);
     return function != NULL ? function(address, size, descriptors, count) : unavailable();
   }
@@ -1367,10 +1425,8 @@ cuMemSetAccess(CUdeviceptr address, size_t size, const CUmemAccessDesc* descript
     return CUDA_ERROR_NOT_SUPPORTED;
   }
   result = function != NULL ? function(address, size, descriptors, count) : unavailable();
-  if (result == CUDA_SUCCESS) {
-    memcpy(mapping->access, descriptors, count * sizeof(*descriptors));
-    mapping->access_count = count;
-  }
+  if (result == CUDA_SUCCESS)
+    (void)record_access_over_range(address, size, descriptors, count, &matched);
   pthread_mutex_unlock(&state_lock);
   return result;
 }
