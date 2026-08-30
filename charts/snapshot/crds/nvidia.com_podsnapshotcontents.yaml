@@ -221,6 +221,28 @@ spec:
                         description: Name is the node the source pod ran on.
                         type: string
                     type: object
+                  pod:
+                    description: Pod records the container the checkpoint was captured
+                      from.
+                    properties:
+                      cpu:
+                        description: CPU is the container's CPU limit, absent if it
+                          had none.
+                        type: string
+                      image:
+                        description: Image is the container image reference the capture
+                          ran.
+                        type: string
+                      imageDigest:
+                        description: |-
+                          ImageDigest identifies which build of the container image the capture
+                          ran, which a mutable tag does not.
+                        type: string
+                      memory:
+                        description: Memory is the container's memory limit, absent
+                          if it had none.
+                        type: string
+                    type: object
                 type: object
             type: object
         required:
