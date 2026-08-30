@@ -60,6 +60,14 @@ def read_crd(name: str) -> client.V1CustomResourceDefinition:
     return client.ApiextensionsV1Api().read_custom_resource_definition(name)
 
 
+def read_config_map(namespace: str, name: str) -> client.V1ConfigMap:
+    return client.CoreV1Api().read_namespaced_config_map(name, namespace)
+
+
+def patch_config_map(namespace: str, name: str, data: dict[str, str]) -> client.V1ConfigMap:
+    return client.CoreV1Api().patch_namespaced_config_map(name, namespace, {"data": data})
+
+
 def read_node(name: str) -> client.V1Node:
     return client.CoreV1Api().read_node(name)
 

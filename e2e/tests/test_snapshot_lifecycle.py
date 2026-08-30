@@ -372,6 +372,93 @@ def test_refused_restore_says_why_and_does_no_criu_work(
         raise
 
 
+# Small enough to be refused, large enough to restore into once the checks are
+# off: with a switch on, the restore these tests start actually runs.
+SKIPPABLE_MEMORY_LIMIT = "3Gi"
+
+
+@pytest.mark.snapshot_success
+@pytest.mark.gpu
+def test_skip_annotation_lets_a_refused_restore_through(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    try:
+        _, source_node, _ = create_valid_gpu_checkpoint(
+            config, run, memory_limit=CAPTURE_MEMORY_LIMIT
+        )
+        k8s.delete_pod(config.namespace, run.source_pod)
+        snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+
+        body = snap.restore_pod(
+            config=config,
+            run=run,
+            gpu=True,
+            source_node=source_node,
+            memory_limit=SKIPPABLE_MEMORY_LIMIT,
+        )
+        body["metadata"]["annotations"]["nvidia.com/snapshot-skip-compat-check"] = "true"
+        k8s.create_pod(body)
+
+        pod = snap.wait_for_restore_past_the_gate(config.namespace, run.restore_pod)
+        assert snap.pod_condition(pod, snap.RESTORED_CONDITION).reason != "RestoreIncompatible"
+        assert "RestoreIncompatible" not in restore_event_reasons(
+            config.namespace, run.restore_pod
+        )
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
+@pytest.mark.snapshot_success
+@pytest.mark.gpu
+def test_node_switch_lets_a_refused_restore_through_without_a_rollout(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    try:
+        _, source_node, _ = create_valid_gpu_checkpoint(
+            config, run, memory_limit=CAPTURE_MEMORY_LIMIT
+        )
+        k8s.delete_pod(config.namespace, run.source_pod)
+        snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+
+        agent_before = k8s.read_pod(
+            config.namespace, snap.checkpoint_agent_pod(config, source_node)
+        )
+        with snap.node_skip_compat_check(config):
+            k8s.create_pod(
+                snap.restore_pod(
+                    config=config,
+                    run=run,
+                    gpu=True,
+                    source_node=source_node,
+                    memory_limit=SKIPPABLE_MEMORY_LIMIT,
+                )
+            )
+            pod = snap.wait_for_restore_past_the_gate(config.namespace, run.restore_pod)
+            assert snap.pod_condition(pod, snap.RESTORED_CONDITION).reason != "RestoreIncompatible"
+            assert "RestoreIncompatible" not in restore_event_reasons(
+                config.namespace, run.restore_pod
+            )
+
+        # The switch is worth having as a ConfigMap rather than an env var only
+        # if flipping it costs nothing, so the agent that honoured it has to be
+        # the same process that was running before.
+        agent_after = k8s.read_pod(
+            config.namespace, snap.checkpoint_agent_pod(config, source_node)
+        )
+        assert agent_after.metadata.uid == agent_before.metadata.uid
+        assert agent_restarts(agent_after) == agent_restarts(agent_before)
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
+def agent_restarts(pod: object) -> int:
+    return sum(status.restart_count for status in pod.status.container_statuses or [])
+
+
 def create_valid_gpu_checkpoint(
     config: k8s.E2EConfig,
     run: snap.TestRun,
