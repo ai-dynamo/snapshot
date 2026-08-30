@@ -689,9 +689,27 @@ cuinterposer_multicast_create(CUmemGenericAllocationHandle* output, const CUmult
     return CUDA_ERROR_INVALID_VALUE;
   if (properties->handleTypes != CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR)
     return CUDA_ERROR_NOT_SUPPORTED;
+  /*
+   * cuMulticastCreate contends the NVIDIA RM top lock and can block for a long
+   * time under concurrent multi-rank startup. Holding state_lock across it
+   * starves the single-threaded control server (serve()), which needs the same
+   * lock to answer a peer's export request; the peer then hits the 30 s
+   * request_export timeout and gets CUDA_ERROR_INVALID_HANDLE while other ranks
+   * succeed. That per-rank, timing-dependent failure made 2 of 8 ranks diverge
+   * onto a different allreduce backend and deadlocked the TP group.
+   * Same reasoning as bind_memory() above.
+   */
+  operations.release_state_lock();
   result = create == NULL ? unavailable() : create(&driver, properties);
+  operations.acquire_state_lock();
   if (result != CUDA_SUCCESS)
     return result;
+  /* A checkpoint may have started while the lock was dropped. */
+  if (operations.state_is_active != NULL && !operations.state_is_active()) {
+    if (release != NULL)
+      (void)release(driver);
+    return CUDA_ERROR_NOT_READY;
+  }
   multicast = calloc(1, sizeof(*multicast));
   if (multicast == NULL || random_bytes(multicast->id, sizeof(multicast->id)) != 0 ||
       random_bytes(multicast->authorization, sizeof(multicast->authorization)) != 0 ||
@@ -725,7 +743,27 @@ cuinterposer_multicast_add_device(CUmemGenericAllocationHandle logical, CUdevice
     return CUDA_ERROR_NOT_READY;
   if (added == NULL)
     return CUDA_ERROR_OUT_OF_MEMORY;
-  result = add_device == NULL ? unavailable() : add_device(handle->driver, device);
+  {
+    /*
+     * Like cuMulticastCreate, this is an NVSwitch-team collective that contends
+     * the RM top lock. Holding state_lock across it starves the control server
+     * and drives peer export timeouts. Capture the driver handle, drop the
+     * lock, then revalidate both the phase and the handle on reacquire.
+     */
+    CUmemGenericAllocationHandle driver = handle->driver;
+
+    operations.release_state_lock();
+    result = add_device == NULL ? unavailable() : add_device(driver, device);
+    operations.acquire_state_lock();
+    if (result == CUDA_SUCCESS && operations.state_is_active != NULL && !operations.state_is_active())
+      result = CUDA_ERROR_NOT_READY;
+    if (result == CUDA_SUCCESS) {
+      /* Re-look up: the handle may have been released while unlocked. */
+      handle = find_handle(logical);
+      if (handle == NULL || !handle->live || handle->driver != driver)
+        result = CUDA_ERROR_INVALID_HANDLE;
+    }
+  }
   if (result != CUDA_SUCCESS) {
     free(added);
     return result;
