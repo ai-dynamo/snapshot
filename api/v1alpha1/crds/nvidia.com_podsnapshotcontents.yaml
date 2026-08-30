@@ -201,6 +201,27 @@ spec:
                   - type
                   type: object
                 type: array
+              source:
+                description: |-
+                  Source publishes what the checkpoint was captured on, written when the
+                  capture goes Ready.
+                properties:
+                  node:
+                    description: Node records the machine the checkpoint was captured
+                      on.
+                    properties:
+                      architecture:
+                        description: Architecture is the node's CPU architecture,
+                          as GOARCH spells it.
+                        type: string
+                      kernelVersion:
+                        description: KernelVersion is the node's kernel release.
+                        type: string
+                      name:
+                        description: Name is the node the source pod ran on.
+                        type: string
+                    type: object
+                type: object
             type: object
         required:
         - spec
