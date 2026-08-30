@@ -132,7 +132,7 @@ func (w *NodeController) deferToCommittedCapture(ctx context.Context, content *s
 	}
 	path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, contentUID, containerName)
 	if err == nil && artifactPresent(path, contentUID, containerName) {
-		if err := w.markCheckpointReady(ctx, content); err != nil {
+		if err := w.markCheckpointReady(ctx, content, path); err != nil {
 			// Not terminal, so the content informer resync retries the recovery.
 			logr.FromContextOrDiscard(ctx).Error(err, "Failed to recover committed artifact to Ready", "content", content.Name)
 		}
@@ -257,7 +257,7 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		return w.setSnapshotContentFailed(ctx, content, "InvalidDestination", err)
 	}
 	if artifactPresent(artifactPath, contentUID, containerName) {
-		return w.markCheckpointReady(ctx, content)
+		return w.markCheckpointReady(ctx, content, artifactPath)
 	}
 
 	// The in-flight guard held above is process-local; overlapping agent instances arbitrate
@@ -382,7 +382,7 @@ func (w *NodeController) runCheckpoint(
 		return
 	}
 
-	if err := w.markCheckpointReady(ctx, content); err != nil {
+	if err := w.markCheckpointReady(ctx, content, artifactPath); err != nil {
 		logger.Error(err, "Failed to finalize checkpoint Ready status", "content", content.Name)
 		return
 	}
@@ -512,9 +512,14 @@ func (w *NodeController) removeCaptureEligibleLabel(ctx context.Context, pod *co
 	}
 }
 
-// setSnapshotContentSucceeded patches status with the Ready condition. Uses optimistic locking so
-// a concurrent terminal Failed write wins and this patch is rejected rather than overwriting it.
-func (w *NodeController) setSnapshotContentSucceeded(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent) error {
+// setSnapshotContentSucceeded patches status with the Ready condition and the source facts the
+// capture recorded. Uses optimistic locking so a concurrent terminal Failed write wins and this
+// patch is rejected rather than overwriting it.
+func (w *NodeController) setSnapshotContentSucceeded(
+	ctx context.Context,
+	content *snapshotv1alpha1.PodSnapshotContent,
+	source *snapshotv1alpha1.CheckpointSource,
+) error {
 	patch := client.MergeFromWithOptions(content.DeepCopy(), client.MergeFromWithOptimisticLock{})
 	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
 		Type:    snapshotv1alpha1.PodSnapshotConditionReady,
@@ -522,6 +527,9 @@ func (w *NodeController) setSnapshotContentSucceeded(ctx context.Context, conten
 		Reason:  "Captured",
 		Message: "Checkpoint captured and verified",
 	})
+	if source != nil {
+		content.Status.Source = source
+	}
 	return w.client.Status().Patch(ctx, content, patch)
 }
 
@@ -535,11 +543,26 @@ const readyStatusConflictLimit = 8
 // Ready-patch conflict, re-read and retry until Ready lands or a terminal state is observed: an
 // already-Failed work order is sticky and wins; Ready already set means another holder finished
 // the write.
-func (w *NodeController) markCheckpointReady(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent) error {
+//
+// The Ready write also publishes what the capture ran on, read from the artifact's manifest once
+// rather than per retry. An unreadable manifest costs the facts, never the capture: Ready is
+// written regardless, because the artifact is already committed.
+func (w *NodeController) markCheckpointReady(
+	ctx context.Context,
+	content *snapshotv1alpha1.PodSnapshotContent,
+	artifactPath string,
+) error {
 	logger := logr.FromContextOrDiscard(ctx)
+	source, err := checkpointSourceAtPath(artifactPath)
+	if err != nil {
+		logger.Error(err, "Failed to read the captured source facts; marking Ready without them",
+			"content", content.Name,
+			"artifactPath", artifactPath,
+		)
+	}
 	ready := content
 	for attempt := 0; attempt < readyStatusConflictLimit; attempt++ {
-		if err := w.setSnapshotContentSucceeded(ctx, ready); err != nil {
+		if err := w.setSnapshotContentSucceeded(ctx, ready, source); err != nil {
 			if !apierrors.IsConflict(err) {
 				logger.Error(err, "Failed to write PodSnapshotContent ready status", "content", content.Name)
 				return err
