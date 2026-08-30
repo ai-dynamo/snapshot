@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: PodSnapshotContent cleanup OpenShift permissions
+templates:
+  - templates/openshift/rbac-privileged.yaml
+set:
+  openshift.enabled: true
+tests:
+  - it: grants the operator the minimal anyuid SCC
+    documentIndex: 2
+    asserts:
+      - equal:
+          path: kind
+          value: Role
+      - equal:
+          path: metadata.name
+          value: snapshot-operator-anyuid
+      - equal:
+          path: rules[0].resourceNames[0]
+          value: anyuid
+      - contains:
+          path: rules[0].verbs
+          content: use
+
+  - it: binds anyuid to the operator service account
+    documentIndex: 3
+    asserts:
+      - equal:
+          path: kind
+          value: RoleBinding
+      - equal:
+          path: roleRef.name
+          value: snapshot-operator-anyuid
+      - equal:
+          path: subjects[0].name
+          value: RELEASE-NAME-snapshot-operator

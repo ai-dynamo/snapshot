@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"reflect"
 	"strings"
 	"sync"
 	"syscall"
@@ -126,8 +125,16 @@ func makeTestController(t *testing.T, pod *corev1.Pod, apiObjects ...runtime.Obj
 	clientObjects := make([]runtime.Object, len(apiObjects))
 	copy(clientObjects, apiObjects)
 	clientBuilder := ctrlfake.NewClientBuilder().WithScheme(testScheme(t))
+	restoreSnapshotIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	restoreContentIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
 	for _, object := range clientObjects {
 		clientBuilder = clientBuilder.WithRuntimeObjects(object)
+		switch object.(type) {
+		case *snapshotv1alpha1.PodSnapshot:
+			require.NoError(t, restoreSnapshotIndexer.Add(object))
+		case *snapshotv1alpha1.PodSnapshotContent:
+			require.NoError(t, restoreContentIndexer.Add(object))
+		}
 	}
 	coreObjects := []runtime.Object{}
 	if pod != nil {
@@ -149,6 +156,8 @@ func makeTestController(t *testing.T, pod *corev1.Pod, apiObjects ...runtime.Obj
 		controlSentinelExistsFn: func(int, string) (bool, error) { return false, nil },
 		sendSignalFn:            func(logr.Logger, int, syscall.Signal, string) error { return nil },
 		restoreQueue:            workqueue.NewTypedDelayingQueue[client.ObjectKey](),
+		restoreSnapshotIndexer:  restoreSnapshotIndexer,
+		restoreContentIndexer:   restoreContentIndexer,
 		log:                     testr.New(t),
 		holderID:                "test-holder",
 		inFlight:                make(map[string]struct{}),
@@ -621,7 +630,7 @@ func TestPreflightRestorePendingStates(t *testing.T) {
 	})
 }
 
-func TestPreflightRestoreFailsWhenInProgressSnapshotDisappears(t *testing.T) {
+func TestPreflightRestoreCacheMissRemainsPendingWhileInProgress(t *testing.T) {
 	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
 	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
 		Type: corev1.PodConditionType(snapshotv1alpha1.RestoredCondition), Status: corev1.ConditionFalse, Reason: restoreInProgressReason,
@@ -633,47 +642,100 @@ func TestPreflightRestoreFailsWhenInProgressSnapshotDisappears(t *testing.T) {
 	assert.Nil(t, artifact)
 	require.Error(t, err)
 	var pending *restorePendingError
-	assert.False(t, errors.As(err, &pending))
-	assert.Contains(t, err.Error(), "disappeared while restore was in progress")
+	require.True(t, errors.As(err, &pending))
+	assert.Equal(t, "SnapshotPending", pending.reason)
+	assert.Equal(t, "Waiting for PodSnapshot inference/snapshot-a", pending.message)
 }
 
-func TestRestorePreflightAPIErrorsUseStablePendingMessages(t *testing.T) {
+func TestPreflightRestoreIgnoresCachedDeletingSnapshotWithoutAPIRead(t *testing.T) {
+	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	snapshot, content := readySnapshotObjects()
+	now := metav1.Now()
+	snapshot.DeletionTimestamp = &now
+	snapshot.Finalizers = []string{"test-finalizer"}
+	w := makeTestController(t, pod, snapshot, content)
+	apiReads := 0
+	w.client = ctrlfake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithRuntimeObjects(snapshot, content).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, delegated client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				apiReads++
+				return delegated.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+
+	plan, err := w.preflightRestore(context.Background(), pod)
+
+	assert.Nil(t, plan)
+	var ignored *restoreIgnoredError
+	require.ErrorAs(t, err, &ignored)
+	assert.Contains(t, err.Error(), "PodSnapshot inference/snapshot-a is deleting")
+	assert.Zero(t, apiReads)
+}
+
+func TestPreflightRestoreIgnoresCachedDeletingContentWithoutAPIRead(t *testing.T) {
+	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	snapshot, content := readySnapshotObjects()
+	now := metav1.Now()
+	content.DeletionTimestamp = &now
+	content.Finalizers = []string{"test-finalizer"}
+	w := makeTestController(t, pod, snapshot, content)
+	apiReads := 0
+	w.client = ctrlfake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithRuntimeObjects(snapshot, content).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, delegated client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				apiReads++
+				return delegated.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+
+	plan, err := w.preflightRestore(context.Background(), pod)
+
+	assert.Nil(t, plan)
+	var ignored *restoreIgnoredError
+	require.ErrorAs(t, err, &ignored)
+	assert.Contains(t, err.Error(), "PodSnapshotContent "+content.Name+" is deleting")
+	assert.Zero(t, apiReads)
+}
+
+func TestRestorePreflightCacheMissesUseStablePendingMessagesWithoutAPIReads(t *testing.T) {
 	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
 	snapshot, _ := readySnapshotObjects()
 
 	tests := []struct {
 		name        string
 		objects     []runtime.Object
-		failType    client.Object
 		wantReason  string
 		wantMessage string
 	}{
 		{
 			name:        "snapshot read",
-			failType:    &snapshotv1alpha1.PodSnapshot{},
 			wantReason:  "SnapshotPending",
-			wantMessage: "Unable to read PodSnapshot inference/snapshot-a; retrying",
+			wantMessage: "Waiting for PodSnapshot inference/snapshot-a",
 		},
 		{
 			name:        "content read",
 			objects:     []runtime.Object{snapshot},
-			failType:    &snapshotv1alpha1.PodSnapshotContent{},
 			wantReason:  "ContentPending",
-			wantMessage: "Unable to read bound PodSnapshotContent podsnapshotcontent-snapshot-uid; retrying",
+			wantMessage: "Waiting for bound PodSnapshotContent podsnapshotcontent-snapshot-uid",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			w := makeTestController(t, pod)
+			w := makeTestController(t, pod, tc.objects...)
+			apiReads := 0
 			w.client = ctrlfake.NewClientBuilder().
 				WithScheme(testScheme(t)).
 				WithRuntimeObjects(tc.objects...).
 				WithInterceptorFuncs(interceptor.Funcs{
 					Get: func(ctx context.Context, delegated client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-						if reflect.TypeOf(obj) == reflect.TypeOf(tc.failType) {
-							return errors.New("transient apiserver detail")
-						}
+						apiReads++
 						return delegated.Get(ctx, key, obj, opts...)
 					},
 				}).
@@ -684,7 +746,7 @@ func TestRestorePreflightAPIErrorsUseStablePendingMessages(t *testing.T) {
 			assert.Nil(t, artifact)
 			assert.Equal(t, tc.wantReason, pendingRestoreReason(t, err))
 			assert.EqualError(t, err, tc.wantMessage)
-			assert.NotContains(t, err.Error(), "transient apiserver detail")
+			assert.Zero(t, apiReads)
 		})
 	}
 }
@@ -990,7 +1052,7 @@ func TestReconcileRestorePodRunsPreflightOnce(t *testing.T) {
 	requeue := w.reconcileRestorePod(context.Background(), pod)
 
 	assert.False(t, requeue)
-	assert.Equal(t, 2, getCalls, "preflight should read PodSnapshot and PodSnapshotContent once")
+	assert.Zero(t, getCalls, "preflight must read PodSnapshot and PodSnapshotContent only from informer caches")
 }
 
 func TestRestoreFinalizerIsNotAddedWhilePreflightIsPending(t *testing.T) {

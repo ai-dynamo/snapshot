@@ -33,6 +33,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	artifactCleanupConfig, err := controller.LoadArtifactCleanupConfigFromEnv()
+	if err != nil {
+		ctrl.Log.Error(err, "invalid artifact cleanup configuration")
+		os.Exit(1)
+	}
+	if err := controller.PrepareArtifactStorage(artifactCleanupConfig.BasePath); err != nil {
+		ctrl.Log.Error(err, "invalid artifact storage mount")
+		os.Exit(1)
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                        scheme,
 		HealthProbeBindAddress:        ":8081",
@@ -61,6 +71,24 @@ func main() {
 	}
 	if err := podSnapshotReconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up PodSnapshot controller")
+		os.Exit(1)
+	}
+
+	contentCleanupReconciler := &controller.SnapshotContentReconciler{
+		Client:   mgr.GetClient(),
+		BasePath: artifactCleanupConfig.BasePath,
+	}
+	if err := contentCleanupReconciler.SetupWithManager(mgr); err != nil {
+		ctrl.Log.Error(err, "unable to set up PodSnapshotContent artifact cleanup controller")
+		os.Exit(1)
+	}
+
+	orphanScanner := &controller.ArtifactOrphanScanner{
+		NonCacheReadClient: mgr.GetAPIReader(),
+		Config:             artifactCleanupConfig,
+	}
+	if err := mgr.Add(orphanScanner); err != nil {
+		ctrl.Log.Error(err, "unable to set up artifact orphan scanner")
 		os.Exit(1)
 	}
 

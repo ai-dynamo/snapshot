@@ -875,6 +875,10 @@ def install_snapshot_chart(
         "storage.pvc.create=false",
         "--set",
         f"storage.pvc.name={pvc_name}",
+        "--set",
+        "operator.artifactCleanup.scanInterval=5s",
+        "--set",
+        "operator.artifactCleanup.orphanGracePeriod=1s",
         "--set-json",
         "daemonset.imagePullSecrets=[]",
     ]

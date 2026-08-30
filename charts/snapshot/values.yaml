@@ -16,6 +16,14 @@ image:
 
 replicaCount: 1
 
+operator:
+  artifactCleanup:
+    scanInterval: 10m
+    orphanGracePeriod: 5m
+    batchSize: 10
+    pageLimit: 500
+    listAttempts: 3
+
 # `helm upgrade` leaves CRDs alone by design; the crd-installer init container
 # closes that gap on every rollout, and is a no-op when nothing changed.
 crdUpgrade:

@@ -25,7 +25,7 @@ metadata:
 rules:
   - apiGroups: ["nvidia.com"]
     resources: ["podsnapshots"]
-    verbs: ["get"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch", "patch", "update"]

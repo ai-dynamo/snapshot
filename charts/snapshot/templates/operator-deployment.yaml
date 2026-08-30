@@ -19,6 +19,10 @@ spec:
       labels:
         {{- include "snapshot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: operator
+      {{- if .Values.openshift.enabled }}
+      annotations:
+        openshift.io/required-scc: anyuid
+      {{- end }}
     spec:
       serviceAccountName: {{ include "snapshot.operatorServiceAccountName" . }}
       {{- with .Values.image.operator.imagePullSecrets }}
@@ -45,3 +49,26 @@ spec:
         - name: manager
           image: "{{ .Values.image.operator.repository }}:{{ .Values.image.operator.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.operator.pullPolicy }}
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          env:
+            - name: SNAPSHOT_STORAGE_BASE_PATH
+              value: {{ .Values.storage.pvc.basePath | quote }}
+            - name: SNAPSHOT_ARTIFACT_CLEANUP_SCAN_INTERVAL
+              value: {{ .Values.operator.artifactCleanup.scanInterval | quote }}
+            - name: SNAPSHOT_ARTIFACT_CLEANUP_ORPHAN_GRACE_PERIOD
+              value: {{ .Values.operator.artifactCleanup.orphanGracePeriod | quote }}
+            - name: SNAPSHOT_ARTIFACT_CLEANUP_BATCH_SIZE
+              value: {{ .Values.operator.artifactCleanup.batchSize | quote }}
+            - name: SNAPSHOT_ARTIFACT_CLEANUP_PAGE_LIMIT
+              value: {{ .Values.operator.artifactCleanup.pageLimit | quote }}
+            - name: SNAPSHOT_ARTIFACT_CLEANUP_LIST_ATTEMPTS
+              value: {{ .Values.operator.artifactCleanup.listAttempts | quote }}
+          volumeMounts:
+            - name: checkpoints
+              mountPath: {{ .Values.storage.pvc.basePath | quote }}
+      volumes:
+        - name: checkpoints
+          persistentVolumeClaim:
+            claimName: {{ .Values.storage.pvc.name }}

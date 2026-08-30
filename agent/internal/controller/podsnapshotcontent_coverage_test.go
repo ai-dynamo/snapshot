@@ -245,13 +245,7 @@ func TestRunCheckpoint_ReadyPatchErrorLeavesNotReady(t *testing.T) {
 func failedBeforeReadyInterceptor() interceptor.Funcs {
 	return interceptor.Funcs{
 		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
-			sc, ok := obj.(*snapshotv1alpha1.PodSnapshotContent)
-			if ok {
-				if cond := meta.FindStatusCondition(sc.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady); cond != nil && cond.Status == metav1.ConditionTrue {
-					return conflictErr()
-				}
-			}
-			return c.Status().Patch(ctx, obj, patch, opts...)
+			return conflictErr()
 		},
 	}
 }
@@ -266,6 +260,7 @@ func TestMarkCheckpointReady_FailedBeforeReadyIsSticky(t *testing.T) {
 	})
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, failedBeforeReadyInterceptor(), stored)
 	stale := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	stale.ResourceVersion = getContent(t, w, stored.Name).ResourceVersion
 
 	err := w.markCheckpointReady(context.Background(), stale)
 
@@ -287,6 +282,7 @@ func TestRunCheckpoint_FailedBeforeReadyDoesNotKill(t *testing.T) {
 	})
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, failedBeforeReadyInterceptor(), stored)
 	stale := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	stale.ResourceVersion = getContent(t, w, stored.Name).ResourceVersion
 	pod := &corev1.Pod{}
 	leaseKey := client.ObjectKey{Namespace: "inference", Name: "checkpoint-lease-x"}
 	artifactPath := w.config.Storage.BasePath
@@ -314,10 +310,52 @@ func TestMarkCheckpointReady_AlreadyReadyNoOp(t *testing.T) {
 	})
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, failedBeforeReadyInterceptor(), stored)
 	stale := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	stale.ResourceVersion = getContent(t, w, stored.Name).ResourceVersion
 
 	err := w.markCheckpointReady(context.Background(), stale)
 
 	require.NoError(t, err, "another holder's Ready write is success, not a conflict to escalate")
+}
+
+func TestMarkCheckpointReady_IgnoresMissingOriginalIdentity(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	content.ResourceVersion = "1"
+	w := makeNodeController(t, &fakeCheckpointer{})
+
+	err := w.markCheckpointReady(context.Background(), content)
+
+	require.NoError(t, err)
+}
+
+func TestMarkCheckpointReady_IgnoresSameNameReplacement(t *testing.T) {
+	replacement := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	replacement.UID = "replacement-uid"
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, failedBeforeReadyInterceptor(), replacement)
+	original := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	original.ResourceVersion = getContent(t, w, replacement.Name).ResourceVersion
+
+	err := w.markCheckpointReady(context.Background(), original)
+
+	require.NoError(t, err)
+	got := getContent(t, w, replacement.Name)
+	assert.Equal(t, replacement.UID, got.UID)
+	assert.Empty(t, got.Status.Conditions)
+}
+
+func TestSetSnapshotContentFailed_IgnoresDeletingOriginalIdentity(t *testing.T) {
+	deleting := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	now := metav1.Now()
+	deleting.DeletionTimestamp = &now
+	deleting.Finalizers = []string{"test-finalizer"}
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, failedBeforeReadyInterceptor(), deleting)
+	original := deleting.DeepCopy()
+	original.DeletionTimestamp = nil
+	original.ResourceVersion = getContent(t, w, deleting.Name).ResourceVersion
+
+	err := w.setSnapshotContentFailed(context.Background(), original, "CheckpointFailed", errors.New("dump failed"))
+
+	require.NoError(t, err)
+	assert.Empty(t, getContent(t, w, deleting.Name).Status.Conditions)
 }
 
 func TestMarkCheckpointReady_SecondConflictObservesFailed(t *testing.T) {
@@ -339,19 +377,15 @@ func TestMarkCheckpointReady_SecondConflictObservesFailed(t *testing.T) {
 			return nil
 		},
 		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
-			sc, ok := obj.(*snapshotv1alpha1.PodSnapshotContent)
-			if ok {
-				if cond := meta.FindStatusCondition(sc.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady); cond != nil && cond.Status == metav1.ConditionTrue {
-					readyPatches++
-					return conflictErr()
-				}
-			}
-			return c.Status().Patch(ctx, obj, patch, opts...)
+			readyPatches++
+			return conflictErr()
 		},
 	}
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, stored)
 
-	err := w.markCheckpointReady(context.Background(), makeWorkOrder("podsnapshotcontent-x", "node-a", "x"))
+	stale := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	stale.ResourceVersion = getContent(t, w, stored.Name).ResourceVersion
+	err := w.markCheckpointReady(context.Background(), stale)
 
 	require.NoError(t, err)
 	assert.Equal(t, 2, readyPatches, "Failed must be observed on the second Ready conflict")

@@ -732,6 +732,23 @@ func TestRunCheckpoint_WritesFailedOnError(t *testing.T) {
 	assert.Equal(t, "CheckpointFailed", cond.Reason)
 }
 
+func TestReconcilePodSnapshotContent_DeletingContentDoesNotStartCapture(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	now := metav1.Now()
+	content.DeletionTimestamp = &now
+	content.Finalizers = []string{"test-finalizer"}
+	pod := makeSourcePod()
+	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+
+	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+
+	gotPod := getPod(t, w, pod.Namespace, pod.Name)
+	_, captureEligible := gotPod.Labels[snapshotv1alpha1.CaptureEligibleLabel]
+	assert.False(t, captureEligible)
+	assert.Empty(t, w.inFlight)
+	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
+}
+
 // TestReconcilePodSnapshotContent_TerminalPodWithArtifactRecoversReady covers the pre-bind
 // gate's resync racing a finished capture: the pod is already terminal (killed by the dump)
 // and the artifact is committed, so the gate must recover Ready instead of writing SourcePodGone.

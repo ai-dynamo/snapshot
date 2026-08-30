@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: PodSnapshotContent artifact cleanup
+templates:
+  - templates/operator-deployment.yaml
+tests:
+  - it: mounts shared artifact storage and wires cleanup defaults
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[0].name
+          value: checkpoints
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[0].mountPath
+          value: /checkpoints
+      - equal:
+          path: spec.template.spec.volumes[0].persistentVolumeClaim.claimName
+          value: snapshot-pvc
+      - equal:
+          path: spec.template.spec.containers[0].env[1].name
+          value: SNAPSHOT_ARTIFACT_CLEANUP_SCAN_INTERVAL
+      - equal:
+          path: spec.template.spec.containers[0].env[1].value
+          value: 10m
+      - equal:
+          path: spec.template.spec.containers[0].env[2].value
+          value: 5m
+      - equal:
+          path: spec.template.spec.containers[0].env[3].value
+          value: "10"
+      - equal:
+          path: spec.template.spec.containers[0].env[4].value
+          value: "500"
+      - equal:
+          path: spec.template.spec.containers[0].env[5].value
+          value: "3"
+
+  - it: carries every non-default cleanup setting to the operator
+    set:
+      operator.artifactCleanup.scanInterval: 37s
+      operator.artifactCleanup.orphanGracePeriod: 2m
+      operator.artifactCleanup.batchSize: 7
+      operator.artifactCleanup.pageLimit: 123
+      operator.artifactCleanup.listAttempts: 4
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[1].value
+          value: 37s
+      - equal:
+          path: spec.template.spec.containers[0].env[2].value
+          value: 2m
+      - equal:
+          path: spec.template.spec.containers[0].env[3].value
+          value: "7"
+      - equal:
+          path: spec.template.spec.containers[0].env[4].value
+          value: "123"
+      - equal:
+          path: spec.template.spec.containers[0].env[5].value
+          value: "4"
+
+  - it: requests anyuid only for the OpenShift operator
+    set:
+      openshift.enabled: true
+    asserts:
+      - equal:
+          path: spec.template.metadata.annotations["openshift.io/required-scc"]
+          value: anyuid
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsUser
+          value: 0
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsGroup
+          value: 0

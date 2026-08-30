@@ -169,6 +169,39 @@ func TestSnapshotJobRejectsMissingSpecAndLongNamesAtAdmission(t *testing.T) {
 	t.Errorf("SnapshotJob root validations = %v, want rule %q", validations, nameRule)
 }
 
+func TestPodSnapshotCRDsRequireExactlyOneContainer(t *testing.T) {
+	for name, manifest := range map[string]string{
+		"PodSnapshot":        PodSnapshotCRD(),
+		"PodSnapshotContent": PodSnapshotContentCRD(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			manifestJSON, err := utilyaml.ToJSON([]byte(manifest))
+			if err != nil {
+				t.Fatalf("convert %s CRD to JSON: %v", name, err)
+			}
+			var crd map[string]any
+			if err := json.Unmarshal(manifestJSON, &crd); err != nil {
+				t.Fatalf("decode %s CRD: %v", name, err)
+			}
+			versions := nestedSlice(t, crd, "spec", "versions")
+			if len(versions) == 0 {
+				t.Fatalf("%s CRD has no versions", name)
+			}
+			version, ok := versions[0].(map[string]any)
+			if !ok {
+				t.Fatalf("%s CRD version has type %T, want object", name, versions[0])
+			}
+			containers := nestedMap(t, version, "schema", "openAPIV3Schema", "properties", "spec", "properties", "source", "properties", "podRef", "properties", "containers")
+			if got := containers["minItems"]; got != float64(1) {
+				t.Errorf("minItems = %v, want 1", got)
+			}
+			if got := containers["maxItems"]; got != float64(1) {
+				t.Errorf("maxItems = %v, want 1", got)
+			}
+		})
+	}
+}
+
 func nestedMap(t *testing.T, object map[string]any, fields ...string) map[string]any {
 	t.Helper()
 	current := object

@@ -80,6 +80,11 @@ type NodeController struct {
 	// contentIndexer is the PodSnapshotContent informer's indexer, indexed by source pod
 	// (podRefIndex). The source-pod informer uses it to map a pod event back to its work order.
 	contentIndexer cache.Indexer
+	// Restore preflight reads snapshots and content exclusively from these
+	// informer stores. Capture continues to use its node-scoped informer and
+	// uncached typed writer.
+	restoreSnapshotIndexer cache.Indexer
+	restoreContentIndexer  cache.Indexer
 
 	stopCh chan struct{}
 }
@@ -160,6 +165,7 @@ const (
 
 // podSnapshotContentGVR is the cluster-scoped resource the capture informer watches.
 var podSnapshotContentGVR = snapshotv1alpha1.GroupVersion.WithResource("podsnapshotcontents")
+var podSnapshotGVR = snapshotv1alpha1.GroupVersion.WithResource("podsnapshots")
 
 // NewNodeController creates the node-local controller that runs inside snapshot-agent.
 func NewNodeController(
@@ -298,6 +304,19 @@ func (w *NodeController) Run(ctx context.Context) error {
 	}
 	go dynFactory.Start(w.stopCh)
 	syncFuncs = append(syncFuncs, contentInformer.HasSynced)
+
+	// Restore lifecycle gate: full cluster-wide caches are intentionally
+	// separate from the node-filtered capture informer. A stale active hit may
+	// launch, but a cache miss never falls through to an authoritative API read.
+	restoreObjectFactory := dynamicinformer.NewDynamicSharedInformerFactory(
+		w.dynClient, 30*time.Second,
+	)
+	restoreSnapshotInformer := restoreObjectFactory.ForResource(podSnapshotGVR).Informer()
+	restoreContentInformer := restoreObjectFactory.ForResource(podSnapshotContentGVR).Informer()
+	w.restoreSnapshotIndexer = restoreSnapshotInformer.GetIndexer()
+	w.restoreContentIndexer = restoreContentInformer.GetIndexer()
+	go restoreObjectFactory.Start(w.stopCh)
+	syncFuncs = append(syncFuncs, restoreSnapshotInformer.HasSynced, restoreContentInformer.HasSynced)
 
 	// Source-pod informer: keyed on CaptureEligibleLabel, the promotion label the pre-bind gate
 	// (reconcilePodSnapshotContent) adds only after a source pod passes validation, so only
@@ -493,12 +512,18 @@ func (w *NodeController) preflightRestore(ctx context.Context, pod *corev1.Pod) 
 	if err != nil {
 		return nil, err
 	}
+	if snapshot.DeletionTimestamp != nil {
+		return nil, &restoreIgnoredError{message: fmt.Sprintf("PodSnapshot %s is deleting", client.ObjectKeyFromObject(snapshot).String())}
+	}
 	if err := validatePodSnapshotForRestore(snapshot); err != nil {
 		return nil, err
 	}
 	content, err := w.getPodSnapshotContentFromSnapshot(ctx, pod, snapshot)
 	if err != nil {
 		return nil, err
+	}
+	if content.DeletionTimestamp != nil {
+		return nil, &restoreIgnoredError{message: fmt.Sprintf("PodSnapshotContent %s is deleting", content.Name)}
 	}
 	if err := validatePodSnapshotContentForRestore(content); err != nil {
 		return nil, err
@@ -524,15 +549,9 @@ func (w *NodeController) getPodSnapshotFromPod(ctx context.Context, pod *corev1.
 	}
 	snapshot := &snapshotv1alpha1.PodSnapshot{}
 	key := client.ObjectKey{Namespace: pod.Namespace, Name: snapshotName}
-	if err := w.client.Get(ctx, key, snapshot); err != nil {
-		if apierrors.IsNotFound(err) {
-			if restoreInProgress(pod) {
-				return nil, fmt.Errorf("PodSnapshot %s disappeared while restore was in progress", key.String())
-			}
-			return nil, newRestorePendingError("SnapshotPending", fmt.Sprintf("Waiting for PodSnapshot %s", key.String()))
-		}
-		w.log.Error(err, "Failed to read PodSnapshot during restore preflight", "pod", client.ObjectKeyFromObject(pod).String(), "snapshot", key.String())
-		return nil, newRestorePendingError("SnapshotPending", fmt.Sprintf("Unable to read PodSnapshot %s; retrying", key.String()))
+	if err := cachedRestoreObject(w.restoreSnapshotIndexer, key.String(), snapshot); err != nil {
+		w.log.V(1).Info("PodSnapshot is absent from restore cache", "pod", client.ObjectKeyFromObject(pod).String(), "snapshot", key.String(), "error", err)
+		return nil, newRestorePendingError("SnapshotPending", fmt.Sprintf("Waiting for PodSnapshot %s", key.String()))
 	}
 	return snapshot, nil
 }
@@ -557,15 +576,9 @@ func validatePodSnapshotForRestore(snapshot *snapshotv1alpha1.PodSnapshot) error
 func (w *NodeController) getPodSnapshotContentFromSnapshot(ctx context.Context, pod *corev1.Pod, snapshot *snapshotv1alpha1.PodSnapshot) (*snapshotv1alpha1.PodSnapshotContent, error) {
 	contentName := strings.TrimSpace(ptr.Deref(snapshot.Status.BoundPodSnapshotContentName, ""))
 	content := &snapshotv1alpha1.PodSnapshotContent{}
-	if err := w.client.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
-		if apierrors.IsNotFound(err) {
-			if restoreInProgress(pod) {
-				return nil, fmt.Errorf("bound PodSnapshotContent %s disappeared while restore was in progress", contentName)
-			}
-			return nil, newRestorePendingError("ContentPending", fmt.Sprintf("Waiting for bound PodSnapshotContent %s", contentName))
-		}
-		w.log.Error(err, "Failed to read PodSnapshotContent during restore preflight", "snapshot", client.ObjectKeyFromObject(snapshot).String(), "content", contentName)
-		return nil, newRestorePendingError("ContentPending", fmt.Sprintf("Unable to read bound PodSnapshotContent %s; retrying", contentName))
+	if err := cachedRestoreObject(w.restoreContentIndexer, contentName, content); err != nil {
+		w.log.V(1).Info("PodSnapshotContent is absent from restore cache", "snapshot", client.ObjectKeyFromObject(snapshot).String(), "content", contentName, "error", err)
+		return nil, newRestorePendingError("ContentPending", fmt.Sprintf("Waiting for bound PodSnapshotContent %s", contentName))
 	}
 	ref := content.Spec.PodSnapshotRef
 	if ref.Namespace != snapshot.Namespace || ref.Name != snapshot.Name || ref.UID == "" || ref.UID != snapshot.UID {
@@ -1073,6 +1086,11 @@ func (w *NodeController) failRestorePod(ctx context.Context, pod *corev1.Pod, ca
 }
 
 func (w *NodeController) handleRestorePreflightError(ctx context.Context, pod *corev1.Pod, cause error) bool {
+	var ignored *restoreIgnoredError
+	if errors.As(cause, &ignored) {
+		w.log.V(1).Info("Ignoring restore because cached snapshot lifecycle is deleting", "pod", client.ObjectKeyFromObject(pod).String(), "message", ignored.message)
+		return w.removeRestoreFinalizerWithEvent(ctx, pod)
+	}
 	var pending *restorePendingError
 	if !errors.As(cause, &pending) {
 		return w.failRestorePod(ctx, pod, cause)
@@ -1259,4 +1277,44 @@ func hasFinalizer(pod *corev1.Pod, finalizer string) bool {
 
 func newRestorePendingError(reason, message string) error {
 	return &restorePendingError{reason: reason, message: message}
+}
+
+type restoreIgnoredError struct{ message string }
+
+func (e *restoreIgnoredError) Error() string { return e.message }
+
+func cachedRestoreObject(indexer cache.Indexer, key string, out client.Object) error {
+	if indexer == nil {
+		return errors.New("restore cache is not initialized")
+	}
+	object, exists, err := indexer.GetByKey(key)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return errors.New("object is not present in restore cache")
+	}
+	switch typed := object.(type) {
+	case *snapshotv1alpha1.PodSnapshot:
+		target, ok := out.(*snapshotv1alpha1.PodSnapshot)
+		if !ok {
+			return fmt.Errorf("cached PodSnapshot cannot populate %T", out)
+		}
+		typed.DeepCopyInto(target)
+		return nil
+	case *snapshotv1alpha1.PodSnapshotContent:
+		target, ok := out.(*snapshotv1alpha1.PodSnapshotContent)
+		if !ok {
+			return fmt.Errorf("cached PodSnapshotContent cannot populate %T", out)
+		}
+		typed.DeepCopyInto(target)
+		return nil
+	case *unstructured.Unstructured:
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(typed.Object, out); err != nil {
+			return fmt.Errorf("convert cached %s: %w", key, err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported restore cache object %T", object)
+	}
 }
