@@ -15,6 +15,10 @@ type CheckpointSource struct {
 	// Node records the machine the checkpoint was captured on.
 	// +optional
 	Node *CheckpointSourceNode `json:"node,omitempty"`
+
+	// Pod records the container the checkpoint was captured from.
+	// +optional
+	Pod *CheckpointSourcePod `json:"pod,omitempty"`
 }
 
 // CheckpointSourceNode is the machine a checkpoint was captured on.
@@ -30,4 +34,25 @@ type CheckpointSourceNode struct {
 	// KernelVersion is the node's kernel release.
 	// +optional
 	KernelVersion string `json:"kernelVersion,omitempty"`
+}
+
+// CheckpointSourcePod is the container a checkpoint was captured from, and what
+// it was given to run in.
+type CheckpointSourcePod struct {
+	// Image is the container image reference the capture ran.
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// ImageDigest identifies which build of the container image the capture
+	// ran, which a mutable tag does not.
+	// +optional
+	ImageDigest string `json:"imageDigest,omitempty"`
+
+	// Memory is the container's memory limit, absent if it had none.
+	// +optional
+	Memory string `json:"memory,omitempty"`
+
+	// CPU is the container's CPU limit, absent if it had none.
+	// +optional
+	CPU string `json:"cpu,omitempty"`
 }
