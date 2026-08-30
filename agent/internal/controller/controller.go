@@ -926,10 +926,10 @@ func (op *restoreOperation) failRestore(ctx context.Context, restoreErr error) e
 	w := op.controller
 	op.log.Error(restoreErr, "External restore failed")
 	// Re-resolve because restore may fail before discovering the placeholder PID.
-	placeholderHostPID, _, err := w.runtime.ResolveContainer(ctx, op.containerID)
-	if err != nil {
-		return errors.Join(restoreErr, fmt.Errorf("placeholder PID could not be resolved after restore failure: %w", err))
-	}
+	//placeholderHostPID, _, err := w.runtime.ResolveContainer(ctx, op.containerID)
+	//if err != nil {
+	//	return errors.Join(restoreErr, fmt.Errorf("placeholder PID could not be resolved after restore failure: %w", err))
+	//}
 	//if err := w.sendSignalFn(op.log, placeholderHostPID, syscall.SIGKILL, "restore failed"); err != nil {
 	//	return errors.Join(restoreErr, fmt.Errorf("placeholder could not be killed after restore failure: %w", err))
 	//}
