@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -32,6 +33,8 @@ type restoreFakeRuntime struct {
 	resolvedID             string
 	resolvedByPodContainer string
 	resolveByPodHit        bool
+	imageID                string
+	imageIDError           error
 }
 
 func (r *restoreFakeRuntime) ResolveContainer(ctx context.Context, id string) (int, *specs.Spec, error) {
@@ -49,8 +52,8 @@ func (r *restoreFakeRuntime) ResolveContainerByPod(ctx context.Context, pod, ns,
 	return 0, nil, errors.New("pod lookup should not be used")
 }
 
-func (r *restoreFakeRuntime) ResolveContainerImageID(context.Context, string) (string, error) {
-	return "", errors.New("not implemented")
+func (r *restoreFakeRuntime) ResolveContainerImageID(_ context.Context, _ string) (string, error) {
+	return r.imageID, r.imageIDError
 }
 
 func (r *restoreFakeRuntime) Close() error { return nil }
@@ -87,6 +90,95 @@ func TestInspectRestoreUsesContainerIDWhenProvided(t *testing.T) {
 	}
 	if rt.resolveByPodHit {
 		t.Fatal("ResolveContainerByPod should not be used when ContainerID is provided")
+	}
+}
+
+func TestInspectRestoreComparesRuntimeImageID(t *testing.T) {
+	const (
+		captured = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+		rebuilt  = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+	)
+	tests := []struct {
+		name        string
+		sourceID    string
+		targetID    string
+		targetError error
+		want        []compat.Mismatch
+		wantError   string
+	}{
+		{
+			name:     "same runtime content",
+			sourceID: captured,
+			targetID: captured,
+		},
+		{
+			name:     "different runtime content",
+			sourceID: captured,
+			targetID: rebuilt,
+			want:     []compat.Mismatch{{Check: compat.CheckImageDigest, Source: captured, Target: rebuilt}},
+		},
+		{
+			name:     "artifact without a runtime image ID",
+			targetID: captured,
+		},
+		{
+			name:        "runtime image ID unavailable",
+			sourceID:    captured,
+			targetError: errors.New("runtime unavailable"),
+			wantError:   "failed to resolve placeholder image ID: runtime unavailable",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			manifest := types.NewCheckpointManifest(
+				"content-uid-123",
+				"main",
+				types.CRIUDumpManifest{},
+				types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
+				types.OverlayManifest{},
+				types.HostManifest{},
+			)
+			manifest.K8s.ImageID = tc.sourceID
+			rt := &restoreFakeRuntime{imageID: tc.targetID, imageIDError: tc.targetError}
+
+			_, _, err := inspectRestore(
+				context.Background(),
+				rt,
+				testr.New(t),
+				RestoreRequest{
+					ContentUID:               "content-uid-123",
+					ContainerID:              "placeholder-id",
+					PodName:                  "restore-pod",
+					PodNamespace:             "default",
+					ArtifactContainerName:    "main",
+					DestinationContainerName: "main",
+				},
+				manifest,
+			)
+			if tc.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("error = %v, want containing %q", err, tc.wantError)
+				}
+				return
+			}
+			if len(tc.want) == 0 {
+				if err != nil {
+					t.Fatalf("inspectRestore: %v", err)
+				}
+				return
+			}
+			var incompatible *compat.IncompatibleError
+			if !errors.As(err, &incompatible) {
+				t.Fatalf("error = %v, want *compat.IncompatibleError", err)
+			}
+			if incompatible.Gate != compat.GateInspect {
+				t.Fatalf("gate = %q, want %q", incompatible.Gate, compat.GateInspect)
+			}
+			if !reflect.DeepEqual(incompatible.Mismatches, tc.want) {
+				t.Fatalf("mismatches = %+v, want %+v", incompatible.Mismatches, tc.want)
+			}
+		})
 	}
 }
 

@@ -140,3 +140,74 @@ func TestKernelVersionCheck(t *testing.T) {
 		})
 	}
 }
+
+func TestImageDigestCheck(t *testing.T) {
+	const (
+		captured = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+		rebuilt  = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+	)
+	imageID := func(id string) Facts {
+		return Facts{ImageID: id}
+	}
+
+	tests := []struct {
+		name   string
+		source Facts
+		target Facts
+		want   []Mismatch
+	}{
+		{
+			name:   "same content",
+			source: imageID(captured),
+			target: imageID(captured),
+		},
+		{
+			name:   "different index aliases for the same runtime content",
+			source: Facts{Image: "registry.example/source@sha256:index-a", ImageID: captured},
+			target: Facts{Image: "registry.example/target@sha256:index-b", ImageID: captured},
+		},
+		{
+			// The same reference resolved to different content, which is what a
+			// rebuilt or moved tag looks like from here.
+			name:   "same reference, rebuilt content",
+			source: imageID(captured),
+			target: imageID(rebuilt),
+			want:   []Mismatch{{Check: CheckImageDigest, Source: captured, Target: rebuilt}},
+		},
+		{
+			// Runtimes wrap the digest differently, and the artifact keeps
+			// whatever it was given. The same content must not read as a
+			// mismatch because one side spells it out and the other does not.
+			name:   "the same digest wrapped differently",
+			source: imageID("docker-pullable://nvcr.io/nvidia/tritonserver@" + captured),
+			target: imageID(captured),
+		},
+		{
+			name:   "different content, wrapped differently",
+			source: imageID("docker-pullable://nvcr.io/nvidia/tritonserver@" + captured),
+			target: imageID(rebuilt),
+			want:   []Mismatch{{Check: CheckImageDigest, Source: captured, Target: rebuilt}},
+		},
+		{
+			name:   "checkpoint taken before the image ID was recorded",
+			target: imageID(captured),
+		},
+		{
+			name:   "runtime image ID is unavailable",
+			source: imageID(captured),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Compare(GateInspect, tc.source, tc.target)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("Compare = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+
+	if got := Compare(GatePreflight, imageID(captured), imageID(rebuilt)); len(got) != 0 {
+		t.Errorf("the first gate judged a runtime fact it cannot read: %+v", got)
+	}
+}

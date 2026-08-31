@@ -253,6 +253,17 @@ func inspectRestore(
 	}
 	log.V(1).Info("Resolved placeholder container", "pid", placeholderPID)
 
+	targetImageID := ""
+	if manifest.K8s.ImageID != "" {
+		if req.ContainerID == "" {
+			return nil, 0, fmt.Errorf("container ID is required to compare the runtime image ID")
+		}
+		targetImageID, err = rt.ResolveContainerImageID(ctx, req.ContainerID)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to resolve placeholder image ID: %w", err)
+		}
+	}
+
 	cgroupRoot, err := snapshotruntime.ResolveCgroupRootFromHostPID(placeholderPID)
 	if err != nil {
 		log.Error(err, "Failed to resolve placeholder cgroup root; proceeding without explicit cgroup remap")
@@ -291,7 +302,7 @@ func inspectRestore(
 	// Gate B, once the placeholder is resolved and this node's own facts are
 	// readable. It runs ahead of BuildDeviceMap, whose positional pairing turns
 	// a GPU difference into a device-map error that names neither GPU.
-	if err := inspectCompatibility(log, manifest, req.SkipCompatCheck); err != nil {
+	if err := inspectCompatibility(log, manifest, targetImageID, req.SkipCompatCheck); err != nil {
 		return nil, 0, err
 	}
 
