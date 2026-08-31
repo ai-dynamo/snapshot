@@ -15,7 +15,7 @@ import (
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
-type CheckpointJobOptions struct {
+type SourceJobOptions struct {
 	Namespace             string
 	TargetContainer       string
 	SeccompProfile        string
@@ -25,14 +25,14 @@ type CheckpointJobOptions struct {
 	WrapLaunchJob         bool
 }
 
-func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOptions) (*batchv1.Job, error) {
+func NewSourceJob(podTemplate *corev1.PodTemplateSpec, opts SourceJobOptions) (*batchv1.Job, error) {
 	podTemplate = podTemplate.DeepCopy()
 	for _, annotation := range []string{
 		snapshotv1alpha1.RestoreFromAnnotation,
 		snapshotv1alpha1.RestoreContainerMapAnnotation,
 	} {
 		if _, restoreRequested := podTemplate.Annotations[annotation]; restoreRequested {
-			return nil, fmt.Errorf("checkpoint job pod template must not set %s", annotation)
+			return nil, fmt.Errorf("source job pod template must not set %s", annotation)
 		}
 	}
 	if podTemplate.Labels == nil {
@@ -41,21 +41,21 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 	if podTemplate.Annotations == nil {
 		podTemplate.Annotations = map[string]string{}
 	}
-	podTemplate.Annotations = DisableCheckpointJobSidecarInjection(podTemplate.Annotations)
+	podTemplate.Annotations = DisableSidecarInjection(podTemplate.Annotations)
 	podTemplate.Spec.RestartPolicy = corev1.RestartPolicyNever
 	if opts.SeccompProfile != "" {
 		EnsureLocalhostSeccompProfile(&podTemplate.Spec, opts.SeccompProfile)
 	}
 	if len(podTemplate.Spec.Containers) == 0 {
-		return nil, fmt.Errorf("checkpoint job requires at least one container")
+		return nil, fmt.Errorf("source job requires at least one container")
 	}
 
-	// Checkpoint contract: exactly one target container per Job. The caller (the operator,
+	// Snapshot contract: exactly one target container per Job. The caller (the operator,
 	// snapshotctl) resolves the single target and passes it in opts so there is no
 	// Containers[0]-vs-"main" ambiguity.
 	targetName := opts.TargetContainer
 	if targetName == "" {
-		return nil, fmt.Errorf("checkpoint job pod template: opts.TargetContainer is required")
+		return nil, fmt.Errorf("source job pod template: opts.TargetContainer is required")
 	}
 	var targetContainer *corev1.Container
 	for i := range podTemplate.Spec.Containers {
@@ -65,14 +65,14 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 		}
 	}
 	if targetContainer == nil {
-		return nil, fmt.Errorf("checkpoint job pod template has no container named %q (from opts.TargetContainer)", targetName)
+		return nil, fmt.Errorf("source job pod template has no container named %q (from opts.TargetContainer)", targetName)
 	}
 
 	// Snapshot contract: control volume + ready-file readiness probe. The
 	// agent reads the pod's Ready condition before starting CRIU dump, so
 	// the workload signals "model loaded, safe to checkpoint" by writing
 	// $SNAPSHOT_CONTROL_DIR/ready-for-snapshot. Any per-container
-	// liveness/startup probes are cleared — a checkpoint job runs to a
+	// liveness/startup probes are cleared — a source job runs to a
 	// quiesce-and-sit state, not a long-lived serving state.
 	EnsureControlVolume(&podTemplate.Spec, targetContainer)
 	targetContainer.ReadinessProbe = &corev1.Probe{
@@ -88,7 +88,7 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 
 	if opts.WrapLaunchJob {
 		if len(targetContainer.Command) == 0 {
-			return nil, fmt.Errorf("checkpoint job requires container.command when cuda-checkpoint launch-job wrapping is enabled")
+			return nil, fmt.Errorf("source job requires container.command when cuda-checkpoint launch-job wrapping is enabled")
 		}
 		targetContainer.Command, targetContainer.Args = wrapWithCudaCheckpointLaunchJob(
 			targetContainer.Command,
@@ -129,14 +129,14 @@ func EnsureLocalhostSeccompProfile(podSpec *corev1.PodSpec, profile string) {
 	}
 }
 
-// DisableCheckpointJobSidecarInjection stamps sidecar opt-out annotations on a
-// pod annotation map. Checkpoint Jobs must complete when the target container
+// DisableSidecarInjection stamps sidecar opt-out annotations on a
+// pod annotation map. Source Jobs must complete when the target container
 // exits; an injected sidecar that outlives the checkpoint keeps the pod alive,
 // preventing Kubernetes from marking the Job complete.
 //
 // Mutates and returns the passed-in map. Allocates a new map when annotations
 // is nil; callers must use the returned value.
-func DisableCheckpointJobSidecarInjection(annotations map[string]string) map[string]string {
+func DisableSidecarInjection(annotations map[string]string) map[string]string {
 	if annotations == nil {
 		annotations = map[string]string{}
 	}

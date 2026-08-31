@@ -64,13 +64,13 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 	}
 
 	checkpointJobName := captureJobName(snapshotName)
-	job, err := snapshotprotocol.NewCheckpointJob(&corev1.PodTemplateSpec{
+	job, err := snapshotprotocol.NewSourceJob(&corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels:      pod.Labels,
 			Annotations: pod.Annotations,
 		},
 		Spec: *pod.Spec.DeepCopy(),
-	}, snapshotprotocol.CheckpointJobOptions{
+	}, snapshotprotocol.SourceJobOptions{
 		Namespace:       namespace,
 		TargetContainer: containerName,
 		SeccompProfile:  snapshotv1alpha1.DefaultSeccompLocalhostProfile,
