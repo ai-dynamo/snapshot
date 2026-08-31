@@ -108,9 +108,10 @@ type check struct {
 }
 
 // checksByGate is the policy table: every compatibility rule, partitioned by the
-// gate that can evaluate it and kept in the order they are reported. Rules are
-// registered one at a time; a table with no rules refuses nothing.
-var checksByGate = registerChecks()
+// gate that can evaluate it and kept in the order they are reported.
+var checksByGate = registerChecks(
+	cpuArchCheck,
+)
 
 // registerChecks partitions the policy table by the gate each rule runs at, so
 // a comparison indexes its rules instead of walking past the ones belonging to

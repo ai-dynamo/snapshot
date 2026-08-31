@@ -23,6 +23,13 @@ import (
 
 const gatedRestoreContainer = "main"
 
+func gatedRestoreMappings() []snapshotv1alpha1.RestoreContainerMapping {
+	return []snapshotv1alpha1.RestoreContainerMapping{{
+		Source:      gatedRestoreContainer,
+		Destination: gatedRestoreContainer,
+	}}
+}
+
 type comparisonCall struct {
 	gate   compat.Gate
 	source compat.Facts

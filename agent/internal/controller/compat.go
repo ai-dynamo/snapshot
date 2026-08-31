@@ -5,6 +5,7 @@ package controller
 
 import (
 	"fmt"
+	"runtime"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -67,7 +68,11 @@ func (w *NodeController) skipCompatCheckRequested(pod *corev1.Pod) bool {
 
 // preflightCompatibility runs the pre-flight compatibility gate for one restore.
 // A nil error means the restore may be attempted.
-func (w *NodeController) preflightCompatibility(pod *corev1.Pod, artifact *restoreArtifact) error {
+func (w *NodeController) preflightCompatibility(
+	pod *corev1.Pod,
+	artifact *restoreArtifact,
+	mappings []snapshotv1alpha1.RestoreContainerMapping,
+) error {
 	log := w.log.WithValues("pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name), "container", artifact.SourceContainerName)
 	if artifact.SkipCompatCheck {
 		log.Info("Restore compatibility check skipped by request", "gate", string(compat.GatePreflight))
@@ -86,11 +91,28 @@ func (w *NodeController) preflightCompatibility(pod *corev1.Pod, artifact *resto
 		return nil
 	}
 
-	// Target facts are read by the rules that need them, since each one costs a
-	// syscall or an API read on a path that runs before every restore.
-	mismatches := w.compareFn(compat.GatePreflight, manifest.CompatFacts(), compat.Facts{})
-	if len(mismatches) == 0 {
-		return nil
+	sourceFacts := manifest.CompatFacts()
+	for _, mapping := range mappings {
+		mismatches := w.compareFn(
+			compat.GatePreflight,
+			sourceFacts,
+			w.preflightTargetFacts(pod, mapping.Destination),
+		)
+		if len(mismatches) != 0 {
+			return compat.NewIncompatibleError(compat.GatePreflight, mismatches)
+		}
 	}
-	return compat.NewIncompatibleError(compat.GatePreflight, mismatches)
+	return nil
+}
+
+// preflightTargetFacts describes what this node and this pod offer a restore, as
+// far as it is knowable before the placeholder container exists. It is assembled
+// per restore from facts the agent already holds, so the gate costs no syscalls
+// and no API reads.
+func (w *NodeController) preflightTargetFacts(pod *corev1.Pod, containerName string) compat.Facts {
+	facts := podFacts(pod, containerName)
+	// The agent's own architecture, which is the node's: this binary could not
+	// be running here otherwise.
+	facts.CPUArch = runtime.GOARCH
+	return facts
 }
