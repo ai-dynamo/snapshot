@@ -162,6 +162,29 @@ func TestBuildSourceJob(t *testing.T) {
 		require.Error(t, err)
 	})
 
+	t.Run("invalid PodSnapshot metadata is a terminal spec error", func(t *testing.T) {
+		tests := map[string]*snapshotv1alpha1.PodSnapshotTemplateMetadata{
+			"invalid label": {
+				Labels: map[string]string{"example.com/team": strings.Repeat("x", 64)},
+			},
+			"invalid annotation": {
+				Annotations: map[string]string{"not a qualified annotation key": "value"},
+			},
+			"reserved owner label": {
+				Labels: map[string]string{snapshotv1alpha1.SnapshotJobOwnerLabel: "caller"},
+			},
+		}
+		for name, metadata := range tests {
+			t.Run(name, func(t *testing.T) {
+				sj := minimalSnapshotJob()
+				sj.Spec.PodSnapshotTemplate.Metadata = metadata
+
+				_, err := buildSourceJob(sj)
+				require.Error(t, err)
+			})
+		}
+	})
+
 	t.Run("more than one targetContainers entry is a terminal spec error", func(t *testing.T) {
 		// The CRD caps this at MaxItems=1, but this is defense in depth for an
 		// object that bypassed CEL validation — v1alpha1 supports exactly one

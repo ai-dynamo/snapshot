@@ -34,6 +34,9 @@ func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, error) {
 	if errs := contentvalidation.IsLabelValue(sj.Name); len(errs) > 0 {
 		return nil, fmt.Errorf("metadata.name %q is not a valid label value: %s", sj.Name, strings.Join(errs, "; "))
 	}
+	if err := validatePodSnapshotTemplateMetadata(sj); err != nil {
+		return nil, err
+	}
 
 	targetContainer, err := snapshotJobTargetContainer(sj)
 	if err != nil {

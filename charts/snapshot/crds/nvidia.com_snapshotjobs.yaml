@@ -77,6 +77,35 @@ spec:
                   PodSnapshotTemplate defines the properties of the PodSnapshot produced by
                   this job. The controller fills in spec.source from the pod it creates.
                 properties:
+                  metadata:
+                    description: |-
+                      Metadata contains labels and annotations copied to the generated
+                      PodSnapshot. SnapshotJob ownership labels are reserved for the controller
+                      and cannot be supplied here.
+                    properties:
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        description: Annotations are copied to the generated PodSnapshot.
+                        maxProperties: 4096
+                        type: object
+                      labels:
+                        additionalProperties:
+                          type: string
+                        description: Labels are copied to the generated PodSnapshot.
+                        maxProperties: 4096
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: metadata.labels keys must be valid Kubernetes qualified
+                        names
+                      rule: '!has(self.labels) || self.labels.all(k, !format.qualifiedName().validate(k).hasValue())'
+                    - message: metadata.labels values must be no more than 63 characters
+                      rule: '!has(self.labels) || self.labels.all(k, size(self.labels[k])
+                        <= 63)'
+                    - message: metadata.annotations keys must be valid Kubernetes
+                        qualified names
+                      rule: '!has(self.annotations) || self.annotations.all(k, !format.qualifiedName().validate(k).hasValue())'
                   targetContainers:
                     default:
                     - main
@@ -100,6 +129,13 @@ spec:
                     minItems: 1
                     type: array
                 type: object
+                x-kubernetes-validations:
+                - message: metadata.labels must not set controller-owned label nvidia.com/snapshot-job
+                  rule: '!has(self.metadata) || !has(self.metadata.labels) || !(''nvidia.com/snapshot-job''
+                    in self.metadata.labels)'
+                - message: metadata.labels must not set controller-owned label nvidia.com/snapshot-job-uid
+                  rule: '!has(self.metadata) || !has(self.metadata.labels) || !(''nvidia.com/snapshot-job-uid''
+                    in self.metadata.labels)'
               podTemplate:
                 description: |-
                   PodTemplate defines the workload to run and capture. The controller injects
