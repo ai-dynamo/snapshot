@@ -79,6 +79,25 @@ helm upgrade --install snapshot ./charts/snapshot \
   --set openshift.enabled=true
 ```
 
+## RKE2 and k3s
+
+RKE2 and k3s relocate both the CRI socket and containerd's snapshotter storage,
+so set both values together:
+
+```bash
+helm upgrade --install snapshot ./charts/snapshot \
+  --namespace "${NAMESPACE}" --create-namespace \
+  --set runtime.socketPath=/run/k3s/containerd/containerd.sock \
+  --set runtime.storageDir=/var/lib/rancher/rke2/agent/containerd
+```
+
+For k3s use `--set runtime.storageDir=/var/lib/rancher/k3s/agent/containerd`.
+
+`runtime.storageDir` is mounted into the agent container at the identical
+absolute path it has on the host. The agent tars the overlay `upperDir` read
+verbatim out of containerd's own metadata, so the path must resolve unchanged
+inside the agent's mount namespace — it is not a relocatable prefix.
+
 ## Minimal install
 
 Create the checkpoint PVC and the agent:
@@ -172,6 +191,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `seccomp.deploy` | Deploy the CRIU seccomp profile ConfigMap and init container. Use this field name; `seccomp.enabled` is not a chart value | `true` |
 | `runtime.type` | CRI backend: `containerd` or `crio` | `containerd` |
 | `runtime.socketPath` | CRI socket (empty = default for `runtime.type`) | `""` |
+| `runtime.storageDir` | Host per-container storage dir, mounted at the identical path in the agent (empty = default for `runtime.type`) | `""` |
 | `crdUpgrade.enabled` | Install and upgrade the CRDs from an operator init container (see below) | `true` |
 | `crdUpgrade.logLevel` | Init container log level | `info` |
 | `rbac.create` | Create agent and operator RBAC | `true` |

@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: runtime storage directory
+templates:
+  - templates/daemonset.yaml
+tests:
+  - it: defaults the runtime-storage volume to the containerd path on host and in container
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: runtime-storage
+            mountPath: /var/lib/containerd
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: runtime-storage
+            hostPath:
+              path: /var/lib/containerd
+              type: Directory
+
+  # The agent tars the overlay upperDir read verbatim out of containerd
+  # metadata, so an override must land at the identical path on both sides.
+  - it: mounts an overridden runtime.storageDir at the identical host path
+    set:
+      runtime.storageDir: /var/lib/rancher/rke2/agent/containerd
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: runtime-storage
+            mountPath: /var/lib/rancher/rke2/agent/containerd
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: runtime-storage
+            hostPath:
+              path: /var/lib/rancher/rke2/agent/containerd
+              type: Directory
