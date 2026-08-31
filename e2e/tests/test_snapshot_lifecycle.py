@@ -254,6 +254,9 @@ def test_direct_content_deletion_removes_complete_artifact_root(
         )
         content_name = content["metadata"]["name"]
         content_uid = content["metadata"]["uid"]
+        assert "nvidia.com/podsnapshotcontent-artifact-cleanup" in content[
+            "metadata"
+        ].get("finalizers", [])
         parent_status = pod_snapshot.get("status", {})
         assert snap.artifact_root_exists(config, source_node, content_uid)
         snap.create_artifact_staging_file(config, source_node, content_uid)

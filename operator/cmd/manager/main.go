@@ -4,6 +4,7 @@
 package main
 
 import (
+	"flag"
 	"os"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -21,6 +22,14 @@ var version = "dev"
 
 func main() {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
+
+	artifactCleanupConfig := bindArtifactCleanupFlags(flag.CommandLine)
+	flag.Parse()
+	if err := artifactCleanupConfig.Validate(); err != nil {
+		ctrl.Log.Error(err, "invalid artifact cleanup configuration")
+		os.Exit(1)
+	}
+
 	ctrl.Log.Info("starting snapshot operator", "version", version)
 
 	scheme := runtime.NewScheme()
@@ -30,16 +39,6 @@ func main() {
 	}
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		ctrl.Log.Error(err, "unable to register API types")
-		os.Exit(1)
-	}
-
-	artifactCleanupConfig, err := controller.LoadArtifactCleanupConfigFromEnv()
-	if err != nil {
-		ctrl.Log.Error(err, "invalid artifact cleanup configuration")
-		os.Exit(1)
-	}
-	if err := controller.PrepareArtifactStorage(artifactCleanupConfig.BasePath); err != nil {
-		ctrl.Log.Error(err, "invalid artifact storage mount")
 		os.Exit(1)
 	}
 
@@ -74,20 +73,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	contentCleanupReconciler := &controller.SnapshotContentReconciler{
-		Client:   mgr.GetClient(),
-		BasePath: artifactCleanupConfig.BasePath,
-	}
-	if err := contentCleanupReconciler.SetupWithManager(mgr); err != nil {
+	if err := controller.SetupSnapshotContentReconciler(mgr, artifactCleanupConfig.BasePath); err != nil {
 		ctrl.Log.Error(err, "unable to set up PodSnapshotContent artifact cleanup controller")
 		os.Exit(1)
 	}
 
-	orphanScanner := &controller.ArtifactOrphanScanner{
-		NonCacheReadClient: mgr.GetAPIReader(),
-		Config:             artifactCleanupConfig,
-	}
-	if err := mgr.Add(orphanScanner); err != nil {
+	if err := controller.AddArtifactOrphanScanner(mgr, *artifactCleanupConfig); err != nil {
 		ctrl.Log.Error(err, "unable to set up artifact orphan scanner")
 		os.Exit(1)
 	}

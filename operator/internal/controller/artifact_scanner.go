@@ -8,65 +8,59 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sort"
 	"time"
 
+	"github.com/ai-dynamo/snapshot/agent/pkg/artifact"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 	"github.com/go-logr/logr"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-
-	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
-// ArtifactOrphanScanner authoritatively reclaims artifact roots whose owning
-// PodSnapshotContent UID no longer exists.
-type ArtifactOrphanScanner struct {
-	NonCacheReadClient client.Reader
-	Config             ArtifactCleanupConfig
-	ReadDir            func(string) ([]os.DirEntry, error)
-	Lstat              func(string) (os.FileInfo, error)
-	RemoveAll          func(string) error
-	Now                func() time.Time
+const podSnapshotContentMetadataListPageLimit int64 = 500
 
-	observed  map[string]time.Time
-	reclaimed map[string]struct{}
-	cursor    string
+// AddArtifactOrphanScanner registers the scanner with the manager's existing
+// leader-election group. RunnableFunc is leader-elected by default.
+func AddArtifactOrphanScanner(mgr ctrl.Manager, cfg operatortypes.ArtifactCleanupConfig) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	scanner := artifactOrphanScanner{apiReader: mgr.GetAPIReader(), config: cfg}
+	return mgr.Add(manager.RunnableFunc(scanner.run))
 }
 
-func (s *ArtifactOrphanScanner) NeedLeaderElection() bool { return true }
+type artifactOrphanScanner struct {
+	apiReader client.Reader
+	config    operatortypes.ArtifactCleanupConfig
+}
 
-func (s *ArtifactOrphanScanner) Start(ctx context.Context) error {
+func (s *artifactOrphanScanner) run(ctx context.Context) error {
 	logger := log.FromContext(ctx).WithName("artifact-orphan-scanner")
-	s.runAndLog(ctx, logger)
-	ticker := time.NewTicker(s.Config.ScanInterval)
+	s.scanAndLog(ctx, logger)
+	ticker := time.NewTicker(s.config.ScanInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			s.runAndLog(ctx, logger)
+			s.scanAndLog(ctx, logger)
 		}
 	}
 }
 
-func (s *ArtifactOrphanScanner) runAndLog(ctx context.Context, logger logr.Logger) {
-	if err := s.ScanOnce(ctx, logger); err != nil {
+func (s *artifactOrphanScanner) scanAndLog(ctx context.Context, logger logr.Logger) {
+	if err := s.scanOnce(ctx, logger); err != nil {
 		logger.Error(err, "Artifact orphan scan failed; remaining candidates were left in place")
 	}
 }
 
-// ScanOnce performs one directory-first scan. It is exported for deterministic
-// tests and diagnostics; the manager calls it serially from Start.
-func (s *ArtifactOrphanScanner) ScanOnce(ctx context.Context, logger logr.Logger) error {
-	if s.NonCacheReadClient == nil {
-		return errors.New("artifact orphan scanner requires a non-cache read client")
-	}
-	if err := s.Config.Validate(); err != nil {
-		return err
-	}
+func (s *artifactOrphanScanner) scanOnce(ctx context.Context, logger logr.Logger) error {
 	candidates, err := s.enumerateCandidates(logger)
 	if err != nil {
 		return err
@@ -75,135 +69,88 @@ func (s *ArtifactOrphanScanner) ScanOnce(ctx context.Context, logger logr.Logger
 	if err != nil {
 		return err
 	}
-	if s.observed == nil {
-		s.observed = make(map[string]time.Time)
-	}
-	if s.reclaimed == nil {
-		s.reclaimed = make(map[string]struct{})
-	}
-
-	present := make(map[string]struct{}, len(candidates))
-	for _, uid := range candidates {
-		present[uid] = struct{}{}
-	}
-	for uid := range s.observed {
-		if _, ok := present[uid]; !ok {
-			delete(s.observed, uid)
-		}
-	}
-
-	now := s.now()()
-	matured := make([]string, 0, len(candidates))
-	for _, uid := range candidates {
-		if _, protected := existing[types.UID(uid)]; protected {
-			delete(s.observed, uid)
-			delete(s.reclaimed, uid)
-			continue
-		}
-		first, seen := s.observed[uid]
-		if !seen {
-			s.observed[uid] = now
-			if _, recurring := s.reclaimed[uid]; recurring {
-				logger.Error(errors.New("reclaimed artifact root reappeared"), "Artifact root was recreated after its content identity disappeared", "content_uid", uid)
-			}
-			continue
-		}
-		if now.Sub(first) >= s.Config.OrphanGrace {
-			matured = append(matured, uid)
-		}
-	}
-
-	selected := selectFairCandidates(matured, s.cursor, s.Config.BatchSize)
 	var scanErrors []error
-	for _, uid := range selected {
-		s.cursor = uid
-		root, targetErr := validateArtifactRemovalTarget(s.Config.BasePath, uid, s.lstat())
-		if targetErr != nil {
-			scanErrors = append(scanErrors, targetErr)
-			logger.Error(targetErr, "Refusing unsafe orphan artifact candidate", "content_uid", uid)
+	processed := 0
+	for uid := range candidates {
+		if _, protected := existing[types.UID(uid)]; protected {
 			continue
 		}
-		if removeErr := s.removeAll()(root); removeErr != nil {
-			scanErrors = append(scanErrors, fmt.Errorf("remove orphan artifact root %q: %w", root, removeErr))
+		if processed == s.config.BatchSize {
+			break
+		}
+		processed++
+		if err := removeArtifactRoot(s.config.BasePath, uid); err != nil {
+			scanErrors = append(scanErrors, err)
+			logger.Error(err, "Unable to reclaim orphan PodSnapshotContent artifact root", "content_uid", uid)
 			continue
 		}
-		if info, statErr := s.lstat()(root); statErr == nil {
-			scanErrors = append(scanErrors, fmt.Errorf("orphan artifact root %q still exists with mode %s", root, info.Mode()))
-			continue
-		} else if !os.IsNotExist(statErr) {
-			scanErrors = append(scanErrors, fmt.Errorf("confirm orphan artifact root %q absent: %w", root, statErr))
-			continue
-		}
-		delete(s.observed, uid)
-		s.reclaimed[uid] = struct{}{}
-		logger.Info("Reclaimed orphan PodSnapshotContent artifact root", "content_uid", uid, "path", root)
+		logger.Info("Reclaimed orphan PodSnapshotContent artifact root", "content_uid", uid)
 	}
 	return errors.Join(scanErrors...)
 }
 
-func (s *ArtifactOrphanScanner) enumerateCandidates(logger logr.Logger) ([]string, error) {
-	artifactsRoot, err := snapshotv1alpha1.ResolveArtifactsRoot(s.Config.BasePath)
+func (s *artifactOrphanScanner) enumerateCandidates(logger logr.Logger) (map[string]struct{}, error) {
+	artifactsRoot, err := artifact.ResolveRoot(s.config.BasePath)
 	if err != nil {
 		return nil, err
 	}
-	entries, err := s.readDir()(artifactsRoot)
+	if err := artifact.ValidateDirectory(artifactsRoot); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return map[string]struct{}{}, nil
+		}
+		return nil, err
+	}
+	entries, err := os.ReadDir(artifactsRoot)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]struct{}{}, nil
+		}
 		return nil, fmt.Errorf("enumerate artifact roots: %w", err)
 	}
-	candidates := make([]string, 0, len(entries))
+	candidates := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
 		name := entry.Name()
-		if err := snapshotv1alpha1.ValidateArtifactPathElement("artifact directory entry", name); err != nil {
+		if err := artifact.ValidatePathElement("artifact directory entry", name); err != nil {
 			logger.Error(err, "Ignoring unsafe artifact directory entry", "entry", name)
 			continue
 		}
-		path, err := snapshotv1alpha1.ResolveArtifactRoot(s.Config.BasePath, name)
+		path, err := artifact.ResolveContentRoot(s.config.BasePath, name)
 		if err != nil {
 			logger.Error(err, "Ignoring unresolved artifact directory entry", "entry", name)
 			continue
 		}
-		info, err := s.lstat()(path)
-		if err != nil {
-			if !os.IsNotExist(err) {
-				logger.Error(err, "Unable to inspect artifact directory entry", "entry", name)
+		if err := artifact.ValidateDirectory(path); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				logger.Error(err, "Ignoring unexpected artifact directory entry", "entry", name)
 			}
 			continue
 		}
-		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			logger.Error(errors.New("entry is not an ordinary directory"), "Ignoring unexpected artifact directory entry", "entry", name, "mode", info.Mode())
-			continue
-		}
-		candidates = append(candidates, name)
+		candidates[name] = struct{}{}
 	}
-	sort.Strings(candidates)
 	return candidates, nil
 }
 
-func (s *ArtifactOrphanScanner) listExistingUIDs(ctx context.Context) (map[types.UID]struct{}, error) {
+func (s *artifactOrphanScanner) listExistingUIDs(ctx context.Context) (map[types.UID]struct{}, error) {
 	var lastErr error
-	for attempt := 1; attempt <= s.Config.ListAttempts; attempt++ {
+	for attempt := 1; attempt <= s.config.ListAttempts; attempt++ {
 		uids, err := s.listExistingUIDsOnce(ctx)
 		if err == nil {
 			return uids, nil
 		}
 		lastErr = err
 	}
-	return nil, fmt.Errorf("list PodSnapshotContent metadata failed after %d attempts: %w", s.Config.ListAttempts, lastErr)
+	return nil, fmt.Errorf("list PodSnapshotContent metadata failed after %d attempts: %w", s.config.ListAttempts, lastErr)
 }
 
-func (s *ArtifactOrphanScanner) listExistingUIDsOnce(ctx context.Context) (map[types.UID]struct{}, error) {
+func (s *artifactOrphanScanner) listExistingUIDsOnce(ctx context.Context) (map[types.UID]struct{}, error) {
 	uids := make(map[types.UID]struct{})
 	continueToken := ""
 	snapshotResourceVersion := ""
 	for {
 		list := &metav1.PartialObjectMetadataList{}
-		list.SetGroupVersionKind(podSnapshotContentGVK.GroupVersion().WithKind("PodSnapshotContentList"))
-		options := &client.ListOptions{Raw: &metav1.ListOptions{
-			Limit:           s.Config.PageLimit,
-			Continue:        continueToken,
-			ResourceVersion: "",
-		}}
-		if err := s.NonCacheReadClient.List(ctx, list, options); err != nil {
+		list.SetGroupVersionKind(snapshotv1alpha1.GroupVersion.WithKind("PodSnapshotContentList"))
+		options := &client.ListOptions{Raw: &metav1.ListOptions{Limit: podSnapshotContentMetadataListPageLimit, Continue: continueToken, ResourceVersion: ""}}
+		if err := s.apiReader.List(ctx, list, options); err != nil {
 			return nil, err
 		}
 		if snapshotResourceVersion == "" {
@@ -215,66 +162,17 @@ func (s *ArtifactOrphanScanner) listExistingUIDsOnce(ctx context.Context) (map[t
 			return nil, fmt.Errorf("PodSnapshotContent metadata list resource version changed from %q to %q", snapshotResourceVersion, list.ResourceVersion)
 		}
 		for i := range list.Items {
-			uid := list.Items[i].UID
-			if uid == "" {
+			if list.Items[i].UID == "" {
 				return nil, fmt.Errorf("PodSnapshotContent %q returned without UID", list.Items[i].Name)
 			}
-			uids[uid] = struct{}{}
+			uids[list.Items[i].UID] = struct{}{}
 		}
-		next := list.Continue
-		if next == "" {
+		if list.Continue == "" {
 			return uids, nil
 		}
-		if next == continueToken {
-			return nil, fmt.Errorf("PodSnapshotContent metadata list repeated continuation token %q", next)
+		if list.Continue == continueToken {
+			return nil, fmt.Errorf("PodSnapshotContent metadata list repeated continuation token %q", list.Continue)
 		}
-		continueToken = next
+		continueToken = list.Continue
 	}
-}
-
-func selectFairCandidates(sorted []string, cursor string, limit int) []string {
-	if len(sorted) == 0 || limit <= 0 {
-		return nil
-	}
-	start := sort.SearchStrings(sorted, cursor)
-	for start < len(sorted) && sorted[start] <= cursor {
-		start++
-	}
-	if start == len(sorted) {
-		start = 0
-	}
-	count := min(limit, len(sorted))
-	selected := make([]string, 0, count)
-	for i := 0; i < count; i++ {
-		selected = append(selected, sorted[(start+i)%len(sorted)])
-	}
-	return selected
-}
-
-func (s *ArtifactOrphanScanner) readDir() func(string) ([]os.DirEntry, error) {
-	if s.ReadDir != nil {
-		return s.ReadDir
-	}
-	return os.ReadDir
-}
-
-func (s *ArtifactOrphanScanner) lstat() func(string) (os.FileInfo, error) {
-	if s.Lstat != nil {
-		return s.Lstat
-	}
-	return os.Lstat
-}
-
-func (s *ArtifactOrphanScanner) removeAll() func(string) error {
-	if s.RemoveAll != nil {
-		return s.RemoveAll
-	}
-	return os.RemoveAll
-}
-
-func (s *ArtifactOrphanScanner) now() func() time.Time {
-	if s.Now != nil {
-		return s.Now
-	}
-	return time.Now
 }

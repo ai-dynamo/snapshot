@@ -5,7 +5,6 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -19,7 +18,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	ktypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -67,9 +65,6 @@ func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name s
 	}
 
 	if content.Spec.Source.NodeName != w.config.NodeName {
-		return
-	}
-	if content.DeletionTimestamp != nil {
 		return
 	}
 	if isContentTerminal(content) {
@@ -212,9 +207,6 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 			return nil
 		}
 		return fmt.Errorf("get PodSnapshotContent %q: %w", name, err)
-	}
-	if content.DeletionTimestamp != nil {
-		return nil
 	}
 	if isContentTerminal(content) {
 		return nil
@@ -517,12 +509,14 @@ func (w *NodeController) removeCaptureEligibleLabel(ctx context.Context, pod *co
 // setSnapshotContentSucceeded patches status with the Ready condition. Uses optimistic locking so
 // a concurrent terminal Failed write wins and this patch is rejected rather than overwriting it.
 func (w *NodeController) setSnapshotContentSucceeded(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent) error {
-	return w.patchSnapshotContentCondition(ctx, content, metav1.Condition{
+	patch := client.MergeFromWithOptions(content.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
 		Type:    snapshotv1alpha1.PodSnapshotConditionReady,
 		Status:  metav1.ConditionTrue,
 		Reason:  "Captured",
 		Message: "Checkpoint captured and verified",
 	})
+	return w.client.Status().Patch(ctx, content, patch)
 }
 
 // readyStatusConflictLimit caps Ready-patch retries after optimistic-lock conflicts so a
@@ -540,17 +534,14 @@ func (w *NodeController) markCheckpointReady(ctx context.Context, content *snaps
 	ready := content
 	for attempt := 0; attempt < readyStatusConflictLimit; attempt++ {
 		if err := w.setSnapshotContentSucceeded(ctx, ready); err != nil {
-			current, ignore, identityErr := w.inspectContentIdentityAfterStatusError(ctx, content, err)
-			if ignore {
-				return nil
-			}
-			if identityErr != nil {
-				logger.Error(identityErr, "Failed to inspect PodSnapshotContent after Ready write failure", "content", content.Name)
-				return identityErr
-			}
-			if !apierrors.IsConflict(err) && !apierrors.IsInvalid(err) {
+			if !apierrors.IsConflict(err) {
 				logger.Error(err, "Failed to write PodSnapshotContent ready status", "content", content.Name)
 				return err
+			}
+			current := &snapshotv1alpha1.PodSnapshotContent{}
+			if getErr := w.client.Get(ctx, client.ObjectKey{Name: content.Name}, current); getErr != nil {
+				logger.Error(getErr, "Failed to re-read PodSnapshotContent after Ready conflict", "content", content.Name)
+				return getErr
 			}
 			if isContentFailed(current) {
 				logger.Info("Skipping Ready write; work order already failed", "content", content.Name)
@@ -570,81 +561,14 @@ func (w *NodeController) markCheckpointReady(ctx context.Context, content *snaps
 // setSnapshotContentFailed patches status with the Failed condition. Uses optimistic locking so
 // that a concurrent failure write wins and this patch is rejected rather than overwriting it.
 func (w *NodeController) setSnapshotContentFailed(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, reason string, cause error) error {
-	err := w.patchSnapshotContentCondition(ctx, content, metav1.Condition{
+	patch := client.MergeFromWithOptions(content.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
 		Type:    snapshotv1alpha1.PodSnapshotConditionFailed,
 		Status:  metav1.ConditionTrue,
 		Reason:  reason,
 		Message: cause.Error(),
 	})
-	if err == nil {
-		return nil
-	}
-	_, ignore, identityErr := w.inspectContentIdentityAfterStatusError(ctx, content, err)
-	if ignore {
-		return nil
-	}
-	if identityErr != nil {
-		return identityErr
-	}
-	return err
-}
-
-// inspectContentIdentityAfterStatusError distinguishes a live optimistic-lock
-// race from a capture result whose original Kubernetes identity is already
-// gone. It never retries merely to publish status for deleted content.
-func (w *NodeController) inspectContentIdentityAfterStatusError(ctx context.Context, original *snapshotv1alpha1.PodSnapshotContent, patchErr error) (*snapshotv1alpha1.PodSnapshotContent, bool, error) {
-	if apierrors.IsNotFound(patchErr) {
-		return nil, true, nil
-	}
-	current := &snapshotv1alpha1.PodSnapshotContent{}
-	if err := w.client.Get(ctx, client.ObjectKey{Name: original.Name}, current); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, true, nil
-		}
-		return nil, false, err
-	}
-	if current.UID != original.UID || current.DeletionTimestamp != nil {
-		return current, true, nil
-	}
-	return current, false, nil
-}
-
-type contentStatusJSONPatchOperation struct {
-	Op    string `json:"op"`
-	Path  string `json:"path"`
-	Value any    `json:"value,omitempty"`
-}
-
-// patchSnapshotContentCondition guards asynchronous terminal writes with both
-// immutable UID and optimistic resource-version tests. A same-name replacement
-// therefore cannot receive the result of an older capture.
-func (w *NodeController) patchSnapshotContentCondition(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, condition metav1.Condition) error {
-	if content.UID == "" || content.ResourceVersion == "" {
-		return fmt.Errorf("cannot patch PodSnapshotContent %q status without UID and resource version", content.Name)
-	}
-	updated := content.DeepCopy()
-	meta.SetStatusCondition(&updated.Status.Conditions, condition)
-	operation := "replace"
-	if content.Status.Conditions == nil {
-		operation = "add"
-	}
-	operations := []contentStatusJSONPatchOperation{
-		{Op: "test", Path: "/metadata/uid", Value: string(content.UID)},
-		{Op: "test", Path: "/metadata/resourceVersion", Value: content.ResourceVersion},
-		{Op: operation, Path: "/status/conditions", Value: updated.Status.Conditions},
-	}
-	data, err := json.Marshal(operations)
-	if err != nil {
-		return fmt.Errorf("marshal PodSnapshotContent status patch: %w", err)
-	}
-	target := &snapshotv1alpha1.PodSnapshotContent{
-		TypeMeta:   metav1.TypeMeta{APIVersion: snapshotv1alpha1.GroupVersion.String(), Kind: "PodSnapshotContent"},
-		ObjectMeta: metav1.ObjectMeta{Name: content.Name},
-	}
-	if err := w.client.Status().Patch(ctx, target, client.RawPatch(ktypes.JSONPatchType, data)); err != nil {
-		return err
-	}
-	return nil
+	return w.client.Status().Patch(ctx, content, patch)
 }
 
 // executorCheckpoint is the production checkpointFn. The reconciler has already resolved the
