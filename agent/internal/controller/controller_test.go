@@ -689,6 +689,50 @@ func TestRestorePreflightAPIErrorsUseStablePendingMessages(t *testing.T) {
 	}
 }
 
+func TestDeletingSnapshotDependencyFailsRestoreBeforeLaunch(t *testing.T) {
+	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	snapshot, content := readySnapshotObjects()
+	now := metav1.Now()
+	snapshot.DeletionTimestamp = &now
+	snapshot.Finalizers = []string{"test-finalizer"}
+	w := makeTestController(t, pod, snapshot, content)
+	restoreCalls := 0
+	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
+		restoreCalls++
+		return 0, nil
+	}
+
+	requeue := w.reconcileRestorePod(context.Background(), pod)
+
+	assert.False(t, requeue)
+	assert.Zero(t, restoreCalls)
+	payload := string(lastPodStatusApply(t, w).GetPatch())
+	assert.Contains(t, payload, `"reason":"RestoreFailed"`)
+	assert.Contains(t, payload, "PodSnapshot inference/snapshot-a is deleting")
+}
+
+func TestDeletingContentDependencyFailsRestoreBeforeLaunch(t *testing.T) {
+	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	snapshot, content := readySnapshotObjects()
+	now := metav1.Now()
+	content.DeletionTimestamp = &now
+	content.Finalizers = []string{"test-finalizer"}
+	w := makeTestController(t, pod, snapshot, content)
+	restoreCalls := 0
+	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
+		restoreCalls++
+		return 0, nil
+	}
+
+	requeue := w.reconcileRestorePod(context.Background(), pod)
+
+	assert.False(t, requeue)
+	assert.Zero(t, restoreCalls)
+	payload := string(lastPodStatusApply(t, w).GetPatch())
+	assert.Contains(t, payload, `"reason":"RestoreFailed"`)
+	assert.Contains(t, payload, "PodSnapshotContent "+content.Name+" is deleting")
+}
+
 func TestPreflightRestoreWaitsForPodIPBeforeTCPRestore(t *testing.T) {
 	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
 	snapshot, content := readySnapshotObjects()

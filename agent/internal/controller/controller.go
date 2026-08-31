@@ -539,6 +539,9 @@ func (w *NodeController) getPodSnapshotFromPod(ctx context.Context, pod *corev1.
 
 func validatePodSnapshotForRestore(snapshot *snapshotv1alpha1.PodSnapshot) error {
 	key := client.ObjectKeyFromObject(snapshot)
+	if snapshot.DeletionTimestamp != nil {
+		return fmt.Errorf("PodSnapshot %s is deleting", key.String())
+	}
 	if snapshotv1alpha1.IsPodSnapshotFailed(snapshot) {
 		cond := meta.FindStatusCondition(snapshot.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
 		message := fmt.Sprintf("PodSnapshot %s failed", key.String())
@@ -575,6 +578,9 @@ func (w *NodeController) getPodSnapshotContentFromSnapshot(ctx context.Context, 
 }
 
 func validatePodSnapshotContentForRestore(content *snapshotv1alpha1.PodSnapshotContent) error {
+	if content.DeletionTimestamp != nil {
+		return fmt.Errorf("PodSnapshotContent %s is deleting", content.Name)
+	}
 	if snapshotv1alpha1.IsPodSnapshotContentFailed(content) {
 		cond := meta.FindStatusCondition(content.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
 		message := fmt.Sprintf("PodSnapshotContent %s failed", content.Name)
@@ -1162,7 +1168,7 @@ func chooseActiveContent(objs []interface{}) string {
 	var chosen *snapshotv1alpha1.PodSnapshotContent
 	for _, obj := range objs {
 		content, ok := contentFromInformerObj(obj)
-		if !ok || isContentTerminal(content) {
+		if !ok || !content.DeletionTimestamp.IsZero() || isContentTerminal(content) {
 			continue
 		}
 		if chosen == nil ||

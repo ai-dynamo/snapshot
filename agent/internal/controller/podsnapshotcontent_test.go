@@ -242,6 +242,21 @@ func TestReconcileSnapshotContent_GateLabelsPodOnSuccess(t *testing.T) {
 	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
 }
 
+func TestReconcileSnapshotContent_DeletingContentDoesNotLabelPod(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	now := metav1.Now()
+	content.DeletionTimestamp = &now
+	content.Finalizers = []string{"test-finalizer"}
+	pod := makeSourcePod()
+	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+
+	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+
+	_, labeled := getPod(t, w, "inference", "worker-0").Labels[snapshotv1alpha1.CaptureEligibleLabel]
+	assert.False(t, labeled)
+	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
+}
+
 func TestReconcileSourcePod_InFlightGuard(t *testing.T) {
 	// The UID is unrelated to the content name, proving the guard is keyed on the
 	// immutable content UID and target container, not the content name.
@@ -255,6 +270,25 @@ func TestReconcileSourcePod_InFlightGuard(t *testing.T) {
 	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
 	got := getContent(t, w, content.Name)
 	assert.Empty(t, got.Status.Conditions, "in-flight guard must not write any status")
+}
+
+func TestReconcileSourcePod_DeletingContentDoesNotStartCapture(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	now := metav1.Now()
+	content.DeletionTimestamp = &now
+	content.Finalizers = []string{"test-finalizer"}
+	pod := makeSourcePod()
+	pod.Labels[snapshotv1alpha1.CaptureEligibleLabel] = "true"
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 7}
+
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+
+	assert.False(t, fc.wasCalled())
+	assert.Empty(t, w.inFlight)
+	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
+	assert.Empty(t, w.clientset.(*k8sfake.Clientset).Actions())
 }
 
 func TestReconcileSourcePod_ProvenanceInvalidFailsAndUnlabels(t *testing.T) {
@@ -1010,6 +1044,15 @@ func TestChooseActiveContent_SkipsTerminalAndTieBreaksByName(t *testing.T) {
 	tieA := mustUnstructured(t, contentForWorker0("podsnapshotcontent-a", metav1.Unix(2000, 0), ""))
 	tieB := mustUnstructured(t, contentForWorker0("podsnapshotcontent-b", metav1.Unix(2000, 0), ""))
 	assert.Equal(t, "podsnapshotcontent-a", chooseActiveContent([]interface{}{terminal, tieB, tieA}))
+}
+
+func TestChooseActiveContent_SkipsDeletingContent(t *testing.T) {
+	deletingContent := contentForWorker0("podsnapshotcontent-old", metav1.Unix(1000, 0), "")
+	now := metav1.Now()
+	deletingContent.DeletionTimestamp = &now
+	activeContent := mustUnstructured(t, contentForWorker0("podsnapshotcontent-new", metav1.Unix(2000, 0), ""))
+
+	assert.Equal(t, "podsnapshotcontent-new", chooseActiveContent([]interface{}{mustUnstructured(t, deletingContent), activeContent}))
 }
 
 func TestChooseActiveContent_AllTerminalReturnsEmpty(t *testing.T) {
