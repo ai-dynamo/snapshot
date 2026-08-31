@@ -25,11 +25,27 @@ import (
 // The write uses create-then-rename so the workload never observes a partial
 // file.
 func WriteControlSentinel(hostPID int, name string) error {
+	return WriteControlSentinelData(hostPID, name, []byte("done\n"))
+}
+
+// WriteControlSentinelData writes a sentinel file with caller-provided content
+// into the workload container's snapshot-control volume.
+func WriteControlSentinelData(hostPID int, name string, data []byte) error {
 	if hostPID <= 0 {
 		return fmt.Errorf("invalid host PID %d for control sentinel %q", hostPID, name)
 	}
 	dir := filepath.Join(HostProcPath, strconv.Itoa(hostPID), "root", snapshotv1alpha1.SnapshotControlMountPath)
-	return writeSentinelInDir(dir, name)
+	return writeSentinelInDir(dir, name, data)
+}
+
+// ReadControlSentinel reads a sentinel file from the workload container's
+// snapshot-control volume.
+func ReadControlSentinel(hostPID int, name string) ([]byte, error) {
+	if hostPID <= 0 {
+		return nil, fmt.Errorf("invalid host PID %d for control sentinel %q", hostPID, name)
+	}
+	dir := filepath.Join(HostProcPath, strconv.Itoa(hostPID), "root", snapshotv1alpha1.SnapshotControlMountPath)
+	return readSentinelInDir(dir, name)
 }
 
 // ControlSentinelExists reports whether a sentinel exists in the workload
@@ -52,10 +68,10 @@ func RemoveControlSentinel(dir, name string) error {
 	return removeSentinelInDir(dir, name)
 }
 
-func writeSentinelInDir(dir, name string) error {
+func writeSentinelInDir(dir, name string, data []byte) error {
 	tmpPath := filepath.Join(dir, "."+name+".tmp")
 	finalPath := filepath.Join(dir, name)
-	if err := os.WriteFile(tmpPath, []byte("done\n"), 0o644); err != nil {
+	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
 		return fmt.Errorf("write temp sentinel %s: %w", tmpPath, err)
 	}
 	if err := os.Rename(tmpPath, finalPath); err != nil {
@@ -63,6 +79,22 @@ func writeSentinelInDir(dir, name string) error {
 		return fmt.Errorf("rename sentinel %s -> %s: %w", tmpPath, finalPath, err)
 	}
 	return nil
+}
+
+func readSentinelInDir(dir, name string) ([]byte, error) {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return nil, fmt.Errorf("control sentinel dir %s: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("control sentinel dir %s: not a directory", dir)
+	}
+	path := filepath.Join(dir, name)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read control sentinel %s: %w", path, err)
+	}
+	return data, nil
 }
 
 func removeSentinelInDir(dir, name string) error {
