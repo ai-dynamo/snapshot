@@ -3,6 +3,7 @@ module github.com/ai-dynamo/snapshot/operator
 go 1.26.6
 
 require (
+	github.com/ai-dynamo/snapshot/agent v0.0.0
 	github.com/ai-dynamo/snapshot/api v0.0.0
 	github.com/go-logr/logr v1.4.3
 	github.com/go-logr/zapr v1.3.0
@@ -64,3 +65,7 @@ require (
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.3 // indirect
 )
+
+replace github.com/ai-dynamo/snapshot/api => ../api
+
+replace github.com/ai-dynamo/snapshot/agent => ../agent
