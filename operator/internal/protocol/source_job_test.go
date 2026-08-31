@@ -11,7 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
-	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
 func requireCheckpointContainer(t *testing.T, containers []corev1.Container, name string) *corev1.Container {
@@ -36,8 +36,8 @@ func requireStableLaunchJobWrapper(t *testing.T, container *corev1.Container, or
 	if container.Args[0] != "--launch-job" || container.Args[1] != "/bin/sh" || container.Args[2] != "-c" || container.Args[4] != "dynamo-cuda-checkpoint" {
 		t.Fatalf("unexpected launch-job wrapper prefix: %#v", container.Args[:6])
 	}
-	if container.Args[5] != snapshotv1alpha1.CUDAJobFilePath {
-		t.Fatalf("stable job file = %q, want %q", container.Args[5], snapshotv1alpha1.CUDAJobFilePath)
+	if container.Args[5] != podcontract.CUDAJobFilePath {
+		t.Fatalf("stable job file = %q, want %q", container.Args[5], podcontract.CUDAJobFilePath)
 	}
 	if got := container.Args[6:]; strings.Join(got, "|") != strings.Join(original, "|") {
 		t.Fatalf("original command = %#v, want %#v", got, original)
@@ -64,7 +64,7 @@ func TestNewSourceJob(t *testing.T) {
 	}, SourceJobOptions{
 		Namespace:             "test-ns",
 		TargetContainer:       "main",
-		SeccompProfile:        snapshotv1alpha1.DefaultSeccompLocalhostProfile,
+		SeccompProfile:        podcontract.DefaultSeccompLocalhostProfile,
 		Name:                  "test-job",
 		ActiveDeadlineSeconds: ptr.To(int64(60)),
 		TTLSecondsAfterFinish: ptr.To(int32(300)),
@@ -77,12 +77,12 @@ func TestNewSourceJob(t *testing.T) {
 	if job.Name != "test-job" || job.Namespace != "test-ns" {
 		t.Fatalf("unexpected job identity: %#v", job.ObjectMeta)
 	}
-	if len(job.Spec.Template.Spec.Volumes) != 1 || job.Spec.Template.Spec.Volumes[0].Name != snapshotv1alpha1.SnapshotControlVolumeName {
-		t.Fatalf("expected only %s volume, got %#v", snapshotv1alpha1.SnapshotControlVolumeName, job.Spec.Template.Spec.Volumes)
+	if len(job.Spec.Template.Spec.Volumes) != 1 || job.Spec.Template.Spec.Volumes[0].Name != podcontract.SnapshotControlVolumeName {
+		t.Fatalf("expected only %s volume, got %#v", podcontract.SnapshotControlVolumeName, job.Spec.Template.Spec.Volumes)
 	}
 	main := &job.Spec.Template.Spec.Containers[0]
-	if len(main.VolumeMounts) != 1 || main.VolumeMounts[0].MountPath != snapshotv1alpha1.SnapshotControlMountPath {
-		t.Fatalf("expected only %s mount at %s, got %#v", snapshotv1alpha1.SnapshotControlVolumeName, snapshotv1alpha1.SnapshotControlMountPath, main.VolumeMounts)
+	if len(main.VolumeMounts) != 1 || main.VolumeMounts[0].MountPath != podcontract.SnapshotControlMountPath {
+		t.Fatalf("expected only %s mount at %s, got %#v", podcontract.SnapshotControlVolumeName, podcontract.SnapshotControlMountPath, main.VolumeMounts)
 	}
 	if main.VolumeMounts[0].SubPath != "main" {
 		t.Fatalf("expected control mount subPath=main, got %#v", main.VolumeMounts[0])
@@ -90,7 +90,7 @@ func TestNewSourceJob(t *testing.T) {
 	if main.ReadinessProbe == nil || main.ReadinessProbe.Exec == nil {
 		t.Fatalf("expected ready-file readiness probe, got %#v", main.ReadinessProbe)
 	}
-	expectedProbe := []string{"cat", snapshotv1alpha1.SnapshotControlMountPath + "/" + snapshotv1alpha1.ReadyForSnapshotFile}
+	expectedProbe := []string{"cat", podcontract.SnapshotControlMountPath + "/" + podcontract.ReadyForSnapshotFile}
 	if strings.Join(main.ReadinessProbe.Exec.Command, " ") != strings.Join(expectedProbe, " ") {
 		t.Fatalf("expected readiness probe %#v, got %#v", expectedProbe, main.ReadinessProbe.Exec.Command)
 	}
@@ -147,12 +147,12 @@ func TestNewSourceJobWrapsTargetContainer(t *testing.T) {
 	}
 	// Sidecar does not get a control volume mount, snapshot env, or ready probe.
 	for _, mount := range sidecar.VolumeMounts {
-		if mount.Name == snapshotv1alpha1.SnapshotControlVolumeName {
+		if mount.Name == podcontract.SnapshotControlVolumeName {
 			t.Fatalf("sidecar should not have control volume mount: %#v", sidecar.VolumeMounts)
 		}
 	}
 	for _, env := range sidecar.Env {
-		if env.Name == snapshotv1alpha1.SnapshotControlDirEnv {
+		if env.Name == podcontract.SnapshotControlDirEnv {
 			t.Fatalf("sidecar should not have control env: %#v", sidecar.Env)
 		}
 	}
@@ -262,12 +262,12 @@ func TestNewSourceJobRequiresTarget(t *testing.T) {
 
 func TestNewSourceJobRejectsRestoreAnnotations(t *testing.T) {
 	for _, annotation := range []string{
-		snapshotv1alpha1.RestoreFromAnnotation,
-		snapshotv1alpha1.RestoreContainerMapAnnotation,
+		podcontract.RestoreFromAnnotation,
+		podcontract.RestoreContainerMapAnnotation,
 	} {
 		t.Run(annotation, func(t *testing.T) {
 			value := ""
-			if annotation == snapshotv1alpha1.RestoreFromAnnotation {
+			if annotation == podcontract.RestoreFromAnnotation {
 				value = "snapshot-a"
 			}
 			_, err := NewSourceJob(&corev1.PodTemplateSpec{

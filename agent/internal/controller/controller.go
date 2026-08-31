@@ -47,6 +47,7 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -99,7 +100,7 @@ type restoreTarget struct {
 
 type restorePlan struct {
 	artifact *restoreArtifact
-	mappings []snapshotv1alpha1.RestoreContainerMapping
+	mappings []podcontract.ContainerMapping
 }
 
 type restoreResultState int
@@ -231,7 +232,7 @@ func (w *NodeController) Run(ctx context.Context) error {
 	ctx = logr.NewContext(ctx, w.log)
 	w.log.Info("Starting snapshot node controller",
 		"node", w.config.NodeName,
-		"restore_from_annotation", snapshotv1alpha1.RestoreFromAnnotation,
+		"restore_from_annotation", podcontract.RestoreFromAnnotation,
 	)
 
 	w.log.Info("Watching pods cluster-wide (all namespaces)")
@@ -384,7 +385,7 @@ func (w *NodeController) restorePodRequested(pod *corev1.Pod) bool {
 	if pod.Spec.NodeName != w.config.NodeName {
 		return false
 	}
-	_, requested := pod.Annotations[snapshotv1alpha1.RestoreFromAnnotation]
+	_, requested := pod.Annotations[podcontract.RestoreFromAnnotation]
 	return requested
 }
 
@@ -514,7 +515,7 @@ func (w *NodeController) preflightRestore(ctx context.Context, pod *corev1.Pod) 
 }
 
 func (w *NodeController) getPodSnapshotFromPod(ctx context.Context, pod *corev1.Pod) (*snapshotv1alpha1.PodSnapshot, error) {
-	snapshotName, err := snapshotv1alpha1.GetRestoreFromSnapshotName(pod.Annotations)
+	snapshotName, err := podcontract.GetRestoreFromSnapshotName(pod.Annotations)
 	if err != nil {
 		return nil, err
 	}
@@ -593,73 +594,23 @@ func validatePodSnapshotContentForRestore(content *snapshotv1alpha1.PodSnapshotC
 
 // validateRestoreTarget resolves the captured source and validates every
 // requested destination against the restore Pod.
-func validateRestoreTarget(pod *corev1.Pod, snapshot *snapshotv1alpha1.PodSnapshot, content *snapshotv1alpha1.PodSnapshotContent) (*restoreTarget, []snapshotv1alpha1.RestoreContainerMapping, error) {
+func validateRestoreTarget(pod *corev1.Pod, snapshot *snapshotv1alpha1.PodSnapshot, content *snapshotv1alpha1.PodSnapshotContent) (*restoreTarget, []podcontract.ContainerMapping, error) {
 	containerName, err := singleTargetContainer(content)
 	if err != nil {
 		return nil, nil, err
 	}
-	mappings, err := snapshotv1alpha1.RestoreContainerMappingsFromAnnotations(pod.Annotations, containerName)
+	mappings, err := podcontract.ContainerMappingsFromAnnotations(pod.Annotations, containerName)
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := validateRestoreMappingsForPod(&pod.Spec, mappings, containerName); err != nil {
+	if err := podcontract.Validate(pod, podcontract.Request{
+		SnapshotName:    snapshot.Name,
+		SourceContainer: containerName,
+		Mappings:        mappings,
+	}); err != nil {
 		return nil, nil, err
 	}
 	return &restoreTarget{SnapshotName: snapshot.Name, ContentUID: string(content.UID), SourceContainerName: containerName}, mappings, nil
-}
-
-// validateRestoreMappingsForPod validates the mapping contract and ensures
-// every destination exists in the restore Pod spec.
-func validateRestoreMappingsForPod(spec *corev1.PodSpec, mappings []snapshotv1alpha1.RestoreContainerMapping, capturedSource string) error {
-	if err := snapshotv1alpha1.ValidateRestoreContainerMappings(mappings, capturedSource); err != nil {
-		return err
-	}
-	if len(mappings) > 1 {
-		hasControlVolume := false
-		for _, volume := range spec.Volumes {
-			if volume.Name == snapshotv1alpha1.SnapshotControlVolumeName && volume.EmptyDir != nil {
-				hasControlVolume = true
-				break
-			}
-		}
-		if !hasControlVolume {
-			return fmt.Errorf("multi-container restore requires %s emptyDir volume", snapshotv1alpha1.SnapshotControlVolumeName)
-		}
-	}
-	for _, mapping := range mappings {
-		var destination *corev1.Container
-		for i := range spec.Containers {
-			if spec.Containers[i].Name == mapping.Destination {
-				destination = &spec.Containers[i]
-				break
-			}
-		}
-		if destination == nil {
-			return fmt.Errorf("restore pod has no destination container named %q", mapping.Destination)
-		}
-		if len(mappings) == 1 {
-			continue
-		}
-		validControlMount := false
-		for _, mount := range destination.VolumeMounts {
-			if mount.Name == snapshotv1alpha1.SnapshotControlVolumeName &&
-				mount.MountPath == snapshotv1alpha1.SnapshotControlMountPath &&
-				mount.SubPath == mapping.Destination {
-				validControlMount = true
-				break
-			}
-		}
-		if !validControlMount {
-			return fmt.Errorf(
-				"multi-container restore destination %q requires %s mounted at %s with subPath %q",
-				mapping.Destination,
-				snapshotv1alpha1.SnapshotControlVolumeName,
-				snapshotv1alpha1.SnapshotControlMountPath,
-				mapping.Destination,
-			)
-		}
-	}
-	return nil
 }
 
 // resolveRestoreArtifact resolves the validated restore target to its physical
@@ -698,7 +649,7 @@ func (w *NodeController) restorePodContainers(ctx context.Context, pod *corev1.P
 	// considering a CRIU replay.
 	recovering := restoreInProgress(pod)
 	message := fmt.Sprintf("Restoring %d destination container(s) from PodSnapshot %s", len(plan.mappings), plan.artifact.SnapshotName)
-	if err := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, snapshotv1alpha1.RestoreReasonInProgress, message); err != nil {
+	if err := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, podcontract.RestoreReasonInProgress, message); err != nil {
 		emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeWarning, restoreStatusUpdateFailedReason, err.Error())
 		return true
 	}
@@ -732,7 +683,7 @@ func (w *NodeController) recordRestoreResults(ctx context.Context, pod *corev1.P
 			"Restore from PodSnapshot %s remains in progress: %d succeeded, %d failed, %d pending (%s)",
 			artifact.SnapshotName, len(succeeded), len(failed), len(pending), strings.Join(pending, ", "),
 		)
-		if err := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, snapshotv1alpha1.RestoreReasonInProgress, message); err != nil {
+		if err := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, podcontract.RestoreReasonInProgress, message); err != nil {
 			emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeWarning, restoreStatusUpdateFailedReason, err.Error())
 		}
 		return true
@@ -740,14 +691,14 @@ func (w *NodeController) recordRestoreResults(ctx context.Context, pod *corev1.P
 
 	if len(failed) == 0 {
 		message := fmt.Sprintf("Restored %d destination container(s) from PodSnapshot %s: %s", len(succeeded), artifact.SnapshotName, strings.Join(succeeded, ", "))
-		return w.finishRestore(ctx, pod, corev1.ConditionTrue, snapshotv1alpha1.RestoreReasonSucceeded, message) != nil
+		return w.finishRestore(ctx, pod, corev1.ConditionTrue, podcontract.RestoreReasonSucceeded, message) != nil
 	}
 	if len(succeeded) != 0 {
 		message := fmt.Sprintf("Restored %d of %d destination containers from PodSnapshot %s; failed: %s", len(succeeded), len(results), artifact.SnapshotName, strings.Join(failed, ", "))
-		return w.finishRestore(ctx, pod, corev1.ConditionFalse, snapshotv1alpha1.RestoreReasonPartiallySucceeded, message) != nil
+		return w.finishRestore(ctx, pod, corev1.ConditionFalse, podcontract.RestoreReasonPartiallySucceeded, message) != nil
 	}
 	message := fmt.Sprintf("Restore failed for all %d destination container(s) from PodSnapshot %s: %s", len(failed), artifact.SnapshotName, strings.Join(failed, ", "))
-	return w.finishRestore(ctx, pod, corev1.ConditionFalse, snapshotv1alpha1.RestoreReasonFailed, message) != nil
+	return w.finishRestore(ctx, pod, corev1.ConditionFalse, podcontract.RestoreReasonFailed, message) != nil
 }
 
 // restoreDestination resolves and restores one destination independently of
@@ -870,7 +821,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, artifa
 // completion sentinel proves the operation already finished.
 func (op *restoreOperation) recoverCompletedRestore(ctx context.Context) (bool, error) {
 	condition := findRestoredCondition(op.pod)
-	if condition == nil || condition.Status != corev1.ConditionFalse || condition.Reason != snapshotv1alpha1.RestoreReasonInProgress {
+	if condition == nil || condition.Status != corev1.ConditionFalse || condition.Reason != podcontract.RestoreReasonInProgress {
 		return false, nil
 	}
 
@@ -878,7 +829,7 @@ func (op *restoreOperation) recoverCompletedRestore(ctx context.Context) (bool, 
 	if err != nil {
 		return false, fmt.Errorf("resolve restore container before checking completion sentinel: %w", err)
 	}
-	exists, err := op.controller.controlSentinelExistsFn(hostPID, snapshotv1alpha1.RestoreCompleteFile)
+	exists, err := op.controller.controlSentinelExistsFn(hostPID, podcontract.RestoreCompleteFile)
 	if err != nil {
 		return false, fmt.Errorf("check restore completion sentinel: %w", err)
 	}
@@ -942,7 +893,7 @@ func (op *restoreOperation) completeRestore(ctx context.Context, placeholderHost
 	w := op.controller
 	// Any PID inside the container mount namespace reaches the control
 	// volume through /host/proc/<pid>/root.
-	if err := w.writeControlSentinelFn(placeholderHostPID, snapshotv1alpha1.RestoreCompleteFile); err != nil {
+	if err := w.writeControlSentinelFn(placeholderHostPID, podcontract.RestoreCompleteFile); err != nil {
 		op.log.Error(err, "Failed to write restore-complete sentinel")
 		if killErr := w.sendSignalFn(op.log, placeholderHostPID, syscall.SIGKILL, "restore sentinel failed"); killErr != nil {
 			return errors.Join(fmt.Errorf("failed to write restore-complete sentinel: %w", err), fmt.Errorf("placeholder could not be killed: %w", killErr))
@@ -957,7 +908,7 @@ func (op *restoreOperation) completeRestore(ctx context.Context, placeholderHost
 // owns only nvidia.com/Restored and does not replace kubelet-owned conditions.
 func (w *NodeController) applyRestoredCondition(ctx context.Context, pod *corev1.Pod, status corev1.ConditionStatus, reason, message string) error {
 	setPodCondition(&pod.Status, corev1.PodCondition{
-		Type:    corev1.PodConditionType(snapshotv1alpha1.RestoredCondition),
+		Type:    corev1.PodConditionType(podcontract.RestoredCondition),
 		Status:  status,
 		Reason:  reason,
 		Message: message,
@@ -1068,7 +1019,7 @@ func (w *NodeController) failRestorePod(ctx context.Context, pod *corev1.Pod, ca
 		ctx,
 		pod,
 		corev1.ConditionFalse,
-		snapshotv1alpha1.RestoreReasonFailed,
+		podcontract.RestoreReasonFailed,
 		cause.Error(),
 	)
 	return err != nil
@@ -1217,7 +1168,7 @@ func restoreContainerResolveAttemptContext(ctx context.Context, deadlineAt time.
 func findRestoredCondition(pod *corev1.Pod) *corev1.PodCondition {
 	for i := range pod.Status.Conditions {
 		condition := &pod.Status.Conditions[i]
-		if condition.Type == corev1.PodConditionType(snapshotv1alpha1.RestoredCondition) {
+		if condition.Type == corev1.PodConditionType(podcontract.RestoredCondition) {
 			return condition
 		}
 	}
@@ -1226,27 +1177,20 @@ func findRestoredCondition(pod *corev1.Pod) *corev1.PodCondition {
 
 func restoreInProgress(pod *corev1.Pod) bool {
 	condition := findRestoredCondition(pod)
-	return condition != nil && condition.Status == corev1.ConditionFalse && condition.Reason == snapshotv1alpha1.RestoreReasonInProgress
+	return condition != nil && condition.Status == corev1.ConditionFalse && condition.Reason == podcontract.RestoreReasonInProgress
 }
 
 func isRestoreSucceeded(pod *corev1.Pod) bool {
-	return snapshotv1alpha1.ClassifyRestoreOutcome(pod.Status.Conditions) == snapshotv1alpha1.RestoreOutcomeSucceeded
+	return podcontract.ClassifyRestoreOutcome(pod.Status.Conditions) == podcontract.RestoreOutcomeSucceeded
 }
 
 // isRestorePartiallySucceeded reports the terminal mixed worker outcome.
 func isRestorePartiallySucceeded(pod *corev1.Pod) bool {
-	return snapshotv1alpha1.ClassifyRestoreOutcome(pod.Status.Conditions) == snapshotv1alpha1.RestoreOutcomePartiallySucceeded
+	return podcontract.ClassifyRestoreOutcome(pod.Status.Conditions) == podcontract.RestoreOutcomePartiallySucceeded
 }
 
 func isRestoreTerminal(pod *corev1.Pod) bool {
-	switch snapshotv1alpha1.ClassifyRestoreOutcome(pod.Status.Conditions) {
-	case snapshotv1alpha1.RestoreOutcomeSucceeded,
-		snapshotv1alpha1.RestoreOutcomeFailed,
-		snapshotv1alpha1.RestoreOutcomePartiallySucceeded:
-		return true
-	default:
-		return false
-	}
+	return podcontract.ClassifyRestoreOutcome(pod.Status.Conditions).Terminal()
 }
 
 func isRestorePodActive(pod *corev1.Pod) bool {

@@ -41,6 +41,11 @@ Snapshots are portable across compatible machines and can be restored on any nod
 | `nvidia.com/restore-from`          | Namespaced     | Added as a pod annotation to trigger restore from a named `PodSnapshot` in the same namespace.                                          |
 | `nvidia.com/restore-container-map` | Namespaced     | Optional comma-separated `source=destination` mappings used to clone the single captured container into one or more restore containers. |
 
+Restore producers must also implement the versioned
+[restore Pod contract](docs/restore-pod-contract.md). Go integrations should
+use the self-contained constants, builder, validator, and restore-outcome API
+from `github.com/ai-dynamo/snapshot/api/podcontract`.
+
 &nbsp;
 
 

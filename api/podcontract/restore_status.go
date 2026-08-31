@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package v1alpha1
+package podcontract
 
 import corev1 "k8s.io/api/core/v1"
 
@@ -24,9 +24,23 @@ const (
 	RestoreOutcomePartiallySucceeded RestoreOutcome = "PartiallySucceeded"
 )
 
+// Terminal reports whether the restore outcome is final.
+func (o RestoreOutcome) Terminal() bool {
+	switch o {
+	case RestoreOutcomeSucceeded, RestoreOutcomeFailed, RestoreOutcomePartiallySucceeded:
+		return true
+	default:
+		return false
+	}
+}
+
 // Stable reasons used on the nvidia.com/Restored Pod condition. Dependency-wait
 // reasons remain agent-internal; consumers should use ClassifyRestoreOutcome.
 const (
+	// RestoredCondition is the Pod status condition owned by the Snapshot node
+	// agent.
+	RestoredCondition = "nvidia.com/Restored"
+
 	// RestoreReasonInProgress marks active restore execution.
 	RestoreReasonInProgress = "RestoreInProgress"
 	// RestoreReasonSucceeded marks a terminal all-destinations success.
