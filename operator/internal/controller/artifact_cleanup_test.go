@@ -22,6 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -49,7 +50,7 @@ func TestSnapshotContentReconcilerAddsFinalizer(t *testing.T) {
 		Name: "content", UID: types.UID("uid-1"), ResourceVersion: "1", Finalizers: []string{"example.com/other"},
 	}}
 	kubeClient := ctrlfake.NewClientBuilder().WithScheme(artifactTestScheme(t)).WithObjects(content).Build()
-	_, err := reconcileSnapshotContent(context.Background(), kubeClient, t.TempDir(), ctrl.Request{NamespacedName: client.ObjectKey{Name: content.Name}})
+	_, err := reconcileSnapshotContent(context.Background(), kubeClient, record.NewFakeRecorder(10), t.TempDir(), ctrl.Request{NamespacedName: client.ObjectKey{Name: content.Name}})
 	require.NoError(t, err)
 
 	current := &snapshotv1alpha1.PodSnapshotContent{}
@@ -65,7 +66,7 @@ func TestSnapshotContentReconcilerDeletesCompleteRootBeforeFinalizer(t *testing.
 		Finalizers: []string{"example.com/other", PodSnapshotContentArtifactCleanupFinalizer},
 	}}
 	kubeClient := ctrlfake.NewClientBuilder().WithScheme(artifactTestScheme(t)).WithObjects(content).Build()
-	_, err := reconcileSnapshotContent(context.Background(), kubeClient, base, ctrl.Request{NamespacedName: client.ObjectKey{Name: content.Name}})
+	_, err := reconcileSnapshotContent(context.Background(), kubeClient, record.NewFakeRecorder(10), base, ctrl.Request{NamespacedName: client.ObjectKey{Name: content.Name}})
 	require.NoError(t, err)
 	_, err = os.Lstat(root)
 	require.True(t, os.IsNotExist(err))
@@ -82,7 +83,7 @@ func TestSnapshotContentReconcilerRemovesFinalizerWhenArtifactsRootIsAbsent(t *t
 		Finalizers: []string{PodSnapshotContentArtifactCleanupFinalizer},
 	}}
 	kubeClient := ctrlfake.NewClientBuilder().WithScheme(artifactTestScheme(t)).WithObjects(content).Build()
-	_, err := reconcileSnapshotContent(context.Background(), kubeClient, t.TempDir(), ctrl.Request{NamespacedName: client.ObjectKey{Name: content.Name}})
+	_, err := reconcileSnapshotContent(context.Background(), kubeClient, record.NewFakeRecorder(10), t.TempDir(), ctrl.Request{NamespacedName: client.ObjectKey{Name: content.Name}})
 	require.NoError(t, err)
 
 	current := &snapshotv1alpha1.PodSnapshotContent{}
@@ -102,12 +103,14 @@ func TestSnapshotContentReconcilerRetainsFinalizerWhenRootIsUnsafe(t *testing.T)
 		Finalizers: []string{PodSnapshotContentArtifactCleanupFinalizer},
 	}}
 	kubeClient := ctrlfake.NewClientBuilder().WithScheme(artifactTestScheme(t)).WithObjects(content).Build()
-	_, err = reconcileSnapshotContent(context.Background(), kubeClient, base, ctrl.Request{NamespacedName: client.ObjectKey{Name: content.Name}})
+	recorder := record.NewFakeRecorder(10)
+	_, err = reconcileSnapshotContent(context.Background(), kubeClient, recorder, base, ctrl.Request{NamespacedName: client.ObjectKey{Name: content.Name}})
 	require.ErrorContains(t, err, "must be a non-symlink directory")
 
 	current := &snapshotv1alpha1.PodSnapshotContent{}
 	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKey{Name: content.Name}, current))
 	assert.Contains(t, current.Finalizers, PodSnapshotContentArtifactCleanupFinalizer)
+	assert.Contains(t, <-recorder.Events, "Warning ArtifactCleanupBlocked")
 }
 
 type metadataReader struct {

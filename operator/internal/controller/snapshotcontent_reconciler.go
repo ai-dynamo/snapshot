@@ -11,6 +11,8 @@ import (
 
 	"github.com/ai-dynamo/snapshot/agent/pkg/artifact"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -20,20 +22,24 @@ import (
 const (
 	PodSnapshotContentArtifactCleanupFinalizer      = "nvidia.com/podsnapshotcontent-artifact-cleanup"
 	podSnapshotContentArtifactCleanupControllerName = "podsnapshotcontent-artifact-cleanup"
+	podSnapshotContentArtifactCleanupBlockedReason  = "ArtifactCleanupBlocked"
 )
+
+var errUnsafeArtifactRoot = errors.New("artifact root is not an ordinary directory")
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshotcontents,verbs=get;list;watch;patch
 
 func SetupSnapshotContentReconciler(mgr ctrl.Manager, basePath string) error {
+	recorder := mgr.GetEventRecorderFor(podSnapshotContentArtifactCleanupControllerName)
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(podSnapshotContentArtifactCleanupControllerName).
 		For(&snapshotv1alpha1.PodSnapshotContent{}).
 		Complete(reconcile.Func(func(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-			return reconcileSnapshotContent(ctx, mgr.GetClient(), basePath, req)
+			return reconcileSnapshotContent(ctx, mgr.GetClient(), recorder, basePath, req)
 		}))
 }
 
-func reconcileSnapshotContent(ctx context.Context, kubeClient client.Client, basePath string, req ctrl.Request) (ctrl.Result, error) {
+func reconcileSnapshotContent(ctx context.Context, kubeClient client.Client, recorder record.EventRecorder, basePath string, req ctrl.Request) (ctrl.Result, error) {
 	content := &snapshotv1alpha1.PodSnapshotContent{}
 	if err := kubeClient.Get(ctx, req.NamespacedName, content); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -50,6 +56,10 @@ func reconcileSnapshotContent(ctx context.Context, kubeClient client.Client, bas
 		return ctrl.Result{}, nil
 	}
 	if err := removeArtifactRoot(basePath, string(content.UID)); err != nil {
+		if errors.Is(err, errUnsafeArtifactRoot) {
+			recorder.Eventf(content, corev1.EventTypeWarning, podSnapshotContentArtifactCleanupBlockedReason,
+				"Artifact cleanup is blocked by an unsafe artifact root; remove it manually after verification: %v", err)
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -64,7 +74,7 @@ func removeArtifactRoot(basePath, contentUID string) error {
 		return err
 	}
 	if err := artifact.ValidateDirectory(root); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+		return fmt.Errorf("%w: %w", errUnsafeArtifactRoot, err)
 	}
 	if err := os.RemoveAll(root); err != nil {
 		return fmt.Errorf("remove artifact root %q: %w", root, err)

@@ -49,9 +49,16 @@ spec:
         - name: manager
           image: "{{ .Values.image.operator.repository }}:{{ .Values.image.operator.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.operator.pullPolicy }}
+          # Artifact cleanup removes CRIU files created as root on the shared PVC.
           securityContext:
             runAsUser: 0
             runAsGroup: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
           args:
             - {{ printf "--snapshot-storage-base-path=%v" .Values.storage.pvc.basePath | quote }}
             - {{ printf "--artifact-cleanup-scan-interval=%v" .Values.operator.artifactCleanup.scanInterval | quote }}
