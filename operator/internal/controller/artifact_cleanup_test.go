@@ -113,6 +113,32 @@ func TestSnapshotContentReconcilerRetainsFinalizerWhenRootIsUnsafe(t *testing.T)
 	assert.Contains(t, <-recorder.Events, "Warning ArtifactCleanupBlocked")
 }
 
+func TestSnapshotContentReconcilerRetainsFinalizerWhenArtifactsRootIsSymlink(t *testing.T) {
+	base := t.TempDir()
+	artifactsRoot, err := artifact.ResolveRoot(base)
+	require.NoError(t, err)
+	externalRoot := t.TempDir()
+	require.NoError(t, os.Symlink(externalRoot, artifactsRoot))
+	externalContentRoot := filepath.Join(externalRoot, "uid-4")
+	require.NoError(t, os.MkdirAll(externalContentRoot, 0o750))
+	now := metav1.Now()
+	content := &snapshotv1alpha1.PodSnapshotContent{ObjectMeta: metav1.ObjectMeta{
+		Name: "content", UID: types.UID("uid-4"), ResourceVersion: "1", DeletionTimestamp: &now,
+		Finalizers: []string{PodSnapshotContentArtifactCleanupFinalizer},
+	}}
+	kubeClient := ctrlfake.NewClientBuilder().WithScheme(artifactTestScheme(t)).WithObjects(content).Build()
+	recorder := record.NewFakeRecorder(10)
+	_, err = reconcileSnapshotContent(context.Background(), kubeClient, recorder, base, ctrl.Request{NamespacedName: client.ObjectKey{Name: content.Name}})
+	require.ErrorContains(t, err, "must be a non-symlink directory")
+	_, err = os.Lstat(externalContentRoot)
+	require.NoError(t, err, "cleanup must not follow the artifacts symlink")
+
+	current := &snapshotv1alpha1.PodSnapshotContent{}
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKey{Name: content.Name}, current))
+	assert.Contains(t, current.Finalizers, PodSnapshotContentArtifactCleanupFinalizer)
+	assert.Contains(t, <-recorder.Events, "Warning ArtifactCleanupBlocked")
+}
+
 type metadataReader struct {
 	list  func(*metav1.PartialObjectMetadataList, *client.ListOptions) error
 	calls int
@@ -144,7 +170,8 @@ func emptyMetadataPage(list *metav1.PartialObjectMetadataList, resourceVersion, 
 func TestArtifactOrphanScannerDeletesOnFirstAuthoritativeAbsence(t *testing.T) {
 	base, root := prepareTestArtifactRoot(t, "orphan-uid")
 	reader := &metadataReader{list: func(list *metav1.PartialObjectMetadataList, options *client.ListOptions) error {
-		require.Equal(t, int64(500), options.Raw.Limit)
+		require.Equal(t, int64(500), options.Limit)
+		require.Empty(t, options.Continue)
 		require.Empty(t, options.Raw.ResourceVersion)
 		emptyMetadataPage(list, "10", "")
 		return nil
@@ -158,14 +185,14 @@ func TestArtifactOrphanScannerDeletesOnFirstAuthoritativeAbsence(t *testing.T) {
 func TestArtifactOrphanScannerProtectsUIDOnFinalPage(t *testing.T) {
 	base, root := prepareTestArtifactRoot(t, "protected-uid")
 	reader := &metadataReader{list: func(list *metav1.PartialObjectMetadataList, options *client.ListOptions) error {
-		switch options.Raw.Continue {
+		switch options.Continue {
 		case "":
 			emptyMetadataPage(list, "20", "next")
 		case "next":
 			emptyMetadataPage(list, "20", "")
 			list.Items = []metav1.PartialObjectMetadata{{ObjectMeta: metav1.ObjectMeta{Name: "content", UID: types.UID("protected-uid")}}}
 		default:
-			return fmt.Errorf("unexpected continuation token %q", options.Raw.Continue)
+			return fmt.Errorf("unexpected continuation token %q", options.Continue)
 		}
 		return nil
 	}}

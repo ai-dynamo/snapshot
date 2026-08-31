@@ -149,7 +149,11 @@ func (s *artifactOrphanScanner) listExistingUIDsOnce(ctx context.Context) (map[t
 	for {
 		list := &metav1.PartialObjectMetadataList{}
 		list.SetGroupVersionKind(snapshotv1alpha1.GroupVersion.WithKind("PodSnapshotContentList"))
-		options := &client.ListOptions{Raw: &metav1.ListOptions{Limit: podSnapshotContentMetadataListPageLimit, Continue: continueToken, ResourceVersion: ""}}
+		options := &client.ListOptions{
+			Limit:    podSnapshotContentMetadataListPageLimit,
+			Continue: continueToken,
+			Raw:      &metav1.ListOptions{ResourceVersion: ""},
+		}
 		if err := s.apiReader.List(ctx, list, options); err != nil {
 			return nil, err
 		}

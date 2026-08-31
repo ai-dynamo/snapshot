@@ -69,6 +69,16 @@ func reconcileSnapshotContent(ctx context.Context, kubeClient client.Client, rec
 }
 
 func removeArtifactRoot(basePath, contentUID string) error {
+	artifactsRoot, err := artifact.ResolveRoot(basePath)
+	if err != nil {
+		return err
+	}
+	if err := artifact.ValidateDirectory(artifactsRoot); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("%w: %w", errUnsafeArtifactRoot, err)
+	}
 	root, err := artifact.ResolveContentRoot(basePath, contentUID)
 	if err != nil {
 		return err
