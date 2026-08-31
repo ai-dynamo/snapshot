@@ -105,24 +105,8 @@ func TestAllReturnsACopy(t *testing.T) {
 }
 
 func TestSnapshotJobConditionsUseMapListSchema(t *testing.T) {
-	manifestJSON, err := utilyaml.ToJSON([]byte(SnapshotJobCRD()))
-	if err != nil {
-		t.Fatalf("convert SnapshotJob CRD to JSON: %v", err)
-	}
-	var crd map[string]any
-	if err := json.Unmarshal(manifestJSON, &crd); err != nil {
-		t.Fatalf("decode SnapshotJob CRD: %v", err)
-	}
-
-	versions := nestedSlice(t, crd, "spec", "versions")
-	if len(versions) == 0 {
-		t.Fatal("SnapshotJob CRD has no versions")
-	}
-	version, ok := versions[0].(map[string]any)
-	if !ok {
-		t.Fatalf("SnapshotJob CRD version has type %T, want object", versions[0])
-	}
-	conditions := nestedMap(t, version, "schema", "openAPIV3Schema", "properties", "status", "properties", "conditions")
+	schema := snapshotJobOpenAPISchema(t)
+	conditions := nestedMap(t, schema, "properties", "status", "properties", "conditions")
 
 	if got := conditions["x-kubernetes-list-type"]; got != "map" {
 		t.Errorf("conditions x-kubernetes-list-type = %v, want map", got)
@@ -134,6 +118,57 @@ func TestSnapshotJobConditionsUseMapListSchema(t *testing.T) {
 }
 
 func TestSnapshotJobRejectsMissingSpecAndLongNamesAtAdmission(t *testing.T) {
+	schema := snapshotJobOpenAPISchema(t)
+
+	required := nestedSlice(t, schema, "required")
+	if !slices.Contains(required, any("spec")) {
+		t.Errorf("SnapshotJob required fields = %v, want spec", required)
+	}
+
+	const nameRule = "size(self.metadata.name) <= 63"
+	validations := nestedSlice(t, schema, "x-kubernetes-validations")
+	if !containsValidationRule(validations, nameRule) {
+		t.Errorf("SnapshotJob root validations = %v, want rule %q", validations, nameRule)
+	}
+}
+
+func TestSnapshotJobIncludesTemplateMetadataAdmissionRules(t *testing.T) {
+	schema := snapshotJobOpenAPISchema(t)
+	template := nestedMap(t, schema,
+		"properties", "spec", "properties", "podSnapshotTemplate")
+	metadata := nestedMap(t, template, "properties", "metadata")
+	for _, field := range []string{"labels", "annotations"} {
+		property := nestedMap(t, metadata, "properties", field)
+		if got := property["maxProperties"]; got != float64(4096) {
+			t.Errorf("PodSnapshot template metadata %s maxProperties = %v, want 4096", field, got)
+		}
+	}
+	validations := nestedSlice(t, metadata, "x-kubernetes-validations")
+	wantRules := []string{
+		"!has(self.labels) || self.labels.all(k, !format.qualifiedName().validate(k).hasValue())",
+		"!has(self.labels) || self.labels.all(k, size(self.labels[k]) <= 63)",
+		"!has(self.annotations) || self.annotations.all(k, !format.qualifiedName().validate(k).hasValue())",
+	}
+	for _, rule := range wantRules {
+		if !containsValidationRule(validations, rule) {
+			t.Errorf("PodSnapshot template metadata validations = %v, want rule %q", validations, rule)
+		}
+	}
+
+	templateValidations := nestedSlice(t, template, "x-kubernetes-validations")
+	wantTemplateRules := []string{
+		"!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-job' in self.metadata.labels)",
+		"!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-job-uid' in self.metadata.labels)",
+	}
+	for _, rule := range wantTemplateRules {
+		if !containsValidationRule(templateValidations, rule) {
+			t.Errorf("PodSnapshot template validations = %v, want rule %q", templateValidations, rule)
+		}
+	}
+}
+
+func snapshotJobOpenAPISchema(t *testing.T) map[string]any {
+	t.Helper()
 	manifestJSON, err := utilyaml.ToJSON([]byte(SnapshotJobCRD()))
 	if err != nil {
 		t.Fatalf("convert SnapshotJob CRD to JSON: %v", err)
@@ -151,22 +186,17 @@ func TestSnapshotJobRejectsMissingSpecAndLongNamesAtAdmission(t *testing.T) {
 	if !ok {
 		t.Fatalf("SnapshotJob CRD version has type %T, want object", versions[0])
 	}
-	schema := nestedMap(t, version, "schema", "openAPIV3Schema")
+	return nestedMap(t, version, "schema", "openAPIV3Schema")
+}
 
-	required := nestedSlice(t, schema, "required")
-	if !slices.Contains(required, any("spec")) {
-		t.Errorf("SnapshotJob required fields = %v, want spec", required)
-	}
-
-	const nameRule = "size(self.metadata.name) <= 63"
-	validations := nestedSlice(t, schema, "x-kubernetes-validations")
+func containsValidationRule(validations []any, rule string) bool {
 	for _, validation := range validations {
 		entry, ok := validation.(map[string]any)
-		if ok && entry["rule"] == nameRule {
-			return
+		if ok && entry["rule"] == rule {
+			return true
 		}
 	}
-	t.Errorf("SnapshotJob root validations = %v, want rule %q", validations, nameRule)
+	return false
 }
 
 func nestedMap(t *testing.T, object map[string]any, fields ...string) map[string]any {
