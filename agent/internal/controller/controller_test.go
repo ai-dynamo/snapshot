@@ -509,6 +509,35 @@ func TestReconcileRestorePodReportsAllDestinationsFailed(t *testing.T) {
 	assert.Contains(t, payload, "engine-1")
 }
 
+func TestIsRestoreTerminalRequiresKnownTerminalOutcome(t *testing.T) {
+	tests := []struct {
+		name   string
+		status corev1.ConditionStatus
+		reason string
+		want   bool
+	}{
+		{name: "succeeded", status: corev1.ConditionTrue, reason: snapshotv1alpha1.RestoreReasonSucceeded, want: true},
+		{name: "failed", status: corev1.ConditionFalse, reason: snapshotv1alpha1.RestoreReasonFailed, want: true},
+		{name: "partially succeeded", status: corev1.ConditionFalse, reason: snapshotv1alpha1.RestoreReasonPartiallySucceeded, want: true},
+		{name: "in progress", status: corev1.ConditionFalse, reason: snapshotv1alpha1.RestoreReasonInProgress},
+		{name: "unrecognized reason", status: corev1.ConditionFalse, reason: "RestoreIncompatible"},
+		{name: "unknown status", status: corev1.ConditionUnknown, reason: snapshotv1alpha1.RestoreReasonSucceeded},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			pod := restorePod(nil)
+			pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+				Type:   corev1.PodConditionType(snapshotv1alpha1.RestoredCondition),
+				Status: test.status,
+				Reason: test.reason,
+			})
+
+			assert.Equal(t, test.want, isRestoreTerminal(pod))
+		})
+	}
+}
+
 func TestRestorePodContainersKeepsAggregateInProgressWhileDestinationIsPending(t *testing.T) {
 	pod := multiRestorePod()
 	pod.Status.ContainerStatuses = pod.Status.ContainerStatuses[:1]
@@ -624,7 +653,7 @@ func TestPreflightRestorePendingStates(t *testing.T) {
 func TestPreflightRestoreFailsWhenInProgressSnapshotDisappears(t *testing.T) {
 	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
 	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
-		Type: corev1.PodConditionType(snapshotv1alpha1.RestoredCondition), Status: corev1.ConditionFalse, Reason: restoreInProgressReason,
+		Type: corev1.PodConditionType(snapshotv1alpha1.RestoredCondition), Status: corev1.ConditionFalse, Reason: snapshotv1alpha1.RestoreReasonInProgress,
 	})
 	w := makeTestController(t, pod)
 
@@ -720,7 +749,7 @@ func TestReconcileRestorePodReportsPendingPreflightConditionAndEvent(t *testing.
 func TestPendingDependencyDoesNotOverwriteRestoreInProgress(t *testing.T) {
 	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
 	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
-		Type: corev1.PodConditionType(snapshotv1alpha1.RestoredCondition), Status: corev1.ConditionFalse, Reason: restoreInProgressReason,
+		Type: corev1.PodConditionType(snapshotv1alpha1.RestoredCondition), Status: corev1.ConditionFalse, Reason: snapshotv1alpha1.RestoreReasonInProgress,
 	})
 	w := makeTestController(t, pod)
 
@@ -728,7 +757,7 @@ func TestPendingDependencyDoesNotOverwriteRestoreInProgress(t *testing.T) {
 
 	assert.True(t, requeue)
 	assert.False(t, hasPodStatusApply(w))
-	assert.Equal(t, restoreInProgressReason, restoredPodCondition(pod).Reason)
+	assert.Equal(t, snapshotv1alpha1.RestoreReasonInProgress, restoredPodCondition(pod).Reason)
 	assert.True(t, sawEventReason(w.clientset.(*fake.Clientset), "ArtifactPending"))
 }
 
@@ -742,7 +771,7 @@ func TestProcessRestoreQueueItemReportsNonRunningPhaseAsFailed(t *testing.T) {
 	payload := string(lastPodStatusApply(t, w).GetPatch())
 	assert.Contains(t, payload, `"reason":"RestoreFailed"`)
 	assert.Contains(t, payload, "phase Failed")
-	assert.True(t, sawEventReason(w.clientset.(*fake.Clientset), restoreFailedReason))
+	assert.True(t, sawEventReason(w.clientset.(*fake.Clientset), snapshotv1alpha1.RestoreReasonFailed))
 }
 
 func TestContainerPollingDoesNotSetInProgressBeforeExecution(t *testing.T) {
@@ -882,7 +911,7 @@ func TestProcessRestoreQueueItemIgnoresFailedRestoreDuringPreflight(t *testing.T
 	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
 		Type:    corev1.PodConditionType(snapshotv1alpha1.RestoredCondition),
 		Status:  corev1.ConditionFalse,
-		Reason:  restoreFailedReason,
+		Reason:  snapshotv1alpha1.RestoreReasonFailed,
 		Message: "original restore failure",
 	})
 	w := makeTestController(t, pod)
@@ -904,7 +933,7 @@ func TestProcessRestoreQueueItemIgnoresFailedRestoreDuringPreflight(t *testing.T
 	assert.Zero(t, getCalls, "failed restore preflight must not read PodSnapshot or PodSnapshotContent")
 	condition := restoredPodCondition(pod)
 	require.NotNil(t, condition)
-	assert.Equal(t, restoreFailedReason, condition.Reason)
+	assert.Equal(t, snapshotv1alpha1.RestoreReasonFailed, condition.Reason)
 	assert.Equal(t, "original restore failure", condition.Message)
 	event := eventForReason(w.clientset.(*fake.Clientset), "RestoreAlreadyFailed")
 	require.NotNil(t, event)
@@ -921,7 +950,7 @@ func TestDeletingInProgressRestoreRemovesFinalizer(t *testing.T) {
 	now := metav1.Now()
 	pod.DeletionTimestamp = &now
 	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
-		Type: corev1.PodConditionType(snapshotv1alpha1.RestoredCondition), Status: corev1.ConditionFalse, Reason: restoreInProgressReason,
+		Type: corev1.PodConditionType(snapshotv1alpha1.RestoredCondition), Status: corev1.ConditionFalse, Reason: snapshotv1alpha1.RestoreReasonInProgress,
 	})
 	w := makeTestController(t, pod)
 
@@ -1091,7 +1120,7 @@ func TestRestoreStatusRetryUsesCompletionSentinelWithoutReplayingRestore(t *test
 	assert.True(t, hasFinalizer(live, restorePodFinalizer))
 	condition := restoredPodCondition(live)
 	require.NotNil(t, condition)
-	assert.Equal(t, restoreInProgressReason, condition.Reason)
+	assert.Equal(t, snapshotv1alpha1.RestoreReasonInProgress, condition.Reason)
 
 	processQueuedRestorePod(t, w, live)
 	assert.Equal(t, 1, restoreCalls, "completion sentinel must prevent CRIU replay")
@@ -1103,7 +1132,7 @@ func TestRestoreStatusRetryUsesCompletionSentinelWithoutReplayingRestore(t *test
 	condition = restoredPodCondition(live)
 	require.NotNil(t, condition)
 	assert.Equal(t, corev1.ConditionTrue, condition.Status)
-	assert.Equal(t, restoreSucceededReason, condition.Reason)
+	assert.Equal(t, snapshotv1alpha1.RestoreReasonSucceeded, condition.Reason)
 }
 
 func TestRestoreFinalizerRemovalRetriesWithoutReplayingRestore(t *testing.T) {
@@ -1271,7 +1300,7 @@ func TestRunRestoreFinalizesExistingCompletionSentinelWithoutReplay(t *testing.T
 	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
 		Type:   corev1.PodConditionType(snapshotv1alpha1.RestoredCondition),
 		Status: corev1.ConditionFalse,
-		Reason: restoreInProgressReason,
+		Reason: snapshotv1alpha1.RestoreReasonInProgress,
 	})
 	w := makeTestController(t, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
