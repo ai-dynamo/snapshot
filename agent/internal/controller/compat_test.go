@@ -5,6 +5,7 @@ package controller
 
 import (
 	"context"
+	"runtime"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -17,6 +18,7 @@ import (
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
 // A checkpoint whose manifest cannot be read is not incompatible, it is broken.
@@ -29,7 +31,7 @@ func TestPreflightCompatibilityAllowsUnreadableManifest(t *testing.T) {
 	err := r.controller.preflightCompatibility(r.pod, &restoreArtifact{
 		SourceContainerName: gatedRestoreContainer,
 		Path:                path,
-	})
+	}, gatedRestoreMappings())
 
 	require.NoError(t, err)
 	assert.Empty(t, r.comparison.calls, "comparison ran without a manifest")
@@ -50,12 +52,44 @@ func TestPreflightCompatibilityComparesRecordedFacts(t *testing.T) {
 	err := r.controller.preflightCompatibility(r.pod, &restoreArtifact{
 		SourceContainerName: gatedRestoreContainer,
 		Path:                path,
-	})
+	}, gatedRestoreMappings())
 
 	require.NoError(t, err)
 	require.Len(t, r.comparison.calls, 1)
 	assert.Equal(t, compat.GatePreflight, r.comparison.calls[0].gate)
 	assert.Equal(t, []string{"/etc/hosts", "/model-cache"}, r.comparison.calls[0].source.ExternalizedMounts)
+}
+
+// The gate compares the checkpoint against every destination, so each target
+// side has to describe this node and its destination container.
+func TestPreflightCompatibilityDescribesEveryRestoreTarget(t *testing.T) {
+	r := newGatedRestore(t)
+	r.pod.Spec.Containers[0].Image = "nvcr.io/nvidia/tritonserver:24.09-py3"
+	r.pod.Status.ContainerStatuses[0].ImageID = "sha256:deadbeef"
+	r.pod.Spec.Containers = append(r.pod.Spec.Containers, corev1.Container{
+		Name:  "engine-1",
+		Image: "nvcr.io/nvidia/tritonserver:25.01-py3",
+	})
+	r.pod.Status.ContainerStatuses = append(r.pod.Status.ContainerStatuses, corev1.ContainerStatus{
+		Name:    "engine-1",
+		ImageID: "sha256:cafebabe",
+	})
+
+	mappings := append(gatedRestoreMappings(), snapshotv1alpha1.RestoreContainerMapping{
+		Source:      gatedRestoreContainer,
+		Destination: "engine-1",
+	})
+	require.NoError(t, r.controller.preflightCompatibility(r.pod, r.artifact, mappings))
+
+	require.Len(t, r.comparison.calls, 2)
+	assert.Equal(t, compat.Facts{
+		CPUArch: runtime.GOARCH,
+		Image:   "nvcr.io/nvidia/tritonserver:24.09-py3",
+	}, r.comparison.calls[0].target)
+	assert.Equal(t, compat.Facts{
+		CPUArch: runtime.GOARCH,
+		Image:   "nvcr.io/nvidia/tritonserver:25.01-py3",
+	}, r.comparison.calls[1].target)
 }
 
 // Both gates log the same sentence for the same refusal, and each names the gate
