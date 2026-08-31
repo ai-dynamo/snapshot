@@ -275,6 +275,17 @@ func (m *CheckpointManifest) CompatFacts() compat.Facts {
 	}
 }
 
+// WithPodFacts records what the captured container ran as. It is the inverse of
+// the pod half of CompatFacts, and sits next to it so the two field lists cannot
+// drift apart.
+func (m SourcePodManifest) WithPodFacts(facts compat.Facts) SourcePodManifest {
+	m.Image = facts.Image
+	m.ImageID = facts.ImageID
+	m.CPULimit = facts.CPULimit
+	m.MemoryLimit = facts.MemoryLimit
+	return m
+}
+
 // gpuFacts prefers the described GPUs and falls back to the UUID list, so an
 // artifact captured before the models were recorded still reports its GPU count.
 func (m *CheckpointManifest) gpuFacts() compat.GPUFacts {

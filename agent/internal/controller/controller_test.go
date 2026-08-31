@@ -79,6 +79,10 @@ func (r *fakeRuntime) ResolveContainerByPod(_ context.Context, _, _, _ string) (
 	return 0, nil, errors.New("not implemented")
 }
 
+func (r *fakeRuntime) ResolveContainerImageID(_ context.Context, _ string) (string, error) {
+	return "", errors.New("not implemented")
+}
+
 func (r *fakeRuntime) Close() error { return nil }
 
 type noopInjector struct{}
