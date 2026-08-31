@@ -33,12 +33,13 @@ Snapshots are portable across compatible machines and can be restored on any nod
 &nbsp;
 
 ## APIs
-| Resource | Scope | Role |
-|----------|-------|------|
-| `PodSnapshot` | Namespaced | Created by callers to request a capture or reference an artifact for restore. |
-| `PodSnapshotContent` | Cluster-scoped | System-managed record of the physical artifact, bound to a `PodSnapshot`. Created by the Snapshot operator, never by the caller. |
-| `nvidia.com/restore-from` | Namespaced | Added as a pod annotation to trigger restore from a named `PodSnapshot` in the same namespace. |
-| `nvidia.com/restore-container-map` | Namespaced | Optional comma-separated `source=destination` mappings used to clone the single captured container into one or more restore containers. |
+| Resource                           | Scope          | Role                                                                                                                                    |
+|------------------------------------|----------------|-----------------------------------------------------------------------------------------------------------------------------------------|
+| `PodSnapshot`                      | Namespaced     | Created by callers to request a capture or reference an artifact for restore.                                                           |
+| `PodSnapshotContent`               | Cluster-scoped | System-managed record of the physical artifact, bound to a `PodSnapshot`. Created by the Snapshot operator, never by the caller.        |
+| `SnapshotJob`                      | Namespaced     | Created by callers to run a workload pod from a template and capture it into a `PodSnapshot` in one declarative, one-shot object.       |
+| `nvidia.com/restore-from`          | Namespaced     | Added as a pod annotation to trigger restore from a named `PodSnapshot` in the same namespace.                                          |
+| `nvidia.com/restore-container-map` | Namespaced     | Optional comma-separated `source=destination` mappings used to clone the single captured container into one or more restore containers. |
 
 &nbsp;
 
