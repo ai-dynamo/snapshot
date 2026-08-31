@@ -23,6 +23,7 @@ type MountInfo struct {
 // CheckpointContainerSnapshot holds runtime container state collected during checkpoint inspection.
 type CheckpointContainerSnapshot struct {
 	PID            int
+	ImageID        string
 	RootFS         string
 	UpperDir       string
 	OCISpec        *specs.Spec

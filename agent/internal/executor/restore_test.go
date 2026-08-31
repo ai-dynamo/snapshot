@@ -49,6 +49,10 @@ func (r *restoreFakeRuntime) ResolveContainerByPod(ctx context.Context, pod, ns,
 	return 0, nil, errors.New("pod lookup should not be used")
 }
 
+func (r *restoreFakeRuntime) ResolveContainerImageID(context.Context, string) (string, error) {
+	return "", errors.New("not implemented")
+}
+
 func (r *restoreFakeRuntime) Close() error { return nil }
 
 func TestInspectRestoreUsesContainerIDWhenProvided(t *testing.T) {

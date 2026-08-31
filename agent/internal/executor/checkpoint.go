@@ -36,6 +36,11 @@ type CheckpointRequest struct {
 	PodNamespace  string
 	PodIP         string
 	Clientset     kubernetes.Interface
+
+	// Pod carries the image reference and limits the target container runs with, read from
+	// the live pod by the caller rather than here: the capture path has no API
+	// client for the pod, and the reconciler already holds it.
+	Pod compat.Facts
 }
 
 type checkpointPhaseTimings struct {
@@ -139,6 +144,10 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to resolve container: %w", err)
 	}
+	imageID, err := rt.ResolveContainerImageID(ctx, containerID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to resolve container image ID: %w", err)
+	}
 
 	var hostCgroupPath string
 	if cgPath, err := snapshotruntime.ResolveCgroupRootFromHostPID(pid); err == nil && cgPath != "" {
@@ -216,6 +225,7 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 
 	return &types.CheckpointContainerSnapshot{
 		PID:            pid,
+		ImageID:        imageID,
 		RootFS:         rootFS,
 		UpperDir:       upperDir,
 		OCISpec:        ociSpec,
@@ -240,12 +250,15 @@ func configureCheckpoint(
 	if err != nil {
 		return nil, nil, err
 	}
+	podFacts := req.Pod
+	podFacts.ImageID = state.ImageID
 
 	m := types.NewCheckpointManifest(
 		req.ContentUID,
 		req.ContainerName,
 		types.NewCRIUDumpManifest(criuOpts, cfg.CRIU),
-		types.NewSourcePodManifest(req.ContainerID, state.PID, req.NodeName, req.PodName, req.PodNamespace, req.PodIP, state.StdioFDs),
+		types.NewSourcePodManifest(req.ContainerID, state.PID, req.NodeName, req.PodName, req.PodNamespace, req.PodIP, state.StdioFDs).
+			WithPodFacts(podFacts),
 		types.NewOverlayManifest(cfg.Overlay, state.UpperDir, state.OCISpec),
 		types.NewHostManifest(cfg.HostKernelVersion),
 	)
