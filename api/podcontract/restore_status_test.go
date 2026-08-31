@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package v1alpha1
+package podcontract
 
 import (
 	"testing"
@@ -77,5 +77,21 @@ func TestClassifyRestoreOutcome(t *testing.T) {
 				t.Fatalf("ClassifyRestoreOutcome() = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestRestoreOutcomeTerminal(t *testing.T) {
+	tests := map[RestoreOutcome]bool{
+		RestoreOutcomeUnknown:            false,
+		RestoreOutcomePending:            false,
+		RestoreOutcomeSucceeded:          true,
+		RestoreOutcomeFailed:             true,
+		RestoreOutcomePartiallySucceeded: true,
+		RestoreOutcome("future-outcome"): false,
+	}
+	for outcome, want := range tests {
+		if got := outcome.Terminal(); got != want {
+			t.Errorf("RestoreOutcome(%q).Terminal() = %t, want %t", outcome, got, want)
+		}
 	}
 }

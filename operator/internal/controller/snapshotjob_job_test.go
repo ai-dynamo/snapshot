@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -53,7 +54,7 @@ func TestBuildSourceJob(t *testing.T) {
 		require.NotNil(t, job.Spec.Template.Spec.SecurityContext.SeccompProfile)
 		profile := job.Spec.Template.Spec.SecurityContext.SeccompProfile
 		assert.Equal(t, corev1.SeccompProfileTypeLocalhost, profile.Type)
-		assert.Equal(t, ptr.To(snapshotv1alpha1.DefaultSeccompLocalhostProfile), profile.LocalhostProfile)
+		assert.Equal(t, ptr.To(podcontract.DefaultSeccompLocalhostProfile), profile.LocalhostProfile)
 	})
 
 	t.Run("stamps the owner label without clobbering existing pod template labels", func(t *testing.T) {
@@ -111,14 +112,14 @@ func TestBuildSourceJob(t *testing.T) {
 		require.NotNil(t, main.ReadinessProbe)
 		require.NotNil(t, main.ReadinessProbe.Exec)
 		assert.Equal(t,
-			[]string{"cat", snapshotv1alpha1.SnapshotControlMountPath + "/" + snapshotv1alpha1.ReadyForSnapshotFile},
+			[]string{"cat", podcontract.SnapshotControlMountPath + "/" + podcontract.ReadyForSnapshotFile},
 			main.ReadinessProbe.Exec.Command)
 
 		var mountPaths []string
 		for _, m := range main.VolumeMounts {
 			mountPaths = append(mountPaths, m.MountPath)
 		}
-		assert.Contains(t, mountPaths, snapshotv1alpha1.SnapshotControlMountPath,
+		assert.Contains(t, mountPaths, podcontract.SnapshotControlMountPath,
 			"the target container must mount the control volume the probe and sentinel live in")
 	})
 

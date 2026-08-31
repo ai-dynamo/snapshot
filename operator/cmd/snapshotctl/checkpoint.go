@@ -15,7 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/validation"
 
-	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotprotocol "github.com/ai-dynamo/snapshot/operator/internal/protocol"
 )
 
@@ -73,7 +73,7 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 	}, snapshotprotocol.SourceJobOptions{
 		Namespace:       namespace,
 		TargetContainer: containerName,
-		SeccompProfile:  snapshotv1alpha1.DefaultSeccompLocalhostProfile,
+		SeccompProfile:  podcontract.DefaultSeccompLocalhostProfile,
 		Name:            checkpointJobName,
 		WrapLaunchJob:   opts.CudaCheckpointWrap,
 	})

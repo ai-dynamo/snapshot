@@ -55,6 +55,14 @@ That pod manifest must:
 - describe the worker pod you want to checkpoint or restore
 - use the placeholder image for checkpoint-aware flows
 - match the runtime-relevant worker settings you care about preserving
+- provide an inert, long-running entrypoint for each restore destination
+
+`snapshotctl restore` applies Snapshot's generic
+[restore Pod contract](../../../docs/restore-pod-contract.md), including the
+annotations, control volume, environment, startup gate, and seccomp profile. It
+does not replace container commands or inject a workload-specific standby
+environment variable. A platform-specific entrypoint convention remains the
+platform's responsibility.
 
 In practice, start from the real worker pod spec you would normally run, then
 keep only the pod-level fields needed to recreate that worker accurately.

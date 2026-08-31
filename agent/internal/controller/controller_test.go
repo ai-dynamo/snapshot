@@ -38,6 +38,7 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -206,7 +207,7 @@ func pendingRestoreReason(t *testing.T, err error) string {
 }
 
 func restorePod(annotations map[string]string) *corev1.Pod {
-	return &corev1.Pod{
+	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        "restore-worker",
 			Namespace:   "inference",
@@ -231,31 +232,48 @@ func restorePod(annotations map[string]string) *corev1.Pod {
 			}},
 		},
 	}
+	snapshotName, restoreRequested := annotations[podcontract.RestoreFromAnnotation]
+	_, hasExplicitMapping := annotations[podcontract.RestoreContainerMapAnnotation]
+	if !restoreRequested || hasExplicitMapping {
+		return pod
+	}
+	shaped, err := podcontract.Build(
+		pod,
+		podcontract.Request{
+			SnapshotName:    snapshotName,
+			SourceContainer: "main",
+		},
+		podcontract.Options{},
+	)
+	if err != nil {
+		panic(err)
+	}
+	return shaped
 }
 
 func multiRestorePod() *corev1.Pod {
 	pod := restorePod(map[string]string{
-		snapshotv1alpha1.RestoreFromAnnotation:         "snapshot-a",
-		snapshotv1alpha1.RestoreContainerMapAnnotation: "main=engine-0,main=engine-1",
+		podcontract.RestoreFromAnnotation:         "snapshot-a",
+		podcontract.RestoreContainerMapAnnotation: "main=engine-0,main=engine-1",
 	})
 	pod.Spec.Volumes = []corev1.Volume{{
-		Name:         snapshotv1alpha1.SnapshotControlVolumeName,
+		Name:         podcontract.SnapshotControlVolumeName,
 		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 	}}
 	pod.Spec.Containers = []corev1.Container{
 		{
 			Name: "engine-0",
 			VolumeMounts: []corev1.VolumeMount{{
-				Name:      snapshotv1alpha1.SnapshotControlVolumeName,
-				MountPath: snapshotv1alpha1.SnapshotControlMountPath,
+				Name:      podcontract.SnapshotControlVolumeName,
+				MountPath: podcontract.SnapshotControlMountPath,
 				SubPath:   "engine-0",
 			}},
 		},
 		{
 			Name: "engine-1",
 			VolumeMounts: []corev1.VolumeMount{{
-				Name:      snapshotv1alpha1.SnapshotControlVolumeName,
-				MountPath: snapshotv1alpha1.SnapshotControlMountPath,
+				Name:      podcontract.SnapshotControlVolumeName,
+				MountPath: podcontract.SnapshotControlMountPath,
 				SubPath:   "engine-1",
 			}},
 		},
@@ -264,7 +282,22 @@ func multiRestorePod() *corev1.Pod {
 		{Name: "engine-0", ContainerID: "containerd://engine-0-id", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
 		{Name: "engine-1", ContainerID: "containerd://engine-1-id", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
 	}
-	return pod
+	shaped, err := podcontract.Build(
+		pod,
+		podcontract.Request{
+			SnapshotName:    "snapshot-a",
+			SourceContainer: "main",
+			Mappings: []podcontract.ContainerMapping{
+				{Source: "main", Destination: "engine-0"},
+				{Source: "main", Destination: "engine-1"},
+			},
+		},
+		podcontract.Options{},
+	)
+	if err != nil {
+		panic(err)
+	}
+	return shaped
 }
 
 func processQueuedRestorePod(t *testing.T, w *NodeController, pod *corev1.Pod) {
@@ -280,7 +313,7 @@ func processQueuedRestorePod(t *testing.T, w *NodeController, pod *corev1.Pod) {
 
 func restoredPodCondition(pod *corev1.Pod) *corev1.PodCondition {
 	for i := range pod.Status.Conditions {
-		if pod.Status.Conditions[i].Type == corev1.PodConditionType(snapshotv1alpha1.RestoredCondition) {
+		if pod.Status.Conditions[i].Type == corev1.PodConditionType(podcontract.RestoredCondition) {
 			return &pod.Status.Conditions[i]
 		}
 	}
@@ -331,7 +364,7 @@ func TestTweakNodePodListOptions(t *testing.T) {
 }
 
 func TestEnqueueRestorePodFiltersAndDeduplicatesEvents(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	w := makeTestController(t, pod)
 	t.Cleanup(w.restoreQueue.ShutDown)
 
@@ -370,7 +403,7 @@ func TestRestoreQueueRequeuesDirtyKeyAfterDone(t *testing.T) {
 }
 
 func TestProcessRestoreQueueItemUsesCachedPod(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	w := makeTestController(t, pod)
 	w.restoreQueue.ShutDown()
 	testClock := clocktesting.NewFakeClock(time.Now())
@@ -393,7 +426,7 @@ func TestProcessRestoreQueueItemUsesCachedPod(t *testing.T) {
 }
 
 func TestPreflightRestore(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	snapshot, content := readySnapshotObjects()
 	w := makeTestController(t, pod, snapshot, content)
 	path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, string(content.UID), "main")
@@ -410,7 +443,7 @@ func TestPreflightRestore(t *testing.T) {
 	assert.Equal(t, string(content.UID), plan.artifact.ContentUID)
 	assert.Equal(t, "main", plan.artifact.SourceContainerName)
 	assert.Equal(t, path, plan.artifact.Path)
-	assert.Equal(t, []snapshotv1alpha1.RestoreContainerMapping{{Source: "main", Destination: "main"}}, plan.mappings)
+	assert.Equal(t, []podcontract.ContainerMapping{{Source: "main", Destination: "main"}}, plan.mappings)
 }
 
 func TestReconcileRestorePodRunsMappedDestinationsConcurrently(t *testing.T) {
@@ -433,7 +466,7 @@ func TestReconcileRestorePodRunsMappedDestinationsConcurrently(t *testing.T) {
 	}
 	sentinels := make(chan int, 2)
 	w.writeControlSentinelFn = func(pid int, name string) error {
-		assert.Equal(t, snapshotv1alpha1.RestoreCompleteFile, name)
+		assert.Equal(t, podcontract.RestoreCompleteFile, name)
 		sentinels <- pid
 		return nil
 	}
@@ -516,19 +549,19 @@ func TestIsRestoreTerminalRequiresKnownTerminalOutcome(t *testing.T) {
 		reason string
 		want   bool
 	}{
-		{name: "succeeded", status: corev1.ConditionTrue, reason: snapshotv1alpha1.RestoreReasonSucceeded, want: true},
-		{name: "failed", status: corev1.ConditionFalse, reason: snapshotv1alpha1.RestoreReasonFailed, want: true},
-		{name: "partially succeeded", status: corev1.ConditionFalse, reason: snapshotv1alpha1.RestoreReasonPartiallySucceeded, want: true},
-		{name: "in progress", status: corev1.ConditionFalse, reason: snapshotv1alpha1.RestoreReasonInProgress},
+		{name: "succeeded", status: corev1.ConditionTrue, reason: podcontract.RestoreReasonSucceeded, want: true},
+		{name: "failed", status: corev1.ConditionFalse, reason: podcontract.RestoreReasonFailed, want: true},
+		{name: "partially succeeded", status: corev1.ConditionFalse, reason: podcontract.RestoreReasonPartiallySucceeded, want: true},
+		{name: "in progress", status: corev1.ConditionFalse, reason: podcontract.RestoreReasonInProgress},
 		{name: "unrecognized reason", status: corev1.ConditionFalse, reason: "RestoreIncompatible"},
-		{name: "unknown status", status: corev1.ConditionUnknown, reason: snapshotv1alpha1.RestoreReasonSucceeded},
+		{name: "unknown status", status: corev1.ConditionUnknown, reason: podcontract.RestoreReasonSucceeded},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			pod := restorePod(nil)
 			pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
-				Type:   corev1.PodConditionType(snapshotv1alpha1.RestoredCondition),
+				Type:   corev1.PodConditionType(podcontract.RestoredCondition),
 				Status: test.status,
 				Reason: test.reason,
 			})
@@ -550,7 +583,7 @@ func TestRestorePodContainersKeepsAggregateInProgressWhileDestinationIsPending(t
 	}
 	plan := &restorePlan{
 		artifact: &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"},
-		mappings: []snapshotv1alpha1.RestoreContainerMapping{
+		mappings: []podcontract.ContainerMapping{
 			{Source: "main", Destination: "engine-0"},
 			{Source: "main", Destination: "engine-1"},
 		},
@@ -566,7 +599,7 @@ func TestRestorePodContainersKeepsAggregateInProgressWhileDestinationIsPending(t
 
 func TestPreflightRestoreRejectsInvalidMappingBeforeExecution(t *testing.T) {
 	pod := multiRestorePod()
-	pod.Annotations[snapshotv1alpha1.RestoreContainerMapAnnotation] = "worker=engine-0"
+	pod.Annotations[podcontract.RestoreContainerMapAnnotation] = "worker=engine-0"
 	snapshot, content := readySnapshotObjects()
 	w := makeTestController(t, pod, snapshot, content)
 	restoreCalls := 0
@@ -600,10 +633,50 @@ func TestPreflightRestoreRejectsSharedMultiDestinationControlMount(t *testing.T)
 	assert.Contains(t, err.Error(), `subPath "engine-1"`)
 }
 
+func TestPreflightRestoreRejectsInvalidRestorePodContract(t *testing.T) {
+	snapshot, content := readySnapshotObjects()
+	tests := map[string]func(*corev1.Pod){
+		"control volume": func(pod *corev1.Pod) {
+			pod.Spec.Volumes = nil
+		},
+		"control environment": func(pod *corev1.Pod) {
+			pod.Spec.Containers[0].Env = nil
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+			mutate(pod)
+			w := makeTestController(t, pod, snapshot, content)
+
+			plan, err := w.preflightRestore(context.Background(), pod)
+
+			assert.Nil(t, plan)
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestValidateRestoreTargetIgnoresWorkloadStartupProbe(t *testing.T) {
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+	pod.Spec.Containers[0].StartupProbe = &corev1.Probe{
+		ProbeHandler:     corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"true"}}},
+		PeriodSeconds:    7,
+		FailureThreshold: 42,
+	}
+	snapshot, content := readySnapshotObjects()
+
+	target, mappings, err := validateRestoreTarget(pod, snapshot, content)
+
+	require.NoError(t, err)
+	assert.Equal(t, "snapshot-a", target.SnapshotName)
+	assert.Equal(t, []podcontract.ContainerMapping{{Source: "main", Destination: "main"}}, mappings)
+}
+
 func TestPreflightRestoreRetriesInProgressCondition(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
-		Type: corev1.PodConditionType(snapshotv1alpha1.RestoredCondition), Status: corev1.ConditionFalse, Reason: "RestoreInProgress",
+		Type: corev1.PodConditionType(podcontract.RestoredCondition), Status: corev1.ConditionFalse, Reason: "RestoreInProgress",
 	})
 	snapshot, content := readySnapshotObjects()
 	w := makeTestController(t, pod, snapshot, content)
@@ -619,7 +692,7 @@ func TestPreflightRestoreRetriesInProgressCondition(t *testing.T) {
 }
 
 func TestPreflightRestorePendingStates(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	t.Run("missing snapshot", func(t *testing.T) {
 		w := makeTestController(t, pod)
 		artifact, err := w.preflightRestore(context.Background(), pod)
@@ -651,9 +724,9 @@ func TestPreflightRestorePendingStates(t *testing.T) {
 }
 
 func TestPreflightRestoreFailsWhenInProgressSnapshotDisappears(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
-		Type: corev1.PodConditionType(snapshotv1alpha1.RestoredCondition), Status: corev1.ConditionFalse, Reason: snapshotv1alpha1.RestoreReasonInProgress,
+		Type: corev1.PodConditionType(podcontract.RestoredCondition), Status: corev1.ConditionFalse, Reason: podcontract.RestoreReasonInProgress,
 	})
 	w := makeTestController(t, pod)
 
@@ -667,7 +740,7 @@ func TestPreflightRestoreFailsWhenInProgressSnapshotDisappears(t *testing.T) {
 }
 
 func TestRestorePreflightAPIErrorsUseStablePendingMessages(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	snapshot, _ := readySnapshotObjects()
 
 	tests := []struct {
@@ -719,7 +792,7 @@ func TestRestorePreflightAPIErrorsUseStablePendingMessages(t *testing.T) {
 }
 
 func TestDeletingSnapshotDependencyFailsRestoreBeforeLaunch(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	snapshot, content := readySnapshotObjects()
 	now := metav1.Now()
 	snapshot.DeletionTimestamp = &now
@@ -741,7 +814,7 @@ func TestDeletingSnapshotDependencyFailsRestoreBeforeLaunch(t *testing.T) {
 }
 
 func TestDeletingContentDependencyFailsRestoreBeforeLaunch(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	snapshot, content := readySnapshotObjects()
 	now := metav1.Now()
 	content.DeletionTimestamp = &now
@@ -763,7 +836,7 @@ func TestDeletingContentDependencyFailsRestoreBeforeLaunch(t *testing.T) {
 }
 
 func TestPreflightRestoreWaitsForPodIPBeforeTCPRestore(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	snapshot, content := readySnapshotObjects()
 	w := makeTestController(t, pod, snapshot, content)
 	w.config.CRIU.TcpEstablished = true
@@ -778,7 +851,7 @@ func TestPreflightRestoreWaitsForPodIPBeforeTCPRestore(t *testing.T) {
 }
 
 func TestReconcileRestorePodReportsPendingPreflightConditionAndEvent(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	w := makeTestController(t, pod)
 
 	requeue := w.reconcileRestorePod(context.Background(), pod)
@@ -791,9 +864,9 @@ func TestReconcileRestorePodReportsPendingPreflightConditionAndEvent(t *testing.
 }
 
 func TestPendingDependencyDoesNotOverwriteRestoreInProgress(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
-		Type: corev1.PodConditionType(snapshotv1alpha1.RestoredCondition), Status: corev1.ConditionFalse, Reason: snapshotv1alpha1.RestoreReasonInProgress,
+		Type: corev1.PodConditionType(podcontract.RestoredCondition), Status: corev1.ConditionFalse, Reason: podcontract.RestoreReasonInProgress,
 	})
 	w := makeTestController(t, pod)
 
@@ -801,12 +874,12 @@ func TestPendingDependencyDoesNotOverwriteRestoreInProgress(t *testing.T) {
 
 	assert.True(t, requeue)
 	assert.False(t, hasPodStatusApply(w))
-	assert.Equal(t, snapshotv1alpha1.RestoreReasonInProgress, restoredPodCondition(pod).Reason)
+	assert.Equal(t, podcontract.RestoreReasonInProgress, restoredPodCondition(pod).Reason)
 	assert.True(t, sawEventReason(w.clientset.(*fake.Clientset), "ArtifactPending"))
 }
 
 func TestProcessRestoreQueueItemReportsNonRunningPhaseAsFailed(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	pod.Status.Phase = corev1.PodFailed
 	w := makeTestController(t, pod)
 
@@ -815,11 +888,11 @@ func TestProcessRestoreQueueItemReportsNonRunningPhaseAsFailed(t *testing.T) {
 	payload := string(lastPodStatusApply(t, w).GetPatch())
 	assert.Contains(t, payload, `"reason":"RestoreFailed"`)
 	assert.Contains(t, payload, "phase Failed")
-	assert.True(t, sawEventReason(w.clientset.(*fake.Clientset), snapshotv1alpha1.RestoreReasonFailed))
+	assert.True(t, sawEventReason(w.clientset.(*fake.Clientset), podcontract.RestoreReasonFailed))
 }
 
 func TestContainerPollingDoesNotSetInProgressBeforeExecution(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	pod.Status.ContainerStatuses[0].ContainerID = ""
 	snapshot, content := readySnapshotObjects()
 	w := makeTestController(t, pod, snapshot, content)
@@ -839,7 +912,7 @@ func TestContainerPollingDoesNotSetInProgressBeforeExecution(t *testing.T) {
 }
 
 func TestPreflightRestoreValidatesContentBacklink(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	tests := map[string]func(*snapshotv1alpha1.PodSnapshotContent){
 		"namespace": func(content *snapshotv1alpha1.PodSnapshotContent) {
 			content.Spec.PodSnapshotRef.Namespace = "other"
@@ -867,7 +940,7 @@ func TestPreflightRestoreValidatesContentBacklink(t *testing.T) {
 }
 
 func TestPreflightRestoreTerminalStates(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	tests := map[string]struct {
 		mutateSnapshot func(*snapshotv1alpha1.PodSnapshot)
 		mutateContent  func(*snapshotv1alpha1.PodSnapshotContent)
@@ -920,7 +993,7 @@ func TestPreflightRestoreTerminalStates(t *testing.T) {
 }
 
 func TestReconcileRestorePodReportsInvalidBacklinkAsFailedCondition(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	snapshot, content := readySnapshotObjects()
 	content.Spec.PodSnapshotRef.UID = "other-uid"
 	w := makeTestController(t, pod, snapshot, content)
@@ -933,10 +1006,10 @@ func TestReconcileRestorePodReportsInvalidBacklinkAsFailedCondition(t *testing.T
 }
 
 func TestProcessRestoreQueueItemEmitsEventWhenRestoreAlreadyCompleted(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	pod.Finalizers = []string{restorePodFinalizer}
 	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
-		Type: corev1.PodConditionType(snapshotv1alpha1.RestoredCondition), Status: corev1.ConditionTrue, Reason: "RestoreSucceeded",
+		Type: corev1.PodConditionType(podcontract.RestoredCondition), Status: corev1.ConditionTrue, Reason: "RestoreSucceeded",
 	})
 	w := makeTestController(t, pod)
 
@@ -949,13 +1022,13 @@ func TestProcessRestoreQueueItemEmitsEventWhenRestoreAlreadyCompleted(t *testing
 }
 
 func TestProcessRestoreQueueItemIgnoresFailedRestoreDuringPreflight(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	pod.Finalizers = []string{restorePodFinalizer}
 	pod.Status.Phase = corev1.PodFailed
 	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
-		Type:    corev1.PodConditionType(snapshotv1alpha1.RestoredCondition),
+		Type:    corev1.PodConditionType(podcontract.RestoredCondition),
 		Status:  corev1.ConditionFalse,
-		Reason:  snapshotv1alpha1.RestoreReasonFailed,
+		Reason:  podcontract.RestoreReasonFailed,
 		Message: "original restore failure",
 	})
 	w := makeTestController(t, pod)
@@ -977,7 +1050,7 @@ func TestProcessRestoreQueueItemIgnoresFailedRestoreDuringPreflight(t *testing.T
 	assert.Zero(t, getCalls, "failed restore preflight must not read PodSnapshot or PodSnapshotContent")
 	condition := restoredPodCondition(pod)
 	require.NotNil(t, condition)
-	assert.Equal(t, snapshotv1alpha1.RestoreReasonFailed, condition.Reason)
+	assert.Equal(t, podcontract.RestoreReasonFailed, condition.Reason)
 	assert.Equal(t, "original restore failure", condition.Message)
 	event := eventForReason(w.clientset.(*fake.Clientset), "RestoreAlreadyFailed")
 	require.NotNil(t, event)
@@ -989,12 +1062,12 @@ func TestProcessRestoreQueueItemIgnoresFailedRestoreDuringPreflight(t *testing.T
 }
 
 func TestDeletingInProgressRestoreRemovesFinalizer(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	pod.Finalizers = []string{restorePodFinalizer}
 	now := metav1.Now()
 	pod.DeletionTimestamp = &now
 	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
-		Type: corev1.PodConditionType(snapshotv1alpha1.RestoredCondition), Status: corev1.ConditionFalse, Reason: snapshotv1alpha1.RestoreReasonInProgress,
+		Type: corev1.PodConditionType(podcontract.RestoredCondition), Status: corev1.ConditionFalse, Reason: podcontract.RestoreReasonInProgress,
 	})
 	w := makeTestController(t, pod)
 
@@ -1007,7 +1080,7 @@ func TestDeletingInProgressRestoreRemovesFinalizer(t *testing.T) {
 }
 
 func TestReconcileRestorePodEmitsEventWhenStatusUpdateFails(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	w := makeTestController(t, pod)
 	w.clientset.(*fake.Clientset).PrependReactor("patch", "pods", func(clientgotesting.Action) (bool, runtime.Object, error) {
 		return true, nil, errors.New("status patch failed")
@@ -1021,8 +1094,8 @@ func TestReconcileRestorePodEmitsEventWhenStatusUpdateFails(t *testing.T) {
 
 func TestPreflightRestoreAllowsUnrelatedAnnotations(t *testing.T) {
 	pod := restorePod(map[string]string{
-		snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a",
-		"example.com/team":                     "inference",
+		podcontract.RestoreFromAnnotation: "snapshot-a",
+		"example.com/team":                "inference",
 	})
 	snapshot, content := readySnapshotObjects()
 	w := makeTestController(t, pod, snapshot, content)
@@ -1038,7 +1111,7 @@ func TestPreflightRestoreAllowsUnrelatedAnnotations(t *testing.T) {
 }
 
 func TestReconcileRestorePodRunsPreflightOnce(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	snapshot, content := readySnapshotObjects()
 	w := makeTestController(t, pod, snapshot, content)
 	path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, string(content.UID), "main")
@@ -1067,7 +1140,7 @@ func TestReconcileRestorePodRunsPreflightOnce(t *testing.T) {
 }
 
 func TestRestoreFinalizerIsNotAddedWhilePreflightIsPending(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "missing-snapshot"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "missing-snapshot"})
 	w := makeTestController(t, pod)
 
 	processQueuedRestorePod(t, w, pod)
@@ -1087,7 +1160,7 @@ func TestRestoreFinalizerIsNotAddedWhilePreflightIsPending(t *testing.T) {
 }
 
 func TestRestoreFinalizerProtectsExecutionAndIsRemovedAfterSuccess(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	snapshot, content := readySnapshotObjects()
 	w := makeTestController(t, pod, snapshot, content)
 	path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, string(content.UID), "main")
@@ -1116,7 +1189,7 @@ func TestRestoreFinalizerProtectsExecutionAndIsRemovedAfterSuccess(t *testing.T)
 }
 
 func TestRestoreStatusRetryUsesCompletionSentinelWithoutReplayingRestore(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	snapshot, content := readySnapshotObjects()
 	w := makeTestController(t, pod, snapshot, content)
 	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
@@ -1132,13 +1205,13 @@ func TestRestoreStatusRetryUsesCompletionSentinelWithoutReplayingRestore(t *test
 	sentinelWritten := false
 	w.writeControlSentinelFn = func(pid int, name string) error {
 		assert.Equal(t, 4242, pid)
-		assert.Equal(t, snapshotv1alpha1.RestoreCompleteFile, name)
+		assert.Equal(t, podcontract.RestoreCompleteFile, name)
 		sentinelWritten = true
 		return nil
 	}
 	w.controlSentinelExistsFn = func(pid int, name string) (bool, error) {
 		assert.Equal(t, 4242, pid)
-		assert.Equal(t, snapshotv1alpha1.RestoreCompleteFile, name)
+		assert.Equal(t, podcontract.RestoreCompleteFile, name)
 		return sentinelWritten, nil
 	}
 	statusPatches := 0
@@ -1164,7 +1237,7 @@ func TestRestoreStatusRetryUsesCompletionSentinelWithoutReplayingRestore(t *test
 	assert.True(t, hasFinalizer(live, restorePodFinalizer))
 	condition := restoredPodCondition(live)
 	require.NotNil(t, condition)
-	assert.Equal(t, snapshotv1alpha1.RestoreReasonInProgress, condition.Reason)
+	assert.Equal(t, podcontract.RestoreReasonInProgress, condition.Reason)
 
 	processQueuedRestorePod(t, w, live)
 	assert.Equal(t, 1, restoreCalls, "completion sentinel must prevent CRIU replay")
@@ -1176,11 +1249,11 @@ func TestRestoreStatusRetryUsesCompletionSentinelWithoutReplayingRestore(t *test
 	condition = restoredPodCondition(live)
 	require.NotNil(t, condition)
 	assert.Equal(t, corev1.ConditionTrue, condition.Status)
-	assert.Equal(t, snapshotv1alpha1.RestoreReasonSucceeded, condition.Reason)
+	assert.Equal(t, podcontract.RestoreReasonSucceeded, condition.Reason)
 }
 
 func TestRestoreFinalizerRemovalRetriesWithoutReplayingRestore(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	snapshot, content := readySnapshotObjects()
 	w := makeTestController(t, pod, snapshot, content)
 	path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, string(content.UID), "main")
@@ -1218,7 +1291,7 @@ func TestRestoreFinalizerRemovalRetriesWithoutReplayingRestore(t *testing.T) {
 }
 
 func TestApplyRestoredConditionUsesServerSideApply(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	w := makeTestController(t, pod)
 	err := w.applyRestoredCondition(context.Background(), pod, corev1.ConditionFalse, "SnapshotPending", "waiting")
 	require.NoError(t, err)
@@ -1235,9 +1308,9 @@ func TestApplyRestoredConditionUsesServerSideApply(t *testing.T) {
 
 func TestApplyRestoredConditionPreservesTransitionTimeForSameStatus(t *testing.T) {
 	transition := metav1.NewTime(time.Unix(123, 0))
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
-		Type: corev1.PodConditionType(snapshotv1alpha1.RestoredCondition), Status: corev1.ConditionFalse, LastTransitionTime: transition,
+		Type: corev1.PodConditionType(podcontract.RestoredCondition), Status: corev1.ConditionFalse, LastTransitionTime: transition,
 	})
 	w := makeTestController(t, pod)
 	err := w.applyRestoredCondition(context.Background(), pod, corev1.ConditionFalse, "ArtifactPending", "waiting")
@@ -1258,7 +1331,7 @@ func TestInFlightKeyIsDeduplicatedForCapture(t *testing.T) {
 }
 
 func TestRunRestoreCleanupFailureStillCompletesRestore(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	w := makeTestController(t, pod)
 	artifactPath := t.TempDir()
 	artifact := &restoreArtifact{
@@ -1290,7 +1363,7 @@ func TestRunRestoreCleanupFailureStillCompletesRestore(t *testing.T) {
 }
 
 func TestRunRestoreRetriesFullRestoreUntilFailureCleanupSucceeds(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	w := makeTestController(t, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
 	artifact := &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"}
@@ -1318,7 +1391,7 @@ func TestRunRestoreRetriesFullRestoreUntilFailureCleanupSucceeds(t *testing.T) {
 }
 
 func TestRunRestoreFailureKillsPlaceholder(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	pod.Finalizers = []string{restorePodFinalizer}
 	w := makeTestController(t, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
@@ -1340,17 +1413,17 @@ func TestRunRestoreFailureKillsPlaceholder(t *testing.T) {
 }
 
 func TestRunRestoreFinalizesExistingCompletionSentinelWithoutReplay(t *testing.T) {
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
-		Type:   corev1.PodConditionType(snapshotv1alpha1.RestoredCondition),
+		Type:   corev1.PodConditionType(podcontract.RestoredCondition),
 		Status: corev1.ConditionFalse,
-		Reason: snapshotv1alpha1.RestoreReasonInProgress,
+		Reason: podcontract.RestoreReasonInProgress,
 	})
 	w := makeTestController(t, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
 	w.controlSentinelExistsFn = func(pid int, name string) (bool, error) {
 		assert.Equal(t, 4242, pid)
-		assert.Equal(t, snapshotv1alpha1.RestoreCompleteFile, name)
+		assert.Equal(t, podcontract.RestoreCompleteFile, name)
 		return true, nil
 	}
 	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {

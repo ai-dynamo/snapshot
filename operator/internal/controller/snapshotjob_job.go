@@ -10,6 +10,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	contentvalidation "k8s.io/apimachinery/pkg/api/validate/content"
 
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/snapshot/operator/internal/protocol"
 )
@@ -54,7 +55,7 @@ func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, error) {
 		Namespace:             sj.Namespace,
 		Name:                  sj.Name,
 		TargetContainer:       targetContainer,
-		SeccompProfile:        snapshotv1alpha1.DefaultSeccompLocalhostProfile,
+		SeccompProfile:        podcontract.DefaultSeccompLocalhostProfile,
 		ActiveDeadlineSeconds: sj.Spec.ActiveDeadlineSeconds,
 		TTLSecondsAfterFinish: nil,
 		WrapLaunchJob:         false,

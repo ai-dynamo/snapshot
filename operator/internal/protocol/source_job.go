@@ -12,7 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
-	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
 type SourceJobOptions struct {
@@ -28,8 +28,8 @@ type SourceJobOptions struct {
 func NewSourceJob(podTemplate *corev1.PodTemplateSpec, opts SourceJobOptions) (*batchv1.Job, error) {
 	podTemplate = podTemplate.DeepCopy()
 	for _, annotation := range []string{
-		snapshotv1alpha1.RestoreFromAnnotation,
-		snapshotv1alpha1.RestoreContainerMapAnnotation,
+		podcontract.RestoreFromAnnotation,
+		podcontract.RestoreContainerMapAnnotation,
 	} {
 		if _, restoreRequested := podTemplate.Annotations[annotation]; restoreRequested {
 			return nil, fmt.Errorf("source job pod template must not set %s", annotation)
@@ -78,7 +78,7 @@ func NewSourceJob(podTemplate *corev1.PodTemplateSpec, opts SourceJobOptions) (*
 	targetContainer.ReadinessProbe = &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
 			Exec: &corev1.ExecAction{
-				Command: []string{"cat", filepath.Join(snapshotv1alpha1.SnapshotControlMountPath, snapshotv1alpha1.ReadyForSnapshotFile)},
+				Command: []string{"cat", filepath.Join(podcontract.SnapshotControlMountPath, podcontract.ReadyForSnapshotFile)},
 			},
 		},
 		PeriodSeconds: 1,
@@ -165,7 +165,7 @@ export CUDA_CHECKPOINT_JOB_FILE="$job_file"
 exec "$@"`
 
 	wrappedArgs := make([]string, 0, len(command)+len(args)+7)
-	wrappedArgs = append(wrappedArgs, "--launch-job", "/bin/sh", "-c", persistJobFileScript, "dynamo-cuda-checkpoint", snapshotv1alpha1.CUDAJobFilePath)
+	wrappedArgs = append(wrappedArgs, "--launch-job", "/bin/sh", "-c", persistJobFileScript, "dynamo-cuda-checkpoint", podcontract.CUDAJobFilePath)
 	wrappedArgs = append(wrappedArgs, command...)
 	wrappedArgs = append(wrappedArgs, args...)
 	return []string{"cuda-checkpoint"}, wrappedArgs
