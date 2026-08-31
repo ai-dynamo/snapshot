@@ -72,6 +72,84 @@ def test_successful_snapshot_captures_cpu_gpu_and_fs(
         raise
 
 
+# The value does not matter, only that one is set: a limit neither side records
+# compares equal to itself and proves nothing.
+RECORDED_MEMORY_LIMIT = "4Gi"
+
+
+@pytest.mark.snapshot_success
+@pytest.mark.gpu
+def test_snapshot_records_the_facts_a_restore_is_checked_against(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    """The recorded facts have to be the machine's, not merely present.
+
+    Everything the compatibility gates decide on is read at capture and can
+    never be recovered afterwards, so this compares each recorded fact against
+    the node object and against nvidia-smi inside the pod that was captured.
+    """
+    try:
+        source, source_node = create_ready_source(
+            config, run, gpu=True, memory_limit=RECORDED_MEMORY_LIMIT
+        )
+        snap.wait_for_state_observations(
+            config.namespace,
+            run.source_pod,
+            run.source_token,
+            gpu=True,
+            minimum=2,
+        )
+        # Read before the capture, while the source container is still running.
+        visible_gpus = snap.visible_gpus(config.namespace, run.source_pod)
+        assert visible_gpus, "the GPU workload could not see a GPU"
+        source_status = next(
+            status
+            for status in source.status.container_statuses
+            if status.name == snap.CONTAINER
+        )
+        source_image_id = snap.runtime_image_id(
+            config, source_node, source_status.container_id
+        )
+
+        snap.create_podsnapshot(
+            config.namespace,
+            run.snapshot_name,
+            run.source_pod,
+            source.metadata.uid,
+        )
+        _, content = snap.wait_for_snapshot_ready(config.namespace, run.snapshot_name)
+        manifest = snap.checkpoint_manifest(
+            config, source_node, content["metadata"]["uid"]
+        )
+
+        node_info = k8s.read_node(source_node).status.node_info
+        host = manifest["host"]
+        assert host["kernelVersion"] == node_info.kernel_version
+        assert host["cpuArch"] == node_info.architecture
+
+        pod = k8s.read_pod(config.namespace, run.source_pod)
+        container = next(c for c in pod.spec.containers if c.name == snap.CONTAINER)
+        limits = (container.resources.limits or {}) if container.resources else {}
+        recorded_pod = manifest["k8s"]
+        assert recorded_pod["image"] == container.image
+        assert recorded_pod["imageId"] == source_image_id
+        assert recorded_pod["memoryLimit"] == limits["memory"]
+        # This pod sets no CPU limit, and an absent fact is recorded as absent
+        # rather than invented, which is what makes it refuse nothing later.
+        assert "cpu" not in limits
+        assert "cpuLimit" not in recorded_pod
+
+        cuda = manifest["cudaRestore"]
+        assert sorted(
+            (gpu["uuid"], gpu["productName"]) for gpu in cuda["sourceGpus"]
+        ) == sorted((gpu["uuid"], gpu["name"]) for gpu in visible_gpus)
+        assert cuda["sourceDriverVersion"] == visible_gpus[0]["driver"]
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
 @pytest.mark.snapshot_success
 @pytest.mark.gpu
 def test_successful_restore_recovers_cpu_gpu_and_fs_from_snapshot(
