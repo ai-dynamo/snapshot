@@ -57,3 +57,19 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].securityContext.seccompProfile.type
           value: RuntimeDefault
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: 50m
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 128Mi
+
+  - it: omits the manager seccomp profile for the OpenShift anyuid SCC
+    set:
+      openshift.enabled: true
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[0].securityContext.seccompProfile
+      - equal:
+          path: spec.template.metadata.annotations["openshift.io/required-scc"]
+          value: anyuid
