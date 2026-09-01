@@ -14,6 +14,8 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
 CONTROL_DIR = Path(os.environ.get("SNAPSHOT_CONTROL_DIR", "/snapshot-control"))
 MODEL = os.environ["SNAPSHOT_MODEL"]
 

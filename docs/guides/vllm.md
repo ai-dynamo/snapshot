@@ -49,6 +49,12 @@ listening. To validate the restored replica, send a `POST` request to
 `/generate` with a JSON body such as
 `{"prompt":"What is the capital of Italy?"}`.
 
+Before constructing `AsyncLLM`, the program sets
+`VLLM_WORKER_MULTIPROC_METHOD=spawn`. vLLM otherwise defaults to `fork`, which
+can copy CUDA file descriptors into child processes after the parent has
+initialized CUDA. Starting workers with `spawn` gives each child a fresh
+process state that Snapshot can capture and restore.
+
 The Dockerfile starts from the official vLLM 0.27.1 image and installs the
 Ubuntu 24.04 glibc required by the current Snapshot restore bundle. It creates
 `/snapshot-control` and adds `app.py`.
