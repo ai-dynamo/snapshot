@@ -124,6 +124,13 @@ daemonset:
   # Affinity rules
   affinity: {}
 
+  # Architectures eligible for the agent DaemonSet. Set to [] to disable the
+  # chart-managed architecture node affinity and supply daemonset.affinity
+  # yourself.
+  supportedArchitectures:
+    - amd64
+    - arm64
+
   # Init container configuration
   initContainer:
     # Busybox image for seccomp profile deployment. Pinned by digest: this is

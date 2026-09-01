@@ -5,9 +5,12 @@ include $(REPO_HACK_DIR)/tools.mk
 
 .PHONY: build test tidy lint fmt
 
+GOOS ?= linux
+GOARCH ?= $(shell go env GOARCH)
+
 build:
-	GOOS=linux GOARCH=amd64 go build -o bin/agent ./cmd/agent
-	GOOS=linux GOARCH=amd64 go build -o bin/nsrestore ./cmd/nsrestore
+	GOOS=$(GOOS) GOARCH=$(GOARCH) go build -o bin/agent ./cmd/agent
+	GOOS=$(GOOS) GOARCH=$(GOARCH) go build -o bin/nsrestore ./cmd/nsrestore
 
 test:
 	go test ./...

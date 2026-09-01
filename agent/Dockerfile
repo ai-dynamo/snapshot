@@ -38,8 +38,8 @@ ARG BASE_IMAGE=placeholder-requires-base-image-arg
 # =============================================================================
 FROM ${DOCKER_PROXY}library/golang:${GO_VERSION} AS go-base
 
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETOS
+ARG TARGETARCH
 
 RUN echo "Building for ${TARGETOS}/${TARGETARCH}"
 
@@ -78,8 +78,8 @@ RUN go test ./... -v
 # =============================================================================
 FROM go-base AS builder
 
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETOS
+ARG TARGETARCH
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /snapshot-agent ./cmd/agent
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /nsrestore ./cmd/nsrestore
@@ -88,9 +88,33 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s
 RUN mkdir -p /go-src && go mod vendor -o /go-src/vendor
 
 # =============================================================================
+# Stage: Agent base - validate target arch and capture package baseline
+# =============================================================================
+FROM ${AGENT_BASE_IMAGE} AS agent-base
+
+ARG TARGETARCH
+
+RUN case "${TARGETARCH}" in \
+      amd64|arm64) ;; \
+      *) echo "ERROR: Snapshot supports amd64 and arm64 agent images, not ${TARGETARCH}" >&2; exit 1 ;; \
+    esac
+
+RUN set -eu; \
+    dpkg-query -W -f='${Package}\t${Version}\t${source:Package}\t${source:Version}\n' \
+      > /base-packages.raw.tsv; \
+    LC_ALL=C sort /base-packages.raw.tsv > /base-packages.tsv; \
+    rm /base-packages.raw.tsv; \
+    test -s /base-packages.tsv; \
+    awk -F'\t' \
+      'NF != 4 || $1 == "" || $2 == "" || $3 == "" || $4 == "" { \
+         printf "invalid base manifest row %d: %s\n", NR, $0 > "/dev/stderr"; bad = 1 \
+       } \
+       END { exit bad ? 1 : 0 }' /base-packages.tsv
+
+# =============================================================================
 # Stage: CUDA checkpoint helper builder
 # =============================================================================
-FROM ${AGENT_BASE_IMAGE} AS cuda-helper-builder
+FROM agent-base AS cuda-helper-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -166,13 +190,7 @@ RUN tar -czf /criu-src.tar.gz -C /tmp --exclude-vcs criu
 #
 # Shared by the agent and sources stages so both see the same package set.
 # =============================================================================
-FROM ${AGENT_BASE_IMAGE} AS runtime-deps
-
-ARG TARGETARCH=amd64
-
-RUN if [ "${TARGETARCH}" != "amd64" ]; then \
-      echo "ERROR: Snapshot requires x86_64 (cuda-checkpoint has no ${TARGETARCH} binary)" >&2; exit 1; \
-    fi
+FROM agent-base AS runtime-deps
 
 # Install CRIU runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -198,11 +216,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # =============================================================================
 FROM runtime-deps AS sources
 
-COPY compliance/base-packages.tsv /tmp/base-packages.tsv
 COPY compliance/collect-sources.sh /tmp/collect-sources.sh
 
 # Debian/Ubuntu source for the delta against the NGC base image.
-RUN sh /tmp/collect-sources.sh /tmp/base-packages.tsv /sources/dpkg
+RUN sh /tmp/collect-sources.sh /base-packages.tsv /sources/dpkg
 
 # CRIU source, at the exact ref this image was built from.
 COPY --from=criu-builder /criu-src.tar.gz /sources/criu/criu-src.tar.gz
@@ -223,8 +240,16 @@ COPY --from=criu-builder /tmp/criu/COPYING /legal/CRIU/COPYING
 RUN criu --version
 
 # Copy CUDA checkpoint binaries
-COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
-COPY --from=criu-builder /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
+ARG TARGETARCH
+COPY --from=criu-builder /tmp/cuda-checkpoint/bin /tmp/cuda-checkpoint-bin
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+      amd64) cuda_checkpoint_arch=x86_64_Linux ;; \
+      arm64) cuda_checkpoint_arch=aarch64_Linux ;; \
+      *) echo "ERROR: Snapshot supports amd64 and arm64 agent images, not ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    install -D -m 0755 "/tmp/cuda-checkpoint-bin/${cuda_checkpoint_arch}/cuda-checkpoint" /usr/local/sbin/cuda-checkpoint; \
+    install -D -m 0644 "/tmp/cuda-checkpoint-bin/${cuda_checkpoint_arch}/LICENSE" /legal/cuda-checkpoint/LICENSE
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
 # nsmount resolves this helper at /usr/local/sbin/ns-bind-mount (see
 # agent/internal/nsmount/mount.go defaultBinaryPath).
@@ -234,6 +259,7 @@ RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-help
 
 # Copy the built binaries
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
+RUN /usr/local/bin/snapshot-agent -h >/dev/null 2>&1
 
 # Assemble the injection bundle: bind-mounted read-only into the placeholder's
 # mount namespace at /tmp/snapshot-binaries during restore (internal/nsmount).
@@ -244,7 +270,6 @@ RUN mkdir -p /snapshot-binaries/lib /snapshot-binaries/criu-plugins
 COPY --from=builder /nsrestore /snapshot-binaries/nsrestore
 COPY --from=criu-builder /criu-install/usr/local/sbin/criu /snapshot-binaries/criu
 COPY --from=criu-builder /criu-install/usr/local/lib/snapshot/criu-plugins/ /snapshot-binaries/criu-plugins/
-COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /snapshot-binaries/cuda-checkpoint
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-checkpoint-helper
 
 # Network binaries needed during restore:
@@ -256,10 +281,17 @@ COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-
 # for restore specifically.
 # All resolve through PATH inside the namespace.
 RUN set -eu; \
+    case "${TARGETARCH}" in \
+      amd64) cuda_checkpoint_arch=x86_64_Linux ;; \
+      arm64) cuda_checkpoint_arch=aarch64_Linux ;; \
+      *) echo "ERROR: Snapshot supports amd64 and arm64 agent images, not ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    cp "/tmp/cuda-checkpoint-bin/${cuda_checkpoint_arch}/cuda-checkpoint" /snapshot-binaries/cuda-checkpoint; \
     cp -L "$(command -v ip)" "$(command -v tar)" /snapshot-binaries/; \
     chmod +x /snapshot-binaries/criu /snapshot-binaries/nsrestore \
              /snapshot-binaries/cuda-checkpoint /snapshot-binaries/cuda-checkpoint-helper \
              /snapshot-binaries/ip /snapshot-binaries/tar
+RUN /snapshot-binaries/nsrestore -h >/dev/null 2>&1
 
 # Shared-library closure of the bundled binaries and plugins.
 #
@@ -347,14 +379,15 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 FROM ${BASE_IMAGE} AS placeholder
 
 ARG BASE_IMAGE
-ARG TARGETARCH=amd64
+ARG TARGETARCH
 ENV ORIGINAL_BASE_IMAGE=${BASE_IMAGE}
 
 USER root
 
-RUN if [ "${TARGETARCH}" != "amd64" ]; then \
-      echo "ERROR: Snapshot requires x86_64" >&2; exit 1; \
-    fi
+RUN case "${TARGETARCH}" in \
+      amd64|arm64) ;; \
+      *) echo "ERROR: Snapshot supports amd64 and arm64 placeholder images, not ${TARGETARCH}" >&2; exit 1 ;; \
+    esac
 
 # Checkpoint volume mount point. This is a storage concern — no restore tooling
 # is provisioned here; see the stage comment above.

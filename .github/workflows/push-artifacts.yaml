@@ -118,6 +118,7 @@ jobs:
       - name: Build and push operator image
         run: |
           make docker-build-operator \
+            OPERATOR_PLATFORM="linux/amd64,linux/arm64" \
             TAGS="${{ needs.version.outputs.tags }}" \
             DOCKER_BUILD_ARGS="--push \
               --cache-from=type=gha,scope=operator \
@@ -149,14 +150,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # --platform=linux/amd64: Dockerfile exits 1 on other arches
       - name: Build and push agent image
         timeout-minutes: 45
         run: |
           make docker-build-agent \
+            AGENT_PLATFORM="linux/amd64,linux/arm64" \
             TAGS="${{ needs.version.outputs.tags }}" \
-            DOCKER_BUILD_ARGS="--platform=linux/amd64 \
-              --push \
+            DOCKER_BUILD_ARGS="--push \
               --cache-from=type=gha,scope=agent \
               --cache-to=type=gha,scope=agent,mode=max"
 

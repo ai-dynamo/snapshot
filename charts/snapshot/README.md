@@ -18,8 +18,8 @@ namespaces. Workload pods never mount checkpoint storage.
 
 ## Prerequisites
 
-- Kubernetes cluster with x86_64 GPU nodes
-- NVIDIA driver 580.xx or newer
+- Kubernetes cluster with amd64 or arm64 GPU nodes
+- NVIDIA driver 580.xx or newer on amd64, or 595.xx or newer on arm64
 - **containerd** or **CRI-O** (chart defaults to containerd; see below for CRI-O / OpenShift)
 - a cluster where a privileged DaemonSet with `hostPID`, `hostIPC`, and `hostNetwork` is acceptable
 
@@ -140,6 +140,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `seccomp.deploy` | Deploy the CRIU seccomp profile ConfigMap and init container. Use this field name; `seccomp.enabled` is not a chart value | `true` |
 | `runtime.type` | CRI backend: `containerd` or `crio` | `containerd` |
 | `runtime.socketPath` | CRI socket (empty = default for `runtime.type`) | `""` |
+| `daemonset.supportedArchitectures` | Node architectures eligible for the agent DaemonSet; set to `[]` to supply custom `daemonset.affinity.nodeAffinity` | `["amd64", "arm64"]` |
 | `crdUpgrade.enabled` | Install and upgrade the CRDs from an operator init container (see below) | `true` |
 | `crdUpgrade.logLevel` | Init container log level | `info` |
 | `rbac.create` | Create agent and operator RBAC | `true` |
