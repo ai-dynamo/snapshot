@@ -90,6 +90,46 @@ def create_podsnapshot(
     )
 
 
+def delete_podsnapshot(namespace: str, name: str) -> None:
+    try:
+        client.CustomObjectsApi().delete_namespaced_custom_object(
+            GROUP, VERSION, namespace, PODSNAPSHOTS, name
+        )
+    except ApiException as exc:
+        if exc.status != 404:
+            raise
+
+
+def delete_podsnapshotcontent(name: str) -> None:
+    try:
+        client.CustomObjectsApi().delete_cluster_custom_object(
+            GROUP, VERSION, PODSNAPSHOTCONTENTS, name
+        )
+    except ApiException as exc:
+        if exc.status != 404:
+            raise
+
+
+def wait_for_custom_object_deleted(
+    namespace: str | None,
+    name: str,
+    plural: str,
+    timeout: int = 180,
+) -> None:
+    api = client.CustomObjectsApi()
+
+    def gone() -> bool | None:
+        try:
+            get_custom_object(api, namespace, name, plural)
+        except ApiException as exc:
+            if exc.status == 404:
+                return True
+            raise
+        return None
+
+    wait_for(f"{plural}/{name} deleted", gone, timeout)
+
+
 def create_snapshotjob(
     namespace: str,
     name: str,
@@ -540,6 +580,46 @@ def checkpoint_rootfs_file(
 def checkpoint_artifact_path(content_uid: str) -> str:
     return shlex.quote(
         f"{AGENT_CHECKPOINT_DIR}/artifacts/{content_uid}/containers/{CONTAINER}"
+    )
+
+
+def checkpoint_artifact_root(content_uid: str) -> str:
+    return shlex.quote(f"{AGENT_CHECKPOINT_DIR}/artifacts/{content_uid}")
+
+
+def artifact_root_exists(config: k8s.E2EConfig, node: str, content_uid: str) -> bool:
+    marker = "__snapshot_artifact_root_exists__"
+    output = k8s.exec_command(
+        config.namespace,
+        checkpoint_agent_pod(config, node),
+        f"test -d {checkpoint_artifact_root(content_uid)} && printf '%s' {marker}",
+    )
+    return output == marker
+
+
+def wait_for_artifact_root_absent(
+    config: k8s.E2EConfig,
+    node: str,
+    content_uid: str,
+    timeout: int = 180,
+) -> None:
+    wait_for(
+        f"artifact root for {content_uid} removed",
+        lambda: True if not artifact_root_exists(config, node, content_uid) else None,
+        timeout,
+    )
+
+
+def create_artifact_staging_file(
+    config: k8s.E2EConfig,
+    node: str,
+    content_uid: str,
+) -> None:
+    k8s.exec_command(
+        config.namespace,
+        checkpoint_agent_pod(config, node),
+        f"mkdir -p {checkpoint_artifact_root(content_uid)}/.tmp && "
+        f"printf orphan > {checkpoint_artifact_root(content_uid)}/.tmp/partial",
     )
 
 

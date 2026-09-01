@@ -19,6 +19,10 @@ spec:
       labels:
         {{- include "snapshot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: operator
+      {{- if .Values.openshift.enabled }}
+      annotations:
+        openshift.io/required-scc: anyuid
+      {{- end }}
     spec:
       serviceAccountName: {{ include "snapshot.operatorServiceAccountName" . }}
       {{- with .Values.image.operator.imagePullSecrets }}
@@ -45,3 +49,25 @@ spec:
         - name: manager
           image: "{{ .Values.image.operator.repository }}:{{ .Values.image.operator.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.operator.pullPolicy }}
+          # Artifact cleanup removes CRIU files created as root on the shared PVC.
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          args:
+            - {{ printf "--snapshot-storage-base-path=%v" .Values.storage.pvc.basePath | quote }}
+            - {{ printf "--artifact-cleanup-scan-interval=%v" .Values.operator.artifactCleanup.scanInterval | quote }}
+            - {{ printf "--artifact-cleanup-batch-size=%v" .Values.operator.artifactCleanup.batchSize | quote }}
+            - {{ printf "--artifact-cleanup-list-attempts=%v" .Values.operator.artifactCleanup.listAttempts | quote }}
+          volumeMounts:
+            - name: checkpoints
+              mountPath: {{ .Values.storage.pvc.basePath | quote }}
+      volumes:
+        - name: checkpoints
+          persistentVolumeClaim:
+            claimName: {{ .Values.storage.pvc.name }}

@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 
+from snapshot_e2e import k8s
 from snapshot_e2e import workloads
 
 
@@ -111,3 +112,41 @@ def test_snapshotjob_exit_template_never_signals_ready() -> None:
             timeout=10,
         )
         assert proc.returncode == exit_code
+
+
+@pytest.mark.workload
+def test_restore_manifests_use_canonical_control_mount_and_startup_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SNAPSHOT_E2E_WORKLOAD_IMAGE", "snapshot-workload:test")
+    config = k8s.E2EConfig(
+        namespace="snapshot-e2e",
+        release="snapshot",
+        pvc_name="snapshot-pvc",
+        kubeconfig=None,
+    )
+    run = workloads.TestRun.new("manifest")
+
+    single = workloads.restore_pod(config=config, run=run, gpu=False)
+    single_container = single["spec"]["containers"][0]
+    assert single_container["volumeMounts"][0] == {
+        "name": "snapshot-control",
+        "mountPath": workloads.CONTROL_DIR,
+        "subPath": workloads.CONTAINER,
+    }
+    assert single_container["startupProbe"]["exec"]["command"] == [
+        "cat",
+        workloads.RESTORE_DONE,
+    ]
+
+    multi, _ = workloads.multi_restore_pod(
+        config=config,
+        run=run,
+        source_node="source-node",
+    )
+    for container in multi["spec"]["containers"]:
+        assert container["volumeMounts"][0]["subPath"] == container["name"]
+        assert container["startupProbe"]["exec"]["command"] == [
+            "cat",
+            workloads.RESTORE_DONE,
+        ]

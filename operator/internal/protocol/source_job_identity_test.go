@@ -10,13 +10,13 @@ import (
 	"strings"
 	"testing"
 
-	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
 func TestCudaCheckpointLaunchJobWrapperPersistsJobFile(t *testing.T) {
 	tempDir := t.TempDir()
 	transientJobFile := filepath.Join(tempDir, "transient-job")
-	stableJobFile := filepath.Join(tempDir, "checkpoint", snapshotv1alpha1.CUDAJobFileName)
+	stableJobFile := filepath.Join(tempDir, "checkpoint", podcontract.CUDAJobFileName)
 	observedEnvironment := filepath.Join(tempDir, "observed-environment")
 	if err := os.WriteFile(transientJobFile, []byte("job-state"), 0600); err != nil {
 		t.Fatal(err)

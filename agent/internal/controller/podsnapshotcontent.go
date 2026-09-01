@@ -67,6 +67,9 @@ func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name s
 	if content.Spec.Source.NodeName != w.config.NodeName {
 		return
 	}
+	if !content.DeletionTimestamp.IsZero() {
+		return
+	}
 	if isContentTerminal(content) {
 		return
 	}
@@ -209,6 +212,9 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		return fmt.Errorf("get PodSnapshotContent %q: %w", name, err)
 	}
 	if isContentTerminal(content) {
+		return nil
+	}
+	if !content.DeletionTimestamp.IsZero() {
 		return nil
 	}
 

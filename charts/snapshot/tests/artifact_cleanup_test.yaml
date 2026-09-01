@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: PodSnapshotContent artifact cleanup
+templates:
+  - templates/operator-deployment.yaml
+tests:
+  - it: mounts shared artifact storage and wires cleanup defaults
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[0].name
+          value: checkpoints
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[0].mountPath
+          value: /checkpoints
+      - equal:
+          path: spec.template.spec.volumes[0].persistentVolumeClaim.claimName
+          value: snapshot-pvc
+      - equal:
+          path: spec.template.spec.containers[0].args[1]
+          value: --artifact-cleanup-scan-interval=10m
+      - equal:
+          path: spec.template.spec.containers[0].args[2]
+          value: --artifact-cleanup-batch-size=10
+      - equal:
+          path: spec.template.spec.containers[0].args[3]
+          value: --artifact-cleanup-list-attempts=3
+
+  - it: carries every non-default cleanup setting to the operator
+    set:
+      operator.artifactCleanup.scanInterval: 37s
+      operator.artifactCleanup.batchSize: 7
+      operator.artifactCleanup.listAttempts: 4
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].args[1]
+          value: --artifact-cleanup-scan-interval=37s
+      - equal:
+          path: spec.template.spec.containers[0].args[2]
+          value: --artifact-cleanup-batch-size=7
+      - equal:
+          path: spec.template.spec.containers[0].args[3]
+          value: --artifact-cleanup-list-attempts=4
+
+  - it: hardens the root-running artifact cleanup manager
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsUser
+          value: 0
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          value:
+            - ALL
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.seccompProfile.type
+          value: RuntimeDefault

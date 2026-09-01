@@ -10,12 +10,13 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	contentvalidation "k8s.io/apimachinery/pkg/api/validate/content"
 
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/snapshot/operator/internal/protocol"
 )
 
 // buildSourceJob constructs the desired batch/v1 Job for a SnapshotJob's source pod.
-// It reuses protocol.NewCheckpointJob unchanged — that function's body is the agent
+// It reuses protocol.NewSourceJob unchanged — that function's body is the agent
 // contract (control volume, readiness probe, labels, seccomp, sidecar opt-outs), not
 // Dynamo-specific code — and adds only the owner label so the PodSnapshot created
 // later (PR 4) can be mapped back to this SnapshotJob without an ownerReference.
@@ -34,6 +35,9 @@ func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, error) {
 	if errs := contentvalidation.IsLabelValue(sj.Name); len(errs) > 0 {
 		return nil, fmt.Errorf("metadata.name %q is not a valid label value: %s", sj.Name, strings.Join(errs, "; "))
 	}
+	if err := validatePodSnapshotTemplateMetadata(sj); err != nil {
+		return nil, err
+	}
 
 	targetContainer, err := snapshotJobTargetContainer(sj)
 	if err != nil {
@@ -47,11 +51,11 @@ func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, error) {
 	podTemplate.Labels[snapshotv1alpha1.SnapshotJobOwnerLabel] = sj.Name
 	podTemplate.Labels[snapshotv1alpha1.SnapshotJobOwnerUIDLabel] = string(sj.UID)
 
-	return protocol.NewCheckpointJob(podTemplate, protocol.CheckpointJobOptions{
+	return protocol.NewSourceJob(podTemplate, protocol.SourceJobOptions{
 		Namespace:             sj.Namespace,
 		Name:                  sj.Name,
 		TargetContainer:       targetContainer,
-		SeccompProfile:        snapshotv1alpha1.DefaultSeccompLocalhostProfile,
+		SeccompProfile:        podcontract.DefaultSeccompLocalhostProfile,
 		ActiveDeadlineSeconds: sj.Spec.ActiveDeadlineSeconds,
 		TTLSecondsAfterFinish: nil,
 		WrapLaunchJob:         false,

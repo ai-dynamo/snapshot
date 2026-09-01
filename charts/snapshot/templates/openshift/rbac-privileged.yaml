@@ -33,4 +33,35 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "snapshot.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+---
+# The operator needs UID 0 only to remove root-owned CRIU files from the shared
+# artifact PVC. anyuid is narrower than the privileged SCC used by the agent.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: snapshot-operator-anyuid
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "snapshot.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["security.openshift.io"]
+    resources: ["securitycontextconstraints"]
+    resourceNames: ["anyuid"]
+    verbs: ["use"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: snapshot-operator-anyuid
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "snapshot.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: snapshot-operator-anyuid
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "snapshot.operatorServiceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
 {{- end }}

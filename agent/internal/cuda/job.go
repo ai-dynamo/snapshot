@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	"golang.org/x/sys/unix"
 )
 
@@ -24,12 +24,12 @@ const JobFileEnv = "CUDA_CHECKPOINT_JOB_FILE"
 // launch wrapper persists the driver-created file at a fixed path before
 // starting the workload.
 func StageJobFile(sourceRootPath, checkpointDir string, sourceGPUCount int) (string, error) {
-	sourcePath := filepath.Join(sourceRootPath, strings.TrimPrefix(snapshotv1alpha1.CUDAJobFilePath, string(os.PathSeparator)))
-	destinationPath := filepath.Join(checkpointDir, snapshotv1alpha1.CUDAJobFileName)
+	sourcePath := filepath.Join(sourceRootPath, strings.TrimPrefix(podcontract.CUDAJobFilePath, string(os.PathSeparator)))
+	destinationPath := filepath.Join(checkpointDir, podcontract.CUDAJobFileName)
 	if err := copyJobFile(sourcePath, destinationPath); err != nil {
 		if os.IsNotExist(err) {
 			if sourceGPUCount > 1 {
-				return "", fmt.Errorf("multi-GPU CUDA source is missing %s; source must be launched under cuda-checkpoint --launch-job", snapshotv1alpha1.CUDAJobFilePath)
+				return "", fmt.Errorf("multi-GPU CUDA source is missing %s; source must be launched under cuda-checkpoint --launch-job", podcontract.CUDAJobFilePath)
 			}
 			return "", nil
 		}
@@ -45,7 +45,7 @@ func refreshJobFileArtifact(liveJobFile, checkpointDir string) error {
 	if liveJobFile == "" {
 		return nil
 	}
-	destinationPath := filepath.Join(checkpointDir, snapshotv1alpha1.CUDAJobFileName)
+	destinationPath := filepath.Join(checkpointDir, podcontract.CUDAJobFileName)
 	if err := prepareLiveJobFile(liveJobFile, destinationPath); err != nil {
 		return fmt.Errorf("refresh CUDA checkpoint job file: %w", err)
 	}
@@ -58,15 +58,15 @@ func refreshJobFileArtifact(liveJobFile, checkpointDir string) error {
 // The returned path is the per-restore working copy that CUDA helpers must use;
 // the staged artifact remains immutable so it can seed later restores.
 func PrepareLiveJobFile(stagedJobFile string) (string, error) {
-	if err := prepareLiveJobFile(stagedJobFile, snapshotv1alpha1.CUDAJobFilePath); err != nil {
+	if err := prepareLiveJobFile(stagedJobFile, podcontract.CUDAJobFilePath); err != nil {
 		return "", err
 	}
-	return snapshotv1alpha1.CUDAJobFilePath, nil
+	return podcontract.CUDAJobFilePath, nil
 }
 
 // JobFileFromCheckpoint returns the staged job file when an artifact contains one.
 func JobFileFromCheckpoint(checkpointDir string) (string, error) {
-	jobFile := filepath.Join(checkpointDir, snapshotv1alpha1.CUDAJobFileName)
+	jobFile := filepath.Join(checkpointDir, podcontract.CUDAJobFileName)
 	info, err := os.Lstat(jobFile)
 	if os.IsNotExist(err) {
 		return "", nil

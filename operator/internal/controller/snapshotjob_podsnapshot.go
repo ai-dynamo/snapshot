@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 
@@ -190,18 +191,20 @@ func buildPodSnapshot(sj *snapshotv1alpha1.SnapshotJob, pod *corev1.Pod) (*snaps
 	if _, err := snapshotJobTargetContainer(sj); err != nil {
 		return nil, err
 	}
+	labels, annotations, err := podSnapshotTemplateMetadata(sj)
+	if err != nil {
+		return nil, err
+	}
 	return &snapshotv1alpha1.PodSnapshot{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: snapshotv1alpha1.GroupVersion.String(),
 			Kind:       "PodSnapshot",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      sj.Name,
-			Namespace: sj.Namespace,
-			Labels: map[string]string{
-				snapshotv1alpha1.SnapshotJobOwnerLabel:    sj.Name,
-				snapshotv1alpha1.SnapshotJobOwnerUIDLabel: string(sj.UID),
-			},
+			Name:        sj.Name,
+			Namespace:   sj.Namespace,
+			Labels:      labels,
+			Annotations: annotations,
 		},
 		Spec: snapshotv1alpha1.PodSnapshotSpec{
 			Source: snapshotv1alpha1.PodSnapshotSource{
@@ -213,6 +216,24 @@ func buildPodSnapshot(sj *snapshotv1alpha1.SnapshotJob, pod *corev1.Pod) (*snaps
 			},
 		},
 	}, nil
+}
+
+func podSnapshotTemplateMetadata(sj *snapshotv1alpha1.SnapshotJob) (map[string]string, map[string]string, error) {
+	if err := validatePodSnapshotTemplateMetadata(sj); err != nil {
+		return nil, nil, err
+	}
+	metadata := sj.Spec.PodSnapshotTemplate.Metadata
+	var labels, annotations map[string]string
+	if metadata != nil {
+		labels = maps.Clone(metadata.Labels)
+		annotations = maps.Clone(metadata.Annotations)
+	}
+	if labels == nil {
+		labels = make(map[string]string, 2)
+	}
+	labels[snapshotv1alpha1.SnapshotJobOwnerLabel] = sj.Name
+	labels[snapshotv1alpha1.SnapshotJobOwnerUIDLabel] = string(sj.UID)
+	return labels, annotations, nil
 }
 
 // createPodSnapshot creates this SnapshotJob's PodSnapshot. The caller has

@@ -4,9 +4,8 @@
 package protocol
 
 import (
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	corev1 "k8s.io/api/core/v1"
-
-	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
 // EnsureControlVolume adds the snapshot-control emptyDir to the pod spec,
@@ -16,7 +15,7 @@ import (
 // and LegacySnapshotControlDirEnv (deprecated) on the container's env, so
 // workload images can migrate off the legacy name independently of the
 // operator release. Idempotent — safe to call from multiple code paths
-// (operator checkpoint job, restore pod shaping, etc.); each env var is
+// (operator source job, restore pod shaping, etc.); each env var is
 // guarded independently so a pod that already carries one (e.g. a
 // hand-crafted template with only the legacy name) still gets the other
 // injected without duplicating either.
@@ -30,14 +29,14 @@ func EnsureControlVolume(podSpec *corev1.PodSpec, container *corev1.Container) {
 
 	hasVolume := false
 	for _, v := range podSpec.Volumes {
-		if v.Name == snapshotv1alpha1.SnapshotControlVolumeName {
+		if v.Name == podcontract.SnapshotControlVolumeName {
 			hasVolume = true
 			break
 		}
 	}
 	if !hasVolume {
 		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
-			Name:         snapshotv1alpha1.SnapshotControlVolumeName,
+			Name:         podcontract.SnapshotControlVolumeName,
 			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 		})
 	}
@@ -50,21 +49,21 @@ func EnsureControlVolume(podSpec *corev1.PodSpec, container *corev1.Container) {
 
 	hasMount := false
 	for _, m := range container.VolumeMounts {
-		if m.Name == snapshotv1alpha1.SnapshotControlVolumeName {
+		if m.Name == podcontract.SnapshotControlVolumeName {
 			hasMount = true
 			break
 		}
 	}
 	if !hasMount {
 		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-			Name:      snapshotv1alpha1.SnapshotControlVolumeName,
-			MountPath: snapshotv1alpha1.SnapshotControlMountPath,
+			Name:      podcontract.SnapshotControlVolumeName,
+			MountPath: podcontract.SnapshotControlMountPath,
 			SubPath:   subPath,
 		})
 	}
 
-	ensureEnv(container, snapshotv1alpha1.SnapshotControlDirEnv, snapshotv1alpha1.SnapshotControlMountPath)
-	ensureEnv(container, snapshotv1alpha1.LegacySnapshotControlDirEnv, snapshotv1alpha1.SnapshotControlMountPath)
+	ensureEnv(container, podcontract.SnapshotControlDirEnv, podcontract.SnapshotControlMountPath)
+	ensureEnv(container, podcontract.LegacySnapshotControlDirEnv, podcontract.SnapshotControlMountPath)
 }
 
 // ensureEnv sets name=value on the container if name is not already present,

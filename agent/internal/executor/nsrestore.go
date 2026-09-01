@@ -18,7 +18,7 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
-	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
 // RestoreOptions holds configuration for an in-namespace restore.
@@ -183,7 +183,7 @@ func executeRestore(
 	// leftover from an earlier incarnation cannot release the restored process
 	// before this CRIU/CUDA attempt finishes. A missing file is already gone;
 	// a missing mount is a hard error.
-	if err := snapshotruntime.RemoveControlSentinel(snapshotv1alpha1.SnapshotControlMountPath, snapshotv1alpha1.RestoreCompleteFile); err != nil {
+	if err := snapshotruntime.RemoveControlSentinel(podcontract.SnapshotControlMountPath, podcontract.RestoreCompleteFile); err != nil {
 		return nil, 0, nil, fmt.Errorf("remove stale restore-complete sentinel: %w", err)
 	}
 

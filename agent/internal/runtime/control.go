@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 
-	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
 // WriteControlSentinel writes a sentinel file into the workload container's
@@ -28,7 +28,7 @@ func WriteControlSentinel(hostPID int, name string) error {
 	if hostPID <= 0 {
 		return fmt.Errorf("invalid host PID %d for control sentinel %q", hostPID, name)
 	}
-	dir := filepath.Join(HostProcPath, strconv.Itoa(hostPID), "root", snapshotv1alpha1.SnapshotControlMountPath)
+	dir := filepath.Join(HostProcPath, strconv.Itoa(hostPID), "root", podcontract.SnapshotControlMountPath)
 	return writeSentinelInDir(dir, name)
 }
 
@@ -40,7 +40,7 @@ func ControlSentinelExists(hostPID int, name string) (bool, error) {
 	if hostPID <= 0 {
 		return false, fmt.Errorf("invalid host PID %d for control sentinel %q", hostPID, name)
 	}
-	dir := filepath.Join(HostProcPath, strconv.Itoa(hostPID), "root", snapshotv1alpha1.SnapshotControlMountPath)
+	dir := filepath.Join(HostProcPath, strconv.Itoa(hostPID), "root", podcontract.SnapshotControlMountPath)
 	return controlSentinelExistsInDir(dir, name)
 }
 

@@ -13,13 +13,13 @@ import (
 	"github.com/go-logr/logr"
 	"golang.org/x/sys/unix"
 
-	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
 func TestStageJobFile(t *testing.T) {
 	sourceRoot := t.TempDir()
 	checkpointDir := t.TempDir()
-	jobFile := snapshotv1alpha1.CUDAJobFilePath
+	jobFile := podcontract.CUDAJobFilePath
 	if err := os.MkdirAll(filepath.Join(sourceRoot, filepath.Dir(jobFile)), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func TestStageJobFile(t *testing.T) {
 	if helperJobFile != wantHelperJobFile {
 		t.Fatalf("StageJobFile() = %q, want %q", helperJobFile, wantHelperJobFile)
 	}
-	artifact := filepath.Join(checkpointDir, snapshotv1alpha1.CUDAJobFileName)
+	artifact := filepath.Join(checkpointDir, podcontract.CUDAJobFileName)
 	content, err := os.ReadFile(artifact)
 	if err != nil {
 		t.Fatal(err)
@@ -48,7 +48,7 @@ func TestStageJobFile(t *testing.T) {
 func TestStageJobFileRejectsSymlink(t *testing.T) {
 	sourceRoot := t.TempDir()
 	checkpointDir := t.TempDir()
-	jobFile := snapshotv1alpha1.CUDAJobFilePath
+	jobFile := podcontract.CUDAJobFilePath
 	if err := os.MkdirAll(filepath.Join(sourceRoot, filepath.Dir(jobFile)), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -65,15 +65,15 @@ func TestStageJobFileRejectsSymlink(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected symlink source to be rejected")
 	}
-	if _, statErr := os.Stat(filepath.Join(checkpointDir, snapshotv1alpha1.CUDAJobFileName)); !os.IsNotExist(statErr) {
+	if _, statErr := os.Stat(filepath.Join(checkpointDir, podcontract.CUDAJobFileName)); !os.IsNotExist(statErr) {
 		t.Fatalf("staged file exists after rejected symlink: %v", statErr)
 	}
 }
 
 func TestRefreshJobFileArtifactCapturesPostCheckpointState(t *testing.T) {
 	checkpointDir := t.TempDir()
-	live := filepath.Join(t.TempDir(), snapshotv1alpha1.CUDAJobFileName)
-	artifact := filepath.Join(checkpointDir, snapshotv1alpha1.CUDAJobFileName)
+	live := filepath.Join(t.TempDir(), podcontract.CUDAJobFileName)
+	artifact := filepath.Join(checkpointDir, podcontract.CUDAJobFileName)
 	if err := os.WriteFile(live, []byte("pre-checkpoint-state"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ if [ "$action" = checkpoint ]; then printf '|%s' "$pid" >> "$job_file"; fi
 	if err := os.WriteFile(liveJobFile, []byte("initial"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(checkpointDir, snapshotv1alpha1.CUDAJobFileName), []byte("validation-copy"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(checkpointDir, podcontract.CUDAJobFileName), []byte("validation-copy"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("DYNAMO_TEST_TRACE", trace)
@@ -163,7 +163,7 @@ if [ "$action" = checkpoint ]; then printf '|%s' "$pid" >> "$job_file"; fi
 	if got, want := string(traceContent), "lock 101\nlock 202\ncheckpoint 101\ncheckpoint 202\n"; got != want {
 		t.Fatalf("helper call order = %q, want %q", got, want)
 	}
-	artifact, err := os.ReadFile(filepath.Join(checkpointDir, snapshotv1alpha1.CUDAJobFileName))
+	artifact, err := os.ReadFile(filepath.Join(checkpointDir, podcontract.CUDAJobFileName))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,7 @@ func TestJobFileFromCheckpointRejectsSymlink(t *testing.T) {
 	if err := os.WriteFile(target, []byte("job-state"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(target, filepath.Join(checkpointDir, snapshotv1alpha1.CUDAJobFileName)); err != nil {
+	if err := os.Symlink(target, filepath.Join(checkpointDir, podcontract.CUDAJobFileName)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -228,8 +228,8 @@ func TestJobFileFromCheckpointRejectsSymlink(t *testing.T) {
 }
 
 func TestPrepareLiveJobFileReplacesMutatedState(t *testing.T) {
-	staged := filepath.Join(t.TempDir(), snapshotv1alpha1.CUDAJobFileName)
-	live := filepath.Join(t.TempDir(), snapshotv1alpha1.CUDAJobFileName)
+	staged := filepath.Join(t.TempDir(), podcontract.CUDAJobFileName)
+	live := filepath.Join(t.TempDir(), podcontract.CUDAJobFileName)
 	if err := os.WriteFile(staged, []byte("capture-time-state"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -257,12 +257,12 @@ func TestPrepareLiveJobFileReplacesMutatedState(t *testing.T) {
 }
 
 func TestPrepareLiveJobFileKeepsRestoreTargetsIsolated(t *testing.T) {
-	staged := filepath.Join(t.TempDir(), snapshotv1alpha1.CUDAJobFileName)
+	staged := filepath.Join(t.TempDir(), podcontract.CUDAJobFileName)
 	if err := os.WriteFile(staged, []byte("capture-time-state"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	first := filepath.Join(t.TempDir(), snapshotv1alpha1.CUDAJobFileName)
-	second := filepath.Join(t.TempDir(), snapshotv1alpha1.CUDAJobFileName)
+	first := filepath.Join(t.TempDir(), podcontract.CUDAJobFileName)
+	second := filepath.Join(t.TempDir(), podcontract.CUDAJobFileName)
 	if err := prepareLiveJobFile(staged, first); err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +282,7 @@ func TestPrepareLiveJobFileKeepsRestoreTargetsIsolated(t *testing.T) {
 }
 
 func TestPrepareLiveJobFileRejectsSymlinkDestination(t *testing.T) {
-	staged := filepath.Join(t.TempDir(), snapshotv1alpha1.CUDAJobFileName)
+	staged := filepath.Join(t.TempDir(), podcontract.CUDAJobFileName)
 	if err := os.WriteFile(staged, []byte("capture-time-state"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +291,7 @@ func TestPrepareLiveJobFileRejectsSymlinkDestination(t *testing.T) {
 	if err := os.WriteFile(target, []byte("must-not-change"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	live := filepath.Join(destinationDir, snapshotv1alpha1.CUDAJobFileName)
+	live := filepath.Join(destinationDir, podcontract.CUDAJobFileName)
 	if err := os.Symlink(target, live); err != nil {
 		t.Fatal(err)
 	}

@@ -135,7 +135,7 @@ func TestSnapshotReconciler_BuildsWorkOrderAndBinds(t *testing.T) {
 	assert.Equal(t, "node-a", content.Spec.Source.NodeName)
 	assert.Equal(t, "node-a", content.Labels[snapshotv1alpha1.SnapshotNodeLabel])
 	assert.Empty(t, content.Annotations)
-	assert.Empty(t, content.Finalizers)
+	assert.Equal(t, []string{PodSnapshotContentArtifactCleanupFinalizer}, content.Finalizers)
 	assert.Equal(t, "inference", content.Spec.PodSnapshotRef.Namespace)
 	assert.Equal(t, snap.Name, content.Spec.PodSnapshotRef.Name)
 	assert.Equal(t, []string{"main"}, content.Spec.Source.PodRef.Containers,

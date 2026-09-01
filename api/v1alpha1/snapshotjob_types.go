@@ -134,9 +134,17 @@ type SnapshotJobSpec struct {
 	PodSnapshotTemplate PodSnapshotTemplate `json:"podSnapshotTemplate"`
 }
 
-// PodSnapshotTemplate mirrors the PodSnapshot spec fields the user controls. The
-// controller fills in spec.source (the pod reference) automatically.
+// PodSnapshotTemplate mirrors the PodSnapshot fields the user controls. The
+// controller fills in identity, ownership, and spec.source automatically.
+// +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-job' in self.metadata.labels)",message="metadata.labels must not set controller-owned label nvidia.com/snapshot-job"
+// +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.labels) || !('nvidia.com/snapshot-job-uid' in self.metadata.labels)",message="metadata.labels must not set controller-owned label nvidia.com/snapshot-job-uid"
 type PodSnapshotTemplate struct {
+	// Metadata contains labels and annotations copied to the generated
+	// PodSnapshot. SnapshotJob ownership labels are reserved for the controller
+	// and cannot be supplied here.
+	// +optional
+	Metadata *PodSnapshotTemplateMetadata `json:"metadata,omitempty"`
+
 	// TargetContainers names the container(s) to checkpoint with CRIU. The pod
 	// may contain any number of additional containers (helpers, sidecars, etc.)
 	// — this field controls only the CRIU dump target.
@@ -155,6 +163,26 @@ type PodSnapshotTemplate struct {
 	// +kubebuilder:validation:items:MaxLength=63
 	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	TargetContainers []string `json:"targetContainers,omitempty"`
+}
+
+// PodSnapshotTemplateMetadata is the caller-owned metadata propagated to a
+// SnapshotJob's generated PodSnapshot. It intentionally exposes only labels and
+// annotations; identity and ownership remain controller-owned. The SnapshotJob
+// spec is immutable, so metadata rejected by the controller as InvalidSpec
+// requires deleting and recreating the SnapshotJob.
+// +kubebuilder:validation:XValidation:rule="!has(self.labels) || self.labels.all(k, !format.qualifiedName().validate(k).hasValue())",message="metadata.labels keys must be valid Kubernetes qualified names"
+// +kubebuilder:validation:XValidation:rule="!has(self.labels) || self.labels.all(k, size(self.labels[k]) <= 63)",message="metadata.labels values must be no more than 63 characters"
+// +kubebuilder:validation:XValidation:rule="!has(self.annotations) || self.annotations.all(k, !format.qualifiedName().validate(k).hasValue())",message="metadata.annotations keys must be valid Kubernetes qualified names"
+type PodSnapshotTemplateMetadata struct {
+	// Labels are copied to the generated PodSnapshot.
+	// +optional
+	// +kubebuilder:validation:MaxProperties=4096
+	Labels map[string]string `json:"labels,omitempty"`
+
+	// Annotations are copied to the generated PodSnapshot.
+	// +optional
+	// +kubebuilder:validation:MaxProperties=4096
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 // SnapshotJobStatus defines the observed state of SnapshotJob.

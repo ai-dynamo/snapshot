@@ -6,9 +6,8 @@ package protocol
 import (
 	"testing"
 
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	corev1 "k8s.io/api/core/v1"
-
-	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
 func TestEnsureControlVolume(t *testing.T) {
@@ -16,12 +15,12 @@ func TestEnsureControlVolume(t *testing.T) {
 		ps := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}}
 		EnsureControlVolume(ps, &ps.Containers[0])
 
-		if len(ps.Volumes) != 1 || ps.Volumes[0].Name != snapshotv1alpha1.SnapshotControlVolumeName || ps.Volumes[0].EmptyDir == nil {
-			t.Fatalf("expected one %s emptyDir volume, got %#v", snapshotv1alpha1.SnapshotControlVolumeName, ps.Volumes)
+		if len(ps.Volumes) != 1 || ps.Volumes[0].Name != podcontract.SnapshotControlVolumeName || ps.Volumes[0].EmptyDir == nil {
+			t.Fatalf("expected one %s emptyDir volume, got %#v", podcontract.SnapshotControlVolumeName, ps.Volumes)
 		}
 		c := ps.Containers[0]
-		if len(c.VolumeMounts) != 1 || c.VolumeMounts[0].Name != snapshotv1alpha1.SnapshotControlVolumeName || c.VolumeMounts[0].MountPath != snapshotv1alpha1.SnapshotControlMountPath {
-			t.Fatalf("expected one %s mount at %s, got %#v", snapshotv1alpha1.SnapshotControlVolumeName, snapshotv1alpha1.SnapshotControlMountPath, c.VolumeMounts)
+		if len(c.VolumeMounts) != 1 || c.VolumeMounts[0].Name != podcontract.SnapshotControlVolumeName || c.VolumeMounts[0].MountPath != podcontract.SnapshotControlMountPath {
+			t.Fatalf("expected one %s mount at %s, got %#v", podcontract.SnapshotControlVolumeName, podcontract.SnapshotControlMountPath, c.VolumeMounts)
 		}
 		if c.VolumeMounts[0].SubPath != "main" {
 			t.Fatalf("expected subPath=%q, got %q", "main", c.VolumeMounts[0].SubPath)
@@ -29,13 +28,13 @@ func TestEnsureControlVolume(t *testing.T) {
 		if len(c.Env) != 2 {
 			t.Fatalf("expected two control-dir env vars, got %#v", c.Env)
 		}
-		for _, name := range []string{snapshotv1alpha1.SnapshotControlDirEnv, snapshotv1alpha1.LegacySnapshotControlDirEnv} {
+		for _, name := range []string{podcontract.SnapshotControlDirEnv, podcontract.LegacySnapshotControlDirEnv} {
 			found := false
 			for _, e := range c.Env {
 				if e.Name == name {
 					found = true
-					if e.Value != snapshotv1alpha1.SnapshotControlMountPath {
-						t.Fatalf("expected env %s=%s, got %#v", name, snapshotv1alpha1.SnapshotControlMountPath, e)
+					if e.Value != podcontract.SnapshotControlMountPath {
+						t.Fatalf("expected env %s=%s, got %#v", name, podcontract.SnapshotControlMountPath, e)
 					}
 				}
 			}
@@ -77,7 +76,7 @@ func TestEnsureControlVolume(t *testing.T) {
 	t.Run("legacy env pre-set backfills canonical", func(t *testing.T) {
 		ps := &corev1.PodSpec{Containers: []corev1.Container{{
 			Name: "main",
-			Env:  []corev1.EnvVar{{Name: snapshotv1alpha1.LegacySnapshotControlDirEnv, Value: snapshotv1alpha1.SnapshotControlMountPath}},
+			Env:  []corev1.EnvVar{{Name: podcontract.LegacySnapshotControlDirEnv, Value: podcontract.SnapshotControlMountPath}},
 		}}}
 		EnsureControlVolume(ps, &ps.Containers[0])
 		c := ps.Containers[0]
@@ -86,7 +85,7 @@ func TestEnsureControlVolume(t *testing.T) {
 		}
 		legacyCount := 0
 		for _, e := range c.Env {
-			if e.Name == snapshotv1alpha1.LegacySnapshotControlDirEnv {
+			if e.Name == podcontract.LegacySnapshotControlDirEnv {
 				legacyCount++
 			}
 		}
@@ -98,7 +97,7 @@ func TestEnsureControlVolume(t *testing.T) {
 	t.Run("canonical env pre-set backfills legacy", func(t *testing.T) {
 		ps := &corev1.PodSpec{Containers: []corev1.Container{{
 			Name: "main",
-			Env:  []corev1.EnvVar{{Name: snapshotv1alpha1.SnapshotControlDirEnv, Value: snapshotv1alpha1.SnapshotControlMountPath}},
+			Env:  []corev1.EnvVar{{Name: podcontract.SnapshotControlDirEnv, Value: podcontract.SnapshotControlMountPath}},
 		}}}
 		EnsureControlVolume(ps, &ps.Containers[0])
 		c := ps.Containers[0]
@@ -107,7 +106,7 @@ func TestEnsureControlVolume(t *testing.T) {
 		}
 		canonicalCount := 0
 		for _, e := range c.Env {
-			if e.Name == snapshotv1alpha1.SnapshotControlDirEnv {
+			if e.Name == podcontract.SnapshotControlDirEnv {
 				canonicalCount++
 			}
 		}

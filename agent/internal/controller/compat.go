@@ -12,7 +12,7 @@ import (
 
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
-	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
 // refuseRestore records a restore this node will not attempt. It is terminal
@@ -26,7 +26,7 @@ func (w *NodeController) refuseRestore(ctx context.Context, pod *corev1.Pod, inc
 		ctx,
 		pod,
 		corev1.ConditionFalse,
-		restoreIncompatibleReason,
+		podcontract.RestoreReasonIncompatible,
 		reason,
 	) != nil
 }
@@ -44,7 +44,7 @@ func (w *NodeController) logRestoreRefusal(pod *corev1.Pod, incompatible *compat
 // which is what makes the skip request an escape hatch and not a retry.
 func (w *NodeController) reopenedAfterRefusal(pod *corev1.Pod) bool {
 	condition := findRestoredCondition(pod)
-	if condition == nil || condition.Status != corev1.ConditionFalse || condition.Reason != restoreIncompatibleReason {
+	if condition == nil || condition.Status != corev1.ConditionFalse || condition.Reason != podcontract.RestoreReasonIncompatible {
 		return false
 	}
 	return w.skipCompatCheckRequested(pod)
@@ -87,7 +87,7 @@ func limitString(limits corev1.ResourceList, name corev1.ResourceName) string {
 // it landed on.
 func (w *NodeController) skipCompatCheckRequested(pod *corev1.Pod) bool {
 	return w.skipCompatCheckFn() ||
-		snapshotv1alpha1.SkipCompatCheckFromAnnotations(pod.Annotations)
+		podcontract.SkipCompatCheckFromAnnotations(pod.Annotations)
 }
 
 // preflightCompatibility runs the pre-flight compatibility gate for one restore.
@@ -95,7 +95,7 @@ func (w *NodeController) skipCompatCheckRequested(pod *corev1.Pod) bool {
 func (w *NodeController) preflightCompatibility(
 	pod *corev1.Pod,
 	artifact *restoreArtifact,
-	mappings []snapshotv1alpha1.RestoreContainerMapping,
+	mappings []podcontract.ContainerMapping,
 ) error {
 	log := w.log.WithValues("pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name), "container", artifact.SourceContainerName)
 	if artifact.SkipCompatCheck {
