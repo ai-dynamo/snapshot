@@ -17,9 +17,33 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <stdlib.h>
+
 #include "util.h"
 
-#define EXPORT_TIMEOUT_SECONDS 30
+/*
+ * Deadline for contacting the creating process to export a shared handle.
+ *
+ * This was a hard-coded 30 s. Under concurrent multi-rank startup the creator's
+ * control server can be blocked far longer than that, and the timeout surfaces
+ * as a per-rank CUDA_ERROR_INVALID_HANDLE -- a non-deterministic, rank-divergent
+ * failure that frameworks are not built to handle. Default generously and allow
+ * an operator override.
+ */
+#define EXPORT_TIMEOUT_SECONDS_DEFAULT 300
+
+static unsigned
+export_timeout_seconds(void)
+{
+  static unsigned cached;
+
+  if (cached == 0) {
+    const char* value = getenv("DYN_SNAPSHOT_EXPORT_TIMEOUT_SECONDS");
+
+    cached = bounded_seconds(value, EXPORT_TIMEOUT_SECONDS_DEFAULT);
+  }
+  return cached;
+}
 
 static bool
 zero_bytes(const void* value, size_t size)
@@ -69,7 +93,18 @@ cuinterposer_posix_read_ticket(int fd, struct cuinterposer_posix_ticket* ticket)
       ticket->creator_endpoint[0] != '/' ||
       memchr(ticket->creator_endpoint, '\0', sizeof(ticket->creator_endpoint)) == NULL ||
       zero_bytes(ticket->authorization, sizeof(ticket->authorization)) ||
+      !zero_bytes(ticket->reserved_alignment, sizeof(ticket->reserved_alignment)) ||
+      (ticket->resource_kind != CUINTERPOSER_RESOURCE_UNICAST &&
+       ticket->resource_kind != CUINTERPOSER_RESOURCE_MULTICAST) ||
       !zero_bytes(ticket->reserved_identity, sizeof(ticket->reserved_identity)))
+    return -1;
+  if (ticket->resource_kind == CUINTERPOSER_RESOURCE_UNICAST &&
+      (ticket->num_devices != 0 || ticket->allocation_size != 0 || ticket->handle_types != 0 ||
+       ticket->object_flags != 0))
+    return -1;
+  if (ticket->resource_kind == CUINTERPOSER_RESOURCE_MULTICAST &&
+      (ticket->num_devices == 0 || ticket->allocation_size == 0 ||
+       ticket->handle_types != CUINTERPOSER_POSIX_HANDLE_TYPE))
     return -1;
   return 0;
 }
@@ -91,12 +126,13 @@ cuinterposer_posix_request_export(
   request.magic = CUINTERPOSER_MAGIC;
   request.version = CUINTERPOSER_VERSION;
   request.operation = CUINTERPOSER_EXPORT;
+  request.resource_kind = ticket->resource_kind;
   snprintf(request.participant_id, sizeof(request.participant_id), "%s", ticket->creator_participant);
   memcpy(request.authorization, ticket->authorization, sizeof(request.authorization));
   memcpy(request.allocation_id, ticket->allocation_id, sizeof(request.allocation_id));
   snprintf(address.sun_path, sizeof(address.sun_path), "%s", ticket->creator_endpoint);
   client = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-  if (client < 0 || set_socket_timeouts(client, EXPORT_TIMEOUT_SECONDS) != 0 ||
+  if (client < 0 || set_socket_timeouts(client, export_timeout_seconds()) != 0 ||
       connect(client, (const struct sockaddr*)&address, sizeof(address)) != 0 ||
       send_header(client, &request, -1) != 0 ||
       receive_header(client, &response, output) != 0) {
@@ -106,7 +142,8 @@ cuinterposer_posix_request_export(
   }
   if (!header_strings_terminated(&response) || response.magic != CUINTERPOSER_MAGIC ||
       response.version != CUINTERPOSER_VERSION || response.operation != CUINTERPOSER_EXPORT || response.count != 0 ||
-      response.payload_size != 0 || strcmp(response.participant_id, ticket->creator_participant) != 0) {
+      response.payload_size != 0 || strcmp(response.participant_id, ticket->creator_participant) != 0 ||
+      response.resource_kind != ticket->resource_kind) {
     if (error != NULL && error_size != 0)
       snprintf(error, error_size, "%s", "invalid creator export response");
     if (*output >= 0) {

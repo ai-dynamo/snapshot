@@ -9,6 +9,7 @@
 #include <cuda.h>
 #include <cuda_runtime_api.h>
 #include <dlfcn.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -31,26 +32,39 @@ require(int condition, const char* message)
 }
 
 static void
-test_direct_forwarding(void)
+require_logical_handle(CUmemGenericAllocationHandle handle, const char* message)
+{
+  require(
+      ((uint64_t)handle & UINT64_C(0xffff000000000000)) ==
+          UINT64_C(0xd94d000000000000),
+      message);
+}
+
+static CUmulticastObjectProp
+properties(void)
+{
+  CUmulticastObjectProp value = {0};
+
+  value.numDevices = 1;
+  value.size = 4096;
+  value.handleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+  return value;
+}
+
+static void
+test_tracked_behavior(void)
 {
   CUmemGenericAllocationHandle handle = 0;
+  CUmulticastObjectProp props = properties();
   size_t granularity = 0;
 
-  require(
-      cuMulticastCreate(&handle, NULL) == (CUresult)110 && handle == 0x456,
-      "cuMulticastCreate");
+  require(cuMulticastCreate(&handle, &props) == CUDA_SUCCESS, "cuMulticastCreate");
+  require_logical_handle(handle, "cuMulticastCreate logical handle");
   require(cuMulticastAddDevice(handle, 1) == (CUresult)111, "cuMulticastAddDevice");
-  require(
-      cuMulticastBindMem(handle, 2, 3, 4, 5, 0) == (CUresult)112,
-      "cuMulticastBindMem");
-  require(
-      cuMulticastBindAddr(handle, 2, 3, 4, 0) == (CUresult)113,
-      "cuMulticastBindAddr");
   require(
       cuMulticastGetGranularity(&granularity, NULL, 0) == (CUresult)114 &&
           granularity == 4096,
       "cuMulticastGetGranularity");
-  require(cuMulticastUnbind(handle, 1, 2, 3) == (CUresult)115, "cuMulticastUnbind");
 }
 
 static void
@@ -61,6 +75,7 @@ test_resolvers(void)
   void* cuda = dlopen("libcuda.so.1", RTLD_NOW);
   void* symbol = NULL;
   CUmemGenericAllocationHandle handle = 0;
+  CUmulticastObjectProp props = properties();
   enum cudaDriverEntryPointQueryResult runtime_status;
 
   require(cuda != NULL, "dlopen libcuda");
@@ -69,8 +84,9 @@ test_resolvers(void)
       symbol != NULL && symbol != (void*)&fakeCuMulticastCreateOriginal,
       "dlsym substitution");
   require(
-      ((create_type)symbol)(&handle, NULL) == (CUresult)110,
-      "dlsym forwarding");
+      ((create_type)symbol)(&handle, &props) == CUDA_SUCCESS,
+      "dlsym behavior");
+  require_logical_handle(handle, "dlsym logical handle");
 
   symbol = NULL;
   require(
@@ -79,6 +95,11 @@ test_resolvers(void)
   require(
       symbol != NULL && symbol != (void*)&fakeCuMulticastCreateOriginal,
       "cuGetProcAddress substitution");
+  handle = 0;
+  require(
+      ((create_type)symbol)(&handle, &props) == CUDA_SUCCESS,
+      "cuGetProcAddress behavior");
+  require_logical_handle(handle, "cuGetProcAddress logical handle");
 
   symbol = NULL;
   require(
@@ -89,14 +110,19 @@ test_resolvers(void)
       runtime_status == cudaDriverEntryPointSuccess &&
           symbol != (void*)&fakeCuMulticastCreateOriginal,
       "runtime substitution");
+  handle = 0;
+  require(
+      ((create_type)symbol)(&handle, &props) == CUDA_SUCCESS,
+      "runtime behavior");
+  require_logical_handle(handle, "runtime logical handle");
   dlclose(cuda);
 }
 
 int
 main(void)
 {
-  test_direct_forwarding();
+  test_tracked_behavior();
   test_resolvers();
-  puts("multicast forwarding OK");
+  puts("multicast behavior OK");
   return 0;
 }

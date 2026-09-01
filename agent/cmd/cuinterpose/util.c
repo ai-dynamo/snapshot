@@ -139,6 +139,43 @@ set_socket_timeouts(int fd, int seconds)
              : -1;
 }
 
+/*
+ * Parses a whole-second timeout override, returning fallback for anything that
+ * is not a plain positive decimal integer of at most a day. Surrounding
+ * whitespace is tolerated because config sources often add a trailing newline.
+ *
+ * Hand-rolled rather than strtol because every caller is compiled with
+ * _GNU_SOURCE, which forces _ISOC23_SOURCE on and makes <stdlib.h> redirect
+ * the whole strtol family to __isoc23_*@GLIBC_2.38. That would push the shim
+ * above the MIN_GLIBC floor asserted in the Makefile. atol is not an escape:
+ * glibc defines it as an inline wrapper around strtol.
+ *
+ * Trailing garbage is rejected rather than ignored as strtol would. Reading
+ * "3x" as 3 seconds would silently arm a timeout far shorter than the operator
+ * asked for, and the default is the safer reading of a malformed override.
+ */
+unsigned
+bounded_seconds(const char* value, unsigned fallback)
+{
+  unsigned long parsed = 0;
+  const char* digits;
+
+  if (value == NULL)
+    return fallback;
+  while (*value == ' ' || *value == '\t' || *value == '\n' || *value == '\r')
+    value++;
+  for (digits = value; *value >= '0' && *value <= '9'; value++) {
+    parsed = parsed * 10 + (unsigned long)(*value - '0');
+    if (parsed > 86400)
+      return fallback;
+  }
+  if (value == digits || parsed == 0)
+    return fallback;
+  while (*value == ' ' || *value == '\t' || *value == '\n' || *value == '\r')
+    value++;
+  return *value == '\0' ? (unsigned)parsed : fallback;
+}
+
 int
 send_header(int fd, const struct cuinterposer_header* header, int passed_fd)
 {
