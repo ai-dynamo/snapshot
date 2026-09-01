@@ -389,6 +389,22 @@ current_context(CUcontext* context)
   return get_current != NULL && get_current(context) == CUDA_SUCCESS && *context != NULL ? 0 : -1;
 }
 
+/*
+ * Diagnostic breadcrumb for the most recent export_raw() attempt.
+ *
+ * export_raw() can only report a bare CUresult, which is not enough to tell
+ * WHICH of its three handle sources was used or what the allocation looked
+ * like. When an export fails the whole restore aborts, so the single error
+ * string that reaches the agent log is the only evidence available.
+ *
+ * The wire message is capped at 96 bytes by struct cuinterposer_header
+ * (protocol.h), and the importer truncates what it appends to 61 chars, so
+ * this MUST stay terse -- widening it would mean an ABI change to protocol.h
+ * and a matching rebuild of the out-of-band cuinterposer-coordinator binary.
+ * Keep it under ~48 characters.
+ */
+static char last_export_detail[64];
+
 static CUresult
 export_raw(struct allocation* allocation, int* output)
 {
@@ -400,24 +416,39 @@ export_raw(struct allocation* allocation, int* output)
   struct mapping* mapping;
   CUmemGenericAllocationHandle temporary = 0;
   CUresult result;
+  const char* source;
 
   *output = -1;
   if (!allocation->creator || export_handle == NULL || enter_context(allocation->context, &scope) != 0)
     return CUDA_ERROR_INVALID_HANDLE;
   handle = first_live_handle(allocation);
-  if (allocation->carrier != 0)
+  if (allocation->carrier != 0) {
     temporary = allocation->carrier;
-  else if (handle != NULL)
+    source = "car";
+  } else if (handle != NULL) {
     temporary = handle->driver;
-  else if ((mapping = first_mapping(allocation)) != NULL && retain != NULL) {
+    source = "lh";
+  } else if ((mapping = first_mapping(allocation)) != NULL && retain != NULL) {
+    source = "ret";
     result = retain(&temporary, (void*)(uintptr_t)mapping->address);
-    if (result != CUDA_SUCCESS)
+    if (result != CUDA_SUCCESS) {
+      snprintf(
+          last_export_detail, sizeof(last_export_detail), "s=ret retain=%d sz=%zuM ht=%u", (int)result,
+          allocation->size >> 20, (unsigned)allocation->properties.requestedHandleTypes);
       goto done;
+    }
   } else {
+    snprintf(
+        last_export_detail, sizeof(last_export_detail), "s=none sz=%zuM ht=%u sh=%d", allocation->size >> 20,
+        (unsigned)allocation->properties.requestedHandleTypes, (int)allocation->shared);
     result = CUDA_ERROR_INVALID_HANDLE;
     goto done;
   }
   result = export_handle(output, temporary, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0);
+  snprintf(
+      last_export_detail, sizeof(last_export_detail), "s=%s sz=%zuM ht=%u lt=%d h=%zu m=%d", source,
+      allocation->size >> 20, (unsigned)allocation->properties.requestedHandleTypes,
+      (int)allocation->properties.location.type, live_handle_count(allocation), first_mapping(allocation) != NULL);
   if (temporary != allocation->carrier && (handle == NULL || temporary != handle->driver) && release != NULL)
     (void)release(temporary);
 done:
@@ -456,7 +487,7 @@ request_export(const struct cuinterposer_posix_ticket* ticket, int* output, char
         snprintf(error, error_size, "%s", "creator resource is unavailable");
     } else if (export_result != CUDA_SUCCESS) {
       if (error != NULL && error_size != 0)
-        snprintf(error, error_size, "creator export failed: CUresult=%d", (int)export_result);
+        snprintf(error, error_size, "creator export failed: CUresult=%d [%.44s]", (int)export_result, last_export_detail);
     } else {
       result = 0;
     }
@@ -777,7 +808,7 @@ restore_importers(void)
       (void)leave_context(&scope);
       current_phase = PHASE_FAILED;
       snprintf(
-          failure, sizeof(failure), "importer restore: creator export: %.61s",
+          failure, sizeof(failure), "imp restore: creator export: %.66s",
           export_error[0] != '\0' ? export_error : "request failed");
       return -1;
     }
@@ -964,7 +995,7 @@ serve(int client)
       }
       if (export_result != CUDA_SUCCESS) {
         char message[sizeof(response.message)];
-        snprintf(message, sizeof(message), "creator export failed: CUresult=%d", (int)export_result);
+        snprintf(message, sizeof(message), "creator export failed: CUresult=%d [%.44s]", (int)export_result, last_export_detail);
         header_error(&response, message);
         (void)send_header(client, &response, -1);
         break;
