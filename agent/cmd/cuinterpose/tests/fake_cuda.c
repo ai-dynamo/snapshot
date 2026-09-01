@@ -11,6 +11,8 @@
 #include <string.h>
 
 #undef cuGetProcAddress
+#undef cuMulticastBindAddr
+#undef cuMulticastBindMem
 
 enum {
   result_create = 101,
@@ -22,6 +24,12 @@ enum {
   result_export,
   result_import,
   result_properties,
+  result_multicast_create,
+  result_multicast_add_device,
+  result_multicast_bind_mem,
+  result_multicast_bind_address,
+  result_multicast_granularity,
+  result_multicast_unbind,
 };
 
 CUresult CUDAAPI
@@ -121,11 +129,87 @@ cuMemGetAllocationPropertiesFromHandle(
   return (CUresult)result_properties;
 }
 
+CUresult CUDAAPI
+fakeCuMulticastCreateOriginal(
+    CUmemGenericAllocationHandle* output, const CUmulticastObjectProp* properties)
+{
+  (void)properties;
+  *output = 0x456;
+  return (CUresult)result_multicast_create;
+}
+
+CUresult CUDAAPI
+cuMulticastCreate(
+    CUmemGenericAllocationHandle* output, const CUmulticastObjectProp* properties)
+{
+  return fakeCuMulticastCreateOriginal(output, properties);
+}
+
+CUresult CUDAAPI
+cuMulticastAddDevice(CUmemGenericAllocationHandle multicast, CUdevice device)
+{
+  (void)multicast;
+  (void)device;
+  return (CUresult)result_multicast_add_device;
+}
+
+CUresult CUDAAPI
+cuMulticastBindMem(
+    CUmemGenericAllocationHandle multicast, size_t multicast_offset,
+    CUmemGenericAllocationHandle memory, size_t memory_offset, size_t size,
+    unsigned long long flags)
+{
+  (void)multicast;
+  (void)multicast_offset;
+  (void)memory;
+  (void)memory_offset;
+  (void)size;
+  (void)flags;
+  return (CUresult)result_multicast_bind_mem;
+}
+
+CUresult CUDAAPI
+cuMulticastBindAddr(
+    CUmemGenericAllocationHandle multicast, size_t multicast_offset, CUdeviceptr memory,
+    size_t size, unsigned long long flags)
+{
+  (void)multicast;
+  (void)multicast_offset;
+  (void)memory;
+  (void)size;
+  (void)flags;
+  return (CUresult)result_multicast_bind_address;
+}
+
+CUresult CUDAAPI
+cuMulticastGetGranularity(
+    size_t* granularity, const CUmulticastObjectProp* properties,
+    CUmulticastGranularity_flags option)
+{
+  (void)properties;
+  (void)option;
+  *granularity = 4096;
+  return (CUresult)result_multicast_granularity;
+}
+
+CUresult CUDAAPI
+cuMulticastUnbind(
+    CUmemGenericAllocationHandle multicast, CUdevice device, size_t offset, size_t size)
+{
+  (void)multicast;
+  (void)device;
+  (void)offset;
+  (void)size;
+  return (CUresult)result_multicast_unbind;
+}
+
 static void*
 original(const char* symbol)
 {
   if (strcmp(symbol, "cuMemCreate") == 0)
     return (void*)&fakeCuMemCreateOriginal;
+  if (strcmp(symbol, "cuMulticastCreate") == 0)
+    return (void*)&fakeCuMulticastCreateOriginal;
   return dlsym(RTLD_DEFAULT, symbol);
 }
 

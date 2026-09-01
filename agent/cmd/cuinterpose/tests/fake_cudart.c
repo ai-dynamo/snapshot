@@ -10,11 +10,18 @@
 
 extern CUresult CUDAAPI fakeCuMemCreateOriginal(
     CUmemGenericAllocationHandle*, size_t, const CUmemAllocationProp*, unsigned long long);
+extern CUresult CUDAAPI fakeCuMulticastCreateOriginal(
+    CUmemGenericAllocationHandle*, const CUmulticastObjectProp*);
 
 static cudaError_t
 resolve(const char* symbol, void** output, enum cudaDriverEntryPointQueryResult* status)
 {
-  *output = strcmp(symbol, "cuMemCreate") == 0 ? (void*)&fakeCuMemCreateOriginal : NULL;
+  if (strcmp(symbol, "cuMemCreate") == 0)
+    *output = (void*)&fakeCuMemCreateOriginal;
+  else if (strcmp(symbol, "cuMulticastCreate") == 0)
+    *output = (void*)&fakeCuMulticastCreateOriginal;
+  else
+    *output = NULL;
   if (status != NULL)
     *status = *output != NULL ? cudaDriverEntryPointSuccess : cudaDriverEntryPointSymbolNotFound;
   return *output != NULL ? cudaSuccess : cudaErrorSymbolNotFound;
