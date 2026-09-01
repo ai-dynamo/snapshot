@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-restored
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vllm-restored
+  template:
+    metadata:
+      labels:
+        app: vllm-restored
+      annotations:
+        nvidia.com/restore-from: vllm-snapshot
+    spec:
+      terminationGracePeriodSeconds: 1
+      runtimeClassName: nvidia
+      securityContext:
+        seccompProfile:
+          type: Localhost
+          localhostProfile: profiles/block-iouring.json
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      containers:
+        - name: main
+          image: vllm-snapshot:replace-me
+          imagePullPolicy: Always
+          env:
+            - name: SNAPSHOT_MODEL
+              value: Qwen/Qwen3-0.6B
+            - name: SNAPSHOT_CONTROL_DIR
+              value: /snapshot-control
+          ports:
+            - name: api
+              containerPort: 8000
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          readinessProbe:
+            exec:
+              command:
+                - cat
+                - /snapshot-control/ready-for-snapshot
+            periodSeconds: 1
+            failureThreshold: 1200
+          volumeMounts:
+            - name: snapshot-control
+              mountPath: /snapshot-control
+              subPath: main
+            - name: tun
+              mountPath: /dev/net/tun
+      volumes:
+        - name: snapshot-control
+          emptyDir: {}
+        - name: tun
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice

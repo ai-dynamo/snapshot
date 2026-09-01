@@ -1,99 +1,202 @@
 # Snapshot
 
-> **This project is under construction.**
+Snapshot is a Kubernetes-native checkpoint and restore system for NVIDIA GPU
+workloads. It checkpoints a fully initialized GPU pod — its running process, with
+CPU and GPU memory — and restores that state on any compatible node, so a pod
+becomes ready in seconds instead of minutes.
 
+Snapshot provides the checkpoint and restore primitives for GPU pods.
+Orchestration — which pods to checkpoint, when, and how the checkpoints are
+restored — is left to the systems that integrate it.
 
-Snapshot is a Kubernetes-native checkpoint and restore system for NVIDIA GPU workloads.
-It enables AI frameworks and platforms to capture a fully initialized GPU worker and restore that state on any compatible node, allowing new pods to become ready in seconds instead of minutes.
+> [!NOTE]
+> Snapshot's APIs may still change, so it is not yet recommended for
+> production-critical workloads.
 
-Snapshot focuses on one responsibility: reliably capturing and restoring running GPU workloads. Higher-level decisions - such as which workloads to checkpoint, when to create snapshots, or when to restore them - are left to the systems integrating with Snapshot.
+## The Problem
 
+In inference serving, a replica can't answer a single request until it is fully
+initialized — model weights loaded into GPU memory, CUDA and runtime libraries
+initialized, execution kernels warmed up, and computation graphs compiled. For
+large models, this **cold start** takes minutes.
 
-## Why Snapshot?
+That cost is paid over and over. Every replica added to meet demand, every
+scale-up from zero, every restart or reschedule pays the full cold start again
+before it can serve traffic:
 
-GPU inference workers are expensive to start. Before serving a single request, a worker typically needs to load large model weights into GPU memory, initialize CUDA and other runtime libraries, warm up execution kernels, and compile or optimize computation graphs.
+- New replicas take minutes to become ready, so autoscaling lags behind demand.
+- Teams over-provision idle GPUs just to absorb demand spikes.
+- Restarts and reschedules stall serving capacity exactly when it is needed.
 
-For large models, this initialization can take several minutes. Every new replica, pod restart, reschedule, or scale-up event repeats the entire process, paying that cost from scratch.
-Snapshot eliminates most of this overhead by restoring a previously initialized worker instead of starting a new one.
+## The Solution
 
-## How it Works
+Snapshot checkpoints a fully initialized pod once and restores it on demand, so a
+new replica comes online in seconds instead of minutes.
 
-Snapshot exposes checkpoint and restore as Kubernetes resources.
+- **Checkpoint** — pause a running pod and save its complete execution state (CPU
+  and GPU memory) as a portable artifact.
+- **Restore** — start a new pod from that artifact on any node with matching GPU
+  hardware and driver versions, skipping model loading and warm-up; the process
+  resumes from where it was checkpointed.
 
-#### Capture
+## Benchmarks
 
-To create a snapshot, a caller identifies the pod to checkpoint. Snapshot pauses the running process and captures its complete execution state, including both CPU memory and GPU memory, into a persistent artifact.
-This artifact is not a container image, a filesystem snapshot, or a volume snapshot. Instead, it represents the complete in-memory state of a live, fully initialized GPU worker.
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/development/img/cold-start-vs-snapshot-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/development/img/cold-start-vs-snapshot-light.svg">
+    <img width="900" alt="Paired column chart comparing cold start against Snapshot for each model. Cold start ranges from 52 to 102 seconds, Snapshot from 3.5 to 40.9 seconds." src="docs/development/img/cold-start-vs-snapshot-light.svg">
+  </picture>
+</div>
 
-#### Restore
+<p align="center"><i><b>Figure 1.</b> Restoring a captured workload is 2.4 to 14.9 times faster than starting the same workload from scratch on the same hardware.</i></p>
 
-To restore a worker, a new pod references a previously captured snapshot artifact. During pod startup, Snapshot restores the captured process state directly into the container, bypassing model loading, kernel warm-up, and other initialization steps. The restored process resumes execution from the exact point where it was captured.
-Snapshots are portable across compatible machines and can be restored on any node with matching GPU hardware and driver versions. They are not tied to the node where they were originally created.
+For the experiment setup, the per stage breakdown, and the full results, see [benchmarks](docs/development/benchmarks.md).
 
-&nbsp;
+## When to use it
 
-## APIs
-| Resource                           | Scope          | Role                                                                                                                                    |
-|------------------------------------|----------------|-----------------------------------------------------------------------------------------------------------------------------------------|
-| `PodSnapshot`                      | Namespaced     | Created by callers to request a capture or reference an artifact for restore.                                                           |
-| `PodSnapshotContent`               | Cluster-scoped | System-managed record of the physical artifact, bound to a `PodSnapshot`. Created by the Snapshot operator, never by the caller.        |
-| `SnapshotJob`                      | Namespaced     | Created by callers to run a workload pod from a template and capture it into a `PodSnapshot` in one declarative, one-shot object.       |
-| `nvidia.com/restore-from`          | Namespaced     | Added as a pod annotation to trigger restore from a named `PodSnapshot` in the same namespace.                                          |
-| `nvidia.com/restore-container-map` | Namespaced     | Optional comma-separated `source=destination` mappings used to clone the single captured container into one or more restore containers. |
+- **Autoscaling inference** — scale out from an existing snapshot: bring the N+1
+  replica and beyond online in seconds to keep pace with demand.
+- **Scale-to-zero** — park idle models at zero replicas and restore them quickly
+  when capacity is needed again.
+- **Faster restarts and reschedules** — recover a pod's initialized state after a
+  restart or a move to another node.
 
-Restore producers must also implement the versioned
-[restore Pod contract](docs/restore-pod-contract.md). Go integrations should
-use the self-contained constants, builder, validator, and restore-outcome API
-from `github.com/ai-dynamo/snapshot/api/podcontract`.
+Snapshot currently focuses on inference cold-start; further use cases are on the
+roadmap.
 
-&nbsp;
+## Who it's for
 
+Snapshot is a building block for the teams that build and operate inference
+infrastructure:
 
-## Architecture
+- **Developers** building Kubernetes controllers, operators, or serving platforms.
+- **MLOps and platform engineers** who assemble deployment pipelines declaratively
+  with GitOps or workflow tools.
 
-Snapshot consists of two main components.
+## Prerequisites
 
-#### Operator
+Before installing Snapshot, make sure the following are in place:
 
-The Kubernetes operator manages the control plane.
+- A Kubernetes cluster with NVIDIA GPU nodes
+- containerd or CRI-O as the container runtime
+- [NVIDIA GPU Operator](https://github.com/NVIDIA/gpu-operator) 26.3 or newer, with CUDA driver 580 or newer and MIG disabled
+- A `ReadWriteMany` (RWX) storage class
+- The [Helm](https://helm.sh/docs/intro/install) CLI
+- A cluster that permits privileged pods for the node agent — see [Security](docs/operations/security.md)
 
-It is responsible for:
+## Installation
 
-* Orchestrating checkpoint and restore operations.
-* Tracking snapshot lifecycle.
-* Exposing status through Kubernetes resources.
-* Managing cleanup.
+Snapshot installs as a single per-cluster Helm release — a control-plane operator
+plus a privileged node agent (DaemonSet) on GPU nodes. Install it in its own
+namespace, and run GPU workloads in separate namespaces.
 
+Snapshot can be installed:
 
-#### Node Agent
+- **From a release** (recommended)
+- **From source** (build the images and install locally)
 
-A privileged node agent runs on every GPU node.
+### From a release
 
-It performs the actual checkpoint and restore operations by invoking CRIU and cuda-checkpoint against live processes.
+Find the latest version on the [releases page](https://github.com/ai-dynamo/snapshot/releases),
+then install the published chart, replacing `<VERSION>`:
 
-The node agent is intentionally an implementation detail. Clients never communicate with it directly.
+```bash
+helm install snapshot oci://ghcr.io/ai-dynamo/snapshot/snapshot \
+  --version <VERSION> \
+  --namespace snapshot --create-namespace
+```
 
-&nbsp;
+By default the chart provisions its own RWX checkpoint volume, shared by every
+checkpoint. See [Storage](docs/operations/storage.md) for the volume model and options
+(including reusing an existing claim), and [Installation](docs/operations/install.md)
+for install and uninstall.
 
-## Design Principles
+### From source
 
-Snapshot owns the mechanics of checkpoint and restore—not the policy.
+Follow the instructions in [Building from source](docs/development/build-from-source.md).
 
-Systems integrating with Snapshot decide:
+## How to use it
 
-* Which workloads should be checkpointed.
-* When snapshots should be created.
-* When they should be restored.
-* How failures should be handled.
+Snapshot is driven entirely through Kubernetes resources, with standard tooling.
+Create a `PodSnapshot` to checkpoint a running pod, and annotate a new pod with
+`nvidia.com/restore-from` to restore it. Higher-level systems wire these
+primitives into their own control loop.
 
-Snapshot executes those requests and exposes the resulting state.
+| Resource | Scope | Role |
+|----------|-------|------|
+| `PodSnapshot` | Namespaced | Created by callers to request a checkpoint, or to reference an artifact for restore. |
+| `PodSnapshotContent` | Cluster-scoped | System-managed record of the physical artifact, bound to a `PodSnapshot`. Created by the operator, never by the caller. |
+| `SnapshotJob` | Namespaced | Runs a pod from a template and checkpoints it into a `PodSnapshot` once ready — a self-contained checkpoint job. |
+| `nvidia.com/restore-from` | Namespaced | Pod annotation that triggers a restore from a named `PodSnapshot` in the same namespace. |
 
-Everything Snapshot manages is represented as Kubernetes resources. Snapshot metadata, capture progress, restore status, and lifecycle information are all observable through the Kubernetes API using standard Kubernetes tooling.
+Under the hood, a control-plane operator and a per-node agent perform the CRIU
+and `cuda-checkpoint` work; see [Architecture](docs/reference/architecture.md).
+The [API reference](docs/reference/api.md) covers the resources and the
+checkpoint/restore lifecycle.
 
-Clients interact exclusively through the Kubernetes API. No platform-specific APIs, direct node communication, or custom protocols are required.
+Once Snapshot is installed, follow the **[usage guides](docs/guides/README.md)**
+to checkpoint and restore a pod.
 
-&nbsp;
+## Limitations
 
-## Status
+Current limitations:
 
-The project is in early development. API types and control plane components are scaffolded but not yet feature-complete. Not ready for production use.
+- Single-GPU workloads only.
+- x86_64 nodes only.
+- vGPU is not supported.
+- Runs only on NVIDIA GPUs supported by the required CUDA driver.
+
+Multi-GPU and Arm support are on the roadmap.
+
+## Documentation
+
+**Get started**
+
+- [Usage guides](docs/guides/README.md) — build a snapshot-ready image per inference framework, then checkpoint and restore.
+
+**Reference**
+
+- [API](docs/reference/api.md) — `PodSnapshot`, `PodSnapshotContent`, `SnapshotJob`, and the `restore-from` annotation.
+- [Architecture](docs/reference/architecture.md) — operator and node-agent design, and the checkpoint/restore internals.
+- [CLI (`snapshotctl`)](docs/reference/cli.md) — lower-level checkpoint/restore from a pod manifest.
+
+**Operations**
+
+- [Installation](docs/operations/install.md) — Helm install and uninstall.
+- [Storage](docs/operations/storage.md) — the shared checkpoint volume and how to configure it.
+- [Troubleshooting](docs/operations/troubleshooting.md) — common failures and where to look.
+- [Security](docs/operations/security.md) — the privileged agent, seccomp, and Pod Security.
+
+**Development**
+
+- [Building from source](docs/development/build-from-source.md) — build the images and install locally.
+- [Benchmarks](docs/development/benchmarks.md) — how startup performance is measured.
+
+**More**
+
+- [Limitations & known issues](docs/limitations.md) — current limitations and what's on the roadmap.
+
+## Adopters
+
+[NVIDIA Dynamo](https://github.com/ai-dynamo/dynamo), the open-source
+inference-serving stack, integrates Snapshot for GPU cold-start. On Dynamo, Snapshot is available through it directly — see
+[Snapshotting GPU Workers](https://docs.nvidia.com/dynamo/latest/kubernetes/operations/cold-start-optimizations/dynamo-snapshot)
+in the Dynamo docs.
+
+## Contributing
+
+Contributions are welcome under the project's [Apache 2.0 license](LICENSE). See
+[CONTRIBUTING.md](CONTRIBUTING.md) — all commits must be signed off (DCO).
+
+## Security
+
+To report a security vulnerability, follow the process in [SECURITY.md](SECURITY.md).
+
+## Feedback
+
+Feedback and issues are welcome — please [open an issue](https://github.com/ai-dynamo/snapshot/issues).
+
+## License
+
+Snapshot is licensed under the [Apache License 2.0](LICENSE).
