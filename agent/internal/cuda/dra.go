@@ -11,6 +11,7 @@ import (
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
@@ -148,6 +149,20 @@ func getAllocatedNVIDIADRADevices(ctx context.Context, clientset kubernetes.Inte
 		}
 		claim, err := clientset.ResourceV1().ResourceClaims(podNamespace).Get(ctx, claimName, metav1.GetOptions{})
 		if err != nil {
+			// A claim generated from a ResourceClaimTemplate is owned by the
+			// pod and may not be visible yet through an API virtualization
+			// layer even though the pod has already been synchronized. Treat
+			// only that transient NotFound as unresolved DRA state so callers
+			// can use runtime-visible GPU discovery. Direct claims and every
+			// other lookup failure remain fail-closed.
+			if ref.ResourceClaimTemplateName != nil && apierrors.IsNotFound(err) {
+				log.V(1).Info(
+					"template-backed resource claim is not visible, trying other discovery paths",
+					"pod_claim", ref.Name,
+					"resource_claim", claimName,
+				)
+				continue
+			}
 			return nil, pod.Spec.NodeName, true, fmt.Errorf("get resource claim %s/%s: %w", podNamespace, claimName, err)
 		}
 		if claim.Status.Allocation == nil || len(claim.Status.Allocation.Devices.Results) == 0 {

@@ -402,15 +402,21 @@ func ensureControlEnv(container *corev1.Container, name string) error {
 }
 
 func validateControlEnvironment(container *corev1.Container) error {
-	found, err := hasValidControlEnv(container, SnapshotControlDirEnv)
+	foundCanonical, err := hasValidControlEnv(container, SnapshotControlDirEnv)
 	if err != nil {
 		return err
 	}
-	if !found {
-		return fmt.Errorf("container %q is missing %s environment variable", container.Name, SnapshotControlDirEnv)
-	}
-	if _, err := hasValidControlEnv(container, LegacySnapshotControlDirEnv); err != nil {
+	foundLegacy, err := hasValidControlEnv(container, LegacySnapshotControlDirEnv)
+	if err != nil {
 		return err
+	}
+	if !foundCanonical && !foundLegacy {
+		return fmt.Errorf(
+			"container %q is missing %s or %s environment variable",
+			container.Name,
+			SnapshotControlDirEnv,
+			LegacySnapshotControlDirEnv,
+		)
 	}
 	return nil
 }

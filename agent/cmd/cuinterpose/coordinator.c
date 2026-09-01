@@ -8,6 +8,7 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -16,13 +17,17 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "protocol.h"
 #include "util.h"
 
 #define TIMEOUT_SECONDS 30
+#define BROKER_TIMEOUT_SECONDS 300
 #define STATE_FILENAME "cuinterposer.state"
+#define BROKER_STATE_FILENAME "cuinterposer.broker"
+#define BROKER_DIRECTORY "/run/snapshot-cuinterposer"
 
 struct participant {
   char* endpoint;
@@ -57,8 +62,22 @@ struct allocation {
   uint64_t size;
   bool creator_handle;
   bool creator_mapping;
+  bool multicast_member;
   struct allocation* next;
 };
+
+struct broker_resource {
+  uint8_t id[CUINTERPOSER_ALLOCATION_ID_SIZE];
+  int fd;
+  struct broker_resource* next;
+};
+
+static int exchange_fd(
+    struct participant* participant, uint16_t operation,
+    const uint8_t allocation_id[CUINTERPOSER_ALLOCATION_ID_SIZE], int input_fd,
+    int* output_fd);
+static int command_all(
+    struct participant* participants, size_t count, uint16_t operation);
 
 static int
 connect_endpoint(const char* endpoint)
@@ -77,6 +96,436 @@ connect_endpoint(const char* endpoint)
     return -1;
   }
   return fd;
+}
+
+static void
+free_broker_resources(struct broker_resource* resources)
+{
+  while (resources != NULL) {
+    struct broker_resource* next = resources->next;
+    if (resources->fd >= 0)
+      close(resources->fd);
+    free(resources);
+    resources = next;
+  }
+}
+
+static struct participant*
+find_participant(struct participant* participants, size_t count, const char* id)
+{
+  size_t index;
+
+  for (index = 0; index < count; index++) {
+    if (strcmp(participants[index].id, id) == 0)
+      return &participants[index];
+  }
+  return NULL;
+}
+
+static struct broker_resource*
+find_broker_resource(
+    struct broker_resource* resources,
+    const uint8_t id[CUINTERPOSER_ALLOCATION_ID_SIZE])
+{
+  for (; resources != NULL; resources = resources->next) {
+    if (memcmp(resources->id, id, CUINTERPOSER_ALLOCATION_ID_SIZE) == 0)
+      return resources;
+  }
+  return NULL;
+}
+
+static int
+collect_broker_resources(
+    struct participant* participants, size_t participant_count,
+    struct allocation* allocations, struct broker_resource** output)
+{
+  struct broker_resource* resources = NULL;
+  struct allocation* allocation;
+
+  for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
+    struct participant* creator = find_participant(participants, participant_count, allocation->creator);
+    struct broker_resource* resource;
+
+    if (creator == NULL)
+      goto failed;
+    resource = calloc(1, sizeof(*resource));
+    if (resource == NULL)
+      goto failed;
+    resource->fd = -1;
+    memcpy(resource->id, allocation->id, sizeof(resource->id));
+    if (exchange_fd(
+            creator, CUINTERPOSER_EXPORT_BROKER, allocation->id, -1,
+            &resource->fd) != 0) {
+      free(resource);
+      goto failed;
+    }
+    resource->next = resources;
+    resources = resource;
+  }
+  *output = resources;
+  return 0;
+failed:
+  free_broker_resources(resources);
+  return -1;
+}
+
+static int
+broker_reply(int client, const struct cuinterposer_header* request, struct broker_resource* resources)
+{
+  struct cuinterposer_header response = *request;
+  struct broker_resource* resource;
+
+  response.status = 0;
+  response.message[0] = '\0';
+  if (request->operation == CUINTERPOSER_BROKER_GET) {
+    resource = find_broker_resource(resources, request->allocation_id);
+    if (resource == NULL) {
+      header_error(&response, "broker allocation unavailable");
+      return send_header(client, &response, -1);
+    }
+    return send_header(client, &response, resource->fd);
+  }
+  if (request->operation == CUINTERPOSER_BROKER_CLOSE)
+    return send_header(client, &response, -1);
+  header_error(&response, "unknown broker operation");
+  return send_header(client, &response, -1);
+}
+
+static void
+broker_loop(int listener, const char* path, struct broker_resource* resources)
+{
+  bool closed = false;
+
+  (void)setsid();
+  close(STDIN_FILENO);
+  close(STDOUT_FILENO);
+  close(STDERR_FILENO);
+  alarm(3600);
+  while (!closed) {
+    int client = accept4(listener, NULL, NULL, SOCK_CLOEXEC);
+    if (client < 0) {
+      if (errno == EINTR)
+        continue;
+      break;
+    }
+    /*
+     * The restore agent connects before CRIU and native CUDA restore. Keep the
+     * connection idle long enough for those phases to finish before the
+     * coordinator sends its first allocation request.
+     */
+    if (set_socket_timeouts(client, BROKER_TIMEOUT_SECONDS) == 0) {
+      for (;;) {
+        struct cuinterposer_header request;
+        int passed_fd = -1;
+
+        if (receive_header(client, &request, &passed_fd) != 0)
+          break;
+        if (passed_fd >= 0)
+          close(passed_fd);
+        if (passed_fd >= 0 || !header_strings_terminated(&request) ||
+            request.magic != CUINTERPOSER_MAGIC ||
+            request.version != CUINTERPOSER_VERSION ||
+            request.status != 0 || request.count != 0 ||
+            request.payload_size != 0 ||
+            (request.operation != CUINTERPOSER_BROKER_GET &&
+             request.operation != CUINTERPOSER_BROKER_CLOSE) ||
+            broker_reply(client, &request, resources) != 0)
+          break;
+        if (request.operation == CUINTERPOSER_BROKER_CLOSE) {
+          closed = true;
+          break;
+        }
+      }
+    }
+    close(client);
+  }
+  close(listener);
+  unlink(path);
+  free_broker_resources(resources);
+  _exit(closed ? EXIT_SUCCESS : EXIT_FAILURE);
+}
+
+static int
+write_broker_state(const char* checkpoint_dir, const char* socket_path)
+{
+  char path[PATH_MAX];
+  char temporary[PATH_MAX];
+  int fd;
+  int length;
+  int result = -1;
+
+  length = snprintf(path, sizeof(path), "%s/%s", checkpoint_dir, BROKER_STATE_FILENAME);
+  if (length < 0 || (size_t)length >= sizeof(path))
+    return -1;
+  length = snprintf(temporary, sizeof(temporary), "%s.tmp.XXXXXX", path);
+  if (length < 0 || (size_t)length >= sizeof(temporary))
+    return -1;
+  fd = mkstemp(temporary);
+  if (fd < 0)
+    return -1;
+  if (dprintf(fd, "%s\n", socket_path) >= 0 && fsync(fd) == 0) {
+    if (close(fd) == 0) {
+      fd = -1;
+      if (rename(temporary, path) == 0)
+        result = 0;
+    }
+  }
+  if (fd >= 0)
+    close(fd);
+  if (result != 0)
+    unlink(temporary);
+  return result;
+}
+
+static int
+start_broker(
+    const char* checkpoint_dir, struct participant* participants,
+    size_t participant_count, struct allocation* allocations,
+    pid_t* broker_pid, char socket_path[sizeof(((struct sockaddr_un*)0)->sun_path)])
+{
+  struct broker_resource* resources = NULL;
+  struct sockaddr_un address = {.sun_family = AF_UNIX};
+  uint8_t random[16];
+  char suffix[33];
+  mode_t previous_umask;
+  int listener = -1;
+  size_t index;
+  pid_t pid;
+
+  *broker_pid = -1;
+  if (collect_broker_resources(participants, participant_count, allocations, &resources) != 0 ||
+      random_bytes(random, sizeof(random)) != 0)
+    goto failed;
+  for (index = 0; index < sizeof(random); index++)
+    snprintf(suffix + index * 2, sizeof(suffix) - index * 2, "%02x", random[index]);
+  if (mkdir(BROKER_DIRECTORY, 0700) != 0 && errno != EEXIST)
+    goto failed;
+  if (snprintf(socket_path, sizeof(address.sun_path), "%s/%s.sock", BROKER_DIRECTORY, suffix) >=
+      (int)sizeof(address.sun_path))
+    goto failed;
+  snprintf(address.sun_path, sizeof(address.sun_path), "%s", socket_path);
+  listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  previous_umask = umask(0077);
+  if (listener < 0 || bind(listener, (const struct sockaddr*)&address, sizeof(address)) != 0 ||
+      listen(listener, 4) != 0) {
+    umask(previous_umask);
+    goto failed;
+  }
+  umask(previous_umask);
+  pid = fork();
+  if (pid < 0)
+    goto failed;
+  if (pid == 0)
+    broker_loop(listener, socket_path, resources);
+  close(listener);
+  listener = -1;
+  free_broker_resources(resources);
+  resources = NULL;
+  if (write_broker_state(checkpoint_dir, socket_path) != 0) {
+    kill(pid, SIGTERM);
+    (void)waitpid(pid, NULL, 0);
+    unlink(socket_path);
+    return -1;
+  }
+  *broker_pid = pid;
+  return 0;
+failed:
+  if (listener >= 0)
+    close(listener);
+  if (socket_path[0] != '\0')
+    unlink(socket_path);
+  free_broker_resources(resources);
+  return -1;
+}
+
+static int
+broker_request(int broker_fd, uint16_t operation, const uint8_t* allocation_id, int* output_fd)
+{
+  struct cuinterposer_header request;
+  struct cuinterposer_header response;
+  int received_fd = -1;
+
+  if (output_fd != NULL)
+    *output_fd = -1;
+  memset(&request, 0, sizeof(request));
+  request.magic = CUINTERPOSER_MAGIC;
+  request.version = CUINTERPOSER_VERSION;
+  request.operation = operation;
+  if (allocation_id != NULL)
+    memcpy(request.allocation_id, allocation_id, sizeof(request.allocation_id));
+  if (send_header(broker_fd, &request, -1) != 0) {
+    fprintf(stderr, "broker request %u: send failed\n", operation);
+    return -1;
+  }
+  if (receive_header(broker_fd, &response, &received_fd) != 0) {
+    fprintf(stderr, "broker request %u: receive failed\n", operation);
+    return -1;
+  }
+  if (
+      !header_strings_terminated(&response) ||
+      response.magic != CUINTERPOSER_MAGIC ||
+      response.version != CUINTERPOSER_VERSION ||
+      response.operation != operation || response.status != 0 ||
+      response.count != 0 || response.payload_size != 0 ||
+      (allocation_id != NULL &&
+       memcmp(response.allocation_id, allocation_id, sizeof(response.allocation_id)) != 0) ||
+      ((output_fd != NULL) != (received_fd >= 0))) {
+    fprintf(
+        stderr, "broker request %u: invalid response status=%d message=%s fd=%d\n",
+        operation, response.status, response.message, received_fd);
+    if (received_fd >= 0)
+      close(received_fd);
+    return -1;
+  }
+  if (output_fd != NULL)
+    *output_fd = received_fd;
+  return 0;
+}
+
+static bool
+participant_needs_allocation(
+    const struct participant* participant,
+    const uint8_t allocation_id[CUINTERPOSER_ALLOCATION_ID_SIZE])
+{
+  uint32_t index;
+
+  for (index = 0; index < participant->count; index++) {
+    const struct cuinterposer_record* record = &participant->records[index];
+    if ((record->kind == CUINTERPOSER_ALLOCATION ||
+         record->kind == CUINTERPOSER_MAPPING) &&
+        memcmp(record->allocation_id, allocation_id, sizeof(record->allocation_id)) == 0)
+      return true;
+  }
+  return false;
+}
+
+static int
+restore_brokered(
+    struct participant* participants, size_t participant_count,
+    struct participant* expected, size_t expected_count,
+    struct allocation* allocations, int broker_fd)
+{
+  struct allocation* allocation;
+  size_t participant_index;
+
+  if (broker_fd < 0)
+    return -1;
+  for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
+    int multicast_member_fd = -1;
+
+    /*
+     * Native CUDA restore may reconstruct the creator's local allocation with
+     * new backing storage. A multicast member must bind that local allocation
+     * (the driver rejects imported members), so peers must import a fresh
+     * export of the restored carrier rather than the broker's pre-checkpoint
+     * object. This keeps the multicast binding and peer mappings on the same
+     * physical allocation without copying device memory.
+     */
+    if (allocation->multicast_member) {
+      struct participant* creator =
+          find_participant(participants, participant_count, allocation->creator);
+      if (creator == NULL ||
+          exchange_fd(
+              creator, CUINTERPOSER_EXPORT_BROKER, allocation->id, -1,
+              &multicast_member_fd) != 0) {
+        fprintf(stderr, "broker restore: restored multicast member export failed\n");
+        return -1;
+      }
+    }
+    for (participant_index = 0; participant_index < participant_count; participant_index++) {
+      struct participant* expected_participant =
+          find_participant(expected, expected_count, participants[participant_index].id);
+      int raw_fd = -1;
+      if (expected_participant == NULL)
+      {
+        fprintf(stderr, "broker restore: participant %s missing from expected topology\n", participants[participant_index].id);
+        if (multicast_member_fd >= 0)
+          close(multicast_member_fd);
+        return -1;
+      }
+      if (!participant_needs_allocation(expected_participant, allocation->id))
+        continue;
+      /*
+       * Imported allocations cannot be passed to cuMulticastBindMem or
+       * cuMulticastBindAddr. Keep the creator's local allocation handle through
+       * native CUDA checkpoint and restore peer imports from the broker.
+       */
+      if (allocation->multicast_member &&
+          strcmp(participants[participant_index].id, allocation->creator) == 0)
+        continue;
+      if (multicast_member_fd >= 0) {
+        raw_fd = multicast_member_fd;
+      } else if (broker_request(broker_fd, CUINTERPOSER_BROKER_GET, allocation->id, &raw_fd) != 0) {
+        fprintf(stderr, "broker restore: allocation fetch failed\n");
+        return -1;
+      }
+      if (exchange_fd(
+              &participants[participant_index], CUINTERPOSER_RESTORE_BROKERED,
+              allocation->id, raw_fd, NULL) != 0) {
+        fprintf(
+            stderr, "broker restore: participant %s rejected allocation\n",
+            participants[participant_index].id);
+        if (multicast_member_fd >= 0)
+          close(multicast_member_fd);
+        else if (raw_fd >= 0)
+          close(raw_fd);
+        return -1;
+      }
+      if (multicast_member_fd < 0)
+        close(raw_fd);
+    }
+    if (multicast_member_fd >= 0)
+      close(multicast_member_fd);
+  }
+  if (command_all(participants, participant_count, CUINTERPOSER_RESTORE_BROKERED_COMPLETE) != 0) {
+    fprintf(stderr, "broker restore: participant completion failed\n");
+    return -1;
+  }
+  return 0;
+}
+
+static int
+exchange_fd(
+    struct participant* participant, uint16_t operation,
+    const uint8_t allocation_id[CUINTERPOSER_ALLOCATION_ID_SIZE], int input_fd, int* output_fd)
+{
+  struct cuinterposer_header request;
+  struct cuinterposer_header response;
+  int fd = -1;
+  int received_fd = -1;
+  int result = -1;
+
+  if (output_fd != NULL)
+    *output_fd = -1;
+  memset(&request, 0, sizeof(request));
+  request.magic = CUINTERPOSER_MAGIC;
+  request.version = CUINTERPOSER_VERSION;
+  request.operation = operation;
+  snprintf(request.participant_id, sizeof(request.participant_id), "%s", participant->id);
+  memcpy(request.allocation_id, allocation_id, sizeof(request.allocation_id));
+  fd = connect_endpoint(participant->endpoint);
+  if (fd < 0 || send_header(fd, &request, input_fd) != 0 ||
+      receive_header(fd, &response, &received_fd) != 0)
+    goto done;
+  if (!header_strings_terminated(&response) || response.magic != CUINTERPOSER_MAGIC ||
+      response.version != CUINTERPOSER_VERSION || response.operation != operation ||
+      response.status != 0 || response.count != 0 || response.payload_size != 0 ||
+      strcmp(response.participant_id, participant->id) != 0 ||
+      memcmp(response.allocation_id, allocation_id, sizeof(response.allocation_id)) != 0)
+    goto done;
+  if ((output_fd != NULL) != (received_fd >= 0))
+    goto done;
+  if (output_fd != NULL) {
+    *output_fd = received_fd;
+    received_fd = -1;
+  }
+  result = 0;
+done:
+  if (received_fd >= 0)
+    close(received_fd);
+  if (fd >= 0)
+    close(fd);
+  return result;
 }
 
 static struct multicast*
@@ -340,6 +789,8 @@ validate_topology(struct participant* participants, size_t participant_count, st
           reason = "invalid multicast member";
           goto failed;
         }
+        if (member != NULL)
+          member->multicast_member = true;
         device = find_multicast_device(multicast, record->device);
         if (device == NULL) {
           reason = "multicast binding device is absent";
@@ -673,12 +1124,44 @@ command_all(struct participant* participants, size_t count, uint16_t operation)
 }
 
 static int
-restore_unicast(struct participant* participants, size_t count)
+command_all_parallel(
+    struct participant* participants, size_t count, uint16_t operation)
 {
-  /* Creators must finish and listen again before importers request a fresh export. */
-  if (command_all(participants, count, CUINTERPOSER_RESTORE_CREATORS) != 0)
-    return -1;
-  return command_all(participants, count, CUINTERPOSER_RESTORE_IMPORTERS);
+  pid_t* children = NULL;
+  size_t started = 0;
+  size_t index;
+  int result = -1;
+
+  children = calloc(count == 0 ? 1 : count, sizeof(*children));
+  if (children == NULL)
+    goto done;
+  for (index = 0; index < count; index++) {
+    children[index] = fork();
+    if (children[index] < 0)
+      goto join;
+    if (children[index] == 0) {
+      struct cuinterposer_record* records = NULL;
+      uint32_t record_count = 0;
+      int child_result =
+          exchange(&participants[index], operation, &records, &record_count);
+
+      free(records);
+      _exit(child_result == 0 ? EXIT_SUCCESS : EXIT_FAILURE);
+    }
+    started++;
+  }
+join:
+  result = started == count ? 0 : -1;
+  for (index = 0; index < started; index++) {
+    int status;
+
+    if (waitpid(children[index], &status, 0) < 0 ||
+        !WIFEXITED(status) || WEXITSTATUS(status) != EXIT_SUCCESS)
+      result = -1;
+  }
+done:
+  free(children);
+  return result;
 }
 
 static int
@@ -693,7 +1176,8 @@ restore_multicast(struct participant* participants, size_t count)
     return -1;
   if (command_all(participants, count, CUINTERPOSER_RESTORE_MULTICAST_DEVICES) != 0)
     return -1;
-  return command_all(participants, count, CUINTERPOSER_RESTORE_MULTICAST);
+  return command_all_parallel(
+      participants, count, CUINTERPOSER_RESTORE_MULTICAST);
 }
 
 static int
@@ -742,6 +1226,9 @@ main(int argc, char** argv)
   size_t expected_count = 0;
   size_t index;
   bool prepare;
+  pid_t broker_pid = -1;
+  char broker_socket[sizeof(((struct sockaddr_un*)0)->sun_path)] = {0};
+  int broker_fd = -1;
   int result = EXIT_FAILURE;
   FILE* state = NULL;
 
@@ -764,6 +1251,17 @@ main(int argc, char** argv)
     return EXIT_FAILURE;
   proc_root = argv[3];
   checkpoint_dir = argv[5];
+  if (!prepare) {
+    const char* value = getenv("DYN_SNAPSHOT_CUINTERPOSER_BROKER_FD");
+    char* end;
+    long parsed;
+    errno = 0;
+    parsed = value == NULL ? -1 : strtol(value, &end, 10);
+    if (errno != 0 || value == NULL || *value == '\0' || *end != '\0' ||
+        parsed < 0 || parsed > INT_MAX)
+      return EXIT_FAILURE;
+    broker_fd = (int)parsed;
+  }
   length = snprintf(state_path, sizeof(state_path), "%s/%s", checkpoint_dir, STATE_FILENAME);
   if (length < 0 || (size_t)length >= sizeof(state_path))
     return EXIT_FAILURE;
@@ -822,6 +1320,12 @@ main(int argc, char** argv)
       fprintf(stderr, "prepare failed: topology validate\n");
       goto done;
     }
+    if (start_broker(
+            checkpoint_dir, participants, participant_count, allocations,
+            &broker_pid, broker_socket) != 0) {
+      fprintf(stderr, "prepare failed: allocation broker\n");
+      goto done;
+    }
     /* Carriers are local to this request. Every rank must finish multicast
      * teardown before PREPARE unmaps unicast. */
     if (command_all(participants, participant_count, CUINTERPOSER_PREPARE_MULTICAST) != 0) {
@@ -837,18 +1341,38 @@ main(int argc, char** argv)
       goto done;
     }
   } else {
-    if (read_state(state, &expected, &expected_count) != 0)
+    if (read_state(state, &expected, &expected_count) != 0) {
+      fprintf(stderr, "restore failed: read checkpoint topology\n");
       goto done;
+    }
     if (fclose(state) != 0) {
       state = NULL;
       goto done;
     }
     state = NULL;
     if (identify(participants, participant_count) != 0 ||
-        same_participants(expected, expected_count, participants, participant_count) != 0)
+        same_participants(expected, expected_count, participants, participant_count) != 0) {
+      fprintf(stderr, "restore failed: participant identity mismatch\n");
       goto done;
-    if (restore_unicast(participants, participant_count) != 0 ||
-        restore_multicast(participants, participant_count) != 0) {
+    }
+    if (validate_topology(expected, expected_count, &allocations) != 0) {
+      fprintf(stderr, "restore failed: checkpoint topology invalid\n");
+      goto done;
+    }
+    if (command_all(
+            participants, participant_count,
+            CUINTERPOSER_RESTORE_LOCAL_MULTICAST_MEMBERS) != 0) {
+      fprintf(stderr, "restore failed: local multicast member restore\n");
+      goto done;
+    }
+    if (restore_brokered(
+            participants, participant_count, expected, expected_count,
+            allocations, broker_fd) != 0) {
+      fprintf(stderr, "restore failed: brokered unicast restore\n");
+      goto done;
+    }
+    if (restore_multicast(participants, participant_count) != 0) {
+      fprintf(stderr, "restore failed: multicast restore\n");
       goto done;
     }
     for (index = 0; index < participant_count; index++) {
@@ -856,13 +1380,26 @@ main(int argc, char** argv)
       participants[index].records = NULL;
       participants[index].count = 0;
     }
+    free_allocations(allocations);
+    allocations = NULL;
     if (inspect(participants, participant_count) != 0 ||
         validate_topology(participants, participant_count, &allocations) != 0 ||
-        same_topology(expected, expected_count, participants, participant_count) != 0)
+        same_topology(expected, expected_count, participants, participant_count) != 0) {
+      fprintf(stderr, "restore failed: restored topology mismatch\n");
       goto done;
+    }
+    if (broker_request(broker_fd, CUINTERPOSER_BROKER_CLOSE, NULL, NULL) != 0) {
+      fprintf(stderr, "restore failed: broker close\n");
+      goto done;
+    }
   }
   result = EXIT_SUCCESS;
 done:
+  if (result != EXIT_SUCCESS && prepare && broker_pid > 0) {
+    kill(broker_pid, SIGTERM);
+    (void)waitpid(broker_pid, NULL, 0);
+    unlink(broker_socket);
+  }
   if (state != NULL)
     fclose(state);
   free_allocations(allocations);

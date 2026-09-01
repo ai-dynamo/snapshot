@@ -26,6 +26,7 @@ func main() {
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
 	targetPodIP := flag.String("target-pod-ip", "", "Restore pod IP for CRIU TCP socket remapping")
 	bundleDir := flag.String("bundle-dir", nsmount.SnapshotBinDst, "Path where the agent binary bundle is mounted in this namespace")
+	cuinterposerBrokerFD := flag.Int("cuinterposer-broker-fd", -1, "Inherited CUDA allocation broker descriptor")
 	flag.Parse()
 
 	if *checkpointPath == "" {
@@ -36,12 +37,22 @@ func main() {
 		fatal(log, err, "failed to point lookups at the injected bundle")
 	}
 
+	var cuinterposerBroker *os.File
+	if *cuinterposerBrokerFD >= 0 {
+		cuinterposerBroker = os.NewFile(uintptr(*cuinterposerBrokerFD), "cuinterposer-broker")
+		if cuinterposerBroker == nil {
+			fatal(log, nil, "invalid --cuinterposer-broker-fd")
+		}
+		defer cuinterposerBroker.Close()
+	}
+
 	opts := executor.RestoreOptions{
-		CheckpointPath: *checkpointPath,
-		CUDADeviceMap:  *cudaDeviceMap,
-		CgroupRoot:     *cgroupRoot,
-		TargetPodIP:    *targetPodIP,
-		BundleDir:      *bundleDir,
+		CheckpointPath:     *checkpointPath,
+		CUDADeviceMap:      *cudaDeviceMap,
+		CgroupRoot:         *cgroupRoot,
+		TargetPodIP:        *targetPodIP,
+		BundleDir:          *bundleDir,
+		CUInterposerBroker: cuinterposerBroker,
 	}
 
 	result, err := executor.RestoreInNamespace(context.Background(), opts, log)

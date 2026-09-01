@@ -267,6 +267,11 @@ def _worker(
             _cuda_call(driver.cuMemRelease, fresh_handle)
 
     _assert_bytes(private_address, private_expected, "private allocation after restore")
+    (sync_dir / f"post-restore-memory-{rank}").touch()
+    _collective(input_tensor, group_name, output, multicast)
+    torch.cuda.synchronize()
+    _assert_exact_result(output, "uncaptured collective after restore")
+    (sync_dir / f"post-restore-collective-{rank}").touch()
     graph.replay()
     torch.cuda.synchronize()
     _assert_exact_result(output, "after restore")
@@ -675,14 +680,29 @@ def _run_coordinator(
     environment = os.environ.copy()
     environment.pop("LD_PRELOAD", None)
     environment["DYN_SNAPSHOT_CONTROL_DIR"] = str(control_dir)
-    result = subprocess.run(
-        command,
-        env=environment,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=COMMAND_TIMEOUT_SECONDS,
-    )
+    broker = None
+    pass_fds: tuple[int, ...] = ()
+    if operation == "--restore":
+        broker_path = (checkpoint_dir / "cuinterposer.broker").read_text().strip()
+        broker = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        broker.connect(broker_path)
+        environment["DYN_SNAPSHOT_CUINTERPOSER_BROKER_FD"] = str(
+            broker.fileno()
+        )
+        pass_fds = (broker.fileno(),)
+    try:
+        result = subprocess.run(
+            command,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=COMMAND_TIMEOUT_SECONDS,
+            pass_fds=pass_fds,
+        )
+    finally:
+        if broker is not None:
+            broker.close()
     if result.returncode != 0:
         raise RuntimeError(
             f"coordinator {operation} failed ({result.returncode}):\n"

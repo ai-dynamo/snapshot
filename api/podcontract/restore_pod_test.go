@@ -369,6 +369,21 @@ func TestValidateMinimumContract(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsLegacyControlEnvironmentDuringMigration(t *testing.T) {
+	pod, err := Build(restorePodFixture(), restoreRequest(), Options{})
+	if err != nil {
+		t.Fatalf("Build() failed: %v", err)
+	}
+	pod.Spec.Containers[0].Env = removeRestoreEnv(
+		pod.Spec.Containers[0].Env,
+		SnapshotControlDirEnv,
+	)
+
+	if err := Validate(pod, restoreRequest()); err != nil {
+		t.Fatalf("Validate() rejected legacy control environment: %v", err)
+	}
+}
+
 func TestValidateRejectsMinimumContractDrift(t *testing.T) {
 	valid, err := Build(restorePodFixture(), restoreRequest(), Options{})
 	if err != nil {
@@ -386,6 +401,7 @@ func TestValidateRejectsMinimumContractDrift(t *testing.T) {
 		},
 		"environment": func(pod *corev1.Pod) {
 			pod.Spec.Containers[0].Env = removeRestoreEnv(pod.Spec.Containers[0].Env, SnapshotControlDirEnv)
+			pod.Spec.Containers[0].Env = removeRestoreEnv(pod.Spec.Containers[0].Env, LegacySnapshotControlDirEnv)
 		},
 	}
 	for name, mutate := range tests {

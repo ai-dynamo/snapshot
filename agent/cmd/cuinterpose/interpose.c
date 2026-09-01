@@ -8,6 +8,7 @@
 
 #include <cuda.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -82,8 +83,11 @@ struct allocation {
   CUmemAllocationProp properties;
   CUcontext context;
   CUmemGenericAllocationHandle carrier;
+  int broker_fd;
   bool creator;
   bool shared;
+  bool brokered;
+  bool brokered_restored;
   struct allocation* next;
 };
 
@@ -92,7 +96,6 @@ enum phase {
   PHASE_CARRIERS,
   PHASE_MULTICAST_DETACHED,
   PHASE_PREPARED,
-  PHASE_CREATORS_RESTORED,
   PHASE_UNICAST_RESTORED,
   PHASE_MULTICAST_CREATED,
   PHASE_MULTICAST_IMPORTED,
@@ -121,6 +124,29 @@ static struct handle* resolve_managed_handle(CUmemGenericAllocationHandle logica
 static struct mapping* find_mapping_at(CUdeviceptr address);
 static struct mapping* first_mapping(const struct allocation* allocation);
 static struct handle* first_live_handle(const struct allocation* allocation);
+static size_t live_handle_count(const struct allocation* allocation);
+
+static void
+close_broker_fd_if_unused(struct allocation* allocation)
+{
+  if (allocation->broker_fd >= 0 && live_handle_count(allocation) == 0 && first_mapping(allocation) == NULL) {
+    close(allocation->broker_fd);
+    allocation->broker_fd = -1;
+  }
+}
+
+static void
+close_broker_fds(void)
+{
+  struct allocation* allocation;
+
+  for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
+    if (allocation->broker_fd >= 0) {
+      close(allocation->broker_fd);
+      allocation->broker_fd = -1;
+    }
+  }
+}
 
 static void
 release_state_lock(void)
@@ -146,16 +172,6 @@ set_failure(const char* message)
 {
   current_phase = PHASE_FAILED;
   snprintf(failure, sizeof(failure), "%s", message);
-}
-
-static void
-set_importer_failure(const char* operation, CUresult result)
-{
-  current_phase = PHASE_FAILED;
-  if (result == CUDA_SUCCESS)
-    snprintf(failure, sizeof(failure), "importer restore: %s", operation);
-  else
-    snprintf(failure, sizeof(failure), "importer restore: %s failed: CUresult=%d", operation, (int)result);
 }
 
 static struct allocation*
@@ -218,6 +234,10 @@ multicast_member_from_id(const uint8_t id[CUINTERPOSER_ALLOCATION_ID_SIZE], stru
     return -1;
   memcpy(member->id, allocation->id, sizeof(member->id));
   member->device = allocation->properties.location.id;
+  if (allocation->carrier != 0) {
+    member->handle = allocation->carrier;
+    return 0;
+  }
   handle = first_live_handle(allocation);
   if (handle != NULL && handle->driver != 0) {
     member->handle = handle->driver;
@@ -402,14 +422,21 @@ export_raw(struct allocation* allocation, int* output)
   CUresult result;
 
   *output = -1;
-  if (!allocation->creator || export_handle == NULL || enter_context(allocation->context, &scope) != 0)
+  if (!allocation->creator)
+    return CUDA_ERROR_INVALID_HANDLE;
+  if (allocation->broker_fd >= 0) {
+    *output = fcntl(allocation->broker_fd, F_DUPFD_CLOEXEC, 0);
+    return *output >= 0 ? CUDA_SUCCESS : CUDA_ERROR_UNKNOWN;
+  }
+  if (export_handle == NULL || enter_context(allocation->context, &scope) != 0)
     return CUDA_ERROR_INVALID_HANDLE;
   handle = first_live_handle(allocation);
-  if (allocation->carrier != 0)
+  mapping = first_mapping(allocation);
+  if (allocation->carrier != 0) {
     temporary = allocation->carrier;
-  else if (handle != NULL)
+  } else if (handle != NULL) {
     temporary = handle->driver;
-  else if ((mapping = first_mapping(allocation)) != NULL && retain != NULL) {
+  } else if (mapping != NULL && retain != NULL) {
     result = retain(&temporary, (void*)(uintptr_t)mapping->address);
     if (result != CUDA_SUCCESS)
       goto done;
@@ -599,6 +626,8 @@ prepare_topology(void)
       goto failed;
   }
   for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
+    bool carrier_has_live_handle = false;
+
     if (!allocation->shared ||
         (live_handle_count(allocation) == 0 && first_mapping(allocation) == NULL && allocation->carrier == 0))
       continue;
@@ -620,7 +649,12 @@ prepare_topology(void)
       if (!handle->live || handle->allocation != allocation)
         continue;
       old = handle->driver;
-      if (allocation->creator && old == allocation->carrier) {
+      if (old == allocation->carrier)
+        carrier_has_live_handle = true;
+      if (allocation->creator &&
+          (!allocation->brokered ||
+           cuinterposer_multicast_is_checkpointed_member(allocation->id)) &&
+          old == allocation->carrier) {
         handle->driver = allocation->carrier;
         continue;
       }
@@ -628,7 +662,21 @@ prepare_topology(void)
         (void)leave_context(&scope);
         goto failed;
       }
-      handle->driver = allocation->creator ? allocation->carrier : 0;
+      handle->driver =
+          allocation->creator &&
+                  (!allocation->brokered ||
+                   cuinterposer_multicast_is_checkpointed_member(allocation->id))
+              ? allocation->carrier
+              : 0;
+    }
+    if (allocation->creator && allocation->brokered &&
+        !cuinterposer_multicast_is_checkpointed_member(allocation->id) &&
+        allocation->carrier != 0) {
+      if (!carrier_has_live_handle && release(allocation->carrier) != CUDA_SUCCESS) {
+        (void)leave_context(&scope);
+        goto failed;
+      }
+      allocation->carrier = 0;
     }
     if (leave_context(&scope) != 0)
       goto failed;
@@ -674,147 +722,145 @@ restore_mappings(struct allocation* allocation, CUmemGenericAllocationHandle han
 }
 
 static int
-restore_creators(void)
+restore_local_multicast_members(void)
 {
   release_fn release = (release_fn)cuinterposer_lookup_real_symbol("cuMemRelease");
   struct allocation* allocation;
-  struct context_scope scope;
-  struct handle* handle;
-  const char* mapping_operation;
 
-  if ((current_phase != PHASE_PREPARED && current_phase != PHASE_FAILED) || release == NULL)
+  if ((current_phase != PHASE_PREPARED && current_phase != PHASE_FAILED) ||
+      release == NULL)
     return -1;
   for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
-    if (!allocation->shared || !allocation->creator || allocation->carrier == 0)
+    struct context_scope scope;
+    struct handle* handle;
+    CUresult result;
+    const char* operation = "restore mappings";
+
+    if (!allocation->shared || !allocation->creator ||
+        !cuinterposer_multicast_is_checkpointed_member(allocation->id))
       continue;
-    if (enter_context(allocation->context, &scope) != 0)
-      goto failed;
-    if (restore_mappings(allocation, allocation->carrier, &mapping_operation) != CUDA_SUCCESS) {
-      (void)leave_context(&scope);
-      goto failed;
+    if (allocation->carrier == 0) {
+      set_failure("local multicast member restore: carrier unavailable");
+      return -1;
     }
-    for (handle = handles; handle != NULL; handle = handle->next) {
+    if (enter_context(allocation->context, &scope) != 0)
+      return -1;
+    result = restore_mappings(allocation, allocation->carrier, &operation);
+    for (handle = handles; result == CUDA_SUCCESS && handle != NULL;
+         handle = handle->next) {
       if (handle->live && handle->allocation == allocation)
         handle->driver = allocation->carrier;
     }
-    if (live_handle_count(allocation) == 0) {
-      if (release(allocation->carrier) != CUDA_SUCCESS) {
-        (void)leave_context(&scope);
-        goto failed;
-      }
-      allocation->carrier = 0;
+    if (result == CUDA_SUCCESS && live_handle_count(allocation) == 0) {
+      operation = "cuMemRelease carrier";
+      result = release(allocation->carrier);
     }
-    if (leave_context(&scope) != 0)
-      goto failed;
+    if (live_handle_count(allocation) == 0)
+      allocation->carrier = 0;
+    if (leave_context(&scope) != 0) {
+      set_failure("local multicast member restore: cannot leave CUDA context");
+      return -1;
+    }
+    if (result != CUDA_SUCCESS) {
+      snprintf(
+          failure, sizeof(failure),
+          "local multicast member restore: %s failed: CUresult=%d",
+          operation, (int)result);
+      current_phase = PHASE_FAILED;
+      return -1;
+    }
+    allocation->brokered_restored = true;
   }
-  current_phase = PHASE_CREATORS_RESTORED;
-  failure[0] = '\0';
   return 0;
-failed:
-  set_failure("cannot restore creator cuinterposer topology");
-  return -1;
 }
 
 static int
-restore_importers(void)
+restore_brokered(
+    const uint8_t allocation_id[CUINTERPOSER_ALLOCATION_ID_SIZE], int raw_fd)
 {
   import_fn import_handle = (import_fn)cuinterposer_lookup_real_symbol("cuMemImportFromShareableHandle");
   release_fn release = (release_fn)cuinterposer_lookup_real_symbol("cuMemRelease");
-  struct allocation* allocation;
+  struct allocation* allocation = find_allocation(allocation_id);
   struct context_scope scope;
   struct handle* handle;
+  CUmemGenericAllocationHandle imported = 0;
+  CUresult result;
+  const char* mapping_operation;
 
-  if (current_phase != PHASE_CREATORS_RESTORED || import_handle == NULL || release == NULL) {
-    snprintf(failure, sizeof(failure), "%s", "importer restore: phase or symbols are not ready");
+  if ((current_phase != PHASE_PREPARED && current_phase != PHASE_FAILED) || raw_fd < 0 ||
+      allocation == NULL || !allocation->shared || import_handle == NULL || release == NULL) {
+    set_failure("broker restore: phase, allocation, FD, or symbols invalid");
     return -1;
   }
-  for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
-    struct cuinterposer_posix_ticket ticket;
-    CUmemGenericAllocationHandle imported = 0;
-    CUresult cuda_result;
-    char export_error[sizeof(failure)];
-    int export_result;
-    int raw_fd = -1;
-    bool needed = false;
-    const char* mapping_operation;
-
-    if (!allocation->shared || allocation->creator)
-      continue;
-    for (handle = handles; handle != NULL; handle = handle->next) {
-      if (handle->live && handle->allocation == allocation) {
-        needed = true;
-        break;
-      }
-    }
-    if (!needed) {
-      struct mapping* mapping;
-      for (mapping = mappings; mapping != NULL; mapping = mapping->next) {
-        if (mapping->allocation == allocation && mapping->checkpointed) {
-          needed = true;
-          break;
-        }
-      }
-    }
-    if (!needed)
-      continue;
-    memset(&ticket, 0, sizeof(ticket));
-    ticket.magic = CUINTERPOSER_POSIX_TICKET_MAGIC;
-    ticket.version = CUINTERPOSER_POSIX_TICKET_VERSION;
-    ticket.resource_kind = CUINTERPOSER_RESOURCE_UNICAST;
+  if (allocation->brokered_restored) {
+    set_failure("broker restore: allocation restored twice");
+    return -1;
+  }
+  if (enter_context(allocation->context, &scope) != 0) {
+    set_failure("broker restore: cannot enter CUDA context");
+    return -1;
+  }
+  result = import_handle(&imported, (void*)(uintptr_t)raw_fd, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR);
+  if (result != CUDA_SUCCESS) {
+    (void)leave_context(&scope);
+    snprintf(failure, sizeof(failure), "broker restore: import failed: CUresult=%d", (int)result);
+    current_phase = PHASE_FAILED;
+    return -1;
+  }
+  result = restore_mappings(allocation, imported, &mapping_operation);
+  if (result != CUDA_SUCCESS) {
+    (void)release(imported);
+    (void)leave_context(&scope);
     snprintf(
-        ticket.creator_participant, sizeof(ticket.creator_participant), "%s", allocation->creator_participant);
-    memcpy(ticket.allocation_id, allocation->id, sizeof(ticket.allocation_id));
-    snprintf(ticket.creator_endpoint, sizeof(ticket.creator_endpoint), "%s", allocation->creator_endpoint);
-    memcpy(ticket.authorization, allocation->authorization, sizeof(ticket.authorization));
-    if (enter_context(allocation->context, &scope) != 0) {
-      set_importer_failure("enter context", CUDA_SUCCESS);
+        failure, sizeof(failure), "broker restore: %s failed: CUresult=%d", mapping_operation, (int)result);
+    current_phase = PHASE_FAILED;
+    return -1;
+  }
+  for (handle = handles; handle != NULL; handle = handle->next) {
+    if (handle->live && handle->allocation == allocation)
+      handle->driver = imported;
+  }
+  if (allocation->creator) {
+    allocation->broker_fd = fcntl(raw_fd, F_DUPFD_CLOEXEC, 0);
+    if (allocation->broker_fd < 0) {
+      if (live_handle_count(allocation) == 0)
+        (void)release(imported);
+      (void)leave_context(&scope);
+      set_failure("broker restore: cannot retain creator export FD");
       return -1;
     }
-    pthread_mutex_unlock(&state_lock);
-    export_result = request_export(&ticket, &raw_fd, export_error, sizeof(export_error));
-    pthread_mutex_lock(&state_lock);
-    if (export_result != 0) {
+  }
+  if (live_handle_count(allocation) == 0) {
+    result = release(imported);
+    if (result != CUDA_SUCCESS) {
       (void)leave_context(&scope);
+      snprintf(failure, sizeof(failure), "broker restore: release failed: CUresult=%d", (int)result);
       current_phase = PHASE_FAILED;
-      snprintf(
-          failure, sizeof(failure), "importer restore: creator export: %.61s",
-          export_error[0] != '\0' ? export_error : "request failed");
       return -1;
     }
-    cuda_result = import_handle(&imported, (void*)(uintptr_t)raw_fd, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR);
-    if (cuda_result != CUDA_SUCCESS) {
-      close(raw_fd);
-      (void)leave_context(&scope);
-      set_importer_failure("cuMemImportFromShareableHandle", cuda_result);
-      return -1;
-    }
-    if (close(raw_fd) != 0) {
-      (void)release(imported);
-      (void)leave_context(&scope);
-      set_importer_failure("raw FD close", CUDA_SUCCESS);
-      return -1;
-    }
-    cuda_result = restore_mappings(allocation, imported, &mapping_operation);
-    if (cuda_result != CUDA_SUCCESS) {
-      (void)release(imported);
-      (void)leave_context(&scope);
-      set_importer_failure(mapping_operation, cuda_result);
-      return -1;
-    }
-    for (handle = handles; handle != NULL; handle = handle->next) {
-      if (handle->live && handle->allocation == allocation)
-        handle->driver = imported;
-    }
-    if (live_handle_count(allocation) == 0) {
-      cuda_result = release(imported);
-      if (cuda_result != CUDA_SUCCESS) {
-        (void)leave_context(&scope);
-        set_importer_failure("cuMemRelease imported handle", cuda_result);
-        return -1;
-      }
-    }
-    if (leave_context(&scope) != 0) {
-      set_importer_failure("leave context", CUDA_SUCCESS);
+  }
+  allocation->carrier = 0;
+  allocation->brokered = true;
+  allocation->brokered_restored = true;
+  if (leave_context(&scope) != 0) {
+    set_failure("broker restore: cannot leave CUDA context");
+    return -1;
+  }
+  return 0;
+}
+
+static int
+finish_brokered_restore(void)
+{
+  struct allocation* allocation;
+
+  if (current_phase != PHASE_PREPARED && current_phase != PHASE_FAILED)
+    return -1;
+  for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
+    if (allocation->shared &&
+        (live_handle_count(allocation) != 0 || first_mapping(allocation) != NULL) &&
+        !allocation->brokered_restored) {
+      set_failure("broker restore: shared allocation missing");
       return -1;
     }
   }
@@ -840,8 +886,9 @@ serve(int client)
   response.version = CUINTERPOSER_VERSION;
   response.operation = request.operation;
   snprintf(response.participant_id, sizeof(response.participant_id), "%s", participant_id);
-  /* Reject ancillary FDs and requests that are not a well-formed control header for this process. */
-  if (passed_fd >= 0 || !header_strings_terminated(&request) || request.magic != CUINTERPOSER_MAGIC ||
+  /* Only brokered restore accepts one ancillary allocation FD. */
+  if (((request.operation == CUINTERPOSER_RESTORE_BROKERED) != (passed_fd >= 0)) ||
+      !header_strings_terminated(&request) || request.magic != CUINTERPOSER_MAGIC ||
       request.version != CUINTERPOSER_VERSION || request.status != 0 || request.count != 0 ||
       request.payload_size != 0 ||
       !((request.operation == CUINTERPOSER_IDENTIFY && request.participant_id[0] == '\0') ||
@@ -854,6 +901,50 @@ serve(int client)
   switch (request.operation) {
     case CUINTERPOSER_IDENTIFY:
       if (current_phase == PHASE_FAILED)
+        header_error(&response, failure);
+      (void)send_header(client, &response, -1);
+      break;
+    case CUINTERPOSER_RESTORE_LOCAL_MULTICAST_MEMBERS:
+      if (restore_local_multicast_members() != 0)
+        header_error(&response, failure);
+      (void)send_header(client, &response, -1);
+      break;
+    case CUINTERPOSER_EXPORT_BROKER: {
+      CUresult export_result;
+      struct allocation* allocation = find_allocation(request.allocation_id);
+
+      if ((current_phase != PHASE_ACTIVE && current_phase != PHASE_PREPARED &&
+           current_phase != PHASE_FAILED) ||
+          allocation == NULL || !allocation->creator || !allocation->shared) {
+        header_error(&response, "broker export: creator allocation unavailable");
+        (void)send_header(client, &response, -1);
+        break;
+      }
+      export_result = export_raw(allocation, &exported_fd);
+      if (export_result != CUDA_SUCCESS) {
+        char message[sizeof(response.message)];
+        snprintf(message, sizeof(message), "broker export failed: CUresult=%d", (int)export_result);
+        header_error(&response, message);
+        (void)send_header(client, &response, -1);
+        break;
+      }
+      allocation->brokered = true;
+      if (allocation->broker_fd >= 0) {
+        close(allocation->broker_fd);
+        allocation->broker_fd = -1;
+      }
+      memcpy(response.allocation_id, request.allocation_id, sizeof(response.allocation_id));
+      (void)send_header(client, &response, exported_fd);
+      break;
+    }
+    case CUINTERPOSER_RESTORE_BROKERED:
+      if (restore_brokered(request.allocation_id, passed_fd) != 0)
+        header_error(&response, failure);
+      memcpy(response.allocation_id, request.allocation_id, sizeof(response.allocation_id));
+      (void)send_header(client, &response, -1);
+      break;
+    case CUINTERPOSER_RESTORE_BROKERED_COMPLETE:
+      if (finish_brokered_restore() != 0)
         header_error(&response, failure);
       (void)send_header(client, &response, -1);
       break;
@@ -890,16 +981,6 @@ serve(int client)
       }
       (void)send_header(client, &response, -1);
       break;
-    case CUINTERPOSER_RESTORE_CREATORS:
-      if (restore_creators() != 0)
-        header_error(&response, failure);
-      (void)send_header(client, &response, -1);
-      break;
-    case CUINTERPOSER_RESTORE_IMPORTERS:
-      if (restore_importers() != 0)
-        header_error(&response, failure);
-      (void)send_header(client, &response, -1);
-      break;
     case CUINTERPOSER_RESTORE_MULTICAST_CREATORS:
       if (current_phase != PHASE_UNICAST_RESTORED || cuinterposer_multicast_restore_creators() != 0) {
         set_failure(cuinterposer_multicast_error());
@@ -928,7 +1009,8 @@ serve(int client)
       (void)send_header(client, &response, -1);
       break;
     case CUINTERPOSER_RESTORE_MULTICAST:
-      if (current_phase != PHASE_MULTICAST_JOINED || cuinterposer_multicast_restore_topology() != 0) {
+      if (current_phase != PHASE_MULTICAST_JOINED ||
+          cuinterposer_multicast_restore_topology() != 0) {
         set_failure(cuinterposer_multicast_error());
         header_error(&response, failure);
       } else {
@@ -942,7 +1024,7 @@ serve(int client)
       if (strcmp(request.participant_id, participant_id) != 0 ||
           (request.resource_kind != CUINTERPOSER_RESOURCE_UNICAST &&
            request.resource_kind != CUINTERPOSER_RESOURCE_MULTICAST) ||
-          (current_phase != PHASE_ACTIVE && current_phase != PHASE_CREATORS_RESTORED &&
+          (current_phase != PHASE_ACTIVE &&
            current_phase != PHASE_UNICAST_RESTORED && current_phase != PHASE_MULTICAST_CREATED &&
            current_phase != PHASE_MULTICAST_IMPORTED && current_phase != PHASE_MULTICAST_JOINED)) {
         header_error(&response, "creator resource is unavailable");
@@ -1093,6 +1175,7 @@ fork_child(void)
   participant_id[0] = '\0';
   socket_path[0] = '\0';
   endpoint_needs_initialization = true;
+  close_broker_fds();
   allocations = NULL;
   handles = NULL;
   mappings = NULL;
@@ -1174,6 +1257,7 @@ initialize(void)
 __attribute__((destructor)) static void
 finalize(void)
 {
+  close_broker_fds();
   if (listener >= 0)
     close(listener);
   if (socket_path[0] != '\0')
@@ -1220,6 +1304,7 @@ cuMemCreate(
   }
   allocation->size = size;
   allocation->properties = *properties;
+  allocation->broker_fd = -1;
   allocation->creator = true;
   snprintf(allocation->creator_participant, sizeof(allocation->creator_participant), "%s", participant_id);
   snprintf(allocation->creator_endpoint, sizeof(allocation->creator_endpoint), "%s", socket_path);
@@ -1259,8 +1344,10 @@ cuMemRelease(CUmemGenericAllocationHandle application)
   result = CUDA_SUCCESS;
   if (!driver_handle_used(handle, handle->driver))
     result = function != NULL ? function(handle->driver) : cuinterposer_unavailable();
-  if (result == CUDA_SUCCESS)
+  if (result == CUDA_SUCCESS) {
     handle->live = false;
+    close_broker_fd_if_unused(handle->allocation);
+  }
   pthread_mutex_unlock(&state_lock);
   return result;
 }
@@ -1382,8 +1469,10 @@ cuMemUnmap(CUdeviceptr address, size_t size)
     return CUDA_ERROR_NOT_READY;
   }
   result = function != NULL ? function(address, size) : cuinterposer_unavailable();
-  if (result == CUDA_SUCCESS)
+  if (result == CUDA_SUCCESS) {
     mapping->mapped = false;
+    close_broker_fd_if_unused(mapping->allocation);
+  }
   pthread_mutex_unlock(&state_lock);
   return result;
 }
@@ -1612,6 +1701,7 @@ cuMemImportFromShareableHandle(CUmemGenericAllocationHandle* output, void* os_ha
           allocation->creator_participant, sizeof(allocation->creator_participant), "%s",
           ticket.creator_participant);
       snprintf(allocation->creator_endpoint, sizeof(allocation->creator_endpoint), "%s", ticket.creator_endpoint);
+      allocation->broker_fd = -1;
       allocation->creator = false;
       allocation->next = allocations;
       allocations = allocation;

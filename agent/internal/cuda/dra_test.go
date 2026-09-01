@@ -526,4 +526,50 @@ func TestGetGPUUUIDsViaDRAAPI(t *testing.T) {
 			t.Fatal("expected unknown container to forbid fallback")
 		}
 	})
+
+	t.Run("missing template-backed claim permits runtime fallback", func(t *testing.T) {
+		templateName := "gpu-template"
+		generatedClaimName := "generated-gpu-claim"
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "pod", Namespace: "default"},
+			Spec: corev1.PodSpec{
+				NodeName: "node-1",
+				Containers: []corev1.Container{{
+					Name: "main",
+					Resources: corev1.ResourceRequirements{
+						Claims: []corev1.ResourceClaim{{Name: "gpu"}},
+					},
+				}},
+				ResourceClaims: []corev1.PodResourceClaim{{
+					Name:                      "gpu",
+					ResourceClaimTemplateName: &templateName,
+				}},
+			},
+			Status: corev1.PodStatus{
+				ResourceClaimStatuses: []corev1.PodResourceClaimStatus{{
+					Name:              "gpu",
+					ResourceClaimName: &generatedClaimName,
+				}},
+			},
+		}
+		client := fake.NewSimpleClientset(pod)
+
+		got, mustNotFallBack, err := GetGPUUUIDsViaDRAAPI(
+			ctx,
+			client,
+			pod.Name,
+			pod.Namespace,
+			"main",
+			log,
+		)
+		if err != nil {
+			t.Fatalf("GetGPUUUIDsViaDRAAPI: %v", err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("got %v, want no DRA UUIDs", got)
+		}
+		if mustNotFallBack {
+			t.Fatal("expected missing template-backed claim to permit fallback")
+		}
+	})
 }

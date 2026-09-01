@@ -113,6 +113,71 @@ func TestHasCUDAInterpositionState(t *testing.T) {
 	}
 }
 
+func TestOpenCUDAInterpositionBroker(t *testing.T) {
+	socketDir := shortTempDir(t)
+	socketPath := filepath.Join(socketDir, "test-"+strconv.Itoa(os.Getpid())+".sock")
+	_ = os.Remove(socketPath)
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = listener.Close()
+		_ = os.Remove(socketPath)
+	})
+
+	accepted := make(chan error, 1)
+	go func() {
+		connection, acceptErr := listener.AcceptUnix()
+		if acceptErr == nil {
+			acceptErr = connection.Close()
+		}
+		accepted <- acceptErr
+	}()
+
+	checkpointDir := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(checkpointDir, cuinterposerBrokerFile),
+		[]byte(socketPath+"\n"),
+		0600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	broker, err := openCUDAInterpositionBroker(checkpointDir, socketDir)
+	if err != nil {
+		t.Fatalf("OpenCUDAInterpositionBroker() error = %v", err)
+	}
+	if err := broker.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-accepted; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenCUDAInterpositionBrokerRejectsInvalidState(t *testing.T) {
+	for _, content := range []string{
+		"",
+		"/tmp/not-the-broker.sock\n",
+		cuinterposerBrokerDir + "/nested/broker.sock\n",
+		cuinterposerBrokerDir + "/broker.sock\ntrailing\n",
+		cuinterposerBrokerDir + "/broker.sock",
+	} {
+		checkpointDir := t.TempDir()
+		if err := os.WriteFile(
+			filepath.Join(checkpointDir, cuinterposerBrokerFile),
+			[]byte(content),
+			0600,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if broker, err := OpenCUDAInterpositionBroker(checkpointDir); err == nil {
+			_ = broker.Close()
+			t.Fatalf("OpenCUDAInterpositionBroker(%q) succeeded", content)
+		}
+	}
+}
+
 func shortTempDir(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "cui")
