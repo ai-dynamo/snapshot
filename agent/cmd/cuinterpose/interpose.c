@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -33,6 +34,10 @@
 #define LOGICAL_HANDLE_TAG UINT64_C(0xd94d000000000000)
 #define LOGICAL_HANDLE_TAG_MASK UINT64_C(0xffff000000000000)
 #define LOGICAL_HANDLE_VALUE_MASK UINT64_C(0x0000ffffffffffff)
+#ifndef CUINTERPOSER_HOST_CARRIER_THRESHOLD
+#define CUINTERPOSER_HOST_CARRIER_THRESHOLD (UINT64_C(512) * 1024 * 1024)
+#endif
+#define CUINTERPOSER_FLA_MIN_GRANULARITY (UINT64_C(2) * 1024 * 1024)
 
 CUresult CUDAAPI cuMemRetainAllocationHandle(CUmemGenericAllocationHandle*, void*);
 CUresult CUDAAPI cuMemGetAllocationPropertiesFromHandle(CUmemAllocationProp*, CUmemGenericAllocationHandle);
@@ -50,6 +55,13 @@ typedef CUresult(CUDAAPI* import_fn)(CUmemGenericAllocationHandle*, void*, CUmem
 typedef CUresult(CUDAAPI* properties_fn)(CUmemAllocationProp*, CUmemGenericAllocationHandle);
 typedef CUresult(CUDAAPI* context_get_fn)(CUcontext*);
 typedef CUresult(CUDAAPI* context_set_fn)(CUcontext);
+typedef CUresult(CUDAAPI* address_reserve_fn)(
+    CUdeviceptr*, size_t, size_t, CUdeviceptr, unsigned long long);
+typedef CUresult(CUDAAPI* address_free_fn)(CUdeviceptr, size_t);
+typedef CUresult(CUDAAPI* host_register_fn)(void*, size_t, unsigned int);
+typedef CUresult(CUDAAPI* host_unregister_fn)(void*);
+typedef CUresult(CUDAAPI* copy_dtoh_fn)(void*, CUdeviceptr, size_t);
+typedef CUresult(CUDAAPI* copy_htod_fn)(CUdeviceptr, const void*, size_t);
 
 struct allocation;
 
@@ -82,8 +94,10 @@ struct allocation {
   CUmemAllocationProp properties;
   CUcontext context;
   CUmemGenericAllocationHandle carrier;
+  void* host_carrier;
   bool creator;
   bool shared;
+  bool host_checkpointed;
   struct allocation* next;
 };
 
@@ -121,6 +135,23 @@ static struct handle* resolve_managed_handle(CUmemGenericAllocationHandle logica
 static struct mapping* find_mapping_at(CUdeviceptr address);
 static struct mapping* first_mapping(const struct allocation* allocation);
 static struct handle* first_live_handle(const struct allocation* allocation);
+
+static bool
+needs_host_carrier(const struct allocation* allocation)
+{
+  /*
+   * r615 may attach FLA state to large, aligned device allocations. Native
+   * restore preserves their contents but a subsequently exported POSIX handle
+   * can retain stale FLA state. Recreate only the shared allocations that can
+   * enter that path; smaller and non-exported allocations remain native.
+   */
+  return allocation->creator && allocation->shared &&
+      allocation->properties.type == CU_MEM_ALLOCATION_TYPE_PINNED &&
+      allocation->properties.location.type == CU_MEM_LOCATION_TYPE_DEVICE &&
+      allocation->properties.requestedHandleTypes == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR &&
+      allocation->size >= CUINTERPOSER_HOST_CARRIER_THRESHOLD &&
+      allocation->size % CUINTERPOSER_FLA_MIN_GRANULARITY == 0;
+}
 
 static void
 release_state_lock(void)
@@ -499,6 +530,8 @@ inspect_records(uint32_t* count)
     record->flags = allocation->creator ? CUINTERPOSER_CREATOR : 0;
     if (handles_count != 0)
       record->flags |= CUINTERPOSER_APPLICATION_HANDLE_LIVE;
+    if (needs_host_carrier(allocation))
+      record->flags |= CUINTERPOSER_HOST_CARRIER;
     memcpy(record->allocation_id, allocation->id, sizeof(record->allocation_id));
     record->allocation_size = allocation->size;
     record->allocation_type = allocation->properties.type;
@@ -543,6 +576,186 @@ driver_handle_used(const struct handle* except, CUmemGenericAllocationHandle dri
       return true;
   }
   return false;
+}
+
+static CUresult
+map_temporary(
+    const struct allocation* allocation, CUmemGenericAllocationHandle handle, CUdeviceptr* address,
+    const char** operation)
+{
+  address_reserve_fn reserve = (address_reserve_fn)cuinterposer_lookup_real_symbol("cuMemAddressReserve");
+  address_free_fn free_address = (address_free_fn)cuinterposer_lookup_real_symbol("cuMemAddressFree");
+  map_fn map = (map_fn)cuinterposer_lookup_real_symbol("cuMemMap");
+  unmap_fn unmap = (unmap_fn)cuinterposer_lookup_real_symbol("cuMemUnmap");
+  access_fn set_access = (access_fn)cuinterposer_lookup_real_symbol("cuMemSetAccess");
+  CUmemAccessDesc access;
+  CUresult result;
+
+  *address = 0;
+  if (reserve == NULL || free_address == NULL || map == NULL || unmap == NULL || set_access == NULL) {
+    *operation = "temporary mapping symbols are unavailable";
+    return CUDA_ERROR_NOT_INITIALIZED;
+  }
+  result = reserve(address, allocation->size, 0, 0, 0);
+  if (result != CUDA_SUCCESS) {
+    *operation = "cuMemAddressReserve";
+    return result;
+  }
+  result = map(*address, allocation->size, 0, handle, 0);
+  if (result != CUDA_SUCCESS) {
+    *operation = "cuMemMap";
+    (void)free_address(*address, allocation->size);
+    *address = 0;
+    return result;
+  }
+  memset(&access, 0, sizeof(access));
+  access.location = allocation->properties.location;
+  access.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+  result = set_access(*address, allocation->size, &access, 1);
+  if (result != CUDA_SUCCESS) {
+    *operation = "cuMemSetAccess";
+    (void)unmap(*address, allocation->size);
+    (void)free_address(*address, allocation->size);
+    *address = 0;
+  }
+  return result;
+}
+
+static int
+unmap_temporary(CUdeviceptr address, size_t size)
+{
+  unmap_fn unmap = (unmap_fn)cuinterposer_lookup_real_symbol("cuMemUnmap");
+  address_free_fn free_address = (address_free_fn)cuinterposer_lookup_real_symbol("cuMemAddressFree");
+
+  if (address == 0)
+    return 0;
+  if (unmap == NULL || free_address == NULL || unmap(address, size) != CUDA_SUCCESS ||
+      free_address(address, size) != CUDA_SUCCESS)
+    return -1;
+  return 0;
+}
+
+static void*
+create_host_carrier(size_t size)
+{
+  host_register_fn register_host = (host_register_fn)cuinterposer_lookup_real_symbol("cuMemHostRegister_v2");
+  void* carrier;
+
+  if (register_host == NULL)
+    return NULL;
+  carrier = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (carrier == MAP_FAILED)
+    return NULL;
+  if (register_host(carrier, size, 0) != CUDA_SUCCESS) {
+    (void)munmap(carrier, size);
+    return NULL;
+  }
+  return carrier;
+}
+
+static int
+destroy_host_carrier(void* carrier, size_t size)
+{
+  host_unregister_fn unregister_host = (host_unregister_fn)cuinterposer_lookup_real_symbol("cuMemHostUnregister");
+
+  if (carrier == NULL)
+    return 0;
+  if (unregister_host == NULL || unregister_host(carrier) != CUDA_SUCCESS)
+    return -1;
+  return munmap(carrier, size);
+}
+
+static int
+save_host_carrier(struct allocation* allocation)
+{
+  copy_dtoh_fn copy = (copy_dtoh_fn)cuinterposer_lookup_real_symbol("cuMemcpyDtoH_v2");
+  struct context_scope scope;
+  CUdeviceptr address = 0;
+  const char* operation = NULL;
+  void* carrier = NULL;
+  int result = -1;
+  bool entered = false;
+
+  if (current_phase != PHASE_MULTICAST_DETACHED || !needs_host_carrier(allocation) ||
+      allocation->carrier == 0 || allocation->host_carrier != NULL || allocation->host_checkpointed ||
+      copy == NULL)
+    return -1;
+  if (enter_context(allocation->context, &scope) != 0)
+    goto done;
+  entered = true;
+  if (map_temporary(allocation, allocation->carrier, &address, &operation) != CUDA_SUCCESS)
+    goto done;
+  carrier = create_host_carrier(allocation->size);
+  if (carrier == NULL)
+    goto done;
+  if (copy(carrier, address, allocation->size) != CUDA_SUCCESS)
+    goto done;
+  if (unmap_temporary(address, allocation->size) != 0)
+    goto done;
+  address = 0;
+  if (leave_context(&scope) != 0)
+    goto done;
+  entered = false;
+  allocation->host_carrier = carrier;
+  carrier = NULL;
+  allocation->host_checkpointed = true;
+  result = 0;
+done:
+  if (carrier != NULL)
+    (void)destroy_host_carrier(carrier, allocation->size);
+  if (address != 0)
+    (void)unmap_temporary(address, allocation->size);
+  if (entered)
+    (void)leave_context(&scope);
+  return result;
+}
+
+static int
+restore_host_carrier(struct allocation* allocation)
+{
+  create_fn create = (create_fn)cuinterposer_lookup_real_symbol("cuMemCreate");
+  release_fn release = (release_fn)cuinterposer_lookup_real_symbol("cuMemRelease");
+  copy_htod_fn copy = (copy_htod_fn)cuinterposer_lookup_real_symbol("cuMemcpyHtoD_v2");
+  struct context_scope scope;
+  CUmemGenericAllocationHandle carrier = 0;
+  CUdeviceptr address = 0;
+  const char* operation = NULL;
+  int result = -1;
+  bool entered = false;
+
+  if (current_phase != PHASE_PREPARED || !needs_host_carrier(allocation) ||
+      !allocation->host_checkpointed || allocation->carrier != 0 || create == NULL || release == NULL ||
+      allocation->host_carrier == NULL || copy == NULL)
+    return -1;
+  if (enter_context(allocation->context, &scope) != 0)
+    goto done;
+  entered = true;
+  if (create(&carrier, allocation->size, &allocation->properties, 0) != CUDA_SUCCESS)
+    goto done;
+  if (map_temporary(allocation, carrier, &address, &operation) != CUDA_SUCCESS)
+    goto done;
+  if (copy(address, allocation->host_carrier, allocation->size) != CUDA_SUCCESS)
+    goto done;
+  if (unmap_temporary(address, allocation->size) != 0)
+    goto done;
+  address = 0;
+  if (destroy_host_carrier(allocation->host_carrier, allocation->size) != 0)
+    goto done;
+  allocation->host_carrier = NULL;
+  if (leave_context(&scope) != 0)
+    goto done;
+  entered = false;
+  allocation->carrier = carrier;
+  allocation->host_checkpointed = false;
+  result = 0;
+done:
+  if (address != 0)
+    (void)unmap_temporary(address, allocation->size);
+  if (carrier != 0 && result != 0)
+    (void)release(carrier);
+  if (entered)
+    (void)leave_context(&scope);
+  return result;
 }
 
 static int
@@ -595,7 +808,8 @@ prepare_topology(void)
     return -1;
   for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
     if (allocation->shared && allocation->creator &&
-        (live_handle_count(allocation) != 0 || first_mapping(allocation) != NULL) && allocation->carrier == 0)
+        (live_handle_count(allocation) != 0 || first_mapping(allocation) != NULL) &&
+        (allocation->carrier == 0 || (needs_host_carrier(allocation) && !allocation->host_checkpointed)))
       goto failed;
   }
   for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
@@ -620,6 +834,14 @@ prepare_topology(void)
       if (!handle->live || handle->allocation != allocation)
         continue;
       old = handle->driver;
+      if (allocation->creator && allocation->host_checkpointed) {
+        if (old != allocation->carrier && !driver_handle_used(handle, old) && release(old) != CUDA_SUCCESS) {
+          (void)leave_context(&scope);
+          goto failed;
+        }
+        handle->driver = 0;
+        continue;
+      }
       if (allocation->creator && old == allocation->carrier) {
         handle->driver = allocation->carrier;
         continue;
@@ -629,6 +851,13 @@ prepare_topology(void)
         goto failed;
       }
       handle->driver = allocation->creator ? allocation->carrier : 0;
+    }
+    if (allocation->creator && allocation->host_checkpointed) {
+      if (release(allocation->carrier) != CUDA_SUCCESS) {
+        (void)leave_context(&scope);
+        goto failed;
+      }
+      allocation->carrier = 0;
     }
     if (leave_context(&scope) != 0)
       goto failed;
@@ -840,10 +1069,13 @@ serve(int client)
   response.version = CUINTERPOSER_VERSION;
   response.operation = request.operation;
   snprintf(response.participant_id, sizeof(response.participant_id), "%s", participant_id);
-  /* Reject ancillary FDs and requests that are not a well-formed control header for this process. */
-  if (passed_fd >= 0 || !header_strings_terminated(&request) || request.magic != CUINTERPOSER_MAGIC ||
+  /* Carrier commands identify one allocation by ID and size; no carrier bytes cross the socket. */
+  bool carrier_request =
+      request.operation == CUINTERPOSER_SAVE_HOST_CARRIER ||
+      request.operation == CUINTERPOSER_RESTORE_HOST_CARRIER;
+  if (passed_fd >= 0 || (carrier_request ? request.payload_size == 0 : request.payload_size != 0) ||
+      !header_strings_terminated(&request) || request.magic != CUINTERPOSER_MAGIC ||
       request.version != CUINTERPOSER_VERSION || request.status != 0 || request.count != 0 ||
-      request.payload_size != 0 ||
       !((request.operation == CUINTERPOSER_IDENTIFY && request.participant_id[0] == '\0') ||
         strcmp(request.participant_id, participant_id) == 0)) {
     header_error(&response, "invalid cuinterposer control request");
@@ -857,6 +1089,28 @@ serve(int client)
         header_error(&response, failure);
       (void)send_header(client, &response, -1);
       break;
+    case CUINTERPOSER_SAVE_HOST_CARRIER:
+    case CUINTERPOSER_RESTORE_HOST_CARRIER: {
+      struct allocation* allocation = find_allocation(request.allocation_id);
+      int transfer_result;
+
+      if (allocation == NULL || request.payload_size != allocation->size) {
+        header_error(&response, "host carrier allocation is unavailable");
+      } else {
+        transfer_result = request.operation == CUINTERPOSER_SAVE_HOST_CARRIER
+            ? save_host_carrier(allocation)
+            : restore_host_carrier(allocation);
+        if (transfer_result != 0) {
+          set_failure(
+              request.operation == CUINTERPOSER_SAVE_HOST_CARRIER
+                  ? "cannot save host-backed cuinterposer carrier"
+                  : "cannot restore host-backed cuinterposer carrier");
+          header_error(&response, failure);
+        }
+      }
+      (void)send_header(client, &response, -1);
+      break;
+    }
     case CUINTERPOSER_INSPECT:
       if (current_phase != PHASE_ACTIVE) {
         header_error(&response, "cuinterposer topology is not active");
