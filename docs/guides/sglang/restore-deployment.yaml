@@ -1,0 +1,119 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sglang-restored
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: sglang-restored
+  template:
+    metadata:
+      labels:
+        app: sglang-restored
+      annotations:
+        nvidia.com/restore-from: sglang-snapshot
+    spec:
+      terminationGracePeriodSeconds: 1
+      runtimeClassName: nvidia
+      securityContext:
+        seccompProfile:
+          type: Localhost
+          localhostProfile: profiles/block-iouring.json
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      initContainers:
+        - name: model-cache
+          image: sglang-snapshot:replace-me
+          imagePullPolicy: Always
+          command:
+            - python3
+            - -c
+          args:
+            - |
+              import os
+              from pathlib import Path
+              from huggingface_hub import snapshot_download
+              model = os.environ["SNAPSHOT_MODEL"]
+              marker = Path("/hf-cache") / (".snapshot-model-" + model.replace("/", "--"))
+              if not marker.exists():
+                  snapshot_download(repo_id=model)
+                  marker.touch()
+          env:
+            - name: SNAPSHOT_MODEL
+              value: Qwen/Qwen3-0.6B
+            - name: HF_HOME
+              value: /hf-cache
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /hf-cache
+      containers:
+        - name: main
+          image: sglang-snapshot:replace-me
+          imagePullPolicy: Always
+          args:
+            - --mode
+            - snapshot
+          env:
+            - name: SNAPSHOT_MODEL
+              value: Qwen/Qwen3-0.6B
+            - name: SGLANG_CONTEXT_LENGTH
+              value: "10240"
+            - name: SNAPSHOT_CONTROL_DIR
+              value: /snapshot-control
+            - name: HF_HOME
+              value: /hf-cache
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+            - name: NCCL_CUMEM_ENABLE
+              value: "0"
+            - name: NCCL_NVLS_ENABLE
+              value: "0"
+            - name: NCCL_IB_DISABLE
+              value: "1"
+            - name: NCCL_RAS_ENABLE
+              value: "0"
+            - name: TORCH_NCCL_ENABLE_MONITORING
+              value: "0"
+            - name: TORCH_NCCL_DUMP_ON_TIMEOUT
+              value: "0"
+          ports:
+            - name: api
+              containerPort: 8000
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          readinessProbe:
+            exec:
+              command:
+                - cat
+                - /snapshot-control/ready-for-snapshot
+            periodSeconds: 1
+            failureThreshold: 1800
+          volumeMounts:
+            - name: model-cache
+              mountPath: /hf-cache
+            - name: snapshot-control
+              mountPath: /snapshot-control
+              subPath: main
+            - name: tun
+              mountPath: /dev/net/tun
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: sglang-model-cache
+        - name: snapshot-control
+          emptyDir: {}
+        - name: tun
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice
