@@ -144,6 +144,7 @@ def restore_pod(
         }
     }
     spec["containers"][0]["env"] = [
+        {"name": "SNAPSHOT_RESTORE_STANDBY", "value": "1"},
         {"name": "DYN_SNAPSHOT_RESTORE_STANDBY", "value": "1"},
         {"name": "SNAPSHOT_CONTROL_DIR", "value": CONTROL_DIR},
         {"name": "DYN_SNAPSHOT_CONTROL_DIR", "value": CONTROL_DIR},
@@ -205,6 +206,7 @@ def multi_restore_pod(
                 }
             ],
             "env": [
+                {"name": "SNAPSHOT_RESTORE_STANDBY", "value": "1"},
                 {"name": "DYN_SNAPSHOT_RESTORE_STANDBY", "value": "1"},
                 {"name": "SNAPSHOT_CONTROL_DIR", "value": CONTROL_DIR},
                 {"name": "DYN_SNAPSHOT_CONTROL_DIR", "value": CONTROL_DIR},

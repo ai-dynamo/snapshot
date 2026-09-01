@@ -341,7 +341,7 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 # PATH search — and so must this placeholder image (same BASE_IMAGE).
 #
 # Backend entrypoints run a restore standby path when the operator
-# injects DYN_SNAPSHOT_RESTORE_STANDBY=1, then sleep while the
+# injects SNAPSHOT_RESTORE_STANDBY=1, then sleep while the
 # snapshot-agent restores into the container.
 # =============================================================================
 FROM ${BASE_IMAGE} AS placeholder
