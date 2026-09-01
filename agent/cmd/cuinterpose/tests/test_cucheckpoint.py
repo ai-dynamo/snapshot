@@ -452,6 +452,7 @@ def _build_native_tools(tmp_path: Path) -> tuple[Path, Path]:
             "-C",
             str(interposer_dir),
             f"BUILD_DIR={build_dir}",
+            "HOST_CARRIER_THRESHOLD=1",
         ],
         check=False,
         capture_output=True,
@@ -821,6 +822,11 @@ def _run_cucheckpoint_test(tmp_path: Path, multicast: bool) -> None:
         state = checkpoint_dir / "cuinterposer.state"
         if not state.is_file() or state.stat().st_size == 0:
             raise AssertionError("coordinator did not write nonempty cuinterposer.state")
+        carriers = list(checkpoint_dir.glob("cuinterposer-host-*.bin"))
+        if carriers:
+            raise AssertionError(
+                f"host carriers must remain process memory, found files: {carriers}"
+            )
 
         _native_checkpoint_with_timeout(child_pids)
         _run_coordinator(

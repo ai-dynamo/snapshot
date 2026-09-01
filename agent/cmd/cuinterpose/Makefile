@@ -8,6 +8,9 @@ COORDINATOR := $(BUILD_DIR)/cuinterposer-coordinator
 MULTICAST_FORWARD_TEST := $(BUILD_DIR)/multicast-forward-test
 MIN_GLIBC := GLIBC_2.34
 INTERPOSER_CPPFLAGS := -DCUINTERPOSER_DLSYM_VERSION=\"$(MIN_GLIBC)\"
+ifneq ($(HOST_CARRIER_THRESHOLD),)
+INTERPOSER_CPPFLAGS += -DCUINTERPOSER_HOST_CARRIER_THRESHOLD=$(HOST_CARRIER_THRESHOLD)
+endif
 COMMON_FLAGS := -std=gnu11 -O2 -Wall -Wextra -Werror
 INTERPOSER_SOURCES := interpose.c multicast.c posix.c symbols.c util.c
 INTERPOSER_HEADERS := multicast.h posix.h protocol.h symbols.h util.h
@@ -33,7 +36,7 @@ $(INTERPOSER): $(INTERPOSER_SOURCES) $(INTERPOSER_HEADERS) | $(BUILD_DIR)
 	mv $@.tmp $@
 
 $(COORDINATOR): $(COORDINATOR_SOURCES) $(COORDINATOR_HEADERS) | $(BUILD_DIR)
-	$(CC) $(COMMON_FLAGS) -static -o $@.tmp $(COORDINATOR_SOURCES)
+	$(CC) $(COMMON_FLAGS) -static -pthread -o $@.tmp $(COORDINATOR_SOURCES)
 	! readelf -d $@.tmp 2>/dev/null | grep -q NEEDED
 	mv $@.tmp $@
 
