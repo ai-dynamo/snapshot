@@ -10,9 +10,8 @@ on:
         description: >-
           Operator/agent image tag to install (e.g. from a manual
           push-artifacts.yaml dispatch on a feature branch). Leave empty to
-          auto-resolve the newest tag published for both images in GHCR,
-          which is not necessarily built from the branch this workflow runs
-          against.
+          test the checked-out commit itself: its dev tag must already be
+          published for both images in GHCR, otherwise the run fails.
         required: false
         type: string
   schedule:
