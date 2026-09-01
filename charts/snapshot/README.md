@@ -54,10 +54,12 @@ Create a checkpoint PVC through an RWX-capable StorageClass, such as an EFS
 StorageClass:
 
 ```bash
+export RWX_STORAGE_CLASS=efs-rwx
+
 helm upgrade --install snapshot ./charts/snapshot \
   --namespace "${NAMESPACE}" --create-namespace \
   --set storage.pvc.create=true \
-  --set storage.pvc.storageClass=<rwx-storage-class> \
+  --set storage.pvc.storageClass="${RWX_STORAGE_CLASS}" \
   --set runtime.type=crio \
   --set openshift.enabled=true
 ```
@@ -65,10 +67,12 @@ helm upgrade --install snapshot ./charts/snapshot \
 Or reuse an existing RWX PVC in the installation namespace:
 
 ```bash
+export EXISTING_RWX_PVC=snapshot-efs-pvc
+
 helm upgrade --install snapshot ./charts/snapshot \
   --namespace "${NAMESPACE}" --create-namespace \
   --set storage.pvc.create=false \
-  --set storage.pvc.name=<existing-rwx-pvc> \
+  --set storage.pvc.name="${EXISTING_RWX_PVC}" \
   --set runtime.type=crio \
   --set openshift.enabled=true
 ```
