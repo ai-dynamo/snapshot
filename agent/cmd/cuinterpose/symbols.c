@@ -22,6 +22,8 @@
 #endif
 
 #undef cuGetProcAddress
+#undef cuMulticastBindAddr
+#undef cuMulticastBindMem
 #undef cudaGetDriverEntryPoint
 #undef cudaGetDriverEntryPointByVersion
 
@@ -37,6 +39,28 @@ CUresult CUDAAPI cuMemImportFromShareableHandle(
     CUmemGenericAllocationHandle*, void*, CUmemAllocationHandleType);
 CUresult CUDAAPI cuMemGetAllocationPropertiesFromHandle(
     CUmemAllocationProp*, CUmemGenericAllocationHandle);
+CUresult CUDAAPI cuMulticastCreate(
+    CUmemGenericAllocationHandle*, const CUmulticastObjectProp*);
+CUresult CUDAAPI cuMulticastAddDevice(CUmemGenericAllocationHandle, CUdevice);
+CUresult CUDAAPI cuMulticastBindMem(
+    CUmemGenericAllocationHandle, size_t, CUmemGenericAllocationHandle, size_t, size_t,
+    unsigned long long);
+#if CUDA_VERSION >= 13010
+CUresult CUDAAPI cuMulticastBindMem_v2(
+    CUmemGenericAllocationHandle, CUdevice, size_t, CUmemGenericAllocationHandle, size_t,
+    size_t, unsigned long long);
+#endif
+CUresult CUDAAPI cuMulticastBindAddr(
+    CUmemGenericAllocationHandle, size_t, CUdeviceptr, size_t, unsigned long long);
+#if CUDA_VERSION >= 13010
+CUresult CUDAAPI cuMulticastBindAddr_v2(
+    CUmemGenericAllocationHandle, CUdevice, size_t, CUdeviceptr, size_t,
+    unsigned long long);
+#endif
+CUresult CUDAAPI cuMulticastGetGranularity(
+    size_t*, const CUmulticastObjectProp*, CUmulticastGranularity_flags);
+CUresult CUDAAPI cuMulticastUnbind(
+    CUmemGenericAllocationHandle, CUdevice, size_t, size_t);
 CUresult CUDAAPI cuGetProcAddress(const char*, void**, int, cuuint64_t);
 CUresult CUDAAPI cuGetProcAddress_v2(
     const char*, void**, int, cuuint64_t, CUdriverProcAddressQueryResult*);
@@ -213,6 +237,12 @@ replacement(const char* symbol, int version)
   return (void*)&name
   if (symbol == NULL)
     return NULL;
+#if CUDA_VERSION >= 13010
+  if (version >= 13010 && strcmp(symbol, "cuMulticastBindMem") == 0)
+    return (void*)&cuMulticastBindMem_v2;
+  if (version >= 13010 && strcmp(symbol, "cuMulticastBindAddr") == 0)
+    return (void*)&cuMulticastBindAddr_v2;
+#endif
   ENTRY(cuMemCreate);
   ENTRY(cuMemRelease);
   ENTRY(cuMemRetainAllocationHandle);
@@ -222,6 +252,18 @@ replacement(const char* symbol, int version)
   ENTRY(cuMemExportToShareableHandle);
   ENTRY(cuMemImportFromShareableHandle);
   ENTRY(cuMemGetAllocationPropertiesFromHandle);
+  ENTRY(cuMulticastCreate);
+  ENTRY(cuMulticastAddDevice);
+  ENTRY(cuMulticastBindMem);
+#if CUDA_VERSION >= 13010
+  ENTRY(cuMulticastBindMem_v2);
+#endif
+  ENTRY(cuMulticastBindAddr);
+#if CUDA_VERSION >= 13010
+  ENTRY(cuMulticastBindAddr_v2);
+#endif
+  ENTRY(cuMulticastGetGranularity);
+  ENTRY(cuMulticastUnbind);
   ENTRY(cuGetProcAddress_v2);
   ENTRY(cuGetProcAddress_v2_ptsz);
   ENTRY(cudaGetDriverEntryPoint);

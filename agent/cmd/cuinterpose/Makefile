@@ -5,7 +5,7 @@ BUILD_DIR ?= build
 CUDA_HOME ?= /usr/local/cuda
 INTERPOSER := $(BUILD_DIR)/libcuinterposer.so
 COORDINATOR := $(BUILD_DIR)/cuinterposer-coordinator
-FORWARD_TEST := $(BUILD_DIR)/forward-test
+MULTICAST_FORWARD_TEST := $(BUILD_DIR)/multicast-forward-test
 MIN_GLIBC := GLIBC_2.34
 INTERPOSER_CPPFLAGS := -DCUINTERPOSER_DLSYM_VERSION=\"$(MIN_GLIBC)\"
 COMMON_FLAGS := -std=gnu11 -O2 -Wall -Wextra -Werror
@@ -47,9 +47,11 @@ test: $(INTERPOSER)
 		-o $(BUILD_DIR)/libcudart.so.13 tests/fake_cudart.c
 	ln -sf libcudart.so.13 $(BUILD_DIR)/libcudart.so
 	$(CC) $(COMMON_FLAGS) -Wno-deprecated-declarations -I$(CUDA_HOME)/include \
-		-L$(BUILD_DIR) -Wl,-rpath,'$$ORIGIN' -o $(FORWARD_TEST) \
-		tests/forward_test.c -lcuda -lcudart -ldl
-	LD_PRELOAD=$(abspath $(INTERPOSER)) $(FORWARD_TEST)
+		-L$(BUILD_DIR) -Wl,-rpath,'$$ORIGIN' -o $(MULTICAST_FORWARD_TEST) \
+		tests/multicast_forward_test.c -lcuda -lcudart -ldl
+	mkdir -p $(BUILD_DIR)/control
+	SNAPSHOT_CONTROL_DIR=$(abspath $(BUILD_DIR)/control) \
+		LD_PRELOAD=$(abspath $(INTERPOSER)) $(MULTICAST_FORWARD_TEST)
 
 clean:
 	rm -rf $(BUILD_DIR)
