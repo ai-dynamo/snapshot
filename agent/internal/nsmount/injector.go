@@ -19,6 +19,10 @@ const (
 	SnapshotBinSrc = "/snapshot-binaries"
 	// SnapshotBinDst is the mount destination inside the placeholder namespace.
 	SnapshotBinDst = "/tmp/snapshot-binaries"
+	// CUDAInterposerSrc is the agent-side bundle directory containing the shim.
+	CUDAInterposerSrc = SnapshotBinSrc + "/cuinterposer"
+	// CUDAInterposerDst is the stable path used by capture and restore.
+	CUDAInterposerDst = "/tmp/snapshot-interposer"
 	// CheckpointSrc is the fixed agent-side checkpoint mount.
 	CheckpointSrc = types.CheckpointBasePath
 	// CheckpointDst is the mount destination for checkpoint data inside the
@@ -36,6 +40,22 @@ type MountPoint interface {
 	// NsFd returns the pinned mount-namespace fd opened at Mount time.
 	// Valid until Unmount is called. Test mocks may return nil.
 	NsFd() *os.File
+}
+
+// MountCUDAInterposer exposes the shim read-only at its checkpoint-time path.
+func (nsm *NSMounter) MountCUDAInterposer(
+	ctx context.Context,
+	namespaceMount MountPoint,
+) (MountPoint, error) {
+	if namespaceMount == nil || namespaceMount.NsFd() == nil {
+		return nil, fmt.Errorf("mount CUDA interposer: pinned mount namespace is required")
+	}
+	nsm.log.Info("mounting CUDA interposer into placeholder namespace")
+	ref, err := nsm.mounter.MountInterposer(ctx, namespaceMount.NsFd())
+	if err != nil {
+		return nil, err
+	}
+	return &mountPoint{mount: ref}, nil
 }
 
 // NSMounter installs the binary bundle and a selected checkpoint artifact at

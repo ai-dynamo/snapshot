@@ -24,6 +24,11 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
 	artifactCleanupConfig := bindArtifactCleanupFlags(flag.CommandLine)
+	agentImage := flag.String(
+		"agent-image",
+		"",
+		"Snapshot agent image used to install the CUDA interposer in opted-in source workloads",
+	)
 	flag.Parse()
 	if err := artifactCleanupConfig.Validate(); err != nil {
 		ctrl.Log.Error(err, "invalid artifact cleanup configuration")
@@ -87,6 +92,7 @@ func main() {
 		Client:             mgr.GetClient(),
 		NonCacheReadClient: mgr.GetAPIReader(),
 		Recorder:           mgr.GetEventRecorderFor("snapshotjob-controller"),
+		AgentImage:         *agentImage,
 	}
 	if err := snapshotJobReconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up SnapshotJob controller")

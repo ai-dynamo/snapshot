@@ -22,6 +22,11 @@ const (
 	// uses the captured container name as the destination.
 	RestoreContainerMapAnnotation = "nvidia.com/restore-container-map"
 
+	// CUDAInterposerAnnotation opts checkpoint targets into CUDA interposition.
+	// The only supported value is "enabled". Snapshot supplies its configured
+	// agent image; workload users do not select an interposer image.
+	CUDAInterposerAnnotation = "nvidia.com/cuda-interposer"
+
 	// DefaultSeccompLocalhostProfile is the kubelet-local profile installed by
 	// the Snapshot Helm chart to block io_uring for CRIU.
 	DefaultSeccompLocalhostProfile = "profiles/block-iouring.json"

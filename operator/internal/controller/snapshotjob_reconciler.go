@@ -56,6 +56,7 @@ type SnapshotJobReconciler struct {
 	client.Client
 	NonCacheReadClient client.Reader
 	Recorder           record.EventRecorder
+	AgentImage         string
 }
 
 type snapshotJobFailure struct {
@@ -146,7 +147,7 @@ func (r *SnapshotJobReconciler) reconcileResources(ctx context.Context, sj *snap
 			}
 			return r.reconcileAcceptedSourceJob(ctx, sj, authoritativeJob)
 		}
-		desiredJob, buildErr := buildSourceJob(sj)
+		desiredJob, buildErr := buildSourceJobWithAgentImage(sj, r.AgentImage)
 		if buildErr != nil {
 			return terminalObservation(snapshotv1alpha1.ReasonInvalidSpec, buildErr), ctrl.Result{}, nil
 		}

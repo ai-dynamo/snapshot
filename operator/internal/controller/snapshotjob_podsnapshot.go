@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -194,6 +195,18 @@ func buildPodSnapshot(sj *snapshotv1alpha1.SnapshotJob, pod *corev1.Pod) (*snaps
 	labels, annotations, err := podSnapshotTemplateMetadata(sj)
 	if err != nil {
 		return nil, err
+	}
+	interposerEnabled, err := podcontract.CUDAInterposerEnabled(pod.Annotations)
+	if err != nil {
+		return nil, err
+	}
+	if interposerEnabled {
+		if annotations == nil {
+			annotations = make(map[string]string, 1)
+		}
+		annotations[podcontract.CUDAInterposerAnnotation] = "enabled"
+	} else {
+		delete(annotations, podcontract.CUDAInterposerAnnotation)
 	}
 	return &snapshotv1alpha1.PodSnapshot{
 		TypeMeta: metav1.TypeMeta{

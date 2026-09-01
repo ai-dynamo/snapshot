@@ -87,6 +87,10 @@ func (noopInjector) MountBundle(_ context.Context, _ int) (nsmount.MountPoint, e
 	return noopMountPoint{}, nil
 }
 
+func (noopInjector) MountCUDAInterposer(_ context.Context, _ nsmount.MountPoint) (nsmount.MountPoint, error) {
+	return noopMountPoint{}, nil
+}
+
 func (noopInjector) MountArtifact(_ context.Context, _ nsmount.MountPoint, _ string) (nsmount.MountPoint, error) {
 	return noopMountPoint{}, nil
 }
@@ -1162,6 +1166,9 @@ func TestRestoreFinalizerIsNotAddedWhilePreflightIsPending(t *testing.T) {
 func TestRestoreFinalizerProtectsExecutionAndIsRemovedAfterSuccess(t *testing.T) {
 	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	snapshot, content := readySnapshotObjects()
+	snapshot.Annotations = map[string]string{
+		podcontract.CUDAInterposerAnnotation: "enabled",
+	}
 	w := makeTestController(t, pod, snapshot, content)
 	path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, string(content.UID), "main")
 	require.NoError(t, err)
@@ -1182,6 +1189,7 @@ func TestRestoreFinalizerProtectsExecutionAndIsRemovedAfterSuccess(t *testing.T)
 	assert.Equal(t, 1, restoreCalls)
 	assert.Equal(t, "main", request.ArtifactContainerName)
 	assert.Equal(t, "main", request.DestinationContainerName)
+	assert.True(t, request.CUDAInterposer)
 	live, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
 	require.NoError(t, err)
 	assert.False(t, hasFinalizer(live, restorePodFinalizer))

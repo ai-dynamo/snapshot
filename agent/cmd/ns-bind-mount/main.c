@@ -2,11 +2,13 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * ns-bind-mount installs and removes the two mounts used by restore:
+ * ns-bind-mount installs and removes the fixed mounts used by restore:
  *
  *   mount-bundle-fd <namespace-fd>
+ *   mount-interposer-fd <namespace-fd>
  *   mount-checkpoint-fd <namespace-fd> <checkpoint-path>
  *   unmount-bundle-fd <namespace-fd> [created]
+ *   unmount-interposer-fd <namespace-fd> [created]
  *   unmount-checkpoint-fd <namespace-fd> [created]
  *
  * The caller pins the target mount namespace and passes its descriptor through
@@ -58,6 +60,8 @@ struct mount_attr {
 
 #define BUNDLE_SOURCE "/snapshot-binaries"
 #define BUNDLE_DESTINATION "/tmp/snapshot-binaries"
+#define INTERPOSER_SOURCE "/snapshot-binaries/cuinterposer"
+#define INTERPOSER_DESTINATION "/tmp/snapshot-interposer"
 #define CHECKPOINT_ROOT "/checkpoints"
 #define CHECKPOINT_DESTINATION "/tmp/checkpoint"
 
@@ -221,6 +225,23 @@ mount_bundle(int argc, char* argv[])
 }
 
 static int
+mount_interposer(int argc, char* argv[])
+{
+  if (argc != 3) {
+    fprintf(stderr, "usage: ns-bind-mount mount-interposer-fd <namespace-fd>\n");
+    return 1;
+  }
+  int ns_fd = parse_fd(argv[2]);
+  if (ns_fd < 0)
+    return 1;
+  return install_mount(
+      ns_fd,
+      INTERPOSER_SOURCE,
+      INTERPOSER_DESTINATION,
+      MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV);
+}
+
+static int
 mount_checkpoint(int argc, char* argv[])
 {
   if (argc != 4) {
@@ -267,6 +288,8 @@ main(int argc, char* argv[])
   }
   if (strcmp(argv[1], "mount-bundle-fd") == 0)
     return mount_bundle(argc, argv);
+  if (strcmp(argv[1], "mount-interposer-fd") == 0)
+    return mount_interposer(argc, argv);
   if (strcmp(argv[1], "mount-checkpoint-fd") == 0)
     return mount_checkpoint(argc, argv);
   if (strcmp(argv[1], "unmount-bundle-fd") == 0)
@@ -275,6 +298,12 @@ main(int argc, char* argv[])
         argv,
         BUNDLE_DESTINATION,
         "usage: ns-bind-mount unmount-bundle-fd <namespace-fd> [created]");
+  if (strcmp(argv[1], "unmount-interposer-fd") == 0)
+    return unmount_role(
+        argc,
+        argv,
+        INTERPOSER_DESTINATION,
+        "usage: ns-bind-mount unmount-interposer-fd <namespace-fd> [created]");
   if (strcmp(argv[1], "unmount-checkpoint-fd") == 0)
     return unmount_role(
         argc,

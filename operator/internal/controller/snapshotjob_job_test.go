@@ -36,6 +36,41 @@ func minimalSnapshotJob() *snapshotv1alpha1.SnapshotJob {
 }
 
 func TestBuildSourceJob(t *testing.T) {
+	t.Run("injects the configured agent shim only into checkpoint targets", func(t *testing.T) {
+		sj := minimalSnapshotJob()
+		sj.Spec.PodTemplate.Annotations = map[string]string{
+			podcontract.CUDAInterposerAnnotation: "enabled",
+		}
+		sj.Spec.PodTemplate.Spec.Containers = append(
+			sj.Spec.PodTemplate.Spec.Containers,
+			corev1.Container{Name: "helper", Image: "test:latest"},
+		)
+		const agentImage = "registry.example/snapshot-agent:v1"
+
+		job, err := buildSourceJobWithAgentImage(sj, agentImage)
+		require.NoError(t, err)
+
+		require.Len(t, job.Spec.Template.Spec.InitContainers, 1)
+		assert.Equal(t, agentImage, job.Spec.Template.Spec.InitContainers[0].Image)
+		target := requireContainer(t, job.Spec.Template.Spec.Containers, "worker")
+		helper := requireContainer(t, job.Spec.Template.Spec.Containers, "helper")
+		assert.Contains(t, target.Env, corev1.EnvVar{
+			Name:  "LD_PRELOAD",
+			Value: podcontract.CUDAInterposerLibraryPath,
+		})
+		assert.Empty(t, helper.VolumeMounts)
+	})
+
+	t.Run("requires an agent image only when interposition is enabled", func(t *testing.T) {
+		sj := minimalSnapshotJob()
+		sj.Spec.PodTemplate.Annotations = map[string]string{
+			podcontract.CUDAInterposerAnnotation: "enabled",
+		}
+
+		_, err := buildSourceJob(sj)
+		require.ErrorContains(t, err, "configured Snapshot agent image")
+	})
+
 	t.Run("wires identity, target, and options through to NewSourceJob", func(t *testing.T) {
 		sj := minimalSnapshotJob()
 

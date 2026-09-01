@@ -26,6 +26,13 @@ import (
 // source it from — a caller needing cuda-checkpoint --launch-job wrapping sets it
 // up themselves in spec.podTemplate).
 func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, error) {
+	return buildSourceJobWithAgentImage(sj, "")
+}
+
+func buildSourceJobWithAgentImage(
+	sj *snapshotv1alpha1.SnapshotJob,
+	agentImage string,
+) (*batchv1.Job, error) {
 	// sj.Name is also used as a SnapshotJobOwnerLabel value. Admission caps
 	// metadata.name at the label-value limit;
 	// retain this check for objects that predate or bypass that schema.
@@ -51,7 +58,7 @@ func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, error) {
 	podTemplate.Labels[snapshotv1alpha1.SnapshotJobOwnerLabel] = sj.Name
 	podTemplate.Labels[snapshotv1alpha1.SnapshotJobOwnerUIDLabel] = string(sj.UID)
 
-	return protocol.NewSourceJob(podTemplate, protocol.SourceJobOptions{
+	job, err := protocol.NewSourceJob(podTemplate, protocol.SourceJobOptions{
 		Namespace:             sj.Namespace,
 		Name:                  sj.Name,
 		TargetContainer:       targetContainer,
@@ -60,4 +67,15 @@ func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, error) {
 		TTLSecondsAfterFinish: nil,
 		WrapLaunchJob:         false,
 	})
+	if err != nil {
+		return nil, err
+	}
+	if err := podcontract.ShapeCUDAInterposerCapture(
+		&job.Spec.Template,
+		sj.Spec.PodSnapshotTemplate.TargetContainers,
+		agentImage,
+	); err != nil {
+		return nil, err
+	}
+	return job, nil
 }

@@ -73,6 +73,36 @@ func TestExecMounterMountArgs(t *testing.T) {
 	}
 }
 
+func TestExecMounterMountInterposerArgs(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "args.log")
+	bin := writeFakeBinary(t, `printf '%s\n' "$@" >> `+logFile)
+	m := newMounterForTest(t, bin)
+	nsFd, err := os.Open("/proc/self/ns/mnt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nsFd.Close()
+
+	handle, err := m.MountInterposer(context.Background(), nsFd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := handle.Unmount(context.Background()); err != nil {
+		t.Fatalf("Unmount: %v", err)
+	}
+
+	want := []string{
+		"mount-interposer-fd",
+		fmt.Sprintf("%d", nsFdChildNum),
+		"unmount-interposer-fd",
+		fmt.Sprintf("%d", nsFdChildNum),
+	}
+	got := readLines(t, logFile)
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("args = %v, want %v", got, want)
+	}
+}
+
 func TestExecMounterMountErrorWrapped(t *testing.T) {
 	bin := writeFakeBinary(t, `echo "subprocess boom" >&2; exit 1`)
 	nsFd, openErr := os.Open("/proc/self/ns/mnt")
@@ -191,6 +221,7 @@ func TestCHelperRejectsUnsafeSourcesBeforeMountSyscalls(t *testing.T) {
 	for _, args := range [][]string{
 		{"mount-fd", "3", "/etc", "/tmp/checkpoint"},
 		{"mount-bundle-fd", "3", "/etc"},
+		{"mount-interposer-fd", "3", "/etc"},
 		{"unmount-checkpoint-fd", "3", "unexpected"},
 	} {
 		if output, err := exec.Command(binary, args...).CombinedOutput(); err == nil {

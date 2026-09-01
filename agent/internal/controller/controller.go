@@ -89,6 +89,7 @@ type restoreArtifact struct {
 	SnapshotName        string
 	ContentUID          string
 	SourceContainerName string
+	CUDAInterposer      bool
 	Path                string
 }
 
@@ -96,6 +97,7 @@ type restoreTarget struct {
 	SnapshotName        string
 	ContentUID          string
 	SourceContainerName string
+	CUDAInterposer      bool
 }
 
 type restorePlan struct {
@@ -610,7 +612,16 @@ func validateRestoreTarget(pod *corev1.Pod, snapshot *snapshotv1alpha1.PodSnapsh
 	}); err != nil {
 		return nil, nil, err
 	}
-	return &restoreTarget{SnapshotName: snapshot.Name, ContentUID: string(content.UID), SourceContainerName: containerName}, mappings, nil
+	interposerEnabled, err := podcontract.CUDAInterposerEnabled(snapshot.Annotations)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &restoreTarget{
+		SnapshotName:        snapshot.Name,
+		ContentUID:          string(content.UID),
+		SourceContainerName: containerName,
+		CUDAInterposer:      interposerEnabled,
+	}, mappings, nil
 }
 
 // resolveRestoreArtifact resolves the validated restore target to its physical
@@ -636,6 +647,7 @@ func (w *NodeController) resolveRestoreArtifact(podKey string, target *restoreTa
 		SnapshotName:        target.SnapshotName,
 		ContentUID:          target.ContentUID,
 		SourceContainerName: target.SourceContainerName,
+		CUDAInterposer:      target.CUDAInterposer,
 		Path:                path,
 	}, nil
 }
@@ -870,6 +882,7 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (int, error) {
 		TargetPodIP:              op.pod.Status.PodIP,
 		ArtifactContainerName:    op.artifact.SourceContainerName,
 		DestinationContainerName: op.destination,
+		CUDAInterposer:           op.artifact.CUDAInterposer,
 		Clientset:                w.clientset,
 	}
 	return w.restoreFn(ctx, w.runtime, op.log, req, w.injector)
