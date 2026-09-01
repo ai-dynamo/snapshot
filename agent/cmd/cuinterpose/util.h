@@ -21,6 +21,7 @@ bool is_lower_hex_id(const char value[CUINTERPOSER_ID_SIZE]);
 bool header_strings_terminated(const struct cuinterposer_header* header);
 void header_error(struct cuinterposer_header* header, const char* message);
 int set_socket_timeouts(int fd, int seconds);
+unsigned bounded_seconds(const char* value, unsigned fallback);
 int send_header(int fd, const struct cuinterposer_header* header, int passed_fd);
 int receive_header(int fd, struct cuinterposer_header* header, int* passed_fd);
 

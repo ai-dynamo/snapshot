@@ -8,6 +8,8 @@
 
 #include <cuda.h>
 #include <dlfcn.h>
+#include <pthread.h>
+#include <stdint.h>
 #include <string.h>
 
 #undef cuGetProcAddress
@@ -32,14 +34,48 @@ enum {
   result_multicast_unbind,
 };
 
+static pthread_mutex_t multicast_map_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t multicast_map_condition = PTHREAD_COND_INITIALIZER;
+static int block_multicast_map;
+static int multicast_map_entered;
+
+void
+fakeEnableBlockingMulticastMap(void)
+{
+  pthread_mutex_lock(&multicast_map_lock);
+  block_multicast_map = 1;
+  multicast_map_entered = 0;
+  pthread_mutex_unlock(&multicast_map_lock);
+}
+
+int
+fakeMulticastMapEntered(void)
+{
+  int entered;
+
+  pthread_mutex_lock(&multicast_map_lock);
+  entered = multicast_map_entered;
+  pthread_mutex_unlock(&multicast_map_lock);
+  return entered;
+}
+
+void
+fakeReleaseMulticastMap(void)
+{
+  pthread_mutex_lock(&multicast_map_lock);
+  block_multicast_map = 0;
+  pthread_cond_broadcast(&multicast_map_condition);
+  pthread_mutex_unlock(&multicast_map_lock);
+}
+
 CUresult CUDAAPI
 fakeCuMemCreateOriginal(
     CUmemGenericAllocationHandle* output, size_t size, const CUmemAllocationProp* properties,
     unsigned long long flags)
 {
   (void)size;
-  (void)properties;
   (void)flags;
+  (void)properties;
   *output = 0xabc;
   return (CUresult)result_create;
 }
@@ -75,8 +111,16 @@ cuMemMap(
   (void)address;
   (void)size;
   (void)offset;
-  (void)handle;
   (void)flags;
+  if (handle == 0x456) {
+    pthread_mutex_lock(&multicast_map_lock);
+    multicast_map_entered = 1;
+    pthread_cond_broadcast(&multicast_map_condition);
+    while (block_multicast_map)
+      pthread_cond_wait(&multicast_map_condition, &multicast_map_lock);
+    pthread_mutex_unlock(&multicast_map_lock);
+    return CUDA_SUCCESS;
+  }
   return (CUresult)result_map;
 }
 
@@ -135,7 +179,7 @@ fakeCuMulticastCreateOriginal(
 {
   (void)properties;
   *output = 0x456;
-  return (CUresult)result_multicast_create;
+  return CUDA_SUCCESS;
 }
 
 CUresult CUDAAPI
@@ -201,6 +245,13 @@ cuMulticastUnbind(
   (void)offset;
   (void)size;
   return (CUresult)result_multicast_unbind;
+}
+
+CUresult CUDAAPI
+cuCtxGetCurrent(CUcontext* context)
+{
+  *context = (CUcontext)(uintptr_t)1;
+  return CUDA_SUCCESS;
 }
 
 static void*
