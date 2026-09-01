@@ -94,8 +94,14 @@ WORKDIR /workspace
 COPY cmd/cuda-checkpoint-helper/main.c ./cmd/cuda-checkpoint-helper/main.c
 COPY cmd/ns-bind-mount/main.c ./cmd/ns-bind-mount/main.c
 COPY cmd/cuinterpose/interpose.c ./cmd/cuinterpose/interpose.c
+COPY cmd/cuinterpose/coordinator.c ./cmd/cuinterpose/coordinator.c
+COPY cmd/cuinterpose/posix.c ./cmd/cuinterpose/posix.c
+COPY cmd/cuinterpose/posix.h ./cmd/cuinterpose/posix.h
+COPY cmd/cuinterpose/protocol.h ./cmd/cuinterpose/protocol.h
 COPY cmd/cuinterpose/symbols.c ./cmd/cuinterpose/symbols.c
 COPY cmd/cuinterpose/symbols.h ./cmd/cuinterpose/symbols.h
+COPY cmd/cuinterpose/util.c ./cmd/cuinterpose/util.c
+COPY cmd/cuinterpose/util.h ./cmd/cuinterpose/util.h
 COPY cmd/cuinterpose/Makefile ./cmd/cuinterpose/Makefile
 
 RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
@@ -229,8 +235,9 @@ COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-chec
 # agent/internal/nsmount/mount.go defaultBinaryPath).
 COPY --from=cuda-helper-builder /ns-bind-mount /usr/local/sbin/ns-bind-mount
 COPY --from=cuda-helper-builder /cuinterpose-build/libcuinterposer.so /usr/local/lib/snapshot/libcuinterposer.so
+COPY --from=cuda-helper-builder /cuinterpose-build/cuinterposer-coordinator /usr/local/bin/cuinterposer-coordinator
 RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper \
-    /usr/local/sbin/ns-bind-mount \
+    /usr/local/sbin/ns-bind-mount /usr/local/bin/cuinterposer-coordinator \
     && chmod 0644 /usr/local/lib/snapshot/libcuinterposer.so
 
 # Copy the built binaries
@@ -249,6 +256,7 @@ COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-checkpoint-helper
 COPY --from=cuda-helper-builder /cuinterpose-build/libcuinterposer.so /snapshot-binaries/cuinterposer/libcuinterposer.so
 RUN chmod 0644 /snapshot-binaries/cuinterposer/libcuinterposer.so
+COPY --from=cuda-helper-builder /cuinterpose-build/cuinterposer-coordinator /snapshot-binaries/cuinterposer-coordinator
 
 # Network binaries needed during restore:
 #   ip  — address/route restore (criu/net.c)
@@ -262,6 +270,7 @@ RUN set -eu; \
     cp -L "$(command -v ip)" "$(command -v tar)" /snapshot-binaries/; \
     chmod +x /snapshot-binaries/criu /snapshot-binaries/nsrestore \
              /snapshot-binaries/cuda-checkpoint /snapshot-binaries/cuda-checkpoint-helper \
+             /snapshot-binaries/cuinterposer-coordinator \
              /snapshot-binaries/ip /snapshot-binaries/tar
 
 # Shared-library closure of the bundled binaries and plugins.
