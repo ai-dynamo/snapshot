@@ -54,9 +54,9 @@ type Facts struct {
 	// capture.
 	ExternalizedMounts []string
 
-	// ExistingMounts holds the destinations that resolve on this machine. The
-	// agent resolves them before comparing, so a comparison never touches disk.
-	ExistingMounts []string
+	// ExistingMountPaths holds the destinations that resolve on this machine.
+	// The agent resolves them before comparing, so a comparison never touches disk.
+	ExistingMountPaths []string
 }
 
 // GPUFacts is what discovery reads off a node before it is folded into a Facts.
