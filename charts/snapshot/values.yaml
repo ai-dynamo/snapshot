@@ -17,6 +17,14 @@ image:
 replicaCount: 1
 
 operator:
+  resources:
+    limits:
+      cpu: 500m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
   artifactCleanup:
     # Frequency of authoritative orphan artifact scans.
     scanInterval: 10m
@@ -89,9 +97,9 @@ daemonset:
   # Agent and nsrestore log level (trace, debug, info, warn, error)
   snapshotLogLevel: info
 
-  # Image pull secrets
-  imagePullSecrets:
-    - name: ngc-secret
+  # The shipped agent image is public on GHCR. Set this only when an image
+  # override is hosted in a private registry.
+  imagePullSecrets: []
 
   # Resource limits and requests
   resources:
