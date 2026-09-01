@@ -277,6 +277,7 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 				snapshotruntime.HostProcPath,
 				state.CUDAHostPIDs,
 				state.CUDANSPIDs,
+				cuda.DefaultCoordinatorBinaryPath,
 				log,
 			); err != nil {
 				return nil, fmt.Errorf("prepare CUDA interposition: %w", err)

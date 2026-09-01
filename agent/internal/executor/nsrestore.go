@@ -178,6 +178,19 @@ func executeRestore(
 		cudaHelperFdPath = fmt.Sprintf("/proc/self/fd/%d", f.Fd())
 	}
 
+	// Same reasoning for the cuinterposer coordinator: it is exec'd after CRIU
+	// returns, by which time the bundle mount is gone.
+	var coordinatorFdPath string
+	if !m.CUDA.IsEmpty() {
+		coordinatorPath := filepath.Join(opts.BundleDir, cuda.CoordinatorBinaryName)
+		f, err := os.Open(coordinatorPath)
+		if err != nil {
+			return nil, 0, nil, fmt.Errorf("failed to open cuinterposer-coordinator before CRIU restore: %w", err)
+		}
+		defer f.Close()
+		coordinatorFdPath = fmt.Sprintf("/proc/self/fd/%d", f.Fd())
+	}
+
 	// The restore-complete sentinel lives on the pod emptyDir mounted at
 	// SnapshotControlMountPath. Clear it here, in that mount namespace, so a
 	// leftover from an earlier incarnation cannot release the restored process
@@ -262,6 +275,7 @@ func executeRestore(
 				opts.CheckpointPath,
 				restorePIDs,
 				m.CUDA.PIDs,
+				coordinatorFdPath,
 			); err != nil {
 				return nil, 0, nil, fmt.Errorf("restore CUDA interposition: %w", err)
 			}

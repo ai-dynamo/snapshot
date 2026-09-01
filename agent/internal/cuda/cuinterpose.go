@@ -17,7 +17,14 @@ import (
 )
 
 const (
-	cuinterposerCoordinator  = "/usr/local/bin/cuinterposer-coordinator"
+	// CoordinatorBinaryName is the cuinterposer-coordinator executable name.
+	CoordinatorBinaryName = "cuinterposer-coordinator"
+	// DefaultCoordinatorBinaryPath is the agent-side coordinator absolute path,
+	// used for prepare. Restore runs inside the placeholder after CRIU has
+	// restored the original mount namespace, which does not contain the agent
+	// bundle, so that call site passes a /proc/self/fd path opened beforehand.
+	DefaultCoordinatorBinaryPath = "/usr/local/bin/" + CoordinatorBinaryName
+
 	cuinterposerSocketPrefix = "cuinterposer-"
 	cuinterposerStateFile    = "cuinterposer.state"
 )
@@ -98,15 +105,16 @@ func PrepareCUDAInterposition(
 	procRoot string,
 	observedPIDs []int,
 	namespacePIDs []int,
+	coordinatorBinaryPath string,
 	log logr.Logger,
 ) error {
 	args, err := cuinterposerArgs("prepare", checkpointDir, procRoot, observedPIDs, namespacePIDs)
 	if err != nil {
 		return err
 	}
-	output, err := exec.CommandContext(ctx, cuinterposerCoordinator, args...).CombinedOutput()
+	output, err := exec.CommandContext(ctx, coordinatorBinaryPath, args...).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("%s failed: %w (output: %s)", cuinterposerCoordinator, err, strings.TrimSpace(string(output)))
+		return fmt.Errorf("%s failed: %w (output: %s)", coordinatorBinaryPath, err, strings.TrimSpace(string(output)))
 	}
 	log.Info("Prepared cuinterposer state")
 	return nil
@@ -117,14 +125,15 @@ func RestoreCUDAInterposition(
 	checkpointDir string,
 	observedPIDs []int,
 	namespacePIDs []int,
+	coordinatorBinaryPath string,
 ) error {
 	args, err := cuinterposerArgs("restore", checkpointDir, "", observedPIDs, namespacePIDs)
 	if err != nil {
 		return err
 	}
-	output, err := exec.CommandContext(ctx, cuinterposerCoordinator, args...).CombinedOutput()
+	output, err := exec.CommandContext(ctx, coordinatorBinaryPath, args...).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("%s failed: %w (output: %s)", cuinterposerCoordinator, err, strings.TrimSpace(string(output)))
+		return fmt.Errorf("%s failed: %w (output: %s)", coordinatorBinaryPath, err, strings.TrimSpace(string(output)))
 	}
 	return nil
 }
