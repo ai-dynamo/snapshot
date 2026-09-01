@@ -31,6 +31,8 @@ enum cuinterposer_operation {
   CUINTERPOSER_RESTORE_MULTICAST_IMPORTERS = 9,
   CUINTERPOSER_RESTORE_MULTICAST_DEVICES = 10,
   CUINTERPOSER_RESTORE_MULTICAST = 11,
+  CUINTERPOSER_SAVE_HOST_CARRIER = 12,
+  CUINTERPOSER_RESTORE_HOST_CARRIER = 13,
 };
 
 enum cuinterposer_record_kind {
@@ -45,6 +47,7 @@ enum cuinterposer_record_kind {
 enum cuinterposer_record_flags {
   CUINTERPOSER_CREATOR = 1U << 0,
   CUINTERPOSER_APPLICATION_HANDLE_LIVE = 1U << 1,
+  CUINTERPOSER_HOST_CARRIER = 1U << 2,
 };
 
 enum cuinterposer_resource_kind {

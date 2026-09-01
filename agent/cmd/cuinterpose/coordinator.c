@@ -23,6 +23,7 @@
 #include "util.h"
 
 #define TIMEOUT_SECONDS 30
+#define CARRIER_TIMEOUT_SECONDS 600
 #define STATE_FILENAME "cuinterposer.state"
 
 struct participant {
@@ -58,7 +59,15 @@ struct allocation {
   uint64_t size;
   bool creator_handle;
   bool creator_mapping;
+  bool host_carrier;
   struct allocation* next;
+};
+
+struct carrier_job {
+  struct participant* participant;
+  struct allocation* allocations;
+  uint16_t operation;
+  int result;
 };
 
 static int
@@ -245,6 +254,10 @@ validate_topology(struct participant* participants, size_t participant_count, st
           snprintf(allocation->creator, sizeof(allocation->creator), "%s", participant->id);
           allocation->size = record->allocation_size;
           allocation->creator_handle = (record->flags & CUINTERPOSER_APPLICATION_HANDLE_LIVE) != 0;
+          allocation->host_carrier = (record->flags & CUINTERPOSER_HOST_CARRIER) != 0;
+        } else if ((record->flags & CUINTERPOSER_HOST_CARRIER) != 0) {
+          reason = "host carrier flag on importer";
+          goto failed;
         }
       } else if (record->kind == CUINTERPOSER_MAPPING) {
         if (record->address == 0) {
@@ -727,6 +740,128 @@ done:
 }
 
 static int
+exchange_carrier(
+    struct participant* participant, uint16_t operation, const uint8_t allocation_id[CUINTERPOSER_ALLOCATION_ID_SIZE],
+    uint64_t size)
+{
+  struct cuinterposer_header request;
+  struct cuinterposer_header response;
+  int response_fd = -1;
+  int fd = -1;
+  int result = -1;
+
+  memset(&request, 0, sizeof(request));
+  request.magic = CUINTERPOSER_MAGIC;
+  request.version = CUINTERPOSER_VERSION;
+  request.operation = operation;
+  request.payload_size = size;
+  snprintf(request.participant_id, sizeof(request.participant_id), "%s", participant->id);
+  memcpy(request.allocation_id, allocation_id, sizeof(request.allocation_id));
+  fd = connect_endpoint(participant->endpoint);
+  if (fd < 0 || set_socket_timeouts(fd, CARRIER_TIMEOUT_SECONDS) != 0 ||
+      send_header(fd, &request, -1) != 0 || receive_header(fd, &response, &response_fd) != 0)
+    goto done;
+  if (response_fd >= 0 || !header_strings_terminated(&response) || response.magic != CUINTERPOSER_MAGIC ||
+      response.version != CUINTERPOSER_VERSION || response.operation != operation || response.status != 0 ||
+      response.count != 0 || response.payload_size != 0 || strcmp(response.participant_id, participant->id) != 0) {
+    if (header_strings_terminated(&response) && response.message[0] != '\0')
+      fprintf(stderr, "%s: %s\n", participant->endpoint, response.message);
+    goto done;
+  }
+  result = 0;
+done:
+  if (response_fd >= 0)
+    close(response_fd);
+  if (fd >= 0)
+    close(fd);
+  return result;
+}
+
+static void*
+run_carrier_job(void* argument)
+{
+  struct carrier_job* job = argument;
+  struct allocation* allocation;
+
+  job->result = 0;
+  for (allocation = job->allocations; allocation != NULL; allocation = allocation->next) {
+    if (!allocation->host_carrier || strcmp(allocation->creator, job->participant->id) != 0)
+      continue;
+    job->result =
+        exchange_carrier(job->participant, job->operation, allocation->id, allocation->size);
+    if (job->result != 0)
+      break;
+  }
+  return NULL;
+}
+
+static int
+transfer_host_carriers(
+    struct participant* participants, size_t participant_count, struct allocation* allocations,
+    uint16_t operation)
+{
+  struct carrier_job* jobs;
+  pthread_t* threads;
+  bool* launched;
+  size_t index;
+  int result = 0;
+
+  jobs = calloc(participant_count, sizeof(*jobs));
+  threads = calloc(participant_count, sizeof(*threads));
+  launched = calloc(participant_count, sizeof(*launched));
+  if (jobs == NULL || threads == NULL || launched == NULL) {
+    result = -1;
+    goto done;
+  }
+  for (index = 0; index < participant_count; index++) {
+    struct allocation* allocation;
+    bool owns_carrier = false;
+
+    for (allocation = allocations; allocation != NULL; allocation = allocation->next) {
+      if (allocation->host_carrier && strcmp(allocation->creator, participants[index].id) == 0) {
+        owns_carrier = true;
+        break;
+      }
+    }
+    if (!owns_carrier)
+      continue;
+    jobs[index].participant = &participants[index];
+    jobs[index].allocations = allocations;
+    jobs[index].operation = operation;
+    if (pthread_create(&threads[index], NULL, run_carrier_job, &jobs[index]) != 0) {
+      result = -1;
+      break;
+    }
+    launched[index] = true;
+  }
+  for (index = 0; index < participant_count; index++) {
+    if (launched[index] && (pthread_join(threads[index], NULL) != 0 || jobs[index].result != 0))
+      result = -1;
+  }
+done:
+  free(launched);
+  free(threads);
+  free(jobs);
+  return result;
+}
+
+static int
+save_host_carriers(
+    struct participant* participants, size_t participant_count, struct allocation* allocations)
+{
+  return transfer_host_carriers(
+      participants, participant_count, allocations, CUINTERPOSER_SAVE_HOST_CARRIER);
+}
+
+static int
+restore_host_carriers(
+    struct participant* participants, size_t participant_count, struct allocation* allocations)
+{
+  return transfer_host_carriers(
+      participants, participant_count, allocations, CUINTERPOSER_RESTORE_HOST_CARRIER);
+}
+
+static int
 restore_unicast(struct participant* participants, size_t count)
 {
   /* Creators must finish and listen again before importers request a fresh export. */
@@ -792,6 +927,7 @@ main(int argc, char** argv)
   struct participant* participants = NULL;
   struct participant* expected = NULL;
   struct allocation* allocations = NULL;
+  struct allocation* restored_allocations = NULL;
   size_t participant_count = 0;
   size_t expected_count = 0;
   size_t index;
@@ -882,6 +1018,10 @@ main(int argc, char** argv)
       fprintf(stderr, "prepare failed: multicast teardown\n");
       goto done;
     }
+    if (save_host_carriers(participants, participant_count, allocations) != 0) {
+      fprintf(stderr, "prepare failed: host carrier save\n");
+      goto done;
+    }
     if (command_all(participants, participant_count, CUINTERPOSER_PREPARE) != 0) {
       fprintf(stderr, "prepare failed: participant prepare\n");
       goto done;
@@ -901,6 +1041,9 @@ main(int argc, char** argv)
     if (identify(participants, participant_count) != 0 ||
         same_participants(expected, expected_count, participants, participant_count) != 0)
       goto done;
+    if (validate_topology(expected, expected_count, &allocations) != 0 ||
+        restore_host_carriers(participants, participant_count, allocations) != 0)
+      goto done;
     if (restore_unicast(participants, participant_count) != 0 ||
         restore_multicast(participants, participant_count) != 0) {
       goto done;
@@ -911,7 +1054,7 @@ main(int argc, char** argv)
       participants[index].count = 0;
     }
     if (inspect(participants, participant_count) != 0 ||
-        validate_topology(participants, participant_count, &allocations) != 0 ||
+        validate_topology(participants, participant_count, &restored_allocations) != 0 ||
         same_topology(expected, expected_count, participants, participant_count) != 0)
       goto done;
   }
@@ -919,6 +1062,7 @@ main(int argc, char** argv)
 done:
   if (state != NULL)
     fclose(state);
+  free_allocations(restored_allocations);
   free_allocations(allocations);
   free_participants(expected, expected_count);
   free_participants(participants, participant_count);
