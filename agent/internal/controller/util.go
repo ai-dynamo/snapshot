@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -61,6 +62,52 @@ func isContainerReady(pod *corev1.Pod, containerName string) bool {
 		}
 	}
 	return false
+}
+
+// buildMountPlan returns the target container's pod-spec mount set as sorted
+// "name=<n> path=<p> sub=<s> subExpr=<e> ro=<b> prop=<p> rro=<r>" entries,
+// string values %q-quoted. This is what the CRIU images bake a mount table for,
+// so it is the shape an adopted artifact must still match — including ReadOnly,
+// which decides whether the replayed bind mount carries MS_RDONLY, and the two
+// optional fields that change the restored mount's namespace propagation and
+// recursive read-only state. Returns nil when the container is absent from the
+// spec.
+//
+// Every field is named and quoted because none of them is delimiter-safe: a
+// mount path or subPath may legally contain any byte except NUL, so a plain
+// separator lets two different mount sets encode identically and compare equal.
+// SubPath and SubPathExpr are mutually exclusive in the Kubernetes API but hold
+// separate keys here, so swapping one for the other is a difference rather than
+// a match — kubelet expands the expression per pod, and a changed expression can
+// select a different mounted subpath while every other field is unchanged.
+//
+// MountPropagation and RecursiveReadOnly are pointers whose nil means the API
+// default, so they are normalized to that default before encoding: an artifact
+// captured from a spec that spelled the default out must still match a spec
+// that left it unset.
+func buildMountPlan(pod *corev1.Pod, containerName string) []string {
+	for i := range pod.Spec.Containers {
+		c := &pod.Spec.Containers[i]
+		if c.Name != containerName {
+			continue
+		}
+		plan := make([]string, 0, len(c.VolumeMounts))
+		for _, m := range c.VolumeMounts {
+			prop := corev1.MountPropagationNone
+			if m.MountPropagation != nil {
+				prop = *m.MountPropagation
+			}
+			rro := corev1.RecursiveReadOnlyDisabled
+			if m.RecursiveReadOnly != nil {
+				rro = *m.RecursiveReadOnly
+			}
+			plan = append(plan, fmt.Sprintf("name=%q path=%q sub=%q subExpr=%q ro=%t prop=%q rro=%q",
+				m.Name, m.MountPath, m.SubPath, m.SubPathExpr, m.ReadOnly, prop, rro))
+		}
+		slices.Sort(plan)
+		return plan
+	}
+	return nil
 }
 
 // checkpointLeaseName returns a DNS-safe Lease name derived from the immutable

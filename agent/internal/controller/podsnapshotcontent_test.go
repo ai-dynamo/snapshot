@@ -413,6 +413,262 @@ func TestReconcileSnapshotContent_ResumeWritesReady(t *testing.T) {
 	require.NotNil(t, cond)
 }
 
+// writeAdoptableArtifact stages a pre-existing artifact carrying mountPlan, so the resume
+// path finds something to adopt.
+func writeAdoptableArtifact(t *testing.T, w *NodeController, contentUID string, mountPlan []string) {
+	t.Helper()
+	dest := filepath.Join(w.config.Storage.BasePath, "artifacts", contentUID, "containers", "main")
+	require.NoError(t, os.MkdirAll(dest, 0o755))
+	require.NoError(t, snapshottypes.WriteManifest(dest, &snapshottypes.CheckpointManifest{
+		Artifact: snapshottypes.ArtifactManifest{ContentUID: contentUID, ContainerName: "main"},
+		K8s:      snapshottypes.SourcePodManifest{MountPlan: mountPlan},
+	}))
+}
+
+// mountEntry builds one stored mount-plan entry through buildMountPlan itself, so these
+// tests pin the adoption behaviour rather than the encoding buildMountPlan happens to use.
+func mountEntry(t *testing.T, mount corev1.VolumeMount) string {
+	t.Helper()
+	plan := buildMountPlan(&corev1.Pod{Spec: corev1.PodSpec{
+		Containers: []corev1.Container{{Name: "main", VolumeMounts: []corev1.VolumeMount{mount}}},
+	}}, "main")
+	require.Len(t, plan, 1)
+	return plan[0]
+}
+
+// podWithMount returns a source pod whose target container mounts one emptyDir at path.
+func podWithMount(path string) *corev1.Pod {
+	pod := makeSourcePod()
+	pod.Spec.Containers = []corev1.Container{{
+		Name:         "main",
+		VolumeMounts: []corev1.VolumeMount{{Name: "scratch", MountPath: path}},
+	}}
+	return pod
+}
+
+// podWithSubPathExpr returns a source pod whose target container mounts one volume through
+// a kubelet-expanded subPathExpr.
+func podWithSubPathExpr(expr string) *corev1.Pod {
+	pod := makeSourcePod()
+	pod.Spec.Containers = []corev1.Container{{
+		Name:         "main",
+		VolumeMounts: []corev1.VolumeMount{{Name: "scratch", MountPath: "/run/dynamo-snapshot", SubPathExpr: expr}},
+	}}
+	return pod
+}
+
+// kubelet expands subPathExpr per pod, so a changed expression selects a different mounted
+// subpath while name and mountPath are unchanged. It must read as a difference, or an
+// incompatible artifact is adopted on an exact-looking match.
+func TestReconcileSourcePod_RefusesArtifactWithChangedSubPathExpr(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	pod := podWithSubPathExpr("$(POD_NAME)")
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+	stored := mountEntry(t, corev1.VolumeMount{Name: "scratch", MountPath: "/run/dynamo-snapshot", SubPathExpr: "$(POD_NAMESPACE)"})
+	writeAdoptableArtifact(t, w, string(content.UID), []string{stored})
+
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	assert.False(t, fc.wasCalled())
+	cond := meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, "ArtifactIncompatible", cond.Reason)
+	assert.Contains(t, cond.Message, "$(POD_NAME)")
+}
+
+// A mount path may legally contain the delimiter of any flat encoding, so two different
+// mount sets must not serialize to the same entry — that would report a match and adopt an
+// incompatible artifact. Here the stored plan puts "tenant" in the subPath and the pod puts
+// it in the path, which an unescaped "name:path:sub" encoding renders identically.
+func TestReconcileSourcePod_RefusesArtifactWhenColonShiftsBetweenPathAndSubPath(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	pod := podWithMount("/run/cache:tenant")
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+	stored := mountEntry(t, corev1.VolumeMount{Name: "scratch", MountPath: "/run/cache", SubPath: "tenant"})
+	writeAdoptableArtifact(t, w, string(content.UID), []string{stored})
+
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	assert.False(t, fc.wasCalled())
+	got := getContent(t, w, content.Name)
+	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, "ArtifactIncompatible", cond.Reason)
+	assert.False(t, meta.IsStatusConditionTrue(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+}
+
+// ReadOnly decides whether the replayed bind mount carries MS_RDONLY, so an artifact
+// captured read-only is not interchangeable with a read-write pod spec even though every
+// name and path matches.
+func TestReconcileSourcePod_RefusesArtifactWhenReadOnlyFlips(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	pod := podWithMount("/run/dynamo-snapshot") // ReadOnly false
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+	stored := mountEntry(t, corev1.VolumeMount{Name: "scratch", MountPath: "/run/dynamo-snapshot", ReadOnly: true})
+	writeAdoptableArtifact(t, w, string(content.UID), []string{stored})
+
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	assert.False(t, fc.wasCalled())
+	got := getContent(t, w, content.Name)
+	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, "ArtifactIncompatible", cond.Reason)
+	assert.False(t, meta.IsStatusConditionTrue(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+}
+
+// MountPropagation decides whether the restored mount shares a propagation group with the
+// host, so a Bidirectional artifact is not interchangeable with a pod spec that takes the
+// None default even though every name, path and flag matches.
+func TestReconcileSourcePod_RefusesArtifactWhenMountPropagationChanges(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	pod := podWithMount("/run/dynamo-snapshot") // MountPropagation nil == None
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+	bidirectional := corev1.MountPropagationBidirectional
+	stored := mountEntry(t, corev1.VolumeMount{
+		Name: "scratch", MountPath: "/run/dynamo-snapshot", MountPropagation: &bidirectional,
+	})
+	writeAdoptableArtifact(t, w, string(content.UID), []string{stored})
+
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	assert.False(t, fc.wasCalled())
+	got := getContent(t, w, content.Name)
+	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, "ArtifactIncompatible", cond.Reason)
+	assert.False(t, meta.IsStatusConditionTrue(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+}
+
+// RecursiveReadOnly decides whether the read-only attribute reaches the whole mount subtree
+// rather than only its root, so a change is a real incompatibility. A nil field means the
+// Disabled default and must compare equal to a spec that spells that default out.
+func TestReconcileSourcePod_RefusesArtifactWhenRecursiveReadOnlyChanges(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	pod := makeSourcePod()
+	disabled := corev1.RecursiveReadOnlyDisabled
+	pod.Spec.Containers = []corev1.Container{{
+		Name: "main",
+		VolumeMounts: []corev1.VolumeMount{{
+			Name: "scratch", MountPath: "/run/dynamo-snapshot", ReadOnly: true, RecursiveReadOnly: &disabled,
+		}},
+	}}
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+	enabled := corev1.RecursiveReadOnlyEnabled
+	stored := mountEntry(t, corev1.VolumeMount{
+		Name: "scratch", MountPath: "/run/dynamo-snapshot", ReadOnly: true, RecursiveReadOnly: &enabled,
+	})
+	writeAdoptableArtifact(t, w, string(content.UID), []string{stored})
+
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	assert.False(t, fc.wasCalled())
+	got := getContent(t, w, content.Name)
+	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, "ArtifactIncompatible", cond.Reason)
+	assert.False(t, meta.IsStatusConditionTrue(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+}
+
+// A spec that spells out the API defaults for the two optional mount fields describes the
+// same mount as one that leaves them nil, so normalization must let it adopt — otherwise
+// every artifact captured before an unrelated spec edit is refused for no reason.
+func TestReconcileSourcePod_AdoptsArtifactWhenOptionalMountFieldsSpellOutDefaults(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	none := corev1.MountPropagationNone
+	disabled := corev1.RecursiveReadOnlyDisabled
+	pod := makeSourcePod()
+	pod.Spec.Containers = []corev1.Container{{
+		Name: "main",
+		VolumeMounts: []corev1.VolumeMount{{
+			Name: "scratch", MountPath: "/run/dynamo-snapshot",
+			MountPropagation: &none, RecursiveReadOnly: &disabled,
+		}},
+	}}
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+	stored := mountEntry(t, corev1.VolumeMount{Name: "scratch", MountPath: "/run/dynamo-snapshot"})
+	writeAdoptableArtifact(t, w, string(content.UID), []string{stored})
+
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	assert.False(t, fc.wasCalled())
+	got := getContent(t, w, content.Name)
+	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
+	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+}
+
+// An artifact recording an explicitly empty plan was captured from a container with no
+// mounts, which is a fact worth comparing — unlike a nil plan from an agent that recorded
+// none. A pod that has since gained a mount must be refused, not adopted.
+func TestReconcileSourcePod_RefusesEmptyStoredPlanAgainstMountedPod(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	pod := podWithMount("/run/dynamo-snapshot")
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+	writeAdoptableArtifact(t, w, string(content.UID), []string{})
+
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	assert.False(t, fc.wasCalled())
+	cond := meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, "ArtifactIncompatible", cond.Reason)
+	assert.Contains(t, cond.Message, "+"+mountEntry(t, corev1.VolumeMount{Name: "scratch", MountPath: "/run/dynamo-snapshot"}))
+}
+
+// A terminal source pod routes recovery through deferToCommittedCapture, which writes Ready
+// and returns — reconcileSourcePod never runs afterwards. The artifact must therefore be
+// validated on that path too, or the mount check is simply bypassed.
+func TestReconcilePodSnapshotContent_RefusesIncompatibleArtifactForTerminalPod(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	pod := podWithMount("/run/moved")
+	pod.Status.Phase = corev1.PodFailed
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+	writeAdoptableArtifact(t, w, string(content.UID), []string{mountEntry(t, corev1.VolumeMount{Name: "scratch", MountPath: "/run/dynamo-snapshot"})})
+
+	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+	got := getContent(t, w, content.Name)
+	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, "ArtifactIncompatible", cond.Reason)
+	assert.False(t, meta.IsStatusConditionTrue(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+}
+
+// Adopting a pre-existing artifact skips the dump, so its stored mount table is what a
+// restore replays. A matching pod spec adopts; a moved mount must be refused here rather
+// than surfacing as a CRIU bind-mount failure at restore time.
+func TestReconcileSourcePod_AdoptsArtifactWithMatchingMountPlan(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	pod := podWithMount("/run/dynamo-snapshot")
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+	writeAdoptableArtifact(t, w, string(content.UID), []string{mountEntry(t, corev1.VolumeMount{Name: "scratch", MountPath: "/run/dynamo-snapshot"})})
+
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	assert.False(t, fc.wasCalled())
+	got := getContent(t, w, content.Name)
+	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+	assert.False(t, meta.IsStatusConditionTrue(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
+}
+
+func TestReconcileSourcePod_RefusesArtifactWithMovedMount(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	pod := podWithMount("/run/moved")
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+	writeAdoptableArtifact(t, w, string(content.UID), []string{mountEntry(t, corev1.VolumeMount{Name: "scratch", MountPath: "/run/dynamo-snapshot"})})
+
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	assert.False(t, fc.wasCalled())
+	got := getContent(t, w, content.Name)
+	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, "ArtifactIncompatible", cond.Reason)
+	assert.Contains(t, cond.Message, "-"+mountEntry(t, corev1.VolumeMount{Name: "scratch", MountPath: "/run/dynamo-snapshot"}))
+	assert.Contains(t, cond.Message, "+"+mountEntry(t, corev1.VolumeMount{Name: "scratch", MountPath: "/run/moved"}))
+	assert.False(t, meta.IsStatusConditionTrue(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+}
+
 // TestReconcileSourcePod_ArtifactRecoveryPrecedesLivenessFailures covers the crash window:
 // the dump committed the artifact and terminated the source (pod Failed, target container
 // exited 137, PID unresolvable), but the agent died before the Ready write. Recovery must
