@@ -83,7 +83,8 @@ func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name s
 			// race. The dump kills the source, so deletion can also trail a successful capture
 			// (Job cleanup, eviction): only a gone pod with neither an in-flight capture nor a
 			// committed artifact fails the work order terminally.
-			if !w.deferToCommittedCapture(ctx, content) {
+			// nil pod: there is nothing left to validate a committed artifact against.
+			if !w.deferToCommittedCapture(ctx, content, nil) {
 				w.failContentFromGate(ctx, content, "SourcePodNotFound", fmt.Errorf("source pod %q not found", key.String()))
 			}
 			return
@@ -99,7 +100,7 @@ func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name s
 		// The dump terminates the source process, so a terminal pod may mean a
 		// capture just succeeded. Only a dead source with neither an in-flight
 		// capture nor a committed artifact is a failure.
-		if !w.deferToCommittedCapture(ctx, content) {
+		if !w.deferToCommittedCapture(ctx, content, pod) {
 			w.failContentFromGate(ctx, content, reason, errors.New(msg))
 		}
 		return
@@ -116,7 +117,11 @@ func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name s
 // that already succeeded or is still in flight: a capture goroutine owning the in-flight guard or
 // the shared Lease owns the outcome, and a committed artifact only needs its Ready write, which is
 // performed here. A false return means none exist and the caller owns the failure.
-func (w *NodeController) deferToCommittedCapture(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent) bool {
+//
+// pod is the live source pod, or nil when it is already gone. When present, the committed
+// artifact is validated against it exactly as the adoption path does: this is a terminal write,
+// so reconcileSourcePod will not run afterwards to catch an incompatible artifact.
+func (w *NodeController) deferToCommittedCapture(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, pod *corev1.Pod) bool {
 	// The UID keys the artifact path and the in-flight guard; empty must not
 	// alias onto a shared path (same invariant as MissingContentUID).
 	contentUID := string(content.UID)
@@ -132,9 +137,11 @@ func (w *NodeController) deferToCommittedCapture(ctx context.Context, content *s
 	}
 	path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, contentUID, containerName)
 	if err == nil && artifactPresent(path, contentUID, containerName) {
-		if err := w.markCheckpointReady(ctx, content); err != nil {
+		// This branch is terminal either way, so reconcileSourcePod never runs to
+		// validate afterwards: the artifact must be refused here or not at all.
+		if err := w.refuseOrAdoptArtifact(ctx, content, pod, path, containerName); err != nil {
 			// Not terminal, so the content informer resync retries the recovery.
-			logr.FromContextOrDiscard(ctx).Error(err, "Failed to recover committed artifact to Ready", "content", content.Name)
+			logr.FromContextOrDiscard(ctx).Error(err, "Failed to recover committed artifact", "content", content.Name)
 		}
 		return true
 	}
@@ -257,7 +264,7 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		return w.setSnapshotContentFailed(ctx, content, "InvalidDestination", err)
 	}
 	if artifactPresent(artifactPath, contentUID, containerName) {
-		return w.markCheckpointReady(ctx, content)
+		return w.refuseOrAdoptArtifact(ctx, content, pod, artifactPath, containerName)
 	}
 
 	// The in-flight guard held above is process-local; overlapping agent instances arbitrate
@@ -593,6 +600,7 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		PodName:             params.Pod.Name,
 		PodNamespace:        params.Pod.Namespace,
 		PodIP:               params.Pod.Status.PodIP,
+		MountPlan:           buildMountPlan(params.Pod, params.ContainerName),
 		Clientset:           w.clientset,
 		PageBrokerRequested: params.Pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] == snapshotv1alpha1.PageBrokerAnnotationEnabled,
 	}
@@ -668,6 +676,55 @@ func artifactPresent(destination, contentUID, containerName string) bool {
 	return err == nil &&
 		manifest.Artifact.ContentUID == contentUID &&
 		manifest.Artifact.ContainerName == containerName
+}
+
+// adoptedArtifactMountDiff reports how a pre-existing artifact's recorded mount plan differs
+// from the current source pod's, as "-stored"/"+current" entries. Empty means compatible.
+//
+// An artifact written before the mount plan was recorded carries none, and is treated as
+// compatible: there is nothing to compare it against, and refusing every such artifact would
+// break in-flight recovery for checkpoints captured by an older agent. That is a nil plan
+// only — an artifact recording an explicitly empty plan was captured from a container with
+// no mounts, and is still compared, so a pod that has since gained one is refused.
+//
+// A manifest that cannot be read is neither: the error is returned so the caller retries,
+// because "unreadable" must not be indistinguishable from "verified compatible".
+func adoptedArtifactMountDiff(artifactPath string, pod *corev1.Pod, containerName string) ([]string, error) {
+	manifest, err := types.ReadManifest(artifactPath)
+	if err != nil {
+		return nil, fmt.Errorf("read manifest of existing artifact at %s: %w", artifactPath, err)
+	}
+	if manifest.K8s.MountPlan == nil {
+		return nil, nil
+	}
+	return types.DiffMountPlan(manifest.K8s.MountPlan, buildMountPlan(pod, containerName)), nil
+}
+
+// refuseOrAdoptArtifact writes the outcome for a committed artifact this reconcile did not
+// produce: Failed=ArtifactIncompatible when its recorded mount plan no longer matches the
+// source pod, Ready otherwise. Every path that adopts an artifact routes through here, so
+// that a validated adoption cannot be reintroduced as an unvalidated markCheckpointReady.
+//
+// Adopting skips the dump entirely, so the stored CRIU mount table is what a restore will
+// replay. If the pod's mount shape moved since the capture, that table names paths this pod
+// does not have, and the mismatch would otherwise surface only as a CRIU bind-mount failure
+// at restore, far from its cause. A nil pod means the source is already gone and there is
+// nothing to compare against, so the artifact is adopted.
+func (w *NodeController) refuseOrAdoptArtifact(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, pod *corev1.Pod, artifactPath, containerName string) error {
+	if pod != nil {
+		diff, err := adoptedArtifactMountDiff(artifactPath, pod, containerName)
+		if err != nil {
+			// Unverified, so neither adopt nor fail terminally: returning the error
+			// leaves the work order for the next resync, which retries the read.
+			return err
+		}
+		if len(diff) > 0 {
+			return w.setSnapshotContentFailed(ctx, content, "ArtifactIncompatible",
+				fmt.Errorf("existing artifact at %s was captured with a different mount plan than pod %s/%s container %q (-stored/+current): %s",
+					artifactPath, pod.Namespace, pod.Name, containerName, strings.Join(diff, ", ")))
+		}
+	}
+	return w.markCheckpointReady(ctx, content)
 }
 
 // contentNameFromInformerObj extracts the object name from a dynamic informer object,
