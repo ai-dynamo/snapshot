@@ -93,7 +93,9 @@ WORKDIR /workspace
 
 COPY cmd/cuda-checkpoint-helper/main.c ./cmd/cuda-checkpoint-helper/main.c
 COPY cmd/ns-bind-mount/main.c ./cmd/ns-bind-mount/main.c
-COPY cmd/cuinterpose/empty.c ./cmd/cuinterpose/empty.c
+COPY cmd/cuinterpose/interpose.c ./cmd/cuinterpose/interpose.c
+COPY cmd/cuinterpose/symbols.c ./cmd/cuinterpose/symbols.c
+COPY cmd/cuinterpose/symbols.h ./cmd/cuinterpose/symbols.h
 COPY cmd/cuinterpose/Makefile ./cmd/cuinterpose/Makefile
 
 RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
