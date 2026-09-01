@@ -19,13 +19,13 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
-	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
 const gatedRestoreContainer = "main"
 
-func gatedRestoreMappings() []snapshotv1alpha1.RestoreContainerMapping {
-	return []snapshotv1alpha1.RestoreContainerMapping{{
+func gatedRestoreMappings() []podcontract.ContainerMapping {
+	return []podcontract.ContainerMapping{{
 		Source:      gatedRestoreContainer,
 		Destination: gatedRestoreContainer,
 	}}
@@ -63,7 +63,7 @@ type gatedRestore struct {
 
 func newGatedRestore(t *testing.T, mismatches ...compat.Mismatch) *gatedRestore {
 	t.Helper()
-	pod := restorePod(map[string]string{snapshotv1alpha1.RestoreFromAnnotation: "snapshot-a"})
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	snapshot, content := readySnapshotObjects()
 	w := makeTestController(t, pod, snapshot, content)
 	logs := &logRecorder{}

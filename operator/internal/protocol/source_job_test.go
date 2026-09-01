@@ -11,7 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
-	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
 func requireCheckpointContainer(t *testing.T, containers []corev1.Container, name string) *corev1.Container {
@@ -36,16 +36,16 @@ func requireStableLaunchJobWrapper(t *testing.T, container *corev1.Container, or
 	if container.Args[0] != "--launch-job" || container.Args[1] != "/bin/sh" || container.Args[2] != "-c" || container.Args[4] != "dynamo-cuda-checkpoint" {
 		t.Fatalf("unexpected launch-job wrapper prefix: %#v", container.Args[:6])
 	}
-	if container.Args[5] != snapshotv1alpha1.CUDAJobFilePath {
-		t.Fatalf("stable job file = %q, want %q", container.Args[5], snapshotv1alpha1.CUDAJobFilePath)
+	if container.Args[5] != podcontract.CUDAJobFilePath {
+		t.Fatalf("stable job file = %q, want %q", container.Args[5], podcontract.CUDAJobFilePath)
 	}
 	if got := container.Args[6:]; strings.Join(got, "|") != strings.Join(original, "|") {
 		t.Fatalf("original command = %#v, want %#v", got, original)
 	}
 }
 
-func TestNewCheckpointJob(t *testing.T) {
-	job, err := NewCheckpointJob(&corev1.PodTemplateSpec{
+func TestNewSourceJob(t *testing.T) {
+	job, err := NewSourceJob(&corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels: map[string]string{"existing": "label"},
 			Annotations: map[string]string{
@@ -61,28 +61,28 @@ func TestNewCheckpointJob(t *testing.T) {
 				Args:    []string{"--model", "Qwen"},
 			}},
 		},
-	}, CheckpointJobOptions{
+	}, SourceJobOptions{
 		Namespace:             "test-ns",
 		TargetContainer:       "main",
-		SeccompProfile:        snapshotv1alpha1.DefaultSeccompLocalhostProfile,
+		SeccompProfile:        podcontract.DefaultSeccompLocalhostProfile,
 		Name:                  "test-job",
 		ActiveDeadlineSeconds: ptr.To(int64(60)),
 		TTLSecondsAfterFinish: ptr.To(int32(300)),
 		WrapLaunchJob:         true,
 	})
 	if err != nil {
-		t.Fatalf("expected checkpoint job, got error: %v", err)
+		t.Fatalf("expected source job, got error: %v", err)
 	}
 
 	if job.Name != "test-job" || job.Namespace != "test-ns" {
 		t.Fatalf("unexpected job identity: %#v", job.ObjectMeta)
 	}
-	if len(job.Spec.Template.Spec.Volumes) != 1 || job.Spec.Template.Spec.Volumes[0].Name != snapshotv1alpha1.SnapshotControlVolumeName {
-		t.Fatalf("expected only %s volume, got %#v", snapshotv1alpha1.SnapshotControlVolumeName, job.Spec.Template.Spec.Volumes)
+	if len(job.Spec.Template.Spec.Volumes) != 1 || job.Spec.Template.Spec.Volumes[0].Name != podcontract.SnapshotControlVolumeName {
+		t.Fatalf("expected only %s volume, got %#v", podcontract.SnapshotControlVolumeName, job.Spec.Template.Spec.Volumes)
 	}
 	main := &job.Spec.Template.Spec.Containers[0]
-	if len(main.VolumeMounts) != 1 || main.VolumeMounts[0].MountPath != snapshotv1alpha1.SnapshotControlMountPath {
-		t.Fatalf("expected only %s mount at %s, got %#v", snapshotv1alpha1.SnapshotControlVolumeName, snapshotv1alpha1.SnapshotControlMountPath, main.VolumeMounts)
+	if len(main.VolumeMounts) != 1 || main.VolumeMounts[0].MountPath != podcontract.SnapshotControlMountPath {
+		t.Fatalf("expected only %s mount at %s, got %#v", podcontract.SnapshotControlVolumeName, podcontract.SnapshotControlMountPath, main.VolumeMounts)
 	}
 	if main.VolumeMounts[0].SubPath != "main" {
 		t.Fatalf("expected control mount subPath=main, got %#v", main.VolumeMounts[0])
@@ -90,7 +90,7 @@ func TestNewCheckpointJob(t *testing.T) {
 	if main.ReadinessProbe == nil || main.ReadinessProbe.Exec == nil {
 		t.Fatalf("expected ready-file readiness probe, got %#v", main.ReadinessProbe)
 	}
-	expectedProbe := []string{"cat", snapshotv1alpha1.SnapshotControlMountPath + "/" + snapshotv1alpha1.ReadyForSnapshotFile}
+	expectedProbe := []string{"cat", podcontract.SnapshotControlMountPath + "/" + podcontract.ReadyForSnapshotFile}
 	if strings.Join(main.ReadinessProbe.Exec.Command, " ") != strings.Join(expectedProbe, " ") {
 		t.Fatalf("expected readiness probe %#v, got %#v", expectedProbe, main.ReadinessProbe.Exec.Command)
 	}
@@ -115,8 +115,8 @@ func TestNewCheckpointJob(t *testing.T) {
 	}
 }
 
-func TestNewCheckpointJobWrapsTargetContainer(t *testing.T) {
-	job, err := NewCheckpointJob(&corev1.PodTemplateSpec{
+func TestNewSourceJobWrapsTargetContainer(t *testing.T) {
+	job, err := NewSourceJob(&corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
@@ -124,7 +124,7 @@ func TestNewCheckpointJobWrapsTargetContainer(t *testing.T) {
 				{Name: "worker", Command: []string{"python3", "-m", "dynamo.vllm"}, Args: []string{"--model", "Qwen"}},
 			},
 		},
-	}, CheckpointJobOptions{
+	}, SourceJobOptions{
 		Namespace:             "test-ns",
 		TargetContainer:       "worker",
 		Name:                  "test-job",
@@ -132,7 +132,7 @@ func TestNewCheckpointJobWrapsTargetContainer(t *testing.T) {
 		WrapLaunchJob:         true,
 	})
 	if err != nil {
-		t.Fatalf("expected checkpoint job, got error: %v", err)
+		t.Fatalf("expected source job, got error: %v", err)
 	}
 
 	worker := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, "worker")
@@ -147,12 +147,12 @@ func TestNewCheckpointJobWrapsTargetContainer(t *testing.T) {
 	}
 	// Sidecar does not get a control volume mount, snapshot env, or ready probe.
 	for _, mount := range sidecar.VolumeMounts {
-		if mount.Name == snapshotv1alpha1.SnapshotControlVolumeName {
+		if mount.Name == podcontract.SnapshotControlVolumeName {
 			t.Fatalf("sidecar should not have control volume mount: %#v", sidecar.VolumeMounts)
 		}
 	}
 	for _, env := range sidecar.Env {
-		if env.Name == snapshotv1alpha1.SnapshotControlDirEnv {
+		if env.Name == podcontract.SnapshotControlDirEnv {
 			t.Fatalf("sidecar should not have control env: %#v", sidecar.Env)
 		}
 	}
@@ -161,7 +161,7 @@ func TestNewCheckpointJobWrapsTargetContainer(t *testing.T) {
 	}
 }
 
-func TestNewCheckpointJobDisablesServiceMeshInjection(t *testing.T) {
+func TestNewSourceJobDisablesServiceMeshInjection(t *testing.T) {
 	cases := []struct {
 		name        string
 		annotations map[string]string
@@ -202,13 +202,13 @@ func TestNewCheckpointJobDisablesServiceMeshInjection(t *testing.T) {
 				},
 			}
 
-			job, err := NewCheckpointJob(source, CheckpointJobOptions{
+			job, err := NewSourceJob(source, SourceJobOptions{
 				Namespace:       "test-ns",
 				Name:            "test-job",
 				TargetContainer: "main",
 			})
 			if err != nil {
-				t.Fatalf("NewCheckpointJob() error = %v", err)
+				t.Fatalf("NewSourceJob() error = %v", err)
 			}
 
 			got := job.Spec.Template.Annotations
@@ -233,8 +233,8 @@ func TestNewCheckpointJobDisablesServiceMeshInjection(t *testing.T) {
 	}
 }
 
-func TestDisableCheckpointJobSidecarInjectionNilMap(t *testing.T) {
-	got := DisableCheckpointJobSidecarInjection(nil)
+func TestDisableSidecarInjectionNilMap(t *testing.T) {
+	got := DisableSidecarInjection(nil)
 	if got == nil {
 		t.Fatal("expected non-nil map, got nil")
 	}
@@ -246,12 +246,12 @@ func TestDisableCheckpointJobSidecarInjectionNilMap(t *testing.T) {
 	}
 }
 
-func TestNewCheckpointJobRequiresTarget(t *testing.T) {
-	_, err := NewCheckpointJob(&corev1.PodTemplateSpec{
+func TestNewSourceJobRequiresTarget(t *testing.T) {
+	_, err := NewSourceJob(&corev1.PodTemplateSpec{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{Name: "worker", Command: []string{"python3"}}},
 		},
-	}, CheckpointJobOptions{
+	}, SourceJobOptions{
 		Namespace: "test-ns",
 		Name:      "test-job",
 	})
@@ -260,24 +260,24 @@ func TestNewCheckpointJobRequiresTarget(t *testing.T) {
 	}
 }
 
-func TestNewCheckpointJobRejectsRestoreAnnotations(t *testing.T) {
+func TestNewSourceJobRejectsRestoreAnnotations(t *testing.T) {
 	for _, annotation := range []string{
-		snapshotv1alpha1.RestoreFromAnnotation,
-		snapshotv1alpha1.RestoreContainerMapAnnotation,
+		podcontract.RestoreFromAnnotation,
+		podcontract.RestoreContainerMapAnnotation,
 	} {
 		t.Run(annotation, func(t *testing.T) {
 			value := ""
-			if annotation == snapshotv1alpha1.RestoreFromAnnotation {
+			if annotation == podcontract.RestoreFromAnnotation {
 				value = "snapshot-a"
 			}
-			_, err := NewCheckpointJob(&corev1.PodTemplateSpec{
+			_, err := NewSourceJob(&corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{annotation: value},
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "main", Command: []string{"python3"}}},
 				},
-			}, CheckpointJobOptions{
+			}, SourceJobOptions{
 				Namespace:       "test-ns",
 				TargetContainer: "main",
 				Name:            "test-job",
@@ -290,12 +290,12 @@ func TestNewCheckpointJobRejectsRestoreAnnotations(t *testing.T) {
 	}
 }
 
-func TestNewCheckpointJobRejectsUnknownTarget(t *testing.T) {
-	_, err := NewCheckpointJob(&corev1.PodTemplateSpec{
+func TestNewSourceJobRejectsUnknownTarget(t *testing.T) {
+	_, err := NewSourceJob(&corev1.PodTemplateSpec{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{Name: "worker", Command: []string{"python3"}}},
 		},
-	}, CheckpointJobOptions{
+	}, SourceJobOptions{
 		Namespace:       "test-ns",
 		TargetContainer: "missing",
 		Name:            "test-job",
@@ -305,16 +305,16 @@ func TestNewCheckpointJobRejectsUnknownTarget(t *testing.T) {
 	}
 }
 
-// TestNewCheckpointJobNoWrapByDefault verifies that the container command is
+// TestNewSourceJobNoWrapByDefault verifies that the container command is
 // preserved unchanged when WrapLaunchJob is false (the default). This guards
 // against accidentally re-introducing cuda-checkpoint wrapping as the default,
 // which would require cuda-checkpoint to be present in the placeholder image
 // at the exact path CRIU checkpointed it from.
-func TestNewCheckpointJobNoWrapByDefault(t *testing.T) {
+func TestNewSourceJobNoWrapByDefault(t *testing.T) {
 	originalCmd := []string{"python3", "-m", "dynamo.vllm"}
 	originalArgs := []string{"--model", "Qwen"}
 
-	job, err := NewCheckpointJob(&corev1.PodTemplateSpec{
+	job, err := NewSourceJob(&corev1.PodTemplateSpec{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{
 				Name:    "main",
@@ -323,7 +323,7 @@ func TestNewCheckpointJobNoWrapByDefault(t *testing.T) {
 				Args:    originalArgs,
 			}},
 		},
-	}, CheckpointJobOptions{
+	}, SourceJobOptions{
 		Namespace:       "test-ns",
 		TargetContainer: "main",
 		Name:            "test-job",

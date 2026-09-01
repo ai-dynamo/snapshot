@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -35,7 +36,7 @@ func minimalSnapshotJob() *snapshotv1alpha1.SnapshotJob {
 }
 
 func TestBuildSourceJob(t *testing.T) {
-	t.Run("wires identity, target, and options through to NewCheckpointJob", func(t *testing.T) {
+	t.Run("wires identity, target, and options through to NewSourceJob", func(t *testing.T) {
 		sj := minimalSnapshotJob()
 
 		job, err := buildSourceJob(sj)
@@ -53,7 +54,7 @@ func TestBuildSourceJob(t *testing.T) {
 		require.NotNil(t, job.Spec.Template.Spec.SecurityContext.SeccompProfile)
 		profile := job.Spec.Template.Spec.SecurityContext.SeccompProfile
 		assert.Equal(t, corev1.SeccompProfileTypeLocalhost, profile.Type)
-		assert.Equal(t, ptr.To(snapshotv1alpha1.DefaultSeccompLocalhostProfile), profile.LocalhostProfile)
+		assert.Equal(t, ptr.To(podcontract.DefaultSeccompLocalhostProfile), profile.LocalhostProfile)
 	})
 
 	t.Run("stamps the owner label without clobbering existing pod template labels", func(t *testing.T) {
@@ -111,14 +112,14 @@ func TestBuildSourceJob(t *testing.T) {
 		require.NotNil(t, main.ReadinessProbe)
 		require.NotNil(t, main.ReadinessProbe.Exec)
 		assert.Equal(t,
-			[]string{"cat", snapshotv1alpha1.SnapshotControlMountPath + "/" + snapshotv1alpha1.ReadyForSnapshotFile},
+			[]string{"cat", podcontract.SnapshotControlMountPath + "/" + podcontract.ReadyForSnapshotFile},
 			main.ReadinessProbe.Exec.Command)
 
 		var mountPaths []string
 		for _, m := range main.VolumeMounts {
 			mountPaths = append(mountPaths, m.MountPath)
 		}
-		assert.Contains(t, mountPaths, snapshotv1alpha1.SnapshotControlMountPath,
+		assert.Contains(t, mountPaths, podcontract.SnapshotControlMountPath,
 			"the target container must mount the control volume the probe and sentinel live in")
 	})
 
@@ -160,6 +161,29 @@ func TestBuildSourceJob(t *testing.T) {
 
 		_, err := buildSourceJob(sj)
 		require.Error(t, err)
+	})
+
+	t.Run("invalid PodSnapshot metadata is a terminal spec error", func(t *testing.T) {
+		tests := map[string]*snapshotv1alpha1.PodSnapshotTemplateMetadata{
+			"invalid label": {
+				Labels: map[string]string{"example.com/team": strings.Repeat("x", 64)},
+			},
+			"invalid annotation": {
+				Annotations: map[string]string{"not a qualified annotation key": "value"},
+			},
+			"reserved owner label": {
+				Labels: map[string]string{snapshotv1alpha1.SnapshotJobOwnerLabel: "caller"},
+			},
+		}
+		for name, metadata := range tests {
+			t.Run(name, func(t *testing.T) {
+				sj := minimalSnapshotJob()
+				sj.Spec.PodSnapshotTemplate.Metadata = metadata
+
+				_, err := buildSourceJob(sj)
+				require.Error(t, err)
+			})
+		}
 	})
 
 	t.Run("more than one targetContainers entry is a terminal spec error", func(t *testing.T) {

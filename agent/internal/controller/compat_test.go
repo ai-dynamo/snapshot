@@ -19,7 +19,7 @@ import (
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
-	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
 // A checkpoint whose manifest cannot be read is not incompatible, it is broken.
@@ -77,7 +77,7 @@ func TestPreflightCompatibilityDescribesEveryRestoreTarget(t *testing.T) {
 		ImageID: "sha256:cafebabe",
 	})
 
-	mappings := append(gatedRestoreMappings(), snapshotv1alpha1.RestoreContainerMapping{
+	mappings := append(gatedRestoreMappings(), podcontract.ContainerMapping{
 		Source:      gatedRestoreContainer,
 		Destination: "engine-1",
 	})
@@ -104,11 +104,11 @@ func TestRefusalEmitsOneIncompatibleEventAtBothGates(t *testing.T) {
 
 	assertOneEvent := func(t *testing.T, r *gatedRestore) {
 		t.Helper()
-		events := r.events(t, restoreIncompatibleReason)
+		events := r.events(t, podcontract.RestoreReasonIncompatible)
 		require.Len(t, events, 1)
 		assert.Equal(t, wantMessage, events[0].Message)
 		assert.Equal(t, corev1.EventTypeWarning, events[0].Type)
-		assert.Empty(t, r.events(t, restoreFailedReason), "refusal also reported a restore failure")
+		assert.Empty(t, r.events(t, podcontract.RestoreReasonFailed), "refusal also reported a restore failure")
 	}
 
 	t.Run("preflight gate", func(t *testing.T) {
@@ -140,9 +140,9 @@ func TestRefusalPublishesTheRestoredConditionAtBothGates(t *testing.T) {
 	assertPublished := func(t *testing.T, r *gatedRestore) {
 		t.Helper()
 		condition := r.condition(t)
-		assert.Equal(t, corev1.PodConditionType(snapshotv1alpha1.RestoredCondition), condition.Type)
+		assert.Equal(t, corev1.PodConditionType(podcontract.RestoredCondition), condition.Type)
 		assert.Equal(t, corev1.ConditionFalse, condition.Status)
-		assert.Equal(t, restoreIncompatibleReason, condition.Reason)
+		assert.Equal(t, podcontract.RestoreReasonIncompatible, condition.Reason)
 		// The same sentence the log line and the event carry, so a reader who
 		// starts from the pod does not get a different answer.
 		assert.Equal(t, wantMessage, condition.Message)
@@ -181,10 +181,10 @@ func TestRecordRestoreResultsReportsEveryIncompatibleDestination(t *testing.T) {
 
 	assert.False(t, requeue)
 	condition := r.condition(t)
-	assert.Equal(t, restoreIncompatibleReason, condition.Reason)
+	assert.Equal(t, podcontract.RestoreReasonIncompatible, condition.Reason)
 	assert.Contains(t, condition.Message, "engine-0: gpu-model")
 	assert.Contains(t, condition.Message, "engine-1: gpu-count")
-	assert.Empty(t, r.events(t, restoreSucceededReason))
+	assert.Empty(t, r.events(t, podcontract.RestoreReasonSucceeded))
 }
 
 // A refusal is terminal like any other restore failure: the pod is not compared
@@ -193,16 +193,16 @@ func TestRecordRestoreResultsReportsEveryIncompatibleDestination(t *testing.T) {
 func TestReconcileRestorePodLeavesARefusedPodAlone(t *testing.T) {
 	r := newGatedRestore(t, compat.Mismatch{Check: "cpu-arch", Source: "amd64", Target: "arm64"})
 	r.pod.Status.Conditions = append(r.pod.Status.Conditions, corev1.PodCondition{
-		Type:    corev1.PodConditionType(snapshotv1alpha1.RestoredCondition),
+		Type:    corev1.PodConditionType(podcontract.RestoredCondition),
 		Status:  corev1.ConditionFalse,
-		Reason:  restoreIncompatibleReason,
+		Reason:  podcontract.RestoreReasonIncompatible,
 		Message: "cpu-arch: source amd64, target arm64",
 	})
 
 	r.reconcile(t)
 
 	assert.Empty(t, r.comparison.calls, "already refused restore was compared again")
-	assert.Empty(t, r.events(t, restoreIncompatibleReason), "already refused restore was refused again")
+	assert.Empty(t, r.events(t, podcontract.RestoreReasonIncompatible), "already refused restore was refused again")
 	assert.Len(t, r.events(t, restoreAlreadyFailedReason), 1)
 	assert.Empty(t, r.controller.inFlight, "already refused restore claimed an attempt")
 }
@@ -222,13 +222,13 @@ func TestSkipCompatCheckTurnsOffTheGates(t *testing.T) {
 
 	t.Run("the pod annotation turns it off", func(t *testing.T) {
 		r := newGatedRestore(t, mismatch)
-		r.pod.Annotations[snapshotv1alpha1.SkipCompatCheckAnnotation] = "true"
+		r.pod.Annotations[podcontract.SkipCompatCheckAnnotation] = "true"
 		stopEarly(r)
 
 		r.reconcile(t)
 
 		assert.Empty(t, r.comparison.calls, "skipped gate compared anyway")
-		assert.Empty(t, r.events(t, restoreIncompatibleReason), "skipped gate refused the restore")
+		assert.Empty(t, r.events(t, podcontract.RestoreReasonIncompatible), "skipped gate refused the restore")
 	})
 
 	// A node with the gate off skips every restore it handles, whether or not
@@ -241,7 +241,7 @@ func TestSkipCompatCheckTurnsOffTheGates(t *testing.T) {
 		r.reconcile(t)
 
 		assert.Empty(t, r.comparison.calls, "skipped gate compared anyway")
-		assert.Empty(t, r.events(t, restoreIncompatibleReason), "skipped gate refused the restore")
+		assert.Empty(t, r.events(t, podcontract.RestoreReasonIncompatible), "skipped gate refused the restore")
 	})
 
 	// Gate B is inside the executor, past the point where either switch can be
@@ -257,7 +257,7 @@ func TestSkipCompatCheckTurnsOffTheGates(t *testing.T) {
 			{
 				name: "skipped by pod",
 				set: func(r *gatedRestore) {
-					r.pod.Annotations[snapshotv1alpha1.SkipCompatCheckAnnotation] = "true"
+					r.pod.Annotations[podcontract.SkipCompatCheckAnnotation] = "true"
 				},
 				want: true,
 			},
@@ -312,21 +312,21 @@ func TestSkipCompatCheckTurnsOffTheGates(t *testing.T) {
 		stopEarly(r)
 
 		r.reconcile(t)
-		require.Len(t, r.events(t, restoreIncompatibleReason), 1, "the gate did not refuse the restore")
+		require.Len(t, r.events(t, podcontract.RestoreReasonIncompatible), 1, "the gate did not refuse the restore")
 
 		r.pod.Status.Conditions = append(r.pod.Status.Conditions, corev1.PodCondition{
-			Type:    corev1.PodConditionType(snapshotv1alpha1.RestoredCondition),
+			Type:    corev1.PodConditionType(podcontract.RestoredCondition),
 			Status:  corev1.ConditionFalse,
-			Reason:  restoreIncompatibleReason,
+			Reason:  podcontract.RestoreReasonIncompatible,
 			Message: mismatch.Reason(),
 		})
-		r.pod.Annotations[snapshotv1alpha1.SkipCompatCheckAnnotation] = "true"
+		r.pod.Annotations[podcontract.SkipCompatCheckAnnotation] = "true"
 		r.comparison.calls = nil
 
 		r.reconcile(t)
 
 		assert.Empty(t, r.comparison.calls, "the reopened restore was compared anyway")
-		assert.Len(t, r.events(t, restoreIncompatibleReason), 1, "the reopened restore was refused again")
+		assert.Len(t, r.events(t, podcontract.RestoreReasonIncompatible), 1, "the reopened restore was refused again")
 	})
 }
 
@@ -379,7 +379,7 @@ func TestRunRestoreTreatsIncompatibleAsTerminal(t *testing.T) {
 	requeue := r.runRestore(t)
 
 	assert.False(t, requeue, "a refusal asked to be driven again")
-	assert.Empty(t, r.events(t, restoreFailedReason), "refusal reported itself as a restore failure")
+	assert.Empty(t, r.events(t, podcontract.RestoreReasonFailed), "refusal reported itself as a restore failure")
 	assert.Zero(t, sentinels, "refusal released the workload")
 	assert.Empty(t, rt.resolvedContainerIDs, "refusal reached the placeholder kill path")
 }

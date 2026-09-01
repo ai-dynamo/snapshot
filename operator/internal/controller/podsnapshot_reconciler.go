@@ -380,7 +380,8 @@ func (sr *PodSnapshotReconciler) buildPodSnapshotContent(snap *snapshotv1alpha1.
 			Kind:       "PodSnapshotContent",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name: contentName,
+			Name:       contentName,
+			Finalizers: []string{PodSnapshotContentArtifactCleanupFinalizer},
 			Labels: map[string]string{
 				snapshotv1alpha1.SnapshotNodeLabel: pod.Spec.NodeName,
 			},

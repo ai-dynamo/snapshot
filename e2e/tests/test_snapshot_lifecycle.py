@@ -6,6 +6,7 @@ from __future__ import annotations
 import time
 
 import pytest
+from kubernetes import client
 
 from snapshot_e2e import k8s
 from snapshot_e2e import lifecycle as snap
@@ -457,6 +458,91 @@ def test_node_switch_lets_a_refused_restore_through_without_a_rollout(
 
 def agent_restarts(pod: object) -> int:
     return sum(status.restart_count for status in pod.status.container_statuses or [])
+
+
+@pytest.mark.snapshot_success
+def test_direct_content_deletion_removes_complete_artifact_root(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    try:
+        source, source_node = create_ready_source(config, run, gpu=False)
+        snap.create_podsnapshot(
+            config.namespace, run.snapshot_name, run.source_pod, source.metadata.uid
+        )
+        pod_snapshot, content = snap.wait_for_snapshot_ready(
+            config.namespace, run.snapshot_name
+        )
+        content_name = content["metadata"]["name"]
+        content_uid = content["metadata"]["uid"]
+        assert "nvidia.com/podsnapshotcontent-artifact-cleanup" in content[
+            "metadata"
+        ].get("finalizers", [])
+        parent_status = pod_snapshot.get("status", {})
+        assert snap.artifact_root_exists(config, source_node, content_uid)
+        snap.create_artifact_staging_file(config, source_node, content_uid)
+
+        snap.delete_podsnapshotcontent(content_name)
+        snap.wait_for_custom_object_deleted(
+            None, content_name, snap.PODSNAPSHOTCONTENTS
+        )
+        snap.wait_for_artifact_root_absent(config, source_node, content_uid)
+
+        surviving_parent = snap.get_custom_object(
+            client.CustomObjectsApi(),
+            config.namespace,
+            run.snapshot_name,
+            snap.PODSNAPSHOTS,
+        )
+        assert surviving_parent.get("status", {}) == parent_status
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
+@pytest.mark.snapshot_success
+def test_snapshot_deletion_cascades_content_and_artifact_cleanup(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    try:
+        source, source_node = create_ready_source(config, run, gpu=False)
+        snap.create_podsnapshot(
+            config.namespace, run.snapshot_name, run.source_pod, source.metadata.uid
+        )
+        _, content = snap.wait_for_snapshot_ready(config.namespace, run.snapshot_name)
+        content_name = content["metadata"]["name"]
+        content_uid = content["metadata"]["uid"]
+
+        snap.delete_podsnapshot(config.namespace, run.snapshot_name)
+        snap.wait_for_custom_object_deleted(
+            config.namespace, run.snapshot_name, snap.PODSNAPSHOTS
+        )
+        snap.wait_for_custom_object_deleted(
+            None, content_name, snap.PODSNAPSHOTCONTENTS
+        )
+        snap.wait_for_artifact_root_absent(config, source_node, content_uid)
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
+@pytest.mark.snapshot_success
+def test_orphan_scanner_reclaims_uid_root(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    try:
+        _, source_node = create_ready_source(config, run, gpu=False)
+        orphan_uid = f"e2e-orphan-{run.suffix}"
+        snap.create_artifact_staging_file(config, source_node, orphan_uid)
+        assert snap.artifact_root_exists(config, source_node, orphan_uid)
+        snap.wait_for_artifact_root_absent(
+            config, source_node, orphan_uid, timeout=60
+        )
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
 
 
 def create_valid_gpu_checkpoint(

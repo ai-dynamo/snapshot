@@ -39,7 +39,13 @@ func TestSnapshotJobDeepCopyIsIndependent(t *testing.T) {
 					Containers: []corev1.Container{{Name: "worker"}},
 				},
 			},
-			PodSnapshotTemplate: PodSnapshotTemplate{TargetContainers: []string{"worker"}},
+			PodSnapshotTemplate: PodSnapshotTemplate{
+				Metadata: &PodSnapshotTemplateMetadata{
+					Labels:      map[string]string{"dynamo.nvidia.com/worker-generation": "abc123"},
+					Annotations: map[string]string{"dynamo.nvidia.com/gms-mode": "enabled"},
+				},
+				TargetContainers: []string{"worker"},
+			},
 		},
 		Status: SnapshotJobStatus{
 			PodSnapshotName: "warm-worker-snapshot",
@@ -56,12 +62,20 @@ func TestSnapshotJobDeepCopyIsIndependent(t *testing.T) {
 
 	clone.Spec.PodTemplate.Spec.Containers[0].Name = "mutated"
 	clone.Spec.PodSnapshotTemplate.TargetContainers[0] = "mutated"
+	clone.Spec.PodSnapshotTemplate.Metadata.Labels["dynamo.nvidia.com/worker-generation"] = "changed"
+	clone.Spec.PodSnapshotTemplate.Metadata.Annotations["dynamo.nvidia.com/gms-mode"] = "disabled"
 	clone.Status.Conditions[0].Reason = "Changed"
 	if original.Spec.PodTemplate.Spec.Containers[0].Name != "worker" {
 		t.Errorf("mutating clone PodTemplate changed original: got %q", original.Spec.PodTemplate.Spec.Containers[0].Name)
 	}
 	if original.Spec.PodSnapshotTemplate.TargetContainers[0] != "worker" {
 		t.Errorf("mutating clone TargetContainers changed original: got %q", original.Spec.PodSnapshotTemplate.TargetContainers[0])
+	}
+	if original.Spec.PodSnapshotTemplate.Metadata.Labels["dynamo.nvidia.com/worker-generation"] != "abc123" {
+		t.Errorf("mutating clone labels changed original: got %q", original.Spec.PodSnapshotTemplate.Metadata.Labels["dynamo.nvidia.com/worker-generation"])
+	}
+	if original.Spec.PodSnapshotTemplate.Metadata.Annotations["dynamo.nvidia.com/gms-mode"] != "enabled" {
+		t.Errorf("mutating clone annotations changed original: got %q", original.Spec.PodSnapshotTemplate.Metadata.Annotations["dynamo.nvidia.com/gms-mode"])
 	}
 	if original.Status.Conditions[0].Reason != ReasonPodReady {
 		t.Errorf("mutating clone condition changed original: got %q", original.Status.Conditions[0].Reason)

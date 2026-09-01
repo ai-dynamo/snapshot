@@ -15,7 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/validation"
 
-	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotprotocol "github.com/ai-dynamo/snapshot/operator/internal/protocol"
 )
 
@@ -64,16 +64,16 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 	}
 
 	checkpointJobName := captureJobName(snapshotName)
-	job, err := snapshotprotocol.NewCheckpointJob(&corev1.PodTemplateSpec{
+	job, err := snapshotprotocol.NewSourceJob(&corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels:      pod.Labels,
 			Annotations: pod.Annotations,
 		},
 		Spec: *pod.Spec.DeepCopy(),
-	}, snapshotprotocol.CheckpointJobOptions{
+	}, snapshotprotocol.SourceJobOptions{
 		Namespace:       namespace,
 		TargetContainer: containerName,
-		SeccompProfile:  snapshotv1alpha1.DefaultSeccompLocalhostProfile,
+		SeccompProfile:  podcontract.DefaultSeccompLocalhostProfile,
 		Name:            checkpointJobName,
 		WrapLaunchJob:   opts.CudaCheckpointWrap,
 	})

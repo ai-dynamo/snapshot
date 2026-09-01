@@ -16,6 +16,15 @@ image:
 
 replicaCount: 1
 
+operator:
+  artifactCleanup:
+    # Frequency of authoritative orphan artifact scans.
+    scanInterval: 10m
+    # Maximum orphan roots removed serially in one scan.
+    batchSize: 10
+    # Total metadata-list attempts before a scan fails closed.
+    listAttempts: 3
+
 # `helm upgrade` leaves CRDs alone by design; the crd-installer init container
 # closes that gap on every rollout, and is a no-op when nothing changed.
 crdUpgrade:
