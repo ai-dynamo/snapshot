@@ -128,6 +128,19 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if err := validateRestoreManifest(req, manifest); err != nil {
 		return 0, err
 	}
+	hasCUDAInterposition, err := restoreCUDAInterpositionEnabled(artifactPath)
+	if err != nil {
+		return 0, fmt.Errorf("inspect CUDA interposition state: %w", err)
+	}
+	if req.CUDAInterposer != hasCUDAInterposition {
+		log.Info(
+			"Using checkpoint artifact CUDA interposition state",
+			"request_cuda_interposer",
+			req.CUDAInterposer,
+			"artifact_cuda_interposer",
+			hasCUDAInterposition,
+		)
+	}
 
 	snap, gpuDeviceMapDuration, err := inspectRestore(ctx, rt, log, req, manifest)
 	if err != nil {
@@ -143,7 +156,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		point:  bundleMount,
 	})
 
-	if req.CUDAInterposer {
+	if hasCUDAInterposition {
 		interposerMount, err := mounts.MountCUDAInterposer(ctx, bundleMount)
 		if err != nil {
 			return 0, fmt.Errorf("mount CUDA interposer into placeholder: %w", err)
@@ -163,7 +176,25 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		point:  artifactMount,
 	})
 
-	result, err := execNSRestore(ctx, log, req, snap, bundleMount, nsmount.CheckpointDst)
+	var broker *os.File
+	if hasCUDAInterposition {
+		broker, err = cuda.OpenCUDAInterpositionBroker(artifactPath)
+		if err != nil {
+			return 0, fmt.Errorf("open CUDA interposition broker: %w", err)
+		}
+		defer broker.Close()
+	}
+
+	result, err := execNSRestore(
+		ctx,
+		log,
+		req,
+		snap,
+		bundleMount,
+		nsmount.CheckpointDst,
+		hasCUDAInterposition,
+		broker,
+	)
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
 	}
@@ -326,7 +357,16 @@ func inspectRestore(
 //     container. Binaries that nsrestore subsequently loads (criu, ip, tar, .so
 //     files) are still resolved by PATH/LD_LIBRARY_PATH inside the container's
 //     mount namespace.
-func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot, mp nsmount.MountPoint, checkpointPath string) (*RestoreInNamespaceResult, error) {
+func execNSRestore(
+	ctx context.Context,
+	log logr.Logger,
+	req RestoreRequest,
+	snap *types.RestoreContainerSnapshot,
+	mp nsmount.MountPoint,
+	checkpointPath string,
+	hasCUDAInterposition bool,
+	broker *os.File,
+) (*RestoreInNamespaceResult, error) {
 
 	// Open nsrestore from the agent host side before entering the container
 	// namespace, so the binary fd is immune to rename attacks inside the container.
@@ -336,11 +376,13 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	}
 	defer binaryFile.Close()
 
-	// ExtraFiles[0] → child fd 3, ExtraFiles[1] → child fd 4.
+	// ExtraFiles[0] → child fd 3, ExtraFiles[1] → child fd 4, and an
+	// optional ExtraFiles[2] → child fd 5.
 	// These constants mirror nsFdChildNum in mount.go (ExtraFiles[0] = fd 3).
 	const (
 		nsFdChild     = 3 // mp.NsFd() passed as ExtraFiles[0]
 		binaryFdChild = 4 // binaryFile passed as ExtraFiles[1]
+		brokerFdChild = 5 // broker passed as ExtraFiles[2]
 	)
 
 	bundleDir := nsmount.SnapshotBinDst // bundle root as seen inside the container
@@ -375,11 +417,19 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	if req.TargetPodIP != "" {
 		args = append(args, "--target-pod-ip", req.TargetPodIP)
 	}
+	extraFiles := []*os.File{nsFd, binaryFile}
+	if hasCUDAInterposition {
+		if broker == nil {
+			return nil, fmt.Errorf("CUDA interposition broker descriptor is required")
+		}
+		args = append(args, "--cuinterposer-broker-fd", strconv.Itoa(brokerFdChild))
+		extraFiles = append(extraFiles, broker)
+	}
 
 	cmd := exec.CommandContext(ctx, "nsenter", args...)
 	// Inherit the agent environment so nsrestore uses the same logger settings.
 	cmd.Env = os.Environ()
-	cmd.ExtraFiles = []*os.File{nsFd, binaryFile}
+	cmd.ExtraFiles = extraFiles
 	log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())
 
 	var stdout bytes.Buffer
@@ -399,4 +449,8 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	}
 
 	return &result, nil
+}
+
+func restoreCUDAInterpositionEnabled(artifactPath string) (bool, error) {
+	return cuda.HasCUDAInterpositionState(artifactPath)
 }

@@ -46,6 +46,8 @@ void cuinterposer_multicast_reset(void);
 
 bool cuinterposer_multicast_is_handle(CUmemGenericAllocationHandle logical);
 bool cuinterposer_multicast_has_mapping(CUdeviceptr address, size_t size);
+bool cuinterposer_multicast_is_checkpointed_member(
+    const uint8_t id[CUINTERPOSER_ALLOCATION_ID_SIZE]);
 CUresult cuinterposer_multicast_release(CUmemGenericAllocationHandle logical);
 CUresult cuinterposer_multicast_retain(CUmemGenericAllocationHandle* output, void* address);
 CUresult cuinterposer_multicast_map(

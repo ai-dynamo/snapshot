@@ -439,6 +439,24 @@ cuinterposer_multicast_has_mapping(CUdeviceptr address, size_t size)
   return find_mapping(address, size) != NULL;
 }
 
+bool
+cuinterposer_multicast_is_checkpointed_member(
+    const uint8_t id[CUINTERPOSER_ALLOCATION_ID_SIZE])
+{
+  const struct multicast* multicast;
+
+  for (multicast = multicasts; multicast != NULL; multicast = multicast->next) {
+    const struct multicast_binding* binding;
+
+    for (binding = multicast->bindings; binding != NULL; binding = binding->next) {
+      if (binding->checkpointed &&
+          memcmp(binding->member_id, id, CUINTERPOSER_ALLOCATION_ID_SIZE) == 0)
+        return true;
+    }
+  }
+  return false;
+}
+
 CUresult
 cuinterposer_multicast_release(CUmemGenericAllocationHandle logical)
 {

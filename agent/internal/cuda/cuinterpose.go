@@ -6,6 +6,7 @@ package cuda
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,10 +28,55 @@ const (
 
 	cuinterposerSocketPrefix = "cuinterposer-"
 	cuinterposerStateFile    = "cuinterposer.state"
+	cuinterposerBrokerFile   = "cuinterposer.broker"
+	cuinterposerBrokerDir    = "/run/snapshot-cuinterposer"
+	cuinterposerBrokerFDEnv  = "DYN_SNAPSHOT_CUINTERPOSER_BROKER_FD"
 )
 
 func snapshotControlDir() string {
 	return strings.TrimPrefix(podcontract.SnapshotControlMountPath, string(os.PathSeparator))
+}
+
+// OpenCUDAInterpositionBroker connects to the host-resident allocation broker
+// recorded alongside the checkpoint. The connected descriptor can cross mount
+// namespaces; the host socket path cannot.
+func OpenCUDAInterpositionBroker(checkpointDir string) (*os.File, error) {
+	return openCUDAInterpositionBroker(checkpointDir, cuinterposerBrokerDir)
+}
+
+func openCUDAInterpositionBroker(checkpointDir, brokerDir string) (*os.File, error) {
+	data, err := os.ReadFile(filepath.Join(checkpointDir, cuinterposerBrokerFile))
+	if err != nil {
+		return nil, fmt.Errorf("read CUDA interposition broker state: %w", err)
+	}
+	if len(data) < 2 || data[len(data)-1] != '\n' ||
+		strings.Contains(string(data[:len(data)-1]), "\n") {
+		return nil, fmt.Errorf("invalid CUDA interposition broker state")
+	}
+	socketPath := string(data[:len(data)-1])
+	if !filepath.IsAbs(socketPath) ||
+		filepath.Clean(filepath.Dir(socketPath)) != filepath.Clean(brokerDir) ||
+		filepath.Clean(socketPath) != socketPath {
+		return nil, fmt.Errorf("invalid CUDA interposition broker path %q", socketPath)
+	}
+	connection, err := net.DialUnix(
+		"unix",
+		nil,
+		&net.UnixAddr{Name: socketPath, Net: "unix"},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("connect CUDA interposition broker: %w", err)
+	}
+	file, fileErr := connection.File()
+	closeErr := connection.Close()
+	if fileErr != nil {
+		return nil, fmt.Errorf("duplicate CUDA interposition broker descriptor: %w", fileErr)
+	}
+	if closeErr != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("close CUDA interposition broker connection: %w", closeErr)
+	}
+	return file, nil
 }
 
 func cuinterposerEndpointPath(procRoot string, observedPID, namespacePID int) string {
@@ -126,12 +172,19 @@ func RestoreCUDAInterposition(
 	observedPIDs []int,
 	namespacePIDs []int,
 	coordinatorBinaryPath string,
+	broker *os.File,
 ) error {
+	if broker == nil {
+		return fmt.Errorf("CUDA interposition broker descriptor is required")
+	}
 	args, err := cuinterposerArgs("restore", checkpointDir, "", observedPIDs, namespacePIDs)
 	if err != nil {
 		return err
 	}
-	output, err := exec.CommandContext(ctx, coordinatorBinaryPath, args...).CombinedOutput()
+	command := exec.CommandContext(ctx, coordinatorBinaryPath, args...)
+	command.Env = append(os.Environ(), cuinterposerBrokerFDEnv+"=3")
+	command.ExtraFiles = []*os.File{broker}
+	output, err := command.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s failed: %w (output: %s)", coordinatorBinaryPath, err, strings.TrimSpace(string(output)))
 	}

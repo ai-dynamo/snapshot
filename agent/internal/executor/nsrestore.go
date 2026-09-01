@@ -28,7 +28,8 @@ type RestoreOptions struct {
 	CgroupRoot     string
 	TargetPodIP    string
 	// BundleDir is the path where the agent's binary bundle is mounted inside this namespace.
-	BundleDir string
+	BundleDir          string
+	CUInterposerBroker *os.File
 }
 
 type RestoreInNamespaceResult struct {
@@ -276,6 +277,7 @@ func executeRestore(
 				restorePIDs,
 				m.CUDA.PIDs,
 				coordinatorFdPath,
+				opts.CUInterposerBroker,
 			); err != nil {
 				return nil, 0, nil, fmt.Errorf("restore CUDA interposition: %w", err)
 			}

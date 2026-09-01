@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -123,6 +124,31 @@ func TestNewRestoreCleanupError(t *testing.T) {
 	var typedErr *RestoreCleanupError
 	if !errors.As(retErr, &typedErr) {
 		t.Fatalf("cleanup error type = %T, want *RestoreCleanupError", retErr)
+	}
+}
+
+func TestRestoreCUDAInterpositionUsesArtifactState(t *testing.T) {
+	artifactPath := t.TempDir()
+	enabled, err := restoreCUDAInterpositionEnabled(artifactPath)
+	if err != nil {
+		t.Fatalf("restoreCUDAInterpositionEnabled() error = %v", err)
+	}
+	if enabled {
+		t.Fatal("restoreCUDAInterpositionEnabled() = true without artifact state")
+	}
+	if err := os.WriteFile(
+		filepath.Join(artifactPath, "cuinterposer.state"),
+		[]byte("state"),
+		0600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	enabled, err = restoreCUDAInterpositionEnabled(artifactPath)
+	if err != nil {
+		t.Fatalf("restoreCUDAInterpositionEnabled() error = %v", err)
+	}
+	if !enabled {
+		t.Fatal("restoreCUDAInterpositionEnabled() = false with artifact state")
 	}
 }
 
