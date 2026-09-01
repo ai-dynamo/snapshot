@@ -87,6 +87,10 @@ func (noopInjector) MountBundle(_ context.Context, _ int) (nsmount.MountPoint, e
 	return noopMountPoint{}, nil
 }
 
+func (noopInjector) MountCUDAInterposer(_ context.Context, _ nsmount.MountPoint) (nsmount.MountPoint, error) {
+	return noopMountPoint{}, nil
+}
+
 func (noopInjector) MountArtifact(_ context.Context, _ nsmount.MountPoint, _ string) (nsmount.MountPoint, error) {
 	return noopMountPoint{}, nil
 }

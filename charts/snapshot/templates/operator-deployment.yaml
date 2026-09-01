@@ -60,6 +60,7 @@ spec:
             seccompProfile:
               type: RuntimeDefault
           args:
+            - {{ printf "--agent-image=%s" (include "snapshot.agentImage" .) | quote }}
             - {{ printf "--snapshot-storage-base-path=%v" .Values.storage.pvc.basePath | quote }}
             - {{ printf "--artifact-cleanup-scan-interval=%v" .Values.operator.artifactCleanup.scanInterval | quote }}
             - {{ printf "--artifact-cleanup-batch-size=%v" .Values.operator.artifactCleanup.batchSize | quote }}

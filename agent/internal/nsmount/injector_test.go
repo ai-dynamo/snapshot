@@ -51,6 +51,15 @@ func (m *mockMounter) MountBundle(_ context.Context, pid int) (mountRef, error) 
 	return m.mount("bundle", pid, "")
 }
 
+func (m *mockMounter) MountInterposer(_ context.Context, nsFd *os.File) (mountRef, error) {
+	i := len(m.calls)
+	m.calls = append(m.calls, mountCall{role: "interposer", nsFd: nsFd})
+	if i < len(m.results) && m.results[i] != nil {
+		return nil, m.results[i]
+	}
+	return &fakeMountRef{dst: "interposer", unmountLog: &m.unmountLog}, nil
+}
+
 func (m *mockMounter) MountCheckpoint(_ context.Context, nsFd *os.File, src string) (mountRef, error) {
 	i := len(m.calls)
 	m.calls = append(m.calls, mountCall{role: "checkpoint", nsFd: nsFd, src: src})
@@ -87,10 +96,14 @@ func TestRoleMountsUseFixedPathsAndPolicies(t *testing.T) {
 	if _, err := nsm.MountArtifact(context.Background(), bundle, "/checkpoints/artifacts/content-uid/containers/main"); err != nil {
 		t.Fatalf("MountArtifact: %v", err)
 	}
+	if _, err := nsm.MountCUDAInterposer(context.Background(), bundle); err != nil {
+		t.Fatalf("MountCUDAInterposer: %v", err)
+	}
 
 	want := []mountCall{
 		{role: "bundle", pid: testPID},
 		{role: "checkpoint", src: "/checkpoints/artifacts/content-uid/containers/main"},
+		{role: "interposer"},
 	}
 	if len(m.calls) != len(want) {
 		t.Fatalf("got %d calls, want %d", len(m.calls), len(want))
@@ -102,6 +115,9 @@ func TestRoleMountsUseFixedPathsAndPolicies(t *testing.T) {
 	}
 	if m.calls[1].nsFd != bundle.NsFd() {
 		t.Fatal("checkpoint mount did not reuse the bundle's pinned namespace fd")
+	}
+	if m.calls[2].nsFd != bundle.NsFd() {
+		t.Fatal("interposer mount did not reuse the bundle's pinned namespace fd")
 	}
 }
 

@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -35,7 +36,14 @@ func TestBuildPodSnapshot(t *testing.T) {
 		Annotations: map[string]string{"dynamo.nvidia.com/gms-mode": "enabled"},
 	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "warm-worker-abcde", Namespace: "inference", UID: types.UID("pod-uid")},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "warm-worker-abcde",
+			Namespace: "inference",
+			UID:       types.UID("pod-uid"),
+			Annotations: map[string]string{
+				podcontract.CUDAInterposerAnnotation: "enabled",
+			},
+		},
 	}
 
 	snap, err := buildPodSnapshot(sj, pod)
@@ -54,6 +62,10 @@ func TestBuildPodSnapshot(t *testing.T) {
 	t.Run("propagates caller metadata", func(t *testing.T) {
 		assert.Equal(t, "abc123", snap.Labels["dynamo.nvidia.com/worker-generation"])
 		assert.Equal(t, "enabled", snap.Annotations["dynamo.nvidia.com/gms-mode"])
+	})
+
+	t.Run("records CUDA interposition for restore", func(t *testing.T) {
+		assert.Equal(t, "enabled", snap.Annotations[podcontract.CUDAInterposerAnnotation])
 	})
 
 	t.Run("pins the source pod name and UID", func(t *testing.T) {

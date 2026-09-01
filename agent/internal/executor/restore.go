@@ -30,6 +30,7 @@ import (
 // artifact inside a placeholder container's mount namespace.
 type RestoreMounter interface {
 	MountBundle(ctx context.Context, pid int) (nsmount.MountPoint, error)
+	MountCUDAInterposer(ctx context.Context, namespaceMount nsmount.MountPoint) (nsmount.MountPoint, error)
 	MountArtifact(ctx context.Context, namespaceMount nsmount.MountPoint, artifactPath string) (nsmount.MountPoint, error)
 }
 
@@ -73,6 +74,7 @@ type RestoreRequest struct {
 	TargetPodIP              string
 	ArtifactContainerName    string
 	DestinationContainerName string
+	CUDAInterposer           bool
 	Clientset                kubernetes.Interface
 }
 
@@ -140,6 +142,17 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		action: "unmount agent bundle from placeholder",
 		point:  bundleMount,
 	})
+
+	if req.CUDAInterposer {
+		interposerMount, err := mounts.MountCUDAInterposer(ctx, bundleMount)
+		if err != nil {
+			return 0, fmt.Errorf("mount CUDA interposer into placeholder: %w", err)
+		}
+		activeMounts = append(activeMounts, restoreMount{
+			action: "unmount CUDA interposer from placeholder",
+			point:  interposerMount,
+		})
+	}
 
 	artifactMount, err := mounts.MountArtifact(ctx, bundleMount, artifactPath)
 	if err != nil {

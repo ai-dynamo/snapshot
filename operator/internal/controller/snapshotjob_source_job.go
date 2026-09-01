@@ -49,7 +49,7 @@ func (r *SnapshotJobReconciler) observeExistingSourceJob(ctx context.Context, sj
 // reconcileExistingSourceJob applies the one-shot Job identity gate shared by
 // steady-state reconciliation and Create-AlreadyExists recovery.
 func (r *SnapshotJobReconciler) reconcileExistingSourceJob(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) (snapshotJobObservation, ctrl.Result, error) {
-	if failure := classifyExistingSourceJob(sj, job); failure != nil {
+	if failure := r.classifyExistingSourceJob(sj, job); failure != nil {
 		return snapshotJobObservation{failure: failure}, ctrl.Result{}, nil
 	}
 	return r.reconcileAcceptedSourceJob(ctx, sj, job)
@@ -74,7 +74,7 @@ func (r *SnapshotJobReconciler) readAuthoritativeSourceJob(ctx context.Context, 
 		}
 		return nil, nil, err
 	}
-	if failure := classifyExistingSourceJob(sj, job); failure != nil {
+	if failure := r.classifyExistingSourceJob(sj, job); failure != nil {
 		return job, failure, nil
 	}
 	return job, nil, nil
@@ -88,7 +88,10 @@ func sourceJobDeletedFailure(sj *snapshotv1alpha1.SnapshotJob) *snapshotJobFailu
 }
 
 // classifyExistingSourceJob validates ownership and one-shot Job identity.
-func classifyExistingSourceJob(sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) *snapshotJobFailure {
+func (r *SnapshotJobReconciler) classifyExistingSourceJob(
+	sj *snapshotv1alpha1.SnapshotJob,
+	job *batchv1.Job,
+) *snapshotJobFailure {
 	if !metav1.IsControlledBy(job, sj) {
 		return &snapshotJobFailure{
 			reason: snapshotv1alpha1.ReasonJobNameConflict,
@@ -106,7 +109,7 @@ func classifyExistingSourceJob(sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Jo
 		return nil
 	}
 
-	desired, err := buildSourceJob(sj)
+	desired, err := buildSourceJobWithAgentImage(sj, r.AgentImage)
 	if err != nil {
 		return &snapshotJobFailure{reason: snapshotv1alpha1.ReasonInvalidSpec, cause: err}
 	}

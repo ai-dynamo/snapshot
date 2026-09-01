@@ -191,6 +191,7 @@ func TestCHelperRejectsUnsafeSourcesBeforeMountSyscalls(t *testing.T) {
 	for _, args := range [][]string{
 		{"mount-fd", "3", "/etc", "/tmp/checkpoint"},
 		{"mount-bundle-fd", "3", "/etc"},
+		{"mount-interposer-fd", "3", "/etc"},
 		{"unmount-checkpoint-fd", "3", "unexpected"},
 	} {
 		if output, err := exec.Command(binary, args...).CombinedOutput(); err == nil {
