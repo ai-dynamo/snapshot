@@ -339,7 +339,7 @@ func TestCPULimitCheck(t *testing.T) {
 
 func TestMountCheck(t *testing.T) {
 	mounts := func(externalized, existing []string) Facts {
-		return Facts{ExternalizedMounts: externalized, ExistingMounts: existing}
+		return Facts{ExternalizedMounts: externalized, ExistingMountPaths: existing}
 	}
 
 	tests := []struct {

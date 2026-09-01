@@ -29,10 +29,10 @@ func inspectCompatibility(
 
 	sourceFacts := manifest.CompatFacts()
 	targetFacts := compat.Facts{
-		ImageID:        targetImageID,
-		DriverVersion:  targetGPUs.DriverVersion,
-		GPUDevices:     targetGPUs.Devices,
-		ExistingMounts: existingMounts(targetRoot, sourceFacts.ExternalizedMounts),
+		ImageID:            targetImageID,
+		DriverVersion:      targetGPUs.DriverVersion,
+		GPUDevices:         targetGPUs.Devices,
+		ExistingMountPaths: existingMountPaths(targetRoot, sourceFacts.ExternalizedMounts),
 	}
 	mismatches := compat.Compare(compat.GateInspect, sourceFacts, targetFacts)
 	if len(mismatches) == 0 {

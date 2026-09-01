@@ -22,7 +22,7 @@ func populatedFacts() Facts {
 			{UUID: "GPU-1111", ProductName: "Tesla T4"},
 		},
 		ExternalizedMounts: []string{"/model-cache"},
-		ExistingMounts:     []string{"/model-cache"},
+		ExistingMountPaths: []string{"/model-cache"},
 	}
 }
 
@@ -39,7 +39,7 @@ func differentFacts() Facts {
 			{UUID: "GPU-2222", ProductName: "NVIDIA A100-SXM4-40GB"},
 		},
 		ExternalizedMounts: []string{"/model-cache"},
-		ExistingMounts:     nil,
+		ExistingMountPaths: nil,
 	}
 }
 

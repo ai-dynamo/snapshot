@@ -298,7 +298,7 @@ func TestRemainingDuration(t *testing.T) {
 	}
 }
 
-func TestExistingMounts(t *testing.T) {
+func TestExistingMountPaths(t *testing.T) {
 	targetRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(targetRoot, "model-cache"), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
@@ -307,13 +307,13 @@ func TestExistingMounts(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	got := existingMounts(targetRoot, []string{"/model-cache", "/data", "/etc-hostname"})
+	got := existingMountPaths(targetRoot, []string{"/model-cache", "/data", "/etc-hostname"})
 	want := []string{"/model-cache", "/etc-hostname"}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("existingMounts = %#v, want %#v", got, want)
+		t.Errorf("existingMountPaths = %#v, want %#v", got, want)
 	}
 
-	if got := existingMounts(targetRoot, nil); len(got) != 0 {
-		t.Errorf("existingMounts of nothing = %#v, want empty", got)
+	if got := existingMountPaths(targetRoot, nil); len(got) != 0 {
+		t.Errorf("existingMountPaths of nothing = %#v, want empty", got)
 	}
 }

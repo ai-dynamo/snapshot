@@ -339,14 +339,14 @@ func inspectRestore(
 	}, discoverDuration + deviceMapDuration, nil
 }
 
-// existingMounts reports which of the recorded destinations resolve inside the
-// placeholder's rootfs. Only what the checkpoint recorded is looked up, so a gate
-// on this path costs one stat per volume the checkpoint actually used.
+// existingMountPaths reports which recorded mount destinations resolve inside
+// the placeholder's rootfs. Only what the checkpoint recorded is looked up, so a
+// gate on this path costs one stat per volume the checkpoint actually used.
 //
 // Only a path that is definitely absent is left out. Any other stat failure is
 // this agent failing to look rather than the pod missing a volume, and reporting
 // it as missing would refuse a restore that would have worked.
-func existingMounts(targetRoot string, destinations []string) []string {
+func existingMountPaths(targetRoot string, destinations []string) []string {
 	existing := make([]string, 0, len(destinations))
 	for _, destination := range destinations {
 		if _, err := os.Stat(filepath.Join(targetRoot, destination)); !os.IsNotExist(err) {

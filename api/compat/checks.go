@@ -183,8 +183,8 @@ var mountCheck = check{
 	name: CheckMount,
 	gate: GateInspect,
 	compare: func(source, target Facts) []Mismatch {
-		existing := make(map[string]bool, len(target.ExistingMounts))
-		for _, path := range target.ExistingMounts {
+		existing := make(map[string]bool, len(target.ExistingMountPaths))
+		for _, path := range target.ExistingMountPaths {
 			existing[path] = true
 		}
 
