@@ -58,7 +58,7 @@ That pod manifest must:
 - provide an inert, long-running entrypoint for each restore destination
 
 `snapshotctl restore` applies Snapshot's generic
-[restore Pod contract](../../../docs/restore-pod-contract.md), including the
+[restore Pod contract](../../../docs/reference/restore-pod-contract.md), including the
 annotations, control volume, environment, startup gate, and seccomp profile. It
 does not replace container commands or inject a workload-specific standby
 environment variable. A platform-specific entrypoint convention remains the
