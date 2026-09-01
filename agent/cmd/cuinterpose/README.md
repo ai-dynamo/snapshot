@@ -4,10 +4,10 @@ All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Same-node POSIX CUDA VMM checkpoint and restore
+# Same-node POSIX CUDA VMM and multicast checkpoint and restore
 
 This interposer implements checkpoint and restore for CUDA VMM allocations
-shared between processes on one node with
+and complete CUDA multicast groups shared between processes on one node with
 `CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR`.
 
 ## Contract
@@ -51,17 +51,16 @@ Legacy CUDA IPC remains driver-owned and is unsupported by this shim.
 hex participant ID. Otherwise, the shim creates one when the process starts.
 
 The orchestrator must externally quiesce the application at the checkpoint
-boundary. Allocation sharing, import, mapping, access updates, kernel work,
-communication-library setup, and teardown must not be in flight.
+boundary. Allocation sharing, mapping, access updates, multicast setup or
+teardown, kernel work, and communication-library setup must not be in flight.
 
 During ordinary execution:
 
-- CUDA generic allocation handles for POSIX-capable allocations tracked by the
-  shim are tagged logical tokens; the corresponding real driver handles remain
-  internal.
-- Untracked CUDA generic allocation handles remain real driver handles.
-- A POSIX-capable allocation becomes checkpoint-managed when its ticket fd
-  is exported.
+- CUDA generic handles for tracked POSIX resources are tagged logical tokens;
+  the corresponding real driver handles remain internal.
+- Untracked CUDA generic handles remain real driver handles.
+- A POSIX-capable unicast allocation becomes checkpoint-managed when its ticket
+  FD is exported.
 - POSIX exports return sealed ticket FDs containing the creator,
   allocation, endpoint, and authorization identities.
 - A ticket import resolves through the creator's local Unix endpoint. A
@@ -69,18 +68,22 @@ During ordinary execution:
   closed immediately, and never returned to the application.
 - A raw external POSIX import is passed directly to CUDA and is not tracked by
   the shim.
+- Multicast create/import/export, device membership, bindings, mappings, and
+  access are passed to CUDA and recorded.
 
 Handle ownership is explicit:
 
 | Source | Application receives | Managed table | Driver-handle owner |
 | --- | --- | --- | --- |
-| POSIX-capable create, tracked retain, or ticket import | Tagged logical token | Logical token to driver handle | Shim |
+| POSIX-capable create, tracked retain, or ticket import | Tagged logical token | Logical token to unicast or multicast resource | Shim |
 | Raw external import or other pass-through | Real driver handle | None | Application |
 | Checkpoint carrier | Nothing | No separate entry | Shim |
 
 `posix.c` owns the sealed ticket format and remote creator exchange.
 `symbols.c` owns `dlsym`, `cuGetProcAddress`, and the replacement table.
-`interpose.c` owns CUDA interception, allocation state, and local raw exports.
+`interpose.c` owns generic CUDA interception and unicast allocation state.
+`multicast.c` owns multicast devices, bindings, mappings, teardown,
+reconstruction, and validation.
 
 Before native CUDA checkpoint, the snapshot agent asks the native coordinator
 to validate the complete participant topology. The original `cuMemCreate`
@@ -98,6 +101,12 @@ remaps every allocation at its saved VA, restores effective access and required
 handle translations, and performs final topology validation. Any failed
 validation fails closed. There is no rollback after checkpoint preparation
 mutates CUDA state.
+
+Multicast is a topology overlay on the unicast allocations whose bytes native
+CUDA checkpoints. Prepare removes multicast mappings, bindings, and objects
+before unicast prepare. Restore creates fresh multicast objects, restores
+device membership and bindings, remaps the original virtual addresses, and
+validates the complete group before the workload resumes.
 
 The native coordinator atomically writes `cuinterposer.state`, its opaque durable
 topology sidecar, in the checkpoint directory. Go only orders native VMM
@@ -119,14 +128,23 @@ replacement table, using the requested CUDA version to select the ABI.
 Chaining with another `dlsym()` interposer and preserving original-caller
 `RTLD_NEXT` lookup scope are unsupported.
 
+The multicast surface includes create, add-device, bind-memory, bind-address,
+unbind, granularity, and the generic handle and mapping consumers. CUDA 13.1+
+resolver requests select the device-explicit bind ABI when build headers expose
+it.
+
 ## Testing
 
-Run the native interposer integration test from the repository root:
+Run the native interposer integration tests from the repository root:
 
 ```bash
-uv run --project agent/cmd/cuinterpose/tests \
-  pytest agent/cmd/cuinterpose/tests/test_cucheckpoint.py -v
+cuda-checkpoint --launch-job \
+  uv run --project agent/cmd/cuinterpose/tests \
+    pytest agent/cmd/cuinterpose/tests/test_cucheckpoint.py -v
 ```
+
+The suite includes a POSIX baseline and a two-GPU multicast case with a
+multimem collective and CUDA graph replay.
 
 ## Qualification
 
@@ -169,11 +187,9 @@ Applications must finish setup and externally quiesce the complete process
 group first.
 
 Children created with `fork()` and no subsequent `exec()` lazily receive a fresh
-random process-local participant identity, a child-PID control socket and thread,
-and empty allocation, handle, and mapping bookkeeping on their first intercepted
-VMM operation. This supports the fork-before-CUDA-initialization lifecycle used
-by vLLM. An explicitly configured parent participant ID is never reused by a
-forked child.
+process-local participant identity, control socket, and empty unicast and
+multicast bookkeeping on their first intercepted VMM operation. This supports
+the fork-before-CUDA-initialization lifecycle used by vLLM.
 
 Forking after the shim has tracked VMM allocations, handles, or mappings is
 unsupported. The child deliberately discards its inherited copies without
@@ -182,11 +198,15 @@ preserved.
 
 ### Fail-closed limitations
 
-The coordinator fails closed for a missing creator anchor, incomplete
+The coordinator fails closed for a missing unicast creator anchor, incomplete
 participants or topology, more than eight access descriptors, access ranges
 that partially overlap a tracked mapping, and reconstruction or final
 validation failures. One access call may cover multiple complete mappings.
 There is no rollback after checkpoint preparation mutates CUDA state.
+
+Only complete same-node POSIX multicast groups are supported. Non-POSIX handle
+types, partial groups, duplicate or missing devices, missing member bindings,
+and multiple metadata creators fail closed.
 
 ### Future compatibility
 

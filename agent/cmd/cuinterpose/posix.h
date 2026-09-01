@@ -14,7 +14,7 @@
 #include "protocol.h"
 
 #define CUINTERPOSER_POSIX_TICKET_MAGIC 0x44564d43U
-#define CUINTERPOSER_POSIX_TICKET_VERSION 1U
+#define CUINTERPOSER_POSIX_TICKET_VERSION 2U
 
 struct cuinterposer_posix_ticket {
   uint32_t magic;
@@ -24,7 +24,13 @@ struct cuinterposer_posix_ticket {
   uint8_t allocation_id[CUINTERPOSER_ALLOCATION_ID_SIZE];
   char creator_endpoint[sizeof(((struct sockaddr_un*)0)->sun_path)];
   uint8_t authorization[CUINTERPOSER_TOKEN_SIZE];
-  uint8_t reserved_identity[42];
+  uint8_t reserved_alignment[2];
+  uint32_t resource_kind;
+  uint32_t num_devices;
+  uint64_t allocation_size;
+  uint64_t handle_types;
+  uint64_t object_flags;
+  uint8_t reserved_identity[8];
 };
 
 _Static_assert(sizeof(struct cuinterposer_posix_ticket) == 256, "cuinterposer POSIX ticket layout changed");

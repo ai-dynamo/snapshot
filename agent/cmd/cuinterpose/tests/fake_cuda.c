@@ -8,6 +8,7 @@
 
 #include <cuda.h>
 #include <dlfcn.h>
+#include <stdint.h>
 #include <string.h>
 
 #undef cuGetProcAddress
@@ -135,7 +136,7 @@ fakeCuMulticastCreateOriginal(
 {
   (void)properties;
   *output = 0x456;
-  return (CUresult)result_multicast_create;
+  return CUDA_SUCCESS;
 }
 
 CUresult CUDAAPI
@@ -201,6 +202,13 @@ cuMulticastUnbind(
   (void)offset;
   (void)size;
   return (CUresult)result_multicast_unbind;
+}
+
+CUresult CUDAAPI
+cuCtxGetCurrent(CUcontext* context)
+{
+  *context = (CUcontext)(uintptr_t)1;
+  return CUDA_SUCCESS;
 }
 
 static void*

@@ -10,7 +10,7 @@ MIN_GLIBC := GLIBC_2.34
 INTERPOSER_CPPFLAGS := -DCUINTERPOSER_DLSYM_VERSION=\"$(MIN_GLIBC)\"
 COMMON_FLAGS := -std=gnu11 -O2 -Wall -Wextra -Werror
 INTERPOSER_SOURCES := interpose.c multicast.c posix.c symbols.c util.c
-INTERPOSER_HEADERS := posix.h protocol.h symbols.h util.h
+INTERPOSER_HEADERS := multicast.h posix.h protocol.h symbols.h util.h
 COORDINATOR_SOURCES := coordinator.c util.c
 COORDINATOR_HEADERS := protocol.h util.h
 
