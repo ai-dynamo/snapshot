@@ -168,7 +168,14 @@ func executeRestore(
 	// opening the binary now and exec'ing via /proc/self/fd/N after CRIU returns,
 	// the fd remains valid even if the mount is gone.
 	var cudaHelperFdPath string
+	var coordinatorFdPath string
+	hasCUDAInterposition := false
 	if !m.CUDA.IsEmpty() {
+		var stateErr error
+		hasCUDAInterposition, stateErr = cuda.HasCUDAInterpositionState(opts.CheckpointPath)
+		if stateErr != nil {
+			return nil, 0, nil, fmt.Errorf("stat CUDA interposition state: %w", stateErr)
+		}
 		helperPath := filepath.Join(opts.BundleDir, cuda.HelperBinaryName)
 		f, err := os.Open(helperPath)
 		if err != nil {
@@ -176,6 +183,16 @@ func executeRestore(
 		}
 		defer f.Close()
 		cudaHelperFdPath = fmt.Sprintf("/proc/self/fd/%d", f.Fd())
+
+		if hasCUDAInterposition {
+			coordinatorPath := filepath.Join(opts.BundleDir, cuda.CoordinatorBinaryName)
+			coordinator, err := os.Open(coordinatorPath)
+			if err != nil {
+				return nil, 0, nil, fmt.Errorf("failed to open cuinterposer-coordinator before CRIU restore: %w", err)
+			}
+			defer coordinator.Close()
+			coordinatorFdPath = fmt.Sprintf("/proc/self/fd/%d", coordinator.Fd())
+		}
 	}
 
 	// The restore-complete sentinel lives on the pod emptyDir mounted at
@@ -249,10 +266,21 @@ func executeRestore(
 		)
 		cudaStart := time.Now()
 		_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, log)
-		timings.cudaRestoreDuration = time.Since(cudaStart)
 		if err != nil {
 			return nil, 0, nil, fmt.Errorf("CUDA restore failed: %w", err)
 		}
+		if hasCUDAInterposition {
+			if err := cuda.RestoreCUDAInterposition(
+				ctx,
+				opts.CheckpointPath,
+				restorePIDs,
+				m.CUDA.PIDs,
+				coordinatorFdPath,
+			); err != nil {
+				return nil, 0, nil, fmt.Errorf("restore CUDA interposition: %w", err)
+			}
+		}
+		timings.cudaRestoreDuration = time.Since(cudaStart)
 	}
 
 	return timings, restoredPID, nil, nil
