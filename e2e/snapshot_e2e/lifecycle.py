@@ -965,7 +965,16 @@ def debug_dump_framework(
                     k8s.exec_command(
                         config.namespace,
                         agent,
-                        f"ls -la {root}/containers/* 2>&1; "
+                        f"ls -la {root}/containers/* 2>&1 | grep -vE ' (core|pagemap|pages|fdinfo|ids|mm|sigacts|fs|tty-info|reg-files|inventory|pstree|files|cgroup|seccomp|timens|utsns|ipcns|netns|mnt|rseq|fanotify|inotify|tls|stats)-?[0-9]*\\.img' 2>&1; "
+                        # The diff is applied into the placeholder's rootfs while
+                        # the placeholder and then CRIU run from it. Anything under
+                        # a library or binary path here is a candidate for
+                        # corrupting code that is already mapped.
+                        f"for t in {root}/containers/*/rootfs-diff.tar; do "
+                        "  if [ -f \"$t\" ]; then echo \"== $t: $(tar -tf \"$t\" | wc -l) entries; libraries/binaries:\"; "
+                        "    tar -tf \"$t\" | grep -E '(^|/)(usr/)?(lib|lib64|bin|sbin)/|\\.so(\\.|$)' | head -40; "
+                        "    echo '   top-level dirs:'; tar -tf \"$t\" | cut -d/ -f1-2 | sort | uniq -c | sort -rn | head -12; fi; "
+                        "done; "
                         f"for f in {root}/containers/*/restore.log {root}/containers/*/dump.log; do "
                         "  if [ -f \"$f\" ]; then echo \"== $f (tail 60)\"; tail -60 \"$f\"; fi; "
                         "done",
