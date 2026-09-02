@@ -165,6 +165,19 @@ RUN git -c http.version=HTTP/1.1 init /tmp/criu \
     && make -j$(nproc) \
     && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
 
+# criu's own shared-library dependencies (libbsd, libgnutls, libnftables,
+# libnl-3, libnet, libuuid, and their transitive deps) must be resolved here,
+# against this stage's older glibc -- not later in the agent stage, whose ldd
+# would resolve the same library names against its own (newer) filesystem and
+# silently reintroduce the GLIBC_2.38 floor this stage exists to avoid. The
+# agent stage's closure step is no-clobber, so it fills in gaps (tar, ip,
+# cuda-checkpoint) without overwriting what's collected here.
+RUN set -eu; \
+    mkdir -p /criu-install/usr/local/lib/snapshot/lib; \
+    ldd /criu-install/usr/local/sbin/criu 2>/dev/null | awk '/=> \//{print $3}' | sort -u \
+    | grep -Ev '/(ld-linux|libc|libm|libmvec|libdl|libpthread|librt|libresolv|libutil|libanl|libnsl|libthread_db)[.-]' \
+    | xargs -r -I{} cp -Ln {} /criu-install/usr/local/lib/snapshot/lib/
+
 COPY plugins/inet-remap/snapshot_inet_remap.c /tmp/snapshot_inet_remap.c
 RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \
     && gcc -O2 -Wall -Wextra -fPIC -shared \
@@ -172,7 +185,8 @@ RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \
       -o /criu-install/usr/local/lib/snapshot/criu-plugins/snapshot_inet_remap.so \
       /tmp/snapshot_inet_remap.c
 
-RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
+# http.version=HTTP/1.1: see the criu clone above for why.
+RUN git -c http.version=HTTP/1.1 clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
 
 # CRIU source at the exact ref built from: this is a from-source build, and
 # CRIU_REF may be a moving branch.
@@ -260,6 +274,11 @@ COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
 RUN mkdir -p /snapshot-binaries/lib /snapshot-binaries/criu-plugins
 COPY --from=builder /nsrestore /snapshot-binaries/nsrestore
 COPY --from=criu-builder /criu-install/usr/local/sbin/criu /snapshot-binaries/criu
+# criu's own shared-library closure, pre-resolved in criu-builder against its
+# older glibc (see that stage). Copied before the generic closure step below
+# so its no-clobber copy can't silently replace these with newer-glibc builds
+# resolved from this (agent) stage's own filesystem.
+COPY --from=criu-builder /criu-install/usr/local/lib/snapshot/lib/ /snapshot-binaries/lib/
 COPY --from=criu-builder /criu-install/usr/local/lib/snapshot/criu-plugins/ /snapshot-binaries/criu-plugins/
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /snapshot-binaries/cuda-checkpoint
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-checkpoint-helper
