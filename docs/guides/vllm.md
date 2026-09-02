@@ -39,8 +39,8 @@ curl --fail --location \
 ```
 
 The program loads the model selected in `deployment.yaml`, runs one
-generation to initialize vLLM, and then calls `pause_generation()` and
-`sleep()`. It writes
+generation to initialize vLLM and records its output in `vllm-precheck`, and
+then calls `pause_generation()` and `sleep()`. It writes
 `ready-for-snapshot` only when the process is safe to checkpoint. In a restore
 container, it waits in standby until Snapshot injects the checkpointed process.
 That process calls `wake_up()` and `resume_generation()`, runs another
@@ -111,6 +111,11 @@ env:
 Other values include `TinyLlama/TinyLlama-1.1B-Chat-v1.0` or a mounted model
 path such as `/models/Qwen3-0.6B`. A mounted path must be available to both the
 source and restored containers.
+
+The example sizes the engine for a small single-GPU deployment through
+`SNAPSHOT_MAX_MODEL_LEN` (default `2048`) and `SNAPSHOT_GPU_MEMORY_UTILIZATION`
+(default `0.30`). Raise them only after validating checkpoint and restore with
+the resulting memory use.
 
 > [!NOTE]
 > This example runs vLLM directly through `AsyncLLM` rather than `vllm serve`, so
