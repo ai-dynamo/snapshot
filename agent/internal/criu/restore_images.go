@@ -25,7 +25,9 @@ const (
 	filesImageFilename            = "files.img"
 	placeholderMountNamespacePath = "/proc/self/ns/mnt"
 	cudaUVMFDSocketNamePrefix     = "\x00cuda-uvmfd-"
+	ncclSocketNamePrefix          = "\x00tmp/nccl-socket-"
 	linuxUnixSocketStateListen    = 10
+	linuxUnixSocketStateClose     = 7
 	linuxTCPStateEstablished      = 1
 	linuxTCPStateClose            = 7
 	linuxTCPStateListen           = 10
@@ -403,11 +405,11 @@ func closeFDs(fds []int) {
 }
 
 func rewriteCloneConflictingUnixSocketAddress(entry *sk_unix.UnixSkEntry, restoreID uint64) bool {
-	if !isCUDAUVMFDListener(entry) {
+	if !isCUDAUVMFDListener(entry) && !isNCCLDatagramSocket(entry) {
 		return false
 	}
 
-	// CUDA retains this listener's FD, so only its clone-private address changes.
+	// CUDA and NCCL retain these FDs, so only their clone-private addresses change.
 	input := make([]byte, 8+len(entry.Name))
 	binary.BigEndian.PutUint64(input, restoreID)
 	copy(input[8:], entry.Name)
@@ -425,4 +427,15 @@ func isCUDAUVMFDListener(entry *sk_unix.UnixSkEntry) bool {
 		*entry.State == linuxUnixSocketStateListen &&
 		*entry.Peer == 0 &&
 		bytes.HasPrefix(entry.Name, []byte(cudaUVMFDSocketNamePrefix))
+}
+
+func isNCCLDatagramSocket(entry *sk_unix.UnixSkEntry) bool {
+	return entry != nil &&
+		entry.Type != nil &&
+		entry.State != nil &&
+		entry.Peer != nil &&
+		*entry.Type == uint32(unix.SOCK_DGRAM) &&
+		*entry.State == linuxUnixSocketStateClose &&
+		*entry.Peer == 0 &&
+		bytes.HasPrefix(entry.Name, []byte(ncclSocketNamePrefix))
 }
