@@ -1,0 +1,322 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: E2E Framework Tests
+
+# Checkpoint/restore of the inference framework guide workloads (vLLM, SGLang,
+# TensorRT-LLM), one vCluster per framework. The cluster setup mirrors
+# e2e.yaml; the differences are the 64Gi checkpoint PVC (framework artifacts
+# are multi-GB), the framework image resolution, and the diagnostics upload.
+
+on:
+  pull_request:
+    paths:
+      - 'agent/**'
+      - 'operator/**'
+      - 'api/**'
+      - 'charts/**'
+      - 'e2e/**'
+      - 'docs/guides/**'
+      - 'hack/**'
+      - '.github/workflows/e2e-frameworks.yaml'
+  schedule:
+    # 01:00 Pacific Standard Time, after the nightly e2e.yaml run.
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+    inputs:
+      framework:
+        description: Framework to test (all, vllm, sglang, tensorrt-llm)
+        required: false
+        default: all
+        type: choice
+        options: [all, vllm, sglang, tensorrt-llm]
+      snapshot_tag:
+        description: >-
+          Operator/agent image tag to install. Leave empty to resolve from the
+          commit under test (pull requests fall back to the newest main build
+          when the commit has no published images).
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  e2e:
+    name: ${{ matrix.framework }}
+    # Fork PRs have no GHCR read token for the framework images and no GPU
+    # runner access; they get the cluster-free manifest checks from ci.yml.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: [vllm, sglang, tensorrt-llm]
+    concurrency:
+      group: snapshot-e2e-frameworks-${{ github.event.pull_request.number || github.run_id }}-${{ matrix.framework }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    env:
+      HOST_NAMESPACE: snapshot-e2e-fw-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
+      VCLUSTER_NAME: snapshot-e2e-fw-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
+      TEST_NAMESPACE: snapshot-e2e
+      SNAPSHOT_E2E_HOST_NAMESPACE: snapshot-e2e-fw-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
+      SNAPSHOT_E2E_VCLUSTER_NAME: snapshot-e2e-fw-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
+      SNAPSHOT_E2E_TEST_NAMESPACE: snapshot-e2e
+      SNAPSHOT_E2E_TARGET_KUBECONFIG: ${{ github.workspace }}/.kubeconfig-snapshot-e2e
+      SNAPSHOT_E2E_SNAPSHOT_RELEASE: snapshot
+      SNAPSHOT_E2E_PVC_NAME: snapshot-pvc
+      SNAPSHOT_E2E_PVC_SIZE: 64Gi
+      SNAPSHOT_E2E_STORAGE_CLASS: azurefile-csi
+      SNAPSHOT_E2E_MODE: vcluster
+      SNAPSHOT_E2E_VCLUSTER_K8S_VERSION: v1.32.13
+      SNAPSHOT_E2E_VCLUSTER_LOCAL_PORT: "8443"
+      SNAPSHOT_E2E_HELM_TIMEOUT: 6m
+      SNAPSHOT_E2E_READY_TIMEOUT_SECONDS: "480"
+      SNAPSHOT_E2E_RESULT_FILE: ${{ github.workspace }}/.snapshot-e2e-setup-result.json
+      SNAPSHOT_E2E_FRAMEWORK: ${{ matrix.framework }}
+      PYTHONUNBUFFERED: "1"
+      UV_LINK_MODE: copy
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Skip frameworks not selected by dispatch
+        id: selected
+        env:
+          SELECTED: ${{ inputs.framework || 'all' }}
+        run: |
+          set -euo pipefail
+          if [[ "${SELECTED}" == "all" || "${SELECTED}" == "${{ matrix.framework }}" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping ${{ matrix.framework }}: dispatch selected ${SELECTED}"
+          fi
+
+      - name: Capture host kubeconfig
+        if: ${{ steps.selected.outputs.run == 'true' }}
+        id: host
+        run: |
+          echo "kubeconfig=${KUBECONFIG:-}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install vCluster CLI
+        if: ${{ steps.selected.outputs.run == 'true' }}
+        timeout-minutes: 3
+        uses: ./.github/actions/install-vcluster-cli
+
+      - name: Cleanup stale e2e namespaces
+        if: ${{ steps.selected.outputs.run == 'true' }}
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+
+          cutoff_epoch="$(date -u -d '12 hours ago' +%s)"
+          kubectl get ns -l snapshot-e2e=true \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.creationTimestamp}{"\n"}{end}' |
+          while IFS=$'\t' read -r namespace created_at; do
+            if [[ -z "${namespace}" ]]; then
+              continue
+            fi
+            if [[ "${namespace}" == "${HOST_NAMESPACE}" ]]; then
+              echo "Keeping current namespace ${namespace}"
+              continue
+            fi
+
+            created_epoch="$(date -u -d "${created_at}" +%s)"
+            if (( created_epoch >= cutoff_epoch )); then
+              echo "Keeping recent namespace ${namespace} created at ${created_at}"
+              continue
+            fi
+
+            echo "Deleting stale Snapshot e2e namespace ${namespace} created at ${created_at}"
+            helm uninstall vcluster-hpm -n "${namespace}" || true
+            vcluster delete "${namespace}" --namespace "${namespace}" || true
+            kubectl delete namespace "${namespace}" --ignore-not-found --wait=false || true
+          done
+
+      - name: Install Python tooling (ARM64)
+        if: ${{ steps.selected.outputs.run == 'true' && runner.arch == 'ARM64' }}
+        timeout-minutes: 3
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.10.11"
+          checksum: "23003df007937dd607409c8ddf010baa82bad2673e60e254632ca5b04edcce13"
+          enable-cache: "false"
+          download-from-astral-mirror: "false"
+
+      - name: Install Python tooling (X64)
+        if: ${{ steps.selected.outputs.run == 'true' && runner.arch == 'X64' }}
+        timeout-minutes: 3
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.10.11"
+          checksum: "5a360b0de092ddf4131f5313d0411b48c4e95e8107e40c3f8f2e9fcb636b3583"
+          enable-cache: "false"
+          download-from-astral-mirror: "false"
+
+      - name: Resolve Snapshot image tag
+        if: ${{ steps.selected.outputs.run == 'true' && (inputs.snapshot_tag || '') == '' }}
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # The PR head, not the synthetic merge commit GITHUB_SHA points at.
+          SNAPSHOT_E2E_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            python3 hack/resolve-snapshot-image-tag.py --fallback-main
+          else
+            python3 hack/resolve-snapshot-image-tag.py
+          fi
+
+      - name: Use provided Snapshot image tag
+        if: ${{ steps.selected.outputs.run == 'true' && (inputs.snapshot_tag || '') != '' }}
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          echo "SNAPSHOT_E2E_SNAPSHOT_TAG=${{ inputs.snapshot_tag }}" >> "$GITHUB_ENV"
+          echo "Using provided Snapshot image tag: ${{ inputs.snapshot_tag }}"
+
+      # The framework image must already be published: building it here would
+      # add 30-60 minutes to every run. The E2E Framework Images workflow
+      # publishes it for pushes and pull requests that change the guide.
+      - name: Resolve framework image
+        if: ${{ steps.selected.outputs.run == 'true' }}
+        id: image
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 hack/framework-image-tag.py "${{ matrix.framework }}" --check --github-output
+          echo "SNAPSHOT_E2E_FRAMEWORK_IMAGE=$(python3 hack/framework-image-tag.py "${{ matrix.framework }}")" >> "$GITHUB_ENV"
+
+      - name: Validate host GPU cluster
+        if: ${{ steps.selected.outputs.run == 'true' }}
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
+            --phase host-preflight
+
+      - name: Create vCluster target
+        if: ${{ steps.selected.outputs.run == 'true' }}
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
+            --phase vcluster
+
+      - name: Install Snapshot in vCluster
+        if: ${{ steps.selected.outputs.run == 'true' }}
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
+            --phase snapshot-install
+
+      - name: Wait for Snapshot components
+        if: ${{ steps.selected.outputs.run == 'true' }}
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
+            --phase snapshot-ready
+
+      - name: Export vCluster kubeconfig
+        if: ${{ steps.selected.outputs.run == 'true' }}
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          result = json.loads(Path(os.environ["SNAPSHOT_E2E_RESULT_FILE"]).read_text())
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write(f"KUBECONFIG={result['target_kubeconfig']}\n")
+              env.write(f"SNAPSHOT_E2E_HOST_NAMESPACE={result.get('host_namespace', '')}\n")
+              env.write(f"SNAPSHOT_E2E_VCLUSTER_NAME={result.get('vcluster_name', '')}\n")
+              env.write(f"SNAPSHOT_E2E_TEST_NAMESPACE={result['test_namespace']}\n")
+              env.write(f"SNAPSHOT_E2E_TARGET_KUBECONFIG={result['target_kubeconfig']}\n")
+              env.write(f"SNAPSHOT_E2E_SNAPSHOT_RELEASE={result['snapshot_release']}\n")
+              env.write(f"SNAPSHOT_E2E_PVC_NAME={result['pvc_name']}\n")
+
+          print(f"Target kubeconfig: {result['target_kubeconfig']}")
+          PY
+
+      - name: Inspect vCluster target
+        if: ${{ steps.selected.outputs.run == 'true' }}
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          kubectl get nodes -o wide
+          kubectl get runtimeclass
+          kubectl get pods -n "${TEST_NAMESPACE}" -o wide
+          kubectl get pvc -n "${TEST_NAMESPACE}" -o wide
+          echo "framework image: ${SNAPSHOT_E2E_FRAMEWORK_IMAGE}"
+
+      - name: Run environment validation
+        if: ${{ steps.selected.outputs.run == 'true' }}
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e pytest e2e/tests -m environment -vv
+
+      - name: Run ${{ matrix.framework }} checkpoint/restore test
+        if: ${{ steps.selected.outputs.run == 'true' }}
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e pytest e2e/tests/test_frameworks.py -vv -s
+
+      # The test already prints its own dump; this preserves the raw cluster
+      # state and full agent logs, which do not fit in a job log.
+      - name: Collect diagnostics
+        if: ${{ failure() && steps.selected.outputs.run == 'true' }}
+        timeout-minutes: 5
+        run: |
+          set +e
+          out="${RUNNER_TEMP}/diagnostics"
+          mkdir -p "${out}"
+          kubectl get pods -n "${TEST_NAMESPACE}" -o yaml > "${out}/pods.yaml"
+          kubectl describe pods -n "${TEST_NAMESPACE}" > "${out}/pods-describe.txt"
+          kubectl get events -n "${TEST_NAMESPACE}" --sort-by=.lastTimestamp > "${out}/events.txt"
+          kubectl get podsnapshots -n "${TEST_NAMESPACE}" -o yaml > "${out}/podsnapshots.yaml"
+          kubectl get podsnapshotcontents -o yaml > "${out}/podsnapshotcontents.yaml"
+          kubectl logs -n "${TEST_NAMESPACE}" -l app.kubernetes.io/component=snapshot-agent \
+            --all-containers --tail=-1 --prefix > "${out}/snapshot-agent.log"
+          kubectl logs -n "${TEST_NAMESPACE}" -l app.kubernetes.io/component=snapshot-operator \
+            --all-containers --tail=-1 --prefix > "${out}/snapshot-operator.log"
+          for pod in $(kubectl get pods -n "${TEST_NAMESPACE}" -l snapshot-e2e-test -o name); do
+            kubectl logs -n "${TEST_NAMESPACE}" "${pod}" --all-containers --tail=-1 \
+              > "${out}/${pod#pod/}.log"
+          done
+          echo "DIAGNOSTICS_DIR=${out}" >> "$GITHUB_ENV"
+
+      - name: Upload diagnostics
+        if: ${{ failure() && steps.selected.outputs.run == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-frameworks-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.DIAGNOSTICS_DIR }}
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Cleanup e2e vCluster
+        if: ${{ always() && steps.selected.outputs.run == 'true' }}
+        env:
+          KUBECONFIG: ${{ steps.host.outputs.kubeconfig }}
+        run: |
+          set +e
+          helm uninstall vcluster-hpm -n "${HOST_NAMESPACE}"
+          if command -v vcluster >/dev/null 2>&1; then
+            vcluster delete "${VCLUSTER_NAME}" --namespace "${HOST_NAMESPACE}"
+          fi
+          kubectl delete namespace "${HOST_NAMESPACE}" --ignore-not-found --wait=false
