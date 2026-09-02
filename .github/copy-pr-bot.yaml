@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Mirrors approved pull requests into same-repo `pull-request/<number>` branches.
+# The GPU runners admit only trusted events (push, schedule, workflow_dispatch),
+# not pull_request, so GPU-backed workflows trigger on pushes to those branches.
+# Maintainers' PRs are mirrored automatically; others need `/ok to test <sha>`.
+enabled: true
