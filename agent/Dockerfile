@@ -92,13 +92,8 @@ RUN mkdir -p /go-src && go mod vendor -o /go-src/vendor
 # =============================================================================
 FROM ${AGENT_BASE_IMAGE} AS cuda-helper-builder
 
-ARG CRIU_REPO
-ARG CRIU_REF
-
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    git \
-    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
@@ -116,84 +111,66 @@ RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
 # namespace. It needs no CUDA headers, only mount_setattr (Linux 5.12+).
 RUN gcc -O2 -Wall -Wextra -o /ns-bind-mount ./cmd/ns-bind-mount/main.c
 
-# snapshot_inet_remap.so is dlopen'd by the bundled criu at restore time and
-# must resolve against the destination placeholder's own glibc (see the
-# criu-builder stage's shared-library-closure step), so it must be compiled
-# against glibc here, not against criu-builder's musl toolchain. Cloned
-# independently of criu-builder (rather than COPY --from=criu-builder) to
-# avoid a stage cycle, since criu-builder copies this plugin's output back.
-RUN git init /tmp/criu-headers \
-    && cd /tmp/criu-headers \
-    && git remote add origin ${CRIU_REPO} \
-    && git fetch --depth 1 origin ${CRIU_REF} \
-    && git checkout FETCH_HEAD
-
-COPY plugins/inet-remap/snapshot_inet_remap.c ./plugins/inet-remap/snapshot_inet_remap.c
-RUN gcc -O2 -Wall -Wextra -fPIC -shared \
-    -idirafter /tmp/criu-headers/criu/include \
-    -o /snapshot_inet_remap.so \
-    ./plugins/inet-remap/snapshot_inet_remap.c
-
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
 #
-# Restore injects criu into the destination container's mount namespace (see
-# the tar-builder stage below for the same problem with rootfs-diff
-# extraction). A dynamically linked criu would need the destination image's
-# glibc to satisfy the symbol versions criu was built against; build it
-# statically against musl instead so it carries no such dependency.
-#
-# criu's optional deps (gnutls, nftables, libbsd, libselinux, libbpf, libdrm)
-# are feature-tested at configure time and silently dropped if absent, so
-# only the mandatory deps need musl static libs. See build-static-criu.sh for
-# why staticness is scoped to criu's own link line rather than passed via a
-# global LDFLAGS, and how the dlopen'd CUDA/inet-remap plugins still resolve
-# criu-internal symbols against a static binary.
+# Restore injects criu into the destination container's mount namespace and
+# execs it there, so criu's dynamic-linker symbol requirements are bounded by
+# the destination image's glibc, not the agent's. Build on an older Ubuntu
+# release (lower GLIBC_* floor) than the agent's own base image so criu stays
+# runnable against realistic destination images. This narrows the failure
+# window rather than eliminating it -- an even older destination glibc can
+# still hit the same class of exec-time failure. Static linking would
+# eliminate the dependency entirely, but criu's plugins (this file's
+# snapshot_inet_remap.so, the CUDA plugin) are dlopen'd at runtime, which a
+# fully static binary cannot do -- see the fix/static-criu-restore history
+# for why that path was abandoned.
 # =============================================================================
-FROM alpine:3.23 AS criu-builder
+FROM ubuntu:22.04 AS criu-builder
 
 ARG CRIU_REPO
 ARG CRIU_REF
 
-RUN apk add --no-cache \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     ca-certificates \
-    build-base \
-    linux-headers \
-    pkgconfig \
-    perl \
+    build-essential \
+    pkg-config \
+    libbsd-dev \
     libcap-dev \
-    libcap-static \
-    libnl3-dev \
-    libnl3-static \
-    libnet-dev \
-    libnet-static \
-    util-linux-dev \
-    util-linux-static \
-    protobuf-dev \
-    protobuf-c-dev \
+    libnet1-dev \
+    libnl-3-dev \
+    libnl-route-3-dev \
+    libprotobuf-dev \
+    libprotobuf-c-dev \
     protobuf-c-compiler \
+    protobuf-compiler \
     python3 \
-    py3-protobuf \
-    binutils \
-    tar
+    python3-pip \
+    python3-protobuf \
+    libgnutls28-dev \
+    libnftables-dev \
+    uuid-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /tmp
-
-COPY scripts/build-static-criu.sh /tmp/scripts/build-static-criu.sh
-
-RUN git init /tmp/criu \
+# http.version=HTTP/1.1: Ubuntu 22.04's git (GnuTLS-backed libcurl) mishandles
+# GitHub's HTTP/2 smart-http response framing, failing with a misleading
+# "could not read Username" credential prompt instead of the real protocol
+# error. HTTP/1.1 avoids the bug entirely.
+RUN git -c http.version=HTTP/1.1 init /tmp/criu \
     && cd /tmp/criu \
-    && git remote add origin ${CRIU_REPO} \
-    && git fetch --depth 1 origin ${CRIU_REF} \
-    && git checkout FETCH_HEAD
+    && git -c http.version=HTTP/1.1 remote add origin ${CRIU_REPO} \
+    && git -c http.version=HTTP/1.1 fetch --depth 1 origin ${CRIU_REF} \
+    && git -c http.version=HTTP/1.1 checkout FETCH_HEAD \
+    && make -j$(nproc) \
+    && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
 
-RUN sh /tmp/scripts/build-static-criu.sh /tmp/criu /criu-install
-
-# Built in cuda-helper-builder (glibc), not here: the placeholder resolves
-# this dlopen'd plugin against its own glibc, and criu-builder is musl.
-COPY --from=cuda-helper-builder /snapshot_inet_remap.so \
-    /criu-install/usr/local/lib/snapshot/criu-plugins/snapshot_inet_remap.so
+COPY plugins/inet-remap/snapshot_inet_remap.c /tmp/snapshot_inet_remap.c
+RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \
+    && gcc -O2 -Wall -Wextra -fPIC -shared \
+      -idirafter /tmp/criu/criu/include \
+      -o /criu-install/usr/local/lib/snapshot/criu-plugins/snapshot_inet_remap.so \
+      /tmp/snapshot_inet_remap.c
 
 RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
 
