@@ -28,6 +28,8 @@ extern CUresult CUDAAPI fakeCuMulticastCreateOriginal(
 extern void fakeEnableBlockingMulticastMap(void);
 extern int fakeMulticastMapEntered(void);
 extern void fakeReleaseMulticastMap(void);
+extern void fakeEnableTrackedBehavior(void);
+extern int fakeReleaseCount(void);
 
 struct map_call {
   CUmemGenericAllocationHandle handle;
@@ -154,6 +156,32 @@ test_multicast_map_releases_state_lock(void)
 }
 
 static void
+test_tracked_unicast_aliases(void)
+{
+  CUmemAllocationProp props = {0};
+  CUmemGenericAllocationHandle created = 0;
+  CUmemGenericAllocationHandle retained = 0;
+
+  props.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+  props.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  props.requestedHandleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+  fakeEnableTrackedBehavior();
+  require(cuMemCreate(&created, 4096, &props, 0) == CUDA_SUCCESS, "tracked cuMemCreate");
+  require_logical_handle(created, "tracked cuMemCreate logical handle");
+  require(cuMemMap(0x1000, 4096, 0, created, 0) == CUDA_SUCCESS, "tracked cuMemMap");
+  require(
+      cuMemRetainAllocationHandle(&retained, (void*)(uintptr_t)0x1000) == CUDA_SUCCESS,
+      "tracked cuMemRetainAllocationHandle");
+  require_logical_handle(retained, "tracked retained logical handle");
+  require(fakeReleaseCount() == 1, "retained driver reference collapsed");
+  require(cuMemRelease(retained) == CUDA_SUCCESS, "tracked retained logical release");
+  require(fakeReleaseCount() == 1, "alias release preserves shared backing reference");
+  require(cuMemRelease(created) == CUDA_SUCCESS, "tracked created logical release");
+  require(fakeReleaseCount() == 2, "last logical release drops backing reference");
+  require(cuMemUnmap(0x1000, 4096) == CUDA_SUCCESS, "tracked cuMemUnmap");
+}
+
+static void
 test_tracked_behavior(void)
 {
   CUmemGenericAllocationHandle handle = 0;
@@ -223,6 +251,7 @@ test_resolvers(void)
 int
 main(void)
 {
+  test_tracked_unicast_aliases();
   test_tracked_behavior();
   test_multicast_map_releases_state_lock();
   test_resolvers();
