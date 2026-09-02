@@ -14,10 +14,10 @@ CONTROL_DIR = Path(os.environ.get("SNAPSHOT_CONTROL_DIR", "/snapshot-control"))
 MODEL = os.environ["SNAPSHOT_MODEL"]
 # Small single-GPU sizing so the example fits alongside other GPU tenants and
 # keeps the checkpoint artifact small. Override through the Pod template.
-MAX_NUM_TOKENS = int(os.environ.get("SNAPSHOT_MAX_NUM_TOKENS", "1024"))
-MAX_BATCH_SIZE = int(os.environ.get("SNAPSHOT_MAX_BATCH_SIZE", "1"))
+MAX_NUM_TOKENS = int(os.environ.get("TRTLLM_MAX_NUM_TOKENS", "1024"))
+MAX_BATCH_SIZE = int(os.environ.get("TRTLLM_MAX_BATCH_SIZE", "1"))
 FREE_GPU_MEMORY_FRACTION = float(
-    os.environ.get("SNAPSHOT_FREE_GPU_MEMORY_FRACTION", "0.10")
+    os.environ.get("TRTLLM_FREE_GPU_MEMORY_FRACTION", "0.10")
 )
 
 

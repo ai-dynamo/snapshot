@@ -18,8 +18,8 @@ CONTROL_DIR = Path(os.environ.get("SNAPSHOT_CONTROL_DIR", "/snapshot-control"))
 MODEL = os.environ["SNAPSHOT_MODEL"]
 # Small single-GPU sizing so the example fits alongside other GPU tenants and
 # keeps the checkpoint artifact small. Override through the Pod template.
-MAX_MODEL_LEN = int(os.environ.get("SNAPSHOT_MAX_MODEL_LEN", "2048"))
-GPU_MEMORY_UTILIZATION = float(os.environ.get("SNAPSHOT_GPU_MEMORY_UTILIZATION", "0.30"))
+MAX_MODEL_LEN = int(os.environ.get("VLLM_MAX_MODEL_LEN", "2048"))
+GPU_MEMORY_UTILIZATION = float(os.environ.get("VLLM_GPU_MEMORY_UTILIZATION", "0.30"))
 
 
 class GenerateRequest(BaseModel):
