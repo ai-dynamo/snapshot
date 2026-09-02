@@ -61,10 +61,12 @@ def generate_text(engine: Any, prompt: str) -> str:
 def pause_generation(engine: Any) -> None:
     from sglang.srt.managers.io_struct import PauseGenerationReqInput
 
+    # Default pause mode. The generation that ran before this call has already
+    # completed, so there is nothing to abort; "abort" mode does not leave the
+    # scheduler in the idle state release_memory_occupation() requires on
+    # SGLang 0.5.17 and fails with "should be called only when server is idle".
     engine.loop.run_until_complete(
-        engine.tokenizer_manager.pause_generation(
-            PauseGenerationReqInput(mode="abort")
-        )
+        engine.tokenizer_manager.pause_generation(PauseGenerationReqInput())
     )
 
 
