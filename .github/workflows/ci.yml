@@ -59,3 +59,23 @@ jobs:
             **/go.sum
             go.work.sum
       - run: make check
+
+  # Cluster-free e2e checks: the workload scripts and the framework guide
+  # manifests against the restore-pod contract. Seconds to run, so they gate
+  # every pull request rather than only the GPU-gated e2e workflows.
+  e2e-static:
+    runs-on: ubuntu-latest
+    env:
+      UV_LINK_MODE: copy
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.10.11"
+          checksum: "5a360b0de092ddf4131f5313d0411b48c4e95e8107e40c3f8f2e9fcb636b3583"
+          enable-cache: "false"
+          download-from-astral-mirror: "false"
+      - run: |
+          uv run --locked --project e2e pytest \
+            e2e/tests/test_framework_manifests.py \
+            e2e/tests/test_workload_scripts.py -vv
