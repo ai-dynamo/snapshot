@@ -98,12 +98,12 @@ Snapshot can be installed:
 
 ### From a release
 
-Find the latest version on the [releases page](https://github.com/ai-dynamo/snapshot/releases),
-then install the published chart, replacing `<VERSION>`:
+Install the published chart (see the [releases page](https://github.com/ai-dynamo/snapshot/releases)
+for other versions):
 
 ```bash
 helm install snapshot oci://ghcr.io/ai-dynamo/snapshot/snapshot \
-  --version <VERSION> \
+  --version 0.1.0-rc.1 \
   --namespace snapshot --create-namespace
 ```
 
