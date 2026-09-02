@@ -7,6 +7,16 @@ import traceback
 from pathlib import Path
 from uuid import uuid4
 
+# A restore placeholder must stay a minimal, inert process: Snapshot restores
+# the checkpointed tree alongside it, and everything imported here (torch, the
+# CUDA libraries, vLLM) would otherwise be mapped into the placeholder for
+# nothing. Decide before importing the framework.
+if os.environ.get("SNAPSHOT_RESTORE_STANDBY") == "1":
+    import time
+
+    while True:
+        time.sleep(3600)
+
 import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
@@ -86,9 +96,6 @@ async def serve_api(engine: AsyncLLM, restored_text: str) -> None:
 
 
 async def main() -> None:
-    if os.environ.get("SNAPSHOT_RESTORE_STANDBY") == "1":
-        await asyncio.Event().wait()
-
     CONTROL_DIR.joinpath("ready-for-snapshot").unlink(missing_ok=True)
 
     engine = AsyncLLM.from_engine_args(

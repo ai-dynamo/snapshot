@@ -9,6 +9,14 @@ import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+# A restore placeholder must stay a minimal, inert process: Snapshot restores
+# the checkpointed tree alongside it, and importing TensorRT-LLM here would map
+# the framework and CUDA libraries into the placeholder for nothing. Decide
+# before importing the framework.
+if os.environ.get("SNAPSHOT_RESTORE_STANDBY") == "1":
+    while True:
+        time.sleep(3600)
+
 from tensorrt_llm import LLM, SamplingParams
 
 CONTROL_DIR = Path(os.environ.get("SNAPSHOT_CONTROL_DIR", "/snapshot-control"))
@@ -81,10 +89,6 @@ def serve_api(llm: LLM, restored_text: str) -> None:
 
 
 def main() -> None:
-    if os.environ.get("SNAPSHOT_RESTORE_STANDBY") == "1":
-        while True:
-            time.sleep(3600)
-
     CONTROL_DIR.joinpath("ready-for-snapshot").unlink(missing_ok=True)
 
     llm = LLM(
