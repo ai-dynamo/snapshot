@@ -33,15 +33,33 @@ enum {
   result_multicast_unbind,
 };
 
+static int tracked_behavior;
+static int release_count;
+
+void
+fakeEnableTrackedBehavior(void)
+{
+  tracked_behavior = 1;
+  release_count = 0;
+}
+
+int
+fakeReleaseCount(void)
+{
+  return release_count;
+}
+
 CUresult CUDAAPI
 fakeCuMemCreateOriginal(
     CUmemGenericAllocationHandle* output, size_t size, const CUmemAllocationProp* properties,
     unsigned long long flags)
 {
   (void)size;
-  (void)properties;
   (void)flags;
   *output = 0xabc;
+  if (tracked_behavior && properties != NULL &&
+      properties->requestedHandleTypes == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR)
+    return CUDA_SUCCESS;
   return (CUresult)result_create;
 }
 
@@ -57,14 +75,19 @@ CUresult CUDAAPI
 cuMemRelease(CUmemGenericAllocationHandle handle)
 {
   (void)handle;
+  if (tracked_behavior) {
+    release_count++;
+    return CUDA_SUCCESS;
+  }
   return (CUresult)result_release;
 }
 
 CUresult CUDAAPI
 cuMemRetainAllocationHandle(CUmemGenericAllocationHandle* output, void* address)
 {
-  (void)address;
   *output = 0xdef;
+  if (tracked_behavior && address == (void*)(uintptr_t)0x1000)
+    return CUDA_SUCCESS;
   return (CUresult)result_retain;
 }
 
@@ -73,11 +96,11 @@ cuMemMap(
     CUdeviceptr address, size_t size, size_t offset, CUmemGenericAllocationHandle handle,
     unsigned long long flags)
 {
-  (void)address;
   (void)size;
   (void)offset;
-  (void)handle;
   (void)flags;
+  if (tracked_behavior && address == 0x1000 && handle == 0xabc)
+    return CUDA_SUCCESS;
   return (CUresult)result_map;
 }
 
@@ -86,6 +109,8 @@ cuMemUnmap(CUdeviceptr address, size_t size)
 {
   (void)address;
   (void)size;
+  if (tracked_behavior)
+    return CUDA_SUCCESS;
   return (CUresult)result_unmap;
 }
 
@@ -96,6 +121,8 @@ cuMemSetAccess(CUdeviceptr address, size_t size, const CUmemAccessDesc* descript
   (void)size;
   (void)descriptors;
   (void)count;
+  if (tracked_behavior)
+    return CUDA_SUCCESS;
   return (CUresult)result_access;
 }
 
