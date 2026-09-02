@@ -117,6 +117,34 @@ func TestSnapshotJobConditionsUseMapListSchema(t *testing.T) {
 	}
 }
 
+// A newer agent may publish a device vendor this CRD predates, and pruning it
+// would silently drop facts the object was told to carry.
+func TestCheckpointSourceDevicesPreservesAVendorTheCRDPredates(t *testing.T) {
+	manifestJSON, err := utilyaml.ToJSON([]byte(PodSnapshotContentCRD()))
+	if err != nil {
+		t.Fatalf("convert PodSnapshotContent CRD to JSON: %v", err)
+	}
+	var crd map[string]any
+	if err := json.Unmarshal(manifestJSON, &crd); err != nil {
+		t.Fatalf("decode PodSnapshotContent CRD: %v", err)
+	}
+
+	versions := nestedSlice(t, crd, "spec", "versions")
+	if len(versions) == 0 {
+		t.Fatal("PodSnapshotContent CRD has no versions")
+	}
+	version, ok := versions[0].(map[string]any)
+	if !ok {
+		t.Fatalf("PodSnapshotContent CRD version has type %T, want object", versions[0])
+	}
+	devices := nestedMap(t, version, "schema", "openAPIV3Schema",
+		"properties", "status", "properties", "source", "properties", "devices")
+
+	if devices["x-kubernetes-preserve-unknown-fields"] != true {
+		t.Error("status.source.devices does not preserve unknown vendors")
+	}
+}
+
 func TestSnapshotJobRejectsMissingSpecAndLongNamesAtAdmission(t *testing.T) {
 	schema := snapshotJobOpenAPISchema(t)
 

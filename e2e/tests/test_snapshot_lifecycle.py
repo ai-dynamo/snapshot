@@ -91,6 +91,10 @@ def test_snapshot_records_the_facts_a_restore_is_checked_against(
     Everything the compatibility gates decide on is read at capture and can
     never be recovered afterwards, so this compares each recorded fact against
     the node object and against nvidia-smi inside the pod that was captured.
+
+    The facts the content publishes are compared against the same ground truth
+    rather than against the manifest, so a projection that quietly renamed or
+    dropped one is caught here too.
     """
     try:
         source, source_node = create_ready_source(
@@ -148,6 +152,25 @@ def test_snapshot_records_the_facts_a_restore_is_checked_against(
             (gpu["uuid"], gpu["productName"]) for gpu in cuda["sourceGpus"]
         ) == sorted((gpu["uuid"], gpu["name"]) for gpu in visible_gpus)
         assert cuda["sourceDriverVersion"] == visible_gpus[0]["driver"]
+
+        published = content["status"]["source"]
+        assert published["node"] == {
+            "name": source_node,
+            "architecture": node_info.architecture,
+            "kernelVersion": node_info.kernel_version,
+        }
+        # Exact equality, because the CPU limit this pod never set must stay
+        # absent here as well as in the manifest.
+        assert published["pod"] == {
+            "image": container.image,
+            "imageDigest": source_image_id.split("://")[-1].rsplit("@", 1)[-1],
+            "memory": limits["memory"],
+        }
+        nvidia = published["devices"]["nvidia"]
+        assert nvidia["driverVersion"] == visible_gpus[0]["driver"]
+        assert sorted(
+            instance["productName"] for instance in nvidia["instances"]
+        ) == sorted(gpu["name"] for gpu in visible_gpus)
     except Exception:
         snap.debug_dump(config, run)
         raise
