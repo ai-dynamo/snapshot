@@ -16,6 +16,10 @@ from vllm.v1.engine.async_llm import AsyncLLM
 
 CONTROL_DIR = Path(os.environ.get("SNAPSHOT_CONTROL_DIR", "/snapshot-control"))
 MODEL = os.environ["SNAPSHOT_MODEL"]
+# Small single-GPU sizing so the example fits alongside other GPU tenants and
+# keeps the checkpoint artifact small. Override through the Pod template.
+MAX_MODEL_LEN = int(os.environ.get("SNAPSHOT_MAX_MODEL_LEN", "2048"))
+GPU_MEMORY_UTILIZATION = float(os.environ.get("SNAPSHOT_GPU_MEMORY_UTILIZATION", "0.30"))
 
 
 class GenerateRequest(BaseModel):
@@ -86,6 +90,8 @@ async def main() -> None:
         AsyncEngineArgs(
             model=MODEL,
             enable_sleep_mode=True,
+            max_model_len=MAX_MODEL_LEN,
+            gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
         ),
         usage_context=UsageContext.LLM_CLASS,
     )
@@ -96,6 +102,9 @@ async def main() -> None:
         "snapshot-preflight",
     )
     print(f"vLLM pre-checkpoint output={text!r}", flush=True)
+    # Durable evidence that the engine served a generation before capture; the
+    # source container is killed by the dump, so logs alone are easy to lose.
+    CONTROL_DIR.joinpath("vllm-precheck").write_text(text + "\n", encoding="utf-8")
 
     await engine.pause_generation()
     await engine.sleep()
