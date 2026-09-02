@@ -30,7 +30,7 @@ import urllib.request
 from pathlib import Path
 
 GITHUB_API_VERSION = "2022-11-28"
-MAX_PAGES = 5
+PAGE_SIZE = 100
 ORG = "ai-dynamo"
 REGISTRY = f"ghcr.io/{ORG}/snapshot"
 TAG_LENGTH = 12
@@ -81,10 +81,15 @@ def image_ref(framework: str) -> tuple[str, str]:
 def package_has_tag(package: str, tag: str, headers: dict[str, str]) -> bool:
     encoded = urllib.parse.quote(package, safe="")
 
-    for page in range(1, MAX_PAGES + 1):
+    # Page until the listing is exhausted: content-addressed tags accumulate
+    # (one per guide change, never pruned), so a fixed page budget would
+    # eventually report a still-valid tag as unpublished.
+    page = 0
+    while True:
+        page += 1
         url = (
             f"https://api.github.com/orgs/{ORG}/packages/container/"
-            f"{encoded}/versions?per_page=100&page={page}"
+            f"{encoded}/versions?per_page={PAGE_SIZE}&page={page}"
         )
         request = urllib.request.Request(url, headers=headers)
         try:
@@ -97,14 +102,14 @@ def package_has_tag(package: str, tag: str, headers: dict[str, str]) -> bool:
             raise
 
         if not versions:
-            break
+            return False
 
         for version in versions:
             version_tags = version.get("metadata", {}).get("container", {}).get("tags", [])
             if tag in version_tags:
                 return True
-
-    return False
+        if len(versions) < PAGE_SIZE:
+            return False
 
 
 def github_headers() -> dict[str, str]:
@@ -175,11 +180,8 @@ def main() -> int:
             f"for {args.framework} (it builds docs/guides/{args.framework}/) or "
             "build and push it manually."
         )
-        if args.allow_missing:
-            print(message, file=sys.stderr)
-            return 0
         print(message, file=sys.stderr)
-        return 1
+        return 0 if args.allow_missing else 1
     return 0
 
 
