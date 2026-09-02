@@ -134,3 +134,31 @@ the test verifies that the restored process and files report the source token,
 not the restore token. The worker also appends periodic observations to
 `/tmp/e2e-state/observations.log`; the observation count is only a liveness
 check that the restored process continues running after restore.
+
+## Framework Images
+
+The framework e2e workloads are the guide programs under
+`docs/guides/<framework>/` (`vllm`, `sglang`, `tensorrt-llm`). Their images are
+published to `ghcr.io/ai-dynamo/snapshot/e2e-<framework>` with a
+content-addressed tag: a digest over the guide's Dockerfile and the files it
+copies. A guide change yields a new tag; unrelated commits reuse the published
+image, so nothing is rebuilt per commit.
+
+Resolve the image for the checked-out tree, and verify it is published:
+
+```bash
+python3 hack/framework-image-tag.py vllm
+GH_TOKEN="$(gh auth token)" python3 hack/framework-image-tag.py vllm --check
+```
+
+The `E2E Framework Images` workflow (`.github/workflows/e2e-framework-images.yaml`)
+builds and pushes missing tags on pushes to `main` and on pull requests that
+touch `docs/guides/**`. Dispatch it with `force=true` to rebuild a tag that
+already exists. To build locally instead:
+
+```bash
+IMAGE="$(python3 hack/framework-image-tag.py vllm)"
+docker buildx build --platform linux/amd64 \
+  --file docs/guides/vllm/Dockerfile.vllm \
+  --tag "$IMAGE" --push docs/guides/vllm
+```
