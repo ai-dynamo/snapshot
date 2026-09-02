@@ -56,6 +56,10 @@ class FrameworkSpec:
     # Written by the restored process once its API is listening; holds the
     # first post-restore generation.
     restore_ready_file: str
+    # Written by the restored process if resuming or serving raised; holds the
+    # traceback. The restored process keeps the dead source container's stdout,
+    # so this file is the only place such a failure is visible.
+    restore_error_file: str
     # Guide PVC manifest for a persistent model cache, if the guide uses one.
     model_cache_manifest: str | None = None
 
@@ -84,12 +88,14 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         model="Qwen/Qwen3-0.6B",
         precheck_file="/snapshot-control/vllm-precheck",
         restore_ready_file="/snapshot-control/vllm-restore-ready",
+        restore_error_file="/snapshot-control/vllm-restore-error",
     ),
     "sglang": FrameworkSpec(
         name="sglang",
         model="Qwen/Qwen3-0.6B",
         precheck_file="/snapshot-control/sglang-precheck",
         restore_ready_file="/snapshot-control/sglang-restore-ready",
+        restore_error_file="/snapshot-control/sglang-restore-error",
         model_cache_manifest="model-cache-pvc.yaml",
     ),
     "tensorrt-llm": FrameworkSpec(
@@ -97,6 +103,7 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         model="Qwen/Qwen3-0.6B",
         precheck_file="/snapshot-control/trtllm-precheck",
         restore_ready_file="/snapshot-control/trtllm-restore-ready",
+        restore_error_file="/snapshot-control/trtllm-restore-error",
     ),
 }
 

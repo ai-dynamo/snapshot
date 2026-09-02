@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import time
+import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -164,13 +165,22 @@ def main() -> None:
         while not CONTROL_DIR.joinpath("restore-complete").exists():
             time.sleep(1)
 
-        engine.resume_memory_occupation()
-        continue_generation(engine)
-        os.environ.pop("HF_HUB_OFFLINE", None)
+        # The restored process keeps the source container's stdout, which is
+        # gone; a failure here would otherwise be invisible. Record it in the
+        # control directory next to the success sentinel.
+        try:
+            engine.resume_memory_occupation()
+            continue_generation(engine)
 
-        text = generate_text(engine, "The capital city of Germany is")
-        print(f"SGLang restored output={text!r}", flush=True)
-        serve_api(engine, text)
+            text = generate_text(engine, "The capital city of Germany is")
+            print(f"SGLang restored output={text!r}", flush=True)
+            serve_api(engine, text)
+        except BaseException:
+            CONTROL_DIR.joinpath("sglang-restore-error").write_text(
+                traceback.format_exc(),
+                encoding="utf-8",
+            )
+            raise
     finally:
         engine.shutdown()
 

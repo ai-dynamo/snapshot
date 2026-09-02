@@ -120,17 +120,13 @@ def test_framework_checkpoint_restore_serves_inference(
             "RestoreSucceeded",
             timeout=frameworks.RESTORE_TIMEOUT_SECONDS,
         )
-        snap.wait_for_file(
+        restored_text = snap.wait_for_restore_outcome(
             config.namespace,
             run.restore_pod,
-            framework.restore_ready_file,
+            ready_file=framework.restore_ready_file,
+            error_file=framework.restore_error_file,
             timeout=frameworks.RESTORE_TIMEOUT_SECONDS,
-        )
-        restored_text = inference.read_control_file(
-            config.namespace, run.restore_pod, framework.restore_ready_file
-        )
-        assert restored_text is not None, f"{framework.restore_ready_file} missing"
-        restored_text = restored_text.strip()
+        ).strip()
         assert restored_text, f"{framework.restore_ready_file} is empty"
         print(f"[{framework.name}] first post-restore generation: {restored_text!r}")
 

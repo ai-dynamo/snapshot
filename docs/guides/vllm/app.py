@@ -3,6 +3,7 @@
 
 import asyncio
 import os
+import traceback
 from pathlib import Path
 from uuid import uuid4
 
@@ -120,16 +121,26 @@ async def main() -> None:
 
     while True:
         if CONTROL_DIR.joinpath("restore-complete").exists():
-            await engine.wake_up()
-            await engine.resume_generation()
-            await engine.check_health()
-            text = await generate_text(
-                engine,
-                "Reply with one word: restored",
-                "snapshot-restore-check",
-            )
-            print(f"vLLM restored output={text!r}", flush=True)
-            await serve_api(engine, text)
+            # The restored process keeps the source container's stdout, which
+            # is gone; a failure here would otherwise be invisible. Record it
+            # in the control directory next to the success sentinel.
+            try:
+                await engine.wake_up()
+                await engine.resume_generation()
+                await engine.check_health()
+                text = await generate_text(
+                    engine,
+                    "Reply with one word: restored",
+                    "snapshot-restore-check",
+                )
+                print(f"vLLM restored output={text!r}", flush=True)
+                await serve_api(engine, text)
+            except BaseException:
+                CONTROL_DIR.joinpath("vllm-restore-error").write_text(
+                    traceback.format_exc(),
+                    encoding="utf-8",
+                )
+                raise
         await asyncio.sleep(1)
 
 

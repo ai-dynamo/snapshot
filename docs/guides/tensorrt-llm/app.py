@@ -5,6 +5,7 @@ import gc
 import json
 import os
 import time
+import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -123,9 +124,19 @@ def main() -> None:
 
     while True:
         if CONTROL_DIR.joinpath("restore-complete").exists():
-            text = generate_text(llm, ["Reply with one word: restored"])[0]
-            print(f"TensorRT-LLM restored output={text!r}", flush=True)
-            serve_api(llm, text)
+            # The restored process keeps the source container's stdout, which
+            # is gone; a failure here would otherwise be invisible. Record it
+            # in the control directory next to the success sentinel.
+            try:
+                text = generate_text(llm, ["Reply with one word: restored"])[0]
+                print(f"TensorRT-LLM restored output={text!r}", flush=True)
+                serve_api(llm, text)
+            except BaseException:
+                CONTROL_DIR.joinpath("trtllm-restore-error").write_text(
+                    traceback.format_exc(),
+                    encoding="utf-8",
+                )
+                raise
         time.sleep(1)
 
 

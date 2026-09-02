@@ -217,6 +217,60 @@ def wait_for_file(namespace: str, pod: str, path: str, timeout: int = 180) -> No
     wait_for(f"{namespace}/{pod}:{path}", exists, timeout, detail=detail)
 
 
+def wait_for_restore_outcome(
+    namespace: str,
+    pod: str,
+    *,
+    ready_file: str,
+    error_file: str,
+    timeout: int,
+) -> str:
+    """Waits for the restored program's success sentinel, failing fast on its
+    error sentinel. Returns the ready file's content.
+
+    The restored process writes one of the two files; anything else it prints
+    goes to the source container's stdout, which no longer exists. Polling for
+    the ready file alone turns every post-restore exception into a timeout.
+    """
+    marker = "__snapshot_e2e_outcome__"
+    last_error: str | None = None
+
+    def outcome() -> str | None:
+        nonlocal last_error
+        try:
+            output = k8s.exec_command(
+                namespace,
+                pod,
+                f"if [[ -f {shlex.quote(error_file)} ]]; then printf '%s:error\\n' {shlex.quote(marker)}; "
+                f"cat {shlex.quote(error_file)}; "
+                f"elif [[ -f {shlex.quote(ready_file)} ]]; then printf '%s:ready\\n' {shlex.quote(marker)}; "
+                f"cat {shlex.quote(ready_file)}; fi",
+            )
+            last_error = None
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            return None
+        if output.startswith(f"{marker}:error"):
+            body = output.split("\n", 1)[1] if "\n" in output else ""
+            raise AssertionError(
+                f"restored program in {namespace}/{pod} failed after restore "
+                f"({error_file}):\n{body}"
+            )
+        if output.startswith(f"{marker}:ready"):
+            return output.split("\n", 1)[1] if "\n" in output else ""
+        return None
+
+    def detail() -> str:
+        return f"last_error={last_error}" if last_error else "neither sentinel observed yet"
+
+    return wait_for(
+        f"{namespace}/{pod} restore outcome ({ready_file} or {error_file})",
+        outcome,
+        timeout,
+        detail=detail,
+    )
+
+
 def matching_observation_count(
     namespace: str,
     pod: str,
@@ -874,6 +928,11 @@ def debug_dump_framework(
         ):
             print(f"  container {cs.name} ready={cs.ready} restarts={cs.restart_count} state={cs.state}")
         print(f"control dir: {snapshot_control_listing(config.namespace, name)}")
+        # The restored process tree is invisible in the container log; its
+        # process list, listening sockets, and any error sentinel are the only
+        # in-pod evidence of what it is doing.
+        print(f"--- processes / sockets / error sentinels in {name} ---")
+        print(pod_runtime_state(config.namespace, name))
         print(f"--- logs {name} (tail 400) ---")
         print(k8s.pod_logs(config.namespace, name, tail_lines=400))
     print_custom_objects(config, run)
@@ -952,6 +1011,23 @@ def bound_content_uid(config: k8s.E2EConfig, snapshot_name: str) -> str | None:
         return content["metadata"]["uid"]
     except ApiException:
         return None
+
+
+def pod_runtime_state(namespace: str, pod: str) -> str:
+    """Process list, listening TCP sockets, and control-dir error sentinels, best-effort."""
+    command = (
+        "ps -eo pid,ppid,stat,etime,rss,cmd --sort=pid 2>/dev/null | cut -c1-200 | head -60 "
+        "|| echo '<ps unavailable>'; "
+        "echo '-- listening (/proc/net/tcp, hex ports) --'; "
+        "awk 'NR>1 && $4==\"0A\" {print $2}' /proc/net/tcp /proc/net/tcp6 2>/dev/null | sort -u; "
+        f"for f in {CONTROL_DIR}/*-restore-error; do "
+        "  if [ -f \"$f\" ]; then echo \"-- $f --\"; cat \"$f\"; fi; "
+        "done"
+    )
+    try:
+        return k8s.exec_command(namespace, pod, command).strip()
+    except Exception as exc:  # noqa: BLE001 - debug helper must never mask the real failure
+        return f"<unavailable: {type(exc).__name__}: {exc}>"
 
 
 def snapshot_control_listing(namespace: str, pod: str) -> str:
