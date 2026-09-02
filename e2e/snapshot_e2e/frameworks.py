@@ -31,11 +31,16 @@ API_PORT = 8000
 PROMPT = "Reply with one short sentence confirming this restored worker can serve."
 REQUEST_TIMEOUT_SECONDS = 120
 
-# Phase budgets. The source budget covers image pull, model download, engine
-# load, and the warm-up generation; the checkpoint budget covers the dump and
-# artifact upload; the restore budget covers the agent restore plus the
-# program's own resume and the first post-restore generation.
-SOURCE_READY_TIMEOUT_SECONDS = 300
+# Phase budgets. The source budget covers image pull, model download or cache
+# load, engine load, compilation/CUDA-graph capture, and the warm-up
+# generation; the checkpoint budget covers the dump and artifact upload; the
+# restore budget covers the agent restore plus the program's own resume and
+# the first post-restore generation.
+#
+# The first run on a node pulls a 10-20 GB runtime image (observed: ~4 min on
+# the CI cluster) before the engine even starts, and vLLM then compiles and
+# captures CUDA graphs; 300s was exceeded with the engine still initializing.
+SOURCE_READY_TIMEOUT_SECONDS = 900
 CHECKPOINT_TIMEOUT_SECONDS = 300
 RESTORE_TIMEOUT_SECONDS = 300
 POD_DELETE_TIMEOUT_SECONDS = 180
@@ -94,6 +99,43 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         restore_ready_file="/snapshot-control/trtllm-restore-ready",
     ),
 }
+
+
+@dataclass(frozen=True)
+class SharedModelCache:
+    """An NFS export holding a Hugging Face cache in HF_HOME layout.
+
+    CI clusters commonly block or throttle model downloads from the pods, and
+    even where they work, pulling weights on every run is wasted minutes. With
+    a shared cache the framework pods mount the export at MODEL_CACHE_MOUNT,
+    point HF_HOME at it, and run offline; the guide's own per-deployment cache
+    (SGLang's download init container and PVC) is replaced, not duplicated.
+    """
+
+    server: str
+    path: str
+    pvc_name: str
+
+    @classmethod
+    def from_env(cls) -> "SharedModelCache | None":
+        server = os.environ.get("SNAPSHOT_E2E_MODEL_CACHE_SERVER", "").strip()
+        path = os.environ.get("SNAPSHOT_E2E_MODEL_CACHE_PATH", "").strip()
+        if not server and not path:
+            return None
+        if not (server and path):
+            raise RuntimeError(
+                "SNAPSHOT_E2E_MODEL_CACHE_SERVER and SNAPSHOT_E2E_MODEL_CACHE_PATH "
+                "must be set together"
+            )
+        return cls(
+            server=server,
+            path=path,
+            pvc_name=os.environ.get("SNAPSHOT_E2E_MODEL_CACHE_PVC", "model-cache"),
+        )
+
+
+MODEL_CACHE_MOUNT = "/models"
+MODEL_CACHE_VOLUME = "model-cache"
 
 
 def selected_frameworks() -> list[str]:

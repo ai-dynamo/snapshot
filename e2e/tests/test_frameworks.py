@@ -53,12 +53,22 @@ def test_framework_checkpoint_restore_serves_inference(
 ) -> None:
     source_node: str | None = None
     try:
-        pvc = fw.model_cache_pvc(config=config, spec=framework)
-        if pvc is not None:
+        # Shared NFS cache when configured (offline, no download); otherwise the
+        # guide's own cache plumbing, which downloads from Hugging Face.
+        model_cache = frameworks.SharedModelCache.from_env()
+        if model_cache is not None:
+            pv, pvc = fw.shared_model_cache_volume(config=config, cache=model_cache)
+            snap.ensure_pv(pv)
             snap.ensure_pvc(pvc)
+        else:
+            guide_pvc = fw.model_cache_pvc(config=config, spec=framework)
+            if guide_pvc is not None:
+                snap.ensure_pvc(guide_pvc)
 
         # --- source: load, generate, pause, ready-for-snapshot -------------
-        k8s.create_pod(fw.source_pod(config=config, run=run, spec=framework))
+        k8s.create_pod(
+            fw.source_pod(config=config, run=run, spec=framework, model_cache=model_cache)
+        )
         source = snap.wait_for_pod_ready(
             config.namespace,
             run.source_pod,
@@ -95,7 +105,13 @@ def test_framework_checkpoint_restore_serves_inference(
 
         # --- restore --------------------------------------------------------
         k8s.create_pod(
-            fw.restore_pod(config=config, run=run, spec=framework, source_node=source_node)
+            fw.restore_pod(
+                config=config,
+                run=run,
+                spec=framework,
+                source_node=source_node,
+                model_cache=model_cache,
+            )
         )
         snap.wait_for_restored_condition(
             config.namespace,

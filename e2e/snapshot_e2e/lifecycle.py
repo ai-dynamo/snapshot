@@ -829,6 +829,18 @@ def ensure_pvc(body: dict[str, Any]) -> None:
         print(f"PVC {namespace}/{name} already exists")
 
 
+def ensure_pv(body: dict[str, Any]) -> None:
+    """Creates the cluster-scoped PersistentVolume if it does not exist."""
+    name = body["metadata"]["name"]
+    try:
+        client.CoreV1Api().create_persistent_volume(body)
+        print(f"created PV {name}")
+    except ApiException as exc:
+        if exc.status != 409:
+            raise
+        print(f"PV {name} already exists")
+
+
 def debug_dump_framework(
     config: k8s.E2EConfig,
     run: TestRun,

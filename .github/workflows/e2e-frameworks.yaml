@@ -81,6 +81,12 @@ jobs:
       SNAPSHOT_E2E_READY_TIMEOUT_SECONDS: "480"
       SNAPSHOT_E2E_RESULT_FILE: ${{ github.workspace }}/.snapshot-e2e-setup-result.json
       SNAPSHOT_E2E_FRAMEWORK: ${{ matrix.framework }}
+      # Shared CI model cache (Hugging Face cache layout on an NFS export):
+      # pods in this cluster cannot resolve huggingface.co, and downloading
+      # weights per run would cost minutes anyway. Repository variables take
+      # precedence; the defaults are the CI cluster's export.
+      SNAPSHOT_E2E_MODEL_CACHE_SERVER: ${{ vars.SNAPSHOT_E2E_MODEL_CACHE_SERVER || 'dynamoinfracimodelcache.file.core.windows.net' }}
+      SNAPSHOT_E2E_MODEL_CACHE_PATH: ${{ vars.SNAPSHOT_E2E_MODEL_CACHE_PATH || '/dynamoinfracimodelcache/models' }}
       PYTHONUNBUFFERED: "1"
       UV_LINK_MODE: copy
     steps:
