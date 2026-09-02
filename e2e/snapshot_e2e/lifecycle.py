@@ -1054,6 +1054,14 @@ def pod_runtime_state(namespace: str, pod: str) -> str:
         "    printf '%s/%s %s %s\\n' \"$p\" \"$(basename $t)\" \"$(awk '{print $3}' $t/stat 2>/dev/null)\" \"$(cat $t/wchan 2>/dev/null)\"; "
         "  done; "
         "done | sort | uniq -c | sort -rn | head -40; "
+        # Python stacks of every Python process (the guide images ship py-spy):
+        # the only way to see where a restored program blocks.
+        "echo '-- py-spy dumps --'; "
+        "if command -v py-spy >/dev/null 2>&1; then "
+        "  for p in $(ps -eo pid,cmd --sort=pid 2>/dev/null | awk 'NR>1 && $2 ~ /python/ {print $1}' | head -6); do "
+        "    echo \"== pid $p\"; timeout 20 py-spy dump --pid $p --nonblocking 2>&1 | head -60; "
+        "  done; "
+        "else echo '<py-spy not installed>'; fi; "
         "echo '-- nvidia-smi --'; "
         "nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv 2>&1 | head -3; "
         "nvidia-smi --query-compute-apps=pid,used_memory --format=csv 2>&1 | head -6; "

@@ -18,7 +18,11 @@ RUN set -eux; \
       echo "Snapshot requires x86_64" >&2; \
       exit 1; \
     fi; \
-    mkdir -p /snapshot-control
+    mkdir -p /snapshot-control; \
+    # Restored processes keep the dead source container's stdout, so a hang
+    # after restore leaves no log. py-spy makes their Python stacks readable
+    # from inside the pod (py-spy dump --pid N).
+    pip install --no-cache-dir py-spy
 
 WORKDIR /app
 COPY app.py ./
