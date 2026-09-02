@@ -21,6 +21,70 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+func TestRewriteSocketMetadataRewritesInternalUnixSocketPair(t *testing.T) {
+	first := newUnixSocketEntry(1, []byte("\x00first"), 101, unix.SOCK_DGRAM, linuxTCPStateEstablished)
+	second := newUnixSocketEntry(2, []byte("\x00second"), 102, unix.SOCK_DGRAM, linuxTCPStateEstablished)
+	first.Usk.Peer = proto.Uint32(second.Usk.GetIno())
+	second.Usk.Peer = proto.Uint32(first.Usk.GetIno())
+	image := &crit.CriuImage{
+		Entries: []*crit.CriuEntry{
+			{Message: first},
+			{Message: second},
+		},
+	}
+
+	reservationFDs, rewritten, err := rewriteSocketMetadata(image, 987654321)
+	if err != nil {
+		t.Fatalf("rewrite socket metadata: %v", err)
+	}
+	closeFDs(reservationFDs)
+	if !rewritten {
+		t.Fatal("connected abstract UNIX socket pair was not rewritten")
+	}
+	for i, entry := range []*fdinfo.FileEntry{first, second} {
+		if !bytes.HasPrefix(entry.Usk.Name, []byte("\x00dynamo-")) {
+			t.Fatalf("endpoint %d address = %q, want Dynamo abstract address", i, entry.Usk.Name)
+		}
+	}
+	if bytes.Equal(first.Usk.Name, second.Usk.Name) {
+		t.Fatal("distinct connected UNIX socket addresses were rewritten to the same address")
+	}
+	if got := first.Usk.GetPeer(); got != second.Usk.GetIno() {
+		t.Fatalf("first peer inode = %d, want %d", got, second.Usk.GetIno())
+	}
+	if got := second.Usk.GetPeer(); got != first.Usk.GetIno() {
+		t.Fatalf("second peer inode = %d, want %d", got, first.Usk.GetIno())
+	}
+}
+
+func TestRewriteSocketMetadataRejectsExternalUnixSocketPeer(t *testing.T) {
+	entry := newUnixSocketEntry(1, []byte("\x00external"), 101, unix.SOCK_DGRAM, linuxTCPStateEstablished)
+	entry.Usk.Peer = proto.Uint32(4242)
+	image := &crit.CriuImage{
+		Entries: []*crit.CriuEntry{{Message: entry}},
+	}
+
+	reservationFDs, rewritten, err := rewriteSocketMetadata(image, 987654321)
+	if err == nil || !strings.Contains(err.Error(), "unresolved peer inode 4242") {
+		t.Fatalf("rewrite socket metadata error = %v", err)
+	}
+	if rewritten || reservationFDs != nil {
+		t.Fatalf("rewrite result = (%v, %v), want no reservations or rewrite", reservationFDs, rewritten)
+	}
+}
+
+func TestRewriteCloneConflictingUnixSocketAddressSkipsUnbound(t *testing.T) {
+	for name, raw := range map[string][]byte{
+		"empty":    {},
+		"bare NUL": {0},
+	} {
+		entry := newUnixSocketEntry(1, raw, 101, unix.SOCK_DGRAM, linuxUnixSocketStateClose)
+		if rewriteCloneConflictingUnixSocketAddress(entry.Usk, 987654321) {
+			t.Fatalf("%s address must not be rewritten", name)
+		}
+	}
+}
+
 func TestPrepareRestoreImageDirRewritesObservedSocketTopology(t *testing.T) {
 	checkpointPath := t.TempDir()
 	entries := observedSocketTopology()
@@ -48,6 +112,14 @@ func TestPrepareRestoreImageDirRewritesObservedSocketTopology(t *testing.T) {
 	if got := restored[0].Usk.Name; !bytes.HasPrefix(got, []byte("\x00dynamo-")) {
 		t.Fatalf("CUDA listener address = %q, want Dynamo abstract address", got)
 	}
+	for _, index := range []int{2, 3} {
+		if got := restored[index].Usk.Name; !bytes.HasPrefix(got, []byte("\x00dynamo-")) {
+			t.Fatalf("abstract datagram address %d = %q, want Dynamo abstract address", index, got)
+		}
+	}
+	if bytes.Equal(restored[2].Usk.Name, restored[3].Usk.Name) {
+		t.Fatal("distinct NCCL datagram addresses were rewritten to the same address")
+	}
 	clientPort := restored[5].Isk.GetSrcPort()
 	if clientPort == entries[5].Isk.GetSrcPort() {
 		t.Fatalf("TCP client port was not rewritten")
@@ -71,6 +143,8 @@ func TestPrepareRestoreImageDirRewritesObservedSocketTopology(t *testing.T) {
 		want := proto.Clone(original).(*fdinfo.FileEntry)
 		switch i {
 		case 0:
+			want.Usk.Name = restored[i].Usk.Name
+		case 2, 3:
 			want.Usk.Name = restored[i].Usk.Name
 		case 5:
 			want.Isk.SrcPort = proto.Uint32(clientPort)
@@ -277,8 +351,8 @@ func observedSocketTopology() []*fdinfo.FileEntry {
 	return []*fdinfo.FileEntry{
 		newUnixSocketEntry(1, []byte("\x00cuda-uvmfd-4026554902-1195\x00"), 101, unix.SOCK_SEQPACKET, linuxUnixSocketStateListen),
 		newUnixSocketEntry(2, []byte("/tmp/4c85f2c6-ea0e-45cb-b7ee-fd519aba82d0\x00"), 102, unix.SOCK_STREAM, linuxUnixSocketStateListen),
-		newUnixSocketEntry(3, []byte("\x00047f9"), 103, unix.SOCK_DGRAM, 7),
-		newUnixSocketEntry(4, []byte("\x00047ff"), 104, unix.SOCK_DGRAM, 7),
+		newUnixSocketEntry(3, paddedUnixSocketName("\x00tmp/nccl-socket-2-fe65a3cdb8ee726d"), 103, unix.SOCK_DGRAM, linuxUnixSocketStateClose),
+		newUnixSocketEntry(4, []byte("\x00e587b"), 104, unix.SOCK_DGRAM, linuxUnixSocketStateClose),
 		listener,
 		client,
 		server,
@@ -287,6 +361,12 @@ func observedSocketTopology() []*fdinfo.FileEntry {
 		dualStackClient,
 		dualStackServer,
 	}
+}
+
+func paddedUnixSocketName(name string) []byte {
+	result := make([]byte, 108)
+	copy(result, name)
+	return result
 }
 
 func newUnixSocketEntry(id uint32, name []byte, inode uint32, socketType int, state uint32) *fdinfo.FileEntry {

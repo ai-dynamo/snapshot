@@ -4,7 +4,6 @@
 package criu
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -24,8 +23,8 @@ import (
 const (
 	filesImageFilename            = "files.img"
 	placeholderMountNamespacePath = "/proc/self/ns/mnt"
-	cudaUVMFDSocketNamePrefix     = "\x00cuda-uvmfd-"
 	linuxUnixSocketStateListen    = 10
+	linuxUnixSocketStateClose     = 7
 	linuxTCPStateEstablished      = 1
 	linuxTCPStateClose            = 7
 	linuxTCPStateListen           = 10
@@ -137,15 +136,38 @@ func rewriteSocketMetadata(image *crit.CriuImage, restoreID uint64) ([]int, bool
 		forbiddenPorts[port] = struct{}{}
 	}
 
-	rewritten := false
+	unixSockets := make(map[uint32]*sk_unix.UnixSkEntry)
 	for i, entry := range image.Entries {
 		fileEntry, ok := entry.Message.(*fdinfo.FileEntry)
 		if !ok {
 			closeFDs(reservationFDs)
 			return nil, false, fmt.Errorf("unexpected %s entry %d type %T", filesImageFilename, i, entry.Message)
 		}
-		if fileEntry.GetType() == fdinfo.FdTypes_UNIXSK && fileEntry.Usk != nil &&
-			rewriteCloneConflictingUnixSocketAddress(fileEntry.Usk, restoreID) {
+		if fileEntry.GetType() == fdinfo.FdTypes_UNIXSK && fileEntry.Usk != nil {
+			unixSockets[fileEntry.Usk.GetIno()] = fileEntry.Usk
+		}
+	}
+
+	rewritten := false
+	for _, socket := range unixSockets {
+		if !isBoundAbstractUnixSocket(socket) {
+			continue
+		}
+		if socket.Ino == nil || socket.Peer == nil {
+			closeFDs(reservationFDs)
+			return nil, false, fmt.Errorf("bound abstract UNIX socket is missing inode or peer metadata")
+		}
+		if peer := socket.GetPeer(); peer != 0 {
+			if _, ok := unixSockets[peer]; !ok {
+				closeFDs(reservationFDs)
+				return nil, false, fmt.Errorf(
+					"bound abstract UNIX socket inode %d has unresolved peer inode %d",
+					socket.GetIno(),
+					peer,
+				)
+			}
+		}
+		if rewriteCloneConflictingUnixSocketAddress(socket, restoreID) {
 			rewritten = true
 		}
 	}
@@ -403,11 +425,10 @@ func closeFDs(fds []int) {
 }
 
 func rewriteCloneConflictingUnixSocketAddress(entry *sk_unix.UnixSkEntry, restoreID uint64) bool {
-	if !isCUDAUVMFDListener(entry) {
+	if !isBoundAbstractUnixSocket(entry) {
 		return false
 	}
 
-	// CUDA retains this listener's FD, so only its clone-private address changes.
 	input := make([]byte, 8+len(entry.Name))
 	binary.BigEndian.PutUint64(input, restoreID)
 	copy(input[8:], entry.Name)
@@ -416,13 +437,7 @@ func rewriteCloneConflictingUnixSocketAddress(entry *sk_unix.UnixSkEntry, restor
 	return true
 }
 
-func isCUDAUVMFDListener(entry *sk_unix.UnixSkEntry) bool {
-	return entry != nil &&
-		entry.Type != nil &&
-		entry.State != nil &&
-		entry.Peer != nil &&
-		*entry.Type == uint32(unix.SOCK_SEQPACKET) &&
-		*entry.State == linuxUnixSocketStateListen &&
-		*entry.Peer == 0 &&
-		bytes.HasPrefix(entry.Name, []byte(cudaUVMFDSocketNamePrefix))
+func isBoundAbstractUnixSocket(entry *sk_unix.UnixSkEntry) bool {
+	// The leading NUL is the abstract-namespace marker; a bare NUL is unbound.
+	return entry != nil && len(entry.Name) > 1 && entry.Name[0] == 0
 }
