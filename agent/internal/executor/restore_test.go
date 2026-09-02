@@ -175,8 +175,8 @@ func TestValidateRestoreManifest(t *testing.T) {
 		RestoreRequest{ContentUID: "content-uid-123", ArtifactContainerName: "main", DestinationContainerName: "engine-0", PodNamespace: "team-a"},
 		manifest,
 	)
-	if err == nil || !strings.Contains(err.Error(), "qualified only for one or more CUDA processes on one GPU") {
-		t.Fatalf("validateRestoreManifest(multi-GPU POSIX) = %v, want qualification error", err)
+	if err != nil {
+		t.Fatalf("validateRestoreManifest(multi-GPU POSIX) = %v, want supported manifest", err)
 	}
 }
 

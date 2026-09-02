@@ -99,6 +99,29 @@ bool CalculatePinnedBytes(size_t device_count, const TransferOptions &options,
   return true;
 }
 
+bool CalculateBatchPinnedBytes(const std::vector<size_t> &target_bytes,
+                               size_t *bytes, std::string *error) {
+  if (bytes == nullptr || error == nullptr || target_bytes.empty()) {
+    if (error != nullptr) {
+      *error = "batch pinned-memory calculation requires at least one target";
+    }
+    return false;
+  }
+  *bytes = 0;
+  for (const size_t target : target_bytes) {
+    if (!CheckedAdd(*bytes, target, bytes)) {
+      *error = "batch pinned-memory size calculation overflow";
+      return false;
+    }
+  }
+  if (*bytes > kMaximumPinnedBytesPerOperation) {
+    *error =
+        "batch transfer buffers exceed the 2 GiB per-operation pinned-memory limit";
+    return false;
+  }
+  return true;
+}
+
 int StorageFileOpenFlags(TransferOperation operation) {
   const int access = operation == TransferOperation::kCheckpoint
                          ? O_RDWR | O_CREAT | O_TRUNC

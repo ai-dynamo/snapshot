@@ -347,9 +347,15 @@ func ResolveManifestPIDsToObservedPIDs(processes []ProcessDetails, restoredPID i
 	return restorePIDs, nil
 }
 
-// ProcessTreePIDs walks the process tree rooted at rootPID and returns all PIDs.
-// Used during checkpoint to enumerate the source process tree before CUDA filtering.
+// ProcessTreePIDs walks the process tree rooted at rootPID and returns all PIDs
+// in breadth-first order. Parents therefore precede descendants. Checkpoint
+// preserves this order through CUDA filtering and in the manifest; batched
+// restore depends on that contract so it can resume descendants before parents.
 func ProcessTreePIDs(rootPID int) []int {
+	return processTreePIDs(rootPID, "/proc")
+}
+
+func processTreePIDs(rootPID int, procRoot string) []int {
 	if rootPID <= 0 {
 		return nil
 	}
@@ -365,19 +371,20 @@ func ProcessTreePIDs(rootPID int) []int {
 			continue
 		}
 		seen[pid] = struct{}{}
-		if _, err := os.Stat(fmt.Sprintf("/proc/%d", pid)); err != nil {
+		processDir := filepath.Join(procRoot, strconv.Itoa(pid))
+		if _, err := os.Stat(processDir); err != nil {
 			continue
 		}
 		all = append(all, pid)
 
 		// Iterate all threads — child processes can be spawned from any thread, not just the main thread (tid==pid).
-		taskDir := fmt.Sprintf("/proc/%d/task", pid)
+		taskDir := filepath.Join(processDir, "task")
 		tids, err := os.ReadDir(taskDir)
 		if err != nil {
 			continue
 		}
 		for _, tid := range tids {
-			children, err := os.ReadFile(fmt.Sprintf("%s/%s/children", taskDir, tid.Name()))
+			children, err := os.ReadFile(filepath.Join(taskDir, tid.Name(), "children"))
 			if err != nil {
 				continue
 			}

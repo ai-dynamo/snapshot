@@ -67,7 +67,7 @@ COPY cmd/cuda-checkpoint-helper/daemon_server.h ./cmd/cuda-checkpoint-helper/dae
 COPY cmd/cuda-checkpoint-helper/daemon_protocol.cpp ./cmd/cuda-checkpoint-helper/daemon_protocol.cpp
 COPY cmd/cuda-checkpoint-helper/daemon_protocol.h ./cmd/cuda-checkpoint-helper/daemon_protocol.h
 COPY cmd/cuda-checkpoint-helper/daemon_protocol_test.cpp ./cmd/cuda-checkpoint-helper/daemon_protocol_test.cpp
-COPY cmd/cuda-checkpoint-helper/testdata/daemon_request_v6.hex ./cmd/cuda-checkpoint-helper/testdata/daemon_request_v6.hex
+COPY cmd/cuda-checkpoint-helper/testdata/daemon_request_v7.hex ./cmd/cuda-checkpoint-helper/testdata/daemon_request_v7.hex
 COPY cmd/cuda-checkpoint-helper/storage_manifest.cpp ./cmd/cuda-checkpoint-helper/storage_manifest.cpp
 COPY cmd/cuda-checkpoint-helper/storage_manifest.h ./cmd/cuda-checkpoint-helper/storage_manifest.h
 COPY cmd/cuda-checkpoint-helper/storage_manifest_test.cpp ./cmd/cuda-checkpoint-helper/storage_manifest_test.cpp
@@ -81,6 +81,8 @@ COPY cmd/cuda-checkpoint-helper/transfer_backend_unavailable.cpp ./cmd/cuda-chec
 COPY cmd/cuda-checkpoint-helper/transfer_scheduler.cpp ./cmd/cuda-checkpoint-helper/transfer_scheduler.cpp
 COPY cmd/cuda-checkpoint-helper/transfer_scheduler.h ./cmd/cuda-checkpoint-helper/transfer_scheduler.h
 COPY cmd/cuda-checkpoint-helper/transfer_scheduler_test.cpp ./cmd/cuda-checkpoint-helper/transfer_scheduler_test.cpp
+COPY cmd/cuda-checkpoint-helper/restore_batch_order.h ./cmd/cuda-checkpoint-helper/restore_batch_order.h
+COPY cmd/cuda-checkpoint-helper/restore_batch_order_test.cpp ./cmd/cuda-checkpoint-helper/restore_batch_order_test.cpp
 
 RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread \
       -o /cuda-checkpoint-helper-no-transfer-adapter \
@@ -139,6 +141,11 @@ RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread \
       ./cmd/cuda-checkpoint-helper/transfer_backend_unavailable.cpp \
       ./cmd/cuda-checkpoint-helper/transfer_scheduler_test.cpp \
     && /cuda-checkpoint-helper-transfer-scheduler-test
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+      -o /cuda-checkpoint-helper-restore-batch-order-test \
+      ./cmd/cuda-checkpoint-helper/restore_batch_order_test.cpp \
+    && /cuda-checkpoint-helper-restore-batch-order-test
 
 # =============================================================================
 # Stage: Go base - Common setup for Go builds
@@ -277,7 +284,7 @@ COPY cmd/cuda-checkpoint-helper/daemon_server.h ./cmd/cuda-checkpoint-helper/dae
 COPY cmd/cuda-checkpoint-helper/daemon_protocol.cpp ./cmd/cuda-checkpoint-helper/daemon_protocol.cpp
 COPY cmd/cuda-checkpoint-helper/daemon_protocol.h ./cmd/cuda-checkpoint-helper/daemon_protocol.h
 COPY cmd/cuda-checkpoint-helper/daemon_protocol_test.cpp ./cmd/cuda-checkpoint-helper/daemon_protocol_test.cpp
-COPY cmd/cuda-checkpoint-helper/testdata/daemon_request_v6.hex ./cmd/cuda-checkpoint-helper/testdata/daemon_request_v6.hex
+COPY cmd/cuda-checkpoint-helper/testdata/daemon_request_v7.hex ./cmd/cuda-checkpoint-helper/testdata/daemon_request_v7.hex
 COPY cmd/cuda-checkpoint-helper/storage_manifest.cpp ./cmd/cuda-checkpoint-helper/storage_manifest.cpp
 COPY cmd/cuda-checkpoint-helper/storage_manifest.h ./cmd/cuda-checkpoint-helper/storage_manifest.h
 COPY cmd/cuda-checkpoint-helper/storage_manifest_test.cpp ./cmd/cuda-checkpoint-helper/storage_manifest_test.cpp
@@ -292,6 +299,8 @@ COPY cmd/cuda-checkpoint-helper/transfer_scheduler.cpp ./cmd/cuda-checkpoint-hel
 COPY cmd/cuda-checkpoint-helper/transfer_scheduler.h ./cmd/cuda-checkpoint-helper/transfer_scheduler.h
 COPY cmd/cuda-checkpoint-helper/transfer_backend_unavailable.cpp ./cmd/cuda-checkpoint-helper/transfer_backend_unavailable.cpp
 COPY cmd/cuda-checkpoint-helper/transfer_scheduler_test.cpp ./cmd/cuda-checkpoint-helper/transfer_scheduler_test.cpp
+COPY cmd/cuda-checkpoint-helper/restore_batch_order.h ./cmd/cuda-checkpoint-helper/restore_batch_order.h
+COPY cmd/cuda-checkpoint-helper/restore_batch_order_test.cpp ./cmd/cuda-checkpoint-helper/restore_batch_order_test.cpp
 COPY cmd/ns-bind-mount/main.c ./cmd/ns-bind-mount/main.c
 
 RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread -o /cuda-checkpoint-helper \
@@ -351,6 +360,11 @@ RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread \
       ./cmd/cuda-checkpoint-helper/transfer_backend_unavailable.cpp \
       ./cmd/cuda-checkpoint-helper/transfer_scheduler_test.cpp \
     && /cuda-checkpoint-helper-transfer-scheduler-test
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+      -o /cuda-checkpoint-helper-restore-batch-order-test \
+      ./cmd/cuda-checkpoint-helper/restore_batch_order_test.cpp \
+    && /cuda-checkpoint-helper-restore-batch-order-test
 
 # ns-bind-mount bind-mounts the snapshot binaries into a target container's mount
 # namespace. It needs no CUDA headers, only mount_setattr (Linux 5.12+).

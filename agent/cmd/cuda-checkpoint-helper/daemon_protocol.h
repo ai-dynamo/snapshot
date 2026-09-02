@@ -20,11 +20,12 @@
 namespace cuda_checkpoint_daemon {
 
 constexpr uint32_t kMagic = 0x50484344; // "DCHP" in little-endian.
-constexpr uint16_t kVersion = 6;
-constexpr size_t kRequestHeaderSize = 56;
+constexpr uint16_t kVersion = 7;
+constexpr size_t kRequestHeaderSize = 60;
 constexpr size_t kResponseHeaderSize = 24;
 constexpr size_t kMaxRequestSize = 64 * 1024;
 constexpr size_t kMaxResponseSize = 128 * 1024;
+constexpr size_t kMaxRestoreBatchTargets = 64;
 constexpr size_t kMaxCgroupSize = 4096;
 constexpr size_t kMaxJobFileSize = 4096;
 
@@ -39,6 +40,7 @@ enum class Action : uint16_t {
   kRestore = 2,
   kLock = 3,
   kUnlock = 4,
+  kRestoreBatch = 5,
 };
 
 enum class Backend : uint16_t {
@@ -74,6 +76,7 @@ struct Request {
   std::string expected_cgroup;
   std::string job_file;
   std::string selected_devices;
+  std::vector<Request> targets;
 };
 
 struct Response {

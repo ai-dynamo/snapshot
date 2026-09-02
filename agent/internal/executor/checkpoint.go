@@ -132,11 +132,6 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		if err != nil {
 			return checkpointPreMutationError(err)
 		}
-		if cfg.CUDACheckpoint.StorageMode == types.CUDAStorageModePOSIX {
-			if err := validatePOSIXCustomStorageTopology(len(state.CUDAHostPIDs), len(state.GPUUUIDs)); err != nil {
-				return checkpointPreMutationError(err)
-			}
-		}
 		cudaStorageMode, err = cuda.SelectCUDAStorageMode(
 			ctx,
 			cfg.CUDACheckpoint.StorageMode,
@@ -218,14 +213,6 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	}
 	log.Info("Checkpoint timing summary", "checkpoint", summary)
 
-	return nil
-}
-
-func validatePOSIXCustomStorageTopology(processCount, gpuCount int) error {
-	if processCount < 1 || gpuCount != 1 {
-		return fmt.Errorf("CUDA POSIX CustomStorage is qualified only for one or more CUDA processes on one GPU; found processes=%d GPUs=%d",
-			processCount, gpuCount)
-	}
 	return nil
 }
 
@@ -416,6 +403,18 @@ func captureCheckpoint(
 		if err != nil {
 			return nil, err
 		}
+		var processGPUUUIDs map[int][]string
+		if cudaStorageMode == types.CUDAStorageModePOSIX {
+			processGPUUUIDs, err = cuda.DiscoverProcessGPUUUIDs(
+				ctx,
+				state.CUDAHostPIDs,
+				state.GPUUUIDs,
+				log,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("discover per-process GPUs for CustomStorage: %w", err)
+			}
+		}
 		cudaTimings, err := cuda.LockAndCheckpointProcessTreeValidated(
 			ctx,
 			processes,
@@ -423,6 +422,7 @@ func captureCheckpoint(
 			cudaStorageMode,
 			checkpointDir,
 			state.GPUUUIDs,
+			processGPUUUIDs,
 			cudaTransfer,
 			log,
 		)
