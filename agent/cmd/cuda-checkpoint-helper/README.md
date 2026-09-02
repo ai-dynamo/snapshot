@@ -34,6 +34,22 @@ A PageBroker GPU engine may reuse the CUDA operation and transfer behavior
 without adopting this socket protocol. Conversely, Snapshot's local path may
 provide a transfer adapter without changing the workload lifecycle.
 
+## Source ownership
+
+- `main.cpp` parses the helper CLI and dispatches daemon, health, and restore
+  target-discovery commands.
+- `daemon_server.*` owns Unix socket setup, request serving, health, and
+  shutdown.
+- `cuda_operation.*` owns CUDA initialization, target identity checks, driver
+  operations, CustomStorage completion, and retained primary-context lifetime.
+- `transfer_scheduler.*` owns per-extent worker lifetime, the shared
+  deadline, sibling cancellation, and result aggregation.
+- `transfer_engine.*` is the link-time artifact transfer adapter used by the
+  Snapshot-local NIXL POSIX implementation.
+
+These are internal ownership boundaries. They do not add another protocol or
+change the request, response, manifest, or transfer configuration contracts.
+
 ## Running
 
 The Snapshot integration configures one privileged helper beside each node
