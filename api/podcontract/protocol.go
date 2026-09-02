@@ -59,15 +59,10 @@ const (
 	CUDAJobFilePath = SnapshotControlMountPath + "/" + CUDAJobFileName
 
 	// RestoreStandbyModeEnv asks standby-aware workload entrypoints to remain
-	// inert until Snapshot replaces them with restored processes. Snapshot does
-	// not inject this workload-specific setting.
+	// inert until Snapshot replaces them with restored processes. Snapshot
+	// publishes the name so producers and workloads agree on it, but does not
+	// inject this workload-specific setting.
 	RestoreStandbyModeEnv = "SNAPSHOT_RESTORE_STANDBY"
-
-	// LegacyRestoreStandbyModeEnv is the deprecated Dynamo restore standby
-	// environment variable. Snapshot publishes the name but does not inject it.
-	//
-	// Deprecated: use RestoreStandbyModeEnv for new workload integrations.
-	LegacyRestoreStandbyModeEnv = "DYN_SNAPSHOT_RESTORE_STANDBY"
 
 	// RestoreCompleteFile is written by the Snapshot agent when restore has
 	// completed and the workload may resume.

@@ -39,6 +39,10 @@ spec:
               value: Qwen/Qwen3-0.6B
             - name: SNAPSHOT_CONTROL_DIR
               value: /snapshot-control
+            # Keep the placeholder inert: the agent restores the checkpointed
+            # process into this container, so app.py must not load a model here.
+            - name: SNAPSHOT_RESTORE_STANDBY
+              value: "1"
             - name: HF_HUB_DISABLE_XET
               value: "1"
             - name: TLLM_NCCL_SYMMETRIC_ZERO_COPY
