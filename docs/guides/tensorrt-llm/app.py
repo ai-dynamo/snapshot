@@ -12,6 +12,13 @@ from tensorrt_llm import LLM, SamplingParams
 
 CONTROL_DIR = Path(os.environ.get("SNAPSHOT_CONTROL_DIR", "/snapshot-control"))
 MODEL = os.environ["SNAPSHOT_MODEL"]
+# Small single-GPU sizing so the example fits alongside other GPU tenants and
+# keeps the checkpoint artifact small. Override through the Pod template.
+MAX_NUM_TOKENS = int(os.environ.get("SNAPSHOT_MAX_NUM_TOKENS", "1024"))
+MAX_BATCH_SIZE = int(os.environ.get("SNAPSHOT_MAX_BATCH_SIZE", "1"))
+FREE_GPU_MEMORY_FRACTION = float(
+    os.environ.get("SNAPSHOT_FREE_GPU_MEMORY_FRACTION", "0.10")
+)
 
 
 def generate_text(llm: LLM, prompts: list[str]) -> list[str]:
@@ -81,21 +88,28 @@ def main() -> None:
         dtype="float16",
         trust_remote_code=True,
         tensor_parallel_size=1,
-        max_num_tokens=1024,
+        max_num_tokens=MAX_NUM_TOKENS,
         max_seq_len=512,
-        max_batch_size=1,
+        max_batch_size=MAX_BATCH_SIZE,
         enable_chunked_prefill=False,
-        kv_cache_config={"free_gpu_memory_fraction": 0.10},
+        kv_cache_config={"free_gpu_memory_fraction": FREE_GPU_MEMORY_FRACTION},
     )
 
-    for text in generate_text(
+    precheck_texts = generate_text(
         llm,
         [
             "Summarize why checkpoint and restore testing matters.",
             "Continue this sequence with four numbers: 1, 2, 3, 4,",
         ],
-    ):
+    )
+    for text in precheck_texts:
         print(f"TensorRT-LLM pre-checkpoint output={text!r}", flush=True)
+    # Durable evidence that the engine served a generation before capture; the
+    # source container is killed by the dump, so logs alone are easy to lose.
+    CONTROL_DIR.joinpath("trtllm-precheck").write_text(
+        "\n".join(precheck_texts) + "\n",
+        encoding="utf-8",
+    )
 
     gc.collect()
     CONTROL_DIR.joinpath("ready-for-snapshot").write_text(
