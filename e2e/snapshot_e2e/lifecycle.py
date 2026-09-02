@@ -885,6 +885,33 @@ def debug_dump_framework(
             print(k8s.pod_logs(config.namespace, agent, tail_lines=200))
             print(f"--- nvidia-smi on {source_node} ---")
             print(k8s.exec_command(config.namespace, agent, "nvidia-smi 2>&1 || true"))
+            # A CRIU crash ("criu swrk failed: signal: segmentation fault") leaves
+            # no restore.log behind; the kernel's trap line is then the only
+            # record of where it died. The agent is privileged with hostPID, so
+            # its dmesg is the node's.
+            print(f"--- kernel log (criu/segfault) on {source_node} ---")
+            print(
+                k8s.exec_command(
+                    config.namespace,
+                    agent,
+                    "dmesg -T 2>/dev/null | grep -iE 'criu|segfault|traps|nsrestore|cuda' | tail -30 "
+                    "|| echo '<dmesg unavailable>'",
+                )
+            )
+            content_uid = bound_content_uid(config, run.snapshot_name)
+            if content_uid:
+                root = checkpoint_artifact_root(content_uid)
+                print(f"--- checkpoint artifact {content_uid} on {source_node} ---")
+                print(
+                    k8s.exec_command(
+                        config.namespace,
+                        agent,
+                        f"ls -la {root}/containers/* 2>&1; "
+                        f"for f in {root}/containers/*/restore.log {root}/containers/*/dump.log; do "
+                        "  if [ -f \"$f\" ]; then echo \"== $f (tail 60)\"; tail -60 \"$f\"; fi; "
+                        "done",
+                    )
+                )
         except Exception as exc:  # noqa: BLE001 - debug helper must never mask the real failure
             print(f"agent diagnostics unavailable: {type(exc).__name__}: {exc}")
     # Filter first, then order by time: the API returns events unordered, and
@@ -910,6 +937,21 @@ def event_time(event: client.CoreV1Event) -> datetime:
         or event.metadata.creation_timestamp
         or datetime.min.replace(tzinfo=timezone.utc)
     )
+
+def bound_content_uid(config: k8s.E2EConfig, snapshot_name: str) -> str | None:
+    """UID of the PodSnapshotContent bound to the run's PodSnapshot, if any."""
+    api = client.CustomObjectsApi()
+    try:
+        snap = api.get_namespaced_custom_object(
+            GROUP, VERSION, config.namespace, PODSNAPSHOTS, snapshot_name
+        )
+        content_name = snap.get("status", {}).get("boundSnapshotContentName")
+        if not content_name:
+            return None
+        content = api.get_cluster_custom_object(GROUP, VERSION, PODSNAPSHOTCONTENTS, content_name)
+        return content["metadata"]["uid"]
+    except ApiException:
+        return None
 
 
 def snapshot_control_listing(namespace: str, pod: str) -> str:
