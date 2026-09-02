@@ -144,9 +144,10 @@ the restriction elsewhere. A destination container must not override a
 requested profile with a conflicting profile.
 
 Snapshot does not modify container commands and does not inject
-`SNAPSHOT_RESTORE_STANDBY`, its deprecated
-`DYN_SNAPSHOT_RESTORE_STANDBY` alias, or any other workload-specific standby
-setting. Both names are exported by `api/podcontract` so application owners can
-set the convention they support. The producer must ensure each destination
-process remains alive and inert until the agent replaces it with the restored
-process.
+`SNAPSHOT_RESTORE_STANDBY` or any other workload-specific standby setting. The
+name is exported by `api/podcontract` (`RestoreStandbyModeEnv`) so producers
+and standby-aware workload entrypoints agree on it: a producer sets
+`SNAPSHOT_RESTORE_STANDBY=1` on destination containers, and the workload
+entrypoint blocks without initializing when it sees that value. The producer
+must ensure each destination process remains alive and inert until the agent
+replaces it with the restored process.
