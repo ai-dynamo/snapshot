@@ -63,7 +63,7 @@ Snapshot control volume at `/snapshot-control`.
 ### 2. Build the image
 
 ```bash
-export TENSORRT_LLM_RUNTIME_IMAGE=nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc24
+export TENSORRT_LLM_RUNTIME_IMAGE=nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc24@sha256:16a103b8b1b682d287e8043fc674d23fa52d5b5f2127da913bf6c0643db3a073
 export TENSORRT_LLM_SNAPSHOT_IMAGE=<registry>/tensorrt-llm-snapshot:<tag>
 
 docker build \
@@ -115,9 +115,9 @@ containers:
 ```
 
 The example uses one GPU, the PyTorch backend, and a maximum sequence length of
-512 tokens. Engine sizing is set through `SNAPSHOT_MAX_NUM_TOKENS` (default
-`1024`), `SNAPSHOT_MAX_BATCH_SIZE` (default `1`), and
-`SNAPSHOT_FREE_GPU_MEMORY_FRACTION` (default `0.10`). Revalidate checkpoint and
+512 tokens. Engine sizing is set through `TRTLLM_MAX_NUM_TOKENS` (default
+`1024`), `TRTLLM_MAX_BATCH_SIZE` (default `1`), and
+`TRTLLM_FREE_GPU_MEMORY_FRACTION` (default `0.10`). Revalidate checkpoint and
 restore before changing the model, TensorRT-LLM image, GPU count, backend, or
 engine settings.
 

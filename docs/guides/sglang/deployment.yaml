@@ -65,7 +65,7 @@ spec:
               value: Qwen/Qwen3-0.6B
             - name: SGLANG_CONTEXT_LENGTH
               value: "10240"
-            - name: SNAPSHOT_PAGE_SIZE
+            - name: SGLANG_PAGE_SIZE
               value: "16"
             - name: SNAPSHOT_CONTROL_DIR
               value: /snapshot-control
