@@ -179,7 +179,7 @@ def main() -> None:
             progress.write_text("generated\n", encoding="utf-8")
             print(f"SGLang restored output={text!r}", flush=True)
             serve_api(engine, text)
-        except BaseException:
+        except Exception:
             CONTROL_DIR.joinpath("sglang-restore-error").write_text(
                 traceback.format_exc(),
                 encoding="utf-8",

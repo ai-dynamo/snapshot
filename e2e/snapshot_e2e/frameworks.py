@@ -40,6 +40,9 @@ REQUEST_TIMEOUT_SECONDS = 120
 # The first run on a node pulls a 10-20 GB runtime image (observed: ~4 min on
 # the CI cluster) before the engine even starts, and vLLM then compiles and
 # captures CUDA graphs; 300s was exceeded with the engine still initializing.
+# The CI step running the test must exceed the sum of these budgets plus
+# REQUEST_TIMEOUT_SECONDS (about 33 min today), or GitHub kills pytest before
+# the failure dump runs; see the test step in e2e-frameworks.yaml.
 SOURCE_READY_TIMEOUT_SECONDS = 900
 CHECKPOINT_TIMEOUT_SECONDS = 300
 RESTORE_TIMEOUT_SECONDS = 300

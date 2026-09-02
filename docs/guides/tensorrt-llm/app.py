@@ -137,7 +137,7 @@ def main() -> None:
                 progress.write_text("generated\n", encoding="utf-8")
                 print(f"TensorRT-LLM restored output={text!r}", flush=True)
                 serve_api(llm, text)
-            except BaseException:
+            except Exception:
                 CONTROL_DIR.joinpath("trtllm-restore-error").write_text(
                     traceback.format_exc(),
                     encoding="utf-8",

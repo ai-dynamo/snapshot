@@ -884,15 +884,31 @@ def ensure_pvc(body: dict[str, Any]) -> None:
 
 
 def ensure_pv(body: dict[str, Any]) -> None:
-    """Creates the cluster-scoped PersistentVolume if it does not exist."""
+    """Creates the cluster-scoped PersistentVolume if it does not exist.
+
+    An existing PV must describe the same NFS export: the name is fixed and the
+    reclaim policy is Retain, so on a reused cluster a changed
+    SNAPSHOT_E2E_MODEL_CACHE_SERVER/PATH would otherwise keep mounting the old
+    export silently. Replacing a Retain PV is the operator's decision, not the
+    test's, so mismatch fails loudly instead.
+    """
     name = body["metadata"]["name"]
+    api = client.CoreV1Api()
     try:
-        client.CoreV1Api().create_persistent_volume(body)
+        api.create_persistent_volume(body)
         print(f"created PV {name}")
     except ApiException as exc:
         if exc.status != 409:
             raise
-        print(f"PV {name} already exists")
+        existing = api.read_persistent_volume(name)
+        wanted = body["spec"]["nfs"]
+        actual = {"server": existing.spec.nfs.server, "path": existing.spec.nfs.path} if existing.spec.nfs else None
+        if actual != wanted:
+            raise AssertionError(
+                f"PV {name} already exists with nfs={actual}, but the configured shared model "
+                f"cache is nfs={wanted}; delete the PV or point SNAPSHOT_E2E_MODEL_CACHE_* at it"
+            )
+        print(f"PV {name} already exists with the configured export")
 
 
 def debug_dump_framework(

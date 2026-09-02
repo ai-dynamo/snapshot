@@ -146,7 +146,7 @@ async def main() -> None:
                 progress.write_text("generated\n", encoding="utf-8")
                 print(f"vLLM restored output={text!r}", flush=True)
                 await serve_api(engine, text)
-            except BaseException:
+            except Exception:
                 CONTROL_DIR.joinpath("vllm-restore-error").write_text(
                     traceback.format_exc(),
                     encoding="utf-8",

@@ -16,11 +16,11 @@ on:
   push:
     branches:
       - 'pull-request/[0-9]+'
+    # Only changes to the workloads, the tests, and this wiring gate a PR:
+    # mirror branches have no operator/agent images of their own, so a run
+    # here tests main's Snapshot and would say nothing about an agent/operator
+    # change. Those are covered nightly against main.
     paths:
-      - 'agent/**'
-      - 'operator/**'
-      - 'api/**'
-      - 'charts/**'
       - 'e2e/**'
       - 'docs/guides/**'
       - 'hack/**'
@@ -52,7 +52,8 @@ jobs:
   e2e:
     name: ${{ matrix.framework }}
     runs-on: prod-deploy-tester-v1
-    timeout-minutes: 45
+    # Setup (~10 min observed) + the image poll below + the test step.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -83,10 +84,14 @@ jobs:
       SNAPSHOT_E2E_FRAMEWORK: ${{ matrix.framework }}
       # Shared CI model cache (Hugging Face cache layout on an NFS export):
       # pods in this cluster cannot resolve huggingface.co, and downloading
-      # weights per run would cost minutes anyway. Repository variables take
-      # precedence; the defaults are the CI cluster's export.
+      # weights per run would cost minutes anyway. Set the repository
+      # variables SNAPSHOT_E2E_MODEL_CACHE_SERVER / _PATH to override; the
+      # literals below are this CI cluster's export and are only a fallback
+      # until the variables exist (the "Report model cache" step says which
+      # is in use).
       SNAPSHOT_E2E_MODEL_CACHE_SERVER: ${{ vars.SNAPSHOT_E2E_MODEL_CACHE_SERVER || 'dynamoinfracimodelcache.file.core.windows.net' }}
       SNAPSHOT_E2E_MODEL_CACHE_PATH: ${{ vars.SNAPSHOT_E2E_MODEL_CACHE_PATH || '/dynamoinfracimodelcache/models' }}
+      SNAPSHOT_E2E_MODEL_CACHE_FROM_VARS: ${{ vars.SNAPSHOT_E2E_MODEL_CACHE_SERVER != '' && vars.SNAPSHOT_E2E_MODEL_CACHE_PATH != '' }}
       PYTHONUNBUFFERED: "1"
       UV_LINK_MODE: copy
     steps:
@@ -194,18 +199,43 @@ jobs:
           echo "SNAPSHOT_E2E_SNAPSHOT_TAG=${{ inputs.snapshot_tag }}" >> "$GITHUB_ENV"
           echo "Using provided Snapshot image tag: ${{ inputs.snapshot_tag }}"
 
+      - name: Report model cache
+        if: ${{ steps.selected.outputs.run == 'true' }}
+        run: |
+          if [[ "${SNAPSHOT_E2E_MODEL_CACHE_FROM_VARS}" == "true" ]]; then
+            echo "Shared model cache from repository variables: ${SNAPSHOT_E2E_MODEL_CACHE_SERVER}:${SNAPSHOT_E2E_MODEL_CACHE_PATH}"
+          else
+            echo "::notice::Shared model cache uses the workflow default ${SNAPSHOT_E2E_MODEL_CACHE_SERVER}:${SNAPSHOT_E2E_MODEL_CACHE_PATH}; set repository variables SNAPSHOT_E2E_MODEL_CACHE_SERVER and SNAPSHOT_E2E_MODEL_CACHE_PATH to override."
+          fi
+
       # The framework image must already be published: building it here would
       # add 30-60 minutes to every run. The E2E Framework Images workflow
-      # publishes it for pushes and pull requests that change the guide.
+      # publishes it for pushes to main and to pull-request/* mirror branches.
+      # On a mirror branch both workflows start from the same push, so wait for
+      # the build (bounded by that job's 75-minute build step); nightly and
+      # dispatch expect the image to exist and fail fast otherwise.
       - name: Resolve framework image
         if: ${{ steps.selected.outputs.run == 'true' }}
         id: image
-        timeout-minutes: 3
+        timeout-minutes: 80
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          python3 hack/framework-image-tag.py "${{ matrix.framework }}" --check --github-output
+          if [[ "${GITHUB_REF_NAME}" == pull-request/* ]]; then
+            deadline=$(( $(date +%s) + 78*60 ))
+            until python3 hack/framework-image-tag.py "${{ matrix.framework }}" --check --allow-missing --github-output 2>/dev/null \
+                  && grep -q '^exists=true$' "$GITHUB_OUTPUT"; do
+              if (( $(date +%s) >= deadline )); then
+                echo "::error::framework image for ${{ matrix.framework }} was not published within the wait budget; check the E2E Framework Images run for this push"
+                exit 1
+              fi
+              echo "[$(date -u +%H:%M:%S)] waiting for the E2E Framework Images workflow to publish the ${{ matrix.framework }} image"
+              sleep 30
+            done
+          else
+            python3 hack/framework-image-tag.py "${{ matrix.framework }}" --check --github-output
+          fi
           echo "SNAPSHOT_E2E_FRAMEWORK_IMAGE=$(python3 hack/framework-image-tag.py "${{ matrix.framework }}")" >> "$GITHUB_ENV"
 
       - name: Validate host GPU cluster
@@ -282,9 +312,11 @@ jobs:
           set -euo pipefail
           uv run --locked --project e2e pytest e2e/tests -m environment -vv
 
+      # Must exceed the phase budgets in e2e/snapshot_e2e/frameworks.py plus the
+      # request timeout (~33 min), or GitHub kills pytest before its dump runs.
       - name: Run ${{ matrix.framework }} checkpoint/restore test
         if: ${{ steps.selected.outputs.run == 'true' }}
-        timeout-minutes: 30
+        timeout-minutes: 40
         run: |
           set -euo pipefail
           uv run --locked --project e2e pytest e2e/tests/test_frameworks.py -vv -s

@@ -38,10 +38,9 @@ PLAIN_DEV_TAG = re.compile(r"^v0\.0\.0-g[0-9a-f]{8}$")
 
 
 def head_sha() -> str:
-    # On pull_request events GITHUB_SHA is the synthetic merge commit; the
-    # workflow passes the PR head so the tag matches what a branch build would
-    # have published.
-    sha = os.environ.get("SNAPSHOT_E2E_HEAD_SHA") or os.environ.get("GITHUB_SHA")
+    # On a push (including copy-pr-bot mirror pushes) GITHUB_SHA is the branch
+    # head, which is the commit a branch build would have tagged.
+    sha = os.environ.get("GITHUB_SHA")
     if sha:
         return sha
     result = subprocess.run(
@@ -196,6 +195,13 @@ def main() -> int:
         f"{fallback} (newest main build). Dispatch push-artifacts on this branch "
         "and re-run to test the commit's own Snapshot."
     )
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as handle:
+            handle.write(
+                f"> **Snapshot images not built for this commit.** Tested against `{fallback}` "
+                f"(newest main build); commit `{sha[:8]}` has no published operator/agent images.\n"
+            )
     print(f"Resolved Snapshot image tag: {fallback} (fallback; commit {sha} unpublished)")
     return 0
 
