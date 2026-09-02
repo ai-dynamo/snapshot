@@ -1523,7 +1523,9 @@ CUresult CUDAAPI
 cuMemRetainAllocationHandle(CUmemGenericAllocationHandle* output, void* address)
 {
   retain_fn function = (retain_fn)cuinterposer_lookup_real_symbol("cuMemRetainAllocationHandle");
+  release_fn release = (release_fn)cuinterposer_lookup_real_symbol("cuMemRelease");
   struct mapping* mapping;
+  struct handle* existing;
   CUmemGenericAllocationHandle driver = 0;
   CUmemGenericAllocationHandle logical;
   CUresult result;
@@ -1548,13 +1550,18 @@ cuMemRetainAllocationHandle(CUmemGenericAllocationHandle* output, void* address)
   mapping = find_mapping_at((CUdeviceptr)(uintptr_t)address);
   if (mapping == NULL) {
     result = transfer_passthrough_handle(result, driver, output);
-  } else if (add_managed_handle(mapping->allocation, driver, &logical) != 0) {
-    release_fn release = (release_fn)cuinterposer_lookup_real_symbol("cuMemRelease");
-    if (release != NULL)
-      (void)release(driver);
-    result = CUDA_ERROR_OUT_OF_MEMORY;
   } else {
-    *output = logical;
+    existing = first_live_handle(mapping->allocation);
+    if (existing != NULL && (release == NULL || release(driver) != CUDA_SUCCESS)) {
+      result = CUDA_ERROR_UNKNOWN;
+    } else if (add_managed_handle(
+                   mapping->allocation, existing != NULL ? existing->driver : driver, &logical) != 0) {
+      if (existing == NULL && release != NULL)
+        (void)release(driver);
+      result = CUDA_ERROR_OUT_OF_MEMORY;
+    } else {
+      *output = logical;
+    }
   }
   pthread_mutex_unlock(&state_lock);
   return result;
@@ -1797,8 +1804,10 @@ cuMemImportFromShareableHandle(CUmemGenericAllocationHandle* output, void* os_ha
 {
   import_fn function = (import_fn)cuinterposer_lookup_real_symbol("cuMemImportFromShareableHandle");
   properties_fn get_properties;
+  release_fn release = (release_fn)cuinterposer_lookup_real_symbol("cuMemRelease");
   struct cuinterposer_posix_ticket ticket;
   struct allocation* allocation;
+  struct handle* existing;
   CUmemGenericAllocationHandle logical;
   CUmemGenericAllocationHandle imported = 0;
   int raw_fd = -1;
@@ -1841,7 +1850,6 @@ cuMemImportFromShareableHandle(CUmemGenericAllocationHandle* output, void* os_ha
     return CUDA_ERROR_INVALID_HANDLE;
   result = function(&imported, (void*)(uintptr_t)raw_fd, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR);
   if (close(raw_fd) != 0 && result == CUDA_SUCCESS) {
-    release_fn release = (release_fn)cuinterposer_lookup_real_symbol("cuMemRelease");
     if (release != NULL)
       (void)release(imported);
     return CUDA_ERROR_UNKNOWN;
@@ -1850,7 +1858,6 @@ cuMemImportFromShareableHandle(CUmemGenericAllocationHandle* output, void* os_ha
     return result;
   pthread_mutex_lock(&state_lock);
   if (current_phase != PHASE_ACTIVE) {
-    release_fn release = (release_fn)cuinterposer_lookup_real_symbol("cuMemRelease");
     if (release != NULL)
       (void)release(imported);
     pthread_mutex_unlock(&state_lock);
@@ -1873,11 +1880,20 @@ cuMemImportFromShareableHandle(CUmemGenericAllocationHandle* output, void* os_ha
   }
   if (allocation != NULL)
     allocation->shared = true;
+  existing = allocation != NULL ? first_live_handle(allocation) : NULL;
   if (allocation == NULL || current_context(&allocation->context) != 0 ||
-      get_properties(&allocation->properties, imported) != CUDA_SUCCESS ||
-      add_managed_handle(allocation, imported, &logical) != 0) {
-    release_fn release = (release_fn)cuinterposer_lookup_real_symbol("cuMemRelease");
+      get_properties(&allocation->properties, imported) != CUDA_SUCCESS) {
     if (release != NULL)
+      (void)release(imported);
+    pthread_mutex_unlock(&state_lock);
+    return CUDA_ERROR_OUT_OF_MEMORY;
+  }
+  if (existing != NULL && (release == NULL || release(imported) != CUDA_SUCCESS)) {
+    pthread_mutex_unlock(&state_lock);
+    return CUDA_ERROR_UNKNOWN;
+  }
+  if (add_managed_handle(allocation, existing != NULL ? existing->driver : imported, &logical) != 0) {
+    if (existing == NULL && release != NULL)
       (void)release(imported);
     pthread_mutex_unlock(&state_lock);
     return CUDA_ERROR_OUT_OF_MEMORY;
