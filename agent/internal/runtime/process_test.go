@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -99,6 +100,79 @@ func TestParseProcExitCode(t *testing.T) {
 	}
 }
 
+func TestResolveHostProcessIdentity(t *testing.T) {
+	procRoot := t.TempDir()
+	procDir := filepath.Join(procRoot, "900")
+	if err := os.MkdirAll(procDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"status": "Name:\tworker\nPPid:\t1\nNSpid:\t900 77\n",
+		"stat":   "900 (worker with spaces) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 424242 20\n",
+		"cgroup": "0::/kubepods/pod/container\n",
+		"comm":   "worker\n",
+	}
+	for name, data := range files {
+		if err := os.WriteFile(filepath.Join(procDir, name), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := ResolveHostProcessIdentity(procRoot, ProcessDetails{
+		InnermostPID:   77,
+		StartTimeTicks: 424242,
+		Cgroup:         "0::/kubepods/pod/container\n",
+	})
+	if err != nil {
+		t.Fatalf("ResolveHostProcessIdentity() error = %v", err)
+	}
+	if got.OutermostPID != 900 {
+		t.Fatalf("OutermostPID = %d, want 900", got.OutermostPID)
+	}
+	if err := ValidateProcessIdentity(procRoot, got); err != nil {
+		t.Fatalf("ValidateProcessIdentity() error = %v", err)
+	}
+	changedStart := got
+	changedStart.StartTimeTicks++
+	if err := ValidateProcessIdentity(procRoot, changedStart); err == nil {
+		t.Fatal("ValidateProcessIdentity() accepted changed start time")
+	}
+	changedCgroup := got
+	changedCgroup.Cgroup = "0::/different\n"
+	if err := ValidateProcessIdentity(procRoot, changedCgroup); err == nil {
+		t.Fatal("ValidateProcessIdentity() accepted changed cgroup")
+	}
+
+	duplicateDir := filepath.Join(procRoot, "901")
+	if err := os.MkdirAll(duplicateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range files {
+		if name == "status" {
+			data = "Name:\tworker\nPPid:\t1\nNSpid:\t901 77\n"
+		} else if name == "stat" {
+			data = strings.Replace(data, "900 (", "901 (", 1)
+		}
+		if err := os.WriteFile(filepath.Join(duplicateDir, name), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err = ResolveHostProcessIdentity(procRoot, ProcessDetails{
+		InnermostPID: 77, StartTimeTicks: 424242,
+		Cgroup: "0::/kubepods/pod/container\n",
+	})
+	if err == nil || !strings.Contains(err.Error(), "not unique") {
+		t.Fatalf("expected non-unique identity error, got %v", err)
+	}
+	_, err = ResolveHostProcessIdentity(procRoot, ProcessDetails{
+		InnermostPID: 999, StartTimeTicks: 424242,
+		Cgroup: "0::/kubepods/pod/container\n",
+	})
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("expected not-found identity error, got %v", err)
+	}
+}
+
 func TestReadProcessDetails(t *testing.T) {
 	procRoot := t.TempDir()
 	pid := 1018
@@ -111,6 +185,12 @@ func TestReadProcessDetails(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(procDir, "cmdline"), []byte("python3\x00-m\x00dynamo.vllm\x00"), 0644); err != nil {
 		t.Fatalf("WriteFile(cmdline): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(procDir, "stat"), []byte("2402711 (python3) S 0 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 424242 20\n"), 0644); err != nil {
+		t.Fatalf("WriteFile(stat): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(procDir, "cgroup"), []byte("0::/kubepods/test\n"), 0644); err != nil {
+		t.Fatalf("WriteFile(cgroup): %v", err)
 	}
 
 	details, err := ReadProcessDetails(procRoot, pid)
@@ -166,6 +246,13 @@ func TestReadProcessTable(t *testing.T) {
 		}
 		if err := os.WriteFile(filepath.Join(procDir, "cmdline"), []byte(cmdline), 0644); err != nil {
 			t.Fatalf("WriteFile(cmdline): %v", err)
+		}
+		stat := strconv.Itoa(pid) + " (process) S 0 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 " + strconv.Itoa(pid+1000) + " 20\n"
+		if err := os.WriteFile(filepath.Join(procDir, "stat"), []byte(stat), 0644); err != nil {
+			t.Fatalf("WriteFile(stat): %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(procDir, "cgroup"), []byte("0::/kubepods/test\n"), 0644); err != nil {
+			t.Fatalf("WriteFile(cgroup): %v", err)
 		}
 	}
 

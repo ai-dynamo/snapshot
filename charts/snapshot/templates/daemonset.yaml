@@ -26,8 +26,8 @@ spec:
         {{- with .Values.daemonset.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- if or .Values.openshift.enabled .Values.daemonset.podAnnotations }}
       annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         {{- if .Values.openshift.enabled }}
         # Pin this DS to the built-in "privileged" SCC even if a higher-priority
         # custom SCC is added later. See openshift/enhancements custom-scc-preemption-prevention.
@@ -41,7 +41,6 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
         {{- end }}
-      {{- end }}
     spec:
       serviceAccountName: {{ include "snapshot.serviceAccountName" . }}
       hostPID: true
@@ -127,6 +126,8 @@ spec:
             - name: config
               mountPath: /etc/snapshot
               readOnly: true
+            - name: cuda-helper-socket
+              mountPath: /run/cuda-checkpoint-helper
             {{- if eq .Values.storage.type "pvc" }}
             # Every agent owns direct access to the shared checkpoint store.
             - name: checkpoints
@@ -168,11 +169,66 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.daemonset.resources | nindent 12 }}
+        - name: cuda-checkpoint-helper
+          image: "{{ .Values.image.agent.repository }}:{{ .Values.image.agent.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.agent.pullPolicy }}
+          command:
+            - /usr/local/bin/cuda-checkpoint-helper
+          args:
+            - --daemon
+            - --socket
+            - /run/cuda-checkpoint-helper/helper.sock
+            - --max-operation-seconds
+            - {{ .Values.config.cudaCheckpoint.daemon.maxOperationSeconds | quote }}
+          securityContext:
+            privileged: true
+          startupProbe:
+            exec:
+              command:
+                - /usr/local/bin/cuda-checkpoint-helper
+                - --health
+                - --socket
+                - /run/cuda-checkpoint-helper/helper.sock
+            periodSeconds: 2
+            failureThreshold: 150
+          readinessProbe:
+            exec:
+              command:
+                - /usr/local/bin/cuda-checkpoint-helper
+                - --health
+                - --socket
+                - /run/cuda-checkpoint-helper/helper.sock
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          livenessProbe:
+            exec:
+              command:
+                - /usr/local/bin/cuda-checkpoint-helper
+                - --health
+                - --socket
+                - /run/cuda-checkpoint-helper/helper.sock
+            periodSeconds: 30
+            timeoutSeconds: 2
+            failureThreshold: 3
+          volumeMounts:
+            - name: cuda-helper-socket
+              mountPath: /run/cuda-checkpoint-helper
+            - name: host-proc
+              mountPath: /host/proc
+            {{- if eq .Values.storage.type "pvc" }}
+            - name: checkpoints
+              mountPath: {{ .Values.storage.pvc.basePath }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.config.cudaCheckpoint.daemon.resources | nindent 12 }}
       volumes:
         # Configuration ConfigMap
         - name: config
           configMap:
             name: {{ include "snapshot.fullname" . }}-config
+        - name: cuda-helper-socket
+          emptyDir: {}
         {{- if .Values.seccomp.deploy }}
         # Seccomp profile ConfigMap (used by initContainer)
         - name: seccomp-profiles

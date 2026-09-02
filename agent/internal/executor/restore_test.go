@@ -12,10 +12,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/testr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
+	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
 
@@ -162,6 +165,19 @@ func TestValidateRestoreManifest(t *testing.T) {
 			}
 		})
 	}
+
+	manifest.CUDA = types.NewCUDAManifest(
+		[]int{42, 43},
+		[]string{"GPU-aaa", "GPU-bbb"},
+		types.CUDAStorageModePOSIX,
+	)
+	err := validateRestoreManifest(
+		RestoreRequest{ContentUID: "content-uid-123", ArtifactContainerName: "main", DestinationContainerName: "engine-0", PodNamespace: "team-a"},
+		manifest,
+	)
+	if err == nil || !strings.Contains(err.Error(), "qualified only for one or more CUDA processes on one GPU") {
+		t.Fatalf("validateRestoreManifest(multi-GPU POSIX) = %v, want qualification error", err)
+	}
 }
 
 func TestRestoreInNamespaceRejectsMultiGPUCheckpointWithoutLaunchJobState(t *testing.T) {
@@ -173,7 +189,7 @@ func TestRestoreInNamespaceRejectsMultiGPUCheckpointWithoutLaunchJobState(t *tes
 		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
 		types.OverlayManifest{},
 	)
-	manifest.CUDA = types.NewCUDAManifest([]int{42, 43}, []string{"GPU-aaa", "GPU-bbb"})
+	manifest.CUDA = types.NewCUDAManifest([]int{42, 43}, []string{"GPU-aaa", "GPU-bbb"}, types.CUDAStorageModeLegacy)
 	if err := types.WriteManifest(checkpointDir, manifest); err != nil {
 		t.Fatalf("WriteManifest: %v", err)
 	}
@@ -191,5 +207,130 @@ func TestRemainingDuration(t *testing.T) {
 	}
 	if remainingDuration(5*time.Second, 4*time.Second, 3*time.Second) != 0 {
 		t.Fatal("remainingDuration should not go negative")
+	}
+}
+
+func TestWaitForCustomStoragePrefetchDiscardDoesNotWait(t *testing.T) {
+	outcomes := make(chan customStoragePrefetchOutcome, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := waitForCustomStoragePrefetch(ctx, outcomes, cancel, true); err != nil {
+			t.Errorf("waitForCustomStoragePrefetch(discard=true): %v", err)
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("discarded prefetch waited for an outcome")
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("discarded prefetch did not cancel its context")
+	}
+}
+
+func TestWaitForCustomStoragePrefetchHonorsContextCancellation(t *testing.T) {
+	outcomes := make(chan customStoragePrefetchOutcome, 1)
+	ctx, cancelContext := context.WithCancel(context.Background())
+	cancelContext()
+	prefetchCtx, cancelPrefetch := context.WithCancel(context.Background())
+
+	_, err := waitForCustomStoragePrefetch(ctx, outcomes, cancelPrefetch, false)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitForCustomStoragePrefetch() error = %v, want context.Canceled", err)
+	}
+	select {
+	case <-prefetchCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("canceled wait did not cancel prefetch")
+	}
+}
+
+func TestRestoreDeferredCUDAProcessesResolvesAndValidatesHostIdentity(t *testing.T) {
+	namespaceProcess := snapshotruntime.ProcessDetails{
+		InnermostPID:   7,
+		StartTimeTicks: 101,
+		Cgroup:         "0::/restored\n",
+	}
+	hostProcess := snapshotruntime.ProcessDetails{
+		ObservedPID:    9007,
+		OutermostPID:   9007,
+		InnermostPID:   7,
+		NamespacePIDs:  []int{9007, 7},
+		StartTimeTicks: 101,
+		Cgroup:         "0::/restored\n",
+	}
+
+	originalRead := readRestoredHostProcessTable
+	originalValidate := validateRestoredProcessIdentity
+	originalRestore := restoreAndUnlockCUDAProcessTree
+	t.Cleanup(func() {
+		readRestoredHostProcessTable = originalRead
+		validateRestoredProcessIdentity = originalValidate
+		restoreAndUnlockCUDAProcessTree = originalRestore
+	})
+
+	readRestoredHostProcessTable = func(procRoot string) ([]snapshotruntime.ProcessDetails, error) {
+		if procRoot != snapshotruntime.HostProcPath {
+			t.Fatalf("ReadProcessTable proc root = %q, want %q", procRoot, snapshotruntime.HostProcPath)
+		}
+		return []snapshotruntime.ProcessDetails{hostProcess}, nil
+	}
+	validated := false
+	validateRestoredProcessIdentity = func(procRoot string, process snapshotruntime.ProcessDetails) error {
+		if procRoot != snapshotruntime.HostProcPath || process.OutermostPID != hostProcess.OutermostPID {
+			t.Fatalf("ValidateProcessIdentity(%q, PID %d), want (%q, PID %d)",
+				procRoot, process.OutermostPID, snapshotruntime.HostProcPath, hostProcess.OutermostPID)
+		}
+		validated = true
+		return nil
+	}
+	restored := false
+	restoreAndUnlockCUDAProcessTree = func(
+		ctx context.Context,
+		processes []snapshotruntime.ProcessDetails,
+		deviceMap, storageMode, checkpointDir, jobFile string,
+		targetGPUUUIDs []string,
+		transferSettings types.CUDATransferSettings,
+		_ logr.Logger,
+	) (cuda.RestorePhaseTimings, error) {
+		if len(processes) != 1 || processes[0].OutermostPID != hostProcess.OutermostPID {
+			t.Fatalf("CUDA restore processes = %+v, want host PID %d", processes, hostProcess.OutermostPID)
+		}
+		if deviceMap != "0=1" || storageMode != types.CUDAStorageModePOSIX || checkpointDir == "" {
+			t.Fatalf("CUDA restore args = device map %q, storage mode %q, checkpoint dir %q", deviceMap, storageMode, checkpointDir)
+		}
+		if len(targetGPUUUIDs) != 1 || targetGPUUUIDs[0] != "GPU-target" {
+			t.Fatalf("target GPU UUIDs = %v", targetGPUUUIDs)
+		}
+		restored = true
+		return cuda.RestorePhaseTimings{TotalDuration: 250 * time.Millisecond}, nil
+	}
+
+	duration, err := restoreDeferredCUDAProcesses(
+		context.Background(),
+		[]snapshotruntime.ProcessDetails{namespaceProcess},
+		&types.RestoreContainerSnapshot{
+			CUDADeviceMap:   "0=1",
+			CUDAStorageMode: types.CUDAStorageModePOSIX,
+			TargetGPUUUIDs:  []string{"GPU-target"},
+		},
+		t.TempDir(),
+		types.CUDATransferSettings{},
+		testr.New(t),
+	)
+	if err != nil {
+		t.Fatalf("restoreDeferredCUDAProcesses: %v", err)
+	}
+	if !validated || !restored {
+		t.Fatalf("validated = %t, restored = %t; want both true", validated, restored)
+	}
+	if duration != 250*time.Millisecond {
+		t.Fatalf("duration = %s, want 250ms", duration)
 	}
 }

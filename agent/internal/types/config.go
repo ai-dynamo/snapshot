@@ -18,11 +18,87 @@ const CheckpointBasePath = "/checkpoints"
 // AgentConfig holds the full agent configuration: static checkpoint settings
 // from the ConfigMap YAML, plus runtime fields from environment variables.
 type AgentConfig struct {
-	NodeName string          `yaml:"-"`
-	Storage  StorageSpec     `yaml:"storage"`
-	Overlay  OverlaySettings `yaml:"overlay"`
-	Restore  RestoreSpec     `yaml:"restore"`
-	CRIU     CRIUSettings    `yaml:"criu"`
+	NodeName       string                 `yaml:"-"`
+	Storage        StorageSpec            `yaml:"storage"`
+	CUDACheckpoint CUDACheckpointSettings `yaml:"cudaCheckpoint"`
+	Overlay        OverlaySettings        `yaml:"overlay"`
+	Restore        RestoreSpec            `yaml:"restore"`
+	CRIU           CRIUSettings           `yaml:"criu"`
+}
+
+// CUDACheckpointSettings holds CUDA CustomStorage transfer settings.
+type CUDACheckpointSettings struct {
+	StorageMode         string  `yaml:"storageMode"`
+	TransferBufferCount *int    `yaml:"transferBufferCount"`
+	TransferChunkBytes  *uint64 `yaml:"transferChunkBytes"`
+}
+
+// CUDATransferSettings is the validated, concrete transfer configuration used
+// by the CUDA helper daemon.
+type CUDATransferSettings struct {
+	BufferCount int
+	ChunkBytes  uint64
+}
+
+const (
+	// CUDAStorageModeLegacy uses the CUDA driver's original in-memory storage.
+	CUDAStorageModeLegacy = "legacy"
+	// CUDAStorageModePOSIX writes CUDA CustomStorage extents into checkpoint files.
+	CUDAStorageModePOSIX = "posix"
+
+	DefaultCUDATransferBufferCount = 1
+	DefaultCUDATransferChunkBytes  = 64 * 1024 * 1024
+	maxCUDATransferBufferCount     = 8
+	minCUDATransferChunkBytes      = 1 * 1024 * 1024
+	maxCUDATransferChunkBytes      = 256 * 1024 * 1024
+	maxCUDAPinnedBytesPerDevice    = 1 * 1024 * 1024 * 1024
+	cudaTransferBufferAlignment    = 4096
+
+	CUDAHelperSocketDirectory = "/run/cuda-checkpoint-helper"
+	CUDAHelperSocketPath      = CUDAHelperSocketDirectory + "/helper.sock"
+)
+
+func (c CUDACheckpointSettings) TransferSettings() CUDATransferSettings {
+	settings := CUDATransferSettings{
+		BufferCount: DefaultCUDATransferBufferCount,
+		ChunkBytes:  DefaultCUDATransferChunkBytes,
+	}
+	if c.TransferBufferCount != nil {
+		settings.BufferCount = *c.TransferBufferCount
+	}
+	if c.TransferChunkBytes != nil {
+		settings.ChunkBytes = *c.TransferChunkBytes
+	}
+	return settings
+}
+
+func (c CUDATransferSettings) WithDefaults() CUDATransferSettings {
+	settings := c
+	if settings.BufferCount == 0 {
+		settings.BufferCount = DefaultCUDATransferBufferCount
+	}
+	if settings.ChunkBytes == 0 {
+		settings.ChunkBytes = DefaultCUDATransferChunkBytes
+	}
+	return settings
+}
+
+func (c CUDATransferSettings) Validate() error {
+	if c.BufferCount < 1 || c.BufferCount > maxCUDATransferBufferCount {
+		return fmt.Errorf("buffer count must be between 1 and %d", maxCUDATransferBufferCount)
+	}
+	if c.ChunkBytes < minCUDATransferChunkBytes || c.ChunkBytes > maxCUDATransferChunkBytes || c.ChunkBytes%cudaTransferBufferAlignment != 0 {
+		return fmt.Errorf(
+			"chunk bytes must be a %d-byte multiple between %d and %d",
+			cudaTransferBufferAlignment,
+			minCUDATransferChunkBytes,
+			maxCUDATransferChunkBytes,
+		)
+	}
+	if uint64(c.BufferCount) > maxCUDAPinnedBytesPerDevice/c.ChunkBytes {
+		return fmt.Errorf("buffers exceed the 1 GiB per-device pinned-memory limit")
+	}
+	return nil
 }
 
 func (c *AgentConfig) LoadEnvOverrides() {
@@ -56,6 +132,35 @@ func (c *AgentConfig) Validate() error {
 		return &ConfigError{
 			Field:   "criu.imageIoMode",
 			Message: fmt.Sprintf("unsupported imageIoMode %q; expected %q, %q, or empty", c.CRIU.ImageIoMode, "writeback", "direct"),
+		}
+	}
+	if c.CUDACheckpoint.TransferBufferCount == nil {
+		value := DefaultCUDATransferBufferCount
+		c.CUDACheckpoint.TransferBufferCount = &value
+	}
+	if c.CUDACheckpoint.TransferChunkBytes == nil {
+		value := uint64(DefaultCUDATransferChunkBytes)
+		c.CUDACheckpoint.TransferChunkBytes = &value
+	}
+	if err := c.CUDACheckpoint.TransferSettings().Validate(); err != nil {
+		return &ConfigError{Field: "cudaCheckpoint", Message: err.Error()}
+	}
+	storageMode := strings.ToLower(strings.TrimSpace(c.CUDACheckpoint.StorageMode))
+	if storageMode == "" {
+		storageMode = CUDAStorageModeLegacy
+	}
+	switch storageMode {
+	case CUDAStorageModeLegacy, CUDAStorageModePOSIX:
+		c.CUDACheckpoint.StorageMode = storageMode
+	default:
+		return &ConfigError{
+			Field: "cudaCheckpoint.storageMode",
+			Message: fmt.Sprintf(
+				"unsupported CUDA storage mode %q; expected %q or %q",
+				c.CUDACheckpoint.StorageMode,
+				CUDAStorageModeLegacy,
+				CUDAStorageModePOSIX,
+			),
 		}
 	}
 	return c.Restore.Validate()

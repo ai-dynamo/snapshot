@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -163,6 +164,18 @@ func (w *NodeController) captureLeaseHeldElsewhere(ctx context.Context, content 
 		*lease.Spec.HolderIdentity != w.holderID
 }
 
+func (w *NodeController) captureLeaseExpired(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, contentUID, containerName string) (*coordinationv1.Lease, bool, error) {
+	key := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: checkpointLeaseName(contentUID, containerName)}
+	lease, err := w.clientset.CoordinationV1().Leases(key.Namespace).Get(ctx, key.Name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("read checkpoint lease %s before capture: %w", key.String(), err)
+	}
+	return lease, checkpointLeaseExpired(lease, time.Now()), nil
+}
+
 // failContentFromGate records a terminal failure from the pre-bind gate, which has no workqueue
 // to surface errors to: a failed status write is logged and left to the informer resync.
 func (w *NodeController) failContentFromGate(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, reason string, cause error) {
@@ -259,6 +272,34 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	if artifactPresent(artifactPath, contentUID, containerName) {
 		return w.markCheckpointReady(ctx, content)
 	}
+	lease, expiredLease, err := w.captureLeaseExpired(ctx, content, contentUID, containerName)
+	if err != nil {
+		return err
+	}
+	if expiredLease {
+		// The abandoned attempt may have parked the CUDA process before the agent
+		// died. Refuse replay and terminate only the exact source identity persisted
+		// before mutation. A restarted container is never signaled.
+		causeMessage := "a prior checkpoint lease expired without a committed artifact; CRIU/CUDA outcome is unknown and will not be replayed"
+		target, targetErr := captureTargetFromLease(lease)
+		if targetErr != nil {
+			causeMessage += fmt.Sprintf("; exact source termination was not attempted because the lease identity is unavailable: %v", targetErr)
+		} else if target.podUID != string(pod.UID) {
+			causeMessage += fmt.Sprintf("; exact source termination was not attempted because lease pod UID %q does not match current pod UID %q", target.podUID, pod.UID)
+		} else if status := containerStatusForName(pod, containerName); status == nil ||
+			snapshotruntime.StripCRIScheme(status.ContainerID) != target.containerID || status.State.Running == nil {
+			causeMessage += "; the recorded source container is no longer the current running container"
+		} else if killErr := w.killCheckpointContainer(ctx, logger, target.containerID, target.pid, "unknown checkpoint outcome"); killErr != nil {
+			var identityChanged *checkpointContainerIdentityChangedError
+			if errors.As(killErr, &identityChanged) {
+				causeMessage += "; the recorded source process identity is no longer current"
+			} else {
+				return fmt.Errorf("terminate source after unknown checkpoint outcome: %w", killErr)
+			}
+		}
+		w.removeCaptureEligibleLabel(ctx, pod)
+		return w.setSnapshotContentFailed(ctx, content, "CheckpointOutcomeUnknown", errors.New(causeMessage))
+	}
 
 	// The in-flight guard held above is process-local; overlapping agent instances arbitrate
 	// through the shared capture Lease. A foreign unexpired holder may be between killing the
@@ -294,7 +335,11 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		return w.setSnapshotContentFailed(ctx, content, "ContainerNotResolved", fmt.Errorf("resolve container %q: %w", containerName, err))
 	}
 	leaseKey := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: checkpointLeaseName(contentUID, containerName)}
-	acquired, err := w.acquireLease(ctx, leaseKey)
+	acquired, err := w.acquireLease(ctx, leaseKey, captureLeaseTarget{
+		podUID:      string(pod.UID),
+		containerID: containerID,
+		pid:         containerPID,
+	})
 	if err != nil {
 		return fmt.Errorf("acquire checkpoint lease %s: %w", leaseKey.String(), err)
 	}
@@ -376,7 +421,7 @@ func (w *NodeController) runCheckpoint(
 				}
 			}
 		}
-		if killErr := w.killCheckpointProcess(logger, containerPID, "checkpoint lease cancelled"); killErr != nil {
+		if killErr := w.killCheckpointContainer(ctx, logger, containerID, containerPID, "checkpoint lease cancelled"); killErr != nil {
 			logger.Error(killErr, "Failed to kill target after lease cancellation", "content", content.Name)
 		}
 		return
@@ -579,8 +624,9 @@ func (w *NodeController) setSnapshotContentFailed(ctx context.Context, content *
 
 // executorCheckpoint is the production checkpointFn. The reconciler has already resolved the
 // container ID and host PID. It runs executor.Checkpoint to the destination and verifies the
-// artifact directory. On dump or verification failure it SIGKILLs the CUDA-locked process before
-// returning the error; on success the dump itself has already terminated the source process.
+// artifact directory. Proven pre-mutation failures preserve the source; failures that may have
+// mutated it and post-capture verification failures re-resolve the container before terminating it.
+// On success the dump itself has already terminated the source process.
 func (w *NodeController) executorCheckpoint(ctx context.Context, params CheckpointParams) error {
 	log := logr.FromContextOrDiscard(ctx)
 
@@ -596,8 +642,10 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		Clientset:     w.clientset,
 	}
 	if err := executor.Checkpoint(ctx, w.runtime, log, req, w.config); err != nil {
-		if killErr := w.killCheckpointProcess(log, params.ContainerPID, "checkpoint failed"); killErr != nil {
-			log.Error(killErr, "Failed to kill target after checkpoint failure")
+		if checkpointFailureRequiresTermination(err) {
+			if killErr := w.killCheckpointContainer(ctx, log, params.ContainerID, params.ContainerPID, "checkpoint failed"); killErr != nil {
+				log.Error(killErr, "Failed to kill target after checkpoint failure")
+			}
 		}
 		return fmt.Errorf("checkpoint: %w", err)
 	}
@@ -610,7 +658,7 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		} else {
 			verifyErr = fmt.Errorf("verify checkpoint path %s: not a directory", params.HostPath)
 		}
-		if killErr := w.killCheckpointProcess(log, params.ContainerPID, "checkpoint verification failed"); killErr != nil {
+		if killErr := w.killCheckpointContainer(ctx, log, params.ContainerID, params.ContainerPID, "checkpoint verification failed"); killErr != nil {
 			log.Error(killErr, "Failed to kill target after checkpoint verification failure")
 		}
 		return verifyErr
@@ -619,10 +667,30 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 	return nil
 }
 
-// killCheckpointProcess SIGKILLs the CUDA-locked process so it does not hang after a failed dump.
-// ESRCH (already exited) is success. Any other signal error is returned so callers can fail closed.
-func (w *NodeController) killCheckpointProcess(log logr.Logger, pid int, reason string) error {
-	if err := snapshotruntime.SendSignalToPID(log, pid, syscall.SIGKILL, reason); err != nil {
+// checkpointFailureRequiresTermination preserves the source only when every
+// failing layer proves that no CRIU or CUDA mutation began.
+func checkpointFailureRequiresTermination(err error) bool {
+	return !executor.CheckpointFailedBeforeTargetMutation(err)
+}
+
+// killCheckpointContainer re-resolves the CRI container immediately before
+// signaling. It refuses to use a stale PID if the container disappeared or
+// restarted while the potentially long checkpoint operation was running.
+func (w *NodeController) killCheckpointContainer(ctx context.Context, log logr.Logger, containerID string, expectedPID int, reason string) error {
+	resolveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	currentPID, _, err := w.runtime.ResolveContainer(resolveCtx, containerID)
+	if err != nil {
+		return fmt.Errorf("refusing to terminate checkpoint container %q without current runtime identity: %w", containerID, err)
+	}
+	if currentPID != expectedPID {
+		return &checkpointContainerIdentityChangedError{
+			containerID: containerID,
+			currentPID:  currentPID,
+			expectedPID: expectedPID,
+		}
+	}
+	if err := w.sendSignalFn(log, currentPID, syscall.SIGKILL, reason); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			return nil
 		}
@@ -632,14 +700,31 @@ func (w *NodeController) killCheckpointProcess(log logr.Logger, pid int, reason 
 	return nil
 }
 
+type checkpointContainerIdentityChangedError struct {
+	containerID string
+	currentPID  int
+	expectedPID int
+}
+
+func (e *checkpointContainerIdentityChangedError) Error() string {
+	return fmt.Sprintf("refusing to terminate checkpoint container %q: current PID %d does not match expected PID %d", e.containerID, e.currentPID, e.expectedPID)
+}
+
 // containerIDForName returns the running container's CRI-stripped ID, or "" if absent.
 func containerIDForName(pod *corev1.Pod, containerName string) string {
-	for _, cs := range pod.Status.ContainerStatuses {
-		if cs.Name == containerName {
-			return snapshotruntime.StripCRIScheme(cs.ContainerID)
-		}
+	if status := containerStatusForName(pod, containerName); status != nil {
+		return snapshotruntime.StripCRIScheme(status.ContainerID)
 	}
 	return ""
+}
+
+func containerStatusForName(pod *corev1.Pod, containerName string) *corev1.ContainerStatus {
+	for i := range pod.Status.ContainerStatuses {
+		if pod.Status.ContainerStatuses[i].Name == containerName {
+			return &pod.Status.ContainerStatuses[i]
+		}
+	}
+	return nil
 }
 
 // isContentTerminal reports whether the work order already has a terminal condition.

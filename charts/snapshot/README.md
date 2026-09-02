@@ -167,6 +167,11 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `storage.pvc.size` | Requested PVC size | `1Ti` |
 | `storage.pvc.storageClass` | Storage class name | `""` |
 | `storage.pvc.basePath` | Fixed checkpoint mount path enforced by the privileged helper | `/checkpoints` |
+| `config.cudaCheckpoint.storageMode` | Storage mode for newly created CUDA checkpoints: `legacy` or explicitly enabled `posix` CustomStorage | `legacy` |
+| `config.cudaCheckpoint.transferBufferCount` | Pinned CustomStorage pipeline slots per CUDA device (1-8) | `4` |
+| `config.cudaCheckpoint.transferChunkBytes` | Bytes per pinned slot (1-256 MiB, 4096-byte aligned) | `67108864` |
+| `config.cudaCheckpoint.daemon.maxOperationSeconds` | Cooperative extent-transfer/health watchdog (maximum one hour; CUDA driver calls are not forcibly interruptible) | `3600` |
+| `config.restore.restoreTimeoutSeconds` | Overall restore deadline; default covers the qualified two-CUDA-PID workload within one target container and must scale by 65 minutes per additional CUDA-owning process | `8100` |
 | `seccomp.deploy` | Deploy the CRIU seccomp profile ConfigMap and init container. Use this field name; `seccomp.enabled` is not a chart value | `true` |
 | `runtime.type` | CRI backend: `containerd` or `crio` | `containerd` |
 | `runtime.socketPath` | CRI socket (empty = default for `runtime.type`) | `""` |
@@ -177,6 +182,50 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 
 Reserved `s3` and `oci` values remain chart-owned placeholders for future
 snapshot backends, but only `pvc` is implemented today.
+
+CustomStorage is opt-in for new checkpoints. Set
+`config.cudaCheckpoint.storageMode=posix` only on nodes whose helper advertises
+the CUDA 13.4 CustomStorage completion API and the Snapshot-local POSIX adapter.
+Snapshot rejects the checkpoint before locking the target when the requested
+capability is unavailable; it does not silently produce a legacy artifact.
+The first rollout is limited to one GPU (TP1). A container may have multiple
+CUDA-owning processes in that GPU's process tree. Checkpoint creation and
+restore reject larger POSIX topologies before CUDA or
+CRIU mutation. Four 64 MiB transfer slots are the qualified TP1 setting.
+Changing the value back to `legacy` affects new checkpoints only. Restore uses
+the storage mode recorded in each checkpoint manifest so already published
+POSIX checkpoints remain restorable.
+
+The CUDA helper sidecar is mandatory for CUDA-bearing `legacy` and `posix`
+operations in this release, but the agent controller starts independently so
+CPU-only checkpoint/restore remains available if the helper is unhealthy.
+Before a CUDA-bearing operation mutates its target, Snapshot waits for helper
+health and the capabilities required by the selected storage mode. This
+prevents a systemic helper or driver failure from being mistaken for a
+negative CUDA process probe and producing a CRIU-only checkpoint for a GPU
+workload. Deploy the agent and sidecar together; changing the ConfigMap rolls
+the DaemonSet pods.
+Before a planned agent upgrade or restart, drain every live target that has
+completed a CustomStorage checkpoint or restore on that helper. Unexpected
+helper restart while such a target remains live is not qualified in V1.
+
+V1 serializes CUDA checkpoint and restore sequences within one agent pod. A
+sequence may cover multiple CUDA-owning PIDs from one workload, but another
+workload handled by that agent waits until the active sequence completes. Run
+at most one Snapshot agent installation on a node: separate DaemonSets are not
+coordinated and can issue overlapping CUDA operations. Host-scoped coordination
+and per-GPU concurrency are follow-ups.
+
+POSIX manifests require a reader that understands `cudaRestore.storageMode`.
+Do not roll the agent back to a release predating that field while any POSIX
+artifacts remain eligible for restore. Disable new POSIX creation, retire or
+migrate those artifacts according to their retention policy, and only then
+roll back. Legacy manifests from older releases remain readable.
+
+`transferBufferCount * transferChunkBytes` must not exceed 1 GiB
+(1073741824 bytes) of pinned memory per CUDA device. Increase the CUDA helper's
+memory limit when increasing either transfer setting or the number of GPUs used
+by one operation.
 
 See [values.yaml](./values.yaml) for the full configuration surface.
 

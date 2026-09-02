@@ -52,14 +52,18 @@ type fakeRuntime struct {
 	containerIDByPod     string
 	resolvedContainerIDs []string
 	resolveContainerPID  int
+	requireLiveContext   bool
 }
 
 var _ snapshotruntime.Runtime = (*fakeRuntime)(nil)
 
-func (r *fakeRuntime) ResolveContainer(_ context.Context, id string) (int, *specs.Spec, error) {
+func (r *fakeRuntime) ResolveContainer(ctx context.Context, id string) (int, *specs.Spec, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.resolvedContainerIDs = append(r.resolvedContainerIDs, id)
+	if r.requireLiveContext && ctx.Err() != nil {
+		return 0, nil, ctx.Err()
+	}
 	if r.resolveContainerPID > 0 {
 		return r.resolveContainerPID, &specs.Spec{}, nil
 	}
@@ -1362,8 +1366,13 @@ func TestRunRestoreCleanupFailureStillCompletesRestore(t *testing.T) {
 	assert.True(t, sawEventReason(w.clientset.(*fake.Clientset), "RestoreCleanupFailed"))
 }
 
-func TestRunRestoreRetriesFullRestoreUntilFailureCleanupSucceeds(t *testing.T) {
+func TestRunRestoreDoesNotReplayUnknownOutcome(t *testing.T) {
 	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+		Type:   corev1.PodConditionType(podcontract.RestoredCondition),
+		Status: corev1.ConditionFalse,
+		Reason: podcontract.RestoreReasonInProgress,
+	})
 	w := makeTestController(t, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
 	artifact := &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"}
@@ -1375,19 +1384,40 @@ func TestRunRestoreRetriesFullRestoreUntilFailureCleanupSucceeds(t *testing.T) {
 	signalCalls := 0
 	w.sendSignalFn = func(logr.Logger, int, syscall.Signal, string) error {
 		signalCalls++
-		if signalCalls == 1 {
-			return errors.New("placeholder still busy")
-		}
 		return nil
 	}
+	w.controlSentinelExistsFn = func(int, string) (bool, error) { return false, nil }
 
 	err := w.runRestore(context.Background(), pod, artifact, "main", "ctr-abc", time.Time{}, true)
 	require.Error(t, err)
-	assert.Equal(t, 1, restoreCalls)
+	assert.Contains(t, err.Error(), "unknown CRIU/CUDA outcome")
+	assert.Equal(t, 0, restoreCalls, "an unknown CRIU/CUDA outcome must not be replayed")
+	assert.Equal(t, 1, signalCalls)
+}
 
-	err = w.runRestore(context.Background(), pod, artifact, "main", "ctr-abc", time.Time{}, false)
+func TestFailRestoreUsesCleanupContextAfterControllerCancellation(t *testing.T) {
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+	w := makeTestController(t, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 4242, requireLiveContext: true}
+	signalCalls := 0
+	w.sendSignalFn = func(logr.Logger, int, syscall.Signal, string) error {
+		signalCalls++
+		return nil
+	}
+	op := w.newRestoreOperation(
+		pod,
+		&restoreArtifact{SnapshotName: "snapshot-a", SourceContainerName: "main"},
+		"main",
+		"ctr-abc",
+		time.Time{},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := op.failRestore(ctx, errors.New("restore interrupted"))
 	require.Error(t, err)
-	assert.Equal(t, 2, restoreCalls, "CRIU restore should retry when the previous cleanup did not finish")
+	assert.Contains(t, err.Error(), "restore interrupted")
+	assert.Equal(t, 1, signalCalls)
 }
 
 func TestRunRestoreFailureKillsPlaceholder(t *testing.T) {
@@ -1453,4 +1483,43 @@ func TestCheckpointLeaseNameUsesContentAndContainer(t *testing.T) {
 	b := checkpointLeaseName("content-uid", "worker")
 	assert.NotEqual(t, a, b)
 	assert.True(t, strings.HasPrefix(a, "snapshot-capture-"))
+}
+
+func TestCheckpointLeasePersistsTargetIdentityAcrossRenewalAndTakeover(t *testing.T) {
+	w := makeTestController(t, nil)
+	key := client.ObjectKey{Namespace: "inference", Name: "capture-identity"}
+	first := captureLeaseTarget{podUID: "pod-a", containerID: "container-a", pid: 101}
+
+	acquired, err := w.acquireLease(context.Background(), key, first)
+	require.NoError(t, err)
+	require.True(t, acquired)
+	lease, err := w.clientset.CoordinationV1().Leases(key.Namespace).Get(context.Background(), key.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	got, err := captureTargetFromLease(lease)
+	require.NoError(t, err)
+	assert.Equal(t, first, got)
+
+	require.NoError(t, w.renewLeaseOnce(context.Background(), key))
+	lease, err = w.clientset.CoordinationV1().Leases(key.Namespace).Get(context.Background(), key.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	got, err = captureTargetFromLease(lease)
+	require.NoError(t, err)
+	assert.Equal(t, first, got)
+
+	expired := metav1.NewMicroTime(time.Now().Add(-2 * checkpointLeaseDuration))
+	otherHolder := "snapshot-agent/expired"
+	lease.Spec.HolderIdentity = &otherHolder
+	lease.Spec.RenewTime = &expired
+	_, err = w.clientset.CoordinationV1().Leases(key.Namespace).Update(context.Background(), lease, metav1.UpdateOptions{})
+	require.NoError(t, err)
+
+	second := captureLeaseTarget{podUID: "pod-b", containerID: "container-b", pid: 202}
+	acquired, err = w.acquireLease(context.Background(), key, second)
+	require.NoError(t, err)
+	require.True(t, acquired)
+	lease, err = w.clientset.CoordinationV1().Leases(key.Namespace).Get(context.Background(), key.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	got, err = captureTargetFromLease(lease)
+	require.NoError(t, err)
+	assert.Equal(t, second, got)
 }
