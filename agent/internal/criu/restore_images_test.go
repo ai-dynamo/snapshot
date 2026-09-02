@@ -48,6 +48,14 @@ func TestPrepareRestoreImageDirRewritesObservedSocketTopology(t *testing.T) {
 	if got := restored[0].Usk.Name; !bytes.HasPrefix(got, []byte("\x00dynamo-")) {
 		t.Fatalf("CUDA listener address = %q, want Dynamo abstract address", got)
 	}
+	for _, index := range []int{2, 3} {
+		if got := restored[index].Usk.Name; !bytes.HasPrefix(got, []byte("\x00dynamo-")) {
+			t.Fatalf("NCCL datagram address %d = %q, want Dynamo abstract address", index, got)
+		}
+	}
+	if bytes.Equal(restored[2].Usk.Name, restored[3].Usk.Name) {
+		t.Fatal("distinct NCCL datagram addresses were rewritten to the same address")
+	}
 	clientPort := restored[5].Isk.GetSrcPort()
 	if clientPort == entries[5].Isk.GetSrcPort() {
 		t.Fatalf("TCP client port was not rewritten")
@@ -71,6 +79,8 @@ func TestPrepareRestoreImageDirRewritesObservedSocketTopology(t *testing.T) {
 		want := proto.Clone(original).(*fdinfo.FileEntry)
 		switch i {
 		case 0:
+			want.Usk.Name = restored[i].Usk.Name
+		case 2, 3:
 			want.Usk.Name = restored[i].Usk.Name
 		case 5:
 			want.Isk.SrcPort = proto.Uint32(clientPort)
@@ -277,8 +287,8 @@ func observedSocketTopology() []*fdinfo.FileEntry {
 	return []*fdinfo.FileEntry{
 		newUnixSocketEntry(1, []byte("\x00cuda-uvmfd-4026554902-1195\x00"), 101, unix.SOCK_SEQPACKET, linuxUnixSocketStateListen),
 		newUnixSocketEntry(2, []byte("/tmp/4c85f2c6-ea0e-45cb-b7ee-fd519aba82d0\x00"), 102, unix.SOCK_STREAM, linuxUnixSocketStateListen),
-		newUnixSocketEntry(3, []byte("\x00047f9"), 103, unix.SOCK_DGRAM, 7),
-		newUnixSocketEntry(4, []byte("\x00047ff"), 104, unix.SOCK_DGRAM, 7),
+		newUnixSocketEntry(3, paddedUnixSocketName("\x00tmp/nccl-socket-2-fe65a3cdb8ee726d"), 103, unix.SOCK_DGRAM, linuxUnixSocketStateClose),
+		newUnixSocketEntry(4, paddedUnixSocketName("\x00tmp/nccl-socket-7-a4664b9b9bbb512"), 104, unix.SOCK_DGRAM, linuxUnixSocketStateClose),
 		listener,
 		client,
 		server,
@@ -287,6 +297,12 @@ func observedSocketTopology() []*fdinfo.FileEntry {
 		dualStackClient,
 		dualStackServer,
 	}
+}
+
+func paddedUnixSocketName(name string) []byte {
+	result := make([]byte, 108)
+	copy(result, name)
+	return result
 }
 
 func newUnixSocketEntry(id uint32, name []byte, inode uint32, socketType int, state uint32) *fdinfo.FileEntry {
