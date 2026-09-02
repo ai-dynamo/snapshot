@@ -8,6 +8,7 @@ import (
 	"errors"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -19,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -72,6 +74,61 @@ func TestReconcilePodSnapshotContent_ContentGetErrorReturns(t *testing.T) {
 	// The gate could not read the work order, so it must not have promoted the pod.
 	_, labeled := getPod(t, w, "inference", "worker-0").Labels[snapshotv1alpha1.CaptureEligibleLabel]
 	assert.False(t, labeled)
+}
+
+func TestReconcilePodSnapshotContent_ContentGetHasDeadline(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	pod := makeSourcePod()
+	var remaining time.Duration
+	funcs := interceptor.Funcs{
+		Get: func(ctx context.Context, _ client.WithWatch, _ client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
+			if _, ok := obj.(*snapshotv1alpha1.PodSnapshotContent); ok {
+				deadline, hasDeadline := ctx.Deadline()
+				require.True(t, hasDeadline)
+				remaining = time.Until(deadline)
+				return context.DeadlineExceeded
+			}
+			return errors.New("unexpected Get")
+		},
+	}
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content, pod)
+
+	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+
+	assert.Positive(t, remaining)
+	assert.LessOrEqual(t, remaining, snapshotContentReconcileTimeout)
+}
+
+func TestEnqueuePodSnapshotContent_QueuesOnlyActiveLocalWork(t *testing.T) {
+	active := makeWorkOrder("podsnapshotcontent-active", "node-a", "active")
+	ready := makeWorkOrder("podsnapshotcontent-ready", "node-a", "ready")
+	meta.SetStatusCondition(&ready.Status.Conditions, metav1.Condition{
+		Type:   snapshotv1alpha1.PodSnapshotConditionReady,
+		Status: metav1.ConditionTrue,
+		Reason: "Captured",
+	})
+	foreign := makeWorkOrder("podsnapshotcontent-foreign", "node-b", "foreign")
+	deleting := makeWorkOrder("podsnapshotcontent-deleting", "node-a", "deleting")
+	now := metav1.Now()
+	deleting.DeletionTimestamp = &now
+
+	w := &NodeController{
+		config:       &snapshottypes.AgentConfig{NodeName: "node-a"},
+		contentQueue: workqueue.NewTypedDelayingQueue[string](),
+	}
+	defer w.contentQueue.ShutDown()
+
+	w.enqueuePodSnapshotContent(mustUnstructured(t, ready))
+	w.enqueuePodSnapshotContent(mustUnstructured(t, foreign))
+	w.enqueuePodSnapshotContent(mustUnstructured(t, deleting))
+	assert.Zero(t, w.contentQueue.Len())
+
+	w.enqueuePodSnapshotContent(mustUnstructured(t, active))
+	require.Equal(t, 1, w.contentQueue.Len())
+	name, shutdown := w.contentQueue.Get()
+	require.False(t, shutdown)
+	assert.Equal(t, active.Name, name)
+	w.contentQueue.Done(name)
 }
 
 func TestReconcilePodSnapshotContent_SourcePodGetErrorReturns(t *testing.T) {
