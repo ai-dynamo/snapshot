@@ -36,8 +36,10 @@ type CheckpointContainerSnapshot struct {
 
 // RestoreContainerSnapshot holds inspected state for the restore target.
 type RestoreContainerSnapshot struct {
-	PlaceholderPID int
-	TargetRoot     string
-	CgroupRoot     string
-	CUDADeviceMap  string
+	PlaceholderPID  int
+	TargetRoot      string
+	CgroupRoot      string
+	CUDADeviceMap   string
+	TargetGPUUUIDs  []string
+	CUDAStorageMode string
 }

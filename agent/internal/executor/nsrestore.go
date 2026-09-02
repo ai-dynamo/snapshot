@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -32,12 +31,13 @@ type RestoreOptions struct {
 }
 
 type RestoreInNamespaceResult struct {
-	RestoredPID            int           `json:"restoredPID"`
-	CleanupError           *CleanupError `json:"cleanupError,omitempty"`
-	OverlayCaptureDuration time.Duration `json:"overlayCaptureDuration"`
-	CRIUPrepareDuration    time.Duration `json:"criuPrepareDuration"`
-	CRIURestoreDuration    time.Duration `json:"criuRestoreDuration"`
-	CUDARestoreDuration    time.Duration `json:"cudaRestoreDuration"`
+	RestoredPID            int                              `json:"restoredPID"`
+	CleanupError           *CleanupError                    `json:"cleanupError,omitempty"`
+	OverlayCaptureDuration time.Duration                    `json:"overlayCaptureDuration"`
+	CRIUPrepareDuration    time.Duration                    `json:"criuPrepareDuration"`
+	CRIURestoreDuration    time.Duration                    `json:"criuRestoreDuration"`
+	CUDARestoreDuration    time.Duration                    `json:"cudaRestoreDuration"`
+	DeferredCUDAProcesses  []snapshotruntime.ProcessDetails `json:"deferredCUDAProcesses,omitempty"`
 	// CuinterposeRestoreDuration is the coordinator's restore step, which runs
 	// after the native CUDA restore and rebuilds shared memory topology.
 	CuinterposeRestoreDuration time.Duration `json:"cuinterposeRestoreDuration"`
@@ -102,6 +102,7 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		CRIUPrepareDuration:        executeTimings.criuPrepareDuration,
 		CRIURestoreDuration:        executeTimings.criuRestoreDuration,
 		CUDARestoreDuration:        executeTimings.cudaRestoreDuration,
+		DeferredCUDAProcesses:      executeTimings.deferredCUDAProcesses,
 		CuinterposeRestoreDuration: executeTimings.cuinterposeRestoreDuration,
 	}
 	if cleanupErr != nil {
@@ -118,6 +119,7 @@ type nsrestorePhaseTimings struct {
 	criuPrepareDuration        time.Duration
 	criuRestoreDuration        time.Duration
 	cudaRestoreDuration        time.Duration
+	deferredCUDAProcesses      []snapshotruntime.ProcessDetails
 	cuinterposeRestoreDuration time.Duration
 }
 
@@ -165,36 +167,11 @@ func executeRestore(
 		}
 	}()
 
-	// Open the cuda-checkpoint-helper fd BEFORE CRIU runs. CRIU restores the
-	// original mount namespace of the checkpointed process, which did not include
-	// the bundle mount at /tmp/snapshot-binaries. The C helper's umount code
-	// tolerates ENOENT from umount2 with the comment "Already gone (CRIU removed
-	// it during namespace restore)" — confirming this is observed behaviour. By
-	// opening the binary now and exec'ing via /proc/self/fd/N after CRIU returns,
-	// the fd remains valid even if the mount is gone.
-	var cudaHelperFdPath string
-	var coordinatorFdPath string
-	if !m.CUDA.IsEmpty() {
-		helperPath := filepath.Join(opts.BundleDir, cuda.HelperBinaryName)
-		f, err := os.Open(helperPath)
-		if err != nil {
-			return nil, 0, nil, fmt.Errorf("failed to open cuda-checkpoint-helper before CRIU restore: %w", err)
-		}
-		defer f.Close()
-		cudaHelperFdPath = fmt.Sprintf("/proc/self/fd/%d", f.Fd())
-	}
 	if m.Cuinterpose.Prepared {
 		if err := requireCuinterposeState(m, opts.CheckpointPath); err != nil {
 			return nil, 0, nil, err
 		}
-		coordinator, err := os.Open(filepath.Join(opts.BundleDir, cuda.CoordinatorBinaryName))
-		if err != nil {
-			return nil, 0, nil, fmt.Errorf("failed to open %s before CRIU restore: %w", cuda.CoordinatorBinaryName, err)
-		}
-		defer coordinator.Close()
-		coordinatorFdPath = fmt.Sprintf("/proc/self/fd/%d", coordinator.Fd())
 	}
-
 	// The restore-complete sentinel lives on the pod emptyDir mounted at
 	// SnapshotControlMountPath. Clear it here, in that mount namespace, so a
 	// leftover from an earlier incarnation cannot release the restored process
@@ -221,7 +198,9 @@ func executeRestore(
 		return nil, 0, nil, err
 	}
 	restoredPID = int(criuPID)
-	// Cleanup runs after CUDA unlock. A cleanup-only failure is returned
+	// Cleanup releases only CRIU-owned files and scratch paths. It runs when
+	// nsrestore returns, before the host agent asks the CUDA daemon to restore
+	// and unlock the parked processes. A cleanup-only failure is returned
 	// separately so the host controller can warn without killing the workload.
 	defer func() {
 		if err := cleanup(); err != nil {
@@ -264,8 +243,9 @@ func executeRestore(
 		)
 	}
 
-	// CUDA restore — remap checkpoint-time innermost namespace PIDs onto the
-	// current visible restored PIDs before invoking cuda-checkpoint.
+	// Resolve the restored CUDA processes while still inside the restored PID
+	// namespace. The host agent maps these identities to host PIDs and delegates
+	// restore to the always-on CUDA helper daemon after nsrestore returns.
 	if !m.CUDA.IsEmpty() {
 		restorePIDs, err := snapshotruntime.ResolveManifestPIDsToObservedPIDs(processes, restoredPID, m.CUDA.PIDs)
 		if err != nil {
@@ -276,23 +256,12 @@ func executeRestore(
 			"restored_cuda_pids", restorePIDs,
 			"criu_callback_pid", restoredPID,
 		)
-		cudaStart := time.Now()
-		_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, log)
-		timings.cudaRestoreDuration = time.Since(cudaStart)
-		if err != nil {
-			return nil, 0, nil, fmt.Errorf("CUDA restore failed: %w", err)
-		}
-		if m.Cuinterpose.Prepared {
-			// The driver is unlocked so the shims can issue CUDA calls, but the
-			// application itself is still parked in its restore-complete poll
-			// loop, so nothing else touches the shared memory while the
-			// coordinator rebuilds it.
-			cuinterposeStart := time.Now()
-			_, err := cuda.RestoreCuinterpose(ctx, opts.CheckpointPath, restorePIDs, m.CUDA.PIDs, coordinatorFdPath, log)
-			timings.cuinterposeRestoreDuration = time.Since(cuinterposeStart)
+		for _, pid := range restorePIDs {
+			process, err := snapshotruntime.ReadProcessDetails("/proc", pid)
 			if err != nil {
-				return nil, 0, nil, fmt.Errorf("restore cuinterpose: %w", err)
+				return nil, 0, nil, fmt.Errorf("capture restored CUDA process identity for PID %d: %w", pid, err)
 			}
+			timings.deferredCUDAProcesses = append(timings.deferredCUDAProcesses, process)
 		}
 	}
 

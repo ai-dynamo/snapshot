@@ -9,6 +9,35 @@ kind: ConfigMap
 {{- if ne .Values.storage.pvc.basePath "/checkpoints" }}
 {{- fail "snapshot.storage.pvc.basePath is fixed at /checkpoints so the privileged mount helper can enforce its source allowlist" }}
 {{- end }}
+{{- $maxOperationSecondsValue := .Values.config.cudaCheckpoint.daemon.maxOperationSeconds }}
+{{- include "snapshot.requireIntegral" (dict "value" $maxOperationSecondsValue "path" "config.cudaCheckpoint.daemon.maxOperationSeconds") }}
+{{- if or (lt (int64 $maxOperationSecondsValue) 1) (gt (int64 $maxOperationSecondsValue) 3600) }}
+{{- fail "snapshot.config.cudaCheckpoint.daemon.maxOperationSeconds must be between 1 and 3600" }}
+{{- end }}
+{{- $restoreTimeoutSecondsValue := .Values.config.restore.restoreTimeoutSeconds }}
+{{- include "snapshot.requireIntegral" (dict "value" $restoreTimeoutSecondsValue "path" "config.restore.restoreTimeoutSeconds") }}
+{{- if lt (int64 $restoreTimeoutSecondsValue) 1 }}
+{{- fail "snapshot.config.restore.restoreTimeoutSeconds must be greater than zero" }}
+{{- end }}
+{{- $transferBufferCountValue := .Values.config.cudaCheckpoint.transferBufferCount }}
+{{- include "snapshot.requireIntegral" (dict "value" $transferBufferCountValue "path" "config.cudaCheckpoint.transferBufferCount") }}
+{{- $transferChunkBytesValue := .Values.config.cudaCheckpoint.transferChunkBytes }}
+{{- include "snapshot.requireIntegral" (dict "value" $transferChunkBytesValue "path" "config.cudaCheckpoint.transferChunkBytes") }}
+{{- $transferBufferCount := int $transferBufferCountValue }}
+{{- $transferChunkBytes := int64 $transferChunkBytesValue }}
+{{- if or (lt $transferBufferCount 1) (gt $transferBufferCount 8) }}
+{{- fail "snapshot.config.cudaCheckpoint.transferBufferCount must be between 1 and 8" }}
+{{- end }}
+{{- if or (lt $transferChunkBytes 1048576) (gt $transferChunkBytes 268435456) (ne (mod $transferChunkBytes 4096) 0) }}
+{{- fail "snapshot.config.cudaCheckpoint.transferChunkBytes must be a 4096-byte multiple between 1048576 and 268435456" }}
+{{- end }}
+{{- if gt (mul $transferBufferCount $transferChunkBytes) 1073741824 }}
+{{- fail "snapshot.config.cudaCheckpoint transfer buffers exceed the 1 GiB per-device pinned-memory limit" }}
+{{- end }}
+{{- $cudaStorageMode := lower (trim .Values.config.cudaCheckpoint.storageMode) }}
+{{- if not (has $cudaStorageMode (list "legacy" "posix")) }}
+{{- fail "snapshot.config.cudaCheckpoint.storageMode must be either legacy or posix" }}
+{{- end }}
 metadata:
   name: {{ include "snapshot.fullname" . }}-config
   namespace: {{ .Release.Namespace }}
@@ -21,6 +50,11 @@ data:
       {{- if eq .Values.storage.type "pvc" }}
       basePath: {{ .Values.storage.pvc.basePath | quote }}
       {{- end }}
+
+    cudaCheckpoint:
+      storageMode: {{ $cudaStorageMode | quote }}
+      transferBufferCount: {{ $transferBufferCount }}
+      transferChunkBytes: {{ $transferChunkBytes }}
 
     overlay:
       exclusions: {{ toYaml .Values.config.overlay.exclusions | nindent 8 }}

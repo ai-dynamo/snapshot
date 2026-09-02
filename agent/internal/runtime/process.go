@@ -22,12 +22,53 @@ const HostProcPath = "/host/proc"
 // ProcessDetails captures the parent link plus the observed, outermost, and innermost
 // PID views for one proc entry. ObservedPID is relative to the proc root being read.
 type ProcessDetails struct {
-	ObservedPID   int
-	ParentPID     int
-	OutermostPID  int
-	InnermostPID  int
-	NamespacePIDs []int
-	Cmdline       string
+	ObservedPID    int
+	ParentPID      int
+	OutermostPID   int
+	InnermostPID   int
+	NamespacePIDs  []int
+	Cmdline        string
+	StartTimeTicks uint64
+	Cgroup         string
+}
+
+// ResolveHostProcessIdentity maps an identity captured through a container's
+// proc mount to the unique host /proc entry with the same namespace PID,
+// process start time, and cgroup.
+func ResolveHostProcessIdentity(procRoot string, expected ProcessDetails) (ProcessDetails, error) {
+	if expected.InnermostPID <= 0 || expected.StartTimeTicks == 0 || expected.Cgroup == "" {
+		return ProcessDetails{}, fmt.Errorf("incomplete restored process identity")
+	}
+	processes, err := ReadProcessTable(procRoot)
+	if err != nil {
+		return ProcessDetails{}, err
+	}
+	return ResolveHostProcessIdentityFromTable(processes, expected)
+}
+
+// ResolveHostProcessIdentityFromTable maps a restored identity against one
+// host-process snapshot. Callers resolving multiple targets should reuse the
+// same table and then revalidate each live PID before a destructive operation.
+func ResolveHostProcessIdentityFromTable(processes []ProcessDetails, expected ProcessDetails) (ProcessDetails, error) {
+	if expected.InnermostPID <= 0 || expected.StartTimeTicks == 0 || expected.Cgroup == "" {
+		return ProcessDetails{}, fmt.Errorf("incomplete restored process identity")
+	}
+	var match ProcessDetails
+	for _, process := range processes {
+		if process.InnermostPID != expected.InnermostPID ||
+			process.StartTimeTicks != expected.StartTimeTicks ||
+			process.Cgroup != expected.Cgroup {
+			continue
+		}
+		if match.OutermostPID != 0 {
+			return ProcessDetails{}, fmt.Errorf("restored process identity for namespace PID %d is not unique", expected.InnermostPID)
+		}
+		match = process
+	}
+	if match.OutermostPID == 0 {
+		return ProcessDetails{}, fmt.Errorf("restored process identity for namespace PID %d not found in host proc", expected.InnermostPID)
+	}
+	return match, nil
 }
 
 // ReadProcessFilesystemIDs returns the filesystem UID and GID from a proc status entry.
@@ -141,15 +182,64 @@ func ReadProcessDetails(procRoot string, pid int) (ProcessDetails, error) {
 			cmdline = strings.TrimSpace(string(comm))
 		}
 	}
+	statPath := filepath.Join(procRoot, strconv.Itoa(pid), "stat")
+	statBytes, err := os.ReadFile(statPath)
+	if err != nil {
+		return ProcessDetails{}, fmt.Errorf("failed to read %s: %w", statPath, err)
+	}
+	startTimeTicks, err := ParseProcStartTime(string(statBytes))
+	if err != nil {
+		return ProcessDetails{}, fmt.Errorf("failed to parse process start time: %w", err)
+	}
+	cgroupPath := filepath.Join(procRoot, strconv.Itoa(pid), "cgroup")
+	cgroupBytes, err := os.ReadFile(cgroupPath)
+	if err != nil {
+		return ProcessDetails{}, fmt.Errorf("failed to read %s: %w", cgroupPath, err)
+	}
+	cgroup := string(cgroupBytes)
 
 	return ProcessDetails{
-		ObservedPID:   pid,
-		ParentPID:     parentPID,
-		OutermostPID:  nspids[0],
-		InnermostPID:  nspids[len(nspids)-1],
-		NamespacePIDs: nspids,
-		Cmdline:       cmdline,
+		ObservedPID:    pid,
+		ParentPID:      parentPID,
+		OutermostPID:   nspids[0],
+		InnermostPID:   nspids[len(nspids)-1],
+		NamespacePIDs:  nspids,
+		Cmdline:        cmdline,
+		StartTimeTicks: startTimeTicks,
+		Cgroup:         cgroup,
 	}, nil
+}
+
+// ParseProcStartTime extracts field 22 from /proc/<pid>/stat.
+func ParseProcStartTime(statLine string) (uint64, error) {
+	statLine = strings.TrimSpace(statLine)
+	paren := strings.LastIndex(statLine, ")")
+	if paren < 0 || paren+2 > len(statLine) {
+		return 0, fmt.Errorf("malformed stat line")
+	}
+	fields := strings.Fields(statLine[paren+2:])
+	if len(fields) < 20 {
+		return 0, fmt.Errorf("malformed stat fields")
+	}
+	return strconv.ParseUint(fields[19], 10, 64)
+}
+
+// ValidateProcessIdentity rejects PID reuse or namespace/cgroup changes.
+func ValidateProcessIdentity(procRoot string, expected ProcessDetails) error {
+	if expected.StartTimeTicks == 0 || expected.Cgroup == "" {
+		return fmt.Errorf("incomplete process identity for host PID %d", expected.OutermostPID)
+	}
+	current, err := ReadProcessDetails(procRoot, expected.OutermostPID)
+	if err != nil {
+		return err
+	}
+	if current.OutermostPID != expected.OutermostPID ||
+		current.InnermostPID != expected.InnermostPID ||
+		current.StartTimeTicks != expected.StartTimeTicks ||
+		current.Cgroup != expected.Cgroup {
+		return fmt.Errorf("process identity changed for host PID %d", expected.OutermostPID)
+	}
+	return nil
 }
 
 // ReadProcessDetailsOrDefault preserves pid-scoped logging even when proc parsing fails.

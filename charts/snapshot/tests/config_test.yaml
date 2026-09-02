@@ -11,3 +11,21 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: "storage.pvc.basePath is fixed at /checkpoints"
+  - it: rejects an implicit or unknown CUDA storage mode
+    set:
+      config.cudaCheckpoint.storageMode: auto
+    asserts:
+      - failedTemplate:
+          errorPattern: "config.cudaCheckpoint.storageMode must be either legacy or posix"
+  - it: rejects a CUDA helper watchdog beyond the supported operation cap
+    set:
+      config.cudaCheckpoint.daemon.maxOperationSeconds: 3601
+    asserts:
+      - failedTemplate:
+          errorPattern: "config.cudaCheckpoint.daemon.maxOperationSeconds must be between 1 and 3600"
+  - it: rejects a non-positive restore timeout
+    set:
+      config.restore.restoreTimeoutSeconds: 0
+    asserts:
+      - failedTemplate:
+          errorPattern: "config.restore.restoreTimeoutSeconds must be greater than zero"
