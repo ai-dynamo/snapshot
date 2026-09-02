@@ -985,25 +985,16 @@ func (w *NodeController) patchRestoreFinalizers(ctx context.Context, pod *corev1
 // restoreIncarnationRestored reports whether a destination container's live
 // incarnation already holds a restored process.
 //
-// The recorded annotation is authoritative when present. It is absent for
-// restores performed by agent builds that predate the record, so fall back to
-// the structural fact that a restore never restarts its destination: an
-// unrestarted destination on a Pod whose restore already reached a terminal
-// outcome still holds that restore, and replaying CRIU into it would destroy a
-// live engine. A restarted destination is a fresh standby placeholder instead.
+// The recorded annotation is authoritative when present. A terminal restore
+// performed by an older agent has no record, so its live and restarted
+// destinations cannot be distinguished safely. Treat every such legacy
+// destination as restored: recreating that Pod upgrades it to exact
+// incarnation tracking without risking a CRIU replay into a live engine.
 func restoreIncarnationRestored(pod *corev1.Pod, containerName, containerID string) bool {
 	if recorded := pod.Annotations[podcontract.RestoredContainerIDAnnotationKey(containerName)]; recorded != "" {
 		return recorded == containerID
 	}
-	if !isRestoreTerminal(pod) {
-		return false
-	}
-	for _, status := range pod.Status.ContainerStatuses {
-		if status.Name == containerName {
-			return status.RestartCount == 0
-		}
-	}
-	return false
+	return isRestoreTerminal(pod)
 }
 
 // restoreDestinationContainers returns the names of the Pod's restore
@@ -1029,14 +1020,8 @@ func restoreDestinationContainers(pod *corev1.Pod) map[string]struct{} {
 
 // hasPendingRestoreIncarnation reports whether any restore destination is
 // running a container incarnation that this Pod's records do not account for.
-// Two cases qualify, and both mean the destination is inert standby that
-// nothing will ever release:
-//
-//   - a destination whose recorded incarnation differs from the live one:
-//     kubelet restarted a previously restored container in place;
-//   - a destination with no record at all that kubelet has restarted: the
-//     restore failed, the agent killed the placeholder, and the terminal
-//     condition would otherwise hide the fresh incarnation forever.
+// A destination qualifies when its recorded incarnation differs from the live
+// one, meaning kubelet restarted a previously restored container in place.
 func (w *NodeController) hasPendingRestoreIncarnation(pod *corev1.Pod) bool {
 	destinations := restoreDestinationContainers(pod)
 	// ContainerStatuses covers regular containers only, so init containers and
