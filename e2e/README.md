@@ -135,6 +135,30 @@ not the restore token. The worker also appends periodic observations to
 `/tmp/e2e-state/observations.log`; the observation count is only a liveness
 check that the restored process continues running after restore.
 
+## Framework Tests
+
+`tests/test_frameworks.py` checkpoints and restores each framework guide
+workload (`vllm`, `sglang`, `tensorrt-llm`) with the guide's own program and
+manifests: source pod Ready (`ready-for-snapshot`) → precheck file proves a
+pre-capture generation → `PodSnapshot` → restore pod pinned to the source node
+→ `nvidia.com/Restored=RestoreSucceeded` → `<framework>-restore-ready` →
+`POST /generate` answers → the placeholder never loaded a model itself.
+
+```bash
+# one framework (CI runs one per matrix job); omit the variable for all three
+SNAPSHOT_E2E_FRAMEWORK=vllm \
+  uv run --project e2e pytest e2e/tests/test_frameworks.py -vv -s
+
+# test an unpublished local build instead of the content-addressed image
+SNAPSHOT_E2E_FRAMEWORK=vllm SNAPSHOT_E2E_FRAMEWORK_IMAGE=<registry>/vllm-snapshot:dev \
+  uv run --project e2e pytest e2e/tests/test_frameworks.py -vv -s
+```
+
+The SGLang guide uses a persistent model-cache PVC; the test creates it from
+the guide manifest if missing (with `SNAPSHOT_E2E_STORAGE_CLASS` when set) and
+leaves it in place so later runs skip the download. `tests/test_framework_manifests.py`
+pins the guide manifests to the restore-pod contract without a cluster.
+
 ## Framework Images
 
 The framework e2e workloads are the guide programs under
