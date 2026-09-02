@@ -68,7 +68,7 @@ at `/hf-cache`.
 ### 2. Build the image
 
 ```bash
-export SGLANG_RUNTIME_IMAGE=lmsysorg/sglang:v0.5.17-cu130-runtime
+export SGLANG_RUNTIME_IMAGE=lmsysorg/sglang:v0.5.17-cu130-runtime@sha256:3ea7c6d74312d964edbcf9b3819425ea42117eb967ef1cfec632a70c926027df
 export SGLANG_SNAPSHOT_IMAGE=<registry>/sglang-snapshot:<tag>
 
 docker build \
@@ -129,8 +129,9 @@ containers:
 The example configures a context length of 10240 tokens for a 24 GiB NVIDIA A10
 GPU. Reduce `SGLANG_CONTEXT_LENGTH` for a smaller GPU or increase it only after
 validating the resulting memory use. The KV cache page size is set through
-`SNAPSHOT_PAGE_SIZE` (default `16`); the engine runs with `tp_size=1` and
-`trust_remote_code=True`.
+`SGLANG_PAGE_SIZE` (default `16`); the engine runs with `tp_size=1`.
+`SGLANG_TRUST_REMOTE_CODE` (default `1`) controls `trust_remote_code`; set it
+to `0` for models that ship no custom code.
 
 > [!NOTE]
 > This example runs SGLang directly through `sglang.Engine` rather than

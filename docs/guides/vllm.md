@@ -61,7 +61,7 @@ The source and restore pods must mount the Snapshot control volume at
 ### 2. Build the image
 
 ```bash
-export VLLM_RUNTIME_IMAGE=vllm/vllm-openai:v0.27.1
+export VLLM_RUNTIME_IMAGE=vllm/vllm-openai:v0.27.1@sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967
 export VLLM_SNAPSHOT_IMAGE=<registry>/vllm-snapshot:<tag>
 
 docker build \
@@ -113,7 +113,7 @@ path such as `/models/Qwen3-0.6B`. A mounted path must be available to both the
 source and restored containers.
 
 The example sizes the engine for a small single-GPU deployment through
-`SNAPSHOT_MAX_MODEL_LEN` (default `2048`) and `SNAPSHOT_GPU_MEMORY_UTILIZATION`
+`VLLM_MAX_MODEL_LEN` (default `2048`) and `VLLM_GPU_MEMORY_UTILIZATION`
 (default `0.30`). Raise them only after validating checkpoint and restore with
 the resulting memory use.
 
