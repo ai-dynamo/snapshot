@@ -170,6 +170,7 @@ func TestCheckpointProcessTreePersistsPostCheckpointJobState(t *testing.T) {
 		types.CUDAStorageModeLegacy,
 		checkpointDir,
 		nil,
+		nil,
 		types.CUDATransferSettings{}.WithDefaults(),
 		runner,
 		logr.Discard(),

@@ -24,6 +24,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/un.h>
+#include <unordered_set>
 #include <unistd.h>
 #include <utility>
 
@@ -138,7 +139,7 @@ bool ParseRequest(const unsigned char *data, size_t size, Request *request,
   const auto backend = static_cast<Backend>(ReadU16(data + 10));
   if (action != Action::kHealth && action != Action::kCheckpoint &&
       action != Action::kRestore && action != Action::kLock &&
-      action != Action::kUnlock) {
+      action != Action::kUnlock && action != Action::kRestoreBatch) {
     *error = "invalid request action";
     return false;
   }
@@ -147,11 +148,12 @@ bool ParseRequest(const unsigned char *data, size_t size, Request *request,
   const uint32_t cgroup_size = ReadU32(data + 36);
   const uint32_t job_file_size = ReadU32(data + 48);
   const uint32_t selected_devices_size = ReadU32(data + 52);
+  const uint32_t batch_size = ReadU32(data + 56);
   if (device_map_size > kMaxRequestSize || storage_dir_size > kMaxRequestSize ||
       cgroup_size > kMaxCgroupSize || job_file_size > kMaxJobFileSize ||
-      selected_devices_size > kMaxRequestSize ||
+      selected_devices_size > kMaxRequestSize || batch_size > kMaxRequestSize ||
       static_cast<size_t>(device_map_size) + storage_dir_size + cgroup_size +
-              job_file_size + selected_devices_size !=
+              job_file_size + selected_devices_size + batch_size !=
           size - kRequestHeaderSize) {
     *error = "invalid request payload lengths";
     return false;
@@ -176,6 +178,79 @@ bool ParseRequest(const unsigned char *data, size_t size, Request *request,
       payload + device_map_size + storage_dir_size + cgroup_size +
           job_file_size,
       selected_devices_size);
+  const unsigned char *batch_payload =
+      data + kRequestHeaderSize + device_map_size + storage_dir_size +
+      cgroup_size + job_file_size + selected_devices_size;
+  if (action == Action::kRestoreBatch) {
+    if (parsed.backend != Backend::kPosix || parsed.pid < 2 ||
+        parsed.pid > kMaxRestoreBatchTargets ||
+        parsed.transfer_buffer_count != 0 ||
+        parsed.transfer_chunk_bytes != 0 ||
+        parsed.expected_start_time_ticks != 0 ||
+        !parsed.device_map.empty() || !parsed.storage_dir.empty() ||
+        !parsed.expected_cgroup.empty() || !parsed.job_file.empty() ||
+        !parsed.selected_devices.empty() || batch_size == 0) {
+      *error = "batch restore request has invalid outer arguments";
+      return false;
+    }
+    size_t offset = 0;
+    std::unordered_set<uint32_t> target_pids;
+    std::unordered_set<std::string> storage_directories;
+    while (offset < batch_size) {
+      if (parsed.targets.size() >= kMaxRestoreBatchTargets) {
+        *error = "batch restore target count exceeds the limit";
+        return false;
+      }
+      if (batch_size - offset < sizeof(uint32_t)) {
+        *error = "truncated batch restore entry length";
+        return false;
+      }
+      const uint32_t entry_size = ReadU32(batch_payload + offset);
+      offset += sizeof(uint32_t);
+      if (entry_size < kRequestHeaderSize || entry_size > batch_size - offset) {
+        *error = "invalid batch restore entry size";
+        return false;
+      }
+      if (ReadU16(batch_payload + offset + 8) !=
+          static_cast<uint16_t>(Action::kRestore)) {
+        *error = "batch restore entry is not a restore request";
+        return false;
+      }
+      Request target;
+      std::string target_error;
+      if (!ParseRequest(batch_payload + offset, entry_size, &target,
+                        &target_error) ||
+          target.action != Action::kRestore ||
+          target.backend != Backend::kPosix || !target.targets.empty() ||
+          !target_pids.insert(target.pid).second ||
+          !storage_directories.insert(target.storage_dir).second) {
+        *error = "invalid batch restore target: " + target_error;
+        return false;
+      }
+      if (!parsed.targets.empty() &&
+          (target.transfer_buffer_count !=
+               parsed.targets.front().transfer_buffer_count ||
+           target.transfer_chunk_bytes !=
+               parsed.targets.front().transfer_chunk_bytes)) {
+        *error = "batch restore targets use different transfer settings";
+        return false;
+      }
+      parsed.targets.push_back(std::move(target));
+      offset += entry_size;
+    }
+    if (parsed.targets.size() < 2 ||
+        parsed.targets.size() > kMaxRestoreBatchTargets ||
+        parsed.targets.size() != parsed.pid) {
+      *error = "batch restore target count mismatch";
+      return false;
+    }
+    *request = std::move(parsed);
+    return true;
+  }
+  if (batch_size != 0) {
+    *error = "non-batch request has a batch payload";
+    return false;
+  }
   if (ContainsNul(parsed.device_map) || ContainsNul(parsed.storage_dir) ||
       ContainsNul(parsed.expected_cgroup) || ContainsNul(parsed.job_file) ||
       ContainsNul(parsed.selected_devices)) {
@@ -239,6 +314,35 @@ bool ParseRequest(const unsigned char *data, size_t size, Request *request,
 
 bool EncodeRequest(const Request &request, std::vector<unsigned char> *data,
                    std::string *error) {
+  std::vector<unsigned char> batch_payload;
+  if (request.action == Action::kRestoreBatch) {
+    if (request.targets.empty() ||
+        request.targets.size() > kMaxRestoreBatchTargets ||
+        request.targets.size() != request.pid) {
+      *error = "batch restore request has invalid targets";
+      return false;
+    }
+    for (const auto &target : request.targets) {
+      if (target.action != Action::kRestore ||
+          target.backend != Backend::kPosix || !target.targets.empty()) {
+        *error = "batch restore contains an invalid target";
+        return false;
+      }
+      std::vector<unsigned char> encoded;
+      if (!EncodeRequest(target, &encoded, error) ||
+          encoded.size() > std::numeric_limits<uint32_t>::max()) {
+        return false;
+      }
+      const size_t old_size = batch_payload.size();
+      batch_payload.resize(old_size + sizeof(uint32_t) + encoded.size());
+      WriteU32(&batch_payload, old_size, encoded.size());
+      std::memcpy(batch_payload.data() + old_size + sizeof(uint32_t),
+                  encoded.data(), encoded.size());
+    }
+  } else if (!request.targets.empty()) {
+    *error = "non-batch request has targets";
+    return false;
+  }
   if (request.device_map.size() > std::numeric_limits<uint32_t>::max() ||
       request.storage_dir.size() > std::numeric_limits<uint32_t>::max() ||
       request.expected_cgroup.size() > kMaxCgroupSize ||
@@ -247,14 +351,16 @@ bool EncodeRequest(const Request &request, std::vector<unsigned char> *data,
           std::numeric_limits<uint32_t>::max() ||
       kRequestHeaderSize + request.device_map.size() +
               request.storage_dir.size() + request.expected_cgroup.size() +
-              request.job_file.size() + request.selected_devices.size() >
+              request.job_file.size() + request.selected_devices.size() +
+              batch_payload.size() >
           kMaxRequestSize) {
     *error = "request is too large";
     return false;
   }
   data->assign(kRequestHeaderSize + request.device_map.size() +
                    request.storage_dir.size() + request.expected_cgroup.size() +
-                   request.job_file.size() + request.selected_devices.size(),
+                   request.job_file.size() + request.selected_devices.size() +
+                   batch_payload.size(),
                0);
   WriteU32(data, 0, kMagic);
   WriteU16(data, 4, kVersion);
@@ -270,6 +376,7 @@ bool EncodeRequest(const Request &request, std::vector<unsigned char> *data,
   WriteU64(data, 40, request.expected_start_time_ticks);
   WriteU32(data, 48, request.job_file.size());
   WriteU32(data, 52, request.selected_devices.size());
+  WriteU32(data, 56, batch_payload.size());
   std::memcpy(data->data() + kRequestHeaderSize, request.device_map.data(),
               request.device_map.size());
   std::memcpy(data->data() + kRequestHeaderSize + request.device_map.size(),
@@ -284,6 +391,13 @@ bool EncodeRequest(const Request &request, std::vector<unsigned char> *data,
                   request.storage_dir.size() + request.expected_cgroup.size() +
                   request.job_file.size(),
               request.selected_devices.data(), request.selected_devices.size());
+  if (!batch_payload.empty()) {
+    std::memcpy(data->data() + kRequestHeaderSize + request.device_map.size() +
+                    request.storage_dir.size() +
+                    request.expected_cgroup.size() + request.job_file.size() +
+                    request.selected_devices.size(),
+                batch_payload.data(), batch_payload.size());
+  }
   return true;
 }
 
@@ -546,7 +660,17 @@ bool ExecuteValidated(const Request &request, const std::string &proc_root,
     return true;
   }
   std::string identity_error;
-  if (!ValidateProcessIdentity(request, proc_root, &identity_error)) {
+  if (request.action == Action::kRestoreBatch) {
+    for (const auto &target : request.targets) {
+      if (!ValidateProcessIdentity(target, proc_root, &identity_error)) {
+        response->cuda_status = 1;
+        response->error =
+            "batch target process identity changed before CUDA operation: " +
+            identity_error;
+        return true;
+      }
+    }
+  } else if (!ValidateProcessIdentity(request, proc_root, &identity_error)) {
     response->cuda_status = 1;
     if (request.action == Action::kLock) {
       response->flags |= kResponseLockNotAcquired;
@@ -1117,6 +1241,8 @@ const char *ActionName(Action action) {
     return "lock";
   case Action::kUnlock:
     return "unlock";
+  case Action::kRestoreBatch:
+    return "restore-batch";
   }
   return "unknown";
 }

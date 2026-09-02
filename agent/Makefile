@@ -66,6 +66,10 @@ test-cuda-helper:
 		-o bin/cuda-checkpoint-helper-transfer-cancellation-test \
 		cmd/cuda-checkpoint-helper/transfer_engine_test.cpp
 	bin/cuda-checkpoint-helper-transfer-cancellation-test
+	g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+		-o bin/cuda-checkpoint-helper-restore-batch-order-test \
+		cmd/cuda-checkpoint-helper/restore_batch_order_test.cpp
+	bin/cuda-checkpoint-helper-restore-batch-order-test
 fmt:
 	gofmt -w .
 

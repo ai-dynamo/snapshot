@@ -11,6 +11,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -25,7 +26,7 @@ import (
 )
 
 func TestDaemonRequestMatchesSharedGoldenFixture(t *testing.T) {
-	encodedFixture, err := os.ReadFile(filepath.Join("..", "..", "cmd", "cuda-checkpoint-helper", "testdata", "daemon_request_v6.hex"))
+	encodedFixture, err := os.ReadFile(filepath.Join("..", "..", "cmd", "cuda-checkpoint-helper", "testdata", "daemon_request_v7.hex"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +51,7 @@ func TestDaemonRequestMatchesSharedGoldenFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(got, want) {
-		t.Fatalf("daemonRequest() bytes differ from shared v6 fixture\n got: %x\nwant: %x", got, want)
+		t.Fatalf("daemonRequest() bytes differ from shared v7 fixture\n got: %x\nwant: %x", got, want)
 	}
 }
 
@@ -189,6 +190,119 @@ func TestCommandRunnerSendsDaemonOperations(t *testing.T) {
 			}
 			if got := string(payload[:selectedDevicesSize]); got != wantSelectedDevices {
 				t.Errorf("selected devices = %q, want %q", got, wantSelectedDevices)
+			}
+		})
+	}
+}
+
+func TestCommandRunnerSendsOneRestoreBatch(t *testing.T) {
+	transfer := types.CUDATransferSettings{BufferCount: 4, ChunkBytes: 64 * 1024 * 1024}
+	requests := []helperAction{
+		{PID: 41, Action: actionRestore, StorageMode: types.CUDAStorageModePOSIX,
+			StorageDir: "/checkpoints/process-41", GPUUUIDs: []string{"GPU-12345678-1234-1234-1234-123456789abc"},
+			Transfer: transfer, Identity: testDaemonIdentity(41)},
+		{PID: 42, Action: actionRestore, StorageMode: types.CUDAStorageModePOSIX,
+			StorageDir: "/checkpoints/process-42", GPUUUIDs: []string{"GPU-22345678-1234-1234-1234-123456789abc"},
+			Transfer: transfer, Identity: testDaemonIdentity(42)},
+	}
+	packetChannel := make(chan []byte, 1)
+	withOperationServer(t, func(conn *net.UnixConn) {
+		packet := make([]byte, daemonMaxRequest)
+		n, err := conn.Read(packet)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		packetChannel <- packet[:n]
+		_, _ = conn.Write(daemonTestResponse(0, 0))
+	})
+	if err := (commandHelperActionRunner{}).runRestoreBatch(context.Background(), requests, logr.Discard()); err != nil {
+		t.Fatalf("runRestoreBatch() error = %v", err)
+	}
+	packet := <-packetChannel
+	if got := binary.LittleEndian.Uint16(packet[8:10]); got != daemonActionRestoreBatch {
+		t.Fatalf("action = %d, want restore-batch", got)
+	}
+	if got := binary.LittleEndian.Uint32(packet[12:16]); got != 2 {
+		t.Fatalf("target count = %d, want 2", got)
+	}
+	payloadSize := int(binary.LittleEndian.Uint32(packet[56:60]))
+	if payloadSize != len(packet)-daemonRequestHeader {
+		t.Fatalf("batch payload size = %d, packet payload = %d", payloadSize, len(packet)-daemonRequestHeader)
+	}
+	payload := packet[daemonRequestHeader:]
+	for index, wantPID := range []uint32{41, 42} {
+		if len(payload) < 4 {
+			t.Fatalf("target %d length is truncated", index)
+		}
+		entrySize := int(binary.LittleEndian.Uint32(payload[:4]))
+		payload = payload[4:]
+		if entrySize < daemonRequestHeader || entrySize > len(payload) {
+			t.Fatalf("target %d size = %d", index, entrySize)
+		}
+		entry := payload[:entrySize]
+		if got := binary.LittleEndian.Uint16(entry[8:10]); got != daemonActionRestore {
+			t.Fatalf("target %d action = %d, want restore", index, got)
+		}
+		if got := binary.LittleEndian.Uint32(entry[12:16]); got != wantPID {
+			t.Fatalf("target %d PID = %d, want %d", index, got, wantPID)
+		}
+		payload = payload[entrySize:]
+	}
+	if len(payload) != 0 {
+		t.Fatalf("trailing batch payload bytes = %d", len(payload))
+	}
+}
+
+func TestDaemonRestoreBatchRequestRejectsExcessiveTargets(t *testing.T) {
+	request := helperAction{
+		PID:         41,
+		Action:      actionRestore,
+		StorageMode: types.CUDAStorageModePOSIX,
+		StorageDir:  "/checkpoints/process-41",
+		GPUUUIDs:    []string{"GPU-12345678-1234-1234-1234-123456789abc"},
+		Transfer:    types.CUDATransferSettings{}.WithDefaults(),
+		Identity:    testDaemonIdentity(41),
+	}
+	requests := make([]helperAction, daemonMaxBatchTargets+1)
+	for index := range requests {
+		requests[index] = request
+		requests[index].PID += index
+		requests[index].StorageDir = fmt.Sprintf("/checkpoints/process-%d", requests[index].PID)
+		requests[index].Identity = testDaemonIdentity(requests[index].PID)
+	}
+	if _, err := daemonRestoreBatchRequest(requests); err == nil || !strings.Contains(err.Error(), "maximum is") {
+		t.Fatalf("daemonRestoreBatchRequest() error = %v, want target bound", err)
+	}
+}
+
+func TestDaemonRestoreBatchRequestRejectsCrossTargetConflicts(t *testing.T) {
+	transfer := types.CUDATransferSettings{}.WithDefaults()
+	first := helperAction{
+		PID: 41, Action: actionRestore, StorageMode: types.CUDAStorageModePOSIX,
+		StorageDir: "/checkpoints/process-41", GPUUUIDs: []string{"GPU-12345678-1234-1234-1234-123456789abc"},
+		Transfer: transfer, Identity: testDaemonIdentity(41),
+	}
+	second := first
+	second.PID = 42
+	second.StorageDir = "/checkpoints/process-42"
+	second.Identity = testDaemonIdentity(42)
+
+	tests := []struct {
+		name   string
+		mutate func(*helperAction)
+		want   string
+	}{
+		{name: "duplicate PID", mutate: func(request *helperAction) { request.PID = first.PID }, want: "duplicate PID"},
+		{name: "duplicate storage directory", mutate: func(request *helperAction) { request.StorageDir = first.StorageDir }, want: "duplicate storage"},
+		{name: "different transfer settings", mutate: func(request *helperAction) { request.Transfer.BufferCount++ }, want: "different transfer settings"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := second
+			test.mutate(&candidate)
+			if _, err := daemonRestoreBatchRequest([]helperAction{first, candidate}); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("daemonRestoreBatchRequest() error = %v, want %q", err, test.want)
 			}
 		})
 	}
@@ -441,7 +555,7 @@ func TestRunDaemonActionPreservesFatalLockRejectionClassification(t *testing.T) 
 func TestValidateCUDAOperationBudgetRejectsShortCallerDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	err := validateCUDAOperationBudget(ctx, actionCheckpoint, 1)
+	err := validateCUDAOperationBudget(ctx, actionCheckpoint, 1, false)
 	if err == nil || !strings.Contains(err.Error(), "before state-changing work") {
 		t.Fatalf("validateCUDAOperationBudget() error = %v, want caller-budget rejection", err)
 	}
@@ -450,7 +564,7 @@ func TestValidateCUDAOperationBudgetRejectsShortCallerDeadline(t *testing.T) {
 func TestValidateCUDAOperationBudgetCoversWholeMultiTargetSequence(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*daemonRPCTimeout)
 	defer cancel()
-	err := validateCUDAOperationBudget(ctx, actionCheckpoint, 2)
+	err := validateCUDAOperationBudget(ctx, actionCheckpoint, 2, false)
 	if err == nil || !strings.Contains(err.Error(), "for 2 target(s)") {
 		t.Fatalf("validateCUDAOperationBudget() error = %v, want whole-sequence rejection", err)
 	}
@@ -459,7 +573,7 @@ func TestValidateCUDAOperationBudgetCoversWholeMultiTargetSequence(t *testing.T)
 func TestValidateCUDAOperationBudgetAllowsOneTargetRestoreAtDefaultDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
 	defer cancel()
-	if err := validateCUDAOperationBudget(ctx, actionRestore, 1); err != nil {
+	if err := validateCUDAOperationBudget(ctx, actionRestore, 1, false); err != nil {
 		t.Fatalf("validateCUDAOperationBudget() error = %v, want default one-target restore to fit", err)
 	}
 }
@@ -467,15 +581,23 @@ func TestValidateCUDAOperationBudgetAllowsOneTargetRestoreAtDefaultDeadline(t *t
 func TestValidateCUDAOperationBudgetAllowsQualifiedTwoTargetRestoreAtChartDefault(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 135*time.Minute)
 	defer cancel()
-	if err := validateCUDAOperationBudget(ctx, actionRestore, 2); err != nil {
+	if err := validateCUDAOperationBudget(ctx, actionRestore, 2, true); err != nil {
 		t.Fatalf("validateCUDAOperationBudget() error = %v, want qualified two-PID restore to fit chart default", err)
 	}
 }
 
-func TestValidateCUDAOperationBudgetCoversAllRestoreTargets(t *testing.T) {
+func TestValidateCUDAOperationBudgetAllowsMultiTargetRestoreBatch(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 135*time.Minute)
+	defer cancel()
+	if err := validateCUDAOperationBudget(ctx, actionRestore, 4, true); err != nil {
+		t.Fatalf("validateCUDAOperationBudget() error = %v, want one batched restore RPC to fit chart default", err)
+	}
+}
+
+func TestValidateCUDAOperationBudgetCoversAllLegacyRestoreTargets(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*daemonRPCTimeout)
 	defer cancel()
-	err := validateCUDAOperationBudget(ctx, actionRestore, 4)
+	err := validateCUDAOperationBudget(ctx, actionRestore, 4, false)
 	if err == nil || !strings.Contains(err.Error(), "for 4 target(s)") {
 		t.Fatalf("validateCUDAOperationBudget() error = %v, want whole restore-sequence rejection", err)
 	}

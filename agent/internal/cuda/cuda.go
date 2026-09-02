@@ -93,10 +93,11 @@ func LockAndCheckpointProcessTreeValidated(
 	storageMode,
 	checkpointDir string,
 	gpuUUIDs []string,
+	processGPUUUIDs map[int][]string,
 	transferSettings types.CUDATransferSettings,
 	log logr.Logger,
 ) (CheckpointPhaseTimings, error) {
-	if err := validateCUDAOperationBudget(ctx, actionCheckpoint, len(processes)); err != nil {
+	if err := validateCUDAOperationBudget(ctx, actionCheckpoint, len(processes), false); err != nil {
 		return CheckpointPhaseTimings{}, &checkpointOperationError{
 			err:                err,
 			targetMayBeMutated: false,
@@ -124,6 +125,7 @@ func LockAndCheckpointProcessTreeValidated(
 		storageMode,
 		checkpointDir,
 		gpuUUIDs,
+		processGPUUUIDs,
 		transferSettings,
 		identityValidatingRunner{
 			runner:     commandHelperActionRunner{},
@@ -355,7 +357,9 @@ func orderDRAUUIDsByRuntime(allocatedUUIDs, visibleUUIDs []string) ([]string, er
 	return append([]string(nil), visibleUUIDs...), nil
 }
 
-// FilterProcesses returns the subset of candidate PIDs that hold actual CUDA contexts.
+// FilterProcesses returns the subset of candidate PIDs that hold actual CUDA
+// contexts, preserving candidate order. Checkpoint passes ProcessTreePIDs here,
+// so the resulting manifest keeps parents before descendants for batched restore.
 // Uses --get-restore-tid (the same technique as the CRIU CUDA plugin) instead of
 // --get-state, because --get-state incorrectly matches coordinator processes like
 // cuda-checkpoint --launch-job that share a /proc namespace with CUDA processes but
@@ -483,6 +487,7 @@ func lockAndCheckpointProcessTree(
 	storageMode,
 	checkpointDir string,
 	gpuUUIDs []string,
+	processGPUUUIDs map[int][]string,
 	transferSettings types.CUDATransferSettings,
 	runner helperActionRunner,
 	log logr.Logger,
@@ -499,6 +504,13 @@ func lockAndCheckpointProcessTree(
 	}
 	if storageMode == types.CUDAStorageModePOSIX && len(targetIDs) != len(cudaPIDs) {
 		return timings, fmt.Errorf("CUDA target identity count %d does not match PID count %d", len(targetIDs), len(cudaPIDs))
+	}
+	if storageMode == types.CUDAStorageModePOSIX {
+		for _, pid := range cudaPIDs {
+			if len(processGPUUUIDs[pid]) == 0 {
+				return timings, fmt.Errorf("missing CustomStorage GPU mapping for CUDA PID %d", pid)
+			}
+		}
 	}
 
 	start := time.Now()
@@ -522,7 +534,7 @@ func lockAndCheckpointProcessTree(
 		var selectedDevices []string
 		if storageMode == types.CUDAStorageModePOSIX {
 			processDir = customStorageProcessDir(checkpointDir, targetIDs[index])
-			selectedDevices = gpuUUIDs
+			selectedDevices = processGPUUUIDs[pid]
 		}
 		if err := runner.run(ctx, helperAction{PID: pid, Action: actionCheckpoint, StorageMode: storageMode, StorageDir: processDir, JobFile: jobFile, GPUUUIDs: selectedDevices, Transfer: transferSettings}, log); err != nil {
 			timings.TotalDuration = time.Since(start)
@@ -555,7 +567,8 @@ func RestoreAndUnlockProcessTreeValidated(
 	transferSettings types.CUDATransferSettings,
 	log logr.Logger,
 ) (RestorePhaseTimings, error) {
-	if err := validateCUDAOperationBudget(ctx, actionRestore, len(processes)); err != nil {
+	batchedRestore := storageMode == types.CUDAStorageModePOSIX && len(processes) > 1
+	if err := validateCUDAOperationBudget(ctx, actionRestore, len(processes), batchedRestore); err != nil {
 		return RestorePhaseTimings{}, err
 	}
 	if err := acquireCUDAOperationLogged(ctx, log); err != nil {
@@ -609,6 +622,7 @@ func restoreAndUnlockProcessTree(
 	}
 
 	start := time.Now()
+	restoreActions := make([]helperAction, 0, len(cudaPIDs))
 	for index, pid := range cudaPIDs {
 		processDir := ""
 		var selectedDevices []string
@@ -622,11 +636,30 @@ func restoreAndUnlockProcessTree(
 		}
 		if storageMode == types.CUDAStorageModePOSIX {
 			processDir = customStorageProcessDir(checkpointDir, targetIDs[index])
-			selectedDevices = targetGPUUUIDs
+			selectedDevices, err = customStorageTargetGPUUUIDs(processDir, deviceMap, targetGPUUUIDs)
+			if err != nil {
+				timings.TotalDuration = time.Since(start)
+				return timings, fmt.Errorf("resolve CustomStorage target GPUs for CUDA PID %d: %w", pid, err)
+			}
 		}
-		if err := runner.run(ctx, helperAction{PID: pid, Action: actionRestore, DeviceMap: deviceMap, StorageMode: storageMode, StorageDir: processDir, JobFile: requestJobFile, GPUUUIDs: selectedDevices, Transfer: transferSettings}, log); err != nil {
+		restoreActions = append(restoreActions, helperAction{PID: pid, Action: actionRestore, DeviceMap: deviceMap, StorageMode: storageMode, StorageDir: processDir, JobFile: requestJobFile, GPUUUIDs: selectedDevices, Transfer: transferSettings})
+	}
+	if storageMode == types.CUDAStorageModePOSIX && len(restoreActions) > 1 {
+		batchRunner, ok := runner.(helperRestoreBatchRunner)
+		if !ok {
+			timings.TotalDuration = time.Since(start)
+			return timings, errors.New("CUDA helper runner does not support batch restore")
+		}
+		if err := batchRunner.runRestoreBatch(ctx, restoreActions, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
+		}
+	} else {
+		for _, action := range restoreActions {
+			if err := runner.run(ctx, action, log); err != nil {
+				timings.TotalDuration = time.Since(start)
+				return timings, err
+			}
 		}
 	}
 

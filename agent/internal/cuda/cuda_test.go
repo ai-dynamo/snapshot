@@ -40,7 +40,7 @@ func TestCUDAOperationSlotHonorsCancellation(t *testing.T) {
 	}
 
 	_, err := LockAndCheckpointProcessTreeValidated(
-		ctx, nil, "", "", "", nil, types.CUDATransferSettings{}, logr.Discard(),
+		ctx, nil, "", "", "", nil, nil, types.CUDATransferSettings{}, logr.Discard(),
 	)
 	if err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("LockAndCheckpointProcessTreeValidated(canceled) = %v, want context.Canceled", err)
@@ -96,7 +96,7 @@ func TestCheckpointRejectsShortBudgetBeforeMutation(t *testing.T) {
 	_, err := LockAndCheckpointProcessTreeValidated(
 		ctx,
 		[]snapshotruntime.ProcessDetails{{OutermostPID: 42, StartTimeTicks: 1, Cgroup: "0::/test\n"}},
-		"", "", "", nil, types.CUDATransferSettings{}, logr.Discard(),
+		"", "", "", nil, nil, types.CUDATransferSettings{}, logr.Discard(),
 	)
 	if err == nil || !FailedBeforeTargetMutation(err) {
 		t.Fatalf("short-budget checkpoint error = %v, want pre-mutation classification", err)
@@ -142,7 +142,7 @@ func TestIdentityValidatingRunnerRejectsMissingAndChangedIdentityBeforeDriver(t 
 
 func TestCheckpointIdentityRaceBeforeFirstLockIsPreMutation(t *testing.T) {
 	_, err := lockAndCheckpointProcessTree(
-		context.Background(), []int{41}, nil, "", types.CUDAStorageModeLegacy, "", nil,
+		context.Background(), []int{41}, nil, "", types.CUDAStorageModeLegacy, "", nil, nil,
 		types.CUDATransferSettings{},
 		helperActionRunnerFunc(func(context.Context, helperAction, logr.Logger) error {
 			return fmt.Errorf("%w: test race", errProcessIdentityChangedBeforeCUDA)
@@ -157,7 +157,7 @@ func TestCheckpointIdentityRaceBeforeFirstLockIsPreMutation(t *testing.T) {
 func TestCheckpointIdentityRaceAfterEarlierLockIsMutating(t *testing.T) {
 	calls := 0
 	_, err := lockAndCheckpointProcessTree(
-		context.Background(), []int{41, 42}, nil, "", types.CUDAStorageModeLegacy, "", nil,
+		context.Background(), []int{41, 42}, nil, "", types.CUDAStorageModeLegacy, "", nil, nil,
 		types.CUDATransferSettings{},
 		helperActionRunnerFunc(func(context.Context, helperAction, logr.Logger) error {
 			calls++
@@ -177,7 +177,7 @@ func TestCheckpointRejectsInvalidIdentityBeforeMutation(t *testing.T) {
 	_, err := LockAndCheckpointProcessTreeValidated(
 		context.Background(),
 		[]snapshotruntime.ProcessDetails{{OutermostPID: 42}},
-		"", "", "", nil, types.CUDATransferSettings{}, logr.Discard(),
+		"", "", "", nil, nil, types.CUDATransferSettings{}, logr.Discard(),
 	)
 	if err == nil || !FailedBeforeTargetMutation(err) {
 		t.Fatalf("invalid-identity checkpoint error = %v, want pre-mutation classification", err)

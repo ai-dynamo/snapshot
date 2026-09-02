@@ -293,16 +293,9 @@ func validateRestoreManifest(req RestoreRequest, manifest *types.CheckpointManif
 			req.ArtifactContainerName,
 		)
 	}
-	mode, err := manifest.CUDA.EffectiveStorageMode()
+	_, err := manifest.CUDA.EffectiveStorageMode()
 	if err != nil {
 		return fmt.Errorf("validate CUDA artifact storage mode: %w", err)
-	}
-	if mode == types.CUDAStorageModePOSIX {
-		if err := validatePOSIXCustomStorageTopology(
-			len(manifest.CUDA.PIDs), len(manifest.CUDA.SourceGPUUUIDs),
-		); err != nil {
-			return err
-		}
 	}
 	return nil
 }

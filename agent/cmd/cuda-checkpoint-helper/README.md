@@ -102,14 +102,24 @@ it restores the target from the recorded extent manifest and completes the
 handle. After all restore targets succeed, the agent sends a separate unlock
 request for each target.
 
-One helper request operates on one CUDA-owning PID. The Snapshot agent may
-issue several requests for one workload, but it retains ordering and an
-individual result for every target. V1 holds one process-local operation slot
-across the whole multi-PID sequence within one target container, so sequences
-handled by one agent do not interleave. The Snapshot integration additionally
-uses one Pod-scoped Kubernetes Lease so overlapping agent instances cannot
-execute or monitor the same restore concurrently. Host-scoped and per-GPU
-scheduling inside one helper remain follow-ups.
+Checkpoint, lock, unlock, and legacy restore requests operate on one
+CUDA-owning PID. A POSIX restore-batch request carries two or more validated
+target identities and restores their independent CustomStorage extents through
+one concurrent transfer batch. The batch is one failure domain: an extent
+failure cancels sibling transfers, leaves no target unlocked, and makes an
+unresolved CUDA operation fatal to the helper.
+
+CUDA completion is intentionally ordered but not transactional. If a later
+target fails after an earlier target completed, the helper reports a fatal
+partial/unknown outcome; callers must discard the restore pod and must not
+replay the batch.
+
+V1 holds one process-local operation slot across the whole multi-PID sequence
+within one target container, so sequences handled by one agent do not
+interleave. The Snapshot integration additionally uses one Pod-scoped
+Kubernetes Lease so overlapping agent instances cannot execute or monitor the
+same restore concurrently. Host-scoped and per-GPU scheduling inside one helper
+remain follow-ups.
 
 The daemon retains primary contexts only for the request's selected GPU set.
 After a successful operation, it associates those references with the exact
@@ -130,6 +140,10 @@ condition and documents the whole-DaemonSet watcher limitation separately.
 ## Failure rules
 
 - Failure of any extent cancels sibling transfers for that operation.
+- Aggregate pinned transfer memory is limited to 2 GiB for the complete
+  operation, including every target in a restore batch.
+- Restore batches are limited to 64 target processes and 64 concurrent extent
+  workers.
 - Every newly written extent carries a SHA-256 digest. Checkpoint computes it
   inline while streaming GPU bytes to storage; restore verifies it during the
   sole storage read before acknowledging the CUDA operation. Manifest formats
