@@ -113,40 +113,59 @@ RUN gcc -O2 -Wall -Wextra -o /ns-bind-mount ./cmd/ns-bind-mount/main.c
 
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
+#
+# Restore injects criu into the destination container's mount namespace (see
+# the tar-builder stage below for the same problem with rootfs-diff
+# extraction). A dynamically linked criu would need the destination image's
+# glibc to satisfy the symbol versions criu was built against; build it
+# statically against musl instead so it carries no such dependency.
+#
+# criu's optional deps (gnutls, nftables, libbsd, libselinux, libbpf, libdrm)
+# are feature-tested at configure time and silently dropped if absent, so
+# only the mandatory deps need musl static libs. See build-static-criu.sh for
+# why staticness is scoped to criu's own link line rather than passed via a
+# global LDFLAGS, and how the dlopen'd CUDA/inet-remap plugins still resolve
+# criu-internal symbols against a static binary.
 # =============================================================================
-FROM ubuntu:24.04 AS criu-builder
+FROM alpine:3.23 AS criu-builder
 
 ARG CRIU_REPO
 ARG CRIU_REF
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apk add --no-cache \
     git \
     ca-certificates \
-    build-essential \
-    pkg-config \
-    libbsd-dev \
+    build-base \
+    linux-headers \
+    pkgconfig \
+    perl \
     libcap-dev \
-    libnet1-dev \
-    libnl-3-dev \
-    libnl-route-3-dev \
-    libprotobuf-dev \
-    libprotobuf-c-dev \
+    libcap-static \
+    libnl3-dev \
+    libnl3-static \
+    libnet-dev \
+    libnet-static \
+    util-linux-dev \
+    util-linux-static \
+    protobuf-dev \
+    protobuf-c-dev \
     protobuf-c-compiler \
-    protobuf-compiler \
     python3 \
-    python3-protobuf \
-    libgnutls28-dev \
-    libnftables-dev \
-    uuid-dev \
-    && rm -rf /var/lib/apt/lists/*
+    py3-protobuf \
+    binutils \
+    tar
+
+WORKDIR /tmp
+
+COPY scripts/build-static-criu.sh /tmp/scripts/build-static-criu.sh
 
 RUN git init /tmp/criu \
     && cd /tmp/criu \
     && git remote add origin ${CRIU_REPO} \
     && git fetch --depth 1 origin ${CRIU_REF} \
-    && git checkout FETCH_HEAD \
-    && make -j$(nproc) \
-    && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
+    && git checkout FETCH_HEAD
+
+RUN sh /tmp/scripts/build-static-criu.sh /tmp/criu /criu-install
 
 COPY plugins/inet-remap/snapshot_inet_remap.c /tmp/snapshot_inet_remap.c
 RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \
