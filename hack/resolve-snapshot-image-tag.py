@@ -31,7 +31,7 @@ import urllib.request
 
 
 GITHUB_API_VERSION = "2022-11-28"
-MAX_PAGES = 5
+PAGE_SIZE = 100
 ORG = "ai-dynamo"
 PACKAGES = ("snapshot/operator", "snapshot/agent")
 PLAIN_DEV_TAG = re.compile(r"^v0\.0\.0-g[0-9a-f]{8}$")
@@ -77,10 +77,14 @@ def package_versions(package: str, headers: dict[str, str]) -> list[dict]:
         return _VERSIONS_CACHE[package]
     encoded = urllib.parse.quote(package, safe="")
     versions: list[dict] = []
-    for page in range(1, MAX_PAGES + 1):
+    # Page until exhausted: dev tags accumulate one per main commit and are not
+    # pruned, so a fixed page budget would eventually hide a published tag.
+    page = 0
+    while True:
+        page += 1
         url = (
             f"https://api.github.com/orgs/{ORG}/packages/container/"
-            f"{encoded}/versions?per_page=100&page={page}"
+            f"{encoded}/versions?per_page={PAGE_SIZE}&page={page}"
         )
         request = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(request, timeout=30) as response:
@@ -88,6 +92,8 @@ def package_versions(package: str, headers: dict[str, str]) -> list[dict]:
         if not page_versions:
             break
         versions.extend(page_versions)
+        if len(page_versions) < PAGE_SIZE:
+            break
     _VERSIONS_CACHE[package] = versions
     return versions
 
