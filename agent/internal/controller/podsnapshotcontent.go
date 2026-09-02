@@ -53,6 +53,9 @@ type CheckpointParams struct {
 // the resync is the backstop that eventually writes a terminal failure for a work order whose source
 // pod is gone.
 func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name string) {
+	ctx, cancel := context.WithTimeout(ctx, snapshotContentReconcileTimeout)
+	defer cancel()
+
 	logger := logr.FromContextOrDiscard(ctx).WithValues("content", name)
 
 	content := &snapshotv1alpha1.PodSnapshotContent{}

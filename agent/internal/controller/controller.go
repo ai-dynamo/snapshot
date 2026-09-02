@@ -70,6 +70,7 @@ type NodeController struct {
 	writeControlSentinelFn  func(int, string) error
 	controlSentinelExistsFn func(int, string) (bool, error)
 	sendSignalFn            func(logr.Logger, int, syscall.Signal, string) error
+	contentQueue            workqueue.TypedDelayingInterface[string]
 	restoreQueue            workqueue.TypedDelayingInterface[client.ObjectKey]
 	restorePodLister        corev1listers.PodLister
 
@@ -153,6 +154,10 @@ const (
 	// snapshotContentResyncInterval re-drives every PodSnapshotContent work order so a
 	// not-yet-Ready source pod is re-checked for quiesce without a busy loop.
 	snapshotContentResyncInterval = 10 * time.Second
+
+	// snapshotContentReconcileTimeout prevents a stalled API request in the synchronous
+	// informer callback from blocking every later work order and resync event.
+	snapshotContentReconcileTimeout = 15 * time.Second
 )
 
 // podSnapshotContentGVR is the cluster-scoped resource the capture informer watches.
@@ -212,6 +217,9 @@ func newDefaultController(
 		holderID:  "snapshot-agent/" + uuid.NewString(),
 		inFlight:  make(map[string]struct{}),
 		stopCh:    make(chan struct{}),
+		contentQueue: workqueue.NewTypedDelayingQueueWithConfig(
+			workqueue.TypedDelayingQueueConfig[string]{Name: "snapshot-contents"},
+		),
 		restoreQueue: workqueue.NewTypedDelayingQueueWithConfig(
 			workqueue.TypedDelayingQueueConfig[client.ObjectKey]{Name: "restore-pods"},
 		),
@@ -227,6 +235,7 @@ func newDefaultController(
 
 // Run starts the local pod informers and processes checkpoint/restore events.
 func (w *NodeController) Run(ctx context.Context) error {
+	defer w.contentQueue.ShutDown()
 	defer w.restoreQueue.ShutDown()
 	// Seed the agent logger onto ctx so the capture path resolves it via log.FromContext.
 	ctx = logr.NewContext(ctx, w.log)
@@ -279,15 +288,9 @@ func (w *NodeController) Run(ctx context.Context) error {
 	}
 	w.contentIndexer = contentInformer.GetIndexer()
 	if _, err := contentInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			if name, ok := contentNameFromInformerObj(obj); ok {
-				w.reconcilePodSnapshotContent(ctx, name)
-			}
-		},
+		AddFunc: w.enqueuePodSnapshotContent,
 		UpdateFunc: func(_, newObj interface{}) {
-			if name, ok := contentNameFromInformerObj(newObj); ok {
-				w.reconcilePodSnapshotContent(ctx, name)
-			}
+			w.enqueuePodSnapshotContent(newObj)
 		},
 	}); err != nil {
 		return fmt.Errorf("failed to add snapshot-content informer handler: %w", err)
@@ -336,6 +339,7 @@ func (w *NodeController) Run(ctx context.Context) error {
 	var stopOnce sync.Once
 	go func() {
 		<-ctx.Done()
+		w.contentQueue.ShutDown()
 		w.restoreQueue.ShutDown()
 		stopOnce.Do(func() { close(w.stopCh) })
 	}()
@@ -344,11 +348,39 @@ func (w *NodeController) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to sync informer caches")
 	}
 
+	go w.runContentQueue(ctx)
 	go w.runRestoreQueue(ctx)
 	w.log.Info("PodSnapshot node controller started and caches synced")
 	<-ctx.Done()
 	stopOnce.Do(func() { close(w.stopCh) })
 	return nil
+}
+
+// enqueuePodSnapshotContent keeps the informer delivery path non-blocking. In
+// particular, it must not perform API calls: one stalled HTTP/2 request in a
+// synchronous informer callback otherwise blocks every later work order and
+// resync event. Terminal objects are filtered from the cached event so the
+// periodic resync does not flood the queue with historical work.
+func (w *NodeController) enqueuePodSnapshotContent(obj interface{}) {
+	content, ok := contentFromInformerObj(obj)
+	if !ok ||
+		content.Spec.Source.NodeName != w.config.NodeName ||
+		!content.DeletionTimestamp.IsZero() ||
+		isContentTerminal(content) {
+		return
+	}
+	w.contentQueue.Add(content.Name)
+}
+
+func (w *NodeController) runContentQueue(ctx context.Context) {
+	for {
+		name, shutdown := w.contentQueue.Get()
+		if shutdown {
+			return
+		}
+		w.reconcilePodSnapshotContent(ctx, name)
+		w.contentQueue.Done(name)
+	}
 }
 
 func tweakNodePodListOptions(nodeName string) func(*metav1.ListOptions) {
