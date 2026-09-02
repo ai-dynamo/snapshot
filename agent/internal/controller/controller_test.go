@@ -1065,11 +1065,12 @@ func TestTerminalRestorePodWithNoNewIncarnationStillReportsAlreadyCompleted(t *t
 	assert.True(t, sawEventReason(w.clientset.(*fake.Clientset), restoreAlreadyCompletedReason))
 }
 
-func TestTerminalFailedRestoreRetriesAfterPlaceholderRestart(t *testing.T) {
+func TestTerminalFailedLegacyRestoreDoesNotReplayWithoutIncarnationRecord(t *testing.T) {
 	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	pod.Finalizers = []string{restorePodFinalizer}
-	// The first attempt failed, the agent killed the placeholder, and kubelet
-	// restarted the destination into a fresh standby incarnation.
+	// An older agent left no incarnation record. Even though kubelet restarted
+	// the destination, replaying cannot be proven safe because the same legacy
+	// shape can also contain a live restored engine.
 	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
 		Type:    corev1.PodConditionType(podcontract.RestoredCondition),
 		Status:  corev1.ConditionFalse,
@@ -1078,23 +1079,16 @@ func TestTerminalFailedRestoreRetriesAfterPlaceholderRestart(t *testing.T) {
 	})
 	pod.Status.ContainerStatuses[0].ContainerID = "containerd://restarted-container"
 	pod.Status.ContainerStatuses[0].RestartCount = 1
-	snapshot, content := readySnapshotObjects()
-	w := makeTestController(t, pod, snapshot, content)
-	path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, string(content.UID), "main")
-	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(path, 0o700))
-	var restored []string
-	w.restoreFn = func(_ context.Context, _ snapshotruntime.Runtime, _ logr.Logger, req executor.RestoreRequest, _ executor.RestoreMounter) (int, error) {
-		restored = append(restored, req.ContainerID)
-		return 4242, nil
+	w := makeTestController(t, pod)
+	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
+		t.Fatal("an unrecorded terminal Pod must be recreated, not replayed")
+		return 0, nil
 	}
 
 	processQueuedRestorePod(t, w, pod)
 
-	assert.Equal(t, []string{"restarted-container"}, restored, "a transient failure must not brick the Pod")
-	assert.False(t, sawEventReason(w.clientset.(*fake.Clientset), restoreAlreadyFailedReason))
-	assert.Contains(t, string(lastPodStatusApply(t, w).GetPatch()), `"reason":"RestoreSucceeded"`)
-	assert.Equal(t, "restarted-container", liveRestoredContainerID(t, w, pod, "main"))
+	assert.True(t, sawEventReason(w.clientset.(*fake.Clientset), restoreAlreadyFailedReason))
+	assert.Empty(t, liveRestoredContainerID(t, w, pod, "main"))
 }
 
 func TestPendingIncarnationIgnoresNonDestinationContainers(t *testing.T) {
