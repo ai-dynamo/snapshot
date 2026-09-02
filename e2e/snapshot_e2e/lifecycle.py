@@ -1020,7 +1020,19 @@ def pod_runtime_state(namespace: str, pod: str) -> str:
         "|| echo '<ps unavailable>'; "
         "echo '-- listening (/proc/net/tcp, hex ports) --'; "
         "awk 'NR>1 && $4==\"0A\" {print $2}' /proc/net/tcp /proc/net/tcp6 2>/dev/null | sort -u; "
-        f"for f in {CONTROL_DIR}/*-restore-error; do "
+        # Where each thread of the engine processes is blocked in the kernel:
+        # a stuck CUDA driver ioctl, a futex, or a socket read tell very
+        # different stories, and none of them reach the container log.
+        "echo '-- kernel wait channels (pid/tid state wchan) --'; "
+        "for p in $(ps -eo pid,cmd --sort=pid 2>/dev/null | awk 'NR>1 && ($2 ~ /python|sglang|vllm|trtllm/) {print $1}' | head -8); do "
+        "  for t in /proc/$p/task/*; do "
+        "    printf '%s/%s %s %s\\n' \"$p\" \"$(basename $t)\" \"$(awk '{print $3}' $t/stat 2>/dev/null)\" \"$(cat $t/wchan 2>/dev/null)\"; "
+        "  done; "
+        "done | sort | uniq -c | sort -rn | head -40; "
+        "echo '-- nvidia-smi --'; "
+        "nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv 2>&1 | head -3; "
+        "nvidia-smi --query-compute-apps=pid,used_memory --format=csv 2>&1 | head -6; "
+        f"for f in {CONTROL_DIR}/*-restore-progress {CONTROL_DIR}/*-restore-error; do "
         "  if [ -f \"$f\" ]; then echo \"-- $f --\"; cat \"$f\"; fi; "
         "done"
     )

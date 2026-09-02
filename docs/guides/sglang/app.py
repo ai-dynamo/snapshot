@@ -169,10 +169,14 @@ def main() -> None:
         # gone; a failure here would otherwise be invisible. Record it in the
         # control directory next to the success sentinel.
         try:
+            progress = CONTROL_DIR.joinpath("sglang-restore-progress")
             engine.resume_memory_occupation()
+            progress.write_text("memory-resumed\n", encoding="utf-8")
             continue_generation(engine)
+            progress.write_text("generation-continued\n", encoding="utf-8")
 
             text = generate_text(engine, "The capital city of Germany is")
+            progress.write_text("generated\n", encoding="utf-8")
             print(f"SGLang restored output={text!r}", flush=True)
             serve_api(engine, text)
         except BaseException:

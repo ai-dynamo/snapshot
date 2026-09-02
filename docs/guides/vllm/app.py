@@ -125,14 +125,18 @@ async def main() -> None:
             # is gone; a failure here would otherwise be invisible. Record it
             # in the control directory next to the success sentinel.
             try:
+                progress = CONTROL_DIR.joinpath("vllm-restore-progress")
                 await engine.wake_up()
+                progress.write_text("woken\n", encoding="utf-8")
                 await engine.resume_generation()
                 await engine.check_health()
+                progress.write_text("generation-resumed\n", encoding="utf-8")
                 text = await generate_text(
                     engine,
                     "Reply with one word: restored",
                     "snapshot-restore-check",
                 )
+                progress.write_text("generated\n", encoding="utf-8")
                 print(f"vLLM restored output={text!r}", flush=True)
                 await serve_api(engine, text)
             except BaseException:
