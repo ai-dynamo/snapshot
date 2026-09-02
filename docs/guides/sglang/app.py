@@ -64,12 +64,16 @@ def generate_text(engine: Any, prompt: str) -> str:
 def pause_generation(engine: Any) -> None:
     from sglang.srt.managers.io_struct import PauseGenerationReqInput
 
-    # Default pause mode. The generation that ran before this call has already
-    # completed, so there is nothing to abort; "abort" mode does not leave the
-    # scheduler in the idle state release_memory_occupation() requires on
-    # SGLang 0.5.17 and fails with "should be called only when server is idle".
+    # "retract" drains the scheduler before pausing: it processes any pending
+    # overlap result, clears last_batch and running_batch, and re-queues
+    # unfinished requests (there are none here; the warm-up generation has
+    # returned). release_memory_occupation() asserts is_fully_idle(), which
+    # also requires last_batch to be empty. The default "in_place" mode freezes
+    # scheduler state untouched, so pausing right after a generation leaves a
+    # stale last_batch and the release fails with "should be called only when
+    # server is idle" (SGLang 0.5.17).
     engine.loop.run_until_complete(
-        engine.tokenizer_manager.pause_generation(PauseGenerationReqInput())
+        engine.tokenizer_manager.pause_generation(PauseGenerationReqInput(mode="retract"))
     )
 
 
