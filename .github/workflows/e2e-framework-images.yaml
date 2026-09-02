@@ -12,7 +12,12 @@ name: E2E Framework Images
 
 on:
   push:
-    branches: [main]
+    # main, plus the copy-pr-bot mirror branches: the mirror push is the
+    # trusted event for every PR (including forks), and it is what the
+    # framework e2e workflow also runs on.
+    branches:
+      - main
+      - 'pull-request/[0-9]+'
     paths:
       - 'docs/guides/**'
       - 'hack/framework-image-tag.py'
@@ -47,8 +52,9 @@ permissions:
 jobs:
   build:
     name: Build ${{ matrix.framework }} image
-    # Fork PRs cannot push to GHCR with the default token; they still get the
-    # tag resolution step below so the failure is explicit rather than a 403.
+    # A fork's pull_request event has no GHCR write token, so skip the whole
+    # job for it; the copy-pr-bot mirror push (push trigger above) builds the
+    # fork PR's image instead.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -130,7 +136,5 @@ jobs:
             --file "${DOCKERFILE}" \
             --tag "${IMAGE}" \
             --push \
-            --cache-from="type=gha,scope=e2e-${{ matrix.framework }}" \
-            --cache-to="type=gha,scope=e2e-${{ matrix.framework }},mode=max" \
             "${CONTEXT}"
           echo "::notice::Published ${IMAGE}"
