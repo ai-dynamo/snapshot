@@ -39,12 +39,13 @@ curl --fail --location \
 ```
 
 The program loads the model selected in `deployment.yaml`, runs one
-generation to initialize vLLM, and then calls `pause_generation()` and
-`sleep()`. It writes
-`ready-for-snapshot` only when the process is safe to checkpoint. After restore,
-the checkpointed process calls `wake_up()` and `resume_generation()`, runs
-another generation, starts an API, and writes `vllm-restore-ready` when the API
-is listening. To validate the restored replica, send a `POST` request to
+generation to initialize vLLM and records its output in `vllm-precheck`, and
+then calls `pause_generation()` and `sleep()`. It writes
+`ready-for-snapshot` only when the process is safe to checkpoint. In a restore
+container, it waits in standby until Snapshot injects the checkpointed process.
+That process calls `wake_up()` and `resume_generation()`, runs another
+generation, starts an API, and writes `vllm-restore-ready` when the API is
+listening. To validate the restored replica, send a `POST` request to
 `/generate` with a JSON body such as
 `{"prompt":"What is the capital of Italy?"}`.
 
@@ -54,8 +55,8 @@ Ubuntu 24.04 glibc required by the current Snapshot restore bundle. It creates
 `HF_HUB_DISABLE_XET=1` prevents the model downloader from leaving an open cache
 log that CRIU cannot reopen after restore.
 
-The source and restore pods must use the same immutable image and mount the
-Snapshot control volume at `/snapshot-control`.
+The source and restore pods must mount the Snapshot control volume at
+`/snapshot-control`.
 
 ### 2. Build the image
 
@@ -94,25 +95,27 @@ Any failure prints an error and returns a non-zero exit status.
 Set the namespace where the vLLM pod will run:
 
 ```bash
-export SNAPSHOT_NAMESPACE=<namespace>
-kubectl get namespace "$SNAPSHOT_NAMESPACE"
+export VLLM_NAMESPACE=<namespace>
+kubectl get namespace "$VLLM_NAMESPACE"
 ```
 
-In [`deployment.yaml`](vllm/deployment.yaml), replace the example `image` with the
-one pushed in step 2 and select the model through `SNAPSHOT_MODEL`:
+Set the model through the `SNAPSHOT_MODEL` environment variable in
+[`deployment.yaml`](vllm/deployment.yaml):
 
 ```yaml
-containers:
-  - name: main
-    image: <registry>/vllm-snapshot:<tag>
-    env:
-      - name: SNAPSHOT_MODEL
-        value: Qwen/Qwen3-0.6B
+env:
+  - name: SNAPSHOT_MODEL
+    value: Qwen/Qwen3-0.6B
 ```
 
 Other values include `TinyLlama/TinyLlama-1.1B-Chat-v1.0` or a mounted model
 path such as `/models/Qwen3-0.6B`. A mounted path must be available to both the
 source and restored containers.
+
+The example sizes the engine for a small single-GPU deployment through
+`SNAPSHOT_MAX_MODEL_LEN` (default `2048`) and `SNAPSHOT_GPU_MEMORY_UTILIZATION`
+(default `0.30`). Raise them only after validating checkpoint and restore with
+the resulting memory use.
 
 > [!NOTE]
 > This example runs vLLM directly through `AsyncLLM` rather than `vllm serve`, so
@@ -121,20 +124,30 @@ source and restored containers.
 > vLLM's [environment variables](https://docs.vllm.ai/en/v0.27.1/configuration/env_vars/)
 > set in the Deployment's Pod template.
 
-Deploy the edited manifest:
+Use [`deployment.yaml`](vllm/deployment.yaml) to deploy the image built in
+step 2:
 
 ```bash
-kubectl apply \
-  --namespace "$SNAPSHOT_NAMESPACE" \
-  --filename deployment.yaml
+kubectl set image \
+  --local \
+  --filename deployment.yaml \
+  main="$VLLM_SNAPSHOT_IMAGE" \
+  --output yaml |
+  kubectl apply \
+    --namespace "$VLLM_NAMESPACE" \
+    --filename -
 ```
+
+The command replaces the example image value in `deployment.yaml` with
+`$VLLM_SNAPSHOT_IMAGE` before creating the Deployment. It does not modify the
+local file.
 
 Wait until the vLLM replica finishes initialization and becomes safe to
 checkpoint:
 
 ```bash
 kubectl rollout status \
-  --namespace "$SNAPSHOT_NAMESPACE" \
+  --namespace "$VLLM_NAMESPACE" \
   deployment/vllm-source \
   --timeout=30m
 ```
@@ -143,7 +156,7 @@ List the generated Pod:
 
 ```bash
 kubectl get pods \
-  --namespace "$SNAPSHOT_NAMESPACE" \
+  --namespace "$VLLM_NAMESPACE" \
   --selector app=vllm-source
 ```
 

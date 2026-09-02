@@ -36,6 +36,12 @@ spec:
           env:
             - name: SNAPSHOT_MODEL
               value: Qwen/Qwen3-0.6B
+            - name: SNAPSHOT_MAX_NUM_TOKENS
+              value: "1024"
+            - name: SNAPSHOT_MAX_BATCH_SIZE
+              value: "1"
+            - name: SNAPSHOT_FREE_GPU_MEMORY_FRACTION
+              value: "0.10"
             - name: SNAPSHOT_CONTROL_DIR
               value: /snapshot-control
             - name: HF_HUB_DISABLE_XET

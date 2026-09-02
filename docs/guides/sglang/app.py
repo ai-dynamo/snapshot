@@ -38,6 +38,9 @@ def create_engine(snapshot_mode: bool) -> Any:
     return sgl.Engine(
         model_path=os.environ["SNAPSHOT_MODEL"],
         context_length=int(os.environ.get("SGLANG_CONTEXT_LENGTH", "10240")),
+        page_size=int(os.environ.get("SNAPSHOT_PAGE_SIZE", "16")),
+        tp_size=1,
+        trust_remote_code=True,
         enable_memory_saver=snapshot_mode,
         enable_weights_cpu_backup=snapshot_mode,
         log_level="info",
@@ -128,6 +131,14 @@ def main() -> None:
 
         if not snapshot_mode:
             return
+
+        # Durable evidence that the engine served a generation before capture;
+        # the source container is killed by the dump, so logs alone are easy
+        # to lose.
+        CONTROL_DIR.joinpath("sglang-precheck").write_text(
+            text + "\n",
+            encoding="utf-8",
+        )
 
         pause_generation(engine)
         try:

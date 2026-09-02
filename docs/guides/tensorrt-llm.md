@@ -39,9 +39,9 @@ curl --fail --location \
 
 The program loads the model selected in `deployment.yaml` and calls
 `LLM.generate()` to initialize TensorRT-LLM. The synchronous call returns only
-after generation finishes, so no request remains in flight. The program runs
-`gc.collect()` and writes `ready-for-snapshot` when it reaches the safe checkpoint
-point.
+after generation finishes, so no request remains in flight. The program records
+the generated text in `trtllm-precheck`, runs `gc.collect()`, and writes
+`ready-for-snapshot` when it reaches the safe checkpoint point.
 
 TensorRT-LLM does not use a framework pause or sleep call in this example. The
 model and initialized CUDA state remain resident. After restore, the checkpointed
@@ -63,7 +63,7 @@ Snapshot control volume at `/snapshot-control`.
 ### 2. Build the image
 
 ```bash
-export TENSORRT_LLM_RUNTIME_IMAGE=nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc23
+export TENSORRT_LLM_RUNTIME_IMAGE=nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc24
 export TENSORRT_LLM_SNAPSHOT_IMAGE=<registry>/tensorrt-llm-snapshot:<tag>
 
 docker build \
@@ -115,8 +115,11 @@ containers:
 ```
 
 The example uses one GPU, the PyTorch backend, and a maximum sequence length of
-512 tokens. Revalidate checkpoint and restore before changing the model,
-TensorRT-LLM image, GPU count, backend, or engine settings.
+512 tokens. Engine sizing is set through `SNAPSHOT_MAX_NUM_TOKENS` (default
+`1024`), `SNAPSHOT_MAX_BATCH_SIZE` (default `1`), and
+`SNAPSHOT_FREE_GPU_MEMORY_FRACTION` (default `0.10`). Revalidate checkpoint and
+restore before changing the model, TensorRT-LLM image, GPU count, backend, or
+engine settings.
 
 > [!NOTE]
 > This example runs TensorRT-LLM through the `LLM` API rather than `trtllm-serve`,
