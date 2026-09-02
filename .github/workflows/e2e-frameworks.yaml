@@ -170,13 +170,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # push-artifacts publishes only main/release, so a mirror branch
-          # normally has no images of its own; fall back to main's, loudly.
-          if [[ "${GITHUB_REF_NAME}" == pull-request/* ]]; then
-            python3 hack/resolve-snapshot-image-tag.py --fallback-main
-          else
-            python3 hack/resolve-snapshot-image-tag.py
-          fi
+          # push-artifacts publishes only main/release, so any other ref (a
+          # pull-request/* mirror branch, or a feature branch dispatched by
+          # hand) normally has no images of its own; fall back to main's,
+          # loudly. main and release refs stay strict: a nightly must test
+          # the commit it checked out.
+          case "${GITHUB_REF_NAME}" in
+            main|release/*) python3 hack/resolve-snapshot-image-tag.py ;;
+            *) python3 hack/resolve-snapshot-image-tag.py --fallback-main ;;
+          esac
 
       - name: Use provided Snapshot image tag
         if: ${{ steps.selected.outputs.run == 'true' && (inputs.snapshot_tag || '') != '' }}
