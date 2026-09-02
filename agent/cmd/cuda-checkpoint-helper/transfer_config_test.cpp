@@ -86,7 +86,22 @@ bool TestPinnedMemoryCalculation() {
          Check(!transfer::CalculatePinnedBytes(
                    std::numeric_limits<size_t>::max(),
                    {1, transfer::kDefaultChunkBytes}, &bytes, &error),
-               "pinned-memory overflow was accepted");
+               "pinned-memory overflow was accepted") &&
+         Check(transfer::CalculateBatchPinnedBytes(
+                   {1ULL * 1024ULL * 1024ULL * 1024ULL,
+                    1ULL * 1024ULL * 1024ULL * 1024ULL},
+                   &bytes, &error) &&
+                   bytes == transfer::kMaximumPinnedBytesPerOperation,
+               "batch pinned-memory boundary was rejected") &&
+         Check(!transfer::CalculateBatchPinnedBytes(
+                   {transfer::kMaximumPinnedBytesPerOperation, 1}, &bytes,
+                   &error),
+               "batch pinned-memory cap was not enforced") &&
+         Check(!transfer::CalculateBatchPinnedBytes(
+                   {std::numeric_limits<size_t>::max(), 1}, &bytes, &error),
+               "batch pinned-memory overflow was accepted") &&
+         Check(!transfer::CalculateBatchPinnedBytes({}, &bytes, &error),
+               "empty batch pinned-memory input was accepted");
 }
 
 bool TestChunkRingAndShardedLayout() {

@@ -175,8 +175,8 @@ func TestValidateRestoreManifest(t *testing.T) {
 		RestoreRequest{ContentUID: "content-uid-123", ArtifactContainerName: "main", DestinationContainerName: "engine-0", PodNamespace: "team-a"},
 		manifest,
 	)
-	if err == nil || !strings.Contains(err.Error(), "qualified only for one or more CUDA processes on one GPU") {
-		t.Fatalf("validateRestoreManifest(multi-GPU POSIX) = %v, want qualification error", err)
+	if err != nil {
+		t.Fatalf("validateRestoreManifest(multi-GPU POSIX) = %v, want supported manifest", err)
 	}
 }
 
@@ -296,7 +296,9 @@ func TestRequireCuinterposeState(t *testing.T) {
 		t.Fatalf("a checkpoint without cuinterpose needs no state file: %v", err)
 	}
 	prepared := &types.CheckpointManifest{
-		CUDA:        types.NewCUDAManifest([]int{1}, nil),
+		CUDA: types.NewCUDAManifest(
+			[]int{1}, nil, types.CUDAStorageModeLegacy,
+		),
 		Cuinterpose: types.CuinterposeManifest{Requested: true, Prepared: true},
 	}
 	if err := requireCuinterposeState(prepared, dir); err == nil {

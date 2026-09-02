@@ -72,24 +72,6 @@ func TestCheckpointNeedsSourceKill(t *testing.T) {
 	assert.False(t, CheckpointNeedsSourceKill(fmt.Errorf("commit PageBroker checkpoint: %w", errors.New("failed"))))
 }
 
-func TestValidatePOSIXCustomStorageTopology(t *testing.T) {
-	for _, processCount := range []int{1, 2, 8} {
-		if err := validatePOSIXCustomStorageTopology(processCount, 1); err != nil {
-			t.Fatalf("validatePOSIXCustomStorageTopology(%d, 1) = %v", processCount, err)
-		}
-	}
-	for _, topology := range []struct {
-		processes int
-		gpus      int
-	}{{0, 1}, {1, 2}, {2, 2}} {
-		err := validatePOSIXCustomStorageTopology(topology.processes, topology.gpus)
-		if err == nil || !strings.Contains(err.Error(), "qualified only for one or more CUDA processes on one GPU") {
-			t.Fatalf("validatePOSIXCustomStorageTopology(%d, %d) = %v, want qualification error",
-				topology.processes, topology.gpus, err)
-		}
-	}
-}
-
 func TestReadCUDAProcessDetailsFailureIsPreMutation(t *testing.T) {
 	_, err := readCUDAProcessDetailsForCheckpoint(t.TempDir(), []int{424242})
 	if err == nil {

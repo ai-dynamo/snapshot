@@ -32,6 +32,10 @@ type helperActionRunner interface {
 	run(context.Context, helperAction, logr.Logger) error
 }
 
+type helperRestoreBatchRunner interface {
+	runRestoreBatch(context.Context, []helperAction, logr.Logger) error
+}
+
 type helperAction struct {
 	PID         int
 	Action      string
@@ -121,6 +125,24 @@ func (commandHelperActionRunner) run(
 	return runDaemonAction(ctx, request, log)
 }
 
+func (commandHelperActionRunner) runRestoreBatch(
+	ctx context.Context,
+	requests []helperAction,
+	log logr.Logger,
+) error {
+	for index := range requests {
+		request := &requests[index]
+		if request.Identity.OutermostPID != request.PID ||
+			request.Identity.StartTimeTicks == 0 || request.Identity.Cgroup == "" {
+			return fmt.Errorf("incomplete process identity for host PID %d", request.PID)
+		}
+		if request.Action != actionRestore || request.StorageMode != types.CUDAStorageModePOSIX {
+			return fmt.Errorf("invalid batch restore action for host PID %d", request.PID)
+		}
+	}
+	return runDaemonRestoreBatch(ctx, requests, log)
+}
+
 func (r identityValidatingRunner) run(
 	ctx context.Context,
 	request helperAction,
@@ -135,4 +157,29 @@ func (r identityValidatingRunner) run(
 	}
 	request.Identity = expected
 	return r.runner.run(ctx, request, log)
+}
+
+func (r identityValidatingRunner) runRestoreBatch(
+	ctx context.Context,
+	requests []helperAction,
+	log logr.Logger,
+) error {
+	validated := make([]helperAction, len(requests))
+	copy(validated, requests)
+	for index := range validated {
+		request := &validated[index]
+		expected, ok := r.identities[request.PID]
+		if !ok {
+			return fmt.Errorf("%w: missing expected process identity for host PID %d", errProcessIdentityChangedBeforeCUDA, request.PID)
+		}
+		if err := snapshotruntime.ValidateProcessIdentity(r.procRoot, expected); err != nil {
+			return fmt.Errorf("%w: validate host PID %d immediately before CUDA batch restore: %v", errProcessIdentityChangedBeforeCUDA, request.PID, err)
+		}
+		request.Identity = expected
+	}
+	batchRunner, ok := r.runner.(helperRestoreBatchRunner)
+	if !ok {
+		return errors.New("CUDA helper runner does not support batch restore")
+	}
+	return batchRunner.runRestoreBatch(ctx, validated, log)
 }
