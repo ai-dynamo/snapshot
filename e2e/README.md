@@ -154,10 +154,24 @@ SNAPSHOT_E2E_FRAMEWORK=vllm SNAPSHOT_E2E_FRAMEWORK_IMAGE=<registry>/vllm-snapsho
   uv run --project e2e pytest e2e/tests/test_frameworks.py -vv -s
 ```
 
-The SGLang guide uses a persistent model-cache PVC; the test creates it from
-the guide manifest if missing (with `SNAPSHOT_E2E_STORAGE_CLASS` when set) and
-leaves it in place so later runs skip the download. `tests/test_framework_manifests.py`
-pins the guide manifests to the restore-pod contract without a cluster.
+Model weights come from one of two places:
+
+- **Shared model cache** (CI): set `SNAPSHOT_E2E_MODEL_CACHE_SERVER` and
+  `SNAPSHOT_E2E_MODEL_CACHE_PATH` to an NFS export holding a Hugging Face cache
+  in `HF_HOME` layout (`hub/models--<org>--<model>/...`). The test creates a
+  static `PersistentVolume`/`PersistentVolumeClaim` (`SNAPSHOT_E2E_MODEL_CACHE_PVC`,
+  default `model-cache`), mounts it at `/models` on every framework container,
+  sets `HF_HOME=/models` and `HF_HUB_OFFLINE=1`, and drops the guide's download
+  init container. In vCluster mode the setup enables `sync.toHost.persistentVolumes`
+  so the NFS mount options reach the node. The model must already be in the cache.
+- **Guide download** (default without the variables): the guide's own plumbing
+  runs unchanged. SGLang's init container downloads into its PVC, which the test
+  creates from the guide manifest if missing (with `SNAPSHOT_E2E_STORAGE_CLASS`
+  when set) and leaves in place; vLLM and TensorRT-LLM download in-process.
+  This needs working DNS and egress from the pods.
+
+`tests/test_framework_manifests.py` pins the guide manifests, and the cache
+rewrite, to the restore-pod contract without a cluster.
 
 ## Framework Images
 

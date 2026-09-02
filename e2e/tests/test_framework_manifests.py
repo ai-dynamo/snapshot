@@ -160,6 +160,76 @@ def test_model_cache_pvc_uses_configured_storage_class(monkeypatch: pytest.Monke
     assert fw.model_cache_pvc(config=CONFIG, spec=frameworks.FRAMEWORKS["vllm"]) is None
 
 
+CACHE = frameworks.SharedModelCache(
+    server="nfs.example.internal", path="/exports/models", pvc_name="model-cache"
+)
+
+
+@pytest.mark.workload
+def test_shared_model_cache_replaces_guide_download(spec: frameworks.FrameworkSpec) -> None:
+    run = workloads.TestRun.new("cache")
+    source = fw.source_pod(config=CONFIG, run=run, spec=spec, image=IMAGE, model_cache=CACHE)
+    restore = fw.restore_pod(
+        config=CONFIG, run=run, spec=spec, source_node="n0", image=IMAGE, model_cache=CACHE
+    )
+    for pod in (source, restore):
+        pod_spec = pod["spec"]
+        # No download init container: the export is mounted read-mostly and the
+        # pod runs offline, so a downloader would fail or race the readers.
+        assert not any(
+            c["name"] == fw.GUIDE_CACHE_INIT_CONTAINER for c in pod_spec.get("initContainers", [])
+        )
+        volumes = {v["name"]: v for v in pod_spec["volumes"]}
+        assert volumes[frameworks.MODEL_CACHE_VOLUME]["persistentVolumeClaim"] == {
+            "claimName": CACHE.pvc_name
+        }
+        # The guide's own claim (SGLang's sglang-model-cache) must not linger.
+        assert sum(1 for v in pod_spec["volumes"] if v["name"] == frameworks.MODEL_CACHE_VOLUME) == 1
+        main = fw.main_container(pod)
+        assert {
+            "name": frameworks.MODEL_CACHE_VOLUME,
+            "mountPath": frameworks.MODEL_CACHE_MOUNT,
+        } in main["volumeMounts"]
+        assert fw.env_value(main, "HF_HOME") == frameworks.MODEL_CACHE_MOUNT
+        assert fw.env_value(main, "HF_HUB_OFFLINE") == "1"
+        # Exactly one HF_HOME even when the guide already set one (SGLang).
+        assert sum(1 for e in main["env"] if e["name"] == "HF_HOME") == 1
+        # Contract pieces are untouched by the cache rewrite.
+        assert fw.env_value(main, "SNAPSHOT_CONTROL_DIR") == workloads.CONTROL_DIR
+        assert any(m["mountPath"] == "/dev/net/tun" for m in main["volumeMounts"])
+
+
+@pytest.mark.workload
+def test_shared_model_cache_volume_is_static_nfs() -> None:
+    pv, pvc = fw.shared_model_cache_volume(config=CONFIG, cache=CACHE)
+    assert pv["metadata"]["name"] == CACHE.pvc_name
+    assert pv["spec"]["nfs"] == {"server": CACHE.server, "path": CACHE.path}
+    assert pv["spec"]["persistentVolumeReclaimPolicy"] == "Retain"
+    assert pv["spec"]["storageClassName"] == ""
+    assert "hard" in pv["spec"]["mountOptions"]
+    assert pvc["metadata"] == {"name": CACHE.pvc_name, "namespace": CONFIG.namespace}
+    assert pvc["spec"]["volumeName"] == CACHE.pvc_name
+    assert pvc["spec"]["storageClassName"] == ""
+    assert pvc["spec"]["accessModes"] == ["ReadWriteMany"]
+
+
+@pytest.mark.workload
+def test_shared_model_cache_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("SNAPSHOT_E2E_MODEL_CACHE_SERVER", "SNAPSHOT_E2E_MODEL_CACHE_PATH", "SNAPSHOT_E2E_MODEL_CACHE_PVC"):
+        monkeypatch.delenv(name, raising=False)
+    assert frameworks.SharedModelCache.from_env() is None
+    monkeypatch.setenv("SNAPSHOT_E2E_MODEL_CACHE_SERVER", "nfs.example.internal")
+    with pytest.raises(RuntimeError):
+        frameworks.SharedModelCache.from_env()
+    monkeypatch.setenv("SNAPSHOT_E2E_MODEL_CACHE_PATH", "/exports/models")
+    cache = frameworks.SharedModelCache.from_env()
+    assert cache == frameworks.SharedModelCache(
+        server="nfs.example.internal", path="/exports/models", pvc_name="model-cache"
+    )
+    monkeypatch.setenv("SNAPSHOT_E2E_MODEL_CACHE_PVC", "shared-models")
+    assert frameworks.SharedModelCache.from_env().pvc_name == "shared-models"
+
+
 @pytest.mark.workload
 def test_framework_selection_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SNAPSHOT_E2E_FRAMEWORK", raising=False)
