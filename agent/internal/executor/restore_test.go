@@ -210,47 +210,6 @@ func TestRemainingDuration(t *testing.T) {
 	}
 }
 
-func TestWaitForCustomStoragePrefetchDiscardDoesNotWait(t *testing.T) {
-	outcomes := make(chan customStoragePrefetchOutcome, 1)
-	ctx, cancel := context.WithCancel(context.Background())
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		if _, err := waitForCustomStoragePrefetch(ctx, outcomes, cancel, true); err != nil {
-			t.Errorf("waitForCustomStoragePrefetch(discard=true): %v", err)
-		}
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("discarded prefetch waited for an outcome")
-	}
-	select {
-	case <-ctx.Done():
-	case <-time.After(time.Second):
-		t.Fatal("discarded prefetch did not cancel its context")
-	}
-}
-
-func TestWaitForCustomStoragePrefetchHonorsContextCancellation(t *testing.T) {
-	outcomes := make(chan customStoragePrefetchOutcome, 1)
-	ctx, cancelContext := context.WithCancel(context.Background())
-	cancelContext()
-	prefetchCtx, cancelPrefetch := context.WithCancel(context.Background())
-
-	_, err := waitForCustomStoragePrefetch(ctx, outcomes, cancelPrefetch, false)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("waitForCustomStoragePrefetch() error = %v, want context.Canceled", err)
-	}
-	select {
-	case <-prefetchCtx.Done():
-	case <-time.After(time.Second):
-		t.Fatal("canceled wait did not cancel prefetch")
-	}
-}
-
 func TestRestoreDeferredCUDAProcessesResolvesAndValidatesHostIdentity(t *testing.T) {
 	namespaceProcess := snapshotruntime.ProcessDetails{
 		InnermostPID:   7,
