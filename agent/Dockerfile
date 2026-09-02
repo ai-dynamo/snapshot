@@ -92,8 +92,13 @@ RUN mkdir -p /go-src && go mod vendor -o /go-src/vendor
 # =============================================================================
 FROM ${AGENT_BASE_IMAGE} AS cuda-helper-builder
 
+ARG CRIU_REPO
+ARG CRIU_REF
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    git \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
@@ -110,6 +115,24 @@ RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
 # ns-bind-mount bind-mounts the snapshot binaries into a target container's mount
 # namespace. It needs no CUDA headers, only mount_setattr (Linux 5.12+).
 RUN gcc -O2 -Wall -Wextra -o /ns-bind-mount ./cmd/ns-bind-mount/main.c
+
+# snapshot_inet_remap.so is dlopen'd by the bundled criu at restore time and
+# must resolve against the destination placeholder's own glibc (see the
+# criu-builder stage's shared-library-closure step), so it must be compiled
+# against glibc here, not against criu-builder's musl toolchain. Cloned
+# independently of criu-builder (rather than COPY --from=criu-builder) to
+# avoid a stage cycle, since criu-builder copies this plugin's output back.
+RUN git init /tmp/criu-headers \
+    && cd /tmp/criu-headers \
+    && git remote add origin ${CRIU_REPO} \
+    && git fetch --depth 1 origin ${CRIU_REF} \
+    && git checkout FETCH_HEAD
+
+COPY plugins/inet-remap/snapshot_inet_remap.c ./plugins/inet-remap/snapshot_inet_remap.c
+RUN gcc -O2 -Wall -Wextra -fPIC -shared \
+    -idirafter /tmp/criu-headers/criu/include \
+    -o /snapshot_inet_remap.so \
+    ./plugins/inet-remap/snapshot_inet_remap.c
 
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
@@ -167,12 +190,10 @@ RUN git init /tmp/criu \
 
 RUN sh /tmp/scripts/build-static-criu.sh /tmp/criu /criu-install
 
-COPY plugins/inet-remap/snapshot_inet_remap.c /tmp/snapshot_inet_remap.c
-RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \
-    && gcc -O2 -Wall -Wextra -fPIC -shared \
-      -idirafter /tmp/criu/criu/include \
-      -o /criu-install/usr/local/lib/snapshot/criu-plugins/snapshot_inet_remap.so \
-      /tmp/snapshot_inet_remap.c
+# Built in cuda-helper-builder (glibc), not here: the placeholder resolves
+# this dlopen'd plugin against its own glibc, and criu-builder is musl.
+COPY --from=cuda-helper-builder /snapshot_inet_remap.so \
+    /criu-install/usr/local/lib/snapshot/criu-plugins/snapshot_inet_remap.so
 
 RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
 
