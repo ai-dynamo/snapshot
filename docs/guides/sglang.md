@@ -39,7 +39,8 @@ curl --fail --location \
   https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/sglang/deployment.yaml
 ```
 
-The program creates a direct `sglang.Engine`, runs one generation, and calls
+The program creates a direct `sglang.Engine`, runs one generation and records
+its output in `sglang-precheck`, and calls
 `TokenizerManager.pause_generation()` followed by
 `Engine.release_memory_occupation()`. It writes `ready-for-snapshot` only after
 both operations succeed.
@@ -67,7 +68,7 @@ at `/hf-cache`.
 ### 2. Build the image
 
 ```bash
-export SGLANG_RUNTIME_IMAGE=lmsysorg/sglang@sha256:9e148f5ac788e856a06166bd6347a831831eb9fcfab4d1770874823a7c29a1a1
+export SGLANG_RUNTIME_IMAGE=lmsysorg/sglang:v0.5.17-cu130-runtime
 export SGLANG_SNAPSHOT_IMAGE=<registry>/sglang-snapshot:<tag>
 
 docker build \
@@ -127,7 +128,9 @@ containers:
 
 The example configures a context length of 10240 tokens for a 24 GiB NVIDIA A10
 GPU. Reduce `SGLANG_CONTEXT_LENGTH` for a smaller GPU or increase it only after
-validating the resulting memory use.
+validating the resulting memory use. The KV cache page size is set through
+`SNAPSHOT_PAGE_SIZE` (default `16`); the engine runs with `tp_size=1` and
+`trust_remote_code=True`.
 
 > [!NOTE]
 > This example runs SGLang directly through `sglang.Engine` rather than
