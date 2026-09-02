@@ -24,6 +24,7 @@ import yaml
 from snapshot_e2e import k8s
 from snapshot_e2e.frameworks import FrameworkSpec
 from snapshot_e2e.frameworks import framework_image
+from snapshot_e2e.frameworks import framework_image_overridden
 from snapshot_e2e.workloads import TestRun
 from snapshot_e2e.workloads import same_node_affinity
 from snapshot_e2e.workloads import workload_scheduling
@@ -115,11 +116,13 @@ def pod_from_deployment(
     pod_spec["restartPolicy"] = "Never"
     pod_spec["terminationGracePeriodSeconds"] = 1
 
+    # Content-addressed tags are immutable, so a cached pull is correct and
+    # saves minutes on multi-GB images. An override (SNAPSHOT_E2E_FRAMEWORK_IMAGE)
+    # is typically a mutable dev tag, where a cached image would test stale bits.
+    pull_policy = "Always" if framework_image_overridden() else "IfNotPresent"
     for container in pod_spec.get("initContainers", []) + pod_spec["containers"]:
         container["image"] = image
-        # Content-addressed tags are immutable, so a cached pull is correct
-        # and saves minutes on multi-GB images.
-        container["imagePullPolicy"] = "IfNotPresent"
+        container["imagePullPolicy"] = pull_policy
 
     scheduling = workload_scheduling()
     pod_spec["nodeSelector"] = {**pod_spec.get("nodeSelector", {}), **scheduling["nodeSelector"]}

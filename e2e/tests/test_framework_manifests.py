@@ -161,6 +161,32 @@ def test_model_cache_pvc_uses_configured_storage_class(monkeypatch: pytest.Monke
 
 
 @pytest.mark.workload
+def test_override_image_is_always_pulled(monkeypatch: pytest.MonkeyPatch) -> None:
+    spec = frameworks.FRAMEWORKS["vllm"]
+    monkeypatch.delenv("SNAPSHOT_E2E_FRAMEWORK_IMAGE", raising=False)
+    run = workloads.TestRun.new("pull")
+    pod = fw.source_pod(config=CONFIG, run=run, spec=spec, image=IMAGE)
+    assert fw.main_container(pod)["imagePullPolicy"] == "IfNotPresent"
+    # A dev override is a mutable tag: a cached copy would test stale bits.
+    monkeypatch.setenv("SNAPSHOT_E2E_FRAMEWORK_IMAGE", "registry/vllm-snapshot:dev")
+    pod = fw.source_pod(config=CONFIG, run=run, spec=spec)
+    for container in pod["spec"]["containers"]:
+        assert container["image"] == "registry/vllm-snapshot:dev"
+        assert container["imagePullPolicy"] == "Always"
+
+
+@pytest.mark.workload
+def test_control_file_parsing_distinguishes_absent_from_content() -> None:
+    from snapshot_e2e import inference
+
+    # exec merges stderr into the output: a missing file must not read as content.
+    assert inference.parse_control_file("cat: /snapshot-control/x: No such file or directory") is None
+    assert inference.parse_control_file("") is None
+    assert inference.parse_control_file(inference._FILE_MARKER + "hello\n") == "hello\n"
+    assert inference.parse_control_file(inference._FILE_MARKER) == ""
+
+
+@pytest.mark.workload
 def test_framework_selection_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SNAPSHOT_E2E_FRAMEWORK", raising=False)
     assert frameworks.selected_frameworks() == sorted(frameworks.FRAMEWORKS)

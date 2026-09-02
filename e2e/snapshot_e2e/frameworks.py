@@ -111,6 +111,10 @@ def selected_frameworks() -> list[str]:
     return names
 
 
+def framework_image_overridden() -> bool:
+    return bool(os.environ.get("SNAPSHOT_E2E_FRAMEWORK_IMAGE"))
+
+
 def framework_image(spec: FrameworkSpec) -> str:
     """The workload image: an explicit override, else the published guide image.
 

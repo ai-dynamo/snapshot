@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import shlex
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from kubernetes import client
@@ -833,6 +834,7 @@ def debug_dump_framework(
     run: TestRun,
     *,
     source_node: str | None = None,
+    image: str | None = None,
 ) -> None:
     """Failure dump for a framework workload run.
 
@@ -842,7 +844,7 @@ def debug_dump_framework(
     framework startup output easily exceeds the generic dump's 80 lines.
     """
     print("\n--- framework e2e debug ---")
-    print(f"namespace={config.namespace} test={run.suffix} image={run.image}")
+    print(f"namespace={config.namespace} test={run.suffix} framework_image={image or '<unknown>'}")
     core = client.CoreV1Api()
     pods = core.list_namespaced_pod(
         config.namespace, label_selector=f"snapshot-e2e-test={run.suffix}"
@@ -852,6 +854,7 @@ def debug_dump_framework(
     for pod in pods:
         name = pod.metadata.name
         print(f"pod {name} phase={pod.status.phase} node={pod.spec.node_name}")
+        print(f"images={[c.image for c in pod.spec.containers]}")
         print(f"annotations={pod.metadata.annotations or {}}")
         print(f"conditions={[(c.type, c.status, c.reason) for c in pod.status.conditions or []]}")
         for cs in list(pod.status.init_container_statuses or []) + list(
@@ -872,12 +875,29 @@ def debug_dump_framework(
             print(k8s.exec_command(config.namespace, agent, "nvidia-smi 2>&1 || true"))
         except Exception as exc:  # noqa: BLE001 - debug helper must never mask the real failure
             print(f"agent diagnostics unavailable: {type(exc).__name__}: {exc}")
-    events = core.list_namespaced_event(config.namespace).items
+    # Filter first, then order by time: the API returns events unordered, and
+    # in a namespace shared with the controllers the run's events need not be
+    # in any tail of the raw list.
+    names = {run.source_pod, run.restore_pod, run.snapshot_name}
+    events = [
+        event
+        for event in core.list_namespaced_event(config.namespace).items
+        if event.involved_object and event.involved_object.name in names
+    ]
+    events.sort(key=event_time)
     for event in events[-60:]:
         involved = event.involved_object
-        if involved and involved.name in {run.source_pod, run.restore_pod, run.snapshot_name}:
-            print(f"event {involved.kind}/{involved.name} {event.reason}: {event.message}")
+        print(f"event {involved.kind}/{involved.name} {event.reason}: {event.message}")
     print("--- end debug ---\n")
+
+
+def event_time(event: client.CoreV1Event) -> datetime:
+    return (
+        event.last_timestamp
+        or event.event_time
+        or event.metadata.creation_timestamp
+        or datetime.min.replace(tzinfo=timezone.utc)
+    )
 
 
 def snapshot_control_listing(namespace: str, pod: str) -> str:

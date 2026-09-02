@@ -68,8 +68,12 @@ def test_framework_checkpoint_restore_serves_inference(
 
         precheck = inference.read_control_file(
             config.namespace, run.source_pod, framework.precheck_file
-        ).strip()
-        assert precheck, f"{framework.precheck_file} is empty: engine did not generate before capture"
+        )
+        assert precheck is not None, (
+            f"{framework.precheck_file} missing: engine did not generate before capture"
+        )
+        precheck = precheck.strip()
+        assert precheck, f"{framework.precheck_file} is empty"
         print(f"[{framework.name}] pre-checkpoint generation: {precheck!r}")
 
         # --- checkpoint -----------------------------------------------------
@@ -108,7 +112,9 @@ def test_framework_checkpoint_restore_serves_inference(
         )
         restored_text = inference.read_control_file(
             config.namespace, run.restore_pod, framework.restore_ready_file
-        ).strip()
+        )
+        assert restored_text is not None, f"{framework.restore_ready_file} missing"
+        restored_text = restored_text.strip()
         assert restored_text, f"{framework.restore_ready_file} is empty"
         print(f"[{framework.name}] first post-restore generation: {restored_text!r}")
 
@@ -125,5 +131,7 @@ def test_framework_checkpoint_restore_serves_inference(
             "restore placeholder loaded a model itself instead of staying in standby"
         )
     except Exception:
-        snap.debug_dump_framework(config, run, source_node=source_node)
+        snap.debug_dump_framework(
+            config, run, source_node=source_node, image=frameworks.framework_image(framework)
+        )
         raise
