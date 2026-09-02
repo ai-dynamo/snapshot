@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -20,6 +21,46 @@ import (
 )
 
 const checkpointLeaseDuration = 30 * time.Second
+
+const (
+	captureLeasePodUIDAnnotation      = "snapshot.nvidia.com/capture-pod-uid"
+	captureLeaseContainerIDAnnotation = "snapshot.nvidia.com/capture-container-id"
+	captureLeasePIDAnnotation         = "snapshot.nvidia.com/capture-host-pid"
+)
+
+type captureLeaseTarget struct {
+	podUID      string
+	containerID string
+	pid         int
+}
+
+func (t captureLeaseTarget) annotations() map[string]string {
+	return map[string]string{
+		captureLeasePodUIDAnnotation:      t.podUID,
+		captureLeaseContainerIDAnnotation: t.containerID,
+		captureLeasePIDAnnotation:         strconv.Itoa(t.pid),
+	}
+}
+
+func captureTargetFromLease(lease *coordinationv1.Lease) (captureLeaseTarget, error) {
+	if lease == nil {
+		return captureLeaseTarget{}, fmt.Errorf("capture lease is missing")
+	}
+	annotations := lease.GetAnnotations()
+	pid, err := strconv.Atoi(annotations[captureLeasePIDAnnotation])
+	if err != nil || pid <= 0 {
+		return captureLeaseTarget{}, fmt.Errorf("capture lease has invalid host PID %q", annotations[captureLeasePIDAnnotation])
+	}
+	target := captureLeaseTarget{
+		podUID:      annotations[captureLeasePodUIDAnnotation],
+		containerID: annotations[captureLeaseContainerIDAnnotation],
+		pid:         pid,
+	}
+	if target.podUID == "" || target.containerID == "" {
+		return captureLeaseTarget{}, fmt.Errorf("capture lease is missing source identity")
+	}
+	return target, nil
+}
 
 // checkpointLeaseRenewInterval is a package-level var (not const) so tests can shorten the
 // renewal loop without a fake clock. Only same-package _test.go files should mutate it.
@@ -72,7 +113,7 @@ func checkpointLeaseName(contentUID, containerName string) string {
 
 // acquireLease acquires or renews a checkpoint lease at an arbitrary namespace/name key,
 // returning false when another live holder owns it.
-func (w *NodeController) acquireLease(ctx context.Context, key client.ObjectKey) (bool, error) {
+func (w *NodeController) acquireLease(ctx context.Context, key client.ObjectKey, target captureLeaseTarget) (bool, error) {
 	now := metav1.NewMicroTime(time.Now())
 	leaseDurationSeconds := int32(checkpointLeaseDuration.Seconds())
 
@@ -83,7 +124,7 @@ func (w *NodeController) acquireLease(ctx context.Context, key client.ObjectKey)
 			return false, fmt.Errorf("get checkpoint lease %s: %w", key.String(), err)
 		}
 		lease := &coordinationv1.Lease{
-			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
+			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, Annotations: target.annotations()},
 			Spec: coordinationv1.LeaseSpec{
 				HolderIdentity:       &w.holderID,
 				LeaseDurationSeconds: &leaseDurationSeconds,
@@ -106,6 +147,7 @@ func (w *NodeController) acquireLease(ctx context.Context, key client.ObjectKey)
 		return false, nil
 	}
 	existing.Spec.HolderIdentity = &w.holderID
+	existing.Annotations = target.annotations()
 	existing.Spec.LeaseDurationSeconds = &leaseDurationSeconds
 	if existing.Spec.AcquireTime == nil || checkpointLeaseExpired(existing, now.Time) {
 		existing.Spec.AcquireTime = &now

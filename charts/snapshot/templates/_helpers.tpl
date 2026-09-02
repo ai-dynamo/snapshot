@@ -72,14 +72,6 @@ Name of the operator service account.
 {{- end }}
 
 {{/*
-The one configured agent image used by both the DaemonSet and the snapshot-cuda
-init container injected into source Pods.
-*/}}
-{{- define "snapshot.agentImage" -}}
-{{- printf "%s:%s" .Values.image.agent.repository (.Values.image.agent.tag | default .Chart.AppVersion) }}
-{{- end }}
-
-{{/*
 Fail fast on unsupported runtime.type values. Called once from daemonset.yaml.
 */}}
 {{- define "snapshot.validateRuntime" -}}
@@ -110,5 +102,10 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
 {{- if eq .Values.runtime.type "crio" -}}/var/lib/containers{{- else -}}/var/lib/containerd{{- end -}}
 {{- end }}
 
-{{- define "snapshot.pageBrokerControlPath" -}}/pagebroker/control{{- end -}}
-{{- define "snapshot.pageBrokerStagingPath" -}}/pagebroker/staging{{- end -}}
+{{/* Require an integer-valued Helm number and reject strings, booleans, and null. */}}
+{{- define "snapshot.requireIntegral" -}}
+{{- $value := .value -}}
+{{- if not (or (kindIs "int" $value) (kindIs "int64" $value) (and (kindIs "float64" $value) (eq $value (floor $value)))) -}}
+{{- fail (printf "snapshot.%s must be an integral numeric value; fractional numbers, booleans, strings, and null are not accepted" .path) -}}
+{{- end -}}
+{{- end }}

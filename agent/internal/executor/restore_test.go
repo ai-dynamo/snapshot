@@ -12,11 +12,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/testr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
+	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
 
@@ -163,6 +165,19 @@ func TestValidateRestoreManifest(t *testing.T) {
 			}
 		})
 	}
+
+	manifest.CUDA = types.NewCUDAManifest(
+		[]int{42, 43},
+		[]string{"GPU-aaa", "GPU-bbb"},
+		types.CUDAStorageModePOSIX,
+	)
+	err := validateRestoreManifest(
+		RestoreRequest{ContentUID: "content-uid-123", ArtifactContainerName: "main", DestinationContainerName: "engine-0", PodNamespace: "team-a"},
+		manifest,
+	)
+	if err == nil || !strings.Contains(err.Error(), "qualified only for one or more CUDA processes on one GPU") {
+		t.Fatalf("validateRestoreManifest(multi-GPU POSIX) = %v, want qualification error", err)
+	}
 }
 
 func TestRestoreInNamespaceRejectsMultiGPUCheckpointWithoutLaunchJobState(t *testing.T) {
@@ -174,7 +189,7 @@ func TestRestoreInNamespaceRejectsMultiGPUCheckpointWithoutLaunchJobState(t *tes
 		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
 		types.OverlayManifest{},
 	)
-	manifest.CUDA = types.NewCUDAManifest([]int{42, 43}, []string{"GPU-aaa", "GPU-bbb"})
+	manifest.CUDA = types.NewCUDAManifest([]int{42, 43}, []string{"GPU-aaa", "GPU-bbb"}, types.CUDAStorageModeLegacy)
 	if err := types.WriteManifest(checkpointDir, manifest); err != nil {
 		t.Fatalf("WriteManifest: %v", err)
 	}
@@ -195,106 +210,127 @@ func TestRemainingDuration(t *testing.T) {
 	}
 }
 
-// recordingMounter records the order of role mounts for mountRestoreInputs.
-type recordingMounter struct {
-	calls   []string
-	failOn  string
-	failErr error
-}
+func TestWaitForCustomStoragePrefetchDiscardDoesNotWait(t *testing.T) {
+	outcomes := make(chan customStoragePrefetchOutcome, 1)
+	ctx, cancel := context.WithCancel(context.Background())
 
-func (m *recordingMounter) record(role string) (nsmount.MountPoint, error) {
-	m.calls = append(m.calls, role)
-	if role == m.failOn {
-		return nil, m.failErr
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := waitForCustomStoragePrefetch(ctx, outcomes, cancel, true); err != nil {
+			t.Errorf("waitForCustomStoragePrefetch(discard=true): %v", err)
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("discarded prefetch waited for an outcome")
 	}
-	return testMountPoint{}, nil
-}
-
-func (m *recordingMounter) MountBundle(context.Context, int) (nsmount.MountPoint, error) {
-	return m.record("bundle")
-}
-
-func (m *recordingMounter) MountCUDATools(context.Context, nsmount.MountPoint) (nsmount.MountPoint, error) {
-	return m.record("cudatools")
-}
-
-func (m *recordingMounter) MountArtifact(context.Context, nsmount.MountPoint, string) (nsmount.MountPoint, error) {
-	return m.record("artifact")
-}
-
-func (m *recordingMounter) MountPageBroker(context.Context, nsmount.MountPoint, string) (nsmount.MountPoint, error) {
-	return m.record("pagebroker")
-}
-
-func TestMountRestoreInputsOrdersCUDAToolsBeforeStaging(t *testing.T) {
-	cases := map[string]struct {
-		tools     bool
-		staged    string
-		wantCalls []string
-		wantPath  string
-	}{
-		"plain artifact":      {wantCalls: []string{"artifact"}, wantPath: nsmount.CheckpointDst},
-		"tools then artifact": {tools: true, wantCalls: []string{"cudatools", "artifact"}, wantPath: nsmount.CheckpointDst},
-		"brokered":            {staged: "/pagebroker/staging/restore/tx", wantCalls: []string{"pagebroker"}, wantPath: nsmount.PageBrokerDst},
-		"tools then brokered": {tools: true, staged: "/pagebroker/staging/restore/tx", wantCalls: []string{"cudatools", "pagebroker"}, wantPath: nsmount.PageBrokerDst},
-	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			m := &recordingMounter{}
-			mounted, path, err := mountRestoreInputs(context.Background(), m, tc.tools, testMountPoint{}, "/checkpoints/x", tc.staged)
-			if err != nil {
-				t.Fatalf("mountRestoreInputs: %v", err)
-			}
-			if strings.Join(m.calls, ",") != strings.Join(tc.wantCalls, ",") {
-				t.Fatalf("mount order = %v, want %v", m.calls, tc.wantCalls)
-			}
-			if path != tc.wantPath {
-				t.Fatalf("checkpoint path = %q, want %q", path, tc.wantPath)
-			}
-			if len(mounted) != len(tc.wantCalls) {
-				t.Fatalf("mounted %d, want %d", len(mounted), len(tc.wantCalls))
-			}
-			// The brokered path unmounts the last active mount early; it must
-			// be the staging mount, never the tools mount.
-			if tc.staged != "" && mounted[len(mounted)-1].action != "unmount PageBroker staging from placeholder" {
-				t.Fatalf("last mount = %q, want the staging mount", mounted[len(mounted)-1].action)
-			}
-		})
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("discarded prefetch did not cancel its context")
 	}
 }
 
-func TestMountRestoreInputsReturnsEarlierMountsOnFailure(t *testing.T) {
-	m := &recordingMounter{failOn: "artifact", failErr: errors.New("boom")}
-	mounted, _, err := mountRestoreInputs(context.Background(), m, true, testMountPoint{}, "/checkpoints/x", "")
-	if err == nil || !strings.Contains(err.Error(), "boom") {
-		t.Fatalf("expected the artifact mount error, got %v", err)
+func TestWaitForCustomStoragePrefetchHonorsContextCancellation(t *testing.T) {
+	outcomes := make(chan customStoragePrefetchOutcome, 1)
+	ctx, cancelContext := context.WithCancel(context.Background())
+	cancelContext()
+	prefetchCtx, cancelPrefetch := context.WithCancel(context.Background())
+
+	_, err := waitForCustomStoragePrefetch(ctx, outcomes, cancelPrefetch, false)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitForCustomStoragePrefetch() error = %v, want context.Canceled", err)
 	}
-	if len(mounted) != 1 || mounted[0].action != "unmount CUDA tools from placeholder" {
-		t.Fatalf("earlier mounts must be returned for cleanup, got %+v", mounted)
+	select {
+	case <-prefetchCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("canceled wait did not cancel prefetch")
 	}
 }
 
-func TestRequireCuinterposeState(t *testing.T) {
-	dir := t.TempDir()
-	plain := &types.CheckpointManifest{}
-	if err := requireCuinterposeState(plain, dir); err != nil {
-		t.Fatalf("a checkpoint without cuinterpose needs no state file: %v", err)
+func TestRestoreDeferredCUDAProcessesResolvesAndValidatesHostIdentity(t *testing.T) {
+	namespaceProcess := snapshotruntime.ProcessDetails{
+		InnermostPID:   7,
+		StartTimeTicks: 101,
+		Cgroup:         "0::/restored\n",
 	}
-	prepared := &types.CheckpointManifest{
-		CUDA:        types.NewCUDAManifest([]int{1}, nil),
-		Cuinterpose: types.CuinterposeManifest{Requested: true, Prepared: true},
+	hostProcess := snapshotruntime.ProcessDetails{
+		ObservedPID:    9007,
+		OutermostPID:   9007,
+		InnermostPID:   7,
+		NamespacePIDs:  []int{9007, 7},
+		StartTimeTicks: 101,
+		Cgroup:         "0::/restored\n",
 	}
-	if err := requireCuinterposeState(prepared, dir); err == nil {
-		t.Fatal("a prepared checkpoint without its state file must be refused")
+
+	originalRead := readRestoredHostProcessTable
+	originalValidate := validateRestoredProcessIdentity
+	originalRestore := restoreAndUnlockCUDAProcessTree
+	t.Cleanup(func() {
+		readRestoredHostProcessTable = originalRead
+		validateRestoredProcessIdentity = originalValidate
+		restoreAndUnlockCUDAProcessTree = originalRestore
+	})
+
+	readRestoredHostProcessTable = func(procRoot string) ([]snapshotruntime.ProcessDetails, error) {
+		if procRoot != snapshotruntime.HostProcPath {
+			t.Fatalf("ReadProcessTable proc root = %q, want %q", procRoot, snapshotruntime.HostProcPath)
+		}
+		return []snapshotruntime.ProcessDetails{hostProcess}, nil
 	}
-	if err := os.WriteFile(dir+"/"+cuda.CuinterposeStateFile, []byte("cuinterpose-state-v2\n"), 0o600); err != nil {
-		t.Fatal(err)
+	validated := false
+	validateRestoredProcessIdentity = func(procRoot string, process snapshotruntime.ProcessDetails) error {
+		if procRoot != snapshotruntime.HostProcPath || process.OutermostPID != hostProcess.OutermostPID {
+			t.Fatalf("ValidateProcessIdentity(%q, PID %d), want (%q, PID %d)",
+				procRoot, process.OutermostPID, snapshotruntime.HostProcPath, hostProcess.OutermostPID)
+		}
+		validated = true
+		return nil
 	}
-	if err := requireCuinterposeState(prepared, dir); err != nil {
-		t.Fatalf("state present: %v", err)
+	restored := false
+	restoreAndUnlockCUDAProcessTree = func(
+		ctx context.Context,
+		processes []snapshotruntime.ProcessDetails,
+		deviceMap, storageMode, checkpointDir, jobFile string,
+		targetGPUUUIDs []string,
+		transferSettings types.CUDATransferSettings,
+		_ logr.Logger,
+	) (cuda.RestorePhaseTimings, error) {
+		if len(processes) != 1 || processes[0].OutermostPID != hostProcess.OutermostPID {
+			t.Fatalf("CUDA restore processes = %+v, want host PID %d", processes, hostProcess.OutermostPID)
+		}
+		if deviceMap != "0=1" || storageMode != types.CUDAStorageModePOSIX || checkpointDir == "" {
+			t.Fatalf("CUDA restore args = device map %q, storage mode %q, checkpoint dir %q", deviceMap, storageMode, checkpointDir)
+		}
+		if len(targetGPUUUIDs) != 1 || targetGPUUUIDs[0] != "GPU-target" {
+			t.Fatalf("target GPU UUIDs = %v", targetGPUUUIDs)
+		}
+		restored = true
+		return cuda.RestorePhaseTimings{TotalDuration: 250 * time.Millisecond}, nil
 	}
-	noCUDA := &types.CheckpointManifest{Cuinterpose: types.CuinterposeManifest{Prepared: true}}
-	if err := requireCuinterposeState(noCUDA, dir); err == nil {
-		t.Fatal("prepared without CUDA processes is inconsistent")
+
+	duration, err := restoreDeferredCUDAProcesses(
+		context.Background(),
+		[]snapshotruntime.ProcessDetails{namespaceProcess},
+		&types.RestoreContainerSnapshot{
+			CUDADeviceMap:   "0=1",
+			CUDAStorageMode: types.CUDAStorageModePOSIX,
+			TargetGPUUUIDs:  []string{"GPU-target"},
+		},
+		t.TempDir(),
+		types.CUDATransferSettings{},
+		testr.New(t),
+	)
+	if err != nil {
+		t.Fatalf("restoreDeferredCUDAProcesses: %v", err)
+	}
+	if !validated || !restored {
+		t.Fatalf("validated = %t, restored = %t; want both true", validated, restored)
+	}
+	if duration != 250*time.Millisecond {
+		t.Fatalf("duration = %s, want 250ms", duration)
 	}
 }
