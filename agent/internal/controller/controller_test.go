@@ -38,6 +38,7 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
+	"github.com/ai-dynamo/snapshot/api/compat"
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
@@ -79,6 +80,10 @@ func (r *fakeRuntime) ResolveContainerByPod(_ context.Context, _, _, _ string) (
 	return 0, nil, errors.New("not implemented")
 }
 
+func (r *fakeRuntime) ResolveContainerImageID(_ context.Context, _ string) (string, error) {
+	return "", errors.New("not implemented")
+}
+
 func (r *fakeRuntime) Close() error { return nil }
 
 type noopInjector struct{}
@@ -107,10 +112,23 @@ func TestNewDefaultControllerSetsDefaultOperations(t *testing.T) {
 		&fakeRuntime{},
 		noopInjector{},
 		testr.New(t),
+		nil,
 	)
 	t.Cleanup(w.restoreQueue.ShutDown)
 	if w.checkpointFn == nil || w.restoreFn == nil || w.writeControlSentinelFn == nil || w.controlSentinelExistsFn == nil || w.sendSignalFn == nil || w.restoreQueue == nil {
 		t.Fatal("default controller operations must be initialized")
+	}
+	if w.compareFn == nil {
+		t.Fatal("default controller must compare restore compatibility")
+	}
+	// Without an injected read there is still one to make: the copy the agent
+	// started with, rather than a nil call on the restore path.
+	if w.skipCompatCheckFn == nil {
+		t.Fatal("default controller must resolve the node compatibility switch")
+	}
+	w.config.Restore.SkipCompatCheck = true
+	if !w.skipCompatCheckFn() {
+		t.Fatal("default controller ignored the configured node compatibility switch")
 	}
 }
 
@@ -150,11 +168,13 @@ func makeTestController(t *testing.T, pod *corev1.Pod, apiObjects ...runtime.Obj
 		controlSentinelExistsFn: func(int, string) (bool, error) { return false, nil },
 		sendSignalFn:            func(logr.Logger, int, syscall.Signal, string) error { return nil },
 		restoreQueue:            workqueue.NewTypedDelayingQueue[client.ObjectKey](),
+		compareFn:               compat.Compare,
 		log:                     testr.New(t),
 		holderID:                "test-holder",
 		inFlight:                make(map[string]struct{}),
 		stopCh:                  make(chan struct{}),
 	}
+	w.skipCompatCheckFn = func() bool { return w.config.Restore.SkipCompatCheck }
 	t.Cleanup(w.restoreQueue.ShutDown)
 	return w
 }
@@ -186,6 +206,17 @@ func sawEventReason(clientset *fake.Clientset, reason string) bool {
 }
 
 func eventForReason(clientset *fake.Clientset, reason string) *corev1.Event {
+	events := eventsForReason(clientset, reason)
+	if len(events) == 0 {
+		return nil
+	}
+	return events[0]
+}
+
+// eventsForReason returns every event created under one reason, so a test can
+// assert on how many there are and not only that there was one.
+func eventsForReason(clientset *fake.Clientset, reason string) []*corev1.Event {
+	var events []*corev1.Event
 	for _, action := range clientset.Actions() {
 		create, ok := action.(clientgotesting.CreateAction)
 		if !ok || create.GetResource().Resource != "events" {
@@ -193,10 +224,10 @@ func eventForReason(clientset *fake.Clientset, reason string) *corev1.Event {
 		}
 		event, ok := create.GetObject().(*corev1.Event)
 		if ok && event.Reason == reason {
-			return event
+			events = append(events, event)
 		}
 	}
-	return nil
+	return events
 }
 
 func pendingRestoreReason(t *testing.T, err error) string {
@@ -553,7 +584,7 @@ func TestIsRestoreTerminalRequiresKnownTerminalOutcome(t *testing.T) {
 		{name: "failed", status: corev1.ConditionFalse, reason: podcontract.RestoreReasonFailed, want: true},
 		{name: "partially succeeded", status: corev1.ConditionFalse, reason: podcontract.RestoreReasonPartiallySucceeded, want: true},
 		{name: "in progress", status: corev1.ConditionFalse, reason: podcontract.RestoreReasonInProgress},
-		{name: "unrecognized reason", status: corev1.ConditionFalse, reason: "RestoreIncompatible"},
+		{name: "incompatible", status: corev1.ConditionFalse, reason: podcontract.RestoreReasonIncompatible, want: true},
 		{name: "unknown status", status: corev1.ConditionUnknown, reason: podcontract.RestoreReasonSucceeded},
 	}
 

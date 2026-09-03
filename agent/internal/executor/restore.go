@@ -24,6 +24,7 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
+	"github.com/ai-dynamo/snapshot/api/compat"
 )
 
 // RestoreMounter installs the fixed binary bundle and one validated checkpoint
@@ -74,6 +75,11 @@ type RestoreRequest struct {
 	ArtifactContainerName    string
 	DestinationContainerName string
 	Clientset                kubernetes.Interface
+
+	// SkipCompatCheck carries the decision the caller already made, so the
+	// second gate cannot reach a different answer than the first: one restore
+	// is either checked or it is not.
+	SkipCompatCheck bool
 }
 
 // Restore performs external restore for the given request.
@@ -248,20 +254,37 @@ func inspectRestore(
 	}
 	log.V(1).Info("Resolved placeholder container", "pid", placeholderPID)
 
+	targetImageID := ""
+	if manifest.K8s.ImageID != "" {
+		if req.ContainerID == "" {
+			return nil, 0, fmt.Errorf("container ID is required to compare the runtime image ID")
+		}
+		targetImageID, err = rt.ResolveContainerImageID(ctx, req.ContainerID)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to resolve placeholder image ID: %w", err)
+		}
+	}
+
 	cgroupRoot, err := snapshotruntime.ResolveCgroupRootFromHostPID(placeholderPID)
 	if err != nil {
 		log.Error(err, "Failed to resolve placeholder cgroup root; proceeding without explicit cgroup remap")
 		cgroupRoot = ""
 	}
 
-	cudaDeviceMap := ""
-	var gpuDeviceMapDuration time.Duration
+	targetRoot := fmt.Sprintf("%s/%d/root", snapshotruntime.HostProcPath, placeholderPID)
+
+	var (
+		targetGPUs        compat.GPUFacts
+		targetGPUUUIDs    []string
+		discoverDuration  time.Duration
+		deviceMapDuration time.Duration
+	)
 	if !manifest.CUDA.IsEmpty() {
 		if len(manifest.CUDA.SourceGPUUUIDs) == 0 {
 			return nil, 0, fmt.Errorf("missing source GPU UUIDs in checkpoint manifest")
 		}
-		gpuStart := time.Now()
-		targetGPUUUIDs, err := cuda.DiscoverGPUUUIDs(
+		discoverStart := time.Now()
+		targetGPUs, err = cuda.DiscoverGPUFacts(
 			ctx,
 			req.Clientset,
 			req.PodName,
@@ -271,14 +294,33 @@ func inspectRestore(
 			placeholderPID,
 			log,
 		)
+		discoverDuration = time.Since(discoverStart)
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to get target GPU UUIDs: %w", err)
 		}
-		if len(targetGPUUUIDs) == 0 {
-			return nil, 0, fmt.Errorf("missing target GPU UUIDs for %s/%s container %s", req.PodNamespace, req.PodName, req.DestinationContainerName)
+		for _, device := range targetGPUs.Devices {
+			targetGPUUUIDs = append(targetGPUUUIDs, device.UUID)
 		}
+	}
+
+	// Gate B, once the placeholder is resolved and this node's own facts are
+	// readable. It runs ahead of BuildDeviceMap, whose positional pairing turns
+	// a GPU difference into a device-map error that names neither GPU.
+	if err := inspectCompatibility(log, manifest, targetGPUs, targetRoot, targetImageID, req.SkipCompatCheck); err != nil {
+		return nil, 0, err
+	}
+
+	// Behind the gate, which names a target with no GPUs as a count refusal.
+	// This is what is left when the gate is skipped.
+	if !manifest.CUDA.IsEmpty() && len(targetGPUUUIDs) == 0 {
+		return nil, 0, fmt.Errorf("missing target GPU UUIDs for %s/%s container %s", req.PodNamespace, req.PodName, req.DestinationContainerName)
+	}
+
+	cudaDeviceMap := ""
+	if len(targetGPUUUIDs) > 0 {
+		deviceMapStart := time.Now()
 		cudaDeviceMap, err = cuda.BuildDeviceMap(manifest.CUDA.SourceGPUUUIDs, targetGPUUUIDs, log)
-		gpuDeviceMapDuration = time.Since(gpuStart)
+		deviceMapDuration = time.Since(deviceMapStart)
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to build CUDA device map: %w", err)
 		}
@@ -291,10 +333,27 @@ func inspectRestore(
 
 	return &types.RestoreContainerSnapshot{
 		PlaceholderPID: placeholderPID,
-		TargetRoot:     fmt.Sprintf("%s/%d/root", snapshotruntime.HostProcPath, placeholderPID),
+		TargetRoot:     targetRoot,
 		CgroupRoot:     cgroupRoot,
 		CUDADeviceMap:  cudaDeviceMap,
-	}, gpuDeviceMapDuration, nil
+	}, discoverDuration + deviceMapDuration, nil
+}
+
+// existingMountPaths reports which recorded mount destinations resolve inside
+// the placeholder's rootfs. Only what the checkpoint recorded is looked up, so a
+// gate on this path costs one stat per volume the checkpoint actually used.
+//
+// Only a path that is definitely absent is left out. Any other stat failure is
+// this agent failing to look rather than the pod missing a volume, and reporting
+// it as missing would refuse a restore that would have worked.
+func existingMountPaths(targetRoot string, destinations []string) []string {
+	existing := make([]string, 0, len(destinations))
+	for _, destination := range destinations {
+		if _, err := os.Stat(filepath.Join(targetRoot, destination)); !os.IsNotExist(err) {
+			existing = append(existing, destination)
+		}
+	}
+	return existing
 }
 
 // execNSRestore launches the nsrestore binary inside the placeholder container's

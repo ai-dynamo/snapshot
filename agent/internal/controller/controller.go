@@ -47,6 +47,7 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
+	"github.com/ai-dynamo/snapshot/api/compat"
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
@@ -72,6 +73,12 @@ type NodeController struct {
 	sendSignalFn            func(logr.Logger, int, syscall.Signal, string) error
 	restoreQueue            workqueue.TypedDelayingInterface[client.ObjectKey]
 	restorePodLister        corev1listers.PodLister
+	compareFn               func(compat.Gate, compat.Facts, compat.Facts) []compat.Mismatch
+
+	// skipCompatCheckFn is read once per restore rather than at startup, so the
+	// node-wide switch can be flipped without a DaemonSet rollout. Injected so
+	// the controller never learns where the config file lives.
+	skipCompatCheckFn func() bool
 
 	inFlight   map[string]struct{}
 	inFlightMu sync.Mutex
@@ -90,6 +97,9 @@ type restoreArtifact struct {
 	ContentUID          string
 	SourceContainerName string
 	Path                string
+	// SkipCompatCheck is decided once in preflight and carried from there, so
+	// the gate inside the restore reaches the same answer as the one before it.
+	SkipCompatCheck bool
 }
 
 type restoreTarget struct {
@@ -109,11 +119,13 @@ const (
 	restoreResultPending restoreResultState = iota
 	restoreResultSucceeded
 	restoreResultFailed
+	restoreResultIncompatible
 )
 
 type restoreResult struct {
 	destination string
 	state       restoreResultState
+	reason      string
 }
 
 type restorePendingError struct {
@@ -159,10 +171,13 @@ const (
 var podSnapshotContentGVR = snapshotv1alpha1.GroupVersion.WithResource("podsnapshotcontents")
 
 // NewNodeController creates the node-local controller that runs inside snapshot-agent.
+// skipCompatCheckFn is read per restore; passing nil pins the switch to the
+// configuration the agent started with.
 func NewNodeController(
 	cfg *types.AgentConfig,
 	rt snapshotruntime.Runtime,
 	log logr.Logger,
+	skipCompatCheckFn func() bool,
 ) (*NodeController, error) {
 	restConfig, err := rest.InClusterConfig()
 	if err != nil {
@@ -189,7 +204,7 @@ func NewNodeController(
 	}
 
 	nsm := nsmount.New(log)
-	return newDefaultController(cfg, clientset, typedClient, dynClient, rt, nsm, log), nil
+	return newDefaultController(cfg, clientset, typedClient, dynClient, rt, nsm, log, skipCompatCheckFn), nil
 }
 
 func newDefaultController(
@@ -200,6 +215,7 @@ func newDefaultController(
 	rt snapshotruntime.Runtime,
 	injector executor.RestoreMounter,
 	log logr.Logger,
+	skipCompatCheckFn func() bool,
 ) *NodeController {
 	w := &NodeController{
 		config:    cfg,
@@ -220,8 +236,13 @@ func newDefaultController(
 		writeControlSentinelFn:  snapshotruntime.WriteControlSentinel,
 		controlSentinelExistsFn: snapshotruntime.ControlSentinelExists,
 		sendSignalFn:            snapshotruntime.SendSignalToPID,
+		compareFn:               compat.Compare,
 	}
 	w.checkpointFn = w.executorCheckpoint
+	w.skipCompatCheckFn = skipCompatCheckFn
+	if w.skipCompatCheckFn == nil {
+		w.skipCompatCheckFn = func() bool { return w.config.Restore.SkipCompatCheck }
+	}
 	return w
 }
 
@@ -423,11 +444,14 @@ func (w *NodeController) processRestoreQueueItem(ctx context.Context, key client
 		return
 	}
 	pod = pod.DeepCopy()
-	if w.restoreHandled(pod) {
+	if w.reopenedAfterRefusal(pod) {
+		// The skip request is the way back for a pod the gates turned down, so
+		// it has to clear the in-process marker as well as the condition below.
+		w.handledRestores.Delete(string(pod.UID))
+	} else if w.restoreHandled(pod) {
 		requeue = w.removeRestoreFinalizerWithEvent(ctx, pod)
 		return
-	}
-	if isRestoreTerminal(pod) {
+	} else if isRestoreTerminal(pod) {
 		requeue = w.handleTerminalRestorePod(ctx, pod)
 		return
 	}
@@ -506,6 +530,12 @@ func (w *NodeController) preflightRestore(ctx context.Context, pod *corev1.Pod) 
 	}
 	artifact, err := w.resolveRestoreArtifact(fmt.Sprintf("%s/%s", pod.Namespace, pod.Name), target)
 	if err != nil {
+		return nil, err
+	}
+	// Gate A: the earliest point the checkpoint's own record of what it was
+	// captured on is readable, and still before any of the restore is attempted.
+	artifact.SkipCompatCheck = w.skipCompatCheckRequested(pod)
+	if err := w.preflightCompatibility(pod, artifact, mappings); err != nil {
 		return nil, err
 	}
 	if w.config.CRIU.TcpEstablished && pod.Status.PodIP == "" {
@@ -670,32 +700,49 @@ func (w *NodeController) restorePodContainers(ctx context.Context, pod *corev1.P
 // recordRestoreResults publishes the aggregate Pod outcome after every worker
 // in the current pass has returned.
 func (w *NodeController) recordRestoreResults(ctx context.Context, pod *corev1.Pod, artifact *restoreArtifact, results []restoreResult) bool {
-	byState := make(map[restoreResultState][]string, 3)
+	byState := make(map[restoreResultState][]string, 4)
+	var incompatibilityReasons []string
 	for _, result := range results {
 		byState[result.state] = append(byState[result.state], result.destination)
+		if result.state == restoreResultIncompatible {
+			reason := result.reason
+			if len(results) > 1 {
+				reason = fmt.Sprintf("%s: %s", result.destination, reason)
+			}
+			incompatibilityReasons = append(incompatibilityReasons, reason)
+		}
 	}
 	succeeded := byState[restoreResultSucceeded]
 	failed := byState[restoreResultFailed]
+	incompatible := byState[restoreResultIncompatible]
 	pending := byState[restoreResultPending]
 
 	if len(pending) != 0 {
-		message := fmt.Sprintf(
-			"Restore from PodSnapshot %s remains in progress: %d succeeded, %d failed, %d pending (%s)",
-			artifact.SnapshotName, len(succeeded), len(failed), len(pending), strings.Join(pending, ", "),
-		)
+		message := fmt.Sprintf("Restore from PodSnapshot %s remains in progress: %d succeeded, %d failed, %d pending (%s)", artifact.SnapshotName, len(succeeded), len(failed), len(pending), strings.Join(pending, ", "))
+		if len(incompatible) != 0 {
+			message = fmt.Sprintf("Restore from PodSnapshot %s remains in progress: %d succeeded, %d failed, %d incompatible, %d pending (%s)", artifact.SnapshotName, len(succeeded), len(failed), len(incompatible), len(pending), strings.Join(pending, ", "))
+		}
 		if err := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, podcontract.RestoreReasonInProgress, message); err != nil {
 			emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeWarning, restoreStatusUpdateFailedReason, err.Error())
 		}
 		return true
 	}
 
-	if len(failed) == 0 {
+	if len(failed) == 0 && len(incompatible) == 0 {
 		message := fmt.Sprintf("Restored %d destination container(s) from PodSnapshot %s: %s", len(succeeded), artifact.SnapshotName, strings.Join(succeeded, ", "))
 		return w.finishRestore(ctx, pod, corev1.ConditionTrue, podcontract.RestoreReasonSucceeded, message) != nil
 	}
 	if len(succeeded) != 0 {
-		message := fmt.Sprintf("Restored %d of %d destination containers from PodSnapshot %s; failed: %s", len(succeeded), len(results), artifact.SnapshotName, strings.Join(failed, ", "))
+		notRestored := append(append([]string{}, failed...), incompatible...)
+		message := fmt.Sprintf("Restored %d of %d destination containers from PodSnapshot %s; not restored: %s", len(succeeded), len(results), artifact.SnapshotName, strings.Join(notRestored, ", "))
 		return w.finishRestore(ctx, pod, corev1.ConditionFalse, podcontract.RestoreReasonPartiallySucceeded, message) != nil
+	}
+	if len(failed) == 0 {
+		return w.finishRestore(ctx, pod, corev1.ConditionFalse, podcontract.RestoreReasonIncompatible, strings.Join(incompatibilityReasons, "; ")) != nil
+	}
+	if len(incompatible) != 0 {
+		message := fmt.Sprintf("Restore failed for %d destination container(s) and refused %d incompatible destination(s) from PodSnapshot %s", len(failed), len(incompatible), artifact.SnapshotName)
+		return w.finishRestore(ctx, pod, corev1.ConditionFalse, podcontract.RestoreReasonFailed, message) != nil
 	}
 	message := fmt.Sprintf("Restore failed for all %d destination container(s) from PodSnapshot %s: %s", len(failed), artifact.SnapshotName, strings.Join(failed, ", "))
 	return w.finishRestore(ctx, pod, corev1.ConditionFalse, podcontract.RestoreReasonFailed, message) != nil
@@ -726,6 +773,13 @@ func (w *NodeController) restoreDestination(
 	emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, corev1.EventTypeNormal, restoreRequestedReason, fmt.Sprintf("Restore requested from PodSnapshot %s for destination %s", artifact.SnapshotName, destination))
 
 	if err := w.runRestore(ctx, pod, artifact, destination, containerID, startedAt, recovering); err != nil {
+		var incompatible *compat.IncompatibleError
+		if errors.As(err, &incompatible) {
+			result.state = restoreResultIncompatible
+			result.reason = compat.Reasons(incompatible.Mismatches)
+			w.logRestoreRefusal(pod, incompatible, result.reason)
+			return result
+		}
 		result.state = restoreResultFailed
 		log.Error(err, "Restore controller worker failed")
 		emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreWorkerFailed", err.Error())
@@ -807,6 +861,14 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, artifa
 
 	placeholderHostPID, err := op.executeRestore(restoreCtx)
 	if err != nil {
+		var incompatible *compat.IncompatibleError
+		if errors.As(err, &incompatible) {
+			// Nothing was attempted, so there is no half-restored process to
+			// clean up. The placeholder is deliberately left running: killing it
+			// would restart the container straight back into the same answer.
+			return incompatible
+		}
+
 		var cleanupErr *executor.RestoreCleanupError
 		if !errors.As(err, &cleanupErr) {
 			return op.failRestore(ctx, err)
@@ -870,6 +932,7 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (int, error) {
 		TargetPodIP:              op.pod.Status.PodIP,
 		ArtifactContainerName:    op.artifact.SourceContainerName,
 		DestinationContainerName: op.destination,
+		SkipCompatCheck:          op.artifact.SkipCompatCheck,
 		Clientset:                w.clientset,
 	}
 	return w.restoreFn(ctx, w.runtime, op.log, req, w.injector)
@@ -1026,6 +1089,11 @@ func (w *NodeController) failRestorePod(ctx context.Context, pod *corev1.Pod, ca
 }
 
 func (w *NodeController) handleRestorePreflightError(ctx context.Context, pod *corev1.Pod, cause error) bool {
+	var incompatible *compat.IncompatibleError
+	if errors.As(cause, &incompatible) {
+		return w.refuseRestore(ctx, pod, incompatible)
+	}
+
 	var pending *restorePendingError
 	if !errors.As(cause, &pending) {
 		return w.failRestorePod(ctx, pod, cause)

@@ -7,12 +7,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"time"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"gopkg.in/yaml.v3"
+
+	"github.com/ai-dynamo/snapshot/api/compat"
 )
 
 const manifestFilename = "manifest.yaml"
@@ -26,6 +30,7 @@ type CheckpointManifest struct {
 	K8s      SourcePodManifest `yaml:"k8s"`
 	Overlay  OverlayManifest   `yaml:"overlay"`
 	CUDA     CUDAManifest      `yaml:"cudaRestore,omitempty"`
+	Host     HostManifest      `yaml:"host,omitempty"`
 }
 
 // ArtifactManifest pins an on-disk checkpoint to the Kubernetes content object
@@ -41,6 +46,7 @@ func NewCheckpointManifest(
 	criuDump CRIUDumpManifest,
 	k8s SourcePodManifest,
 	overlay OverlayManifest,
+	host HostManifest,
 ) *CheckpointManifest {
 	return &CheckpointManifest{
 		Artifact: ArtifactManifest{
@@ -51,6 +57,24 @@ func NewCheckpointManifest(
 		CRIUDump:  criuDump,
 		K8s:       k8s,
 		Overlay:   overlay,
+		Host:      host,
+	}
+}
+
+// HostManifest records the machine a checkpoint was captured on. A fact the
+// agent could not read is left out rather than written empty, so it reads as
+// unknown instead of as a value that happens to be blank.
+type HostManifest struct {
+	KernelVersion string `yaml:"kernelVersion,omitempty"`
+	CPUArch       string `yaml:"cpuArch,omitempty"`
+}
+
+// NewHostManifest takes the architecture from the agent binary rather than
+// asking the node: this binary is running on that node, so they agree.
+func NewHostManifest(kernelVersion string) HostManifest {
+	return HostManifest{
+		KernelVersion: kernelVersion,
+		CPUArch:       runtime.GOARCH,
 	}
 }
 
@@ -94,6 +118,12 @@ type SourcePodManifest struct {
 
 	// StdioFDs holds readlink targets for FDs 0, 1, 2 (e.g. "pipe:[12345]").
 	StdioFDs []string `yaml:"stdioFDs,omitempty"`
+
+	// ImageID is CRI ContainerStatus.image_id, not kubelet's image_ref alias.
+	Image       string `yaml:"image,omitempty"`
+	ImageID     string `yaml:"imageId,omitempty"`
+	CPULimit    string `yaml:"cpuLimit,omitempty"`
+	MemoryLimit string `yaml:"memoryLimit,omitempty"`
 }
 
 func NewSourcePodManifest(containerID string, pid int, sourceNode, podName, podNamespace, podIP string, stdioFDs []string) SourcePodManifest {
@@ -142,13 +172,33 @@ func NewOverlayManifest(exclusions OverlaySettings, upperDir string, ociSpec *sp
 type CUDAManifest struct {
 	PIDs           []int    `yaml:"pids"`
 	SourceGPUUUIDs []string `yaml:"sourceGpuUuids"`
+
+	// SourceGPUs describes the same GPUs as SourceGPUUUIDs, in the same order.
+	// The UUIDs stay where they are because the device map is built from them
+	// and artifacts written before this field exists still restore.
+	SourceGPUs          []GPUManifest `yaml:"sourceGpus,omitempty"`
+	SourceDriverVersion string        `yaml:"sourceDriverVersion,omitempty"`
 }
 
-func NewCUDAManifest(pids []int, sourceGPUUUIDs []string) CUDAManifest {
-	return CUDAManifest{
-		PIDs:           append([]int(nil), pids...),
-		SourceGPUUUIDs: append([]string(nil), sourceGPUUUIDs...),
+// GPUManifest is one GPU the checkpointed process could see.
+type GPUManifest struct {
+	UUID        string `yaml:"uuid"`
+	ProductName string `yaml:"productName,omitempty"`
+}
+
+func NewCUDAManifest(pids []int, gpus compat.GPUFacts) CUDAManifest {
+	m := CUDAManifest{
+		PIDs:                append([]int(nil), pids...),
+		SourceDriverVersion: gpus.DriverVersion,
 	}
+	for _, device := range gpus.Devices {
+		m.SourceGPUUUIDs = append(m.SourceGPUUUIDs, device.UUID)
+		m.SourceGPUs = append(m.SourceGPUs, GPUManifest{
+			UUID:        device.UUID,
+			ProductName: device.ProductName,
+		})
+	}
+	return m
 }
 
 func (m CUDAManifest) IsEmpty() bool {
@@ -205,4 +255,66 @@ func validateArtifactManifest(artifact ArtifactManifest) error {
 		return fmt.Errorf("checkpoint manifest is missing artifact.containerName")
 	}
 	return nil
+}
+
+// CompatFacts maps the manifest onto the fact model the compatibility gates
+// compare. Both gates read it from here, so the two cannot disagree about what
+// the checkpoint recorded.
+func (m *CheckpointManifest) CompatFacts() compat.Facts {
+	gpus := m.gpuFacts()
+	return compat.Facts{
+		KernelVersion:      m.Host.KernelVersion,
+		CPUArch:            m.Host.CPUArch,
+		Image:              m.K8s.Image,
+		ImageID:            m.K8s.ImageID,
+		CPULimit:           m.K8s.CPULimit,
+		MemoryLimit:        m.K8s.MemoryLimit,
+		DriverVersion:      gpus.DriverVersion,
+		GPUDevices:         gpus.Devices,
+		ExternalizedMounts: m.externalizedMounts(),
+	}
+}
+
+// WithPodFacts records what the captured container ran as. It is the inverse of
+// the pod half of CompatFacts, and sits next to it so the two field lists cannot
+// drift apart.
+func (m SourcePodManifest) WithPodFacts(facts compat.Facts) SourcePodManifest {
+	m.Image = facts.Image
+	m.ImageID = facts.ImageID
+	m.CPULimit = facts.CPULimit
+	m.MemoryLimit = facts.MemoryLimit
+	return m
+}
+
+// gpuFacts prefers the described GPUs and falls back to the UUID list, so an
+// artifact captured before the models were recorded still reports its GPU count.
+func (m *CheckpointManifest) gpuFacts() compat.GPUFacts {
+	facts := compat.GPUFacts{DriverVersion: m.CUDA.SourceDriverVersion}
+	if len(m.CUDA.SourceGPUs) > 0 {
+		for _, gpu := range m.CUDA.SourceGPUs {
+			facts.Devices = append(facts.Devices, compat.GPUDevice{
+				UUID:        gpu.UUID,
+				ProductName: gpu.ProductName,
+			})
+		}
+		return facts
+	}
+	for _, uuid := range m.CUDA.SourceGPUUUIDs {
+		facts.Devices = append(facts.Devices, compat.GPUDevice{UUID: uuid})
+	}
+	return facts
+}
+
+// externalizedMounts returns the destinations CRIU externalized at capture, in a
+// stable order so a refusal always names them the same way.
+func (m *CheckpointManifest) externalizedMounts() []string {
+	if len(m.CRIUDump.ExtMnt) == 0 {
+		return nil
+	}
+	destinations := make([]string, 0, len(m.CRIUDump.ExtMnt))
+	for destination := range m.CRIUDump.ExtMnt {
+		destinations = append(destinations, destination)
+	}
+	sort.Strings(destinations)
+	return destinations
 }

@@ -11,3 +11,17 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: "storage.pvc.basePath is fixed at /checkpoints"
+
+  - it: keeps the restore compatibility gate on by default
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: "skipCompatCheck: false"
+
+  - it: renders the node-wide compatibility gate opt-out
+    set:
+      config.restore.skipCompatCheck: true
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: "skipCompatCheck: true"

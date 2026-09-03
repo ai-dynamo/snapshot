@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from kubernetes import client
 
@@ -68,6 +70,84 @@ def test_successful_snapshot_captures_cpu_gpu_and_fs(
             "./tmp/e2e-state/file-token",
         )
         assert file_token.strip() == run.source_token
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
+# The value does not matter, only that one is set: a limit neither side records
+# compares equal to itself and proves nothing.
+RECORDED_MEMORY_LIMIT = "4Gi"
+
+
+@pytest.mark.snapshot_success
+@pytest.mark.gpu
+def test_snapshot_records_the_facts_a_restore_is_checked_against(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    """The recorded facts have to be the machine's, not merely present.
+
+    Everything the compatibility gates decide on is read at capture and can
+    never be recovered afterwards, so this compares each recorded fact against
+    the node object and against nvidia-smi inside the pod that was captured.
+    """
+    try:
+        source, source_node = create_ready_source(
+            config, run, gpu=True, memory_limit=RECORDED_MEMORY_LIMIT
+        )
+        snap.wait_for_state_observations(
+            config.namespace,
+            run.source_pod,
+            run.source_token,
+            gpu=True,
+            minimum=2,
+        )
+        # Read before the capture, while the source container is still running.
+        visible_gpus = snap.visible_gpus(config.namespace, run.source_pod)
+        assert visible_gpus, "the GPU workload could not see a GPU"
+        source_status = next(
+            status
+            for status in source.status.container_statuses
+            if status.name == snap.CONTAINER
+        )
+        source_image_id = snap.runtime_image_id(
+            config, source_node, source_status.container_id
+        )
+
+        snap.create_podsnapshot(
+            config.namespace,
+            run.snapshot_name,
+            run.source_pod,
+            source.metadata.uid,
+        )
+        _, content = snap.wait_for_snapshot_ready(config.namespace, run.snapshot_name)
+        manifest = snap.checkpoint_manifest(
+            config, source_node, content["metadata"]["uid"]
+        )
+
+        node_info = k8s.read_node(source_node).status.node_info
+        host = manifest["host"]
+        assert host["kernelVersion"] == node_info.kernel_version
+        assert host["cpuArch"] == node_info.architecture
+
+        pod = k8s.read_pod(config.namespace, run.source_pod)
+        container = next(c for c in pod.spec.containers if c.name == snap.CONTAINER)
+        limits = (container.resources.limits or {}) if container.resources else {}
+        recorded_pod = manifest["k8s"]
+        assert recorded_pod["image"] == container.image
+        assert recorded_pod["imageId"] == source_image_id
+        assert recorded_pod["memoryLimit"] == limits["memory"]
+        # This pod sets no CPU limit, and an absent fact is recorded as absent
+        # rather than invented, which is what makes it refuse nothing later.
+        assert "cpu" not in limits
+        assert "cpuLimit" not in recorded_pod
+
+        cuda = manifest["cudaRestore"]
+        assert sorted(
+            (gpu["uuid"], gpu["productName"]) for gpu in cuda["sourceGpus"]
+        ) == sorted((gpu["uuid"], gpu["name"]) for gpu in visible_gpus)
+        assert cuda["sourceDriverVersion"] == visible_gpus[0]["driver"]
     except Exception:
         snap.debug_dump(config, run)
         raise
@@ -239,6 +319,147 @@ def test_failed_restore_gpu_checkpoint_into_non_gpu_target(
         raise
 
 
+# A checkpoint captured with more memory than the target offers is the cheapest
+# real mismatch to build: nothing about the node has to change for it.
+CAPTURE_MEMORY_LIMIT = "4Gi"
+SMALLER_MEMORY_LIMIT = "1Gi"
+
+# The restore informer resyncs every 30s, which is what would re-drive a refused
+# pod. Waiting past two of them is how a retry loop would show itself.
+RESTORE_RESYNC_SECONDS = 30
+
+
+@pytest.mark.snapshot_failure
+@pytest.mark.gpu
+def test_refused_restore_says_why_and_does_no_criu_work(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    try:
+        _, source_node, _ = create_valid_gpu_checkpoint(
+            config, run, memory_limit=CAPTURE_MEMORY_LIMIT
+        )
+        k8s.delete_pod(config.namespace, run.source_pod)
+        snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+
+        k8s.create_pod(
+            snap.restore_pod(
+                config=config,
+                run=run,
+                gpu=True,
+                source_node=source_node,
+                memory_limit=SMALLER_MEMORY_LIMIT,
+            )
+        )
+        pod = snap.wait_for_restored_condition(
+            config.namespace, run.restore_pod, "False", "RestoreIncompatible"
+        )
+
+        refusal = snap.pod_condition(pod, snap.RESTORED_CONDITION)
+        assert "memory-limit" in refusal.message
+        assert CAPTURE_MEMORY_LIMIT in refusal.message
+        assert SMALLER_MEMORY_LIMIT in refusal.message
+
+        assert_restore_events(config.namespace, run.restore_pod, {"RestoreIncompatible"})
+        time.sleep(2 * RESTORE_RESYNC_SECONDS + 5)
+        assert restore_event_count(config.namespace, run.restore_pod, "RestoreIncompatible") == 1
+        assert "RestoreFailed" not in restore_event_reasons(config.namespace, run.restore_pod)
+
+        # The placeholder is still the placeholder: a refusal costs no CRIU work,
+        # so the workload never sees restore-complete.
+        assert not snap.file_present(config.namespace, run.restore_pod, snap.RESTORE_DONE)
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
+# Small enough to be refused, large enough to restore into once the checks are
+# off: with a switch on, the restore these tests start actually runs.
+SKIPPABLE_MEMORY_LIMIT = "3Gi"
+
+
+@pytest.mark.snapshot_success
+@pytest.mark.gpu
+def test_skip_annotation_lets_a_refused_restore_through(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    try:
+        _, source_node, _ = create_valid_gpu_checkpoint(
+            config, run, memory_limit=CAPTURE_MEMORY_LIMIT
+        )
+        k8s.delete_pod(config.namespace, run.source_pod)
+        snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+
+        body = snap.restore_pod(
+            config=config,
+            run=run,
+            gpu=True,
+            source_node=source_node,
+            memory_limit=SKIPPABLE_MEMORY_LIMIT,
+        )
+        body["metadata"]["annotations"]["nvidia.com/snapshot-skip-compat-check"] = "true"
+        k8s.create_pod(body)
+
+        pod = snap.wait_for_restore_past_the_gate(config.namespace, run.restore_pod)
+        assert snap.pod_condition(pod, snap.RESTORED_CONDITION).reason != "RestoreIncompatible"
+        assert "RestoreIncompatible" not in restore_event_reasons(
+            config.namespace, run.restore_pod
+        )
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
+@pytest.mark.snapshot_success
+@pytest.mark.gpu
+def test_node_switch_lets_a_refused_restore_through_without_a_rollout(
+    config: k8s.E2EConfig,
+    run: snap.TestRun,
+) -> None:
+    try:
+        _, source_node, _ = create_valid_gpu_checkpoint(
+            config, run, memory_limit=CAPTURE_MEMORY_LIMIT
+        )
+        k8s.delete_pod(config.namespace, run.source_pod)
+        snap.wait_for_pod_deleted(config.namespace, run.source_pod)
+
+        agent_before = k8s.read_pod(
+            config.namespace, snap.checkpoint_agent_pod(config, source_node)
+        )
+        with snap.node_skip_compat_check(config):
+            k8s.create_pod(
+                snap.restore_pod(
+                    config=config,
+                    run=run,
+                    gpu=True,
+                    source_node=source_node,
+                    memory_limit=SKIPPABLE_MEMORY_LIMIT,
+                )
+            )
+            pod = snap.wait_for_restore_past_the_gate(config.namespace, run.restore_pod)
+            assert snap.pod_condition(pod, snap.RESTORED_CONDITION).reason != "RestoreIncompatible"
+            assert "RestoreIncompatible" not in restore_event_reasons(
+                config.namespace, run.restore_pod
+            )
+
+        # The switch is worth having as a ConfigMap rather than an env var only
+        # if flipping it costs nothing, so the agent that honoured it has to be
+        # the same process that was running before.
+        agent_after = k8s.read_pod(
+            config.namespace, snap.checkpoint_agent_pod(config, source_node)
+        )
+        assert agent_after.metadata.uid == agent_before.metadata.uid
+        assert agent_restarts(agent_after) == agent_restarts(agent_before)
+    except Exception:
+        snap.debug_dump(config, run)
+        raise
+
+
+def agent_restarts(pod: object) -> int:
+    return sum(status.restart_count for status in pod.status.container_statuses or [])
+
+
 @pytest.mark.snapshot_success
 def test_direct_content_deletion_removes_complete_artifact_root(
     config: k8s.E2EConfig,
@@ -327,8 +548,10 @@ def test_orphan_scanner_reclaims_uid_root(
 def create_valid_gpu_checkpoint(
     config: k8s.E2EConfig,
     run: snap.TestRun,
+    *,
+    memory_limit: str | None = None,
 ) -> tuple[object, str, int]:
-    source, source_node = create_ready_source(config, run, gpu=True)
+    source, source_node = create_ready_source(config, run, gpu=True, memory_limit=memory_limit)
     checkpoint_observations = snap.wait_for_state_observations(
         config.namespace,
         run.source_pod,
@@ -350,6 +573,7 @@ def create_ready_source(
     *,
     gpu: bool,
     annotations: dict[str, str] | None = None,
+    memory_limit: str | None = None,
 ) -> tuple[object, str]:
     k8s.create_pod(
         snap.source_pod(
@@ -357,6 +581,7 @@ def create_ready_source(
             run=run,
             gpu=gpu,
             annotations=annotations,
+            memory_limit=memory_limit,
         )
     )
     pod = snap.wait_for_pod_ready(config.namespace, run.source_pod)
@@ -428,3 +653,18 @@ def restore_event_reasons(namespace: str, pod_name: str) -> set[str]:
         for event in events
         if event.involved_object and event.involved_object.name == pod_name
     }
+
+
+def restore_event_count(namespace: str, pod_name: str, reason: str) -> int:
+    """How many times the pod was told this, not how many objects say it.
+
+    Repeated events are aggregated into one object with a count, so counting
+    objects would report one no matter how often the agent repeated itself.
+    """
+    return sum(
+        event.count or 1
+        for event in k8s.list_events(namespace)
+        if event.involved_object
+        and event.involved_object.name == pod_name
+        and event.reason == reason
+    )

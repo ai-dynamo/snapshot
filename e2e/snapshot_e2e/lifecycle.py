@@ -5,10 +5,13 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 import time
-from typing import Any, Callable
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator
 
+import yaml
 from kubernetes import client
 from kubernetes.client import ApiException
 
@@ -28,6 +31,7 @@ from snapshot_e2e.workloads import source_pod
 
 GROUP = "nvidia.com"
 VERSION = "v1alpha1"
+RESTORED_CONDITION = f"{GROUP}/Restored"
 PODSNAPSHOTS = "podsnapshots"
 PODSNAPSHOTCONTENTS = "podsnapshotcontents"
 SNAPSHOTJOBS = "snapshotjobs"
@@ -191,21 +195,24 @@ def wait_for_pod_ready(namespace: str, name: str, timeout: int = 600) -> client.
     return wait_for(f"pod {namespace}/{name} Ready", ready, timeout, detail=detail)
 
 
+def file_present(namespace: str, pod: str, path: str) -> bool:
+    # Require a stdout marker because exec does not expose remote exit status,
+    # and look for it rather than match on it: exec returns stderr too, and a
+    # login shell is free to write to it.
+    marker = "__snapshot_e2e_file_present__"
+    command = f"[[ -f {shlex.quote(path)} ]] && printf '%s' {shlex.quote(marker)}"
+    return marker in k8s.exec_command(namespace, pod, command)
+
+
 def wait_for_file(namespace: str, pod: str, path: str, timeout: int = 180) -> None:
     last_error: str | None = None
-    marker = "__snapshot_e2e_file_present__"
 
     def exists() -> bool | None:
         nonlocal last_error
         try:
-            # Require a stdout marker because exec does not expose remote exit status.
-            command = (
-                f"[[ -f {shlex.quote(path)} ]] && "
-                f"printf '%s' {shlex.quote(marker)}"
-            )
-            response = k8s.exec_command(namespace, pod, command)
+            present = file_present(namespace, pod, path)
             last_error = None
-            return True if response == marker else None
+            return True if present else None
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
             return None
@@ -427,7 +434,7 @@ def wait_for_restored_condition(
 ) -> client.V1Pod:
     def check() -> client.V1Pod | None:
         pod = k8s.read_pod(namespace, pod_name)
-        restored = pod_condition(pod, "nvidia.com/Restored")
+        restored = pod_condition(pod, RESTORED_CONDITION)
         if restored and restored.status == status and restored.reason == reason:
             return pod
         terminal_reasons = {"RestoreSucceeded", "RestorePartiallySucceeded", "RestoreFailed"}
@@ -443,8 +450,8 @@ def wait_for_restored_condition(
             pod = k8s.read_pod(namespace, pod_name)
         except ApiException as exc:
             return f"api_error={k8s.api_error_detail(exc)}"
-        restored = pod_condition(pod, "nvidia.com/Restored")
-        return f"nvidia.com/Restored={restored or '<unset>'}"
+        restored = pod_condition(pod, RESTORED_CONDITION)
+        return f"{RESTORED_CONDITION}={restored or '<unset>'}"
 
     return wait_for(
         f"nvidia.com/Restored={status}/{reason} on {namespace}/{pod_name}",
@@ -461,14 +468,87 @@ def pod_condition(pod: client.V1Pod, condition_type: str) -> client.V1PodConditi
     return None
 
 
+def wait_for_restore_past_the_gate(
+    namespace: str,
+    pod_name: str,
+    timeout: int = 600,
+) -> client.V1Pod:
+    """Wait for any reason the agent only records once the gate has let the restore through.
+
+    RestoreInProgress is transient, so waiting for it alone is a race a fast
+    restore wins. A restore refused at the gate never reaches any of these.
+    """
+    past = ("RestoreInProgress", "RestoreSucceeded", "RestoreFailed")
+
+    def check() -> client.V1Pod | None:
+        pod = k8s.read_pod(namespace, pod_name)
+        restored = pod_condition(pod, RESTORED_CONDITION)
+        return pod if restored and restored.reason in past else None
+
+    def detail() -> str:
+        try:
+            pod = k8s.read_pod(namespace, pod_name)
+        except ApiException as exc:
+            return f"api_error={k8s.api_error_detail(exc)}"
+        restored = pod_condition(pod, RESTORED_CONDITION)
+        return f"{RESTORED_CONDITION}={restored.reason if restored else '<unset>'}"
+
+    return wait_for(
+        f"restore past the gate on {namespace}/{pod_name}",
+        check,
+        timeout,
+        detail=detail,
+    )
+
+
 def checkpoint_artifact_manifest(
     config: k8s.E2EConfig, node: str, content_uid: str
 ) -> str:
-    return k8s.exec_command(
+    return k8s.exec_payload(
         config.namespace,
         checkpoint_agent_pod(config, node),
         f"cat {checkpoint_artifact_path(content_uid)}/manifest.yaml",
     )
+
+
+def checkpoint_manifest(
+    config: k8s.E2EConfig, node: str, content_uid: str
+) -> dict[str, Any]:
+    """The manifest as the agent will read it back, rather than as text."""
+    return yaml.safe_load(checkpoint_artifact_manifest(config, node, content_uid))
+
+
+def runtime_image_id(config: k8s.E2EConfig, node: str, container_id: str) -> str:
+    runtime_id = container_id.split("://", 1)[-1]
+    output = k8s.exec_payload(
+        config.namespace,
+        checkpoint_agent_pod(config, node),
+        f"nsenter -t 1 -m -- crictl inspect {shlex.quote(runtime_id)}",
+    )
+    image_id = (json.loads(output).get("status") or {}).get("imageId")
+    if not image_id:
+        raise AssertionError(f"runtime reported no image ID for {container_id!r}")
+    return image_id
+
+
+def visible_gpus(namespace: str, pod: str) -> list[dict[str, str]]:
+    """The GPUs a pod can see, as nvidia-smi inside that pod reports them.
+
+    The same query the agent runs, so a test comparing the two is comparing what
+    the machine says against what the artifact recorded, not two spellings of it.
+    """
+    output = k8s.exec_payload(
+        namespace,
+        pod,
+        "nvidia-smi --query-gpu=gpu_uuid,name,driver_version --format=csv,noheader",
+    )
+    gpus = []
+    for line in output.strip().splitlines():
+        fields = [field.strip() for field in line.split(",")]
+        if len(fields) != 3:
+            raise AssertionError(f"unexpected nvidia-smi row {line!r}")
+        gpus.append({"uuid": fields[0], "name": fields[1], "driver": fields[2]})
+    return gpus
 
 
 def checkpoint_artifact_listing(
@@ -559,6 +639,85 @@ def checkpoint_agent_pod(config: k8s.E2EConfig, node: str) -> str:
     return agents[0].metadata.name
 
 
+AGENT_CONFIG_VOLUME = "config"
+AGENT_CONFIG_KEY = "config.yaml"
+
+
+def agent_config_source(config: k8s.E2EConfig) -> tuple[str, str]:
+    """The ConfigMap the agent reads from and the path it reads it at.
+
+    Read off the DaemonSet so a test edits the file the agent is actually
+    mounting rather than one the chart happens to name the same way.
+    """
+    daemonsets = k8s.list_snapshot_daemonsets(
+        config.namespace, config.release, "snapshot-agent"
+    )
+    if len(daemonsets) != 1:
+        raise AssertionError(f"expected one snapshot agent DaemonSet, found {len(daemonsets)}")
+
+    spec = daemonsets[0].spec.template.spec
+    volume = next(v for v in spec.volumes if v.name == AGENT_CONFIG_VOLUME)
+    mount = next(
+        m
+        for container in spec.containers
+        for m in container.volume_mounts or []
+        if m.name == AGENT_CONFIG_VOLUME
+    )
+    return volume.config_map.name, f"{mount.mount_path}/{AGENT_CONFIG_KEY}"
+
+
+def wait_for_agent_config(config: k8s.E2EConfig, expected: str, timeout: int = 180) -> None:
+    """Wait for a ConfigMap edit to reach every agent in the release.
+
+    The ConfigMap belongs to the release, so an edit reaches the whole
+    DaemonSet; waiting on one node would leave the others holding the old value.
+    The kubelet refreshes projected ConfigMaps on its own schedule, so the file
+    inside each container is the only honest signal that an edit has landed.
+    """
+    _, path = agent_config_source(config)
+    command = f"cat {shlex.quote(path)}"
+    agents = [
+        pod.metadata.name
+        for pod in k8s.list_snapshot_pods(config.namespace, config.release, "snapshot-agent")
+    ]
+    if not agents:
+        raise AssertionError("no snapshot agent pods to wait on")
+
+    for agent in agents:
+        def projected(agent: str = agent) -> bool | None:
+            content = k8s.exec_command(config.namespace, agent, command)
+            return True if expected in content else None
+
+        wait_for(
+            f"{expected!r} in {agent}:{path}",
+            projected,
+            timeout,
+            detail=lambda agent=agent: k8s.exec_command(config.namespace, agent, command),
+        )
+
+
+@contextmanager
+def node_skip_compat_check(config: k8s.E2EConfig) -> Iterator[None]:
+    """Turn the node switch on for the body, and put it back afterwards.
+
+    Waits for the projection on both edges: leaving the switch on would let a
+    later test's restore through the very gate it means to exercise.
+    """
+    name, _ = agent_config_source(config)
+    original = k8s.read_config_map(config.namespace, name).data[AGENT_CONFIG_KEY]
+    off, on = "skipCompatCheck: false", "skipCompatCheck: true"
+    if off not in original:
+        raise AssertionError(f"{name}:{AGENT_CONFIG_KEY} does not carry {off!r}")
+
+    k8s.patch_config_map(config.namespace, name, {AGENT_CONFIG_KEY: original.replace(off, on)})
+    try:
+        wait_for_agent_config(config, on)
+        yield
+    finally:
+        k8s.patch_config_map(config.namespace, name, {AGENT_CONFIG_KEY: original})
+        wait_for_agent_config(config, off)
+
+
 def assert_restored_state(
     namespace: str,
     pod: str,
@@ -605,6 +764,15 @@ def debug_dump(config: k8s.E2EConfig, run: TestRun) -> None:
     for pod in pods:
         print(f"pod {pod.metadata.name} phase={pod.status.phase} node={pod.spec.node_name}")
         print(f"annotations={pod.metadata.annotations or {}}")
+        print(
+            "conditions="
+            + str(
+                [
+                    (c.type, c.status, c.reason, c.message)
+                    for c in pod.status.conditions or []
+                ]
+            )
+        )
         print(k8s.pod_logs(config.namespace, pod.metadata.name, tail_lines=80))
     print_custom_objects(config, run)
     print_snapshot_controller_logs(config)

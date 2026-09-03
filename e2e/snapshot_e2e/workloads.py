@@ -68,6 +68,7 @@ def source_pod(
     run: TestRun,
     gpu: bool,
     annotations: dict[str, str] | None = None,
+    memory_limit: str | None = None,
 ) -> dict[str, Any]:
     metadata = {
         "name": run.source_pod,
@@ -75,7 +76,7 @@ def source_pod(
         "labels": run.labels,
         "annotations": annotations or {},
     }
-    spec = base_pod_spec(config, run, source_command(run.image, gpu), gpu)
+    spec = base_pod_spec(config, run, source_command(run.image, gpu), gpu, memory_limit)
     spec["containers"][0]["env"] = [
         {"name": SOURCE_TOKEN_ENV, "value": run.source_token},
     ]
@@ -132,11 +133,12 @@ def restore_pod(
     gpu: bool,
     source_node: str | None = None,
     snapshot_name: str | None = None,
+    memory_limit: str | None = None,
 ) -> dict[str, Any]:
     # snapshot_name defaults to the lifecycle flow's test-created PodSnapshot
     # (run.snapshot_name); a SnapshotJob-produced PodSnapshot is named after
     # the SnapshotJob instead, so those tests pass it explicitly.
-    spec = base_pod_spec(config, run, restore_command(run.image, gpu), gpu)
+    spec = base_pod_spec(config, run, restore_command(run.image, gpu), gpu, memory_limit)
     spec["securityContext"] = {
         "seccompProfile": {
             "type": "Localhost",
@@ -240,6 +242,7 @@ def base_pod_spec(
     run: TestRun,
     command: str,
     gpu: bool,
+    memory_limit: str | None = None,
     *,
     control_volume: bool = True,
     checkpoint_pvc: bool = True,
@@ -288,6 +291,9 @@ def base_pod_spec(
     if gpu:
         spec["runtimeClassName"] = "nvidia"
         container["resources"] = {"limits": {"nvidia.com/gpu": "1"}}
+    if memory_limit:
+        limits = container.setdefault("resources", {}).setdefault("limits", {})
+        limits["memory"] = memory_limit
     return spec
 
 
