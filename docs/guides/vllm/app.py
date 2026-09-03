@@ -77,7 +77,7 @@ async def serve_api(engine: AsyncLLM, restored_text: str) -> None:
 
 
 async def main() -> None:
-    if os.environ.get("DYN_SNAPSHOT_RESTORE_STANDBY") == "1":
+    if os.environ.get("SNAPSHOT_RESTORE_STANDBY") == "1":
         await asyncio.Event().wait()
 
     CONTROL_DIR.joinpath("ready-for-snapshot").unlink(missing_ok=True)
