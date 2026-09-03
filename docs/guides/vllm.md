@@ -97,17 +97,20 @@ Any failure prints an error and returns a non-zero exit status.
 Set the namespace where the vLLM pod will run:
 
 ```bash
-export VLLM_NAMESPACE=<namespace>
-kubectl get namespace "$VLLM_NAMESPACE"
+export SNAPSHOT_NAMESPACE=<namespace>
+kubectl get namespace "$SNAPSHOT_NAMESPACE"
 ```
 
-Set the model through the `SNAPSHOT_MODEL` environment variable in
-[`deployment.yaml`](vllm/deployment.yaml):
+In [`deployment.yaml`](vllm/deployment.yaml), replace the example `image` with the
+one pushed in step 2 and select the model through `SNAPSHOT_MODEL`:
 
 ```yaml
-env:
-  - name: SNAPSHOT_MODEL
-    value: Qwen/Qwen3-0.6B
+containers:
+  - name: main
+    image: <registry>/vllm-snapshot:<tag>
+    env:
+      - name: SNAPSHOT_MODEL
+        value: Qwen/Qwen3-0.6B
 ```
 
 Other values include `TinyLlama/TinyLlama-1.1B-Chat-v1.0` or a mounted model
@@ -128,30 +131,20 @@ modeling code. Qwen3 does not.
 > vLLM's [environment variables](https://docs.vllm.ai/en/v0.27.1/configuration/env_vars/)
 > set in the Deployment's Pod template.
 
-Use [`deployment.yaml`](vllm/deployment.yaml) to deploy the image built in
-step 2:
+Deploy the edited manifest:
 
 ```bash
-kubectl set image \
-  --local \
-  --filename deployment.yaml \
-  main="$VLLM_SNAPSHOT_IMAGE" \
-  --output yaml |
-  kubectl apply \
-    --namespace "$VLLM_NAMESPACE" \
-    --filename -
+kubectl apply \
+  --namespace "$SNAPSHOT_NAMESPACE" \
+  --filename deployment.yaml
 ```
-
-The command replaces the example image value in `deployment.yaml` with
-`$VLLM_SNAPSHOT_IMAGE` before creating the Deployment. It does not modify the
-local file.
 
 Wait until the vLLM replica finishes initialization and becomes safe to
 checkpoint:
 
 ```bash
 kubectl rollout status \
-  --namespace "$VLLM_NAMESPACE" \
+  --namespace "$SNAPSHOT_NAMESPACE" \
   deployment/vllm-source \
   --timeout=30m
 ```
@@ -160,7 +153,7 @@ List the generated Pod:
 
 ```bash
 kubectl get pods \
-  --namespace "$VLLM_NAMESPACE" \
+  --namespace "$SNAPSHOT_NAMESPACE" \
   --selector app=vllm-source
 ```
 
