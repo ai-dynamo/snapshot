@@ -104,14 +104,23 @@ export SNAPSHOT_NAMESPACE=<namespace>
 kubectl get namespace "$SNAPSHOT_NAMESPACE"
 ```
 
-Set the model through the `SNAPSHOT_MODEL` environment variable in both the
-init container and the main container in
-[`deployment.yaml`](sglang/deployment.yaml):
+In [`deployment.yaml`](sglang/deployment.yaml), replace the example `image` with
+the one pushed in step 2 and select the model through `SNAPSHOT_MODEL`. Both the
+init container and the main container carry each value:
 
 ```yaml
-env:
-  - name: SNAPSHOT_MODEL
-    value: Qwen/Qwen3-0.6B
+initContainers:
+  - name: model-cache
+    image: <registry>/sglang-snapshot:<tag>
+    env:
+      - name: SNAPSHOT_MODEL
+        value: Qwen/Qwen3-0.6B
+containers:
+  - name: main
+    image: <registry>/sglang-snapshot:<tag>
+    env:
+      - name: SNAPSHOT_MODEL
+        value: Qwen/Qwen3-0.6B
 ```
 
 The example configures a context length of 10240 tokens for a 24 GiB NVIDIA A10
@@ -133,25 +142,16 @@ kubectl apply \
   --filename model-cache-pvc.yaml
 ```
 
-Use [`deployment.yaml`](sglang/deployment.yaml) to deploy the image built in
-step 2:
+Deploy the edited manifest:
 
 ```bash
-kubectl set image \
-  --local \
-  --filename deployment.yaml \
-  model-cache="$SGLANG_SNAPSHOT_IMAGE" \
-  main="$SGLANG_SNAPSHOT_IMAGE" \
-  --output yaml |
-  kubectl apply \
-    --namespace "$SNAPSHOT_NAMESPACE" \
-    --filename -
+kubectl apply \
+  --namespace "$SNAPSHOT_NAMESPACE" \
+  --filename deployment.yaml
 ```
 
-The command replaces both example image values in `deployment.yaml` with
-`$SGLANG_SNAPSHOT_IMAGE` before creating the Deployment. It does not modify the
-local file. The init container downloads the model when its cache marker does
-not exist. The main container then starts SGLang from the offline cache.
+The init container downloads the model when its cache marker does not exist. The
+main container then starts SGLang from the offline cache.
 
 Wait until the SGLang replica finishes initialization and becomes safe to
 checkpoint:

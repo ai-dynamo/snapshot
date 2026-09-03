@@ -101,14 +101,17 @@ export SNAPSHOT_NAMESPACE=<namespace>
 kubectl get namespace "$SNAPSHOT_NAMESPACE"
 ```
 
-Set a model supported by the selected TensorRT-LLM image through the
-`SNAPSHOT_MODEL` environment variable in
-[`deployment.yaml`](tensorrt-llm/deployment.yaml):
+In [`deployment.yaml`](tensorrt-llm/deployment.yaml), replace the example `image`
+with the one pushed in step 2 and select a model supported by the chosen
+TensorRT-LLM image through `SNAPSHOT_MODEL`:
 
 ```yaml
-env:
-  - name: SNAPSHOT_MODEL
-    value: Qwen/Qwen3-0.6B
+containers:
+  - name: main
+    image: <registry>/tensorrt-llm-snapshot:<tag>
+    env:
+      - name: SNAPSHOT_MODEL
+        value: Qwen/Qwen3-0.6B
 ```
 
 The example uses one GPU, the PyTorch backend, and a maximum sequence length of
@@ -122,23 +125,13 @@ TensorRT-LLM image, GPU count, backend, or engine settings.
 > [`LLM` API](https://nvidia.github.io/TensorRT-LLM/llm-api/reference.html) in
 > `app.py`.
 
-Use [`deployment.yaml`](tensorrt-llm/deployment.yaml) to deploy the image built
-in step 2:
+Deploy the edited manifest:
 
 ```bash
-kubectl set image \
-  --local \
-  --filename deployment.yaml \
-  main="$TENSORRT_LLM_SNAPSHOT_IMAGE" \
-  --output yaml |
-  kubectl apply \
-    --namespace "$SNAPSHOT_NAMESPACE" \
-    --filename -
+kubectl apply \
+  --namespace "$SNAPSHOT_NAMESPACE" \
+  --filename deployment.yaml
 ```
-
-The command replaces the example image value in `deployment.yaml` with
-`$TENSORRT_LLM_SNAPSHOT_IMAGE` before creating the Deployment. It does not
-modify the local file.
 
 Wait until the TensorRT-LLM replica finishes initialization and becomes safe to
 checkpoint:
