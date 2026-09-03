@@ -175,7 +175,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `crdUpgrade.enabled` | Install and upgrade the CRDs from an operator init container (see below) | `true` |
 | `crdUpgrade.logLevel` | Init container log level | `info` |
 | `rbac.create` | Create agent and operator RBAC | `true` |
-| `openshift.enabled` | Create OpenShift SCC-use RBAC and required-SCC pod annotations | `false` |
+| `openshift.enabled` | Create required-SCC pod annotations and, when `rbac.create=true`, OpenShift SCC-use RBAC | `false` |
 
 Reserved `s3` and `oci` values remain chart-owned placeholders for future
 snapshot backends, but only `pvc` is implemented today.
