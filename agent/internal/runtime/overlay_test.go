@@ -6,13 +6,26 @@ package runtime
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr/testr"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
+
+// systemTar resolves the host tar to an absolute path; ApplyRootfsDiff
+// rejects relative tar paths so they cannot resolve through PATH.
+func systemTar(t *testing.T) string {
+	t.Helper()
+	path, err := exec.LookPath("tar")
+	if err != nil {
+		t.Fatalf("resolve system tar: %v", err)
+	}
+	return path
+}
 
 func TestBuildExclusions(t *testing.T) {
 	tests := []struct {
@@ -179,7 +192,7 @@ func TestCaptureRootfsDiff(t *testing.T) {
 		}
 
 		targetRoot := t.TempDir()
-		if err := ApplyRootfsDiff(checkpointDir, targetRoot, testr.New(t)); err != nil {
+		if err := ApplyRootfsDiff(checkpointDir, targetRoot, systemTar(t), testr.New(t)); err != nil {
 			t.Fatalf("ApplyRootfsDiff: %v", err)
 		}
 		data, err := os.ReadFile(filepath.Join(targetRoot, "generated.txt"))
@@ -213,7 +226,7 @@ func TestCaptureRootfsDiff(t *testing.T) {
 
 func TestApplyRootfsDiff(t *testing.T) {
 	t.Run("missing archive is no-op", func(t *testing.T) {
-		if err := ApplyRootfsDiff(t.TempDir(), t.TempDir(), testr.New(t)); err != nil {
+		if err := ApplyRootfsDiff(t.TempDir(), t.TempDir(), systemTar(t), testr.New(t)); err != nil {
 			t.Fatalf("ApplyRootfsDiff: %v", err)
 		}
 	})
@@ -223,7 +236,7 @@ func TestApplyRootfsDiff(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(checkpointDir, rootfsDiffFilename), nil, 0644); err != nil {
 			t.Fatalf("write empty rootfs diff: %v", err)
 		}
-		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), testr.New(t)); err != nil {
+		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), systemTar(t), testr.New(t)); err != nil {
 			t.Fatalf("ApplyRootfsDiff: %v", err)
 		}
 	})
@@ -233,8 +246,27 @@ func TestApplyRootfsDiff(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(checkpointDir, rootfsDiffFilename), []byte("not a tar archive"), 0644); err != nil {
 			t.Fatalf("write invalid rootfs diff: %v", err)
 		}
-		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), testr.New(t)); err == nil {
+		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), systemTar(t), testr.New(t)); err == nil {
 			t.Fatal("ApplyRootfsDiff should fail for invalid non-empty archive")
+		}
+	})
+
+	t.Run("relative tar path is rejected", func(t *testing.T) {
+		err := ApplyRootfsDiff(t.TempDir(), t.TempDir(), "tar", testr.New(t))
+		if err == nil || !strings.Contains(err.Error(), "not absolute") {
+			t.Fatalf("ApplyRootfsDiff error = %v, want rejection of relative tar path", err)
+		}
+	})
+
+	t.Run("uses the provided tar binary", func(t *testing.T) {
+		checkpointDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(checkpointDir, rootfsDiffFilename), []byte("not a tar archive"), 0644); err != nil {
+			t.Fatalf("write invalid rootfs diff: %v", err)
+		}
+		tarBinary := filepath.Join(t.TempDir(), "missing-tar")
+		err := ApplyRootfsDiff(checkpointDir, t.TempDir(), tarBinary, testr.New(t))
+		if err == nil || !strings.Contains(err.Error(), tarBinary) {
+			t.Fatalf("ApplyRootfsDiff error = %v, want provided tar path %q", err, tarBinary)
 		}
 	})
 
@@ -246,7 +278,7 @@ func TestApplyRootfsDiff(t *testing.T) {
 			t.Fatalf("create temp file: %v", err)
 		}
 		f.Close()
-		if err := ApplyRootfsDiff(f.Name(), t.TempDir(), testr.New(t)); err == nil {
+		if err := ApplyRootfsDiff(f.Name(), t.TempDir(), systemTar(t), testr.New(t)); err == nil {
 			t.Fatal("ApplyRootfsDiff should propagate non-ENOENT stat error")
 		}
 	})
@@ -265,7 +297,7 @@ func TestApplyRootfsDiff(t *testing.T) {
 		if err != nil {
 			t.Fatalf("glob staged copies: %v", err)
 		}
-		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), testr.New(t)); err != nil {
+		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), systemTar(t), testr.New(t)); err != nil {
 			t.Fatalf("ApplyRootfsDiff: %v", err)
 		}
 		after, err := filepath.Glob(filepath.Join(os.TempDir(), rootfsDiffFilename+".*.tmp"))

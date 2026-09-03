@@ -151,6 +151,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgnutls28-dev \
     libnftables-dev \
     uuid-dev \
+    tar \
     && rm -rf /var/lib/apt/lists/*
 
 # http.version=HTTP/1.1: Ubuntu 22.04's git (GnuTLS-backed libcurl) mishandles
@@ -165,16 +166,26 @@ RUN git -c http.version=HTTP/1.1 init /tmp/criu \
     && make -j$(nproc) \
     && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
 
-# criu's own shared-library dependencies (libbsd, libgnutls, libnftables,
-# libnl-3, libnet, libuuid, and their transitive deps) must be resolved here,
-# against this stage's older glibc -- not later in the agent stage, whose ldd
-# would resolve the same library names against its own (newer) filesystem and
-# silently reintroduce the GLIBC_2.38 floor this stage exists to avoid. The
-# agent stage's closure step is no-clobber, so it fills in gaps (tar, ip,
-# cuda-checkpoint) without overwriting what's collected here.
+# The restore-time tar (runtime.ApplyRootfsDiff) has the identical
+# glibc-floor problem as criu: it is exec'd inside the destination
+# placeholder's namespace, so it must come from this stage too, not the
+# agent's own (newer) filesystem. Bundled here alongside criu so both share
+# one glibc floor and one lib closure below.
+RUN mkdir -p /criu-install/usr/local/bin \
+    && cp -L "$(command -v tar)" /criu-install/usr/local/bin/tar
+
+# criu's and tar's own shared-library dependencies (libbsd, libgnutls,
+# libnftables, libnl-3, libnet, libuuid, libacl, libselinux, and their
+# transitive deps) must be resolved here, against this stage's older glibc --
+# not later in the agent stage, whose ldd would resolve the same library
+# names against its own (newer) filesystem and silently reintroduce the
+# GLIBC_2.38 floor this stage exists to avoid. The agent stage's closure step
+# is no-clobber, so it fills in gaps (ip, cuda-checkpoint) without
+# overwriting what's collected here.
 RUN set -eu; \
     mkdir -p /criu-install/usr/local/lib/snapshot/lib; \
-    ldd /criu-install/usr/local/sbin/criu 2>/dev/null | awk '/=> \//{print $3}' | sort -u \
+    ldd /criu-install/usr/local/sbin/criu /criu-install/usr/local/bin/tar 2>/dev/null \
+    | awk '/=> \//{print $3}' | sort -u \
     | grep -Ev '/(ld-linux|libc|libm|libmvec|libdl|libpthread|librt|libresolv|libutil|libanl|libnsl|libthread_db)[.-]' \
     | xargs -r -I{} cp -Ln {} /criu-install/usr/local/lib/snapshot/lib/
 
@@ -282,17 +293,19 @@ COPY --from=criu-builder /criu-install/usr/local/lib/snapshot/lib/ /snapshot-bin
 COPY --from=criu-builder /criu-install/usr/local/lib/snapshot/criu-plugins/ /snapshot-binaries/criu-plugins/
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /snapshot-binaries/cuda-checkpoint
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-checkpoint-helper
+# tar is used by runtime.ApplyRootfsDiff via its explicit bundle path (not
+# PATH), so it must be the criu-builder-sourced copy above, matching criu's
+# own glibc floor -- not this (newer) stage's own tar.
+COPY --from=criu-builder /criu-install/usr/local/bin/tar /snapshot-binaries/tar
 
-# Network binaries needed during restore:
-#   ip  — address/route restore (criu/net.c)
-#   tar — used by runtime.ApplyRootfsDiff
-# Network lock is set to SKIP (--network-lock skip) in BuildRestoreOpts, so
-# criu never forks iptables-restore/ip6tables-restore on this path and neither
-# binary needs to be in the bundle. See BuildRestoreOpts for why SKIP is safe
-# for restore specifically.
-# All resolve through PATH inside the namespace.
+# ip is used for address/route restore during restore (criu/net.c) and
+# resolves through PATH inside the namespace. Network lock is set to SKIP
+# (--network-lock skip) in BuildRestoreOpts, so criu never forks
+# iptables-restore/ip6tables-restore on this path and neither binary needs to
+# be in the bundle. See BuildRestoreOpts for why SKIP is safe for restore
+# specifically.
 RUN set -eu; \
-    cp -L "$(command -v ip)" "$(command -v tar)" /snapshot-binaries/; \
+    cp -L "$(command -v ip)" /snapshot-binaries/; \
     chmod +x /snapshot-binaries/criu /snapshot-binaries/nsrestore \
              /snapshot-binaries/cuda-checkpoint /snapshot-binaries/cuda-checkpoint-helper \
              /snapshot-binaries/ip /snapshot-binaries/tar
