@@ -67,6 +67,9 @@ spec:
               value: "10240"
             - name: SGLANG_PAGE_SIZE
               value: "16"
+            # Remote code execution is opt-in; Qwen3 ships no custom code.
+            - name: SGLANG_TRUST_REMOTE_CODE
+              value: "0"
             - name: SNAPSHOT_CONTROL_DIR
               value: /snapshot-control
             - name: HF_HOME
