@@ -1,9 +1,9 @@
 # Build and deploy an SGLang replica
 
 Snapshot restores a replica by injecting its checkpointed state into a
-snapshot-ready image: an SGLang runtime image prepared with the application and container
-layout Snapshot expects. The Snapshot agent injects the restore tooling at
-runtime.
+snapshot-ready image: an SGLang runtime image prepared with the application and
+container layout Snapshot expects. The Snapshot agent injects the restore
+tooling at runtime.
 
 ## Build
 
@@ -58,9 +58,11 @@ send a `POST` request to `/generate` with a JSON body such as
 `{"prompt":"What is the capital of Italy?"}`.
 
 The Dockerfile starts from the tested SGLang image, creates
-`/snapshot-control`, and adds `app.py`. The source and restore pods must use the
-same immutable image, mount the Snapshot control volume at
-`/snapshot-control`, and mount the same model cache at `/hf-cache`.
+`/snapshot-control`, and adds `app.py`.
+
+The source and restore pods must use the same immutable image, mount the
+Snapshot control volume at `/snapshot-control`, and mount the same model cache
+at `/hf-cache`.
 
 ### 2. Build the image
 
