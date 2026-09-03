@@ -983,8 +983,30 @@ def debug_dump_framework(
     """
     print("\n--- framework e2e debug ---")
     print(f"namespace={config.namespace} test={run.suffix} framework_image={image or '<unknown>'}")
-    core = client.CoreV1Api()
-    pods = core.list_namespaced_pod(
+    # Every section is isolated: the caller re-raises the original test
+    # failure after this returns, so nothing here may raise, and one section
+    # failing (a pod deleted mid-dump, an apiserver hiccup) must not hide the
+    # others.
+    _dump_section("pods", lambda: _dump_framework_pods(config, run))
+    _dump_section("custom objects", lambda: print_custom_objects(config, run))
+    _dump_section("controller logs", lambda: print_snapshot_controller_logs(config))
+    if source_node:
+        _dump_section(
+            "agent diagnostics", lambda: _dump_agent_diagnostics(config, run, source_node)
+        )
+    _dump_section("events", lambda: _dump_run_events(config, run))
+    print("--- end debug ---\n")
+
+
+def _dump_section(title: str, dump: Callable[[], None]) -> None:
+    try:
+        dump()
+    except Exception as exc:  # noqa: BLE001 - debug helper must never mask the real failure
+        print(f"{title} unavailable: {type(exc).__name__}: {exc}")
+
+
+def _dump_framework_pods(config: k8s.E2EConfig, run: TestRun) -> None:
+    pods = client.CoreV1Api().list_namespaced_pod(
         config.namespace, label_selector=f"snapshot-e2e-test={run.suffix}"
     ).items
     if not pods:
@@ -1003,74 +1025,104 @@ def debug_dump_framework(
         # The restored process tree is invisible in the container log; its
         # process list, listening sockets, and any error sentinel are the only
         # in-pod evidence of what it is doing.
-        print(f"--- processes / sockets / error sentinels in {name} ---")
-        print(pod_runtime_state(config.namespace, name))
-        print(f"--- logs {name} (tail 400) ---")
-        print(k8s.pod_logs(config.namespace, name, tail_lines=400))
-    print_custom_objects(config, run)
-    print_snapshot_controller_logs(config)
-    if source_node:
-        try:
-            agent = checkpoint_agent_pod(config, source_node)
-            print(f"--- agent {agent} on {source_node} (tail 200) ---")
-            print(k8s.pod_logs(config.namespace, agent, tail_lines=200))
-            print(f"--- nvidia-smi on {source_node} ---")
-            print(k8s.exec_command(config.namespace, agent, "nvidia-smi 2>&1 || true"))
-            print(f"--- host monitoring agents (datadog/dcgm) on {source_node} ---")
-            print(host_monitoring_agents(config, source_node))
-            # A CRIU crash ("criu swrk failed: signal: segmentation fault") leaves
-            # no restore.log behind; the kernel's trap line is then the only
-            # record of where it died. The agent is privileged with hostPID, so
-            # its dmesg is the node's.
-            print(f"--- kernel log (criu/segfault) on {source_node} ---")
-            print(
-                k8s.exec_command(
-                    config.namespace,
-                    agent,
-                    "dmesg -T 2>/dev/null | grep -iE 'criu|segfault|traps|nsrestore|cuda' | tail -30 "
-                    "|| echo '<dmesg unavailable>'",
-                )
-            )
-            content_uid = bound_content_uid(config, run.snapshot_name)
-            if content_uid:
-                root = checkpoint_artifact_root(content_uid)
-                print(f"--- checkpoint artifact {content_uid} on {source_node} ---")
-                print(
-                    k8s.exec_command(
-                        config.namespace,
-                        agent,
-                        f"ls -la {root}/containers/* 2>&1 | grep -vE ' (core|pagemap|pages|fdinfo|ids|mm|sigacts|fs|tty-info|reg-files|inventory|pstree|files|cgroup|seccomp|timens|utsns|ipcns|netns|mnt|rseq|fanotify|inotify|tls|stats)-?[0-9]*\\.img' 2>&1; "
-                        # The diff is applied into the placeholder's rootfs while
-                        # the placeholder and then CRIU run from it. Anything under
-                        # a library or binary path here is a candidate for
-                        # corrupting code that is already mapped.
-                        f"for t in {root}/containers/*/rootfs-diff.tar; do "
-                        "  if [ -f \"$t\" ]; then echo \"== $t: $(tar -tf \"$t\" | wc -l) entries; libraries/binaries:\"; "
-                        "    tar -tf \"$t\" | grep -E '(^|/)(usr/)?(lib|lib64|bin|sbin)/|\\.so(\\.|$)' | head -40; "
-                        "    echo '   top-level dirs:'; tar -tf \"$t\" | cut -d/ -f1-2 | sort | uniq -c | sort -rn | head -12; fi; "
-                        "done; "
-                        f"for f in {root}/containers/*/restore.log {root}/containers/*/dump.log; do "
-                        "  if [ -f \"$f\" ]; then echo \"== $f (tail 60)\"; tail -60 \"$f\"; fi; "
-                        "done",
-                    )
-                )
-        except Exception as exc:  # noqa: BLE001 - debug helper must never mask the real failure
-            print(f"agent diagnostics unavailable: {type(exc).__name__}: {exc}")
+        _dump_section(f"runtime state {name}", lambda name=name: _dump_pod_runtime_state(config, name))
+        _dump_section(f"logs {name}", lambda name=name: _dump_pod_logs(config, name))
+
+
+def _dump_pod_runtime_state(config: k8s.E2EConfig, name: str) -> None:
+    print(f"--- processes / sockets / error sentinels in {name} ---")
+    print(pod_runtime_state(config.namespace, name))
+
+
+def _dump_pod_logs(config: k8s.E2EConfig, name: str) -> None:
+    print(f"--- logs {name} (tail 400) ---")
+    print(k8s.pod_logs(config.namespace, name, tail_lines=400))
+
+
+def _dump_agent_diagnostics(config: k8s.E2EConfig, run: TestRun, source_node: str) -> None:
+    agent = checkpoint_agent_pod(config, source_node)
+    _dump_section("agent logs", lambda: _dump_agent_logs(config, agent, source_node))
+    _dump_section("nvidia-smi", lambda: _dump_nvidia_smi(config, agent, source_node))
+    _dump_section("host monitoring agents", lambda: _dump_host_monitoring(config, source_node))
+    _dump_section("kernel log", lambda: _dump_kernel_log(config, agent, source_node))
+    _dump_section("checkpoint artifact", lambda: _dump_checkpoint_artifact(config, run, agent, source_node))
+
+
+def _dump_agent_logs(config: k8s.E2EConfig, agent: str, source_node: str) -> None:
+    print(f"--- agent {agent} on {source_node} (tail 200) ---")
+    print(k8s.pod_logs(config.namespace, agent, tail_lines=200))
+
+
+def _dump_nvidia_smi(config: k8s.E2EConfig, agent: str, source_node: str) -> None:
+    print(f"--- nvidia-smi on {source_node} ---")
+    print(k8s.exec_command(config.namespace, agent, "nvidia-smi 2>&1 || true"))
+
+
+def _dump_host_monitoring(config: k8s.E2EConfig, source_node: str) -> None:
+    print(f"--- host monitoring agents (datadog/dcgm) on {source_node} ---")
+    print(host_monitoring_agents(config, source_node))
+
+
+def _dump_kernel_log(config: k8s.E2EConfig, agent: str, source_node: str) -> None:
+    # A CRIU crash ("criu swrk failed: signal: segmentation fault") leaves
+    # no restore.log behind; the kernel's trap line is then the only
+    # record of where it died. The agent is privileged with hostPID, so
+    # its dmesg is the node's.
+    print(f"--- kernel log (criu/segfault) on {source_node} ---")
+    print(
+        k8s.exec_command(
+            config.namespace,
+            agent,
+            "dmesg -T 2>/dev/null | grep -iE 'criu|segfault|traps|nsrestore|cuda' | tail -30 "
+            "|| echo '<dmesg unavailable>'",
+        )
+    )
+
+
+def _dump_checkpoint_artifact(
+    config: k8s.E2EConfig, run: TestRun, agent: str, source_node: str
+) -> None:
+    content_uid = bound_content_uid(config, run.snapshot_name)
+    if not content_uid:
+        print("no bound PodSnapshotContent; nothing to list")
+        return
+    root = checkpoint_artifact_root(content_uid)
+    print(f"--- checkpoint artifact {content_uid} on {source_node} ---")
+    print(
+        k8s.exec_command(
+            config.namespace,
+            agent,
+            f"ls -la {root}/containers/* 2>&1 | grep -vE ' (core|pagemap|pages|fdinfo|ids|mm|sigacts|fs|tty-info|reg-files|inventory|pstree|files|cgroup|seccomp|timens|utsns|ipcns|netns|mnt|rseq|fanotify|inotify|tls|stats)-?[0-9]*\\.img' 2>&1; "
+            # The diff is applied into the placeholder's rootfs while
+            # the placeholder and then CRIU run from it. Anything under
+            # a library or binary path here is a candidate for
+            # corrupting code that is already mapped.
+            f"for t in {root}/containers/*/rootfs-diff.tar; do "
+            "  if [ -f \"$t\" ]; then echo \"== $t: $(tar -tf \"$t\" | wc -l) entries; libraries/binaries:\"; "
+            "    tar -tf \"$t\" | grep -E '(^|/)(usr/)?(lib|lib64|bin|sbin)/|\\.so(\\.|$)' | head -40; "
+            "    echo '   top-level dirs:'; tar -tf \"$t\" | cut -d/ -f1-2 | sort | uniq -c | sort -rn | head -12; fi; "
+            "done; "
+            f"for f in {root}/containers/*/restore.log {root}/containers/*/dump.log; do "
+            "  if [ -f \"$f\" ]; then echo \"== $f (tail 60)\"; tail -60 \"$f\"; fi; "
+            "done",
+        )
+    )
+
+
+def _dump_run_events(config: k8s.E2EConfig, run: TestRun) -> None:
     # Filter first, then order by time: the API returns events unordered, and
     # in a namespace shared with the controllers the run's events need not be
     # in any tail of the raw list.
     names = {run.source_pod, run.restore_pod, run.snapshot_name}
     events = [
         event
-        for event in core.list_namespaced_event(config.namespace).items
+        for event in client.CoreV1Api().list_namespaced_event(config.namespace).items
         if event.involved_object and event.involved_object.name in names
     ]
     events.sort(key=event_time)
     for event in events[-60:]:
         involved = event.involved_object
         print(f"event {involved.kind}/{involved.name} {event.reason}: {event.message}")
-    print("--- end debug ---\n")
-
 
 def event_time(event: client.CoreV1Event) -> datetime:
     return (
