@@ -156,7 +156,9 @@ SNAPSHOT_E2E_FRAMEWORK=vllm SNAPSHOT_E2E_FRAMEWORK_IMAGE=<registry>/vllm-snapsho
 
 The SGLang guide uses a persistent model-cache PVC; the test creates it from
 the guide manifest if missing (with `SNAPSHOT_E2E_STORAGE_CLASS` when set) and
-leaves it in place so later runs skip the download. `tests/test_framework_manifests.py`
+leaves it in place so later runs skip the download. A partial or stale cache
+(for example after a killed run) is reset by deleting that PVC; the next run
+recreates and refills it. `tests/test_framework_manifests.py`
 pins the guide manifests to the restore-pod contract without a cluster.
 
 ## Framework Images

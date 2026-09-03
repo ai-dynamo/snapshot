@@ -195,3 +195,19 @@ def test_framework_selection_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SNAPSHOT_E2E_FRAMEWORK", "nope")
     with pytest.raises(RuntimeError):
         frameworks.selected_frameworks()
+
+
+@pytest.mark.workload
+def test_control_file_names_match_the_guide_program(spec: frameworks.FrameworkSpec) -> None:
+    """The sentinel paths in FrameworkSpec are copies of literals in the guide's
+    app.py. A rename on either side would otherwise surface only as a GPU run
+    timing out on "neither sentinel" minutes later.
+    """
+    program = (spec.guide_dir / "app.py").read_text(encoding="utf-8")
+    sentinels = [spec.precheck_file, spec.restore_ready_file]
+    error_file = getattr(spec, "restore_error_file", None)
+    if error_file:
+        sentinels.append(error_file)
+    for path in sentinels:
+        name = path.rsplit("/", 1)[-1]
+        assert f'"{name}"' in program, f"{spec.name}/app.py does not write {name!r}"
