@@ -24,7 +24,7 @@ The runs used single GPU LLM serving workloads, with the KV cache discarded befo
 | Inference engine | vLLM 0.20 |
 | GPU | NVIDIA B200 |
 | NVIDIA driver | 595 |
-| Storage backend | VAST PVC |
+| Storage backend | VAST PVC (NFS) |
 | Restore locality | Not pinned. Placement was left to the scheduler, so restores were neither forced onto the capture node nor forced away from it. |
 
 </div>
@@ -137,4 +137,4 @@ Quantization, parameter count, and other factors combine to determine the size o
 
 CRIU restore is a bulk read of the checkpoint from shared storage into host RAM, and it is the single largest stage in every configuration measured here, between 49 and 67 percent of end to end time. The storage backend therefore largely determines how fast a restore can be.
 
-Every number in this document was measured with the checkpoint on a VAST PVC. A slower backend moves every row up, and a faster one moves every row down, so these results should be read as specific to that setup rather than as a property of Snapshot itself.
+Every number in this document was measured with the checkpoint on a VAST PVC (NFS). A slower backend moves every row up, and a faster one moves every row down, so these results should be read as specific to that setup rather than as a property of Snapshot itself.

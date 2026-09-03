@@ -98,12 +98,12 @@ Snapshot can be installed:
 
 ### From a release
 
-Find the latest version on the [releases page](https://github.com/ai-dynamo/snapshot/releases),
-then install the published chart, replacing `<VERSION>`:
+Install the published chart (see the [releases page](https://github.com/ai-dynamo/snapshot/releases)
+for other versions):
 
 ```bash
 helm install snapshot oci://ghcr.io/ai-dynamo/snapshot/snapshot \
-  --version <VERSION> \
+  --version 0.1.0-rc.1 \
   --namespace snapshot --create-namespace
 ```
 
@@ -160,6 +160,7 @@ Multi-GPU and Arm support are on the roadmap.
 - [API](docs/reference/api.md) — `PodSnapshot`, `PodSnapshotContent`, `SnapshotJob`, and the `restore-from` annotation.
 - [Architecture](docs/reference/architecture.md) — operator and node-agent design, and the checkpoint/restore internals.
 - [CLI (`snapshotctl`)](docs/reference/cli.md) — lower-level checkpoint/restore from a pod manifest.
+- [Restore Pod contract](docs/reference/restore-pod-contract.md) — the pod interface for programmatic restore: annotations, control volume, startup gate, and seccomp.
 
 **Operations**
 
