@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "pagebroker.pb.h"
+#include "pagebroker_types.hpp"
 #include "transfer_engine.hpp"
 
 namespace snapshot::pagebroker {
