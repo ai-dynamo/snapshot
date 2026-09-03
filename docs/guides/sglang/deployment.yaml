@@ -57,6 +57,11 @@ spec:
         - name: main
           image: sglang-snapshot:replace-me
           imagePullPolicy: Always
+          # SYS_PTRACE: lets py-spy attach to sibling processes in this
+          # container for failure diagnostics (see e2e debug_dump_framework).
+          securityContext:
+            capabilities:
+              add: ["SYS_PTRACE"]
           args:
             - --mode
             - snapshot
