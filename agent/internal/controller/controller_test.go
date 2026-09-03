@@ -91,6 +91,10 @@ func (noopInjector) MountArtifact(_ context.Context, _ nsmount.MountPoint, _ str
 	return noopMountPoint{}, nil
 }
 
+func (noopInjector) MountPageBroker(_ context.Context, _ nsmount.MountPoint, _ string) (nsmount.MountPoint, error) {
+	return noopMountPoint{}, nil
+}
+
 type noopMountPoint struct{}
 
 func (noopMountPoint) Unmount(context.Context) error { return nil }
