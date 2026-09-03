@@ -1068,13 +1068,17 @@ def _dump_kernel_log(config: k8s.E2EConfig, agent: str, source_node: str) -> Non
     # no restore.log behind; the kernel's trap line is then the only
     # record of where it died. The agent is privileged with hostPID, so
     # its dmesg is the node's.
-    print(f"--- kernel log (criu/segfault) on {source_node} ---")
+    # Also match memory-pressure kills: a task in the seized tree dying with
+    # SIGKILL mid-dump is either the OOM killer (visible here) or a userspace
+    # killer (not visible here); the two need different investigations.
+    print(f"--- kernel log (criu/segfault/oom) on {source_node} ---")
     print(
         k8s.exec_command(
             config.namespace,
             agent,
-            "dmesg -T 2>/dev/null | grep -iE 'criu|segfault|traps|nsrestore|cuda' | tail -30 "
-            "|| echo '<dmesg unavailable>'",
+            "dmesg -T 2>/dev/null "
+            "| grep -iE 'criu|segfault|traps|nsrestore|cuda|out of memory|killed process|oom|memory cgroup' "
+            "| tail -40 || echo '<dmesg unavailable>'",
         )
     )
 
@@ -1102,8 +1106,11 @@ def _dump_checkpoint_artifact(
             "    tar -tf \"$t\" | grep -E '(^|/)(usr/)?(lib|lib64|bin|sbin)/|\\.so(\\.|$)' | head -40; "
             "    echo '   top-level dirs:'; tar -tf \"$t\" | cut -d/ -f1-2 | sort | uniq -c | sort -rn | head -12; fi; "
             "done; "
-            f"for f in {root}/containers/*/restore.log {root}/containers/*/dump.log; do "
-            "  if [ -f \"$f\" ]; then echo \"== $f (tail 60)\"; tail -60 \"$f\"; fi; "
+            # A failed checkpoint never leaves .tmp/, so its dump.log lives
+            # there; the agent log only carries a truncated tail of it.
+            f"for f in {root}/containers/*/restore.log {root}/containers/*/dump.log {root}/.tmp/*/dump.log; do "
+            "  if [ -f \"$f\" ]; then echo \"== $f (errors, then tail 60)\"; "
+            "    grep -E 'Error \\(|Warn  \\(' \"$f\" | tail -20; tail -60 \"$f\"; fi; "
             "done",
         )
     )
