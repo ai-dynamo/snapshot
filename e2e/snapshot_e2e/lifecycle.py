@@ -499,7 +499,7 @@ def wait_for_restored_condition(
         except ApiException as exc:
             return f"api_error={k8s.api_error_detail(exc)}"
         restored = pod_condition(pod, "nvidia.com/Restored")
-        return f"nvidia.com/Restored={restored or '<unset>'}"
+        return f"nvidia.com/Restored={condition_summary(restored)}"
 
     return wait_for(
         f"nvidia.com/Restored={status}/{reason} on {namespace}/{pod_name}",
@@ -514,6 +514,40 @@ def pod_condition(pod: client.V1Pod, condition_type: str) -> client.V1PodConditi
         if item.type == condition_type:
             return item
     return None
+
+
+def condition_summary(cond: object) -> str:
+    """One-line, human-readable rendering of a Kubernetes condition.
+
+    The client's model objects repr as multi-line dicts with ``datetime``
+    objects, which is unreadable in a wait loop's progress line. Works for
+    typed models (``V1PodCondition``, ``V1JobCondition``) and for the plain
+    dicts custom objects return.
+    """
+    if cond is None:
+        return "<unset>"
+    if isinstance(cond, dict):
+        get = cond.get
+    else:
+        get = lambda key, default=None: getattr(cond, key, default)
+    at = get("last_transition_time") or get("lastTransitionTime")
+    if hasattr(at, "isoformat"):
+        at = at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    parts = [f"status={get('status')}", f"reason={get('reason')}"]
+    if get("message"):
+        parts.append(f"message={get('message')!r}")
+    if at:
+        parts.append(f"at={at}")
+    return " ".join(parts)
+
+
+def conditions_summary(conds: object) -> str:
+    if not conds:
+        return "[]"
+    return "[" + "; ".join(
+        f"{(c.get('type') if isinstance(c, dict) else getattr(c, 'type', None))}: {condition_summary(c)}"
+        for c in conds
+    ) + "]"
 
 
 def checkpoint_artifact_manifest(
@@ -859,7 +893,7 @@ def debug_dump_snapshotjob(config: k8s.E2EConfig, run: TestRun) -> None:
         print(
             f"source Job {job.metadata.name} active={job.status.active} "
             f"succeeded={job.status.succeeded} failed={job.status.failed} "
-            f"startTime={job.status.start_time} conditions={job.status.conditions}"
+            f"startTime={job.status.start_time} conditions={conditions_summary(job.status.conditions)}"
         )
     api = client.CustomObjectsApi()
     try:
