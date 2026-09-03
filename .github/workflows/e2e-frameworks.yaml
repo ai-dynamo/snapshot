@@ -11,6 +11,17 @@ name: E2E Framework Tests
 # Pull requests are tested through their copy-pr-bot mirror branch
 # (pull-request/<number>, see .github/copy-pr-bot.yaml): the GPU runners admit
 # push, schedule, and workflow_dispatch events but reject pull_request.
+#
+# Known-red on this gate, kept red on purpose (not this workflow's bug):
+#   - vLLM: intermittent CRIU restore segfault ("criu swrk failed: signal:
+#     segmentation fault"), a product defect in criu itself, not this repo's
+#     restore wiring -- see PR #179's discussion for the current investigation.
+#   - SGLang: occasional post-restore hang in resume_memory_occupation();
+#     largely resolved by switching to PauseGenerationReqInput(mode="retract")
+#     (this PR), but not eliminated.
+#   - TensorRT-LLM has been consistently green.
+# Do not re-diagnose these from scratch on a failing run; check whether the
+# failure matches one of the above first.
 
 on:
   push:
@@ -96,16 +107,27 @@ jobs:
     name: ${{ matrix.framework }}
     needs: datadog-gate
     runs-on: prod-deploy-tester-v1
-    # Setup (~10 min observed) + the image poll below + the test step.
-    timeout-minutes: 120
+    # Sum of this job's own step timeout-minutes below (188 min: dominated by
+    # the 80-min framework-image wait and the 50-min test step), plus margin
+    # for the ~10 min of untimed steps and scheduling overhead. Must stay
+    # above that sum: a job-level timeout kills the whole job, including the
+    # failure() diagnostics upload and always() vCluster cleanup below, which
+    # is exactly the safety net a slow run (the scenario this budget exists
+    # for) needs most.
+    timeout-minutes: 200
     strategy:
       fail-fast: false
       matrix:
         framework: [vllm, sglang, tensorrt-llm]
     concurrency:
-      # One group per mirror branch (pull-request/N) so a new push to the PR
-      # cancels the stale run; scheduled and dispatched runs never cancel.
-      group: snapshot-e2e-frameworks-${{ startsWith(github.ref, 'refs/heads/pull-request/') && github.ref_name || github.run_id }}-${{ matrix.framework }}
+      # PR mirror branches: one group per branch (pull-request/N), so a new
+      # push to the PR cancels the stale run. Scheduled and dispatched runs
+      # share a fixed 'nightly' group per framework instead of github.run_id,
+      # so an overlapping nightly + workflow_dispatch (or two dispatches)
+      # queue rather than run concurrently on this GPU-scarce shared cluster
+      # -- cancel-in-progress stays false for these so a queued run still
+      # executes rather than being dropped.
+      group: snapshot-e2e-frameworks-${{ startsWith(github.ref, 'refs/heads/pull-request/') && github.ref_name || 'nightly' }}-${{ matrix.framework }}
       cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/pull-request/') }}
     env:
       HOST_NAMESPACE: snapshot-e2e-fw-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
