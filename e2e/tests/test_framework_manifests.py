@@ -12,7 +12,7 @@ pull request, without a cluster:
   relies on (control volume at /snapshot-control with subPath main,
   SNAPSHOT_CONTROL_DIR, io_uring seccomp profile, /dev/net/tun, nvidia
   RuntimeClass, one GPU);
-- the restore pod is a standby placeholder (SNAPSHOT_RESTORE_STANDBY=1) that
+- the restore pod is an inert placeholder (an explicit sleep command) that
   restores this run's PodSnapshot;
 - the model the guide deploys is the one the tests expect;
 - the image tag is content-addressed and deterministic.
@@ -101,9 +101,11 @@ def test_source_pod_is_checkpointable_and_unannotated(spec: frameworks.Framework
 def test_restore_pod_is_standby_placeholder_for_this_run(spec: frameworks.FrameworkSpec) -> None:
     _, restore, run = pods(spec)
     main = fw.main_container(restore)
-    # Without standby the guide program would load a model into the GPU while
-    # the agent restores into the same container.
-    assert fw.env_value(main, "SNAPSHOT_RESTORE_STANDBY") == "1"
+    # The guide manifests keep the placeholder inert with an explicit sleep
+    # command; without it the guide program would load a model into the GPU
+    # while the agent restores into the same container.
+    assert main["command"] == ["/bin/sh", "-c", "exec sleep infinity"]
+    assert fw.env_value(main, "SNAPSHOT_RESTORE_STANDBY") is None
     assert restore["metadata"]["annotations"] == {fw.RESTORE_FROM_ANNOTATION: run.snapshot_name}
     node_terms = restore["spec"]["affinity"]["nodeAffinity"][
         "requiredDuringSchedulingIgnoredDuringExecution"
