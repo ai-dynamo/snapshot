@@ -313,10 +313,11 @@ jobs:
           uv run --locked --project e2e pytest e2e/tests -m environment -vv
 
       # Must exceed the phase budgets in e2e/snapshot_e2e/frameworks.py plus the
-      # request timeout (~33 min), or GitHub kills pytest before its dump runs.
+      # request timeout (~43 min with sglang's 600s restore_timeout_seconds
+      # override), or GitHub kills pytest before its dump runs.
       - name: Run ${{ matrix.framework }} checkpoint/restore test
         if: ${{ steps.selected.outputs.run == 'true' }}
-        timeout-minutes: 40
+        timeout-minutes: 50
         run: |
           set -euo pipefail
           uv run --locked --project e2e pytest e2e/tests/test_frameworks.py -vv -s

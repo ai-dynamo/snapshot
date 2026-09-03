@@ -65,6 +65,9 @@ class FrameworkSpec:
     restore_error_file: str
     # Guide PVC manifest for a persistent model cache, if the guide uses one.
     model_cache_manifest: str | None = None
+    # Overrides RESTORE_TIMEOUT_SECONDS for this framework's restore-condition
+    # and restore-outcome waits.
+    restore_timeout_seconds: int = RESTORE_TIMEOUT_SECONDS
 
     @property
     def guide_dir(self) -> Path:
@@ -100,6 +103,10 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         restore_ready_file="/snapshot-control/sglang-restore-ready",
         restore_error_file="/snapshot-control/sglang-restore-error",
         model_cache_manifest="model-cache-pvc.yaml",
+        # engine.resume_memory_occupation() has come within seconds of the
+        # default 300s budget in CI; give it more room than the other
+        # frameworks need.
+        restore_timeout_seconds=600,
     ),
     "tensorrt-llm": FrameworkSpec(
         name="tensorrt-llm",
