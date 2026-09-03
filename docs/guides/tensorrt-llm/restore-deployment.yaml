@@ -34,6 +34,12 @@ spec:
         - name: main
           image: tensorrt-llm-snapshot:replace-me
           imagePullPolicy: Always
+          # Inert placeholder: the agent restores the checkpointed process into
+          # this container, so app.py must not run here.
+          command:
+            - /bin/sh
+            - -c
+            - exec sleep infinity
           env:
             - name: SNAPSHOT_MODEL
               value: Qwen/Qwen3-0.6B
@@ -55,7 +61,7 @@ spec:
             exec:
               command:
                 - cat
-                - /snapshot-control/ready-for-snapshot
+                - /snapshot-control/trtllm-restore-ready
             periodSeconds: 1
             failureThreshold: 1800
           volumeMounts:
