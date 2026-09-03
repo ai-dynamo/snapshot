@@ -22,7 +22,10 @@ const (
 	commitRetryDelay = 100 * time.Millisecond
 )
 
-var errMessageTooLarge = fmt.Errorf("message exceeds %d bytes", maxMessageSize)
+var (
+	commitRetryLimit   = 30 * time.Second
+	errMessageTooLarge = fmt.Errorf("message exceeds %d bytes", maxMessageSize)
+)
 
 // Client uses the deployment-wide filesystem/POSIX PageBroker plan.
 type Client struct {
@@ -57,24 +60,42 @@ func imageDirectory(directory string) (string, error) {
 }
 
 func (c Client) Commit(ctx context.Context, transactionID string) error {
+	err := c.commit(ctx, transactionID)
+	if !isTransportError(err) {
+		return err
+	}
+	return c.retryCommit(ctx, transactionID)
+}
+
+func (c Client) retryCommit(ctx context.Context, transactionID string) error {
+	retryCtx, cancel := context.WithTimeout(ctx, commitRetryLimit)
+	defer cancel()
 	for {
-		response, err := c.request(ctx, transactionID, &Request_Commit{Commit: &CommitRequest{}})
-		if err == nil {
-			if response.GetCommitComplete() != nil {
-				return nil
-			}
-			return fmt.Errorf("unexpected PageBroker commit response")
-		}
-		var transport transportError
-		if !errors.As(err, &transport) {
-			return err
-		}
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-retryCtx.Done():
+			return retryCtx.Err()
 		case <-time.After(commitRetryDelay):
 		}
+		if err := c.commit(retryCtx, transactionID); !isTransportError(err) {
+			return err
+		}
 	}
+}
+
+func (c Client) commit(ctx context.Context, transactionID string) error {
+	response, err := c.request(ctx, transactionID, &Request_Commit{Commit: &CommitRequest{}})
+	if err != nil {
+		return err
+	}
+	if response.GetCommitComplete() == nil {
+		return fmt.Errorf("unexpected PageBroker commit response")
+	}
+	return nil
+}
+
+func isTransportError(err error) bool {
+	var transport transportError
+	return errors.As(err, &transport)
 }
 
 func (c Client) Abort(ctx context.Context, transactionID string) error {

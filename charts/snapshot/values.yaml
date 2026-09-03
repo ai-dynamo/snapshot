@@ -97,17 +97,17 @@ pageBroker:
   command: []
   args: []
   maxConcurrentRequests: 16
-  stagingSizeLimit: 64Gi
   resources:
     requests:
       cpu: 8
-      memory: 64Gi
+      memory: 32Gi
     limits:
       cpu: 32
-      memory: 72Gi
+      memory: 256Gi
   image:
     repository: ghcr.io/ai-dynamo/snapshot/agent
-    tag: 1.4.0
+    # Defaults to the chart's appVersion when empty (see templates).
+    tag: ""
     pullPolicy: Always
 
 # DaemonSet configuration for the checkpoint/restore agent
