@@ -27,6 +27,8 @@ ARG GO_VERSION=1.26.6
 #   --build-arg CRIU_REF=<fork-branch-or-sha>
 ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
 ARG CRIU_REF=criu-dev
+ARG GNU_TAR_VERSION=1.35
+ARG GNU_TAR_SHA256=4d62ff37342ec7aed748535323930c7cf94acf71c3591882b26a7ea50f3edc16
 ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04@sha256:8315e2455736c4f9b597f15c5fb4d31f834e798e0c6b66bbdbdbac491ce26bd1
 
 # For placeholder target only - this default allows agent builds to succeed,
@@ -107,6 +109,36 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s
 
 # Corresponding source for the Go modules compiled into the binaries above.
 RUN mkdir -p /go-src && go mod vendor -o /go-src/vendor
+
+# =============================================================================
+# Stage: Restore tar builder
+#
+# Rootfs diffs are extracted inside the placeholder container. A dynamically
+# linked tar would use that image's ELF loader and glibc, which may be older
+# than the agent image's. Build GNU tar against musl so restore extraction does
+# not depend on any userspace library in the placeholder image.
+# =============================================================================
+FROM alpine:3.23 AS tar-builder
+
+ARG GNU_TAR_VERSION
+ARG GNU_TAR_SHA256
+
+RUN apk add --no-cache \
+    attr \
+    build-base \
+    ca-certificates \
+    curl \
+    xz
+
+WORKDIR /tmp
+
+COPY scripts/fetch-gnu-tar.sh scripts/build-gnu-tar.sh /tmp/scripts/
+
+RUN sh /tmp/scripts/fetch-gnu-tar.sh "${GNU_TAR_VERSION}" "${GNU_TAR_SHA256}"
+
+WORKDIR /tmp/tar-${GNU_TAR_VERSION}
+
+RUN sh /tmp/scripts/build-gnu-tar.sh
 
 # =============================================================================
 # Stage: CUDA checkpoint helper builder
@@ -229,6 +261,9 @@ RUN sh /tmp/collect-sources.sh /tmp/base-packages.tsv /sources/dpkg
 # CRIU source, at the exact ref this image was built from.
 COPY --from=criu-builder /criu-src.tar.gz /sources/criu/criu-src.tar.gz
 
+# Pinned upstream source for the statically linked restore-time GNU tar.
+COPY --from=tar-builder /gnu-tar-source.tar.xz /sources/gnu-tar/gnu-tar-source.tar.xz
+
 # Go module source for the statically linked binaries.
 COPY --from=builder /go-src/vendor /sources/go/vendor
 
@@ -272,17 +307,19 @@ COPY --from=criu-builder /criu-install/usr/local/sbin/criu /snapshot-binaries/cr
 COPY --from=criu-builder /criu-install/usr/local/lib/snapshot/criu-plugins/ /snapshot-binaries/criu-plugins/
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /snapshot-binaries/cuda-checkpoint
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-checkpoint-helper
+COPY --from=tar-builder /out/tar /snapshot-binaries/tar
 
 # Network binaries needed during restore:
 #   ip  — address/route restore (criu/net.c)
-#   tar — used by runtime.ApplyRootfsDiff
+#   tar — used by runtime.ApplyRootfsDiff; statically linked and copied above
 # Network lock is set to SKIP (--network-lock skip) in BuildRestoreOpts, so
 # criu never forks iptables-restore/ip6tables-restore on this path and neither
 # binary needs to be in the bundle. See BuildRestoreOpts for why SKIP is safe
 # for restore specifically.
-# All resolve through PATH inside the namespace.
+# ip resolves through PATH inside the namespace. ApplyRootfsDiff invokes tar by
+# its explicit bundle path so it cannot fall back to the placeholder's tar.
 RUN set -eu; \
-    cp -L "$(command -v ip)" "$(command -v tar)" /snapshot-binaries/; \
+    cp -L "$(command -v ip)" /snapshot-binaries/; \
     chmod +x /snapshot-binaries/criu /snapshot-binaries/nsrestore \
              /snapshot-binaries/cuda-checkpoint /snapshot-binaries/cuda-checkpoint-helper \
              /snapshot-binaries/ip /snapshot-binaries/tar
@@ -311,7 +348,7 @@ RUN set -eu; \
 # a silent ldd failure leaves lib/ empty; asserting here catches that.
 RUN set -eu; \
     for f in /snapshot-binaries/criu /snapshot-binaries/ip \
-             /snapshot-binaries/tar /snapshot-binaries/criu-plugins/*.so; do \
+             /snapshot-binaries/criu-plugins/*.so; do \
       [ -f "$f" ] || continue; \
       if LD_LIBRARY_PATH=/snapshot-binaries/lib ldd "$f" 2>&1 | grep -q 'not found'; then \
         echo "ERROR: unresolved shared libraries in $f:" >&2; \
@@ -321,6 +358,7 @@ RUN set -eu; \
     done
 
 COPY --from=sources /sources /legal/source
+COPY --from=tar-builder /out/COPYING /legal/gnu-tar/COPYING
 
 # Attribution generated from the delta manifest and the vendored modules.
 COPY compliance/gen-attribution.sh /tmp/gen-attribution.sh
@@ -348,11 +386,11 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 # namespace, so nothing needs pre-provisioning here.
 #
 # Three constraints follow from that and must hold for every BASE_IMAGE:
-#   - BASE_IMAGE must be glibc-compatible with AGENT_BASE_IMAGE, because the
-#     bundle's library closure is built from AGENT_BASE_IMAGE (ubuntu 24.04,
-#     glibc 2.39) and loaded ahead of the placeholder's own libraries via
-#     LD_LIBRARY_PATH. A 22.04-based BASE_IMAGE builds green but fails at
-#     restore with "version 'GLIBC_2.38' not found".
+#   - BASE_IMAGE must be glibc-compatible with AGENT_BASE_IMAGE for the
+#     dynamically linked CRIU, ip, and CUDA tools. Their library closure is
+#     built from AGENT_BASE_IMAGE (ubuntu 24.04, glibc 2.39) and loaded ahead
+#     of the placeholder's own libraries via LD_LIBRARY_PATH. The restore tar
+#     is statically linked and does not share this constraint.
 #   - The node kernel must be >= 5.12 (mount_setattr, used by ns-bind-mount).
 #   - The placeholder pod must NOT set readOnlyRootFilesystem: true unless a
 #     writable volume is mounted at /tmp. The agent bind-mounts the binary
