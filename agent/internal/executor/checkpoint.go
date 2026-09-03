@@ -7,6 +7,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,21 +21,40 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/criu"
 	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
+	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
 
+const pageBrokerAbortTimeout = 5 * time.Second
+
+// checkpointNeedsSourceKillError reports a failure after CUDA or CRIU may have left the source unsafe.
+type checkpointNeedsSourceKillError struct{ cause error }
+
+func (e *checkpointNeedsSourceKillError) Error() string { return e.cause.Error() }
+
+func (e *checkpointNeedsSourceKillError) Unwrap() error { return e.cause }
+
+func checkpointNeedsSourceKill(err error) error { return &checkpointNeedsSourceKillError{cause: err} }
+
+// CheckpointNeedsSourceKill reports whether a failed checkpoint may have left the source unsafe.
+func CheckpointNeedsSourceKill(err error) bool {
+	var checkpointError *checkpointNeedsSourceKillError
+	return errors.As(err, &checkpointError)
+}
+
 // CheckpointRequest holds the content-owned inputs for a checkpoint operation.
 type CheckpointRequest struct {
-	ContainerID   string
-	ContainerName string
-	ContentUID    string
-	StartedAt     time.Time
-	NodeName      string
-	PodName       string
-	PodNamespace  string
-	PodIP         string
-	Clientset     kubernetes.Interface
+	ContainerID         string
+	ContainerName       string
+	ContentUID          string
+	StartedAt           time.Time
+	NodeName            string
+	PodName             string
+	PodNamespace        string
+	PodIP               string
+	Clientset           kubernetes.Interface
+	PageBrokerRequested bool
 }
 
 type checkpointPhaseTimings struct {
@@ -48,7 +68,7 @@ type checkpointPhaseTimings struct {
 // The checkpoint directory is staged under the content-owned .tmp directory.
 // On success, the previous checkpoint is removed and the staged directory is
 // renamed atomically into the content/container artifact path.
-func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req CheckpointRequest, cfg *types.AgentConfig) error {
+func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req CheckpointRequest, cfg *types.AgentConfig) (retErr error) {
 	checkpointStart := time.Now()
 	log.Info("=== Starting checkpoint operation ===")
 
@@ -56,21 +76,44 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	if err != nil {
 		return fmt.Errorf("resolve checkpoint artifact path: %w", err)
 	}
-	tmpRoot, err := nsmount.ResolveArtifactStagingRoot(cfg.Storage.BasePath, req.ContentUID)
-	if err != nil {
-		return fmt.Errorf("resolve checkpoint staging root: %w", err)
+	brokered := req.PageBrokerRequested && cfg.PageBroker.Enabled
+	transactionID := uuid.NewString()
+	var broker pagebroker.Client
+	committed := false
+	var tmpDir string
+	if brokered {
+		broker = pagebroker.Client{ControlSocketPath: cfg.PageBroker.ControlSocketPath}
+		defer func() {
+			if !committed {
+				abortCtx, cancel := context.WithTimeout(context.Background(), pageBrokerAbortTimeout)
+				defer cancel()
+				if err := broker.Abort(abortCtx, transactionID); err != nil {
+					retErr = errors.Join(retErr, fmt.Errorf("abort PageBroker checkpoint %q: %w", transactionID, err))
+				}
+			}
+		}()
+		var err error
+		tmpDir, err = broker.PrepareCheckpoint(ctx, transactionID, finalDir)
+		if err != nil {
+			return fmt.Errorf("prepare PageBroker checkpoint: %w", err)
+		}
+	} else {
+		tmpRoot, err := nsmount.ResolveArtifactStagingRoot(cfg.Storage.BasePath, req.ContentUID)
+		if err != nil {
+			return fmt.Errorf("resolve checkpoint staging root: %w", err)
+		}
+		if err := os.MkdirAll(tmpRoot, 0700); err != nil {
+			return fmt.Errorf("failed to create checkpoint staging root: %w", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(finalDir), 0700); err != nil {
+			return fmt.Errorf("failed to create checkpoint container root: %w", err)
+		}
+		tmpDir = filepath.Join(tmpRoot, transactionID)
+		if err := os.Mkdir(tmpDir, 0700); err != nil {
+			return fmt.Errorf("failed to create checkpoint staging directory: %w", err)
+		}
+		defer os.RemoveAll(tmpDir)
 	}
-	if err := os.MkdirAll(tmpRoot, 0700); err != nil {
-		return fmt.Errorf("failed to create checkpoint staging root: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(finalDir), 0700); err != nil {
-		return fmt.Errorf("failed to create checkpoint container root: %w", err)
-	}
-	tmpDir := filepath.Join(tmpRoot, uuid.NewString())
-	if err := os.Mkdir(tmpDir, 0700); err != nil {
-		return fmt.Errorf("failed to create checkpoint staging directory: %w", err)
-	}
-	defer os.RemoveAll(tmpDir)
 
 	state, gpuDeviceMapDuration, err := inspectContainer(ctx, rt, log, req)
 	if err != nil {
@@ -91,17 +134,24 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 
 	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log)
 	if err != nil {
-		return err
+		return checkpointNeedsSourceKill(err)
 	}
 
-	// Remove any previous checkpoint with the same identity hash, then
-	// promote the staged checkpoint directory into place.
 	switchStart := time.Now()
-	if err := os.RemoveAll(finalDir); err != nil {
-		return fmt.Errorf("failed to remove previous checkpoint directory: %w", err)
-	}
-	if err := os.Rename(tmpDir, finalDir); err != nil {
-		return fmt.Errorf("failed to finalize checkpoint directory: %w", err)
+	if brokered {
+		if err := broker.Commit(ctx, transactionID); err != nil {
+			return fmt.Errorf("commit PageBroker checkpoint: %w", err)
+		}
+		committed = true
+	} else {
+		// Remove any previous checkpoint with the same identity hash, then
+		// promote the staged checkpoint directory into place.
+		if err := os.RemoveAll(finalDir); err != nil {
+			return fmt.Errorf("failed to remove previous checkpoint directory: %w", err)
+		}
+		if err := os.Rename(tmpDir, finalDir); err != nil {
+			return fmt.Errorf("failed to finalize checkpoint directory: %w", err)
+		}
 	}
 	switchDuration := time.Since(switchStart)
 
