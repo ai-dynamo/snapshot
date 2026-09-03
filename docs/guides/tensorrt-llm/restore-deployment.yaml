@@ -61,7 +61,7 @@ spec:
             exec:
               command:
                 - cat
-                - /snapshot-control/ready-for-snapshot
+                - /snapshot-control/trtllm-restore-ready
             periodSeconds: 1
             failureThreshold: 1800
           volumeMounts:
