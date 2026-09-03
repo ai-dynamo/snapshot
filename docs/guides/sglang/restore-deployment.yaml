@@ -71,10 +71,6 @@ spec:
               value: "10240"
             - name: SNAPSHOT_CONTROL_DIR
               value: /snapshot-control
-            # Keep the placeholder inert: the agent restores the checkpointed
-            # process into this container, so app.py must not load a model here.
-            - name: SNAPSHOT_RESTORE_STANDBY
-              value: "1"
             - name: HF_HOME
               value: /hf-cache
             - name: HF_HUB_OFFLINE

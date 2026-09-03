@@ -80,8 +80,10 @@ func TestBuildShapesSingleDestination(t *testing.T) {
 			t.Fatalf("%s = %q, want %q", name, got, SnapshotControlMountPath)
 		}
 	}
-	if got := restoreEnvValue(main.Env, RestoreStandbyModeEnv); got != "" {
-		t.Fatalf("generic builder injected workload-specific %s value %q", RestoreStandbyModeEnv, got)
+	for _, name := range []string{RestoreStandbyModeEnv, LegacyRestoreStandbyModeEnv} {
+		if got := restoreEnvValue(main.Env, name); got != "" {
+			t.Fatalf("generic builder injected workload-specific %s value %q", name, got)
+		}
 	}
 	if main.StartupProbe == nil ||
 		main.StartupProbe.Exec == nil ||
