@@ -6,8 +6,9 @@ container layout Snapshot expects. The Snapshot agent injects the restore
 tooling at runtime.
 
 > [!NOTE]
-> This example is validated on vLLM 0.27.1 (the pinned `vllm/vllm-openai:v0.27.1`
-> image) and does not work on vLLM 0.28.
+> This example is validated on vLLM 0.27.1 (the pinned
+> `vllm/vllm-openai:v0.27.1-ubuntu2404` image) and does not work on vLLM
+> 0.28.
 
 ## Build
 
@@ -49,9 +50,10 @@ listening. To validate the restored replica, send a `POST` request to
 `/generate` with a JSON body such as
 `{"prompt":"What is the capital of Italy?"}`.
 
-The Dockerfile starts from the official vLLM 0.27.1 image and installs the
-Ubuntu 24.04 glibc required by the current Snapshot restore bundle. It creates
-`/snapshot-control` and adds `app.py`.
+The Dockerfile starts from vLLM's own Ubuntu 24.04 build of the 0.27.1 image
+(`v0.27.1-ubuntu2404`), which already matches the glibc floor the current
+Snapshot restore bundle requires. It creates `/snapshot-control` and adds
+`app.py`.
 `HF_HUB_DISABLE_XET=1` prevents the model downloader from leaving an open cache
 log that CRIU cannot reopen after restore.
 
@@ -61,7 +63,7 @@ The source and restore pods must mount the Snapshot control volume at
 ### 2. Build the image
 
 ```bash
-export VLLM_RUNTIME_IMAGE=vllm/vllm-openai:v0.27.1@sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967
+export VLLM_RUNTIME_IMAGE=vllm/vllm-openai:v0.27.1-ubuntu2404@sha256:dafea057f24b7d42716331a48e2db4e1f204f877a3aa759cb7e4c37e64ca2eee
 export VLLM_SNAPSHOT_IMAGE=<registry>/vllm-snapshot:<tag>
 
 docker build \
