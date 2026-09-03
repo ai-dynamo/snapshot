@@ -51,34 +51,6 @@ type restoreMount struct {
 	point  nsmount.MountPoint
 }
 
-type customStoragePrefetchOutcome struct {
-	result cuda.CustomStoragePrefetchResult
-	err    error
-}
-
-func waitForCustomStoragePrefetch(
-	ctx context.Context,
-	outcomes <-chan customStoragePrefetchOutcome,
-	cancel context.CancelFunc,
-	discard bool,
-) (cuda.CustomStoragePrefetchResult, error) {
-	if outcomes == nil {
-		return cuda.CustomStoragePrefetchResult{}, nil
-	}
-	if discard {
-		cancel()
-		return cuda.CustomStoragePrefetchResult{}, nil
-	}
-	select {
-	case outcome := <-outcomes:
-		cancel()
-		return outcome.result, outcome.err
-	case <-ctx.Done():
-		cancel()
-		return cuda.CustomStoragePrefetchResult{}, fmt.Errorf("wait for CUDA CustomStorage artifact prefetch: %w", ctx.Err())
-	}
-}
-
 func cleanupRestoreMounts(ctx context.Context, mounts []restoreMount) error {
 	var cleanupErr error
 	cleanupCtx := context.WithoutCancel(ctx)
@@ -186,58 +158,13 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		point:  artifactMount,
 	})
 
-	var prefetch <-chan customStoragePrefetchOutcome
-	var cancelPrefetch context.CancelFunc
-	if snap.CUDAStorageMode == types.CUDAStorageModePOSIX {
-		prefetchCtx, cancel := context.WithCancel(ctx)
-		cancelPrefetch = cancel
-		outcomes := make(chan customStoragePrefetchOutcome, 1)
-		prefetch = outcomes
-		go func() {
-			result, err := cuda.PrefetchCustomStorageArtifacts(prefetchCtx, artifactPath)
-			outcomes <- customStoragePrefetchOutcome{result: result, err: err}
-		}()
-	}
-	awaitPrefetch := func(cancel bool) (cuda.CustomStoragePrefetchResult, error) {
-		if prefetch == nil {
-			return cuda.CustomStoragePrefetchResult{}, nil
-		}
-		result, err := waitForCustomStoragePrefetch(ctx, prefetch, cancelPrefetch, cancel)
-		prefetch = nil
-		cancelPrefetch = nil
-		return result, err
-	}
-	defer func() {
-		if prefetch != nil {
-			_, _ = awaitPrefetch(true)
-		}
-	}()
-
 	// NodeController.failRestore owns placeholder-wide termination for every
 	// non-cleanup error returned after execution begins. Keeping cleanup in the
 	// controller guarantees that RestoreFailed is not persisted until the
 	// runtime-owned placeholder has actually been resolved and terminated.
 	result, err := execNSRestore(ctx, log, req, snap, bundleMount, nsmount.CheckpointDst)
 	if err != nil {
-		_, _ = awaitPrefetch(true)
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
-	}
-	prefetchResult, err := awaitPrefetch(false)
-	if err != nil {
-		if ctx.Err() != nil {
-			return 0, fmt.Errorf("CUDA CustomStorage artifact prefetch interrupted after CRIU restore: %w", err)
-		}
-		// Prefetch only overlaps durable-storage reads with CRIU. The CUDA
-		// helper performs the authoritative read and validation, so an
-		// optimization failure must not strand a process after CRIU restore.
-		log.Error(err, "CUDA CustomStorage artifact prefetch failed; continuing with authoritative restore")
-	} else if prefetchResult.Files > 0 {
-		log.Info("CUDA CustomStorage artifact prefetch completed",
-			"files", prefetchResult.Files,
-			"bytes", prefetchResult.Bytes,
-			"service_duration", prefetchResult.Duration,
-			"overlapped_with_criu", true,
-		)
 	}
 	if result.CleanupError != nil {
 		cleanupErr = errors.Join(cleanupErr, result.CleanupError)
