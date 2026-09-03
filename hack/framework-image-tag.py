@@ -54,7 +54,13 @@ def image_inputs(framework: str) -> list[Path]:
 
 
 def dockerfile(framework: str) -> Path:
-    return image_inputs(framework)[0]
+    # Named, not positional: the hash-input tuple has no ordering contract,
+    # and building from the wrong file would still publish a validly tagged
+    # image.
+    path = GUIDES_DIR / framework / f"Dockerfile.{framework}"
+    if path.name not in FRAMEWORKS[framework]:
+        raise ValueError(f"{path.name} is not a hash input for {framework}")
+    return path
 
 
 def inputs_digest(framework: str) -> str:

@@ -131,10 +131,16 @@ jobs:
           CONTEXT: ${{ steps.image.outputs.context }}
         run: |
           set -euo pipefail
+          # Provenance labels are not hash inputs, so they never change the
+          # content tag; they make a published image self-describing
+          # (docker inspect) instead of requiring the tag to be recomputed
+          # against candidate commits.
           docker buildx build \
             --platform=linux/amd64 \
             --file "${DOCKERFILE}" \
             --tag "${IMAGE}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             --push \
             "${CONTEXT}"
           echo "::notice::Published ${IMAGE}"
