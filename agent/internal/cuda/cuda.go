@@ -133,20 +133,30 @@ func parseNvidiaSmiGPUFacts(output string) compat.GPUFacts {
 			continue
 		}
 		fields := strings.SplitN(line, ",", 3)
-		uuid := strings.TrimSpace(fields[0])
+		uuid := nvidiaSmiFact(fields[0])
 		if uuid == "" {
 			continue
 		}
 		device := compat.GPUDevice{UUID: uuid}
 		if len(fields) == 3 {
-			device.ProductName = strings.TrimSpace(fields[1])
-			if driverVersion := strings.TrimSpace(fields[2]); driverVersion != "" {
+			device.ProductName = nvidiaSmiFact(fields[1])
+			if driverVersion := nvidiaSmiFact(fields[2]); driverVersion != "" {
 				facts.DriverVersion = driverVersion
 			}
 		}
 		facts.Devices = append(facts.Devices, device)
 	}
 	return facts
+}
+
+func nvidiaSmiFact(value string) string {
+	value = strings.TrimSpace(value)
+	switch strings.ToLower(value) {
+	case "n/a", "[n/a]", "not supported", "[not supported]":
+		return ""
+	default:
+		return value
+	}
 }
 
 type visibleGPUDiscovery func(context.Context, string, int) (compat.GPUFacts, error)

@@ -74,6 +74,16 @@ func TestParseNvidiaSmiGPUFacts(t *testing.T) {
 			},
 		},
 		{
+			name:   "unsupported values are unknown facts",
+			output: "N/A, NVIDIA L4, 580.65.06\nGPU-aaa, N/A, N/A\nGPU-bbb, [Not Supported], Not Supported\n",
+			want: compat.GPUFacts{
+				Devices: []compat.GPUDevice{
+					{UUID: "GPU-aaa"},
+					{UUID: "GPU-bbb"},
+				},
+			},
+		},
+		{
 			name:   "a node with no GPUs reports nothing",
 			output: "\n",
 			want:   compat.GPUFacts{},
