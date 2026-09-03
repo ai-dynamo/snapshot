@@ -120,11 +120,11 @@ containers:
 The example uses one GPU, the PyTorch backend, and a maximum sequence length of
 512 tokens. Engine sizing is set through `TRTLLM_MAX_NUM_TOKENS` (default
 `1024`), `TRTLLM_MAX_BATCH_SIZE` (default `1`), and
-`TRTLLM_FREE_GPU_MEMORY_FRACTION` (default `0.10`). `TRTLLM_TRUST_REMOTE_CODE`
-(default `0`) controls `trust_remote_code`; set it to `1` only for checkpoints
-that ship their own modeling code. Qwen3 does not. Revalidate checkpoint and
-restore before changing the model, TensorRT-LLM image, GPU count, backend, or
-engine settings.
+`TRTLLM_FREE_GPU_MEMORY_FRACTION` (default `0.10`). `app.py` sets
+`trust_remote_code=False`; Qwen3 needs no custom model code. Edit
+`TRUST_REMOTE_CODE` in `app.py` for a checkpoint that ships its own modeling
+code. Revalidate checkpoint and restore before changing the model,
+TensorRT-LLM image, GPU count, backend, or engine settings.
 
 > [!NOTE]
 > This example runs TensorRT-LLM through the `LLM` API rather than `trtllm-serve`,

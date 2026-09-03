@@ -130,8 +130,8 @@ The example configures a context length of 10240 tokens for a 24 GiB NVIDIA A10
 GPU. Reduce `SGLANG_CONTEXT_LENGTH` for a smaller GPU or increase it only after
 validating the resulting memory use. The KV cache page size is set through
 `SGLANG_PAGE_SIZE` (default `16`); the engine runs with `tp_size=1`.
-`SGLANG_TRUST_REMOTE_CODE` (default `0`) controls `trust_remote_code`; set it
-to `1` only for checkpoints that ship their own modeling code. Qwen3 does not.
+`app.py` sets `trust_remote_code=False`; Qwen3 needs no custom model code.
+Edit that line in `app.py` for a checkpoint that ships its own modeling code.
 
 > [!NOTE]
 > This example runs SGLang directly through `sglang.Engine` rather than
