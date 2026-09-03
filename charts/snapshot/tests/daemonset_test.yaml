@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: snapshot agent daemonset defaults
+templates:
+  - templates/daemonset.yaml
+tests:
+  - it: reserves enough helper memory for the bounded concurrent restore profile
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].name
+          value: cuda-checkpoint-helper
+      - equal:
+          path: spec.template.spec.containers[1].resources.requests.memory
+          value: 1Gi
+      - equal:
+          path: spec.template.spec.containers[1].resources.limits.memory
+          value: 4Gi

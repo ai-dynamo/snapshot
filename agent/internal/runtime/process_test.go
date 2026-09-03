@@ -6,6 +6,7 @@ package runtime
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -289,6 +290,50 @@ func TestResolveManifestPIDsToObservedPIDs(t *testing.T) {
 	}
 	if resolved[0] != 74 || resolved[1] != 80 {
 		t.Fatalf("resolved PIDs = %v, want [74 80]", resolved)
+	}
+}
+
+func TestResolveManifestPIDsToObservedPIDsPreservesManifestTreeOrder(t *testing.T) {
+	processes := []ProcessDetails{
+		{ObservedPID: 74, ParentPID: 50, OutermostPID: 74, InnermostPID: 1, NamespacePIDs: []int{74, 1}},
+		{ObservedPID: 80, ParentPID: 74, OutermostPID: 80, InnermostPID: 750, NamespacePIDs: []int{80, 750}},
+		{ObservedPID: 81, ParentPID: 80, OutermostPID: 81, InnermostPID: 751, NamespacePIDs: []int{81, 751}},
+	}
+
+	resolved, err := ResolveManifestPIDsToObservedPIDs(processes, 74, []int{1, 750, 751})
+	if err != nil {
+		t.Fatalf("ResolveManifestPIDsToObservedPIDs(...) returned error: %v", err)
+	}
+	want := []int{74, 80, 81}
+	if !reflect.DeepEqual(resolved, want) {
+		t.Fatalf("resolved PIDs = %v, want parent-before-child order %v", resolved, want)
+	}
+}
+
+func TestProcessTreePIDsReturnsParentsBeforeDescendants(t *testing.T) {
+	procRoot := t.TempDir()
+	writeChildren := func(pid, tid int, children string) {
+		t.Helper()
+		taskDir := filepath.Join(procRoot, strconv.Itoa(pid), "task", strconv.Itoa(tid))
+		if err := os.MkdirAll(taskDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(taskDir, "children"), []byte(children), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeChildren(100, 100, "200 300")
+	writeChildren(100, 101, "400")
+	writeChildren(200, 200, "500")
+	writeChildren(300, 300, "")
+	writeChildren(400, 400, "")
+	writeChildren(500, 500, "")
+
+	got := processTreePIDs(100, procRoot)
+	want := []int{100, 200, 300, 400, 500}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("processTreePIDs() = %v, want breadth-first parent order %v", got, want)
 	}
 }
 

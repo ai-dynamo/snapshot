@@ -203,10 +203,12 @@ config:
       resources:
         limits:
           cpu: 2
-          memory: 1Gi
+          # Supports the 2 GiB aggregate pinned-buffer guard plus helper,
+          # CUDA, and NIXL overhead for concurrent multi-process restore.
+          memory: 4Gi
         requests:
           cpu: 250m
-          memory: 256Mi
+          memory: 1Gi
 
   overlay:
     # Rootfs diff tar exclusions. Absolute-looking paths are normalized

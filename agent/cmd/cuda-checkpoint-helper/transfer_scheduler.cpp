@@ -29,6 +29,12 @@ bool TransferBatch(const std::vector<ScheduledTransfer> &jobs,
     return false;
   }
   const auto orchestration_start = Clock::now();
+  if (jobs.size() > kMaximumConcurrentTransferJobs) {
+    result->metrics.clear();
+    result->error = "custom storage transfer batch exceeds the 64-worker limit";
+    result->orchestration_seconds = ElapsedSeconds(orchestration_start);
+    return false;
+  }
   result->metrics.assign(jobs.size(), {});
   result->error.clear();
   std::vector<std::thread> workers;

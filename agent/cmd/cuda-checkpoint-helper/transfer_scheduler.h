@@ -16,6 +16,8 @@
 
 namespace cuda_checkpoint_transfer {
 
+constexpr size_t kMaximumConcurrentTransferJobs = 64;
+
 struct ScheduledTransfer {
   CUdeviceptr device_ptr = 0;
   size_t extent_size = 0;

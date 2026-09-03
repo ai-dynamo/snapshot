@@ -65,6 +65,8 @@ bool ValidateTransferOptions(const TransferOptions &options,
                              std::string *error);
 bool CalculatePinnedBytes(size_t device_count, const TransferOptions &options,
                           size_t *bytes, std::string *error);
+bool CalculateBatchPinnedBytes(const std::vector<size_t> &target_bytes,
+                               size_t *bytes, std::string *error);
 int StorageFileOpenFlags(TransferOperation operation);
 bool BuildTransferChunks(size_t extent_size, const StorageLayout &storage,
                          const TransferOptions &options,

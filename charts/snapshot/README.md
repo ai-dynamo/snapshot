@@ -171,7 +171,8 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `config.cudaCheckpoint.transferBufferCount` | Pinned CustomStorage pipeline slots per CUDA device (1-8) | `4` |
 | `config.cudaCheckpoint.transferChunkBytes` | Bytes per pinned slot (1-256 MiB, 4096-byte aligned) | `67108864` |
 | `config.cudaCheckpoint.daemon.maxOperationSeconds` | Cooperative extent-transfer/health watchdog (maximum one hour; CUDA driver calls are not forcibly interruptible) | `3600` |
-| `config.restore.restoreTimeoutSeconds` | Overall restore deadline; default covers the qualified two-CUDA-PID workload within one target container and must scale by 65 minutes per additional CUDA-owning process | `8100` |
+| `config.cudaCheckpoint.daemon.resources` | Helper resources; the default 4 GiB memory limit covers the 2 GiB aggregate pinned-buffer cap plus CUDA/NIXL overhead | See `values.yaml` |
+| `config.restore.restoreTimeoutSeconds` | Overall restore deadline for CRIU, CUDA driver calls, and all concurrent CustomStorage extent transfers | `8100` |
 | `seccomp.deploy` | Deploy the CRIU seccomp profile ConfigMap and init container. Use this field name; `seccomp.enabled` is not a chart value | `true` |
 | `runtime.type` | CRI backend: `containerd` or `crio` | `containerd` |
 | `runtime.socketPath` | CRI socket (empty = default for `runtime.type`) | `""` |
@@ -188,10 +189,18 @@ CustomStorage is opt-in for new checkpoints. Set
 the CUDA 13.4 CustomStorage completion API and the Snapshot-local POSIX adapter.
 Snapshot rejects the checkpoint before locking the target when the requested
 capability is unavailable; it does not silently produce a legacy artifact.
-The first rollout is limited to one GPU (TP1). A container may have multiple
-CUDA-owning processes in that GPU's process tree. Checkpoint creation and
-restore reject larger POSIX topologies before CUDA or
-CRIU mutation. Four 64 MiB transfer slots are the qualified TP1 setting.
+POSIX CustomStorage supports multiple CUDA-owning processes and GPUs within one
+target container. Checkpoint discovers and records the GPU subset used by each
+process. Restore validates each process manifest against the destination GPU
+allocation, then transfers independent process extents concurrently in one
+helper failure domain. Transfer failures cancel siblings before CUDA completion;
+later completion failures are fatal and require discarding the restore pod.
+Four 64 MiB transfer slots per active extent are
+the qualified TP4 setting. The complete operation is capped at 2 GiB of pinned
+transfer memory; larger topologies or buffer configurations fail closed before
+buffer allocation. The chart therefore reserves 1 GiB and limits the helper to
+4 GiB; deployments that override the helper memory limit must leave headroom
+beyond the pinned-buffer cap for CUDA, NIXL, and process overhead.
 Changing the value back to `legacy` affects new checkpoints only. Restore uses
 the storage mode recorded in each checkpoint manifest so already published
 POSIX checkpoints remain restorable.

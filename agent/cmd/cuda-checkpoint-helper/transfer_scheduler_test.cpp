@@ -8,12 +8,14 @@
 #include <cassert>
 #include <chrono>
 #include <string>
+#include <vector>
 
 int main() {
   using namespace std::chrono_literals;
   using cuda_checkpoint_transfer::TransferBatch;
   using cuda_checkpoint_transfer::TransferBatchResult;
   using cuda_checkpoint_transfer::TransferCancellation;
+  using cuda_checkpoint_transfer::kMaximumConcurrentTransferJobs;
   using cuda_checkpoint_transfer::TransferOperation;
   using cuda_checkpoint_transfer::ScheduledTransfer;
 
@@ -36,5 +38,14 @@ int main() {
   assert(unavailable_result.error ==
          "custom storage transfer failed for device index 7: no "
          "CustomStorage transfer backend is linked");
+
+  TransferBatchResult excessive_result;
+  assert(!TransferBatch(
+      std::vector<ScheduledTransfer>(kMaximumConcurrentTransferJobs + 1),
+      TransferOperation::kRestore, {},
+      TransferCancellation::Clock::now() + 1h, &excessive_result));
+  assert(excessive_result.metrics.empty());
+  assert(excessive_result.error ==
+         "custom storage transfer batch exceeds the 64-worker limit");
   return 0;
 }
