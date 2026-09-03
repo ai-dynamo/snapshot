@@ -97,8 +97,8 @@ present. Any failure prints an error and returns a non-zero exit status.
 Set the namespace where the TensorRT-LLM pod will run:
 
 ```bash
-export TENSORRT_LLM_NAMESPACE=<namespace>
-kubectl get namespace "$TENSORRT_LLM_NAMESPACE"
+export SNAPSHOT_NAMESPACE=<namespace>
+kubectl get namespace "$SNAPSHOT_NAMESPACE"
 ```
 
 Set a model supported by the selected TensorRT-LLM image through the
@@ -132,7 +132,7 @@ kubectl set image \
   main="$TENSORRT_LLM_SNAPSHOT_IMAGE" \
   --output yaml |
   kubectl apply \
-    --namespace "$TENSORRT_LLM_NAMESPACE" \
+    --namespace "$SNAPSHOT_NAMESPACE" \
     --filename -
 ```
 
@@ -145,7 +145,7 @@ checkpoint:
 
 ```bash
 kubectl rollout status \
-  --namespace "$TENSORRT_LLM_NAMESPACE" \
+  --namespace "$SNAPSHOT_NAMESPACE" \
   deployment/tensorrt-llm-source \
   --timeout=30m
 ```
@@ -154,7 +154,7 @@ List the generated Pod:
 
 ```bash
 kubectl get pods \
-  --namespace "$TENSORRT_LLM_NAMESPACE" \
+  --namespace "$SNAPSHOT_NAMESPACE" \
   --selector app=tensorrt-llm-source
 ```
 

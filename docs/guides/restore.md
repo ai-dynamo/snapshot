@@ -23,13 +23,27 @@ from. Download the one for the framework in use:
 - [SGLang `restore-deployment.yaml`](sglang/restore-deployment.yaml)
 - [TensorRT-LLM `restore-deployment.yaml`](tensorrt-llm/restore-deployment.yaml)
 
+Set the namespace where the restored replica will run — the same one holding the
+`PodSnapshot`:
+
+```bash
+export SNAPSHOT_NAMESPACE=<namespace>
+kubectl get namespace "$SNAPSHOT_NAMESPACE"
+```
+
 In the manifest, set the container `image` to the one built for the source and set
 the `restore-from` annotation to the `PodSnapshot` name, then apply it and watch the
 rollout (the Deployment is named `<framework>-restored`):
 
 ```bash
-kubectl apply -f restore-deployment.yaml
-kubectl rollout status deployment/<framework>-restored -n my-inference --timeout=30m
+kubectl apply \
+  --namespace "$SNAPSHOT_NAMESPACE" \
+  --filename restore-deployment.yaml
+
+kubectl rollout status \
+  --namespace "$SNAPSHOT_NAMESPACE" \
+  deployment/<framework>-restored \
+  --timeout=30m
 ```
 
 The node agent adds a `nvidia.com/Restored` condition to the pod once the restore

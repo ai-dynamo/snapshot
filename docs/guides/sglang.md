@@ -100,8 +100,8 @@ failure prints an error and returns a non-zero exit status.
 Set the namespace where the SGLang pod will run:
 
 ```bash
-export SGLANG_NAMESPACE=<namespace>
-kubectl get namespace "$SGLANG_NAMESPACE"
+export SNAPSHOT_NAMESPACE=<namespace>
+kubectl get namespace "$SNAPSHOT_NAMESPACE"
 ```
 
 Set the model through the `SNAPSHOT_MODEL` environment variable in both the
@@ -129,7 +129,7 @@ Create the persistent model cache:
 
 ```bash
 kubectl apply \
-  --namespace "$SGLANG_NAMESPACE" \
+  --namespace "$SNAPSHOT_NAMESPACE" \
   --filename model-cache-pvc.yaml
 ```
 
@@ -144,7 +144,7 @@ kubectl set image \
   main="$SGLANG_SNAPSHOT_IMAGE" \
   --output yaml |
   kubectl apply \
-    --namespace "$SGLANG_NAMESPACE" \
+    --namespace "$SNAPSHOT_NAMESPACE" \
     --filename -
 ```
 
@@ -158,7 +158,7 @@ checkpoint:
 
 ```bash
 kubectl rollout status \
-  --namespace "$SGLANG_NAMESPACE" \
+  --namespace "$SNAPSHOT_NAMESPACE" \
   deployment/sglang-source \
   --timeout=30m
 ```
@@ -167,7 +167,7 @@ List the generated Pod:
 
 ```bash
 kubectl get pods \
-  --namespace "$SGLANG_NAMESPACE" \
+  --namespace "$SNAPSHOT_NAMESPACE" \
   --selector app=sglang-source
 ```
 

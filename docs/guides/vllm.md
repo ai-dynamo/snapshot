@@ -95,8 +95,8 @@ Any failure prints an error and returns a non-zero exit status.
 Set the namespace where the vLLM pod will run:
 
 ```bash
-export VLLM_NAMESPACE=<namespace>
-kubectl get namespace "$VLLM_NAMESPACE"
+export SNAPSHOT_NAMESPACE=<namespace>
+kubectl get namespace "$SNAPSHOT_NAMESPACE"
 ```
 
 Set the model through the `SNAPSHOT_MODEL` environment variable in
@@ -129,7 +129,7 @@ kubectl set image \
   main="$VLLM_SNAPSHOT_IMAGE" \
   --output yaml |
   kubectl apply \
-    --namespace "$VLLM_NAMESPACE" \
+    --namespace "$SNAPSHOT_NAMESPACE" \
     --filename -
 ```
 
@@ -142,7 +142,7 @@ checkpoint:
 
 ```bash
 kubectl rollout status \
-  --namespace "$VLLM_NAMESPACE" \
+  --namespace "$SNAPSHOT_NAMESPACE" \
   deployment/vllm-source \
   --timeout=30m
 ```
@@ -151,7 +151,7 @@ List the generated Pod:
 
 ```bash
 kubectl get pods \
-  --namespace "$VLLM_NAMESPACE" \
+  --namespace "$SNAPSHOT_NAMESPACE" \
   --selector app=vllm-source
 ```
 
