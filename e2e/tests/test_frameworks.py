@@ -75,6 +75,12 @@ def test_framework_checkpoint_restore_serves_inference(
             timeout=frameworks.SOURCE_READY_TIMEOUT_SECONDS,
         )
         source_node = source.spec.node_name
+        # Recorded on success too, so a flaky restore failure can be correlated
+        # with whether Datadog GPU monitoring was active on the node.
+        print(
+            f"[{framework.name}] host monitoring agents on {source_node}:\n"
+            f"{snap.host_monitoring_agents(config, source_node)}"
+        )
 
         precheck = inference.read_control_file(
             config.namespace, run.source_pod, framework.precheck_file

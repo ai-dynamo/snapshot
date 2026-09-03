@@ -598,6 +598,28 @@ def create_artifact_staging_file(
     )
 
 
+def host_monitoring_agents(config: k8s.E2EConfig, node: str) -> str:
+    """Host-level monitoring agents (Datadog, DCGM) running on ``node``.
+
+    The snapshot agent is privileged with hostPID, so ``ps`` inside it lists
+    the node's processes, including agents that live in other clusters'
+    namespaces (the CI vcluster cannot see the host cluster's ``datadog``
+    namespace). Datadog's GPU monitoring attaches to GPU processes via
+    system-probe and NVML, which is a candidate interferer for CRIU/CUDA
+    checkpoint and restore; record whether it is present on every run so a
+    flaky failure can be correlated with it.
+    """
+    agent = checkpoint_agent_pod(config, node)
+    return k8s.exec_command(
+        config.namespace,
+        agent,
+        "ps -eo pid,ppid,user,comm,args --no-headers 2>/dev/null "
+        "| grep -iE 'datadog|dd-agent|system-probe|process-agent|trace-agent|security-agent|dcgm' "
+        "| grep -vE 'grep -iE' "
+        "|| echo '<no datadog/dcgm processes on host>'",
+    )
+
+
 def checkpoint_agent_pod(config: k8s.E2EConfig, node: str) -> str:
     agents = [
         pod
@@ -960,6 +982,8 @@ def debug_dump_framework(
             print(k8s.pod_logs(config.namespace, agent, tail_lines=200))
             print(f"--- nvidia-smi on {source_node} ---")
             print(k8s.exec_command(config.namespace, agent, "nvidia-smi 2>&1 || true"))
+            print(f"--- host monitoring agents (datadog/dcgm) on {source_node} ---")
+            print(host_monitoring_agents(config, source_node))
             # A CRIU crash ("criu swrk failed: signal: segmentation fault") leaves
             # no restore.log behind; the kernel's trap line is then the only
             # record of where it died. The agent is privileged with hostPID, so
