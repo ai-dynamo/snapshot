@@ -57,12 +57,35 @@ func TestRewriteSocketMetadataRewritesInternalUnixSocketPair(t *testing.T) {
 	}
 }
 
-func TestRewriteSocketMetadataRejectsExternalUnixSocketPeer(t *testing.T) {
-	entry := newUnixSocketEntry(1, []byte("\x00external"), 101, unix.SOCK_DGRAM, linuxTCPStateEstablished)
-	entry.Usk.Peer = proto.Uint32(4242)
+func TestRewriteSocketMetadataPreservesExternalUnixSocketPeer(t *testing.T) {
+	client := newUnixSocketEntry(1, []byte("\x00client"), 101, unix.SOCK_DGRAM, linuxTCPStateEstablished)
+	external := newUnixSocketEntry(2, []byte("\x00external"), 4242, unix.SOCK_DGRAM, linuxUnixSocketStateListen)
+	client.Usk.Peer = proto.Uint32(external.Usk.GetIno())
+	external.Usk.Uflags = proto.Uint32(criuUnixSocketUflagExternal)
 	image := &crit.CriuImage{
-		Entries: []*crit.CriuEntry{{Message: entry}},
+		Entries: []*crit.CriuEntry{{Message: client}, {Message: external}},
 	}
+
+	reservationFDs, rewritten, err := rewriteSocketMetadata(image, 987654321)
+	if err != nil {
+		t.Fatalf("rewrite socket metadata: %v", err)
+	}
+	closeFDs(reservationFDs)
+	if !rewritten {
+		t.Fatal("client address was not rewritten")
+	}
+	if !bytes.HasPrefix(client.Usk.Name, []byte("\x00dynamo-")) {
+		t.Fatalf("client address = %q, want Dynamo abstract address", client.Usk.Name)
+	}
+	if got, want := external.Usk.Name, []byte("\x00external"); !bytes.Equal(got, want) {
+		t.Fatalf("external address = %q, want %q", got, want)
+	}
+}
+
+func TestRewriteSocketMetadataRejectsMissingUnixSocketPeer(t *testing.T) {
+	entry := newUnixSocketEntry(1, []byte("\x00client"), 101, unix.SOCK_DGRAM, linuxTCPStateEstablished)
+	entry.Usk.Peer = proto.Uint32(4242)
+	image := &crit.CriuImage{Entries: []*crit.CriuEntry{{Message: entry}}}
 
 	reservationFDs, rewritten, err := rewriteSocketMetadata(image, 987654321)
 	if err == nil || !strings.Contains(err.Error(), "unresolved peer inode 4242") {
@@ -73,15 +96,27 @@ func TestRewriteSocketMetadataRejectsExternalUnixSocketPeer(t *testing.T) {
 	}
 }
 
+func TestRewriteSocketMetadataRejectsMissingUnixSocketInode(t *testing.T) {
+	entry := newUnixSocketEntry(1, []byte("\x00client"), 101, unix.SOCK_DGRAM, linuxTCPStateEstablished)
+	entry.Usk.Ino = nil
+
+	_, _, err := rewriteSocketMetadata(&crit.CriuImage{
+		Entries: []*crit.CriuEntry{{Message: entry}},
+	}, 987654321)
+	if err == nil || !strings.Contains(err.Error(), "missing inode metadata") {
+		t.Fatalf("rewrite socket metadata error = %v", err)
+	}
+}
+
 func TestRewriteCloneConflictingUnixSocketAddressSkipsUnbound(t *testing.T) {
-	for name, raw := range map[string][]byte{
-		"empty":    {},
-		"bare NUL": {0},
-	} {
-		entry := newUnixSocketEntry(1, raw, 101, unix.SOCK_DGRAM, linuxUnixSocketStateClose)
-		if rewriteCloneConflictingUnixSocketAddress(entry.Usk, 987654321) {
-			t.Fatalf("%s address must not be rewritten", name)
-		}
+	entry := newUnixSocketEntry(1, nil, 101, unix.SOCK_DGRAM, linuxUnixSocketStateClose)
+	if rewriteCloneConflictingUnixSocketAddress(entry.Usk, 987654321) {
+		t.Fatal("empty address must not be rewritten")
+	}
+
+	entry.Usk.Name = []byte{0}
+	if !rewriteCloneConflictingUnixSocketAddress(entry.Usk, 987654321) {
+		t.Fatal("bound bare-NUL abstract address was not rewritten")
 	}
 }
 

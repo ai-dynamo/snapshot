@@ -23,6 +23,7 @@ import (
 const (
 	filesImageFilename            = "files.img"
 	placeholderMountNamespacePath = "/proc/self/ns/mnt"
+	criuUnixSocketUflagExternal   = 1 << 0
 	linuxUnixSocketStateListen    = 10
 	linuxUnixSocketStateClose     = 7
 	linuxTCPStateEstablished      = 1
@@ -144,18 +145,28 @@ func rewriteSocketMetadata(image *crit.CriuImage, restoreID uint64) ([]int, bool
 			return nil, false, fmt.Errorf("unexpected %s entry %d type %T", filesImageFilename, i, entry.Message)
 		}
 		if fileEntry.GetType() == fdinfo.FdTypes_UNIXSK && fileEntry.Usk != nil {
-			unixSockets[fileEntry.Usk.GetIno()] = fileEntry.Usk
+			socket := fileEntry.Usk
+			if socket.Ino == nil {
+				closeFDs(reservationFDs)
+				return nil, false, fmt.Errorf("UNIX socket entry %d is missing inode metadata", i)
+			}
+			if _, ok := unixSockets[socket.GetIno()]; ok {
+				closeFDs(reservationFDs)
+				return nil, false, fmt.Errorf("duplicate UNIX socket inode %d", socket.GetIno())
+			}
+			unixSockets[socket.GetIno()] = socket
 		}
 	}
 
 	rewritten := false
 	for _, socket := range unixSockets {
-		if !isBoundAbstractUnixSocket(socket) {
+		// CRIU uses external entries as connection targets; it does not bind them.
+		if !isBoundAbstractUnixSocket(socket) || isExternalUnixSocket(socket) {
 			continue
 		}
-		if socket.Ino == nil || socket.Peer == nil {
+		if socket.Peer == nil {
 			closeFDs(reservationFDs)
-			return nil, false, fmt.Errorf("bound abstract UNIX socket is missing inode or peer metadata")
+			return nil, false, fmt.Errorf("bound abstract UNIX socket is missing peer metadata")
 		}
 		if peer := socket.GetPeer(); peer != 0 {
 			if _, ok := unixSockets[peer]; !ok {
@@ -425,7 +436,7 @@ func closeFDs(fds []int) {
 }
 
 func rewriteCloneConflictingUnixSocketAddress(entry *sk_unix.UnixSkEntry, restoreID uint64) bool {
-	if !isBoundAbstractUnixSocket(entry) {
+	if !isBoundAbstractUnixSocket(entry) || isExternalUnixSocket(entry) {
 		return false
 	}
 
@@ -438,6 +449,9 @@ func rewriteCloneConflictingUnixSocketAddress(entry *sk_unix.UnixSkEntry, restor
 }
 
 func isBoundAbstractUnixSocket(entry *sk_unix.UnixSkEntry) bool {
-	// The leading NUL is the abstract-namespace marker; a bare NUL is unbound.
-	return entry != nil && len(entry.Name) > 1 && entry.Name[0] == 0
+	return entry != nil && len(entry.Name) > 0 && entry.Name[0] == 0
+}
+
+func isExternalUnixSocket(entry *sk_unix.UnixSkEntry) bool {
+	return entry != nil && entry.GetUflags()&criuUnixSocketUflagExternal != 0
 }
