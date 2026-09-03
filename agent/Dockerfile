@@ -113,8 +113,20 @@ RUN gcc -O2 -Wall -Wextra -o /ns-bind-mount ./cmd/ns-bind-mount/main.c
 
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
+#
+# Restore injects criu into the destination container's mount namespace and
+# execs it there, so criu's dynamic-linker symbol requirements are bounded by
+# the destination image's glibc, not the agent's. Build on an older Ubuntu
+# release (lower GLIBC_* floor) than the agent's own base image so criu stays
+# runnable against realistic destination images. This narrows the failure
+# window rather than eliminating it -- an even older destination glibc can
+# still hit the same class of exec-time failure. Static linking would
+# eliminate the dependency entirely, but criu's plugins (this file's
+# snapshot_inet_remap.so, the CUDA plugin) are dlopen'd at runtime, which a
+# fully static binary cannot do -- see the fix/static-criu-restore history
+# for why that path was abandoned.
 # =============================================================================
-FROM ubuntu:24.04 AS criu-builder
+FROM ubuntu:22.04 AS criu-builder
 
 ARG CRIU_REPO
 ARG CRIU_REF
@@ -134,19 +146,48 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-c-compiler \
     protobuf-compiler \
     python3 \
+    python3-pip \
     python3-protobuf \
     libgnutls28-dev \
     libnftables-dev \
     uuid-dev \
+    tar \
     && rm -rf /var/lib/apt/lists/*
 
-RUN git init /tmp/criu \
+# http.version=HTTP/1.1: Ubuntu 22.04's git (GnuTLS-backed libcurl) mishandles
+# GitHub's HTTP/2 smart-http response framing, failing with a misleading
+# "could not read Username" credential prompt instead of the real protocol
+# error. HTTP/1.1 avoids the bug entirely.
+RUN git -c http.version=HTTP/1.1 init /tmp/criu \
     && cd /tmp/criu \
-    && git remote add origin ${CRIU_REPO} \
-    && git fetch --depth 1 origin ${CRIU_REF} \
-    && git checkout FETCH_HEAD \
+    && git -c http.version=HTTP/1.1 remote add origin ${CRIU_REPO} \
+    && git -c http.version=HTTP/1.1 fetch --depth 1 origin ${CRIU_REF} \
+    && git -c http.version=HTTP/1.1 checkout FETCH_HEAD \
     && make -j$(nproc) \
     && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
+
+# The restore-time tar (runtime.ApplyRootfsDiff) has the identical
+# glibc-floor problem as criu: it is exec'd inside the destination
+# placeholder's namespace, so it must come from this stage too, not the
+# agent's own (newer) filesystem. Bundled here alongside criu so both share
+# one glibc floor and one lib closure below.
+RUN mkdir -p /criu-install/usr/local/bin \
+    && cp -L "$(command -v tar)" /criu-install/usr/local/bin/tar
+
+# criu's and tar's own shared-library dependencies (libbsd, libgnutls,
+# libnftables, libnl-3, libnet, libuuid, libacl, libselinux, and their
+# transitive deps) must be resolved here, against this stage's older glibc --
+# not later in the agent stage, whose ldd would resolve the same library
+# names against its own (newer) filesystem and silently reintroduce the
+# GLIBC_2.38 floor this stage exists to avoid. The agent stage's closure step
+# is no-clobber, so it fills in gaps (ip, cuda-checkpoint) without
+# overwriting what's collected here.
+RUN set -eu; \
+    mkdir -p /criu-install/usr/local/lib/snapshot/lib; \
+    ldd /criu-install/usr/local/sbin/criu /criu-install/usr/local/bin/tar 2>/dev/null \
+    | awk '/=> \//{print $3}' | sort -u \
+    | grep -Ev '/(ld-linux|libc|libm|libmvec|libdl|libpthread|librt|libresolv|libutil|libanl|libnsl|libthread_db)[.-]' \
+    | xargs -r -I{} cp -Ln {} /criu-install/usr/local/lib/snapshot/lib/
 
 COPY plugins/inet-remap/snapshot_inet_remap.c /tmp/snapshot_inet_remap.c
 RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \
@@ -155,7 +196,8 @@ RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \
       -o /criu-install/usr/local/lib/snapshot/criu-plugins/snapshot_inet_remap.so \
       /tmp/snapshot_inet_remap.c
 
-RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
+# http.version=HTTP/1.1: see the criu clone above for why.
+RUN git -c http.version=HTTP/1.1 clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
 
 # CRIU source at the exact ref built from: this is a from-source build, and
 # CRIU_REF may be a moving branch.
@@ -243,23 +285,34 @@ COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
 RUN mkdir -p /snapshot-binaries/lib /snapshot-binaries/criu-plugins
 COPY --from=builder /nsrestore /snapshot-binaries/nsrestore
 COPY --from=criu-builder /criu-install/usr/local/sbin/criu /snapshot-binaries/criu
+# criu's own shared-library closure, pre-resolved in criu-builder against its
+# older glibc (see that stage). Copied before the generic closure step below
+# so its no-clobber copy can't silently replace these with newer-glibc builds
+# resolved from this (agent) stage's own filesystem.
+COPY --from=criu-builder /criu-install/usr/local/lib/snapshot/lib/ /snapshot-binaries/lib/
 COPY --from=criu-builder /criu-install/usr/local/lib/snapshot/criu-plugins/ /snapshot-binaries/criu-plugins/
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /snapshot-binaries/cuda-checkpoint
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-checkpoint-helper
+# tar is used by runtime.ApplyRootfsDiff via its explicit bundle path (not
+# PATH), so it must be the criu-builder-sourced copy above, matching criu's
+# own glibc floor -- not this (newer) stage's own tar.
+COPY --from=criu-builder /criu-install/usr/local/bin/tar /snapshot-binaries/tar
 
-# Network binaries needed during restore:
-#   ip  — address/route restore (criu/net.c)
-#   tar — used by runtime.ApplyRootfsDiff
-# Network lock is set to SKIP (--network-lock skip) in BuildRestoreOpts, so
-# criu never forks iptables-restore/ip6tables-restore on this path and neither
-# binary needs to be in the bundle. See BuildRestoreOpts for why SKIP is safe
-# for restore specifically.
-# All resolve through PATH inside the namespace.
+# ip is used for address/route restore during restore (criu/net.c) and
+# resolves through PATH inside the namespace. Network lock is set to SKIP
+# (--network-lock skip) in BuildRestoreOpts, so criu never forks
+# iptables-restore/ip6tables-restore on this path and neither binary needs to
+# be in the bundle. See BuildRestoreOpts for why SKIP is safe for restore
+# specifically.
 RUN set -eu; \
-    cp -L "$(command -v ip)" "$(command -v tar)" /snapshot-binaries/; \
+    cp -L "$(command -v ip)" /snapshot-binaries/; \
     chmod +x /snapshot-binaries/criu /snapshot-binaries/nsrestore \
              /snapshot-binaries/cuda-checkpoint /snapshot-binaries/cuda-checkpoint-helper \
              /snapshot-binaries/ip /snapshot-binaries/tar
+
+# Smoke-test the bundled tar the same way criu is above: the ldd post-condition
+# below proves its symbols resolve, not that it executes.
+RUN /snapshot-binaries/tar --version
 
 # Shared-library closure of the bundled binaries and plugins.
 #
@@ -322,11 +375,16 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 # namespace, so nothing needs pre-provisioning here.
 #
 # Three constraints follow from that and must hold for every BASE_IMAGE:
-#   - BASE_IMAGE must be glibc-compatible with AGENT_BASE_IMAGE, because the
-#     bundle's library closure is built from AGENT_BASE_IMAGE (ubuntu 24.04,
-#     glibc 2.39) and loaded ahead of the placeholder's own libraries via
-#     LD_LIBRARY_PATH. A 22.04-based BASE_IMAGE builds green but fails at
-#     restore with "version 'GLIBC_2.38' not found".
+#   - BASE_IMAGE's glibc must satisfy every bundled binary exec'd inside the
+#     placeholder. criu, its plugins, tar, and their shared-library closure
+#     are built in criu-builder (ubuntu 22.04, glibc 2.35 floor) and loaded
+#     ahead of the placeholder's own libraries via LD_LIBRARY_PATH. The
+#     cuda-checkpoint-helper is still built from AGENT_BASE_IMAGE (ubuntu
+#     24.04, glibc 2.39) and exec'd in the placeholder on CUDA restores, so
+#     it carries the higher floor until it moves to an older-glibc stage.
+#     The bundled ip is not exec'd on this restore path: the network
+#     namespace is always external, and criu skips link/address/route
+#     restore for external netns.
 #   - The node kernel must be >= 5.12 (mount_setattr, used by ns-bind-mount).
 #   - The placeholder pod must NOT set readOnlyRootFilesystem: true unless a
 #     writable volume is mounted at /tmp. The agent bind-mounts the binary
