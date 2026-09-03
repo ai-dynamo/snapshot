@@ -8,6 +8,7 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -672,6 +673,59 @@ command_all(struct participant* participants, size_t count, uint16_t operation)
   return 0;
 }
 
+struct command {
+  struct participant* participant;
+  uint16_t operation;
+  int result;
+};
+
+static void*
+command_run(void* argument)
+{
+  struct command* command = argument;
+  struct cuinterposer_record* records = NULL;
+  uint32_t record_count = 0;
+
+  command->result = exchange(command->participant, command->operation, &records, &record_count);
+  free(records);
+  return NULL;
+}
+
+static int
+command_all_parallel(struct participant* participants, size_t count, uint16_t operation)
+{
+  struct command* commands = NULL;
+  pthread_t* threads = NULL;
+  size_t started = 0;
+  size_t index;
+  int result = 0;
+
+  commands = calloc(count, sizeof(*commands));
+  threads = calloc(count, sizeof(*threads));
+  if (commands == NULL || threads == NULL) {
+    result = -1;
+    goto done;
+  }
+  for (index = 0; index < count; index++) {
+    commands[index].participant = &participants[index];
+    commands[index].operation = operation;
+    commands[index].result = -1;
+    if (pthread_create(&threads[index], NULL, command_run, &commands[index]) != 0) {
+      result = -1;
+      break;
+    }
+    started++;
+  }
+  for (index = 0; index < started; index++) {
+    if (pthread_join(threads[index], NULL) != 0 || commands[index].result != 0)
+      result = -1;
+  }
+done:
+  free(threads);
+  free(commands);
+  return result;
+}
+
 static int
 restore_unicast(struct participant* participants, size_t count)
 {
@@ -824,7 +878,7 @@ main(int argc, char** argv)
     }
     /* Carriers are local to this request. Every rank must finish multicast
      * teardown before PREPARE unmaps unicast. */
-    if (command_all(participants, participant_count, CUINTERPOSER_PREPARE_MULTICAST) != 0) {
+    if (command_all_parallel(participants, participant_count, CUINTERPOSER_PREPARE_MULTICAST) != 0) {
       fprintf(stderr, "prepare failed: multicast teardown\n");
       goto done;
     }

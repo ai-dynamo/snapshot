@@ -33,7 +33,7 @@ $(INTERPOSER): $(INTERPOSER_SOURCES) $(INTERPOSER_HEADERS) | $(BUILD_DIR)
 	mv $@.tmp $@
 
 $(COORDINATOR): $(COORDINATOR_SOURCES) $(COORDINATOR_HEADERS) | $(BUILD_DIR)
-	$(CC) $(COMMON_FLAGS) -static -o $@.tmp $(COORDINATOR_SOURCES)
+	$(CC) $(COMMON_FLAGS) -static -pthread -o $@.tmp $(COORDINATOR_SOURCES)
 	! readelf -d $@.tmp 2>/dev/null | grep -q NEEDED
 	mv $@.tmp $@
 
