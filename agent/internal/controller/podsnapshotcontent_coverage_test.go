@@ -23,6 +23,7 @@ import (
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	snapshottypes "github.com/ai-dynamo/snapshot/agent/internal/types"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
@@ -49,9 +50,49 @@ func makeNodeControllerWithInterceptor(t *testing.T, fc *fakeCheckpointer, funcs
 		holderID:       "snapshot-agent/test",
 		inFlight:       make(map[string]struct{}),
 		contentIndexer: idx,
+		sendSignalFn:   snapshotruntime.SendSignalToPID,
 	}
 	w.checkpointFn = fc.fn
 	return w
+}
+
+func TestUnknownCheckpointRecoveryRetriesStatusAfterExactTermination(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	pod := makeSourcePod()
+	failedOnce := false
+	funcs := interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if snapshotContent, ok := obj.(*snapshotv1alpha1.PodSnapshotContent); ok {
+				condition := meta.FindStatusCondition(snapshotContent.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+				if condition != nil && condition.Reason == "CheckpointOutcomeUnknown" && !failedOnce {
+					failedOnce = true
+					return errors.New("status temporarily unavailable")
+				}
+			}
+			return c.Status().Patch(ctx, obj, patch, opts...)
+		},
+	}
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 123}
+	signalCount := 0
+	w.sendSignalFn = func(logr.Logger, int, syscall.Signal, string) error {
+		signalCount++
+		return nil
+	}
+	foreignCaptureLease(t, w, content, true)
+
+	err := w.reconcileSourcePod(context.Background(), pod)
+	require.ErrorContains(t, err, "status temporarily unavailable")
+	assert.Equal(t, 1, signalCount)
+
+	pod.Status.ContainerStatuses[0].State = corev1.ContainerState{
+		Terminated: &corev1.ContainerStateTerminated{ExitCode: 137},
+	}
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	assert.Equal(t, 1, signalCount, "a terminated exact target must not be signaled again")
+	condition := meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, condition)
+	assert.Equal(t, "CheckpointOutcomeUnknown", condition.Reason)
 }
 
 func TestReconcilePodSnapshotContent_ContentGetErrorReturns(t *testing.T) {

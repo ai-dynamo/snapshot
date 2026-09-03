@@ -88,7 +88,12 @@ request for each target.
 
 One helper request operates on one CUDA-owning PID. The Snapshot agent may
 issue several requests for one workload, but it retains ordering and an
-individual result for every target.
+individual result for every target. V1 holds one process-local operation slot
+across the whole multi-PID sequence within one target container, so sequences
+handled by one agent do not interleave. The Snapshot integration additionally
+uses one Pod-scoped Kubernetes Lease so overlapping agent instances cannot
+execute or monitor the same restore concurrently. Host-scoped and per-GPU
+scheduling inside one helper remain follow-ups.
 
 The daemon retains primary contexts only for the request's selected GPU set.
 After a successful operation, it associates those references with the exact
@@ -126,16 +131,18 @@ condition and documents the whole-DaemonSet watcher limitation separately.
 - Storage cleanup, including a future PageBroker abort, does not prove that the
   CUDA target or workload is safe to resume.
 
-The no-backend build used by the first stack slice validates compilation,
-linkage, and the standalone protocol, manifest, transfer-configuration, and
-cancellation contracts without choosing a production transfer implementation.
-The Snapshot-local NIXL/POSIX adapter and its rollout are added separately.
+The helper has two link-time transfer variants. The first stack slice links the
+no-backend implementation to validate compilation, linkage, and the standalone
+protocol, manifest, transfer-configuration, and cancellation contracts without
+NIXL. This Snapshot integration links the NIXL-backed POSIX adapter.
+`custom_storage_available` is true only when both the CUDA CustomStorage driver
+API and the linked transfer adapter are available.
 
-The no-backend helper proof target compiles against `cuda.h` copied from the
-digest-pinned CUDA 13.4 development image, which is the canonical owner of the
-CustomStorage types. Its compiler and the final agent image remain on the
-existing CUDA 13.0 base, so using the newer header does not change the shipped
-runtime or its system-library closure. The helper still resolves
+The helper compiles against `cuda.h` copied from the digest-pinned CUDA 13.4
+development image, which is the canonical owner of the CustomStorage types.
+The compiler, NIXL build, and final agent image remain on the existing CUDA
+13.0 base, so using the newer header does not change the shipped runtime or
+its system-library closure. The helper still resolves
 `cuCheckpointOperationComplete` dynamically and fails closed when the host
 driver does not export the 13.4 API.
 

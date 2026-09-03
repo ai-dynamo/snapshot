@@ -179,6 +179,35 @@ rbac:
 # Static agent configuration (loaded from ConfigMap)
 # Dynamic values such as NODE_NAME come from environment variables.
 config:
+  cudaCheckpoint:
+    # Storage mode for newly created CUDA checkpoints. "legacy" keeps the
+    # existing driver-managed path. "posix" explicitly requires the CUDA 13.4
+    # CustomStorage capability and the Snapshot-local NIXL POSIX adapter.
+    # Restore always follows the mode recorded in the checkpoint manifest.
+    storageMode: legacy
+    # Pinned transfer slots per CUDA device. More slots add pipeline depth,
+    # not worker threads. Four 64 MiB slots are the qualified TP1 benchmark
+    # configuration; POSIX creation is rejected outside that topology for V1.
+    transferBufferCount: 4
+    # Bytes in each pinned transfer slot (1-256 MiB, 4096-byte aligned).
+    transferChunkBytes: 67108864
+    daemon:
+      # Cooperative watchdog for one CUDA operation's extent transfers and
+      # health state. CUDA driver calls are not forcibly interruptible. The
+      # client reserves a five-minute response margin before long-running work.
+      maxOperationSeconds: 3600
+      # Pinned transfer memory is bufferCount * chunkBytes per active CUDA
+      # device. Increase this limit when increasing those settings or the
+      # number of GPUs used by one operation; the helper also needs room for
+      # NIXL, CUDA, and process overhead beyond the pinned buffers.
+      resources:
+        limits:
+          cpu: 2
+          memory: 1Gi
+        requests:
+          cpu: 250m
+          memory: 256Mi
+
   overlay:
     # Rootfs diff tar exclusions. Absolute-looking paths are normalized
     # relative to the tar root, and patterns starting with * are passed
@@ -193,7 +222,11 @@ config:
 
   restore:
     # Maximum seconds to allow a restore attempt before the agent marks it failed
-    restoreTimeoutSeconds: 7200
+    # Each CUDA target can require one long-running restore call with a
+    # 65-minute caller budget. Terminal unlock remains permitted under a short
+    # deadline. The default covers the qualified two-CUDA-PID TP1 workload;
+    # scale it for workloads with more CUDA-owning processes.
+    restoreTimeoutSeconds: 8100
 
   criu:
     # Path to the criu binary

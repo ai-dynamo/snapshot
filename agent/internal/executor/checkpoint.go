@@ -7,9 +7,11 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
@@ -43,6 +45,26 @@ type checkpointPhaseTimings struct {
 	OverlayCaptureDuration time.Duration
 }
 
+type checkpointMutationError struct {
+	err                error
+	targetMayBeMutated bool
+}
+
+func (e *checkpointMutationError) Error() string { return e.err.Error() }
+func (e *checkpointMutationError) Unwrap() error { return e.err }
+
+func checkpointPreMutationError(err error) error {
+	return &checkpointMutationError{err: err, targetMayBeMutated: false}
+}
+
+// CheckpointFailedBeforeTargetMutation is true only when checkpoint
+// preflight failed before CRIU or any CUDA driver operation could mutate the
+// source workload. Unclassified failures remain fail-closed.
+func CheckpointFailedBeforeTargetMutation(err error) bool {
+	var checkpointErr *checkpointMutationError
+	return errors.As(err, &checkpointErr) && !checkpointErr.targetMayBeMutated
+}
+
 // Checkpoint performs a CRIU dump of a container.
 //
 // The checkpoint directory is staged under the content-owned .tmp directory.
@@ -54,42 +76,73 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 
 	finalDir, err := nsmount.ResolveArtifactPath(cfg.Storage.BasePath, req.ContentUID, req.ContainerName)
 	if err != nil {
-		return fmt.Errorf("resolve checkpoint artifact path: %w", err)
+		return checkpointPreMutationError(fmt.Errorf("resolve checkpoint artifact path: %w", err))
 	}
 	tmpRoot, err := nsmount.ResolveArtifactStagingRoot(cfg.Storage.BasePath, req.ContentUID)
 	if err != nil {
-		return fmt.Errorf("resolve checkpoint staging root: %w", err)
+		return checkpointPreMutationError(fmt.Errorf("resolve checkpoint staging root: %w", err))
 	}
 	if err := os.MkdirAll(tmpRoot, 0700); err != nil {
-		return fmt.Errorf("failed to create checkpoint staging root: %w", err)
+		return checkpointPreMutationError(fmt.Errorf("failed to create checkpoint staging root: %w", err))
 	}
 	if err := os.MkdirAll(filepath.Dir(finalDir), 0700); err != nil {
-		return fmt.Errorf("failed to create checkpoint container root: %w", err)
+		return checkpointPreMutationError(fmt.Errorf("failed to create checkpoint container root: %w", err))
 	}
 	tmpDir := filepath.Join(tmpRoot, uuid.NewString())
 	if err := os.Mkdir(tmpDir, 0700); err != nil {
-		return fmt.Errorf("failed to create checkpoint staging directory: %w", err)
+		return checkpointPreMutationError(fmt.Errorf("failed to create checkpoint staging directory: %w", err))
 	}
 	defer os.RemoveAll(tmpDir)
 
 	state, gpuDeviceMapDuration, err := inspectContainer(ctx, rt, log, req)
 	if err != nil {
-		return err
+		return checkpointPreMutationError(err)
 	}
 	cudaJobFile := ""
+	cudaStorageMode := types.CUDAStorageModeLegacy
 	if len(state.CUDAHostPIDs) > 0 {
 		cudaJobFile, err = cuda.StageJobFile(state.RootFS, tmpDir, len(state.GPUUUIDs))
 		if err != nil {
-			return err
+			return checkpointPreMutationError(err)
+		}
+		if cfg.CUDACheckpoint.StorageMode == types.CUDAStorageModePOSIX {
+			if err := validatePOSIXCustomStorageTopology(len(state.CUDAHostPIDs), len(state.GPUUUIDs)); err != nil {
+				return checkpointPreMutationError(err)
+			}
+		}
+		cudaStorageMode, err = cuda.SelectCUDAStorageMode(
+			ctx,
+			cfg.CUDACheckpoint.StorageMode,
+		)
+		if err != nil {
+			return checkpointPreMutationError(fmt.Errorf("select CUDA storage mode before locking target: %w", err))
+		}
+		if cudaStorageMode == types.CUDAStorageModePOSIX {
+			log.Info("CUDA CustomStorage explicitly enabled and available; using the Snapshot-local NIXL POSIX path",
+				"cuda_storage_mode", cudaStorageMode)
+		} else {
+			log.Info("CUDA CustomStorage disabled for new checkpoints; using legacy CUDA checkpoint storage",
+				"cuda_storage_mode", cudaStorageMode)
 		}
 	}
 
-	criuOpts, data, err := configureCheckpoint(log, state, req, cfg, tmpDir)
+	criuOpts, data, err := configureCheckpoint(log, state, req, cfg, tmpDir, cudaStorageMode)
 	if err != nil {
-		return err
+		return checkpointPreMutationError(err)
 	}
 
-	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log)
+	captureTimings, err := captureCheckpoint(
+		ctx,
+		criuOpts,
+		&cfg.CRIU,
+		cfg.CUDACheckpoint.TransferSettings(),
+		data,
+		state,
+		tmpDir,
+		cudaJobFile,
+		cudaStorageMode,
+		log,
+	)
 	if err != nil {
 		return err
 	}
@@ -129,6 +182,14 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	}
 	log.Info("Checkpoint timing summary", "checkpoint", summary)
 
+	return nil
+}
+
+func validatePOSIXCustomStorageTopology(processCount, gpuCount int) error {
+	if processCount < 1 || gpuCount != 1 {
+		return fmt.Errorf("CUDA POSIX CustomStorage is qualified only for one or more CUDA processes on one GPU; found processes=%d GPUs=%d",
+			processCount, gpuCount)
+	}
 	return nil
 }
 
@@ -178,7 +239,10 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 
 	// Discover CUDA processes and GPU UUIDs
 	allPIDs := snapshotruntime.ProcessTreePIDs(pid)
-	cudaHostPIDs := cuda.FilterProcesses(ctx, allPIDs, log)
+	cudaHostPIDs, err := cuda.FilterProcesses(ctx, allPIDs, log)
+	if err != nil {
+		return nil, 0, fmt.Errorf("discover CUDA processes: %w", err)
+	}
 	cudaNamespacePIDs := make([]int, 0, len(cudaHostPIDs))
 	for _, cudaHostPID := range cudaHostPIDs {
 		process, err := snapshotruntime.ReadProcessDetails(snapshotruntime.HostProcPath, cudaHostPID)
@@ -234,6 +298,7 @@ func configureCheckpoint(
 	req CheckpointRequest,
 	cfg *types.AgentConfig,
 	checkpointDir string,
+	cudaStorageMode string,
 ) (*criurpc.CriuOpts, *types.CheckpointManifest, error) {
 	criuOpts, err := criu.BuildDumpOptions(state, &cfg.CRIU, checkpointDir, log)
 	if err != nil {
@@ -248,7 +313,7 @@ func configureCheckpoint(
 		types.NewOverlayManifest(cfg.Overlay, state.UpperDir, state.OCISpec),
 	)
 	if len(state.CUDANSPIDs) > 0 {
-		m.CUDA = types.NewCUDAManifest(state.CUDANSPIDs, state.GPUUUIDs)
+		m.CUDA = types.NewCUDAManifest(state.CUDANSPIDs, state.GPUUUIDs, cudaStorageMode)
 	}
 
 	if err := types.WriteManifest(checkpointDir, m); err != nil {
@@ -258,14 +323,53 @@ func configureCheckpoint(
 	return criuOpts, m, nil
 }
 
-func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger) (*checkpointPhaseTimings, error) {
+func captureCheckpoint(
+	ctx context.Context,
+	criuOpts *criurpc.CriuOpts,
+	criuSettings *types.CRIUSettings,
+	cudaTransfer types.CUDATransferSettings,
+	data *types.CheckpointManifest,
+	state *types.CheckpointContainerSnapshot,
+	checkpointDir,
+	cudaJobFile,
+	cudaStorageMode string,
+	log logr.Logger,
+) (*checkpointPhaseTimings, error) {
 	timings := &checkpointPhaseTimings{}
 
 	// CUDA lock+checkpoint must happen before CRIU dump
 	if len(state.CUDAHostPIDs) > 0 {
-		cudaTimings, err := cuda.CheckpointProcessTree(ctx, state.CUDAHostPIDs, cudaJobFile, checkpointDir, log)
+		processes, err := readCUDAProcessDetailsForCheckpoint(
+			snapshotruntime.HostProcPath,
+			state.CUDAHostPIDs,
+		)
 		if err != nil {
-			return nil, fmt.Errorf("CUDA checkpoint failed: %w", err)
+			return nil, err
+		}
+		cudaTimings, err := cuda.LockAndCheckpointProcessTreeValidated(
+			ctx,
+			processes,
+			cudaJobFile,
+			cudaStorageMode,
+			checkpointDir,
+			state.GPUUUIDs,
+			cudaTransfer,
+			log,
+		)
+		if err != nil {
+			checkpointErr := fmt.Errorf("CUDA checkpoint failed: %w", err)
+			if cuda.FailedBeforeTargetMutation(err) {
+				return nil, checkpointPreMutationError(checkpointErr)
+			}
+			cleanupErr := terminateCUDAProcessesAfterOperationFailure(
+				processes,
+				snapshotruntime.HostProcPath,
+				"checkpoint",
+				log,
+				snapshotruntime.ValidateProcessIdentity,
+				snapshotruntime.SendSignalToPID,
+			)
+			return nil, errors.Join(checkpointErr, cleanupErr)
 		}
 		timings.CUDACheckpointDuration = cudaTimings.TotalDuration
 	}
@@ -291,4 +395,58 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 	}
 
 	return timings, nil
+}
+
+func readCUDAProcessDetailsForCheckpoint(
+	procRoot string,
+	pids []int,
+) ([]snapshotruntime.ProcessDetails, error) {
+	processes := make([]snapshotruntime.ProcessDetails, 0, len(pids))
+	for _, pid := range pids {
+		process, err := snapshotruntime.ReadProcessDetails(procRoot, pid)
+		if err != nil {
+			return nil, checkpointPreMutationError(
+				fmt.Errorf("capture CUDA process identity for PID %d: %w", pid, err),
+			)
+		}
+		processes = append(processes, process)
+	}
+	return processes, nil
+}
+
+type signalProcessFunc func(logr.Logger, int, syscall.Signal, string) error
+
+type validateProcessIdentityFunc func(string, snapshotruntime.ProcessDetails) error
+
+func terminateCUDAProcessesAfterOperationFailure(
+	processes []snapshotruntime.ProcessDetails,
+	procRoot string,
+	operation string,
+	log logr.Logger,
+	validateProcessIdentity validateProcessIdentityFunc,
+	signalProcess signalProcessFunc,
+) error {
+	var cleanupErr error
+	for _, process := range processes {
+		pid := process.OutermostPID
+		if err := validateProcessIdentity(procRoot, process); err != nil {
+			cleanupErr = errors.Join(
+				cleanupErr,
+				fmt.Errorf(
+					"refusing to terminate CUDA PID %d after %s identity validation failed: %w",
+					pid,
+					operation,
+					err,
+				),
+			)
+			continue
+		}
+		if err := signalProcess(log, pid, syscall.SIGKILL, "CUDA "+operation+" failed"); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
+	}
+	if cleanupErr != nil {
+		return fmt.Errorf("failed to terminate one or more CUDA processes after %s failure: %w", operation, cleanupErr)
+	}
+	return nil
 }

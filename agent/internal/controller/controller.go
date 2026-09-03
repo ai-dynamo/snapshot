@@ -817,8 +817,10 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, artifa
 	return op.completeRestore(ctx, placeholderHostPID)
 }
 
-// recoverCompletedRestore avoids replaying CRIU when the destination-scoped
-// completion sentinel proves the operation already finished.
+// recoverCompletedRestore resolves a prior in-progress attempt without
+// replaying CRIU or CUDA. The completion sentinel proves execution finished;
+// without it the prior state-changing outcome is unknown, so V1 terminates the
+// immutable placeholder and requires a fresh restore pod.
 func (op *restoreOperation) recoverCompletedRestore(ctx context.Context) (bool, error) {
 	condition := findRestoredCondition(op.pod)
 	if condition == nil || condition.Status != corev1.ConditionFalse || condition.Reason != podcontract.RestoreReasonInProgress {
@@ -834,7 +836,11 @@ func (op *restoreOperation) recoverCompletedRestore(ctx context.Context) (bool, 
 		return false, fmt.Errorf("check restore completion sentinel: %w", err)
 	}
 	if !exists {
-		return false, nil
+		interruptedErr := errors.New("restore was interrupted with an unknown CRIU/CUDA outcome; refusing to replay into the existing placeholder")
+		if err := op.failRestore(ctx, interruptedErr); err != nil {
+			return true, err
+		}
+		return true, nil
 	}
 	return true, nil
 }
@@ -871,6 +877,7 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (int, error) {
 		ArtifactContainerName:    op.artifact.SourceContainerName,
 		DestinationContainerName: op.destination,
 		Clientset:                w.clientset,
+		CUDATransfer:             w.config.CUDACheckpoint.TransferSettings(),
 	}
 	return w.restoreFn(ctx, w.runtime, op.log, req, w.injector)
 }
@@ -878,8 +885,10 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (int, error) {
 func (op *restoreOperation) failRestore(ctx context.Context, restoreErr error) error {
 	w := op.controller
 	op.log.Error(restoreErr, "External restore failed")
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 	// Re-resolve because restore may fail before discovering the placeholder PID.
-	placeholderHostPID, _, err := w.runtime.ResolveContainer(ctx, op.containerID)
+	placeholderHostPID, _, err := w.runtime.ResolveContainer(cleanupCtx, op.containerID)
 	if err != nil {
 		return errors.Join(restoreErr, fmt.Errorf("placeholder PID could not be resolved after restore failure: %w", err))
 	}

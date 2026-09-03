@@ -28,6 +28,9 @@ ARG GO_VERSION=1.26.6
 #   --build-arg CRIU_REF=<fork-branch-or-sha>
 ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
 ARG CRIU_REF=criu-dev
+ARG NIXL_REPO=https://github.com/ai-dynamo/nixl.git
+# Immutable pin containing POSIX short-write/error recovery used by #11584.
+ARG NIXL_REF=71ca3cb249a481ae892fcc042a456e1a9b87463d
 ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04@sha256:8315e2455736c4f9b597f15c5fb4d31f834e798e0c6b66bbdbdbac491ce26bd1
 ARG CUDA_HELPER_HEADERS_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04@sha256:edd686dcb3e87806dfc869623ccb0a7e62c0d09bd720a82014c23efcecc8d9a2
 
@@ -174,24 +177,143 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s
 RUN mkdir -p /go-src && go mod vendor -o /go-src/vendor
 
 # =============================================================================
+# Stage: NIXL SDK/runtime builder (POSIX backend only)
+# =============================================================================
+FROM ${AGENT_BASE_IMAGE} AS nixl-builder
+
+ARG NIXL_REPO
+ARG NIXL_REF
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    git \
+    libaio-dev \
+    meson \
+    ninja-build \
+    pkg-config \
+    pybind11-dev \
+    python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git init /tmp/nixl \
+    && cd /tmp/nixl \
+    && git remote add origin ${NIXL_REPO} \
+    && git fetch --depth 1 origin ${NIXL_REF} \
+    && test "$(git rev-parse FETCH_HEAD)" = "${NIXL_REF}" \
+    && git checkout --detach ${NIXL_REF} \
+    && CXXFLAGS="-Wno-error=maybe-uninitialized -Wno-maybe-uninitialized" meson setup build-test \
+      --buildtype=debugoptimized \
+      -Dbuild_tests=true \
+      -Dbuild_examples=false \
+      -Denable_plugins=POSIX \
+    && meson compile -C build-test \
+    && NIXL_PLUGIN_DIR=/tmp/nixl/build-test/src/plugins/posix \
+      ./build-test/test/unit/plugins/posix/nixl_posix_test -n 32 \
+    && meson setup build \
+      --prefix=/usr/local \
+      --libdir=lib \
+      --buildtype=release \
+      -Dbuild_tests=false \
+      -Dbuild_examples=false \
+      -Denable_plugins=POSIX \
+    && meson compile -C build \
+    && DESTDIR=/nixl-install meson install -C build --strip \
+    && mkdir -p /nixl-runtime/lib/plugins \
+    && printf '%s\n' "${NIXL_REF}" > /nixl-runtime/NIXL_COMMIT \
+    && cp /tmp/nixl/subprojects/liburing-liburing-2.14/LICENSE /nixl-runtime/liburing-LICENSE \
+    && cp \
+      /nixl-install/usr/local/lib/libnixl.so \
+      /nixl-install/usr/local/lib/libnixl_build.so \
+      /nixl-install/usr/local/lib/libnixl_common.so \
+      /nixl-install/usr/local/lib/libserdes.so \
+      /nixl-install/usr/local/lib/libstream.so \
+      /nixl-install/usr/local/lib/libfile_utils.so \
+      /nixl-runtime/lib/ \
+    && cp -a /nixl-install/usr/local/lib/liburing.so* /nixl-runtime/lib/ \
+    && cp /nixl-install/usr/local/lib/plugins/libplugin_POSIX.so /nixl-runtime/lib/plugins/ \
+    && tar -czf /nixl-src.tar.gz -C /tmp --exclude-vcs nixl
+
+# =============================================================================
 # Stage: CUDA checkpoint helper builder
 # =============================================================================
 FROM ${AGENT_BASE_IMAGE} AS cuda-helper-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
 
-COPY cmd/cuda-checkpoint-helper/main.c ./cmd/cuda-checkpoint-helper/main.c
+COPY --from=cuda-helper-headers /usr/local/cuda-13.4/targets/x86_64-linux/include/cuda.h /opt/cuda-13.4/include/cuda.h
+COPY --from=nixl-builder /nixl-install/usr/local /usr/local
+COPY cmd/cuda-checkpoint-helper/main.cpp ./cmd/cuda-checkpoint-helper/main.cpp
+COPY cmd/cuda-checkpoint-helper/content_digest.cpp ./cmd/cuda-checkpoint-helper/content_digest.cpp
+COPY cmd/cuda-checkpoint-helper/content_digest.h ./cmd/cuda-checkpoint-helper/content_digest.h
+COPY cmd/cuda-checkpoint-helper/content_digest_test.cpp ./cmd/cuda-checkpoint-helper/content_digest_test.cpp
+COPY cmd/cuda-checkpoint-helper/daemon_protocol.cpp ./cmd/cuda-checkpoint-helper/daemon_protocol.cpp
+COPY cmd/cuda-checkpoint-helper/daemon_protocol.h ./cmd/cuda-checkpoint-helper/daemon_protocol.h
+COPY cmd/cuda-checkpoint-helper/daemon_protocol_test.cpp ./cmd/cuda-checkpoint-helper/daemon_protocol_test.cpp
+COPY cmd/cuda-checkpoint-helper/testdata/daemon_request_v6.hex ./cmd/cuda-checkpoint-helper/testdata/daemon_request_v6.hex
+COPY cmd/cuda-checkpoint-helper/storage_manifest.cpp ./cmd/cuda-checkpoint-helper/storage_manifest.cpp
+COPY cmd/cuda-checkpoint-helper/storage_manifest.h ./cmd/cuda-checkpoint-helper/storage_manifest.h
+COPY cmd/cuda-checkpoint-helper/storage_manifest_test.cpp ./cmd/cuda-checkpoint-helper/storage_manifest_test.cpp
+COPY cmd/cuda-checkpoint-helper/transfer_config.cpp ./cmd/cuda-checkpoint-helper/transfer_config.cpp
+COPY cmd/cuda-checkpoint-helper/transfer_config.h ./cmd/cuda-checkpoint-helper/transfer_config.h
+COPY cmd/cuda-checkpoint-helper/transfer_config_test.cpp ./cmd/cuda-checkpoint-helper/transfer_config_test.cpp
+COPY cmd/cuda-checkpoint-helper/transfer_cancellation.h ./cmd/cuda-checkpoint-helper/transfer_cancellation.h
+COPY cmd/cuda-checkpoint-helper/transfer_engine.cpp ./cmd/cuda-checkpoint-helper/transfer_engine.cpp
+COPY cmd/cuda-checkpoint-helper/transfer_engine.h ./cmd/cuda-checkpoint-helper/transfer_engine.h
+COPY cmd/cuda-checkpoint-helper/transfer_engine_test.cpp ./cmd/cuda-checkpoint-helper/transfer_engine_test.cpp
 COPY cmd/ns-bind-mount/main.c ./cmd/ns-bind-mount/main.c
 
-RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
-    ./cmd/cuda-checkpoint-helper/main.c \
-    -I/usr/local/cuda/include \
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread -o /cuda-checkpoint-helper \
+    ./cmd/cuda-checkpoint-helper/main.cpp \
+    ./cmd/cuda-checkpoint-helper/content_digest.cpp \
+    ./cmd/cuda-checkpoint-helper/daemon_protocol.cpp \
+    ./cmd/cuda-checkpoint-helper/storage_manifest.cpp \
+    ./cmd/cuda-checkpoint-helper/transfer_config.cpp \
+    ./cmd/cuda-checkpoint-helper/transfer_engine.cpp \
+    -I/opt/cuda-13.4/include \
+    -I/usr/local/include \
     -L/usr/local/cuda/lib64/stubs \
-    -lcuda
+    -L/usr/local/lib \
+    -Wl,-rpath,/usr/local/lib \
+    -lnixl -lnixl_build -lcuda -lcrypto
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread \
+      -o /cuda-checkpoint-helper-daemon-protocol-test \
+      ./cmd/cuda-checkpoint-helper/daemon_protocol.cpp \
+      ./cmd/cuda-checkpoint-helper/daemon_protocol_test.cpp \
+    && /cuda-checkpoint-helper-daemon-protocol-test
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+      -o /cuda-checkpoint-helper-storage-test \
+      ./cmd/cuda-checkpoint-helper/content_digest.cpp \
+      ./cmd/cuda-checkpoint-helper/storage_manifest.cpp \
+      ./cmd/cuda-checkpoint-helper/storage_manifest_test.cpp \
+      -lcrypto \
+    && /cuda-checkpoint-helper-storage-test
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+      -o /cuda-checkpoint-helper-content-digest-test \
+      ./cmd/cuda-checkpoint-helper/content_digest.cpp \
+      ./cmd/cuda-checkpoint-helper/content_digest_test.cpp \
+      -lcrypto \
+    && /cuda-checkpoint-helper-content-digest-test
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+      -o /cuda-checkpoint-helper-transfer-test \
+      ./cmd/cuda-checkpoint-helper/transfer_config.cpp \
+      ./cmd/cuda-checkpoint-helper/transfer_config_test.cpp \
+    && /cuda-checkpoint-helper-transfer-test
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+      -I/opt/cuda-13.4/include \
+      -o /cuda-checkpoint-helper-transfer-cancellation-test \
+      ./cmd/cuda-checkpoint-helper/transfer_engine_test.cpp \
+    && /cuda-checkpoint-helper-transfer-cancellation-test
 
 # ns-bind-mount bind-mounts the snapshot binaries into a target container's mount
 # namespace. It needs no CUDA headers, only mount_setattr (Linux 5.12+).
@@ -270,6 +392,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libprotobuf-c1 \
     libgnutls30t64 \
     libnftables1 \
+    libaio1t64 \
+    libssl3t64 \
     iproute2 \
     iptables \
     procps \
@@ -292,6 +416,7 @@ RUN sh /tmp/collect-sources.sh /tmp/base-packages.tsv /sources/dpkg
 
 # CRIU source, at the exact ref this image was built from.
 COPY --from=criu-builder /criu-src.tar.gz /sources/criu/criu-src.tar.gz
+COPY --from=nixl-builder /nixl-src.tar.gz /sources/nixl/nixl-src.tar.gz
 
 # Go module source for the statically linked binaries.
 COPY --from=builder /go-src/vendor /sources/go/vendor
@@ -312,6 +437,12 @@ RUN criu --version
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
 COPY --from=criu-builder /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
+COPY --from=nixl-builder /nixl-runtime/lib /usr/local/lib
+COPY --from=nixl-builder /nixl-runtime/NIXL_COMMIT /usr/local/share/nixl/NIXL_COMMIT
+COPY --from=nixl-builder /tmp/nixl/LICENSE /legal/NIXL/LICENSE
+COPY --from=nixl-builder /nixl-runtime/liburing-LICENSE /legal/liburing/LICENSE
+ENV NIXL_PLUGIN_DIR=/usr/local/lib/plugins
+RUN ldconfig
 # nsmount resolves this helper at /usr/local/sbin/ns-bind-mount (see
 # agent/internal/nsmount/mount.go defaultBinaryPath).
 COPY --from=cuda-helper-builder /ns-bind-mount /usr/local/sbin/ns-bind-mount

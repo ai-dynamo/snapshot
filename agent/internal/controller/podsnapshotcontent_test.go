@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 	"testing"
@@ -30,6 +31,8 @@ import (
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/executor"
+	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	snapshottypes "github.com/ai-dynamo/snapshot/agent/internal/types"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
@@ -97,6 +100,7 @@ func makeNodeController(t *testing.T, fc *fakeCheckpointer, objs ...client.Objec
 		holderID:       "snapshot-agent/test",
 		inFlight:       make(map[string]struct{}),
 		contentIndexer: idx,
+		sendSignalFn:   snapshotruntime.SendSignalToPID,
 	}
 	w.checkpointFn = fc.fn
 	return w
@@ -131,7 +135,12 @@ func makeSourcePod() *corev1.Pod {
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
 			ContainerStatuses: []corev1.ContainerStatus{
-				{Name: "main", Ready: true, ContainerID: "containerd://abc123"},
+				{
+					Name:        "main",
+					Ready:       true,
+					ContainerID: "containerd://abc123",
+					State:       corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+				},
 			},
 		},
 	}
@@ -535,6 +544,7 @@ func TestRunCheckpoint_LeaseCancelledAfterDumpFailsAndKills(t *testing.T) {
 		}
 	}
 	ctx, target := startKillableTarget(t)
+	w.runtime = &fakeRuntime{resolveContainerPID: target.Process.Pid}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")}}
 	leaseKey := client.ObjectKey{Namespace: "inference", Name: "checkpoint-lease-abc"}
 	artifactPath := filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1")
@@ -547,6 +557,27 @@ func TestRunCheckpoint_LeaseCancelledAfterDumpFailsAndKills(t *testing.T) {
 	failed := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
 	require.NotNil(t, failed)
 	assert.Equal(t, "LeaseCancelled", failed.Reason)
+}
+
+func TestKillCheckpointContainerRefusesReusedPID(t *testing.T) {
+	w := makeNodeController(t, &fakeCheckpointer{})
+	w.runtime = &fakeRuntime{resolveContainerPID: 99}
+
+	err := w.killCheckpointContainer(context.Background(), logr.Discard(), "abc123", 42, "checkpoint failed")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "current PID 99 does not match expected PID 42")
+}
+
+func TestCheckpointPreflightFailurePreservesSource(t *testing.T) {
+	err := executor.Checkpoint(
+		context.Background(),
+		&fakeRuntime{},
+		logr.Discard(),
+		executor.CheckpointRequest{},
+		&snapshottypes.AgentConfig{},
+	)
+	require.Error(t, err)
+	assert.False(t, checkpointFailureRequiresTermination(err))
 }
 
 func TestRunCheckpoint_LeaseCancelledConflictReadyDoesNotKill(t *testing.T) {
@@ -848,6 +879,11 @@ func foreignCaptureLease(t *testing.T, w *NodeController, content *snapshotv1alp
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      checkpointLeaseName(string(content.UID), "main"),
 			Namespace: content.Spec.PodSnapshotRef.Namespace,
+			Annotations: captureLeaseTarget{
+				podUID:      "pod-uid",
+				containerID: "abc123",
+				pid:         123,
+			}.annotations(),
 		},
 		Spec: coordinationv1.LeaseSpec{
 			HolderIdentity:       &holder,
@@ -913,6 +949,93 @@ func TestReconcilePodSnapshotContent_ExpiredForeignLeaseStillFails(t *testing.T)
 	cond := meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
 	require.NotNil(t, cond)
 	assert.Equal(t, "SourcePodGone", cond.Reason)
+}
+
+func TestReconcileSourcePod_ExpiredLeaseDoesNotReplayLiveTarget(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	pod := makeSourcePod()
+	checkpointer := &fakeCheckpointer{}
+	w := makeNodeController(t, checkpointer, content, pod)
+	ctx, target := startKillableTarget(t)
+	w.runtime = &fakeRuntime{resolveContainerPID: target.Process.Pid}
+	foreignCaptureLease(t, w, content, true)
+	leaseName := checkpointLeaseName(string(content.UID), "main")
+	lease, err := w.clientset.CoordinationV1().Leases("inference").Get(context.Background(), leaseName, metav1.GetOptions{})
+	require.NoError(t, err)
+	lease.Annotations[captureLeasePIDAnnotation] = strconv.Itoa(target.Process.Pid)
+	_, err = w.clientset.CoordinationV1().Leases("inference").Update(context.Background(), lease, metav1.UpdateOptions{})
+	require.NoError(t, err)
+
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+
+	assert.False(t, checkpointer.wasCalled(), "an unknown CRIU/CUDA outcome must not be replayed")
+	requireKilledBySIGKILL(t, ctx, target)
+	cond := meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, "CheckpointOutcomeUnknown", cond.Reason)
+}
+
+func TestReconcileSourcePod_ExpiredLeaseTerminalizesWithoutUnsafeSignal(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		runtimePID int
+		mutate     func(*corev1.Pod, *coordinationv1.Lease)
+	}{
+		{
+			name: "legacy lease without target identity",
+			mutate: func(_ *corev1.Pod, lease *coordinationv1.Lease) {
+				lease.Annotations = nil
+			},
+		},
+		{
+			name: "replacement container",
+			mutate: func(pod *corev1.Pod, _ *coordinationv1.Lease) {
+				pod.Status.ContainerStatuses[0].ContainerID = "containerd://replacement"
+			},
+		},
+		{
+			name: "recorded container already terminated",
+			mutate: func(pod *corev1.Pod, _ *coordinationv1.Lease) {
+				pod.Status.ContainerStatuses[0].State = corev1.ContainerState{
+					Terminated: &corev1.ContainerStateTerminated{ExitCode: 137},
+				}
+			},
+		},
+		{
+			name:       "recorded container PID changed",
+			runtimePID: 456,
+			mutate:     func(*corev1.Pod, *coordinationv1.Lease) {},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+			pod := makeSourcePod()
+			checkpointer := &fakeCheckpointer{}
+			w := makeNodeController(t, checkpointer, content, pod)
+			runtimePID := tc.runtimePID
+			if runtimePID == 0 {
+				runtimePID = 123
+			}
+			w.runtime = &fakeRuntime{resolveContainerPID: runtimePID}
+			w.sendSignalFn = func(logr.Logger, int, syscall.Signal, string) error {
+				t.Fatal("replacement or unidentifiable process must not be signaled")
+				return nil
+			}
+			foreignCaptureLease(t, w, content, true)
+			leaseName := checkpointLeaseName(string(content.UID), "main")
+			lease, err := w.clientset.CoordinationV1().Leases("inference").Get(context.Background(), leaseName, metav1.GetOptions{})
+			require.NoError(t, err)
+			tc.mutate(pod, lease)
+			_, err = w.clientset.CoordinationV1().Leases("inference").Update(context.Background(), lease, metav1.UpdateOptions{})
+			require.NoError(t, err)
+
+			require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+			assert.False(t, checkpointer.wasCalled())
+			cond := meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+			require.NotNil(t, cond)
+			assert.Equal(t, "CheckpointOutcomeUnknown", cond.Reason)
+		})
+	}
 }
 
 // TestReconcileSourcePod_ForeignLeaseDefersContainerExitFailure covers the capture path's window:
