@@ -310,6 +310,10 @@ RUN set -eu; \
              /snapshot-binaries/cuda-checkpoint /snapshot-binaries/cuda-checkpoint-helper \
              /snapshot-binaries/ip /snapshot-binaries/tar
 
+# Smoke-test the bundled tar the same way criu is above: the ldd post-condition
+# below proves its symbols resolve, not that it executes.
+RUN /snapshot-binaries/tar --version
+
 # Shared-library closure of the bundled binaries and plugins.
 #
 # glibc (libc, libm, libpthread, libdl, librt, libresolv) and the loader are
@@ -371,11 +375,16 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 # namespace, so nothing needs pre-provisioning here.
 #
 # Three constraints follow from that and must hold for every BASE_IMAGE:
-#   - BASE_IMAGE must be glibc-compatible with AGENT_BASE_IMAGE, because the
-#     bundle's library closure is built from AGENT_BASE_IMAGE (ubuntu 24.04,
-#     glibc 2.39) and loaded ahead of the placeholder's own libraries via
-#     LD_LIBRARY_PATH. A 22.04-based BASE_IMAGE builds green but fails at
-#     restore with "version 'GLIBC_2.38' not found".
+#   - BASE_IMAGE's glibc must satisfy every bundled binary exec'd inside the
+#     placeholder. criu, its plugins, tar, and their shared-library closure
+#     are built in criu-builder (ubuntu 22.04, glibc 2.35 floor) and loaded
+#     ahead of the placeholder's own libraries via LD_LIBRARY_PATH. The
+#     cuda-checkpoint-helper is still built from AGENT_BASE_IMAGE (ubuntu
+#     24.04, glibc 2.39) and exec'd in the placeholder on CUDA restores, so
+#     it carries the higher floor until it moves to an older-glibc stage.
+#     The bundled ip is not exec'd on this restore path: the network
+#     namespace is always external, and criu skips link/address/route
+#     restore for external netns.
 #   - The node kernel must be >= 5.12 (mount_setattr, used by ns-bind-mount).
 #   - The placeholder pod must NOT set readOnlyRootFilesystem: true unless a
 #     writable volume is mounted at /tmp. The agent bind-mounts the binary
