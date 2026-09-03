@@ -69,7 +69,7 @@ def serve_api(llm: LLM, restored_text: str) -> None:
 
 
 def main() -> None:
-    if os.environ.get("DYN_SNAPSHOT_RESTORE_STANDBY") == "1":
+    if os.environ.get("SNAPSHOT_RESTORE_STANDBY") == "1":
         while True:
             time.sleep(3600)
 

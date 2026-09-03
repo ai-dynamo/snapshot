@@ -340,9 +340,9 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 # path as it runs from — CRIU restores file-backed mappings by path, not via
 # PATH search — and so must this placeholder image (same BASE_IMAGE).
 #
-# Backend entrypoints run a restore standby path when the operator
-# injects DYN_SNAPSHOT_RESTORE_STANDBY=1, then sleep while the
-# snapshot-agent restores into the container.
+# Standby-aware workload entrypoints stay inert when the restore Pod sets
+# SNAPSHOT_RESTORE_STANDBY=1, then sleep while the snapshot-agent restores
+# into the container.
 # =============================================================================
 FROM ${BASE_IMAGE} AS placeholder
 
