@@ -39,4 +39,8 @@ resumed correctly.
 
 The restored process resumes from the checkpointed state, skipping model loading
 and warm-up. In practice, higher-level systems create these restored Deployments
-rather than applying them by hand.
+rather than applying them by hand. To generate restore pods programmatically —
+from a controller, operator, or serving platform — implement the
+[restore Pod contract](../reference/restore-pod-contract.md), which specifies the
+required annotations, control volume, and `SNAPSHOT_CONTROL_DIR`, plus the
+optional startup gate and seccomp profile a restored pod may carry.
