@@ -25,6 +25,12 @@ data:
     overlay:
       exclusions: {{ toYaml .Values.config.overlay.exclusions | nindent 8 }}
 
+    pageBroker:
+      enabled: {{ .Values.pageBroker.enabled }}
+      {{- if .Values.pageBroker.enabled }}
+      controlSocketPath: {{ printf "%s/pagebroker.sock" (include "snapshot.pageBrokerControlPath" .) | quote }}
+      {{- end }}
+
     restore:
       restoreTimeoutSeconds: {{ .Values.config.restore.restoreTimeoutSeconds }}
 

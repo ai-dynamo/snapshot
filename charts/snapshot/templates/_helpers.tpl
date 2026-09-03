@@ -101,3 +101,6 @@ reads for rootfs-diff capture, and CRI-O config.json fallback).
 {{- define "snapshot.runtimeStorageDir" -}}
 {{- if eq .Values.runtime.type "crio" -}}/var/lib/containers{{- else -}}/var/lib/containerd{{- end -}}
 {{- end }}
+
+{{- define "snapshot.pageBrokerControlPath" -}}/pagebroker/control{{- end -}}
+{{- define "snapshot.pageBrokerStagingPath" -}}/pagebroker/staging{{- end -}}
