@@ -42,6 +42,13 @@ spec:
               value: "2048"
             - name: VLLM_GPU_MEMORY_UTILIZATION
               value: "0.30"
+            # app.py calls AsyncLLM directly rather than vLLM's CLI wrapper,
+            # which sets this automatically when unset. Without it, worker
+            # startup defaults to fork (or switches to spawn only if vLLM
+            # detects CUDA already initialized), which is unreliable across
+            # checkpoint/restore.
+            - name: VLLM_WORKER_MULTIPROC_METHOD
+              value: spawn
             - name: SNAPSHOT_CONTROL_DIR
               value: /snapshot-control
           ports:
