@@ -19,6 +19,10 @@ MAX_BATCH_SIZE = int(os.environ.get("TRTLLM_MAX_BATCH_SIZE", "1"))
 FREE_GPU_MEMORY_FRACTION = float(
     os.environ.get("TRTLLM_FREE_GPU_MEMORY_FRACTION", "0.10")
 )
+# Off by default: Qwen3 needs no custom model code, and remote code execution
+# should be an explicit opt-in. Set TRTLLM_TRUST_REMOTE_CODE=1 only for
+# checkpoints that ship their own modeling code.
+TRUST_REMOTE_CODE = os.environ.get("TRTLLM_TRUST_REMOTE_CODE", "0") == "1"
 
 
 def generate_text(llm: LLM, prompts: list[str]) -> list[str]:
@@ -86,7 +90,7 @@ def main() -> None:
         model=MODEL,
         backend="pytorch",
         dtype="float16",
-        trust_remote_code=True,
+        trust_remote_code=TRUST_REMOTE_CODE,
         tensor_parallel_size=1,
         max_num_tokens=MAX_NUM_TOKENS,
         max_seq_len=512,

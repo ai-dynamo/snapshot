@@ -20,6 +20,10 @@ MODEL = os.environ["SNAPSHOT_MODEL"]
 # keeps the checkpoint artifact small. Override through the Pod template.
 MAX_MODEL_LEN = int(os.environ.get("VLLM_MAX_MODEL_LEN", "2048"))
 GPU_MEMORY_UTILIZATION = float(os.environ.get("VLLM_GPU_MEMORY_UTILIZATION", "0.30"))
+# Off by default: Qwen3 needs no custom model code, and remote code execution
+# should be an explicit opt-in. Set VLLM_TRUST_REMOTE_CODE=1 only for
+# checkpoints that ship their own modeling code.
+TRUST_REMOTE_CODE = os.environ.get("VLLM_TRUST_REMOTE_CODE", "0") == "1"
 
 
 class GenerateRequest(BaseModel):
@@ -92,6 +96,7 @@ async def main() -> None:
             enable_sleep_mode=True,
             max_model_len=MAX_MODEL_LEN,
             gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
+            trust_remote_code=TRUST_REMOTE_CODE,
         ),
         usage_context=UsageContext.LLM_CLASS,
     )

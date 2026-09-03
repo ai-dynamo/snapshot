@@ -115,7 +115,9 @@ source and restored containers.
 The example sizes the engine for a small single-GPU deployment through
 `VLLM_MAX_MODEL_LEN` (default `2048`) and `VLLM_GPU_MEMORY_UTILIZATION`
 (default `0.30`). Raise them only after validating checkpoint and restore with
-the resulting memory use.
+the resulting memory use. `VLLM_TRUST_REMOTE_CODE` (default `0`) controls
+`trust_remote_code`; set it to `1` only for checkpoints that ship their own
+modeling code. Qwen3 does not.
 
 > [!NOTE]
 > This example runs vLLM directly through `AsyncLLM` rather than `vllm serve`, so

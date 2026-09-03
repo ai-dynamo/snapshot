@@ -37,6 +37,9 @@ spec:
               value: "2048"
             - name: VLLM_GPU_MEMORY_UTILIZATION
               value: "0.30"
+            # Remote code execution is opt-in; Qwen3 ships no custom code.
+            - name: VLLM_TRUST_REMOTE_CODE
+              value: "0"
             - name: SNAPSHOT_CONTROL_DIR
               value: /snapshot-control
           ports:
