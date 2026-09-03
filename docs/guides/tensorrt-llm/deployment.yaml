@@ -42,9 +42,6 @@ spec:
               value: "1"
             - name: TRTLLM_FREE_GPU_MEMORY_FRACTION
               value: "0.10"
-            # Remote code execution is opt-in; Qwen3 ships no custom code.
-            - name: TRTLLM_TRUST_REMOTE_CODE
-              value: "0"
             - name: SNAPSHOT_CONTROL_DIR
               value: /snapshot-control
             - name: HF_HUB_DISABLE_XET
