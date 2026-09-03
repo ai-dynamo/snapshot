@@ -123,6 +123,10 @@ func TestInspectRestoreComparesRuntimeImageID(t *testing.T) {
 			targetID: captured,
 		},
 		{
+			name:     "target without a runtime image ID",
+			sourceID: captured,
+		},
+		{
 			name:        "runtime image ID unavailable",
 			sourceID:    captured,
 			targetError: errors.New("runtime unavailable"),

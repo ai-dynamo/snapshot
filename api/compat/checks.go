@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	digest "github.com/opencontainers/go-digest"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -156,14 +157,18 @@ func atLeastSource(source, target string) []Mismatch {
 // others a scheme and a repository around it - and the artifact keeps whichever
 // form it was given, so the two are only comparable after this.
 func imageDigest(imageID string) string {
-	digest := strings.TrimSpace(imageID)
-	if scheme := strings.Index(digest, "://"); scheme >= 0 {
-		digest = digest[scheme+len("://"):]
+	value := strings.TrimSpace(imageID)
+	if scheme := strings.Index(value, "://"); scheme >= 0 {
+		value = value[scheme+len("://"):]
 	}
-	if at := strings.LastIndex(digest, "@"); at >= 0 {
-		digest = digest[at+1:]
+	if at := strings.LastIndex(value, "@"); at >= 0 {
+		value = value[at+1:]
 	}
-	return digest
+	parsed, err := digest.Parse(value)
+	if err != nil {
+		return ""
+	}
+	return parsed.String()
 }
 
 // CheckMount refuses a restore into a pod that is missing a path the checkpoint

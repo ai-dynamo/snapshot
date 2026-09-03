@@ -196,6 +196,16 @@ func TestImageDigestCheck(t *testing.T) {
 			name:   "runtime image ID is unavailable",
 			source: imageID(captured),
 		},
+		{
+			name:   "runtime image ID is not a content digest",
+			source: imageID(captured),
+			target: imageID("runtime-local-image"),
+		},
+		{
+			name:   "checkpoint image ID is not a content digest",
+			source: imageID("runtime-local-image"),
+			target: imageID(captured),
+		},
 	}
 
 	for _, tc := range tests {

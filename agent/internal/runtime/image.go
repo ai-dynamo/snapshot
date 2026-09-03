@@ -6,6 +6,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
@@ -25,9 +26,9 @@ func resolveContainerImageID(ctx context.Context, svc containerStatusService, co
 	if err != nil {
 		return "", fmt.Errorf("failed to get container status for %s: %w", containerID, err)
 	}
-	imageID := response.GetStatus().GetImageId()
-	if imageID == "" {
-		return "", fmt.Errorf("container status for %s has no image ID", containerID)
+	status := response.GetStatus()
+	if status == nil {
+		return "", fmt.Errorf("container status for %s is missing", containerID)
 	}
-	return imageID, nil
+	return strings.TrimSpace(status.GetImageId()), nil
 }
