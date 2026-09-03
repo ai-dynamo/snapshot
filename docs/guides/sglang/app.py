@@ -40,10 +40,10 @@ def create_engine(snapshot_mode: bool) -> Any:
         context_length=int(os.environ.get("SGLANG_CONTEXT_LENGTH", "10240")),
         page_size=int(os.environ.get("SGLANG_PAGE_SIZE", "16")),
         tp_size=1,
-        # Off by default: Qwen3 needs no custom model code, and remote code
-        # execution should be an explicit opt-in. Set SGLANG_TRUST_REMOTE_CODE=1
-        # only for checkpoints that ship their own modeling code.
-        trust_remote_code=os.environ.get("SGLANG_TRUST_REMOTE_CODE", "0") == "1",
+        # Off: Qwen3 needs no custom model code, and remote code execution
+        # should be an explicit opt-in. Set this to True only for checkpoints
+        # that ship their own modeling code.
+        trust_remote_code=False,
         enable_memory_saver=snapshot_mode,
         enable_weights_cpu_backup=snapshot_mode,
         log_level="info",
