@@ -94,6 +94,8 @@ storage:
 
 pageBroker:
   enabled: false
+  command: []
+  args: []
   maxConcurrentRequests: 16
   stagingSizeLimit: 64Gi
   resources:
@@ -104,7 +106,7 @@ pageBroker:
       cpu: 32
       memory: 72Gi
   image:
-    repository: nvcr.io/nvidia/ai-dynamo/pagebroker
+    repository: ghcr.io/ai-dynamo/snapshot/agent
     tag: 1.4.0
     pullPolicy: Always
 
