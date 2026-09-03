@@ -51,8 +51,11 @@ listening. To validate the restored replica, send a `POST` request to
 `/generate` with a JSON body such as
 `{"prompt":"What is the capital of Italy?"}`.
 
-The Dockerfile starts from the TensorRT-LLM 1.2.1 release image (a GA
-release, pinned by digest), creates `/snapshot-control`, and adds `app.py`.
+The Dockerfile starts from the TensorRT-LLM `1.3.0rc24` release image, pinned by
+digest, creates `/snapshot-control`, and adds `app.py`. A release candidate is
+used deliberately: the `1.2.1` GA image fails at `import tensorrt` because
+`libnvonnxparser.so.10` is missing from it, and no 1.3.0 GA image exists yet.
+Move to the first 1.3.x GA once it is published.
 `TLLM_NCCL_SYMMETRIC_ZERO_COPY=0` disables NCCL registered windows that CUDA
 checkpoint does not support. `UCX_TLS=tcp,self` avoids RDMA mappings that CRIU
 cannot restore.
@@ -63,7 +66,7 @@ Snapshot control volume at `/snapshot-control`.
 ### 2. Build the image
 
 ```bash
-export TENSORRT_LLM_RUNTIME_IMAGE=nvcr.io/nvidia/tensorrt-llm/release:1.2.1@sha256:33cd085b772947bd22b7273886539331420404e5d2a4a039945241945ff927b9
+export TENSORRT_LLM_RUNTIME_IMAGE=nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc24@sha256:16a103b8b1b682d287e8043fc674d23fa52d5b5f2127da913bf6c0643db3a073
 export TENSORRT_LLM_SNAPSHOT_IMAGE=<registry>/tensorrt-llm-snapshot:<tag>
 
 docker build \

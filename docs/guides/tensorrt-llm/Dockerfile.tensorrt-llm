@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-ARG TENSORRT_LLM_RUNTIME_IMAGE=nvcr.io/nvidia/tensorrt-llm/release:1.2.1@sha256:33cd085b772947bd22b7273886539331420404e5d2a4a039945241945ff927b9
+# A release candidate on purpose: the 1.2.1 GA image fails at `import tensorrt`
+# (libnvonnxparser.so.10 is missing from that image), and no 1.3.0 GA exists
+# yet. Move to the first 1.3.x GA once published.
+ARG TENSORRT_LLM_RUNTIME_IMAGE=nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc24@sha256:16a103b8b1b682d287e8043fc674d23fa52d5b5f2127da913bf6c0643db3a073
 FROM ${TENSORRT_LLM_RUNTIME_IMAGE}
 
 ARG TARGETARCH=amd64
