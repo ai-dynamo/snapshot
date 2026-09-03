@@ -99,7 +99,7 @@ spec:
             exec:
               command:
                 - cat
-                - /snapshot-control/sglang-restore-ready
+                - /snapshot-control/ready-for-snapshot
             periodSeconds: 1
             failureThreshold: 1800
           volumeMounts:

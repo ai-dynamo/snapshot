@@ -50,9 +50,7 @@ kubectl rollout status \
 The container starts as an inert `sleep infinity` placeholder, as the
 [restore Pod contract](../reference/restore-pod-contract.md) requires: the agent
 restores the checkpointed process into it as a sibling, so running the
-application there would only load a second copy of the model. Readiness
-therefore waits on the framework's post-restore sentinel — `vllm-restore-ready`
-and its equivalents — not the `ready-for-snapshot` file the source pod writes.
+application there would only load a second copy of the model.
 
 The node agent adds a `nvidia.com/Restored` condition to the pod once the restore
 completes — watch it, along with pod readiness, to confirm. If the restored

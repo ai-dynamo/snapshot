@@ -52,7 +52,7 @@ spec:
             exec:
               command:
                 - cat
-                - /snapshot-control/vllm-restore-ready
+                - /snapshot-control/ready-for-snapshot
             periodSeconds: 1
             failureThreshold: 1200
           volumeMounts:
