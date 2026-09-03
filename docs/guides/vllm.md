@@ -41,11 +41,10 @@ curl --fail --location \
 The program loads the model selected in `deployment.yaml`, runs one
 generation to initialize vLLM, and then calls `pause_generation()` and
 `sleep()`. It writes
-`ready-for-snapshot` only when the process is safe to checkpoint. In a restore
-container, it waits in standby until Snapshot injects the checkpointed process.
-That process calls `wake_up()` and `resume_generation()`, runs another
-generation, starts an API, and writes `vllm-restore-ready` when the API is
-listening. To validate the restored replica, send a `POST` request to
+`ready-for-snapshot` only when the process is safe to checkpoint. After restore,
+the checkpointed process calls `wake_up()` and `resume_generation()`, runs
+another generation, starts an API, and writes `vllm-restore-ready` when the API
+is listening. To validate the restored replica, send a `POST` request to
 `/generate` with a JSON body such as
 `{"prompt":"What is the capital of Italy?"}`.
 
@@ -55,8 +54,8 @@ Ubuntu 24.04 glibc required by the current Snapshot restore bundle. It creates
 `HF_HUB_DISABLE_XET=1` prevents the model downloader from leaving an open cache
 log that CRIU cannot reopen after restore.
 
-The source and restore pods must mount the Snapshot control volume at
-`/snapshot-control`.
+The source and restore pods must use the same immutable image and mount the
+Snapshot control volume at `/snapshot-control`.
 
 ### 2. Build the image
 
@@ -95,17 +94,20 @@ Any failure prints an error and returns a non-zero exit status.
 Set the namespace where the vLLM pod will run:
 
 ```bash
-export VLLM_NAMESPACE=<namespace>
-kubectl get namespace "$VLLM_NAMESPACE"
+export SNAPSHOT_NAMESPACE=<namespace>
+kubectl get namespace "$SNAPSHOT_NAMESPACE"
 ```
 
-Set the model through the `SNAPSHOT_MODEL` environment variable in
-[`deployment.yaml`](vllm/deployment.yaml):
+In [`deployment.yaml`](vllm/deployment.yaml), replace the example `image` with the
+one pushed in step 2 and select the model through `SNAPSHOT_MODEL`:
 
 ```yaml
-env:
-  - name: SNAPSHOT_MODEL
-    value: Qwen/Qwen3-0.6B
+containers:
+  - name: main
+    image: <registry>/vllm-snapshot:<tag>
+    env:
+      - name: SNAPSHOT_MODEL
+        value: Qwen/Qwen3-0.6B
 ```
 
 Other values include `TinyLlama/TinyLlama-1.1B-Chat-v1.0` or a mounted model
@@ -119,30 +121,20 @@ source and restored containers.
 > vLLM's [environment variables](https://docs.vllm.ai/en/v0.27.1/configuration/env_vars/)
 > set in the Deployment's Pod template.
 
-Use [`deployment.yaml`](vllm/deployment.yaml) to deploy the image built in
-step 2:
+Deploy the edited manifest:
 
 ```bash
-kubectl set image \
-  --local \
-  --filename deployment.yaml \
-  main="$VLLM_SNAPSHOT_IMAGE" \
-  --output yaml |
-  kubectl apply \
-    --namespace "$VLLM_NAMESPACE" \
-    --filename -
+kubectl apply \
+  --namespace "$SNAPSHOT_NAMESPACE" \
+  --filename deployment.yaml
 ```
-
-The command replaces the example image value in `deployment.yaml` with
-`$VLLM_SNAPSHOT_IMAGE` before creating the Deployment. It does not modify the
-local file.
 
 Wait until the vLLM replica finishes initialization and becomes safe to
 checkpoint:
 
 ```bash
 kubectl rollout status \
-  --namespace "$VLLM_NAMESPACE" \
+  --namespace "$SNAPSHOT_NAMESPACE" \
   deployment/vllm-source \
   --timeout=30m
 ```
@@ -151,7 +143,7 @@ List the generated Pod:
 
 ```bash
 kubectl get pods \
-  --namespace "$VLLM_NAMESPACE" \
+  --namespace "$SNAPSHOT_NAMESPACE" \
   --selector app=vllm-source
 ```
 
