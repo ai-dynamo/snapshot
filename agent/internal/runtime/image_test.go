@@ -33,14 +33,20 @@ func TestResolveContainerImageID(t *testing.T) {
 		{
 			name: "returns the runtime image ID",
 			service: &fakeContainerStatusService{response: &runtimeapi.ContainerStatusResponse{
-				Status: &runtimeapi.ContainerStatus{ImageId: "sha256:config"},
+				Status: &runtimeapi.ContainerStatus{ImageId: " sha256:config "},
 			}},
 			want: "sha256:config",
 		},
 		{
 			name:      "rejects a missing status",
 			service:   &fakeContainerStatusService{response: &runtimeapi.ContainerStatusResponse{}},
-			wantError: "has no image ID",
+			wantError: "is missing",
+		},
+		{
+			name: "accepts an unavailable runtime image ID",
+			service: &fakeContainerStatusService{response: &runtimeapi.ContainerStatusResponse{
+				Status: &runtimeapi.ContainerStatus{},
+			}},
 		},
 		{
 			name:      "reports the runtime error",
