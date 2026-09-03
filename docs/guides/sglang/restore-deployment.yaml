@@ -58,9 +58,12 @@ spec:
         - name: main
           image: sglang-snapshot:replace-me
           imagePullPolicy: Always
-          args:
-            - --mode
-            - snapshot
+          # Inert placeholder: the agent restores the checkpointed process into
+          # this container, so app.py must not run here.
+          command:
+            - /bin/sh
+            - -c
+            - exec sleep infinity
           env:
             - name: SNAPSHOT_MODEL
               value: Qwen/Qwen3-0.6B
@@ -96,7 +99,7 @@ spec:
             exec:
               command:
                 - cat
-                - /snapshot-control/ready-for-snapshot
+                - /snapshot-control/sglang-restore-ready
             periodSeconds: 1
             failureThreshold: 1800
           volumeMounts:

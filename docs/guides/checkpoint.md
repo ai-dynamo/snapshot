@@ -32,6 +32,13 @@ each framework — see the `deployment.yaml` referenced from the [vLLM](vllm.md)
 as the reference: a `PodSnapshot` targets a pod deployed this way, and a
 `SnapshotJob`'s `podTemplate` must carry the same fields.
 
+Set the namespace where the replica runs — the same one used to deploy it:
+
+```bash
+export SNAPSHOT_NAMESPACE=<namespace>
+kubectl get namespace "$SNAPSHOT_NAMESPACE"
+```
+
 ## Option 1 — `PodSnapshot` (checkpoint a running replica)
 
 Point at a replica that is already up and serving. Create a `PodSnapshot` naming its
@@ -42,7 +49,6 @@ apiVersion: nvidia.com/v1alpha1
 kind: PodSnapshot
 metadata:
   name: vllm-snapshot
-  namespace: my-inference
 spec:
   source:
     podRef:
@@ -52,9 +58,14 @@ spec:
 ```
 
 ```bash
-kubectl apply -f vllm-snapshot.yaml
-kubectl wait --for=condition=Ready podsnapshot/vllm-snapshot \
-  -n my-inference --timeout=30m
+kubectl apply \
+  --namespace "$SNAPSHOT_NAMESPACE" \
+  --filename vllm-snapshot.yaml
+
+kubectl wait \
+  --namespace "$SNAPSHOT_NAMESPACE" \
+  --for=condition=Ready podsnapshot/vllm-snapshot \
+  --timeout=30m
 ```
 
 The operator binds a cluster-scoped `PodSnapshotContent` and records the artifact.
@@ -73,7 +84,6 @@ apiVersion: nvidia.com/v1alpha1
 kind: SnapshotJob
 metadata:
   name: vllm-snapshot-job
-  namespace: my-inference
 spec:
   podSnapshotTemplate:
     targetContainers:
@@ -89,13 +99,19 @@ spec:
 ```
 
 ```bash
-kubectl apply -f vllm-snapshot-job.yaml
-kubectl wait --for=condition=Completed snapshotjob/vllm-snapshot-job \
-  -n my-inference --timeout=30m
+kubectl apply \
+  --namespace "$SNAPSHOT_NAMESPACE" \
+  --filename vllm-snapshot-job.yaml
+
+kubectl wait \
+  --namespace "$SNAPSHOT_NAMESPACE" \
+  --for=condition=Completed snapshotjob/vllm-snapshot-job \
+  --timeout=30m
 
 # the resulting PodSnapshot to restore from:
-kubectl get snapshotjob vllm-snapshot-job -n my-inference \
-  -o jsonpath='{.status.podSnapshotName}'
+kubectl get snapshotjob vllm-snapshot-job \
+  --namespace "$SNAPSHOT_NAMESPACE" \
+  --output jsonpath='{.status.podSnapshotName}'
 ```
 
 Because the source replica is deleted, every serving replica — including the

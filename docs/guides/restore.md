@@ -15,22 +15,44 @@ the container during pod startup.
 
 Each build-and-deploy guide ships a ready-to-apply `restore-deployment.yaml` next
 to its `deployment.yaml`: the same manifest with the
-`nvidia.com/snapshot-is-checkpoint-source` label removed and an
-`nvidia.com/restore-from` annotation added, naming the `PodSnapshot` to restore
-from. Download the one for the framework in use:
+`nvidia.com/snapshot-is-checkpoint-source` label removed, an
+`nvidia.com/restore-from` annotation added naming the `PodSnapshot` to restore
+from, and the container command replaced with an inert `sleep infinity`.
+Download the one for the framework in use:
 
 - [vLLM `restore-deployment.yaml`](vllm/restore-deployment.yaml)
 - [SGLang `restore-deployment.yaml`](sglang/restore-deployment.yaml)
 - [TensorRT-LLM `restore-deployment.yaml`](tensorrt-llm/restore-deployment.yaml)
+
+Set the namespace where the restored replica will run — the same one holding the
+`PodSnapshot`:
+
+```bash
+export SNAPSHOT_NAMESPACE=<namespace>
+kubectl get namespace "$SNAPSHOT_NAMESPACE"
+```
 
 In the manifest, set the container `image` to the one built for the source and set
 the `restore-from` annotation to the `PodSnapshot` name, then apply it and watch the
 rollout (the Deployment is named `<framework>-restored`):
 
 ```bash
-kubectl apply -f restore-deployment.yaml
-kubectl rollout status deployment/<framework>-restored -n my-inference --timeout=30m
+kubectl apply \
+  --namespace "$SNAPSHOT_NAMESPACE" \
+  --filename restore-deployment.yaml
+
+kubectl rollout status \
+  --namespace "$SNAPSHOT_NAMESPACE" \
+  deployment/<framework>-restored \
+  --timeout=30m
 ```
+
+The container starts as an inert `sleep infinity` placeholder, as the
+[restore Pod contract](../reference/restore-pod-contract.md) requires: the agent
+restores the checkpointed process into it as a sibling, so running the
+application there would only load a second copy of the model. Readiness
+therefore waits on the framework's post-restore sentinel — `vllm-restore-ready`
+and its equivalents — not the `ready-for-snapshot` file the source pod writes.
 
 The node agent adds a `nvidia.com/Restored` condition to the pod once the restore
 completes — watch it, along with pod readiness, to confirm. If the restored
