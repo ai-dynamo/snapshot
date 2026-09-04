@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import time
+import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -64,10 +65,16 @@ def generate_text(engine: Any, prompt: str) -> str:
 def pause_generation(engine: Any) -> None:
     from sglang.srt.managers.io_struct import PauseGenerationReqInput
 
+    # "retract" drains the scheduler before pausing: it processes any pending
+    # overlap result, clears last_batch and running_batch, and re-queues
+    # unfinished requests (there are none here; the warm-up generation has
+    # returned). release_memory_occupation() asserts is_fully_idle(), which
+    # also requires last_batch to be empty. The default "in_place" mode freezes
+    # scheduler state untouched, so pausing right after a generation leaves a
+    # stale last_batch and the release fails with "should be called only when
+    # server is idle" (SGLang 0.5.17).
     engine.loop.run_until_complete(
-        engine.tokenizer_manager.pause_generation(
-            PauseGenerationReqInput(mode="abort")
-        )
+        engine.tokenizer_manager.pause_generation(PauseGenerationReqInput(mode="retract"))
     )
 
 
@@ -158,13 +165,26 @@ def main() -> None:
         while not CONTROL_DIR.joinpath("restore-complete").exists():
             time.sleep(1)
 
-        engine.resume_memory_occupation()
-        continue_generation(engine)
-        os.environ.pop("HF_HUB_OFFLINE", None)
+        # The restored process keeps the source container's stdout, which is
+        # gone; a failure here would otherwise be invisible. Record it in the
+        # control directory next to the success sentinel.
+        try:
+            progress = CONTROL_DIR.joinpath("sglang-restore-progress")
+            engine.resume_memory_occupation()
+            progress.write_text("memory-resumed\n", encoding="utf-8")
+            continue_generation(engine)
+            progress.write_text("generation-continued\n", encoding="utf-8")
 
-        text = generate_text(engine, "The capital city of Germany is")
-        print(f"SGLang restored output={text!r}", flush=True)
-        serve_api(engine, text)
+            text = generate_text(engine, "The capital city of Germany is")
+            progress.write_text("generated\n", encoding="utf-8")
+            print(f"SGLang restored output={text!r}", flush=True)
+            serve_api(engine, text)
+        except Exception:
+            CONTROL_DIR.joinpath("sglang-restore-error").write_text(
+                traceback.format_exc(),
+                encoding="utf-8",
+            )
+            raise
     finally:
         engine.shutdown()
 

@@ -37,9 +37,19 @@ spec:
             - /bin/sh
             - -c
             - exec sleep infinity
+          # SYS_PTRACE: lets py-spy attach to sibling processes in this
+          # container for post-restore diagnostics (see e2e debug_dump_framework).
+          securityContext:
+            capabilities:
+              add: ["SYS_PTRACE"]
           env:
             - name: SNAPSHOT_MODEL
               value: Qwen/Qwen3-0.6B
+            # See deployment.yaml: matches the source container's env so a
+            # restarted placeholder (pre-restore) behaves identically; the
+            # actual restored process's environment comes from the checkpoint.
+            - name: VLLM_WORKER_MULTIPROC_METHOD
+              value: spawn
             - name: SNAPSHOT_CONTROL_DIR
               value: /snapshot-control
           ports:

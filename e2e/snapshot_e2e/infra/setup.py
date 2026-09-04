@@ -504,7 +504,7 @@ def create_vcluster(namespace: str, name: str, k8s_version: str) -> None:
     if node_selector:
         synced_nodes["selector"]["labels"] = node_selector
 
-    values = {
+    values: dict[str, Any] = {
         "controlPlane": {
             "hostPathMapper": {
                 "enabled": True,
@@ -522,6 +522,12 @@ def create_vcluster(namespace: str, name: str, k8s_version: str) -> None:
             },
         },
     }
+    if os.environ.get("SNAPSHOT_E2E_MODEL_CACHE_SERVER"):
+        # The framework tests create a static NFS PersistentVolume for the
+        # shared model cache. Sync it to the host so its mount options are
+        # honored by the node; without this vCluster rewrites the claim to a
+        # host-provisioned volume and the NFS spec is lost.
+        values["sync"]["toHost"] = {"persistentVolumes": {"enabled": True}}
     values_file = write_temp_yaml("snapshot-vcluster-values-", values)
     try:
         run(

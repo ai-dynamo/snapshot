@@ -217,6 +217,60 @@ def wait_for_file(namespace: str, pod: str, path: str, timeout: int = 180) -> No
     wait_for(f"{namespace}/{pod}:{path}", exists, timeout, detail=detail)
 
 
+def wait_for_restore_outcome(
+    namespace: str,
+    pod: str,
+    *,
+    ready_file: str,
+    error_file: str,
+    timeout: int,
+) -> str:
+    """Waits for the restored program's success sentinel, failing fast on its
+    error sentinel. Returns the ready file's content.
+
+    The restored process writes one of the two files; anything else it prints
+    goes to the source container's stdout, which no longer exists. Polling for
+    the ready file alone turns every post-restore exception into a timeout.
+    """
+    marker = "__snapshot_e2e_outcome__"
+    last_error: str | None = None
+
+    def outcome() -> str | None:
+        nonlocal last_error
+        try:
+            output = k8s.exec_command(
+                namespace,
+                pod,
+                f"if [[ -f {shlex.quote(error_file)} ]]; then printf '%s:error\\n' {shlex.quote(marker)}; "
+                f"cat {shlex.quote(error_file)}; "
+                f"elif [[ -f {shlex.quote(ready_file)} ]]; then printf '%s:ready\\n' {shlex.quote(marker)}; "
+                f"cat {shlex.quote(ready_file)}; fi",
+            )
+            last_error = None
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            return None
+        if output.startswith(f"{marker}:error"):
+            body = output.split("\n", 1)[1] if "\n" in output else ""
+            raise AssertionError(
+                f"restored program in {namespace}/{pod} failed after restore "
+                f"({error_file}):\n{body}"
+            )
+        if output.startswith(f"{marker}:ready"):
+            return output.split("\n", 1)[1] if "\n" in output else ""
+        return None
+
+    def detail() -> str:
+        return f"last_error={last_error}" if last_error else "neither sentinel observed yet"
+
+    return wait_for(
+        f"{namespace}/{pod} restore outcome ({ready_file} or {error_file})",
+        outcome,
+        timeout,
+        detail=detail,
+    )
+
+
 def matching_observation_count(
     namespace: str,
     pod: str,
@@ -445,7 +499,7 @@ def wait_for_restored_condition(
         except ApiException as exc:
             return f"api_error={k8s.api_error_detail(exc)}"
         restored = pod_condition(pod, "nvidia.com/Restored")
-        return f"nvidia.com/Restored={restored or '<unset>'}"
+        return f"nvidia.com/Restored={condition_summary(restored)}"
 
     return wait_for(
         f"nvidia.com/Restored={status}/{reason} on {namespace}/{pod_name}",
@@ -460,6 +514,40 @@ def pod_condition(pod: client.V1Pod, condition_type: str) -> client.V1PodConditi
         if item.type == condition_type:
             return item
     return None
+
+
+def condition_summary(cond: object) -> str:
+    """One-line, human-readable rendering of a Kubernetes condition.
+
+    The client's model objects repr as multi-line dicts with ``datetime``
+    objects, which is unreadable in a wait loop's progress line. Works for
+    typed models (``V1PodCondition``, ``V1JobCondition``) and for the plain
+    dicts custom objects return.
+    """
+    if cond is None:
+        return "<unset>"
+    if isinstance(cond, dict):
+        get = cond.get
+    else:
+        get = lambda key, default=None: getattr(cond, key, default)
+    at = get("last_transition_time") or get("lastTransitionTime")
+    if hasattr(at, "isoformat"):
+        at = at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    parts = [f"status={get('status')}", f"reason={get('reason')}"]
+    if get("message"):
+        parts.append(f"message={get('message')!r}")
+    if at:
+        parts.append(f"at={at}")
+    return " ".join(parts)
+
+
+def conditions_summary(conds: object) -> str:
+    if not conds:
+        return "[]"
+    return "[" + "; ".join(
+        f"{(c.get('type') if isinstance(c, dict) else getattr(c, 'type', None))}: {condition_summary(c)}"
+        for c in conds
+    ) + "]"
 
 
 def checkpoint_artifact_manifest(
@@ -541,6 +629,28 @@ def create_artifact_staging_file(
         checkpoint_agent_pod(config, node),
         f"mkdir -p {checkpoint_artifact_root(content_uid)}/.tmp && "
         f"printf orphan > {checkpoint_artifact_root(content_uid)}/.tmp/partial",
+    )
+
+
+def host_monitoring_agents(config: k8s.E2EConfig, node: str) -> str:
+    """Host-level monitoring agents (Datadog, DCGM) running on ``node``.
+
+    The snapshot agent is privileged with hostPID, so ``ps`` inside it lists
+    the node's processes, including agents that live in other clusters'
+    namespaces (the CI vcluster cannot see the host cluster's ``datadog``
+    namespace). Datadog's GPU monitoring attaches to GPU processes via
+    system-probe and NVML, which is a candidate interferer for CRIU/CUDA
+    checkpoint and restore; record whether it is present on every run so a
+    flaky failure can be correlated with it.
+    """
+    agent = checkpoint_agent_pod(config, node)
+    return k8s.exec_command(
+        config.namespace,
+        agent,
+        "ps -eo pid,ppid,user,comm,args --no-headers 2>/dev/null "
+        "| grep -iE 'datadog|dd-agent|system-probe|process-agent|trace-agent|security-agent|dcgm' "
+        "| grep -vE 'grep -iE' "
+        "|| echo '<no datadog/dcgm processes on host>'",
     )
 
 
@@ -783,7 +893,7 @@ def debug_dump_snapshotjob(config: k8s.E2EConfig, run: TestRun) -> None:
         print(
             f"source Job {job.metadata.name} active={job.status.active} "
             f"succeeded={job.status.succeeded} failed={job.status.failed} "
-            f"startTime={job.status.start_time} conditions={job.status.conditions}"
+            f"startTime={job.status.start_time} conditions={conditions_summary(job.status.conditions)}"
         )
     api = client.CustomObjectsApi()
     try:
@@ -829,6 +939,34 @@ def ensure_pvc(body: dict[str, Any]) -> None:
         print(f"PVC {namespace}/{name} already exists")
 
 
+def ensure_pv(body: dict[str, Any]) -> None:
+    """Creates the cluster-scoped PersistentVolume if it does not exist.
+
+    An existing PV must describe the same NFS export: the name is fixed and the
+    reclaim policy is Retain, so on a reused cluster a changed
+    SNAPSHOT_E2E_MODEL_CACHE_SERVER/PATH would otherwise keep mounting the old
+    export silently. Replacing a Retain PV is the operator's decision, not the
+    test's, so mismatch fails loudly instead.
+    """
+    name = body["metadata"]["name"]
+    api = client.CoreV1Api()
+    try:
+        api.create_persistent_volume(body)
+        print(f"created PV {name}")
+    except ApiException as exc:
+        if exc.status != 409:
+            raise
+        existing = api.read_persistent_volume(name)
+        wanted = body["spec"]["nfs"]
+        actual = {"server": existing.spec.nfs.server, "path": existing.spec.nfs.path} if existing.spec.nfs else None
+        if actual != wanted:
+            raise AssertionError(
+                f"PV {name} already exists with nfs={actual}, but the configured shared model "
+                f"cache is nfs={wanted}; delete the PV or point SNAPSHOT_E2E_MODEL_CACHE_* at it"
+            )
+        print(f"PV {name} already exists with the configured export")
+
+
 def debug_dump_framework(
     config: k8s.E2EConfig,
     run: TestRun,
@@ -845,8 +983,30 @@ def debug_dump_framework(
     """
     print("\n--- framework e2e debug ---")
     print(f"namespace={config.namespace} test={run.suffix} framework_image={image or '<unknown>'}")
-    core = client.CoreV1Api()
-    pods = core.list_namespaced_pod(
+    # Every section is isolated: the caller re-raises the original test
+    # failure after this returns, so nothing here may raise, and one section
+    # failing (a pod deleted mid-dump, an apiserver hiccup) must not hide the
+    # others.
+    _dump_section("pods", lambda: _dump_framework_pods(config, run))
+    _dump_section("custom objects", lambda: print_custom_objects(config, run))
+    _dump_section("controller logs", lambda: print_snapshot_controller_logs(config))
+    if source_node:
+        _dump_section(
+            "agent diagnostics", lambda: _dump_agent_diagnostics(config, run, source_node)
+        )
+    _dump_section("events", lambda: _dump_run_events(config, run))
+    print("--- end debug ---\n")
+
+
+def _dump_section(title: str, dump: Callable[[], None]) -> None:
+    try:
+        dump()
+    except Exception as exc:  # noqa: BLE001 - debug helper must never mask the real failure
+        print(f"{title} unavailable: {type(exc).__name__}: {exc}")
+
+
+def _dump_framework_pods(config: k8s.E2EConfig, run: TestRun) -> None:
+    pods = client.CoreV1Api().list_namespaced_pod(
         config.namespace, label_selector=f"snapshot-e2e-test={run.suffix}"
     ).items
     if not pods:
@@ -862,34 +1022,114 @@ def debug_dump_framework(
         ):
             print(f"  container {cs.name} ready={cs.ready} restarts={cs.restart_count} state={cs.state}")
         print(f"control dir: {snapshot_control_listing(config.namespace, name)}")
-        print(f"--- logs {name} (tail 400) ---")
-        print(k8s.pod_logs(config.namespace, name, tail_lines=400))
-    print_custom_objects(config, run)
-    print_snapshot_controller_logs(config)
-    if source_node:
-        try:
-            agent = checkpoint_agent_pod(config, source_node)
-            print(f"--- agent {agent} on {source_node} (tail 200) ---")
-            print(k8s.pod_logs(config.namespace, agent, tail_lines=200))
-            print(f"--- nvidia-smi on {source_node} ---")
-            print(k8s.exec_command(config.namespace, agent, "nvidia-smi 2>&1 || true"))
-        except Exception as exc:  # noqa: BLE001 - debug helper must never mask the real failure
-            print(f"agent diagnostics unavailable: {type(exc).__name__}: {exc}")
+        # The restored process tree is invisible in the container log; its
+        # process list, listening sockets, and any error sentinel are the only
+        # in-pod evidence of what it is doing.
+        _dump_section(f"runtime state {name}", lambda name=name: _dump_pod_runtime_state(config, name))
+        _dump_section(f"logs {name}", lambda name=name: _dump_pod_logs(config, name))
+
+
+def _dump_pod_runtime_state(config: k8s.E2EConfig, name: str) -> None:
+    print(f"--- processes / sockets / error sentinels in {name} ---")
+    print(pod_runtime_state(config.namespace, name))
+
+
+def _dump_pod_logs(config: k8s.E2EConfig, name: str) -> None:
+    print(f"--- logs {name} (tail 400) ---")
+    print(k8s.pod_logs(config.namespace, name, tail_lines=400))
+
+
+def _dump_agent_diagnostics(config: k8s.E2EConfig, run: TestRun, source_node: str) -> None:
+    agent = checkpoint_agent_pod(config, source_node)
+    _dump_section("agent logs", lambda: _dump_agent_logs(config, agent, source_node))
+    _dump_section("nvidia-smi", lambda: _dump_nvidia_smi(config, agent, source_node))
+    _dump_section("host monitoring agents", lambda: _dump_host_monitoring(config, source_node))
+    _dump_section("kernel log", lambda: _dump_kernel_log(config, agent, source_node))
+    _dump_section("checkpoint artifact", lambda: _dump_checkpoint_artifact(config, run, agent, source_node))
+
+
+def _dump_agent_logs(config: k8s.E2EConfig, agent: str, source_node: str) -> None:
+    print(f"--- agent {agent} on {source_node} (tail 200) ---")
+    print(k8s.pod_logs(config.namespace, agent, tail_lines=200))
+
+
+def _dump_nvidia_smi(config: k8s.E2EConfig, agent: str, source_node: str) -> None:
+    print(f"--- nvidia-smi on {source_node} ---")
+    print(k8s.exec_command(config.namespace, agent, "nvidia-smi 2>&1 || true"))
+
+
+def _dump_host_monitoring(config: k8s.E2EConfig, source_node: str) -> None:
+    print(f"--- host monitoring agents (datadog/dcgm) on {source_node} ---")
+    print(host_monitoring_agents(config, source_node))
+
+
+def _dump_kernel_log(config: k8s.E2EConfig, agent: str, source_node: str) -> None:
+    # A CRIU crash ("criu swrk failed: signal: segmentation fault") leaves
+    # no restore.log behind; the kernel's trap line is then the only
+    # record of where it died. The agent is privileged with hostPID, so
+    # its dmesg is the node's.
+    # Also match memory-pressure kills: a task in the seized tree dying with
+    # SIGKILL mid-dump is either the OOM killer (visible here) or a userspace
+    # killer (not visible here); the two need different investigations.
+    print(f"--- kernel log (criu/segfault/oom) on {source_node} ---")
+    print(
+        k8s.exec_command(
+            config.namespace,
+            agent,
+            "dmesg -T 2>/dev/null "
+            "| grep -iE 'criu|segfault|traps|nsrestore|cuda|out of memory|killed process|oom|memory cgroup' "
+            "| tail -40 || echo '<dmesg unavailable>'",
+        )
+    )
+
+
+def _dump_checkpoint_artifact(
+    config: k8s.E2EConfig, run: TestRun, agent: str, source_node: str
+) -> None:
+    content_uid = bound_content_uid(config, run.snapshot_name)
+    if not content_uid:
+        print("no bound PodSnapshotContent; nothing to list")
+        return
+    root = checkpoint_artifact_root(content_uid)
+    print(f"--- checkpoint artifact {content_uid} on {source_node} ---")
+    print(
+        k8s.exec_command(
+            config.namespace,
+            agent,
+            f"ls -la {root}/containers/* 2>&1 | grep -vE ' (core|pagemap|pages|fdinfo|ids|mm|sigacts|fs|tty-info|reg-files|inventory|pstree|files|cgroup|seccomp|timens|utsns|ipcns|netns|mnt|rseq|fanotify|inotify|tls|stats)-?[0-9]*\\.img' 2>&1; "
+            # The diff is applied into the placeholder's rootfs while
+            # the placeholder and then CRIU run from it. Anything under
+            # a library or binary path here is a candidate for
+            # corrupting code that is already mapped.
+            f"for t in {root}/containers/*/rootfs-diff.tar; do "
+            "  if [ -f \"$t\" ]; then echo \"== $t: $(tar -tf \"$t\" | wc -l) entries; libraries/binaries:\"; "
+            "    tar -tf \"$t\" | grep -E '(^|/)(usr/)?(lib|lib64|bin|sbin)/|\\.so(\\.|$)' | head -40; "
+            "    echo '   top-level dirs:'; tar -tf \"$t\" | cut -d/ -f1-2 | sort | uniq -c | sort -rn | head -12; fi; "
+            "done; "
+            # A failed checkpoint never leaves .tmp/, so its dump.log lives
+            # there; the agent log only carries a truncated tail of it.
+            f"for f in {root}/containers/*/restore.log {root}/containers/*/dump.log {root}/.tmp/*/dump.log; do "
+            "  if [ -f \"$f\" ]; then echo \"== $f (errors, then tail 60)\"; "
+            "    grep -E 'Error \\(|Warn  \\(' \"$f\" | tail -20; tail -60 \"$f\"; fi; "
+            "done",
+        )
+    )
+
+
+def _dump_run_events(config: k8s.E2EConfig, run: TestRun) -> None:
     # Filter first, then order by time: the API returns events unordered, and
     # in a namespace shared with the controllers the run's events need not be
     # in any tail of the raw list.
     names = {run.source_pod, run.restore_pod, run.snapshot_name}
     events = [
         event
-        for event in core.list_namespaced_event(config.namespace).items
+        for event in client.CoreV1Api().list_namespaced_event(config.namespace).items
         if event.involved_object and event.involved_object.name in names
     ]
     events.sort(key=event_time)
     for event in events[-60:]:
         involved = event.involved_object
         print(f"event {involved.kind}/{involved.name} {event.reason}: {event.message}")
-    print("--- end debug ---\n")
-
 
 def event_time(event: client.CoreV1Event) -> datetime:
     return (
@@ -898,6 +1138,58 @@ def event_time(event: client.CoreV1Event) -> datetime:
         or event.metadata.creation_timestamp
         or datetime.min.replace(tzinfo=timezone.utc)
     )
+
+def bound_content_uid(config: k8s.E2EConfig, snapshot_name: str) -> str | None:
+    """UID of the PodSnapshotContent bound to the run's PodSnapshot, if any."""
+    api = client.CustomObjectsApi()
+    try:
+        snap = api.get_namespaced_custom_object(
+            GROUP, VERSION, config.namespace, PODSNAPSHOTS, snapshot_name
+        )
+        content_name = snap.get("status", {}).get("boundSnapshotContentName")
+        if not content_name:
+            return None
+        content = api.get_cluster_custom_object(GROUP, VERSION, PODSNAPSHOTCONTENTS, content_name)
+        return content["metadata"]["uid"]
+    except ApiException:
+        return None
+
+
+def pod_runtime_state(namespace: str, pod: str) -> str:
+    """Process list, listening TCP sockets, and control-dir error sentinels, best-effort."""
+    command = (
+        "ps -eo pid,ppid,stat,etime,rss,cmd --sort=pid 2>/dev/null | cut -c1-200 | head -60 "
+        "|| echo '<ps unavailable>'; "
+        "echo '-- listening (/proc/net/tcp, hex ports) --'; "
+        "awk 'NR>1 && $4==\"0A\" {print $2}' /proc/net/tcp /proc/net/tcp6 2>/dev/null | sort -u; "
+        # Where each thread of the engine processes is blocked in the kernel:
+        # a stuck CUDA driver ioctl, a futex, or a socket read tell very
+        # different stories, and none of them reach the container log.
+        "echo '-- kernel wait channels (pid/tid state wchan) --'; "
+        "for p in $(ps -eo pid,cmd --sort=pid 2>/dev/null | awk 'NR>1 && ($2 ~ /python|sglang|vllm|trtllm/) {print $1}' | head -8); do "
+        "  for t in /proc/$p/task/*; do "
+        "    printf '%s/%s %s %s\\n' \"$p\" \"$(basename $t)\" \"$(awk '{print $3}' $t/stat 2>/dev/null)\" \"$(cat $t/wchan 2>/dev/null)\"; "
+        "  done; "
+        "done | sort | uniq -c | sort -rn | head -40; "
+        # Python stacks of every Python process (the guide images ship py-spy):
+        # the only way to see where a restored program blocks.
+        "echo '-- py-spy dumps --'; "
+        "if command -v py-spy >/dev/null 2>&1; then "
+        "  for p in $(ps -eo pid,cmd --sort=pid 2>/dev/null | awk 'NR>1 && $2 ~ /python/ {print $1}' | head -6); do "
+        "    echo \"== pid $p\"; timeout 20 py-spy dump --pid $p --nonblocking 2>&1 | head -60; "
+        "  done; "
+        "else echo '<py-spy not installed>'; fi; "
+        "echo '-- nvidia-smi --'; "
+        "nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv 2>&1 | head -3; "
+        "nvidia-smi --query-compute-apps=pid,used_memory --format=csv 2>&1 | head -6; "
+        f"for f in {CONTROL_DIR}/*-restore-progress {CONTROL_DIR}/*-restore-error; do "
+        "  if [ -f \"$f\" ]; then echo \"-- $f --\"; cat \"$f\"; fi; "
+        "done"
+    )
+    try:
+        return k8s.exec_command(namespace, pod, command).strip()
+    except Exception as exc:  # noqa: BLE001 - debug helper must never mask the real failure
+        return f"<unavailable: {type(exc).__name__}: {exc}>"
 
 
 def snapshot_control_listing(namespace: str, pod: str) -> str:

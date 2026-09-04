@@ -3,8 +3,19 @@
 
 import asyncio
 import os
+import traceback
 from pathlib import Path
 from uuid import uuid4
+
+# A restore placeholder must stay a minimal, inert process: Snapshot restores
+# the checkpointed tree alongside it, and everything imported here (torch, the
+# CUDA libraries, vLLM) would otherwise be mapped into the placeholder for
+# nothing. Decide before importing the framework.
+if os.environ.get("SNAPSHOT_RESTORE_STANDBY") == "1":
+    import time
+
+    while True:
+        time.sleep(3600)
 
 import uvicorn
 from fastapi import FastAPI
@@ -85,9 +96,6 @@ async def serve_api(engine: AsyncLLM, restored_text: str) -> None:
 
 
 async def main() -> None:
-    if os.environ.get("SNAPSHOT_RESTORE_STANDBY") == "1":
-        await asyncio.Event().wait()
-
     CONTROL_DIR.joinpath("ready-for-snapshot").unlink(missing_ok=True)
 
     engine = AsyncLLM.from_engine_args(
@@ -120,16 +128,30 @@ async def main() -> None:
 
     while True:
         if CONTROL_DIR.joinpath("restore-complete").exists():
-            await engine.wake_up()
-            await engine.resume_generation()
-            await engine.check_health()
-            text = await generate_text(
-                engine,
-                "Reply with one word: restored",
-                "snapshot-restore-check",
-            )
-            print(f"vLLM restored output={text!r}", flush=True)
-            await serve_api(engine, text)
+            # The restored process keeps the source container's stdout, which
+            # is gone; a failure here would otherwise be invisible. Record it
+            # in the control directory next to the success sentinel.
+            try:
+                progress = CONTROL_DIR.joinpath("vllm-restore-progress")
+                await engine.wake_up()
+                progress.write_text("woken\n", encoding="utf-8")
+                await engine.resume_generation()
+                await engine.check_health()
+                progress.write_text("generation-resumed\n", encoding="utf-8")
+                text = await generate_text(
+                    engine,
+                    "Reply with one word: restored",
+                    "snapshot-restore-check",
+                )
+                progress.write_text("generated\n", encoding="utf-8")
+                print(f"vLLM restored output={text!r}", flush=True)
+                await serve_api(engine, text)
+            except Exception:
+                CONTROL_DIR.joinpath("vllm-restore-error").write_text(
+                    traceback.format_exc(),
+                    encoding="utf-8",
+                )
+                raise
         await asyncio.sleep(1)
 
 

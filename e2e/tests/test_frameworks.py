@@ -53,18 +53,34 @@ def test_framework_checkpoint_restore_serves_inference(
 ) -> None:
     source_node: str | None = None
     try:
-        pvc = fw.model_cache_pvc(config=config, spec=framework)
-        if pvc is not None:
+        # Shared NFS cache when configured (offline, no download); otherwise the
+        # guide's own cache plumbing, which downloads from Hugging Face.
+        model_cache = frameworks.SharedModelCache.from_env()
+        if model_cache is not None:
+            pv, pvc = fw.shared_model_cache_volume(config=config, cache=model_cache)
+            snap.ensure_pv(pv)
             snap.ensure_pvc(pvc)
+        else:
+            guide_pvc = fw.model_cache_pvc(config=config, spec=framework)
+            if guide_pvc is not None:
+                snap.ensure_pvc(guide_pvc)
 
         # --- source: load, generate, pause, ready-for-snapshot -------------
-        k8s.create_pod(fw.source_pod(config=config, run=run, spec=framework))
+        k8s.create_pod(
+            fw.source_pod(config=config, run=run, spec=framework, model_cache=model_cache)
+        )
         source = snap.wait_for_pod_ready(
             config.namespace,
             run.source_pod,
             timeout=frameworks.SOURCE_READY_TIMEOUT_SECONDS,
         )
         source_node = source.spec.node_name
+        # Recorded on success too, so a flaky restore failure can be correlated
+        # with whether Datadog GPU monitoring was active on the node.
+        print(
+            f"[{framework.name}] host monitoring agents on {source_node}:\n"
+            f"{snap.host_monitoring_agents(config, source_node)}"
+        )
 
         precheck = inference.read_control_file(
             config.namespace, run.source_pod, framework.precheck_file
@@ -95,26 +111,28 @@ def test_framework_checkpoint_restore_serves_inference(
 
         # --- restore --------------------------------------------------------
         k8s.create_pod(
-            fw.restore_pod(config=config, run=run, spec=framework, source_node=source_node)
+            fw.restore_pod(
+                config=config,
+                run=run,
+                spec=framework,
+                source_node=source_node,
+                model_cache=model_cache,
+            )
         )
         snap.wait_for_restored_condition(
             config.namespace,
             run.restore_pod,
             "True",
             "RestoreSucceeded",
-            timeout=frameworks.RESTORE_TIMEOUT_SECONDS,
+            timeout=framework.restore_timeout_seconds,
         )
-        snap.wait_for_file(
+        restored_text = snap.wait_for_restore_outcome(
             config.namespace,
             run.restore_pod,
-            framework.restore_ready_file,
-            timeout=frameworks.RESTORE_TIMEOUT_SECONDS,
-        )
-        restored_text = inference.read_control_file(
-            config.namespace, run.restore_pod, framework.restore_ready_file
-        )
-        assert restored_text is not None, f"{framework.restore_ready_file} missing"
-        restored_text = restored_text.strip()
+            ready_file=framework.restore_ready_file,
+            error_file=framework.restore_error_file,
+            timeout=framework.restore_timeout_seconds,
+        ).strip()
         assert restored_text, f"{framework.restore_ready_file} is empty"
         print(f"[{framework.name}] first post-restore generation: {restored_text!r}")
 

@@ -31,11 +31,26 @@ API_PORT = 8000
 PROMPT = "Reply with one short sentence confirming this restored worker can serve."
 REQUEST_TIMEOUT_SECONDS = 120
 
-# Phase budgets. The source budget covers image pull, model download, engine
-# load, and the warm-up generation; the checkpoint budget covers the dump and
-# artifact upload; the restore budget covers the agent restore plus the
-# program's own resume and the first post-restore generation.
-SOURCE_READY_TIMEOUT_SECONDS = 300
+# Phase budgets. The source budget covers image pull, model download or cache
+# load, engine load, compilation/CUDA-graph capture, and the warm-up
+# generation; the checkpoint budget covers the dump and artifact upload; the
+# restore budget covers the agent restore plus the program's own resume and
+# the first post-restore generation.
+#
+# The first run on a node pulls a 10-20 GB runtime image (observed: ~4 min on
+# the CI cluster) before the engine even starts, and vLLM then compiles and
+# captures CUDA graphs; 300s was exceeded with the engine still initializing.
+#
+# test_frameworks.py waits on restore_timeout_seconds twice in sequence
+# (wait_for_restored_condition, then wait_for_restore_outcome), so the restore
+# budget below counts double. The CI step running the test must exceed
+# SOURCE_READY_TIMEOUT_SECONDS + CHECKPOINT_TIMEOUT_SECONDS +
+# POD_DELETE_TIMEOUT_SECONDS + 2 * restore_timeout_seconds +
+# REQUEST_TIMEOUT_SECONDS, or GitHub kills pytest before the failure dump
+# runs; see the test step in e2e-frameworks.yaml. With sglang's 600s
+# restore_timeout_seconds override that's 900 + 300 + 180 + 2*600 + 120 =
+# 2700s (~45 min) today, the largest of the three frameworks' budgets.
+SOURCE_READY_TIMEOUT_SECONDS = 900
 CHECKPOINT_TIMEOUT_SECONDS = 300
 RESTORE_TIMEOUT_SECONDS = 300
 POD_DELETE_TIMEOUT_SECONDS = 180
@@ -51,8 +66,15 @@ class FrameworkSpec:
     # Written by the restored process once its API is listening; holds the
     # first post-restore generation.
     restore_ready_file: str
+    # Written by the restored process if resuming or serving raised; holds the
+    # traceback. The restored process keeps the dead source container's stdout,
+    # so this file is the only place such a failure is visible.
+    restore_error_file: str
     # Guide PVC manifest for a persistent model cache, if the guide uses one.
     model_cache_manifest: str | None = None
+    # Overrides RESTORE_TIMEOUT_SECONDS for this framework's restore-condition
+    # and restore-outcome waits.
+    restore_timeout_seconds: int = RESTORE_TIMEOUT_SECONDS
 
     @property
     def guide_dir(self) -> Path:
@@ -79,21 +101,65 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         model="Qwen/Qwen3-0.6B",
         precheck_file="/snapshot-control/vllm-precheck",
         restore_ready_file="/snapshot-control/vllm-restore-ready",
+        restore_error_file="/snapshot-control/vllm-restore-error",
     ),
     "sglang": FrameworkSpec(
         name="sglang",
         model="Qwen/Qwen3-0.6B",
         precheck_file="/snapshot-control/sglang-precheck",
         restore_ready_file="/snapshot-control/sglang-restore-ready",
+        restore_error_file="/snapshot-control/sglang-restore-error",
         model_cache_manifest="model-cache-pvc.yaml",
+        # engine.resume_memory_occupation() has come within seconds of the
+        # default 300s budget in CI; give it more room than the other
+        # frameworks need.
+        restore_timeout_seconds=600,
     ),
     "tensorrt-llm": FrameworkSpec(
         name="tensorrt-llm",
         model="Qwen/Qwen3-0.6B",
         precheck_file="/snapshot-control/trtllm-precheck",
         restore_ready_file="/snapshot-control/trtllm-restore-ready",
+        restore_error_file="/snapshot-control/trtllm-restore-error",
     ),
 }
+
+
+@dataclass(frozen=True)
+class SharedModelCache:
+    """An NFS export holding a Hugging Face cache in HF_HOME layout.
+
+    CI clusters commonly block or throttle model downloads from the pods, and
+    even where they work, pulling weights on every run is wasted minutes. With
+    a shared cache the framework pods mount the export at MODEL_CACHE_MOUNT,
+    point HF_HOME at it, and run offline; the guide's own per-deployment cache
+    (SGLang's download init container and PVC) is replaced, not duplicated.
+    """
+
+    server: str
+    path: str
+    pvc_name: str
+
+    @classmethod
+    def from_env(cls) -> "SharedModelCache | None":
+        server = os.environ.get("SNAPSHOT_E2E_MODEL_CACHE_SERVER", "").strip()
+        path = os.environ.get("SNAPSHOT_E2E_MODEL_CACHE_PATH", "").strip()
+        if not server and not path:
+            return None
+        if not (server and path):
+            raise RuntimeError(
+                "SNAPSHOT_E2E_MODEL_CACHE_SERVER and SNAPSHOT_E2E_MODEL_CACHE_PATH "
+                "must be set together"
+            )
+        return cls(
+            server=server,
+            path=path,
+            pvc_name=os.environ.get("SNAPSHOT_E2E_MODEL_CACHE_PVC", "model-cache"),
+        )
+
+
+MODEL_CACHE_MOUNT = "/models"
+MODEL_CACHE_VOLUME = "model-cache"
 
 
 def selected_frameworks() -> list[str]:
