@@ -220,19 +220,21 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		result.CRIUPrepareDuration,
 		result.CRIURestoreDuration,
 		result.CUDARestoreDuration,
+		result.CuinterposeRestoreDuration,
 	)
 	summary := map[string]any{
 		"duration": wall.String(),
 		"phases": map[string]string{
-			"pagebroker_stage":  pageBrokerStageDuration.String(),
-			"pagebroker_mount":  pageBrokerMountDuration.String(),
-			"pagebroker_commit": pageBrokerCommitDuration.String(),
-			"gpu_device_map":    gpuDeviceMapDuration.String(),
-			"overlay_capture":   result.OverlayCaptureDuration.String(),
-			"criu_prepare":      result.CRIUPrepareDuration.String(),
-			"criu_restore":      result.CRIURestoreDuration.String(),
-			"cuda_restore":      result.CUDARestoreDuration.String(),
-			"unaccounted":       unaccounted.String(),
+			"pagebroker_stage":    pageBrokerStageDuration.String(),
+			"pagebroker_mount":    pageBrokerMountDuration.String(),
+			"pagebroker_commit":   pageBrokerCommitDuration.String(),
+			"gpu_device_map":      gpuDeviceMapDuration.String(),
+			"overlay_capture":     result.OverlayCaptureDuration.String(),
+			"criu_prepare":        result.CRIUPrepareDuration.String(),
+			"criu_restore":        result.CRIURestoreDuration.String(),
+			"cuda_restore":        result.CUDARestoreDuration.String(),
+			"cuinterpose_restore": result.CuinterposeRestoreDuration.String(),
+			"unaccounted":         unaccounted.String(),
 		},
 	}
 	if !req.StartedAt.IsZero() {

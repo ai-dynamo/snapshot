@@ -15,6 +15,7 @@ import (
 	"github.com/go-logr/logr/testr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
@@ -270,5 +271,30 @@ func TestMountRestoreInputsReturnsEarlierMountsOnFailure(t *testing.T) {
 	}
 	if len(mounted) != 1 || mounted[0].action != "unmount CUDA tools from placeholder" {
 		t.Fatalf("earlier mounts must be returned for cleanup, got %+v", mounted)
+	}
+}
+
+func TestRequireCuinterposeState(t *testing.T) {
+	dir := t.TempDir()
+	plain := &types.CheckpointManifest{}
+	if err := requireCuinterposeState(plain, dir); err != nil {
+		t.Fatalf("a checkpoint without cuinterpose needs no state file: %v", err)
+	}
+	prepared := &types.CheckpointManifest{
+		CUDA:        types.NewCUDAManifest([]int{1}, nil),
+		Cuinterpose: types.CuinterposeManifest{Requested: true, Prepared: true},
+	}
+	if err := requireCuinterposeState(prepared, dir); err == nil {
+		t.Fatal("a prepared checkpoint without its state file must be refused")
+	}
+	if err := os.WriteFile(dir+"/"+cuda.CuinterposeStateFile, []byte("cuinterpose-state-v2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := requireCuinterposeState(prepared, dir); err != nil {
+		t.Fatalf("state present: %v", err)
+	}
+	noCUDA := &types.CheckpointManifest{Cuinterpose: types.CuinterposeManifest{Prepared: true}}
+	if err := requireCuinterposeState(noCUDA, dir); err == nil {
+		t.Fatal("prepared without CUDA processes is inconsistent")
 	}
 }
