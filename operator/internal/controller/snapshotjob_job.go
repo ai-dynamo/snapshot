@@ -76,5 +76,11 @@ func buildShapedSourceJob(
 	if err != nil {
 		return nil, nil, err
 	}
+	if err := podcontract.ShapeCuinterposeCapture(
+		&job.Spec.Template,
+		sj.Spec.PodSnapshotTemplate.TargetContainers,
+	); err != nil {
+		return nil, nil, err
+	}
 	return job, wrapped, nil
 }
