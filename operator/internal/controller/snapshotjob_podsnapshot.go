@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -194,6 +195,20 @@ func buildPodSnapshot(sj *snapshotv1alpha1.SnapshotJob, pod *corev1.Pod) (*snaps
 	labels, annotations, err := podSnapshotTemplateMetadata(sj)
 	if err != nil {
 		return nil, err
+	}
+	// Record on the PodSnapshot whether the source ran with cuinterpose, so
+	// the restore side knows to mount the shim at its capture-time path.
+	cuinterposeEnabled, err := podcontract.CuinterposeEnabled(pod.Annotations)
+	if err != nil {
+		return nil, err
+	}
+	if cuinterposeEnabled {
+		if annotations == nil {
+			annotations = make(map[string]string, 1)
+		}
+		annotations[podcontract.CuinterposeAnnotation] = podcontract.CuinterposeAnnotationEnabled
+	} else {
+		delete(annotations, podcontract.CuinterposeAnnotation)
 	}
 	return &snapshotv1alpha1.PodSnapshot{
 		TypeMeta: metav1.TypeMeta{

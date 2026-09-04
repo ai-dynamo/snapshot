@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -56,6 +57,9 @@ type SnapshotJobReconciler struct {
 	client.Client
 	NonCacheReadClient client.Reader
 	Recorder           record.EventRecorder
+	// Cuinterpose says where the CUDA interposer shim is delivered from when a
+	// SnapshotJob opts in (podcontract.CuinterposeAnnotation).
+	Cuinterpose podcontract.CuinterposeDelivery
 }
 
 type snapshotJobFailure struct {
@@ -146,7 +150,7 @@ func (r *SnapshotJobReconciler) reconcileResources(ctx context.Context, sj *snap
 			}
 			return r.reconcileAcceptedSourceJob(ctx, sj, authoritativeJob)
 		}
-		desiredJob, buildErr := buildSourceJob(sj)
+		desiredJob, buildErr := buildSourceJobWithDelivery(sj, r.Cuinterpose)
 		if buildErr != nil {
 			return terminalObservation(snapshotv1alpha1.ReasonInvalidSpec, buildErr), ctrl.Result{}, nil
 		}

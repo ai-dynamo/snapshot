@@ -42,6 +42,24 @@ type MountPoint interface {
 	NsFd() *os.File
 }
 
+// MountCuinterpose exposes the cuinterpose shim and cuda-checkpoint at the
+// path the source workload used (podcontract.CuinterposeMountPath). Both the
+// source and destination are fixed inside the ns-bind-mount helper.
+func (nsm *NSMounter) MountCuinterpose(
+	ctx context.Context,
+	namespaceMount MountPoint,
+) (MountPoint, error) {
+	if namespaceMount == nil || namespaceMount.NsFd() == nil {
+		return nil, fmt.Errorf("mount cuinterpose: pinned mount namespace is required")
+	}
+	nsm.log.Info("mounting cuinterpose into placeholder namespace")
+	ref, err := nsm.mounter.MountCuinterpose(ctx, namespaceMount.NsFd())
+	if err != nil {
+		return nil, err
+	}
+	return &mountPoint{mount: ref}, nil
+}
+
 // NSMounter installs the binary bundle and a selected checkpoint artifact at
 // their fixed destinations in a placeholder container's mount namespace.
 type NSMounter struct {

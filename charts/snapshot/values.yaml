@@ -14,6 +14,16 @@ image:
     tag: ""
     pullPolicy: Always
 
+# cuinterpose is the CUDA interposer that lets Snapshot checkpoint CUDA memory
+# shared between processes. Source Pods opt in with the annotation
+# nvidia.com/cuinterpose: enabled; the operator then adds an init container that
+# copies the shim out of image.agent into the workload Pod.
+cuinterpose:
+  # Names of imagePullSecrets that exist in the workload namespaces, added to
+  # opted-in source Pods so the init container can pull image.agent from a
+  # private registry. The DaemonSet's own pull secrets do not apply there.
+  imagePullSecrets: []
+
 replicaCount: 1
 
 operator:

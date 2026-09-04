@@ -16,6 +16,8 @@ import (
 	"testing"
 
 	"github.com/go-logr/logr"
+
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
 func writeFakeBinary(t *testing.T, script string) string {
@@ -191,10 +193,29 @@ func TestCHelperRejectsUnsafeSourcesBeforeMountSyscalls(t *testing.T) {
 	for _, args := range [][]string{
 		{"mount-fd", "3", "/etc", "/tmp/checkpoint"},
 		{"mount-bundle-fd", "3", "/etc"},
+		{"mount-cuinterpose-fd", "3", "/etc"},
 		{"unmount-checkpoint-fd", "3", "unexpected"},
 	} {
 		if output, err := exec.Command(binary, args...).CombinedOutput(); err == nil {
 			t.Fatalf("helper accepted %v: %s", args, output)
+		}
+	}
+}
+
+// The C helper hard-codes the cuinterpose destination. It must equal the path
+// podcontract bakes into LD_PRELOAD and the cuda-checkpoint command of the
+// source workload, because CRIU re-opens those file-backed mappings by path.
+func TestCHelperCuinterposeDestinationMatchesPodContract(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join("..", "..", "cmd", "ns-bind-mount", "main.c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`#define CUINTERPOSE_DESTINATION "` + podcontract.CuinterposeMountPath + `"`,
+		`#define CUINTERPOSE_SOURCE "` + SnapshotBinSrc + `/cuinterpose"`,
+	} {
+		if !strings.Contains(string(source), want) {
+			t.Errorf("ns-bind-mount/main.c lacks %q", want)
 		}
 	}
 }

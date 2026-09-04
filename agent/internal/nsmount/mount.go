@@ -32,6 +32,7 @@ type mountRef interface {
 
 type mounter interface {
 	MountBundle(ctx context.Context, pid int) (mountRef, error)
+	MountCuinterpose(ctx context.Context, nsFd *os.File) (mountRef, error)
 	MountCheckpoint(ctx context.Context, nsFd *os.File, checkpointPath string) (mountRef, error)
 	MountPageBroker(ctx context.Context, nsFd *os.File, stagingPath string) (mountRef, error)
 }
@@ -89,6 +90,20 @@ func (m *execMounter) MountBundle(ctx context.Context, pid int) (mountRef, error
 }
 
 func (m *execMounter) MountCheckpoint(ctx context.Context, nsFd *os.File, checkpointPath string) (mountRef, error) {
+	return m.mountInNamespace(ctx, nsFd, "mount-checkpoint-fd", "unmount-checkpoint-fd", checkpointPath)
+}
+
+func (m *execMounter) MountCuinterpose(ctx context.Context, nsFd *os.File) (mountRef, error) {
+	return m.mountInNamespace(ctx, nsFd, "mount-cuinterpose-fd", "unmount-cuinterpose-fd")
+}
+
+func (m *execMounter) mountInNamespace(
+	ctx context.Context,
+	nsFd *os.File,
+	mountCmd string,
+	unmountCmd string,
+	args ...string,
+) (mountRef, error) {
 	if nsFd == nil {
 		return nil, fmt.Errorf("mount namespace fd is required")
 	}
@@ -97,7 +112,7 @@ func (m *execMounter) MountCheckpoint(ctx context.Context, nsFd *os.File, checkp
 		return nil, fmt.Errorf("duplicate mount namespace fd: %w", err)
 	}
 	unix.CloseOnExec(dupFd)
-	return m.mount(ctx, os.NewFile(uintptr(dupFd), nsFd.Name()), "mount-checkpoint-fd", "unmount-checkpoint-fd", checkpointPath)
+	return m.mount(ctx, os.NewFile(uintptr(dupFd), nsFd.Name()), mountCmd, unmountCmd, args...)
 }
 
 func (m *execMounter) MountPageBroker(ctx context.Context, nsFd *os.File, stagingPath string) (mountRef, error) {

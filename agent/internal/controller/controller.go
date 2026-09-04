@@ -89,6 +89,7 @@ type restoreArtifact struct {
 	SnapshotName        string
 	ContentUID          string
 	SourceContainerName string
+	Cuinterpose         bool
 	Path                string
 }
 
@@ -96,6 +97,7 @@ type restoreTarget struct {
 	SnapshotName        string
 	ContentUID          string
 	SourceContainerName string
+	Cuinterpose         bool
 }
 
 type restorePlan struct {
@@ -610,7 +612,19 @@ func validateRestoreTarget(pod *corev1.Pod, snapshot *snapshotv1alpha1.PodSnapsh
 	}); err != nil {
 		return nil, nil, err
 	}
-	return &restoreTarget{SnapshotName: snapshot.Name, ContentUID: string(content.UID), SourceContainerName: containerName}, mappings, nil
+	// The PodSnapshot records whether the source ran with the cuinterpose
+	// shim preloaded; restore must then mount the shim at its capture path so
+	// CRIU can re-open the file-backed mappings.
+	cuinterposeEnabled, err := podcontract.CuinterposeEnabled(snapshot.Annotations)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &restoreTarget{
+		SnapshotName:        snapshot.Name,
+		ContentUID:          string(content.UID),
+		SourceContainerName: containerName,
+		Cuinterpose:         cuinterposeEnabled,
+	}, mappings, nil
 }
 
 // resolveRestoreArtifact resolves the validated restore target to its physical
@@ -636,6 +650,7 @@ func (w *NodeController) resolveRestoreArtifact(podKey string, target *restoreTa
 		SnapshotName:        target.SnapshotName,
 		ContentUID:          target.ContentUID,
 		SourceContainerName: target.SourceContainerName,
+		Cuinterpose:         target.Cuinterpose,
 		Path:                path,
 	}, nil
 }
@@ -871,6 +886,7 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (int, error) {
 		ArtifactContainerName:       op.artifact.SourceContainerName,
 		DestinationContainerName:    op.destination,
 		Clientset:                   w.clientset,
+		Cuinterpose:                 op.artifact.Cuinterpose,
 		PageBrokerRequested:         op.pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] == snapshotv1alpha1.PageBrokerAnnotationEnabled,
 		PageBrokerEnabled:           w.config.PageBroker.Enabled,
 		PageBrokerControlSocketPath: w.config.PageBroker.ControlSocketPath,

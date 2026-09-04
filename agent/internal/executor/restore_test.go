@@ -15,6 +15,7 @@ import (
 	"github.com/go-logr/logr/testr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
@@ -191,5 +192,109 @@ func TestRemainingDuration(t *testing.T) {
 	}
 	if remainingDuration(5*time.Second, 4*time.Second, 3*time.Second) != 0 {
 		t.Fatal("remainingDuration should not go negative")
+	}
+}
+
+// recordingMounter records the order of role mounts for mountRestoreInputs.
+type recordingMounter struct {
+	calls   []string
+	failOn  string
+	failErr error
+}
+
+func (m *recordingMounter) record(role string) (nsmount.MountPoint, error) {
+	m.calls = append(m.calls, role)
+	if role == m.failOn {
+		return nil, m.failErr
+	}
+	return testMountPoint{}, nil
+}
+
+func (m *recordingMounter) MountBundle(context.Context, int) (nsmount.MountPoint, error) {
+	return m.record("bundle")
+}
+
+func (m *recordingMounter) MountCuinterpose(context.Context, nsmount.MountPoint) (nsmount.MountPoint, error) {
+	return m.record("cuinterpose")
+}
+
+func (m *recordingMounter) MountArtifact(context.Context, nsmount.MountPoint, string) (nsmount.MountPoint, error) {
+	return m.record("artifact")
+}
+
+func (m *recordingMounter) MountPageBroker(context.Context, nsmount.MountPoint, string) (nsmount.MountPoint, error) {
+	return m.record("pagebroker")
+}
+
+func TestMountRestoreInputsOrdersCuinterposeBeforeStaging(t *testing.T) {
+	cases := map[string]struct {
+		cuinterpose bool
+		staged      string
+		wantCalls   []string
+		wantPath    string
+	}{
+		"plain artifact":            {wantCalls: []string{"artifact"}, wantPath: nsmount.CheckpointDst},
+		"cuinterpose then artifact": {cuinterpose: true, wantCalls: []string{"cuinterpose", "artifact"}, wantPath: nsmount.CheckpointDst},
+		"brokered":                  {staged: "/pagebroker/staging/restore/tx", wantCalls: []string{"pagebroker"}, wantPath: nsmount.PageBrokerDst},
+		"cuinterpose then brokered": {cuinterpose: true, staged: "/pagebroker/staging/restore/tx", wantCalls: []string{"cuinterpose", "pagebroker"}, wantPath: nsmount.PageBrokerDst},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			m := &recordingMounter{}
+			mounted, path, err := mountRestoreInputs(context.Background(), m, RestoreRequest{Cuinterpose: tc.cuinterpose}, testMountPoint{}, "/checkpoints/x", tc.staged)
+			if err != nil {
+				t.Fatalf("mountRestoreInputs: %v", err)
+			}
+			if strings.Join(m.calls, ",") != strings.Join(tc.wantCalls, ",") {
+				t.Fatalf("mount order = %v, want %v", m.calls, tc.wantCalls)
+			}
+			if path != tc.wantPath {
+				t.Fatalf("checkpoint path = %q, want %q", path, tc.wantPath)
+			}
+			if len(mounted) != len(tc.wantCalls) {
+				t.Fatalf("mounted %d, want %d", len(mounted), len(tc.wantCalls))
+			}
+			// The brokered path unmounts the last active mount early; it must
+			// be the staging mount, never the cuinterpose mount.
+			if tc.staged != "" && mounted[len(mounted)-1].action != "unmount PageBroker staging from placeholder" {
+				t.Fatalf("last mount = %q, want the staging mount", mounted[len(mounted)-1].action)
+			}
+		})
+	}
+}
+
+func TestMountRestoreInputsReturnsEarlierMountsOnFailure(t *testing.T) {
+	m := &recordingMounter{failOn: "artifact", failErr: errors.New("boom")}
+	mounted, _, err := mountRestoreInputs(context.Background(), m, RestoreRequest{Cuinterpose: true}, testMountPoint{}, "/checkpoints/x", "")
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("expected the artifact mount error, got %v", err)
+	}
+	if len(mounted) != 1 || mounted[0].action != "unmount cuinterpose from placeholder" {
+		t.Fatalf("earlier mounts must be returned for cleanup, got %+v", mounted)
+	}
+}
+
+func TestRequireCuinterposeState(t *testing.T) {
+	dir := t.TempDir()
+	plain := &types.CheckpointManifest{}
+	if err := requireCuinterposeState(plain, dir); err != nil {
+		t.Fatalf("a checkpoint without cuinterpose needs no state file: %v", err)
+	}
+	prepared := &types.CheckpointManifest{
+		CUDA:        types.NewCUDAManifest([]int{1}, nil),
+		Cuinterpose: types.CuinterposeManifest{Requested: true, Prepared: true},
+	}
+	if err := requireCuinterposeState(prepared, dir); err == nil {
+		t.Fatal("a prepared checkpoint without its state file must be refused")
+	}
+	if err := os.WriteFile(dir+"/"+cuda.CuinterposeStateFile, []byte("cuinterpose-state-v2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := requireCuinterposeState(prepared, dir); err != nil {
+		t.Fatalf("state present: %v", err)
+	}
+	noCUDA := &types.CheckpointManifest{Cuinterpose: types.CuinterposeManifest{Prepared: true}}
+	if err := requireCuinterposeState(noCUDA, dir); err == nil {
+		t.Fatal("prepared without CUDA processes is inconsistent")
 	}
 }

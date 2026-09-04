@@ -71,6 +71,10 @@ spec:
             - {{ printf "--artifact-cleanup-scan-interval=%v" .Values.operator.artifactCleanup.scanInterval | quote }}
             - {{ printf "--artifact-cleanup-batch-size=%v" .Values.operator.artifactCleanup.batchSize | quote }}
             - {{ printf "--artifact-cleanup-list-attempts=%v" .Values.operator.artifactCleanup.listAttempts | quote }}
+            # cuinterpose delivery (nvidia.com/cuinterpose: enabled on source Pods).
+            - {{ printf "--agent-image=%s" (include "snapshot.agentImage" .) | quote }}
+            - {{ printf "--agent-image-pull-policy=%s" .Values.image.agent.pullPolicy | quote }}
+            - {{ printf "--agent-image-pull-secrets=%s" (join "," .Values.cuinterpose.imagePullSecrets) | quote }}
           volumeMounts:
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath | quote }}

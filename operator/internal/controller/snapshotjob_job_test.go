@@ -123,18 +123,6 @@ func TestBuildSourceJob(t *testing.T) {
 			"the target container must mount the control volume the probe and sentinel live in")
 	})
 
-	t.Run("WrapLaunchJob is always false: command/args pass through unchanged", func(t *testing.T) {
-		sj := minimalSnapshotJob()
-		sj.Spec.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "worker"}
-
-		job, err := buildSourceJob(sj)
-		require.NoError(t, err)
-
-		main := requireContainer(t, job.Spec.Template.Spec.Containers, "worker")
-		assert.Equal(t, []string{"python3", "-m", "worker"}, main.Command,
-			"PodSnapshotTemplate has no multi-GPU field (spec §5.4) — command must never be wrapped")
-	})
-
 	t.Run("SnapshotJob name longer than a label value is a terminal spec error", func(t *testing.T) {
 		// Admission rejects this today, but construction keeps the check for
 		// objects that predate or bypass the current CRD schema.
@@ -237,4 +225,45 @@ func getBatchJobByName(jobs *batchv1.JobList, name string) *batchv1.Job {
 		}
 	}
 	return nil
+}
+
+func cuinterposeSnapshotJob() *snapshotv1alpha1.SnapshotJob {
+	sj := minimalSnapshotJob()
+	sj.Spec.PodTemplate.Annotations = map[string]string{
+		podcontract.CuinterposeAnnotation: podcontract.CuinterposeAnnotationEnabled,
+	}
+	sj.Spec.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "worker"}
+	return sj
+}
+
+func testCuinterposeDelivery() podcontract.CuinterposeDelivery {
+	return podcontract.CuinterposeDelivery{AgentImage: "registry.example/snapshot-agent:v1.2.3"}
+}
+
+func TestBuildSourceJobWithDeliveryShapesCuinterpose(t *testing.T) {
+	sj := cuinterposeSnapshotJob()
+
+	job, err := buildSourceJobWithDelivery(sj, testCuinterposeDelivery())
+	require.NoError(t, err)
+
+	require.NoError(t, podcontract.VerifyCuinterposeCapture(&job.Spec.Template.Spec, []string{"worker"}))
+	main := requireContainer(t, job.Spec.Template.Spec.Containers, "worker")
+	assert.Equal(t, []string{podcontract.CuinterposeCUDACheckpointPath}, main.Command,
+		"the opted-in target is launched through the cuda-checkpoint copied from the agent image")
+	assert.Equal(t, []string{"python3", "-m", "worker"}, main.Args[len(main.Args)-3:],
+		"the original command follows the launch-job wrapper")
+	init := requireContainer(t, job.Spec.Template.Spec.InitContainers, podcontract.CuinterposeInitContainerName)
+	assert.Equal(t, "registry.example/snapshot-agent:v1.2.3", init.Image)
+
+	t.Run("an opted-in SnapshotJob needs a configured agent image", func(t *testing.T) {
+		_, err := buildSourceJob(cuinterposeSnapshotJob())
+		require.Error(t, err)
+	})
+
+	t.Run("a SnapshotJob without the annotation is untouched", func(t *testing.T) {
+		job, err := buildSourceJobWithDelivery(minimalSnapshotJob(), testCuinterposeDelivery())
+		require.NoError(t, err)
+		assert.Empty(t, job.Spec.Template.Spec.InitContainers)
+		assert.Empty(t, requireContainer(t, job.Spec.Template.Spec.Containers, "worker").Command)
+	})
 }

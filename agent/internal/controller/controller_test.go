@@ -87,6 +87,10 @@ func (noopInjector) MountBundle(_ context.Context, _ int) (nsmount.MountPoint, e
 	return noopMountPoint{}, nil
 }
 
+func (noopInjector) MountCuinterpose(_ context.Context, _ nsmount.MountPoint) (nsmount.MountPoint, error) {
+	return noopMountPoint{}, nil
+}
+
 func (noopInjector) MountArtifact(_ context.Context, _ nsmount.MountPoint, _ string) (nsmount.MountPoint, error) {
 	return noopMountPoint{}, nil
 }
@@ -1457,4 +1461,25 @@ func TestCheckpointLeaseNameUsesContentAndContainer(t *testing.T) {
 	b := checkpointLeaseName("content-uid", "worker")
 	assert.NotEqual(t, a, b)
 	assert.True(t, strings.HasPrefix(a, "snapshot-capture-"))
+}
+
+func TestValidateRestoreTargetRecordsCuinterpose(t *testing.T) {
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+	snapshot, content := readySnapshotObjects()
+
+	target, _, err := validateRestoreTarget(pod, snapshot, content)
+	require.NoError(t, err)
+	assert.False(t, target.Cuinterpose, "a PodSnapshot without the annotation restores without the shim")
+
+	if snapshot.Annotations == nil {
+		snapshot.Annotations = map[string]string{}
+	}
+	snapshot.Annotations[podcontract.CuinterposeAnnotation] = podcontract.CuinterposeAnnotationEnabled
+	target, _, err = validateRestoreTarget(pod, snapshot, content)
+	require.NoError(t, err)
+	assert.True(t, target.Cuinterpose, "the PodSnapshot annotation drives the restore-time shim mount")
+
+	snapshot.Annotations[podcontract.CuinterposeAnnotation] = "yes"
+	_, _, err = validateRestoreTarget(pod, snapshot, content)
+	require.Error(t, err, "an unrecognized annotation value must not be read as disabled")
 }

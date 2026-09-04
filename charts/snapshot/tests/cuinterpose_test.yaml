@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: cuinterpose delivery flags on the operator
+templates:
+  - templates/operator-deployment.yaml
+tests:
+  - it: passes the agent image, pull policy, and no pull secrets by default
+    set:
+      image.agent.tag: v9.9.9
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "--agent-image=ghcr.io/ai-dynamo/snapshot/agent:v9.9.9"
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "--agent-image-pull-policy=Always"
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "--agent-image-pull-secrets="
+
+  - it: joins configured workload pull secrets
+    set:
+      cuinterpose.imagePullSecrets:
+        - registry-creds
+        - mirror-creds
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "--agent-image-pull-secrets=registry-creds,mirror-creds"

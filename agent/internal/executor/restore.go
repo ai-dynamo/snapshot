@@ -32,6 +32,7 @@ import (
 // artifact inside a placeholder container's mount namespace.
 type RestoreMounter interface {
 	MountBundle(ctx context.Context, pid int) (nsmount.MountPoint, error)
+	MountCuinterpose(ctx context.Context, namespaceMount nsmount.MountPoint) (nsmount.MountPoint, error)
 	MountArtifact(ctx context.Context, namespaceMount nsmount.MountPoint, artifactPath string) (nsmount.MountPoint, error)
 	MountPageBroker(ctx context.Context, namespaceMount nsmount.MountPoint, stagingPath string) (nsmount.MountPoint, error)
 }
@@ -67,16 +68,19 @@ func cleanupRestoreMounts(ctx context.Context, mounts []restoreMount) error {
 
 // RestoreRequest holds the parameters for a restore operation.
 type RestoreRequest struct {
-	ContentUID                  string
-	BasePath                    string
-	ContainerID                 string
-	StartedAt                   time.Time
-	PodName                     string
-	PodNamespace                string
-	TargetPodIP                 string
-	ArtifactContainerName       string
-	DestinationContainerName    string
-	Clientset                   kubernetes.Interface
+	ContentUID               string
+	BasePath                 string
+	ContainerID              string
+	StartedAt                time.Time
+	PodName                  string
+	PodNamespace             string
+	TargetPodIP              string
+	ArtifactContainerName    string
+	DestinationContainerName string
+	Clientset                kubernetes.Interface
+	// Cuinterpose asks for the CUDA interposer shim and cuda-checkpoint to be
+	// mounted at their capture-time path before CRIU runs.
+	Cuinterpose                 bool
 	PageBrokerRequested         bool
 	PageBrokerEnabled           bool
 	PageBrokerControlSocketPath string
@@ -149,6 +153,14 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if err != nil {
 		return 0, err
 	}
+	// The manifest is the source of truth for whether the shim must be mounted;
+	// the PodSnapshot annotation is kept as a fallback for artifacts written
+	// before the manifest recorded it, and a disagreement is worth a log line.
+	if manifest.Cuinterpose.Requested != req.Cuinterpose {
+		log.Info("cuinterpose request in manifest and PodSnapshot disagree; following the manifest",
+			"manifest", manifest.Cuinterpose.Requested, "podsnapshot", req.Cuinterpose)
+	}
+	req.Cuinterpose = manifest.Cuinterpose.Requested || req.Cuinterpose
 
 	bundleMount, err := mounts.MountBundle(ctx, snap.PlaceholderPID)
 	if err != nil {
@@ -159,8 +171,8 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		point:  bundleMount,
 	})
 
-	containerCheckpointPath := nsmount.CheckpointDst
 	var pageBrokerStageDuration, pageBrokerMountDuration, pageBrokerCommitDuration time.Duration
+	stagedPath := ""
 	if brokered {
 		transactionID = uuid.NewString()
 		broker = pagebroker.Client{ControlSocketPath: req.PageBrokerControlSocketPath}
@@ -170,26 +182,16 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		if err != nil {
 			return 0, fmt.Errorf("stage PageBroker restore: %w", err)
 		}
-		mountStart := time.Now()
-		stagingMount, err := mounts.MountPageBroker(ctx, bundleMount, staged)
+		stagedPath = staged
+	}
+	mountStart := time.Now()
+	inputMounts, containerCheckpointPath, err := mountRestoreInputs(ctx, mounts, req, bundleMount, artifactPath, stagedPath)
+	activeMounts = append(activeMounts, inputMounts...)
+	if err != nil {
+		return 0, err
+	}
+	if brokered {
 		pageBrokerMountDuration = time.Since(mountStart)
-		if err != nil {
-			return 0, fmt.Errorf("mount PageBroker staging: %w", err)
-		}
-		activeMounts = append(activeMounts, restoreMount{
-			action: "unmount PageBroker staging from placeholder",
-			point:  stagingMount,
-		})
-		containerCheckpointPath = nsmount.PageBrokerDst
-	} else {
-		artifactMount, err := mounts.MountArtifact(ctx, bundleMount, artifactPath)
-		if err != nil {
-			return 0, fmt.Errorf("mount checkpoint artifact into placeholder: %w", err)
-		}
-		activeMounts = append(activeMounts, restoreMount{
-			action: "unmount checkpoint artifact from placeholder",
-			point:  artifactMount,
-		})
 	}
 
 	result, err := execNSRestore(ctx, log, req, snap, bundleMount, containerCheckpointPath)
@@ -228,19 +230,21 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		result.CRIUPrepareDuration,
 		result.CRIURestoreDuration,
 		result.CUDARestoreDuration,
+		result.CuinterposeRestoreDuration,
 	)
 	summary := map[string]any{
 		"duration": wall.String(),
 		"phases": map[string]string{
-			"pagebroker_stage":  pageBrokerStageDuration.String(),
-			"pagebroker_mount":  pageBrokerMountDuration.String(),
-			"pagebroker_commit": pageBrokerCommitDuration.String(),
-			"gpu_device_map":    gpuDeviceMapDuration.String(),
-			"overlay_capture":   result.OverlayCaptureDuration.String(),
-			"criu_prepare":      result.CRIUPrepareDuration.String(),
-			"criu_restore":      result.CRIURestoreDuration.String(),
-			"cuda_restore":      result.CUDARestoreDuration.String(),
-			"unaccounted":       unaccounted.String(),
+			"pagebroker_stage":    pageBrokerStageDuration.String(),
+			"pagebroker_mount":    pageBrokerMountDuration.String(),
+			"pagebroker_commit":   pageBrokerCommitDuration.String(),
+			"gpu_device_map":      gpuDeviceMapDuration.String(),
+			"overlay_capture":     result.OverlayCaptureDuration.String(),
+			"criu_prepare":        result.CRIUPrepareDuration.String(),
+			"criu_restore":        result.CRIURestoreDuration.String(),
+			"cuda_restore":        result.CUDARestoreDuration.String(),
+			"cuinterpose_restore": result.CuinterposeRestoreDuration.String(),
+			"unaccounted":         unaccounted.String(),
 		},
 	}
 	if !req.StartedAt.IsZero() {
@@ -448,4 +452,51 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	}
 
 	return &result, nil
+}
+
+// mountRestoreInputs installs, after the agent bundle, the mounts nsrestore
+// reads from inside the placeholder: the cuinterpose bundle when the artifact
+// was captured with the shim, then either the PageBroker staging directory
+// (stagedPath != "") or the checkpoint artifact itself. Order matters: the
+// brokered path unmounts the *last* returned mount early, so the staging mount
+// must come last. Mounts that succeeded before an error are returned so the
+// caller can unmount them.
+func mountRestoreInputs(
+	ctx context.Context,
+	mounts RestoreMounter,
+	req RestoreRequest,
+	bundleMount nsmount.MountPoint,
+	artifactPath string,
+	stagedPath string,
+) (mounted []restoreMount, containerCheckpointPath string, err error) {
+	if req.Cuinterpose {
+		cuinterposeMount, err := mounts.MountCuinterpose(ctx, bundleMount)
+		if err != nil {
+			return mounted, "", fmt.Errorf("mount cuinterpose into placeholder: %w", err)
+		}
+		mounted = append(mounted, restoreMount{
+			action: "unmount cuinterpose from placeholder",
+			point:  cuinterposeMount,
+		})
+	}
+	if stagedPath != "" {
+		stagingMount, err := mounts.MountPageBroker(ctx, bundleMount, stagedPath)
+		if err != nil {
+			return mounted, "", fmt.Errorf("mount PageBroker staging: %w", err)
+		}
+		mounted = append(mounted, restoreMount{
+			action: "unmount PageBroker staging from placeholder",
+			point:  stagingMount,
+		})
+		return mounted, nsmount.PageBrokerDst, nil
+	}
+	artifactMount, err := mounts.MountArtifact(ctx, bundleMount, artifactPath)
+	if err != nil {
+		return mounted, "", fmt.Errorf("mount checkpoint artifact into placeholder: %w", err)
+	}
+	mounted = append(mounted, restoreMount{
+		action: "unmount checkpoint artifact from placeholder",
+		point:  artifactMount,
+	})
+	return mounted, nsmount.CheckpointDst, nil
 }

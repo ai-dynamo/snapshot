@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -49,7 +50,7 @@ func (r *SnapshotJobReconciler) observeExistingSourceJob(ctx context.Context, sj
 // reconcileExistingSourceJob applies the one-shot Job identity gate shared by
 // steady-state reconciliation and Create-AlreadyExists recovery.
 func (r *SnapshotJobReconciler) reconcileExistingSourceJob(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) (snapshotJobObservation, ctrl.Result, error) {
-	if failure := classifyExistingSourceJob(sj, job); failure != nil {
+	if failure := r.classifyExistingSourceJob(sj, job); failure != nil {
 		return snapshotJobObservation{failure: failure}, ctrl.Result{}, nil
 	}
 	return r.reconcileAcceptedSourceJob(ctx, sj, job)
@@ -74,7 +75,7 @@ func (r *SnapshotJobReconciler) readAuthoritativeSourceJob(ctx context.Context, 
 		}
 		return nil, nil, err
 	}
-	if failure := classifyExistingSourceJob(sj, job); failure != nil {
+	if failure := r.classifyExistingSourceJob(sj, job); failure != nil {
 		return job, failure, nil
 	}
 	return job, nil, nil
@@ -88,7 +89,10 @@ func sourceJobDeletedFailure(sj *snapshotv1alpha1.SnapshotJob) *snapshotJobFailu
 }
 
 // classifyExistingSourceJob validates ownership and one-shot Job identity.
-func classifyExistingSourceJob(sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) *snapshotJobFailure {
+func (r *SnapshotJobReconciler) classifyExistingSourceJob(
+	sj *snapshotv1alpha1.SnapshotJob,
+	job *batchv1.Job,
+) *snapshotJobFailure {
 	if !metav1.IsControlledBy(job, sj) {
 		return &snapshotJobFailure{
 			reason: snapshotv1alpha1.ReasonJobNameConflict,
@@ -106,7 +110,7 @@ func classifyExistingSourceJob(sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Jo
 		return nil
 	}
 
-	desired, err := buildSourceJob(sj)
+	desired, err := buildSourceJobWithDelivery(sj, r.Cuinterpose)
 	if err != nil {
 		return &snapshotJobFailure{reason: snapshotv1alpha1.ReasonInvalidSpec, cause: err}
 	}
@@ -119,6 +123,21 @@ func classifyExistingSourceJob(sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Jo
 			reason: snapshotv1alpha1.ReasonJobNameConflict,
 			cause: fmt.Errorf("existing source Job %q does not carry the immutable identity expected for this SnapshotJob",
 				job.Name),
+		}
+	}
+	// A Job created before cuinterpose was configured, or by an operator
+	// without --agent-image, carries none of the capture contract even though
+	// its Pod is annotated. Adopting it would produce a checkpoint whose
+	// PodSnapshot claims interposition that never happened.
+	if enabled, err := podcontract.CuinterposeEnabled(desired.Spec.Template.Annotations); err == nil && enabled {
+		if err := podcontract.VerifyCuinterposeCapture(
+			&job.Spec.Template.Spec,
+			sj.Spec.PodSnapshotTemplate.TargetContainers,
+		); err != nil {
+			return &snapshotJobFailure{
+				reason: snapshotv1alpha1.ReasonJobNameConflict,
+				cause:  fmt.Errorf("existing source Job %q lacks the cuinterpose capture contract: %w", job.Name, err),
+			}
 		}
 	}
 	return nil

@@ -26,6 +26,23 @@ type CheckpointManifest struct {
 	K8s      SourcePodManifest `yaml:"k8s"`
 	Overlay  OverlayManifest   `yaml:"overlay"`
 	CUDA     CUDAManifest      `yaml:"cudaRestore,omitempty"`
+	// Cuinterpose records whether the CUDA interposer shim was in play. It is
+	// the restore side's only source of truth: the restore Pod's annotations
+	// may be absent or edited, and the state file alone cannot say whether
+	// prepare was supposed to have run.
+	Cuinterpose CuinterposeManifest `yaml:"cuinterpose,omitempty"`
+}
+
+// CuinterposeManifest carries two separate facts about the shim.
+type CuinterposeManifest struct {
+	// Requested is true when the source Pod opted in. Restore then bind-mounts
+	// the shim at its capture path before CRIU, because the checkpointed
+	// processes have it mapped by that path whether or not it did anything.
+	Requested bool `yaml:"requested"`
+	// Prepared is true when the coordinator's prepare step completed and wrote
+	// the state file. Restore then runs the coordinator, and a missing state
+	// file is an error rather than a plain restore.
+	Prepared bool `yaml:"prepared"`
 }
 
 // ArtifactManifest pins an on-disk checkpoint to the Kubernetes content object

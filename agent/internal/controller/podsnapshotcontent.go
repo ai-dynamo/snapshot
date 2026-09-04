@@ -25,6 +25,7 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -584,17 +585,22 @@ func (w *NodeController) setSnapshotContentFailed(ctx context.Context, content *
 func (w *NodeController) executorCheckpoint(ctx context.Context, params CheckpointParams) error {
 	log := logr.FromContextOrDiscard(ctx)
 
+	cuinterposeRequested, err := podcontract.CuinterposeEnabled(params.Pod.Annotations)
+	if err != nil {
+		return fmt.Errorf("source pod %s/%s: %w", params.Pod.Namespace, params.Pod.Name, err)
+	}
 	req := executor.CheckpointRequest{
-		ContainerID:         params.ContainerID,
-		ContainerName:       params.ContainerName,
-		ContentUID:          params.ContentUID,
-		StartedAt:           params.StartedAt,
-		NodeName:            w.config.NodeName,
-		PodName:             params.Pod.Name,
-		PodNamespace:        params.Pod.Namespace,
-		PodIP:               params.Pod.Status.PodIP,
-		Clientset:           w.clientset,
-		PageBrokerRequested: params.Pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] == snapshotv1alpha1.PageBrokerAnnotationEnabled,
+		CuinterposeRequested: cuinterposeRequested,
+		ContainerID:          params.ContainerID,
+		ContainerName:        params.ContainerName,
+		ContentUID:           params.ContentUID,
+		StartedAt:            params.StartedAt,
+		NodeName:             w.config.NodeName,
+		PodName:              params.Pod.Name,
+		PodNamespace:         params.Pod.Namespace,
+		PodIP:                params.Pod.Status.PodIP,
+		Clientset:            w.clientset,
+		PageBrokerRequested:  params.Pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] == snapshotv1alpha1.PageBrokerAnnotationEnabled,
 	}
 	if err := executor.Checkpoint(ctx, w.runtime, log, req, w.config); err != nil {
 		if executor.CheckpointNeedsSourceKill(err) {

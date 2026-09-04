@@ -177,3 +177,31 @@ func TestManifestRequiresContainerName(t *testing.T) {
 		t.Fatalf("expected missing container name error, got %v", err)
 	}
 }
+
+func TestManifestRoundTripsCuinterpose(t *testing.T) {
+	dir := t.TempDir()
+	m := NewCheckpointManifest("content-uid", "main", CRIUDumpManifest{}, SourcePodManifest{}, OverlayManifest{})
+	m.Cuinterpose = CuinterposeManifest{Requested: true, Prepared: true}
+	if err := WriteManifest(dir, m); err != nil {
+		t.Fatal(err)
+	}
+	read, err := ReadManifest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !read.Cuinterpose.Requested || !read.Cuinterpose.Prepared {
+		t.Fatalf("cuinterpose = %+v, want both true", read.Cuinterpose)
+	}
+	// Older manifests without the section read as not requested, not prepared.
+	m.Cuinterpose = CuinterposeManifest{}
+	if err := WriteManifest(dir, m); err != nil {
+		t.Fatal(err)
+	}
+	read, err = ReadManifest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.Cuinterpose.Requested || read.Cuinterpose.Prepared {
+		t.Fatalf("cuinterpose = %+v, want zero", read.Cuinterpose)
+	}
+}
