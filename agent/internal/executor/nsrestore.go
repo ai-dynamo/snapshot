@@ -38,6 +38,9 @@ type RestoreInNamespaceResult struct {
 	CRIUPrepareDuration    time.Duration `json:"criuPrepareDuration"`
 	CRIURestoreDuration    time.Duration `json:"criuRestoreDuration"`
 	CUDARestoreDuration    time.Duration `json:"cudaRestoreDuration"`
+	// CuinterposeRestoreDuration is the coordinator's restore step, which runs
+	// after the native CUDA restore and rebuilds shared memory topology.
+	CuinterposeRestoreDuration time.Duration `json:"cuinterposeRestoreDuration"`
 }
 
 // CleanupError is the wire representation of a successful restore whose
@@ -94,11 +97,12 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 	}
 
 	result := &RestoreInNamespaceResult{
-		RestoredPID:            restoredPID,
-		OverlayCaptureDuration: executeTimings.overlayCaptureDuration,
-		CRIUPrepareDuration:    executeTimings.criuPrepareDuration,
-		CRIURestoreDuration:    executeTimings.criuRestoreDuration,
-		CUDARestoreDuration:    executeTimings.cudaRestoreDuration,
+		RestoredPID:                restoredPID,
+		OverlayCaptureDuration:     executeTimings.overlayCaptureDuration,
+		CRIUPrepareDuration:        executeTimings.criuPrepareDuration,
+		CRIURestoreDuration:        executeTimings.criuRestoreDuration,
+		CUDARestoreDuration:        executeTimings.cudaRestoreDuration,
+		CuinterposeRestoreDuration: executeTimings.cuinterposeRestoreDuration,
 	}
 	if cleanupErr != nil {
 		result.CleanupError = &CleanupError{
@@ -110,10 +114,11 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 }
 
 type nsrestorePhaseTimings struct {
-	overlayCaptureDuration time.Duration
-	criuPrepareDuration    time.Duration
-	criuRestoreDuration    time.Duration
-	cudaRestoreDuration    time.Duration
+	overlayCaptureDuration     time.Duration
+	criuPrepareDuration        time.Duration
+	criuRestoreDuration        time.Duration
+	cudaRestoreDuration        time.Duration
+	cuinterposeRestoreDuration time.Duration
 }
 
 func executeRestore(
@@ -168,6 +173,7 @@ func executeRestore(
 	// opening the binary now and exec'ing via /proc/self/fd/N after CRIU returns,
 	// the fd remains valid even if the mount is gone.
 	var cudaHelperFdPath string
+	var coordinatorFdPath string
 	if !m.CUDA.IsEmpty() {
 		helperPath := filepath.Join(opts.BundleDir, cuda.HelperBinaryName)
 		f, err := os.Open(helperPath)
@@ -177,6 +183,17 @@ func executeRestore(
 		defer f.Close()
 		cudaHelperFdPath = fmt.Sprintf("/proc/self/fd/%d", f.Fd())
 	}
+	if m.Cuinterpose.Prepared {
+		if err := requireCuinterposeState(m, opts.CheckpointPath); err != nil {
+			return nil, 0, nil, err
+		}
+		coordinator, err := os.Open(filepath.Join(opts.BundleDir, cuda.CoordinatorBinaryName))
+		if err != nil {
+			return nil, 0, nil, fmt.Errorf("failed to open %s before CRIU restore: %w", cuda.CoordinatorBinaryName, err)
+		}
+		defer coordinator.Close()
+		coordinatorFdPath = fmt.Sprintf("/proc/self/fd/%d", coordinator.Fd())
+	}
 
 	// The restore-complete sentinel lives on the pod emptyDir mounted at
 	// SnapshotControlMountPath. Clear it here, in that mount namespace, so a
@@ -185,6 +202,18 @@ func executeRestore(
 	// a missing mount is a hard error.
 	if err := snapshotruntime.RemoveControlSentinel(podcontract.SnapshotControlMountPath, podcontract.RestoreCompleteFile); err != nil {
 		return nil, 0, nil, fmt.Errorf("remove stale restore-complete sentinel: %w", err)
+	}
+	if m.Cuinterpose.Requested {
+		// The shim binds its control socket by namespace PID, which CRIU
+		// reproduces exactly; a socket file left by an earlier incarnation of
+		// this pod (agent restart, replaced container) would make that bind fail.
+		removed, err := cuda.RemoveStaleCuinterposeSockets(podcontract.SnapshotControlMountPath)
+		if err != nil {
+			return nil, 0, nil, fmt.Errorf("remove stale cuinterpose sockets: %w", err)
+		}
+		if removed > 0 {
+			log.Info("Removed stale cuinterpose control sockets before restore", "count", removed)
+		}
 	}
 
 	criuPID, cleanup, prepare, restore, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, opts.BundleDir, log)
@@ -253,7 +282,42 @@ func executeRestore(
 		if err != nil {
 			return nil, 0, nil, fmt.Errorf("CUDA restore failed: %w", err)
 		}
+		if m.Cuinterpose.Prepared {
+			// The driver is unlocked so the shims can issue CUDA calls, but the
+			// application itself is still parked in its restore-complete poll
+			// loop, so nothing else touches the shared memory while the
+			// coordinator rebuilds it.
+			cuinterposeStart := time.Now()
+			_, err := cuda.RestoreCuinterpose(ctx, opts.CheckpointPath, restorePIDs, m.CUDA.PIDs, coordinatorFdPath, log)
+			timings.cuinterposeRestoreDuration = time.Since(cuinterposeStart)
+			if err != nil {
+				return nil, 0, nil, fmt.Errorf("restore cuinterpose: %w", err)
+			}
+		}
 	}
 
 	return timings, restoredPID, nil, nil
+}
+
+// requireCuinterposeState checks that a checkpoint whose manifest records a
+// cuinterpose prepare also carries the coordinator's state file. Without it
+// the shims inside the restored processes would stay frozen mid-checkpoint
+// forever, so restoring such an artifact is refused up front.
+func requireCuinterposeState(m *types.CheckpointManifest, checkpointPath string) error {
+	if !m.Cuinterpose.Prepared {
+		return nil
+	}
+	if m.CUDA.IsEmpty() {
+		return fmt.Errorf("checkpoint manifest records a cuinterpose prepare but no CUDA processes")
+	}
+	hasState, err := cuda.HasCuinterposeState(checkpointPath)
+	if err != nil {
+		return fmt.Errorf("stat cuinterpose state: %w", err)
+	}
+	if !hasState {
+		return fmt.Errorf(
+			"checkpoint manifest records a cuinterpose prepare but %s is missing from %s; the artifact is incomplete",
+			cuda.CuinterposeStateFile, checkpointPath)
+	}
+	return nil
 }
