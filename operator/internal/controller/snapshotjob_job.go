@@ -33,7 +33,8 @@ func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, error) {
 // the target is launched under cuda-checkpoint --launch-job, which the agent
 // requires to checkpoint a multi-GPU process tree. DRA claims are sized through
 // claims; an unresolvable claim counts as multi-GPU. Returns the targets that
-// carry the wrapper.
+// carry the wrapper. A template that opts into cuinterpose additionally gets
+// the shim preloaded, and every target wrapped whatever its GPU count.
 //
 // No storage is injected (spec §5.3: the agent falls back to its own config).
 func buildShapedSourceJob(
@@ -85,6 +86,13 @@ func buildShapedSourceJob(
 		claims,
 	)
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := podcontract.ShapeCuinterposeCapture(
+		&job.Spec.Template,
+		sj.Spec.PodSnapshotTemplate.TargetContainers,
+		delivery,
+	); err != nil {
 		return nil, nil, err
 	}
 	return job, wrapped, nil

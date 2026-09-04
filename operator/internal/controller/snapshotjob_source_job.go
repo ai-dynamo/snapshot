@@ -151,6 +151,19 @@ func (r *SnapshotJobReconciler) classifyExistingSourceJob(
 			}, nil
 		}
 	}
+	// The same for the shim: a Job created without it would produce a
+	// checkpoint whose PodSnapshot claims interposition that never happened.
+	if enabled, err := podcontract.CuinterposeEnabled(desired.Spec.Template.Annotations); err == nil && enabled {
+		if err := podcontract.VerifyCuinterposeCapture(
+			&job.Spec.Template.Spec,
+			sj.Spec.PodSnapshotTemplate.TargetContainers,
+		); err != nil {
+			return &snapshotJobFailure{
+				reason: snapshotv1alpha1.ReasonJobNameConflict,
+				cause:  fmt.Errorf("existing source Job %q lacks the cuinterpose capture contract: %w", job.Name, err),
+			}, nil
+		}
+	}
 	return nil, nil
 }
 
