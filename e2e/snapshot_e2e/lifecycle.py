@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import shlex
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from kubernetes import client
@@ -809,6 +810,94 @@ def debug_dump_snapshotjob(config: k8s.E2EConfig, run: TestRun) -> None:
         }:
             print(f"event {involved.kind}/{involved.name} {event.reason}: {event.message}")
     print("--- end debug ---\n")
+
+
+def ensure_pvc(body: dict[str, Any]) -> None:
+    """Creates the PVC if it does not exist; an existing claim is left as is.
+
+    Framework model caches are meant to outlive a test run so later runs skip
+    the download, so this is create-if-missing rather than create-or-replace.
+    """
+    namespace = body["metadata"]["namespace"]
+    name = body["metadata"]["name"]
+    try:
+        client.CoreV1Api().create_namespaced_persistent_volume_claim(namespace, body)
+        print(f"created PVC {namespace}/{name}")
+    except ApiException as exc:
+        if exc.status != 409:
+            raise
+        print(f"PVC {namespace}/{name} already exists")
+
+
+def debug_dump_framework(
+    config: k8s.E2EConfig,
+    run: TestRun,
+    *,
+    source_node: str | None = None,
+    image: str | None = None,
+) -> None:
+    """Failure dump for a framework workload run.
+
+    Framework programs log the framework's own diagnostics (engine load, CUDA
+    errors, sleep/wake failures) and the agent logs the CRIU/cuda-checkpoint
+    side; a failure is only actionable with both. Logs are kept long because
+    framework startup output easily exceeds the generic dump's 80 lines.
+    """
+    print("\n--- framework e2e debug ---")
+    print(f"namespace={config.namespace} test={run.suffix} framework_image={image or '<unknown>'}")
+    core = client.CoreV1Api()
+    pods = core.list_namespaced_pod(
+        config.namespace, label_selector=f"snapshot-e2e-test={run.suffix}"
+    ).items
+    if not pods:
+        print("no pods matched the e2e label")
+    for pod in pods:
+        name = pod.metadata.name
+        print(f"pod {name} phase={pod.status.phase} node={pod.spec.node_name}")
+        print(f"images={[c.image for c in pod.spec.containers]}")
+        print(f"annotations={pod.metadata.annotations or {}}")
+        print(f"conditions={[(c.type, c.status, c.reason) for c in pod.status.conditions or []]}")
+        for cs in list(pod.status.init_container_statuses or []) + list(
+            pod.status.container_statuses or []
+        ):
+            print(f"  container {cs.name} ready={cs.ready} restarts={cs.restart_count} state={cs.state}")
+        print(f"control dir: {snapshot_control_listing(config.namespace, name)}")
+        print(f"--- logs {name} (tail 400) ---")
+        print(k8s.pod_logs(config.namespace, name, tail_lines=400))
+    print_custom_objects(config, run)
+    print_snapshot_controller_logs(config)
+    if source_node:
+        try:
+            agent = checkpoint_agent_pod(config, source_node)
+            print(f"--- agent {agent} on {source_node} (tail 200) ---")
+            print(k8s.pod_logs(config.namespace, agent, tail_lines=200))
+            print(f"--- nvidia-smi on {source_node} ---")
+            print(k8s.exec_command(config.namespace, agent, "nvidia-smi 2>&1 || true"))
+        except Exception as exc:  # noqa: BLE001 - debug helper must never mask the real failure
+            print(f"agent diagnostics unavailable: {type(exc).__name__}: {exc}")
+    # Filter first, then order by time: the API returns events unordered, and
+    # in a namespace shared with the controllers the run's events need not be
+    # in any tail of the raw list.
+    names = {run.source_pod, run.restore_pod, run.snapshot_name}
+    events = [
+        event
+        for event in core.list_namespaced_event(config.namespace).items
+        if event.involved_object and event.involved_object.name in names
+    ]
+    events.sort(key=event_time)
+    for event in events[-60:]:
+        involved = event.involved_object
+        print(f"event {involved.kind}/{involved.name} {event.reason}: {event.message}")
+    print("--- end debug ---\n")
+
+
+def event_time(event: client.CoreV1Event) -> datetime:
+    return (
+        event.last_timestamp
+        or event.event_time
+        or event.metadata.creation_timestamp
+        or datetime.min.replace(tzinfo=timezone.utc)
+    )
 
 
 def snapshot_control_listing(namespace: str, pod: str) -> str:
