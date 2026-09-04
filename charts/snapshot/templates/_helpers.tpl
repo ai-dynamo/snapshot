@@ -78,6 +78,9 @@ Fail fast on unsupported runtime.type values. Called once from daemonset.yaml.
 {{- if not (has .Values.runtime.type (list "containerd" "crio")) }}
 {{- fail (printf "runtime.type must be 'containerd' or 'crio', got %q" .Values.runtime.type) }}
 {{- end }}
+{{- if and .Values.runtime.storageDir (not (hasPrefix "/" .Values.runtime.storageDir)) }}
+{{- fail (printf "runtime.storageDir must be an absolute path, got %q" .Values.runtime.storageDir) }}
+{{- end }}
 {{- end }}
 
 {{/*

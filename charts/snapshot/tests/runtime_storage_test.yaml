@@ -40,3 +40,13 @@ tests:
             hostPath:
               path: /var/lib/rancher/rke2/agent/containerd
               type: Directory
+
+  # hostPath.path and the agent's volumeMount.mountPath both take this value
+  # verbatim, and Kubernetes rejects a relative mountPath at Pod admission --
+  # far from the value that caused it. Fail at template time instead.
+  - it: rejects a relative runtime.storageDir
+    set:
+      runtime.storageDir: relative/containerd
+    asserts:
+      - failedTemplate:
+          errorPattern: "runtime.storageDir must be an absolute path"
