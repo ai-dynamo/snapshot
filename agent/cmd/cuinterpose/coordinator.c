@@ -114,7 +114,12 @@ struct carrier_job {
   struct allocation* allocations;
   uint16_t operation;
   int result;
+  uint32_t copy_us; /* the shim's own timing of its copies */
 };
+
+/* Longest copy time any participant reported in the last carrier phase; the
+ * participants copy concurrently, so this is the copy's share of the phase. */
+static uint32_t last_carrier_copy_us;
 
 static int
 connect_endpoint(const char* endpoint)
@@ -809,7 +814,7 @@ done:
 static int
 exchange_carrier(
     struct participant* participant, uint16_t operation, const uint8_t allocation_id[CUINTERPOSE_ALLOCATION_ID_SIZE],
-    uint64_t size)
+    uint64_t size, uint32_t* copy_us)
 {
   struct cuinterpose_header request;
   struct cuinterpose_header response;
@@ -830,11 +835,18 @@ exchange_carrier(
     goto done;
   if (response_fd >= 0 || !cuinterpose_header_strings_terminated(&response) || response.magic != CUINTERPOSE_MAGIC ||
       response.version != CUINTERPOSE_VERSION || response.operation != operation || response.status != 0 ||
-      response.count != 0 || response.payload_size != 0 || strcmp(response.participant_id, participant->id) != 0) {
+      response.count != 0 || strcmp(response.participant_id, participant->id) != 0) {
     if (cuinterpose_header_strings_terminated(&response) && response.message[0] != '\0')
       fprintf(stderr, "%s: %s\n", participant->endpoint, response.message);
     goto done;
   }
+  if (response.payload_size != size) {
+    fprintf(
+        stderr, "%s: carrier transfer moved %llu bytes, expected %llu\n", participant->endpoint,
+        (unsigned long long)response.payload_size, (unsigned long long)size);
+    goto done;
+  }
+  *copy_us = response.copy_us;
   result = 0;
 done:
   if (response_fd >= 0)
@@ -844,21 +856,26 @@ done:
   return result;
 }
 
+/*
+ * One request per participant: the shim copies every carrier allocation it
+ * owns in one batch (all copies issued on one stream, one wait), and reports
+ * the byte count in the reply's payload_size. The expected total is checked
+ * against the topology so a shim that silently skipped an allocation fails
+ * here rather than at restore.
+ */
 static void*
 run_carrier_job(void* argument)
 {
   struct carrier_job* job = argument;
   struct allocation* allocation;
+  uint64_t expected = 0;
+  uint8_t all_allocations[CUINTERPOSE_ALLOCATION_ID_SIZE] = {0};
 
-  job->result = 0;
   for (allocation = job->allocations; allocation != NULL; allocation = allocation->next) {
-    if (!allocation->host_carrier || strcmp(allocation->creator, job->participant->id) != 0)
-      continue;
-    job->result =
-        exchange_carrier(job->participant, job->operation, allocation->id, allocation->size);
-    if (job->result != 0)
-      break;
+    if (allocation->host_carrier && strcmp(allocation->creator, job->participant->id) == 0)
+      expected += allocation->size;
   }
+  job->result = exchange_carrier(job->participant, job->operation, all_allocations, expected, &job->copy_us);
   return NULL;
 }
 
@@ -873,6 +890,7 @@ transfer_host_carriers(
   size_t index;
   int result = 0;
 
+  last_carrier_copy_us = 0;
   jobs = calloc(participant_count, sizeof(*jobs));
   threads = calloc(participant_count, sizeof(*threads));
   launched = calloc(participant_count, sizeof(*launched));
@@ -902,8 +920,12 @@ transfer_host_carriers(
     launched[index] = true;
   }
   for (index = 0; index < participant_count; index++) {
-    if (launched[index] && (pthread_join(threads[index], NULL) != 0 || jobs[index].result != 0))
+    if (!launched[index])
+      continue;
+    if (pthread_join(threads[index], NULL) != 0 || jobs[index].result != 0)
       result = -1;
+    else if (jobs[index].copy_us > last_carrier_copy_us)
+      last_carrier_copy_us = jobs[index].copy_us;
   }
 done:
   free(launched);
@@ -982,9 +1004,12 @@ carrier_extra(char* buffer, size_t size, const struct allocation* allocations, c
   double ms = elapsed_ms(start);
 
   carrier_totals(allocations, &count, &bytes);
+  /* gb_per_s covers the whole phase (memory setup, copies, teardown, sockets);
+   * copy_gb_per_s is the copies alone, as timed by the slowest shim. */
   snprintf(
-      buffer, size, "carrier_count=%zu carrier_bytes=%llu gb_per_s=%.2f", count, (unsigned long long)bytes,
-      ms > 0.0 ? ((double)bytes / 1e9) / (ms / 1000.0) : 0.0);
+      buffer, size, "carrier_count=%zu carrier_bytes=%llu gb_per_s=%.2f copy_gb_per_s=%.2f", count,
+      (unsigned long long)bytes, ms > 0.0 ? ((double)bytes / 1e9) / (ms / 1000.0) : 0.0,
+      last_carrier_copy_us > 0 ? ((double)bytes / 1e9) / ((double)last_carrier_copy_us / 1e6) : 0.0);
 }
 
 /* Prepare must not start while any participant still holds an untracked import:

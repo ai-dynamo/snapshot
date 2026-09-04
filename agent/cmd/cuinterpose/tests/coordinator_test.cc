@@ -23,6 +23,7 @@
 #include <functional>
 #include <mutex>
 #include <sstream>
+#include <filesystem>
 #include <string>
 #include <thread>
 #include <vector>
@@ -185,7 +186,8 @@ class Coordinator : public ::testing::Test {
     ASSERT_EQ(mkdir(checkpoint.c_str(), 0700), 0);
   }
   void TearDown() override {
-    if (std::system(("rm -rf " + dir).c_str()) != 0) ADD_FAILURE() << "cleanup failed";
+    std::error_code ignored;
+    std::filesystem::remove_all(dir, ignored);
   }
 
   std::vector<std::string> args(const char* mode, std::initializer_list<int> pids) {
