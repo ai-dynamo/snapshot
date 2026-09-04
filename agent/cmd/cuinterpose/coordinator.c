@@ -127,7 +127,12 @@ struct allocation_job {
   size_t allocation_count;
   uint16_t operation;
   int result;
+  uint32_t copy_us; /* the shim's own timing of its copies */
 };
+
+/* Longest copy time any participant reported in the last carrier phase; the
+ * participants copy concurrently, so this is the copy's share of the phase. */
+static uint32_t last_allocation_copy_us;
 
 static int
 connect_endpoint(const char* endpoint)
@@ -753,9 +758,7 @@ command_all_parallel(struct participant* participants, size_t count, uint16_t op
 }
 
 static int
-exchange_allocation(
-    struct participant* participant, uint16_t operation, const uint8_t allocation_id[CUINTERPOSE_ALLOCATION_ID_SIZE],
-    uint64_t size)
+exchange_allocations(struct participant* participant, uint16_t operation, uint64_t size, uint32_t* copy_us)
 {
   struct cuinterpose_header request;
   struct cuinterpose_header response;
@@ -768,37 +771,47 @@ exchange_allocation(
   request.operation = operation;
   request.payload_size = size;
   id_copy(request.participant_id, participant->id);
-  allocation_id_copy(request.allocation_id, allocation_id);
   fd = connect_endpoint(participant->endpoint);
   if (fd < 0 || set_socket_timeouts(fd, allocation_transfer_timeout_seconds()) != 0 ||
       cuinterpose_send_header(fd, &request, -1) != 0 || cuinterpose_receive_header(fd, &response, &response_fd) != 0)
     return -1;
   if (response_fd >= 0 || !cuinterpose_header_strings_terminated(&response) || response.magic != CUINTERPOSE_MAGIC ||
       response.version != CUINTERPOSE_VERSION || response.operation != operation || response.status != 0 ||
-      response.count != 0 || response.payload_size != 0 || !id_eq(response.participant_id, participant->id)) {
+      response.count != 0 || !id_eq(response.participant_id, participant->id)) {
     if (cuinterpose_header_strings_terminated(&response) && response.message[0] != '\0')
       fprintf(stderr, "%s: %s\n", participant->endpoint, response.message);
     return -1;
   }
+  if (response.payload_size != size) {
+    fprintf(
+        stderr, "%s: allocation transfer moved %llu bytes, expected %llu\n", participant->endpoint,
+        (unsigned long long)response.payload_size, (unsigned long long)size);
+    return -1;
+  }
+  *copy_us = response.copy_us;
   return 0;
 }
 
+/*
+ * One request per participant: the shim copies every allocation it owns in
+ * one batch (all copies issued on one stream, one wait), and reports
+ * the byte count in the reply's payload_size. The expected total is checked
+ * against the topology so a shim that silently skipped an allocation fails
+ * here rather than at restore.
+ */
 static void*
 run_allocation_job(void* argument)
 {
   struct allocation_job* job = argument;
   size_t index;
+  uint64_t expected = 0;
 
-  job->result = 0;
   for (index = 0; index < job->allocation_count; index++) {
     const struct allocation* allocation = &job->allocations[index];
-
-    if (!allocation->preserve_content || !id_eq(allocation->creator, job->participant->id))
-      continue;
-    job->result = exchange_allocation(job->participant, job->operation, allocation->id, allocation->size);
-    if (job->result != 0)
-      break;
+    if (allocation->preserve_content && id_eq(allocation->creator, job->participant->id))
+      expected += allocation->size;
   }
+  job->result = exchange_allocations(job->participant, job->operation, expected, &job->copy_us);
   return NULL;
 }
 
@@ -813,24 +826,13 @@ transfer_allocations(
   size_t index;
   int result = 0;
 
+  last_allocation_copy_us = 0;
   jobs = calloc(participant_count, sizeof(*jobs));
   threads = calloc(participant_count, sizeof(*threads));
   launched = calloc(participant_count, sizeof(*launched));
   if (jobs == NULL || threads == NULL || launched == NULL)
     return -1;
   for (index = 0; index < participant_count; index++) {
-    size_t allocation_index;
-    bool owns_content = false;
-
-    for (allocation_index = 0; allocation_index < allocation_count; allocation_index++) {
-      const struct allocation* allocation = &allocations[allocation_index];
-      if (allocation->preserve_content && id_eq(allocation->creator, participants[index].id)) {
-        owns_content = true;
-        break;
-      }
-    }
-    if (!owns_content)
-      continue;
     jobs[index].participant = &participants[index];
     jobs[index].allocations = allocations;
     jobs[index].allocation_count = allocation_count;
@@ -842,8 +844,12 @@ transfer_allocations(
     launched[index] = true;
   }
   for (index = 0; index < participant_count; index++) {
-    if (launched[index] && (pthread_join(threads[index], NULL) != 0 || jobs[index].result != 0))
+    if (!launched[index])
+      continue;
+    if (pthread_join(threads[index], NULL) != 0 || jobs[index].result != 0)
       result = -1;
+    else if (jobs[index].copy_us > last_allocation_copy_us)
+      last_allocation_copy_us = jobs[index].copy_us;
   }
   return result;
 }
@@ -912,9 +918,12 @@ allocation_extra(
   double ms = elapsed_since_milliseconds(start);
 
   allocation_totals(allocations, allocation_count, &count, &bytes);
+  /* gb_per_s covers setup, copies, teardown, and sockets; copy_gb_per_s uses
+   * the slowest participant's device-copy time. */
   snprintf(
-      buffer, size, "allocation_count=%zu allocation_bytes=%llu gb_per_s=%.2f", count, (unsigned long long)bytes,
-      ms > 0.0 ? ((double)bytes / 1e9) / (ms / 1000.0) : 0.0);
+      buffer, size, "allocation_count=%zu allocation_bytes=%llu gb_per_s=%.2f copy_gb_per_s=%.2f", count,
+      (unsigned long long)bytes, ms > 0.0 ? ((double)bytes / 1e9) / (ms / 1000.0) : 0.0,
+      last_allocation_copy_us > 0 ? ((double)bytes / 1e9) / ((double)last_allocation_copy_us / 1e6) : 0.0);
 }
 
 /* Prepare must not start with state cuinterpose cannot reconstruct. These
