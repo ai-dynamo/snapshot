@@ -326,19 +326,32 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 	}
 	timings.CRIUDumpDuration = criuDumpDuration
 
-	// Overlay rootfs diff capture is best-effort. Failures are logged but not
-	// propagated — a checkpoint without overlay diffs is still valid for restore
-	// (the base container image provides the filesystem).
-	if state.UpperDir != "" {
-		overlayCaptureStart := time.Now()
-		if _, err := snapshotruntime.CaptureRootfsDiff(state.UpperDir, checkpointDir, data.Overlay.Exclusions, data.Overlay.BindMountDests); err != nil {
-			log.Error(err, "Failed to capture rootfs diff")
-		}
-		if _, err := snapshotruntime.CaptureDeletedFiles(state.UpperDir, checkpointDir); err != nil {
-			log.Error(err, "Failed to capture deleted files")
-		}
-		timings.OverlayCaptureDuration = time.Since(overlayCaptureStart)
+	overlayCaptureDuration, err := captureOverlay(state.UpperDir, checkpointDir, data)
+	if err != nil {
+		return nil, err
 	}
+	timings.OverlayCaptureDuration = overlayCaptureDuration
 
 	return timings, nil
+}
+
+// captureOverlay writes the container's rootfs diff and whiteout list into the staged
+// checkpoint directory.
+//
+// Failures are returned, not logged and dropped: an artifact missing rootfs-diff.tar
+// restores with every container-created file silently absent, and the caller has no way
+// to tell that from a complete checkpoint. Failing here keeps the staged directory from
+// being promoted, so the work order lands CheckpointFailed instead of Captured.
+func captureOverlay(upperDir, checkpointDir string, data *types.CheckpointManifest) (time.Duration, error) {
+	if upperDir == "" {
+		return 0, nil
+	}
+	start := time.Now()
+	if _, err := snapshotruntime.CaptureRootfsDiff(upperDir, checkpointDir, data.Overlay.Exclusions, data.Overlay.BindMountDests); err != nil {
+		return 0, fmt.Errorf("failed to capture rootfs diff: %w", err)
+	}
+	if _, err := snapshotruntime.CaptureDeletedFiles(upperDir, checkpointDir); err != nil {
+		return 0, fmt.Errorf("failed to capture deleted files: %w", err)
+	}
+	return time.Since(start), nil
 }
