@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -820,6 +821,59 @@ func TestSnapshotJobReconcileRejectsUnshapedMultiGPUJob(t *testing.T) {
 func TestSnapshotJobReconcileAdoptsShapedMultiGPUJob(t *testing.T) {
 	s := snapshotJobReconcilerScheme()
 	sj := multiGPUSnapshotJob()
+	sj.UID = types.UID("sj-uid")
+
+	job, _, err := buildShapedSourceJob(sj, testCUDAToolsDelivery(), nil)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	job.UID = types.UID("source-job-uid")
+
+	r := makeSnapshotJobReconciler(s, sj, job)
+	r.CUDATools = testCUDAToolsDelivery()
+
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	assert.Equal(t, job.UID, updated.Status.SourceJobUID, "a correctly shaped Job is adopted")
+}
+
+func TestSnapshotJobReconcileRejectsUnshapedJobWhenCuinterposeEnabled(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := cuinterposeSnapshotJob()
+	sj.UID = types.UID("sj-uid")
+
+	// A Job created by an operator that had no agent image: the Pod template is
+	// annotated but carries none of the capture contract.
+	plain := sj.DeepCopy()
+	delete(plain.Spec.PodTemplate.Annotations, podcontract.CuinterposeAnnotation)
+	job, err := buildSourceJob(plain)
+	require.NoError(t, err)
+	job.Spec.Template.Annotations = map[string]string{
+		podcontract.CuinterposeAnnotation: podcontract.CuinterposeAnnotationEnabled,
+	}
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	job.UID = types.UID("source-job-uid")
+
+	r := makeSnapshotJobReconciler(s, sj, job)
+	r.CUDATools = testCUDAToolsDelivery()
+
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+	require.NotNil(t, failed, "adopting a Job without the shim would checkpoint without interposition")
+	assert.Equal(t, snapshotv1alpha1.ReasonJobNameConflict, failed.Reason)
+	assert.Contains(t, failed.Message, "cuinterpose capture contract")
+	assert.Empty(t, updated.Status.SourceJobUID)
+}
+
+func TestSnapshotJobReconcileAdoptsShapedJobWhenCuinterposeEnabled(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := cuinterposeSnapshotJob()
 	sj.UID = types.UID("sj-uid")
 
 	job, _, err := buildShapedSourceJob(sj, testCUDAToolsDelivery(), nil)

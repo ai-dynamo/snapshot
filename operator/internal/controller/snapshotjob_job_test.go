@@ -294,3 +294,38 @@ func TestBuildShapedSourceJobWrapsMultiGPUTargets(t *testing.T) {
 		assert.Equal(t, []string{"worker"}, wrapped)
 	})
 }
+
+func cuinterposeSnapshotJob() *snapshotv1alpha1.SnapshotJob {
+	sj := minimalSnapshotJob()
+	sj.Spec.PodTemplate.Annotations = map[string]string{
+		podcontract.CuinterposeAnnotation: podcontract.CuinterposeAnnotationEnabled,
+	}
+	sj.Spec.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "worker"}
+	return sj
+}
+
+func TestBuildShapedSourceJobShapesCuinterpose(t *testing.T) {
+	sj := cuinterposeSnapshotJob()
+
+	job, wrapped, err := buildShapedSourceJob(sj, testCUDAToolsDelivery(), nil)
+	require.NoError(t, err)
+	assert.Empty(t, wrapped, "a single-GPU target is wrapped by the shim's contract, not the GPU rule")
+
+	require.NoError(t, podcontract.VerifyCuinterposeCapture(&job.Spec.Template.Spec, []string{"worker"}))
+	main := requireContainer(t, job.Spec.Template.Spec.Containers, "worker")
+	assert.Equal(t, []string{podcontract.CUDACheckpointPath}, main.Command,
+		"the opted-in target is launched through cuda-checkpoint even on one GPU")
+	assert.Equal(t, []string{"python3", "-m", "worker"}, main.Args[len(main.Args)-3:])
+	requireContainer(t, job.Spec.Template.Spec.InitContainers, podcontract.CUDAToolsInitContainerName)
+
+	t.Run("an opted-in SnapshotJob needs a configured agent image", func(t *testing.T) {
+		_, err := buildSourceJob(cuinterposeSnapshotJob())
+		require.Error(t, err)
+	})
+
+	t.Run("a SnapshotJob without the annotation gets no shim", func(t *testing.T) {
+		job, _, err := buildShapedSourceJob(multiGPUSnapshotJob(), testCUDAToolsDelivery(), nil)
+		require.NoError(t, err)
+		require.Error(t, podcontract.VerifyCuinterposeCapture(&job.Spec.Template.Spec, []string{"worker"}))
+	})
+}
