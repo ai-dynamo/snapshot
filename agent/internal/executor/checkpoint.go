@@ -55,6 +55,10 @@ type CheckpointRequest struct {
 	PodIP               string
 	Clientset           kubernetes.Interface
 	PageBrokerRequested bool
+	// CUDAToolsDelivered is true when the source container mounts Snapshot's
+	// CUDA tools (podcontract.CUDAToolsDelivered); recorded in the manifest so
+	// restore mounts them at the same path.
+	CUDAToolsDelivered bool
 }
 
 type checkpointPhaseTimings struct {
@@ -300,6 +304,7 @@ func configureCheckpoint(
 	if len(state.CUDANSPIDs) > 0 {
 		m.CUDA = types.NewCUDAManifest(state.CUDANSPIDs, state.GPUUUIDs)
 	}
+	m.CUDATools.Delivered = req.CUDAToolsDelivered
 
 	if err := types.WriteManifest(checkpointDir, m); err != nil {
 		return nil, nil, fmt.Errorf("failed to write checkpoint manifest: %w", err)

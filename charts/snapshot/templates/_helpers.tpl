@@ -72,6 +72,14 @@ Name of the operator service account.
 {{- end }}
 
 {{/*
+The one configured agent image used by both the DaemonSet and the snapshot-cuda
+init container injected into source Pods.
+*/}}
+{{- define "snapshot.agentImage" -}}
+{{- printf "%s:%s" .Values.image.agent.repository (.Values.image.agent.tag | default .Chart.AppVersion) }}
+{{- end }}
+
+{{/*
 Fail fast on unsupported runtime.type values. Called once from daemonset.yaml.
 */}}
 {{- define "snapshot.validateRuntime" -}}

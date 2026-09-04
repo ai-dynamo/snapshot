@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
@@ -237,4 +238,59 @@ func getBatchJobByName(jobs *batchv1.JobList, name string) *batchv1.Job {
 		}
 	}
 	return nil
+}
+
+func multiGPUSnapshotJob() *snapshotv1alpha1.SnapshotJob {
+	sj := minimalSnapshotJob()
+	worker := &sj.Spec.PodTemplate.Spec.Containers[0]
+	worker.Command = []string{"python3", "-m", "worker"}
+	worker.Resources.Limits = corev1.ResourceList{podcontract.GPUResourceName: resource.MustParse("2")}
+	return sj
+}
+
+func testCUDAToolsDelivery() podcontract.CUDAToolsDelivery {
+	return podcontract.CUDAToolsDelivery{AgentImage: "registry.example/snapshot-agent:v1.2.3"}
+}
+
+func TestBuildShapedSourceJobWrapsMultiGPUTargets(t *testing.T) {
+	sj := multiGPUSnapshotJob()
+
+	job, wrapped, err := buildShapedSourceJob(sj, testCUDAToolsDelivery(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"worker"}, wrapped)
+
+	require.NoError(t, podcontract.VerifyCUDALaunchJob(&job.Spec.Template.Spec, []string{"worker"}))
+	main := requireContainer(t, job.Spec.Template.Spec.Containers, "worker")
+	assert.Equal(t, []string{podcontract.CUDACheckpointPath}, main.Command,
+		"a multi-GPU target is launched through the cuda-checkpoint copied from the agent image")
+	assert.Equal(t, []string{"python3", "-m", "worker"}, main.Args[len(main.Args)-3:],
+		"the original command follows the launch-job wrapper")
+	init := requireContainer(t, job.Spec.Template.Spec.InitContainers, podcontract.CUDAToolsInitContainerName)
+	assert.Equal(t, "registry.example/snapshot-agent:v1.2.3", init.Image)
+
+	t.Run("a multi-GPU SnapshotJob needs a configured agent image", func(t *testing.T) {
+		_, err := buildSourceJob(multiGPUSnapshotJob())
+		require.Error(t, err)
+	})
+
+	t.Run("a single-GPU SnapshotJob is untouched", func(t *testing.T) {
+		sj := minimalSnapshotJob()
+		sj.Spec.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "worker"}
+		job, wrapped, err := buildShapedSourceJob(sj, testCUDAToolsDelivery(), nil)
+		require.NoError(t, err)
+		assert.Empty(t, wrapped)
+		assert.Empty(t, job.Spec.Template.Spec.InitContainers)
+		assert.Equal(t, []string{"python3", "-m", "worker"}, requireContainer(t, job.Spec.Template.Spec.Containers, "worker").Command)
+	})
+
+	t.Run("a DRA claim of unknown size is treated as multi-GPU", func(t *testing.T) {
+		sj := minimalSnapshotJob()
+		worker := &sj.Spec.PodTemplate.Spec.Containers[0]
+		worker.Command = []string{"worker"}
+		worker.Resources.Claims = []corev1.ResourceClaim{{Name: "gpus"}}
+		sj.Spec.PodTemplate.Spec.ResourceClaims = []corev1.PodResourceClaim{{Name: "gpus"}}
+		_, wrapped, err := buildShapedSourceJob(sj, testCUDAToolsDelivery(), nil)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"worker"}, wrapped)
+	})
 }

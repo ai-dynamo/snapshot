@@ -6,13 +6,16 @@ package main
 import (
 	"flag"
 	"os"
+	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	"github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/snapshot/operator/internal/controller"
 )
@@ -24,6 +27,21 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
 	artifactCleanupConfig := bindArtifactCleanupFlags(flag.CommandLine)
+	agentImage := flag.String(
+		"agent-image",
+		"",
+		"Snapshot agent image that cuda-checkpoint and the cuinterpose shim are copied from into source Pods whose target may use more than one GPU or opts into cuinterpose",
+	)
+	agentImagePullPolicy := flag.String(
+		"agent-image-pull-policy",
+		"",
+		"Pull policy for the snapshot-cuda install init container (Always, IfNotPresent, Never); empty picks a default from the reference",
+	)
+	agentImagePullSecrets := flag.String(
+		"agent-image-pull-secrets",
+		"",
+		"Comma-separated imagePullSecret names, present in workload namespaces, added to source Pods that receive the tools",
+	)
 	flag.Parse()
 	if err := artifactCleanupConfig.Validate(); err != nil {
 		ctrl.Log.Error(err, "invalid artifact cleanup configuration")
@@ -87,6 +105,11 @@ func main() {
 		Client:             mgr.GetClient(),
 		NonCacheReadClient: mgr.GetAPIReader(),
 		Recorder:           mgr.GetEventRecorderFor("snapshotjob-controller"),
+		CUDATools: podcontract.CUDAToolsDelivery{
+			AgentImage:       *agentImage,
+			PullPolicy:       corev1.PullPolicy(*agentImagePullPolicy),
+			ImagePullSecrets: splitNonEmpty(*agentImagePullSecrets),
+		},
 	}
 	if err := snapshotJobReconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up SnapshotJob controller")
@@ -97,4 +120,15 @@ func main() {
 		ctrl.Log.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
+}
+
+// splitNonEmpty splits a comma-separated flag value, dropping blanks.
+func splitNonEmpty(value string) []string {
+	var out []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
