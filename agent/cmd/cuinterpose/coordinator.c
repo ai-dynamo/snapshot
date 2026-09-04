@@ -362,11 +362,17 @@ validate_topology(struct participant* participants, size_t participant_count, st
           multicast->next = multicasts;
           multicasts = multicast;
         } else if (
-            multicast->size != record->allocation_size || multicast->handle_types != record->handle_types ||
-            multicast->flags != record->object_flags || multicast->num_devices != record->num_devices ||
+            multicast->handle_types != record->handle_types || multicast->flags != record->object_flags ||
+            multicast->num_devices != record->num_devices ||
             strcmp(multicast->creator, record->creator_participant) != 0) {
           reason = "inconsistent multicast properties";
           goto failed;
+        } else if (record->allocation_size > multicast->size) {
+          /* Each participant reports the extent it used; the driver may have
+           * given the object more capacity than was asked for, and ranks
+           * need not use the same amount of it. Bounds are checked against
+           * the largest. */
+          multicast->size = record->allocation_size;
         }
         if ((record->flags & CUINTERPOSE_CREATOR) != 0) {
           if (strcmp(participant->id, multicast->creator) != 0) {
