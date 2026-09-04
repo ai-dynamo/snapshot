@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -49,7 +50,11 @@ func (r *SnapshotJobReconciler) observeExistingSourceJob(ctx context.Context, sj
 // reconcileExistingSourceJob applies the one-shot Job identity gate shared by
 // steady-state reconciliation and Create-AlreadyExists recovery.
 func (r *SnapshotJobReconciler) reconcileExistingSourceJob(ctx context.Context, sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) (snapshotJobObservation, ctrl.Result, error) {
-	if failure := classifyExistingSourceJob(sj, job); failure != nil {
+	failure, err := r.classifyExistingSourceJob(ctx, sj, job)
+	if err != nil {
+		return snapshotJobObservation{}, ctrl.Result{}, err
+	}
+	if failure != nil {
 		return snapshotJobObservation{failure: failure}, ctrl.Result{}, nil
 	}
 	return r.reconcileAcceptedSourceJob(ctx, sj, job)
@@ -74,7 +79,11 @@ func (r *SnapshotJobReconciler) readAuthoritativeSourceJob(ctx context.Context, 
 		}
 		return nil, nil, err
 	}
-	if failure := classifyExistingSourceJob(sj, job); failure != nil {
+	failure, err := r.classifyExistingSourceJob(ctx, sj, job)
+	if err != nil {
+		return nil, nil, err
+	}
+	if failure != nil {
 		return job, failure, nil
 	}
 	return job, nil, nil
@@ -87,13 +96,19 @@ func sourceJobDeletedFailure(sj *snapshotv1alpha1.SnapshotJob) *snapshotJobFailu
 	}
 }
 
-// classifyExistingSourceJob validates ownership and one-shot Job identity.
-func classifyExistingSourceJob(sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Job) *snapshotJobFailure {
+// classifyExistingSourceJob validates ownership and one-shot Job identity. The
+// error return is a transient API failure while sizing the template's DRA
+// claims; everything else is a terminal failure or acceptance.
+func (r *SnapshotJobReconciler) classifyExistingSourceJob(
+	ctx context.Context,
+	sj *snapshotv1alpha1.SnapshotJob,
+	job *batchv1.Job,
+) (*snapshotJobFailure, error) {
 	if !metav1.IsControlledBy(job, sj) {
 		return &snapshotJobFailure{
 			reason: snapshotv1alpha1.ReasonJobNameConflict,
 			cause:  fmt.Errorf("an object not controlled by this SnapshotJob already holds the name %q", sj.Name),
-		}
+		}, nil
 	}
 	if expectedUID := sj.Status.SourceJobUID; expectedUID != "" {
 		if job.UID != expectedUID {
@@ -101,27 +116,42 @@ func classifyExistingSourceJob(sj *snapshotv1alpha1.SnapshotJob, job *batchv1.Jo
 				reason: snapshotv1alpha1.ReasonJobNameConflict,
 				cause: fmt.Errorf("source Job %q was replaced: found uid %q, expected %q",
 					job.Name, job.UID, expectedUID),
-			}
+			}, nil
 		}
-		return nil
+		return nil, nil
 	}
 
-	desired, err := buildSourceJob(sj)
+	desired, wrapped, err := r.buildSourceJob(ctx, sj)
 	if err != nil {
-		return &snapshotJobFailure{reason: snapshotv1alpha1.ReasonInvalidSpec, cause: err}
+		if errors.As(err, new(claimLookupError)) {
+			return nil, err
+		}
+		return &snapshotJobFailure{reason: snapshotv1alpha1.ReasonInvalidSpec, cause: err}, nil
 	}
 	targetContainer, err := snapshotJobTargetContainer(sj)
 	if err != nil {
-		return &snapshotJobFailure{reason: snapshotv1alpha1.ReasonInvalidSpec, cause: err}
+		return &snapshotJobFailure{reason: snapshotv1alpha1.ReasonInvalidSpec, cause: err}, nil
 	}
 	if !sourceJobHasExpectedIdentity(desired, job, targetContainer) {
 		return &snapshotJobFailure{
 			reason: snapshotv1alpha1.ReasonJobNameConflict,
 			cause: fmt.Errorf("existing source Job %q does not carry the immutable identity expected for this SnapshotJob",
 				job.Name),
+		}, nil
+	}
+	// A Job created before the agent image was configured carries none of the
+	// launch-job contract even though its target may use several GPUs. Adopting
+	// it would fail at checkpoint, after the workload has loaded, because the
+	// agent refuses a multi-GPU process tree without the job file.
+	if len(wrapped) > 0 {
+		if err := podcontract.VerifyCUDALaunchJob(&job.Spec.Template.Spec, wrapped); err != nil {
+			return &snapshotJobFailure{
+				reason: snapshotv1alpha1.ReasonJobNameConflict,
+				cause:  fmt.Errorf("existing source Job %q lacks the cuda-checkpoint launch-job contract: %w", job.Name, err),
+			}, nil
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 // sourceJobHasExpectedIdentity checks only the immutable identity and capture

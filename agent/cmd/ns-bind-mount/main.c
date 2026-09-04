@@ -2,15 +2,17 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * ns-bind-mount installs and removes the two mounts used by restore:
+ * ns-bind-mount installs and removes the fixed mounts used by restore:
  *
  *   mount-bundle-fd <namespace-fd>
+ *   mount-snapshot-cuda-fd <namespace-fd>
  *   mount-checkpoint-fd <namespace-fd> <checkpoint-path>
  *   unmount-bundle-fd <namespace-fd> [created]
+ *   unmount-snapshot-cuda-fd <namespace-fd> [created]
  *   unmount-checkpoint-fd <namespace-fd> [created]
  *
  * The caller pins the target mount namespace and passes its descriptor through
- * ExtraFiles. Bundle and checkpoint policy is deliberately fixed here: callers
+ * ExtraFiles. Bundle, snapshot-cuda, and checkpoint policy is deliberately fixed here: callers
  * cannot select arbitrary host sources, container destinations, or attributes.
  */
 
@@ -58,6 +60,14 @@ struct mount_attr {
 
 #define BUNDLE_SOURCE "/snapshot-binaries"
 #define BUNDLE_DESTINATION "/tmp/snapshot-binaries"
+/*
+ * snapshot-cuda: cuda-checkpoint (the --launch-job wrapper) and the cuinterpose
+ * shim, as delivered to the source workload. The destination must equal
+ * podcontract.CUDAToolsMountPath, because CRIU re-opens the file-backed mappings
+ * of both by that path.
+ */
+#define SNAPSHOT_CUDA_SOURCE "/snapshot-binaries/snapshot-cuda"
+#define SNAPSHOT_CUDA_DESTINATION "/tmp/snapshot-cuda"
 #define CHECKPOINT_ROOT "/checkpoints"
 #define CHECKPOINT_DESTINATION "/tmp/checkpoint"
 #define PAGEBROKER_RESTORE_ROOT "/pagebroker/staging/restore"
@@ -235,6 +245,23 @@ mount_bundle(int argc, char* argv[])
 }
 
 static int
+mount_snapshot_cuda(int argc, char* argv[])
+{
+  if (argc != 3) {
+    fprintf(stderr, "usage: ns-bind-mount mount-snapshot-cuda-fd <namespace-fd>\n");
+    return 1;
+  }
+  int ns_fd = parse_fd(argv[2]);
+  if (ns_fd < 0)
+    return 1;
+  return install_mount(
+      ns_fd,
+      SNAPSHOT_CUDA_SOURCE,
+      SNAPSHOT_CUDA_DESTINATION,
+      MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV);
+}
+
+static int
 mount_checkpoint(int argc, char* argv[])
 {
   if (argc != 4) {
@@ -298,6 +325,8 @@ main(int argc, char* argv[])
   }
   if (strcmp(argv[1], "mount-bundle-fd") == 0)
     return mount_bundle(argc, argv);
+  if (strcmp(argv[1], "mount-snapshot-cuda-fd") == 0)
+    return mount_snapshot_cuda(argc, argv);
   if (strcmp(argv[1], "mount-checkpoint-fd") == 0)
     return mount_checkpoint(argc, argv);
   if (strcmp(argv[1], "mount-pagebroker-fd") == 0)
@@ -308,6 +337,12 @@ main(int argc, char* argv[])
         argv,
         BUNDLE_DESTINATION,
         "usage: ns-bind-mount unmount-bundle-fd <namespace-fd> [created]");
+  if (strcmp(argv[1], "unmount-snapshot-cuda-fd") == 0)
+    return unmount_role(
+        argc,
+        argv,
+        SNAPSHOT_CUDA_DESTINATION,
+        "usage: ns-bind-mount unmount-snapshot-cuda-fd <namespace-fd> [created]");
   if (strcmp(argv[1], "unmount-checkpoint-fd") == 0)
     return unmount_role(
         argc,

@@ -786,3 +786,54 @@ func TestSnapshotJobReconcileSkipsTerminalAndDeleted(t *testing.T) {
 		require.NoError(t, err)
 	})
 }
+
+func TestSnapshotJobReconcileRejectsUnshapedMultiGPUJob(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := multiGPUSnapshotJob()
+	sj.UID = types.UID("sj-uid")
+
+	// A Job created by an operator that had no agent image: the target asks for
+	// two GPUs but carries none of the launch-job contract.
+	single := sj.DeepCopy()
+	single.Spec.PodTemplate.Spec.Containers[0].Resources.Limits = nil
+	job, err := buildSourceJob(single)
+	require.NoError(t, err)
+	job.Spec.Template.Spec.Containers[0].Resources.Limits = sj.Spec.PodTemplate.Spec.Containers[0].Resources.Limits
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	job.UID = types.UID("source-job-uid")
+
+	r := makeSnapshotJobReconciler(s, sj, job)
+	r.CUDATools = testCUDAToolsDelivery()
+
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+	require.NotNil(t, failed, "adopting a multi-GPU Job without the wrapper would fail at checkpoint time")
+	assert.Equal(t, snapshotv1alpha1.ReasonJobNameConflict, failed.Reason)
+	assert.Contains(t, failed.Message, "launch-job contract")
+	assert.Empty(t, updated.Status.SourceJobUID)
+}
+
+func TestSnapshotJobReconcileAdoptsShapedMultiGPUJob(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := multiGPUSnapshotJob()
+	sj.UID = types.UID("sj-uid")
+
+	job, _, err := buildShapedSourceJob(sj, testCUDAToolsDelivery(), nil)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	job.UID = types.UID("source-job-uid")
+
+	r := makeSnapshotJobReconciler(s, sj, job)
+	r.CUDATools = testCUDAToolsDelivery()
+
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	assert.Equal(t, job.UID, updated.Status.SourceJobUID, "a correctly shaped Job is adopted")
+}
