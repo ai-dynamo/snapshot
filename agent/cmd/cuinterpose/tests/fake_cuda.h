@@ -62,6 +62,28 @@ struct fake_last_call {
 
 void fakeReset(void);
 const struct fake_last_call* fakeLastCall(void);
+
+/*
+ * Tracked mode: a small but honest model of the driver's allocation objects,
+ * enough for the shim's bookkeeping to be tested. Handles are reference counts
+ * on allocations; export produces a memfd naming the allocation; import of such
+ * a memfd adds a reference; import of any other descriptor creates a fresh
+ * "foreign" allocation; retain-by-address looks the mapping up. Calls succeed
+ * with CUDA_SUCCESS instead of returning the forwarding codes above.
+ */
+void fakeEnableTrackedBehavior(void);
+/* Forget every modeled allocation and mapping (tracked mode stays on). */
+void fakeResetModel(void);
+/* Allocations whose reference count is above zero. */
+int fakeLiveAllocations(void);
+/* Reference count of the allocation behind handle, or -1 when unknown/freed. */
+int fakeAllocationRefs(CUmemGenericAllocationHandle handle);
+/* True when two handles refer to the same modeled allocation. */
+int fakeSameAllocation(CUmemGenericAllocationHandle a, CUmemGenericAllocationHandle b);
+int fakeExportCalls(void);
+int fakeMappedCount(void);
+/* Number of cuMemSetAccess calls since the last reset. */
+int fakeAccessCalls(void);
 /* The fake's own implementation of `symbol`, bypassing any interposer. */
 void* fakeOriginal(const char* symbol);
 /* Same, for a caller that asked for a specific CUDA version. */

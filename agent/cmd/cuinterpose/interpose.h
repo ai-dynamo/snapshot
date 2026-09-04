@@ -1,0 +1,35 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+ * All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef CUINTERPOSE_INTERPOSE_H
+#define CUINTERPOSE_INTERPOSE_H
+
+#include <cuda.h>
+#include <stdbool.h>
+#include <stdint.h>
+
+/* Internal entry points shared between the shim's translation units. */
+
+/*
+ * Make sure this process has its participant identity and control socket. A
+ * child created by fork() inherits neither, so every wrapper and every
+ * resolver calls this first; the first CUDA activity in the child creates them.
+ */
+CUresult cuinterpose_ensure_process_endpoint(void);
+
+/*
+ * If `handle` is one of the shim's logical handles for a tracked allocation,
+ * store the driver handle behind it in *driver and return true. Used by the
+ * multicast wrappers, which must hand the driver a handle it recognizes.
+ */
+bool cuinterpose_translate_handle(CUmemGenericAllocationHandle handle, CUmemGenericAllocationHandle* driver);
+
+/* Record a successful exportable creation whose handle type cuinterpose cannot
+ * reconstruct. The coordinator refuses checkpoint before teardown when this
+ * counter is non-zero. Multicast uses the same process-wide diagnostic. */
+void cuinterpose_note_unsupported_exportable_creation(uint64_t handle_types);
+
+#endif

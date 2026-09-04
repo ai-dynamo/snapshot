@@ -8,6 +8,13 @@
 
 #include "fake_cuda.h"
 
+#include <fcntl.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <string.h>
 
 #undef cuGetProcAddress
@@ -43,6 +50,171 @@ record(const char* function)
   last.function = function;
 }
 
+/* ---------------------------------------------------------------------- */
+/* Tracked mode model.                                                      */
+/* ---------------------------------------------------------------------- */
+
+#define FAKE_MAX_ALLOCATIONS 512
+#define FAKE_MAX_HANDLES 4096
+#define FAKE_MAX_MAPPINGS 4096
+#define FAKE_HANDLE_BASE 0x1000
+#define FAKE_EXPORT_MAGIC "fake-cuda-export:"
+
+struct fake_allocation {
+  int used;
+  int refs;
+  size_t size;
+  CUmemAllocationProp properties;
+};
+
+struct fake_handle {
+  int used;
+  int allocation;
+};
+
+struct fake_mapping {
+  int used;
+  CUdeviceptr address;
+  size_t size;
+  int allocation;
+};
+
+static int tracked;
+static struct fake_allocation allocations[FAKE_MAX_ALLOCATIONS];
+static struct fake_handle handles[FAKE_MAX_HANDLES];
+static struct fake_mapping mappings[FAKE_MAX_MAPPINGS];
+static int export_calls;
+static int access_calls;
+static pthread_mutex_t model_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void
+fakeEnableTrackedBehavior(void)
+{
+  tracked = 1;
+}
+
+void
+fakeResetModel(void)
+{
+  pthread_mutex_lock(&model_lock);
+  memset(allocations, 0, sizeof(allocations));
+  memset(handles, 0, sizeof(handles));
+  memset(mappings, 0, sizeof(mappings));
+  export_calls = 0;
+  access_calls = 0;
+  pthread_mutex_unlock(&model_lock);
+}
+
+static int
+handle_index(CUmemGenericAllocationHandle handle)
+{
+  if (handle < FAKE_HANDLE_BASE || handle >= FAKE_HANDLE_BASE + FAKE_MAX_HANDLES)
+    return -1;
+  return (int)(handle - FAKE_HANDLE_BASE);
+}
+
+/* Caller holds model_lock. */
+static CUmemGenericAllocationHandle
+new_handle(int allocation)
+{
+  int index;
+
+  for (index = 0; index < FAKE_MAX_HANDLES; index++) {
+    if (!handles[index].used) {
+      handles[index].used = 1;
+      handles[index].allocation = allocation;
+      allocations[allocation].refs++;
+      return (CUmemGenericAllocationHandle)(FAKE_HANDLE_BASE + index);
+    }
+  }
+  return 0;
+}
+
+/* Caller holds model_lock. Returns the allocation index or -1. */
+static int
+new_allocation(size_t size, const CUmemAllocationProp* properties)
+{
+  int index;
+
+  for (index = 0; index < FAKE_MAX_ALLOCATIONS; index++) {
+    if (!allocations[index].used) {
+      allocations[index].used = 1;
+      allocations[index].refs = 0;
+      allocations[index].size = size;
+      if (properties != NULL)
+        allocations[index].properties = *properties;
+      else
+        memset(&allocations[index].properties, 0, sizeof(allocations[index].properties));
+      return index;
+    }
+  }
+  return -1;
+}
+
+int
+fakeLiveAllocations(void)
+{
+  int index;
+  int live = 0;
+
+  pthread_mutex_lock(&model_lock);
+  for (index = 0; index < FAKE_MAX_ALLOCATIONS; index++)
+    live += allocations[index].used && allocations[index].refs > 0;
+  pthread_mutex_unlock(&model_lock);
+  return live;
+}
+
+int
+fakeAllocationRefs(CUmemGenericAllocationHandle handle)
+{
+  int index = handle_index(handle);
+  int refs = -1;
+
+  pthread_mutex_lock(&model_lock);
+  if (index >= 0 && handles[index].used)
+    refs = allocations[handles[index].allocation].refs;
+  pthread_mutex_unlock(&model_lock);
+  return refs;
+}
+
+int
+fakeSameAllocation(CUmemGenericAllocationHandle a, CUmemGenericAllocationHandle b)
+{
+  int ia = handle_index(a);
+  int ib = handle_index(b);
+  int same = 0;
+
+  pthread_mutex_lock(&model_lock);
+  same = ia >= 0 && ib >= 0 && handles[ia].used && handles[ib].used && handles[ia].allocation == handles[ib].allocation;
+  pthread_mutex_unlock(&model_lock);
+  return same;
+}
+
+int
+fakeExportCalls(void)
+{
+  return export_calls;
+}
+
+int
+fakeMappedCount(void)
+{
+  int index;
+  int count = 0;
+
+  pthread_mutex_lock(&model_lock);
+  for (index = 0; index < FAKE_MAX_MAPPINGS; index++)
+    count += mappings[index].used;
+  pthread_mutex_unlock(&model_lock);
+  return count;
+}
+
+int
+fakeAccessCalls(void)
+{
+  return access_calls;
+}
+
 /*
  * Each entry point exists twice: the exported CUDA name, and a fakeXxx alias
  * that cuGetProcAddress hands out. The alias lets a test tell "the shim's
@@ -53,6 +225,25 @@ CUresult CUDAAPI
 fakeCuMemCreate(
     CUmemGenericAllocationHandle* output, size_t size, const CUmemAllocationProp* properties, unsigned long long flags)
 {
+  if (tracked) {
+    int allocation;
+    CUmemGenericAllocationHandle handle = 0;
+    record("cuMemCreate");
+    last.size = size;
+    last.flags = flags;
+    last.handle_type = properties != NULL ? (int)properties->requestedHandleTypes : -1;
+    if (output == NULL)
+      return CUDA_ERROR_INVALID_VALUE;
+    pthread_mutex_lock(&model_lock);
+    allocation = new_allocation(size, properties);
+    if (allocation >= 0)
+      handle = new_handle(allocation);
+    pthread_mutex_unlock(&model_lock);
+    if (handle == 0)
+      return CUDA_ERROR_OUT_OF_MEMORY;
+    *output = handle;
+    return CUDA_SUCCESS;
+  }
   record("cuMemCreate");
   last.size = size;
   last.flags = flags;
@@ -71,6 +262,21 @@ cuMemCreate(
 CUresult CUDAAPI
 fakeCuMemRelease(CUmemGenericAllocationHandle handle)
 {
+  if (tracked) {
+    int index = handle_index(handle);
+    record("cuMemRelease");
+    last.handle = handle;
+    pthread_mutex_lock(&model_lock);
+    if (index < 0 || !handles[index].used) {
+      pthread_mutex_unlock(&model_lock);
+      return CUDA_ERROR_INVALID_HANDLE;
+    }
+    handles[index].used = 0;
+    if (--allocations[handles[index].allocation].refs == 0)
+      allocations[handles[index].allocation].used = 0;
+    pthread_mutex_unlock(&model_lock);
+    return CUDA_SUCCESS;
+  }
   record("cuMemRelease");
   last.handle = handle;
   return (CUresult)FAKE_RESULT_RELEASE;
@@ -84,6 +290,27 @@ cuMemRelease(CUmemGenericAllocationHandle handle)
 CUresult CUDAAPI
 fakeCuMemRetainAllocationHandle(CUmemGenericAllocationHandle* output, void* address)
 {
+  if (tracked) {
+    int index;
+    CUmemGenericAllocationHandle handle = 0;
+    record("cuMemRetainAllocationHandle");
+    last.pointer = address;
+    if (output == NULL)
+      return CUDA_ERROR_INVALID_VALUE;
+    pthread_mutex_lock(&model_lock);
+    for (index = 0; index < FAKE_MAX_MAPPINGS; index++) {
+      if (mappings[index].used && (CUdeviceptr)(uintptr_t)address >= mappings[index].address &&
+          (CUdeviceptr)(uintptr_t)address < mappings[index].address + mappings[index].size) {
+        handle = new_handle(mappings[index].allocation);
+        break;
+      }
+    }
+    pthread_mutex_unlock(&model_lock);
+    if (handle == 0)
+      return CUDA_ERROR_INVALID_VALUE;
+    *output = handle;
+    return CUDA_SUCCESS;
+  }
   record("cuMemRetainAllocationHandle");
   last.pointer = address;
   if (output != NULL)
@@ -100,6 +327,35 @@ CUresult CUDAAPI
 fakeCuMemMap(
     CUdeviceptr address, size_t size, size_t offset, CUmemGenericAllocationHandle handle, unsigned long long flags)
 {
+  if (tracked) {
+    int hindex = handle_index(handle);
+    int index;
+    record("cuMemMap");
+    last.address = address;
+    last.size = size;
+    last.offset = offset;
+    last.handle = handle;
+    last.flags = flags;
+    pthread_mutex_lock(&model_lock);
+    if (hindex < 0 || !handles[hindex].used) {
+      pthread_mutex_unlock(&model_lock);
+      return CUDA_ERROR_INVALID_HANDLE;
+    }
+    for (index = 0; index < FAKE_MAX_MAPPINGS; index++) {
+      if (!mappings[index].used) {
+        mappings[index].used = 1;
+        mappings[index].address = address;
+        mappings[index].size = size;
+        mappings[index].allocation = handles[hindex].allocation;
+        /* The mapping keeps the memory alive, like the driver does. */
+        allocations[mappings[index].allocation].refs++;
+        pthread_mutex_unlock(&model_lock);
+        return CUDA_SUCCESS;
+      }
+    }
+    pthread_mutex_unlock(&model_lock);
+    return CUDA_ERROR_OUT_OF_MEMORY;
+  }
   record("cuMemMap");
   last.address = address;
   last.size = size;
@@ -117,6 +373,25 @@ cuMemMap(CUdeviceptr address, size_t size, size_t offset, CUmemGenericAllocation
 CUresult CUDAAPI
 fakeCuMemUnmap(CUdeviceptr address, size_t size)
 {
+  if (tracked) {
+    int index;
+    int found = 0;
+    record("cuMemUnmap");
+    last.address = address;
+    last.size = size;
+    pthread_mutex_lock(&model_lock);
+    for (index = 0; index < FAKE_MAX_MAPPINGS; index++) {
+      if (mappings[index].used && mappings[index].address >= address &&
+          mappings[index].address + mappings[index].size <= address + size) {
+        mappings[index].used = 0;
+        if (--allocations[mappings[index].allocation].refs == 0)
+          allocations[mappings[index].allocation].used = 0;
+        found = 1;
+      }
+    }
+    pthread_mutex_unlock(&model_lock);
+    return found ? CUDA_SUCCESS : CUDA_ERROR_INVALID_VALUE;
+  }
   record("cuMemUnmap");
   last.address = address;
   last.size = size;
@@ -131,6 +406,15 @@ cuMemUnmap(CUdeviceptr address, size_t size)
 CUresult CUDAAPI
 fakeCuMemSetAccess(CUdeviceptr address, size_t size, const CUmemAccessDesc* descriptors, size_t count)
 {
+  if (tracked) {
+    record("cuMemSetAccess");
+    last.address = address;
+    last.size = size;
+    last.count = count;
+    last.pointer = (void*)descriptors;
+    access_calls++;
+    return CUDA_SUCCESS;
+  }
   record("cuMemSetAccess");
   last.address = address;
   last.size = size;
@@ -148,6 +432,33 @@ CUresult CUDAAPI
 fakeCuMemExportToShareableHandle(
     void* output, CUmemGenericAllocationHandle handle, CUmemAllocationHandleType type, unsigned long long flags)
 {
+  if (tracked) {
+    int index = handle_index(handle);
+    char text[64];
+    int fd;
+    record("cuMemExportToShareableHandle");
+    last.pointer = output;
+    last.handle = handle;
+    last.handle_type = (int)type;
+    last.flags = flags;
+    if (output == NULL || flags != 0)
+      return CUDA_ERROR_INVALID_VALUE;
+    pthread_mutex_lock(&model_lock);
+    if (index < 0 || !handles[index].used) {
+      pthread_mutex_unlock(&model_lock);
+      return CUDA_ERROR_INVALID_HANDLE;
+    }
+    export_calls++;
+    snprintf(text, sizeof(text), FAKE_EXPORT_MAGIC "%d", handles[index].allocation);
+    /* The real driver's descriptor holds a reference until it is closed; this
+     * model cannot observe close(), so the descriptor is not counted here. */
+    pthread_mutex_unlock(&model_lock);
+    fd = memfd_create("fake-cuda-export", MFD_CLOEXEC);
+    if (fd < 0 || write(fd, text, strlen(text)) != (ssize_t)strlen(text))
+      return CUDA_ERROR_UNKNOWN;
+    *(int*)output = fd;
+    return CUDA_SUCCESS;
+  }
   record("cuMemExportToShareableHandle");
   last.pointer = output;
   last.handle = handle;
@@ -166,6 +477,31 @@ CUresult CUDAAPI
 fakeCuMemImportFromShareableHandle(
     CUmemGenericAllocationHandle* output, void* os_handle, CUmemAllocationHandleType type)
 {
+  if (tracked) {
+    char text[64] = {0};
+    int allocation = -1;
+    CUmemGenericAllocationHandle handle = 0;
+    record("cuMemImportFromShareableHandle");
+    last.pointer = os_handle;
+    last.handle_type = (int)type;
+    if (output == NULL)
+      return CUDA_ERROR_INVALID_VALUE;
+    if (pread((int)(uintptr_t)os_handle, text, sizeof(text) - 1, 0) > 0 &&
+        strncmp(text, FAKE_EXPORT_MAGIC, strlen(FAKE_EXPORT_MAGIC)) == 0)
+      allocation = atoi(text + strlen(FAKE_EXPORT_MAGIC));
+    pthread_mutex_lock(&model_lock);
+    if (allocation < 0 || allocation >= FAKE_MAX_ALLOCATIONS || !allocations[allocation].used) {
+      /* Not one of ours: model a descriptor from some other process. */
+      allocation = new_allocation(0, NULL);
+    }
+    if (allocation >= 0)
+      handle = new_handle(allocation);
+    pthread_mutex_unlock(&model_lock);
+    if (handle == 0)
+      return CUDA_ERROR_OUT_OF_MEMORY;
+    *output = handle;
+    return CUDA_SUCCESS;
+  }
   record("cuMemImportFromShareableHandle");
   last.pointer = os_handle;
   last.handle_type = (int)type;
@@ -182,6 +518,21 @@ cuMemImportFromShareableHandle(CUmemGenericAllocationHandle* output, void* os_ha
 CUresult CUDAAPI
 fakeCuMemGetAllocationPropertiesFromHandle(CUmemAllocationProp* properties, CUmemGenericAllocationHandle handle)
 {
+  if (tracked) {
+    int index = handle_index(handle);
+    record("cuMemGetAllocationPropertiesFromHandle");
+    last.pointer = properties;
+    last.handle = handle;
+    pthread_mutex_lock(&model_lock);
+    if (index < 0 || !handles[index].used) {
+      pthread_mutex_unlock(&model_lock);
+      return CUDA_ERROR_INVALID_HANDLE;
+    }
+    if (properties != NULL)
+      *properties = allocations[handles[index].allocation].properties;
+    pthread_mutex_unlock(&model_lock);
+    return CUDA_SUCCESS;
+  }
   record("cuMemGetAllocationPropertiesFromHandle");
   last.pointer = properties;
   last.handle = handle;
