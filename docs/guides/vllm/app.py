@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import os
 from pathlib import Path
 from uuid import uuid4
@@ -16,6 +17,24 @@ from vllm.v1.engine.async_llm import AsyncLLM
 
 CONTROL_DIR = Path(os.environ.get("SNAPSHOT_CONTROL_DIR", "/snapshot-control"))
 MODEL = os.environ["SNAPSHOT_MODEL"]
+# Extra AsyncEngineArgs fields as a JSON object, for example
+# {"tensor_parallel_size": 2, "kv_cache_memory_bytes": 2147483648,
+#  "attention_config": {"backend": "FLASHINFER", "use_trtllm_attention": true}}.
+ENGINE_ARGS = json.loads(os.environ.get("SNAPSHOT_ENGINE_ARGS", "{}"))
+
+
+def engine_args() -> dict:
+    """Nested configs arrive as JSON objects; hand vLLM the dataclasses it expects."""
+    args = dict(ENGINE_ARGS)
+    if isinstance(args.get("attention_config"), dict):
+        from vllm.config import AttentionConfig
+
+        args["attention_config"] = AttentionConfig(**args["attention_config"])
+    if isinstance(args.get("compilation_config"), dict):
+        from vllm.config import CompilationConfig
+
+        args["compilation_config"] = CompilationConfig(**args["compilation_config"])
+    return args
 
 
 class GenerateRequest(BaseModel):
@@ -86,6 +105,7 @@ async def main() -> None:
         AsyncEngineArgs(
             model=MODEL,
             enable_sleep_mode=True,
+            **engine_args(),
         ),
         usage_context=UsageContext.LLM_CLASS,
     )

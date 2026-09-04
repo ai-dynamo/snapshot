@@ -117,9 +117,29 @@ source and restored containers.
 > [!NOTE]
 > This example runs vLLM directly through `AsyncLLM` rather than `vllm serve`, so
 > the standard `vllm serve` command-line arguments do not apply. The model is
-> selected with `SNAPSHOT_MODEL`, and other runtime settings are supplied through
-> vLLM's [environment variables](https://docs.vllm.ai/en/v0.27.1/configuration/env_vars/)
+> selected with `SNAPSHOT_MODEL`; further engine arguments go in
+> `SNAPSHOT_ENGINE_ARGS` as a JSON object (for example
+> `{"tensor_parallel_size": 2, "kv_cache_memory_bytes": 2147483648}`), and
+> other runtime settings are supplied through vLLM's
+> [environment variables](https://docs.vllm.ai/en/v0.27.1/configuration/env_vars/)
 > set in the Deployment's Pod template.
+
+### Tensor parallelism
+
+A tensor-parallel replica shares GPU memory between its worker processes.
+Snapshot needs the CUDA interposer for that: add the annotation
+`nvidia.com/cuinterpose: enabled` to the Pod template, set
+`tensor_parallel_size` in `SNAPSHOT_ENGINE_ARGS`, request the matching number
+of GPUs, and give the container an explicit `command` (the launch-job wrapper
+needs one). With a `SnapshotJob`, the operator shapes the Pod itself. With a
+`PodSnapshot` of a Deployment you manage, shape the Pod template with
+`podcontract.ShapeCuinterposeCapture` from `api/podcontract` (it adds the init
+container that copies the shim out of the agent image, `LD_PRELOAD`, and the
+`cuda-checkpoint --launch-job` wrapper). Keep allocators on POSIX descriptors:
+`VLLM_ALLREDUCE_USE_FLASHINFER=1` with `VLLM_FLASHINFER_ALLREDUCE_BACKEND=trtllm`
+uses them for its unicast and multicast workspace, whereas the `mnnvl` backend
+and PyTorch symmetric memory prefer fabric handles on nodes that offer them,
+which the interposer does not track (see [limitations](../limitations.md)).
 
 Deploy the edited manifest:
 
