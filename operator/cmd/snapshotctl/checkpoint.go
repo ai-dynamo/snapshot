@@ -63,6 +63,23 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 		return nil, err
 	}
 
+	// Multi-GPU sources must run under cuda-checkpoint --launch-job or the
+	// agent refuses to checkpoint them. DRA claims cannot be sized here, so a
+	// target with any device claim is wrapped as well.
+	wrapLaunchJob := opts.CudaCheckpointWrap
+	if !wrapLaunchJob {
+		for i := range pod.Spec.Containers {
+			if pod.Spec.Containers[i].Name != containerName {
+				continue
+			}
+			needed, err := podcontract.NeedsCUDALaunchJob(&pod.Spec, &pod.Spec.Containers[i], nil)
+			if err != nil {
+				return nil, err
+			}
+			wrapLaunchJob = needed
+		}
+	}
+
 	checkpointJobName := captureJobName(snapshotName)
 	job, err := snapshotprotocol.NewSourceJob(&corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
@@ -75,7 +92,7 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, 
 		TargetContainer: containerName,
 		SeccompProfile:  podcontract.DefaultSeccompLocalhostProfile,
 		Name:            checkpointJobName,
-		WrapLaunchJob:   opts.CudaCheckpointWrap,
+		WrapLaunchJob:   wrapLaunchJob,
 	})
 	if err != nil {
 		return nil, err
