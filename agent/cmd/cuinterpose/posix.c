@@ -1,0 +1,155 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+ * All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#define _GNU_SOURCE
+
+#include "posix.h"
+
+#include <fcntl.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include "util.h"
+
+static bool
+zero_bytes(const void* value, size_t size)
+{
+  const uint8_t* bytes = value;
+  size_t index;
+
+  for (index = 0; index < size; index++) {
+    if (bytes[index] != 0)
+      return false;
+  }
+  return true;
+}
+
+static void
+set_error(char* error, size_t error_size, const char* message)
+{
+  if (error != NULL && error_size != 0)
+    snprintf(error, error_size, "%s", message);
+}
+
+static void
+close_output(int* output)
+{
+  if (*output >= 0) {
+    close(*output);
+    *output = -1;
+  }
+}
+
+int
+cuinterpose_posix_create_ticket(const struct cuinterpose_posix_ticket* ticket, int* output)
+{
+  const int seals = F_SEAL_WRITE | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL;
+  int fd;
+
+  fd = memfd_create("cuinterpose-ticket", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+  if (fd < 0 || cuinterpose_write_all(fd, ticket, sizeof(*ticket)) != 0 || fcntl(fd, F_ADD_SEALS, seals) != 0) {
+    if (fd >= 0)
+      close(fd);
+    return -1;
+  }
+  *output = fd;
+  return 0;
+}
+
+int
+cuinterpose_posix_read_ticket(int fd, struct cuinterpose_posix_ticket* ticket)
+{
+  const int seals = F_SEAL_WRITE | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL;
+  struct stat status;
+
+  memset(ticket, 0, sizeof(*ticket));
+  /*
+   * A real driver fd is a character device: F_GET_SEALS fails on it, and the
+   * size check would fail too. Either mismatch means "not a ticket", which the
+   * caller treats as a raw fd to pass through.
+   */
+  if (fd < 0 || fcntl(fd, F_GET_SEALS) != seals || fstat(fd, &status) != 0 ||
+      status.st_size != (off_t)sizeof(*ticket) || cuinterpose_pread_all(fd, ticket, sizeof(*ticket)) != 0 ||
+      ticket->magic != CUINTERPOSE_POSIX_TICKET_MAGIC || ticket->version != CUINTERPOSE_POSIX_TICKET_VERSION ||
+      !zero_bytes(ticket->reserved, sizeof(ticket->reserved)) ||
+      !cuinterpose_is_lower_hex_id(ticket->creator_participant) ||
+      zero_bytes(ticket->allocation_id, sizeof(ticket->allocation_id)) || ticket->creator_endpoint[0] != '/' ||
+      memchr(ticket->creator_endpoint, '\0', sizeof(ticket->creator_endpoint)) == NULL ||
+      zero_bytes(ticket->authorization, sizeof(ticket->authorization)) ||
+      !zero_bytes(ticket->reserved_alignment, sizeof(ticket->reserved_alignment)) ||
+      (ticket->resource_kind != CUINTERPOSE_RESOURCE_UNICAST &&
+       ticket->resource_kind != CUINTERPOSE_RESOURCE_MULTICAST) ||
+      !zero_bytes(ticket->reserved_identity, sizeof(ticket->reserved_identity)))
+    return -1;
+  if (ticket->resource_kind == CUINTERPOSE_RESOURCE_UNICAST &&
+      (ticket->num_devices != 0 || ticket->allocation_size != 0 || ticket->handle_types != 0 ||
+       ticket->object_flags != 0))
+    return -1;
+  if (ticket->resource_kind == CUINTERPOSE_RESOURCE_MULTICAST &&
+      (ticket->num_devices == 0 || ticket->allocation_size == 0 ||
+       ticket->handle_types != CUINTERPOSE_POSIX_HANDLE_TYPE))
+    return -1;
+  return 0;
+}
+
+int
+cuinterpose_posix_request_export(
+    const struct cuinterpose_posix_ticket* ticket, int* output, char* error, size_t error_size)
+{
+  struct sockaddr_un address = {.sun_family = AF_UNIX};
+  struct cuinterpose_header request;
+  struct cuinterpose_header response;
+  int client = -1;
+  int result = -1;
+
+  *output = -1;
+  set_error(error, error_size, "");
+  memset(&request, 0, sizeof(request));
+  request.magic = CUINTERPOSE_MAGIC;
+  request.version = CUINTERPOSE_VERSION;
+  request.operation = CUINTERPOSE_EXPORT;
+  request.resource_kind = ticket->resource_kind;
+  snprintf(request.participant_id, sizeof(request.participant_id), "%s", ticket->creator_participant);
+  memcpy(request.authorization, ticket->authorization, sizeof(request.authorization));
+  memcpy(request.allocation_id, ticket->allocation_id, sizeof(request.allocation_id));
+  snprintf(address.sun_path, sizeof(address.sun_path), "%s", ticket->creator_endpoint);
+  client = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if (client < 0 || cuinterpose_set_socket_timeouts(client, cuinterpose_control_timeout_seconds()) != 0 ||
+      connect(client, (const struct sockaddr*)&address, sizeof(address)) != 0 ||
+      cuinterpose_send_header(client, &request, -1) != 0 ||
+      cuinterpose_receive_header(client, &response, output) != 0) {
+    set_error(error, error_size, "cannot contact creator endpoint");
+    goto done;
+  }
+  if (!cuinterpose_header_strings_terminated(&response) || response.magic != CUINTERPOSE_MAGIC ||
+      response.version != CUINTERPOSE_VERSION || response.operation != CUINTERPOSE_EXPORT ||
+      response.count != 0 || response.payload_size != 0 ||
+      strcmp(response.participant_id, ticket->creator_participant) != 0 ||
+      response.resource_kind != ticket->resource_kind) {
+    set_error(error, error_size, "invalid creator export response");
+    goto done;
+  }
+  if (response.status != 0) {
+    set_error(error, error_size, response.message[0] != '\0' ? response.message : "creator export request failed");
+    goto done;
+  }
+  if (memcmp(response.allocation_id, ticket->allocation_id, sizeof(response.allocation_id)) != 0 || *output < 0) {
+    set_error(error, error_size, "invalid creator export response");
+    goto done;
+  }
+  result = 0;
+done:
+  if (result != 0)
+    close_output(output);
+  if (client >= 0)
+    close(client);
+  return result;
+}
