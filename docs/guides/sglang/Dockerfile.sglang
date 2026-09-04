@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-ARG SGLANG_RUNTIME_IMAGE=lmsysorg/sglang@sha256:9e148f5ac788e856a06166bd6347a831831eb9fcfab4d1770874823a7c29a1a1
+ARG SGLANG_RUNTIME_IMAGE=lmsysorg/sglang:v0.5.17-cu130-runtime@sha256:3ea7c6d74312d964edbcf9b3819425ea42117eb967ef1cfec632a70c926027df
 FROM ${SGLANG_RUNTIME_IMAGE}
 
 ARG TARGETARCH=amd64
