@@ -58,11 +58,9 @@ crdUpgrade:
 runtime:
   type: containerd  # containerd | crio
   socketPath: ""
-  # Host directory holding per-container storage. Mounted into the agent at
-  # this same absolute path, because runtime metadata reports it verbatim.
+  # Host per-container storage, mounted into the agent at the same absolute path.
   # Defaults: /var/lib/containerd (containerd), /var/lib/containers (crio).
-  # RKE2: /var/lib/rancher/rke2/agent/containerd, with
-  #       socketPath: /run/k3s/containerd/containerd.sock
+  # RKE2: /var/lib/rancher/rke2/agent/containerd + socketPath /run/k3s/containerd/containerd.sock
   storageDir: ""
 
 # Gates the OCP RBAC template and the DS required-scc annotation. Keep false
