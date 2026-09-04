@@ -25,6 +25,26 @@ CUresult CUDAAPI fakeCuGetProcAddress(const char*, void**, int, cuuint64_t);
 
 static struct fake_last_call last;
 
+#define FAKE_MAX_HOST 256
+
+struct fake_host_range {
+  int used;
+  void* address;
+  size_t size;
+};
+
+static struct fake_host_range host_ranges[FAKE_MAX_HOST];
+static uint64_t copied_to_host;
+static uint64_t copied_to_device;
+static CUcontext current_context = (CUcontext)(uintptr_t)1;
+/* Primary contexts: one per device, handed out by cuDevicePrimaryCtxRetain. */
+static int primary_retain_calls;
+static int primary_contexts_held;
+static char fail_next[64];
+static CUdeviceptr next_reservation = 0x7f0000000000ULL;
+
+static int should_fail(const char* function);
+
 void
 fakeReset(void)
 {
@@ -96,12 +116,19 @@ fakeEnableTrackedBehavior(void)
 void
 fakeResetModel(void)
 {
+  current_context = (CUcontext)(uintptr_t)1;
+  primary_retain_calls = 0;
+  primary_contexts_held = 0;
   pthread_mutex_lock(&model_lock);
   memset(allocations, 0, sizeof(allocations));
   memset(handles, 0, sizeof(handles));
   memset(mappings, 0, sizeof(mappings));
+  memset(host_ranges, 0, sizeof(host_ranges));
   export_calls = 0;
   access_calls = 0;
+  copied_to_host = 0;
+  copied_to_device = 0;
+  fail_next[0] = '\0';
   pthread_mutex_unlock(&model_lock);
 }
 
@@ -234,6 +261,8 @@ fakeCuMemCreate(
     last.handle_type = properties != NULL ? (int)properties->requestedHandleTypes : -1;
     if (output == NULL)
       return CUDA_ERROR_INVALID_VALUE;
+    if (should_fail("cuMemCreate"))
+      return CUDA_ERROR_UNKNOWN;
     pthread_mutex_lock(&model_lock);
     allocation = new_allocation(size, properties);
     if (allocation >= 0)
@@ -702,11 +731,260 @@ cuMulticastUnbind(CUmemGenericAllocationHandle multicast, CUdevice device, size_
   return fakeCuMulticastUnbind(multicast, device, offset, size);
 }
 
+
+/* ---------------------------------------------------------------------- */
+/* Tracked mode: staging, host carriers, streams, contexts.                 */
+/* ---------------------------------------------------------------------- */
+
+
+void
+fakeFailNext(const char* function)
+{
+  snprintf(fail_next, sizeof(fail_next), "%s", function);
+}
+
+/* True (and consumed) when this call was armed to fail. */
+static int
+should_fail(const char* function)
+{
+  if (fail_next[0] != '\0' && strcmp(fail_next, function) == 0) {
+    fail_next[0] = '\0';
+    return 1;
+  }
+  return 0;
+}
+
+uint64_t
+fakeCopiedToHost(void)
+{
+  return copied_to_host;
+}
+
+uint64_t
+fakeCopiedToDevice(void)
+{
+  return copied_to_device;
+}
+
+int
+fakeRegisteredHostRanges(void)
+{
+  int index;
+  int count = 0;
+
+  pthread_mutex_lock(&model_lock);
+  for (index = 0; index < FAKE_MAX_HOST; index++)
+    count += host_ranges[index].used;
+  pthread_mutex_unlock(&model_lock);
+  return count;
+}
+
+void
+fakeForgetHostRegistrations(void)
+{
+  pthread_mutex_lock(&model_lock);
+  memset(host_ranges, 0, sizeof(host_ranges));
+  pthread_mutex_unlock(&model_lock);
+}
+
+CUcontext
+fakeCurrentContext(void)
+{
+  return current_context;
+}
+
+CUresult CUDAAPI
+cuCtxSetCurrent(CUcontext context)
+{
+  current_context = context;
+  return CUDA_SUCCESS;
+}
+
+CUresult CUDAAPI
+cuMemAddressReserve(CUdeviceptr* address, size_t size, size_t alignment, CUdeviceptr fixed, unsigned long long flags)
+{
+  (void)alignment;
+  (void)fixed;
+  (void)flags;
+  if (should_fail("cuMemAddressReserve"))
+    return CUDA_ERROR_UNKNOWN;
+  pthread_mutex_lock(&model_lock);
+  *address = next_reservation;
+  next_reservation += (size + 0xfffff) & ~(CUdeviceptr)0xfffff;
+  pthread_mutex_unlock(&model_lock);
+  return CUDA_SUCCESS;
+}
+
+CUresult CUDAAPI
+cuMemAddressFree(CUdeviceptr address, size_t size)
+{
+  (void)address;
+  (void)size;
+  return CUDA_SUCCESS;
+}
+
+CUresult CUDAAPI
+cuMemHostRegister_v2(void* address, size_t size, unsigned int flags)
+{
+  int index;
+
+  (void)flags;
+  if (should_fail("cuMemHostRegister_v2"))
+    return CUDA_ERROR_UNKNOWN;
+  pthread_mutex_lock(&model_lock);
+  for (index = 0; index < FAKE_MAX_HOST; index++) {
+    if (!host_ranges[index].used) {
+      host_ranges[index].used = 1;
+      host_ranges[index].address = address;
+      host_ranges[index].size = size;
+      pthread_mutex_unlock(&model_lock);
+      return CUDA_SUCCESS;
+    }
+  }
+  pthread_mutex_unlock(&model_lock);
+  return CUDA_ERROR_OUT_OF_MEMORY;
+}
+
+CUresult CUDAAPI
+cuMemHostUnregister(void* address)
+{
+  int index;
+
+  pthread_mutex_lock(&model_lock);
+  for (index = 0; index < FAKE_MAX_HOST; index++) {
+    if (host_ranges[index].used && host_ranges[index].address == address) {
+      host_ranges[index].used = 0;
+      pthread_mutex_unlock(&model_lock);
+      return CUDA_SUCCESS;
+    }
+  }
+  pthread_mutex_unlock(&model_lock);
+  return CUDA_ERROR_HOST_MEMORY_NOT_REGISTERED;
+}
+
+CUresult CUDAAPI
+cuMemHostGetFlags(unsigned int* flags, void* address)
+{
+  int index;
+
+  pthread_mutex_lock(&model_lock);
+  for (index = 0; index < FAKE_MAX_HOST; index++) {
+    if (host_ranges[index].used && host_ranges[index].address == address) {
+      pthread_mutex_unlock(&model_lock);
+      *flags = 0;
+      return CUDA_SUCCESS;
+    }
+  }
+  pthread_mutex_unlock(&model_lock);
+  return CUDA_ERROR_INVALID_VALUE;
+}
+
+/* The fake has no device memory: copies only count bytes. A staging mapping
+ * must exist for the device address, as the driver would require. */
+static int
+staged(CUdeviceptr address, size_t size)
+{
+  int index;
+  int ok = 0;
+
+  pthread_mutex_lock(&model_lock);
+  for (index = 0; index < FAKE_MAX_MAPPINGS; index++) {
+    if (mappings[index].used && address >= mappings[index].address &&
+        address + size <= mappings[index].address + mappings[index].size)
+      ok = 1;
+  }
+  pthread_mutex_unlock(&model_lock);
+  return ok;
+}
+
+CUresult CUDAAPI
+cuMemcpyDtoHAsync_v2(void* host, CUdeviceptr device, size_t size, CUstream stream)
+{
+  (void)host;
+  (void)stream;
+  if (should_fail("cuMemcpyDtoHAsync_v2"))
+    return CUDA_ERROR_UNKNOWN;
+  if (!staged(device, size))
+    return CUDA_ERROR_INVALID_VALUE;
+  copied_to_host += size;
+  return CUDA_SUCCESS;
+}
+
+CUresult CUDAAPI
+cuMemcpyHtoDAsync_v2(CUdeviceptr device, const void* host, size_t size, CUstream stream)
+{
+  (void)host;
+  (void)stream;
+  if (should_fail("cuMemcpyHtoDAsync_v2"))
+    return CUDA_ERROR_UNKNOWN;
+  if (!staged(device, size))
+    return CUDA_ERROR_INVALID_VALUE;
+  copied_to_device += size;
+  return CUDA_SUCCESS;
+}
+
+CUresult CUDAAPI
+cuStreamCreate(CUstream* stream, unsigned int flags)
+{
+  (void)flags;
+  *stream = (CUstream)(uintptr_t)0x5eed;
+  return CUDA_SUCCESS;
+}
+
+CUresult CUDAAPI
+cuStreamSynchronize(CUstream stream)
+{
+  (void)stream;
+  return should_fail("cuStreamSynchronize") ? CUDA_ERROR_UNKNOWN : CUDA_SUCCESS;
+}
+
+CUresult CUDAAPI
+cuStreamDestroy_v2(CUstream stream)
+{
+  (void)stream;
+  return CUDA_SUCCESS;
+}
+
 CUresult CUDAAPI
 cuCtxGetCurrent(CUcontext* context)
 {
-  *context = (CUcontext)(uintptr_t)1;
+  *context = current_context;
   return CUDA_SUCCESS;
+}
+
+CUresult CUDAAPI
+cuDevicePrimaryCtxRetain(CUcontext* context, CUdevice device)
+{
+  if (should_fail("cuDevicePrimaryCtxRetain"))
+    return CUDA_ERROR_UNKNOWN;
+  *context = (CUcontext)(uintptr_t)(0x100 + device);
+  pthread_mutex_lock(&model_lock);
+  primary_retain_calls++;
+  primary_contexts_held++;
+  pthread_mutex_unlock(&model_lock);
+  return CUDA_SUCCESS;
+}
+
+CUresult CUDAAPI
+cuDevicePrimaryCtxRelease_v2(CUdevice device)
+{
+  (void)device;
+  pthread_mutex_lock(&model_lock);
+  primary_contexts_held--;
+  pthread_mutex_unlock(&model_lock);
+  return CUDA_SUCCESS;
+}
+
+int
+fakePrimaryContextRetainCalls(void)
+{
+  return primary_retain_calls;
+}
+
+int
+fakePrimaryContextsHeld(void)
+{
+  return primary_contexts_held;
 }
 
 /*
