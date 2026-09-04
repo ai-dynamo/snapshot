@@ -113,14 +113,30 @@ RUN mkdir -p /go-src && go mod vendor -o /go-src/vendor
 # =============================================================================
 FROM ${AGENT_BASE_IMAGE} AS cuda-helper-builder
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# cuinterpose is built against CUDA 13.1 headers (the base image ships 13.0):
+# 13.1 added the device-explicit multicast bind entry points the shim wraps.
+# Headers only; the shim links nothing from libcuda. libgtest-dev runs the
+# shim's unit tests during the build, so a broken shim fails the image.
+# The base image carries no NVIDIA apt repository; the pinned cuda-keyring
+# package adds it.
+ARG CUINTERPOSE_CUDA_HEADERS=13-1
+ADD --checksum=sha256:d2a6b11c096396d868758b86dab1823b25e14d70333f1dfa74da5ddaf6a06dba \
+    https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb \
+    /tmp/cuda-keyring.deb
+RUN dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb \
+    && apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    libgtest-dev \
+    cuda-driver-dev-${CUINTERPOSE_CUDA_HEADERS} \
+    cuda-cudart-dev-${CUINTERPOSE_CUDA_HEADERS} \
+    cuda-crt-${CUINTERPOSE_CUDA_HEADERS} \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
 
 COPY cmd/cuda-checkpoint-helper/main.c ./cmd/cuda-checkpoint-helper/main.c
 COPY cmd/ns-bind-mount/main.c ./cmd/ns-bind-mount/main.c
+COPY cmd/cuinterpose/ ./cmd/cuinterpose/
 
 RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
     ./cmd/cuda-checkpoint-helper/main.c \
@@ -131,6 +147,13 @@ RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
 # ns-bind-mount bind-mounts the snapshot binaries into a target container's mount
 # namespace. It needs no CUDA headers, only mount_setattr (Linux 5.12+).
 RUN gcc -O2 -Wall -Wextra -o /ns-bind-mount ./cmd/ns-bind-mount/main.c
+
+# cuinterpose: LD_PRELOAD shim and static coordinator (see cmd/cuinterpose/README.md).
+# `test` builds a sanitizer-instrumented copy of the shim plus fake CUDA
+# libraries and runs the GoogleTest suites; the production artifacts in
+# /cuinterpose-build are the uninstrumented ones.
+RUN make -C ./cmd/cuinterpose BUILD_DIR=/cuinterpose-build \
+    CUDA_HOME=/usr/local/cuda-$(echo ${CUINTERPOSE_CUDA_HEADERS} | tr - .) all test
 
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
@@ -251,8 +274,11 @@ COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-chec
 # nsmount resolves this helper at /usr/local/sbin/ns-bind-mount (see
 # agent/internal/nsmount/mount.go defaultBinaryPath).
 COPY --from=cuda-helper-builder /ns-bind-mount /usr/local/sbin/ns-bind-mount
+COPY --from=cuda-helper-builder /cuinterpose-build/libcuinterpose.so /usr/local/lib/snapshot/libcuinterpose.so
+COPY --from=cuda-helper-builder /cuinterpose-build/cuinterpose-coordinator /usr/local/bin/cuinterpose-coordinator
 RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper \
-    /usr/local/sbin/ns-bind-mount
+    /usr/local/sbin/ns-bind-mount /usr/local/bin/cuinterpose-coordinator \
+    && chmod 0644 /usr/local/lib/snapshot/libcuinterpose.so
 
 # Copy the built binaries
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
@@ -266,12 +292,20 @@ RUN output=$(/usr/local/bin/pagebroker 2>&1); status=$?; \
 # The placeholder ships none of this. nsrestore redirects all three lookup
 # mechanisms into the mount: criu's libdir -> criu-plugins/ (criu.overrideLibDir),
 # LD_LIBRARY_PATH -> lib/, and PATH -> the bundle root.
-RUN mkdir -p /snapshot-binaries/lib /snapshot-binaries/criu-plugins
+RUN mkdir -p /snapshot-binaries/lib /snapshot-binaries/criu-plugins /snapshot-binaries/snapshot-cuda
 COPY --from=builder /nsrestore /snapshot-binaries/nsrestore
 COPY --from=criu-builder /criu-install/usr/local/sbin/criu /snapshot-binaries/criu
 COPY --from=criu-builder /criu-install/usr/local/lib/snapshot/criu-plugins/ /snapshot-binaries/criu-plugins/
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /snapshot-binaries/cuda-checkpoint
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-checkpoint-helper
+# snapshot-cuda restore bundle: cuda-checkpoint (the --launch-job wrapper) and the
+# cuinterpose shim, delivered to source Pods from this image and bind-mounted at
+# the same path on restore, because CRIU restores file-backed mappings by path.
+COPY --from=cuda-helper-builder /cuinterpose-build/libcuinterpose.so /snapshot-binaries/snapshot-cuda/libcuinterpose.so
+COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /snapshot-binaries/snapshot-cuda/cuda-checkpoint
+RUN chmod 0644 /snapshot-binaries/snapshot-cuda/libcuinterpose.so \
+    && chmod +x /snapshot-binaries/snapshot-cuda/cuda-checkpoint
+COPY --from=cuda-helper-builder /cuinterpose-build/cuinterpose-coordinator /snapshot-binaries/cuinterpose-coordinator
 
 # Network binaries needed during restore:
 #   ip  — address/route restore (criu/net.c)
@@ -285,6 +319,7 @@ RUN set -eu; \
     cp -L "$(command -v ip)" "$(command -v tar)" /snapshot-binaries/; \
     chmod +x /snapshot-binaries/criu /snapshot-binaries/nsrestore \
              /snapshot-binaries/cuda-checkpoint /snapshot-binaries/cuda-checkpoint-helper \
+             /snapshot-binaries/cuinterpose-coordinator \
              /snapshot-binaries/ip /snapshot-binaries/tar
 
 # Shared-library closure of the bundled binaries and plugins.
