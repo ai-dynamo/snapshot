@@ -78,6 +78,9 @@ Fail fast on unsupported runtime.type values. Called once from daemonset.yaml.
 {{- if not (has .Values.runtime.type (list "containerd" "crio")) }}
 {{- fail (printf "runtime.type must be 'containerd' or 'crio', got %q" .Values.runtime.type) }}
 {{- end }}
+{{- if and .Values.runtime.storageDir (not (hasPrefix "/" .Values.runtime.storageDir)) }}
+{{- fail (printf "runtime.storageDir must be an absolute path, got %q" .Values.runtime.storageDir) }}
+{{- end }}
 {{- end }}
 
 {{/*
@@ -99,7 +102,13 @@ Host directory holding per-container storage (overlay upperdirs the agent
 reads for rootfs-diff capture, and CRI-O config.json fallback).
 */}}
 {{- define "snapshot.runtimeStorageDir" -}}
-{{- if eq .Values.runtime.type "crio" -}}/var/lib/containers{{- else -}}/var/lib/containerd{{- end -}}
+{{- if .Values.runtime.storageDir }}
+{{- .Values.runtime.storageDir }}
+{{- else if eq .Values.runtime.type "crio" }}
+{{- "/var/lib/containers" }}
+{{- else }}
+{{- "/var/lib/containerd" }}
+{{- end }}
 {{- end }}
 
 {{- define "snapshot.pageBrokerControlPath" -}}/pagebroker/control{{- end -}}

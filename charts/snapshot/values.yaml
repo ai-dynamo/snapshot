@@ -53,11 +53,15 @@ crdUpgrade:
       cpu: 50m
       memory: 64Mi
 
-# Container runtime backend. Leave socketPath empty to use the conventional
-# path for the chosen type.
+# Container runtime backend. Leave socketPath/storageDir empty to use the
+# conventional paths for the chosen type.
 runtime:
   type: containerd  # containerd | crio
   socketPath: ""
+  # Host per-container storage, mounted into the agent at the same absolute path.
+  # Defaults: /var/lib/containerd (containerd), /var/lib/containers (crio).
+  # RKE2: /var/lib/rancher/rke2/agent/containerd + socketPath /run/k3s/containerd/containerd.sock
+  storageDir: ""
 
 # Gates the OCP RBAC template and the DS required-scc annotation. Keep false
 # on vanilla Kubernetes (it references an OCP-only built-in SCC).
