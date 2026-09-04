@@ -149,6 +149,51 @@ Current limitations:
 
 Multi-GPU and Arm support are on the roadmap.
 
+## Known Issues
+
+### `mntnsCompatMode` is applied at dump time, not restore time
+
+`config.criu.mntnsCompatMode` reads as a restore-side option — it maps to a CRIU
+restore RPC field — but it takes effect **at capture**. The value in force when a
+checkpoint is dumped is persisted into that checkpoint's `manifest.yaml`, and
+`BuildRestoreOpts` reads the setting back out of the manifest
+(`m.CRIUDump.CRIU`) rather than from the agent's live configuration.
+
+Consequences:
+
+- Flipping `config.criu.mntnsCompatMode` does **not** change how an already
+  captured checkpoint restores. Only checkpoints captured after the change pick
+  it up.
+- A restore that still fails after enabling the flag is not evidence the flag
+  does not help — re-capture first, then restore.
+
+### CRIU mount-v2 sharing-copy failure with nvidia-runtime bind mounts on RKE2
+
+Restoring a checkpoint captured with `runtimeClassName: nvidia` can fail in
+CRIU's mount-v2 engine while restoring the NVIDIA device bind mounts:
+
+```text
+mnt-v2: Failed to copy sharing from -1:/dev/nvidia0 to <id>: Invalid argument
+...
+Restoring FAILED
+```
+
+The device mounts are correctly declared external on both sides; this is CRIU's
+mount-namespace-restore engine failing to reconcile the mount's
+propagation/sharing group recorded at dump time against the restore mount
+namespace — a separate mechanism from external-mount handling, and dependent on
+the host's mount-propagation setup.
+
+**Workaround:** set `config.criu.mntnsCompatMode=true` **before** capturing the
+checkpoint you intend to restore, then re-capture. Per the note above, enabling
+it after the capture cannot fix an existing artifact.
+
+```bash
+helm upgrade --install snapshot ./charts/snapshot \
+  --namespace "${NAMESPACE}" \
+  --set config.criu.mntnsCompatMode=true
+```
+
 ## Documentation
 
 **Get started**

@@ -238,9 +238,17 @@ config:
     manageCgroupsMode: soft # CRIU cgroup management mode (ignore/soft/full/strict)
     imageIoMode: direct     # CRIU image I/O mode (writeback/direct); direct uses O_DIRECT to avoid page-cache double-buffering
 
-    # Restore-specific options (only apply during CRIU restore, not dump)
+    # Restore-side options. These shape the restore, not the dump; note that
+    # mntnsCompatMode below is nonetheless read at capture time and persisted.
     rstSibling: true         # Restore as sibling process (required for go-criu swrk mode)
-    mntnsCompatMode: false   # Mount namespace compatibility mode
+    # Mount namespace compatibility mode. This is a restore-side CRIU option,
+    # but it is APPLIED AT DUMP TIME: the value in effect when a checkpoint is
+    # captured is persisted into that checkpoint's manifest.yaml, and
+    # BuildRestoreOpts reads it back from there (m.CRIUDump.CRIU) rather than
+    # from the agent's live config. Flipping this value therefore does NOT
+    # change how an existing checkpoint restores — set it before the capture
+    # and re-capture to take effect. See Known Issues in the top-level README.
+    mntnsCompatMode: false
     evasiveDevices: true     # Use any device path if original is inaccessible
     forceIrmap: true         # Force resolving inotify/fsnotify watch names
 
