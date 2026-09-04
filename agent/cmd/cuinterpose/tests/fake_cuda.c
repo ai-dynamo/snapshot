@@ -78,13 +78,34 @@ record(const char* function)
 #define FAKE_MAX_HANDLES 4096
 #define FAKE_MAX_MAPPINGS 4096
 #define FAKE_HANDLE_BASE 0x1000
+#define FAKE_MAX_MULTICAST_DEVICES 8
+#define FAKE_MAX_MULTICAST_BINDINGS 16
 #define FAKE_EXPORT_MAGIC "fake-cuda-export:"
+
+/* A multicast object's binding: which device bound which member slice where. */
+struct fake_binding {
+  int used;
+  CUdevice device;
+  size_t offset;
+  size_t size;
+  int member;
+  size_t member_offset;
+  CUdeviceptr member_address;
+  int kind; /* 1: BindMem, 2: BindAddr */
+};
 
 struct fake_allocation {
   int used;
   int refs;
   size_t size;
   CUmemAllocationProp properties;
+  /* Multicast objects share the handle/mapping/export machinery. */
+  int multicast;
+  size_t capacity; /* like the real driver, rounded up above the requested size */
+  CUmulticastObjectProp multicast_properties;
+  CUdevice devices[FAKE_MAX_MULTICAST_DEVICES];
+  int device_count;
+  struct fake_binding bindings[FAKE_MAX_MULTICAST_BINDINGS];
 };
 
 struct fake_handle {
@@ -165,6 +186,7 @@ new_allocation(size_t size, const CUmemAllocationProp* properties)
 
   for (index = 0; index < FAKE_MAX_ALLOCATIONS; index++) {
     if (!allocations[index].used) {
+      memset(&allocations[index], 0, sizeof(allocations[index]));
       allocations[index].used = 1;
       allocations[index].refs = 0;
       allocations[index].size = size;
@@ -478,7 +500,11 @@ fakeCuMemExportToShareableHandle(
       return CUDA_ERROR_INVALID_HANDLE;
     }
     export_calls++;
-    snprintf(text, sizeof(text), FAKE_EXPORT_MAGIC "%d", handles[index].allocation);
+    /* Enough for a foreign process to model the same object. */
+    snprintf(
+        text, sizeof(text), FAKE_EXPORT_MAGIC "%d:%d:%zu:%zu:%d", handles[index].allocation,
+        allocations[handles[index].allocation].multicast, allocations[handles[index].allocation].size,
+        allocations[handles[index].allocation].capacity, allocations[handles[index].allocation].properties.location.id);
     /* The real driver's descriptor holds a reference until it is closed; this
      * model cannot observe close(), so the descriptor is not counted here. */
     pthread_mutex_unlock(&model_lock);
@@ -507,8 +533,12 @@ fakeCuMemImportFromShareableHandle(
     CUmemGenericAllocationHandle* output, void* os_handle, CUmemAllocationHandleType type)
 {
   if (tracked) {
-    char text[64] = {0};
+    char text[128] = {0};
     int allocation = -1;
+    int multicast = 0;
+    int location = 0;
+    size_t size = 0;
+    size_t capacity = 0;
     CUmemGenericAllocationHandle handle = 0;
     record("cuMemImportFromShareableHandle");
     last.pointer = os_handle;
@@ -516,12 +546,20 @@ fakeCuMemImportFromShareableHandle(
     if (output == NULL)
       return CUDA_ERROR_INVALID_VALUE;
     if (pread((int)(uintptr_t)os_handle, text, sizeof(text) - 1, 0) > 0 &&
-        strncmp(text, FAKE_EXPORT_MAGIC, strlen(FAKE_EXPORT_MAGIC)) == 0)
-      allocation = atoi(text + strlen(FAKE_EXPORT_MAGIC));
+        strncmp(text, FAKE_EXPORT_MAGIC, strlen(FAKE_EXPORT_MAGIC)) == 0 &&
+        sscanf(text + strlen(FAKE_EXPORT_MAGIC), "%d:%d:%zu:%zu:%d", &allocation, &multicast, &size, &capacity,
+               &location) != 5)
+      allocation = -1;
     pthread_mutex_lock(&model_lock);
     if (allocation < 0 || allocation >= FAKE_MAX_ALLOCATIONS || !allocations[allocation].used) {
-      /* Not one of ours: model a descriptor from some other process. */
-      allocation = new_allocation(0, NULL);
+      /* Not one of ours: model the other process's object from its description. */
+      allocation = new_allocation(size, NULL);
+      if (allocation >= 0) {
+        allocations[allocation].multicast = multicast;
+        allocations[allocation].capacity = capacity;
+        allocations[allocation].properties.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+        allocations[allocation].properties.location.id = location;
+      }
     }
     if (allocation >= 0)
       handle = new_handle(allocation);
@@ -573,9 +611,206 @@ cuMemGetAllocationPropertiesFromHandle(CUmemAllocationProp* properties, CUmemGen
   return fakeCuMemGetAllocationPropertiesFromHandle(properties, handle);
 }
 
+/* Caller holds model_lock. The multicast allocation behind a handle, or -1. */
+static int
+multicast_index(CUmemGenericAllocationHandle handle)
+{
+  int index = handle_index(handle);
+
+  if (index < 0 || !handles[index].used || !allocations[handles[index].allocation].multicast)
+    return -1;
+  return handles[index].allocation;
+}
+
+static int
+multicast_has_device(const struct fake_allocation* object, CUdevice device)
+{
+  int index;
+
+  for (index = 0; index < object->device_count; index++) {
+    if (object->devices[index] == device)
+      return 1;
+  }
+  return 0;
+}
+
+/* Caller holds model_lock. Records a binding after the same checks the driver makes. */
+static CUresult
+multicast_bind(
+    int object_index, CUdevice device, size_t offset, int member, size_t member_offset, CUdeviceptr member_address,
+    size_t size, int kind)
+{
+  struct fake_allocation* object = &allocations[object_index];
+  int index;
+
+  if (!multicast_has_device(object, device))
+    return CUDA_ERROR_INVALID_VALUE; /* the driver: the device must be attached first */
+  if (size == 0 || offset > object->capacity || size > object->capacity - offset)
+    return CUDA_ERROR_INVALID_VALUE;
+  if (member < 0 || !allocations[member].used || member_offset > allocations[member].size ||
+      size > allocations[member].size - member_offset)
+    return CUDA_ERROR_INVALID_VALUE;
+  for (index = 0; index < FAKE_MAX_MULTICAST_BINDINGS; index++) {
+    if (!object->bindings[index].used) {
+      object->bindings[index].used = 1;
+      object->bindings[index].device = device;
+      object->bindings[index].offset = offset;
+      object->bindings[index].size = size;
+      object->bindings[index].member = member;
+      object->bindings[index].member_offset = member_offset;
+      object->bindings[index].member_address = member_address;
+      object->bindings[index].kind = kind;
+      return CUDA_SUCCESS;
+    }
+  }
+  return CUDA_ERROR_OUT_OF_MEMORY;
+}
+
+/* Caller holds model_lock. The mapping holding [address, address + size), or -1. */
+static int
+mapping_containing(CUdeviceptr address, size_t size, size_t* offset_in_mapping)
+{
+  int index;
+
+  for (index = 0; index < FAKE_MAX_MAPPINGS; index++) {
+    if (mappings[index].used && address >= mappings[index].address && size <= mappings[index].size &&
+        address - mappings[index].address <= mappings[index].size - size) {
+      *offset_in_mapping = (size_t)(address - mappings[index].address);
+      return index;
+    }
+  }
+  return -1;
+}
+
+static CUresult
+tracked_bind_mem(
+    CUmemGenericAllocationHandle multicast, CUdevice device, int device_explicit, size_t multicast_offset,
+    CUmemGenericAllocationHandle memory, size_t memory_offset, size_t size)
+{
+  int object;
+  int member;
+  CUresult result;
+
+  pthread_mutex_lock(&model_lock);
+  object = multicast_index(multicast);
+  member = handle_index(memory);
+  member = member >= 0 && handles[member].used ? handles[member].allocation : -1;
+  if (object < 0 || member < 0) {
+    pthread_mutex_unlock(&model_lock);
+    return CUDA_ERROR_INVALID_HANDLE;
+  }
+  if (!device_explicit)
+    device = allocations[member].properties.location.id;
+  result = multicast_bind(object, device, multicast_offset, member, memory_offset, 0, size, 1);
+  pthread_mutex_unlock(&model_lock);
+  return result;
+}
+
+static CUresult
+tracked_bind_address(
+    CUmemGenericAllocationHandle multicast, CUdevice device, int device_explicit, size_t multicast_offset,
+    CUdeviceptr memory, size_t size)
+{
+  int object;
+  int mapping;
+  size_t offset_in_mapping = 0;
+  CUresult result;
+
+  pthread_mutex_lock(&model_lock);
+  object = multicast_index(multicast);
+  mapping = mapping_containing(memory, size, &offset_in_mapping);
+  if (object < 0) {
+    pthread_mutex_unlock(&model_lock);
+    return CUDA_ERROR_INVALID_HANDLE;
+  }
+  if (mapping < 0) {
+    pthread_mutex_unlock(&model_lock);
+    return CUDA_ERROR_INVALID_VALUE;
+  }
+  if (!device_explicit)
+    device = allocations[mappings[mapping].allocation].properties.location.id;
+  result = multicast_bind(
+      object, device, multicast_offset, mappings[mapping].allocation, offset_in_mapping, memory, size, 2);
+  pthread_mutex_unlock(&model_lock);
+  return result;
+}
+
+int
+fakeMulticastObjects(void)
+{
+  int index;
+  int count = 0;
+
+  pthread_mutex_lock(&model_lock);
+  for (index = 0; index < FAKE_MAX_ALLOCATIONS; index++)
+    count += allocations[index].used && allocations[index].multicast;
+  pthread_mutex_unlock(&model_lock);
+  return count;
+}
+
+int
+fakeMulticastDevices(void)
+{
+  int index;
+  int count = 0;
+
+  pthread_mutex_lock(&model_lock);
+  for (index = 0; index < FAKE_MAX_ALLOCATIONS; index++) {
+    if (allocations[index].used && allocations[index].multicast)
+      count += allocations[index].device_count;
+  }
+  pthread_mutex_unlock(&model_lock);
+  return count;
+}
+
+int
+fakeMulticastBindings(int kind)
+{
+  int index;
+  int binding;
+  int count = 0;
+
+  pthread_mutex_lock(&model_lock);
+  for (index = 0; index < FAKE_MAX_ALLOCATIONS; index++) {
+    if (!allocations[index].used || !allocations[index].multicast)
+      continue;
+    for (binding = 0; binding < FAKE_MAX_MULTICAST_BINDINGS; binding++) {
+      if (allocations[index].bindings[binding].used && (kind == 0 || allocations[index].bindings[binding].kind == kind))
+        count++;
+    }
+  }
+  pthread_mutex_unlock(&model_lock);
+  return count;
+}
+
 CUresult CUDAAPI
 fakeCuMulticastCreate(CUmemGenericAllocationHandle* output, const CUmulticastObjectProp* properties)
 {
+  if (tracked) {
+    int allocation;
+    CUmemGenericAllocationHandle handle = 0;
+
+    record("cuMulticastCreate");
+    if (output == NULL || properties == NULL || properties->size == 0)
+      return CUDA_ERROR_INVALID_VALUE;
+    if (should_fail("cuMulticastCreate"))
+      return CUDA_ERROR_UNKNOWN;
+    pthread_mutex_lock(&model_lock);
+    allocation = new_allocation(properties->size, NULL);
+    if (allocation >= 0) {
+      allocations[allocation].multicast = 1;
+      allocations[allocation].multicast_properties = *properties;
+      /* Like r615, which rounds a multicast object's capacity up. */
+      allocations[allocation].capacity =
+          (properties->size + FAKE_MULTICAST_GRANULARITY - 1) / FAKE_MULTICAST_GRANULARITY * FAKE_MULTICAST_GRANULARITY;
+      handle = new_handle(allocation);
+    }
+    pthread_mutex_unlock(&model_lock);
+    if (handle == 0)
+      return CUDA_ERROR_OUT_OF_MEMORY;
+    *output = handle;
+    return CUDA_SUCCESS;
+  }
   record("cuMulticastCreate");
   last.pointer = (void*)properties;
   last.size = properties != NULL ? properties->size : 0;
@@ -592,6 +827,26 @@ cuMulticastCreate(CUmemGenericAllocationHandle* output, const CUmulticastObjectP
 CUresult CUDAAPI
 fakeCuMulticastAddDevice(CUmemGenericAllocationHandle multicast, CUdevice device)
 {
+  if (tracked) {
+    int object;
+    struct fake_allocation* allocation;
+
+    record("cuMulticastAddDevice");
+    pthread_mutex_lock(&model_lock);
+    object = multicast_index(multicast);
+    if (object < 0) {
+      pthread_mutex_unlock(&model_lock);
+      return CUDA_ERROR_INVALID_HANDLE;
+    }
+    allocation = &allocations[object];
+    if (multicast_has_device(allocation, device) || allocation->device_count == FAKE_MAX_MULTICAST_DEVICES) {
+      pthread_mutex_unlock(&model_lock);
+      return CUDA_ERROR_INVALID_VALUE;
+    }
+    allocation->devices[allocation->device_count++] = device;
+    pthread_mutex_unlock(&model_lock);
+    return CUDA_SUCCESS;
+  }
   record("cuMulticastAddDevice");
   last.handle = multicast;
   last.device = device;
@@ -609,6 +864,11 @@ fakeCuMulticastBindMem(
     CUmemGenericAllocationHandle multicast, size_t multicast_offset, CUmemGenericAllocationHandle memory,
     size_t memory_offset, size_t size, unsigned long long flags)
 {
+  if (tracked) {
+    record("cuMulticastBindMem");
+    (void)flags;
+    return tracked_bind_mem(multicast, 0, 0, multicast_offset, memory, memory_offset, size);
+  }
   record("cuMulticastBindMem");
   last.handle = multicast;
   last.offset = multicast_offset;
@@ -631,6 +891,11 @@ fakeCuMulticastBindAddr(
     CUmemGenericAllocationHandle multicast, size_t multicast_offset, CUdeviceptr memory, size_t size,
     unsigned long long flags)
 {
+  if (tracked) {
+    record("cuMulticastBindAddr");
+    (void)flags;
+    return tracked_bind_address(multicast, 0, 0, multicast_offset, memory, size);
+  }
   record("cuMulticastBindAddr");
   last.handle = multicast;
   last.offset = multicast_offset;
@@ -653,6 +918,11 @@ fakeCuMulticastBindMem_v2(
     CUmemGenericAllocationHandle multicast, CUdevice device, size_t multicast_offset,
     CUmemGenericAllocationHandle memory, size_t memory_offset, size_t size, unsigned long long flags)
 {
+  if (tracked) {
+    record("cuMulticastBindMem_v2");
+    (void)flags;
+    return tracked_bind_mem(multicast, device, 1, multicast_offset, memory, memory_offset, size);
+  }
   record("cuMulticastBindMem_v2");
   last.handle = multicast;
   last.device = device;
@@ -677,6 +947,11 @@ fakeCuMulticastBindAddr_v2(
     CUmemGenericAllocationHandle multicast, CUdevice device, size_t multicast_offset, CUdeviceptr memory, size_t size,
     unsigned long long flags)
 {
+  if (tracked) {
+    record("cuMulticastBindAddr_v2");
+    (void)flags;
+    return tracked_bind_address(multicast, device, 1, multicast_offset, memory, size);
+  }
   record("cuMulticastBindAddr_v2");
   last.handle = multicast;
   last.device = device;
@@ -717,6 +992,29 @@ cuMulticastGetGranularity(
 CUresult CUDAAPI
 fakeCuMulticastUnbind(CUmemGenericAllocationHandle multicast, CUdevice device, size_t offset, size_t size)
 {
+  if (tracked) {
+    int object;
+    int index;
+    CUresult result = CUDA_ERROR_INVALID_VALUE;
+
+    record("cuMulticastUnbind");
+    pthread_mutex_lock(&model_lock);
+    object = multicast_index(multicast);
+    if (object < 0) {
+      pthread_mutex_unlock(&model_lock);
+      return CUDA_ERROR_INVALID_HANDLE;
+    }
+    for (index = 0; index < FAKE_MAX_MULTICAST_BINDINGS; index++) {
+      struct fake_binding* binding = &allocations[object].bindings[index];
+      if (binding->used && binding->device == device && binding->offset == offset && binding->size == size) {
+        binding->used = 0;
+        result = CUDA_SUCCESS;
+        break;
+      }
+    }
+    pthread_mutex_unlock(&model_lock);
+    return result;
+  }
   record("cuMulticastUnbind");
   last.handle = multicast;
   last.device = device;
