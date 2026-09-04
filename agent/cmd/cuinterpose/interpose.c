@@ -29,9 +29,10 @@
 #define _GNU_SOURCE
 
 #include "interpose.h"
+#include "multicast.h"
 
-#include <errno.h>
 #include <dirent.h>
+#include <errno.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -205,24 +206,39 @@ mapping_at(CUdeviceptr address)
   return range == NULL ? NULL : range->value;
 }
 
+/* Logical handle numbers are shared with the multicast module. */
+static int
+mint_logical_handle(CUmemGenericAllocationHandle* logical)
+{
+  if (next_logical_handle > LOGICAL_HANDLE_VALUE_MASK)
+    return -1;
+  *logical = (CUmemGenericAllocationHandle)(LOGICAL_HANDLE_TAG | next_logical_handle);
+  next_logical_handle++;
+  return 0;
+}
+
+bool
+cuinterpose_is_logical_handle(CUmemGenericAllocationHandle handle)
+{
+  return is_logical_handle(handle);
+}
+
 /* Mint a logical handle for allocation. Returns 0 and sets *logical. */
 static int
 add_handle(struct allocation* allocation, CUmemGenericAllocationHandle* logical)
 {
   struct handle* handle;
 
-  if (next_logical_handle > LOGICAL_HANDLE_VALUE_MASK)
-    return -1;
   handle = calloc(1, sizeof(*handle));
-  if (handle == NULL)
+  if (handle == NULL || mint_logical_handle(&handle->logical) != 0) {
+    free(handle);
     return -1;
-  handle->logical = (CUmemGenericAllocationHandle)(LOGICAL_HANDLE_TAG | next_logical_handle);
+  }
   handle->allocation = allocation;
   if (cuinterpose_table_put(&handles, cuinterpose_key_u64((uint64_t)handle->logical), handle) != 0) {
     free(handle);
     return -1;
   }
-  next_logical_handle++;
   allocation->live_handles++;
   *logical = handle->logical;
   return 0;
@@ -318,6 +334,7 @@ cuinterpose_debug_stats(struct cuinterpose_debug_stats* stats)
   stats->allocations = allocations.count;
   stats->handles = handles.count;
   stats->mappings = mappings.count;
+  stats->multicasts = cuinterpose_multicast_count();
   stats->live_raw_imports = atomic_load(&live_raw_imports);
   stats->passthrough_creations = atomic_load(&passthrough_creations);
   stats->phase = phase_code();
@@ -423,7 +440,7 @@ inspect_records(uint32_t* count, const char** error)
   size_t index;
 
   *error = NULL;
-  total = allocations.count + mappings.count;
+  total = allocations.count + mappings.count + cuinterpose_multicast_record_count();
   if (total > CUINTERPOSE_MAX_RECORDS) {
     *error = "too many tracked records for one participant";
     return NULL;
@@ -483,6 +500,10 @@ inspect_records(uint32_t* count, const char** error)
       record->access[access].flags = mapping->access[access].flags;
     }
     record++;
+  }
+  if (cuinterpose_multicast_write_records(record, total - (size_t)(record - records), error) != 0) {
+    free(records);
+    return NULL;
   }
   *count = (uint32_t)total;
   return records;
@@ -1375,7 +1396,7 @@ serve(int client)
       pthread_mutex_lock(&state_lock);
       if (current_phase != PHASE_ACTIVE) {
         error = "cuinterpose is not in the active phase";
-      } else if (create_carriers(&error) == 0) {
+      } else if (create_carriers(&error) == 0 && cuinterpose_multicast_prepare(&error) == 0) {
         current_phase = PHASE_CARRIERS;
       } else {
         set_failure(error);
@@ -1485,24 +1506,41 @@ serve(int client)
     case CUINTERPOSE_RESTORE_MULTICAST_IMPORTERS:
     case CUINTERPOSE_RESTORE_MULTICAST_DEVICES:
     case CUINTERPOSE_RESTORE_MULTICAST: {
-      /* No multicast state in this layer: each phase only advances. */
+      /* Four phases with a coordinator barrier after each: binding waits for
+       * every device of the team, so all AddDevice calls must be done first. */
       static const enum phase expected[] = {
           PHASE_UNICAST_RESTORED, PHASE_MULTICAST_CREATED, PHASE_MULTICAST_IMPORTED, PHASE_MULTICAST_JOINED};
       static const enum phase next[] = {
           PHASE_MULTICAST_CREATED, PHASE_MULTICAST_IMPORTED, PHASE_MULTICAST_JOINED, PHASE_ACTIVE};
       size_t step = request.operation - CUINTERPOSE_RESTORE_MULTICAST_CREATORS;
+      char message[96] = {0};
+      const char* error = NULL;
 
       pthread_mutex_lock(&state_lock);
       if (current_phase != expected[step]) {
-        pthread_mutex_unlock(&state_lock);
-        cuinterpose_header_error(&response, "multicast restore phase out of order");
-        (void)cuinterpose_send_header(client, &response, -1);
-        break;
+        error = "multicast restore phase out of order";
+      } else if (step == 0) {
+        if (cuinterpose_multicast_restore_creators(&error) != 0)
+          set_failure(error);
+      } else if (step == 1) {
+        if (cuinterpose_multicast_restore_importers(message, sizeof(message)) != 0) {
+          error = message;
+          set_failure(error);
+        }
+      } else if (step == 2) {
+        if (cuinterpose_multicast_restore_devices(&error) != 0)
+          set_failure(error);
+      } else if (cuinterpose_multicast_restore_topology(&error) != 0) {
+        set_failure(error);
       }
-      current_phase = next[step];
-      if (current_phase == PHASE_ACTIVE)
-        failure[0] = '\0';
+      if (error == NULL) {
+        current_phase = next[step];
+        if (current_phase == PHASE_ACTIVE)
+          failure[0] = '\0';
+      }
       pthread_mutex_unlock(&state_lock);
+      if (error != NULL)
+        cuinterpose_header_error(&response, error);
       (void)cuinterpose_send_header(client, &response, -1);
       break;
     }
@@ -1512,7 +1550,8 @@ serve(int client)
       const char* reason = NULL;
       int dup = -1;
 
-      if (request.resource_kind != CUINTERPOSE_RESOURCE_UNICAST) {
+      if (request.resource_kind != CUINTERPOSE_RESOURCE_UNICAST &&
+          request.resource_kind != CUINTERPOSE_RESOURCE_MULTICAST) {
         cuinterpose_header_error(&response, "creator resource is unavailable");
         (void)cuinterpose_send_header(client, &response, -1);
         break;
@@ -1727,6 +1766,7 @@ fork_child(void)
     munmap(arena.base, arena.size);
   memset(&arena, 0, sizeof(arena));
   cuinterpose_export_cache_fork_child();
+  cuinterpose_multicast_fork_child();
   pthread_mutex_init(&state_lock, NULL);
 }
 
@@ -1750,11 +1790,117 @@ cuinterpose_ensure_process_endpoint(void)
   return result;
 }
 
+/* ------------------------------------------------------------------------- */
+/* What the multicast module needs from the unicast side.                     */
+/* ------------------------------------------------------------------------- */
+
+static int
+multicast_allocate_logical_handle(CUmemGenericAllocationHandle* output)
+{
+  return mint_logical_handle(output);
+}
+
+static int
+multicast_member_from_handle(CUmemGenericAllocationHandle logical, struct cuinterpose_multicast_member* member)
+{
+  struct handle* handle = find_handle(logical);
+
+  if (handle == NULL || handle->allocation->driver == 0)
+    return -1;
+  memcpy(member->id, handle->allocation->id, sizeof(member->id));
+  member->handle = handle->allocation->driver;
+  member->device = handle->allocation->properties.location.id;
+  return 0;
+}
+
+static int
+multicast_member_from_address(CUdeviceptr address, size_t size, struct cuinterpose_multicast_member* member)
+{
+  struct mapping* mapping = mapping_at(address);
+
+  if (mapping == NULL || size > mapping->size || address - mapping->address > mapping->size - size)
+    return -1;
+  memcpy(member->id, mapping->allocation->id, sizeof(member->id));
+  member->address = address;
+  member->allocation_offset = mapping->offset + (size_t)(address - mapping->address);
+  member->device = mapping->allocation->properties.location.id;
+  return 0;
+}
+
+/* A driver handle for the member: the one we hold, or one retained through a
+ * mapping when the application released all of its handles. */
+static int
+multicast_member_from_id(const uint8_t id[CUINTERPOSE_ALLOCATION_ID_SIZE], struct cuinterpose_multicast_member* member)
+{
+  retain_fn retain = (retain_fn)cuinterpose_lookup_real_symbol("cuMemRetainAllocationHandle");
+  struct allocation* allocation = find_allocation(id);
+  size_t index;
+
+  if (allocation == NULL)
+    return -1;
+  memcpy(member->id, allocation->id, sizeof(member->id));
+  member->device = allocation->properties.location.id;
+  if (allocation->driver != 0) {
+    member->handle = allocation->driver;
+    return 0;
+  }
+  for (index = 0; index < mappings.count; index++) {
+    const struct mapping* mapping = mappings.items[index].value;
+
+    if (mapping->allocation == allocation) {
+      if (retain == NULL || retain(&member->handle, (void*)(uintptr_t)mapping->address) != CUDA_SUCCESS)
+        return -1;
+      member->temporary_handle = true;
+      return 0;
+    }
+  }
+  return -1;
+}
+
+static void
+multicast_mark_member_shared(const uint8_t id[CUINTERPOSE_ALLOCATION_ID_SIZE])
+{
+  struct allocation* allocation = find_allocation(id);
+
+  if (allocation != NULL)
+    allocation->shared = true;
+}
+
+static void
+multicast_release_state_lock(void)
+{
+  pthread_mutex_unlock(&state_lock);
+}
+
+static void
+multicast_acquire_state_lock(void)
+{
+  pthread_mutex_lock(&state_lock);
+}
+
+static bool
+multicast_state_is_active(void)
+{
+  return current_phase == PHASE_ACTIVE;
+}
+
 __attribute__((constructor)) static void
 initialize(void)
 {
+  static const struct cuinterpose_multicast_callbacks multicast_callbacks = {
+      .allocate_logical_handle = multicast_allocate_logical_handle,
+      .member_from_handle = multicast_member_from_handle,
+      .member_from_address = multicast_member_from_address,
+      .member_from_id = multicast_member_from_id,
+      .mark_member_shared = multicast_mark_member_shared,
+      .release_state_lock = multicast_release_state_lock,
+      .acquire_state_lock = multicast_acquire_state_lock,
+      .state_is_active = multicast_state_is_active,
+  };
   const char* control;
   const char* configured_participant;
+
+  cuinterpose_multicast_initialize(&multicast_callbacks, participant_id, socket_path);
 
   configured_participant = getenv(CUINTERPOSE_PARTICIPANT_ID_ENV);
   if (configured_participant != NULL && !cuinterpose_is_lower_hex_id(configured_participant)) {
@@ -1917,6 +2063,11 @@ cuMemRelease(CUmemGenericAllocationHandle application)
   pthread_mutex_lock(&state_lock);
   handle = find_handle(application);
   if (handle == NULL) {
+    if (cuinterpose_multicast_is_handle(application)) {
+      result = cuinterpose_multicast_release(application);
+      pthread_mutex_unlock(&state_lock);
+      return result;
+    }
     if (is_logical_handle(application)) {
       pthread_mutex_unlock(&state_lock);
       return CUDA_ERROR_INVALID_HANDLE;
@@ -1959,6 +2110,11 @@ cuMemRetainAllocationHandle(CUmemGenericAllocationHandle* output, void* address)
   pthread_mutex_lock(&state_lock);
   mapping = mapping_at((CUdeviceptr)(uintptr_t)address);
   if (mapping == NULL) {
+    if (cuinterpose_multicast_owns_range((CUdeviceptr)(uintptr_t)address, 1)) {
+      result = cuinterpose_multicast_retain(output, address);
+      pthread_mutex_unlock(&state_lock);
+      return result;
+    }
     pthread_mutex_unlock(&state_lock);
     result = function(&driver, address);
     return passthrough_handle(result, driver, output);
@@ -2007,6 +2163,11 @@ cuMemMap(CUdeviceptr address, size_t size, size_t offset, CUmemGenericAllocation
   pthread_mutex_lock(&state_lock);
   handle = find_handle(application);
   if (handle == NULL) {
+    if (cuinterpose_multicast_is_handle(application)) {
+      result = cuinterpose_multicast_map(address, size, offset, application, flags);
+      pthread_mutex_unlock(&state_lock);
+      return result;
+    }
     pthread_mutex_unlock(&state_lock);
     if (is_logical_handle(application))
       return CUDA_ERROR_INVALID_HANDLE;
@@ -2088,6 +2249,11 @@ cuMemUnmap(CUdeviceptr address, size_t size)
     return CUDA_ERROR_INVALID_VALUE;
   }
   if (first == last) {
+    if (cuinterpose_multicast_owns_range(address, size)) {
+      result = cuinterpose_multicast_unmap(address, size);
+      pthread_mutex_unlock(&state_lock);
+      return result;
+    }
     pthread_mutex_unlock(&state_lock);
     return function != NULL ? function(address, size) : cuinterpose_unavailable();
   }
@@ -2178,6 +2344,11 @@ cuMemSetAccess(CUdeviceptr address, size_t size, const CUmemAccessDesc* descript
     return CUDA_ERROR_INVALID_VALUE;
   }
   if (first == last) {
+    if (cuinterpose_multicast_owns_range(address, size)) {
+      result = cuinterpose_multicast_set_access(address, size, descriptors, count);
+      pthread_mutex_unlock(&state_lock);
+      return result;
+    }
     pthread_mutex_unlock(&state_lock);
     return function != NULL ? function(address, size, descriptors, count) : cuinterpose_unavailable();
   }
@@ -2242,6 +2413,11 @@ cuMemExportToShareableHandle(
   pthread_mutex_lock(&state_lock);
   handle = find_handle(application);
   if (handle == NULL) {
+    if (cuinterpose_multicast_is_handle(application)) {
+      result = cuinterpose_multicast_export(shareable, application, type, flags);
+      pthread_mutex_unlock(&state_lock);
+      return result;
+    }
     pthread_mutex_unlock(&state_lock);
     if (is_logical_handle(application))
       return CUDA_ERROR_INVALID_HANDLE;
@@ -2339,6 +2515,8 @@ cuMemImportFromShareableHandle(CUmemGenericAllocationHandle* output, void* os_ha
     }
     return result;
   }
+  if (ticket.resource_kind == CUINTERPOSE_RESOURCE_MULTICAST)
+    return cuinterpose_multicast_import(output, &ticket);
   if (ticket.resource_kind != CUINTERPOSE_RESOURCE_UNICAST)
     return CUDA_ERROR_INVALID_HANDLE;
   if (get_properties == NULL || release == NULL)
@@ -2416,6 +2594,11 @@ cuMemGetAllocationPropertiesFromHandle(CUmemAllocationProp* properties, CUmemGen
   pthread_mutex_lock(&state_lock);
   handle = find_handle(application);
   if (handle == NULL) {
+    if (cuinterpose_multicast_is_handle(application)) {
+      result = cuinterpose_multicast_get_properties(properties, application);
+      pthread_mutex_unlock(&state_lock);
+      return result;
+    }
     pthread_mutex_unlock(&state_lock);
     if (is_logical_handle(application))
       return CUDA_ERROR_INVALID_HANDLE;

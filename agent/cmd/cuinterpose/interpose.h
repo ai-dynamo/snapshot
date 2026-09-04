@@ -26,4 +26,7 @@ CUresult cuinterpose_ensure_process_endpoint(void);
  */
 bool cuinterpose_translate_handle(CUmemGenericAllocationHandle handle, CUmemGenericAllocationHandle* driver);
 
+/* True for handles minted by the shim (unicast or multicast), by their tag. */
+bool cuinterpose_is_logical_handle(CUmemGenericAllocationHandle handle);
+
 #endif

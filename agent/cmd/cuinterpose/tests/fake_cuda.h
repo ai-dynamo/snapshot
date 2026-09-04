@@ -99,6 +99,20 @@ int fakePrimaryContextRetainCalls(void);
 int fakePrimaryContextsHeld(void);
 /* Number of cuMemSetAccess calls since the last reset. */
 int fakeAccessCalls(void);
+/*
+ * Multicast objects in tracked mode: cuMulticastCreate makes an allocation
+ * flagged as multicast whose capacity is rounded up to
+ * FAKE_MULTICAST_GRANULARITY (as r615 does), devices must be added before a
+ * bind names them, and bindings are checked against the capacity and the
+ * member's size. Handles, mappings, export and import work as for any
+ * allocation.
+ */
+#define FAKE_MULTICAST_GRANULARITY (4u << 20)
+int fakeMulticastObjects(void);
+/* Devices attached across all live multicast objects. */
+int fakeMulticastDevices(void);
+/* Bindings across all live objects; kind 0 = any, 1 = BindMem, 2 = BindAddr. */
+int fakeMulticastBindings(int kind);
 /* The fake's own implementation of `symbol`, bypassing any interposer. */
 void* fakeOriginal(const char* symbol);
 /* Same, for a caller that asked for a specific CUDA version. */
