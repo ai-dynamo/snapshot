@@ -86,11 +86,15 @@ docker run --rm \
   --platform linux/amd64 \
   --entrypoint python3 \
   "$TENSORRT_LLM_SNAPSHOT_IMAGE" \
-  -c 'import pathlib; import tensorrt_llm; assert pathlib.Path("/app/app.py").is_file()'
+  -c 'import importlib.util, pathlib; assert importlib.util.find_spec("tensorrt_llm"); assert pathlib.Path("/app/app.py").is_file()'
 ```
 
 The command produces no output when both TensorRT-LLM and `/app/app.py` are
-present. Any failure prints an error and returns a non-zero exit status.
+present. Any failure prints an error and returns a non-zero exit status. The
+check locates the TensorRT-LLM package rather than importing it: importing it
+loads bindings that link against the CUDA driver library, which the NVIDIA
+container runtime injects only when the container runs with a GPU, so an
+import-based check fails on a build host that has none.
 
 ### 3. Deploy TensorRT-LLM
 
