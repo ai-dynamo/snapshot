@@ -57,8 +57,15 @@ spec:
             capabilities:
               drop:
                 - ALL
+            {{- /* OpenShift's anyuid SCC does not allow seccomp profiles. */}}
+            {{- if not .Values.openshift.enabled }}
             seccompProfile:
               type: RuntimeDefault
+            {{- end }}
+          {{- with .Values.operator.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           args:
             - {{ printf "--snapshot-storage-base-path=%v" .Values.storage.pvc.basePath | quote }}
             - {{ printf "--artifact-cleanup-scan-interval=%v" .Values.operator.artifactCleanup.scanInterval | quote }}

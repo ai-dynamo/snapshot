@@ -1,13 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Resolve the newest shared published Snapshot image tag for e2e runs."""
+"""Resolve the Snapshot image tag for the exact commit under test.
+
+The e2e run must test the commit it checked out, so the tag is derived from
+HEAD (v0.0.0-g<sha8>) and merely verified to be published for both the
+operator and agent packages. If push-artifacts has not published HEAD yet,
+the run fails instead of silently testing something else.
+"""
 
 from __future__ import annotations
 
-from datetime import datetime
 import json
 import os
+import subprocess
 import sys
 import urllib.parse
 import urllib.request
@@ -16,15 +22,26 @@ import urllib.request
 GITHUB_API_VERSION = "2022-11-28"
 MAX_PAGES = 5
 ORG = "ai-dynamo"
-TAG_PREFIX = "v0.0.0-g"
 
 
-def parse_created_at(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+def head_sha() -> str:
+    sha = os.environ.get("GITHUB_SHA")
+    if sha:
+        return sha
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
 
 
-def package_tags(package: str, headers: dict[str, str]) -> dict[str, datetime]:
-    tags: dict[str, datetime] = {}
+def dev_tag(sha: str) -> str:
+    return f"v0.0.0-g{sha[:8]}"
+
+
+def package_has_tag(package: str, tag: str, headers: dict[str, str]) -> bool:
     encoded = urllib.parse.quote(package, safe="")
 
     for page in range(1, MAX_PAGES + 1):
@@ -40,29 +57,11 @@ def package_tags(package: str, headers: dict[str, str]) -> dict[str, datetime]:
             break
 
         for version in versions:
-            created_at = parse_created_at(version["created_at"])
             version_tags = version.get("metadata", {}).get("container", {}).get("tags", [])
-            for tag in version_tags:
-                if not tag.startswith(TAG_PREFIX):
-                    continue
-                if tag not in tags or created_at > tags[tag]:
-                    tags[tag] = created_at
+            if tag in version_tags:
+                return True
 
-    return tags
-
-
-def newest_shared_tag(
-    operator_tags: dict[str, datetime],
-    agent_tags: dict[str, datetime],
-) -> str | None:
-    shared_tags = operator_tags.keys() & agent_tags.keys()
-    if not shared_tags:
-        return None
-
-    return max(
-        shared_tags,
-        key=lambda tag: (min(operator_tags[tag], agent_tags[tag]), tag),
-    )
+    return False
 
 
 def write_github_env(tag: str) -> None:
@@ -83,17 +82,27 @@ def main() -> int:
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
-    operator_tags = package_tags("snapshot/operator", headers)
-    agent_tags = package_tags("snapshot/agent", headers)
+    sha = head_sha()
+    tag = dev_tag(sha)
 
-    tag = newest_shared_tag(operator_tags, agent_tags)
-    if tag:
-        write_github_env(tag)
-        print(f"Resolved Snapshot image tag: {tag}")
-        return 0
+    missing = [
+        package
+        for package in ("snapshot/operator", "snapshot/agent")
+        if not package_has_tag(package, tag, headers)
+    ]
+    if missing:
+        print(
+            f"Tag {tag} for commit {sha} is not published for: "
+            f"{', '.join(missing)}. Wait for push-artifacts to publish this "
+            "commit, or dispatch the e2e workflow with an explicit "
+            "snapshot_tag.",
+            file=sys.stderr,
+        )
+        return 1
 
-    print("No shared published Snapshot operator/agent tag found", file=sys.stderr)
-    return 1
+    write_github_env(tag)
+    print(f"Resolved Snapshot image tag: {tag} (commit {sha})")
+    return 0
 
 
 if __name__ == "__main__":

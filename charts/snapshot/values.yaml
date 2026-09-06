@@ -17,6 +17,14 @@ image:
 replicaCount: 1
 
 operator:
+  resources:
+    limits:
+      cpu: 500m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
   artifactCleanup:
     # Frequency of authoritative orphan artifact scans.
     scanInterval: 10m
@@ -84,14 +92,32 @@ storage:
   oci:
     uri: ""
 
+pageBroker:
+  enabled: false
+  command: []
+  args: []
+  maxConcurrentRequests: 16
+  resources:
+    requests:
+      cpu: 8
+      memory: 32Gi
+    limits:
+      cpu: 32
+      memory: 256Gi
+  image:
+    repository: ghcr.io/ai-dynamo/snapshot/agent
+    # Defaults to the chart's appVersion when empty (see templates).
+    tag: ""
+    pullPolicy: Always
+
 # DaemonSet configuration for the checkpoint/restore agent
 daemonset:
   # Agent and nsrestore log level (trace, debug, info, warn, error)
   snapshotLogLevel: info
 
-  # Image pull secrets
-  imagePullSecrets:
-    - name: ngc-secret
+  # The shipped agent image is public on GHCR. Set this only when an image
+  # override is hosted in a private registry.
+  imagePullSecrets: []
 
   # Resource limits and requests
   resources:

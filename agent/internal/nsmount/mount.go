@@ -33,6 +33,7 @@ type mountRef interface {
 type mounter interface {
 	MountBundle(ctx context.Context, pid int) (mountRef, error)
 	MountCheckpoint(ctx context.Context, nsFd *os.File, checkpointPath string) (mountRef, error)
+	MountPageBroker(ctx context.Context, nsFd *os.File, stagingPath string) (mountRef, error)
 }
 
 type execMounter struct {
@@ -97,6 +98,18 @@ func (m *execMounter) MountCheckpoint(ctx context.Context, nsFd *os.File, checkp
 	}
 	unix.CloseOnExec(dupFd)
 	return m.mount(ctx, os.NewFile(uintptr(dupFd), nsFd.Name()), "mount-checkpoint-fd", "unmount-checkpoint-fd", checkpointPath)
+}
+
+func (m *execMounter) MountPageBroker(ctx context.Context, nsFd *os.File, stagingPath string) (mountRef, error) {
+	if nsFd == nil {
+		return nil, fmt.Errorf("mount namespace fd is required")
+	}
+	dupFd, err := unix.Dup(int(nsFd.Fd()))
+	if err != nil {
+		return nil, fmt.Errorf("duplicate mount namespace fd: %w", err)
+	}
+	unix.CloseOnExec(dupFd)
+	return m.mount(ctx, os.NewFile(uintptr(dupFd), nsFd.Name()), "mount-pagebroker-fd", "unmount-pagebroker-fd", stagingPath)
 }
 
 func (m *execMounter) mount(ctx context.Context, nsFd *os.File, mountCmd, unmountCmd string, args ...string) (mountRef, error) {

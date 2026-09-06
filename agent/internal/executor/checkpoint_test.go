@@ -6,6 +6,7 @@ package executor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -103,4 +104,25 @@ func TestConfigureCheckpointRecordsRuntimeImageID(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "registry.example/workload:latest", manifest.K8s.Image)
 	assert.Equal(t, "sha256:runtime-content", manifest.K8s.ImageID)
+}
+
+func TestCheckpointPageBrokerPrepareFailureDoesNotMutate(t *testing.T) {
+	cfg := &types.AgentConfig{
+		Storage:    types.StorageSpec{BasePath: t.TempDir()},
+		PageBroker: types.PageBrokerSpec{Enabled: true, ControlSocketPath: t.TempDir() + "/pagebroker.sock"},
+	}
+
+	err := Checkpoint(context.Background(), checkpointPathRuntime{}, logr.Discard(), CheckpointRequest{
+		ContentUID:          "content-uid",
+		ContainerName:       "main",
+		PageBrokerRequested: true,
+	}, cfg)
+	require.ErrorContains(t, err, "prepare PageBroker checkpoint")
+	assert.False(t, CheckpointNeedsSourceKill(err))
+}
+
+func TestCheckpointNeedsSourceKill(t *testing.T) {
+	assert.True(t, CheckpointNeedsSourceKill(checkpointNeedsSourceKill(errors.New("capture failed"))))
+	assert.False(t, CheckpointNeedsSourceKill(errors.New("prepare failed")))
+	assert.False(t, CheckpointNeedsSourceKill(fmt.Errorf("commit PageBroker checkpoint: %w", errors.New("failed"))))
 }
