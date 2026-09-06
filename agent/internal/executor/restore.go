@@ -16,12 +16,14 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/google/uuid"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/criu"
 	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/logging"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
+	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
@@ -32,6 +34,7 @@ import (
 type RestoreMounter interface {
 	MountBundle(ctx context.Context, pid int) (nsmount.MountPoint, error)
 	MountArtifact(ctx context.Context, namespaceMount nsmount.MountPoint, artifactPath string) (nsmount.MountPoint, error)
+	MountPageBroker(ctx context.Context, namespaceMount nsmount.MountPoint, stagingPath string) (nsmount.MountPoint, error)
 }
 
 // RestoreCleanupError reports a successful restore whose cleanup did not fully
@@ -65,16 +68,19 @@ func cleanupRestoreMounts(ctx context.Context, mounts []restoreMount) error {
 
 // RestoreRequest holds the parameters for a restore operation.
 type RestoreRequest struct {
-	ContentUID               string
-	BasePath                 string
-	ContainerID              string
-	StartedAt                time.Time
-	PodName                  string
-	PodNamespace             string
-	TargetPodIP              string
-	ArtifactContainerName    string
-	DestinationContainerName string
-	Clientset                kubernetes.Interface
+	ContentUID                  string
+	BasePath                    string
+	ContainerID                 string
+	StartedAt                   time.Time
+	PodName                     string
+	PodNamespace                string
+	TargetPodIP                 string
+	ArtifactContainerName       string
+	DestinationContainerName    string
+	Clientset                   kubernetes.Interface
+	PageBrokerRequested         bool
+	PageBrokerEnabled           bool
+	PageBrokerControlSocketPath string
 
 	// SkipCompatCheck carries the decision the caller already made, so the
 	// second gate cannot reach a different answer than the first: one restore
@@ -94,6 +100,18 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if mounts == nil {
 		return 0, fmt.Errorf("restore mounter is required")
 	}
+
+	brokered := req.PageBrokerRequested && req.PageBrokerEnabled
+	transactionID := ""
+	var broker pagebroker.Client
+	committed := false
+	defer func() {
+		if transactionID != "" && !committed {
+			abortCtx, cancel := context.WithTimeout(context.Background(), pageBrokerAbortTimeout)
+			defer cancel()
+			_ = broker.Abort(abortCtx, transactionID)
+		}
+	}()
 
 	var cleanupErr error
 	var activeMounts []restoreMount
@@ -147,18 +165,56 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		point:  bundleMount,
 	})
 
-	artifactMount, err := mounts.MountArtifact(ctx, bundleMount, artifactPath)
-	if err != nil {
-		return 0, fmt.Errorf("mount checkpoint artifact into placeholder: %w", err)
+	containerCheckpointPath := nsmount.CheckpointDst
+	var pageBrokerStageDuration, pageBrokerMountDuration, pageBrokerCommitDuration time.Duration
+	if brokered {
+		transactionID = uuid.NewString()
+		broker = pagebroker.Client{ControlSocketPath: req.PageBrokerControlSocketPath}
+		stageStart := time.Now()
+		staged, err := broker.StagedRestore(ctx, transactionID, artifactPath)
+		pageBrokerStageDuration = time.Since(stageStart)
+		if err != nil {
+			return 0, fmt.Errorf("stage PageBroker restore: %w", err)
+		}
+		mountStart := time.Now()
+		stagingMount, err := mounts.MountPageBroker(ctx, bundleMount, staged)
+		pageBrokerMountDuration = time.Since(mountStart)
+		if err != nil {
+			return 0, fmt.Errorf("mount PageBroker staging: %w", err)
+		}
+		activeMounts = append(activeMounts, restoreMount{
+			action: "unmount PageBroker staging from placeholder",
+			point:  stagingMount,
+		})
+		containerCheckpointPath = nsmount.PageBrokerDst
+	} else {
+		artifactMount, err := mounts.MountArtifact(ctx, bundleMount, artifactPath)
+		if err != nil {
+			return 0, fmt.Errorf("mount checkpoint artifact into placeholder: %w", err)
+		}
+		activeMounts = append(activeMounts, restoreMount{
+			action: "unmount checkpoint artifact from placeholder",
+			point:  artifactMount,
+		})
 	}
-	activeMounts = append(activeMounts, restoreMount{
-		action: "unmount checkpoint artifact from placeholder",
-		point:  artifactMount,
-	})
 
-	result, err := execNSRestore(ctx, log, req, snap, bundleMount, nsmount.CheckpointDst)
+	result, err := execNSRestore(ctx, log, req, snap, bundleMount, containerCheckpointPath)
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
+	}
+	if brokered {
+		stagingMount := activeMounts[len(activeMounts)-1]
+		if err := stagingMount.point.Unmount(ctx); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("%s: %w", stagingMount.action, err))
+		}
+		activeMounts = activeMounts[:len(activeMounts)-1]
+		commitStart := time.Now()
+		if err := broker.Commit(ctx, transactionID); err != nil {
+			log.Error(err, "failed to commit PageBroker restore")
+		} else {
+			committed = true
+		}
+		pageBrokerCommitDuration = time.Since(commitStart)
 	}
 	if result.CleanupError != nil {
 		cleanupErr = errors.Join(cleanupErr, result.CleanupError)
@@ -170,6 +226,9 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	cleanup()
 	wall := time.Since(restoreStart)
 	unaccounted := remainingDuration(wall,
+		pageBrokerStageDuration,
+		pageBrokerMountDuration,
+		pageBrokerCommitDuration,
 		gpuDeviceMapDuration,
 		result.OverlayCaptureDuration,
 		result.CRIUPrepareDuration,
@@ -179,12 +238,15 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	summary := map[string]any{
 		"duration": wall.String(),
 		"phases": map[string]string{
-			"gpu_device_map":  gpuDeviceMapDuration.String(),
-			"overlay_capture": result.OverlayCaptureDuration.String(),
-			"criu_prepare":    result.CRIUPrepareDuration.String(),
-			"criu_restore":    result.CRIURestoreDuration.String(),
-			"cuda_restore":    result.CUDARestoreDuration.String(),
-			"unaccounted":     unaccounted.String(),
+			"pagebroker_stage":  pageBrokerStageDuration.String(),
+			"pagebroker_mount":  pageBrokerMountDuration.String(),
+			"pagebroker_commit": pageBrokerCommitDuration.String(),
+			"gpu_device_map":    gpuDeviceMapDuration.String(),
+			"overlay_capture":   result.OverlayCaptureDuration.String(),
+			"criu_prepare":      result.CRIUPrepareDuration.String(),
+			"criu_restore":      result.CRIURestoreDuration.String(),
+			"cuda_restore":      result.CUDARestoreDuration.String(),
+			"unaccounted":       unaccounted.String(),
 		},
 	}
 	if !req.StartedAt.IsZero() {

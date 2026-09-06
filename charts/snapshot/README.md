@@ -19,7 +19,7 @@ namespaces. Workload pods never mount checkpoint storage.
 ## Prerequisites
 
 - Kubernetes cluster with x86_64 GPU nodes
-- NVIDIA driver 580.xx or newer
+- NVIDIA GPU Operator 26.3 or newer, with NVIDIA driver 580.xx or newer
 - **containerd** or **CRI-O** (chart defaults to containerd; see below for CRI-O / OpenShift)
 - a cluster where a privileged DaemonSet with `hostPID`, `hostIPC`, and `hostNetwork` is acceptable
 
@@ -34,17 +34,47 @@ or upgrading. To migrate, create a new RWX claim, copy the retained checkpoint
 data once if it must be preserved, then set `storage.pvc.create=false` and
 `storage.pvc.name` to the new claim. The old retained claim remains untouched.
 
-## CRI-O and OpenShift
+When using AWS EFS, make sure a reused static PV references a real EFS file
+system ID and has mount targets reachable from every GPU node. A placeholder
+such as `fs-xxxx` can bind a PVC but the snapshot agent will not start because
+the node cannot mount it.
 
-For CRI-O nodes set `runtime.type=crio`. Only set `runtime.socketPath` if the CRI
-socket is not the default for that type (see `values.yaml`). On OpenShift, set
-`openshift.enabled=true` so the chart emits the extra RBAC and pod annotations
-the agent needs. Example:
+## OpenShift installation
+
+OpenShift uses CRI-O. Install with `runtime.type=crio` and
+`openshift.enabled=true`. The OpenShift setting creates the SCC-use RBAC and
+required-SCC pod annotations for both components: the agent uses the
+`privileged` SCC and the operator uses `anyuid`. Keep `rbac.create=true` (the
+default); otherwise, create equivalent SCC-use RBAC separately. The agent uses
+public GHCR images by default and does not need an image pull secret; configure
+`daemonset.imagePullSecrets` only for a private image override. When upgrading a
+release that uses a private agent image, set the private registry pull secret in
+the same Helm upgrade so the new chart defaults do not remove the required image
+access.
+
+Create a checkpoint PVC through an RWX-capable StorageClass, such as an EFS
+StorageClass:
 
 ```bash
+export RWX_STORAGE_CLASS=efs-rwx
+
 helm upgrade --install snapshot ./charts/snapshot \
   --namespace "${NAMESPACE}" --create-namespace \
   --set storage.pvc.create=true \
+  --set storage.pvc.storageClass="${RWX_STORAGE_CLASS}" \
+  --set runtime.type=crio \
+  --set openshift.enabled=true
+```
+
+Or reuse an existing RWX PVC in the installation namespace:
+
+```bash
+export EXISTING_RWX_PVC=snapshot-efs-pvc
+
+helm upgrade --install snapshot ./charts/snapshot \
+  --namespace "${NAMESPACE}" --create-namespace \
+  --set storage.pvc.create=false \
+  --set storage.pvc.name="${EXISTING_RWX_PVC}" \
   --set runtime.type=crio \
   --set openshift.enabled=true
 ```
@@ -131,6 +161,8 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `image.operator.repository` | Operator image repository | `ghcr.io/ai-dynamo/snapshot/operator` |
 | `image.agent.repository` | Agent image repository | `ghcr.io/ai-dynamo/snapshot/agent` |
 | `image.agent.tag` | Agent image tag (empty = chart appVersion) | `""` |
+| `daemonset.imagePullSecrets` | Pull secrets for a private agent image override | `[]` |
+| `operator.resources` | CPU and memory requests/limits for the operator manager | 50m CPU / 64Mi request, 500m CPU / 128Mi limit |
 | `storage.type` | Snapshot-owned storage backend | `pvc` |
 | `storage.pvc.create` | Create `snapshot-pvc` instead of using an existing shared PVC | `true` |
 | `storage.pvc.name` | Shared RWX checkpoint PVC mounted by every agent | `snapshot-pvc` |
@@ -143,7 +175,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `crdUpgrade.enabled` | Install and upgrade the CRDs from an operator init container (see below) | `true` |
 | `crdUpgrade.logLevel` | Init container log level | `info` |
 | `rbac.create` | Create agent and operator RBAC | `true` |
-| `openshift.enabled` | OpenShift RBAC / SCC-related chart pieces | `false` |
+| `openshift.enabled` | Create required-SCC pod annotations and, when `rbac.create=true`, OpenShift SCC-use RBAC | `false` |
 
 Reserved `s3` and `oci` values remain chart-owned placeholders for future
 snapshot backends, but only `pvc` is implemented today.

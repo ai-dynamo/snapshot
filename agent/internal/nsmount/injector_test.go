@@ -60,6 +60,15 @@ func (m *mockMounter) MountCheckpoint(_ context.Context, nsFd *os.File, src stri
 	return &fakeMountRef{dst: "checkpoint", unmountLog: &m.unmountLog}, nil
 }
 
+func (m *mockMounter) MountPageBroker(_ context.Context, nsFd *os.File, src string) (mountRef, error) {
+	i := len(m.calls)
+	m.calls = append(m.calls, mountCall{role: "pagebroker", nsFd: nsFd, src: src})
+	if i < len(m.results) && m.results[i] != nil {
+		return nil, m.results[i]
+	}
+	return &fakeMountRef{dst: "pagebroker", unmountLog: &m.unmountLog}, nil
+}
+
 const testPID = 42
 
 func newMounter(t *testing.T, m *mockMounter) *NSMounter {

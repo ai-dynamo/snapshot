@@ -1,0 +1,119 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+package snapshot.pagebroker.v1;
+option go_package = "github.com/ai-dynamo/snapshot/agent/internal/pagebroker";
+
+message FilesystemStorage
+{
+  optional string directory = 1;
+}
+message StorageBackend
+{
+  // Requests require exactly one storage kind.
+  oneof kind
+  {
+    FilesystemStorage filesystem = 1;
+  }
+}
+message PosixCopyIOEngine {}
+message IOEngine
+{
+  // Requests require exactly one I/O engine.
+  oneof kind
+  {
+    PosixCopyIOEngine posix_copy = 1;
+  }
+}
+
+message StagedRestoreRequest
+{
+  StorageBackend source = 1;
+  IOEngine io_engine = 2;
+}
+// Allows a future GPU engine to read source data without a staging directory.
+message DirectRestoreRequest
+{
+  StorageBackend source = 1;
+  IOEngine io_engine = 2;
+}
+message PrepareStagedCheckpointRequest
+{
+  StorageBackend destination = 1;
+  IOEngine io_engine = 2;
+}
+// Completes a live transaction. PageBroker retains up to 1,024 terminal transactions for up to one hour.
+// Repeating Commit for a retained committed transaction returns CommitComplete; Commit for an aborted, expired, or
+// unknown transaction returns TRANSACTION_NOT_FOUND.
+message CommitRequest {}
+// Releases PageBroker state for a live transaction. PageBroker retains up to 1,024 terminal transactions for up to
+// one hour. Repeating Abort for a retained aborted transaction returns AbortComplete; Abort for a committed, expired,
+// or unknown transaction returns TRANSACTION_NOT_FOUND.
+message AbortRequest {}
+
+message Request
+{
+  // Snapshot assigns an ID to each request.
+  optional string request_id = 1;
+  // Snapshot assigns a unique transaction ID before the first request and does not reuse it while PageBroker retains it.
+  // An uncommitted transaction expires one hour after staging begins.
+  optional string transaction_id = 2;
+  oneof command
+  {
+    StagedRestoreRequest staged_restore = 3;
+    PrepareStagedCheckpointRequest prepare_staged_checkpoint = 4;
+    CommitRequest commit = 5;
+    AbortRequest abort = 6;
+    DirectRestoreRequest direct_restore = 7;
+  }
+}
+
+message StagedRestoreDirectory
+{
+  optional string image_directory = 1;
+}
+message DirectRestoreReady {}
+message StagedCheckpointDirectory
+{
+  optional string image_directory = 1;
+}
+message CommitComplete {}
+// Confirms only that PageBroker transaction state/content was released; it says nothing about the target
+// process or CUDA state.
+message AbortComplete {}
+message Failure
+{
+  enum Code {
+    // No failure code was supplied.
+    UNSPECIFIED = 0;
+    // The request is malformed or unsupported. PageBroker did not mutate transaction state.
+    INVALID_REQUEST = 1;
+    // The transaction is unknown or has reached the opposite terminal state.
+    TRANSACTION_NOT_FOUND = 2;
+    // The transaction ID or checkpoint destination conflicts with an existing transaction or output.
+    TRANSACTION_CONFLICT = 3;
+    // Tmpfs staging lacks space. PageBroker did not create staging for this request.
+    INSUFFICIENT_STORAGE = 4;
+    // Storage I/O failed. The caller may Abort the transaction before retrying with a new transaction ID.
+    STORAGE_ERROR = 5;
+    // An unexpected broker failure occurred. The caller may Abort the transaction before retrying.
+    INTERNAL_ERROR = 6;
+  }
+  optional Code code = 1;
+  optional string message = 2;
+}
+message Response
+{
+  optional string request_id = 1;
+  optional string transaction_id = 2;
+  oneof result
+  {
+    StagedRestoreDirectory staged_restore_directory = 3;
+    StagedCheckpointDirectory staged_checkpoint_directory = 4;
+    CommitComplete commit_complete = 5;
+    AbortComplete abort_complete = 6;
+    Failure failure = 7;
+    DirectRestoreReady direct_restore_ready = 8;
+  }
+}

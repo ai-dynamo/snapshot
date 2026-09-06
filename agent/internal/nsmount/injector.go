@@ -24,6 +24,10 @@ const (
 	// CheckpointDst is the mount destination for checkpoint data inside the
 	// placeholder namespace.
 	CheckpointDst = "/tmp/checkpoint"
+	// PageBrokerRestoreSrc is the agent-side PageBroker restore staging root.
+	PageBrokerRestoreSrc = "/pagebroker/staging/restore"
+	// PageBrokerDst is the mount destination for PageBroker staging inside the placeholder namespace.
+	PageBrokerDst = "/tmp/pagebroker"
 )
 
 // MountPoint represents an active bind-mount of a directory inside a foreign
@@ -79,6 +83,22 @@ func (nsm *NSMounter) MountArtifact(ctx context.Context, namespaceMount MountPoi
 	}
 	nsm.log.Info("mounting checkpoint into placeholder namespace", "src", src)
 	ref, err := nsm.mounter.MountCheckpoint(ctx, namespaceMount.NsFd(), src)
+	if err != nil {
+		return nil, err
+	}
+	return &mountPoint{mount: ref}, nil
+}
+
+// MountPageBroker exposes a staged PageBroker restore using the namespace
+// already pinned for the agent bundle.
+func (nsm *NSMounter) MountPageBroker(ctx context.Context, namespaceMount MountPoint, src string) (MountPoint, error) {
+	if err := validateWithin(PageBrokerRestoreSrc, src); err != nil {
+		return nil, err
+	}
+	if namespaceMount == nil || namespaceMount.NsFd() == nil {
+		return nil, fmt.Errorf("mount PageBroker: pinned mount namespace is required")
+	}
+	ref, err := nsm.mounter.MountPageBroker(ctx, namespaceMount.NsFd(), src)
 	if err != nil {
 		return nil, err
 	}

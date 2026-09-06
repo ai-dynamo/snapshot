@@ -766,6 +766,36 @@ func TestRunCheckpoint_WritesFailedOnError(t *testing.T) {
 	assert.Equal(t, "CheckpointFailed", cond.Reason)
 }
 
+func TestExecutorCheckpointPageBrokerPrepareFailureDoesNotKill(t *testing.T) {
+	w := makeNodeController(t, &fakeCheckpointer{})
+	w.config.PageBroker = snapshottypes.PageBrokerSpec{
+		Enabled:           true,
+		ControlSocketPath: filepath.Join(t.TempDir(), "pagebroker.sock"),
+	}
+	ctx, target := startKillableTarget(t)
+	defer func() {
+		_ = target.Process.Kill()
+		_ = target.Wait()
+	}()
+
+	err := w.executorCheckpoint(context.Background(), CheckpointParams{
+		Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			Name:      "worker-0",
+			Namespace: "inference",
+			Annotations: map[string]string{
+				snapshotv1alpha1.PageBrokerAnnotation: snapshotv1alpha1.PageBrokerAnnotationEnabled,
+			},
+		}},
+		ContainerName: "main",
+		ContainerID:   "abc123",
+		ContainerPID:  target.Process.Pid,
+		ContentUID:    "content-uid",
+	})
+	require.ErrorContains(t, err, "prepare PageBroker checkpoint")
+	require.NoError(t, target.Process.Signal(syscall.Signal(0)), "PageBroker preflight failure must not kill the source")
+	require.NoError(t, ctx.Err())
+}
+
 // TestReconcilePodSnapshotContent_TerminalPodWithArtifactRecoversReady covers the pre-bind
 // gate's resync racing a finished capture: the pod is already terminal (killed by the dump)
 // and the artifact is committed, so the gate must recover Ready instead of writing SourcePodGone.

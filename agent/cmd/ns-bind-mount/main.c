@@ -60,6 +60,8 @@ struct mount_attr {
 #define BUNDLE_DESTINATION "/tmp/snapshot-binaries"
 #define CHECKPOINT_ROOT "/checkpoints"
 #define CHECKPOINT_DESTINATION "/tmp/checkpoint"
+#define PAGEBROKER_RESTORE_ROOT "/pagebroker/staging/restore"
+#define PAGEBROKER_DESTINATION "/tmp/pagebroker"
 
 static int
 parse_fd(const char* value)
@@ -83,11 +85,11 @@ is_portable_path_char(char value)
 /* The Go caller constructs this path from validated single path elements. This
  * second check keeps the privileged helper safe if that caller regresses. */
 static int
-check_checkpoint_path(const char* value)
+check_storage_path(const char* value, const char* root)
 {
-  size_t root_len = strlen(CHECKPOINT_ROOT);
-  if (strncmp(value, CHECKPOINT_ROOT, root_len) != 0 || value[root_len] != '/') {
-    fprintf(stderr, "checkpoint path must be below %s: %s\n", CHECKPOINT_ROOT, value);
+  size_t root_len = strlen(root);
+  if (strncmp(value, root, root_len) != 0 || value[root_len] != '/') {
+    fprintf(stderr, "storage path must be below %s: %s\n", root, value);
     return -1;
   }
 
@@ -95,7 +97,7 @@ check_checkpoint_path(const char* value)
   for (const char* p = component;; p++) {
     if (*p != '/' && *p != '\0') {
       if (!is_portable_path_char(*p)) {
-        fprintf(stderr, "checkpoint path contains unsupported character: %s\n", value);
+        fprintf(stderr, "storage path contains unsupported character: %s\n", value);
         return -1;
       }
       continue;
@@ -104,13 +106,25 @@ check_checkpoint_path(const char* value)
     size_t len = (size_t)(p - component);
     if (len == 0 || (len == 1 && component[0] == '.') ||
         (len == 2 && component[0] == '.' && component[1] == '.')) {
-      fprintf(stderr, "checkpoint path contains an empty or traversing component: %s\n", value);
+      fprintf(stderr, "storage path contains an empty or traversing component: %s\n", value);
       return -1;
     }
     if (*p == '\0')
       return 0;
     component = p + 1;
   }
+}
+
+static int
+check_checkpoint_path(const char* value)
+{
+  return check_storage_path(value, CHECKPOINT_ROOT);
+}
+
+static int
+check_pagebroker_path(const char* value)
+{
+  return check_storage_path(value, PAGEBROKER_RESTORE_ROOT);
 }
 
 /* Returns 1 when this invocation created dst, 0 when a plain directory was
@@ -238,6 +252,23 @@ mount_checkpoint(int argc, char* argv[])
 }
 
 static int
+mount_pagebroker(int argc, char* argv[])
+{
+  if (argc != 4) {
+    fprintf(stderr, "usage: ns-bind-mount mount-pagebroker-fd <namespace-fd> <staging-path>\n");
+    return 1;
+  }
+  int ns_fd = parse_fd(argv[2]);
+  if (ns_fd < 0 || check_pagebroker_path(argv[3]) < 0)
+    return 1;
+  return install_mount(
+      ns_fd,
+      argv[3],
+      PAGEBROKER_DESTINATION,
+      MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV | MOUNT_ATTR_NOEXEC);
+}
+
+static int
 unmount_role(int argc, char* argv[], const char* dst, const char* usage)
 {
   if (argc != 3 && argc != 4) {
@@ -269,6 +300,8 @@ main(int argc, char* argv[])
     return mount_bundle(argc, argv);
   if (strcmp(argv[1], "mount-checkpoint-fd") == 0)
     return mount_checkpoint(argc, argv);
+  if (strcmp(argv[1], "mount-pagebroker-fd") == 0)
+    return mount_pagebroker(argc, argv);
   if (strcmp(argv[1], "unmount-bundle-fd") == 0)
     return unmount_role(
         argc,
@@ -281,6 +314,12 @@ main(int argc, char* argv[])
         argv,
         CHECKPOINT_DESTINATION,
         "usage: ns-bind-mount unmount-checkpoint-fd <namespace-fd> [created]");
+  if (strcmp(argv[1], "unmount-pagebroker-fd") == 0)
+    return unmount_role(
+        argc,
+        argv,
+        PAGEBROKER_DESTINATION,
+        "usage: ns-bind-mount unmount-pagebroker-fd <namespace-fd> [created]");
 
   fprintf(stderr, "unknown role command: %s\n", argv[1]);
   return 1;

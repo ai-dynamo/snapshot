@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+ARG SGLANG_RUNTIME_IMAGE=lmsysorg/sglang@sha256:9e148f5ac788e856a06166bd6347a831831eb9fcfab4d1770874823a7c29a1a1
+FROM ${SGLANG_RUNTIME_IMAGE}
+
+ARG TARGETARCH=amd64
+
+ENV HF_HUB_DISABLE_XET=1
+
+USER root
+
+RUN set -eux; \
+    if [ "${TARGETARCH}" != "amd64" ]; then \
+      echo "Snapshot requires x86_64" >&2; \
+      exit 1; \
+    fi; \
+    mkdir -p /snapshot-control
+
+WORKDIR /app
+COPY app.py ./
+ENTRYPOINT ["python3", "-u", "/app/app.py"]
+CMD ["--mode", "snapshot"]

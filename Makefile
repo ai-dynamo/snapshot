@@ -24,7 +24,7 @@ AGENT_PLATFORM ?= linux/amd64
 
 .PHONY: tidy generate test build lint verify-generate verify-crds check fmt add-license-headers \
         verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator capture-base-packages verify-base-packages \
-        linux-build linux-test
+        linux-build linux-test pagebroker-check-generated
 
 CRD_SRC_DIR   := api/v1alpha1/crds
 CHART_CRD_DIR := charts/snapshot/crds
@@ -77,7 +77,7 @@ verify-crds:
 # install-tools makes controller-gen/golangci-lint/addlicense/helm available to
 # the stages before they run. govulncheck + helm-lint are read-only, so they run
 # after the mutating stages and before the clean-tree assert.
-check: verify-crds install-tools generate add-license-headers fmt tidy verify-license-headers lint govulncheck helm-lint
+check: verify-crds install-tools generate pagebroker-check-generated add-license-headers fmt tidy verify-license-headers lint govulncheck helm-lint
 	@test -z "$$(git status --porcelain)" || \
 	  (echo "ERROR: tree dirty after check — commit the changes below"; git status --porcelain; git diff; exit 1)
 
@@ -90,6 +90,9 @@ govulncheck: $(GOVULNCHECK)
 
 helm-lint: $(HELM)
 	$(HELM) lint charts/snapshot/
+
+pagebroker-check-generated:
+	$(MAKE) -C agent pagebroker-check-generated
 
 # Run build/test inside a Linux container (local dev only; CI runs on Linux natively).
 linux-build:

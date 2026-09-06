@@ -138,6 +138,11 @@ def test_restore_manifests_use_canonical_control_mount_and_startup_gate(
         "cat",
         workloads.RESTORE_DONE,
     ]
+    # The standby flag is what keeps the placeholder from loading a model
+    # itself; it must be injected under its single canonical name.
+    standby_env = {"name": "SNAPSHOT_RESTORE_STANDBY", "value": "1"}
+    assert standby_env in single_container["env"]
+    assert all(not e["name"].startswith("DYN_") for e in single_container["env"])
 
     multi, _ = workloads.multi_restore_pod(
         config=config,
@@ -150,3 +155,5 @@ def test_restore_manifests_use_canonical_control_mount_and_startup_gate(
             "cat",
             workloads.RESTORE_DONE,
         ]
+        assert standby_env in container["env"]
+        assert all(not e["name"].startswith("DYN_") for e in container["env"])
