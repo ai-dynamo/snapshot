@@ -99,21 +99,14 @@ def main() -> None:
         kv_cache_config={"free_gpu_memory_fraction": FREE_GPU_MEMORY_FRACTION},
     )
 
-    precheck_texts = generate_text(
+    for text in generate_text(
         llm,
         [
             "Summarize why checkpoint and restore testing matters.",
             "Continue this sequence with four numbers: 1, 2, 3, 4,",
         ],
-    )
-    for text in precheck_texts:
+    ):
         print(f"TensorRT-LLM pre-checkpoint output={text!r}", flush=True)
-    # Durable evidence that the engine served a generation before capture; the
-    # source container is killed by the dump, so logs alone are easy to lose.
-    CONTROL_DIR.joinpath("trtllm-precheck").write_text(
-        "\n".join(precheck_texts) + "\n",
-        encoding="utf-8",
-    )
 
     gc.collect()
     CONTROL_DIR.joinpath("ready-for-snapshot").write_text(

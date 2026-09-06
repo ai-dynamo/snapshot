@@ -39,8 +39,7 @@ curl --fail --location \
   https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/sglang/deployment.yaml
 ```
 
-The program creates a direct `sglang.Engine`, runs one generation and records
-its output in `sglang-precheck`, and calls
+The program creates a direct `sglang.Engine`, runs one generation, and calls
 `TokenizerManager.pause_generation()` followed by
 `Engine.release_memory_occupation()`. It writes `ready-for-snapshot` only after
 both operations succeed.

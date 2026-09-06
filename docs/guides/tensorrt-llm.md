@@ -39,9 +39,9 @@ curl --fail --location \
 
 The program loads the model selected in `deployment.yaml` and calls
 `LLM.generate()` to initialize TensorRT-LLM. The synchronous call returns only
-after generation finishes, so no request remains in flight. The program records
-the generated text in `trtllm-precheck`, runs `gc.collect()`, and writes
-`ready-for-snapshot` when it reaches the safe checkpoint point.
+after generation finishes, so no request remains in flight. The program then
+runs `gc.collect()` and writes `ready-for-snapshot` when it reaches the safe
+checkpoint point.
 
 TensorRT-LLM does not use a framework pause or sleep call in this example. The
 model and initialized CUDA state remain resident. After restore, the checkpointed
