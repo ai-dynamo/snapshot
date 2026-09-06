@@ -70,6 +70,12 @@ spec:
               subPath: main
             - name: tun
               mountPath: /dev/net/tun
+            # The checkpointed process's mount namespace includes this
+            # mount (from the source Pod); restore recreates it here too,
+            # even though this placeholder's own command never reads it.
+            - name: app
+              mountPath: /snapshot-app
+              readOnly: true
       volumes:
         - name: snapshot-control
           emptyDir: {}
@@ -77,3 +83,6 @@ spec:
           hostPath:
             path: /dev/net/tun
             type: CharDevice
+        - name: app
+          configMap:
+            name: tensorrt-llm-app
