@@ -29,19 +29,14 @@ spec:
         nvidia.com/gpu.present: "true"
       containers:
         - name: main
-          image: vllm-snapshot:replace-me
-          imagePullPolicy: Always
+          image: vllm/vllm-openai:v0.27.1-ubuntu2404@sha256:dafea057f24b7d42716331a48e2db4e1f204f877a3aa759cb7e4c37e64ca2eee
+          imagePullPolicy: IfNotPresent
           # Inert placeholder: the agent restores the checkpointed process into
           # this container, so app.py must not run here.
           command:
             - /bin/sh
             - -c
             - exec sleep infinity
-          # SYS_PTRACE: lets py-spy attach to sibling processes in this
-          # container for post-restore diagnostics (see e2e debug_dump_framework).
-          securityContext:
-            capabilities:
-              add: ["SYS_PTRACE"]
           env:
             - name: SNAPSHOT_MODEL
               value: Qwen/Qwen3-0.6B

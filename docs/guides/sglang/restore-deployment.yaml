@@ -29,8 +29,8 @@ spec:
         nvidia.com/gpu.present: "true"
       initContainers:
         - name: model-cache
-          image: sglang-snapshot:replace-me
-          imagePullPolicy: Always
+          image: lmsysorg/sglang:v0.5.17-cu130-runtime@sha256:3ea7c6d74312d964edbcf9b3819425ea42117eb967ef1cfec632a70c926027df
+          imagePullPolicy: IfNotPresent
           command:
             - python3
             - -c
@@ -56,19 +56,14 @@ spec:
               mountPath: /hf-cache
       containers:
         - name: main
-          image: sglang-snapshot:replace-me
-          imagePullPolicy: Always
+          image: lmsysorg/sglang:v0.5.17-cu130-runtime@sha256:3ea7c6d74312d964edbcf9b3819425ea42117eb967ef1cfec632a70c926027df
+          imagePullPolicy: IfNotPresent
           # Inert placeholder: the agent restores the checkpointed process into
           # this container, so app.py must not run here.
           command:
             - /bin/sh
             - -c
             - exec sleep infinity
-          # SYS_PTRACE: lets py-spy attach to sibling processes in this
-          # container for post-restore diagnostics (see e2e debug_dump_framework).
-          securityContext:
-            capabilities:
-              add: ["SYS_PTRACE"]
           args:
             - --mode
             - snapshot

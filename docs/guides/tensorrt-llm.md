@@ -11,30 +11,34 @@ tooling at runtime.
 ## Build
 
 Start with the TensorRT-LLM runtime image, which includes TensorRT-LLM and its
-runtime dependencies. Add one program that prepares TensorRT-LLM for checkpoint
-and validates it after restore. Select the model when deploying the source pod.
+runtime dependencies -- unmodified, with one program mounted into it that
+prepares TensorRT-LLM for checkpoint and validates it after restore. There is
+no Snapshot-specific image to build or push: `deployment.yaml` pins the exact
+upstream image, and `app.py` is mounted from a ConfigMap. Select the model
+when deploying the source pod.
 
 ### 1. Download the example files
 
 Download [`app.py`](tensorrt-llm/app.py),
-[`Dockerfile.tensorrt-llm`](tensorrt-llm/Dockerfile.tensorrt-llm), and
-[`deployment.yaml`](tensorrt-llm/deployment.yaml) from the repository:
+[`deployment.yaml`](tensorrt-llm/deployment.yaml), and
+[`restore-deployment.yaml`](tensorrt-llm/restore-deployment.yaml) from the
+repository:
 
 ```bash
-mkdir -p tensorrt-llm-snapshot-image
-cd tensorrt-llm-snapshot-image
+mkdir -p tensorrt-llm-snapshot
+cd tensorrt-llm-snapshot
 
 curl --fail --location \
   --output app.py \
   https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/tensorrt-llm/app.py
 
 curl --fail --location \
-  --output Dockerfile.tensorrt-llm \
-  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/tensorrt-llm/Dockerfile.tensorrt-llm
-
-curl --fail --location \
   --output deployment.yaml \
   https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/tensorrt-llm/deployment.yaml
+
+curl --fail --location \
+  --output restore-deployment.yaml \
+  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/tensorrt-llm/restore-deployment.yaml
 ```
 
 The program loads the model selected in `deployment.yaml` and calls
@@ -51,9 +55,10 @@ listening. To validate the restored replica, send a `POST` request to
 `/generate` with a JSON body such as
 `{"prompt":"What is the capital of Italy?"}`.
 
-The Dockerfile starts from the TensorRT-LLM `1.3.0rc24` release image, pinned by
-digest, creates `/snapshot-control`, and adds `app.py`. A release candidate is
-used deliberately: the `1.2.1` GA image fails at `import tensorrt` because
+`deployment.yaml` runs the TensorRT-LLM `1.3.0rc24` release image, pinned by
+digest, unmodified, and mounts `app.py` at `/snapshot-app` from the
+`tensorrt-llm-app` ConfigMap created in step 2. A release candidate is used
+deliberately: the `1.2.1` GA image fails at `import tensorrt` because
 `libnvonnxparser.so.10` is missing from it, and no 1.3.0 GA image exists yet.
 Move to the first 1.3.x GA once it is published.
 `TLLM_NCCL_SYMMETRIC_ZERO_COPY=0` disables NCCL registered windows that CUDA
@@ -63,59 +68,32 @@ cannot restore.
 The source and restore pods must use the same immutable image and mount the
 Snapshot control volume at `/snapshot-control`.
 
-### 2. Build the image
+### 2. Create the app.py ConfigMap
 
-```bash
-export TENSORRT_LLM_RUNTIME_IMAGE=nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc24@sha256:16a103b8b1b682d287e8043fc674d23fa52d5b5f2127da913bf6c0643db3a073
-export TENSORRT_LLM_SNAPSHOT_IMAGE=<registry>/tensorrt-llm-snapshot:<tag>
-
-docker build \
-  --platform linux/amd64 \
-  --build-arg TENSORRT_LLM_RUNTIME_IMAGE="$TENSORRT_LLM_RUNTIME_IMAGE" \
-  -f Dockerfile.tensorrt-llm \
-  -t "$TENSORRT_LLM_SNAPSHOT_IMAGE" .
-
-docker push "$TENSORRT_LLM_SNAPSHOT_IMAGE"
-```
-
-The `docker push` command uploads the newly built image to the registry named
-in `$TENSORRT_LLM_SNAPSHOT_IMAGE`. Step 3 deploys that image as the source pod.
-Use the same full image name and tag for restored pods.
-
-Verify that the packaged image contains TensorRT-LLM and `app.py`:
-
-```bash
-docker run --rm \
-  --platform linux/amd64 \
-  --entrypoint python3 \
-  "$TENSORRT_LLM_SNAPSHOT_IMAGE" \
-  -c 'import importlib.util, pathlib; assert importlib.util.find_spec("tensorrt_llm"); assert pathlib.Path("/app/app.py").is_file()'
-```
-
-The command produces no output when both TensorRT-LLM and `/app/app.py` are
-present. Any failure prints an error and returns a non-zero exit status. The
-check locates the TensorRT-LLM package rather than importing it: importing it
-loads bindings that link against the CUDA driver library, which the NVIDIA
-container runtime injects only when the container runs with a GPU, so an
-import-based check fails on a build host that has none.
-
-### 3. Deploy TensorRT-LLM
-
-Set the namespace where the TensorRT-LLM pod will run:
+Set the namespace where the TensorRT-LLM pod will run, and create the
+ConfigMap `deployment.yaml` mounts `app.py` from:
 
 ```bash
 export SNAPSHOT_NAMESPACE=<namespace>
 kubectl get namespace "$SNAPSHOT_NAMESPACE"
+
+kubectl create configmap tensorrt-llm-app \
+  --namespace "$SNAPSHOT_NAMESPACE" \
+  --from-file=app.py
 ```
 
-In [`deployment.yaml`](tensorrt-llm/deployment.yaml), replace the example `image`
-with the one pushed in step 2 and select a model supported by the chosen
-TensorRT-LLM image through `SNAPSHOT_MODEL`:
+Re-run this command after editing `app.py` -- `kubectl create configmap` fails
+if the ConfigMap already exists; add `--dry-run=client -o yaml | kubectl apply
+-f -` to update it in place instead.
+
+### 3. Deploy TensorRT-LLM
+
+Select a model supported by the chosen TensorRT-LLM image through
+`SNAPSHOT_MODEL` in [`deployment.yaml`](tensorrt-llm/deployment.yaml):
 
 ```yaml
 containers:
   - name: main
-    image: <registry>/tensorrt-llm-snapshot:<tag>
     env:
       - name: SNAPSHOT_MODEL
         value: Qwen/Qwen3-0.6B

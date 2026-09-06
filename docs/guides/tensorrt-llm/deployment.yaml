@@ -31,13 +31,14 @@ spec:
         nvidia.com/gpu.present: "true"
       containers:
         - name: main
-          image: tensorrt-llm-snapshot:replace-me
-          imagePullPolicy: Always
-          # SYS_PTRACE: lets py-spy attach to sibling processes in this
-          # container for failure diagnostics (see e2e debug_dump_framework).
-          securityContext:
-            capabilities:
-              add: ["SYS_PTRACE"]
+          # The upstream TensorRT-LLM image, unmodified: app.py comes from the
+          # tensorrt-llm-app ConfigMap below, so there is no Snapshot-specific
+          # image to build, push, or keep available.
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc24@sha256:16a103b8b1b682d287e8043fc674d23fa52d5b5f2127da913bf6c0643db3a073
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - /snapshot-app/app.py
           env:
             - name: SNAPSHOT_MODEL
               value: Qwen/Qwen3-0.6B
@@ -74,6 +75,9 @@ spec:
               subPath: main
             - name: tun
               mountPath: /dev/net/tun
+            - name: app
+              mountPath: /snapshot-app
+              readOnly: true
       volumes:
         - name: snapshot-control
           emptyDir: {}
@@ -81,3 +85,7 @@ spec:
           hostPath:
             path: /dev/net/tun
             type: CharDevice
+        # Created from app.py: kubectl create configmap tensorrt-llm-app --from-file=app.py
+        - name: app
+          configMap:
+            name: tensorrt-llm-app
