@@ -107,9 +107,6 @@ async def main() -> None:
         "snapshot-preflight",
     )
     print(f"vLLM pre-checkpoint output={text!r}", flush=True)
-    # Durable evidence that the engine served a generation before capture; the
-    # source container is killed by the dump, so logs alone are easy to lose.
-    CONTROL_DIR.joinpath("vllm-precheck").write_text(text + "\n", encoding="utf-8")
 
     await engine.pause_generation()
     await engine.sleep()

@@ -135,14 +135,6 @@ def main() -> None:
         if not snapshot_mode:
             return
 
-        # Durable evidence that the engine served a generation before capture;
-        # the source container is killed by the dump, so logs alone are easy
-        # to lose.
-        CONTROL_DIR.joinpath("sglang-precheck").write_text(
-            text + "\n",
-            encoding="utf-8",
-        )
-
         pause_generation(engine)
         try:
             engine.release_memory_occupation()
