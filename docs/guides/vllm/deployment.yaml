@@ -28,9 +28,6 @@ spec:
         nvidia.com/gpu.present: "true"
       containers:
         - name: main
-          # The upstream vLLM image, unmodified: app.py comes from the
-          # vllm-app ConfigMap below, so there is no Snapshot-specific image
-          # to build, push, or keep available.
           image: vllm/vllm-openai:v0.27.1-ubuntu2404@sha256:dafea057f24b7d42716331a48e2db4e1f204f877a3aa759cb7e4c37e64ca2eee
           imagePullPolicy: IfNotPresent
           command:

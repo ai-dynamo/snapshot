@@ -31,9 +31,6 @@ spec:
         nvidia.com/gpu.present: "true"
       containers:
         - name: main
-          # The upstream TensorRT-LLM image, unmodified: app.py comes from the
-          # tensorrt-llm-app ConfigMap below, so there is no Snapshot-specific
-          # image to build, push, or keep available.
           image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc24@sha256:16a103b8b1b682d287e8043fc674d23fa52d5b5f2127da913bf6c0643db3a073
           imagePullPolicy: IfNotPresent
           command:

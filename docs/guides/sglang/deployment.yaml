@@ -55,9 +55,6 @@ spec:
               mountPath: /hf-cache
       containers:
         - name: main
-          # The upstream SGLang image, unmodified: app.py comes from the
-          # sglang-app ConfigMap below, so there is no Snapshot-specific image
-          # to build, push, or keep available.
           image: lmsysorg/sglang:v0.5.17-cu130-runtime@sha256:3ea7c6d74312d964edbcf9b3819425ea42117eb967ef1cfec632a70c926027df
           imagePullPolicy: IfNotPresent
           command:
