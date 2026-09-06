@@ -23,6 +23,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -38,19 +39,69 @@ TAG_LENGTH = 12
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GUIDES_DIR = REPO_ROOT / "docs" / "guides"
 
-# Files that end up in the image, per framework guide directory. The Dockerfile
-# carries the runtime base image pin, so a base bump changes the tag too.
-# Deployment manifests are deliberately excluded: they configure the Pod, not
-# the image, and must not force a rebuild.
+# FRAMEWORKS is the contract for tag correctness: the tag is a digest over
+# exactly these files, so a file that reaches the image but is missing here
+# lets CI reuse a stale image for a changed guide. Every file in a guide
+# directory must be listed either here (image input) or in EXCLUDED (never
+# part of the image); validate_guide_files() fails on anything unclassified,
+# and validate_dockerfile_copies() fails if a Dockerfile COPY/ADD source is not
+# an input. The Dockerfile carries the runtime base image pin, so a base bump
+# changes the tag too.
 FRAMEWORKS: dict[str, tuple[str, ...]] = {
     "vllm": ("Dockerfile.vllm", "app.py"),
     "sglang": ("Dockerfile.sglang", "app.py"),
     "tensorrt-llm": ("Dockerfile.tensorrt-llm", "app.py"),
 }
 
+# Files in a guide directory that never enter the image. Deployment manifests
+# configure the Pod, not the image, and must not force a rebuild.
+EXCLUDED: dict[str, tuple[str, ...]] = {
+    "vllm": ("deployment.yaml", "restore-deployment.yaml"),
+    "sglang": (
+        "deployment.yaml",
+        "restore-deployment.yaml",
+        "model-cache-pvc.yaml",
+    ),
+    "tensorrt-llm": ("deployment.yaml", "restore-deployment.yaml"),
+}
+
+COPY_INSTRUCTION = re.compile(r"^\s*(?:COPY|ADD)\s+(?P<args>.+?)\s*$", re.IGNORECASE)
+
 
 def image_inputs(framework: str) -> list[Path]:
     return [GUIDES_DIR / framework / name for name in FRAMEWORKS[framework]]
+
+
+def validate_guide_files(framework: str) -> list[str]:
+    """Names of files in the guide directory that are neither inputs nor excluded."""
+    classified = set(FRAMEWORKS[framework]) | set(EXCLUDED[framework])
+    guide_dir = GUIDES_DIR / framework
+    present = {path.name for path in guide_dir.iterdir() if path.is_file()}
+    return sorted(present - classified)
+
+
+def validate_dockerfile_copies(framework: str) -> list[str]:
+    """COPY/ADD sources in the Dockerfile that are not hash inputs.
+
+    Sources from another build stage (--from=) do not come from the guide
+    directory and are skipped. Only single-file sources are supported; a
+    directory or glob would need its members enumerated in FRAMEWORKS.
+    """
+    inputs = set(FRAMEWORKS[framework])
+    unlisted: list[str] = []
+    for line in dockerfile(framework).read_text(encoding="utf-8").splitlines():
+        match = COPY_INSTRUCTION.match(line)
+        if not match:
+            continue
+        tokens = match.group("args").split()
+        flags = [token for token in tokens if token.startswith("--")]
+        if any(flag.startswith("--from=") for flag in flags):
+            continue
+        operands = [token for token in tokens if not token.startswith("--")]
+        for source in operands[:-1]:  # the last operand is the destination
+            if source.lstrip("./") not in inputs:
+                unlisted.append(source)
+    return unlisted
 
 
 def dockerfile(framework: str) -> Path:
@@ -161,6 +212,27 @@ def main() -> int:
     missing_inputs = [str(path) for path in image_inputs(args.framework) if not path.is_file()]
     if missing_inputs:
         print(f"Missing image inputs: {', '.join(missing_inputs)}", file=sys.stderr)
+        return 2
+
+    # Both checks run on every invocation, so they fail the PR-time --check
+    # step and not only a later build.
+    unclassified = validate_guide_files(args.framework)
+    if unclassified:
+        print(
+            f"Unclassified files in docs/guides/{args.framework}/: "
+            f"{', '.join(unclassified)}. Add each to FRAMEWORKS (it is copied into "
+            "the image) or to EXCLUDED (it is not) in hack/framework-image-tag.py.",
+            file=sys.stderr,
+        )
+        return 2
+    unlisted = validate_dockerfile_copies(args.framework)
+    if unlisted:
+        print(
+            f"Dockerfile.{args.framework} copies {', '.join(unlisted)} but "
+            "FRAMEWORKS does not list it as an image input; the tag would not "
+            "change when it does.",
+            file=sys.stderr,
+        )
         return 2
 
     image, tag = image_ref(args.framework)
