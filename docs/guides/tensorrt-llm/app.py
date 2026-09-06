@@ -19,9 +19,6 @@ MAX_BATCH_SIZE = int(os.environ.get("TRTLLM_MAX_BATCH_SIZE", "1"))
 FREE_GPU_MEMORY_FRACTION = float(
     os.environ.get("TRTLLM_FREE_GPU_MEMORY_FRACTION", "0.10")
 )
-# Off: Qwen3 needs no custom model code, and remote code execution should be
-# an explicit opt-in. Set this to True only for checkpoints that ship their
-# own modeling code.
 TRUST_REMOTE_CODE = False
 
 
