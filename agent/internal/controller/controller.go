@@ -157,6 +157,7 @@ const (
 	restoreFinalizerUpdateFailedReason = "RestoreFinalizerUpdateFailed"
 	restoreStatusUpdateFailedReason    = "RestoreStatusUpdateFailed"
 	restoreRequestedReason             = "RestoreRequested"
+	restoreCompatUncheckedReason       = "RestoreCompatibilityUnchecked"
 	restoreStatusFieldManager          = "snapshot-agent-restore"
 	restorePodFinalizer                = "snapshot/restore-protection"
 	snapshotEventComponent             = "snapshot"
@@ -535,7 +536,7 @@ func (w *NodeController) preflightRestore(ctx context.Context, pod *corev1.Pod) 
 	// Gate A: the earliest point the checkpoint's own record of what it was
 	// captured on is readable, and still before any of the restore is attempted.
 	artifact.SkipCompatCheck = w.skipCompatCheckRequested(pod)
-	if err := w.preflightCompatibility(pod, artifact, mappings); err != nil {
+	if err := w.preflightCompatibility(ctx, pod, artifact, mappings); err != nil {
 		return nil, err
 	}
 	if w.config.CRIU.TcpEstablished && pod.Status.PodIP == "" {
