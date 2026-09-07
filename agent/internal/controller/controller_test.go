@@ -632,7 +632,7 @@ func TestRestorePodContainersKeepsAggregateInProgressWhileDestinationIsPending(t
 	assert.Contains(t, payload, "1 pending")
 }
 
-func TestRestoreTallyVerdictCoversEveryTerminalOutcome(t *testing.T) {
+func TestRestoreTallyVerdictCoversEveryOutcome(t *testing.T) {
 	tests := []struct {
 		name        string
 		tally       restoreTally
@@ -640,6 +640,32 @@ func TestRestoreTallyVerdictCoversEveryTerminalOutcome(t *testing.T) {
 		wantReason  string
 		wantMessage string
 	}{
+		{
+			name: "a destination is still pending",
+			tally: restoreTally{
+				total:     2,
+				succeeded: []string{"engine-0"},
+				pending:   []string{"engine-1"},
+			},
+			wantStatus:  corev1.ConditionFalse,
+			wantReason:  podcontract.RestoreReasonInProgress,
+			wantMessage: "Restore from PodSnapshot snapshot-a remains in progress: 1 succeeded, 0 failed, 1 pending (engine-1)",
+		},
+		{
+			// Pending outranks a refusal already in: the pass is not over, so
+			// the terminal reasons cannot be published yet.
+			name: "a destination is pending and another was refused",
+			tally: restoreTally{
+				total:                  3,
+				succeeded:              []string{"engine-0"},
+				incompatible:           []string{"engine-1"},
+				incompatibilityReasons: []string{"engine-1: gpu-count: source 1, target 0"},
+				pending:                []string{"engine-2"},
+			},
+			wantStatus:  corev1.ConditionFalse,
+			wantReason:  podcontract.RestoreReasonInProgress,
+			wantMessage: "Restore from PodSnapshot snapshot-a remains in progress: 1 succeeded, 0 failed, 1 incompatible, 1 pending (engine-2)",
+		},
 		{
 			name:        "every destination restored",
 			tally:       restoreTally{total: 2, succeeded: []string{"engine-0", "engine-1"}},
