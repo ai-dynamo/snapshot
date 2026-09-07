@@ -632,6 +632,78 @@ func TestRestorePodContainersKeepsAggregateInProgressWhileDestinationIsPending(t
 	assert.Contains(t, payload, "1 pending")
 }
 
+func TestRestoreTallyVerdictCoversEveryTerminalOutcome(t *testing.T) {
+	tests := []struct {
+		name        string
+		tally       restoreTally
+		wantStatus  corev1.ConditionStatus
+		wantReason  string
+		wantMessage string
+	}{
+		{
+			name:        "every destination restored",
+			tally:       restoreTally{total: 2, succeeded: []string{"engine-0", "engine-1"}},
+			wantStatus:  corev1.ConditionTrue,
+			wantReason:  podcontract.RestoreReasonSucceeded,
+			wantMessage: "Restored 2 destination container(s) from PodSnapshot snapshot-a: engine-0, engine-1",
+		},
+		{
+			name: "some restored and the rest not",
+			tally: restoreTally{
+				total:        3,
+				succeeded:    []string{"engine-0"},
+				failed:       []string{"engine-1"},
+				incompatible: []string{"engine-2"},
+			},
+			wantStatus:  corev1.ConditionFalse,
+			wantReason:  podcontract.RestoreReasonPartiallySucceeded,
+			wantMessage: "Restored 1 of 3 destination containers from PodSnapshot snapshot-a; not restored: engine-1, engine-2",
+		},
+		{
+			name: "every destination refused",
+			tally: restoreTally{
+				total:        2,
+				incompatible: []string{"engine-0", "engine-1"},
+				incompatibilityReasons: []string{
+					"engine-0: cpu-arch: source amd64, target arm64",
+					"engine-1: gpu-count: source 1, target 0",
+				},
+			},
+			wantStatus:  corev1.ConditionFalse,
+			wantReason:  podcontract.RestoreReasonIncompatible,
+			wantMessage: "engine-0: cpu-arch: source amd64, target arm64; engine-1: gpu-count: source 1, target 0",
+		},
+		{
+			name: "some failed and some refused",
+			tally: restoreTally{
+				total:        2,
+				failed:       []string{"engine-0"},
+				incompatible: []string{"engine-1"},
+			},
+			wantStatus:  corev1.ConditionFalse,
+			wantReason:  podcontract.RestoreReasonFailed,
+			wantMessage: "Restore failed for 1 destination container(s) and refused 1 incompatible destination(s) from PodSnapshot snapshot-a",
+		},
+		{
+			name:        "every destination failed",
+			tally:       restoreTally{total: 2, failed: []string{"engine-0", "engine-1"}},
+			wantStatus:  corev1.ConditionFalse,
+			wantReason:  podcontract.RestoreReasonFailed,
+			wantMessage: "Restore failed for all 2 destination container(s) from PodSnapshot snapshot-a: engine-0, engine-1",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			verdict := test.tally.verdict("snapshot-a")
+
+			assert.Equal(t, test.wantStatus, verdict.status)
+			assert.Equal(t, test.wantReason, verdict.reason)
+			assert.Equal(t, test.wantMessage, verdict.message)
+		})
+	}
+}
+
 func TestPreflightRestoreRejectsInvalidMappingBeforeExecution(t *testing.T) {
 	pod := multiRestorePod()
 	pod.Annotations[podcontract.RestoreContainerMapAnnotation] = "worker=engine-0"

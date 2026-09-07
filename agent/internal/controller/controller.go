@@ -700,55 +700,120 @@ func (w *NodeController) restorePodContainers(ctx context.Context, pod *corev1.P
 	return w.recordRestoreResults(ctx, pod, plan.artifact, results)
 }
 
+// restoreTally groups one pass of worker outcomes by destination.
+type restoreTally struct {
+	total                  int
+	succeeded              []string
+	failed                 []string
+	incompatible           []string
+	pending                []string
+	incompatibilityReasons []string
+}
+
+// restoreVerdict is what one pass concluded, ready to publish as a condition.
+type restoreVerdict struct {
+	status  corev1.ConditionStatus
+	reason  string
+	message string
+}
+
 // recordRestoreResults publishes the aggregate Pod outcome after every worker
 // in the current pass has returned.
 func (w *NodeController) recordRestoreResults(ctx context.Context, pod *corev1.Pod, artifact *restoreArtifact, results []restoreResult) bool {
-	byState := make(map[restoreResultState][]string, 4)
-	var incompatibilityReasons []string
+	tally := tallyRestoreResults(results)
+	if len(tally.pending) != 0 {
+		return w.reportRestoreProgress(ctx, pod, artifact.SnapshotName, tally)
+	}
+	verdict := tally.verdict(artifact.SnapshotName)
+	return w.finishRestore(ctx, pod, verdict.status, verdict.reason, verdict.message) != nil
+}
+
+func tallyRestoreResults(results []restoreResult) restoreTally {
+	tally := restoreTally{total: len(results)}
 	for _, result := range results {
-		byState[result.state] = append(byState[result.state], result.destination)
-		if result.state == restoreResultIncompatible {
+		switch result.state {
+		case restoreResultSucceeded:
+			tally.succeeded = append(tally.succeeded, result.destination)
+		case restoreResultFailed:
+			tally.failed = append(tally.failed, result.destination)
+		case restoreResultPending:
+			tally.pending = append(tally.pending, result.destination)
+		case restoreResultIncompatible:
+			tally.incompatible = append(tally.incompatible, result.destination)
 			reason := result.reason
 			if len(results) > 1 {
 				reason = fmt.Sprintf("%s: %s", result.destination, reason)
 			}
-			incompatibilityReasons = append(incompatibilityReasons, reason)
+			tally.incompatibilityReasons = append(tally.incompatibilityReasons, reason)
 		}
 	}
-	succeeded := byState[restoreResultSucceeded]
-	failed := byState[restoreResultFailed]
-	incompatible := byState[restoreResultIncompatible]
-	pending := byState[restoreResultPending]
+	return tally
+}
 
-	if len(pending) != 0 {
-		message := fmt.Sprintf("Restore from PodSnapshot %s remains in progress: %d succeeded, %d failed, %d pending (%s)", artifact.SnapshotName, len(succeeded), len(failed), len(pending), strings.Join(pending, ", "))
-		if len(incompatible) != 0 {
-			message = fmt.Sprintf("Restore from PodSnapshot %s remains in progress: %d succeeded, %d failed, %d incompatible, %d pending (%s)", artifact.SnapshotName, len(succeeded), len(failed), len(incompatible), len(pending), strings.Join(pending, ", "))
-		}
-		if err := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, podcontract.RestoreReasonInProgress, message); err != nil {
-			emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeWarning, restoreStatusUpdateFailedReason, err.Error())
-		}
-		return true
+// reportRestoreProgress publishes the interim state of a pass that still has
+// destinations pending. A status write that fails is reported and dropped: the
+// pass is not over, and the next one publishes again.
+func (w *NodeController) reportRestoreProgress(ctx context.Context, pod *corev1.Pod, snapshotName string, tally restoreTally) bool {
+	counts := []string{
+		fmt.Sprintf("%d succeeded", len(tally.succeeded)),
+		fmt.Sprintf("%d failed", len(tally.failed)),
 	}
+	if len(tally.incompatible) != 0 {
+		counts = append(counts, fmt.Sprintf("%d incompatible", len(tally.incompatible)))
+	}
+	counts = append(counts, fmt.Sprintf("%d pending", len(tally.pending)))
 
-	if len(failed) == 0 && len(incompatible) == 0 {
-		message := fmt.Sprintf("Restored %d destination container(s) from PodSnapshot %s: %s", len(succeeded), artifact.SnapshotName, strings.Join(succeeded, ", "))
-		return w.finishRestore(ctx, pod, corev1.ConditionTrue, podcontract.RestoreReasonSucceeded, message) != nil
+	message := fmt.Sprintf("Restore from PodSnapshot %s remains in progress: %s (%s)",
+		snapshotName,
+		strings.Join(counts, ", "),
+		strings.Join(tally.pending, ", "),
+	)
+	if err := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, podcontract.RestoreReasonInProgress, message); err != nil {
+		emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeWarning, restoreStatusUpdateFailedReason, err.Error())
 	}
-	if len(succeeded) != 0 {
-		notRestored := append(append([]string{}, failed...), incompatible...)
-		message := fmt.Sprintf("Restored %d of %d destination containers from PodSnapshot %s; not restored: %s", len(succeeded), len(results), artifact.SnapshotName, strings.Join(notRestored, ", "))
-		return w.finishRestore(ctx, pod, corev1.ConditionFalse, podcontract.RestoreReasonPartiallySucceeded, message) != nil
+	return true
+}
+
+// verdict concludes a pass with nothing left pending. It reaches no further
+// than the counts it is given, so the outcomes read as one list.
+func (t restoreTally) verdict(snapshotName string) restoreVerdict {
+	switch {
+	case len(t.failed) == 0 && len(t.incompatible) == 0:
+		return restoreVerdict{
+			status: corev1.ConditionTrue,
+			reason: podcontract.RestoreReasonSucceeded,
+			message: fmt.Sprintf("Restored %d destination container(s) from PodSnapshot %s: %s",
+				len(t.succeeded), snapshotName, strings.Join(t.succeeded, ", ")),
+		}
+	case len(t.succeeded) != 0:
+		notRestored := append(append([]string{}, t.failed...), t.incompatible...)
+		return restoreVerdict{
+			status: corev1.ConditionFalse,
+			reason: podcontract.RestoreReasonPartiallySucceeded,
+			message: fmt.Sprintf("Restored %d of %d destination containers from PodSnapshot %s; not restored: %s",
+				len(t.succeeded), t.total, snapshotName, strings.Join(notRestored, ", ")),
+		}
+	case len(t.failed) == 0:
+		return restoreVerdict{
+			status:  corev1.ConditionFalse,
+			reason:  podcontract.RestoreReasonIncompatible,
+			message: strings.Join(t.incompatibilityReasons, "; "),
+		}
+	case len(t.incompatible) != 0:
+		return restoreVerdict{
+			status: corev1.ConditionFalse,
+			reason: podcontract.RestoreReasonFailed,
+			message: fmt.Sprintf("Restore failed for %d destination container(s) and refused %d incompatible destination(s) from PodSnapshot %s",
+				len(t.failed), len(t.incompatible), snapshotName),
+		}
+	default:
+		return restoreVerdict{
+			status: corev1.ConditionFalse,
+			reason: podcontract.RestoreReasonFailed,
+			message: fmt.Sprintf("Restore failed for all %d destination container(s) from PodSnapshot %s: %s",
+				len(t.failed), snapshotName, strings.Join(t.failed, ", ")),
+		}
 	}
-	if len(failed) == 0 {
-		return w.finishRestore(ctx, pod, corev1.ConditionFalse, podcontract.RestoreReasonIncompatible, strings.Join(incompatibilityReasons, "; ")) != nil
-	}
-	if len(incompatible) != 0 {
-		message := fmt.Sprintf("Restore failed for %d destination container(s) and refused %d incompatible destination(s) from PodSnapshot %s", len(failed), len(incompatible), artifact.SnapshotName)
-		return w.finishRestore(ctx, pod, corev1.ConditionFalse, podcontract.RestoreReasonFailed, message) != nil
-	}
-	message := fmt.Sprintf("Restore failed for all %d destination container(s) from PodSnapshot %s: %s", len(failed), artifact.SnapshotName, strings.Join(failed, ", "))
-	return w.finishRestore(ctx, pod, corev1.ConditionFalse, podcontract.RestoreReasonFailed, message) != nil
 }
 
 // restoreDestination resolves and restores one destination independently of
