@@ -75,9 +75,7 @@ type NodeController struct {
 	restorePodLister        corev1listers.PodLister
 	compareFn               func(compat.Gate, compat.Environment, compat.Environment) []compat.Mismatch
 
-	// skipCompatCheckFn is read once per restore rather than at startup, so the
-	// node-wide switch can be flipped without a DaemonSet rollout. Injected so
-	// the controller never learns where the config file lives.
+	// Read per restore, so the node-wide switch takes effect without a rollout.
 	skipCompatCheckFn func() bool
 
 	inFlight   map[string]struct{}
@@ -698,7 +696,6 @@ func (w *NodeController) restorePodContainers(ctx context.Context, pod *corev1.P
 	return w.recordRestoreResults(ctx, pod, plan.artifact, results)
 }
 
-// restoreTally groups one pass of worker outcomes by destination.
 type restoreTally struct {
 	total                  int
 	succeeded              []string
@@ -708,7 +705,6 @@ type restoreTally struct {
 	incompatibilityReasons []string
 }
 
-// restoreVerdict is what one pass concluded, ready to publish as a condition.
 type restoreVerdict struct {
 	status  corev1.ConditionStatus
 	reason  string

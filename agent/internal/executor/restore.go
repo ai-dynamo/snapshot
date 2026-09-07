@@ -82,9 +82,7 @@ type RestoreRequest struct {
 	PageBrokerEnabled           bool
 	PageBrokerControlSocketPath string
 
-	// SkipCompatCheck carries the decision the caller already made, so the
-	// second gate cannot reach a different answer than the first: one restore
-	// is either checked or it is not.
+	// Decided by the caller, so both gates reach the same answer.
 	SkipCompatCheck bool
 }
 
@@ -371,15 +369,14 @@ func inspectRestore(
 		}
 	}
 
-	// Gate B, once the placeholder is resolved and this node's own env are
-	// readable. It runs ahead of BuildDeviceMap, whose positional pairing turns
-	// a GPU difference into a device-map error that names neither GPU.
+	// Ahead of BuildDeviceMap, whose positional pairing turns a GPU difference
+	// into a device-map error that names neither GPU.
 	if err := inspectCompatibility(log, manifest, targetGPUs, targetRoot, targetImageID, req.SkipCompatCheck); err != nil {
 		return nil, 0, err
 	}
 
-	// Behind the gate, which names a target with no GPUs as a count refusal.
-	// This is what is left when the gate is skipped.
+	// Only reachable with the gate skipped, which otherwise reports a target
+	// with no GPUs as a count refusal.
 	if !manifest.CUDA.IsEmpty() && len(targetGPUUUIDs) == 0 {
 		return nil, 0, fmt.Errorf("missing target GPU UUIDs for %s/%s container %s", req.PodNamespace, req.PodName, req.DestinationContainerName)
 	}

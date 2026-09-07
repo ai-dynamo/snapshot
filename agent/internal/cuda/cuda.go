@@ -176,7 +176,7 @@ func DiscoverGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podNa
 
 // DiscoverGPUs resolves the same GPUs as DiscoverGPUUUIDs, in the same
 // order, described by model and driver version wherever nvidia-smi can be
-// reached. Whichever path finds the GPUs, the env come out the same shape, so
+// reached. Whichever path finds the GPUs, they come out the same shape, so
 // what gets recorded does not depend on how this cluster allocates GPUs.
 func DiscoverGPUs(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName, hostProcPath string, pid int, log logr.Logger) (compat.GPUInfo, error) {
 	return discoverGPUs(
