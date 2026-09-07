@@ -120,7 +120,7 @@ test "$6" = "--format=csv,noheader"
 printf '%s\n' 'GPU-a, NVIDIA L4, 580.65.06'
 `)
 
-	got, err := DiscoverVisibleGPUFacts(context.Background(), "/host/proc/", 42)
+	got, err := DiscoverVisibleGPUFacts(context.Background(), "/host/proc/", 42, nvidiaSMITimeout)
 	if err != nil {
 		t.Fatalf("DiscoverVisibleGPUFacts: %v", err)
 	}
@@ -136,7 +136,7 @@ printf '%s\n' 'GPU-a, NVIDIA L4, 580.65.06'
 func TestDiscoverVisibleGPUFactsReturnsCommandFailure(t *testing.T) {
 	installFakeNSenter(t, "exit 17\n")
 
-	_, err := DiscoverVisibleGPUFacts(context.Background(), "/host/proc", 42)
+	_, err := DiscoverVisibleGPUFacts(context.Background(), "/host/proc", 42, nvidiaSMITimeout)
 	if err == nil {
 		t.Fatal("DiscoverVisibleGPUFacts succeeded after nsenter failed")
 	}

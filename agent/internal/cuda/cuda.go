@@ -33,9 +33,9 @@ const (
 	// In the placeholder namespace pass filepath.Join(bundleDir, HelperBinaryName) instead.
 	DefaultHelperBinaryPath = "/usr/local/bin/" + HelperBinaryName
 
-	// nvidiaSMITimeout bounds every nsenter nvidia-smi call. The agent's own
-	// context carries no deadline, so a hung one would block the worker for good
-	// and cost the node every restore that followed.
+	// nvidiaSMITimeout is what the agent bounds every nsenter nvidia-smi call
+	// by. The agent's own context carries no deadline, so a hung one would block
+	// the worker for good and cost the node every restore that followed.
 	nvidiaSMITimeout = 30 * time.Second
 )
 
@@ -99,8 +99,8 @@ func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName st
 // version come from the same call as the UUIDs: nothing else on the restore path
 // gets to look at the source node's GPUs, so what is not read here cannot be
 // compared later.
-func DiscoverVisibleGPUFacts(ctx context.Context, hostProcPath string, pid int) (compat.GPUFacts, error) {
-	ctx, cancel := context.WithTimeout(ctx, nvidiaSMITimeout)
+func DiscoverVisibleGPUFacts(ctx context.Context, hostProcPath string, pid int, timeout time.Duration) (compat.GPUFacts, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	mountPath := fmt.Sprintf("%s/%d/ns/mnt", strings.TrimRight(hostProcPath, "/"), pid)
@@ -183,7 +183,9 @@ func DiscoverGPUFacts(ctx context.Context, clientset kubernetes.Interface, podNa
 		containerName,
 		hostProcPath,
 		pid,
-		DiscoverVisibleGPUFacts,
+		func(ctx context.Context, hostProcPath string, pid int) (compat.GPUFacts, error) {
+			return DiscoverVisibleGPUFacts(ctx, hostProcPath, pid, nvidiaSMITimeout)
+		},
 		log,
 	)
 }
