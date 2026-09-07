@@ -108,9 +108,7 @@ type restoreTarget struct {
 type restorePlan struct {
 	artifact *restoreArtifact
 	mappings []podcontract.ContainerMapping
-	// skipCompatCheck is the pod's and the node's decision, read once in
-	// preflight so the gate inside the restore reaches the same answer as the
-	// one before it.
+	// Read once in preflight, so both gates reach the same answer.
 	skipCompatCheck bool
 }
 
@@ -932,9 +930,8 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *
 	if err != nil {
 		var incompatible *compat.IncompatibleError
 		if errors.As(err, &incompatible) {
-			// Nothing was attempted, so there is no half-restored process to
-			// clean up. The placeholder is deliberately left running: killing it
-			// would restart the container straight back into the same answer.
+			// The placeholder is left running: killing it restarts the container
+			// straight back into the same refusal.
 			return incompatible
 		}
 
