@@ -32,7 +32,7 @@ func TestPreflightCompatibilityAllowsUnreadableManifest(t *testing.T) {
 	err := r.controller.preflightCompatibility(context.Background(), r.pod, &restoreArtifact{
 		SourceContainerName: gatedRestoreContainer,
 		Path:                path,
-	}, gatedRestoreMappings())
+	}, gatedRestoreMappings(), false)
 
 	require.NoError(t, err)
 	assert.Empty(t, r.comparison.calls, "comparison ran without a manifest")
@@ -61,7 +61,7 @@ func TestPreflightCompatibilityComparesRecordedFacts(t *testing.T) {
 	err := r.controller.preflightCompatibility(context.Background(), r.pod, &restoreArtifact{
 		SourceContainerName: gatedRestoreContainer,
 		Path:                path,
-	}, gatedRestoreMappings())
+	}, gatedRestoreMappings(), false)
 
 	require.NoError(t, err)
 	require.Len(t, r.comparison.calls, 1)
@@ -89,7 +89,7 @@ func TestPreflightCompatibilityDescribesEveryRestoreTarget(t *testing.T) {
 		Source:      gatedRestoreContainer,
 		Destination: "engine-1",
 	})
-	require.NoError(t, r.controller.preflightCompatibility(context.Background(), r.pod, r.artifact, mappings))
+	require.NoError(t, r.controller.preflightCompatibility(context.Background(), r.pod, r.artifact, mappings, false))
 
 	require.Len(t, r.comparison.calls, 2)
 	assert.Equal(t, compat.Facts{
