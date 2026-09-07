@@ -34,12 +34,9 @@ API as part of its control loop.
     behavior (image, command, how it signals readiness) — it doesn't need to
     duplicate those controller-injected fields.
 
-The build-and-deploy guides include a complete, working example of such a pod for
-each framework — see the `deployment.yaml` referenced from the [vLLM](vllm.md),
-[SGLang](sglang.md), and [TensorRT-LLM](tensorrt-llm.md) guides. Use that pod spec
-as the reference: a `PodSnapshot` targets a pod deployed this way, and a
-`SnapshotJob`'s `podTemplate` can reuse the same container spec — the
-controller-injected fields don't need to be added manually.
+The framework guides include a complete, working example of a `PodSnapshot`-ready
+pod — see the `deployment.yaml` referenced from the [vLLM](vllm.md),
+[SGLang](sglang.md), and [TensorRT-LLM](tensorrt-llm.md) guides.
 
 Set the namespace where the replica runs — the same one used to deploy it:
 
