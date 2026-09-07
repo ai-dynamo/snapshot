@@ -27,8 +27,17 @@ func (w *NodeController) refuseRestore(ctx context.Context, pod *corev1.Pod, inc
 		pod,
 		corev1.ConditionFalse,
 		podcontract.RestoreReasonIncompatible,
-		reason,
+		refusalMessage(reason),
 	) != nil
+}
+
+// refusalMessage puts a sentence around the mismatches, which on their own read
+// as a bare "<check>: source <x>, target <y>". Both gates report through it so
+// the condition and the event say the same thing wherever the refusal came
+// from. The log keeps the mismatches unwrapped, since that is the field an
+// operator greps.
+func refusalMessage(reasons string) string {
+	return "Refused restore; this node cannot run the checkpoint: " + reasons
 }
 
 func (w *NodeController) logRestoreRefusal(pod *corev1.Pod, incompatible *compat.IncompatibleError, reason string) {
