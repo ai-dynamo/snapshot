@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -66,14 +67,23 @@ func TestCheckpointPreparesContentArtifactParents(t *testing.T) {
 	assert.DirExists(t, filepath.Join(cfg.Storage.BasePath, "artifacts", "content-uid", ".tmp"))
 }
 
-func TestInspectContainerRequiresRuntimeImageID(t *testing.T) {
+func TestInspectContainerToleratesUnreadableRuntimeImageID(t *testing.T) {
+	var logged []string
+	log := funcr.New(func(_, args string) { logged = append(logged, args) }, funcr.Options{})
+
 	_, _, err := inspectContainer(
 		context.Background(),
 		checkpointImageRuntime{},
-		logr.Discard(),
+		log,
 		CheckpointRequest{ContainerID: "container-id"},
 	)
-	require.ErrorContains(t, err, "failed to resolve container image ID: runtime image unavailable")
+
+	// The fake runtime has no rootfs to offer, so inspection still fails - but
+	// after the image ID rather than on it.
+	require.ErrorContains(t, err, "failed to get rootfs")
+	require.Len(t, logged, 1)
+	assert.Contains(t, logged[0], "this checkpoint will not record it")
+	assert.Contains(t, logged[0], "runtime image unavailable")
 }
 
 func TestConfigureCheckpointRecordsRuntimeImageID(t *testing.T) {
