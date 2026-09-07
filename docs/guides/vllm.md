@@ -112,6 +112,12 @@ that ships its own modeling code.
 > vLLM's [environment variables](https://docs.vllm.ai/en/v0.27.1/configuration/env_vars/)
 > set in the Deployment's Pod template.
 
+`app.py` also sets `VLLM_WORKER_MULTIPROC_METHOD=spawn` before importing vLLM.
+Calling `AsyncLLM` directly rather than vLLM's CLI wrapper skips the wrapper's
+automatic default; without it, worker startup falls back to `fork` (or
+switches to `spawn` only if vLLM detects CUDA already initialized), which is
+unreliable across checkpoint/restore.
+
 Deploy the edited manifest:
 
 ```bash
