@@ -56,10 +56,6 @@ func (w *NodeController) reopenedAfterRefusal(pod *corev1.Pod) bool {
 //
 // A container that is not in the pod leaves its facts unknown.
 func podFacts(pod *corev1.Pod, containerName string) compat.Facts {
-	if pod == nil {
-		return compat.Facts{}
-	}
-
 	facts := compat.Facts{}
 	for _, container := range pod.Spec.Containers {
 		if container.Name != containerName {

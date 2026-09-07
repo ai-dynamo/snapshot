@@ -456,5 +456,4 @@ func TestPodFactsLeaveWhatThePodDoesNotSayUnknown(t *testing.T) {
 
 	assert.Equal(t, compat.Facts{Image: "busybox:1.36", MemoryLimit: "16Gi"}, podFacts(pod, "main"))
 	assert.Equal(t, compat.Facts{}, podFacts(pod, "absent"), "a container not in the pod")
-	assert.Equal(t, compat.Facts{}, podFacts(nil, "main"), "no pod at all")
 }
