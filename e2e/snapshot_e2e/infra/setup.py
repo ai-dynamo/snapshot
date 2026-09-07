@@ -575,8 +575,8 @@ def vcluster_node_sync_selector_labels() -> dict[str, str]:
     for node in nodes:
         labels = node.metadata.labels or {}
         if labels.get(AKS_USER_NODE_LABEL) == AKS_USER_NODE_VALUE:
-            # This matches the current Dynamo AKS runner layout. If that cluster
-            # layout changes, revisit which host nodes the vCluster should sync.
+            # Matches the current AKS CI runner layout. If that cluster layout
+            # changes, revisit which host nodes the vCluster should sync.
             log(
                 "Using AKS user-node selector for vCluster node sync: "
                 f"{AKS_USER_NODE_LABEL}={AKS_USER_NODE_VALUE}"

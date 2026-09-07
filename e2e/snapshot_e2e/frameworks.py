@@ -28,25 +28,18 @@ API_PORT = 8000
 PROMPT = "Reply with one short sentence confirming this restored worker can serve."
 REQUEST_TIMEOUT_SECONDS = 120
 
-# Phase budgets. The source budget covers image pull, model download or cache
-# load, engine load, compilation/CUDA-graph capture, and the warm-up
-# generation; the checkpoint budget covers the dump and artifact upload; the
-# restore budget covers the agent restore plus the program's own resume and
-# the first post-restore generation.
+# Phase budgets: source covers image pull, model load, and warm-up generation
+# (300s was exceeded mid-init on a cold 10-20 GB image pull); checkpoint
+# covers the dump and upload; restore covers the agent restore plus resume
+# and the first post-restore generation.
 #
-# The first run on a node pulls a 10-20 GB runtime image (observed: ~4 min on
-# the CI cluster) before the engine even starts, and vLLM then compiles and
-# captures CUDA graphs; 300s was exceeded with the engine still initializing.
-#
-# test_frameworks.py waits on restore_timeout_seconds twice in sequence
-# (wait_for_restored_condition, then wait_for_restore_outcome), so the restore
-# budget below counts double. The CI step running the test must exceed
-# SOURCE_READY_TIMEOUT_SECONDS + CHECKPOINT_TIMEOUT_SECONDS +
-# POD_DELETE_TIMEOUT_SECONDS + 2 * restore_timeout_seconds +
-# REQUEST_TIMEOUT_SECONDS, or GitHub kills pytest before the failure dump
-# runs; see the test step in e2e-frameworks.yaml. With sglang's 600s
-# restore_timeout_seconds override that's 900 + 300 + 180 + 2*600 + 120 =
-# 2700s (~45 min) today, the largest of the three frameworks' budgets.
+# test_frameworks.py waits on restore_timeout_seconds twice (restored
+# condition, then restore outcome), so it counts double. The CI test step
+# (e2e-frameworks.yaml) must exceed SOURCE_READY_TIMEOUT_SECONDS +
+# CHECKPOINT_TIMEOUT_SECONDS + POD_DELETE_TIMEOUT_SECONDS +
+# 2 * restore_timeout_seconds + REQUEST_TIMEOUT_SECONDS, or GitHub kills
+# pytest before the failure dump runs -- e.g. sglang's 600s override makes
+# that 900+300+180+2*600+120 = 2700s (~45 min), the largest of the three.
 SOURCE_READY_TIMEOUT_SECONDS = 900
 CHECKPOINT_TIMEOUT_SECONDS = 300
 RESTORE_TIMEOUT_SECONDS = 300
