@@ -29,13 +29,21 @@ func TestPreflightCompatibilityAllowsUnreadableManifest(t *testing.T) {
 	r := newGatedRestore(t, compat.Mismatch{Check: "kernel-version"})
 	path := writeTestArtifact(t, r.controller.config.Storage.BasePath, "no-manifest-here", nil)
 
-	err := r.controller.preflightCompatibility(r.pod, &restoreArtifact{
+	err := r.controller.preflightCompatibility(context.Background(), r.pod, &restoreArtifact{
 		SourceContainerName: gatedRestoreContainer,
 		Path:                path,
 	}, gatedRestoreMappings())
 
 	require.NoError(t, err)
 	assert.Empty(t, r.comparison.calls, "comparison ran without a manifest")
+
+	// Allowed, but not in silence: an operator has to be able to tell that the
+	// gate did not run.
+	events := r.events(t, restoreCompatUncheckedReason)
+	require.Len(t, events, 1)
+	assert.Equal(t, corev1.EventTypeWarning, events[0].Type)
+	assert.Contains(t, events[0].Message, "manifest at "+path+" is unreadable")
+	require.Len(t, r.logs.fieldsOf("Skipping restore compatibility gate; checkpoint manifest is unreadable"), 1)
 }
 
 func TestPreflightCompatibilityComparesRecordedFacts(t *testing.T) {
@@ -50,7 +58,7 @@ func TestPreflightCompatibilityComparesRecordedFacts(t *testing.T) {
 		},
 	})
 
-	err := r.controller.preflightCompatibility(r.pod, &restoreArtifact{
+	err := r.controller.preflightCompatibility(context.Background(), r.pod, &restoreArtifact{
 		SourceContainerName: gatedRestoreContainer,
 		Path:                path,
 	}, gatedRestoreMappings())
@@ -81,7 +89,7 @@ func TestPreflightCompatibilityDescribesEveryRestoreTarget(t *testing.T) {
 		Source:      gatedRestoreContainer,
 		Destination: "engine-1",
 	})
-	require.NoError(t, r.controller.preflightCompatibility(r.pod, r.artifact, mappings))
+	require.NoError(t, r.controller.preflightCompatibility(context.Background(), r.pod, r.artifact, mappings))
 
 	require.Len(t, r.comparison.calls, 2)
 	assert.Equal(t, compat.Facts{

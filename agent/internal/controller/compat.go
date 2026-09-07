@@ -89,6 +89,7 @@ func (w *NodeController) skipCompatCheckRequested(pod *corev1.Pod) bool {
 // preflightCompatibility runs the pre-flight compatibility gate for one restore.
 // A nil error means the restore may be attempted.
 func (w *NodeController) preflightCompatibility(
+	ctx context.Context,
 	pod *corev1.Pod,
 	artifact *restoreArtifact,
 	mappings []podcontract.ContainerMapping,
@@ -104,9 +105,14 @@ func (w *NodeController) preflightCompatibility(
 		// An unreadable manifest is not an incompatibility. The restore path
 		// reads it again and reports the real error from there, so refusing here
 		// would relabel a broken artifact as an incompatible one.
-		log.V(1).Info("Skipping restore compatibility gate; checkpoint manifest is unreadable",
+		log.Info("Skipping restore compatibility gate; checkpoint manifest is unreadable",
 			"artifact_path", artifact.Path,
 			"error", err.Error(),
+		)
+		emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, corev1.EventTypeWarning,
+			restoreCompatUncheckedReason,
+			fmt.Sprintf("Restore compatibility not checked for container %s: checkpoint manifest at %s is unreadable: %v",
+				artifact.SourceContainerName, artifact.Path, err),
 		)
 		return nil
 	}
