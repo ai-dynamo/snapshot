@@ -194,9 +194,14 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to resolve container: %w", err)
 	}
+	// Only the image-digest check reads this, and it treats a blank value as
+	// unknown, so a runtime that cannot answer costs the comparison, not the
+	// checkpoint.
 	imageID, err := rt.ResolveContainerImageID(ctx, containerID)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to resolve container image ID: %w", err)
+		log.Error(err, "Failed to resolve the container image ID; this checkpoint will not record it",
+			"containerID", containerID)
+		imageID = ""
 	}
 
 	var hostCgroupPath string
