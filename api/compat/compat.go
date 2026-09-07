@@ -7,13 +7,13 @@
 //
 // The node agent is the only consumer today. It sits in the api module because
 // the check names are protocol, published verbatim on pod conditions and events,
-// and so the operator can surface the same recorded facts on the content status
+// and so the operator can surface the same recorded env on the content status
 // without a second vocabulary growing up beside this one.
 package compat
 
 import "fmt"
 
-// Gate names the moment a comparison runs. The two gates see different facts:
+// Gate names the moment a comparison runs. The two gates see different env:
 // only the later one can read the node's GPUs and the target's rootfs.
 type Gate string
 
@@ -31,14 +31,16 @@ const (
 // tooling that branches on it, so a name never changes once released.
 type Check string
 
-// Facts is one side of a comparison: the machine, pod, GPU and mount state a
-// checkpoint was captured on, or the state a restore target offers.
+// Environment is one side of a comparison: the machine, pod, GPU and mount
+// state a checkpoint was captured on, or the state a restore target offers. It
+// carries no environment variables, deliberately: CRIU restores those with the
+// process, so they are not something a node either offers or withholds.
 //
-// Every field is optional. A fact missing on either side is unknown rather than
-// mismatched, because a checkpoint captured before that fact was ever recorded
-// has to stay restorable. A producer that reads only some of these returns a
-// Facts with those set and leaves its caller to fill in the rest.
-type Facts struct {
+// Every field is optional. A field missing on either side is unknown rather
+// than mismatched, because a checkpoint captured before it was ever recorded
+// has to stay restorable. A producer that reads only some of these returns an
+// Environment with those set and leaves its caller to fill in the rest.
+type Environment struct {
 	KernelVersion string
 	CPUArch       string
 
@@ -59,10 +61,10 @@ type Facts struct {
 	ExistingMountPaths []string
 }
 
-// GPUFacts is what discovery reads off a node before it is folded into a Facts.
+// GPUInfo is what discovery reads off a node before it is folded into a Environment.
 // Discovery has no business carrying kernel versions and image digests around,
 // so it keeps a type of its own.
-type GPUFacts struct {
+type GPUInfo struct {
 	DriverVersion string
 	Devices       []GPUDevice
 }
@@ -99,12 +101,12 @@ func (e *IncompatibleError) Error() string {
 }
 
 // check is one row of the policy table. compare returns nil when the rule passes
-// or when a fact it needs is unknown, and may report more than one mismatch when
+// or when a value it needs is unknown, and may report more than one mismatch when
 // a rule covers several values.
 type check struct {
 	name    Check
 	gate    Gate
-	compare func(source, target Facts) []Mismatch
+	compare func(source, target Environment) []Mismatch
 }
 
 // checksByGate is the policy table: every compatibility rule, partitioned by the
@@ -142,7 +144,7 @@ func registerChecks(checks ...check) map[Gate][]check {
 
 // Compare reports every rule the target fails at the given gate. An empty result
 // means the restore may proceed.
-func Compare(gate Gate, source, target Facts) []Mismatch {
+func Compare(gate Gate, source, target Environment) []Mismatch {
 	var mismatches []Mismatch
 	for _, c := range checksByGate[gate] {
 		for _, mismatch := range c.compare(source, target) {

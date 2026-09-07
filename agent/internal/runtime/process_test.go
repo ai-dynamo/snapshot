@@ -255,7 +255,7 @@ func TestReadKernelVersion(t *testing.T) {
 	}
 }
 
-// An unreadable or blank release is reported rather than passed on: a fact
+// An unreadable or blank release is reported rather than passed on: a value
 // recorded as the empty string would be indistinguishable from one this agent
 // version never recorded at all.
 func TestReadKernelVersionRejectsWhatItCannotRead(t *testing.T) {

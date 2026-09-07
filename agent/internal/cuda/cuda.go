@@ -94,7 +94,7 @@ func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName st
 	return uuids, nil
 }
 
-// DiscoverVisibleGPUFacts describes the GPUs a container can see, by running
+// DiscoverVisibleGPUs describes the GPUs a container can see, by running
 // nvidia-smi inside its mount and PID namespaces. The model and the driver
 // version come from the same call as the UUIDs: nothing else on the restore path
 // gets to look at the source node's GPUs, so what is not read here cannot be
@@ -103,7 +103,7 @@ func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName st
 // Every path ends here, and under DRA this is the only path that reports GPUs
 // at all, because the kubelet publishes no nvidia.com/gpu devices when the
 // NVIDIA DRA driver allocates them instead of the device plugin.
-func DiscoverVisibleGPUFacts(ctx context.Context, hostProcPath string, pid int, timeout time.Duration) (compat.GPUFacts, error) {
+func DiscoverVisibleGPUs(ctx context.Context, hostProcPath string, pid int, timeout time.Duration) (compat.GPUInfo, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -119,41 +119,41 @@ func DiscoverVisibleGPUFacts(ctx context.Context, hostProcPath string, pid int, 
 	)
 	output, err := cmd.Output()
 	if err != nil {
-		return compat.GPUFacts{}, fmt.Errorf("nvidia-smi via nsenter (pid %d) failed: %w", pid, err)
+		return compat.GPUInfo{}, fmt.Errorf("nvidia-smi via nsenter (pid %d) failed: %w", pid, err)
 	}
-	return parseNvidiaSmiGPUFacts(string(output)), nil
+	return parseNvidiaSmiGPUs(string(output)), nil
 }
 
-// parseNvidiaSmiGPUFacts reads the unquoted CSV nvidia-smi writes. Splitting on
+// parseNvidiaSmiGPUs reads the unquoted CSV nvidia-smi writes. Splitting on
 // commas is safe because nvidia-smi documents name and driver_version as
 // alphanumeric strings: https://docs.nvidia.com/deploy/nvidia-smi/index.html
 // A row it cannot make sense of still contributes its UUID, because the device
 // map is built from UUIDs and must not start failing over a model name.
-func parseNvidiaSmiGPUFacts(output string) compat.GPUFacts {
-	var facts compat.GPUFacts
+func parseNvidiaSmiGPUs(output string) compat.GPUInfo {
+	var env compat.GPUInfo
 	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
 		fields := strings.SplitN(line, ",", 3)
-		uuid := nvidiaSmiFact(fields[0])
+		uuid := nvidiaSmiValue(fields[0])
 		if uuid == "" {
 			continue
 		}
 		device := compat.GPUDevice{UUID: uuid}
 		if len(fields) == 3 {
-			device.ProductName = nvidiaSmiFact(fields[1])
-			if driverVersion := nvidiaSmiFact(fields[2]); driverVersion != "" {
-				facts.DriverVersion = driverVersion
+			device.ProductName = nvidiaSmiValue(fields[1])
+			if driverVersion := nvidiaSmiValue(fields[2]); driverVersion != "" {
+				env.DriverVersion = driverVersion
 			}
 		}
-		facts.Devices = append(facts.Devices, device)
+		env.Devices = append(env.Devices, device)
 	}
-	return facts
+	return env
 }
 
-func nvidiaSmiFact(value string) string {
+func nvidiaSmiValue(value string) string {
 	value = strings.TrimSpace(value)
 	switch strings.ToLower(value) {
 	case "n/a", "[n/a]", "not supported", "[not supported]":
@@ -163,23 +163,23 @@ func nvidiaSmiFact(value string) string {
 	}
 }
 
-type visibleGPUDiscovery func(context.Context, string, int) (compat.GPUFacts, error)
+type visibleGPUDiscovery func(context.Context, string, int) (compat.GPUInfo, error)
 
 // DiscoverGPUUUIDs resolves GPU UUIDs in the container's runtime ordinal order.
 func DiscoverGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName, hostProcPath string, pid int, log logr.Logger) ([]string, error) {
-	facts, err := DiscoverGPUFacts(ctx, clientset, podName, podNamespace, containerName, hostProcPath, pid, log)
+	env, err := DiscoverGPUs(ctx, clientset, podName, podNamespace, containerName, hostProcPath, pid, log)
 	if err != nil {
 		return nil, err
 	}
-	return gpuUUIDsOf(facts), nil
+	return gpuUUIDsOf(env), nil
 }
 
-// DiscoverGPUFacts resolves the same GPUs as DiscoverGPUUUIDs, in the same
+// DiscoverGPUs resolves the same GPUs as DiscoverGPUUUIDs, in the same
 // order, described by model and driver version wherever nvidia-smi can be
-// reached. Whichever path finds the GPUs, the facts come out the same shape, so
+// reached. Whichever path finds the GPUs, the env come out the same shape, so
 // what gets recorded does not depend on how this cluster allocates GPUs.
-func DiscoverGPUFacts(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName, hostProcPath string, pid int, log logr.Logger) (compat.GPUFacts, error) {
-	return discoverGPUFacts(
+func DiscoverGPUs(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName, hostProcPath string, pid int, log logr.Logger) (compat.GPUInfo, error) {
+	return discoverGPUs(
 		ctx,
 		clientset,
 		podName,
@@ -187,14 +187,14 @@ func DiscoverGPUFacts(ctx context.Context, clientset kubernetes.Interface, podNa
 		containerName,
 		hostProcPath,
 		pid,
-		func(ctx context.Context, hostProcPath string, pid int) (compat.GPUFacts, error) {
-			return DiscoverVisibleGPUFacts(ctx, hostProcPath, pid, nvidiaSMITimeout)
+		func(ctx context.Context, hostProcPath string, pid int) (compat.GPUInfo, error) {
+			return DiscoverVisibleGPUs(ctx, hostProcPath, pid, nvidiaSMITimeout)
 		},
 		log,
 	)
 }
 
-func discoverGPUFacts(
+func discoverGPUs(
 	ctx context.Context,
 	clientset kubernetes.Interface,
 	podName,
@@ -204,11 +204,11 @@ func discoverGPUFacts(
 	pid int,
 	discoverVisibleGPUs visibleGPUDiscovery,
 	log logr.Logger,
-) (compat.GPUFacts, error) {
+) (compat.GPUInfo, error) {
 	gpuUUIDs, hasNVIDIADRAAllocation, err := GetGPUUUIDsViaDRAAPI(ctx, clientset, podName, podNamespace, containerName, log)
 	if err != nil {
 		if hasNVIDIADRAAllocation {
-			return compat.GPUFacts{}, fmt.Errorf("DRA GPU UUID lookup failed: %w", err)
+			return compat.GPUInfo{}, fmt.Errorf("DRA GPU UUID lookup failed: %w", err)
 		}
 		log.Error(
 			err,
@@ -220,20 +220,20 @@ func discoverGPUFacts(
 
 	if hasNVIDIADRAAllocation {
 		if len(gpuUUIDs) == 0 {
-			return compat.GPUFacts{}, errors.New(
+			return compat.GPUInfo{}, errors.New(
 				"DRA GPU allocation has no resolvable UUIDs",
 			)
 		}
 		visible, err := discoverVisibleGPUs(ctx, hostProcPath, pid)
 		if err != nil {
-			return compat.GPUFacts{}, fmt.Errorf(
+			return compat.GPUInfo{}, fmt.Errorf(
 				"discover DRA GPUs in container ordinal order: %w",
 				err,
 			)
 		}
 		orderedUUIDs, err := orderDRAUUIDsByRuntime(gpuUUIDs, gpuUUIDsOf(visible))
 		if err != nil {
-			return compat.GPUFacts{}, err
+			return compat.GPUInfo{}, err
 		}
 		log.Info(
 			"resolved DRA GPU UUIDs in container ordinal order",
@@ -244,18 +244,18 @@ func discoverGPUFacts(
 
 	gpuUUIDs, err = GetPodGPUUUIDs(ctx, podName, podNamespace, containerName)
 	if err != nil {
-		return compat.GPUFacts{}, fmt.Errorf("PodResources GPU UUID lookup failed: %w", err)
+		return compat.GPUInfo{}, fmt.Errorf("PodResources GPU UUID lookup failed: %w", err)
 	}
 	if len(gpuUUIDs) > 0 {
 		// This path has its GPUs already and needs nvidia-smi only to describe
-		// them, so a failure here costs facts, not the checkpoint.
+		// them, so a failure here costs env, not the checkpoint.
 		visible, err := discoverVisibleGPUs(ctx, hostProcPath, pid)
 		if err != nil {
 			log.V(1).Info("Failed to describe PodResources GPUs; recording their UUIDs alone",
 				"pid", pid,
 				"error", err,
 			)
-			return describeGPUs(gpuUUIDs, compat.GPUFacts{}), nil
+			return describeGPUs(gpuUUIDs, compat.GPUInfo{}), nil
 		}
 		return describeGPUs(gpuUUIDs, visible), nil
 	}
@@ -263,7 +263,7 @@ func discoverGPUFacts(
 	log.Info("PodResources API returned no GPU UUIDs, falling back to nvidia-smi", "pid", pid)
 	visible, err := discoverVisibleGPUs(ctx, hostProcPath, pid)
 	if err != nil {
-		return compat.GPUFacts{}, fmt.Errorf("nvidia-smi GPU UUID fallback failed: %w", err)
+		return compat.GPUInfo{}, fmt.Errorf("nvidia-smi GPU UUID fallback failed: %w", err)
 	}
 	log.Info("nvidia-smi fallback discovered GPU UUIDs", "uuids", gpuUUIDsOf(visible))
 	return visible, nil
@@ -272,12 +272,12 @@ func discoverGPUFacts(
 // describeGPUs keeps the allocated order and fills each UUID in from what
 // nvidia-smi reported about it. A UUID nvidia-smi did not report keeps its
 // place undescribed rather than dropping out of the set.
-func describeGPUs(uuids []string, visible compat.GPUFacts) compat.GPUFacts {
+func describeGPUs(uuids []string, visible compat.GPUInfo) compat.GPUInfo {
 	described := make(map[string]compat.GPUDevice, len(visible.Devices))
 	for _, device := range visible.Devices {
 		described[device.UUID] = device
 	}
-	facts := compat.GPUFacts{
+	env := compat.GPUInfo{
 		DriverVersion: visible.DriverVersion,
 		Devices:       make([]compat.GPUDevice, 0, len(uuids)),
 	}
@@ -286,14 +286,14 @@ func describeGPUs(uuids []string, visible compat.GPUFacts) compat.GPUFacts {
 		if !ok {
 			device = compat.GPUDevice{UUID: uuid}
 		}
-		facts.Devices = append(facts.Devices, device)
+		env.Devices = append(env.Devices, device)
 	}
-	return facts
+	return env
 }
 
-func gpuUUIDsOf(facts compat.GPUFacts) []string {
+func gpuUUIDsOf(env compat.GPUInfo) []string {
 	var uuids []string
-	for _, device := range facts.Devices {
+	for _, device := range env.Devices {
 		if device.UUID != "" {
 			uuids = append(uuids, device.UUID)
 		}

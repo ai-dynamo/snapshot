@@ -9,14 +9,14 @@ import (
 )
 
 func TestCPUArchCheck(t *testing.T) {
-	arch := func(value string) Facts {
-		return Facts{CPUArch: value}
+	arch := func(value string) Environment {
+		return Environment{CPUArch: value}
 	}
 
 	tests := []struct {
 		name   string
-		source Facts
-		target Facts
+		source Environment
+		target Environment
 		want   []Mismatch
 	}{
 		{
@@ -57,14 +57,14 @@ func TestCPUArchCheck(t *testing.T) {
 }
 
 func TestKernelVersionCheck(t *testing.T) {
-	kernel := func(value string) Facts {
-		return Facts{KernelVersion: value}
+	kernel := func(value string) Environment {
+		return Environment{KernelVersion: value}
 	}
 
 	tests := []struct {
 		name   string
-		source Facts
-		target Facts
+		source Environment
+		target Environment
 		want   []Mismatch
 	}{
 		{
@@ -146,14 +146,14 @@ func TestImageDigestCheck(t *testing.T) {
 		captured = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 		rebuilt  = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 	)
-	imageID := func(id string) Facts {
-		return Facts{ImageID: id}
+	imageID := func(id string) Environment {
+		return Environment{ImageID: id}
 	}
 
 	tests := []struct {
 		name   string
-		source Facts
-		target Facts
+		source Environment
+		target Environment
 		want   []Mismatch
 	}{
 		{
@@ -163,8 +163,8 @@ func TestImageDigestCheck(t *testing.T) {
 		},
 		{
 			name:   "different index aliases for the same runtime content",
-			source: Facts{Image: "registry.example/source@sha256:index-a", ImageID: captured},
-			target: Facts{Image: "registry.example/target@sha256:index-b", ImageID: captured},
+			source: Environment{Image: "registry.example/source@sha256:index-a", ImageID: captured},
+			target: Environment{Image: "registry.example/target@sha256:index-b", ImageID: captured},
 		},
 		{
 			// The same reference resolved to different content, which is what a
@@ -218,19 +218,19 @@ func TestImageDigestCheck(t *testing.T) {
 	}
 
 	if got := Compare(GatePreflight, imageID(captured), imageID(rebuilt)); len(got) != 0 {
-		t.Errorf("the first gate judged a runtime fact it cannot read: %+v", got)
+		t.Errorf("the first gate judged a runtime value it cannot read: %+v", got)
 	}
 }
 
 func TestMemoryLimitCheck(t *testing.T) {
-	memory := func(limit string) Facts {
-		return Facts{MemoryLimit: limit}
+	memory := func(limit string) Environment {
+		return Environment{MemoryLimit: limit}
 	}
 
 	tests := []struct {
 		name   string
-		source Facts
-		target Facts
+		source Environment
+		target Environment
 		want   []Mismatch
 	}{
 		{
@@ -283,14 +283,14 @@ func TestMemoryLimitCheck(t *testing.T) {
 }
 
 func TestCPULimitCheck(t *testing.T) {
-	cpu := func(limit string) Facts {
-		return Facts{CPULimit: limit}
+	cpu := func(limit string) Environment {
+		return Environment{CPULimit: limit}
 	}
 
 	tests := []struct {
 		name   string
-		source Facts
-		target Facts
+		source Environment
+		target Environment
 		want   []Mismatch
 	}{
 		{
@@ -348,29 +348,29 @@ func TestCPULimitCheck(t *testing.T) {
 }
 
 func TestMountCheck(t *testing.T) {
-	mounts := func(externalized, existing []string) Facts {
-		return Facts{ExternalizedMounts: externalized, ExistingMountPaths: existing}
+	mounts := func(externalized, existing []string) Environment {
+		return Environment{ExternalizedMounts: externalized, ExistingMountPaths: existing}
 	}
 
 	tests := []struct {
-		name  string
-		facts Facts
-		want  []Mismatch
+		name string
+		env  Environment
+		want []Mismatch
 	}{
 		{
-			name:  "every mount is there",
-			facts: mounts([]string{"/model-cache", "/data"}, []string{"/model-cache", "/data"}),
+			name: "every mount is there",
+			env:  mounts([]string{"/model-cache", "/data"}, []string{"/model-cache", "/data"}),
 		},
 		{
-			name:  "one mount is missing",
-			facts: mounts([]string{"/model-cache", "/data"}, []string{"/model-cache"}),
-			want:  []Mismatch{{Check: CheckMount, Source: "/data", Target: "missing"}},
+			name: "one mount is missing",
+			env:  mounts([]string{"/model-cache", "/data"}, []string{"/model-cache"}),
+			want: []Mismatch{{Check: CheckMount, Source: "/data", Target: "missing"}},
 		},
 		{
 			// Each missing volume is named, since a user fixing their pod needs
 			// to know about all of them and not one at a time.
-			name:  "the pod has none of them",
-			facts: mounts([]string{"/model-cache", "/data"}, nil),
+			name: "the pod has none of them",
+			env:  mounts([]string{"/model-cache", "/data"}, nil),
 			want: []Mismatch{
 				{Check: CheckMount, Source: "/model-cache", Target: "missing"},
 				{Check: CheckMount, Source: "/data", Target: "missing"},
@@ -379,24 +379,24 @@ func TestMountCheck(t *testing.T) {
 		{
 			// CRIU reconstructs these itself, so their absence from the pod is
 			// not a volume anybody forgot to declare.
-			name:  "the mounts CRIU restores itself",
-			facts: mounts([]string{"/", "/dev/shm", "/model-cache"}, []string{"/model-cache"}),
+			name: "the mounts CRIU restores itself",
+			env:  mounts([]string{"/", "/dev/shm", "/model-cache"}, []string{"/model-cache"}),
 		},
 		{
-			name:  "the checkpoint externalized nothing",
-			facts: mounts(nil, nil),
+			name: "the checkpoint externalized nothing",
+			env:  mounts(nil, nil),
 		},
 		{
 			// The target side is resolved from the recorded list, so a path the
 			// pod has and the checkpoint never used is not the gate's business.
-			name:  "the pod has more than the checkpoint used",
-			facts: mounts([]string{"/model-cache"}, []string{"/model-cache", "/scratch"}),
+			name: "the pod has more than the checkpoint used",
+			env:  mounts([]string{"/model-cache"}, []string{"/model-cache", "/scratch"}),
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := Compare(GateInspect, tc.facts, tc.facts)
+			got := Compare(GateInspect, tc.env, tc.env)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("Compare = %+v, want %+v", got, tc.want)
 			}
@@ -411,19 +411,19 @@ func TestMountCheck(t *testing.T) {
 	}
 }
 
-func gpus(models ...string) Facts {
+func gpus(models ...string) Environment {
 	devices := make([]GPUDevice, 0, len(models))
 	for i, model := range models {
 		devices = append(devices, GPUDevice{UUID: "GPU-" + string(rune('a'+i)), ProductName: model})
 	}
-	return Facts{GPUDevices: devices}
+	return Environment{GPUDevices: devices}
 }
 
 func TestGPUModelCheck(t *testing.T) {
 	tests := []struct {
 		name   string
-		source Facts
-		target Facts
+		source Environment
+		target Environment
 		want   []Mismatch
 	}{
 		{
@@ -460,7 +460,7 @@ func TestGPUModelCheck(t *testing.T) {
 		},
 		{
 			name:   "checkpoint taken before the models were recorded",
-			source: Facts{GPUDevices: []GPUDevice{{UUID: "GPU-a"}}},
+			source: Environment{GPUDevices: []GPUDevice{{UUID: "GPU-a"}}},
 			target: gpus("NVIDIA L4"),
 		},
 		{
@@ -476,7 +476,7 @@ func TestGPUModelCheck(t *testing.T) {
 			// same as being different.
 			name:   "target models could not be read",
 			source: gpus("NVIDIA L4"),
-			target: Facts{GPUDevices: []GPUDevice{{UUID: "GPU-a"}}},
+			target: Environment{GPUDevices: []GPUDevice{{UUID: "GPU-a"}}},
 		},
 		{
 			// Nothing to name is not another name, so the model rule stays
@@ -506,8 +506,8 @@ func TestGPUModelCheck(t *testing.T) {
 func TestGPUCountCheck(t *testing.T) {
 	tests := []struct {
 		name   string
-		source Facts
-		target Facts
+		source Environment
+		target Environment
 		want   []Mismatch
 	}{
 		{
@@ -563,7 +563,7 @@ func TestGPUCountCheck(t *testing.T) {
 
 	// A checkpoint from before the models were recorded still knows how many
 	// GPUs it used, so the count keeps applying where the model rule cannot.
-	unnamed := Facts{GPUDevices: []GPUDevice{{UUID: "GPU-a"}, {UUID: "GPU-b"}}}
+	unnamed := Environment{GPUDevices: []GPUDevice{{UUID: "GPU-a"}, {UUID: "GPU-b"}}}
 	want := []Mismatch{{Check: CheckGPUCount, Source: "2", Target: "1"}}
 	if got := Compare(GateInspect, unnamed, gpus("NVIDIA L4")); !reflect.DeepEqual(got, want) {
 		t.Errorf("Compare = %+v, want %+v", got, want)
@@ -571,14 +571,14 @@ func TestGPUCountCheck(t *testing.T) {
 }
 
 func TestDriverVersionCheck(t *testing.T) {
-	driver := func(version string) Facts {
-		return Facts{DriverVersion: version}
+	driver := func(version string) Environment {
+		return Environment{DriverVersion: version}
 	}
 
 	tests := []struct {
 		name   string
-		source Facts
-		target Facts
+		source Environment
+		target Environment
 		want   []Mismatch
 	}{
 		{

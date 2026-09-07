@@ -73,7 +73,7 @@ type NodeController struct {
 	sendSignalFn            func(logr.Logger, int, syscall.Signal, string) error
 	restoreQueue            workqueue.TypedDelayingInterface[client.ObjectKey]
 	restorePodLister        corev1listers.PodLister
-	compareFn               func(compat.Gate, compat.Facts, compat.Facts) []compat.Mismatch
+	compareFn               func(compat.Gate, compat.Environment, compat.Environment) []compat.Mismatch
 
 	// skipCompatCheckFn is read once per restore rather than at startup, so the
 	// node-wide switch can be flipped without a DaemonSet rollout. Injected so

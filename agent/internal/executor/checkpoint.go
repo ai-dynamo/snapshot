@@ -60,7 +60,7 @@ type CheckpointRequest struct {
 	// Pod carries the image reference and limits the target container runs with, read from
 	// the live pod by the caller rather than here: the capture path has no API
 	// client for the pod, and the reconciler already holds it.
-	Pod compat.Facts
+	Pod compat.Environment
 }
 
 type checkpointPhaseTimings struct {
@@ -258,11 +258,11 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 	if len(cudaHostPIDs) > 0 {
 		log.V(1).Info("Resolved checkpoint CUDA PID mapping", "host_pids", cudaHostPIDs, "namespace_pids", cudaNamespacePIDs)
 	}
-	var gpus compat.GPUFacts
+	var gpus compat.GPUInfo
 	var gpuDeviceMapDuration time.Duration
 	if len(cudaHostPIDs) > 0 {
 		gpuStart := time.Now()
-		gpus, err = cuda.DiscoverGPUFacts(
+		gpus, err = cuda.DiscoverGPUs(
 			ctx,
 			req.Clientset,
 			req.PodName,
@@ -305,15 +305,15 @@ func configureCheckpoint(
 	if err != nil {
 		return nil, nil, err
 	}
-	podFacts := req.Pod
-	podFacts.ImageID = state.ImageID
+	podEnvironment := req.Pod
+	podEnvironment.ImageID = state.ImageID
 
 	m := types.NewCheckpointManifest(
 		req.ContentUID,
 		req.ContainerName,
 		types.NewCRIUDumpManifest(criuOpts, cfg.CRIU),
 		types.NewSourcePodManifest(req.ContainerID, state.PID, req.NodeName, req.PodName, req.PodNamespace, req.PodIP, state.StdioFDs).
-			WithPodFacts(podFacts),
+			WithPodEnvironment(podEnvironment),
 		types.NewOverlayManifest(cfg.Overlay, state.UpperDir, state.OCISpec),
 		types.NewHostManifest(cfg.HostKernelVersion),
 	)

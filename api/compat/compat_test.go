@@ -9,8 +9,8 @@ import (
 	"testing"
 )
 
-func populatedFacts() Facts {
-	return Facts{
+func populatedEnvironment() Environment {
+	return Environment{
 		KernelVersion: "6.8.0-45-generic",
 		CPUArch:       "amd64",
 		Image:         "nvcr.io/nvidia/tritonserver:24.09",
@@ -26,8 +26,8 @@ func populatedFacts() Facts {
 	}
 }
 
-func differentFacts() Facts {
-	return Facts{
+func differentEnvironment() Environment {
+	return Environment{
 		KernelVersion: "5.15.0-89-generic",
 		CPUArch:       "arm64",
 		Image:         "nvcr.io/nvidia/tritonserver:24.01",
@@ -43,8 +43,8 @@ func differentFacts() Facts {
 	}
 }
 
-// deliberatelyNotSilent holds the rules that do refuse on a fact the target side
-// does not carry, for the reasons given where each is defined: the mount rule is
+// deliberatelyNotSilent holds the rules that do refuse on a value the target
+// side does not carry, for the reasons given where each is defined: the mount rule is
 // handed a target list resolved from the source list, and the GPU count is only
 // ever compared after discovery has run. An absence in either is a thing looked
 // for and not found rather than a thing nobody read.
@@ -53,30 +53,30 @@ var deliberatelyNotSilent = map[Check]bool{
 	CheckGPUCount: true,
 }
 
-// Whatever rules are registered, a fact nobody recorded cannot refuse anything:
-// every checkpoint captured before a fact existed has to stay restorable, and a
+// Whatever rules are registered, a value nobody recorded cannot refuse anything:
+// every checkpoint captured before a field existed has to stay restorable, and a
 // target the agent could not read has to be given the benefit of the doubt.
-func TestCompareIgnoresUnknownFacts(t *testing.T) {
+func TestCompareIgnoresUnknownValues(t *testing.T) {
 	tests := []struct {
 		name   string
-		source Facts
-		target Facts
+		source Environment
+		target Environment
 	}{
 		{
 			name: "neither side knows anything",
 		},
 		{
-			name:   "the checkpoint recorded facts the target cannot describe",
-			source: populatedFacts(),
+			name:   "the checkpoint recorded env the target cannot describe",
+			source: populatedEnvironment(),
 		},
 		{
-			name:   "the target describes facts the checkpoint never recorded",
-			target: populatedFacts(),
+			name:   "the target describes env the checkpoint never recorded",
+			target: populatedEnvironment(),
 		},
 		{
 			name:   "both sides agree",
-			source: populatedFacts(),
-			target: populatedFacts(),
+			source: populatedEnvironment(),
+			target: populatedEnvironment(),
 		},
 	}
 
@@ -115,7 +115,7 @@ func TestEveryCheckIsNamedAndRegisteredOnce(t *testing.T) {
 // Compare has to attribute a mismatch to the rule that found it, since the whole
 // refusal vocabulary is built on the check name.
 func TestCompareNamesTheFailingCheck(t *testing.T) {
-	mismatches := Compare(GatePreflight, populatedFacts(), differentFacts())
+	mismatches := Compare(GatePreflight, populatedEnvironment(), differentEnvironment())
 
 	if len(mismatches) == 0 {
 		t.Fatal("Compare found nothing wrong between two entirely different machines")
@@ -138,13 +138,13 @@ func withChecks(t *testing.T, checks ...check) {
 }
 
 // A rule runs at its own gate and at no other, and what it reports comes back
-// named after it. The two gates read different facts, so a rule that ran at the
-// wrong one would compare against facts nobody had gathered yet.
+// named after it. The two gates read different env, so a rule that ran at the
+// wrong one would compare against env nobody had gathered yet.
 func TestCompareRunsTheRulesOfOneGate(t *testing.T) {
 	archCheck := check{
 		name: "fixture",
 		gate: GatePreflight,
-		compare: func(source, target Facts) []Mismatch {
+		compare: func(source, target Environment) []Mismatch {
 			return []Mismatch{{Source: source.CPUArch, Target: target.CPUArch}}
 		},
 	}
@@ -153,7 +153,7 @@ func TestCompareRunsTheRulesOfOneGate(t *testing.T) {
 		withChecks(t, archCheck)
 
 		want := Mismatch{Check: "fixture", Source: "amd64", Target: "arm64"}
-		got := Compare(GatePreflight, populatedFacts(), differentFacts())
+		got := Compare(GatePreflight, populatedEnvironment(), differentEnvironment())
 		if len(got) != 1 || got[0] != want {
 			t.Fatalf("Compare at the preflight gate = %v, want exactly %v", got, want)
 		}
@@ -162,7 +162,7 @@ func TestCompareRunsTheRulesOfOneGate(t *testing.T) {
 	t.Run("and nowhere else", func(t *testing.T) {
 		withChecks(t, archCheck)
 
-		if got := Compare(GateInspect, populatedFacts(), differentFacts()); len(got) != 0 {
+		if got := Compare(GateInspect, populatedEnvironment(), differentEnvironment()); len(got) != 0 {
 			t.Fatalf("Compare at the inspect gate = %v, want no mismatches", got)
 		}
 	})
@@ -171,7 +171,7 @@ func TestCompareRunsTheRulesOfOneGate(t *testing.T) {
 		withChecks(t)
 
 		for _, gate := range []Gate{GatePreflight, GateInspect} {
-			if got := Compare(gate, populatedFacts(), differentFacts()); len(got) != 0 {
+			if got := Compare(gate, populatedEnvironment(), differentEnvironment()); len(got) != 0 {
 				t.Fatalf("Compare at the %q gate = %v, want no mismatches", gate, got)
 			}
 		}

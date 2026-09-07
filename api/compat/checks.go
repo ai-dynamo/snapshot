@@ -21,7 +21,7 @@ const CheckCPUArch Check = "cpu-arch"
 var cpuArchCheck = check{
 	name:    CheckCPUArch,
 	gate:    GatePreflight,
-	compare: func(source, target Facts) []Mismatch { return mustMatch(source.CPUArch, target.CPUArch) },
+	compare: func(source, target Environment) []Mismatch { return mustMatch(source.CPUArch, target.CPUArch) },
 }
 
 // CheckKernelVersion refuses a restore onto a kernel other than the captured
@@ -42,7 +42,7 @@ const (
 var kernelVersionCheck = check{
 	name: CheckKernelVersion,
 	gate: GatePreflight,
-	compare: func(source, target Facts) []Mismatch {
+	compare: func(source, target Environment) []Mismatch {
 		return mustMatch(source.KernelVersion, target.KernelVersion)
 	},
 }
@@ -50,7 +50,7 @@ var kernelVersionCheck = check{
 var kernelMinimumCheck = check{
 	name: CheckKernelMinimum,
 	gate: GatePreflight,
-	compare: func(_, target Facts) []Mismatch {
+	compare: func(_, target Environment) []Mismatch {
 		major, minor, ok := parseKernelVersion(target.KernelVersion)
 		if !ok || major > minKernelMajor || (major == minKernelMajor && minor >= minKernelMinor) {
 			return nil
@@ -97,7 +97,7 @@ const CheckImageDigest Check = "image-digest"
 var imageDigestCheck = check{
 	name: CheckImageDigest,
 	gate: GateInspect,
-	compare: func(source, target Facts) []Mismatch {
+	compare: func(source, target Environment) []Mismatch {
 		return mustMatch(imageDigest(source.ImageID), imageDigest(target.ImageID))
 	},
 }
@@ -110,7 +110,7 @@ const CheckMemoryLimit Check = "memory-limit"
 var memoryLimitCheck = check{
 	name: CheckMemoryLimit,
 	gate: GatePreflight,
-	compare: func(source, target Facts) []Mismatch {
+	compare: func(source, target Environment) []Mismatch {
 		return atLeastSource(source.MemoryLimit, target.MemoryLimit)
 	},
 }
@@ -124,7 +124,7 @@ const CheckCPULimit Check = "cpu-limit"
 var cpuLimitCheck = check{
 	name: CheckCPULimit,
 	gate: GatePreflight,
-	compare: func(source, target Facts) []Mismatch {
+	compare: func(source, target Environment) []Mismatch {
 		return atLeastSource(source.CPULimit, target.CPULimit)
 	},
 }
@@ -187,7 +187,7 @@ var criuHandledMounts = map[string]bool{
 var mountCheck = check{
 	name: CheckMount,
 	gate: GateInspect,
-	compare: func(source, target Facts) []Mismatch {
+	compare: func(source, target Environment) []Mismatch {
 		existing := make(map[string]bool, len(target.ExistingMountPaths))
 		for _, path := range target.ExistingMountPaths {
 			existing[path] = true
@@ -213,7 +213,7 @@ const CheckGPUModel Check = "gpu-model"
 var gpuModelCheck = check{
 	name: CheckGPUModel,
 	gate: GateInspect,
-	compare: func(source, target Facts) []Mismatch {
+	compare: func(source, target Environment) []Mismatch {
 		sourceModels, sourceOK := gpuModels(source.GPUDevices)
 		targetModels, targetOK := gpuModels(target.GPUDevices)
 		if !sourceOK || !targetOK || sourceModels == targetModels {
@@ -236,7 +236,7 @@ const CheckGPUCount Check = "gpu-count"
 var gpuCountCheck = check{
 	name: CheckGPUCount,
 	gate: GateInspect,
-	compare: func(source, target Facts) []Mismatch {
+	compare: func(source, target Environment) []Mismatch {
 		sourceCount := len(source.GPUDevices)
 		targetCount := len(target.GPUDevices)
 		if sourceCount == 0 || sourceCount == targetCount {
@@ -263,7 +263,7 @@ const minDriverMajor = 580
 var driverVersionCheck = check{
 	name: CheckDriverVersion,
 	gate: GateInspect,
-	compare: func(source, target Facts) []Mismatch {
+	compare: func(source, target Environment) []Mismatch {
 		return mustMatch(source.DriverVersion, target.DriverVersion)
 	},
 }
@@ -271,7 +271,7 @@ var driverVersionCheck = check{
 var driverMinimumCheck = check{
 	name: CheckDriverMinimum,
 	gate: GateInspect,
-	compare: func(_, target Facts) []Mismatch {
+	compare: func(_, target Environment) []Mismatch {
 		major, ok := leadingNumber(target.DriverVersion)
 		if !ok || major >= minDriverMajor {
 			return nil
@@ -315,7 +315,7 @@ func gpuModels(devices []GPUDevice) (string, bool) {
 }
 
 // mustMatch reports a mismatch unless the two values are identical. A value
-// absent on either side is unknown, and an unknown fact never refuses a restore:
+// absent on either side is unknown, and an unknown value never refuses a restore:
 // a checkpoint captured before it was ever recorded has to stay restorable.
 func mustMatch(source, target string) []Mismatch {
 	if source == "" || target == "" || source == target {
