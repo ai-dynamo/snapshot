@@ -61,7 +61,7 @@ func NewCheckpointManifest(
 	}
 }
 
-// HostManifest records the machine a checkpoint was captured on. A fact the
+// HostManifest records the machine a checkpoint was captured on. A value the
 // agent could not read is left out rather than written empty, so it reads as
 // unknown instead of as a value that happens to be blank.
 type HostManifest struct {
@@ -186,7 +186,7 @@ type GPUManifest struct {
 	ProductName string `yaml:"productName,omitempty"`
 }
 
-func NewCUDAManifest(pids []int, gpus compat.GPUFacts) CUDAManifest {
+func NewCUDAManifest(pids []int, gpus compat.GPUInfo) CUDAManifest {
 	m := CUDAManifest{
 		PIDs:                append([]int(nil), pids...),
 		SourceDriverVersion: gpus.DriverVersion,
@@ -257,12 +257,12 @@ func validateArtifactManifest(artifact ArtifactManifest) error {
 	return nil
 }
 
-// CompatFacts maps the manifest onto the fact model the compatibility gates
+// CompatEnvironment maps the manifest onto what the compatibility gates
 // compare. Both gates read it from here, so the two cannot disagree about what
 // the checkpoint recorded.
-func (m *CheckpointManifest) CompatFacts() compat.Facts {
-	gpus := m.gpuFacts()
-	return compat.Facts{
+func (m *CheckpointManifest) CompatEnvironment() compat.Environment {
+	gpus := m.gpuInfo()
+	return compat.Environment{
 		KernelVersion:      m.Host.KernelVersion,
 		CPUArch:            m.Host.CPUArch,
 		Image:              m.K8s.Image,
@@ -275,34 +275,34 @@ func (m *CheckpointManifest) CompatFacts() compat.Facts {
 	}
 }
 
-// WithPodFacts records what the captured container ran as. It is the inverse of
-// the pod half of CompatFacts, and sits next to it so the two field lists cannot
+// WithPodEnvironment records what the captured container ran as. It is the inverse of
+// the pod half of CompatEnvironment, and sits next to it so the two field lists cannot
 // drift apart.
-func (m SourcePodManifest) WithPodFacts(facts compat.Facts) SourcePodManifest {
-	m.Image = facts.Image
-	m.ImageID = facts.ImageID
-	m.CPULimit = facts.CPULimit
-	m.MemoryLimit = facts.MemoryLimit
+func (m SourcePodManifest) WithPodEnvironment(env compat.Environment) SourcePodManifest {
+	m.Image = env.Image
+	m.ImageID = env.ImageID
+	m.CPULimit = env.CPULimit
+	m.MemoryLimit = env.MemoryLimit
 	return m
 }
 
-// gpuFacts prefers the described GPUs and falls back to the UUID list, so an
+// gpuInfo prefers the described GPUs and falls back to the UUID list, so an
 // artifact captured before the models were recorded still reports its GPU count.
-func (m *CheckpointManifest) gpuFacts() compat.GPUFacts {
-	facts := compat.GPUFacts{DriverVersion: m.CUDA.SourceDriverVersion}
+func (m *CheckpointManifest) gpuInfo() compat.GPUInfo {
+	env := compat.GPUInfo{DriverVersion: m.CUDA.SourceDriverVersion}
 	if len(m.CUDA.SourceGPUs) > 0 {
 		for _, gpu := range m.CUDA.SourceGPUs {
-			facts.Devices = append(facts.Devices, compat.GPUDevice{
+			env.Devices = append(env.Devices, compat.GPUDevice{
 				UUID:        gpu.UUID,
 				ProductName: gpu.ProductName,
 			})
 		}
-		return facts
+		return env
 	}
 	for _, uuid := range m.CUDA.SourceGPUUUIDs {
-		facts.Devices = append(facts.Devices, compat.GPUDevice{UUID: uuid})
+		env.Devices = append(env.Devices, compat.GPUDevice{UUID: uuid})
 	}
-	return facts
+	return env
 }
 
 // externalizedMounts returns the destinations CRIU externalized at capture, in a

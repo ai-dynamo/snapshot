@@ -64,22 +64,22 @@ func (w *NodeController) skipRequestedAfterRefusal(pod *corev1.Pod) bool {
 	return restoreRefusedAsIncompatible(pod) && w.skipCompatCheckRequested(pod)
 }
 
-// podFacts reads what one container of a pod runs as and is allowed. It serves
+// podEnvironment reads what one container of a pod runs as and is allowed. It serves
 // both sides of a comparison: what a capture records about the source pod, and
 // what a restore target offers.
 //
-// A container that is not in the pod leaves its facts unknown.
-func podFacts(pod *corev1.Pod, containerName string) compat.Facts {
-	facts := compat.Facts{}
+// A container that is not in the pod leaves its env unknown.
+func podEnvironment(pod *corev1.Pod, containerName string) compat.Environment {
+	env := compat.Environment{}
 	for _, container := range pod.Spec.Containers {
 		if container.Name != containerName {
 			continue
 		}
-		facts.Image = container.Image
-		facts.CPULimit = limitString(container.Resources.Limits, corev1.ResourceCPU)
-		facts.MemoryLimit = limitString(container.Resources.Limits, corev1.ResourceMemory)
+		env.Image = container.Image
+		env.CPULimit = limitString(container.Resources.Limits, corev1.ResourceCPU)
+		env.MemoryLimit = limitString(container.Resources.Limits, corev1.ResourceMemory)
 	}
-	return facts
+	return env
 }
 
 // limitString keeps an unset limit unset. A missing quantity formats as "0",
@@ -132,12 +132,12 @@ func (w *NodeController) preflightCompatibility(
 		return nil
 	}
 
-	sourceFacts := manifest.CompatFacts()
+	sourceEnv := manifest.CompatEnvironment()
 	for _, mapping := range mappings {
 		mismatches := w.compareFn(
 			compat.GatePreflight,
-			sourceFacts,
-			w.preflightTargetFacts(pod, mapping.Destination),
+			sourceEnv,
+			w.preflightTargetEnvironment(pod, mapping.Destination),
 		)
 		if len(mismatches) != 0 {
 			return compat.NewIncompatibleError(compat.GatePreflight, mismatches)
@@ -146,15 +146,15 @@ func (w *NodeController) preflightCompatibility(
 	return nil
 }
 
-// preflightTargetFacts describes what this node and this pod offer a restore, as
+// preflightTargetEnvironment describes what this node and this pod offer a restore, as
 // far as it is knowable before the placeholder container exists. It is assembled
-// per restore from facts the agent already holds, so the gate costs no syscalls
+// per restore from env the agent already holds, so the gate costs no syscalls
 // and no API reads.
-func (w *NodeController) preflightTargetFacts(pod *corev1.Pod, containerName string) compat.Facts {
-	facts := podFacts(pod, containerName)
+func (w *NodeController) preflightTargetEnvironment(pod *corev1.Pod, containerName string) compat.Environment {
+	env := podEnvironment(pod, containerName)
 	// The agent's own architecture, which is the node's: this binary could not
 	// be running here otherwise.
-	facts.CPUArch = runtime.GOARCH
-	facts.KernelVersion = w.config.HostKernelVersion
-	return facts
+	env.CPUArch = runtime.GOARCH
+	env.KernelVersion = w.config.HostKernelVersion
+	return env
 }

@@ -100,7 +100,7 @@ func TestConfigureCheckpointRecordsRuntimeImageID(t *testing.T) {
 			ContentUID:    "content-uid",
 			ContainerID:   "container-id",
 			ContainerName: "main",
-			Pod: compat.Facts{
+			Pod: compat.Environment{
 				Image:   "registry.example/workload:latest",
 				ImageID: "sha256:kubelet-alias",
 			},

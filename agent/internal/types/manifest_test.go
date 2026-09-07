@@ -42,7 +42,7 @@ func TestManifestRoundTrip(t *testing.T) {
 		},
 		NewHostManifest("5.15.0-1071-aws"),
 	)
-	original.CUDA = NewCUDAManifest([]int{42, 43}, compat.GPUFacts{
+	original.CUDA = NewCUDAManifest([]int{42, 43}, compat.GPUInfo{
 		DriverVersion: "580.65.06",
 		Devices: []compat.GPUDevice{
 			{UUID: "GPU-aaa", ProductName: "NVIDIA A100-SXM4-40GB"},
@@ -142,11 +142,11 @@ func TestSourcePodManifestRecordsTheImageAndItsLimits(t *testing.T) {
 	}
 }
 
-// Every checkpoint already on disk was written before any of these facts
-// existed. Such an artifact has to keep parsing, and the facts it never
+// Every checkpoint already on disk was written before any of these env
+// existed. Such an artifact has to keep parsing, and the env it never
 // recorded have to come back unknown - the manifest carries no schema version,
 // so absent keys are the entire compatibility mechanism.
-func TestReadManifestAcceptsAnArtifactWrittenBeforeTheseFacts(t *testing.T) {
+func TestReadManifestAcceptsAnArtifactWrittenBeforeTheseFields(t *testing.T) {
 	dir := t.TempDir()
 	legacy := `artifact:
   contentUID: content-uid-123
@@ -177,26 +177,26 @@ cudaRestore:
 	if err != nil {
 		t.Fatalf("ReadManifest: %v", err)
 	}
-	facts := manifest.CompatFacts()
-	if facts.Image != "" || facts.ImageID != "" || facts.CPULimit != "" || facts.MemoryLimit != "" {
-		t.Errorf("pod facts = %#v, want unknown", facts)
+	env := manifest.CompatEnvironment()
+	if env.Image != "" || env.ImageID != "" || env.CPULimit != "" || env.MemoryLimit != "" {
+		t.Errorf("pod env = %#v, want unknown", env)
 	}
-	if facts.KernelVersion != "" || facts.CPUArch != "" {
-		t.Errorf("host facts = %#v, want unknown", facts)
+	if env.KernelVersion != "" || env.CPUArch != "" {
+		t.Errorf("host env = %#v, want unknown", env)
 	}
 
 	// What the artifact does record still has to arrive, or the older
 	// checkpoints would stop being compared at all.
 	wantGPUs := []compat.GPUDevice{{UUID: "GPU-aaa"}}
-	if !reflect.DeepEqual(facts.GPUDevices, wantGPUs) {
-		t.Errorf("GPU devices = %#v, want %#v", facts.GPUDevices, wantGPUs)
+	if !reflect.DeepEqual(env.GPUDevices, wantGPUs) {
+		t.Errorf("GPU devices = %#v, want %#v", env.GPUDevices, wantGPUs)
 	}
-	if !reflect.DeepEqual(facts.ExternalizedMounts, []string{"/etc/hostname"}) {
-		t.Errorf("externalized mounts = %#v", facts.ExternalizedMounts)
+	if !reflect.DeepEqual(env.ExternalizedMounts, []string{"/etc/hostname"}) {
+		t.Errorf("externalized mounts = %#v", env.ExternalizedMounts)
 	}
 }
 
-// A host fact the agent could not read has to stay absent in the file, because a
+// A host value the agent could not read has to stay absent in the file, because a
 // comparison treats absent as unknown and an empty string as a value.
 func TestHostManifestOmitsWhatTheAgentCouldNotRead(t *testing.T) {
 	dir := t.TempDir()
@@ -216,30 +216,30 @@ func TestHostManifestOmitsWhatTheAgentCouldNotRead(t *testing.T) {
 	}
 }
 
-// The facts are recorded to be compared, so what a manifest carries has to come
+// The env are recorded to be compared, so what a manifest carries has to come
 // back out as the source side of a comparison, one group at a time.
-func TestManifestFactsSurviveIntoTheComparison(t *testing.T) {
+func TestManifestEnvironmentSurvivesIntoTheComparison(t *testing.T) {
 	tests := []struct {
 		name     string
 		manifest *CheckpointManifest
-		want     compat.Facts
+		want     compat.Environment
 	}{
 		{
-			name: "host facts",
+			name: "host env",
 			manifest: &CheckpointManifest{
 				Host: NewHostManifest("5.15.0-1071-aws"),
 			},
-			want: compat.Facts{KernelVersion: "5.15.0-1071-aws", CPUArch: runtime.GOARCH},
+			want: compat.Environment{KernelVersion: "5.15.0-1071-aws", CPUArch: runtime.GOARCH},
 		},
 		{
-			name: "pod facts",
+			name: "pod env",
 			manifest: &CheckpointManifest{K8s: SourcePodManifest{
 				Image:       "nvcr.io/nvidia/tritonserver:24.09-py3",
 				ImageID:     "docker-pullable://nvcr.io/nvidia/tritonserver@sha256:deadbeef",
 				CPULimit:    "4",
 				MemoryLimit: "16Gi",
 			}},
-			want: compat.Facts{
+			want: compat.Environment{
 				Image:       "nvcr.io/nvidia/tritonserver:24.09-py3",
 				ImageID:     "docker-pullable://nvcr.io/nvidia/tritonserver@sha256:deadbeef",
 				CPULimit:    "4",
@@ -247,14 +247,14 @@ func TestManifestFactsSurviveIntoTheComparison(t *testing.T) {
 			},
 		},
 		{
-			name: "GPU facts",
+			name: "GPU env",
 			manifest: &CheckpointManifest{
-				CUDA: NewCUDAManifest([]int{1}, compat.GPUFacts{
+				CUDA: NewCUDAManifest([]int{1}, compat.GPUInfo{
 					DriverVersion: "580.65.06",
 					Devices:       []compat.GPUDevice{{UUID: "GPU-aaa", ProductName: "NVIDIA L4"}},
 				}),
 			},
-			want: compat.Facts{
+			want: compat.Environment{
 				DriverVersion: "580.65.06",
 				GPUDevices:    []compat.GPUDevice{{UUID: "GPU-aaa", ProductName: "NVIDIA L4"}},
 			},
@@ -263,11 +263,11 @@ func TestManifestFactsSurviveIntoTheComparison(t *testing.T) {
 			// An artifact captured before the models were recorded still has to
 			// report how many GPUs it used, or the count rule would silently stop
 			// applying to every checkpoint taken so far.
-			name: "GPU facts recorded as UUIDs alone",
+			name: "GPU env recorded as UUIDs alone",
 			manifest: &CheckpointManifest{
 				CUDA: CUDAManifest{PIDs: []int{1}, SourceGPUUUIDs: []string{"GPU-aaa", "GPU-bbb"}},
 			},
-			want: compat.Facts{
+			want: compat.Environment{
 				GPUDevices: []compat.GPUDevice{{UUID: "GPU-aaa"}, {UUID: "GPU-bbb"}},
 			},
 		},
@@ -275,8 +275,8 @@ func TestManifestFactsSurviveIntoTheComparison(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.manifest.CompatFacts(); !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("CompatFacts = %#v, want %#v", got, tc.want)
+			if got := tc.manifest.CompatEnvironment(); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("CompatEnvironment = %#v, want %#v", got, tc.want)
 			}
 		})
 	}

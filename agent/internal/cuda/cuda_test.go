@@ -27,16 +27,16 @@ import (
 	"github.com/ai-dynamo/snapshot/api/compat"
 )
 
-func TestParseNvidiaSmiGPUFacts(t *testing.T) {
+func TestParseNvidiaSmiGPUs(t *testing.T) {
 	tests := []struct {
 		name   string
 		output string
-		want   compat.GPUFacts
+		want   compat.GPUInfo
 	}{
 		{
 			name:   "two GPUs on one driver",
 			output: "GPU-aaa, NVIDIA A100-SXM4-40GB, 580.65.06\nGPU-bbb, NVIDIA A100-SXM4-40GB, 580.65.06\n",
-			want: compat.GPUFacts{
+			want: compat.GPUInfo{
 				DriverVersion: "580.65.06",
 				Devices: []compat.GPUDevice{
 					{UUID: "GPU-aaa", ProductName: "NVIDIA A100-SXM4-40GB"},
@@ -49,7 +49,7 @@ func TestParseNvidiaSmiGPUFacts(t *testing.T) {
 			// still has to count as a GPU.
 			name:   "a row without a model still reports its GPU",
 			output: "GPU-aaa\nGPU-bbb, NVIDIA H100 80GB HBM3, 580.65.06\n",
-			want: compat.GPUFacts{
+			want: compat.GPUInfo{
 				DriverVersion: "580.65.06",
 				Devices: []compat.GPUDevice{
 					{UUID: "GPU-aaa"},
@@ -60,7 +60,7 @@ func TestParseNvidiaSmiGPUFacts(t *testing.T) {
 		{
 			name:   "blank lines are not GPUs",
 			output: "\n\nGPU-aaa, NVIDIA L4, 580.65.06\n\n",
-			want: compat.GPUFacts{
+			want: compat.GPUInfo{
 				DriverVersion: "580.65.06",
 				Devices:       []compat.GPUDevice{{UUID: "GPU-aaa", ProductName: "NVIDIA L4"}},
 			},
@@ -68,15 +68,15 @@ func TestParseNvidiaSmiGPUFacts(t *testing.T) {
 		{
 			name:   "rows without UUIDs are not GPUs",
 			output: ", NVIDIA L4, 580.65.06\nGPU-aaa, NVIDIA L4, 580.65.06\n",
-			want: compat.GPUFacts{
+			want: compat.GPUInfo{
 				DriverVersion: "580.65.06",
 				Devices:       []compat.GPUDevice{{UUID: "GPU-aaa", ProductName: "NVIDIA L4"}},
 			},
 		},
 		{
-			name:   "unsupported values are unknown facts",
+			name:   "unsupported values are unknown env",
 			output: "N/A, NVIDIA L4, 580.65.06\nGPU-aaa, N/A, N/A\nGPU-bbb, [Not Supported], Not Supported\n",
-			want: compat.GPUFacts{
+			want: compat.GPUInfo{
 				Devices: []compat.GPUDevice{
 					{UUID: "GPU-aaa"},
 					{UUID: "GPU-bbb"},
@@ -86,13 +86,13 @@ func TestParseNvidiaSmiGPUFacts(t *testing.T) {
 		{
 			name:   "a node with no GPUs reports nothing",
 			output: "\n",
-			want:   compat.GPUFacts{},
+			want:   compat.GPUInfo{},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := parseNvidiaSmiGPUFacts(tc.output); !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("parseNvidiaSmiGPUFacts() = %#v, want %#v", got, tc.want)
+			if got := parseNvidiaSmiGPUs(tc.output); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("parseNvidiaSmiGPUs() = %#v, want %#v", got, tc.want)
 			}
 		})
 	}
@@ -108,7 +108,7 @@ func installFakeNSenter(t *testing.T, body string) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-func TestDiscoverVisibleGPUFacts(t *testing.T) {
+func TestDiscoverVisibleGPUs(t *testing.T) {
 	installFakeNSenter(t, `
 test "$#" = 6
 test "$1" = "--mount=/host/proc/42/ns/mnt"
@@ -120,28 +120,28 @@ test "$6" = "--format=csv,noheader"
 printf '%s\n' 'GPU-a, NVIDIA L4, 580.65.06'
 `)
 
-	got, err := DiscoverVisibleGPUFacts(context.Background(), "/host/proc/", 42, nvidiaSMITimeout)
+	got, err := DiscoverVisibleGPUs(context.Background(), "/host/proc/", 42, nvidiaSMITimeout)
 	if err != nil {
-		t.Fatalf("DiscoverVisibleGPUFacts: %v", err)
+		t.Fatalf("DiscoverVisibleGPUs: %v", err)
 	}
-	want := compat.GPUFacts{
+	want := compat.GPUInfo{
 		DriverVersion: "580.65.06",
 		Devices:       []compat.GPUDevice{{UUID: "GPU-a", ProductName: "NVIDIA L4"}},
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("DiscoverVisibleGPUFacts() = %#v, want %#v", got, want)
+		t.Fatalf("DiscoverVisibleGPUs() = %#v, want %#v", got, want)
 	}
 }
 
-func TestDiscoverVisibleGPUFactsReturnsCommandFailure(t *testing.T) {
+func TestDiscoverVisibleGPUsReturnCommandFailure(t *testing.T) {
 	installFakeNSenter(t, "exit 17\n")
 
-	_, err := DiscoverVisibleGPUFacts(context.Background(), "/host/proc", 42, nvidiaSMITimeout)
+	_, err := DiscoverVisibleGPUs(context.Background(), "/host/proc", 42, nvidiaSMITimeout)
 	if err == nil {
-		t.Fatal("DiscoverVisibleGPUFacts succeeded after nsenter failed")
+		t.Fatal("DiscoverVisibleGPUs succeeded after nsenter failed")
 	}
 	if !strings.Contains(err.Error(), "pid 42") {
-		t.Fatalf("DiscoverVisibleGPUFacts error = %q, want pid", err)
+		t.Fatalf("DiscoverVisibleGPUs error = %q, want pid", err)
 	}
 }
 
@@ -521,7 +521,7 @@ func TestDiscoverGPUUUIDsOrdersDRAPodByContainerOrdinal(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	got, err := discoverGPUFacts(
+	got, err := discoverGPUs(
 		ctx,
 		client,
 		podName,
@@ -529,8 +529,8 @@ func TestDiscoverGPUUUIDsOrdersDRAPodByContainerOrdinal(t *testing.T) {
 		"main",
 		"/proc",
 		123,
-		func(context.Context, string, int) (compat.GPUFacts, error) {
-			return compat.GPUFacts{
+		func(context.Context, string, int) (compat.GPUInfo, error) {
+			return compat.GPUInfo{
 				DriverVersion: "580.65.06",
 				Devices: []compat.GPUDevice{
 					{UUID: uuid0, ProductName: "NVIDIA A100-SXM4-40GB"},
@@ -541,11 +541,11 @@ func TestDiscoverGPUUUIDsOrdersDRAPodByContainerOrdinal(t *testing.T) {
 		logr.Discard(),
 	)
 	if err != nil {
-		t.Fatalf("discoverGPUFacts: %v", err)
+		t.Fatalf("discoverGPUs: %v", err)
 	}
 	// Ordered by the runtime, and still described: the DRA path used to reduce
 	// nvidia-smi's answer to an ordering and throw the rest away.
-	want := compat.GPUFacts{
+	want := compat.GPUInfo{
 		DriverVersion: "580.65.06",
 		Devices: []compat.GPUDevice{
 			{UUID: uuid0, ProductName: "NVIDIA A100-SXM4-40GB"},
@@ -553,14 +553,14 @@ func TestDiscoverGPUUUIDsOrdersDRAPodByContainerOrdinal(t *testing.T) {
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("discoverGPUFacts() = %#v, want %#v", got, want)
+		t.Fatalf("discoverGPUs() = %#v, want %#v", got, want)
 	}
 }
 
 // The kubelet path has its GPUs without nvidia-smi, so it never used to run it.
 // It runs it now for the model and driver version, and a failure there costs
-// those facts and nothing else.
-func TestDiscoverGPUFactsDescribesPodResourcesGPUs(t *testing.T) {
+// those env and nothing else.
+func TestDiscoverGPUsDescribePodResourcesGPUs(t *testing.T) {
 	installTestPodResourcesServer(t, &podresourcesv1.ListPodResourcesResponse{
 		PodResources: []*podresourcesv1.PodResources{
 			{
@@ -583,13 +583,13 @@ func TestDiscoverGPUFactsDescribesPodResourcesGPUs(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		visible func(context.Context, string, int) (compat.GPUFacts, error)
-		want    compat.GPUFacts
+		visible func(context.Context, string, int) (compat.GPUInfo, error)
+		want    compat.GPUInfo
 	}{
 		{
 			name: "described in the kubelet's order",
-			visible: func(context.Context, string, int) (compat.GPUFacts, error) {
-				return compat.GPUFacts{
+			visible: func(context.Context, string, int) (compat.GPUInfo, error) {
+				return compat.GPUInfo{
 					DriverVersion: "580.65.06",
 					Devices: []compat.GPUDevice{
 						{UUID: "GPU-b", ProductName: "NVIDIA L4"},
@@ -597,7 +597,7 @@ func TestDiscoverGPUFactsDescribesPodResourcesGPUs(t *testing.T) {
 					},
 				}, nil
 			},
-			want: compat.GPUFacts{
+			want: compat.GPUInfo{
 				DriverVersion: "580.65.06",
 				Devices: []compat.GPUDevice{
 					{UUID: "GPU-a", ProductName: "NVIDIA L4"},
@@ -607,22 +607,22 @@ func TestDiscoverGPUFactsDescribesPodResourcesGPUs(t *testing.T) {
 		},
 		{
 			name: "undescribed when nvidia-smi cannot be reached",
-			visible: func(context.Context, string, int) (compat.GPUFacts, error) {
-				return compat.GPUFacts{}, errors.New("nsenter unavailable")
+			visible: func(context.Context, string, int) (compat.GPUInfo, error) {
+				return compat.GPUInfo{}, errors.New("nsenter unavailable")
 			},
-			want: compat.GPUFacts{
+			want: compat.GPUInfo{
 				Devices: []compat.GPUDevice{{UUID: "GPU-a"}, {UUID: "GPU-b"}},
 			},
 		},
 		{
 			name: "undescribed when nvidia-smi reports other GPUs",
-			visible: func(context.Context, string, int) (compat.GPUFacts, error) {
-				return compat.GPUFacts{
+			visible: func(context.Context, string, int) (compat.GPUInfo, error) {
+				return compat.GPUInfo{
 					DriverVersion: "580.65.06",
 					Devices:       []compat.GPUDevice{{UUID: "GPU-z", ProductName: "NVIDIA L4"}},
 				}, nil
 			},
-			want: compat.GPUFacts{
+			want: compat.GPUInfo{
 				DriverVersion: "580.65.06",
 				Devices:       []compat.GPUDevice{{UUID: "GPU-a"}, {UUID: "GPU-b"}},
 			},
@@ -633,20 +633,20 @@ func TestDiscoverGPUFactsDescribesPodResourcesGPUs(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
-			got, err := discoverGPUFacts(
+			got, err := discoverGPUs(
 				ctx, nil, "test-pod", "default", "main", "/proc", 123, tc.visible, logr.Discard(),
 			)
 			if err != nil {
-				t.Fatalf("discoverGPUFacts: %v", err)
+				t.Fatalf("discoverGPUs: %v", err)
 			}
 			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("discoverGPUFacts() = %#v, want %#v", got, tc.want)
+				t.Fatalf("discoverGPUs() = %#v, want %#v", got, tc.want)
 			}
 		})
 	}
 }
 
-func TestDiscoverGPUFactsUsesVisibleGPUDescriptions(t *testing.T) {
+func TestDiscoverGPUsUseVisibleGPUDescriptions(t *testing.T) {
 	installTestPodResourcesServer(t, &podresourcesv1.ListPodResourcesResponse{
 		PodResources: []*podresourcesv1.PodResources{
 			{
@@ -668,29 +668,29 @@ func TestDiscoverGPUFactsUsesVisibleGPUDescriptions(t *testing.T) {
 	})
 	installFakeNSenter(t, "printf '%s\\n' 'GPU-a, NVIDIA L4, 580.65.06'\n")
 
-	got, err := DiscoverGPUFacts(
+	got, err := DiscoverGPUs(
 		context.Background(), nil, "test-pod", "default", "main", "/host/proc", 42, logr.Discard(),
 	)
 	if err != nil {
-		t.Fatalf("DiscoverGPUFacts: %v", err)
+		t.Fatalf("DiscoverGPUs: %v", err)
 	}
-	want := compat.GPUFacts{
+	want := compat.GPUInfo{
 		DriverVersion: "580.65.06",
 		Devices:       []compat.GPUDevice{{UUID: "GPU-a", ProductName: "NVIDIA L4"}},
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("DiscoverGPUFacts() = %#v, want %#v", got, want)
+		t.Fatalf("DiscoverGPUs() = %#v, want %#v", got, want)
 	}
 }
 
-func TestDiscoverGPUFactsFallsBackToVisibleGPUs(t *testing.T) {
+func TestDiscoverGPUsFallBackToVisibleGPUs(t *testing.T) {
 	installTestPodResourcesServer(t, &podresourcesv1.ListPodResourcesResponse{})
-	want := compat.GPUFacts{
+	want := compat.GPUInfo{
 		DriverVersion: "580.65.06",
 		Devices:       []compat.GPUDevice{{UUID: "GPU-a", ProductName: "NVIDIA L4"}},
 	}
 
-	got, err := discoverGPUFacts(
+	got, err := discoverGPUs(
 		context.Background(),
 		nil,
 		"test-pod",
@@ -698,21 +698,21 @@ func TestDiscoverGPUFactsFallsBackToVisibleGPUs(t *testing.T) {
 		"main",
 		"/host/proc",
 		42,
-		func(context.Context, string, int) (compat.GPUFacts, error) {
+		func(context.Context, string, int) (compat.GPUInfo, error) {
 			return want, nil
 		},
 		logr.Discard(),
 	)
 	if err != nil {
-		t.Fatalf("discoverGPUFacts: %v", err)
+		t.Fatalf("discoverGPUs: %v", err)
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("discoverGPUFacts() = %#v, want %#v", got, want)
+		t.Fatalf("discoverGPUs() = %#v, want %#v", got, want)
 	}
 }
 
 func TestDescribeGPUs(t *testing.T) {
-	visible := compat.GPUFacts{
+	visible := compat.GPUInfo{
 		DriverVersion: "580.65.06",
 		Devices: []compat.GPUDevice{
 			{UUID: "GPU-b", ProductName: "NVIDIA H100"},
@@ -722,7 +722,7 @@ func TestDescribeGPUs(t *testing.T) {
 	}
 
 	got := describeGPUs([]string{"GPU-a", "GPU-b", "GPU-missing"}, visible)
-	want := compat.GPUFacts{
+	want := compat.GPUInfo{
 		DriverVersion: "580.65.06",
 		Devices: []compat.GPUDevice{
 			{UUID: "GPU-a", ProductName: "NVIDIA A100"},
@@ -736,7 +736,7 @@ func TestDescribeGPUs(t *testing.T) {
 }
 
 func TestGPUUUIDsOf(t *testing.T) {
-	facts := compat.GPUFacts{
+	env := compat.GPUInfo{
 		Devices: []compat.GPUDevice{
 			{UUID: "GPU-a"},
 			{ProductName: "NVIDIA L4"},
@@ -744,7 +744,7 @@ func TestGPUUUIDsOf(t *testing.T) {
 		},
 	}
 
-	got := gpuUUIDsOf(facts)
+	got := gpuUUIDsOf(env)
 	want := []string{"GPU-a", "GPU-b"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("gpuUUIDsOf() = %v, want %v", got, want)

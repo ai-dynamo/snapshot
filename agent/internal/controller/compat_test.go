@@ -46,7 +46,7 @@ func TestPreflightCompatibilityAllowsUnreadableManifest(t *testing.T) {
 	require.Len(t, r.logs.fieldsOf("Skipping restore compatibility gate; checkpoint manifest is unreadable"), 1)
 }
 
-func TestPreflightCompatibilityComparesRecordedFacts(t *testing.T) {
+func TestPreflightCompatibilityComparesTheRecordedEnvironment(t *testing.T) {
 	r := newGatedRestore(t)
 	path := writeTestArtifact(t, r.controller.config.Storage.BasePath, "mounted-content", &types.CheckpointManifest{
 		Artifact: types.ArtifactManifest{ContentUID: "mounted-content", ContainerName: gatedRestoreContainer},
@@ -92,12 +92,12 @@ func TestPreflightCompatibilityDescribesEveryRestoreTarget(t *testing.T) {
 	require.NoError(t, r.controller.preflightCompatibility(context.Background(), r.pod, r.artifact, mappings, false))
 
 	require.Len(t, r.comparison.calls, 2)
-	assert.Equal(t, compat.Facts{
+	assert.Equal(t, compat.Environment{
 		CPUArch:       runtime.GOARCH,
 		KernelVersion: "5.15.0-1071-aws",
 		Image:         "nvcr.io/nvidia/tritonserver:24.09-py3",
 	}, r.comparison.calls[0].target)
-	assert.Equal(t, compat.Facts{
+	assert.Equal(t, compat.Environment{
 		CPUArch:       runtime.GOARCH,
 		KernelVersion: "5.15.0-1071-aws",
 		Image:         "nvcr.io/nvidia/tritonserver:25.01-py3",
@@ -415,9 +415,9 @@ func refuseWith(mismatches ...compat.Mismatch) func(context.Context, snapshotrun
 	}
 }
 
-// The facts recorded at capture describe one container, so a multi-container pod
+// The env recorded at capture describe one container, so a multi-container pod
 // must not contribute another container's image or limits.
-func TestPodFactsReadTheTargetContainer(t *testing.T) {
+func TestPodEnvironmentReadsTheTargetContainer(t *testing.T) {
 	pod := &corev1.Pod{
 		Spec: corev1.PodSpec{Containers: []corev1.Container{
 			{
@@ -443,16 +443,16 @@ func TestPodFactsReadTheTargetContainer(t *testing.T) {
 		}},
 	}
 
-	assert.Equal(t, compat.Facts{
+	assert.Equal(t, compat.Environment{
 		Image:       "nvcr.io/nvidia/tritonserver:24.09-py3",
 		CPULimit:    "4",
 		MemoryLimit: "16Gi",
-	}, podFacts(pod, "main"))
+	}, podEnvironment(pod, "main"))
 }
 
-// A fact the pod does not carry stays unknown. An unlimited container is not a
+// A value the pod does not carry stays unknown. An unlimited container is not a
 // container limited to zero.
-func TestPodFactsLeaveWhatThePodDoesNotSayUnknown(t *testing.T) {
+func TestPodEnvironmentLeavesWhatThePodDoesNotSayUnknown(t *testing.T) {
 	pod := &corev1.Pod{
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{
 			Name:  "main",
@@ -463,6 +463,6 @@ func TestPodFactsLeaveWhatThePodDoesNotSayUnknown(t *testing.T) {
 		}}},
 	}
 
-	assert.Equal(t, compat.Facts{Image: "busybox:1.36", MemoryLimit: "16Gi"}, podFacts(pod, "main"))
-	assert.Equal(t, compat.Facts{}, podFacts(pod, "absent"), "a container not in the pod")
+	assert.Equal(t, compat.Environment{Image: "busybox:1.36", MemoryLimit: "16Gi"}, podEnvironment(pod, "main"))
+	assert.Equal(t, compat.Environment{}, podEnvironment(pod, "absent"), "a container not in the pod")
 }

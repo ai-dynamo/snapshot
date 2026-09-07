@@ -33,8 +33,8 @@ func gatedRestoreMappings() []podcontract.ContainerMapping {
 
 type comparisonCall struct {
 	gate   compat.Gate
-	source compat.Facts
-	target compat.Facts
+	source compat.Environment
+	target compat.Environment
 }
 
 // comparisonSpy stands in for the policy table so a test can decide the verdict
@@ -44,7 +44,7 @@ type comparisonSpy struct {
 	calls      []comparisonCall
 }
 
-func (s *comparisonSpy) compare(gate compat.Gate, source, target compat.Facts) []compat.Mismatch {
+func (s *comparisonSpy) compare(gate compat.Gate, source, target compat.Environment) []compat.Mismatch {
 	s.calls = append(s.calls, comparisonCall{gate: gate, source: source, target: target})
 	return s.mismatches
 }

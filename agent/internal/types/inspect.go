@@ -36,7 +36,7 @@ type CheckpointContainerSnapshot struct {
 
 	// GPUs holds the GPUs the checkpointed container could see, in allocation
 	// order, with the model and driver version where they could be read.
-	GPUs compat.GPUFacts
+	GPUs compat.GPUInfo
 }
 
 // RestoreContainerSnapshot holds inspected state for the restore target.

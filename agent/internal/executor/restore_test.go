@@ -286,7 +286,7 @@ func TestRestoreInNamespaceRejectsMultiGPUCheckpointWithoutLaunchJobState(t *tes
 		types.OverlayManifest{},
 		types.HostManifest{},
 	)
-	manifest.CUDA = types.NewCUDAManifest([]int{42, 43}, compat.GPUFacts{
+	manifest.CUDA = types.NewCUDAManifest([]int{42, 43}, compat.GPUInfo{
 		Devices: []compat.GPUDevice{{UUID: "GPU-aaa"}, {UUID: "GPU-bbb"}},
 	})
 	if err := types.WriteManifest(checkpointDir, manifest); err != nil {

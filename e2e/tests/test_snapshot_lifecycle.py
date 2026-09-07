@@ -82,14 +82,14 @@ RECORDED_MEMORY_LIMIT = "4Gi"
 
 @pytest.mark.snapshot_success
 @pytest.mark.gpu
-def test_snapshot_records_the_facts_a_restore_is_checked_against(
+def test_snapshot_records_the_environment_a_restore_is_checked_against(
     config: k8s.E2EConfig,
     run: snap.TestRun,
 ) -> None:
-    """The recorded facts have to be the machine's, not merely present.
+    """The recorded environment has to be the machine's, not merely present.
 
     Everything the compatibility gates decide on is read at capture and can
-    never be recovered afterwards, so this compares each recorded fact against
+    never be recovered afterwards, so this compares each recorded value against
     the node object and against nvidia-smi inside the pod that was captured.
     """
     try:
@@ -138,7 +138,7 @@ def test_snapshot_records_the_facts_a_restore_is_checked_against(
         assert recorded_pod["image"] == container.image
         assert recorded_pod["imageId"] == source_image_id
         assert recorded_pod["memoryLimit"] == limits["memory"]
-        # This pod sets no CPU limit, and an absent fact is recorded as absent
+        # This pod sets no CPU limit, and an absent value is recorded as absent
         # rather than invented, which is what makes it refuse nothing later.
         assert "cpu" not in limits
         assert "cpuLimit" not in recorded_pod

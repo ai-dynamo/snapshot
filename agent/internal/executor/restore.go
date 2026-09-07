@@ -342,7 +342,7 @@ func inspectRestore(
 	targetRoot := fmt.Sprintf("%s/%d/root", snapshotruntime.HostProcPath, placeholderPID)
 
 	var (
-		targetGPUs        compat.GPUFacts
+		targetGPUs        compat.GPUInfo
 		targetGPUUUIDs    []string
 		discoverDuration  time.Duration
 		deviceMapDuration time.Duration
@@ -352,7 +352,7 @@ func inspectRestore(
 			return nil, 0, fmt.Errorf("missing source GPU UUIDs in checkpoint manifest")
 		}
 		discoverStart := time.Now()
-		targetGPUs, err = cuda.DiscoverGPUFacts(
+		targetGPUs, err = cuda.DiscoverGPUs(
 			ctx,
 			req.Clientset,
 			req.PodName,
@@ -371,7 +371,7 @@ func inspectRestore(
 		}
 	}
 
-	// Gate B, once the placeholder is resolved and this node's own facts are
+	// Gate B, once the placeholder is resolved and this node's own env are
 	// readable. It runs ahead of BuildDeviceMap, whose positional pairing turns
 	// a GPU difference into a device-map error that names neither GPU.
 	if err := inspectCompatibility(log, manifest, targetGPUs, targetRoot, targetImageID, req.SkipCompatCheck); err != nil {
