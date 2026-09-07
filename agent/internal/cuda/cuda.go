@@ -163,7 +163,7 @@ func nvidiaSmiValue(value string) string {
 	}
 }
 
-type visibleGPUDiscovery func(context.Context, string, int) (compat.GPUInfo, error)
+type visibleGPUDiscovery func(context.Context, string, int, time.Duration) (compat.GPUInfo, error)
 
 // DiscoverGPUUUIDs resolves GPU UUIDs in the container's runtime ordinal order.
 func DiscoverGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName, hostProcPath string, pid int, log logr.Logger) ([]string, error) {
@@ -187,9 +187,8 @@ func DiscoverGPUs(ctx context.Context, clientset kubernetes.Interface, podName, 
 		containerName,
 		hostProcPath,
 		pid,
-		func(ctx context.Context, hostProcPath string, pid int) (compat.GPUInfo, error) {
-			return DiscoverVisibleGPUs(ctx, hostProcPath, pid, nvidiaSMITimeout)
-		},
+		nvidiaSMITimeout,
+		DiscoverVisibleGPUs,
 		log,
 	)
 }
@@ -202,6 +201,7 @@ func discoverGPUs(
 	containerName,
 	hostProcPath string,
 	pid int,
+	timeout time.Duration,
 	discoverVisibleGPUs visibleGPUDiscovery,
 	log logr.Logger,
 ) (compat.GPUInfo, error) {
@@ -224,7 +224,7 @@ func discoverGPUs(
 				"DRA GPU allocation has no resolvable UUIDs",
 			)
 		}
-		visible, err := discoverVisibleGPUs(ctx, hostProcPath, pid)
+		visible, err := discoverVisibleGPUs(ctx, hostProcPath, pid, timeout)
 		if err != nil {
 			return compat.GPUInfo{}, fmt.Errorf(
 				"discover DRA GPUs in container ordinal order: %w",
@@ -248,8 +248,8 @@ func discoverGPUs(
 	}
 	if len(gpuUUIDs) > 0 {
 		// This path has its GPUs already and needs nvidia-smi only to describe
-		// them, so a failure here costs env, not the checkpoint.
-		visible, err := discoverVisibleGPUs(ctx, hostProcPath, pid)
+		// them, so a failure here costs the description, not the checkpoint.
+		visible, err := discoverVisibleGPUs(ctx, hostProcPath, pid, timeout)
 		if err != nil {
 			log.V(1).Info("Failed to describe PodResources GPUs; recording their UUIDs alone",
 				"pid", pid,
@@ -261,7 +261,7 @@ func discoverGPUs(
 	}
 
 	log.Info("PodResources API returned no GPU UUIDs, falling back to nvidia-smi", "pid", pid)
-	visible, err := discoverVisibleGPUs(ctx, hostProcPath, pid)
+	visible, err := discoverVisibleGPUs(ctx, hostProcPath, pid, timeout)
 	if err != nil {
 		return compat.GPUInfo{}, fmt.Errorf("nvidia-smi GPU UUID fallback failed: %w", err)
 	}

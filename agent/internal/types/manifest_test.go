@@ -142,8 +142,8 @@ func TestSourcePodManifestRecordsTheImageAndItsLimits(t *testing.T) {
 	}
 }
 
-// Every checkpoint already on disk was written before any of these env
-// existed. Such an artifact has to keep parsing, and the env it never
+// Every checkpoint already on disk was written before any of these fields
+// existed. Such an artifact has to keep parsing, and the fields it never
 // recorded have to come back unknown - the manifest carries no schema version,
 // so absent keys are the entire compatibility mechanism.
 func TestReadManifestAcceptsAnArtifactWrittenBeforeTheseFields(t *testing.T) {
@@ -216,7 +216,7 @@ func TestHostManifestOmitsWhatTheAgentCouldNotRead(t *testing.T) {
 	}
 }
 
-// The env are recorded to be compared, so what a manifest carries has to come
+// The values are recorded to be compared, so what a manifest carries has to come
 // back out as the source side of a comparison, one group at a time.
 func TestManifestEnvironmentSurvivesIntoTheComparison(t *testing.T) {
 	tests := []struct {

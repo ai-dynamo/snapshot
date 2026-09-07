@@ -415,7 +415,7 @@ func refuseWith(mismatches ...compat.Mismatch) func(context.Context, snapshotrun
 	}
 }
 
-// The env recorded at capture describe one container, so a multi-container pod
+// What is recorded at capture describes one container, so a multi-container pod
 // must not contribute another container's image or limits.
 func TestPodEnvironmentReadsTheTargetContainer(t *testing.T) {
 	pod := &corev1.Pod{

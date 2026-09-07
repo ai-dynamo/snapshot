@@ -529,7 +529,8 @@ func TestDiscoverGPUUUIDsOrdersDRAPodByContainerOrdinal(t *testing.T) {
 		"main",
 		"/proc",
 		123,
-		func(context.Context, string, int) (compat.GPUInfo, error) {
+		nvidiaSMITimeout,
+		func(context.Context, string, int, time.Duration) (compat.GPUInfo, error) {
 			return compat.GPUInfo{
 				DriverVersion: "580.65.06",
 				Devices: []compat.GPUDevice{
@@ -559,7 +560,7 @@ func TestDiscoverGPUUUIDsOrdersDRAPodByContainerOrdinal(t *testing.T) {
 
 // The kubelet path has its GPUs without nvidia-smi, so it never used to run it.
 // It runs it now for the model and driver version, and a failure there costs
-// those env and nothing else.
+// those two and nothing else.
 func TestDiscoverGPUsDescribePodResourcesGPUs(t *testing.T) {
 	installTestPodResourcesServer(t, &podresourcesv1.ListPodResourcesResponse{
 		PodResources: []*podresourcesv1.PodResources{
@@ -583,12 +584,12 @@ func TestDiscoverGPUsDescribePodResourcesGPUs(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		visible func(context.Context, string, int) (compat.GPUInfo, error)
+		visible func(context.Context, string, int, time.Duration) (compat.GPUInfo, error)
 		want    compat.GPUInfo
 	}{
 		{
 			name: "described in the kubelet's order",
-			visible: func(context.Context, string, int) (compat.GPUInfo, error) {
+			visible: func(context.Context, string, int, time.Duration) (compat.GPUInfo, error) {
 				return compat.GPUInfo{
 					DriverVersion: "580.65.06",
 					Devices: []compat.GPUDevice{
@@ -607,7 +608,7 @@ func TestDiscoverGPUsDescribePodResourcesGPUs(t *testing.T) {
 		},
 		{
 			name: "undescribed when nvidia-smi cannot be reached",
-			visible: func(context.Context, string, int) (compat.GPUInfo, error) {
+			visible: func(context.Context, string, int, time.Duration) (compat.GPUInfo, error) {
 				return compat.GPUInfo{}, errors.New("nsenter unavailable")
 			},
 			want: compat.GPUInfo{
@@ -616,7 +617,7 @@ func TestDiscoverGPUsDescribePodResourcesGPUs(t *testing.T) {
 		},
 		{
 			name: "undescribed when nvidia-smi reports other GPUs",
-			visible: func(context.Context, string, int) (compat.GPUInfo, error) {
+			visible: func(context.Context, string, int, time.Duration) (compat.GPUInfo, error) {
 				return compat.GPUInfo{
 					DriverVersion: "580.65.06",
 					Devices:       []compat.GPUDevice{{UUID: "GPU-z", ProductName: "NVIDIA L4"}},
@@ -634,7 +635,7 @@ func TestDiscoverGPUsDescribePodResourcesGPUs(t *testing.T) {
 			defer cancel()
 
 			got, err := discoverGPUs(
-				ctx, nil, "test-pod", "default", "main", "/proc", 123, tc.visible, logr.Discard(),
+				ctx, nil, "test-pod", "default", "main", "/proc", 123, nvidiaSMITimeout, tc.visible, logr.Discard(),
 			)
 			if err != nil {
 				t.Fatalf("discoverGPUs: %v", err)
@@ -698,7 +699,8 @@ func TestDiscoverGPUsFallBackToVisibleGPUs(t *testing.T) {
 		"main",
 		"/host/proc",
 		42,
-		func(context.Context, string, int) (compat.GPUInfo, error) {
+		nvidiaSMITimeout,
+		func(context.Context, string, int, time.Duration) (compat.GPUInfo, error) {
 			return want, nil
 		},
 		logr.Discard(),
