@@ -97,9 +97,6 @@ type restoreArtifact struct {
 	ContentUID          string
 	SourceContainerName string
 	Path                string
-	// SkipCompatCheck is decided once in preflight and carried from there, so
-	// the gate inside the restore reaches the same answer as the one before it.
-	SkipCompatCheck bool
 }
 
 type restoreTarget struct {
@@ -111,6 +108,10 @@ type restoreTarget struct {
 type restorePlan struct {
 	artifact *restoreArtifact
 	mappings []podcontract.ContainerMapping
+	// skipCompatCheck is the pod's and the node's decision, read once in
+	// preflight so the gate inside the restore reaches the same answer as the
+	// one before it.
+	skipCompatCheck bool
 }
 
 type restoreResultState int
@@ -138,13 +139,14 @@ func (e *restorePendingError) Error() string {
 }
 
 type restoreOperation struct {
-	controller  *NodeController
-	pod         *corev1.Pod
-	artifact    *restoreArtifact
-	destination string
-	containerID string
-	startedAt   time.Time
-	log         logr.Logger
+	controller      *NodeController
+	pod             *corev1.Pod
+	artifact        *restoreArtifact
+	skipCompatCheck bool
+	destination     string
+	containerID     string
+	startedAt       time.Time
+	log             logr.Logger
 }
 
 const (
@@ -535,14 +537,14 @@ func (w *NodeController) preflightRestore(ctx context.Context, pod *corev1.Pod) 
 	}
 	// Gate A: the earliest point the checkpoint's own record of what it was
 	// captured on is readable, and still before any of the restore is attempted.
-	artifact.SkipCompatCheck = w.skipCompatCheckRequested(pod)
-	if err := w.preflightCompatibility(ctx, pod, artifact, mappings); err != nil {
+	skipCompatCheck := w.skipCompatCheckRequested(pod)
+	if err := w.preflightCompatibility(ctx, pod, artifact, mappings, skipCompatCheck); err != nil {
 		return nil, err
 	}
 	if w.config.CRIU.TcpEstablished && pod.Status.PodIP == "" {
 		return nil, newRestorePendingError("PodIPPending", fmt.Sprintf("Waiting for restore Pod %s/%s to receive an IP address", pod.Namespace, pod.Name))
 	}
-	return &restorePlan{artifact: artifact, mappings: mappings}, nil
+	return &restorePlan{artifact: artifact, mappings: mappings, skipCompatCheck: skipCompatCheck}, nil
 }
 
 func (w *NodeController) getPodSnapshotFromPod(ctx context.Context, pod *corev1.Pod) (*snapshotv1alpha1.PodSnapshot, error) {
@@ -690,7 +692,7 @@ func (w *NodeController) restorePodContainers(ctx context.Context, pod *corev1.P
 	for i, mapping := range plan.mappings {
 		i, destination := i, mapping.Destination
 		workers.Go(func() {
-			results[i] = w.restoreDestination(ctx, pod, plan.artifact, destination, podKey, recovering)
+			results[i] = w.restoreDestination(ctx, pod, plan, destination, podKey, recovering)
 		})
 	}
 	workers.Wait()
@@ -754,10 +756,11 @@ func (w *NodeController) recordRestoreResults(ctx context.Context, pod *corev1.P
 func (w *NodeController) restoreDestination(
 	ctx context.Context,
 	pod *corev1.Pod,
-	artifact *restoreArtifact,
+	plan *restorePlan,
 	destination, podKey string,
 	recovering bool,
 ) restoreResult {
+	artifact := plan.artifact
 	result := restoreResult{destination: destination, state: restoreResultPending}
 	containerID, _ := w.resolveRestoreContainerID(ctx, pod, destination, podKey)
 	if containerID == "" {
@@ -773,7 +776,7 @@ func (w *NodeController) restoreDestination(
 	)
 	emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, corev1.EventTypeNormal, restoreRequestedReason, fmt.Sprintf("Restore requested from PodSnapshot %s for destination %s", artifact.SnapshotName, destination))
 
-	if err := w.runRestore(ctx, pod, artifact, destination, containerID, startedAt, recovering); err != nil {
+	if err := w.runRestore(ctx, pod, plan, destination, containerID, startedAt, recovering); err != nil {
 		var incompatible *compat.IncompatibleError
 		if errors.As(err, &incompatible) {
 			result.state = restoreResultIncompatible
@@ -841,8 +844,8 @@ func (w *NodeController) resolveRestoreContainerID(ctx context.Context, pod *cor
 //  2. Write a restore-complete sentinel: the CRIU-restored process resumes
 //     inside the polling loop that waits on this file, exits quiescence,
 //     and resumes the engine
-func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, artifact *restoreArtifact, destination, containerID string, startedAt time.Time, recovering bool) error {
-	op := w.newRestoreOperation(pod, artifact, destination, containerID, startedAt)
+func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *restorePlan, destination, containerID string, startedAt time.Time, recovering bool) error {
+	op := w.newRestoreOperation(pod, plan, destination, containerID, startedAt)
 	if recovering {
 		completed, err := op.recoverCompletedRestore(ctx)
 		if err != nil {
@@ -904,20 +907,22 @@ func (op *restoreOperation) recoverCompletedRestore(ctx context.Context) (bool, 
 
 func (w *NodeController) newRestoreOperation(
 	pod *corev1.Pod,
-	artifact *restoreArtifact,
+	plan *restorePlan,
 	destination string,
 	containerID string,
 	startedAt time.Time,
 ) *restoreOperation {
 	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+	artifact := plan.artifact
 	return &restoreOperation{
-		controller:  w,
-		pod:         pod,
-		artifact:    artifact,
-		destination: destination,
-		containerID: containerID,
-		startedAt:   startedAt,
-		log:         w.log.WithValues("pod", podKey, "snapshot", artifact.SnapshotName, "content_uid", artifact.ContentUID, "source_container", artifact.SourceContainerName, "destination_container", destination, "container_id", containerID),
+		controller:      w,
+		pod:             pod,
+		artifact:        artifact,
+		skipCompatCheck: plan.skipCompatCheck,
+		destination:     destination,
+		containerID:     containerID,
+		startedAt:       startedAt,
+		log:             w.log.WithValues("pod", podKey, "snapshot", artifact.SnapshotName, "content_uid", artifact.ContentUID, "source_container", artifact.SourceContainerName, "destination_container", destination, "container_id", containerID),
 	}
 }
 
@@ -933,7 +938,7 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (int, error) {
 		TargetPodIP:                 op.pod.Status.PodIP,
 		ArtifactContainerName:       op.artifact.SourceContainerName,
 		DestinationContainerName:    op.destination,
-		SkipCompatCheck:             op.artifact.SkipCompatCheck,
+		SkipCompatCheck:             op.skipCompatCheck,
 		Clientset:                   w.clientset,
 		PageBrokerRequested:         op.pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] == snapshotv1alpha1.PageBrokerAnnotationEnabled,
 		PageBrokerEnabled:           w.config.PageBroker.Enabled,

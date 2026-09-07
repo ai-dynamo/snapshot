@@ -93,9 +93,10 @@ func (w *NodeController) preflightCompatibility(
 	pod *corev1.Pod,
 	artifact *restoreArtifact,
 	mappings []podcontract.ContainerMapping,
+	skipCompatCheck bool,
 ) error {
 	log := w.log.WithValues("pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name), "container", artifact.SourceContainerName)
-	if artifact.SkipCompatCheck {
+	if skipCompatCheck {
 		log.Info("Restore compatibility check skipped by request", "gate", string(compat.GatePreflight))
 		return nil
 	}

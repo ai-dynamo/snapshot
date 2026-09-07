@@ -1387,7 +1387,7 @@ func TestRunRestoreCleanupFailureStillCompletesRestore(t *testing.T) {
 		return nil
 	}
 
-	err := w.runRestore(context.Background(), pod, artifact, "engine-0", "ctr-abc", time.Time{}, false)
+	err := w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "engine-0", "ctr-abc", time.Time{}, false)
 	require.NoError(t, err)
 	assert.Equal(t, "content-uid", request.ContentUID)
 	assert.Equal(t, w.config.Storage.BasePath, request.BasePath)
@@ -1416,11 +1416,11 @@ func TestRunRestoreRetriesFullRestoreUntilFailureCleanupSucceeds(t *testing.T) {
 		return nil
 	}
 
-	err := w.runRestore(context.Background(), pod, artifact, "main", "ctr-abc", time.Time{}, true)
+	err := w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Time{}, true)
 	require.Error(t, err)
 	assert.Equal(t, 1, restoreCalls)
 
-	err = w.runRestore(context.Background(), pod, artifact, "main", "ctr-abc", time.Time{}, false)
+	err = w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Time{}, false)
 	require.Error(t, err)
 	assert.Equal(t, 2, restoreCalls, "CRIU restore should retry when the previous cleanup did not finish")
 }
@@ -1441,7 +1441,7 @@ func TestRunRestoreFailureKillsPlaceholder(t *testing.T) {
 		signalCalls++
 		return nil
 	}
-	err := w.runRestore(context.Background(), pod, artifact, "main", "ctr-abc", time.Time{}, true)
+	err := w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Time{}, true)
 	require.Error(t, err)
 	assert.Equal(t, 1, restoreCalls)
 	assert.Equal(t, 1, signalCalls)
@@ -1467,7 +1467,7 @@ func TestRunRestoreFinalizesExistingCompletionSentinelWithoutReplay(t *testing.T
 	}
 	artifact := &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"}
 
-	err := w.runRestore(context.Background(), pod, artifact, "main", "ctr-abc", time.Time{}, true)
+	err := w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Time{}, true)
 	require.NoError(t, err)
 }
 
