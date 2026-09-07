@@ -68,7 +68,7 @@ func (w *NodeController) skipRequestedAfterRefusal(pod *corev1.Pod) bool {
 // both sides of a comparison: what a capture records about the source pod, and
 // what a restore target offers.
 //
-// A container that is not in the pod leaves its env unknown.
+// A container that is not in the pod leaves its environment unknown.
 func podEnvironment(pod *corev1.Pod, containerName string) compat.Environment {
 	env := compat.Environment{}
 	for _, container := range pod.Spec.Containers {
@@ -92,16 +92,12 @@ func limitString(limits corev1.ResourceList, name corev1.ResourceName) string {
 	return quantity.String()
 }
 
-// skipCompatCheckRequested reports whether this restore was asked to skip
-// the compatibility gates, by the pod that is being restored or by the node
-// it landed on.
 func (w *NodeController) skipCompatCheckRequested(pod *corev1.Pod) bool {
 	return w.skipCompatCheckFn() ||
 		podcontract.SkipCompatCheckFromAnnotations(pod.Annotations)
 }
 
-// preflightCompatibility runs the pre-flight compatibility gate for one restore.
-// A nil error means the restore may be attempted.
+// preflightCompatibility returns nil when the restore may be attempted.
 func (w *NodeController) preflightCompatibility(
 	ctx context.Context,
 	pod *corev1.Pod,
@@ -146,14 +142,11 @@ func (w *NodeController) preflightCompatibility(
 	return nil
 }
 
-// preflightTargetEnvironment describes what this node and this pod offer a restore, as
-// far as it is knowable before the placeholder container exists. It is assembled
-// per restore from env the agent already holds, so the gate costs no syscalls
-// and no API reads.
+// preflightTargetEnvironment describes what this node and this pod offer a
+// restore before the placeholder container exists. It is assembled from what
+// the agent already holds, so the gate costs no syscalls and no API reads.
 func (w *NodeController) preflightTargetEnvironment(pod *corev1.Pod, containerName string) compat.Environment {
 	env := podEnvironment(pod, containerName)
-	// The agent's own architecture, which is the node's: this binary could not
-	// be running here otherwise.
 	env.CPUArch = runtime.GOARCH
 	env.KernelVersion = w.config.HostKernelVersion
 	return env

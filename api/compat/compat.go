@@ -7,13 +7,13 @@
 //
 // The node agent is the only consumer today. It sits in the api module because
 // the check names are protocol, published verbatim on pod conditions and events,
-// and so the operator can surface the same recorded env on the content status
-// without a second vocabulary growing up beside this one.
+// and so the operator can surface the same recorded environment on the content
+// status without a second vocabulary growing up beside this one.
 package compat
 
 import "fmt"
 
-// Gate names the moment a comparison runs. The two gates see different env:
+// Gate names the moment a comparison runs. The two gates see different state:
 // only the later one can read the node's GPUs and the target's rootfs.
 type Gate string
 
@@ -52,18 +52,14 @@ type Environment struct {
 	DriverVersion string
 	GPUDevices    []GPUDevice
 
-	// ExternalizedMounts holds the mount destinations CRIU externalized at
-	// capture.
 	ExternalizedMounts []string
 
-	// ExistingMountPaths holds the destinations that resolve on this machine.
-	// The agent resolves them before comparing, so a comparison never touches disk.
+	// Resolved before comparing, so a comparison never touches disk.
 	ExistingMountPaths []string
 }
 
-// GPUInfo is what discovery reads off a node before it is folded into a Environment.
-// Discovery has no business carrying kernel versions and image digests around,
-// so it keeps a type of its own.
+// GPUInfo is the GPU part of an Environment, kept apart because discovery reads
+// only this much of one.
 type GPUInfo struct {
 	DriverVersion string
 	Devices       []GPUDevice

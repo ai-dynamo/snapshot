@@ -12,7 +12,7 @@ import (
 
 // inspectCompatibility runs the inspect gate for one restore, the counterpart of
 // the controller's preflightCompatibility. A nil error means the restore may go
-// ahead. It gathers the target env this gate can read, which the earlier gate
+// ahead. It gathers the target state this gate can read, which the earlier gate
 // cannot: the runtime image ID, GPUs, and mounts under its rootfs.
 func inspectCompatibility(
 	log logr.Logger,
