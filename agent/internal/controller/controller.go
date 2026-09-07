@@ -447,7 +447,7 @@ func (w *NodeController) processRestoreQueueItem(ctx context.Context, key client
 		return
 	}
 	pod = pod.DeepCopy()
-	if w.reopenedAfterRefusal(pod) {
+	if w.skipRequestedAfterRefusal(pod) {
 		// The skip request is the way back for a pod the gates turned down, so
 		// it has to clear the in-process marker as well as the condition below.
 		w.handledRestores.Delete(string(pod.UID))
