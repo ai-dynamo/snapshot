@@ -121,10 +121,6 @@ def serve_api(engine: Any, restored_text: str) -> None:
 
 
 def main() -> None:
-    if os.environ.get("SNAPSHOT_RESTORE_STANDBY") == "1":
-        while True:
-            time.sleep(3600)
-
     args = parse_args()
     snapshot_mode = args.mode == "snapshot"
     if snapshot_mode:

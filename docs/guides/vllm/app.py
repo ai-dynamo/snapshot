@@ -7,15 +7,11 @@ import traceback
 from pathlib import Path
 from uuid import uuid4
 
-# A restore placeholder must stay a minimal, inert process: Snapshot restores
-# the checkpointed tree alongside it, and everything imported here (torch, the
-# CUDA libraries, vLLM) would otherwise be mapped into the placeholder for
-# nothing. Decide before importing the framework.
-if os.environ.get("SNAPSHOT_RESTORE_STANDBY") == "1":
-    import time
-
-    while True:
-        time.sleep(3600)
+# This script calls AsyncLLM directly rather than vLLM's CLI wrapper, which
+# sets this automatically when unset. Without it, worker startup defaults to
+# fork (or switches to spawn only if vLLM detects CUDA already initialized),
+# which is unreliable across checkpoint/restore.
+os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
 import uvicorn
 from fastapi import FastAPI
