@@ -114,7 +114,7 @@ func TestRefusalEmitsOneIncompatibleEventAtBothGates(t *testing.T) {
 		t.Helper()
 		events := r.events(t, podcontract.RestoreReasonIncompatible)
 		require.Len(t, events, 1)
-		assert.Equal(t, wantMessage, events[0].Message)
+		assert.Contains(t, events[0].Message, wantMessage)
 		assert.Equal(t, corev1.EventTypeWarning, events[0].Type)
 		assert.Empty(t, r.events(t, podcontract.RestoreReasonFailed), "refusal also reported a restore failure")
 	}
@@ -151,9 +151,10 @@ func TestRefusalPublishesTheRestoredConditionAtBothGates(t *testing.T) {
 		assert.Equal(t, corev1.PodConditionType(podcontract.RestoredCondition), condition.Type)
 		assert.Equal(t, corev1.ConditionFalse, condition.Status)
 		assert.Equal(t, podcontract.RestoreReasonIncompatible, condition.Reason)
-		// The same sentence the log line and the event carry, so a reader who
-		// starts from the pod does not get a different answer.
-		assert.Equal(t, wantMessage, condition.Message)
+		// The condition and the event read as prose while the log keeps the
+		// mismatch on its own, so an operator greps the same string a reader
+		// starting from the pod is shown.
+		assert.Contains(t, condition.Message, wantMessage)
 		assert.Equal(t, wantMessage, r.refusalLog(t)["reason"])
 	}
 

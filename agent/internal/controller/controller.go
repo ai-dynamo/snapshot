@@ -797,7 +797,7 @@ func (t restoreTally) verdict(snapshotName string) restoreVerdict {
 		return restoreVerdict{
 			status:  corev1.ConditionFalse,
 			reason:  podcontract.RestoreReasonIncompatible,
-			message: strings.Join(t.incompatibilityReasons, "; "),
+			message: refusalMessage(strings.Join(t.incompatibilityReasons, "; ")),
 		}
 	case len(t.incompatible) != 0:
 		return restoreVerdict{

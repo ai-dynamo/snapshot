@@ -669,9 +669,10 @@ func TestRestoreTallyVerdictCoversEveryTerminalOutcome(t *testing.T) {
 					"engine-1: gpu-count: source 1, target 0",
 				},
 			},
-			wantStatus:  corev1.ConditionFalse,
-			wantReason:  podcontract.RestoreReasonIncompatible,
-			wantMessage: "engine-0: cpu-arch: source amd64, target arm64; engine-1: gpu-count: source 1, target 0",
+			wantStatus: corev1.ConditionFalse,
+			wantReason: podcontract.RestoreReasonIncompatible,
+			wantMessage: "Refused restore; this node cannot run the checkpoint: " +
+				"engine-0: cpu-arch: source amd64, target arm64; engine-1: gpu-count: source 1, target 0",
 		},
 		{
 			name: "some failed and some refused",
