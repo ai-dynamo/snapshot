@@ -99,6 +99,10 @@ func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName st
 // version come from the same call as the UUIDs: nothing else on the restore path
 // gets to look at the source node's GPUs, so what is not read here cannot be
 // compared later.
+//
+// Every path ends here, and under DRA this is the only path that reports GPUs
+// at all, because the kubelet publishes no nvidia.com/gpu devices when the
+// NVIDIA DRA driver allocates them instead of the device plugin.
 func DiscoverVisibleGPUFacts(ctx context.Context, hostProcPath string, pid int, timeout time.Duration) (compat.GPUFacts, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -297,6 +301,10 @@ func gpuUUIDsOf(facts compat.GPUFacts) []string {
 	return uuids
 }
 
+// orderDRAUUIDsByRuntime re-sorts allocated UUIDs into the order the container
+// sees them. CUDA addresses GPUs by ordinal and a checkpoint records that
+// ordering, but the DRA API returns devices in claim order, which need not
+// match. A count mismatch is an error rather than a partial ordering.
 func orderDRAUUIDsByRuntime(allocatedUUIDs, visibleUUIDs []string) ([]string, error) {
 	if len(allocatedUUIDs) != len(visibleUUIDs) {
 		return nil, fmt.Errorf(
