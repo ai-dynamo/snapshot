@@ -158,7 +158,7 @@ Multi-GPU and Arm support are on the roadmap.
 
 **Get started**
 
-- [Usage guides](docs/guides/README.md) — build a snapshot-ready image per inference framework, then checkpoint and restore.
+- [Usage guides](docs/guides/README.md) — deploy a replica per inference framework, then checkpoint and restore.
 
 **Reference**
 

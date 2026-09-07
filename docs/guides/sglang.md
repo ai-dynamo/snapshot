@@ -1,20 +1,14 @@
-# Build and deploy an SGLang replica
+# Deploy an SGLang replica
 
-Snapshot restores a replica by injecting its checkpointed state into a
-snapshot-ready image: an SGLang runtime image prepared with the application and
-container layout Snapshot expects. The Snapshot agent injects the restore
-tooling at runtime.
+Snapshot restores a replica by injecting its checkpointed process back into a
+running container. This example runs an SGLang image that includes SGLang,
+CUDA, and `torch_memory_saver`, unmodified -- there is no Snapshot-specific
+image to build or push. `deployment.yaml` pins the exact upstream image, and
+one program, `app.py`, is mounted into it from a ConfigMap to prepare SGLang
+for checkpoint and resume it after restore. The Snapshot agent injects the
+restore tooling at runtime.
 
-## Build
-
-Start with an SGLang image that includes SGLang, CUDA, and
-`torch_memory_saver` -- unmodified, with one program mounted into it that
-prepares SGLang for checkpoint and resumes it after restore. There is no
-Snapshot-specific image to build or push: `deployment.yaml` pins the exact
-upstream image, and `app.py` is mounted from a ConfigMap. Select the model
-when deploying the source pod.
-
-### 1. Download the example files
+## 1. Download the example files
 
 Download [`app.py`](sglang/app.py),
 [`model-cache-pvc.yaml`](sglang/model-cache-pvc.yaml),
@@ -68,7 +62,7 @@ The source and restore pods must use the same immutable image, mount the
 Snapshot control volume at `/snapshot-control`, and mount the same model cache
 at `/hf-cache`.
 
-### 2. Create the app.py ConfigMap
+## 2. Create the app.py ConfigMap
 
 Set the namespace where the SGLang pod will run, and create the ConfigMap
 `deployment.yaml` mounts `app.py` from:
@@ -86,7 +80,7 @@ Re-run this command after editing `app.py` -- `kubectl create configmap` fails
 if the ConfigMap already exists; add `--dry-run=client -o yaml | kubectl apply
 -f -` to update it in place instead.
 
-### 3. Deploy SGLang
+## 3. Deploy SGLang
 
 Select the model through `SNAPSHOT_MODEL` in [`deployment.yaml`](sglang/deployment.yaml).
 Both the init container and the main container carry the value:

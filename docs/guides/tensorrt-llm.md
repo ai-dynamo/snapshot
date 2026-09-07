@@ -1,23 +1,17 @@
-# Build and deploy a TensorRT-LLM replica
+# Deploy a TensorRT-LLM replica
 
-Snapshot restores a replica by injecting its checkpointed state into a
-snapshot-ready image: a TensorRT-LLM runtime image prepared with the application
-and container layout Snapshot expects. The Snapshot agent injects the restore
-tooling at runtime.
+Snapshot restores a replica by injecting its checkpointed process back into a
+running container. This example runs the TensorRT-LLM runtime image, which
+includes TensorRT-LLM and its runtime dependencies, unmodified -- there is no
+Snapshot-specific image to build or push. `deployment.yaml` pins the exact
+upstream image, and one program, `app.py`, is mounted into it from a ConfigMap
+to prepare TensorRT-LLM for checkpoint and validate it after restore. The
+Snapshot agent injects the restore tooling at runtime.
 
 > [!NOTE]
 > TensorRT-LLM support is experimental and currently limited to a single GPU.
 
-## Build
-
-Start with the TensorRT-LLM runtime image, which includes TensorRT-LLM and its
-runtime dependencies -- unmodified, with one program mounted into it that
-prepares TensorRT-LLM for checkpoint and validates it after restore. There is
-no Snapshot-specific image to build or push: `deployment.yaml` pins the exact
-upstream image, and `app.py` is mounted from a ConfigMap. Select the model
-when deploying the source pod.
-
-### 1. Download the example files
+## 1. Download the example files
 
 Download [`app.py`](tensorrt-llm/app.py),
 [`deployment.yaml`](tensorrt-llm/deployment.yaml), and
@@ -68,7 +62,7 @@ cannot restore.
 The source and restore pods must use the same immutable image and mount the
 Snapshot control volume at `/snapshot-control`.
 
-### 2. Create the app.py ConfigMap
+## 2. Create the app.py ConfigMap
 
 Set the namespace where the TensorRT-LLM pod will run, and create the
 ConfigMap `deployment.yaml` mounts `app.py` from:
@@ -86,7 +80,7 @@ Re-run this command after editing `app.py` -- `kubectl create configmap` fails
 if the ConfigMap already exists; add `--dry-run=client -o yaml | kubectl apply
 -f -` to update it in place instead.
 
-### 3. Deploy TensorRT-LLM
+## 3. Deploy TensorRT-LLM
 
 Select a model supported by the chosen TensorRT-LLM image through
 `SNAPSHOT_MODEL` in [`deployment.yaml`](tensorrt-llm/deployment.yaml):

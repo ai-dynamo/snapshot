@@ -1,8 +1,11 @@
-# Build and deploy a vLLM replica
+# Deploy a vLLM replica
 
-Snapshot restores a replica by injecting its checkpointed state into a
-snapshot-ready image: a vLLM runtime image prepared with the application and
-container layout Snapshot expects. The Snapshot agent injects the restore
+Snapshot restores a replica by injecting its checkpointed process back into a
+running container. This example runs the official vLLM image, which includes
+vLLM and its runtime dependencies, unmodified -- there is no Snapshot-specific
+image to build or push. `deployment.yaml` pins the exact upstream image, and
+one program, `app.py`, is mounted into it from a ConfigMap to prepare vLLM for
+checkpoint and resume it after restore. The Snapshot agent injects the restore
 tooling at runtime.
 
 > [!NOTE]
@@ -10,16 +13,7 @@ tooling at runtime.
 > `vllm/vllm-openai:v0.27.1-ubuntu2404` image) and does not work on vLLM
 > 0.28.
 
-## Build
-
-Start with the official vLLM image, which includes vLLM and its runtime
-dependencies -- unmodified, with one program mounted into it that prepares
-vLLM for checkpoint and resumes it after restore. There is no Snapshot-specific
-image to build or push: `deployment.yaml` pins the exact upstream image, and
-`app.py` is mounted from a ConfigMap. Select the model when deploying the
-source pod.
-
-### 1. Download the example files
+## 1. Download the example files
 
 Download [`app.py`](vllm/app.py), [`deployment.yaml`](vllm/deployment.yaml),
 and [`restore-deployment.yaml`](vllm/restore-deployment.yaml) from the
@@ -63,7 +57,7 @@ log that CRIU cannot reopen after restore.
 The source and restore pods must mount the Snapshot control volume at
 `/snapshot-control`.
 
-### 2. Create the app.py ConfigMap
+## 2. Create the app.py ConfigMap
 
 Set the namespace where the vLLM pod will run, and create the ConfigMap
 `deployment.yaml` mounts `app.py` from:
@@ -82,7 +76,7 @@ model's `trust_remote_code` needs) -- `kubectl create configmap` fails if the
 ConfigMap already exists; add `--dry-run=client -o yaml | kubectl apply -f -`
 to update it in place instead.
 
-### 3. Deploy vLLM
+## 3. Deploy vLLM
 
 Select the model through `SNAPSHOT_MODEL` in [`deployment.yaml`](vllm/deployment.yaml):
 

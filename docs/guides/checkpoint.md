@@ -16,9 +16,9 @@ API as part of its control loop.
 
 - Snapshot is [installed](../operations/install.md) in the cluster.
 - The pod to checkpoint is a **snapshot-ready pod**, fully initialized (weights
-  loaded, kernels warmed up). A [snapshot-ready image](README.md) is necessary but
-  not sufficient — the pod spec itself must also carry what Snapshot relies on to
-  checkpoint it:
+  loaded, kernels warmed up). Following one of the [framework guides](README.md)
+  gets the running program there, but the pod spec itself must also carry what
+  Snapshot relies on to checkpoint it:
   - the `/snapshot-control` volume mount, the control directory Snapshot signals
     through;
   - the `securityContext` (seccomp profile) that checkpointing requires;
