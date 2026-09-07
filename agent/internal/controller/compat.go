@@ -39,15 +39,20 @@ func (w *NodeController) logRestoreRefusal(pod *corev1.Pod, incompatible *compat
 	)
 }
 
-// reopenedAfterRefusal reports a pod that the gates turned down and that has
-// since asked for them to be skipped. Nothing else reopens a terminal restore,
-// which is what makes the skip request an escape hatch and not a retry.
-func (w *NodeController) reopenedAfterRefusal(pod *corev1.Pod) bool {
+// restoreRefusedAsIncompatible reports a pod whose restore the gates turned
+// down, as opposed to one that was attempted and failed.
+func restoreRefusedAsIncompatible(pod *corev1.Pod) bool {
 	condition := findRestoredCondition(pod)
-	if condition == nil || condition.Status != corev1.ConditionFalse || condition.Reason != podcontract.RestoreReasonIncompatible {
-		return false
-	}
-	return w.skipCompatCheckRequested(pod)
+	return condition != nil &&
+		condition.Status == corev1.ConditionFalse &&
+		condition.Reason == podcontract.RestoreReasonIncompatible
+}
+
+// skipRequestedAfterRefusal reports a pod that the gates turned down and that
+// has since asked for them to be skipped. Nothing else reopens a terminal
+// restore, which is what makes the skip request an escape hatch and not a retry.
+func (w *NodeController) skipRequestedAfterRefusal(pod *corev1.Pod) bool {
+	return restoreRefusedAsIncompatible(pod) && w.skipCompatCheckRequested(pod)
 }
 
 // podFacts reads what one container of a pod runs as and is allowed. It serves
