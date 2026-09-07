@@ -715,10 +715,15 @@ type restoreVerdict struct {
 // in the current pass has returned.
 func (w *NodeController) recordRestoreResults(ctx context.Context, pod *corev1.Pod, artifact *restoreArtifact, results []restoreResult) bool {
 	tally := tallyRestoreResults(results)
-	if len(tally.pending) != 0 {
-		return w.reportRestoreProgress(ctx, pod, artifact.SnapshotName, tally)
-	}
 	verdict := tally.verdict(artifact.SnapshotName)
+	if len(tally.pending) != 0 {
+		// The pass is not over, so a write that fails is reported and dropped
+		// rather than retried: the next pass publishes again.
+		if err := w.applyRestoredCondition(ctx, pod, verdict.status, verdict.reason, verdict.message); err != nil {
+			emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeWarning, restoreStatusUpdateFailedReason, err.Error())
+		}
+		return true
+	}
 	return w.finishRestore(ctx, pod, verdict.status, verdict.reason, verdict.message) != nil
 }
 
@@ -744,34 +749,16 @@ func tallyRestoreResults(results []restoreResult) restoreTally {
 	return tally
 }
 
-// reportRestoreProgress publishes the interim state of a pass that still has
-// destinations pending. A status write that fails is reported and dropped: the
-// pass is not over, and the next one publishes again.
-func (w *NodeController) reportRestoreProgress(ctx context.Context, pod *corev1.Pod, snapshotName string, tally restoreTally) bool {
-	counts := []string{
-		fmt.Sprintf("%d succeeded", len(tally.succeeded)),
-		fmt.Sprintf("%d failed", len(tally.failed)),
-	}
-	if len(tally.incompatible) != 0 {
-		counts = append(counts, fmt.Sprintf("%d incompatible", len(tally.incompatible)))
-	}
-	counts = append(counts, fmt.Sprintf("%d pending", len(tally.pending)))
-
-	message := fmt.Sprintf("Restore from PodSnapshot %s remains in progress: %s (%s)",
-		snapshotName,
-		strings.Join(counts, ", "),
-		strings.Join(tally.pending, ", "),
-	)
-	if err := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, podcontract.RestoreReasonInProgress, message); err != nil {
-		emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeWarning, restoreStatusUpdateFailedReason, err.Error())
-	}
-	return true
-}
-
-// verdict concludes a pass with nothing left pending. It reaches no further
-// than the counts it is given, so the outcomes read as one list.
+// verdict concludes one pass, still in progress or terminal, from the counts
+// alone.
 func (t restoreTally) verdict(snapshotName string) restoreVerdict {
 	switch {
+	case len(t.pending) != 0:
+		return restoreVerdict{
+			status:  corev1.ConditionFalse,
+			reason:  podcontract.RestoreReasonInProgress,
+			message: t.progressMessage(snapshotName),
+		}
 	case len(t.failed) == 0 && len(t.incompatible) == 0:
 		return restoreVerdict{
 			status: corev1.ConditionTrue,
@@ -808,6 +795,23 @@ func (t restoreTally) verdict(snapshotName string) restoreVerdict {
 				len(t.failed), snapshotName, strings.Join(t.failed, ", ")),
 		}
 	}
+}
+
+func (t restoreTally) progressMessage(snapshotName string) string {
+	counts := []string{
+		fmt.Sprintf("%d succeeded", len(t.succeeded)),
+		fmt.Sprintf("%d failed", len(t.failed)),
+	}
+	if len(t.incompatible) != 0 {
+		counts = append(counts, fmt.Sprintf("%d incompatible", len(t.incompatible)))
+	}
+	counts = append(counts, fmt.Sprintf("%d pending", len(t.pending)))
+
+	return fmt.Sprintf("Restore from PodSnapshot %s remains in progress: %s (%s)",
+		snapshotName,
+		strings.Join(counts, ", "),
+		strings.Join(t.pending, ", "),
+	)
 }
 
 // restoreDestination resolves and restores one destination independently of
