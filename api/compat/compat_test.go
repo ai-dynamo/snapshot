@@ -138,8 +138,8 @@ func withChecks(t *testing.T, checks ...check) {
 }
 
 // A rule runs at its own gate and at no other, and what it reports comes back
-// named after it. The two gates read different env, so a rule that ran at the
-// wrong one would compare against env nobody had gathered yet.
+// named after it. The two gates read different state, so a rule that ran at the
+// wrong one would compare against state nobody had gathered yet.
 func TestCompareRunsTheRulesOfOneGate(t *testing.T) {
 	archCheck := check{
 		name: "fixture",
