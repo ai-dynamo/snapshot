@@ -103,7 +103,7 @@ for other versions):
 
 ```bash
 helm install snapshot oci://ghcr.io/ai-dynamo/snapshot/snapshot \
-  --version 0.1.0-rc.1 \
+  --version 0.1.0 \
   --namespace snapshot --create-namespace
 ```
 
