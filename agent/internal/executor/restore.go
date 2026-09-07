@@ -316,14 +316,20 @@ func inspectRestore(
 	}
 	log.V(1).Info("Resolved placeholder container", "pid", placeholderPID)
 
+	// Read only for the image-digest check, which treats a blank value as
+	// unknown, so neither a skipped gate nor a runtime that cannot answer is
+	// worth failing a restore over.
 	targetImageID := ""
-	if manifest.K8s.ImageID != "" {
+	if !req.SkipCompatCheck && manifest.K8s.ImageID != "" {
 		if req.ContainerID == "" {
-			return nil, 0, fmt.Errorf("container ID is required to compare the runtime image ID")
-		}
-		targetImageID, err = rt.ResolveContainerImageID(ctx, req.ContainerID)
-		if err != nil {
-			return nil, 0, fmt.Errorf("failed to resolve placeholder image ID: %w", err)
+			log.Info("No container ID for this restore; not comparing the runtime image ID")
+		} else {
+			targetImageID, err = rt.ResolveContainerImageID(ctx, req.ContainerID)
+			if err != nil {
+				log.Error(err, "Failed to resolve the placeholder image ID; not comparing it",
+					"containerID", req.ContainerID)
+				targetImageID = ""
+			}
 		}
 	}
 

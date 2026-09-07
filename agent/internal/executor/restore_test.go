@@ -36,6 +36,7 @@ type restoreFakeRuntime struct {
 	resolveByPodHit        bool
 	imageID                string
 	imageIDError           error
+	imageIDHit             bool
 }
 
 func (r *restoreFakeRuntime) ResolveContainer(ctx context.Context, id string) (int, *specs.Spec, error) {
@@ -54,6 +55,7 @@ func (r *restoreFakeRuntime) ResolveContainerByPod(ctx context.Context, pod, ns,
 }
 
 func (r *restoreFakeRuntime) ResolveContainerImageID(_ context.Context, _ string) (string, error) {
+	r.imageIDHit = true
 	return r.imageID, r.imageIDError
 }
 
@@ -100,12 +102,13 @@ func TestInspectRestoreComparesRuntimeImageID(t *testing.T) {
 		rebuilt  = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 	)
 	tests := []struct {
-		name        string
-		sourceID    string
-		targetID    string
-		targetError error
-		want        []compat.Mismatch
-		wantError   string
+		name            string
+		sourceID        string
+		targetID        string
+		targetError     error
+		skipCompatCheck bool
+		want            []compat.Mismatch
+		wantNoLookup    bool
 	}{
 		{
 			name:     "same runtime content",
@@ -127,10 +130,16 @@ func TestInspectRestoreComparesRuntimeImageID(t *testing.T) {
 			sourceID: captured,
 		},
 		{
-			name:        "runtime image ID unavailable",
+			name:        "runtime image ID unavailable is left uncompared",
 			sourceID:    captured,
 			targetError: errors.New("runtime unavailable"),
-			wantError:   "failed to resolve placeholder image ID: runtime unavailable",
+		},
+		{
+			name:            "skipped check never asks the runtime",
+			sourceID:        captured,
+			targetID:        rebuilt,
+			skipCompatCheck: true,
+			wantNoLookup:    true,
 		},
 	}
 
@@ -158,14 +167,12 @@ func TestInspectRestoreComparesRuntimeImageID(t *testing.T) {
 					PodNamespace:             "default",
 					ArtifactContainerName:    "main",
 					DestinationContainerName: "main",
+					SkipCompatCheck:          tc.skipCompatCheck,
 				},
 				manifest,
 			)
-			if tc.wantError != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
-					t.Fatalf("error = %v, want containing %q", err, tc.wantError)
-				}
-				return
+			if tc.wantNoLookup && rt.imageIDHit {
+				t.Fatal("resolved the runtime image ID while the check was skipped")
 			}
 			if len(tc.want) == 0 {
 				if err != nil {
