@@ -177,6 +177,7 @@ Multi-GPU and Arm support are on the roadmap.
 **More**
 
 - [Limitations & known issues](docs/limitations.md) — current limitations and what's on the roadmap.
+- [Snapshot Enhancement Proposals](docs/proposals/README.md) — the design process for significant Snapshot changes.
 
 ## Adopters
 
