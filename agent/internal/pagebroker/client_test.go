@@ -109,8 +109,8 @@ func TestRequestStopsWaitingForSocketWhenContextExpires(t *testing.T) {
 
 	start := time.Now()
 	err := (Client{ControlSocketPath: filepath.Join(t.TempDir(), "missing.sock")}).Abort(ctx, "transaction")
-	if !isTransportError(err) {
-		t.Fatalf("Abort() error = %v, want transport error", err)
+	if !isTransportError(err) || !IsDialError(err) {
+		t.Fatalf("Abort() error = %v, want dial transport error", err)
 	}
 	if elapsed := time.Since(start); elapsed < limit || elapsed > 5*time.Second {
 		t.Fatalf("Abort() returned after %v, want about %v", elapsed, limit)
@@ -220,8 +220,8 @@ func TestCommitStopsWhenRetryResponseHangs(t *testing.T) {
 	if _, err := readMessage(second); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-result; !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Commit() error = %v, want retry deadline", err)
+	if err := <-result; !errors.Is(err, context.DeadlineExceeded) || IsDialError(err) {
+		t.Fatalf("Commit() error = %v, want retry deadline after a lost response", err)
 	}
 	if _, err := readMessage(second); err == nil {
 		t.Fatal("retry connection did not close")
