@@ -153,6 +153,7 @@ defaults; see [Storage](../operations/storage.md) for the storage model.
 |-------|---------|-------------|
 | `image.operator.repository` | `ghcr.io/ai-dynamo/snapshot/operator` | Operator image. |
 | `image.agent.repository` | `ghcr.io/ai-dynamo/snapshot/agent` | Agent image. |
+| `image.pageBroker.repository` | `ghcr.io/ai-dynamo/snapshot/pagebroker` | PageBroker sidecar image, pulled at `image.agent.tag`. |
 | `image.*.tag` | chart `appVersion` | Image tag; defaults to the chart's `appVersion` when empty. |
 | `crdUpgrade.enabled` | `true` | Re-apply the CRDs on every rollout via an init container. |
 | `runtime.type` | `containerd` | Container runtime: `containerd` or `crio`. |
