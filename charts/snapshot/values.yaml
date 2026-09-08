@@ -106,12 +106,13 @@ storage:
 pageBroker:
   maxConcurrentRequests: 16
   staging:
-    # Cap on the memory-backed staging volume; empty derives it from pod memory limits.
-    sizeLimit: ""
+    # Keep at or below both memory limits; see docs/operations/storage.md.
+    sizeLimit: 64Gi
+  # Requests cover the idle daemon; limits cover restore prefetch into staging.
   resources:
     requests:
-      cpu: 8
-      memory: 32Gi
+      cpu: 1
+      memory: 2Gi
     limits:
       cpu: 32
       memory: 256Gi
