@@ -46,7 +46,7 @@ We agree to restrict the following behaviors in our community. Instances, threat
 
 Tensions can occur between community members even when they are trying their best to collaborate. Not every conflict represents a code of conduct violation, and this Code of Conduct reinforces encouraged behaviors and norms that can help avoid conflicts and minimize harm.
 
-When an incident does occur, it is important to report it promptly. To report a possible violation, **contact the project maintainers privately — they are listed in [MAINTAINERS.md](MAINTAINERS.md). If your report concerns a maintainer, send it to any other maintainer instead.** Reports are handled confidentially.
+When an incident does occur, it is important to report it promptly. To report a possible violation, **email <dbar@nvidia.com>.** Reports are handled confidentially. If your report concerns the person at that address, contact any other maintainer listed in [MAINTAINERS.md](MAINTAINERS.md) directly instead.
 
 Do not use a code of conduct report to disclose a security vulnerability. Security issues follow a separate process described in [SECURITY.md](SECURITY.md).
 

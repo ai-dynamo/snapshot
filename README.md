@@ -197,8 +197,9 @@ Contributions are welcome under the project's [Apache 2.0 license](LICENSE). See
 
 Participation in this project is governed by our
 [Code of Conduct](CODE_OF_CONDUCT.md). [MAINTAINERS.md](MAINTAINERS.md) lists
-who reviews and merges changes, and [GOVERNANCE.md](GOVERNANCE.md) describes how
-decisions are made. AI coding agents should also read [AGENTS.md](AGENTS.md).
+who reviews and merges changes, [GOVERNANCE.md](GOVERNANCE.md) describes how
+decisions are made, and [RELEASE.md](RELEASE.md) covers versioning and how
+releases are cut. AI coding agents should also read [AGENTS.md](AGENTS.md).
 
 ## Security
 

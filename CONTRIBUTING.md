@@ -51,6 +51,39 @@ Questions and open-ended design discussions belong in
 an issue. Security vulnerabilities are never reported in a public issue; see
 [SECURITY.md](SECURITY.md).
 
+## How pull requests are reviewed
+
+**Who reviews.** Every pull request is reviewed by a maintainer. The maintainers
+are the code owners for the whole repository — see
+[`.github/CODEOWNERS`](.github/CODEOWNERS) and [MAINTAINERS.md](MAINTAINERS.md) —
+so GitHub requests review from that group automatically. At least one maintainer
+approval is required before a pull request can merge.
+
+**What has to pass.** Alongside the approval, CI must be green: the `check`,
+`build`, and `test` jobs, the DCO check, and `Validate Issue Reference`. A
+maintainer will not usually start a detailed review while CI is red, so fix
+failing checks first.
+
+**Turnaround.** Maintainers aim to give a first response within a week. Reviews
+are best-effort alongside other work, and larger or more invasive changes take
+longer than small ones — another reason to agree on the approach in the issue
+before writing code.
+
+**Addressing feedback.** Push follow-up commits to the same branch rather than
+force-pushing over the history under review, so reviewers can see what changed;
+squashing happens at merge. Reply to each review comment, and re-request review
+when you have addressed them.
+
+**Following up.** If a pull request has had no response after a week, comment on
+it to bump it. If it stays quiet after that, raise it in
+[Discussions](https://github.com/ai-dynamo/snapshot/discussions) or mention a
+maintainer from [MAINTAINERS.md](MAINTAINERS.md) directly. Pinging is welcome —
+a stalled review is a maintainer oversight, not an imposition.
+
+**Merging.** Maintainers merge; contributors do not need to (and cannot) merge
+their own pull requests. A pull request that goes 90 days without activity is
+labeled `lifecycle/stale` and closed 30 days later, as described below.
+
 ## Triage, priority, and inactivity
 
 Maintainers triage new issues weekly and set a priority label. Only maintainers
