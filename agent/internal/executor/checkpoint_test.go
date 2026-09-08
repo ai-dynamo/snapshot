@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -40,11 +41,16 @@ func TestCheckpointPageBrokerPrepareFailureDoesNotMutate(t *testing.T) {
 		PageBroker: types.PageBrokerSpec{ControlSocketPath: t.TempDir() + "/pagebroker.sock"},
 	}
 
-	err := Checkpoint(context.Background(), checkpointPathRuntime{}, logr.Discard(), CheckpointRequest{
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	start := time.Now()
+	err := Checkpoint(ctx, checkpointPathRuntime{}, logr.Discard(), CheckpointRequest{
 		ContentUID:    "content-uid",
 		ContainerName: "main",
 	}, cfg)
 	require.ErrorContains(t, err, "prepare PageBroker checkpoint")
+	assert.NotContains(t, err.Error(), "abort PageBroker checkpoint")
+	assert.Less(t, time.Since(start), 3*time.Second)
 	assert.False(t, CheckpointNeedsSourceKill(err))
 	assert.NoDirExists(t, filepath.Join(cfg.Storage.BasePath, "artifacts"))
 }

@@ -74,20 +74,28 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	}
 	transactionID := uuid.NewString()
 	broker := pagebroker.Client{ControlSocketPath: cfg.PageBroker.ControlSocketPath}
+	abort := func() error {
+		abortCtx, cancel := context.WithTimeout(context.Background(), pageBrokerAbortTimeout)
+		defer cancel()
+		if err := broker.Abort(abortCtx, transactionID); err != nil {
+			return fmt.Errorf("abort PageBroker checkpoint %q: %w", transactionID, err)
+		}
+		return nil
+	}
+	tmpDir, err := broker.PrepareCheckpoint(ctx, transactionID, finalDir)
+	if err != nil {
+		err = fmt.Errorf("prepare PageBroker checkpoint: %w", err)
+		if pagebroker.IsDialError(err) {
+			return err
+		}
+		return errors.Join(err, abort())
+	}
 	committed := false
 	defer func() {
 		if !committed {
-			abortCtx, cancel := context.WithTimeout(context.Background(), pageBrokerAbortTimeout)
-			defer cancel()
-			if err := broker.Abort(abortCtx, transactionID); err != nil {
-				retErr = errors.Join(retErr, fmt.Errorf("abort PageBroker checkpoint %q: %w", transactionID, err))
-			}
+			retErr = errors.Join(retErr, abort())
 		}
 	}()
-	tmpDir, err := broker.PrepareCheckpoint(ctx, transactionID, finalDir)
-	if err != nil {
-		return fmt.Errorf("prepare PageBroker checkpoint: %w", err)
-	}
 
 	state, gpuDeviceMapDuration, err := inspectContainer(ctx, rt, log, req)
 	if err != nil {

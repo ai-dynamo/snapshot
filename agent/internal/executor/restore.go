@@ -160,6 +160,9 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	staged, err := broker.StagedRestore(ctx, transactionID, artifactPath)
 	pageBrokerStageDuration := time.Since(stageStart)
 	if err != nil {
+		if pagebroker.IsDialError(err) {
+			transactionID = ""
+		}
 		return 0, fmt.Errorf("stage PageBroker restore: %w", err)
 	}
 	mountStart := time.Now()

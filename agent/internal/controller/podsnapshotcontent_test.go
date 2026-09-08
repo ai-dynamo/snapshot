@@ -775,7 +775,9 @@ func TestExecutorCheckpointPageBrokerPrepareFailureDoesNotKill(t *testing.T) {
 		_ = target.Wait()
 	}()
 
-	err := w.executorCheckpoint(context.Background(), CheckpointParams{
+	checkpointCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := w.executorCheckpoint(checkpointCtx, CheckpointParams{
 		Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 			Name:      "worker-0",
 			Namespace: "inference",
