@@ -51,7 +51,7 @@ owners for `agent/`, `operator/`, `api/`, `charts/`, and `docs/` individually.
   [Discussions](https://github.com/ai-dynamo/snapshot/discussions).
 - **Security vulnerabilities** — never in a public issue. Follow
   [SECURITY.md](SECURITY.md).
-- **Code of conduct reports** — contact a maintainer privately, as described in
+- **Code of conduct reports** — email <dbar@nvidia.com>, as described in
   [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 ## Becoming a maintainer

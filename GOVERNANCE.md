@@ -75,6 +75,9 @@ built and published by the `release` workflow. Because Snapshot's APIs may still
 change, releases are currently pre-1.0 and API stability is not yet guaranteed —
 see the note at the top of the [README](README.md).
 
+[RELEASE.md](RELEASE.md) documents the versioning scheme, the tagging
+convention, and the mechanics of cutting a release.
+
 ## Becoming a maintainer
 
 Maintainers are added by consensus of the existing maintainers. The usual path

@@ -105,6 +105,29 @@ Both require Docker.
    `make capture-base-packages` so the committed package baseline matches;
    `verify-base-packages` enforces this.
 
+## Secrets and credentials
+
+**Never commit credentials, secrets, API keys, tokens, kubeconfigs, or `.env`
+files.** This repository contains none, and no change should introduce any.
+Specifically:
+
+- Do not add a `.env` file, a kubeconfig, a cloud credential file, or a private
+  key to the tree, and do not paste any of them into code, tests, fixtures,
+  comments, commit messages, or pull request descriptions.
+- Do not hardcode a registry password, GitHub token, or NGC/NVIDIA API key.
+  Workflows read credentials from GitHub Actions secrets
+  (`${{ secrets.* }}`); local runs read them from your own environment.
+- Do not echo secrets in workflow `run:` blocks or test output — a value printed
+  in a public CI log is disclosed.
+- Test fixtures use obviously fake placeholders. Never copy a real token into
+  one, even an expired one.
+- If you find a committed secret, do not fix it in a public pull request. Treat
+  it as a vulnerability and follow [SECURITY.md](SECURITY.md); the credential
+  needs rotating, and a public commit reverting it advertises the leak.
+
+When a task genuinely needs a credential, read it from an environment variable
+and document the variable name — never the value.
+
 ## Working style
 
 - Match the surrounding code. The repository favors explanatory comments on
