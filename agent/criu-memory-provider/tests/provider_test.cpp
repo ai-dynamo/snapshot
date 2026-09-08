@@ -1,4 +1,3 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 #include <fcntl.h>
@@ -344,14 +343,7 @@ TEST(Plan, WritesLoadsAndVisitsRanges)
 	EXPECT_EQ(range.offset, 0);
 	EXPECT_EQ(range.length, 8);
 	criu_provider_plan_destroy(loaded);
-	const auto legacy_path = path.string() + ".legacy";
-	std::ofstream legacy(legacy_path, std::ios::binary);
-	legacy << plan.value.SerializeAsString();
-	legacy.close();
-	ASSERT_EQ(criu_provider_plan_load(legacy_path.c_str(), &loaded), 0);
-	criu_provider_plan_destroy(loaded);
 	std::filesystem::remove(path);
-	std::filesystem::remove(legacy_path);
 }
 
 TEST(DumpPlan, RecordsProviderAndFallbackImages)

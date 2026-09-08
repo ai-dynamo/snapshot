@@ -1,4 +1,3 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "internal.hpp"
@@ -28,12 +27,10 @@ int DecodePlan(const std::string &bytes, criu_provider::v1::Plan *plan)
 {
 	const auto first = bytes.find_first_not_of(" \t\r\n");
 	if (first == std::string::npos) return -EINVAL;
-	if (bytes[first] == '{') {
-		google::protobuf::util::JsonParseOptions options;
-		options.ignore_unknown_fields = false;
-		return google::protobuf::util::JsonStringToMessage(bytes, plan, options).ok() ? 0 : -EINVAL;
-	}
-	return plan->ParseFromString(bytes) ? 0 : -EINVAL;
+	if (bytes[first] != '{') return -EINVAL;
+	google::protobuf::util::JsonParseOptions options;
+	options.ignore_unknown_fields = false;
+	return google::protobuf::util::JsonStringToMessage(bytes, plan, options).ok() ? 0 : -EINVAL;
 }
 }
 
