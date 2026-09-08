@@ -1,5 +1,10 @@
 # Snapshot
 
+[![CI](https://github.com/ai-dynamo/snapshot/actions/workflows/ci.yml/badge.svg)](https://github.com/ai-dynamo/snapshot/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/ai-dynamo/snapshot?include_prereleases&sort=semver)](https://github.com/ai-dynamo/snapshot/releases)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Contributors](https://img.shields.io/github/contributors/ai-dynamo/snapshot)](https://github.com/ai-dynamo/snapshot/graphs/contributors)
+
 Snapshot is a Kubernetes-native checkpoint and restore system for NVIDIA GPU
 workloads. It checkpoints a fully initialized GPU pod — its running process, with
 CPU and GPU memory — and restores that state on any compatible node, so a pod
@@ -189,6 +194,11 @@ in the Dynamo docs.
 
 Contributions are welcome under the project's [Apache 2.0 license](LICENSE). See
 [CONTRIBUTING.md](CONTRIBUTING.md) — all commits must be signed off (DCO).
+
+Participation in this project is governed by our
+[Code of Conduct](CODE_OF_CONDUCT.md). [MAINTAINERS.md](MAINTAINERS.md) lists
+who reviews and merges changes, and [GOVERNANCE.md](GOVERNANCE.md) describes how
+decisions are made. AI coding agents should also read [AGENTS.md](AGENTS.md).
 
 ## Security
 
