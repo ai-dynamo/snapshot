@@ -1,0 +1,214 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Validate Issue Reference
+
+# Every pull request must link at least one open issue that carries the
+# approval label. The check re-runs automatically when the label is added to or
+# removed from an issue, so contributors do not need to push an empty commit.
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - edited
+      - synchronize
+      - ready_for_review
+      - labeled
+      - unlabeled
+  issues:
+    types:
+      - labeled
+      - unlabeled
+      - closed
+      - reopened
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || format('issue-{0}', github.event.issue.number) }}
+  cancel-in-progress: true
+
+permissions: {}
+
+env:
+  # Label an issue must carry before pull requests referencing it can merge.
+  APPROVED_LABEL: approved
+  # Label on a pull request that waives the issue requirement.
+  BYPASS_LABEL: skip-issue-check
+
+jobs:
+  validate:
+    name: PR links an approved issue
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      # Read the pull request body and the issues it references.
+      contents: read
+      pull-requests: read
+      issues: read
+    steps:
+      - name: Validate issue reference
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pr = context.payload.pull_request;
+            const approvedLabel = process.env.APPROVED_LABEL;
+            const bypassLabel = process.env.BYPASS_LABEL;
+
+            const labels = (pr.labels || []).map(l => l.name);
+            if (labels.includes(bypassLabel)) {
+              core.info(`Pull request is labeled "${bypassLabel}" - skipping the issue requirement.`);
+              return;
+            }
+            if (pr.user && pr.user.type === 'Bot') {
+              core.info(`Pull request was opened by ${pr.user.login} (bot) - skipping the issue requirement.`);
+              return;
+            }
+            if (pr.draft) {
+              core.info('Pull request is a draft - the check runs again when it is marked ready for review.');
+              return;
+            }
+
+            // Drop HTML comments, fenced code blocks, and inline code spans so
+            // template boilerplate, pasted logs, and prose such as `#123` are
+            // not mistaken for an issue reference. GitHub does not render a
+            // reference inside backticks as a link either.
+            const body = (pr.body || '')
+              .replace(/<!--[\s\S]*?-->/g, ' ')
+              .replace(/```[\s\S]*?```/g, ' ')
+              .replace(/`[^`\n]*`/g, ' ');
+
+            const escapeRegExp = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const references = new Set();
+            for (const m of body.matchAll(/#(\d+)\b/g)) {
+              references.add(Number(m[1]));
+            }
+            const urlPattern = new RegExp(
+              `https?://github\\.com/${escapeRegExp(owner)}/${escapeRegExp(repo)}/issues/(\\d+)`, 'gi');
+            for (const m of body.matchAll(urlPattern)) {
+              references.add(Number(m[1]));
+            }
+
+            const howTo =
+              `Link the issue from the pull request description, for example \`Fixes #123\` ` +
+              `or \`Fixes https://github.com/${owner}/${repo}/issues/123\`. ` +
+              `The issue must be open and labeled \`${approvedLabel}\` by a maintainer. ` +
+              `Maintainers can waive this by adding the \`${bypassLabel}\` label to the pull request.`;
+
+            if (references.size === 0) {
+              await core.summary
+                .addHeading('Issue reference missing')
+                .addRaw(howTo)
+                .write();
+              core.setFailed(`This pull request does not reference an issue. ${howTo}`);
+              return;
+            }
+
+            const numbers = [...references].sort((a, b) => a - b);
+            core.info(`Found issue reference(s): ${numbers.map(n => `#${n}`).join(', ')}`);
+
+            const problems = [];
+            let approvedIssue = null;
+
+            for (const number of numbers) {
+              let issue;
+              try {
+                issue = (await github.rest.issues.get({ owner, repo, issue_number: number })).data;
+              } catch (error) {
+                problems.push(error.status === 404
+                  ? `#${number} does not exist`
+                  : `#${number} could not be read: ${error.message}`);
+                continue;
+              }
+
+              if (issue.pull_request) {
+                problems.push(`#${number} is a pull request, not an issue`);
+                continue;
+              }
+              if (issue.state === 'closed') {
+                problems.push(`#${number} is closed`);
+                continue;
+              }
+
+              const issueLabels = (issue.labels || []).map(l => (typeof l === 'string' ? l : l.name));
+              if (!issueLabels.includes(approvedLabel)) {
+                problems.push(`#${number} is open but is not labeled \`${approvedLabel}\``);
+                continue;
+              }
+
+              approvedIssue = number;
+              break;
+            }
+
+            if (approvedIssue === null) {
+              const details = problems.map(p => `- ${p}`).join('\n');
+              await core.summary
+                .addHeading('No approved issue referenced')
+                .addRaw(details, true)
+                .addRaw(howTo)
+                .write();
+              core.setFailed(
+                `None of the referenced issues are open and labeled "${approvedLabel}":\n${details}\n\n${howTo}`);
+              return;
+            }
+
+            core.info(`Issue #${approvedIssue} is open and labeled "${approvedLabel}".`);
+            await core.summary
+              .addHeading('Approved issue referenced')
+              .addRaw(`This pull request references #${approvedIssue}, which is open and labeled \`${approvedLabel}\`.`)
+              .write();
+
+  revalidate:
+    name: Re-run validation for linked pull requests
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    permissions:
+      # Re-run this workflow for the pull requests affected by the issue change.
+      actions: write
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Re-run affected pull request checks
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issueNumber = context.payload.issue.number;
+            const workflowFile = 'validate-issue-references.yaml';
+
+            const referencesIssue = (body) => {
+              const text = (body || '')
+                .replace(/<!--[\s\S]*?-->/g, ' ')
+                .replace(/```[\s\S]*?```/g, ' ')
+                .replace(/`[^`\n]*`/g, ' ');
+              return new RegExp(`(?:#|/issues/)${issueNumber}\\b`).test(text);
+            };
+
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              owner, repo, state: 'open', per_page: 100,
+            });
+            const affected = pulls.filter(pr => referencesIssue(pr.body));
+
+            if (affected.length === 0) {
+              core.info(`No open pull request references issue #${issueNumber}.`);
+              return;
+            }
+
+            for (const pr of affected) {
+              const runs = await github.rest.actions.listWorkflowRuns({
+                owner, repo, workflow_id: workflowFile, head_sha: pr.head.sha, per_page: 20,
+              });
+              // Runs come back newest first; only the latest one shows on the PR.
+              const latest = runs.data.workflow_runs.find(
+                run => run.event === 'pull_request' && run.status === 'completed');
+              if (!latest) {
+                core.info(`PR #${pr.number}: no completed validation run to re-run.`);
+                continue;
+              }
+              try {
+                await github.rest.actions.reRunWorkflow({ owner, repo, run_id: latest.id });
+                core.info(`PR #${pr.number}: re-running validation (run ${latest.id}).`);
+              } catch (error) {
+                core.warning(`PR #${pr.number}: could not re-run ${latest.id}: ${error.message}`);
+              }
+            }

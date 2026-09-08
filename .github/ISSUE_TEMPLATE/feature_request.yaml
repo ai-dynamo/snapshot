@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Feature Request
+description: Suggest a feature or an enhancement for Snapshot
+labels: ["enhancement"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to propose a feature.
+
+        A maintainer labels accepted proposals `approved`. Pull requests can only
+        merge once they reference an issue carrying that label, so please wait for
+        approval before starting significant work.
+
+  - type: textarea
+    id: feature
+    attributes:
+      label: What would you like to be added?
+      description: A clear and concise description of the feature you want in Snapshot.
+    validations:
+      required: true
+
+  - type: textarea
+    id: rationale
+    attributes:
+      label: Why is this needed?
+      description: The problem this solves and who it affects.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which area does this affect?
+      multiple: true
+      options:
+        - operator
+        - agent
+        - api
+        - charts
+        - e2e tests
+        - build and CI
+        - documentation
+        - other or not sure
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: duplicates
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have searched the existing issues and found no duplicate of this request
+          required: true
+
+  - type: markdown
+    attributes:
+      value: Want this feature? Give it a 👍 above.
