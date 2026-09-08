@@ -106,34 +106,6 @@ spec:
               mountPath: /host-seccomp
       {{- end }}
       containers:
-        {{- if .Values.pageBroker.enabled }}
-        - name: pagebroker
-          image: "{{ .Values.image.pageBroker.repository }}:{{ .Values.image.agent.tag | default .Chart.AppVersion }}"
-          imagePullPolicy: {{ .Values.image.pageBroker.pullPolicy }}
-          command:
-          {{- with .Values.pageBroker.command }}
-            {{- toYaml . | nindent 12 }}
-          {{- else }}
-            - /usr/local/bin/pagebroker
-          {{- end }}
-          args:
-            {{- with .Values.pageBroker.args }}
-            {{- toYaml . | nindent 12 }}
-            {{- else }}
-            - {{ printf "%s/pagebroker.sock" $pageBrokerControlPath | quote }}
-            - {{ $pageBrokerStagingPath | quote }}
-            - {{ .Values.storage.pvc.basePath | quote }}
-            - --max-concurrent-requests
-            - {{ .Values.pageBroker.maxConcurrentRequests | quote }}
-            {{- end }}
-          resources:
-            {{- toYaml .Values.pageBroker.resources | nindent 12 }}
-          volumeMounts:
-            - name: pagebroker
-              mountPath: /pagebroker
-            - name: checkpoints
-              mountPath: {{ .Values.storage.pvc.basePath }}
-        {{- end }}
         - name: agent
           image: "{{ .Values.image.agent.repository }}:{{ .Values.image.agent.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.agent.pullPolicy }}
@@ -157,10 +129,8 @@ spec:
             - name: config
               mountPath: /etc/snapshot
               readOnly: true
-            {{- if .Values.pageBroker.enabled }}
             - name: pagebroker
               mountPath: /pagebroker
-            {{- end }}
             {{- if eq .Values.storage.type "pvc" }}
             # Every agent owns direct access to the shared checkpoint store.
             - name: checkpoints
@@ -202,16 +172,33 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.daemonset.resources | nindent 12 }}
+        - name: pagebroker
+          image: "{{ .Values.image.pageBroker.repository }}:{{ .Values.image.agent.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pageBroker.pullPolicy }}
+          args:
+            - {{ printf "%s/pagebroker.sock" $pageBrokerControlPath | quote }}
+            - {{ $pageBrokerStagingPath | quote }}
+            - {{ .Values.storage.pvc.basePath | quote }}
+            - --max-concurrent-requests
+            - {{ .Values.pageBroker.maxConcurrentRequests | quote }}
+          resources:
+            {{- toYaml .Values.pageBroker.resources | nindent 12 }}
+          volumeMounts:
+            - name: pagebroker
+              mountPath: /pagebroker
+            - name: checkpoints
+              mountPath: {{ .Values.storage.pvc.basePath }}
       volumes:
         # Configuration ConfigMap
         - name: config
           configMap:
             name: {{ include "snapshot.fullname" . }}-config
-        {{- if .Values.pageBroker.enabled }}
         - name: pagebroker
           emptyDir:
             medium: Memory
-        {{- end }}
+            {{- with .Values.pageBroker.staging.sizeLimit }}
+            sizeLimit: {{ . | quote }}
+            {{- end }}
         {{- if .Values.seccomp.deploy }}
         # Seccomp profile ConfigMap (used by initContainer)
         - name: seccomp-profiles
