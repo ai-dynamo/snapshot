@@ -20,6 +20,12 @@ limitations under the License.
 Thank you for your interest in contributing to Snapshot! Contributions are
 welcome under the project's [Apache 2.0 license](LICENSE).
 
+Participation in this project is governed by our
+[Code of Conduct](CODE_OF_CONDUCT.md). By taking part, you agree to uphold it —
+please report unacceptable behavior as described there.
+[MAINTAINERS.md](MAINTAINERS.md) lists the maintainers, and
+[GOVERNANCE.md](GOVERNANCE.md) describes how decisions get made.
+
 ## Start with an issue
 
 Every change starts as an issue, and every pull request must link to one.
