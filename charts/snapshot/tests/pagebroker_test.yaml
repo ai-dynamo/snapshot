@@ -77,11 +77,10 @@ tests:
             name: pagebroker
             emptyDir:
               medium: Memory
+              sizeLimit: "64Gi"
 
-  - it: caps the staging volume when pageBroker.staging.sizeLimit is set
+  - it: caps the staging volume at the agent memory limit by default
     template: templates/daemonset.yaml
-    set:
-      pageBroker.staging.sizeLimit: 64Gi
     asserts:
       - contains:
           path: spec.template.spec.volumes
@@ -90,6 +89,43 @@ tests:
             emptyDir:
               medium: Memory
               sizeLimit: "64Gi"
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 64Gi
+
+  - it: honours a pageBroker.staging.sizeLimit override
+    template: templates/daemonset.yaml
+    set:
+      pageBroker.staging.sizeLimit: 128Gi
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: pagebroker
+            emptyDir:
+              medium: Memory
+              sizeLimit: "128Gi"
+
+  - it: renders when reused values carry no pageBroker.staging map
+    template: templates/daemonset.yaml
+    set:
+      pageBroker.staging: null
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: pagebroker
+            emptyDir:
+              medium: Memory
+
+  - it: requests only the idle daemon footprint
+    template: templates/daemonset.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].resources.requests
+          value:
+            cpu: 1
+            memory: 2Gi
 
   - it: follows image.pageBroker overrides
     template: templates/daemonset.yaml

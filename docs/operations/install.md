@@ -22,7 +22,9 @@ by every checkpoint. See [Storage](storage.md) for the volume model and options,
 including reusing an existing claim.
 
 Each agent pod runs two containers: the agent and the PageBroker sidecar, which
-stages checkpoint data in memory and publishes it to the shared volume. See
+stages checkpoint data in memory and publishes it to the shared volume. The pod
+requests 3 CPU and 3Gi of memory per GPU node by default, and its memory limits
+decide the largest checkpoint it can take. See
 [PageBroker staging](storage.md#pagebroker-staging) for how to size it.
 
 ## Verify the installation
