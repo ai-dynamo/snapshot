@@ -4,15 +4,15 @@
 """Resolve the Snapshot image tag for the exact commit under test.
 
 The e2e run must test the commit it checked out, so the tag is derived from
-HEAD (v0.0.0-g<sha8>) and merely verified to be published for both the
-operator and agent packages. If push-artifacts has not published HEAD yet,
+HEAD (v0.0.0-g<sha8>) and merely verified to be published for the operator,
+agent, and pagebroker packages. If push-artifacts has not published HEAD yet,
 the run fails instead of silently testing something else.
 
 Pull requests are the exception: push-artifacts publishes only main and
 release branches, so a PR head usually has no images. With --fallback-main the
 resolver first tries the head's own tags (plain, then the branch-slugged form a
 manual push-artifacts dispatch produces), and otherwise falls back to the
-newest plain v0.0.0-g<sha8> tag published for both packages. Plain tags are
+newest plain v0.0.0-g<sha8> tag published for all packages. Plain tags are
 only ever produced from main/release, so the fallback cannot pick up another
 feature branch's build; it is announced loudly because the Snapshot under test
 is then main's, not the PR's.
@@ -33,7 +33,7 @@ import urllib.request
 GITHUB_API_VERSION = "2022-11-28"
 PAGE_SIZE = 100
 ORG = "ai-dynamo"
-PACKAGES = ("snapshot/operator", "snapshot/agent")
+PACKAGES = ("snapshot/operator", "snapshot/agent", "snapshot/pagebroker")
 PLAIN_DEV_TAG = re.compile(r"^v0\.0\.0-g[0-9a-f]{8}$")
 
 
@@ -114,7 +114,7 @@ def newest_plain_tag(headers: dict[str, str]) -> str | None:
     """Newest plain dev tag published for every package.
 
     GHCR lists versions newest first, so the first operator tag also present
-    on the agent package is the newest common one.
+    on every other package is the newest common one.
     """
     per_package = [
         [tag for v in package_versions(p, headers) for tag in version_tags(v) if PLAIN_DEV_TAG.match(tag)]
@@ -197,7 +197,7 @@ def main() -> int:
     # a green run must be able to see it did not test this commit's Snapshot.
     print(
         f"::warning title=Snapshot images not built for this commit::"
-        f"Commit {sha} has no published operator/agent images; testing against "
+        f"Commit {sha} has no published operator/agent/pagebroker images; testing against "
         f"{fallback} (newest main build). Dispatch push-artifacts on this branch "
         "and re-run to test the commit's own Snapshot."
     )
@@ -206,7 +206,7 @@ def main() -> int:
         with open(summary, "a", encoding="utf-8") as handle:
             handle.write(
                 f"> **Snapshot images not built for this commit.** Tested against `{fallback}` "
-                f"(newest main build); commit `{sha[:8]}` has no published operator/agent images.\n"
+                f"(newest main build); commit `{sha[:8]}` has no published operator/agent/pagebroker images.\n"
             )
     print(f"Resolved Snapshot image tag: {fallback} (fallback; commit {sha} unpublished)")
     return 0
