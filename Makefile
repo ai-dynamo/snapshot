@@ -142,5 +142,5 @@ docker-build-operator:
 	  $(foreach t,$(TAGS),-t $(REGISTRY)/operator:$(t)) .
 
 docker-build-pagebroker:
-	docker buildx build $(DOCKER_BUILD_ARGS) -f agent/pagebroker/Dockerfile \
+	docker buildx build $(DOCKER_BUILD_ARGS) --platform "$(AGENT_PLATFORM)" -f agent/pagebroker/Dockerfile \
 	  $(foreach t,$(TAGS),-t $(REGISTRY)/pagebroker:$(t)) agent/pagebroker/

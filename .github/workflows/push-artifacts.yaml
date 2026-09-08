@@ -209,8 +209,7 @@ jobs:
         run: |
           make docker-build-pagebroker \
             TAGS="${{ needs.version.outputs.tags }}" \
-            DOCKER_BUILD_ARGS="--platform=linux/amd64 \
-              --push \
+            DOCKER_BUILD_ARGS="--push \
               --cache-from=type=gha,scope=pagebroker \
               --cache-to=type=gha,scope=pagebroker,mode=max"
 
