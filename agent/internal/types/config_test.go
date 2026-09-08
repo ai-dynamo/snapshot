@@ -18,6 +18,7 @@ func validAgentConfig() *AgentConfig {
 		Restore: RestoreSpec{
 			RestoreTimeoutSeconds: 60,
 		},
+		PageBroker: PageBrokerSpec{ControlSocketPath: "/pagebroker/control/pagebroker.sock"},
 	}
 }
 
@@ -52,7 +53,7 @@ func TestAgentConfigValidateRequiresFixedStorageBasePath(t *testing.T) {
 
 func TestAgentConfigValidateRequiresPageBrokerControlSocket(t *testing.T) {
 	cfg := validAgentConfig()
-	cfg.PageBroker.Enabled = true
+	cfg.PageBroker.ControlSocketPath = ""
 
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error for missing PageBroker control socket")
