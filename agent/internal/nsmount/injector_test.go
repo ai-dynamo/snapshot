@@ -51,15 +51,6 @@ func (m *mockMounter) MountBundle(_ context.Context, pid int) (mountRef, error) 
 	return m.mount("bundle", pid, "")
 }
 
-func (m *mockMounter) MountCheckpoint(_ context.Context, nsFd *os.File, src string) (mountRef, error) {
-	i := len(m.calls)
-	m.calls = append(m.calls, mountCall{role: "checkpoint", nsFd: nsFd, src: src})
-	if i < len(m.results) && m.results[i] != nil {
-		return nil, m.results[i]
-	}
-	return &fakeMountRef{dst: "checkpoint", unmountLog: &m.unmountLog}, nil
-}
-
 func (m *mockMounter) MountPageBroker(_ context.Context, nsFd *os.File, src string) (mountRef, error) {
 	i := len(m.calls)
 	m.calls = append(m.calls, mountCall{role: "pagebroker", nsFd: nsFd, src: src})
@@ -93,13 +84,13 @@ func TestRoleMountsUseFixedPathsAndPolicies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MountBundle: %v", err)
 	}
-	if _, err := nsm.MountArtifact(context.Background(), bundle, "/checkpoints/artifacts/content-uid/containers/main"); err != nil {
-		t.Fatalf("MountArtifact: %v", err)
+	if _, err := nsm.MountPageBroker(context.Background(), bundle, "/pagebroker/staging/restore/tx-1"); err != nil {
+		t.Fatalf("MountPageBroker: %v", err)
 	}
 
 	want := []mountCall{
 		{role: "bundle", pid: testPID},
-		{role: "checkpoint", src: "/checkpoints/artifacts/content-uid/containers/main"},
+		{role: "pagebroker", src: "/pagebroker/staging/restore/tx-1"},
 	}
 	if len(m.calls) != len(want) {
 		t.Fatalf("got %d calls, want %d", len(m.calls), len(want))
@@ -110,24 +101,26 @@ func TestRoleMountsUseFixedPathsAndPolicies(t *testing.T) {
 		}
 	}
 	if m.calls[1].nsFd != bundle.NsFd() {
-		t.Fatal("checkpoint mount did not reuse the bundle's pinned namespace fd")
+		t.Fatal("PageBroker mount did not reuse the bundle's pinned namespace fd")
 	}
 }
 
-func TestMountArtifactRejectsUnsafeSourceBeforeHelper(t *testing.T) {
+func TestMountPageBrokerRejectsUnsafeSourceBeforeHelper(t *testing.T) {
 	for _, source := range []string{
 		"/etc",
 		"/proc",
-		"/checkpoints-other/abc",
-		"/checkpoints/../etc",
-		"/checkpoints/abc;id",
-		"/checkpoints/abc id",
-		"/checkpoints/é",
+		"/checkpoints/artifacts/content-uid/containers/main",
+		"/pagebroker/staging/checkpoint/tx",
+		"/pagebroker/staging/restore-other/tx",
+		"/pagebroker/staging/restore/../etc",
+		"/pagebroker/staging/restore/tx;id",
+		"/pagebroker/staging/restore/tx id",
+		"/pagebroker/staging/restore/é",
 	} {
 		t.Run(source, func(t *testing.T) {
 			m := &mockMounter{}
-			if _, err := newMounter(t, m).MountArtifact(context.Background(), noopNamespaceMount{}, source); err == nil {
-				t.Fatalf("MountArtifact(%q) succeeded", source)
+			if _, err := newMounter(t, m).MountPageBroker(context.Background(), noopNamespaceMount{}, source); err == nil {
+				t.Fatalf("MountPageBroker(%q) succeeded", source)
 			}
 			if len(m.calls) != 0 {
 				t.Fatalf("helper called for invalid source %q", source)

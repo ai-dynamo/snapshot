@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/go-logr/logr"
 )
 
@@ -19,11 +18,6 @@ const (
 	SnapshotBinSrc = "/snapshot-binaries"
 	// SnapshotBinDst is the mount destination inside the placeholder namespace.
 	SnapshotBinDst = "/tmp/snapshot-binaries"
-	// CheckpointSrc is the fixed agent-side checkpoint mount.
-	CheckpointSrc = types.CheckpointBasePath
-	// CheckpointDst is the mount destination for checkpoint data inside the
-	// placeholder namespace.
-	CheckpointDst = "/tmp/checkpoint"
 	// PageBrokerRestoreSrc is the agent-side PageBroker restore staging root.
 	PageBrokerRestoreSrc = "/pagebroker/staging/restore"
 	// PageBrokerDst is the mount destination for PageBroker staging inside the placeholder namespace.
@@ -42,7 +36,7 @@ type MountPoint interface {
 	NsFd() *os.File
 }
 
-// NSMounter installs the binary bundle and a selected checkpoint artifact at
+// NSMounter installs the binary bundle and a staged PageBroker restore at
 // their fixed destinations in a placeholder container's mount namespace.
 type NSMounter struct {
 	mounter mounter
@@ -72,25 +66,8 @@ func (nsm *NSMounter) MountBundle(ctx context.Context, pid int) (MountPoint, err
 	return &mountPoint{mount: ref}, nil
 }
 
-// MountArtifact exposes one validated checkpoint artifact read-only and
-// non-executable in the namespace pinned by namespaceMount.
-func (nsm *NSMounter) MountArtifact(ctx context.Context, namespaceMount MountPoint, src string) (MountPoint, error) {
-	if err := validateWithin(CheckpointSrc, src); err != nil {
-		return nil, err
-	}
-	if namespaceMount == nil || namespaceMount.NsFd() == nil {
-		return nil, fmt.Errorf("mount artifact: pinned mount namespace is required")
-	}
-	nsm.log.Info("mounting checkpoint into placeholder namespace", "src", src)
-	ref, err := nsm.mounter.MountCheckpoint(ctx, namespaceMount.NsFd(), src)
-	if err != nil {
-		return nil, err
-	}
-	return &mountPoint{mount: ref}, nil
-}
-
-// MountPageBroker exposes a staged PageBroker restore using the namespace
-// already pinned for the agent bundle.
+// MountPageBroker exposes a staged PageBroker restore read-only and
+// non-executable in the namespace already pinned for the agent bundle.
 func (nsm *NSMounter) MountPageBroker(ctx context.Context, namespaceMount MountPoint, src string) (MountPoint, error) {
 	if err := validateWithin(PageBrokerRestoreSrc, src); err != nil {
 		return nil, err
@@ -98,6 +75,7 @@ func (nsm *NSMounter) MountPageBroker(ctx context.Context, namespaceMount MountP
 	if namespaceMount == nil || namespaceMount.NsFd() == nil {
 		return nil, fmt.Errorf("mount PageBroker: pinned mount namespace is required")
 	}
+	nsm.log.Info("mounting PageBroker staging into placeholder namespace", "src", src)
 	ref, err := nsm.mounter.MountPageBroker(ctx, namespaceMount.NsFd(), src)
 	if err != nil {
 		return nil, err
