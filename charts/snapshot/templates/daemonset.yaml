@@ -196,7 +196,7 @@ spec:
         - name: pagebroker
           emptyDir:
             medium: Memory
-            {{- with .Values.pageBroker.staging.sizeLimit }}
+            {{- with (.Values.pageBroker.staging | default dict).sizeLimit }}
             sizeLimit: {{ . | quote }}
             {{- end }}
         {{- if .Values.seccomp.deploy }}
