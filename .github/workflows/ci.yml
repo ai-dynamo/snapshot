@@ -80,6 +80,13 @@ jobs:
             e2e/tests/test_framework_manifests.py \
             e2e/tests/test_workload_scripts.py -vv
 
+  helm-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: helm plugin install https://github.com/helm-unittest/helm-unittest
+      - run: helm unittest charts/snapshot/
+
   pagebroker-image:
     runs-on: ubuntu-latest
     steps:
