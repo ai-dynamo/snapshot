@@ -32,9 +32,11 @@ change, so minor versions can carry breaking changes until 1.0. Release
 candidates (`-rcN`) are published ahead of a stable release for integration
 testing.
 
-There is no fixed calendar cadence. Releases are cut when the maintainers judge
-that enough has landed to be worth shipping, and release candidates precede any
-release that changes the CRDs or the checkpoint or restore contract.
+Snapshot releases monthly. The maintainers cut a release once a month from
+whatever has landed on `main`; a month with nothing user-visible to ship can be
+skipped rather than padded. Release candidates precede any release that changes
+the CRDs or the checkpoint or restore contract, so integrators have a version to
+test against before the stable tag.
 
 ## Who can cut a release
 
