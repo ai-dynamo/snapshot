@@ -30,7 +30,7 @@ concurrency:
 permissions: {}
 
 env:
-  # Label an issue must carry before pull requests referencing it can merge.
+  # Label an issue must carry for a pull request referencing it to pass.
   APPROVED_LABEL: approved
   # Label on a pull request that waives the issue requirement.
   BYPASS_LABEL: skip-issue-check
@@ -40,6 +40,7 @@ jobs:
     name: PR links an approved issue
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       # Read the pull request body and the issues it references.
       contents: read
@@ -47,7 +48,7 @@ jobs:
       issues: read
     steps:
       - name: Validate issue reference
-        uses: actions/github-script@v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const { owner, repo } = context.repo;
@@ -162,6 +163,7 @@ jobs:
     name: Re-run validation for linked pull requests
     if: github.event_name == 'issues'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       # Re-run this workflow for the pull requests affected by the issue change.
       actions: write
@@ -169,7 +171,7 @@ jobs:
       pull-requests: read
     steps:
       - name: Re-run affected pull request checks
-        uses: actions/github-script@v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const { owner, repo } = context.repo;
@@ -194,16 +196,44 @@ jobs:
               return;
             }
 
+            // A run that is still executing may have read the issue labels
+            // before this change landed, and GitHub offers no completion event
+            // to retry on, so wait for it rather than dropping the request.
+            const waitForCompletion = async (runId, prNumber) => {
+              const deadline = Date.now() + 10 * 60 * 1000;
+              while (Date.now() < deadline) {
+                await new Promise(resolve => setTimeout(resolve, 15000));
+                const { data: run } = await github.rest.actions.getWorkflowRun({
+                  owner, repo, run_id: runId,
+                });
+                if (run.status === 'completed') {
+                  return run;
+                }
+              }
+              core.warning(
+                `PR #${prNumber}: validation run ${runId} did not finish in time. ` +
+                'Re-run it by hand to pick up the label change.');
+              return null;
+            };
+
             for (const pr of affected) {
               const runs = await github.rest.actions.listWorkflowRuns({
                 owner, repo, workflow_id: workflowFile, head_sha: pr.head.sha, per_page: 20,
               });
               // Runs come back newest first; only the latest one shows on the PR.
-              const latest = runs.data.workflow_runs.find(
-                run => run.event === 'pull_request' && run.status === 'completed');
+              let latest = runs.data.workflow_runs.find(run => run.event === 'pull_request');
               if (!latest) {
-                core.info(`PR #${pr.number}: no completed validation run to re-run.`);
+                core.info(`PR #${pr.number}: no validation run to re-run.`);
                 continue;
+              }
+              if (latest.status !== 'completed') {
+                core.info(
+                  `PR #${pr.number}: validation run ${latest.id} is ${latest.status}; ` +
+                  'waiting for it to finish before re-running.');
+                latest = await waitForCompletion(latest.id, pr.number);
+                if (!latest) {
+                  continue;
+                }
               }
               try {
                 await github.rest.actions.reRunWorkflow({ owner, repo, run_id: latest.id });

@@ -11,26 +11,35 @@ on:
   schedule:
     - cron: "21 4 * * *"
 
+# A manual run must not overlap the nightly one; two passes over the same issue
+# would duplicate its stale comment.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 permissions: {}
 
 jobs:
   stale:
+    name: Mark and close inactive issues and pull requests
     permissions:
-      actions: write
+      # Label, comment on, and close inactive issues and pull requests.
       issues: write
       pull-requests: write
+      # Required by actions/stale to persist its cursor between runs.
+      actions: write
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     steps:
-      - uses: actions/stale@v11
+      - uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93 # v11.0.0
         with:
           days-before-stale: 90
           stale-issue-label: 'lifecycle/stale'
           stale-issue-message: 'This issue is stale because it has been open 90 days with no activity. This issue will be closed in 30 days unless new comments are made or the stale label is removed. To skip these checks, apply the "lifecycle/frozen" label.'
           close-issue-message: 'This issue was automatically closed due to inactivity.'
           days-before-issue-close: 30
-          exempt-issue-labels: 'lifecycle/frozen,feature,enhancement'
+          exempt-issue-labels: 'lifecycle/frozen'
           stale-pr-label: 'lifecycle/stale'
           stale-pr-message: 'This pull request is stale because it has been open 90 days with no activity. It will be closed in 30 days unless new comments are made or the stale label is removed. To skip these checks, apply the "lifecycle/frozen" label.'
           close-pr-message: 'This pull request was automatically closed due to inactivity.'

@@ -11,9 +11,9 @@ body:
       value: |
         Thanks for taking the time to propose a feature.
 
-        A maintainer labels accepted proposals `approved`. Pull requests can only
-        merge once they reference an issue carrying that label, so please wait for
-        approval before starting significant work.
+        A maintainer labels accepted proposals `approved`. A pull request has to
+        pass a check confirming that it references an issue carrying that label,
+        so please wait for approval before starting significant work.
 
   - type: textarea
     id: feature
