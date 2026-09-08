@@ -292,28 +292,6 @@ func TestSkipCompatCheckTurnsOffTheGates(t *testing.T) {
 		}
 	})
 
-	// The node switch is read per restore, not once at startup, which is what
-	// makes flipping the ConfigMap enough to be heard.
-	t.Run("the node config is re-read for every restore", func(t *testing.T) {
-		r := newGatedRestore(t, mismatch)
-		reads := 0
-		r.controller.skipCompatCheckFn = func() bool {
-			reads++
-			return reads > 1
-		}
-		stopEarly(r)
-
-		r.reconcile(t)
-		require.Len(t, r.comparison.calls, 1, "gate did not run while the switch was off")
-
-		r.pod.Status.Conditions = nil
-		r.controller.handledRestores.Delete(string(r.pod.UID))
-		r.reconcile(t)
-
-		assert.Len(t, r.comparison.calls, 1, "gate ran after the switch was flipped on")
-		assert.Equal(t, 2, reads)
-	})
-
 	// The annotation has to reach a pod the gate already turned down, or the
 	// only way out of a wrong refusal is deleting and recreating the pod.
 	t.Run("it reopens a pod that was already refused", func(t *testing.T) {

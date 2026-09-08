@@ -93,7 +93,7 @@ func limitString(limits corev1.ResourceList, name corev1.ResourceName) string {
 }
 
 func (w *NodeController) skipCompatCheckRequested(pod *corev1.Pod) bool {
-	return w.skipCompatCheckFn() ||
+	return w.config.Restore.SkipCompatCheck ||
 		podcontract.SkipCompatCheckFromAnnotations(pod.Annotations)
 }
 
