@@ -585,16 +585,15 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 	log := logr.FromContextOrDiscard(ctx)
 
 	req := executor.CheckpointRequest{
-		ContainerID:         params.ContainerID,
-		ContainerName:       params.ContainerName,
-		ContentUID:          params.ContentUID,
-		StartedAt:           params.StartedAt,
-		NodeName:            w.config.NodeName,
-		PodName:             params.Pod.Name,
-		PodNamespace:        params.Pod.Namespace,
-		PodIP:               params.Pod.Status.PodIP,
-		Clientset:           w.clientset,
-		PageBrokerRequested: params.Pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] == snapshotv1alpha1.PageBrokerAnnotationEnabled,
+		ContainerID:   params.ContainerID,
+		ContainerName: params.ContainerName,
+		ContentUID:    params.ContentUID,
+		StartedAt:     params.StartedAt,
+		NodeName:      w.config.NodeName,
+		PodName:       params.Pod.Name,
+		PodNamespace:  params.Pod.Namespace,
+		PodIP:         params.Pod.Status.PodIP,
+		Clientset:     w.clientset,
 	}
 	if err := executor.Checkpoint(ctx, w.runtime, log, req, w.config); err != nil {
 		if executor.CheckpointNeedsSourceKill(err) {

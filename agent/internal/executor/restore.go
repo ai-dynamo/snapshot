@@ -32,7 +32,6 @@ import (
 // artifact inside a placeholder container's mount namespace.
 type RestoreMounter interface {
 	MountBundle(ctx context.Context, pid int) (nsmount.MountPoint, error)
-	MountArtifact(ctx context.Context, namespaceMount nsmount.MountPoint, artifactPath string) (nsmount.MountPoint, error)
 	MountPageBroker(ctx context.Context, namespaceMount nsmount.MountPoint, stagingPath string) (nsmount.MountPoint, error)
 }
 
@@ -77,8 +76,6 @@ type RestoreRequest struct {
 	ArtifactContainerName       string
 	DestinationContainerName    string
 	Clientset                   kubernetes.Interface
-	PageBrokerRequested         bool
-	PageBrokerEnabled           bool
 	PageBrokerControlSocketPath string
 }
 
@@ -95,9 +92,8 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		return 0, fmt.Errorf("restore mounter is required")
 	}
 
-	brokered := req.PageBrokerRequested && req.PageBrokerEnabled
 	transactionID := ""
-	var broker pagebroker.Client
+	broker := pagebroker.Client{ControlSocketPath: req.PageBrokerControlSocketPath}
 	committed := false
 	defer func() {
 		if transactionID != "" && !committed {
@@ -159,57 +155,39 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		point:  bundleMount,
 	})
 
-	containerCheckpointPath := nsmount.CheckpointDst
-	var pageBrokerStageDuration, pageBrokerMountDuration, pageBrokerCommitDuration time.Duration
-	if brokered {
-		transactionID = uuid.NewString()
-		broker = pagebroker.Client{ControlSocketPath: req.PageBrokerControlSocketPath}
-		stageStart := time.Now()
-		staged, err := broker.StagedRestore(ctx, transactionID, artifactPath)
-		pageBrokerStageDuration = time.Since(stageStart)
-		if err != nil {
-			return 0, fmt.Errorf("stage PageBroker restore: %w", err)
-		}
-		mountStart := time.Now()
-		stagingMount, err := mounts.MountPageBroker(ctx, bundleMount, staged)
-		pageBrokerMountDuration = time.Since(mountStart)
-		if err != nil {
-			return 0, fmt.Errorf("mount PageBroker staging: %w", err)
-		}
-		activeMounts = append(activeMounts, restoreMount{
-			action: "unmount PageBroker staging from placeholder",
-			point:  stagingMount,
-		})
-		containerCheckpointPath = nsmount.PageBrokerDst
-	} else {
-		artifactMount, err := mounts.MountArtifact(ctx, bundleMount, artifactPath)
-		if err != nil {
-			return 0, fmt.Errorf("mount checkpoint artifact into placeholder: %w", err)
-		}
-		activeMounts = append(activeMounts, restoreMount{
-			action: "unmount checkpoint artifact from placeholder",
-			point:  artifactMount,
-		})
+	transactionID = uuid.NewString()
+	stageStart := time.Now()
+	staged, err := broker.StagedRestore(ctx, transactionID, artifactPath)
+	pageBrokerStageDuration := time.Since(stageStart)
+	if err != nil {
+		return 0, fmt.Errorf("stage PageBroker restore: %w", err)
 	}
+	mountStart := time.Now()
+	stagingMount, err := mounts.MountPageBroker(ctx, bundleMount, staged)
+	pageBrokerMountDuration := time.Since(mountStart)
+	if err != nil {
+		return 0, fmt.Errorf("mount PageBroker staging: %w", err)
+	}
+	activeMounts = append(activeMounts, restoreMount{
+		action: "unmount PageBroker staging from placeholder",
+		point:  stagingMount,
+	})
 
-	result, err := execNSRestore(ctx, log, req, snap, bundleMount, containerCheckpointPath)
+	result, err := execNSRestore(ctx, log, req, snap, bundleMount, nsmount.PageBrokerDst)
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
 	}
-	if brokered {
-		stagingMount := activeMounts[len(activeMounts)-1]
-		if err := stagingMount.point.Unmount(ctx); err != nil {
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("%s: %w", stagingMount.action, err))
-		}
-		activeMounts = activeMounts[:len(activeMounts)-1]
-		commitStart := time.Now()
-		if err := broker.Commit(ctx, transactionID); err != nil {
-			log.Error(err, "failed to commit PageBroker restore")
-		} else {
-			committed = true
-		}
-		pageBrokerCommitDuration = time.Since(commitStart)
+	if err := stagingMount.Unmount(ctx); err != nil {
+		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("unmount PageBroker staging from placeholder: %w", err))
 	}
+	activeMounts = activeMounts[:len(activeMounts)-1]
+	commitStart := time.Now()
+	if err := broker.Commit(ctx, transactionID); err != nil {
+		log.Error(err, "failed to commit PageBroker restore")
+	} else {
+		committed = true
+	}
+	pageBrokerCommitDuration := time.Since(commitStart)
 	if result.CleanupError != nil {
 		cleanupErr = errors.Join(cleanupErr, result.CleanupError)
 	}

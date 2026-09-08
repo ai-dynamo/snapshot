@@ -15,7 +15,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
 
@@ -35,33 +34,19 @@ func (checkpointPathRuntime) ResolveContainerByPod(context.Context, string, stri
 
 func (checkpointPathRuntime) Close() error { return nil }
 
-func TestCheckpointPreparesContentArtifactParents(t *testing.T) {
-	cfg := &types.AgentConfig{Storage: types.StorageSpec{BasePath: t.TempDir()}}
-	finalDir, err := nsmount.ResolveArtifactPath(cfg.Storage.BasePath, "content-uid", "main")
-	require.NoError(t, err)
-
-	err = Checkpoint(context.Background(), checkpointPathRuntime{}, logr.Discard(), CheckpointRequest{
-		ContentUID:    "content-uid",
-		ContainerName: "main",
-	}, cfg)
-	require.ErrorContains(t, err, "stop after path preparation")
-	assert.DirExists(t, filepath.Dir(finalDir))
-	assert.DirExists(t, filepath.Join(cfg.Storage.BasePath, "artifacts", "content-uid", ".tmp"))
-}
-
 func TestCheckpointPageBrokerPrepareFailureDoesNotMutate(t *testing.T) {
 	cfg := &types.AgentConfig{
 		Storage:    types.StorageSpec{BasePath: t.TempDir()},
-		PageBroker: types.PageBrokerSpec{Enabled: true, ControlSocketPath: t.TempDir() + "/pagebroker.sock"},
+		PageBroker: types.PageBrokerSpec{ControlSocketPath: t.TempDir() + "/pagebroker.sock"},
 	}
 
 	err := Checkpoint(context.Background(), checkpointPathRuntime{}, logr.Discard(), CheckpointRequest{
-		ContentUID:          "content-uid",
-		ContainerName:       "main",
-		PageBrokerRequested: true,
+		ContentUID:    "content-uid",
+		ContainerName: "main",
 	}, cfg)
 	require.ErrorContains(t, err, "prepare PageBroker checkpoint")
 	assert.False(t, CheckpointNeedsSourceKill(err))
+	assert.NoDirExists(t, filepath.Join(cfg.Storage.BasePath, "artifacts"))
 }
 
 func TestCheckpointNeedsSourceKill(t *testing.T) {

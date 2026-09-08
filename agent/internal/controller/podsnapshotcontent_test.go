@@ -768,10 +768,7 @@ func TestRunCheckpoint_WritesFailedOnError(t *testing.T) {
 
 func TestExecutorCheckpointPageBrokerPrepareFailureDoesNotKill(t *testing.T) {
 	w := makeNodeController(t, &fakeCheckpointer{})
-	w.config.PageBroker = snapshottypes.PageBrokerSpec{
-		Enabled:           true,
-		ControlSocketPath: filepath.Join(t.TempDir(), "pagebroker.sock"),
-	}
+	w.config.PageBroker = snapshottypes.PageBrokerSpec{ControlSocketPath: filepath.Join(t.TempDir(), "pagebroker.sock")}
 	ctx, target := startKillableTarget(t)
 	defer func() {
 		_ = target.Process.Kill()
@@ -782,9 +779,6 @@ func TestExecutorCheckpointPageBrokerPrepareFailureDoesNotKill(t *testing.T) {
 		Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 			Name:      "worker-0",
 			Namespace: "inference",
-			Annotations: map[string]string{
-				snapshotv1alpha1.PageBrokerAnnotation: snapshotv1alpha1.PageBrokerAnnotationEnabled,
-			},
 		}},
 		ContainerName: "main",
 		ContainerID:   "abc123",
