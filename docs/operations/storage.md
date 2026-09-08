@@ -1,8 +1,8 @@
 # Storage
 
 Snapshot keeps every checkpoint in a single shared volume that all node agents
-mount. Each agent reads and writes checkpoint artifacts there; workload pods never
-mount checkpoint storage.
+mount. Each agent's PageBroker sidecar publishes checkpoint artifacts there and
+reads them back for restore; workload pods never mount checkpoint storage.
 
 ## The checkpoint volume
 
@@ -15,13 +15,13 @@ mounts it at `/checkpoints` in every agent.
 
 The chart's `storage.pvc` values control the PVC:
 
-| Value | Purpose | Default |
-|-------|---------|---------|
-| `storage.pvc.create` | Create the PVC (set `false` to use an existing one) | `true` |
-| `storage.pvc.name` | Shared RWX PVC mounted by every agent | `snapshot-pvc` |
-| `storage.pvc.size` | Requested size | `1Ti` |
-| `storage.pvc.storageClass` | Storage class (empty = cluster default) | `""` |
-| `storage.pvc.basePath` | Mount path inside the agent | `/checkpoints` |
+| Value                      | Purpose                                             | Default        |
+|----------------------------|-----------------------------------------------------|----------------|
+| `storage.pvc.create`       | Create the PVC (set `false` to use an existing one) | `true`         |
+| `storage.pvc.name`         | Shared RWX PVC mounted by every agent               | `snapshot-pvc` |
+| `storage.pvc.size`         | Requested size                                      | `1Ti`          |
+| `storage.pvc.storageClass` | Storage class (empty = cluster default)             | `""`           |
+| `storage.pvc.basePath`     | Mount path inside the agent                         | `/checkpoints` |
 
 If the cluster has no default storage class that can provision RWX, set one:
 
@@ -65,11 +65,38 @@ the sidecar:
 
 Because the staging volume is RAM, size the agent pod for it:
 
-| Value | Purpose | Default |
-|-------|---------|---------|
-| `pageBroker.staging.sizeLimit` | Cap on the shared staging volume; empty lets the kubelet derive it from pod memory limits | `""` |
-| `daemonset.resources.limits.memory` | Bounds the largest checkpoint image, since CRIU writes staging from the agent container | `64Gi` |
-| `pageBroker.resources.limits.memory` | Bounds restore prefetch, since PageBroker fills staging on restore | `256Gi` |
+| Value                                | Purpose                                                                                 | Default     |
+|--------------------------------------|-----------------------------------------------------------------------------------------|-------------|
+| `pageBroker.staging.sizeLimit`       | Cap on the shared staging volume. PageBroker refuses a restore that does not fit        | `64Gi`      |
+| `daemonset.resources.limits.memory`  | Bounds the largest checkpoint image, since CRIU writes staging from the agent container | `64Gi`      |
+| `pageBroker.resources.limits.memory` | Bounds restore prefetch, since PageBroker fills staging on restore                      | `256Gi`     |
+| `pageBroker.resources.requests`      | Idle footprint of the daemon; added to the agent's requests when scheduling             | 1 CPU / 2Gi |
+
+Pages written to the staging volume are charged to the container that wrote
+them, not to the volume. Keep `sizeLimit` at or below the smaller of the two
+memory limits so that an oversized transfer fails PageBroker's capacity check
+with `INSUFFICIENT_STORAGE` instead of OOM-killing the writer. Leaving
+`sizeLimit` empty sizes the tmpfs from node allocatable memory, which is larger
+than either limit and defeats that check.
+
+To checkpoint workloads whose CPU memory exceeds the defaults, raise all three
+together, for example for images up to 200Gi:
+
+```bash
+helm upgrade snapshot ... \
+  --set daemonset.resources.limits.memory=200Gi \
+  --set pageBroker.resources.limits.memory=200Gi \
+  --set pageBroker.staging.sizeLimit=200Gi
+```
+
+Each agent pod requests 3 CPU and 3Gi of memory in total by default, so it
+schedules on any GPU node the agent alone would have fit on. Limits are not
+checked at scheduling time.
+
+When upgrading from a chart that shipped without PageBroker, do not use
+`helm upgrade --reuse-values`: it keeps the previous chart's defaults, including
+the old 4Gi agent memory limit. Use `--reset-then-reuse-values` or pass your
+overrides explicitly.
 
 ## Retention
 
