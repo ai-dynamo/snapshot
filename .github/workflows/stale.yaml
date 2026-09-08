@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Stale policy: no activity for 90 days marks an item stale, and 30 more days of
+# silence closes it. The `lifecycle/frozen` label exempts an item from the
+# policy. See CONTRIBUTING.md.
+name: Stale issues
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "21 4 * * *"
+
+# A manual run must not overlap the nightly one; two passes over the same issue
+# would duplicate its stale comment.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  stale:
+    name: Mark and close inactive issues and pull requests
+    permissions:
+      # Label, comment on, and close inactive issues and pull requests.
+      issues: write
+      pull-requests: write
+      # Required by actions/stale to persist its cursor between runs.
+      actions: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/stale@v11
+        with:
+          days-before-stale: 90
+          stale-issue-label: 'lifecycle/stale'
+          stale-issue-message: 'This issue is stale because it has been open 90 days with no activity. This issue will be closed in 30 days unless new comments are made or the stale label is removed. To skip these checks, apply the "lifecycle/frozen" label.'
+          close-issue-message: 'This issue was automatically closed due to inactivity.'
+          days-before-issue-close: 30
+          exempt-issue-labels: 'lifecycle/frozen'
+          stale-pr-label: 'lifecycle/stale'
+          stale-pr-message: 'This pull request is stale because it has been open 90 days with no activity. It will be closed in 30 days unless new comments are made or the stale label is removed. To skip these checks, apply the "lifecycle/frozen" label.'
+          close-pr-message: 'This pull request was automatically closed due to inactivity.'
+          days-before-pr-close: 30
+          exempt-pr-labels: 'lifecycle/frozen'
+          remove-stale-when-updated: true
+          operations-per-run: 1000
