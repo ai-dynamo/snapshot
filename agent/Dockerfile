@@ -28,6 +28,7 @@ ARG GO_VERSION=1.26.6
 ARG CRIU_REPO=https://github.com/dfeigin-nv/criu.git
 ARG CRIU_REF=78ef07f8d84bf2f8cd7d982ef1f99244274f0222
 ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04@sha256:8315e2455736c4f9b597f15c5fb4d31f834e798e0c6b66bbdbdbac491ce26bd1
+ARG S3_RUNTIME_IMAGE=nvcr.io/nvidian/dynamo-dev/dynamo-vllm-placeholder:cs11584-lz4
 
 # For placeholder target only - this default allows agent builds to succeed,
 # but placeholder builds MUST override it with --build-arg BASE_IMAGE=<image>
@@ -93,6 +94,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN make -C criu-memory-provider clean all && make -C pagebroker daemon
+
+# The S3 provider POC uses the existing Model Streamer ABI for restore and
+# s5cmd for checkpoint upload. They are loaded only when PAGEBROKER_S3_MOVER
+# is configured.
+FROM ${S3_RUNTIME_IMAGE} AS s3-runtime
+FROM peakcom/s5cmd:v2.3.0 AS s5cmd-runtime
 
 # =============================================================================
 # Stage: Builder - Build Go binaries
@@ -257,6 +264,10 @@ RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-help
 # Copy the built binaries
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
 COPY --from=pagebroker-builder /workspace/pagebroker/pagebroker /usr/local/bin/pagebroker
+COPY --from=s5cmd-runtime /s5cmd /usr/local/bin/s5cmd
+COPY --from=s3-runtime /opt/dynamo/venv/lib/python3.12/site-packages/runai_model_streamer/libstreamer/lib /opt/pagebroker/model-streamer
+ENV PAGEBROKER_MODEL_STREAMER_LIBRARY=/opt/pagebroker/model-streamer/libstreamer.so
+ENV LD_LIBRARY_PATH=/opt/pagebroker/model-streamer
 RUN output=$(/usr/local/bin/pagebroker 2>&1); status=$?; \
     [ "$status" -eq 2 ]; \
     [ "$output" = "usage: pagebroker socket_path staging_directory storage_root --max-concurrent-requests max_concurrent_requests" ]

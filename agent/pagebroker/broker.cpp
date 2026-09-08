@@ -16,6 +16,8 @@
 
 #include "posix_copy_engine.hpp"
 #include "criu_provider.h"
+#include "s3_range_reader.hpp"
+#include "s3_transfer.hpp"
 
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
@@ -133,11 +135,14 @@ void
 StageDirectRestore(const Path& source, const Path& destination)
 {
   fs::create_directories(destination);
+  const bool s3 = S3RangeReaderEnabled();
   for (const auto& entry : fs::directory_iterator(source)) {
     if (!entry.is_regular_file() || entry.is_symlink())
       throw std::runtime_error("direct restore source contains unsupported entry");
     const std::string name = entry.path().filename();
-    if (name.rfind("pages-", 0) == 0)
+    if (name.rfind("pages-", 0) == 0 ||
+        (s3 && name != "inventory.img" && name != "manifest.yaml" &&
+         name != "files.img" && name != "criu-provider.plan"))
       continue;
     fs::copy_file(entry.path(), destination / name, fs::copy_options::overwrite_existing);
   }
@@ -145,7 +150,7 @@ StageDirectRestore(const Path& source, const Path& destination)
   if (criu_provider_plan_load((destination / "criu-provider.plan").c_str(), &plan) != 0)
     throw std::runtime_error("direct restore plan is unavailable");
   RangeCopyContext context{source, destination};
-  const int copied = criu_provider_plan_enumerate_source_ranges(plan, CopyRange, &context);
+  const int copied = s3 ? 0 : criu_provider_plan_enumerate_source_ranges(plan, CopyRange, &context);
   criu_provider_plan_destroy(plan);
   if (copied != 0)
     throw std::runtime_error("direct restore range prefetch failed");
@@ -579,6 +584,7 @@ Broker::PublishCheckpoint(
   }
   try {
     engine.PublishCheckpoint(staging_directory, descriptor.destination_storage());
+    if (S3TransferEnabled()) PublishToS3(staging_directory);
     transaction.clear_descriptor();
     transaction.set_state(Transaction::State::COMMITTED);
     std::error_code cleanup_error;

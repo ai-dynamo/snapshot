@@ -115,6 +115,14 @@ pageBroker:
     # Defaults to the chart's appVersion when empty (see templates).
     tag: ""
     pullPolicy: Always
+  # RAM-only S3 provider POC. The checkpoint remains published to the normal
+  # filesystem store and is also uploaded with s5cmd. Restore reads planned
+  # bytes from this prefix through Model Streamer into provider memfds.
+  s3:
+    enabled: false
+    prefix: ""
+    mover: model-streamer
+    credentialsSecretRef: ""
 
 # DaemonSet configuration for the checkpoint/restore agent
 daemonset:

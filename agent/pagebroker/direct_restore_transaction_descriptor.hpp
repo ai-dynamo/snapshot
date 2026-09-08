@@ -40,5 +40,6 @@ class DirectRestoreTransactionDescriptor {
   int server_socket_ = -1;
   std::future<void> preparation_;
   std::thread server_;
+  std::string s3_prefix_;
 };
 }  // namespace snapshot::pagebroker

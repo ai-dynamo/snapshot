@@ -126,6 +126,18 @@ spec:
             - --max-concurrent-requests
             - {{ .Values.pageBroker.maxConcurrentRequests | quote }}
             {{- end }}
+          {{- if .Values.pageBroker.s3.enabled }}
+          env:
+            - name: PAGEBROKER_S3_MOVER
+              value: {{ .Values.pageBroker.s3.mover | quote }}
+            - name: PAGEBROKER_S3_PREFIX
+              value: {{ .Values.pageBroker.s3.prefix | quote }}
+          {{- if .Values.pageBroker.s3.credentialsSecretRef }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.pageBroker.s3.credentialsSecretRef }}
+          {{- end }}
+          {{- end }}
           resources:
             {{- toYaml .Values.pageBroker.resources | nindent 12 }}
           volumeMounts:
