@@ -1,0 +1,85 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+package criu_provider.v1;
+
+// Internal typed model for criu-provider.plan JSON. It is not the on-disk
+// encoding; plan files are UTF-8 JSON so they can be inspected directly.
+
+message Plan {
+	uint32 format_major = 1;
+	uint32 format_minor = 2;
+	uint64 page_size = 3;
+	string criu_build_id = 4;
+	repeated Image images = 5;
+	repeated Object objects = 6;
+	repeated Chunk chunks = 7;
+	Requirements requirements = 8;
+	// The revision-specific CRIU names which are allowed to fall back to the
+	// local image directory when that checkpoint did not produce them.
+	repeated ImageRule image_rules = 9;
+}
+
+message ImageRule {
+	// A basename, or the fixed parts around a single numeric CRIU selector.
+	string prefix = 1;
+	string suffix = 2;
+	enum Selector { EXACT = 0; DECIMAL = 1; HEX = 2; }
+	Selector selector = 3;
+	Image.RestoreMode restore_mode = 4;
+	Image.DumpMode dump_mode = 5;
+}
+
+message Image {
+	string name = 1;
+	uint64 size = 2;
+	enum Role { BOOTSTRAP_LOCAL = 0; METADATA = 1; PAGES = 2; }
+	Role role = 3;
+	enum RestoreMode {
+		RESTORE_LOCAL = 0;
+		RESTORE_READY_LOCAL = 1;
+		RESTORE_PROVIDER_FD = 2;
+		RESTORE_LOCAL_FALLBACK = 3;
+	}
+	enum DumpMode {
+		DUMP_LOCAL = 0;
+		DUMP_PROVIDER_OUTPUT = 1;
+		DUMP_LOCAL_FALLBACK = 2;
+	}
+	RestoreMode restore_mode = 4;
+	DumpMode dump_mode = 5;
+}
+
+message Object {
+	string key = 1;
+	uint64 length = 2;
+	enum Kind { PRIVATE_VMA = 0; SHARED = 1; RESIDUAL = 2; }
+	Kind kind = 3;
+	uint32 pid = 4;
+	uint32 vma_id = 5;
+	uint64 start = 6;
+	uint64 shmid = 7;
+	string image = 8;
+	uint32 saved_seals = 9;
+}
+
+message Placement { string object_key = 1; uint64 destination_offset = 2; }
+message Chunk {
+	string image = 1;
+	uint64 source_offset = 2;
+	uint64 stored_length = 3;
+	enum Encoding { RAW = 0; ZERO = 1; }
+	Encoding encoding = 4;
+	uint64 decoded_length = 5;
+	repeated Placement placements = 6;
+}
+
+message Requirements {
+	uint64 stored_bytes = 1;
+	uint64 materialized_bytes = 2;
+	uint64 logical_fd_bytes = 3;
+	uint64 metadata_bytes = 4;
+	uint64 workspace_bytes = 5;
+	uint32 fd_count = 6;
+}

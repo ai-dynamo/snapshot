@@ -1,0 +1,17 @@
+// SPDX-License-Identifier: MIT
+
+syntax = "proto2";
+
+import "google/protobuf/descriptor.proto";
+
+message CRIU_Opts {
+	optional bool hex = 1;
+	optional bool ipadd = 2;
+	optional string flags = 3;
+	optional bool dev = 4;
+	optional bool odev = 5;
+	optional string dict = 6;
+	optional string conv = 7;
+}
+
+extend google.protobuf.FieldOptions { optional CRIU_Opts criu = 1018; }
