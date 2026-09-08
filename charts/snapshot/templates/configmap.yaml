@@ -9,6 +9,9 @@ kind: ConfigMap
 {{- if ne .Values.storage.pvc.basePath "/checkpoints" }}
 {{- fail "snapshot.storage.pvc.basePath is fixed at /checkpoints so the privileged mount helper can enforce its source allowlist" }}
 {{- end }}
+{{- if and (ne .Values.pageBroker.transferEngine "posix-copy") (ne .Values.pageBroker.transferEngine "model-streamer") }}
+{{- fail (printf "snapshot.pageBroker.transferEngine=%q is not supported; expected posix-copy or model-streamer" .Values.pageBroker.transferEngine) }}
+{{- end }}
 metadata:
   name: {{ include "snapshot.fullname" . }}-config
   namespace: {{ .Release.Namespace }}
@@ -27,6 +30,7 @@ data:
 
     pageBroker:
       enabled: {{ .Values.pageBroker.enabled }}
+      transferEngine: {{ .Values.pageBroker.transferEngine | quote }}
       {{- if .Values.pageBroker.enabled }}
       controlSocketPath: {{ printf "%s/pagebroker.sock" (include "snapshot.pageBrokerControlPath" .) | quote }}
       {{- end }}

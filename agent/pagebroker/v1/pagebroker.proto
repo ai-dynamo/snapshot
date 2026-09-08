@@ -24,6 +24,7 @@ message IOEngine
   oneof kind
   {
     PosixCopyIOEngine posix_copy = 1;
+    ModelStreamerIOEngine model_streamer = 2;
   }
 }
 
@@ -117,3 +118,5 @@ message Response
     DirectRestoreReady direct_restore_ready = 8;
   }
 }
+
+message ModelStreamerIOEngine {}

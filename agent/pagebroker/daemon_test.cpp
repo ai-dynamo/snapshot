@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <thread>
@@ -36,10 +37,17 @@ class BrokerTest : public ::testing::Test {
     return request;
   }
 
-  void Configure(StorageBackend* storage, IOEngine* engine, const fs::path& directory)
+  void Configure(
+      StorageBackend* storage,
+      IOEngine* engine,
+      const fs::path& directory,
+      TransferEngineType engine_type = TransferEngineType::POSIX_COPY)
   {
     storage->mutable_filesystem()->set_directory(directory.string());
-    engine->mutable_posix_copy();
+    if (engine_type == TransferEngineType::MODEL_STREAMER)
+      engine->mutable_model_streamer();
+    else
+      engine->mutable_posix_copy();
   }
 
   Broker& broker() { return *broker_; }
@@ -78,14 +86,57 @@ TEST_F(BrokerTest, StagesRestoreAndCleansUpOnCommit)
   EXPECT_EQ(abort_response.failure().code(), Failure::TRANSACTION_NOT_FOUND);
 }
 
+TEST_F(BrokerTest, ModelStreamerRestoresFilesystemTreeDataAndPermissions)
+{
+  fs::create_directories(source_ / "nested" / "empty");
+  constexpr char kExpectedData[] = "model-streamer\0data\n";
+  const std::string expected_data(kExpectedData, sizeof(kExpectedData) - 1);
+  {
+    std::ofstream data(source_ / "nested" / "data", std::ios::binary);
+    data.write(expected_data.data(), expected_data.size());
+  }
+  std::ofstream(source_ / "empty-file", std::ios::binary);
+  const auto root_permissions = fs::perms::owner_all | fs::perms::group_read | fs::perms::group_exec;
+  const auto directory_permissions = fs::perms::owner_all;
+  const auto file_permissions = fs::perms::owner_read | fs::perms::group_read;
+  const auto empty_file_permissions = fs::perms::owner_read;
+  fs::permissions(source_, root_permissions, fs::perm_options::replace);
+  fs::permissions(source_ / "nested" / "empty", directory_permissions, fs::perm_options::replace);
+  fs::permissions(source_ / "nested" / "data", file_permissions, fs::perm_options::replace);
+  fs::permissions(source_ / "empty-file", empty_file_permissions, fs::perm_options::replace);
+
+  auto restore = RequestFor("model-streamer");
+  Configure(
+      restore.mutable_staged_restore()->mutable_source(), restore.mutable_staged_restore()->mutable_io_engine(),
+      source_, TransferEngineType::MODEL_STREAMER);
+  const auto staged = broker().HandleRequest(restore);
+  ASSERT_TRUE(staged.has_staged_restore_directory()) << staged.failure().message();
+  const fs::path staging_directory(staged.staged_restore_directory().image_directory());
+  const fs::path restored_directory = staging_directory / "nested" / "empty";
+  const fs::path restored_data = staging_directory / "nested" / "data";
+  ASSERT_TRUE(fs::is_directory(restored_directory));
+  ASSERT_TRUE(fs::is_regular_file(staging_directory / "empty-file"));
+  EXPECT_EQ(fs::file_size(staging_directory / "empty-file"), 0);
+  std::ifstream restored(restored_data, std::ios::binary);
+  ASSERT_TRUE(restored);
+  const std::string contents{std::istreambuf_iterator<char>(restored), std::istreambuf_iterator<char>()};
+  EXPECT_EQ(contents, expected_data);
+  EXPECT_EQ(fs::status(staging_directory).permissions(), root_permissions);
+  EXPECT_EQ(fs::status(restored_directory).permissions(), directory_permissions);
+  EXPECT_EQ(fs::status(restored_data).permissions(), file_permissions);
+  EXPECT_EQ(fs::status(staging_directory / "empty-file").permissions(), empty_file_permissions);
+}
+
 TEST_F(BrokerTest, StagesIndependentRestoresConcurrently)
 {
   auto first = RequestFor("first");
   auto second = RequestFor("second");
   Configure(
-      first.mutable_staged_restore()->mutable_source(), first.mutable_staged_restore()->mutable_io_engine(), source_);
+      first.mutable_staged_restore()->mutable_source(), first.mutable_staged_restore()->mutable_io_engine(), source_,
+      TransferEngineType::MODEL_STREAMER);
   Configure(
-      second.mutable_staged_restore()->mutable_source(), second.mutable_staged_restore()->mutable_io_engine(), source_);
+      second.mutable_staged_restore()->mutable_source(), second.mutable_staged_restore()->mutable_io_engine(), source_,
+      TransferEngineType::MODEL_STREAMER);
 
   Response first_response;
   Response second_response;

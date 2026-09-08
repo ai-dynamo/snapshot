@@ -82,7 +82,9 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 			}
 		}()
 		var err error
-		tmpDir, err = broker.PrepareCheckpoint(ctx, transactionID, finalDir)
+		tmpDir, err = broker.PrepareCheckpoint(
+			ctx, transactionID, finalDir, pagebroker.TransferEngine(cfg.PageBroker.TransferEngine),
+		)
 		if err != nil {
 			return fmt.Errorf("prepare PageBroker checkpoint: %w", err)
 		}

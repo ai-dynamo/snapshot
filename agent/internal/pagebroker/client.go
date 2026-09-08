@@ -25,14 +25,26 @@ const (
 
 var errMessageTooLarge = fmt.Errorf("message exceeds %d bytes", maxMessageSize)
 
-// Client uses the deployment-wide filesystem/POSIX PageBroker plan.
+// TransferEngine selects the PageBroker implementation for one staging request.
+type TransferEngine string
+
+const (
+	TransferEnginePosixCopy     TransferEngine = "posix-copy"
+	TransferEngineModelStreamer TransferEngine = "model-streamer"
+)
+
+// Client sends transaction requests to the local PageBroker daemon.
 type Client struct {
 	ControlSocketPath string
 }
 
-func (c Client) StagedRestore(ctx context.Context, transactionID, source string) (string, error) {
+func (c Client) StagedRestore(ctx context.Context, transactionID, source string, engine TransferEngine) (string, error) {
+	ioEngine, err := protocolIOEngine(engine)
+	if err != nil {
+		return "", err
+	}
 	response, err := c.request(ctx, transactionID, &Request_StagedRestore{
-		StagedRestore: &StagedRestoreRequest{Source: filesystem(source), IoEngine: posixCopy()},
+		StagedRestore: &StagedRestoreRequest{Source: filesystem(source), IoEngine: ioEngine},
 	})
 	if err != nil {
 		return "", err
@@ -40,9 +52,13 @@ func (c Client) StagedRestore(ctx context.Context, transactionID, source string)
 	return imageDirectory(response.GetStagedRestoreDirectory().GetImageDirectory())
 }
 
-func (c Client) PrepareCheckpoint(ctx context.Context, transactionID, destination string) (string, error) {
+func (c Client) PrepareCheckpoint(ctx context.Context, transactionID, destination string, engine TransferEngine) (string, error) {
+	ioEngine, err := protocolIOEngine(engine)
+	if err != nil {
+		return "", err
+	}
 	response, err := c.request(ctx, transactionID, &Request_PrepareStagedCheckpoint{
-		PrepareStagedCheckpoint: &PrepareStagedCheckpointRequest{Destination: filesystem(destination), IoEngine: posixCopy()},
+		PrepareStagedCheckpoint: &PrepareStagedCheckpointRequest{Destination: filesystem(destination), IoEngine: ioEngine},
 	})
 	if err != nil {
 		return "", err
@@ -166,8 +182,15 @@ func filesystem(directory string) *StorageBackend {
 	return &StorageBackend{Kind: &StorageBackend_Filesystem{Filesystem: &FilesystemStorage{Directory: &directory}}}
 }
 
-func posixCopy() *IOEngine {
-	return &IOEngine{Kind: &IOEngine_PosixCopy{PosixCopy: &PosixCopyIOEngine{}}}
+func protocolIOEngine(engine TransferEngine) (*IOEngine, error) {
+	switch engine {
+	case TransferEnginePosixCopy:
+		return &IOEngine{Kind: &IOEngine_PosixCopy{PosixCopy: &PosixCopyIOEngine{}}}, nil
+	case TransferEngineModelStreamer:
+		return &IOEngine{Kind: &IOEngine_ModelStreamer{ModelStreamer: &ModelStreamerIOEngine{}}}, nil
+	default:
+		return nil, fmt.Errorf("unsupported PageBroker transfer engine %q", engine)
+	}
 }
 
 func writeMessage(writer io.Writer, message []byte) error {

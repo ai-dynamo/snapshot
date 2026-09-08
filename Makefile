@@ -11,6 +11,7 @@ REGISTRY          ?= ghcr.io/ai-dynamo/snapshot
 VERSION           ?= latest
 TAGS              ?= $(VERSION)
 DOCKER_BUILD_ARGS ?=
+MODEL_STREAMER_WHEEL_DIR ?= ../runai-model-streamer/py/runai_model_streamer/dist
 
 # Base image for the agent, read from the Dockerfile so the digest lives in one
 # place. capture-base-packages and docker-build-agent must agree on it, or the
@@ -23,7 +24,7 @@ AGENT_BASE_IMAGE ?= $(shell sed -n 's/^ARG AGENT_BASE_IMAGE=//p' agent/Dockerfil
 AGENT_PLATFORM ?= linux/amd64
 
 .PHONY: tidy generate test build lint verify-generate verify-crds check fmt add-license-headers \
-        verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator capture-base-packages verify-base-packages \
+        verify-license-headers govulncheck helm-lint docker-build-agent docker-build-pagebroker docker-build-operator capture-base-packages verify-base-packages \
         linux-build linux-test pagebroker-check-generated
 
 CRD_SRC_DIR   := api/v1alpha1/crds
@@ -133,8 +134,14 @@ docker-build-agent: verify-base-packages
 	  --build-arg "GO_VERSION=$(GO_VERSION)" \
 	  --build-arg "AGENT_BASE_IMAGE=$(AGENT_BASE_IMAGE)" \
 	  --build-context=api=./api --build-context=compliance=./hack/compliance \
+	  --build-context=model-streamer-wheel="$(MODEL_STREAMER_WHEEL_DIR)" \
 	  --target agent \
 	  $(foreach t,$(TAGS),-t $(REGISTRY)/agent:$(t)) agent/
+
+docker-build-pagebroker:
+	docker buildx build $(DOCKER_BUILD_ARGS) --platform "$(AGENT_PLATFORM)" -f agent/pagebroker/Dockerfile \
+	  --build-context=model-streamer-wheel="$(MODEL_STREAMER_WHEEL_DIR)" \
+	  $(foreach t,$(TAGS),-t $(REGISTRY)/pagebroker:$(t)) agent/pagebroker/
 
 docker-build-operator:
 	docker buildx build $(DOCKER_BUILD_ARGS) -f operator/Dockerfile \

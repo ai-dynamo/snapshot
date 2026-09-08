@@ -80,6 +80,7 @@ type RestoreRequest struct {
 	PageBrokerRequested         bool
 	PageBrokerEnabled           bool
 	PageBrokerControlSocketPath string
+	PageBrokerTransferEngine    string
 }
 
 // Restore performs external restore for the given request.
@@ -163,7 +164,9 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 			}
 		}()
 		stageStart := time.Now()
-		staged, err := broker.StagedRestore(ctx, transactionID, artifactPath)
+		staged, err := broker.StagedRestore(
+			ctx, transactionID, artifactPath, pagebroker.TransferEngine(req.PageBrokerTransferEngine),
+		)
 		pageBrokerStageDuration = time.Since(stageStart)
 		if err != nil {
 			return 0, fmt.Errorf("stage PageBroker restore: %w", err)

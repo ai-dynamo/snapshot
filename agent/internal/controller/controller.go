@@ -576,6 +576,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		PageBrokerRequested:         pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] == snapshotv1alpha1.PageBrokerAnnotationEnabled,
 		PageBrokerEnabled:           w.config.PageBroker.Enabled,
 		PageBrokerControlSocketPath: w.config.PageBroker.ControlSocketPath,
+		PageBrokerTransferEngine:    w.config.PageBroker.TransferEngine,
 	}
 	placeholderHostPID, err := w.restoreFn(restoreCtx, w.runtime, log, req, w.injector)
 	if err != nil {

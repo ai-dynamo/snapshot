@@ -8,6 +8,7 @@
 # (attribution helpers shared with the operator image):
 #   docker build --platform linux/amd64 --target agent \
 #     --build-context api=../api --build-context compliance=../hack/compliance \
+#     --build-context model-streamer-wheel=/path/to/model-streamer-wheel-directory \
 #     -t snapshot-agent:latest .
 #   docker build --platform linux/amd64 --target placeholder --build-context api=../api \
 #     --build-arg BASE_IMAGE=<app-image> -t placeholder:latest .
@@ -32,6 +33,27 @@ ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.0
 # For placeholder target only - this default allows agent builds to succeed,
 # but placeholder builds MUST override it with --build-arg BASE_IMAGE=<image>
 ARG BASE_IMAGE=placeholder-requires-base-image-arg
+
+# =============================================================================
+# Stage: Model Streamer native SDK extracted from its Python wheel
+# =============================================================================
+FROM python:3.12-slim AS model-streamer-install
+
+COPY --from=model-streamer-wheel / /wheels/
+RUN set -eu; \
+    set -- /wheels/*.whl; \
+    [ "$#" -eq 1 ] && [ -f "$1" ] || { echo "exactly one Model Streamer wheel is required" >&2; exit 1; }; \
+    python3 -m pip install --no-cache-dir --no-deps --target /opt/model-streamer "$1"; \
+    package=/opt/model-streamer/runai_model_streamer; \
+    test -f "$package/libstreamer/lib/libstreamer.so"; \
+    mkdir -p /opt/model-streamer-sdk/lib /opt/model-streamer-sdk/legal; \
+    cp "$package/libstreamer/lib/libstreamer.so" /opt/model-streamer-sdk/lib/; \
+    license=$(find /opt/model-streamer -path '*.dist-info/LICENSE' -print -quit); \
+    metadata=$(find /opt/model-streamer -path '*.dist-info/METADATA' -print -quit); \
+    test -n "$license"; \
+    test -n "$metadata"; \
+    cp "$license" /opt/model-streamer-sdk/legal/LICENSE; \
+    cp "$metadata" /opt/model-streamer-sdk/legal/METADATA
 
 # =============================================================================
 # Stage: Go base - Common setup for Go builds
@@ -71,6 +93,8 @@ RUN golangci-lint run --timeout=5m
 # =============================================================================
 FROM go-base AS tester
 
+COPY --from=model-streamer-install /opt/model-streamer-sdk/lib/libstreamer.so /usr/local/lib/libstreamer.so
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     libgtest-dev \
@@ -85,6 +109,8 @@ RUN go test ./... -v && make -C pagebroker test
 # Stage: PageBroker Builder
 # =============================================================================
 FROM go-base AS pagebroker-builder
+
+COPY --from=model-streamer-install /opt/model-streamer-sdk/lib/libstreamer.so /usr/local/lib/libstreamer.so
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -257,6 +283,9 @@ RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-help
 # Copy the built binaries
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
 COPY --from=pagebroker-builder /workspace/pagebroker/pagebroker /usr/local/bin/pagebroker
+COPY --from=model-streamer-install /opt/model-streamer-sdk/lib/libstreamer.so /usr/local/lib/libstreamer.so
+COPY --from=model-streamer-install /opt/model-streamer-sdk/legal/LICENSE /legal/model-streamer/LICENSE
+COPY --from=model-streamer-install /opt/model-streamer-sdk/legal/METADATA /legal/model-streamer/METADATA
 RUN output=$(/usr/local/bin/pagebroker 2>&1); status=$?; \
     [ "$status" -eq 2 ]; \
     [ "$output" = "usage: pagebroker socket_path staging_directory storage_root --max-concurrent-requests max_concurrent_requests" ]

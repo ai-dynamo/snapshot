@@ -1,7 +1,7 @@
 #pragma once
 
 #include "pagebroker_types.hpp"
-#include "transfer_engine.hpp"
+#include "transfer/transfer_engine.hpp"
 
 namespace snapshot::pagebroker {
 class CheckpointTransactionDescriptor {

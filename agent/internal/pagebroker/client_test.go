@@ -18,6 +18,28 @@ func TestFailureCodeMapsUnknownValuesToUnspecified(t *testing.T) {
 	}
 }
 
+func TestProtocolIOEngine(t *testing.T) {
+	posix, err := protocolIOEngine(TransferEnginePosixCopy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if posix.GetPosixCopy() == nil {
+		t.Fatalf("protocolIOEngine(%q) = %v, want POSIX copy", TransferEnginePosixCopy, posix)
+	}
+
+	modelStreamer, err := protocolIOEngine(TransferEngineModelStreamer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if modelStreamer.GetModelStreamer() == nil {
+		t.Fatalf("protocolIOEngine(%q) = %v, want Model Streamer", TransferEngineModelStreamer, modelStreamer)
+	}
+
+	if _, err := protocolIOEngine("unknown"); err == nil {
+		t.Fatal("protocolIOEngine accepted an unknown transfer engine")
+	}
+}
+
 func TestRequestStopsWhenContextIsCanceled(t *testing.T) {
 	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "pagebroker.sock"))
 	if err != nil {
@@ -176,7 +198,7 @@ func TestStagingRequestsRejectEmptyDirectory(t *testing.T) {
 		{
 			name: "restore",
 			call: func(client Client, ctx context.Context) error {
-				_, err := client.StagedRestore(ctx, "transaction", "/checkpoints/source")
+				_, err := client.StagedRestore(ctx, "transaction", "/checkpoints/source", TransferEngineModelStreamer)
 				return err
 			},
 			reply: func(request *Request) *Response {
@@ -187,7 +209,7 @@ func TestStagingRequestsRejectEmptyDirectory(t *testing.T) {
 		{
 			name: "checkpoint",
 			call: func(client Client, ctx context.Context) error {
-				_, err := client.PrepareCheckpoint(ctx, "transaction", "/checkpoints/destination")
+				_, err := client.PrepareCheckpoint(ctx, "transaction", "/checkpoints/destination", TransferEnginePosixCopy)
 				return err
 			},
 			reply: func(request *Request) *Response {
