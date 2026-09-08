@@ -110,6 +110,13 @@ jobs:
       - run: npm exec playwright -- install --with-deps chromium
       - run: npm run test:browser
 
+  helm-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: helm plugin install https://github.com/helm-unittest/helm-unittest
+      - run: helm unittest charts/snapshot/
+
   pagebroker-image:
     runs-on: ubuntu-latest
     steps:
