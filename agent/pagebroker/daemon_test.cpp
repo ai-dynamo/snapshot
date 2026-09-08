@@ -11,6 +11,8 @@
 #include <string>
 #include <thread>
 
+#include <google/protobuf/util/json_util.h>
+
 #include "broker.hpp"
 #include "criu_provider_plan.pb.h"
 
@@ -84,8 +86,13 @@ void WriteDirectRestorePlan(const fs::path& directory)
   placement->set_object_key("vma:1:0");
   plan.mutable_requirements()->set_stored_bytes(4);
   plan.mutable_requirements()->set_metadata_bytes(4);
-  std::ofstream output(directory / "criu-provider.plan", std::ios::binary);
-  ASSERT_TRUE(plan.SerializeToOstream(&output));
+  google::protobuf::util::JsonPrintOptions options;
+  options.always_print_primitive_fields = true;
+  options.preserve_proto_field_names = true;
+  std::string json;
+  ASSERT_TRUE(google::protobuf::util::MessageToJsonString(plan, &json, options).ok());
+  std::ofstream output(directory / "criu-provider_plan.json");
+  output << json;
 }
 
 TEST_F(BrokerTest, StagesRestoreAndCleansUpOnCommit)

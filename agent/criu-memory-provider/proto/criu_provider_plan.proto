@@ -3,7 +3,7 @@
 syntax = "proto3";
 package criu_provider.v1;
 
-// Internal typed model for criu-provider.plan JSON. It is not the on-disk
+// Internal typed model for criu-provider_plan.json. It is not the on-disk
 // encoding; plan files are UTF-8 JSON so they can be inspected directly.
 
 message Plan {

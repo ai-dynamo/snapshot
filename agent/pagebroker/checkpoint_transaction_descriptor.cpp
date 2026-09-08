@@ -72,8 +72,8 @@ int CheckpointTransactionDescriptor::FinishDump(void* context, const criu_provid
               << index_result << '\n';
     return 0;
   }
-  const int write_result = criu_provider_plan_write(plan,
-      (self->staging_directory_ / "criu-provider.plan").c_str());
+  const int write_result = criu_provider_plan_write(
+      plan, (self->staging_directory_ / "criu-provider_plan.json").c_str());
   criu_provider_plan_destroy(plan);
   if (write_result != 0)
     std::cerr << "criu memory provider: cannot write optional plan: "

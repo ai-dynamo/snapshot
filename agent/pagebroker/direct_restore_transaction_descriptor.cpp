@@ -80,7 +80,8 @@ void DirectRestoreTransactionDescriptor::Start(std::function<void(const Path&)> 
       while (s3_prefix_.size() > 5 && s3_prefix_.back() == '/') s3_prefix_.pop_back();
     }
     if (const int result = criu_provider_plan_load(
-            (staging_directory_ / "criu-provider.plan").c_str(), &plan_); result != 0)
+            (staging_directory_ / "criu-provider_plan.json").c_str(), &plan_);
+        result != 0)
       throw std::runtime_error("direct restore plan load failed: " + std::to_string(result));
     const criu_provider_source_ops ops{ReadRange, OpenReadyImage};
     if (const int result = criu_provider_session_create(plan_, &ops, this, &session_); result != 0)

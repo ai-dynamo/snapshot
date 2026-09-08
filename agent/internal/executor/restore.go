@@ -167,7 +167,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		broker = pagebroker.Client{ControlSocketPath: req.PageBrokerControlSocketPath}
 		stageStart := time.Now()
 		staged := ""
-		if _, planErr := os.Stat(filepath.Join(artifactPath, "criu-provider.plan")); planErr == nil {
+		if _, planErr := os.Stat(filepath.Join(artifactPath, "criu-provider_plan.json")); planErr == nil {
 			if err := broker.DirectRestore(ctx, transactionID, artifactPath); err != nil {
 				return 0, fmt.Errorf("start PageBroker direct restore: %w", err)
 			}

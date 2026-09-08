@@ -142,12 +142,13 @@ StageDirectRestore(const Path& source, const Path& destination)
     const std::string name = entry.path().filename();
     if (name.rfind("pages-", 0) == 0 ||
         (s3 && name != "inventory.img" && name != "manifest.yaml" &&
-         name != "files.img" && name != "criu-provider.plan"))
+         name != "files.img" && name != "criu-provider_plan.json"))
       continue;
     fs::copy_file(entry.path(), destination / name, fs::copy_options::overwrite_existing);
   }
   criu_provider_plan* plan = nullptr;
-  if (criu_provider_plan_load((destination / "criu-provider.plan").c_str(), &plan) != 0)
+  if (criu_provider_plan_load(
+          (destination / "criu-provider_plan.json").c_str(), &plan) != 0)
     throw std::runtime_error("direct restore plan is unavailable");
   RangeCopyContext context{source, destination};
   const int copied = s3 ? 0 : criu_provider_plan_enumerate_source_ranges(plan, CopyRange, &context);
@@ -380,13 +381,15 @@ Broker::DirectRestore(const Request& request)
   Engine(operation.io_engine()).RestoreSize(source);
   const Path source_directory = source.filesystem().directory();
   criu_provider_plan* plan = nullptr;
-  if (criu_provider_plan_load((source_directory / "criu-provider.plan").c_str(), &plan) != 0)
+  if (criu_provider_plan_load(
+          (source_directory / "criu-provider_plan.json").c_str(), &plan) != 0)
     throw std::invalid_argument("direct restore plan is unavailable");
   criu_provider_requirements requirements{};
   const int requirements_status = criu_provider_plan_requirements(plan, &requirements);
   criu_provider_plan_destroy(plan);
   std::error_code plan_size_error;
-  const uintmax_t plan_bytes = fs::file_size(source_directory / "criu-provider.plan", plan_size_error);
+  const uintmax_t plan_bytes = fs::file_size(
+      source_directory / "criu-provider_plan.json", plan_size_error);
   if (requirements_status != 0 || plan_size_error ||
       requirements.stored_bytes > UINTMAX_MAX - requirements.metadata_bytes ||
       requirements.stored_bytes + requirements.metadata_bytes > UINTMAX_MAX - plan_bytes)
@@ -577,7 +580,7 @@ Broker::PublishCheckpoint(
   // never make the ordinary CRIU checkpoint unpublishable.
   criu_provider_plan* plan = nullptr;
   if (criu_provider_plan_from_checkpoint(staging_directory.c_str(), &plan) == 0) {
-    const Path path = staging_directory / "criu-provider.plan";
+    const Path path = staging_directory / "criu-provider_plan.json";
     if (criu_provider_plan_write(plan, path.c_str()) != 0)
       fs::remove(path);
     criu_provider_plan_destroy(plan);
