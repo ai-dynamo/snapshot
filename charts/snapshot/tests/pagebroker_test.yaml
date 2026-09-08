@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: PageBroker sidecar image
+templates:
+  - templates/daemonset.yaml
+tests:
+  - it: pulls the sidecar from its own repository at the agent's tag
+    set:
+      pageBroker.enabled: true
+      image.agent.tag: v1.2.3
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].name
+          value: pagebroker
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/ai-dynamo/snapshot/pagebroker:v1.2.3
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: Always
+
+  - it: defaults the sidecar tag to the chart appVersion like the agent
+    set:
+      pageBroker.enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/ai-dynamo/snapshot/pagebroker:0.1.0
+      - equal:
+          path: spec.template.spec.containers[1].image
+          value: ghcr.io/ai-dynamo/snapshot/agent:0.1.0
+
+  - it: follows image.pageBroker overrides
+    set:
+      pageBroker.enabled: true
+      image.agent.tag: v1.2.3
+      image.pageBroker.repository: registry.internal/snapshot/pagebroker
+      image.pageBroker.pullPolicy: IfNotPresent
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: registry.internal/snapshot/pagebroker:v1.2.3
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: IfNotPresent
