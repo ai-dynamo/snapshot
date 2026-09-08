@@ -8,19 +8,21 @@
 #include <variant>
 
 #include "checkpoint_transaction_descriptor.hpp"
+#include "direct_restore_transaction_descriptor.hpp"
 #include "restore_transaction_descriptor.hpp"
 
 namespace snapshot::pagebroker {
 class Transaction {
  public:
   enum class State { NEW, PREPARING, STAGED, COMMITTED, ABORTED };
-  using Descriptor = std::variant<std::monostate, RestoreTransactionDescriptor, CheckpointTransactionDescriptor>;
+  using Descriptor = std::variant<std::monostate, RestoreTransactionDescriptor, CheckpointTransactionDescriptor, DirectRestoreTransactionDescriptor>;
 
   // Callers hold mutex() while accessing transaction state.
   std::mutex& mutex();
   State state() const;
   void set_state(State state);
   const Descriptor& descriptor() const;
+  Descriptor& descriptor();
   void set_descriptor(Descriptor descriptor);
   void clear_descriptor();
   bool retain_terminal();

@@ -51,6 +51,7 @@ func TestParseManageCgroupsMode(t *testing.T) {
 		})
 	}
 }
+
 func TestReadLogTail(t *testing.T) {
 	t.Run("returns whole small log", func(t *testing.T) {
 		path := t.TempDir() + "/dump.log"

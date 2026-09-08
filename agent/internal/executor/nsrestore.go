@@ -29,6 +29,7 @@ type RestoreOptions struct {
 	TargetPodIP    string
 	// BundleDir is the path where the agent's binary bundle is mounted inside this namespace.
 	BundleDir string
+	ExtmemProviderFD int
 }
 
 type RestoreInNamespaceResult struct {
@@ -187,7 +188,12 @@ func executeRestore(
 		return nil, 0, nil, fmt.Errorf("remove stale restore-complete sentinel: %w", err)
 	}
 
-	criuPID, cleanup, prepare, restore, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, opts.BundleDir, log)
+	var provider *os.File
+	if opts.ExtmemProviderFD >= 0 {
+		provider = os.NewFile(uintptr(opts.ExtmemProviderFD), "criu-extmem-provider")
+		if provider == nil { return nil, 0, nil, fmt.Errorf("invalid external-memory provider FD") }
+	}
+	criuPID, cleanup, prepare, restore, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, opts.BundleDir, provider, log)
 	if err != nil {
 		return nil, 0, nil, err
 	}

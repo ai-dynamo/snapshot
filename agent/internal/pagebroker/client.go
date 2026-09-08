@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -50,6 +52,182 @@ func (c Client) PrepareCheckpoint(ctx context.Context, transactionID, destinatio
 		return "", err
 	}
 	return imageDirectory(response.GetStagedCheckpointDirectory().GetImageDirectory())
+}
+
+// PrepareCheckpointWithProvider returns CRIU's dump-provider socket. The caller
+// owns the returned file and must close it after CRIU exits.
+func (c Client) PrepareCheckpointWithProvider(ctx context.Context, transactionID, destination string) (string, *os.File, error) {
+	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", c.ControlSocketPath)
+	if err != nil {
+		return "", nil, transportError{cause: fmt.Errorf("dial PageBroker: %w", err)}
+	}
+	defer connection.Close()
+	unixConnection, ok := connection.(*net.UnixConn)
+	if !ok {
+		return "", nil, fmt.Errorf("PageBroker connection is not Unix")
+	}
+	stopCancel := context.AfterFunc(ctx, func() { _ = connection.Close() })
+	defer stopCancel()
+	requestID := uuid.NewString()
+	request := &Request{RequestId: &requestID, TransactionId: &transactionID,
+		Command: &Request_PrepareStagedCheckpoint{PrepareStagedCheckpoint: &PrepareStagedCheckpointRequest{
+			Destination: filesystem(destination), IoEngine: posixCopy(), ExternalMemoryProvider: proto.Bool(true)}}}
+	message, err := proto.Marshal(request)
+	if err != nil {
+		return "", nil, fmt.Errorf("marshal PageBroker request: %w", err)
+	}
+	if err := writeMessage(connection, message); err != nil {
+		return "", nil, transportError{cause: fmt.Errorf("write PageBroker request: %w", err)}
+	}
+	var header [4]byte
+	oob := make([]byte, 128)
+	n, oobn, _, _, err := unixConnection.ReadMsgUnix(header[:], oob)
+	if err != nil || n != len(header) {
+		return "", nil, transportError{cause: fmt.Errorf("read PageBroker response header: %w", err)}
+	}
+	controls, err := syscall.ParseSocketControlMessage(oob[:oobn])
+	if err != nil {
+		return "", nil, fmt.Errorf("parse PageBroker provider FD: %w", err)
+	}
+	var fds []int
+	for _, control := range controls {
+		rights, rightsErr := syscall.ParseUnixRights(&control)
+		if rightsErr != nil {
+			for _, fd := range fds {
+				_ = syscall.Close(fd)
+			}
+			return "", nil, fmt.Errorf("parse PageBroker provider FD: %w", rightsErr)
+		}
+		fds = append(fds, rights...)
+	}
+	closeFDs := func() {
+		for _, fd := range fds {
+			_ = syscall.Close(fd)
+		}
+	}
+	defer closeFDs()
+	size := binary.BigEndian.Uint32(header[:])
+	if size > maxMessageSize {
+		return "", nil, errMessageTooLarge
+	}
+	message = make([]byte, size)
+	if _, err := io.ReadFull(connection, message); err != nil {
+		return "", nil, transportError{cause: fmt.Errorf("read PageBroker response: %w", err)}
+	}
+	response := new(Response)
+	if err := proto.Unmarshal(message, response); err != nil {
+		return "", nil, fmt.Errorf("unmarshal PageBroker response: %w", err)
+	}
+	if response.GetRequestId() != requestID || response.GetTransactionId() != transactionID {
+		return "", nil, fmt.Errorf("PageBroker response identifiers do not match request")
+	}
+	if failure := response.GetFailure(); failure != nil {
+		return "", nil, failureError{code: failureCode(failure.GetCode()), message: failure.GetMessage()}
+	}
+	if len(fds) != 1 || response.GetStagedCheckpointDirectory() == nil {
+		return "", nil, fmt.Errorf("PageBroker checkpoint returned invalid provider FD")
+	}
+	directory, err := imageDirectory(response.GetStagedCheckpointDirectory().GetImageDirectory())
+	if err != nil {
+		return "", nil, err
+	}
+	provider := os.NewFile(uintptr(fds[0]), "criu-extmem-provider")
+	fds = nil
+	return directory, provider, nil
+}
+
+func (c Client) DirectRestore(ctx context.Context, transactionID, source string) error {
+	response, err := c.request(ctx, transactionID, &Request_DirectRestore{
+		DirectRestore: &DirectRestoreRequest{Source: filesystem(source), IoEngine: posixCopy()},
+	})
+	if err != nil {
+		return err
+	}
+	if response.GetDirectRestoreStarted() == nil {
+		return fmt.Errorf("unexpected PageBroker direct-restore response")
+	}
+	return nil
+}
+
+// WaitDirectRestore returns the local bootstrap directory and CRIU's provider socket.
+// The caller owns and must close the returned file.
+func (c Client) WaitDirectRestore(ctx context.Context, transactionID string) (string, *os.File, error) {
+	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", c.ControlSocketPath)
+	if err != nil {
+		return "", nil, transportError{cause: fmt.Errorf("dial PageBroker: %w", err)}
+	}
+	defer connection.Close()
+	unixConnection, ok := connection.(*net.UnixConn)
+	if !ok {
+		return "", nil, fmt.Errorf("PageBroker connection is not Unix")
+	}
+	stopCancel := context.AfterFunc(ctx, func() { _ = connection.Close() })
+	defer stopCancel()
+	requestID := uuid.NewString()
+	request := &Request{RequestId: &requestID, TransactionId: &transactionID,
+		Command: &Request_WaitDirectRestore{WaitDirectRestore: &WaitDirectRestoreRequest{}}}
+	message, err := proto.Marshal(request)
+	if err != nil {
+		return "", nil, fmt.Errorf("marshal PageBroker request: %w", err)
+	}
+	if err := writeMessage(connection, message); err != nil {
+		return "", nil, transportError{cause: fmt.Errorf("write PageBroker request: %w", err)}
+	}
+	var header [4]byte
+	oob := make([]byte, 128)
+	n, oobn, _, _, err := unixConnection.ReadMsgUnix(header[:], oob)
+	if err != nil || n != len(header) {
+		return "", nil, transportError{cause: fmt.Errorf("read PageBroker response header: %w", err)}
+	}
+	controls, err := syscall.ParseSocketControlMessage(oob[:oobn])
+	if err != nil {
+		return "", nil, fmt.Errorf("parse PageBroker provider FD: %w", err)
+	}
+	var fds []int
+	for _, control := range controls {
+		rights, rightsErr := syscall.ParseUnixRights(&control)
+		if rightsErr != nil {
+			for _, fd := range fds {
+				_ = syscall.Close(fd)
+			}
+			return "", nil, fmt.Errorf("parse PageBroker provider FD: %w", rightsErr)
+		}
+		fds = append(fds, rights...)
+	}
+	closeFDs := func() {
+		for _, fd := range fds {
+			_ = syscall.Close(fd)
+		}
+	}
+	defer closeFDs()
+	size := binary.BigEndian.Uint32(header[:])
+	if size > maxMessageSize {
+		return "", nil, errMessageTooLarge
+	}
+	message = make([]byte, size)
+	if _, err := io.ReadFull(connection, message); err != nil {
+		return "", nil, transportError{cause: fmt.Errorf("read PageBroker response: %w", err)}
+	}
+	response := new(Response)
+	if err := proto.Unmarshal(message, response); err != nil {
+		return "", nil, fmt.Errorf("unmarshal PageBroker response: %w", err)
+	}
+	if response.GetRequestId() != requestID || response.GetTransactionId() != transactionID {
+		return "", nil, fmt.Errorf("PageBroker response identifiers do not match request")
+	}
+	if failure := response.GetFailure(); failure != nil {
+		return "", nil, failureError{code: failureCode(failure.GetCode()), message: failure.GetMessage()}
+	}
+	if len(fds) != 1 {
+		return "", nil, fmt.Errorf("PageBroker direct restore returned invalid provider FDs")
+	}
+	directory, err := imageDirectory(response.GetDirectRestoreReady().GetImageDirectory())
+	if err != nil {
+		return "", nil, err
+	}
+	provider := os.NewFile(uintptr(fds[0]), "criu-extmem-provider")
+	fds = nil
+	return directory, provider, nil
 }
 
 func imageDirectory(directory string) (string, error) {

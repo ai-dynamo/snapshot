@@ -99,6 +99,7 @@ func ExecuteDump(
 	criuOpts *criurpc.CriuOpts,
 	checkpointDir string,
 	settings *types.CRIUSettings,
+	provider *os.File,
 	log logr.Logger,
 ) (time.Duration, error) {
 	imageDir, imageDirFD, err := openPathForCRIU(checkpointDir)
@@ -115,6 +116,10 @@ func ExecuteDump(
 			return 0, fmt.Errorf("criu binary not found at %s: %w", settings.BinaryPath, err)
 		}
 		criuClient.SetCriuPath(settings.BinaryPath)
+	}
+	if provider != nil {
+		defer provider.Close()
+		criuClient.AddInheritFd("extmem-provider", provider)
 	}
 	if err := criuClient.Dump(criuOpts, nil); err != nil {
 		dumpDuration := time.Since(criuDumpStart)

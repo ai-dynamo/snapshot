@@ -74,6 +74,7 @@ type StorageSpec struct {
 type PageBrokerSpec struct {
 	Enabled           bool   `yaml:"enabled"`
 	ControlSocketPath string `yaml:"controlSocketPath"`
+	DirectDump        bool   `yaml:"directDump"`
 }
 
 // RestoreSpec holds settings for the CRIU restore process.

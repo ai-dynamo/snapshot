@@ -35,6 +35,7 @@ func ExecuteRestore(
 	m *types.CheckpointManifest,
 	checkpointPath string,
 	bundleDir string,
+	provider *os.File,
 	log logr.Logger,
 ) (int32, func() error, time.Duration, time.Duration, error) {
 	settings := m.CRIUDump.CRIU
@@ -113,6 +114,10 @@ func ExecuteRestore(
 	c.AddInheritFd("extNetNs", netNsFile)
 
 	inheritedFiles = registerInheritFDs(c, m.K8s.StdioFDs, log)
+	if provider != nil {
+		inheritedFiles = append(inheritedFiles, provider)
+		c.AddInheritFd("extmem-provider", provider)
+	}
 
 	notify := &restoreNotify{log: log}
 	log.V(1).Info("Executing go-criu Restore call")

@@ -81,6 +81,7 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	var broker pagebroker.Client
 	committed := false
 	var tmpDir string
+	var provider *os.File
 	if brokered {
 		broker = pagebroker.Client{ControlSocketPath: cfg.PageBroker.ControlSocketPath}
 		defer func() {
@@ -93,7 +94,11 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 			}
 		}()
 		var err error
-		tmpDir, err = broker.PrepareCheckpoint(ctx, transactionID, finalDir)
+		if cfg.PageBroker.DirectDump {
+			tmpDir, provider, err = broker.PrepareCheckpointWithProvider(ctx, transactionID, finalDir)
+		} else {
+			tmpDir, err = broker.PrepareCheckpoint(ctx, transactionID, finalDir)
+		}
 		if err != nil {
 			return fmt.Errorf("prepare PageBroker checkpoint: %w", err)
 		}
@@ -132,7 +137,7 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		return err
 	}
 
-	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log)
+	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, provider, log)
 	if err != nil {
 		return checkpointNeedsSourceKill(err)
 	}
@@ -308,7 +313,7 @@ func configureCheckpoint(
 	return criuOpts, m, nil
 }
 
-func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger) (*checkpointPhaseTimings, error) {
+func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, provider *os.File, log logr.Logger) (*checkpointPhaseTimings, error) {
 	timings := &checkpointPhaseTimings{}
 
 	// CUDA lock+checkpoint must happen before CRIU dump
@@ -320,7 +325,7 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 		timings.CUDACheckpointDuration = cudaTimings.TotalDuration
 	}
 
-	criuDumpDuration, err := criu.ExecuteDump(criuOpts, checkpointDir, criuSettings, log)
+	criuDumpDuration, err := criu.ExecuteDump(criuOpts, checkpointDir, criuSettings, provider, log)
 	if err != nil {
 		return nil, err
 	}

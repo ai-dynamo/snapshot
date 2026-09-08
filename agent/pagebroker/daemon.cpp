@@ -196,6 +196,26 @@ WriteAll(int fd, const void* buffer, size_t size)
   return true;
 }
 
+bool
+WriteHeaderWithFd(int connection, uint32_t size, int passed_fd)
+{
+  if (passed_fd < 0)
+    return WriteAll(connection, &size, sizeof(size));
+  iovec iov{&size, sizeof(size)};
+  std::array<char, CMSG_SPACE(sizeof(int))> control{};
+  msghdr message{};
+  message.msg_iov = &iov;
+  message.msg_iovlen = 1;
+  message.msg_control = control.data();
+  message.msg_controllen = control.size();
+  cmsghdr* header = CMSG_FIRSTHDR(&message);
+  header->cmsg_level = SOL_SOCKET;
+  header->cmsg_type = SCM_RIGHTS;
+  header->cmsg_len = CMSG_LEN(sizeof(passed_fd));
+  std::memcpy(CMSG_DATA(header), &passed_fd, sizeof(passed_fd));
+  return sendmsg(connection, &message, MSG_NOSIGNAL) == static_cast<ssize_t>(sizeof(size));
+}
+
 Response
 InvalidRequest()
 {
@@ -215,6 +235,10 @@ CommandName(Request::CommandCase command)
       return "staged_restore";
     case Request::kPrepareStagedCheckpoint:
       return "prepare_staged_checkpoint";
+    case Request::kDirectRestore:
+      return "direct_restore";
+    case Request::kWaitDirectRestore:
+      return "wait_direct_restore";
     case Request::kCommit:
       return "commit";
     case Request::kAbort:
@@ -238,6 +262,10 @@ ResultName(const Response& response)
       return "aborted";
     case Response::kFailure:
       return "failed";
+    case Response::kDirectRestoreStarted:
+      return "direct_restore_started";
+    case Response::kDirectRestoreReady:
+      return "direct_restore_ready";
     default:
       return "invalid";
   }
@@ -252,6 +280,7 @@ HandleConnection(int connection, Broker& broker)
   size = ntohl(size);
 
   Response response;
+  int response_fd = -1;
   if (size > kMaxMessageSize) {
     response = InvalidRequest();
   } else {
@@ -262,6 +291,12 @@ HandleConnection(int connection, Broker& broker)
     } else {
       const auto request_start = std::chrono::steady_clock::now();
       response = broker.HandleRequest(request);
+      if (request.command_case() == Request::kWaitDirectRestore && response.has_direct_restore_ready())
+        response_fd = broker.TakeDirectRestoreSocket(request.transaction_id());
+      if (request.command_case() == Request::kPrepareStagedCheckpoint &&
+          request.prepare_staged_checkpoint().external_memory_provider() &&
+          response.has_staged_checkpoint_directory())
+        response_fd = broker.TakeCheckpointSocket(request.transaction_id());
       const auto duration =
           std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - request_start);
       std::osyncstream(std::cerr) << "transaction=" << request.transaction_id()
@@ -273,8 +308,10 @@ HandleConnection(int connection, Broker& broker)
 
   std::string message = response.SerializeAsString();
   size = htonl(message.size());
-  WriteAll(connection, &size, sizeof(size));
+  WriteHeaderWithFd(connection, size, response_fd);
   WriteAll(connection, message.data(), message.size());
+  if (response_fd >= 0)
+    close(response_fd);
 }
 
 void

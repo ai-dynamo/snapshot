@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -284,6 +285,54 @@ func TestStagingRequestsRejectEmptyDirectory(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestWaitDirectRestoreReportsBrokerFailureWithoutFD(t *testing.T) {
+	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "pagebroker.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	server := make(chan error, 1)
+	go func() {
+		connection, err := listener.Accept()
+		if err != nil {
+			server <- err
+			return
+		}
+		defer connection.Close()
+		message, err := readMessage(connection)
+		if err != nil {
+			server <- err
+			return
+		}
+		request := new(Request)
+		if err := proto.Unmarshal(message, request); err != nil {
+			server <- err
+			return
+		}
+		message, err = proto.Marshal(&Response{
+			RequestId: request.RequestId, TransactionId: request.TransactionId,
+			Result: &Response_Failure{Failure: &Failure{Code: Failure_STORAGE_ERROR.Enum(), Message: proto.String("prepare failed")}},
+		})
+		if err == nil {
+			err = writeMessage(connection, message)
+		}
+		server <- err
+	}()
+
+	_, provider, err := (Client{ControlSocketPath: listener.Addr().String()}).WaitDirectRestore(context.Background(), "transaction")
+	if provider != nil {
+		_ = provider.Close()
+		t.Fatal("WaitDirectRestore returned a provider FD on failure")
+	}
+	if err == nil || !strings.Contains(err.Error(), "prepare failed") {
+		t.Fatalf("WaitDirectRestore() error = %v, want broker failure", err)
+	}
+	if err := <-server; err != nil {
+		t.Fatal(err)
 	}
 }
 

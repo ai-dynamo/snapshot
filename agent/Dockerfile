@@ -25,8 +25,8 @@ ARG GO_VERSION=1.26.6
 # args at build time, for example:
 #   --build-arg CRIU_REPO=<git-remote-url>
 #   --build-arg CRIU_REF=<fork-branch-or-sha>
-ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
-ARG CRIU_REF=criu-dev
+ARG CRIU_REPO=https://github.com/dfeigin-nv/criu.git
+ARG CRIU_REF=78ef07f8d84bf2f8cd7d982ef1f99244274f0222
 ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04@sha256:8315e2455736c4f9b597f15c5fb4d31f834e798e0c6b66bbdbdbac491ce26bd1
 
 # For placeholder target only - this default allows agent builds to succeed,
@@ -79,7 +79,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
-RUN go test ./... -v && make -C pagebroker test
+RUN go test ./... -v && make -C criu-memory-provider test && make -C pagebroker test
 
 # =============================================================================
 # Stage: PageBroker Builder
@@ -92,7 +92,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
-RUN make -C pagebroker daemon
+RUN make -C criu-memory-provider clean all && make -C pagebroker daemon
 
 # =============================================================================
 # Stage: Builder - Build Go binaries

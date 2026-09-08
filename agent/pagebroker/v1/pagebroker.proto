@@ -38,10 +38,13 @@ message DirectRestoreRequest
   StorageBackend source = 1;
   IOEngine io_engine = 2;
 }
+message WaitDirectRestoreRequest {}
 message PrepareStagedCheckpointRequest
 {
   StorageBackend destination = 1;
   IOEngine io_engine = 2;
+  // CRIU dump support from the selected external-memory-provider revision.
+  optional bool external_memory_provider = 3;
 }
 // Completes a live transaction. PageBroker retains up to 1,024 terminal transactions for up to one hour.
 // Repeating Commit for a retained committed transaction returns CommitComplete; Commit for an aborted, expired, or
@@ -66,6 +69,7 @@ message Request
     CommitRequest commit = 5;
     AbortRequest abort = 6;
     DirectRestoreRequest direct_restore = 7;
+    WaitDirectRestoreRequest wait_direct_restore = 8;
   }
 }
 
@@ -73,7 +77,11 @@ message StagedRestoreDirectory
 {
   optional string image_directory = 1;
 }
-message DirectRestoreReady {}
+message DirectRestoreReady
+{
+  optional string image_directory = 1;
+}
+message DirectRestoreStarted {}
 message StagedCheckpointDirectory
 {
   optional string image_directory = 1;
@@ -115,5 +123,6 @@ message Response
     AbortComplete abort_complete = 6;
     Failure failure = 7;
     DirectRestoreReady direct_restore_ready = 8;
+    DirectRestoreStarted direct_restore_started = 9;
   }
 }

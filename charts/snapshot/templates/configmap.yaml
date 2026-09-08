@@ -27,6 +27,7 @@ data:
 
     pageBroker:
       enabled: {{ .Values.pageBroker.enabled }}
+      directDump: {{ .Values.pageBroker.directDump }}
       {{- if .Values.pageBroker.enabled }}
       controlSocketPath: {{ printf "%s/pagebroker.sock" (include "snapshot.pageBrokerControlPath" .) | quote }}
       {{- end }}

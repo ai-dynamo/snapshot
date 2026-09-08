@@ -160,15 +160,27 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	})
 
 	containerCheckpointPath := nsmount.CheckpointDst
+	var providerSocket *os.File
 	var pageBrokerStageDuration, pageBrokerMountDuration, pageBrokerCommitDuration time.Duration
 	if brokered {
 		transactionID = uuid.NewString()
 		broker = pagebroker.Client{ControlSocketPath: req.PageBrokerControlSocketPath}
 		stageStart := time.Now()
-		staged, err := broker.StagedRestore(ctx, transactionID, artifactPath)
+		staged := ""
+		if _, planErr := os.Stat(filepath.Join(artifactPath, "criu-provider.plan")); planErr == nil {
+			if err := broker.DirectRestore(ctx, transactionID, artifactPath); err != nil {
+				return 0, fmt.Errorf("start PageBroker direct restore: %w", err)
+			}
+			staged, providerSocket, err = broker.WaitDirectRestore(ctx, transactionID)
+		} else {
+			staged, err = broker.StagedRestore(ctx, transactionID, artifactPath)
+		}
 		pageBrokerStageDuration = time.Since(stageStart)
 		if err != nil {
 			return 0, fmt.Errorf("stage PageBroker restore: %w", err)
+		}
+		if providerSocket != nil {
+			defer providerSocket.Close()
 		}
 		mountStart := time.Now()
 		stagingMount, err := mounts.MountPageBroker(ctx, bundleMount, staged)
@@ -192,7 +204,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		})
 	}
 
-	result, err := execNSRestore(ctx, log, req, snap, bundleMount, containerCheckpointPath)
+	result, err := execNSRestore(ctx, log, req, snap, bundleMount, containerCheckpointPath, providerSocket)
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
 	}
@@ -375,7 +387,7 @@ func inspectRestore(
 //     container. Binaries that nsrestore subsequently loads (criu, ip, tar, .so
 //     files) are still resolved by PATH/LD_LIBRARY_PATH inside the container's
 //     mount namespace.
-func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot, mp nsmount.MountPoint, checkpointPath string) (*RestoreInNamespaceResult, error) {
+func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot, mp nsmount.MountPoint, checkpointPath string, providerSocket *os.File) (*RestoreInNamespaceResult, error) {
 
 	// Open nsrestore from the agent host side before entering the container
 	// namespace, so the binary fd is immune to rename attacks inside the container.
@@ -424,11 +436,18 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	if req.TargetPodIP != "" {
 		args = append(args, "--target-pod-ip", req.TargetPodIP)
 	}
+	if providerSocket != nil {
+		const providerFDChild = 5
+		args = append(args, "--extmem-provider-fd", strconv.Itoa(providerFDChild))
+	}
 
 	cmd := exec.CommandContext(ctx, "nsenter", args...)
 	// Inherit the agent environment so nsrestore uses the same logger settings.
 	cmd.Env = os.Environ()
 	cmd.ExtraFiles = []*os.File{nsFd, binaryFile}
+	if providerSocket != nil {
+		cmd.ExtraFiles = append(cmd.ExtraFiles, providerSocket)
+	}
 	log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())
 
 	var stdout bytes.Buffer

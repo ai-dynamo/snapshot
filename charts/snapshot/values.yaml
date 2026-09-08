@@ -98,6 +98,8 @@ storage:
 
 pageBroker:
   enabled: false
+  # Use CRIU's external-memory provider while dumping checkpoint images.
+  directDump: false
   command: []
   args: []
   maxConcurrentRequests: 16

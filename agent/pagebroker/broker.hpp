@@ -22,6 +22,8 @@ class Broker {
  public:
   Broker(Path staging_root, Path storage_root);
   Response HandleRequest(const Request& request);
+  int TakeDirectRestoreSocket(const std::string& transaction_id);
+  int TakeCheckpointSocket(const std::string& transaction_id);
   void ReapExpiredTransactions(std::chrono::steady_clock::time_point now);
 
  private:
@@ -42,12 +44,16 @@ class Broker {
   void ReapTerminalTransactions();
   bool ReserveStaging(uintmax_t bytes);
   void ReleaseStaging(uintmax_t bytes);
+  void ReleaseDirectRestoreReservation(Transaction& transaction);
   Response AbortStaging(
       const Request& request, Transaction& transaction, const Path& staging_directory, const std::exception& error);
   Response Restore(const Request& request);
+  Response DirectRestore(const Request& request);
+  Response WaitDirectRestore(const Request& request);
   Response StageRestore(const Request& request, const StorageBackend& source, const TransferEngine& engine);
   Response PrepareCheckpoint(const Request& request);
-  Response StageCheckpoint(const Request& request, const StorageBackend& destination, const TransferEngine& engine);
+  Response StageCheckpoint(const Request& request, const StorageBackend& destination,
+                           const TransferEngine& engine, bool external_memory_provider);
   // The Snapshot Agent sends COMMIT after CRIU returns; the provider will send it directly later.
   Response Commit(const Request& request);
   Response CleanupRestore(

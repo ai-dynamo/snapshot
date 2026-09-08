@@ -32,6 +32,12 @@ Transaction::descriptor() const
   return descriptor_;
 }
 
+Transaction::Descriptor&
+Transaction::descriptor()
+{
+  return descriptor_;
+}
+
 void
 Transaction::set_descriptor(Descriptor descriptor)
 {

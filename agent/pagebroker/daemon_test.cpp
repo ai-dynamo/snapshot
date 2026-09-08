@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include <unistd.h>
+
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -10,6 +12,7 @@
 #include <thread>
 
 #include "broker.hpp"
+#include "criu_provider_plan.pb.h"
 
 namespace fs = std::filesystem;
 using namespace snapshot::pagebroker;
@@ -53,6 +56,38 @@ class BrokerTest : public ::testing::Test {
   unsigned request_number_ = 0;
 };
 
+void WriteDirectRestorePlan(const fs::path& directory)
+{
+  criu_provider::v1::Plan plan;
+  plan.set_format_major(1);
+  plan.set_page_size(4096);
+  auto* pages = plan.add_images();
+  pages->set_name("pages-1.img");
+  pages->set_size(4);
+  pages->set_role(criu_provider::v1::Image::PAGES);
+  auto* inventory = plan.add_images();
+  inventory->set_name("inventory.img");
+  inventory->set_size(4);
+  inventory->set_role(criu_provider::v1::Image::BOOTSTRAP_LOCAL);
+  auto* object = plan.add_objects();
+  object->set_key("vma:1:0");
+  object->set_length(4096);
+  object->set_kind(criu_provider::v1::Object::PRIVATE_VMA);
+  object->set_pid(1);
+  object->set_vma_id(0);
+  object->set_start(0x1000);
+  auto* chunk = plan.add_chunks();
+  chunk->set_image("pages-1.img");
+  chunk->set_stored_length(4);
+  chunk->set_decoded_length(4);
+  auto* placement = chunk->add_placements();
+  placement->set_object_key("vma:1:0");
+  plan.mutable_requirements()->set_stored_bytes(4);
+  plan.mutable_requirements()->set_metadata_bytes(4);
+  std::ofstream output(directory / "criu-provider.plan", std::ios::binary);
+  ASSERT_TRUE(plan.SerializeToOstream(&output));
+}
+
 TEST_F(BrokerTest, StagesRestoreAndCleansUpOnCommit)
 {
   auto restore = RequestFor("restore");
@@ -79,6 +114,48 @@ TEST_F(BrokerTest, StagesRestoreAndCleansUpOnCommit)
   const auto abort_response = broker().HandleRequest(abort);
   ASSERT_TRUE(abort_response.has_failure());
   EXPECT_EQ(abort_response.failure().code(), Failure::TRANSACTION_NOT_FOUND);
+}
+
+TEST_F(BrokerTest, PreparesDirectRestoreAndReleasesItOnAbort)
+{
+  std::ofstream(source_ / "pages-1.img", std::ios::binary) << "page";
+  std::ofstream(source_ / "inventory.img", std::ios::binary) << "meta";
+  WriteDirectRestorePlan(source_);
+
+  auto direct = RequestFor("direct");
+  Configure(
+      direct.mutable_direct_restore()->mutable_source(), direct.mutable_direct_restore()->mutable_io_engine(), source_);
+  EXPECT_TRUE(broker().HandleRequest(direct).has_direct_restore_started());
+
+  auto wait = RequestFor("direct");
+  wait.mutable_wait_direct_restore();
+  const auto ready = broker().HandleRequest(wait);
+  ASSERT_TRUE(ready.has_direct_restore_ready());
+  EXPECT_TRUE(fs::exists(fs::path(ready.direct_restore_ready().image_directory()) / "pages-1.img"));
+  const int provider_socket = broker().TakeDirectRestoreSocket("direct");
+  ASSERT_GE(provider_socket, 0);
+  close(provider_socket);
+
+  auto abort = RequestFor("direct");
+  abort.mutable_abort();
+  EXPECT_TRUE(broker().HandleRequest(abort).has_abort_complete());
+}
+
+TEST_F(BrokerTest, PreparesDirectCheckpointAndReleasesItOnAbort)
+{
+  auto checkpoint = RequestFor("direct-checkpoint");
+  Configure(checkpoint.mutable_prepare_staged_checkpoint()->mutable_destination(),
+            checkpoint.mutable_prepare_staged_checkpoint()->mutable_io_engine(), source_);
+  checkpoint.mutable_prepare_staged_checkpoint()->set_external_memory_provider(true);
+  const auto staged = broker().HandleRequest(checkpoint);
+  ASSERT_TRUE(staged.has_staged_checkpoint_directory());
+  const int provider_socket = broker().TakeCheckpointSocket("direct-checkpoint");
+  ASSERT_GE(provider_socket, 0);
+  close(provider_socket);
+
+  auto abort = RequestFor("direct-checkpoint");
+  abort.mutable_abort();
+  EXPECT_TRUE(broker().HandleRequest(abort).has_abort_complete());
 }
 
 TEST_F(BrokerTest, StagesIndependentRestoresConcurrently)
