@@ -149,40 +149,42 @@ defaults; see [Storage](../operations/storage.md) for the storage model.
 
 ### Images and rollout
 
-| Value | Default | Description |
-|-------|---------|-------------|
-| `image.operator.repository` | `ghcr.io/ai-dynamo/snapshot/operator` | Operator image. |
-| `image.agent.repository` | `ghcr.io/ai-dynamo/snapshot/agent` | Agent image. |
-| `image.pageBroker.repository` | `ghcr.io/ai-dynamo/snapshot/pagebroker` | PageBroker sidecar image, pulled at `image.agent.tag`. |
-| `image.*.tag` | chart `appVersion` | Image tag; defaults to the chart's `appVersion` when empty. |
-| `crdUpgrade.enabled` | `true` | Re-apply the CRDs on every rollout via an init container. |
-| `runtime.type` | `containerd` | Container runtime: `containerd` or `crio`. |
-| `runtime.socketPath` | `""` | Runtime socket path; empty uses the conventional path for the type. |
-| `openshift.enabled` | `false` | Enable OpenShift RBAC/SCC pieces. Keep `false` on vanilla Kubernetes. |
+| Value                         | Default                                 | Description                                                           |
+|-------------------------------|-----------------------------------------|-----------------------------------------------------------------------|
+| `image.operator.repository`   | `ghcr.io/ai-dynamo/snapshot/operator`   | Operator image.                                                       |
+| `image.agent.repository`      | `ghcr.io/ai-dynamo/snapshot/agent`      | Agent image.                                                          |
+| `image.pageBroker.repository` | `ghcr.io/ai-dynamo/snapshot/pagebroker` | PageBroker sidecar image, pulled at `image.agent.tag`.                |
+| `image.*.tag`                 | chart `appVersion`                      | Image tag; defaults to the chart's `appVersion` when empty.           |
+| `crdUpgrade.enabled`          | `true`                                  | Re-apply the CRDs on every rollout via an init container.             |
+| `runtime.type`                | `containerd`                            | Container runtime: `containerd` or `crio`.                            |
+| `runtime.socketPath`          | `""`                                    | Runtime socket path; empty uses the conventional path for the type.   |
+| `openshift.enabled`           | `false`                                 | Enable OpenShift RBAC/SCC pieces. Keep `false` on vanilla Kubernetes. |
 
 ### Storage
 
-| Value | Default | Description |
-|-------|---------|-------------|
-| `storage.type` | `pvc` | Only `pvc` is implemented today. |
-| `storage.pvc.create` | `true` | Create the PVC; set `false` to use an existing one. |
-| `storage.pvc.name` | `snapshot-pvc` | Shared PVC name. |
-| `storage.pvc.size` | `1Ti` | Requested size. |
-| `storage.pvc.storageClass` | `""` | Storage class; empty uses the cluster default. Must support `ReadWriteMany`. |
-| `storage.pvc.basePath` | `/checkpoints` | Fixed agent mount path; cannot be changed. |
+| Value                      | Default        | Description                                                                  |
+|----------------------------|----------------|------------------------------------------------------------------------------|
+| `storage.type`             | `pvc`          | Only `pvc` is implemented today.                                             |
+| `storage.pvc.create`       | `true`         | Create the PVC; set `false` to use an existing one.                          |
+| `storage.pvc.name`         | `snapshot-pvc` | Shared PVC name.                                                             |
+| `storage.pvc.size`         | `1Ti`          | Requested size.                                                              |
+| `storage.pvc.storageClass` | `""`           | Storage class; empty uses the cluster default. Must support `ReadWriteMany`. |
+| `storage.pvc.basePath`     | `/checkpoints` | Fixed agent mount path; cannot be changed.                                   |
 
 ### Agent DaemonSet and access
 
-| Value | Default | Description |
-|-------|---------|-------------|
-| `daemonset.snapshotLogLevel` | `info` | Agent log level (`trace`/`debug`/`info`/`warn`/`error`). |
-| `daemonset.resources` | 4 CPU / 4Gi limit | Agent resource requests and limits. |
-| `daemonset.nodeSelector` | `nvidia.com/gpu.present: "true"` | Targets GPU nodes. |
-| `daemonset.tolerations` | GPU + `dedicated` | Node tolerations. |
-| `daemonset.imagePullSecrets` | `ngc-secret` | Pull secrets for the agent image. |
-| `seccomp.deploy` | `true` | Install the block-iouring seccomp profile (required for CRIU; set `false` on RHCOS 9.6+). |
-| `rbac.create` | `true` | Create agent and operator RBAC. |
-| `serviceAccount.create` | `true` | Create the agent service account. |
+| Value                          | Default                                   | Description                                                                                                                               |
+|--------------------------------|-------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------|
+| `daemonset.snapshotLogLevel`   | `info`                                    | Agent log level (`trace`/`debug`/`info`/`warn`/`error`).                                                                                  |
+| `daemonset.resources`          | 2 CPU / 1Gi request, 4 CPU / 64Gi limit   | Agent resource requests and limits. The memory limit also bounds the largest checkpoint image, which CRIU writes into PageBroker staging. |
+| `pageBroker.resources`         | 1 CPU / 2Gi request, 32 CPU / 256Gi limit | PageBroker sidecar requests and limits. The memory limit bounds restore prefetch.                                                         |
+| `pageBroker.staging.sizeLimit` | `64Gi`                                    | Cap on the memory-backed staging volume shared by the agent and PageBroker.                                                               |
+| `daemonset.nodeSelector`       | `nvidia.com/gpu.present: "true"`          | Targets GPU nodes.                                                                                                                        |
+| `daemonset.tolerations`        | GPU + `dedicated`                         | Node tolerations.                                                                                                                         |
+| `daemonset.imagePullSecrets`   | `ngc-secret`                              | Pull secrets for the agent image.                                                                                                         |
+| `seccomp.deploy`               | `true`                                    | Install the block-iouring seccomp profile (required for CRIU; set `false` on RHCOS 9.6+).                                                 |
+| `rbac.create`                  | `true`                                    | Create agent and operator RBAC.                                                                                                           |
+| `serviceAccount.create`        | `true`                                    | Create the agent service account.                                                                                                         |
 
 ### Agent config (`config.*`)
 
@@ -193,28 +195,28 @@ defaults; see [Storage](../operations/storage.md) for the storage model.
 
 `config.criu.*` — CRIU options:
 
-| Value | Default | Description |
-|-------|---------|-------------|
-| `binaryPath` | `/usr/local/sbin/criu` | Path to the criu binary. |
-| `ghostLimit` | `536870912` | Max size in bytes of a deleted-but-open file saved inline as a ghost file. |
-| `logLevel` | `4` | CRIU verbosity (0–4). |
-| `workDir` | `/var/criu-work` | CRIU temporary-file directory. |
-| `shellJob` | `true` | Treat containers as session leaders. |
-| `tcpClose` | `false` | Close non-listening TCP sockets on restore. |
-| `tcpEstablished` | `true` | Preserve established TCP sockets. `tcpClose` and `tcpEstablished` cannot both be `true`. |
-| `fileLocks` | `true` | Preserve file locks. |
-| `orphanPtsMaster` | `true` | Support containers with TTYs. |
-| `extUnixSk` | `true` | External Unix sockets. |
-| `linkRemap` | `true` | Support deleted-but-open files (e.g. `/dev/shm` semaphores). |
-| `extMasters` | `true` | External bind-mount masters. |
-| `manageCgroupsMode` | `soft` | CRIU cgroup mode: `ignore` / `soft` / `full` / `strict`. |
-| `imageIoMode` | `direct` | CRIU image I/O: `writeback` or `direct`. |
-| `rstSibling` | `true` | Restore as a sibling process (required for go-criu swrk mode). |
-| `mntnsCompatMode` | `false` | Mount-namespace compatibility mode, applied during restore. |
-| `evasiveDevices` | `true` | Use any device path when the original is inaccessible. |
-| `forceIrmap` | `true` | Force resolving inotify/fsnotify watch names. |
-| `autoDedup` | `false` | Auto-deduplicate memory pages. |
-| `lazyPages` | `false` | Lazy page migration (experimental). |
-| `libDir` | `/usr/local/lib/snapshot/criu-plugins` | CRIU plugin directory used by the chart. |
-| `allowUprobes` | `true` | Kernel/userspace probe compatibility. |
-| `skipInFlight` | `true` | Skip in-flight TCP connections. |
+| Value               | Default                                | Description                                                                              |
+|---------------------|----------------------------------------|------------------------------------------------------------------------------------------|
+| `binaryPath`        | `/usr/local/sbin/criu`                 | Path to the criu binary.                                                                 |
+| `ghostLimit`        | `536870912`                            | Max size in bytes of a deleted-but-open file saved inline as a ghost file.               |
+| `logLevel`          | `4`                                    | CRIU verbosity (0–4).                                                                    |
+| `workDir`           | `/var/criu-work`                       | CRIU temporary-file directory.                                                           |
+| `shellJob`          | `true`                                 | Treat containers as session leaders.                                                     |
+| `tcpClose`          | `false`                                | Close non-listening TCP sockets on restore.                                              |
+| `tcpEstablished`    | `true`                                 | Preserve established TCP sockets. `tcpClose` and `tcpEstablished` cannot both be `true`. |
+| `fileLocks`         | `true`                                 | Preserve file locks.                                                                     |
+| `orphanPtsMaster`   | `true`                                 | Support containers with TTYs.                                                            |
+| `extUnixSk`         | `true`                                 | External Unix sockets.                                                                   |
+| `linkRemap`         | `true`                                 | Support deleted-but-open files (e.g. `/dev/shm` semaphores).                             |
+| `extMasters`        | `true`                                 | External bind-mount masters.                                                             |
+| `manageCgroupsMode` | `soft`                                 | CRIU cgroup mode: `ignore` / `soft` / `full` / `strict`.                                 |
+| `imageIoMode`       | `direct`                               | CRIU image I/O: `writeback` or `direct`.                                                 |
+| `rstSibling`        | `true`                                 | Restore as a sibling process (required for go-criu swrk mode).                           |
+| `mntnsCompatMode`   | `false`                                | Mount-namespace compatibility mode, applied during restore.                              |
+| `evasiveDevices`    | `true`                                 | Use any device path when the original is inaccessible.                                   |
+| `forceIrmap`        | `true`                                 | Force resolving inotify/fsnotify watch names.                                            |
+| `autoDedup`         | `false`                                | Auto-deduplicate memory pages.                                                           |
+| `lazyPages`         | `false`                                | Lazy page migration (experimental).                                                      |
+| `libDir`            | `/usr/local/lib/snapshot/criu-plugins` | CRIU plugin directory used by the chart.                                                 |
+| `allowUprobes`      | `true`                                 | Kernel/userspace probe compatibility.                                                    |
+| `skipInFlight`      | `true`                                 | Skip in-flight TCP connections.                                                          |

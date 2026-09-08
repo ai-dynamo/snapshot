@@ -20,12 +20,12 @@ const (
 	// PageBroker control requests and responses are limited to 64 KiB.
 	maxMessageSize   = 64 << 10
 	commitRetryDelay = 100 * time.Millisecond
+	commitRetryLimit = 30 * time.Second
+	dialRetryDelay   = 100 * time.Millisecond
+	dialRetryLimit   = 30 * time.Second
 )
 
-var (
-	commitRetryLimit   = 30 * time.Second
-	errMessageTooLarge = fmt.Errorf("message exceeds %d bytes", maxMessageSize)
-)
+var errMessageTooLarge = fmt.Errorf("message exceeds %d bytes", maxMessageSize)
 
 // Client uses the deployment-wide filesystem/POSIX PageBroker plan.
 type Client struct {
@@ -109,8 +109,29 @@ func (c Client) Abort(ctx context.Context, transactionID string) error {
 	return nil
 }
 
+func (c Client) dial(ctx context.Context) (net.Conn, error) {
+	dialer := &net.Dialer{}
+	connection, err := dialer.DialContext(ctx, "unix", c.ControlSocketPath)
+	if err == nil || ctx.Err() != nil {
+		return connection, err
+	}
+	retryCtx, cancel := context.WithTimeout(ctx, dialRetryLimit)
+	defer cancel()
+	for {
+		select {
+		case <-retryCtx.Done():
+			return nil, err
+		case <-time.After(dialRetryDelay):
+		}
+		connection, err = dialer.DialContext(retryCtx, "unix", c.ControlSocketPath)
+		if err == nil {
+			return connection, nil
+		}
+	}
+}
+
 func (c Client) request(ctx context.Context, transactionID string, command isRequest_Command) (*Response, error) {
-	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", c.ControlSocketPath)
+	connection, err := c.dial(ctx)
 	if err != nil {
 		return nil, transportError{cause: fmt.Errorf("dial PageBroker: %w", err)}
 	}
