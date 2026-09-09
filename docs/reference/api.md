@@ -98,7 +98,7 @@ The caller sets these annotations on the new pod to trigger a restore:
 |------------|-------------|
 | `nvidia.com/restore-from` | Names the `PodSnapshot`, in the pod's namespace, to restore into the pod. |
 | `nvidia.com/restore-container-map` | Optional. Comma-separated `source=destination` pairs mapping the single captured container to one or more restore containers. When absent, the captured container name is the destination. |
-| `nvidia.com/snapshot-skip-compat-check` | Optional. Set to `"true"` to attempt the restore without the compatibility checks, which otherwise refuse a checkpoint this node cannot run. The value must parse as a boolean, so any other spelling, including `"yes"`, leaves the checks in place. Treat it as a debugging escape hatch: a restore that should have been refused instead fails somewhere inside CRIU. |
+| `nvidia.com/snapshot-skip-compat-check` | Optional. Set to `"true"` to attempt the restore without the compatibility checks, which otherwise refuse a checkpoint this node cannot run. The value must parse as a boolean, so any other spelling, including `"yes"`, leaves the checks in place. Treat it as a debugging escape hatch: a restore that should have been refused instead fails somewhere inside CRIU. Adding it to a pod whose restore was already refused reopens that restore in place, so this is the one case that needs no new pod — a restore that was attempted and failed still does. |
 
 Snapshot then reports restore progress with a pod status condition — written by
 the node agent, not set by the caller:
