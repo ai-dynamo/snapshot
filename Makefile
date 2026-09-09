@@ -11,6 +11,7 @@ REGISTRY          ?= ghcr.io/ai-dynamo/snapshot
 VERSION           ?= latest
 TAGS              ?= $(VERSION)
 DOCKER_BUILD_ARGS ?=
+MODEL_STREAMER_WHEEL_DIR ?= ../runai-model-streamer/py/runai_model_streamer/dist
 
 # Base image for the agent, read from the Dockerfile so the digest lives in one
 # place. capture-base-packages and docker-build-agent must agree on it, or the
@@ -133,6 +134,7 @@ docker-build-agent: verify-base-packages
 	  --build-arg "GO_VERSION=$(GO_VERSION)" \
 	  --build-arg "AGENT_BASE_IMAGE=$(AGENT_BASE_IMAGE)" \
 	  --build-context=api=./api --build-context=compliance=./hack/compliance \
+	  --build-context=model-streamer-wheel="$(MODEL_STREAMER_WHEEL_DIR)" \
 	  --target agent \
 	  $(foreach t,$(TAGS),-t $(REGISTRY)/agent:$(t)) agent/
 
