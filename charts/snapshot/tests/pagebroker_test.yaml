@@ -38,6 +38,29 @@ tests:
             - --max-concurrent-requests
             - "16"
 
+  - it: can publish root-owned artifacts without additional privileges
+    template: templates/daemonset.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].securityContext.runAsUser
+          value: 0
+      - equal:
+          path: spec.template.spec.containers[1].securityContext.runAsGroup
+          value: 0
+      - equal:
+          path: spec.template.spec.containers[1].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.containers[1].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
+          path: spec.template.spec.containers[1].securityContext.capabilities.drop
+          value:
+            - ALL
+      - equal:
+          path: spec.template.spec.containers[1].securityContext.seccompProfile.type
+          value: RuntimeDefault
+
   - it: mounts the checkpoint PVC in both containers at the same path
     template: templates/daemonset.yaml
     asserts:

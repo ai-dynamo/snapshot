@@ -175,6 +175,19 @@ spec:
         - name: pagebroker
           image: "{{ .Values.image.pageBroker.repository }}:{{ .Values.image.agent.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pageBroker.pullPolicy }}
+          # CRIU artifacts on the shared PVC are created by the privileged agent
+          # as root. PageBroker needs the same UID to publish and restore them,
+          # but does not need privilege escalation or Linux capabilities.
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
           args:
             - {{ printf "%s/pagebroker.sock" $pageBrokerControlPath | quote }}
             - {{ $pageBrokerStagingPath | quote }}
