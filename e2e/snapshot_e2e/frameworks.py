@@ -3,11 +3,10 @@
 
 """Inference framework workloads under e2e test.
 
-Each framework's program and manifests live under manifests/frameworks/<name>/,
-owned by the e2e suite (not docs/guides/, which still documents the
-build-and-push image flow and is updated separately). This module pins what
-the tests need to know about each one: which control-dir files it writes, how
-long each phase may take, and which model it serves.
+Each framework's program and manifests live under docs/guides/<name>/ in the
+repository root. This module pins what the tests need to know about each one:
+which control-dir files it writes, how long each phase may take, and which
+model it serves.
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ from pathlib import Path
 
 import yaml
 
-FRAMEWORKS_DIR = Path(__file__).resolve().parent / "manifests" / "frameworks"
+FRAMEWORKS_DIR = Path(__file__).resolve().parent.parent.parent / "docs" / "guides"
 
 CONTAINER = "main"
 API_PORT = 8000
