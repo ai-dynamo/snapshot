@@ -149,6 +149,7 @@ def test_restore_pod_is_standby_placeholder_for_this_run(spec: frameworks.Framew
     # command; without it the guide program would load a model into the GPU
     # while the agent restores into the same container.
     assert main["command"] == ["/bin/sh", "-c", "exec sleep infinity"]
+    assert "args" not in main
     assert fw.env_value(main, "SNAPSHOT_RESTORE_STANDBY") is None
     assert restore["metadata"]["annotations"] == {fw.RESTORE_FROM_ANNOTATION: run.snapshot_name}
     node_terms = restore["spec"]["affinity"]["nodeAffinity"][

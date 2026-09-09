@@ -206,7 +206,7 @@ def wait_for_file(namespace: str, pod: str, path: str, timeout: int = 180) -> No
             )
             response = k8s.exec_command(namespace, pod, command)
             last_error = None
-            return True if response == marker else None
+            return True if marker in response else None
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
             return None
@@ -250,14 +250,18 @@ def wait_for_restore_outcome(
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
             return None
-        if output.startswith(f"{marker}:error"):
-            body = output.split("\n", 1)[1] if "\n" in output else ""
+        marker_at = output.rfind(marker)
+        if marker_at < 0:
+            return None
+        tail = output[marker_at:]
+        body = tail.split("\n", 1)[1] if "\n" in tail else ""
+        if tail.startswith(f"{marker}:error"):
             raise AssertionError(
                 f"restored program in {namespace}/{pod} failed after restore "
                 f"({error_file}):\n{body}"
             )
-        if output.startswith(f"{marker}:ready"):
-            return output.split("\n", 1)[1] if "\n" in output else ""
+        if tail.startswith(f"{marker}:ready"):
+            return body
         return None
 
     def detail() -> str:

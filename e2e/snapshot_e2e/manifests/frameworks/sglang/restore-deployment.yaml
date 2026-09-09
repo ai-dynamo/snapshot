@@ -64,9 +64,6 @@ spec:
             - /bin/sh
             - -c
             - exec sleep infinity
-          args:
-            - --mode
-            - snapshot
           env:
             - name: SNAPSHOT_MODEL
               value: Qwen/Qwen3-0.6B

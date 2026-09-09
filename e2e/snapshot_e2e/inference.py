@@ -71,31 +71,3 @@ def request_generate(
     if not isinstance(text, str) or not text.strip():
         raise AssertionError(f"/generate on {namespace}/{pod} returned empty text: {body!r}")
     return text
-
-
-_FILE_MARKER = "__snapshot_e2e_file__"
-
-
-def read_control_file(
-    namespace: str, pod: str, path: str, *, container: str | None = None
-) -> str | None:
-    """Content of a control-directory file, or None when it does not exist.
-
-    exec merges stdout and stderr and hides the remote exit status, so a bare
-    `cat` of a missing file would come back as its error text and pass a
-    "non-empty" assertion. The marker is printed only when the file exists.
-    """
-    quoted = shlex.quote(path)
-    output = k8s.exec_command(
-        namespace,
-        pod,
-        f"if [[ -f {quoted} ]]; then printf '%s' {shlex.quote(_FILE_MARKER)}; cat {quoted}; fi",
-        container=container,
-    )
-    return parse_control_file(output)
-
-
-def parse_control_file(output: str) -> str | None:
-    if not output.startswith(_FILE_MARKER):
-        return None
-    return output[len(_FILE_MARKER):]
