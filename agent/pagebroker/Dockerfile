@@ -27,21 +27,9 @@ RUN output=$(/src/pagebroker 2>&1); status=$?; \
     [ "$output" = "usage: pagebroker socket_path staging_directory storage_root --max-concurrent-requests max_concurrent_requests" ]
 
 # Corresponding source for the statically linked protobuf. Fetched in this
-# stage and pinned to the source version of the libprotobuf-dev that provided
-# the libprotobuf.a linked above, so the shipped source cannot be a different
-# version than the linked object.
-RUN for f in /etc/apt/sources.list.d/*.sources; do \
-      [ -f "$f" ] && sed -i 's/^Types: deb$/Types: deb deb-src/' "$f" || true; \
-    done \
-    && { [ ! -f /etc/apt/sources.list ] \
-         || sed -i 's/^deb \(.*\)$/deb \1\ndeb-src \1/' /etc/apt/sources.list; } \
-    && apt-get update \
-    && mkdir -p /legal/source/protobuf \
-    && version="$(dpkg-query -W -f='${source:Version}' libprotobuf-dev)" \
-    && (cd /legal/source/protobuf \
-        && apt-get source --only-source --download-only "protobuf=${version}") \
-    && printf '%s\n' "${version}" > /legal/source/protobuf/VERSION \
-    && cp /usr/share/doc/libprotobuf-dev/copyright /legal/source/protobuf/copyright \
+# stage, from the same libprotobuf-dev install that provided the linked
+# libprotobuf.a, and pinned to its source version (see compliance/).
+RUN sh /src/compliance/collect-sources.sh /legal/source/protobuf \
     && rm -rf /var/lib/apt/lists/*
 
 # Assemble the legal materials so the runtime stage (distroless, no shell) can
@@ -56,18 +44,10 @@ RUN rm -rf /legal/source/pagebroker/build \
            /legal/source/pagebroker/pagebroker \
            /legal/source/pagebroker/v1/pagebroker.pb.*
 
-RUN { \
-      printf '================================================================================\n'; \
-      printf 'THIRD-PARTY SOFTWARE NOTICES AND ATTRIBUTION\n'; \
-      printf 'NVIDIA Dynamo Snapshot (PageBroker image)\n'; \
-      printf '================================================================================\n\n'; \
-      printf 'This image statically links protobuf. Corresponding source ships under\n'; \
-      printf '/legal/source/protobuf/.\n\n'; \
-      printf '================================================================================\n'; \
-      printf 'COMPONENT: protobuf\n'; \
-      printf '================================================================================\n'; \
-      cat /legal/source/protobuf/copyright; \
-    } > /legal/THIRD-PARTY.txt
+# Attribution generated from the collected source, so it cannot drift from the
+# version actually shipped.
+COPY compliance/gen-attribution.sh /tmp/gen-attribution.sh
+RUN sh /tmp/gen-attribution.sh /legal/source/protobuf /legal/THIRD-PARTY.txt
 
 FROM ${PAGEBROKER_BASE_IMAGE}
 
