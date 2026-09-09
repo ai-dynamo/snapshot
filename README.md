@@ -158,13 +158,14 @@ Multi-GPU and Arm support are on the roadmap.
 
 **Get started**
 
-- [Usage guides](docs/guides/README.md) — build a snapshot-ready image per inference framework, then checkpoint and restore.
+- [Usage guides](docs/guides/README.md) — make a workload snapshot-ready per inference framework, then checkpoint and restore.
 
 **Reference**
 
 - [API](docs/reference/api.md) — `PodSnapshot`, `PodSnapshotContent`, `SnapshotJob`, and the `restore-from` annotation.
 - [Architecture](docs/reference/architecture.md) — operator and node-agent design, and the checkpoint/restore internals.
 - [CLI (`snapshotctl`)](docs/reference/cli.md) — lower-level checkpoint/restore from a pod manifest.
+- [Workload contract](docs/reference/workload-contract.md) — what a workload must do, and how its pod must be shaped, to be checkpointed and restored; a custom image is one packaging method.
 - [Restore Pod contract](docs/reference/restore-pod-contract.md) — the pod interface for programmatic restore: annotations, control volume, startup gate, and seccomp.
 
 **Operations**
