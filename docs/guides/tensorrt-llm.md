@@ -1,9 +1,11 @@
 # Build and deploy a TensorRT-LLM replica
 
-Snapshot restores a replica by injecting its checkpointed state into a
-snapshot-ready image: a TensorRT-LLM runtime image prepared with the application
-and container layout Snapshot expects. The Snapshot agent injects the restore
-tooling at runtime.
+This guide makes a TensorRT-LLM workload snapshot-ready using the **custom-image
+method**: start from the TensorRT-LLM runtime image and add a small entrypoint
+that implements Snapshot's [workload contract](../reference/workload-contract.md).
+Building an image is the reference way to package a compliant workload, not a
+requirement of Snapshot — any container whose entrypoint satisfies the contract
+works. The Snapshot agent injects the restore tooling at runtime.
 
 > [!NOTE]
 > TensorRT-LLM support is experimental and currently limited to a single GPU.

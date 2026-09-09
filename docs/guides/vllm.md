@@ -1,9 +1,11 @@
 # Build and deploy a vLLM replica
 
-Snapshot restores a replica by injecting its checkpointed state into a
-snapshot-ready image: a vLLM runtime image prepared with the application and
-container layout Snapshot expects. The Snapshot agent injects the restore
-tooling at runtime.
+This guide makes a vLLM workload snapshot-ready using the **custom-image
+method**: start from vLLM's runtime image and add a small entrypoint that
+implements Snapshot's [workload contract](../reference/workload-contract.md).
+Building an image is the reference way to package a compliant workload, not a
+requirement of Snapshot — any container whose entrypoint satisfies the contract
+works. The Snapshot agent injects the restore tooling at runtime.
 
 > [!NOTE]
 > This example is validated on vLLM 0.27.1 (the pinned

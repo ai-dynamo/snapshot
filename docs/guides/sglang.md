@@ -1,9 +1,11 @@
 # Build and deploy an SGLang replica
 
-Snapshot restores a replica by injecting its checkpointed state into a
-snapshot-ready image: an SGLang runtime image prepared with the application and
-container layout Snapshot expects. The Snapshot agent injects the restore
-tooling at runtime.
+This guide makes an SGLang workload snapshot-ready using the **custom-image
+method**: start from an SGLang runtime image and add a small entrypoint that
+implements Snapshot's [workload contract](../reference/workload-contract.md).
+Building an image is the reference way to package a compliant workload, not a
+requirement of Snapshot — any container whose entrypoint satisfies the contract
+works. The Snapshot agent injects the restore tooling at runtime.
 
 ## Build
 

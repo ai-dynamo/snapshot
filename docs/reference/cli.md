@@ -27,7 +27,7 @@ snapshotctl checkpoint \
 ```
 
 The manifest must be a `Pod` (not a Deployment or Job) using a
-[snapshot-ready image](../guides/README.md).
+[snapshot-ready workload](../guides/README.md).
 
 ## Restore
 
