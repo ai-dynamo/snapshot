@@ -228,9 +228,9 @@ var gpuModelCheck = check{
 // is no meaning to be given to a rank that has nowhere to land - or to a GPU no
 // rank was recorded for.
 //
-// A target with no GPUs at all is that same refusal and is reported as one. It
-// reaches here only once discovery has run, so none found means none, and the
-// alternative is the unnamed device-map error further in.
+// A target discovery read as having no GPUs is that same refusal. A target with
+// no GPU stack to read does not reach here at all: discovery fails first and the
+// restore carries that error instead.
 const CheckGPUCount Check = "gpu-count"
 
 var gpuCountCheck = check{
