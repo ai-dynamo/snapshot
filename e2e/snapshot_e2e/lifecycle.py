@@ -513,6 +513,50 @@ def wait_for_restored_condition(
     )
 
 
+def wait_for_pod_event(
+    namespace: str,
+    pod_name: str,
+    reason: str,
+    *,
+    pod_uid: str | None = None,
+    timeout: int = 600,
+    poll_interval: float = 1.0,
+) -> client.CoreV1Event:
+    """Waits for a named event on one pod.
+
+    Benchmark callers use a shorter poll than the ordinary lifecycle waits so
+    observing an agent event adds at most one second to the timing boundary.
+    The UID guard avoids matching an event from a locally re-created pod with
+    the same name.
+    """
+
+    def matching_event() -> client.CoreV1Event | None:
+        for event in reversed(k8s.list_events(namespace)):
+            involved = event.involved_object
+            if not involved or involved.name != pod_name or event.reason != reason:
+                continue
+            if pod_uid and str(involved.uid or "") != pod_uid:
+                continue
+            return event
+        return None
+
+    def detail() -> str:
+        reasons = [
+            event.reason
+            for event in k8s.list_events(namespace)
+            if event.involved_object and event.involved_object.name == pod_name
+        ]
+        return f"observed_reasons={reasons[-10:]}"
+
+    return wait_for(
+        f"event {reason} on pod {namespace}/{pod_name}",
+        matching_event,
+        timeout,
+        detail=detail,
+        poll_interval=poll_interval,
+    )
+
+
 def pod_condition(pod: client.V1Pod, condition_type: str) -> client.V1PodCondition | None:
     for item in pod.status.conditions or []:
         if item.type == condition_type:
@@ -1236,6 +1280,7 @@ def wait_for(
     timeout: int,
     *,
     detail: Callable[[], str] | None = None,
+    poll_interval: float = 5.0,
 ) -> Any:
     start = time.monotonic()
     deadline = time.monotonic() + timeout
@@ -1256,6 +1301,6 @@ def wait_for(
                 flush=True,
             )
             last_report = now
-        time.sleep(5)
+        time.sleep(poll_interval)
     suffix = f": {last_detail}" if last_detail else ""
     raise AssertionError(f"timed out waiting for {description}{suffix}")

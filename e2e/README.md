@@ -175,6 +175,39 @@ Model weights come from one of two places:
 `tests/test_framework_manifests.py` pins the guide manifests, and the cache
 rewrite, to the restore-pod contract without a cluster.
 
+### Framework benchmark results
+
+Every selected framework test prints a benchmark summary and writes one
+versioned JSON result. CI uploads the JSON as a 30-day artifact even when the
+functional test fails. Set `SNAPSHOT_E2E_BENCHMARK_DIR` to choose the local
+output directory; without it, results go under the system temporary directory.
+
+The required durations use these stable boundaries:
+
+- `checkpoint.duration`: immediately before the `PodSnapshot` create request
+  until both `PodSnapshot` and its bound `PodSnapshotContent` report Ready.
+- `restore.to_traffic.duration`: observation of the Snapshot agent's
+  `RestoreRequested` event until the framework writes its restore-ready
+  sentinel, which happens after its API is listening and its first
+  post-restore generation completes.
+- `restore.pod_create_to_traffic.duration`: immediately before restore pod
+  creation until the same traffic-ready sentinel. This secondary measurement
+  includes scheduling and target discovery.
+- `test.total.duration`: entry into the test body through restored inference
+  verification and the no-cold-start assertion. Failure diagnostics and
+  fixture cleanup are excluded.
+
+Durations use the test runner's monotonic clock. UTC timestamps are metadata;
+they are not subtracted across machines. The result also keeps the underlying
+events, the test outcome, source revision, framework image and model, cache and
+storage modes, Kubernetes node, and the GPU model/UUID/driver visible inside
+the workload. Missing boundaries remain explicit incomplete measurements and
+are never serialized as zero.
+
+`snapshot_e2e.benchmark.BenchmarkSession` is intentionally independent of the
+framework schema: another E2E suite can name its own case, events, and duration
+measurements while producing the same result envelope.
+
 ## Framework Images
 
 The framework e2e workloads are the programs and manifests under
