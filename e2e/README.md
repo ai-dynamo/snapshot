@@ -248,6 +248,54 @@ diagnostics artifact because results are retained outside the cluster.
 framework schema: another E2E suite can name its own case, events, and duration
 measurements while producing the same result envelope.
 
+### Benchmark history and comparison
+
+After the matrix finishes, one CPU-only job downloads all selected framework
+results and compares every completed measurement with the previous compatible
+successful run and the median of the previous seven. The comparison, including
+GPU, storage, image-cache state, commit, outcome, and workflow links, is written
+to the GitHub Actions step summary and uploaded as another 30-day artifact.
+Failed and timed-out results remain visible but do not contribute values to a
+baseline. A missing or invalid matrix artifact becomes an explicit
+`infrastructure_failed` result instead of disappearing from history.
+
+Only the scheduled workflow on `main` can publish. Pull-request mirror,
+ordinary branch, and manually dispatched runs use a separate read-only job and
+cannot mutate durable history. The publisher serializes updates, commits all
+frameworks from one workflow in one commit, and bootstraps the data-only orphan
+branch `e2e-benchmark-history` on its first successful invocation.
+
+Raw results are the source of truth. They are stored under:
+
+```text
+results/v1/<suite>/<case>/<test>/<year>/<month>/<day>/<run-id>-<attempt>.json
+```
+
+Derived monthly indexes live at `index/v1/<year>-<month>.ndjson`; the small
+`index/manifest.json` lists chunks newest-first. Identity is the GitHub run ID,
+attempt, suite, case, and test, so publishing the same attempt again recognizes
+the immutable record instead of duplicating it.
+
+Compatible baselines have the same suite, case, test, schema and benchmark
+versions, measurement unit, GPU models, framework image, model, storage
+configuration, model-cache mode, image-cache state, and GPU-monitoring mode.
+GPU UUID, node, Snapshot commit, and Snapshot image tag stay diagnostic: they
+do not split the baseline. Future suites can add stable suite-specific values
+under `environment.comparisonDimensions`.
+
+The monthly indexes and manifest can be reconstructed from a checked-out
+history branch without modifying any raw result:
+
+```bash
+PYTHONPATH=e2e python3 -m snapshot_e2e.benchmark_history rebuild \
+  --history-dir /path/to/e2e-benchmark-history
+```
+
+After inspecting the diff, commit and push the rebuilt `index/` directory. If
+the history branch is lost, restore the raw `results/` tree from a backup or
+retained workflow artifacts and run the same rebuild command; indexes alone
+cannot reconstruct the raw records.
+
 ## Framework Images
 
 The framework e2e workloads are the programs and manifests under
