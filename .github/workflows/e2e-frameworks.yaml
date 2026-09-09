@@ -459,3 +459,178 @@ jobs:
 
       - name: Restore Datadog GPU monitoring
         run: python3 hack/datadog-gpu-monitoring.py restore --holder "${{ github.run_id }}-${{ github.run_attempt }}"
+
+  # PR mirrors and ordinary dispatches compare against history with a
+  # read-only token. Keep this separate from the scheduled publisher: mirror
+  # branches contain PR code but run as push events, so merely guarding a
+  # write step inside one write-capable job would still expose that token.
+  benchmark-history-read-only:
+    name: compare framework benchmark history
+    needs: e2e
+    if: ${{ always() && !(github.event_name == 'schedule' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Download framework benchmark results
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: e2e-framework-benchmark-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/e2e-framework-benchmark-results
+          merge-multiple: true
+
+      - name: Fetch benchmark history
+        run: |
+          set -euo pipefail
+          history_dir="${RUNNER_TEMP}/e2e-framework-benchmark-history"
+          mkdir -p "${history_dir}"
+          git -C "${history_dir}" init --quiet --initial-branch=e2e-benchmark-history
+          git -C "${history_dir}" remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          set +e
+          git -C "${history_dir}" ls-remote --quiet --exit-code --heads origin e2e-benchmark-history >/dev/null
+          history_status=$?
+          set -e
+          case "${history_status}" in
+            0)
+              git -C "${history_dir}" fetch --quiet --depth=1 origin refs/heads/e2e-benchmark-history
+              git -C "${history_dir}" checkout --quiet -B e2e-benchmark-history FETCH_HEAD
+              ;;
+            2)
+              echo "::notice::No e2e-benchmark-history branch exists yet; comparisons will have no baseline."
+              ;;
+            *)
+              echo "::error::Could not inspect the e2e-benchmark-history branch."
+              exit "${history_status}"
+              ;;
+          esac
+          echo "SNAPSHOT_E2E_HISTORY_DIR=${history_dir}" >> "${GITHUB_ENV}"
+
+      - name: Compare benchmark results
+        env:
+          SELECTED_FRAMEWORK: ${{ inputs.framework || 'all' }}
+        run: |
+          set -euo pipefail
+          cases=()
+          if [[ "${SELECTED_FRAMEWORK}" == "all" ]]; then
+            cases=(vllm sglang tensorrt-llm)
+          else
+            cases=("${SELECTED_FRAMEWORK}")
+          fi
+          case_args=()
+          for framework in "${cases[@]}"; do
+            case_args+=(--expected-case "${framework}")
+          done
+          PYTHONPATH=e2e python3 -m snapshot_e2e.benchmark_history aggregate \
+            --artifacts-dir "${RUNNER_TEMP}/e2e-framework-benchmark-results" \
+            --history-dir "${SNAPSHOT_E2E_HISTORY_DIR}" \
+            --output-dir "${RUNNER_TEMP}/e2e-framework-benchmark-comparison" \
+            --summary-file "${GITHUB_STEP_SUMMARY}" \
+            "${case_args[@]}"
+
+      - name: Upload benchmark comparison
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-framework-benchmark-comparison-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/e2e-framework-benchmark-comparison
+          if-no-files-found: error
+          retention-days: 30
+
+  # Exactly one scheduled default-branch job receives contents:write. It
+  # aggregates all matrix artifacts and pushes one serialized history commit.
+  benchmark-history-publish:
+    name: publish framework benchmark history
+    needs: e2e
+    if: ${{ always() && github.event_name == 'schedule' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: snapshot-e2e-benchmark-history
+      cancel-in-progress: false
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Download framework benchmark results
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: e2e-framework-benchmark-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/e2e-framework-benchmark-results
+          merge-multiple: true
+
+      - name: Fetch or initialize benchmark history
+        run: |
+          set -euo pipefail
+          history_dir="${RUNNER_TEMP}/e2e-framework-benchmark-history"
+          mkdir -p "${history_dir}"
+          git -C "${history_dir}" init --quiet --initial-branch=e2e-benchmark-history
+          git -C "${history_dir}" remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          set +e
+          git -C "${history_dir}" ls-remote --quiet --exit-code --heads origin e2e-benchmark-history >/dev/null
+          history_status=$?
+          set -e
+          case "${history_status}" in
+            0)
+              git -C "${history_dir}" fetch --quiet --depth=1 origin refs/heads/e2e-benchmark-history
+              git -C "${history_dir}" checkout --quiet -B e2e-benchmark-history FETCH_HEAD
+              ;;
+            2)
+              echo "::notice::Bootstrapping the orphan e2e-benchmark-history branch."
+              ;;
+            *)
+              echo "::error::Could not inspect the e2e-benchmark-history branch."
+              exit "${history_status}"
+              ;;
+          esac
+          echo "SNAPSHOT_E2E_HISTORY_DIR=${history_dir}" >> "${GITHUB_ENV}"
+
+      - name: Aggregate and index benchmark results
+        run: |
+          set -euo pipefail
+          PYTHONPATH=e2e python3 -m snapshot_e2e.benchmark_history aggregate \
+            --artifacts-dir "${RUNNER_TEMP}/e2e-framework-benchmark-results" \
+            --history-dir "${SNAPSHOT_E2E_HISTORY_DIR}" \
+            --output-dir "${RUNNER_TEMP}/e2e-framework-benchmark-comparison" \
+            --summary-file "${GITHUB_STEP_SUMMARY}" \
+            --expected-case vllm \
+            --expected-case sglang \
+            --expected-case tensorrt-llm \
+            --publish
+
+      - name: Commit and push benchmark history
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git -C "${SNAPSHOT_E2E_HISTORY_DIR}" config user.name "github-actions[bot]"
+          git -C "${SNAPSHOT_E2E_HISTORY_DIR}" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "${SNAPSHOT_E2E_HISTORY_DIR}" add results index
+          if git -C "${SNAPSHOT_E2E_HISTORY_DIR}" diff --cached --quiet; then
+            echo "History already contains this workflow attempt; nothing to push."
+            exit 0
+          fi
+          git -C "${SNAPSHOT_E2E_HISTORY_DIR}" commit --signoff \
+            --message "data(e2e): record benchmark run ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          gh auth setup-git
+          git -C "${SNAPSHOT_E2E_HISTORY_DIR}" push origin HEAD:refs/heads/e2e-benchmark-history
+
+      - name: Upload benchmark comparison
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-framework-benchmark-comparison-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/e2e-framework-benchmark-comparison
+          if-no-files-found: error
+          retention-days: 30
