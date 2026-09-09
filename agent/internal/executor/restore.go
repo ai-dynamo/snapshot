@@ -375,8 +375,9 @@ func inspectRestore(
 		return nil, 0, err
 	}
 
-	// Only reachable with the gate skipped, which otherwise reports a target
-	// with no GPUs as a count refusal.
+	// Only reachable with the gate skipped: with it on, a target discovery read
+	// as having no GPUs is a count refusal, and one it could not read at all
+	// failed above.
 	if !manifest.CUDA.IsEmpty() && len(targetGPUUUIDs) == 0 {
 		return nil, 0, fmt.Errorf("missing target GPU UUIDs for %s/%s container %s", req.PodNamespace, req.PodName, req.DestinationContainerName)
 	}
