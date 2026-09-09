@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Documentation Request or Correction
+description: Request new Snapshot documentation, or a correction to existing documentation
+title: "[DOC]: "
+labels: ["documentation"]
+
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time to improve our documentation!
+
+  - type: dropdown
+    id: request_type
+    attributes:
+      label: What kind of request is this?
+      options:
+        - Correction or update to existing documentation
+        - New documentation that does not exist yet
+    validations:
+      required: true
+
+  - type: input
+    id: location
+    attributes:
+      label: Link to the relevant docs, or where you looked for them
+      placeholder: "ex: https://github.com/ai-dynamo/snapshot/blob/main/README.md"
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Describe the problem or the missing documentation
+      placeholder: The docs say to put the restore-from annotation on the namespace, but it belongs on the pod.
+    validations:
+      required: true
+
+  - type: textarea
+    id: correction
+    attributes:
+      label: (Optional) Propose a correction or an outline of the new content
+
+  - type: dropdown
+    id: criticality
+    attributes:
+      label: How would you describe the impact of this documentation gap?
+      description: Maintainers set the final priority label during triage.
+      options:
+        - Critical (currently preventing usage)
+        - High
+        - Medium
+        - Low (would be nice)
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: duplicates
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have searched the existing issues and found no duplicate of this request
+          required: true

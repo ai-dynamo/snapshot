@@ -1,0 +1,79 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-source
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vllm-source
+  template:
+    metadata:
+      labels:
+        app: vllm-source
+        nvidia.com/snapshot-is-checkpoint-source: "true"
+    spec:
+      terminationGracePeriodSeconds: 1
+      runtimeClassName: nvidia
+      securityContext:
+        seccompProfile:
+          type: Localhost
+          localhostProfile: profiles/block-iouring.json
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      containers:
+        - name: main
+          image: vllm/vllm-openai:v0.27.1-ubuntu2404@sha256:dafea057f24b7d42716331a48e2db4e1f204f877a3aa759cb7e4c37e64ca2eee
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - /snapshot-app/app.py
+          env:
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+            - name: SNAPSHOT_MODEL
+              value: Qwen/Qwen3-0.6B
+            - name: VLLM_MAX_MODEL_LEN
+              value: "2048"
+            - name: VLLM_GPU_MEMORY_UTILIZATION
+              value: "0.30"
+            - name: SNAPSHOT_CONTROL_DIR
+              value: /snapshot-control
+          ports:
+            - name: api
+              containerPort: 8000
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          readinessProbe:
+            exec:
+              command:
+                - cat
+                - /snapshot-control/ready-for-snapshot
+            periodSeconds: 1
+            failureThreshold: 1200
+          volumeMounts:
+            - name: snapshot-control
+              mountPath: /snapshot-control
+              subPath: main
+            - name: tun
+              mountPath: /dev/net/tun
+            - name: app
+              mountPath: /snapshot-app
+              readOnly: true
+      volumes:
+        - name: snapshot-control
+          emptyDir: {}
+        - name: tun
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice
+        # Created from app.py: kubectl create configmap vllm-app --from-file=app.py
+        - name: app
+          configMap:
+            name: vllm-app
