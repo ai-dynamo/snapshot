@@ -79,6 +79,7 @@ jobs:
       - run: |
           uv run --locked --project e2e pytest \
             e2e/tests/test_framework_manifests.py \
+            e2e/tests/test_multicontainer_diagnostics.py \
             e2e/tests/test_workload_scripts.py -vv
 
   helm-test:

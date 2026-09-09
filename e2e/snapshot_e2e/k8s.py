@@ -154,12 +154,19 @@ def delete_pod(namespace: str, name: str) -> bool:
         raise
 
 
-def pod_logs(namespace: str, name: str, *, tail_lines: int = 120) -> str:
+def pod_logs(
+    namespace: str,
+    name: str,
+    *,
+    tail_lines: int = 120,
+    container: str | None = None,
+) -> str:
     try:
         return client.CoreV1Api().read_namespaced_pod_log(
             name=name,
             namespace=namespace,
             tail_lines=tail_lines,
+            container=container,
             _preload_content=True,
         )
     except ApiException as exc:
