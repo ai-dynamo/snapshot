@@ -275,6 +275,103 @@ def wait_for_restore_outcome(
     )
 
 
+def wait_for_restore_traffic_ready(
+    namespace: str,
+    pod_name: str,
+    *,
+    ready_file: str,
+    error_file: str,
+    timeout: int,
+    on_restore_succeeded: Callable[[], None] | None = None,
+    on_traffic_ready: Callable[[], None] | None = None,
+    poll_interval: float = 1.0,
+) -> tuple[client.V1Pod, str]:
+    """Observes restore completion and traffic readiness in one tight loop.
+
+    Waiting for the pod condition and then starting a separate sentinel wait
+    can add two independent polling delays to the reported duration. This
+    waiter records each boundary the first time it is seen, still requires
+    both success signals, and fails fast on either restore or workload errors.
+    """
+    marker = "__snapshot_e2e_outcome__"
+    restored_pod: client.V1Pod | None = None
+    ready_text: str | None = None
+    last_exec_error: str | None = None
+
+    def check() -> tuple[client.V1Pod, str] | None:
+        nonlocal restored_pod, ready_text, last_exec_error
+        pod = k8s.read_pod(namespace, pod_name)
+        restored = pod_condition(pod, "nvidia.com/Restored")
+        if restored and restored.status == "True" and restored.reason == "RestoreSucceeded":
+            if restored_pod is None and on_restore_succeeded is not None:
+                on_restore_succeeded()
+            restored_pod = pod
+        else:
+            terminal_reasons = {
+                "RestoreSucceeded",
+                "RestorePartiallySucceeded",
+                "RestoreFailed",
+            }
+            if restored and restored.reason in terminal_reasons:
+                raise AssertionError(
+                    f"restore reached unexpected terminal condition for "
+                    f"{namespace}/{pod_name}: {restored.reason}: {restored.message}"
+                )
+            if pod.status.phase in TERMINAL_POD_PHASES:
+                raise AssertionError(
+                    f"pod {namespace}/{pod_name} reached phase {pod.status.phase} "
+                    "before restore and traffic readiness"
+                )
+
+        if ready_text is None:
+            try:
+                output = k8s.exec_command(
+                    namespace,
+                    pod_name,
+                    f"if [[ -f {shlex.quote(error_file)} ]]; then printf '%s:error\\n' {shlex.quote(marker)}; "
+                    f"cat {shlex.quote(error_file)}; "
+                    f"elif [[ -f {shlex.quote(ready_file)} ]]; then printf '%s:ready\\n' {shlex.quote(marker)}; "
+                    f"cat {shlex.quote(ready_file)}; fi",
+                )
+                last_exec_error = None
+            except Exception as exc:  # transient while the container starts
+                last_exec_error = f"{type(exc).__name__}: {exc}"
+            else:
+                if output.startswith(f"{marker}:error"):
+                    body = output.split("\n", 1)[1] if "\n" in output else ""
+                    raise AssertionError(
+                        f"restored program in {namespace}/{pod_name} failed after "
+                        f"restore ({error_file}):\n{body}"
+                    )
+                if output.startswith(f"{marker}:ready"):
+                    ready_text = output.split("\n", 1)[1] if "\n" in output else ""
+                    if on_traffic_ready is not None:
+                        on_traffic_ready()
+
+        if restored_pod is not None and ready_text is not None:
+            return restored_pod, ready_text
+        return None
+
+    def detail() -> str:
+        try:
+            pod = k8s.read_pod(namespace, pod_name)
+            restored = pod_condition(pod, "nvidia.com/Restored")
+            condition_detail = condition_summary(restored)
+        except ApiException as exc:
+            condition_detail = f"api_error={k8s.api_error_detail(exc)}"
+        sentinel = "ready" if ready_text is not None else "not ready"
+        exec_detail = f" last_exec_error={last_exec_error}" if last_exec_error else ""
+        return f"nvidia.com/Restored={condition_detail} sentinel={sentinel}{exec_detail}"
+
+    return wait_for(
+        f"restore and traffic readiness on {namespace}/{pod_name}",
+        check,
+        timeout,
+        detail=detail,
+        poll_interval=poll_interval,
+    )
+
+
 def matching_observation_count(
     namespace: str,
     pod: str,
@@ -555,6 +652,22 @@ def wait_for_pod_event(
         detail=detail,
         poll_interval=poll_interval,
     )
+
+
+def pod_event_timestamp(event: client.CoreV1Event) -> datetime:
+    """Returns the best available occurrence timestamp for a Kubernetes event."""
+    candidates = (
+        getattr(event, "event_time", None),
+        getattr(event, "last_timestamp", None),
+        getattr(event, "first_timestamp", None),
+        getattr(getattr(event, "metadata", None), "creation_timestamp", None),
+    )
+    for value in candidates:
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc)
+    raise ValueError("Kubernetes event has no timestamp")
 
 
 def pod_condition(pod: client.V1Pod, condition_type: str) -> client.V1PodCondition | None:

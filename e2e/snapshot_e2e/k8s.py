@@ -56,6 +56,10 @@ def read_pvc(namespace: str, name: str) -> client.V1PersistentVolumeClaim:
     return client.CoreV1Api().read_namespaced_persistent_volume_claim(name, namespace)
 
 
+def read_storage_class(name: str) -> client.V1StorageClass:
+    return client.StorageV1Api().read_storage_class(name)
+
+
 def read_crd(name: str) -> client.V1CustomResourceDefinition:
     return client.ApiextensionsV1Api().read_custom_resource_definition(name)
 
@@ -154,12 +158,19 @@ def delete_pod(namespace: str, name: str) -> bool:
         raise
 
 
-def pod_logs(namespace: str, name: str, *, tail_lines: int = 120) -> str:
+def pod_logs(
+    namespace: str,
+    name: str,
+    *,
+    tail_lines: int = 120,
+    container: str | None = None,
+) -> str:
     try:
         return client.CoreV1Api().read_namespaced_pod_log(
             name=name,
             namespace=namespace,
             tail_lines=tail_lines,
+            container=container,
             _preload_content=True,
         )
     except ApiException as exc:

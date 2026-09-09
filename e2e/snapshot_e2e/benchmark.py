@@ -21,7 +21,7 @@ from typing import Any, Protocol
 
 
 SCHEMA_VERSION = 1
-BENCHMARK_VERSION = 1
+BENCHMARK_VERSION = 2
 TEST_TOTAL = "test.total.duration"
 VALID_OUTCOMES = {
     "passed",
@@ -60,6 +60,26 @@ class _Measurement:
     start_event: str | None = None
     end_event: str | None = None
     value: float | None = None
+
+
+@dataclass(frozen=True)
+class AgentTimingSummary:
+    """One structured timing summary emitted by the Snapshot agent."""
+
+    completed_at: datetime
+    duration_seconds: float
+    phases_seconds: dict[str, float]
+    started_to_complete_seconds: float | None
+
+
+@dataclass(frozen=True)
+class ImagePullSummary:
+    """Image pull result reconstructed from kubelet Pod events."""
+
+    duration_seconds: float
+    including_wait_seconds: float
+    cache_hit: bool
+    image_size_bytes: int | None
 
 
 def parse_nvidia_smi_csv(output: str) -> list[dict[str, str]]:
@@ -111,13 +131,14 @@ class BenchmarkRecorder:
         self._started_at = self._clock.now()
         self._events: list[dict[str, Any]] = []
         self._event_names: set[str] = set()
+        self._event_wall_times: dict[str, datetime] = {}
         self._measurements: dict[str, _Measurement] = {}
         self._outcome: str | None = None
         self._error: dict[str, str] | None = None
         self._finished_at: datetime | None = None
         self._result_path: Path | None = None
 
-        self.define_duration(TEST_TOTAL, "Total test")
+        self.define_duration(TEST_TOTAL, "Full E2E test")
         if start_test:
             self.start_duration(TEST_TOTAL, event="test.started", captured=self._capture_started())
 
@@ -143,8 +164,15 @@ class BenchmarkRecorder:
         value: float,
     ) -> None:
         """Records a scalar such as bytes or requests/second in the same envelope."""
-        self.define_measurement(name, display_name, unit)
-        self._measurements[name].value = float(value)
+        measurement = self._measurements.get(name)
+        if measurement is None:
+            self.define_measurement(name, display_name, unit)
+            measurement = self._measurements[name]
+        elif measurement.display_name != display_name or measurement.unit != unit:
+            raise ValueError(f"measurement {name!r} metadata does not match its definition")
+        if measurement.started_monotonic is not None or measurement.value is not None:
+            raise ValueError(f"measurement {name!r} has already been recorded")
+        measurement.value = float(value)
 
     def start_duration(
         self,
@@ -163,6 +191,33 @@ class BenchmarkRecorder:
         measurement.start_event = event
         if event:
             self._add_event(event, monotonic, wall)
+
+    def start_duration_at(
+        self,
+        name: str,
+        timestamp: datetime,
+        *,
+        event: str | None = None,
+    ) -> None:
+        """Starts a duration at an externally timestamped event.
+
+        Kubernetes events are observed after they are emitted. Estimate the
+        corresponding monotonic boundary once, then continue measuring with
+        the runner's monotonic clock. This removes poll delay from the start
+        without repeatedly subtracting wall clocks across machines.
+        """
+        timestamp = _utc_datetime(timestamp)
+        monotonic, wall = self._capture()
+        age_seconds = max(0.0, (wall - timestamp).total_seconds())
+        estimated_monotonic = max(
+            self._started_monotonic,
+            monotonic - age_seconds,
+        )
+        self.start_duration(
+            name,
+            event=event,
+            captured=(estimated_monotonic, timestamp),
+        )
 
     def finish_duration(self, name: str, *, event: str | None = None) -> float:
         values = self.finish_durations([name], event=event)
@@ -195,6 +250,12 @@ class BenchmarkRecorder:
     def mark_event(self, name: str) -> None:
         monotonic, wall = self._capture()
         self._add_event(name, monotonic, wall)
+
+    def event_time(self, name: str) -> datetime:
+        try:
+            return self._event_wall_times[name]
+        except KeyError as exc:
+            raise ValueError(f"event {name!r} is not recorded") from exc
 
     def update_environment(self, **values: Any) -> None:
         self.environment.update(values)
@@ -260,8 +321,9 @@ class BenchmarkRecorder:
         lines = [
             f"\n=== E2E benchmark: {self.suite} / {self.case} ===",
             f"Outcome: {outcome}",
-            f"GPU: {_gpu_summary(self.environment)}",
         ]
+        lines.extend(_gpu_summary_lines(self.environment))
+        lines.append(_storage_summary(self.environment))
         ordered = [
             measurement
             for name, measurement in self._measurements.items()
@@ -289,6 +351,7 @@ class BenchmarkRecorder:
         if name in self._event_names:
             raise ValueError(f"event {name!r} is already recorded")
         self._event_names.add(name)
+        self._event_wall_times[name] = wall
         self._events.append(
             {
                 "name": name,
@@ -413,7 +476,13 @@ def write_fallback(
         suite=suite,
         case=case,
         test=test,
-        environment={"gpus": [], "gpuCollectionError": "test did not reach GPU discovery"},
+        environment={
+            "sourceGpus": [],
+            "restoreGpus": [],
+            "sourceGpuCollectionError": "test did not reach source GPU discovery",
+            "restoreGpuCollectionError": "test did not reach restore GPU discovery",
+            "storageCollectionError": "test did not reach storage discovery",
+        },
         result_dir=directory,
         start_test=False,
     )
@@ -423,8 +492,16 @@ def write_fallback(
     )
 
 
-def _gpu_summary(environment: Mapping[str, Any]) -> str:
-    gpus = environment.get("gpus")
+def _gpu_summary_lines(environment: Mapping[str, Any]) -> list[str]:
+    return [
+        _gpu_summary(environment, role="source"),
+        _gpu_summary(environment, role="restore"),
+    ]
+
+
+def _gpu_summary(environment: Mapping[str, Any], *, role: str) -> str:
+    title = role.capitalize()
+    gpus = environment.get(f"{role}Gpus")
     if isinstance(gpus, list) and gpus:
         rendered = []
         for gpu in gpus:
@@ -435,16 +512,182 @@ def _gpu_summary(environment: Mapping[str, Any]) -> str:
                 f"({gpu.get('uuid', 'unknown')}, driver {gpu.get('driverVersion', 'unknown')})"
             )
         if rendered:
-            node = environment.get("node", "unknown node")
-            return f"{'; '.join(rendered)}, node {node}"
-    reason = environment.get("gpuCollectionError")
-    return f"unknown ({reason})" if reason else "unknown"
+            node = environment.get(f"{role}Node", "unknown node")
+            return f"{title} GPU: {'; '.join(rendered)}, node {node}"
+    reason = environment.get(f"{role}GpuCollectionError")
+    unknown = f"unknown ({reason})" if reason else "unknown"
+    return f"{title} GPU: {unknown}"
+
+
+def _storage_summary(environment: Mapping[str, Any]) -> str:
+    storage = environment.get("storage")
+    if isinstance(storage, Mapping):
+        storage_type = storage.get("type", "unknown type")
+        provisioner = storage.get("provisioner", "unknown type")
+        storage_class = storage.get("storageClass", "unknown class")
+        requested = storage.get("requestedSize", "unknown")
+        capacity = storage.get("capacity", "unknown")
+        return (
+            f"Storage: {storage_type} ({provisioner}), class {storage_class}, "
+            f"requested {requested}, capacity {capacity}"
+        )
+    reason = environment.get("storageCollectionError")
+    configured = environment.get("storageClass")
+    suffix = f" ({reason})" if reason else ""
+    return f"Storage: {configured or 'unknown'}{suffix}"
+
+
+_GO_DURATION_PART = re.compile(
+    r"(?P<value>\d+(?:\.\d+)?)(?P<unit>ns|us|[µμ]s|ms|s|m|h)"
+)
+_GO_DURATION_MULTIPLIERS = {
+    "ns": 1e-9,
+    "us": 1e-6,
+    "µs": 1e-6,
+    "μs": 1e-6,
+    "ms": 1e-3,
+    "s": 1.0,
+    "m": 60.0,
+    "h": 3600.0,
+}
+_RFC3339 = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})"
+)
+
+
+def parse_go_duration(value: str) -> float:
+    """Converts a non-negative Go duration string to seconds."""
+    matches = list(_GO_DURATION_PART.finditer(value))
+    if not matches or "".join(match.group(0) for match in matches) != value:
+        raise ValueError(f"invalid Go duration {value!r}")
+    return sum(
+        float(match.group("value")) * _GO_DURATION_MULTIPLIERS[match.group("unit")]
+        for match in matches
+    )
+
+
+def parse_agent_timing_summary(
+    logs: str,
+    *,
+    message: str,
+    field: str,
+    matches: Mapping[str, str],
+) -> AgentTimingSummary:
+    """Finds the newest matching structured timing summary in agent logs."""
+    for line in reversed(logs.splitlines()):
+        marker = line.find(message)
+        if marker < 0:
+            continue
+        timestamp_match = _RFC3339.search(line[:marker])
+        if timestamp_match is None:
+            continue
+        payload_text = line[marker + len(message) :].strip()
+        try:
+            payload = json.loads(payload_text)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict) or any(
+            str(payload.get(key)) != expected for key, expected in matches.items()
+        ):
+            continue
+        summary = payload.get(field)
+        if not isinstance(summary, dict):
+            raise ValueError(f"agent {message!r} payload has no {field!r} object")
+        phases = summary.get("phases")
+        if not isinstance(phases, dict):
+            raise ValueError(f"agent {message!r} payload has no phases object")
+        started_to_complete = summary.get("started_to_complete")
+        return AgentTimingSummary(
+            completed_at=_parse_rfc3339(timestamp_match.group(0)),
+            duration_seconds=parse_go_duration(str(summary["duration"])),
+            phases_seconds={
+                str(name): parse_go_duration(str(duration))
+                for name, duration in phases.items()
+            },
+            started_to_complete_seconds=(
+                parse_go_duration(str(started_to_complete))
+                if started_to_complete is not None
+                else None
+            ),
+        )
+    match_text = ", ".join(f"{key}={value!r}" for key, value in matches.items())
+    raise ValueError(f"no {message!r} agent timing summary matched {match_text}")
+
+
+_IMAGE_PULLED = re.compile(
+    r'Successfully pulled image ".+" in (?P<duration>\S+) '
+    r'\((?P<including_wait>\S+) including waiting\)\. '
+    r'Image size: (?P<size>\d+) bytes\.'
+)
+
+
+def parse_image_pull_events(
+    events: Sequence[object],
+    *,
+    pod_uid: str,
+) -> ImagePullSummary:
+    """Extracts the framework image pull duration for one Pod UID.
+
+    Framework pods use the same image for their init and main containers. If
+    both emit events, the longest real pull represents the cache population;
+    subsequent "already present" events are cache hits, not additional pulls.
+    """
+    pulls: list[ImagePullSummary] = []
+    cached = False
+    for event in events:
+        involved = getattr(event, "involved_object", None)
+        if (
+            getattr(event, "reason", None) != "Pulled"
+            or str(getattr(involved, "uid", "") or "") != pod_uid
+        ):
+            continue
+        message = str(getattr(event, "message", "") or "")
+        match = _IMAGE_PULLED.search(message)
+        if match:
+            pulls.append(
+                ImagePullSummary(
+                    duration_seconds=parse_go_duration(match.group("duration")),
+                    including_wait_seconds=parse_go_duration(
+                        match.group("including_wait")
+                    ),
+                    cache_hit=False,
+                    image_size_bytes=int(match.group("size")),
+                )
+            )
+        elif "already present on machine" in message:
+            cached = True
+    if pulls:
+        return max(pulls, key=lambda item: item.including_wait_seconds)
+    if cached:
+        return ImagePullSummary(
+            duration_seconds=0.0,
+            including_wait_seconds=0.0,
+            cache_hit=True,
+            image_size_bytes=None,
+        )
+    raise ValueError(f"no Pulled event found for pod UID {pod_uid!r}")
 
 
 def _timestamp(value: datetime) -> str:
+    value = _utc_datetime(value)
+    return value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _utc_datetime(value: datetime) -> datetime:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return value.astimezone(timezone.utc)
+
+
+def _parse_rfc3339(value: str) -> datetime:
+    # datetime accepts RFC3339 offsets but only retains microseconds; trim the
+    # agent's nanosecond precision explicitly instead of relying on runtime
+    # version-specific parsing behavior.
+    normalized = value.replace("Z", "+00:00")
+    match = re.match(r"^(.*\.)(\d+)([+-]\d{2}:\d{2})$", normalized)
+    if match:
+        normalized = f"{match.group(1)}{match.group(2)[:6]}{match.group(3)}"
+    return _utc_datetime(datetime.fromisoformat(normalized))
 
 
 def _safe_filename(value: str) -> str:
