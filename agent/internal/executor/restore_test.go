@@ -126,6 +126,15 @@ func TestNewRestoreCleanupError(t *testing.T) {
 	}
 }
 
+func TestPageBrokerTransferEngineDefaultsEmptyToPosixCopy(t *testing.T) {
+	if got := pageBrokerTransferEngine(""); got != "posix-copy" {
+		t.Fatalf("pageBrokerTransferEngine(\"\") = %q, want posix-copy", got)
+	}
+	if got := pageBrokerTransferEngine("model-streamer"); got != "model-streamer" {
+		t.Fatalf("pageBrokerTransferEngine(model-streamer) = %q, want model-streamer", got)
+	}
+}
+
 func TestValidateRestoreManifest(t *testing.T) {
 	manifest := types.NewCheckpointManifest(
 		"content-uid-123",
