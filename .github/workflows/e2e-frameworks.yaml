@@ -385,6 +385,7 @@ jobs:
           name: e2e-framework-benchmark-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.SNAPSHOT_E2E_BENCHMARK_DIR }}/*.json
           if-no-files-found: error
+          include-hidden-files: true
           retention-days: 30
 
       # The test already prints its own dump; this preserves the raw cluster
