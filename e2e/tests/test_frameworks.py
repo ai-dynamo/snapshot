@@ -41,6 +41,18 @@ from snapshot_e2e import lifecycle as snap
 CHECKPOINT_DURATION = "checkpoint.duration"
 RESTORE_TO_TRAFFIC_DURATION = "restore.to_traffic.duration"
 RESTORE_POD_TO_TRAFFIC_DURATION = "restore.pod_create_to_traffic.duration"
+RESTORE_AGENT_TO_TRAFFIC_DURATION = "restore.agent_complete_to_traffic.duration"
+EXPECTED_COLLECTED_DURATIONS = {
+    "checkpoint.agent.duration": "Checkpoint (agent)",
+    "checkpoint.criu_dump.duration": "Checkpoint CRIU dump",
+    "restore.agent.duration": "Restore (agent)",
+    "restore.criu_restore.duration": "Restore CRIU restore",
+    RESTORE_AGENT_TO_TRAFFIC_DURATION: "Agent restore complete to traffic ready",
+    "source.image_pull.duration": "Source image pull",
+    "source.image_pull_including_wait.duration": "Source image pull including wait",
+    "restore.image_pull.duration": "Restore image pull",
+    "restore.image_pull_including_wait.duration": "Restore image pull including wait",
+}
 
 
 @pytest.fixture(params=sorted(frameworks.FRAMEWORKS))
@@ -72,18 +84,25 @@ def test_framework_checkpoint_restore_serves_inference(
             "datadogGpuMonitoringMode": os.environ.get(
                 "SNAPSHOT_E2E_DATADOG_GPU_MONITORING", "unknown"
             ),
-            "gpus": [],
+            "sourceGpus": [],
+            "restoreGpus": [],
         },
     )
-    result.define_duration(CHECKPOINT_DURATION, "Checkpoint")
-    result.define_duration(RESTORE_TO_TRAFFIC_DURATION, "Restore to traffic")
+    result.define_duration(CHECKPOINT_DURATION, "Checkpoint (API to Ready)")
+    result.define_duration(
+        RESTORE_TO_TRAFFIC_DURATION,
+        "Restore requested to traffic ready",
+    )
     result.define_duration(
         RESTORE_POD_TO_TRAFFIC_DURATION,
         "Restore pod create to traffic",
     )
+    for name, display_name in EXPECTED_COLLECTED_DURATIONS.items():
+        result.define_duration(name, display_name)
     framework_image: str | None = None
     source_node: str | None = None
     try:
+        _record_storage_environment(result, config)
         framework_image = frameworks.framework_image(framework)
         result.update_environment(frameworkImage=framework_image)
         # Shared NFS cache when configured (offline, no download); otherwise the
@@ -118,8 +137,13 @@ def test_framework_checkpoint_restore_serves_inference(
         )
         source_node = source.spec.node_name
         result.mark_event("source.ready")
-        result.update_environment(node=source_node)
-        _record_gpu_environment(result, config.namespace, run.source_pod)
+        result.update_environment(sourceNode=source_node)
+        _record_gpu_environment(
+            result,
+            config.namespace,
+            run.source_pod,
+            role="source",
+        )
         # Recorded on success too, so a flaky restore failure can be correlated
         # with whether Datadog GPU monitoring was active on the node.
         print(
@@ -160,33 +184,34 @@ def test_framework_checkpoint_restore_serves_inference(
             )
         )
         result.mark_event("restore.pod_created")
-        snap.wait_for_pod_event(
+        restore_requested = snap.wait_for_pod_event(
             config.namespace,
             run.restore_pod,
             "RestoreRequested",
             pod_uid=str(restore_pod.metadata.uid),
             timeout=framework.restore_timeout_seconds,
         )
-        result.start_duration(RESTORE_TO_TRAFFIC_DURATION, event="restore.requested")
-        snap.wait_for_restored_condition(
-            config.namespace,
-            run.restore_pod,
-            "True",
-            "RestoreSucceeded",
-            timeout=framework.restore_timeout_seconds,
+        _start_duration_from_pod_event(
+            result,
+            RESTORE_TO_TRAFFIC_DURATION,
+            "restore.requested",
+            restore_requested,
         )
-        result.mark_event("restore.succeeded")
-        restored_text = snap.wait_for_restore_outcome(
+        restored_pod, restored_text = snap.wait_for_restore_traffic_ready(
             config.namespace,
             run.restore_pod,
             ready_file=framework.restore_ready_file,
             error_file=framework.restore_error_file,
             timeout=framework.restore_timeout_seconds,
-        ).strip()
-        result.finish_durations(
-            [RESTORE_TO_TRAFFIC_DURATION, RESTORE_POD_TO_TRAFFIC_DURATION],
-            event="traffic.ready",
+            on_restore_succeeded=lambda: result.mark_event("restore.succeeded"),
+            on_traffic_ready=lambda: result.finish_durations(
+                [RESTORE_TO_TRAFFIC_DURATION, RESTORE_POD_TO_TRAFFIC_DURATION],
+                event="traffic.ready",
+            ),
         )
+        restored_text = restored_text.strip()
+        restore_node = restored_pod.spec.node_name
+        result.update_environment(restoreNode=restore_node)
         assert restored_text, f"{framework.restore_ready_file} is empty"
         print(f"[{framework.name}] first post-restore generation: {restored_text!r}")
 
@@ -203,6 +228,29 @@ def test_framework_checkpoint_restore_serves_inference(
         )
         result.mark_event("inference.verified")
         result.finish_test()
+        # Metadata collection is deliberately outside test.total.duration so
+        # extra exec/log calls do not inflate the functional benchmark.
+        _record_gpu_environment(
+            result,
+            config.namespace,
+            run.restore_pod,
+            role="restore",
+        )
+        _record_image_pulls(
+            result,
+            namespace=config.namespace,
+            source_pod_uid=str(source.metadata.uid),
+            restore_pod_uid=str(restored_pod.metadata.uid),
+        )
+        _record_agent_timings(
+            result,
+            config=config,
+            source_node=source_node,
+            restore_node=restore_node,
+            snapshot_name=run.snapshot_name,
+            content_name=content["metadata"]["name"],
+            content_uid=content["metadata"]["uid"],
+        )
     except Exception:
         # End the functional-test timer before diagnostics, which can take
         # minutes and are not part of the benchmark definition.
@@ -220,16 +268,241 @@ def _record_gpu_environment(
     result: benchmark_result.BenchmarkRecorder,
     namespace: str,
     pod: str,
+    *,
+    role: str,
 ) -> None:
     """Records the GPU visible to the workload without failing the e2e test."""
+    if role not in {"source", "restore"}:
+        raise ValueError(f"unknown GPU role {role!r}")
     try:
         output = k8s.exec_command(
             namespace,
             pod,
             f"{benchmark_result.NVIDIA_SMI_QUERY} 2>/dev/null",
         )
-        result.update_environment(gpus=benchmark_result.parse_nvidia_smi_csv(output))
+        result.update_environment(
+            **{f"{role}Gpus": benchmark_result.parse_nvidia_smi_csv(output)}
+        )
     except Exception as exc:  # noqa: BLE001 - metadata is not a functional assertion
         message = f"{type(exc).__name__}: {exc}"
-        result.update_environment(gpus=[], gpuCollectionError=message)
-        print(f"benchmark GPU metadata unavailable: {message}")
+        result.update_environment(
+            **{f"{role}Gpus": [], f"{role}GpuCollectionError": message}
+        )
+        print(f"benchmark {role} GPU metadata unavailable: {message}")
+
+
+def _record_storage_environment(
+    result: benchmark_result.BenchmarkRecorder,
+    config: k8s.E2EConfig,
+) -> None:
+    """Records the bound checkpoint PVC and its provisioner best-effort."""
+    try:
+        pvc = k8s.read_pvc(config.namespace, config.pvc_name)
+        storage_class_name = pvc.spec.storage_class_name
+        if not storage_class_name:
+            raise ValueError(f"PVC {config.namespace}/{config.pvc_name} has no storage class")
+        storage_class = k8s.read_storage_class(storage_class_name)
+        parameters = dict(storage_class.parameters or {})
+        storage_type = next(
+            (
+                parameters[key]
+                for key in ("skuName", "type", "storageType")
+                if parameters.get(key)
+            ),
+            storage_class.provisioner,
+        )
+        requests = pvc.spec.resources.requests or {}
+        capacity = pvc.status.capacity or {}
+        result.update_environment(
+            storageClass=storage_class_name,
+            storage={
+                "storageClass": storage_class_name,
+                "type": storage_type,
+                "provisioner": storage_class.provisioner,
+                "parameters": parameters,
+                "requestedSize": str(requests.get("storage", "unknown")),
+                "capacity": str(capacity.get("storage", "unknown")),
+                "accessModes": list(pvc.spec.access_modes or []),
+                "volumeMode": pvc.spec.volume_mode,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - metadata is not a functional assertion
+        message = f"{type(exc).__name__}: {exc}"
+        result.update_environment(storageCollectionError=message)
+        print(f"benchmark storage metadata unavailable: {message}")
+
+
+def _start_duration_from_pod_event(
+    result: benchmark_result.BenchmarkRecorder,
+    measurement: str,
+    event_name: str,
+    event: object,
+) -> None:
+    """Uses event emission time, falling back to observation time if absent."""
+    try:
+        timestamp = snap.pod_event_timestamp(event)
+    except ValueError as exc:
+        _record_environment_error(result, "timingBoundaryCollectionErrors", event_name, exc)
+        result.start_duration(measurement, event=event_name)
+    else:
+        result.start_duration_at(measurement, timestamp, event=event_name)
+
+
+def _record_image_pull(
+    result: benchmark_result.BenchmarkRecorder,
+    *,
+    role: str,
+    events: list[object],
+    pod_uid: str,
+) -> None:
+    """Records kubelet-reported image pull time, including cache hits."""
+    try:
+        pull = benchmark_result.parse_image_pull_events(events, pod_uid=pod_uid)
+        pulls = dict(result.environment.get("imagePulls", {}))
+        pulls[role] = {
+            "cacheHit": pull.cache_hit,
+            "imageSizeBytes": pull.image_size_bytes,
+            "includingWaitSeconds": pull.including_wait_seconds,
+        }
+        result.update_environment(imagePulls=pulls)
+        result.record_measurement(
+            f"{role}.image_pull.duration",
+            f"{role.capitalize()} image pull",
+            "seconds",
+            pull.duration_seconds,
+        )
+        result.record_measurement(
+            f"{role}.image_pull_including_wait.duration",
+            f"{role.capitalize()} image pull including wait",
+            "seconds",
+            pull.including_wait_seconds,
+        )
+    except Exception as exc:  # noqa: BLE001 - instrumentation must not fail e2e
+        _record_environment_error(result, "imagePullCollectionErrors", role, exc)
+
+
+def _record_image_pulls(
+    result: benchmark_result.BenchmarkRecorder,
+    *,
+    namespace: str,
+    source_pod_uid: str,
+    restore_pod_uid: str,
+) -> None:
+    try:
+        events = k8s.list_events(namespace)
+    except Exception as exc:  # noqa: BLE001 - instrumentation must not fail e2e
+        for role in ("source", "restore"):
+            _record_environment_error(result, "imagePullCollectionErrors", role, exc)
+        return
+    _record_image_pull(result, role="source", events=events, pod_uid=source_pod_uid)
+    _record_image_pull(result, role="restore", events=events, pod_uid=restore_pod_uid)
+
+
+def _record_agent_timings(
+    result: benchmark_result.BenchmarkRecorder,
+    *,
+    config: k8s.E2EConfig,
+    source_node: str,
+    restore_node: str,
+    snapshot_name: str,
+    content_name: str,
+    content_uid: str,
+) -> None:
+    """Adds agent-native phase timings without changing functional outcomes."""
+    logs_by_node: dict[str, str] = {}
+
+    def agent_logs(node: str) -> str:
+        if node not in logs_by_node:
+            agent = snap.checkpoint_agent_pod(config, node)
+            logs_by_node[node] = k8s.pod_logs(
+                config.namespace,
+                agent,
+                tail_lines=2000,
+                container="agent",
+            )
+        return logs_by_node[node]
+
+    try:
+        checkpoint = benchmark_result.parse_agent_timing_summary(
+            agent_logs(source_node),
+            message="Checkpoint timing summary",
+            field="checkpoint",
+            matches={"content": content_name},
+        )
+        _record_agent_summary(result, "checkpoint", checkpoint)
+    except Exception as exc:  # noqa: BLE001 - instrumentation must not fail e2e
+        _record_environment_error(result, "agentTimingCollectionErrors", "checkpoint", exc)
+
+    restore: benchmark_result.AgentTimingSummary | None = None
+    try:
+        restore = benchmark_result.parse_agent_timing_summary(
+            agent_logs(restore_node),
+            message="Restore timing summary",
+            field="restore",
+            matches={"snapshot": snapshot_name, "content_uid": content_uid},
+        )
+        _record_agent_summary(result, "restore", restore)
+    except Exception as exc:  # noqa: BLE001 - instrumentation must not fail e2e
+        _record_environment_error(result, "agentTimingCollectionErrors", "restore", exc)
+
+    if restore is None:
+        return
+    try:
+        gap = (result.event_time("traffic.ready") - restore.completed_at).total_seconds()
+        if gap < -1.0:
+            raise ValueError(
+                "traffic-ready timestamp precedes the agent restore summary by "
+                f"{-gap:.3f}s"
+            )
+        result.record_measurement(
+            RESTORE_AGENT_TO_TRAFFIC_DURATION,
+            "Agent restore complete to traffic ready",
+            "seconds",
+            max(0.0, gap),
+        )
+    except Exception as exc:  # noqa: BLE001 - instrumentation must not fail e2e
+        _record_environment_error(
+            result,
+            "agentTimingCollectionErrors",
+            "restore.agent_complete_to_traffic",
+            exc,
+        )
+
+
+def _record_agent_summary(
+    result: benchmark_result.BenchmarkRecorder,
+    operation: str,
+    summary: benchmark_result.AgentTimingSummary,
+) -> None:
+    title = operation.capitalize()
+    result.record_measurement(
+        f"{operation}.agent.duration",
+        f"{title} (agent)",
+        "seconds",
+        summary.duration_seconds,
+    )
+    for phase, duration in summary.phases_seconds.items():
+        result.record_measurement(
+            f"{operation}.{phase}.duration",
+            f"{title} {_phase_display_name(phase)}",
+            "seconds",
+            duration,
+        )
+
+
+def _phase_display_name(phase: str) -> str:
+    acronyms = {"criu": "CRIU", "cuda": "CUDA", "gpu": "GPU"}
+    return " ".join(acronyms.get(word, word) for word in phase.split("_"))
+
+
+def _record_environment_error(
+    result: benchmark_result.BenchmarkRecorder,
+    category: str,
+    key: str,
+    error: Exception,
+) -> None:
+    errors = dict(result.environment.get(category, {}))
+    message = f"{type(error).__name__}: {error}"
+    errors[key] = message
+    result.update_environment(**{category: errors})
+    print(f"benchmark {key} metadata unavailable: {message}")
