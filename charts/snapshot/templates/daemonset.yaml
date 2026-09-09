@@ -29,6 +29,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         kubectl.kubernetes.io/default-container: agent
         {{- if .Values.openshift.enabled }}
         # Pin this DS to the built-in "privileged" SCC even if a higher-priority
