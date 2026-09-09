@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/configuring-issue-templates-for-your-repository
+#
+# The "New issue" chooser is limited to bug reports, feature requests,
+# documentation requests, and the security vulnerability contact link. Blank
+# issues stay off so every issue arrives with the fields triage needs, and
+# questions belong in Discussions rather than an issue template.
+blank_issues_enabled: false
+
+contact_links:
+  - name: Ask a question
+    url: https://github.com/ai-dynamo/snapshot/discussions
+    about: Please ask questions and start design conversations in Discussions.
+  - name: Report a security vulnerability
+    url: https://www.nvidia.com/en-us/support/submit-security-vulnerability/
+    about: Never open a public issue for a security vulnerability. Report it to NVIDIA PSIRT - see SECURITY.md.

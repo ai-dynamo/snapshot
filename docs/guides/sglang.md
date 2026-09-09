@@ -67,7 +67,7 @@ at `/hf-cache`.
 ### 2. Build the image
 
 ```bash
-export SGLANG_RUNTIME_IMAGE=lmsysorg/sglang@sha256:9e148f5ac788e856a06166bd6347a831831eb9fcfab4d1770874823a7c29a1a1
+export SGLANG_RUNTIME_IMAGE=lmsysorg/sglang:v0.5.17-cu130-runtime@sha256:3ea7c6d74312d964edbcf9b3819425ea42117eb967ef1cfec632a70c926027df
 export SGLANG_SNAPSHOT_IMAGE=<registry>/sglang-snapshot:<tag>
 
 docker build \
@@ -127,7 +127,10 @@ containers:
 
 The example configures a context length of 10240 tokens for a 24 GiB NVIDIA A10
 GPU. Reduce `SGLANG_CONTEXT_LENGTH` for a smaller GPU or increase it only after
-validating the resulting memory use.
+validating the resulting memory use. The KV cache page size is set through
+`SGLANG_PAGE_SIZE` (default `16`); the engine runs with `tp_size=1`.
+`app.py` sets `trust_remote_code=False`; Qwen3 needs no custom model code.
+Edit that line in `app.py` for a checkpoint that ships its own modeling code.
 
 > [!NOTE]
 > This example runs SGLang directly through `sglang.Engine` rather than

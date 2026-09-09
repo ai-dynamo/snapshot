@@ -33,6 +33,10 @@ spec:
           env:
             - name: SNAPSHOT_MODEL
               value: Qwen/Qwen3-0.6B
+            - name: VLLM_MAX_MODEL_LEN
+              value: "2048"
+            - name: VLLM_GPU_MEMORY_UTILIZATION
+              value: "0.30"
             - name: SNAPSHOT_CONTROL_DIR
               value: /snapshot-control
           ports:
