@@ -9,7 +9,7 @@ generate:
 	protoc --proto_path=. --cpp_out=. $(PROTO)
 
 daemon: generate
-	c++ -I. -std=c++20 -Wall -Werror $(DAEMON_SOURCES) v1/pagebroker.pb.cc -lprotobuf -o pagebroker
+	c++ -I. -std=c++20 -Wall -Werror $(DAEMON_SOURCES) v1/pagebroker.pb.cc -Wl,-Bstatic -lprotobuf -Wl,-Bdynamic -o pagebroker
 
 test: generate $(BROKER_SOURCES) daemon_test.cpp
 	mkdir -p build
