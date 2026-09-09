@@ -143,6 +143,8 @@ jobs:
       SNAPSHOT_E2E_READY_TIMEOUT_SECONDS: "480"
       SNAPSHOT_E2E_RESULT_FILE: ${{ github.workspace }}/.snapshot-e2e-setup-result.json
       SNAPSHOT_E2E_FRAMEWORK: ${{ matrix.framework }}
+      SNAPSHOT_E2E_BENCHMARK_DIR: ${{ github.workspace }}/.e2e-benchmark-results
+      SNAPSHOT_E2E_DATADOG_GPU_MONITORING: ${{ needs.datadog-gate.outputs.mode }}
       # Shared CI model cache (HF cache layout on an NFS export): pods here
       # can't resolve huggingface.co, and per-run downloads cost minutes
       # anyway. Repository variables override the literals below, which are
@@ -344,10 +346,46 @@ jobs:
       # override), or GitHub kills pytest before its dump runs.
       - name: Run ${{ matrix.framework }} checkpoint/restore test
         if: ${{ steps.selected.outputs.run == 'true' }}
+        id: framework_test
         timeout-minutes: 50
         run: |
+          set -uo pipefail
+          # Leave enough of the step's timeout for a result to be written even
+          # if pytest itself hangs. GNU timeout returns 124 for this path.
+          timeout --signal=TERM --kill-after=15s 48m \
+            uv run --locked --project e2e pytest e2e/tests/test_frameworks.py -vv -s
+          status=$?
+          if [[ "${status}" -eq 124 ]]; then
+            PYTHONPATH=e2e python3 -m snapshot_e2e.benchmark fallback \
+              --suite framework-checkpoint-restore \
+              --case "${{ matrix.framework }}" \
+              --test test_framework_checkpoint_restore_serves_inference \
+              --outcome timed_out \
+              --message "pytest exceeded the 48 minute benchmark timeout"
+          fi
+          exit "${status}"
+
+      - name: Ensure benchmark result exists
+        if: ${{ always() && steps.selected.outputs.run == 'true' }}
+        env:
+          TEST_STEP_OUTCOME: ${{ steps.framework_test.outcome }}
+        run: |
           set -euo pipefail
-          uv run --locked --project e2e pytest e2e/tests/test_frameworks.py -vv -s
+          PYTHONPATH=e2e python3 -m snapshot_e2e.benchmark fallback \
+            --suite framework-checkpoint-restore \
+            --case "${{ matrix.framework }}" \
+            --test test_framework_checkpoint_restore_serves_inference \
+            --outcome infrastructure_failed \
+            --message "pytest produced no benchmark result; step outcome=${TEST_STEP_OUTCOME}"
+
+      - name: Upload benchmark result
+        if: ${{ always() && steps.selected.outputs.run == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-framework-benchmark-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SNAPSHOT_E2E_BENCHMARK_DIR }}/*.json
+          if-no-files-found: error
+          retention-days: 30
 
       # The test already prints its own dump; this preserves the raw cluster
       # state and full agent logs, which do not fit in a job log.
