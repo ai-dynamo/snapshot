@@ -122,6 +122,26 @@ input[type="checkbox"] {
   color: #ffaaa1;
 }
 
+.status--stale {
+  color: #ffd27a;
+}
+
+.warnings {
+  margin-top: 0.9rem;
+  color: #aebbb9;
+  font-size: 0.85rem;
+}
+
+.warnings summary {
+  cursor: pointer;
+}
+
+.warnings ul {
+  margin: 0.5rem 0 0;
+  padding-left: 1.25rem;
+  overflow-wrap: anywhere;
+}
+
 main {
   width: min(1280px, calc(100% - 2.5rem));
   margin: 0 auto;
