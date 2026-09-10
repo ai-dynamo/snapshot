@@ -104,9 +104,11 @@ which permits executing a model repo's custom Python code during load). The
 restored process *is* the captured process; a different configuration is
 undefined.
 
-Steps 3 (warm up), 4 (quiesce), and 9 (rehydrate) break down into the same
-sub-obligations across engines, met through different framework mechanisms —
-which is why the protocol, not any one engine's API, is the contract. Tiers carry
+Steps 3 and 4 (capture: warm up, quiesce) and step 9 (restore: rehydrate) each
+break down into the same sub-obligations across engines — the table below lists
+what each engine calls to meet them. Different frameworks expose different
+function names for the same obligation, which is why the protocol defines the
+contract in terms of *what must happen*, not any one engine's API. Tiers carry
 over from their parent step: skipping a **MUST** row breaks capture or restore
 outright (for example, checkpointing without parking GPU memory first, or
 serving without restoring it, fails); skipping the **SHOULD** row still produces
