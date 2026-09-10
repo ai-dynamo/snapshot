@@ -60,32 +60,37 @@ workload useful and operable.
 
 1. **MUST** clear any stale `ready-for-snapshot` before initializing. A leftover
    file from a previous run would signal readiness before the engine is ready.
-2. **SHOULD** initialize the engine and run at least one real generation to warm
-   it up before signaling readiness. Lazy CUDA context, autotuning, and graph
-   capture happen on first use; a checkpoint taken before them omits that state,
-   so the restored replica re-pays the cold start the checkpoint was meant to
-   skip. This is not load-bearing for correctness — a checkpoint of a cold
-   engine still restores — but it defeats the purpose of checkpointing.
-3. **MUST** quiesce before signaling: ensure no generation is in flight (pause
+2. **SHOULD** initialize the engine before signaling readiness.
+3. **SHOULD** run at least one real generation to warm the engine up before
+   signaling readiness. Lazy CUDA context, autotuning, and graph capture happen
+   on first use; a checkpoint taken before them omits that state, so the
+   restored replica re-pays the cold start the checkpoint was meant to skip.
+   Neither of steps 2-3 is load-bearing for correctness — a checkpoint of a cold
+   engine still restores — but skipping them defeats the purpose of
+   checkpointing.
+4. **MUST** quiesce before signaling: ensure no generation is in flight (pause
    it, or rely on a synchronous engine having returned), then bring GPU memory to
-   a checkpoint-safe state. Where both apply, stop work before releasing memory,
-   and **SHOULD** roll back to a running state if the release fails rather than
-   signal readiness.
-4. **MUST** write `ready-for-snapshot` only once step 3 holds. This is the
+   a checkpoint-safe state. Where both apply, stop work before releasing memory.
+5. **SHOULD** roll back to a running state if the memory release in step 4
+   fails, rather than signal readiness.
+6. **MUST** write `ready-for-snapshot` only once step 4 holds. This is the
    promise the rest of the system trusts; the agent captures the process as soon
    as the pod reports Ready.
 
 ### Restore (restored workload)
 
-5. **MUST**, when `SNAPSHOT_RESTORE_STANDBY=1`, block without initializing. The
-   agent injects the restored process into this container as a sibling; a process
-   that initializes anyway loads a second copy of the model and collides with it.
-6. **MUST** wait for `restore-complete` before touching the engine.
-7. **MUST** rehydrate before serving, in order: restore GPU memory (wake), then
+7. **MUST**, when `SNAPSHOT_RESTORE_STANDBY=1`, have the workload's entrypoint
+   skip its normal initialization and idle instead (for example, sleep without
+   starting the engine). The agent restores the checkpointed process into this
+   container as a sibling PID via CRIU, outside the entrypoint's control; an
+   entrypoint that initializes anyway starts a second, competing copy of the
+   model in the same container.
+8. **MUST** wait for `restore-complete` before touching the engine.
+9. **MUST** rehydrate before serving, in order: restore GPU memory (wake), then
    resume generation, then validate. Resuming generation before memory is mapped
    runs against freed memory.
-8. **SHOULD** write the `<framework>-restore-ready` sentinel only after the API
-   socket is actually listening, so readiness reflects true serving capacity.
+10. **SHOULD** write the `<framework>-restore-ready` sentinel only after the API
+    socket is actually listening, so readiness reflects true serving capacity.
 
 ### Config parity and mechanism
 
