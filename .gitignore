@@ -18,3 +18,7 @@ dashboard/node_modules/
 dashboard/dist/
 dashboard/playwright-report/
 dashboard/test-results/
+
+# Benchmarks Python workspace
+benchmarks/.venv/
+benchmarks/results/
