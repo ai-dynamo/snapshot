@@ -81,7 +81,7 @@ def test_recorder_writes_events_measurements_and_environment(tmp_path) -> None:
 
     assert path.name == "framework-checkpoint-restore-vllm-12345-2.json"
     assert result["schemaVersion"] == 1
-    assert result["benchmarkVersion"] == 2
+    assert result["benchmarkVersion"] == 1
     assert result["identity"] == {
         "suite": "framework-checkpoint-restore",
         "case": "vllm",
@@ -150,6 +150,39 @@ def test_external_event_timestamp_removes_observation_delay(tmp_path) -> None:
 
     assert recorder.finish_duration("restore.duration", event="traffic.ready") == 10
     assert recorder.event_time("restore.requested") == emitted_at
+    recorder.finish_test()
+    result = json.loads(recorder.finalize("passed").read_text(encoding="utf-8"))
+    requested = next(e for e in result["events"] if e["name"] == "restore.requested")
+    assert requested["externalTimestamp"] is True
+    assert requested["observationDelaySeconds"] == 2.0
+    assert "clamped" not in requested
+    assert recorder.timing_warnings() == []
+
+
+def test_external_event_from_a_clock_ahead_of_the_runner_is_flagged(tmp_path) -> None:
+    clock = FakeClock()
+    recorder = benchmark.BenchmarkRecorder(
+        suite="suite",
+        case="case",
+        test="test",
+        result_dir=tmp_path,
+        clock=clock,
+    )
+    recorder.define_duration("restore.duration", "Restore")
+    clock.advance(10)
+    ahead = clock.now() + timedelta(seconds=3)
+
+    recorder.start_duration_at("restore.duration", ahead, event="restore.requested")
+    clock.advance(8)
+
+    assert recorder.finish_duration("restore.duration") == 8
+    requested = next(e for e in recorder.as_dict_events() if e["name"] == "restore.requested")
+    assert requested["observationDelaySeconds"] == -3.0
+    assert requested["clamped"] is True
+    warnings = recorder.timing_warnings()
+    assert len(warnings) == 1
+    assert "cluster clock is ahead" in warnings[0]
+    assert warnings[0] in recorder.summary()
 
 
 def test_failure_keeps_incomplete_measurements_and_bounds_error(tmp_path) -> None:
@@ -275,6 +308,41 @@ def test_parse_image_pull_events_reports_pull_and_cache_hit() -> None:
     assert cache_hit.cache_hit is True
 
 
+@pytest.mark.parametrize(
+    ("message", "including_wait", "size"),
+    [
+        ('Successfully pulled image "registry/framework:tag" in 1m2.5s', 62.5, None),
+        (
+            'Successfully pulled image "registry/framework:tag" in 1m2.5s '
+            "(1m3s including waiting)",
+            63.0,
+            None,
+        ),
+        (
+            'Successfully pulled image "registry/framework:tag" in 1m2.5s '
+            "(1m3s including waiting). Image size: 42 bytes.",
+            63.0,
+            42,
+        ),
+    ],
+)
+def test_parse_image_pull_events_accepts_older_kubelet_messages(
+    message: str, including_wait: float, size: int | None
+) -> None:
+    event = SimpleNamespace(
+        reason="Pulled",
+        involved_object=SimpleNamespace(uid="pod"),
+        message=message,
+    )
+
+    pulled = benchmark.parse_image_pull_events([event], pod_uid="pod")
+
+    assert pulled.duration_seconds == 62.5
+    assert pulled.including_wait_seconds == including_wait
+    assert pulled.image_size_bytes == size
+    assert pulled.cache_hit is False
+
+
 def test_public_storage_parameters_excludes_cluster_identifiers() -> None:
     parameters = benchmark.public_storage_parameters(
         {
@@ -303,6 +371,8 @@ def test_fallback_is_idempotent(tmp_path) -> None:
         outcome="infrastructure_failed",
         message="pytest did not start",
         result_dir=tmp_path,
+        run_id="run-1",
+        run_attempt=1,
     )
     second = benchmark.write_fallback(
         suite="framework-checkpoint-restore",
@@ -311,6 +381,8 @@ def test_fallback_is_idempotent(tmp_path) -> None:
         outcome="timed_out",
         message="this must not replace the first result",
         result_dir=tmp_path,
+        run_id="run-1",
+        run_attempt=1,
     )
 
     assert second == first
@@ -329,6 +401,8 @@ def test_fallback_does_not_reuse_another_case_result(tmp_path) -> None:
         outcome="infrastructure_failed",
         message="vllm did not start",
         result_dir=tmp_path,
+        run_id="run-1",
+        run_attempt=1,
     )
 
     result = benchmark.write_fallback(
@@ -338,12 +412,52 @@ def test_fallback_does_not_reuse_another_case_result(tmp_path) -> None:
         outcome="timed_out",
         message="sglang timed out",
         result_dir=tmp_path,
+        run_id="run-1",
+        run_attempt=1,
     )
 
     assert result != existing
     assert len(list(tmp_path.glob("*.json"))) == 2
     written = json.loads(result.read_text(encoding="utf-8"))
     assert written["identity"]["case"] == "sglang"
+
+
+def test_fallback_does_not_reuse_a_stale_result_from_another_run(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stale = benchmark.write_fallback(
+        suite="framework-checkpoint-restore",
+        case="sglang",
+        test="test_framework",
+        outcome="infrastructure_failed",
+        message="left behind on a reused runner workspace",
+        result_dir=tmp_path,
+        run_id="run-1",
+        run_attempt=1,
+    )
+    monkeypatch.setenv("GITHUB_RUN_ID", "run-2")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "3")
+
+    current = benchmark.write_fallback(
+        suite="framework-checkpoint-restore",
+        case="sglang",
+        test="test_framework",
+        outcome="timed_out",
+        message="current run timed out",
+        result_dir=tmp_path,
+    )
+
+    assert current != stale
+    assert current.name == "framework-checkpoint-restore-sglang-run-2-3.json"
+    written = json.loads(current.read_text(encoding="utf-8"))
+    assert written["identity"] == {
+        "suite": "framework-checkpoint-restore",
+        "case": "sglang",
+        "test": "test_framework",
+        "runId": "run-2",
+        "runAttempt": 3,
+    }
+    assert written["outcome"] == "timed_out"
 
 
 def test_wait_for_pod_event_matches_uid(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -356,7 +470,13 @@ def test_wait_for_pod_event_matches_uid(monkeypatch: pytest.MonkeyPatch) -> None
         involved_object=SimpleNamespace(name="restore", uid="current-uid"),
         event_time=datetime(2026, 9, 9, 7, 0, tzinfo=timezone.utc),
     )
-    monkeypatch.setattr(lifecycle.k8s, "list_events", lambda namespace: [wrong, expected])
+    selectors: list[dict[str, str] | None] = []
+
+    def list_events(namespace: str, *, field_selector=None):
+        selectors.append(field_selector)
+        return [wrong, expected]
+
+    monkeypatch.setattr(lifecycle.k8s, "list_events", list_events)
 
     assert (
         lifecycle.wait_for_pod_event(
@@ -368,7 +488,26 @@ def test_wait_for_pod_event_matches_uid(monkeypatch: pytest.MonkeyPatch) -> None
         )
         is expected
     )
+    assert selectors == [
+        {
+            "involvedObject.name": "restore",
+            "involvedObject.uid": "current-uid",
+            "reason": "RestoreRequested",
+        }
+    ]
     assert lifecycle.pod_event_timestamp(expected) == expected.event_time
+
+
+def test_wait_for_raises_a_lifecycle_timeout() -> None:
+    with pytest.raises(lifecycle.LifecycleTimeoutError, match="timed out waiting for never"):
+        lifecycle.wait_for("never", lambda: None, 0)
+
+
+def _poll_without_sleeping(description, fn, timeout, **kwargs):
+    while True:
+        result = fn()
+        if result is not None:
+            return result
 
 
 def test_combined_restore_wait_records_each_boundary_once(
@@ -386,21 +525,18 @@ def test_combined_restore_wait_records_each_boundary_once(
     succeeded = SimpleNamespace(
         status=SimpleNamespace(phase="Running", conditions=[succeeded_condition]),
     )
-    # The waiter's first progress report performs one extra read for detail.
-    pods = iter([pending, pending, pending, succeeded])
-    outputs = iter(
-        [
-            "",
-            "__snapshot_e2e_outcome__:ready\nfirst generation",
-        ]
-    )
-    monkeypatch.setattr(lifecycle.k8s, "read_pod", lambda namespace, name: next(pods))
-    monkeypatch.setattr(
-        lifecycle.k8s,
-        "exec_command",
-        lambda namespace, name, command: next(outputs),
-    )
+    pods = iter([pending, pending, succeeded, succeeded])
+    outputs = iter(["", "__snapshot_e2e_outcome__:ready\nfirst generation"])
     observed: list[str] = []
+    exec_calls: list[str] = []
+
+    def exec_command(namespace: str, name: str, command: str) -> str:
+        exec_calls.append(observed[-1] if observed else "before-restore")
+        return next(outputs)
+
+    monkeypatch.setattr(lifecycle.k8s, "read_pod", lambda namespace, name: next(pods))
+    monkeypatch.setattr(lifecycle.k8s, "exec_command", exec_command)
+    monkeypatch.setattr(lifecycle, "wait_for", _poll_without_sleeping)
 
     pod, text = lifecycle.wait_for_restore_traffic_ready(
         "snapshot-e2e",
@@ -410,12 +546,12 @@ def test_combined_restore_wait_records_each_boundary_once(
         timeout=1,
         on_restore_succeeded=lambda: observed.append("restore"),
         on_traffic_ready=lambda: observed.append("traffic"),
-        poll_interval=0,
     )
 
     assert pod is succeeded
     assert text == "first generation"
-    assert observed == ["traffic", "restore"]
+    assert observed == ["restore", "traffic"]
+    assert exec_calls == ["restore", "restore"]
 
 
 def test_combined_restore_wait_fails_when_restored_pod_terminates(

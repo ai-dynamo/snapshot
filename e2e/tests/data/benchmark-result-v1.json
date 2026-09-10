@@ -1,0 +1,124 @@
+{
+  "schemaVersion": 1,
+  "benchmarkVersion": 1,
+  "identity": {
+    "suite": "framework-checkpoint-restore",
+    "case": "vllm",
+    "test": "test_framework_checkpoint_restore_serves_inference",
+    "runId": "123456789",
+    "runAttempt": 1
+  },
+  "outcome": "failed",
+  "startedAt": "2026-09-10T09:00:00.000Z",
+  "finishedAt": "2026-09-10T09:01:09.250Z",
+  "source": {
+    "commit": null,
+    "ref": null,
+    "event": "local",
+    "runUrl": null,
+    "snapshotTag": null
+  },
+  "environment": {
+    "namespace": "snapshot-e2e",
+    "model": "Qwen/Qwen3-0.6B",
+    "frameworkImage": "registry.example/vllm:tag",
+    "frameworkImageDigest": "registry.example/vllm@sha256:abc123",
+    "sourceNode": "gpu-node-a",
+    "sourceGpus": [
+      {
+        "model": "NVIDIA B200",
+        "uuid": "GPU-1",
+        "driverVersion": "580.1"
+      }
+    ],
+    "restoreGpus": [],
+    "restoreGpuCollectionError": "exec failed",
+    "restoreNodeGpuProduct": "NVIDIA-B200"
+  },
+  "measurements": [
+    {
+      "name": "test.total.duration",
+      "displayName": "Full E2E test",
+      "unit": "seconds",
+      "value": 69.25,
+      "status": "complete",
+      "startEvent": "test.started",
+      "endEvent": "test.finished"
+    },
+    {
+      "name": "checkpoint.duration",
+      "displayName": "Checkpoint (API to Ready)",
+      "unit": "seconds",
+      "value": 12.5,
+      "status": "complete",
+      "startEvent": "checkpoint.requested",
+      "endEvent": "checkpoint.ready"
+    },
+    {
+      "name": "restore.to_traffic.duration",
+      "displayName": "Restore requested to traffic ready",
+      "unit": "seconds",
+      "value": 20.75,
+      "status": "complete",
+      "startEvent": "restore.requested",
+      "endEvent": "traffic.ready"
+    },
+    {
+      "name": "restore.criu_restore.duration",
+      "displayName": "Restore CRIU restore",
+      "unit": "seconds",
+      "value": 8.25,
+      "status": "complete"
+    },
+    {
+      "name": "checkpoint.size",
+      "displayName": "Checkpoint size",
+      "unit": "bytes",
+      "value": 4096.0,
+      "status": "complete"
+    }
+  ],
+  "events": [
+    {
+      "name": "test.started",
+      "offsetSeconds": 0.0,
+      "timestamp": "2026-09-10T09:00:00.000Z"
+    },
+    {
+      "name": "source.ready",
+      "offsetSeconds": 30.0,
+      "timestamp": "2026-09-10T09:00:30.000Z"
+    },
+    {
+      "name": "checkpoint.requested",
+      "offsetSeconds": 30.0,
+      "timestamp": "2026-09-10T09:00:30.000Z"
+    },
+    {
+      "name": "checkpoint.ready",
+      "offsetSeconds": 42.5,
+      "timestamp": "2026-09-10T09:00:42.500Z"
+    },
+    {
+      "name": "restore.requested",
+      "offsetSeconds": 47.5,
+      "timestamp": "2026-09-10T09:00:47.500Z",
+      "externalTimestamp": true,
+      "observationDelaySeconds": 0.75
+    },
+    {
+      "name": "traffic.ready",
+      "offsetSeconds": 68.25,
+      "timestamp": "2026-09-10T09:01:08.250Z"
+    },
+    {
+      "name": "test.finished",
+      "offsetSeconds": 69.25,
+      "timestamp": "2026-09-10T09:01:09.250Z"
+    }
+  ],
+  "error": {
+    "phase": "call",
+    "message": "AssertionError: x"
+  }
+}

@@ -42,17 +42,46 @@ CHECKPOINT_DURATION = "checkpoint.duration"
 RESTORE_TO_TRAFFIC_DURATION = "restore.to_traffic.duration"
 RESTORE_POD_TO_TRAFFIC_DURATION = "restore.pod_create_to_traffic.duration"
 RESTORE_AGENT_TO_TRAFFIC_DURATION = "restore.agent_complete_to_traffic.duration"
-EXPECTED_COLLECTED_DURATIONS = {
-    "checkpoint.agent.duration": "Checkpoint (agent)",
-    "checkpoint.criu_dump.duration": "Checkpoint CRIU dump",
-    "restore.agent.duration": "Restore (agent)",
-    "restore.criu_restore.duration": "Restore CRIU restore",
-    RESTORE_AGENT_TO_TRAFFIC_DURATION: "Agent restore complete to traffic ready",
-    "source.image_pull.duration": "Source image pull",
-    "source.image_pull_including_wait.duration": "Source image pull including wait",
-    "restore.image_pull.duration": "Restore image pull",
-    "restore.image_pull_including_wait.duration": "Restore image pull including wait",
-}
+RESTORE_AGENT_TO_TRAFFIC_DISPLAY_NAME = "Agent restore complete to traffic ready"
+GPU_PRODUCT_NODE_LABEL = "nvidia.com/gpu.product"
+
+
+def _phase_display_name(phase: str) -> str:
+    acronyms = {"criu": "CRIU", "cuda": "CUDA", "gpu": "GPU"}
+    return " ".join(acronyms.get(word, word) for word in phase.split("_"))
+
+
+def agent_duration(operation: str, phase: str | None = None) -> tuple[str, str]:
+    """Measurement name and display name for an agent total or phase."""
+    title = operation.capitalize()
+    if phase is None:
+        return f"{operation}.agent.duration", f"{title} (agent)"
+    return f"{operation}.{phase}.duration", f"{title} {_phase_display_name(phase)}"
+
+
+def image_pull_duration(role: str, *, including_wait: bool) -> tuple[str, str]:
+    title = role.capitalize()
+    if including_wait:
+        return (
+            f"{role}.image_pull_including_wait.duration",
+            f"{title} image pull including wait",
+        )
+    return f"{role}.image_pull.duration", f"{title} image pull"
+
+
+EXPECTED_COLLECTED_DURATIONS = dict(
+    [
+        agent_duration("checkpoint"),
+        agent_duration("checkpoint", "criu_dump"),
+        agent_duration("restore"),
+        agent_duration("restore", "criu_restore"),
+        (RESTORE_AGENT_TO_TRAFFIC_DURATION, RESTORE_AGENT_TO_TRAFFIC_DISPLAY_NAME),
+        image_pull_duration("source", including_wait=False),
+        image_pull_duration("source", including_wait=True),
+        image_pull_duration("restore", including_wait=False),
+        image_pull_duration("restore", including_wait=True),
+    ]
+)
 
 
 @pytest.fixture(params=sorted(frameworks.FRAMEWORKS))
@@ -138,11 +167,13 @@ def test_framework_checkpoint_restore_serves_inference(
         source_node = source.spec.node_name
         result.mark_event("source.ready")
         result.update_environment(sourceNode=source_node)
+        _record_framework_image_digest(result, source)
         _record_gpu_environment(
             result,
             config.namespace,
             run.source_pod,
             role="source",
+            node=source_node,
         )
         # Recorded on success too, so a flaky restore failure can be correlated
         # with whether Datadog GPU monitoring was active on the node.
@@ -235,6 +266,7 @@ def test_framework_checkpoint_restore_serves_inference(
             config.namespace,
             run.restore_pod,
             role="restore",
+            node=restore_node,
         )
         _record_image_pulls(
             result,
@@ -270,10 +302,17 @@ def _record_gpu_environment(
     pod: str,
     *,
     role: str,
+    node: str | None,
 ) -> None:
-    """Records the GPU visible to the workload without failing the e2e test."""
+    """Records the GPU visible to the workload without failing the e2e test.
+
+    `nvidia-smi` inside the workload is the preferred source. The node's
+    `nvidia.com/gpu.product` label is recorded alongside it and stands in as
+    the GPU model when the exec fails, so the result stays comparable.
+    """
     if role not in {"source", "restore"}:
         raise ValueError(f"unknown GPU role {role!r}")
+    gpu_product = _node_gpu_product(result, role=role, node=node)
     try:
         output = k8s.exec_command(
             namespace,
@@ -285,10 +324,57 @@ def _record_gpu_environment(
         )
     except Exception as exc:  # noqa: BLE001 - metadata is not a functional assertion
         message = f"{type(exc).__name__}: {exc}"
+        fallback = (
+            [
+                {
+                    "model": gpu_product,
+                    "uuid": "unknown",
+                    "driverVersion": "unknown",
+                    "source": GPU_PRODUCT_NODE_LABEL,
+                }
+            ]
+            if gpu_product
+            else []
+        )
         result.update_environment(
-            **{f"{role}Gpus": [], f"{role}GpuCollectionError": message}
+            **{f"{role}Gpus": fallback, f"{role}GpuCollectionError": message}
         )
         print(f"benchmark {role} GPU metadata unavailable: {message}")
+
+
+def _node_gpu_product(
+    result: benchmark_result.BenchmarkRecorder,
+    *,
+    role: str,
+    node: str | None,
+) -> str | None:
+    try:
+        if not node:
+            raise ValueError("pod has no node")
+        labels = k8s.read_node(node).metadata.labels or {}
+        product = labels.get(GPU_PRODUCT_NODE_LABEL)
+        if not product:
+            raise ValueError(f"node {node} has no {GPU_PRODUCT_NODE_LABEL} label")
+        result.update_environment(**{f"{role}NodeGpuProduct": product})
+        return product
+    except Exception as exc:  # noqa: BLE001 - metadata is not a functional assertion
+        _record_environment_error(result, "gpuProductCollectionErrors", role, exc)
+        return None
+
+
+def _record_framework_image_digest(
+    result: benchmark_result.BenchmarkRecorder,
+    pod: object,
+) -> None:
+    """Records the resolved image digest so baselines survive re-pushed tags."""
+    try:
+        statuses = getattr(getattr(pod, "status", None), "container_statuses", None) or []
+        status = next(item for item in statuses if item.name == frameworks.CONTAINER)
+        if not status.image_id:
+            raise ValueError(f"container {frameworks.CONTAINER} reports no imageID")
+        result.update_environment(frameworkImageDigest=status.image_id)
+    except Exception as exc:  # noqa: BLE001 - metadata is not a functional assertion
+        _record_environment_error(result, "frameworkImageCollectionErrors", "digest", exc)
 
 
 def _record_storage_environment(
@@ -368,14 +454,12 @@ def _record_image_pull(
         }
         result.update_environment(imagePulls=pulls)
         result.record_measurement(
-            f"{role}.image_pull.duration",
-            f"{role.capitalize()} image pull",
+            *image_pull_duration(role, including_wait=False),
             "seconds",
             pull.duration_seconds,
         )
         result.record_measurement(
-            f"{role}.image_pull_including_wait.duration",
-            f"{role.capitalize()} image pull including wait",
+            *image_pull_duration(role, including_wait=True),
             "seconds",
             pull.including_wait_seconds,
         )
@@ -458,7 +542,7 @@ def _record_agent_timings(
             )
         result.record_measurement(
             RESTORE_AGENT_TO_TRAFFIC_DURATION,
-            "Agent restore complete to traffic ready",
+            RESTORE_AGENT_TO_TRAFFIC_DISPLAY_NAME,
             "seconds",
             max(0.0, gap),
         )
@@ -476,25 +560,17 @@ def _record_agent_summary(
     operation: str,
     summary: benchmark_result.AgentTimingSummary,
 ) -> None:
-    title = operation.capitalize()
     result.record_measurement(
-        f"{operation}.agent.duration",
-        f"{title} (agent)",
+        *agent_duration(operation),
         "seconds",
         summary.duration_seconds,
     )
     for phase, duration in summary.phases_seconds.items():
         result.record_measurement(
-            f"{operation}.{phase}.duration",
-            f"{title} {_phase_display_name(phase)}",
+            *agent_duration(operation, phase),
             "seconds",
             duration,
         )
-
-
-def _phase_display_name(phase: str) -> str:
-    acronyms = {"criu": "CRIU", "cuda": "CUDA", "gpu": "GPU"}
-    return " ".join(acronyms.get(word, word) for word in phase.split("_"))
 
 
 def _record_environment_error(

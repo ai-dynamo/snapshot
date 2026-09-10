@@ -21,8 +21,9 @@ from typing import Any, Protocol
 
 
 SCHEMA_VERSION = 1
-BENCHMARK_VERSION = 2
+BENCHMARK_VERSION = 1
 TEST_TOTAL = "test.total.duration"
+MAX_EXPECTED_OBSERVATION_DELAY_SECONDS = 5.0
 VALID_OUTCOMES = {
     "passed",
     "failed",
@@ -143,8 +144,7 @@ class BenchmarkRecorder:
         self.environment: dict[str, Any] = dict(environment or {})
         self._clock = clock or SystemClock()
         self._result_dir = result_dir or result_directory()
-        self._run_id = run_id or os.environ.get("GITHUB_RUN_ID") or f"local-{uuid.uuid4()}"
-        self._run_attempt = run_attempt or _integer_environment("GITHUB_RUN_ATTEMPT", 1)
+        self._run_id, self._run_attempt = run_identity(run_id, run_attempt)
         self._started_monotonic = self._clock.monotonic()
         self._started_at = self._clock.now()
         self._events: list[dict[str, Any]] = []
@@ -198,6 +198,7 @@ class BenchmarkRecorder:
         *,
         event: str | None = None,
         captured: tuple[float, datetime] | None = None,
+        event_fields: Mapping[str, Any] | None = None,
     ) -> None:
         measurement = self._measurement(name)
         if measurement.unit != "seconds":
@@ -208,7 +209,7 @@ class BenchmarkRecorder:
         measurement.started_monotonic = monotonic
         measurement.start_event = event
         if event:
-            self._add_event(event, monotonic, wall)
+            self._add_event(event, monotonic, wall, fields=event_fields)
 
     def start_duration_at(
         self,
@@ -223,18 +224,34 @@ class BenchmarkRecorder:
         corresponding monotonic boundary once, then continue measuring with
         the runner's monotonic clock. This removes poll delay from the start
         without repeatedly subtracting wall clocks across machines.
+
+        The external timestamp comes from another machine's clock. The signed
+        delay between it and the runner's observation is kept on the event so
+        clock skew between the cluster and the runner stays diagnosable; a
+        negative delay means the cluster clock is ahead of the runner.
         """
         timestamp = _utc_datetime(timestamp)
         monotonic, wall = self._capture()
-        age_seconds = max(0.0, (wall - timestamp).total_seconds())
+        observation_delay = (wall - timestamp).total_seconds()
         estimated_monotonic = max(
             self._started_monotonic,
-            monotonic - age_seconds,
+            monotonic - max(0.0, observation_delay),
         )
+        clamped = (
+            observation_delay < 0.0
+            or monotonic - observation_delay < self._started_monotonic
+        )
+        fields: dict[str, Any] = {
+            "externalTimestamp": True,
+            "observationDelaySeconds": round(observation_delay, 6),
+        }
+        if clamped:
+            fields["clamped"] = True
         self.start_duration(
             name,
             event=event,
             captured=(estimated_monotonic, timestamp),
+            event_fields=fields,
         )
 
     def finish_duration(self, name: str, *, event: str | None = None) -> float:
@@ -355,9 +372,31 @@ class BenchmarkRecorder:
                 else "not completed"
             )
             lines.append(f"{measurement.display_name}: {value}")
+        lines.extend(self.timing_warnings())
         if self._result_path is not None:
             lines.append(f"Result: {self._result_path}")
         return "\n".join(lines)
+
+    def as_dict_events(self) -> list[dict[str, Any]]:
+        return [dict(event) for event in self._events]
+
+    def timing_warnings(self) -> list[str]:
+        warnings: list[str] = []
+        for event in self._events:
+            delay = event.get("observationDelaySeconds")
+            if delay is None:
+                continue
+            if delay < 0.0:
+                warnings.append(
+                    f"Warning: {event['name']} was observed {-delay:.3f}s before its "
+                    "cluster timestamp; the cluster clock is ahead of the runner"
+                )
+            elif delay > MAX_EXPECTED_OBSERVATION_DELAY_SECONDS:
+                warnings.append(
+                    f"Warning: {event['name']} was observed {delay:.3f}s after its "
+                    "cluster timestamp; check clock skew or event delivery"
+                )
+        return warnings
 
     def _capture_started(self) -> tuple[float, datetime]:
         return self._started_monotonic, self._started_at
@@ -365,18 +404,25 @@ class BenchmarkRecorder:
     def _capture(self) -> tuple[float, datetime]:
         return self._clock.monotonic(), self._clock.now()
 
-    def _add_event(self, name: str, monotonic: float, wall: datetime) -> None:
+    def _add_event(
+        self,
+        name: str,
+        monotonic: float,
+        wall: datetime,
+        *,
+        fields: Mapping[str, Any] | None = None,
+    ) -> None:
         if name in self._event_names:
             raise ValueError(f"event {name!r} is already recorded")
         self._event_names.add(name)
         self._event_wall_times[name] = wall
-        self._events.append(
-            {
-                "name": name,
-                "offsetSeconds": round(max(0.0, monotonic - self._started_monotonic), 6),
-                "timestamp": _timestamp(wall),
-            }
-        )
+        event: dict[str, Any] = {
+            "name": name,
+            "offsetSeconds": round(max(0.0, monotonic - self._started_monotonic), 6),
+            "timestamp": _timestamp(wall),
+        }
+        event.update(fields or {})
+        self._events.append(event)
 
     def _measurement(self, name: str) -> _Measurement:
         try:
@@ -408,11 +454,9 @@ class BenchmarkRecorder:
 
     def _write(self) -> Path:
         self._result_dir.mkdir(parents=True, exist_ok=True)
-        filename = "-".join(
-            _safe_filename(part)
-            for part in (self.suite, self.case, self._run_id, str(self._run_attempt))
+        path = result_path(
+            self._result_dir, self.suite, self.case, self._run_id, self._run_attempt
         )
-        path = self._result_dir / f"{filename}.json"
         temporary = path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(self.as_dict(), indent=2) + "\n", encoding="utf-8")
         os.replace(temporary, path)
@@ -463,6 +507,30 @@ def result_directory() -> Path:
     return Path(tempfile.gettempdir()) / "snapshot-e2e-benchmarks"
 
 
+def run_identity(run_id: str | None, run_attempt: int | None) -> tuple[str, int]:
+    """Resolves the workflow run identity, defaulting to the GitHub Actions environment."""
+    resolved_id = run_id or os.environ.get("GITHUB_RUN_ID") or f"local-{uuid.uuid4()}"
+    resolved_attempt = (
+        run_attempt
+        if run_attempt is not None
+        else _integer_environment("GITHUB_RUN_ATTEMPT", 1)
+    )
+    return resolved_id, resolved_attempt
+
+
+def result_path(
+    directory: Path,
+    suite: str,
+    case: str,
+    run_id: str,
+    run_attempt: int,
+) -> Path:
+    filename = "-".join(
+        _safe_filename(part) for part in (suite, case, run_id, str(run_attempt))
+    )
+    return directory / f"{filename}.json"
+
+
 def source_from_environment(run_id: str) -> dict[str, Any]:
     server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
     repository = os.environ.get("GITHUB_REPOSITORY", "")
@@ -484,19 +552,27 @@ def write_fallback(
     outcome: str,
     message: str,
     result_dir: Path | None = None,
+    run_id: str | None = None,
+    run_attempt: int | None = None,
 ) -> Path:
+    """Writes a minimal result unless this exact run attempt already has one.
+
+    Only a result whose file name carries the current run ID and attempt counts
+    as existing: a reused self-hosted workspace may still hold results from an
+    earlier run, and those must not stand in for a missing one.
+    """
     directory = result_dir or result_directory()
-    prefix = "-".join(_safe_filename(part) for part in (suite, case))
-    existing = (
-        sorted(directory.glob(f"{prefix}-*.json")) if directory.exists() else []
-    )
-    if existing:
-        print(f"Benchmark result already exists: {existing[0]}")
-        return existing[0]
+    run_id, run_attempt = run_identity(run_id, run_attempt)
+    existing = result_path(directory, suite, case, run_id, run_attempt)
+    if existing.exists():
+        print(f"Benchmark result already exists: {existing}")
+        return existing
     recorder = BenchmarkRecorder(
         suite=suite,
         case=case,
         test=test,
+        run_id=run_id,
+        run_attempt=run_attempt,
         environment={
             "sourceGpus": [],
             "restoreGpus": [],
@@ -636,9 +712,9 @@ def parse_agent_timing_summary(
 
 
 _IMAGE_PULLED = re.compile(
-    r'Successfully pulled image ".+" in (?P<duration>\S+) '
-    r'\((?P<including_wait>\S+) including waiting\)\. '
-    r'Image size: (?P<size>\d+) bytes\.'
+    r'Successfully pulled image ".+" in (?P<duration>\S+?)'
+    r'(?: \((?P<including_wait>\S+) including waiting\))?\.?'
+    r'(?: Image size: (?P<size>\d+) bytes\.?)?\s*$'
 )
 
 
@@ -665,14 +741,17 @@ def parse_image_pull_events(
         message = str(getattr(event, "message", "") or "")
         match = _IMAGE_PULLED.search(message)
         if match:
+            duration = parse_go_duration(match.group("duration"))
+            including_wait = match.group("including_wait")
+            size = match.group("size")
             pulls.append(
                 ImagePullSummary(
-                    duration_seconds=parse_go_duration(match.group("duration")),
-                    including_wait_seconds=parse_go_duration(
-                        match.group("including_wait")
+                    duration_seconds=duration,
+                    including_wait_seconds=(
+                        parse_go_duration(including_wait) if including_wait else duration
                     ),
                     cache_hit=False,
-                    image_size_bytes=int(match.group("size")),
+                    image_size_bytes=int(size) if size else None,
                 )
             )
         elif "already present on machine" in message:
@@ -744,6 +823,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     fallback.add_argument("--test", required=True)
     fallback.add_argument("--outcome", choices=sorted(VALID_OUTCOMES), required=True)
     fallback.add_argument("--message", required=True)
+    fallback.add_argument("--run-id")
+    fallback.add_argument("--run-attempt", type=int)
     args = parser.parse_args(argv)
     if args.command == "fallback":
         write_fallback(
@@ -752,6 +833,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             test=args.test,
             outcome=args.outcome,
             message=args.message,
+            run_id=args.run_id,
+            run_attempt=args.run_attempt,
         )
     return 0
 

@@ -23,6 +23,7 @@ markers = [
   "framework: checkpoint/restore of an inference framework guide workload",
 ]
 testpaths = ["tests"]
+addopts = "-p pytester"
 
 [build-system]
 requires = ["hatchling"]
