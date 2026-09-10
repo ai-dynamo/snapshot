@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -364,11 +365,26 @@ func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap,
 	var timings RestorePhaseTimings
 
 	start := time.Now()
+	// A launch-job may contain CUDA contexts which jointly own allocations.
+	// Restoring each rank serially leaves early ranks exposed to later ranks
+	// observing an incomplete job. The helper operates on one PID, so issue all
+	// restores before any unlock and wait for every helper result.
+	errs := make(chan error, len(cudaPIDs))
+	var restores sync.WaitGroup
 	for _, pid := range cudaPIDs {
-		if err := restoreProcess(ctx, pid, deviceMap, helperBinaryPath, log); err != nil {
-			timings.TotalDuration = time.Since(start)
-			return timings, err
-		}
+		restores.Add(1)
+		go func(pid int) {
+			defer restores.Done()
+			if err := restoreProcess(ctx, pid, deviceMap, helperBinaryPath, log); err != nil {
+				errs <- err
+			}
+		}(pid)
+	}
+	restores.Wait()
+	close(errs)
+	for err := range errs {
+		timings.TotalDuration = time.Since(start)
+		return timings, err
 	}
 
 	for _, pid := range cudaPIDs {
