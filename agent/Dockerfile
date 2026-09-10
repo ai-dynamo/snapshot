@@ -20,7 +20,17 @@
 # Build Arguments
 # =============================================================================
 ARG DOCKER_PROXY
-ARG GO_VERSION=1.26.6
+ARG GO_VERSION=1.27.1
+# Digest of golang:${GO_VERSION}. A digest is content-addressed, so it resolves
+# identically through DOCKER_PROXY pull-through mirrors. Docker resolves
+# tag@digest by digest and never checks the tag against it, so the two must be
+# updated together — the go-base stage asserts they agree rather than trusting
+# the tag.
+ARG GO_IMAGE_DIGEST=sha256:f44f6e88636cfb311f9ebace870ded69d943f227bb3cb27d32ffd84ea18c43ea
+# Keep in step with GOLANGCI_LINT_VERSION in hack/tools.mk. Used by the linter
+# stage, which is a developer target (`--target linter`) and so is not covered
+# by the CI `check` job.
+ARG GOLANGCI_LINT_VERSION=v2.13.2
 # Default to upstream CRIU development branch. Custom forks can override both
 # args at build time, for example:
 #   --build-arg CRIU_REPO=<git-remote-url>
@@ -36,12 +46,24 @@ ARG BASE_IMAGE=placeholder-requires-base-image-arg
 # =============================================================================
 # Stage: Go base - Common setup for Go builds
 # =============================================================================
-FROM ${DOCKER_PROXY}library/golang:${GO_VERSION} AS go-base
+FROM ${DOCKER_PROXY}library/golang:${GO_VERSION}@${GO_IMAGE_DIGEST} AS go-base
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
+ARG GO_VERSION
 
 RUN echo "Building for ${TARGETOS}/${TARGETARCH}"
+
+# Docker resolves image:tag@digest by digest alone and never validates the tag
+# against it. Overriding GO_VERSION without the matching GO_IMAGE_DIGEST would
+# otherwise build on the digest's toolchain while every label claims the new
+# one. Assert instead of trusting the tag.
+RUN actual="$(go env GOVERSION)"; \
+    [ "${actual}" = "go${GO_VERSION}" ] || { \
+      echo "ERROR: GO_VERSION=${GO_VERSION} but the pinned GO_IMAGE_DIGEST provides ${actual}." >&2; \
+      echo "       Update GO_VERSION and GO_IMAGE_DIGEST in agent/Dockerfile together." >&2; \
+      exit 1; \
+    }
 
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -63,7 +85,14 @@ COPY . .
 # =============================================================================
 FROM go-base AS linter
 
-RUN go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.62.2
+ARG GO_VERSION
+ARG GOLANGCI_LINT_VERSION
+
+# Same constraint as hack/tools.mk: golangci-lint refuses to run when it was
+# built with an older Go than the module it lints, and its own go.mod pins a
+# toolchain that lags ours — so force ours.
+RUN GOTOOLCHAIN=go${GO_VERSION} \
+    go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}
 RUN golangci-lint run --timeout=5m
 
 # =============================================================================
@@ -135,7 +164,7 @@ RUN gcc -O2 -Wall -Wextra -o /ns-bind-mount ./cmd/ns-bind-mount/main.c
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
 # =============================================================================
-FROM ubuntu:24.04 AS criu-builder
+FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254 AS criu-builder
 
 ARG CRIU_REPO
 ARG CRIU_REF

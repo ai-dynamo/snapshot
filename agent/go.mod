@@ -1,6 +1,6 @@
 module github.com/ai-dynamo/snapshot/agent
 
-go 1.26.6
+go 1.27.1
 
 tool google.golang.org/protobuf/cmd/protoc-gen-go
 

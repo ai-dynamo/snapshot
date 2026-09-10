@@ -1,0 +1,71 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Bug Report
+description: Tell us about a problem you are experiencing with Snapshot
+labels: ["bug"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report security vulnerabilities here - see
+        [SECURITY.md](https://github.com/ai-dynamo/snapshot/blob/main/SECURITY.md).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: |
+        Please provide as much detail as possible. Incomplete reports may not be
+        addressed in a timely manner.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How can we reproduce it?
+      description: Minimal steps, manifests, or commands that trigger the problem.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      value: |
+        - Snapshot version (operator and agent):
+        - Kubernetes version:
+        - GPU model and driver version:
+        - Container runtime:
+        - Cloud provider or hardware configuration:
+        - Anything else that is relevant:
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs, events, or resource YAML
+      description: Output is rendered as a code block, so no backticks are needed.
+      render: shell
+
+  - type: checkboxes
+    id: duplicates
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have searched the existing issues and found no duplicate of this report
+          required: true
+
+  - type: markdown
+    attributes:
+      value: Impacted by this bug? Give it a 👍 above.

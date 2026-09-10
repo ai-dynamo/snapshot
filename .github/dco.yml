@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Configuration for the DCO app: every commit needs a Signed-off-by trailer,
+# including commits from organization members. See CONTRIBUTING.md.
+require:
+  members: true
