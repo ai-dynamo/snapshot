@@ -48,7 +48,8 @@ FROM ${CUDA_HELPER_HEADERS_IMAGE} AS cuda-helper-headers
 # =============================================================================
 FROM ${AGENT_BASE_IMAGE} AS cuda-helper-core-builder
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb \
+    && apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -264,9 +265,20 @@ RUN git init /tmp/nixl \
 # =============================================================================
 FROM ${AGENT_BASE_IMAGE} AS cuda-helper-builder
 
+# cuinterpose needs CUDA 13.1's device-explicit multicast bind declarations.
+# The CustomStorage helper itself uses the newer header-provider stage above;
+# this shim links only against the driver at runtime.
+ARG CUINTERPOSE_CUDA_HEADERS=13-1
+ADD --checksum=sha256:d2a6b11c096396d868758b86dab1823b25e14d70333f1dfa74da5ddaf6a06dba \
+    https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb \
+    /tmp/cuda-keyring.deb
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libssl-dev \
+    libgtest-dev \
+    cuda-driver-dev-${CUINTERPOSE_CUDA_HEADERS} \
+    cuda-cudart-dev-${CUINTERPOSE_CUDA_HEADERS} \
+    cuda-crt-${CUINTERPOSE_CUDA_HEADERS} \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
@@ -302,6 +314,7 @@ COPY cmd/cuda-checkpoint-helper/transfer_scheduler_test.cpp ./cmd/cuda-checkpoin
 COPY cmd/cuda-checkpoint-helper/restore_batch_order.h ./cmd/cuda-checkpoint-helper/restore_batch_order.h
 COPY cmd/cuda-checkpoint-helper/restore_batch_order_test.cpp ./cmd/cuda-checkpoint-helper/restore_batch_order_test.cpp
 COPY cmd/ns-bind-mount/main.c ./cmd/ns-bind-mount/main.c
+COPY cmd/cuinterpose/ ./cmd/cuinterpose/
 
 RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread -o /cuda-checkpoint-helper \
     ./cmd/cuda-checkpoint-helper/main.cpp \
@@ -319,6 +332,10 @@ RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread -o /cuda-checkpoint-helper
     -L/usr/local/lib \
     -Wl,-rpath,/usr/local/lib \
     -lnixl -lnixl_build -lcuda -lcrypto
+
+# Build the preload shim and coordinator, including its C++ unit suite.
+RUN make -C ./cmd/cuinterpose BUILD_DIR=/cuinterpose-build \
+    CUDA_HOME=/usr/local/cuda-$(echo ${CUINTERPOSE_CUDA_HEADERS} | tr - .) all test
 
 RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread \
       -o /cuda-checkpoint-helper-daemon-protocol-test \
@@ -508,12 +525,17 @@ COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
 # The placeholder ships none of this. nsrestore redirects all three lookup
 # mechanisms into the mount: criu's libdir -> criu-plugins/ (criu.overrideLibDir),
 # LD_LIBRARY_PATH -> lib/, and PATH -> the bundle root.
-RUN mkdir -p /snapshot-binaries/lib /snapshot-binaries/criu-plugins
+RUN mkdir -p /snapshot-binaries/lib /snapshot-binaries/criu-plugins /snapshot-binaries/snapshot-cuda
 COPY --from=builder /nsrestore /snapshot-binaries/nsrestore
 COPY --from=criu-builder /criu-install/usr/local/sbin/criu /snapshot-binaries/criu
 COPY --from=criu-builder /criu-install/usr/local/lib/snapshot/criu-plugins/ /snapshot-binaries/criu-plugins/
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /snapshot-binaries/cuda-checkpoint
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-checkpoint-helper
+COPY --from=cuda-helper-builder /cuinterpose-build/libcuinterpose.so /snapshot-binaries/snapshot-cuda/libcuinterpose.so
+COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /snapshot-binaries/snapshot-cuda/cuda-checkpoint
+COPY --from=cuda-helper-builder /cuinterpose-build/cuinterpose-coordinator /snapshot-binaries/cuinterpose-coordinator
+RUN chmod 0644 /snapshot-binaries/snapshot-cuda/libcuinterpose.so \
+    && chmod +x /snapshot-binaries/snapshot-cuda/cuda-checkpoint
 
 # Network binaries needed during restore:
 #   ip  — address/route restore (criu/net.c)
