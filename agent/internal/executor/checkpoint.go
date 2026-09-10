@@ -105,21 +105,43 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	if err != nil {
 		return checkpointPreMutationError(fmt.Errorf("resolve checkpoint artifact path: %w", err))
 	}
-	tmpRoot, err := nsmount.ResolveArtifactStagingRoot(cfg.Storage.BasePath, req.ContentUID)
-	if err != nil {
-		return checkpointPreMutationError(fmt.Errorf("resolve checkpoint staging root: %w", err))
+	brokered := req.PageBrokerRequested && cfg.PageBroker.Enabled
+	transactionID := uuid.NewString()
+	var broker pagebroker.Client
+	committed := false
+	var tmpDir string
+	if brokered {
+		broker = pagebroker.Client{ControlSocketPath: cfg.PageBroker.ControlSocketPath}
+		defer func() {
+			if !committed {
+				abortCtx, cancel := context.WithTimeout(context.Background(), pageBrokerAbortTimeout)
+				defer cancel()
+				if err := broker.Abort(abortCtx, transactionID); err != nil {
+					retErr = errors.Join(retErr, fmt.Errorf("abort PageBroker checkpoint %q: %w", transactionID, err))
+				}
+			}
+		}()
+		tmpDir, err = broker.PrepareCheckpoint(ctx, transactionID, finalDir)
+		if err != nil {
+			return checkpointPreMutationError(fmt.Errorf("prepare PageBroker checkpoint: %w", err))
+		}
+	} else {
+		tmpRoot, err := nsmount.ResolveArtifactStagingRoot(cfg.Storage.BasePath, req.ContentUID)
+		if err != nil {
+			return checkpointPreMutationError(fmt.Errorf("resolve checkpoint staging root: %w", err))
+		}
+		if err := os.MkdirAll(tmpRoot, 0700); err != nil {
+			return checkpointPreMutationError(fmt.Errorf("failed to create checkpoint staging root: %w", err))
+		}
+		if err := os.MkdirAll(filepath.Dir(finalDir), 0700); err != nil {
+			return checkpointPreMutationError(fmt.Errorf("failed to create checkpoint container root: %w", err))
+		}
+		tmpDir = filepath.Join(tmpRoot, transactionID)
+		if err := os.Mkdir(tmpDir, 0700); err != nil {
+			return checkpointPreMutationError(fmt.Errorf("failed to create checkpoint staging directory: %w", err))
+		}
+		defer os.RemoveAll(tmpDir)
 	}
-	if err := os.MkdirAll(tmpRoot, 0700); err != nil {
-		return checkpointPreMutationError(fmt.Errorf("failed to create checkpoint staging root: %w", err))
-	}
-	if err := os.MkdirAll(filepath.Dir(finalDir), 0700); err != nil {
-		return checkpointPreMutationError(fmt.Errorf("failed to create checkpoint container root: %w", err))
-	}
-	tmpDir := filepath.Join(tmpRoot, uuid.NewString())
-	if err := os.Mkdir(tmpDir, 0700); err != nil {
-		return checkpointPreMutationError(fmt.Errorf("failed to create checkpoint staging directory: %w", err))
-	}
-	defer os.RemoveAll(tmpDir)
 
 	state, gpuDeviceMapDuration, err := inspectContainer(ctx, rt, log, req)
 	if err != nil {

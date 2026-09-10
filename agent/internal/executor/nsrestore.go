@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -167,24 +168,7 @@ func executeRestore(
 		}
 	}()
 
-	// Open the cuda-checkpoint-helper fd BEFORE CRIU runs. CRIU restores the
-	// original mount namespace of the checkpointed process, which did not include
-	// the bundle mount at /tmp/snapshot-binaries. The C helper's umount code
-	// tolerates ENOENT from umount2 with the comment "Already gone (CRIU removed
-	// it during namespace restore)" — confirming this is observed behaviour. By
-	// opening the binary now and exec'ing via /proc/self/fd/N after CRIU returns,
-	// the fd remains valid even if the mount is gone.
-	var cudaHelperFdPath string
 	var coordinatorFdPath string
-	if !m.CUDA.IsEmpty() {
-		helperPath := filepath.Join(opts.BundleDir, cuda.HelperBinaryName)
-		f, err := os.Open(helperPath)
-		if err != nil {
-			return nil, 0, nil, fmt.Errorf("failed to open cuda-checkpoint-helper before CRIU restore: %w", err)
-		}
-		defer f.Close()
-		cudaHelperFdPath = fmt.Sprintf("/proc/self/fd/%d", f.Fd())
-	}
 	if m.Cuinterpose.Prepared {
 		if err := requireCuinterposeState(m, opts.CheckpointPath); err != nil {
 			return nil, 0, nil, err

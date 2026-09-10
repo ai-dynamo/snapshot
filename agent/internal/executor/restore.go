@@ -81,7 +81,7 @@ type RestoreRequest struct {
 	PageBrokerRequested         bool
 	PageBrokerEnabled           bool
 	PageBrokerControlSocketPath string
-	CUDATransfer             types.CUDATransferSettings
+	CUDATransfer                types.CUDATransferSettings
 }
 
 var (

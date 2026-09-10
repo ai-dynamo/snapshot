@@ -22,6 +22,7 @@ type AgentConfig struct {
 	Storage        StorageSpec            `yaml:"storage"`
 	CUDACheckpoint CUDACheckpointSettings `yaml:"cudaCheckpoint"`
 	Overlay        OverlaySettings        `yaml:"overlay"`
+	PageBroker     PageBrokerSpec         `yaml:"pageBroker"`
 	Restore        RestoreSpec            `yaml:"restore"`
 	CRIU           CRIUSettings           `yaml:"criu"`
 }
@@ -120,6 +121,9 @@ func (c *AgentConfig) Validate() error {
 		return &ConfigError{Field: "storage.basePath", Message: fmt.Sprintf("storage.basePath must be %q", CheckpointBasePath)}
 	}
 	c.Storage.BasePath = basePath
+	if c.PageBroker.Enabled && strings.TrimSpace(c.PageBroker.ControlSocketPath) == "" {
+		return &ConfigError{Field: "pageBroker.controlSocketPath", Message: "pageBroker.controlSocketPath is required when PageBroker is enabled"}
+	}
 	if c.CRIU.TcpClose && c.CRIU.TcpEstablished {
 		return &ConfigError{
 			Field:   "criu",
@@ -170,6 +174,11 @@ func (c *AgentConfig) Validate() error {
 type StorageSpec struct {
 	Type     string `yaml:"type"`
 	BasePath string `yaml:"basePath"`
+}
+
+type PageBrokerSpec struct {
+	Enabled           bool   `yaml:"enabled"`
+	ControlSocketPath string `yaml:"controlSocketPath"`
 }
 
 // RestoreSpec holds settings for the CRIU restore process.
