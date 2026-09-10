@@ -340,8 +340,8 @@ class BenchmarkRecorder:
                 "runAttempt": self._run_attempt,
             },
             "outcome": self._outcome,
-            "startedAt": _timestamp(self._started_at),
-            "finishedAt": _timestamp(self._finished_at),
+            "startedAt": format_timestamp(self._started_at),
+            "finishedAt": format_timestamp(self._finished_at),
             "source": source_from_environment(self._run_id),
             "environment": self.environment,
             "measurements": [
@@ -419,7 +419,7 @@ class BenchmarkRecorder:
         event: dict[str, Any] = {
             "name": name,
             "offsetSeconds": round(max(0.0, monotonic - self._started_monotonic), 6),
-            "timestamp": _timestamp(wall),
+            "timestamp": format_timestamp(wall),
         }
         event.update(fields or {})
         self._events.append(event)
@@ -540,7 +540,7 @@ def source_from_environment(run_id: str) -> dict[str, Any]:
         "ref": os.environ.get("GITHUB_REF"),
         "event": os.environ.get("GITHUB_EVENT_NAME", "local"),
         "runUrl": run_url,
-        "snapshotTag": os.environ.get("SNAPSHOT_E2E_SNAPSHOT_TAG"),
+        "snapshotTag": os.environ.get("SNAPSHOT_E2E_SNAPSHOT_TAG") or None,
     }
 
 
@@ -768,7 +768,7 @@ def parse_image_pull_events(
     raise ValueError(f"no Pulled event found for pod UID {pod_uid!r}")
 
 
-def _timestamp(value: datetime) -> str:
+def format_timestamp(value: datetime) -> str:
     value = _utc_datetime(value)
     return value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 

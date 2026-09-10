@@ -191,6 +191,212 @@ def test_collection_synthesizes_missing_and_invalid_artifacts(tmp_path: Path) ->
     assert len(collection.warnings) == 1
 
 
+def test_collection_reuses_passing_results_from_earlier_attempts(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    passed_first = _result(case="vllm", run_id="123", run_attempt=1, started=START)
+    failed_first = _result(
+        case="sglang", run_id="123", run_attempt=1, started=START, outcome="failed"
+    )
+    passed_rerun = _result(
+        case="sglang", run_id="123", run_attempt=2, started=START + timedelta(hours=1)
+    )
+    for name, result in (
+        ("vllm-1", passed_first),
+        ("sglang-1", failed_first),
+        ("sglang-2", passed_rerun),
+    ):
+        (artifacts / f"{name}.json").write_text(json.dumps(result), encoding="utf-8")
+
+    collection = history.collect_current_results(
+        artifacts,
+        expected_cases=["vllm", "sglang", "tensorrt-llm"],
+        suite="framework-checkpoint-restore",
+        test="test_framework",
+        run_id="123",
+        run_attempt=2,
+        generated_at=START + timedelta(hours=1),
+        source={**passed_first["source"], "snapshotTag": None},
+    )
+
+    by_case = {result["identity"]["case"]: result for result in collection.results}
+    assert by_case["vllm"]["outcome"] == "passed"
+    assert by_case["vllm"]["identity"]["runAttempt"] == 1
+    assert by_case["sglang"]["outcome"] == "passed"
+    assert by_case["sglang"]["identity"]["runAttempt"] == 2
+    assert by_case["tensorrt-llm"]["outcome"] == "infrastructure_failed"
+    assert by_case["tensorrt-llm"]["identity"]["runAttempt"] == 2
+    assert by_case["tensorrt-llm"]["source"]["snapshotTag"] == "v0.0.0-test"
+    assert collection.warnings == []
+
+
+def test_collection_ignores_other_runs_later_attempts_and_conflicting_duplicates(
+    tmp_path: Path,
+) -> None:
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    current = _result(case="vllm", run_id="123", run_attempt=1, value=10)
+    conflicting = _result(case="vllm", run_id="123", run_attempt=1, value=11)
+    other_run = _result(case="vllm", run_id="999", run_attempt=1)
+    later_attempt = _result(case="vllm", run_id="123", run_attempt=2)
+    for name, result in (
+        ("a-current", current),
+        ("b-conflicting", conflicting),
+        ("c-other-run", other_run),
+        ("d-later-attempt", later_attempt),
+    ):
+        (artifacts / f"{name}.json").write_text(json.dumps(result), encoding="utf-8")
+
+    collection = history.collect_current_results(
+        artifacts,
+        expected_cases=["vllm"],
+        suite="framework-checkpoint-restore",
+        test="test_framework",
+        run_id="123",
+        run_attempt=1,
+        generated_at=START,
+        source=current["source"],
+    )
+
+    assert collection.results[0]["measurements"][0]["value"] == 10
+    assert len(collection.warnings) == 3
+    assert any("conflicting" in warning for warning in collection.warnings)
+    assert any("c-other-run" in warning for warning in collection.warnings)
+    assert any("d-later-attempt" in warning for warning in collection.warnings)
+
+
+def test_comparison_prefers_the_resolved_image_digest_over_the_tag() -> None:
+    prior = _result(run_id="1", started=START, value=10)
+    prior["environment"]["frameworkImage"] = "registry/vllm:old-tag"
+    prior["environment"]["frameworkImageDigest"] = "registry/vllm@sha256:same"
+    current = _result(run_id="2", started=START + timedelta(days=1), value=20)
+    current["environment"]["frameworkImage"] = "registry/vllm:new-tag"
+    current["environment"]["frameworkImageDigest"] = "registry/vllm@sha256:same"
+
+    same_digest = history.compare_result(current, [history.StoredResult(prior, "p.json")])
+    current["environment"]["frameworkImageDigest"] = "registry/vllm@sha256:other"
+    other_digest = history.compare_result(current, [history.StoredResult(prior, "p.json")])
+
+    assert same_digest[0]["previous"]["value"] == 10
+    assert other_digest[0]["previous"] is None
+
+
+def test_index_lines_carry_the_comparison_key_shared_with_other_readers(
+    tmp_path: Path,
+) -> None:
+    fixture = json.loads(
+        (Path(__file__).with_name("data") / "comparison-key.json").read_text(encoding="utf-8")
+    )
+    history.store_results(tmp_path, [fixture["result"]])
+
+    line = _ndjson(tmp_path / "index" / "v1" / "2026-08.ndjson")[0]
+
+    assert set(line) == {"rawPath", "comparisonKey", "result"}
+    assert line["comparisonKey"] == fixture["comparisonKey"]
+    assert history.comparison_key(fixture["result"]) == fixture["comparisonKey"]
+    assert json.loads(line["comparisonKey"]) == history.comparison_dimensions(
+        fixture["result"]
+    )
+
+
+def test_rebuild_removes_stale_monthly_indexes(tmp_path: Path) -> None:
+    history.store_results(tmp_path, [_result()])
+    stale = tmp_path / "index" / "v1" / "2020-01.ndjson"
+    stale.write_text("{}\n", encoding="utf-8")
+
+    manifest = history.rebuild_indexes(tmp_path)
+
+    assert not stale.exists()
+    assert [chunk["month"] for chunk in manifest["chunks"]] == ["2026-08"]
+
+
+def test_atomic_write_leaves_no_temporary_file_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "index" / "file.json"
+
+    def refuse_replace(source, destination):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(history.os, "replace", refuse_replace)
+    with pytest.raises(OSError, match="disk full"):
+        history._write_json_atomic(target, {"ok": True})
+
+    assert not target.exists()
+    assert list(target.parent.iterdir()) == []
+
+
+def test_cli_aggregate_appends_summary_and_rebuild_prints_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for name in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "SNAPSHOT_E2E_SNAPSHOT_TAG"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "ai-dynamo/snapshot")
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    current = _result(run_id="42", started=START)
+    (artifacts / "vllm.json").write_text(json.dumps(current), encoding="utf-8")
+    summary_file = tmp_path / "summary.md"
+    summary_file.write_text("existing\n", encoding="utf-8")
+    history_dir = tmp_path / "history"
+
+    status = history.main(
+        [
+            "aggregate",
+            "--artifacts-dir",
+            str(artifacts),
+            "--history-dir",
+            str(history_dir),
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--expected-case",
+            "vllm",
+            "--test",
+            "test_framework",
+            "--run-id",
+            "42",
+            "--run-attempt",
+            "1",
+            "--summary-file",
+            str(summary_file),
+            "--publish",
+        ]
+    )
+
+    assert status == 0
+    summary = summary_file.read_text(encoding="utf-8")
+    assert summary.startswith("existing\n## E2E framework benchmark comparison")
+    assert summary.endswith("\n")
+    assert len(history.load_history(history_dir)) == 1
+
+    (history_dir / "index" / "manifest.json").unlink()
+    capsys.readouterr()
+    assert history.main(["rebuild", "--history-dir", str(history_dir)]) == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["recordCount"] == 1
+    assert (history_dir / "index" / "manifest.json").is_file()
+
+
+def test_cli_requires_a_run_identity(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("GITHUB_RUN_ID", raising=False)
+    monkeypatch.delenv("GITHUB_RUN_ATTEMPT", raising=False)
+
+    with pytest.raises(SystemExit):
+        history.main(
+            [
+                "aggregate",
+                "--artifacts-dir",
+                str(tmp_path),
+                "--history-dir",
+                str(tmp_path / "history"),
+                "--output-dir",
+                str(tmp_path / "output"),
+                "--expected-case",
+                "vllm",
+            ]
+        )
+
+
 def test_aggregate_writes_comparison_artifact_and_readable_summary(
     tmp_path: Path,
 ) -> None:
@@ -276,6 +482,7 @@ def _result(
     *,
     case: str = "vllm",
     run_id: str = "1",
+    run_attempt: int = 1,
     started: datetime = START,
     value: float = 10,
     outcome: str = "passed",
@@ -284,13 +491,13 @@ def _result(
     finished = started + timedelta(seconds=value)
     result = {
         "schemaVersion": 1,
-        "benchmarkVersion": 2,
+        "benchmarkVersion": 1,
         "identity": {
             "suite": "framework-checkpoint-restore",
             "case": case,
             "test": "test_framework",
             "runId": run_id,
-            "runAttempt": 1,
+            "runAttempt": run_attempt,
         },
         "outcome": outcome,
         "startedAt": _timestamp(started),
