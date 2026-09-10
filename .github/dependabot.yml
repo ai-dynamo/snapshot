@@ -1,9 +1,49 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# `cooldown` holds a newly published version back for a few days — the window in
+# which a compromised release is most likely to still be undetected. It applies
+# to version updates only; Dependabot security updates ignore it and open
+# immediately.
+
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
+
+  # One entry covering all three modules: gomod resolves manifests per
+  # directory and does not follow go.work.
+  - package-ecosystem: gomod
+    directories:
+      - /api
+      - /agent
+      - /operator
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+    groups:
+      # Minor and patch bumps land as one pull request per module. Majors stay
+      # ungrouped so each gets its own review.
+      go-dependencies:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # operator/ only. agent/Dockerfile pins its CUDA base through an ARG that
+  # Dependabot cannot parse, and its ubuntu:24.04 CRIU builder must stay on the
+  # release the committed package baseline was captured against — see
+  # `make verify-base-packages`.
+  - package-ecosystem: docker
+    directory: /operator
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
