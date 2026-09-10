@@ -33,13 +33,14 @@ REQUEST_TIMEOUT_SECONDS = 120
 # covers the dump and upload; restore covers the agent restore plus resume
 # and the first post-restore generation.
 #
-# test_frameworks.py waits on restore_timeout_seconds twice (restored
-# condition, then restore outcome), so it counts double. The CI test step
-# (e2e-frameworks.yaml) must exceed SOURCE_READY_TIMEOUT_SECONDS +
+# test_frameworks.py waits on restore_timeout_seconds twice (the agent's
+# RestoreRequested event, then restore success plus the traffic sentinel), so
+# it counts double. The inner `timeout` around pytest in e2e-frameworks.yaml
+# is the binding limit: it must exceed SOURCE_READY_TIMEOUT_SECONDS +
 # CHECKPOINT_TIMEOUT_SECONDS + POD_DELETE_TIMEOUT_SECONDS +
-# 2 * restore_timeout_seconds + REQUEST_TIMEOUT_SECONDS, or GitHub kills
-# pytest before the failure dump runs -- e.g. sglang's 600s override makes
-# that 900+300+180+2*600+120 = 2700s (~45 min), the largest of the three.
+# 2 * restore_timeout_seconds + REQUEST_TIMEOUT_SECONDS, or pytest is
+# interrupted before the failure dump runs -- e.g. sglang's 600s override
+# makes that 900+300+180+2*600+120 = 2700s (45 min), the largest of the three.
 SOURCE_READY_TIMEOUT_SECONDS = 900
 CHECKPOINT_TIMEOUT_SECONDS = 300
 RESTORE_TIMEOUT_SECONDS = 300
