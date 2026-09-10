@@ -419,6 +419,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-protobuf \
     libgnutls28-dev \
+    liblz4-dev \
     libnftables-dev \
     uuid-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -429,7 +430,8 @@ RUN git init /tmp/criu \
     && git fetch --depth 1 origin ${CRIU_REF} \
     && git checkout FETCH_HEAD \
     && make -j$(nproc) \
-    && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
+    && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin \
+    && ldd /criu-install/usr/local/sbin/criu | grep -q 'liblz4.so'
 
 COPY plugins/inet-remap/snapshot_inet_remap.c /tmp/snapshot_inet_remap.c
 RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \
