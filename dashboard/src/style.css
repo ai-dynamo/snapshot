@@ -148,6 +148,40 @@ main {
   padding: 3.5rem 0 5rem;
 }
 
+.preview-banner {
+  display: flex;
+  gap: 2rem;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 2rem;
+  padding: 1.35rem 1.5rem;
+  border: 1px solid #d49d2f;
+  border-left: 0.4rem solid #d49d2f;
+  border-radius: 0.8rem;
+  background: #fff8e8;
+  box-shadow: var(--shadow);
+}
+
+.preview-banner[hidden] {
+  display: none;
+}
+
+.preview-banner h2,
+.preview-banner p {
+  margin-top: 0;
+}
+
+.preview-banner h2 {
+  margin-bottom: 0.45rem;
+  font-size: 1.25rem;
+}
+
+.preview-banner p:last-child {
+  margin-bottom: 0;
+  color: #5d5139;
+  line-height: 1.5;
+}
+
 section + section {
   margin-top: 4rem;
 }
