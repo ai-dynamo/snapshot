@@ -101,6 +101,11 @@ which is why the protocol, not any one engine's API, is the contract:
 | Restore GPU memory | `wake_up()` | — (resident) | `resume_memory_occupation()` |
 | Resume | `resume_generation()` + `check_health()` | next `generate` | `continue_generation()` |
 
+The three are the engines the guides document, not the limit of what the
+contract admits — any inference server that fills in its own column of the table
+and meets the channel, pod, and runtime requirements is snapshot-ready. See
+[Support a new inference server](#support-a-new-inference-server).
+
 ## Pod requirements
 
 The source pod gives the workload the control channel and the conditions
@@ -151,6 +156,28 @@ custom image still has to meet these:
   the command, or a framework that implements the protocol natively, is equally
   valid — provided the running container satisfies this contract and the runtime
   compatibility constraints above.
+
+## Support a new inference server
+
+The documented engines are examples, not the boundary: any inference server that
+satisfies this contract is snapshot-ready, and the node agent checkpoints and
+restores it with no Snapshot-side change. To bring one:
+
+1. **Map each obligation to the engine's API** — fill in its own column of the
+   [config-parity table](#config-parity-and-mechanism): warm up, stop in-flight
+   work, park and restore GPU memory, resume. Any mechanism qualifies as long as
+   it meets the obligation; an engine with no explicit memory-park call can rely
+   on a synchronous request returning idle, as TensorRT-LLM does.
+2. **Implement the lifecycle protocol over the control channel** — read
+   `SNAPSHOT_CONTROL_DIR`, clear then write `ready-for-snapshot` at the quiesced
+   barrier, honor `SNAPSHOT_RESTORE_STANDBY`, wait on `restore-complete`, and
+   write a `<framework>-restore-ready` sentinel once the API is serving.
+3. **Clear the [runtime-compatibility](#runtime-compatibility) constraints** and
+   **give the pod the [required shape](#pod-requirements)**, then package it by
+   either method above.
+
+Nothing about the engine's identity is special to Snapshot; satisfying the
+contract is the whole requirement.
 
 ## See also
 
