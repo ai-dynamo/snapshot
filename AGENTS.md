@@ -105,6 +105,76 @@ Both require Docker.
    `make capture-base-packages` so the committed package baseline matches;
    `verify-base-packages` enforces this.
 
+## Preferred and deprecated patterns
+
+Concrete examples of the shape a change should take here. Each of these is
+enforced somewhere — by a linter, a `make` target, or a CI job — so getting it
+wrong shows up as a failure rather than a review comment.
+
+**Read the control directory from the canonical environment variable.**
+`LegacySnapshotControlDirEnv` is carried only so workload images built against
+the old name keep working during the migration window. New code must not read
+it; `operator/.golangci.yml` scopes the deprecation exclusion to the one file
+allowed to reference it.
+
+```go
+// Good
+dir := os.Getenv(podcontract.SnapshotControlDirEnv)   // SNAPSHOT_CONTROL_DIR
+
+// Bad — deprecated, kept only for backward compatibility
+dir := os.Getenv(podcontract.LegacySnapshotControlDirEnv)  // DYN_SNAPSHOT_CONTROL_DIR
+```
+
+**Log through the context logger, not stdout.** Reconcilers get a logger
+carrying the request's identity; printing loses it. There is no `fmt.Print` in
+`operator/internal` or `agent/internal`, and new code should not add one.
+
+```go
+// Good
+log.FromContext(ctx).Error(err, "Failed to list PodSnapshots", "pod", key)
+
+// Bad — no request context, invisible to log scraping
+fmt.Printf("failed to list PodSnapshots for %s: %v\n", key, err)
+```
+
+**Generate CRDs; never hand-edit them.** `verify-crds` diffs the two copies and
+fails on drift.
+
+```sh
+# Good — edit the Go types, then regenerate both copies
+vim api/v1alpha1/podsnapshot_types.go && make generate
+
+# Bad — the next `make generate` overwrites it and CI fails first
+vim charts/snapshot/crds/snapshot.nvidia.com_podsnapshots.yaml
+```
+
+**Pin base images by digest.** A tag is mutable, so the image that ships is
+whatever the registry served that day. Note that Docker resolves `tag@digest`
+by digest and never validates the tag against it — the two have to be updated
+together.
+
+```dockerfile
+# Good
+FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254
+
+# Bad — mutable tag
+FROM ubuntu:24.04
+```
+
+**Move the Go toolchain version everywhere at once.** It appears in `go.work`,
+all three `go.mod` files, `hack/tools.mk`, `agent/Dockerfile` and every
+workflow. Bumping one leaves the shipped binary built by a toolchain CI never
+validated, so `.github/dependabot.yml` ignores major and minor updates to the
+`golang` image specifically to stop that happening automatically.
+
+```sh
+# Good — one change, all of them
+rg -l '1\.27\.1' go.work */go.mod hack/tools.mk agent/Dockerfile .github/workflows
+
+# Bad — the operator builds on a toolchain nothing else agrees with
+vim operator/Dockerfile   # FROM golang:1.28-alpine
+```
+
 ## Secrets and credentials
 
 **Never commit credentials, secrets, API keys, tokens, kubeconfigs, or `.env`
