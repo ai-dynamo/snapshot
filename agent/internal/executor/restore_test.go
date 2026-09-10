@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -228,10 +229,12 @@ func TestRestoreDeferredCUDAProcessesResolvesAndValidatesHostIdentity(t *testing
 	originalRead := readRestoredHostProcessTable
 	originalValidate := validateRestoredProcessIdentity
 	originalRestore := restoreAndUnlockCUDAProcessTree
+	originalCuinterpose := restoreCuinterposeFromHost
 	t.Cleanup(func() {
 		readRestoredHostProcessTable = originalRead
 		validateRestoredProcessIdentity = originalValidate
 		restoreAndUnlockCUDAProcessTree = originalRestore
+		restoreCuinterposeFromHost = originalCuinterpose
 	})
 
 	readRestoredHostProcessTable = func(procRoot string) ([]snapshotruntime.ProcessDetails, error) {
@@ -249,7 +252,7 @@ func TestRestoreDeferredCUDAProcessesResolvesAndValidatesHostIdentity(t *testing
 		validated = true
 		return nil
 	}
-	restored := false
+	order := make([]string, 0, 2)
 	restoreAndUnlockCUDAProcessTree = func(
 		ctx context.Context,
 		processes []snapshotruntime.ProcessDetails,
@@ -267,11 +270,28 @@ func TestRestoreDeferredCUDAProcessesResolvesAndValidatesHostIdentity(t *testing
 		if len(targetGPUUUIDs) != 1 || targetGPUUUIDs[0] != "GPU-target" {
 			t.Fatalf("target GPU UUIDs = %v", targetGPUUUIDs)
 		}
-		restored = true
+		order = append(order, "cuda")
 		return cuda.RestorePhaseTimings{TotalDuration: 250 * time.Millisecond}, nil
 	}
+	restoreCuinterposeFromHost = func(
+		ctx context.Context, checkpointDir, procRoot string, observedPIDs, namespacePIDs []int,
+		binary string, _ logr.Logger,
+	) ([]cuda.CoordinatorPhase, error) {
+		if procRoot != snapshotruntime.HostProcPath || len(observedPIDs) != 1 || observedPIDs[0] != hostProcess.ObservedPID {
+			t.Fatalf("cuinterpose host args = proc root %q, observed PIDs %v", procRoot, observedPIDs)
+		}
+		if len(namespacePIDs) != 1 || namespacePIDs[0] != 7 || binary != cuda.DefaultCoordinatorBinaryPath {
+			t.Fatalf("cuinterpose namespace PIDs %v, binary %q", namespacePIDs, binary)
+		}
+		order = append(order, "cuinterpose")
+		return nil, nil
+	}
 
-	duration, err := restoreDeferredCUDAProcesses(
+	manifest := &types.CheckpointManifest{
+		CUDA:        types.NewCUDAManifest([]int{7}, []string{"GPU-source"}, types.CUDAStorageModePOSIX),
+		Cuinterpose: types.CuinterposeManifest{Prepared: true},
+	}
+	duration, _, err := restoreDeferredCUDAProcesses(
 		context.Background(),
 		[]snapshotruntime.ProcessDetails{namespaceProcess},
 		&types.RestoreContainerSnapshot{
@@ -279,6 +299,7 @@ func TestRestoreDeferredCUDAProcessesResolvesAndValidatesHostIdentity(t *testing
 			CUDAStorageMode: types.CUDAStorageModePOSIX,
 			TargetGPUUUIDs:  []string{"GPU-target"},
 		},
+		manifest,
 		t.TempDir(),
 		types.CUDATransferSettings{},
 		testr.New(t),
@@ -286,8 +307,8 @@ func TestRestoreDeferredCUDAProcessesResolvesAndValidatesHostIdentity(t *testing
 	if err != nil {
 		t.Fatalf("restoreDeferredCUDAProcesses: %v", err)
 	}
-	if !validated || !restored {
-		t.Fatalf("validated = %t, restored = %t; want both true", validated, restored)
+	if !validated || !slices.Equal(order, []string{"cuda", "cuinterpose"}) {
+		t.Fatalf("validated = %t, order = %v; want CUDA before cuinterpose", validated, order)
 	}
 	if duration != 250*time.Millisecond {
 		t.Fatalf("duration = %s, want 250ms", duration)

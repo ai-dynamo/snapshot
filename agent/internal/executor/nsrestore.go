@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -168,17 +167,10 @@ func executeRestore(
 		}
 	}()
 
-	var coordinatorFdPath string
 	if m.Cuinterpose.Prepared {
 		if err := requireCuinterposeState(m, opts.CheckpointPath); err != nil {
 			return nil, 0, nil, err
 		}
-		coordinator, err := os.Open(filepath.Join(opts.BundleDir, cuda.CoordinatorBinaryName))
-		if err != nil {
-			return nil, 0, nil, fmt.Errorf("failed to open %s before CRIU restore: %w", cuda.CoordinatorBinaryName, err)
-		}
-		defer coordinator.Close()
-		coordinatorFdPath = fmt.Sprintf("/proc/self/fd/%d", coordinator.Fd())
 	}
 
 	// The restore-complete sentinel lives on the pod emptyDir mounted at
@@ -271,18 +263,6 @@ func executeRestore(
 				return nil, 0, nil, fmt.Errorf("capture restored CUDA process identity for PID %d: %w", pid, err)
 			}
 			timings.deferredCUDAProcesses = append(timings.deferredCUDAProcesses, process)
-		}
-		if m.Cuinterpose.Prepared {
-			// The driver is unlocked so the shims can issue CUDA calls, but the
-			// application itself is still parked in its restore-complete poll
-			// loop, so nothing else touches the shared memory while the
-			// coordinator rebuilds it.
-			cuinterposeStart := time.Now()
-			_, err := cuda.RestoreCuinterpose(ctx, opts.CheckpointPath, restorePIDs, m.CUDA.PIDs, coordinatorFdPath, log)
-			timings.cuinterposeRestoreDuration = time.Since(cuinterposeStart)
-			if err != nil {
-				return nil, 0, nil, fmt.Errorf("restore cuinterpose: %w", err)
-			}
 		}
 	}
 
