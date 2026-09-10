@@ -45,16 +45,15 @@ func CheckpointNeedsSourceKill(err error) bool {
 
 // CheckpointRequest holds the content-owned inputs for a checkpoint operation.
 type CheckpointRequest struct {
-	ContainerID         string
-	ContainerName       string
-	ContentUID          string
-	StartedAt           time.Time
-	NodeName            string
-	PodName             string
-	PodNamespace        string
-	PodIP               string
-	Clientset           kubernetes.Interface
-	PageBrokerRequested bool
+	ContainerID   string
+	ContainerName string
+	ContentUID    string
+	StartedAt     time.Time
+	NodeName      string
+	PodName       string
+	PodNamespace  string
+	PodIP         string
+	Clientset     kubernetes.Interface
 }
 
 type checkpointPhaseTimings struct {
@@ -63,11 +62,8 @@ type checkpointPhaseTimings struct {
 	OverlayCaptureDuration time.Duration
 }
 
-// Checkpoint performs a CRIU dump of a container.
-//
-// The checkpoint directory is staged under the content-owned .tmp directory.
-// On success, the previous checkpoint is removed and the staged directory is
-// renamed atomically into the content/container artifact path.
+// Checkpoint performs a CRIU dump of a container into a PageBroker staging
+// directory and commits it to the content/container artifact path.
 func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req CheckpointRequest, cfg *types.AgentConfig) (retErr error) {
 	checkpointStart := time.Now()
 	log.Info("=== Starting checkpoint operation ===")
@@ -76,44 +72,30 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	if err != nil {
 		return fmt.Errorf("resolve checkpoint artifact path: %w", err)
 	}
-	brokered := req.PageBrokerRequested && cfg.PageBroker.Enabled
 	transactionID := uuid.NewString()
-	var broker pagebroker.Client
-	committed := false
-	var tmpDir string
-	if brokered {
-		broker = pagebroker.Client{ControlSocketPath: cfg.PageBroker.ControlSocketPath}
-		defer func() {
-			if !committed {
-				abortCtx, cancel := context.WithTimeout(context.Background(), pageBrokerAbortTimeout)
-				defer cancel()
-				if err := broker.Abort(abortCtx, transactionID); err != nil {
-					retErr = errors.Join(retErr, fmt.Errorf("abort PageBroker checkpoint %q: %w", transactionID, err))
-				}
-			}
-		}()
-		var err error
-		tmpDir, err = broker.PrepareCheckpoint(ctx, transactionID, finalDir)
-		if err != nil {
-			return fmt.Errorf("prepare PageBroker checkpoint: %w", err)
+	broker := pagebroker.Client{ControlSocketPath: cfg.PageBroker.ControlSocketPath}
+	abort := func() error {
+		abortCtx, cancel := context.WithTimeout(context.Background(), pageBrokerAbortTimeout)
+		defer cancel()
+		if err := broker.Abort(abortCtx, transactionID); err != nil {
+			return fmt.Errorf("abort PageBroker checkpoint %q: %w", transactionID, err)
 		}
-	} else {
-		tmpRoot, err := nsmount.ResolveArtifactStagingRoot(cfg.Storage.BasePath, req.ContentUID)
-		if err != nil {
-			return fmt.Errorf("resolve checkpoint staging root: %w", err)
-		}
-		if err := os.MkdirAll(tmpRoot, 0700); err != nil {
-			return fmt.Errorf("failed to create checkpoint staging root: %w", err)
-		}
-		if err := os.MkdirAll(filepath.Dir(finalDir), 0700); err != nil {
-			return fmt.Errorf("failed to create checkpoint container root: %w", err)
-		}
-		tmpDir = filepath.Join(tmpRoot, transactionID)
-		if err := os.Mkdir(tmpDir, 0700); err != nil {
-			return fmt.Errorf("failed to create checkpoint staging directory: %w", err)
-		}
-		defer os.RemoveAll(tmpDir)
+		return nil
 	}
+	tmpDir, err := broker.PrepareCheckpoint(ctx, transactionID, finalDir)
+	if err != nil {
+		err = fmt.Errorf("prepare PageBroker checkpoint: %w", err)
+		if pagebroker.IsDialError(err) {
+			return err
+		}
+		return errors.Join(err, abort())
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			retErr = errors.Join(retErr, abort())
+		}
+	}()
 
 	state, gpuDeviceMapDuration, err := inspectContainer(ctx, rt, log, req)
 	if err != nil {
@@ -138,21 +120,10 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	}
 
 	switchStart := time.Now()
-	if brokered {
-		if err := broker.Commit(ctx, transactionID); err != nil {
-			return fmt.Errorf("commit PageBroker checkpoint: %w", err)
-		}
-		committed = true
-	} else {
-		// Remove any previous checkpoint with the same identity hash, then
-		// promote the staged checkpoint directory into place.
-		if err := os.RemoveAll(finalDir); err != nil {
-			return fmt.Errorf("failed to remove previous checkpoint directory: %w", err)
-		}
-		if err := os.Rename(tmpDir, finalDir); err != nil {
-			return fmt.Errorf("failed to finalize checkpoint directory: %w", err)
-		}
+	if err := broker.Commit(ctx, transactionID); err != nil {
+		return fmt.Errorf("commit PageBroker checkpoint: %w", err)
 	}
+	committed = true
 	switchDuration := time.Since(switchStart)
 
 	wall := time.Since(checkpointStart)

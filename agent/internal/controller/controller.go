@@ -871,8 +871,6 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (int, error) {
 		ArtifactContainerName:       op.artifact.SourceContainerName,
 		DestinationContainerName:    op.destination,
 		Clientset:                   w.clientset,
-		PageBrokerRequested:         op.pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] == snapshotv1alpha1.PageBrokerAnnotationEnabled,
-		PageBrokerEnabled:           w.config.PageBroker.Enabled,
 		PageBrokerControlSocketPath: w.config.PageBroker.ControlSocketPath,
 	}
 	return w.restoreFn(ctx, w.runtime, op.log, req, w.injector)

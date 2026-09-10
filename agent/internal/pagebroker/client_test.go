@@ -60,6 +60,63 @@ func TestRequestStopsWhenContextIsCanceled(t *testing.T) {
 	}
 }
 
+func TestRequestWaitsForSocketToAppear(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "pagebroker.sock")
+	result := make(chan error, 1)
+	go func() {
+		result <- (Client{ControlSocketPath: socketPath}).Abort(context.Background(), "transaction")
+	}()
+
+	time.Sleep(300 * time.Millisecond)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	connection, err := listener.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	message, err := readMessage(connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := new(Request)
+	if err := proto.Unmarshal(message, request); err != nil {
+		t.Fatal(err)
+	}
+	message, err = proto.Marshal(&Response{
+		RequestId:     request.RequestId,
+		TransactionId: request.TransactionId,
+		Result:        &Response_AbortComplete{AbortComplete: &AbortComplete{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMessage(connection, message); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-result; err != nil {
+		t.Fatalf("Abort() = %v, want success after the socket appeared", err)
+	}
+}
+
+func TestRequestStopsWaitingForSocketWhenContextExpires(t *testing.T) {
+	const limit = 200 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	defer cancel()
+
+	start := time.Now()
+	err := (Client{ControlSocketPath: filepath.Join(t.TempDir(), "missing.sock")}).Abort(ctx, "transaction")
+	if !isTransportError(err) || !IsDialError(err) {
+		t.Fatalf("Abort() error = %v, want dial transport error", err)
+	}
+	if elapsed := time.Since(start); elapsed < limit || elapsed > 5*time.Second {
+		t.Fatalf("Abort() returned after %v, want about %v", elapsed, limit)
+	}
+}
+
 func TestCommitRetriesLostResponses(t *testing.T) {
 	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "pagebroker.sock"))
 	if err != nil {
@@ -127,9 +184,8 @@ func TestCommitRetriesLostResponses(t *testing.T) {
 }
 
 func TestCommitStopsWhenRetryResponseHangs(t *testing.T) {
-	previousLimit := commitRetryLimit
-	commitRetryLimit = 200 * time.Millisecond
-	t.Cleanup(func() { commitRetryLimit = previousLimit })
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
 
 	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "pagebroker.sock"))
 	if err != nil {
@@ -150,7 +206,7 @@ func TestCommitStopsWhenRetryResponseHangs(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		result <- (Client{ControlSocketPath: listener.Addr().String()}).Commit(context.Background(), "transaction")
+		result <- (Client{ControlSocketPath: listener.Addr().String()}).Commit(ctx, "transaction")
 	}()
 
 	first := <-accepted
@@ -164,8 +220,8 @@ func TestCommitStopsWhenRetryResponseHangs(t *testing.T) {
 	if _, err := readMessage(second); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-result; !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Commit() error = %v, want retry deadline", err)
+	if err := <-result; !errors.Is(err, context.DeadlineExceeded) || IsDialError(err) {
+		t.Fatalf("Commit() error = %v, want retry deadline after a lost response", err)
 	}
 	if _, err := readMessage(second); err == nil {
 		t.Fatal("retry connection did not close")

@@ -57,7 +57,7 @@ func TestExecMounterMountArgs(t *testing.T) {
 	}
 	defer nsFd.Close()
 
-	handle, err := m.MountCheckpoint(context.Background(), nsFd, "/checkpoints/abc/versions/1")
+	handle, err := m.MountPageBroker(context.Background(), nsFd, "/pagebroker/staging/restore/tx-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestExecMounterMountArgs(t *testing.T) {
 			t.Errorf("Unmount: %v", err)
 		}
 	})
-	want := []string{"mount-checkpoint-fd", fmt.Sprintf("%d", nsFdChildNum), "/checkpoints/abc/versions/1"}
+	want := []string{"mount-pagebroker-fd", fmt.Sprintf("%d", nsFdChildNum), "/pagebroker/staging/restore/tx-1"}
 	got := readLines(t, logFile)
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("args = %v, want %v", got, want)
@@ -80,18 +80,18 @@ func TestExecMounterMountErrorWrapped(t *testing.T) {
 		t.Fatal(openErr)
 	}
 	defer nsFd.Close()
-	_, err := newMounterForTest(t, bin).MountCheckpoint(context.Background(), nsFd, "/checkpoints/abc/versions/1")
+	_, err := newMounterForTest(t, bin).MountPageBroker(context.Background(), nsFd, "/pagebroker/staging/restore/tx-1")
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	for _, want := range []string{"mount-checkpoint-fd", "subprocess boom"} {
+	for _, want := range []string{"mount-pagebroker-fd", "subprocess boom"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error missing %q: %v", want, err)
 		}
 	}
 }
 
-func TestExecMounterCheckpointUsesPinnedBundleNamespace(t *testing.T) {
+func TestExecMounterPageBrokerUsesPinnedBundleNamespace(t *testing.T) {
 	logFile := filepath.Join(t.TempDir(), "namespaces.log")
 	bin := writeFakeBinary(t, `printf '%s %s\n' "$1" "$(readlink /proc/self/fd/$2)" >> `+logFile)
 	m := newMounterForTest(t, bin)
@@ -105,27 +105,27 @@ func TestExecMounterCheckpointUsesPinnedBundleNamespace(t *testing.T) {
 			t.Errorf("unmount bundle: %v", err)
 		}
 	})
-	checkpoint, err := m.MountCheckpoint(context.Background(), bundle.NsFd(), "/checkpoints/abc/versions/1")
+	staging, err := m.MountPageBroker(context.Background(), bundle.NsFd(), "/pagebroker/staging/restore/tx-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := checkpoint.Unmount(context.Background()); err != nil {
-			t.Errorf("unmount checkpoint: %v", err)
+		if err := staging.Unmount(context.Background()); err != nil {
+			t.Errorf("unmount staging: %v", err)
 		}
 	})
 
 	lines := readLines(t, logFile)
 	if len(lines) != 2 {
-		t.Fatalf("mount helper calls = %v, want bundle and checkpoint", lines)
+		t.Fatalf("mount helper calls = %v, want bundle and staging", lines)
 	}
 	bundleFields := strings.Fields(lines[0])
-	checkpointFields := strings.Fields(lines[1])
-	if len(bundleFields) != 2 || len(checkpointFields) != 2 {
+	stagingFields := strings.Fields(lines[1])
+	if len(bundleFields) != 2 || len(stagingFields) != 2 {
 		t.Fatalf("unexpected mount helper output: %v", lines)
 	}
-	if bundleFields[1] != checkpointFields[1] {
-		t.Fatalf("namespace fds resolve to %q and %q, want the same namespace", bundleFields[1], checkpointFields[1])
+	if bundleFields[1] != stagingFields[1] {
+		t.Fatalf("namespace fds resolve to %q and %q, want the same namespace", bundleFields[1], stagingFields[1])
 	}
 }
 
@@ -169,15 +169,17 @@ func TestCHelperRejectsUnsafeSourcesBeforeMountSyscalls(t *testing.T) {
 	}{
 		{name: "outside root", source: "/etc"},
 		{name: "proc", source: "/proc"},
-		{name: "sibling prefix", source: "/checkpoints-other/id"},
-		{name: "traversal", source: "/checkpoints/../etc"},
-		{name: "repeated separator", source: "/checkpoints//id"},
-		{name: "whitespace", source: "/checkpoints/bad id"},
-		{name: "shell punctuation", source: "/checkpoints/bad;id"},
-		{name: "unicode", source: "/checkpoints/é"},
+		{name: "checkpoint pvc", source: "/checkpoints/artifacts/id/containers/main"},
+		{name: "checkpoint staging", source: "/pagebroker/staging/checkpoint/id"},
+		{name: "sibling prefix", source: "/pagebroker/staging/restore-other/id"},
+		{name: "traversal", source: "/pagebroker/staging/restore/../etc"},
+		{name: "repeated separator", source: "/pagebroker/staging/restore//id"},
+		{name: "whitespace", source: "/pagebroker/staging/restore/bad id"},
+		{name: "shell punctuation", source: "/pagebroker/staging/restore/bad;id"},
+		{name: "unicode", source: "/pagebroker/staging/restore/é"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd := exec.Command(binary, "mount-checkpoint-fd", fmt.Sprintf("%d", nsFdChildNum), tc.source)
+			cmd := exec.Command(binary, "mount-pagebroker-fd", fmt.Sprintf("%d", nsFdChildNum), tc.source)
 			output, err := cmd.CombinedOutput()
 			if err == nil {
 				t.Fatalf("helper accepted source %q", tc.source)
@@ -189,9 +191,11 @@ func TestCHelperRejectsUnsafeSourcesBeforeMountSyscalls(t *testing.T) {
 	}
 
 	for _, args := range [][]string{
-		{"mount-fd", "3", "/etc", "/tmp/checkpoint"},
+		{"mount-fd", "3", "/etc", "/tmp/pagebroker"},
+		{"mount-checkpoint-fd", "3", "/checkpoints/artifacts/id/containers/main"},
 		{"mount-bundle-fd", "3", "/etc"},
-		{"unmount-checkpoint-fd", "3", "unexpected"},
+		{"unmount-checkpoint-fd", "3"},
+		{"unmount-pagebroker-fd", "3", "unexpected"},
 	} {
 		if output, err := exec.Command(binary, args...).CombinedOutput(); err == nil {
 			t.Fatalf("helper accepted %v: %s", args, output)
