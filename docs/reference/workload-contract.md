@@ -5,16 +5,18 @@ SPDX-License-Identifier: Apache-2.0
 
 # Workload contract
 
-Snapshot checkpoints a running GPU workload and restores it later. For that to be
-correct, the workload has to cooperate with the checkpoint/restore lifecycle:
-reach a state that is safe to capture, signal when it is there, and resume from
-the restored state on the other side. That cooperation — not any particular
-image — is the requirement. This page defines it.
+Snapshot checkpoints a running GPU workload and restores it later. Capturing a
+workload before it's ready produces a wrong, oversized, or unrestorable
+checkpoint, so the workload must cooperate with the checkpoint/restore
+lifecycle: reach a state that's safe to capture, signal when it does, and
+resume correctly once restored. That cooperation — not any particular image —
+is the requirement. This page defines it.
 
-Building a custom image is the *reference way to package* a compliant workload,
-and the [usage guides](../guides/README.md) use it because it is self-contained.
-It is one method, not the requirement: any packaging that makes the container's
-entrypoint satisfy this contract works.
+The [usage guides](../guides/README.md) package workloads as a self-contained
+custom image. Other packaging methods work too — for example mounting the
+entrypoint into a stock image and overriding the command — as long as the
+container's entrypoint satisfies this contract; see
+[Packaging methods](#packaging-methods).
 
 A snapshot-ready workload has two parts:
 
@@ -100,13 +102,12 @@ workload useful and operable.
 
 ### Matching configuration, per-engine calls
 
-**MUST** keep the capture and restore processes configured identically — model,
-dtype, tensor-parallel size, engine sizing, and any loader flags that change what
-gets loaded or how (for example, vLLM's
-[`trust_remote_code`](https://docs.vllm.ai/en/v0.27.1/configuration/engine_args.html#-trust-remote-code-no-trust-remote-code),
-which permits executing a model repo's custom Python code during load). The
+**MUST** keep the capture and restore processes configured identically — the
 restored process *is* the captured process; a different configuration is
-undefined.
+undefined. This is easy to overlook for loader flags that change what gets
+loaded or how, for example vLLM's
+[`trust_remote_code`](https://docs.vllm.ai/en/v0.27.1/configuration/engine_args.html#-trust-remote-code-no-trust-remote-code),
+which permits executing a model repo's custom Python code during load.
 
 Steps 3-6 (capture: warm up, quiesce) and step 10 (restore: bring the engine
 back to serving) each break down into the same sub-requirements across
