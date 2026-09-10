@@ -537,7 +537,7 @@ COPY --from=cuda-helper-builder /cuinterpose-build/libcuinterpose.so /snapshot-b
 COPY --from=cuda-helper-builder /cuinterpose-build/libcuinterpose.so /usr/local/lib/snapshot/libcuinterpose.so
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /snapshot-binaries/snapshot-cuda/cuda-checkpoint
 COPY --from=cuda-helper-builder /cuinterpose-build/cuinterpose-coordinator /snapshot-binaries/cuinterpose-coordinator
-RUN chmod 0644 /snapshot-binaries/snapshot-cuda/libcuinterpose.so \
+RUN chmod 0755 /snapshot-binaries/snapshot-cuda/libcuinterpose.so \
     && chmod +x /snapshot-binaries/snapshot-cuda/cuda-checkpoint
 
 # Network binaries needed during restore:
