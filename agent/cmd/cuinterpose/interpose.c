@@ -426,8 +426,7 @@ list_allocations(struct allocation_list* list)
 static bool
 needs_host_carrier(const struct allocation* allocation)
 {
-  return allocation->creator && allocation->properties.type == CU_MEM_ALLOCATION_TYPE_PINNED &&
-         allocation->properties.location.type == CU_MEM_LOCATION_TYPE_DEVICE;
+  return allocation->creator && allocation->properties.type == CU_MEM_ALLOCATION_TYPE_PINNED;
 }
 
 static struct cuinterpose_record*
@@ -982,21 +981,6 @@ restore_host_carriers(uint64_t* bytes, uint32_t* copy_us, const char** error)
         fresh[index] = 0;
         *error = "cannot create fresh device memory for a creator allocation";
         goto done;
-      }
-      if (fresh[index] == 0) {
-        CUmemGenericAllocationHandle replacement = 0;
-
-        /* The shim reserves zero as its absent-handle sentinel, but r615 can
-         * return it as a valid first handle after process restore. Keep that
-         * allocation live while asking the driver for a distinct handle. */
-        if (create(&replacement, list.items[index]->size, &list.items[index]->properties, 0) != CUDA_SUCCESS ||
-            replacement == 0 || release(fresh[index]) != CUDA_SUCCESS) {
-          if (replacement != 0)
-            (void)release(replacement);
-          *error = "cannot replace a zero-valued restored allocation handle";
-          goto done;
-        }
-        fresh[index] = replacement;
       }
     }
     if (map_staging_range(&list.items[begin], &fresh[begin], end - begin, batch_bytes, &range) != CUDA_SUCCESS) {
