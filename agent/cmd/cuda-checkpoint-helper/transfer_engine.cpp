@@ -5,6 +5,8 @@
 
 #include "transfer_engine.h"
 
+#include "zero_detection.h"
+
 #include <fcntl.h>
 #include <nixl.h>
 #include <nixl_descriptors.h>
@@ -494,6 +496,7 @@ bool TransferPipeline(const std::vector<TransferChunk> &chunks,
         }
         break;
       }
+      metrics->storage_bytes += chunk.size;
       metrics->files[chunk.file_index].bytes += chunk.size;
       if (cancellation != nullptr && cancellation->IsCancelled()) {
         *error = "transfer canceled after another extent failed";
@@ -551,10 +554,12 @@ bool TransferPipeline(const std::vector<TransferChunk> &chunks,
       }
       const auto storage_start = Clock::now();
       std::string transfer_error;
+      const bool all_zero = AllBytesZero(slot->data(), chunk.size);
       const bool transferred =
-          NixlTransfer(agent, agent_name, NIXL_WRITE, slot->data(),
-                       files[chunk.file_index].get(), chunk.file_offset,
-                       chunk.size, cancellation, &transfer_error);
+          all_zero || NixlTransfer(agent, agent_name, NIXL_WRITE, slot->data(),
+                                   files[chunk.file_index].get(),
+                                   chunk.file_offset, chunk.size, cancellation,
+                                   &transfer_error);
       const double storage_seconds = ElapsedSeconds(storage_start);
       metrics->storage_seconds += storage_seconds;
       metrics->files[chunk.file_index].storage_seconds += storage_seconds;
@@ -567,7 +572,12 @@ bool TransferPipeline(const std::vector<TransferChunk> &chunks,
         }
         break;
       }
-      metrics->files[chunk.file_index].bytes += chunk.size;
+      if (all_zero) {
+        metrics->zero_bytes_skipped += chunk.size;
+      } else {
+        metrics->storage_bytes += chunk.size;
+        metrics->files[chunk.file_index].bytes += chunk.size;
+      }
       if (next_chunk < chunks.size()) {
         const auto &next = chunks[next_chunk];
         if (next.slot_index != chunk.slot_index) {

@@ -24,6 +24,8 @@ struct StorageFileMetrics {
 
 struct TransferMetrics {
   size_t bytes = 0;
+  size_t storage_bytes = 0;
+  size_t zero_bytes_skipped = 0;
   double setup_seconds = 0.0;
   double pipeline_seconds = 0.0;
   double storage_seconds = 0.0;

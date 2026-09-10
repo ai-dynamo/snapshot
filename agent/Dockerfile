@@ -313,6 +313,8 @@ COPY cmd/cuda-checkpoint-helper/transfer_backend_unavailable.cpp ./cmd/cuda-chec
 COPY cmd/cuda-checkpoint-helper/transfer_scheduler_test.cpp ./cmd/cuda-checkpoint-helper/transfer_scheduler_test.cpp
 COPY cmd/cuda-checkpoint-helper/restore_batch_order.h ./cmd/cuda-checkpoint-helper/restore_batch_order.h
 COPY cmd/cuda-checkpoint-helper/restore_batch_order_test.cpp ./cmd/cuda-checkpoint-helper/restore_batch_order_test.cpp
+COPY cmd/cuda-checkpoint-helper/zero_detection.h ./cmd/cuda-checkpoint-helper/zero_detection.h
+COPY cmd/cuda-checkpoint-helper/zero_detection_test.cpp ./cmd/cuda-checkpoint-helper/zero_detection_test.cpp
 COPY cmd/ns-bind-mount/main.c ./cmd/ns-bind-mount/main.c
 COPY cmd/cuinterpose/ ./cmd/cuinterpose/
 
@@ -382,6 +384,11 @@ RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
       -o /cuda-checkpoint-helper-restore-batch-order-test \
       ./cmd/cuda-checkpoint-helper/restore_batch_order_test.cpp \
     && /cuda-checkpoint-helper-restore-batch-order-test
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+      -o /cuda-checkpoint-helper-zero-detection-test \
+      ./cmd/cuda-checkpoint-helper/zero_detection_test.cpp \
+    && /cuda-checkpoint-helper-zero-detection-test
 
 # ns-bind-mount bind-mounts the snapshot binaries into a target container's mount
 # namespace. It needs no CUDA headers, only mount_setattr (Linux 5.12+).
