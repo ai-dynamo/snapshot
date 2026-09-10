@@ -24,6 +24,8 @@ from snapshot_e2e.benchmark import (
     SCHEMA_VERSION,
     TEST_TOTAL,
     VALID_OUTCOMES,
+    format_timestamp,
+    source_from_environment,
 )
 
 
@@ -133,10 +135,10 @@ def validate_result(value: object, *, origin: str = "benchmark result") -> dict[
         normalized = json.loads(json.dumps(result, allow_nan=False))
     except (TypeError, ValueError) as exc:
         raise ResultValidationError(f"{origin} is not valid JSON: {exc}") from exc
-    normalized["startedAt"] = _timestamp(started)
-    normalized["finishedAt"] = _timestamp(finished)
+    normalized["startedAt"] = format_timestamp(started)
+    normalized["finishedAt"] = format_timestamp(finished)
     for event, original in zip(normalized["events"], events, strict=True):
-        event["timestamp"] = _timestamp(
+        event["timestamp"] = format_timestamp(
             _parse_timestamp(original["timestamp"], f"{origin}.events.timestamp")
         )
     return normalized
@@ -172,7 +174,13 @@ def collect_current_results(
     generated_at: datetime,
     source: Mapping[str, Any],
 ) -> Collection:
-    """Collect one valid result per expected case and make failures explicit."""
+    """Collect one valid result per expected case and make failures explicit.
+
+    Results from earlier attempts of the same workflow run are accepted, and
+    the newest attempt wins per case: "Re-run failed jobs" re-executes only the
+    failed matrix jobs, so a passing framework's result stays in its original
+    attempt's artifact and must not be mistaken for a missing one.
+    """
     expected = list(dict.fromkeys(expected_cases))
     if not expected:
         raise ValueError("at least one expected benchmark case is required")
@@ -186,16 +194,13 @@ def collect_current_results(
             warnings.append(str(exc))
             continue
         identity = result["identity"]
-        actual = (
-            str(identity["suite"]),
-            str(identity["test"]),
-            str(identity["runId"]),
-            int(identity["runAttempt"]),
-        )
-        wanted = (suite, test, run_id, run_attempt)
-        if actual != wanted:
+        actual = (str(identity["suite"]), str(identity["test"]), str(identity["runId"]))
+        wanted = (suite, test, run_id)
+        attempt = int(identity["runAttempt"])
+        if actual != wanted or attempt > run_attempt:
             warnings.append(
-                f"ignored {path}: identity {actual!r} does not match current run {wanted!r}"
+                f"ignored {path}: identity {actual + (attempt,)!r} does not belong to "
+                f"run {wanted!r} attempt <= {run_attempt}"
             )
             continue
         case = str(identity["case"])
@@ -204,10 +209,28 @@ def collect_current_results(
             continue
         previous = found.get(case)
         if previous is not None:
-            if _canonical_json(previous) != _canonical_json(result):
-                warnings.append(f"ignored duplicate, conflicting result for case {case!r}: {path}")
-            continue
+            previous_attempt = int(previous["identity"]["runAttempt"])
+            if attempt < previous_attempt:
+                continue
+            if attempt == previous_attempt:
+                if _canonical_json(previous) != _canonical_json(result):
+                    warnings.append(
+                        f"ignored duplicate, conflicting result for case {case!r}: {path}"
+                    )
+                continue
         found[case] = result
+
+    sibling_tag = next(
+        (
+            item["source"]["snapshotTag"]
+            for item in found.values()
+            if isinstance(item.get("source"), Mapping) and item["source"].get("snapshotTag")
+        ),
+        None,
+    )
+    synthesized_source = dict(source)
+    if not synthesized_source.get("snapshotTag") and sibling_tag:
+        synthesized_source["snapshotTag"] = sibling_tag
 
     results: list[dict[str, Any]] = []
     for case in expected:
@@ -223,7 +246,7 @@ def collect_current_results(
                 run_id=run_id,
                 run_attempt=run_attempt,
                 generated_at=generated_at,
-                source=source,
+                source=synthesized_source,
                 message=detail,
             )
         results.append(result)
@@ -241,7 +264,7 @@ def synthesize_missing_result(
     source: Mapping[str, Any],
     message: str,
 ) -> dict[str, Any]:
-    timestamp = _timestamp(generated_at)
+    timestamp = format_timestamp(generated_at)
     return validate_result(
         {
             "schemaVersion": SCHEMA_VERSION,
@@ -357,7 +380,13 @@ def rebuild_indexes(
         path = history_dir / relative
         wanted_paths.add(path)
         lines = [
-            _canonical_json({"rawPath": item.raw_path, "result": item.result})
+            _canonical_json(
+                {
+                    "rawPath": item.raw_path,
+                    "comparisonKey": comparison_key(item.result),
+                    "result": item.result,
+                }
+            )
             for item in items
         ]
         _write_text_atomic(path, "\n".join(lines) + "\n")
@@ -387,8 +416,21 @@ def rebuild_indexes(
     return manifest
 
 
+def comparison_key(result: Mapping[str, Any]) -> str:
+    """Canonical string form of the comparison dimensions.
+
+    Written into every monthly index line so readers in other languages group
+    results by this exact string instead of re-deriving the dimensions.
+    """
+    return _canonical_json(comparison_dimensions(result))
+
+
 def comparison_dimensions(result: Mapping[str, Any]) -> dict[str, Any]:
-    """Return stable environment dimensions which can materially affect timing."""
+    """Return stable environment dimensions which can materially affect timing.
+
+    The resolved image digest is preferred over the tag so a re-pushed tag
+    starts a new baseline while a re-tagged identical image does not.
+    """
     identity = result["identity"]
     environment = result.get("environment", {})
     storage_value = environment.get("storage")
@@ -407,7 +449,9 @@ def comparison_dimensions(result: Mapping[str, Any]) -> dict[str, Any]:
         "test": identity["test"],
         "sourceGpuModels": source_gpu_models,
         "restoreGpuModels": restore_gpu_models,
-        "frameworkImage": environment.get("frameworkImage"),
+        "frameworkImage": (
+            environment.get("frameworkImageDigest") or environment.get("frameworkImage")
+        ),
         "model": environment.get("model"),
         "storage": {
             "storageClass": storage.get(
@@ -524,7 +568,7 @@ def aggregate(
     ]
     output = {
         "formatVersion": HISTORY_FORMAT_VERSION,
-        "generatedAt": _timestamp(generated_at),
+        "generatedAt": format_timestamp(generated_at),
         "published": publish,
         "collectionWarnings": collection.warnings,
         "benchmarks": compared,
@@ -607,20 +651,6 @@ def _history_from_cli(path: Path) -> Path:
     return path
 
 
-def _source_from_environment(run_id: str) -> dict[str, Any]:
-    server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
-    repository = os.environ.get("GITHUB_REPOSITORY", "")
-    return {
-        "commit": os.environ.get("GITHUB_SHA"),
-        "ref": os.environ.get("GITHUB_REF"),
-        "event": os.environ.get("GITHUB_EVENT_NAME", "local"),
-        "runUrl": (
-            f"{server}/{repository}/actions/runs/{run_id}" if repository else None
-        ),
-        "snapshotTag": os.environ.get("SNAPSHOT_E2E_SNAPSHOT_TAG"),
-    }
-
-
 def _parse_cli_timestamp(value: str | None) -> datetime:
     if value is None:
         return datetime.now(timezone.utc)
@@ -673,7 +703,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_id=str(args.run_id),
         run_attempt=int(args.run_attempt),
         generated_at=generated_at,
-        source=_source_from_environment(str(args.run_id)),
+        source=source_from_environment(str(args.run_id)),
         publish=bool(args.publish),
     )
     summary = render_summary(output)
@@ -725,14 +755,6 @@ def _parse_timestamp(value: object, location: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _timestamp(value: datetime) -> str:
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace(
-        "+00:00", "Z"
-    )
-
-
 def _canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
@@ -754,8 +776,17 @@ def _write_text_atomic(path: Path, value: str) -> None:
         "w", encoding="utf-8", dir=path.parent, delete=False
     ) as handle:
         temporary = Path(handle.name)
-        handle.write(value)
-    os.replace(temporary, path)
+        try:
+            handle.write(value)
+        except BaseException:
+            handle.close()
+            temporary.unlink(missing_ok=True)
+            raise
+    try:
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def _stored_sort_key(item: StoredResult) -> tuple[datetime, str, int, str, str, str]:

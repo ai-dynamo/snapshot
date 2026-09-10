@@ -479,43 +479,28 @@ jobs:
         with:
           persist-credentials: false
 
+      # All attempts of this run: "Re-run failed jobs" re-executes only the
+      # failed matrix jobs, so the passing frameworks' results still live in
+      # the earlier attempt's artifacts.
       - name: Download framework benchmark results
         continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          pattern: e2e-framework-benchmark-*-${{ github.run_id }}-${{ github.run_attempt }}
+          pattern: e2e-framework-benchmark-*-${{ github.run_id }}-*
           path: ${{ runner.temp }}/e2e-framework-benchmark-results
           merge-multiple: true
 
       - name: Fetch benchmark history
-        run: |
-          set -euo pipefail
-          history_dir="${RUNNER_TEMP}/e2e-framework-benchmark-history"
-          mkdir -p "${history_dir}"
-          git -C "${history_dir}" init --quiet --initial-branch=e2e-benchmark-history
-          git -C "${history_dir}" remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          set +e
-          git -C "${history_dir}" ls-remote --quiet --exit-code --heads origin e2e-benchmark-history >/dev/null
-          history_status=$?
-          set -e
-          case "${history_status}" in
-            0)
-              git -C "${history_dir}" fetch --quiet --depth=1 origin refs/heads/e2e-benchmark-history
-              git -C "${history_dir}" checkout --quiet -B e2e-benchmark-history FETCH_HEAD
-              ;;
-            2)
-              echo "::notice::No e2e-benchmark-history branch exists yet; comparisons will have no baseline."
-              ;;
-            *)
-              echo "::error::Could not inspect the e2e-benchmark-history branch."
-              exit "${history_status}"
-              ;;
-          esac
-          echo "SNAPSHOT_E2E_HISTORY_DIR=${history_dir}" >> "${GITHUB_ENV}"
+        id: history
+        uses: ./.github/actions/fetch-benchmark-history
+        with:
+          token: ${{ github.token }}
 
       - name: Compare benchmark results
         env:
           SELECTED_FRAMEWORK: ${{ inputs.framework || 'all' }}
+          SNAPSHOT_E2E_HISTORY_DIR: ${{ steps.history.outputs.history_dir }}
+          SNAPSHOT_E2E_SNAPSHOT_TAG: ${{ inputs.snapshot_tag || '' }}
         run: |
           set -euo pipefail
           cases=()
@@ -538,7 +523,7 @@ jobs:
       - name: Upload benchmark comparison
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: e2e-framework-benchmark-comparison-${{ github.run_id }}-${{ github.run_attempt }}
+          name: e2e-benchmark-comparison-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/e2e-framework-benchmark-comparison
           if-no-files-found: error
           retention-days: 30
@@ -567,39 +552,23 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          pattern: e2e-framework-benchmark-*-${{ github.run_id }}-${{ github.run_attempt }}
+          pattern: e2e-framework-benchmark-*-${{ github.run_id }}-*
           path: ${{ runner.temp }}/e2e-framework-benchmark-results
           merge-multiple: true
 
       - name: Fetch or initialize benchmark history
-        run: |
-          set -euo pipefail
-          history_dir="${RUNNER_TEMP}/e2e-framework-benchmark-history"
-          mkdir -p "${history_dir}"
-          git -C "${history_dir}" init --quiet --initial-branch=e2e-benchmark-history
-          git -C "${history_dir}" remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          set +e
-          git -C "${history_dir}" ls-remote --quiet --exit-code --heads origin e2e-benchmark-history >/dev/null
-          history_status=$?
-          set -e
-          case "${history_status}" in
-            0)
-              git -C "${history_dir}" fetch --quiet --depth=1 origin refs/heads/e2e-benchmark-history
-              git -C "${history_dir}" checkout --quiet -B e2e-benchmark-history FETCH_HEAD
-              ;;
-            2)
-              echo "::notice::Bootstrapping the orphan e2e-benchmark-history branch."
-              ;;
-            *)
-              echo "::error::Could not inspect the e2e-benchmark-history branch."
-              exit "${history_status}"
-              ;;
-          esac
-          echo "SNAPSHOT_E2E_HISTORY_DIR=${history_dir}" >> "${GITHUB_ENV}"
+        id: history
+        uses: ./.github/actions/fetch-benchmark-history
+        with:
+          token: ${{ github.token }}
+          bootstrap: "true"
 
       - name: Aggregate and index benchmark results
+        env:
+          SNAPSHOT_E2E_HISTORY_DIR: ${{ steps.history.outputs.history_dir }}
         run: |
           set -euo pipefail
+          echo "SNAPSHOT_E2E_HISTORY_DIR=${SNAPSHOT_E2E_HISTORY_DIR}" >> "${GITHUB_ENV}"
           PYTHONPATH=e2e python3 -m snapshot_e2e.benchmark_history aggregate \
             --artifacts-dir "${RUNNER_TEMP}/e2e-framework-benchmark-results" \
             --history-dir "${SNAPSHOT_E2E_HISTORY_DIR}" \
@@ -611,8 +580,6 @@ jobs:
             --publish
 
       - name: Commit and push benchmark history
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           git -C "${SNAPSHOT_E2E_HISTORY_DIR}" config user.name "github-actions[bot]"
@@ -624,13 +591,12 @@ jobs:
           fi
           git -C "${SNAPSHOT_E2E_HISTORY_DIR}" commit --signoff \
             --message "data(e2e): record benchmark run ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          gh auth setup-git
           git -C "${SNAPSHOT_E2E_HISTORY_DIR}" push origin HEAD:refs/heads/e2e-benchmark-history
 
       - name: Upload benchmark comparison
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: e2e-framework-benchmark-comparison-${{ github.run_id }}-${{ github.run_attempt }}
+          name: e2e-benchmark-comparison-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/e2e-framework-benchmark-comparison
           if-no-files-found: error
           retention-days: 30

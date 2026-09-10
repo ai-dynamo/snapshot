@@ -257,13 +257,21 @@ GPU, storage, image-cache state, commit, outcome, and workflow links, is written
 to the GitHub Actions step summary and uploaded as another 30-day artifact.
 Failed and timed-out results remain visible but do not contribute values to a
 baseline. A missing or invalid matrix artifact becomes an explicit
-`infrastructure_failed` result instead of disappearing from history.
+`infrastructure_failed` result instead of disappearing from history. The
+aggregation reads the artifacts of every attempt of the workflow run and keeps
+the newest attempt per framework, so "Re-run failed jobs" does not turn the
+frameworks that already passed into missing artifacts. A synthesized result
+takes its Snapshot tag from a sibling framework result of the same run when the
+aggregation job itself does not know it.
 
 Only the scheduled workflow on `main` can publish. Pull-request mirror,
 ordinary branch, and manually dispatched runs use a separate read-only job and
-cannot mutate durable history. The publisher serializes updates, commits all
-frameworks from one workflow in one commit, and bootstraps the data-only orphan
-branch `e2e-benchmark-history` on its first successful invocation.
+cannot mutate durable history. Both jobs check the history branch out through
+the `.github/actions/fetch-benchmark-history` composite action, which uses the
+job's own token so it works for private repositories and GitHub Enterprise
+hosts. The publisher serializes updates, commits all frameworks from one
+workflow in one commit, and bootstraps the data-only orphan branch
+`e2e-benchmark-history` on its first successful invocation.
 
 Raw results are the source of truth. They are stored under:
 
@@ -272,16 +280,20 @@ results/v1/<suite>/<case>/<test>/<year>/<month>/<day>/<run-id>-<attempt>.json
 ```
 
 Derived monthly indexes live at `index/v1/<year>-<month>.ndjson`; the small
-`index/manifest.json` lists chunks newest-first. Identity is the GitHub run ID,
+`index/manifest.json` lists chunks newest-first. Every index line carries the
+raw path, the result, and a `comparisonKey`: the canonical JSON of the
+comparison dimensions below, so readers group compatible results by that
+string instead of re-deriving the rules. Identity is the GitHub run ID,
 attempt, suite, case, and test, so publishing the same attempt again recognizes
 the immutable record instead of duplicating it.
 
 Compatible baselines have the same suite, case, test, schema and benchmark
-versions, measurement unit, GPU models, framework image, model, storage
-configuration, model-cache mode, image-cache state, and GPU-monitoring mode.
-GPU UUID, node, Snapshot commit, and Snapshot image tag stay diagnostic: they
-do not split the baseline. Future suites can add stable suite-specific values
-under `environment.comparisonDimensions`.
+versions, measurement unit, GPU models, framework image (the resolved digest
+when the test recorded one, otherwise the tag), model, storage configuration,
+model-cache mode, image-cache state, and GPU-monitoring mode. GPU UUID, node,
+Snapshot commit, and Snapshot image tag stay diagnostic: they do not split the
+baseline. Future suites can add stable suite-specific values under
+`environment.comparisonDimensions`.
 
 The monthly indexes and manifest can be reconstructed from a checked-out
 history branch without modifying any raw result:
