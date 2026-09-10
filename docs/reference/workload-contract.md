@@ -98,8 +98,9 @@ workload useful and operable.
 
 **MUST** keep the capture and restore processes configured identically — model,
 dtype, tensor-parallel size, engine sizing, and any loader flags that change what
-gets loaded or how (for example, `trust_remote_code`, the HuggingFace
-`transformers`/`vllm` flag that allows loading a model's custom Python code). The
+gets loaded or how (for example, vLLM's
+[`trust_remote_code`](https://docs.vllm.ai/en/v0.27.1/configuration/engine_args.html#-trust-remote-code-no-trust-remote-code),
+which permits executing a model repo's custom Python code during load). The
 restored process *is* the captured process; a different configuration is
 undefined.
 
