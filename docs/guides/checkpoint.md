@@ -16,21 +16,31 @@ API as part of its control loop.
 
 - Snapshot is [installed](../operations/install.md) in the cluster.
 - The pod to checkpoint is a **snapshot-ready pod**, fully initialized (weights
-  loaded, kernels warmed up). A [snapshot-ready image](README.md) is necessary but
-  not sufficient — the pod spec itself must also carry what Snapshot relies on to
-  checkpoint it:
-  - the `/snapshot-control` volume mount, the control directory Snapshot signals
-    through;
-  - the `securityContext` (seccomp profile) that checkpointing requires;
-  - a readiness gate on `/snapshot-control/ready-for-snapshot`, so the pod reports
-    Ready only once it is safe to checkpoint;
-  - the `nvidia.com/snapshot-is-checkpoint-source: "true"` pod label.
+  loaded, kernels warmed up), that satisfies the
+  [workload contract](../reference/workload-contract.md). Packaging the workload
+  as a [custom image](README.md) is one way to meet the contract's lifecycle
+  protocol. What the pod spec must carry depends on which resource creates it:
+  - **`PodSnapshot`** targets a pod that already exists, so that pod's spec must
+    carry everything the contract requires on its own:
+    - the `/snapshot-control` volume mount, the control directory Snapshot
+      signals through;
+    - the `securityContext` (seccomp profile) that checkpointing requires;
+    - a readiness gate on `/snapshot-control/ready-for-snapshot`, so the pod
+      reports Ready only once it is safe to checkpoint;
+    - the `nvidia.com/snapshot-is-checkpoint-source: "true"` pod label.
+  - **`SnapshotJob`** creates the source pod itself, so the controller injects
+    the control volume and mount, the readiness probe, and the seccomp profile
+    into `spec.podTemplate` before creating the source Job. The `podTemplate`
+    only needs to supply the workload-specific container spec and lifecycle
+    behavior (image, command, how it signals readiness) — it doesn't need to
+    duplicate those controller-injected fields.
 
 The build-and-deploy guides include a complete, working example of such a pod for
 each framework — see the `deployment.yaml` referenced from the [vLLM](vllm.md),
 [SGLang](sglang.md), and [TensorRT-LLM](tensorrt-llm.md) guides. Use that pod spec
 as the reference: a `PodSnapshot` targets a pod deployed this way, and a
-`SnapshotJob`'s `podTemplate` must carry the same fields.
+`SnapshotJob`'s `podTemplate` can reuse the same container spec — the
+controller-injected fields don't need to be added manually.
 
 Set the namespace where the replica runs — the same one used to deploy it:
 
