@@ -86,21 +86,27 @@ workload useful and operable.
    entrypoint that initializes anyway starts a second, competing copy of the
    model in the same container.
 8. **MUST** wait for `restore-complete` before touching the engine.
-9. **MUST** rehydrate before serving, in order: restore GPU memory (wake), then
-   resume generation, then validate. Resuming generation before memory is mapped
-   runs against freed memory.
+9. **MUST** bring the engine back to a serving-ready state in this order: let
+   `cuda-checkpoint` restore GPU memory (CUDA contexts, streams, and device
+   allocations) before resuming generation, then validate the engine responds
+   correctly before serving traffic. Resuming generation before GPU memory is
+   restored runs against freed memory.
 10. **SHOULD** write the `<framework>-restore-ready` sentinel only after the API
     socket is actually listening, so readiness reflects true serving capacity.
 
 ### Config parity and mechanism
 
 **MUST** keep the capture and restore processes configured identically — model,
-dtype, tensor-parallel size, `trust_remote_code`, and engine sizing. The restored
-process *is* the captured process; a different configuration is undefined.
+dtype, tensor-parallel size, engine sizing, and any loader flags that change what
+gets loaded or how (for example, `trust_remote_code`, the HuggingFace
+`transformers`/`vllm` flag that allows loading a model's custom Python code). The
+restored process *is* the captured process; a different configuration is
+undefined.
 
-Steps 2, 3, and 7 are *obligations*, not specific calls. The three reference
-workloads meet the same obligations through different framework mechanisms —
-which is why the protocol, not any one engine's API, is the contract:
+Steps 3 (warm up), 4 (quiesce), and 9 (rehydrate) are *obligations*, not specific
+calls. The three reference workloads meet the same obligations through different
+framework mechanisms — which is why the protocol, not any one engine's API, is
+the contract:
 
 | Obligation | vLLM | TensorRT-LLM | SGLang |
 |------------|------|--------------|--------|
