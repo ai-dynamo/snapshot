@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "restore_batch_order.h"
+#include "content_digest.h"
 #include "storage_manifest.h"
 #include "transfer_config.h"
 #include "transfer_engine.h"
@@ -413,6 +414,76 @@ CUresult DeviceUUID(CUdevice device, std::string *uuid_out) {
   std::memcpy(bytes.data(), uuid.bytes, bytes.size());
   *uuid_out = storage::FormatGPUUUID(bytes);
   return CUDA_SUCCESS;
+}
+
+bool ComputeExtentDigests(
+    const std::filesystem::path &storage_dir,
+    const std::vector<storage::TransferJob> &transfer_jobs,
+    const std::vector<storage::ManifestExtent> &manifest,
+    std::vector<std::string> *digests, std::string *error) {
+  digests->clear();
+  digests->reserve(transfer_jobs.size());
+  std::array<char, 1 << 20> buffer;
+
+  for (const auto &job : transfer_jobs) {
+    if (job.extent_index >= manifest.size()) {
+      *error = "custom storage digest references an invalid extent";
+      return false;
+    }
+    const auto path = storage_dir / manifest[job.extent_index].filename;
+    const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+      *error = "failed to open custom storage extent for digest: " +
+               path.string() + ": " + std::strerror(errno);
+      return false;
+    }
+
+    storage::ContentDigest digest;
+    size_t bytes_read = 0;
+    while (true) {
+      const ssize_t read_result = read(fd, buffer.data(), buffer.size());
+      if (read_result < 0) {
+        if (errno == EINTR) {
+          continue;
+        }
+        *error = "failed to read custom storage extent for digest: " +
+                 path.string() + ": " + std::strerror(errno);
+        (void)close(fd);
+        return false;
+      }
+      if (read_result == 0) {
+        break;
+      }
+      if (static_cast<size_t>(read_result) >
+          std::numeric_limits<size_t>::max() - bytes_read) {
+        *error = "custom storage digest byte count overflow";
+        (void)close(fd);
+        return false;
+      }
+      bytes_read += static_cast<size_t>(read_result);
+      if (!digest.Update(buffer.data(), static_cast<size_t>(read_result),
+                         error)) {
+        (void)close(fd);
+        return false;
+      }
+    }
+    if (close(fd) != 0) {
+      *error = "failed to close custom storage extent after digest: " +
+               path.string() + ": " + std::strerror(errno);
+      return false;
+    }
+    if (bytes_read != manifest[job.extent_index].size) {
+      *error = "custom storage extent size changed while computing digest: " +
+               path.string();
+      return false;
+    }
+    std::string hex_digest;
+    if (!digest.Finalize(&hex_digest, error)) {
+      return false;
+    }
+    digests->push_back(std::move(hex_digest));
+  }
+  return true;
 }
 
 struct CustomStorageResult {
@@ -940,10 +1011,19 @@ DoCustomStorage(int pid, bool checkpoint, const std::string &device_map,
                  transferred_bytes, total_bytes);
     return post_handle_failure(CUDA_ERROR_OPERATING_SYSTEM);
   }
+  const auto post_transfer_validation_start = Clock::now();
+  if (checkpoint &&
+      !storage::ValidateExtentFiles(storage_dir, manifest, &manifest_error)) {
+    std::fprintf(stderr, "custom storage extent validation failed: %s\n",
+                 manifest_error.c_str());
+    return post_handle_failure(CUDA_ERROR_OPERATING_SYSTEM);
+  }
   std::vector<std::string> extent_digests;
-  extent_digests.reserve(transfer_result.metrics.size());
-  for (const auto &metrics : transfer_result.metrics) {
-    extent_digests.push_back(metrics.sha256);
+  if (!ComputeExtentDigests(storage_dir, transfer_jobs, manifest,
+                            &extent_digests, &manifest_error)) {
+    std::fprintf(stderr, "custom storage digest computation failed: %s\n",
+                 manifest_error.c_str());
+    return post_handle_failure(CUDA_ERROR_OPERATING_SYSTEM);
   }
   if (!storage::ApplyOrVerifyExtentDigests(
           checkpoint, transfer_jobs, extent_digests, &manifest,
@@ -952,13 +1032,7 @@ DoCustomStorage(int pid, bool checkpoint, const std::string &device_map,
     return post_handle_failure(CUDA_ERROR_OPERATING_SYSTEM);
   }
 
-  const auto post_transfer_validation_start = Clock::now();
   if (checkpoint) {
-    if (!storage::ValidateExtentFiles(storage_dir, manifest, &manifest_error)) {
-      std::fprintf(stderr, "custom storage extent validation failed: %s\n",
-                   manifest_error.c_str());
-      return post_handle_failure(CUDA_ERROR_OPERATING_SYSTEM);
-    }
     if (!storage::WriteManifest(storage_dir, manifest, &manifest_error)) {
       std::fprintf(stderr, "custom storage manifest write failed: %s\n",
                    manifest_error.c_str());
@@ -1198,16 +1272,23 @@ CustomStorageResult DoCustomStorageRestoreBatch(
             .fatal = true};
   }
 
-  size_t metric_offset = 0;
   for (auto &target : prepared) {
     std::vector<std::string> extent_digests;
-    extent_digests.reserve(target->transfer_jobs.size());
-    for (size_t index = 0; index < target->transfer_jobs.size(); ++index) {
-      extent_digests.push_back(
-          transfer_result.metrics[metric_offset + index].sha256);
-    }
-    metric_offset += target->transfer_jobs.size();
     std::string digest_error;
+    if (!ComputeExtentDigests(target->storage_dir, target->transfer_jobs,
+                              target->manifest, &extent_digests,
+                              &digest_error)) {
+      std::fprintf(stderr,
+                   "restore batch digest computation failed for pid %u: %s\n",
+                   target->request->pid, digest_error.c_str());
+      for (auto &remaining : prepared) {
+        (void)FailPreparedRestore(remaining.get(),
+                                  CUDA_ERROR_OPERATING_SYSTEM);
+      }
+      return {.status = CUDA_ERROR_OPERATING_SYSTEM,
+              .operation = target->operation,
+              .fatal = true};
+    }
     if (!storage::ApplyOrVerifyExtentDigests(
             false, target->transfer_jobs, extent_digests, &target->manifest,
             &digest_error)) {
