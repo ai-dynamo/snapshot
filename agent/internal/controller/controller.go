@@ -476,6 +476,10 @@ func (w *NodeController) handleTerminalRestorePod(ctx context.Context, pod *core
 		message = "Pod restore previously failed; create a new restore Pod to retry"
 	}
 
+	// finishRestore's marker is in-memory, so an agent restart sends every
+	// terminal restore pod here; without marking again the resync reports it
+	// once per interval for as long as the pod exists.
+	w.markRestoreHandled(pod)
 	emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, eventType, reason, message)
 	return w.removeRestoreFinalizerWithEvent(ctx, pod)
 }

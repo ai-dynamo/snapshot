@@ -1144,6 +1144,26 @@ func TestProcessRestoreQueueItemEmitsEventWhenRestoreAlreadyCompleted(t *testing
 	assert.False(t, hasFinalizer(live, restorePodFinalizer))
 }
 
+// A terminal restore pod outlives the restore, and the agent that restarts under
+// it has no record of having reported one. The report has to survive a resync as
+// a single event rather than one per interval.
+func TestProcessRestoreQueueItemReportsATerminalRestoreOnce(t *testing.T) {
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+	pod.Finalizers = []string{restorePodFinalizer}
+	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+		Type:    corev1.PodConditionType(podcontract.RestoredCondition),
+		Status:  corev1.ConditionFalse,
+		Reason:  podcontract.RestoreReasonIncompatible,
+		Message: "Refused restore; this node cannot run the checkpoint: cpu-arch: source amd64, target arm64",
+	})
+	w := makeTestController(t, pod)
+
+	processQueuedRestorePod(t, w, pod)
+	processQueuedRestorePod(t, w, pod)
+
+	assert.Len(t, eventsForReason(w.clientset.(*fake.Clientset), "RestoreAlreadyFailed"), 1)
+}
+
 func TestProcessRestoreQueueItemIgnoresFailedRestoreDuringPreflight(t *testing.T) {
 	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	pod.Finalizers = []string{restorePodFinalizer}
