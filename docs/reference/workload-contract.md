@@ -31,8 +31,8 @@ through an environment variable and signals across it with sentinel files.
 | Name | Direction | Meaning |
 |------|-----------|---------|
 | `SNAPSHOT_CONTROL_DIR` | agent → workload | Path to the control directory (mounted at `/snapshot-control`). The workload reads it here rather than hard-coding the path. |
-| `ready-for-snapshot` | workload writes | "I am quiesced and safe to checkpoint." The source pod's readiness probe gates on this file. |
-| `restore-complete` | agent writes, workload waits | "Your state is restored; you may resume." |
+| `ready-for-snapshot` | workload writes | The workload is quiesced and safe to checkpoint. The source pod's readiness probe gates on this file. |
+| `restore-complete` | agent writes, workload waits | The workload's state is restored; it may resume. |
 | `SNAPSHOT_RESTORE_STANDBY` | producer → workload | When `1`, this process is a restore placeholder: stay inert and do not initialize. |
 | `<framework>-restore-ready` | workload writes | A workload-chosen sentinel meaning "restored and serving." The restore pod's readiness probe gates on it. |
 
@@ -48,7 +48,7 @@ a *promise that a precondition already holds*; each down-signal it waits on is a
 *barrier it must not cross early*. The whole contract reduces to one rule:
 
 > Raise a sentinel only once its precondition is true, and do not proceed past a
-> wait until you observe the agent's signal.
+> wait until the agent's signal is observed.
 
 Steps marked **MUST** are load-bearing for correctness — violating one produces a
 wrong, oversized, or failed checkpoint. Steps marked **SHOULD** keep a correct
