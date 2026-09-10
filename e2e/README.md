@@ -308,6 +308,21 @@ the history branch is lost, restore the raw `results/` tree from a backup or
 retained workflow artifacts and run the same rebuild command; indexes alone
 cannot reconstruct the raw records.
 
+### Benchmark dashboard
+
+The static dashboard source lives under `dashboard/`. It graphs the latest 90
+days by default, exposes suite, case, GPU, outcome, channel, and measurement
+filters, and compares completed points with the previous compatible run and
+seven-run median. Failed and timed-out measurements remain visible as explicit
+gaps instead of zero values.
+
+The `E2E Benchmark Dashboard` workflow builds the TypeScript application from
+`main` and combines it with the data-only `e2e-benchmark-history` branch. A
+scheduled framework run triggers a new Pages deployment after history
+publication without merging the generated history into `main`. See
+[`dashboard/README.md`](../dashboard/README.md) for local development and the
+one-time GitHub Pages configuration.
+
 ## Framework Images
 
 The framework e2e workloads are the programs and manifests under

@@ -1,0 +1,30 @@
+{
+  "manifestVersion": 1,
+  "historyFormatVersion": 1,
+  "supportedSchemaVersions": [1],
+  "recordCount": 6,
+  "newestResultAt": "2026-09-09T02:02:00.000Z",
+  "chunks": [
+    {
+      "path": "index/v1/2026-09.ndjson",
+      "month": "2026-09",
+      "recordCount": 4,
+      "firstStartedAt": "2026-09-07T01:00:00.000Z",
+      "lastStartedAt": "2026-09-09T02:00:00.000Z"
+    },
+    {
+      "path": "index/v1/2026-08.ndjson",
+      "month": "2026-08",
+      "recordCount": 1,
+      "firstStartedAt": "2026-08-01T01:00:00.000Z",
+      "lastStartedAt": "2026-08-01T01:00:00.000Z"
+    },
+    {
+      "path": "index/v1/2026-06.ndjson",
+      "month": "2026-06",
+      "recordCount": 1,
+      "firstStartedAt": "2026-06-01T01:00:00.000Z",
+      "lastStartedAt": "2026-06-01T01:00:00.000Z"
+    }
+  ]
+}
