@@ -427,9 +427,8 @@ list_allocations(struct allocation_list* list)
 static bool
 needs_allocation_content(const struct allocation* allocation)
 {
-  return allocation->creator && allocation->properties.requestedHandleTypes != 0 &&
-         allocation->properties.type == CU_MEM_ALLOCATION_TYPE_PINNED &&
-         allocation->properties.location.type == CU_MEM_LOCATION_TYPE_DEVICE;
+  return allocation->creator &&
+         allocation->properties.type == CU_MEM_ALLOCATION_TYPE_PINNED;
 }
 
 static struct cuinterpose_record*

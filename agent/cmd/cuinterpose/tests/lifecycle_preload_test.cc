@@ -78,9 +78,11 @@ class Lifecycle : public ::testing::Test {
 // mapping came back.
 TEST_F(Lifecycle, PrepareAndRestoreAcrossTwoProcesses) {
   CUmemAllocationProp prop = posix_props();
+  CUmemAllocationProp host_prop = posix_props();
+  host_prop.location.type = CU_MEM_LOCATION_TYPE_HOST_NUMA;
   CUmemGenericAllocationHandle shared = 0, private_alloc = 0;
   ASSERT_EQ(cuMemCreate(&shared, 1 << 20, &prop, 0), CUDA_SUCCESS);
-  ASSERT_EQ(cuMemCreate(&private_alloc, 1 << 19, &prop, 0), CUDA_SUCCESS);
+  ASSERT_EQ(cuMemCreate(&private_alloc, 1 << 19, &host_prop, 0), CUDA_SUCCESS);
   ASSERT_EQ(cuMemMap(0x10000000, 1 << 20, 0, shared, 0), CUDA_SUCCESS);
   ASSERT_EQ(cuMemMap(0x20000000, 1 << 19, 0, private_alloc, 0), CUDA_SUCCESS);
   CUmemAccessDesc access{};
