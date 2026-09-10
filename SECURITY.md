@@ -29,3 +29,28 @@ If reporting a potential vulnerability via email, please encrypt it using NVIDIA
 5. Potential impact of the vulnerability, including how an attacker could exploit the vulnerability
 
 See https://www.nvidia.com/en-us/security/ for past NVIDIA Security Bulletins and Notices.
+
+## Coordinated disclosure and patch timelines
+
+NVIDIA PSIRT coordinates the triage, fix, and disclosure of every report under
+NVIDIA's coordinated vulnerability disclosure process. The timelines that apply
+to a report — including the deadline by which an issue is publicly disclosed —
+are published on the
+[NVIDIA PSIRT policies page](https://www.nvidia.com/en-us/security/psirt-policies/).
+This project does not set its own timelines; the PSIRT policy governs.
+
+## Reporter credit
+
+Reporters are credited in the NVIDIA security bulletin published for the issue,
+unless they ask to remain anonymous. Credit is handled by PSIRT as part of the
+disclosure process above. Snapshot does not publish GitHub Security Advisories,
+so credit is never given through GHSA.
+
+## Supported versions
+
+Snapshot is pre-1.0. Security fixes are applied to the most recent minor release
+line only.
+
+If you are running a pre-release or an older patch version, upgrade to the latest
+patch release on the supported line to pick up a fix. This policy is revisited at
+1.0, when more than one line may be supported at a time.

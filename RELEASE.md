@@ -47,9 +47,10 @@ The decision to cut a release is made by maintainer consensus, per
 
 ## Tagging and branches
 
-Releases are cut from `main`. There are no long-lived release branches; a patch
-for an older release is branched from that release's tag only if the need
-arises.
+Releases are cut from `main`. Patch releases for a published line are cut from
+that line's maintenance branch, such as `release/0.1`. Only the most recent line
+receives security fixes; see
+[Supported versions](SECURITY.md#supported-versions).
 
 Every release produces four tags. You create one — the rest are automatic:
 

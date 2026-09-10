@@ -51,6 +51,32 @@ Questions and open-ended design discussions belong in
 an issue. Security vulnerabilities are never reported in a public issue; see
 [SECURITY.md](SECURITY.md).
 
+## Preparing a change
+
+**Run the checks locally.** `make check` is the same gate CI's `check` job runs:
+it verifies the CRD copies, regenerates, applies and verifies license headers,
+formats, tidies, lints, then runs `govulncheck` and `helm lint` — and fails if
+any of that left the working tree dirty. `make test` and `make build` cover the
+other two jobs. Running all three before pushing means CI holds no surprises.
+
+`make check` needs a Linux amd64 toolchain: the pinned `protoc` it installs is
+only downloaded for that platform. On other hosts, run `make linux-build` and
+`make linux-test`, which execute in a container, and let CI run the full gate.
+
+**Write conventional commit messages.** Subjects follow
+[Conventional Commits](https://www.conventionalcommits.org/): a type — one of
+`feat`, `fix`, `docs`, `ci`, `build`, `refactor`, `perf`, `test`, `chore` — an
+optional scope in parentheses, a colon, then a short imperative summary:
+
+```
+ci: require an approved issue link on every PR
+docs(guides): verify TensorRT-LLM without a GPU driver
+```
+
+Pull requests are squash-merged, so the pull request *title* becomes the commit
+subject on `main` and follows the same format. Individual commits within a
+branch are squashed away, so their subjects matter less than the title.
+
 ## How pull requests are reviewed
 
 **Who reviews.** Every pull request is reviewed by a maintainer. The maintainers
