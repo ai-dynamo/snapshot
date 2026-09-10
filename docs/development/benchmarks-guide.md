@@ -26,8 +26,10 @@ SGLang and TensorRT-LLM can be added later without redesigning the tool — see
 ## Quick start
 
 Sanity-check the cluster before committing to a multi-minute sweep — this
-prints the same environment bundle every run records, without deploying
-anything:
+prints the same environment bundle every run records (storage backend, cluster
+version, etc.), without deploying anything. It omits `gpu_product` and
+`gpu_driver_version` (both come back `null`), since those are queried live from
+inside a running GPU pod via `nvidia-smi`, and this command deploys none:
 
 ```bash
 export SNAPSHOT_E2E_TEST_NAMESPACE=<namespace-vllm-runs-in>
