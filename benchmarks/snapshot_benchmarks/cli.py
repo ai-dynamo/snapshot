@@ -12,6 +12,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -72,6 +73,24 @@ def _benchmark_config(args: argparse.Namespace) -> BenchmarkConfig:
     )
 
 
+def _stringify_env(label: str, env: dict[str, Any] | None) -> dict[str, str]:
+    """Coerces scalar `env` values (e.g. an unquoted `0.75` or `2048` in YAML,
+    parsed by PyYAML as a float/int, not a string) to `str`, since pod env var
+    values are always strings anyway. Raises a clear, load-time error for
+    anything that isn't a plain scalar (list/dict/None) instead of letting a
+    malformed value reach `create_pod` and fail deep inside a Kubernetes API
+    JSON-unmarshal error."""
+    result: dict[str, str] = {}
+    for key, value in (env or {}).items():
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            raise ValueError(
+                f"model {label!r}: env[{key!r}] must be a plain string/number, got "
+                f"{type(value).__name__} ({value!r}) -- quote it in models.yaml"
+            )
+        result[key] = str(value)
+    return result
+
+
 def _load_models(path: Path) -> list[ModelSpec]:
     data = yaml.safe_load(path.read_text())
     return [
@@ -79,7 +98,7 @@ def _load_models(path: Path) -> list[ModelSpec]:
             label=entry["label"],
             hf_id_or_path=entry["hf_id_or_path"],
             reported_weights_bytes=entry.get("reported_weights_bytes"),
-            env=entry.get("env") or {},
+            env=_stringify_env(entry["label"], entry.get("env")),
         )
         for entry in data["models"]
     ]
