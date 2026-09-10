@@ -29,13 +29,18 @@ CUDA_DRIVER_MAJOR_LABEL = "nvidia.com/cuda.driver-version.major"
 
 def gpu_identity(namespace: str, pod: str, container: str) -> tuple[str | None, str | None]:
     """Returns (gpu_product, driver_version) queried live from inside the pod,
-    which already has GPU access via `runtimeClassName: nvidia`."""
-    output = k8s.exec_command(
-        namespace,
-        pod,
-        "nvidia-smi --query-gpu=name,driver_version --format=csv,noheader",
-        container=container,
-    )
+    which already has GPU access via `runtimeClassName: nvidia`. Returns
+    (None, None) if the exec handshake or transport fails -- diagnostic
+    metadata, never worth failing the whole run over."""
+    try:
+        output = k8s.exec_command(
+            namespace,
+            pod,
+            "nvidia-smi --query-gpu=name,driver_version --format=csv,noheader",
+            container=container,
+        )
+    except Exception:  # noqa: BLE001 - exec-over-websocket fails in many untyped ways; best-effort
+        return None, None
     line = output.strip().splitlines()[0] if output.strip() else ""
     parts = [part.strip() for part in line.split(",")]
     if len(parts) != 2:
@@ -45,11 +50,15 @@ def gpu_identity(namespace: str, pod: str, container: str) -> tuple[str | None, 
 
 def engine_version(namespace: str, pod: str, container: str, probe_command: str) -> str | None:
     """Runs `probe_command` (e.g. `python3 -c "import vllm; print(vllm.__version__)"`)
-    inside the pod and returns its stripped stdout, or None on failure. Never
-    hardcoded: the guides and the published benchmark doc have already drifted
-    on the pinned vLLM version, so a live query is the only way a result stays
-    self-describing instead of silently reproducing that drift."""
-    output = k8s.exec_command(namespace, pod, probe_command, container=container)
+    inside the pod and returns its stripped stdout, or None on failure (including
+    an exec handshake/transport failure). Never hardcoded: the guides and the
+    published benchmark doc have already drifted on the pinned vLLM version, so
+    a live query is the only way a result stays self-describing instead of
+    silently reproducing that drift."""
+    try:
+        output = k8s.exec_command(namespace, pod, probe_command, container=container)
+    except Exception:  # noqa: BLE001 - exec-over-websocket fails in many untyped ways; best-effort
+        return None
     version = output.strip().splitlines()[-1].strip() if output.strip() else ""
     return version or None
 

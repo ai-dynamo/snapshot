@@ -58,36 +58,49 @@ def parse_go_duration(value: str | None) -> float | None:
     return total
 
 
-def find_restore_summary_json(log_text: str) -> dict[str, Any] | None:
+def find_restore_summary_json(
+    log_text: str, *, pod: str, snapshot: str
+) -> dict[str, Any] | None:
     """Returns the parsed trailing JSON object of the last "Restore timing
-    summary" line in `log_text`, or None if no such line is present."""
-    summary_line = None
+    summary" line in `log_text` whose `pod` and `snapshot` fields both match
+    the given values, or None if no such line is present.
+
+    A node's agent log can carry restore summaries for other pods/snapshots
+    entirely -- concurrent benchmark runs, or another tenant's workload on a
+    shared cluster -- so a bare marker-text match would risk silently
+    attributing someone else's phase timings to this run."""
+    summary_payload = None
     for line in log_text.splitlines():
-        if RESTORE_SUMMARY_MARKER in line:
-            summary_line = line
-    if summary_line is None:
-        return None
+        if RESTORE_SUMMARY_MARKER not in line:
+            continue
+        brace_index = line.find("{")
+        if brace_index == -1:
+            continue
+        try:
+            candidate = json.loads(line[brace_index:])
+        except json.JSONDecodeError:
+            continue
+        if candidate.get("pod") == pod and candidate.get("snapshot") == snapshot:
+            summary_payload = candidate
+    return summary_payload
 
-    brace_index = summary_line.find("{")
-    if brace_index == -1:
-        return None
-    try:
-        return json.loads(summary_line[brace_index:])
-    except json.JSONDecodeError:
-        return None
 
-
-def parse_agent_log_phases(log_text: str, *, log_source_pod: str | None) -> AgentLogPhases:
+def parse_agent_log_phases(
+    log_text: str, *, log_source_pod: str | None, restore_pod: str, snapshot: str
+) -> AgentLogPhases:
     """Parses the node agent's own restore log to recover the sub-second-
-    precision phase breakdown. Best-effort: returns an `AgentLogPhases` with
-    `log_line_found=False` and a warning if the line is missing or malformed
+    precision phase breakdown for the restore of `restore_pod` (a
+    "namespace/name" key, matching the agent's own log field) from
+    `snapshot`. Best-effort: returns an `AgentLogPhases` with
+    `log_line_found=False` and a warning if no matching line is present
     (e.g. the agent log rotated past it), never raises."""
     phases = AgentLogPhases(log_source_pod=log_source_pod)
 
-    payload = find_restore_summary_json(log_text)
+    payload = find_restore_summary_json(log_text, pod=restore_pod, snapshot=snapshot)
     if payload is None:
         phases.parse_warnings.append(
-            f'"{RESTORE_SUMMARY_MARKER}" line not found in the provided agent log'
+            f'"{RESTORE_SUMMARY_MARKER}" line for pod={restore_pod!r} snapshot={snapshot!r} '
+            "not found in the provided agent log"
         )
         return phases
 

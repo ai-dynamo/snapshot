@@ -4,10 +4,14 @@
 """Reads and writes raw `RunResult` JSON files.
 
 One file per run, one directory per invocation
-(`benchmarks/results/<YYYYMMDD>-<git-sha7>/<model-label-slug>-<mode>.json`),
-so a sweep's raw output is reviewable as a unit and diffable across
-invocations. `benchmarks/results/` is gitignored -- these are local, ad-hoc,
-user-generated artifacts, not the source of truth for anything published.
+(`benchmarks/results/<YYYYMMDD>-<git-sha7>-<random-suffix>/<model-label-slug>-<mode>.json`),
+so a sweep's raw output is reviewable as a unit. Each invocation gets its own
+directory (the random suffix guarantees this even for two invocations on the
+same day against the same commit, e.g. rerunning a single model after a fix)
+rather than reusing an existing one, so a later run can never silently
+overwrite an earlier one's result files. `benchmarks/results/` is gitignored
+-- these are local, ad-hoc, user-generated artifacts, not the source of truth
+for anything published.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ from __future__ import annotations
 import datetime
 import json
 import re
+import uuid
 from pathlib import Path
 
 from snapshot_benchmarks.schema import RunResult
@@ -29,8 +34,8 @@ def _slug(label: str) -> str:
 def invocation_dir(root: Path, *, git_sha: str | None) -> Path:
     date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d")
     sha = git_sha or "nogit"
-    directory = root / f"{date}-{sha}"
-    directory.mkdir(parents=True, exist_ok=True)
+    directory = root / f"{date}-{sha}-{uuid.uuid4().hex[:8]}"
+    directory.mkdir(parents=True)
     return directory
 
 

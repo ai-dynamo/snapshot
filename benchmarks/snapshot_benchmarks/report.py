@@ -49,9 +49,10 @@ def render(results: list[dict]) -> str:
     lines.append("")
     lines.append(
         "| Model | Weights (reported) | Checkpoint size (measured) | Checkpoint (s) | "
-        "Cold start (s) | Restore total (s) | GPU | Driver | Storage | Placement |"
+        "Cold start (s) | Restore, agent-internal (s) | Restore total, incl. vLLM wake (s) | "
+        "GPU | Driver | Storage | Placement |"
     )
-    lines.append("|---|---:|---:|---:|---:|---:|---|---|---|---|")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---|---|---|---|")
     for r in results:
         model = r.get("model", {})
         env = r.get("environment", {})
@@ -59,18 +60,23 @@ def render(results: list[dict]) -> str:
         checkpoint = r.get("checkpoint") or {}
         restore = r.get("restore") or {}
         agent_log = r.get("agent_log_phases") or {}
-        restore_total = agent_log.get("duration")
-        if restore_total is None:
-            restore_total = restore.get("restore_total_seconds")
+        # These are two different measurements, not two precisions of the same
+        # one: `agent_log.duration` is the node agent's own restore duration
+        # (excludes vLLM's wake-and-copy-to-GPU step entirely), while
+        # `restore_total_seconds` spans container start to pod Ready (includes
+        # it). Rendered as separate columns rather than one falling back to
+        # the other, so a row where the agent log didn't parse never silently
+        # gets compared against a different metric than the rest of the table.
         lines.append(
-            "| {label} | {weights} | {ckpt} | {ckpt_s} | {cold} | {restore} | {gpu} | "
-            "{driver} | {storage} | {placement} |".format(
+            "| {label} | {weights} | {ckpt} | {ckpt_s} | {cold} | {restore_agent} | "
+            "{restore_total} | {gpu} | {driver} | {storage} | {placement} |".format(
                 label=model.get("label", "-"),
                 weights=_fmt_bytes(model.get("reported_weights_bytes")),
                 ckpt=_fmt_bytes(model.get("checkpoint_artifact_bytes")),
                 ckpt_s=_fmt(checkpoint.get("checkpoint_seconds")),
                 cold=_fmt(cold_start.get("cold_start_excl_container_seconds")),
-                restore=_fmt(restore_total),
+                restore_agent=_fmt(agent_log.get("duration")),
+                restore_total=_fmt(restore.get("restore_total_seconds")),
                 gpu=env.get("gpu_product") or "-",
                 driver=env.get("gpu_driver_version") or "-",
                 storage=env.get("storage_class") or "-",
