@@ -1,45 +1,13 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
+version: "2"
 run:
-  timeout: 10m
   allow-parallel-runners: true
-
-issues:
-  exclude-rules:
-    # Node-agent internals: relax style/complexity linters on the faithfully
-    # migrated CRIU/CUDA/runtime code. Correctness linters stay enabled.
-    - path: "internal/"
-      linters:
-        - dupl
-        - lll
-        - gocyclo
-        - prealloc
-        - unparam
-        - goconst
-    # CLI code carries long flag/usage/error strings.
-    - path: "cmd/"
-      linters:
-        - lll
-    # Table-driven tests legitimately repeat literals and run long.
-    - path: "_test\\.go"
-      linters:
-        - dupl
-        - goconst
-        - gocyclo
-        - prealloc
-        - unparam
-
 linters:
-  disable-all: true
+  default: none
   enable:
     - dupl
     - errcheck
     - goconst
     - gocyclo
-    - gofmt
-    - goimports
-    - gosimple
     - govet
     - ineffassign
     - lll
@@ -47,7 +15,55 @@ linters:
     - nakedret
     - prealloc
     - staticcheck
-    - typecheck
     - unconvert
     - unparam
     - unused
+  settings:
+    staticcheck:
+      # v1 ran staticcheck (SA*) and gosimple (S1*). v2 merges both into
+      # staticcheck and adds the ST* and QF* check sets by default; keep
+      # the original scope so the toolchain bump does not quietly widen
+      # what CI enforces.
+      checks:
+        - SA*
+        - S1*
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - dupl
+          - goconst
+          - gocyclo
+          - lll
+          - prealloc
+          - unparam
+        path: internal/
+      - linters:
+          - lll
+        path: cmd/
+      - linters:
+          - dupl
+          - goconst
+          - gocyclo
+          - prealloc
+          - unparam
+        path: _test\.go
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

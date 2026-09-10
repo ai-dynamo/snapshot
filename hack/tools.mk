@@ -1,7 +1,7 @@
 GO_VERSION             ?= 1.27.1
 
 CONTROLLER_GEN_VERSION ?= v0.19.0
-GOLANGCI_LINT_VERSION  ?= v1.62.2
+GOLANGCI_LINT_VERSION  ?= v2.13.2
 ADDLICENSE_VERSION     ?= v1.1.1
 GOVULNCHECK_VERSION    ?= v1.1.4
 HELM_VERSION           ?= v3.17.3
@@ -30,8 +30,13 @@ PROTOC         := $(TOOLS_BIN_DIR)/protoc
 $(CONTROLLER_GEN):
 	GOBIN=$(TOOLS_BIN_DIR) GOWORK=off go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
 
+# golangci-lint refuses to run when the Go version it was built with is older
+# than the version the target module declares, and its own go.mod pins a
+# toolchain that lags ours. Build it with GO_VERSION so the two stay in step —
+# without this, bumping GO_VERSION breaks `make lint` until upstream catches up.
 $(GOLANGCI_LINT):
-	GOBIN=$(TOOLS_BIN_DIR) GOWORK=off go install github.com/golangci/golangci-lint/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	GOBIN=$(TOOLS_BIN_DIR) GOWORK=off GOTOOLCHAIN=go$(GO_VERSION) \
+	  go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 
 $(ADDLICENSE):
 	GOBIN=$(TOOLS_BIN_DIR) GOWORK=off go install github.com/google/addlicense@$(ADDLICENSE_VERSION)
