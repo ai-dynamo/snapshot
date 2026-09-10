@@ -58,10 +58,7 @@ updates:
           - version-update:semver-major
           - version-update:semver-minor
 
-  # The e2e suite is a uv-managed Python project with its own lockfile. Nothing
-  # covered it until now, so its dependencies were never proposed for update —
-  # an OpenSSF Scorecard run against the repo reports a known pytest advisory
-  # (PYSEC-2026-1845) that no tooling here would have surfaced.
+  # The e2e suite is a uv-managed Python project with its own lockfile.
   - package-ecosystem: uv
     directory: /e2e
     schedule:
