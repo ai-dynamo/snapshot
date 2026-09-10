@@ -53,9 +53,9 @@ import (
 
 // NodeController watches local-node pods with checkpoint metadata and reconciles
 // snapshot execution for checkpoint and restore requests. The restore path is
-// driven by a client-go pod informer; the capture path is driven by a dynamic
-// informer over PodSnapshotContent work orders filtered to this node, with typed
-// reads/writes via an uncached controller-runtime client.
+// driven by a client-go pod informer; PodSnapshotContent events feed content
+// workqueue workers, which perform typed reads/writes via an uncached controller-runtime
+// client.
 type NodeController struct {
 	config                  *types.AgentConfig
 	clientset               kubernetes.Interface
@@ -70,6 +70,7 @@ type NodeController struct {
 	writeControlSentinelFn  func(int, string) error
 	controlSentinelExistsFn func(int, string) (bool, error)
 	sendSignalFn            func(logr.Logger, int, syscall.Signal, string) error
+	contentQueue            workqueue.TypedDelayingInterface[string]
 	restoreQueue            workqueue.TypedDelayingInterface[client.ObjectKey]
 	restorePodLister        corev1listers.PodLister
 
@@ -153,6 +154,10 @@ const (
 	// snapshotContentResyncInterval re-drives every PodSnapshotContent work order so a
 	// not-yet-Ready source pod is re-checked for quiesce without a busy loop.
 	snapshotContentResyncInterval = 10 * time.Second
+	// contentWorkerCount keeps informer delivery independent of live API calls while allowing
+	// unrelated work orders to make progress when one reconciliation is stalled.
+	// When all workers are stalled, later work orders wait in the queue until a worker frees.
+	contentWorkerCount = 2
 )
 
 // podSnapshotContentGVR is the cluster-scoped resource the capture informer watches.
@@ -212,6 +217,9 @@ func newDefaultController(
 		holderID:  "snapshot-agent/" + uuid.NewString(),
 		inFlight:  make(map[string]struct{}),
 		stopCh:    make(chan struct{}),
+		contentQueue: workqueue.NewTypedDelayingQueueWithConfig(
+			workqueue.TypedDelayingQueueConfig[string]{Name: "snapshot-contents"},
+		),
 		restoreQueue: workqueue.NewTypedDelayingQueueWithConfig(
 			workqueue.TypedDelayingQueueConfig[client.ObjectKey]{Name: "restore-pods"},
 		),
@@ -227,6 +235,7 @@ func newDefaultController(
 
 // Run starts the local pod informers and processes checkpoint/restore events.
 func (w *NodeController) Run(ctx context.Context) error {
+	defer w.contentQueue.ShutDown()
 	defer w.restoreQueue.ShutDown()
 	// Seed the agent logger onto ctx so the capture path resolves it via log.FromContext.
 	ctx = logr.NewContext(ctx, w.log)
@@ -280,15 +289,9 @@ func (w *NodeController) Run(ctx context.Context) error {
 	}
 	w.contentIndexer = contentInformer.GetIndexer()
 	if _, err := contentInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			if name, ok := contentNameFromInformerObj(obj); ok {
-				w.reconcilePodSnapshotContent(ctx, name)
-			}
-		},
+		AddFunc: w.enqueuePodSnapshotContent,
 		UpdateFunc: func(_, newObj interface{}) {
-			if name, ok := contentNameFromInformerObj(newObj); ok {
-				w.reconcilePodSnapshotContent(ctx, name)
-			}
+			w.enqueuePodSnapshotContent(newObj)
 		},
 	}); err != nil {
 		return fmt.Errorf("failed to add snapshot-content informer handler: %w", err)
@@ -337,6 +340,7 @@ func (w *NodeController) Run(ctx context.Context) error {
 	var stopOnce sync.Once
 	go func() {
 		<-ctx.Done()
+		w.contentQueue.ShutDown()
 		w.restoreQueue.ShutDown()
 		stopOnce.Do(func() { close(w.stopCh) })
 	}()
@@ -345,11 +349,56 @@ func (w *NodeController) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to sync informer caches")
 	}
 
+	for i := 0; i < contentWorkerCount; i++ {
+		go w.runContentQueue(ctx)
+	}
 	go w.runRestoreQueue(ctx)
 	w.log.Info("PodSnapshot node controller started and caches synced")
 	<-ctx.Done()
 	stopOnce.Do(func() { close(w.stopCh) })
 	return nil
+}
+
+// enqueuePodSnapshotContent keeps informer callbacks limited to cache-to-queue work. The live
+// client calls happen in runContentQueue workers, so one stalled reconciliation cannot block later
+// informer notifications. Filtering here also keeps terminal or foreign work out of the queue.
+func (w *NodeController) enqueuePodSnapshotContent(obj interface{}) {
+	content, ok := contentFromInformerObj(obj)
+	if !ok {
+		if name, nameOK := contentNameFromInformerObj(obj); nameOK {
+			w.log.Error(errors.New("failed to convert PodSnapshotContent informer object"),
+				"Queuing PodSnapshotContent after informer conversion failure", "content", name)
+			w.contentQueue.Add(name)
+		} else {
+			w.log.Error(errors.New("failed to identify PodSnapshotContent informer object"),
+				"Dropping unidentified PodSnapshotContent informer object")
+		}
+		return
+	}
+	if content.Spec.Source.NodeName != w.config.NodeName || !contentActionable(content) {
+		return
+	}
+	w.contentQueue.Add(content.Name)
+}
+
+// contentActionable reports whether a PodSnapshotContent can still be reconciled.
+func contentActionable(content *snapshotv1alpha1.PodSnapshotContent) bool {
+	return content.DeletionTimestamp.IsZero() && !isContentTerminal(content)
+}
+
+func (w *NodeController) runContentQueue(ctx context.Context) {
+	for {
+		name, shutdown := w.contentQueue.Get()
+		if shutdown {
+			return
+		}
+		w.processContentQueueItem(ctx, name)
+	}
+}
+
+func (w *NodeController) processContentQueueItem(ctx context.Context, name string) {
+	defer w.contentQueue.Done(name)
+	w.reconcilePodSnapshotContent(ctx, name)
 }
 
 func tweakNodePodListOptions(nodeName string) func(*metav1.ListOptions) {
@@ -1111,6 +1160,19 @@ func contentFromInformerObj(obj interface{}) (*snapshotv1alpha1.PodSnapshotConte
 	return content, true
 }
 
+// contentNameFromInformerObj extracts the name used to re-drive a work order when its cached
+// representation cannot be converted. The live typed read in the worker remains authoritative.
+func contentNameFromInformerObj(obj interface{}) (string, bool) {
+	if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+		obj = tombstone.Obj
+	}
+	accessor, err := meta.Accessor(obj)
+	if err != nil || accessor.GetName() == "" {
+		return "", false
+	}
+	return accessor.GetName(), true
+}
+
 // chooseActiveContent returns the name of the oldest non-terminal PodSnapshotContent among the indexed
 // objects (oldest first by CreationTimestamp, ties broken by Name), or "" when none are active.
 // Driving the oldest until it finishes gives deterministic, stable selection across pod events.
@@ -1118,7 +1180,7 @@ func chooseActiveContent(objs []interface{}) string {
 	var chosen *snapshotv1alpha1.PodSnapshotContent
 	for _, obj := range objs {
 		content, ok := contentFromInformerObj(obj)
-		if !ok || !content.DeletionTimestamp.IsZero() || isContentTerminal(content) {
+		if !ok || !contentActionable(content) {
 			continue
 		}
 		if chosen == nil ||

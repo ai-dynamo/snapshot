@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -21,9 +22,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ktypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 	corev1listers "k8s.io/client-go/listers/core/v1"
 	clientgotesting "k8s.io/client-go/testing"
@@ -112,10 +116,361 @@ func TestNewDefaultControllerSetsDefaultOperations(t *testing.T) {
 		noopInjector{},
 		testr.New(t),
 	)
+	t.Cleanup(w.contentQueue.ShutDown)
 	t.Cleanup(w.restoreQueue.ShutDown)
-	if w.checkpointFn == nil || w.restoreFn == nil || w.writeControlSentinelFn == nil || w.controlSentinelExistsFn == nil || w.sendSignalFn == nil || w.restoreQueue == nil {
+	if w.checkpointFn == nil || w.restoreFn == nil || w.writeControlSentinelFn == nil || w.controlSentinelExistsFn == nil || w.sendSignalFn == nil || w.contentQueue == nil || w.restoreQueue == nil {
 		t.Fatal("default controller operations must be initialized")
 	}
+}
+
+type contentInformerBarrierHarness struct {
+	t                   *testing.T
+	controller          *NodeController
+	dynamicClient       *dynamicfake.FakeDynamicClient
+	cancel              context.CancelFunc
+	runDone             chan error
+	watchStarted        chan struct{}
+	podWatchesStarted   chan struct{}
+	controllerStarted   chan struct{}
+	contentAGet         chan struct{}
+	contentBGet         chan struct{}
+	releaseContentA     chan struct{}
+	releaseContentB     chan struct{}
+	checkpointEntered   chan struct{}
+	releaseCheckpoint   chan struct{}
+	leaseCreated        chan struct{}
+	leaseDeleted        chan struct{}
+	contentReady        chan struct{}
+	contentAGetOnce     sync.Once
+	contentBGetOnce     sync.Once
+	contentBBlockOnce   sync.Once
+	checkpointOnce      sync.Once
+	leaseCreatedOnce    sync.Once
+	leaseDeletedOnce    sync.Once
+	contentReadyOnce    sync.Once
+	captureContentB     bool
+	controllerReady     atomic.Bool
+	checkpointCalls     atomic.Int32
+	contentStatusWrites atomic.Int32
+}
+
+func newContentInformerBarrierHarness(t *testing.T, captureContentB bool) *contentInformerBarrierHarness {
+	t.Helper()
+
+	h := &contentInformerBarrierHarness{
+		t:                 t,
+		watchStarted:      make(chan struct{}),
+		podWatchesStarted: make(chan struct{}),
+		controllerStarted: make(chan struct{}),
+		contentAGet:       make(chan struct{}),
+		contentBGet:       make(chan struct{}),
+		releaseContentA:   make(chan struct{}),
+		releaseContentB:   make(chan struct{}),
+		checkpointEntered: make(chan struct{}),
+		releaseCheckpoint: make(chan struct{}),
+		leaseCreated:      make(chan struct{}),
+		leaseDeleted:      make(chan struct{}),
+		contentReady:      make(chan struct{}),
+		captureContentB:   captureContentB,
+		runDone:           make(chan error, 1),
+	}
+
+	contentA := informerRaceContent("content-a", "snapshot-a")
+	contentB := informerRaceContent("content-b", "snapshot-b")
+	typedObjects := []client.Object{contentA, contentB}
+	coreObjects := []runtime.Object{}
+	if captureContentB {
+		sourcePod := informerRaceSourcePod(contentB)
+		typedObjects = append(typedObjects, sourcePod)
+		coreObjects = append(coreObjects, sourcePod.DeepCopy())
+	}
+	coreClient := fake.NewClientset(coreObjects...)
+	typedClient := ctrlfake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithObjects(typedObjects...).
+		WithStatusSubresource(&snapshotv1alpha1.PodSnapshotContent{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				content, ok := obj.(*snapshotv1alpha1.PodSnapshotContent)
+				if !ok {
+					return c.Get(ctx, key, obj, opts...)
+				}
+				if err := c.Get(ctx, key, content, opts...); err != nil {
+					return err
+				}
+				if content.UID == "" || content.Spec.PodSnapshotRef.UID == "" ||
+					content.Spec.Source.NodeName != testNodeName {
+					return fmt.Errorf("content %q is not fully node-bound", content.Name)
+				}
+				switch content.Name {
+				case contentA.Name:
+					h.contentAGetOnce.Do(func() { close(h.contentAGet) })
+					<-h.releaseContentA
+				case contentB.Name:
+					block := false
+					h.contentBBlockOnce.Do(func() {
+						block = true
+						h.contentBGetOnce.Do(func() { close(h.contentBGet) })
+					})
+					if h.captureContentB {
+						return nil
+					}
+					if block {
+						<-h.releaseContentB
+						return errors.New("injected live content Get failure")
+					}
+					return nil
+				}
+				return errors.New("injected live content Get failure")
+			},
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if err := c.Patch(ctx, obj, patch, opts...); err != nil {
+					return err
+				}
+				pod, ok := obj.(*corev1.Pod)
+				if !ok || !h.captureContentB {
+					return nil
+				}
+				stored := &corev1.Pod{}
+				if err := c.Get(ctx, client.ObjectKeyFromObject(pod), stored); err != nil {
+					return err
+				}
+				_, err := coreClient.CoreV1().Pods(stored.Namespace).Update(ctx, stored, metav1.UpdateOptions{})
+				return err
+			},
+			SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+				if _, ok := obj.(*snapshotv1alpha1.PodSnapshotContent); ok && subResourceName == "status" {
+					h.contentStatusWrites.Add(1)
+				}
+				if err := c.SubResource(subResourceName).Patch(ctx, obj, patch, opts...); err != nil {
+					return err
+				}
+				if content, ok := obj.(*snapshotv1alpha1.PodSnapshotContent); ok &&
+					content.Name == contentB.Name && isContentReady(content) {
+					h.contentReadyOnce.Do(func() { close(h.contentReady) })
+				}
+				return nil
+			},
+		}).Build()
+
+	h.dynamicClient = dynamicfake.NewSimpleDynamicClient(testScheme(t))
+	var signalWatch sync.Once
+	h.dynamicClient.PrependWatchReactor("podsnapshotcontents", func(clientgotesting.Action) (bool, watch.Interface, error) {
+		signalWatch.Do(func() { close(h.watchStarted) })
+		return false, nil, nil
+	})
+	var podWatchCount atomic.Int32
+	var signalPodWatches sync.Once
+	coreClient.PrependWatchReactor("pods", func(clientgotesting.Action) (bool, watch.Interface, error) {
+		if podWatchCount.Add(1) == 2 {
+			signalPodWatches.Do(func() { close(h.podWatchesStarted) })
+		}
+		return false, nil, nil
+	})
+	coreClient.PrependReactor("create", "leases", func(clientgotesting.Action) (bool, runtime.Object, error) {
+		h.leaseCreatedOnce.Do(func() { close(h.leaseCreated) })
+		return false, nil, nil
+	})
+	coreClient.PrependReactor("delete", "leases", func(clientgotesting.Action) (bool, runtime.Object, error) {
+		h.leaseDeletedOnce.Do(func() { close(h.leaseDeleted) })
+		return false, nil, nil
+	})
+
+	h.controller = newDefaultController(
+		&types.AgentConfig{NodeName: testNodeName, Storage: types.StorageSpec{Type: "pvc", BasePath: t.TempDir()}},
+		coreClient,
+		typedClient,
+		h.dynamicClient,
+		&fakeRuntime{resolveContainerPID: 1234},
+		noopInjector{},
+		logr.New(&controllerStartedLogSink{started: h.controllerStarted, ready: &h.controllerReady}),
+	)
+	h.controller.checkpointFn = func(context.Context, CheckpointParams) error {
+		h.checkpointCalls.Add(1)
+		h.checkpointOnce.Do(func() { close(h.checkpointEntered) })
+		<-h.releaseCheckpoint
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	h.cancel = cancel
+	go func() { h.runDone <- h.controller.Run(ctx) }()
+	t.Cleanup(h.stop)
+	h.requireBarrier(h.watchStarted, "content informer watch did not start")
+	h.requireBarrier(h.podWatchesStarted, "pod informer watches did not start")
+	h.requireBarrier(h.controllerStarted, "node controller caches did not sync")
+	return h
+}
+
+type controllerStartedLogSink struct {
+	started chan struct{}
+	once    sync.Once
+	ready   *atomic.Bool
+}
+
+func (*controllerStartedLogSink) Init(logr.RuntimeInfo) {}
+func (*controllerStartedLogSink) Enabled(int) bool      { return true }
+func (s *controllerStartedLogSink) Info(_ int, message string, _ ...any) {
+	if message == "PodSnapshot node controller started and caches synced" {
+		s.once.Do(func() {
+			s.ready.Store(true)
+			close(s.started)
+		})
+	}
+}
+func (*controllerStartedLogSink) Error(error, string, ...any) {}
+func (s *controllerStartedLogSink) WithValues(...any) logr.LogSink {
+	return s
+}
+func (s *controllerStartedLogSink) WithName(string) logr.LogSink {
+	return s
+}
+
+func informerRaceContent(name, snapshotName string) *snapshotv1alpha1.PodSnapshotContent {
+	return &snapshotv1alpha1.PodSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   name,
+			UID:    ktypes.UID(name + "-uid"),
+			Labels: map[string]string{snapshotv1alpha1.SnapshotNodeLabel: testNodeName},
+		},
+		Spec: snapshotv1alpha1.PodSnapshotContentSpec{
+			PodSnapshotRef: snapshotv1alpha1.PodSnapshotReference{
+				Namespace: "inference",
+				Name:      snapshotName,
+				UID:       ktypes.UID(snapshotName + "-uid"),
+			},
+			Source: snapshotv1alpha1.PodSnapshotContentSource{
+				PodRef: snapshotv1alpha1.PodReference{
+					Name:       "source-" + name,
+					UID:        ktypes.UID("source-" + name + "-uid"),
+					Containers: []string{"main"},
+				},
+				NodeName: testNodeName,
+			},
+		},
+	}
+}
+
+func informerRaceSourcePod(content *snapshotv1alpha1.PodSnapshotContent) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: content.Spec.PodSnapshotRef.Namespace,
+			Name:      content.Spec.Source.PodRef.Name,
+			UID:       content.Spec.Source.PodRef.UID,
+			Labels:    map[string]string{},
+		},
+		Spec: corev1.PodSpec{NodeName: testNodeName},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:        "main",
+				Ready:       true,
+				ContainerID: "containerd://content-b-container",
+				State:       corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			}},
+		},
+	}
+}
+
+func (h *contentInformerBarrierHarness) deliver(content *snapshotv1alpha1.PodSnapshotContent) {
+	h.t.Helper()
+	_, err := h.dynamicClient.Resource(podSnapshotContentGVR).Create(
+		context.Background(), mustUnstructured(h.t, content), metav1.CreateOptions{},
+	)
+	require.NoError(h.t, err)
+}
+
+func (h *contentInformerBarrierHarness) requireBarrier(barrier <-chan struct{}, message string) {
+	h.t.Helper()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-barrier:
+		return
+	case <-timer.C:
+		require.FailNow(h.t, message)
+	}
+}
+
+func (h *contentInformerBarrierHarness) assertNoCaptureEvidence(contentName string) {
+	h.t.Helper()
+	assert.Zero(h.t, h.checkpointCalls.Load(), "checkpoint seam must not be called")
+	assert.Zero(h.t, h.contentStatusWrites.Load(), "agent must not publish Ready or Failed")
+	for _, action := range h.controller.clientset.(*fake.Clientset).Actions() {
+		assert.NotEqual(h.t, "leases", action.GetResource().Resource, "capture lease must not be accessed")
+	}
+	stored := &snapshotv1alpha1.PodSnapshotContent{}
+	err := h.controller.client.Get(context.Background(), client.ObjectKey{Name: contentName}, stored)
+	require.NoError(h.t, err)
+	assert.Nil(h.t, meta.FindStatusCondition(stored.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady), "content must have no Ready agent result")
+	assert.Nil(h.t, meta.FindStatusCondition(stored.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed), "content must have no Failed agent result")
+}
+
+func (h *contentInformerBarrierHarness) stop() {
+	closeBarrier(h.releaseContentB)
+	closeBarrier(h.releaseContentA)
+	closeBarrier(h.releaseCheckpoint)
+	h.cancel()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	select {
+	case err := <-h.runDone:
+		if h.controllerReady.Load() {
+			assert.NoError(h.t, err)
+		}
+	case <-timer.C:
+		h.t.Error("node controller did not stop")
+	}
+}
+
+func closeBarrier(barrier chan struct{}) {
+	select {
+	case <-barrier:
+	default:
+		close(barrier)
+	}
+}
+
+func TestNodeController_ContentInformerDoesNotBlockLaterWork(t *testing.T) {
+	t.Run("blocked reconciliation does not block later content", func(t *testing.T) {
+		h := newContentInformerBarrierHarness(t, false)
+		h.deliver(informerRaceContent("content-a", "snapshot-a"))
+		h.requireBarrier(h.contentAGet, "content A did not enter live reconciliation")
+
+		h.deliver(informerRaceContent("content-b", "snapshot-b"))
+		h.requireBarrier(h.contentBGet,
+			"content B did not reach the live Get boundary while content A reconciliation was blocked")
+		h.assertNoCaptureEvidence("content-b")
+	})
+
+	t.Run("released reconciliation allows later content", func(t *testing.T) {
+		h := newContentInformerBarrierHarness(t, false)
+		h.deliver(informerRaceContent("content-a", "snapshot-a"))
+		h.requireBarrier(h.contentAGet, "content A did not enter live reconciliation")
+		closeBarrier(h.releaseContentA)
+
+		h.deliver(informerRaceContent("content-b", "snapshot-b"))
+		h.requireBarrier(h.contentBGet,
+			"content B did not reach the live Get boundary after content A reconciliation was released")
+		h.assertNoCaptureEvidence("content-b")
+	})
+
+	t.Run("content reaches capture pipeline", func(t *testing.T) {
+		h := newContentInformerBarrierHarness(t, true)
+		h.deliver(informerRaceContent("content-b", "snapshot-b"))
+		h.requireBarrier(h.contentBGet, "content B did not reach the live Get boundary")
+		h.requireBarrier(h.leaseCreated, "content B did not acquire its capture lease")
+		h.requireBarrier(h.checkpointEntered, "content B did not reach the checkpoint seam")
+		closeBarrier(h.releaseCheckpoint)
+		h.requireBarrier(h.contentReady, "content B did not publish Ready after checkpoint success")
+		h.requireBarrier(h.leaseDeleted, "content B did not release its capture lease")
+
+		stored := &snapshotv1alpha1.PodSnapshotContent{}
+		require.NoError(t, h.controller.client.Get(context.Background(), client.ObjectKey{Name: "content-b"}, stored))
+		assert.Equal(t, int32(1), h.checkpointCalls.Load())
+		assert.NotNil(t, meta.FindStatusCondition(stored.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+		assert.Nil(t, meta.FindStatusCondition(stored.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
+	})
 }
 
 func testScheme(t *testing.T) *runtime.Scheme {

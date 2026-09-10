@@ -18,7 +18,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
@@ -49,9 +48,9 @@ type CheckpointParams struct {
 // reconcilePodSnapshotContent is the pre-bind gate for a PodSnapshotContent work order. It validates the
 // source pod (existence and provenance) and, when the pod is valid, promotes it by adding
 // CaptureEligibleLabel — it never runs the capture flow itself. The source-pod informer (keyed on that
-// label) then drives the capture path. Driven by the content informer (Add/Update) and its 10s resync;
-// the resync is the backstop that eventually writes a terminal failure for a work order whose source
-// pod is gone.
+// label) then drives the capture path. Driven by content workqueue workers fed from the content informer
+// (Add/Update) and its 10s resync; the resync is the backstop that eventually writes a terminal failure
+// for a work order whose source pod is gone.
 func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name string) {
 	logger := logr.FromContextOrDiscard(ctx).WithValues("content", name)
 
@@ -67,10 +66,7 @@ func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name s
 	if content.Spec.Source.NodeName != w.config.NodeName {
 		return
 	}
-	if !content.DeletionTimestamp.IsZero() {
-		return
-	}
-	if isContentTerminal(content) {
+	if !contentActionable(content) {
 		return
 	}
 
@@ -163,8 +159,8 @@ func (w *NodeController) captureLeaseHeldElsewhere(ctx context.Context, content 
 		*lease.Spec.HolderIdentity != w.holderID
 }
 
-// failContentFromGate records a terminal failure from the pre-bind gate, which has no workqueue
-// to surface errors to: a failed status write is logged and left to the informer resync.
+// failContentFromGate records a terminal failure from the pre-bind gate, which surfaces no errors
+// onto the content workqueue: a failed status write is logged and left to the informer resync.
 func (w *NodeController) failContentFromGate(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, reason string, cause error) {
 	if err := w.setSnapshotContentFailed(ctx, content, reason, cause); err != nil {
 		logr.FromContextOrDiscard(ctx).Error(err, "Failed to write PodSnapshotContent failed status", "content", content.Name)
@@ -668,21 +664,4 @@ func artifactPresent(destination, contentUID, containerName string) bool {
 	return err == nil &&
 		manifest.Artifact.ContentUID == contentUID &&
 		manifest.Artifact.ContainerName == containerName
-}
-
-// contentNameFromInformerObj extracts the object name from a dynamic informer object,
-// handling the DeletedFinalStateUnknown tombstone.
-func contentNameFromInformerObj(obj interface{}) (string, bool) {
-	if accessor, err := meta.Accessor(obj); err == nil {
-		return accessor.GetName(), true
-	}
-	tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
-	if !ok {
-		return "", false
-	}
-	accessor, err := meta.Accessor(tombstone.Obj)
-	if err != nil {
-		return "", false
-	}
-	return accessor.GetName(), true
 }
