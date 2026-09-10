@@ -28,7 +28,7 @@ type RestoreOptions struct {
 	CgroupRoot     string
 	TargetPodIP    string
 	// BundleDir is the path where the agent's binary bundle is mounted inside this namespace.
-	BundleDir string
+	BundleDir        string
 	ExtmemProviderFD int
 }
 
@@ -191,8 +191,15 @@ func executeRestore(
 	var provider *os.File
 	if opts.ExtmemProviderFD >= 0 {
 		provider = os.NewFile(uintptr(opts.ExtmemProviderFD), "criu-extmem-provider")
-		if provider == nil { return nil, 0, nil, fmt.Errorf("invalid external-memory provider FD") }
+		if provider == nil {
+			return nil, 0, nil, fmt.Errorf("invalid external-memory provider FD")
+		}
 	}
+	resetGPUExternalMounts, err := criu.ConfigureGPUExternalMounts(m)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	defer resetGPUExternalMounts()
 	criuPID, cleanup, prepare, restore, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, opts.BundleDir, provider, log)
 	if err != nil {
 		return nil, 0, nil, err

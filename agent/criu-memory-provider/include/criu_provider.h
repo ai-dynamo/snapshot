@@ -49,9 +49,23 @@ typedef int (*criu_provider_image_callback)(void *context,
 		const char *logical_image, uint64_t size,
 		enum criu_provider_image_role role);
 
-struct criu_provider_source_ops {
-	int (*read_range)(void *context, const char *logical_image,
-		uint64_t source_offset, void *buffer, size_t length);
+struct criu_provider_write_range {
+	/* The string and destination FD are borrowed for the callback call. */
+	const char *logical_image;
+	enum criu_provider_image_role image_role;
+	uint64_t source_offset;
+	uint64_t length;
+	int destination_fd;
+	uint64_t destination_offset;
+};
+
+typedef int (*criu_provider_write_ranges_callback)(void *context,
+		const struct criu_provider_write_range *ranges, size_t range_count);
+
+struct criu_provider_restore_ops {
+	/* Synchronously fill every destination range; do not retain or close FDs. */
+	criu_provider_write_ranges_callback write_ranges;
+	/* Return a newly opened FD. The library takes ownership on success. */
 	int (*open_ready_image)(void *context, const char *logical_image,
 		int open_flags);
 };
@@ -75,7 +89,7 @@ int criu_provider_dump_plan_add_image(criu_provider_plan *plan,
 		enum criu_provider_dump_mode dump_mode);
 
 int criu_provider_session_create(const criu_provider_plan *plan,
-		const struct criu_provider_source_ops *source_ops, void *source_context,
+		const struct criu_provider_restore_ops *restore_ops, void *restore_context,
 		criu_provider_session **out);
 int criu_provider_session_prepare(criu_provider_session *session);
 int criu_provider_session_serve(criu_provider_session *session,
@@ -83,9 +97,12 @@ int criu_provider_session_serve(criu_provider_session *session,
 void criu_provider_session_destroy(criu_provider_session *session);
 
 struct criu_provider_dump_ops {
+	/* Return a newly opened writable FD. The library takes ownership. */
 	int (*open_output_image)(void *context, const char *logical_image,
 		int open_flags);
+	/* Finalize provider output after CRIU commits. Plan contains dump rules. */
 	int (*commit)(void *context, const criu_provider_plan *plan);
+	/* Discard backend staging. This must be safe after a failed commit. */
 	void (*abort)(void *context);
 };
 

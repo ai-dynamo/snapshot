@@ -58,9 +58,12 @@ int ValidatePlan(const Plan &plan)
 	if (plan.format_major() != 1 || plan.format_minor() != 0 || plan.page_size() == 0)
 		return -EPROTONOSUPPORT;
 	std::map<std::string, uint64_t> images;
+	std::set<std::string> metadata_images;
 	for (const auto &image : plan.images()) {
 		if (!ValidName(image.name()) || !images.emplace(image.name(), image.size()).second)
 			return -EINVAL;
+		if (image.role() == criu_provider::v1::Image::METADATA)
+			metadata_images.emplace(image.name());
 	}
 	std::set<std::tuple<std::string, std::string, int>> rules;
 	for (const auto &rule : plan.image_rules()) {
@@ -75,7 +78,8 @@ int ValidatePlan(const Plan &plan)
 	std::set<std::tuple<uint32_t, uint32_t, uint64_t, uint64_t>> vmas;
 	std::set<std::tuple<uint64_t, uint64_t>> shared;
 	for (const auto &object : plan.objects()) {
-		if (!ValidName(object.key()) || object.length() == 0 ||
+		if (!ValidName(object.key()) || metadata_images.count(object.key()) ||
+			object.length() == 0 ||
 			!objects.emplace(object.key(), object.length()).second)
 			return -EINVAL;
 		if (object.kind() == criu_provider::v1::Object::PRIVATE_VMA) {

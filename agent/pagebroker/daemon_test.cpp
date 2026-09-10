@@ -137,8 +137,11 @@ TEST_F(BrokerTest, PreparesDirectRestoreAndReleasesItOnAbort)
   auto wait = RequestFor("direct");
   wait.mutable_wait_direct_restore();
   const auto ready = broker().HandleRequest(wait);
-  ASSERT_TRUE(ready.has_direct_restore_ready());
-  EXPECT_TRUE(fs::exists(fs::path(ready.direct_restore_ready().image_directory()) / "pages-1.img"));
+  ASSERT_TRUE(ready.has_direct_restore_ready()) << ready.DebugString();
+  const fs::path image_directory(ready.direct_restore_ready().image_directory());
+  EXPECT_TRUE(fs::exists(image_directory / "inventory.img"));
+  EXPECT_FALSE(fs::exists(image_directory / "pages-1.img"));
+  EXPECT_FALSE(fs::exists(image_directory / "criu-provider_plan.json"));
   const int provider_socket = broker().TakeDirectRestoreSocket("direct");
   ASSERT_GE(provider_socket, 0);
   close(provider_socket);

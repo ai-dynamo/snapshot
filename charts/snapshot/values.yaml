@@ -122,6 +122,8 @@ pageBroker:
     enabled: false
     prefix: ""
     mover: model-streamer
+    chunkBytes: "16777216"
+    modelStreamerConcurrency: "48"
     credentialsSecretRef: ""
 
 # DaemonSet configuration for the checkpoint/restore agent

@@ -132,6 +132,10 @@ spec:
               value: {{ .Values.pageBroker.s3.mover | quote }}
             - name: PAGEBROKER_S3_PREFIX
               value: {{ .Values.pageBroker.s3.prefix | quote }}
+            - name: RUNAI_STREAMER_CHUNK_BYTESIZE
+              value: {{ .Values.pageBroker.s3.chunkBytes | quote }}
+            - name: RUNAI_STREAMER_CONCURRENCY
+              value: {{ .Values.pageBroker.s3.modelStreamerConcurrency | quote }}
           {{- if .Values.pageBroker.s3.credentialsSecretRef }}
           envFrom:
             - secretRef:

@@ -190,18 +190,19 @@ func TestResolveManifestPIDsToObservedPIDs(t *testing.T) {
 		{ObservedPID: 50, ParentPID: 0, OutermostPID: 50, InnermostPID: 50, NamespacePIDs: []int{50}, Cmdline: "nsrestore"},
 		{ObservedPID: 74, ParentPID: 50, OutermostPID: 74, InnermostPID: 1, NamespacePIDs: []int{74, 1}, Cmdline: "python3 -m dynamo.vllm"},
 		{ObservedPID: 80, ParentPID: 74, OutermostPID: 80, InnermostPID: 750, NamespacePIDs: []int{80, 750}, Cmdline: "VLLM::EngineCore"},
+		{ObservedPID: 82, ThreadGroupPID: 80, ParentPID: 74, OutermostPID: 82, InnermostPID: 78, NamespacePIDs: []int{82, 78}, Cmdline: "VLLM::EngineCore"},
 		{ObservedPID: 81, ParentPID: 74, OutermostPID: 81, InnermostPID: 749, NamespacePIDs: []int{81, 749}, Cmdline: "resource_tracker"},
 	}
 
-	resolved, err := ResolveManifestPIDsToObservedPIDs(processes, 74, []int{1, 750})
+	resolved, err := ResolveManifestPIDsToObservedPIDs(processes, 74, []int{1, 750, 78})
 	if err != nil {
 		t.Fatalf("ResolveManifestPIDsToObservedPIDs(...) returned error: %v", err)
 	}
-	if len(resolved) != 2 {
-		t.Fatalf("len(resolved) = %d, want 2", len(resolved))
+	if len(resolved) != 3 {
+		t.Fatalf("len(resolved) = %d, want 3", len(resolved))
 	}
-	if resolved[0] != 74 || resolved[1] != 80 {
-		t.Fatalf("resolved PIDs = %v, want [74 80]", resolved)
+	if resolved[0] != 74 || resolved[1] != 80 || resolved[2] != 82 {
+		t.Fatalf("resolved PIDs = %v, want [74 80 82]", resolved)
 	}
 }
 

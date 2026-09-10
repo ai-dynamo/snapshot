@@ -26,7 +26,7 @@ ARG GO_VERSION=1.26.6
 #   --build-arg CRIU_REPO=<git-remote-url>
 #   --build-arg CRIU_REF=<fork-branch-or-sha>
 ARG CRIU_REPO=https://github.com/dfeigin-nv/criu.git
-ARG CRIU_REF=78ef07f8d84bf2f8cd7d982ef1f99244274f0222
+ARG CRIU_REF=4675dcf3187dbdcea3afb2831e7487238ea214a2
 ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04@sha256:8315e2455736c4f9b597f15c5fb4d31f834e798e0c6b66bbdbdbac491ce26bd1
 ARG S3_RUNTIME_IMAGE=nvcr.io/nvidian/dynamo-dev/dynamo-vllm-placeholder:cs11584-lz4
 
@@ -172,7 +172,12 @@ RUN git init /tmp/criu \
     && cd /tmp/criu \
     && git remote add origin ${CRIU_REPO} \
     && git fetch --depth 1 origin ${CRIU_REF} \
-    && git checkout FETCH_HEAD \
+    && git checkout FETCH_HEAD
+
+COPY patches/criu-gpu-mount-remap.patch /tmp/criu-gpu-mount-remap.patch
+
+RUN cd /tmp/criu \
+    && git apply --unidiff-zero /tmp/criu-gpu-mount-remap.patch \
     && make -j$(nproc) \
     && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
 

@@ -4,11 +4,8 @@
 #include "broker.hpp"
 
 #include <sys/statvfs.h>
-#include <fcntl.h>
-#include <unistd.h>
 
 #include <filesystem>
-#include <array>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -100,61 +97,24 @@ HasAvailableSpace(const Path& filesystem, uintmax_t required_bytes)
   return statvfs(filesystem.c_str(), &stat) == 0 && uintmax_t(stat.f_bavail) * stat.f_frsize >= required_bytes;
 }
 
-struct RangeCopyContext {
-  Path source;
-  Path destination;
-};
-
-int
-CopyRange(void* context, const char* image, uint64_t offset, uint64_t length)
-{
-  auto& paths = *static_cast<RangeCopyContext*>(context);
-  const Path source = paths.source / image;
-  const Path destination = paths.destination / image;
-  const int input = open(source.c_str(), O_RDONLY | O_CLOEXEC);
-  if (input < 0) return -errno;
-  const int output = open(destination.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0600);
-  if (output < 0) { const int error = -errno; close(input); return error; }
-  std::array<char, 1 << 20> buffer;
-  uint64_t copied = 0;
-  while (copied < length) {
-    const size_t count = std::min<uint64_t>(buffer.size(), length - copied);
-    const ssize_t read_bytes = pread(input, buffer.data(), count, offset + copied);
-    const ssize_t written = read_bytes == static_cast<ssize_t>(count) ?
-        pwrite(output, buffer.data(), count, offset + copied) : -1;
-    if (read_bytes != static_cast<ssize_t>(count) || written != static_cast<ssize_t>(count)) {
-      const int error = errno ? -errno : -EIO;
-      close(output); close(input); return error;
-    }
-    copied += count;
-  }
-  close(output); close(input); return 0;
-}
-
 void
 StageDirectRestore(const Path& source, const Path& destination)
 {
   fs::create_directories(destination);
   const bool s3 = S3RangeReaderEnabled();
-  for (const auto& entry : fs::directory_iterator(source)) {
-    if (!entry.is_regular_file() || entry.is_symlink())
-      throw std::runtime_error("direct restore source contains unsupported entry");
-    const std::string name = entry.path().filename();
-    if (name.rfind("pages-", 0) == 0 ||
-        (s3 && name != "inventory.img" && name != "manifest.yaml" &&
-         name != "files.img" && name != "criu-provider_plan.json"))
-      continue;
-    fs::copy_file(entry.path(), destination / name, fs::copy_options::overwrite_existing);
+  if (s3) {
+    StageLocalImagesFromS3(destination);
+  } else {
+    for (const auto& entry : fs::directory_iterator(source)) {
+      if (!entry.is_regular_file() || entry.is_symlink())
+        throw std::runtime_error("direct restore source contains unsupported entry");
+      const std::string name = entry.path().filename();
+      if (name.rfind("pages-", 0) == 0 || name == "criu-provider_plan.json")
+        continue;
+      fs::copy_file(entry.path(), destination / name,
+                    fs::copy_options::overwrite_existing);
+    }
   }
-  criu_provider_plan* plan = nullptr;
-  if (criu_provider_plan_load(
-          (destination / "criu-provider_plan.json").c_str(), &plan) != 0)
-    throw std::runtime_error("direct restore plan is unavailable");
-  RangeCopyContext context{source, destination};
-  const int copied = s3 ? 0 : criu_provider_plan_enumerate_source_ranges(plan, CopyRange, &context);
-  criu_provider_plan_destroy(plan);
-  if (copied != 0)
-    throw std::runtime_error("direct restore range prefetch failed");
 }
 
 Path
@@ -380,21 +340,18 @@ Broker::DirectRestore(const Request& request)
     throw std::invalid_argument("direct restore requires filesystem storage and POSIX I/O");
   Engine(operation.io_engine()).RestoreSize(source);
   const Path source_directory = source.filesystem().directory();
-  criu_provider_plan* plan = nullptr;
+  criu_provider_plan* loaded_plan = nullptr;
   if (criu_provider_plan_load(
-          (source_directory / "criu-provider_plan.json").c_str(), &plan) != 0)
+          (source_directory / "criu-provider_plan.json").c_str(), &loaded_plan) != 0)
     throw std::invalid_argument("direct restore plan is unavailable");
+  std::unique_ptr<criu_provider_plan, decltype(&criu_provider_plan_destroy)> plan(
+      loaded_plan, criu_provider_plan_destroy);
   criu_provider_requirements requirements{};
-  const int requirements_status = criu_provider_plan_requirements(plan, &requirements);
-  criu_provider_plan_destroy(plan);
-  std::error_code plan_size_error;
-  const uintmax_t plan_bytes = fs::file_size(
-      source_directory / "criu-provider_plan.json", plan_size_error);
-  if (requirements_status != 0 || plan_size_error ||
-      requirements.stored_bytes > UINTMAX_MAX - requirements.metadata_bytes ||
-      requirements.stored_bytes + requirements.metadata_bytes > UINTMAX_MAX - plan_bytes)
+  const int requirements_status = criu_provider_plan_requirements(plan.get(), &requirements);
+  if (requirements_status != 0 ||
+      requirements.stored_bytes > UINTMAX_MAX - requirements.metadata_bytes)
     throw std::invalid_argument("direct restore plan is invalid");
-  const uintmax_t staging_bytes = requirements.stored_bytes + requirements.metadata_bytes + plan_bytes;
+  const uintmax_t staging_bytes = requirements.stored_bytes + requirements.metadata_bytes;
   const Path directory = TransactionDirectory(staging_root_ / "restore", request.transaction_id());
   auto transaction = CreateOrGetTransaction(request.transaction_id());
   std::lock_guard lock(transaction->mutex());
@@ -404,7 +361,8 @@ Broker::DirectRestore(const Request& request)
     return Fail(request, Failure::INSUFFICIENT_STORAGE, "insufficient tmpfs capacity");
   try {
     transaction->set_state(Transaction::State::PREPARING);
-    DirectRestoreTransactionDescriptor descriptor(directory, staging_bytes);
+    DirectRestoreTransactionDescriptor descriptor(
+        source_directory, directory, staging_bytes, plan.release());
     transaction->set_descriptor(std::move(descriptor));
     auto* stored = std::get_if<DirectRestoreTransactionDescriptor>(&transaction->descriptor());
     stored->Start([source_directory](const Path& staging) { StageDirectRestore(source_directory, staging); });

@@ -22,12 +22,13 @@ const HostProcPath = "/host/proc"
 // ProcessDetails captures the parent link plus the observed, outermost, and innermost
 // PID views for one proc entry. ObservedPID is relative to the proc root being read.
 type ProcessDetails struct {
-	ObservedPID   int
-	ParentPID     int
-	OutermostPID  int
-	InnermostPID  int
-	NamespacePIDs []int
-	Cmdline       string
+	ObservedPID    int
+	ThreadGroupPID int
+	ParentPID      int
+	OutermostPID   int
+	InnermostPID   int
+	NamespacePIDs  []int
+	Cmdline        string
 }
 
 // ReadProcessFilesystemIDs returns the filesystem UID and GID from a proc status entry.
@@ -80,17 +81,29 @@ func ReadProcessDetails(procRoot string, pid int) (ProcessDetails, error) {
 	if pid <= 0 {
 		return ProcessDetails{}, fmt.Errorf("invalid PID %d", pid)
 	}
+	return readProcessDetailsAt(filepath.Join(procRoot, strconv.Itoa(pid)), pid)
+}
 
-	statusPath := filepath.Join(procRoot, strconv.Itoa(pid), "status")
+func readProcessDetailsAt(procDir string, pid int) (ProcessDetails, error) {
+	statusPath := filepath.Join(procDir, "status")
 	statusBytes, err := os.ReadFile(statusPath)
 	if err != nil {
 		return ProcessDetails{}, fmt.Errorf("failed to read %s: %w", statusPath, err)
 	}
 	status := string(statusBytes)
 
+	threadGroupPID := pid
 	parentPID := 0
 	parentPIDFound := false
 	for _, line := range strings.Split(status, "\n") {
+		if strings.HasPrefix(line, "Tgid:") {
+			value := strings.TrimSpace(strings.TrimPrefix(line, "Tgid:"))
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				return ProcessDetails{}, fmt.Errorf("failed to parse Tgid value %q: %w", value, err)
+			}
+			threadGroupPID = parsed
+		}
 		if strings.HasPrefix(line, "PPid:") {
 			value := strings.TrimSpace(strings.TrimPrefix(line, "PPid:"))
 			parsed, err := strconv.Atoi(value)
@@ -132,23 +145,24 @@ func ReadProcessDetails(procRoot string, pid int) (ProcessDetails, error) {
 	}
 
 	cmdline := ""
-	if data, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "cmdline")); err == nil {
+	if data, err := os.ReadFile(filepath.Join(procDir, "cmdline")); err == nil {
 		cmdline = strings.TrimSpace(strings.ReplaceAll(string(data), "\x00", " "))
 	}
 	if cmdline == "" {
-		comm, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "comm"))
+		comm, err := os.ReadFile(filepath.Join(procDir, "comm"))
 		if err == nil {
 			cmdline = strings.TrimSpace(string(comm))
 		}
 	}
 
 	return ProcessDetails{
-		ObservedPID:   pid,
-		ParentPID:     parentPID,
-		OutermostPID:  nspids[0],
-		InnermostPID:  nspids[len(nspids)-1],
-		NamespacePIDs: nspids,
-		Cmdline:       cmdline,
+		ObservedPID:    pid,
+		ThreadGroupPID: threadGroupPID,
+		ParentPID:      parentPID,
+		OutermostPID:   nspids[0],
+		InnermostPID:   nspids[len(nspids)-1],
+		NamespacePIDs:  nspids,
+		Cmdline:        cmdline,
 	}, nil
 }
 
@@ -188,6 +202,22 @@ func ReadProcessTable(procRoot string) ([]ProcessDetails, error) {
 			continue
 		}
 		processes = append(processes, process)
+
+		tasks, err := os.ReadDir(filepath.Join(procRoot, entry.Name(), "task"))
+		if err != nil {
+			continue
+		}
+		for _, task := range tasks {
+			tid, err := strconv.Atoi(task.Name())
+			if err != nil || tid == pid {
+				continue
+			}
+			details, err := readProcessDetailsAt(
+				filepath.Join(procRoot, entry.Name(), "task", task.Name()), tid)
+			if err == nil {
+				processes = append(processes, details)
+			}
+		}
 	}
 
 	// Keep restore diagnostics deterministic by ordering on the manifest-facing PID view first.
@@ -217,32 +247,49 @@ func ResolveManifestPIDsToObservedPIDs(processes []ProcessDetails, restoredPID i
 	childrenByParentPID := make(map[int][]int, len(processes))
 	for _, process := range processes {
 		processByObservedPID[process.ObservedPID] = process
-		childrenByParentPID[process.ParentPID] = append(childrenByParentPID[process.ParentPID], process.ObservedPID)
+		threadGroupPID := process.ThreadGroupPID
+		if threadGroupPID == 0 {
+			threadGroupPID = process.ObservedPID
+		}
+		if threadGroupPID == process.ObservedPID {
+			childrenByParentPID[process.ParentPID] = append(
+				childrenByParentPID[process.ParentPID], process.ObservedPID)
+		}
 	}
 
 	if _, ok := processByObservedPID[restoredPID]; !ok {
 		return nil, fmt.Errorf("restored root pid %d not found in process table", restoredPID)
 	}
 
-	innermostToObservedPID := map[int]int{}
+	restoredThreadGroups := map[int]struct{}{}
 	queue := []int{restoredPID}
 	for len(queue) > 0 {
 		pid := queue[0]
 		queue = queue[1:]
 
-		process, ok := processByObservedPID[pid]
-		if !ok {
+		if _, ok := processByObservedPID[pid]; !ok {
+			continue
+		}
+		restoredThreadGroups[pid] = struct{}{}
+		queue = append(queue, childrenByParentPID[pid]...)
+	}
+
+	innermostToObservedPID := map[int]int{}
+	for _, process := range processes {
+		threadGroupPID := process.ThreadGroupPID
+		if threadGroupPID == 0 {
+			threadGroupPID = process.ObservedPID
+		}
+		if _, ok := restoredThreadGroups[threadGroupPID]; !ok {
 			continue
 		}
 		if len(process.NamespacePIDs) != 2 {
-			return nil, fmt.Errorf("restored process %d has namespace depth %d, want 2", pid, len(process.NamespacePIDs))
+			return nil, fmt.Errorf("restored task %d has namespace depth %d, want 2", process.ObservedPID, len(process.NamespacePIDs))
 		}
 		if existingPID, ok := innermostToObservedPID[process.InnermostPID]; ok {
-			return nil, fmt.Errorf("multiple restored processes map to innermost pid %d: %d and %d", process.InnermostPID, existingPID, process.ObservedPID)
+			return nil, fmt.Errorf("multiple restored tasks map to innermost pid %d: %d and %d", process.InnermostPID, existingPID, process.ObservedPID)
 		}
-
 		innermostToObservedPID[process.InnermostPID] = process.ObservedPID
-		queue = append(queue, childrenByParentPID[pid]...)
 	}
 
 	restorePIDs := make([]int, 0, len(manifestPIDs))

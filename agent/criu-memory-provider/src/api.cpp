@@ -147,15 +147,16 @@ int criu_provider_dump_plan_add_image(criu_provider_plan *plan, const char *name
 }
 
 int criu_provider_session_create(const criu_provider_plan *plan,
-		const struct criu_provider_source_ops *ops, void *context,
+		const struct criu_provider_restore_ops *ops, void *context,
 		criu_provider_session **out)
 {
-	if (!plan || !ops || !ops->read_range || !ops->open_ready_image || !out || ValidatePlan(plan->value))
+	if (!plan || !ops || !ops->write_ranges || !ops->open_ready_image ||
+		!out || ValidatePlan(plan->value))
 		return -EINVAL;
 	auto *session = new criu_provider_session();
 	session->plan = plan;
-	session->source_ops = *ops;
-	session->source_context = context;
+	session->restore_ops = *ops;
+	session->restore_context = context;
 	*out = session;
 	return 0;
 }

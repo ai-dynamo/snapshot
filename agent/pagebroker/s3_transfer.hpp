@@ -8,4 +8,5 @@
 namespace snapshot::pagebroker {
 bool S3TransferEnabled();
 void PublishToS3(const Path& source);
+void StageLocalImagesFromS3(const Path& destination);
 }  // namespace snapshot::pagebroker

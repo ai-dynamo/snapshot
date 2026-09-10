@@ -44,4 +44,26 @@ void PublishToS3(const Path& source)
   if (waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
     throw std::runtime_error("s5cmd checkpoint upload failed");
 }
+
+void StageLocalImagesFromS3(const Path& destination)
+{
+  const char* prefix = Prefix();
+  if (!prefix) throw std::runtime_error("PAGEBROKER_S3_PREFIX must be an S3 URI");
+  std::string source(prefix);
+  while (source.size() > 5 && source.back() == '/') source.pop_back();
+  source += "/*";
+  std::string destination_path = destination.string() + "/";
+  const pid_t child = fork();
+  if (child < 0) throw std::runtime_error("fork s5cmd");
+  if (child == 0) {
+    execlp("s5cmd", "s5cmd", "sync", "--exclude", "*pages-*.img",
+           "--exclude", "*criu-provider_plan.json", source.c_str(),
+           destination_path.c_str(), nullptr);
+    _exit(127);
+  }
+  int status = 0;
+  if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
+      WEXITSTATUS(status) != 0)
+    throw std::runtime_error("s5cmd checkpoint metadata download failed");
+}
 }  // namespace snapshot::pagebroker

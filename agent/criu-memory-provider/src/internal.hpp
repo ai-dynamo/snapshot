@@ -18,8 +18,8 @@ struct ProviderFd {
 
 struct criu_provider_session {
 	const criu_provider_plan *plan = nullptr;
-	criu_provider_source_ops source_ops{};
-	void *source_context = nullptr;
+	criu_provider_restore_ops restore_ops{};
+	void *restore_context = nullptr;
 	std::map<std::string, ProviderFd> objects;
 	bool prepared = false;
 	bool active = false;

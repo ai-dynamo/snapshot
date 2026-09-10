@@ -1,0 +1,81 @@
+diff --git a/criu/mount-v2.c b/criu/mount-v2.c
+index 321f4c009..e5d0f10d2 100644
+--- a/criu/mount-v2.c
++++ b/criu/mount-v2.c
+@@ -1,0 +2 @@
++#include <stdlib.h>
+@@ -933,0 +935,12 @@ static int move_mount_set_group(int src_id, char *source, int dst_id)
++static bool is_remapped_gpu_mount(const char *source)
++{
++	const char *rules = getenv("CRIU_ADD_MOUNTS");
++	char prefix[PATH_MAX + sizeof("src=,")];
++
++	if (!rules || !source)
++		return false;
++	if (snprintf(prefix, sizeof(prefix), "src=%s,", source) >= sizeof(prefix))
++		return false;
++	return strstr(rules, prefix) != NULL;
++}
++
+@@ -967,2 +980,5 @@ static int restore_one_sharing(struct sharing_group *sg, struct mount_info *targ
+-				pr_err("Failed to copy sharing from source %s to %d\n", sg->source, target->mnt_id);
+-				goto err;
++				if (!is_remapped_gpu_mount(sg->source)) {
++					pr_err("Failed to copy sharing from source %s to %d\n", sg->source, target->mnt_id);
++					goto err;
++				}
++				pr_warn("Skipping private sharing source %s for remapped GPU mount\n", sg->source);
+diff --git a/criu/mount.c b/criu/mount.c
+index 58c8b2ede..6bc378e7a 100644
+--- a/criu/mount.c
++++ b/criu/mount.c
+@@ -108,0 +109,40 @@ static char *ext_mount_lookup(char *key)
++/*
++ * A runtime can assign a different host device while restoring a container.
++ * For this experiment CRIU_ADD_MOUNTS carries rules in the form
++ * "src=<new host path>,dst=<path saved in the image>".  Resolve the saved
++ * external mount to the newly assigned path before constructing mount sharing.
++ */
++static char *remap_external_mount(const char *external)
++{
++	const char *rules = getenv("CRIU_ADD_MOUNTS");
++	char *copy, *rule, *saveptr;
++
++	if (!rules || !*rules || !external)
++		return NULL;
++
++	copy = xstrdup(rules);
++	if (!copy)
++		return NULL;
++
++	for (rule = strtok_r(copy, ";", &saveptr); rule; rule = strtok_r(NULL, ";", &saveptr)) {
++		char *field, *field_saveptr;
++		char *src = NULL, *dst = NULL;
++
++		for (field = strtok_r(rule, ",", &field_saveptr); field;
++		     field = strtok_r(NULL, ",", &field_saveptr)) {
++			if (!strncmp(field, "src=", 4))
++				src = field + 4;
++			else if (!strncmp(field, "dst=", 4))
++				dst = field + 4;
++		}
++		if (src && dst && !strcmp(dst, external)) {
++			char *mapped = xstrdup(src);
++			xfree(copy);
++			return mapped;
++		}
++	}
++
++	xfree(copy);
++	return NULL;
++}
++
+@@ -3029,0 +3070,8 @@ static int get_mp_root(MntEntry *me, struct mount_info *mi)
++	if (ext) {
++		char *mapped = remap_external_mount(ext);
++
++		if (mapped) {
++			pr_info("Remap external mount %s to %s\n", ext, mapped);
++			mi->external = mapped;
++		}
++	}

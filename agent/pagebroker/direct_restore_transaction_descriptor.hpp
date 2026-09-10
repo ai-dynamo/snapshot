@@ -6,16 +6,21 @@
 #include <thread>
 #include <future>
 #include <functional>
+#include <vector>
 
+#include "s3_range_reader.hpp"
 #include "transfer_engine.hpp"
 
 struct criu_provider_plan;
 struct criu_provider_session;
+struct criu_provider_write_range;
 
 namespace snapshot::pagebroker {
 class DirectRestoreTransactionDescriptor {
  public:
-  DirectRestoreTransactionDescriptor(Path staging_directory, uintmax_t reserved_staging_bytes);
+  DirectRestoreTransactionDescriptor(Path source_directory, Path staging_directory,
+                                     uintmax_t reserved_staging_bytes,
+                                     criu_provider_plan* plan);
   ~DirectRestoreTransactionDescriptor();
   DirectRestoreTransactionDescriptor(const DirectRestoreTransactionDescriptor&) = delete;
   DirectRestoreTransactionDescriptor& operator=(const DirectRestoreTransactionDescriptor&) = delete;
@@ -31,7 +36,10 @@ class DirectRestoreTransactionDescriptor {
  private:
   static int ReadRange(void* context, const char* image, uint64_t offset, void* buffer, size_t length);
   static int OpenReadyImage(void* context, const char* image, int flags);
+  static int WriteRanges(void* context, const criu_provider_write_range* ranges,
+						 size_t range_count);
   void Close();
+  Path source_directory_;
   Path staging_directory_;
   uintmax_t reserved_staging_bytes_ = 0;
   criu_provider_plan* plan_ = nullptr;

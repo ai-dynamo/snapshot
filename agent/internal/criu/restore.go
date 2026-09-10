@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -27,6 +28,73 @@ const (
 	placeholderFDDir             = "/proc/1/fd"
 	restoreScratchTempDirPattern = "criu-restore-*"
 )
+
+const additionalMountsEnv = "CRIU_ADD_MOUNTS"
+
+// ConfigureGPUExternalMounts tells CRIU that the NVIDIA runtime supplied the
+// target device node for a GPU mount saved in the checkpoint. NVIDIA exposes
+// those nodes as private bind mounts, so CRIU must not copy mount propagation
+// from them. The returned function restores the nsrestore process environment.
+func ConfigureGPUExternalMounts(m *types.CheckpointManifest) (func(), error) {
+	if m == nil {
+		return func() {}, nil
+	}
+
+	devices := make(map[string]struct{})
+	for _, mount := range m.CRIUDump.ExtMnt {
+		if isGPUExternalMount(mount) {
+			devices[mount] = struct{}{}
+		}
+	}
+	if len(devices) == 0 {
+		return func() {}, nil
+	}
+
+	paths := make([]string, 0, len(devices))
+	for path := range devices {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
+	rules := make([]string, 0, len(paths))
+	for _, path := range paths {
+		rules = append(rules, "src="+path+",dst="+path)
+	}
+
+	previous, hadPrevious := os.LookupEnv(additionalMountsEnv)
+	value := strings.Join(rules, ";")
+	if previous != "" {
+		value = previous + ";" + value
+	}
+	if err := os.Setenv(additionalMountsEnv, value); err != nil {
+		return nil, fmt.Errorf("set %s: %w", additionalMountsEnv, err)
+	}
+
+	return func() {
+		if hadPrevious {
+			_ = os.Setenv(additionalMountsEnv, previous)
+		} else {
+			_ = os.Unsetenv(additionalMountsEnv)
+		}
+	}, nil
+}
+
+func isGPUExternalMount(path string) bool {
+	if strings.HasPrefix(path, "/usr/lib/firmware/nvidia/") {
+		return true
+	}
+
+	const prefix = "/dev/nvidia"
+	if !strings.HasPrefix(path, prefix) || len(path) == len(prefix) {
+		return false
+	}
+	for _, char := range path[len(prefix):] {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
 
 // ExecuteRestore opens the image/work directory FDs, configures inherited
 // resources, and calls go-criu Restore. Returns the namespace-relative PID.

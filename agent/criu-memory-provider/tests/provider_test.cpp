@@ -23,15 +23,40 @@
 #include "extmem.pb.h"
 
 namespace {
-int Read(void *, const char *image, uint64_t offset, void *buffer, size_t length)
+int Open(void *, const char *image, int) { return !std::strcmp(image, "memfd.img") ? -ENOENT : -1; }
+
+struct WriteState {
+	size_t calls = 0;
+	size_t writes = 0;
+};
+
+int WritePrepared(void *context, const criu_provider_write_range *ranges,
+		size_t range_count)
 {
 	static constexpr char bytes[] = "abcdefgh";
-	if (std::strcmp(image, "pages-1.img") || offset + length > sizeof(bytes) - 1) return -EINVAL;
-	std::memcpy(buffer, bytes + offset, length);
+	auto *state = static_cast<WriteState *>(context);
+	if (state) {
+		++state->calls;
+		state->writes = range_count;
+	}
+	for (size_t index = 0; index < range_count; ++index) {
+		const auto &write = ranges[index];
+		if (!write.length) {
+			if (write.image_role != CRIU_PROVIDER_IMAGE_METADATA) return -EINVAL;
+			continue;
+		}
+		if (std::strcmp(write.logical_image, "pages-1.img") ||
+		    write.image_role != CRIU_PROVIDER_IMAGE_PAGES ||
+		    write.source_offset || write.length != sizeof(bytes) - 1 ||
+		    write.destination_offset != 4096)
+			return -EINVAL;
+		const ssize_t written = pwrite(write.destination_fd, bytes,
+				sizeof(bytes) - 1, write.destination_offset);
+		if (written != sizeof(bytes) - 1)
+			return written < 0 ? -errno : -EIO;
+	}
 	return 0;
 }
-
-int Open(void *, const char *image, int) { return !std::strcmp(image, "memfd.img") ? -ENOENT : -1; }
 
 int OpenDump(void *, const char *, int) { return -1; }
 int CommitDump(void *, const criu_provider_plan *) { return 0; }
@@ -83,6 +108,7 @@ criu_provider_plan Plan()
 	auto *value = &plan.value;
 	value->set_format_major(1); value->set_page_size(4096);
 	auto *image = value->add_images(); image->set_name("pages-1.img"); image->set_size(8);
+	image->set_role(criu_provider::v1::Image::PAGES);
 	image->set_restore_mode(criu_provider::v1::Image::RESTORE_PROVIDER_FD);
 	auto *missing = value->add_images(); missing->set_name("memfd.img");
 	missing->set_role(criu_provider::v1::Image::METADATA);
@@ -185,9 +211,28 @@ TEST(Materializer, PreservesSparseHole)
 {
 	auto plan = Plan();
 	criu_provider_session *session = nullptr;
-	const criu_provider_source_ops ops{Read, Open};
+	const criu_provider_restore_ops ops{WritePrepared, Open};
 	ASSERT_EQ(criu_provider_session_create(&plan, &ops, nullptr, &session), 0);
 	ASSERT_EQ(criu_provider_session_prepare(session), 0);
+	const auto &object = session->objects.at("vma:17:3");
+	std::array<char, 8> bytes{};
+	ASSERT_EQ(pread(object.fd, bytes.data(), bytes.size(), 0), 8);
+	EXPECT_EQ(std::string(bytes.data(), bytes.size()), std::string(8, '\0'));
+	ASSERT_EQ(pread(object.fd, bytes.data(), bytes.size(), 4096), 8);
+	EXPECT_EQ(std::string(bytes.data(), bytes.size()), "abcdefgh");
+	criu_provider_session_destroy(session);
+}
+
+TEST(Materializer, LetsBackendWritePreparedFds)
+{
+	auto plan = Plan();
+	criu_provider_session *session = nullptr;
+	const criu_provider_restore_ops ops{WritePrepared, Open};
+	WriteState state;
+	ASSERT_EQ(criu_provider_session_create(&plan, &ops, &state, &session), 0);
+	ASSERT_EQ(criu_provider_session_prepare(session), 0);
+	EXPECT_EQ(state.calls, 1);
+	EXPECT_EQ(state.writes, 1);
 	const auto &object = session->objects.at("vma:17:3");
 	std::array<char, 8> bytes{};
 	ASSERT_EQ(pread(object.fd, bytes.data(), bytes.size(), 0), 8);
@@ -201,7 +246,7 @@ TEST(Protocol, ServesPreparedVmasAndRejectsUnknownImages)
 {
 	auto plan = Plan();
 	criu_provider_session *session = nullptr;
-	const criu_provider_source_ops ops{Read, Open};
+	const criu_provider_restore_ops ops{WritePrepared, Open};
 	ASSERT_EQ(criu_provider_session_create(&plan, &ops, nullptr, &session), 0);
 	ASSERT_EQ(criu_provider_session_prepare(session), 0);
 	int sockets[2];
@@ -278,6 +323,12 @@ TEST(Protocol, ServesPreparedVmasAndRejectsUnknownImages)
 	response.Clear();
 	EXPECT_EQ(ReceiveResponse(sockets[0], &response), -1);
 	EXPECT_EQ(response.status(), -EPROTO);
+	vma.mutable_get_vma()->set_vma_id(4);
+	vma.mutable_get_vma()->set_length(8192);
+	ASSERT_EQ(SendRequest(sockets[0], vma), 0);
+	response.Clear();
+	EXPECT_EQ(ReceiveResponse(sockets[0], &response), -1);
+	EXPECT_EQ(response.status(), -ENOTSUP);
 
 	extmem_req commit;
 	commit.set_op(EXTMEM_COMMIT);
@@ -321,6 +372,8 @@ TEST(Plan, RejectsTraversalAndOutOfRangeChunk)
 	plan = Plan();
 	auto *duplicate = plan.value.add_objects(); *duplicate = plan.value.objects(0);
 	duplicate->set_key("vma:17:other");
+	EXPECT_EQ(criu_provider_plan_requirements(&plan, &requirements), -EINVAL);
+	plan = Plan(); plan.value.mutable_images(1)->set_name("vma:17:3");
 	EXPECT_EQ(criu_provider_plan_requirements(&plan, &requirements), -EINVAL);
 }
 

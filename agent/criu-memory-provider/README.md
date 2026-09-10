@@ -1,8 +1,8 @@
 # CRIU memory provider
 
-This builds `build/libcriu_provider.a`, the provider side of CRIU external
-memory.  It reads CRIU checkpoint metadata, prepares sparse FDs, and serves
-them to CRIU over Unix `SOCK_SEQPACKET`.
+This builds `build/libcriu_provider.a`, a library for implementing CRIU's
+external-memory provider.  It creates checkpoint plans, prepares sparse FDs,
+and serves CRIU's Unix `SOCK_SEQPACKET` protocol.
 
 ## Using the library in a provider
 
@@ -12,70 +12,89 @@ example backend.
 
 You implement these callbacks:
 
-- restore: `read_range()` to return already-local checkpoint bytes, and
-  `open_ready_image()` for a local image FD when needed;
+- restore: `write_ranges()` puts checkpoint bytes directly into the library's
+  FDs; `open_ready_image()` opens staged metadata images;
 - dump: `open_output_image()` to return a writable staging FD, plus `commit()`
   and `abort()` for the backend transaction.
 
-The library implements CRIU image reading, plan creation and validation,
-sparse-FD creation and filling, and the dump and restore `SOCK_SEQPACKET`
-protocol.  You do not implement the CRIU protocol or fill the provider FDs.
+The split is:
+
+- the backend owns storage, transactions, staging, and starting CRIU;
+- this library owns plan validation, sparse FDs, and the provider protocol;
+- CRIU requests and maps the FDs, falls back to local images when allowed, and
+  applies saved memfd seals.
 
 For checkpoint:
 
 ```text
 create dump session -> give CRIU one socket endpoint -> serve dump session
--> on COMMIT, create and write criu-provider_plan.json -> publish staging
+-> in the COMMIT callback, index staging and write criu-provider_plan.json
+-> publish staging
 ```
 
 For restore:
 
 ```text
-load plan -> enumerate and stage its bytes -> create and prepare session
+load the local plan -> create and prepare session
+-> write_ranges supplies the requested bytes -> stage ready-local images
 -> give CRIU one socket endpoint -> serve restore session
 ```
 
-The backend gives the library only local bytes and FDs through callbacks. It
-does not give it storage URLs, credentials, or backend-specific objects. The
-library never fetches data.
+The backend supplies bytes through callbacks.  It does not give the library
+storage URLs, credentials, or backend-specific objects.  The library never
+fetches data itself.
 
 ## C API
 
 The complete API is [`include/criu_provider.h`](include/criu_provider.h).  It
 uses opaque C handles, so a backend can call it from C++, Rust, Go, or C.
+Functions return `0` on success and a negative errno value on failure.  An FD
+callback returns a non-negative FD or a negative errno value.
 
 | API | What the backend does | What happens |
 | --- | --- | --- |
 | `criu_provider_plan_from_checkpoint()` | Pass a finished local checkpoint directory. | Reads CRIU metadata and builds a plan. |
 | `criu_provider_plan_write()` / `_load()` | Write or load `criu-provider_plan.json`. | Stores or validates the JSON plan. |
 | `_requirements()`, `_enumerate_source_ranges()`, `_enumerate_images()` | Reserve resources and stage listed inputs. | Reports exactly what preparation needs. |
-| `criu_provider_session_*()` | Pass restore callbacks and a `SOCK_SEQPACKET` FD. | Prepares restore FDs and serves CRIU. |
+| `criu_provider_session_prepare()` | Write planned ranges into borrowed restore FDs. | Creates the restore FDs and calls `write_ranges()` once. |
+| `criu_provider_session_serve()` | Pass a `SOCK_SEQPACKET` FD. | Serves the prepared FDs to CRIU. |
 | `criu_provider_dump_session_*()` | Pass writable-output, commit, and abort callbacks. | Serves CRIU dump output; flushes FDs, then calls commit or abort. |
 
-Keep the plan and callback context alive until its session is destroyed.
+Keep the plan and callback context alive until its session is destroyed.  A
+session owns its prepared and output FDs; destroying it closes any that remain.
 
 ### Restore callbacks
 
-`criu_provider_source_ops` has:
+`criu_provider_restore_ops` has:
 
-- `read_range()`: copy an already-local source range into the supplied buffer.
-  Return `0` or a negative errno-style error.
+- `write_ranges()`: write every supplied source range into its destination FD;
 - `open_ready_image()`: return an FD for a `RESTORE_READY_LOCAL` image when
   the session has no prepared FD for that image.
 
-`criu_provider_session_prepare()` performs all `read_range()` calls.  It must
-finish before CRIU starts; after it returns, the library does no more reads.
+`criu_provider_session_prepare()` creates the restore FDs and calls
+`write_ranges()` once with every source and destination range.  The callback is
+synchronous.  Destination FDs and range strings are borrowed: use them before
+returning, but do not retain or close them.  Each range includes the source
+image's plan role.  The library owns the FDs' size, layout, and lifetime.  The
+backend may fetch the ranges while preparation is in progress.
+
+`open_ready_image()` returns a newly opened FD.  Ownership passes to the
+library, which closes it after sending a duplicate to CRIU.
 
 ### Dump callbacks
 
 `criu_provider_dump_ops` has:
 
-- `open_output_image()`: return a writable FD for one CRIU image;
-- `commit()`: finish the backend's output transaction after CRIU `COMMIT`; and
+- `open_output_image()`: return a newly opened writable FD for one CRIU image;
+- `commit()`: finalize provider output and create the plan after CRIU `COMMIT`;
+  and
 - `abort()`: discard staging after `ABORT` or failure.
 
-The library flushes its output FDs before calling `commit()`.  If `commit()`
-fails, it calls `abort()`.  The library does not publish a checkpoint itself.
+Ownership of an output FD passes to the library.  It flushes all output FDs
+before calling `commit()` and closes them when the session finishes.  If
+`commit()` fails, it calls `abort()`.  The backend creates the final plan in the
+commit callback.  Publishing the larger checkpoint transaction remains a
+separate backend step after the session completes.
 
 ## Normal flows
 
@@ -89,22 +108,20 @@ CRIU dump -> backend staging directory -> dump-session commit callback
 Restore:
 
 ```text
-load plan -> stage listed bytes -> session_prepare
+load plan -> prepare the session; backend writes the listed ranges
 -> socketpair -> CRIU <-> session_serve -> COMMIT or ABORT
 ```
 
-`session_prepare()` creates one correctly sized sparse memfd per planned VMA,
-shared object, residual page image, and provider-owned metadata image.  Holes
-stay holes.
+Preparation creates one correctly sized sparse memfd per planned VMA, shared
+object, and residual page image.  Holes stay holes.  Ready-local metadata stays
+in backend-owned staging and is opened only when CRIU requests it.
 
 ### Possible backend extension: FD pool
 
 Today the library calls `memfd_create()` and closes those FDs itself.  A future
-backend API may instead lease an empty, exclusive FD from a pool.  The library
-would still reset, size, fill, retain, and send that FD; after CRIU `COMMIT` or
-`ABORT`, it would return the lease to the backend instead of closing it.  The
-backend should not fill provider FDs: placement and sparse-hole correctness
-remain library responsibilities.
+backend API may instead lease empty, exclusive FDs from a pool.  The library
+would still size, retain, and send each FD, then return the lease after CRIU
+`COMMIT` or `ABORT`.
 
 ## `criu-provider_plan.json`
 
@@ -118,22 +135,23 @@ roles, and resource estimates.  It rejects unknown JSON fields, path
 traversal, duplicate keys, overflow, non-raw chunks, and out-of-range data.
 
 V1 supports full raw checkpoints: private anonymous memory, anonymous shared
-memory, non-hugetlb memfds, and residual page-image data.  It rejects
-parent/pre-dump chains, compressed pages, hugetlb memfds, and malformed images.
-A rejected plan means use ordinary staged restore; it does not invalidate the
-checkpoint.
+memory, non-hugetlb memfds, and residual page-image data.  Parent/pre-dump
+chains, hugetlb memfds, and malformed images are not accepted for provider
+restore.  The checkpoint itself remains valid and can use ordinary staged
+restore.
 
 ## CRIU requests
 
 `OPEN_IMAGE` returns a duplicate of a prepared FD for
-`RESTORE_PROVIDER_FD`.  For `RESTORE_READY_LOCAL`, it uses a prepared FD when
-one exists, otherwise `open_ready_image()`.  `RESTORE_LOCAL` and
+`RESTORE_PROVIDER_FD`.  For `RESTORE_READY_LOCAL`, it calls
+`open_ready_image()`.  `RESTORE_LOCAL` and
 `RESTORE_LOCAL_FALLBACK` return `-ENOTSUP`, so CRIU uses its local image
 directory.  Unknown image names return `-EPROTO`.
 
-`GET_VMA` and `GET_SHARED` return a duplicate only for an exact plan match;
-otherwise they return `-EPROTO`.  `COMMIT` and `ABORT` release provider-owned
-FDs.
+`GET_VMA` and `GET_SHARED` return a duplicate for an exact plan match.  An
+object that is not in the plan returns `-ENOTSUP`, so CRIU uses its normal
+restore path.  A known object whose address or length disagrees with the plan
+returns `-EPROTO`.  `COMMIT` and `ABORT` release provider-owned FDs.
 
 ## Directory map
 
@@ -145,7 +163,7 @@ src/plan.cpp    plan validation and image rules
 src/image_index.cpp
                 CRIU metadata reader and plan builder
 src/materializer.cpp
-                sparse FD creation and byte copying
+                sparse FD creation and backend write handoff
 src/protocol.cpp restore server
 src/dump.cpp     dump server
 tests/           library tests

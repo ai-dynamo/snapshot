@@ -83,8 +83,8 @@ int ServeProtocol(criu_provider_session *session, int socket)
 			}
 			int fd = ObjectFd(session, name);
 			if (fd < 0 && image->restore_mode() ==
-				criu_provider::v1::Image::RESTORE_READY_LOCAL && session->source_ops.open_ready_image)
-				fd = session->source_ops.open_ready_image(session->source_context, name.c_str(),
+				criu_provider::v1::Image::RESTORE_READY_LOCAL && session->restore_ops.open_ready_image)
+				fd = session->restore_ops.open_ready_image(session->restore_context, name.c_str(),
 					request.open_image().flags());
 			result = fd < 0 ? Send(socket, -EPROTO) : Send(socket, 0, fd);
 			if (fd >= 0) close(fd);
@@ -94,12 +94,15 @@ int ServeProtocol(criu_provider_session *session, int socket)
 			if (!request.has_get_vma()) { result = Send(socket, -EBADMSG); break; }
 			const auto &vma = request.get_vma();
 			int fd = -1;
+			bool known = false;
 			for (const auto &object : session->plan->value.objects())
 				if (object.kind() == criu_provider::v1::Object::PRIVATE_VMA &&
-					object.pid() == vma.pid() && object.vma_id() == vma.vma_id() &&
-					object.start() == vma.vaddr() && object.length() == vma.length())
-					fd = ObjectFd(session, object.key());
-			result = fd < 0 ? Send(socket, -EPROTO) : Send(socket, 0, fd);
+					object.pid() == vma.pid() && object.vma_id() == vma.vma_id()) {
+					known = true;
+					if (object.start() == vma.vaddr() && object.length() == vma.length())
+						fd = ObjectFd(session, object.key());
+				}
+			result = fd < 0 ? Send(socket, known ? -EPROTO : -ENOTSUP) : Send(socket, 0, fd);
 			if (fd >= 0) close(fd);
 			break;
 		}
@@ -107,11 +110,15 @@ int ServeProtocol(criu_provider_session *session, int socket)
 			if (!request.has_get_shared()) { result = Send(socket, -EBADMSG); break; }
 			const auto &shared = request.get_shared();
 			int fd = -1;
+			bool known = false;
 			for (const auto &object : session->plan->value.objects())
 				if (object.kind() == criu_provider::v1::Object::SHARED &&
-					object.shmid() == shared.shmid() && object.length() == shared.length())
-					fd = ObjectFd(session, object.key());
-			result = fd < 0 ? Send(socket, -EPROTO) : Send(socket, 0, fd);
+					object.shmid() == shared.shmid()) {
+					known = true;
+					if (object.length() == shared.length())
+						fd = ObjectFd(session, object.key());
+				}
+			result = fd < 0 ? Send(socket, known ? -EPROTO : -ENOTSUP) : Send(socket, 0, fd);
 			if (fd >= 0) close(fd);
 			break;
 		}
