@@ -103,18 +103,21 @@ gets loaded or how (for example, `trust_remote_code`, the HuggingFace
 restored process *is* the captured process; a different configuration is
 undefined.
 
-Steps 3 (warm up), 4 (quiesce), and 9 (rehydrate) are *obligations*, not specific
-calls. The three reference workloads meet the same obligations through different
-framework mechanisms — which is why the protocol, not any one engine's API, is
-the contract:
+Steps 3 (warm up), 4 (quiesce), and 9 (rehydrate) break down into the same
+sub-obligations across engines, met through different framework mechanisms —
+which is why the protocol, not any one engine's API, is the contract. Tiers carry
+over from their parent step: skipping a **MUST** row breaks capture or restore
+outright (for example, checkpointing without parking GPU memory first, or
+serving without restoring it, fails); skipping the **SHOULD** row still produces
+a working checkpoint, just a cold one.
 
-| Obligation | vLLM | TensorRT-LLM | SGLang |
-|------------|------|--------------|--------|
-| Warm up | one `generate` | `LLM.generate` (two prompts) | one `generate` |
-| Stop in-flight work | `pause_generation()` | synchronous `generate` returns idle | `pause_generation()` |
-| Park GPU memory | `sleep()` (sleep mode) | `gc.collect()`; state stays resident | `release_memory_occupation()` (memory saver) |
-| Restore GPU memory | `wake_up()` | — (resident) | `resume_memory_occupation()` |
-| Resume | `resume_generation()` + `check_health()` | next `generate` | `continue_generation()` |
+| Obligation | Tier | vLLM | TensorRT-LLM | SGLang |
+|------------|------|------|--------------|--------|
+| Warm up | SHOULD | one `generate` | `LLM.generate` (two prompts) | one `generate` |
+| Stop in-flight work | MUST | `pause_generation()` | synchronous `generate` returns idle | `pause_generation()` |
+| Park GPU memory | MUST | `sleep()` (sleep mode) | `gc.collect()`; state stays resident | `release_memory_occupation()` (memory saver) |
+| Restore GPU memory | MUST | `wake_up()` | — (resident) | `resume_memory_occupation()` |
+| Resume | MUST | `resume_generation()` + `check_health()` | next `generate` | `continue_generation()` |
 
 The three are the engines the guides document, not the limit of what the
 contract admits — any inference server that fills in its own column of the table
@@ -158,8 +161,10 @@ custom image still has to meet these:
   for example TensorRT-LLM's `TLLM_NCCL_SYMMETRIC_ZERO_COPY=0` and
   `UCX_TLS=tcp,self`.
 - **`spawn`, not `fork`.** Multiprocess engines start workers with `spawn` (for
-  example `VLLM_WORKER_MULTIPROC_METHOD=spawn`); `fork` is unreliable across
-  checkpoint/restore.
+  example `VLLM_WORKER_MULTIPROC_METHOD=spawn`). This isn't a CRIU limitation —
+  CRIU restores forked process trees fine — it's a CUDA one: forking a process
+  that already holds a CUDA context produces a child with an unreliable copy of
+  that context, so a worker forked before checkpoint may not restore correctly.
 
 ## Packaging methods
 
