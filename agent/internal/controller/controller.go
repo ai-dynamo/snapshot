@@ -36,7 +36,6 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	corev1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
@@ -71,12 +70,11 @@ type NodeController struct {
 	controlSentinelExistsFn func(int, string) (bool, error)
 	sendSignalFn            func(logr.Logger, int, syscall.Signal, string) error
 	restoreQueue            workqueue.TypedDelayingInterface[client.ObjectKey]
-	restorePodLister        corev1listers.PodLister
 
 	inFlight   map[string]struct{}
 	inFlightMu sync.Mutex
 
-	handledRestores sync.Map
+	restoredContainerIDsMu sync.Mutex
 
 	// contentIndexer is the PodSnapshotContent informer's indexer, indexed by source pod
 	// (podRefIndex). The source-pod informer uses it to map a pod event back to its work order.
@@ -249,13 +247,11 @@ func (w *NodeController) Run(ctx context.Context) error {
 
 	restorePods := restoreFactory.Core().V1().Pods()
 	restoreInformer := restorePods.Informer()
-	w.restorePodLister = restorePods.Lister()
 	if _, err := restoreInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: w.enqueueRestorePod,
 		UpdateFunc: func(_, newObj interface{}) {
 			w.enqueueRestorePod(newObj)
 		},
-		DeleteFunc: w.forgetRestorePod,
 	}); err != nil {
 		return fmt.Errorf("failed to add restore informer handler: %w", err)
 	}
@@ -373,14 +369,6 @@ func (w *NodeController) enqueueRestorePod(obj interface{}) {
 	w.restoreQueue.Add(client.ObjectKeyFromObject(pod))
 }
 
-func (w *NodeController) forgetRestorePod(obj interface{}) {
-	pod, ok := podFromInformerObj(obj)
-	if !ok {
-		return
-	}
-	w.handledRestores.Delete(string(pod.UID))
-}
-
 func (w *NodeController) restorePodRequested(pod *corev1.Pod) bool {
 	if pod.Spec.NodeName != w.config.NodeName {
 		return false
@@ -413,21 +401,18 @@ func (w *NodeController) processRestoreQueueItem(ctx context.Context, key client
 		}
 	}()
 
-	pod, err := w.restorePodLister.Pods(key.Namespace).Get(key.Name)
+	// The informer only supplies work keys. Read directly from the API server
+	// before CRIU decisions so a delayed annotation event cannot replay restore.
+	pod, err := w.clientset.CoreV1().Pods(key.Namespace).Get(ctx, key.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return
 	}
 	if err != nil {
-		w.log.Error(err, "Failed to read restore pod from informer cache", "pod", key.String())
+		w.log.Error(err, "Failed to read restore pod from API server", "pod", key.String())
 		requeue = true
 		return
 	}
-	pod = pod.DeepCopy()
-	if w.restoreHandled(pod) {
-		requeue = w.removeRestoreFinalizerWithEvent(ctx, pod)
-		return
-	}
-	if isRestoreTerminal(pod) {
+	if isRestoreTerminal(pod) && !w.hasRestartedRestoreDestination(pod) {
 		requeue = w.handleTerminalRestorePod(ctx, pod)
 		return
 	}
@@ -648,6 +633,11 @@ func (w *NodeController) restorePodContainers(ctx context.Context, pod *corev1.P
 	// RestoreInProgress makes each worker check its completion sentinel before
 	// considering a CRIU replay.
 	recovering := restoreInProgress(pod)
+	replenishing := isRestoreSucceeded(pod)
+	restoredIDs, err := restoredContainerIDs(pod)
+	if err != nil {
+		return w.failRestorePod(ctx, pod, err)
+	}
 	message := fmt.Sprintf("Restoring %d destination container(s) from PodSnapshot %s", len(plan.mappings), plan.artifact.SnapshotName)
 	if err := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, podcontract.RestoreReasonInProgress, message); err != nil {
 		emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeWarning, restoreStatusUpdateFailedReason, err.Error())
@@ -659,7 +649,7 @@ func (w *NodeController) restorePodContainers(ctx context.Context, pod *corev1.P
 	for i, mapping := range plan.mappings {
 		i, destination := i, mapping.Destination
 		workers.Go(func() {
-			results[i] = w.restoreDestination(ctx, pod, plan.artifact, destination, podKey, recovering)
+			results[i] = w.restoreDestination(ctx, pod, plan.artifact, destination, podKey, recovering, replenishing, restoredIDs)
 		})
 	}
 	workers.Wait()
@@ -708,11 +698,19 @@ func (w *NodeController) restoreDestination(
 	pod *corev1.Pod,
 	artifact *restoreArtifact,
 	destination, podKey string,
-	recovering bool,
+	recovering, replenishing bool,
+	restoredIDs map[string]string,
 ) restoreResult {
 	result := restoreResult{destination: destination, state: restoreResultPending}
 	containerID, _ := w.resolveRestoreContainerID(ctx, pod, destination, podKey)
 	if containerID == "" {
+		return result
+	}
+	recordedID, tracked := restoredIDs[destination]
+	// An unchanged ID already holds the restored process. An untracked
+	// destination on a replenishment pass predates tracking and is left alone.
+	if (tracked && recordedID == containerID) || (!tracked && replenishing) {
+		result.state = restoreResultSucceeded
 		return result
 	}
 
@@ -729,6 +727,14 @@ func (w *NodeController) restoreDestination(
 		result.state = restoreResultFailed
 		log.Error(err, "Restore controller worker failed")
 		emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreWorkerFailed", err.Error())
+		return result
+	}
+	// Without a persisted container ID the next pass could replay CRIU
+	// into this live restored engine, so a failed record fails the destination.
+	if err := w.recordRestoredContainerID(ctx, pod, destination, containerID); err != nil {
+		result.state = restoreResultFailed
+		log.Error(err, "Failed to record restored container ID")
+		emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreRecordFailed", err.Error())
 		return result
 	}
 	result.state = restoreResultSucceeded
@@ -973,13 +979,83 @@ func (w *NodeController) patchRestoreFinalizers(ctx context.Context, pod *corev1
 	return err
 }
 
-func (w *NodeController) restoreHandled(pod *corev1.Pod) bool {
-	_, handled := w.handledRestores.Load(string(pod.UID))
-	return handled
+func restoredContainerIDs(pod *corev1.Pod) (map[string]string, error) {
+	ids := make(map[string]string)
+	raw := pod.Annotations[podcontract.RestoredContainerIDsAnnotation]
+	if raw == "" {
+		return ids, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &ids); err != nil {
+		return nil, fmt.Errorf("decode %s annotation: %w", podcontract.RestoredContainerIDsAnnotation, err)
+	}
+	if ids == nil {
+		return nil, fmt.Errorf("decode %s annotation: expected JSON object", podcontract.RestoredContainerIDsAnnotation)
+	}
+	return ids, nil
 }
 
-func (w *NodeController) markRestoreHandled(pod *corev1.Pod) {
-	w.handledRestores.Store(string(pod.UID), struct{}{})
+// hasRestartedRestoreDestination reports whether kubelet restarted a
+// destination after a successful restore. Failed and partially successful
+// restores retain their terminal outcome and require a new restore Pod.
+func (w *NodeController) hasRestartedRestoreDestination(pod *corev1.Pod) bool {
+	if !isRestoreSucceeded(pod) {
+		return false
+	}
+
+	w.restoredContainerIDsMu.Lock()
+	defer w.restoredContainerIDsMu.Unlock()
+
+	ids, err := restoredContainerIDs(pod)
+	if err != nil {
+		// Invalid records cannot prove that a running container is safe to replace.
+		return false
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.State.Running == nil || status.ContainerID == "" {
+			continue
+		}
+		recorded, tracked := ids[status.Name]
+		if tracked && recorded != snapshotruntime.StripCRIScheme(status.ContainerID) {
+			return true
+		}
+	}
+	return false
+}
+
+// recordRestoredContainerID persists the container ID into which a destination
+// was restored. Successful workers are serialized so updates to the shared
+// annotation cannot overwrite a sibling destination's record.
+func (w *NodeController) recordRestoredContainerID(ctx context.Context, pod *corev1.Pod, destination, containerID string) error {
+	w.restoredContainerIDsMu.Lock()
+	defer w.restoredContainerIDsMu.Unlock()
+
+	ids, err := restoredContainerIDs(pod)
+	if err != nil {
+		return err
+	}
+	ids[destination] = containerID
+	value, err := json.Marshal(ids)
+	if err != nil {
+		return err
+	}
+	patch, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{
+			"annotations": map[string]string{
+				podcontract.RestoredContainerIDsAnnotation: string(value),
+			},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := w.clientset.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, ktypes.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+		return fmt.Errorf("record restored container ID: %w", err)
+	}
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+	}
+	pod.Annotations[podcontract.RestoredContainerIDsAnnotation] = string(value)
+	return nil
 }
 
 func (w *NodeController) removeRestoreFinalizerWithEvent(ctx context.Context, pod *corev1.Pod) bool {
@@ -1001,7 +1077,6 @@ func (w *NodeController) finishRestore(
 		emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeWarning, restoreStatusUpdateFailedReason, fmt.Sprintf("Failed to record %s restore status: %v", reason, err))
 		return err
 	}
-	w.markRestoreHandled(pod)
 	eventType := corev1.EventTypeWarning
 	if status == corev1.ConditionTrue {
 		eventType = corev1.EventTypeNormal

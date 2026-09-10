@@ -22,6 +22,10 @@ const (
 	// uses the captured container name as the destination.
 	RestoreContainerMapAnnotation = "nvidia.com/restore-container-map"
 
+	// RestoredContainerIDsAnnotation records the container ID into which each
+	// restore destination was most recently restored.
+	RestoredContainerIDsAnnotation = "nvidia.com/restored-container-ids"
+
 	// DefaultSeccompLocalhostProfile is the kubelet-local profile installed by
 	// the Snapshot Helm chart to block io_uring for CRIU.
 	DefaultSeccompLocalhostProfile = "profiles/block-iouring.json"
