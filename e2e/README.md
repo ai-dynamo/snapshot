@@ -273,6 +273,14 @@ hosts. The publisher serializes updates, commits all frameworks from one
 workflow in one commit, and bootstraps the data-only orphan branch
 `e2e-benchmark-history` on its first successful invocation.
 
+After a pull-request mirror or manual run completes, the trusted dashboard
+workflow validates its comparison artifact and publishes a 14-day preview.
+Pull requests use the stable path `/previews/pr-<number>/`; other manual runs
+use `/previews/run-<workflow-run-id>/`. Each preview combines that run with a
+read-only copy of nightly history. Generated preview indexes are isolated on
+the `e2e-benchmark-previews` branch and never enter `e2e-benchmark-history`.
+The dashboard deployment summary links to the resulting Pages URL.
+
 Raw results are the source of truth. They are stored under:
 
 ```text
@@ -317,9 +325,9 @@ seven-run median. Failed and timed-out measurements remain visible as explicit
 gaps instead of zero values.
 
 The `E2E Benchmark Dashboard` workflow builds the TypeScript application from
-`main` and combines it with the data-only `e2e-benchmark-history` branch. A
-scheduled framework run triggers a new Pages deployment after history
-publication without merging the generated history into `main`. See
+`main` and combines it with the data-only `e2e-benchmark-history` branch plus
+any unexpired pre-merge previews. A completed framework run triggers a new
+Pages deployment without merging generated benchmark data into `main`. See
 [`dashboard/README.md`](../dashboard/README.md) for local development and the
 one-time GitHub Pages configuration.
 
