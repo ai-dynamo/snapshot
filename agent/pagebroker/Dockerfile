@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-FROM ubuntu:24.04 AS build
+FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254 AS build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -13,7 +13,7 @@ WORKDIR /src
 COPY . .
 RUN make daemon
 
-FROM ubuntu:24.04
+FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254
 
 RUN apt-get update && apt-get install -y --no-install-recommends libprotobuf32t64 \
     && rm -rf /var/lib/apt/lists/*
