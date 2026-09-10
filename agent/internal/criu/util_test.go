@@ -80,6 +80,14 @@ func TestReadLogTail(t *testing.T) {
 	})
 }
 
+func TestBuildCRIUConfEnablesPageCompression(t *testing.T) {
+	got := buildCRIUConf(&types.CRIUSettings{Compress: true})
+	want := "compress\ndecompress-threads 0\n"
+	if got != want {
+		t.Fatalf("buildCRIUConf() = %q, want %q", got, want)
+	}
+}
+
 func TestApplyCommonSettings(t *testing.T) {
 	t.Run("valid mode sets all fields", func(t *testing.T) {
 		opts := &criurpc.CriuOpts{}

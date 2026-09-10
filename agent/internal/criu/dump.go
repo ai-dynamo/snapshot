@@ -159,5 +159,9 @@ func buildCRIUConf(c *types.CRIUSettings) string {
 	if c.SkipInFlight {
 		content += "skip-in-flight\n"
 	}
+	if c.Compress {
+		content += "compress\n"
+		content += "decompress-threads 0\n"
+	}
 	return content
 }

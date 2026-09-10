@@ -225,6 +225,7 @@ type CRIUSettings struct {
 	LibDir            string `yaml:"libDir"`
 	AllowUprobes      bool   `yaml:"allowUprobes"`
 	SkipInFlight      bool   `yaml:"skipInFlight"`
+	Compress          bool   `yaml:"compress"`
 }
 
 // OverlaySettings is the static config for rootfs exclusions.

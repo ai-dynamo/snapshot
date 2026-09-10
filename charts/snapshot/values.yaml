@@ -299,3 +299,7 @@ config:
     libDir: "/usr/local/lib/snapshot/criu-plugins"
     allowUprobes: true             # Leave enabled for kernel/userspace probe compatibility
     skipInFlight: true             # Skip in-flight TCP connections
+    # Per-page LZ4 compression. CRIU omits all-zero 4 KiB pages and restores
+    # with an automatically sized decompression worker pool. Compressed page
+    # images use buffered I/O even when imageIoMode is direct.
+    compress: false
