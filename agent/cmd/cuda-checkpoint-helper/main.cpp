@@ -132,15 +132,17 @@ int main(int argc, char **argv) {
   }
   int tid = 0;
   status = cuCheckpointProcessGetRestoreThreadId(pid, &tid);
-  if (status == CUDA_ERROR_INVALID_VALUE) {
+  if (status == CUDA_ERROR_INVALID_VALUE ||
+      status == CUDA_ERROR_NOT_INITIALIZED) {
     std::string process_error;
     const daemon_protocol::ProcessExistenceState existence =
         daemon_protocol::InspectProcessExistence(pid, "/proc", &process_error);
     if (existence == daemon_protocol::ProcessExistenceState::kExists) {
       // The output pointer is valid and the candidate PID still exists. The
-      // driver uses INVALID_VALUE for a live process without CUDA checkpoint
-      // state. Keep that negative result distinct from helper, driver, and
-      // raced-PID failures so the agent can fail closed on the latter.
+      // The driver uses INVALID_VALUE and NOT_INITIALIZED for a live process
+      // without CUDA checkpoint state. Keep that negative result distinct
+      // from helper, driver, and raced-PID failures so the agent can fail
+      // closed on the latter.
       return std::fprintf(stdout, "none\n") < 0 ? 1 : 0;
     }
     std::fprintf(stderr, "CUDA restore-tid candidate validation failed: %s\n",
