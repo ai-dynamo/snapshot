@@ -5,6 +5,45 @@ suite: snapshot agent configuration validation
 templates:
   - templates/configmap.yaml
 tests:
+  - it: defaults PageBroker to the POSIX copy transfer engine
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'transferEngine: "posix-copy"'
+  - it: defaults an empty PageBroker transfer engine to POSIX copy
+    set:
+      pageBroker.transferEngine: ""
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'transferEngine: "posix-copy"'
+  - it: defaults a whitespace-only PageBroker transfer engine to POSIX copy
+    set:
+      pageBroker.transferEngine: "   "
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'transferEngine: "posix-copy"'
+  - it: configures the Model Streamer transfer engine
+    set:
+      pageBroker.transferEngine: model-streamer
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'transferEngine: "model-streamer"'
+  - it: trims the configured PageBroker transfer engine
+    set:
+      pageBroker.transferEngine: "  model-streamer  "
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'transferEngine: "model-streamer"'
+  - it: rejects an unsupported PageBroker transfer engine
+    set:
+      pageBroker.transferEngine: unknown
+    asserts:
+      - failedTemplate:
+          errorPattern: "pageBroker.transferEngine=.* is not supported"
   - it: rejects a caller-selected checkpoint mount path
     set:
       storage.pvc.basePath: /other
