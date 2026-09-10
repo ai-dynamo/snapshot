@@ -10,3 +10,10 @@ e2e/.venv/
 e2e/__pycache__/
 e2e/**/*.py[cod]
 e2e/.pytest_cache/
+
+# Benchmarks Python workspace
+benchmarks/.venv/
+benchmarks/__pycache__/
+benchmarks/**/*.py[cod]
+benchmarks/.pytest_cache/
+benchmarks/results/
