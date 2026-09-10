@@ -5,14 +5,29 @@ package runtime
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr/testr"
+	"golang.org/x/sys/unix"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
+
+// systemTar resolves the host tar to an absolute path; ApplyRootfsDiff
+// rejects relative tar paths so they cannot resolve through PATH.
+func systemTar(t *testing.T) string {
+	t.Helper()
+	path, err := exec.LookPath("tar")
+	if err != nil {
+		t.Fatalf("resolve system tar: %v", err)
+	}
+	return path
+}
 
 func TestBuildExclusions(t *testing.T) {
 	tests := []struct {
@@ -179,7 +194,7 @@ func TestCaptureRootfsDiff(t *testing.T) {
 		}
 
 		targetRoot := t.TempDir()
-		if err := ApplyRootfsDiff(checkpointDir, targetRoot, testr.New(t)); err != nil {
+		if err := ApplyRootfsDiff(checkpointDir, targetRoot, systemTar(t), testr.New(t)); err != nil {
 			t.Fatalf("ApplyRootfsDiff: %v", err)
 		}
 		data, err := os.ReadFile(filepath.Join(targetRoot, "generated.txt"))
@@ -213,7 +228,7 @@ func TestCaptureRootfsDiff(t *testing.T) {
 
 func TestApplyRootfsDiff(t *testing.T) {
 	t.Run("missing archive is no-op", func(t *testing.T) {
-		if err := ApplyRootfsDiff(t.TempDir(), t.TempDir(), testr.New(t)); err != nil {
+		if err := ApplyRootfsDiff(t.TempDir(), t.TempDir(), systemTar(t), testr.New(t)); err != nil {
 			t.Fatalf("ApplyRootfsDiff: %v", err)
 		}
 	})
@@ -223,7 +238,7 @@ func TestApplyRootfsDiff(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(checkpointDir, rootfsDiffFilename), nil, 0644); err != nil {
 			t.Fatalf("write empty rootfs diff: %v", err)
 		}
-		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), testr.New(t)); err != nil {
+		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), systemTar(t), testr.New(t)); err != nil {
 			t.Fatalf("ApplyRootfsDiff: %v", err)
 		}
 	})
@@ -233,8 +248,27 @@ func TestApplyRootfsDiff(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(checkpointDir, rootfsDiffFilename), []byte("not a tar archive"), 0644); err != nil {
 			t.Fatalf("write invalid rootfs diff: %v", err)
 		}
-		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), testr.New(t)); err == nil {
+		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), systemTar(t), testr.New(t)); err == nil {
 			t.Fatal("ApplyRootfsDiff should fail for invalid non-empty archive")
+		}
+	})
+
+	t.Run("relative tar path is rejected", func(t *testing.T) {
+		err := ApplyRootfsDiff(t.TempDir(), t.TempDir(), "tar", testr.New(t))
+		if err == nil || !strings.Contains(err.Error(), "not absolute") {
+			t.Fatalf("ApplyRootfsDiff error = %v, want rejection of relative tar path", err)
+		}
+	})
+
+	t.Run("uses the provided tar binary", func(t *testing.T) {
+		checkpointDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(checkpointDir, rootfsDiffFilename), []byte("not a tar archive"), 0644); err != nil {
+			t.Fatalf("write invalid rootfs diff: %v", err)
+		}
+		tarBinary := filepath.Join(t.TempDir(), "missing-tar")
+		err := ApplyRootfsDiff(checkpointDir, t.TempDir(), tarBinary, testr.New(t))
+		if err == nil || !strings.Contains(err.Error(), tarBinary) {
+			t.Fatalf("ApplyRootfsDiff error = %v, want provided tar path %q", err, tarBinary)
 		}
 	})
 
@@ -246,7 +280,7 @@ func TestApplyRootfsDiff(t *testing.T) {
 			t.Fatalf("create temp file: %v", err)
 		}
 		f.Close()
-		if err := ApplyRootfsDiff(f.Name(), t.TempDir(), testr.New(t)); err == nil {
+		if err := ApplyRootfsDiff(f.Name(), t.TempDir(), systemTar(t), testr.New(t)); err == nil {
 			t.Fatal("ApplyRootfsDiff should propagate non-ENOENT stat error")
 		}
 	})
@@ -265,7 +299,7 @@ func TestApplyRootfsDiff(t *testing.T) {
 		if err != nil {
 			t.Fatalf("glob staged copies: %v", err)
 		}
-		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), testr.New(t)); err != nil {
+		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), systemTar(t), testr.New(t)); err != nil {
 			t.Fatalf("ApplyRootfsDiff: %v", err)
 		}
 		after, err := filepath.Glob(filepath.Join(os.TempDir(), rootfsDiffFilename+".*.tmp"))
@@ -440,4 +474,81 @@ func TestApplyDeletedFiles(t *testing.T) {
 			t.Fatalf("ApplyDeletedFiles: %v", err)
 		}
 	})
+}
+
+// TestApplyRootfsDiffXattrFilter pins the restore-side xattr filter: the
+// capture archives every namespace, but only user.* and security.capability
+// may land on the restored file. trusted.* (overlay bookkeeping) and the rest
+// of security.* (SELinux/IMA labels from the source container) must be dropped.
+func TestApplyRootfsDiffXattrFilter(t *testing.T) {
+	upperDir := t.TempDir()
+	src := filepath.Join(upperDir, "labelled.txt")
+	if err := os.WriteFile(src, []byte("data"), 0644); err != nil {
+		t.Fatalf("write upperdir file: %v", err)
+	}
+
+	// setxattr reports whether the attribute could be set here; unsupported
+	// filesystems (ENOTSUP) skip the whole test, missing privilege for a
+	// namespace (EPERM) skips only that attribute.
+	setxattr := func(name string, value []byte) bool {
+		err := unix.Setxattr(src, name, value, 0)
+		if err == nil {
+			return true
+		}
+		if errors.Is(err, unix.ENOTSUP) || errors.Is(err, unix.EOPNOTSUPP) {
+			t.Skipf("xattrs unsupported on %s: %v", upperDir, err)
+		}
+		if errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) {
+			t.Logf("cannot set %s without privilege, not exercising it: %v", name, err)
+			return false
+		}
+		t.Fatalf("setxattr %s: %v", name, err)
+		return false
+	}
+
+	// Minimal VFS_CAP_REVISION_2 header: no capabilities, no flags.
+	capValue := []byte{0x00, 0x00, 0x00, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	want := map[string]bool{}
+	if setxattr("user.snapshot", []byte("keep")) {
+		want["user.snapshot"] = true
+	}
+	if setxattr("security.capability", capValue) {
+		want["security.capability"] = true
+	}
+	if setxattr("security.selinux", []byte("system_u:object_r:container_file_t:s0:c1,c2")) {
+		want["security.selinux"] = false
+	}
+	if setxattr("trusted.overlay.origin", []byte("drop")) {
+		want["trusted.overlay.origin"] = false
+	}
+	if !want["user.snapshot"] {
+		t.Skip("could not set any user xattr, nothing to assert")
+	}
+
+	checkpointDir := t.TempDir()
+	if _, err := CaptureRootfsDiff(upperDir, checkpointDir, types.OverlaySettings{}, nil); err != nil {
+		t.Fatalf("CaptureRootfsDiff: %v", err)
+	}
+	targetRoot := t.TempDir()
+	if err := ApplyRootfsDiff(checkpointDir, targetRoot, systemTar(t), testr.New(t)); err != nil {
+		t.Fatalf("ApplyRootfsDiff: %v", err)
+	}
+
+	dst := filepath.Join(targetRoot, "labelled.txt")
+	buf := make([]byte, 4096)
+	n, err := unix.Listxattr(dst, buf)
+	if err != nil {
+		t.Fatalf("listxattr restored file: %v", err)
+	}
+	present := map[string]bool{}
+	for _, name := range strings.Split(strings.TrimRight(string(buf[:n]), "\x00"), "\x00") {
+		if name != "" {
+			present[name] = true
+		}
+	}
+	for name, shouldLand := range want {
+		if present[name] != shouldLand {
+			t.Errorf("xattr %s restored=%v, want %v (all restored: %v)", name, present[name], shouldLand, present)
+		}
+	}
 }

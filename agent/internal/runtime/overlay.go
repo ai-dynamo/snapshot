@@ -153,12 +153,24 @@ func CaptureDeletedFiles(upperDir, checkpointDir string) (bool, error) {
 	return true, nil
 }
 
+// RestoreTarBinaryName is the file name of the tar binary in the injected
+// agent bundle (see /snapshot-binaries/tar in agent/Dockerfile). nsrestore
+// joins it onto the bundle directory to build the absolute path ApplyRootfsDiff
+// requires.
+const RestoreTarBinaryName = "tar"
+
 // ApplyRootfsDiff extracts rootfs-diff.tar into the target root.
 //
 // The archive is copied to local disk first. tar walks members with many small
 // reads; doing that directly from NFS is much slower than one sequential copy
 // plus a local extract.
-func ApplyRootfsDiff(checkpointPath, targetRoot string, log logr.Logger) error {
+func ApplyRootfsDiff(checkpointPath, targetRoot, tarBinary string, log logr.Logger) error {
+	// A relative path would resolve through PATH inside the placeholder —
+	// exactly the fallback the bundled tar exists to prevent.
+	if !filepath.IsAbs(tarBinary) {
+		return fmt.Errorf("tar binary path %q is not absolute", tarBinary)
+	}
+
 	rootfsDiffPath := filepath.Join(checkpointPath, rootfsDiffFilename)
 	info, err := os.Stat(rootfsDiffPath)
 	if os.IsNotExist(err) {
@@ -182,12 +194,23 @@ func ApplyRootfsDiff(checkpointPath, targetRoot string, log logr.Logger) error {
 	// --skip-old-files: silently skip files that already exist in the restore target.
 	// The rootfs diff only contains overlay upperdir changes (runtime-generated files
 	// like triton caches, tmp files) — base image files should not be overwritten.
+	//
+	// The capture side archives with --xattrs; restore only the user namespace
+	// and file capabilities. The archive is cut from the overlay upperdir, so it
+	// can carry trusted.overlay.* entries that must never be re-applied through
+	// the restored container's overlay mount, and on SELinux hosts it carries the
+	// source container's security.selinux MCS label, which would make the
+	// restored process unable to read its own files in a container with a
+	// different category. security.capability is the only attribute in that
+	// namespace the restore needs.
 	log.Info("Applying rootfs diff", "target", targetRoot, "bytes", info.Size())
-	cmd := exec.Command("tar", "--skip-old-files", "--blocking-factor=2048", "-C", targetRoot, "-xf", localPath)
+	cmd := exec.Command(tarBinary, "--skip-old-files", "--blocking-factor=2048",
+		"--xattrs", "--xattrs-include=user.*", "--xattrs-include=security.capability",
+		"-C", targetRoot, "-xf", localPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("tar extract failed: %w", err)
+		return fmt.Errorf("tar extract with %s failed: %w", tarBinary, err)
 	}
 	return nil
 }
