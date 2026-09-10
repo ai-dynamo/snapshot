@@ -238,18 +238,17 @@ func orderDRAUUIDsByRuntime(allocatedUUIDs, visibleUUIDs []string) ([]string, er
 	return append([]string(nil), visibleUUIDs...), nil
 }
 
-// FilterProcesses returns the subset of candidate PIDs that hold actual CUDA contexts.
-// Uses --get-restore-tid (the same technique as the CRIU CUDA plugin) instead of
-// --get-state, because --get-state incorrectly matches coordinator processes like
-// cuda-checkpoint --launch-job that share a /proc namespace with CUDA processes but
-// don't hold CUDA contexts themselves.
+// FilterProcesses returns the CUDA restore TIDs for candidate processes.
+// --get-restore-tid identifies the task the CUDA helper must act on. That task
+// can differ from the process leader passed to the query.
 func FilterProcesses(ctx context.Context, allPIDs []int, log logr.Logger) []int {
 	cudaPIDs := make([]int, 0, len(allPIDs))
+	seen := make(map[int]struct{}, len(allPIDs))
 	for _, pid := range allPIDs {
 		if pid <= 0 {
 			continue
 		}
-		cmd := exec.CommandContext(ctx, DefaultHelperBinaryPath, "--get-restore-tid", "--pid", strconv.Itoa(pid))
+		cmd := exec.CommandContext(ctx, cudaCheckpointHelperBinary, "--get-restore-tid", "--pid", strconv.Itoa(pid))
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			if ctx.Err() != nil {
@@ -258,9 +257,17 @@ func FilterProcesses(ctx context.Context, allPIDs []int, log logr.Logger) []int 
 			log.V(1).Info("CUDA restore-tid probe negative", "pid", pid)
 			continue
 		}
-		tid := strings.TrimSpace(string(output))
+		tid, err := strconv.Atoi(strings.TrimSpace(string(output)))
+		if err != nil || tid <= 0 {
+			log.V(1).Info("CUDA restore-tid probe returned invalid TID", "pid", pid)
+			continue
+		}
+		if _, ok := seen[tid]; ok {
+			continue
+		}
+		seen[tid] = struct{}{}
 		log.V(1).Info("CUDA restore-tid probe positive", "pid", pid, "tid", tid)
-		cudaPIDs = append(cudaPIDs, pid)
+		cudaPIDs = append(cudaPIDs, tid)
 	}
 	return cudaPIDs
 }

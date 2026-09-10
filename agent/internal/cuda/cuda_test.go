@@ -94,6 +94,28 @@ func TestBuildDeviceMap(t *testing.T) {
 	}
 }
 
+func TestFilterProcessesReturnsUniqueRestoreTIDs(t *testing.T) {
+	installFakeCUDAHelper(t, `
+case "$3" in
+11|12) echo 101 ;;
+13) echo invalid ;;
+14) exit 1 ;;
+*) exit 1 ;;
+esac
+`)
+
+	got := FilterProcesses(context.Background(), []int{0, 11, 12, 13, 14}, logr.Discard())
+	want := []int{101}
+	if len(got) != len(want) {
+		t.Fatalf("FilterProcesses() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("FilterProcesses() = %v, want %v", got, want)
+		}
+	}
+}
+
 type testPodResourcesServer struct {
 	podresourcesv1.UnimplementedPodResourcesListerServer
 	resp *podresourcesv1.ListPodResourcesResponse
