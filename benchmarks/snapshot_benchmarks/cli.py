@@ -79,9 +79,17 @@ def _stringify_env(label: str, env: dict[str, Any] | None) -> dict[str, str]:
     values are always strings anyway. Raises a clear, load-time error for
     anything that isn't a plain scalar (list/dict/None) instead of letting a
     malformed value reach `create_pod` and fail deep inside a Kubernetes API
-    JSON-unmarshal error."""
+    JSON-unmarshal error. Keys must already be plain strings (e.g. an unquoted
+    numeric or boolean-looking key in YAML would otherwise reach `_set_env` as
+    a non-string env var name) -- rejected outright, not coerced, since there's
+    no sensible env var name to coerce a non-string key into."""
     result: dict[str, str] = {}
     for key, value in (env or {}).items():
+        if not isinstance(key, str):
+            raise ValueError(
+                f"model {label!r}: env key {key!r} must be a string, got "
+                f"{type(key).__name__} -- quote it in models.yaml"
+            )
         if isinstance(value, bool) or not isinstance(value, (str, int, float)):
             raise ValueError(
                 f"model {label!r}: env[{key!r}] must be a plain string/number, got "

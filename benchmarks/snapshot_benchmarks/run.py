@@ -334,6 +334,9 @@ def run_benchmark(
             if restore_created:
                 progress(f"[{run_id}] cleaning up restore pod")
                 _try_cleanup(lambda: k8s.delete_pod(cfg.workload_namespace, restore_name))
+                _try_cleanup(
+                    lambda: lifecycle.wait_for_pod_deleted(cfg.workload_namespace, restore_name)
+                )
             if snapshot_name is not None:
                 _try_cleanup(
                     lambda: lifecycle.delete_podsnapshot(cfg.workload_namespace, snapshot_name)
@@ -343,6 +346,9 @@ def run_benchmark(
             if source_created and not source_deleted:
                 progress(f"[{run_id}] cleaning up source pod")
                 _try_cleanup(lambda: k8s.delete_pod(cfg.workload_namespace, source_name))
+                _try_cleanup(
+                    lambda: lifecycle.wait_for_pod_deleted(cfg.workload_namespace, source_name)
+                )
 
 
 def _try_cleanup(action: Callable[[], None]) -> None:
