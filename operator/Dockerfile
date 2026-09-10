@@ -3,7 +3,7 @@
 
 # Build context is the repository root so the Go workspace can resolve the
 # api/ and agent/ modules used by the operator.
-FROM golang:1.26-alpine AS builder
+FROM golang:1.27-alpine AS builder
 WORKDIR /workspace
 COPY go.work go.work.sum ./
 COPY api/ api/
