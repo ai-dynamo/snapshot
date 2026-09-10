@@ -22,9 +22,10 @@
 ARG DOCKER_PROXY
 ARG GO_VERSION=1.27.1
 # Digest of golang:${GO_VERSION}. A digest is content-addressed, so it resolves
-# identically through DOCKER_PROXY pull-through mirrors. Update it together with
-# GO_VERSION — a mismatched pair fails the pull rather than building silently on
-# the wrong toolchain.
+# identically through DOCKER_PROXY pull-through mirrors. Docker resolves
+# tag@digest by digest and never checks the tag against it, so the two must be
+# updated together — the go-base stage asserts they agree rather than trusting
+# the tag.
 ARG GO_IMAGE_DIGEST=sha256:f44f6e88636cfb311f9ebace870ded69d943f227bb3cb27d32ffd84ea18c43ea
 # Default to upstream CRIU development branch. Custom forks can override both
 # args at build time, for example:
@@ -45,8 +46,20 @@ FROM ${DOCKER_PROXY}library/golang:${GO_VERSION}@${GO_IMAGE_DIGEST} AS go-base
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
+ARG GO_VERSION
 
 RUN echo "Building for ${TARGETOS}/${TARGETARCH}"
+
+# Docker resolves image:tag@digest by digest alone and never validates the tag
+# against it. Overriding GO_VERSION without the matching GO_IMAGE_DIGEST would
+# otherwise build on the digest's toolchain while every label claims the new
+# one. Assert instead of trusting the tag.
+RUN actual="$(go env GOVERSION)"; \
+    [ "${actual}" = "go${GO_VERSION}" ] || { \
+      echo "ERROR: GO_VERSION=${GO_VERSION} but the pinned GO_IMAGE_DIGEST provides ${actual}." >&2; \
+      echo "       Update GO_VERSION and GO_IMAGE_DIGEST in agent/Dockerfile together." >&2; \
+      exit 1; \
+    }
 
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
