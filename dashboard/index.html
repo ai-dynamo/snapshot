@@ -1,0 +1,134 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Nightly checkpoint and restore benchmark history for Snapshot E2E suites"
+    />
+    <title>Snapshot E2E benchmarks</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to benchmark results</a>
+    <header class="hero">
+      <div class="hero__content">
+        <p class="eyebrow">AI-Dynamo · Snapshot</p>
+        <h1>Framework E2E benchmarks</h1>
+        <p class="hero__summary">
+          Nightly checkpoint and restore performance, with hardware and runtime
+          context preserved for every result.
+        </p>
+        <p id="load-status" class="status" role="status" aria-live="polite">
+          Loading benchmark history…
+        </p>
+      </div>
+      <div class="hero__mark" aria-hidden="true">S</div>
+    </header>
+
+    <main id="main-content">
+      <section class="controls" aria-labelledby="filters-heading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Explore</p>
+            <h2 id="filters-heading">Filter comparable runs</h2>
+          </div>
+          <button id="reset-filters" class="button button--quiet" type="button">
+            Reset filters
+          </button>
+        </div>
+
+        <div class="controls__grid">
+          <label>
+            <span>Suite</span>
+            <select id="suite-filter"></select>
+          </label>
+          <label>
+            <span>Date range</span>
+            <select id="date-filter">
+              <option value="30">Latest 30 days</option>
+              <option value="90" selected>Latest 90 days</option>
+              <option value="180">Latest 180 days</option>
+              <option value="all">All history</option>
+            </select>
+          </label>
+          <label>
+            <span>GPU model</span>
+            <select id="gpu-filter"></select>
+          </label>
+          <label>
+            <span>Outcome</span>
+            <select id="outcome-filter"></select>
+          </label>
+          <label>
+            <span>Run channel</span>
+            <select id="channel-filter"></select>
+          </label>
+        </div>
+
+        <div class="toggle-grid">
+          <fieldset>
+            <legend>Cases</legend>
+            <div id="case-filters" class="toggle-list"></div>
+          </fieldset>
+          <fieldset>
+            <legend>Measurements</legend>
+            <div id="metric-filters" class="toggle-list"></div>
+          </fieldset>
+        </div>
+      </section>
+
+      <section aria-labelledby="charts-heading">
+        <div class="section-heading section-heading--results">
+          <div>
+            <p class="eyebrow">Trends</p>
+            <h2 id="charts-heading">Timing history</h2>
+          </div>
+          <p id="visible-count" class="result-count"></p>
+        </div>
+        <div id="no-results" class="empty-state" hidden>
+          No benchmark results match the selected filters.
+        </div>
+        <div id="charts" class="chart-grid"></div>
+      </section>
+
+      <section class="latest" aria-labelledby="latest-heading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Inspect</p>
+            <h2 id="latest-heading">Latest runs</h2>
+          </div>
+        </div>
+        <div class="table-shell" tabindex="0" aria-label="Scrollable latest benchmark runs">
+          <table>
+            <thead id="latest-head"></thead>
+            <tbody id="latest-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="run-details" aria-labelledby="details-heading">
+      <div class="dialog__heading">
+        <h2 id="details-heading">Run details</h2>
+        <button id="close-details" class="icon-button" type="button" aria-label="Close">
+          ×
+        </button>
+      </div>
+      <div id="details-content"></div>
+    </dialog>
+
+    <footer>
+      <p>
+        Measurements are grouped only with comparable hardware, images, models,
+        storage, cache state, and benchmark semantics.
+      </p>
+    </footer>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
