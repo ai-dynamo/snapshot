@@ -27,6 +27,10 @@ ARG GO_VERSION=1.27.1
 # updated together — the go-base stage asserts they agree rather than trusting
 # the tag.
 ARG GO_IMAGE_DIGEST=sha256:f44f6e88636cfb311f9ebace870ded69d943f227bb3cb27d32ffd84ea18c43ea
+# Keep in step with GOLANGCI_LINT_VERSION in hack/tools.mk. Used by the linter
+# stage, which is a developer target (`--target linter`) and so is not covered
+# by the CI `check` job.
+ARG GOLANGCI_LINT_VERSION=v2.13.2
 # Default to upstream CRIU development branch. Custom forks can override both
 # args at build time, for example:
 #   --build-arg CRIU_REPO=<git-remote-url>
@@ -81,7 +85,14 @@ COPY . .
 # =============================================================================
 FROM go-base AS linter
 
-RUN go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.62.2
+ARG GO_VERSION
+ARG GOLANGCI_LINT_VERSION
+
+# Same constraint as hack/tools.mk: golangci-lint refuses to run when it was
+# built with an older Go than the module it lints, and its own go.mod pins a
+# toolchain that lags ours — so force ours.
+RUN GOTOOLCHAIN=go${GO_VERSION} \
+    go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}
 RUN golangci-lint run --timeout=5m
 
 # =============================================================================
