@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	testGPUA = "GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-	testGPUB = "GPU-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	testGPUA   = "GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	testGPUB   = "GPU-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	testSHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 )
 
 type recordingHelperActionRunner struct {
@@ -129,7 +130,7 @@ func TestRestoreProcessTreeUsesManifestGPUUUIDs(t *testing.T) {
 		if err := os.MkdirAll(processDir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		manifest := "version 2\ndevice_count 1\ndevice 0 " + uuid + " 4096 device-0000.bin\n"
+		manifest := "version 3\ndevice_count 1\ndevice 0 " + uuid + " 4096 device-0000.bin " + testSHA256 + "\n"
 		if err := os.WriteFile(filepath.Join(processDir, "manifest.txt"), []byte(manifest), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -167,7 +168,7 @@ func TestRestoreProcessTreeUsesManifestGPUUUIDs(t *testing.T) {
 
 func TestCustomStorageTargetGPUUUIDs(t *testing.T) {
 	dir := t.TempDir()
-	manifest := "version 2\ndevice_count 1\ndevice 0 " + testGPUA + " 4096 device-0000.bin\n"
+	manifest := "version 3\ndevice_count 1\ndevice 0 " + testGPUA + " 4096 device-0000.bin " + testSHA256 + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "manifest.txt"), []byte(manifest), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +183,7 @@ func TestCustomStorageTargetGPUUUIDs(t *testing.T) {
 
 func TestCustomStorageTargetGPUUUIDsAllowsZeroDeviceProcess(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "manifest.txt"), []byte("version 2\ndevice_count 0\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "manifest.txt"), []byte("version 3\ndevice_count 0\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	got, err := customStorageTargetGPUUUIDs(dir, "", []string{testGPUA})
@@ -196,7 +197,7 @@ func TestCustomStorageTargetGPUUUIDsAllowsZeroDeviceProcess(t *testing.T) {
 
 func TestReadCustomStorageSourceUUIDsRejectsTrailingData(t *testing.T) {
 	dir := t.TempDir()
-	manifest := "version 2\ndevice_count 1\ndevice 0 " + testGPUA + " 4096 device-0000.bin\nextra\n"
+	manifest := "version 3\ndevice_count 1\ndevice 0 " + testGPUA + " 4096 device-0000.bin " + testSHA256 + "\nextra\n"
 	if err := os.WriteFile(filepath.Join(dir, "manifest.txt"), []byte(manifest), 0o600); err != nil {
 		t.Fatal(err)
 	}

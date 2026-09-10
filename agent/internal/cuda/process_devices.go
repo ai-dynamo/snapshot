@@ -165,7 +165,7 @@ func readCustomStorageSourceUUIDs(path string) (uuids []string, err error) {
 	reader := bufio.NewReader(io.LimitReader(file, customStorageManifestMaximumBytes+1))
 	var key string
 	var version, count int
-	if _, err := fmt.Fscan(reader, &key, &version); err != nil || key != "version" || version != 2 {
+	if _, err := fmt.Fscan(reader, &key, &version); err != nil || key != "version" || version != 3 {
 		return nil, errors.New("invalid CUDA CustomStorage manifest version")
 	}
 	if _, err := fmt.Fscan(reader, &key, &count); err != nil || key != "device_count" || count < 0 || count > 1024 {
@@ -174,11 +174,11 @@ func readCustomStorageSourceUUIDs(path string) (uuids []string, err error) {
 	seen := make(map[string]struct{}, count)
 	for expected := 0; expected < count; expected++ {
 		var index int
-		var uuid, filename string
+		var uuid, filename, digest string
 		var size uint64
-		if _, err := fmt.Fscan(reader, &key, &index, &uuid, &size, &filename); err != nil ||
+		if _, err := fmt.Fscan(reader, &key, &index, &uuid, &size, &filename, &digest); err != nil ||
 			key != "device" || index != expected || !gpuUUIDPattern.MatchString(uuid) ||
-			size == 0 || filename != fmt.Sprintf("device-%04d.bin", expected) {
+			size == 0 || filename != fmt.Sprintf("device-%04d.bin", expected) || !isLowerSHA256(digest) {
 			return nil, fmt.Errorf("invalid CUDA CustomStorage manifest device %d", expected)
 		}
 		uuidKey := strings.ToLower(uuid)
@@ -193,6 +193,18 @@ func readCustomStorageSourceUUIDs(path string) (uuids []string, err error) {
 		return nil, errors.New("CUDA CustomStorage manifest has trailing data")
 	}
 	return uuids, nil
+}
+
+func isLowerSHA256(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func parseDeviceMapUUIDs(value string) (map[string]string, error) {
