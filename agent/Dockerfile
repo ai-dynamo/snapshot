@@ -527,13 +527,14 @@ COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
 # The placeholder ships none of this. nsrestore redirects all three lookup
 # mechanisms into the mount: criu's libdir -> criu-plugins/ (criu.overrideLibDir),
 # LD_LIBRARY_PATH -> lib/, and PATH -> the bundle root.
-RUN mkdir -p /snapshot-binaries/lib /snapshot-binaries/criu-plugins /snapshot-binaries/snapshot-cuda
+RUN mkdir -p /snapshot-binaries/lib /snapshot-binaries/criu-plugins /snapshot-binaries/snapshot-cuda /usr/local/lib/snapshot
 COPY --from=builder /nsrestore /snapshot-binaries/nsrestore
 COPY --from=criu-builder /criu-install/usr/local/sbin/criu /snapshot-binaries/criu
 COPY --from=criu-builder /criu-install/usr/local/lib/snapshot/criu-plugins/ /snapshot-binaries/criu-plugins/
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /snapshot-binaries/cuda-checkpoint
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-checkpoint-helper
 COPY --from=cuda-helper-builder /cuinterpose-build/libcuinterpose.so /snapshot-binaries/snapshot-cuda/libcuinterpose.so
+COPY --from=cuda-helper-builder /cuinterpose-build/libcuinterpose.so /usr/local/lib/snapshot/libcuinterpose.so
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /snapshot-binaries/snapshot-cuda/cuda-checkpoint
 COPY --from=cuda-helper-builder /cuinterpose-build/cuinterpose-coordinator /snapshot-binaries/cuinterpose-coordinator
 RUN chmod 0644 /snapshot-binaries/snapshot-cuda/libcuinterpose.so \
