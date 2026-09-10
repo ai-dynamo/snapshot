@@ -32,9 +32,10 @@ change, so minor versions can carry breaking changes until 1.0. Release
 candidates (`-rcN`) are published ahead of a stable release for integration
 testing.
 
-Snapshot releases monthly. The maintainers cut a release once a month from
+Snapshot releases monthly. The maintainers cut a minor release once a month from
 whatever has landed on `main`; a month with nothing user-visible to ship can be
-skipped rather than padded. Release candidates precede any release that changes
+skipped rather than padded. Patch releases are cut from the affected line's
+maintenance branch as needed, not on the monthly cadence. Release candidates precede any release that changes
 the CRDs or the checkpoint or restore contract, so integrators have a version to
 test against before the stable tag.
 
@@ -47,9 +48,10 @@ The decision to cut a release is made by maintainer consensus, per
 
 ## Tagging and branches
 
-Releases are cut from `main`. There are no long-lived release branches; a patch
-for an older release is branched from that release's tag only if the need
-arises.
+Releases are cut from `main`. Patch releases for a published line are cut from
+that line's maintenance branch, such as `release/0.1`. Only the most recent line
+receives security fixes; see
+[Supported versions](SECURITY.md#supported-versions).
 
 Every release produces four tags. You create one — the rest are automatic:
 
@@ -69,10 +71,17 @@ move a tag that already points elsewhere.
 
 ## Cutting a release
 
-1. Confirm `main` is green and contains everything intended for the release.
+Throughout, the *release branch* means `main` for the first release of a minor
+line (`vX.Y.0`), and that line's maintenance branch — `release/X.Y` — for every
+patch release after it. The `Release` workflow builds from the commit the tag
+points at, so tagging a patch release against `main` would publish whatever else
+has landed there since.
+
+1. Confirm the release branch is green and contains everything intended for the
+   release.
 2. Publish a [GitHub Release](https://github.com/ai-dynamo/snapshot/releases/new)
-   with a new tag `vX.Y.Z` targeting `main`, and write user-facing release notes
-   (see below).
+   with a new tag `vX.Y.Z` targeting the release branch, and write user-facing
+   release notes (see below).
 3. The `Release` workflow triggers on `release: published` and:
    - runs the full validation gate against the release commit,
    - builds and pushes the operator and agent images to
