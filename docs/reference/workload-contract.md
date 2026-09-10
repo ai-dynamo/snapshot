@@ -18,11 +18,11 @@ entrypoint satisfy this contract works.
 
 A snapshot-ready workload has two parts:
 
-- a **lifecycle protocol** the workload process implements, and
-- a **pod shape** that gives the process the control channel and the runtime
-  conditions CRIU needs.
+- **capture and restore steps** the workload process implements, and
+- **pod requirements** that give the process the shared directory and the
+  runtime conditions CRIU needs.
 
-## The control channel
+## Coordinating with the agent
 
 The workload and the Snapshot node agent coordinate through a shared directory: a
 per-pod `emptyDir` the agent mounts into the container. The workload finds it
@@ -30,24 +30,25 @@ through an environment variable and signals across it with sentinel files.
 
 | Name | Direction | Meaning |
 |------|-----------|---------|
-| `SNAPSHOT_CONTROL_DIR` | agent → workload | Path to the control directory (mounted at `/snapshot-control`). The workload reads it here rather than hard-coding the path. |
+| `SNAPSHOT_CONTROL_DIR` | agent → workload | Path to the shared directory (mounted at `/snapshot-control`). The workload reads it here rather than hard-coding the path. |
 | `ready-for-snapshot` | workload writes | The workload is quiesced and safe to checkpoint. The source pod's readiness probe gates on this file. |
 | `restore-complete` | agent writes, workload waits | The workload's state is restored; it may resume. |
 | `SNAPSHOT_RESTORE_STANDBY` | producer → workload | When `1`, this process is a restore placeholder: the workload must stay inert and not initialize. |
 | `<framework>-restore-ready` | workload writes | A workload-chosen sentinel meaning "restored and serving." The restore pod's readiness probe gates on it. |
 
-The agent-owned side of this channel (and its `cuda-checkpoint-job` file) is
-described in [The snapshot-control volume](api.md#the-snapshot-control-volume).
+The agent-owned side of this shared directory (and its `cuda-checkpoint-job`
+file) is described in
+[The snapshot-control volume](api.md#the-snapshot-control-volume).
 The restore-pod side — annotations, standby, startup gate — is the
 [Restore Pod contract](restore-pod-contract.md).
 
-## The lifecycle protocol
+## The capture and restore steps
 
-The protocol is a sequence of **barriers** built from the sentinels above. An
-**up-signal** is a sentinel the workload writes (`ready-for-snapshot`,
-`<framework>-restore-ready`) — a *promise that a precondition already holds*. A
-**down-signal** is a sentinel the workload waits on (`restore-complete`) — a
-*barrier it must not cross early*. The whole contract reduces to one rule:
+These steps are built from the sentinels above. A sentinel the workload writes
+(`ready-for-snapshot`, `<framework>-restore-ready`) is a *promise that a
+precondition already holds*. A sentinel the workload waits on
+(`restore-complete`) must not be crossed early. The whole contract reduces to
+one rule:
 
 > Raise a sentinel only once its precondition is true, and do not proceed past a
 > wait until the agent's signal is observed.
@@ -97,7 +98,7 @@ workload useful and operable.
 11. **SHOULD** write the `<framework>-restore-ready` sentinel only after the API
     socket is actually listening, so readiness reflects true serving capacity.
 
-### Config parity and mechanism
+### Matching configuration, per-engine calls
 
 **MUST** keep the capture and restore processes configured identically — model,
 dtype, tensor-parallel size, engine sizing, and any loader flags that change what
@@ -107,17 +108,18 @@ which permits executing a model repo's custom Python code during load). The
 restored process *is* the captured process; a different configuration is
 undefined.
 
-Steps 3-6 (capture: warm up, quiesce) and step 10 (restore: rehydrate) each
-break down into the same sub-obligations across engines — the table below lists
-what each engine calls to meet them. Different frameworks expose different
-function names for the same obligation, which is why the protocol defines the
-contract in terms of *what must happen*, not any one engine's API. Tiers carry
-over from their parent step: skipping a **MUST** row breaks capture or restore
-outright (for example, checkpointing with a generation in flight, or resuming
-before GPU memory is restored, fails); skipping the **SHOULD** row still
-produces a working checkpoint, just a larger or colder one.
+Steps 3-6 (capture: warm up, quiesce) and step 10 (restore: bring the engine
+back to serving) each break down into the same sub-requirements across
+engines — the table below lists what each engine calls to meet them.
+Different frameworks expose different function names for the same
+requirement, which is why these steps define the contract in terms of *what
+must happen*, not any one engine's API. Tiers carry over from their parent
+step: skipping a **MUST** row breaks capture or restore outright (for
+example, checkpointing with a generation in flight, or resuming before GPU
+memory is restored, fails); skipping the **SHOULD** row still produces a
+working checkpoint, just a larger or colder one.
 
-| Obligation | Tier | vLLM | TensorRT-LLM | SGLang |
+| Requirement | Tier | vLLM | TensorRT-LLM | SGLang |
 |------------|------|------|--------------|--------|
 | Warm up | SHOULD | one `generate` | `LLM.generate` (two prompts) | one `generate` |
 | Stop in-flight work | MUST | `pause_generation()` | synchronous `generate` returns idle | `pause_generation()` |
@@ -127,12 +129,12 @@ produces a working checkpoint, just a larger or colder one.
 
 The three are the engines the guides document, not the limit of what the
 contract admits — any inference server that fills in its own column of the table
-and meets the channel, pod, and runtime requirements is snapshot-ready. See
+and meets the pod and runtime requirements below is snapshot-ready. See
 [Support a new inference server](#support-a-new-inference-server).
 
 ## Pod requirements
 
-The source pod gives the workload the control channel and the conditions
+The source pod gives the workload the shared directory and the conditions
 checkpointing needs. The framework `deployment.yaml` files referenced from the
 [usage guides](../guides/README.md) are the complete reference; the load-bearing
 fields are:
@@ -145,8 +147,9 @@ fields are:
 - a readiness gate on `/snapshot-control/ready-for-snapshot`, so the pod reports
   Ready only once it is safe to checkpoint.
 
-Restore pods carry a different shape — the `nvidia.com/restore-from` annotation,
-an inert placeholder command, and the optional standby and startup-gate settings.
+Restore pods carry different requirements — the `nvidia.com/restore-from`
+annotation, an inert placeholder command, and the optional standby and
+startup-gate settings.
 Producing them programmatically is the
 [Restore Pod contract](restore-pod-contract.md).
 
@@ -175,11 +178,11 @@ custom image still has to meet these:
 ## Packaging methods
 
 - **Custom image (reference).** Start from the framework runtime image, add a
-  small entrypoint that implements the lifecycle protocol, and set it as the
-  command. The [usage guides](../guides/README.md) walk through this for vLLM,
-  SGLang, and TensorRT-LLM.
+  small entrypoint that implements the capture and restore steps, and set it as
+  the command. The [usage guides](../guides/README.md) walk through this for
+  vLLM, SGLang, and TensorRT-LLM.
 - **Any equivalent.** Mounting the entrypoint into a stock image and overriding
-  the command, or a framework that implements the protocol natively, is equally
+  the command, or a framework that implements these steps natively, is equally
   valid — provided the running container satisfies this contract and the runtime
   compatibility constraints above.
 
@@ -189,17 +192,17 @@ The documented engines are examples, not the boundary: any inference server that
 satisfies this contract is snapshot-ready, and the node agent checkpoints and
 restores it with no Snapshot-side change. To bring one:
 
-1. **Map each obligation to the engine's API** — fill in its own column of the
-   [config-parity table](#config-parity-and-mechanism): warm up, stop in-flight
+1. **Map each requirement to the engine's API** — fill in its own column of the
+   [table](#matching-configuration-per-engine-calls): warm up, stop in-flight
    work, park and restore GPU memory, resume. Any mechanism qualifies as long as
-   it meets the obligation; an engine with no explicit memory-park call can rely
-   on a synchronous request returning idle, as TensorRT-LLM does.
-2. **Implement the lifecycle protocol over the control channel** — read
-   `SNAPSHOT_CONTROL_DIR`, clear then write `ready-for-snapshot` at the quiesced
-   barrier, honor `SNAPSHOT_RESTORE_STANDBY`, wait on `restore-complete`, and
+   it meets the requirement; an engine with no explicit memory-park call can
+   rely on a synchronous request returning idle, as TensorRT-LLM does.
+2. **Implement the capture and restore steps over the shared directory** — read
+   `SNAPSHOT_CONTROL_DIR`, clear then write `ready-for-snapshot` once quiesced,
+   honor `SNAPSHOT_RESTORE_STANDBY`, wait on `restore-complete`, and
    write a `<framework>-restore-ready` sentinel once the API is serving.
 3. **Clear the [runtime-compatibility](#runtime-compatibility) constraints** and
-   **give the pod the [required shape](#pod-requirements)**, then package it by
+   **meet the [pod requirements](#pod-requirements)**, then package it by
    either method above.
 
 Nothing about the engine's identity is special to Snapshot; satisfying the
