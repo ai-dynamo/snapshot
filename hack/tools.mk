@@ -1,9 +1,9 @@
-GO_VERSION             ?= 1.26.6
+GO_VERSION             ?= 1.27.1
 
 CONTROLLER_GEN_VERSION ?= v0.19.0
-GOLANGCI_LINT_VERSION  ?= v1.62.2
+GOLANGCI_LINT_VERSION  ?= v2.13.2
 ADDLICENSE_VERSION     ?= v1.1.1
-GOVULNCHECK_VERSION    ?= v1.1.4
+GOVULNCHECK_VERSION    ?= v1.8.0
 HELM_VERSION           ?= v3.17.3
 # Protobuf's v21.12 release reports itself as libprotoc 3.21.12.
 override PROTOC_VERSION := 3.21.12
@@ -25,19 +25,29 @@ GOVULNCHECK    := $(TOOLS_BIN_DIR)/govulncheck
 HELM           := $(TOOLS_BIN_DIR)/helm
 PROTOC         := $(TOOLS_BIN_DIR)/protoc
 
+# A tool that type-checks our source has to be built with at least our Go
+# version: golangci-lint refuses to start when it was built with an older one,
+# and govulncheck panics part-way through. Both pin a toolchain in their own
+# go.mod that lags ours, and `go install` honours that pin — so force ours.
+# Without this, every GO_VERSION bump breaks `make check` until the tools
+# catch up. Tools that only rewrite or generate files do not need it.
+TOOL_TOOLCHAIN := GOTOOLCHAIN=go$(GO_VERSION)
+
 # Each tool installs on demand (only when its binary is missing), so targets can
 # depend on it as a prerequisite without a separate install step in CI.
 $(CONTROLLER_GEN):
 	GOBIN=$(TOOLS_BIN_DIR) GOWORK=off go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
 
 $(GOLANGCI_LINT):
-	GOBIN=$(TOOLS_BIN_DIR) GOWORK=off go install github.com/golangci/golangci-lint/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	GOBIN=$(TOOLS_BIN_DIR) GOWORK=off $(TOOL_TOOLCHAIN) \
+	  go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 
 $(ADDLICENSE):
 	GOBIN=$(TOOLS_BIN_DIR) GOWORK=off go install github.com/google/addlicense@$(ADDLICENSE_VERSION)
 
 $(GOVULNCHECK):
-	GOBIN=$(TOOLS_BIN_DIR) GOWORK=off go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
+	GOBIN=$(TOOLS_BIN_DIR) GOWORK=off $(TOOL_TOOLCHAIN) \
+	  go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
 
 # helm ships as a tarball (<os>-<arch>/helm); extract just the binary.
 $(HELM):

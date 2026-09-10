@@ -20,6 +20,7 @@ markers = [
   "snapshot_failure: functional snapshot/restore failure checks",
   "gpu: tests that require a GPU workload",
   "workload: cluster-free checks of the workload scripts themselves",
+  "framework: checkpoint/restore of an inference framework guide workload",
 ]
 testpaths = ["tests"]
 

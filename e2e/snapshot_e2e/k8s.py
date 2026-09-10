@@ -71,6 +71,25 @@ def create_pod(body: dict[str, Any]) -> client.V1Pod:
     )
 
 
+def apply_configmap(namespace: str, body: dict[str, Any]) -> client.V1ConfigMap:
+    """Create the ConfigMap, replacing it in place if it already exists.
+
+    A prior run in the same namespace (a local re-run, a retried CI job) can
+    leave a stale ConfigMap with the same name; replace rather than error, so
+    the test always deploys against the current app.py.
+    """
+    api = client.CoreV1Api()
+    name = body["metadata"]["name"]
+    try:
+        return api.create_namespaced_config_map(namespace=namespace, body=body)
+    except ApiException as exc:
+        if exc.status != 409:
+            raise
+        existing = api.read_namespaced_config_map(name=name, namespace=namespace)
+        body["metadata"]["resourceVersion"] = existing.metadata.resource_version
+        return api.replace_namespaced_config_map(name=name, namespace=namespace, body=body)
+
+
 def read_pod(namespace: str, name: str) -> client.V1Pod:
     return client.CoreV1Api().read_namespaced_pod(name=name, namespace=namespace)
 

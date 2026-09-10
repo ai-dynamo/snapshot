@@ -29,3 +29,30 @@ If reporting a potential vulnerability via email, please encrypt it using NVIDIA
 5. Potential impact of the vulnerability, including how an attacker could exploit the vulnerability
 
 See https://www.nvidia.com/en-us/security/ for past NVIDIA Security Bulletins and Notices.
+
+## Coordinated disclosure
+
+NVIDIA PSIRT triages every report and coordinates any resulting fix and
+disclosure under NVIDIA's coordinated vulnerability disclosure process. What
+that process covers — how reports are evaluated, and what NVIDIA does and does
+not commit to — is described on the
+[NVIDIA PSIRT policies page](https://www.nvidia.com/en-us/security/psirt-policies/).
+Snapshot does not set separate terms; that policy governs. Note in particular
+that NVIDIA does not guarantee a specific resolution for every reported issue.
+
+## Reporter credit
+
+With the reporter's agreement, NVIDIA PSIRT may recognize them for a valid,
+privately reported vulnerability — on NVIDIA's acknowledgement page, or in the
+security bulletin for the issue. Recognition is discretionary and arranged by
+PSIRT as part of the process above. It is never given through GitHub Security
+Advisories; Snapshot does not publish those.
+
+## Supported versions
+
+Snapshot is pre-1.0. Security fixes are applied to the most recent minor release
+line only.
+
+If you are running a pre-release or an older patch version, upgrade to the latest
+patch release on the supported line to pick up a fix. This policy is revisited at
+1.0, when more than one line may be supported at a time.

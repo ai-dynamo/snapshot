@@ -1,0 +1,79 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-restored
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vllm-restored
+  template:
+    metadata:
+      labels:
+        app: vllm-restored
+      annotations:
+        nvidia.com/restore-from: vllm-snapshot
+    spec:
+      terminationGracePeriodSeconds: 1
+      runtimeClassName: nvidia
+      securityContext:
+        seccompProfile:
+          type: Localhost
+          localhostProfile: profiles/block-iouring.json
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      containers:
+        - name: main
+          image: vllm/vllm-openai:v0.27.1-ubuntu2404@sha256:dafea057f24b7d42716331a48e2db4e1f204f877a3aa759cb7e4c37e64ca2eee
+          imagePullPolicy: IfNotPresent
+          # Inert placeholder: the agent restores the checkpointed process into
+          # this container, so app.py must not run here.
+          command:
+            - /bin/sh
+            - -c
+            - exec sleep infinity
+          env:
+            - name: SNAPSHOT_MODEL
+              value: Qwen/Qwen3-0.6B
+            - name: SNAPSHOT_CONTROL_DIR
+              value: /snapshot-control
+          ports:
+            - name: api
+              containerPort: 8000
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          readinessProbe:
+            exec:
+              command:
+                - cat
+                - /snapshot-control/vllm-restore-ready
+            periodSeconds: 1
+            failureThreshold: 1200
+          volumeMounts:
+            - name: snapshot-control
+              mountPath: /snapshot-control
+              subPath: main
+            - name: tun
+              mountPath: /dev/net/tun
+            # The checkpointed process's mount namespace includes this
+            # mount (from the source Pod); restore recreates it here too,
+            # even though this placeholder's own command never reads it.
+            - name: app
+              mountPath: /snapshot-app
+              readOnly: true
+      volumes:
+        - name: snapshot-control
+          emptyDir: {}
+        - name: tun
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice
+        - name: app
+          configMap:
+            name: vllm-app
