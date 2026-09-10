@@ -19,6 +19,7 @@ def pytest_runtest_makereport(
     outcome = yield
     report = outcome.get_result()
     setattr(item, f"benchmark_report_{call.when}", report)
+    setattr(item, f"benchmark_excinfo_{call.when}", call.excinfo)
 
 
 @pytest.fixture
@@ -41,26 +42,55 @@ def benchmark(request: pytest.FixtureRequest) -> benchmark_result.BenchmarkSessi
     session = benchmark_result.BenchmarkSession(test_name)
     yield session
 
-    report = getattr(request.node, "benchmark_report_call", None)
+    outcome, error = benchmark_outcome(
+        report=getattr(request.node, "benchmark_report_call", None),
+        excinfo=getattr(request.node, "benchmark_excinfo_call", None),
+        interrupted=request.session.exitstatus == pytest.ExitCode.INTERRUPTED,
+    )
+    session.finalize(outcome, error=error)
+
+
+def benchmark_outcome(
+    *,
+    report: pytest.TestReport | None,
+    excinfo: pytest.ExceptionInfo[BaseException] | None,
+    interrupted: bool,
+) -> tuple[str, dict[str, str] | None]:
+    """Maps the pytest call report to a benchmark outcome and durable error.
+
+    Only the crash line of a failure is kept. Full tracebacks stay in the
+    pytest log and short-lived artifacts because results are retained outside
+    the cluster.
+    """
     if report is None:
-        session.finalize(
-            "infrastructure_failed",
-            error={"phase": "pytest", "message": "pytest produced no call report"},
+        if interrupted:
+            return "timed_out", {
+                "phase": "call",
+                "message": "pytest was interrupted before the test completed",
+            }
+        return "infrastructure_failed", {
+            "phase": "pytest",
+            "message": "pytest produced no call report",
+        }
+    if report.skipped:
+        return "skipped", {"phase": "call", "message": report_message(report)}
+    if report.failed:
+        timed_out = excinfo is not None and isinstance(
+            excinfo.value, lifecycle.LifecycleTimeoutError
         )
-    elif report.skipped:
-        session.finalize(
-            "skipped",
-            error={"phase": "call", "message": _report_message(report)},
-        )
-    elif report.failed:
-        session.finalize(
-            "failed",
-            error={"phase": "call", "message": _report_message(report)},
-        )
-    else:
-        session.finalize("passed")
+        return ("timed_out" if timed_out else "failed"), {
+            "phase": "call",
+            "message": report_message(report),
+        }
+    return "passed", None
 
 
-def _report_message(report: pytest.TestReport) -> str:
-    longreprtext = getattr(report, "longreprtext", "")
-    return longreprtext or str(report.longrepr)
+def report_message(report: pytest.TestReport) -> str:
+    longrepr = report.longrepr
+    if isinstance(longrepr, tuple) and len(longrepr) == 3:
+        return str(longrepr[2])
+    crash = getattr(longrepr, "reprcrash", None)
+    message = getattr(crash, "message", None)
+    if message:
+        return str(message)
+    return getattr(report, "longreprtext", "") or str(longrepr)

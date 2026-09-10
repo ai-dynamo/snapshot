@@ -341,18 +341,19 @@ jobs:
           set -euo pipefail
           uv run --locked --project e2e pytest e2e/tests -m environment -vv
 
-      # Must exceed the phase budgets in e2e/snapshot_e2e/frameworks.py plus the
-      # request timeout (~43 min with sglang's 600s restore_timeout_seconds
-      # override), or GitHub kills pytest before its dump runs.
+      # The inner timeout must exceed the phase budgets in
+      # e2e/snapshot_e2e/frameworks.py plus the request timeout (45 min with
+      # sglang's 600s restore_timeout_seconds override). SIGINT reaches the
+      # whole process group, so pytest raises KeyboardInterrupt, runs its
+      # fixture finalizers (benchmark result, cluster cleanup), and exits
+      # before the KILL backstop; GNU timeout still returns 124.
       - name: Run ${{ matrix.framework }} checkpoint/restore test
         if: ${{ steps.selected.outputs.run == 'true' }}
         id: framework_test
         timeout-minutes: 50
         run: |
           set -uo pipefail
-          # Leave enough of the step's timeout for a result to be written even
-          # if pytest itself hangs. GNU timeout returns 124 for this path.
-          timeout --signal=TERM --kill-after=15s 48m \
+          timeout --signal=INT --kill-after=150s 46m \
             uv run --locked --project e2e pytest e2e/tests/test_frameworks.py -vv -s
           status=$?
           if [[ "${status}" -eq 124 ]]; then
@@ -361,7 +362,7 @@ jobs:
               --case "${{ matrix.framework }}" \
               --test test_framework_checkpoint_restore_serves_inference \
               --outcome timed_out \
-              --message "pytest exceeded the 48 minute benchmark timeout"
+              --message "pytest exceeded the 46 minute benchmark timeout"
           fi
           exit "${status}"
 

@@ -64,8 +64,21 @@ def read_crd(name: str) -> client.V1CustomResourceDefinition:
     return client.ApiextensionsV1Api().read_custom_resource_definition(name)
 
 
-def list_events(namespace: str) -> list[client.CoreV1Event]:
-    return client.CoreV1Api().list_namespaced_event(namespace).items
+def read_node(name: str) -> client.V1Node:
+    return client.CoreV1Api().read_node(name)
+
+
+def list_events(
+    namespace: str,
+    *,
+    field_selector: dict[str, str] | None = None,
+) -> list[client.CoreV1Event]:
+    kwargs: dict[str, Any] = {}
+    if field_selector:
+        kwargs["field_selector"] = ",".join(
+            f"{key}={value}" for key, value in sorted(field_selector.items())
+        )
+    return client.CoreV1Api().list_namespaced_event(namespace, **kwargs).items
 
 
 def create_pod(body: dict[str, Any]) -> client.V1Pod:

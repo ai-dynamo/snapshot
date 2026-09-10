@@ -37,6 +37,10 @@ TERMINAL_POD_PHASES = {"Failed", "Succeeded"}
 AGENT_CHECKPOINT_DIR = "/checkpoints"
 
 
+class LifecycleTimeoutError(AssertionError, TimeoutError):
+    """A lifecycle wait exhausted its budget before the awaited state appeared."""
+
+
 def wait_for_pod_deleted(namespace: str, name: str, timeout: int = 180) -> None:
     def gone() -> bool | None:
         try:
@@ -292,6 +296,12 @@ def wait_for_restore_traffic_ready(
     can add two independent polling delays to the reported duration. This
     waiter records each boundary the first time it is seen, still requires
     both success signals, and fails fast on either restore or workload errors.
+
+    The sentinel exec starts only after ``nvidia.com/Restored`` reports
+    ``RestoreSucceeded``. The agent restores the checkpointed process tree
+    into the placeholder's PID namespace with its original PIDs, and an exec
+    session in that namespace during the restore could occupy one of them.
+    The poll interval bounds the delay this adds to the traffic boundary.
     """
     marker = "__snapshot_e2e_outcome__"
     restored_pod: client.V1Pod | None = None
@@ -323,7 +333,7 @@ def wait_for_restore_traffic_ready(
                     f"{namespace}/{pod_name}: {restored.reason}: {restored.message}"
                 )
 
-        if ready_text is None:
+        if restored_pod is not None and ready_text is None:
             try:
                 output = k8s.exec_command(
                     namespace,
@@ -334,7 +344,7 @@ def wait_for_restore_traffic_ready(
                     f"cat {shlex.quote(ready_file)}; fi",
                 )
                 last_exec_error = None
-            except Exception as exc:  # transient while the container starts
+            except Exception as exc:  # transient while the restored process settles
                 last_exec_error = f"{type(exc).__name__}: {exc}"
             else:
                 if output.startswith(f"{marker}:error"):
@@ -623,12 +633,16 @@ def wait_for_pod_event(
 
     Benchmark callers use a shorter poll than the ordinary lifecycle waits so
     observing an agent event adds at most one second to the timing boundary.
-    The UID guard avoids matching an event from a locally re-created pod with
-    the same name.
+    The server-side field selector keeps that poll cheap in a busy namespace;
+    the UID guard avoids matching an event from a re-created pod with the
+    same name.
     """
+    selector = {"involvedObject.name": pod_name, "reason": reason}
+    if pod_uid:
+        selector["involvedObject.uid"] = pod_uid
 
     def matching_event() -> client.CoreV1Event | None:
-        for event in reversed(k8s.list_events(namespace)):
+        for event in reversed(k8s.list_events(namespace, field_selector=selector)):
             involved = event.involved_object
             if not involved or involved.name != pod_name or event.reason != reason:
                 continue
@@ -640,8 +654,9 @@ def wait_for_pod_event(
     def detail() -> str:
         reasons = [
             event.reason
-            for event in k8s.list_events(namespace)
-            if event.involved_object and event.involved_object.name == pod_name
+            for event in k8s.list_events(
+                namespace, field_selector={"involvedObject.name": pod_name}
+            )
         ]
         return f"observed_reasons={reasons[-10:]}"
 
@@ -1416,4 +1431,4 @@ def wait_for(
             last_report = now
         time.sleep(poll_interval)
     suffix = f": {last_detail}" if last_detail else ""
-    raise AssertionError(f"timed out waiting for {description}{suffix}")
+    raise LifecycleTimeoutError(f"timed out waiting for {description}{suffix}")

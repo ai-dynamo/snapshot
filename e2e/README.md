@@ -205,7 +205,11 @@ also emitted as `<operation>.<phase>.duration`, including
 `checkpoint.criu_dump.duration` and `restore.criu_restore.duration`.
 `restore.agent_complete_to_traffic.duration` shows framework wake-up time after
 the agent completes. Restore success and the traffic sentinel are watched in
-one one-second polling loop so two sequential waits do not inflate this gap.
+one one-second polling loop. The sentinel check execs into the restore pod, so
+it starts only after the `nvidia.com/Restored` condition reports
+`RestoreSucceeded`: the agent restores the checkpointed process tree with its
+original PIDs, and an exec session in that PID namespace during the restore
+could collide with one of them. The one-second poll bounds the delay this adds.
 
 `source.image_pull.duration` and `restore.image_pull.duration` come from the
 kubelet's `Pulled` events. The companion `*_including_wait.duration` includes
@@ -216,13 +220,29 @@ a network pull.
 Most durations use the test runner's monotonic clock. The restore start is
 backdated once from the Kubernetes event timestamp to remove event-observation
 delay, and the agent-to-traffic gap compares the agent log timestamp with the
-observed traffic-ready timestamp. The result also keeps the underlying events,
-test outcome, source revision, framework image and model, cache mode, and
-storage metadata (CSI provisioner, storage class, requested size, bound
+observed traffic-ready timestamp. Both cross the boundary between the cluster's
+clock and the runner's clock. The agent stamps its events with a microsecond
+`eventTime`, and the `restore.requested` event in the result records
+`observationDelaySeconds`, the signed gap between the agent's timestamp and the
+runner's observation; a negative value means the cluster clock is ahead of the
+runner, and the console summary warns when the gap is negative or larger than
+a few seconds. The result also keeps the underlying events, test outcome,
+source revision, framework image tag and resolved digest, model, cache mode,
+and storage metadata (CSI provisioner, storage class, requested size, bound
 capacity, access modes, and volume mode). Source and restore GPU model, UUID,
 driver, and node are recorded separately because restore may receive a
-different physical GPU. Missing boundaries remain explicit incomplete
-measurements and are never serialized as zero.
+different physical GPU; the node's `nvidia.com/gpu.product` label is recorded
+too and stands in for the model when `nvidia-smi` is unavailable. Missing
+boundaries remain explicit incomplete measurements and are never serialized as
+zero.
+
+Outcomes are `passed`, `failed`, `timed_out`, `skipped`, and
+`infrastructure_failed`. A lifecycle wait that exhausts its budget, or a pytest
+run interrupted by the workflow's timeout, is `timed_out`; other assertion
+failures are `failed`; a run that never produced a pytest call report is
+`infrastructure_failed`. The durable `error.message` holds only the final
+exception line. Full tracebacks stay in the pytest log and the short-lived
+diagnostics artifact because results are retained outside the cluster.
 
 `snapshot_e2e.benchmark.BenchmarkSession` is intentionally independent of the
 framework schema: another E2E suite can name its own case, events, and duration
