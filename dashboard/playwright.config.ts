@@ -14,8 +14,10 @@ export default defineConfig({
     trace: "on-first-retry",
     ...devices["Desktop Chrome"],
   },
+  // Serves the production bundle from dist/ (built by pretest:browser with
+  // the fixture index copied in), the same artifact actions/deploy-pages ships.
   webServer: {
-    command: "npm run dev -- --host 127.0.0.1 --port 4173",
+    command: "npm exec vite -- preview --host 127.0.0.1 --port 4173 --strictPort",
     url: "http://127.0.0.1:4173",
     reuseExistingServer: !process.env.CI,
   },

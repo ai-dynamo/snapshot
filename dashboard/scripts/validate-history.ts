@@ -6,7 +6,11 @@ import { resolve } from "node:path";
 
 import { parseChunk, parseManifest } from "../src/data.ts";
 
-const indexDirectory = resolve(process.argv[2] || "public/index");
+const args = process.argv.slice(2);
+const strict = args.includes("--strict");
+const indexDirectory = resolve(args.find((arg) => !arg.startsWith("--")) || "public/index");
+const annotate = process.env.GITHUB_ACTIONS === "true";
+
 const manifest = parseManifest(
   await readFile(resolve(indexDirectory, "manifest.json"), "utf8"),
 );
@@ -15,9 +19,9 @@ let invalid = 0;
 let unsupported = 0;
 for (const chunk of manifest.chunks) {
   const relative = chunk.path.replace(/^index\//, "");
-  const parsed = parseChunk(
-    await readFile(resolve(indexDirectory, relative), "utf8"),
-  );
+  const text = await readFile(resolve(indexDirectory, relative), "utf8");
+  const lines = text.split(/\r?\n/).filter((line) => line.trim() !== "");
+  const parsed = parseChunk(text);
   if (parsed.records.length + parsed.warnings.length !== chunk.recordCount) {
     throw new Error(
       `${chunk.path} record count does not match the manifest ` +
@@ -26,12 +30,14 @@ for (const chunk of manifest.chunks) {
   }
   records += parsed.records.length;
   for (const warning of parsed.warnings) {
+    const rawPath = rawPathOf(lines[(warning.line ?? 1) - 1]);
+    const location = `${chunk.path}:${warning.line}${rawPath ? ` (${rawPath})` : ""}`;
     if (warning.code === "unsupported-schema") {
       unsupported += 1;
-      console.warn(`${chunk.path}:${warning.line}: ${warning.message}`);
+      report("warning", `${location}: ${warning.message}`);
     } else {
       invalid += 1;
-      console.error(`${chunk.path}:${warning.line}: ${warning.message}`);
+      report(strict ? "error" : "warning", `${location}: ${warning.message}`);
     }
   }
 }
@@ -42,6 +48,30 @@ if (indexedRecords !== manifest.recordCount) {
   );
 }
 if (invalid > 0) {
-  throw new Error(`History contains ${invalid} invalid record${invalid === 1 ? "" : "s"}`);
+  const summary = `History contains ${invalid} invalid record${invalid === 1 ? "" : "s"}`;
+  if (strict) {
+    throw new Error(summary);
+  }
+  report("warning", `${summary}; the dashboard skips them at load time.`);
 }
 console.log(`Validated ${records} dashboard record${records === 1 ? "" : "s"}.`);
+
+function rawPathOf(line: string | undefined): string | null {
+  if (!line) return null;
+  try {
+    const entry = JSON.parse(line) as { rawPath?: unknown };
+    return typeof entry.rawPath === "string" ? entry.rawPath : null;
+  } catch {
+    return null;
+  }
+}
+
+function report(level: "warning" | "error", message: string): void {
+  if (annotate) {
+    console.log(`::${level}::${message}`);
+  } else if (level === "error") {
+    console.error(message);
+  } else {
+    console.warn(message);
+  }
+}

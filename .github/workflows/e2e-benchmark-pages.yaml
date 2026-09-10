@@ -8,6 +8,7 @@ on:
     branches: [main]
     paths:
       - 'dashboard/**'
+      - '.github/actions/fetch-benchmark-history/**'
       - '.github/workflows/e2e-benchmark-pages.yaml'
   workflow_run:
     workflows: [E2E Framework Tests]
@@ -15,9 +16,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Queue rather than cancel: cancelling a run mid actions/deploy-pages leaves a
+# failed github-pages deployment behind.
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -33,49 +36,33 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout dashboard source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
           persist-credentials: false
 
       - name: Fetch benchmark history
+        id: history
+        uses: ./.github/actions/fetch-benchmark-history
+        with:
+          token: ${{ github.token }}
+
+      - name: Bootstrap an empty history index
+        if: steps.history.outputs.exists != 'true'
+        env:
+          HISTORY_DIR: ${{ steps.history.outputs.history_dir }}
         run: |
           set -euo pipefail
-          history_dir="${RUNNER_TEMP}/snapshot-e2e-benchmark-history"
-          mkdir -p "${history_dir}"
-          git -C "${history_dir}" init --quiet --initial-branch=e2e-benchmark-history
-          git -C "${history_dir}" remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-
-          set +e
-          git -C "${history_dir}" ls-remote --quiet --exit-code \
-            --heads origin e2e-benchmark-history >/dev/null
-          history_status=$?
-          set -e
-
-          case "${history_status}" in
-            0)
-              git -C "${history_dir}" fetch --quiet --depth=1 \
-                origin refs/heads/e2e-benchmark-history
-              git -C "${history_dir}" checkout --quiet --detach FETCH_HEAD
-              ;;
-            2)
-              echo "::notice::No benchmark history exists yet; deploying an empty dashboard."
-              mkdir -p "${history_dir}/index"
-              printf '%s\n' \
-                '{"manifestVersion":1,"historyFormatVersion":1,"supportedSchemaVersions":[1],"recordCount":0,"chunks":[]}' \
-                > "${history_dir}/index/manifest.json"
-              ;;
-            *)
-              echo "::error::Could not inspect the e2e-benchmark-history branch."
-              exit "${history_status}"
-              ;;
-          esac
-          echo "BENCHMARK_HISTORY_DIR=${history_dir}" >> "${GITHUB_ENV}"
+          echo "::notice::No benchmark history exists yet; deploying an empty dashboard."
+          mkdir -p "${HISTORY_DIR}/index"
+          printf '%s\n' \
+            '{"manifestVersion":1,"historyFormatVersion":1,"supportedSchemaVersions":[1],"recordCount":0,"newestResultAt":null,"chunks":[]}' \
+            > "${HISTORY_DIR}/index/manifest.json"
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "24"
+          node-version-file: dashboard/.nvmrc
           cache: npm
           cache-dependency-path: dashboard/package-lock.json
 
@@ -87,24 +74,28 @@ jobs:
         working-directory: dashboard
         run: npm test
 
+      # Invalid records are reported as annotations and skipped by the
+      # dashboard at load time; only a broken manifest blocks the deployment.
       - name: Validate benchmark history
         working-directory: dashboard
-        run: npm run validate-data -- "${BENCHMARK_HISTORY_DIR}/index"
+        env:
+          HISTORY_DIR: ${{ steps.history.outputs.history_dir }}
+        run: npm run validate-data -- "${HISTORY_DIR}/index"
 
       - name: Build static dashboard
         working-directory: dashboard
-        env:
-          DASHBOARD_PRODUCTION: "true"
-        run: npm run build
+        run: npm run build:production
 
       - name: Add benchmark history to static artifact
-        run: cp -R "${BENCHMARK_HISTORY_DIR}/index" "${GITHUB_WORKSPACE}/dashboard/dist/index"
+        env:
+          HISTORY_DIR: ${{ steps.history.outputs.history_dir }}
+        run: cp -R "${HISTORY_DIR}/index" "${GITHUB_WORKSPACE}/dashboard/dist/index"
 
       - name: Configure GitHub Pages
-        uses: actions/configure-pages@v6
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 
       - name: Upload GitHub Pages artifact
-        uses: actions/upload-pages-artifact@v5
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: dashboard/dist
 
@@ -121,4 +112,4 @@ jobs:
     steps:
       - name: Deploy GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

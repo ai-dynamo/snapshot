@@ -4,15 +4,17 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22.22.2"
+    "node": ">=22.18.0"
   },
   "scripts": {
     "dev": "vite",
     "build": "npm run typecheck && vite build",
+    "build:production": "node scripts/check-node.mjs && DASHBOARD_PRODUCTION=true npm run build",
+    "pretest:browser": "npm run build:production && rm -rf dist/index && cp -R public/index dist/index",
     "test": "vitest run",
     "test:browser": "playwright test",
     "typecheck": "tsc --noEmit",
-    "validate-data": "node scripts/validate-history.ts"
+    "validate-data": "node scripts/check-node.mjs && node scripts/validate-history.ts"
   },
   "dependencies": {
     "chart.js": "4.5.1"
