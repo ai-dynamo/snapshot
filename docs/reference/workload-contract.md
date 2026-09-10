@@ -43,8 +43,10 @@ The restore-pod side — annotations, standby, startup gate — is the
 
 ## The lifecycle protocol
 
-The protocol is a sequence of **barriers**. Each up-signal the workload raises is
-a *promise that a precondition already holds*; each down-signal it waits on is a
+The protocol is a sequence of **barriers** built from the sentinels above. An
+**up-signal** is a sentinel the workload writes (`ready-for-snapshot`,
+`<framework>-restore-ready`) — a *promise that a precondition already holds*. A
+**down-signal** is a sentinel the workload waits on (`restore-complete`) — a
 *barrier it must not cross early*. The whole contract reduces to one rule:
 
 > Raise a sentinel only once its precondition is true, and do not proceed past a
@@ -58,10 +60,12 @@ workload useful and operable.
 
 1. **MUST** clear any stale `ready-for-snapshot` before initializing. A leftover
    file from a previous run would signal readiness before the engine is ready.
-2. **MUST** initialize the engine, and **SHOULD** run at least one real
-   generation to warm it up. Lazy CUDA context, autotuning, and graph capture
-   happen on first use; a checkpoint taken before them omits that state, so the
-   restored replica re-pays the cold start the checkpoint was meant to skip.
+2. **SHOULD** initialize the engine and run at least one real generation to warm
+   it up before signaling readiness. Lazy CUDA context, autotuning, and graph
+   capture happen on first use; a checkpoint taken before them omits that state,
+   so the restored replica re-pays the cold start the checkpoint was meant to
+   skip. This is not load-bearing for correctness — a checkpoint of a cold
+   engine still restores — but it defeats the purpose of checkpointing.
 3. **MUST** quiesce before signaling: ensure no generation is in flight (pause
    it, or rely on a synchronous engine having returned), then bring GPU memory to
    a checkpoint-safe state. Where both apply, stop work before releasing memory,
