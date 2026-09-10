@@ -34,9 +34,13 @@ func NewCRIORuntime(socket string) (*CRIORuntime, error) {
 	return &CRIORuntime{svc: svc}, nil
 }
 
-// Close is a no-op: k8s.io/cri-client's RuntimeService interface doesn't
-// expose one. The gRPC connection is released at process exit.
-func (r *CRIORuntime) Close() error { return nil }
+func (r *CRIORuntime) Close() error {
+	return r.svc.Close(context.Background())
+}
+
+func (r *CRIORuntime) ResolveContainerImageID(ctx context.Context, containerID string) (string, error) {
+	return resolveContainerImageID(ctx, r.svc, containerID)
+}
 
 func (r *CRIORuntime) ResolveContainer(ctx context.Context, id string) (int, *specs.Spec, error) {
 	ctx, cancel := context.WithTimeout(ctx, crioCallTimeout)

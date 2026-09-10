@@ -47,6 +47,7 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
+	"github.com/ai-dynamo/snapshot/api/compat"
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
@@ -72,6 +73,7 @@ type NodeController struct {
 	sendSignalFn            func(logr.Logger, int, syscall.Signal, string) error
 	restoreQueue            workqueue.TypedDelayingInterface[client.ObjectKey]
 	restorePodLister        corev1listers.PodLister
+	compareFn               func(compat.Gate, compat.Environment, compat.Environment) []compat.Mismatch
 
 	inFlight   map[string]struct{}
 	inFlightMu sync.Mutex
@@ -101,6 +103,8 @@ type restoreTarget struct {
 type restorePlan struct {
 	artifact *restoreArtifact
 	mappings []podcontract.ContainerMapping
+	// Read once in preflight, so both gates reach the same answer.
+	skipCompatCheck bool
 }
 
 type restoreResultState int
@@ -109,11 +113,13 @@ const (
 	restoreResultPending restoreResultState = iota
 	restoreResultSucceeded
 	restoreResultFailed
+	restoreResultIncompatible
 )
 
 type restoreResult struct {
 	destination string
 	state       restoreResultState
+	reason      string
 }
 
 type restorePendingError struct {
@@ -126,13 +132,14 @@ func (e *restorePendingError) Error() string {
 }
 
 type restoreOperation struct {
-	controller  *NodeController
-	pod         *corev1.Pod
-	artifact    *restoreArtifact
-	destination string
-	containerID string
-	startedAt   time.Time
-	log         logr.Logger
+	controller      *NodeController
+	pod             *corev1.Pod
+	artifact        *restoreArtifact
+	skipCompatCheck bool
+	destination     string
+	containerID     string
+	startedAt       time.Time
+	log             logr.Logger
 }
 
 const (
@@ -145,6 +152,7 @@ const (
 	restoreFinalizerUpdateFailedReason = "RestoreFinalizerUpdateFailed"
 	restoreStatusUpdateFailedReason    = "RestoreStatusUpdateFailed"
 	restoreRequestedReason             = "RestoreRequested"
+	restoreCompatUncheckedReason       = "RestoreCompatibilityUnchecked"
 	restoreStatusFieldManager          = "snapshot-agent-restore"
 	restorePodFinalizer                = "snapshot/restore-protection"
 	snapshotEventComponent             = "snapshot"
@@ -220,6 +228,7 @@ func newDefaultController(
 		writeControlSentinelFn:  snapshotruntime.WriteControlSentinel,
 		controlSentinelExistsFn: snapshotruntime.ControlSentinelExists,
 		sendSignalFn:            snapshotruntime.SendSignalToPID,
+		compareFn:               compat.Compare,
 	}
 	w.checkpointFn = w.executorCheckpoint
 	return w
@@ -423,11 +432,14 @@ func (w *NodeController) processRestoreQueueItem(ctx context.Context, key client
 		return
 	}
 	pod = pod.DeepCopy()
-	if w.restoreHandled(pod) {
+	if w.skipRequestedAfterRefusal(pod) {
+		// The skip request is the way back for a pod the gates turned down, so
+		// it has to clear the in-process marker as well as the condition below.
+		w.handledRestores.Delete(string(pod.UID))
+	} else if w.restoreHandled(pod) {
 		requeue = w.removeRestoreFinalizerWithEvent(ctx, pod)
 		return
-	}
-	if isRestoreTerminal(pod) {
+	} else if isRestoreTerminal(pod) {
 		requeue = w.handleTerminalRestorePod(ctx, pod)
 		return
 	}
@@ -464,6 +476,10 @@ func (w *NodeController) handleTerminalRestorePod(ctx context.Context, pod *core
 		message = "Pod restore previously failed; create a new restore Pod to retry"
 	}
 
+	// finishRestore's marker is in-memory, so an agent restart sends every
+	// terminal restore pod here; without marking again the resync reports it
+	// once per interval for as long as the pod exists.
+	w.markRestoreHandled(pod)
 	emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, eventType, reason, message)
 	return w.removeRestoreFinalizerWithEvent(ctx, pod)
 }
@@ -508,10 +524,16 @@ func (w *NodeController) preflightRestore(ctx context.Context, pod *corev1.Pod) 
 	if err != nil {
 		return nil, err
 	}
+	// Gate A: the earliest point the checkpoint's own record of what it was
+	// captured on is readable, and still before any of the restore is attempted.
+	skipCompatCheck := w.skipCompatCheckRequested(pod)
+	if err := w.preflightCompatibility(ctx, pod, artifact, mappings, skipCompatCheck); err != nil {
+		return nil, err
+	}
 	if w.config.CRIU.TcpEstablished && pod.Status.PodIP == "" {
 		return nil, newRestorePendingError("PodIPPending", fmt.Sprintf("Waiting for restore Pod %s/%s to receive an IP address", pod.Namespace, pod.Name))
 	}
-	return &restorePlan{artifact: artifact, mappings: mappings}, nil
+	return &restorePlan{artifact: artifact, mappings: mappings, skipCompatCheck: skipCompatCheck}, nil
 }
 
 func (w *NodeController) getPodSnapshotFromPod(ctx context.Context, pod *corev1.Pod) (*snapshotv1alpha1.PodSnapshot, error) {
@@ -659,7 +681,7 @@ func (w *NodeController) restorePodContainers(ctx context.Context, pod *corev1.P
 	for i, mapping := range plan.mappings {
 		i, destination := i, mapping.Destination
 		workers.Go(func() {
-			results[i] = w.restoreDestination(ctx, pod, plan.artifact, destination, podKey, recovering)
+			results[i] = w.restoreDestination(ctx, pod, plan, destination, podKey, recovering)
 		})
 	}
 	workers.Wait()
@@ -667,38 +689,122 @@ func (w *NodeController) restorePodContainers(ctx context.Context, pod *corev1.P
 	return w.recordRestoreResults(ctx, pod, plan.artifact, results)
 }
 
+type restoreTally struct {
+	total                  int
+	succeeded              []string
+	failed                 []string
+	incompatible           []string
+	pending                []string
+	incompatibilityReasons []string
+}
+
+type restoreVerdict struct {
+	status  corev1.ConditionStatus
+	reason  string
+	message string
+}
+
 // recordRestoreResults publishes the aggregate Pod outcome after every worker
 // in the current pass has returned.
 func (w *NodeController) recordRestoreResults(ctx context.Context, pod *corev1.Pod, artifact *restoreArtifact, results []restoreResult) bool {
-	byState := make(map[restoreResultState][]string, 3)
-	for _, result := range results {
-		byState[result.state] = append(byState[result.state], result.destination)
-	}
-	succeeded := byState[restoreResultSucceeded]
-	failed := byState[restoreResultFailed]
-	pending := byState[restoreResultPending]
-
-	if len(pending) != 0 {
-		message := fmt.Sprintf(
-			"Restore from PodSnapshot %s remains in progress: %d succeeded, %d failed, %d pending (%s)",
-			artifact.SnapshotName, len(succeeded), len(failed), len(pending), strings.Join(pending, ", "),
-		)
-		if err := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, podcontract.RestoreReasonInProgress, message); err != nil {
+	tally := tallyRestoreResults(results)
+	verdict := tally.verdict(artifact.SnapshotName)
+	if len(tally.pending) != 0 {
+		// The pass is not over, so a write that fails is reported and dropped
+		// rather than retried: the next pass publishes again.
+		if err := w.applyRestoredCondition(ctx, pod, verdict.status, verdict.reason, verdict.message); err != nil {
 			emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeWarning, restoreStatusUpdateFailedReason, err.Error())
 		}
 		return true
 	}
+	return w.finishRestore(ctx, pod, verdict.status, verdict.reason, verdict.message) != nil
+}
 
-	if len(failed) == 0 {
-		message := fmt.Sprintf("Restored %d destination container(s) from PodSnapshot %s: %s", len(succeeded), artifact.SnapshotName, strings.Join(succeeded, ", "))
-		return w.finishRestore(ctx, pod, corev1.ConditionTrue, podcontract.RestoreReasonSucceeded, message) != nil
+func tallyRestoreResults(results []restoreResult) restoreTally {
+	tally := restoreTally{total: len(results)}
+	for _, result := range results {
+		switch result.state {
+		case restoreResultSucceeded:
+			tally.succeeded = append(tally.succeeded, result.destination)
+		case restoreResultFailed:
+			tally.failed = append(tally.failed, result.destination)
+		case restoreResultPending:
+			tally.pending = append(tally.pending, result.destination)
+		case restoreResultIncompatible:
+			tally.incompatible = append(tally.incompatible, result.destination)
+			reason := result.reason
+			if len(results) > 1 {
+				reason = fmt.Sprintf("%s: %s", result.destination, reason)
+			}
+			tally.incompatibilityReasons = append(tally.incompatibilityReasons, reason)
+		}
 	}
-	if len(succeeded) != 0 {
-		message := fmt.Sprintf("Restored %d of %d destination containers from PodSnapshot %s; failed: %s", len(succeeded), len(results), artifact.SnapshotName, strings.Join(failed, ", "))
-		return w.finishRestore(ctx, pod, corev1.ConditionFalse, podcontract.RestoreReasonPartiallySucceeded, message) != nil
+	return tally
+}
+
+// verdict concludes one pass, still in progress or terminal, from the counts
+// alone.
+func (t restoreTally) verdict(snapshotName string) restoreVerdict {
+	switch {
+	case len(t.pending) != 0:
+		return restoreVerdict{
+			status:  corev1.ConditionFalse,
+			reason:  podcontract.RestoreReasonInProgress,
+			message: t.progressMessage(snapshotName),
+		}
+	case len(t.failed) == 0 && len(t.incompatible) == 0:
+		return restoreVerdict{
+			status: corev1.ConditionTrue,
+			reason: podcontract.RestoreReasonSucceeded,
+			message: fmt.Sprintf("Restored %d destination container(s) from PodSnapshot %s: %s",
+				len(t.succeeded), snapshotName, strings.Join(t.succeeded, ", ")),
+		}
+	case len(t.succeeded) != 0:
+		notRestored := append(append([]string{}, t.failed...), t.incompatible...)
+		return restoreVerdict{
+			status: corev1.ConditionFalse,
+			reason: podcontract.RestoreReasonPartiallySucceeded,
+			message: fmt.Sprintf("Restored %d of %d destination containers from PodSnapshot %s; not restored: %s",
+				len(t.succeeded), t.total, snapshotName, strings.Join(notRestored, ", ")),
+		}
+	case len(t.failed) == 0:
+		return restoreVerdict{
+			status:  corev1.ConditionFalse,
+			reason:  podcontract.RestoreReasonIncompatible,
+			message: refusalMessage(strings.Join(t.incompatibilityReasons, "; ")),
+		}
+	case len(t.incompatible) != 0:
+		return restoreVerdict{
+			status: corev1.ConditionFalse,
+			reason: podcontract.RestoreReasonFailed,
+			message: fmt.Sprintf("Restore failed for %d destination container(s) and refused %d incompatible destination(s) from PodSnapshot %s",
+				len(t.failed), len(t.incompatible), snapshotName),
+		}
+	default:
+		return restoreVerdict{
+			status: corev1.ConditionFalse,
+			reason: podcontract.RestoreReasonFailed,
+			message: fmt.Sprintf("Restore failed for all %d destination container(s) from PodSnapshot %s: %s",
+				len(t.failed), snapshotName, strings.Join(t.failed, ", ")),
+		}
 	}
-	message := fmt.Sprintf("Restore failed for all %d destination container(s) from PodSnapshot %s: %s", len(failed), artifact.SnapshotName, strings.Join(failed, ", "))
-	return w.finishRestore(ctx, pod, corev1.ConditionFalse, podcontract.RestoreReasonFailed, message) != nil
+}
+
+func (t restoreTally) progressMessage(snapshotName string) string {
+	counts := []string{
+		fmt.Sprintf("%d succeeded", len(t.succeeded)),
+		fmt.Sprintf("%d failed", len(t.failed)),
+	}
+	if len(t.incompatible) != 0 {
+		counts = append(counts, fmt.Sprintf("%d incompatible", len(t.incompatible)))
+	}
+	counts = append(counts, fmt.Sprintf("%d pending", len(t.pending)))
+
+	return fmt.Sprintf("Restore from PodSnapshot %s remains in progress: %s (%s)",
+		snapshotName,
+		strings.Join(counts, ", "),
+		strings.Join(t.pending, ", "),
+	)
 }
 
 // restoreDestination resolves and restores one destination independently of
@@ -706,10 +812,11 @@ func (w *NodeController) recordRestoreResults(ctx context.Context, pod *corev1.P
 func (w *NodeController) restoreDestination(
 	ctx context.Context,
 	pod *corev1.Pod,
-	artifact *restoreArtifact,
+	plan *restorePlan,
 	destination, podKey string,
 	recovering bool,
 ) restoreResult {
+	artifact := plan.artifact
 	result := restoreResult{destination: destination, state: restoreResultPending}
 	containerID, _ := w.resolveRestoreContainerID(ctx, pod, destination, podKey)
 	if containerID == "" {
@@ -725,7 +832,14 @@ func (w *NodeController) restoreDestination(
 	)
 	emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, corev1.EventTypeNormal, restoreRequestedReason, fmt.Sprintf("Restore requested from PodSnapshot %s for destination %s", artifact.SnapshotName, destination))
 
-	if err := w.runRestore(ctx, pod, artifact, destination, containerID, startedAt, recovering); err != nil {
+	if err := w.runRestore(ctx, pod, plan, destination, containerID, startedAt, recovering); err != nil {
+		var incompatible *compat.IncompatibleError
+		if errors.As(err, &incompatible) {
+			result.state = restoreResultIncompatible
+			result.reason = compat.Reasons(incompatible.Mismatches)
+			w.logRestoreRefusal(pod, incompatible, result.reason)
+			return result
+		}
 		result.state = restoreResultFailed
 		log.Error(err, "Restore controller worker failed")
 		emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, corev1.EventTypeWarning, "RestoreWorkerFailed", err.Error())
@@ -786,8 +900,8 @@ func (w *NodeController) resolveRestoreContainerID(ctx context.Context, pod *cor
 //  2. Write a restore-complete sentinel: the CRIU-restored process resumes
 //     inside the polling loop that waits on this file, exits quiescence,
 //     and resumes the engine
-func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, artifact *restoreArtifact, destination, containerID string, startedAt time.Time, recovering bool) error {
-	op := w.newRestoreOperation(pod, artifact, destination, containerID, startedAt)
+func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, plan *restorePlan, destination, containerID string, startedAt time.Time, recovering bool) error {
+	op := w.newRestoreOperation(pod, plan, destination, containerID, startedAt)
 	if recovering {
 		completed, err := op.recoverCompletedRestore(ctx)
 		if err != nil {
@@ -807,6 +921,13 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, artifa
 
 	placeholderHostPID, err := op.executeRestore(restoreCtx)
 	if err != nil {
+		var incompatible *compat.IncompatibleError
+		if errors.As(err, &incompatible) {
+			// The placeholder is left running: killing it restarts the container
+			// straight back into the same refusal.
+			return incompatible
+		}
+
 		var cleanupErr *executor.RestoreCleanupError
 		if !errors.As(err, &cleanupErr) {
 			return op.failRestore(ctx, err)
@@ -841,20 +962,22 @@ func (op *restoreOperation) recoverCompletedRestore(ctx context.Context) (bool, 
 
 func (w *NodeController) newRestoreOperation(
 	pod *corev1.Pod,
-	artifact *restoreArtifact,
+	plan *restorePlan,
 	destination string,
 	containerID string,
 	startedAt time.Time,
 ) *restoreOperation {
 	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+	artifact := plan.artifact
 	return &restoreOperation{
-		controller:  w,
-		pod:         pod,
-		artifact:    artifact,
-		destination: destination,
-		containerID: containerID,
-		startedAt:   startedAt,
-		log:         w.log.WithValues("pod", podKey, "snapshot", artifact.SnapshotName, "content_uid", artifact.ContentUID, "source_container", artifact.SourceContainerName, "destination_container", destination, "container_id", containerID),
+		controller:      w,
+		pod:             pod,
+		artifact:        artifact,
+		skipCompatCheck: plan.skipCompatCheck,
+		destination:     destination,
+		containerID:     containerID,
+		startedAt:       startedAt,
+		log:             w.log.WithValues("pod", podKey, "snapshot", artifact.SnapshotName, "content_uid", artifact.ContentUID, "source_container", artifact.SourceContainerName, "destination_container", destination, "container_id", containerID),
 	}
 }
 
@@ -870,6 +993,7 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (int, error) {
 		TargetPodIP:                 op.pod.Status.PodIP,
 		ArtifactContainerName:       op.artifact.SourceContainerName,
 		DestinationContainerName:    op.destination,
+		SkipCompatCheck:             op.skipCompatCheck,
 		Clientset:                   w.clientset,
 		PageBrokerRequested:         op.pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] == snapshotv1alpha1.PageBrokerAnnotationEnabled,
 		PageBrokerEnabled:           w.config.PageBroker.Enabled,
@@ -1029,6 +1153,11 @@ func (w *NodeController) failRestorePod(ctx context.Context, pod *corev1.Pod, ca
 }
 
 func (w *NodeController) handleRestorePreflightError(ctx context.Context, pod *corev1.Pod, cause error) bool {
+	var incompatible *compat.IncompatibleError
+	if errors.As(cause, &incompatible) {
+		return w.refuseRestore(ctx, pod, incompatible)
+	}
+
 	var pending *restorePendingError
 	if !errors.As(cause, &pending) {
 		return w.failRestorePod(ctx, pod, cause)
