@@ -48,8 +48,7 @@ FROM ${CUDA_HELPER_HEADERS_IMAGE} AS cuda-helper-headers
 # =============================================================================
 FROM ${AGENT_BASE_IMAGE} AS cuda-helper-core-builder
 
-RUN dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb \
-    && apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -272,7 +271,8 @@ ARG CUINTERPOSE_CUDA_HEADERS=13-1
 ADD --checksum=sha256:d2a6b11c096396d868758b86dab1823b25e14d70333f1dfa74da5ddaf6a06dba \
     https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb \
     /tmp/cuda-keyring.deb
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb \
+    && apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libssl-dev \
     libgtest-dev \
