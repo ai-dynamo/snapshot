@@ -20,7 +20,12 @@
 # Build Arguments
 # =============================================================================
 ARG DOCKER_PROXY
-ARG GO_VERSION=1.26.6
+ARG GO_VERSION=1.27.1
+# Digest of golang:${GO_VERSION}. A digest is content-addressed, so it resolves
+# identically through DOCKER_PROXY pull-through mirrors. Update it together with
+# GO_VERSION — a mismatched pair fails the pull rather than building silently on
+# the wrong toolchain.
+ARG GO_IMAGE_DIGEST=sha256:f44f6e88636cfb311f9ebace870ded69d943f227bb3cb27d32ffd84ea18c43ea
 # Default to upstream CRIU development branch. Custom forks can override both
 # args at build time, for example:
 #   --build-arg CRIU_REPO=<git-remote-url>
@@ -36,7 +41,7 @@ ARG BASE_IMAGE=placeholder-requires-base-image-arg
 # =============================================================================
 # Stage: Go base - Common setup for Go builds
 # =============================================================================
-FROM ${DOCKER_PROXY}library/golang:${GO_VERSION} AS go-base
+FROM ${DOCKER_PROXY}library/golang:${GO_VERSION}@${GO_IMAGE_DIGEST} AS go-base
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
@@ -135,7 +140,7 @@ RUN gcc -O2 -Wall -Wextra -o /ns-bind-mount ./cmd/ns-bind-mount/main.c
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
 # =============================================================================
-FROM ubuntu:24.04 AS criu-builder
+FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254 AS criu-builder
 
 ARG CRIU_REPO
 ARG CRIU_REF

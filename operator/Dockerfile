@@ -3,7 +3,9 @@
 
 # Build context is the repository root so the Go workspace can resolve the
 # api/ and agent/ modules used by the operator.
-FROM golang:1.27-alpine AS builder
+# Tracks the toolchain pinned in go.work, the three go.mod files, hack/tools.mk,
+# agent/Dockerfile, and the workflows. Move them together, never this one alone.
+FROM golang:1.27-alpine@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125 AS builder
 WORKDIR /workspace
 COPY go.work go.work.sum ./
 COPY api/ api/

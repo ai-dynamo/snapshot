@@ -47,3 +47,13 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+    ignore:
+      # The Go toolchain version is a project decision pinned across go.work,
+      # the three go.mod files, hack/tools.mk, agent/Dockerfile and the
+      # workflows. Digest refreshes of the builder image are welcome; moving it
+      # to a toolchain CI does not validate against is not. Bump the toolchain
+      # deliberately, everywhere at once.
+      - dependency-name: "golang"
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
