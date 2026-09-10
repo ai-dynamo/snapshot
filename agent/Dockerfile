@@ -505,6 +505,7 @@ RUN criu --version
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
 COPY --from=criu-builder /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
+COPY --from=cuda-helper-builder /cuinterpose-build/cuinterpose-coordinator /usr/local/bin/cuinterpose-coordinator
 COPY --from=nixl-builder /nixl-runtime/lib /usr/local/lib
 COPY --from=nixl-builder /nixl-runtime/NIXL_COMMIT /usr/local/share/nixl/NIXL_COMMIT
 COPY --from=nixl-builder /tmp/nixl/LICENSE /legal/NIXL/LICENSE
@@ -515,6 +516,7 @@ RUN ldconfig
 # agent/internal/nsmount/mount.go defaultBinaryPath).
 COPY --from=cuda-helper-builder /ns-bind-mount /usr/local/sbin/ns-bind-mount
 RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper \
+    /usr/local/bin/cuinterpose-coordinator \
     /usr/local/sbin/ns-bind-mount
 
 # Copy the built binaries
