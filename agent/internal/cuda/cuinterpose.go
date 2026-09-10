@@ -272,7 +272,34 @@ func RestoreCuinterpose(
 	coordinatorBinaryPath string,
 	log logr.Logger,
 ) ([]CoordinatorPhase, error) {
-	args, err := cuinterposeArgs("restore", checkpointDir, "", podcontract.SnapshotControlMountPath, observedPIDs, namespacePIDs)
+	return restoreCuinterpose(ctx, checkpointDir, "", observedPIDs, namespacePIDs, coordinatorBinaryPath, log)
+}
+
+// RestoreCuinterposeFromHost runs the restore coordinator from the node agent,
+// reaching each restored process through the host procfs. This is used when
+// native CUDA restore is delegated to the host helper daemon.
+func RestoreCuinterposeFromHost(
+	ctx context.Context,
+	checkpointDir string,
+	procRoot string,
+	observedPIDs []int,
+	namespacePIDs []int,
+	coordinatorBinaryPath string,
+	log logr.Logger,
+) ([]CoordinatorPhase, error) {
+	return restoreCuinterpose(ctx, checkpointDir, procRoot, observedPIDs, namespacePIDs, coordinatorBinaryPath, log)
+}
+
+func restoreCuinterpose(
+	ctx context.Context,
+	checkpointDir string,
+	procRoot string,
+	observedPIDs []int,
+	namespacePIDs []int,
+	coordinatorBinaryPath string,
+	log logr.Logger,
+) ([]CoordinatorPhase, error) {
+	args, err := cuinterposeArgs("restore", checkpointDir, procRoot, podcontract.SnapshotControlMountPath, observedPIDs, namespacePIDs)
 	if err != nil {
 		return nil, err
 	}

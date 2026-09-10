@@ -89,12 +89,13 @@ var (
 	readRestoredHostProcessTable    = snapshotruntime.ReadProcessTable
 	validateRestoredProcessIdentity = snapshotruntime.ValidateProcessIdentity
 	restoreAndUnlockCUDAProcessTree = cuda.RestoreAndUnlockProcessTreeValidated
+	restoreCuinterposeFromHost      = cuda.RestoreCuinterposeFromHost
 )
 
 // Restore performs external restore for the given request.
 // Returns the namespace-relative PID of the restored process.
-// The DaemonSet side inspects the placeholder and launches nsrestore,
-// which handles rootfs application, CRIU restore, and CUDA restore inside the namespace.
+// The DaemonSet side launches nsrestore for rootfs and CRIU restore, then
+// restores CUDA through the host helper daemon before releasing the workload.
 //
 // Returns the placeholder container's host PID so callers can reach into the
 // container's mount namespace (e.g. to write sentinels under /snapshot-control)
@@ -220,13 +221,14 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		cleanupErr = errors.Join(cleanupErr, result.CleanupError)
 	}
 	if len(result.DeferredCUDAProcesses) > 0 {
-		cudaTimings, err := restoreDeferredCUDAProcesses(
-			ctx, result.DeferredCUDAProcesses, snap, artifactPath, req.CUDATransfer, log,
+		cudaTimings, cuinterposeTimings, err := restoreDeferredCUDAProcesses(
+			ctx, result.DeferredCUDAProcesses, snap, manifest, artifactPath, req.CUDATransfer, log,
 		)
 		if err != nil {
 			return 0, err
 		}
 		result.CUDARestoreDuration += cudaTimings
+		result.CuinterposeRestoreDuration += cuinterposeTimings
 	}
 	if err := validateRestoredProcess(snap.TargetRoot, result.RestoredPID, log); err != nil {
 		return 0, err
@@ -276,28 +278,29 @@ func restoreDeferredCUDAProcesses(
 	ctx context.Context,
 	namespaceProcesses []snapshotruntime.ProcessDetails,
 	snap *types.RestoreContainerSnapshot,
+	manifest *types.CheckpointManifest,
 	artifactPath string,
 	transferSettings types.CUDATransferSettings,
 	log logr.Logger,
-) (time.Duration, error) {
+) (time.Duration, time.Duration, error) {
 	processTable, err := readRestoredHostProcessTable(snapshotruntime.HostProcPath)
 	if err != nil {
-		return 0, fmt.Errorf("snapshot restored host process table: %w", err)
+		return 0, 0, fmt.Errorf("snapshot restored host process table: %w", err)
 	}
 	hostProcesses := make([]snapshotruntime.ProcessDetails, 0, len(namespaceProcesses))
 	for _, namespaceProcess := range namespaceProcesses {
 		process, err := snapshotruntime.ResolveHostProcessIdentityFromTable(processTable, namespaceProcess)
 		if err != nil {
-			return 0, fmt.Errorf("resolve restored CUDA host process identity: %w", err)
+			return 0, 0, fmt.Errorf("resolve restored CUDA host process identity: %w", err)
 		}
 		if err := validateRestoredProcessIdentity(snapshotruntime.HostProcPath, process); err != nil {
-			return 0, fmt.Errorf("validate restored CUDA process identity: %w", err)
+			return 0, 0, fmt.Errorf("validate restored CUDA process identity: %w", err)
 		}
 		hostProcesses = append(hostProcesses, process)
 	}
 	cudaJobFile := ""
 	if stagedJobFile, err := cuda.JobFileFromCheckpoint(artifactPath); err != nil {
-		return 0, err
+		return 0, 0, err
 	} else if stagedJobFile != "" {
 		// The CUDA layer uses this only as a presence signal and derives a
 		// host-visible path from each identity-validated target PID.
@@ -315,9 +318,25 @@ func restoreDeferredCUDAProcesses(
 		log,
 	)
 	if err != nil {
-		return 0, fmt.Errorf("host CUDA restore failed: %w", err)
+		return 0, 0, fmt.Errorf("host CUDA restore failed: %w", err)
 	}
-	return cudaTimings.TotalDuration, nil
+	var cuinterposeDuration time.Duration
+	if manifest.Cuinterpose.Prepared {
+		observedPIDs := make([]int, 0, len(hostProcesses))
+		for _, process := range hostProcesses {
+			observedPIDs = append(observedPIDs, process.ObservedPID)
+		}
+		start := time.Now()
+		_, err := restoreCuinterposeFromHost(
+			ctx, artifactPath, snapshotruntime.HostProcPath, observedPIDs, manifest.CUDA.PIDs,
+			cuda.DefaultCoordinatorBinaryPath, log,
+		)
+		cuinterposeDuration = time.Since(start)
+		if err != nil {
+			return cudaTimings.TotalDuration, cuinterposeDuration, fmt.Errorf("restore cuinterpose: %w", err)
+		}
+	}
+	return cudaTimings.TotalDuration, cuinterposeDuration, nil
 }
 
 func remainingDuration(wall time.Duration, parts ...time.Duration) time.Duration {
