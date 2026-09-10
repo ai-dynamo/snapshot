@@ -184,6 +184,7 @@ func (w *NodeController) releaseLease(ctx context.Context, key client.ObjectKey)
 	}
 	return nil
 }
+
 // eventMessageLengthLimit is the core/v1 Event message limit the API server
 // enforces once eventTime is set.
 const eventMessageLengthLimit = 1024
