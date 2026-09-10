@@ -13,27 +13,171 @@ on:
   workflow_run:
     workflows: [E2E Framework Tests]
     types: [completed]
-    branches: [main]
   workflow_dispatch:
 
-# Queue rather than cancel: cancelling a run mid actions/deploy-pages leaves a
-# failed github-pages deployment behind.
+# Preview publication and Pages deployment both update shared state. Serialize
+# every trigger so two completed benchmark runs cannot overwrite each other.
 concurrency:
-  group: pages
+  group: e2e-benchmark-pages
   cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  build:
-    # Scheduled framework runs publish partial results even when a framework
-    # fails, so do not gate deployment on the parent workflow's conclusion.
+  # workflow_run executes this workflow from the default branch. Keep the only
+  # write token here, check out trusted main, and treat every downloaded result
+  # as untrusted data. PR code is never executed with write permissions.
+  prepare-preview:
     if: >-
-      github.event_name != 'workflow_run' ||
-      github.event.workflow_run.event == 'schedule'
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.event != 'schedule' &&
+      github.event.workflow_run.conclusion != 'cancelled'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    outputs:
+      preview-key: ${{ steps.metadata.outputs.key }}
+    steps:
+      - name: Checkout trusted preview publisher
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Resolve trusted preview metadata
+        id: metadata
+        env:
+          SOURCE_EVENT: ${{ github.event.workflow_run.event }}
+          SOURCE_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          pull_request=""
+          if [[ "${SOURCE_EVENT}" == "push" && "${SOURCE_BRANCH}" =~ ^pull-request/([1-9][0-9]*)$ ]]; then
+            pull_request="${BASH_REMATCH[1]}"
+            key="pr-${pull_request}"
+          else
+            key="run-${SOURCE_RUN_ID}"
+          fi
+          echo "key=${key}" >> "${GITHUB_OUTPUT}"
+          echo "pull-request=${pull_request}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download benchmark comparison
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: |
+          set -euo pipefail
+          comparison_dir="${RUNNER_TEMP}/e2e-framework-benchmark-comparison"
+          gh run download "${SOURCE_RUN_ID}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --name "e2e-framework-benchmark-comparison-${SOURCE_RUN_ID}-${SOURCE_RUN_ATTEMPT}" \
+            --dir "${comparison_dir}"
+          echo "BENCHMARK_COMPARISON_DIR=${comparison_dir}" >> "${GITHUB_ENV}"
+
+      - name: Fetch durable nightly history
+        id: history
+        uses: ./.github/actions/fetch-benchmark-history
+        with:
+          token: ${{ github.token }}
+          path: ${{ runner.temp }}/e2e-framework-benchmark-history
+
+      - name: Fetch or initialize preview data
+        run: |
+          set -euo pipefail
+          previews_worktree="${RUNNER_TEMP}/e2e-framework-benchmark-previews"
+          mkdir -p "${previews_worktree}"
+          git -C "${previews_worktree}" init --quiet --initial-branch=e2e-benchmark-previews
+          git -C "${previews_worktree}" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          set +e
+          git -C "${previews_worktree}" ls-remote --quiet --exit-code \
+            --heads origin e2e-benchmark-previews >/dev/null
+          previews_status=$?
+          set -e
+          case "${previews_status}" in
+            0)
+              git -C "${previews_worktree}" fetch --quiet --depth=1 \
+                origin refs/heads/e2e-benchmark-previews
+              git -C "${previews_worktree}" checkout --quiet -B e2e-benchmark-previews FETCH_HEAD
+              ;;
+            2)
+              echo "::notice::Bootstrapping the expiring preview data branch."
+              ;;
+            *)
+              echo "::error::Could not inspect the e2e-benchmark-previews branch."
+              exit "${previews_status}"
+              ;;
+          esac
+          echo "BENCHMARK_PREVIEWS_WORKTREE=${previews_worktree}" >> "${GITHUB_ENV}"
+
+      - name: Validate and prepare preview index
+        env:
+          HISTORY_DIR: ${{ steps.history.outputs.history_dir }}
+          PREVIEW_KEY: ${{ steps.metadata.outputs.key }}
+          PREVIEW_PULL_REQUEST: ${{ steps.metadata.outputs.pull-request }}
+          SOURCE_EVENT: ${{ github.event.workflow_run.event }}
+          SOURCE_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          SOURCE_COMMIT: ${{ github.event.workflow_run.head_sha }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          SOURCE_RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          set -euo pipefail
+          preview_args=()
+          if [[ -n "${PREVIEW_PULL_REQUEST}" ]]; then
+            preview_args+=(--pull-request "${PREVIEW_PULL_REQUEST}")
+          fi
+          PYTHONPATH=e2e python3 -m snapshot_e2e.benchmark_preview \
+            --results-dir "${BENCHMARK_COMPARISON_DIR}/current" \
+            --history-dir "${HISTORY_DIR}" \
+            --previews-dir "${BENCHMARK_PREVIEWS_WORKTREE}/previews" \
+            --key "${PREVIEW_KEY}" \
+            --run-id "${SOURCE_RUN_ID}" \
+            --run-attempt "${SOURCE_RUN_ATTEMPT}" \
+            --source-event "${SOURCE_EVENT}" \
+            --source-branch "${SOURCE_BRANCH}" \
+            --source-commit "${SOURCE_COMMIT}" \
+            --source-run-url "${SOURCE_RUN_URL}" \
+            --retention-days 14 \
+            "${preview_args[@]}"
+
+      - name: Commit and push expiring preview data
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIEW_KEY: ${{ steps.metadata.outputs.key }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: |
+          set -euo pipefail
+          git -C "${BENCHMARK_PREVIEWS_WORKTREE}" config user.name "github-actions[bot]"
+          git -C "${BENCHMARK_PREVIEWS_WORKTREE}" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "${BENCHMARK_PREVIEWS_WORKTREE}" add previews
+          if git -C "${BENCHMARK_PREVIEWS_WORKTREE}" diff --cached --quiet; then
+            echo "Preview ${PREVIEW_KEY} is already current."
+            exit 0
+          fi
+          git -C "${BENCHMARK_PREVIEWS_WORKTREE}" commit --signoff \
+            --message "data(e2e): preview benchmark run ${SOURCE_RUN_ID}-${SOURCE_RUN_ATTEMPT}"
+          gh auth setup-git
+          git -C "${BENCHMARK_PREVIEWS_WORKTREE}" push \
+            origin HEAD:refs/heads/e2e-benchmark-previews
+
+  build:
+    needs: prepare-preview
+    if: >-
+      always() &&
+      (needs.prepare-preview.result == 'success' ||
+       needs.prepare-preview.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      preview-key: ${{ steps.preview-key.outputs.key }}
     steps:
       - name: Checkout dashboard source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -58,6 +202,35 @@ jobs:
           printf '%s\n' \
             '{"manifestVersion":1,"historyFormatVersion":1,"supportedSchemaVersions":[1],"recordCount":0,"newestResultAt":null,"chunks":[]}' \
             > "${HISTORY_DIR}/index/manifest.json"
+
+      - name: Fetch expiring preview data
+        run: |
+          set -euo pipefail
+          previews_dir="${RUNNER_TEMP}/snapshot-e2e-benchmark-previews"
+          mkdir -p "${previews_dir}"
+          git -C "${previews_dir}" init --quiet --initial-branch=e2e-benchmark-previews
+          git -C "${previews_dir}" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          set +e
+          git -C "${previews_dir}" ls-remote --quiet --exit-code \
+            --heads origin e2e-benchmark-previews >/dev/null
+          previews_status=$?
+          set -e
+          case "${previews_status}" in
+            0)
+              git -C "${previews_dir}" fetch --quiet --depth=1 \
+                origin refs/heads/e2e-benchmark-previews
+              git -C "${previews_dir}" checkout --quiet --detach FETCH_HEAD
+              ;;
+            2)
+              echo "::notice::No benchmark previews exist yet."
+              mkdir -p "${previews_dir}/previews"
+              ;;
+            *)
+              echo "::error::Could not inspect the e2e-benchmark-previews branch."
+              exit "${previews_status}"
+              ;;
+          esac
+          echo "BENCHMARK_PREVIEWS_DIR=${previews_dir}/previews" >> "${GITHUB_ENV}"
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -86,10 +259,21 @@ jobs:
         working-directory: dashboard
         run: npm run build:production
 
-      - name: Add benchmark history to static artifact
+      - name: Assemble history and preview pages
+        working-directory: dashboard
         env:
           HISTORY_DIR: ${{ steps.history.outputs.history_dir }}
-        run: cp -R "${HISTORY_DIR}/index" "${GITHUB_WORKSPACE}/dashboard/dist/index"
+        run: |
+          npm run assemble-site -- \
+            --dist "${GITHUB_WORKSPACE}/dashboard/dist" \
+            --history-index "${HISTORY_DIR}/index" \
+            --previews "${BENCHMARK_PREVIEWS_DIR}"
+
+      - name: Export preview key
+        id: preview-key
+        env:
+          PREVIEW_KEY: ${{ needs.prepare-preview.outputs.preview-key }}
+        run: echo "key=${PREVIEW_KEY}" >> "${GITHUB_OUTPUT}"
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
@@ -105,7 +289,7 @@ jobs:
     timeout-minutes: 5
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: ${{ needs.build.outputs.preview-key != '' && format('{0}previews/{1}/', steps.deployment.outputs.page_url, needs.build.outputs.preview-key) || steps.deployment.outputs.page_url }}
     permissions:
       pages: write
       id-token: write
@@ -113,3 +297,16 @@ jobs:
       - name: Deploy GitHub Pages
         id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+      - name: Report preview URL
+        if: ${{ needs.build.outputs.preview-key != '' }}
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+          PREVIEW_KEY: ${{ needs.build.outputs.preview-key }}
+        run: |
+          preview_url="${PAGE_URL%/}/previews/${PREVIEW_KEY}/"
+          echo "## Benchmark preview" >> "${GITHUB_STEP_SUMMARY}"
+          echo "" >> "${GITHUB_STEP_SUMMARY}"
+          echo "[Open ${PREVIEW_KEY} benchmark results](${preview_url})" >> "${GITHUB_STEP_SUMMARY}"
+          echo "" >> "${GITHUB_STEP_SUMMARY}"
+          echo "This preview expires after 14 days and is not written to durable nightly history." >> "${GITHUB_STEP_SUMMARY}"

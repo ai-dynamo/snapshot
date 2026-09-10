@@ -10,11 +10,12 @@
     "dev": "vite",
     "build": "npm run typecheck && vite build",
     "build:production": "node scripts/check-node.mjs && DASHBOARD_PRODUCTION=true npm run build",
-    "pretest:browser": "npm run build:production && rm -rf dist/index && cp -R public/index dist/index",
+    "pretest:browser": "npm run build:production && rm -rf dist/index && cp -R public/index dist/index && cp public/preview.json dist/preview.json",
     "test": "vitest run",
     "test:browser": "playwright test",
     "typecheck": "tsc --noEmit",
-    "validate-data": "node scripts/check-node.mjs && node scripts/validate-history.ts"
+    "validate-data": "node scripts/check-node.mjs && node scripts/validate-history.ts",
+    "assemble-site": "node scripts/check-node.mjs && node scripts/assemble-site.ts"
   },
   "dependencies": {
     "chart.js": "4.5.1"

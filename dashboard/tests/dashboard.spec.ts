@@ -124,3 +124,40 @@ test("surfaces record warnings with their location", async ({ page }) => {
   const warnings = page.locator("#load-warnings");
   await expect(warnings).toContainText("index/v1/2026-08.ndjson:1");
 });
+
+test("labels a pull request overlay as temporary history", async ({ page }) => {
+  await page.route("**/preview.json", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        formatVersion: 1,
+        key: "pr-250",
+        generatedAt: "2026-09-10T10:00:00.000Z",
+        expiresAt: "2026-09-24T10:00:00.000Z",
+        historyRecordCount: 20,
+        previewRecordCount: 3,
+        combinedRecordCount: 23,
+        source: {
+          event: "push",
+          branch: "pull-request/250",
+          commit: "0123456789abcdef",
+          runId: "12345",
+          runAttempt: 1,
+          runUrl: "https://github.com/ai-dynamo/snapshot/actions/runs/12345",
+          pullRequest: 250,
+        },
+      }),
+    });
+  });
+
+  await page.goto("/");
+
+  const banner = page.locator("#preview-banner");
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText("Pull request #250 benchmark preview");
+  await expect(banner).toContainText("not part of benchmark history");
+  await expect(banner.getByRole("link", { name: "Open workflow run" })).toHaveAttribute(
+    "href",
+    "https://github.com/ai-dynamo/snapshot/actions/runs/12345",
+  );
+});
