@@ -43,6 +43,7 @@ import type {
   MetricSeries,
   Outcome,
 } from "./data.ts";
+import { loadPreviewMetadata, type PreviewMetadata } from "./preview.ts";
 import "./style.css";
 
 Chart.register(...registerables);
@@ -72,6 +73,10 @@ interface SelectOption {
 }
 
 const elements = {
+  preview: requiredElement<HTMLElement>("#preview-banner"),
+  previewTitle: requiredElement<HTMLElement>("#preview-title"),
+  previewDescription: requiredElement<HTMLElement>("#preview-description"),
+  previewRunLink: requiredElement<HTMLAnchorElement>("#preview-run-link"),
   status: requiredElement<HTMLElement>("#load-status"),
   suite: requiredElement<HTMLSelectElement>("#suite-filter"),
   date: requiredElement<HTMLSelectElement>("#date-filter"),
@@ -96,7 +101,13 @@ let charts: Chart<"line", DashboardPoint[]>[] = [];
 
 async function start() {
   try {
-    history = await loadHistory(new URL("./", document.baseURI));
+    const root = new URL("./", document.baseURI);
+    const [loadedHistory, preview] = await Promise.all([
+      loadHistory(root),
+      loadPreviewMetadata(root),
+    ]);
+    history = loadedHistory;
+    renderPreview(preview);
     configureSuites();
     configureSuiteFilters();
     bindEvents();
@@ -161,6 +172,26 @@ function renderWarnings() {
   }
   details.append(summary, list);
   elements.status.after(details);
+}
+
+function renderPreview(preview: PreviewMetadata | null): void {
+  if (preview === null) return;
+  const source = preview.source;
+  elements.previewTitle.textContent = source.pullRequest
+    ? `Pull request #${source.pullRequest} benchmark preview`
+    : `Manual run ${source.runId} benchmark preview`;
+  elements.previewDescription.textContent =
+    `${preview.previewRecordCount} result${preview.previewRecordCount === 1 ? "" : "s"} from ` +
+    `${source.branch} are overlaid on ${preview.historyRecordCount} durable nightly ` +
+    `result${preview.historyRecordCount === 1 ? "" : "s"}. ` +
+    `They are not part of benchmark history and expire ${fullDate(preview.expiresAt)}.`;
+  const runUrl = safeLink(source.runUrl);
+  if (runUrl) {
+    elements.previewRunLink.href = runUrl;
+  } else {
+    elements.previewRunLink.hidden = true;
+  }
+  elements.preview.hidden = false;
 }
 
 function configureSuites() {

@@ -91,6 +91,20 @@ deployment is never interrupted. Before the first scheduled run publishes
 history, the site deploys with an empty manifest and explains that no results
 exist yet.
 
+Scheduled `main` results update the root dashboard and durable history. A pull
+request mirror or manual framework run instead gets a temporary URL under
+`/previews/pr-<number>/` or `/previews/run-<id>/`. Its validated result is
+overlaid on a read-only copy of nightly history, so the graph can be inspected
+before merge without changing the baseline. Preview indexes live on the
+separate generated branch `e2e-benchmark-previews`, expire after 14 days, and
+are clearly labeled in the UI. The Pages deployment job summary contains the
+final preview link.
+
+The privileged preview job is a deliberate trust boundary: GitHub runs its
+workflow and Python publisher from `main`, never from the source branch. It
+accepts only size-limited benchmark JSON whose run identity matches the
+triggering workflow, and it never executes artifact content.
+
 A repository administrator must enable Pages once in **Settings → Pages → Build
 and deployment → Source → GitHub Actions**. No Node.js process runs after the
 artifact is deployed.
