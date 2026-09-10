@@ -23,7 +23,8 @@ AGENT_BASE_IMAGE ?= $(shell sed -n 's/^ARG AGENT_BASE_IMAGE=//p' agent/Dockerfil
 AGENT_PLATFORM ?= linux/amd64
 
 .PHONY: tidy generate test build lint verify-generate verify-crds check fmt add-license-headers \
-        verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator capture-base-packages verify-base-packages \
+        verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator docker-build-pagebroker \
+        capture-base-packages verify-base-packages \
         linux-build linux-test pagebroker-check-generated
 
 CRD_SRC_DIR   := api/v1alpha1/crds
@@ -139,3 +140,7 @@ docker-build-agent: verify-base-packages
 docker-build-operator:
 	docker buildx build $(DOCKER_BUILD_ARGS) -f operator/Dockerfile \
 	  $(foreach t,$(TAGS),-t $(REGISTRY)/operator:$(t)) .
+
+docker-build-pagebroker:
+	docker buildx build $(DOCKER_BUILD_ARGS) --platform "$(AGENT_PLATFORM)" -f agent/pagebroker/Dockerfile \
+	  $(foreach t,$(TAGS),-t $(REGISTRY)/pagebroker:$(t)) agent/pagebroker/

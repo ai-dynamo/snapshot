@@ -180,10 +180,43 @@ jobs:
               --cache-from=type=gha,scope=agent \
               --cache-to=type=gha,scope=agent,mode=max"
 
+  # ── PageBroker image ────────────────────────────────────────────────────────
+  build-pagebroker:
+    name: Build and push PageBroker image
+    needs: [version, validate]
+    permissions:
+      # Checkout the validated source and publish its image to GHCR.
+      contents: read
+      packages: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.version.outputs.head_sha }}
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push PageBroker image
+        run: |
+          make docker-build-pagebroker \
+            TAGS="${{ needs.version.outputs.tags }}" \
+            DOCKER_BUILD_ARGS="--push \
+              --cache-from=type=gha,scope=pagebroker \
+              --cache-to=type=gha,scope=pagebroker,mode=max"
+
   # ── Helm chart (OCI push to GHCR) ──────────────────────────────────────────
   release-helm:
     name: Package and push Helm chart
-    needs: [version, validate, build-operator, build-agent]
+    needs: [version, validate, build-operator, build-agent, build-pagebroker]
     permissions:
       # Checkout the validated chart and publish it to GHCR.
       contents: read

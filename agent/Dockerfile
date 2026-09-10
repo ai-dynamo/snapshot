@@ -71,28 +71,7 @@ RUN golangci-lint run --timeout=5m
 # =============================================================================
 FROM go-base AS tester
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    g++ \
-    libgtest-dev \
-    libprotobuf-dev \
-    pkg-config \
-    protobuf-compiler \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN go test ./... -v && make -C pagebroker test
-
-# =============================================================================
-# Stage: PageBroker Builder
-# =============================================================================
-FROM go-base AS pagebroker-builder
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libprotobuf-dev \
-    protobuf-compiler \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN make -C pagebroker daemon
+RUN go test ./... -v
 
 # =============================================================================
 # Stage: Builder - Build Go binaries
@@ -256,10 +235,6 @@ RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-help
 
 # Copy the built binaries
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
-COPY --from=pagebroker-builder /workspace/pagebroker/pagebroker /usr/local/bin/pagebroker
-RUN output=$(/usr/local/bin/pagebroker 2>&1); status=$?; \
-    [ "$status" -eq 2 ]; \
-    [ "$output" = "usage: pagebroker socket_path staging_directory storage_root --max-concurrent-requests max_concurrent_requests" ]
 
 # Assemble the injection bundle: bind-mounted read-only into the placeholder's
 # mount namespace at /tmp/snapshot-binaries during restore (internal/nsmount).
