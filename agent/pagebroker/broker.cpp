@@ -10,7 +10,9 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <utility>
 
+#include "transfer/model_streamer_transfer_engine.hpp"
 #include "transfer/posix_copy_engine.hpp"
 
 namespace snapshot::pagebroker {
@@ -106,7 +108,8 @@ TransactionDirectory(const Path& transaction_root, const std::string& transactio
 
 Broker::Broker(Path staging_root, Path storage_root) : staging_root_(fs::weakly_canonical(std::move(staging_root)))
 {
-  io_engines_.push_back(std::make_unique<PosixCopyEngine>(std::move(storage_root)));
+  io_engines_.push_back(std::make_unique<PosixCopyEngine>(storage_root));
+  io_engines_.push_back(std::make_unique<ModelStreamerTransferEngine>(std::move(storage_root)));
   fs::remove_all(staging_root_ / "restore");
   fs::remove_all(staging_root_ / "checkpoint");
   fs::create_directories(staging_root_ / "restore");
@@ -240,6 +243,8 @@ Broker::Engine(const IOEngine& engine) const
 {
   if (engine.has_posix_copy())
     return Engine(TransferEngineType::POSIX_COPY);
+  if (engine.has_model_streamer())
+    return Engine(TransferEngineType::MODEL_STREAMER);
   throw std::invalid_argument("unsupported I/O engine");
 }
 
