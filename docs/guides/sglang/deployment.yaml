@@ -28,8 +28,8 @@ spec:
         nvidia.com/gpu.present: "true"
       initContainers:
         - name: model-cache
-          image: sglang-snapshot:replace-me
-          imagePullPolicy: Always
+          image: lmsysorg/sglang:v0.5.17-cu130-runtime@sha256:3ea7c6d74312d964edbcf9b3819425ea42117eb967ef1cfec632a70c926027df
+          imagePullPolicy: IfNotPresent
           command:
             - python3
             - -c
@@ -55,8 +55,12 @@ spec:
               mountPath: /hf-cache
       containers:
         - name: main
-          image: sglang-snapshot:replace-me
-          imagePullPolicy: Always
+          image: lmsysorg/sglang:v0.5.17-cu130-runtime@sha256:3ea7c6d74312d964edbcf9b3819425ea42117eb967ef1cfec632a70c926027df
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - -u
+            - /snapshot-app/app.py
           args:
             - --mode
             - snapshot
@@ -108,6 +112,9 @@ spec:
               subPath: main
             - name: tun
               mountPath: /dev/net/tun
+            - name: app
+              mountPath: /snapshot-app
+              readOnly: true
       volumes:
         - name: model-cache
           persistentVolumeClaim:
@@ -118,3 +125,7 @@ spec:
           hostPath:
             path: /dev/net/tun
             type: CharDevice
+        # Created from app.py: kubectl create configmap sglang-app --from-file=app.py
+        - name: app
+          configMap:
+            name: sglang-app

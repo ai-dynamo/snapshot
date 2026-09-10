@@ -5,6 +5,7 @@ import gc
 import json
 import os
 import time
+import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -77,10 +78,6 @@ def serve_api(llm: LLM, restored_text: str) -> None:
 
 
 def main() -> None:
-    if os.environ.get("SNAPSHOT_RESTORE_STANDBY") == "1":
-        while True:
-            time.sleep(3600)
-
     CONTROL_DIR.joinpath("ready-for-snapshot").unlink(missing_ok=True)
 
     llm = LLM(
@@ -113,9 +110,21 @@ def main() -> None:
 
     while True:
         if CONTROL_DIR.joinpath("restore-complete").exists():
-            text = generate_text(llm, ["Reply with one word: restored"])[0]
-            print(f"TensorRT-LLM restored output={text!r}", flush=True)
-            serve_api(llm, text)
+            # The restored process keeps the source container's stdout, which
+            # is gone; a failure here would otherwise be invisible. Record it
+            # in the control directory next to the success sentinel.
+            try:
+                progress = CONTROL_DIR.joinpath("trtllm-restore-progress")
+                text = generate_text(llm, ["Reply with one word: restored"])[0]
+                progress.write_text("generated\n", encoding="utf-8")
+                print(f"TensorRT-LLM restored output={text!r}", flush=True)
+                serve_api(llm, text)
+            except Exception:
+                CONTROL_DIR.joinpath("trtllm-restore-error").write_text(
+                    traceback.format_exc(),
+                    encoding="utf-8",
+                )
+                raise
         time.sleep(1)
 
 

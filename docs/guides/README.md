@@ -2,9 +2,9 @@
 
 Using Snapshot is a three-stage flow:
 
-1. **Build and deploy** a snapshot-ready image for the inference framework. Start
-   from the framework's runtime image, add a small program that cooperates with
-   Snapshot's checkpoint/restore lifecycle, and deploy it as a replica. Snapshot's agent
+1. **Deploy** a replica for the inference framework. Run the framework's stock
+   runtime image unmodified, with a small program mounted into it that
+   cooperates with Snapshot's checkpoint/restore lifecycle. Snapshot's agent
    injects the restore tooling at runtime.
 2. **Checkpoint** the running replica — with a `PodSnapshot` or a `SnapshotJob`.
 3. **Restore** into new pods — with the `nvidia.com/restore-from` annotation.
@@ -18,7 +18,7 @@ stage 1 differ.
 > API as part of its own control loop — `kubectl` here is just for illustration and
 > for trying things out by hand.
 
-## 1. Build and deploy
+## 1. Deploy
 
 Per inference framework:
 

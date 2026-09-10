@@ -1,34 +1,28 @@
-# Build and deploy an SGLang replica
+# Deploy an SGLang replica
 
-Snapshot restores a replica by injecting its checkpointed state into a
-snapshot-ready image: an SGLang runtime image prepared with the application and
-container layout Snapshot expects. The Snapshot agent injects the restore
-tooling at runtime.
+Snapshot restores a replica by injecting its checkpointed process back into a
+running container. This example runs an SGLang image that includes SGLang,
+CUDA, and `torch_memory_saver`, unmodified -- there is no Snapshot-specific
+image to build or push. `deployment.yaml` pins the exact upstream image, and
+one program, `app.py`, is mounted into it from a ConfigMap to prepare SGLang
+for checkpoint and resume it after restore. The Snapshot agent injects the
+restore tooling at runtime.
 
-## Build
-
-Start with an SGLang image that includes SGLang, CUDA, and
-`torch_memory_saver`. Add one program that prepares SGLang for checkpoint and
-resumes it after restore. Select the model when deploying the source pod.
-
-### 1. Download the example files
+## 1. Download the example files
 
 Download [`app.py`](sglang/app.py),
-[`Dockerfile.sglang`](sglang/Dockerfile.sglang),
-[`model-cache-pvc.yaml`](sglang/model-cache-pvc.yaml), and
-[`deployment.yaml`](sglang/deployment.yaml) from the repository:
+[`model-cache-pvc.yaml`](sglang/model-cache-pvc.yaml),
+[`deployment.yaml`](sglang/deployment.yaml), and
+[`restore-deployment.yaml`](sglang/restore-deployment.yaml) from the
+repository:
 
 ```bash
-mkdir -p sglang-snapshot-image
-cd sglang-snapshot-image
+mkdir -p sglang-snapshot
+cd sglang-snapshot
 
 curl --fail --location \
   --output app.py \
   https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/sglang/app.py
-
-curl --fail --location \
-  --output Dockerfile.sglang \
-  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/sglang/Dockerfile.sglang
 
 curl --fail --location \
   --output model-cache-pvc.yaml \
@@ -37,6 +31,10 @@ curl --fail --location \
 curl --fail --location \
   --output deployment.yaml \
   https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/sglang/deployment.yaml
+
+curl --fail --location \
+  --output restore-deployment.yaml \
+  https://raw.githubusercontent.com/ai-dynamo/snapshot/main/docs/guides/sglang/restore-deployment.yaml
 ```
 
 The program creates a direct `sglang.Engine`, runs one generation, and calls
@@ -57,69 +55,44 @@ generation succeeds and the API is listening. To validate the restored replica,
 send a `POST` request to `/generate` with a JSON body such as
 `{"prompt":"What is the capital of Italy?"}`.
 
-The Dockerfile starts from the tested SGLang image, creates
-`/snapshot-control`, and adds `app.py`.
+`deployment.yaml` runs the tested SGLang image unmodified, and mounts `app.py`
+at `/snapshot-app` from the `sglang-app` ConfigMap created in step 2.
 
 The source and restore pods must use the same immutable image, mount the
 Snapshot control volume at `/snapshot-control`, and mount the same model cache
 at `/hf-cache`.
 
-### 2. Build the image
+## 2. Create the app.py ConfigMap
 
-```bash
-export SGLANG_RUNTIME_IMAGE=lmsysorg/sglang:v0.5.17-cu130-runtime@sha256:3ea7c6d74312d964edbcf9b3819425ea42117eb967ef1cfec632a70c926027df
-export SGLANG_SNAPSHOT_IMAGE=<registry>/sglang-snapshot:<tag>
-
-docker build \
-  --platform linux/amd64 \
-  --build-arg SGLANG_RUNTIME_IMAGE="$SGLANG_RUNTIME_IMAGE" \
-  -f Dockerfile.sglang \
-  -t "$SGLANG_SNAPSHOT_IMAGE" .
-
-docker push "$SGLANG_SNAPSHOT_IMAGE"
-```
-
-The `docker push` command uploads the newly built image to the registry named
-in `$SGLANG_SNAPSHOT_IMAGE`. Step 3 deploys that image as the source pod. Use
-the same full image name and tag for restored pods.
-
-Verify that the packaged image contains SGLang, `torch_memory_saver`, and
-`app.py`:
-
-```bash
-docker run --rm \
-  --platform linux/amd64 \
-  --entrypoint python3 \
-  "$SGLANG_SNAPSHOT_IMAGE" \
-  -c 'import pathlib; import sglang; import torch_memory_saver; assert pathlib.Path("/app/app.py").is_file()'
-```
-
-The command produces no output when all three components are present. Any
-failure prints an error and returns a non-zero exit status.
-
-### 3. Deploy SGLang
-
-Set the namespace where the SGLang pod will run:
+Set the namespace where the SGLang pod will run, and create the ConfigMap
+`deployment.yaml` mounts `app.py` from:
 
 ```bash
 export SNAPSHOT_NAMESPACE=<namespace>
 kubectl get namespace "$SNAPSHOT_NAMESPACE"
+
+kubectl create configmap sglang-app \
+  --namespace "$SNAPSHOT_NAMESPACE" \
+  --from-file=app.py
 ```
 
-In [`deployment.yaml`](sglang/deployment.yaml), replace the example `image` with
-the one pushed in step 2 and select the model through `SNAPSHOT_MODEL`. Both the
-init container and the main container carry each value:
+Re-run this command after editing `app.py` -- `kubectl create configmap` fails
+if the ConfigMap already exists; add `--dry-run=client -o yaml | kubectl apply
+-f -` to update it in place instead.
+
+## 3. Deploy SGLang
+
+Select the model through `SNAPSHOT_MODEL` in [`deployment.yaml`](sglang/deployment.yaml).
+Both the init container and the main container carry the value:
 
 ```yaml
 initContainers:
   - name: model-cache
-    image: <registry>/sglang-snapshot:<tag>
     env:
       - name: SNAPSHOT_MODEL
         value: Qwen/Qwen3-0.6B
 containers:
   - name: main
-    image: <registry>/sglang-snapshot:<tag>
     env:
       - name: SNAPSHOT_MODEL
         value: Qwen/Qwen3-0.6B

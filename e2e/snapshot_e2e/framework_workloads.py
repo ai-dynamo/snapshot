@@ -1,16 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pods for the framework e2e tests, derived from the framework manifests.
+"""Pods for the framework e2e tests, derived from the framework guide manifests.
 
-manifests/frameworks/<name>/ ships Deployments. The tests need plain Pods
-they can name, label, pin to a node, and delete individually, so the
-Deployment's Pod template is lifted into a Pod with the minimum of edits:
-test identity, the image under test, e2e scheduling, and — for the restore
-pod — the PodSnapshot to restore from. Everything that makes the Pod
-checkpointable or restorable (control volume, probes, seccomp, device
-mounts, standby env) stays exactly as the manifest wrote it, so a framework
-definition that would not work does not pass here.
+docs/guides/<name>/ ships Deployments. The tests need plain Pods they can
+name, label, pin to a node, and delete individually, so the Deployment's Pod
+template is lifted into a Pod with the minimum of edits: test identity, the
+image under test, e2e scheduling, and — for the restore pod — the PodSnapshot
+to restore from. Everything that makes the Pod checkpointable or restorable
+(control volume, probes, seccomp, device mounts, standby env) stays exactly as
+the manifest wrote it, so a framework definition that would not work does not
+pass here.
 """
 
 from __future__ import annotations

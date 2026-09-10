@@ -26,8 +26,8 @@ snapshotctl checkpoint \
   --namespace my-inference
 ```
 
-The manifest must be a `Pod` (not a Deployment or Job) using a
-[snapshot-ready image](../guides/README.md).
+The manifest must be a `Pod` (not a Deployment or Job) set up as described in
+the [framework guides](../guides/README.md).
 
 ## Restore
 
