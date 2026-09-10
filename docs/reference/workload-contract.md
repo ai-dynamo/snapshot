@@ -33,7 +33,7 @@ through an environment variable and signals across it with sentinel files.
 | `SNAPSHOT_CONTROL_DIR` | agent → workload | Path to the control directory (mounted at `/snapshot-control`). The workload reads it here rather than hard-coding the path. |
 | `ready-for-snapshot` | workload writes | The workload is quiesced and safe to checkpoint. The source pod's readiness probe gates on this file. |
 | `restore-complete` | agent writes, workload waits | The workload's state is restored; it may resume. |
-| `SNAPSHOT_RESTORE_STANDBY` | producer → workload | When `1`, this process is a restore placeholder: stay inert and do not initialize. |
+| `SNAPSHOT_RESTORE_STANDBY` | producer → workload | When `1`, this process is a restore placeholder: the workload must stay inert and not initialize. |
 | `<framework>-restore-ready` | workload writes | A workload-chosen sentinel meaning "restored and serving." The restore pod's readiness probe gates on it. |
 
 The agent-owned side of this channel (and its `cuda-checkpoint-job` file) is
@@ -68,30 +68,33 @@ workload useful and operable.
    Neither of steps 2-3 is load-bearing for correctness — a checkpoint of a cold
    engine still restores — but skipping them defeats the purpose of
    checkpointing.
-4. **MUST** quiesce before signaling: ensure no generation is in flight (pause
-   it, or rely on a synchronous engine having returned), then bring GPU memory to
-   a checkpoint-safe state. Where both apply, stop work before releasing memory.
-5. **SHOULD** roll back to a running state if the memory release in step 4
+4. **MUST** ensure no generation is in flight before signaling: pause it, or
+   rely on a synchronous engine having returned.
+5. **SHOULD** bring GPU memory to a checkpoint-safe state (park it) before
+   signaling, once step 4 holds. Skipping this still produces a working
+   checkpoint — it just captures more GPU memory than necessary, making the
+   checkpoint larger and slower to restore.
+6. **SHOULD** roll back to a running state if the memory release in step 5
    fails, rather than signal readiness.
-6. **MUST** write `ready-for-snapshot` only once step 4 holds. This is the
+7. **MUST** write `ready-for-snapshot` only once step 4 holds. This is the
    promise the rest of the system trusts; the agent captures the process as soon
    as the pod reports Ready.
 
 ### Restore (restored workload)
 
-7. **MUST**, when `SNAPSHOT_RESTORE_STANDBY=1`, have the workload's entrypoint
+8. **MUST**, when `SNAPSHOT_RESTORE_STANDBY=1`, have the workload's entrypoint
    skip its normal initialization and idle instead (for example, sleep without
    starting the engine). The agent restores the checkpointed process into this
    container as a sibling PID via CRIU, outside the entrypoint's control; an
    entrypoint that initializes anyway starts a second, competing copy of the
    model in the same container.
-8. **MUST** wait for `restore-complete` before touching the engine.
-9. **MUST** bring the engine back to a serving-ready state in this order: let
-   `cuda-checkpoint` restore GPU memory (CUDA contexts, streams, and device
-   allocations) before resuming generation, then validate the engine responds
-   correctly before serving traffic. Resuming generation before GPU memory is
-   restored runs against freed memory.
-10. **SHOULD** write the `<framework>-restore-ready` sentinel only after the API
+9. **MUST** wait for `restore-complete` before touching the engine.
+10. **MUST** bring the engine back to a serving-ready state in this order: let
+    `cuda-checkpoint` restore GPU memory (CUDA contexts, streams, and device
+    allocations) before resuming generation, then validate the engine responds
+    correctly before serving traffic. Resuming generation before GPU memory is
+    restored runs against freed memory.
+11. **SHOULD** write the `<framework>-restore-ready` sentinel only after the API
     socket is actually listening, so readiness reflects true serving capacity.
 
 ### Config parity and mechanism
@@ -104,21 +107,21 @@ which permits executing a model repo's custom Python code during load). The
 restored process *is* the captured process; a different configuration is
 undefined.
 
-Steps 3 and 4 (capture: warm up, quiesce) and step 9 (restore: rehydrate) each
+Steps 3-6 (capture: warm up, quiesce) and step 10 (restore: rehydrate) each
 break down into the same sub-obligations across engines — the table below lists
 what each engine calls to meet them. Different frameworks expose different
 function names for the same obligation, which is why the protocol defines the
 contract in terms of *what must happen*, not any one engine's API. Tiers carry
 over from their parent step: skipping a **MUST** row breaks capture or restore
-outright (for example, checkpointing without parking GPU memory first, or
-serving without restoring it, fails); skipping the **SHOULD** row still produces
-a working checkpoint, just a cold one.
+outright (for example, checkpointing with a generation in flight, or resuming
+before GPU memory is restored, fails); skipping the **SHOULD** row still
+produces a working checkpoint, just a larger or colder one.
 
 | Obligation | Tier | vLLM | TensorRT-LLM | SGLang |
 |------------|------|------|--------------|--------|
 | Warm up | SHOULD | one `generate` | `LLM.generate` (two prompts) | one `generate` |
 | Stop in-flight work | MUST | `pause_generation()` | synchronous `generate` returns idle | `pause_generation()` |
-| Park GPU memory | MUST | `sleep()` (sleep mode) | `gc.collect()`; state stays resident | `release_memory_occupation()` (memory saver) |
+| Park GPU memory | SHOULD | `sleep()` (sleep mode) | `gc.collect()`; state stays resident | `release_memory_occupation()` (memory saver) |
 | Restore GPU memory | MUST | `wake_up()` | — (resident) | `resume_memory_occupation()` |
 | Resume | MUST | `resume_generation()` + `check_health()` | next `generate` | `continue_generation()` |
 
@@ -149,7 +152,7 @@ Producing them programmatically is the
 
 ## Runtime compatibility
 
-CRIU restores a process only if nothing in it is un-checkpointable, so the
+CRIU restores a process only if everything in it is checkpointable, so the
 workload's *environment* — not just its logic — has to cooperate. In the
 reference images this is why the build starts from the framework's tested runtime
 image and sets a few environment variables. A packaging method that skips the
@@ -157,17 +160,17 @@ custom image still has to meet these:
 
 - **glibc floor and `x86_64`.** The restore bundle requires a recent glibc, which
   the reference runtime images already clear. Snapshot is x86_64-only today.
-- **No un-reopenable file handles.** Disable caches that leave handles CRIU
+- **All file handles must be reopenable.** Disable caches that leave handles CRIU
   cannot reopen after restore — for example `HF_HUB_DISABLE_XET=1`, and loading
   models from a local cache with `HF_HUB_OFFLINE=1`.
-- **No un-restorable device mappings.** Turn off transports CRIU cannot restore —
-  for example TensorRT-LLM's `TLLM_NCCL_SYMMETRIC_ZERO_COPY=0` and
+- **All device mappings must be restorable.** Turn off transports CRIU cannot
+  restore — for example TensorRT-LLM's `TLLM_NCCL_SYMMETRIC_ZERO_COPY=0` and
   `UCX_TLS=tcp,self`.
 - **`spawn`, not `fork`.** Multiprocess engines start workers with `spawn` (for
-  example `VLLM_WORKER_MULTIPROC_METHOD=spawn`). This isn't a CRIU limitation —
-  CRIU restores forked process trees fine — it's a CUDA one: forking a process
-  that already holds a CUDA context produces a child with an unreliable copy of
-  that context, so a worker forked before checkpoint may not restore correctly.
+  example `VLLM_WORKER_MULTIPROC_METHOD=spawn`). This is a CUDA limitation:
+  forking a process that already holds a CUDA context produces a child with an
+  unreliable copy of that context, so a worker forked before checkpoint may not
+  restore correctly.
 
 ## Packaging methods
 
