@@ -302,7 +302,9 @@ def _record_storage_environment(
         if not storage_class_name:
             raise ValueError(f"PVC {config.namespace}/{config.pvc_name} has no storage class")
         storage_class = k8s.read_storage_class(storage_class_name)
-        parameters = dict(storage_class.parameters or {})
+        parameters = benchmark_result.public_storage_parameters(
+            storage_class.parameters
+        )
         storage_type = next(
             (
                 parameters[key]

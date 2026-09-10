@@ -301,6 +301,11 @@ def wait_for_restore_traffic_ready(
     def check() -> tuple[client.V1Pod, str] | None:
         nonlocal restored_pod, ready_text, last_exec_error
         pod = k8s.read_pod(namespace, pod_name)
+        if pod.status.phase in TERMINAL_POD_PHASES:
+            raise AssertionError(
+                f"pod {namespace}/{pod_name} reached phase {pod.status.phase} "
+                "before restore and traffic readiness"
+            )
         restored = pod_condition(pod, "nvidia.com/Restored")
         if restored and restored.status == "True" and restored.reason == "RestoreSucceeded":
             if restored_pod is None and on_restore_succeeded is not None:
@@ -316,11 +321,6 @@ def wait_for_restore_traffic_ready(
                 raise AssertionError(
                     f"restore reached unexpected terminal condition for "
                     f"{namespace}/{pod_name}: {restored.reason}: {restored.message}"
-                )
-            if pod.status.phase in TERMINAL_POD_PHASES:
-                raise AssertionError(
-                    f"pod {namespace}/{pod_name} reached phase {pod.status.phase} "
-                    "before restore and traffic readiness"
                 )
 
         if ready_text is None:

@@ -275,6 +275,26 @@ def test_parse_image_pull_events_reports_pull_and_cache_hit() -> None:
     assert cache_hit.cache_hit is True
 
 
+def test_public_storage_parameters_excludes_cluster_identifiers() -> None:
+    parameters = benchmark.public_storage_parameters(
+        {
+            "skuName": "Premium_LRS",
+            "type": "azurefile",
+            "storageType": "ssd",
+            "secretName": "storage-credentials",
+            "secretNamespace": "kube-system",
+            "resourceGroup": "internal-infrastructure",
+            "storageAccount": "private-account",
+        }
+    )
+
+    assert parameters == {
+        "skuName": "Premium_LRS",
+        "type": "azurefile",
+        "storageType": "ssd",
+    }
+
+
 def test_fallback_is_idempotent(tmp_path) -> None:
     first = benchmark.write_fallback(
         suite="framework-checkpoint-restore",
@@ -299,6 +319,31 @@ def test_fallback_is_idempotent(tmp_path) -> None:
     assert result["outcome"] == "infrastructure_failed"
     assert _measurement(result, benchmark.TEST_TOTAL)["status"] == "incomplete"
     assert _measurement(result, benchmark.TEST_TOTAL)["value"] is None
+
+
+def test_fallback_does_not_reuse_another_case_result(tmp_path) -> None:
+    existing = benchmark.write_fallback(
+        suite="framework-checkpoint-restore",
+        case="vllm",
+        test="test_framework",
+        outcome="infrastructure_failed",
+        message="vllm did not start",
+        result_dir=tmp_path,
+    )
+
+    result = benchmark.write_fallback(
+        suite="framework-checkpoint-restore",
+        case="sglang",
+        test="test_framework",
+        outcome="timed_out",
+        message="sglang timed out",
+        result_dir=tmp_path,
+    )
+
+    assert result != existing
+    assert len(list(tmp_path.glob("*.json"))) == 2
+    written = json.loads(result.read_text(encoding="utf-8"))
+    assert written["identity"]["case"] == "sglang"
 
 
 def test_wait_for_pod_event_matches_uid(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -371,6 +416,42 @@ def test_combined_restore_wait_records_each_boundary_once(
     assert pod is succeeded
     assert text == "first generation"
     assert observed == ["traffic", "restore"]
+
+
+def test_combined_restore_wait_fails_when_restored_pod_terminates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    restored = SimpleNamespace(
+        type="nvidia.com/Restored",
+        status="True",
+        reason="RestoreSucceeded",
+        message="restored",
+    )
+    terminated = SimpleNamespace(
+        status=SimpleNamespace(phase="Failed", conditions=[restored]),
+    )
+    monkeypatch.setattr(lifecycle.k8s, "read_pod", lambda namespace, name: terminated)
+    monkeypatch.setattr(
+        lifecycle.k8s,
+        "exec_command",
+        lambda namespace, name, command: pytest.fail(
+            "must not exec into a terminal pod"
+        ),
+    )
+    monkeypatch.setattr(
+        lifecycle,
+        "wait_for",
+        lambda description, fn, timeout, **kwargs: fn(),
+    )
+
+    with pytest.raises(AssertionError, match="reached phase Failed"):
+        lifecycle.wait_for_restore_traffic_ready(
+            "snapshot-e2e",
+            "restore",
+            ready_file="/ready",
+            error_file="/error",
+            timeout=1,
+        )
 
 
 def _measurement(result: dict, name: str) -> dict:

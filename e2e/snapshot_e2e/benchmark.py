@@ -35,6 +35,7 @@ NVIDIA_SMI_QUERY = (
     "nvidia-smi --query-gpu=name,uuid,driver_version "
     "--format=csv,noheader,nounits"
 )
+PUBLIC_STORAGE_PARAMETER_KEYS = ("skuName", "type", "storageType")
 
 
 class Clock(Protocol):
@@ -101,6 +102,23 @@ def parse_nvidia_smi_csv(output: str) -> list[dict[str, str]]:
     if not gpus:
         raise ValueError("nvidia-smi returned no GPUs")
     return gpus
+
+
+def public_storage_parameters(
+    parameters: Mapping[str, str] | None,
+) -> dict[str, str]:
+    """Returns only benchmark-relevant StorageClass parameters.
+
+    StorageClass parameters may include infrastructure identifiers and secret
+    references. Benchmark artifacts are retained outside the cluster, so only
+    the allowlisted storage-type fields are safe and useful to publish.
+    """
+    parameters = parameters or {}
+    return {
+        key: parameters[key]
+        for key in PUBLIC_STORAGE_PARAMETER_KEYS
+        if key in parameters
+    }
 
 
 class BenchmarkRecorder:
@@ -468,7 +486,10 @@ def write_fallback(
     result_dir: Path | None = None,
 ) -> Path:
     directory = result_dir or result_directory()
-    existing = sorted(directory.glob("*.json")) if directory.exists() else []
+    prefix = "-".join(_safe_filename(part) for part in (suite, case))
+    existing = (
+        sorted(directory.glob(f"{prefix}-*.json")) if directory.exists() else []
+    )
     if existing:
         print(f"Benchmark result already exists: {existing[0]}")
         return existing[0]
