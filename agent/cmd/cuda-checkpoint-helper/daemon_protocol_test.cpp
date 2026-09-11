@@ -327,6 +327,14 @@ void TestExecutionIdentityAndFatalControlFlow() {
             checkpoint ? Action::kCheckpointBatch : Action::kRestoreBatch,
         .backend = Backend::kPosix,
         .pid = 2,
+        .transfer_buffer_count = 0,
+        .transfer_chunk_bytes = 0,
+        .expected_start_time_ticks = 0,
+        .device_map = {},
+        .storage_dir = {},
+        .expected_cgroup = {},
+        .job_file = {},
+        .selected_devices = {},
         .targets = {first, second},
     };
     const std::string first_proc_root = CreateProcRoot(first);
