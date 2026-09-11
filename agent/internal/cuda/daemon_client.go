@@ -23,7 +23,7 @@ import (
 
 const (
 	daemonProtocolMagic   = uint32(0x50484344)
-	daemonProtocolVersion = uint16(7)
+	daemonProtocolVersion = uint16(8)
 	daemonRequestHeader   = 60
 	daemonResponseHeader  = 24
 	daemonMaxRequest      = 64 * 1024
@@ -32,12 +32,13 @@ const (
 	daemonMaxCgroup       = 4096
 	daemonMaxJobFile      = 4096
 
-	daemonActionHealth       = uint16(0)
-	daemonActionCheckpoint   = uint16(1)
-	daemonActionRestore      = uint16(2)
-	daemonActionLock         = uint16(3)
-	daemonActionUnlock       = uint16(4)
-	daemonActionRestoreBatch = uint16(5)
+	daemonActionHealth          = uint16(0)
+	daemonActionCheckpoint      = uint16(1)
+	daemonActionRestore         = uint16(2)
+	daemonActionLock            = uint16(3)
+	daemonActionUnlock          = uint16(4)
+	daemonActionRestoreBatch    = uint16(5)
+	daemonActionCheckpointBatch = uint16(6)
 
 	daemonResponseFatal           = uint32(1 << 0)
 	daemonCapabilityDeferredCUDA  = uint32(1 << 1)
@@ -190,29 +191,73 @@ func daemonRequest(request helperAction) ([]byte, error) {
 }
 
 func daemonRestoreBatchRequest(requests []helperAction) ([]byte, error) {
+	return daemonBatchRequest(
+		requests,
+		actionRestore,
+		daemonActionRestoreBatch,
+	)
+}
+
+func daemonCheckpointBatchRequest(requests []helperAction) ([]byte, error) {
+	return daemonBatchRequest(
+		requests,
+		actionCheckpoint,
+		daemonActionCheckpointBatch,
+	)
+}
+
+func daemonBatchRequest(
+	requests []helperAction,
+	targetAction string,
+	outerAction uint16,
+) ([]byte, error) {
 	if len(requests) < 2 {
-		return nil, errors.New("CUDA helper restore batch requires at least two targets")
+		return nil, fmt.Errorf(
+			"CUDA helper %s batch requires at least two targets",
+			targetAction,
+		)
 	}
 	if len(requests) > daemonMaxBatchTargets {
-		return nil, fmt.Errorf("CUDA helper restore batch has %d targets; maximum is %d", len(requests), daemonMaxBatchTargets)
+		return nil, fmt.Errorf(
+			"CUDA helper %s batch has %d targets; maximum is %d",
+			targetAction,
+			len(requests),
+			daemonMaxBatchTargets,
+		)
 	}
 	transfer := requests[0].Transfer
 	seenPIDs := make(map[int]struct{}, len(requests))
 	seenStorageDirs := make(map[string]struct{}, len(requests))
 	var payload []byte
 	for _, request := range requests {
-		if request.Action != actionRestore || request.StorageMode != types.CUDAStorageModePOSIX {
-			return nil, errors.New("CUDA helper restore batch accepts only POSIX restore targets")
+		if request.Action != targetAction ||
+			request.StorageMode != types.CUDAStorageModePOSIX {
+			return nil, fmt.Errorf(
+				"CUDA helper %s batch accepts only POSIX %s targets",
+				targetAction,
+				targetAction,
+			)
 		}
 		if request.Transfer != transfer {
-			return nil, errors.New("CUDA helper restore batch targets use different transfer settings")
+			return nil, fmt.Errorf(
+				"CUDA helper %s batch targets use different transfer settings",
+				targetAction,
+			)
 		}
 		if _, duplicate := seenPIDs[request.PID]; duplicate {
-			return nil, fmt.Errorf("CUDA helper restore batch contains duplicate PID %d", request.PID)
+			return nil, fmt.Errorf(
+				"CUDA helper %s batch contains duplicate PID %d",
+				targetAction,
+				request.PID,
+			)
 		}
 		seenPIDs[request.PID] = struct{}{}
 		if _, duplicate := seenStorageDirs[request.StorageDir]; duplicate {
-			return nil, fmt.Errorf("CUDA helper restore batch contains duplicate storage directory %q", request.StorageDir)
+			return nil, fmt.Errorf(
+				"CUDA helper %s batch contains duplicate storage directory %q",
+				targetAction,
+				request.StorageDir,
+			)
 		}
 		seenStorageDirs[request.StorageDir] = struct{}{}
 		encoded, err := daemonRequest(request)
@@ -220,7 +265,7 @@ func daemonRestoreBatchRequest(requests []helperAction) ([]byte, error) {
 			return nil, err
 		}
 		if len(encoded) > int(^uint32(0)) || len(payload) > daemonMaxRequest-4-len(encoded) {
-			return nil, errors.New("CUDA helper restore batch is too large")
+			return nil, fmt.Errorf("CUDA helper %s batch is too large", targetAction)
 		}
 		entry := make([]byte, 4+len(encoded))
 		binary.LittleEndian.PutUint32(entry[:4], uint32(len(encoded)))
@@ -228,13 +273,13 @@ func daemonRestoreBatchRequest(requests []helperAction) ([]byte, error) {
 		payload = append(payload, entry...)
 	}
 	if daemonRequestHeader+len(payload) > daemonMaxRequest {
-		return nil, errors.New("CUDA helper restore batch is too large")
+		return nil, fmt.Errorf("CUDA helper %s batch is too large", targetAction)
 	}
 	packet := make([]byte, daemonRequestHeader+len(payload))
 	binary.LittleEndian.PutUint32(packet[0:4], daemonProtocolMagic)
 	binary.LittleEndian.PutUint16(packet[4:6], daemonProtocolVersion)
 	binary.LittleEndian.PutUint16(packet[6:8], daemonRequestHeader)
-	binary.LittleEndian.PutUint16(packet[8:10], daemonActionRestoreBatch)
+	binary.LittleEndian.PutUint16(packet[8:10], outerAction)
 	binary.LittleEndian.PutUint16(packet[10:12], 2)
 	binary.LittleEndian.PutUint32(packet[12:16], uint32(len(requests)))
 	binary.LittleEndian.PutUint32(packet[56:60], uint32(len(payload)))
@@ -391,7 +436,37 @@ func runDaemonAction(
 }
 
 func runDaemonRestoreBatch(ctx context.Context, requests []helperAction, log logr.Logger) error {
-	packet, err := daemonRestoreBatchRequest(requests)
+	return runDaemonBatch(
+		ctx,
+		requests,
+		actionRestore,
+		daemonRestoreBatchRequest,
+		log,
+	)
+}
+
+func runDaemonCheckpointBatch(
+	ctx context.Context,
+	requests []helperAction,
+	log logr.Logger,
+) error {
+	return runDaemonBatch(
+		ctx,
+		requests,
+		actionCheckpoint,
+		daemonCheckpointBatchRequest,
+		log,
+	)
+}
+
+func runDaemonBatch(
+	ctx context.Context,
+	requests []helperAction,
+	action string,
+	encode func([]helperAction) ([]byte, error),
+	log logr.Logger,
+) error {
+	packet, err := encode(requests)
 	if err != nil {
 		return err
 	}
@@ -402,13 +477,27 @@ func runDaemonRestoreBatch(ctx context.Context, requests []helperAction, log log
 	output := stdout + stderr
 	if status != 0 {
 		if flags&daemonResponseFatal != 0 {
-			return fmt.Errorf("%w: CUDA helper daemon batch restore failed for %d targets after %s with CUDA status %d (output: %s)",
-				errDaemonFatal, len(requests), rpcWall, status, output)
+			return fmt.Errorf(
+				"%w: CUDA helper daemon batch %s failed for %d targets after %s with CUDA status %d (output: %s)",
+				errDaemonFatal,
+				action,
+				len(requests),
+				rpcWall,
+				status,
+				output,
+			)
 		}
-		return fmt.Errorf("CUDA helper daemon batch restore failed for %d targets after %s with CUDA status %d (output: %s)",
-			len(requests), rpcWall, status, output)
+		return fmt.Errorf(
+			"CUDA helper daemon batch %s failed for %d targets after %s with CUDA status %d (output: %s)",
+			action,
+			len(requests),
+			rpcWall,
+			status,
+			output,
+		)
 	}
-	log.Info("CUDA custom-storage batch restore succeeded",
+	log.Info("CUDA custom-storage batch operation succeeded",
+		"action", action,
 		"targets", len(requests),
 		"daemon_rpc_wall_duration", rpcWall,
 		"output", output,
@@ -419,12 +508,22 @@ func runDaemonRestoreBatch(ctx context.Context, requests []helperAction, log log
 // validateCUDAOperationBudget rejects a long-running CUDA sequence before its
 // first driver call. Per-request validation in runDaemonAction is too late for
 // checkpoint because the process has already been locked by then.
-func validateCUDAOperationBudget(ctx context.Context, action string, targetCount int, batchedRestore bool) error {
+func validateCUDAOperationBudget(
+	ctx context.Context,
+	action string,
+	targetCount int,
+	batched bool,
+) error {
 	if targetCount < 0 {
 		return fmt.Errorf("CUDA helper %s target count must not be negative", action)
 	}
-	if batchedRestore && (action != actionRestore || targetCount < 2) {
-		return errors.New("CUDA helper batch restore requires at least two restore targets")
+	if batched &&
+		(action != actionRestore && action != actionCheckpoint ||
+			targetCount < 2) {
+		return fmt.Errorf(
+			"CUDA helper batch %s requires at least two targets",
+			action,
+		)
 	}
 	callsPerTarget := 1
 	if action == actionCheckpoint {
@@ -439,8 +538,12 @@ func validateCUDAOperationBudget(ctx context.Context, action string, targetCount
 		return fmt.Errorf("CUDA helper %s target count %d exceeds operation-budget capacity", action, targetCount)
 	}
 	requiredCalls := targetCount * callsPerTarget
-	if batchedRestore {
-		requiredCalls = 1
+	if batched {
+		if action == actionCheckpoint {
+			requiredCalls = targetCount + 1
+		} else {
+			requiredCalls = 1
+		}
 	}
 	required := time.Duration(requiredCalls) * daemonRPCTimeout
 	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= required {

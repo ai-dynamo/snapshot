@@ -36,6 +36,10 @@ type helperRestoreBatchRunner interface {
 	runRestoreBatch(context.Context, []helperAction, logr.Logger) error
 }
 
+type helperCheckpointBatchRunner interface {
+	runCheckpointBatch(context.Context, []helperAction, logr.Logger) error
+}
+
 type helperAction struct {
 	PID         int
 	Action      string
@@ -143,6 +147,28 @@ func (commandHelperActionRunner) runRestoreBatch(
 	return runDaemonRestoreBatch(ctx, requests, log)
 }
 
+func (commandHelperActionRunner) runCheckpointBatch(
+	ctx context.Context,
+	requests []helperAction,
+	log logr.Logger,
+) error {
+	for index := range requests {
+		request := &requests[index]
+		if request.Identity.OutermostPID != request.PID ||
+			request.Identity.StartTimeTicks == 0 || request.Identity.Cgroup == "" {
+			return fmt.Errorf("incomplete process identity for host PID %d", request.PID)
+		}
+		if request.Action != actionCheckpoint ||
+			request.StorageMode != types.CUDAStorageModePOSIX {
+			return fmt.Errorf(
+				"invalid batch checkpoint action for host PID %d",
+				request.PID,
+			)
+		}
+	}
+	return runDaemonCheckpointBatch(ctx, requests, log)
+}
+
 func (r identityValidatingRunner) run(
 	ctx context.Context,
 	request helperAction,
@@ -182,4 +208,41 @@ func (r identityValidatingRunner) runRestoreBatch(
 		return errors.New("CUDA helper runner does not support batch restore")
 	}
 	return batchRunner.runRestoreBatch(ctx, validated, log)
+}
+
+func (r identityValidatingRunner) runCheckpointBatch(
+	ctx context.Context,
+	requests []helperAction,
+	log logr.Logger,
+) error {
+	validated := make([]helperAction, len(requests))
+	copy(validated, requests)
+	for index := range validated {
+		request := &validated[index]
+		expected, ok := r.identities[request.PID]
+		if !ok {
+			return fmt.Errorf(
+				"%w: missing expected process identity for host PID %d",
+				errProcessIdentityChangedBeforeCUDA,
+				request.PID,
+			)
+		}
+		if err := snapshotruntime.ValidateProcessIdentity(
+			r.procRoot,
+			expected,
+		); err != nil {
+			return fmt.Errorf(
+				"%w: validate host PID %d immediately before CUDA batch checkpoint: %v",
+				errProcessIdentityChangedBeforeCUDA,
+				request.PID,
+				err,
+			)
+		}
+		request.Identity = expected
+	}
+	batchRunner, ok := r.runner.(helperCheckpointBatchRunner)
+	if !ok {
+		return errors.New("CUDA helper runner does not support batch checkpoint")
+	}
+	return batchRunner.runCheckpointBatch(ctx, validated, log)
 }

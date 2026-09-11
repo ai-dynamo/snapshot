@@ -85,7 +85,7 @@ Request LiveProcessRequest(pid_t pid) {
 
 std::vector<unsigned char> ReadGoldenRequest() {
   std::ifstream fixture(
-      "cmd/cuda-checkpoint-helper/testdata/daemon_request_v7.hex");
+      "cmd/cuda-checkpoint-helper/testdata/daemon_request_v8.hex");
   assert(fixture.good());
   std::string encoded;
   fixture >> encoded;
@@ -225,57 +225,62 @@ void TestProtocol() {
   }
 }
 
-void TestRestoreBatchProtocol() {
-  Request first = TestRequest(Action::kRestore);
-  Request second = first;
-  second.pid = 124;
-  second.expected_start_time_ticks = 987655;
-  second.expected_cgroup = "0::/kubepods/test-2\n";
-  second.storage_dir = "/checkpoints/cuda-2";
-  second.job_file = "/host/proc/124/root/tmp/cuda-job";
-  second.selected_devices = "GPU-22345678-1234-1234-1234-123456789abc";
-  Request batch{
-      .action = Action::kRestoreBatch,
-      .backend = Backend::kPosix,
-      .pid = 2,
-      .transfer_buffer_count = 0,
-      .transfer_chunk_bytes = 0,
-      .expected_start_time_ticks = 0,
-      .device_map = {},
-      .storage_dir = {},
-      .expected_cgroup = {},
-      .job_file = {},
-      .selected_devices = {},
-      .targets = {first, second},
-  };
-  std::vector<unsigned char> encoded;
-  std::string error;
-  assert(EncodeRequest(batch, &encoded, &error));
-  Request parsed;
-  assert(ParseRequest(encoded.data(), encoded.size(), &parsed, &error));
-  assert(parsed.action == Action::kRestoreBatch && parsed.targets.size() == 2);
-  assert(parsed.targets[0].pid == 123 && parsed.targets[1].pid == 124);
+void TestBatchProtocol() {
+  for (const bool checkpoint : {false, true}) {
+    const Action target_action =
+        checkpoint ? Action::kCheckpoint : Action::kRestore;
+    Request first = TestRequest(target_action);
+    Request second = first;
+    second.pid = 124;
+    second.expected_start_time_ticks = 987655;
+    second.expected_cgroup = "0::/kubepods/test-2\n";
+    second.storage_dir = "/checkpoints/cuda-2";
+    second.job_file = "/host/proc/124/root/tmp/cuda-job";
+    second.selected_devices = "GPU-22345678-1234-1234-1234-123456789abc";
+    Request batch{
+        .action =
+            checkpoint ? Action::kCheckpointBatch : Action::kRestoreBatch,
+        .backend = Backend::kPosix,
+        .pid = 2,
+        .transfer_buffer_count = 0,
+        .transfer_chunk_bytes = 0,
+        .expected_start_time_ticks = 0,
+        .device_map = {},
+        .storage_dir = {},
+        .expected_cgroup = {},
+        .job_file = {},
+        .selected_devices = {},
+        .targets = {first, second},
+    };
+    std::vector<unsigned char> encoded;
+    std::string error;
+    assert(EncodeRequest(batch, &encoded, &error));
+    Request parsed;
+    assert(ParseRequest(encoded.data(), encoded.size(), &parsed, &error));
+    assert(parsed.action == batch.action && parsed.targets.size() == 2);
+    assert(parsed.targets[0].pid == 123 && parsed.targets[1].pid == 124);
 
-  batch.targets[1].storage_dir = batch.targets[0].storage_dir;
-  assert(EncodeRequest(batch, &encoded, &error));
-  assert(!ParseRequest(encoded.data(), encoded.size(), &parsed, &error));
-  batch.targets[1] = second;
-  batch.targets[1].transfer_buffer_count++;
-  assert(EncodeRequest(batch, &encoded, &error));
-  assert(!ParseRequest(encoded.data(), encoded.size(), &parsed, &error));
+    batch.targets[1].storage_dir = batch.targets[0].storage_dir;
+    assert(EncodeRequest(batch, &encoded, &error));
+    assert(!ParseRequest(encoded.data(), encoded.size(), &parsed, &error));
+    batch.targets[1] = second;
+    batch.targets[1].transfer_buffer_count++;
+    assert(EncodeRequest(batch, &encoded, &error));
+    assert(!ParseRequest(encoded.data(), encoded.size(), &parsed, &error));
 
-  batch.targets[1] = second;
-  batch.targets[1].action = Action::kRestoreBatch;
-  assert(!EncodeRequest(batch, &encoded, &error));
+    batch.targets[1] = second;
+    batch.targets[1].action = batch.action;
+    assert(!EncodeRequest(batch, &encoded, &error));
 
-  batch.targets = {first};
-  batch.pid = 1;
-  assert(EncodeRequest(batch, &encoded, &error));
-  assert(!ParseRequest(encoded.data(), encoded.size(), &parsed, &error));
+    batch.targets = {first};
+    batch.pid = 1;
+    assert(EncodeRequest(batch, &encoded, &error));
+    assert(!ParseRequest(encoded.data(), encoded.size(), &parsed, &error));
 
-  batch.targets.assign(kMaxRestoreBatchTargets + 1, first);
-  batch.pid = batch.targets.size();
-  assert(!EncodeRequest(batch, &encoded, &error));
+    batch.targets.assign(kMaxBatchTargets + 1, first);
+    batch.pid = batch.targets.size();
+    assert(!EncodeRequest(batch, &encoded, &error));
+  }
 }
 
 void TestExecutionIdentityAndFatalControlFlow() {
@@ -308,6 +313,49 @@ void TestExecutionIdentityAndFatalControlFlow() {
       assert((response.flags & kResponseLockNotAcquired) == 0);
     }
     std::filesystem::remove_all(proc_root);
+  }
+
+  for (const bool checkpoint : {false, true}) {
+    const Action target_action =
+        checkpoint ? Action::kCheckpoint : Action::kRestore;
+    Request first = TestRequest(target_action);
+    Request second = first;
+    second.pid++;
+    second.expected_cgroup = "0::/kubepods/test-2\n";
+    Request batch{
+        .action =
+            checkpoint ? Action::kCheckpointBatch : Action::kRestoreBatch,
+        .backend = Backend::kPosix,
+        .pid = 2,
+        .targets = {first, second},
+    };
+    const std::string first_proc_root = CreateProcRoot(first);
+    const std::string second_proc_root = CreateProcRoot(second);
+    std::filesystem::rename(
+        std::filesystem::path(second_proc_root) / std::to_string(second.pid),
+        std::filesystem::path(first_proc_root) / std::to_string(second.pid));
+    std::filesystem::remove_all(second_proc_root);
+
+    int executions = 0;
+    Response response;
+    assert(ExecuteValidated(
+        batch, first_proc_root,
+        [&executions](const Request &) {
+          ++executions;
+          return Response{};
+        },
+        &response));
+    assert(executions == 1);
+    batch.targets[1].expected_start_time_ticks++;
+    assert(ExecuteValidated(
+        batch, first_proc_root,
+        [&executions](const Request &) {
+          ++executions;
+          return Response{};
+        },
+        &response));
+    assert(executions == 1);
+    std::filesystem::remove_all(first_proc_root);
   }
 
   OperationState operation;
@@ -735,7 +783,7 @@ void TestBoundedOutputCaptureDrainsAndTruncates() {
 int main() {
   TestGoldenRequestFixture();
   TestProtocol();
-  TestRestoreBatchProtocol();
+  TestBatchProtocol();
   TestExecutionIdentityAndFatalControlFlow();
   TestProcessIdentityStates();
   TestHealthStates();

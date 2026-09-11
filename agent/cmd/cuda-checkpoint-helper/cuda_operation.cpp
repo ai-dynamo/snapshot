@@ -492,7 +492,7 @@ struct CustomStorageResult {
   bool fatal = false;
 };
 
-struct PreparedCustomStorageRestore {
+struct PreparedCustomStorageTarget {
   const daemon_protocol::Request *request = nullptr;
   std::filesystem::path storage_dir;
   transfer::TransferOptions transfer_options;
@@ -515,8 +515,8 @@ struct PreparedCustomStorageRestore {
   double metadata_job_construction_seconds = 0.0;
 };
 
-CustomStorageResult FailPreparedRestore(PreparedCustomStorageRestore *prepared,
-                                        CUresult failure) {
+CustomStorageResult FailPreparedTarget(PreparedCustomStorageTarget *prepared,
+                                       CUresult failure) {
   const CUresult status =
       static_cast<CUresult>(daemon_protocol::FinishHandledOperation(
           false, failure, [] { return static_cast<int32_t>(CUDA_SUCCESS); },
@@ -534,27 +534,49 @@ CustomStorageResult FailPreparedRestore(PreparedCustomStorageRestore *prepared,
                    release_status != CUDA_SUCCESS};
 }
 
-CustomStorageResult PrepareCustomStorageRestore(
+CustomStorageResult PrepareCustomStorageTarget(
     const daemon_protocol::Request &request,
+    bool checkpoint,
     const transfer::TransferOptions &transfer_options,
     OperationCompleteFn operation_complete,
-    std::unique_ptr<PreparedCustomStorageRestore> *prepared_out) {
+    std::unique_ptr<PreparedCustomStorageTarget> *prepared_out) {
   if (operation_complete == nullptr) {
     std::fprintf(stderr, "CUDA custom storage unavailable\n");
     return {CUDA_ERROR_NOT_SUPPORTED, {}};
   }
-  auto prepared = std::make_unique<PreparedCustomStorageRestore>();
+  auto prepared = std::make_unique<PreparedCustomStorageTarget>();
   prepared->request = &request;
   prepared->storage_dir = request.storage_dir;
   prepared->transfer_options = transfer_options;
   prepared->operation_contexts = std::make_unique<OperationContexts>();
 
   const auto storage_directory_start = Clock::now();
+  if (!prepared->storage_dir.is_absolute()) {
+    std::fprintf(stderr, "custom storage directory must be absolute\n");
+    return {CUDA_ERROR_INVALID_VALUE, {}};
+  }
   struct stat directory_stat {};
-  if (!prepared->storage_dir.is_absolute() ||
-      lstat(prepared->storage_dir.c_str(), &directory_stat) != 0 ||
-      !S_ISDIR(directory_stat.st_mode) ||
-      (directory_stat.st_mode & 0022) != 0) {
+  if (checkpoint) {
+    std::error_code filesystem_error;
+    std::filesystem::create_directories(prepared->storage_dir,
+                                        filesystem_error);
+    if (filesystem_error ||
+        lstat(prepared->storage_dir.c_str(), &directory_stat) != 0 ||
+        !S_ISDIR(directory_stat.st_mode) ||
+        chmod(prepared->storage_dir.c_str(), 0700) != 0) {
+      std::fprintf(stderr, "failed to create custom storage directory\n");
+      return {CUDA_ERROR_OPERATING_SYSTEM, {}};
+    }
+    std::string remove_error;
+    if (!storage::RemoveManifest(prepared->storage_dir, &remove_error)) {
+      std::fprintf(stderr,
+                   "failed to clear stale custom storage manifest: %s\n",
+                   remove_error.c_str());
+      return {CUDA_ERROR_OPERATING_SYSTEM, {}};
+    }
+  } else if (lstat(prepared->storage_dir.c_str(), &directory_stat) != 0 ||
+             !S_ISDIR(directory_stat.st_mode) ||
+             (directory_stat.st_mode & 0022) != 0) {
     std::fprintf(stderr, "custom storage directory is missing or invalid\n");
     return {CUDA_ERROR_INVALID_VALUE, {}};
   }
@@ -576,10 +598,11 @@ CustomStorageResult PrepareCustomStorageRestore(
 
   const auto manifest_validation_start = Clock::now();
   std::string manifest_error;
-  if (!storage::ReadManifest(prepared->storage_dir, &prepared->manifest,
-                             &manifest_error) ||
-      !storage::ValidateExtentFiles(prepared->storage_dir, prepared->manifest,
-                                    &manifest_error)) {
+  if (!checkpoint &&
+      (!storage::ReadManifest(prepared->storage_dir, &prepared->manifest,
+                              &manifest_error) ||
+       !storage::ValidateExtentFiles(prepared->storage_dir, prepared->manifest,
+                                     &manifest_error))) {
     std::fprintf(stderr, "custom storage manifest validation failed: %s\n",
                  manifest_error.c_str());
     return {CUDA_ERROR_INVALID_VALUE, {}};
@@ -590,7 +613,8 @@ CustomStorageResult PrepareCustomStorageRestore(
   std::vector<CUcheckpointGpuPair> gpu_pairs;
   std::vector<storage::DevicePair> storage_pairs;
   const auto device_map_preparation_start = Clock::now();
-  if (!ParseDeviceMap(request.device_map, &gpu_pairs, &storage_pairs)) {
+  if (!checkpoint &&
+      !ParseDeviceMap(request.device_map, &gpu_pairs, &storage_pairs)) {
     return {CUDA_ERROR_INVALID_VALUE, {}};
   }
   prepared->device_map_preparation_seconds =
@@ -612,11 +636,17 @@ CustomStorageResult PrepareCustomStorageRestore(
   }
 
   const auto cuda_process_api_start = Clock::now();
-  CUcheckpointRestoreArgs args{};
-  args.gpuPairs = gpu_pairs.empty() ? nullptr : gpu_pairs.data();
-  args.gpuPairsCount = gpu_pairs.size();
-  args.customStorageInfo_out = &prepared->info;
-  status = cuCheckpointProcessRestore(request.pid, &args);
+  if (checkpoint) {
+    CUcheckpointCheckpointArgs args{};
+    args.customStorageInfo_out = &prepared->info;
+    status = cuCheckpointProcessCheckpoint(request.pid, &args);
+  } else {
+    CUcheckpointRestoreArgs args{};
+    args.gpuPairs = gpu_pairs.empty() ? nullptr : gpu_pairs.data();
+    args.gpuPairsCount = gpu_pairs.size();
+    args.customStorageInfo_out = &prepared->info;
+    status = cuCheckpointProcessRestore(request.pid, &args);
+  }
   prepared->cuda_process_api_seconds = SecondsSince(cuda_process_api_start);
   if (status != CUDA_SUCCESS) {
     return {status, {}};
@@ -629,7 +659,7 @@ CustomStorageResult PrepareCustomStorageRestore(
       (prepared->info->deviceCount > 0 &&
        prepared->info->perDeviceData == nullptr)) {
     std::fprintf(stderr, "CUDA returned invalid custom storage information\n");
-    return FailPreparedRestore(prepared.get(), CUDA_ERROR_INVALID_VALUE);
+    return FailPreparedTarget(prepared.get(), CUDA_ERROR_INVALID_VALUE);
   }
   std::string transfer_config_error;
   if (!transfer::CalculatePinnedBytes(
@@ -637,7 +667,7 @@ CustomStorageResult PrepareCustomStorageRestore(
           &prepared->pinned_bytes, &transfer_config_error)) {
     std::fprintf(stderr, "custom storage transfer configuration invalid: %s\n",
                  transfer_config_error.c_str());
-    return FailPreparedRestore(prepared.get(), CUDA_ERROR_INVALID_VALUE);
+    return FailPreparedTarget(prepared.get(), CUDA_ERROR_INVALID_VALUE);
   }
 
   std::vector<CUcontext> contexts(prepared->info->deviceCount);
@@ -652,29 +682,38 @@ CustomStorageResult PrepareCustomStorageRestore(
     prepared->target_context_discovery_seconds +=
         SecondsSince(discovery_start);
     if (status != CUDA_SUCCESS) {
-      return FailPreparedRestore(prepared.get(), status);
+      return FailPreparedTarget(prepared.get(), status);
     }
     std::string uuid;
     status = DeviceUUID(devices[index], &uuid);
     if (status != CUDA_SUCCESS) {
-      return FailPreparedRestore(prepared.get(), status);
+      return FailPreparedTarget(prepared.get(), status);
     }
     device_extents.push_back(
         {std::move(uuid), prepared->info->perDeviceData[index].size});
   }
 
-  if (!storage::BuildTransferJobs(prepared->manifest, device_extents,
-                                  storage_pairs, &prepared->transfer_jobs,
-                                  &manifest_error)) {
-    std::fprintf(stderr, "invalid restore custom storage mapping: %s\n",
+  if (checkpoint &&
+      !storage::BuildCheckpointManifest(device_extents, &prepared->manifest,
+                                        &manifest_error)) {
+    std::fprintf(stderr, "invalid checkpoint custom storage mapping: %s\n",
                  manifest_error.c_str());
-    return FailPreparedRestore(prepared.get(), CUDA_ERROR_INVALID_VALUE);
+    return FailPreparedTarget(prepared.get(), CUDA_ERROR_INVALID_VALUE);
+  }
+  if (!storage::BuildTransferJobs(
+          prepared->manifest, device_extents,
+          checkpoint ? std::vector<storage::DevicePair>{} : storage_pairs,
+          &prepared->transfer_jobs, &manifest_error)) {
+    std::fprintf(stderr, "invalid %s custom storage mapping: %s\n",
+                 checkpoint ? "checkpoint" : "restore",
+                 manifest_error.c_str());
+    return FailPreparedTarget(prepared.get(), CUDA_ERROR_INVALID_VALUE);
   }
   for (const auto &extent : prepared->manifest) {
     if (extent.size >
         std::numeric_limits<size_t>::max() - prepared->total_bytes) {
       std::fprintf(stderr, "custom storage byte count overflow\n");
-      return FailPreparedRestore(prepared.get(), CUDA_ERROR_INVALID_VALUE);
+      return FailPreparedTarget(prepared.get(), CUDA_ERROR_INVALID_VALUE);
     }
     prepared->total_bytes += extent.size;
   }
@@ -702,13 +741,13 @@ CustomStorageResult PrepareCustomStorageRestore(
     std::fprintf(stderr,
                  "custom storage transfer setup failed for job %zu: %s\n",
                  job_index, exception.what());
-    return FailPreparedRestore(prepared.get(), CUDA_ERROR_OPERATING_SYSTEM);
+    return FailPreparedTarget(prepared.get(), CUDA_ERROR_OPERATING_SYSTEM);
   } catch (...) {
     std::fprintf(stderr,
                  "custom storage transfer setup failed for job %zu: unknown "
                  "exception\n",
                  job_index);
-    return FailPreparedRestore(prepared.get(), CUDA_ERROR_OPERATING_SYSTEM);
+    return FailPreparedTarget(prepared.get(), CUDA_ERROR_OPERATING_SYSTEM);
   }
   prepared->metadata_job_construction_seconds = SecondsSince(metadata_start);
   *prepared_out = std::move(prepared);
@@ -1152,8 +1191,9 @@ DoCustomStorage(int pid, bool checkpoint, const std::string &device_map,
   return {CUDA_SUCCESS, operation, false};
 }
 
-CustomStorageResult DoCustomStorageRestoreBatch(
+CustomStorageResult DoCustomStorageBatch(
     const std::vector<daemon_protocol::Request> &requests,
+    bool checkpoint,
     Clock::time_point operation_deadline,
     Clock::time_point operation_dispatch_start,
     OperationCompleteFn operation_complete,
@@ -1162,6 +1202,10 @@ CustomStorageResult DoCustomStorageRestoreBatch(
       persistent_contexts == nullptr) {
     return {CUDA_ERROR_INVALID_VALUE, {}};
   }
+  const auto target_action = checkpoint
+                                 ? daemon_protocol::Action::kCheckpoint
+                                 : daemon_protocol::Action::kRestore;
+  const char *operation_name = checkpoint ? "checkpoint" : "restore";
   const auto batch_total_start = Clock::now();
   const transfer::TransferOptions options{
       .buffer_count = requests.front().transfer_buffer_count,
@@ -1175,28 +1219,38 @@ CustomStorageResult DoCustomStorageRestoreBatch(
     return {CUDA_ERROR_INVALID_VALUE, {}};
   }
   for (const auto &request : requests) {
-    if (request.action != daemon_protocol::Action::kRestore ||
+    if (request.action != target_action ||
         request.backend != daemon_protocol::Backend::kPosix ||
         request.transfer_buffer_count != options.buffer_count ||
         request.transfer_chunk_bytes != options.chunk_bytes) {
       std::fprintf(stderr,
-                   "restore batch targets must use identical POSIX transfer "
-                   "configuration\n");
+                   "%s batch targets must use identical POSIX transfer "
+                   "configuration\n",
+                   operation_name);
       return {CUDA_ERROR_INVALID_VALUE, {}};
     }
   }
 
-  std::vector<std::unique_ptr<PreparedCustomStorageRestore>> prepared;
+  std::vector<std::unique_ptr<PreparedCustomStorageTarget>> prepared;
   prepared.reserve(requests.size());
   for (const auto &request : requests) {
-    std::unique_ptr<PreparedCustomStorageRestore> target;
-    const CustomStorageResult result = PrepareCustomStorageRestore(
-        request, options, operation_complete, &target);
+    std::unique_ptr<PreparedCustomStorageTarget> target;
+    const CustomStorageResult result = PrepareCustomStorageTarget(
+        request, checkpoint, options, operation_complete, &target);
+    std::fprintf(
+        stdout,
+        "{\"event\":\"cuda_custom_storage_batch_phase\","
+        "\"operation\":\"%s\",\"phase\":\"begin\",\"target_index\":%zu,"
+        "\"pid\":%u,\"cuda_status\":%d,\"devices\":%u}\n",
+        operation_name, prepared.size(), request.pid,
+        static_cast<int>(result.status),
+        target == nullptr || target->info == nullptr ? 0
+                                                     : target->info->deviceCount);
     if (result.status != CUDA_SUCCESS) {
       bool fatal = result.fatal || result.operation.fatal();
       for (auto &existing : prepared) {
         const CustomStorageResult cleanup =
-            FailPreparedRestore(existing.get(), result.status);
+            FailPreparedTarget(existing.get(), result.status);
         fatal = fatal || cleanup.fatal || cleanup.operation.fatal();
       }
       return {.status = result.status,
@@ -1215,7 +1269,8 @@ CustomStorageResult DoCustomStorageRestoreBatch(
     for (const auto &target : prepared) {
       if (target->total_bytes >
           std::numeric_limits<size_t>::max() - total_bytes) {
-        throw std::overflow_error("restore batch payload byte count overflow");
+        throw std::overflow_error(std::string(operation_name) +
+                                  " batch payload byte count overflow");
       }
       total_bytes += target->total_bytes;
       target_pinned_bytes.push_back(target->pinned_bytes);
@@ -1223,10 +1278,10 @@ CustomStorageResult DoCustomStorageRestoreBatch(
                        target->scheduled_transfers.end());
     }
   } catch (const std::exception &exception) {
-    std::fprintf(stderr, "restore batch construction failed: %s\n",
-                 exception.what());
+    std::fprintf(stderr, "%s batch construction failed: %s\n",
+                 operation_name, exception.what());
     for (auto &target : prepared) {
-      (void)FailPreparedRestore(target.get(), CUDA_ERROR_OPERATING_SYSTEM);
+      (void)FailPreparedTarget(target.get(), CUDA_ERROR_OPERATING_SYSTEM);
     }
     return {.status = CUDA_ERROR_OPERATING_SYSTEM,
             .operation = {},
@@ -1237,10 +1292,10 @@ CustomStorageResult DoCustomStorageRestoreBatch(
   if (!transfer::CalculateBatchPinnedBytes(target_pinned_bytes,
                                            &total_pinned_bytes,
                                            &pinned_memory_error)) {
-    std::fprintf(stderr, "restore batch configuration invalid: %s\n",
-                 pinned_memory_error.c_str());
+    std::fprintf(stderr, "%s batch configuration invalid: %s\n",
+                 operation_name, pinned_memory_error.c_str());
     for (auto &target : prepared) {
-      (void)FailPreparedRestore(target.get(), CUDA_ERROR_OUT_OF_MEMORY);
+      (void)FailPreparedTarget(target.get(), CUDA_ERROR_OUT_OF_MEMORY);
     }
     return {.status = CUDA_ERROR_OUT_OF_MEMORY,
             .operation = {},
@@ -1249,12 +1304,14 @@ CustomStorageResult DoCustomStorageRestoreBatch(
 
   const auto batch_transfer_start = Clock::now();
   transfer::TransferBatchResult transfer_result;
-  if (!transfer::TransferBatch(transfers, transfer::TransferOperation::kRestore,
-                               options, operation_deadline,
-                               &transfer_result)) {
+  if (!transfer::TransferBatch(
+          transfers,
+          checkpoint ? transfer::TransferOperation::kCheckpoint
+                     : transfer::TransferOperation::kRestore,
+          options, operation_deadline, &transfer_result)) {
     std::fprintf(stderr, "%s\n", transfer_result.error.c_str());
     for (auto &target : prepared) {
-      (void)FailPreparedRestore(target.get(), CUDA_ERROR_OPERATING_SYSTEM);
+      (void)FailPreparedTarget(target.get(), CUDA_ERROR_OPERATING_SYSTEM);
     }
     return {.status = CUDA_ERROR_OPERATING_SYSTEM,
             .operation = {},
@@ -1263,9 +1320,10 @@ CustomStorageResult DoCustomStorageRestoreBatch(
   const double batch_transfer_seconds = SecondsSince(batch_transfer_start);
   if (transfer_result.metrics.size() != transfers.size()) {
     std::fprintf(stderr,
-                 "restore batch returned an invalid transfer metric count\n");
+                 "%s batch returned an invalid transfer metric count\n",
+                 operation_name);
     for (auto &target : prepared) {
-      (void)FailPreparedRestore(target.get(), CUDA_ERROR_OPERATING_SYSTEM);
+      (void)FailPreparedTarget(target.get(), CUDA_ERROR_OPERATING_SYSTEM);
     }
     return {.status = CUDA_ERROR_OPERATING_SYSTEM,
             .operation = {},
@@ -1275,30 +1333,60 @@ CustomStorageResult DoCustomStorageRestoreBatch(
   for (auto &target : prepared) {
     std::vector<std::string> extent_digests;
     std::string digest_error;
+    if (checkpoint &&
+        !storage::ValidateExtentFiles(target->storage_dir, target->manifest,
+                                      &digest_error)) {
+      std::fprintf(stderr,
+                   "checkpoint batch extent validation failed for pid %u: "
+                   "%s\n",
+                   target->request->pid, digest_error.c_str());
+      for (auto &remaining : prepared) {
+        (void)FailPreparedTarget(remaining.get(),
+                                 CUDA_ERROR_OPERATING_SYSTEM);
+      }
+      return {.status = CUDA_ERROR_OPERATING_SYSTEM,
+              .operation = target->operation,
+              .fatal = true};
+    }
+    if (checkpoint &&
+        !storage::WriteManifest(target->storage_dir, target->manifest,
+                                &digest_error)) {
+      std::fprintf(stderr,
+                   "checkpoint batch manifest write failed for pid %u: %s\n",
+                   target->request->pid, digest_error.c_str());
+      for (auto &remaining : prepared) {
+        (void)FailPreparedTarget(remaining.get(),
+                                 CUDA_ERROR_OPERATING_SYSTEM);
+      }
+      return {.status = CUDA_ERROR_OPERATING_SYSTEM,
+              .operation = target->operation,
+              .fatal = true};
+    }
     if (!ComputeExtentDigests(target->storage_dir, target->transfer_jobs,
                               target->manifest, &extent_digests,
                               &digest_error)) {
       std::fprintf(stderr,
-                   "restore batch digest computation failed for pid %u: %s\n",
-                   target->request->pid, digest_error.c_str());
+                   "%s batch digest computation failed for pid %u: %s\n",
+                   operation_name, target->request->pid,
+                   digest_error.c_str());
       for (auto &remaining : prepared) {
-        (void)FailPreparedRestore(remaining.get(),
-                                  CUDA_ERROR_OPERATING_SYSTEM);
+        (void)FailPreparedTarget(remaining.get(),
+                                 CUDA_ERROR_OPERATING_SYSTEM);
       }
       return {.status = CUDA_ERROR_OPERATING_SYSTEM,
               .operation = target->operation,
               .fatal = true};
     }
     if (!storage::ApplyOrVerifyExtentDigests(
-            false, target->transfer_jobs, extent_digests, &target->manifest,
-            &digest_error)) {
+            checkpoint, target->transfer_jobs, extent_digests,
+            &target->manifest, &digest_error)) {
       std::fprintf(stderr,
-                   "restore batch extent digest verification failed for pid "
-                   "%u: %s\n",
-                   target->request->pid, digest_error.c_str());
+                   "%s batch extent digest handling failed for pid %u: %s\n",
+                   operation_name, target->request->pid,
+                   digest_error.c_str());
       for (auto &remaining : prepared) {
-        (void)FailPreparedRestore(remaining.get(),
-                                  CUDA_ERROR_OPERATING_SYSTEM);
+        (void)FailPreparedTarget(remaining.get(),
+                                 CUDA_ERROR_OPERATING_SYSTEM);
       }
       return {.status = CUDA_ERROR_OPERATING_SYSTEM,
               .operation = target->operation,
@@ -1335,9 +1423,10 @@ CustomStorageResult DoCustomStorageRestoreBatch(
   for (const auto &metrics : transfer_result.metrics) {
     if (metrics.bytes >
         std::numeric_limits<size_t>::max() - transferred_bytes) {
-      std::fprintf(stderr, "restore batch transferred byte count overflow\n");
+      std::fprintf(stderr, "%s batch transferred byte count overflow\n",
+                   operation_name);
       for (auto &target : prepared) {
-        (void)FailPreparedRestore(target.get(), CUDA_ERROR_OPERATING_SYSTEM);
+        (void)FailPreparedTarget(target.get(), CUDA_ERROR_OPERATING_SYSTEM);
       }
       return {.status = CUDA_ERROR_OPERATING_SYSTEM,
               .operation = {},
@@ -1349,11 +1438,11 @@ CustomStorageResult DoCustomStorageRestoreBatch(
   }
   if (transferred_bytes != total_bytes) {
     std::fprintf(stderr,
-                 "restore batch transfer coverage mismatch: transferred=%zu "
+                 "%s batch transfer coverage mismatch: transferred=%zu "
                  "expected=%zu\n",
-                 transferred_bytes, total_bytes);
+                 operation_name, transferred_bytes, total_bytes);
     for (auto &target : prepared) {
-      (void)FailPreparedRestore(target.get(), CUDA_ERROR_OPERATING_SYSTEM);
+      (void)FailPreparedTarget(target.get(), CUDA_ERROR_OPERATING_SYSTEM);
     }
     return {.status = CUDA_ERROR_OPERATING_SYSTEM,
             .operation = {},
@@ -1361,14 +1450,13 @@ CustomStorageResult DoCustomStorageRestoreBatch(
   }
 
   const auto operation_complete_start = Clock::now();
-  // Completing a CUDA operation resumes its target. The request order follows
-  // the captured process tree (parents before children), so release the tree in
-  // reverse order. In particular, TRT-LLM ranks may reap their compile-worker
-  // children as soon as the rank resumes; completing the parent first would
-  // make the later child completion fail with CUDA_ERROR_OPERATING_SYSTEM.
+  // Restore completion resumes targets, so restore children before parents.
+  // Checkpoint completion keeps targets suspended and follows request order.
   for (size_t completed = 0; completed < prepared.size(); ++completed) {
-    auto &target = prepared[RestoreBatchCompletionIndex(completed,
-                                                         prepared.size())];
+    const size_t target_index =
+        checkpoint ? completed
+                   : RestoreBatchCompletionIndex(completed, prepared.size());
+    auto &target = prepared[target_index];
     const CUresult status =
         static_cast<CUresult>(daemon_protocol::FinishHandledOperation(
             true, CUDA_SUCCESS,
@@ -1376,11 +1464,17 @@ CustomStorageResult DoCustomStorageRestoreBatch(
               return static_cast<int32_t>(operation_complete(info->handle));
             },
             &target->operation));
+    std::fprintf(
+        stdout,
+        "{\"event\":\"cuda_custom_storage_batch_phase\","
+        "\"operation\":\"%s\",\"phase\":\"complete\",\"target_index\":%zu,"
+        "\"pid\":%u,\"cuda_status\":%d}\n",
+        operation_name, target_index, target->request->pid,
+        static_cast<int>(status));
     if (status != CUDA_SUCCESS) {
       std::fprintf(stderr,
-                   "restore batch CUDA operation completion failed for pid "
-                   "%u\n",
-                   target->request->pid);
+                   "%s batch CUDA operation completion failed for pid %u\n",
+                   operation_name, target->request->pid);
       for (auto &remaining : prepared) {
         (void)remaining->operation_contexts->ReleaseAll();
       }
@@ -1398,9 +1492,8 @@ CustomStorageResult DoCustomStorageRestoreBatch(
         target->operation_contexts->DetachDevices(), *target->request);
     if (status != CUDA_SUCCESS) {
       std::fprintf(stderr,
-                   "failed to retain restored target CUDA contexts for pid "
-                   "%u\n",
-                   target->request->pid);
+                   "failed to retain %s target CUDA contexts for pid %u\n",
+                   operation_name, target->request->pid);
       return {.status = status, .operation = target->operation, .fatal = true};
     }
   }
@@ -1418,7 +1511,7 @@ CustomStorageResult DoCustomStorageRestoreBatch(
                 (1024.0 * 1024.0 * 1024.0) / batch_transfer_seconds;
   std::fprintf(
       stdout,
-      "{\"event\":\"cuda_custom_storage_restore_batch\","
+      "{\"event\":\"cuda_custom_storage_%s_batch\","
       "\"schema_version\":1,\"targets\":%zu,\"transfer_jobs\":%zu,"
       "\"bytes\":%zu,\"duration_seconds\":%.6f,"
       "\"effective_gib_per_second\":%.6f,"
@@ -1439,7 +1532,8 @@ CustomStorageResult DoCustomStorageRestoreBatch(
       "\"operation_complete_service_seconds\":%.6f,"
       "\"context_adopt_service_seconds\":%.6f,"
       "\"context_lifecycle\":\"target_identity\"}\n",
-      prepared.size(), transfers.size(), total_bytes, batch_transfer_seconds,
+      operation_name, prepared.size(), transfers.size(), total_bytes,
+      batch_transfer_seconds,
       gib_per_second, options.buffer_count, options.chunk_bytes,
       total_pinned_bytes, storage_service_seconds, cuda_wait_service_seconds,
       transfer_result.orchestration_seconds, prepare_wall_seconds,
@@ -1591,7 +1685,9 @@ daemon_protocol::Response RunDaemonOperation(
         CUcheckpointUnlockArgs args{};
         response.cuda_status = cuCheckpointProcessUnlock(request.pid, &args);
       }
-    } else if (request.action == daemon_protocol::Action::kRestoreBatch) {
+    } else if (request.action == daemon_protocol::Action::kRestoreBatch ||
+               request.action ==
+                   daemon_protocol::Action::kCheckpointBatch) {
       const auto operation_start = Clock::now();
       if (max_operation_duration >
           Clock::time_point::max() - operation_start) {
@@ -1601,9 +1697,11 @@ daemon_protocol::Response RunDaemonOperation(
                      "configured operation duration exceeds the steady clock "
                      "range\n");
       } else {
-        const CustomStorageResult result = DoCustomStorageRestoreBatch(
-            request.targets, operation_start + max_operation_duration,
-            operation_start, operation_complete, persistent_contexts);
+        const CustomStorageResult result = DoCustomStorageBatch(
+            request.targets,
+            request.action == daemon_protocol::Action::kCheckpointBatch,
+            operation_start + max_operation_duration, operation_start,
+            operation_complete, persistent_contexts);
         response.cuda_status = result.status;
         if (result.operation.fatal() || result.fatal) {
           response.flags |= daemon_protocol::kResponseFatal;

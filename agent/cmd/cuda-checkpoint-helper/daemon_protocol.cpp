@@ -139,7 +139,8 @@ bool ParseRequest(const unsigned char *data, size_t size, Request *request,
   const auto backend = static_cast<Backend>(ReadU16(data + 10));
   if (action != Action::kHealth && action != Action::kCheckpoint &&
       action != Action::kRestore && action != Action::kLock &&
-      action != Action::kUnlock && action != Action::kRestoreBatch) {
+      action != Action::kUnlock && action != Action::kRestoreBatch &&
+      action != Action::kCheckpointBatch) {
     *error = "invalid request action";
     return false;
   }
@@ -181,50 +182,54 @@ bool ParseRequest(const unsigned char *data, size_t size, Request *request,
   const unsigned char *batch_payload =
       data + kRequestHeaderSize + device_map_size + storage_dir_size +
       cgroup_size + job_file_size + selected_devices_size;
-  if (action == Action::kRestoreBatch) {
+  if (action == Action::kRestoreBatch || action == Action::kCheckpointBatch) {
+    const bool checkpoint_batch = action == Action::kCheckpointBatch;
+    const Action target_action =
+        checkpoint_batch ? Action::kCheckpoint : Action::kRestore;
+    const std::string operation = checkpoint_batch ? "checkpoint" : "restore";
     if (parsed.backend != Backend::kPosix || parsed.pid < 2 ||
-        parsed.pid > kMaxRestoreBatchTargets ||
+        parsed.pid > kMaxBatchTargets ||
         parsed.transfer_buffer_count != 0 ||
         parsed.transfer_chunk_bytes != 0 ||
         parsed.expected_start_time_ticks != 0 ||
         !parsed.device_map.empty() || !parsed.storage_dir.empty() ||
         !parsed.expected_cgroup.empty() || !parsed.job_file.empty() ||
         !parsed.selected_devices.empty() || batch_size == 0) {
-      *error = "batch restore request has invalid outer arguments";
+      *error = "batch " + operation + " request has invalid outer arguments";
       return false;
     }
     size_t offset = 0;
     std::unordered_set<uint32_t> target_pids;
     std::unordered_set<std::string> storage_directories;
     while (offset < batch_size) {
-      if (parsed.targets.size() >= kMaxRestoreBatchTargets) {
-        *error = "batch restore target count exceeds the limit";
+      if (parsed.targets.size() >= kMaxBatchTargets) {
+        *error = "batch " + operation + " target count exceeds the limit";
         return false;
       }
       if (batch_size - offset < sizeof(uint32_t)) {
-        *error = "truncated batch restore entry length";
+        *error = "truncated batch " + operation + " entry length";
         return false;
       }
       const uint32_t entry_size = ReadU32(batch_payload + offset);
       offset += sizeof(uint32_t);
       if (entry_size < kRequestHeaderSize || entry_size > batch_size - offset) {
-        *error = "invalid batch restore entry size";
+        *error = "invalid batch " + operation + " entry size";
         return false;
       }
       if (ReadU16(batch_payload + offset + 8) !=
-          static_cast<uint16_t>(Action::kRestore)) {
-        *error = "batch restore entry is not a restore request";
+          static_cast<uint16_t>(target_action)) {
+        *error = "batch " + operation + " entry has the wrong action";
         return false;
       }
       Request target;
       std::string target_error;
       if (!ParseRequest(batch_payload + offset, entry_size, &target,
                         &target_error) ||
-          target.action != Action::kRestore ||
+          target.action != target_action ||
           target.backend != Backend::kPosix || !target.targets.empty() ||
           !target_pids.insert(target.pid).second ||
           !storage_directories.insert(target.storage_dir).second) {
-        *error = "invalid batch restore target: " + target_error;
+        *error = "invalid batch " + operation + " target: " + target_error;
         return false;
       }
       if (!parsed.targets.empty() &&
@@ -232,16 +237,17 @@ bool ParseRequest(const unsigned char *data, size_t size, Request *request,
                parsed.targets.front().transfer_buffer_count ||
            target.transfer_chunk_bytes !=
                parsed.targets.front().transfer_chunk_bytes)) {
-        *error = "batch restore targets use different transfer settings";
+        *error = "batch " + operation +
+                 " targets use different transfer settings";
         return false;
       }
       parsed.targets.push_back(std::move(target));
       offset += entry_size;
     }
     if (parsed.targets.size() < 2 ||
-        parsed.targets.size() > kMaxRestoreBatchTargets ||
+        parsed.targets.size() > kMaxBatchTargets ||
         parsed.targets.size() != parsed.pid) {
-      *error = "batch restore target count mismatch";
+      *error = "batch " + operation + " target count mismatch";
       return false;
     }
     *request = std::move(parsed);
@@ -315,17 +321,23 @@ bool ParseRequest(const unsigned char *data, size_t size, Request *request,
 bool EncodeRequest(const Request &request, std::vector<unsigned char> *data,
                    std::string *error) {
   std::vector<unsigned char> batch_payload;
-  if (request.action == Action::kRestoreBatch) {
+  if (request.action == Action::kRestoreBatch ||
+      request.action == Action::kCheckpointBatch) {
+    const bool checkpoint_batch =
+        request.action == Action::kCheckpointBatch;
+    const Action target_action =
+        checkpoint_batch ? Action::kCheckpoint : Action::kRestore;
+    const std::string operation = checkpoint_batch ? "checkpoint" : "restore";
     if (request.targets.empty() ||
-        request.targets.size() > kMaxRestoreBatchTargets ||
+        request.targets.size() > kMaxBatchTargets ||
         request.targets.size() != request.pid) {
-      *error = "batch restore request has invalid targets";
+      *error = "batch " + operation + " request has invalid targets";
       return false;
     }
     for (const auto &target : request.targets) {
-      if (target.action != Action::kRestore ||
+      if (target.action != target_action ||
           target.backend != Backend::kPosix || !target.targets.empty()) {
-        *error = "batch restore contains an invalid target";
+        *error = "batch " + operation + " contains an invalid target";
         return false;
       }
       std::vector<unsigned char> encoded;
@@ -660,7 +672,8 @@ bool ExecuteValidated(const Request &request, const std::string &proc_root,
     return true;
   }
   std::string identity_error;
-  if (request.action == Action::kRestoreBatch) {
+  if (request.action == Action::kRestoreBatch ||
+      request.action == Action::kCheckpointBatch) {
     for (const auto &target : request.targets) {
       if (!ValidateProcessIdentity(target, proc_root, &identity_error)) {
         response->cuda_status = 1;
@@ -1243,6 +1256,8 @@ const char *ActionName(Action action) {
     return "unlock";
   case Action::kRestoreBatch:
     return "restore-batch";
+  case Action::kCheckpointBatch:
+    return "checkpoint-batch";
   }
   return "unknown";
 }

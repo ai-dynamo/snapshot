@@ -23,8 +23,9 @@ const (
 )
 
 type recordingHelperActionRunner struct {
-	requests   []helperAction
-	batchCalls int
+	requests             []helperAction
+	restoreBatchCalls    int
+	checkpointBatchCalls int
 }
 
 func (r *recordingHelperActionRunner) run(_ context.Context, request helperAction, _ logr.Logger) error {
@@ -33,7 +34,13 @@ func (r *recordingHelperActionRunner) run(_ context.Context, request helperActio
 }
 
 func (r *recordingHelperActionRunner) runRestoreBatch(_ context.Context, requests []helperAction, _ logr.Logger) error {
-	r.batchCalls++
+	r.restoreBatchCalls++
+	r.requests = append(r.requests, requests...)
+	return nil
+}
+
+func (r *recordingHelperActionRunner) runCheckpointBatch(_ context.Context, requests []helperAction, _ logr.Logger) error {
+	r.checkpointBatchCalls++
 	r.requests = append(r.requests, requests...)
 	return nil
 }
@@ -90,6 +97,12 @@ func TestCheckpointProcessTreeUsesPerProcessGPUUUIDs(t *testing.T) {
 	}
 	if len(runner.requests) != 4 {
 		t.Fatalf("helper requests = %d, want 4", len(runner.requests))
+	}
+	if runner.checkpointBatchCalls != 1 {
+		t.Fatalf(
+			"checkpoint batch calls = %d, want 1",
+			runner.checkpointBatchCalls,
+		)
 	}
 	if got := runner.requests[2].GPUUUIDs; !reflect.DeepEqual(got, []string{testGPUA}) {
 		t.Fatalf("PID 101 target GPUs = %#v, want %s", got, testGPUA)
@@ -155,8 +168,8 @@ func TestRestoreProcessTreeUsesManifestGPUUUIDs(t *testing.T) {
 	if len(runner.requests) != 4 {
 		t.Fatalf("helper requests = %d, want 4", len(runner.requests))
 	}
-	if runner.batchCalls != 1 {
-		t.Fatalf("restore batch calls = %d, want 1", runner.batchCalls)
+	if runner.restoreBatchCalls != 1 {
+		t.Fatalf("restore batch calls = %d, want 1", runner.restoreBatchCalls)
 	}
 	if got := runner.requests[0]; got.PID != 303 || !reflect.DeepEqual(got.GPUUUIDs, []string{testGPUA}) {
 		t.Fatalf("first restore request = %#v, want PID 303 on %s", got, testGPUA)

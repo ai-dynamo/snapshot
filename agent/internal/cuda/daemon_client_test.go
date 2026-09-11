@@ -26,7 +26,7 @@ import (
 )
 
 func TestDaemonRequestMatchesSharedGoldenFixture(t *testing.T) {
-	encodedFixture, err := os.ReadFile(filepath.Join("..", "..", "cmd", "cuda-checkpoint-helper", "testdata", "daemon_request_v7.hex"))
+	encodedFixture, err := os.ReadFile(filepath.Join("..", "..", "cmd", "cuda-checkpoint-helper", "testdata", "daemon_request_v8.hex"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,26 @@ func TestDaemonRequestMatchesSharedGoldenFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(got, want) {
-		t.Fatalf("daemonRequest() bytes differ from shared v7 fixture\n got: %x\nwant: %x", got, want)
+		t.Fatalf("daemonRequest() bytes differ from shared v8 fixture\n got: %x\nwant: %x", got, want)
+	}
+}
+
+func TestValidateCUDAOperationBudgetAllowsMultiTargetCheckpointBatch(t *testing.T) {
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		4*daemonRPCTimeout,
+	)
+	defer cancel()
+	if err := validateCUDAOperationBudget(
+		ctx,
+		actionCheckpoint,
+		2,
+		true,
+	); err != nil {
+		t.Fatalf(
+			"validateCUDAOperationBudget() error = %v, want two locks plus one checkpoint batch to fit",
+			err,
+		)
 	}
 }
 
@@ -195,62 +214,92 @@ func TestCommandRunnerSendsDaemonOperations(t *testing.T) {
 	}
 }
 
-func TestCommandRunnerSendsOneRestoreBatch(t *testing.T) {
+func TestCommandRunnerSendsOneBatch(t *testing.T) {
 	transfer := types.CUDATransferSettings{BufferCount: 4, ChunkBytes: 64 * 1024 * 1024}
-	requests := []helperAction{
-		{PID: 41, Action: actionRestore, StorageMode: types.CUDAStorageModePOSIX,
-			StorageDir: "/checkpoints/process-41", GPUUUIDs: []string{"GPU-12345678-1234-1234-1234-123456789abc"},
-			Transfer: transfer, Identity: testDaemonIdentity(41)},
-		{PID: 42, Action: actionRestore, StorageMode: types.CUDAStorageModePOSIX,
-			StorageDir: "/checkpoints/process-42", GPUUUIDs: []string{"GPU-22345678-1234-1234-1234-123456789abc"},
-			Transfer: transfer, Identity: testDaemonIdentity(42)},
-	}
-	packetChannel := make(chan []byte, 1)
-	withOperationServer(t, func(conn *net.UnixConn) {
-		packet := make([]byte, daemonMaxRequest)
-		n, err := conn.Read(packet)
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		packetChannel <- packet[:n]
-		_, _ = conn.Write(daemonTestResponse(0, 0))
-	})
-	if err := (commandHelperActionRunner{}).runRestoreBatch(context.Background(), requests, logr.Discard()); err != nil {
-		t.Fatalf("runRestoreBatch() error = %v", err)
-	}
-	packet := <-packetChannel
-	if got := binary.LittleEndian.Uint16(packet[8:10]); got != daemonActionRestoreBatch {
-		t.Fatalf("action = %d, want restore-batch", got)
-	}
-	if got := binary.LittleEndian.Uint32(packet[12:16]); got != 2 {
-		t.Fatalf("target count = %d, want 2", got)
-	}
-	payloadSize := int(binary.LittleEndian.Uint32(packet[56:60]))
-	if payloadSize != len(packet)-daemonRequestHeader {
-		t.Fatalf("batch payload size = %d, packet payload = %d", payloadSize, len(packet)-daemonRequestHeader)
-	}
-	payload := packet[daemonRequestHeader:]
-	for index, wantPID := range []uint32{41, 42} {
-		if len(payload) < 4 {
-			t.Fatalf("target %d length is truncated", index)
-		}
-		entrySize := int(binary.LittleEndian.Uint32(payload[:4]))
-		payload = payload[4:]
-		if entrySize < daemonRequestHeader || entrySize > len(payload) {
-			t.Fatalf("target %d size = %d", index, entrySize)
-		}
-		entry := payload[:entrySize]
-		if got := binary.LittleEndian.Uint16(entry[8:10]); got != daemonActionRestore {
-			t.Fatalf("target %d action = %d, want restore", index, got)
-		}
-		if got := binary.LittleEndian.Uint32(entry[12:16]); got != wantPID {
-			t.Fatalf("target %d PID = %d, want %d", index, got, wantPID)
-		}
-		payload = payload[entrySize:]
-	}
-	if len(payload) != 0 {
-		t.Fatalf("trailing batch payload bytes = %d", len(payload))
+	for _, test := range []struct {
+		name         string
+		action       string
+		outerAction  uint16
+		targetAction uint16
+		run          func(commandHelperActionRunner, context.Context, []helperAction, logr.Logger) error
+	}{
+		{
+			name:         "restore",
+			action:       actionRestore,
+			outerAction:  daemonActionRestoreBatch,
+			targetAction: daemonActionRestore,
+			run:          commandHelperActionRunner.runRestoreBatch,
+		},
+		{
+			name:         "checkpoint",
+			action:       actionCheckpoint,
+			outerAction:  daemonActionCheckpointBatch,
+			targetAction: daemonActionCheckpoint,
+			run:          commandHelperActionRunner.runCheckpointBatch,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			requests := []helperAction{
+				{PID: 41, Action: test.action, StorageMode: types.CUDAStorageModePOSIX,
+					StorageDir: "/checkpoints/process-41", GPUUUIDs: []string{"GPU-12345678-1234-1234-1234-123456789abc"},
+					Transfer: transfer, Identity: testDaemonIdentity(41)},
+				{PID: 42, Action: test.action, StorageMode: types.CUDAStorageModePOSIX,
+					StorageDir: "/checkpoints/process-42", GPUUUIDs: []string{"GPU-22345678-1234-1234-1234-123456789abc"},
+					Transfer: transfer, Identity: testDaemonIdentity(42)},
+			}
+			packetChannel := make(chan []byte, 1)
+			withOperationServer(t, func(conn *net.UnixConn) {
+				packet := make([]byte, daemonMaxRequest)
+				n, err := conn.Read(packet)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				packetChannel <- packet[:n]
+				_, _ = conn.Write(daemonTestResponse(0, 0))
+			})
+			if err := test.run(
+				commandHelperActionRunner{},
+				context.Background(),
+				requests,
+				logr.Discard(),
+			); err != nil {
+				t.Fatalf("run batch() error = %v", err)
+			}
+			packet := <-packetChannel
+			if got := binary.LittleEndian.Uint16(packet[8:10]); got != test.outerAction {
+				t.Fatalf("action = %d, want %d", got, test.outerAction)
+			}
+			if got := binary.LittleEndian.Uint32(packet[12:16]); got != 2 {
+				t.Fatalf("target count = %d, want 2", got)
+			}
+			payloadSize := int(binary.LittleEndian.Uint32(packet[56:60]))
+			if payloadSize != len(packet)-daemonRequestHeader {
+				t.Fatalf("batch payload size = %d, packet payload = %d", payloadSize, len(packet)-daemonRequestHeader)
+			}
+			payload := packet[daemonRequestHeader:]
+			for index, wantPID := range []uint32{41, 42} {
+				if len(payload) < 4 {
+					t.Fatalf("target %d length is truncated", index)
+				}
+				entrySize := int(binary.LittleEndian.Uint32(payload[:4]))
+				payload = payload[4:]
+				if entrySize < daemonRequestHeader || entrySize > len(payload) {
+					t.Fatalf("target %d size = %d", index, entrySize)
+				}
+				entry := payload[:entrySize]
+				if got := binary.LittleEndian.Uint16(entry[8:10]); got != test.targetAction {
+					t.Fatalf("target %d action = %d, want %d", index, got, test.targetAction)
+				}
+				if got := binary.LittleEndian.Uint32(entry[12:16]); got != wantPID {
+					t.Fatalf("target %d PID = %d, want %d", index, got, wantPID)
+				}
+				payload = payload[entrySize:]
+			}
+			if len(payload) != 0 {
+				t.Fatalf("trailing batch payload bytes = %d", len(payload))
+			}
+		})
 	}
 }
 

@@ -77,7 +77,7 @@ COPY cmd/cuda-checkpoint-helper/daemon_server.h ./cmd/cuda-checkpoint-helper/dae
 COPY cmd/cuda-checkpoint-helper/daemon_protocol.cpp ./cmd/cuda-checkpoint-helper/daemon_protocol.cpp
 COPY cmd/cuda-checkpoint-helper/daemon_protocol.h ./cmd/cuda-checkpoint-helper/daemon_protocol.h
 COPY cmd/cuda-checkpoint-helper/daemon_protocol_test.cpp ./cmd/cuda-checkpoint-helper/daemon_protocol_test.cpp
-COPY cmd/cuda-checkpoint-helper/testdata/daemon_request_v7.hex ./cmd/cuda-checkpoint-helper/testdata/daemon_request_v7.hex
+COPY cmd/cuda-checkpoint-helper/testdata/daemon_request_v8.hex ./cmd/cuda-checkpoint-helper/testdata/daemon_request_v8.hex
 COPY cmd/cuda-checkpoint-helper/storage_manifest.cpp ./cmd/cuda-checkpoint-helper/storage_manifest.cpp
 COPY cmd/cuda-checkpoint-helper/storage_manifest.h ./cmd/cuda-checkpoint-helper/storage_manifest.h
 COPY cmd/cuda-checkpoint-helper/storage_manifest_test.cpp ./cmd/cuda-checkpoint-helper/storage_manifest_test.cpp
@@ -349,7 +349,7 @@ COPY cmd/cuda-checkpoint-helper/daemon_server.h ./cmd/cuda-checkpoint-helper/dae
 COPY cmd/cuda-checkpoint-helper/daemon_protocol.cpp ./cmd/cuda-checkpoint-helper/daemon_protocol.cpp
 COPY cmd/cuda-checkpoint-helper/daemon_protocol.h ./cmd/cuda-checkpoint-helper/daemon_protocol.h
 COPY cmd/cuda-checkpoint-helper/daemon_protocol_test.cpp ./cmd/cuda-checkpoint-helper/daemon_protocol_test.cpp
-COPY cmd/cuda-checkpoint-helper/testdata/daemon_request_v7.hex ./cmd/cuda-checkpoint-helper/testdata/daemon_request_v7.hex
+COPY cmd/cuda-checkpoint-helper/testdata/daemon_request_v8.hex ./cmd/cuda-checkpoint-helper/testdata/daemon_request_v8.hex
 COPY cmd/cuda-checkpoint-helper/storage_manifest.cpp ./cmd/cuda-checkpoint-helper/storage_manifest.cpp
 COPY cmd/cuda-checkpoint-helper/storage_manifest.h ./cmd/cuda-checkpoint-helper/storage_manifest.h
 COPY cmd/cuda-checkpoint-helper/storage_manifest_test.cpp ./cmd/cuda-checkpoint-helper/storage_manifest_test.cpp

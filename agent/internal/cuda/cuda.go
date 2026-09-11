@@ -97,7 +97,14 @@ func LockAndCheckpointProcessTreeValidated(
 	transferSettings types.CUDATransferSettings,
 	log logr.Logger,
 ) (CheckpointPhaseTimings, error) {
-	if err := validateCUDAOperationBudget(ctx, actionCheckpoint, len(processes), false); err != nil {
+	batchedCheckpoint := storageMode == types.CUDAStorageModePOSIX &&
+		len(processes) > 1
+	if err := validateCUDAOperationBudget(
+		ctx,
+		actionCheckpoint,
+		len(processes),
+		batchedCheckpoint,
+	); err != nil {
 		return CheckpointPhaseTimings{}, &checkpointOperationError{
 			err:                err,
 			targetMayBeMutated: false,
@@ -529,6 +536,7 @@ func lockAndCheckpointProcessTree(
 		locked++
 	}
 
+	checkpointRequests := make([]helperAction, 0, len(cudaPIDs))
 	for index, pid := range cudaPIDs {
 		processDir := ""
 		var selectedDevices []string
@@ -536,9 +544,42 @@ func lockAndCheckpointProcessTree(
 			processDir = customStorageProcessDir(checkpointDir, targetIDs[index])
 			selectedDevices = processGPUUUIDs[pid]
 		}
-		if err := runner.run(ctx, helperAction{PID: pid, Action: actionCheckpoint, StorageMode: storageMode, StorageDir: processDir, JobFile: jobFile, GPUUUIDs: selectedDevices, Transfer: transferSettings}, log); err != nil {
+		checkpointRequests = append(checkpointRequests, helperAction{
+			PID:         pid,
+			Action:      actionCheckpoint,
+			StorageMode: storageMode,
+			StorageDir:  processDir,
+			JobFile:     jobFile,
+			GPUUUIDs:    selectedDevices,
+			Transfer:    transferSettings,
+		})
+	}
+	if storageMode == types.CUDAStorageModePOSIX && len(checkpointRequests) > 1 {
+		batchRunner, ok := runner.(helperCheckpointBatchRunner)
+		if !ok {
+			timings.TotalDuration = time.Since(start)
+			return timings, &checkpointOperationError{
+				err:                errors.New("CUDA helper runner does not support batch checkpoint"),
+				targetMayBeMutated: true,
+			}
+		}
+		if err := batchRunner.runCheckpointBatch(
+			ctx,
+			checkpointRequests,
+			log,
+		); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, &checkpointOperationError{err: err, targetMayBeMutated: true}
+		}
+	} else {
+		for _, request := range checkpointRequests {
+			if err := runner.run(ctx, request, log); err != nil {
+				timings.TotalDuration = time.Since(start)
+				return timings, &checkpointOperationError{
+					err:                err,
+					targetMayBeMutated: true,
+				}
+			}
 		}
 	}
 	if err := refreshJobFileArtifact(jobFile, checkpointDir); err != nil {
