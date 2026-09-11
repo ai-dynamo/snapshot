@@ -423,11 +423,11 @@ list_allocations(struct allocation_list* list)
   return 0;
 }
 
-/* Every supported exportable creator allocation needs content preservation. */
+/* Private VMM allocations and their handles remain owned by native CUDA. */
 static bool
 needs_allocation_content(const struct allocation* allocation)
 {
-  return allocation->creator &&
+  return allocation->shared && allocation->creator &&
          allocation->properties.type == CU_MEM_ALLOCATION_TYPE_PINNED;
 }
 
@@ -467,8 +467,6 @@ inspect_records(uint32_t* count, const char** error)
       record->flags |= CUINTERPOSE_APPLICATION_HANDLE_LIVE;
     if (needs_allocation_content(allocation))
       record->flags |= CUINTERPOSE_ALLOCATION_CONTENT;
-    if (allocation->creator && !allocation->shared)
-      record->flags |= CUINTERPOSE_CONTENT_ONLY;
     memcpy(record->allocation_id, allocation->id, sizeof(record->allocation_id));
     record->allocation_size = allocation->size;
     record->allocation_type = allocation->properties.type;
@@ -511,7 +509,7 @@ inspect_records(uint32_t* count, const char** error)
 }
 
 /*
- * SAVE_ALLOCATIONS first makes sure every creator allocation has a driver
+ * SAVE_ALLOCATIONS first makes sure every shared creator allocation has a driver
  * handle to copy from. A creator that released its handles but still has a
  * mapping gets one back through cuMemRetainAllocationHandle.
  */
@@ -536,7 +534,7 @@ retain_creator_handles_for_save(const char** error)
     size_t range;
     CUresult result = CUDA_ERROR_INVALID_VALUE;
 
-    if (!allocation->creator || allocation->driver != 0)
+    if (!allocation->shared || !allocation->creator || allocation->driver != 0)
       continue;
     if (enter_allocation_context(allocation, &scope) != 0) {
       free(list.items);
@@ -682,6 +680,8 @@ prepare(const char** error)
     struct cuinterpose_context_scope scope;
     size_t range;
 
+    if (!allocation->shared)
+      continue;
     if (needs_allocation_content(allocation) && !allocation->host_checkpointed) {
       free(list.items);
       *error = "a creator allocation was not saved to its host carrier";
