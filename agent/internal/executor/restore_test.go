@@ -55,7 +55,7 @@ func TestInspectRestoreUsesContainerIDWhenProvided(t *testing.T) {
 		"content-uid-123",
 		"main",
 		types.CRIUDumpManifest{},
-		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
+		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil, nil),
 		types.OverlayManifest{},
 	)
 	rt := &restoreFakeRuntime{}
@@ -89,7 +89,7 @@ func TestInspectRestoreUsesDestinationNameForPodLookup(t *testing.T) {
 		"content-uid-123",
 		"main",
 		types.CRIUDumpManifest{},
-		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
+		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil, nil),
 		types.OverlayManifest{},
 	)
 	rt := &restoreFakeRuntime{}
@@ -131,7 +131,7 @@ func TestValidateRestoreManifest(t *testing.T) {
 		"content-uid-123",
 		"main",
 		types.CRIUDumpManifest{},
-		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "team-a", "10.0.0.11", nil),
+		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "team-a", "10.0.0.11", nil, nil),
 		types.OverlayManifest{},
 	)
 
@@ -170,7 +170,7 @@ func TestRestoreInNamespaceRejectsMultiGPUCheckpointWithoutLaunchJobState(t *tes
 		"content-uid-123",
 		"main",
 		types.CRIUDumpManifest{},
-		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
+		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil, nil),
 		types.OverlayManifest{},
 	)
 	manifest.CUDA = types.NewCUDAManifest([]int{42, 43}, []string{"GPU-aaa", "GPU-bbb"})
