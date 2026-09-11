@@ -31,7 +31,9 @@
 #include "interpose.h"
 
 #include <errno.h>
+#include <dirent.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -44,7 +46,9 @@
 #include <unistd.h>
 
 #include "export.h"
+#include "context.h"
 #include "export_cache.h"
+#include "host_carrier.h"
 #include "posix.h"
 #include "protocol.h"
 #include "symbols.h"
@@ -73,7 +77,6 @@ typedef CUresult(CUDAAPI* export_fn)(
     void*, CUmemGenericAllocationHandle, CUmemAllocationHandleType, unsigned long long);
 typedef CUresult(CUDAAPI* import_fn)(CUmemGenericAllocationHandle*, void*, CUmemAllocationHandleType);
 typedef CUresult(CUDAAPI* properties_fn)(CUmemAllocationProp*, CUmemGenericAllocationHandle);
-typedef CUresult(CUDAAPI* context_get_fn)(CUcontext*);
 
 struct allocation {
   uint8_t id[CUINTERPOSE_ALLOCATION_ID_SIZE];
@@ -87,6 +90,10 @@ struct allocation {
   bool shared; /* a ticket was issued (creator) or imported (importer) */
   unsigned live_handles;
   unsigned live_mappings;
+  /* Checkpoint state. */
+  bool checkpointed; /* PREPARE_UNICAST ran: mappings are unmapped and driver handles released */
+  void* host_carrier; /* creator: pinned host copy of the contents while checkpointed */
+  bool host_checkpointed; /* creator: the device backing was freed after copying to host */
 };
 
 struct handle {
@@ -102,10 +109,25 @@ struct mapping {
   CUmemAccessDesc access[CUINTERPOSE_MAX_ACCESS];
   size_t access_count;
   bool access_unknown; /* a driver access call failed part-way; replay cannot be trusted */
+  bool checkpointed; /* unmapped for the checkpoint; to be mapped again on restore */
 };
 
+/*
+ * Where this process is in the checkpoint/restore lifecycle. The coordinator
+ * drives the transitions; while not ACTIVE every tracked entry point answers
+ * CUDA_ERROR_NOT_READY, which is safe only because the workload is parked
+ * (see docs/reference/cuinterpose.md, "Quiescence").
+ */
 enum phase {
   PHASE_ACTIVE,
+  PHASE_MULTICAST_PREPARED,
+  PHASE_ALLOCATIONS_SAVED,
+  PHASE_PREPARED, /* PREPARE_UNICAST done: nothing shared is mapped or held */
+  PHASE_UNICAST_CREATORS_RESTORED,
+  PHASE_UNICAST_RESTORED,
+  PHASE_MULTICAST_CREATED,
+  PHASE_MULTICAST_IMPORTED,
+  PHASE_MULTICAST_JOINED,
   PHASE_FAILED,
 };
 
@@ -125,6 +147,9 @@ static uint64_t next_logical_handle = 1;
 static _Atomic uint32_t live_raw_imports;
 static _Atomic uint32_t unsupported_exportable_creations;
 static _Atomic bool fabric_passthrough_logged;
+
+static uint8_t phase_code(void);
+static int request_export(const struct cuinterpose_posix_ticket* ticket, int* output, char* error, size_t error_size);
 
 static void
 set_failure(const char* message)
@@ -210,7 +235,7 @@ settle_allocation(struct allocation* allocation)
     result = release != NULL ? release(allocation->driver) : cuinterpose_unavailable();
     allocation->driver = 0;
   }
-  if (allocation->live_handles == 0 && allocation->live_mappings == 0) {
+  if (allocation->live_handles == 0 && allocation->live_mappings == 0 && !allocation->checkpointed) {
     /* No local reference is left, so any ticket for this allocation is dead. */
     cuinterpose_export_cache_drop(allocation->id);
     table_remove(&allocations, key_bytes(allocation->id));
@@ -219,12 +244,18 @@ settle_allocation(struct allocation* allocation)
   return result;
 }
 
-static int
-current_context(CUcontext* context)
+/*
+ * The driver does not need a context for cuMemCreate or
+ * cuMemImportFromShareableHandle, so neither may the shim: an allocation
+ * without a context adopts the one current at its first map or export, and if
+ * it never gets one the lifecycle code falls back to the primary context of
+ * the allocation's device (context.c).
+ */
+static void
+adopt_context(struct allocation* allocation)
 {
-  context_get_fn get_current = (context_get_fn)cuinterpose_lookup_real_symbol("cuCtxGetCurrent");
-
-  return get_current != NULL && get_current(context) == CUDA_SUCCESS && *context != NULL ? 0 : -1;
+  if (allocation->context == NULL)
+    cuinterpose_capture_context(&allocation->context);
 }
 
 /*
@@ -290,7 +321,7 @@ cuinterpose_debug_stats(struct cuinterpose_debug_stats* stats)
   stats->mappings = mappings.count;
   stats->live_raw_imports = atomic_load(&live_raw_imports);
   stats->unsupported_exportable_creations = atomic_load(&unsupported_exportable_creations);
-  stats->phase = current_phase == PHASE_ACTIVE ? CUINTERPOSE_PHASE_ACTIVE : CUINTERPOSE_PHASE_FAILED;
+  stats->phase = phase_code();
   pthread_mutex_unlock(&state_lock);
   stats->cached_exports = cuinterpose_export_cache_count();
 }
@@ -302,7 +333,560 @@ cuinterpose_debug_stats(struct cuinterpose_debug_stats* stats)
 static uint8_t
 phase_code(void)
 {
-  return current_phase == PHASE_ACTIVE ? CUINTERPOSE_PHASE_ACTIVE : CUINTERPOSE_PHASE_FAILED;
+  switch (current_phase) {
+    case PHASE_ACTIVE:
+      return CUINTERPOSE_PHASE_ACTIVE;
+    case PHASE_MULTICAST_PREPARED:
+    case PHASE_ALLOCATIONS_SAVED:
+      return CUINTERPOSE_PHASE_PREPARING;
+    case PHASE_PREPARED:
+      return CUINTERPOSE_PHASE_PREPARED;
+    case PHASE_FAILED:
+      return CUINTERPOSE_PHASE_FAILED;
+    default:
+      return CUINTERPOSE_PHASE_RESTORING;
+  }
+}
+
+
+/* ------------------------------------------------------------------------- */
+/* Checkpoint and restore of tracked allocations. Caller holds state_lock.    */
+/*                                                                            */
+/* The sequence, driven by the coordinator across every process at once:      */
+/*   PREPARE_MULTICAST  dismantle multicast state (implemented in multicast.c) */
+/*   SAVE_ALLOCATIONS   retain creator handles, copy contents to host memory   */
+/*   PREPARE_UNICAST    unmap shared memory, release every unicast handle       */
+/*   (native CUDA checkpoint, CRIU dump; later CRIU restore, native restore)  */
+/*   LOAD_ALLOCATIONS   new device memory, H2D, creator mappings and exports   */
+/*   RESTORE_UNICAST    fetch fresh descriptors from creators, import, remap   */
+/*   RESTORE_MULTICAST* (no multicast state in this layer)                    */
+/* ------------------------------------------------------------------------- */
+
+static int
+enter_allocation_context(const struct allocation* allocation, struct cuinterpose_context_scope* scope)
+{
+  CUdevice fallback = allocation->properties.location.type == CU_MEM_LOCATION_TYPE_DEVICE
+                          ? (CUdevice)allocation->properties.location.id
+                          : CUINTERPOSE_NO_DEVICE;
+
+  return cuinterpose_enter_context(allocation->context, fallback, scope);
+}
+
+static int
+leave_context(struct cuinterpose_context_scope* scope)
+{
+  return cuinterpose_leave_context(scope);
+}
+
+struct allocation_list {
+  struct allocation** items;
+  size_t count;
+};
+
+static int
+collect_allocation(struct key key, void* value, void* arg)
+{
+  struct allocation_list* list = arg;
+
+  (void)key;
+  list->items[list->count++] = value;
+  return 0;
+}
+
+/* Snapshot of the allocation table as an array, so callers can mutate the
+ * table while walking. Returns -1 on allocation failure. */
+static int
+list_allocations(struct allocation_list* list)
+{
+  list->count = 0;
+  list->items = calloc(allocations.count == 0 ? 1 : allocations.count, sizeof(*list->items));
+  if (list->items == NULL)
+    return -1;
+  table_each(&allocations, collect_allocation, list);
+  return 0;
+}
+
+/* Private VMM allocations and their handles remain owned by native CUDA. */
+static bool
+needs_allocation_content(const struct allocation* allocation)
+{
+  return allocation->shared && allocation->creator &&
+         allocation->properties.requestedHandleTypes != 0 &&
+         allocation->properties.type == CU_MEM_ALLOCATION_TYPE_PINNED &&
+         allocation->properties.location.type == CU_MEM_LOCATION_TYPE_DEVICE;
+}
+
+static struct cuinterpose_record*
+inspect_records(uint32_t* count, const char** error)
+{
+  struct cuinterpose_record* records;
+  struct cuinterpose_record* record;
+  struct allocation_list list;
+  size_t total;
+  size_t index;
+
+  *error = NULL;
+  total = allocations.count + mappings.count;
+  if (total > CUINTERPOSE_MAX_RECORDS) {
+    *error = "too many tracked records for one participant";
+    return NULL;
+  }
+  if (list_allocations(&list) != 0) {
+    *error = "cannot allocate inspect records";
+    return NULL;
+  }
+  records = calloc(total == 0 ? 1 : total, sizeof(*records));
+  if (records == NULL) {
+    free(list.items);
+    *error = "cannot allocate inspect records";
+    return NULL;
+  }
+  record = records;
+  for (index = 0; index < list.count; index++) {
+    const struct allocation* allocation = list.items[index];
+
+    record->kind = CUINTERPOSE_ALLOCATION;
+    if (allocation->creator)
+      record->flags |= CUINTERPOSE_CREATOR;
+    if (allocation->live_handles != 0)
+      record->flags |= CUINTERPOSE_APPLICATION_HANDLE_LIVE;
+    if (needs_allocation_content(allocation))
+      record->flags |= CUINTERPOSE_ALLOCATION_CONTENT;
+    memcpy(record->allocation_id, allocation->id, sizeof(record->allocation_id));
+    record->allocation_size = allocation->size;
+    record->allocation_type = allocation->properties.type;
+    record->requested_handle_types = allocation->properties.requestedHandleTypes;
+    record->allocation_location_type = allocation->properties.location.type;
+    record->allocation_location_id = allocation->properties.location.id;
+    record->application_handle_count = allocation->live_handles;
+    record++;
+  }
+  free(list.items);
+  for (index = 0; index < mappings.count; index++) {
+    const struct mapping* mapping = mappings.items[index].value;
+    size_t access;
+
+    if (mapping->access_unknown) {
+      free(records);
+      *error = "a mapping's access state is unknown after a failed cuMemSetAccess";
+      return NULL;
+    }
+    record->kind = CUINTERPOSE_MAPPING;
+    record->flags = mapping->allocation->creator ? CUINTERPOSE_CREATOR : 0;
+    memcpy(record->allocation_id, mapping->allocation->id, sizeof(record->allocation_id));
+    record->address = mapping->address;
+    record->size = mapping->size;
+    record->offset = mapping->offset;
+    record->access_count = (uint32_t)mapping->access_count;
+    for (access = 0; access < mapping->access_count; access++) {
+      record->access[access].location_type = mapping->access[access].location.type;
+      record->access[access].location_id = mapping->access[access].location.id;
+      record->access[access].flags = mapping->access[access].flags;
+    }
+    record++;
+  }
+  *count = (uint32_t)total;
+  return records;
+}
+
+/*
+ * SAVE_ALLOCATIONS first makes sure every shared creator allocation has a driver
+ * handle to copy from. A creator that released its handles but still has a
+ * mapping gets one back through cuMemRetainAllocationHandle.
+ */
+static int
+retain_creator_handles_for_save(const char** error)
+{
+  retain_fn retain = (retain_fn)cuinterpose_lookup_real_symbol("cuMemRetainAllocationHandle");
+  struct allocation_list list;
+  size_t index;
+
+  if (retain == NULL) {
+    *error = "cuMemRetainAllocationHandle is unavailable";
+    return -1;
+  }
+  if (list_allocations(&list) != 0) {
+    *error = "cannot allocate";
+    return -1;
+  }
+  for (index = 0; index < list.count; index++) {
+    struct allocation* allocation = list.items[index];
+    struct cuinterpose_context_scope scope;
+    size_t range;
+    CUresult result = CUDA_ERROR_INVALID_VALUE;
+
+    if (!allocation->shared || !allocation->creator || allocation->driver != 0)
+      continue;
+    if (enter_allocation_context(allocation, &scope) != 0) {
+      free(list.items);
+      *error = "cannot enter the allocation's CUDA context";
+      return -1;
+    }
+    for (range = 0; range < mappings.count; range++) {
+      const struct mapping* mapping = mappings.items[range].value;
+      if (mapping->allocation == allocation) {
+        result = retain(&allocation->driver, (void*)(uintptr_t)mapping->address);
+        break;
+      }
+    }
+    if (leave_context(&scope) != 0 || result != CUDA_SUCCESS) {
+      free(list.items);
+      *error = "cannot retain a handle for a creator allocation";
+      return -1;
+    }
+  }
+  free(list.items);
+  return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Allocation content through host carriers                                  */
+/* ------------------------------------------------------------------------- */
+
+/* Build the concrete host-carrier module's batch from the tracked allocation
+ * table. Eligibility and checkpoint state remain lifecycle policy here. */
+static int
+collect_host_carrier_allocations(
+    bool restoring, struct allocation_list* selected,
+    struct cuinterpose_host_carrier_allocation** output, const char** error)
+{
+  struct cuinterpose_host_carrier_allocation* carriers;
+  size_t kept = 0;
+  size_t index;
+
+  *output = NULL;
+  if (list_allocations(selected) != 0) {
+    *error = "cannot allocate";
+    return -1;
+  }
+  for (index = 0; index < selected->count; index++) {
+    struct allocation* allocation = selected->items[index];
+    bool wanted = restoring ? allocation->host_checkpointed
+                            : needs_allocation_content(allocation) && allocation->host_carrier == NULL;
+
+    if (wanted)
+      selected->items[kept++] = allocation;
+  }
+  selected->count = kept;
+  carriers = calloc(kept == 0 ? 1 : kept, sizeof(*carriers));
+  if (carriers == NULL) {
+    free(selected->items);
+    selected->items = NULL;
+    selected->count = 0;
+    *error = "cannot allocate";
+    return -1;
+  }
+  for (index = 0; index < kept; index++) {
+    struct allocation* allocation = selected->items[index];
+
+    carriers[index].context = allocation->context;
+    carriers[index].properties = allocation->properties;
+    carriers[index].size = allocation->size;
+    carriers[index].device_handle = &allocation->driver;
+    carriers[index].host_address = &allocation->host_carrier;
+  }
+  *output = carriers;
+  return 0;
+}
+
+static int
+save_allocation_contents(uint64_t* bytes, uint32_t* copy_us, const char** error)
+{
+  struct allocation_list selected = {0};
+  struct cuinterpose_host_carrier_allocation* carriers = NULL;
+  size_t index;
+  int result;
+
+  if (collect_host_carrier_allocations(false, &selected, &carriers, error) != 0)
+    return -1;
+  result = cuinterpose_host_carrier_save(carriers, selected.count, bytes, copy_us, error);
+  if (result == 0) {
+    for (index = 0; index < selected.count; index++)
+      selected.items[index]->host_checkpointed = true;
+  }
+  free(carriers);
+  free(selected.items);
+  return result;
+}
+
+static int
+load_allocation_contents(uint64_t* bytes, uint32_t* copy_us, const char** error)
+{
+  struct allocation_list selected = {0};
+  struct cuinterpose_host_carrier_allocation* carriers = NULL;
+  size_t index;
+  int result;
+
+  if (collect_host_carrier_allocations(true, &selected, &carriers, error) != 0)
+    return -1;
+  result = cuinterpose_host_carrier_load(carriers, selected.count, bytes, copy_us, error);
+  if (result == 0) {
+    for (index = 0; index < selected.count; index++)
+      selected.items[index]->host_checkpointed = false;
+  }
+  free(carriers);
+  free(selected.items);
+  return result;
+}
+
+/* PREPARE_UNICAST: leave nothing shared mapped or held, so the native
+ * checkpoint sees only private memory. The records stay for restore. */
+static int
+prepare(const char** error)
+{
+  release_fn release = (release_fn)cuinterpose_lookup_real_symbol("cuMemRelease");
+  unmap_fn unmap = (unmap_fn)cuinterpose_lookup_real_symbol("cuMemUnmap");
+  struct allocation_list list;
+  size_t index;
+
+  if (release == NULL || unmap == NULL) {
+    *error = "driver symbols are unavailable";
+    return -1;
+  }
+  for (index = 0; index < mappings.count; index++) {
+    const struct mapping* mapping = mappings.items[index].value;
+    if (mapping->access_unknown) {
+      *error = "a mapping's access state is unknown after a failed cuMemSetAccess";
+      return -1;
+    }
+  }
+  if (list_allocations(&list) != 0) {
+    *error = "cannot allocate";
+    return -1;
+  }
+  /* Peers must not fetch descriptors that are about to be invalidated. */
+  cuinterpose_export_cache_quiesce();
+  for (index = 0; index < list.count; index++) {
+    struct allocation* allocation = list.items[index];
+    struct cuinterpose_context_scope scope;
+    size_t range;
+
+    if (!allocation->shared)
+      continue;
+    if (needs_allocation_content(allocation) && !allocation->host_checkpointed) {
+      free(list.items);
+      *error = "a creator allocation was not saved to its host carrier";
+      return -1;
+    }
+    if (enter_allocation_context(allocation, &scope) != 0) {
+      free(list.items);
+      *error = "cannot enter the allocation's CUDA context";
+      return -1;
+    }
+    for (range = 0; range < mappings.count; range++) {
+      struct mapping* mapping = mappings.items[range].value;
+      if (mapping->allocation != allocation || mapping->checkpointed)
+        continue;
+      if (unmap(mapping->address, mapping->size) != CUDA_SUCCESS) {
+        (void)leave_context(&scope);
+        free(list.items);
+        *error = "cuMemUnmap failed during prepare";
+        return -1;
+      }
+      mapping->checkpointed = true;
+    }
+    if (allocation->driver != 0) {
+      if (release(allocation->driver) != CUDA_SUCCESS) {
+        (void)leave_context(&scope);
+        free(list.items);
+        *error = "cuMemRelease failed during prepare";
+        return -1;
+      }
+      allocation->driver = 0;
+    }
+    allocation->checkpointed = true;
+    if (leave_context(&scope) != 0) {
+      free(list.items);
+      *error = "cannot leave the allocation's CUDA context";
+      return -1;
+    }
+  }
+  free(list.items);
+  return 0;
+}
+
+/* Map every checkpointed mapping of allocation back where it was. */
+static CUresult
+remap_allocation(struct allocation* allocation, const char** error)
+{
+  map_fn map = (map_fn)cuinterpose_lookup_real_symbol("cuMemMap");
+  access_fn set_access = (access_fn)cuinterpose_lookup_real_symbol("cuMemSetAccess");
+  size_t index;
+
+  if (map == NULL || set_access == NULL) {
+    *error = "mapping symbols are unavailable";
+    return CUDA_ERROR_NOT_INITIALIZED;
+  }
+  for (index = 0; index < mappings.count; index++) {
+    struct mapping* mapping = mappings.items[index].value;
+    CUresult result;
+
+    if (mapping->allocation != allocation || !mapping->checkpointed)
+      continue;
+    result = map(mapping->address, mapping->size, mapping->offset, allocation->driver, 0);
+    if (result != CUDA_SUCCESS) {
+      *error = "cuMemMap failed during restore";
+      return result;
+    }
+    mapping->checkpointed = false;
+    if (mapping->access_count != 0) {
+      result = set_access(mapping->address, mapping->size, mapping->access, mapping->access_count);
+      if (result != CUDA_SUCCESS) {
+        *error = "cuMemSetAccess failed during restore";
+        return result;
+      }
+    }
+  }
+  return CUDA_SUCCESS;
+}
+
+/* Once an allocation is back, keep the driver handle only if the application
+ * still holds a logical handle; mappings keep the memory alive otherwise. */
+static int
+finish_restore(struct allocation* allocation, const char** error)
+{
+  release_fn release = (release_fn)cuinterpose_lookup_real_symbol("cuMemRelease");
+
+  allocation->checkpointed = false;
+  if (allocation->live_handles == 0 && allocation->driver != 0) {
+    if (release == NULL || release(allocation->driver) != CUDA_SUCCESS) {
+      *error = "cuMemRelease failed during restore";
+      return -1;
+    }
+    allocation->driver = 0;
+  }
+  return 0;
+}
+
+/* LOAD_ALLOCATIONS, creator topology: remap and re-export after the module has
+ * loaded every creator's bytes. The command's reply is the importer barrier. */
+static int
+restore_creators(const char** error)
+{
+  export_fn export_handle = (export_fn)cuinterpose_lookup_real_symbol("cuMemExportToShareableHandle");
+  struct allocation_list list;
+  size_t index;
+
+  if (export_handle == NULL) {
+    *error = "cuMemExportToShareableHandle is unavailable";
+    return -1;
+  }
+  if (list_allocations(&list) != 0) {
+    *error = "cannot allocate";
+    return -1;
+  }
+  for (index = 0; index < list.count; index++) {
+    struct allocation* allocation = list.items[index];
+    struct cuinterpose_context_scope scope;
+
+    if (!allocation->creator || !allocation->checkpointed)
+      continue;
+    if (allocation->driver == 0) {
+      free(list.items);
+      *error = "creator allocation has no device memory after restore";
+      return -1;
+    }
+    if (enter_allocation_context(allocation, &scope) != 0) {
+      free(list.items);
+      *error = "cannot enter the allocation's CUDA context";
+      return -1;
+    }
+    if (remap_allocation(allocation, error) != CUDA_SUCCESS) {
+      (void)leave_context(&scope);
+      free(list.items);
+      return -1;
+    }
+    if (allocation->shared) {
+      int real_fd = -1;
+      if (export_handle(&real_fd, allocation->driver, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0) != CUDA_SUCCESS ||
+          cuinterpose_export_cache_put(allocation->id, real_fd) != 0) {
+        if (real_fd >= 0)
+          close(real_fd);
+        (void)leave_context(&scope);
+        free(list.items);
+        *error = "cannot re-export a restored creator allocation";
+        return -1;
+      }
+    }
+    if (finish_restore(allocation, error) != 0 || leave_context(&scope) != 0) {
+      free(list.items);
+      if (*error == NULL)
+        *error = "cannot leave the allocation's CUDA context";
+      return -1;
+    }
+  }
+  free(list.items);
+  /* Peers may fetch descriptors again. */
+  cuinterpose_export_cache_resume();
+  return 0;
+}
+
+/* RESTORE_UNICAST: importers fetch fresh descriptors and remap. */
+static int
+restore_importers(char* message, size_t message_size)
+{
+  import_fn import_handle = (import_fn)cuinterpose_lookup_real_symbol("cuMemImportFromShareableHandle");
+  struct allocation_list list;
+  size_t index;
+
+  if (import_handle == NULL) {
+    snprintf(message, message_size, "%s", "cuMemImportFromShareableHandle is unavailable");
+    return -1;
+  }
+  if (list_allocations(&list) != 0) {
+    snprintf(message, message_size, "%s", "cannot allocate");
+    return -1;
+  }
+  for (index = 0; index < list.count; index++) {
+    struct allocation* allocation = list.items[index];
+    struct cuinterpose_posix_ticket ticket;
+    struct cuinterpose_context_scope scope;
+    const char* error = NULL;
+    char export_error[96];
+    int raw_fd = -1;
+    CUmemGenericAllocationHandle imported = 0;
+    CUresult result;
+
+    if (allocation->creator || !allocation->checkpointed)
+      continue;
+    memset(&ticket, 0, sizeof(ticket));
+    ticket.magic = CUINTERPOSE_POSIX_TICKET_MAGIC;
+    ticket.version = CUINTERPOSE_POSIX_TICKET_VERSION;
+    ticket.resource_kind = CUINTERPOSE_RESOURCE_UNICAST;
+    snprintf(ticket.creator_participant, sizeof(ticket.creator_participant), "%s", allocation->creator_participant);
+    memcpy(ticket.allocation_id, allocation->id, sizeof(ticket.allocation_id));
+    snprintf(ticket.creator_endpoint, sizeof(ticket.creator_endpoint), "%s", allocation->creator_endpoint);
+    /* The creator's listener answers without any lock of its own that we hold,
+     * so the request can be made while holding state_lock. */
+    if (request_export(&ticket, &raw_fd, export_error, sizeof(export_error)) != 0) {
+      free(list.items);
+      snprintf(message, message_size, "creator export: %.70s", export_error);
+      return -1;
+    }
+    if (enter_allocation_context(allocation, &scope) != 0) {
+      close(raw_fd);
+      free(list.items);
+      snprintf(message, message_size, "%s", "cannot enter the allocation's CUDA context");
+      return -1;
+    }
+    result = import_handle(&imported, (void*)(uintptr_t)raw_fd, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR);
+    close(raw_fd);
+    if (result != CUDA_SUCCESS) {
+      (void)leave_context(&scope);
+      free(list.items);
+      snprintf(message, message_size, "cuMemImportFromShareableHandle failed: CUresult=%d", (int)result);
+      return -1;
+    }
+    allocation->driver = imported;
+    if (remap_allocation(allocation, &error) != CUDA_SUCCESS || finish_restore(allocation, &error) != 0 ||
+        leave_context(&scope) != 0) {
+      free(list.items);
+      snprintf(message, message_size, "%s", error != NULL ? error : "cannot leave the allocation's CUDA context");
+      return -1;
+    }
+  }
+  free(list.items);
+  return 0;
 }
 
 static void
@@ -324,7 +908,7 @@ serve(int client)
   response.live_raw_imports = atomic_load(&live_raw_imports);
   response.unsupported_exportable_creations = atomic_load(&unsupported_exportable_creations);
   response.phase = phase_code();
-  if (passed_fd >= 0 || request.payload_size != 0 || !cuinterpose_header_strings_terminated(&request) ||
+  if (passed_fd >= 0 || !cuinterpose_header_strings_terminated(&request) ||
       request.magic != CUINTERPOSE_MAGIC || request.version != CUINTERPOSE_VERSION || request.status != 0 ||
       request.count != 0 ||
       !((request.operation == CUINTERPOSE_HANDSHAKE && request.participant_id[0] == '\0') ||
@@ -339,6 +923,157 @@ serve(int client)
         cuinterpose_header_error(&response, failure);
       (void)cuinterpose_send_header(client, &response, -1);
       break;
+    case CUINTERPOSE_INSPECT: {
+      struct cuinterpose_record* records;
+      const char* error;
+
+      pthread_mutex_lock(&state_lock);
+      if (current_phase != PHASE_ACTIVE) {
+        pthread_mutex_unlock(&state_lock);
+        cuinterpose_header_error(&response, "cuinterpose is not in the active phase");
+        (void)cuinterpose_send_header(client, &response, -1);
+        break;
+      }
+      records = inspect_records(&response.count, &error);
+      pthread_mutex_unlock(&state_lock);
+      if (records == NULL) {
+        cuinterpose_header_error(&response, error);
+        (void)cuinterpose_send_header(client, &response, -1);
+        break;
+      }
+      response.payload_size = (uint64_t)response.count * sizeof(struct cuinterpose_record);
+      if (cuinterpose_send_header(client, &response, -1) == 0 && response.payload_size != 0)
+        (void)send_all(client, records, (size_t)response.payload_size);
+      free(records);
+      break;
+    }
+    case CUINTERPOSE_PREPARE_MULTICAST: {
+      const char* error = NULL;
+
+      pthread_mutex_lock(&state_lock);
+      if (current_phase != PHASE_ACTIVE) {
+        error = "cuinterpose is not in the active phase";
+      } else {
+        current_phase = PHASE_MULTICAST_PREPARED;
+      }
+      if (error != NULL) {
+        set_failure(error);
+      }
+      pthread_mutex_unlock(&state_lock);
+      if (error != NULL)
+        cuinterpose_header_error(&response, error);
+      (void)cuinterpose_send_header(client, &response, -1);
+      break;
+    }
+    case CUINTERPOSE_SAVE_ALLOCATIONS: {
+      const char* error = NULL;
+      uint64_t bytes = 0;
+      uint32_t copy_us = 0;
+
+      pthread_mutex_lock(&state_lock);
+      if (current_phase != PHASE_MULTICAST_PREPARED) {
+        error = "multicast was not prepared before allocation save";
+      } else if (retain_creator_handles_for_save(&error) != 0 ||
+                 save_allocation_contents(&bytes, &copy_us, &error) != 0) {
+        set_failure(error);
+      } else {
+        current_phase = PHASE_ALLOCATIONS_SAVED;
+      }
+      pthread_mutex_unlock(&state_lock);
+      if (error != NULL)
+        cuinterpose_header_error(&response, error);
+      response.payload_size = bytes;
+      response.copy_us = copy_us;
+      (void)cuinterpose_send_header(client, &response, -1);
+      break;
+    }
+    case CUINTERPOSE_PREPARE_UNICAST: {
+      const char* error = NULL;
+
+      pthread_mutex_lock(&state_lock);
+      if (current_phase != PHASE_ALLOCATIONS_SAVED) {
+        error = "allocations were not saved before unicast prepare";
+      } else if (prepare(&error) == 0) {
+        current_phase = PHASE_PREPARED;
+      } else {
+        set_failure(error);
+      }
+      pthread_mutex_unlock(&state_lock);
+      if (error != NULL)
+        cuinterpose_header_error(&response, error);
+      (void)cuinterpose_send_header(client, &response, -1);
+      break;
+    }
+    case CUINTERPOSE_LOAD_ALLOCATIONS: {
+      const char* error = NULL;
+      uint64_t bytes = 0;
+      uint32_t copy_us = 0;
+
+      pthread_mutex_lock(&state_lock);
+      if (current_phase != PHASE_PREPARED) {
+        error = "cuinterpose is not in the prepared phase";
+      } else if (load_allocation_contents(&bytes, &copy_us, &error) != 0 ||
+                 restore_creators(&error) != 0) {
+        set_failure(error);
+      } else {
+        current_phase = PHASE_UNICAST_CREATORS_RESTORED;
+      }
+      pthread_mutex_unlock(&state_lock);
+      if (error != NULL)
+        cuinterpose_header_error(&response, error);
+      response.payload_size = bytes;
+      response.copy_us = copy_us;
+      (void)cuinterpose_send_header(client, &response, -1);
+      /* Off the hot path: the coordinator has its answer and moves on. */
+      if (error == NULL)
+        cuinterpose_host_carrier_release();
+      break;
+    }
+    case CUINTERPOSE_RESTORE_UNICAST: {
+      char message[96] = {0};
+      bool failed = false;
+
+      pthread_mutex_lock(&state_lock);
+      if (current_phase != PHASE_UNICAST_CREATORS_RESTORED) {
+        snprintf(message, sizeof(message), "%s", "creator allocations were not loaded before unicast restore");
+        failed = true;
+      } else if (restore_importers(message, sizeof(message)) == 0) {
+        current_phase = PHASE_UNICAST_RESTORED;
+      } else {
+        set_failure(message);
+        failed = true;
+      }
+      pthread_mutex_unlock(&state_lock);
+      if (failed)
+        cuinterpose_header_error(&response, message);
+      (void)cuinterpose_send_header(client, &response, -1);
+      break;
+    }
+    case CUINTERPOSE_RESTORE_MULTICAST_CREATORS:
+    case CUINTERPOSE_RESTORE_MULTICAST_IMPORTERS:
+    case CUINTERPOSE_RESTORE_MULTICAST_DEVICES:
+    case CUINTERPOSE_RESTORE_MULTICAST_BINDINGS: {
+      /* No multicast state in this layer: each phase only advances. */
+      static const enum phase expected[] = {
+          PHASE_UNICAST_RESTORED, PHASE_MULTICAST_CREATED, PHASE_MULTICAST_IMPORTED, PHASE_MULTICAST_JOINED};
+      static const enum phase next[] = {
+          PHASE_MULTICAST_CREATED, PHASE_MULTICAST_IMPORTED, PHASE_MULTICAST_JOINED, PHASE_ACTIVE};
+      size_t step = request.operation - CUINTERPOSE_RESTORE_MULTICAST_CREATORS;
+
+      pthread_mutex_lock(&state_lock);
+      if (current_phase != expected[step]) {
+        pthread_mutex_unlock(&state_lock);
+        cuinterpose_header_error(&response, "multicast restore phase out of order");
+        (void)cuinterpose_send_header(client, &response, -1);
+        break;
+      }
+      current_phase = next[step];
+      if (current_phase == PHASE_ACTIVE)
+        failure[0] = '\0';
+      pthread_mutex_unlock(&state_lock);
+      (void)cuinterpose_send_header(client, &response, -1);
+      break;
+    }
     case CUINTERPOSE_EXPORT: {
       /* A peer holding a ticket wants the real descriptor. Served from the
        * export cache only: no driver call, no state_lock. */
@@ -420,6 +1155,44 @@ control_agent(void* unused)
   }
 }
 
+/*
+ * A process that exits without running destructors (os._exit, a signal) leaves
+ * its socket behind, and CUDA workloads spawn many such helpers. Remove the
+ * sockets whose process no longer exists, so the control directory describes
+ * the processes that are actually there.
+ */
+static void
+remove_dead_sockets(void)
+{
+  DIR* directory = opendir(control_directory);
+  struct dirent* entry;
+
+  if (directory == NULL)
+    return;
+  while ((entry = readdir(directory)) != NULL) {
+    const char* name = entry->d_name;
+    const char* digits;
+    long pid = 0;
+
+    if (strncmp(name, CUINTERPOSE_SOCKET_PREFIX, strlen(CUINTERPOSE_SOCKET_PREFIX)) != 0)
+      continue;
+    /* Hand-rolled: strtol resolves to a glibc 2.38 symbol under C2x headers,
+     * and the shim must load on glibc 2.34. */
+    for (digits = name + strlen(CUINTERPOSE_SOCKET_PREFIX); *digits >= '0' && *digits <= '9' && pid < 100000000L;
+         digits++)
+      pid = pid * 10 + (*digits - '0');
+    if (pid <= 0 || strcmp(digits, ".sock") != 0 || pid == (long)getpid())
+      continue;
+    if (kill((pid_t)pid, 0) == -1 && errno == ESRCH) {
+      char path[sizeof(socket_path)];
+
+      if (snprintf(path, sizeof(path), "%s/%s", control_directory, name) < (int)sizeof(path))
+        unlink(path);
+    }
+  }
+  closedir(directory);
+}
+
 static int
 discard_control_endpoint(void)
 {
@@ -439,6 +1212,7 @@ start_control_endpoint(void)
   pthread_t thread;
   int count;
 
+  remove_dead_sockets();
   count = snprintf(
       socket_path, sizeof(socket_path), "%s/%s%ld.sock", control_directory, CUINTERPOSE_SOCKET_PREFIX,
       (long)getpid());
@@ -523,6 +1297,7 @@ fork_child(void)
   next_logical_handle = 1;
   current_phase = PHASE_ACTIVE;
   failure[0] = '\0';
+  cuinterpose_host_carrier_fork_child();
   cuinterpose_export_cache_fork_child();
   pthread_mutex_init(&state_lock, NULL);
 }
@@ -656,9 +1431,15 @@ cuMemCreate(
     return result;
   allocation = calloc(1, sizeof(*allocation));
   pthread_mutex_lock(&state_lock);
-  if (allocation == NULL || current_phase != PHASE_ACTIVE ||
-      random_bytes(allocation->id, sizeof(allocation->id)) != 0 ||
-      current_context(&allocation->context) != 0 ||
+  if (current_phase != PHASE_ACTIVE) {
+    release_fn release = (release_fn)cuinterpose_lookup_real_symbol("cuMemRelease");
+    pthread_mutex_unlock(&state_lock);
+    if (release != NULL)
+      (void)release(driver);
+    free(allocation);
+    return CUDA_ERROR_NOT_READY;
+  }
+  if (allocation == NULL || random_bytes(allocation->id, sizeof(allocation->id)) != 0 ||
       table_put(&allocations, key_bytes(allocation->id), allocation) != 0) {
     release_fn release = (release_fn)cuinterpose_lookup_real_symbol("cuMemRelease");
     pthread_mutex_unlock(&state_lock);
@@ -671,6 +1452,7 @@ cuMemCreate(
   allocation->properties = *properties;
   allocation->driver = driver;
   allocation->creator = true;
+  cuinterpose_capture_context(&allocation->context);
   snprintf(allocation->creator_participant, sizeof(allocation->creator_participant), "%s", participant_id);
   snprintf(allocation->creator_endpoint, sizeof(allocation->creator_endpoint), "%s", socket_path);
   if (add_handle(allocation, &logical) != 0) {
@@ -841,6 +1623,7 @@ cuMemMap(CUdeviceptr address, size_t size, size_t offset, CUmemGenericAllocation
   mapping->offset = offset;
   mapping->allocation = handle->allocation;
   handle->allocation->live_mappings++;
+  adopt_context(handle->allocation);
   pthread_mutex_unlock(&state_lock);
   return CUDA_SUCCESS;
 }
@@ -1039,6 +1822,7 @@ cuMemExportToShareableHandle(
     return CUDA_ERROR_NOT_READY;
   }
   allocation = handle->allocation;
+  adopt_context(allocation);
   if (allocation->creator && !cuinterpose_export_cache_has(allocation->id)) {
     /*
      * The one real export for this allocation in this process. The descriptor
@@ -1145,7 +1929,6 @@ cuMemImportFromShareableHandle(CUmemGenericAllocationHandle* output, void* os_ha
   if (allocation == NULL) {
     allocation = calloc(1, sizeof(*allocation));
     if (allocation == NULL || get_properties(&allocation->properties, imported) != CUDA_SUCCESS ||
-        current_context(&allocation->context) != 0 ||
         table_put(&allocations, key_bytes(ticket.allocation_id), allocation) != 0) {
       pthread_mutex_unlock(&state_lock);
       (void)release(imported);
@@ -1158,6 +1941,7 @@ cuMemImportFromShareableHandle(CUmemGenericAllocationHandle* output, void* os_ha
     snprintf(allocation->creator_endpoint, sizeof(allocation->creator_endpoint), "%s", ticket.creator_endpoint);
     allocation->creator = false;
     allocation->driver = imported;
+    cuinterpose_capture_context(&allocation->context);
   } else if (allocation->driver != 0) {
     /* Already imported here: alias the existing driver handle. */
     if (release(imported) != CUDA_SUCCESS) {
