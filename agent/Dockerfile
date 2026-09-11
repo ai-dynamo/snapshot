@@ -85,6 +85,8 @@ COPY cmd/cuda-checkpoint-helper/transfer_config.cpp ./cmd/cuda-checkpoint-helper
 COPY cmd/cuda-checkpoint-helper/transfer_config.h ./cmd/cuda-checkpoint-helper/transfer_config.h
 COPY cmd/cuda-checkpoint-helper/transfer_config_test.cpp ./cmd/cuda-checkpoint-helper/transfer_config_test.cpp
 COPY cmd/cuda-checkpoint-helper/transfer_cancellation.h ./cmd/cuda-checkpoint-helper/transfer_cancellation.h
+COPY cmd/cuda-checkpoint-helper/restore_pipeline.h ./cmd/cuda-checkpoint-helper/restore_pipeline.h
+COPY cmd/cuda-checkpoint-helper/fatal_io.h ./cmd/cuda-checkpoint-helper/fatal_io.h
 COPY cmd/cuda-checkpoint-helper/transfer_engine.h ./cmd/cuda-checkpoint-helper/transfer_engine.h
 COPY cmd/cuda-checkpoint-helper/transfer_engine_test.cpp ./cmd/cuda-checkpoint-helper/transfer_engine_test.cpp
 COPY cmd/cuda-checkpoint-helper/transfer_backend_unavailable.cpp ./cmd/cuda-checkpoint-helper/transfer_backend_unavailable.cpp
@@ -140,7 +142,7 @@ RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
       ./cmd/cuda-checkpoint-helper/transfer_config_test.cpp \
     && /cuda-checkpoint-helper-transfer-config-test
 
-RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread \
       -I/opt/cuda-13.4/include \
       -o /cuda-checkpoint-helper-transfer-cancellation-test \
       ./cmd/cuda-checkpoint-helper/transfer_engine_test.cpp \
@@ -360,6 +362,8 @@ COPY cmd/cuda-checkpoint-helper/transfer_config.h ./cmd/cuda-checkpoint-helper/t
 COPY cmd/cuda-checkpoint-helper/transfer_config_test.cpp ./cmd/cuda-checkpoint-helper/transfer_config_test.cpp
 COPY cmd/cuda-checkpoint-helper/transfer_cancellation.h ./cmd/cuda-checkpoint-helper/transfer_cancellation.h
 COPY cmd/cuda-checkpoint-helper/transfer_engine.cpp ./cmd/cuda-checkpoint-helper/transfer_engine.cpp
+COPY cmd/cuda-checkpoint-helper/restore_pipeline.h ./cmd/cuda-checkpoint-helper/restore_pipeline.h
+COPY cmd/cuda-checkpoint-helper/fatal_io.h ./cmd/cuda-checkpoint-helper/fatal_io.h
 COPY cmd/cuda-checkpoint-helper/transfer_engine.h ./cmd/cuda-checkpoint-helper/transfer_engine.h
 COPY cmd/cuda-checkpoint-helper/transfer_engine_test.cpp ./cmd/cuda-checkpoint-helper/transfer_engine_test.cpp
 COPY cmd/cuda-checkpoint-helper/transfer_scheduler.cpp ./cmd/cuda-checkpoint-helper/transfer_scheduler.cpp
@@ -417,7 +421,7 @@ RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
       ./cmd/cuda-checkpoint-helper/transfer_config_test.cpp \
     && /cuda-checkpoint-helper-transfer-test
 
-RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread \
       -I/opt/cuda-13.4/include \
       -o /cuda-checkpoint-helper-transfer-cancellation-test \
       ./cmd/cuda-checkpoint-helper/transfer_engine_test.cpp \

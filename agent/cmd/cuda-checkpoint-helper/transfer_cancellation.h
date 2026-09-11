@@ -8,6 +8,8 @@
 #include <atomic>
 #include <chrono>
 
+#include "fatal_io.h"
+
 namespace cuda_checkpoint_transfer {
 
 class TransferCancellation {
@@ -21,7 +23,8 @@ public:
   void Cancel() { cancelled_.store(true, std::memory_order_relaxed); }
   bool DeadlineExceeded() const { return Clock::now() >= deadline_; }
   bool IsCancelled() const {
-    return cancelled_.load(std::memory_order_relaxed) || DeadlineExceeded();
+    return cancelled_.load(std::memory_order_relaxed) || DeadlineExceeded() ||
+           FatalIo::Pending();
   }
 
 private:

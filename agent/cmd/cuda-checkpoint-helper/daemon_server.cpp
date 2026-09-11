@@ -27,6 +27,7 @@
 
 #include "cuda_operation.h"
 #include "daemon_protocol.h"
+#include "fatal_io.h"
 
 namespace cuda_checkpoint_server {
 
@@ -211,6 +212,12 @@ bool RunHealthServer(daemon_protocol::OwnedUnixSocket *socket, int shutdown_fd,
           operation_service->ReapExited("/host/proc", &reap_error);
       response = daemon_protocol::HealthResponseAfterReap(
           *health, static_cast<int32_t>(release_status), reap_error);
+      if (cuda_checkpoint_transfer::FatalIo::Pending()) {
+        // The service must confirm target exit before helper teardown. Keep
+        // liveness successful even past the watchdog deadline while it retries;
+        // the health payload still reports the busy/overdue operation.
+        response.cuda_status = 0;
+      }
       if (!reap_error.empty()) {
         // An unreadable /proc identity is not proof that the target exited.
         // Keep liveness successful so kubelet does not restart the helper and

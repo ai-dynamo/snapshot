@@ -36,6 +36,7 @@
 #include "transfer_config.h"
 #include "transfer_engine.h"
 #include "transfer_scheduler.h"
+#include "fatal_io.h"
 
 #if !defined(CUDA_VERSION) || CUDA_VERSION < 13040
 #error "cuda-checkpoint-helper requires CUDA 13.4 or newer headers"
@@ -242,6 +243,11 @@ public:
 
   CUresult ReapExited(const std::string &proc_root,
                       std::string *identity_error) {
+    if (transfer::FatalIo::Pending()) {
+      *identity_error =
+          "fatal I/O containment is quiescing targets with resources retained";
+      return CUDA_SUCCESS;
+    }
     std::lock_guard lock(mutex_);
     CUresult first_error = CUDA_SUCCESS;
     auto target = targets_.begin();
@@ -1916,6 +1922,43 @@ public:
               .output = {},
               .error = "CUDA operation service is not initialized"};
     }
+    // A worker with indeterminate backend ownership parks without unwinding.
+    // This service-owned monitor is then the sole authority to tear down the
+    // process, and includes the current batch as well as earlier live targets.
+    const auto current_targets =
+        request.targets.empty() ? std::vector{request} : request.targets;
+    std::jthread containment([&](std::stop_token stop) {
+      while (!stop.stop_requested()) {
+        if (transfer::FatalIo::Pending()) {
+          transfer::FatalIo::QuiesceBeforeTeardown(
+              [&] {
+                std::string error;
+                const bool exited = daemon_protocol::TerminateMatchingProcesses(
+                    current_targets, "/host/proc", std::chrono::seconds(5),
+                    &error);
+                if (!exited) {
+                  std::fprintf(stderr, "fatal I/O current targets: %s\n",
+                               error.c_str());
+                }
+                return exited;
+              },
+              [&] {
+                std::string error;
+                const bool exited =
+                    persistent_contexts_.TerminateAll("/host/proc", &error) ==
+                    CUDA_SUCCESS;
+                if (!exited) {
+                  std::fprintf(stderr, "fatal I/O retained targets: %s\n",
+                               error.c_str());
+                }
+                return exited;
+              },
+              [] { std::this_thread::sleep_for(std::chrono::seconds(1)); },
+              [] { std::_Exit(EXIT_FAILURE); });
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+    });
     return RunDaemonOperation(request, operation_complete_,
                               max_operation_duration_, &persistent_contexts_);
   }

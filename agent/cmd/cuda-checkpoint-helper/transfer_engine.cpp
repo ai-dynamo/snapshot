@@ -5,6 +5,7 @@
 
 #include "transfer_engine.h"
 
+#include "restore_pipeline.h"
 #include "zero_detection.h"
 
 #include <fcntl.h>
@@ -18,6 +19,7 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -449,6 +451,189 @@ bool DrainCUDA(std::vector<std::unique_ptr<TransferSlot>> *slots,
   return success;
 }
 
+class RestorePipeline {
+public:
+  RestorePipeline(const std::vector<TransferChunk> &chunks,
+                  const std::vector<FileDescriptor> &files,
+                  std::vector<std::unique_ptr<TransferSlot>> &slots,
+                  nixlAgent &agent, const std::string &agent_name,
+                  CUdeviceptr device_ptr, CUstream stream,
+                  TransferMetrics &metrics, TransferCancellation *cancellation,
+                  bool &cuda_work_posted, std::string &error)
+      : chunks_(chunks), files_(files), slots_(slots), agent_(agent),
+        agent_name_(agent_name), device_ptr_(device_ptr), stream_(stream),
+        metrics_(metrics), cancellation_(cancellation),
+        cuda_work_posted_(cuda_work_posted), error_(error),
+        requests_(slots.size()) {}
+
+  ~RestorePipeline() {
+    // POSIX releaseReqH deletes the handle but does not cancel queued AIO
+    // callbacks. Never release an active request, including during unwinding.
+    for (size_t slot = 0; slot < requests_.size(); ++slot) {
+      while (requests_[slot].handle != nullptr) {
+        (void)PollRead(slot);
+        if (requests_[slot].handle != nullptr) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+      }
+    }
+  }
+
+  bool Cancelled() {
+    if (failed_) {
+      return true;
+    }
+    if (cancellation_ != nullptr && cancellation_->IsCancelled()) {
+      Fail(cancellation_->DeadlineExceeded()
+               ? "restore transfer exceeded the configured operation deadline"
+               : "restore transfer canceled after another extent failed");
+      return true;
+    }
+    if (cancellation_ == nullptr && Clock::now() >= deadline_) {
+      Fail("restore transfer exceeded the 30-minute fallback deadline");
+      return true;
+    }
+    return false;
+  }
+
+  bool Read(size_t chunk_index, size_t slot) {
+    if (Cancelled()) {
+      return false;
+    }
+    const auto &chunk = chunks_[chunk_index];
+    auto &request = requests_[slot];
+    request.chunk = chunk_index;
+    request.started = Clock::now();
+    nixl_xfer_dlist_t dram(DRAM_SEG);
+    nixl_xfer_dlist_t file(FILE_SEG);
+    dram.addDesc(nixlBlobDesc(
+        reinterpret_cast<uintptr_t>(slots_[slot]->data()), chunk.size, 0));
+    file.addDesc(nixlBlobDesc(chunk.file_offset, chunk.size,
+                             files_[chunk.file_index].get()));
+    request.status = agent_.createXferReq(
+        NIXL_READ, dram, file, agent_name_, request.handle);
+    if (request.status == NIXL_SUCCESS) {
+      request.status = agent_.postXferReq(request.handle);
+      FatalIo::CheckBackendStatus("post", request.status, NIXL_SUCCESS,
+                                 NIXL_IN_PROG);
+    }
+    if (request.status != NIXL_SUCCESS && request.status != NIXL_IN_PROG) {
+      Fail("NIXL restore read submission failed at logical offset " +
+           std::to_string(chunk.logical_offset) + ": " +
+           std::to_string(request.status));
+      return false;
+    }
+    return true;
+  }
+
+  RestoreProgress PollRead(size_t slot) {
+    auto &request = requests_[slot];
+    if (request.handle == nullptr) {
+      return RestoreProgress::kFailed;
+    }
+    if (request.status == NIXL_IN_PROG) {
+      request.status = agent_.getXferStatus(request.handle);
+      FatalIo::CheckBackendStatus("poll", request.status, NIXL_SUCCESS,
+                                 NIXL_IN_PROG);
+    }
+    if (request.status == NIXL_IN_PROG) {
+      return RestoreProgress::kPending;
+    }
+    const auto status = agent_.releaseXferReq(request.handle);
+    if (status != NIXL_SUCCESS) {
+      Fail("NIXL restore request release failed: " + std::to_string(status));
+      return RestoreProgress::kPending;
+    }
+    request.handle = nullptr;
+    const auto &chunk = chunks_[request.chunk];
+    const double seconds = ElapsedSeconds(request.started);
+    metrics_.storage_seconds += seconds;
+    metrics_.files[chunk.file_index].storage_seconds += seconds;
+    if (request.status != NIXL_SUCCESS) {
+      Fail("NIXL restore read failed at logical offset " +
+           std::to_string(chunk.logical_offset) + ": " +
+           std::to_string(request.status));
+      return RestoreProgress::kFailed;
+    }
+    metrics_.storage_bytes += chunk.size;
+    metrics_.files[chunk.file_index].bytes += chunk.size;
+    return RestoreProgress::kComplete;
+  }
+
+  bool Copy(size_t chunk, size_t slot) {
+    if (Cancelled()) {
+      return false;
+    }
+    if (!EnqueueCopy(TransferOperation::kRestore, chunks_[chunk],
+                     slots_[slot].get(), device_ptr_, stream_,
+                     &cuda_work_posted_, &error_)) {
+      if (cancellation_ != nullptr) {
+        cancellation_->Cancel();
+      }
+      return false;
+    }
+    return true;
+  }
+
+  RestoreProgress PollCopy(size_t slot) {
+    const auto start = Clock::now();
+    const CUresult status = cuEventQuery(slots_[slot]->event());
+    metrics_.cuda_wait_seconds += ElapsedSeconds(start);
+    if (status == CUDA_ERROR_NOT_READY) {
+      return RestoreProgress::kPending;
+    }
+    if (status != CUDA_SUCCESS) {
+      Fail("CUDA restore copy failed: " + CudaError(status));
+      return RestoreProgress::kFailed;
+    }
+    slots_[slot]->MarkCUDAComplete();
+    return RestoreProgress::kComplete;
+  }
+
+  void Idle(bool progressed) {
+    if (progressed) {
+      poll_delay_ = std::chrono::microseconds(50);
+    } else {
+      std::this_thread::sleep_for(poll_delay_);
+      poll_delay_ = std::min(poll_delay_ * 2, std::chrono::microseconds(1000));
+    }
+  }
+
+private:
+  void Fail(const std::string &message) {
+    failed_ = true;
+    if (error_.empty()) {
+      error_ = message;
+    }
+    if (cancellation_ != nullptr) {
+      cancellation_->Cancel();
+    }
+  }
+
+  struct ReadRequest {
+    nixlXferReqH *handle = nullptr;
+    nixl_status_t status = NIXL_SUCCESS;
+    size_t chunk = 0;
+    Clock::time_point started;
+  };
+
+  const std::vector<TransferChunk> &chunks_;
+  const std::vector<FileDescriptor> &files_;
+  std::vector<std::unique_ptr<TransferSlot>> &slots_;
+  nixlAgent &agent_;
+  const std::string &agent_name_;
+  CUdeviceptr device_ptr_;
+  CUstream stream_;
+  TransferMetrics &metrics_;
+  TransferCancellation *cancellation_;
+  bool &cuda_work_posted_;
+  std::string &error_;
+  std::vector<ReadRequest> requests_;
+  bool failed_ = false;
+  Clock::time_point deadline_ = Clock::now() + kNixlTransferTimeout;
+  std::chrono::microseconds poll_delay_{50};
+};
+
 bool TransferPipeline(const std::vector<TransferChunk> &chunks,
                       const std::vector<FileDescriptor> &files,
                       std::vector<std::unique_ptr<TransferSlot>> *slots,
@@ -459,59 +644,10 @@ bool TransferPipeline(const std::vector<TransferChunk> &chunks,
   bool success = true;
   bool cuda_work_posted = false;
   if (operation == TransferOperation::kRestore) {
-    for (const auto &chunk : chunks) {
-      if (cancellation != nullptr && cancellation->IsCancelled()) {
-        *error = "transfer canceled after another extent failed";
-        success = false;
-        break;
-      }
-      TransferSlot *slot = (*slots)[chunk.slot_index].get();
-      if (!WaitForSlot(slot, metrics, error)) {
-        success = false;
-        if (cancellation != nullptr) {
-          cancellation->Cancel();
-        }
-        break;
-      }
-      if (cancellation != nullptr && cancellation->IsCancelled()) {
-        *error = "transfer canceled after another extent failed";
-        success = false;
-        break;
-      }
-      const auto storage_start = Clock::now();
-      std::string transfer_error;
-      const bool transferred =
-          NixlTransfer(agent, agent_name, NIXL_READ, slot->data(),
-                       files[chunk.file_index].get(), chunk.file_offset,
-                       chunk.size, cancellation, &transfer_error);
-      const double storage_seconds = ElapsedSeconds(storage_start);
-      metrics->storage_seconds += storage_seconds;
-      metrics->files[chunk.file_index].storage_seconds += storage_seconds;
-      if (!transferred) {
-        *error = "storage read failed at logical offset " +
-                 std::to_string(chunk.logical_offset) + ": " + transfer_error;
-        success = false;
-        if (cancellation != nullptr) {
-          cancellation->Cancel();
-        }
-        break;
-      }
-      metrics->storage_bytes += chunk.size;
-      metrics->files[chunk.file_index].bytes += chunk.size;
-      if (cancellation != nullptr && cancellation->IsCancelled()) {
-        *error = "transfer canceled after another extent failed";
-        success = false;
-        break;
-      }
-      if (!EnqueueCopy(operation, chunk, slot, device_ptr, stream,
-                       &cuda_work_posted, error)) {
-        success = false;
-        if (cancellation != nullptr) {
-          cancellation->Cancel();
-        }
-        break;
-      }
-    }
+    RestorePipeline pipeline(chunks, files, *slots, *agent, agent_name,
+                             device_ptr, stream, *metrics, cancellation,
+                             cuda_work_posted, *error);
+    success = RunRestorePipeline(chunks.size(), slots->size(), pipeline);
   } else {
     size_t next_chunk = 0;
     const size_t initial_count = std::min(chunks.size(), slots->size());

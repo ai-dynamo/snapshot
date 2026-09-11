@@ -46,9 +46,37 @@ provide a transfer adapter without changing the workload lifecycle.
   deadline, sibling cancellation, and result aggregation.
 - `transfer_engine.*` is the link-time artifact transfer adapter used by the
   Snapshot-local NIXL POSIX implementation.
+- `restore_pipeline.h` owns bounded read/copy slot scheduling. Restore posts
+  up to `transferBufferCount` reads per extent, consumes ready reads without
+  waiting for earlier chunks, and reuses each slot only after its CUDA event
+  completes. Cancellation stops submission and drains outstanding reads and
+  copies before their resources are released.
 
 These are internal ownership boundaries. They do not add another protocol or
 change the request, response, manifest, or transfer configuration contracts.
+
+Restore storage-service time sums request lifetimes, which overlap within an
+extent as well as across extents; it is not wall time. The transfer adapter
+still uses buffered NIXL POSIX AIO. Its submission calls can block on some
+filesystems, so a configured read window does not guarantee concurrent device
+I/O. Requests are drained rather than actively canceled because the pinned
+POSIX backend's handle release does not drain queued AIO callbacks.
+Native post/poll errors park the failing worker without unwinding live I/O:
+the backend does not distinguish a drained request error from a queue-wide
+fault with outstanding callbacks. A service-owned containment monitor stops
+new transfer work and terminates identity-pinned current and previously
+retained targets. It retries indeterminate identities with all I/O resources
+and CUDA contexts retained. Only confirmed target termination permits process
+exit; destructors never touch the ambiguous request. Health reports the
+busy/overdue operation but keeps liveness successful during containment to
+avoid an unsafe watchdog restart. The agent sees a failed or timed-out RPC,
+never a successful restore.
+
+The interposer carries only actually shared VMM allocations (POSIX exports,
+imports, and multicast members). Private VMM allocations, mappings, and native
+handles remain intact for native CUDA checkpoint/CustomStorage. Native
+eligibility restrictions can still send a private allocation through the
+driver's ordinary host-copy fallback.
 
 ## Running
 
