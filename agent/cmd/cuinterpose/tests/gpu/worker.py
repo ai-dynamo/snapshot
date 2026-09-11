@@ -222,7 +222,20 @@ def _worker(rank: int, options: Options, peer_channel: socket.socket) -> None:
     cuda_driver.assert_handle_namespace(bulk_handle, True, "tracked bulk cuMemCreate")
     bulk_address = cuda_driver.map_allocation(bulk_handle, bulk_size, device)
     _fill(bulk_address, bulk_size, bulk_seed, rank)
-    (options.sync_dir / f"carrier-{rank}").write_text(f"2 {private_size + bulk_size}\n")
+    # Keep a large actually-shared allocation for carrier throughput, while the
+    # native path is exercised by an additional never-exported VMM allocation.
+    native_handle = cuda_call(driver.cuMemCreate, private_size, properties, 0)
+    native_address = cuda_driver.map_allocation(native_handle, private_size, device)
+    _fill(native_address, private_size, bulk_seed + WORLD_SIZE, rank)
+    bulk_ticket = int(
+        cuda_call(
+            driver.cuMemExportToShareableHandle, bulk_handle, POSIX_FD_HANDLE_TYPE, 0
+        )
+    )
+    os.close(bulk_ticket)
+    shared_count = 1 + int(peer_handle is not None)
+    shared_bytes = bulk_size + (private_size if peer_handle is not None else 0)
+    (options.sync_dir / f"carrier-{rank}").write_text(f"{shared_count} {shared_bytes}\n")
 
     if options.hold_raw_import:
         # Nothing to restore in this mode: the test only checks that prepare is
@@ -238,6 +251,7 @@ def _worker(rank: int, options: Options, peer_channel: socket.socket) -> None:
         _verify(bulk_address, bulk_size, bulk_seed, rank, "bulk after refused prepare")
         (options.sync_dir / f"done-{rank}").touch()
         cuda_driver.destroy_mapped_allocation(bulk_address, bulk_size, bulk_handle)
+        cuda_driver.destroy_mapped_allocation(native_address, private_size, native_handle)
         cuda_driver.destroy_mapped_allocation(private_address, private_size, private_handle)
         return
 
@@ -279,6 +293,13 @@ def _worker(rank: int, options: Options, peer_channel: socket.socket) -> None:
 
     _verify(private_address, private_size, private_seed, rank, "private allocation after restore")
     _verify(bulk_address, bulk_size, bulk_seed, rank, "bulk allocation after restore")
+    _verify(
+        native_address, private_size, bulk_seed + WORLD_SIZE, rank,
+        "native private VMM after restore",
+    )
+    cuda_call(driver.cuMemGetAllocationPropertiesFromHandle, native_handle)
+    native_retained = cuda_call(driver.cuMemRetainAllocationHandle, native_address)
+    cuda_call(driver.cuMemRelease, native_retained)
     if peer_handle is not None:
         _verify(
             peer_address,
@@ -299,6 +320,7 @@ def _worker(rank: int, options: Options, peer_channel: socket.socket) -> None:
     if peer_handle is not None:
         cuda_driver.destroy_mapped_allocation(peer_address, private_size, peer_handle)
     cuda_driver.destroy_mapped_allocation(bulk_address, bulk_size, bulk_handle)
+    cuda_driver.destroy_mapped_allocation(native_address, private_size, native_handle)
     cuda_driver.destroy_mapped_allocation(private_address, private_size, private_handle)
 
 

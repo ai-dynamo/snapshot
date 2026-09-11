@@ -61,8 +61,8 @@ def test_checkpoint_restores_shared_posix_memory(
         stray = [path.name for path in workload.checkpoint_dir.iterdir() if path != state]
         assert not stray, f"host carriers must stay in process memory, found {stray}"
 
-        # Every tracked creator allocation travels through the host carrier: at
-        # least the two each worker made itself (PyTorch's buffers may add more).
+        # Only actually shared creators use host carriers. The worker also
+        # checks a never-exported VMM allocation left to native CUDA.
         expected_count, expected_bytes = workload.worker_carriers()
         saved = prepare.phases["save_allocations"]
         assert int(saved["allocation_count"]) >= expected_count, prepare.out
