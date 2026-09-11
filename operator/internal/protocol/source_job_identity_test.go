@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/ai-dynamo/snapshot/api/podcontract"
+	corev1 "k8s.io/api/core/v1"
 )
 
 func TestCudaCheckpointLaunchJobWrapperPersistsJobFile(t *testing.T) {
@@ -25,10 +26,14 @@ func TestCudaCheckpointLaunchJobWrapperPersistsJobFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, args := wrapWithCudaCheckpointLaunchJob(
-		[]string{"/bin/sh", "-c"},
-		[]string{`printf '%s' "$CUDA_CHECKPOINT_JOB_FILE" > "$1"`, "workload", observedEnvironment},
-	)
+	container := &corev1.Container{
+		Command: []string{"/bin/sh", "-c"},
+		Args:    []string{`printf '%s' "$CUDA_CHECKPOINT_JOB_FILE" > "$1"`, "workload", observedEnvironment},
+	}
+	if err := podcontract.EnsureCUDACheckpointLaunchJob(container, "cuda-checkpoint"); err != nil {
+		t.Fatal(err)
+	}
+	args := container.Args
 	args[5] = stableJobFile
 	cmd := exec.Command(args[1], args[2:]...)
 	cmd.Env = append(os.Environ(), "CUDA_CHECKPOINT_JOB_FILE="+transientJobFile)
@@ -60,7 +65,11 @@ func TestCudaCheckpointLaunchJobWrapperPersistsJobFile(t *testing.T) {
 }
 
 func TestCudaCheckpointLaunchJobWrapperReportsMissingJobFile(t *testing.T) {
-	_, args := wrapWithCudaCheckpointLaunchJob([]string{"/bin/true"}, nil)
+	container := &corev1.Container{Command: []string{"/bin/true"}}
+	if err := podcontract.EnsureCUDACheckpointLaunchJob(container, "cuda-checkpoint"); err != nil {
+		t.Fatal(err)
+	}
+	args := container.Args
 	cmd := exec.Command(args[1], args[2:]...)
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH")}
 	output, err := cmd.CombinedOutput()

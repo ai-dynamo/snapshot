@@ -193,3 +193,82 @@ func TestRemainingDuration(t *testing.T) {
 		t.Fatal("remainingDuration should not go negative")
 	}
 }
+
+// recordingMounter records the order of role mounts for mountRestoreInputs.
+type recordingMounter struct {
+	calls   []string
+	failOn  string
+	failErr error
+}
+
+func (m *recordingMounter) record(role string) (nsmount.MountPoint, error) {
+	m.calls = append(m.calls, role)
+	if role == m.failOn {
+		return nil, m.failErr
+	}
+	return testMountPoint{}, nil
+}
+
+func (m *recordingMounter) MountBundle(context.Context, int) (nsmount.MountPoint, error) {
+	return m.record("bundle")
+}
+
+func (m *recordingMounter) MountCUDATools(context.Context, nsmount.MountPoint) (nsmount.MountPoint, error) {
+	return m.record("cudatools")
+}
+
+func (m *recordingMounter) MountArtifact(context.Context, nsmount.MountPoint, string) (nsmount.MountPoint, error) {
+	return m.record("artifact")
+}
+
+func (m *recordingMounter) MountPageBroker(context.Context, nsmount.MountPoint, string) (nsmount.MountPoint, error) {
+	return m.record("pagebroker")
+}
+
+func TestMountRestoreInputsOrdersCUDAToolsBeforeStaging(t *testing.T) {
+	cases := map[string]struct {
+		tools     bool
+		staged    string
+		wantCalls []string
+		wantPath  string
+	}{
+		"plain artifact":      {wantCalls: []string{"artifact"}, wantPath: nsmount.CheckpointDst},
+		"tools then artifact": {tools: true, wantCalls: []string{"cudatools", "artifact"}, wantPath: nsmount.CheckpointDst},
+		"brokered":            {staged: "/pagebroker/staging/restore/tx", wantCalls: []string{"pagebroker"}, wantPath: nsmount.PageBrokerDst},
+		"tools then brokered": {tools: true, staged: "/pagebroker/staging/restore/tx", wantCalls: []string{"cudatools", "pagebroker"}, wantPath: nsmount.PageBrokerDst},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			m := &recordingMounter{}
+			mounted, path, err := mountRestoreInputs(context.Background(), m, tc.tools, testMountPoint{}, "/checkpoints/x", tc.staged)
+			if err != nil {
+				t.Fatalf("mountRestoreInputs: %v", err)
+			}
+			if strings.Join(m.calls, ",") != strings.Join(tc.wantCalls, ",") {
+				t.Fatalf("mount order = %v, want %v", m.calls, tc.wantCalls)
+			}
+			if path != tc.wantPath {
+				t.Fatalf("checkpoint path = %q, want %q", path, tc.wantPath)
+			}
+			if len(mounted) != len(tc.wantCalls) {
+				t.Fatalf("mounted %d, want %d", len(mounted), len(tc.wantCalls))
+			}
+			// The brokered path unmounts the last active mount early; it must
+			// be the staging mount, never the tools mount.
+			if tc.staged != "" && mounted[len(mounted)-1].action != "unmount PageBroker staging from placeholder" {
+				t.Fatalf("last mount = %q, want the staging mount", mounted[len(mounted)-1].action)
+			}
+		})
+	}
+}
+
+func TestMountRestoreInputsReturnsEarlierMountsOnFailure(t *testing.T) {
+	m := &recordingMounter{failOn: "artifact", failErr: errors.New("boom")}
+	mounted, _, err := mountRestoreInputs(context.Background(), m, true, testMountPoint{}, "/checkpoints/x", "")
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("expected the artifact mount error, got %v", err)
+	}
+	if len(mounted) != 1 || mounted[0].action != "unmount CUDA tools from placeholder" {
+		t.Fatalf("earlier mounts must be returned for cleanup, got %+v", mounted)
+	}
+}

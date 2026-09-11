@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -51,6 +52,7 @@ func makeSnapshotJobReconcilerWithInterceptor(s *runtime.Scheme, funcs intercept
 		Client:             testClient,
 		NonCacheReadClient: testClient,
 		Recorder:           record.NewFakeRecorder(10),
+		CUDATools:          testCUDAToolsDelivery(),
 	}
 }
 
@@ -785,4 +787,63 @@ func TestSnapshotJobReconcileSkipsTerminalAndDeleted(t *testing.T) {
 		_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "inference", Name: "gone"}})
 		require.NoError(t, err)
 	})
+}
+
+func TestSnapshotJobReconcileRejectsUnshapedMultiGPUJob(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := multiGPUSnapshotJob()
+	sj.UID = types.UID("sj-uid")
+
+	// Shape the target while it appears to use one GPU, so it receives the
+	// tools but no launch-job wrapper. Then make the desired and existing
+	// target multi-GPU to exercise the wrapper-specific adoption check.
+	single := sj.DeepCopy()
+	single.Spec.PodTemplate.Spec.Containers[0].Resources.Limits = nil
+	job, err := buildBaseSourceJob(single)
+	require.NoError(t, err)
+	_, err = podcontract.ShapeCUDATools(
+		&job.Spec.Template,
+		single.Spec.PodSnapshotTemplate.TargetContainers,
+		testCUDAToolsDelivery(),
+		nil,
+	)
+	require.NoError(t, err)
+	job.Spec.Template.Spec.Containers[0].Resources.Limits = sj.Spec.PodTemplate.Spec.Containers[0].Resources.Limits
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	job.UID = types.UID("source-job-uid")
+
+	r := makeSnapshotJobReconciler(s, sj, job)
+	r.CUDATools = testCUDAToolsDelivery()
+
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	failed := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+	require.NotNil(t, failed, "adopting a multi-GPU Job without the wrapper would fail at checkpoint time")
+	assert.Equal(t, snapshotv1alpha1.ReasonJobNameConflict, failed.Reason)
+	assert.Contains(t, failed.Message, "launch-job contract")
+	assert.Empty(t, updated.Status.SourceJobUID)
+}
+
+func TestSnapshotJobReconcileAdoptsShapedMultiGPUJob(t *testing.T) {
+	s := snapshotJobReconcilerScheme()
+	sj := multiGPUSnapshotJob()
+	sj.UID = types.UID("sj-uid")
+
+	job, _, err := buildShapedSourceJob(sj, testCUDAToolsDelivery(), nil)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(sj, job, s))
+	job.UID = types.UID("source-job-uid")
+
+	r := makeSnapshotJobReconciler(s, sj, job)
+	r.CUDATools = testCUDAToolsDelivery()
+
+	_, err = r.Reconcile(context.Background(), reconcileRequest(sj))
+	require.NoError(t, err)
+
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(context.Background(), reconcileRequest(sj).NamespacedName, updated))
+	assert.Equal(t, job.UID, updated.Status.SourceJobUID, "a correctly shaped Job is adopted")
 }
