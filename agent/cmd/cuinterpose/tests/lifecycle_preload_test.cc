@@ -322,7 +322,7 @@ TEST_F(Lifecycle, FailedHostCopyLeavesTheWorkloadIntactAndFailsClosed) {
   EXPECT_NE(stat((checkpoint + "/" + CUINTERPOSE_STATE_FILENAME).c_str(), &st), 0) << "no state file on failure";
   EXPECT_EQ(fakeRegisteredHostRanges(), 0) << "partial host carriers were released";
   EXPECT_EQ(fakeMappedCount(), 1) << "the mapping was never touched";
-  // The shim is in the failed phase: IDENTIFY reports it, and the application
+  // The shim is in the failed phase: HANDSHAKE reports it, and the application
   // cannot continue with VMM calls. This is the documented fail-stop behavior.
   EXPECT_EQ(stats().phase, static_cast<uint32_t>(CUINTERPOSE_PHASE_FAILED));
   EXPECT_EQ(cuMemUnmap(0x10000000, 1 << 20), CUDA_ERROR_NOT_READY);

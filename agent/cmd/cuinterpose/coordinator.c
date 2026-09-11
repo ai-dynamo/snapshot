@@ -374,10 +374,16 @@ validate_topology(
           multicast->num_devices = record->num_devices;
           id_copy(multicast->creator, record->creator_participant);
         } else if (
-            multicast->size != record->allocation_size || multicast->handle_types != record->handle_types ||
-            multicast->flags != record->object_flags || multicast->num_devices != record->num_devices ||
+            multicast->handle_types != record->handle_types || multicast->flags != record->object_flags ||
+            multicast->num_devices != record->num_devices ||
             !id_eq(multicast->creator, record->creator_participant)) {
           return topology_rejected("inconsistent multicast properties", participant_index, participant_count, record_index);
+        } else if (record->allocation_size > multicast->size) {
+          /* Each participant reports the extent it used; the driver may have
+           * given the object more capacity than was asked for, and ranks
+           * need not use the same amount of it. Bounds are checked against
+           * the largest. */
+          multicast->size = record->allocation_size;
         }
         if ((record->flags & CUINTERPOSE_CREATOR) != 0) {
           if (!id_eq(participant->id, multicast->creator)) {
