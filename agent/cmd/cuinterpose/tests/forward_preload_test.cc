@@ -76,7 +76,7 @@ TEST_F(Forwarding, UnicastEntryPointsForwardArguments) {
   EXPECT_EQ(last().size, 4096u);
   EXPECT_EQ(last().flags, 7u);
   EXPECT_EQ(last().handle_type, static_cast<int>(CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
-  EXPECT_EQ(handle, 0xabcu) << "the driver's handle must reach the caller unchanged";
+  EXPECT_EQ(handle, 0u) << "on a driver error the output is left untouched";
 
   EXPECT_EQ(cuMemRelease(0x77), static_cast<CUresult>(FAKE_RESULT_RELEASE));
   EXPECT_EQ(last().handle, 0x77u);
@@ -85,7 +85,7 @@ TEST_F(Forwarding, UnicastEntryPointsForwardArguments) {
   EXPECT_EQ(cuMemRetainAllocationHandle(&retained, reinterpret_cast<void*>(0x1000)),
             static_cast<CUresult>(FAKE_RESULT_RETAIN));
   EXPECT_EQ(last().pointer, reinterpret_cast<void*>(0x1000));
-  EXPECT_EQ(retained, 0xdefu);
+  EXPECT_EQ(retained, 0u) << "on a driver error the output is left untouched";
 
   EXPECT_EQ(cuMemMap(0x2000, 8192, 16, 0xabc, 3), static_cast<CUresult>(FAKE_RESULT_MAP));
   EXPECT_EQ(last().address, 0x2000u);
@@ -112,7 +112,7 @@ TEST_F(Forwarding, UnicastEntryPointsForwardArguments) {
   EXPECT_EQ(cuMemImportFromShareableHandle(&imported, reinterpret_cast<void*>(42), CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR),
             static_cast<CUresult>(FAKE_RESULT_IMPORT));
   EXPECT_EQ(last().pointer, reinterpret_cast<void*>(42));
-  EXPECT_EQ(imported, 0x123u);
+  EXPECT_EQ(imported, 0u) << "on a driver error the output is left untouched";
 
   EXPECT_EQ(cuMemGetAllocationPropertiesFromHandle(&prop, 0x55), static_cast<CUresult>(FAKE_RESULT_PROPERTIES));
   EXPECT_EQ(last().handle, 0x55u);

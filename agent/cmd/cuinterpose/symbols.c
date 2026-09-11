@@ -40,6 +40,7 @@
 #include <string.h>
 
 #include "export.h"
+#include "interpose.h"
 
 #ifndef CUINTERPOSE_DLSYM_VERSION
 #error "CUINTERPOSE_DLSYM_VERSION must be set by the build"
@@ -200,6 +201,9 @@ runtime_driver_entry_point(
   cudaError_t result;
   void* entry;
 
+  /* The CUDA runtime resolves driver functions before any VMM call, so this is
+   * the earliest point at which a fork child can announce itself. */
+  (void)cuinterpose_ensure_process_endpoint();
   if (strcmp(resolver, "cudaGetDriverEntryPoint") == 0 || strcmp(resolver, "cudaGetDriverEntryPoint_ptsz") == 0) {
     typedef cudaError_t(CUDARTAPI * function_type)(
         const char*, void**, unsigned long long, enum cudaDriverEntryPointQueryResult*);
@@ -309,6 +313,7 @@ cuGetProcAddress(const char* symbol, void** output, int version, cuuint64_t flag
   CUresult result;
   void* entry;
 
+  (void)cuinterpose_ensure_process_endpoint();
   if (function == NULL)
     function = (function_type)cuinterpose_lookup_real_symbol("cuGetProcAddress");
   result = function != NULL ? function(symbol, output, version, flags) : cuinterpose_unavailable();
@@ -326,6 +331,7 @@ cuGetProcAddress_v2(
   CUresult result;
   void* entry;
 
+  (void)cuinterpose_ensure_process_endpoint();
   if (function == NULL)
     function = (function_type)cuinterpose_lookup_real_symbol("cuGetProcAddress_v2");
   result = function != NULL ? function(symbol, output, version, flags, status) : cuinterpose_unavailable();
@@ -345,6 +351,7 @@ cuGetProcAddress_v2_ptsz(
   CUresult result;
   void* entry;
 
+  (void)cuinterpose_ensure_process_endpoint();
   if (function == NULL)
     function = (function_type)cuinterpose_lookup_real_symbol("cuGetProcAddress_v2");
   if ((flags & stream_flags) == 0)
