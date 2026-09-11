@@ -31,6 +31,7 @@ type CheckpointContainerSnapshot struct {
 	CUDAHostPIDs   []int    // host-visible PIDs used for checkpoint-side CUDA actions
 	CUDANSPIDs     []int    // namespace-relative PIDs stored in the checkpoint manifest
 	GPUUUIDs       []string // source GPU UUIDs from kubelet PodResources API
+	Cuinterpose    bool     // every CUDA process runs the cuinterpose shim (its control socket is present)
 }
 
 // RestoreContainerSnapshot holds inspected state for the restore target.

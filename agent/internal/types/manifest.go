@@ -29,6 +29,23 @@ type CheckpointManifest struct {
 	// CUDATools records whether the source ran with Snapshot's CUDA tools
 	// (cuda-checkpoint, the cuinterpose shim) delivered into the container.
 	CUDATools CUDAToolsManifest `yaml:"cudaTools,omitempty"`
+	// Cuinterpose records whether the CUDA interposer shim was in play. It is
+	// the restore side's only source of truth: the restore Pod's annotations
+	// may be absent or edited, and the state file alone cannot say whether
+	// prepare was supposed to have run.
+	Cuinterpose CuinterposeManifest `yaml:"cuinterpose,omitempty"`
+}
+
+// CuinterposeManifest carries two separate facts about the shim.
+type CuinterposeManifest struct {
+	// Requested is true when the source Pod opted in. Restore then removes
+	// stale shim sockets before CRIU recreates the processes. The shim itself
+	// is mounted through the CUDA tools delivery (CUDAToolsManifest).
+	Requested bool `yaml:"requested"`
+	// Prepared is true when the coordinator's prepare step completed and wrote
+	// the state file. Restore then runs the coordinator, and a missing state
+	// file is an error rather than a plain restore.
+	Prepared bool `yaml:"prepared"`
 }
 
 // CUDAToolsManifest is the restore side's source of truth for the tools mount.
