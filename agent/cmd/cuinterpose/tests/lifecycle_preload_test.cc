@@ -72,8 +72,8 @@ class Lifecycle : public ::testing::Test {
 };
 
 // Creator (this process) and importer (child) share one 1 MiB allocation and
-// a second, never-exported allocation that must still travel through the host
-// carrier. The coordinator prepares both, then restores both; the fake driver
+// a second, never-exported allocation that must remain with native CUDA.
+// The coordinator prepares both, then restores both; the fake driver
 // counts bytes copied out and back in, and the child confirms its imported
 // mapping came back.
 TEST_F(Lifecycle, PrepareAndRestoreAcrossTwoProcesses) {
@@ -152,11 +152,11 @@ TEST_F(Lifecycle, PrepareAndRestoreAcrossTwoProcesses) {
   EXPECT_EQ(fakeRegisteredHostRanges(), 1) << "one pinned arena holds every host carrier while checkpointed";
   struct stat st{};
   EXPECT_EQ(stat((checkpoint + "/" + CUINTERPOSE_STATE_FILENAME).c_str(), &st), 0);
-  EXPECT_EQ(fakeCopiedToHost(), static_cast<uint64_t>((1 << 20) + (1 << 19)))
-      << "both creator allocations, the never-exported one included, were copied to the host";
-  EXPECT_NE(prepare.out.find("allocation_count=2 allocation_bytes=1572864"), std::string::npos)
+  EXPECT_EQ(fakeCopiedToHost(), static_cast<uint64_t>(1 << 20))
+      << "only the shared creator is copied to the host";
+  EXPECT_NE(prepare.out.find("allocation_count=1 allocation_bytes=1048576"), std::string::npos)
       << prepare.out;
-  EXPECT_EQ(fakeMappedCount(), 0) << "nothing shared stays mapped in the parent for the native checkpoint";
+  EXPECT_EQ(fakeMappedCount(), 1) << "private mapping stays intact for native checkpoint";
   EXPECT_EQ(stats().phase, static_cast<uint32_t>(CUINTERPOSE_PHASE_PREPARED));
   EXPECT_EQ(stats().cached_exports, 0u) << "the export cache is closed while checkpointed";
   // While prepared, the application's handles answer "not ready".
@@ -171,7 +171,7 @@ TEST_F(Lifecycle, PrepareAndRestoreAcrossTwoProcesses) {
   // Restore.
   Outcome restore = coordinate("--restore", checkpoint, {getpid(), child});
   EXPECT_EQ(restore.status, 0) << restore.err << restore.out;
-  EXPECT_EQ(fakeCopiedToDevice(), static_cast<uint64_t>((1 << 20) + (1 << 19)));
+  EXPECT_EQ(fakeCopiedToDevice(), static_cast<uint64_t>(1 << 20));
   EXPECT_NE(restore.out.find("phase=load_allocations status=ok"), std::string::npos) << restore.out;
   EXPECT_EQ(stats().phase, static_cast<uint32_t>(CUINTERPOSE_PHASE_ACTIVE));
   EXPECT_EQ(stats().mappings, 2u);
@@ -207,6 +207,35 @@ TEST_F(Lifecycle, PrepareAndRestoreAcrossTwoProcesses) {
   EXPECT_EQ(fakeLiveAllocations(), 0);
 }
 
+TEST_F(Lifecycle, ReleasedPrivateHandleIsNotRetainedOrCarried) {
+  CUmemAllocationProp prop = posix_props();
+  CUmemGenericAllocationHandle allocation = 0;
+  ASSERT_EQ(cuMemCreate(&allocation, 1 << 20, &prop, 0), CUDA_SUCCESS);
+  ASSERT_EQ(cuMemMap(0x10000000, 1 << 20, 0, allocation, 0), CUDA_SUCCESS);
+  ASSERT_EQ(cuMemRelease(allocation), CUDA_SUCCESS);
+  EXPECT_EQ(stats().handles, 0u);
+
+  Outcome prepare = coordinate("--prepare", checkpoint, {getpid()});
+  ASSERT_EQ(prepare.status, 0) << prepare.err << prepare.out;
+  EXPECT_EQ(fakeCopiedToHost(), 0u);
+  EXPECT_EQ(fakeMappedCount(), 1);
+  EXPECT_EQ(fakePrimaryContextRetainCalls(), 0);
+  EXPECT_NE(prepare.out.find("allocation_count=0 allocation_bytes=0"),
+            std::string::npos) << prepare.out;
+  Outcome restore = coordinate("--restore", checkpoint, {getpid()});
+  ASSERT_EQ(restore.status, 0) << restore.err << restore.out;
+  EXPECT_EQ(fakeCopiedToDevice(), 0u);
+  EXPECT_EQ(fakeMappedCount(), 1);
+  CUmemGenericAllocationHandle retained = 0;
+  ASSERT_EQ(cuMemRetainAllocationHandle(&retained, reinterpret_cast<void*>(0x10000000)), CUDA_SUCCESS);
+  CUmemAllocationProp restored{};
+  EXPECT_EQ(cuMemGetAllocationPropertiesFromHandle(&restored, retained), CUDA_SUCCESS);
+  EXPECT_EQ(restored.requestedHandleTypes, prop.requestedHandleTypes);
+  EXPECT_EQ(cuMemUnmap(0x10000000, 1 << 20), CUDA_SUCCESS);
+  EXPECT_EQ(cuMemRelease(retained), CUDA_SUCCESS);
+  EXPECT_EQ(stats().allocations, 0u);
+}
+
 TEST_F(Lifecycle, PrepareIsRefusedWhileARawImportIsAlive) {
   int foreign = memfd_create("foreign", MFD_CLOEXEC);
   ASSERT_EQ(write(foreign, "x", 1), 1);
@@ -232,13 +261,18 @@ TEST_F(Lifecycle, PrepareIsRefusedWhileARawImportIsAlive) {
 // The driver needs no current context for cuMemCreate, and some workloads
 // allocate before they initialize one. Such an allocation adopts the context
 // current at its first map or export; one that never gets a context is still
-// carried through checkpoint and restore in its device's primary context.
+// carried through checkpoint and restore if it has actually been exported.
 TEST_F(Lifecycle, AllocationsCreatedWithoutAContextAreCarried) {
   CUmemAllocationProp prop = posix_props();
   CUmemGenericAllocationHandle mapped_later = 0, never_mapped = 0;
   ASSERT_EQ(cuCtxSetCurrent(nullptr), CUDA_SUCCESS);  // not interposed: goes to the fake
   ASSERT_EQ(cuMemCreate(&mapped_later, 1 << 20, &prop, 0), CUDA_SUCCESS);
   ASSERT_EQ(cuMemCreate(&never_mapped, 1 << 19, &prop, 0), CUDA_SUCCESS);
+  int tickets[2] = {-1, -1};
+  ASSERT_EQ(cuMemExportToShareableHandle(&tickets[0], mapped_later, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0), CUDA_SUCCESS);
+  ASSERT_EQ(cuMemExportToShareableHandle(&tickets[1], never_mapped, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0), CUDA_SUCCESS);
+  close(tickets[0]);
+  close(tickets[1]);
   EXPECT_EQ(stats().allocations, 2u) << "allocations made without a context are tracked";
 
   CUcontext application = reinterpret_cast<CUcontext>(static_cast<uintptr_t>(7));
@@ -277,6 +311,9 @@ TEST_F(Lifecycle, FailedHostCopyLeavesTheWorkloadIntactAndFailsClosed) {
   CUmemGenericAllocationHandle handle = 0;
   ASSERT_EQ(cuMemCreate(&handle, 1 << 20, &prop, 0), CUDA_SUCCESS);
   ASSERT_EQ(cuMemMap(0x10000000, 1 << 20, 0, handle, 0), CUDA_SUCCESS);
+  int ticket = -1;
+  ASSERT_EQ(cuMemExportToShareableHandle(&ticket, handle, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0), CUDA_SUCCESS);
+  close(ticket);
   fakeFailNext("cuMemcpyDtoHAsync_v2");
   Outcome prepare = coordinate("--prepare", checkpoint, {getpid()});
   EXPECT_NE(prepare.status, 0);
