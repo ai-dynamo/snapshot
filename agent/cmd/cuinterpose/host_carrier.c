@@ -514,6 +514,23 @@ cuinterpose_host_carrier_load(
         *error = "cannot create fresh device memory for a creator allocation";
         return -1;
       }
+      if (operation.fresh[index] == 0) {
+        CUmemGenericAllocationHandle replacement = 0;
+
+        /* r615 can return zero after restore, but the shim reserves it as
+         * its absent-handle sentinel. Keep it live until a distinct handle
+         * has been allocated. */
+        if (create(
+                &replacement, allocations[index].size,
+                &allocations[index].properties, 0) != CUDA_SUCCESS ||
+            replacement == 0 || release(operation.fresh[index]) != CUDA_SUCCESS) {
+          if (replacement != 0)
+            (void)release(replacement);
+          *error = "cannot replace a zero-valued restored allocation handle";
+          return -1;
+        }
+        operation.fresh[index] = replacement;
+      }
     }
     if (map_staging_range(
             &allocations[begin], &operation.fresh[begin], end - begin, batch_bytes,

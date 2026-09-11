@@ -1023,6 +1023,8 @@ DoCustomStorage(int pid, bool checkpoint, const std::string &device_map,
       transfer_result.orchestration_seconds;
 
   size_t transferred_bytes = 0;
+  size_t storage_bytes = 0;
+  size_t zero_bytes_skipped = 0;
   double setup_service_seconds = 0.0;
   double pipeline_service_seconds = 0.0;
   double storage_service_seconds = 0.0;
@@ -1036,6 +1038,15 @@ DoCustomStorage(int pid, bool checkpoint, const std::string &device_map,
       return post_handle_failure(CUDA_ERROR_OPERATING_SYSTEM);
     }
     transferred_bytes += metrics.bytes;
+    if (metrics.storage_bytes >
+            std::numeric_limits<size_t>::max() - storage_bytes ||
+        metrics.zero_bytes_skipped >
+            std::numeric_limits<size_t>::max() - zero_bytes_skipped) {
+      std::fprintf(stderr, "custom storage byte telemetry overflow\n");
+      return post_handle_failure(CUDA_ERROR_OPERATING_SYSTEM);
+    }
+    storage_bytes += metrics.storage_bytes;
+    zero_bytes_skipped += metrics.zero_bytes_skipped;
     setup_service_seconds += metrics.setup_seconds;
     pipeline_service_seconds += metrics.pipeline_seconds;
     storage_service_seconds += metrics.storage_seconds;
@@ -1051,27 +1062,24 @@ DoCustomStorage(int pid, bool checkpoint, const std::string &device_map,
     return post_handle_failure(CUDA_ERROR_OPERATING_SYSTEM);
   }
   const auto post_transfer_validation_start = Clock::now();
-  if (checkpoint &&
-      !storage::ValidateExtentFiles(storage_dir, manifest, &manifest_error)) {
-    std::fprintf(stderr, "custom storage extent validation failed: %s\n",
-                 manifest_error.c_str());
-    return post_handle_failure(CUDA_ERROR_OPERATING_SYSTEM);
-  }
-  std::vector<std::string> extent_digests;
-  if (!ComputeExtentDigests(storage_dir, transfer_jobs, manifest,
-                            &extent_digests, &manifest_error)) {
-    std::fprintf(stderr, "custom storage digest computation failed: %s\n",
-                 manifest_error.c_str());
-    return post_handle_failure(CUDA_ERROR_OPERATING_SYSTEM);
-  }
-  if (!storage::ApplyOrVerifyExtentDigests(
-          checkpoint, transfer_jobs, extent_digests, &manifest,
-          &manifest_error)) {
-    std::fprintf(stderr, "%s\n", manifest_error.c_str());
-    return post_handle_failure(CUDA_ERROR_OPERATING_SYSTEM);
-  }
-
   if (checkpoint) {
+    if (!storage::ValidateExtentFiles(storage_dir, manifest, &manifest_error)) {
+      std::fprintf(stderr, "custom storage extent validation failed: %s\n",
+                   manifest_error.c_str());
+      return post_handle_failure(CUDA_ERROR_OPERATING_SYSTEM);
+    }
+    std::vector<std::string> extent_digests;
+    if (!ComputeExtentDigests(storage_dir, transfer_jobs, manifest,
+                              &extent_digests, &manifest_error)) {
+      std::fprintf(stderr, "custom storage digest computation failed: %s\n",
+                   manifest_error.c_str());
+      return post_handle_failure(CUDA_ERROR_OPERATING_SYSTEM);
+    }
+    if (!storage::ApplyOrVerifyExtentDigests(
+            true, transfer_jobs, extent_digests, &manifest, &manifest_error)) {
+      std::fprintf(stderr, "%s\n", manifest_error.c_str());
+      return post_handle_failure(CUDA_ERROR_OPERATING_SYSTEM);
+    }
     if (!storage::WriteManifest(storage_dir, manifest, &manifest_error)) {
       std::fprintf(stderr, "custom storage manifest write failed: %s\n",
                    manifest_error.c_str());
@@ -1133,6 +1141,7 @@ DoCustomStorage(int pid, bool checkpoint, const std::string &device_map,
       stdout,
       "{\"event\":\"cuda_custom_storage_transfer\",\"schema_version\":1,"
       "\"operation\":\"%s\",\"devices\":%zu,\"bytes\":%zu,"
+      "\"storage_bytes\":%zu,\"zero_bytes_skipped\":%zu,"
       "\"duration_seconds\":%.6f,\"effective_gib_per_second\":%.6f,"
       "\"transfer_buffer_count\":%zu,\"transfer_chunk_bytes\":%zu,"
       "\"pinned_bytes\":%zu,\"setup_service_seconds\":%.6f,"
@@ -1162,6 +1171,7 @@ DoCustomStorage(int pid, bool checkpoint, const std::string &device_map,
       "\"primary_context_release_status\":%d,"
       "\"context_lifecycle\":\"%s\"}\n",
       checkpoint ? "checkpoint" : "restore", manifest.size(), total_bytes,
+      storage_bytes, zero_bytes_skipped,
       seconds, gib_per_second, transfer_options.buffer_count,
       transfer_options.chunk_bytes, pinned_bytes, setup_service_seconds,
       pipeline_service_seconds, storage_service_seconds,
@@ -1331,11 +1341,17 @@ CustomStorageResult DoCustomStorageBatch(
   }
 
   size_t transferred_bytes = 0;
+  size_t storage_bytes = 0;
+  size_t zero_bytes_skipped = 0;
   double storage_service_seconds = 0.0;
   double cuda_wait_service_seconds = 0.0;
   for (const auto &metrics : transfer_result.metrics) {
     if (metrics.bytes >
-        std::numeric_limits<size_t>::max() - transferred_bytes) {
+            std::numeric_limits<size_t>::max() - transferred_bytes ||
+        metrics.storage_bytes >
+            std::numeric_limits<size_t>::max() - storage_bytes ||
+        metrics.zero_bytes_skipped >
+            std::numeric_limits<size_t>::max() - zero_bytes_skipped) {
       std::fprintf(stderr, "%s batch transferred byte count overflow\n",
                    operation_name);
       for (auto &target : prepared) {
@@ -1346,6 +1362,8 @@ CustomStorageResult DoCustomStorageBatch(
               .fatal = true};
     }
     transferred_bytes += metrics.bytes;
+    storage_bytes += metrics.storage_bytes;
+    zero_bytes_skipped += metrics.zero_bytes_skipped;
     storage_service_seconds += metrics.storage_seconds;
     cuda_wait_service_seconds += metrics.cuda_wait_seconds;
   }
@@ -1378,6 +1396,9 @@ CustomStorageResult DoCustomStorageBatch(
   };
 
   for (auto &target : prepared) {
+    if (!checkpoint) {
+      continue;
+    }
     std::vector<std::string> extent_digests;
     std::string digest_error;
     if (checkpoint &&
@@ -1537,6 +1558,7 @@ CustomStorageResult DoCustomStorageBatch(
       "{\"event\":\"cuda_custom_storage_%s_batch\","
       "\"schema_version\":1,\"targets\":%zu,\"transfer_jobs\":%zu,"
       "\"bytes\":%zu,\"duration_seconds\":%.6f,"
+      "\"storage_bytes\":%zu,\"zero_bytes_skipped\":%zu,"
       "\"effective_gib_per_second\":%.6f,"
       "\"transfer_buffer_count\":%zu,\"transfer_chunk_bytes\":%zu,"
       "\"pinned_bytes\":%zu,\"storage_service_seconds\":%.6f,"
@@ -1557,6 +1579,7 @@ CustomStorageResult DoCustomStorageBatch(
       "\"context_lifecycle\":\"target_identity\"}\n",
       operation_name, prepared.size(), transfers.size(), total_bytes,
       batch_transfer_seconds,
+      storage_bytes, zero_bytes_skipped,
       gib_per_second, options.buffer_count, options.chunk_bytes,
       total_pinned_bytes, storage_service_seconds, cuda_wait_service_seconds,
       transfer_result.orchestration_seconds, prepare_wall_seconds,

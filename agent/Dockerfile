@@ -93,6 +93,8 @@ COPY cmd/cuda-checkpoint-helper/transfer_scheduler.h ./cmd/cuda-checkpoint-helpe
 COPY cmd/cuda-checkpoint-helper/transfer_scheduler_test.cpp ./cmd/cuda-checkpoint-helper/transfer_scheduler_test.cpp
 COPY cmd/cuda-checkpoint-helper/restore_batch_order.h ./cmd/cuda-checkpoint-helper/restore_batch_order.h
 COPY cmd/cuda-checkpoint-helper/restore_batch_order_test.cpp ./cmd/cuda-checkpoint-helper/restore_batch_order_test.cpp
+COPY cmd/cuda-checkpoint-helper/zero_detection.h ./cmd/cuda-checkpoint-helper/zero_detection.h
+COPY cmd/cuda-checkpoint-helper/zero_detection_test.cpp ./cmd/cuda-checkpoint-helper/zero_detection_test.cpp
 
 RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread \
       -o /cuda-checkpoint-helper-no-transfer-adapter \
@@ -366,6 +368,8 @@ COPY cmd/cuda-checkpoint-helper/transfer_backend_unavailable.cpp ./cmd/cuda-chec
 COPY cmd/cuda-checkpoint-helper/transfer_scheduler_test.cpp ./cmd/cuda-checkpoint-helper/transfer_scheduler_test.cpp
 COPY cmd/cuda-checkpoint-helper/restore_batch_order.h ./cmd/cuda-checkpoint-helper/restore_batch_order.h
 COPY cmd/cuda-checkpoint-helper/restore_batch_order_test.cpp ./cmd/cuda-checkpoint-helper/restore_batch_order_test.cpp
+COPY cmd/cuda-checkpoint-helper/zero_detection.h ./cmd/cuda-checkpoint-helper/zero_detection.h
+COPY cmd/cuda-checkpoint-helper/zero_detection_test.cpp ./cmd/cuda-checkpoint-helper/zero_detection_test.cpp
 COPY cmd/ns-bind-mount/main.c ./cmd/ns-bind-mount/main.c
 COPY cmd/cuinterpose/ ./cmd/cuinterpose/
 
@@ -432,6 +436,11 @@ RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
       ./cmd/cuda-checkpoint-helper/restore_batch_order_test.cpp \
     && /cuda-checkpoint-helper-restore-batch-order-test
 
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+      -o /cuda-checkpoint-helper-zero-detection-test \
+      ./cmd/cuda-checkpoint-helper/zero_detection_test.cpp \
+    && /cuda-checkpoint-helper-zero-detection-test
+
 # ns-bind-mount bind-mounts the snapshot binaries into a target container's mount
 # namespace. It needs no CUDA headers, only mount_setattr (Linux 5.12+).
 RUN gcc -O2 -Wall -Wextra -o /ns-bind-mount ./cmd/ns-bind-mount/main.c
@@ -468,6 +477,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-protobuf \
     libgnutls28-dev \
+    liblz4-dev \
     libnftables-dev \
     uuid-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -478,7 +488,8 @@ RUN git init /tmp/criu \
     && git fetch --depth 1 origin ${CRIU_REF} \
     && git checkout FETCH_HEAD \
     && make -j$(nproc) \
-    && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
+    && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin \
+    && ldd /criu-install/usr/local/sbin/criu | grep -q 'liblz4.so'
 
 COPY plugins/inet-remap/snapshot_inet_remap.c /tmp/snapshot_inet_remap.c
 RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \

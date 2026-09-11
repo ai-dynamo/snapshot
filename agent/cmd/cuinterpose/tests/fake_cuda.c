@@ -126,6 +126,8 @@ static struct fake_handle handles[FAKE_MAX_HANDLES];
 static struct fake_mapping mappings[FAKE_MAX_MAPPINGS];
 static int export_calls;
 static int access_calls;
+static int zero_next_create;
+static int zero_handle_index = -1;
 static pthread_mutex_t model_lock = PTHREAD_MUTEX_INITIALIZER;
 
 void
@@ -147,6 +149,8 @@ fakeResetModel(void)
   memset(host_ranges, 0, sizeof(host_ranges));
   export_calls = 0;
   access_calls = 0;
+  zero_next_create = 0;
+  zero_handle_index = -1;
   copied_to_host = 0;
   copied_to_device = 0;
   fail_next[0] = '\0';
@@ -156,9 +160,19 @@ fakeResetModel(void)
 static int
 handle_index(CUmemGenericAllocationHandle handle)
 {
+  if (handle == 0)
+    return zero_handle_index;
   if (handle < FAKE_HANDLE_BASE || handle >= FAKE_HANDLE_BASE + FAKE_MAX_HANDLES)
     return -1;
   return (int)(handle - FAKE_HANDLE_BASE);
+}
+
+void
+fakeZeroNextCreate(void)
+{
+  pthread_mutex_lock(&model_lock);
+  zero_next_create = 1;
+  pthread_mutex_unlock(&model_lock);
 }
 
 /* Caller holds model_lock. */
@@ -292,6 +306,13 @@ fakeCuMemCreate(
     pthread_mutex_unlock(&model_lock);
     if (handle == 0)
       return CUDA_ERROR_OUT_OF_MEMORY;
+    pthread_mutex_lock(&model_lock);
+    if (zero_next_create) {
+      zero_next_create = 0;
+      zero_handle_index = handle_index(handle);
+      handle = 0;
+    }
+    pthread_mutex_unlock(&model_lock);
     *output = handle;
     return CUDA_SUCCESS;
   }
@@ -323,6 +344,8 @@ fakeCuMemRelease(CUmemGenericAllocationHandle handle)
       return CUDA_ERROR_INVALID_HANDLE;
     }
     handles[index].used = 0;
+    if (handle == 0)
+      zero_handle_index = -1;
     if (--allocations[handles[index].allocation].refs == 0)
       allocations[handles[index].allocation].used = 0;
     pthread_mutex_unlock(&model_lock);

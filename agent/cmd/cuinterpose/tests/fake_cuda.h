@@ -92,6 +92,8 @@ int fakeRegisteredHostRanges(void);
 void fakeForgetHostRegistrations(void);
 /* Fail the next call to the named entry point once, with CUDA_ERROR_UNKNOWN. */
 void fakeFailNext(const char* function);
+/* Make the next successful cuMemCreate return a valid zero-valued handle. */
+void fakeZeroNextCreate(void);
 /* The fake's notion of the current context, changed by cuCtxSetCurrent. */
 CUcontext fakeCurrentContext(void);
 /* cuDevicePrimaryCtxRetain calls since the last model reset, and retains not yet released. */

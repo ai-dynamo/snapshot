@@ -209,6 +209,26 @@ TEST_F(Lifecycle, PrepareAndRestoreAcrossTwoProcesses) {
   EXPECT_EQ(fakeLiveAllocations(), 0);
 }
 
+TEST_F(Lifecycle, RestoreReplacesValidZeroHandleWithoutLeakingIt) {
+  CUmemAllocationProp prop = posix_props();
+  CUmemGenericAllocationHandle allocation = 0;
+  ASSERT_EQ(cuMemCreate(&allocation, 1 << 20, &prop, 0), CUDA_SUCCESS);
+  ASSERT_EQ(cuMemMap(0x10000000, 1 << 20, 0, allocation, 0), CUDA_SUCCESS);
+
+  Outcome prepare = coordinate("--prepare", checkpoint, {getpid()});
+  ASSERT_EQ(prepare.status, 0) << prepare.err << prepare.out;
+  EXPECT_EQ(fakeLiveAllocations(), 0);
+  fakeZeroNextCreate();
+  Outcome restore = coordinate("--restore", checkpoint, {getpid()});
+  ASSERT_EQ(restore.status, 0) << restore.err << restore.out;
+  EXPECT_EQ(fakeLiveAllocations(), 1);
+  EXPECT_EQ(fakeCopiedToDevice(), uint64_t{1 << 20});
+  EXPECT_EQ(cuMemUnmap(0x10000000, 1 << 20), CUDA_SUCCESS);
+  EXPECT_EQ(cuMemRelease(allocation), CUDA_SUCCESS);
+  EXPECT_EQ(fakeLiveAllocations(), 0);
+  EXPECT_EQ(stats().allocations, 0u);
+}
+
 TEST_F(Lifecycle, PrepareIsRefusedWhileARawImportIsAlive) {
   int foreign = memfd_create("foreign", MFD_CLOEXEC);
   ASSERT_EQ(write(foreign, "x", 1), 1);
