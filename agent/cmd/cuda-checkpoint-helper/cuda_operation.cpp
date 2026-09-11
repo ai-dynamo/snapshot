@@ -1330,6 +1330,53 @@ CustomStorageResult DoCustomStorageBatch(
             .fatal = true};
   }
 
+  size_t transferred_bytes = 0;
+  double storage_service_seconds = 0.0;
+  double cuda_wait_service_seconds = 0.0;
+  for (const auto &metrics : transfer_result.metrics) {
+    if (metrics.bytes >
+        std::numeric_limits<size_t>::max() - transferred_bytes) {
+      std::fprintf(stderr, "%s batch transferred byte count overflow\n",
+                   operation_name);
+      for (auto &target : prepared) {
+        (void)FailPreparedTarget(target.get(), CUDA_ERROR_OPERATING_SYSTEM);
+      }
+      return {.status = CUDA_ERROR_OPERATING_SYSTEM,
+              .operation = {},
+              .fatal = true};
+    }
+    transferred_bytes += metrics.bytes;
+    storage_service_seconds += metrics.storage_seconds;
+    cuda_wait_service_seconds += metrics.cuda_wait_seconds;
+  }
+  if (transferred_bytes != total_bytes) {
+    std::fprintf(stderr,
+                 "%s batch transfer coverage mismatch: transferred=%zu "
+                 "expected=%zu\n",
+                 operation_name, transferred_bytes, total_bytes);
+    for (auto &target : prepared) {
+      (void)FailPreparedTarget(target.get(), CUDA_ERROR_OPERATING_SYSTEM);
+    }
+    return {.status = CUDA_ERROR_OPERATING_SYSTEM,
+            .operation = {},
+            .fatal = true};
+  }
+
+  const auto remove_checkpoint_manifests = [&prepared, checkpoint] {
+    if (!checkpoint) {
+      return;
+    }
+    for (const auto &target : prepared) {
+      std::string remove_error;
+      if (!storage::RemoveManifest(target->storage_dir, &remove_error)) {
+        std::fprintf(
+            stderr,
+            "failed to remove checkpoint batch manifest for pid %u: %s\n",
+            target->request->pid, remove_error.c_str());
+      }
+    }
+  };
+
   for (auto &target : prepared) {
     std::vector<std::string> extent_digests;
     std::string digest_error;
@@ -1339,20 +1386,6 @@ CustomStorageResult DoCustomStorageBatch(
       std::fprintf(stderr,
                    "checkpoint batch extent validation failed for pid %u: "
                    "%s\n",
-                   target->request->pid, digest_error.c_str());
-      for (auto &remaining : prepared) {
-        (void)FailPreparedTarget(remaining.get(),
-                                 CUDA_ERROR_OPERATING_SYSTEM);
-      }
-      return {.status = CUDA_ERROR_OPERATING_SYSTEM,
-              .operation = target->operation,
-              .fatal = true};
-    }
-    if (checkpoint &&
-        !storage::WriteManifest(target->storage_dir, target->manifest,
-                                &digest_error)) {
-      std::fprintf(stderr,
-                   "checkpoint batch manifest write failed for pid %u: %s\n",
                    target->request->pid, digest_error.c_str());
       for (auto &remaining : prepared) {
         (void)FailPreparedTarget(remaining.get(),
@@ -1394,9 +1427,26 @@ CustomStorageResult DoCustomStorageBatch(
     }
   }
 
-  size_t transferred_bytes = 0;
-  double storage_service_seconds = 0.0;
-  double cuda_wait_service_seconds = 0.0;
+  if (checkpoint) {
+    for (auto &target : prepared) {
+      std::string manifest_error;
+      if (!storage::WriteManifest(target->storage_dir, target->manifest,
+                                  &manifest_error)) {
+        std::fprintf(stderr,
+                     "checkpoint batch manifest write failed for pid %u: %s\n",
+                     target->request->pid, manifest_error.c_str());
+        remove_checkpoint_manifests();
+        for (auto &remaining : prepared) {
+          (void)FailPreparedTarget(remaining.get(),
+                                   CUDA_ERROR_OPERATING_SYSTEM);
+        }
+        return {.status = CUDA_ERROR_OPERATING_SYSTEM,
+                .operation = target->operation,
+                .fatal = true};
+      }
+    }
+  }
+
   double storage_directory_validation_service_seconds = 0.0;
   double device_enumeration_service_seconds = 0.0;
   double primary_context_retain_service_seconds = 0.0;
@@ -1419,34 +1469,6 @@ CustomStorageResult DoCustomStorageBatch(
         target->target_context_discovery_seconds;
     metadata_job_construction_service_seconds +=
         target->metadata_job_construction_seconds;
-  }
-  for (const auto &metrics : transfer_result.metrics) {
-    if (metrics.bytes >
-        std::numeric_limits<size_t>::max() - transferred_bytes) {
-      std::fprintf(stderr, "%s batch transferred byte count overflow\n",
-                   operation_name);
-      for (auto &target : prepared) {
-        (void)FailPreparedTarget(target.get(), CUDA_ERROR_OPERATING_SYSTEM);
-      }
-      return {.status = CUDA_ERROR_OPERATING_SYSTEM,
-              .operation = {},
-              .fatal = true};
-    }
-    transferred_bytes += metrics.bytes;
-    storage_service_seconds += metrics.storage_seconds;
-    cuda_wait_service_seconds += metrics.cuda_wait_seconds;
-  }
-  if (transferred_bytes != total_bytes) {
-    std::fprintf(stderr,
-                 "%s batch transfer coverage mismatch: transferred=%zu "
-                 "expected=%zu\n",
-                 operation_name, transferred_bytes, total_bytes);
-    for (auto &target : prepared) {
-      (void)FailPreparedTarget(target.get(), CUDA_ERROR_OPERATING_SYSTEM);
-    }
-    return {.status = CUDA_ERROR_OPERATING_SYSTEM,
-            .operation = {},
-            .fatal = true};
   }
 
   const auto operation_complete_start = Clock::now();
@@ -1475,6 +1497,7 @@ CustomStorageResult DoCustomStorageBatch(
       std::fprintf(stderr,
                    "%s batch CUDA operation completion failed for pid %u\n",
                    operation_name, target->request->pid);
+      remove_checkpoint_manifests();
       for (auto &remaining : prepared) {
         (void)remaining->operation_contexts->ReleaseAll();
       }
