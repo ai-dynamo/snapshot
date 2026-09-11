@@ -611,7 +611,7 @@ COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-
 # the same path on restore, because CRIU restores file-backed mappings by path.
 COPY --from=cuda-helper-builder /cuinterpose-build/libcuinterpose.so /snapshot-binaries/snapshot-cuda/libcuinterpose.so
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /snapshot-binaries/snapshot-cuda/cuda-checkpoint
-RUN chmod 0755 /snapshot-binaries/snapshot-cuda/libcuinterpose.so \
+RUN chmod 0644 /snapshot-binaries/snapshot-cuda/libcuinterpose.so \
     && chmod +x /snapshot-binaries/snapshot-cuda/cuda-checkpoint
 COPY --from=cuda-helper-builder /cuinterpose-build/cuinterpose-coordinator /snapshot-binaries/cuinterpose-coordinator
 
