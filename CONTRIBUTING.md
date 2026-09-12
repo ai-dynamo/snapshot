@@ -160,6 +160,13 @@ git config user.email "jane@example.com"
 **Unsigned commits fail the DCO check**, and the pull request cannot be merged
 until every commit carries a valid `Signed-off-by` trailer.
 
+## Snapshot Enhancement Proposals
+
+For a substantial new capability, public API change, or architectural change,
+start a [Snapshot Enhancement Proposal (SEP)](docs/proposals/README.md) before
+implementation. An SEP records the motivation, design, trade-offs, and test
+plan so maintainers and contributors can discuss the direction early.
+
 ### Fixing a missing sign-off
 
 If you forgot to sign off, you can amend the most recent commit:

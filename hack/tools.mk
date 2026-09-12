@@ -8,6 +8,7 @@ HELM_VERSION           ?= v3.17.3
 # Protobuf's v21.12 release reports itself as libprotoc 3.21.12.
 override PROTOC_VERSION := 3.21.12
 PROTOC_RELEASE := 21.12
+MDTOC_VERSION          ?= latest
 
 # Install tools into an explicit bin dir and put it ahead on PATH so callers
 # (including submakes) resolve the pinned binaries. Defaults to GOPATH/bin.
@@ -24,6 +25,7 @@ ADDLICENSE     := $(TOOLS_BIN_DIR)/addlicense
 GOVULNCHECK    := $(TOOLS_BIN_DIR)/govulncheck
 HELM           := $(TOOLS_BIN_DIR)/helm
 PROTOC         := $(TOOLS_BIN_DIR)/protoc
+MDTOC          := $(TOOLS_BIN_DIR)/mdtoc
 
 # A tool that type-checks our source has to be built with at least our Go
 # version: golangci-lint refuses to start when it was built with an older one,
@@ -57,7 +59,7 @@ $(HELM):
 
 $(PROTOC):
 	@set -e; mkdir -p $(TOOLS_BIN_DIR); tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
- curl -fsSL --retry 3 --connect-timeout 10 --max-time 120 https://github.com/protocolbuffers/protobuf/releases/download/v$(PROTOC_RELEASE)/protoc-$(PROTOC_RELEASE)-linux-x86_64.zip -o "$$tmp/protoc.zip"; \
+	 curl -fsSL --retry 3 --connect-timeout 10 --max-time 120 https://github.com/protocolbuffers/protobuf/releases/download/v$(PROTOC_RELEASE)/protoc-$(PROTOC_RELEASE)-linux-x86_64.zip -o "$$tmp/protoc.zip"; \
  echo '3a4c1e5f2516c639d3079b1586e703fc7bcfa2136d58bda24d1d54f949c315e8  '"$$tmp/protoc.zip" | sha256sum -c -; \
 	 unzip -q "$$tmp/protoc.zip" -d "$$tmp"; \
 	 install -m 755 "$$tmp/bin/protoc" $(PROTOC)
@@ -66,5 +68,8 @@ $(PROTOC):
 protoc: $(PROTOC)
 	@test "$$($(PROTOC) --version)" = "libprotoc $(PROTOC_VERSION)"
 
+$(MDTOC):
+	GOBIN=$(TOOLS_BIN_DIR) GOWORK=off go install sigs.k8s.io/mdtoc@$(MDTOC_VERSION)
+
 .PHONY: install-tools
-install-tools: $(CONTROLLER_GEN) $(GOLANGCI_LINT) $(ADDLICENSE) $(GOVULNCHECK) $(HELM)
+install-tools: $(CONTROLLER_GEN) $(GOLANGCI_LINT) $(ADDLICENSE) $(GOVULNCHECK) $(HELM) $(MDTOC)

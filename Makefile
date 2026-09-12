@@ -22,7 +22,7 @@ AGENT_BASE_IMAGE ?= $(shell sed -n 's/^ARG AGENT_BASE_IMAGE=//p' agent/Dockerfil
 # whatever the buildx builder defaults to.
 AGENT_PLATFORM ?= linux/amd64
 
-.PHONY: tidy generate test build lint verify-generate verify-crds check fmt add-license-headers \
+.PHONY: tidy generate test build lint verify-generate verify-crds verify-toc update-toc check fmt add-license-headers \
         verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator capture-base-packages verify-base-packages \
         linux-build linux-test pagebroker-check-generated
 
@@ -77,7 +77,7 @@ verify-crds:
 # install-tools makes controller-gen/golangci-lint/addlicense/helm available to
 # the stages before they run. govulncheck + helm-lint are read-only, so they run
 # after the mutating stages and before the clean-tree assert.
-check: verify-crds install-tools generate pagebroker-check-generated add-license-headers fmt tidy verify-license-headers lint govulncheck helm-lint
+check: verify-crds install-tools generate pagebroker-check-generated add-license-headers fmt tidy verify-license-headers lint govulncheck helm-lint verify-toc
 	@test -z "$$(git status --porcelain)" || \
 	  (echo "ERROR: tree dirty after check — commit the changes below"; git status --porcelain; git diff; exit 1)
 
@@ -93,6 +93,15 @@ helm-lint: $(HELM)
 
 pagebroker-check-generated:
 	$(MAKE) -C agent pagebroker-check-generated
+
+# Refresh or check the generated tables of contents in Snapshot Enhancement
+# Proposals. Keeping this separate makes authoring proposals convenient while
+# ensuring CI catches a stale TOC.
+update-toc: $(MDTOC)
+	@sh hack/update-toc.sh
+
+verify-toc: $(MDTOC)
+	@sh hack/verify-toc.sh
 
 # Run build/test inside a Linux container (local dev only; CI runs on Linux natively).
 linux-build:
