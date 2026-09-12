@@ -39,6 +39,23 @@ double ElapsedSeconds(Clock::time_point start) {
   return std::chrono::duration<double>(Clock::now() - start).count();
 }
 
+bool RestoreDirectIO(bool *enabled, std::string *error) {
+  // Environment is process-start configuration, not a per-request setting.
+  static const auto config = [] {
+    struct Config {
+      bool enabled = false;
+      std::string error;
+    } result;
+    const char *value = std::getenv("SNAPSHOT_CUDA_RESTORE_DIRECT_IO");
+    (void)ParseRestoreDirectIO(value == nullptr ? "" : value, &result.enabled,
+                               &result.error);
+    return result;
+  }();
+  *enabled = config.enabled;
+  *error = config.error;
+  return error->empty();
+}
+
 void AppendError(std::string *error, const std::string &detail) {
   if (!error->empty()) {
     *error += "; ";
@@ -229,6 +246,7 @@ private:
 };
 
 bool OpenStorageFiles(const StorageLayout &storage, TransferOperation operation,
+                      bool direct_io,
                       std::vector<FileDescriptor> *files, std::string *error) {
   files->clear();
   files->reserve(storage.files.size());
@@ -275,7 +293,8 @@ bool OpenStorageFiles(const StorageLayout &storage, TransferOperation operation,
       parent_fd = parents.back().get();
     }
     FileDescriptor descriptor(openat(parent_fd, normalized.filename().c_str(),
-                                     StorageFileOpenFlags(operation), 0600));
+                                     StorageFileOpenFlags(operation, direct_io),
+                                     0600));
     if (descriptor.get() < 0) {
       *error = "open storage file " + std::to_string(index) +
                " failed: " + std::strerror(errno);
@@ -782,7 +801,10 @@ bool TransferExtent(CUdeviceptr device_ptr, size_t extent_size, CUstream stream,
   const auto total_start = Clock::now();
 
   std::vector<TransferChunk> chunks;
-  if (!BuildTransferChunks(extent_size, storage, options, &chunks, error)) {
+  if ((operation == TransferOperation::kRestore &&
+       !RestoreDirectIO(&metrics->direct_io, error)) ||
+      !BuildTransferChunks(extent_size, storage, options, &chunks, error,
+                           metrics->direct_io)) {
     if (cancellation != nullptr) {
       cancellation->Cancel();
     }
@@ -841,7 +863,7 @@ bool TransferExtent(CUdeviceptr device_ptr, size_t extent_size, CUstream stream,
   }
 
   std::vector<FileDescriptor> files;
-  if (!OpenStorageFiles(storage, operation, &files, error)) {
+  if (!OpenStorageFiles(storage, operation, metrics->direct_io, &files, error)) {
     if (cancellation != nullptr) {
       cancellation->Cancel();
     }

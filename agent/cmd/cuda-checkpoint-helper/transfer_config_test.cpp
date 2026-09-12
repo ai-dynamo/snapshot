@@ -23,12 +23,68 @@ bool Check(bool condition, const std::string &message) {
   return condition;
 }
 
+bool TestDirectRestoreSetting() {
+  bool enabled = true;
+  std::string error;
+  for (const char *value : {"", "0", "1"}) {
+    if (!Check(transfer::ParseRestoreDirectIO(value, &enabled, &error), error) ||
+        !Check(enabled == (std::string(value) == "1"),
+               "direct restore setting was parsed incorrectly")) {
+      return false;
+    }
+  }
+  return Check(!transfer::ParseRestoreDirectIO("true", &enabled, &error),
+               "ambiguous direct restore setting was accepted");
+}
+
+bool TestDirectRestoreRejectsUnalignedLayouts() {
+  std::vector<transfer::TransferChunk> chunks;
+  std::string error;
+  const transfer::TransferOptions options{2, transfer::kMinimumChunkBytes};
+  const transfer::StorageLayout aligned{
+      {{"/tmp/a", 8192}}, {{0, 8192, 0, 0}},
+  };
+  const transfer::StorageLayout tail{
+      {{"/tmp/a", 8193}}, {{0, 8193, 0, 0}},
+  };
+  // A valid reordered layout whose first range starts at an unaligned offset.
+  const transfer::StorageLayout offset{
+      {{"/tmp/a", 8193}}, {{0, 4096, 0, 4097}, {4096, 4097, 0, 0}},
+  };
+  if (!Check(transfer::BuildTransferChunks(8192, aligned, options, &chunks,
+                                           &error, true), error) ||
+      !Check(transfer::BuildTransferChunks(8193, tail, options, &chunks,
+                                           &error), error) ||
+      !Check(transfer::BuildTransferChunks(8193, offset, options, &chunks,
+                                           &error), error) ||
+      !Check(!transfer::BuildTransferChunks(8193, tail, options, &chunks,
+                                            &error, true),
+             "unaligned final read accepted in direct mode") ||
+      !Check(error.find("4096-byte aligned") != std::string::npos, error) ||
+      !Check(!transfer::BuildTransferChunks(8193, offset, options, &chunks,
+                                            &error, true),
+             "unaligned file offset accepted in direct mode")) {
+    return false;
+  }
+  return Check(error.find("4096-byte aligned") != std::string::npos, error);
+}
+
 bool TestStorageOpenModePolicy() {
   const int restore_flags =
       transfer::StorageFileOpenFlags(transfer::TransferOperation::kRestore);
   const int checkpoint_flags =
       transfer::StorageFileOpenFlags(transfer::TransferOperation::kCheckpoint);
-  return Check((restore_flags & O_ACCMODE) == O_RDONLY,
+  const int direct_restore_flags =
+      transfer::StorageFileOpenFlags(transfer::TransferOperation::kRestore, true);
+  return Check((restore_flags & O_DIRECT) == 0,
+               "default restore unexpectedly uses direct I/O") &&
+         Check(direct_restore_flags == (restore_flags | O_DIRECT),
+               "direct restore changed flags other than O_DIRECT") &&
+         Check(transfer::StorageFileOpenFlags(
+                   transfer::TransferOperation::kCheckpoint, true) ==
+                   checkpoint_flags,
+               "restore direct I/O option changed checkpoint flags") &&
+         Check((restore_flags & O_ACCMODE) == O_RDONLY,
                "restore storage is not opened read-only") &&
          Check((restore_flags & (O_CREAT | O_TRUNC)) == 0,
                "restore storage can be created or truncated") &&
@@ -213,6 +269,7 @@ bool TestJsonEscaping() {
 
 int main() {
   if (!TestOptionParsingAndBounds() || !TestPinnedMemoryCalculation() ||
+      !TestDirectRestoreSetting() || !TestDirectRestoreRejectsUnalignedLayouts() ||
       !TestStorageOpenModePolicy() || !TestChunkRingAndShardedLayout() ||
       !TestRelativeStorageLayoutRejected() ||
       !TestLayoutGapsAndOverflowRejected() || !TestJsonEscaping()) {

@@ -23,6 +23,7 @@ struct StorageFileMetrics {
 };
 
 struct TransferMetrics {
+  bool direct_io = false;
   size_t bytes = 0;
   size_t storage_bytes = 0;
   size_t zero_bytes_skipped = 0;

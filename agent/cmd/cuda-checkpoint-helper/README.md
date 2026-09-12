@@ -57,7 +57,7 @@ change the request, response, manifest, or transfer configuration contracts.
 
 Restore storage-service time sums request lifetimes, which overlap within an
 extent as well as across extents; it is not wall time. The transfer adapter
-still uses buffered NIXL POSIX AIO. Its submission calls can block on some
+defaults to buffered NIXL POSIX AIO. Its submission calls can block on some
 filesystems, so a configured read window does not guarantee concurrent device
 I/O. Requests are drained rather than actively canceled because the pinned
 POSIX backend's handle release does not drain queued AIO callbacks.
@@ -71,6 +71,28 @@ exit; destructors never touch the ambiguous request. Health reports the
 busy/overdue operation but keeps liveness successful during containment to
 avoid an unsafe watchdog restart. The agent sees a failed or timed-out RPC,
 never a successful restore.
+
+### Experimental direct restore reads
+
+Set `SNAPSHOT_CUDA_RESTORE_DIRECT_IO=1` on the helper process to open only
+restore payload files with `O_DIRECT`. Unset or `0` preserves buffered reads;
+other values fail restore validation. The setting is cached at the first
+restore transfer and must not be changed within a running helper. Checkpoint
+writes and metadata reads are unaffected. Transfer telemetry includes
+`storage_io_mode` (`direct` or `buffered`).
+
+Direct mode requires every file offset and range length to be a 4096-byte
+multiple; transfer chunk sizes and allocated pinned buffers already enforce
+4096-byte alignment. Layout rejection happens before buffer allocation,
+file opens, or NIXL submission. This is a conservative alignment policy, not
+filesystem capability detection. The filesystem must support aligned direct
+reads. There is no buffered retry: open errors fail the transfer, and native
+post/poll errors use the containment policy above, including `EINVAL` from a
+filesystem that accepts the open but rejects the read.
+
+Use a separate helper or benchmark process for A/B testing. Never restart a
+helper retaining contexts for a live restored workload just to change this
+setting. Stop those workloads and confirm their exit before replacing it.
 
 The interposer carries only actually shared VMM allocations (POSIX exports,
 imports, and multicast members). Private VMM allocations, mappings, and native

@@ -1037,7 +1037,9 @@ DoCustomStorage(int pid, bool checkpoint, const std::string &device_map,
   double cuda_wait_service_seconds = 0.0;
   double fsync_service_seconds = 0.0;
   double cleanup_service_seconds = 0.0;
+  bool direct_io = false;
   for (const auto &metrics : transfer_result.metrics) {
+    direct_io = direct_io || metrics.direct_io;
     if (metrics.bytes >
         std::numeric_limits<size_t>::max() - transferred_bytes) {
       std::fprintf(stderr, "custom storage transferred byte count overflow\n");
@@ -1147,6 +1149,7 @@ DoCustomStorage(int pid, bool checkpoint, const std::string &device_map,
       stdout,
       "{\"event\":\"cuda_custom_storage_transfer\",\"schema_version\":1,"
       "\"operation\":\"%s\",\"devices\":%zu,\"bytes\":%zu,"
+      "\"storage_io_mode\":\"%s\","
       "\"storage_bytes\":%zu,\"zero_bytes_skipped\":%zu,"
       "\"duration_seconds\":%.6f,\"effective_gib_per_second\":%.6f,"
       "\"transfer_buffer_count\":%zu,\"transfer_chunk_bytes\":%zu,"
@@ -1177,6 +1180,7 @@ DoCustomStorage(int pid, bool checkpoint, const std::string &device_map,
       "\"primary_context_release_status\":%d,"
       "\"context_lifecycle\":\"%s\"}\n",
       checkpoint ? "checkpoint" : "restore", manifest.size(), total_bytes,
+      direct_io ? "direct" : "buffered",
       storage_bytes, zero_bytes_skipped,
       seconds, gib_per_second, transfer_options.buffer_count,
       transfer_options.chunk_bytes, pinned_bytes, setup_service_seconds,
@@ -1351,7 +1355,9 @@ CustomStorageResult DoCustomStorageBatch(
   size_t zero_bytes_skipped = 0;
   double storage_service_seconds = 0.0;
   double cuda_wait_service_seconds = 0.0;
+  bool direct_io = false;
   for (const auto &metrics : transfer_result.metrics) {
+    direct_io = direct_io || metrics.direct_io;
     if (metrics.bytes >
             std::numeric_limits<size_t>::max() - transferred_bytes ||
         metrics.storage_bytes >
@@ -1564,6 +1570,7 @@ CustomStorageResult DoCustomStorageBatch(
       "{\"event\":\"cuda_custom_storage_%s_batch\","
       "\"schema_version\":1,\"targets\":%zu,\"transfer_jobs\":%zu,"
       "\"bytes\":%zu,\"duration_seconds\":%.6f,"
+      "\"storage_io_mode\":\"%s\","
       "\"storage_bytes\":%zu,\"zero_bytes_skipped\":%zu,"
       "\"effective_gib_per_second\":%.6f,"
       "\"transfer_buffer_count\":%zu,\"transfer_chunk_bytes\":%zu,"
@@ -1585,6 +1592,7 @@ CustomStorageResult DoCustomStorageBatch(
       "\"context_lifecycle\":\"target_identity\"}\n",
       operation_name, prepared.size(), transfers.size(), total_bytes,
       batch_transfer_seconds,
+      direct_io ? "direct" : "buffered",
       storage_bytes, zero_bytes_skipped,
       gib_per_second, options.buffer_count, options.chunk_bytes,
       total_pinned_bytes, storage_service_seconds, cuda_wait_service_seconds,

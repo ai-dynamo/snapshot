@@ -67,11 +67,13 @@ bool CalculatePinnedBytes(size_t device_count, const TransferOptions &options,
                           size_t *bytes, std::string *error);
 bool CalculateBatchPinnedBytes(const std::vector<size_t> &target_bytes,
                                size_t *bytes, std::string *error);
-int StorageFileOpenFlags(TransferOperation operation);
+bool ParseRestoreDirectIO(std::string_view value, bool *enabled,
+                          std::string *error);
+int StorageFileOpenFlags(TransferOperation operation, bool direct_io = false);
 bool BuildTransferChunks(size_t extent_size, const StorageLayout &storage,
                          const TransferOptions &options,
                          std::vector<TransferChunk> *chunks,
-                         std::string *error);
+                         std::string *error, bool direct_io = false);
 bool BuildContiguousStorageLayout(const std::filesystem::path &base_path,
                                   size_t extent_size, size_t file_count,
                                   StorageLayout *storage, std::string *error);

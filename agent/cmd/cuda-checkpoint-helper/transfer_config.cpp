@@ -122,17 +122,32 @@ bool CalculateBatchPinnedBytes(const std::vector<size_t> &target_bytes,
   return true;
 }
 
-int StorageFileOpenFlags(TransferOperation operation) {
+bool ParseRestoreDirectIO(std::string_view value, bool *enabled,
+                          std::string *error) {
+  if (enabled == nullptr || error == nullptr) {
+    return false;
+  }
+  if (value != "" && value != "0" && value != "1") {
+    *error = "SNAPSHOT_CUDA_RESTORE_DIRECT_IO must be unset, 0, or 1";
+    return false;
+  }
+  *enabled = value == "1";
+  return true;
+}
+
+int StorageFileOpenFlags(TransferOperation operation, bool direct_io) {
   const int access = operation == TransferOperation::kCheckpoint
                          ? O_RDWR | O_CREAT | O_TRUNC
                          : O_RDONLY;
-  return access | O_CLOEXEC | O_NOFOLLOW;
+  const int io_flags =
+      operation == TransferOperation::kRestore && direct_io ? O_DIRECT : 0;
+  return access | O_CLOEXEC | O_NOFOLLOW | io_flags;
 }
 
 bool BuildTransferChunks(size_t extent_size, const StorageLayout &storage,
                          const TransferOptions &options,
                          std::vector<TransferChunk> *chunks,
-                         std::string *error) {
+                         std::string *error, bool direct_io) {
   if (chunks == nullptr || error == nullptr ||
       !ValidateTransferOptions(options, error)) {
     return false;
@@ -164,6 +179,12 @@ bool BuildTransferChunks(size_t extent_size, const StorageLayout &storage,
         range.file_index >= storage.files.size()) {
       *error = "storage ranges must be nonempty and exactly cover the logical "
                "extent in order";
+      return false;
+    }
+    if (direct_io && (range.file_offset % kBufferAlignment != 0 ||
+                      range.size % kBufferAlignment != 0)) {
+      *error = "direct restore requires 4096-byte aligned file offsets and "
+               "range sizes";
       return false;
     }
     size_t logical_end = 0;
