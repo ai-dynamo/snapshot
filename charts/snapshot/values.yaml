@@ -101,6 +101,10 @@ pageBroker:
   command: []
   args: []
   maxConcurrentRequests: 16
+  # Hard admission bound for bytes reserved in PageBroker's staging area.
+  # This preserves the existing 256 GiB operational envelope while making
+  # concurrent staging fail before exhausting the sidecar's storage budget.
+  maxStagingBytes: "274877906944"
   resources:
     requests:
       cpu: 8

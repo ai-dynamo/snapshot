@@ -5,6 +5,7 @@
 
 #include <arpa/inet.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -27,6 +28,8 @@
 #include <vector>
 
 #include "broker.hpp"
+#include "cuda_engine.hpp"
+#include "daemon_connection.hpp"
 #include "file_descriptor.hpp"
 
 namespace fs = std::filesystem;
@@ -42,7 +45,7 @@ constexpr rlim_t kRequiredFileDescriptors = 4096;
 constexpr int kShutdownPollTimeoutMs = 1000;
 constexpr auto kAcceptRetryInitialDelay = std::chrono::milliseconds(10);
 constexpr auto kAcceptRetryMaxDelay = std::chrono::milliseconds(1000);
-constexpr auto kTransactionReapInterval = std::chrono::minutes(2);
+constexpr auto kCudaShutdownRetryDelay = std::chrono::milliseconds(100);
 volatile sig_atomic_t shutting_down;
 
 void
@@ -115,12 +118,27 @@ std::error_code
 PrepareDirectories(const fs::path& socket_path, const fs::path& staging_directory)
 {
   std::error_code error;
+  fs::remove(DaemonReadinessPath(socket_path), error);
+  if (error)
+    return error;
   fs::create_directories(socket_path.parent_path(), error);
   if (error)
     return error;
   fs::create_directories(staging_directory, error);
   return error;
 }
+
+class ReadinessWithdrawal final {
+ public:
+  explicit ReadinessWithdrawal(fs::path socket_path)
+      : socket_path_(std::move(socket_path)) {}
+  ReadinessWithdrawal(const ReadinessWithdrawal&) = delete;
+  ReadinessWithdrawal& operator=(const ReadinessWithdrawal&) = delete;
+  ~ReadinessWithdrawal() { WithdrawDaemonReadiness(socket_path_); }
+
+ private:
+  fs::path socket_path_;
+};
 
 std::error_code
 ConfigureConnection(int connection)
@@ -207,41 +225,73 @@ InvalidRequest()
   return response;
 }
 
+}  // namespace
+
 const char*
-CommandName(Request::CommandCase command)
+RequestCommandName(Request::CommandCase command)
 {
   switch (command) {
     case Request::kStagedRestore:
       return "staged_restore";
+    case Request::kDirectRestore:
+      return "direct_restore";
+    case Request::kReferenceRegularRestore:
+      return "reference_regular_restore";
     case Request::kPrepareStagedCheckpoint:
       return "prepare_staged_checkpoint";
     case Request::kCommit:
       return "commit";
     case Request::kAbort:
       return "abort";
+    case Request::kCudaCheckpoint:
+      return "cuda_checkpoint";
+    case Request::kCudaRestore:
+      return "cuda_restore";
+    case Request::kBeginRestore:
+      return "begin_restore";
+    case Request::kActivateRestore:
+      return "activate_restore";
+    case Request::kBeginCheckpoint:
+      return "begin_checkpoint";
     default:
       return "invalid";
   }
 }
 
 const char*
-ResultName(const Response& response)
+ResponseResultName(Request::CommandCase command, const Response& response)
 {
   switch (response.result_case()) {
     case Response::kStagedRestoreDirectory:
+      if (command == Request::kDirectRestore)
+        return "direct_restore_staged";
+      if (command == Request::kReferenceRegularRestore)
+        return "regular_restore_referenced";
       return "staged_restore";
     case Response::kStagedCheckpointDirectory:
       return "staged_checkpoint";
+    case Response::kDirectRestoreReady:
+      return "direct_restore_ready";
     case Response::kCommitComplete:
       return "committed";
     case Response::kAbortComplete:
       return "aborted";
     case Response::kFailure:
       return "failed";
+    case Response::kCudaOperationComplete:
+      return "cuda_complete";
+    case Response::kRestoreAdmissionGranted:
+      return "restore_admitted";
+    case Response::kCheckpointAdmissionGranted:
+      return "checkpoint_admitted";
+    case Response::kRestoreActivationGranted:
+      return "restore_activated";
     default:
       return "invalid";
   }
 }
+
+namespace {
 
 void
 HandleConnection(int connection, Broker& broker)
@@ -265,8 +315,9 @@ HandleConnection(int connection, Broker& broker)
       const auto duration =
           std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - request_start);
       std::osyncstream(std::cerr) << "transaction=" << request.transaction_id()
-                                  << " command=" << CommandName(request.command_case())
-                                  << " result=" << ResultName(response) << " duration_ms=" << duration.count()
+                                  << " command=" << RequestCommandName(request.command_case())
+                                  << " result=" << ResponseResultName(request.command_case(), response)
+                                  << " duration_ms=" << duration.count()
                                   << (response.has_failure() ? " error=" + response.failure().message() : "") << '\n';
     }
   }
@@ -321,18 +372,107 @@ WaitForHandlers(std::vector<std::future<void>>& handlers)
   for (auto& handler : handlers) WaitForHandler(handler);
 }
 
+}  // namespace
+
+fs::path
+DaemonReadinessPath(const fs::path& socket_path)
+{
+  return socket_path.string() + ".ready";
+}
+
+bool
+PublishDaemonReadiness(const fs::path& socket_path, std::error_code* error)
+{
+  const fs::path readiness_path = DaemonReadinessPath(socket_path);
+  FileDescriptor marker(open(readiness_path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600));
+  if (marker.get() < 0) {
+    if (error != nullptr)
+      *error = {errno, std::generic_category()};
+    return false;
+  }
+  if (error != nullptr)
+    error->clear();
+  return true;
+}
+
 void
-Serve(FileDescriptor& listener, Broker& broker, size_t max_concurrent_requests)
+WithdrawDaemonReadiness(const fs::path& socket_path)
+{
+  std::error_code ignored;
+  fs::remove(DaemonReadinessPath(socket_path), ignored);
+}
+
+ExitCode
+ProbeDaemonReady(const fs::path& socket_path)
+{
+  if (socket_path.string().size() >= sizeof(sockaddr_un::sun_path))
+    return ExitCode::INVALID_ARGUMENTS;
+  struct stat marker {};
+  if (lstat(DaemonReadinessPath(socket_path).c_str(), &marker) != 0 ||
+      !S_ISREG(marker.st_mode))
+    return ExitCode::FAILURE;
+
+  FileDescriptor connection(socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0));
+  if (connection.get() < 0)
+    return ExitCode::FAILURE;
+  sockaddr_un address {};
+  address.sun_family = AF_UNIX;
+  std::strcpy(address.sun_path, socket_path.c_str());
+  if (connect(connection.get(), reinterpret_cast<sockaddr*>(&address),
+              sizeof(address)) != 0)
+    return ExitCode::FAILURE;
+  // Closing without a request is intentionally silent in ServeConnection and
+  // cannot mutate broker state or trigger CUDA fail-stop.
+  return ExitCode::SUCCESS;
+}
+
+void
+ShutdownAndWaitForHandlers(Broker& broker,
+                           std::vector<std::future<void>>& handlers,
+                           const fs::path& readiness_socket_path)
+{
+  if (!readiness_socket_path.empty())
+    WithdrawDaemonReadiness(readiness_socket_path);
+  for (;;) {
+    std::string shutdown_error;
+    if (broker.BeginShutdownCuda(&shutdown_error))
+      break;
+    std::cerr << "begin PageBroker CUDA shutdown: " << shutdown_error << '\n';
+    // BeginShutdownCuda performs bounded identity checks. Retry them before
+    // joining handlers: a restore handler blocked in a worker RPC cannot
+    // unwind until a conclusive pass safely signals that worker. Persistent
+    // identity uncertainty remains fail-closed until kubelet enforces the Pod
+    // deadline; PageBroker never exits or signals a context owner on a guess.
+    ReapHandlers(handlers);
+    std::this_thread::sleep_for(kCudaShutdownRetryDelay);
+  }
+  WaitForHandlers(handlers);
+}
+
+namespace {
+
+void
+Serve(FileDescriptor& listener, Broker& broker, size_t max_concurrent_requests,
+      const fs::path& readiness_socket_path)
 {
   std::vector<std::future<void>> handlers;
-  auto next_transaction_reap = std::chrono::steady_clock::now();
+  DaemonMaintenanceSchedule maintenance(std::chrono::steady_clock::now());
   auto accept_retry_delay = kAcceptRetryInitialDelay;
-  while (!shutting_down) {
+  while (!shutting_down && !broker.ShutdownRequested()) {
     ReapHandlers(handlers);
     const auto now = std::chrono::steady_clock::now();
-    if (now >= next_transaction_reap) {
+    if (maintenance.TransactionsDue(now)) {
       broker.ReapExpiredTransactions(now);
-      next_transaction_reap = now + kTransactionReapInterval;
+      std::string stage_reap_error;
+      if (!broker.ReapRetainedStageReadyMarkers(
+              std::chrono::system_clock::now(), &stage_reap_error))
+        std::cerr << "reap retained PageBroker stage markers: "
+                  << stage_reap_error << '\n';
+    }
+    if (maintenance.CudaDue(now)) {
+      std::string cuda_reap_error;
+      if (!broker.ReapExitedCuda(&cuda_reap_error))
+        std::cerr << "reap exited PageBroker CUDA targets: " << cuda_reap_error << '\n';
     }
     pollfd poll_descriptor{listener.get(), POLLIN, 0};
     const int ready = poll(&poll_descriptor, 1, kShutdownPollTimeoutMs);
@@ -359,6 +499,8 @@ Serve(FileDescriptor& listener, Broker& broker, size_t max_concurrent_requests)
     if (handlers.size() == max_concurrent_requests) {
       FileDescriptor descriptor(connection);
       std::cerr << "connection limit reached\n";
+      if (!snapshot::pagebroker::HandleConnectionLimit(descriptor.get()))
+        std::cerr << "connection limit response timed out\n";
       continue;
     }
     try {
@@ -370,7 +512,7 @@ Serve(FileDescriptor& listener, Broker& broker, size_t max_concurrent_requests)
       std::cerr << "start connection: " << error.what() << '\n';
     }
   }
-  WaitForHandlers(handlers);
+  ShutdownAndWaitForHandlers(broker, handlers, readiness_socket_path);
 }
 }  // namespace
 
@@ -379,7 +521,14 @@ RunDaemon(
     const fs::path& socket_path,
     const fs::path& staging_directory,
     const fs::path& storage_root,
-    size_t max_concurrent_requests)
+    size_t max_concurrent_requests,
+    uintmax_t max_staging_bytes,
+    bool cuda,
+    bool cuda_custom_storage,
+    size_t max_concurrent_cuda_restores,
+    uint64_t cuda_operation_timeout_seconds,
+    size_t cuda_worker_count,
+    size_t cuda_custom_storage_worker_count)
 {
   shutting_down = 0;
   if (!RaiseFileDescriptorLimit())
@@ -388,6 +537,11 @@ RunDaemon(
     return Fail("install signal handlers", error);
   if (const auto error = PrepareDirectories(socket_path, staging_directory); error)
     return Fail("create daemon directories", error);
+  std::error_code staging_path_error;
+  const fs::path canonical_staging_directory =
+      fs::canonical(staging_directory, staging_path_error);
+  if (staging_path_error)
+    return Fail("resolve staging directory", staging_path_error);
   if (socket_path.string().size() >= sizeof(sockaddr_un::sun_path)) {
     std::cerr << "socket path is too long\n";
     return ExitCode::INVALID_ARGUMENTS;
@@ -396,7 +550,34 @@ RunDaemon(
   if (error)
     return Fail("create listener", error);
 
-  Broker broker(staging_directory, storage_root);
-  Serve(listener, broker, max_concurrent_requests);
+  std::unique_ptr<snapshot::pagebroker::CudaEngine> cuda_engine;
+  if (cuda || cuda_custom_storage) {
+    try {
+      cuda_engine = snapshot::pagebroker::CreateCudaEngine(
+          std::chrono::seconds(cuda_operation_timeout_seconds),
+          canonical_staging_directory,
+          cuda,
+          cuda_custom_storage,
+          max_concurrent_cuda_restores,
+          cuda_worker_count,
+          cuda_custom_storage_worker_count);
+    }
+    catch (const std::exception& error) {
+      std::cerr << error.what() << '\n';
+      return ExitCode::FAILURE;
+    }
+  }
+  Broker broker(canonical_staging_directory, storage_root, max_staging_bytes,
+                std::move(cuda_engine));
+  ReadinessWithdrawal readiness_withdrawal(socket_path);
+  std::error_code readiness_error;
+  if (!PublishDaemonReadiness(socket_path, &readiness_error))
+    return Fail("publish daemon readiness", readiness_error);
+  Serve(listener, broker, max_concurrent_requests, socket_path);
+  std::string shutdown_error;
+  if (!broker.ShutdownCuda(&shutdown_error)) {
+    std::cerr << shutdown_error << '\n';
+    return ExitCode::FAILURE;
+  }
   return ExitCode::SUCCESS;
 }

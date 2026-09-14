@@ -15,6 +15,7 @@
 # Optional targets for CI:
 #   docker build --target linter --build-context api=../api .   # Run linting
 #   docker build --target tester --build-context api=../api .   # Run tests
+#   docker build --target cuda-helper-core-builder .             # Prove the CUDA helper builds without NIXL
 
 # =============================================================================
 # Build Arguments
@@ -27,9 +28,7 @@ ARG GO_VERSION=1.27.1
 # updated together — the go-base stage asserts they agree rather than trusting
 # the tag.
 ARG GO_IMAGE_DIGEST=sha256:f44f6e88636cfb311f9ebace870ded69d943f227bb3cb27d32ffd84ea18c43ea
-# Keep in step with GOLANGCI_LINT_VERSION in hack/tools.mk. Used by the linter
-# stage, which is a developer target (`--target linter`) and so is not covered
-# by the CI `check` job.
+# Keep in step with GOLANGCI_LINT_VERSION in hack/tools.mk.
 ARG GOLANGCI_LINT_VERSION=v2.13.2
 # Default to upstream CRIU development branch. Custom forks can override both
 # args at build time, for example:
@@ -38,10 +37,121 @@ ARG GOLANGCI_LINT_VERSION=v2.13.2
 ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
 ARG CRIU_REF=criu-dev
 ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04@sha256:8315e2455736c4f9b597f15c5fb4d31f834e798e0c6b66bbdbdbac491ce26bd1
+ARG CUDA_HELPER_HEADERS_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04@sha256:edd686dcb3e87806dfc869623ccb0a7e62c0d09bd720a82014c23efcecc8d9a2
 
 # For placeholder target only - this default allows agent builds to succeed,
 # but placeholder builds MUST override it with --build-arg BASE_IMAGE=<image>
 ARG BASE_IMAGE=placeholder-requires-base-image-arg
+
+# Stage: CUDA 13.4 header provider
+# =============================================================================
+FROM ${CUDA_HELPER_HEADERS_IMAGE} AS cuda-helper-headers
+
+# =============================================================================
+# Stage: CUDA checkpoint helper core builder (no transfer adapter)
+# =============================================================================
+FROM ${AGENT_BASE_IMAGE} AS cuda-helper-core-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+COPY --from=cuda-helper-headers /usr/local/cuda-13.4/targets/x86_64-linux/include/cuda.h /opt/cuda-13.4/include/cuda.h
+COPY cmd/cuda-checkpoint-helper/main.cpp ./cmd/cuda-checkpoint-helper/main.cpp
+COPY cmd/cuda-checkpoint-helper/content_digest.cpp ./cmd/cuda-checkpoint-helper/content_digest.cpp
+COPY cmd/cuda-checkpoint-helper/content_digest.h ./cmd/cuda-checkpoint-helper/content_digest.h
+COPY cmd/cuda-checkpoint-helper/content_digest_test.cpp ./cmd/cuda-checkpoint-helper/content_digest_test.cpp
+COPY cmd/cuda-checkpoint-helper/cuda_operation.cpp ./cmd/cuda-checkpoint-helper/cuda_operation.cpp
+COPY cmd/cuda-checkpoint-helper/cuda_operation.h ./cmd/cuda-checkpoint-helper/cuda_operation.h
+COPY cmd/cuda-checkpoint-helper/daemon_server.cpp ./cmd/cuda-checkpoint-helper/daemon_server.cpp
+COPY cmd/cuda-checkpoint-helper/daemon_server.h ./cmd/cuda-checkpoint-helper/daemon_server.h
+COPY cmd/cuda-checkpoint-helper/daemon_protocol.cpp ./cmd/cuda-checkpoint-helper/daemon_protocol.cpp
+COPY cmd/cuda-checkpoint-helper/daemon_protocol.h ./cmd/cuda-checkpoint-helper/daemon_protocol.h
+COPY cmd/cuda-checkpoint-helper/daemon_protocol_test.cpp ./cmd/cuda-checkpoint-helper/daemon_protocol_test.cpp
+COPY cmd/cuda-checkpoint-helper/testdata/daemon_request_v7.hex ./cmd/cuda-checkpoint-helper/testdata/daemon_request_v7.hex
+COPY cmd/cuda-checkpoint-helper/storage_manifest.cpp ./cmd/cuda-checkpoint-helper/storage_manifest.cpp
+COPY cmd/cuda-checkpoint-helper/storage_manifest.h ./cmd/cuda-checkpoint-helper/storage_manifest.h
+COPY cmd/cuda-checkpoint-helper/storage_manifest_test.cpp ./cmd/cuda-checkpoint-helper/storage_manifest_test.cpp
+COPY cmd/cuda-checkpoint-helper/transfer_config.cpp ./cmd/cuda-checkpoint-helper/transfer_config.cpp
+COPY cmd/cuda-checkpoint-helper/transfer_config.h ./cmd/cuda-checkpoint-helper/transfer_config.h
+COPY cmd/cuda-checkpoint-helper/transfer_config_test.cpp ./cmd/cuda-checkpoint-helper/transfer_config_test.cpp
+COPY cmd/cuda-checkpoint-helper/transfer_cancellation.h ./cmd/cuda-checkpoint-helper/transfer_cancellation.h
+COPY cmd/cuda-checkpoint-helper/transfer_engine.h ./cmd/cuda-checkpoint-helper/transfer_engine.h
+COPY cmd/cuda-checkpoint-helper/transfer_engine_test.cpp ./cmd/cuda-checkpoint-helper/transfer_engine_test.cpp
+COPY cmd/cuda-checkpoint-helper/transfer_backend_unavailable.cpp ./cmd/cuda-checkpoint-helper/transfer_backend_unavailable.cpp
+COPY cmd/cuda-checkpoint-helper/transfer_scheduler.cpp ./cmd/cuda-checkpoint-helper/transfer_scheduler.cpp
+COPY cmd/cuda-checkpoint-helper/transfer_scheduler.h ./cmd/cuda-checkpoint-helper/transfer_scheduler.h
+COPY cmd/cuda-checkpoint-helper/transfer_scheduler_test.cpp ./cmd/cuda-checkpoint-helper/transfer_scheduler_test.cpp
+COPY cmd/cuda-checkpoint-helper/restore_batch_order.h ./cmd/cuda-checkpoint-helper/restore_batch_order.h
+COPY cmd/cuda-checkpoint-helper/restore_batch_order_test.cpp ./cmd/cuda-checkpoint-helper/restore_batch_order_test.cpp
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread \
+      -o /cuda-checkpoint-helper-no-transfer-adapter \
+      ./cmd/cuda-checkpoint-helper/main.cpp \
+      ./cmd/cuda-checkpoint-helper/content_digest.cpp \
+      ./cmd/cuda-checkpoint-helper/cuda_operation.cpp \
+      ./cmd/cuda-checkpoint-helper/daemon_server.cpp \
+      ./cmd/cuda-checkpoint-helper/daemon_protocol.cpp \
+      ./cmd/cuda-checkpoint-helper/storage_manifest.cpp \
+      ./cmd/cuda-checkpoint-helper/transfer_config.cpp \
+      ./cmd/cuda-checkpoint-helper/transfer_scheduler.cpp \
+      ./cmd/cuda-checkpoint-helper/transfer_backend_unavailable.cpp \
+      -I/opt/cuda-13.4/include \
+      -L/usr/local/cuda/lib64/stubs \
+      -lcuda -lcrypto \
+    && ldd /cuda-checkpoint-helper-no-transfer-adapter > /tmp/helper-ldd.txt \
+    && ! grep -q nixl /tmp/helper-ldd.txt
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread \
+      -o /cuda-checkpoint-helper-daemon-protocol-test \
+      ./cmd/cuda-checkpoint-helper/daemon_protocol.cpp \
+      ./cmd/cuda-checkpoint-helper/daemon_protocol_test.cpp \
+    && /cuda-checkpoint-helper-daemon-protocol-test
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+      -o /cuda-checkpoint-helper-storage-test \
+      ./cmd/cuda-checkpoint-helper/content_digest.cpp \
+      ./cmd/cuda-checkpoint-helper/storage_manifest.cpp \
+      ./cmd/cuda-checkpoint-helper/storage_manifest_test.cpp \
+      -lcrypto \
+    && /cuda-checkpoint-helper-storage-test
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+      -o /cuda-checkpoint-helper-content-digest-test \
+      ./cmd/cuda-checkpoint-helper/content_digest.cpp \
+      ./cmd/cuda-checkpoint-helper/content_digest_test.cpp \
+      -lcrypto \
+    && /cuda-checkpoint-helper-content-digest-test
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+      -o /cuda-checkpoint-helper-transfer-config-test \
+      ./cmd/cuda-checkpoint-helper/transfer_config.cpp \
+      ./cmd/cuda-checkpoint-helper/transfer_config_test.cpp \
+    && /cuda-checkpoint-helper-transfer-config-test
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+      -I/opt/cuda-13.4/include \
+      -o /cuda-checkpoint-helper-transfer-cancellation-test \
+      ./cmd/cuda-checkpoint-helper/transfer_engine_test.cpp \
+    && /cuda-checkpoint-helper-transfer-cancellation-test
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread \
+      -I/opt/cuda-13.4/include \
+      -o /cuda-checkpoint-helper-transfer-scheduler-test \
+      ./cmd/cuda-checkpoint-helper/transfer_scheduler.cpp \
+      ./cmd/cuda-checkpoint-helper/transfer_config.cpp \
+      ./cmd/cuda-checkpoint-helper/transfer_backend_unavailable.cpp \
+      ./cmd/cuda-checkpoint-helper/transfer_scheduler_test.cpp \
+    && /cuda-checkpoint-helper-transfer-scheduler-test
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+      -o /cuda-checkpoint-helper-restore-batch-order-test \
+      ./cmd/cuda-checkpoint-helper/restore_batch_order_test.cpp \
+    && /cuda-checkpoint-helper-restore-batch-order-test
+
 
 # =============================================================================
 # Stage: Go base - Common setup for Go builds
@@ -55,9 +165,7 @@ ARG GO_VERSION
 RUN echo "Building for ${TARGETOS}/${TARGETARCH}"
 
 # Docker resolves image:tag@digest by digest alone and never validates the tag
-# against it. Overriding GO_VERSION without the matching GO_IMAGE_DIGEST would
-# otherwise build on the digest's toolchain while every label claims the new
-# one. Assert instead of trusting the tag.
+# against it. Keep labels and the actual toolchain from silently diverging.
 RUN actual="$(go env GOVERSION)"; \
     [ "${actual}" = "go${GO_VERSION}" ] || { \
       echo "ERROR: GO_VERSION=${GO_VERSION} but the pinned GO_IMAGE_DIGEST provides ${actual}." >&2; \
@@ -88,9 +196,6 @@ FROM go-base AS linter
 ARG GO_VERSION
 ARG GOLANGCI_LINT_VERSION
 
-# Same constraint as hack/tools.mk: golangci-lint refuses to run when it was
-# built with an older Go than the module it lints, and its own go.mod pins a
-# toolchain that lags ours — so force ours.
 RUN GOTOOLCHAIN=go${GO_VERSION} \
     go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}
 RUN golangci-lint run --timeout=5m
@@ -100,28 +205,55 @@ RUN golangci-lint run --timeout=5m
 # =============================================================================
 FROM go-base AS tester
 
+COPY --from=cuda-helper-headers /usr/local/cuda-13.4/targets/x86_64-linux/include/ /opt/cuda-13.4/include/
+COPY --from=cuda-helper-headers /usr/local/cuda-13.4/targets/x86_64-linux/lib/stubs/libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     libgtest-dev \
     libprotobuf-dev \
+    libssl-dev \
     pkg-config \
     protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
-RUN go test ./... -v && make -C pagebroker test
+RUN ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1 \
+    && make -C pagebroker daemon \
+    && LD_LIBRARY_PATH=/usr/local/cuda/lib64/stubs PAGEBROKER_TEST_BINARY=/workspace/pagebroker/pagebroker go test ./... -v \
+    && make -C pagebroker test \
+    && make -C cmd/cuinterpose CUDA_HOME=/opt/cuda-13.4 test
 
 # =============================================================================
-# Stage: PageBroker Builder
+# Stage: PageBroker Builder with the PageBroker-owned CUDA engine
 # =============================================================================
-FROM go-base AS pagebroker-builder
+FROM ${AGENT_BASE_IMAGE} AS pagebroker-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    libgtest-dev \
     libprotobuf-dev \
+    libssl-dev \
+    pkg-config \
     protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
-RUN make -C pagebroker daemon
+WORKDIR /workspace
+
+COPY --from=cuda-helper-headers /usr/local/cuda-13.4/targets/x86_64-linux/include/ /opt/cuda-13.4/include/
+COPY pagebroker ./pagebroker
+COPY cmd/cuda-checkpoint-helper ./cmd/cuda-checkpoint-helper
+COPY cmd/cuinterpose ./cmd/cuinterpose
+
+RUN make -C cmd/cuinterpose BUILD_DIR=/cuinterpose-build \
+      CUDA_HOME=/opt/cuda-13.4 all test \
+    && make -C pagebroker daemon
+RUN ln -s libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1; \
+    output=$(LD_LIBRARY_PATH=/usr/local/cuda/lib64/stubs /workspace/pagebroker/pagebroker 2>&1); status=$?; \
+    expected=$(printf '%s\n%s' \
+      'usage: pagebroker --probe-ready socket_path' \
+      '   or: pagebroker socket_path staging_directory storage_root --max-concurrent-requests max_concurrent_requests --max-staging-bytes max_staging_bytes [--cuda] [--cuda-custom-storage] [--max-concurrent-cuda-restores max_concurrent_cuda_restores] [--cuda-operation-timeout-seconds cuda_operation_timeout_seconds] [--cuda-worker-count cuda_worker_count] [--cuda-custom-storage-worker-count cuda_custom_storage_worker_count]'); \
+    [ "$status" -eq 2 ] && \
+    [ "$output" = "$expected" ]
 
 # =============================================================================
 # Stage: Builder - Build Go binaries
@@ -235,6 +367,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libprotobuf-c1 \
     libgnutls30t64 \
     libnftables1 \
+    libssl3t64 \
     iproute2 \
     iptables \
     procps \
@@ -286,21 +419,27 @@ RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-help
 # Copy the built binaries
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
 COPY --from=pagebroker-builder /workspace/pagebroker/pagebroker /usr/local/bin/pagebroker
-RUN output=$(/usr/local/bin/pagebroker 2>&1); status=$?; \
-    [ "$status" -eq 2 ]; \
-    [ "$output" = "usage: pagebroker socket_path staging_directory storage_root --max-concurrent-requests max_concurrent_requests" ]
+COPY --from=pagebroker-builder /workspace/pagebroker/pagebroker-cuda-worker /usr/local/bin/pagebroker-cuda-worker
+COPY --from=pagebroker-builder /cuinterpose-build/cuinterpose-coordinator /usr/local/bin/cuinterpose-coordinator
+COPY --from=pagebroker-builder /cuinterpose-build/libcuinterpose.so /usr/local/lib/snapshot/libcuinterpose.so
+RUN test -x /usr/local/bin/pagebroker-cuda-worker \
+    && chmod 0644 /usr/local/lib/snapshot/libcuinterpose.so
 
 # Assemble the injection bundle: bind-mounted read-only into the placeholder's
 # mount namespace at /tmp/snapshot-binaries during restore (internal/nsmount).
 # The placeholder ships none of this. nsrestore redirects all three lookup
 # mechanisms into the mount: criu's libdir -> criu-plugins/ (criu.overrideLibDir),
 # LD_LIBRARY_PATH -> lib/, and PATH -> the bundle root.
-RUN mkdir -p /snapshot-binaries/lib /snapshot-binaries/criu-plugins
+RUN mkdir -p /snapshot-binaries/lib /snapshot-binaries/criu-plugins /snapshot-binaries/snapshot-cuda
 COPY --from=builder /nsrestore /snapshot-binaries/nsrestore
 COPY --from=criu-builder /criu-install/usr/local/sbin/criu /snapshot-binaries/criu
 COPY --from=criu-builder /criu-install/usr/local/lib/snapshot/criu-plugins/ /snapshot-binaries/criu-plugins/
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /snapshot-binaries/cuda-checkpoint
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-checkpoint-helper
+COPY --from=pagebroker-builder /cuinterpose-build/libcuinterpose.so /snapshot-binaries/snapshot-cuda/libcuinterpose.so
+COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /snapshot-binaries/snapshot-cuda/cuda-checkpoint
+RUN chmod 0644 /snapshot-binaries/snapshot-cuda/libcuinterpose.so \
+    && chmod +x /snapshot-binaries/snapshot-cuda/cuda-checkpoint
 
 # Network binaries needed during restore:
 #   ip  — address/route restore (criu/net.c)

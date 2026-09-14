@@ -1,3 +1,5 @@
 /build/
 /pagebroker
+/pagebroker-cuda-worker
 /pagebroker.pb.*
+/v1/pagebroker.pb.*

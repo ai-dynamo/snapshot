@@ -32,16 +32,133 @@ message StagedRestoreRequest
   StorageBackend source = 1;
   IOEngine io_engine = 2;
 }
-// Allows a future GPU engine to read source data without a staging directory.
+// Creates a transaction-private, metadata-only hardlink reference to an
+// immutable regular-backend artifact. PageBroker owns the reference lifetime;
+// no checkpoint payload bytes are copied into node-local staging.
+message ReferenceRegularRestoreRequest
+{
+  StorageBackend source = 1;
+  IOEngine io_engine = 2;
+  // Stable destination identity used by PageBroker-owned restore readiness.
+  // All five fields are required for a regular restore reference even before
+  // the readiness marker lifecycle is enabled.
+  optional string pod_uid = 3;
+  optional string destination_container = 4;
+  optional string content_uid = 5;
+  optional string source_container = 6;
+  // Exact runtime container incarnation. This is required so a stale regular
+  // staging transaction cannot activate readiness for a replacement container.
+  optional string container_id = 7;
+}
+// Stages the mutable/CRIU portion of a POSIX CustomStorage artifact while
+// PageBroker retains a descriptor-pinned view of its immutable CUDA carriers.
+// The response is StagedRestoreDirectory because CRIU still consumes the
+// broker-owned metadata staging tree.
 message DirectRestoreRequest
 {
   StorageBackend source = 1;
   IOEngine io_engine = 2;
+  repeated uint32 cuda_namespace_pids = 3;
+  // Bind the descriptor-pinned artifact and placeholder incarnation before
+  // activation can publish a PageBroker-owned stage-ready marker.
+  RestoreIdentity identity = 4;
+}
+message RestoreIdentity
+{
+  optional string pod_uid = 1;
+  optional string destination_container = 2;
+  optional string content_uid = 3;
+  optional string source_container = 4;
+  optional string container_id = 5;
 }
 message PrepareStagedCheckpointRequest
 {
   StorageBackend destination = 1;
   IOEngine io_engine = 2;
+}
+message CudaProcessTarget
+{
+  // The host PID is revalidated against start_time_ticks and cgroup
+  // immediately before every CUDA driver call.
+  optional uint32 host_pid = 1;
+  // The namespace PID is the stable artifact key captured in the manifest.
+  optional uint32 namespace_pid = 2;
+  optional uint64 start_time_ticks = 3;
+  optional string cgroup = 4;
+  optional string device_map = 5;
+  repeated string selected_devices = 6;
+}
+enum CudaStorageBackend
+{
+  // Requests must select a backend explicitly. PageBroker never infers,
+  // retries, or falls back to another backend after dispatch.
+  CUDA_STORAGE_BACKEND_UNSPECIFIED = 0;
+  CUDA_STORAGE_BACKEND_REGULAR = 1;
+  CUDA_STORAGE_BACKEND_POSIX_CUSTOM_STORAGE = 2;
+}
+message CudaCheckpointRequest
+{
+  repeated CudaProcessTarget targets = 1;
+  // True when PageBroker must use and refresh the launch-job file rooted in
+  // the source process mount namespace. PageBroker derives the host path from
+  // the identity-validated first target instead of accepting an agent-local
+  // pathname.
+  optional bool uses_job_file = 2;
+  // True when every target is expected to expose the cuinterpose control
+  // socket. PageBroker runs the coordinator before taking the native CUDA
+  // lock and persists its topology state in the transaction staging tree.
+  optional bool uses_cuinterpose = 3;
+  optional CudaStorageBackend storage_backend = 4;
+}
+message CuinterposeState
+{
+  optional uint32 protocol_version = 1;
+  optional uint64 size_bytes = 2;
+  // Lowercase hexadecimal SHA-256 of the complete state file.
+  optional string sha256 = 3;
+  optional uint32 participant_count = 4;
+}
+message CudaRestoreRequest
+{
+  // Targets are ordered as captured (parents before descendants). PageBroker
+  // completes their CUDA restore in reverse order before unlocking them.
+  repeated CudaProcessTarget targets = 1;
+  optional bool uses_job_file = 2;
+  // True only for artifacts whose PageBroker checkpoint completed the
+  // cuinterpose prepare phase. PageBroker rejects a missing or partial set of
+  // restored participant sockets and rebuilds the topology before replying.
+  optional bool uses_cuinterpose = 3;
+  // Required with uses_cuinterpose. PageBroker validates these immutable
+  // checkpoint facts before invoking the native restore.
+  optional CuinterposeState cuinterpose_state = 4;
+  optional CudaStorageBackend storage_backend = 5;
+}
+// Reserves PageBroker restore capacity and verifies that the selected CUDA
+// backend is ready before Snapshot records a durable restore attempt or calls
+// CRIU. Repeating this request for the same admitted transaction and backend
+// is idempotent; it never touches a workload process.
+message BeginRestoreRequest
+{
+  optional CudaStorageBackend storage_backend = 1;
+  // Exact number of CUDA participants that the later CudaRestore request
+  // will contain. PageBroker reserves this many regular-backend workers
+  // atomically before the caller records a restore attempt or invokes CRIU.
+  optional uint32 target_count = 2;
+}
+// Opens the PageBroker-owned durable gate consumed by GMS. Snapshot calls this
+// only after restore admission and its identity-bound mutation proof are both
+// durable. A transport-ambiguous outcome is never replayed.
+message ActivateRestoreRequest
+{
+  RestoreIdentity identity = 1;
+}
+// Reserves the exclusive PageBroker CUDA checkpoint boundary before Snapshot
+// records a durable mutation attempt. Repeating the request for the same
+// staged transaction, backend, and target count is idempotent.
+message BeginCheckpointRequest
+{
+  optional CudaStorageBackend storage_backend = 1;
+  optional uint32 target_count = 2;
 }
 // Completes a live transaction. PageBroker retains up to 1,024 terminal transactions for up to one hour.
 // Repeating Commit for a retained committed transaction returns CommitComplete; Commit for an aborted, expired, or
@@ -57,7 +174,11 @@ message Request
   // Snapshot assigns an ID to each request.
   optional string request_id = 1;
   // Snapshot assigns a unique transaction ID before the first request and does not reuse it while PageBroker retains it.
-  // An uncommitted transaction expires one hour after staging begins.
+  // NEW, PREPARING, and STAGED transactions are reaped ten minutes after
+  // staging begins because they cannot have mutated a workload. Once restore
+  // admission, CUDA dispatch, or checkpoint publication begins, PageBroker
+  // never time-reaps the transaction: Snapshot recovery or graceful shutdown
+  // must first perform the state-specific durable cleanup.
   optional string transaction_id = 2;
   oneof command
   {
@@ -66,6 +187,12 @@ message Request
     CommitRequest commit = 5;
     AbortRequest abort = 6;
     DirectRestoreRequest direct_restore = 7;
+    CudaCheckpointRequest cuda_checkpoint = 8;
+    CudaRestoreRequest cuda_restore = 9;
+    BeginRestoreRequest begin_restore = 10;
+    BeginCheckpointRequest begin_checkpoint = 11;
+    ReferenceRegularRestoreRequest reference_regular_restore = 12;
+    ActivateRestoreRequest activate_restore = 13;
   }
 }
 
@@ -73,6 +200,8 @@ message StagedRestoreDirectory
 {
   optional string image_directory = 1;
 }
+// Reserved response shape from the original DirectRestore placeholder. The
+// implemented metadata-staging contract returns StagedRestoreDirectory.
 message DirectRestoreReady {}
 message StagedCheckpointDirectory
 {
@@ -82,6 +211,16 @@ message CommitComplete {}
 // Confirms only that PageBroker transaction state/content was released; it says nothing about the target
 // process or CUDA state.
 message AbortComplete {}
+message CudaOperationComplete
+{
+  optional uint32 target_count = 1;
+  // Present on a cuinterpose checkpoint response after the state file is
+  // durably written and hashed by PageBroker.
+  optional CuinterposeState cuinterpose_state = 2;
+}
+message RestoreAdmissionGranted {}
+message CheckpointAdmissionGranted {}
+message RestoreActivationGranted {}
 message Failure
 {
   enum Code {
@@ -93,15 +232,22 @@ message Failure
     TRANSACTION_NOT_FOUND = 2;
     // The transaction ID or checkpoint destination conflicts with an existing transaction or output.
     TRANSACTION_CONFLICT = 3;
-    // Tmpfs staging lacks space. PageBroker did not create staging for this request.
+    // The configured staging budget or backing filesystem lacks space. PageBroker did not create staging.
     INSUFFICIENT_STORAGE = 4;
     // Storage I/O failed. The caller may Abort the transaction before retrying with a new transaction ID.
     STORAGE_ERROR = 5;
     // An unexpected broker failure occurred. The caller may Abort the transaction before retrying.
     INTERNAL_ERROR = 6;
+    // A CUDA operation failed. CUDA requests are not replayable; the caller
+    // must use target_may_be_mutated to choose source/placeholder cleanup.
+    CUDA_ERROR = 7;
+    // The bounded CUDA restore executor is saturated. PageBroker did not
+    // register the target or invoke an identity, cuinterpose, or CUDA operation.
+    BUSY = 8;
   }
   optional Code code = 1;
   optional string message = 2;
+  optional bool target_may_be_mutated = 3;
 }
 message Response
 {
@@ -115,5 +261,9 @@ message Response
     AbortComplete abort_complete = 6;
     Failure failure = 7;
     DirectRestoreReady direct_restore_ready = 8;
+    CudaOperationComplete cuda_operation_complete = 9;
+    RestoreAdmissionGranted restore_admission_granted = 10;
+    CheckpointAdmissionGranted checkpoint_admission_granted = 11;
+    RestoreActivationGranted restore_activation_granted = 12;
   }
 }

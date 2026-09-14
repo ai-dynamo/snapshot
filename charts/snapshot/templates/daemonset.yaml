@@ -125,6 +125,8 @@ spec:
             - {{ .Values.storage.pvc.basePath | quote }}
             - --max-concurrent-requests
             - {{ .Values.pageBroker.maxConcurrentRequests | quote }}
+            - --max-staging-bytes
+            - {{ .Values.pageBroker.maxStagingBytes | quote }}
             {{- end }}
           resources:
             {{- toYaml .Values.pageBroker.resources | nindent 12 }}

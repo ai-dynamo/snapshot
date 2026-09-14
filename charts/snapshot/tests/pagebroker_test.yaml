@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: pagebroker deployment
+templates:
+  - templates/daemonset.yaml
+tests:
+  - it: configures the PageBroker staging admission bound
+    set:
+      pageBroker.enabled: true
+      pageBroker.maxStagingBytes: "123456789"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value:
+            - /pagebroker/control/pagebroker.sock
+            - /pagebroker/staging
+            - /checkpoints
+            - --max-concurrent-requests
+            - "16"
+            - --max-staging-bytes
+            - "123456789"
