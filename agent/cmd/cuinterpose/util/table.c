@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "table.h"
+#include "util/table.h"
 
 #include <stdlib.h>
 #include <string.h>

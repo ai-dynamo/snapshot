@@ -32,4 +32,7 @@ bool cuinterpose_translate_handle(CUmemGenericAllocationHandle handle, CUmemGene
  * counter is non-zero. Multicast uses the same process-wide diagnostic. */
 void cuinterpose_note_unsupported_exportable_creation(uint64_t handle_types);
 
+/* True for handles minted by the shim (unicast or multicast), by their tag. */
+bool cuinterpose_is_logical_handle(CUmemGenericAllocationHandle handle);
+
 #endif
