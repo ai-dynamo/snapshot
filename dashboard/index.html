@@ -52,13 +52,20 @@ SPDX-License-Identifier: Apache-2.0
         </div>
 
         <div class="controls__grid">
-          <label>
+          <!--
+            Hidden, not removed: a single suite exists today, but the
+            underlying filtering still keys off elements.suite.value
+            everywhere, so this stays functional (auto-selects the only
+            suite) for when a second suite shows up.
+          -->
+          <label class="controls__field--hidden">
             <span>Suite</span>
             <select id="suite-filter"></select>
           </label>
           <label>
             <span>Date range</span>
             <select id="date-filter">
+              <option value="7">Latest 7 days</option>
               <option value="30">Latest 30 days</option>
               <option value="90" selected>Latest 90 days</option>
               <option value="180">Latest 180 days</option>
@@ -73,7 +80,8 @@ SPDX-License-Identifier: Apache-2.0
             <span>Outcome</span>
             <select id="outcome-filter"></select>
           </label>
-          <label>
+          <!-- Hidden, not removed: same reasoning as the Suite field above. -->
+          <label class="controls__field--hidden">
             <span>Run channel</span>
             <select id="channel-filter"></select>
           </label>

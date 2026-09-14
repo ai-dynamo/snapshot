@@ -69,6 +69,12 @@ export interface IncompleteMeasurement {
 export type Measurement = CompleteMeasurement | IncompleteMeasurement;
 export type DataObject = Record<string, unknown>;
 
+export interface RunEvent {
+  name: string;
+  offsetSeconds: number;
+  timestamp: string;
+}
+
 export interface BenchmarkResult {
   schemaVersion: number;
   benchmarkVersion: number;
@@ -79,8 +85,97 @@ export interface BenchmarkResult {
   source: DataObject;
   environment: DataObject;
   measurements: Measurement[];
-  events?: unknown[];
+  events?: RunEvent[];
   error?: unknown;
+}
+
+export interface StageSegment {
+  name: string;
+  displayName: string;
+  seconds: number;
+}
+
+/**
+ * One stacked segment per selected, complete measurement, straight from
+ * `measurements` in the order the server emitted them -- not a derived,
+ * non-overlapping timeline. Selecting a coarse phase (checkpoint.duration)
+ * together with one of its own sub-phases (checkpoint.criu_dump.duration)
+ * double-counts that overlap in the bar; the breakdown reflects whatever is
+ * checked, trading the earlier event-derived accuracy guarantee for every
+ * measurement checkbox being able to drive the chart.
+ */
+export function measurementStageSegments(
+  result: BenchmarkResult,
+  selectedMetrics: ReadonlySet<string>,
+): StageSegment[] {
+  const segments: StageSegment[] = [];
+  for (const item of result.measurements) {
+    if (item.status !== "complete" || !selectedMetrics.has(item.name)) continue;
+    segments.push({ name: item.name, displayName: item.displayName, seconds: item.value });
+  }
+  return segments;
+}
+
+export interface StageRun {
+  result: BenchmarkResult;
+  /** Seconds per stage, aligned to a shared stage-name order across runs. */
+  values: ReadonlyMap<string, number>;
+}
+
+export interface StageComparison {
+  /** Stage display names in a stable, shared left-to-right order. */
+  stageNames: string[];
+  runs: StageRun[];
+}
+
+// checkpoint.* segments sort before restore.* segments regardless of raw
+// measurement order (the two interleave in `measurements`), so the stacked
+// bar reads as one contiguous checkpoint block then one restore block.
+function stagePrefixRank(name: string): number {
+  if (name.startsWith("checkpoint.")) return 0;
+  if (name.startsWith("restore.")) return 1;
+  return 2;
+}
+
+/**
+ * The most recent `count` runs for one case, with every run's stage seconds
+ * aligned to the same stage-name order (0 where a run has no such stage), so
+ * they can be plotted as one dataset per stage across all runs.
+ */
+export function recentStageComparison(
+  records: BenchmarkResult[],
+  caseName: string,
+  count: number,
+  selectedMetrics: ReadonlySet<string>,
+): StageComparison {
+  const results = records
+    .filter((result) => result.identity.case === caseName)
+    .sort((left, right) => Date.parse(right.startedAt) - Date.parse(left.startedAt))
+    .slice(0, count);
+
+  const breakdowns = results.map((result) => measurementStageSegments(result, selectedMetrics));
+  const seen = new Set<string>();
+  const discovered: StageSegment[] = [];
+  for (const segments of breakdowns) {
+    for (const segment of segments) {
+      if (!seen.has(segment.displayName)) {
+        seen.add(segment.displayName);
+        discovered.push(segment);
+      }
+    }
+  }
+  discovered.sort((a, b) => stagePrefixRank(a.name) - stagePrefixRank(b.name));
+  const stageNames = discovered.map((segment) => segment.displayName);
+
+  const runs: StageRun[] = results.map((result, index) => {
+    const values = new Map<string, number>();
+    for (const segment of breakdowns[index]!) {
+      values.set(segment.displayName, (values.get(segment.displayName) ?? 0) + segment.seconds);
+    }
+    return { result, values };
+  });
+
+  return { stageNames, runs };
 }
 
 export interface HistoryWarning {

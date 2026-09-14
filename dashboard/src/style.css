@@ -221,13 +221,17 @@ section + section {
 
 .controls__grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(9rem, 1fr));
+  grid-template-columns: repeat(3, minmax(9rem, 1fr));
   gap: 1rem;
 }
 
 .controls__grid label,
 fieldset {
   min-width: 0;
+}
+
+.controls__field--hidden {
+  display: none;
 }
 
 .controls__grid label > span,
@@ -261,7 +265,7 @@ input:focus-visible,
 
 .toggle-grid {
   display: grid;
-  grid-template-columns: minmax(14rem, 0.8fr) minmax(20rem, 1.2fr);
+  grid-template-columns: minmax(9rem, 0.35fr) minmax(24rem, 1.65fr);
   gap: 1.5rem;
   margin-top: 1.5rem;
 }
@@ -276,6 +280,24 @@ fieldset {
   display: flex;
   flex-wrap: wrap;
   gap: 0.55rem;
+}
+
+#case-filters.toggle-list {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.toggle-group + .toggle-group {
+  margin-top: 0.9rem;
+}
+
+.toggle-group h4 {
+  margin: 0 0 0.4rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 750;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
 }
 
 .toggle {
@@ -297,7 +319,7 @@ fieldset {
   display: block;
   padding: 0.5rem 0.75rem;
   border: 1px solid #cbd2c8;
-  border-radius: 999px;
+  border-radius: 5px;
   color: var(--muted);
   background: white;
   font-size: 0.88rem;
@@ -379,6 +401,21 @@ fieldset {
   height: 22rem;
 }
 
+.chart-canvas--stage {
+  height: 9rem;
+  margin-bottom: 1.5rem;
+}
+
+.chart-canvas--stage-comparison {
+  height: 20rem;
+}
+
+.stage-breakdown__caption {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0.2rem 0 0.6rem;
+}
+
 .failure-strip {
   display: flex;
   flex-wrap: wrap;
@@ -441,7 +478,7 @@ td {
 .badge {
   display: inline-block;
   padding: 0.25rem 0.5rem;
-  border-radius: 999px;
+  border-radius: 0.3rem;
   font-size: 0.75rem;
   font-weight: 750;
 }

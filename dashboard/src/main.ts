@@ -30,6 +30,8 @@ import {
   newestResultAt,
   runChannel,
   safeLink,
+  measurementStageSegments,
+  recentStageComparison,
   seriesForMetric,
   shortCommit,
   stringProperty,
@@ -99,6 +101,22 @@ const elements = {
 
 let history: LoadedHistory;
 let charts: Chart<"line", DashboardPoint[]>[] = [];
+let stageChart: Chart<"bar", number[]> | null = null;
+let stageComparisonCharts: Chart<"bar", number[]>[] = [];
+let currentMetrics: ReadonlySet<string> = new Set();
+const STAGE_COMPARISON_RUN_COUNT = 7;
+
+const STAGE_COLORS = [
+  "#76b900",
+  "#5d7fe5",
+  "#ef9f27",
+  "#18a999",
+  "#b05fd3",
+  "#e05a47",
+  "#517891",
+  "#c9a227",
+  "#8a5cf6",
+] as const;
 
 async function start() {
   try {
@@ -273,18 +291,48 @@ function configureSuiteFilters({ preserve = false }: { preserve?: boolean } = {}
     })),
     "case",
   );
-  const hasDefaults = dimensions.metrics.some((item) => DEFAULT_METRIC_NAMES.has(item.name));
-  renderCheckboxes(
-    elements.metrics,
-    dimensions.metrics.map((item, index) => ({
-      value: item.name,
-      label: item.displayName,
-      checked:
-        previous?.metrics.get(item.name) ??
-        (hasDefaults ? DEFAULT_METRIC_NAMES.has(item.name) : index < 3),
-    })),
-    "metric",
-  );
+  renderMetricGroups(dimensions.metrics, previous?.metrics);
+}
+
+const METRIC_GROUPS = [
+  { label: "Checkpoint", prefix: "checkpoint." },
+  { label: "Restore", prefix: "restore." },
+] as const;
+
+// Only the checkpoint/restore measurements are actionable in the stage
+// breakdown; everything else (test.total.duration, source.image_pull*, ...)
+// is dropped from the picker rather than shown ungrouped.
+function renderMetricGroups(
+  metrics: MetricDefinition[],
+  previous?: ReadonlyMap<string, boolean>,
+): void {
+  const hasDefaults = metrics.some((item) => DEFAULT_METRIC_NAMES.has(item.name));
+  elements.metrics.replaceChildren();
+  for (const { label, prefix } of METRIC_GROUPS) {
+    const items = metrics.filter((item) => item.name.startsWith(prefix));
+    if (items.length === 0) continue;
+
+    const group = document.createElement("div");
+    group.className = "toggle-group";
+    const heading = document.createElement("h4");
+    heading.textContent = label;
+    const list = document.createElement("div");
+    list.className = "toggle-list";
+    group.append(heading, list);
+    elements.metrics.append(group);
+
+    renderCheckboxes(
+      list,
+      items.map((item, index) => ({
+        value: item.name,
+        label: item.displayName,
+        checked:
+          previous?.get(item.name) ??
+          (hasDefaults ? DEFAULT_METRIC_NAMES.has(item.name) : index < 3),
+      })),
+      "metric",
+    );
+  }
 }
 
 function restoreSelection(select: HTMLSelectElement, value: string): void {
@@ -360,6 +408,7 @@ function selectedDays(): number | null {
 function render() {
   const selectedCases = checkedValues(elements.cases);
   const selectedMetrics = checkedValues(elements.metrics);
+  currentMetrics = selectedMetrics;
   if (history.records.length === 0) {
     elements.count.textContent = "0 results";
     elements.empty.hidden = false;
@@ -395,8 +444,11 @@ function render() {
 function renderCharts(records: BenchmarkResult[], selectedMetrics: ReadonlySet<string>): void {
   for (const chart of charts) chart.destroy();
   charts = [];
+  for (const chart of stageComparisonCharts) chart.destroy();
+  stageComparisonCharts = [];
   elements.charts.replaceChildren();
   if (records.length === 0) return;
+  renderStageComparisonCharts(records, selectedMetrics);
   if (selectedMetrics.size === 0) {
     elements.charts.append(messageCard("Select at least one measurement to draw a chart."));
     return;
@@ -626,6 +678,8 @@ function showDetails(result: BenchmarkResult): void {
   for (const [label, value] of fields) appendDefinition(summary, label, value);
   elements.dialogContent.append(summary);
 
+  renderStageBreakdown(result);
+
   const heading = document.createElement("h3");
   heading.textContent = "Measurements";
   const list = document.createElement("dl");
@@ -651,6 +705,150 @@ function showDetails(result: BenchmarkResult): void {
   if (commit) links.append(linkButton(commit, "Open commit"));
   if (links.childElementCount) elements.dialogContent.append(links);
   elements.dialog.showModal();
+}
+
+function renderStageComparisonCharts(
+  records: BenchmarkResult[],
+  selectedMetrics: ReadonlySet<string>,
+): void {
+  if (selectedMetrics.size === 0) return;
+  const cases = [...new Set(records.map((result) => result.identity.case))].sort();
+  for (const caseName of cases) {
+    const comparison = recentStageComparison(
+      records,
+      caseName,
+      STAGE_COMPARISON_RUN_COUNT,
+      selectedMetrics,
+    );
+    if (comparison.runs.length === 0 || comparison.stageNames.length === 0) continue;
+
+    const card = document.createElement("article");
+    card.className = "chart-card";
+    const heading = document.createElement("div");
+    heading.className = "chart-card__heading";
+    const title = document.createElement("h3");
+    title.textContent = `${frameworkLabel(caseName)} stage breakdown`;
+    const unit = document.createElement("span");
+    unit.textContent = `last ${comparison.runs.length} run${comparison.runs.length === 1 ? "" : "s"}`;
+    heading.append(title, unit);
+
+    const canvasWrap = document.createElement("div");
+    canvasWrap.className = "chart-canvas chart-canvas--stage-comparison";
+    const canvas = document.createElement("canvas");
+    canvas.setAttribute(
+      "aria-label",
+      `${frameworkLabel(caseName)} stage breakdown for the last ${comparison.runs.length} runs, in seconds`,
+    );
+    canvas.setAttribute("role", "img");
+    canvasWrap.append(canvas);
+    card.append(heading, canvasWrap);
+    elements.charts.append(card);
+
+    // Index 0 is the most recent run; reverse so the chart reads oldest to
+    // newest top-to-bottom, matching the line charts' left-to-right time axis.
+    const runs = [...comparison.runs].reverse();
+    const labels = runs.map((run) => stageRunLabel(run.result));
+    const chart = new Chart(canvas, {
+      type: "bar",
+      data: {
+        labels,
+        datasets: comparison.stageNames.map((name, index): ChartDataset<"bar", number[]> => ({
+          label: name,
+          data: runs.map((run) => run.values.get(name) ?? 0),
+          backgroundColor: STAGE_COLORS[index % STAGE_COLORS.length],
+          stack: "timeline",
+        })),
+      },
+      options: {
+        ...stageChartOptions(),
+        onClick: (_event, activeElements) => {
+          const active = activeElements[0];
+          if (!active) return;
+          const run = runs[active.index];
+          if (run) showDetails(run.result);
+        },
+      },
+    });
+    stageComparisonCharts.push(chart);
+  }
+}
+
+function stageRunLabel(result: BenchmarkResult): string {
+  const outcome = result.outcome === "passed" ? "" : ` · ${displayIdentifier(result.outcome)}`;
+  return `${shortDate(result.startedAt)}${outcome}`;
+}
+
+function renderStageBreakdown(result: BenchmarkResult): void {
+  stageChart?.destroy();
+  stageChart = null;
+  const segments = measurementStageSegments(result, currentMetrics);
+  if (segments.length === 0) return;
+
+  const heading = document.createElement("h3");
+  heading.textContent = "Stage breakdown";
+  const total = segments.reduce((sum, segment) => sum + segment.seconds, 0);
+  const caption = document.createElement("p");
+  caption.className = "stage-breakdown__caption";
+  caption.textContent = `${formatValue(total, "seconds")} total, from ${segments.length} stage${segments.length === 1 ? "" : "s"}.`;
+
+  const canvasWrap = document.createElement("div");
+  canvasWrap.className = "chart-canvas chart-canvas--stage";
+  const canvas = document.createElement("canvas");
+  canvas.setAttribute("aria-label", "Stage breakdown of total run duration, in seconds");
+  canvas.setAttribute("role", "img");
+  canvasWrap.append(canvas);
+
+  elements.dialogContent.append(heading, caption, canvasWrap);
+
+  stageChart = new Chart(canvas, {
+    type: "bar",
+    data: {
+      labels: ["Timeline"],
+      datasets: segments.map((segment, index): ChartDataset<"bar", number[]> => ({
+        label: segment.displayName,
+        data: [segment.seconds],
+        backgroundColor: STAGE_COLORS[index % STAGE_COLORS.length],
+        stack: "timeline",
+      })),
+    },
+    options: stageChartOptions(),
+  });
+}
+
+function stageChartOptions(): ChartOptions<"bar"> {
+  return {
+    indexAxis: "y",
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    plugins: {
+      legend: {
+        position: "bottom",
+        labels: { usePointStyle: true, boxWidth: 10, padding: 12 },
+      },
+      tooltip: {
+        callbacks: {
+          label: (context) => {
+            const segment = (context.dataset as { label?: string }).label ?? "";
+            const value = context.parsed.x ?? 0;
+            return `${segment}: ${formatValue(value, "seconds")}`;
+          },
+        },
+      },
+    },
+    scales: {
+      x: {
+        stacked: true,
+        beginAtZero: true,
+        title: { display: true, text: "seconds" },
+        grid: { color: "rgba(42, 53, 56, 0.08)" },
+      },
+      y: {
+        stacked: true,
+        grid: { display: false },
+      },
+    },
+  };
 }
 
 function linkButton(href: string, label: string): HTMLAnchorElement {
