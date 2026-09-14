@@ -3,6 +3,7 @@
 
 #include "event_loop.hpp"
 
+#include <cassert>
 #include <stdexcept>
 #include <utility>
 
@@ -66,7 +67,8 @@ EventLoop::Post(std::unique_ptr<Event> event)
 void
 EventLoop::Stop() noexcept
 {
-  std::lock_guard stop_lock(stop_mutex_);
+  assert(worker_.get_id() != std::this_thread::get_id() &&
+         "EventLoop::Stop must be called outside the worker thread");
   std::deque<std::unique_ptr<Event>> events;
   std::exception_ptr error;
   {
@@ -87,8 +89,6 @@ EventLoop::Stop() noexcept
       state_ = State::STOPPED;
     return;
   }
-  if (worker_.get_id() == std::this_thread::get_id())
-    return;
   try {
     worker_.join();
   }
