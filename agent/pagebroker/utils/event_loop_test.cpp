@@ -9,6 +9,7 @@
 #include <exception>
 #include <future>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <stdexcept>
 #include <thread>
@@ -44,6 +45,47 @@ class TestEvent final : public Event {
   ExecuteFunction execute_;
   CancelFunction cancel_;
 };
+
+TEST(EventLoopDeathTest, RejectsStopFromWorker)
+{
+  EXPECT_DEATH(
+      {
+        EventLoop loop;
+        loop.Start();
+        std::promise<void> completed;
+        loop.Post(std::make_unique<TestEvent>([&] {
+          loop.Stop();
+          completed.set_value();
+        }));
+        completed.get_future().get();
+        loop.Stop();
+      },
+      "");
+}
+
+TEST(EventLoopTest, StopCanBeRepeated)
+{
+  for (const bool start : {false, true}) {
+    SCOPED_TRACE(start);
+    EventLoop loop;
+    if (start)
+      loop.Start();
+
+    loop.Stop();
+    loop.Stop();
+
+    int cancellations = 0;
+    EXPECT_FALSE(loop.Post(std::make_unique<TestEvent>(
+        [] { FAIL() << "stopped loop executed an event"; },
+        [&](std::exception_ptr error) {
+          EXPECT_NE(error, nullptr);
+          ++cancellations;
+        })));
+    loop.Stop();
+    EXPECT_EQ(cancellations, 1);
+    EXPECT_THROW(loop.Start(), std::logic_error);
+  }
+}
 
 TEST(EventLoopTest, ExecutesEventsInPostingOrder)
 {
@@ -121,9 +163,11 @@ TEST(EventLoopTest, StopCancelsQueuedEvents)
   std::promise<void> executing;
   std::promise<void> release;
   auto released = release.get_future().share();
+  std::atomic<bool> finished = false;
   loop.Post(std::make_unique<TestEvent>([&] {
     executing.set_value();
     released.wait();
+    finished = true;
   }));
   executing.get_future().get();
 
@@ -135,7 +179,10 @@ TEST(EventLoopTest, StopCancelsQueuedEvents)
         cancelled.set_value();
       }));
 
-  std::thread stop([&] { loop.Stop(); });
+  std::thread stop([&] {
+    loop.Stop();
+    EXPECT_TRUE(finished.load());
+  });
   cancelled.get_future().get();
   release.set_value();
   stop.join();
