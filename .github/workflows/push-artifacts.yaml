@@ -28,8 +28,7 @@ concurrency:
 permissions: {}
 
 env:
-  # One source for the GHCR namespace, passed through to make so the references
-  # we sign are provably the ones the build pushed.
+  # Passed through to make, so the references we sign are the ones it pushed.
   REGISTRY: ghcr.io/ai-dynamo/snapshot
 
 jobs:
@@ -115,9 +114,8 @@ jobs:
         run: make check
 
   # ── Images ──────────────────────────────────────────────────────────────────
-  # The two images build identically apart from the `include` entries below.
-  # Sharing one job is what keeps the attestation flags, the cosign version and
-  # the pinned action SHAs in step by construction rather than by review.
+  # Identical apart from the `include` entries, so one job keeps the attestation
+  # flags and pinned SHAs in step by construction rather than by review.
   build-image:
     name: Build and push ${{ matrix.image }} image
     needs: [version, validate]
@@ -125,22 +123,17 @@ jobs:
       # Checkout the validated source and publish its image to GHCR.
       contents: read
       packages: write
-      # Mint the OIDC token cosign exchanges for a short-lived Fulcio
-      # certificate. Keyless signing means no key material to store or rotate.
       id-token: write
     runs-on: ubuntu-latest
-    # Sized for the agent, which builds CRIU from source on a CUDA base and now
-    # also has an SBOM scanned over it. The operator finishes in a fraction.
+    # Sized for the agent: CRIU from source on a CUDA base, plus an SBOM scan.
     timeout-minutes: 75
     strategy:
-      # One image failing should not cancel an hour of work on the other.
       fail-fast: false
       matrix:
         include:
           - image: operator
           - image: agent
-            # The agent Dockerfile exits 1 on any other arch, since
-            # cuda-checkpoint ships no other build.
+            # Dockerfile exits 1 on other arches
             build_args: --platform=linux/amd64
     steps:
       # Check out the exact commit that passed CI, not whatever is at HEAD now.
@@ -159,15 +152,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Each job runs on its own runner, so tools installed in one are not
-      # present in another. This is per image because the builds are parallel.
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
-      # --provenance/--sbom attach in-toto SLSA provenance and an SPDX SBOM to
-      # the image as OCI attestations. --metadata-file is how we learn the
-      # digest buildx actually pushed: a tag can be repointed later, so the
-      # digest is the only stable thing to sign.
+      # --provenance/--sbom attach SLSA provenance and an SPDX SBOM as OCI
+      # attestations. --metadata-file reports the pushed digest, which is what we
+      # sign: a tag can be repointed afterwards, a digest cannot.
       - name: Build and push image
         id: build
         env:
@@ -194,10 +184,8 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: cosign sign --yes "${REGISTRY}/${IMAGE}@${DIGEST}"
 
-      # A matrix job has one set of outputs shared by every leg, with the last
-      # leg to finish winning, so the digests travel as files instead. The
-      # release job must use the digest captured at build time: re-resolving the
-      # tag later could pick up different bytes than the ones we just signed.
+      # Matrix legs share one set of job outputs, last leg winning, so digests
+      # travel as files. The release job needs the digest captured here.
       - name: Publish digest for the release job
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -214,8 +202,6 @@ jobs:
       # Checkout the validated chart and publish it to GHCR.
       contents: read
       packages: write
-      # Mint the OIDC token cosign exchanges for a short-lived Fulcio
-      # certificate. Keyless signing means no key material to store or rotate.
       id-token: write
     outputs:
       chart: ${{ steps.push.outputs.chart }}
@@ -253,8 +239,6 @@ jobs:
 
       # Chart.yaml on disk stays at dev values. Version is injected at package
       # time. The values.yaml `tag: ""` fields resolve to appVersion in templates.
-      # helm push reports the digest of what it stored; that is what we sign,
-      # for the same reason we sign images by digest rather than by tag.
       - name: Package and push Helm chart
         id: push
         env:
@@ -280,8 +264,8 @@ jobs:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: cosign sign --yes "${REGISTRY}/snapshot@${DIGEST}"
 
-      # Hand the exact tarball that was pushed to the release-assets job, so
-      # the checksum it publishes describes those bytes and not a re-package.
+      # Hand over the exact tarball pushed, so its published checksum describes
+      # those bytes rather than a re-package.
       - name: Upload packaged chart for the release job
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -291,10 +275,9 @@ jobs:
           if-no-files-found: error
 
   # ── Release assets (SBOMs, checksums, signature) ────────────────────────────
-  # The OCI attestations above only reach someone who already pulled the image.
-  # These are the same facts as downloadable files on the release, for consumers
-  # auditing before they pull. Dev snapshots have no release to attach to, so
-  # this runs only for an explicit version.
+  # The attestations above only reach someone who already pulled the image;
+  # these are the same facts as files, for auditing beforehand. Only tagged
+  # releases have somewhere to attach them.
   release-assets:
     name: Attach SBOMs and checksums to the release
     needs: [version, build-image, release-helm]
@@ -304,8 +287,6 @@ jobs:
       contents: write
       # Let syft read the published images from GHCR.
       packages: read
-      # Mint the OIDC token cosign exchanges for a short-lived Fulcio
-      # certificate. Keyless signing means no key material to store or rotate.
       id-token: write
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -348,10 +329,7 @@ jobs:
           path: digests
 
       # Scanned from the registry by digest, so each SBOM describes the bytes
-      # that were published and signed rather than a local rebuild of them.
-      # Both formats: NVIDIA's GitHub OSS release guidance asks for CycloneDX,
-      # while SPDX is what the buildx attestation and the OpenSSF tooling read.
-      # One syft scan emits both, so carrying the pair costs nothing.
+      # that were published. Both formats, because one scan emits both.
       - name: Generate SBOMs for the published images
         run: |
           for image in operator agent; do
@@ -362,9 +340,7 @@ jobs:
               "registry:${REGISTRY}/${image}@${digest}"
           done
 
-      # SHA256SUMS covers every asset; signing it keyless means one signature
-      # transitively covers them all, and the .sig/.pem pair is verifiable with
-      # cosign verify-blob and nothing else.
+      # One signature over SHA256SUMS transitively covers every asset.
       - name: Write and sign SHA256SUMS
         working-directory: assets
         env:
