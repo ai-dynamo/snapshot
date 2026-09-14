@@ -593,6 +593,7 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		PodName:             params.Pod.Name,
 		PodNamespace:        params.Pod.Namespace,
 		PodIP:               params.Pod.Status.PodIP,
+		Pod:                 podEnvironment(params.Pod, params.ContainerName),
 		Clientset:           w.clientset,
 		PageBrokerRequested: params.Pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] == snapshotv1alpha1.PageBrokerAnnotationEnabled,
 	}
