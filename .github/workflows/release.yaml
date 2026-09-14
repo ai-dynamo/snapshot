@@ -13,9 +13,13 @@ jobs:
   push-artifacts:
     name: Push release artifacts
     permissions:
-      # Let the called workflow read source and publish release artifacts.
-      contents: read
+      # A reusable workflow cannot hold more than its caller grants, so the
+      # ceiling is set here and each called job narrows to what it needs:
+      # contents: write only for the release-assets upload, id-token: write
+      # only for the jobs that sign with cosign.
+      contents: write
       packages: write
+      id-token: write
     uses: ./.github/workflows/push-artifacts.yaml
     with:
       version: ${{ github.event.release.tag_name }}
