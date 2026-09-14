@@ -6,6 +6,7 @@ package types
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
@@ -28,7 +29,7 @@ func TestManifestRoundTrip(t *testing.T) {
 			External: []string{"net[12345]:extNetNs"},
 			SkipMnt:  []string{"/proc/kcore"},
 		},
-		NewSourcePodManifest("ctr-abc", 42, "node-1", "my-pod", "default", "10.0.0.11", []string{"pipe:[111]", "pipe:[222]", "pipe:[333]"}),
+		NewSourcePodManifest("ctr-abc", 42, "node-1", "my-pod", "default", "10.0.0.11", []string{"pipe:[111]", "pipe:[222]", "pipe:[333]"}, nil),
 		OverlayManifest{
 			Exclusions:     OverlaySettings{Exclusions: []string{"/proc", "/sys"}},
 			UpperDir:       "/var/lib/containerd/upper",
@@ -175,5 +176,74 @@ func TestManifestRequiresContainerName(t *testing.T) {
 	err := WriteManifest(t.TempDir(), &CheckpointManifest{Artifact: ArtifactManifest{ContentUID: "content-uid-123"}})
 	if err == nil || err.Error() != "checkpoint manifest is missing artifact.containerName" {
 		t.Fatalf("expected missing container name error, got %v", err)
+	}
+}
+
+// A moved or added mount must show up as a diff: that is what stops a stale artifact from
+// being adopted for a pod whose mount table no longer matches it.
+func TestDiffMountPlan(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		stored, current []string
+		want            []string
+	}{
+		{name: "identical", stored: []string{"a:/x"}, current: []string{"a:/x"}},
+		{name: "both empty"},
+		{name: "moved", stored: []string{"a:/x"}, current: []string{"a:/y"}, want: []string{"-a:/x", "+a:/y"}},
+		{name: "added", stored: []string{"a:/x"}, current: []string{"a:/x", "b:/y"}, want: []string{"+b:/y"}},
+		{name: "removed", stored: []string{"a:/x", "b:/y"}, current: []string{"a:/x"}, want: []string{"-b:/y"}},
+		{name: "subpath differs", stored: []string{"a:/x:s1"}, current: []string{"a:/x:s2"}, want: []string{"-a:/x:s1", "+a:/x:s2"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := DiffMountPlan(tc.stored, tc.current)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("DiffMountPlan(%v, %v) = %v, want %v", tc.stored, tc.current, got, tc.want)
+			}
+		})
+	}
+}
+
+// The adoption guard distinguishes a nil plan ("written before plans were recorded", so
+// unverifiable) from an explicitly empty one ("this container had no mounts", so still
+// comparable). The field is written unconditionally to keep that true: under omitempty an
+// empty plan would serialize identically to an old artifact's missing key, and a pod that
+// has since gained a mount would be adopted instead of refused.
+func TestMountPlanRoundTripKeepsAbsentDistinctFromEmpty(t *testing.T) {
+	write := func(t *testing.T, plan []string) []string {
+		t.Helper()
+		dir := t.TempDir()
+		manifest := &CheckpointManifest{
+			Artifact: ArtifactManifest{ContentUID: "content-uid-123", ContainerName: "main"},
+			K8s:      NewSourcePodManifest("ctr", 1, "node-1", "pod", "default", "", nil, plan),
+		}
+		if err := WriteManifest(dir, manifest); err != nil {
+			t.Fatalf("WriteManifest: %v", err)
+		}
+		loaded, err := ReadManifest(dir)
+		if err != nil {
+			t.Fatalf("ReadManifest: %v", err)
+		}
+		return loaded.K8s.MountPlan
+	}
+
+	if got := write(t, []string{}); got == nil {
+		t.Fatal("an explicitly empty plan round-tripped to nil, so it would be skipped as unverifiable")
+	}
+	if got := write(t, []string{"a:/x"}); !slices.Equal(got, []string{"a:/x"}) {
+		t.Fatalf("MountPlan = %v, want [a:/x]", got)
+	}
+
+	// An artifact from an agent that predates the field carries no key at all.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, manifestFilename),
+		[]byte("artifact:\n  contentUID: content-uid-123\n  containerName: main\nk8s:\n  podName: pod\n"), 0o600); err != nil {
+		t.Fatalf("write legacy manifest: %v", err)
+	}
+	loaded, err := ReadManifest(dir)
+	if err != nil {
+		t.Fatalf("ReadManifest: %v", err)
+	}
+	if loaded.K8s.MountPlan != nil {
+		t.Fatalf("a manifest without mountPlan read back as %#v, want nil", loaded.K8s.MountPlan)
 	}
 }

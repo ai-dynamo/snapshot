@@ -45,14 +45,18 @@ func CheckpointNeedsSourceKill(err error) bool {
 
 // CheckpointRequest holds the content-owned inputs for a checkpoint operation.
 type CheckpointRequest struct {
-	ContainerID         string
-	ContainerName       string
-	ContentUID          string
-	StartedAt           time.Time
-	NodeName            string
-	PodName             string
-	PodNamespace        string
-	PodIP               string
+	ContainerID   string
+	ContainerName string
+	ContentUID    string
+	StartedAt     time.Time
+	NodeName      string
+	PodName       string
+	PodNamespace  string
+	PodIP         string
+	// MountPlan is the target container's pod-spec mount set, recorded in the
+	// manifest so a later adoption can reject an artifact whose mount table no
+	// longer matches the pod it would be restored into.
+	MountPlan           []string
 	Clientset           kubernetes.Interface
 	PageBrokerRequested bool
 }
@@ -294,7 +298,7 @@ func configureCheckpoint(
 		req.ContentUID,
 		req.ContainerName,
 		types.NewCRIUDumpManifest(criuOpts, cfg.CRIU),
-		types.NewSourcePodManifest(req.ContainerID, state.PID, req.NodeName, req.PodName, req.PodNamespace, req.PodIP, state.StdioFDs),
+		types.NewSourcePodManifest(req.ContainerID, state.PID, req.NodeName, req.PodName, req.PodNamespace, req.PodIP, state.StdioFDs, req.MountPlan),
 		types.NewOverlayManifest(cfg.Overlay, state.UpperDir, state.OCISpec),
 	)
 	if len(state.CUDANSPIDs) > 0 {
