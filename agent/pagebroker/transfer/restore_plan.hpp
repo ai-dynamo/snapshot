@@ -12,14 +12,17 @@ namespace snapshot::pagebroker {
 using Path = std::filesystem::path;
 
 struct RestoreDirectory {
-  Path relative;
+  // Path within the checkpoint tree; appended to the destination staging root.
+  Path relative_path;
   std::filesystem::perms permissions = std::filesystem::perms::unknown;
 };
 
 struct RestoreFile {
+  // Source to read: a full filesystem path today; future backends may use object URIs.
   std::string source_locator;
-  Path relative;
-  uintmax_t bytes = 0;
+  // Path within the checkpoint tree; appended to the destination staging root.
+  Path relative_path;
+  uintmax_t size_bytes = 0;
   std::filesystem::perms permissions = std::filesystem::perms::unknown;
 };
 
