@@ -4,14 +4,17 @@
 """Reads and writes raw `RunResult` JSON files.
 
 One file per run, one directory per invocation
-(`benchmarks/results/<YYYYMMDD>-<git-sha7>-<random-suffix>/<model-label-slug>-<mode>.json`),
+(`benchmarks/results/<YYYYMMDD>-<git-sha7>-<random-suffix>/<model-label-slug>-<mode>-<run-id>.json`),
 so a sweep's raw output is reviewable as a unit. Each invocation gets its own
 directory (the random suffix guarantees this even for two invocations on the
 same day against the same commit, e.g. rerunning a single model after a fix)
 rather than reusing an existing one, so a later run can never silently
-overwrite an earlier one's result files. `benchmarks/results/` is gitignored
--- these are local, ad-hoc, user-generated artifacts, not the source of truth
-for anything published.
+overwrite an earlier one's result files. The filename itself includes
+`run_id` for the same reason at the single-file level: the label slug alone
+is not collision-free (`"Foo Bar"` and `"Foo-Bar"` both normalize to
+`foo-bar`), and `run_id` is what actually guarantees a unique path.
+`benchmarks/results/` is gitignored -- these are local, ad-hoc,
+user-generated artifacts, not the source of truth for anything published.
 """
 
 from __future__ import annotations
@@ -40,7 +43,14 @@ def invocation_dir(root: Path, *, git_sha: str | None) -> Path:
 
 
 def write_result(result: RunResult, directory: Path) -> Path:
-    path = directory / f"{_slug(result.model.label)}-{result.mode}.json"
+    path = directory / f"{_slug(result.model.label)}-{result.mode}-{result.run_id}.json"
+    if path.exists():
+        # `run_id` is generated per run (see `run.py`'s `run_benchmark`), so
+        # this should be unreachable in practice -- but a silent overwrite
+        # here would be exactly the failure mode this filename scheme exists
+        # to prevent, so a same-run_id collision must be a loud error, not a
+        # quiet clobber.
+        raise FileExistsError(f"refusing to overwrite existing result file: {path}")
     path.write_text(json.dumps(result.to_json_dict(), indent=2, sort_keys=False) + "\n")
     return path
 

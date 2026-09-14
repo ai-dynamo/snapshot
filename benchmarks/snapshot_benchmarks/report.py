@@ -50,12 +50,14 @@ def render(results: list[dict]) -> str:
     lines.append(
         "| Model | Weights (reported) | Checkpoint size (measured) | Checkpoint (s) | "
         "Cold start (s) | Restore, agent-internal (s) | Restore total, incl. vLLM wake (s) | "
-        "GPU | Driver | Storage | Placement |"
+        "GPU (capture) | Driver (capture) | GPU (restore) | Driver (restore) | Storage | Placement |"
     )
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---|---|---|---|")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---|---|---|---|---|---|")
     for r in results:
         model = r.get("model", {})
         env = r.get("environment", {})
+        capture_gpu = env.get("capture") or {}
+        restore_gpu = env.get("restore") or {}
         cold_start = r.get("cold_start") or {}
         checkpoint = r.get("checkpoint") or {}
         restore = r.get("restore") or {}
@@ -67,9 +69,16 @@ def render(results: list[dict]) -> str:
         # it). Rendered as separate columns rather than one falling back to
         # the other, so a row where the agent log didn't parse never silently
         # gets compared against a different metric than the rest of the table.
+        #
+        # GPU/driver are shown for capture and restore separately -- not
+        # collapsed into one column -- because on a heterogeneous cluster (or
+        # any `different_node` placement) the restore node's hardware can
+        # genuinely differ from the capture node's; see `warnings` below for
+        # an explicit flag when they do.
         lines.append(
             "| {label} | {weights} | {ckpt} | {ckpt_s} | {cold} | {restore_agent} | "
-            "{restore_total} | {gpu} | {driver} | {storage} | {placement} |".format(
+            "{restore_total} | {cgpu} | {cdriver} | {rgpu} | {rdriver} | {storage} | "
+            "{placement} |".format(
                 label=model.get("label", "-"),
                 weights=_fmt_bytes(model.get("reported_weights_bytes")),
                 ckpt=_fmt_bytes(model.get("checkpoint_artifact_bytes")),
@@ -77,8 +86,10 @@ def render(results: list[dict]) -> str:
                 cold=_fmt(cold_start.get("cold_start_excl_container_seconds")),
                 restore_agent=_fmt(agent_log.get("duration")),
                 restore_total=_fmt(restore.get("restore_total_seconds")),
-                gpu=env.get("gpu_product") or "-",
-                driver=env.get("gpu_driver_version") or "-",
+                cgpu=capture_gpu.get("gpu_product") or "-",
+                cdriver=capture_gpu.get("gpu_driver_version") or "-",
+                rgpu=restore_gpu.get("gpu_product") or "-",
+                rdriver=restore_gpu.get("gpu_driver_version") or "-",
                 storage=env.get("storage_class") or "-",
                 placement=env.get("placement") or "-",
             )
