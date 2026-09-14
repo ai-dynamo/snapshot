@@ -120,7 +120,7 @@ PRELOAD_TESTS := $(patsubst tests/%.cc,$(TEST_DIR)/%,$(wildcard tests/*_preload_
 COORDINATOR_TEST := $(patsubst tests/%.cc,$(TEST_DIR)/%,$(wildcard tests/coordinator_test.cc))
 # Shim sources that need no CUDA driver at run time. symbols.c and context.c
 # resolve driver symbols and are exercised through the preload tests.
-UNIT_SOURCES := $(filter-out coordinator.c interpose.c multicast.c symbols.c context.c,$(wildcard *.c)) $(UTIL_SOURCES)
+UNIT_SOURCES := $(filter-out coordinator.c interpose.c multicast.c symbols.c context.c host_carrier.c,$(wildcard *.c)) $(UTIL_SOURCES)
 UNIT_OBJECTS := $(patsubst %.c,$(TEST_DIR)/%.o,$(UNIT_SOURCES))
 # When the shim under test is ASan-instrumented, the ASan runtime must be the
 # first library in the process, ahead of the shim itself.
