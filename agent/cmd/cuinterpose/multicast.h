@@ -9,8 +9,9 @@
 
 /*
  * CUDA multicast objects (cuMulticast*) let several GPUs write one buffer
- * through NVLink. This layer forwards the entry points unchanged; tracking
- * and checkpoint of multicast groups is added in a later change.
+ * through NVLink. This layer forwards the entry points, translating tracked
+ * unicast handles for the bind calls; tracking and checkpoint of multicast
+ * groups is added in a later change.
  */
 
 #endif

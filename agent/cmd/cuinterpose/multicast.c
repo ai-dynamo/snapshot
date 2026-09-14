@@ -11,6 +11,7 @@
 #include <cuda.h>
 
 #include "export.h"
+#include "interpose.h"
 #include "symbols.h"
 
 /* cuda.h maps these names to versioned entry points; the shim wraps the names. */
@@ -53,8 +54,12 @@ cuMulticastBindMem(
     size_t memory_offset, size_t size, unsigned long long flags)
 {
   bind_mem_fn function = (bind_mem_fn)cuinterpose_lookup_real_symbol("cuMulticastBindMem");
+  CUmemGenericAllocationHandle driver = memory;
 
-  return function != NULL ? function(multicast, multicast_offset, memory, memory_offset, size, flags)
+  (void)cuinterpose_ensure_process_endpoint();
+  /* The application binds by its logical handle; the driver needs its own. */
+  (void)cuinterpose_translate_handle(memory, &driver);
+  return function != NULL ? function(multicast, multicast_offset, driver, memory_offset, size, flags)
                           : cuinterpose_unavailable();
 }
 
@@ -75,8 +80,11 @@ cuMulticastBindMem_v2(
     CUmemGenericAllocationHandle memory, size_t memory_offset, size_t size, unsigned long long flags)
 {
   bind_mem_v2_fn function = (bind_mem_v2_fn)cuinterpose_lookup_real_symbol("cuMulticastBindMem_v2");
+  CUmemGenericAllocationHandle driver = memory;
 
-  return function != NULL ? function(multicast, device, multicast_offset, memory, memory_offset, size, flags)
+  (void)cuinterpose_ensure_process_endpoint();
+  (void)cuinterpose_translate_handle(memory, &driver);
+  return function != NULL ? function(multicast, device, multicast_offset, driver, memory_offset, size, flags)
                           : cuinterpose_unavailable();
 }
 
