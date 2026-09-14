@@ -83,9 +83,7 @@ enum cuinterpose_record_flags {
   CUINTERPOSE_CREATOR = 1U << 0,
   CUINTERPOSE_APPLICATION_HANDLE_LIVE = 1U << 1,
   CUINTERPOSE_ALLOCATION_CONTENT = 1U << 2,
-  /* A creator allocation that was never exported. It is reported only so its
-   * contents can be preserved; no importer refers to it. */
-  CUINTERPOSE_CONTENT_ONLY = 1U << 3,
+  /* Bit 3 is reserved; private allocations stay with native CUDA. */
 };
 
 /* Where a participant is in the checkpoint/restore lifecycle; reported in

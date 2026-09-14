@@ -82,6 +82,21 @@ int fakeAllocationRefs(CUmemGenericAllocationHandle handle);
 int fakeSameAllocation(CUmemGenericAllocationHandle a, CUmemGenericAllocationHandle b);
 int fakeExportCalls(void);
 int fakeMappedCount(void);
+/* Bytes moved by cuMemcpyDtoHAsync / cuMemcpyHtoDAsync since the last model reset. */
+uint64_t fakeCopiedToHost(void);
+uint64_t fakeCopiedToDevice(void);
+/* Host ranges currently registered with cuMemHostRegister. */
+int fakeRegisteredHostRanges(void);
+/* Make cuMemHostGetFlags report every range as unregistered (simulates a
+ * registration that did not survive restore). */
+void fakeForgetHostRegistrations(void);
+/* Fail the next call to the named entry point once, with CUDA_ERROR_UNKNOWN. */
+void fakeFailNext(const char* function);
+/* The fake's notion of the current context, changed by cuCtxSetCurrent. */
+CUcontext fakeCurrentContext(void);
+/* cuDevicePrimaryCtxRetain calls since the last model reset, and retains not yet released. */
+int fakePrimaryContextRetainCalls(void);
+int fakePrimaryContextsHeld(void);
 /* Number of cuMemSetAccess calls since the last reset. */
 int fakeAccessCalls(void);
 /* The fake's own implementation of `symbol`, bypassing any interposer. */

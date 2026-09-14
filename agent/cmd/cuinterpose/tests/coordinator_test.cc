@@ -23,6 +23,7 @@
 #include <functional>
 #include <mutex>
 #include <sstream>
+#include <filesystem>
 #include <string>
 #include <thread>
 #include <vector>
@@ -187,7 +188,8 @@ class Coordinator : public ::testing::Test {
     ASSERT_EQ(mkdir(checkpoint.c_str(), 0700), 0);
   }
   void TearDown() override {
-    if (std::system(("rm -rf " + dir).c_str()) != 0) ADD_FAILURE() << "cleanup failed";
+    std::error_code ignored;
+    std::filesystem::remove_all(dir, ignored);
   }
 
   std::vector<std::string> args(const char* mode, std::initializer_list<int> pids) {
@@ -264,7 +266,7 @@ TEST_F(Coordinator, PrepareDrivesEveryPhaseInOrderAndWritesState) {
   for (auto* p : {&a, &b}) {
     std::vector<uint16_t> want = {
         CUINTERPOSE_HANDSHAKE, CUINTERPOSE_INSPECT, CUINTERPOSE_PREPARE_MULTICAST,
-        CUINTERPOSE_PREPARE_UNICAST};
+        CUINTERPOSE_SAVE_ALLOCATIONS, CUINTERPOSE_PREPARE_UNICAST};
     EXPECT_EQ(p->operations(), want);
   }
   // Progress lines, one per phase, in order.
@@ -471,6 +473,7 @@ TEST_F(Coordinator, RestoreRunsPhasesWithBarriers) {
   EXPECT_EQ(run.status, 0) << run.err;
   EXPECT_FALSE(a_got_final_while_b_held) << "RESTORE_MULTICAST_BINDINGS was dispatched before every DEVICES reply";
   std::vector<uint16_t> want = {CUINTERPOSE_HANDSHAKE,
+                                CUINTERPOSE_LOAD_ALLOCATIONS,
                                 CUINTERPOSE_RESTORE_UNICAST,
                                 CUINTERPOSE_RESTORE_MULTICAST_CREATORS,
                                 CUINTERPOSE_RESTORE_MULTICAST_IMPORTERS,
