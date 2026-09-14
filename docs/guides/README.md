@@ -2,9 +2,9 @@
 
 Using Snapshot is a three-stage flow:
 
-1. **Make the workload snapshot-ready** — satisfy the [workload
-   contract](../reference/workload-contract.md); the per-framework guides below
-   build one from the framework's runtime image.
+1. **Make the workload snapshot-ready** — the per-framework guides below build
+   one from the framework's runtime image. The requirement they satisfy is the
+   [workload contract](../reference/workload-contract.md).
 2. **Checkpoint** the running replica — with a `PodSnapshot` or a `SnapshotJob`.
 3. **Restore** into new pods — with the `nvidia.com/restore-from` annotation.
 
