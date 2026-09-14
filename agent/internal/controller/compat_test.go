@@ -34,7 +34,7 @@ func TestReplacementRestoreStillChecksCompatibility(t *testing.T) {
 	}
 	r.reconcile(t)
 	require.NotEmpty(t, r.comparison.calls)
-	assert.Equal(t, podcontract.RestoreReasonIncompatible, r.condition(t).Reason)
+	assert.Equal(t, podcontract.RestoreReasonReplenishmentIncompatible, r.condition(t).Reason)
 	assert.Equal(t, "old-container", liveRestoredContainerID(t, r.controller, r.pod, "main"))
 }
 
@@ -404,11 +404,13 @@ func TestRefusalIsLoggedWithTheSameReasonAtBothGates(t *testing.T) {
 // back into the same answer.
 func TestRunRestoreTreatsIncompatibleAsTerminal(t *testing.T) {
 	r := newGatedRestore(t)
-	rt := &fakeRuntime{}
+	rt := &fakeRuntime{resolveContainerPID: 4242}
 	r.controller.runtime = rt
 	sentinels := 0
-	r.controller.writeControlSentinelFn = func(int, string) error {
-		sentinels++
+	r.controller.writeControlSentinelFn = func(_ int, name string) error {
+		if name == podcontract.RestoreCompleteFile {
+			sentinels++
+		}
 		return nil
 	}
 	r.controller.restoreFn = refuseWith(compat.Mismatch{Check: "cpu-arch", Source: "amd64", Target: "arm64"})
@@ -418,7 +420,7 @@ func TestRunRestoreTreatsIncompatibleAsTerminal(t *testing.T) {
 	assert.False(t, requeue, "a refusal asked to be driven again")
 	assert.Empty(t, r.events(t, podcontract.RestoreReasonFailed), "refusal reported itself as a restore failure")
 	assert.Zero(t, sentinels, "refusal released the workload")
-	assert.Empty(t, rt.resolvedContainerIDs, "refusal reached the placeholder kill path")
+	assert.Len(t, rt.resolvedContainerIDs, 2, "only recovery and intent recording resolve the placeholder")
 }
 
 // The gate runs in preflight, before the restore is entered at all, so a refusal

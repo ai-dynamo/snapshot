@@ -62,18 +62,30 @@ whose IDs differ from their recorded IDs, without replaying CRIU into unchanged
 siblings. A replacement that is not running yet remains pending until a usable
 container can be resolved. Compatibility checks still apply.
 
-Before starting replenishment, the agent persists
-`nvidia.com/restore-replenishing: "true"`. This agent-owned marker remains set
-across pending passes and agent restarts, so an untracked sibling cannot be
-mistaken for a destination awaiting its initial restore. Producers must not set
-or copy this annotation. Failure to persist the marker requeues without starting
-restore workers or changing the restore condition.
+Before starting replenishment, the agent persists `nvidia.com/Restored=False`
+with reason `RestoreReplenishing`. Pending passes and agent restarts preserve
+this phase, so an untracked sibling cannot be mistaken for initial restore work.
+Failure to persist status requeues without starting workers. Execution phase
+comes from agent-written status, never producer annotations.
+
+Recovery evidence in the control volume is scoped to the Pod UID, checkpoint
+content UID, destination, and runtime container ID. The agent records intent
+before executing restore and completion before releasing the workload through
+`restore-complete`. The workload-facing file alone does not prove completion for
+a replacement container. An interrupted attempt without completion evidence
+fails closed and requires a new restore Pod; CRIU and Kubernetes status cannot
+be committed atomically.
 
 Failed and partially successful restores require a new restore Pod, not an
 automatic retry. Compatibility refusals retain their explicit skip-check
-override. Successful legacy Pods without recorded IDs, and untracked
-destinations during replenishment, are left alone because their state cannot
+override; `RestoreReplenishmentIncompatible` retains the replacement-only policy
+when that override is applied. Successful legacy Pods without recorded IDs, and
+untracked destinations during replenishment, are left alone because their state cannot
 prove replay is safe. Invalid records cannot authorize replay and are logged.
+
+Drain active restore operations before upgrading the agent. In-progress
+operations from agents that did not write incarnation-scoped recovery evidence
+cannot be safely resumed using the workload-facing completion file alone.
 
 The producer supplies `SourceContainer` from the referenced `PodSnapshot`.
 Empty mappings restore that source into the same-named destination only. The

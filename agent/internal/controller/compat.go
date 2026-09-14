@@ -22,11 +22,15 @@ import (
 func (w *NodeController) refuseRestore(ctx context.Context, pod *corev1.Pod, incompatible *compat.IncompatibleError) bool {
 	reason := compat.Reasons(incompatible.Mismatches)
 	w.logRestoreRefusal(pod, incompatible, reason)
+	statusReason := podcontract.RestoreReasonIncompatible
+	if restorePhaseForPod(pod) == restoreReplenishing {
+		statusReason = podcontract.RestoreReasonReplenishmentIncompatible
+	}
 	return w.finishRestore(
 		ctx,
 		pod,
 		corev1.ConditionFalse,
-		podcontract.RestoreReasonIncompatible,
+		statusReason,
 		refusalMessage(reason),
 	) != nil
 }
@@ -54,7 +58,7 @@ func restoreRefused(pod *corev1.Pod) bool {
 	condition := findRestoredCondition(pod)
 	return condition != nil &&
 		condition.Status == corev1.ConditionFalse &&
-		condition.Reason == podcontract.RestoreReasonIncompatible
+		(condition.Reason == podcontract.RestoreReasonIncompatible || condition.Reason == podcontract.RestoreReasonReplenishmentIncompatible)
 }
 
 // skipRequestedAfterRefusal reports a pod that the gates turned down and that
