@@ -302,3 +302,34 @@ func TestBuildShapedSourceJobWrapsMultiGPUTargets(t *testing.T) {
 		assert.Equal(t, []string{"worker"}, wrapped)
 	})
 }
+
+func cuinterposeSnapshotJob() *snapshotv1alpha1.SnapshotJob {
+	sj := minimalSnapshotJob()
+	sj.Spec.PodTemplate.Annotations = map[string]string{
+		podcontract.CuinterposeAnnotation: podcontract.CuinterposeAnnotationEnabled,
+	}
+	sj.Spec.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "worker"}
+	return sj
+}
+
+func TestBuildShapedSourceJobShapesCuinterpose(t *testing.T) {
+	sj := cuinterposeSnapshotJob()
+
+	job, wrapped, err := buildShapedSourceJob(sj, testCUDAToolsDelivery(), nil)
+	require.NoError(t, err)
+	assert.Empty(t, wrapped, "cuinterpose opt-in does not change the single-GPU launch rule")
+
+	require.NoError(t, podcontract.VerifyCUDATools(&job.Spec.Template.Spec, []string{"worker"}))
+	require.NoError(t, podcontract.VerifyCuinterposeCapture(&job.Spec.Template.Spec, []string{"worker"}))
+	main := requireContainer(t, job.Spec.Template.Spec.Containers, "worker")
+	assert.Equal(t, []string{"python3", "-m", "worker"}, main.Command,
+		"the annotation only enables LD_PRELOAD")
+	requireContainer(t, job.Spec.Template.Spec.InitContainers, podcontract.CUDAToolsInitContainerName)
+
+	t.Run("a SnapshotJob without the annotation does not preload the shim", func(t *testing.T) {
+		job, _, err := buildShapedSourceJob(multiGPUSnapshotJob(), testCUDAToolsDelivery(), nil)
+		require.NoError(t, err)
+		require.NoError(t, podcontract.VerifyCUDATools(&job.Spec.Template.Spec, []string{"worker"}))
+		require.Error(t, podcontract.VerifyCuinterposeCapture(&job.Spec.Template.Spec, []string{"worker"}))
+	})
+}
