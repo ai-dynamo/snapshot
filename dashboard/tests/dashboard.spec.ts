@@ -33,7 +33,11 @@ test("loads, filters, and exposes benchmark details", async ({ page }) => {
     "Loaded 6 benchmark results from 2 of 3 monthly indexes",
   );
   await expect(page.getByRole("status")).toContainText("newest result");
-  await expect(page.locator(".chart-card canvas")).toHaveCount(3);
+  // 3 per-case stage breakdown charts (sglang, tensorrt-llm, vllm) plus the
+  // 2 default-selected measurement line charts (checkpoint.duration and
+  // restore.to_traffic.duration; test.total.duration is no longer a
+  // selectable measurement).
+  await expect(page.locator(".chart-card canvas")).toHaveCount(5);
   await expect(page.locator("#latest-body tr")).toHaveCount(5);
 
   const restoreCard = page.locator(".chart-card", { hasText: "Restore to traffic" });
@@ -43,7 +47,10 @@ test("loads, filters, and exposes benchmark details", async ({ page }) => {
   );
   await expect(restoreCard.locator(".failure-strip")).toContainText("end event not reached");
 
-  await page.getByLabel("SGLang").uncheck();
+  // getByLabel("SGLang") is ambiguous now: it also matches the SGLang stage
+  // breakdown chart's aria-label ("SGLang stage breakdown for..."), a
+  // substring match. The checkbox role disambiguates.
+  await page.getByRole("checkbox", { name: "SGLang" }).uncheck();
   await expect(page.locator("#latest-body")).not.toContainText("SGLang");
 
   await page.getByLabel("Date range").selectOption("30");

@@ -53,12 +53,11 @@ SPDX-License-Identifier: Apache-2.0
 
         <div class="controls__grid">
           <!--
-            Hidden, not removed: a single suite exists today, but the
-            underlying filtering still keys off elements.suite.value
-            everywhere, so this stays functional (auto-selects the only
-            suite) for when a second suite shows up.
+            Hidden by default: only one suite exists today. configureSuites()
+            un-hides this as soon as a second suite is discovered, so it
+            still works for the discoverability the suite select exists for.
           -->
-          <label class="controls__field--hidden">
+          <label id="suite-field" class="controls__field--hidden">
             <span>Suite</span>
             <select id="suite-filter"></select>
           </label>
