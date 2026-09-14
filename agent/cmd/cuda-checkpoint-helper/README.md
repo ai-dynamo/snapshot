@@ -8,14 +8,7 @@ add a Snapshot-local coordinator.
 
 ## Ownership boundary
 
-Snapshot owns workload orchestration, target discovery, ordering with CRIU,
-and the final checkpoint or restore result. PageBroker is the production owner
-of node-local CUDA execution and artifact staging. The code in this slice is a
-C++ foundation used behind that PageBroker boundary.
-
-The transfer interface intentionally does not depend on PageBroker protobufs
-or on a concrete data plane. A later PageBroker engine supplies the production
-adapter while preserving these contracts:
+This C++ core preserves the lower-level transfer contracts consumed by PageBroker's CUDA execution path. These lower-level transfer contracts deliberately do not import PageBroker protobuf types. The PageBroker-owned CUDA adapter translates the existing PageBroker transaction API into these contracts so wire-format concerns do not leak into driver and I/O code. The core preserves these contracts:
 
 - transfer configuration is bounded before pinned memory or work is allocated;
 - extent content can be incrementally hashed with SHA-256;
