@@ -26,6 +26,39 @@ tests:
       - notExists:
           path: spec.template.spec.containers[1].command
 
+  - it: keeps the agent as the default container for exec and logs
+    template: templates/daemonset.yaml
+    asserts:
+      - equal:
+          path: spec.template.metadata.annotations["kubectl.kubernetes.io/default-container"]
+          value: agent
+
+  - it: does not let podAnnotations redirect the default container
+    template: templates/daemonset.yaml
+    set:
+      daemonset.podAnnotations:
+        kubectl.kubernetes.io/default-container: pagebroker
+        example.com/team: platform
+    asserts:
+      - equal:
+          path: spec.template.metadata.annotations["kubectl.kubernetes.io/default-container"]
+          value: agent
+      - equal:
+          path: spec.template.metadata.annotations["example.com/team"]
+          value: platform
+
+  - it: keeps the default container alongside the OpenShift SCC pin
+    template: templates/daemonset.yaml
+    set:
+      openshift.enabled: true
+    asserts:
+      - equal:
+          path: spec.template.metadata.annotations["kubectl.kubernetes.io/default-container"]
+          value: agent
+      - equal:
+          path: spec.template.metadata.annotations["openshift.io/required-scc"]
+          value: privileged
+
   - it: points the daemon at the shared socket, staging root, and checkpoint PVC path
     template: templates/daemonset.yaml
     asserts:
