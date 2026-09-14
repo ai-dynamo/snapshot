@@ -73,21 +73,21 @@ ValidateRestorePlan(const RestorePlan& plan)
   std::set<Path> directories;
   std::set<Path> entries;
   for (const auto& directory : plan.directories) {
-    if (!IsSafeRelativePath(directory.relative))
+    if (!IsSafeRelativePath(directory.relative_path))
       throw std::invalid_argument("restore plan contains an unsafe directory path");
-    const Path parent = directory.relative.parent_path();
+    const Path parent = directory.relative_path.parent_path();
     if (!parent.empty() && !directories.contains(parent))
       throw std::invalid_argument("restore plan directories must be ordered parent-first");
-    if (!directories.insert(directory.relative).second || !entries.insert(directory.relative).second)
+    if (!directories.insert(directory.relative_path).second || !entries.insert(directory.relative_path).second)
       throw std::invalid_argument("restore plan contains a duplicate path");
   }
   for (const auto& file : plan.files) {
-    if (!IsSafeRelativePath(file.relative))
+    if (!IsSafeRelativePath(file.relative_path))
       throw std::invalid_argument("restore plan contains an unsafe file path");
-    const Path parent = file.relative.parent_path();
+    const Path parent = file.relative_path.parent_path();
     if (!parent.empty() && !directories.contains(parent))
       throw std::invalid_argument("restore plan file parent is missing");
-    if (!entries.insert(file.relative).second)
+    if (!entries.insert(file.relative_path).second)
       throw std::invalid_argument("restore plan contains a duplicate path");
   }
 }
@@ -95,7 +95,7 @@ ValidateRestorePlan(const RestorePlan& plan)
 class MappedFile {
  public:
   MappedFile(const RestoreFile& file, const Path& destination)
-      : source_(file.source_locator), destination_(destination), bytes_(CheckedSize(file.bytes)),
+      : source_(file.source_locator), destination_(destination), bytes_(CheckedSize(file.size_bytes)),
         permissions_(file.permissions)
   {
     FileDescriptor descriptor(open(destination_.c_str(), O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600));
@@ -147,7 +147,7 @@ CreateDirectoryTree(const RestorePlan& plan, const Path& destination)
 {
   fs::create_directory(destination);
   for (const auto& directory : plan.directories)
-    fs::create_directory(destination / directory.relative);
+    fs::create_directory(destination / directory.relative_path);
 }
 
 void
@@ -163,7 +163,7 @@ void
 ApplyTreePermissions(const RestorePlan& plan, const Path& destination)
 {
   for (auto directory = plan.directories.rbegin(); directory != plan.directories.rend(); ++directory)
-    ApplyPermissions(destination / directory->relative, directory->permissions);
+    ApplyPermissions(destination / directory->relative_path, directory->permissions);
   ApplyPermissions(destination, plan.root_permissions);
 }
 }  // namespace
@@ -335,7 +335,7 @@ ModelStreamerRestore::ReceiveAndDispatch()
   response.status = streamer::runai_response(
       value_, &response.submission_id, &response.file_index, &response.range_index, &response.submission_done,
       kResponsePollTimeoutMs);
-  if (response.status != streamer::kTimedOut) {
+  if (response.status != streamer::kTimedOutStatusCode) {
     const auto entry = active_.find(response.submission_id);
     if (entry == active_.end())
       throw std::runtime_error("Model Streamer returned a response for an unknown submission");
@@ -400,19 +400,19 @@ ModelStreamerRestore::RestoreFiles(const RestorePlan& plan, const Path& destinat
     MappedFiles batch;
     uintmax_t batch_bytes = 0;
     while (file != plan.files.end()) {
-      const Path staged = destination / file->relative;
-      if (file->bytes == 0) {
+      const Path staged = destination / file->relative_path;
+      if (file->size_bytes == 0) {
         CreateEmptyFile(*file, staged);
         ++file;
         continue;
       }
 
       if (!batch.empty() &&
-          (batch_bytes >= kSubmissionByteBudget || file->bytes > kSubmissionByteBudget - batch_bytes))
+          (batch_bytes >= kSubmissionByteBudget || file->size_bytes > kSubmissionByteBudget - batch_bytes))
         break;
 
       batch.push_back(std::make_unique<MappedFile>(*file, staged));
-      batch_bytes += file->bytes;
+      batch_bytes += file->size_bytes;
       ++file;
     }
 

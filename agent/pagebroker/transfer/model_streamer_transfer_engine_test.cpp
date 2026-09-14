@@ -104,7 +104,7 @@ runai_response(
 {
   auto& streamer = *static_cast<FakeStreamer*>(value);
   if (streamer.next_response == streamer.responses.size())
-    return kTimedOut;
+    return kTimedOutStatusCode;
 
   const auto& response = streamer.responses[streamer.next_response++];
   *out_submission_id = response.submission_id;
@@ -117,7 +117,7 @@ runai_response(
 extern "C" const char*
 runai_response_str(int response_code)
 {
-  return response_code == kTimedOut ? "timed out" : "fake Model Streamer error";
+  return response_code == kTimedOutStatusCode ? "timed out" : "fake Model Streamer error";
 }
 }  // namespace snapshot::pagebroker::model_streamer_api
 
