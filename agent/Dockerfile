@@ -15,6 +15,7 @@
 # Optional targets for CI:
 #   docker build --target linter --build-context api=../api .   # Run linting
 #   docker build --target tester --build-context api=../api .   # Run tests
+#   docker build --target cuda-transfer-contracts-builder .      # Validate CUDA transfer contracts
 
 # =============================================================================
 # Build Arguments
@@ -38,10 +39,64 @@ ARG GOLANGCI_LINT_VERSION=v2.13.2
 ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
 ARG CRIU_REF=criu-dev
 ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04@sha256:8315e2455736c4f9b597f15c5fb4d31f834e798e0c6b66bbdbdbac491ce26bd1
+ARG CUDA_HELPER_HEADERS_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04@sha256:edd686dcb3e87806dfc869623ccb0a7e62c0d09bd720a82014c23efcecc8d9a2
 
 # For placeholder target only - this default allows agent builds to succeed,
 # but placeholder builds MUST override it with --build-arg BASE_IMAGE=<image>
 ARG BASE_IMAGE=placeholder-requires-base-image-arg
+
+# =============================================================================
+# Stage: CUDA 13.4 header provider
+# =============================================================================
+FROM ${CUDA_HELPER_HEADERS_IMAGE} AS cuda-helper-headers
+
+# =============================================================================
+# Stage: CUDA transfer contract builder (no transfer adapter)
+# =============================================================================
+FROM ${AGENT_BASE_IMAGE} AS cuda-transfer-contracts-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+COPY --from=cuda-helper-headers /usr/local/cuda-13.4/targets/x86_64-linux/include/cuda.h /opt/cuda-13.4/include/cuda.h
+COPY cmd/cuda-checkpoint-helper/content_digest.cpp ./cmd/cuda-checkpoint-helper/content_digest.cpp
+COPY cmd/cuda-checkpoint-helper/content_digest.h ./cmd/cuda-checkpoint-helper/content_digest.h
+COPY cmd/cuda-checkpoint-helper/content_digest_test.cpp ./cmd/cuda-checkpoint-helper/content_digest_test.cpp
+COPY cmd/cuda-checkpoint-helper/transfer_config.cpp ./cmd/cuda-checkpoint-helper/transfer_config.cpp
+COPY cmd/cuda-checkpoint-helper/transfer_config.h ./cmd/cuda-checkpoint-helper/transfer_config.h
+COPY cmd/cuda-checkpoint-helper/transfer_config_test.cpp ./cmd/cuda-checkpoint-helper/transfer_config_test.cpp
+COPY cmd/cuda-checkpoint-helper/transfer_cancellation.h ./cmd/cuda-checkpoint-helper/transfer_cancellation.h
+COPY cmd/cuda-checkpoint-helper/transfer_engine.h ./cmd/cuda-checkpoint-helper/transfer_engine.h
+COPY cmd/cuda-checkpoint-helper/transfer_engine_test.cpp ./cmd/cuda-checkpoint-helper/transfer_engine_test.cpp
+COPY cmd/cuda-checkpoint-helper/transfer_backend_unavailable.cpp ./cmd/cuda-checkpoint-helper/transfer_backend_unavailable.cpp
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread \
+      -I/opt/cuda-13.4/include \
+      -c ./cmd/cuda-checkpoint-helper/transfer_backend_unavailable.cpp \
+      -o /transfer-backend-unavailable.o
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+      -o /cuda-checkpoint-helper-content-digest-test \
+      ./cmd/cuda-checkpoint-helper/content_digest.cpp \
+      ./cmd/cuda-checkpoint-helper/content_digest_test.cpp \
+      -lcrypto \
+    && /cuda-checkpoint-helper-content-digest-test
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+      -o /cuda-checkpoint-helper-transfer-config-test \
+      ./cmd/cuda-checkpoint-helper/transfer_config.cpp \
+      ./cmd/cuda-checkpoint-helper/transfer_config_test.cpp \
+    && /cuda-checkpoint-helper-transfer-config-test
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+      -I/opt/cuda-13.4/include \
+      -o /cuda-checkpoint-helper-transfer-cancellation-test \
+      ./cmd/cuda-checkpoint-helper/transfer_engine_test.cpp \
+    && /cuda-checkpoint-helper-transfer-cancellation-test
 
 # =============================================================================
 # Stage: Go base - Common setup for Go builds
