@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
+import sys
 import uuid
 from typing import Callable
 
@@ -34,6 +35,7 @@ from snapshot_benchmarks.schema import (
     BenchmarkEngine,
     CheckpointTiming,
     ColdStartTiming,
+    GpuIdentity,
     ModelInfo,
     RestoreTiming,
     RunResult,
@@ -241,11 +243,12 @@ def run_benchmark(
 
         capture_node = source_pod.spec.node_name
         result.environment = metadata.collect_environment(
-            namespace=cfg.workload_namespace,
+            pvc_namespace=cfg.snapshot_namespace,
             pvc_name=cfg.pvc_name,
-            gpu_pod=source_name,
-            gpu_container=engine.container_name,
             capture_node=capture_node,
+        )
+        result.environment.capture = metadata.collect_gpu_identity(
+            cfg.workload_namespace, source_name, engine.container_name, capture_node
         )
         result.engine.version = metadata.engine_version(
             cfg.workload_namespace, source_name, engine.container_name, engine.version_probe_command
@@ -323,6 +326,14 @@ def run_benchmark(
             restore_node = restore_ready_pod.spec.node_name
             result.environment.restore_node = restore_node
             result.environment.placement = metadata.placement(capture_node, restore_node)
+            result.environment.restore = metadata.collect_gpu_identity(
+                cfg.workload_namespace, restore_name, engine.container_name, restore_node
+            )
+            heterogeneous_warning = _heterogeneous_restore_warning(
+                result.environment.capture, result.environment.restore
+            )
+            if heterogeneous_warning:
+                result.warnings.append(heterogeneous_warning)
 
             result.agent_log_phases = _collect_agent_log_phases(
                 cfg, restore_node, restore_name=restore_name, snapshot_name=snapshot_name
@@ -331,35 +342,74 @@ def run_benchmark(
         return result
     finally:
         if not keep:
+            cleanup_errors: list[Exception] = []
+
+            def cleanup(action: Callable[[], None]) -> None:
+                exc = _try_cleanup(action)
+                if exc is not None:
+                    cleanup_errors.append(exc)
+
             if restore_created:
                 progress(f"[{run_id}] cleaning up restore pod")
-                _try_cleanup(lambda: k8s.delete_pod(cfg.workload_namespace, restore_name))
-                _try_cleanup(
+                cleanup(lambda: k8s.delete_pod(cfg.workload_namespace, restore_name))
+                cleanup(
                     lambda: lifecycle.wait_for_pod_deleted(cfg.workload_namespace, restore_name)
                 )
             if snapshot_name is not None:
-                _try_cleanup(
+                cleanup(
                     lambda: lifecycle.delete_podsnapshot(cfg.workload_namespace, snapshot_name)
                 )
             if content_name is not None:
-                _try_cleanup(lambda: lifecycle.delete_podsnapshotcontent(content_name))
+                cleanup(lambda: lifecycle.delete_podsnapshotcontent(content_name))
             if source_created and not source_deleted:
                 progress(f"[{run_id}] cleaning up source pod")
-                _try_cleanup(lambda: k8s.delete_pod(cfg.workload_namespace, source_name))
-                _try_cleanup(
+                cleanup(lambda: k8s.delete_pod(cfg.workload_namespace, source_name))
+                cleanup(
                     lambda: lifecycle.wait_for_pod_deleted(cfg.workload_namespace, source_name)
                 )
 
+            if cleanup_errors:
+                # A cleanup failure here means a pod, PodSnapshot, or
+                # PodSnapshotContent from this run may still be sitting on the
+                # cluster -- holding a GPU or leaving stale checkpoint state
+                # behind for the next run to trip over. That must never be
+                # swallowed the way individual `_try_cleanup` steps are: it
+                # has to reach the caller (`cli.py`'s `sweep`) as a distinct,
+                # unmissable signal to stop rather than start another model
+                # against contaminated cluster state. `sys.exc_info()` reads
+                # whatever exception is already propagating out of the `try`
+                # block above (if any) -- raising here would otherwise
+                # silently replace it. We fold its message into the new
+                # exception and chain it with `raise ... from`, so it's
+                # visible both via `str(exc)` (e.g. `cli.py`'s plain `print`)
+                # and via the full traceback, instead of being lost.
+                primary_exc = sys.exc_info()[1]
+                detail = "; ".join(f"{type(exc).__name__}: {exc}" for exc in cleanup_errors)
+                message = f"[{run_id}] cleanup failed, cluster state may be contaminated: {detail}"
+                if primary_exc is not None:
+                    message += f" (after benchmark error: {primary_exc})"
+                raise CleanupError(message) from primary_exc
 
-def _try_cleanup(action: Callable[[], None]) -> None:
-    """Runs a best-effort cleanup step, swallowing and printing any exception
-    rather than letting it propagate -- a cleanup failure (e.g. the pod was
-    already gone) must never shadow the run's own real exception when both
-    happen inside the same `finally` block."""
+
+class CleanupError(RuntimeError):
+    """Raised when post-run cleanup (deleting the source/restore pod, the
+    PodSnapshot, or the PodSnapshotContent) itself fails. Distinct from a
+    benchmark's own failure so `cli.py`'s `sweep` can tell "this model failed"
+    apart from "the cluster may now be in a bad state -- stop"."""
+
+
+def _try_cleanup(action: Callable[[], None]) -> Exception | None:
+    """Runs a best-effort cleanup step, catching (never letting propagate,
+    so one failed step never skips the rest) and returning any exception
+    instead of only printing it -- the caller collects these across all
+    cleanup steps and decides how to react (see the `finally` block above),
+    rather than the failure being silently swallowed."""
     try:
         action()
     except Exception as exc:  # noqa: BLE001 - deliberately broad, see docstring
         print(f"warning: cleanup step failed: {exc}")
+        return exc
+    return None
 
 
 def _pod_condition_time(pod, condition_type: str) -> datetime.datetime | None:
@@ -418,6 +468,29 @@ def _collect_agent_log_phases(
     return logs.parse_agent_log_phases(
         log_text, log_source_pod=agent_pod, restore_pod=restore_pod_key, snapshot=snapshot_name
     )
+
+
+def _heterogeneous_restore_warning(
+    capture: GpuIdentity, restore: GpuIdentity
+) -> str | None:
+    """Flags a restore onto a node whose reported GPU product or driver
+    version differs from the capture node's -- a silent mismatch here would
+    make a report reader attribute restore timing to the wrong hardware.
+    Best-effort: only compares fields both sides actually reported."""
+    mismatches = []
+    if capture.gpu_product and restore.gpu_product and capture.gpu_product != restore.gpu_product:
+        mismatches.append(f"gpu_product {capture.gpu_product!r} -> {restore.gpu_product!r}")
+    if (
+        capture.gpu_driver_version
+        and restore.gpu_driver_version
+        and capture.gpu_driver_version != restore.gpu_driver_version
+    ):
+        mismatches.append(
+            f"gpu_driver_version {capture.gpu_driver_version!r} -> {restore.gpu_driver_version!r}"
+        )
+    if not mismatches:
+        return None
+    return "heterogeneous restore (capture -> restore): " + ", ".join(mismatches)
 
 
 def _git_sha() -> str | None:

@@ -34,6 +34,19 @@ def _seconds(end: datetime.datetime | None, start: datetime.datetime | None) -> 
 
 
 @dataclass
+class GpuIdentity:
+    """The GPU/driver identity of a single pod+node, queried live (never
+    hardcoded). Collected separately for the capture pod/node and the restore
+    pod/node -- on a heterogeneous cluster these can genuinely differ, and
+    conflating them would silently attribute restore timing to the wrong
+    hardware."""
+
+    gpu_product: str | None = None
+    gpu_driver_version: str | None = None
+    cuda_driver_major_label: str | None = None
+
+
+@dataclass
 class BenchmarkEnvironment:
     """Everything needed to judge whether two runs are comparable.
 
@@ -41,17 +54,24 @@ class BenchmarkEnvironment:
     A10G is a clearly-labeled, self-describing result rather than a silent,
     invalid comparison against the B200/VAST numbers published in
     docs/development/benchmarks.md.
+
+    `capture` is always populated once the source pod is Ready; `restore` is
+    populated only for `mode="both"`, once the restore pod's node is known --
+    see `run.py`. They are deliberately not collapsed into one set of fields:
+    for a `different_node` restore (or any heterogeneous cluster), the GPU
+    product/driver on the restore node can differ from the capture node, and a
+    report reading a single flat `gpu_product` would silently attribute
+    restore timing to the wrong hardware.
     """
 
-    gpu_product: str | None = None
-    gpu_driver_version: str | None = None
-    cuda_driver_major_label: str | None = None
     storage_class: str | None = None
     storage_provisioner: str | None = None
     k8s_version: str | None = None
     capture_node: str | None = None
     restore_node: str | None = None
     placement: str | None = None  # "same_node" | "different_node" | None
+    capture: GpuIdentity = field(default_factory=GpuIdentity)
+    restore: GpuIdentity | None = None
 
 
 @dataclass
@@ -243,4 +263,4 @@ def _to_json_value(value: Any) -> Any:
     return value
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2

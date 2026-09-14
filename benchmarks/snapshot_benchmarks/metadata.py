@@ -19,7 +19,7 @@ from kubernetes.client import ApiException
 
 from snapshot_e2e import k8s
 
-from snapshot_benchmarks.schema import BenchmarkEnvironment
+from snapshot_benchmarks.schema import BenchmarkEnvironment, GpuIdentity
 
 # The label GPU Operator's Node Feature Discovery writes when it manages the
 # node. Absent on manually-driver-installed nodes (e.g. a plain `dnf install
@@ -103,29 +103,41 @@ def placement(capture_node: str | None, restore_node: str | None) -> str | None:
     return "same_node" if capture_node == restore_node else "different_node"
 
 
+def collect_gpu_identity(
+    namespace: str, pod: str, container: str, node_name: str | None
+) -> GpuIdentity:
+    """Collects the GPU/driver identity of one pod+node. Called once for the
+    capture pod/node and, for `mode="both"`, once more for the restore
+    pod/node -- see `run.py`. Never reused across the two: on a heterogeneous
+    cluster the restore node's GPU product/driver can genuinely differ from
+    the capture node's."""
+    gpu_product, driver_version = gpu_identity(namespace, pod, container)
+    return GpuIdentity(
+        gpu_product=gpu_product,
+        gpu_driver_version=driver_version,
+        cuda_driver_major_label=node_cuda_driver_major_label(node_name),
+    )
+
+
 def collect_environment(
     *,
-    namespace: str,
+    pvc_namespace: str,
     pvc_name: str,
-    gpu_pod: str | None = None,
-    gpu_container: str | None = None,
     capture_node: str | None = None,
     restore_node: str | None = None,
 ) -> BenchmarkEnvironment:
-    """Collects the full `BenchmarkEnvironment` bundle. `gpu_pod` is any
-    currently-running GPU pod in `namespace` -- typically the just-created
-    source or restore pod -- used only to exec `nvidia-smi`. Omit it (e.g. for
-    a standalone pre-flight check with no workload deployed yet) to collect
-    everything except `gpu_product`/`gpu_driver_version`."""
-    gpu_product = driver_version = None
-    if gpu_pod:
-        gpu_product, driver_version = gpu_identity(namespace, gpu_pod, gpu_container)
-    storage_class, provisioner = storage_backend(namespace, pvc_name)
-    reference_node = capture_node or restore_node
+    """Collects the `BenchmarkEnvironment` bundle minus GPU identity, which is
+    per-pod and collected separately via `collect_gpu_identity` (once for the
+    capture pod, once more for the restore pod when `mode="both"`) -- see
+    `run.py`.
+
+    `pvc_namespace` is deliberately not the workload namespace: the checkpoint
+    PVC (`storage.pvc.name`, mounted by every snapshot-agent) lives in the
+    Snapshot release's own namespace, which a hand-installed cluster commonly
+    keeps separate from the workload namespace (e.g. `snapshot` vs.
+    `default`) -- see `BenchmarkConfig`'s docstring in `run.py`."""
+    storage_class, provisioner = storage_backend(pvc_namespace, pvc_name)
     return BenchmarkEnvironment(
-        gpu_product=gpu_product,
-        gpu_driver_version=driver_version,
-        cuda_driver_major_label=node_cuda_driver_major_label(reference_node),
         storage_class=storage_class,
         storage_provisioner=provisioner,
         k8s_version=k8s_server_version(),

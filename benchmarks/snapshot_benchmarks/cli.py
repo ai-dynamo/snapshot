@@ -22,7 +22,7 @@ from snapshot_benchmarks import metadata, report, results
 from snapshot_benchmarks.engines import ModelSpec
 from snapshot_benchmarks.engines.vllm import VLLMEngine
 from snapshot_benchmarks import run
-from snapshot_benchmarks.run import BenchmarkConfig, run_benchmark
+from snapshot_benchmarks.run import BenchmarkConfig, CleanupError, run_benchmark
 
 ENGINES = {"vllm": VLLMEngine()}
 
@@ -115,7 +115,7 @@ def _load_models(path: Path) -> list[ModelSpec]:
 def cmd_metadata(args: argparse.Namespace) -> int:
     cfg = _benchmark_config(args)
     k8s.configure(cfg.workload_e2e_config())
-    env = metadata.collect_environment(namespace=cfg.workload_namespace, pvc_name=cfg.pvc_name)
+    env = metadata.collect_environment(pvc_namespace=cfg.snapshot_namespace, pvc_name=cfg.pvc_name)
     print(json.dumps(_to_json(env), indent=2))
     return 0
 
@@ -180,6 +180,17 @@ def cmd_sweep(args: argparse.Namespace) -> int:
                 snapshot_ready_timeout=args.pod_ready_timeout,
                 restore_timeout=args.pod_ready_timeout,
             )
+        except CleanupError as exc:
+            # Cleanup itself failed -- a pod, PodSnapshot, or
+            # PodSnapshotContent from this model may still be on the cluster.
+            # Unlike an ordinary per-model failure, it is never safe to
+            # continue the sweep from here: the next model could schedule
+            # onto a GPU still held by the leaked resource, or trip over
+            # stale checkpoint state. Always stop, regardless of --fail-fast.
+            print(f"error: {model.label} cleanup failed: {exc}", file=sys.stderr)
+            failures.append(model.label)
+            print("aborting sweep: cluster state may be contaminated, inspect and clean up manually", file=sys.stderr)
+            break
         except Exception as exc:  # noqa: BLE001 - recorded per-model, sweep continues
             print(f"error: {model.label} failed: {exc}", file=sys.stderr)
             failures.append(model.label)
