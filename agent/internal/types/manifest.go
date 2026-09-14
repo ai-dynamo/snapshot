@@ -26,6 +26,18 @@ type CheckpointManifest struct {
 	K8s      SourcePodManifest `yaml:"k8s"`
 	Overlay  OverlayManifest   `yaml:"overlay"`
 	CUDA     CUDAManifest      `yaml:"cudaRestore,omitempty"`
+	// CUDATools records whether the source ran with Snapshot's CUDA tools
+	// (cuda-checkpoint, the cuinterpose shim) delivered into the container.
+	CUDATools CUDAToolsManifest `yaml:"cudaTools,omitempty"`
+}
+
+// CUDAToolsManifest is the restore side's source of truth for the tools mount.
+type CUDAToolsManifest struct {
+	// Delivered is true when the source container mounted the tools volume at
+	// podcontract.CUDAToolsMountPath. Restore then bind-mounts the agent's copy
+	// at the same path before CRIU runs, because the checkpointed processes
+	// have cuda-checkpoint (and possibly the shim) mapped by that path.
+	Delivered bool `yaml:"delivered"`
 }
 
 // ArtifactManifest pins an on-disk checkpoint to the Kubernetes content object

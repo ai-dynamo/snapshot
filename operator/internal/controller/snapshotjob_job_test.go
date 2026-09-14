@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
@@ -39,7 +40,7 @@ func TestBuildSourceJob(t *testing.T) {
 	t.Run("wires identity, target, and options through to NewSourceJob", func(t *testing.T) {
 		sj := minimalSnapshotJob()
 
-		job, err := buildSourceJob(sj)
+		job, err := buildBaseSourceJob(sj)
 		require.NoError(t, err)
 
 		assert.Equal(t, "warm-worker", job.Name)
@@ -61,7 +62,7 @@ func TestBuildSourceJob(t *testing.T) {
 		sj := minimalSnapshotJob()
 		sj.Spec.PodTemplate.Labels = map[string]string{"existing": "label"}
 
-		job, err := buildSourceJob(sj)
+		job, err := buildBaseSourceJob(sj)
 		require.NoError(t, err)
 
 		assert.Equal(t, "warm-worker", job.Spec.Template.Labels[snapshotv1alpha1.SnapshotJobOwnerLabel])
@@ -77,7 +78,7 @@ func TestBuildSourceJob(t *testing.T) {
 		sj.Spec.PodTemplate.Spec.Containers = append(sj.Spec.PodTemplate.Spec.Containers,
 			corev1.Container{Name: "helper", Image: "test:latest"})
 
-		job, err := buildSourceJob(sj)
+		job, err := buildBaseSourceJob(sj)
 		require.NoError(t, err)
 
 		var names []string
@@ -105,7 +106,7 @@ func TestBuildSourceJob(t *testing.T) {
 	t.Run("readiness probe reads the ready file from the control mount", func(t *testing.T) {
 		sj := minimalSnapshotJob()
 
-		job, err := buildSourceJob(sj)
+		job, err := buildBaseSourceJob(sj)
 		require.NoError(t, err)
 
 		main := requireContainer(t, job.Spec.Template.Spec.Containers, "worker")
@@ -127,7 +128,7 @@ func TestBuildSourceJob(t *testing.T) {
 		sj := minimalSnapshotJob()
 		sj.Spec.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "worker"}
 
-		job, err := buildSourceJob(sj)
+		job, err := buildBaseSourceJob(sj)
 		require.NoError(t, err)
 
 		main := requireContainer(t, job.Spec.Template.Spec.Containers, "worker")
@@ -141,7 +142,7 @@ func TestBuildSourceJob(t *testing.T) {
 		sj := minimalSnapshotJob()
 		sj.Name = strings.Repeat("a", 64)
 
-		_, err := buildSourceJob(sj)
+		_, err := buildBaseSourceJob(sj)
 		require.Error(t, err)
 	})
 
@@ -150,7 +151,7 @@ func TestBuildSourceJob(t *testing.T) {
 			sj := minimalSnapshotJob()
 			sj.Name = name
 
-			_, err := buildSourceJob(sj)
+			_, err := buildBaseSourceJob(sj)
 			require.NoError(t, err)
 		}
 	})
@@ -159,7 +160,7 @@ func TestBuildSourceJob(t *testing.T) {
 		sj := minimalSnapshotJob()
 		sj.Spec.PodSnapshotTemplate.TargetContainers = nil
 
-		_, err := buildSourceJob(sj)
+		_, err := buildBaseSourceJob(sj)
 		require.Error(t, err)
 	})
 
@@ -180,7 +181,7 @@ func TestBuildSourceJob(t *testing.T) {
 				sj := minimalSnapshotJob()
 				sj.Spec.PodSnapshotTemplate.Metadata = metadata
 
-				_, err := buildSourceJob(sj)
+				_, err := buildBaseSourceJob(sj)
 				require.Error(t, err)
 			})
 		}
@@ -195,7 +196,7 @@ func TestBuildSourceJob(t *testing.T) {
 			corev1.Container{Name: "helper", Image: "test:latest"})
 		sj.Spec.PodSnapshotTemplate.TargetContainers = []string{"worker", "helper"}
 
-		_, err := buildSourceJob(sj)
+		_, err := buildBaseSourceJob(sj)
 		require.Error(t, err)
 	})
 
@@ -203,7 +204,7 @@ func TestBuildSourceJob(t *testing.T) {
 		sj := minimalSnapshotJob()
 		sj.Spec.PodSnapshotTemplate.TargetContainers = []string{"does-not-exist"}
 
-		_, err := buildSourceJob(sj)
+		_, err := buildBaseSourceJob(sj)
 		require.Error(t, err)
 	})
 
@@ -211,7 +212,7 @@ func TestBuildSourceJob(t *testing.T) {
 		sj := minimalSnapshotJob()
 		sj.Spec.PodTemplate.Spec.Containers = nil
 
-		_, err := buildSourceJob(sj)
+		_, err := buildBaseSourceJob(sj)
 		require.Error(t, err)
 	})
 }
@@ -237,4 +238,67 @@ func getBatchJobByName(jobs *batchv1.JobList, name string) *batchv1.Job {
 		}
 	}
 	return nil
+}
+
+func multiGPUSnapshotJob() *snapshotv1alpha1.SnapshotJob {
+	sj := minimalSnapshotJob()
+	worker := &sj.Spec.PodTemplate.Spec.Containers[0]
+	worker.Command = []string{"python3", "-m", "worker"}
+	worker.Resources.Limits = corev1.ResourceList{podcontract.GPUResourceName: resource.MustParse("2")}
+	return sj
+}
+
+func testCUDAToolsDelivery() podcontract.CUDAToolsDelivery {
+	return podcontract.CUDAToolsDelivery{AgentImage: "registry.example/snapshot-agent:v1.2.3"}
+}
+
+// buildSourceJob gives controller tests the production-shaped Job without
+// requiring every test to repeat delivery configuration.
+func buildSourceJob(sj *snapshotv1alpha1.SnapshotJob) (*batchv1.Job, error) {
+	job, _, err := buildShapedSourceJob(sj, testCUDAToolsDelivery(), nil)
+	return job, err
+}
+
+func TestBuildShapedSourceJobWrapsMultiGPUTargets(t *testing.T) {
+	sj := multiGPUSnapshotJob()
+
+	job, wrapped, err := buildShapedSourceJob(sj, testCUDAToolsDelivery(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"worker"}, wrapped)
+
+	require.NoError(t, podcontract.VerifyCUDALaunchJob(&job.Spec.Template.Spec, []string{"worker"}))
+	main := requireContainer(t, job.Spec.Template.Spec.Containers, "worker")
+	assert.Equal(t, []string{podcontract.CUDACheckpointPath}, main.Command,
+		"a multi-GPU target is launched through the cuda-checkpoint copied from the agent image")
+	assert.Equal(t, []string{"python3", "-m", "worker"}, main.Args[len(main.Args)-3:],
+		"the original command follows the launch-job wrapper")
+	init := requireContainer(t, job.Spec.Template.Spec.InitContainers, podcontract.CUDAToolsInitContainerName)
+	assert.Equal(t, "registry.example/snapshot-agent:v1.2.3", init.Image)
+
+	t.Run("every shaped SnapshotJob needs a configured agent image", func(t *testing.T) {
+		_, _, err := buildShapedSourceJob(minimalSnapshotJob(), podcontract.CUDAToolsDelivery{}, nil)
+		require.Error(t, err)
+	})
+
+	t.Run("a single-GPU SnapshotJob gets the tools without a wrapper", func(t *testing.T) {
+		sj := minimalSnapshotJob()
+		sj.Spec.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "worker"}
+		job, wrapped, err := buildShapedSourceJob(sj, testCUDAToolsDelivery(), nil)
+		require.NoError(t, err)
+		assert.Empty(t, wrapped)
+		require.NoError(t, podcontract.VerifyCUDATools(&job.Spec.Template.Spec, []string{"worker"}))
+		main := requireContainer(t, job.Spec.Template.Spec.Containers, "worker")
+		assert.Equal(t, []string{"python3", "-m", "worker"}, main.Command)
+	})
+
+	t.Run("a DRA claim of unknown size is treated as multi-GPU", func(t *testing.T) {
+		sj := minimalSnapshotJob()
+		worker := &sj.Spec.PodTemplate.Spec.Containers[0]
+		worker.Command = []string{"worker"}
+		worker.Resources.Claims = []corev1.ResourceClaim{{Name: "gpus"}}
+		sj.Spec.PodTemplate.Spec.ResourceClaims = []corev1.PodResourceClaim{{Name: "gpus"}}
+		_, wrapped, err := buildShapedSourceJob(sj, testCUDAToolsDelivery(), nil)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"worker"}, wrapped)
+	})
 }

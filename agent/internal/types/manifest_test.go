@@ -177,3 +177,27 @@ func TestManifestRequiresContainerName(t *testing.T) {
 		t.Fatalf("expected missing container name error, got %v", err)
 	}
 }
+
+func TestManifestRoundTripsCUDATools(t *testing.T) {
+	dir := t.TempDir()
+	m := NewCheckpointManifest("content-uid", "main", CRIUDumpManifest{}, SourcePodManifest{}, OverlayManifest{})
+	m.CUDATools.Delivered = true
+	if err := WriteManifest(dir, m); err != nil {
+		t.Fatal(err)
+	}
+	read, err := ReadManifest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !read.CUDATools.Delivered {
+		t.Fatalf("cudaTools = %+v, want delivered", read.CUDATools)
+	}
+	// Older manifests without the section read as not delivered.
+	m.CUDATools.Delivered = false
+	if err := WriteManifest(dir, m); err != nil {
+		t.Fatal(err)
+	}
+	if read, err = ReadManifest(dir); err != nil || read.CUDATools.Delivered {
+		t.Fatalf("cudaTools = %+v, err = %v, want zero", read.CUDATools, err)
+	}
+}

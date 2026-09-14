@@ -25,6 +25,7 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -595,6 +596,7 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		PodIP:               params.Pod.Status.PodIP,
 		Clientset:           w.clientset,
 		PageBrokerRequested: params.Pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] == snapshotv1alpha1.PageBrokerAnnotationEnabled,
+		CUDAToolsDelivered:  podcontract.CUDAToolsDelivered(&params.Pod.Spec, params.ContainerName),
 	}
 	if err := executor.Checkpoint(ctx, w.runtime, log, req, w.config); err != nil {
 		if executor.CheckpointNeedsSourceKill(err) {
