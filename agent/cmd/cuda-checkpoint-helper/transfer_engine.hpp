@@ -11,14 +11,14 @@
 #include <string>
 #include <vector>
 
-#include "transfer_cancellation.h"
-#include "transfer_config.h"
+#include "transfer_cancellation.hpp"
+#include "transfer_config.hpp"
 
 namespace cuda_checkpoint_transfer {
 
 struct StorageFileMetrics {
   size_t bytes = 0;
-  double storage_seconds = 0.0;
+  double storage_io_seconds = 0.0;
   double fsync_seconds = 0.0;
 };
 
@@ -26,7 +26,7 @@ struct TransferMetrics {
   size_t bytes = 0;
   double setup_seconds = 0.0;
   double pipeline_seconds = 0.0;
-  double storage_seconds = 0.0;
+  double storage_io_seconds = 0.0;
   double cuda_wait_seconds = 0.0;
   double fsync_seconds = 0.0;
   double cleanup_seconds = 0.0;

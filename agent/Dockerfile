@@ -64,13 +64,13 @@ WORKDIR /workspace
 
 COPY --from=cuda-helper-headers /usr/local/cuda-13.4/targets/x86_64-linux/include/cuda.h /opt/cuda-13.4/include/cuda.h
 COPY cmd/cuda-checkpoint-helper/content_digest.cpp ./cmd/cuda-checkpoint-helper/content_digest.cpp
-COPY cmd/cuda-checkpoint-helper/content_digest.h ./cmd/cuda-checkpoint-helper/content_digest.h
+COPY cmd/cuda-checkpoint-helper/content_digest.hpp ./cmd/cuda-checkpoint-helper/content_digest.hpp
 COPY cmd/cuda-checkpoint-helper/content_digest_test.cpp ./cmd/cuda-checkpoint-helper/content_digest_test.cpp
 COPY cmd/cuda-checkpoint-helper/transfer_config.cpp ./cmd/cuda-checkpoint-helper/transfer_config.cpp
-COPY cmd/cuda-checkpoint-helper/transfer_config.h ./cmd/cuda-checkpoint-helper/transfer_config.h
+COPY cmd/cuda-checkpoint-helper/transfer_config.hpp ./cmd/cuda-checkpoint-helper/transfer_config.hpp
 COPY cmd/cuda-checkpoint-helper/transfer_config_test.cpp ./cmd/cuda-checkpoint-helper/transfer_config_test.cpp
-COPY cmd/cuda-checkpoint-helper/transfer_cancellation.h ./cmd/cuda-checkpoint-helper/transfer_cancellation.h
-COPY cmd/cuda-checkpoint-helper/transfer_engine.h ./cmd/cuda-checkpoint-helper/transfer_engine.h
+COPY cmd/cuda-checkpoint-helper/transfer_cancellation.hpp ./cmd/cuda-checkpoint-helper/transfer_cancellation.hpp
+COPY cmd/cuda-checkpoint-helper/transfer_engine.hpp ./cmd/cuda-checkpoint-helper/transfer_engine.hpp
 COPY cmd/cuda-checkpoint-helper/transfer_engine_test.cpp ./cmd/cuda-checkpoint-helper/transfer_engine_test.cpp
 COPY cmd/cuda-checkpoint-helper/transfer_backend_unavailable.cpp ./cmd/cuda-checkpoint-helper/transfer_backend_unavailable.cpp
 

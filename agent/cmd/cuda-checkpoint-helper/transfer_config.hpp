@@ -73,6 +73,5 @@ bool BuildTransferChunks(size_t extent_size, const StorageLayout &storage,
 bool BuildContiguousStorageLayout(const std::filesystem::path &base_path,
                                   size_t extent_size, size_t file_count,
                                   StorageLayout *storage, std::string *error);
-std::string JsonEscape(std::string_view value);
 
 } // namespace cuda_checkpoint_transfer

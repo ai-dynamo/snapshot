@@ -3,7 +3,7 @@
  * All rights reserved. SPDX-License-Identifier: Apache-2.0
  */
 
-#include "transfer_engine.h"
+#include "transfer_engine.hpp"
 
 namespace cuda_checkpoint_transfer {
 

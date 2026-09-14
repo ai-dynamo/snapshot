@@ -3,7 +3,7 @@
  * All rights reserved. SPDX-License-Identifier: Apache-2.0
  */
 
-#include "transfer_config.h"
+#include "transfer_config.hpp"
 
 #include <fcntl.h>
 
@@ -237,48 +237,6 @@ bool BuildContiguousStorageLayout(const std::filesystem::path &base_path,
     logical_offset += size;
   }
   return true;
-}
-
-std::string JsonEscape(std::string_view value) {
-  static constexpr char kHex[] = "0123456789abcdef";
-  std::string result;
-  result.reserve(value.size() + 2);
-  result.push_back('"');
-  for (const unsigned char byte : value) {
-    switch (byte) {
-    case '"':
-      result += "\\\"";
-      break;
-    case '\\':
-      result += "\\\\";
-      break;
-    case '\b':
-      result += "\\b";
-      break;
-    case '\f':
-      result += "\\f";
-      break;
-    case '\n':
-      result += "\\n";
-      break;
-    case '\r':
-      result += "\\r";
-      break;
-    case '\t':
-      result += "\\t";
-      break;
-    default:
-      if (byte < 0x20 || byte >= 0x80) {
-        result += "\\u00";
-        result.push_back(kHex[byte >> 4]);
-        result.push_back(kHex[byte & 0x0f]);
-      } else {
-        result.push_back(static_cast<char>(byte));
-      }
-    }
-  }
-  result.push_back('"');
-  return result;
 }
 
 } // namespace cuda_checkpoint_transfer

@@ -3,7 +3,7 @@
  * All rights reserved. SPDX-License-Identifier: Apache-2.0
  */
 
-#include "content_digest.h"
+#include "content_digest.hpp"
 
 #include <iostream>
 #include <string>

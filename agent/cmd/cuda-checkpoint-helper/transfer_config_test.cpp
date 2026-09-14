@@ -3,7 +3,7 @@
  * All rights reserved. SPDX-License-Identifier: Apache-2.0
  */
 
-#include "transfer_config.h"
+#include "transfer_config.hpp"
 
 #include <fcntl.h>
 
@@ -185,22 +185,13 @@ bool TestLayoutGapsAndOverflowRejected() {
                "duplicate physical file path was accepted");
 }
 
-bool TestJsonEscaping() {
-  return Check(transfer::JsonEscape("file\\name\n\"value\"") ==
-                   "\"file\\\\name\\n\\\"value\\\"\"",
-               "JSON escaping is wrong") &&
-         Check(transfer::JsonEscape(std::string("bad\xff", 4)) ==
-                   "\"bad\\u00ff\"",
-               "non-UTF-8 byte was emitted into JSON");
-}
-
 } // namespace
 
 int main() {
   if (!TestOptionParsingAndBounds() || !TestPinnedMemoryCalculation() ||
       !TestStorageOpenModePolicy() || !TestChunkRingAndShardedLayout() ||
       !TestRelativeStorageLayoutRejected() ||
-      !TestLayoutGapsAndOverflowRejected() || !TestJsonEscaping()) {
+      !TestLayoutGapsAndOverflowRejected()) {
     return 1;
   }
   std::cout << "CUDA transfer configuration tests passed\n";
