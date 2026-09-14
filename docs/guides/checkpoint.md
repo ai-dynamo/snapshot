@@ -26,8 +26,7 @@ API as part of its control loop.
       signals through;
     - the `securityContext` (seccomp profile) that checkpointing requires;
     - a readiness gate on `/snapshot-control/ready-for-snapshot`, so the pod
-      reports Ready only once it is safe to checkpoint;
-    - the `nvidia.com/snapshot-is-checkpoint-source: "true"` pod label.
+      reports Ready only once it is safe to checkpoint.
   - **`SnapshotJob`** creates the source pod itself, so the controller injects
     the control volume and mount, the readiness probe, and the seccomp profile
     into `spec.podTemplate` before creating the source Job. The `podTemplate`

@@ -17,7 +17,6 @@ spec:
     metadata:
       labels:
         app: tensorrt-llm-source
-        nvidia.com/snapshot-is-checkpoint-source: "true"
     spec:
       terminationGracePeriodSeconds: 1
       runtimeClassName: nvidia

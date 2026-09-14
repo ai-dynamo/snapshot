@@ -14,8 +14,7 @@ the container during pod startup.
 ## Example
 
 Each build-and-deploy guide ships a ready-to-apply `restore-deployment.yaml` next
-to its `deployment.yaml`: the same manifest with the
-`nvidia.com/snapshot-is-checkpoint-source` label removed, an
+to its `deployment.yaml`: the same manifest with an
 `nvidia.com/restore-from` annotation added naming the `PodSnapshot` to restore
 from, and the container command replaced with an inert `sleep infinity`.
 Download the one for the framework in use:

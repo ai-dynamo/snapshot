@@ -143,8 +143,7 @@ fields are:
 - the `snapshot-control` `emptyDir`, mounted at `/snapshot-control` with `subPath`
   equal to the container name, and `SNAPSHOT_CONTROL_DIR` set to that mount;
 - a seccomp profile that blocks io_uring (`profiles/block-iouring.json`), which
-  CRIU cannot checkpoint — see [Security](../operations/security.md);
-- the `nvidia.com/snapshot-is-checkpoint-source: "true"` label; and
+  CRIU cannot checkpoint — see [Security](../operations/security.md); and
 - a readiness gate on `/snapshot-control/ready-for-snapshot`, so the pod reports
   Ready only once it is safe to checkpoint.
 
