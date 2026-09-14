@@ -23,6 +23,9 @@ class Event {
   virtual void Cancel(std::exception_ptr error) noexcept = 0;
 };
 
+// The owner must serialize Start(), Stop(), and destruction. These operations
+// must not be called from event or failure callbacks. Post() may run concurrently
+// with Start() and Stop(), but its callers must finish before destruction.
 class EventLoop {
  public:
   using FailureHandler = std::function<void(std::exception_ptr)>;
@@ -36,6 +39,7 @@ class EventLoop {
   // Post transfers ownership even when it rejects and cancels the event.
   bool Post(std::unique_ptr<Event> event);
   // Stop cancels queued events and waits for the executing event to return.
+  // Repeated calls are allowed, including before Start().
   void Stop() noexcept;
 
  private:
@@ -56,7 +60,6 @@ class EventLoop {
   std::condition_variable ready_;
   std::deque<std::unique_ptr<Event>> events_;
   std::thread worker_;
-  std::mutex stop_mutex_;
   std::exception_ptr terminal_error_;
   State state_ = State::CREATED;
 };
