@@ -27,6 +27,10 @@ const (
 	// restore destination was most recently restored.
 	RestoredContainerIDsAnnotation = "nvidia.com/restored-container-ids"
 
+	// RestoreReplenishingAnnotation marks a Pod that has entered replenishment
+	// after a successful restore. It remains set across pending passes.
+	RestoreReplenishingAnnotation = "nvidia.com/restore-replenishing"
+
 	// SkipCompatCheckAnnotation disables compatibility checks for one restore.
 	SkipCompatCheckAnnotation = "nvidia.com/snapshot-skip-compat-check"
 

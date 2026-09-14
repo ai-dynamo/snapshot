@@ -660,10 +660,14 @@ func (w *NodeController) restorePodContainers(ctx context.Context, pod *corev1.P
 	// RestoreInProgress makes each worker check its completion sentinel before
 	// considering a CRIU replay.
 	recovering := restoreInProgress(pod)
-	replenishing := isRestoreSucceeded(pod)
 	restoredIDs, err := restoredContainerIDs(pod)
 	if err != nil {
 		return w.failRestorePod(ctx, pod, err)
+	}
+	replenishing, err := w.persistRestoreReplenishment(ctx, pod)
+	if err != nil {
+		w.log.Error(err, "Failed to persist restore replenishment mode", "pod", podKey)
+		return true
 	}
 	message := fmt.Sprintf("Restoring %d destination container(s) from PodSnapshot %s", len(plan.mappings), plan.artifact.SnapshotName)
 	if err := w.applyRestoredCondition(ctx, pod, corev1.ConditionFalse, podcontract.RestoreReasonInProgress, message); err != nil {
@@ -814,14 +818,19 @@ func (w *NodeController) restoreDestination(
 ) restoreResult {
 	artifact := plan.artifact
 	result := restoreResult{destination: destination, state: restoreResultPending}
+	recordedID, tracked := restoredIDs[destination]
+	// Untracked destinations on replenishment passes predate tracking. Do not
+	// resolve or restore them, even while a tracked replacement is pending.
+	if !tracked && replenishing {
+		result.state = restoreResultSucceeded
+		return result
+	}
 	containerID, _ := w.resolveRestoreContainerID(ctx, pod, destination, podKey)
 	if containerID == "" {
 		return result
 	}
-	recordedID, tracked := restoredIDs[destination]
-	// An unchanged ID already holds the restored process. An untracked
-	// destination on a replenishment pass predates tracking and is left alone.
-	if (tracked && recordedID == containerID) || (!tracked && replenishing) {
+	// An unchanged ID already holds the restored process.
+	if tracked && recordedID == containerID {
 		result.state = restoreResultSucceeded
 		return result
 	}
@@ -1113,6 +1122,39 @@ func (w *NodeController) patchRestoreFinalizers(ctx context.Context, pod *corev1
 	return err
 }
 
+// persistRestoreReplenishment records the policy before the transient condition
+// changes to InProgress. A later pass or agent restart must not mistake an
+// untracked legacy sibling for a destination awaiting its initial restore.
+// The marker stays set; terminal failure handling still decides retry eligibility.
+func (w *NodeController) persistRestoreReplenishment(ctx context.Context, pod *corev1.Pod) (bool, error) {
+	if value := pod.Annotations[podcontract.RestoreReplenishingAnnotation]; value != "" {
+		if value != "true" {
+			return false, fmt.Errorf("invalid %s annotation: expected true", podcontract.RestoreReplenishingAnnotation)
+		}
+		return true, nil
+	}
+	if !isRestoreSucceeded(pod) {
+		return false, nil
+	}
+	patch, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{
+			"annotations": map[string]string{podcontract.RestoreReplenishingAnnotation: "true"},
+		},
+	})
+	if err != nil {
+		return false, err
+	}
+	if _, err := w.clientset.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, ktypes.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+		return false, err
+	}
+	// This runs before workers start; only their container-ID writes need locking.
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
+	}
+	pod.Annotations[podcontract.RestoreReplenishingAnnotation] = "true"
+	return true, nil
+}
+
 func restoredContainerIDs(pod *corev1.Pod) (map[string]string, error) {
 	ids := make(map[string]string)
 	raw := pod.Annotations[podcontract.RestoredContainerIDsAnnotation]
@@ -1146,14 +1188,22 @@ func (w *NodeController) hasRestartedRestoreDestination(pod *corev1.Pod) bool {
 		return false
 	}
 	for _, status := range pod.Status.ContainerStatuses {
+		// Mapping destinations and ContainerStatus.Name are both container names.
+		recorded, tracked := ids[status.Name]
+		if !tracked {
+			continue
+		}
 		// Detect replacement even in backoff. The worker separately resolves a
 		// running container, keeping the restore pending until one is available.
 		if status.ContainerID == "" {
+			// The marker can have committed before an interrupted InProgress
+			// write. Do not strand that replenishment in terminal handling.
+			if pod.Annotations[podcontract.RestoreReplenishingAnnotation] == "true" {
+				return true
+			}
 			continue
 		}
-		// Mapping destinations and ContainerStatus.Name are both container names.
-		recorded, tracked := ids[status.Name]
-		if tracked && recorded != snapshotruntime.StripCRIScheme(status.ContainerID) {
+		if recorded != snapshotruntime.StripCRIScheme(status.ContainerID) {
 			return true
 		}
 	}

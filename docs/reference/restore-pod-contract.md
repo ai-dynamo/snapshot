@@ -62,6 +62,13 @@ whose IDs differ from their recorded IDs, without replaying CRIU into unchanged
 siblings. A replacement that is not running yet remains pending until a usable
 container can be resolved. Compatibility checks still apply.
 
+Before starting replenishment, the agent persists
+`nvidia.com/restore-replenishing: "true"`. This agent-owned marker remains set
+across pending passes and agent restarts, so an untracked sibling cannot be
+mistaken for a destination awaiting its initial restore. Producers must not set
+or copy this annotation. Failure to persist the marker requeues without starting
+restore workers or changing the restore condition.
+
 Failed and partially successful restores require a new restore Pod, not an
 automatic retry. Compatibility refusals retain their explicit skip-check
 override. Successful legacy Pods without recorded IDs, and untracked
