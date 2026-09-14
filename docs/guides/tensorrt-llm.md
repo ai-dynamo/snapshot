@@ -39,9 +39,9 @@ curl --fail --location \
 
 The program loads the model selected in `deployment.yaml` and calls
 `LLM.generate()` to initialize TensorRT-LLM. The synchronous call returns only
-after generation finishes, so no request remains in flight. The program runs
-`gc.collect()` and writes `ready-for-snapshot` when it reaches the safe checkpoint
-point.
+after generation finishes, so no request remains in flight. The program then
+runs `gc.collect()` and writes `ready-for-snapshot` when it reaches the safe
+checkpoint point.
 
 TensorRT-LLM does not use a framework pause or sleep call in this example. The
 model and initialized CUDA state remain resident. After restore, the checkpointed
@@ -51,8 +51,11 @@ listening. To validate the restored replica, send a `POST` request to
 `/generate` with a JSON body such as
 `{"prompt":"What is the capital of Italy?"}`.
 
-The Dockerfile starts from the tested TensorRT-LLM 1.3.0 release candidate
-image, creates `/snapshot-control`, and adds `app.py`.
+The Dockerfile starts from the TensorRT-LLM `1.3.0rc24` release image, pinned by
+digest, creates `/snapshot-control`, and adds `app.py`. A release candidate is
+used deliberately: the `1.2.1` GA image fails at `import tensorrt` because
+`libnvonnxparser.so.10` is missing from it, and no 1.3.0 GA image exists yet.
+Move to the first 1.3.x GA once it is published.
 `TLLM_NCCL_SYMMETRIC_ZERO_COPY=0` disables NCCL registered windows that CUDA
 checkpoint does not support. `UCX_TLS=tcp,self` avoids RDMA mappings that CRIU
 cannot restore.
@@ -63,7 +66,7 @@ Snapshot control volume at `/snapshot-control`.
 ### 2. Build the image
 
 ```bash
-export TENSORRT_LLM_RUNTIME_IMAGE=nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc23
+export TENSORRT_LLM_RUNTIME_IMAGE=nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc24@sha256:16a103b8b1b682d287e8043fc674d23fa52d5b5f2127da913bf6c0643db3a073
 export TENSORRT_LLM_SNAPSHOT_IMAGE=<registry>/tensorrt-llm-snapshot:<tag>
 
 docker build \
@@ -86,11 +89,15 @@ docker run --rm \
   --platform linux/amd64 \
   --entrypoint python3 \
   "$TENSORRT_LLM_SNAPSHOT_IMAGE" \
-  -c 'import pathlib; import tensorrt_llm; assert pathlib.Path("/app/app.py").is_file()'
+  -c 'import importlib.util, pathlib; assert importlib.util.find_spec("tensorrt_llm"); assert pathlib.Path("/app/app.py").is_file()'
 ```
 
 The command produces no output when both TensorRT-LLM and `/app/app.py` are
-present. Any failure prints an error and returns a non-zero exit status.
+present. Any failure prints an error and returns a non-zero exit status. The
+check locates the TensorRT-LLM package rather than importing it: importing it
+loads bindings that link against the CUDA driver library, which the NVIDIA
+container runtime injects only when the container runs with a GPU, so an
+import-based check fails on a build host that has none.
 
 ### 3. Deploy TensorRT-LLM
 
@@ -115,7 +122,12 @@ containers:
 ```
 
 The example uses one GPU, the PyTorch backend, and a maximum sequence length of
-512 tokens. Revalidate checkpoint and restore before changing the model,
+512 tokens. Engine sizing is set through `TRTLLM_MAX_NUM_TOKENS` (default
+`1024`), `TRTLLM_MAX_BATCH_SIZE` (default `1`), and
+`TRTLLM_FREE_GPU_MEMORY_FRACTION` (default `0.10`). `app.py` sets
+`trust_remote_code=False`; Qwen3 needs no custom model code. Edit
+`TRUST_REMOTE_CODE` in `app.py` for a checkpoint that ships its own modeling
+code. Revalidate checkpoint and restore before changing the model,
 TensorRT-LLM image, GPU count, backend, or engine settings.
 
 > [!NOTE]

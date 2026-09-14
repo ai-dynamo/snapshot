@@ -53,11 +53,15 @@ crdUpgrade:
       cpu: 50m
       memory: 64Mi
 
-# Container runtime backend. Leave socketPath empty to use the conventional
-# path for the chosen type.
+# Container runtime backend. Leave socketPath/storageDir empty to use the
+# conventional paths for the chosen type.
 runtime:
   type: containerd  # containerd | crio
   socketPath: ""
+  # Host per-container storage, mounted into the agent at the same absolute path.
+  # Defaults: /var/lib/containerd (containerd), /var/lib/containers (crio).
+  # RKE2: /var/lib/rancher/rke2/agent/containerd + socketPath /run/k3s/containerd/containerd.sock
+  storageDir: ""
 
 # Gates the OCP RBAC template and the DS required-scc annotation. Keep false
 # on vanilla Kubernetes (it references an OCP-only built-in SCC).
@@ -212,6 +216,13 @@ config:
   restore:
     # Maximum seconds to allow a restore attempt before the agent marks it failed
     restoreTimeoutSeconds: 7200
+    # Skip the restore compatibility check on every restore this agent handles.
+    # The gate refuses a restore whose checkpoint was captured somewhere the
+    # target node cannot reproduce; turning it off means those restores are
+    # attempted and fail inside CRIU instead. Per-node escape hatch; a single
+    # restore can opt out with the nvidia.com/snapshot-skip-compat-check
+    # annotation on the restore pod.
+    skipCompatCheck: false
 
   criu:
     # Path to the criu binary

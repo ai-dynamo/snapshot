@@ -134,3 +134,64 @@ the test verifies that the restored process and files report the source token,
 not the restore token. The worker also appends periodic observations to
 `/tmp/e2e-state/observations.log`; the observation count is only a liveness
 check that the restored process continues running after restore.
+
+## Framework Tests
+
+`tests/test_frameworks.py` checkpoints and restores each framework guide
+workload (`vllm`, `sglang`, `tensorrt-llm`) with the guide's own program and
+manifests: source pod Ready (`ready-for-snapshot`, written only after a
+pre-capture generation) → `PodSnapshot` → restore pod pinned to the source node
+→ `nvidia.com/Restored=RestoreSucceeded` → `<framework>-restore-ready` →
+`POST /generate` answers → the placeholder never loaded a model itself.
+
+```bash
+# one framework (CI runs one per matrix job); omit the variable for all three
+SNAPSHOT_E2E_FRAMEWORK=vllm \
+  uv run --project e2e pytest e2e/tests/test_frameworks.py -vv -s
+
+# test a different image instead of the guide's own pinned image
+SNAPSHOT_E2E_FRAMEWORK=vllm SNAPSHOT_E2E_FRAMEWORK_IMAGE=<registry>/vllm-snapshot:dev \
+  uv run --project e2e pytest e2e/tests/test_frameworks.py -vv -s
+```
+
+Model weights come from one of two places:
+
+- **Shared model cache** (CI): set `SNAPSHOT_E2E_MODEL_CACHE_SERVER` and
+  `SNAPSHOT_E2E_MODEL_CACHE_PATH` to an NFS export holding a Hugging Face cache
+  in `HF_HOME` layout (`hub/models--<org>--<model>/...`). The test creates a
+  static `PersistentVolume`/`PersistentVolumeClaim` (`SNAPSHOT_E2E_MODEL_CACHE_PVC`,
+  default `model-cache`), mounts it at `/models` on every framework container,
+  sets `HF_HOME=/models` and `HF_HUB_OFFLINE=1`, and drops the guide's download
+  init container. In vCluster mode the setup enables `sync.toHost.persistentVolumes`
+  so the NFS mount options reach the node. The model must already be in the cache.
+- **Guide download** (default without the variables): the guide's own plumbing
+  runs unchanged. SGLang's init container downloads into its PVC, which the test
+  creates from the guide manifest if missing (with `SNAPSHOT_E2E_STORAGE_CLASS`
+  when set) and leaves in place; vLLM and TensorRT-LLM download in-process.
+  This needs working DNS and egress from the pods. A partial or stale SGLang
+  cache (for example after a killed run) is reset by deleting that PVC; the
+  next run recreates and refills it.
+
+`tests/test_framework_manifests.py` pins the guide manifests, and the cache
+rewrite, to the restore-pod contract without a cluster.
+
+## Framework Images
+
+The framework e2e workloads are the programs and manifests under
+`manifests/frameworks/<framework>/` (`vllm`, `sglang`, `tensorrt-llm`), owned
+by the e2e suite -- these are not the `docs/guides/` examples, which still
+document a build-and-push image flow and are updated separately. Each
+framework runs the upstream image unmodified -- the exact image reference is
+`spec.template.spec.containers[0].image` in that framework's own
+`deployment.yaml` -- with `app.py` mounted from a ConfigMap (`kubectl create
+configmap <framework>-app --from-file=app.py -n
+"${SNAPSHOT_E2E_TEST_NAMESPACE:-snapshot-e2e}"`) rather than baked into a
+Snapshot-built image. There is nothing under `manifests/frameworks/<framework>/`
+for Snapshot to build, push, or keep available; `frameworks.framework_image()`
+reads the image straight from that `deployment.yaml`, and
+`framework_workloads.app_configmap()` builds the ConfigMap from the same
+`app.py`.
+
+Point `SNAPSHOT_E2E_FRAMEWORK_IMAGE` at a different image to test an
+unpublished change (a fork of `vllm/vllm-openai`, for example) without
+editing `deployment.yaml`.

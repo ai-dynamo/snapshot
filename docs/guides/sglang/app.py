@@ -38,6 +38,9 @@ def create_engine(snapshot_mode: bool) -> Any:
     return sgl.Engine(
         model_path=os.environ["SNAPSHOT_MODEL"],
         context_length=int(os.environ.get("SGLANG_CONTEXT_LENGTH", "10240")),
+        page_size=int(os.environ.get("SGLANG_PAGE_SIZE", "16")),
+        tp_size=1,
+        trust_remote_code=False,
         enable_memory_saver=snapshot_mode,
         enable_weights_cpu_backup=snapshot_mode,
         log_level="info",

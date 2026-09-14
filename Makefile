@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 include hack/tools.mk
 
 .DEFAULT_GOAL := check
@@ -68,6 +71,18 @@ add-license-headers: $(ADDLICENSE)
 
 verify-license-headers: $(ADDLICENSE)
 	$(ADDLICENSE) -f hack/boilerplate.addlicense.txt -check $(LICENSE_IGNORES) . .github/workflows
+	@# addlicense picks its comment style from the file extension, so it silently
+	@# skips extensionless Makefiles and .mk files rather than failing on them.
+	@# Without this they drift uncovered, which is how six of them lost headers.
+	@missing=$$(find . -path ./.git -prune -o \( -name Makefile -o -name '*.mk' \) -print \
+	  | while read -r f; do \
+	      head -2 "$$f" | grep -q 'SPDX-License-Identifier' || echo "  $$f"; \
+	    done); \
+	if [ -n "$$missing" ]; then \
+	  echo "ERROR: missing SPDX license header:"; echo "$$missing"; \
+	  echo "Add the two-line header from hack/boilerplate.addlicense.txt"; \
+	  exit 1; \
+	fi
 
 # Ordered before generate: afterwards it would compare freshly repaired copies.
 verify-crds:

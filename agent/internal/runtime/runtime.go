@@ -29,6 +29,7 @@ type Runtime interface {
 	ResolveContainer(ctx context.Context, id string) (int, *specs.Spec, error)
 	ResolveContainerIDByPod(ctx context.Context, pod, ns, ctr string) (string, error)
 	ResolveContainerByPod(ctx context.Context, pod, ns, ctr string) (int, *specs.Spec, error)
+	ResolveContainerImageID(ctx context.Context, id string) (string, error)
 	Close() error
 }
 

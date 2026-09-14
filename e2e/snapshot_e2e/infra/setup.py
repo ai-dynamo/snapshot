@@ -26,6 +26,7 @@ from kubernetes.client import ApiException
 from packaging.version import Version
 
 from snapshot_e2e import k8s
+from snapshot_e2e.frameworks import SharedModelCache
 from snapshot_e2e.infra import preflight
 
 
@@ -310,6 +311,7 @@ def setup_vcluster(args: argparse.Namespace, context: SetupContext) -> None:
         context.host_namespace,
         context.vcluster_name,
         args.vcluster_k8s_version,
+        model_cache=SharedModelCache.from_env(),
     )
     install_hostpath_mapper(
         context.host_namespace,
@@ -491,7 +493,13 @@ def ensure_vcluster_unused(namespace: str, name: str) -> None:
     log(f"vCluster name {namespace}/{name} is available")
 
 
-def create_vcluster(namespace: str, name: str, k8s_version: str) -> None:
+def create_vcluster(
+    namespace: str,
+    name: str,
+    k8s_version: str,
+    *,
+    model_cache: SharedModelCache | None = None,
+) -> None:
     log(f"Creating vCluster {namespace}/{name}")
     synced_nodes = {
         "enabled": True,
@@ -504,7 +512,7 @@ def create_vcluster(namespace: str, name: str, k8s_version: str) -> None:
     if node_selector:
         synced_nodes["selector"]["labels"] = node_selector
 
-    values = {
+    values: dict[str, Any] = {
         "controlPlane": {
             "hostPathMapper": {
                 "enabled": True,
@@ -522,6 +530,12 @@ def create_vcluster(namespace: str, name: str, k8s_version: str) -> None:
             },
         },
     }
+    if model_cache is not None:
+        # The framework tests create a static NFS PersistentVolume for the
+        # shared model cache. Sync it to the host so its mount options are
+        # honored by the node; without this vCluster rewrites the claim to a
+        # host-provisioned volume and the NFS spec is lost.
+        values["sync"]["toHost"] = {"persistentVolumes": {"enabled": True}}
     values_file = write_temp_yaml("snapshot-vcluster-values-", values)
     try:
         run(
@@ -561,8 +575,8 @@ def vcluster_node_sync_selector_labels() -> dict[str, str]:
     for node in nodes:
         labels = node.metadata.labels or {}
         if labels.get(AKS_USER_NODE_LABEL) == AKS_USER_NODE_VALUE:
-            # This matches the current Dynamo AKS runner layout. If that cluster
-            # layout changes, revisit which host nodes the vCluster should sync.
+            # Matches the current AKS CI runner layout. If that cluster layout
+            # changes, revisit which host nodes the vCluster should sync.
             log(
                 "Using AKS user-node selector for vCluster node sync: "
                 f"{AKS_USER_NODE_LABEL}={AKS_USER_NODE_VALUE}"

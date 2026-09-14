@@ -50,6 +50,24 @@ outcome := podcontract.ClassifyRestoreOutcome(pod.Status.Conditions)
 The package also owns the shared control-volume, environment, capture-sentinel,
 and CUDA job-file names used by Snapshot-managed source and restore Pods.
 
+### Container replacement after restore
+
+The agent owns the `nvidia.com/restored-container-ids` Pod annotation, a JSON
+object mapping destination container names to the container IDs successfully
+restored into them. Producers must not set or copy this annotation onto new
+restore Pods.
+
+After a fully successful restore, the agent restores replacement containers
+whose IDs differ from their recorded IDs, without replaying CRIU into unchanged
+siblings. A replacement that is not running yet remains pending until a usable
+container can be resolved. Compatibility checks still apply.
+
+Failed and partially successful restores require a new restore Pod, not an
+automatic retry. Compatibility refusals retain their explicit skip-check
+override. Successful legacy Pods without recorded IDs, and untracked
+destinations during replenishment, are left alone because their state cannot
+prove replay is safe. Invalid records cannot authorize replay and are logged.
+
 The producer supplies `SourceContainer` from the referenced `PodSnapshot`.
 Empty mappings restore that source into the same-named destination only. The
 builder validates one-source-to-many-destination consistency but deliberately

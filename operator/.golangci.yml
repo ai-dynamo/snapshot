@@ -1,59 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+version: "2"
 run:
-  timeout: 10m
   allow-parallel-runners: true
-
-issues:
-  exclude-rules:
-    # Operator internals: relax style/complexity linters on the faithfully
-    # migrated pod-shaping and reconciler code. Correctness linters stay enabled.
-    - path: "internal/"
-      linters:
-        - dupl
-        - lll
-        - gocyclo
-        - prealloc
-        - unparam
-        - goconst
-    # CLI code (snapshotctl) carries long flag/usage/error strings.
-    - path: "cmd/"
-      linters:
-        - lll
-    # Table-driven tests legitimately repeat literals and run long.
-    - path: "_test\\.go"
-      linters:
-        - dupl
-        - goconst
-        - gocyclo
-        - prealloc
-        - unparam
-    # controller-runtime v0.24 deprecates GetEventRecorderFor; migrating the
-    # manager to GetEventRecorder is a separate, behavior-preserving change.
-    - linters:
-        - staticcheck
-      text: "SA1019:.*GetEventRecorderFor.*deprecated"
-    # LegacySnapshotControlDirEnv is deprecated for new callers, but
-    # EnsureControlVolume must keep injecting it during the migration window
-    # so existing workload images that read the old name keep working.
-    # Scoped to this file (and its test) so any other future reference stays
-    # flagged.
-    - path: "internal/protocol/control_volume(_test)?\\.go"
-      linters:
-        - staticcheck
-      text: "SA1019:.*LegacySnapshotControlDirEnv.*deprecated"
-
 linters:
-  disable-all: true
+  default: none
   enable:
     - dupl
     - errcheck
     - goconst
     - gocyclo
-    - gofmt
-    - goimports
-    - gosimple
     - govet
     - ineffassign
     - lll
@@ -61,7 +18,62 @@ linters:
     - nakedret
     - prealloc
     - staticcheck
-    - typecheck
     - unconvert
     - unparam
     - unused
+  settings:
+    staticcheck:
+      # v1 ran staticcheck (SA*) and gosimple (S1*). v2 merges both into
+      # staticcheck and adds the ST* and QF* check sets by default; keep
+      # the original scope so the toolchain bump does not quietly widen
+      # what CI enforces.
+      checks:
+        - SA*
+        - S1*
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - dupl
+          - goconst
+          - gocyclo
+          - lll
+          - prealloc
+          - unparam
+        path: internal/
+      - linters:
+          - lll
+        path: cmd/
+      - linters:
+          - dupl
+          - goconst
+          - gocyclo
+          - prealloc
+          - unparam
+        path: _test\.go
+      - linters:
+          - staticcheck
+        text: SA1019:.*GetEventRecorderFor.*deprecated
+      - linters:
+          - staticcheck
+        path: internal/protocol/control_volume(_test)?\.go
+        text: SA1019:.*LegacySnapshotControlDirEnv.*deprecated
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

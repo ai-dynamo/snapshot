@@ -60,6 +60,10 @@ def read_crd(name: str) -> client.V1CustomResourceDefinition:
     return client.ApiextensionsV1Api().read_custom_resource_definition(name)
 
 
+def read_node(name: str) -> client.V1Node:
+    return client.CoreV1Api().read_node(name)
+
+
 def list_events(namespace: str) -> list[client.CoreV1Event]:
     return client.CoreV1Api().list_namespaced_event(namespace).items
 
@@ -69,6 +73,25 @@ def create_pod(body: dict[str, Any]) -> client.V1Pod:
         namespace=body["metadata"]["namespace"],
         body=body,
     )
+
+
+def apply_configmap(namespace: str, body: dict[str, Any]) -> client.V1ConfigMap:
+    """Create the ConfigMap, replacing it in place if it already exists.
+
+    A prior run in the same namespace (a local re-run, a retried CI job) can
+    leave a stale ConfigMap with the same name; replace rather than error, so
+    the test always deploys against the current app.py.
+    """
+    api = client.CoreV1Api()
+    name = body["metadata"]["name"]
+    try:
+        return api.create_namespaced_config_map(namespace=namespace, body=body)
+    except ApiException as exc:
+        if exc.status != 409:
+            raise
+        existing = api.read_namespaced_config_map(name=name, namespace=namespace)
+        body["metadata"]["resourceVersion"] = existing.metadata.resource_version
+        return api.replace_namespaced_config_map(name=name, namespace=namespace, body=body)
 
 
 def read_pod(namespace: str, name: str) -> client.V1Pod:
@@ -165,6 +188,23 @@ def exec_command(
         stdout=True,
         tty=False,
     )
+
+
+PAYLOAD_MARKER = "e2e-payload-follows"
+
+
+def exec_payload(namespace: str, pod: str, command: str) -> str:
+    """Exec output with whatever the login shell printed first dropped.
+
+    exec_command merges stderr into the stream, so a container whose profile
+    writes anything breaks every caller that parses the result rather than
+    matching a substring in it.
+    """
+    output = exec_command(namespace, pod, f"echo {PAYLOAD_MARKER}; {command}")
+    _, marker, payload = output.partition(PAYLOAD_MARKER)
+    if not marker:
+        raise AssertionError(f"exec output carried no payload marker: {output!r}")
+    return payload.lstrip("\n")
 
 
 def snapshot_custom_resource_api_is_accessible(namespace: str) -> None:

@@ -5,6 +5,7 @@ package podcontract
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -25,6 +26,9 @@ const (
 	// RestoredContainerIDsAnnotation records the container ID into which each
 	// restore destination was most recently restored.
 	RestoredContainerIDsAnnotation = "nvidia.com/restored-container-ids"
+
+	// SkipCompatCheckAnnotation disables compatibility checks for one restore.
+	SkipCompatCheckAnnotation = "nvidia.com/snapshot-skip-compat-check"
 
 	// DefaultSeccompLocalhostProfile is the kubelet-local profile installed by
 	// the Snapshot Helm chart to block io_uring for CRIU.
@@ -169,4 +173,10 @@ func ValidateContainerMappings(mappings []ContainerMapping, capturedSource strin
 		destinations[destination] = struct{}{}
 	}
 	return nil
+}
+
+// SkipCompatCheckFromAnnotations reports whether compatibility checks are disabled.
+func SkipCompatCheckFromAnnotations(annotations map[string]string) bool {
+	skip, err := strconv.ParseBool(strings.TrimSpace(annotations[SkipCompatCheckAnnotation]))
+	return err == nil && skip
 }
