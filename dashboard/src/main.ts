@@ -256,6 +256,26 @@ const METRIC_GROUPS = [
   { label: "Restore", prefix: "restore." },
 ] as const;
 
+// Sub-phase measurements whose values are negligible next to the phase
+// they're part of (well under a second, against tens of seconds for
+// checkpoint/restore) -- selecting them barely moves a stacked bar, they
+// just clutter the picker and the chart legend with near-invisible segments.
+const NEGLIGIBLE_METRICS: ReadonlySet<string> = new Set([
+  "checkpoint.cuda_checkpoint.duration",
+  "checkpoint.gpu_device_map.duration",
+  "checkpoint.overlay_capture.duration",
+  "checkpoint.remove_old_version_and_switch.duration",
+  "checkpoint.unaccounted.duration",
+  "restore.gpu_device_map.duration",
+  "restore.image_pull.duration",
+  "restore.image_pull_including_wait.duration",
+  "restore.overlay_capture.duration",
+  "restore.pagebroker_commit.duration",
+  "restore.pagebroker_mount.duration",
+  "restore.pagebroker_stage.duration",
+  "restore.unaccounted.duration",
+]);
+
 // Only the checkpoint/restore measurements are actionable in the stage
 // breakdown, so a suite shaped like the framework benchmark drops everything
 // else (test.total.duration, source.image_pull*, ...) from the picker rather
@@ -271,7 +291,9 @@ function renderMetricGroups(metrics: MetricDefinition[]): void {
   const groups = METRIC_GROUPS
     .map(({ label, prefix }) => ({
       label: label as string | null,
-      items: metrics.filter((item) => item.name.startsWith(prefix)),
+      items: metrics.filter(
+        (item) => item.name.startsWith(prefix) && !NEGLIGIBLE_METRICS.has(item.name),
+      ),
     }))
     .filter((group) => group.items.length > 0);
   const effectiveGroups = groups.length > 0 ? groups : [{ label: null, items: metrics }];
