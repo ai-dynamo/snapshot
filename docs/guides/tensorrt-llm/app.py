@@ -115,7 +115,7 @@ def main() -> None:
             # in the control directory next to the success sentinel.
             try:
                 progress = CONTROL_DIR.joinpath("trtllm-restore-progress")
-                text = generate_text(llm, ["Reply with one word: restored"])[0]
+                text = generate_text(llm, ["The capital city of Germany is"])[0]
                 progress.write_text("generated\n", encoding="utf-8")
                 print(f"TensorRT-LLM restored output={text!r}", flush=True)
                 serve_api(llm, text)

@@ -130,7 +130,7 @@ async def main() -> None:
                 progress.write_text("generation-resumed\n", encoding="utf-8")
                 text = await generate_text(
                     engine,
-                    "Reply with one word: restored",
+                    "The capital city of Germany is",
                     "snapshot-restore-check",
                 )
                 progress.write_text("generated\n", encoding="utf-8")

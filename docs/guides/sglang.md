@@ -77,9 +77,15 @@ kubectl create configmap sglang-app \
   --from-file=app.py
 ```
 
-Re-run this command after editing `app.py` -- `kubectl create configmap` fails
-if the ConfigMap already exists; add `--dry-run=client -o yaml | kubectl apply
--f -` to update it in place instead.
+`kubectl create configmap` fails if the ConfigMap already exists. To update it
+after editing `app.py`, use `apply` instead:
+
+```bash
+kubectl create configmap sglang-app \
+  --namespace "$SNAPSHOT_NAMESPACE" \
+  --from-file=app.py \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
 
 ## 3. Deploy SGLang
 
