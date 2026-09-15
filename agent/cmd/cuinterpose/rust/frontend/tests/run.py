@@ -88,8 +88,8 @@ def main():
         env["LD_LIBRARY_PATH"] = str(build)
         env["LD_PRELOAD"] = str(build / "libcuinterpose.so")
         cases = ["direct", "lookup", "queries", "missing", "bindings", "runtime", "local-lifetime", "next",
-                 "fork-reentry", "constructor-reentry", "constructor-fork", "constructor-concurrent",
-                 "resolver-fork", "providers", "identities", "ready-failure", "chain-before", "chain-after",
+                 "constructor-reentry", "constructor-concurrent",
+                 "providers", "identities", "ready-failure", "chain-before", "chain-after",
                  "missing-core", "bad-core", "short-version-core", "short-size-core",
                  "runtime-nested", "identities-nested", "early-plugin", "early-plugin-nested"]
         for case in cases:
@@ -98,8 +98,8 @@ def main():
                 case_env["CUINTERPOSE_TEST_NESTED_RUNTIME"] = "1"
             if case == "constructor-reentry":
                 case_env["CUINTERPOSE_TEST_REENTER_CORE"] = "1"
-            if case in ("constructor-fork", "constructor-concurrent"):
-                case_env["CUINTERPOSE_TEST_CONSTRUCTOR"] = "fork" if case == "constructor-fork" else "create"
+            if case == "constructor-concurrent":
+                case_env["CUINTERPOSE_TEST_CONSTRUCTOR"] = "create"
             if case == "next":
                 case_env["LD_PRELOAD"] += ":" + str(build / "caller.so") + ":" + str(build / "following.so")
             elif case in ("early-plugin", "early-plugin-nested"):

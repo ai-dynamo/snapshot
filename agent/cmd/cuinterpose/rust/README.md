@@ -5,12 +5,38 @@ SPDX-License-Identifier: Apache-2.0
 
 # Rust cuinterpose experiment
 
+The [development log](../../../../docs/development/cuinterpose-rust-development-log.md)
+records failed approaches, reproduced defects, their fixes, and remaining
+validation gaps. It distinguishes production behavior from test-only adapters.
+
 This workspace is an incomplete, main-based port. It builds a run-ai-style
 `libcuinterpose.so` front end, a separate `libcuinterpose_core.so`, and
 `cuinterpose-coordinator`. Unicast, host-carrier, and multicast reconstruction
 are implemented and exercised against fake CUDA. Fork generation reset is covered
 by fake-driver tests, not qualified for real post-CUDA fork. Do not treat
 a successful build or loader test as GPU, CRIU, or vLLM qualification.
+
+## Relationship to the draft C design
+
+The checkpoint semantics remain the target: sealed POSIX tickets identify the
+original creator; only shared creator allocations receive host carriers;
+never-shared allocations remain native-owned; unicast precedes multicast
+reconstruction; the coordinator enforces topology validation and phase barriers.
+This is not a claim of identical behavior or complete parity.
+
+| Area | Intentional Rust implementation difference from the pinned C stack |
+| --- | --- |
+| Library boundary | Two shared objects with a versioned typed C ABI, rather than one interposition library |
+| Resolver selection | Qualify the actual returned symbol and its provider; C selects replacement ABI from the requested name/version. Unknown tracked results fail closed rather than guessing. |
+| Endpoint startup | First memory call, successful `cuInit`, or successful resolver activity initializes the endpoint; the Rust constructor only installs fork hooks, unlike C's endpoint constructor. |
+| Fork reset | C-style atfork metadata locks; the child abandons its inherited Rust generation rather than destroying CUDA-bearing objects or reinitializing mutexes in place. Quiescent fork only. |
+| Control dispatch | Prestarted bounded worker plus independent export listener, rather than C's per-connection thread with synchronous handling on spawn failure |
+| Uncertain asynchronous copies | If synchronization cannot establish completion, terminate the process without cleanup; never free potentially DMA-referenced memory. |
+| Allocation failure | Standard Rust allocation OOM can abort rather than return a CUDA error; catching panics does not change that. |
+
+Snapshot packaging/orchestration, static coordinator delivery, and GPU/CRIU/vLLM
+qualification remain unfinished integration work, not intentional design
+differences or evidence of parity.
 
 ## Implementation boundaries
 
@@ -22,7 +48,7 @@ a successful build or loader test as GPU, CRIU, or vLLM qualification.
 | `protocol` | C v2 binary layouts, named records and tickets, checked codecs, socket framing, and descriptor transport |
 | `coordinator` | Participant discovery, named-field topology validation, phase barriers, and state-file publication |
 
-The private host/core ABI is version 4, checked by version and size.
+The private host/core ABI is version 5, checked by version and size.
 `cuinterpose_core_init` is the core's only dynamic export. It returns a
 `repr(C)` table of typed C function pointers; memory calls do not look up
 untyped core functions by name. The host's real-symbol resolver remains a
@@ -80,7 +106,7 @@ owning object/device/binding records. Runtime create, import, add-device, bind,
 and map calls drop the state mutex around CUDA; an in-flight counter prevents
 inspection or preparation while their results are not yet recorded. Objects
 and tracked unicast members are pinned against concurrent release/unmap.
-Driver handles in multicast records use `Option<u64>`: zero is a valid handle,
+Driver handles in unicast and multicast records use `Option<u64>`: zero is a valid handle,
 not the prepared-state marker.
 
 Capture drains multicast exports, unmaps, unbinds, and releases objects before
@@ -93,38 +119,81 @@ properties and v1/v2 ABIs are retained; inspection reports the largest extent
 accepted by CUDA. BindMem replay temporarily retains mapped members whose
 application handles were released, then drops that temporary reference.
 
+The host-carrier module stages all mappings before timing copy enqueue and
+synchronization. Its reported `copy_us` excludes allocation, context, mapping,
+and export work. Context entry avoids redundant switches and releases a
+retained primary context even if switching fails. Missing or failing host
+registration queries trigger re-registration on load.
+
+Load keeps fresh driver handles private until copying and staging cleanup
+succeed. If transfer completion is established, failures roll back acquired
+handles and save's temporary mapping-retained handles. Explicit cleanup then
+attempts all stream, mapping, VA, and context releases even if one fails,
+preserving the original CUDA error. CUDA never runs from `Drop`.
+An arena is unmapped only after successful host unregister. Actual cleanup
+failures remain fail-stop, not a promise that a failing driver freed resources.
+
+If both synchronization attempts fail, completion is unknown. The shim writes
+a diagnostic and immediately calls `_exit(127)`, without destructors, CUDA
+cleanup, or a successful coordinator response. The agent must terminate the
+remaining failed process tree. There is no quarantine registry, recovery
+operation, or permanent fork lease. Redundant-retain release failure records the extra
+reference and poisons capture eligibility rather than silently losing ownership.
+
+Two mandatory threads start before generation publication: a peer listener
+and a control worker with an eight-request bounded queue. The listener serves
+`EXPORT` without taking the state mutex; all other requests, including
+`INSPECT`, execute on the control worker. Reciprocal imports therefore retain
+peer progress without per-request thread creation. A full queue refuses the
+request before mutation, rather than dropping it or executing lifecycle work
+on the listener. Startup failure logs the OS error, closes the owned listener
+and path, and disconnects the only queue producer. An already-started idle
+worker exits asynchronously; initialization never joins it while a caller may
+hold the loader lock. The failed generation is never published or retried.
+Header reads and peer writes use a per-blocking-I/O timeout (10 seconds by
+default), not a total request deadline. Partial input can therefore occupy the
+listener longer than that overall; this is not a hostile-client fairness
+guarantee. Coordinator I/O errors include endpoint and operation.
+
+Recoverable identity/handle-capacity checks precede new tracked allocations,
+and failed import bookkeeping releases unpublished driver handles. Standard
+Rust allocator OOM can still abort; panic catching does not convert it into a
+CUDA error. During preparation, provably native handles and nonoverlapping
+native ranges continue through CUDA while tracked or pending ranges remain
+protected.
+
 Wrong-phase requests, unsupported sharing, and in-flight collectives refuse
 without poisoning state. A driver failure after lifecycle mutation starts is
 fail-stop. Per-resource checkpoint markers govern replay, and inspection
 refuses more than 4096 topology records before allocating the response.
 
-The frontend registers `pthread_atfork` hooks and supplies a reentrant operation
-gate to the core. Public fork atomically closes admission only when no operation
-is active; otherwise it returns `EAGAIN` without waiting. Prepare snapshots shim-owned
-listener/cache descriptors and the carrier mapping, then holds admission closed
-through fork. The child closes that inventory, unmaps the carrier without CUDA
-unregistration, and detaches its inherited generation. Fresh state and a new
-identity are created on first activity; inherited identity overrides are ignored.
-The parent and application-owned ticket descriptors remain unchanged.
+The frontend registers `pthread_atfork`; it does not export `fork` or gate
+every intercepted call. Prepare locks initialization, STATE, the export cache,
+the owned-socket registry, then frontend provider references. Cache leases drain
+before the snapshot, and socket open/register and unregister/close share a short
+registry lock. Peer export never takes STATE. Parent callbacks release locks
+without changing records.
 
-The child hook uses atomics, precomputed data, and close/munmap only. It does not
-drop the inherited Rust generation, acquire a Rust mutex, or call CUDA. That
-generation and the snapshot are intentionally leaked in the child; exec/process
-exit reclaims them. Common mutexes and immutable loaded API/provider tables remain
-usable because prepare quiesces every path that touches them.
+The child closes only inventoried shim FDs, unmaps the carrier without CUDA
+unregistration, and detaches its inherited generation. It abandons that
+generation and its state/cache locks without invoking inherited CUDA-bearing
+destructors. Process-lifetime initialization, registry, and provider mutexes are
+unlocked by the surviving thread that acquired them; no Rust mutex is overwritten.
+Fresh state and a random participant ID are created on first activity, ignoring
+an inherited override. Parent state and application-owned ticket FDs survive.
+The registry is cleared before unlocking so nested fork cannot close reused FDs.
 
-Fork invoked recursively from an intercepted operation fails with `EDEADLK`.
-A libc-internal bypass that cannot establish quiescence terminates the child with
-status 127. CUDA operations racing the fully closed fork barrier return
-`CUDA_ERROR_NOT_SUPPORTED` instead of waiting while possibly holding loader locks.
-Listener workers wait outside loader locks. Fork never waits for active
-operations: a caller may own a loader lock needed by one of those operations.
-Applications that fork during CUDA/control traffic must retry `EAGAIN` from a
-safe caller or quiesce that traffic first. Constructor reentry and concurrent
+The supported contract is quiescent fork, normally worker creation before CUDA.
+Fork while CUDA/lifecycle calls are in flight (including collectives temporarily
+outside STATE), recursive fork inside interception, constructor-time fork, and
+arbitrary foreign atfork ordering are unsupported. No EAGAIN retry policy tries
+to extend that contract. NVIDIA CUDA initialization inherited through fork is
+not made usable by resetting shim metadata; real workloads should use spawn/exec
+or fork before CUDA. Constructor reentry and concurrent
 initialization of either the core library or a post-fork generation return
 not-initialized rather than waiting for an initializer that may need the caller's
 loader lock. This transient refusal does not poison initialization. A generation
-is published as ready only after listener startup succeeds; a bound socket alone
+is published as ready only after both mandatory thread starts succeed; a bound socket alone
 does not make its state available. Actual generation setup failures are sticky,
 and never publish a ready generation. The child immediately invalidates its old socket
 registry, including before a second fork with no intervening shim activity.
@@ -150,8 +219,31 @@ An explicit system linker avoids the host's Nix compiler linking against a
 newer incompatible glibc. Release qualification still needs a controlled
 glibc baseline and dynamic-symbol/dependency inspection.
 
+The simplified fork path passed a fresh unsanitized reference run without
+coordinator-launch adaptations or suite retries. Loader coverage is 23 cases
+(three old recursive/constructor fork-policy cases removed), plus 19 actual-core
+endpoint cases. The separate development log preserves previous failed runs.
+The traced prior HANDSHAKE timeout occurred before either successfully created
+importer thread entered its Rust closure, only with the sanitized fixture.
+Equivalent unsanitized state→lifecycle sequences passed 300/300 in the targeted
+diagnosis. The underlying sanitizer/runtime/old-gate interaction remains unknown;
+it is not evidence of a protocol or carrier defect. None of these results
+qualify native CUDA/CRIU or physical-GPU restore.
+
 Unit tests include wire known-byte compatibility fixtures, malformed ELF
 tables, panic poisoning, sealed memfds, and export-cache retirement races.
+The carrier suite adds 22 process-isolated zero-handle, import rollback,
+native-phase, partial-copy/cleanup, fail-stop, and timing cases. Persistent
+D2H/H2D sync-failure subprocesses must exit 127 with the diagnostic; the provider
+exits with a distinct failure if destructive cleanup runs. RPC tests cover both
+mandatory worker startup failures, queue-full refusal before mutation, and
+reciprocal unicast/multicast imports with thread creation unavailable after
+startup. Constructor controls cover success and either startup spawn failing;
+failures preserve output values and leave no path, FD, or eventual worker,
+while the parent generation remains usable. The test-only carrier provider
+uses `RTLD_NEXT`, translating a valid zero handle into the pinned fake driver's
+nonzero model; production contains no such translation. A separate unit
+subprocess checks absent-query fallback and primary-error preservation.
 The ticket interoperability runner compiles the unmodified reader and writer
 from C stack commit `21008b50b93a9879a805665e331e777bb93abf49`, obtained with
 `git show`, into a temporary helper. That commit must exist in the local
@@ -168,33 +260,25 @@ real multicast reconstruction.
 
 `reference.py` builds the pinned C fixtures using a local CUDA 13.1/gtest Docker
 image, then runs all 14 coordinator, 13 tracking, 5 unicast lifecycle, and
-6 multicast tests against Rust, with no fork exclusions. The temporary extracted
-test harness receives one explicit adaptation: coordinator process creation
-retries only `fork()` returning `EAGAIN`, up to a five-second absolute deadline,
-and reports its retry count. Other errors or deadline exhaustion abort before
-`waitpid`; no CUDA call, coordinator phase, child operation, or suite is retried.
-The runner validates the pinned coordinator-header checksum before overlaying
-that one launch site. Runtime sources, the fake driver, test assertions, and
-actual fork-generation calls are unchanged. Five deterministic launch-helper
-cases exercise recovery, terminal errors, deadline exhaustion, and child return.
-`--fixtures <build-directory>` reuses an existing build with a warning that this
-adaptation cannot be applied or verified; the default fresh build is authoritative.
+6 multicast tests against Rust, including ordinary forked importers. The pinned
+fixtures are unmodified; there is no coordinator-fork retry adapter.
+By default `SANITIZE=` explicitly disables fixture instrumentation and readelf
+checks actual linkage. `--sanitized` selects separate ASan/UBSan diagnostic
+coverage; `--fixtures` reuse must match the selected linkage.
 Eight additional multicast modes cover
 released handles and binding-only sharing, resource-kind/ticket mismatch,
 partial mappings and unknown access, destructive versus harmless refusal,
 native-address binding replay, a blocked collective with simultaneous control
 requests, retain refusal during map publication, and driver-written create-error
-output. Eight extra
+output. Six extra
 process-isolated fork regressions cover
 pre-init fork, identity and descriptor reset, nested-fork FD reuse, saved-carrier
-unmapping without CUDA cleanup, concurrent activity, and generation
-poisoning, post-fork constructor/worker contention using the actual Rust core,
-and sticky startup failure. The constructor regression waits for the child's
-socket and the initializing worker's futex wait before reentering the shim,
-then verifies that the worker completes after the loader lock is released.
+unmapping without CUDA cleanup, generation poisoning, and sticky startup failure.
+Concurrent-CUDA fork and the redundant child-constructor fork mode were removed;
+ordinary loader-constructor reentry remains covered in the endpoint suite.
 Python may warn about multithreaded fork: these are deliberately
 fake-driver regression tests, not a relaxation of POSIX/CUDA fork restrictions.
 ASan instruments the C fixtures only, with leak detection disabled; it does not
-instrument Rust. The frontend suite additionally checks recursive fork refusal
-and same/cross-thread constructor reentry. Real workloads should use spawn/exec or fork before CUDA
+instrument Rust. The frontend suite checks same/cross-thread constructor reentry,
+not fork from those constructors. Real workloads should use spawn/exec or fork before CUDA
 initialization; shim reset cannot repair inherited NVIDIA runtime state.

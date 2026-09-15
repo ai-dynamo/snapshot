@@ -37,6 +37,7 @@ mod tests {
                 })
                 .collect(),
             raw: BTreeMap::new(),
+            unreleased_handles: Vec::new(),
             unsupported: 0,
             phase: 0,
             arena: None,
@@ -63,15 +64,31 @@ static STATE: AtomicPtr<Generation> = AtomicPtr::new(std::ptr::null_mut());
 static INITIALIZING: Mutex<()> = Mutex::new(());
 static CHILD: AtomicBool = AtomicBool::new(false);
 
-pub fn fork_snapshot(descriptors: &mut Vec<i32>) -> Option<(usize, usize)> {
+pub struct ForkState {
+    // Field order releases locks in reverse acquisition order in the parent.
+    pub cache: Option<MutexGuard<'static, super::export_cache::Entries>>,
+    pub state: Option<MutexGuard<'static, State>>,
+    pub initializing: Option<MutexGuard<'static, ()>>,
+}
+
+pub fn fork_lock(descriptors: &mut Vec<i32>) -> ForkState {
+    let initializing = INITIALIZING.lock().unwrap_or_else(|e| e.into_inner());
     let pointer = STATE.load(Ordering::Acquire);
     if pointer.is_null() {
-        return None;
+        return ForkState {
+            initializing: Some(initializing),
+            state: None,
+            cache: None,
+        };
     }
     let generation = unsafe { &*pointer };
-    generation.cache.fork_descriptors(descriptors);
     let state = generation.state.lock().unwrap_or_else(|e| e.into_inner());
-    state.arena.as_ref().map(|arena| (arena.base, arena.size))
+    let cache = generation.cache.fork_lock(descriptors);
+    ForkState {
+        initializing: Some(initializing),
+        state: Some(state),
+        cache: Some(cache),
+    }
 }
 
 pub fn fork_child() {
@@ -90,23 +107,31 @@ pub fn cache() -> Result<&'static super::export_cache::ExportCache> {
     Ok(&unsafe { &*pointer }.cache)
 }
 
-macro_rules! call {
+// An expression form lets cleanup attempt every release without losing the
+// primary error. Ordinary operations use call! to propagate it immediately.
+macro_rules! invoke {
     ($name:expr, fn($($ty:ty),*) $(, $arg:expr)* $(,)?) => {{
-        let name = std::ffi::CStr::from_bytes_with_nul(concat!($name, "\0").as_bytes()).map_err(|_| NOT_INITIALIZED)?;
-        let address = super::driver(name);
-        if address.is_null() { return Err(NOT_INITIALIZED); }
-        let function: unsafe extern "C" fn($($ty),*) -> i32 = unsafe { std::mem::transmute(address) };
-        let code = unsafe { function($($arg),*) };
-        if code != SUCCESS { return Err(code); }
+        (|| -> crate::state::Result<()> {
+            let name = std::ffi::CStr::from_bytes_with_nul(concat!($name, "\0").as_bytes()).map_err(|_| cuinterpose_abi::NOT_INITIALIZED)?;
+            let address = crate::driver(name);
+            if address.is_null() { return Err(cuinterpose_abi::NOT_INITIALIZED); }
+            let function: unsafe extern "C" fn($($ty),*) -> i32 = unsafe { std::mem::transmute(address) };
+            let code = unsafe { function($($arg),*) };
+            if code != cuinterpose_abi::SUCCESS { return Err(code); }
+            Ok(())
+        })()
     }};
 }
-pub(super) use call;
+macro_rules! call {
+    ($($tokens:tt)*) => { crate::state::invoke!($($tokens)*)? };
+}
+pub(super) use {call, invoke};
 
 #[derive(Clone)]
 pub struct Allocation {
     pub id: AllocationId,
     pub ticket: Ticket,
-    pub driver: u64,
+    pub driver: Option<u64>,
     pub size: usize,
     pub properties: AllocationProp,
     pub creator: bool,
@@ -141,6 +166,9 @@ pub struct State {
     pub handles: BTreeMap<u64, AllocationId>,
     pub mappings: BTreeMap<u64, Mapping>,
     pub raw: BTreeMap<u64, u32>,
+    // Failed redundant-reference cleanup poisons capture, but ownership remains
+    // recorded until the failed process is terminated.
+    pub unreleased_handles: Vec<u64>,
     pub unsupported: u64,
     pub phase: u16,
     pub arena: Option<super::host_carrier::Arena>,
@@ -257,9 +285,9 @@ impl State {
     }
 
     /// Validation has completed without mutation. Failures here are fail-stop.
-    pub fn lifecycle(&mut self, operation: u16) -> Result<u64> {
+    pub fn lifecycle(&mut self, operation: u16) -> Result<super::host_carrier::Transfer> {
         use super::host_carrier::{Arena, Context};
-        let selected = |a: &&Allocation| {
+        let selected = |a: &Allocation| {
             a.creator
                 && a.shared
                 && a.properties.handle_types != 0
@@ -267,6 +295,7 @@ impl State {
                 && a.properties.location.kind == 1
         };
         let mut bytes = 0u64;
+        let mut copy_us = 0u32;
         match operation {
             3 => {
                 super::multicast::prepare(self)?;
@@ -275,44 +304,70 @@ impl State {
                 let ids: Vec<_> = self
                     .allocations
                     .values()
-                    .filter(selected)
+                    .filter(|a| selected(a))
                     .map(|a| a.id)
                     .collect();
-                let mut allocations = Vec::new();
-                for id in ids {
-                    let allocation = self.allocations.get_mut(&id).ok_or(INVALID_HANDLE)?;
-                    if allocation.driver == 0 {
-                        let mapping = self
-                            .mappings
-                            .values()
-                            .find(|m| m.id == id)
-                            .ok_or(INVALID_HANDLE)?;
-                        let context =
-                            Context::enter(allocation.context, allocation.properties.location.id)?;
-                        let retained = (|| -> Result<()> {
-                            call!(
+                let mut recovered = Vec::new();
+                let saved = (|| -> Result<(Option<Arena>, u32)> {
+                    let mut allocations = Vec::new();
+                    for id in ids {
+                        let allocation = self.allocations.get_mut(&id).ok_or(INVALID_HANDLE)?;
+                        if allocation.driver.is_none() {
+                            let mapping = self
+                                .mappings
+                                .values()
+                                .find(|m| m.id == id)
+                                .ok_or(INVALID_HANDLE)?;
+                            let context = Context::enter(
+                                allocation.context,
+                                allocation.properties.location.id,
+                            )?;
+                            let mut driver = 0;
+                            let retained = invoke!(
                                 "cuMemRetainAllocationHandle",
                                 fn(*mut u64, *mut c_void),
-                                &mut allocation.driver,
+                                &mut driver,
                                 mapping.address as usize as *mut c_void
                             );
-                            Ok(())
-                        })();
-                        let left = context.leave();
-                        retained?;
-                        left?;
+                            if retained.is_ok() {
+                                allocation.driver = Some(driver);
+                                recovered.push(id);
+                            }
+                            let left = context.leave();
+                            retained.and(left)?;
+                        }
+                        bytes = bytes
+                            .checked_add(allocation.size as u64)
+                            .ok_or(OUT_OF_MEMORY)?;
+                        allocations.push(allocation.clone());
                     }
-                    bytes = bytes
-                        .checked_add(allocation.size as u64)
-                        .ok_or(OUT_OF_MEMORY)?;
-                    allocations.push(allocation.clone());
-                }
-                self.arena = Arena::save(&allocations)?;
-                for allocation in &allocations {
-                    self.allocations
-                        .get_mut(&allocation.id)
-                        .ok_or(INVALID_HANDLE)?
-                        .host_checkpointed = true;
+                    Arena::save(&allocations)
+                })();
+                let (arena, elapsed) = match saved {
+                    Ok(saved) => saved,
+                    Err(error) => {
+                        for id in recovered {
+                            if let Some(allocation) = self.allocations.get_mut(&id) {
+                                if let Ok(context) = Context::enter(
+                                    allocation.context,
+                                    allocation.properties.location.id,
+                                ) {
+                                    if let Some(driver) = allocation.driver {
+                                        if invoke!("cuMemRelease", fn(u64), driver).is_ok() {
+                                            allocation.driver = None;
+                                        }
+                                    }
+                                    let _ = context.leave();
+                                }
+                            }
+                        }
+                        return Err(error);
+                    }
+                };
+                self.arena = arena;
+                copy_us = elapsed;
+                for allocation in self.allocations.values_mut().filter(|a| selected(a)) {
+                    allocation.host_checkpointed = true;
                 }
             }
             5 => {
@@ -326,9 +381,9 @@ impl State {
                             call!("cuMemUnmap", fn(u64, usize), mapping.address, mapping.size);
                             mapping.checkpointed = true;
                         }
-                        if allocation.driver != 0 {
-                            call!("cuMemRelease", fn(u64), allocation.driver);
-                            allocation.driver = 0;
+                        if let Some(driver) = allocation.driver {
+                            call!("cuMemRelease", fn(u64), driver);
+                            allocation.driver = None;
                         }
                         allocation.checkpointed = true;
                         Ok(())
@@ -349,7 +404,7 @@ impl State {
                     sum.checked_add(a.size as u64).ok_or(OUT_OF_MEMORY)
                 })?;
                 if let Some(arena) = &self.arena {
-                    arena.load(&mut allocations)?;
+                    copy_us = arena.load(&mut allocations)?;
                 } else if !allocations.is_empty() {
                     return Err(INVALID_VALUE);
                 }
@@ -367,11 +422,12 @@ impl State {
                     let raw = ticket::request(&allocation.ticket).map_err(|_| INVALID_HANDLE)?;
                     let context =
                         Context::enter(allocation.context, allocation.properties.location.id)?;
+                    let mut driver = 0;
                     let imported = (|| -> Result<()> {
                         call!(
                             "cuMemImportFromShareableHandle",
                             fn(*mut u64, *mut c_void, u32),
-                            &mut allocation.driver,
+                            &mut driver,
                             raw.as_raw_fd() as usize as *mut c_void,
                             1
                         );
@@ -379,14 +435,23 @@ impl State {
                     })();
                     let left = context.leave();
                     imported?;
-                    left?;
+                    if let Err(error) = left {
+                        if let Ok(context) =
+                            Context::enter(allocation.context, allocation.properties.location.id)
+                        {
+                            let _ = invoke!("cuMemRelease", fn(u64), driver);
+                            let _ = context.leave();
+                        }
+                        return Err(error);
+                    }
+                    allocation.driver = Some(driver);
                 }
                 self.remap(false)?;
             }
             _ => return Err(NOT_SUPPORTED),
         }
         self.phase = if operation == 12 { 0 } else { operation };
-        Ok(bytes)
+        Ok(super::host_carrier::Transfer { bytes, copy_us })
     }
 
     fn remap(&mut self, creator: bool) -> Result<()> {
@@ -411,7 +476,7 @@ impl State {
                         mapping.address,
                         mapping.size,
                         mapping.offset,
-                        allocation.driver,
+                        allocation.driver.ok_or(INVALID_HANDLE)?,
                         0
                     );
                     if !mapping.access.is_empty() {
@@ -432,7 +497,7 @@ impl State {
                         "cuMemExportToShareableHandle",
                         fn(*mut c_void, u64, u32, u64),
                         (&mut fd as *mut i32).cast(),
-                        allocation.driver,
+                        allocation.driver.ok_or(INVALID_HANDLE)?,
                         1,
                         0
                     );
@@ -445,8 +510,12 @@ impl State {
                     )?;
                 }
                 if !self.handles.values().any(|id| *id == allocation.id) {
-                    call!("cuMemRelease", fn(u64), allocation.driver);
-                    allocation.driver = 0;
+                    call!(
+                        "cuMemRelease",
+                        fn(u64),
+                        allocation.driver.ok_or(INVALID_HANDLE)?
+                    );
+                    allocation.driver = None;
                 }
                 allocation.checkpointed = false;
                 allocation.host_checkpointed = false;
@@ -507,9 +576,11 @@ impl State {
         let handle_live = self.handles.values().any(|value| *value == id);
         let mapped = self.mappings.values().any(|mapping| mapping.id == id);
         let allocation = self.allocations.get_mut(&id).ok_or(INVALID_HANDLE)?;
-        if !handle_live && allocation.driver != 0 {
-            call!("cuMemRelease", fn(u64), allocation.driver);
-            allocation.driver = 0;
+        if !handle_live {
+            if let Some(driver) = allocation.driver {
+                call!("cuMemRelease", fn(u64), driver);
+                allocation.driver = None;
+            }
         }
         if !handle_live && !mapped {
             cache()?.replace((1, id), None)?;
@@ -590,9 +661,6 @@ pub fn initialize() -> Result<()> {
 
 fn initialize_generation() -> Result<()> {
     let pid = unsafe { libc::getpid() };
-    if CHILD.load(Ordering::Acquire) {
-        super::process::reset_sockets();
-    }
     let configured = if CHILD.load(Ordering::Acquire)
         || super::HOST.get().is_some_and(|host| host.origin_pid != pid)
     {
@@ -631,6 +699,7 @@ fn initialize_generation() -> Result<()> {
         handles: BTreeMap::new(),
         mappings: BTreeMap::new(),
         raw: BTreeMap::new(),
+        unreleased_handles: Vec::new(),
         unsupported: 0,
         next: 1,
         phase: 0,
@@ -658,7 +727,13 @@ pub fn get() -> Result<MutexGuard<'static, State>> {
     if pointer.is_null() {
         return Err(NOT_INITIALIZED);
     }
-    unsafe { &*pointer }.state.lock().map_err(|_| UNKNOWN)
+    let state = unsafe { &*pointer }.state.lock().map_err(|_| UNKNOWN)?;
+    // A caller may have waited behind a failed lifecycle operation. Do not
+    // admit queued mutations using only the pre-lock check.
+    if super::FAILED.load(Ordering::Acquire) {
+        return Err(UNKNOWN);
+    }
+    Ok(state)
 }
 
 pub(super) fn active() -> Result<MutexGuard<'static, State>> {
@@ -693,7 +768,20 @@ pub fn cuMemCreate(
         return Err(INVALID_VALUE);
     }
     let properties = unsafe { *prop };
-    let mut state = active()?;
+    let mut state = get()?;
+    if properties.handle_types == 1 && state.phase != 0 {
+        return Err(NOT_READY);
+    }
+    // Reserve the logical identity before acquiring backing. Recoverable
+    // metadata errors must not leave an unpublished CUDA allocation behind.
+    let tracked = if properties.handle_types == 1 {
+        if state.next & HANDLE_MASK != 0 {
+            return Err(OUT_OF_MEMORY);
+        }
+        Some(random()?)
+    } else {
+        None
+    };
     let mut driver = 0;
     call!(
         "cuMemCreate",
@@ -704,7 +792,7 @@ pub fn cuMemCreate(
         flags
     );
     if driver & HANDLE_MASK == HANDLE_TAG {
-        call!("cuMemRelease", fn(u64), driver);
+        let _ = invoke!("cuMemRelease", fn(u64), driver);
         return Err(INVALID_HANDLE);
     }
     if properties.handle_types != 1 {
@@ -716,13 +804,7 @@ pub fn cuMemCreate(
         }
         return Ok(SUCCESS);
     }
-    let id = match random() {
-        Ok(id) => id,
-        Err(error) => {
-            call!("cuMemRelease", fn(u64), driver);
-            return Err(error);
-        }
-    };
+    let id = tracked.ok_or(INVALID_HANDLE)?;
     let ticket = Ticket {
         creator: state.identity,
         allocation: id,
@@ -738,7 +820,7 @@ pub fn cuMemCreate(
     let allocation = Allocation {
         id,
         ticket,
-        driver,
+        driver: Some(driver),
         size,
         properties,
         creator: true,
@@ -748,7 +830,13 @@ pub fn cuMemCreate(
         host_checkpointed: false,
         pins: 0,
     };
-    let logical = state.mint(id)?;
+    let logical = match state.mint(id) {
+        Ok(logical) => logical,
+        Err(error) => {
+            let _ = invoke!("cuMemRelease", fn(u64), driver);
+            return Err(error);
+        }
+    };
     state.allocations.insert(id, allocation);
     unsafe {
         out.write(logical);
@@ -757,16 +845,20 @@ pub fn cuMemCreate(
 }
 
 pub fn cuMemRelease(handle: u64) -> Result<i32> {
-    let mut state = active()?;
+    let mut state = get()?;
     if let Some(id) = state.handles.get(&handle) {
-        if state.multicasts.get(id).is_some_and(|a| a.inflight != 0)
+        if state.phase != 0
+            || state.multicasts.get(id).is_some_and(|a| a.inflight != 0)
             || state.allocations.get(id).is_some_and(|a| a.pins != 0)
         {
             return Err(NOT_READY);
         }
     }
     if let Some(id) = state.handles.remove(&handle) {
-        state.settle(id)?;
+        if let Err(error) = state.settle(id) {
+            state.handles.insert(handle, id);
+            return Err(error);
+        }
     } else {
         if handle & HANDLE_MASK == HANDLE_TAG {
             return Err(INVALID_HANDLE);
@@ -786,7 +878,7 @@ pub fn cuMemRetainAllocationHandle(out: *mut u64, address: *mut c_void) -> Resul
     if out.is_null() {
         return Err(INVALID_VALUE);
     }
-    let mut state = active()?;
+    let mut state = get()?;
     // CUDA may already have mapped a multicast range while its record is
     // still pending publication. Do not let the native fallback expose that
     // object's real driver handle before we can return a tracked alias.
@@ -802,6 +894,12 @@ pub fn cuMemRetainAllocationHandle(out: *mut u64, address: *mut c_void) -> Resul
         .find(|m| address as u64 >= m.address && (address as u64) - m.address < m.size as u64)
         .map(|m| m.id);
     if let Some(id) = id {
+        if state.phase != 0 {
+            return Err(NOT_READY);
+        }
+        if state.next & HANDLE_MASK != 0 {
+            return Err(OUT_OF_MEMORY);
+        }
         if let Some(object) = state.multicasts.get(&id) {
             if object.driver.is_none() {
                 return Err(INVALID_HANDLE);
@@ -821,17 +919,21 @@ pub fn cuMemRetainAllocationHandle(out: *mut u64, address: *mut c_void) -> Resul
     );
     if let Some(id) = id {
         let allocation = state.allocations.get_mut(&id).ok_or(INVALID_HANDLE)?;
-        if allocation.driver != 0 {
-            call!("cuMemRelease", fn(u64), driver);
+        if allocation.driver.is_some() {
+            if let Err(error) = invoke!("cuMemRelease", fn(u64), driver) {
+                state.unreleased_handles.push(driver);
+                super::FAILED.store(true, Ordering::Release);
+                return Err(error);
+            }
         } else {
-            allocation.driver = driver;
+            allocation.driver = Some(driver);
         }
         unsafe {
             out.write(state.mint(id)?);
         }
     } else {
         if driver & HANDLE_MASK == HANDLE_TAG {
-            call!("cuMemRelease", fn(u64), driver);
+            let _ = invoke!("cuMemRelease", fn(u64), driver);
             return Err(INVALID_HANDLE);
         }
         unsafe {
@@ -842,10 +944,15 @@ pub fn cuMemRetainAllocationHandle(out: *mut u64, address: *mut c_void) -> Resul
 }
 
 pub fn cuMemMap(address: u64, size: usize, offset: usize, handle: u64, flags: u64) -> Result<i32> {
-    let mut state = active()?;
+    let mut state = get()?;
     let Some(id) = state.handles.get(&handle).copied() else {
         if handle & HANDLE_MASK == HANDLE_TAG {
             return Err(INVALID_HANDLE);
+        }
+        // Native handles must not overwrite tracked or pending ranges while
+        // those mappings are temporarily absent from CUDA during checkpoint.
+        if !state.covered(address, size)?.is_empty() {
+            return Err(INVALID_VALUE);
         }
         call!(
             "cuMemMap",
@@ -858,6 +965,9 @@ pub fn cuMemMap(address: u64, size: usize, offset: usize, handle: u64, flags: u6
         );
         return Ok(SUCCESS);
     };
+    if state.phase != 0 {
+        return Err(NOT_READY);
+    }
     if state.multicasts.contains_key(&id) {
         return super::multicast::map(state, id, address, size, offset, flags);
     }
@@ -871,7 +981,7 @@ pub fn cuMemMap(address: u64, size: usize, offset: usize, handle: u64, flags: u6
         address,
         size,
         offset,
-        allocation.driver,
+        allocation.driver.ok_or(INVALID_HANDLE)?,
         flags
     );
     if allocation.context == 0 {
@@ -894,8 +1004,11 @@ pub fn cuMemMap(address: u64, size: usize, offset: usize, handle: u64, flags: u6
 }
 
 pub fn cuMemUnmap(address: u64, size: usize) -> Result<i32> {
-    let mut state = active()?;
+    let mut state = get()?;
     let mappings = state.covered(address, size)?;
+    if !mappings.is_empty() && state.phase != 0 {
+        return Err(NOT_READY);
+    }
     for base in &mappings {
         let id = &state.mappings[base].id;
         if state.multicasts.get(id).is_some_and(|a| a.inflight != 0)
@@ -918,8 +1031,11 @@ pub fn cuMemSetAccess(
     access: *const Access,
     count: usize,
 ) -> Result<i32> {
-    let mut state = active()?;
+    let mut state = get()?;
     let mappings = state.covered(address, size)?;
+    if !mappings.is_empty() && state.phase != 0 {
+        return Err(NOT_READY);
+    }
     if mappings.is_empty() || access.is_null() {
         call!(
             "cuMemSetAccess",
@@ -976,7 +1092,7 @@ pub fn cuMemExportToShareableHandle(
     kind: u32,
     flags: u64,
 ) -> Result<i32> {
-    let mut state = active()?;
+    let mut state = get()?;
     let Some(id) = state.handles.get(&handle).copied() else {
         if handle & HANDLE_MASK == HANDLE_TAG {
             return Err(INVALID_HANDLE);
@@ -991,6 +1107,9 @@ pub fn cuMemExportToShareableHandle(
         );
         return Ok(SUCCESS);
     };
+    if state.phase != 0 {
+        return Err(NOT_READY);
+    }
     if out.is_null() || kind != 1 || flags != 0 {
         return Err(INVALID_VALUE);
     }
@@ -1004,7 +1123,7 @@ pub fn cuMemExportToShareableHandle(
             "cuMemExportToShareableHandle",
             fn(*mut c_void, u64, u32, u64),
             (&mut fd as *mut i32).cast(),
-            allocation.driver,
+            allocation.driver.ok_or(INVALID_HANDLE)?,
             1,
             0
         );
@@ -1033,7 +1152,7 @@ pub fn cuMemImportFromShareableHandle(out: *mut u64, fd: *mut c_void, kind: u32)
     } else {
         None
     };
-    let mut state = active()?;
+    let mut state = get()?;
     let Some(ticket) = ticket else {
         let mut driver = 0;
         call!(
@@ -1044,7 +1163,7 @@ pub fn cuMemImportFromShareableHandle(out: *mut u64, fd: *mut c_void, kind: u32)
             kind
         );
         if driver & HANDLE_MASK == HANDLE_TAG {
-            call!("cuMemRelease", fn(u64), driver);
+            let _ = invoke!("cuMemRelease", fn(u64), driver);
             return Err(INVALID_HANDLE);
         }
         *state.raw.entry(driver).or_insert(0) += 1;
@@ -1053,6 +1172,12 @@ pub fn cuMemImportFromShareableHandle(out: *mut u64, fd: *mut c_void, kind: u32)
         }
         return Ok(SUCCESS);
     };
+    if state.phase != 0 {
+        return Err(NOT_READY);
+    }
+    if state.next & HANDLE_MASK != 0 {
+        return Err(OUT_OF_MEMORY);
+    }
     if ticket.resource == 2 {
         return super::multicast::import(state, out, ticket);
     }
@@ -1061,15 +1186,20 @@ pub fn cuMemImportFromShareableHandle(out: *mut u64, fd: *mut c_void, kind: u32)
         return Err(INVALID_HANDLE);
     }
     if let Some(allocation) = state.allocations.get_mut(&id) {
-        if allocation.driver == 0 {
+        if allocation.ticket != ticket {
+            return Err(INVALID_VALUE);
+        }
+        if allocation.driver.is_none() {
             let raw = ticket::request(&ticket).map_err(|_| INVALID_HANDLE)?;
+            let mut driver = 0;
             call!(
                 "cuMemImportFromShareableHandle",
                 fn(*mut u64, *mut c_void, u32),
-                &mut allocation.driver,
+                &mut driver,
                 raw.as_raw_fd() as usize as *mut c_void,
                 1
             );
+            allocation.driver = Some(driver);
         }
         allocation.shared = true;
         unsafe {
@@ -1089,19 +1219,31 @@ pub fn cuMemImportFromShareableHandle(out: *mut u64, fd: *mut c_void, kind: u32)
         1
     );
     let mut properties = std::mem::MaybeUninit::<AllocationProp>::zeroed();
-    call!(
-        "cuMemGetAllocationPropertiesFromHandle",
-        fn(*mut AllocationProp, u64),
-        properties.as_mut_ptr(),
-        driver
-    );
-    let logical = state.mint(id)?;
+    let recorded = (|| -> Result<u64> {
+        if driver & HANDLE_MASK == HANDLE_TAG {
+            return Err(INVALID_HANDLE);
+        }
+        call!(
+            "cuMemGetAllocationPropertiesFromHandle",
+            fn(*mut AllocationProp, u64),
+            properties.as_mut_ptr(),
+            driver
+        );
+        state.mint(id)
+    })();
+    let logical = match recorded {
+        Ok(logical) => logical,
+        Err(error) => {
+            let _ = invoke!("cuMemRelease", fn(u64), driver);
+            return Err(error);
+        }
+    };
     state.allocations.insert(
         id,
         Allocation {
             id,
             ticket,
-            driver,
+            driver: Some(driver),
             size: 0,
             properties: unsafe { properties.assume_init() },
             creator: false,
@@ -1122,11 +1264,14 @@ pub fn cuMemGetAllocationPropertiesFromHandle(
     out: *mut AllocationProp,
     handle: u64,
 ) -> Result<i32> {
-    let state = active()?;
+    let state = get()?;
+    if state.handles.contains_key(&handle) && state.phase != 0 {
+        return Err(NOT_READY);
+    }
     let driver = match state.handles.get(&handle) {
         Some(id) => match state.multicasts.get(id) {
             Some(object) => object.driver.ok_or(INVALID_HANDLE)?,
-            None => state.allocations[id].driver,
+            None => state.allocations[id].driver.ok_or(INVALID_HANDLE)?,
         },
         None if handle & HANDLE_MASK == HANDLE_TAG => return Err(INVALID_HANDLE),
         None => handle,

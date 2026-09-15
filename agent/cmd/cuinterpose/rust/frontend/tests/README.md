@@ -72,17 +72,15 @@ exercise wrong-version and current-version/wrong-size rejection without
 reading beyond the prefix. The Rust core unit suite checks the same boundary
 for a short host table.
 
-Fork-specific cases verify recursive fork refusal from a memory call and all
-seven resolver variants, plus unsafe-child termination for an explicit libc
-fork bypass. A constructor holds the loader lock while another thread enters
-its first CUDA call; fork must return `EAGAIN`, and concurrent core reentry must
+Fork is not interposed. A constructor holds the loader lock while another thread enters
+its first CUDA call; concurrent core reentry must
 return not-initialized without poisoning the eventual initialization.
 The fixture waits for the worker's futex syscall rather than using a fixed
 sleep. Same-thread core-constructor reentry is covered separately. These use
 the independent mock core; `core/tests/reference.py` covers Rust core generation
 reset, including nested-fork FD reuse and saved host carriers.
 
-After the 26 mock-core loader cases, 19 separate endpoint cases use the actual
+After the 23 mock-core loader cases, 19 separate endpoint cases use the actual
 Rust core. They cover directly linked `cuInit`, explicit/default lookup,
 failed initialization, a private-runtime path, all seven resolver-only paths,
 and a tracked query without calling the returned VMM function. Parent/child

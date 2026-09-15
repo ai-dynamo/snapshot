@@ -5,13 +5,11 @@
 """Actual Rust core endpoints without VMM activity; provider has no GPU state."""
 
 import ctypes as c
-import errno
 import os
 from pathlib import Path
 import socket
 import struct
 import sys
-import time
 
 
 def handshake():
@@ -91,15 +89,7 @@ else:
 
 activate()
 parent = handshake()
-deadline = time.monotonic() + 5
-while True:
-    try:
-        child = os.fork()
-        break
-    except OSError as error:
-        if error.errno != errno.EAGAIN or time.monotonic() >= deadline:
-            raise
-        time.sleep(0.001)
+child = os.fork()
 if child == 0:
     try:
         if mode == "constructor":

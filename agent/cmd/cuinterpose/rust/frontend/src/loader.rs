@@ -13,6 +13,23 @@ static PROVIDERS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 static CORE: OnceLock<Option<usize>> = OnceLock::new();
 static INITIALIZING_CORE: AtomicBool = AtomicBool::new(false);
 
+thread_local! {
+    static FORK_PROVIDERS: std::cell::RefCell<Option<std::sync::MutexGuard<'static, Vec<usize>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub fn fork_prepare() {
+    FORK_PROVIDERS.with(|slot| {
+        *slot.borrow_mut() = Some(PROVIDERS.lock().unwrap_or_else(|e| e.into_inner()));
+    });
+}
+
+pub fn fork_unlock() {
+    // This guard was acquired by the surviving fork thread. Unlock it rather
+    // than overwriting an inherited Rust mutex. Provider references stay valid.
+    FORK_PROVIDERS.with(|slot| drop(slot.borrow_mut().take()));
+}
+
 /// Like run-ai, anchor on dladdr's provider and discover its defined dlsym
 /// without asking the intercepted dlsym. The image must be ELF64 little-endian.
 pub fn real() -> Option<Dlsym> {
@@ -119,11 +136,6 @@ pub fn retain_provider(selected: *mut c_void, address: *mut c_void) -> Result<bo
             return Ok(false);
         }
     }
-    // A qualified CUDA pointer must not escape unwrapped just because fork
-    // temporarily closed admission. Unrelated providers need no mutable lease.
-    let Some(_guard) = super::process::Guard::enter() else {
-        return Err(());
-    };
     // Never hold a Rust lock across dlopen: constructors can reenter the shim.
     let handle = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_NOLOAD) };
     if handle.is_null() {
@@ -183,9 +195,6 @@ pub fn proxy(handle: *mut c_void, name: &CStr, caller: *const c_void) -> *mut c_
 
 pub unsafe extern "C" fn resolve(name: *const c_char) -> *mut c_void {
     cuinterpose_abi::boundary(&FAILED, std::ptr::null_mut(), || {
-        let Some(_guard) = super::process::Guard::enter() else {
-            return std::ptr::null_mut();
-        };
         if name.is_null() {
             return std::ptr::null_mut();
         }
@@ -281,8 +290,6 @@ pub fn core() -> Option<&'static Core> {
             version: ABI_VERSION,
             size: size_of::<Host>() as u32,
             resolve,
-            enter: super::process::enter,
-            leave: super::process::leave,
             origin_pid: super::process::ORIGIN_PID.load(Ordering::Acquire),
         };
         let mut output = std::ptr::null();

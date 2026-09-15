@@ -36,7 +36,8 @@ impl Default for Participant {
 
 impl Participant {
     fn exchange(&mut self, operation: Operation, bytes: Option<u64>) -> Result<u32> {
-        let mut stream = UnixStream::connect(&self.endpoint)?;
+        let mut stream = UnixStream::connect(&self.endpoint)
+            .map_err(|error| format!("{}: {operation:?} connect failed: {error}", self.endpoint))?;
         let timeout = Some(cuinterpose_protocol::timeout(operation));
         stream.set_read_timeout(timeout)?;
         stream.set_write_timeout(timeout)?;
@@ -49,8 +50,10 @@ impl Participant {
             },
         );
         request.payload_size = bytes.unwrap_or(0);
-        cuinterpose_protocol::send_header(&stream, &request, None)?;
-        let (response, descriptor) = cuinterpose_protocol::receive_header(&stream)?;
+        cuinterpose_protocol::send_header(&stream, &request, None)
+            .map_err(|error| format!("{}: {operation:?} send failed: {error}", self.endpoint))?;
+        let (response, descriptor) = cuinterpose_protocol::receive_header(&stream)
+            .map_err(|error| format!("{}: {operation:?} receive failed: {error}", self.endpoint))?;
         if response.status != 0 {
             let end = response.message.iter().position(|b| *b == 0).unwrap_or(96);
             return Err(format!(
@@ -87,7 +90,12 @@ impl Participant {
             let mut records = Vec::with_capacity(response.count as usize);
             for _ in 0..response.count {
                 let mut bytes = [0; RECORD_SIZE];
-                stream.read_exact(&mut bytes)?;
+                stream.read_exact(&mut bytes).map_err(|error| {
+                    format!(
+                        "{}: {operation:?} record receive failed: {error}",
+                        self.endpoint
+                    )
+                })?;
                 records.push(Record::decode(&bytes)?);
             }
             if operation == Operation::Inspect {

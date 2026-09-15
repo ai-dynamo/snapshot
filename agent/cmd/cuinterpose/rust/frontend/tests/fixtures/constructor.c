@@ -4,7 +4,6 @@
 #define _GNU_SOURCE
 #include "cuda.h"
 #include <assert.h>
-#include <errno.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
@@ -50,16 +49,11 @@ __attribute__((constructor)) static void contend_with_loader(void) {
         }
         sched_yield();
     }
-    if (strcmp(getenv("CUINTERPOSE_TEST_CONSTRUCTOR"), "fork") == 0) {
-        errno = 0;
-        assert(fork() == -1 && errno == EAGAIN);
-    } else {
-        uint64_t handle = 42;
-        // A must not wait for B's core initialization while holding the lock
-        // needed by B. The failed attempt must not poison B's eventual result.
-        assert(fixture_create(&handle, 4096, NULL, 0) == 3);
-        assert(handle == 42);
-    }
+    uint64_t handle = 42;
+    // A must not wait for B's core initialization while holding the lock
+    // needed by B. The failed attempt must not poison B's eventual result.
+    assert(fixture_create(&handle, 4096, NULL, 0) == 3);
+    assert(handle == 42);
 }
 
 void fixture_join_worker(void) {

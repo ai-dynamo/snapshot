@@ -11,7 +11,6 @@ from pathlib import Path
 import socket
 import struct
 import sys
-import threading
 import time
 
 
@@ -49,13 +48,16 @@ def stats():
 
 def inspect(operation=1):
     path = f"{os.environ['SNAPSHOT_CONTROL_DIR']}/cuinterpose-{os.getpid()}.sock"
+    # Identify before opening the operation connection. Leaving that first
+    # connection idle while handshaking on a second one consumes the listener's
+    # bounded header-read slot and delays the handshake until its timeout.
+    identity = inspect()[24:57] if operation != 1 else bytes(33)
     with socket.socket(socket.AF_UNIX) as connection:
         connection.settimeout(5)
         connection.connect(path)
         request = bytearray(256)
         struct.pack_into("<IHH", request, 0, 0x44564D4D, 2, operation)
-        if operation != 1:
-            request[24:57] = inspect()[24:57]
+        request[24:57] = identity
         connection.sendall(request)
         response = bytearray()
         while len(response) < 256:
@@ -76,19 +78,6 @@ def wait(child):
     os.kill(child, 9)
     os.waitpid(child, 0)
     raise AssertionError("fork child did not complete")
-
-def fork_when_idle():
-    # Public fork cannot wait inside a potentially loader-locked caller. This
-    # application-side retry is bounded and runs outside any shim operation.
-    deadline = time.monotonic() + 15
-    while True:
-        try:
-            return os.fork()
-        except OSError as error:
-            assert error.errno == errno.EAGAIN
-            assert time.monotonic() < deadline, "no quiescent fork interval"
-            time.sleep(0.001)
-
 
 def child_checks(parent_id, inherited=(), ticket=None, application_socket=None):
     try:
@@ -121,7 +110,7 @@ def child_checks(parent_id, inherited=(), ticket=None, application_socket=None):
 def main():
     mode = sys.argv[1]
     if mode == "preinit":
-        child = fork_when_idle()
+        child = os.fork()
         if child == 0:
             child_checks(b"")
         wait(child)
@@ -137,8 +126,8 @@ def main():
     assert parent_id[:32].decode() == os.environ["CUINTERPOSE_PARTICIPANT_ID"]
 
     if mode == "descriptors":
-        # Keep one accepted request idle. Retry refused forks until its bounded
-        # read timeout; the application's end must survive, the shim's must not.
+        # An idle accepted socket belongs to the shim's FD inventory, while the
+        # application's end survives. No CUDA or lifecycle call is in flight.
         before = set(os.listdir("/proc/self/fd"))
         idle = socket.socket(socket.AF_UNIX)
         idle.connect(f"{os.environ['SNAPSHOT_CONTROL_DIR']}/cuinterpose-{os.getpid()}.sock")
@@ -156,52 +145,13 @@ def main():
             if fd != idle.fileno() and ("fake-cuda" in name or name.startswith("socket:")):
                 inherited.append(fd)
         assert len(inherited) >= 2, inherited
-        child = fork_when_idle()
+        child = os.fork()
         if child == 0:
             child_checks(parent_id, inherited, ticket.value, idle.fileno())
         wait(child)
         assert stats().allocations == 1 and stats().exports == 1
         assert inspect()[24:57] == parent_id
         idle.close()
-    elif mode == "concurrent":
-        stop = threading.Event()
-        errors = []
-        def churn():
-            while not stop.is_set():
-                temporary = c.c_uint64()
-                result = cuda.cuMemCreate(c.byref(temporary), 4096, c.byref(props), 0)
-                if result == 801:  # Admission closed at the fork boundary.
-                    continue
-                if result != 0:
-                    errors.append(result)
-                    return
-                deadline = time.monotonic() + 10
-                while True:
-                    result = cuda.cuMemRelease(temporary)
-                    if result != 801:
-                        break
-                    if time.monotonic() >= deadline:
-                        errors.append("release never admitted")
-                        return
-                if result != 0:
-                    errors.append(result)
-                    return
-        workers = [threading.Thread(target=churn) for _ in range(3)]
-        for worker in workers:
-            worker.start()
-        try:
-            for _ in range(8):
-                child = fork_when_idle()
-                if child == 0:
-                    child_checks(parent_id, ticket=ticket.value)
-                wait(child)
-        finally:
-            stop.set()
-            for worker in workers:
-                worker.join(timeout=10)
-                assert not worker.is_alive()
-        assert not errors
-        assert stats().allocations == 1
     elif mode == "poison":
         # Protocol/order rejection must not poison the workload. A real copy
         # failure does, and only that generation's poison is reset by fork.
@@ -213,7 +163,7 @@ def main():
         cuda.fakeFailNext(b"cuMemcpyDtoHAsync_v2")
         assert struct.unpack_from("<i", inspect(4), 8)[0] != 0
         assert stats().phase == 5
-        child = fork_when_idle()
+        child = os.fork()
         if child == 0:
             child_checks(parent_id, ticket=ticket.value)
         wait(child)
@@ -232,7 +182,7 @@ def main():
                 continue
         assert sockets
         listener = min(sockets)
-        child = fork_when_idle()
+        child = os.fork()
         if child == 0:
             try:
                 replacement = os.open("/dev/null", os.O_RDONLY)
@@ -292,7 +242,7 @@ def main():
         resident = c.c_ubyte()
         assert libc.mincore(base, 4096, c.byref(resident)) == 0
         allocations = cuda.fakeLiveAllocations()
-        child = fork_when_idle()
+        child = os.fork()
         if child == 0:
             try:
                 assert libc.mincore(base, 4096, c.byref(resident)) == -1
@@ -312,23 +262,8 @@ def main():
         assert cuda.fakeLiveAllocations() == allocations
         os.close(ticket.value)
         return  # Parent intentionally remains prepared until process exit.
-    elif mode == "generation-constructor":
-        child = fork_when_idle()
-        if child == 0:
-            try:
-                # Parent already loaded the real Rust core. The DSO constructor
-                # starts first child-generation initialization on another thread.
-                plugin = c.CDLL(sys.argv[2])
-                plugin.fixture_join_generation_worker()
-                child_checks(parent_id, ticket=ticket.value)
-            except BaseException:
-                import traceback
-                traceback.print_exc()
-                os._exit(1)
-        wait(child)
-        assert stats().allocations == 1 and inspect()[24:57] == parent_id
     elif mode == "startup-failure":
-        child = fork_when_idle()
+        child = os.fork()
         if child == 0:
             try:
                 endpoint = Path(os.environ["SNAPSHOT_CONTROL_DIR"]) / f"cuinterpose-{os.getpid()}.sock"

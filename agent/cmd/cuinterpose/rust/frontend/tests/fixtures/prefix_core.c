@@ -30,7 +30,7 @@ int cuinterpose_core_init(const void *host, const void **output)
     // Prefix, debug, three fork hooks, readiness, and 17 CUDA callbacks.
     prefix[1] = 8 + 22 * sizeof(void (*)(void));
 #else
-    prefix[0] = 4;
+    prefix[0] = 5;
     prefix[1] = 8;
 #endif
     *output = prefix;

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::process::{Guard, Socket};
+use super::process::Socket;
 use super::state::{self, Result};
 use cuinterpose_protocol::{Header, Identity, Operation};
 use std::io::Write;
@@ -9,69 +9,143 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::Ordering;
+use std::sync::mpsc::{self, TrySendError};
+
+// One running control operation and at most eight waiting connections. Peer
+// exports never enter this queue: reciprocal importers need them to progress.
+const CONTROL_QUEUE_CAPACITY: usize = 8;
 
 pub fn start(endpoint: &str, identity: Identity) -> Result<()> {
-    let listener = UnixListener::bind(endpoint).map_err(|_| cuinterpose_abi::NOT_INITIALIZED)?;
-    listener
-        .set_nonblocking(true)
+    let listener = Socket::open(|| UnixListener::bind(endpoint))
         .map_err(|_| cuinterpose_abi::NOT_INITIALIZED)?;
-    let listener = Socket::new(listener);
-    std::fs::set_permissions(endpoint, std::fs::Permissions::from_mode(0o600))
-        .map_err(|_| cuinterpose_abi::NOT_INITIALIZED)?;
-    std::thread::Builder::new()
-        .name("cuinterpose".into())
-        .spawn(move || {
-            loop {
-                let mut poll = libc::pollfd {
-                    fd: listener.as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                };
-                if unsafe { libc::poll(&mut poll, 1, -1) } <= 0 {
-                    continue;
-                }
-                let Some(_guard) = Guard::enter() else {
-                    break;
-                };
-                let Ok((socket, _)) = listener.accept() else {
-                    continue;
-                };
-                let socket = Socket::new(socket);
-                // A peer request must progress independently of a CUDA lifecycle
-                // request. Each handler contains panics before leaving its thread.
-                let _ = std::thread::Builder::new()
-                    .name("cuinterpose-rpc".into())
-                    .spawn(move || {
-                        cuinterpose_abi::boundary(&super::FAILED, (), || {
-                            let Some(_guard) = Guard::enter() else {
-                                return;
-                            };
-                            let _ = serve(socket, identity);
-                        });
+    let started = (|| -> std::io::Result<()> {
+        listener.set_nonblocking(true)?;
+        std::fs::set_permissions(endpoint, std::fs::Permissions::from_mode(0o600))?;
+        let (sender, receiver) =
+            mpsc::sync_channel::<(Socket<UnixStream>, Header)>(CONTROL_QUEUE_CAPACITY);
+        let _worker = std::thread::Builder::new()
+            .name("cuinterpose-control".into())
+            .spawn(move || {
+                // Queued sockets remain in the atfork FD registry.
+                while let Ok((socket, request)) = receiver.recv() {
+                    cuinterpose_abi::boundary(&super::FAILED, (), || {
+                        let _ = serve(socket, request, identity);
                     });
-            }
-        })
-        .map_err(|_| cuinterpose_abi::NOT_INITIALIZED)?;
+                }
+            })
+            .map_err(|error| {
+                eprintln!("cuinterpose: control worker startup failed: {error}");
+                error
+            })?;
+        let started = std::thread::Builder::new()
+            .name("cuinterpose-peer".into())
+            .spawn(move || {
+                loop {
+                    let mut poll = libc::pollfd {
+                        fd: listener.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    if unsafe { libc::poll(&mut poll, 1, -1) } <= 0 {
+                        continue;
+                    }
+                    let Ok(socket) = Socket::open(|| listener.accept().map(|(socket, _)| socket))
+                    else {
+                        continue;
+                    };
+                    cuinterpose_abi::boundary(&super::FAILED, (), || {
+                        let _ = dispatch(socket, identity, &sender);
+                    });
+                }
+            });
+        if let Err(error) = started {
+            // Failed spawn drops its closure, closing the listener and the
+            // only sender. Detach the idle worker: initialization may run in a
+            // DSO constructor holding the loader lock, which worker TLS startup
+            // or teardown also needs. Joining here would deadlock. No request
+            // was queued; recv exits once thread startup can finish.
+            eprintln!("cuinterpose: peer listener startup failed: {error}");
+            return Err(error);
+        }
+        Ok(())
+    })();
+    if started.is_err() {
+        // We successfully bound this path, so it is ours to remove. A bind
+        // failure above must never unlink an application-owned filesystem entry.
+        let _ = std::fs::remove_file(endpoint);
+        return Err(cuinterpose_abi::NOT_INITIALIZED);
+    }
     Ok(())
 }
 
-fn serve(mut socket: Socket<UnixStream>, identity: Identity) -> std::io::Result<()> {
+fn dispatch(
+    socket: Socket<UnixStream>,
+    identity: Identity,
+    sender: &mpsc::SyncSender<(Socket<UnixStream>, Header)>,
+) -> std::io::Result<()> {
+    // Classification uses per-I/O socket timeouts, not a total header deadline.
+    // A slow peer can delay acceptance, but never waits on STATE or lifecycle
+    // CUDA calls. Fork during active protocol traffic is outside the contract.
     let timeout = Some(cuinterpose_protocol::timeout(Operation::Handshake));
     socket.set_read_timeout(timeout)?;
     socket.set_write_timeout(timeout)?;
     let (request, descriptor) = cuinterpose_protocol::receive_header(&socket)?;
+    if descriptor.is_some()
+        || request.status != 0
+        || request.count != 0
+        || !(request.participant == identity
+            || (request.operation == Operation::Handshake && request.participant == [0; 33]))
+    {
+        return refuse(
+            &socket,
+            request.operation,
+            identity,
+            "invalid cuinterpose control request",
+        );
+    }
+    if request.operation == Operation::Export {
+        return serve(socket, request, identity);
+    }
+    match sender.try_send((socket, request)) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let ((socket, request), message) = match error {
+                TrySendError::Full(request) => {
+                    (request, "control queue full; refused without mutation")
+                }
+                TrySendError::Disconnected(request) => (
+                    request,
+                    "control worker unavailable; refused without mutation",
+                ),
+            };
+            refuse(&socket, request.operation, identity, message)
+        }
+    }
+}
+
+fn refuse(
+    socket: &UnixStream,
+    operation: Operation,
+    identity: Identity,
+    message: &str,
+) -> std::io::Result<()> {
+    let mut response = Header::new(operation, identity);
+    response.status = -1;
+    let length = message.len().min(response.message.len() - 1);
+    response.message[..length].copy_from_slice(&message.as_bytes()[..length]);
+    cuinterpose_protocol::send_header(socket, &response, None)
+}
+
+fn serve(
+    mut socket: Socket<UnixStream>,
+    request: Header,
+    identity: Identity,
+) -> std::io::Result<()> {
     let mut response = Header::new(request.operation, identity);
     let mut records = Vec::new();
     let mut passed = None;
+    let mut cuda_error = None;
     let result = (|| -> std::result::Result<(), &'static str> {
-        if descriptor.is_some()
-            || request.status != 0
-            || request.count != 0
-            || !(request.participant == identity
-                || (request.operation == Operation::Handshake && request.participant == [0; 33]))
-        {
-            return Err("invalid cuinterpose control request");
-        }
         if super::FAILED.load(Ordering::Acquire) {
             return Err("cuinterpose state failed");
         }
@@ -111,20 +185,20 @@ fn serve(mut socket: Socket<UnixStream>, identity: Identity) -> std::io::Result<
                 state
                     .validate_lifecycle(request.operation as u16)
                     .map_err(|_| "CUDA lifecycle operation refused without mutation")?;
-                let start = std::time::Instant::now();
                 let operation = request.operation as u16;
                 let result = if (9..=12).contains(&operation) {
                     super::multicast::restore_phase(state, operation)
+                        .map(|bytes| super::host_carrier::Transfer { bytes, copy_us: 0 })
                 } else {
                     state.lifecycle(operation)
                 };
                 match result {
-                    Ok(bytes) => {
-                        response.payload_size = bytes;
-                        response.copy_us =
-                            start.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
+                    Ok(transfer) => {
+                        response.payload_size = transfer.bytes;
+                        response.copy_us = transfer.copy_us;
                     }
-                    Err(_) => {
+                    Err(code) => {
+                        cuda_error = Some(code);
                         super::FAILED.store(true, Ordering::Release);
                         return Err("CUDA lifecycle operation failed");
                     }
@@ -135,6 +209,10 @@ fn serve(mut socket: Socket<UnixStream>, identity: Identity) -> std::io::Result<
     })();
     if let Err(message) = result {
         response.status = -1;
+        let message = match cuda_error {
+            Some(code) => format!("{message}: CUDA error {code}"),
+            None => message.to_owned(),
+        };
         let length = message.len().min(response.message.len() - 1);
         response.message[..length].copy_from_slice(&message.as_bytes()[..length]);
     }

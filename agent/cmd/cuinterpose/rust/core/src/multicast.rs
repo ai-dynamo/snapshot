@@ -43,8 +43,8 @@ pub struct Binding {
     checkpointed: bool,
 }
 
-/// The outer frontend lease pins this process generation across the unlocked
-/// driver call. These counters additionally exclude inspection/prepare and
+/// Fork during the unlocked CUDA call is outside the supported contract.
+/// These counters exclude inspection/prepare and
 /// prevent release/unmap of the object or member being used by that call.
 struct Flight {
     object: Option<(AllocationId, u64)>,
@@ -518,7 +518,11 @@ fn bind(handle: u64, mut binding: Binding, member_handle: u64) -> Result<i32> {
     let mut member_driver = member_handle;
     if let Some(id) = member {
         let allocation = &state.allocations[&id];
-        member_driver = allocation.driver;
+        // BindAddr may refer to a mapping whose logical handles were released.
+        // Its driver handle is not an argument to that CUDA operation.
+        if binding.kind == 1 {
+            member_driver = allocation.driver.ok_or(INVALID_HANDLE)?;
+        }
         binding.member = id;
         if binding.version == 1 {
             binding.device = allocation.properties.location.id;
@@ -894,7 +898,7 @@ pub fn prepare(state: &mut State) -> Result<()> {
 
 /// Restore collectives must not hold STATE either. The phase reserves the
 /// entire lifecycle operation; CPU records remain private until the driver
-/// work completes, and the outer control lease excludes fork throughout.
+/// work completes. Fork during lifecycle execution is unsupported.
 pub fn restore_phase(mut state: MutexGuard<'static, State>, operation: u16) -> Result<u64> {
     let mut objects = state.multicasts.clone();
     let mut mappings = state.mappings.clone();
@@ -990,8 +994,9 @@ fn restore(
                         if binding.kind == 1 {
                             let allocation =
                                 allocations.get(&binding.member).ok_or(INVALID_HANDLE)?;
-                            member = allocation.driver;
-                            if member == 0 {
+                            if let Some(driver) = allocation.driver {
+                                member = driver;
+                            } else {
                                 let mapping = mappings
                                     .values()
                                     .find(|mapping| {

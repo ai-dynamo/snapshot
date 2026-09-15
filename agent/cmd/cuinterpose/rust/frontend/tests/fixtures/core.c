@@ -15,8 +15,6 @@ typedef void *(*resolve_fn)(const char *);
 struct host_api {
     uint32_t version, size;
     resolve_fn resolve;
-    int (*enter)(void);
-    void (*leave)(void);
     int origin_pid;
 };
 struct core_api {
@@ -96,9 +94,9 @@ static int unbind(uint64_t handle, int device, size_t offset, size_t size) {
 }
 
 int cuinterpose_core_init(const struct host_api *host, const struct core_api **output) {
-    if (!host || !output || host->version != 4 || host->size != sizeof(*host))
+    if (!host || !output || host->version != 5 || host->size != sizeof(*host))
         return 1;
-    api.version = 4;
+    api.version = 5;
     api.size = sizeof(api);
     api.debug_stats = debug_stats;
     api.fork_prepare = fork_hook;

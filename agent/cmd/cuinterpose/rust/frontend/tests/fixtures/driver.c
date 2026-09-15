@@ -40,10 +40,6 @@ int cuMemCreate(uint64_t *output, size_t size, const void *properties, uint64_t 
     last.flags = flags;
     if (!output)
         return 1;
-    if (flags == 998) {
-        errno = 0;
-        assert(fork() == -1 && errno == EDEADLK);
-    }
     if (flags == 999)
         return 2; // Driver failure must leave application output untouched.
     *output = 0xabcdef;
@@ -117,26 +113,6 @@ int cuFixtureQuery(const char *name, void **output, int version, uint64_t flags,
         return 1;
     if (strcmp(name, "query-error") == 0)
         return 1;
-    if (strcmp(name, "fork-reentry") == 0) {
-        errno = 0;
-        assert(fork() == -1 && errno == EDEADLK);
-        *output = NULL;
-        return 0;
-    }
-    if (strcmp(name, "fork-bypass") == 0) {
-        void *libc = dlopen("libc.so.6", RTLD_NOW);
-        assert(libc);
-        pid_t (*original_fork)(void) = dlsym(libc, "fork");
-        assert(original_fork);
-        pid_t child = original_fork();
-        assert(child > 0); // Unsafe child must exit in the atfork callback.
-        int status;
-        assert(waitpid(child, &status, 0) == child);
-        assert(WIFEXITED(status) && WEXITSTATUS(status) == 127);
-        dlclose(libc);
-        *output = NULL;
-        return 0;
-    }
     if (status)
         *status = 0;
     const char *identity = getenv("CUINTERPOSE_TEST_IDENTITY");

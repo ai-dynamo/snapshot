@@ -188,7 +188,7 @@ int main(int argc, char **argv) {
         assert(query("cuMemCreate", &pointer, 13010, 0) == 3 && pointer == NULL);
         unsetenv("CUINTERPOSE_TEST_READY_FAILURE");
         assert(initialize(0) == 0);
-    } else if (strcmp(argv[1], "constructor-fork") == 0 || strcmp(argv[1], "constructor-concurrent") == 0) {
+    } else if (strcmp(argv[1], "constructor-concurrent") == 0) {
         fixture_create = symbol(driver, "cuMemCreate");
         void *plugin = dlopen("constructor.so", RTLD_NOW | RTLD_LOCAL);
         assert(plugin);
@@ -197,26 +197,10 @@ int main(int argc, char **argv) {
         uint64_t handle = 0;
         assert(fixture_create(&handle, 4096, NULL, 0) == 0 && handle == 0xabcdef);
         dlclose(plugin);
-    } else if (strcmp(argv[1], "resolver-fork") == 0) {
-        void *pointer = NULL;
-        int status = -1;
-        assert(query("fork-reentry", &pointer, 13010, 0) == 0);
-        assert(query("fork-bypass", &pointer, 13010, 0) == 0);
-        assert(query2("fork-reentry", &pointer, 13010, 0, &status) == 0);
-        query_v2 ptsz = symbol(RTLD_DEFAULT, "cuGetProcAddress_v2_ptsz");
-        assert(ptsz("fork-reentry", &pointer, 13010, 0, &status) == 0);
-        const char *names[] = {"cudaGetDriverEntryPoint", "cudaGetDriverEntryPoint_ptsz",
-            "cudaGetDriverEntryPointByVersion", "cudaGetDriverEntryPointByVersion_ptsz"};
-        for (unsigned i = 0; i != 4; ++i) {
-            void *resolver = symbol(runtime, names[i]);
-            int result = i < 2 ? ((runtime_query)resolver)("fork-reentry", &pointer, 0, &status)
-                              : ((runtime_version_query)resolver)("fork-reentry", &pointer, 13010, 0, &status);
-            assert(result == 0);
-        }
-    } else if (strcmp(argv[1], "fork-reentry") == 0 || strcmp(argv[1], "constructor-reentry") == 0) {
+    } else if (strcmp(argv[1], "constructor-reentry") == 0) {
         create_fn create = symbol(driver, "cuMemCreate");
         uint64_t handle = 0;
-        assert(create(&handle, 4096, NULL, 998) == 0);
+        assert(create(&handle, 4096, NULL, 0) == 0);
         assert(handle == 0xabcdef);
     } else if (strcmp(argv[1], "lookup") == 0) {
         dlerror();

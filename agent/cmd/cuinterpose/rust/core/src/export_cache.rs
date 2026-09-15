@@ -10,13 +10,13 @@ use cuinterpose_abi::{INVALID_HANDLE, UNKNOWN};
 use cuinterpose_protocol::AllocationId;
 use std::collections::BTreeMap;
 use std::os::fd::OwnedFd;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Condvar, Mutex, MutexGuard};
 
 /// Resource kind is part of the lookup key, not an authorization token.
 pub type Key = (u32, AllocationId);
 
 #[derive(Default)]
-struct Entries {
+pub(super) struct Entries {
     descriptors: BTreeMap<Key, Entry>,
     transfers: usize,
     draining: bool,
@@ -45,15 +45,22 @@ pub struct Lease<'a> {
 }
 
 impl ExportCache {
-    pub fn fork_descriptors(&self, descriptors: &mut Vec<i32>) {
+    pub fn fork_lock(&self, descriptors: &mut Vec<i32>) -> MutexGuard<'_, Entries> {
         use std::os::fd::AsRawFd;
-        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        while entries.transfers != 0 {
+            entries = self
+                .drained
+                .wait(entries)
+                .unwrap_or_else(|e| e.into_inner());
+        }
         descriptors.extend(
             entries
                 .descriptors
                 .values()
                 .map(|entry| entry.descriptor.as_raw_fd()),
         );
+        entries
     }
     pub fn contains(&self, id: &Key) -> Result<bool> {
         let entries = self.entries.lock().map_err(|_| UNKNOWN)?;

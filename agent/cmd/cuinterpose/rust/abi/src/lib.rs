@@ -7,7 +7,7 @@
 use std::ffi::{c_char, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub const ABI_VERSION: u32 = 4;
+pub const ABI_VERSION: u32 = 5;
 pub const CUDA_VERSION: u32 = 13010;
 pub const SUCCESS: i32 = 0;
 pub const INVALID_VALUE: i32 = 1;
@@ -113,8 +113,6 @@ pub struct Host {
     pub version: u32,
     pub size: u32,
     pub resolve: Resolve,
-    pub enter: unsafe extern "C" fn() -> i32,
-    pub leave: unsafe extern "C" fn(),
     pub origin_pid: i32,
 }
 
