@@ -995,8 +995,6 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (int, error) {
 		DestinationContainerName:    op.destination,
 		SkipCompatCheck:             op.skipCompatCheck,
 		Clientset:                   w.clientset,
-		PageBrokerRequested:         op.pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] == snapshotv1alpha1.PageBrokerAnnotationEnabled,
-		PageBrokerEnabled:           w.config.PageBroker.Enabled,
 		PageBrokerControlSocketPath: w.config.PageBroker.ControlSocketPath,
 	}
 	return w.restoreFn(ctx, w.runtime, op.log, req, w.injector)

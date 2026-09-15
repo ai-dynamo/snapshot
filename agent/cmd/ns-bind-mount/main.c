@@ -5,12 +5,12 @@
  * ns-bind-mount installs and removes the two mounts used by restore:
  *
  *   mount-bundle-fd <namespace-fd>
- *   mount-checkpoint-fd <namespace-fd> <checkpoint-path>
+ *   mount-pagebroker-fd <namespace-fd> <staging-path>
  *   unmount-bundle-fd <namespace-fd> [created]
- *   unmount-checkpoint-fd <namespace-fd> [created]
+ *   unmount-pagebroker-fd <namespace-fd> [created]
  *
  * The caller pins the target mount namespace and passes its descriptor through
- * ExtraFiles. Bundle and checkpoint policy is deliberately fixed here: callers
+ * ExtraFiles. Bundle and staging policy is deliberately fixed here: callers
  * cannot select arbitrary host sources, container destinations, or attributes.
  */
 
@@ -58,8 +58,6 @@ struct mount_attr {
 
 #define BUNDLE_SOURCE "/snapshot-binaries"
 #define BUNDLE_DESTINATION "/tmp/snapshot-binaries"
-#define CHECKPOINT_ROOT "/checkpoints"
-#define CHECKPOINT_DESTINATION "/tmp/checkpoint"
 #define PAGEBROKER_RESTORE_ROOT "/pagebroker/staging/restore"
 #define PAGEBROKER_DESTINATION "/tmp/pagebroker"
 
@@ -113,12 +111,6 @@ check_storage_path(const char* value, const char* root)
       return 0;
     component = p + 1;
   }
-}
-
-static int
-check_checkpoint_path(const char* value)
-{
-  return check_storage_path(value, CHECKPOINT_ROOT);
 }
 
 static int
@@ -235,23 +227,6 @@ mount_bundle(int argc, char* argv[])
 }
 
 static int
-mount_checkpoint(int argc, char* argv[])
-{
-  if (argc != 4) {
-    fprintf(stderr, "usage: ns-bind-mount mount-checkpoint-fd <namespace-fd> <checkpoint-path>\n");
-    return 1;
-  }
-  int ns_fd = parse_fd(argv[2]);
-  if (ns_fd < 0 || check_checkpoint_path(argv[3]) < 0)
-    return 1;
-  return install_mount(
-      ns_fd,
-      argv[3],
-      CHECKPOINT_DESTINATION,
-      MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV | MOUNT_ATTR_NOEXEC);
-}
-
-static int
 mount_pagebroker(int argc, char* argv[])
 {
   if (argc != 4) {
@@ -298,8 +273,6 @@ main(int argc, char* argv[])
   }
   if (strcmp(argv[1], "mount-bundle-fd") == 0)
     return mount_bundle(argc, argv);
-  if (strcmp(argv[1], "mount-checkpoint-fd") == 0)
-    return mount_checkpoint(argc, argv);
   if (strcmp(argv[1], "mount-pagebroker-fd") == 0)
     return mount_pagebroker(argc, argv);
   if (strcmp(argv[1], "unmount-bundle-fd") == 0)
@@ -308,12 +281,6 @@ main(int argc, char* argv[])
         argv,
         BUNDLE_DESTINATION,
         "usage: ns-bind-mount unmount-bundle-fd <namespace-fd> [created]");
-  if (strcmp(argv[1], "unmount-checkpoint-fd") == 0)
-    return unmount_role(
-        argc,
-        argv,
-        CHECKPOINT_DESTINATION,
-        "usage: ns-bind-mount unmount-checkpoint-fd <namespace-fd> [created]");
   if (strcmp(argv[1], "unmount-pagebroker-fd") == 0)
     return unmount_role(
         argc,

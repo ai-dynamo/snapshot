@@ -10,10 +10,6 @@ func TestResolveArtifactPath(t *testing.T) {
 	if err != nil || got != "/checkpoints/artifacts/content-uid-123/containers/main" {
 		t.Fatalf("ResolveArtifactPath() = %q, %v", got, err)
 	}
-	staging, err := ResolveArtifactStagingRoot("/checkpoints", "content-uid-123")
-	if err != nil || staging != "/checkpoints/artifacts/content-uid-123/.tmp" {
-		t.Fatalf("ResolveArtifactStagingRoot() = %q, %v", staging, err)
-	}
 }
 
 func TestResolveArtifactPathRejectsUnsafeCoordinates(t *testing.T) {
@@ -37,9 +33,9 @@ func TestResolveArtifactPathRejectsUnsafeCoordinates(t *testing.T) {
 }
 
 func TestValidateWithinRejectsUnsafeRoot(t *testing.T) {
-	for _, root := range []string{"checkpoints", "/checkpoints/", "/checkpoints/../etc"} {
+	for _, root := range []string{"pagebroker", "/pagebroker/staging/restore/", "/pagebroker/../etc"} {
 		t.Run(root, func(t *testing.T) {
-			if err := validateWithin(root, "/checkpoints/artifacts/content-uid-123/containers/main"); err == nil {
+			if err := validateWithin(root, "/pagebroker/staging/restore/tx"); err == nil {
 				t.Fatal("expected root validation error")
 			}
 		})
