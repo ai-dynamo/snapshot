@@ -1,12 +1,12 @@
 # Deploy a vLLM replica
 
 This guide makes a vLLM workload snapshot-ready by mounting an entrypoint
-into vLLM's stock runtime image, implementing Snapshot's [workload
+into a vLLM runtime image, implementing Snapshot's [workload
 contract](../reference/workload-contract.md). The example runs the official
-vLLM image unmodified. `deployment.yaml` pins the exact upstream image, and
-one program, `app.py`, is mounted into it from a ConfigMap to prepare vLLM
-for checkpoint and resume it after restore. The Snapshot agent injects the
-restore tooling at runtime.
+vLLM image that includes vLLM and its runtime dependencies, unmodified.
+`deployment.yaml` pins the exact upstream image, and one program, `app.py`, is
+mounted into it from a ConfigMap to prepare vLLM for checkpoint and resume it
+after restore. The Snapshot agent injects the restore tooling at runtime.
 
 > [!NOTE]
 > This example is validated on vLLM 0.27.1 (the pinned
