@@ -1627,3 +1627,24 @@ the verifier passes Python syntax compilation and `git diff --check`. These
 are targeted checks, not a successful pinned packaging gate or GPU test run.
 Validation must restart at the corrected revision; the existing exported
 `build/` artifacts remain unqualified and may still contain version 3.
+
+### CLI contract coverage after Clap derivation
+
+At `e0e45db`, both pinned packaging targets passed, but the following Go CUDA
+suite failed `TestGoConstantsMatchTheRustSources`: it searched the coordinator
+source for six quoted CLI flags that Clap now derives from argument fields.
+The executor suite passed, and no GPU tests or cluster operations had started.
+
+The packaged verifier now invokes the actual coordinator with `--help` and
+requires all six options as complete tokens. Go retains its endpoint and state
+filename checks without acquiring a dependency on Cargo build outputs. Existing
+Rust coordinator integration tests exercise valid prepare/restore invocations,
+repeated PID pairs, and malformed arguments; no replacement source regex or
+parallel parser was added.
+
+With this correction, `go test ./agent/internal/cuda/...
+./agent/internal/executor/...` and the full pinned `make -C snapshot/agent
+cuinterpose-test` pass, including artifact verification, headless lifecycle
+tests, five static-musl coordinator contracts, and six protocol tests. The
+packaged gate log is `/tmp/cuinterpose-clap-contract-gate.log`. This run did not
+export new local `build/` artifacts or run GPU/cross-node tests.

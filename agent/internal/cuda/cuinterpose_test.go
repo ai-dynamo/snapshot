@@ -303,8 +303,8 @@ func TestCuinterposeArgsRejectsEmptyOrMismatchedPIDs(t *testing.T) {
 	}
 }
 
-// Keep the Go endpoint discovery and CLI contract aligned with the Rust
-// implementation without introducing a second wire-protocol implementation.
+// Keep endpoint discovery and artifact names aligned with Rust without a second
+// wire-protocol implementation. The packaged verifier checks the actual CLI.
 func TestGoConstantsMatchTheRustSources(t *testing.T) {
 	root := filepath.Join("..", "..", "cmd", "cuinterpose", "rust")
 	core, err := os.ReadFile(filepath.Join(root, "core", "src", "state.rs"))
@@ -322,11 +322,6 @@ func TestGoConstantsMatchTheRustSources(t *testing.T) {
 	}
 	if !strings.Contains(string(coordinator), `"`+CuinterposeStateFile+`"`) {
 		t.Error("Rust coordinator state filename differs from Go")
-	}
-	for _, flag := range []string{"--prepare", "--restore", "--proc-root", "--checkpoint-dir", "--control-dir", "--process"} {
-		if !strings.Contains(string(coordinator), `"`+flag+`"`) {
-			t.Errorf("Rust coordinator does not parse %s", flag)
-		}
 	}
 }
 

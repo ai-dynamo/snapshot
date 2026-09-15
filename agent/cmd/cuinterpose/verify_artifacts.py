@@ -44,4 +44,8 @@ assert "INTERP" not in subprocess.check_output(["readelf", "-lW", coordinator], 
 assert "NEEDED" not in subprocess.check_output(["readelf", "-dW", coordinator], text=True)
 result = subprocess.run([coordinator], text=True, capture_output=True, check=False)
 assert result.returncode == 2 and "Usage: cuinterpose-coordinator" in result.stderr, result
+# Clap derives option names; check the shipped CLI rather than Rust source text.
+result = subprocess.run([coordinator, "--help"], text=True, capture_output=True, check=True)
+flags = {"--prepare", "--restore", "--proc-root", "--checkpoint-dir", "--control-dir", "--process"}
+assert flags <= set(result.stdout.split()), result.stdout
 print("cuinterpose artifact ABI, permissions, glibc baseline, and static CLI checks passed")
