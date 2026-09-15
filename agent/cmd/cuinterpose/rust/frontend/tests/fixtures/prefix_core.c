@@ -30,7 +30,7 @@ int cuinterpose_core_init(const void *host, const void **output)
     // Current full table size: prefix + debug callback + 17 CUDA callbacks.
     prefix[1] = 8 + 18 * sizeof(void (*)(void));
 #else
-    prefix[0] = 2;
+    prefix[0] = 3;
     prefix[1] = 8;
 #endif
     *output = prefix;

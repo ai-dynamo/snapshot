@@ -8,14 +8,44 @@ use cuinterpose_protocol::{AllocationId, Identity};
 use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
-use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::{LazyLock, Mutex, MutexGuard, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::{Mutex, MutexGuard, TryLockError};
 
 pub type Result<T> = std::result::Result<T, i32>;
-static STATE: OnceLock<Mutex<State>> = OnceLock::new();
-static GENERATION: AtomicI32 = AtomicI32::new(0);
-pub(super) static CACHE: LazyLock<super::export_cache::ExportCache> =
-    LazyLock::new(super::export_cache::ExportCache::default);
+struct Generation {
+    state: Mutex<State>,
+    cache: super::export_cache::ExportCache,
+}
+static STATE: AtomicPtr<Generation> = AtomicPtr::new(std::ptr::null_mut());
+static INITIALIZING: Mutex<()> = Mutex::new(());
+static CHILD: AtomicBool = AtomicBool::new(false);
+
+pub fn fork_snapshot(descriptors: &mut Vec<i32>) -> Option<(usize, usize)> {
+    let pointer = STATE.load(Ordering::Acquire);
+    if pointer.is_null() {
+        return None;
+    }
+    let generation = unsafe { &*pointer };
+    generation.cache.fork_descriptors(descriptors);
+    let state = generation.state.lock().unwrap_or_else(|e| e.into_inner());
+    state.arena.as_ref().map(|arena| (arena.base, arena.size))
+}
+
+pub fn fork_child() {
+    STATE.store(std::ptr::null_mut(), Ordering::Release);
+    CHILD.store(true, Ordering::Release);
+    // A lifecycle failure belongs to the abandoned generation. ABI/loader
+    // poison remains sticky and is not reset.
+    super::FAILED.store(false, Ordering::Release);
+}
+
+pub fn cache() -> Result<&'static super::export_cache::ExportCache> {
+    let pointer = STATE.load(Ordering::Acquire);
+    if pointer.is_null() {
+        return Err(NOT_INITIALIZED);
+    }
+    Ok(&unsafe { &*pointer }.cache)
+}
 
 macro_rules! call {
     ($name:expr, fn($($ty:ty),*) $(, $arg:expr)* $(,)?) => {{
@@ -200,7 +230,7 @@ impl State {
                 self.arena = Arena::save(&allocations)?;
             }
             5 => {
-                CACHE.clear()?;
+                cache()?.clear()?;
                 for allocation in self.allocations.values_mut().filter(|a| a.shared) {
                     let context =
                         Context::enter(allocation.context, allocation.properties.location.id)?;
@@ -316,7 +346,7 @@ impl State {
                     if fd < 0 {
                         return Err(INVALID_HANDLE);
                     }
-                    CACHE.replace(allocation.id, Some(unsafe { OwnedFd::from_raw_fd(fd) }))?;
+                    cache()?.replace(allocation.id, Some(unsafe { OwnedFd::from_raw_fd(fd) }))?;
                 }
                 Ok(())
             })();
@@ -343,7 +373,7 @@ impl State {
             handles: self.handles.len() as u64,
             mappings: self.mappings.len() as u64,
             multicasts: 0,
-            cached_exports: CACHE.len().unwrap_or(0) as u64,
+            cached_exports: cache().and_then(|cache| cache.len()).unwrap_or(0) as u64,
             live_raw_imports: self.raw.values().map(|n| u64::from(*n)).sum(),
             unsupported_exportable_creations: self.unsupported,
             phase: if super::FAILED.load(Ordering::Acquire) {
@@ -368,7 +398,7 @@ impl State {
             allocation.driver = 0;
         }
         if !handle_live && !mapped {
-            CACHE.replace(id, None)?;
+            cache()?.replace(id, None)?;
             self.allocations.remove(&id);
         }
         Ok(())
@@ -409,17 +439,49 @@ fn random<const N: usize>() -> Result<[u8; N]> {
 }
 
 pub fn initialize() -> Result<()> {
-    let pid = unsafe { libc::getpid() };
-    // Do not touch an inherited Rust mutex: another vanished thread may own it.
-    // Fork-without-exec is deliberately refused until generation reset is ported.
-    let generation = GENERATION.load(Ordering::Acquire);
-    if generation != 0 && generation != pid {
-        return Err(NOT_SUPPORTED);
-    }
-    if STATE.get().is_some() {
+    // STATE denotes a ready generation, never one whose listener is still
+    // starting. A caller may own the loader lock needed by another initializer,
+    // so it must not wait for that initializer's thread/TLS setup.
+    if !STATE.load(Ordering::Acquire).is_null() {
         return Ok(());
     }
-    let identity = match std::env::var("CUINTERPOSE_PARTICIPANT_ID") {
+    if super::FAILED.load(Ordering::Acquire) {
+        return Err(UNKNOWN);
+    }
+    let _initializing = match INITIALIZING.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::WouldBlock) => return Err(NOT_INITIALIZED),
+        Err(TryLockError::Poisoned(poison)) if CHILD.load(Ordering::Acquire) => poison.into_inner(),
+        Err(TryLockError::Poisoned(_)) => return Err(UNKNOWN),
+    };
+    if !STATE.load(Ordering::Acquire).is_null() {
+        return Ok(());
+    }
+    if super::FAILED.load(Ordering::Acquire) {
+        return Err(UNKNOWN);
+    }
+    let result = initialize_generation();
+    if result.is_err() {
+        // Actual setup failure is sticky; contention above is a transient
+        // refusal and must not poison the initializer that is making progress.
+        super::FAILED.store(true, Ordering::Release);
+    }
+    result
+}
+
+fn initialize_generation() -> Result<()> {
+    let pid = unsafe { libc::getpid() };
+    if CHILD.load(Ordering::Acquire) {
+        super::process::reset_sockets();
+    }
+    let configured = if CHILD.load(Ordering::Acquire)
+        || super::HOST.get().is_some_and(|host| host.origin_pid != pid)
+    {
+        Err(std::env::VarError::NotPresent)
+    } else {
+        std::env::var("CUINTERPOSE_PARTICIPANT_ID")
+    };
+    let identity = match configured {
         Ok(value) => {
             cuinterpose_protocol::parse_identity(value.as_bytes()).map_err(|_| INVALID_VALUE)?
         }
@@ -454,24 +516,27 @@ pub fn initialize() -> Result<()> {
         phase: 0,
         arena: None,
     };
-    GENERATION.store(pid, Ordering::Release);
-    STATE.set(Mutex::new(state)).map_err(|_| NOT_READY)?;
-    super::control::start()?;
+    let mut generation = Box::new(Generation {
+        state: Mutex::new(state),
+        cache: super::export_cache::ExportCache::default(),
+    });
+    let state = generation.state.get_mut().map_err(|_| UNKNOWN)?;
+    super::control::start(&state.endpoint, state.identity)?;
+    // No fallible work follows successful startup. Failed startup drops only
+    // the unpublished, empty generation; no CUDA resources have been created.
+    STATE.store(Box::into_raw(generation), Ordering::Release);
     Ok(())
 }
 
 pub fn get() -> Result<MutexGuard<'static, State>> {
-    if GENERATION.load(Ordering::Acquire) != unsafe { libc::getpid() } {
-        return Err(NOT_SUPPORTED);
-    }
     if super::FAILED.load(Ordering::Acquire) {
         return Err(UNKNOWN);
     }
-    STATE
-        .get()
-        .ok_or(NOT_INITIALIZED)?
-        .lock()
-        .map_err(|_| UNKNOWN)
+    let pointer = STATE.load(Ordering::Acquire);
+    if pointer.is_null() {
+        return Err(NOT_INITIALIZED);
+    }
+    unsafe { &*pointer }.state.lock().map_err(|_| UNKNOWN)
 }
 
 fn active() -> Result<MutexGuard<'static, State>> {
@@ -765,7 +830,7 @@ pub fn cuMemExportToShareableHandle(
         return Err(INVALID_VALUE);
     }
     let allocation = state.allocations.get_mut(&id).ok_or(INVALID_HANDLE)?;
-    if allocation.creator && !CACHE.contains(&id)? {
+    if allocation.creator && !cache()?.contains(&id)? {
         let mut fd = -1;
         call!(
             "cuMemExportToShareableHandle",
@@ -778,7 +843,7 @@ pub fn cuMemExportToShareableHandle(
         if fd < 0 {
             return Err(INVALID_HANDLE);
         }
-        CACHE.replace(id, Some(unsafe { OwnedFd::from_raw_fd(fd) }))?;
+        cache()?.replace(id, Some(unsafe { OwnedFd::from_raw_fd(fd) }))?;
     }
     let ticket = ticket::export(&allocation.ticket).map_err(|_| OUT_OF_MEMORY)?;
     allocation.shared = true;

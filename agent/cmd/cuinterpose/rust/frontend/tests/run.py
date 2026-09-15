@@ -51,7 +51,8 @@ def main():
             ("prefix_core.c", "short-size-core.so", shared),
             ("next.c", "caller.so", shared + ["-DCALLER", "-ldl"]),
             ("next.c", "following.so", shared + ["-DMARKER=93"]),
-            ("probe.c", "probe", ["-ldl"]),
+            ("constructor.c", "constructor.so", shared + ["-pthread"]),
+            ("probe.c", "probe", ["-ldl", "-rdynamic"]),
             ("direct.c", "direct", ["-L" + str(build), "-l:libcuda.so.1", "-Wl,-rpath,$ORIGIN", "-ldl"]),
         ]
         for source, output, options in targets:
@@ -60,9 +61,15 @@ def main():
         env["LD_LIBRARY_PATH"] = str(build)
         env["LD_PRELOAD"] = str(build / "libcuinterpose.so")
         cases = ["direct", "lookup", "queries", "missing", "bindings", "runtime", "local-lifetime", "next",
+                 "fork-reentry", "constructor-reentry", "constructor-fork", "constructor-concurrent",
+                 "resolver-fork",
                  "missing-core", "bad-core", "short-version-core", "short-size-core"]
         for case in cases:
             case_env = env.copy()
+            if case == "constructor-reentry":
+                case_env["CUINTERPOSE_TEST_REENTER_CORE"] = "1"
+            if case in ("constructor-fork", "constructor-concurrent"):
+                case_env["CUINTERPOSE_TEST_CONSTRUCTOR"] = "fork" if case == "constructor-fork" else "create"
             if case == "next":
                 case_env["LD_PRELOAD"] += ":" + str(build / "caller.so") + ":" + str(build / "following.so")
             elif case in ("missing-core", "bad-core", "short-version-core", "short-size-core"):

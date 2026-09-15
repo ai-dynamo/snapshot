@@ -1,34 +1,51 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::state::{self, CACHE, Result};
+use super::process::{Guard, Socket};
+use super::state::{self, Result};
 use cuinterpose_protocol::{Header, Identity, Operation};
 use std::io::Write;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::Ordering;
 
-pub fn start() -> Result<()> {
-    let state = state::get()?;
-    let listener =
-        UnixListener::bind(&state.endpoint).map_err(|_| cuinterpose_abi::NOT_INITIALIZED)?;
-    std::fs::set_permissions(&state.endpoint, std::fs::Permissions::from_mode(0o600))
+pub fn start(endpoint: &str, identity: Identity) -> Result<()> {
+    let listener = UnixListener::bind(endpoint).map_err(|_| cuinterpose_abi::NOT_INITIALIZED)?;
+    listener
+        .set_nonblocking(true)
         .map_err(|_| cuinterpose_abi::NOT_INITIALIZED)?;
-    let identity = state.identity;
-    drop(state);
+    let listener = Socket::new(listener);
+    std::fs::set_permissions(endpoint, std::fs::Permissions::from_mode(0o600))
+        .map_err(|_| cuinterpose_abi::NOT_INITIALIZED)?;
     std::thread::Builder::new()
         .name("cuinterpose".into())
         .spawn(move || {
-            for socket in listener.incoming() {
-                let Ok(socket) = socket else {
+            loop {
+                let mut poll = libc::pollfd {
+                    fd: listener.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                if unsafe { libc::poll(&mut poll, 1, -1) } <= 0 {
+                    continue;
+                }
+                let Some(_guard) = Guard::enter() else {
+                    break;
+                };
+                let Ok((socket, _)) = listener.accept() else {
                     continue;
                 };
+                let socket = Socket::new(socket);
                 // A peer request must progress independently of a CUDA lifecycle
                 // request. Each handler contains panics before leaving its thread.
                 let _ = std::thread::Builder::new()
                     .name("cuinterpose-rpc".into())
                     .spawn(move || {
                         cuinterpose_abi::boundary(&super::FAILED, (), || {
+                            let Some(_guard) = Guard::enter() else {
+                                return;
+                            };
                             let _ = serve(socket, identity);
                         });
                     });
@@ -38,7 +55,7 @@ pub fn start() -> Result<()> {
     Ok(())
 }
 
-fn serve(mut socket: UnixStream, identity: Identity) -> std::io::Result<()> {
+fn serve(mut socket: Socket<UnixStream>, identity: Identity) -> std::io::Result<()> {
     let timeout = Some(cuinterpose_protocol::timeout(Operation::Handshake));
     socket.set_read_timeout(timeout)?;
     socket.set_write_timeout(timeout)?;
@@ -63,7 +80,8 @@ fn serve(mut socket: UnixStream, identity: Identity) -> std::io::Result<()> {
                 return Err("creator resource is unavailable");
             }
             passed = Some(
-                CACHE
+                state::cache()
+                    .map_err(|_| "export cache unavailable")?
                     .acquire(&request.allocation)
                     .map_err(|_| "creator resource is unavailable")?,
             );

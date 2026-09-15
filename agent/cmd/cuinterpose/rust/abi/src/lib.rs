@@ -7,7 +7,7 @@
 use std::ffi::{c_char, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 3;
 pub const CUDA_VERSION: u32 = 13010;
 pub const SUCCESS: i32 = 0;
 pub const INVALID_VALUE: i32 = 1;
@@ -37,6 +37,9 @@ macro_rules! core_api {
             pub version: u32,
             pub size: u32,
             pub debug_stats: unsafe extern "C" fn(*mut DebugStats),
+            pub fork_prepare: unsafe extern "C" fn(),
+            pub fork_parent: unsafe extern "C" fn(),
+            pub fork_child: unsafe extern "C" fn(),
             $(pub $name: unsafe extern "C" fn($($ty),*) -> i32,)*
         }
     };
@@ -109,6 +112,9 @@ pub struct Host {
     pub version: u32,
     pub size: u32,
     pub resolve: Resolve,
+    pub enter: unsafe extern "C" fn() -> i32,
+    pub leave: unsafe extern "C" fn(),
+    pub origin_pid: i32,
 }
 
 pub type Initialize = unsafe extern "C" fn(*const Host, *mut *const Core) -> i32;

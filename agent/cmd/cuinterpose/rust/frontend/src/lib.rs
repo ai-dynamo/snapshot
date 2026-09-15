@@ -4,6 +4,7 @@
 #![allow(non_snake_case)]
 mod elf;
 mod loader;
+mod process;
 
 use cuinterpose_abi::*;
 use std::ffi::{CStr, c_char, c_void};
@@ -20,6 +21,7 @@ macro_rules! wrappers {
             #[unsafe(no_mangle)]
             pub unsafe extern "C" fn $name($($arg: $ty),*) -> i32 {
                 boundary(&loader::FAILED, UNKNOWN, || {
+                    let Some(_guard) = process::Guard::enter() else { return NOT_SUPPORTED; };
                     let Some(core) = loader::core() else { return NOT_INITIALIZED; };
                     unsafe { (core.$name)($($arg),*) }
                 })
@@ -120,6 +122,9 @@ pub unsafe extern "C" fn cuGetProcAddress(
     flags: u64,
 ) -> i32 {
     boundary(&loader::FAILED, UNKNOWN, || {
+        let Some(_guard) = process::Guard::enter() else {
+            return NOT_SUPPORTED;
+        };
         let address = unsafe { loader::resolve(c"cuGetProcAddress".as_ptr()) };
         if address.is_null() {
             return NOT_INITIALIZED;
@@ -145,6 +150,9 @@ pub unsafe extern "C" fn cuGetProcAddress_v2(
     status: *mut i32,
 ) -> i32 {
     boundary(&loader::FAILED, UNKNOWN, || {
+        let Some(_guard) = process::Guard::enter() else {
+            return NOT_SUPPORTED;
+        };
         let address = unsafe { loader::resolve(c"cuGetProcAddress_v2".as_ptr()) };
         if address.is_null() {
             return NOT_INITIALIZED;
@@ -190,6 +198,9 @@ macro_rules! runtime_resolver {
             status: *mut i32,
         ) -> i32 {
             boundary(&loader::FAILED, 999, || {
+                let Some(_guard) = process::Guard::enter() else {
+                    return NOT_SUPPORTED;
+                };
                 let address =
                     unsafe { loader::resolve(concat!(stringify!($name), "\0").as_ptr().cast()) };
                 if address.is_null() {
@@ -221,6 +232,9 @@ macro_rules! runtime_resolver {
             status: *mut i32,
         ) -> i32 {
             boundary(&loader::FAILED, 999, || {
+                let Some(_guard) = process::Guard::enter() else {
+                    return NOT_SUPPORTED;
+                };
                 let address =
                     unsafe { loader::resolve(concat!(stringify!($name), "\0").as_ptr().cast()) };
                 if address.is_null() {
@@ -252,6 +266,9 @@ runtime_resolver!(cudaGetDriverEntryPointByVersion_ptsz, versioned);
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuinterpose_debug_stats(output: *mut DebugStats) {
     boundary(&loader::FAILED, (), || {
+        let Some(_guard) = process::Guard::enter() else {
+            return;
+        };
         if !output.is_null() {
             if let Some(core) = loader::core() {
                 unsafe {

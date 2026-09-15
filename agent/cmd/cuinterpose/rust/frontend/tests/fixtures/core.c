@@ -7,16 +7,24 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <dlfcn.h>
+#include <assert.h>
 #include "cuda.h"
 
 typedef void *(*resolve_fn)(const char *);
 struct host_api {
     uint32_t version, size;
     resolve_fn resolve;
+    int (*enter)(void);
+    void (*leave)(void);
+    int origin_pid;
 };
 struct core_api {
     uint32_t version, size;
     void (*debug_stats)(void *);
+    void (*fork_prepare)(void);
+    void (*fork_parent)(void);
+    void (*fork_child)(void);
     create_fn cuMemCreate;
     int (*cuMemRelease)(uint64_t);
     int (*cuMemRetainAllocationHandle)(uint64_t *, void *);
@@ -37,6 +45,14 @@ struct core_api {
 };
 
 static struct core_api api;
+__attribute__((constructor)) static void reenter_frontend(void) {
+    if (!getenv("CUINTERPOSE_TEST_REENTER_CORE"))
+        return;
+    create_fn create = (create_fn)dlsym(RTLD_DEFAULT, "cuMemCreate");
+    uint64_t handle = 0;
+    assert(create && create(&handle, 4096, NULL, 0) == 3);
+}
+static void fork_hook(void) {}
 static void debug_stats(void *output) { (void)output; }
 // Every table field is a valid non-null function pointer, even those not
 // exercised by this focused fixture. These stubs have the declared ABI.
@@ -63,11 +79,14 @@ static int unbind(uint64_t handle, int device, size_t offset, size_t size) {
 }
 
 int cuinterpose_core_init(const struct host_api *host, const struct core_api **output) {
-    if (!host || !output || host->version != 2 || host->size != sizeof(*host))
+    if (!host || !output || host->version != 3 || host->size != sizeof(*host))
         return 1;
-    api.version = 2;
+    api.version = 3;
     api.size = sizeof(api);
     api.debug_stats = debug_stats;
+    api.fork_prepare = fork_hook;
+    api.fork_parent = fork_hook;
+    api.fork_child = fork_hook;
     api.cuMemRelease = release;
     api.cuMemRetainAllocationHandle = retain;
     api.cuMemUnmap = unmap;

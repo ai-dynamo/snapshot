@@ -56,8 +56,8 @@ impl Context {
 }
 
 pub struct Arena {
-    base: usize,
-    size: usize,
+    pub(super) base: usize,
+    pub(super) size: usize,
     context: usize,
     device: i32,
     offsets: BTreeMap<AllocationId, usize>,

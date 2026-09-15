@@ -5,6 +5,7 @@
 mod control;
 mod export_cache;
 mod host_carrier;
+mod process;
 mod state;
 mod ticket;
 
@@ -30,6 +31,7 @@ macro_rules! exports {
             unsafe extern "C" fn $name($($arg: $ty),*) -> i32 {
                 if FAILED.load(std::sync::atomic::Ordering::Acquire) { return NOT_READY; }
                 boundary(&FAILED, UNKNOWN, || {
+                    if let Err(code) = state::initialize() { return code; }
                     let result = state::$name($($arg),*);
                     result.unwrap_or_else(|code| code)
                 })
@@ -37,6 +39,9 @@ macro_rules! exports {
         )*
         static API: Core = Core {
             version: ABI_VERSION, size: size_of::<Core>() as u32, debug_stats,
+            fork_prepare: process::prepare,
+            fork_parent: process::parent,
+            fork_child: process::child,
             $($name,)*
         };
     };
@@ -45,6 +50,9 @@ memory_api!(exports);
 
 unsafe extern "C" fn debug_stats(output: *mut DebugStats) {
     boundary(&ABI_FAILED, (), || {
+        if state::initialize().is_err() {
+            return;
+        }
         if !output.is_null() {
             if FAILED.load(std::sync::atomic::Ordering::Acquire) {
                 unsafe {

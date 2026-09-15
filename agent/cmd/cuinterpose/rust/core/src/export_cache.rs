@@ -42,6 +42,16 @@ pub struct Lease<'a> {
 }
 
 impl ExportCache {
+    pub fn fork_descriptors(&self, descriptors: &mut Vec<i32>) {
+        use std::os::fd::AsRawFd;
+        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        descriptors.extend(
+            entries
+                .descriptors
+                .values()
+                .map(|entry| entry.descriptor.as_raw_fd()),
+        );
+    }
     pub fn contains(&self, id: &AllocationId) -> Result<bool> {
         let entries = self.entries.lock().map_err(|_| UNKNOWN)?;
         Ok(entries.descriptors.contains_key(id))

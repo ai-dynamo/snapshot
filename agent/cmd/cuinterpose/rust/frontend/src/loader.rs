@@ -11,6 +11,7 @@ static REAL_DLSYM: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 type Dlsym = unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_void;
 static PROVIDERS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 static CORE: OnceLock<Option<usize>> = OnceLock::new();
+static INITIALIZING_CORE: AtomicBool = AtomicBool::new(false);
 
 /// Like run-ai, anchor on dladdr's provider and discover its defined dlsym
 /// without asking the intercepted dlsym. The image must be ELF64 little-endian.
@@ -44,6 +45,9 @@ pub fn real() -> Option<Dlsym> {
 /// Retain CUDA providers before a pointer can be cached by the core. Handles
 /// intentionally live until process exit; no dlclose races with CUDA replay.
 pub fn retain_provider(address: *mut c_void) {
+    let Some(_guard) = super::process::Guard::enter() else {
+        return;
+    };
     if address.is_null() {
         return;
     }
@@ -97,6 +101,9 @@ pub fn proxy(handle: *mut c_void, name: &CStr, caller: *const c_void) -> *mut c_
 
 pub unsafe extern "C" fn resolve(name: *const c_char) -> *mut c_void {
     cuinterpose_abi::boundary(&FAILED, std::ptr::null_mut(), || {
+        let Some(_guard) = super::process::Guard::enter() else {
+            return std::ptr::null_mut();
+        };
         if name.is_null() {
             return std::ptr::null_mut();
         }
@@ -139,6 +146,26 @@ pub unsafe extern "C" fn resolve(name: *const c_char) -> *mut c_void {
 }
 
 pub fn core() -> Option<&'static Core> {
+    if let Some(pointer) = CORE.get() {
+        return pointer.map(|address| unsafe { &*(address as *const Core) });
+    }
+    // Another initializer may be waiting for the loader lock held by this
+    // caller's constructor. Never wait, even across threads. A transient
+    // NOT_INITIALIZED reply does not poison or publish a failed core.
+    if INITIALIZING_CORE
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        return None;
+    }
+    struct Initializing;
+    impl Drop for Initializing {
+        fn drop(&mut self) {
+            INITIALIZING_CORE.store(false, Ordering::Release);
+        }
+    }
+    let _initializing = Initializing;
+    // Only the nonblocking admission winner can initialize this OnceLock.
     let pointer = CORE.get_or_init(|| {
         let real = real()?;
         let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
@@ -166,6 +193,9 @@ pub fn core() -> Option<&'static Core> {
             version: ABI_VERSION,
             size: size_of::<Host>() as u32,
             resolve,
+            enter: super::process::enter,
+            leave: super::process::leave,
+            origin_pid: super::process::ORIGIN_PID.load(Ordering::Acquire),
         };
         let mut output = std::ptr::null();
         let result = unsafe { init(&host, &mut output) };
@@ -190,6 +220,7 @@ pub fn core() -> Option<&'static Core> {
         // arbitrary foreign table or its function-pointer targets.
         // The core owns process state and exported function pointers. Keep
         // its loader reference; neither normal shutdown nor fork drops it.
+        super::process::publish(output);
         Some(output as usize)
     });
     pointer.map(|address| unsafe { &*(address as *const Core) })
