@@ -4,8 +4,10 @@
 suite: runtime storage directory
 templates:
   - templates/daemonset.yaml
+  - templates/configmap.yaml
 tests:
   - it: defaults the runtime-storage volume to the containerd path on host and in container
+    template: templates/daemonset.yaml
     asserts:
       - contains:
           path: spec.template.spec.containers[0].volumeMounts
@@ -24,6 +26,7 @@ tests:
   # The agent tars the overlay upperDir read verbatim out of containerd
   # metadata, so an override must land at the identical path on both sides.
   - it: mounts an overridden runtime.storageDir at the identical host path
+    template: templates/daemonset.yaml
     set:
       runtime.storageDir: /var/lib/rancher/rke2/agent/containerd
     asserts:
@@ -45,6 +48,7 @@ tests:
   # verbatim, and Kubernetes rejects a relative mountPath at Pod admission --
   # far from the value that caused it. Fail at template time instead.
   - it: rejects a relative runtime.storageDir
+    template: templates/daemonset.yaml
     set:
       runtime.storageDir: relative/containerd
     asserts:
