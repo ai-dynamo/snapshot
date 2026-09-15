@@ -25,6 +25,7 @@ struct core_api {
     void (*fork_prepare)(void);
     void (*fork_parent)(void);
     void (*fork_child)(void);
+    int (*ensure_ready)(void);
     create_fn cuMemCreate;
     int (*cuMemRelease)(uint64_t);
     int (*cuMemRetainAllocationHandle)(uint64_t *, void *);
@@ -45,6 +46,19 @@ struct core_api {
 };
 
 static struct core_api api;
+static create_fn next_create;
+static bind_v1 next_bind;
+static unsigned counts[2];
+const unsigned *fixture_core_counts(void) { return counts; }
+static int create(uint64_t *out, size_t size, const void *prop, uint64_t flags) {
+    ++counts[0];
+    return next_create(out, size, prop, flags);
+}
+static int bind_memory(uint64_t handle, size_t offset, uint64_t member,
+                       size_t member_offset, size_t size, uint64_t flags) {
+    ++counts[1];
+    return next_bind(handle, offset, member, member_offset, size, flags);
+}
 __attribute__((constructor)) static void reenter_frontend(void) {
     if (!getenv("CUINTERPOSE_TEST_REENTER_CORE"))
         return;
@@ -54,6 +68,9 @@ __attribute__((constructor)) static void reenter_frontend(void) {
 }
 static void fork_hook(void) {}
 static void debug_stats(void *output) { (void)output; }
+static int ensure_ready(void) {
+    return getenv("CUINTERPOSE_TEST_READY_FAILURE") ? 3 : 0;
+}
 // Every table field is a valid non-null function pointer, even those not
 // exercised by this focused fixture. These stubs have the declared ABI.
 static int release(uint64_t handle) { (void)handle; return 3; }
@@ -79,14 +96,15 @@ static int unbind(uint64_t handle, int device, size_t offset, size_t size) {
 }
 
 int cuinterpose_core_init(const struct host_api *host, const struct core_api **output) {
-    if (!host || !output || host->version != 3 || host->size != sizeof(*host))
+    if (!host || !output || host->version != 4 || host->size != sizeof(*host))
         return 1;
-    api.version = 3;
+    api.version = 4;
     api.size = sizeof(api);
     api.debug_stats = debug_stats;
     api.fork_prepare = fork_hook;
     api.fork_parent = fork_hook;
     api.fork_child = fork_hook;
+    api.ensure_ready = ensure_ready;
     api.cuMemRelease = release;
     api.cuMemRetainAllocationHandle = retain;
     api.cuMemUnmap = unmap;
@@ -98,9 +116,11 @@ int cuinterpose_core_init(const struct host_api *host, const struct core_api **o
     api.cuMulticastAddDevice = add_device;
     api.cuMulticastGetGranularity = granularity;
     api.cuMulticastUnbind = unbind;
-    api.cuMemCreate = (create_fn)host->resolve("cuMemCreate");
+    next_create = (create_fn)host->resolve("cuMemCreate");
+    api.cuMemCreate = create;
     api.cuMemMap = host->resolve("cuMemMap");
-    api.cuMulticastBindMem = (bind_v1)host->resolve("cuMulticastBindMem");
+    next_bind = (bind_v1)host->resolve("cuMulticastBindMem");
+    api.cuMulticastBindMem = bind_memory;
     api.cuMulticastBindMem_v2 = (bind_v2)host->resolve("cuMulticastBindMem_v2");
     api.cuMulticastBindAddr = (bind_addr_v1)host->resolve("cuMulticastBindAddr");
     api.cuMulticastBindAddr_v2 = (bind_addr_v2)host->resolve("cuMulticastBindAddr_v2");

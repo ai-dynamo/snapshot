@@ -29,6 +29,7 @@ struct fixture_call {
 };
 
 int cuMemCreate(uint64_t *, size_t, const void *, uint64_t);
+int cuInit(unsigned);
 int cuMemMap(uint64_t, size_t, size_t, uint64_t, uint64_t);
 int cuMulticastBindMem(uint64_t, size_t, uint64_t, size_t, size_t, uint64_t);
 int cuMulticastBindMem_v2(uint64_t, int, size_t, uint64_t, size_t, size_t, uint64_t);

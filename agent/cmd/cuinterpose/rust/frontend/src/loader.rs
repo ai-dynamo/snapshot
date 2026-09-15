@@ -42,33 +42,111 @@ pub fn real() -> Option<Dlsym> {
     Some(unsafe { std::mem::transmute::<*mut c_void, Dlsym>(address) })
 }
 
-/// Retain CUDA providers before a pointer can be cached by the core. Handles
-/// intentionally live until process exit; no dlclose races with CUDA replay.
-pub fn retain_provider(address: *mut c_void) {
-    let Some(_guard) = super::process::Guard::enter() else {
-        return;
-    };
+// Public glibc link_map prefix, used only for a valid handle returned by dlopen.
+// Unlike ELF file parsing this reads loader-owned, naturally aligned objects.
+#[repr(C)]
+struct LinkMap {
+    load_bias: usize,
+    name: *const c_char,
+}
+
+#[derive(PartialEq, Eq)]
+enum Provider {
+    Driver,
+    Runtime,
+}
+
+fn provider(path: &CStr) -> Option<Provider> {
+    let base = path.to_bytes().rsplit(|c| *c == b'/').next()?;
+    for (stem, family) in [
+        (b"libcuda.so".as_slice(), Provider::Driver),
+        (b"libcudart.so".as_slice(), Provider::Runtime),
+    ] {
+        if base == stem
+            || base.strip_prefix(stem).is_some_and(|suffix| {
+                suffix.first() == Some(&b'.')
+                    && suffix.len() > 1
+                    && suffix[1..]
+                        .split(|b| *b == b'.')
+                        .all(|part| !part.is_empty() && part.iter().all(u8::is_ascii_digit))
+            })
+        {
+            return Some(family);
+        }
+    }
+    None
+}
+
+/// Qualify and retain one CUDA provider before substituting its pointer.
+/// Concrete handles must select that provider family in the base namespace.
+/// Handles intentionally live until exit; no dlclose races with CUDA replay.
+pub fn retain_provider(selected: *mut c_void, address: *mut c_void) -> Result<bool, ()> {
     if address.is_null() {
-        return;
+        return Ok(false);
     }
     let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
     if unsafe { libc::dladdr(address, &mut info) } == 0 || info.dli_fname.is_null() {
-        return;
+        return Ok(false);
     }
     let path = unsafe { CStr::from_ptr(info.dli_fname) };
-    let base = path
-        .to_bytes()
-        .rsplit(|c| *c == b'/')
-        .next()
-        .unwrap_or_default();
-    if !base.starts_with(b"libcuda.so") && !base.starts_with(b"libcudart.so") {
-        return;
+    let Some(family) = provider(path) else {
+        return Ok(false);
+    };
+    if selected != libc::RTLD_DEFAULT && selected != libc::RTLD_NEXT {
+        let mut map: *mut LinkMap = std::ptr::null_mut();
+        let mut namespace: libc::c_long = -1;
+        if unsafe {
+            libc::dlinfo(
+                selected,
+                libc::RTLD_DI_LINKMAP,
+                (&mut map as *mut *mut LinkMap).cast(),
+            )
+        } != 0
+            || unsafe {
+                libc::dlinfo(
+                    selected,
+                    libc::RTLD_DI_LMID,
+                    (&mut namespace as *mut libc::c_long).cast(),
+                )
+            } != 0
+            || namespace != 0
+            || map.is_null()
+        {
+            return Ok(false);
+        }
+        let name = unsafe { (*map).name };
+        if name.is_null() || provider(unsafe { CStr::from_ptr(name) }) != Some(family) {
+            return Ok(false);
+        }
     }
+    // A qualified CUDA pointer must not escape unwrapped just because fork
+    // temporarily closed admission. Unrelated providers need no mutable lease.
+    let Some(_guard) = super::process::Guard::enter() else {
+        return Err(());
+    };
     // Never hold a Rust lock across dlopen: constructors can reenter the shim.
     let handle = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_NOLOAD) };
     if handle.is_null() {
         FAILED.store(true, Ordering::Release);
-        return;
+        return Err(());
+    }
+    let mut retained: *mut LinkMap = std::ptr::null_mut();
+    if unsafe {
+        libc::dlinfo(
+            handle,
+            libc::RTLD_DI_LINKMAP,
+            (&mut retained as *mut *mut LinkMap).cast(),
+        )
+    } != 0
+        || retained.is_null()
+        || unsafe { (*retained).load_bias } != info.dli_fbase as usize
+    {
+        // The same path may be loaded in another dlmopen namespace. Retaining
+        // the base-namespace copy does not keep that returned pointer alive.
+        unsafe {
+            libc::dlclose(handle);
+        }
+        return Ok(false);
     }
     let mut providers = PROVIDERS.lock().unwrap_or_else(|e| e.into_inner());
     if providers.contains(&(handle as usize)) {
@@ -79,10 +157,14 @@ pub fn retain_provider(address: *mut c_void) {
     } else {
         providers.push(handle as usize);
     }
+    Ok(true)
 }
 
 pub fn proxy(handle: *mut c_void, name: &CStr, caller: *const c_void) -> *mut c_void {
     if handle == libc::RTLD_NEXT {
+        // This traversal already visits the shim when (and only when) it is
+        // after the original caller. Never substitute a wrapper afterward:
+        // that could jump backwards into us from a following interceptor.
         return super::elf::after(caller, name);
     }
     // The next dlsym may belong to a subsequent interceptor. Calling it lets
@@ -133,13 +215,19 @@ pub unsafe extern "C" fn resolve(name: *const c_char) -> *mut c_void {
                 unsafe { libc::dlopen(library.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
             if !handle.is_null() {
                 address = unsafe { real(handle, name.as_ptr()) };
-                retain_provider(address);
+                if retain_provider(handle, address) != Ok(true) {
+                    address = std::ptr::null_mut();
+                }
                 unsafe {
                     libc::dlclose(handle);
                 }
             }
         } else {
-            retain_provider(address);
+            // A next interceptor need not itself be CUDA. Keep that chain;
+            // qualification controls public substitution, not delegation.
+            if retain_provider(libc::RTLD_DEFAULT, address).is_err() {
+                return std::ptr::null_mut();
+            }
         }
         address
     })

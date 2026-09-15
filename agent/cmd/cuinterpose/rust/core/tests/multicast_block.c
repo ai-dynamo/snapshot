@@ -75,17 +75,15 @@ int cuMulticastAddDevice(uint64_t handle, int device) {
         while (!released) pthread_cond_wait(&changed, &lock);
     }
     pthread_mutex_unlock(&lock);
-    // Deliberately select the fixture implementation, not another intercepted
-    // CUDA name. The test concerns core concurrency, not resolver chaining.
-    void *(*original)(const char *) = dlsym(RTLD_NEXT, "fakeOriginal");
-    int (*next)(uint64_t, int) = original ? original("cuMulticastAddDevice") : 0;
+    // Also exercise genuine next-interceptor chaining: this layer follows the
+    // shim, so lookup must not jump backward to the shim's wrapper.
+    int (*next)(uint64_t, int) = dlsym(RTLD_NEXT, "cuMulticastAddDevice");
     return next ? next(handle, device) : 3;
 }
 
 int cuMemMap(uint64_t address, size_t size, size_t offset, uint64_t handle, uint64_t flags) {
-    void *(*original)(const char *) = dlsym(RTLD_NEXT, "fakeOriginal");
     int (*next)(uint64_t, size_t, size_t, uint64_t, uint64_t) =
-        original ? original("cuMemMap") : 0;
+        dlsym(RTLD_NEXT, "cuMemMap");
     int result = next ? next(address, size, offset, handle, flags) : 3;
     pthread_mutex_lock(&lock);
     if (armed == 2 && result == 0) {

@@ -43,11 +43,18 @@ macro_rules! exports {
             fork_prepare: process::prepare,
             fork_parent: process::parent,
             fork_child: process::child,
+            ensure_ready,
             $($name,)*
         };
     };
 }
 memory_api!(exports);
+
+unsafe extern "C" fn ensure_ready() -> i32 {
+    boundary(&FAILED, NOT_INITIALIZED, || {
+        state::initialize().map_or_else(|error| error, |()| SUCCESS)
+    })
+}
 
 unsafe extern "C" fn debug_stats(output: *mut DebugStats) {
     boundary(&ABI_FAILED, (), || {

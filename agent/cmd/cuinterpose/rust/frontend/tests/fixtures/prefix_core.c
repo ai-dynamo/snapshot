@@ -27,10 +27,10 @@ int cuinterpose_core_init(const void *host, const void **output)
     uint32_t *prefix = (uint32_t *)((char *)mapping + page_size - 2 * sizeof(uint32_t));
 #ifdef WRONG_VERSION
     prefix[0] = 999;
-    // Current full table size: prefix + debug callback + 17 CUDA callbacks.
-    prefix[1] = 8 + 18 * sizeof(void (*)(void));
+    // Prefix, debug, three fork hooks, readiness, and 17 CUDA callbacks.
+    prefix[1] = 8 + 22 * sizeof(void (*)(void));
 #else
-    prefix[0] = 3;
+    prefix[0] = 4;
     prefix[1] = 8;
 #endif
     *output = prefix;

@@ -9,14 +9,32 @@
 #include <assert.h>
 #include <dlfcn.h>
 #include <sys/wait.h>
+#include <stdlib.h>
 
 static struct fixture_call last;
+static unsigned counts[2];
+
+const unsigned *fixture_driver_counts(void) { return counts; }
+
+int cuInit(unsigned flags) {
+    return flags ? 1 : 0;
+}
+
+// Models a runtime-only allocation path that initializes the driver but never
+// calls VMM. Lookup through the default scope permits the cuInit interceptor.
+int fixture_private_runtime(void) {
+    int (*initialize)(unsigned) = dlsym(RTLD_DEFAULT, "cuInit");
+    return initialize ? initialize(0) : 3;
+}
+
+static int anonymous_entry(void) { return 78; }
 
 const struct fixture_call *fixture_last_call(void) {
     return &last;
 }
 
 int cuMemCreate(uint64_t *output, size_t size, const void *properties, uint64_t flags) {
+    ++counts[0];
     last.size = size;
     last.properties = properties;
     last.flags = flags;
@@ -43,6 +61,7 @@ int cuMemMap(uint64_t address, size_t size, size_t offset, uint64_t handle, uint
 
 int cuMulticastBindMem(uint64_t handle, size_t offset, uint64_t member,
                        size_t member_offset, size_t size, uint64_t flags) {
+    ++counts[1];
     last.handle = handle;
     last.offset = offset;
     last.member = member;
@@ -120,6 +139,21 @@ int cuFixtureQuery(const char *name, void **output, int version, uint64_t flags,
     }
     if (status)
         *status = 0;
+    const char *identity = getenv("CUINTERPOSE_TEST_IDENTITY");
+    if (identity) {
+        if (strcmp(identity, "anonymous") == 0)
+            *output = (void *)anonymous_entry;
+        else if (strcmp(identity, "mismatch") == 0)
+            *output = strcmp(name, "cuMemMap") == 0 ? (void *)cuInit : (void *)cuMemMap;
+        else if (strcmp(identity, "alias") == 0)
+            *output = (void *)cuFixtureUnwrapped;
+        else if (strcmp(identity, "foreign") == 0) {
+            void *plugin = dlopen("plugin.so", RTLD_NOW | RTLD_LOCAL);
+            assert(plugin);
+            *output = dlsym(plugin, "cuMemCreate");
+        } else assert(0);
+        return 0;
+    }
     if (strcmp(name, "query-status-failure") == 0) {
         *output = (void *)cuMemMap;
         if (status)
@@ -128,7 +162,9 @@ int cuFixtureQuery(const char *name, void **output, int version, uint64_t flags,
     }
     // -Bsymbolic-functions is essential: pointers returned by this provider
     // must point to its real CUDA-named definitions, not preempted wrappers.
-    if (strcmp(name, "cuMemCreate") == 0)
+    if (strcmp(name, "cuInit") == 0)
+        *output = (void *)cuInit;
+    else if (strcmp(name, "cuMemCreate") == 0)
         *output = (void *)cuMemCreate;
     else if (strcmp(name, "cuMemMap") == 0)
         *output = (void *)cuMemMap;

@@ -22,15 +22,43 @@ a successful build or loader test as GPU, CRIU, or vLLM qualification.
 | `protocol` | C v2 binary layouts, named records and tickets, checked codecs, socket framing, and descriptor transport |
 | `coordinator` | Participant discovery, named-field topology validation, phase barriers, and state-file publication |
 
-The private host/core ABI is version 3, checked by version and size.
+The private host/core ABI is version 4, checked by version and size.
 `cuinterpose_core_init` is the core's only dynamic export. It returns a
 `repr(C)` table of typed C function pointers; memory calls do not look up
 untyped core functions by name. The host's real-symbol resolver remains a
 C-ABI callback because ELF lookup produces untyped addresses. The front end
-loads the sibling core with `RTLD_LAZY | RTLD_LOCAL` on the first memory call.
+loads the sibling core with `RTLD_LAZY | RTLD_LOCAL` on the first memory call,
+successful `cuInit`, or successful CUDA resolver activity. The typed
+`ensure_ready` callback also initializes a new child generation after fork.
+The ELF constructor still only registers fork hooks; it does not load the core.
 The sibling libraries are trusted code: a matching version and size promises
 valid non-null callbacks with the declared signatures. Prefix checks reject
 incompatible tables; they do not validate arbitrary foreign function pointers.
+
+`RTLD_NEXT` returns the original-caller object walk's result without a second
+substitution: a following interceptor must not jump backward into this shim.
+Other lookups substitute only a CUDA-provider result, with concrete handles
+restricted to that provider family in the base namespace. Unrelated plugins
+and separate namespace handles keep their own result. Provider retention
+checks the retained mapping identity, not merely its pathname.
+
+Successful resolver requests for tracked APIs use the actual returned symbol's
+ABI, constrained to the requested API family. Anonymous pointers, unknown
+aliases, and unrelated symbols fail with `NOT_SUPPORTED` and a null output;
+they cannot silently bypass tracking. Real lookup errors and query-status
+failures retain their outputs/status. Untracked successful results are preserved,
+but still require the process endpoint to initialize. No requested-version ABI
+guessing is used.
+If an inner intercepted resolver already returned a shim wrapper, the outer
+resolver accepts only its exact known address in the requested API family.
+The frontend's `build.rs` applies `-Bsymbolic-functions` only to that cdylib:
+references to its own function definitions bind locally, so an earlier
+preload cannot replace a wrapper-inventory address. Undefined CUDA/libc
+functions and explicit `RTLD_NEXT` discovery remain dynamic. The core and
+coordinator do not inherit this linker policy. This is a narrow identity
+invariant, not a claim of compatibility with arbitrary loader namespaces.
+This makes nested runtime-to-driver queries idempotent without trusting
+arbitrary functions from a library named cuinterpose.
 
 The independently versioned C wire format remains v2: 256-byte headers,
 256-byte tickets, and 688-byte records. Numeric layout belongs only in

@@ -25,17 +25,26 @@ static void (*debug_stats)(struct stats *);
 static pthread_t worker;
 static atomic_int worker_tid;
 static struct stats worker_stats;
+static int (*query)(const char *, void **, int, uint64_t);
 
 static void *initialize_generation(void *unused) {
     (void)unused;
     atomic_store(&worker_tid, (int)syscall(SYS_gettid));
     debug_stats(&worker_stats);
+    if (query) {
+        void *output = NULL;
+        assert(query("cuFixtureUnwrapped", &output, 13010, 0) == 0 && output);
+    }
     return NULL;
 }
 
 __attribute__((constructor)) static void contend_with_generation_startup(void) {
     debug_stats = dlsym(RTLD_DEFAULT, "cuinterpose_debug_stats");
     assert(debug_stats);
+    if (getenv("CUINTERPOSE_TEST_GENERATION_QUERY")) {
+        query = dlsym(RTLD_DEFAULT, "cuGetProcAddress");
+        assert(query);
+    }
     assert(pthread_create(&worker, NULL, initialize_generation, NULL) == 0);
 
     char endpoint[256];
@@ -66,6 +75,11 @@ __attribute__((constructor)) static void contend_with_generation_startup(void) {
     struct stats busy = {.phase = 99};
     debug_stats(&busy);
     assert(busy.phase == 99);
+    if (query) {
+        void *output = (void *)42;
+        assert(query("cuFixtureUnwrapped", &output, 13010, 0) == 3);
+        assert(output == NULL);
+    }
     int (*create)(uint64_t *, size_t, const void *, uint64_t) =
         dlsym(RTLD_DEFAULT, "cuMemCreate");
     assert(create);

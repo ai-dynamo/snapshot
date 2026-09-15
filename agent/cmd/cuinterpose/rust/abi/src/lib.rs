@@ -7,7 +7,7 @@
 use std::ffi::{c_char, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub const ABI_VERSION: u32 = 3;
+pub const ABI_VERSION: u32 = 4;
 pub const CUDA_VERSION: u32 = 13010;
 pub const SUCCESS: i32 = 0;
 pub const INVALID_VALUE: i32 = 1;
@@ -40,6 +40,7 @@ macro_rules! core_api {
             pub fork_prepare: unsafe extern "C" fn(),
             pub fork_parent: unsafe extern "C" fn(),
             pub fork_child: unsafe extern "C" fn(),
+            pub ensure_ready: unsafe extern "C" fn() -> i32,
             $(pub $name: unsafe extern "C" fn($($ty),*) -> i32,)*
         }
     };

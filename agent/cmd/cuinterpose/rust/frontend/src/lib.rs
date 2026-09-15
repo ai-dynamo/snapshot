@@ -30,6 +30,7 @@ macro_rules! wrappers {
 
         fn memory_wrapper(name: &[u8]) -> *mut c_void {
             match name {
+        b"cuInit" => cuInit as *const () as *mut c_void,
                 $(x if x == stringify!($name).as_bytes() => $name as *const () as *mut c_void,)*
                 _ => std::ptr::null_mut(),
             }
@@ -79,39 +80,104 @@ unsafe extern "C" fn lookup(
         }
         let name = unsafe { CStr::from_ptr(name) };
         let original = loader::proxy(handle, name, caller);
-        if original.is_null() {
+        if original.is_null() || handle == libc::RTLD_NEXT {
             return original;
         }
         let wrapper = replacement(name.to_bytes());
-        if wrapper.is_null() {
+        if wrapper.is_null() || original == wrapper {
             return original;
         }
-        loader::retain_provider(original);
-        wrapper
+        match loader::retain_provider(handle, original) {
+            Ok(true) => wrapper,
+            Ok(false) => original,
+            Err(()) => std::ptr::null_mut(),
+        }
     })
 }
 
-/// Use CUDA's returned function identity, not our header version, to select
-/// the wrapper ABI. Unknown pointers remain untouched; no ABI is invented.
-unsafe fn substitute(output: *mut *mut c_void) {
-    if output.is_null() || unsafe { (*output).is_null() } {
-        return;
+/// A successful tracked query must identify a supported ABI in that API's
+/// family. Anonymous stubs and unrelated aliases cannot silently escape
+/// tracking. The real resolver's failures never enter this path.
+unsafe fn finish_query(name: *const c_char, output: *mut *mut c_void) -> i32 {
+    if name.is_null() || output.is_null() {
+        return INVALID_VALUE;
     }
+    let requested = unsafe { CStr::from_ptr(name) }.to_bytes();
     let address = unsafe { *output };
-    let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
-    if unsafe { libc::dladdr(address, &mut info) } == 0
-        || info.dli_sname.is_null()
-        || info.dli_saddr != address
-    {
-        return;
-    }
-    let wrapper = replacement(unsafe { CStr::from_ptr(info.dli_sname) }.to_bytes());
-    if !wrapper.is_null() {
-        loader::retain_provider(address);
+    if !replacement(requested).is_null() {
+        let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
+        let mut wrapper = std::ptr::null_mut();
+        if !address.is_null()
+            && unsafe { libc::dladdr(address, &mut info) } != 0
+            && !info.dli_sname.is_null()
+            && info.dli_saddr == address
+        {
+            let actual = unsafe { CStr::from_ptr(info.dli_sname) }.to_bytes();
+            let same_api = actual == requested
+                || matches!(
+                    (requested, actual),
+                    (
+                        b"cuGetProcAddress",
+                        b"cuGetProcAddress_v2" | b"cuGetProcAddress_v2_ptsz"
+                    ) | (b"cuGetProcAddress_v2", b"cuGetProcAddress_v2_ptsz")
+                        | (b"cuMulticastBindMem", b"cuMulticastBindMem_v2")
+                        | (b"cuMulticastBindAddr", b"cuMulticastBindAddr_v2")
+                );
+            if same_api {
+                let candidate = replacement(actual);
+                // libcudart may delegate to an already-intercepted driver
+                // resolver. Accept only the exact known wrapper address, not
+                // arbitrary symbols from a CUDA- or cuinterpose-named DSO.
+                if !candidate.is_null()
+                    && (address == candidate
+                        || loader::retain_provider(libc::RTLD_DEFAULT, address) == Ok(true))
+                {
+                    wrapper = candidate;
+                }
+            }
+        }
+        if wrapper.is_null() {
+            unsafe {
+                *output = std::ptr::null_mut();
+            }
+            return NOT_SUPPORTED;
+        }
         unsafe {
             *output = wrapper;
         }
     }
+    let result = match loader::core() {
+        Some(core) => unsafe { (core.ensure_ready)() },
+        None => NOT_INITIALIZED,
+    };
+    if result != SUCCESS {
+        unsafe {
+            *output = std::ptr::null_mut();
+        }
+    }
+    result
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cuInit(flags: u32) -> i32 {
+    boundary(&loader::FAILED, UNKNOWN, || {
+        let Some(_guard) = process::Guard::enter() else {
+            return NOT_SUPPORTED;
+        };
+        let address = unsafe { loader::resolve(c"cuInit".as_ptr()) };
+        if address.is_null() {
+            return NOT_INITIALIZED;
+        }
+        let function: unsafe extern "C" fn(u32) -> i32 = unsafe { std::mem::transmute(address) };
+        let result = unsafe { function(flags) };
+        if result != SUCCESS {
+            return result;
+        }
+        match loader::core() {
+            Some(core) => unsafe { (core.ensure_ready)() },
+            None => NOT_INITIALIZED,
+        }
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -133,9 +199,7 @@ pub unsafe extern "C" fn cuGetProcAddress(
             unsafe { std::mem::transmute(address) };
         let result = unsafe { function(name, out, version, flags) };
         if result == SUCCESS {
-            unsafe {
-                substitute(out);
-            }
+            return unsafe { finish_query(name, out) };
         }
         result
     })
@@ -166,9 +230,7 @@ pub unsafe extern "C" fn cuGetProcAddress_v2(
         ) -> i32 = unsafe { std::mem::transmute(address) };
         let result = unsafe { function(name, out, version, flags, status) };
         if result == SUCCESS && (status.is_null() || unsafe { *status } == 0) {
-            unsafe {
-                substitute(out);
-            }
+            return unsafe { finish_query(name, out) };
         }
         result
     })
@@ -214,9 +276,7 @@ macro_rules! runtime_resolver {
                 ) -> i32 = unsafe { std::mem::transmute(address) };
                 let result = unsafe { function(name, out, flags, status) };
                 if result == SUCCESS && (status.is_null() || unsafe { *status } == 0) {
-                    unsafe {
-                        substitute(out);
-                    }
+                    return unsafe { finish_query(name, out) };
                 }
                 result
             })
@@ -249,9 +309,7 @@ macro_rules! runtime_resolver {
                 ) -> i32 = unsafe { std::mem::transmute(address) };
                 let result = unsafe { function(name, out, version, flags, status) };
                 if result == SUCCESS && (status.is_null() || unsafe { *status } == 0) {
-                    unsafe {
-                        substitute(out);
-                    }
+                    return unsafe { finish_query(name, out) };
                 }
                 result
             })
