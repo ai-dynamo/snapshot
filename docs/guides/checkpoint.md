@@ -85,6 +85,12 @@ readiness, then triggering the checkpoint.
 completes from the resulting `PodSnapshot` — removing the source replica. There is
 no long-running replica to manage, which fits pipeline use cases.
 
+`spec.podTemplate` only needs the workload's own container spec — image,
+command, resources, and any volumes it mounts. The controller injects the
+`/snapshot-control` volume and mount, `SNAPSHOT_CONTROL_DIR`, the
+`ready-for-snapshot` readiness probe, and the seccomp profile before creating
+the source pod.
+
 ```yaml
 apiVersion: nvidia.com/v1alpha1
 kind: SnapshotJob
@@ -94,14 +100,31 @@ spec:
   podSnapshotTemplate:
     targetContainers:
       - main
-  # podTemplate must be a full snapshot-ready pod spec — see Prerequisites and the
-  # build-and-deploy deployment.yaml (checkpoint-source label, securityContext,
-  # /snapshot-control mount, and the ready-for-snapshot readiness gate).
   podTemplate:
     spec:
+      runtimeClassName: nvidia
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
       containers:
         - name: main
-          image: <registry>/vllm-snapshot:<tag>
+          image: vllm/vllm-openai:v0.27.1-ubuntu2404@sha256:dafea057f24b7d42716331a48e2db4e1f204f877a3aa759cb7e4c37e64ca2eee
+          command:
+            - python3
+            - /snapshot-app/app.py
+          env:
+            - name: SNAPSHOT_MODEL
+              value: Qwen/Qwen3-0.6B
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: app
+              mountPath: /snapshot-app
+              readOnly: true
+      volumes:
+        - name: app
+          configMap:
+            name: vllm-app
 ```
 
 ```bash
