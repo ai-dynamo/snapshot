@@ -43,12 +43,16 @@ def _normalize_result(result: dict) -> dict:
     GPU metadata as "no data" rather than "can't read this file", masking a
     real schema mismatch in a directory of mixed-version results."""
     version = result.get("schema_version")
-    if version == 2:
-        return result
-    if version == 1:
-        normalized = dict(result)
-        normalized["environment"] = _normalize_environment_v1(result.get("environment") or {})
-        return normalized
+    # `type(...) is int` rather than `isinstance`/`==` on purpose: `bool` is an
+    # `int` subclass (`isinstance(True, int)` is `True`) and `1.0 == 1`, so
+    # either check would silently accept `True`/`1.0` as schema_version 1.
+    if type(version) is int:
+        if version == 2:
+            return result
+        if version == 1:
+            normalized = dict(result)
+            normalized["environment"] = _normalize_environment_v1(result.get("environment") or {})
+            return normalized
     run_id = result.get("run_id", "<unknown>")
     label = (result.get("model") or {}).get("label", "<unknown>")
     raise ValueError(

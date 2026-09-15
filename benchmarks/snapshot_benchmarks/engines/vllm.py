@@ -72,9 +72,11 @@ def _patch_container(
     container["image"] = image
     if image_pull_policy is not None:
         container["imagePullPolicy"] = image_pull_policy
-    _set_env(container, SNAPSHOT_MODEL_ENV, model.hf_id_or_path)
     for env_name, env_value in (model.env or {}).items():
         _set_env(container, env_name, env_value)
+    # Set last so a conflicting `model.env` entry can never make the pod load
+    # a different model than the one `RunResult.model.hf_id_or_path` records.
+    _set_env(container, SNAPSHOT_MODEL_ENV, model.hf_id_or_path)
     if tolerations:
         pod_spec.setdefault("tolerations", []).extend(tolerations)
 
