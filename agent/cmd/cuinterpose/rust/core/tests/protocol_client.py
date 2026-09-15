@@ -31,14 +31,9 @@ def decode(data):
     return envelope["body"]
 
 
-def send(connection, body, fd=None):
+def send(connection, body):
     data = encode(body)
-    frame = struct.pack("<I", len(data)) + data
-    ancillary = [] if fd is None else [
-        (socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [fd]))]
-    sent = connection.sendmsg([frame], ancillary)
-    assert sent
-    connection.sendall(frame[sent:])
+    connection.sendall(struct.pack("<I", len(data)) + data)
 
 
 def receive(connection):

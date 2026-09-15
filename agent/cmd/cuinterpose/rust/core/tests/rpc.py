@@ -139,31 +139,7 @@ def reciprocal(kind):
     print(f"PASS RPC reciprocal {kind}: peer and queued INSPECT progress with pthread_create unavailable")
 
 
-def startup(nth):
-    before = len(os.listdir("/proc/self/task"))
-    cuda.rpc_fail_startup(nth)
-    handle = c.c_uint64(0xAAAA)
-    assert cuda.cuMemCreate(c.byref(handle), 4096, c.byref(props), 0) != 0
-    assert handle.value == 0xAAAA
-    assert cuda.rpc_refused() == 1 and cuda.rpc_attempts() == nth
-    path = Path(os.environ["SNAPSHOT_CONTROL_DIR"]) / f"cuinterpose-{os.getpid()}.sock"
-    assert not path.exists(), "failed startup left a socket"
-    # No restart after removing the cause: the unpublished generation failed.
-    cuda.rpc_fail_startup(0)
-    value = Stats()
-    value.phase = 99
-    cuda.cuinterpose_debug_stats(c.byref(value))
-    assert value.phase == 99 and cuda.rpc_attempts() == nth
-    assert cuda.cuMemCreate(c.byref(handle), 4096, c.byref(props), 0) != 0
-    assert handle.value == 0xAAAA and not path.exists()
-    deadline = time.monotonic() + 5
-    while len(os.listdir("/proc/self/task")) != before and time.monotonic() < deadline:
-        time.sleep(0.001)
-    assert len(os.listdir("/proc/self/task")) == before, "orphan startup worker"
-    print(f"PASS RPC mandatory startup failure {nth}: sticky, no published state, no orphan")
-
-
-def constructor_child(nth, library):
+def constructor(nth, library):
     before_fds = set(os.listdir("/proc/self/fd"))
     before_tasks = set(os.listdir("/proc/self/task"))
     started = time.monotonic()
@@ -196,23 +172,8 @@ def constructor_child(nth, library):
         assert len(os.listdir("/proc/self/task")) == len(before_tasks) + 2
         reply(request(str(path), "handshake"))
         assert cuda.cuMemRelease(handle) == 0
-    print(f"PASS RPC constructor child {nth}: prompt return, "
+    print(f"PASS RPC constructor {nth}: prompt return, "
           + ("sticky failure, FD/path cleanup, eventual worker exit" if nth else "live endpoint"))
-
-
-def constructor(nth, library):
-    handle = c.c_uint64()
-    assert cuda.cuMemCreate(c.byref(handle), 4096, c.byref(props), 0) == 0
-    path = f"{os.environ['SNAPSHOT_CONTROL_DIR']}/cuinterpose-{os.getpid()}.sock"
-    identity = reply(request(path, "handshake"))["participant"]
-    subprocess.run([sys.executable, __file__, "constructor-child", str(nth), library],
-                   env=os.environ | {"CUINTERPOSE_TEST_STARTUP_FAILURE": str(nth)},
-                   check=True, timeout=15)
-    assert stats().allocations == 1 and stats().phase == 1
-    assert reply(request(path, "handshake"))["participant"] == identity
-    assert cuda.rpc_attempts() == 2 and cuda.rpc_refused() == 0
-    assert cuda.cuMemRelease(handle) == 0
-    print(f"PASS RPC constructor {nth}: parent generation unaffected")
 
 
 def queue_full():
@@ -251,12 +212,8 @@ if __name__ == "__main__":
     mode = sys.argv[1]
     if mode == "worker":
         worker(sys.argv[2], *map(int, sys.argv[3:]))
-    elif mode == "constructor-child":
-        constructor_child(int(sys.argv[2]), sys.argv[3])
     elif mode.startswith("constructor"):
         constructor(int(mode[-1]), sys.argv[2])
-    elif mode.startswith("startup"):
-        startup(int(mode[-1]))
     elif mode == "queue":
         queue_full()
     else:

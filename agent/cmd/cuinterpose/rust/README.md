@@ -315,8 +315,8 @@ On Linux/amd64 with Rust, `/usr/bin/gcc`, and Python `msgpack` installed
 ```sh
 export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/gcc
 cargo test --workspace --target x86_64-unknown-linux-gnu
-cargo build --workspace --release --target x86_64-unknown-linux-gnu
 python3 frontend/tests/run.py
+make -C .. build
 python3 core/tests/reference.py
 ```
 
@@ -324,73 +324,41 @@ An explicit system linker avoids the host's Nix compiler linking against a
 newer incompatible glibc. Release qualification still needs a controlled
 glibc baseline and dynamic-symbol/dependency inspection.
 
-The simplified fork path passed a fresh unsanitized reference run without
-coordinator-launch adaptations or suite retries. Loader coverage is 23 cases
-(three old recursive/constructor fork-policy cases removed), plus 19 actual-core
-endpoint cases. The separate development log preserves previous failed runs.
-The traced prior HANDSHAKE timeout occurred before either successfully created
-importer thread entered its Rust closure, only with the sanitized fixture.
-Equivalent unsanitized state→lifecycle sequences passed 300/300 in the targeted
-diagnosis. The underlying sanitizer/runtime/old-gate interaction remains unknown;
-it is not evidence of a protocol or carrier defect. None of these results
-qualify native CUDA/CRIU or physical-GPU restore.
-
 Unit tests include MessagePack version/bounds checks, fragmented frames,
 descriptor ownership on malformed input, binary identities, malformed ELF
 tables, panic poisoning, sealed memfds, and export-cache retirement races.
-The carrier suite adds 22 process-isolated zero-handle, import rollback,
-native-phase, partial-copy/cleanup, fail-stop, and timing cases. Persistent
-D2H/H2D sync-failure subprocesses must exit 127 with the diagnostic; the provider
-exits with a distinct failure if destructive cleanup runs. RPC tests cover both
-mandatory worker startup failures, queue-full refusal before mutation, and
-reciprocal unicast/multicast imports with thread creation unavailable after
-startup. Constructor controls cover success and either startup spawn failing;
-failures preserve output values and leave no path, FD, or eventual worker,
-while the parent generation remains usable. The test-only carrier provider
-uses `RTLD_NEXT`, translating a valid zero handle into the pinned fake driver's
-nonzero model; production contains no such translation. A separate unit
-subprocess checks absent-query fallback and primary-error preservation.
-Python process tests use one shared MessagePack client instead of duplicating
-byte offsets. They exchange tickets and control requests with the real Rust
-core, including import rollback and resource-kind/property mismatch cases.
 The [standalone loader suite](frontend/tests/README.md) uses independently
-compiled C fixtures with real CUDA symbol names and a mock core, without
-CUDA headers or GPUs. It validates the front-end ABI and loader behavior,
-not the Rust core's complete lifecycle. No test here establishes support for
-general post-CUDA fork-without-exec, local `RTLD_NEXT` scopes, arbitrary loader namespaces, or
-real multicast reconstruction.
+compiled C providers with real CUDA symbol names: 23 loader cases and 19
+actual-core endpoint cases protect the ELF/resolver behavior. They need
+neither CUDA headers nor GPUs.
 
-`reference.py` builds the pinned C fixtures using a local CUDA 13.1/gtest Docker
-image, then runs 13 tracking, 5 unicast lifecycle, and 5 multicast C tests
-against Rust, including ordinary forked importers. The sixth multicast case
-sent a v2 packet directly; its cache-drop assertions are preserved in the
-Python `cached-export` case. The C coordinator's 14 behavioral cases are
-covered by the typed Rust executable-contract tests, including parallel
-dispatch, global barriers, fail-before-mutation checks, state publication,
-and restore identity/topology refusal. After the original C self-tests run,
-`core/tests/json-reports.patch` changes only their progress-output assertions
-before rebuilding them for Rust. There is no coordinator-fork retry adapter.
-Prebuilt fixtures must carry the matching patch fingerprint.
-By default `SANITIZE=` explicitly disables fixture instrumentation and readelf
-checks actual linkage. `--sanitized` selects separate ASan/UBSan diagnostic
-coverage; `--fixtures` reuse must match the selected linkage.
-Nine Python multicast modes cover
-released handles and binding-only sharing, resource-kind/ticket mismatch,
-partial mappings and unknown access, destructive versus harmless refusal,
-native-address binding replay, a blocked collective with simultaneous control
-requests, retain refusal during map publication, and driver-written create-error
-output. Six extra
-process-isolated fork regressions cover
-pre-init fork, identity and descriptor reset, nested-fork FD reuse, saved-carrier
-unmapping without CUDA cleanup, generation poisoning, and sticky startup failure.
-Concurrent-CUDA fork and the redundant child-constructor fork mode were removed;
-ordinary loader-constructor reentry remains covered in the endpoint suite.
-Python may warn about multithreaded fork: these are deliberately
-fake-driver regression tests, not a relaxation of POSIX/CUDA fork restrictions.
-ASan instruments the C fixtures only, with leak detection disabled; it does not
-instrument Rust. The frontend suite checks same/cross-thread constructor reentry,
-not fork from those constructors. Real workloads should use spawn/exec or fork before CUDA
-initialization; shim reset cannot repair inherited NVIDIA runtime state.
+`reference.py` tests the packaged artifacts from `../build` (override with
+`--artifacts`). It builds only the reusable CUDA-call fixtures and fake
+providers from the pinned C stack using a CUDA 13.1/gtest Docker image.
+It does not build or test the old C implementation. The small
+`json-reports.patch` adapts report assertions, not CUDA behavior.
+
+| Coverage | Retained checks |
+| --- | --- |
+| C CUDA-call fixtures | 13 tracking, 5 unicast lifecycle, 5 multicast cases; includes shared/private ownership, released handles, peer reconstruction, and raw-import refusal |
+| Rust coordinator contracts | Ordering/barriers, malformed input, preflight refusal, canonical state, and restored identity/topology |
+| Python multicast | 9 cases for binding-only sharing, native BindAddr, ticket mismatch, cache teardown, phase refusal, and collective/map-publication regressions |
+| Carrier failures | 4 cases: D2H/H2D copy failure and unknown-completion fail-stop; cleanup must not resume a failed generation |
+| RPC | 6 cases: reciprocal unicast/multicast under thread pressure, queue-full refusal, and success/failure of both mandatory spawns under the loader lock |
+| Fork | 4 cases: pre-init, identity/FD reset, poison reset, and nested-fork descriptor reuse |
+
+Python tests share one MessagePack client. The direct-v2 multicast fixture
+is replaced by the Python cache-teardown case; no legacy codec is tested.
+The suite deliberately omits the synthetic zero-driver-handle translation
+layer, exhaustive per-CUDA-call cleanup-failure permutations, timing
+microbenchmarks, and prepared-arena fork probe. Basic copy failures remain,
+as do known loader/startup regressions. Non-constructor startup duplicates
+and the extra parent subprocess around constructor tests are unnecessary.
+Historical failures and larger diagnostic runs remain in the development log.
+
+These local tests do not qualify native CUDA/CRIU, real multicast, or general
+post-CUDA fork-without-exec. Python fork warnings do not relax that contract:
+real workloads should use spawn/exec or fork before CUDA initialization.
 
 For the physical-GPU suite, `core/tests/stage_gpu.py DEST --artifacts DIR
 --cuda-checkpoint PATH` extracts the pinned test sources and applies only

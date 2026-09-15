@@ -1476,3 +1476,41 @@ checked by the harness. Evidence is in session-local
 No cluster resources or deployments were touched. Physical-GPU/vLLM
 qualification of v3 remains outstanding; earlier v2 GPU evidence does not
 qualify this change.
+
+## 19. Remove redundant reference-test machinery
+
+Compared with `f6ea0cd`, this cleanup removes 552 lines of test code/fixtures.
+Production Rust remains 6,468 lines; Rust plus Python/C/patch fixtures drops
+from 10,349 to 9,797. Runtime, agent/operator/API integration, and dependencies
+are unchanged. The integration comparison used `origin/main` (`eb58c63`),
+not stale local `main`: compatibility #140 is upstream. Operator behavior
+already matches the C stack. Rust-specific delivery/report changes and the
+target-root/cwd fix remain, as does adapting tools-mount inspection to newer
+main; no unrelated integration rewrite was needed.
+
+The reference runner now builds only the inherited CUDA-call fixtures and
+fake providers and tests packaged Rust artifacts. It no longer builds/tests
+the C implementation, supports sanitizer/prebuilt-fixture branches, or uses
+patch-fingerprint bookkeeping. A small JSON-report assertion patch remains
+instead of copying the C lifecycle tests into this branch.
+
+Removed the synthetic zero-handle translation layer, exhaustive cleanup-fault
+permutations and timing microbenchmark; four representative copy-failure and
+unknown-completion tests replace the 22-mode matrix. Removed the prepared-arena
+fork probe and duplicate child-startup test. Constructor tests directly cover
+both mandatory spawn failures, replacing ordinary-startup duplicates and an
+extra parent subprocess that merely rechecked process isolation. This is
+intentionally less test scope, not a claim that every removed case is covered.
+All loader, multicast, coordinator, protocol, and existing C behavioral
+assertions remain, including shared/private ownership and peer reconstruction.
+
+Validation passed: 27 Rust tests, strict workspace Clippy/rustfmt/rustdoc,
+pinned GNU/musl packaging/build, 23 loader and 19 endpoint cases, Go CUDA and
+executor tests, and the reduced reference suite (13 tracking, 5 lifecycle,
+5 multicast C cases; 9 multicast, 4 carrier, 6 RPC, 4 fork Python modes).
+The initial runner invocation failed before testing because its default
+artifact path used `workspace` before assignment; a first context patch did
+not relocate the assignment, and the corrected patch fixed it. No runtime
+change or workload retry was needed. Evidence:
+`.cuinterpose-cleanup-{packaging,build,reference}.log`.
+No cluster changes; GPU/vLLM qualification of v3 is still pending.
