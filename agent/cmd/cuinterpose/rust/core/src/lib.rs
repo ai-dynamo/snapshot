@@ -1,7 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-#![allow(non_snake_case)]
+//! In-process CUDA sharing state, lifecycle operations, and the private frontend ABI.
+//!
+//! Driver calls execute in the owning workload process. Rust-owned records,
+//! locks, allocation storage, and panic state never cross the library boundary.
+
+#![allow(non_snake_case, reason = "CUDA dispatch mirrors the NVIDIA ABI names")]
 mod control;
 mod export_cache;
 mod host_carrier;
@@ -15,12 +20,12 @@ use std::ffi::{CStr, c_void};
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 
-static HOST: OnceLock<Host> = OnceLock::new();
-static FAILED: AtomicBool = AtomicBool::new(false);
-static ABI_FAILED: AtomicBool = AtomicBool::new(false);
+static G_HOST: OnceLock<Host> = OnceLock::new();
+static G_FAILED: AtomicBool = AtomicBool::new(false);
+static G_ABI_FAILED: AtomicBool = AtomicBool::new(false);
 
 fn driver(name: &CStr) -> *mut c_void {
-    match HOST.get() {
+    match G_HOST.get() {
         Some(host) => unsafe { (host.resolve)(name.as_ptr()) },
         None => std::ptr::null_mut(),
     }
@@ -30,15 +35,15 @@ macro_rules! exports {
     ($($name:ident($($arg:ident: $ty:ty),*);)*) => {
         $(
             unsafe extern "C" fn $name($($arg: $ty),*) -> i32 {
-                if FAILED.load(std::sync::atomic::Ordering::Acquire) { return NOT_READY; }
-                boundary(&FAILED, UNKNOWN, || {
+                if G_FAILED.load(std::sync::atomic::Ordering::Acquire) { return NOT_READY; }
+                boundary(&G_FAILED, UNKNOWN, || {
                     if let Err(code) = state::initialize() { return code; }
                     let result = state::$name($($arg),*);
                     result.unwrap_or_else(|code| code)
                 })
             }
         )*
-        static API: Core = Core {
+        static G_API: Core = Core {
             version: ABI_VERSION, size: size_of::<Core>() as u32, debug_stats,
             fork_prepare: process::prepare,
             fork_parent: process::parent,
@@ -51,18 +56,18 @@ macro_rules! exports {
 memory_api!(exports);
 
 unsafe extern "C" fn ensure_ready() -> i32 {
-    boundary(&FAILED, NOT_INITIALIZED, || {
+    boundary(&G_FAILED, NOT_INITIALIZED, || {
         state::initialize().map_or_else(|error| error, |()| SUCCESS)
     })
 }
 
 unsafe extern "C" fn debug_stats(output: *mut DebugStats) {
-    boundary(&ABI_FAILED, (), || {
+    boundary(&G_ABI_FAILED, (), || {
         if state::initialize().is_err() {
             return;
         }
         if !output.is_null() {
-            if FAILED.load(std::sync::atomic::Ordering::Acquire) {
+            if G_FAILED.load(std::sync::atomic::Ordering::Acquire) {
                 unsafe {
                     output.write(DebugStats {
                         phase: DebugPhase::Failed as u32,
@@ -80,9 +85,17 @@ unsafe extern "C" fn debug_stats(output: *mut DebugStats) {
     });
 }
 
+/// Initializes this core generation and returns its process-lifetime dispatch table.
+///
+/// # Safety
+/// `host` must expose an aligned readable version/size prefix. A matching
+/// prefix promises a complete `Host` with a valid C resolver callback that
+/// remains callable for the process lifetime and never unwinds into Rust.
+/// `output` must be writable pointer storage. The returned table is borrowed:
+/// callers must not free it or unload this library while using its callbacks.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuinterpose_core_init(host: *const Host, output: *mut *const Core) -> i32 {
-    boundary(&FAILED, UNKNOWN, || {
+    boundary(&G_FAILED, UNKNOWN, || {
         if host.is_null() || output.is_null() {
             return INVALID_VALUE;
         }
@@ -94,18 +107,18 @@ pub unsafe extern "C" fn cuinterpose_core_init(host: *const Host, output: *mut *
             return INVALID_VALUE;
         }
         let host = unsafe { *host };
-        if let Some(existing) = HOST.get() {
+        if let Some(existing) = G_HOST.get() {
             if existing.resolve as usize != host.resolve as usize {
                 return INVALID_VALUE;
             }
-        } else if HOST.set(host).is_err() {
+        } else if G_HOST.set(host).is_err() {
             return NOT_READY;
         }
         if let Err(error) = state::initialize() {
             return error;
         }
         unsafe {
-            *output = &API;
+            *output = &G_API;
         }
         SUCCESS
     })
@@ -149,7 +162,7 @@ mod tests {
             );
             assert!(output.is_null());
             assert!(
-                HOST.get().is_none(),
+                G_HOST.get().is_none(),
                 "invalid prefix initialized core state"
             );
         }

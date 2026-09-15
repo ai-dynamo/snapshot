@@ -84,12 +84,12 @@ impl Flight {
             let object = state.multicasts.get_mut(&id).ok_or(INVALID_HANDLE)?;
             object.inflight -= 1;
             if object.driver != Some(driver) {
-                super::FAILED.store(true, Ordering::Release);
+                super::G_FAILED.store(true, Ordering::Release);
                 return Err(NOT_READY);
             }
         }
         if state.phase != Phase::Active {
-            super::FAILED.store(true, Ordering::Release);
+            super::G_FAILED.store(true, Ordering::Release);
             return Err(NOT_READY);
         }
         Ok(state)

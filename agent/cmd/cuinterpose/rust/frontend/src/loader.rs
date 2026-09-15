@@ -1,39 +1,45 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
+//! Provider lifetime and nonblocking lazy-core initialization after ELF bootstrap.
+//!
+//! Release stores publish resolved pointers and sticky failure; Acquire loads
+//! observe them before calling code. The admission flag prevents recursive or
+//! concurrent initialization from waiting while a caller holds the loader lock.
+
 use cuinterpose_abi::{ABI_VERSION, Core, Host, Initialize};
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-pub static FAILED: AtomicBool = AtomicBool::new(false);
-static REAL_DLSYM: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+pub static G_FAILED: AtomicBool = AtomicBool::new(false);
+static G_REAL_DLSYM: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 type Dlsym = unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_void;
-static PROVIDERS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
-static CORE: OnceLock<Option<usize>> = OnceLock::new();
-static INITIALIZING_CORE: AtomicBool = AtomicBool::new(false);
+static G_PROVIDERS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+static G_CORE: OnceLock<Option<usize>> = OnceLock::new();
+static G_INITIALIZING_CORE: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
-    static FORK_PROVIDERS: std::cell::RefCell<Option<std::sync::MutexGuard<'static, Vec<usize>>>> =
+    static G_FORK_PROVIDERS: std::cell::RefCell<Option<std::sync::MutexGuard<'static, Vec<usize>>>> =
         const { std::cell::RefCell::new(None) };
 }
 
 pub fn fork_prepare() {
-    FORK_PROVIDERS.with(|slot| {
-        *slot.borrow_mut() = Some(PROVIDERS.lock().unwrap_or_else(|e| e.into_inner()));
+    G_FORK_PROVIDERS.with(|slot| {
+        *slot.borrow_mut() = Some(G_PROVIDERS.lock().unwrap_or_else(|e| e.into_inner()));
     });
 }
 
 pub fn fork_unlock() {
     // This guard was acquired by the surviving fork thread. Unlock it rather
     // than overwriting an inherited Rust mutex. Provider references stay valid.
-    FORK_PROVIDERS.with(|slot| drop(slot.borrow_mut().take()));
+    G_FORK_PROVIDERS.with(|slot| drop(slot.borrow_mut().take()));
 }
 
 /// Like run-ai, anchor on dladdr's provider and discover its defined dlsym
 /// without asking the intercepted dlsym. The image must be ELF64 little-endian.
 pub fn real() -> Option<Dlsym> {
-    let mut address = REAL_DLSYM.load(Ordering::Acquire);
+    let mut address = G_REAL_DLSYM.load(Ordering::Acquire);
     if address.is_null() {
         let anchor = libc::dladdr as *const () as *const c_void;
         let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
@@ -53,7 +59,7 @@ pub fn real() -> Option<Dlsym> {
             return None;
         }
         address = (info.dli_fbase as usize).checked_add(symbol.value)? as *mut c_void;
-        REAL_DLSYM.store(address, Ordering::Release);
+        G_REAL_DLSYM.store(address, Ordering::Release);
     }
     // SAFETY: the checked ELF entry is glibc's dlsym with this public signature.
     Some(unsafe { std::mem::transmute::<*mut c_void, Dlsym>(address) })
@@ -139,7 +145,7 @@ pub fn retain_provider(selected: *mut c_void, address: *mut c_void) -> Result<bo
     // Never hold a Rust lock across dlopen: constructors can reenter the shim.
     let handle = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_NOLOAD) };
     if handle.is_null() {
-        FAILED.store(true, Ordering::Release);
+        G_FAILED.store(true, Ordering::Release);
         return Err(());
     }
     let mut retained: *mut LinkMap = std::ptr::null_mut();
@@ -160,7 +166,7 @@ pub fn retain_provider(selected: *mut c_void, address: *mut c_void) -> Result<bo
         }
         return Ok(false);
     }
-    let mut providers = PROVIDERS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut providers = G_PROVIDERS.lock().unwrap_or_else(|e| e.into_inner());
     if providers.contains(&(handle as usize)) {
         drop(providers);
         unsafe {
@@ -194,7 +200,7 @@ pub fn proxy(handle: *mut c_void, name: &CStr, caller: *const c_void) -> *mut c_
 }
 
 pub unsafe extern "C" fn resolve(name: *const c_char) -> *mut c_void {
-    cuinterpose_abi::boundary(&FAILED, std::ptr::null_mut(), || {
+    cuinterpose_abi::boundary(&G_FAILED, std::ptr::null_mut(), || {
         if name.is_null() {
             return std::ptr::null_mut();
         }
@@ -204,7 +210,10 @@ pub unsafe extern "C" fn resolve(name: *const c_char) -> *mut c_void {
         };
         let mut address = unsafe { real(libc::RTLD_NEXT, name.as_ptr()) };
         if address.is_null() {
-            let handles = PROVIDERS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let handles = G_PROVIDERS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             for handle in handles {
                 address = unsafe { real(handle as *mut c_void, name.as_ptr()) };
                 if !address.is_null() {
@@ -243,13 +252,13 @@ pub unsafe extern "C" fn resolve(name: *const c_char) -> *mut c_void {
 }
 
 pub fn core() -> Option<&'static Core> {
-    if let Some(pointer) = CORE.get() {
+    if let Some(pointer) = G_CORE.get() {
         return pointer.map(|address| unsafe { &*(address as *const Core) });
     }
     // Another initializer may be waiting for the loader lock held by this
     // caller's constructor. Never wait, even across threads. A transient
     // NOT_INITIALIZED reply does not poison or publish a failed core.
-    if INITIALIZING_CORE
+    if G_INITIALIZING_CORE
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
     {
@@ -258,12 +267,12 @@ pub fn core() -> Option<&'static Core> {
     struct Initializing;
     impl Drop for Initializing {
         fn drop(&mut self) {
-            INITIALIZING_CORE.store(false, Ordering::Release);
+            G_INITIALIZING_CORE.store(false, Ordering::Release);
         }
     }
     let _initializing = Initializing;
     // Only the nonblocking admission winner can initialize this OnceLock.
-    let pointer = CORE.get_or_init(|| {
+    let pointer = G_CORE.get_or_init(|| {
         let real = real()?;
         let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
         if unsafe { libc::dladdr(core as *const () as *const c_void, &mut info) } == 0 {
@@ -290,7 +299,7 @@ pub fn core() -> Option<&'static Core> {
             version: ABI_VERSION,
             size: size_of::<Host>() as u32,
             resolve,
-            origin_pid: super::process::ORIGIN_PID.load(Ordering::Acquire),
+            origin_pid: super::process::G_ORIGIN_PID.load(Ordering::Acquire),
         };
         let mut output = std::ptr::null();
         let result = unsafe { init(&host, &mut output) };

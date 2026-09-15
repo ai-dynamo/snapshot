@@ -109,26 +109,36 @@ fn fragmented_prefix_and_body_are_accepted_and_oversized_prefix_is_refused() {
 }
 
 #[test]
-fn malformed_frame_closes_received_descriptors() {
-    // A pipe reports EOF only when all write descriptors, including any leaked
-    // SCM_RIGHTS duplicate, have closed.
-    let (reader, writer) = UnixStream::pair().unwrap();
-    reader
-        .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+fn malformed_or_excess_ancillary_data_closes_received_descriptors() {
+    // The peer reports EOF only when every SCM_RIGHTS duplicate has closed.
+    // Cover decoding failure, excess rights, and ancillary-buffer truncation.
+    for count in [1, 2, 4] {
+        let (reader, writer) = UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let (sender, receiver) = UnixStream::pair().unwrap();
+        let mut space = [std::mem::MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(4))];
+        let mut ancillary = rustix::net::SendAncillaryBuffer::new(&mut space);
+        let descriptors = [writer.as_fd(); 4];
+        ancillary.push(rustix::net::SendAncillaryMessage::ScmRights(
+            &descriptors[..count],
+        ));
+        let body = if count == 1 {
+            vec![0xc1]
+        } else {
+            encode(&Request::Handshake).unwrap()
+        };
+        let frame = [(body.len() as u32).to_le_bytes().as_slice(), &body].concat();
+        rustix::net::sendmsg(
+            &sender,
+            &[std::io::IoSlice::new(&frame)],
+            &mut ancillary,
+            rustix::net::SendFlags::NOSIGNAL,
+        )
         .unwrap();
-    let (sender, receiver) = UnixStream::pair().unwrap();
-    let mut space = [std::mem::MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
-    let mut ancillary = rustix::net::SendAncillaryBuffer::new(&mut space);
-    let descriptors = [writer.as_fd()];
-    ancillary.push(rustix::net::SendAncillaryMessage::ScmRights(&descriptors));
-    rustix::net::sendmsg(
-        &sender,
-        &[std::io::IoSlice::new(&[1, 0, 0, 0, 0xc1])],
-        &mut ancillary,
-        rustix::net::SendFlags::NOSIGNAL,
-    )
-    .unwrap();
-    drop(writer);
-    assert!(receive::<Request>(&receiver).is_err());
-    assert_eq!((&reader).read(&mut [0]).unwrap(), 0);
+        drop(writer);
+        assert!(receive::<Request>(&receiver).is_err());
+        assert_eq!((&reader).read(&mut [0]).unwrap(), 0);
+    }
 }

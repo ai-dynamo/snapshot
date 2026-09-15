@@ -7,15 +7,16 @@
 use cuinterpose_abi::Core;
 use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 
-pub static ORIGIN_PID: AtomicI32 = AtomicI32::new(0);
-static API: AtomicPtr<Core> = AtomicPtr::new(std::ptr::null_mut());
+pub static G_ORIGIN_PID: AtomicI32 = AtomicI32::new(0);
+// Acquire readers only call a fully initialized, process-lifetime core table.
+static G_API: AtomicPtr<Core> = AtomicPtr::new(std::ptr::null_mut());
 
 pub fn publish(api: *const Core) {
-    API.store(api.cast_mut(), Ordering::Release);
+    G_API.store(api.cast_mut(), Ordering::Release);
 }
 
 unsafe extern "C" fn prepare() {
-    let api = API.load(Ordering::Acquire);
+    let api = G_API.load(Ordering::Acquire);
     if !api.is_null() {
         unsafe { ((*api).fork_prepare)() };
     }
@@ -26,7 +27,7 @@ unsafe extern "C" fn prepare() {
 
 unsafe extern "C" fn parent() {
     super::loader::fork_unlock();
-    let api = API.load(Ordering::Acquire);
+    let api = G_API.load(Ordering::Acquire);
     if !api.is_null() {
         unsafe { ((*api).fork_parent)() };
     }
@@ -34,19 +35,19 @@ unsafe extern "C" fn parent() {
 
 unsafe extern "C" fn child() {
     super::loader::fork_unlock();
-    let api = API.load(Ordering::Acquire);
+    let api = G_API.load(Ordering::Acquire);
     if !api.is_null() {
         unsafe { ((*api).fork_child)() };
     }
 }
 
 unsafe extern "C" fn initialize() {
-    ORIGIN_PID.store(unsafe { libc::getpid() }, Ordering::Release);
+    G_ORIGIN_PID.store(unsafe { libc::getpid() }, Ordering::Release);
     if unsafe { libc::pthread_atfork(Some(prepare), Some(parent), Some(child)) } != 0 {
-        super::loader::FAILED.store(true, Ordering::Release);
+        super::loader::G_FAILED.store(true, Ordering::Release);
     }
 }
 
 #[used]
 #[unsafe(link_section = ".init_array")]
-static INITIALIZE: unsafe extern "C" fn() = initialize;
+static G_INITIALIZE: unsafe extern "C" fn() = initialize;

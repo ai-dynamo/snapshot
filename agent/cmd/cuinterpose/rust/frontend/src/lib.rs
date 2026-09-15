@@ -1,7 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-#![allow(non_snake_case)]
+//! CUDA preload exports and caller-aware symbol lookup; state lives in the lazy core.
+//!
+//! CUDA pointers and handles obey the corresponding NVIDIA driver/runtime API
+//! contracts. The shim borrows them only for the call; it does not own caller
+//! buffers. Rust unwinds are contained and poison this library's generation.
+
+#![allow(non_snake_case, reason = "CUDA ABI exports retain NVIDIA symbol names")]
 mod elf;
 mod loader;
 mod process;
@@ -18,9 +24,14 @@ pub static cuinterpose_build_info: BuildInfo = BuildInfo {
 macro_rules! wrappers {
     ($($name:ident($($arg:ident: $ty:ty),*);)*) => {
         $(
+            #[doc = concat!("Intercepts `", stringify!($name), "` through the typed core table.")]
+            ///
+            /// # Safety
+            /// Pointers, sizes, handles, and context lifetime must satisfy the
+            /// identically named CUDA API's contract for the entire call.
             #[unsafe(no_mangle)]
             pub unsafe extern "C" fn $name($($arg: $ty),*) -> i32 {
-                boundary(&loader::FAILED, UNKNOWN, || {
+                boundary(&loader::G_FAILED, UNKNOWN, || {
                     let Some(core) = loader::core() else { return NOT_INITIALIZED; };
                     unsafe { (core.$name)($($arg),*) }
                 })
@@ -59,6 +70,11 @@ fn replacement(name: &[u8]) -> *mut c_void {
     }
 }
 
+/// Resolves a symbol while preserving the original caller's lookup scope.
+///
+/// # Safety
+/// `handle` must be a live dlopen handle or a supported RTLD pseudo-handle;
+/// `name` must point to a readable NUL-terminated string for this call.
 // Rust's stable ABI has no __builtin_return_address equivalent. Capture it
 // before creating a Rust frame, then tail-enter the ordinary C-ABI dispatcher.
 // This is caller identification for run-ai-style lookup, not a glibc trampoline.
@@ -73,7 +89,7 @@ unsafe extern "C" fn lookup(
     name: *const c_char,
     caller: *const c_void,
 ) -> *mut c_void {
-    boundary(&loader::FAILED, std::ptr::null_mut(), || {
+    boundary(&loader::G_FAILED, std::ptr::null_mut(), || {
         if name.is_null() {
             return std::ptr::null_mut();
         }
@@ -157,9 +173,13 @@ unsafe fn finish_query(name: *const c_char, output: *mut *mut c_void) -> i32 {
     result
 }
 
+/// Initializes CUDA and makes this process's shim endpoint ready.
+///
+/// # Safety
+/// The installed CUDA provider must expose the documented `cuInit` C ABI.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuInit(flags: u32) -> i32 {
-    boundary(&loader::FAILED, UNKNOWN, || {
+    boundary(&loader::G_FAILED, UNKNOWN, || {
         let address = unsafe { loader::resolve(c"cuInit".as_ptr()) };
         if address.is_null() {
             return NOT_INITIALIZED;
@@ -176,6 +196,11 @@ pub unsafe extern "C" fn cuInit(flags: u32) -> i32 {
     })
 }
 
+/// Resolves a driver entry point and substitutes a supported shim wrapper.
+///
+/// # Safety
+/// `name` is a readable NUL-terminated string; `out` is writable pointer storage.
+/// The caller must invoke the returned pointer with the driver-selected ABI.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuGetProcAddress(
     name: *const c_char,
@@ -183,7 +208,7 @@ pub unsafe extern "C" fn cuGetProcAddress(
     version: i32,
     flags: u64,
 ) -> i32 {
-    boundary(&loader::FAILED, UNKNOWN, || {
+    boundary(&loader::G_FAILED, UNKNOWN, || {
         let address = unsafe { loader::resolve(c"cuGetProcAddress".as_ptr()) };
         if address.is_null() {
             return NOT_INITIALIZED;
@@ -198,6 +223,11 @@ pub unsafe extern "C" fn cuGetProcAddress(
     })
 }
 
+/// Resolves a driver entry point with the v2 query-status output.
+///
+/// # Safety
+/// The `cuGetProcAddress` pointer contract applies; non-null `status` must
+/// additionally point to writable query-status storage.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuGetProcAddress_v2(
     name: *const c_char,
@@ -206,7 +236,7 @@ pub unsafe extern "C" fn cuGetProcAddress_v2(
     flags: u64,
     status: *mut i32,
 ) -> i32 {
-    boundary(&loader::FAILED, UNKNOWN, || {
+    boundary(&loader::G_FAILED, UNKNOWN, || {
         let address = unsafe { loader::resolve(c"cuGetProcAddress_v2".as_ptr()) };
         if address.is_null() {
             return NOT_INITIALIZED;
@@ -226,6 +256,10 @@ pub unsafe extern "C" fn cuGetProcAddress_v2(
     })
 }
 
+/// Resolves a v2 entry point with the default per-thread stream flag.
+///
+/// # Safety
+/// All pointer and returned-function requirements of `cuGetProcAddress_v2` apply.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuGetProcAddress_v2_ptsz(
     name: *const c_char,
@@ -241,57 +275,34 @@ pub unsafe extern "C" fn cuGetProcAddress_v2_ptsz(
 }
 
 macro_rules! runtime_resolver {
-    ($name:ident) => {
+    ($name:ident($($version:ident: $version_ty:ty)?)) => {
+        /// Resolves a runtime-selected driver entry point through the shim.
+        ///
+        /// # Safety
+        /// `name` is NUL-terminated; `out` and non-null `status` are writable.
+        /// The returned function must be called using its CUDA-selected ABI.
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(
             name: *const c_char,
             out: *mut *mut c_void,
+            $($version: $version_ty,)?
             flags: u64,
             status: *mut i32,
         ) -> i32 {
-            boundary(&loader::FAILED, 999, || {
+            boundary(&loader::G_FAILED, UNKNOWN, || {
                 let address =
                     unsafe { loader::resolve(concat!(stringify!($name), "\0").as_ptr().cast()) };
                 if address.is_null() {
-                    return 3;
+                    return NOT_INITIALIZED;
                 }
                 let function: unsafe extern "C" fn(
                     *const c_char,
                     *mut *mut c_void,
+                    $($version_ty,)?
                     u64,
                     *mut i32,
                 ) -> i32 = unsafe { std::mem::transmute(address) };
-                let result = unsafe { function(name, out, flags, status) };
-                if result == SUCCESS && (status.is_null() || unsafe { *status } == 0) {
-                    return unsafe { finish_query(name, out) };
-                }
-                result
-            })
-        }
-    };
-    ($name:ident, versioned) => {
-        #[unsafe(no_mangle)]
-        pub unsafe extern "C" fn $name(
-            name: *const c_char,
-            out: *mut *mut c_void,
-            version: u32,
-            flags: u64,
-            status: *mut i32,
-        ) -> i32 {
-            boundary(&loader::FAILED, 999, || {
-                let address =
-                    unsafe { loader::resolve(concat!(stringify!($name), "\0").as_ptr().cast()) };
-                if address.is_null() {
-                    return 3;
-                }
-                let function: unsafe extern "C" fn(
-                    *const c_char,
-                    *mut *mut c_void,
-                    u32,
-                    u64,
-                    *mut i32,
-                ) -> i32 = unsafe { std::mem::transmute(address) };
-                let result = unsafe { function(name, out, version, flags, status) };
+                let result = unsafe { function(name, out, $($version,)? flags, status) };
                 if result == SUCCESS && (status.is_null() || unsafe { *status } == 0) {
                     return unsafe { finish_query(name, out) };
                 }
@@ -300,19 +311,23 @@ macro_rules! runtime_resolver {
         }
     };
 }
-runtime_resolver!(cudaGetDriverEntryPoint);
-runtime_resolver!(cudaGetDriverEntryPoint_ptsz);
-runtime_resolver!(cudaGetDriverEntryPointByVersion, versioned);
-runtime_resolver!(cudaGetDriverEntryPointByVersion_ptsz, versioned);
+runtime_resolver!(cudaGetDriverEntryPoint());
+runtime_resolver!(cudaGetDriverEntryPoint_ptsz());
+runtime_resolver!(cudaGetDriverEntryPointByVersion(version: u32));
+runtime_resolver!(cudaGetDriverEntryPointByVersion_ptsz(version: u32));
 
+/// Writes diagnostic counters without exposing Rust-owned state.
+///
+/// # Safety
+/// Non-null `output` must be aligned, writable storage for one `DebugStats`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuinterpose_debug_stats(output: *mut DebugStats) {
-    boundary(&loader::FAILED, (), || {
-        if !output.is_null() {
-            if let Some(core) = loader::core() {
-                unsafe {
-                    (core.debug_stats)(output);
-                }
+    boundary(&loader::G_FAILED, (), || {
+        if !output.is_null()
+            && let Some(core) = loader::core()
+        {
+            unsafe {
+                (core.debug_stats)(output);
             }
         }
     });

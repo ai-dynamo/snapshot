@@ -6,6 +6,7 @@ members = ["abi", "frontend", "core", "protocol", "coordinator"]
 resolver = "3"
 
 [workspace.package]
+version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.88"
@@ -18,8 +19,18 @@ serde_bytes = "0.11"
 rmp-serde = "1"
 rustix = { version = "1", features = ["net", "fs"] }
 thiserror = "2"
-cuinterpose-protocol = { path = "protocol" }
-cuinterpose-abi = { path = "abi" }
+cuinterpose-protocol = { path = "protocol", version = "0.1.0" }
+cuinterpose-abi = { path = "abi", version = "0.1.0" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+redundant_imports = "warn"
+redundant_lifetimes = "warn"
+unused_lifetimes = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+allow_attributes_without_reason = "warn"
 
 [profile.release]
 panic = "unwind"

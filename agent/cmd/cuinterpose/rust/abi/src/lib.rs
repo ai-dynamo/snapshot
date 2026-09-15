@@ -32,7 +32,8 @@ macro_rules! core_api {
         /// Versioned, typed dispatch table. Its field order is generated from
         /// the same signature inventory used to declare both sides of the ABI.
         #[repr(C)]
-        #[allow(non_snake_case)]
+        #[derive(Debug)]
+        #[allow(non_snake_case, reason = "CUDA callback fields preserve the API inventory")]
         pub struct Core {
             pub version: u32,
             pub size: u32,
@@ -83,7 +84,7 @@ pub struct MulticastProp {
 }
 
 #[repr(C)]
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct DebugStats {
     pub allocations: u64,
     pub handles: u64,
@@ -107,6 +108,7 @@ pub enum DebugPhase {
 }
 
 #[repr(C)]
+#[derive(Debug)]
 pub struct BuildInfo {
     pub cuda_version: u32,
     pub protocol_version: u32,
@@ -119,7 +121,7 @@ pub type Resolve = unsafe extern "C" fn(*const c_char) -> *mut c_void;
 /// callbacks with the declared signatures and process-lifetime validity.
 /// A mismatched table need only provide the aligned eight-byte prefix.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Host {
     pub version: u32,
     pub size: u32,

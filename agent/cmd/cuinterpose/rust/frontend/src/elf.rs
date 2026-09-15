@@ -294,22 +294,21 @@ unsafe extern "C" fn collect(info: *mut libc::dl_phdr_info, _: usize, data: *mut
             }
         } else {
             let path = unsafe { CStr::from_ptr(info.dlpi_name) };
-            if !path.to_bytes().is_empty() && path.to_bytes() != b"linux-vdso.so.1" {
-                if let Some(image) = Image::open(path) {
-                    if let Some(symbol) = image.symbol(context.name.to_bytes()) {
-                        if let Some(address) = bias.checked_add(symbol.value) {
-                            context.result = if symbol.indirect {
-                                // GNU IFUNC st_value names a resolver, not the
-                                // implementation (notably glibc memcpy/memset).
-                                let resolver: unsafe extern "C" fn() -> *mut c_void =
-                                    unsafe { std::mem::transmute(address) };
-                                unsafe { resolver() }
-                            } else {
-                                address as *mut c_void
-                            };
-                        }
-                    }
-                }
+            if !path.to_bytes().is_empty()
+                && path.to_bytes() != b"linux-vdso.so.1"
+                && let Some(image) = Image::open(path)
+                && let Some(symbol) = image.symbol(context.name.to_bytes())
+                && let Some(address) = bias.checked_add(symbol.value)
+            {
+                context.result = if symbol.indirect {
+                    // GNU IFUNC st_value names a resolver, not the
+                    // implementation (notably glibc memcpy/memset).
+                    let resolver: unsafe extern "C" fn() -> *mut c_void =
+                        unsafe { std::mem::transmute(address) };
+                    unsafe { resolver() }
+                } else {
+                    address as *mut c_void
+                };
             }
         }
     }));

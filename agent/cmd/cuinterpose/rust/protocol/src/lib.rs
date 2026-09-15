@@ -9,11 +9,15 @@ mod record;
 mod ticket;
 mod transport;
 
+#[doc(inline)]
 pub use identity::{AllocationId, ParticipantId};
+#[doc(inline)]
 pub use record::{Access, BindingKind, BindingVersion, Record};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{io, time::Duration};
+#[doc(inline)]
 pub use ticket::{Resource, ResourceKind, TICKET_MAGIC, Ticket};
+#[doc(inline)]
 pub use transport::{receive, send};
 
 pub const VERSION: u16 = 3;
@@ -112,6 +116,10 @@ struct Envelope<T> {
     body: T,
 }
 
+/// Encodes an owned metadata value inside the current version envelope.
+///
+/// # Errors
+/// Returns serialization failures or an error when the encoded size exceeds `MAX_BYTES`.
 pub fn encode<T: Serialize>(body: &T) -> Result<Vec<u8>> {
     let bytes = rmp_serde::to_vec_named(&Envelope {
         version: VERSION,
@@ -123,6 +131,10 @@ pub fn encode<T: Serialize>(body: &T) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Decodes one versioned metadata value without retaining references to the input.
+///
+/// # Errors
+/// Rejects malformed, oversized, too deeply nested, obsolete, or trailing data.
 pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     if bytes.len() > MAX_BYTES {
         return Err(Error::Invalid("message exceeds size limit"));
@@ -160,7 +172,7 @@ where
             if seq.size_hint().is_some_and(|count| count > N) {
                 return Err(serde::de::Error::custom("too many entries"));
             }
-            let mut entries = Vec::new();
+            let mut entries = Vec::with_capacity(seq.size_hint().unwrap_or(0));
             while let Some(entry) = seq.next_element()? {
                 if entries.len() == N {
                     return Err(serde::de::Error::custom("too many entries"));

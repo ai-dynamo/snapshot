@@ -10,8 +10,10 @@ use std::sync::{
     atomic::{AtomicPtr, Ordering},
 };
 
-static SOCKETS: Mutex<Vec<RawFd>> = Mutex::new(Vec::new());
-static SNAPSHOT: AtomicPtr<Snapshot> = AtomicPtr::new(std::ptr::null_mut());
+static G_SOCKETS: Mutex<Vec<RawFd>> = Mutex::new(Vec::new());
+// Release publishes the complete atfork inventory; each AcqRel swap takes it
+// exactly once in the parent or child, which have separate post-fork memory.
+static G_SNAPSHOT: AtomicPtr<Snapshot> = AtomicPtr::new(std::ptr::null_mut());
 
 struct Snapshot {
     // Release the registry before state/cache/initialization in the parent.
@@ -26,7 +28,7 @@ pub struct Socket<T: AsRawFd>(Option<T>);
 
 impl<T: AsRawFd> Socket<T> {
     pub fn open(open: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<Self> {
-        let mut sockets = SOCKETS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sockets = G_SOCKETS.lock().unwrap_or_else(|e| e.into_inner());
         let socket = open()?;
         sockets.push(socket.as_raw_fd());
         Ok(Self(Some(socket)))
@@ -48,7 +50,7 @@ impl<T: AsRawFd> std::ops::DerefMut for Socket<T> {
 
 impl<T: AsRawFd> Drop for Socket<T> {
     fn drop(&mut self) {
-        let mut sockets = SOCKETS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sockets = G_SOCKETS.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(socket) = self.0.take() {
             sockets.retain(|fd| *fd != socket.as_raw_fd());
             drop(socket);
@@ -63,9 +65,9 @@ pub unsafe extern "C" fn prepare() {
         // Peer EXPORT never needs STATE; draining its leases cannot deadlock a
         // worker waiting for a creator while holding its local STATE.
         let state = super::state::fork_lock(&mut descriptors);
-        let sockets = SOCKETS.lock().unwrap_or_else(|e| e.into_inner());
+        let sockets = G_SOCKETS.lock().unwrap_or_else(|e| e.into_inner());
         descriptors.extend(sockets.iter().copied());
-        SNAPSHOT.store(
+        G_SNAPSHOT.store(
             Box::into_raw(Box::new(Snapshot {
                 state,
                 sockets: Some(sockets),
@@ -80,14 +82,14 @@ pub unsafe extern "C" fn prepare() {
 }
 
 pub unsafe extern "C" fn parent() {
-    let snapshot = SNAPSHOT.swap(std::ptr::null_mut(), Ordering::AcqRel);
+    let snapshot = G_SNAPSHOT.swap(std::ptr::null_mut(), Ordering::AcqRel);
     if !snapshot.is_null() {
         drop(unsafe { Box::from_raw(snapshot) });
     }
 }
 
 pub unsafe extern "C" fn child() {
-    let snapshot = SNAPSHOT.swap(std::ptr::null_mut(), Ordering::AcqRel);
+    let snapshot = G_SNAPSHOT.swap(std::ptr::null_mut(), Ordering::AcqRel);
     if !snapshot.is_null() {
         let snapshot = unsafe { &mut *snapshot };
         for fd in &snapshot.descriptors {

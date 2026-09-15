@@ -52,7 +52,7 @@ RUN test "$(rustc --version | cut -d' ' -f2)" = 1.95.0 \
        musl-tools make gcc binutils python3 python3-msgpack \
     && rm -rf /var/lib/apt/lists/* \
     && rustup target add x86_64-unknown-linux-musl \
-    && rustup component add rust-src rustfmt
+    && rustup component add rust-src rustfmt clippy
 WORKDIR /cuinterpose
 COPY cmd/cuinterpose/ ./
 RUN make native

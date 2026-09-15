@@ -78,6 +78,47 @@ identity checks are retained.
 
 ## Implementation boundaries
 
+### Maintenance constraints
+
+The [Microsoft Rust guidelines](https://microsoft.github.io/rust-guidelines/guidelines/checklist/index.html)
+and [Rust coding guidelines](https://rust-coding-guidelines.github.io/rust-coding-guidelines-zh/)
+inform this implementation, with the preload/FFI constraints taking precedence
+over generic application recipes. Workspace metadata and lints are inherited;
+`make -C agent cuinterpose-test` requires rustfmt and workspace-wide Clippy
+with warnings denied, in addition to the runtime tests.
+
+The private ABI uses borrowed C-layout tables, pointers, and scalars only.
+Rust collections, allocation ownership, errors, thread locals, and type
+identities remain inside their originating library. CUDA/diagnostic exports
+retain their ABI names; internal Rust statics use `G_`. Process-lifetime
+statics and the small signature-inventory macros are intentional: they bind
+global interposition callbacks and keep both sides' C signatures synchronized.
+Unsafe FFI entry points document caller obligations; casts at the actual
+driver/loader boundary remain necessary, not a general Rust coding pattern.
+
+No allocator replacement, telemetry runtime, `target-cpu=native`, or extra
+async runtime belongs in the preload path. Existing `std::sync` mutexes,
+condition variables, and bounded channels are supported APIs, not deprecated
+ones. They provide the required two-worker topology without new dependencies.
+The lock order is initialization → CUDA state → export cache → socket registry
+→ frontend provider inventory; provider locks are never held over `dlopen` or
+CUDA calls. Atomic Acquire/Release pairs publish complete generations and
+callback pointers, or mark sticky failure.
+
+Rust panics are bugs, not CUDA error transport. C boundaries contain unwinds
+and poison the generation; they do not catch aborts, OOM, invalid pointers, or
+foreign exceptions. Ordinary poisoned-state access remains refused. Existing
+teardown/fork bookkeeping may inspect poisoned mutex contents solely to drain
+owned FDs or abandon the old generation, not to resume CUDA mutation.
+The quiescent fork contract remains mandatory. `RefCell` in its paired
+atfork hooks is not a reentrant public API; converting borrow failures into
+success would conceal a contract violation.
+
+Clippy is a maintenance gate, not a proof of FFI soundness. Miri cannot
+qualify the real glibc loader, CUDA driver, or CRIU lifecycle. The full
+pedantic/restriction lint sets are not blanket-enabled: changes should fix
+specific problems rather than generate casts, wrappers, or suppression noise.
+
 Core lifecycle operations and phases use enums rather than numeric states.
 The numeric `DebugPhase` values exist only at the diagnostic C ABI boundary.
 

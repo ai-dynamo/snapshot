@@ -1416,3 +1416,63 @@ directory. The physical-GPU and GLM results in earlier sections remain
 attributed to their earlier revisions. Version 3 has not yet been run on
 physical GPUs or through two-node GLM capture/restore; it requires fresh
 artifacts and a new checkpoint, not restore of the retained v2 artifact.
+
+## 18. Guideline-conformance maintenance pass
+
+Read the Microsoft checklist and its universal, FFI, correctness, project,
+documentation, macros, and Rust-shaped-design details, plus the supplied Rust
+coding guidelines. Applied concrete improvements rather than claiming blanket
+compliance: workspace-inherited version/lints, a strict workspace Clippy build
+gate, documented unsafe ABI entry points, Debug for public ABI records,
+internal `G_` static names, and comments explaining atomic publication.
+Exported names and ABI 5 layouts remain unchanged; Cargo.lock and dependencies
+are unchanged.
+
+Flattened the flagged conditional branches without changing CUDA cleanup order
+or error handling. The two runtime-resolver macro bodies now share one body
+whose invocation explicitly names the optional version parameter/type.
+Coordinator CLI parsing uses slice patterns and named fields rather than
+numeric argument offsets. Known-size vectors reserve capacity. Ancillary
+decoding consumes rustix's owned iterator directly instead of allocating
+intermediate descriptor vectors; tests cover excess and truncated rights as
+well as malformed bodies. Additional CLI cases reject incomplete triples,
+zero PIDs, and malformed PIDs.
+
+The README records lasting constraints, not a rule-by-rule compliance table:
+no allocator/telemetry/async runtime in the preload path; std mutexes and
+bounded channels remain supported and appropriate; existing lock ordering,
+poisoning, two-worker dispatch, quiescent fork reset, and explicit fallible
+CUDA cleanup are retained. There is no new poisoned-lock recovery, no
+exception/OOM-catching claim, and no Miri or general FFI soundness claim.
+
+Compared with `7715254`, Rust `src/` text grows from 6,394 to 6,468 lines,
+mostly safety/module documentation. Excluding blank and comment-only lines,
+it decreases from 5,870 to 5,851. Rust plus Python/C/patch fixture text grows
+from 10,230 to 10,349 lines; meaningful tests were retained and extended.
+This is not represented as an overall PR-size reduction.
+
+Validation passed on the final code:
+
+- Workspace strict Clippy, rustfmt, and 27 GNU Rust tests.
+- `make -C agent cuinterpose-test`: pinned GNU/musl build, new strict Clippy
+  gate, 23 loader cases, 19 endpoint cases, static coordinator/protocol tests,
+  and artifact symbol/dependency/GLIBC checks.
+- `make -C agent cuinterpose-build`, then the complete reference runner against
+  those packaged GNU libraries and musl coordinator: original C self-tests,
+  13 tracking, five lifecycle, five multicast C cases, nine multicast,
+  22 carrier, eight RPC, and six fork Python modes.
+- Rustdoc with warnings denied; Go CUDA/executor unit tests; dependency-tree
+  check confirms frontend only `abi` + `libc`, ABI dependency-free.
+
+The initial Clippy baseline found missing unsafe-function safety documentation
+and collapsible branches; all were fixed without blanket suppression. One
+multi-file patch stopped at a mismatched host-carrier fixture line after
+applying earlier files; the remaining edits were reapplied against the actual
+context. No runtime regression required a workaround, phase retry, or relaxed
+assertion. Expected fail-stop and Python quiescent-fork diagnostics remain
+checked by the harness. Evidence is in session-local
+`.cuinterpose-guidelines-{packaging,build,reference}.log`.
+
+No cluster resources or deployments were touched. Physical-GPU/vLLM
+qualification of v3 remains outstanding; earlier v2 GPU evidence does not
+qualify this change.

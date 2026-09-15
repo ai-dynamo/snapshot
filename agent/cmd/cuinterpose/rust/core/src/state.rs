@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
+//! Per-generation logical handles, mappings, and shared-allocation lifecycle state.
+//! The generation owns its locks and CUDA records; fork abandons rather than drops it.
+
 use super::ticket;
 use cuinterpose_abi::*;
 use cuinterpose_protocol::Ticket;
@@ -126,9 +129,12 @@ struct Generation {
     state: Mutex<State>,
     cache: super::export_cache::ExportCache,
 }
-static STATE: AtomicPtr<Generation> = AtomicPtr::new(std::ptr::null_mut());
-static INITIALIZING: Mutex<()> = Mutex::new(());
-static CHILD: AtomicBool = AtomicBool::new(false);
+// Release publication follows successful worker startup; Acquire readers may
+// then borrow the generation for its process lifetime. Only a quiescent fork
+// child abandons the inherited pointer; it never frees the parent's generation.
+static G_STATE: AtomicPtr<Generation> = AtomicPtr::new(std::ptr::null_mut());
+static G_INITIALIZING: Mutex<()> = Mutex::new(());
+static G_CHILD: AtomicBool = AtomicBool::new(false);
 
 pub struct ForkState {
     // Field order releases locks in reverse acquisition order in the parent.
@@ -138,8 +144,8 @@ pub struct ForkState {
 }
 
 pub fn fork_lock(descriptors: &mut Vec<i32>) -> ForkState {
-    let initializing = INITIALIZING.lock().unwrap_or_else(|e| e.into_inner());
-    let pointer = STATE.load(Ordering::Acquire);
+    let initializing = G_INITIALIZING.lock().unwrap_or_else(|e| e.into_inner());
+    let pointer = G_STATE.load(Ordering::Acquire);
     if pointer.is_null() {
         return ForkState {
             initializing: Some(initializing),
@@ -158,15 +164,15 @@ pub fn fork_lock(descriptors: &mut Vec<i32>) -> ForkState {
 }
 
 pub fn fork_child() {
-    STATE.store(std::ptr::null_mut(), Ordering::Release);
-    CHILD.store(true, Ordering::Release);
+    G_STATE.store(std::ptr::null_mut(), Ordering::Release);
+    G_CHILD.store(true, Ordering::Release);
     // A lifecycle failure belongs to the abandoned generation. ABI/loader
     // poison remains sticky and is not reset.
-    super::FAILED.store(false, Ordering::Release);
+    super::G_FAILED.store(false, Ordering::Release);
 }
 
 pub fn cache() -> Result<&'static super::export_cache::ExportCache> {
-    let pointer = STATE.load(Ordering::Acquire);
+    let pointer = G_STATE.load(Ordering::Acquire);
     if pointer.is_null() {
         return Err(NOT_INITIALIZED);
     }
@@ -443,18 +449,18 @@ impl State {
                     Ok(saved) => saved,
                     Err(error) => {
                         for id in recovered {
-                            if let Some(allocation) = self.allocations.get_mut(&id) {
-                                if let Ok(context) = Context::enter(
+                            if let Some(allocation) = self.allocations.get_mut(&id)
+                                && let Ok(context) = Context::enter(
                                     allocation.context,
                                     allocation.properties.location.id,
-                                ) {
-                                    if let Some(driver) = allocation.driver {
-                                        if invoke!("cuMemRelease", fn(u64), driver).is_ok() {
-                                            allocation.driver = None;
-                                        }
-                                    }
-                                    let _ = context.leave();
+                                )
+                            {
+                                if let Some(driver) = allocation.driver
+                                    && invoke!("cuMemRelease", fn(u64), driver).is_ok()
+                                {
+                                    allocation.driver = None;
                                 }
+                                let _ = context.leave();
                             }
                         }
                         return Err(error);
@@ -652,7 +658,7 @@ impl State {
             cached_exports: cache().and_then(|cache| cache.len()).unwrap_or(0) as u64,
             live_raw_imports: self.raw.values().map(|n| u64::from(*n)).sum(),
             unsupported_exportable_creations: self.unsupported,
-            phase: (if super::FAILED.load(Ordering::Acquire) {
+            phase: (if super::G_FAILED.load(Ordering::Acquire) {
                 DebugPhase::Failed
             } else {
                 match self.phase {
@@ -672,11 +678,9 @@ impl State {
         let handle_live = self.handles.values().any(|value| *value == id);
         let mapped = self.mappings.values().any(|mapping| mapping.id == id);
         let allocation = self.allocations.get_mut(&id).ok_or(INVALID_HANDLE)?;
-        if !handle_live {
-            if let Some(driver) = allocation.driver {
-                call!("cuMemRelease", fn(u64), driver);
-                allocation.driver = None;
-            }
+        if !handle_live && let Some(driver) = allocation.driver {
+            call!("cuMemRelease", fn(u64), driver);
+            allocation.driver = None;
         }
         if !handle_live && !mapped {
             cache()?.replace((ResourceKind::Unicast, id), None)?;
@@ -728,37 +732,41 @@ pub fn initialize() -> Result<()> {
     // STATE denotes a ready generation, never one whose listener is still
     // starting. A caller may own the loader lock needed by another initializer,
     // so it must not wait for that initializer's thread/TLS setup.
-    if !STATE.load(Ordering::Acquire).is_null() {
+    if !G_STATE.load(Ordering::Acquire).is_null() {
         return Ok(());
     }
-    if super::FAILED.load(Ordering::Acquire) {
+    if super::G_FAILED.load(Ordering::Acquire) {
         return Err(UNKNOWN);
     }
-    let _initializing = match INITIALIZING.try_lock() {
+    let _initializing = match G_INITIALIZING.try_lock() {
         Ok(guard) => guard,
         Err(TryLockError::WouldBlock) => return Err(NOT_INITIALIZED),
-        Err(TryLockError::Poisoned(poison)) if CHILD.load(Ordering::Acquire) => poison.into_inner(),
+        Err(TryLockError::Poisoned(poison)) if G_CHILD.load(Ordering::Acquire) => {
+            poison.into_inner()
+        }
         Err(TryLockError::Poisoned(_)) => return Err(UNKNOWN),
     };
-    if !STATE.load(Ordering::Acquire).is_null() {
+    if !G_STATE.load(Ordering::Acquire).is_null() {
         return Ok(());
     }
-    if super::FAILED.load(Ordering::Acquire) {
+    if super::G_FAILED.load(Ordering::Acquire) {
         return Err(UNKNOWN);
     }
     let result = initialize_generation();
     if result.is_err() {
         // Actual setup failure is sticky; contention above is a transient
         // refusal and must not poison the initializer that is making progress.
-        super::FAILED.store(true, Ordering::Release);
+        super::G_FAILED.store(true, Ordering::Release);
     }
     result
 }
 
 fn initialize_generation() -> Result<()> {
     let pid = unsafe { libc::getpid() };
-    let configured = if CHILD.load(Ordering::Acquire)
-        || super::HOST.get().is_some_and(|host| host.origin_pid != pid)
+    let configured = if G_CHILD.load(Ordering::Acquire)
+        || super::G_HOST
+            .get()
+            .is_some_and(|host| host.origin_pid != pid)
     {
         Err(std::env::VarError::NotPresent)
     } else {
@@ -802,22 +810,22 @@ fn initialize_generation() -> Result<()> {
     super::control::start(&state.endpoint, state.identity)?;
     // No fallible work follows successful startup. Failed startup drops only
     // the unpublished, empty generation; no CUDA resources have been created.
-    STATE.store(Box::into_raw(generation), Ordering::Release);
+    G_STATE.store(Box::into_raw(generation), Ordering::Release);
     Ok(())
 }
 
 pub fn get() -> Result<MutexGuard<'static, State>> {
-    if super::FAILED.load(Ordering::Acquire) {
+    if super::G_FAILED.load(Ordering::Acquire) {
         return Err(UNKNOWN);
     }
-    let pointer = STATE.load(Ordering::Acquire);
+    let pointer = G_STATE.load(Ordering::Acquire);
     if pointer.is_null() {
         return Err(NOT_INITIALIZED);
     }
     let state = unsafe { &*pointer }.state.lock().map_err(|_| UNKNOWN)?;
     // A caller may have waited behind a failed lifecycle operation. Do not
     // admit queued mutations using only the pre-lock check.
-    if super::FAILED.load(Ordering::Acquire) {
+    if super::G_FAILED.load(Ordering::Acquire) {
         return Err(UNKNOWN);
     }
     Ok(state)
@@ -927,13 +935,12 @@ pub fn cuMemCreate(
 
 pub fn cuMemRelease(handle: u64) -> Result<i32> {
     let mut state = get()?;
-    if let Some(id) = state.handles.get(&handle) {
-        if state.phase != Phase::Active
+    if let Some(id) = state.handles.get(&handle)
+        && (state.phase != Phase::Active
             || state.multicasts.get(id).is_some_and(|a| a.inflight != 0)
-            || state.allocations.get(id).is_some_and(|a| a.pins != 0)
-        {
-            return Err(NOT_READY);
-        }
+            || state.allocations.get(id).is_some_and(|a| a.pins != 0))
+    {
+        return Err(NOT_READY);
     }
     if let Some(id) = state.handles.remove(&handle) {
         if let Err(error) = state.settle(id) {
@@ -1003,7 +1010,7 @@ pub fn cuMemRetainAllocationHandle(out: *mut u64, address: *mut c_void) -> Resul
         if allocation.driver.is_some() {
             if let Err(error) = invoke!("cuMemRelease", fn(u64), driver) {
                 state.unreleased_handles.push(driver);
-                super::FAILED.store(true, Ordering::Release);
+                super::G_FAILED.store(true, Ordering::Release);
                 return Err(error);
             }
         } else {

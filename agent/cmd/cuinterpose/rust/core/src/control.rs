@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
+//! Two prestarted workers separate peer FD service from serialized CUDA control.
+//! Queue pressure refuses requests before mutation; no operation is retried.
+
 use super::process::Socket;
 use super::state::{self, Result};
 use cuinterpose_protocol::{self as protocol, Operation, ParticipantId, Reply, Request, Response};
@@ -27,7 +30,7 @@ pub fn start(endpoint: &str, identity: ParticipantId) -> Result<()> {
             .spawn(move || {
                 // Queued sockets remain in the atfork FD registry.
                 while let Ok((socket, request)) = receiver.recv() {
-                    cuinterpose_abi::boundary(&super::FAILED, (), || {
+                    cuinterpose_abi::boundary(&super::G_FAILED, (), || {
                         let _ = serve(socket, request, identity);
                     });
                 }
@@ -52,7 +55,7 @@ pub fn start(endpoint: &str, identity: ParticipantId) -> Result<()> {
                     else {
                         continue;
                     };
-                    cuinterpose_abi::boundary(&super::FAILED, (), || {
+                    cuinterpose_abi::boundary(&super::G_FAILED, (), || {
                         let _ = dispatch(socket, identity, &sender);
                     });
                 }
@@ -143,7 +146,7 @@ fn serve(
     );
     let mut passed = None;
     let result = (|| -> std::result::Result<Reply, String> {
-        if super::FAILED.load(Ordering::Acquire) {
+        if super::G_FAILED.load(Ordering::Acquire) {
             return Err("cuinterpose state failed".into());
         }
         if let Request::Export {
@@ -200,7 +203,7 @@ fn serve(
                         copy_us: transfer.copy_us,
                     }),
                     Err(code) => {
-                        super::FAILED.store(true, Ordering::Release);
+                        super::G_FAILED.store(true, Ordering::Release);
                         Err(format!(
                             "CUDA lifecycle operation failed: CUDA error {code}"
                         ))
@@ -220,14 +223,12 @@ fn serve(
         passed.as_ref().map(|lease| lease.descriptor()),
     )?;
     drop(passed);
-    if loaded {
-        if let Ok(mut state) = state::get() {
-            if let Some(arena) = state.arena.take() {
-                if arena.release().is_err() {
-                    super::FAILED.store(true, Ordering::Release);
-                }
-            }
-        }
+    if loaded
+        && let Ok(mut state) = state::get()
+        && let Some(arena) = state.arena.take()
+        && arena.release().is_err()
+    {
+        super::G_FAILED.store(true, Ordering::Release);
     }
     Ok(())
 }

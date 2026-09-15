@@ -40,11 +40,11 @@ struct Fixture {
 
 impl Fixture {
     fn new(count: usize, rendezvous: Option<Operation>) -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        static G_NEXT: AtomicUsize = AtomicUsize::new(0);
         let directory = std::env::temp_dir().join(format!(
             "cui-contract-{}-{}",
             std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
+            G_NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir(&directory).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
@@ -419,6 +419,41 @@ fn usage_errors() {
             "relative",
             "--process",
             "1",
+            "1",
+        ],
+        vec![
+            "--prepare",
+            "--proc-root",
+            "",
+            "--checkpoint-dir",
+            "/tmp",
+            "--control-dir",
+            "/tmp",
+            "--process",
+            "1",
+        ],
+        vec![
+            "--prepare",
+            "--proc-root",
+            "",
+            "--checkpoint-dir",
+            "/tmp",
+            "--control-dir",
+            "/tmp",
+            "--process",
+            "0",
+            "1",
+        ],
+        vec![
+            "--prepare",
+            "--proc-root",
+            "",
+            "--checkpoint-dir",
+            "/tmp",
+            "--control-dir",
+            "/tmp",
+            "--process",
+            "not-a-pid",
             "1",
         ],
     ] {

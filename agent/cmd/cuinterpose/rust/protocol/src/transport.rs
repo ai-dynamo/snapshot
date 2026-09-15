@@ -12,13 +12,19 @@ use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 
+/// Sends one bounded message, optionally transferring a borrowed descriptor.
+///
+/// # Errors
+/// Returns serialization or socket errors; a failed send must not be retried
+/// on this stream because a prefix or descriptor may already have been sent.
 pub fn send<T: Serialize>(
     socket: &UnixStream,
     message: &T,
     descriptor: Option<&OwnedFd>,
 ) -> Result<()> {
     let body = encode(message)?;
-    let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
+    let mut bytes = Vec::with_capacity(4 + body.len());
+    bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
     bytes.extend_from_slice(&body);
     let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
     let mut ancillary = SendAncillaryBuffer::new(&mut space);
@@ -45,6 +51,11 @@ pub fn send<T: Serialize>(
     Ok(())
 }
 
+/// Receives one bounded message and takes ownership of any transferred descriptor.
+///
+/// # Errors
+/// Rejects truncated/oversized frames, invalid encoding, and excess descriptors.
+/// Received descriptors are closed on error; the caller should close the stream.
 pub fn receive<T: DeserializeOwned>(socket: &UnixStream) -> Result<(T, Option<OwnedFd>)> {
     let mut prefix = [0; 4];
     let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(2))];
@@ -60,18 +71,19 @@ pub fn receive<T: DeserializeOwned>(socket: &UnixStream) -> Result<(T, Option<Ow
             result => break result.map_err(io::Error::from)?,
         }
     };
-    let descriptors: Vec<OwnedFd> = ancillary
+    let mut descriptors = ancillary
         .drain()
-        .flat_map(|message| match message {
-            RecvAncillaryMessage::ScmRights(fds) => fds.collect::<Vec<_>>(),
-            _ => Vec::new(),
+        .filter_map(|message| match message {
+            RecvAncillaryMessage::ScmRights(fds) => Some(fds),
+            _ => None,
         })
-        .collect();
+        .flatten();
+    let descriptor = descriptors.next();
     if received.bytes == 0
         || received
             .flags
             .intersects(ReturnFlags::CTRUNC | ReturnFlags::TRUNC)
-        || descriptors.len() > 1
+        || descriptors.next().is_some()
     {
         return Err(Error::Invalid(
             "closed socket or invalid ancillary descriptors",
@@ -85,5 +97,5 @@ pub fn receive<T: DeserializeOwned>(socket: &UnixStream) -> Result<(T, Option<Ow
     let mut bytes = vec![0; size];
     (&*socket).read_exact(&mut bytes)?;
     // Every received FD is owned before any fallible framing/decoding work.
-    Ok((decode(&bytes)?, descriptors.into_iter().next()))
+    Ok((decode(&bytes)?, descriptor))
 }

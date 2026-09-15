@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
+//! Short-lived participant validation, global CUDA lifecycle barriers, and state publication.
+
 mod report;
 mod state;
 mod topology;
@@ -187,45 +189,49 @@ fn transfer(
 }
 
 fn run() -> Result<()> {
-    let argv: Vec<String> = std::env::args().collect();
-    if argv.len() < 11
-        || !(argv.len() - 8).is_multiple_of(3)
-        || !matches!(argv[1].as_str(), "--prepare" | "--restore")
-        || argv[2] != "--proc-root"
-        || argv[4] != "--checkpoint-dir"
-        || argv[6] != "--control-dir"
-    {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<_> = argv.iter().map(String::as_str).collect();
+    let [
+        mode @ ("--prepare" | "--restore"),
+        "--proc-root",
+        proc_root,
+        "--checkpoint-dir",
+        checkpoint,
+        "--control-dir",
+        control,
+        processes @ ..,
+    ] = args.as_slice()
+    else {
         return Err("usage: cuinterpose-coordinator (--prepare|--restore) --proc-root PATH --checkpoint-dir PATH --control-dir PATH --process OBSERVED_PID NAMESPACE_PID...".into());
+    };
+    if processes.is_empty() || !processes.len().is_multiple_of(3) {
+        return Err("expected --process OBSERVED_PID NAMESPACE_PID".into());
     }
-    let prepare = argv[1] == "--prepare";
-    let control = &argv[7];
+    let prepare = *mode == "--prepare";
     if !control.starts_with('/') {
         return Err("--control-dir must be an absolute path".into());
     }
-    let path = PathBuf::from(&argv[5]).join("cuinterpose.state");
+    let path = PathBuf::from(checkpoint).join("cuinterpose.state");
     // Validate the artifact before contacting a restored process.
     let mut expected = if prepare {
         Vec::new()
     } else {
         state::read(&path).map_err(|error| format!("cannot parse {}: {error}", path.display()))?
     };
-    let mut participants = Vec::new();
-    for process in argv[8..].chunks_exact(3) {
-        if process[0] != "--process" {
+    let mut participants = Vec::with_capacity(processes.len() / 3);
+    for process in processes.chunks_exact(3) {
+        let ["--process", observed, namespace] = process else {
             return Err("expected --process OBSERVED_PID NAMESPACE_PID".into());
-        }
-        let observed: i32 = process[1].parse()?;
-        let namespace: i32 = process[2].parse()?;
+        };
+        let observed: i32 = observed.parse()?;
+        let namespace: i32 = namespace.parse()?;
         if observed <= 0 || namespace <= 0 {
             return Err("process IDs must be positive".into());
         }
-        let endpoint = if argv[3].is_empty() {
+        let endpoint = if proc_root.is_empty() {
             format!("{control}/cuinterpose-{namespace}.sock")
         } else {
-            format!(
-                "{}/{observed}/root{control}/cuinterpose-{namespace}.sock",
-                argv[3]
-            )
+            format!("{proc_root}/{observed}/root{control}/cuinterpose-{namespace}.sock")
         };
         if endpoint.len() >= 108 {
             return Err("control socket path does not fit in sun_path".into());

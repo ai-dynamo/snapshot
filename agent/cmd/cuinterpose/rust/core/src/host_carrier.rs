@@ -23,19 +23,19 @@ mod tests {
     use std::ffi::{CStr, c_char};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    static REGISTERED: AtomicUsize = AtomicUsize::new(0);
-    static REGISTER_CALLS: AtomicUsize = AtomicUsize::new(0);
-    static RELEASED: AtomicUsize = AtomicUsize::new(0);
-    static SWITCHED: AtomicUsize = AtomicUsize::new(0);
+    static G_REGISTERED: AtomicUsize = AtomicUsize::new(0);
+    static G_REGISTER_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static G_RELEASED: AtomicUsize = AtomicUsize::new(0);
+    static G_SWITCHED: AtomicUsize = AtomicUsize::new(0);
 
     unsafe extern "C" fn current(output: *mut *mut c_void) -> i32 {
         unsafe {
-            output.write(1usize as *mut c_void);
+            output.write(std::ptr::dangling_mut::<c_void>());
         }
         SUCCESS
     }
     unsafe extern "C" fn switch(_: *mut c_void) -> i32 {
-        SWITCHED.fetch_add(1, Ordering::Relaxed);
+        G_SWITCHED.fetch_add(1, Ordering::Relaxed);
         711
     }
     unsafe extern "C" fn retain(output: *mut *mut c_void, _: i32) -> i32 {
@@ -45,16 +45,16 @@ mod tests {
         SUCCESS
     }
     unsafe extern "C" fn release(_: i32) -> i32 {
-        RELEASED.fetch_add(1, Ordering::Relaxed);
+        G_RELEASED.fetch_add(1, Ordering::Relaxed);
         712
     }
     unsafe extern "C" fn register(_: *mut c_void, _: usize, _: u32) -> i32 {
-        REGISTERED.fetch_add(1, Ordering::Relaxed);
-        REGISTER_CALLS.fetch_add(1, Ordering::Relaxed);
+        G_REGISTERED.fetch_add(1, Ordering::Relaxed);
+        G_REGISTER_CALLS.fetch_add(1, Ordering::Relaxed);
         SUCCESS
     }
     unsafe extern "C" fn unregister(_: *mut c_void) -> i32 {
-        REGISTERED.fetch_sub(1, Ordering::Relaxed);
+        G_REGISTERED.fetch_sub(1, Ordering::Relaxed);
         SUCCESS
     }
     unsafe extern "C" fn create(_: *mut u64, _: usize, _: *const AllocationProp, _: u64) -> i32 {
@@ -88,7 +88,7 @@ mod tests {
             return;
         }
         assert!(
-            crate::HOST
+            crate::G_HOST
                 .set(Host {
                     version: ABI_VERSION,
                     size: size_of::<Host>() as u32,
@@ -98,9 +98,9 @@ mod tests {
                 .is_ok()
         );
         Context::enter(1, 0).unwrap().leave().unwrap();
-        assert_eq!(SWITCHED.load(Ordering::Relaxed), 0);
+        assert_eq!(G_SWITCHED.load(Ordering::Relaxed), 0);
         assert_eq!(Context::enter(0, 0).err(), Some(711));
-        assert_eq!(RELEASED.load(Ordering::Relaxed), 1);
+        assert_eq!(G_RELEASED.load(Ordering::Relaxed), 1);
         let id = AllocationId([1; 16]);
         let arena = Arena {
             base: 0x1000,
@@ -134,8 +134,8 @@ mod tests {
             pins: 0,
         }];
         assert_eq!(arena.load(&mut allocations), Err(713));
-        assert_eq!(REGISTER_CALLS.load(Ordering::Relaxed), 1);
-        assert_eq!(REGISTERED.load(Ordering::Relaxed), 0);
+        assert_eq!(G_REGISTER_CALLS.load(Ordering::Relaxed), 1);
+        assert_eq!(G_REGISTERED.load(Ordering::Relaxed), 0);
         assert_eq!(allocations[0].driver, None);
     }
 }
@@ -162,13 +162,11 @@ impl Context {
             primary = Some(device);
         }
         let changed = target != previous;
-        if changed {
-            if let Err(error) = invoke!("cuCtxSetCurrent", fn(*mut c_void), target) {
-                if let Some(device) = primary {
-                    let _ = invoke!("cuDevicePrimaryCtxRelease_v2", fn(i32), device);
-                }
-                return Err(error);
+        if changed && let Err(error) = invoke!("cuCtxSetCurrent", fn(*mut c_void), target) {
+            if let Some(device) = primary {
+                let _ = invoke!("cuDevicePrimaryCtxRelease_v2", fn(i32), device);
             }
+            return Err(error);
         }
         Ok(Self {
             previous,
@@ -341,24 +339,21 @@ impl Arena {
             }
             Err(error) => {
                 for allocation in fresh {
-                    if let Some(driver) = allocation.driver {
-                        if let Ok(context) =
+                    if let Some(driver) = allocation.driver
+                        && let Ok(context) =
                             Context::enter(allocation.context, allocation.properties.location.id)
-                        {
-                            let _ = invoke!("cuMemRelease", fn(u64), driver);
-                            let _ = context.leave();
-                        }
-                    }
-                }
-                if registered {
-                    if let Ok(context) = Context::enter(self.context, self.device) {
-                        let _ = invoke!(
-                            "cuMemHostUnregister",
-                            fn(*mut c_void),
-                            self.base as *mut c_void
-                        );
+                    {
+                        let _ = invoke!("cuMemRelease", fn(u64), driver);
                         let _ = context.leave();
                     }
+                }
+                if registered && let Ok(context) = Context::enter(self.context, self.device) {
+                    let _ = invoke!(
+                        "cuMemHostUnregister",
+                        fn(*mut c_void),
+                        self.base as *mut c_void
+                    );
+                    let _ = context.leave();
                 }
                 Err(error)
             }
