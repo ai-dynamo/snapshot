@@ -85,14 +85,113 @@ has landed there since.
 3. The `Release` workflow triggers on `release: published` and:
    - runs the full validation gate against the release commit,
    - builds and pushes the operator and agent images to
-     `ghcr.io/ai-dynamo/snapshot`,
+     `ghcr.io/ai-dynamo/snapshot`, each carrying SLSA provenance and an SPDX
+     SBOM as OCI attestations,
    - packages and pushes the Helm chart to GHCR as an OCI artifact,
+   - signs both images and the chart by digest with cosign keyless signing,
+   - attaches an SPDX and a CycloneDX SBOM per image, the chart tarball, and a
+     signed `SHA256SUMS` to the GitHub release,
    - creates the three Go module sub-path tags.
 4. Verify the workflow succeeded and that the images and chart are pullable at
    the new version.
 
 Artifacts are always built and published by CI from the release commit. Never
-build and push release artifacts from a local machine.
+build and push release artifacts from a local machine. Signing happens in CI
+too: the identity in every signature is this repository's workflow, not a
+person, and there is no private key anywhere to leak or rotate.
+
+## Verifying a release
+
+Every published artifact is signed with [Sigstore](https://www.sigstore.dev/)
+keyless signing. There is no public key to fetch — verification asserts *which
+workflow, in which repository, at which tag* produced the artifact, and the
+signature is recorded in the public Rekor transparency log.
+
+All the commands below need [cosign](https://docs.sigstore.dev/cosign/installation/).
+Set the identity of this repository's release workflow once:
+
+```bash
+export COSIGN_IDENTITY='^https://github\.com/ai-dynamo/snapshot/\.github/workflows/push-artifacts\.yaml@refs/tags/v'
+export COSIGN_ISSUER='https://token.actions.githubusercontent.com'
+```
+
+The regular expression is anchored on `refs/tags/v`, so it accepts only
+artifacts built from a release tag. Images built from `main` are signed by the
+same workflow at `refs/heads/main` and are deliberately rejected by it.
+
+### Images
+
+Verify by digest where you can; a tag can be repointed, a digest cannot.
+
+```bash
+cosign verify \
+  --certificate-identity-regexp "${COSIGN_IDENTITY}" \
+  --certificate-oidc-issuer "${COSIGN_ISSUER}" \
+  ghcr.io/ai-dynamo/snapshot/operator:v0.1.0
+
+cosign verify \
+  --certificate-identity-regexp "${COSIGN_IDENTITY}" \
+  --certificate-oidc-issuer "${COSIGN_ISSUER}" \
+  ghcr.io/ai-dynamo/snapshot/agent:v0.1.0
+```
+
+A successful run prints the signature payload and the certificate subject; a
+failure exits non-zero with `no matching signatures`.
+
+### Helm chart
+
+The chart is an OCI artifact in the same registry, so it verifies the same way:
+
+```bash
+cosign verify \
+  --certificate-identity-regexp "${COSIGN_IDENTITY}" \
+  --certificate-oidc-issuer "${COSIGN_ISSUER}" \
+  ghcr.io/ai-dynamo/snapshot/snapshot:0.1.0
+```
+
+Note the chart tag carries no `v` prefix — Helm chart versions are bare semver.
+
+### Provenance and SBOM attestations
+
+Each image carries an in-toto SLSA provenance statement and an SPDX SBOM,
+attached as OCI attestations at build time:
+
+```bash
+docker buildx imagetools inspect \
+  ghcr.io/ai-dynamo/snapshot/operator:v0.1.0 \
+  --format '{{ json .Provenance }}'
+
+docker buildx imagetools inspect \
+  ghcr.io/ai-dynamo/snapshot/operator:v0.1.0 \
+  --format '{{ json .SBOM }}'
+```
+
+The provenance names the source repository, the commit, and the workflow that
+built the image, so you can confirm an image came from the commit it claims.
+
+### Release assets and checksums
+
+Each release carries two SBOMs per image — SPDX (`.spdx.json`) and CycloneDX
+(`.cdx.json`), the same inventory in the two formats consumers ask for — plus
+the packaged chart and a `SHA256SUMS` covering all of them. `SHA256SUMS` is
+itself signed, so verifying one signature transitively covers every asset:
+
+```bash
+gh release download v0.1.0 --repo ai-dynamo/snapshot
+
+cosign verify-blob \
+  --certificate SHA256SUMS.pem \
+  --signature SHA256SUMS.sig \
+  --certificate-identity-regexp "${COSIGN_IDENTITY}" \
+  --certificate-oidc-issuer "${COSIGN_ISSUER}" \
+  SHA256SUMS
+
+sha256sum --check SHA256SUMS
+```
+
+Verify the signature *before* trusting the checksums. `sha256sum --check` on
+its own only proves the files match a list an attacker could have replaced
+alongside them.
 
 ## Release notes
 

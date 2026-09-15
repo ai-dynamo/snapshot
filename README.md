@@ -156,6 +156,9 @@ Multi-GPU and Arm support are on the roadmap.
 
 ## Documentation
 
+The full documentation set lives in [`docs/`](docs/) — guides, reference, and
+operations, indexed below.
+
 **Get started**
 
 - [Usage guides](docs/guides/README.md) — build a snapshot-ready image per inference framework, then checkpoint and restore.
@@ -204,6 +207,16 @@ releases are cut. AI coding agents should also read [AGENTS.md](AGENTS.md).
 ## Security
 
 To report a security vulnerability, follow the process in [SECURITY.md](SECURITY.md).
+
+## Community
+
+- **[Discussions](https://github.com/ai-dynamo/snapshot/discussions)** — questions, ideas, and open-ended design conversations.
+- **[Issues](https://github.com/ai-dynamo/snapshot/issues)** — bugs and feature requests. Every change starts as an issue; see [CONTRIBUTING.md](CONTRIBUTING.md).
+- **[Changelog](CHANGELOG.md)** — what changed in each release.
+- **Security** — never in a public issue; follow [SECURITY.md](SECURITY.md).
+
+Questions and design discussions belong in Discussions rather than an issue.
+Issues are for work the project intends to do.
 
 ## Feedback
 

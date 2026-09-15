@@ -57,3 +57,18 @@ updates:
         update-types:
           - version-update:semver-major
           - version-update:semver-minor
+
+  # The e2e suite is a uv-managed Python project with its own lockfile.
+  - package-ecosystem: uv
+    directory: /e2e
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      e2e-dependencies:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch

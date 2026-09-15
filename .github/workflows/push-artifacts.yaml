@@ -27,6 +27,10 @@ concurrency:
 
 permissions: {}
 
+env:
+  # Passed through to make, so the references we sign are the ones it pushed.
+  REGISTRY: ghcr.io/ai-dynamo/snapshot
+
 jobs:
 
   # Gate: skip all jobs if triggered by a failed CI run.
@@ -109,15 +113,28 @@ jobs:
       - name: Run full validation gate
         run: make check
 
-  # ── Operator image ──────────────────────────────────────────────────────────
-  build-operator:
-    name: Build and push operator image
+  # ── Images ──────────────────────────────────────────────────────────────────
+  # Identical apart from the `include` entries, so one job keeps the attestation
+  # flags and pinned SHAs in step by construction rather than by review.
+  build-image:
+    name: Build and push ${{ matrix.image }} image
     needs: [version, validate]
     permissions:
       # Checkout the validated source and publish its image to GHCR.
       contents: read
       packages: write
+      id-token: write
     runs-on: ubuntu-latest
+    # Sized for the agent: CRIU from source on a CUDA base, plus an SBOM scan.
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: operator
+          - image: agent
+            # Dockerfile exits 1 on other arches
+            build_args: --platform=linux/amd64
     steps:
       # Check out the exact commit that passed CI, not whatever is at HEAD now.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -135,59 +152,59 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push operator image
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # --provenance/--sbom attach SLSA provenance and an SPDX SBOM as OCI
+      # attestations. --metadata-file reports the pushed digest, which is what we
+      # sign: a tag can be repointed afterwards, a digest cannot.
+      - name: Build and push image
+        id: build
+        env:
+          IMAGE: ${{ matrix.image }}
+          BUILD_ARGS: ${{ matrix.build_args }}
+          TAGS: ${{ needs.version.outputs.tags }}
         run: |
-          make docker-build-operator \
-            TAGS="${{ needs.version.outputs.tags }}" \
-            DOCKER_BUILD_ARGS="--push \
-              --cache-from=type=gha,scope=operator \
-              --cache-to=type=gha,scope=operator,mode=max"
+          make "docker-build-${IMAGE}" \
+            REGISTRY="${REGISTRY}" \
+            TAGS="${TAGS}" \
+            DOCKER_BUILD_ARGS="--push ${BUILD_ARGS} \
+              --provenance=mode=max \
+              --sbom=true \
+              --metadata-file=buildx.json \
+              --cache-from=type=gha,scope=${IMAGE} \
+              --cache-to=type=gha,scope=${IMAGE},mode=max"
+          DIGEST="$(jq -er '."containerimage.digest"' buildx.json)"
+          echo "${DIGEST}" > "digest-${IMAGE}.txt"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
 
-  # ── Agent image (slow: CRIU from source + CUDA base) ────────────────────────
-  build-agent:
-    name: Build and push agent image
-    needs: [version, validate]
-    permissions:
-      # Checkout the validated source and publish its image to GHCR.
-      contents: read
-      packages: write
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Sign image
+        env:
+          IMAGE: ${{ matrix.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${REGISTRY}/${IMAGE}@${DIGEST}"
+
+      # Matrix legs share one set of job outputs, last leg winning, so digests
+      # travel as files. The release job needs the digest captured here.
+      - name: Publish digest for the release job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          ref: ${{ needs.version.outputs.head_sha }}
-          persist-credentials: false
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
-
-      - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # --platform=linux/amd64: Dockerfile exits 1 on other arches
-      - name: Build and push agent image
-        timeout-minutes: 45
-        run: |
-          make docker-build-agent \
-            TAGS="${{ needs.version.outputs.tags }}" \
-            DOCKER_BUILD_ARGS="--platform=linux/amd64 \
-              --push \
-              --cache-from=type=gha,scope=agent \
-              --cache-to=type=gha,scope=agent,mode=max"
+          name: digest-${{ matrix.image }}
+          path: digest-${{ matrix.image }}.txt
+          retention-days: 1
+          if-no-files-found: error
 
   # ── Helm chart (OCI push to GHCR) ──────────────────────────────────────────
   release-helm:
     name: Package and push Helm chart
-    needs: [version, validate, build-operator, build-agent]
+    needs: [version, validate, build-image]
     permissions:
       # Checkout the validated chart and publish it to GHCR.
       contents: read
       packages: write
+      id-token: write
+    outputs:
+      chart: ${{ steps.push.outputs.chart }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -201,6 +218,9 @@ jobs:
       - name: Lint chart before packaging
         run: helm lint ./charts/snapshot
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
       - name: Log in to GHCR (Helm OCI)
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | \
@@ -208,12 +228,147 @@ jobs:
               --username "${{ github.actor }}" \
               --password-stdin
 
+      # helm registry login writes its own credential store, which cosign does
+      # not read. cosign reads ~/.docker/config.json, so it needs its own login.
+      - name: Log in to GHCR (Docker config, for cosign)
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       # Chart.yaml on disk stays at dev values. Version is injected at package
       # time. The values.yaml `tag: ""` fields resolve to appVersion in templates.
       - name: Package and push Helm chart
+        id: push
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          VERSION="${{ needs.version.outputs.version }}"
+          CHART="snapshot-${VERSION#v}.tgz"
           helm package ./charts/snapshot \
             --version "${VERSION#v}" \
             --app-version "${VERSION}"
-          helm push "./snapshot-${VERSION#v}.tgz" oci://ghcr.io/ai-dynamo/snapshot
+          helm push "./${CHART}" "oci://${REGISTRY}" > helm-push.log 2>&1 \
+            || { cat helm-push.log; exit 1; }
+          cat helm-push.log
+          DIGEST="$(awk '/^Digest: /{print $2}' helm-push.log)"
+          case "${DIGEST}" in
+            sha256:*) ;;
+            *) echo "Could not read the pushed chart digest from helm output" >&2; exit 1 ;;
+          esac
+          echo "chart=${CHART}" >> "$GITHUB_OUTPUT"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign Helm chart
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "${REGISTRY}/snapshot@${DIGEST}"
+
+      # Hand over the exact tarball pushed, so its published checksum describes
+      # those bytes rather than a re-package.
+      - name: Upload packaged chart for the release job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: helm-chart
+          path: ${{ steps.push.outputs.chart }}
+          retention-days: 1
+          if-no-files-found: error
+
+  # ── Release assets (SBOMs, checksums, signature) ────────────────────────────
+  # The attestations above only reach someone who already pulled the image;
+  # these are the same facts as files, for auditing beforehand. Only tagged
+  # releases have somewhere to attach them.
+  release-assets:
+    name: Attach SBOMs and checksums to the release
+    needs: [version, build-image, release-helm]
+    if: inputs.version != ''
+    permissions:
+      # Upload assets to the GitHub release for this tag.
+      contents: write
+      # Let syft read the published images from GHCR.
+      packages: read
+      id-token: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Confirm the release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.version }}
+        run: |
+          gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" > /dev/null || {
+            echo "No published release for ${TAG}. Publish the release before" >&2
+            echo "running this workflow with a version input." >&2
+            exit 1
+          }
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+
+      - name: Download the packaged chart
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: helm-chart
+          path: assets
+
+      - name: Download the image digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: digest-*
+          merge-multiple: true
+          path: digests
+
+      # Scanned from the registry by digest, so each SBOM describes the bytes
+      # that were published. Both formats, because one scan emits both.
+      - name: Generate SBOMs for the published images
+        run: |
+          for image in operator agent; do
+            digest="$(cat "digests/digest-${image}.txt")"
+            syft scan --platform linux/amd64 \
+              -o "spdx-json=assets/sbom-${image}.spdx.json" \
+              -o "cyclonedx-json=assets/sbom-${image}.cdx.json" \
+              "registry:${REGISTRY}/${image}@${digest}"
+          done
+
+      # One signature over SHA256SUMS transitively covers every asset.
+      - name: Write and sign SHA256SUMS
+        working-directory: assets
+        env:
+          CHART: ${{ needs.release-helm.outputs.chart }}
+        run: |
+          sha256sum \
+            sbom-operator.spdx.json sbom-operator.cdx.json \
+            sbom-agent.spdx.json sbom-agent.cdx.json \
+            "${CHART}" > SHA256SUMS
+          cat SHA256SUMS
+          cosign sign-blob --yes \
+            --output-signature SHA256SUMS.sig \
+            --output-certificate SHA256SUMS.pem \
+            SHA256SUMS
+
+      - name: Upload assets to the release
+        working-directory: assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.version }}
+          CHART: ${{ needs.release-helm.outputs.chart }}
+        run: |
+          gh release upload "${TAG}" --repo "${GITHUB_REPOSITORY}" --clobber \
+            sbom-operator.spdx.json \
+            sbom-operator.cdx.json \
+            sbom-agent.spdx.json \
+            sbom-agent.cdx.json \
+            "${CHART}" \
+            SHA256SUMS \
+            SHA256SUMS.sig \
+            SHA256SUMS.pem
