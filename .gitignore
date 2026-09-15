@@ -12,3 +12,9 @@ __pycache__/
 
 # E2E Python workspace
 e2e/.venv/
+
+# Benchmark dashboard dependencies, builds, and browser-test output
+dashboard/node_modules/
+dashboard/dist/
+dashboard/playwright-report/
+dashboard/test-results/

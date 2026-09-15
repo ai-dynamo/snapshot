@@ -1,0 +1,29 @@
+{
+  "name": "@ai-dynamo/snapshot-benchmark-dashboard",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "npm run typecheck && vite build",
+    "build:production": "node scripts/check-node.mjs && DASHBOARD_PRODUCTION=true npm run build",
+    "pretest:browser": "npm run build:production && rm -rf dist/index && cp -R public/index dist/index",
+    "test": "vitest run",
+    "test:browser": "playwright test",
+    "typecheck": "tsc --noEmit",
+    "validate-data": "node scripts/check-node.mjs && node scripts/validate-history.ts"
+  },
+  "dependencies": {
+    "chart.js": "4.5.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "25.5.0",
+    "typescript": "6.0.2",
+    "vite": "8.2.2",
+    "vitest": "5.0.0"
+  }
+}

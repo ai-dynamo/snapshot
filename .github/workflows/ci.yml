@@ -82,3 +82,28 @@ jobs:
             e2e/tests/test_benchmark_history.py \
             e2e/tests/test_framework_manifests.py \
             e2e/tests/test_workload_scripts.py -vv
+
+  # Runs on every pull request so cross-cutting changes (shared workflows, the
+  # history writer's output shape) cannot silently break the dashboard.
+  benchmark-dashboard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: dashboard/.nvmrc
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('dashboard/package-lock.json') }}
+      - run: npm ci
+      - run: npm test
+      - run: npm run validate-data -- --strict
+      - run: npm exec playwright -- install --with-deps chromium
+      - run: npm run test:browser

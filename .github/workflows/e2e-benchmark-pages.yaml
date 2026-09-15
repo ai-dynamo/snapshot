@@ -1,0 +1,115 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: E2E Benchmark Dashboard
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'dashboard/**'
+      - '.github/actions/fetch-benchmark-history/**'
+      - '.github/workflows/e2e-benchmark-pages.yaml'
+  workflow_run:
+    workflows: [E2E Framework Tests]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+# Queue rather than cancel: cancelling a run mid actions/deploy-pages leaves a
+# failed github-pages deployment behind.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # Scheduled framework runs publish partial results even when a framework
+    # fails, so do not gate deployment on the parent workflow's conclusion.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.event == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout dashboard source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Fetch benchmark history
+        id: history
+        uses: ./.github/actions/fetch-benchmark-history
+        with:
+          token: ${{ github.token }}
+
+      - name: Bootstrap an empty history index
+        if: steps.history.outputs.exists != 'true'
+        env:
+          HISTORY_DIR: ${{ steps.history.outputs.history_dir }}
+        run: |
+          set -euo pipefail
+          echo "::notice::No benchmark history exists yet; deploying an empty dashboard."
+          mkdir -p "${HISTORY_DIR}/index"
+          printf '%s\n' \
+            '{"manifestVersion":1,"historyFormatVersion":1,"supportedSchemaVersions":[1],"recordCount":0,"newestResultAt":null,"chunks":[]}' \
+            > "${HISTORY_DIR}/index/manifest.json"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: dashboard/.nvmrc
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Test dashboard logic
+        working-directory: dashboard
+        run: npm test
+
+      # Invalid records are reported as annotations and skipped by the
+      # dashboard at load time; only a broken manifest blocks the deployment.
+      - name: Validate benchmark history
+        working-directory: dashboard
+        env:
+          HISTORY_DIR: ${{ steps.history.outputs.history_dir }}
+        run: npm run validate-data -- "${HISTORY_DIR}/index"
+
+      - name: Build static dashboard
+        working-directory: dashboard
+        run: npm run build:production
+
+      - name: Add benchmark history to static artifact
+        env:
+          HISTORY_DIR: ${{ steps.history.outputs.history_dir }}
+        run: cp -R "${HISTORY_DIR}/index" "${GITHUB_WORKSPACE}/dashboard/dist/index"
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: dashboard/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
