@@ -340,7 +340,9 @@ jobs:
               "registry:${REGISTRY}/${image}@${digest}"
           done
 
-      # One signature over SHA256SUMS transitively covers every asset.
+      # One signature over SHA256SUMS transitively covers every asset. cosign v3
+      # writes a Sigstore bundle carrying the signature and the certificate
+      # together; --output-signature/--output-certificate are ignored under it.
       - name: Write and sign SHA256SUMS
         working-directory: assets
         env:
@@ -352,9 +354,9 @@ jobs:
             "${CHART}" > SHA256SUMS
           cat SHA256SUMS
           cosign sign-blob --yes \
-            --output-signature SHA256SUMS.sig \
-            --output-certificate SHA256SUMS.pem \
+            --bundle SHA256SUMS.sigstore.json \
             SHA256SUMS
+          test -s SHA256SUMS.sigstore.json
 
       - name: Upload assets to the release
         working-directory: assets
@@ -370,5 +372,4 @@ jobs:
             sbom-agent.cdx.json \
             "${CHART}" \
             SHA256SUMS \
-            SHA256SUMS.sig \
-            SHA256SUMS.pem
+            SHA256SUMS.sigstore.json
