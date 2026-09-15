@@ -9,14 +9,16 @@ The [development log](../../../../docs/development/cuinterpose-rust-development-
 records failed approaches, reproduced defects, their fixes, and remaining
 validation gaps. It distinguishes production behavior from test-only adapters.
 
-This workspace is an incomplete, main-based port. It builds a run-ai-style
+This main-based port awaits integrated CRIU/vLLM qualification. It builds a run-ai-style
 `libcuinterpose.so` front end, a separate `libcuinterpose_core.so`, and
 `cuinterpose-coordinator`. Unicast, host-carrier, and multicast reconstruction
 are implemented and exercised against fake CUDA. The existing three-test
 physical-GPU suite also passed against revision `41dd090` on two B200s
 (zero failures/skips, 19.186 seconds); see development-log section 11.
 Fork generation reset is not qualified for general post-CUDA fork.
-The standalone GPU result is not CRIU, vLLM, or cross-node qualification.
+The separate native GLM 5.2 TE8 test passed capture on eight B200s on `tx5tk`,
+CRIU/native CUDA/Rust restore on eight B200s on `s2877`, and fresh post-restore
+inference. Development-log section 14 records the exact images and limitations.
 
 ## Relationship to the draft C design
 
@@ -36,9 +38,43 @@ This is not a claim of identical behavior or complete parity.
 | Uncertain asynchronous copies | If synchronization cannot establish completion, terminate the process without cleanup; never free potentially DMA-referenced memory. |
 | Allocation failure | Standard Rust allocation OOM can abort rather than return a CUDA error; catching panics does not change that. |
 
-Snapshot packaging/orchestration, static coordinator delivery, and CRIU/vLLM
-qualification remain unfinished integration work, not intentional design
-differences or evidence of parity.
+Snapshot packaging and namespace orchestration are implemented. The original
+three-test GPU suite passed at `41dd090`; the packaged artifacts also passed
+the native two-node GLM test. CustomStorage/NIXL composition remains untested.
+
+## Snapshot integration
+
+`make -C agent cuinterpose-build` builds both GNU libraries and the static musl
+coordinator in a digest-pinned Rust 1.95.0 Debian bookworm container. Docker is
+required; the shared host's Rust installation is not changed. The resulting
+ELFs are checked for exact exports, a maximum `GLIBC_2.34` requirement, and no
+CUDA/runtime linkage; the coordinator must have neither `PT_INTERP` nor
+`DT_NEEDED`. `make -C agent cuinterpose-test` runs unit, loader, endpoint, and
+static coordinator CLI/protocol tests in the same builder. A newer build libc
+is not permission to raise the artifact's checked glibc baseline.
+
+The agent image installs the frontend and core under `/usr/local/lib/snapshot`
+and the coordinator under `/usr/local/bin`. Both libraries are copied as
+`0644`, with the NVIDIA executable as `0755`, into every checkpoint target's
+`/tmp/snapshot-cuda`. Only the frontend is added to `LD_PRELOAD`, on annotation
+opt-in. Possible multi-GPU targets (including unknown DRA counts) independently
+use `cuda-checkpoint --launch-job`; single-GPU and CPU-only targets are not
+wrapped solely because of interposition.
+
+Prepare opens trusted executable/checkpoint-directory descriptors, the target
+root, and mount/UTS/IPC/network/PID namespace descriptors before `nsenter`.
+Root and working-directory entry are explicit: entering a mount namespace
+alone does not change filesystem root. Restore pins the same namespace set
+and root, remounts both libraries at their source paths, and opens the static
+coordinator before CRIU. The restore-complete sentinel is published only after
+CRIU, native CUDA restore/unlock, and coordinator reconstruction succeed.
+User and cgroup namespaces remain in the agent context.
+
+Prepared manifests without CUDA metadata, requested interposition, delivered
+tools, or `cuinterpose.state` are refused. The mount helper checks all three
+tools before entering a namespace; a missing frontend or core is not a native
+restore fallback. Main's image/host/GPU compatibility and process/artifact
+identity checks are retained.
 
 ## Implementation boundaries
 

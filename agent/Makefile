@@ -6,11 +6,19 @@ include $(REPO_HACK_DIR)/tools.mk
 
 .DEFAULT_GOAL := build
 
-.PHONY: build test tidy lint fmt pagebroker-generate pagebroker-check-generated
+.PHONY: build go-build cuinterpose-build cuinterpose-test test tidy lint fmt pagebroker-generate pagebroker-check-generated
 
 PROTOC_GEN_GO := $(TOOLS_BIN_DIR)/protoc-gen-go
 
-build:
+build: go-build cuinterpose-build
+
+cuinterpose-build:
+	$(MAKE) -C cmd/cuinterpose build
+
+cuinterpose-test:
+	$(MAKE) -C cmd/cuinterpose test
+
+go-build:
 	GOOS=linux GOARCH=amd64 go build -o bin/agent ./cmd/agent
 	GOOS=linux GOARCH=amd64 go build -o bin/nsrestore ./cmd/nsrestore
 

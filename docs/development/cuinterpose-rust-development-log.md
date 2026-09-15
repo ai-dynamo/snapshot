@@ -26,9 +26,10 @@ implementation, not a production fallback.
 | `b99f4bc`: loader composition and participant initialization | Committed after review and independent tests |
 | Unicast zero handles, host-carrier cleanup, and prestarted control execution | Retained during fork simplification; focused independent review approved and independent unsanitized gate passed |
 | C-style quiescent fork and unknown-completion fail-stop | Focused independent review approved and independent gate passed atop `b99f4bc`; broad global gate and coordinator retry adapter removed at user direction; see section 10 |
-| Snapshot delivery/orchestration, static coordinator packaging, optimization composition | Pending |
+| Snapshot delivery/orchestration and static coordinator packaging | Implemented on the working tree after `3184500`; local Go, chart, artifact and containerized Rust checks pass; integrated image/CRIU qualification pending |
+| CustomStorage/NIXL optimization composition | Pending; intentionally separate from native integration |
 | Standalone physical-GPU suite | Three passed, zero failures/skips at `41dd090` on two B200s; see section 11 |
-| CRIU, vLLM, and two-node qualification | Not run for this Rust port |
+| Native CRIU/vLLM two-node qualification | GLM 5.2 TE8 passed on eight B200s per node; section 14 |
 
 ## What “fallback” means here
 
@@ -990,3 +991,308 @@ the tests assert their success and content counts, and print transfer metrics.
 This gate restores CUDA state in the same worker processes. It does not run
 CRIU, the Snapshot agent/operator, or vLLM, and it does not move the workload
 between nodes. Those remain separate required integration tests.
+
+## 12. Native Snapshot integration after `3184500`
+
+The working tree ports tool delivery, annotation shaping, and coordinator
+orchestration from C-stack commits `3f12b0c`, `f4963ad`, and `8ca6275`, without
+importing a C cuinterpose library or coordinator. Main's host/image/GPU
+compatibility metadata and process/artifact identity checks are retained.
+The old plan named Go 1.26.6, but the actual baseline pins 1.27.1 everywhere;
+this integration does not change those pins or the agent base image.
+
+Delivery copies the NVIDIA executable and both Rust libraries into every
+target. Annotation opt-in affects only frontend preloading. Multi-GPU or
+unknown DRA counts independently select `--launch-job`. Restore rejects a
+prepared artifact without CUDA metadata, requested interposition, delivered
+tools, or its state file; the mount helper verifies all three tool files before
+attempting namespace or mount syscalls.
+
+### Build failures and corrections
+
+The first pinned Rust builder used Debian bullseye. Its security repository
+advertised several package versions whose downloads returned HTTP 404.
+Switching the repository transport from HTTP to HTTPS did not fix that.
+The builder now uses digest-pinned `rust:1.95.0-slim-bookworm`; the actual
+GNU outputs still pass the strict maximum `GLIBC_2.34` gate. This is not a
+relaxation of the workload libc baseline. The agent's NGC base remains unchanged.
+An ignored local GPU-test virtual environment initially enlarged the Docker
+context by gigabytes; `agent/.dockerignore` now excludes virtual environments,
+Cargo outputs, and test caches.
+
+Building the coordinator for musl exposed an actual portability defect:
+`msghdr.msg_controllen` and `cmsghdr.cmsg_len` are not `usize` on musl. Eleven
+compile errors prevented a static binary. Fixed-size ancillary lengths now
+convert to the platform field type, and received lengths convert to `usize`
+for buffer arithmetic. GNU and musl protocol tests, including SCM_RIGHTS
+descriptor transfer, pass. The wire layout and phase semantics did not change.
+
+Ported tests initially used the older manifest constructors without main's
+host/GPU compatibility arguments. These were updated rather than removing
+the compatibility fields. Two local patch-placement mistakes temporarily
+inserted tests inside helper functions; formatting caught them before tests
+ran, and their function boundaries were corrected.
+
+### Namespace-root correction
+
+The C-reference prepare path pinned namespace descriptors but did not change
+filesystem root or cwd. `setns(CLONE_NEWNS)` alone does not do that, so direct
+`/snapshot-control` lookup could still resolve through the agent root.
+Prepare now additionally pins `/proc/<pid>/root` and passes `--root` and `--wd`
+through that descriptor. Restore does the same, and pins the remaining four
+namespace descriptors rather than resolving them later through `nsenter -t`.
+The coordinator executable and prepare checkpoint directory remain trusted
+open descriptors. No host-side coordinator shortcut was introduced.
+
+### Local checks and remaining gates
+
+The pinned container produced GNU frontend/core libraries and a musl static
+coordinator. Artifact checks verify exact dynamic exports, modes `0644` and
+`0755`, glibc symbol versions, no CUDA/runtime linkage, and no coordinator
+`PT_INTERP` or `DT_NEEDED`. The coordinator's CLI/phase test runs against the
+release musl executable, covering prepare, state publication, restore, and
+every multicast suboperation through real Unix sockets with an empty
+participant. It validates orchestration, not CUDA behavior.
+
+| Command | Result |
+| --- | --- |
+| `make -C agent cuinterpose-build` | Passed in the pinned container |
+| `make -C agent cuinterpose-test` | GNU workspace tests, 23 loader cases, 19 actual-core endpoints, static release CLI test, and 9 musl protocol tests passed |
+| `go test ./api/... ./agent/... ./operator/...` | Passed |
+| `make -C agent go-build` | Agent and nsrestore compiled |
+| `helm lint charts/snapshot` | Passed |
+| `helm unittest charts/snapshot` | 6 suites, 15 tests passed |
+| `git diff --check HEAD` | Passed |
+
+Logs are in the parent workspace under `.cuinterpose-evidence/integration-*`,
+including failed build attempts. No cluster jobs were launched in this task.
+The complete agent/operator images, root `make check`, full fake-driver
+reference suite against the new artifacts, and native two-node CRIU/vLLM
+capture/restore/inference remain validation gates. The three real-GPU results
+in section 11 belong to `41dd090`, not these newly packaged artifacts.
+CustomStorage/NIXL composition remains separate future work.
+
+## 13. Packaged tests and first native cross-node vLLM attempt
+
+On 2026-09-15 UTC, testing proceeded without a review gate, at the user's
+direction. The integration remained an uncommitted diff atop `3184500`.
+The complete fake-driver reference suite passed against the **packaged GNU
+libraries and static musl coordinator**, selected with the new
+`reference.py --artifacts` option rather than the runner's default GNU rebuild.
+The artifact audit, all three Go module suites, 41 framework/workload Python
+tests, and six Helm suites containing 15 tests passed.
+
+Root `make check` first found one overlong newly added test line. After wrapping
+that line, generation, licensing, formatting, tidy, lint, vulnerability checking,
+and Helm lint passed. The final clean-tree assertion correctly failed because
+this integration has not been committed. Agent tests and lint passed again
+after the mount-compatibility fix below.
+
+### Full images and setup corrections
+
+The first agent image command omitted the named `api` build context; the next
+omitted `compliance`. Docker consequently tried to pull those names as images.
+Using the canonical root Makefile's two named contexts built the full agent
+successfully. The operator image also built. Both were pushed under unique
+`nvcr.io/nvidian/dynamo-dev/schwinns` tags:
+
+| Image tag | Manifest digest |
+| --- | --- |
+| `rust-native-agent-3184500-20260915` | `sha256:6f3863d4201254d925c8e1688ab208ace837368cc51dafcf5ee93e6cae07f0eb` |
+| `rust-native-operator-3184500-20260915` | `sha256:4c5d37c3abeb03e801821fd7714da30b31544e383b55ddf95ac7f33adbe36d98` |
+| `rust-native-agent-3184500-20260915-mountfix` | `sha256:f3009c067c72e043ab66c85a4ba7af677c7e559b3bfa6da8311b01e767a07794` |
+
+Image inspection verified both library locations and mode `0644`, and both
+coordinator locations and mode `0755`. The Rust artifact hashes match section
+12's packaged build. Running `cuda-checkpoint --version` in the local
+non-GPU container failed to load `libcuda.so.1`; this was not treated as a
+runtime capability result. The shipped tool subsequently performed native CUDA
+capture successfully on the source node.
+
+The test reused the guide's pinned vLLM 0.27.1 image and existing framework
+pytest assertions. A private adapter selected TP2, two DRA GPUs, the existing
+NFS model cache, and the actual Go pod-contract shaping functions for source
+tool delivery and preload. It changed `tensor_parallel_size` to two in the
+guide program but did not weaken inference, checkpoint, or restore assertions.
+The source ran on `tx5tk` and the destination was explicitly `l9nsv`.
+The reusable framework test now accepts `SNAPSHOT_E2E_RESTORE_NODE`, asserts
+it differs from the source, and verifies actual destination placement.
+
+The owned agent installation was updated with `OnDelete` scheduling. Only the
+idle test-node agents were replaced; the existing `s2877` agent and GLM workload
+were not restarted. Original agent/operator templates were saved first.
+An initial merge patch omitted rather than nulled `affinity`, leaving the old
+`l9nsv` exclusion in place; explicitly clearing that field enabled its agent.
+
+### Successful source capture, followed by a real integration refusal
+
+Run `rust-native-vllm-d9c1cf` generated before capture, slept, and completed
+Rust prepare, native CUDA checkpoint, and CRIU dump. Capture took **46.737 s**:
+CUDA checkpoint 2.881 s, cuinterpose prepare 0.465 s, CRIU dump 42.927 s.
+The coordinator inspected four participants and 1,060 records, with zero raw
+imports and unsupported creations, and saved 136 allocations totaling
+2,109,734,912 bytes.
+
+Each of the two workers recorded 257 unicast allocations and mappings,
+including 67 imported allocations and 68 content allocations, plus four
+multicast objects, devices, bindings, and mappings. The two other participants
+had no topology records. vLLM reported FlashInfer attention with the TRTLLM
+decode backend and its MNNVL allreduce/norm fusion workspace. Thus real
+unicast and multicast coverage was established before capture.
+
+The source GPUs were `GPU-390c745d-b113-45b5-8d1a-7873a74d8a29` and
+`GPU-9702d531-4c6f-99a0-eab6-1f7438365df4`. The destination selected
+`GPU-fd77376f-599d-a407-48c4-e89927e80d3f` and
+`GPU-f9f66bb6-1527-586f-d438-aca8e5fecba0`. Both nodes used driver 595.58.03.
+The destination image pull took about 214 seconds; no CUDA/CRIU restore
+occurred during that wait.
+
+Once the placeholder started, the agent refused restore:
+
+```text
+gate=inspect reason="mount: source /tmp/snapshot-cuda, target missing"
+```
+
+The new-main compatibility check runs before restore installs Snapshot's own
+tools mount. The C-derived integration had not accounted for that ordering.
+The correction removes **only** `/tmp/snapshot-cuda` from the pre-existing
+mount requirement when the manifest records `cudaTools.delivered: true`.
+The subsequent mandatory mount step still checks every tool file and fails
+if installation fails. Tests confirm an unmanaged tools mount or any missing
+workload mount still fails compatibility inspection. No compatibility bypass
+annotation was used.
+
+The first pytest invocation failed after 474.46 seconds. Its visible Pod
+condition was overwritten with `SnapshotPending` by a host-side controller;
+the Rust destination agent log retains the concrete compatibility refusal.
+The failed JUnit and logs are preserved, not replaced by a later success.
+
+### Corrected rerun blocked by destination DiskPressure
+
+The fixed agent was built, pushed, and passed the focused regression and agent
+suite. Before a second pytest invocation could start, kubelet evicted the
+replacement `l9nsv` agent with `DiskPressure` and
+`Init:ContainerStatusUnknown`. The node's condition changed at
+2026-09-15 05:09:31 UTC. The launcher's readiness check failed because the
+evicted agent had already been replaced; **no second workload capture or
+restore test ran**. We did not delete node data, remove other images, or evict
+other workloads to force progress.
+
+The original agent/operator templates were verified unchanged apart from our
+patches and restored exactly. The old `tx5tk` agent image was restored and
+ready; `s2877` remained untouched. Both test GPU claims, the refused restore
+Pod, and the private app ConfigMap were deleted. The successful source
+checkpoint remains for diagnosis:
+
+```text
+PodSnapshot: rust-native-vllm-d9c1cf-snapshot
+PodSnapshotContent: podsnapshotcontent-42f64f2f-d68a-4d47-b442-930832c458eb
+Content UID: 331b35e0-e6ac-4e0f-9863-0cd43da5d029
+Artifact: /checkpoints/artifacts/331b35e0-e6ac-4e0f-9863-0cd43da5d029/containers/main
+```
+
+Evidence, manifests, state, source hashes, image digests, test adapters, logs,
+failed JUnit, node pressure, and rollback checks are retained privately in
+`.cuinterpose-evidence/rust-native-e2e/`. There is **no successful cross-node
+restore or post-restore inference result yet**. Resolve destination disk
+pressure or choose another safe compatible node before resuming the two-node
+vLLM test.
+
+## 14. Native GLM 5.2 TE8 cross-node test passed
+
+On 2026-09-15 UTC, the requested GLM test ran without another review or broad
+preflight gate. It used `nvidia/GLM-5.2-NVFP4`, vLLM 0.27.1, tensor parallel
+size eight, expert parallelism enabled, and spawn workers. `moe_backend='auto'`
+selected `FLASHINFER_TRTLLM` automatically; no MoE backend override was applied.
+The source used all eight B200 GPUs on `tx5tk`; the destination used all eight
+on `s2877`. Both nodes ran driver 595.58.03.
+
+The existing framework pytest assertions passed: pre-capture generation,
+snapshot Ready, source deletion, actual placement on a distinct node,
+RestoreSucceeded, post-restore ready sentinel, fresh HTTP `/generate`, and no
+placeholder cold-start output. JUnit reports **one passed, zero failures,
+errors, or skips in 1,887.244 seconds**. Two marker-registration warnings arose
+because the private adapter's pytest root is outside the e2e project config.
+The test uses a directly created source Pod and PodSnapshot, not SnapshotJob.
+
+The run was `rust-glm52-te8-8f73f1`. Pre-capture output was
+`I am ready to assist you.`; the restored process generated
+`I have a question for you.`; the fresh HTTP response was
+`(No need to mention the worker's`. The example caps outputs at eight tokens:
+these nonempty responses establish inference continuity, not answer quality.
+
+### Exact build and topology
+
+The integration remained uncommitted atop `3184500`. Agent digest was
+`sha256:f3009c067c72e043ab66c85a4ba7af677c7e559b3bfa6da8311b01e767a07794`;
+operator digest was
+`sha256:4c5d37c3abeb03e801821fd7714da30b31544e383b55ddf95ac7f33adbe36d98`.
+The workload image was
+`vllm/vllm-openai:v0.27.1-ubuntu2404@sha256:dafea057f24b7d42716331a48e2db4e1f204f877a3aa759cb7e4c37e64ca2eee`.
+Both test-node agents were replaced with the Rust mount-fix build before launch.
+The GNU frontend/core and static musl coordinator were the packaged section-12
+artifacts; no C production shim or coordinator was substituted.
+
+Rust inspected ten participants and 8,624 records. Eight workers each held
+527 unicast allocation and mapping records, including 149 imports and 134
+content allocations. Each worker also had six multicast objects, devices,
+bindings, and mappings. Two participants had no topology records.
+Capture saved 1,072 creator allocations totaling 15,904,800,768 bytes, with no
+live raw imports or unsupported creations. Restore handshake, content load,
+unicast replay, multicast replay, and final topology validation all succeeded.
+
+| Phase | Time |
+| --- | ---: |
+| Complete capture | 1,099.479 s |
+| Rust prepare | 1.685 s |
+| Native CUDA checkpoint | 37.816 s |
+| CRIU dump | 1,059.624 s |
+| Complete external restore | 124.883 s |
+| CRIU restore | 52.455 s |
+| Native CUDA restore | 70.412 s |
+| Rust reconstruction | 1.481 s |
+
+### Cache omission, correction, and observed wakeup delay
+
+The initial source `rust-glm52-te8-e570b9-source` mounted the model cache but
+omitted persistent compiler/JIT/autotune paths. This was a test-configuration
+mistake. At the user's question, its driver was interrupted before capture,
+logs were retained, and existing completed vLLM cache files were copied with
+no overwrite into the shared cache. The source was deleted and a new test
+invocation started; no CUDA lifecycle failure was retried or hidden.
+
+Both source and restore now mount `/model-cache` and the existing FlashInfer
+cache subpath. Environment explicitly points vLLM/torch.compile, TorchInductor,
+Triton, DeepGEMM, CUDA, XDG, FlashInfer JIT, and FlashInfer autotune caches under
+`/model-cache/glm52-cache`. Cache keys changed with the image/configuration, so
+mounting them did not eliminate compilation. FlashInfer tuned 22 new entries
+and saved them under the shared `vllm/flashinfer_autotune` directory.
+
+The app used `pause_generation(); sleep()` (default level one), then full
+`wake_up()` after restore. It did **not** wake only weights before capture.
+Each rank backed about 55.35 GiB of model weights into CPU memory, contributing
+to the large CRIU dump. This run used native CUDA storage and CRIU, not
+CustomStorage/NIXL/compression or the keep-weights optimization.
+
+External restore completed at 06:06:22.954 UTC, but the vLLM ready sentinel
+arrived at 06:09:15.655 UTC. Seven GPUs had about 128 GiB allocated while the
+last still had about 7 GiB. Focused Python stacks showed the engine waiting
+for wakeup RPC responses; later stacks showed the workers back in their
+message loops. All eight GPUs ultimately reached 128,094 MiB and inference
+passed without a production change. The exact reason for the last worker's
+longer delay was not established. A native py-spy unwind failed with
+`UNW_EBADREG`; ordinary Python stack sampling succeeded. The diagnostic
+binary was staged only in the temporary test-agent container.
+
+The checkpoint is retained as `rust-glm52-te8-8f73f1-snapshot`, content
+`podsnapshotcontent-1172346f-a9c0-46da-a6b0-e5cdca2b2696`, content UID
+`ca68f5ec-08bd-4bad-bae2-baa052797452`. Private evidence is under
+`.cuinterpose-evidence/rust-glm52-te8-e2e/`, including the adapter/launcher,
+both attempts' logs, JUnit, original/patched deployment templates, GPU claims,
+manifest/state/topology, inference sentinels, timings, and cleanup logs.
+The restored Pod, both test GPU claims, and private app ConfigMap were deleted
+after evidence collection. Original agent/operator templates were restored
+only after comparison with the test's patches; original agents were Ready on
+both test nodes. The previously suspended 50-hour-old GLM DGD worker remains
+at zero replicas rather than being restarted without direction.
+CustomStorage/NIXL composition remains a separate, untested next step.

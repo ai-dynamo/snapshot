@@ -202,11 +202,13 @@ pub fn send_header(
         // SAFETY: a single int descriptor fits in control, which stays live
         // through sendmsg. CMSG_FIRSTHDR returns that aligned buffer's header.
         unsafe {
-            message.msg_controllen = libc::CMSG_SPACE(size_of::<i32>() as u32) as usize;
+            // glibc uses size_t here; musl uses socklen_t. This fixed-size
+            // ancillary buffer fits both ABIs.
+            message.msg_controllen = libc::CMSG_SPACE(size_of::<i32>() as u32) as _;
             let cmsg = libc::CMSG_FIRSTHDR(&message);
             (*cmsg).cmsg_level = libc::SOL_SOCKET;
             (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-            (*cmsg).cmsg_len = libc::CMSG_LEN(size_of::<i32>() as u32) as usize;
+            (*cmsg).cmsg_len = libc::CMSG_LEN(size_of::<i32>() as u32) as _;
             libc::CMSG_DATA(cmsg).cast::<i32>().write(fd.as_raw_fd());
         }
     }
@@ -244,7 +246,7 @@ pub fn receive_header(stream: &UnixStream) -> io::Result<(Header, Option<OwnedFd
     message.msg_iov = &mut iov;
     message.msg_iovlen = 1;
     message.msg_control = control.as_mut_ptr().cast();
-    message.msg_controllen = size_of_val(&control);
+    message.msg_controllen = size_of_val(&control) as _;
     let received = loop {
         // SAFETY: recvmsg writes only within the provided buffers.
         let n = unsafe { libc::recvmsg(stream.as_raw_fd(), &mut message, libc::MSG_CMSG_CLOEXEC) };
@@ -266,9 +268,9 @@ pub fn receive_header(stream: &UnixStream) -> io::Result<(Header, Option<OwnedFd
             let base = libc::CMSG_LEN(0) as usize;
             if (*cmsg).cmsg_level == libc::SOL_SOCKET
                 && (*cmsg).cmsg_type == libc::SCM_RIGHTS
-                && (*cmsg).cmsg_len >= base
+                && (*cmsg).cmsg_len as usize >= base
             {
-                let length = (*cmsg).cmsg_len - base;
+                let length = (*cmsg).cmsg_len as usize - base;
                 invalid |= length % size_of::<i32>() != 0;
                 for index in 0..length / size_of::<i32>() {
                     descriptors.push(OwnedFd::from_raw_fd(

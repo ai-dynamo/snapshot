@@ -18,6 +18,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixtures", type=Path,
                         help="Reuse prebuilt fixtures (sanitizer linkage is checked)")
+    parser.add_argument("--artifacts", type=Path,
+                        help="Test an existing packaged frontend, core, and coordinator without rebuilding")
     parser.add_argument("--sanitized", action="store_true",
                         help="Diagnostic ASan/UBSan fixture run; post-fork runtime is not a GPU gate")
     parser.add_argument("--image", default="snapshot-cuinterpose-check:latest",
@@ -28,9 +30,15 @@ def main():
     environment = os.environ.copy()
     environment.pop("LD_PRELOAD", None)
     environment.setdefault("CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER", "/usr/bin/gcc")
-    subprocess.run(["cargo", "build", "--workspace", "--release", "--target",
-                    "x86_64-unknown-linux-gnu"], cwd=workspace, env=environment, check=True)
-    artifacts = workspace / "target/x86_64-unknown-linux-gnu/release"
+    if args.artifacts:
+        artifacts = args.artifacts.resolve()
+    else:
+        subprocess.run(["cargo", "build", "--workspace", "--release", "--target",
+                        "x86_64-unknown-linux-gnu"], cwd=workspace, env=environment, check=True)
+        artifacts = workspace / "target/x86_64-unknown-linux-gnu/release"
+    for name in ("libcuinterpose.so", "libcuinterpose_core.so", "cuinterpose-coordinator"):
+        if not (artifacts / name).is_file():
+            parser.error(f"missing artifact: {artifacts / name}")
     with tempfile.TemporaryDirectory(prefix="cuinterpose-reference-") as directory:
         temporary = Path(directory)
         fixtures = args.fixtures.resolve() if args.fixtures else temporary / "build"
