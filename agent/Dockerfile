@@ -164,6 +164,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-protobuf \
     libgnutls28-dev \
+    liblz4-dev \
     libnftables-dev \
     uuid-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -217,6 +218,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libprotobuf32t64 \
     libprotobuf-c1 \
     libgnutls30t64 \
+    liblz4-1 \
     libnftables1 \
     iproute2 \
     iptables \

@@ -271,3 +271,5 @@ config:
     libDir: "/usr/local/lib/snapshot/criu-plugins"
     allowUprobes: true             # Leave enabled for kernel/userspace probe compatibility
     skipInFlight: true             # Skip in-flight TCP connections
+    compress: false                # Compress memory page images during dump
+    compressAcceleration: 65537    # Fastest LZ4 compression

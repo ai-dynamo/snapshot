@@ -79,7 +79,8 @@ int ValidatePlan(const Plan &plan)
 	std::set<std::tuple<uint64_t, uint64_t>> shared;
 	for (const auto &object : plan.objects()) {
 		if (!ValidName(object.key()) || metadata_images.count(object.key()) ||
-			object.length() == 0 ||
+			(object.length() == 0 &&
+			 object.kind() != criu_provider::v1::Object::RESIDUAL) ||
 			!objects.emplace(object.key(), object.length()).second)
 			return -EINVAL;
 		if (object.kind() == criu_provider::v1::Object::PRIVATE_VMA) {

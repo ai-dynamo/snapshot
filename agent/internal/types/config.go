@@ -98,29 +98,31 @@ func (c *RestoreSpec) Validate() error {
 
 // CRIUSettings holds CRIU-specific configuration options.
 type CRIUSettings struct {
-	GhostLimit        uint32 `yaml:"ghostLimit"`
-	LogLevel          int32  `yaml:"logLevel"`
-	WorkDir           string `yaml:"workDir"`
-	AutoDedup         bool   `yaml:"autoDedup"`
-	LazyPages         bool   `yaml:"lazyPages"`
-	ShellJob          bool   `yaml:"shellJob"`
-	TcpClose          bool   `yaml:"tcpClose"`
-	TcpEstablished    bool   `yaml:"tcpEstablished"`
-	FileLocks         bool   `yaml:"fileLocks"`
-	OrphanPtsMaster   bool   `yaml:"orphanPtsMaster"`
-	ExtUnixSk         bool   `yaml:"extUnixSk"`
-	LinkRemap         bool   `yaml:"linkRemap"`
-	ExtMasters        bool   `yaml:"extMasters"`
-	ManageCgroupsMode string `yaml:"manageCgroupsMode"`
-	ImageIoMode       string `yaml:"imageIoMode"`
-	RstSibling        bool   `yaml:"rstSibling"`
-	MntnsCompatMode   bool   `yaml:"mntnsCompatMode"`
-	EvasiveDevices    bool   `yaml:"evasiveDevices"`
-	ForceIrmap        bool   `yaml:"forceIrmap"`
-	BinaryPath        string `yaml:"binaryPath"`
-	LibDir            string `yaml:"libDir"`
-	AllowUprobes      bool   `yaml:"allowUprobes"`
-	SkipInFlight      bool   `yaml:"skipInFlight"`
+	GhostLimit           uint32 `yaml:"ghostLimit"`
+	LogLevel             int32  `yaml:"logLevel"`
+	WorkDir              string `yaml:"workDir"`
+	AutoDedup            bool   `yaml:"autoDedup"`
+	LazyPages            bool   `yaml:"lazyPages"`
+	ShellJob             bool   `yaml:"shellJob"`
+	TcpClose             bool   `yaml:"tcpClose"`
+	TcpEstablished       bool   `yaml:"tcpEstablished"`
+	FileLocks            bool   `yaml:"fileLocks"`
+	OrphanPtsMaster      bool   `yaml:"orphanPtsMaster"`
+	ExtUnixSk            bool   `yaml:"extUnixSk"`
+	LinkRemap            bool   `yaml:"linkRemap"`
+	ExtMasters           bool   `yaml:"extMasters"`
+	ManageCgroupsMode    string `yaml:"manageCgroupsMode"`
+	ImageIoMode          string `yaml:"imageIoMode"`
+	RstSibling           bool   `yaml:"rstSibling"`
+	MntnsCompatMode      bool   `yaml:"mntnsCompatMode"`
+	EvasiveDevices       bool   `yaml:"evasiveDevices"`
+	ForceIrmap           bool   `yaml:"forceIrmap"`
+	BinaryPath           string `yaml:"binaryPath"`
+	LibDir               string `yaml:"libDir"`
+	AllowUprobes         bool   `yaml:"allowUprobes"`
+	SkipInFlight         bool   `yaml:"skipInFlight"`
+	Compress             bool   `yaml:"compress"`
+	CompressAcceleration uint32 `yaml:"compressAcceleration"`
 }
 
 // OverlaySettings is the static config for rootfs exclusions.

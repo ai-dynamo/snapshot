@@ -59,3 +59,5 @@ data:
       libDir: {{ .Values.config.criu.libDir | quote }}
       allowUprobes: {{ .Values.config.criu.allowUprobes }}
       skipInFlight: {{ .Values.config.criu.skipInFlight }}
+      compress: {{ .Values.config.criu.compress }}
+      compressAcceleration: {{ .Values.config.criu.compressAcceleration }}

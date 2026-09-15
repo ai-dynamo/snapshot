@@ -75,6 +75,35 @@ int AddImage(criu_provider::v1::Plan& plan, const std::filesystem::path& path,
 	return 0;
 }
 
+int HasEncodedPagemap(const std::filesystem::path& root, bool *encoded)
+{
+	*encoded = false;
+	for (const auto& file : std::filesystem::directory_iterator(root)) {
+		const std::string name = file.path().filename();
+		if (name.rfind("pagemap-", 0) || file.path().extension() != ".img")
+			continue;
+		std::ifstream input;
+		if (OpenImage(&input, file.path(), kPagemapMagic))
+			return -EINVAL;
+		pagemap_head head;
+		bool eof;
+		if (Read(input, &head, &eof) || eof)
+			return -EINVAL;
+		for (;;) {
+			pagemap_entry entry;
+			if (Read(input, &entry, &eof))
+				return -EINVAL;
+			if (eof)
+				break;
+			if (entry.in_parent())
+				return -ENOTSUP;
+			if (entry.has_blocks())
+				*encoded = true;
+		}
+	}
+	return 0;
+}
+
 void AddRule(criu_provider::v1::Plan& plan, const char* prefix, const char* suffix,
 	criu_provider::v1::ImageRule::Selector selector,
 	criu_provider::v1::Image::RestoreMode restore,
@@ -119,6 +148,64 @@ void AddCriuRules(criu_provider::v1::Plan& plan,
 	for (const auto& name : {"tmpfs-", "tmpfs-dev-"})
 		AddRule(plan, name, ".tar.gz.img", Rule::DECIMAL,
 			criu_provider::v1::Image::RESTORE_LOCAL_FALLBACK, dump);
+}
+
+int FinishPlan(criu_provider::v1::Plan& plan)
+{
+	if (!plan.objects_size())
+		return -ENOTSUP;
+	auto *need = plan.mutable_requirements();
+	for (const auto& image : plan.images())
+		if (image.role() != criu_provider::v1::Image::PAGES)
+			need->set_metadata_bytes(need->metadata_bytes() + image.size());
+	for (const auto& chunk : plan.chunks()) {
+		need->set_stored_bytes(need->stored_bytes() + chunk.stored_length());
+		need->set_materialized_bytes(need->materialized_bytes() +
+			chunk.decoded_length() * chunk.placements_size());
+	}
+	for (const auto& object : plan.objects())
+		need->set_logical_fd_bytes(need->logical_fd_bytes() + object.length());
+	need->set_fd_count(plan.objects_size());
+	need->set_workspace_bytes(1 << 20);
+	return ValidatePlan(plan);
+}
+
+int IndexOpaqueCheckpoint(const std::filesystem::path& root,
+	criu_provider::v1::Plan& plan)
+{
+	for (const auto& entry : std::filesystem::directory_iterator(root)) {
+		if (!entry.is_regular_file() || entry.is_symlink())
+			return -EINVAL;
+		const std::string name = entry.path().filename();
+		const bool pages = name.rfind("pages-", 0) == 0 &&
+			entry.path().extension() == ".img";
+		if (const int status = AddImage(plan, entry.path(), pages ?
+			criu_provider::v1::Image::PAGES :
+			criu_provider::v1::Image::METADATA))
+			return status;
+		if (!pages)
+			continue;
+
+		std::error_code error;
+		const uint64_t size = std::filesystem::file_size(entry.path(), error);
+		if (error)
+			return -EIO;
+		auto *object = plan.add_objects();
+		object->set_key(name);
+		object->set_kind(criu_provider::v1::Object::RESIDUAL);
+		object->set_image(name);
+		object->set_length(size);
+		if (!size)
+			continue;
+		auto *chunk = plan.add_chunks();
+		chunk->set_image(name);
+		chunk->set_stored_length(size);
+		chunk->set_decoded_length(size);
+		auto *placement = chunk->add_placements();
+		placement->set_object_key(name);
+	}
+	AddCriuRules(plan, criu_provider::v1::Image::DUMP_LOCAL_FALLBACK);
+	return FinishPlan(plan);
 }
 
 int IndexShared(const std::filesystem::path& root, uint64_t shmid, uint64_t known_size, uint32_t seals,
@@ -202,12 +289,21 @@ int CreatePlanFromCheckpoint(const char *directory, criu_provider_plan **out)
 	*out = nullptr; std::filesystem::path root(directory); std::error_code error;
 	if (!std::filesystem::is_directory(root, error)) return -ENOENT;
 	if (std::filesystem::exists(root / "parent", error)) return -ENOTSUP;
+	auto plan = std::make_unique<criu_provider_plan>(); auto &value = plan->value;
+	value.set_format_major(1); value.set_page_size(getpagesize());
+	bool encoded;
+	if (const int status = HasEncodedPagemap(root, &encoded))
+		return status;
+	if (encoded) {
+		if (const int status = IndexOpaqueCheckpoint(root, value))
+			return status;
+		*out = plan.release();
+		return 0;
+	}
 	std::map<uint32_t, uint32_t> memfd_files;
 	if (std::filesystem::exists(root / "files.img", error)) {
 		if (const int status = LoadMemfdFiles(root, &memfd_files)) return status;
 	}
-	auto plan = std::make_unique<criu_provider_plan>(); auto &value = plan->value;
-	value.set_format_major(1); value.set_page_size(getpagesize());
 	for (const auto &file : std::filesystem::directory_iterator(root)) {
 		const std::string name = file.path().filename();
 		if (name.rfind("mm-", 0) || file.path().extension() != ".img") continue;
@@ -284,18 +380,7 @@ int CreatePlanFromCheckpoint(const char *directory, criu_provider_plan **out)
 		if (const int status = AddImage(value, entry.path(), criu_provider::v1::Image::METADATA)) return status;
 	}
 	AddCriuRules(value, criu_provider::v1::Image::DUMP_LOCAL_FALLBACK);
-	if (!value.objects_size()) return -ENOTSUP;
-	auto *need = value.mutable_requirements();
-	for (const auto& image : value.images())
-		if (image.role() != criu_provider::v1::Image::PAGES)
-			need->set_metadata_bytes(need->metadata_bytes() + image.size());
-	for (const auto& chunk : value.chunks()) {
-		need->set_stored_bytes(need->stored_bytes() + chunk.stored_length());
-		need->set_materialized_bytes(need->materialized_bytes() + chunk.decoded_length() * chunk.placements_size());
-	}
-	for (const auto& object : value.objects()) need->set_logical_fd_bytes(need->logical_fd_bytes() + object.length());
-	need->set_fd_count(value.objects_size()); need->set_workspace_bytes(1 << 20);
-	if (int error_code = ValidatePlan(value)) return error_code;
+	if (const int status = FinishPlan(value)) return status;
 	*out = plan.release();
 	return 0;
 }

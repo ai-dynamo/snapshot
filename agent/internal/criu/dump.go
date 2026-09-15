@@ -164,5 +164,11 @@ func buildCRIUConf(c *types.CRIUSettings) string {
 	if c.SkipInFlight {
 		content += "skip-in-flight\n"
 	}
+	if c.Compress {
+		content += "compress\n"
+		if c.CompressAcceleration != 0 {
+			content += fmt.Sprintf("compress-acceleration %d\n", c.CompressAcceleration)
+		}
+	}
 	return content
 }

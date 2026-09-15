@@ -39,13 +39,18 @@ class MappedRanges {
  public:
   explicit MappedRanges(const std::vector<S3WriteRange>& ranges)
   {
-    const long page_size = sysconf(_SC_PAGESIZE);
+    const size_t page_size = static_cast<size_t>(sysconf(_SC_PAGESIZE));
     for (const auto& range : ranges) {
-      if (range.destination_offset % page_size || range.length % page_size ||
-          range.length > SIZE_MAX - size_)
+      if (range.destination_offset % page_size || !range.length ||
+          range.length > SIZE_MAX - (page_size - 1))
         throw std::runtime_error("invalid S3 destination range");
       offsets_.push_back(size_);
-      size_ += static_cast<size_t>(range.length);
+      const size_t slot_size =
+          (static_cast<size_t>(range.length) + page_size - 1) &
+          ~(page_size - 1);
+      if (slot_size > SIZE_MAX - size_)
+        throw std::runtime_error("invalid S3 destination range");
+      size_ += slot_size;
     }
     if (!size_) return;
     address_ = mmap(nullptr, size_, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS,
@@ -166,7 +171,17 @@ class Streamer {
           Receive(streamer, submissions);
           continue;
         }
-        const size_t count = std::min(kRangesPerRequest, ranges.size() - first);
+        size_t count = std::min(kRangesPerRequest, ranges.size() - first);
+        const size_t page_size = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+        // Model Streamer writes a submission contiguously through dsts[0].
+        // A non-page-aligned mapping leaves a gap before the next mapping, so
+        // it may only be the final range in a submission.
+        for (size_t i = 0; i + 1 < count; ++i) {
+          if (ranges[first + i].length % page_size) {
+            count = i + 1;
+            break;
+          }
+        }
         std::vector<std::string> uris;
         std::vector<const char*> paths;
         std::vector<size_t> offsets, sizes;
