@@ -1,6 +1,6 @@
 # CUDA checkpoint transfer core
 
-This directory contains the transfer-neutral CUDA checkpoint operation core. The first slice defines the integrity, configuration, cancellation, and transfer-backend contracts shared by later CUDA operation code. This slice adds the durable storage-manifest contract consumed behind the existing PageBroker boundary. It does not add a Snapshot-local daemon or coordinator or select PageBroker's production data plane.
+This directory contains the transfer-neutral CUDA checkpoint operation core. The first slice defines the integrity, configuration, cancellation, and transfer-backend contracts shared by later CUDA operation code. The durable storage-manifest contract is consumed behind the existing PageBroker boundary. The private, co-versioned daemon protocol frames requests and responses between PageBroker and its CUDA helper without exposing that wire format to Snapshot. These contracts do not add a Snapshot-local daemon or coordinator or select PageBroker's production data plane.
 
 ## Ownership boundary
 
@@ -21,7 +21,7 @@ The transfer interface uses the CustomStorage types introduced by CUDA 13.4. The
 
 ## Validation
 
-`make test` always runs the Go suite. When a C++20 compiler and the OpenSSL development headers and library are available, it also runs the standalone digest, manifest, transfer-configuration, and cancellation tests. Missing C++ prerequisites are fatal in CI and optional for local Go-only development.
+`make test` always runs the Go suite. When a C++20 compiler and the OpenSSL development headers and library are available, it also runs the standalone digest, manifest, transfer-configuration, cancellation, and daemon-protocol framing tests. Missing C++ prerequisites are fatal in CI and optional for local Go-only development.
 
 `make test-cuda-helper` is the strict local target for these C++ contract tests. The Docker target below also compiles the unavailable-backend adapter against the pinned CUDA 13.4 header:
 
