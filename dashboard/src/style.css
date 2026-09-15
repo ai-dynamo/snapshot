@@ -61,10 +61,10 @@ input[type="checkbox"] {
 .hero {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 2rem;
+  gap: 1rem;
   align-items: center;
-  min-height: 20rem;
-  padding: 4.5rem max(1.25rem, calc((100vw - 1280px) / 2));
+  min-height: 0;
+  padding: 1.25rem max(1.25rem, calc((100vw - 1280px) / 2));
   color: white;
   background: #192527;
   overflow: hidden;
@@ -77,28 +77,20 @@ input[type="checkbox"] {
 .hero h1 {
   max-width: 48rem;
   margin: 0;
-  font-size: clamp(2.6rem, 7vw, 5.4rem);
-  line-height: 0.98;
-  letter-spacing: -0.055em;
-}
-
-.hero__summary {
-  max-width: 45rem;
-  margin: 1.5rem 0 0;
-  color: #d8e0df;
-  font-size: clamp(1rem, 2vw, 1.25rem);
-  line-height: 1.55;
+  font-size: 1.4rem;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
 }
 
 .hero__mark {
   display: grid;
-  width: clamp(7rem, 18vw, 14rem);
+  width: 2.75rem;
   aspect-ratio: 1;
   place-items: center;
   border: 2px solid rgba(255, 255, 255, 0.22);
   border-radius: 50%;
   color: var(--green);
-  font-size: clamp(4rem, 12vw, 10rem);
+  font-size: 1.5rem;
   font-weight: 800;
   transform: rotate(-8deg);
 }
@@ -145,7 +137,41 @@ input[type="checkbox"] {
 main {
   width: min(1280px, calc(100% - 2.5rem));
   margin: 0 auto;
-  padding: 3.5rem 0 5rem;
+  padding: 1.5rem 0 2rem;
+}
+
+.preview-banner {
+  display: flex;
+  gap: 2rem;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 2rem;
+  padding: 1.35rem 1.5rem;
+  border: 1px solid #d49d2f;
+  border-left: 0.4rem solid #d49d2f;
+  border-radius: 0.8rem;
+  background: #fff8e8;
+  box-shadow: var(--shadow);
+}
+
+.preview-banner[hidden] {
+  display: none;
+}
+
+.preview-banner h2,
+.preview-banner p {
+  margin-top: 0;
+}
+
+.preview-banner h2 {
+  margin-bottom: 0.45rem;
+  font-size: 1.25rem;
+}
+
+.preview-banner p:last-child {
+  margin-bottom: 0;
+  color: #5d5139;
+  line-height: 1.5;
 }
 
 section + section {
@@ -182,18 +208,22 @@ section + section {
 }
 
 .section-heading h2 {
-  font-size: clamp(1.6rem, 3vw, 2.35rem);
+  font-size: 1.3rem;
 }
 
 .controls__grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(9rem, 1fr));
+  grid-template-columns: repeat(3, minmax(9rem, 1fr));
   gap: 1rem;
 }
 
 .controls__grid label,
 fieldset {
   min-width: 0;
+}
+
+.controls__field--hidden {
+  display: none;
 }
 
 .controls__grid label > span,
@@ -209,8 +239,8 @@ legend {
 
 select {
   width: 100%;
-  min-height: 2.8rem;
-  padding: 0.55rem 2rem 0.55rem 0.75rem;
+  min-height: 1.8rem;
+  padding: 0.35rem 2rem 0.35rem 0.75rem;
   border: 1px solid #c8d0c7;
   border-radius: 0.55rem;
   color: var(--ink);
@@ -227,7 +257,7 @@ input:focus-visible,
 
 .toggle-grid {
   display: grid;
-  grid-template-columns: minmax(14rem, 0.8fr) minmax(20rem, 1.2fr);
+  grid-template-columns: minmax(9rem, 0.35fr) minmax(24rem, 1.65fr);
   gap: 1.5rem;
   margin-top: 1.5rem;
 }
@@ -241,7 +271,25 @@ fieldset {
 .toggle-list {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.55rem;
+  gap: 0.35rem;
+}
+
+#case-filters.toggle-list {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.toggle-group + .toggle-group {
+  margin-top: 0.9rem;
+}
+
+.toggle-group h4 {
+  margin: 0 0 0.4rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 750;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
 }
 
 .toggle {
@@ -261,9 +309,9 @@ fieldset {
 
 .toggle span {
   display: block;
-  padding: 0.5rem 0.75rem;
+  padding: 0.35rem 0.45rem;
   border: 1px solid #cbd2c8;
-  border-radius: 999px;
+  border-radius: 5px;
   color: var(--muted);
   background: white;
   font-size: 0.88rem;
@@ -345,6 +393,21 @@ fieldset {
   height: 22rem;
 }
 
+.chart-canvas--stage {
+  height: 9rem;
+  margin-bottom: 1.5rem;
+}
+
+.chart-canvas--stage-comparison {
+  height: 20rem;
+}
+
+.stage-breakdown__caption {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0.2rem 0 0.6rem;
+}
+
 .failure-strip {
   display: flex;
   flex-wrap: wrap;
@@ -407,7 +470,7 @@ td {
 .badge {
   display: inline-block;
   padding: 0.25rem 0.5rem;
-  border-radius: 999px;
+  border-radius: 0.3rem;
   font-size: 0.75rem;
   font-weight: 750;
 }
@@ -509,9 +572,8 @@ footer p {
 @media (max-width: 640px) {
   .hero {
     grid-template-columns: 1fr;
-    min-height: auto;
-    padding-top: 3.5rem;
-    padding-bottom: 3.5rem;
+    padding-top: 1rem;
+    padding-bottom: 1rem;
   }
 
   .hero__mark {

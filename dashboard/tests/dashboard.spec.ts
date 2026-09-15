@@ -33,7 +33,11 @@ test("loads, filters, and exposes benchmark details", async ({ page }) => {
     "Loaded 6 benchmark results from 2 of 3 monthly indexes",
   );
   await expect(page.getByRole("status")).toContainText("newest result");
-  await expect(page.locator(".chart-card canvas")).toHaveCount(3);
+  // 3 per-case stage breakdown charts (sglang, tensorrt-llm, vllm) plus the
+  // 2 default-selected measurement line charts (checkpoint.duration and
+  // restore.to_traffic.duration; test.total.duration is no longer a
+  // selectable measurement).
+  await expect(page.locator(".chart-card canvas")).toHaveCount(5);
   await expect(page.locator("#latest-body tr")).toHaveCount(5);
 
   const restoreCard = page.locator(".chart-card", { hasText: "Restore to traffic" });
@@ -43,7 +47,10 @@ test("loads, filters, and exposes benchmark details", async ({ page }) => {
   );
   await expect(restoreCard.locator(".failure-strip")).toContainText("end event not reached");
 
-  await page.getByLabel("SGLang").uncheck();
+  // getByLabel("SGLang") is ambiguous now: it also matches the SGLang stage
+  // breakdown chart's aria-label ("SGLang stage breakdown for..."), a
+  // substring match. The checkbox role disambiguates.
+  await page.getByRole("checkbox", { name: "SGLang" }).uncheck();
   await expect(page.locator("#latest-body")).not.toContainText("SGLang");
 
   await page.getByLabel("Date range").selectOption("30");
@@ -123,4 +130,41 @@ test("surfaces record warnings with their location", async ({ page }) => {
   await expect(page.getByRole("status")).toContainText("1 record warning");
   const warnings = page.locator("#load-warnings");
   await expect(warnings).toContainText("index/v1/2026-08.ndjson:1");
+});
+
+test("labels a pull request overlay as temporary history", async ({ page }) => {
+  await page.route("**/preview.json", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        formatVersion: 1,
+        key: "pr-250",
+        generatedAt: "2026-09-10T10:00:00.000Z",
+        expiresAt: "2026-09-24T10:00:00.000Z",
+        historyRecordCount: 20,
+        previewRecordCount: 3,
+        combinedRecordCount: 23,
+        source: {
+          event: "push",
+          branch: "pull-request/250",
+          commit: "0123456789abcdef",
+          runId: "12345",
+          runAttempt: 1,
+          runUrl: "https://github.com/ai-dynamo/snapshot/actions/runs/12345",
+          pullRequest: 250,
+        },
+      }),
+    });
+  });
+
+  await page.goto("/");
+
+  const banner = page.locator("#preview-banner");
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText("Pull request #250 benchmark preview");
+  await expect(banner).toContainText("not part of benchmark history");
+  await expect(banner.getByRole("link", { name: "Open workflow run" })).toHaveAttribute(
+    "href",
+    "https://github.com/ai-dynamo/snapshot/actions/runs/12345",
+  );
 });

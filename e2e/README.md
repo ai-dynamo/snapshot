@@ -273,6 +273,44 @@ hosts. The publisher serializes updates, commits all frameworks from one
 workflow in one commit, and bootstraps the data-only orphan branch
 `e2e-benchmark-history` on its first successful invocation.
 
+After a pull-request mirror or manual run completes, the trusted dashboard
+workflow validates its comparison artifact and publishes a 14-day preview.
+Pull requests use the stable path `/previews/pr-<number>/`; other manual runs
+use `/previews/run-<workflow-run-id>/`. Each preview combines that run with a
+read-only copy of nightly history. Generated preview indexes are isolated on
+the `e2e-benchmark-previews` branch and never enter `e2e-benchmark-history`.
+The dashboard deployment summary links to the resulting Pages URL.
+
+#### Viewing a pull request's benchmark preview
+
+1. Get an `E2E Framework Tests` run against your PR. Pushing to the PR
+   normally does this automatically (`.github/workflows/e2e-frameworks.yaml`
+   runs on push to its `pull-request/<number>` mirror branch, created by
+   `copy-pr-bot`); to force a fresh run without a new push, dispatch it
+   manually from the Actions tab (`workflow_dispatch`, `ref`: your PR's
+   `pull-request/<number>` branch).
+2. Wait for it to finish, then open the **E2E Benchmark Dashboard** workflow
+   run it triggers (`.github/workflows/e2e-benchmark-pages.yaml`, via
+   `workflow_run`) -- filter the Actions tab to that workflow and your PR's
+   commit if it's not the latest run.
+3. Open that run's `deploy` job and read its summary (or the `url` shown for
+   the `github-pages` environment): that's the Pages URL for
+   `/previews/pr-<number>/`.
+4. The preview page overlays your PR's results on the read-only nightly
+   history baseline -- a "Temporary preview" banner at the top says how many
+   results are yours versus durable history, and links back to the source
+   workflow run. It's the same dashboard as the durable one, so the
+   Measurements/Cases filters, stage breakdown charts, and run-details
+   dialog all work the same way; nothing here mutates `e2e-benchmark-history`,
+   and the preview expires after 14 days.
+
+This needs GitHub Pages enabled once for the repository (**Settings → Pages →
+Build and deployment → Source → GitHub Actions**) and the `E2E Benchmark
+Dashboard` workflow to already exist on `main` -- `workflow_run` triggers are
+evaluated from the default branch's copy of the workflow file, not the PR's,
+so a preview pipeline added in the same PR it's meant to preview won't fire
+until that PR merges.
+
 Raw results are the source of truth. They are stored under:
 
 ```text
@@ -317,9 +355,9 @@ seven-run median. Failed and timed-out measurements remain visible as explicit
 gaps instead of zero values.
 
 The `E2E Benchmark Dashboard` workflow builds the TypeScript application from
-`main` and combines it with the data-only `e2e-benchmark-history` branch. A
-scheduled framework run triggers a new Pages deployment after history
-publication without merging the generated history into `main`. See
+`main` and combines it with the data-only `e2e-benchmark-history` branch plus
+any unexpired pre-merge previews. A completed framework run triggers a new
+Pages deployment without merging generated benchmark data into `main`. See
 [`dashboard/README.md`](../dashboard/README.md) for local development and the
 one-time GitHub Pages configuration.
 
