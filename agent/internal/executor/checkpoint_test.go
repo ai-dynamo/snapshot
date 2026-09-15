@@ -39,6 +39,10 @@ func (checkpointPathRuntime) ResolveContainerImageID(context.Context, string) (s
 	return "", errors.New("not implemented")
 }
 
+func (checkpointPathRuntime) TerminateContainer(context.Context, string) error {
+	return errors.New("not implemented")
+}
+
 func (checkpointPathRuntime) Close() error { return nil }
 
 type checkpointImageRuntime struct {
