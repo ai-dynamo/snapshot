@@ -88,10 +88,13 @@ def restore_pod(
         model_cache=model_cache,
     )
     # The guide's placeholder annotation names its own PodSnapshot; this run's
-    # PodSnapshot is what must be restored. Restore is node-pinned: the agent
-    # that holds the artifact is the one on the source node.
+    # PodSnapshot is what must be restored. A different destination requires
+    # shared checkpoint storage; ordinary guide tests retain same-node restore.
     pod["metadata"]["annotations"] = {RESTORE_FROM_ANNOTATION: run.snapshot_name}
-    pod["spec"]["affinity"] = same_node_affinity(source_node)
+    destination = os.environ.get("SNAPSHOT_E2E_RESTORE_NODE", source_node)
+    if not destination:
+        raise ValueError("SNAPSHOT_E2E_RESTORE_NODE must name a node")
+    pod["spec"]["affinity"] = same_node_affinity(destination)
     return pod
 
 

@@ -13,6 +13,10 @@ build:
 	docker buildx build --platform linux/amd64 --target cuinterpose-export \
 		--output type=local,dest=build -f ../../Dockerfile ../..
 
+test:
+	docker buildx build --platform linux/amd64 --target cuinterpose-test \
+		-f ../../Dockerfile ../..
+
 frontend:
 	mkdir -p build
 	/usr/bin/gcc -std=gnu11 -O2 -Wall -Wextra -Werror -shared -fPIC -fvisibility=hidden \
@@ -32,3 +36,11 @@ build/cuinterpose-coordinator: build/coordinator.o build/protocol.o
 
 native: frontend build/libcuinterpose_core.so build/cuinterpose-coordinator
 	python3 verify_artifacts.py build
+
+test-native: native
+	$(CXX) $(CXXFLAGS) cpp/tests/protocol.cpp build/protocol.o build/export_cache.o -o build/protocol-test
+	build/protocol-test
+	$(CXX) $(CXXFLAGS) cpp/tests/state.cpp $(OBJECTS) -o build/state-test
+	build/state-test
+	python3 cpp/tests/coordinator.py build/cuinterpose-coordinator
+	python3 tests/headless/headless.py --artifacts build

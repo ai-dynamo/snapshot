@@ -138,6 +138,9 @@ RUN sed -i 's/Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/debian.so
     && cp -a /usr/share/doc/libc6 /cpp-dependencies/notices/ \
     && rm -rf /var/lib/apt/lists/*
 
+FROM cuinterpose-builder AS cuinterpose-test
+RUN make test-native
+
 FROM scratch AS cuinterpose-export
 COPY --from=cuinterpose-builder /cuinterpose/build/libcuinterpose.so /
 COPY --from=cuinterpose-builder /cuinterpose/build/libcuinterpose_core.so /
