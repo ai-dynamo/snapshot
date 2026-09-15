@@ -148,8 +148,16 @@ fail-closed condition.
 The no-backend build used by the first stack slice validates compilation,
 linkage, and the standalone protocol, manifest, transfer-configuration, and
 cancellation contracts without choosing a production transfer implementation.
-The PageBroker CUDA integration and its GPU transfer engine are added
-separately; there is no Snapshot-local NIXL/POSIX rollout.
+PageBroker owns the production transfer adapter; there is no Snapshot-local
+NIXL/POSIX rollout.
+
+The PageBroker build keeps the direct POSIX adapter as its default while NIXL
+is qualified. `make -C pagebroker daemon-nixl` and
+`make -C pagebroker test-nixl` select the NIXL POSIX backend without changing
+the transfer contract or manifest digest. From the `agent` directory,
+`docker build --target nixl -f pagebroker/Dockerfile .` creates the explicit
+PageBroker qualification image with the pinned NIXL runtime; the Dockerfile's
+default final stage remains the direct POSIX image.
 
 The no-backend helper proof target compiles against `cuda.h` copied from the
 digest-pinned CUDA 13.4 development image, which is the canonical owner of the
