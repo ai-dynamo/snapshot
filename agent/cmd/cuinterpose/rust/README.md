@@ -12,9 +12,11 @@ validation gaps. It distinguishes production behavior from test-only adapters.
 This workspace is an incomplete, main-based port. It builds a run-ai-style
 `libcuinterpose.so` front end, a separate `libcuinterpose_core.so`, and
 `cuinterpose-coordinator`. Unicast, host-carrier, and multicast reconstruction
-are implemented and exercised against fake CUDA. Fork generation reset is covered
-by fake-driver tests, not qualified for real post-CUDA fork. Do not treat
-a successful build or loader test as GPU, CRIU, or vLLM qualification.
+are implemented and exercised against fake CUDA. The existing three-test
+physical-GPU suite also passed against revision `41dd090` on two B200s
+(zero failures/skips, 19.186 seconds); see development-log section 11.
+Fork generation reset is not qualified for general post-CUDA fork.
+The standalone GPU result is not CRIU, vLLM, or cross-node qualification.
 
 ## Relationship to the draft C design
 
@@ -34,7 +36,7 @@ This is not a claim of identical behavior or complete parity.
 | Uncertain asynchronous copies | If synchronization cannot establish completion, terminate the process without cleanup; never free potentially DMA-referenced memory. |
 | Allocation failure | Standard Rust allocation OOM can abort rather than return a CUDA error; catching panics does not change that. |
 
-Snapshot packaging/orchestration, static coordinator delivery, and GPU/CRIU/vLLM
+Snapshot packaging/orchestration, static coordinator delivery, and CRIU/vLLM
 qualification remain unfinished integration work, not intentional design
 differences or evidence of parity.
 

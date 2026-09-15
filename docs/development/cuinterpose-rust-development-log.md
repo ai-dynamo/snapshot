@@ -10,7 +10,7 @@ port. It records unsuccessful approaches, reproduced defects, test limitations,
 and the corrections made in response. It is not a claim that the port has
 completed production or GPU qualification.
 
-The implementation branch is `feat/cuinterpose-rust-runai`. Its reference is the
+The implementation branch is `schwinns/cuinterpose-rust-runai`. Its reference is the
 C cuinterpose stack at `21008b50b93a9879a805665e331e777bb93abf49`.
 Production cuinterpose consists of a Rust frontend, Rust core, and Rust
 coordinator. C and C++ code used below is test infrastructure or the reference
@@ -27,7 +27,8 @@ implementation, not a production fallback.
 | Unicast zero handles, host-carrier cleanup, and prestarted control execution | Retained during fork simplification; focused independent review approved and independent unsanitized gate passed |
 | C-style quiescent fork and unknown-completion fail-stop | Focused independent review approved and independent gate passed atop `b99f4bc`; broad global gate and coordinator retry adapter removed at user direction; see section 10 |
 | Snapshot delivery/orchestration, static coordinator packaging, optimization composition | Pending |
-| Physical-GPU, CRIU, vLLM, and two-node qualification | Not run for this Rust port |
+| Standalone physical-GPU suite | Three passed, zero failures/skips at `41dd090` on two B200s; see section 11 |
+| CRIU, vLLM, and two-node qualification | Not run for this Rust port |
 
 ## What “fallback” means here
 
@@ -77,8 +78,9 @@ multicast. “Following the C design” does not mean identical behavior everywh
 | Uncertain transfer completion | Immediate process termination without cleanup that could invalidate DMA references |
 | OOM | Standard allocator failure can abort; panic catching cannot convert all OOM into CUDA errors. |
 
-Snapshot integration, static coordinator packaging, and GPU/CRIU/vLLM testing
-are unfinished work, not new design features. No full-parity claim is made.
+Snapshot integration, static coordinator packaging, and CRIU/vLLM testing
+are unfinished work, not new design features. The standalone physical-GPU
+result in section 11 does not establish full parity.
 
 ## 1. Build and early loader bootstrap
 
@@ -902,3 +904,89 @@ These are validation provenance, not downloadable repository artifacts.
 This is not full parity or GPU evidence. Snapshot delivery and namespace
 integration, static coordinator packaging, and two-node
 capture/restore/post-restore vLLM inference remain the next work.
+
+## 11. First Rust physical-GPU gate: three tests passed
+
+On 2026-09-15 UTC, the unchanged seven-file GPU pytest suite from C reference
+`21008b50b93a9879a805665e331e777bb93abf49` ran against the Rust frontend,
+core, and coordinator built from
+`41dd090a37ec21f3aead6fe5e7d3b1cfff1cb7b7`. The first pytest invocation
+completed with **3 passed, 0 failed, 0 errors, and 0 skipped in 19.186 seconds**.
+No production source or test assertion was changed, and no CUDA operation,
+phase, or suite retry was used.
+
+| Test | Time | Observed coverage |
+| --- | ---: | --- |
+| `test_checkpoint_restores_multicast_group` | 7.799 s | Real multicast object/device/binding/mapping records in both ranks, BindAddr rebind, native CUDA checkpoint/restore, and post-restore collective/graph replay |
+| `test_checkpoint_restores_shared_posix_memory` | 6.601 s | Ticket-backed peer imports and mappings, shared host-carrier save/load, original-address byte verification, and never-exported native-owned VMM property/retain/cleanup checks |
+| `test_prepare_is_refused_while_a_raw_import_is_alive` | 3.251 s | Prepare refusal while a raw import remains live, no state-file publication, and continued usable workload state |
+
+Persisted multicast topology contains one multicast object, device attachment,
+binding, and mapping per participant. Each participant also has five unicast
+allocation and mapping records and two content allocations. The separate
+unicast case has six allocation and mapping records per participant, including
+two imports and three content allocations. Thus multicast coverage was not
+inferred merely from wrapper presence or a successful workload launch.
+
+The POSIX test reported 545,259,520 carrier bytes, aggregate copy throughput
+109.82 GB/s, and whole-phase throughput 63.27 GB/s. Its single-GPU pinned-copy
+baseline was 55.36 GB/s; the existing 0.8-times-baseline assertion passed
+unchanged. The coordinator divides total bytes across ranks by the longest
+reported per-rank copy duration. This is an aggregate two-rank number, not
+evidence of a twofold per-GPU improvement or a controlled performance benchmark.
+
+### Environment and provenance
+
+The run used the host `schwinns` namespace on nscale-dev, node
+`cluster-0967a26d-pool-14bee067-prctr-tx5tk`, with two DRA-allocated B200 GPUs
+connected by `NV18`. The GPUs were
+`GPU-390c745d-b113-45b5-8d1a-7873a74d8a29` and
+`GPU-9702d531-4c6f-99a0-eab6-1f7438365df4`.
+The installed driver was 595.58.03; `nvidia-smi` reported CUDA 13.3.
+The separately staged `cuda-checkpoint` utility reported 610.43.02 and came
+from upstream revision `00d5cce84c628088d6caa203fc4af40c1538b6f7`.
+The actual `--launch-job` and native checkpoint APIs worked on this node;
+this does not establish CustomStorage or a second node's capabilities.
+
+The image was
+`nvcr.io/nvidia/pytorch@sha256:43c018d6a12963f1a1bad85ef8574b5c2a978eec2be0ebcacfb87f69e0d210e1`,
+not a Dynamo runtime image. A uv 0.11.28 virtual environment inherited the
+image's PyTorch `2.13.0a0+8145d630e8.nv26.06` and installed pytest 8.4.2 and
+cuda-bindings 13.3.1. This deliberately reused the image's CUDA-enabled
+PyTorch rather than resolving the source pyproject's torch 2.11.0 pin.
+The test source files were unchanged and verified against the reference Git
+objects. Seed was 41221090, with 256 MiB large carrier allocations per rank.
+Three harmless pytest warnings concerned `record_property` with xunit2 JUnit.
+
+The GNU-target Rust artifacts were rebuilt with `/usr/bin/gcc` as linker.
+Their hashes exactly matched the independent fake-driver gate in section 10
+and were verified inside the pod before and after testing. Both Rust libraries
+were staged as siblings. No C production cuinterpose binary was used.
+
+### Setup attempts and cleanup
+
+The prior tester's combined apply/wait command had timed out locally, but its
+job had successfully scheduled and was still waiting for a payload sentinel.
+Its disposable evidence directory was no longer accessible during takeover;
+the payload was therefore reproduced in the parent workspace and verified
+against the recorded hashes. That initial failed copy was a setup issue,
+not a product or pytest failure.
+
+Before starting any tests, only the owned waiting job was recreated to use
+a uv-managed environment and hold its results for collection. The original
+two-GPU claim was retained. pip bootstrapped uv; uv installed the test
+dependencies. The replacement job ran once. Tar omitted stale Unix socket
+paths during evidence collection, as expected; regular files, state records,
+JUnit, and logs were preserved. Both the job and its claim were deleted after
+evidence collection, without touching other workloads.
+
+The private, parent-workspace evidence is under
+`.cuinterpose-evidence/rust-gpu-41dd090/`: source/artifact checksums, launcher,
+manifests/events, environment audit, pytest/run logs, JUnit, checkpoint state
+files, and decoded topology counts. Successful coordinator stdout is consumed
+by the unchanged test harness, so full phase reports are not separately logged;
+the tests assert their success and content counts, and print transfer metrics.
+
+This gate restores CUDA state in the same worker processes. It does not run
+CRIU, the Snapshot agent/operator, or vLLM, and it does not move the workload
+between nodes. Those remain separate required integration tests.
