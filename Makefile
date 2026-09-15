@@ -14,6 +14,7 @@ REGISTRY          ?= ghcr.io/ai-dynamo/snapshot
 VERSION           ?= latest
 TAGS              ?= $(VERSION)
 DOCKER_BUILD_ARGS ?=
+MODEL_STREAMER_WHEEL_DIR ?= ../runai-model-streamer/py/runai_model_streamer/dist
 
 # Base image for the agent, read from the Dockerfile so the digest lives in one
 # place. capture-base-packages and docker-build-agent must agree on it, or the
@@ -158,4 +159,5 @@ docker-build-operator:
 
 docker-build-pagebroker:
 	docker buildx build $(DOCKER_BUILD_ARGS) --platform "$(AGENT_PLATFORM)" -f agent/pagebroker/Dockerfile \
+	  --build-context=model-streamer-wheel="$(MODEL_STREAMER_WHEEL_DIR)" \
 	  $(foreach t,$(TAGS),-t $(REGISTRY)/pagebroker:$(t)) agent/pagebroker/

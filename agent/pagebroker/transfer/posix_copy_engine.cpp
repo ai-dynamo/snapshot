@@ -4,104 +4,12 @@
 #include "posix_copy_engine.hpp"
 
 #include <filesystem>
-#include <stdexcept>
-#include <string>
-#include <system_error>
 #include <utility>
+
+#include "filesystem_storage.hpp"
 
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
-namespace {
-Path
-StoragePath(const StorageBackend& storage, const Path& storage_root, const char* label)
-{
-  if (!storage.has_filesystem() || storage.filesystem().directory().empty())
-    throw std::invalid_argument(std::string("filesystem ") + label + " is required");
-  const Path path(storage.filesystem().directory());
-  const Path relative = path.lexically_relative(storage_root);
-  if (!path.is_absolute() || path.lexically_normal() != path || relative.empty() ||
-      relative == "." || relative.string().starts_with("../") || relative == "..")
-    throw std::invalid_argument(std::string(label) + " must be within storage root");
-
-  Path component = storage_root;
-  for (const auto& part : relative) {
-    component /= part;
-    if (fs::is_symlink(component))
-      throw std::invalid_argument(std::string(label) + " contains symlink");
-  }
-  return path;
-}
-
-Path
-SourcePath(const StorageBackend& source, const Path& storage_root)
-{
-  const Path path = StoragePath(source, storage_root, "source");
-  if (!fs::is_directory(path))
-    throw std::invalid_argument("source must be a storage directory");
-  return path;
-}
-
-Path
-DestinationPath(const StorageBackend& destination, const Path& storage_root)
-{
-  return StoragePath(destination, storage_root, "destination");
-}
-
-Path
-PartialPath(const Path& destination)
-{
-  Path partial = destination;
-  partial += ".pagebroker-partial";
-  return partial;
-}
-
-Path
-PreviousPath(const Path& destination)
-{
-  Path previous = destination;
-  previous += ".pagebroker-previous";
-  return previous;
-}
-
-class RestorePreviousOnFailure {
- public:
-  RestorePreviousOnFailure(const Path& previous, const Path& published) : previous_(previous), published_(published) {}
-
-  ~RestorePreviousOnFailure()
-  {
-    if (!cancelled_) {
-      std::error_code error;
-      std::filesystem::rename(previous_, published_, error);
-    }
-  }
-
-  void Cancel() { cancelled_ = true; }
-
- private:
-  const Path& previous_;
-  const Path& published_;
-  bool cancelled_ = false;
-};
-
-uintmax_t
-DirectorySize(const Path& path)
-{
-  uintmax_t bytes = 0;
-  for (const auto& entry : fs::recursive_directory_iterator(path)) {
-    if (entry.is_symlink())
-      throw std::runtime_error("checkpoint contains symlink");
-    if (entry.is_regular_file())
-      bytes += entry.file_size();
-  }
-  return bytes;
-}
-
-void
-CopyDirectory(const Path& source, const Path& destination)
-{
-  fs::copy(source, destination, fs::copy_options::recursive);
-}
-}  // namespace
 
 PosixCopyEngine::PosixCopyEngine(Path storage_root)
     : storage_root_(fs::weakly_canonical(std::move(storage_root)))
@@ -117,51 +25,30 @@ PosixCopyEngine::type() const
 uintmax_t
 PosixCopyEngine::RestoreSize(const StorageBackend& source) const
 {
-  return DirectorySize(SourcePath(source, storage_root_));
+  return filesystem_storage::RestoreSize(source, storage_root_);
 }
 
 void
 PosixCopyEngine::StageRestore(const StorageBackend& source, const Path& destination) const
 {
-  CopyDirectory(SourcePath(source, storage_root_), destination);
+  fs::copy(filesystem_storage::SourcePath(source, storage_root_), destination, fs::copy_options::recursive);
 }
 
 void
 PosixCopyEngine::ValidateCheckpointDestination(const StorageBackend& destination) const
 {
-  DestinationPath(destination, storage_root_);
+  filesystem_storage::DestinationPath(destination, storage_root_);
 }
 
 bool
 PosixCopyEngine::CheckpointDestinationConflicts(const StorageBackend& destination) const
 {
-  return fs::exists(PartialPath(DestinationPath(destination, storage_root_)));
+  return filesystem_storage::CheckpointDestinationConflicts(destination, storage_root_);
 }
 
 void
 PosixCopyEngine::PublishCheckpoint(const Path& source, const StorageBackend& destination) const
 {
-  const Path published = DestinationPath(destination, storage_root_);
-  const Path partial = PartialPath(published);
-  const Path previous = PreviousPath(published);
-  try {
-    fs::create_directories(published.parent_path());
-    CopyDirectory(source, partial);
-    if (fs::exists(published)) {
-      fs::rename(published, previous);
-      RestorePreviousOnFailure restore_previous(previous, published);
-      fs::rename(partial, published);
-      restore_previous.Cancel();
-      std::error_code cleanup_error;
-      fs::remove_all(previous, cleanup_error);
-      return;
-    }
-    fs::rename(partial, published);
-  }
-  catch (...) {
-    std::error_code cleanup_error;
-    fs::remove_all(partial, cleanup_error);
-    throw;
-  }
+  filesystem_storage::PublishCheckpoint(source, destination, storage_root_);
 }
 }  // namespace snapshot::pagebroker
