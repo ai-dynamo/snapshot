@@ -11,8 +11,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include <cerrno>
 #include <atomic>
+#include <cerrno>
+#include <charconv>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -56,17 +57,19 @@ private:
   int fd_;
 };
 
-int HexValue(char value) {
-  if (value >= '0' && value <= '9') {
-    return value - '0';
+template <typename T>
+bool ParseUnsigned(std::string_view value, T *parsed) {
+  if (value.empty() || parsed == nullptr) {
+    return false;
   }
-  if (value >= 'a' && value <= 'f') {
-    return value - 'a' + 10;
+  T result = 0;
+  const auto [end, parse_error] =
+      std::from_chars(value.data(), value.data() + value.size(), result, 10);
+  if (parse_error != std::errc{} || end != value.data() + value.size()) {
+    return false;
   }
-  if (value >= 'A' && value <= 'F') {
-    return value - 'A' + 10;
-  }
-  return -1;
+  *parsed = result;
+  return true;
 }
 
 bool NormalizeExtent(const ManifestExtent &extent, size_t index,
@@ -125,24 +128,13 @@ void RemoveTemporaryManifest(const std::filesystem::path &temporary) {
 bool RemoveTemporaryManifests(const std::filesystem::path &directory,
                               bool *removed, std::string *error) {
   std::error_code iterator_error;
-  std::filesystem::directory_iterator iterator(directory, iterator_error);
-  if (iterator_error) {
-    *error = "scan helper directory for temporary manifests: " +
-             iterator_error.message();
-    return false;
-  }
   const std::filesystem::directory_iterator end;
-  while (iterator != end) {
+  for (std::filesystem::directory_iterator iterator(directory, iterator_error);
+       !iterator_error && iterator != end; iterator.increment(iterator_error)) {
     const auto entry = *iterator;
     const std::string name = entry.path().filename().string();
     if (name != kLegacyTemporaryManifestName &&
-        name.rfind(kTemporaryManifestPrefix, 0) != 0) {
-      iterator.increment(iterator_error);
-      if (iterator_error) {
-        *error = "scan helper directory for temporary manifests: " +
-                 iterator_error.message();
-        return false;
-      }
+        !name.starts_with(kTemporaryManifestPrefix)) {
       continue;
     }
     if (unlink(entry.path().c_str()) != 0 && errno != ENOENT) {
@@ -151,12 +143,11 @@ bool RemoveTemporaryManifests(const std::filesystem::path &directory,
       return false;
     }
     *removed = true;
-    iterator.increment(iterator_error);
-    if (iterator_error) {
-      *error = "scan helper directory for temporary manifests: " +
-               iterator_error.message();
-      return false;
-    }
+  }
+  if (iterator_error) {
+    *error = "scan helper directory for temporary manifests: " +
+             iterator_error.message();
+    return false;
   }
   return true;
 }
@@ -225,6 +216,53 @@ bool ReadManifestContents(const std::filesystem::path &manifest_path,
   return true;
 }
 
+bool ParseVersionHeader(std::istringstream &input, std::string *error) {
+  std::string key;
+  std::string version_text;
+  unsigned int version = 0;
+  if (!(input >> key >> version_text) || key != "version" ||
+      !ParseUnsigned(version_text, &version)) {
+    *error = "invalid helper manifest version header";
+    return false;
+  }
+  if (version < 3) {
+    *error = "unsafe helper manifest without extent digests is not supported";
+    return false;
+  }
+  if (version != 3) {
+    *error = "unsupported helper manifest version";
+    return false;
+  }
+  return true;
+}
+
+bool ParseDeviceEntry(std::istringstream &input, size_t expected_index,
+                      ManifestExtent *extent, std::string *error) {
+  std::string key;
+  std::string index_text;
+  std::string size_text;
+  size_t index = 0;
+  if (!(input >> key >> index_text >> extent->source_uuid >> size_text >>
+        extent->filename >> extent->sha256) ||
+      key != "device" || !ParseUnsigned(index_text, &index) ||
+      index != expected_index || !ParseUnsigned(size_text, &extent->size)) {
+    *error = "invalid helper manifest device entry";
+    return false;
+  }
+
+  std::string canonical;
+  if (!CanonicalizeGPUUUID(extent->source_uuid, &canonical) ||
+      canonical != extent->source_uuid) {
+    *error = "helper manifest source GPU UUID is not canonical";
+    return false;
+  }
+  if (!IsSHA256Hex(extent->sha256)) {
+    *error = "helper manifest extent SHA-256 digest is invalid";
+    return false;
+  }
+  return true;
+}
+
 } // namespace
 
 bool ParseGPUUUID(std::string_view value,
@@ -233,7 +271,7 @@ bool ParseGPUUUID(std::string_view value,
     return false;
   }
   if (value.size() == 40) {
-    if (value.substr(0, 4) != "GPU-") {
+    if (!value.starts_with("GPU-")) {
       return false;
     }
     value.remove_prefix(4);
@@ -249,12 +287,14 @@ bool ParseGPUUUID(std::string_view value,
         input_index == 23) {
       ++input_index;
     }
-    const int high = HexValue(value[input_index]);
-    const int low = HexValue(value[input_index + 1]);
-    if (high < 0 || low < 0) {
+    unsigned int byte = 0;
+    const char *begin = value.data() + input_index;
+    const auto [end, parse_error] =
+        std::from_chars(begin, begin + 2, byte, 16);
+    if (parse_error != std::errc{} || end != begin + 2 || byte > 0xff) {
       return false;
     }
-    (*bytes_out)[byte_index] = static_cast<unsigned char>((high << 4) | low);
+    (*bytes_out)[byte_index] = static_cast<unsigned char>(byte);
     input_index += 2;
   }
   return input_index == value.size();
@@ -545,23 +585,15 @@ bool ReadManifest(const std::filesystem::path &directory,
   }
 
   std::istringstream input(contents);
-  std::string key;
-  unsigned int version = 0;
-  if (!(input >> key >> version) || key != "version") {
-    *error = "invalid helper manifest version header";
-    return false;
-  }
-  if (version < 3) {
-    *error = "unsafe helper manifest without extent digests is not supported";
-    return false;
-  }
-  if (version != 3) {
-    *error = "unsupported helper manifest version";
+  if (!ParseVersionHeader(input, error)) {
     return false;
   }
 
+  std::string key;
+  std::string device_count_text;
   size_t device_count = 0;
-  if (!(input >> key >> device_count) || key != "device_count" ||
+  if (!(input >> key >> device_count_text) || key != "device_count" ||
+      !ParseUnsigned(device_count_text, &device_count) ||
       device_count > kMaximumDeviceCount) {
     *error = "invalid helper manifest device count";
     return false;
@@ -571,22 +603,8 @@ bool ReadManifest(const std::filesystem::path &directory,
   parsed.reserve(device_count);
   for (size_t expected_index = 0; expected_index < device_count;
        ++expected_index) {
-    size_t index = 0;
     ManifestExtent extent;
-    if (!(input >> key >> index >> extent.source_uuid >> extent.size >>
-          extent.filename >> extent.sha256) ||
-        key != "device" || index != expected_index) {
-      *error = "invalid helper manifest device entry";
-      return false;
-    }
-    std::string canonical;
-    if (!CanonicalizeGPUUUID(extent.source_uuid, &canonical) ||
-        canonical != extent.source_uuid) {
-      *error = "helper manifest source GPU UUID is not canonical";
-      return false;
-    }
-    if (!IsSHA256Hex(extent.sha256)) {
-      *error = "helper manifest extent SHA-256 digest is invalid";
+    if (!ParseDeviceEntry(input, expected_index, &extent, error)) {
       return false;
     }
     parsed.push_back(std::move(extent));

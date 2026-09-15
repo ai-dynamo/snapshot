@@ -202,6 +202,51 @@ bool TestV2RejectedWithoutDigest() {
   return result;
 }
 
+bool TestInvalidUnsignedFieldsRejected() {
+  char path[] = "/tmp/cuda-storage-manifest-unsigned-test-XXXXXX";
+  const char *directory = mkdtemp(path);
+  if (!Check(directory != nullptr, "mkdtemp failed")) {
+    return false;
+  }
+  const auto manifest =
+      std::filesystem::path(directory) / storage::kManifestName;
+  std::vector<storage::ManifestExtent> extents;
+  std::string error;
+  const auto rejected = [&](const std::string &contents,
+                            const std::string &message) {
+    std::ofstream(manifest, std::ios::trunc) << contents;
+    extents.clear();
+    error.clear();
+    return Check(!storage::ReadManifest(directory, &extents, &error), message);
+  };
+
+  const std::string device_prefix =
+      std::string("version 3\ndevice_count 1\ndevice 0 ") + kSourceA;
+  const bool result =
+      rejected("version -1\ndevice_count 0\n",
+               "negative manifest version was accepted") &&
+      rejected("version +3\ndevice_count 0\n",
+               "explicitly signed manifest version was accepted") &&
+      rejected("version 3\ndevice_count -1\n",
+               "negative device count was accepted") &&
+      rejected("version 3\ndevice_count +1\n",
+               "explicitly signed device count was accepted") &&
+      rejected(std::string("version 3\ndevice_count 1\ndevice -1 ") +
+                   kSourceA + " 1 device-0000.bin " + kDigestA + "\n",
+               "negative device index was accepted") &&
+      rejected(device_prefix + " -1 device-0000.bin " + kDigestA + "\n",
+               "negative extent size was accepted") &&
+      rejected(device_prefix + " +1 device-0000.bin " + kDigestA + "\n",
+               "explicitly signed extent size was accepted") &&
+      rejected(device_prefix +
+                   " 184467440737095516160 device-0000.bin " + kDigestA +
+                   "\n",
+               "overflowing extent size was accepted");
+  std::error_code ignored;
+  std::filesystem::remove_all(directory, ignored);
+  return result;
+}
+
 bool TestManifestSymlinkRejected() {
   char path[] = "/tmp/cuda-storage-manifest-symlink-test-XXXXXX";
   const char *directory = mkdtemp(path);
@@ -348,13 +393,24 @@ bool TestValidateExtentFiles() {
   const bool resized = truncate(extent_path.c_str(), 4) == 0;
   const bool accepted_exact_size =
       resized && storage::ValidateExtentFiles(directory, extents, &error);
+  const auto target_path = std::filesystem::path(directory) / "extent-target";
+  std::error_code rename_error;
+  std::filesystem::rename(extent_path, target_path, rename_error);
+  const bool linked = !rename_error &&
+                      symlink(target_path.c_str(), extent_path.c_str()) == 0;
+  const bool rejected_symlink =
+      linked && !storage::ValidateExtentFiles(directory, extents, &error);
   std::error_code ignored;
   std::filesystem::remove_all(directory, ignored);
   return Check(rejected_wrong_size,
                "ValidateExtentFiles accepted an incorrect extent size") &&
          Check(resized, "failed to resize extent fixture") &&
          Check(accepted_exact_size,
-               "ValidateExtentFiles rejected the exact extent size");
+               "ValidateExtentFiles rejected the exact extent size") &&
+         Check(!rename_error, "failed to rename extent fixture") &&
+         Check(linked, "failed to create extent symlink fixture") &&
+         Check(rejected_symlink,
+               "ValidateExtentFiles accepted an extent symlink");
 }
 
 bool TestRemoveManifest() {
@@ -369,16 +425,20 @@ bool TestRemoveManifest() {
   const auto unique_temporary = std::filesystem::path(directory) /
                                 (std::string(storage::kTemporaryManifestPrefix) +
                                  "123.456");
+  const auto lookalike =
+      std::filesystem::path(directory) / "manifest.txt.tmpx";
   {
     std::ofstream(manifest) << "manifest";
     std::ofstream(temporary) << "temporary";
     std::ofstream(unique_temporary) << "temporary";
+    std::ofstream(lookalike) << "preserve";
   }
   std::string error;
   const bool first = storage::RemoveManifest(directory, &error);
   const bool removed = !std::filesystem::exists(manifest) &&
                        !std::filesystem::exists(temporary) &&
-                       !std::filesystem::exists(unique_temporary);
+                       !std::filesystem::exists(unique_temporary) &&
+                       std::filesystem::exists(lookalike);
   const bool second = storage::RemoveManifest(directory, &error);
   std::error_code ignored;
   std::filesystem::remove_all(directory, ignored);
@@ -411,7 +471,8 @@ int main() {
   if (!TestGPUUUIDParsing() || !TestEqualSizeNonOrderPreservingMap() ||
       !TestEmptyV3Manifest() ||
       !TestNonemptyV3ManifestRoundTrip() || !TestV1Rejected() ||
-      !TestV2RejectedWithoutDigest() || !TestManifestSymlinkRejected() ||
+      !TestV2RejectedWithoutDigest() || !TestInvalidUnsignedFieldsRejected() ||
+      !TestManifestSymlinkRejected() ||
       !TestUnconsumedExtentRejected() || !TestUnsafeMappingsRejected() ||
       !TestDuplicateCheckpointUUIDRejected() ||
       !TestExtentDigestApplyAndSameSizeCorruptionRejection() ||
