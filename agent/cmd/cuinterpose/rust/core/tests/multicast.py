@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Additional multicast invariants against the Rust core and pinned fake CUDA."""
+"""Multicast invariants against the Rust core and local fake CUDA."""
 
 import ctypes as c
 import os
+import subprocess
 import socket
 import sys
 import threading
@@ -53,6 +54,18 @@ def main():
         # Failure must also finish its in-flight reservation.
         command("inspect")
         group.value = 0
+    if mode == "unsupported":
+        assert cuda.cuMulticastCreate(c.byref(group), c.byref(Multicast(1, length, 8, 0))) == 0
+        assert stats().multicasts == 0 and stats().unsupported == 1
+        assert cuda.cuMemRelease(group) == 0
+        result = subprocess.run([
+            os.environ["CUINTERPOSE_COORDINATOR"], "--prepare", "--proc-root", "/proc",
+            "--control-dir", os.environ["SNAPSHOT_CONTROL_DIR"],
+            "--checkpoint-dir", os.environ["SNAPSHOT_CONTROL_DIR"],
+            "--process", str(os.getpid()), str(os.getpid()),
+        ], capture_output=True)
+        assert result.returncode != 0 and stats().phase == 1
+        return
     assert cuda.cuMemCreate(c.byref(member), length, c.byref(props), 0) == 0
     assert cuda.cuMemMap(0x10000000, length, 0, member, 0) == 0
     assert cuda.cuMulticastCreate(c.byref(group), c.byref(Multicast(1, length, 1, 0))) == 0
@@ -80,7 +93,9 @@ def main():
     else:
         assert cuda.cuMulticastAddDevice(group, 0) == 0
 
-    assert cuda.cuMulticastBindMem_v2(group, 0, 0, member, 0, length, 0) == 0
+    binding_offset = length if mode == "extent" else 0
+    mapped_size = 2 * length if mode == "extent" else length
+    assert cuda.cuMulticastBindMem_v2(group, 0, binding_offset, member, 0, length, 0) == 0
     if mode == "pending-map":
         cuda.multicast_block_arm(2)
         results = []
@@ -118,7 +133,7 @@ def main():
         assert stats().handles == unicast_handles and cuda.fakeAllocationRefs(real) == refs
         replay()
     else:
-        assert cuda.cuMemMap(0x70000000, length, 0, group, 0) == 0
+        assert cuda.cuMemMap(0x70000000, mapped_size, 0, group, 0) == 0
     if mode == "cached-export":
         tickets = []
         for handle in (member, group):
@@ -198,6 +213,12 @@ def main():
         assert stats().phase == 5
         print("PASS multicast failure")
         return
+    elif mode == "tracked-address":
+        assert cuda.cuMulticastUnbind(group, 0, 0, length) == 0
+        assert cuda.cuMulticastBindAddr_v2(group, 0, 0, 0x10000000, length, 0) == 0
+        replay()
+        assert cuda.fakeMulticastBindings(2) == 1
+        assert cuda.fakeCopiedToHost() == length
     elif mode == "native-address":
         # BindAddr's member may be native-owned and absent from the shim table.
         # Its VA is restored by native CUDA, while only the binding is replayed.
@@ -208,12 +229,14 @@ def main():
         assert cuda.cuMemCreate(c.byref(native), length, c.byref(native_properties), 0) == 0
         assert cuda.cuMemMap(0x30000000, length, 0, native, 0) == 0
         assert cuda.cuMulticastUnbind(group, 0, 0, length) == 0
+        assert cuda.cuMulticastBindMem_v2(group, 0, 0, native, 0, length, 0) == 801
+        assert cuda.fakeMulticastBindings(0) == 0
         assert cuda.cuMulticastBindAddr_v2(group, 0, 0, 0x30000000, length, 0) == 0
         replay()
         assert cuda.fakeMulticastBindings(2) == 1
         assert cuda.cuMemUnmap(0x30000000, length) == 0
         assert cuda.cuMemRelease(native) == 0
-    elif mode in ("inflight", "create-output"):
+    elif mode in ("inflight", "create-output", "extent"):
         replay()
     elif mode == "pending-map":
         # The round trip and retain/reference assertions ran above.
@@ -221,8 +244,8 @@ def main():
     else:
         raise AssertionError(mode)
 
-    assert cuda.cuMemUnmap(0x70000000, length) == 0
-    assert cuda.cuMulticastUnbind(group, 0, 0, length) == 0
+    assert cuda.cuMemUnmap(0x70000000, mapped_size) == 0
+    assert cuda.cuMulticastUnbind(group, 0, binding_offset, length) == 0
     assert cuda.cuMemRelease(group) == 0
     assert cuda.cuMemUnmap(0x10000000, length) == 0
     assert cuda.cuMemRelease(member) == 0

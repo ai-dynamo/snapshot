@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Build CUDA-named providers and test the Rust front end in fresh processes."""
+"""Test one packaged artifact set against CUDA-named providers in fresh processes."""
 
 import argparse
 import os
@@ -15,33 +15,17 @@ import tempfile
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--frontend", type=Path, help="Use an already-built libcuinterpose.so")
+    parser.add_argument("--artifacts", type=Path,
+                        default=Path(__file__).resolve().parents[3] / "build")
     args = parser.parse_args()
     workspace = Path(__file__).resolve().parents[2]
     fixtures = Path(__file__).resolve().parent / "fixtures"
     env = os.environ.copy()
     env.pop("LD_PRELOAD", None)
     env.pop("CUINTERPOSE_TEST_CORE_INITIALIZED", None)
-    env.setdefault("CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER", "/usr/bin/gcc")
-    subprocess.run(
-        ["cargo", "build", "--release", "--target", "x86_64-unknown-linux-gnu", "-p", "cuinterpose-core"],
-        cwd=workspace, env=env, check=True,
-    )
-    target = Path(env.get("CARGO_TARGET_DIR", workspace / "target"))
-    if not target.is_absolute():
-        target = workspace / target
-    core = target / "x86_64-unknown-linux-gnu/release/libcuinterpose_core.so"
-    if args.frontend:
-        frontend = args.frontend.resolve()
-    else:
-        subprocess.run(
-            ["cargo", "build", "--release", "--target", "x86_64-unknown-linux-gnu", "-p", "cuinterpose"],
-            cwd=workspace, env=env, check=True,
-        )
-        target = Path(env.get("CARGO_TARGET_DIR", workspace / "target"))
-        if not target.is_absolute():
-            target = workspace / target
-        frontend = target / "x86_64-unknown-linux-gnu/release/libcuinterpose.so"
+    artifacts = args.artifacts.resolve()
+    core = artifacts / "libcuinterpose_core.so"
+    frontend = artifacts / "libcuinterpose.so"
     # The own-wrapper identity exception is valid only when an earlier preload
     # cannot preempt addresses in the frontend's wrapper inventory.
     exports = subprocess.check_output(

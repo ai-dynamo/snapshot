@@ -8,6 +8,7 @@
 
 #![allow(non_snake_case, reason = "CUDA dispatch mirrors the NVIDIA ABI names")]
 mod control;
+mod driver;
 mod export_cache;
 mod host_carrier;
 mod multicast;
@@ -37,9 +38,9 @@ macro_rules! exports {
             unsafe extern "C" fn $name($($arg: $ty),*) -> i32 {
                 if G_FAILED.load(std::sync::atomic::Ordering::Acquire) { return NOT_READY; }
                 boundary(&G_FAILED, UNKNOWN, || {
-                    if let Err(code) = state::initialize() { return code; }
+                    if let Err(code) = state::initialize() { return code.0; }
                     let result = state::$name($($arg),*);
-                    result.unwrap_or_else(|code| code)
+                    result.map_or_else(|code| code.0, |()| SUCCESS)
                 })
             }
         )*
@@ -57,7 +58,7 @@ memory_api!(exports);
 
 unsafe extern "C" fn ensure_ready() -> i32 {
     boundary(&G_FAILED, NOT_INITIALIZED, || {
-        state::initialize().map_or_else(|error| error, |()| SUCCESS)
+        state::initialize().map_or_else(|error| error.0, |()| SUCCESS)
     })
 }
 
@@ -115,7 +116,7 @@ pub unsafe extern "C" fn cuinterpose_core_init(host: *const Host, output: *mut *
             return NOT_READY;
         }
         if let Err(error) = state::initialize() {
-            return error;
+            return error.0;
         }
         unsafe {
             *output = &G_API;

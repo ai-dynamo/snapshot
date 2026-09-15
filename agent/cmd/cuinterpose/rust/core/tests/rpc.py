@@ -43,6 +43,20 @@ def worker(kind, transport_fd, ready_fd, release_fd):
     cuda.cuMemImportFromShareableHandle.argtypes = [c.POINTER(c.c_uint64), c.c_void_p, c.c_uint]
     assert cuda.cuMemImportFromShareableHandle(c.byref(imported), c.c_void_p(descriptors[0]), 1) == 0
     os.close(descriptors[0])
+    u64, size = c.c_uint64, c.c_size_t
+    cuda.cuMemMap.argtypes = [u64, size, size, u64, u64]
+    cuda.cuMemUnmap.argtypes = [u64, size]
+    if kind == "multicast":
+        cuda.cuMulticastAddDevice.argtypes = [u64, c.c_int]
+        cuda.cuMulticastBindMem_v2.argtypes = [u64, c.c_int, size, u64, size, size, u64]
+        cuda.cuMulticastUnbind.argtypes = [u64, c.c_int, size, size]
+        member = u64()
+        assert cuda.cuMemCreate(c.byref(member), length, c.byref(props), 0) == 0
+        for group in (handle, imported):
+            assert cuda.cuMulticastAddDevice(group, 0) == 0
+            assert cuda.cuMulticastBindMem_v2(group, 0, 0, member, 0, length, 0) == 0
+    for address, allocation in ((0x10000000, handle), (0x20000000, imported)):
+        assert cuda.cuMemMap(address, length, 0, allocation, 0) == 0
     path = f"{os.environ['SNAPSHOT_CONTROL_DIR']}/cuinterpose-{os.getpid()}.sock"
     identity = reply(request(path, "handshake"))["participant"]
     assert cuda.rpc_attempts() == 2, "only the two mandatory threads should exist"
@@ -66,9 +80,17 @@ def worker(kind, transport_fd, ready_fd, release_fd):
             assert stats().phase == 1
             cuda.fakeCopiedToHost.restype = c.c_uint64
             cuda.fakeCopiedToDevice.restype = c.c_uint64
-            expected = length if kind == "unicast" else 0
+            expected = length
             assert cuda.fakeCopiedToHost() == expected
             assert cuda.fakeCopiedToDevice() == expected
+            assert cuda.fakeMappedCount() == 2
+            if kind == "multicast":
+                assert cuda.fakeMulticastBindings(1) == 2
+                for group in (handle, imported):
+                    assert cuda.cuMulticastUnbind(group, 0, 0, length) == 0
+                assert cuda.cuMemRelease(member) == 0
+            assert cuda.cuMemUnmap(0x10000000, length) == 0
+            assert cuda.cuMemUnmap(0x20000000, length) == 0
             assert cuda.cuMemRelease(imported) == 0
             assert cuda.cuMemRelease(handle) == 0
             os.close(ticket.value)

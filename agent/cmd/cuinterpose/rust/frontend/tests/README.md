@@ -11,13 +11,13 @@ From the cuinterpose Rust workspace:
 python3 frontend/tests/run.py
 ```
 
-The runner requires Linux/amd64, Rust, Python 3, and `/usr/bin/gcc`. It builds
-the Rust frontend and core and compiles independent C fixtures in
-a temporary directory. No CUDA toolkit, GPU, Python packages, or root access
-is required. To test an existing artifact:
+The runner requires Linux/amd64, Python 3 with `msgpack`, `/usr/bin/gcc`, and
+matched packaged artifacts (default `../build`). It compiles independent C
+fixtures in a temporary directory, but never rebuilds or mixes Rust artifacts.
+No CUDA toolkit, GPU, or root access is required:
 
 ```sh
-python3 frontend/tests/run.py --frontend /path/to/libcuinterpose.so
+python3 frontend/tests/run.py --artifacts /path/to/build
 ```
 
 The default GNU target linker is `/usr/bin/gcc`, overridable through
@@ -77,7 +77,7 @@ its first CUDA call; concurrent core reentry must
 return not-initialized without poisoning the eventual initialization.
 The fixture waits for the worker's futex syscall rather than using a fixed
 sleep. Same-thread core-constructor reentry is covered separately. These use
-the independent mock core; `core/tests/reference.py` covers Rust core generation
+the independent mock core; `core/tests/headless.py` covers Rust core generation
 reset, including nested-fork FD reuse and saved host carriers.
 
 After the 23 mock-core loader cases, 19 separate endpoint cases use the actual

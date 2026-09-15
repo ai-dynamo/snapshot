@@ -42,12 +42,6 @@ impl<T: AsRawFd> std::ops::Deref for Socket<T> {
     }
 }
 
-impl<T: AsRawFd> std::ops::DerefMut for Socket<T> {
-    fn deref_mut(&mut self) -> &mut T {
-        self.0.as_mut().expect("live registered socket")
-    }
-}
-
 impl<T: AsRawFd> Drop for Socket<T> {
     fn drop(&mut self) {
         let mut sockets = G_SOCKETS.lock().unwrap_or_else(|e| e.into_inner());
@@ -95,25 +89,12 @@ pub unsafe extern "C" fn child() {
         for fd in &snapshot.descriptors {
             unsafe { libc::syscall(libc::SYS_close, *fd) };
         }
-        if let Some(arena) = snapshot
-            .state
-            .state
-            .as_ref()
-            .and_then(|state| state.arena.as_ref())
-        {
-            unsafe { libc::syscall(libc::SYS_munmap, arena.base, arena.size) };
-        }
-        // Abandon CUDA-bearing state/cache and their locked mutexes. Fresh child
-        // activity allocates a new generation; no inherited CUDA Drop runs.
-        std::mem::forget(snapshot.state.state.take());
-        std::mem::forget(snapshot.state.cache.take());
         // The surviving thread acquired these two process-lifetime guards.
         // Clear before unlocking: a nested fork must not close a reused app FD.
         if let Some(mut sockets) = snapshot.sockets.take() {
             sockets.clear();
         }
-        drop(snapshot.state.initializing.take());
+        snapshot.state.abandon();
         // The snapshot allocation is intentionally abandoned in the child.
     }
-    super::state::fork_child();
 }

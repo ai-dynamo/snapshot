@@ -15,13 +15,31 @@ use std::sync::{Mutex, OnceLock};
 pub static G_FAILED: AtomicBool = AtomicBool::new(false);
 static G_REAL_DLSYM: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 type Dlsym = unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_void;
-static G_PROVIDERS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
-static G_CORE: OnceLock<Option<usize>> = OnceLock::new();
+static G_PROVIDERS: Mutex<Vec<Library>> = Mutex::new(Vec::new());
+pub(super) static G_CORE: OnceLock<Option<&'static Core>> = OnceLock::new();
 static G_INITIALIZING_CORE: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
-    static G_FORK_PROVIDERS: std::cell::RefCell<Option<std::sync::MutexGuard<'static, Vec<usize>>>> =
+    static G_FORK_PROVIDERS: std::cell::RefCell<Option<std::sync::MutexGuard<'static, Vec<Library>>>> =
         const { std::cell::RefCell::new(None) };
+}
+
+// dlopen references are process-wide and glibc's loader operations are MT-safe.
+// Keep the opaque token as an integer, never dereference it. Unlike a symbol
+// address this owns one reference; drop it outside our locks (destructors run).
+struct Library(usize);
+
+impl Library {
+    fn open(path: &CStr, flags: i32) -> Option<Self> {
+        let handle = unsafe { libc::dlopen(path.as_ptr(), flags) };
+        (!handle.is_null()).then(|| Self(handle as usize))
+    }
+}
+
+impl Drop for Library {
+    fn drop(&mut self) {
+        unsafe { libc::dlclose(self.0 as *mut c_void) };
+    }
 }
 
 pub fn fork_prepare() {
@@ -143,11 +161,11 @@ pub fn retain_provider(selected: *mut c_void, address: *mut c_void) -> Result<bo
         }
     }
     // Never hold a Rust lock across dlopen: constructors can reenter the shim.
-    let handle = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_NOLOAD) };
-    if handle.is_null() {
+    let Some(library) = Library::open(path, libc::RTLD_LAZY | libc::RTLD_NOLOAD) else {
         G_FAILED.store(true, Ordering::Release);
         return Err(());
-    }
+    };
+    let handle = library.0 as *mut c_void;
     let mut retained: *mut LinkMap = std::ptr::null_mut();
     if unsafe {
         libc::dlinfo(
@@ -161,20 +179,15 @@ pub fn retain_provider(selected: *mut c_void, address: *mut c_void) -> Result<bo
     {
         // The same path may be loaded in another dlmopen namespace. Retaining
         // the base-namespace copy does not keep that returned pointer alive.
-        unsafe {
-            libc::dlclose(handle);
-        }
         return Ok(false);
     }
     let mut providers = G_PROVIDERS.lock().unwrap_or_else(|e| e.into_inner());
-    if providers.contains(&(handle as usize)) {
-        drop(providers);
-        unsafe {
-            libc::dlclose(handle);
-        }
-    } else {
-        providers.push(handle as usize);
+    if !providers.iter().any(|provider| provider.0 == library.0) {
+        providers.push(library);
+        return Ok(true);
     }
+    drop(providers);
+    drop(library);
     Ok(true)
 }
 
@@ -213,7 +226,9 @@ pub unsafe extern "C" fn resolve(name: *const c_char) -> *mut c_void {
             let handles = G_PROVIDERS
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .clone();
+                .iter()
+                .map(|library| library.0)
+                .collect::<Vec<_>>();
             for handle in handles {
                 address = unsafe { real(handle as *mut c_void, name.as_ptr()) };
                 if !address.is_null() {
@@ -229,15 +244,11 @@ pub unsafe extern "C" fn resolve(name: *const c_char) -> *mut c_void {
             } else {
                 c"libcuda.so.1"
             };
-            let handle =
-                unsafe { libc::dlopen(library.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
-            if !handle.is_null() {
+            if let Some(library) = Library::open(library, libc::RTLD_LAZY | libc::RTLD_LOCAL) {
+                let handle = library.0 as *mut c_void;
                 address = unsafe { real(handle, name.as_ptr()) };
                 if retain_provider(handle, address) != Ok(true) {
                     address = std::ptr::null_mut();
-                }
-                unsafe {
-                    libc::dlclose(handle);
                 }
             }
         } else {
@@ -253,7 +264,7 @@ pub unsafe extern "C" fn resolve(name: *const c_char) -> *mut c_void {
 
 pub fn core() -> Option<&'static Core> {
     if let Some(pointer) = G_CORE.get() {
-        return pointer.map(|address| unsafe { &*(address as *const Core) });
+        return *pointer;
     }
     // Another initializer may be waiting for the loader lock held by this
     // caller's constructor. Never wait, even across threads. A transient
@@ -283,15 +294,10 @@ pub fn core() -> Option<&'static Core> {
         let own = std::path::Path::new(std::ffi::OsStr::from_bytes(own.to_bytes()));
         let path = own.parent()?.join("libcuinterpose_core.so");
         let path = CString::new(path.as_os_str().as_bytes()).ok()?;
-        let handle = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
-        if handle.is_null() {
-            return None;
-        }
+        let library = Library::open(&path, libc::RTLD_LAZY | libc::RTLD_LOCAL)?;
+        let handle = library.0 as *mut c_void;
         let init = unsafe { real(handle, c"cuinterpose_core_init".as_ptr()) };
         if init.is_null() {
-            unsafe {
-                libc::dlclose(handle);
-            }
             return None;
         }
         let init: Initialize = unsafe { std::mem::transmute(init) };
@@ -304,9 +310,6 @@ pub fn core() -> Option<&'static Core> {
         let mut output = std::ptr::null();
         let result = unsafe { init(&host, &mut output) };
         if result != 0 || output.is_null() {
-            unsafe {
-                libc::dlclose(handle);
-            }
             return None;
         }
         // Check the fixed ABI prefix before creating a reference to the full
@@ -314,9 +317,6 @@ pub fn core() -> Option<&'static Core> {
         let version = unsafe { std::ptr::addr_of!((*output).version).read() };
         let size = unsafe { std::ptr::addr_of!((*output).size).read() };
         if version != ABI_VERSION || size as usize != size_of::<Core>() {
-            unsafe {
-                libc::dlclose(handle);
-            }
             return None;
         }
         // The sibling core is trusted to supply a fully initialized, non-null
@@ -324,8 +324,8 @@ pub fn core() -> Option<&'static Core> {
         // arbitrary foreign table or its function-pointer targets.
         // The core owns process state and exported function pointers. Keep
         // its loader reference; neither normal shutdown nor fork drops it.
-        super::process::publish(output);
-        Some(output as usize)
+        std::mem::forget(library);
+        Some(unsafe { &*output })
     });
-    pointer.map(|address| unsafe { &*(address as *const Core) })
+    *pointer
 }

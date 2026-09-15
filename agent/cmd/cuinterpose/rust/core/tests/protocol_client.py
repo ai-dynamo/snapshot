@@ -11,7 +11,7 @@ import struct
 
 import msgpack
 
-VERSION = 3
+VERSION = 4
 MAX_BYTES = 32 * 1024 * 1024
 LIFECYCLE = (
     "prepare_multicast", "save_allocations", "prepare_unicast",
@@ -99,7 +99,9 @@ def inspect(operation="handshake"):
 def command(operation, success=True):
     response = inspect(operation)
     assert ("Ok" in response["result"]) == success, (operation, response)
-    return response["result"]["Ok" if success else "Err"]
+    value = response["result"]["Ok" if success else "Err"]
+    # Externally tagged replies deserialize directly without buffering records.
+    return next(iter(value.values())) if success and isinstance(value, dict) else value
 
 
 def seal_ticket(ticket):

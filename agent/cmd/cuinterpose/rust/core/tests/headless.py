@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Build pinned C fake-driver fixtures and exercise the Rust implementation."""
+"""Exercise packaged Rust artifacts with local headless CUDA fixtures."""
 
 import argparse
 import os
@@ -11,8 +11,6 @@ import subprocess
 import sys
 import tempfile
 
-REFERENCE = "21008b50b93a9879a805665e331e777bb93abf49"
-
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -20,63 +18,49 @@ def main():
     parser.add_argument("--artifacts", type=Path,
                         default=workspace.parent / "build",
                         help="Packaged frontend, core, and coordinator (default: ../build)")
-    parser.add_argument("--image", default="snapshot-cuinterpose-check:latest",
-                        help="Local build image with CUDA 13.1 headers, gcc, and gtest")
     args = parser.parse_args()
-    repo = workspace.parents[3]
+    subprocess.run([sys.executable, str(workspace.parent / "tests/gpu/test_reports.py")],
+                   check=True)
     environment = os.environ.copy()
     environment.pop("LD_PRELOAD", None)
     artifacts = args.artifacts.resolve()
     for name in ("libcuinterpose.so", "libcuinterpose_core.so", "cuinterpose-coordinator"):
         if not (artifacts / name).is_file():
             parser.error(f"missing artifact: {artifacts / name}")
-    with tempfile.TemporaryDirectory(prefix="cuinterpose-reference-") as directory:
+    with tempfile.TemporaryDirectory(prefix="cuinterpose-headless-") as directory:
         temporary = Path(directory)
         fixtures = temporary / "build"
-        report_patch = Path(__file__).with_name("json-reports.patch")
-        archive = subprocess.check_output([
-            "git", "archive", REFERENCE, "agent/cmd/cuinterpose",
-        ], cwd=repo)
-        subprocess.run(["tar", "xf", "-", "-C", str(temporary)], input=archive, check=True)
-        subprocess.run(["git", "apply", str(report_patch.resolve())],
-                       cwd=temporary / "agent/cmd/cuinterpose", check=True)
-        # Build only the reusable CUDA-call fixtures and their fake providers,
-        # not the old C shim/coordinator or their implementation-specific tests.
+        (fixtures / "test").mkdir(parents=True)
+        sources = Path(__file__).with_name("fixtures")
         subprocess.run([
-            "docker", "run", "--runtime=runc", "--rm", "--entrypoint", "bash",
-            "--user", f"{os.getuid()}:{os.getgid()}",
-            "-v", f"{temporary}:/work", args.image, "-lc",
-            "cd /work/agent/cmd/cuinterpose && "
-            "make BUILD_DIR=/work/build CUDA_HOME=/usr/local/cuda-13.1 SANITIZE= "
-            "/work/build/test/state_preload_test /work/build/test/lifecycle_preload_test "
-            "/work/build/test/multicast_preload_test",
-        ], check=True, timeout=600)
+            "/usr/bin/gcc", "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror",
+            "-shared", "-fPIC", "-pthread", "-I", str(sources),
+            str(sources / "fake_cuda.c"), "-Wl,-soname,libcuda.so.1",
+            "-o", str(fixtures / "test/libcuda.so.1"),
+        ], env=environment, check=True)
+        subprocess.run([sys.executable, str(workspace / "frontend/tests/run.py"),
+                        "--artifacts", str(artifacts)], env=environment, check=True)
         control = temporary / "control"
         control.mkdir()
         env = environment | {
             "SNAPSHOT_CONTROL_DIR": str(control),
             "CUINTERPOSE_COORDINATOR": str(artifacts / "cuinterpose-coordinator"),
         }
-        # The C coordinator fixture speaks the obsolete v2 wire protocol.
-        # Its behavioral cases live in coordinator/tests; CUDA call fixtures
-        # below still exercise the original lifecycle assertions against Rust.
         env["LD_PRELOAD"] = str(artifacts / "libcuinterpose.so")
-        for name in ("state_preload_test", "lifecycle_preload_test", "multicast_preload_test"):
-            argv = [str(fixtures / "test" / name)]
-            if name == "multicast_preload_test":
-                # This one case sends a v2 packet directly. The "cached-export"
-                # Python case below carries the same assertions using v3.
-                argv += ["--gtest_filter=-Multicast.PrepareMulticastClosesTheCachedDescriptorBeforeReleasingTheObject"]
-            subprocess.run(argv, env=env,
-                           check=True, timeout=90)
+        lifecycle_env = env | {"LD_PRELOAD": env["LD_PRELOAD"] +
+                              f":{fixtures / 'test/libcuda.so.1'}"}
+        for mode in ("tracking", "exports", "exhaustion", "access", "shared",
+                     "private-released", "no-context", "raw", "unsupported"):
+            subprocess.run([sys.executable, str(Path(__file__).with_name("lifecycle.py")), mode],
+                           env=lifecycle_env, check=True, timeout=60)
         blocker = temporary / "multicast-block.so"
         subprocess.run([
             "/usr/bin/gcc", "-std=c11", "-Wall", "-Wextra", "-Werror",
             "-shared", "-fPIC", "-pthread", "-o", str(blocker),
             str(Path(__file__).with_name("multicast_block.c")), "-ldl",
         ], env=environment, check=True)
-        for mode in ("released", "kind", "access", "failure", "native-address", "inflight",
-                     "pending-map", "create-output", "cached-export"):
+        for mode in ("released", "kind", "access", "failure", "native-address", "tracked-address", "extent", "inflight",
+                     "pending-map", "create-output", "cached-export", "unsupported"):
             multicast_env = env | {
                 "LD_PRELOAD": env["LD_PRELOAD"] + f":{blocker}:{fixtures / 'test/libcuda.so.1'}",
             }
@@ -132,7 +116,7 @@ def main():
             subprocess.run([sys.executable, str(Path(__file__).with_name("fork.py")),
                             mode],
                            env=case_env, check=True, timeout=60)
-    print(f"PASS Rust unicast/multicast/carrier/fork with C reference {REFERENCE}; no GPU qualification")
+    print("PASS packaged Rust loader/unicast/multicast/carrier/fork; no GPU qualification")
 
 
 if __name__ == "__main__":

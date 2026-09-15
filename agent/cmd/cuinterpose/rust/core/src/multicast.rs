@@ -5,14 +5,15 @@
 //! and replay; common memory APIs share State's logical handles and VA ranges.
 
 use super::host_carrier::Context;
-use super::state::{self, Mapping, Phase, Result, State, call};
+use super::state::{self, Mapping, Phase, Result, State};
 use super::ticket;
 use cuinterpose_abi::*;
 use cuinterpose_protocol::{
-    AllocationId, BindingKind, BindingVersion, Operation, Record, Resource, ResourceKind, Ticket,
+    AllocationId, BindingSource, BindingVersion, MemberRange, Operation, Record, Resource,
+    ResourceKind, Ticket,
 };
 use std::ffi::c_void;
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, IntoRawFd};
 use std::sync::MutexGuard;
 use std::sync::atomic::Ordering;
 
@@ -33,14 +34,11 @@ pub struct Object {
 
 #[derive(Clone)]
 pub struct Binding {
-    member: AllocationId,
-    address: u64,
+    source: BindingSource,
     offset: usize,
-    member_offset: usize,
     size: usize,
     flags: u64,
     device: i32,
-    kind: BindingKind,
     version: BindingVersion,
     checkpointed: bool,
 }
@@ -85,20 +83,20 @@ impl Flight {
             object.inflight -= 1;
             if object.driver != Some(driver) {
                 super::G_FAILED.store(true, Ordering::Release);
-                return Err(NOT_READY);
+                return Err(crate::driver::CudaError(NOT_READY));
             }
         }
         if state.phase != Phase::Active {
             super::G_FAILED.store(true, Ordering::Release);
-            return Err(NOT_READY);
+            return Err(crate::driver::CudaError(NOT_READY));
         }
         Ok(state)
     }
 }
 
-pub fn cuMulticastCreate(out: *mut u64, properties: *const MulticastProp) -> Result<i32> {
+pub fn cuMulticastCreate(out: *mut u64, properties: *const MulticastProp) -> Result<()> {
     if out.is_null() || properties.is_null() {
-        return Err(INVALID_VALUE);
+        return Err(crate::driver::CudaError(INVALID_VALUE));
     }
     let properties = unsafe { *properties };
     let mut state = state::active()?;
@@ -107,12 +105,7 @@ pub fn cuMulticastCreate(out: *mut u64, properties: *const MulticastProp) -> Res
     drop(state);
     let mut driver = 0;
     let created = (|| -> Result<()> {
-        let address = super::driver(c"cuMulticastCreate");
-        if address.is_null() {
-            return Err(NOT_INITIALIZED);
-        }
-        let function: unsafe extern "C" fn(*mut u64, *const MulticastProp) -> i32 =
-            unsafe { std::mem::transmute(address) };
+        let function = crate::driver::symbols::cuMulticastCreate()?;
         let result = unsafe { function(&mut driver, &properties) };
         if result != SUCCESS {
             // Preserve output written by a failing driver, but leave it alone
@@ -120,7 +113,7 @@ pub fn cuMulticastCreate(out: *mut u64, properties: *const MulticastProp) -> Res
             unsafe {
                 out.write(driver);
             }
-            return Err(result);
+            return Err(result.into());
         }
         Ok(())
     })();
@@ -128,15 +121,15 @@ pub fn cuMulticastCreate(out: *mut u64, properties: *const MulticastProp) -> Res
         Ok(state) => state,
         Err(error) => {
             if created.is_ok() {
-                call!("cuMemRelease", fn(u64), driver);
+                unsafe { crate::driver::cuMemRelease(driver) }?;
             }
             return Err(error);
         }
     };
     created?;
     if driver & HANDLE_MASK == HANDLE_TAG {
-        call!("cuMemRelease", fn(u64), driver);
-        return Err(INVALID_HANDLE);
+        unsafe { crate::driver::cuMemRelease(driver) }?;
+        return Err(crate::driver::CudaError(INVALID_HANDLE));
     }
     if properties.handle_types != 1 {
         if properties.handle_types != 0 {
@@ -145,12 +138,12 @@ pub fn cuMulticastCreate(out: *mut u64, properties: *const MulticastProp) -> Res
         unsafe {
             out.write(driver);
         }
-        return Ok(SUCCESS);
+        return Ok(());
     }
     let logical = match state.mint(id) {
         Ok(handle) => handle,
         Err(error) => {
-            call!("cuMemRelease", fn(u64), driver);
+            unsafe { crate::driver::cuMemRelease(driver) }?;
             return Err(error);
         }
     };
@@ -184,18 +177,18 @@ pub fn cuMulticastCreate(out: *mut u64, properties: *const MulticastProp) -> Res
     unsafe {
         out.write(logical);
     }
-    Ok(SUCCESS)
+    Ok(())
 }
 
-pub fn cuMulticastAddDevice(handle: u64, device: i32) -> Result<i32> {
+pub fn cuMulticastAddDevice(handle: u64, device: i32) -> Result<()> {
     let mut state = state::active()?;
     let Some(id) = state.handles.get(&handle).copied() else {
         if handle & HANDLE_MASK == HANDLE_TAG {
-            return Err(INVALID_HANDLE);
+            return Err(crate::driver::CudaError(INVALID_HANDLE));
         }
         drop(state);
-        call!("cuMulticastAddDevice", fn(u64, i32), handle, device);
-        return Ok(SUCCESS);
+        unsafe { crate::driver::cuMulticastAddDevice(handle, device) }?;
+        return Ok(());
     };
     let object = state.multicasts.get_mut(&id).ok_or(INVALID_HANDLE)?;
     object
@@ -206,7 +199,7 @@ pub fn cuMulticastAddDevice(handle: u64, device: i32) -> Result<i32> {
     let flight = Flight::begin(&mut state, Some(id), None)?;
     drop(state);
     let added = (|| -> Result<()> {
-        call!("cuMulticastAddDevice", fn(u64, i32), driver, device);
+        unsafe { crate::driver::cuMulticastAddDevice(driver, device) }?;
         Ok(())
     })();
     // AddDevice has no inverse. A successful call that cannot be recorded must
@@ -220,7 +213,7 @@ pub fn cuMulticastAddDevice(handle: u64, device: i32) -> Result<i32> {
     if object.context == 0 {
         object.context = state::context();
     }
-    Ok(SUCCESS)
+    Ok(())
 }
 
 pub fn map(
@@ -230,10 +223,10 @@ pub fn map(
     size: usize,
     offset: usize,
     flags: u64,
-) -> Result<i32> {
+) -> Result<()> {
     let end = offset.checked_add(size).ok_or(INVALID_VALUE)?;
     if size == 0 || !state.covered(address, size)?.is_empty() {
-        return Err(INVALID_VALUE);
+        return Err(crate::driver::CudaError(INVALID_VALUE));
     }
     state
         .pending_maps
@@ -249,22 +242,14 @@ pub fn map(
     state.pending_maps.push((address, size));
     drop(state);
     let mapped = (|| -> Result<()> {
-        call!(
-            "cuMemMap",
-            fn(u64, usize, usize, u64, u64),
-            address,
-            size,
-            offset,
-            driver,
-            flags
-        );
+        unsafe { crate::driver::cuMemMap(address, size, offset, driver, flags) }?;
         Ok(())
     })();
     let mut state = match flight.finish() {
         Ok(state) => state,
         Err(error) => {
             if mapped.is_ok() {
-                call!("cuMemUnmap", fn(u64, usize), address, size);
+                unsafe { crate::driver::cuMemUnmap(address, size) }?;
             }
             return Err(error);
         }
@@ -289,7 +274,7 @@ pub fn map(
             checkpointed: false,
         },
     );
-    Ok(SUCCESS)
+    Ok(())
 }
 
 pub fn settle(state: &mut State, id: AllocationId) -> Result<()> {
@@ -300,92 +285,78 @@ pub fn settle(state: &mut State, id: AllocationId) -> Result<()> {
     }
     let object = state.multicasts.get(&id).ok_or(INVALID_HANDLE)?;
     if object.inflight != 0 || object.checkpointed {
-        return Err(NOT_READY);
+        return Err(crate::driver::CudaError(NOT_READY));
     }
     state::cache()?.replace((ResourceKind::Multicast, id), None)?;
     if let Some(driver) = object.driver {
-        call!("cuMemRelease", fn(u64), driver);
+        unsafe { crate::driver::cuMemRelease(driver) }?;
     }
     state.multicasts.remove(&id);
     Ok(())
 }
 
-pub fn export(state: &mut State, id: AllocationId, out: *mut c_void) -> Result<i32> {
+pub fn export(state: &mut State, id: AllocationId, out: *mut c_void) -> Result<()> {
     let object = state.multicasts.get_mut(&id).ok_or(INVALID_HANDLE)?;
     if object.creator && !state::cache()?.contains(&(ResourceKind::Multicast, id))? {
-        let mut fd = -1;
-        call!(
-            "cuMemExportToShareableHandle",
-            fn(*mut c_void, u64, u32, u64),
-            (&mut fd as *mut i32).cast(),
-            object.driver.ok_or(INVALID_HANDLE)?,
-            1,
-            0
-        );
-        if fd < 0 {
-            return Err(INVALID_HANDLE);
-        }
-        state::cache()?.replace(
-            (ResourceKind::Multicast, id),
-            Some(unsafe { OwnedFd::from_raw_fd(fd) }),
-        )?;
+        let fd = crate::driver::export_posix(object.driver.ok_or(INVALID_HANDLE)?)?;
+        state::cache()?.replace((ResourceKind::Multicast, id), Some(fd))?;
     }
     let fd = ticket::export(&object.ticket).map_err(|_| OUT_OF_MEMORY)?;
     object.shared = true;
     unsafe {
         out.cast::<i32>().write(fd.into_raw_fd());
     }
-    Ok(SUCCESS)
+    Ok(())
 }
 
-pub fn import(mut state: MutexGuard<'static, State>, out: *mut u64, ticket: Ticket) -> Result<i32> {
+pub fn import(mut state: MutexGuard<'static, State>, out: *mut u64, ticket: Ticket) -> Result<()> {
     let id = ticket.allocation;
     if state.allocations.contains_key(&id) {
-        return Err(INVALID_HANDLE);
+        return Err(crate::driver::CudaError(INVALID_HANDLE));
     }
     if let Some(object) = state.multicasts.get_mut(&id) {
         if object.ticket != ticket {
-            return Err(INVALID_VALUE);
+            return Err(crate::driver::CudaError(INVALID_VALUE));
         }
         object.shared = true;
         unsafe {
             out.write(state.mint(id)?);
         }
-        return Ok(SUCCESS);
+        return Ok(());
     }
     let flight = Flight::begin(&mut state, None, None)?;
     drop(state);
     let mut driver = 0;
     let imported = (|| -> Result<()> {
         let fd = ticket::request(&ticket).map_err(|_| INVALID_HANDLE)?;
-        call!(
-            "cuMemImportFromShareableHandle",
-            fn(*mut u64, *mut c_void, u32),
-            &mut driver,
-            fd.as_raw_fd() as usize as *mut c_void,
-            1
-        );
+        unsafe {
+            crate::driver::cuMemImportFromShareableHandle(
+                &mut driver,
+                fd.as_raw_fd() as usize as *mut c_void,
+                1,
+            )
+        }?;
         Ok(())
     })();
     let mut state = match flight.finish() {
         Ok(state) => state,
         Err(error) => {
             if imported.is_ok() {
-                call!("cuMemRelease", fn(u64), driver);
+                unsafe { crate::driver::cuMemRelease(driver) }?;
             }
             return Err(error);
         }
     };
     imported?;
     if driver & HANDLE_MASK == HANDLE_TAG {
-        call!("cuMemRelease", fn(u64), driver);
-        return Err(INVALID_HANDLE);
+        unsafe { crate::driver::cuMemRelease(driver) }?;
+        return Err(crate::driver::CudaError(INVALID_HANDLE));
     }
     // Another importer can have completed while this thread waited in CUDA.
     let inserted = if let Some(object) = state.multicasts.get_mut(&id) {
-        call!("cuMemRelease", fn(u64), driver);
+        unsafe { crate::driver::cuMemRelease(driver) }?;
         if object.ticket != ticket {
-            return Err(INVALID_VALUE);
+            return Err(crate::driver::CudaError(INVALID_VALUE));
         }
         false
     } else {
@@ -396,7 +367,7 @@ pub fn import(mut state: MutexGuard<'static, State>, out: *mut u64, ticket: Tick
             flags,
         } = ticket.resource
         else {
-            return Err(INVALID_HANDLE);
+            return Err(crate::driver::CudaError(INVALID_HANDLE));
         };
         let properties = MulticastProp {
             devices,
@@ -427,7 +398,7 @@ pub fn import(mut state: MutexGuard<'static, State>, out: *mut u64, ticket: Tick
         Err(error) => {
             if inserted {
                 state.multicasts.remove(&id);
-                call!("cuMemRelease", fn(u64), driver);
+                unsafe { crate::driver::cuMemRelease(driver) }?;
             }
             return Err(error);
         }
@@ -435,172 +406,214 @@ pub fn import(mut state: MutexGuard<'static, State>, out: *mut u64, ticket: Tick
     unsafe {
         out.write(logical);
     }
-    Ok(SUCCESS)
+    Ok(())
 }
 
 impl Binding {
-    fn apply(&self, driver: u64, member: u64) -> Result<()> {
-        match (self.kind, self.version) {
-            (BindingKind::Memory, BindingVersion::V1) => call!(
-                "cuMulticastBindMem",
-                fn(u64, usize, u64, usize, usize, u64),
-                driver,
-                self.offset,
-                member,
-                self.member_offset,
-                self.size,
-                self.flags
-            ),
-            (BindingKind::Memory, BindingVersion::V2) => call!(
-                "cuMulticastBindMem_v2",
-                fn(u64, i32, usize, u64, usize, usize, u64),
-                driver,
-                self.device,
-                self.offset,
-                member,
-                self.member_offset,
-                self.size,
-                self.flags
-            ),
-            (BindingKind::Address, BindingVersion::V1) => call!(
-                "cuMulticastBindAddr",
-                fn(u64, usize, u64, usize, u64),
-                driver,
-                self.offset,
-                self.address,
-                self.size,
-                self.flags
-            ),
-            (BindingKind::Address, BindingVersion::V2) => call!(
-                "cuMulticastBindAddr_v2",
-                fn(u64, i32, usize, u64, usize, u64),
-                driver,
-                self.device,
-                self.offset,
-                self.address,
-                self.size,
-                self.flags
-            ),
+    fn apply(&self, group: u64, member: u64) -> Result<()> {
+        use crate::driver;
+        // v1/v2 differ in the explicit device argument, not the recorded source.
+        unsafe {
+            match (self.source, self.version) {
+                (BindingSource::Memory(range), BindingVersion::V1) => driver::cuMulticastBindMem(
+                    group,
+                    self.offset,
+                    member,
+                    range.offset as usize,
+                    self.size,
+                    self.flags,
+                ),
+                (BindingSource::Memory(range), BindingVersion::V2) => {
+                    driver::cuMulticastBindMem_v2(
+                        group,
+                        self.device,
+                        self.offset,
+                        member,
+                        range.offset as usize,
+                        self.size,
+                        self.flags,
+                    )
+                }
+                (BindingSource::Address { address, .. }, BindingVersion::V1) => {
+                    driver::cuMulticastBindAddr(group, self.offset, address, self.size, self.flags)
+                }
+                (BindingSource::Address { address, .. }, BindingVersion::V2) => {
+                    driver::cuMulticastBindAddr_v2(
+                        group,
+                        self.device,
+                        self.offset,
+                        address,
+                        self.size,
+                        self.flags,
+                    )
+                }
+            }
         }
-        Ok(())
     }
 }
 
-fn bind(handle: u64, mut binding: Binding, member_handle: u64) -> Result<i32> {
+// Application handles are resolved before constructing replay metadata.
+enum BindInput {
+    Memory { handle: u64, offset: usize },
+    Address(u64),
+}
+
+fn bind(
+    handle: u64,
+    offset: usize,
+    size: usize,
+    flags: u64,
+    mut device: i32,
+    version: BindingVersion,
+    input: BindInput,
+) -> Result<()> {
     let mut state = state::active()?;
     let target = state.handles.get(&handle).copied();
-    if binding.kind == BindingKind::Address && target.is_some() {
-        let end = binding
-            .address
-            .checked_add(binding.size as u64)
-            .ok_or(INVALID_VALUE)?;
-        // A native BindAddr is allowed, but an address range that intersects
-        // tracked memory must be wholly contained in one unicast mapping.
-        for mapping in state.mappings.values() {
-            if mapping.address < end
-                && mapping.address + mapping.size as u64 > binding.address
-                && (binding.address < mapping.address
-                    || end > mapping.address + mapping.size as u64
-                    || !state.allocations.contains_key(&mapping.id))
-            {
-                return Err(INVALID_VALUE);
-            }
-        }
-        for &(address, size) in &state.pending_maps {
-            if address < end && address + size as u64 > binding.address {
-                return Err(NOT_READY);
-            }
-        }
+    if target.is_none() && handle & HANDLE_MASK == HANDLE_TAG {
+        return Err(crate::driver::CudaError(INVALID_HANDLE));
     }
-    let member = if binding.kind == BindingKind::Memory {
-        state
-            .handles
-            .get(&member_handle)
-            .copied()
-            .filter(|id| state.allocations.contains_key(id))
-    } else {
-        state
-            .mappings
-            .values()
-            .find(|mapping| {
-                binding.address >= mapping.address
-                    && binding.address - mapping.address < mapping.size as u64
+    let (source, member, member_driver) = match input {
+        BindInput::Memory {
+            handle: member_handle,
+            offset: member_offset,
+        } => {
+            let member = state
+                .handles
+                .get(&member_handle)
+                .copied()
+                .filter(|id| state.allocations.contains_key(id));
+            if let Some(id) = member {
+                let allocation = &state.allocations[&id];
+                if member_offset
+                    .checked_add(size)
+                    .is_none_or(|end| allocation.size != 0 && end > allocation.size)
+                {
+                    return Err(INVALID_VALUE.into());
+                }
+                if version == BindingVersion::V1 {
+                    device = allocation.properties.location.id;
+                }
+                (
+                    BindingSource::Memory(MemberRange {
+                        allocation: id,
+                        offset: member_offset as u64,
+                    }),
+                    member,
+                    allocation.driver.ok_or(INVALID_HANDLE)?,
+                )
+            } else {
+                if member_handle & HANDLE_MASK == HANDLE_TAG {
+                    return Err(INVALID_HANDLE.into());
+                }
+                if target.is_some() {
+                    return Err(NOT_SUPPORTED.into());
+                }
+                // Pass-through has no replay record, so no synthetic allocation ID.
+                drop(state);
+                return unsafe {
+                    match version {
+                        BindingVersion::V1 => crate::driver::cuMulticastBindMem(
+                            handle,
+                            offset,
+                            member_handle,
+                            member_offset,
+                            size,
+                            flags,
+                        ),
+                        BindingVersion::V2 => crate::driver::cuMulticastBindMem_v2(
+                            handle,
+                            device,
+                            offset,
+                            member_handle,
+                            member_offset,
+                            size,
+                            flags,
+                        ),
+                    }
+                };
+            }
+        }
+        BindInput::Address(address) => {
+            let end = address.checked_add(size as u64).ok_or(INVALID_VALUE)?;
+            if target.is_some() {
+                for mapping in state.mappings.values() {
+                    if mapping.address < end
+                        && mapping.address + mapping.size as u64 > address
+                        && (address < mapping.address
+                            || end > mapping.address + mapping.size as u64
+                            || !state.allocations.contains_key(&mapping.id))
+                    {
+                        return Err(INVALID_VALUE.into());
+                    }
+                }
+                if state
+                    .pending_maps
+                    .iter()
+                    .any(|&(base, length)| base < end && base + length as u64 > address)
+                {
+                    return Err(NOT_READY.into());
+                }
+            }
+            let mapping = state.mappings.values().find(|mapping| {
+                address >= mapping.address
+                    && address - mapping.address < mapping.size as u64
                     && state.allocations.contains_key(&mapping.id)
-            })
-            .map(|mapping| mapping.id)
-    };
-    let mut member_driver = member_handle;
-    if let Some(id) = member {
-        let allocation = &state.allocations[&id];
-        // BindAddr may refer to a mapping whose logical handles were released.
-        // Its driver handle is not an argument to that CUDA operation.
-        if binding.kind == BindingKind::Memory {
-            member_driver = allocation.driver.ok_or(INVALID_HANDLE)?;
-        }
-        binding.member = id;
-        if binding.version == BindingVersion::V1 {
-            binding.device = allocation.properties.location.id;
-        }
-        if binding.kind == BindingKind::Memory {
-            let end = binding
-                .member_offset
-                .checked_add(binding.size)
-                .ok_or(INVALID_VALUE)?;
-            if allocation.size != 0 && end > allocation.size {
-                return Err(INVALID_VALUE);
-            }
-        } else {
-            let mapping = state
-                .mappings
-                .values()
-                .find(|mapping| {
-                    mapping.id == id
-                        && binding.address >= mapping.address
-                        && binding.address - mapping.address < mapping.size as u64
+            });
+            let range = if let Some(mapping) = mapping {
+                let displacement = address - mapping.address;
+                if displacement
+                    .checked_add(size as u64)
+                    .is_none_or(|end| end > mapping.size as u64)
+                {
+                    return Err(INVALID_VALUE.into());
+                }
+                if version == BindingVersion::V1 {
+                    device = state.allocations[&mapping.id].properties.location.id;
+                }
+                Some(MemberRange {
+                    allocation: mapping.id,
+                    offset: (mapping.offset as u64)
+                        .checked_add(displacement)
+                        .ok_or(INVALID_VALUE)?,
                 })
-                .ok_or(INVALID_VALUE)?;
-            let displacement = (binding.address - mapping.address) as usize;
-            if displacement
-                .checked_add(binding.size)
-                .ok_or(INVALID_VALUE)?
-                > mapping.size
-            {
-                return Err(INVALID_VALUE);
-            }
-            binding.member_offset = mapping
-                .offset
-                .checked_add(displacement)
-                .ok_or(INVALID_VALUE)?;
+            } else {
+                if version == BindingVersion::V1 {
+                    unsafe { crate::driver::cuCtxGetDevice(&mut device) }?;
+                }
+                None
+            };
+            (
+                BindingSource::Address {
+                    address,
+                    tracked_member: range,
+                },
+                range.map(|r| r.allocation),
+                0,
+            )
         }
-    } else if binding.kind == BindingKind::Address {
-        binding.member = AllocationId(state::random()?);
-        if binding.version == BindingVersion::V1 {
-            call!("cuCtxGetDevice", fn(*mut i32), &mut binding.device);
-        }
-    }
+    };
+    let binding = Binding {
+        source,
+        offset,
+        size,
+        flags,
+        device,
+        version,
+        checkpointed: false,
+    };
     let Some(id) = target else {
         if handle & HANDLE_MASK == HANDLE_TAG {
-            return Err(INVALID_HANDLE);
-        }
-        if member_handle & HANDLE_MASK == HANDLE_TAG
-            && member.is_none()
-            && binding.kind == BindingKind::Memory
-        {
-            return Err(INVALID_HANDLE);
+            return Err(INVALID_HANDLE.into());
         }
         drop(state);
-        binding.apply(handle, member_driver)?;
-        return Ok(SUCCESS);
+        return binding.apply(handle, member_driver);
     };
-    if binding.kind == BindingKind::Memory && member.is_none() {
-        return Err(NOT_SUPPORTED);
-    }
     let end = binding
         .offset
         .checked_add(binding.size)
         .ok_or(INVALID_VALUE)?;
     if binding.size == 0 {
-        return Err(INVALID_VALUE);
+        return Err(crate::driver::CudaError(INVALID_VALUE));
     }
     let object = state.multicasts.get_mut(&id).ok_or(INVALID_HANDLE)?;
     object
@@ -615,14 +628,14 @@ fn bind(handle: u64, mut binding: Binding, member_handle: u64) -> Result<i32> {
         Ok(state) => state,
         Err(error) => {
             if bound.is_ok() {
-                call!(
-                    "cuMulticastUnbind",
-                    fn(u64, i32, usize, usize),
-                    driver,
-                    binding.device,
-                    binding.offset,
-                    binding.size
-                );
+                unsafe {
+                    crate::driver::cuMulticastUnbind(
+                        driver,
+                        binding.device,
+                        binding.offset,
+                        binding.size,
+                    )
+                }?;
             }
             return Err(error);
         }
@@ -637,7 +650,7 @@ fn bind(handle: u64, mut binding: Binding, member_handle: u64) -> Result<i32> {
     if object.context == 0 {
         object.context = state::context();
     }
-    Ok(SUCCESS)
+    Ok(())
 }
 
 pub fn cuMulticastBindMem(
@@ -647,22 +660,18 @@ pub fn cuMulticastBindMem(
     member_offset: usize,
     size: usize,
     flags: u64,
-) -> Result<i32> {
+) -> Result<()> {
     bind(
         handle,
-        Binding {
-            member: AllocationId::default(),
-            address: 0,
-            offset,
-            member_offset,
-            size,
-            flags,
-            device: 0,
-            kind: BindingKind::Memory,
-            version: BindingVersion::V1,
-            checkpointed: false,
+        offset,
+        size,
+        flags,
+        0,
+        BindingVersion::V1,
+        BindInput::Memory {
+            handle: member,
+            offset: member_offset,
         },
-        member,
     )
 }
 
@@ -674,22 +683,18 @@ pub fn cuMulticastBindMem_v2(
     member_offset: usize,
     size: usize,
     flags: u64,
-) -> Result<i32> {
+) -> Result<()> {
     bind(
         handle,
-        Binding {
-            member: AllocationId::default(),
-            address: 0,
-            offset,
-            member_offset,
-            size,
-            flags,
-            device,
-            kind: BindingKind::Memory,
-            version: BindingVersion::V2,
-            checkpointed: false,
+        offset,
+        size,
+        flags,
+        device,
+        BindingVersion::V2,
+        BindInput::Memory {
+            handle: member,
+            offset: member_offset,
         },
-        member,
     )
 }
 
@@ -699,22 +704,15 @@ pub fn cuMulticastBindAddr(
     address: u64,
     size: usize,
     flags: u64,
-) -> Result<i32> {
+) -> Result<()> {
     bind(
         handle,
-        Binding {
-            member: AllocationId::default(),
-            address,
-            offset,
-            member_offset: 0,
-            size,
-            flags,
-            device: 0,
-            kind: BindingKind::Address,
-            version: BindingVersion::V1,
-            checkpointed: false,
-        },
+        offset,
+        size,
+        flags,
         0,
+        BindingVersion::V1,
+        BindInput::Address(address),
     )
 }
 
@@ -725,22 +723,15 @@ pub fn cuMulticastBindAddr_v2(
     address: u64,
     size: usize,
     flags: u64,
-) -> Result<i32> {
+) -> Result<()> {
     bind(
         handle,
-        Binding {
-            member: AllocationId::default(),
-            address,
-            offset,
-            member_offset: 0,
-            size,
-            flags,
-            device,
-            kind: BindingKind::Address,
-            version: BindingVersion::V2,
-            checkpointed: false,
-        },
-        0,
+        offset,
+        size,
+        flags,
+        device,
+        BindingVersion::V2,
+        BindInput::Address(address),
     )
 }
 
@@ -748,37 +739,24 @@ pub fn cuMulticastGetGranularity(
     out: *mut usize,
     properties: *const MulticastProp,
     flags: u32,
-) -> Result<i32> {
-    call!(
-        "cuMulticastGetGranularity",
-        fn(*mut usize, *const MulticastProp, u32),
-        out,
-        properties,
-        flags
-    );
-    Ok(SUCCESS)
+) -> Result<()> {
+    unsafe { crate::driver::cuMulticastGetGranularity(out, properties, flags) }?;
+    Ok(())
 }
 
-pub fn cuMulticastUnbind(handle: u64, device: i32, offset: usize, size: usize) -> Result<i32> {
+pub fn cuMulticastUnbind(handle: u64, device: i32, offset: usize, size: usize) -> Result<()> {
     let mut state = state::active()?;
     let Some(id) = state.handles.get(&handle).copied() else {
         if handle & HANDLE_MASK == HANDLE_TAG {
-            return Err(INVALID_HANDLE);
+            return Err(crate::driver::CudaError(INVALID_HANDLE));
         }
         drop(state);
-        call!(
-            "cuMulticastUnbind",
-            fn(u64, i32, usize, usize),
-            handle,
-            device,
-            offset,
-            size
-        );
-        return Ok(SUCCESS);
+        unsafe { crate::driver::cuMulticastUnbind(handle, device, offset, size) }?;
+        return Ok(());
     };
     let object = state.multicasts.get_mut(&id).ok_or(INVALID_HANDLE)?;
     if object.inflight != 0 {
-        return Err(NOT_READY);
+        return Err(crate::driver::CudaError(NOT_READY));
     }
     let end = offset.checked_add(size).ok_or(INVALID_VALUE)?;
     for binding in &object.bindings {
@@ -787,21 +765,16 @@ pub fn cuMulticastUnbind(handle: u64, device: i32, offset: usize, size: usize) -
             && binding.offset + binding.size > offset
             && (binding.offset < offset || binding.offset + binding.size > end)
         {
-            return Err(INVALID_VALUE);
+            return Err(crate::driver::CudaError(INVALID_VALUE));
         }
     }
-    call!(
-        "cuMulticastUnbind",
-        fn(u64, i32, usize, usize),
-        object.driver.ok_or(INVALID_HANDLE)?,
-        device,
-        offset,
-        size
-    );
+    unsafe {
+        crate::driver::cuMulticastUnbind(object.driver.ok_or(INVALID_HANDLE)?, device, offset, size)
+    }?;
     object.bindings.retain(|binding| {
         binding.device != device || binding.offset >= end || binding.offset + binding.size <= offset
     });
-    Ok(SUCCESS)
+    Ok(())
 }
 
 pub fn describe(state: &State, records: &mut Vec<Record>) -> Result<()> {
@@ -826,20 +799,17 @@ pub fn describe(state: &State, records: &mut Vec<Record>) -> Result<()> {
         for binding in &object.bindings {
             records.push(Record::MulticastBinding {
                 id: *id,
-                member: binding.member,
-                address: binding.address,
+                source: binding.source,
                 size: binding.size as u64,
                 offset: binding.offset as u64,
-                member_offset: binding.member_offset as u64,
                 flags: binding.flags,
-                binding: binding.kind,
                 version: binding.version,
                 device: binding.device,
             });
         }
         for mapping in state.mappings.values().filter(|mapping| mapping.id == *id) {
             if mapping.unknown {
-                return Err(NOT_SUPPORTED);
+                return Err(crate::driver::CudaError(NOT_SUPPORTED));
             }
             let mut access: Vec<_> = mapping
                 .access
@@ -875,35 +845,31 @@ pub fn prepare(state: &mut State) -> Result<()> {
             .copied()
             .or_else(|| object.bindings.first().map(|b| b.device))
             .unwrap_or(0);
-        let context = Context::enter(object.context, device)?;
-        let prepared = (|| -> Result<()> {
+        Context::run(object.context, device, || {
             for mapping in state
                 .mappings
                 .values_mut()
                 .filter(|mapping| mapping.id == *id)
             {
-                call!("cuMemUnmap", fn(u64, usize), mapping.address, mapping.size);
+                unsafe { crate::driver::cuMemUnmap(mapping.address, mapping.size) }?;
                 mapping.checkpointed = true;
             }
             for binding in &mut object.bindings {
-                call!(
-                    "cuMulticastUnbind",
-                    fn(u64, i32, usize, usize),
-                    driver,
-                    binding.device,
-                    binding.offset,
-                    binding.size
-                );
+                unsafe {
+                    crate::driver::cuMulticastUnbind(
+                        driver,
+                        binding.device,
+                        binding.offset,
+                        binding.size,
+                    )
+                }?;
                 binding.checkpointed = true;
             }
-            call!("cuMemRelease", fn(u64), driver);
+            unsafe { crate::driver::cuMemRelease(driver) }?;
             object.driver = None;
             object.checkpointed = true;
             Ok(())
-        })();
-        let left = context.leave();
-        prepared?;
-        left?;
+        })?;
     }
     Ok(())
 }
@@ -913,15 +879,31 @@ pub fn prepare(state: &mut State) -> Result<()> {
 /// work completes. Fork during lifecycle execution is unsupported.
 pub fn restore_phase(mut state: MutexGuard<'static, State>, operation: Operation) -> Result<u64> {
     let next_phase = state.phase.next(operation)?;
-    let mut objects = state.multicasts.clone();
-    let mut mappings = state.mappings.clone();
-    let allocations = state.allocations.clone();
+    let mut objects = state
+        .multicasts
+        .iter()
+        .filter(|(_, object)| object.checkpointed)
+        .map(|(id, object)| (*id, object.clone()))
+        .collect();
+    let bindings = operation == Operation::RestoreMulticastBindings;
+    let mut mappings = state
+        .mappings
+        .iter()
+        .filter(|_| bindings)
+        .map(|(address, mapping)| (*address, mapping.clone()))
+        .collect();
+    let allocations = state
+        .allocations
+        .iter()
+        .filter(|_| bindings)
+        .map(|(id, allocation)| (*id, allocation.driver))
+        .collect();
     state.phase = Phase::ReconstructingMulticast;
     drop(state);
     let result = restore(&mut objects, &mut mappings, &allocations, operation);
     let mut state = state::get()?;
-    state.multicasts = objects;
-    state.mappings = mappings;
+    state.multicasts.extend(objects);
+    state.mappings.extend(mappings);
     result?;
     state.phase = next_phase;
     Ok(0)
@@ -930,7 +912,7 @@ pub fn restore_phase(mut state: MutexGuard<'static, State>, operation: Operation
 fn restore(
     objects: &mut std::collections::BTreeMap<AllocationId, Object>,
     mappings: &mut std::collections::BTreeMap<u64, Mapping>,
-    allocations: &std::collections::BTreeMap<AllocationId, state::Allocation>,
+    allocations: &std::collections::BTreeMap<AllocationId, Option<u64>>,
     operation: Operation,
 ) -> Result<()> {
     for (id, object) in objects {
@@ -948,57 +930,30 @@ fn restore(
             .copied()
             .or_else(|| object.bindings.first().map(|b| b.device))
             .unwrap_or(0);
-        let context = Context::enter(object.context, device)?;
-        let restored = (|| -> Result<()> {
+        Context::run(object.context, device, || {
             match operation {
                 Operation::RestoreMulticastCreators if object.creator => {
                     let mut driver = 0;
-                    call!(
-                        "cuMulticastCreate",
-                        fn(*mut u64, *const MulticastProp),
-                        &mut driver,
-                        &object.properties
-                    );
+                    unsafe { crate::driver::cuMulticastCreate(&mut driver, &object.properties) }?;
                     object.driver = Some(driver);
                     if object.shared {
-                        let mut fd = -1;
-                        call!(
-                            "cuMemExportToShareableHandle",
-                            fn(*mut c_void, u64, u32, u64),
-                            (&mut fd as *mut i32).cast(),
-                            driver,
-                            1,
-                            0
-                        );
-                        if fd < 0 {
-                            return Err(INVALID_HANDLE);
-                        }
-                        state::cache()?.replace(
-                            (ResourceKind::Multicast, *id),
-                            Some(unsafe { OwnedFd::from_raw_fd(fd) }),
-                        )?;
+                        let fd = crate::driver::export_posix(driver)?;
+                        state::cache()?.replace((ResourceKind::Multicast, *id), Some(fd))?;
                     }
                 }
                 Operation::RestoreMulticastImporters if !object.creator => {
                     let fd = ticket::request(&object.ticket).map_err(|_| INVALID_HANDLE)?;
-                    let mut driver = 0;
-                    call!(
-                        "cuMemImportFromShareableHandle",
-                        fn(*mut u64, *mut c_void, u32),
-                        &mut driver,
-                        fd.as_raw_fd() as usize as *mut c_void,
-                        1
-                    );
+                    let driver = crate::driver::import_posix(fd.as_fd())?;
                     object.driver = Some(driver);
                 }
                 Operation::RestoreMulticastDevices => {
                     for device in &object.devices {
-                        call!(
-                            "cuMulticastAddDevice",
-                            fn(u64, i32),
-                            object.driver.ok_or(INVALID_HANDLE)?,
-                            *device
-                        );
+                        unsafe {
+                            crate::driver::cuMulticastAddDevice(
+                                object.driver.ok_or(INVALID_HANDLE)?,
+                                *device,
+                            )
+                        }?;
                     }
                 }
                 Operation::RestoreMulticastBindings => {
@@ -1008,31 +963,31 @@ fn restore(
                         }
                         let mut member = 0;
                         let mut temporary = false;
-                        if binding.kind == BindingKind::Memory {
+                        if let BindingSource::Memory(range) = binding.source {
                             let allocation =
-                                allocations.get(&binding.member).ok_or(INVALID_HANDLE)?;
-                            if let Some(driver) = allocation.driver {
-                                member = driver;
+                                allocations.get(&range.allocation).ok_or(INVALID_HANDLE)?;
+                            if let Some(driver) = allocation {
+                                member = *driver;
                             } else {
                                 let mapping = mappings
                                     .values()
                                     .find(|mapping| {
-                                        mapping.id == binding.member && !mapping.checkpointed
+                                        mapping.id == range.allocation && !mapping.checkpointed
                                     })
                                     .ok_or(INVALID_HANDLE)?;
-                                call!(
-                                    "cuMemRetainAllocationHandle",
-                                    fn(*mut u64, *mut c_void),
-                                    &mut member,
-                                    mapping.address as usize as *mut c_void
-                                );
+                                unsafe {
+                                    crate::driver::cuMemRetainAllocationHandle(
+                                        &mut member,
+                                        mapping.address as usize as *mut c_void,
+                                    )
+                                }?;
                                 temporary = true;
                             }
                         }
                         let bound = binding.apply(object.driver.ok_or(INVALID_HANDLE)?, member);
                         let released = (|| -> Result<()> {
                             if temporary {
-                                call!("cuMemRelease", fn(u64), member);
+                                unsafe { crate::driver::cuMemRelease(member) }?;
                             }
                             Ok(())
                         })();
@@ -1044,37 +999,34 @@ fn restore(
                         .values_mut()
                         .filter(|mapping| mapping.id == *id && mapping.checkpointed)
                     {
-                        call!(
-                            "cuMemMap",
-                            fn(u64, usize, usize, u64, u64),
-                            mapping.address,
-                            mapping.size,
-                            mapping.offset,
-                            object.driver.ok_or(INVALID_HANDLE)?,
-                            mapping.flags
-                        );
-                        if !mapping.access.is_empty() {
-                            call!(
-                                "cuMemSetAccess",
-                                fn(u64, usize, *const Access, usize),
+                        unsafe {
+                            crate::driver::cuMemMap(
                                 mapping.address,
                                 mapping.size,
-                                mapping.access.as_ptr(),
-                                mapping.access.len()
-                            );
+                                mapping.offset,
+                                object.driver.ok_or(INVALID_HANDLE)?,
+                                mapping.flags,
+                            )
+                        }?;
+                        if !mapping.access.is_empty() {
+                            unsafe {
+                                crate::driver::cuMemSetAccess(
+                                    mapping.address,
+                                    mapping.size,
+                                    mapping.access.as_ptr(),
+                                    mapping.access.len(),
+                                )
+                            }?;
                         }
                         mapping.checkpointed = false;
                     }
                     object.checkpointed = false;
                 }
                 Operation::RestoreMulticastCreators | Operation::RestoreMulticastImporters => {}
-                _ => return Err(INVALID_VALUE),
+                _ => return Err(crate::driver::CudaError(INVALID_VALUE)),
             }
             Ok(())
-        })();
-        let left = context.leave();
-        restored?;
-        left?;
+        })?;
     }
     Ok(())
 }

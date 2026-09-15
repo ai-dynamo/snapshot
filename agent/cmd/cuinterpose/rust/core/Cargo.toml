@@ -19,3 +19,4 @@ cuinterpose-abi.workspace = true
 cuinterpose-protocol.workspace = true
 libc.workspace = true
 rustix.workspace = true
+thiserror.workspace = true

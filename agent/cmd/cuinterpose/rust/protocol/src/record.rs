@@ -12,10 +12,19 @@ pub struct Access {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct MemberRange {
+    pub allocation: AllocationId,
+    pub offset: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum BindingKind {
-    Memory,
-    Address,
+pub enum BindingSource {
+    Memory(MemberRange),
+    Address {
+        address: u64,
+        tracked_member: Option<MemberRange>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -28,7 +37,7 @@ pub enum BindingVersion {
 /// Each variant contains only metadata meaningful for that resource. Ordering
 /// is semantic (including variant order), not an encoding-dependent memcmp.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum Record {
     Allocation {
         id: AllocationId,
@@ -66,13 +75,10 @@ pub enum Record {
     },
     MulticastBinding {
         id: AllocationId,
-        member: AllocationId,
-        address: u64,
+        source: BindingSource,
         size: u64,
         offset: u64,
-        member_offset: u64,
         flags: u64,
-        binding: BindingKind,
         version: BindingVersion,
         device: i32,
     },

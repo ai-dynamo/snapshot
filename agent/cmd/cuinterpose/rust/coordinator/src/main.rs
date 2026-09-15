@@ -7,112 +7,150 @@ mod report;
 mod state;
 mod topology;
 
+use anyhow::{Context, Result, bail, ensure};
+use clap::Parser;
 use cuinterpose_protocol::{
-    self as protocol, Operation, ParticipantId, Record, Reply, Request, Response,
+    self as protocol, Operation, Participant, ParticipantId, Reply, Request, Response,
 };
-use report::{Metrics, Phase, write as report};
-use std::os::unix::net::UnixStream;
+use report::{Event, Transfer, write as report};
+use std::os::unix::net::{SocketAddr, UnixStream};
 use std::path::PathBuf;
 use std::time::Instant;
 use topology::Allocation;
 
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-
-#[derive(Clone, Default)]
-struct Participant {
-    endpoint: String,
-    id: ParticipantId,
-    records: Vec<Record>,
-    raw_imports: u64,
-    unsupported: u64,
+#[derive(Parser)]
+struct Arguments {
+    #[arg(long, required_unless_present = "restore", conflicts_with = "restore")]
+    prepare: bool,
+    #[arg(long)]
+    restore: bool,
+    #[arg(long)]
+    proc_root: String,
+    #[arg(long)]
+    checkpoint_dir: PathBuf,
+    #[arg(long)]
+    control_dir: String,
+    #[arg(long = "process", required = true, num_args = 2, action = clap::ArgAction::Append,
+          value_parser = clap::value_parser!(i32).range(1..))]
+    processes: Vec<i32>,
 }
 
-impl Participant {
-    fn exchange(&mut self, operation: Operation, bytes: Option<u64>) -> Result<u32> {
-        let stream = UnixStream::connect(&self.endpoint)
-            .map_err(|error| format!("{}: {operation:?} connect failed: {error}", self.endpoint))?;
-        let timeout = Some(cuinterpose_protocol::timeout(operation));
-        stream.set_read_timeout(timeout)?;
-        stream.set_write_timeout(timeout)?;
-        let request = match operation {
-            Operation::Handshake => Request::Handshake,
-            Operation::Inspect => Request::Inspect {
+struct Peer {
+    endpoint: String,
+    id: ParticipantId,
+}
+
+struct Inspection {
+    participant: Participant,
+    raw_imports: u64,
+    unsupported_creations: u64,
+}
+
+// Transport errors retain their cause; remote refusals are application errors.
+fn exchange(endpoint: &str, request: &Request) -> Result<Response> {
+    let socket =
+        UnixStream::connect(endpoint).with_context(|| format!("{endpoint}: connect failed"))?;
+    let operation = match request {
+        Request::Execute { operation, .. } => Some(*operation),
+        _ => None,
+    };
+    let timeout = Some(protocol::timeout(operation));
+    socket.set_read_timeout(timeout)?;
+    socket.set_write_timeout(timeout)?;
+    protocol::send(&socket, request, None).with_context(|| format!("{endpoint}: send failed"))?;
+    let (response, fd): (Response, _) =
+        protocol::receive(&socket).with_context(|| format!("{endpoint}: receive failed"))?;
+    ensure!(fd.is_none(), "{endpoint}: unexpected descriptor");
+    Ok(response)
+}
+
+impl Peer {
+    fn identify(endpoint: String) -> Result<Self> {
+        let response = exchange(&endpoint, &Request::Handshake)?;
+        ensure!(
+            matches!(
+                response.result.map_err(anyhow::Error::msg)?,
+                Reply::Handshake
+            ),
+            "{endpoint}: unexpected handshake response"
+        );
+        Ok(Self {
+            endpoint,
+            id: response.participant,
+        })
+    }
+
+    fn inspect(&self) -> Result<Inspection> {
+        let response = exchange(
+            &self.endpoint,
+            &Request::Inspect {
                 participant: self.id,
             },
-            _ => Request::Execute {
-                participant: self.id,
-                operation,
-            },
-        };
-        protocol::send(&stream, &request, None)
-            .map_err(|error| format!("{}: {operation:?} send failed: {error}", self.endpoint))?;
-        let (response, descriptor): (Response, _) = protocol::receive(&stream)
-            .map_err(|error| format!("{}: {operation:?} receive failed: {error}", self.endpoint))?;
-        if descriptor.is_some()
-            || (operation != Operation::Handshake && response.participant != self.id)
-        {
-            return Err(format!(
-                "{}: invalid response identity, operation, or descriptor",
-                self.endpoint
-            )
-            .into());
-        }
-        match response
-            .result
-            .map_err(|error| format!("{}: {error}", self.endpoint))?
-        {
-            Reply::Handshake if operation == Operation::Handshake => {
-                self.id = response.participant;
-            }
+        )?;
+        ensure!(
+            response.participant == self.id,
+            "{}: participant changed",
+            self.endpoint
+        );
+        match response.result.map_err(anyhow::Error::msg)? {
             Reply::Inspection {
                 records,
                 live_raw_imports,
                 unsupported_creations,
-            } if operation == Operation::Inspect => {
-                self.records = records;
-                self.raw_imports = live_raw_imports;
-                self.unsupported = unsupported_creations;
-            }
+            } => Ok(Inspection {
+                participant: Participant {
+                    id: self.id,
+                    records,
+                },
+                raw_imports: live_raw_imports,
+                unsupported_creations,
+            }),
+            _ => bail!("{}: unexpected inspection reply", self.endpoint),
+        }
+    }
+
+    fn execute(&self, operation: Operation, expected_bytes: u64) -> Result<u32> {
+        let response = exchange(
+            &self.endpoint,
+            &Request::Execute {
+                participant: self.id,
+                operation,
+            },
+        )?;
+        ensure!(
+            response.participant == self.id,
+            "{}: participant changed",
+            self.endpoint
+        );
+        match response.result.map_err(anyhow::Error::msg)? {
             Reply::Completed {
                 operation: actual,
-                bytes: moved,
+                bytes,
                 copy_us,
-            } if operation == actual && bytes.unwrap_or(0) == moved => return Ok(copy_us),
-            _ => {
-                return Err(format!(
-                    "{}: unexpected {operation:?} response or transfer size",
-                    self.endpoint
-                )
-                .into());
-            }
+            } if actual == operation && bytes == expected_bytes => Ok(copy_us),
+            _ => bail!(
+                "{}: unexpected {operation:?} response or transfer size",
+                self.endpoint
+            ),
         }
-        Ok(0)
     }
 }
 
-/// Scoped threads are the global barrier. Even if one exchange fails, all
-/// started exchanges are joined before returning the first failure.
-fn command_all(
-    participants: &mut [Participant],
-    operation: Operation,
-    allocations: Option<&[Allocation]>,
-) -> Result<u32> {
+/// Join every started exchange, including when one participant fails. A phase
+/// cannot advance until every rank has replied; a bounded worker pool is unsafe.
+fn command_all(peers: &[Peer], operation: Operation, allocations: &[Allocation]) -> Result<u32> {
     std::thread::scope(|scope| {
-        let mut jobs = Vec::with_capacity(participants.len());
-        for participant in participants {
+        let mut jobs = Vec::with_capacity(peers.len());
+        for peer in peers {
             let bytes = allocations
-                .map(|entries| {
-                    entries
-                        .iter()
-                        .filter(|a| a.preserve_content && a.creator == participant.id)
-                        .try_fold(0u64, |sum, a| {
-                            sum.checked_add(a.size).ok_or("allocation size overflow")
-                        })
-                })
-                .transpose()?;
+                .iter()
+                .filter(|a| a.preserve_content && a.creator == peer.id)
+                .try_fold(0u64, |sum, a| {
+                    sum.checked_add(a.size).context("allocation size overflow")
+                })?;
             jobs.push(
                 std::thread::Builder::new()
-                    .spawn_scoped(scope, move || participant.exchange(operation, bytes))?,
+                    .spawn_scoped(scope, move || peer.execute(operation, bytes))?,
             );
         }
         let mut longest = 0;
@@ -124,7 +162,7 @@ fn command_all(
                     failure.get_or_insert(error);
                 }
                 Err(_) => {
-                    failure.get_or_insert("participant exchange panicked".into());
+                    failure.get_or_insert_with(|| anyhow::anyhow!("participant exchange panicked"));
                 }
             }
         }
@@ -135,206 +173,124 @@ fn command_all(
     })
 }
 
-fn inspect(participants: &mut [Participant]) -> Result<()> {
-    for participant in &mut *participants {
-        participant.exchange(Operation::Handshake, None)?;
+fn inspect(peers: &[Peer]) -> Result<(Vec<Participant>, u64, u64)> {
+    let mut participants = Vec::with_capacity(peers.len());
+    let (mut raw, mut unsupported) = (0, 0);
+    for peer in peers {
+        let inspection = peer.inspect()?;
+        participants.push(inspection.participant);
+        raw += inspection.raw_imports;
+        unsupported += inspection.unsupported_creations;
     }
-    for participant in participants {
-        participant.exchange(Operation::Inspect, None)?;
-    }
-    Ok(())
+    Ok((participants, raw, unsupported))
 }
 
-fn transfer(
-    participants: &mut [Participant],
-    operation: Operation,
-    allocations: &[Allocation],
-    phase: Phase,
-) -> Result<()> {
+fn transfer(peers: &[Peer], operation: Operation, allocations: &[Allocation]) -> Result<()> {
     let start = Instant::now();
-    let copy_us = command_all(participants, operation, Some(allocations)).map_err(|error| {
-        format!(
-            "allocation {}: {error}",
-            if operation == Operation::SaveAllocations {
-                "save"
-            } else {
-                "load"
-            }
-        )
-    })?;
-    let (count, bytes) = allocations.iter().filter(|a| a.preserve_content).try_fold(
-        (0usize, 0u64),
-        |(n, sum), a| {
-            sum.checked_add(a.size)
-                .map(|b| (n + 1, b))
-                .ok_or("allocation size overflow")
+    let copy_us = command_all(peers, operation, allocations).context("allocation transfer")?;
+    let (count, bytes) =
+        allocations
+            .iter()
+            .filter(|a| a.preserve_content)
+            .try_fold((0, 0u64), |(n, sum), a| {
+                Ok::<_, anyhow::Error>((
+                    n + 1,
+                    sum.checked_add(a.size)
+                        .context("allocation size overflow")?,
+                ))
+            })?;
+    let metrics = Transfer {
+        allocation_count: count,
+        allocation_bytes: bytes,
+        gb_per_s: bytes as f64 / 1e9 / start.elapsed().as_secs_f64(),
+        copy_gb_per_s: if copy_us == 0 {
+            0.0
+        } else {
+            bytes as f64 / 1000.0 / f64::from(copy_us)
         },
-    )?;
-    report(
-        phase,
-        start,
-        participants.len(),
-        Metrics::Transfer {
-            allocation_count: count,
-            allocation_bytes: bytes,
-            gb_per_s: bytes as f64 / 1e9 / start.elapsed().as_secs_f64(),
-            copy_gb_per_s: if copy_us == 0 {
-                0.0
-            } else {
-                bytes as f64 / 1000.0 / f64::from(copy_us)
-            },
-        },
-    )?;
+    };
+    let event = match operation {
+        Operation::SaveAllocations => Event::SaveAllocations(metrics),
+        Operation::LoadAllocations => Event::LoadAllocations(metrics),
+        _ => bail!("not an allocation transfer"),
+    };
+    report(event, start, peers.len())?;
     Ok(())
 }
 
 fn run() -> Result<()> {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    let args: Vec<_> = argv.iter().map(String::as_str).collect();
-    let [
-        mode @ ("--prepare" | "--restore"),
-        "--proc-root",
-        proc_root,
-        "--checkpoint-dir",
-        checkpoint,
-        "--control-dir",
-        control,
-        processes @ ..,
-    ] = args.as_slice()
-    else {
-        return Err("usage: cuinterpose-coordinator (--prepare|--restore) --proc-root PATH --checkpoint-dir PATH --control-dir PATH --process OBSERVED_PID NAMESPACE_PID...".into());
-    };
-    if processes.is_empty() || !processes.len().is_multiple_of(3) {
-        return Err("expected --process OBSERVED_PID NAMESPACE_PID".into());
-    }
-    let prepare = *mode == "--prepare";
-    if !control.starts_with('/') {
-        return Err("--control-dir must be an absolute path".into());
-    }
-    let path = PathBuf::from(checkpoint).join("cuinterpose.state");
-    // Validate the artifact before contacting a restored process.
-    let mut expected = if prepare {
+    let args = Arguments::parse();
+    ensure!(
+        args.control_dir.starts_with('/'),
+        "--control-dir must be an absolute path"
+    );
+    let path = args.checkpoint_dir.join("cuinterpose.state");
+    let mut expected = if args.prepare {
         Vec::new()
     } else {
-        state::read(&path).map_err(|error| format!("cannot parse {}: {error}", path.display()))?
+        state::read(&path).with_context(|| format!("cannot parse {}", path.display()))?
     };
-    let mut participants = Vec::with_capacity(processes.len() / 3);
-    for process in processes.chunks_exact(3) {
-        let ["--process", observed, namespace] = process else {
-            return Err("expected --process OBSERVED_PID NAMESPACE_PID".into());
-        };
-        let observed: i32 = observed.parse()?;
-        let namespace: i32 = namespace.parse()?;
-        if observed <= 0 || namespace <= 0 {
-            return Err("process IDs must be positive".into());
-        }
-        let endpoint = if proc_root.is_empty() {
+    let start = Instant::now();
+    let mut peers = Vec::with_capacity(args.processes.len() / 2);
+    for process in args.processes.chunks_exact(2) {
+        let (observed, namespace) = (process[0], process[1]);
+        let control = &args.control_dir;
+        let endpoint = if args.proc_root.is_empty() {
             format!("{control}/cuinterpose-{namespace}.sock")
         } else {
-            format!("{proc_root}/{observed}/root{control}/cuinterpose-{namespace}.sock")
+            format!(
+                "{}/{observed}/root{control}/cuinterpose-{namespace}.sock",
+                args.proc_root
+            )
         };
-        if endpoint.len() >= 108 {
-            return Err("control socket path does not fit in sun_path".into());
-        }
-        participants.push(Participant {
-            endpoint,
-            ..Participant::default()
-        });
+        SocketAddr::from_pathname(&endpoint)?;
+        peers.push(Peer::identify(endpoint)?);
     }
-    if prepare {
-        let start = Instant::now();
-        inspect(&mut participants)?;
+    if args.prepare {
+        let (mut participants, raw, unsupported) = inspect(&peers)?;
         report(
-            Phase::Inspect,
-            start,
-            participants.len(),
-            Metrics::Inspection {
+            Event::Inspect {
                 records: participants.iter().map(|p| p.records.len()).sum(),
-                live_raw_imports: participants.iter().map(|p| p.raw_imports).sum(),
-                unsupported_exportable_creations: participants.iter().map(|p| p.unsupported).sum(),
+                live_raw_imports: raw,
+                unsupported_exportable_creations: unsupported,
             },
+            start,
+            peers.len(),
         )?;
-        for participant in &participants {
-            if participant.raw_imports != 0 {
-                return Err(format!(
-                    "prepare refused: {} holds {} live raw imports",
-                    participant.endpoint, participant.raw_imports
-                )
-                .into());
-            }
-            if participant.unsupported != 0 {
-                return Err(format!("prepare refused: {} created {} CUDA resources with unsupported exportable handle types", participant.endpoint, participant.unsupported).into());
-            }
-        }
+        ensure!(
+            raw == 0,
+            "prepare refused: participants hold {raw} live raw imports"
+        );
+        ensure!(
+            unsupported == 0,
+            "prepare refused: participants created {unsupported} CUDA resources with unsupported exportable handle types"
+        );
         let start = Instant::now();
         let allocations = topology::validate(&participants)?;
-        report(Phase::Validate, start, participants.len(), Metrics::None {})?;
+        report(Event::Validate, start, peers.len())?;
         let start = Instant::now();
-        command_all(&mut participants, Operation::PrepareMulticast, None)
-            .map_err(|error| format!("multicast teardown: {error}"))?;
-        report(
-            Phase::PrepareMulticast,
-            start,
-            participants.len(),
-            Metrics::None {},
-        )?;
-        transfer(
-            &mut participants,
-            Operation::SaveAllocations,
-            &allocations,
-            Phase::SaveAllocations,
-        )?;
+        command_all(&peers, Operation::PrepareMulticast, &[]).context("multicast teardown")?;
+        report(Event::PrepareMulticast, start, peers.len())?;
+        transfer(&peers, Operation::SaveAllocations, &allocations)?;
         let start = Instant::now();
-        command_all(&mut participants, Operation::PrepareUnicast, None)?;
-        report(
-            Phase::PrepareUnicast,
-            start,
-            participants.len(),
-            Metrics::None {},
-        )?;
+        command_all(&peers, Operation::PrepareUnicast, &[])?;
+        report(Event::PrepareUnicast, start, peers.len())?;
         let start = Instant::now();
         state::write_atomic(&path, &mut participants)?;
-        report(
-            Phase::StateWrite,
-            start,
-            participants.len(),
-            Metrics::None {},
-        )?;
+        report(Event::StateWrite, start, peers.len())?;
     } else {
-        let start = Instant::now();
-        for participant in &mut participants {
-            participant.exchange(Operation::Handshake, None)?;
-        }
-        participants.sort_by_key(|p| p.id);
+        peers.sort_by_key(|p| p.id);
         expected.sort_by_key(|p| p.id);
-        if participants
-            .iter()
-            .map(|p| p.id)
-            .ne(expected.iter().map(|p| p.id))
-        {
-            return Err("restored processes do not match the checkpointed participants".into());
-        }
+        ensure!(
+            peers.iter().map(|p| p.id).eq(expected.iter().map(|p| p.id)),
+            "restored processes do not match the checkpointed participants"
+        );
         let allocations = topology::validate(&expected)?;
-        report(
-            Phase::Handshake,
-            start,
-            participants.len(),
-            Metrics::None {},
-        )?;
-        transfer(
-            &mut participants,
-            Operation::LoadAllocations,
-            &allocations,
-            Phase::LoadAllocations,
-        )?;
+        report(Event::Handshake, start, peers.len())?;
+        transfer(&peers, Operation::LoadAllocations, &allocations)?;
         let start = Instant::now();
-        command_all(&mut participants, Operation::RestoreUnicast, None)?;
-        report(
-            Phase::RestoreUnicast,
-            start,
-            participants.len(),
-            Metrics::None {},
-        )?;
+        command_all(&peers, Operation::RestoreUnicast, &[])?;
+        report(Event::RestoreUnicast, start, peers.len())?;
         let start = Instant::now();
         for operation in [
             Operation::RestoreMulticastCreators,
@@ -342,26 +298,32 @@ fn run() -> Result<()> {
             Operation::RestoreMulticastDevices,
             Operation::RestoreMulticastBindings,
         ] {
-            command_all(&mut participants, operation, None)?;
+            command_all(&peers, operation, &[])?;
         }
-        report(
-            Phase::RestoreMulticast,
-            start,
-            participants.len(),
-            Metrics::None {},
-        )?;
+        report(Event::RestoreMulticast, start, peers.len())?;
         let start = Instant::now();
-        inspect(&mut participants)?;
+        // Re-identify before inspecting, preserving the final identity barrier.
+        for peer in &peers {
+            ensure!(
+                Peer::identify(peer.endpoint.clone())?.id == peer.id,
+                "restored participant changed"
+            );
+        }
+        let (mut participants, raw, unsupported) = inspect(&peers)?;
+        ensure!(
+            raw == 0 && unsupported == 0,
+            "restored participant has unsupported CUDA state"
+        );
         topology::validate(&participants)?;
-        participants.sort_by_key(|p| p.id);
         for (actual, expected) in participants.iter_mut().zip(&mut expected) {
             actual.records.sort();
             expected.records.sort();
-            if actual.id != expected.id || actual.records != expected.records {
-                return Err("restored topology does not match the checkpoint".into());
-            }
+            ensure!(
+                actual.id == expected.id && actual.records == expected.records,
+                "restored topology does not match the checkpoint"
+            );
         }
-        report(Phase::Validate, start, participants.len(), Metrics::None {})?;
+        report(Event::Validate, start, peers.len())?;
     }
     Ok(())
 }
@@ -370,7 +332,7 @@ fn main() -> std::process::ExitCode {
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("cuinterpose-coordinator: {error}");
+            eprintln!("cuinterpose-coordinator: {error:#}");
             std::process::ExitCode::FAILURE
         }
     }

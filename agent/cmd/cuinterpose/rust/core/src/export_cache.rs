@@ -75,12 +75,12 @@ impl ExportCache {
     pub fn acquire(&self, id: &Key) -> Result<Lease<'_>> {
         let mut entries = self.entries.lock().map_err(|_| UNKNOWN)?;
         if entries.draining {
-            return Err(INVALID_HANDLE);
+            return Err(INVALID_HANDLE.into());
         }
         let total = entries.transfers.checked_add(1).ok_or(UNKNOWN)?;
         let entry = entries.descriptors.get_mut(id).ok_or(INVALID_HANDLE)?;
         if entry.retiring {
-            return Err(INVALID_HANDLE);
+            return Err(INVALID_HANDLE.into());
         }
         let descriptor = entry.descriptor.try_clone().map_err(|_| UNKNOWN)?;
         entry.transfers = entry.transfers.checked_add(1).ok_or(UNKNOWN)?;

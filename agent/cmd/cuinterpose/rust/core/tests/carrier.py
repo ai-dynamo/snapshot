@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Representative carrier failure boundaries; normal restore uses the C fixtures."""
+"""Headless carrier failure boundaries; normal restore uses lifecycle.py."""
 
 import ctypes as c
 import os

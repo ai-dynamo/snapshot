@@ -18,7 +18,7 @@ use std::ffi::{CStr, c_char, c_void};
 #[unsafe(no_mangle)]
 pub static cuinterpose_build_info: BuildInfo = BuildInfo {
     cuda_version: CUDA_VERSION,
-    protocol_version: 3,
+    protocol_version: 4,
 };
 
 macro_rules! wrappers {

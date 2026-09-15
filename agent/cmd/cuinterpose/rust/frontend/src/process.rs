@@ -4,21 +4,13 @@
 //! C-style metadata locking for quiescent fork, not a CUDA-operation barrier.
 //! Fork inside interception, initialization, or concurrent CUDA is unsupported.
 
-use cuinterpose_abi::Core;
-use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicI32, Ordering};
 
 pub static G_ORIGIN_PID: AtomicI32 = AtomicI32::new(0);
-// Acquire readers only call a fully initialized, process-lifetime core table.
-static G_API: AtomicPtr<Core> = AtomicPtr::new(std::ptr::null_mut());
-
-pub fn publish(api: *const Core) {
-    G_API.store(api.cast_mut(), Ordering::Release);
-}
 
 unsafe extern "C" fn prepare() {
-    let api = G_API.load(Ordering::Acquire);
-    if !api.is_null() {
-        unsafe { ((*api).fork_prepare)() };
+    if let Some(Some(api)) = super::loader::G_CORE.get() {
+        unsafe { (api.fork_prepare)() };
     }
     // Core operations can resolve providers while holding STATE, so acquire
     // the provider-reference lock last. Never hold it over a CUDA call/dlopen.
@@ -27,17 +19,15 @@ unsafe extern "C" fn prepare() {
 
 unsafe extern "C" fn parent() {
     super::loader::fork_unlock();
-    let api = G_API.load(Ordering::Acquire);
-    if !api.is_null() {
-        unsafe { ((*api).fork_parent)() };
+    if let Some(Some(api)) = super::loader::G_CORE.get() {
+        unsafe { (api.fork_parent)() };
     }
 }
 
 unsafe extern "C" fn child() {
     super::loader::fork_unlock();
-    let api = G_API.load(Ordering::Acquire);
-    if !api.is_null() {
-        unsafe { ((*api).fork_child)() };
+    if let Some(Some(api)) = super::loader::G_CORE.get() {
+        unsafe { (api.fork_child)() };
     }
 }
 

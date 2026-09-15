@@ -25,7 +25,7 @@ fn versions_and_trailing_data_are_rejected() {
         body: Request,
     }
     let old = rmp_serde::to_vec_named(&Message {
-        version: 2,
+        version: VERSION - 1,
         body: Request::Handshake,
     })
     .unwrap();
@@ -65,6 +65,26 @@ fn maximal_inspection_fits_and_excess_records_are_rejected() {
         unsupported_creations: 0,
     };
     assert!(decode::<Reply>(&encode(&oversized).unwrap()).is_err());
+
+    // Only a declared array length, with no elements: the limit error must
+    // occur before trying to buffer/parse those missing elements.
+    let mut header = vec![0x82, 0xa7];
+    header.extend_from_slice(b"version");
+    header.push(VERSION as u8);
+    header.push(0xa4);
+    header.extend_from_slice(b"body");
+    header.extend_from_slice(&[0x81, 0xaa]);
+    header.extend_from_slice(b"inspection");
+    header.extend_from_slice(&[0x81, 0xa7]);
+    header.extend_from_slice(b"records");
+    header.push(0xdd);
+    header.extend_from_slice(&((MAX_RECORDS + 1) as u32).to_be_bytes());
+    assert!(
+        decode::<Reply>(&header)
+            .unwrap_err()
+            .to_string()
+            .contains("too many entries")
+    );
 }
 
 #[test]

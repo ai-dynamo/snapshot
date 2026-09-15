@@ -127,8 +127,41 @@ and `serde_json`, with numeric timings and allocation counts. The Go agent
 decodes the same fields using `encoding/json`. The protocol crate uses Serde
 and `rmp-serde` for MessagePack, `serde_bytes` for binary IDs, `rustix` for
 owned descriptor transfer, and `thiserror` for codec/I/O errors. These
-dependencies belong to the lazy core and standalone coordinator; the frontend
-still depends only on the ABI crate and `libc`.
+dependencies belong to the lazy core and standalone coordinator. The frontend
+uses the ABI crate, `libc`, and `elf` with default features disabled. `elf` 0.8
+has no dependencies or build script; its borrowed `ElfBytes` parser replaces
+our manual ELF tables without allocating or introducing runtime initialization.
+Our mmap, caller-relative lookup, symbol filtering, version and IFUNC policies
+remain ours. Loader tests check those policies against real ELF objects.
+
+The coordinator uses `clap` derive for its existing flags (including repeated
+`--process OBSERVED_PID NAMESPACE_PID`), `anyhow` for error chains, and `tempfile`
+for atomic state publication. Argument ordering is no longer artificially
+restricted. File mode 0600, file fsync, atomic rename and directory fsync remain.
+Shim settings use `std::env` and `str::parse`; there is no configuration framework
+or new constructor-time environment reading. `std::sync` supplies the existing
+bounded queue and locks; these APIs are not deprecated.
+
+### CUDA binding choice
+
+NVIDIA now publishes Rust host bindings: NVlabs
+[`cuda-bindings`](https://github.com/NVlabs/cutile-rs/tree/main/cuda-bindings)
+is shared by cuda-oxide and cuTile. It is a relevant candidate, not an absent SDK.
+Its current package generates types using bindgen and CUDA 13+ / cuRAND headers,
+and routes public calls through its own private generated API, `libloading`,
+and `OnceLock`. The inspected manifest has no bindings-only feature or injectable
+resolver. Using those calls directly would bypass our `Host.resolve` contract;
+whether it also recurses depends on lookup paths and was not runtime-tested.
+
+For now `core/src/driver.rs` declares the supported raw signatures once, following
+NVIDIA's [`cuda.h` / `cudaTypedefs.h` declarations](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/driver-entry-point-access.html).
+It resolves lazily through the frontend and preserves arbitrary numeric CUDA
+errors, optional entry points and driver-written outputs. POSIX import/export
+operations own descriptors and hide output-parameter conventions. A future
+NVIDIA bindings-only/custom-resolver interface could replace this inventory.
+Community `cudarc` also has generated raw bindings, but its normal dynamic
+loader is not our resolver either. Neither high-level context/buffer ownership
+nor kernel compiler infrastructure belongs in an interposer.
 
 | Crate | Owns |
 | --- | --- |
@@ -176,18 +209,21 @@ invariant, not a claim of compatibility with arbitrary loader namespaces.
 This makes nested runtime-to-driver queries idempotent without trusting
 arbitrary functions from a library named cuinterpose.
 
-The wire/state format is version **3**, independent of the host/core C ABI.
+The wire/state format is version **4**, independent of host/core C ABI **5**.
 Requests, responses, sealed tickets, and `cuinterpose.state` encode a
 `{version, body}` MessagePack envelope with named fields. Stream messages
 have a four-byte little-endian length prefix. Tickets retain the four-byte
 `CMVD` signature so obsolete or malformed shim tickets fail instead of being
-forwarded to CUDA as raw descriptors. There is no C v2 compatibility codec:
+forwarded to CUDA as raw descriptors. There is no v2/v3 compatibility codec:
 old experimental checkpoints require the old implementation.
 
 `Record` is an enum with allocation, mapping, multicast object, device,
 binding, and multicast-mapping variants. Each carries only its relevant
 fields. Creator/content properties are booleans, not packed flags; bindings
-carry typed kind/version values. `ParticipantId` and `AllocationId` are
+carry `Memory(MemberRange)` or `Address { address, tracked_member }` plus ABI
+version. Native address bindings do not invent allocation IDs. Replies and
+records use external Serde tags so the bounded collection visitor runs before
+any intermediate collection buffer is allocated. `ParticipantId` and `AllocationId` are
 distinct 16-byte types. Only the participant environment override uses hex.
 Canonical state sorts participants and typed records; access grants are sorted
 by their fields, not their encoded bytes.
@@ -315,9 +351,8 @@ On Linux/amd64 with Rust, `/usr/bin/gcc`, and Python `msgpack` installed
 ```sh
 export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/gcc
 cargo test --workspace --target x86_64-unknown-linux-gnu
-python3 frontend/tests/run.py
 make -C .. build
-python3 core/tests/reference.py
+python3 core/tests/headless.py --artifacts ../build
 ```
 
 An explicit system linker avoids the host's Nix compiler linking against a
@@ -332,23 +367,25 @@ compiled C providers with real CUDA symbol names: 23 loader cases and 19
 actual-core endpoint cases protect the ELF/resolver behavior. They need
 neither CUDA headers nor GPUs.
 
-`reference.py` tests the packaged artifacts from `../build` (override with
-`--artifacts`). It builds only the reusable CUDA-call fixtures and fake
-providers from the pinned C stack using a CUDA 13.1/gtest Docker image.
-It does not build or test the old C implementation. The small
-`json-reports.patch` adapts report assertions, not CUDA behavior.
+`headless.py` tests one packaged frontend/core/coordinator set. It compiles
+locally owned fake CUDA and ELF probes with gcc, without Git history, CUDA
+headers, gtest or a separate image. The standard `test-native` gate includes it.
+The fake driver is a test-only destination for calls forwarded by the actual
+shim, not real CUDA qualification. Its C allocation model is retained temporarily:
+rewriting that model in Rust would not remove the model. C ABI does not require
+C source; the small independent C ELF probes remain for loader/cross-language checks.
 
 | Coverage | Retained checks |
 | --- | --- |
-| C CUDA-call fixtures | 13 tracking, 5 unicast lifecycle, 5 multicast cases; includes shared/private ownership, released handles, peer reconstruction, and raw-import refusal |
+| Local Python lifecycle | Tracking/ranges/retains, concurrent ticket exports and alias imports, shared/private ownership, released-private handles, no-context content, raw imports and unsupported types |
 | Rust coordinator contracts | Ordering/barriers, malformed input, preflight refusal, canonical state, and restored identity/topology |
-| Python multicast | 9 cases for binding-only sharing, native BindAddr, ticket mismatch, cache teardown, phase refusal, and collective/map-publication regressions |
+| Python multicast | Binding-only sharing, native/tracked BindAddr, effective extent, ticket mismatch, cache teardown, phase refusal, and collective/map-publication regressions |
 | Carrier failures | 4 cases: D2H/H2D copy failure and unknown-completion fail-stop; cleanup must not resume a failed generation |
 | RPC | 6 cases: reciprocal unicast/multicast under thread pressure, queue-full refusal, and success/failure of both mandatory spawns under the loader lock |
 | Fork | 4 cases: pre-init, identity/FD reset, poison reset, and nested-fork descriptor reuse |
 
-Python tests share one MessagePack client. The direct-v2 multicast fixture
-is replaced by the Python cache-teardown case; no legacy codec is tested.
+Python tests share one MessagePack client. Reciprocal unicast and multicast
+workers replay mappings and bindings, not just object handles. No legacy codec is tested.
 The suite deliberately omits the synthetic zero-driver-handle translation
 layer, exhaustive per-CUDA-call cleanup-failure permutations, timing
 microbenchmarks, and prepared-arena fork probe. Basic copy failures remain,
@@ -361,7 +398,8 @@ post-CUDA fork-without-exec. Python fork warnings do not relax that contract:
 real workloads should use spawn/exec or fork before CUDA initialization.
 
 For the physical-GPU suite, `core/tests/stage_gpu.py DEST --artifacts DIR
---cuda-checkpoint PATH` extracts the pinned test sources and applies only
-`gpu-json-reports.patch` to the harness parser. It stages both Rust libraries
-and the coordinator, and exercises the staged JSON parser without loading CUDA
-on the build host. GPU test bodies and throughput assertions are unchanged.
+--cuda-checkpoint PATH` copies the locally owned `../tests/gpu` suite and matched
+artifacts. Its report parser is an ordinary CUDA-independent Python module.
+The three physical-GPU cases use the real driver through the shim and native
+cuda-checkpoint; the headless fake provider is never staged. They remain an
+explicit separate gate, and v4 requires a fresh checkpoint.

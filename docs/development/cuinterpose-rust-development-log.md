@@ -1514,3 +1514,80 @@ not relocate the assignment, and the corrected patch fixed it. No runtime
 change or workload retry was needed. Evidence:
 `.cuinterpose-cleanup-{packaging,build,reference}.log`.
 No cluster changes; GPU/vLLM qualification of v3 is still pending.
+
+## Typed driver, protocol v4, and locally owned tests
+
+The substantive Rust cleanup replaces call-site CUDA signatures/casts with one
+lazy typed driver inventory, `CudaError(i32)`, owned POSIX descriptor operations,
+and synchronous context execution. Host transfers carry small content plans,
+not tickets/full allocation records, and the arena owner is not cloneable.
+Multicast bindings now distinguish memory ranges from addresses with an optional
+tracked member. The coordinator uses clap, anyhow and tempfile; report events
+carry their own metrics, and peer identity is established once by handshake.
+Control requests cannot enqueue EXPORT; fork guard abandonment is owned by the
+generation state rather than reaching through guards from child callbacks.
+
+Wire/state/tickets are version 4, with external tags on replies/records so bounded
+collection decoding occurs before Serde buffering. ABI 5 and CUDA symbol names
+are unchanged. Version 3 artifacts require their old implementation; there is
+no implicit compatibility path. The frontend now uses typed core publication,
+owned loader references, and dependency-free/noalloc `elf` parsing with default
+features off. The nonblocking initialization guard, caller-aware loader behavior,
+and explicit DMA-unknown fail-stop remain.
+
+NVIDIA's current NVlabs cuda-bindings is real Rust host infrastructure, but the
+inspected package couples generated types to toolkit headers and its own
+libloading/OnceLock driver cache, without a custom-resolver or bindings-only
+feature. It is not used directly because this shim must use Host.resolve.
+README records the sources and reuse path; this is not a claim that NVIDIA
+provides no Rust bindings.
+
+The historical Git extraction, gtest assertion programs, protocol header
+dependency and report patches were removed. GPU pytest sources are local;
+staging copies only source/artifacts, not the fake driver or local environments.
+The normal headless gate now includes loader, endpoint and lifecycle scenarios
+against one matched artifact directory. A small independent CUDA ABI header
+lets the retained C fake allocation model compile without a toolkit. This model
+is test-only, not the real NVIDIA driver. Some inherited stress-only repetitions
+(listener churn and long allocation loops) were consolidated rather than copied
+literally; this is not a claim that every old assertion remains verbatim.
+
+Implementation attempts and fixes:
+
+- The first owned-library conversion used eager `then_some`, constructing and
+  dropping a null handle when dlopen failed. The existing missing-core loader
+  case segfaulted. Lazy `then` constructs an owner only on success; all 23 loader
+  cases subsequently passed.
+- An initial tag edit affected Request instead of Reply. Rust-to-Rust tests
+  agreed with each other, but the independent Python endpoint client exposed
+  the mismatch. Requests keep their small internal tag; replies/records now
+  have external tags. A declared oversized array with no elements must report
+  the collection limit before attempting to parse elements.
+- The consolidated no-context test initially exported after changing context,
+  thereby recording that context. Exporting while still contextless preserves
+  the intended primary-context test; no production context policy was changed.
+- Expanding reciprocal multicast tests from handle-only replay to actual
+  mappings/bindings exposed equal process-local allocation indices aliasing in
+  the inherited fake model. Its descriptor metadata now includes creator PID;
+  foreign imports cannot alias unrelated local allocations. Both reciprocal
+  unicast and multicast mapping replays then passed.
+
+Implementation-local GNU checks passed: 26 Rust tests, strict Clippy, rustfmt,
+rustdoc, and the consolidated headless process gate (23 loader, 19 endpoint,
+9 tracking/lifecycle, 12 multicast, 4 carrier, 6 RPC, 4 fork cases, plus the
+CUDA-independent report parser). Logs are `/tmp/cuinterpose-{rust-tests,clippy,
+rustdoc,headless}.log`; GNU artifacts are `/tmp/cuinterpose-cleanup-artifacts`.
+GPU source syntax and source-only staging were checked; the staging smoke used
+`/bin/true` as an explicit placeholder, not a CUDA test.
+
+Production module source is 6,180 lines including comments/blanks, down from
+6,468. Locally visible source grows because the fake provider and GPU suite are
+now owned: test/build infrastructure is 4,969 lines and GPU Python 1,419 lines
+when counting Rust/Python/C/headers/patches outside target directories. Those
+figures must not be compared to a baseline that excluded externally extracted
+sources as if all the new visible code were new behavior.
+
+No Go integration, upstream compatibility, C draft branches, or cluster state
+was changed. The parent still needs review and the pinned GNU/musl final gate.
+Fresh version-4 physical GPU and vLLM capture/restore/inference qualification
+has not been run and is not implied by these headless results.

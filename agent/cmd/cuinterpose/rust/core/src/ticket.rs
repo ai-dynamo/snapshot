@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use cuinterpose_protocol::{
-    self as protocol, Error, MAX_TICKET_BYTES, Operation, Reply, Request, Response, Result,
-    TICKET_MAGIC, Ticket,
+    self as protocol, Error, MAX_TICKET_BYTES, Reply, Request, Response, Result, TICKET_MAGIC,
+    Ticket,
 };
 use rustix::fs::{MemfdFlags, SealFlags, fcntl_add_seals, fcntl_get_seals, memfd_create};
 use std::fs::File;
@@ -65,7 +65,7 @@ pub fn read(fd: i32) -> Result<Option<Ticket>> {
 
 pub fn request(ticket: &Ticket) -> Result<OwnedFd> {
     let socket = super::process::Socket::open(|| UnixStream::connect(&ticket.endpoint))?;
-    let timeout = Some(protocol::timeout(Operation::Export));
+    let timeout = Some(protocol::timeout(None));
     socket.set_read_timeout(timeout)?;
     socket.set_write_timeout(timeout)?;
     let resource = ticket.resource.kind();
@@ -93,7 +93,16 @@ pub fn request(ticket: &Ticket) -> Result<OwnedFd> {
         {
             fd.ok_or(Error::Invalid("creator sent no descriptor"))
         }
-        _ => Err(Error::Invalid("creator rejected export")),
+        Response { participant, .. } if participant != ticket.creator => {
+            Err(Error::Invalid("wrong creator participant"))
+        }
+        Response {
+            result: Err(message),
+            ..
+        } => Err(Error::Remote(message)),
+        _ => Err(Error::Invalid(
+            "invalid export response identity or resource",
+        )),
     }
 }
 

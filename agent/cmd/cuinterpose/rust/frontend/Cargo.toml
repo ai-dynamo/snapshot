@@ -16,3 +16,4 @@ crate-type = ["cdylib"]
 [dependencies]
 cuinterpose-abi.workspace = true
 libc.workspace = true
+elf.workspace = true

@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Behavioral cases from the C coordinator suite, using typed v3 messages.
+//! Behavioral cases from the C coordinator suite, using typed v4 messages.
 use cuinterpose_protocol::{
-    AllocationId, BindingKind, BindingVersion, Operation, Participant, ParticipantId, Record,
-    Reply, Request, Response, decode, receive, send,
+    AllocationId, BindingSource, BindingVersion, MemberRange, Operation, Participant,
+    ParticipantId, Record, Reply, Request, Response, decode, receive, send,
 };
 use std::os::unix::net::UnixListener;
 use std::{
@@ -12,7 +12,7 @@ use std::{
     process::{Command, Output},
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
     time::Duration,
@@ -27,12 +27,13 @@ struct Model {
     raw: u64,
     unsupported: u64,
     fail: Option<Operation>,
-    operations: Vec<Operation>,
+    operations: Vec<String>,
     identity: u8,
 }
 
 struct Fixture {
     directory: PathBuf,
+    _temporary: tempfile::TempDir,
     models: Vec<Arc<Mutex<Model>>>,
     stop: Arc<AtomicBool>,
     servers: Vec<JoinHandle<()>>,
@@ -40,13 +41,8 @@ struct Fixture {
 
 impl Fixture {
     fn new(count: usize, rendezvous: Option<Operation>) -> Self {
-        static G_NEXT: AtomicUsize = AtomicUsize::new(0);
-        let directory = std::env::temp_dir().join(format!(
-            "cui-contract-{}-{}",
-            std::process::id(),
-            G_NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir(&directory).unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().to_path_buf();
         let stop = Arc::new(AtomicBool::new(false));
         let gate = Arc::new((Mutex::new(0), Condvar::new()));
         let released = Arc::new(AtomicBool::new(false));
@@ -80,9 +76,9 @@ impl Fixture {
                     assert!(fd.is_none());
                     let mut model = model.lock().unwrap();
                     let (operation, response) = match request {
-                        Request::Handshake => (Operation::Handshake, Reply::Handshake),
+                        Request::Handshake => (None, Reply::Handshake),
                         Request::Inspect { .. } => (
-                            Operation::Inspect,
+                            None,
                             Reply::Inspection {
                                 records: model.records.clone(),
                                 live_raw_imports: model.raw,
@@ -90,7 +86,7 @@ impl Fixture {
                             },
                         ),
                         Request::Execute { operation, .. } => (
-                            operation,
+                            Some(operation),
                             Reply::Completed {
                                 operation,
                                 bytes: 0,
@@ -99,17 +95,26 @@ impl Fixture {
                         ),
                         Request::Export { .. } => panic!("coordinator must not request CUDA FDs"),
                     };
-                    model.operations.push(operation);
+                    model.operations.push(match &response {
+                        Reply::Handshake => "handshake".into(),
+                        Reply::Inspection { .. } => "inspect".into(),
+                        Reply::Completed { operation, .. } => serde_json::to_value(operation)
+                            .unwrap()
+                            .as_str()
+                            .unwrap()
+                            .into(),
+                        _ => panic!("unexpected response"),
+                    });
                     let response = Response {
                         participant: ParticipantId([model.identity; 16]),
-                        result: if model.fail == Some(operation) {
+                        result: if model.fail.is_some() && model.fail == operation {
                             Err("injected participant failure".into())
                         } else {
                             Ok(response)
                         },
                     };
                     drop(model);
-                    if rendezvous == Some(operation) {
+                    if rendezvous.is_some() && rendezvous == operation {
                         let mut arrived = gate.0.lock().unwrap();
                         *arrived += 1;
                         gate.1.notify_all();
@@ -129,10 +134,10 @@ impl Fixture {
                         (rendezvous, operation),
                         (
                             Some(Operation::PrepareMulticast),
-                            Operation::SaveAllocations
+                            Some(Operation::SaveAllocations)
                         ) | (
                             Some(Operation::RestoreMulticastDevices),
-                            Operation::RestoreMulticastBindings
+                            Some(Operation::RestoreMulticastBindings)
                         )
                     ) {
                         assert_eq!(
@@ -151,6 +156,7 @@ impl Fixture {
         }
         Self {
             directory,
+            _temporary: temporary,
             models,
             stop,
             servers,
@@ -214,7 +220,6 @@ impl Drop for Fixture {
         for server in self.servers.drain(..) {
             server.join().unwrap();
         }
-        std::fs::remove_dir_all(&self.directory).unwrap();
     }
 }
 
@@ -273,13 +278,13 @@ fn preflight_refusals_do_not_mutate_or_publish_state() {
                         },
                         Record::MulticastBinding {
                             id: GROUP,
-                            member: ID,
-                            address: 0,
+                            source: BindingSource::Memory(MemberRange {
+                                allocation: ID,
+                                offset: 0,
+                            }),
                             size: 8192,
                             offset: 0,
-                            member_offset: 0,
                             flags: 0,
-                            binding: BindingKind::Memory,
                             version: BindingVersion::V1,
                             device: 0,
                         },
@@ -292,7 +297,7 @@ fn preflight_refusals_do_not_mutate_or_publish_state() {
         assert!(!output.status.success(), "{case}: {output:?}");
         assert_eq!(
             fixture.models[0].lock().unwrap().operations,
-            [Operation::Handshake, Operation::Inspect],
+            ["handshake", "inspect"],
             "{case}"
         );
         assert!(!fixture.directory.join("cuinterpose.state").exists());
@@ -307,11 +312,7 @@ fn failed_phase_stops_before_next_phase_and_state_publication() {
     for model in &fixture.models {
         assert_eq!(
             model.lock().unwrap().operations,
-            [
-                Operation::Handshake,
-                Operation::Inspect,
-                Operation::PrepareMulticast
-            ]
+            ["handshake", "inspect", "prepare_multicast"]
         );
     }
     assert!(!fixture.directory.join("cuinterpose.state").exists());
@@ -348,20 +349,20 @@ fn parallel_prepare_and_restore_barriers_preserve_canonical_state() {
             assert_eq!(
                 model.lock().unwrap().operations,
                 [
-                    Operation::Handshake,
-                    Operation::Inspect,
-                    Operation::PrepareMulticast,
-                    Operation::SaveAllocations,
-                    Operation::PrepareUnicast,
-                    Operation::Handshake,
-                    Operation::LoadAllocations,
-                    Operation::RestoreUnicast,
-                    Operation::RestoreMulticastCreators,
-                    Operation::RestoreMulticastImporters,
-                    Operation::RestoreMulticastDevices,
-                    Operation::RestoreMulticastBindings,
-                    Operation::Handshake,
-                    Operation::Inspect,
+                    "handshake",
+                    "inspect",
+                    "prepare_multicast",
+                    "save_allocations",
+                    "prepare_unicast",
+                    "handshake",
+                    "load_allocations",
+                    "restore_unicast",
+                    "restore_multicast_creators",
+                    "restore_multicast_importers",
+                    "restore_multicast_devices",
+                    "restore_multicast_bindings",
+                    "handshake",
+                    "inspect",
                 ]
             );
         }
@@ -397,8 +398,8 @@ fn restore_rejects_missing_corrupt_or_changed_state() {
         let model = fixture.models[0].lock().unwrap();
         match case {
             "missing" | "corrupt" => assert!(model.operations.is_empty()),
-            "identity" => assert_eq!(model.operations, [Operation::Handshake]),
-            "topology" => assert_eq!(model.operations.last(), Some(&Operation::Inspect)),
+            "identity" => assert_eq!(model.operations, ["handshake"]),
+            "topology" => assert_eq!(model.operations.last(), Some(&"inspect".to_string())),
             _ => unreachable!(),
         }
     }

@@ -46,13 +46,10 @@ pub struct Ticket {
 
 impl Ticket {
     pub fn validate(&self) -> Result<()> {
-        if self.allocation == AllocationId::default()
-            || self.endpoint.len() >= 108
-            || !self.endpoint.starts_with('/')
-            || self.endpoint.as_bytes().contains(&0)
-        {
+        if self.allocation == AllocationId::default() || !self.endpoint.starts_with('/') {
             return Err(Error::Invalid("invalid ticket identity or endpoint"));
         }
+        std::os::unix::net::SocketAddr::from_pathname(&self.endpoint)?;
         if let Resource::Multicast {
             devices,
             size,

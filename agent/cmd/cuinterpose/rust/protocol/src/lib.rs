@@ -12,7 +12,7 @@ mod transport;
 #[doc(inline)]
 pub use identity::{AllocationId, ParticipantId};
 #[doc(inline)]
-pub use record::{Access, BindingKind, BindingVersion, Record};
+pub use record::{Access, BindingSource, BindingVersion, MemberRange, Record};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{io, time::Duration};
 #[doc(inline)]
@@ -20,7 +20,7 @@ pub use ticket::{Resource, ResourceKind, TICKET_MAGIC, Ticket};
 #[doc(inline)]
 pub use transport::{receive, send};
 
-pub const VERSION: u16 = 3;
+pub const VERSION: u16 = 4;
 pub const MAX_RECORDS: usize = 4096;
 pub const MAX_ACCESS: usize = 32;
 // A maximal inspection (4096 mappings, 32 named access grants each) fits here.
@@ -38,18 +38,17 @@ pub enum Error {
     Decode(#[from] rmp_serde::decode::Error),
     #[error("{0}")]
     Invalid(&'static str),
+    #[error("creator rejected export: {0}")]
+    Remote(String),
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
-    Handshake,
-    Inspect,
     PrepareMulticast,
     SaveAllocations,
     PrepareUnicast,
-    Export,
     LoadAllocations,
     RestoreUnicast,
     RestoreMulticastCreators,
@@ -83,7 +82,8 @@ pub struct Response {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+// Select the variant before reading bounded collections, without Content buffering.
+#[serde(rename_all = "snake_case")]
 pub enum Reply {
     Handshake,
     Inspection {
@@ -185,9 +185,9 @@ where
     deserializer.deserialize_seq(Sequence::<T, LIMIT>(std::marker::PhantomData))
 }
 
-pub fn timeout(operation: Operation) -> Duration {
+pub fn timeout(operation: Option<Operation>) -> Duration {
     let (variable, fallback) = match operation {
-        Operation::SaveAllocations | Operation::LoadAllocations => {
+        Some(Operation::SaveAllocations | Operation::LoadAllocations) => {
             ("SNAPSHOT_CARRIER_TIMEOUT_SECONDS", 3600)
         }
         _ => ("SNAPSHOT_CONTROL_TIMEOUT_SECONDS", 10),

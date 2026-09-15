@@ -1,10 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{Participant, Result};
-use cuinterpose_protocol::{self as protocol, MAX_BYTES};
+use anyhow::{Context, Result, ensure};
+use cuinterpose_protocol::{self as protocol, MAX_BYTES, Participant};
 use std::io::{Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 pub fn read(path: &Path) -> Result<Vec<Participant>> {
@@ -12,48 +11,24 @@ pub fn read(path: &Path) -> Result<Vec<Participant>> {
     std::fs::File::open(path)?
         .take(MAX_BYTES as u64 + 1)
         .read_to_end(&mut bytes)?;
-    let captured: Vec<protocol::Participant> = protocol::decode(&bytes)?;
-    if captured.is_empty() {
-        return Err("state has no participants".into());
-    }
-    Ok(captured
-        .into_iter()
-        .map(|p| Participant {
-            id: p.id,
-            records: p.records,
-            ..Participant::default()
-        })
-        .collect())
+    let participants: Vec<Participant> = protocol::decode(&bytes)?;
+    ensure!(!participants.is_empty(), "state has no participants");
+    Ok(participants)
 }
 
 pub fn write_atomic(path: &Path, participants: &mut [Participant]) -> Result<()> {
     participants.sort_by_key(|p| p.id);
-    let captured: Vec<_> = participants
-        .iter_mut()
-        .map(|p| {
-            p.records.sort();
-            protocol::Participant {
-                id: p.id,
-                records: p.records.clone(),
-            }
-        })
-        .collect();
-    let bytes = protocol::encode(&captured)?;
-    let directory = path.parent().ok_or("missing checkpoint directory")?;
-    let temporary = directory.join(format!(".cuinterpose.state.{}.tmp", std::process::id()));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temporary)?;
-    let result = (|| {
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        std::fs::rename(&temporary, path)?;
-        std::fs::File::open(directory)?.sync_all()
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
+    for participant in participants.iter_mut() {
+        participant.records.sort();
     }
-    Ok(result?)
+    let bytes = protocol::encode(&participants)?;
+    let directory = path.parent().context("missing checkpoint directory")?;
+    // NamedTempFile starts mode 0600 and removes incomplete files on error.
+    // persist is atomic replacement, not durability: retain both fsyncs.
+    let mut file = tempfile::NamedTempFile::new_in(directory)?;
+    file.write_all(&bytes)?;
+    file.as_file().sync_all()?;
+    file.persist(path)?;
+    std::fs::File::open(directory)?.sync_all()?;
+    Ok(())
 }

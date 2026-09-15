@@ -8,73 +8,7 @@
 
 use std::ffi::{CStr, c_void};
 
-fn integer<const N: usize>(data: &[u8], offset: usize) -> Option<[u8; N]> {
-    data.get(offset..offset.checked_add(N)?)?.try_into().ok()
-}
-
-// ELF64 field locations belong to these checked readers, never the resolver.
-// Reading integers into native values avoids alignment and aliasing assumptions.
-const ELF_IDENT: &[u8] = b"\x7fELF\x02\x01\x01";
-const ELF_HEADER_SECTION_OFFSET: usize = 40;
-const ELF_HEADER_SECTION_ENTRY_SIZE: usize = 58;
-const ELF_HEADER_SECTION_COUNT: usize = 60;
-const SECTION_SIZE: usize = 64;
-const SECTION_TYPE: usize = 4;
-const SECTION_OFFSET: usize = 24;
-const SECTION_LENGTH: usize = 32;
-const SECTION_LINK: usize = 40;
-const SECTION_ENTRY_SIZE: usize = 56;
-const SYMBOL_SIZE: usize = 24;
-const SYMBOL_NAME: usize = 0;
-const SYMBOL_INFO: usize = 4;
-const SYMBOL_VISIBILITY: usize = 5;
-const SYMBOL_SECTION: usize = 6;
-const SYMBOL_VALUE: usize = 8;
-const SHT_DYNSYM: u32 = 11;
-const SHT_STRTAB: u32 = 3;
-const SHN_UNDEF: u16 = 0;
-const STT_GNU_IFUNC: u8 = 10;
-
-struct ElfHeader {
-    sections_offset: usize,
-    section_entry_size: usize,
-    section_count: usize,
-}
-
-impl ElfHeader {
-    fn read(data: &[u8]) -> Option<Self> {
-        if data.get(..ELF_IDENT.len())? != ELF_IDENT {
-            return None;
-        }
-        let header = Self {
-            sections_offset: u64::from_le_bytes(integer(data, ELF_HEADER_SECTION_OFFSET)?) as usize,
-            section_entry_size: u16::from_le_bytes(integer(data, ELF_HEADER_SECTION_ENTRY_SIZE)?)
-                as usize,
-            section_count: u16::from_le_bytes(integer(data, ELF_HEADER_SECTION_COUNT)?) as usize,
-        };
-        if header.section_entry_size < SECTION_SIZE || header.section_count == 0 {
-            return None;
-        }
-        Some(header)
-    }
-
-    fn section(&self, data: &[u8], index: usize) -> Option<Section> {
-        if index >= self.section_count {
-            return None;
-        }
-        let offset = self
-            .sections_offset
-            .checked_add(index.checked_mul(self.section_entry_size)?)?;
-        let bytes = data.get(offset..offset.checked_add(SECTION_SIZE)?)?;
-        Some(Section {
-            kind: u32::from_le_bytes(integer(bytes, SECTION_TYPE)?),
-            offset: u64::from_le_bytes(integer(bytes, SECTION_OFFSET)?) as usize,
-            length: u64::from_le_bytes(integer(bytes, SECTION_LENGTH)?) as usize,
-            link: u32::from_le_bytes(integer(bytes, SECTION_LINK)?) as usize,
-            entry_size: u64::from_le_bytes(integer(bytes, SECTION_ENTRY_SIZE)?) as usize,
-        })
-    }
-}
+use elf::{ElfBytes, abi, endian::LittleEndian, file::Class};
 
 #[cfg(test)]
 mod reader_tests {
@@ -85,7 +19,8 @@ mod reader_tests {
         // Minimal independent ELF64 fixture: header, null/dynsym/strtab
         // sections, one symbol, and its name. No native struct casts.
         let mut bytes = [0u8; 320];
-        bytes[..7].copy_from_slice(ELF_IDENT);
+        bytes[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
+        bytes[20..24].copy_from_slice(&1u32.to_le_bytes());
         bytes[40..48].copy_from_slice(&64u64.to_le_bytes());
         bytes[58..60].copy_from_slice(&64u16.to_le_bytes());
         bytes[60..62].copy_from_slice(&3u16.to_le_bytes());
@@ -119,77 +54,36 @@ mod reader_tests {
     }
 }
 
-struct Section {
-    kind: u32,
-    offset: usize,
-    length: usize,
-    link: usize,
-    entry_size: usize,
-}
-
-struct SymbolEntry {
-    name_offset: usize,
-    kind: u8,
-    binding: u8,
-    visibility: u8,
-    section: u16,
-    value: usize,
-}
-
-impl SymbolEntry {
-    fn read(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < SYMBOL_SIZE {
-            return None;
-        }
-        Some(Self {
-            name_offset: u32::from_le_bytes(integer(bytes, SYMBOL_NAME)?) as usize,
-            kind: bytes[SYMBOL_INFO] & 15,
-            binding: bytes[SYMBOL_INFO] >> 4,
-            visibility: bytes[SYMBOL_VISIBILITY] & 3,
-            section: u16::from_le_bytes(integer(bytes, SYMBOL_SECTION)?),
-            value: u64::from_le_bytes(integer(bytes, SYMBOL_VALUE)?) as usize,
-        })
-    }
-}
-
 pub struct Symbol {
     pub value: usize,
     pub indirect: bool,
 }
 
 pub fn defined_symbol(data: &[u8], name: &[u8]) -> Option<Symbol> {
-    let elf = ElfHeader::read(data)?;
-    for index in 0..elf.section_count {
-        let table = elf.section(data, index)?;
-        if table.kind != SHT_DYNSYM {
+    // Borrowed tables: elf's alloc/std features are disabled in Cargo.toml.
+    // The crate owns ELF decoding; our interposition policy remains explicit.
+    let image = ElfBytes::<LittleEndian>::minimal_parse(data).ok()?;
+    if image.ehdr.class != Class::ELF64 {
+        return None;
+    }
+    let (symbols, strings) = image.dynamic_symbol_table().ok()??;
+    for index in 0..symbols.len() {
+        let symbol = symbols.get(index).ok()?;
+        if symbol.st_shndx == abi::SHN_UNDEF
+            || !matches!(symbol.st_bind(), abi::STB_GLOBAL | abi::STB_WEAK)
+            || !matches!(symbol.st_vis(), abi::STV_DEFAULT | abi::STV_PROTECTED)
+            || !matches!(
+                symbol.st_symtype(),
+                abi::STT_NOTYPE | abi::STT_OBJECT | abi::STT_FUNC | abi::STT_GNU_IFUNC
+            )
+        {
             continue;
         }
-        if table.entry_size < SYMBOL_SIZE || table.length % table.entry_size != 0 {
-            return None;
-        }
-        let symbols = data.get(table.offset..table.offset.checked_add(table.length)?)?;
-        let strings = elf.section(data, table.link)?;
-        if strings.kind != SHT_STRTAB {
-            return None;
-        }
-        let strings = data.get(strings.offset..strings.offset.checked_add(strings.length)?)?;
-        for entry in symbols.chunks_exact(table.entry_size) {
-            let symbol = SymbolEntry::read(entry)?;
-            if symbol.section == SHN_UNDEF
-                || !matches!(symbol.binding, 1 | 2)
-                || !matches!(symbol.visibility, 0 | 3)
-                || !matches!(symbol.kind, 0..=2 | STT_GNU_IFUNC)
-            {
-                continue;
-            }
-            let tail = strings.get(symbol.name_offset..)?;
-            let end = tail.iter().position(|byte| *byte == 0)?;
-            if &tail[..end] == name {
-                return Some(Symbol {
-                    value: symbol.value,
-                    indirect: symbol.kind == STT_GNU_IFUNC,
-                });
-            }
+        if strings.get_raw(symbol.st_name as usize).ok()? == name {
+            return Some(Symbol {
+                value: symbol.st_value.try_into().ok()?,
+                indirect: symbol.st_symtype() == abi::STT_GNU_IFUNC,
+            });
         }
     }
     None

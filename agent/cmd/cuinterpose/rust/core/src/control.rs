@@ -7,7 +7,7 @@
 use super::process::Socket;
 use super::state::{self, Result};
 use cuinterpose_protocol::{self as protocol, Operation, ParticipantId, Reply, Request, Response};
-use std::os::fd::AsRawFd;
+use rustix::event::{PollFd, PollFlags, poll};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::Ordering;
@@ -17,6 +17,12 @@ use std::sync::mpsc::{self, TrySendError};
 // exports never enter this queue: reciprocal importers need them to progress.
 const CONTROL_QUEUE_CAPACITY: usize = 8;
 
+enum ControlRequest {
+    Handshake,
+    Inspect,
+    Execute(Operation),
+}
+
 pub fn start(endpoint: &str, identity: ParticipantId) -> Result<()> {
     let listener = Socket::open(|| UnixListener::bind(endpoint))
         .map_err(|_| cuinterpose_abi::NOT_INITIALIZED)?;
@@ -24,7 +30,7 @@ pub fn start(endpoint: &str, identity: ParticipantId) -> Result<()> {
         listener.set_nonblocking(true)?;
         std::fs::set_permissions(endpoint, std::fs::Permissions::from_mode(0o600))?;
         let (sender, receiver) =
-            mpsc::sync_channel::<(Socket<UnixStream>, Request)>(CONTROL_QUEUE_CAPACITY);
+            mpsc::sync_channel::<(Socket<UnixStream>, ControlRequest)>(CONTROL_QUEUE_CAPACITY);
         let _worker = std::thread::Builder::new()
             .name("cuinterpose-control".into())
             .spawn(move || {
@@ -43,13 +49,14 @@ pub fn start(endpoint: &str, identity: ParticipantId) -> Result<()> {
             .name("cuinterpose-peer".into())
             .spawn(move || {
                 loop {
-                    let mut poll = libc::pollfd {
-                        fd: listener.as_raw_fd(),
-                        events: libc::POLLIN,
-                        revents: 0,
-                    };
-                    if unsafe { libc::poll(&mut poll, 1, -1) } <= 0 {
-                        continue;
+                    let mut events = [PollFd::new(&*listener, PollFlags::IN)];
+                    match poll(&mut events, None) {
+                        Err(rustix::io::Errno::INTR) => continue,
+                        Ok(_) if events[0].revents() == PollFlags::IN => {}
+                        _ => {
+                            super::G_FAILED.store(true, Ordering::Release);
+                            break;
+                        }
                     }
                     let Ok(socket) = Socket::open(|| listener.accept().map(|(socket, _)| socket))
                     else {
@@ -75,7 +82,7 @@ pub fn start(endpoint: &str, identity: ParticipantId) -> Result<()> {
         // We successfully bound this path, so it is ours to remove. A bind
         // failure above must never unlink an application-owned filesystem entry.
         let _ = std::fs::remove_file(endpoint);
-        return Err(cuinterpose_abi::NOT_INITIALIZED);
+        return Err(cuinterpose_abi::NOT_INITIALIZED.into());
     }
     Ok(())
 }
@@ -83,12 +90,12 @@ pub fn start(endpoint: &str, identity: ParticipantId) -> Result<()> {
 fn dispatch(
     socket: Socket<UnixStream>,
     identity: ParticipantId,
-    sender: &mpsc::SyncSender<(Socket<UnixStream>, Request)>,
+    sender: &mpsc::SyncSender<(Socket<UnixStream>, ControlRequest)>,
 ) -> protocol::Result<()> {
     // Classification uses per-I/O socket timeouts, not a total header deadline.
     // A slow peer can delay acceptance, but never waits on STATE or lifecycle
     // CUDA calls. Fork during active protocol traffic is outside the contract.
-    let timeout = Some(cuinterpose_protocol::timeout(Operation::Handshake));
+    let timeout = Some(cuinterpose_protocol::timeout(None));
     socket.set_read_timeout(timeout)?;
     socket.set_write_timeout(timeout)?;
     let (request, descriptor): (Request, _) = protocol::receive(&socket)?;
@@ -101,9 +108,36 @@ fn dispatch(
     if descriptor.is_some() || !identified {
         return refuse(&socket, identity, "invalid cuinterpose control request");
     }
-    if matches!(request, Request::Export { .. }) {
-        return serve(socket, request, identity);
-    }
+    let request = match request {
+        Request::Handshake => ControlRequest::Handshake,
+        Request::Inspect { .. } => ControlRequest::Inspect,
+        Request::Execute { operation, .. } => ControlRequest::Execute(operation),
+        Request::Export {
+            resource,
+            allocation,
+            ..
+        } => {
+            if super::G_FAILED.load(Ordering::Acquire) {
+                return refuse(&socket, identity, "cuinterpose state failed");
+            }
+            let lease =
+                match state::cache().and_then(|cache| cache.acquire(&(resource, allocation))) {
+                    Ok(lease) => lease,
+                    Err(_) => return refuse(&socket, identity, "creator resource is unavailable"),
+                };
+            return protocol::send(
+                &socket,
+                &Response {
+                    participant: identity,
+                    result: Ok(Reply::Export {
+                        resource,
+                        allocation,
+                    }),
+                },
+                Some(lease.descriptor()),
+            );
+        }
+    };
     match sender.try_send((socket, request)) {
         Ok(()) => Ok(()),
         Err(error) => {
@@ -134,42 +168,18 @@ fn refuse(socket: &UnixStream, identity: ParticipantId, message: &str) -> protoc
 
 fn serve(
     socket: Socket<UnixStream>,
-    request: Request,
+    request: ControlRequest,
     identity: ParticipantId,
 ) -> protocol::Result<()> {
-    let loading = matches!(
-        request,
-        Request::Execute {
-            operation: Operation::LoadAllocations,
-            ..
-        }
-    );
-    let mut passed = None;
+    let loading = matches!(request, ControlRequest::Execute(Operation::LoadAllocations));
     let result = (|| -> std::result::Result<Reply, String> {
         if super::G_FAILED.load(Ordering::Acquire) {
             return Err("cuinterpose state failed".into());
         }
-        if let Request::Export {
-            resource,
-            allocation,
-            ..
-        } = request
-        {
-            passed = Some(
-                state::cache()
-                    .map_err(|_| "export cache unavailable")?
-                    .acquire(&(resource, allocation))
-                    .map_err(|_| "creator resource is unavailable")?,
-            );
-            return Ok(Reply::Export {
-                resource,
-                allocation,
-            });
-        }
         let mut state = state::get().map_err(|_| "cuinterpose state is unavailable")?;
         match request {
-            Request::Handshake => Ok(Reply::Handshake),
-            Request::Inspect { .. } => {
+            ControlRequest::Handshake => Ok(Reply::Handshake),
+            ControlRequest::Inspect => {
                 let stats = state.stats();
                 let records = state
                     .inspect()
@@ -180,7 +190,7 @@ fn serve(
                     unsupported_creations: stats.unsupported_exportable_creations,
                 })
             }
-            Request::Execute { operation, .. } => {
+            ControlRequest::Execute(operation) => {
                 state
                     .validate_lifecycle(operation)
                     .map_err(|_| "CUDA lifecycle operation refused without mutation")?;
@@ -204,13 +214,10 @@ fn serve(
                     }),
                     Err(code) => {
                         super::G_FAILED.store(true, Ordering::Release);
-                        Err(format!(
-                            "CUDA lifecycle operation failed: CUDA error {code}"
-                        ))
+                        Err(format!("CUDA lifecycle operation failed: {code}"))
                     }
                 }
             }
-            Request::Export { .. } => unreachable!(),
         }
     })();
     let loaded = loading && result.is_ok();
@@ -220,9 +227,8 @@ fn serve(
             participant: identity,
             result,
         },
-        passed.as_ref().map(|lease| lease.descriptor()),
+        None,
     )?;
-    drop(passed);
     if loaded
         && let Ok(mut state) = state::get()
         && let Some(arena) = state.arena.take()
