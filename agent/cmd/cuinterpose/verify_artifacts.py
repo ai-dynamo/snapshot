@@ -43,5 +43,5 @@ assert coordinator.stat().st_mode & 0o777 == 0o755
 assert "INTERP" not in subprocess.check_output(["readelf", "-lW", coordinator], text=True)
 assert "NEEDED" not in subprocess.check_output(["readelf", "-dW", coordinator], text=True)
 result = subprocess.run([coordinator], text=True, capture_output=True, check=False)
-assert result.returncode != 0 and "usage: cuinterpose-coordinator" in result.stderr, result
+assert result.returncode == 2 and "Usage: cuinterpose-coordinator" in result.stderr, result
 print("cuinterpose artifact ABI, permissions, glibc baseline, and static CLI checks passed")

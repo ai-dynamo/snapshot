@@ -1612,3 +1612,18 @@ Its non-executable cuda-checkpoint copy sentinel was never run; this is not GPU
 validation. A missing-socket smoke also verified contextual coordinator errors.
 The first formatting check requested a multiline `ensure!`; rustfmt fixed it.
 Pinned GNU/musl packaging and fresh v4 GPU/vLLM qualification remain pending.
+
+### Packaged verifier: Clap usage diagnostic
+
+The pinned `make -C snapshot/agent cuinterpose-test` attempt at `6d8b97b`
+compiled the GNU libraries and static-musl coordinator, then stopped before
+test execution: the artifact verifier expected lowercase `usage:`, while Clap
+correctly returned status 2 with `Usage: cuinterpose-coordinator`. The preceding
+ELF checks passed. The verifier now requires that exact usage prefix and status
+2; no production behavior or packaging checks were bypassed.
+
+A fresh local GNU coordinator build passes the corrected CLI assertion, and
+the verifier passes Python syntax compilation and `git diff --check`. These
+are targeted checks, not a successful pinned packaging gate or GPU test run.
+Validation must restart at the corrected revision; the existing exported
+`build/` artifacts remain unqualified and may still contain version 3.
