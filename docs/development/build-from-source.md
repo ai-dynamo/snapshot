@@ -30,6 +30,7 @@ to tag them for the registry:
 
 ```bash
 make docker-build-agent docker-build-pagebroker docker-build-operator \
+  MODEL_STREAMER_WHEEL_DIR=/path/to/pinned-wheel-directory \
   REGISTRY=<registry> \
   VERSION=<tag>
 ```
@@ -38,6 +39,15 @@ This produces `<registry>/agent:<tag>`, `<registry>/pagebroker:<tag>`, and
 `<registry>/operator:<tag>`. The agent and PageBroker images must be built from
 the same checkout: they speak an internal protocol and the chart pulls both at
 `image.agent.tag`.
+
+The PageBroker build requires exactly one compatible Model Streamer wheel in
+`MODEL_STREAMER_WHEEL_DIR` (default: the sibling `runai-model-streamer` checkout's
+`py/runai_model_streamer/dist` directory). The build checks its SHA-256 against
+`agent/pagebroker/model-streamer-wheel.sha256` before extracting the native
+library. Supply that exact artifact to local and CI image builds until a
+compatible Streamer release replaces the pin. The Streamer library and its
+license metadata are included only in the PageBroker image; the agent image
+build does not require the wheel.
 
 ## 3. Push the images
 
