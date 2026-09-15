@@ -110,6 +110,15 @@ RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
     && /cuda-checkpoint-helper-transfer-cancellation-test
 
 # =============================================================================
+# C frontend and C++ core/coordinator - pinned GNU builder
+# =============================================================================
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS cuinterpose-builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+       g++=4:12.2.0-3 nlohmann-json3-dev=3.11.2-2 libcli11-dev=2.1.2+ds-1 \
+       make binutils python3 python3-msgpack \
+    && rm -rf /var/lib/apt/lists/*
+
+# =============================================================================
 # Stage: Go base - Common setup for Go builds
 # =============================================================================
 FROM ${DOCKER_PROXY}library/golang:${GO_VERSION}@${GO_IMAGE_DIGEST} AS go-base
