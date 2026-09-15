@@ -4,11 +4,77 @@
 use super::ticket;
 use cuinterpose_abi::*;
 use cuinterpose_protocol::Ticket;
-use cuinterpose_protocol::{AllocationId, Identity};
+use cuinterpose_protocol::{AllocationId, Identity, Operation};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lifecycle_transitions_require_each_local_milestone() {
+        let transitions = [
+            (
+                Phase::Active,
+                Operation::PrepareMulticast,
+                Phase::MulticastPrepared,
+            ),
+            (
+                Phase::MulticastPrepared,
+                Operation::SaveAllocations,
+                Phase::AllocationsSaved,
+            ),
+            (
+                Phase::AllocationsSaved,
+                Operation::PrepareUnicast,
+                Phase::UnicastPrepared,
+            ),
+            (
+                Phase::UnicastPrepared,
+                Operation::LoadAllocations,
+                Phase::AllocationsLoaded,
+            ),
+            (
+                Phase::AllocationsLoaded,
+                Operation::RestoreUnicast,
+                Phase::UnicastRestored,
+            ),
+            (
+                Phase::UnicastRestored,
+                Operation::RestoreMulticastCreators,
+                Phase::MulticastCreatorsRestored,
+            ),
+            (
+                Phase::MulticastCreatorsRestored,
+                Operation::RestoreMulticastImporters,
+                Phase::MulticastImportersRestored,
+            ),
+            (
+                Phase::MulticastImportersRestored,
+                Operation::RestoreMulticastDevices,
+                Phase::MulticastDevicesRestored,
+            ),
+            (
+                Phase::MulticastDevicesRestored,
+                Operation::RestoreMulticastBindings,
+                Phase::Active,
+            ),
+        ];
+        for (phase, operation, next) in transitions {
+            assert_eq!(phase.next(operation), Ok(next));
+            for (other, _, _) in transitions {
+                if other != phase {
+                    assert_eq!(other.next(operation), Err(NOT_READY));
+                }
+            }
+            assert_eq!(
+                Phase::ReconstructingMulticast.next(operation),
+                Err(NOT_READY)
+            );
+        }
+        for operation in [Operation::Handshake, Operation::Inspect, Operation::Export] {
+            assert_eq!(Phase::Active.next(operation), Err(NOT_SUPPORTED));
+        }
+    }
 
     #[test]
     fn oversized_inspection_is_refused_before_building_records() {
@@ -39,7 +105,7 @@ mod tests {
             raw: BTreeMap::new(),
             unreleased_handles: Vec::new(),
             unsupported: 0,
-            phase: 0,
+            phase: Phase::Active,
             arena: None,
             inflight: 0,
             pending_maps: Vec::new(),
@@ -158,6 +224,51 @@ pub struct Mapping {
     pub checkpointed: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    Active,
+    MulticastPrepared,
+    AllocationsSaved,
+    UnicastPrepared,
+    AllocationsLoaded,
+    UnicastRestored,
+    MulticastCreatorsRestored,
+    MulticastImportersRestored,
+    MulticastDevicesRestored,
+    ReconstructingMulticast,
+}
+
+impl Phase {
+    /// Validate ordering before mutation and identify the state to publish on
+    /// success. The coordinator, not this local state, owns global barriers.
+    pub(super) fn next(self, operation: Operation) -> Result<Self> {
+        let (expected, next) = match operation {
+            Operation::PrepareMulticast => (Self::Active, Self::MulticastPrepared),
+            Operation::SaveAllocations => (Self::MulticastPrepared, Self::AllocationsSaved),
+            Operation::PrepareUnicast => (Self::AllocationsSaved, Self::UnicastPrepared),
+            Operation::LoadAllocations => (Self::UnicastPrepared, Self::AllocationsLoaded),
+            Operation::RestoreUnicast => (Self::AllocationsLoaded, Self::UnicastRestored),
+            Operation::RestoreMulticastCreators => {
+                (Self::UnicastRestored, Self::MulticastCreatorsRestored)
+            }
+            Operation::RestoreMulticastImporters => (
+                Self::MulticastCreatorsRestored,
+                Self::MulticastImportersRestored,
+            ),
+            Operation::RestoreMulticastDevices => (
+                Self::MulticastImportersRestored,
+                Self::MulticastDevicesRestored,
+            ),
+            Operation::RestoreMulticastBindings => (Self::MulticastDevicesRestored, Self::Active),
+            _ => return Err(NOT_SUPPORTED),
+        };
+        if self != expected {
+            return Err(NOT_READY);
+        }
+        Ok(next)
+    }
+}
+
 pub struct State {
     pub identity: Identity,
     pub endpoint: String,
@@ -170,7 +281,7 @@ pub struct State {
     // recorded until the failed process is terminated.
     pub unreleased_handles: Vec<u64>,
     pub unsupported: u64,
-    pub phase: u16,
+    pub phase: Phase,
     pub arena: Option<super::host_carrier::Arena>,
     pub inflight: usize,
     pub pending_maps: Vec<(u64, usize)>,
@@ -180,7 +291,7 @@ pub struct State {
 impl State {
     pub fn inspect(&self) -> Result<Vec<cuinterpose_protocol::Record>> {
         use cuinterpose_protocol::{Record, RecordFlags, RecordKind};
-        if self.phase != 0 || self.inflight != 0 {
+        if self.phase != Phase::Active || self.inflight != 0 {
             return Err(NOT_READY);
         }
         let count = self
@@ -259,34 +370,24 @@ impl State {
         Ok(records)
     }
 
-    pub fn validate_lifecycle(&self, operation: u16) -> Result<()> {
-        let expected = match operation {
-            3 => 0,
-            4 => 3,
-            5 => 4,
-            7 => 5,
-            8 => 7,
-            9 => 8,
-            10 => 9,
-            11 => 10,
-            12 => 11,
-            _ => return Err(NOT_SUPPORTED),
-        };
-        if self.phase != expected || self.inflight != 0 {
+    pub fn validate_lifecycle(&self, operation: Operation) -> Result<()> {
+        self.phase.next(operation)?;
+        if self.inflight != 0 {
             return Err(NOT_READY);
         }
         if self.unsupported != 0 || !self.raw.is_empty() {
             return Err(NOT_SUPPORTED);
         }
-        if operation == 3 {
+        if operation == Operation::PrepareMulticast {
             self.inspect()?;
         }
         Ok(())
     }
 
     /// Validation has completed without mutation. Failures here are fail-stop.
-    pub fn lifecycle(&mut self, operation: u16) -> Result<super::host_carrier::Transfer> {
+    pub fn lifecycle(&mut self, operation: Operation) -> Result<super::host_carrier::Transfer> {
         use super::host_carrier::{Arena, Context};
+        let next_phase = self.phase.next(operation)?;
         let selected = |a: &Allocation| {
             a.creator
                 && a.shared
@@ -297,10 +398,10 @@ impl State {
         let mut bytes = 0u64;
         let mut copy_us = 0u32;
         match operation {
-            3 => {
+            Operation::PrepareMulticast => {
                 super::multicast::prepare(self)?;
             }
-            4 => {
+            Operation::SaveAllocations => {
                 let ids: Vec<_> = self
                     .allocations
                     .values()
@@ -370,7 +471,7 @@ impl State {
                     allocation.host_checkpointed = true;
                 }
             }
-            5 => {
+            Operation::PrepareUnicast => {
                 cache()?.clear()?;
                 for allocation in self.allocations.values_mut().filter(|a| a.shared) {
                     let context =
@@ -393,7 +494,7 @@ impl State {
                     left?;
                 }
             }
-            7 => {
+            Operation::LoadAllocations => {
                 let mut allocations: Vec<_> = self
                     .allocations
                     .values()
@@ -413,7 +514,7 @@ impl State {
                 }
                 self.remap(true)?;
             }
-            8 => {
+            Operation::RestoreUnicast => {
                 for allocation in self
                     .allocations
                     .values_mut()
@@ -450,7 +551,7 @@ impl State {
             }
             _ => return Err(NOT_SUPPORTED),
         }
-        self.phase = if operation == 12 { 0 } else { operation };
+        self.phase = next_phase;
         Ok(super::host_carrier::Transfer { bytes, copy_us })
     }
 
@@ -556,16 +657,16 @@ impl State {
             cached_exports: cache().and_then(|cache| cache.len()).unwrap_or(0) as u64,
             live_raw_imports: self.raw.values().map(|n| u64::from(*n)).sum(),
             unsupported_exportable_creations: self.unsupported,
-            phase: if super::FAILED.load(Ordering::Acquire) {
-                5
+            phase: (if super::FAILED.load(Ordering::Acquire) {
+                DebugPhase::Failed
             } else {
                 match self.phase {
-                    0 => 1,
-                    3 | 4 => 2,
-                    5 => 3,
-                    _ => 4,
+                    Phase::Active => DebugPhase::Active,
+                    Phase::MulticastPrepared | Phase::AllocationsSaved => DebugPhase::Preparing,
+                    Phase::UnicastPrepared => DebugPhase::Prepared,
+                    _ => DebugPhase::Restoring,
                 }
-            },
+            }) as u32,
         }
     }
 
@@ -702,7 +803,7 @@ fn initialize_generation() -> Result<()> {
         unreleased_handles: Vec::new(),
         unsupported: 0,
         next: 1,
-        phase: 0,
+        phase: Phase::Active,
         arena: None,
         inflight: 0,
         pending_maps: Vec::new(),
@@ -738,7 +839,7 @@ pub fn get() -> Result<MutexGuard<'static, State>> {
 
 pub(super) fn active() -> Result<MutexGuard<'static, State>> {
     let state = get()?;
-    if state.phase != 0 {
+    if state.phase != Phase::Active {
         return Err(NOT_READY);
     }
     Ok(state)
@@ -769,7 +870,7 @@ pub fn cuMemCreate(
     }
     let properties = unsafe { *prop };
     let mut state = get()?;
-    if properties.handle_types == 1 && state.phase != 0 {
+    if properties.handle_types == 1 && state.phase != Phase::Active {
         return Err(NOT_READY);
     }
     // Reserve the logical identity before acquiring backing. Recoverable
@@ -847,7 +948,7 @@ pub fn cuMemCreate(
 pub fn cuMemRelease(handle: u64) -> Result<i32> {
     let mut state = get()?;
     if let Some(id) = state.handles.get(&handle) {
-        if state.phase != 0
+        if state.phase != Phase::Active
             || state.multicasts.get(id).is_some_and(|a| a.inflight != 0)
             || state.allocations.get(id).is_some_and(|a| a.pins != 0)
         {
@@ -894,7 +995,7 @@ pub fn cuMemRetainAllocationHandle(out: *mut u64, address: *mut c_void) -> Resul
         .find(|m| address as u64 >= m.address && (address as u64) - m.address < m.size as u64)
         .map(|m| m.id);
     if let Some(id) = id {
-        if state.phase != 0 {
+        if state.phase != Phase::Active {
             return Err(NOT_READY);
         }
         if state.next & HANDLE_MASK != 0 {
@@ -965,7 +1066,7 @@ pub fn cuMemMap(address: u64, size: usize, offset: usize, handle: u64, flags: u6
         );
         return Ok(SUCCESS);
     };
-    if state.phase != 0 {
+    if state.phase != Phase::Active {
         return Err(NOT_READY);
     }
     if state.multicasts.contains_key(&id) {
@@ -1006,7 +1107,7 @@ pub fn cuMemMap(address: u64, size: usize, offset: usize, handle: u64, flags: u6
 pub fn cuMemUnmap(address: u64, size: usize) -> Result<i32> {
     let mut state = get()?;
     let mappings = state.covered(address, size)?;
-    if !mappings.is_empty() && state.phase != 0 {
+    if !mappings.is_empty() && state.phase != Phase::Active {
         return Err(NOT_READY);
     }
     for base in &mappings {
@@ -1033,7 +1134,7 @@ pub fn cuMemSetAccess(
 ) -> Result<i32> {
     let mut state = get()?;
     let mappings = state.covered(address, size)?;
-    if !mappings.is_empty() && state.phase != 0 {
+    if !mappings.is_empty() && state.phase != Phase::Active {
         return Err(NOT_READY);
     }
     if mappings.is_empty() || access.is_null() {
@@ -1107,7 +1208,7 @@ pub fn cuMemExportToShareableHandle(
         );
         return Ok(SUCCESS);
     };
-    if state.phase != 0 {
+    if state.phase != Phase::Active {
         return Err(NOT_READY);
     }
     if out.is_null() || kind != 1 || flags != 0 {
@@ -1172,7 +1273,7 @@ pub fn cuMemImportFromShareableHandle(out: *mut u64, fd: *mut c_void, kind: u32)
         }
         return Ok(SUCCESS);
     };
-    if state.phase != 0 {
+    if state.phase != Phase::Active {
         return Err(NOT_READY);
     }
     if state.next & HANDLE_MASK != 0 {
@@ -1265,7 +1366,7 @@ pub fn cuMemGetAllocationPropertiesFromHandle(
     handle: u64,
 ) -> Result<i32> {
     let state = get()?;
-    if state.handles.contains_key(&handle) && state.phase != 0 {
+    if state.handles.contains_key(&handle) && state.phase != Phase::Active {
         return Err(NOT_READY);
     }
     let driver = match state.handles.get(&handle) {

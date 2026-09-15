@@ -95,6 +95,17 @@ pub struct DebugStats {
     pub phase: u32,
 }
 
+/// Stable values exposed through DebugStats, not the core's lifecycle state.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DebugPhase {
+    Active = 1,
+    Preparing = 2,
+    Prepared = 3,
+    Restoring = 4,
+    Failed = 5,
+}
+
 #[repr(C)]
 pub struct BuildInfo {
     pub cuda_version: u32,

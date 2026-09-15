@@ -65,7 +65,7 @@ unsafe extern "C" fn debug_stats(output: *mut DebugStats) {
             if FAILED.load(std::sync::atomic::Ordering::Acquire) {
                 unsafe {
                     output.write(DebugStats {
-                        phase: 5,
+                        phase: DebugPhase::Failed as u32,
                         ..DebugStats::default()
                     });
                 }

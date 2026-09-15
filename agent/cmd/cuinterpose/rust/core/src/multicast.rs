@@ -5,10 +5,10 @@
 //! and replay; common memory APIs share State's logical handles and VA ranges.
 
 use super::host_carrier::Context;
-use super::state::{self, Mapping, Result, State, call};
+use super::state::{self, Mapping, Phase, Result, State, call};
 use super::ticket;
 use cuinterpose_abi::*;
-use cuinterpose_protocol::{AllocationId, Record, RecordFlags, RecordKind, Ticket};
+use cuinterpose_protocol::{AllocationId, Operation, Record, RecordFlags, RecordKind, Ticket};
 use std::ffi::c_void;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::MutexGuard;
@@ -86,7 +86,7 @@ impl Flight {
                 return Err(NOT_READY);
             }
         }
-        if state.phase != 0 {
+        if state.phase != Phase::Active {
             super::FAILED.store(true, Ordering::Release);
             return Err(NOT_READY);
         }
@@ -899,18 +899,19 @@ pub fn prepare(state: &mut State) -> Result<()> {
 /// Restore collectives must not hold STATE either. The phase reserves the
 /// entire lifecycle operation; CPU records remain private until the driver
 /// work completes. Fork during lifecycle execution is unsupported.
-pub fn restore_phase(mut state: MutexGuard<'static, State>, operation: u16) -> Result<u64> {
+pub fn restore_phase(mut state: MutexGuard<'static, State>, operation: Operation) -> Result<u64> {
+    let next_phase = state.phase.next(operation)?;
     let mut objects = state.multicasts.clone();
     let mut mappings = state.mappings.clone();
     let allocations = state.allocations.clone();
-    state.phase = u16::MAX;
+    state.phase = Phase::ReconstructingMulticast;
     drop(state);
     let result = restore(&mut objects, &mut mappings, &allocations, operation);
     let mut state = state::get()?;
     state.multicasts = objects;
     state.mappings = mappings;
     result?;
-    state.phase = if operation == 12 { 0 } else { operation };
+    state.phase = next_phase;
     Ok(0)
 }
 
@@ -918,13 +919,15 @@ fn restore(
     objects: &mut std::collections::BTreeMap<AllocationId, Object>,
     mappings: &mut std::collections::BTreeMap<u64, Mapping>,
     allocations: &std::collections::BTreeMap<AllocationId, state::Allocation>,
-    operation: u16,
+    operation: Operation,
 ) -> Result<()> {
     for (id, object) in objects {
         if !object.checkpointed {
             continue;
         }
-        if (operation == 9 && !object.creator) || (operation == 10 && object.creator) {
+        if (operation == Operation::RestoreMulticastCreators && !object.creator)
+            || (operation == Operation::RestoreMulticastImporters && object.creator)
+        {
             continue;
         }
         let device = object
@@ -936,7 +939,7 @@ fn restore(
         let context = Context::enter(object.context, device)?;
         let restored = (|| -> Result<()> {
             match operation {
-                9 if object.creator => {
+                Operation::RestoreMulticastCreators if object.creator => {
                     let mut driver = 0;
                     call!(
                         "cuMulticastCreate",
@@ -962,7 +965,7 @@ fn restore(
                             .replace((2, *id), Some(unsafe { OwnedFd::from_raw_fd(fd) }))?;
                     }
                 }
-                10 if !object.creator => {
+                Operation::RestoreMulticastImporters if !object.creator => {
                     let fd = ticket::request(&object.ticket).map_err(|_| INVALID_HANDLE)?;
                     let mut driver = 0;
                     call!(
@@ -974,7 +977,7 @@ fn restore(
                     );
                     object.driver = Some(driver);
                 }
-                11 => {
+                Operation::RestoreMulticastDevices => {
                     for device in &object.devices {
                         call!(
                             "cuMulticastAddDevice",
@@ -984,7 +987,7 @@ fn restore(
                         );
                     }
                 }
-                12 => {
+                Operation::RestoreMulticastBindings => {
                     for binding in &mut object.bindings {
                         if !binding.checkpointed {
                             continue;
@@ -1050,7 +1053,7 @@ fn restore(
                     }
                     object.checkpointed = false;
                 }
-                9 | 10 => {}
+                Operation::RestoreMulticastCreators | Operation::RestoreMulticastImporters => {}
                 _ => return Err(INVALID_VALUE),
             }
             Ok(())

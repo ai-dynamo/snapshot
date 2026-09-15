@@ -10,6 +10,10 @@ port. It records unsuccessful approaches, reproduced defects, test limitations,
 and the corrections made in response. It is not a claim that the port has
 completed production or GPU qualification.
 
+The native GLM 5.2 TE8 cross-node result in section 14 is preserved by
+integration commit `40e45af`. Subsequent idiomatic-Rust cleanup is separate
+work and does not inherit that result without another run.
+
 The implementation branch is `schwinns/cuinterpose-rust-runai`. Its reference is the
 C cuinterpose stack at `21008b50b93a9879a805665e331e777bb93abf49`.
 Production cuinterpose consists of a Rust frontend, Rust core, and Rust
@@ -1296,3 +1300,25 @@ only after comparison with the test's patches; original agents were Ready on
 both test nodes. The previously suspended 50-hour-old GLM DGD worker remains
 at zero replicas rather than being restarted without direction.
 CustomStorage/NIXL composition remains a separate, untested next step.
+
+## 15. Idiomatic Rust cleanup: typed lifecycle state
+
+The first cleanup increment replaces numeric core lifecycle operations with
+the existing `Operation` enum and internal numeric phases with `Phase`.
+One transition match describes the capture/restore sequence, including the
+temporary multicast-reconstruction state while the state lock is released.
+The public debug ABI retains its original values through a separate
+`DebugPhase` enum; no CUDA function signature, wire format, or loader behavior
+changes in this increment.
+
+A new unit test checks every legal transition, every out-of-order transition,
+and refusal during multicast reconstruction. Workspace tests, all 23 loader
+cases, 19 actual-core endpoint cases, and the complete fake-driver reference
+runner (including carrier, multicast, RPC, and fork modes) passed locally.
+This is not another physical-GPU or cross-node qualification.
+
+The remaining cleanup will replace the C-shaped metadata/wire codec with
+Serde/MessagePack, move coordinator reports to typed JSON with coordinated
+Go/Python consumer changes, and use established Unix APIs for FD transport.
+Those changes will deliberately break the experimental format rather than
+maintain a production legacy codec.

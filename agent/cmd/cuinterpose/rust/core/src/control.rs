@@ -183,10 +183,16 @@ fn serve(
             }
             _ => {
                 state
-                    .validate_lifecycle(request.operation as u16)
+                    .validate_lifecycle(request.operation)
                     .map_err(|_| "CUDA lifecycle operation refused without mutation")?;
-                let operation = request.operation as u16;
-                let result = if (9..=12).contains(&operation) {
+                let operation = request.operation;
+                let result = if matches!(
+                    operation,
+                    Operation::RestoreMulticastCreators
+                        | Operation::RestoreMulticastImporters
+                        | Operation::RestoreMulticastDevices
+                        | Operation::RestoreMulticastBindings
+                ) {
                     super::multicast::restore_phase(state, operation)
                         .map(|bytes| super::host_carrier::Transfer { bytes, copy_us: 0 })
                 } else {
