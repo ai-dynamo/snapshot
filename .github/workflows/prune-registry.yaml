@@ -45,10 +45,18 @@ jobs:
       # DRY_RUN defaults to true on the schedule as well: this deletes published
       # artifacts, so it reports for a few cycles and a maintainer flips the
       # default here once the output has been reviewed.
+      #
+      # The github.event_name guard is load-bearing. `inputs` is only populated
+      # for workflow_dispatch and workflow_call, so on the schedule inputs.dry_run
+      # is null — and GitHub coerces both null and false to 0, making
+      # `inputs.dry_run == false` true there. Without this guard every scheduled
+      # run would delete for real.
       - name: Prune
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DRY_RUN: ${{ inputs.dry_run == false && 'false' || 'true' }}
+          DRY_RUN: >-
+            ${{ (github.event_name == 'workflow_dispatch'
+                 && inputs.dry_run == false) && 'false' || 'true' }}
           KEEP_DAYS: ${{ inputs.keep_days || '90' }}
         run: |
           python3 hack/prune-ghcr.py \

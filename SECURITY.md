@@ -65,9 +65,13 @@ and `cosign verify-blob` invocations, including the certificate identity to
 require, are in [RELEASE.md](RELEASE.md#verifying-a-release). Verification needs
 cosign v3.0 or newer.
 
-A signature proves an artifact came from this repository's CI at the commit it
-claims. It is not a statement that the artifact is free of vulnerabilities — for
-that, report anything you find through the process above.
+Be precise about what each part establishes. The signature identifies the
+*workflow* that produced the artifact — this repository's release workflow at a
+release tag — and nothing more. The source commit is recorded in the SLSA
+provenance attestation, so tying an artifact to a commit means reading the
+provenance as well as checking the signature; RELEASE.md shows both. Neither is
+a statement that the artifact is free of vulnerabilities — for that, report
+anything you find through the process above.
 
 ## Supported versions
 

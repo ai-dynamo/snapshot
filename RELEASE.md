@@ -142,12 +142,12 @@ Verify by digest where you can; a tag can be repointed, a digest cannot.
 cosign verify \
   --certificate-identity-regexp "${COSIGN_IDENTITY}" \
   --certificate-oidc-issuer "${COSIGN_ISSUER}" \
-  ghcr.io/ai-dynamo/snapshot/operator:v0.1.0
+  ghcr.io/ai-dynamo/snapshot/operator:v0.2.0
 
 cosign verify \
   --certificate-identity-regexp "${COSIGN_IDENTITY}" \
   --certificate-oidc-issuer "${COSIGN_ISSUER}" \
-  ghcr.io/ai-dynamo/snapshot/agent:v0.1.0
+  ghcr.io/ai-dynamo/snapshot/agent:v0.2.0
 ```
 
 A successful run prints the signature payload and the certificate subject; a
@@ -161,7 +161,7 @@ The chart is an OCI artifact in the same registry, so it verifies the same way:
 cosign verify \
   --certificate-identity-regexp "${COSIGN_IDENTITY}" \
   --certificate-oidc-issuer "${COSIGN_ISSUER}" \
-  ghcr.io/ai-dynamo/snapshot/snapshot:0.1.0
+  ghcr.io/ai-dynamo/snapshot/snapshot:0.2.0
 ```
 
 Note the chart tag carries no `v` prefix — Helm chart versions are bare semver.
@@ -173,11 +173,11 @@ attached as OCI attestations at build time:
 
 ```bash
 docker buildx imagetools inspect \
-  ghcr.io/ai-dynamo/snapshot/operator:v0.1.0 \
+  ghcr.io/ai-dynamo/snapshot/operator:v0.2.0 \
   --format '{{ json .Provenance }}'
 
 docker buildx imagetools inspect \
-  ghcr.io/ai-dynamo/snapshot/operator:v0.1.0 \
+  ghcr.io/ai-dynamo/snapshot/operator:v0.2.0 \
   --format '{{ json .SBOM }}'
 ```
 
@@ -193,7 +193,7 @@ for — plus the packaged chart and a `SHA256SUMS` covering all of them.
 every asset:
 
 ```bash
-gh release download v0.1.0 --repo ai-dynamo/snapshot
+gh release download v0.2.0 --repo ai-dynamo/snapshot
 
 cosign verify-blob \
   --bundle SHA256SUMS.sigstore.json \
@@ -214,17 +214,29 @@ alongside them.
 
 ### Releases before v0.2.0
 
-`v0.1.0` and the pre-releases before it carry SPDX and CycloneDX SBOMs and
-nothing else — no signature, no `SHA256SUMS`, no attestations. Those SBOMs were
+`v0.1.0` and the pre-releases before it carry SPDX and CycloneDX SBOMs as their
+only release assets — no signature and no `SHA256SUMS`. Those SBOMs were
 generated after the fact by scanning the images already published to GHCR, so
 the `created` timestamp inside each one is the backfill date, not the release
 date.
 
+Their images do carry a SLSA provenance attestation, because buildx attaches a
+minimal one by default. It is not the `mode=max` provenance later releases
+carry, and there is no SBOM attestation on them — `imagetools inspect --format
+'{{ json .SBOM }}'` returns `{}` for these tags.
+
 Treat them as an inventory, not as provenance. An SBOM is descriptive and
-independently reproducible — anyone can re-derive it from the same digest:
+independently reproducible — anyone can re-derive it from the digest it was
+taken from. Resolve that digest rather than rescanning the tag, so a repointed
+tag cannot hand you an inventory of different bytes:
 
 ```bash
-syft scan --platform linux/amd64 registry:ghcr.io/ai-dynamo/snapshot/operator:v0.1.0
+DIGEST="$(docker buildx imagetools inspect \
+  ghcr.io/ai-dynamo/snapshot/operator:v0.1.0 \
+  --raw | sha256sum | cut -d' ' -f1)"
+
+syft scan --platform linux/amd64 \
+  "registry:ghcr.io/ai-dynamo/snapshot/operator@sha256:${DIGEST}"
 ```
 
 What they do not tell you is who built the image or from which commit. That
