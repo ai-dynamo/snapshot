@@ -210,7 +210,7 @@ contract is the whole requirement.
 
 ## See also
 
-- [Usage guides](../guides/README.md) — the custom-image method, per framework.
+- [Usage guides](../guides/README.md) — a worked example per framework.
 - [Restore Pod contract](restore-pod-contract.md) — the restore-pod interface for
   programmatic restore.
 - [API reference](api.md#the-snapshot-control-volume) — the control volume and
