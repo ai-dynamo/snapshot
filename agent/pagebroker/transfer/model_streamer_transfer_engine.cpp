@@ -45,6 +45,8 @@ ModelStreamerTransferEngine::ModelStreamerTransferEngine(Path storage_root)
 {
 }
 
+// Reuse a healthy session; replace a failed one after its native streamer stops.
+// Existing callers keep the old wrapper until they finish cleanup.
 std::shared_ptr<ModelStreamerRestore>
 ModelStreamerTransferEngine::AcquireRestore() const
 {
