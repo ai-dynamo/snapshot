@@ -42,6 +42,19 @@ func (r *CRIORuntime) ResolveContainerImageID(ctx context.Context, containerID s
 	return resolveContainerImageID(ctx, r.svc, containerID)
 }
 
+func (r *CRIORuntime) TerminateContainer(ctx context.Context, containerID string) error {
+	id, err := containerIDForRuntime(containerID, "cri-o://", "crio://")
+	if err != nil {
+		return fmt.Errorf("invalid CRI-O container ID %q: %w", containerID, err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, crioCallTimeout)
+	defer cancel()
+	if err := r.svc.StopContainer(ctx, id, 0); err != nil {
+		return fmt.Errorf("failed to terminate container %s: %w", containerID, err)
+	}
+	return nil
+}
+
 func (r *CRIORuntime) ResolveContainer(ctx context.Context, id string) (int, *specs.Spec, error) {
 	ctx, cancel := context.WithTimeout(ctx, crioCallTimeout)
 	defer cancel()
