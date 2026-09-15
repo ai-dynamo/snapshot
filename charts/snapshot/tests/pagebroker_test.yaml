@@ -4,8 +4,10 @@
 suite: PageBroker sidecar image
 templates:
   - templates/daemonset.yaml
+  - templates/configmap.yaml
 tests:
   - it: pulls the sidecar from its own repository at the agent's tag
+    template: templates/daemonset.yaml
     set:
       pageBroker.enabled: true
       image.agent.tag: v1.2.3
@@ -21,6 +23,7 @@ tests:
           value: Always
 
   - it: defaults the sidecar tag to the chart appVersion like the agent
+    template: templates/daemonset.yaml
     set:
       pageBroker.enabled: true
     asserts:
@@ -32,6 +35,7 @@ tests:
           value: ghcr.io/ai-dynamo/snapshot/agent:0.1.0
 
   - it: follows image.pageBroker overrides
+    template: templates/daemonset.yaml
     set:
       pageBroker.enabled: true
       image.agent.tag: v1.2.3

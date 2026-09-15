@@ -874,6 +874,7 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (int, error) {
 		PageBrokerRequested:         op.pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] == snapshotv1alpha1.PageBrokerAnnotationEnabled,
 		PageBrokerEnabled:           w.config.PageBroker.Enabled,
 		PageBrokerControlSocketPath: w.config.PageBroker.ControlSocketPath,
+		PageBrokerTransferEngine:    w.config.PageBroker.TransferEngine,
 	}
 	return w.restoreFn(ctx, w.runtime, op.log, req, w.injector)
 }

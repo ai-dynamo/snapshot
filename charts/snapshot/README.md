@@ -122,6 +122,55 @@ helm upgrade --install snapshot ./charts/snapshot \
   --set storage.pvc.name=my-snapshot-pvc
 ```
 
+## PageBroker transfer engines
+
+PageBroker is opt-in at both deployment and workload level. The Snapshot Agent
+uses the configured transfer engine for checkpoint and restore requests. Build
+the agent and dedicated PageBroker images from the same checkout and tag them
+alike. Only the PageBroker image includes the native Model Streamer library:
+
+```bash
+# In this repository. Add --push through DOCKER_BUILD_ARGS for a remote cluster.
+make docker-build-agent docker-build-pagebroker \
+  MODEL_STREAMER_WHEEL_DIR=/path/to/pinned-wheel-directory \
+  REGISTRY=ghcr.io/YOUR_ACCOUNT/snapshot \
+  TAGS=pagebroker-model-streamer
+
+helm upgrade --install snapshot ./charts/snapshot \
+  --namespace "${NAMESPACE}" --create-namespace \
+  --set pageBroker.enabled=true \
+  --set pageBroker.transferEngine=model-streamer \
+  --set image.agent.repository=ghcr.io/YOUR_ACCOUNT/snapshot/agent \
+  --set image.agent.tag=pagebroker-model-streamer \
+  --set image.pageBroker.repository=ghcr.io/YOUR_ACCOUNT/snapshot/pagebroker
+```
+
+Opt an individual workload into PageBroker by putting this annotation on the
+pod handled by the agent:
+
+```yaml
+metadata:
+  annotations:
+    nvidia.com/snapshot-pagebroker: "true"
+```
+
+For PageBroker restore, annotate the restore target pod. Annotating a
+checkpoint source pod also routes checkpoint staging through PageBroker, but
+Model Streamer currently accelerates restore reads only; its checkpoint path
+uses filesystem copy because Model Streamer does not provide a write API. The
+`pageBroker.transferEngine` value accepts `posix-copy` (the default) or
+`model-streamer`.
+
+The PageBroker Docker build expects exactly one wheel in `MODEL_STREAMER_WHEEL_DIR`, which
+defaults to the sibling repository's
+`py/runai_model_streamer/dist` directory. Its SHA-256 must match the
+artifact pinned in `agent/pagebroker/model-streamer-wheel.sha256`. That artifact
+was built from Model Streamer commit
+`bc21fd4182cc06ce9475452d16697d50ce3588c4`; PyPI version `0.16.1` uses an older
+ABI and is not compatible with this PageBroker engine.
+The agent build does not require the wheel. The PageBroker image always includes
+the library, including when `posix-copy` is selected at runtime.
+
 ## CRD upgrades
 
 Helm creates the CRDs in [crds/](./crds) on a fresh install and then leaves them
@@ -197,6 +246,8 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `crdUpgrade.logLevel` | Init container log level | `info` |
 | `rbac.create` | Create agent and operator RBAC | `true` |
 | `openshift.enabled` | Create required-SCC pod annotations and, when `rbac.create=true`, OpenShift SCC-use RBAC | `false` |
+| `pageBroker.enabled` | Run the PageBroker sidecar | `false` |
+| `pageBroker.transferEngine` | PageBroker transfer engine: `posix-copy` or `model-streamer` | `posix-copy` |
 
 Reserved `s3` and `oci` values remain chart-owned placeholders for future
 snapshot backends, but only `pvc` is implemented today.
