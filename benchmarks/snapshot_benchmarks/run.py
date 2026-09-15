@@ -41,9 +41,7 @@ from snapshot_benchmarks.schema import (
     RunResult,
 )
 
-DEFAULT_POD_READY_TIMEOUT = 1800  # models up to 145GB can take a while to load
-DEFAULT_SNAPSHOT_READY_TIMEOUT = 1800
-DEFAULT_RESTORE_TIMEOUT = 1800
+DEFAULT_TIMEOUT = 1800  # models up to 145GB can take a while to load
 
 
 @dataclasses.dataclass(frozen=True)
@@ -158,9 +156,7 @@ def run_benchmark(
     tolerations: list[dict[str, str]] | None = None,
     mode: str = "both",
     keep: bool = False,
-    pod_ready_timeout: int = DEFAULT_POD_READY_TIMEOUT,
-    snapshot_ready_timeout: int = DEFAULT_SNAPSHOT_READY_TIMEOUT,
-    restore_timeout: int = DEFAULT_RESTORE_TIMEOUT,
+    timeout: int = DEFAULT_TIMEOUT,
     run_id: str | None = None,
     progress: Callable[[str], None] = print,
 ) -> RunResult:
@@ -177,6 +173,9 @@ def run_benchmark(
     assumes `image` is pushed to a registry the cluster can reach) -- pass
     `"IfNotPresent"` when `image` was built and imported directly into the
     node's container runtime with no registry involved.
+
+    `timeout` bounds each individual wait (source pod Ready, checkpoint
+    Ready, restore condition, restore pod Ready) -- not the whole run.
     """
     if mode not in ("cold_start", "both"):
         raise ValueError(f"unsupported mode: {mode!r}")
@@ -233,7 +232,7 @@ def run_benchmark(
 
         progress(f"[{run_id}] waiting for source pod Ready (cold start)")
         source_pod = _wait_for_pod_condition(
-            cfg.workload_namespace, source_name, "Ready", timeout=pod_ready_timeout
+            cfg.workload_namespace, source_name, "Ready", timeout=timeout
         )
         result.cold_start = ColdStartTiming(
             pod_created_at=source_pod.metadata.creation_timestamp,
@@ -265,7 +264,7 @@ def run_benchmark(
                 container=engine.container_name,
             )
             snap, content = lifecycle.wait_for_snapshot_ready(
-                cfg.workload_namespace, snapshot_name, timeout=snapshot_ready_timeout
+                cfg.workload_namespace, snapshot_name, timeout=timeout
             )
             content_name = content["metadata"]["name"]
             result.checkpoint = CheckpointTiming(
@@ -305,7 +304,7 @@ def run_benchmark(
                 restore_name,
                 "True",
                 "RestoreSucceeded",
-                timeout=restore_timeout,
+                timeout=timeout,
             )
             restore_container_started_at = _container_started_at(
                 restored_pod, engine.container_name
@@ -313,7 +312,7 @@ def run_benchmark(
 
             progress(f"[{run_id}] waiting for restore pod Ready (vLLM wake and copy-to-GPU)")
             restore_ready_pod = _wait_for_pod_condition(
-                cfg.workload_namespace, restore_name, "Ready", timeout=restore_timeout
+                cfg.workload_namespace, restore_name, "Ready", timeout=timeout
             )
 
             result.restore = RestoreTiming(
@@ -456,38 +455,53 @@ def _checkpoint_size(
 def _collect_agent_log_phases(
     cfg: BenchmarkConfig, restore_node: str | None, *, restore_name: str, snapshot_name: str
 ) -> AgentLogPhases:
+    """Best-effort: the restore itself has already succeeded by the time this
+    runs, so a failure here (agent pod lookup or log fetch/parse) must never
+    fail the whole run -- it degrades to a warning, same as `_checkpoint_size`."""
     if not restore_node:
         return AgentLogPhases(parse_warnings=["restore pod had no node_name; cannot locate agent"])
     snapshot_cfg = cfg.snapshot_e2e_config()
     try:
         agent_pod = lifecycle.checkpoint_agent_pod(snapshot_cfg, restore_node)
+        log_text = k8s.pod_logs(cfg.snapshot_namespace, agent_pod, tail_lines=2000)
+        restore_pod_key = f"{cfg.workload_namespace}/{restore_name}"
+        return logs.parse_agent_log_phases(
+            log_text, log_source_pod=agent_pod, restore_pod=restore_pod_key, snapshot=snapshot_name
+        )
     except AssertionError as exc:
         return AgentLogPhases(parse_warnings=[str(exc)])
-    log_text = k8s.pod_logs(cfg.snapshot_namespace, agent_pod, tail_lines=2000)
-    restore_pod_key = f"{cfg.workload_namespace}/{restore_name}"
-    return logs.parse_agent_log_phases(
-        log_text, log_source_pod=agent_pod, restore_pod=restore_pod_key, snapshot=snapshot_name
-    )
+    except Exception as exc:  # noqa: BLE001 - log fetch/parse fails in many untyped ways
+        return AgentLogPhases(parse_warnings=[f"agent_log_phases unavailable: {exc}"])
 
 
 def _heterogeneous_restore_warning(
     capture: GpuIdentity, restore: GpuIdentity
 ) -> str | None:
     """Flags a restore onto a node whose reported GPU product or driver
-    version differs from the capture node's -- a silent mismatch here would
-    make a report reader attribute restore timing to the wrong hardware.
-    Best-effort: only compares fields both sides actually reported."""
+    differs from the capture node's -- a silent mismatch here would make a
+    report reader attribute restore timing to the wrong hardware.
+    Best-effort: only compares fields both sides actually reported.
+
+    `gpu_driver_version` (queried live via `nvidia-smi` in-pod) is compared
+    when both sides have it. When either side's exec failed and only the
+    node's `cuda_driver_major_label` (GPU Operator's NFD label) is available,
+    falls back to comparing that major-only value instead of skipping the
+    driver check entirely."""
     mismatches = []
     if capture.gpu_product and restore.gpu_product and capture.gpu_product != restore.gpu_product:
         mismatches.append(f"gpu_product {capture.gpu_product!r} -> {restore.gpu_product!r}")
-    if (
-        capture.gpu_driver_version
-        and restore.gpu_driver_version
-        and capture.gpu_driver_version != restore.gpu_driver_version
-    ):
-        mismatches.append(
-            f"gpu_driver_version {capture.gpu_driver_version!r} -> {restore.gpu_driver_version!r}"
-        )
+    if capture.gpu_driver_version and restore.gpu_driver_version:
+        if capture.gpu_driver_version != restore.gpu_driver_version:
+            mismatches.append(
+                f"gpu_driver_version {capture.gpu_driver_version!r} -> "
+                f"{restore.gpu_driver_version!r}"
+            )
+    elif capture.cuda_driver_major_label and restore.cuda_driver_major_label:
+        if capture.cuda_driver_major_label != restore.cuda_driver_major_label:
+            mismatches.append(
+                f"cuda_driver_major_label {capture.cuda_driver_major_label!r} -> "
+                f"{restore.cuda_driver_major_label!r}"
+            )
     if not mismatches:
         return None
     return "heterogeneous restore (capture -> restore): " + ", ".join(mismatches)
