@@ -115,12 +115,13 @@ fetch — verification asserts *which workflow, in which repository, at which ta
 produced the artifact, and the signature is recorded in the public Rekor
 transparency log.
 
-All the commands below need
+The `cosign` commands below need
 [cosign](https://docs.sigstore.dev/cosign/installation/) **v3.0 or newer**. CI
 signs with v3, which stores signatures in Sigstore's bundle format alongside the
-artifact. Cosign v2 looks for the older `.sig` tag instead, does not find one,
-and reports `no signatures found` — indistinguishable from an unsigned artifact.
-If you see that error, check `cosign version` before concluding anything.
+artifact. Older cosign releases look for a `sha256-<digest>.sig` tag instead,
+do not find one, and report `no signatures found` — indistinguishable from an
+unsigned artifact. This was confirmed against cosign v2.4.1; if you see that
+error, check `cosign version` before concluding anything.
 
 Set the identity of this repository's release workflow once:
 

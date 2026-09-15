@@ -114,6 +114,7 @@ def prune_package(org: str, package: str, token: str, keep_days: int,
 
     reachable: set[str] = set()
     untagged: list[dict] = []
+    unresolved = False
     for v in versions:
         tags = (v.get("metadata") or {}).get("container", {}).get("tags") or []
         digest = v.get("name", "")
@@ -121,10 +122,20 @@ def prune_package(org: str, package: str, token: str, keep_days: int,
             reachable.add(digest)
             try:
                 reachable |= child_digests(repo_path, digest, reg_token)
-            except Exception as exc:  # noqa: BLE001 - keep, never delete, on doubt
-                print(f"  ! {package}@{digest[:19]}: {exc}; treating as reachable")
+            except Exception as exc:  # noqa: BLE001 - see below
+                # Marking only the parent reachable would leave its children
+                # looking unreferenced, which is exactly how a published image
+                # gets its manifests deleted. We cannot enumerate what we could
+                # not read, so nothing in this package is safe to delete.
+                print(f"  ! {package}@{digest[:19]}: {exc}")
+                unresolved = True
         else:
             untagged.append(v)
+
+    if unresolved:
+        print(f"  {package}: {len(versions)} versions, "
+              f"skipping deletions — a tagged manifest could not be resolved")
+        return (len(untagged), 0)
 
     deleted = 0
     for v in untagged:
