@@ -201,6 +201,80 @@ spec:
                   - type
                   type: object
                 type: array
+              source:
+                description: |-
+                  Source publishes what the checkpoint was captured on, written when the
+                  capture goes Ready.
+                properties:
+                  devices:
+                    description: Devices records the devices the capture could see,
+                      grouped by vendor.
+                    properties:
+                      nvidia:
+                        description: Nvidia records the NVIDIA GPUs the capture could
+                          see.
+                        properties:
+                          driverVersion:
+                            description: DriverVersion is the NVIDIA driver the capture
+                              ran against.
+                            type: string
+                          instances:
+                            description: |-
+                              Instances lists one entry per GPU the captured container could see, so
+                              the count is the length of this list.
+                            items:
+                              description: |-
+                                NvidiaCheckpointSourceInstance is one GPU. UUIDs are deliberately left out:
+                                they identify a physical card rather than describe what a restore target has
+                                to match.
+                              properties:
+                                productName:
+                                  description: ProductName is the GPU model, as nvidia-smi
+                                    reports it.
+                                  type: string
+                              type: object
+                            type: array
+                        type: object
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                  node:
+                    description: Node records the machine the checkpoint was captured
+                      on.
+                    properties:
+                      architecture:
+                        description: Architecture is the node's CPU architecture,
+                          as GOARCH spells it.
+                        type: string
+                      kernelVersion:
+                        description: KernelVersion is the node's kernel release.
+                        type: string
+                      name:
+                        description: Name is the node the source pod ran on.
+                        type: string
+                    type: object
+                  pod:
+                    description: Pod records the container the checkpoint was captured
+                      from.
+                    properties:
+                      cpu:
+                        description: CPU is the container's CPU limit, absent if it
+                          had none.
+                        type: string
+                      image:
+                        description: Image is the container image reference the capture
+                          ran.
+                        type: string
+                      imageDigest:
+                        description: |-
+                          ImageDigest identifies which build of the container image the capture
+                          ran, which a mutable tag does not.
+                        type: string
+                      memory:
+                        description: Memory is the container's memory limit, absent
+                          if it had none.
+                        type: string
+                    type: object
+                type: object
             type: object
         required:
         - spec

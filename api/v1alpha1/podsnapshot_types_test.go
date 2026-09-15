@@ -86,6 +86,16 @@ func TestSnapshotContentDeepCopyIsIndependent(t *testing.T) {
 		},
 		Status: PodSnapshotContentStatus{
 			Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Bound"}},
+			Source: &CheckpointSource{
+				Node: &CheckpointSourceNode{Name: "node-a", Architecture: "amd64"},
+				Pod:  &CheckpointSourcePod{Image: "example.com/worker:v1", Memory: "64Gi"},
+				Devices: &CheckpointSourceDevices{
+					Nvidia: &NvidiaCheckpointSource{
+						DriverVersion: "580.82.07",
+						Instances:     []NvidiaCheckpointSourceInstance{{ProductName: "NVIDIA A100-SXM4-80GB"}},
+					},
+				},
+			},
 		},
 	}
 
@@ -97,6 +107,9 @@ func TestSnapshotContentDeepCopyIsIndependent(t *testing.T) {
 	clone.Spec.Source.PodRef.Name = "mutated"
 	clone.Spec.Source.PodRef.Containers[0] = "mutated-container"
 	clone.Status.Conditions[0].Reason = "Changed"
+	clone.Status.Source.Node.Name = "node-b"
+	clone.Status.Source.Pod.Memory = "32Gi"
+	clone.Status.Source.Devices.Nvidia.Instances[0].ProductName = "NVIDIA H100"
 	if original.Spec.Source.PodRef.Name != "worker-0" {
 		t.Errorf("mutating clone changed original podRef name: got %q", original.Spec.Source.PodRef.Name)
 	}
@@ -105,5 +118,14 @@ func TestSnapshotContentDeepCopyIsIndependent(t *testing.T) {
 	}
 	if original.Status.Conditions[0].Reason != "Bound" {
 		t.Errorf("mutating clone condition changed original: got %q", original.Status.Conditions[0].Reason)
+	}
+	if original.Status.Source.Node.Name != "node-a" {
+		t.Errorf("mutating clone source node changed original: got %q", original.Status.Source.Node.Name)
+	}
+	if original.Status.Source.Pod.Memory != "64Gi" {
+		t.Errorf("mutating clone source pod changed original: got %q", original.Status.Source.Pod.Memory)
+	}
+	if original.Status.Source.Devices.Nvidia.Instances[0].ProductName != "NVIDIA A100-SXM4-80GB" {
+		t.Errorf("mutating clone source device changed original: got %q", original.Status.Source.Devices.Nvidia.Instances[0].ProductName)
 	}
 }

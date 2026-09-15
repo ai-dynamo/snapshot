@@ -51,7 +51,21 @@ when it binds a `PodSnapshot`; callers never create it.
 | `source.podRef` | PodReference | yes | The pod to dump (`name` / `uid` / `containers`). |
 | `source.nodeName` | string | yes | Node the source pod runs on; selects the node agent that performs the dump. |
 
-`status`: `conditions` — `Ready` and `Failed`.
+`status`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `conditions` | []Condition | `Ready` (artifact captured and usable for restore) and `Failed` (capture failed terminally). |
+| `source` | CheckpointSource | What the checkpoint was captured on, written with `Ready`. Informational only: the restore compatibility gates compare the artifact's manifest, not this block. Every field below is optional and absent when the value could not be read. |
+| `source.node.name` | string | Node the source pod ran on. |
+| `source.node.architecture` | string | Node CPU architecture, as `GOARCH` spells it. |
+| `source.node.kernelVersion` | string | Node kernel release. |
+| `source.pod.image` | string | Container image reference the capture ran. |
+| `source.pod.imageDigest` | string | Identifies which build of the image ran, which a mutable tag does not. |
+| `source.pod.memory` | string | Container memory limit; absent if it had none. |
+| `source.pod.cpu` | string | Container CPU limit; absent if it had none. |
+| `source.devices.nvidia.driverVersion` | string | NVIDIA driver the capture ran against. |
+| `source.devices.nvidia.instances[].productName` | string | GPU model as `nvidia-smi` reports it, one entry per GPU the captured container could see. |
 
 ### SnapshotJob
 
