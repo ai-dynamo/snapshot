@@ -126,15 +126,13 @@ helm upgrade --install snapshot ./charts/snapshot \
 
 PageBroker is opt-in at both deployment and workload level. The Snapshot Agent
 uses the configured transfer engine for checkpoint and restore requests. Build
-the agent image with the compatible native Model Streamer wheel, use that image
-for both DaemonSet containers, and select the Model Streamer transfer engine:
+the agent and dedicated PageBroker images from the same checkout and tag them
+alike. Only the PageBroker image includes the native Model Streamer library:
 
 ```bash
-# In the unchanged sibling runai-model-streamer checkout, from its devcontainer:
-make build_x86_64
-
 # In this repository. Add --push through DOCKER_BUILD_ARGS for a remote cluster.
-make docker-build-agent \
+make docker-build-agent docker-build-pagebroker \
+  MODEL_STREAMER_WHEEL_DIR=/path/to/pinned-wheel-directory \
   REGISTRY=ghcr.io/YOUR_ACCOUNT/snapshot \
   TAGS=pagebroker-model-streamer
 
@@ -144,8 +142,7 @@ helm upgrade --install snapshot ./charts/snapshot \
   --set pageBroker.transferEngine=model-streamer \
   --set image.agent.repository=ghcr.io/YOUR_ACCOUNT/snapshot/agent \
   --set image.agent.tag=pagebroker-model-streamer \
-  --set pageBroker.image.repository=ghcr.io/YOUR_ACCOUNT/snapshot/agent \
-  --set pageBroker.image.tag=pagebroker-model-streamer
+  --set image.pageBroker.repository=ghcr.io/YOUR_ACCOUNT/snapshot/pagebroker
 ```
 
 Opt an individual workload into PageBroker by putting this annotation on the
@@ -164,13 +161,15 @@ uses filesystem copy because Model Streamer does not provide a write API. The
 `pageBroker.transferEngine` value accepts `posix-copy` (the default) or
 `model-streamer`.
 
-The Docker build expects exactly one wheel in `MODEL_STREAMER_WHEEL_DIR`, which
+The PageBroker Docker build expects exactly one wheel in `MODEL_STREAMER_WHEEL_DIR`, which
 defaults to the sibling repository's
-`py/runai_model_streamer/dist` directory. Its SHA-256 must match the approved
+`py/runai_model_streamer/dist` directory. Its SHA-256 must match the
 artifact pinned in `agent/pagebroker/model-streamer-wheel.sha256`. That artifact
 was built from Model Streamer commit
 `bc21fd4182cc06ce9475452d16697d50ce3588c4`; PyPI version `0.16.1` uses an older
 ABI and is not compatible with this PageBroker engine.
+The agent build does not require the wheel. The PageBroker image always includes
+the library, including when `posix-copy` is selected at runtime.
 
 ## CRD upgrades
 
