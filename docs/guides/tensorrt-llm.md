@@ -1,14 +1,13 @@
 # Deploy a TensorRT-LLM replica
 
-This guide makes a TensorRT-LLM workload snapshot-ready by mounting a small
+This guide makes a TensorRT-LLM workload snapshot-ready by mounting an
 entrypoint into the TensorRT-LLM runtime image, implementing Snapshot's
 [workload contract](../reference/workload-contract.md). The example runs the
 TensorRT-LLM runtime image, which includes TensorRT-LLM and its runtime
-dependencies, unmodified -- there is no Snapshot-specific image to build or
-push. `deployment.yaml` pins the exact upstream image, and one program,
-`app.py`, is mounted into it from a ConfigMap to prepare TensorRT-LLM for
-checkpoint and validate it after restore. The Snapshot agent injects the
-restore tooling at runtime.
+dependencies, unmodified. `deployment.yaml` pins the exact upstream image,
+and one program, `app.py`, is mounted into it from a ConfigMap to prepare
+TensorRT-LLM for checkpoint and validate it after restore. The Snapshot
+agent injects the restore tooling at runtime.
 
 > [!NOTE]
 > TensorRT-LLM support is experimental and currently limited to a single GPU.

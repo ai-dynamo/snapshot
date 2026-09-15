@@ -1,13 +1,12 @@
 # Deploy an SGLang replica
 
-This guide makes an SGLang workload snapshot-ready by mounting a small
-entrypoint into an SGLang runtime image, implementing Snapshot's [workload
+This guide makes an SGLang workload snapshot-ready by mounting an entrypoint
+into an SGLang runtime image, implementing Snapshot's [workload
 contract](../reference/workload-contract.md). The example runs an SGLang
-image that includes SGLang, CUDA, and `torch_memory_saver`, unmodified --
-there is no Snapshot-specific image to build or push. `deployment.yaml` pins
-the exact upstream image, and one program, `app.py`, is mounted into it from
-a ConfigMap to prepare SGLang for checkpoint and resume it after restore. The
-Snapshot agent injects the restore tooling at runtime.
+image that includes SGLang, CUDA, and `torch_memory_saver`, unmodified.
+`deployment.yaml` pins the exact upstream image, and one program, `app.py`, is
+mounted into it from a ConfigMap to prepare SGLang for checkpoint and resume
+it after restore. The Snapshot agent injects the restore tooling at runtime.
 
 ## 1. Download the example files
 

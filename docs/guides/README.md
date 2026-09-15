@@ -3,8 +3,8 @@
 Using Snapshot is a three-stage flow:
 
 1. **Make the workload snapshot-ready** — the per-framework guides below run
-   the framework's stock runtime image unmodified, with a small program
-   mounted into it from a ConfigMap. The requirement they satisfy is the
+   the framework's runtime image unmodified and mount an entrypoint into it
+   from a ConfigMap, implementing the
    [workload contract](../reference/workload-contract.md).
 2. **Checkpoint** the running replica — with a `PodSnapshot` or a `SnapshotJob`.
 3. **Restore** into new pods — with the `nvidia.com/restore-from` annotation.
@@ -20,8 +20,8 @@ deployment in stage 1 differ.
 
 ## 1. Make the workload snapshot-ready
 
-Per inference framework, mount a small entrypoint into the framework's stock
-runtime image and deploy it:
+Per inference framework, mount an entrypoint into the framework's runtime
+image and deploy it:
 
 - [vLLM](vllm.md)
 - [SGLang](sglang.md)
