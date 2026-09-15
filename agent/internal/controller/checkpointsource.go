@@ -25,9 +25,6 @@ func checkpointSourceAtPath(artifactPath string) (*snapshotv1alpha1.CheckpointSo
 // block that publishes it. The compared values come from CompatEnvironment, the same
 // view the restore gates read, so what a user sees cannot drift from what a
 // restore is actually checked against.
-//
-// A block with nothing to say is left out entirely, and a manifest with nothing
-// to say at all projects to nil rather than to an empty object.
 func checkpointSourceFromManifest(manifest *types.CheckpointManifest) *snapshotv1alpha1.CheckpointSource {
 	if manifest == nil {
 		return nil
