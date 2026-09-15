@@ -102,10 +102,18 @@ person, and there is no private key anywhere to leak or rotate.
 
 ## Verifying a release
 
-Every published artifact is signed with [Sigstore](https://www.sigstore.dev/)
-keyless signing. There is no public key to fetch — verification asserts *which
-workflow, in which repository, at which tag* produced the artifact, and the
-signature is recorded in the public Rekor transparency log.
+**Signing applies to `v0.2.0` and later.** Earlier releases were published
+before the signing pipeline existed, and are not signed retroactively: a
+signature made today would be dated today while implying the artifact was
+signed when released. Those releases do carry SBOMs, generated after the fact
+by scanning the images that were actually published — see
+[Releases before v0.2.0](#releases-before-v020) below.
+
+Every published artifact from `v0.2.0` on is signed with
+[Sigstore](https://www.sigstore.dev/) keyless signing. There is no public key to
+fetch — verification asserts *which workflow, in which repository, at which tag*
+produced the artifact, and the signature is recorded in the public Rekor
+transparency log.
 
 All the commands below need
 [cosign](https://docs.sigstore.dev/cosign/installation/) **v3.0 or newer**. CI
@@ -177,10 +185,11 @@ built the image, so you can confirm an image came from the commit it claims.
 
 ### Release assets and checksums
 
-Each release carries two SBOMs per image — SPDX (`.spdx.json`) and CycloneDX
-(`.cdx.json`), the same inventory in the two formats consumers ask for — plus
-the packaged chart and a `SHA256SUMS` covering all of them. `SHA256SUMS` is
-itself signed, so verifying one signature transitively covers every asset:
+Releases from `v0.2.0` carry two SBOMs per image — SPDX (`.spdx.json`) and
+CycloneDX (`.cdx.json`), the same inventory in the two formats consumers ask
+for — plus the packaged chart and a `SHA256SUMS` covering all of them.
+`SHA256SUMS` is itself signed, so verifying one signature transitively covers
+every asset:
 
 ```bash
 gh release download v0.1.0 --repo ai-dynamo/snapshot
@@ -201,6 +210,25 @@ to download.
 Verify the signature *before* trusting the checksums. `sha256sum --check` on
 its own only proves the files match a list an attacker could have replaced
 alongside them.
+
+### Releases before v0.2.0
+
+`v0.1.0` and the pre-releases before it carry SPDX and CycloneDX SBOMs and
+nothing else — no signature, no `SHA256SUMS`, no attestations. Those SBOMs were
+generated after the fact by scanning the images already published to GHCR, so
+the `created` timestamp inside each one is the backfill date, not the release
+date.
+
+Treat them as an inventory, not as provenance. An SBOM is descriptive and
+independently reproducible — anyone can re-derive it from the same digest:
+
+```bash
+syft scan --platform linux/amd64 registry:ghcr.io/ai-dynamo/snapshot/operator:v0.1.0
+```
+
+What they do not tell you is who built the image or from which commit. That
+question has no answer for these releases, which is the reason signing starts at
+`v0.2.0` rather than being applied backwards.
 
 ## Release notes
 

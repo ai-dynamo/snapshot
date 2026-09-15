@@ -50,9 +50,11 @@ Advisories; Snapshot does not publish those.
 
 ## Verifying what you run
 
-Every published artifact — the operator image, the agent image, and the Helm
-chart — is signed in CI with [Sigstore](https://www.sigstore.dev/) cosign
-keyless signing. There is no key to distribute: the signing identity is this
+From `v0.2.0` on, every published artifact — the operator image, the agent
+image, and the Helm chart — is signed in CI with
+[Sigstore](https://www.sigstore.dev/) cosign keyless signing. Earlier releases
+predate the signing pipeline and carry SBOMs only; they are not signed
+retroactively. There is no key to distribute: the signing identity is this
 repository's release workflow, and each signature is recorded in the public
 Rekor transparency log. Images additionally carry SLSA provenance and an SBOM
 as OCI attestations, and each release ships SPDX and CycloneDX SBOMs alongside
