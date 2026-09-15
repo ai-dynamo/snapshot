@@ -24,6 +24,7 @@ import (
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
+	"github.com/ai-dynamo/snapshot/api/compat"
 )
 
 const pageBrokerAbortTimeout = 5 * time.Second
@@ -55,6 +56,11 @@ type CheckpointRequest struct {
 	PodIP               string
 	Clientset           kubernetes.Interface
 	PageBrokerRequested bool
+
+	// Pod carries the image reference and limits the target container runs with, read from
+	// the live pod by the caller rather than here: the capture path has no API
+	// client for the pod, and the reconciler already holds it.
+	Pod compat.Environment
 }
 
 type checkpointPhaseTimings struct {
@@ -121,7 +127,7 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	}
 	cudaJobFile := ""
 	if len(state.CUDAHostPIDs) > 0 {
-		cudaJobFile, err = cuda.StageJobFile(state.RootFS, tmpDir, len(state.GPUUUIDs))
+		cudaJobFile, err = cuda.StageJobFile(state.RootFS, tmpDir, len(state.GPUs.Devices))
 		if err != nil {
 			return err
 		}
@@ -188,6 +194,15 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to resolve container: %w", err)
 	}
+	// Only the image-digest check reads this, and it treats a blank value as
+	// unknown, so a runtime that cannot answer costs the comparison, not the
+	// checkpoint.
+	imageID, err := rt.ResolveContainerImageID(ctx, containerID)
+	if err != nil {
+		log.Error(err, "Failed to resolve the container image ID; this checkpoint will not record it",
+			"containerID", containerID)
+		imageID = ""
+	}
 
 	var hostCgroupPath string
 	if cgPath, err := snapshotruntime.ResolveCgroupRootFromHostPID(pid); err == nil && cgPath != "" {
@@ -243,19 +258,19 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 	if len(cudaHostPIDs) > 0 {
 		log.V(1).Info("Resolved checkpoint CUDA PID mapping", "host_pids", cudaHostPIDs, "namespace_pids", cudaNamespacePIDs)
 	}
-	var gpuUUIDs []string
+	var gpus compat.GPUInfo
 	var gpuDevicePaths map[string]string
 	var gpuDeviceMapDuration time.Duration
 	if len(cudaHostPIDs) > 0 {
 		gpuStart := time.Now()
 		if ociSpec != nil && ociSpec.Process != nil {
-			gpuUUIDs, err = cuda.ResolveVisibleDevices(ctx, ociSpec.Process.Env)
+			gpus, err = cuda.ResolveVisibleGPUs(ctx, ociSpec.Process.Env)
 			if err != nil {
 				return nil, 0, err
 			}
 		}
-		if len(gpuUUIDs) == 0 {
-			gpuUUIDs, err = cuda.DiscoverGPUUUIDs(
+		if len(gpus.Devices) == 0 {
+			gpus, err = cuda.DiscoverGPUs(
 				ctx,
 				req.Clientset,
 				req.PodName,
@@ -270,6 +285,10 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to discover source GPU UUIDs: %w", err)
 		}
+		var gpuUUIDs []string
+		for _, device := range gpus.Devices {
+			gpuUUIDs = append(gpuUUIDs, device.UUID)
+		}
 		gpuDevicePaths, err = cuda.ResolveDevicePaths(snapshotruntime.HostProcPath, pid, gpuUUIDs)
 		if err != nil {
 			return nil, 0, err
@@ -278,6 +297,7 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 
 	return &types.CheckpointContainerSnapshot{
 		PID:            pid,
+		ImageID:        imageID,
 		RootFS:         rootFS,
 		UpperDir:       upperDir,
 		OCISpec:        ociSpec,
@@ -287,8 +307,8 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 		HostCgroupPath: hostCgroupPath,
 		CUDAHostPIDs:   cudaHostPIDs,
 		CUDANSPIDs:     cudaNamespacePIDs,
-		GPUUUIDs:       gpuUUIDs,
 		GPUDevicePaths: gpuDevicePaths,
+		GPUs:           gpus,
 	}, gpuDeviceMapDuration, nil
 }
 
@@ -303,16 +323,20 @@ func configureCheckpoint(
 	if err != nil {
 		return nil, nil, err
 	}
+	podEnvironment := req.Pod
+	podEnvironment.ImageID = state.ImageID
 
 	m := types.NewCheckpointManifest(
 		req.ContentUID,
 		req.ContainerName,
 		types.NewCRIUDumpManifest(criuOpts, cfg.CRIU),
-		types.NewSourcePodManifest(req.ContainerID, state.PID, req.NodeName, req.PodName, req.PodNamespace, req.PodIP, state.StdioFDs),
+		types.NewSourcePodManifest(req.ContainerID, state.PID, req.NodeName, req.PodName, req.PodNamespace, req.PodIP, state.StdioFDs).
+			WithPodEnvironment(podEnvironment),
 		types.NewOverlayManifest(cfg.Overlay, state.UpperDir, state.OCISpec),
+		types.NewHostManifest(cfg.HostKernelVersion),
 	)
 	if len(state.CUDANSPIDs) > 0 {
-		m.CUDA = types.NewCUDAManifest(state.CUDANSPIDs, state.GPUUUIDs)
+		m.CUDA = types.NewCUDAManifest(state.CUDANSPIDs, state.GPUs)
 		m.CUDA.DevicePaths = state.GPUDevicePaths
 		if state.OCISpec != nil && state.OCISpec.Process != nil {
 			m.CUDA.NVIDIAVisibleDevices = cuda.VisibleDevicesValue(state.OCISpec.Process.Env)

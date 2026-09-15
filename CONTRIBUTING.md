@@ -77,6 +77,67 @@ Pull requests are squash-merged, so the pull request *title* becomes the commit
 subject on `main` and follows the same format. Individual commits within a
 branch are squashed away, so their subjects matter less than the title.
 
+## Extending Snapshot
+
+Most extension work is adding support for a new inference framework. Stages 2
+and 3 of the flow — checkpoint and restore — are framework-agnostic; only the
+image and deployment in stage 1 differ, so a new framework is additive and does
+not touch the operator or the agent. See the
+[usage guides](docs/guides/README.md) for the shape of the flow.
+
+To add one, follow an existing framework end to end —
+[vLLM](docs/guides/vllm.md) is the smallest — and provide the same four pieces
+under `docs/guides/<framework>/`:
+
+| File | What it does |
+| --- | --- |
+| `Dockerfile.<framework>` | Starts from the framework's runtime image and adds the entrypoint program |
+| `app.py` | Cooperates with the checkpoint/restore lifecycle: loads the model, then signals readiness |
+| `deployment.yaml` | Deploys the replica that gets checkpointed |
+| `restore-deployment.yaml` | Consumes a checkpoint through the `nvidia.com/restore-from` annotation |
+
+Plus `docs/guides/<framework>.md` walking through it, and an entry in the
+[guides index](docs/guides/README.md).
+
+The contract your entrypoint has to honor — the control volume, the startup
+gate, the `SNAPSHOT_CONTROL_DIR` environment variable, and the seccomp profile
+— is specified in the
+[Restore Pod contract](docs/reference/restore-pod-contract.md). Read that
+before writing `app.py`; everything a framework must do to be checkpointable is
+there.
+
+Extending the API surface instead — a new field, or a new custom resource — is
+a larger change that affects stored checkpoints. Open an issue and agree the
+approach before writing code, and expect the CRD compatibility question to be
+the bulk of the review.
+
+## AI-assisted contributions
+
+AI assistance is welcome. Agent-specific repository guidance lives in
+[AGENTS.md](AGENTS.md).
+
+The rules are the same as for any other contribution, because the obligations
+do not change based on how the code was produced:
+
+- **You are the author.** Signing off with the DCO certifies you have the right
+  to submit the work under Apache 2.0. That certification is yours regardless
+  of what produced the diff, so do not sign off on code you have not reviewed
+  and cannot explain.
+- **Review before you open.** Run `make check`, `make test`, and `make build`,
+  and read the diff. A pull request you cannot talk through in review is not
+  ready, and generated code that merely compiles is not evidence that it is
+  correct.
+- **Do not paste project code into a service you have not cleared.** This is a
+  public repository, so its contents are public — but credentials, internal
+  URLs, customer data, and unreleased material are not, and must not be pasted
+  into any tool. See the secrets guidance in [AGENTS.md](AGENTS.md).
+- **Disclosure is not required, and is welcome.** There is no obligation to
+  declare AI assistance. Noting it in the pull request description is useful
+  context for reviewers, not a mark against the change.
+
+Pull requests that are bulk-generated, untested, or clearly unreviewed will be
+closed. The bar is reviewer time: a change nobody has read wastes it.
+
 ## How pull requests are reviewed
 
 **Who reviews.** Every pull request is reviewed by a maintainer. The maintainers
@@ -125,6 +186,46 @@ apply labels and priorities.
 Issues and pull requests with no activity for 90 days are labeled
 `lifecycle/stale` and closed 30 days later unless the discussion resumes. Add
 the `lifecycle/frozen` label to exempt an item from this.
+
+## Community standards
+
+Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md). This
+section covers what happens after a report and what the process does not cover.
+
+**Where to report.** Email <dbar@nvidia.com>. Reports are handled
+confidentially. If the report concerns the person at that address, contact any
+other maintainer in [MAINTAINERS.md](MAINTAINERS.md) directly.
+
+**Response timeline.**
+
+| Stage | Target |
+| --- | --- |
+| Acknowledgement that the report was received | 3 business days |
+| Decision on outcome, or an update explaining the delay | 14 calendar days |
+| Communication of the outcome to the reporter | With the decision |
+
+Investigations involving more people, or spanning several incidents, take
+longer. When a report cannot be resolved within 14 days the reporter gets an
+update rather than silence.
+
+**Out of scope.** The Code of Conduct process is not the route for:
+
+- **Technical disagreement.** Design and implementation disputes belong in the
+  issue, the pull request, or [Discussions](https://github.com/ai-dynamo/snapshot/discussions),
+  and are settled as described in [GOVERNANCE.md](GOVERNANCE.md). Disagreeing
+  firmly is not a violation; how you do it can be.
+- **Security vulnerabilities.** These follow [SECURITY.md](SECURITY.md) and
+  NVIDIA PSIRT. Never report one through a Code of Conduct email or a public
+  issue.
+- **Conduct outside project spaces** that has no bearing on the safety of
+  participants here. Behavior elsewhere that does affect that safety is in
+  scope.
+- **Moderation appeals against NVIDIA products or services**, which are not
+  this project's to decide.
+
+Anything touching the safety, dignity, or ability to participate of someone in
+this community is in scope. If you are unsure, report it and let the
+maintainers decide.
 
 ## Developer Certificate of Origin (DCO)
 
@@ -185,9 +286,6 @@ Developer Certificate of Origin
 Version 1.1
 
 Copyright (C) 2004, 2006 The Linux Foundation and its contributors.
-1 Letterman Drive
-Suite D4700
-San Francisco, CA, 94129
 
 Everyone is permitted to copy and distribute verbatim copies of this
 license document, but changing it is not allowed.

@@ -13,7 +13,26 @@ import (
 	"strings"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/ai-dynamo/snapshot/api/compat"
 )
+
+// ResolveVisibleGPUs preserves explicit selection order and includes the model
+// and driver metadata used by the restore compatibility gate.
+func ResolveVisibleGPUs(ctx context.Context, env []string) (compat.GPUInfo, error) {
+	uuids, err := ResolveVisibleDevices(ctx, env)
+	if err != nil || len(uuids) == 0 {
+		return compat.GPUInfo{}, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, nvidiaSMITimeout)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "nvidia-smi", "-i", strings.Join(uuids, ","),
+		"--query-gpu=uuid,name,driver_version", "--format=csv,noheader").Output()
+	if err != nil {
+		return compat.GPUInfo{}, fmt.Errorf("describe NVIDIA_VISIBLE_DEVICES GPUs: %w", err)
+	}
+	return describeGPUs(uuids, parseNvidiaSmiGPUs(string(output))), nil
+}
 
 // ResolveVisibleDevices resolves an explicit legacy runtime selection on the
 // host, before container-local CUDA enumeration can reinterpret numeric indices.

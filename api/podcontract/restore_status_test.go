@@ -36,8 +36,13 @@ func TestClassifyRestoreOutcome(t *testing.T) {
 			want:       RestoreOutcomeUnknown,
 		},
 		{
+			name:       "incompatible",
+			conditions: []corev1.PodCondition{restored(corev1.ConditionFalse, RestoreReasonIncompatible)},
+			want:       RestoreOutcomeFailed,
+		},
+		{
 			name:       "unrecognized terminal reason",
-			conditions: []corev1.PodCondition{restored(corev1.ConditionFalse, "RestoreIncompatible")},
+			conditions: []corev1.PodCondition{restored(corev1.ConditionFalse, "FutureTerminalReason")},
 			want:       RestoreOutcomeUnknown,
 		},
 		{
