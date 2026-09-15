@@ -66,6 +66,9 @@ COPY --from=cuda-helper-headers /usr/local/cuda-13.4/targets/x86_64-linux/includ
 COPY cmd/cuda-checkpoint-helper/content_digest.cpp ./cmd/cuda-checkpoint-helper/content_digest.cpp
 COPY cmd/cuda-checkpoint-helper/content_digest.hpp ./cmd/cuda-checkpoint-helper/content_digest.hpp
 COPY cmd/cuda-checkpoint-helper/content_digest_test.cpp ./cmd/cuda-checkpoint-helper/content_digest_test.cpp
+COPY cmd/cuda-checkpoint-helper/storage_manifest.cpp ./cmd/cuda-checkpoint-helper/storage_manifest.cpp
+COPY cmd/cuda-checkpoint-helper/storage_manifest.hpp ./cmd/cuda-checkpoint-helper/storage_manifest.hpp
+COPY cmd/cuda-checkpoint-helper/storage_manifest_test.cpp ./cmd/cuda-checkpoint-helper/storage_manifest_test.cpp
 COPY cmd/cuda-checkpoint-helper/transfer_config.cpp ./cmd/cuda-checkpoint-helper/transfer_config.cpp
 COPY cmd/cuda-checkpoint-helper/transfer_config.hpp ./cmd/cuda-checkpoint-helper/transfer_config.hpp
 COPY cmd/cuda-checkpoint-helper/transfer_config_test.cpp ./cmd/cuda-checkpoint-helper/transfer_config_test.cpp
@@ -78,6 +81,14 @@ RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread \
       -I/opt/cuda-13.4/include \
       -c ./cmd/cuda-checkpoint-helper/transfer_backend_unavailable.cpp \
       -o /transfer-backend-unavailable.o
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+      -o /cuda-checkpoint-helper-storage-test \
+      ./cmd/cuda-checkpoint-helper/content_digest.cpp \
+      ./cmd/cuda-checkpoint-helper/storage_manifest.cpp \
+      ./cmd/cuda-checkpoint-helper/storage_manifest_test.cpp \
+      -lcrypto \
+    && /cuda-checkpoint-helper-storage-test
 
 RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
       -o /cuda-checkpoint-helper-content-digest-test \

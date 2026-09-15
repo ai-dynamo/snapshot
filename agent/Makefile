@@ -45,6 +45,13 @@ endif
 test-cuda-helper:
 	@mkdir -p bin
 	$(CXX) $(CUDA_HELPER_CXXFLAGS) \
+		-o bin/cuda-checkpoint-helper-storage-test \
+		cmd/cuda-checkpoint-helper/content_digest.cpp \
+		cmd/cuda-checkpoint-helper/storage_manifest.cpp \
+		cmd/cuda-checkpoint-helper/storage_manifest_test.cpp \
+		-lcrypto
+	bin/cuda-checkpoint-helper-storage-test
+	$(CXX) $(CUDA_HELPER_CXXFLAGS) \
 		-o bin/cuda-checkpoint-helper-content-digest-test \
 		cmd/cuda-checkpoint-helper/content_digest.cpp \
 		cmd/cuda-checkpoint-helper/content_digest_test.cpp \
