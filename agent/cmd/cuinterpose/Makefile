@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 
-.DEFAULT_GOAL := core
+.DEFAULT_GOAL := native
 .PHONY: build test frontend native test-native
 CXXFLAGS := -std=c++20 -O2 -g -Wall -Wextra -Werror -pthread
 CORE := protocol state process control export_cache host_carrier multicast
@@ -21,4 +21,7 @@ build/libcuinterpose_core.so: $(OBJECTS) cpp/exports.map
 	$(CXX) $(CXXFLAGS) -shared $(OBJECTS) -Wl,--version-script=cpp/exports.map -o $@
 	chmod 0644 $@
 
-core: frontend build/libcuinterpose_core.so
+build/cuinterpose-coordinator: build/coordinator.o build/protocol.o
+	$(CXX) $(CXXFLAGS) -static build/coordinator.o build/protocol.o -o $@
+
+native: frontend build/libcuinterpose_core.so build/cuinterpose-coordinator
