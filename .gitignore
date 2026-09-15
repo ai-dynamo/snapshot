@@ -12,3 +12,7 @@ __pycache__/
 
 # E2E Python workspace
 e2e/.venv/
+
+# Benchmarks Python workspace
+benchmarks/.venv/
+benchmarks/results/
