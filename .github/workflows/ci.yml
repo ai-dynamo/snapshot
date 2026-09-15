@@ -12,6 +12,7 @@ on:
     branches:
       - main
       - 'release/*'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
@@ -79,3 +80,22 @@ jobs:
           uv run --locked --project e2e pytest \
             e2e/tests/test_framework_manifests.py \
             e2e/tests/test_workload_scripts.py -vv
+
+  helm-test:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: helm plugin install https://github.com/helm-unittest/helm-unittest
+      - run: helm unittest charts/snapshot/
+
+  pagebroker-image:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - run: |
+          make docker-build-pagebroker \
+            DOCKER_BUILD_ARGS="--cache-from=type=gha,scope=pagebroker \
+              --cache-to=type=gha,scope=pagebroker,mode=max"
