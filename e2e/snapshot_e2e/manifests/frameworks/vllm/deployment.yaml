@@ -16,7 +16,6 @@ spec:
     metadata:
       labels:
         app: vllm-source
-        nvidia.com/snapshot-is-checkpoint-source: "true"
     spec:
       terminationGracePeriodSeconds: 1
       runtimeClassName: nvidia
