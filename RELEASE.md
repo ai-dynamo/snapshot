@@ -186,14 +186,17 @@ itself signed, so verifying one signature transitively covers every asset:
 gh release download v0.1.0 --repo ai-dynamo/snapshot
 
 cosign verify-blob \
-  --certificate SHA256SUMS.pem \
-  --signature SHA256SUMS.sig \
+  --bundle SHA256SUMS.sigstore.json \
   --certificate-identity-regexp "${COSIGN_IDENTITY}" \
   --certificate-oidc-issuer "${COSIGN_ISSUER}" \
   SHA256SUMS
 
 sha256sum --check SHA256SUMS
 ```
+
+`SHA256SUMS.sigstore.json` is a Sigstore bundle: it carries the signature and
+the signing certificate in one file, so there is no separate `.sig`/`.pem` pair
+to download.
 
 Verify the signature *before* trusting the checksums. `sha256sum --check` on
 its own only proves the files match a list an attacker could have replaced
