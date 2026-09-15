@@ -7,10 +7,10 @@
 import ctypes as c
 import os
 import socket
-import struct
 import sys
 import threading
-from fork import cuda, inspect, props, stats
+from fork import cuda, props, stats
+from protocol_client import LIFECYCLE, command, decode, receive, seal_ticket, send
 
 
 class Multicast(c.Structure):
@@ -34,15 +34,8 @@ cuda.fakeAllocationRefs.argtypes = [u64]
 cuda.multicast_block_arm.argtypes = [c.c_int]
 
 
-def command(operation, success=True):
-    response = inspect(operation)
-    status = struct.unpack_from("<i", response, 8)[0]
-    assert (status == 0) == success, (operation, status, response[57:153])
-    return response
-
-
 def replay():
-    for operation in (3, 4, 5, 7, 8, 9, 10, 11, 12):
+    for operation in LIFECYCLE:
         command(operation)
 
 
@@ -58,7 +51,7 @@ def main():
         assert stats().multicasts == 0 and stats().handles == 0 and stats().phase == 1
         assert cuda.fakeLiveAllocations() == 0
         # Failure must also finish its in-flight reservation.
-        command(2)
+        command("inspect")
         group.value = 0
     assert cuda.cuMemCreate(c.byref(member), length, c.byref(props), 0) == 0
     assert cuda.cuMemMap(0x10000000, length, 0, member, 0) == 0
@@ -71,9 +64,9 @@ def main():
         worker.start()
         cuda.multicast_block_wait()
         try:
-            command(2, False)
-            command(3, False)
-            command(9, False)
+            command("inspect", False)
+            command("prepare_multicast", False)
+            command("restore_multicast_creators", False)
             assert stats().phase == 1
             assert cuda.cuMemRelease(group) == 600
             # State remains available while the driver collective is blocked.
@@ -126,7 +119,24 @@ def main():
         replay()
     else:
         assert cuda.cuMemMap(0x70000000, length, 0, group, 0) == 0
-    if mode == "released":
+    if mode == "cached-export":
+        tickets = []
+        for handle in (member, group):
+            fd = c.c_int(-1)
+            assert cuda.cuMemExportToShareableHandle(c.byref(fd), handle, 1, 0) == 0
+            tickets.append(fd.value)
+        assert stats().exports == 2
+        command("prepare_multicast")
+        assert stats().exports == 1, "only the unicast descriptor remains cached"
+        assert cuda.fakeMulticastObjects() == 0
+        assert cuda.fakeMulticastBindings(0) == 0
+        assert cuda.fakeMappedCount() == 1, "member mapping remains until PREPARE_UNICAST"
+        assert stats().multicasts == 1, "metadata remains for restore"
+        for fd in tickets:
+            os.close(fd)
+        print("PASS multicast cached-export")
+        return  # Deliberately leave the process mid-prepare, as the C case did.
+    elif mode == "released":
         # No unicast export ever occurred. BindMem alone transfers ownership,
         # and restore must temporarily retain the mapped member to rebind it.
         assert stats().exports == 0
@@ -141,31 +151,19 @@ def main():
     elif mode == "kind":
         fd = c.c_int(-1)
         assert cuda.cuMemExportToShareableHandle(c.byref(fd), group, 1, 0) == 0
-        ticket = os.pread(fd.value, 256, 0)
-        request = bytearray(256)
-        struct.pack_into("<IHH", request, 0, 0x44564D4D, 2, 6)
-        request[24:57] = ticket[41:74]
-        request[153:169] = ticket[74:90]
-        struct.pack_into("<I", request, 172, 1)  # Actual cached resource is kind 2.
-        endpoint = ticket[90:198].split(b"\0")[0].decode()
+        ticket = decode(os.pread(fd.value, 4096, 4))
         with socket.socket(socket.AF_UNIX) as connection:
             connection.settimeout(5)
-            connection.connect(endpoint)
-            connection.sendall(request)
-            reply, ancillary, _, _ = connection.recvmsg(256, socket.CMSG_SPACE(4))
-            assert len(reply) == 256 and struct.unpack_from("<i", reply, 8)[0] != 0
-            assert not ancillary
+            connection.connect(ticket["endpoint"])
+            send(connection, dict(kind="export", participant=ticket["creator"],
+                                  allocation=ticket["allocation"], resource="unicast"))
+            assert "Err" in receive(connection)["result"]  # Cached object is multicast.
         alias = u64()
         assert cuda.cuMemImportFromShareableHandle(c.byref(alias), c.c_void_p(fd.value), 1) == 0
         assert cuda.cuMemRelease(alias) == 0
         # A forged sealed ticket with inconsistent properties must not alias.
-        changed = bytearray(ticket)
-        struct.pack_into("<I", changed, 204, 2)
-        malformed = os.memfd_create("bad-multicast", os.MFD_ALLOW_SEALING)
-        os.write(malformed, changed)
-        import fcntl
-        fcntl.fcntl(malformed, fcntl.F_ADD_SEALS,
-                    fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL)
+        ticket["resource"]["devices"] = 2
+        malformed = seal_ticket(ticket)
         assert cuda.cuMemImportFromShareableHandle(c.byref(alias), c.c_void_p(malformed), 1) != 0
         os.close(malformed)
         os.close(fd.value)
@@ -180,8 +178,8 @@ def main():
         assert cuda.cuMemUnmap(0x70000000, length // 2) != 0
         cuda.multicast_fail_access()
         assert cuda.cuMemSetAccess(0x70000000, length, c.byref(access), 1) != 0
-        command(2, False)
-        command(3, False)
+        command("inspect", False)
+        command("prepare_multicast", False)
         assert stats().phase == 1
         # Unknown access is sticky for this mapping. Unmap and recreate it,
         # rather than assuming a later per-location update repaired everything.
@@ -190,16 +188,13 @@ def main():
         assert cuda.cuMemSetAccess(0x70000000, length, c.byref(access), 1) == 0
         replay()
     elif mode == "failure":
-        command(3)
-        command(4)
-        command(5)
-        command(7)
-        command(8)
-        command(10, False)
+        for operation in LIFECYCLE[:5]:
+            command(operation)
+        command("restore_multicast_importers", False)
         assert stats().phase != 5
         cuda.fakeFailNext.argtypes = [c.c_char_p]
         cuda.fakeFailNext(b"cuMulticastCreate")
-        command(9, False)
+        command("restore_multicast_creators", False)
         assert stats().phase == 5
         print("PASS multicast failure")
         return

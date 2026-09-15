@@ -8,7 +8,9 @@ use super::host_carrier::Context;
 use super::state::{self, Mapping, Phase, Result, State, call};
 use super::ticket;
 use cuinterpose_abi::*;
-use cuinterpose_protocol::{AllocationId, Operation, Record, RecordFlags, RecordKind, Ticket};
+use cuinterpose_protocol::{
+    AllocationId, BindingKind, BindingVersion, Operation, Record, Resource, ResourceKind, Ticket,
+};
 use std::ffi::c_void;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::MutexGuard;
@@ -38,8 +40,8 @@ pub struct Binding {
     size: usize,
     flags: u64,
     device: i32,
-    kind: u8,
-    version: u8,
+    kind: BindingKind,
+    version: BindingVersion,
     checkpointed: bool,
 }
 
@@ -100,7 +102,7 @@ pub fn cuMulticastCreate(out: *mut u64, properties: *const MulticastProp) -> Res
     }
     let properties = unsafe { *properties };
     let mut state = state::active()?;
-    let id = state::random()?;
+    let id = AllocationId(state::random()?);
     let flight = Flight::begin(&mut state, None, None)?;
     drop(state);
     let mut driver = 0;
@@ -156,11 +158,12 @@ pub fn cuMulticastCreate(out: *mut u64, properties: *const MulticastProp) -> Res
         creator: state.identity,
         endpoint: state.endpoint.clone(),
         allocation: id,
-        resource: 2,
-        devices: properties.devices,
-        size: properties.size as u64,
-        handle_types: properties.handle_types,
-        flags: properties.flags,
+        resource: Resource::Multicast {
+            devices: properties.devices,
+            size: properties.size as u64,
+            handle_types: properties.handle_types,
+            flags: properties.flags,
+        },
     };
     state.multicasts.insert(
         id,
@@ -299,7 +302,7 @@ pub fn settle(state: &mut State, id: AllocationId) -> Result<()> {
     if object.inflight != 0 || object.checkpointed {
         return Err(NOT_READY);
     }
-    state::cache()?.replace((2, id), None)?;
+    state::cache()?.replace((ResourceKind::Multicast, id), None)?;
     if let Some(driver) = object.driver {
         call!("cuMemRelease", fn(u64), driver);
     }
@@ -309,7 +312,7 @@ pub fn settle(state: &mut State, id: AllocationId) -> Result<()> {
 
 pub fn export(state: &mut State, id: AllocationId, out: *mut c_void) -> Result<i32> {
     let object = state.multicasts.get_mut(&id).ok_or(INVALID_HANDLE)?;
-    if object.creator && !state::cache()?.contains(&(2, id))? {
+    if object.creator && !state::cache()?.contains(&(ResourceKind::Multicast, id))? {
         let mut fd = -1;
         call!(
             "cuMemExportToShareableHandle",
@@ -322,7 +325,10 @@ pub fn export(state: &mut State, id: AllocationId, out: *mut c_void) -> Result<i
         if fd < 0 {
             return Err(INVALID_HANDLE);
         }
-        state::cache()?.replace((2, id), Some(unsafe { OwnedFd::from_raw_fd(fd) }))?;
+        state::cache()?.replace(
+            (ResourceKind::Multicast, id),
+            Some(unsafe { OwnedFd::from_raw_fd(fd) }),
+        )?;
     }
     let fd = ticket::export(&object.ticket).map_err(|_| OUT_OF_MEMORY)?;
     object.shared = true;
@@ -383,11 +389,20 @@ pub fn import(mut state: MutexGuard<'static, State>, out: *mut u64, ticket: Tick
         }
         false
     } else {
+        let Resource::Multicast {
+            devices,
+            size,
+            handle_types,
+            flags,
+        } = ticket.resource
+        else {
+            return Err(INVALID_HANDLE);
+        };
         let properties = MulticastProp {
-            devices: ticket.devices,
-            size: ticket.size as usize,
-            handle_types: ticket.handle_types,
-            flags: ticket.flags,
+            devices,
+            size: size as usize,
+            handle_types,
+            flags,
         };
         state.multicasts.insert(
             id,
@@ -426,7 +441,7 @@ pub fn import(mut state: MutexGuard<'static, State>, out: *mut u64, ticket: Tick
 impl Binding {
     fn apply(&self, driver: u64, member: u64) -> Result<()> {
         match (self.kind, self.version) {
-            (1, 1) => call!(
+            (BindingKind::Memory, BindingVersion::V1) => call!(
                 "cuMulticastBindMem",
                 fn(u64, usize, u64, usize, usize, u64),
                 driver,
@@ -436,7 +451,7 @@ impl Binding {
                 self.size,
                 self.flags
             ),
-            (1, 2) => call!(
+            (BindingKind::Memory, BindingVersion::V2) => call!(
                 "cuMulticastBindMem_v2",
                 fn(u64, i32, usize, u64, usize, usize, u64),
                 driver,
@@ -447,7 +462,7 @@ impl Binding {
                 self.size,
                 self.flags
             ),
-            (2, 1) => call!(
+            (BindingKind::Address, BindingVersion::V1) => call!(
                 "cuMulticastBindAddr",
                 fn(u64, usize, u64, usize, u64),
                 driver,
@@ -456,7 +471,7 @@ impl Binding {
                 self.size,
                 self.flags
             ),
-            (2, 2) => call!(
+            (BindingKind::Address, BindingVersion::V2) => call!(
                 "cuMulticastBindAddr_v2",
                 fn(u64, i32, usize, u64, usize, u64),
                 driver,
@@ -466,7 +481,6 @@ impl Binding {
                 self.size,
                 self.flags
             ),
-            _ => return Err(INVALID_VALUE),
         }
         Ok(())
     }
@@ -475,7 +489,7 @@ impl Binding {
 fn bind(handle: u64, mut binding: Binding, member_handle: u64) -> Result<i32> {
     let mut state = state::active()?;
     let target = state.handles.get(&handle).copied();
-    if binding.kind == 2 && target.is_some() {
+    if binding.kind == BindingKind::Address && target.is_some() {
         let end = binding
             .address
             .checked_add(binding.size as u64)
@@ -498,7 +512,7 @@ fn bind(handle: u64, mut binding: Binding, member_handle: u64) -> Result<i32> {
             }
         }
     }
-    let member = if binding.kind == 1 {
+    let member = if binding.kind == BindingKind::Memory {
         state
             .handles
             .get(&member_handle)
@@ -520,14 +534,14 @@ fn bind(handle: u64, mut binding: Binding, member_handle: u64) -> Result<i32> {
         let allocation = &state.allocations[&id];
         // BindAddr may refer to a mapping whose logical handles were released.
         // Its driver handle is not an argument to that CUDA operation.
-        if binding.kind == 1 {
+        if binding.kind == BindingKind::Memory {
             member_driver = allocation.driver.ok_or(INVALID_HANDLE)?;
         }
         binding.member = id;
-        if binding.version == 1 {
+        if binding.version == BindingVersion::V1 {
             binding.device = allocation.properties.location.id;
         }
-        if binding.kind == 1 {
+        if binding.kind == BindingKind::Memory {
             let end = binding
                 .member_offset
                 .checked_add(binding.size)
@@ -558,9 +572,9 @@ fn bind(handle: u64, mut binding: Binding, member_handle: u64) -> Result<i32> {
                 .checked_add(displacement)
                 .ok_or(INVALID_VALUE)?;
         }
-    } else if binding.kind == 2 {
-        binding.member = state::random()?;
-        if binding.version == 1 {
+    } else if binding.kind == BindingKind::Address {
+        binding.member = AllocationId(state::random()?);
+        if binding.version == BindingVersion::V1 {
             call!("cuCtxGetDevice", fn(*mut i32), &mut binding.device);
         }
     }
@@ -568,14 +582,17 @@ fn bind(handle: u64, mut binding: Binding, member_handle: u64) -> Result<i32> {
         if handle & HANDLE_MASK == HANDLE_TAG {
             return Err(INVALID_HANDLE);
         }
-        if member_handle & HANDLE_MASK == HANDLE_TAG && member.is_none() && binding.kind == 1 {
+        if member_handle & HANDLE_MASK == HANDLE_TAG
+            && member.is_none()
+            && binding.kind == BindingKind::Memory
+        {
             return Err(INVALID_HANDLE);
         }
         drop(state);
         binding.apply(handle, member_driver)?;
         return Ok(SUCCESS);
     };
-    if binding.kind == 1 && member.is_none() {
+    if binding.kind == BindingKind::Memory && member.is_none() {
         return Err(NOT_SUPPORTED);
     }
     let end = binding
@@ -634,15 +651,15 @@ pub fn cuMulticastBindMem(
     bind(
         handle,
         Binding {
-            member: [0; 16],
+            member: AllocationId::default(),
             address: 0,
             offset,
             member_offset,
             size,
             flags,
             device: 0,
-            kind: 1,
-            version: 1,
+            kind: BindingKind::Memory,
+            version: BindingVersion::V1,
             checkpointed: false,
         },
         member,
@@ -661,15 +678,15 @@ pub fn cuMulticastBindMem_v2(
     bind(
         handle,
         Binding {
-            member: [0; 16],
+            member: AllocationId::default(),
             address: 0,
             offset,
             member_offset,
             size,
             flags,
             device,
-            kind: 1,
-            version: 2,
+            kind: BindingKind::Memory,
+            version: BindingVersion::V2,
             checkpointed: false,
         },
         member,
@@ -686,15 +703,15 @@ pub fn cuMulticastBindAddr(
     bind(
         handle,
         Binding {
-            member: [0; 16],
+            member: AllocationId::default(),
             address,
             offset,
             member_offset: 0,
             size,
             flags,
             device: 0,
-            kind: 2,
-            version: 1,
+            kind: BindingKind::Address,
+            version: BindingVersion::V1,
             checkpointed: false,
         },
         0,
@@ -712,15 +729,15 @@ pub fn cuMulticastBindAddr_v2(
     bind(
         handle,
         Binding {
-            member: [0; 16],
+            member: AllocationId::default(),
             address,
             offset,
             member_offset: 0,
             size,
             flags,
             device,
-            kind: 2,
-            version: 2,
+            kind: BindingKind::Address,
+            version: BindingVersion::V2,
             checkpointed: false,
         },
         0,
@@ -790,63 +807,58 @@ pub fn cuMulticastUnbind(handle: u64, device: i32, offset: usize, size: usize) -
 pub fn describe(state: &State, records: &mut Vec<Record>) -> Result<()> {
     for (id, object) in &state.multicasts {
         let handles = state.handles.values().filter(|value| *value == id).count() as u32;
-        records.push(Record {
-            kind: RecordKind::Multicast,
-            flags: RecordFlags(u32::from(object.creator) | (u32::from(handles != 0) << 1)),
-            allocation_id: *id,
-            allocation_size: object.effective_size as u64,
-            application_handle_count: handles,
+        records.push(Record::Multicast {
+            owned: object.creator,
+            id: *id,
+            size: object.effective_size as u64,
+            handles,
             handle_types: object.properties.handle_types,
-            object_flags: object.properties.flags,
-            num_devices: object.properties.devices,
-            creator_participant: object.ticket.creator,
-            ..Record::default()
+            flags: object.properties.flags,
+            devices: object.properties.devices,
+            creator: object.ticket.creator,
         });
         for device in &object.devices {
-            records.push(Record {
-                kind: RecordKind::MulticastDevice,
-                allocation_id: *id,
+            records.push(Record::MulticastDevice {
+                id: *id,
                 device: *device,
-                ..Record::default()
             });
         }
         for binding in &object.bindings {
-            records.push(Record {
-                kind: RecordKind::MulticastBinding,
-                allocation_id: *id,
-                member_id: binding.member,
+            records.push(Record::MulticastBinding {
+                id: *id,
+                member: binding.member,
                 address: binding.address,
                 size: binding.size as u64,
                 offset: binding.offset as u64,
                 member_offset: binding.member_offset as u64,
-                operation_flags: binding.flags,
-                binding_kind: binding.kind,
-                api_version: binding.version,
+                flags: binding.flags,
+                binding: binding.kind,
+                version: binding.version,
                 device: binding.device,
-                ..Record::default()
             });
         }
         for mapping in state.mappings.values().filter(|mapping| mapping.id == *id) {
             if mapping.unknown {
                 return Err(NOT_SUPPORTED);
             }
-            let mut record = Record {
-                kind: RecordKind::MulticastMapping,
-                allocation_id: *id,
-                address: mapping.address,
-                size: mapping.size as u64,
-                offset: mapping.offset as u64,
-                operation_flags: mapping.flags,
-                access_count: mapping.access.len() as u32,
-                ..Record::default()
-            };
-            for (slot, access) in record.access.iter_mut().zip(&mapping.access) {
-                *slot = cuinterpose_protocol::Access {
+            let mut access: Vec<_> = mapping
+                .access
+                .iter()
+                .map(|access| cuinterpose_protocol::Access {
                     location_type: access.location.kind,
                     location_id: access.location.id,
                     flags: u64::from(access.flags),
-                };
-            }
+                })
+                .collect();
+            access.sort();
+            let record = Record::MulticastMapping {
+                id: *id,
+                address: mapping.address,
+                size: mapping.size as u64,
+                offset: mapping.offset as u64,
+                flags: mapping.flags,
+                access,
+            };
             records.push(record);
         }
     }
@@ -856,7 +868,7 @@ pub fn describe(state: &State, records: &mut Vec<Record>) -> Result<()> {
 pub fn prepare(state: &mut State) -> Result<()> {
     for (id, object) in &mut state.multicasts {
         let driver = object.driver.ok_or(INVALID_HANDLE)?;
-        state::cache()?.replace((2, *id), None)?;
+        state::cache()?.replace((ResourceKind::Multicast, *id), None)?;
         let device = object
             .devices
             .first()
@@ -961,8 +973,10 @@ fn restore(
                         if fd < 0 {
                             return Err(INVALID_HANDLE);
                         }
-                        state::cache()?
-                            .replace((2, *id), Some(unsafe { OwnedFd::from_raw_fd(fd) }))?;
+                        state::cache()?.replace(
+                            (ResourceKind::Multicast, *id),
+                            Some(unsafe { OwnedFd::from_raw_fd(fd) }),
+                        )?;
                     }
                 }
                 Operation::RestoreMulticastImporters if !object.creator => {
@@ -994,7 +1008,7 @@ fn restore(
                         }
                         let mut member = 0;
                         let mut temporary = false;
-                        if binding.kind == 1 {
+                        if binding.kind == BindingKind::Memory {
                             let allocation =
                                 allocations.get(&binding.member).ok_or(INVALID_HANDLE)?;
                             if let Some(driver) = allocation.driver {

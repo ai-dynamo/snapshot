@@ -49,7 +49,7 @@ ARG BASE_IMAGE=placeholder-requires-base-image-arg
 FROM rust:1.95.0-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082 AS cuinterpose-builder
 RUN test "$(rustc --version | cut -d' ' -f2)" = 1.95.0 \
     && apt-get update && apt-get install -y --no-install-recommends \
-       musl-tools make gcc binutils python3 \
+       musl-tools make gcc binutils python3 python3-msgpack \
     && rm -rf /var/lib/apt/lists/* \
     && rustup target add x86_64-unknown-linux-musl \
     && rustup component add rust-src rustfmt

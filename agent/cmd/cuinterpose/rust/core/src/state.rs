@@ -4,7 +4,7 @@
 use super::ticket;
 use cuinterpose_abi::*;
 use cuinterpose_protocol::Ticket;
-use cuinterpose_protocol::{AllocationId, Identity, Operation};
+use cuinterpose_protocol::{AllocationId, Operation, ParticipantId, Resource, ResourceKind};
 
 #[cfg(test)]
 mod tests {
@@ -79,7 +79,7 @@ mod tests {
     #[test]
     fn oversized_inspection_is_refused_before_building_records() {
         let state = State {
-            identity: [0; 33],
+            identity: ParticipantId::default(),
             endpoint: String::new(),
             allocations: BTreeMap::new(),
             multicasts: BTreeMap::new(),
@@ -90,7 +90,7 @@ mod tests {
                     (
                         address,
                         Mapping {
-                            id: [0; 16],
+                            id: AllocationId::default(),
                             address,
                             size: 4096,
                             offset: 0,
@@ -270,7 +270,7 @@ impl Phase {
 }
 
 pub struct State {
-    pub identity: Identity,
+    pub identity: ParticipantId,
     pub endpoint: String,
     pub allocations: BTreeMap<AllocationId, Allocation>,
     pub multicasts: BTreeMap<AllocationId, super::multicast::Object>,
@@ -290,7 +290,7 @@ pub struct State {
 
 impl State {
     pub fn inspect(&self) -> Result<Vec<cuinterpose_protocol::Record>> {
-        use cuinterpose_protocol::{Record, RecordFlags, RecordKind};
+        use cuinterpose_protocol::Record;
         if self.phase != Phase::Active || self.inflight != 0 {
             return Err(NOT_READY);
         }
@@ -317,26 +317,20 @@ impl State {
                 .values()
                 .filter(|id| **id == allocation.id)
                 .count() as u32;
-            let flags = u32::from(allocation.creator)
-                | (u32::from(handles != 0) << 1)
-                | (u32::from(
-                    allocation.creator
-                        && allocation.shared
-                        && allocation.properties.handle_types != 0
-                        && allocation.properties.kind == 1
-                        && allocation.properties.location.kind == 1,
-                ) << 2);
-            let record = Record {
-                kind: RecordKind::Allocation,
-                flags: RecordFlags(flags),
-                allocation_id: allocation.id,
-                allocation_size: allocation.size as u64,
+            let record = Record::Allocation {
+                id: allocation.id,
+                creator: allocation.creator,
+                content: allocation.creator
+                    && allocation.shared
+                    && allocation.properties.handle_types != 0
+                    && allocation.properties.kind == 1
+                    && allocation.properties.location.kind == 1,
+                size: allocation.size as u64,
                 allocation_type: allocation.properties.kind,
-                requested_handle_types: allocation.properties.handle_types,
-                allocation_location_type: allocation.properties.location.kind,
-                allocation_location_id: allocation.properties.location.id,
-                application_handle_count: handles,
-                ..Record::default()
+                handle_types: allocation.properties.handle_types,
+                location_type: allocation.properties.location.kind,
+                location_id: allocation.properties.location.id,
+                handles,
             };
             records.push(record);
         }
@@ -347,23 +341,24 @@ impl State {
             if self.multicasts.contains_key(&mapping.id) {
                 continue;
             }
-            let mut record = Record {
-                kind: RecordKind::Mapping,
-                flags: RecordFlags(u32::from(self.allocations[&mapping.id].creator)),
-                allocation_id: mapping.id,
-                address: mapping.address,
-                size: mapping.size as u64,
-                offset: mapping.offset as u64,
-                access_count: mapping.access.len() as u32,
-                ..Record::default()
-            };
-            for (index, access) in mapping.access.iter().enumerate() {
-                record.access[index] = cuinterpose_protocol::Access {
+            let mut access: Vec<_> = mapping
+                .access
+                .iter()
+                .map(|access| cuinterpose_protocol::Access {
                     location_type: access.location.kind,
                     location_id: access.location.id,
                     flags: u64::from(access.flags),
-                };
-            }
+                })
+                .collect();
+            access.sort();
+            let record = Record::Mapping {
+                creator: self.allocations[&mapping.id].creator,
+                id: mapping.id,
+                address: mapping.address,
+                size: mapping.size as u64,
+                offset: mapping.offset as u64,
+                access,
+            };
             records.push(record);
         }
         super::multicast::describe(self, &mut records)?;
@@ -606,7 +601,7 @@ impl State {
                         return Err(INVALID_HANDLE);
                     }
                     cache()?.replace(
-                        (1, allocation.id),
+                        (ResourceKind::Unicast, allocation.id),
                         Some(unsafe { OwnedFd::from_raw_fd(fd) }),
                     )?;
                 }
@@ -684,7 +679,7 @@ impl State {
             }
         }
         if !handle_live && !mapped {
-            cache()?.replace((1, id), None)?;
+            cache()?.replace((ResourceKind::Unicast, id), None)?;
             self.allocations.remove(&id);
         }
         Ok(())
@@ -770,17 +765,8 @@ fn initialize_generation() -> Result<()> {
         std::env::var("CUINTERPOSE_PARTICIPANT_ID")
     };
     let identity = match configured {
-        Ok(value) => {
-            cuinterpose_protocol::parse_identity(value.as_bytes()).map_err(|_| INVALID_VALUE)?
-        }
-        Err(std::env::VarError::NotPresent) => {
-            let mut id = [0; 33];
-            for (index, byte) in random::<16>()?.iter().enumerate() {
-                id[index * 2] = b"0123456789abcdef"[(byte >> 4) as usize];
-                id[index * 2 + 1] = b"0123456789abcdef"[(byte & 15) as usize];
-            }
-            id
-        }
+        Ok(value) => value.parse().map_err(|_| INVALID_VALUE)?,
+        Err(std::env::VarError::NotPresent) => ParticipantId(random()?),
         Err(_) => return Err(INVALID_VALUE),
     };
     let directory =
@@ -879,7 +865,7 @@ pub fn cuMemCreate(
         if state.next & HANDLE_MASK != 0 {
             return Err(OUT_OF_MEMORY);
         }
-        Some(random()?)
+        Some(AllocationId(random()?))
     } else {
         None
     };
@@ -910,13 +896,7 @@ pub fn cuMemCreate(
         creator: state.identity,
         allocation: id,
         endpoint: state.endpoint.clone(),
-        resource: 1,
-        devices: 0,
-        // These ticket fields describe multicast objects only. Unicast size
-        // and properties belong to Allocation, not the C v2 ticket.
-        size: 0,
-        handle_types: 0,
-        flags: 0,
+        resource: Resource::Unicast,
     };
     let allocation = Allocation {
         id,
@@ -1218,7 +1198,7 @@ pub fn cuMemExportToShareableHandle(
         return super::multicast::export(&mut state, id, out);
     }
     let allocation = state.allocations.get_mut(&id).ok_or(INVALID_HANDLE)?;
-    if allocation.creator && !cache()?.contains(&(1, id))? {
+    if allocation.creator && !cache()?.contains(&(ResourceKind::Unicast, id))? {
         let mut fd = -1;
         call!(
             "cuMemExportToShareableHandle",
@@ -1231,7 +1211,10 @@ pub fn cuMemExportToShareableHandle(
         if fd < 0 {
             return Err(INVALID_HANDLE);
         }
-        cache()?.replace((1, id), Some(unsafe { OwnedFd::from_raw_fd(fd) }))?;
+        cache()?.replace(
+            (ResourceKind::Unicast, id),
+            Some(unsafe { OwnedFd::from_raw_fd(fd) }),
+        )?;
     }
     let ticket = ticket::export(&allocation.ticket).map_err(|_| OUT_OF_MEMORY)?;
     allocation.shared = true;
@@ -1249,7 +1232,7 @@ pub fn cuMemImportFromShareableHandle(out: *mut u64, fd: *mut c_void, kind: u32)
         return Err(INVALID_VALUE);
     }
     let ticket = if kind == 1 {
-        ticket::read(fd as isize as i32).ok()
+        ticket::read(fd as isize as i32).map_err(|_| INVALID_HANDLE)?
     } else {
         None
     };
@@ -1279,7 +1262,7 @@ pub fn cuMemImportFromShareableHandle(out: *mut u64, fd: *mut c_void, kind: u32)
     if state.next & HANDLE_MASK != 0 {
         return Err(OUT_OF_MEMORY);
     }
-    if ticket.resource == 2 {
+    if matches!(ticket.resource, Resource::Multicast { .. }) {
         return super::multicast::import(state, out, ticket);
     }
     let id = ticket.allocation;

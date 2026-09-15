@@ -11,46 +11,17 @@ import os
 from pathlib import Path
 import select
 import socket
-import struct
 import subprocess
 import sys
 import time
 
 from fork import cuda, props, Stats, stats
+from protocol_client import LIFECYCLE, request, reply
 
 
 class Multicast(c.Structure):
     _fields_ = [("devices", c.c_uint), ("size", c.c_size_t),
                 ("handles", c.c_uint64), ("flags", c.c_uint64)]
-
-
-def request(path, operation, identity):
-    connection = socket.socket(socket.AF_UNIX)
-    connection.settimeout(10)
-    connection.connect(path)
-    header = bytearray(256)
-    struct.pack_into("<IHH", header, 0, 0x44564D4D, 2, operation)
-    header[24:57] = identity
-    connection.sendall(header)
-    return connection
-
-
-def reply(connection, success=True):
-    with connection:
-        data = bytearray()
-        while len(data) < 256:
-            chunk = connection.recv(256 - len(data))
-            assert chunk, "missing control response"
-            data.extend(chunk)
-        status = struct.unpack_from("<i", data, 8)[0]
-        assert (status == 0) == success, data[57:153]
-        remaining = struct.unpack_from("<I", data, 12)[0] * 688
-        while remaining:
-            chunk = connection.recv(remaining)
-            assert chunk
-            remaining -= len(chunk)
-        assert connection.recv(1) == b"", "more than one response"
-        return data
 
 
 def worker(kind, transport_fd, ready_fd, release_fd):
@@ -73,7 +44,7 @@ def worker(kind, transport_fd, ready_fd, release_fd):
     assert cuda.cuMemImportFromShareableHandle(c.byref(imported), c.c_void_p(descriptors[0]), 1) == 0
     os.close(descriptors[0])
     path = f"{os.environ['SNAPSHOT_CONTROL_DIR']}/cuinterpose-{os.getpid()}.sock"
-    identity = reply(request(path, 1, bytes(33)))[24:57]
+    identity = reply(request(path, "handshake"))["participant"]
     assert cuda.rpc_attempts() == 2, "only the two mandatory threads should exist"
     # Confirm pressure is real, then leave it armed for the entire lifecycle.
     cuda.rpc_fail_workers(1000)
@@ -124,8 +95,9 @@ def reciprocal(kind):
         for process in workers:
             path, identity = json.loads(process.stdout.readline())
             endpoints.append((path, bytes.fromhex(identity)))
-        for operation in (3, 4, 5, 7, 8, 9, 10, 11, 12):
-            barrier = operation == (8 if kind == "unicast" else 10)
+        for operation in LIFECYCLE:
+            barrier = operation == (
+                "restore_unicast" if kind == "unicast" else "restore_multicast_importers")
             if barrier:
                 for process in workers:
                     process.stdin.write("barrier\n")
@@ -140,7 +112,7 @@ def reciprocal(kind):
                     assert os.read(ready, 1) == b"R"
                 # Queue INSPECT behind both blocked lifecycle workers. Neither
                 # queued state access may obstruct the independent listeners.
-                inspections = [request(path, 2, identity) for path, identity in endpoints]
+                inspections = [request(path, "inspect", identity) for path, identity in endpoints]
                 for _, release in pipes:
                     os.write(release, b"G")
             for connection in connections:
@@ -148,7 +120,7 @@ def reciprocal(kind):
             if barrier:
                 for connection in inspections:
                     refused = reply(connection, success=False)
-                    assert b"cannot inspect current CUDA state" in refused[57:153]
+                    assert "cannot inspect current CUDA state" in refused["result"]["Err"]
         for process in workers:
             process.stdin.write("done\n")
             process.stdin.flush()
@@ -222,7 +194,7 @@ def constructor_child(nth, library):
         assert result == 0 and value.allocations == 1 and value.phase == 1
         assert path.exists() and cuda.rpc_refused() == 0
         assert len(os.listdir("/proc/self/task")) == len(before_tasks) + 2
-        reply(request(str(path), 1, bytes(33)))
+        reply(request(str(path), "handshake"))
         assert cuda.cuMemRelease(handle) == 0
     print(f"PASS RPC constructor child {nth}: prompt return, "
           + ("sticky failure, FD/path cleanup, eventual worker exit" if nth else "live endpoint"))
@@ -232,12 +204,12 @@ def constructor(nth, library):
     handle = c.c_uint64()
     assert cuda.cuMemCreate(c.byref(handle), 4096, c.byref(props), 0) == 0
     path = f"{os.environ['SNAPSHOT_CONTROL_DIR']}/cuinterpose-{os.getpid()}.sock"
-    identity = reply(request(path, 1, bytes(33)))[24:57]
+    identity = reply(request(path, "handshake"))["participant"]
     subprocess.run([sys.executable, __file__, "constructor-child", str(nth), library],
                    env=os.environ | {"CUINTERPOSE_TEST_STARTUP_FAILURE": str(nth)},
                    check=True, timeout=15)
     assert stats().allocations == 1 and stats().phase == 1
-    assert reply(request(path, 1, bytes(33)))[24:57] == identity
+    assert reply(request(path, "handshake"))["participant"] == identity
     assert cuda.rpc_attempts() == 2 and cuda.rpc_refused() == 0
     assert cuda.cuMemRelease(handle) == 0
     print(f"PASS RPC constructor {nth}: parent generation unaffected")
@@ -248,28 +220,28 @@ def queue_full():
     assert cuda.cuMemCreate(c.byref(handle), 1 << 20, c.byref(props), 0) == 0
     assert cuda.cuMemExportToShareableHandle(c.byref(ticket), handle, 1, 0) == 0
     path = f"{os.environ['SNAPSHOT_CONTROL_DIR']}/cuinterpose-{os.getpid()}.sock"
-    identity = reply(request(path, 1, bytes(33)))[24:57]
-    reply(request(path, 3, identity))
+    identity = reply(request(path, "handshake"))["participant"]
+    reply(request(path, "prepare_multicast", identity))
     cuda.rpc_block_copy()
-    saving = request(path, 4, identity)
+    saving = request(path, "save_allocations", identity)
     deadline = time.monotonic() + 5
     while not cuda.rpc_copy_entered() and time.monotonic() < deadline:
         time.sleep(0.001)
     assert cuda.rpc_copy_entered()
-    queued = [request(path, 2, identity) for _ in range(8)]
+    queued = [request(path, "inspect", identity) for _ in range(8)]
     # A lifecycle request that would mutate state after SAVE completes is
     # rejected before it enters execution. It must not be replayed later.
-    refused = reply(request(path, 5, identity), success=False)
-    assert b"control queue full; refused without mutation" in refused[57:153]
+    refused = reply(request(path, "prepare_unicast", identity), success=False)
+    assert "control queue full; refused without mutation" in refused["result"]["Err"]
     cuda.rpc_release_copy()
     reply(saving)
     for connection in queued:
         refused = reply(connection, success=False)
-        assert b"cannot inspect current CUDA state" in refused[57:153]
+        assert "cannot inspect current CUDA state" in refused["result"]["Err"]
     assert stats().phase == 2  # Preparing (saved), not fully prepared.
     assert cuda.fakeLiveAllocations() == 1
     # Explicit subsequent request is a new caller action, not an internal retry.
-    reply(request(path, 5, identity))
+    reply(request(path, "prepare_unicast", identity))
     assert cuda.fakeLiveAllocations() == 0
     os.close(ticket.value)
     print("PASS RPC bounded queue: eight waiting requests, rejected mutation never executed")

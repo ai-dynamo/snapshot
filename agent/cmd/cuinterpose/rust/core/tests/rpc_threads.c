@@ -7,9 +7,11 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 static atomic_int armed, refused, attempts, fail_nth;
@@ -28,24 +30,23 @@ void rpc_block_copy(void) { atomic_store(&block_copy, 1); }
 int rpc_copy_entered(void) { return atomic_load(&copy_entered); }
 void rpc_release_copy(void) { atomic_store(&copy_release, 1); }
 
-ssize_t sendmsg(int fd, const struct msghdr *message, int flags) {
-    // Both import workers stop before sending their first peer EXPORT. The
-    // external controller releases them only after both reached this point.
-    if (ready_fd >= 0 && message->msg_iovlen &&
-        message->msg_iov[0].iov_len == 256) {
-        const unsigned char *header = message->msg_iov[0].iov_base;
-        uint32_t magic;
-        memcpy(&magic, header, sizeof(magic));
-        if (magic == 0x44564d4d && header[6] == 6 && header[7] == 0) {
-            char token = 'R';
-            if (write(ready_fd, &token, 1) != 1 ||
-                read(release_fd, &token, 1) != 1)
-                _exit(91);
-            ready_fd = release_fd = -1;
-        }
+int connect(int fd, const struct sockaddr *address, socklen_t length) {
+    // Only the lifecycle worker opens a peer connection while this rendezvous
+    // is armed. Stop at that semantic boundary, not at packet byte offsets or
+    // libc sendmsg (rustix may issue sendmsg directly as a Linux syscall).
+    if (ready_fd >= 0 && address->sa_family == AF_UNIX &&
+        length > offsetof(struct sockaddr_un, sun_path) &&
+        memmem(((const struct sockaddr_un *)address)->sun_path,
+               length - offsetof(struct sockaddr_un, sun_path),
+               "/cuinterpose-", strlen("/cuinterpose-"))) {
+        char token = 'R';
+        if (write(ready_fd, &token, 1) != 1 ||
+            read(release_fd, &token, 1) != 1)
+            _exit(91);
+        ready_fd = release_fd = -1;
     }
-    ssize_t (*next)(int, const struct msghdr *, int) = dlsym(RTLD_NEXT, "sendmsg");
-    return next(fd, message, flags);
+    int (*next)(int, const struct sockaddr *, socklen_t) = dlsym(RTLD_NEXT, "connect");
+    return next(fd, address, length);
 }
 
 int cuMemcpyDtoHAsync_v2(void *host, uint64_t device, size_t size, void *stream) {

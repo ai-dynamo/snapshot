@@ -7,13 +7,13 @@
 
 use crate::state::Result;
 use cuinterpose_abi::{INVALID_HANDLE, UNKNOWN};
-use cuinterpose_protocol::AllocationId;
+use cuinterpose_protocol::{AllocationId, ResourceKind};
 use std::collections::BTreeMap;
 use std::os::fd::OwnedFd;
 use std::sync::{Condvar, Mutex, MutexGuard};
 
 /// Resource kind is part of the lookup key, not an authorization token.
-pub type Key = (u32, AllocationId);
+pub type Key = (ResourceKind, AllocationId);
 
 #[derive(Default)]
 pub(super) struct Entries {
@@ -164,20 +164,23 @@ mod tests {
     #[test]
     fn resource_kind_is_part_of_descriptor_identity() {
         let cache = ExportCache::default();
-        let id = [8; 16];
+        let id = AllocationId([8; 16]);
         cache
-            .replace((2, id), Some(File::open("/dev/null").unwrap().into()))
+            .replace(
+                (ResourceKind::Multicast, id),
+                Some(File::open("/dev/null").unwrap().into()),
+            )
             .unwrap();
-        assert!(cache.acquire(&(1, id)).is_err());
-        assert!(cache.acquire(&(2, id)).is_ok());
-        cache.replace((1, id), None).unwrap();
-        assert!(cache.acquire(&(2, id)).is_ok());
+        assert!(cache.acquire(&(ResourceKind::Unicast, id)).is_err());
+        assert!(cache.acquire(&(ResourceKind::Multicast, id)).is_ok());
+        cache.replace((ResourceKind::Unicast, id), None).unwrap();
+        assert!(cache.acquire(&(ResourceKind::Multicast, id)).is_ok());
     }
 
     #[test]
     fn teardown_drains_transfers_and_rejects_new_requests() {
         let cache = Arc::new(ExportCache::default());
-        let id = (1, [1; 16]);
+        let id = (ResourceKind::Unicast, AllocationId([1; 16]));
         cache
             .replace(id, Some(File::open("/dev/null").unwrap().into()))
             .unwrap();
@@ -210,8 +213,8 @@ mod tests {
     fn replacement_waits_until_the_old_descriptor_is_sent() {
         use std::io::Read;
         let cache = Arc::new(ExportCache::default());
-        let id = (2, [2; 16]);
-        let unrelated = (1, [4; 16]);
+        let id = (ResourceKind::Multicast, AllocationId([2; 16]));
+        let unrelated = (ResourceKind::Unicast, AllocationId([4; 16]));
         cache
             .replace(unrelated, Some(File::open("/dev/null").unwrap().into()))
             .unwrap();
@@ -249,8 +252,8 @@ mod tests {
     #[test]
     fn unrelated_mutations_do_not_drain_or_reject_active_exports() {
         let cache = ExportCache::default();
-        let a = (1, [1; 16]);
-        let b = (2, [2; 16]);
+        let a = (ResourceKind::Unicast, AllocationId([1; 16]));
+        let b = (ResourceKind::Multicast, AllocationId([2; 16]));
         cache
             .replace(a, Some(File::open("/dev/null").unwrap().into()))
             .unwrap();
@@ -279,18 +282,17 @@ mod tests {
 
     #[test]
     fn failed_socket_send_releases_lease_and_allows_clear() {
-        use cuinterpose_protocol::{Header, Operation, send_header};
+        use cuinterpose_protocol::{Request, send};
         use std::os::unix::net::UnixStream;
         let cache = Arc::new(ExportCache::default());
-        let id = (1, [3; 16]);
+        let id = (ResourceKind::Unicast, AllocationId([3; 16]));
         cache
             .replace(id, Some(File::open("/dev/null").unwrap().into()))
             .unwrap();
         let lease = cache.acquire(&id).unwrap();
         let (socket, peer) = UnixStream::pair().unwrap();
         drop(peer);
-        let request = Header::new(Operation::Export, [0; 33]);
-        assert!(send_header(&socket, &request, Some(lease.descriptor())).is_err());
+        assert!(send(&socket, &Request::Handshake, Some(lease.descriptor())).is_err());
         let (done, completion) = mpsc::channel();
         let copy = Arc::clone(&cache);
         let worker = std::thread::spawn(move || {

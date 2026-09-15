@@ -12,6 +12,7 @@ import socket
 import struct
 import sys
 import time
+from protocol_client import command, inspect
 
 
 class Location(c.Structure):
@@ -46,27 +47,6 @@ def stats():
     return value
 
 
-def inspect(operation=1):
-    path = f"{os.environ['SNAPSHOT_CONTROL_DIR']}/cuinterpose-{os.getpid()}.sock"
-    # Identify before opening the operation connection. Leaving that first
-    # connection idle while handshaking on a second one consumes the listener's
-    # bounded header-read slot and delays the handshake until its timeout.
-    identity = inspect()[24:57] if operation != 1 else bytes(33)
-    with socket.socket(socket.AF_UNIX) as connection:
-        connection.settimeout(5)
-        connection.connect(path)
-        request = bytearray(256)
-        struct.pack_into("<IHH", request, 0, 0x44564D4D, 2, operation)
-        request[24:57] = identity
-        connection.sendall(request)
-        response = bytearray()
-        while len(response) < 256:
-            data = connection.recv(256 - len(response))
-            assert data
-            response.extend(data)
-        return response
-
-
 def wait(child):
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
@@ -94,9 +74,9 @@ def child_checks(parent_id, inherited=(), ticket=None, application_socket=None):
         if application_socket is not None:
             os.fstat(application_socket)
         assert stats().allocations == 0
-        identity = inspect()[24:57]
+        identity = inspect()["participant"]
         assert identity != parent_id
-        assert identity[:32] != os.environ["CUINTERPOSE_PARTICIPANT_ID"].encode()
+        assert identity.hex() != os.environ["CUINTERPOSE_PARTICIPANT_ID"]
         value = c.c_uint64()
         assert cuda.cuMemCreate(c.byref(value), 4096, c.byref(props), 0) == 0
         assert cuda.cuMemRelease(value) == 0
@@ -115,15 +95,15 @@ def main():
             child_checks(b"")
         wait(child)
         assert stats().allocations == 0
-        assert inspect()[24:56].decode() == os.environ["CUINTERPOSE_PARTICIPANT_ID"]
+        assert inspect()["participant"].hex() == os.environ["CUINTERPOSE_PARTICIPANT_ID"]
         return
 
     value = c.c_uint64()
     assert cuda.cuMemCreate(c.byref(value), 4096, c.byref(props), 0) == 0
     ticket = c.c_int(-1)
     assert cuda.cuMemExportToShareableHandle(c.byref(ticket), value, 1, 0) == 0
-    parent_id = inspect()[24:57]
-    assert parent_id[:32].decode() == os.environ["CUINTERPOSE_PARTICIPANT_ID"]
+    parent_id = inspect()["participant"]
+    assert parent_id.hex() == os.environ["CUINTERPOSE_PARTICIPANT_ID"]
 
     if mode == "descriptors":
         # An idle accepted socket belongs to the shim's FD inventory, while the
@@ -150,18 +130,17 @@ def main():
             child_checks(parent_id, inherited, ticket.value, idle.fileno())
         wait(child)
         assert stats().allocations == 1 and stats().exports == 1
-        assert inspect()[24:57] == parent_id
+        assert inspect()["participant"] == parent_id
         idle.close()
     elif mode == "poison":
         # Protocol/order rejection must not poison the workload. A real copy
         # failure does, and only that generation's poison is reset by fork.
-        response = inspect(5)
-        assert struct.unpack_from("<i", response, 8)[0] != 0
+        command("prepare_unicast", False)
         assert stats().phase == 1
-        assert struct.unpack_from("<i", inspect(3), 8)[0] == 0
+        command("prepare_multicast")
         cuda.fakeFailNext.argtypes = [c.c_char_p]
         cuda.fakeFailNext(b"cuMemcpyDtoHAsync_v2")
-        assert struct.unpack_from("<i", inspect(4), 8)[0] != 0
+        command("save_allocations", False)
         assert stats().phase == 5
         child = os.fork()
         if child == 0:
@@ -205,14 +184,14 @@ def main():
                 traceback.print_exc()
                 os._exit(1)
         wait(child)
-        assert inspect()[24:57] == parent_id
+        assert inspect()["participant"] == parent_id
     elif mode == "carrier":
         def mappings():
             return [tuple(int(part, 16) for part in line.split()[0].split("-"))
                     for line in Path("/proc/self/maps").read_text().splitlines()]
         before = mappings()
-        assert struct.unpack_from("<i", inspect(3), 8)[0] == 0
-        assert struct.unpack_from("<i", inspect(4), 8)[0] == 0
+        command("prepare_multicast")
+        command("save_allocations")
         assert cuda.fakeRegisteredHostRanges() == 1
         cuda.cuMemHostGetFlags.argtypes = [c.POINTER(c.c_uint), c.c_void_p]
         base = None
@@ -287,7 +266,7 @@ def main():
                 traceback.print_exc()
                 os._exit(1)
         wait(child)
-        assert stats().allocations == 1 and inspect()[24:57] == parent_id
+        assert stats().allocations == 1 and inspect()["participant"] == parent_id
     else:
         raise AssertionError(mode)
     os.close(ticket.value)

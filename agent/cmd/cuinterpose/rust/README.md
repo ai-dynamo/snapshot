@@ -83,18 +83,18 @@ The numeric `DebugPhase` values exist only at the diagnostic C ABI boundary.
 
 The coordinator emits one typed JSON report per completed phase using Serde
 and `serde_json`, with numeric timings and allocation counts. The Go agent
-decodes the same fields using `encoding/json`. This replaces the experimental
-key/value progress format; producer and consumer must be updated together.
-Serde is currently coordinator-only: the frontend still depends only on the
-ABI crate and `libc`. MessagePack transport and typed topology records are
-the next cleanup increment, not implemented by this report-format change.
+decodes the same fields using `encoding/json`. The protocol crate uses Serde
+and `rmp-serde` for MessagePack, `serde_bytes` for binary IDs, `rustix` for
+owned descriptor transfer, and `thiserror` for codec/I/O errors. These
+dependencies belong to the lazy core and standalone coordinator; the frontend
+still depends only on the ABI crate and `libc`.
 
 | Crate | Owns |
 | --- | --- |
 | `frontend` | CUDA/resolver exports, checked allocation-free ELF bootstrap, caller-relative lookup, provider retention, and lazy core loading |
 | `abi` | C layouts and the single `memory_api!` signature inventory generating wrappers and the typed core table |
 | `core` | Allocation state, CUDA operations, host carriers, control listener, sealed-ticket transport, and leased peer-export descriptors |
-| `protocol` | C v2 binary layouts, named records and tickets, checked codecs, socket framing, and descriptor transport |
+| `protocol` | Typed messages, topology records, identities and tickets; versioned MessagePack encoding, framing, and owned descriptor transport |
 | `coordinator` | Participant discovery, named-field topology validation, phase barriers, and state-file publication |
 
 The private host/core ABI is version 5, checked by version and size.
@@ -135,13 +135,28 @@ invariant, not a claim of compatibility with arbitrary loader namespaces.
 This makes nested runtime-to-driver queries idempotent without trusting
 arbitrary functions from a library named cuinterpose.
 
-The independently versioned C wire format remains v2: 256-byte headers,
-256-byte tickets, and 688-byte records. Numeric layout belongs only in
-`protocol`, not allocation or topology logic. Record ordering compares the
-encoded bytes, preserving the C implementation's canonical order. Record
-reserved bytes round-trip unchanged. Header readers ignore reserved input;
-ticket readers reject nonzero reserved arrays and require the multicast-only
-metadata to be zero for unicast. Fresh encodings zero reserved fields.
+The wire/state format is version **3**, independent of the host/core C ABI.
+Requests, responses, sealed tickets, and `cuinterpose.state` encode a
+`{version, body}` MessagePack envelope with named fields. Stream messages
+have a four-byte little-endian length prefix. Tickets retain the four-byte
+`CMVD` signature so obsolete or malformed shim tickets fail instead of being
+forwarded to CUDA as raw descriptors. There is no C v2 compatibility codec:
+old experimental checkpoints require the old implementation.
+
+`Record` is an enum with allocation, mapping, multicast object, device,
+binding, and multicast-mapping variants. Each carries only its relevant
+fields. Creator/content properties are booleans, not packed flags; bindings
+carry typed kind/version values. `ParticipantId` and `AllocationId` are
+distinct 16-byte types. Only the participant environment override uses hex.
+Canonical state sorts participants and typed records; access grants are sorted
+by their fields, not their encoded bytes.
+
+Control messages and state documents are bounded at 32 MiB, inspection
+collections at 4096 records and 32 access grants per mapping, and sealed
+tickets at 4096 bytes. Decoding rejects unsupported versions and trailing
+data. `rustix` handles `SCM_RIGHTS`, close-on-exec, and memfd sealing; every
+received descriptor is RAII-owned before fallible decoding. Application FD
+transport and CUDA API signatures are unchanged.
 
 The peer-export cache is separate from CUDA state. Each transmission leases
 a duplicated descriptor. Replacement/removal retires only the affected entry
@@ -253,14 +268,14 @@ and does not make a partially mutated CUDA state safe to resume.
 
 ## Local validation
 
-On Linux/amd64 with Rust and `/usr/bin/gcc`:
+On Linux/amd64 with Rust, `/usr/bin/gcc`, and Python `msgpack` installed
+(use a virtual environment locally; the pinned test builder includes it):
 
 ```sh
 export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/gcc
 cargo test --workspace --target x86_64-unknown-linux-gnu
 cargo build --workspace --release --target x86_64-unknown-linux-gnu
 python3 frontend/tests/run.py
-python3 core/tests/ticket_interop.py
 python3 core/tests/reference.py
 ```
 
@@ -279,7 +294,8 @@ diagnosis. The underlying sanitizer/runtime/old-gate interaction remains unknown
 it is not evidence of a protocol or carrier defect. None of these results
 qualify native CUDA/CRIU or physical-GPU restore.
 
-Unit tests include wire known-byte compatibility fixtures, malformed ELF
+Unit tests include MessagePack version/bounds checks, fragmented frames,
+descriptor ownership on malformed input, binary identities, malformed ELF
 tables, panic poisoning, sealed memfds, and export-cache retirement races.
 The carrier suite adds 22 process-isolated zero-handle, import rollback,
 native-phase, partial-copy/cleanup, fail-stop, and timing cases. Persistent
@@ -293,13 +309,9 @@ while the parent generation remains usable. The test-only carrier provider
 uses `RTLD_NEXT`, translating a valid zero handle into the pinned fake driver's
 nonzero model; production contains no such translation. A separate unit
 subprocess checks absent-query fallback and primary-error preservation.
-The ticket interoperability runner compiles the unmodified reader and writer
-from C stack commit `21008b50b93a9879a805665e331e777bb93abf49`, obtained with
-`git show`, into a temporary helper. That commit must exist in the local
-repository; the runner does not fetch or change branches. An explicitly
-selected Rust test exchanges sealed ticket FDs with the helper in both
-directions. It is ignored by ordinary `cargo test` because it needs that C
-build. No CUDA toolkit is required.
+Python process tests use one shared MessagePack client instead of duplicating
+byte offsets. They exchange tickets and control requests with the real Rust
+core, including import rollback and resource-kind/property mismatch cases.
 The [standalone loader suite](frontend/tests/README.md) uses independently
 compiled C fixtures with real CUDA symbol names and a mock core, without
 CUDA headers or GPUs. It validates the front-end ABI and loader behavior,
@@ -308,16 +320,20 @@ general post-CUDA fork-without-exec, local `RTLD_NEXT` scopes, arbitrary loader 
 real multicast reconstruction.
 
 `reference.py` builds the pinned C fixtures using a local CUDA 13.1/gtest Docker
-image, then runs all 14 coordinator, 13 tracking, 5 unicast lifecycle, and
-6 multicast tests against Rust, including ordinary forked importers. The pinned
-fixtures retain their CUDA assertions. After the original C self-tests run,
+image, then runs 13 tracking, 5 unicast lifecycle, and 5 multicast C tests
+against Rust, including ordinary forked importers. The sixth multicast case
+sent a v2 packet directly; its cache-drop assertions are preserved in the
+Python `cached-export` case. The C coordinator's 14 behavioral cases are
+covered by the typed Rust executable-contract tests, including parallel
+dispatch, global barriers, fail-before-mutation checks, state publication,
+and restore identity/topology refusal. After the original C self-tests run,
 `core/tests/json-reports.patch` changes only their progress-output assertions
 before rebuilding them for Rust. There is no coordinator-fork retry adapter.
 Prebuilt fixtures must carry the matching patch fingerprint.
 By default `SANITIZE=` explicitly disables fixture instrumentation and readelf
 checks actual linkage. `--sanitized` selects separate ASan/UBSan diagnostic
 coverage; `--fixtures` reuse must match the selected linkage.
-Eight additional multicast modes cover
+Nine Python multicast modes cover
 released handles and binding-only sharing, resource-kind/ticket mismatch,
 partial mappings and unknown access, destructive versus harmless refusal,
 native-address binding replay, a blocked collective with simultaneous control

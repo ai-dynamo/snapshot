@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 
 
@@ -134,10 +135,10 @@ def main():
                             "SNAPSHOT_CONTROL_DIR": str(actual)}
         subprocess.run([str(build / "init-only")], env=actual_env, check=True, timeout=20)
         for mode in ["init", "init-handle", "init-failure", "private", *map(str, range(7)), "tracked-query", "constructor"]:
-            subprocess.run(["/usr/bin/python3", str(fixtures.parent / "endpoint.py"), mode, str(constructor)],
+            subprocess.run([sys.executable, str(fixtures.parent / "endpoint.py"), mode, str(constructor)],
                            env=actual_env, check=True, timeout=20)
         for mode in [*map(str, range(3, 7)), "resolver-startup-failure"]:
-            subprocess.run(["/usr/bin/python3", str(fixtures.parent / "endpoint.py"), mode, str(constructor)],
+            subprocess.run([sys.executable, str(fixtures.parent / "endpoint.py"), mode, str(constructor)],
                            env=actual_env | {"CUINTERPOSE_TEST_NESTED_RUNTIME": "1"},
                            check=True, timeout=20)
         print("19 actual-core endpoint cases passed; no GPU or VMM lifecycle qualification.")

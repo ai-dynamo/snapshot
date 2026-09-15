@@ -6,14 +6,12 @@
 
 import ctypes as c
 import os
-import array
-import fcntl
 import socket
-import struct
 import sys
 import threading
 import time
-from fork import cuda, inspect, props, stats, Properties
+from fork import cuda, props, stats, Properties
+from protocol_client import LIFECYCLE, command, receive, seal_ticket, send
 
 CREATE, MAP, ACCESS, D2H, H2D, SYNC, DESTROY, UNMAP, FREE = range(9)
 RELEASE, PROPERTIES, SET_CONTEXT, RETAIN_PRIMARY, RELEASE_PRIMARY, REGISTER, UNREGISTER, RETAIN = range(9, 17)
@@ -32,13 +30,6 @@ cuda.fakeCurrentContext.restype = c.c_void_p
 cuda.cuCtxSetCurrent.argtypes = [c.c_void_p]
 
 
-def command(operation, success=True):
-    response = inspect(operation)
-    result = struct.unpack_from("<i", response, 8)[0]
-    assert (result == 0) == success, (operation, result, response[57:153])
-    return response
-
-
 def main():
     mode = sys.argv[1]
     length = 1 << 20
@@ -51,16 +42,9 @@ def main():
         assert cuda.cuMemCreate(c.byref(native), length, c.byref(native_prop), 0) == 0
         assert cuda.cuMemExportToShareableHandle(c.byref(raw), native, 1, 0) == 0
         endpoint = f"{os.environ['SNAPSHOT_CONTROL_DIR']}/peer.sock"
-        creator, allocation = b"1" * 32 + b"\0", b"a" * 16
-        ticket = bytearray(256)
-        struct.pack_into("<IH", ticket, 0, 0x44564D43, 2)
-        ticket[41:74], ticket[74:90] = creator, allocation
-        ticket[90:90 + len(endpoint)] = endpoint.encode()
-        struct.pack_into("<I", ticket, 200, 1)
-        fd = os.memfd_create("import-rollback", os.MFD_ALLOW_SEALING)
-        os.write(fd, ticket)
-        fcntl.fcntl(fd, fcntl.F_ADD_SEALS, fcntl.F_SEAL_SEAL | fcntl.F_SEAL_WRITE |
-                    fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK)
+        creator, allocation = b"1" * 16, b"a" * 16
+        fd = seal_ticket(dict(creator=creator, allocation=allocation, endpoint=endpoint,
+                              resource={"kind": "unicast"}))
         with socket.socket(socket.AF_UNIX) as listener:
             listener.bind(endpoint)
             listener.listen()
@@ -71,13 +55,11 @@ def main():
                         connection, _ = listener.accept()
                         with connection:
                             connection.settimeout(5)
-                            request = bytearray()
-                            while len(request) < 256:
-                                part = connection.recv(256 - len(request))
-                                assert part
-                                request.extend(part)
-                            connection.sendmsg([request], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
-                                                           array.array("i", [raw.value]))])
+                            request = receive(connection)
+                            assert request == dict(kind="export", participant=creator,
+                                                   resource="unicast", allocation=allocation)
+                            send(connection, dict(participant=creator, result={"Ok": dict(
+                                kind="export", resource="unicast", allocation=allocation)}), raw.value)
                 except BaseException as error:
                     errors.append(error)
             worker = threading.Thread(target=serve)
@@ -96,10 +78,10 @@ def main():
                 assert imported.value & 0xFFFF000000000000 == 0xD94D000000000000
                 assert cuda.cuMemMap(0x10000000, length, 0, imported, 0) == 0
                 assert cuda.cuMemGetAllocationPropertiesFromHandle(c.byref(Properties()), imported) == 0
-                for operation in (3, 4, 5, 7):
+                for operation in LIFECYCLE[:4]:
                     command(operation)
                 cuda.carrier_zero_import()
-                for operation in (8, 9, 10, 11, 12):
+                for operation in LIFECYCLE[4:]:
                     command(operation)
                 assert cuda.cuMemGetAllocationPropertiesFromHandle(c.byref(Properties()), imported) == 0
                 assert cuda.cuMemUnmap(0x10000000, length) == 0
@@ -177,21 +159,18 @@ def main():
         for handle in handles:
             assert cuda.cuMemRelease(handle) == 0
         handles.clear()
-    command(3)
+    command("prepare_multicast")
     cuda.carrier_reset()
     if mode == "save-pending":
         cuda.carrier_pending_copies()
-        command(4)  # Harness requires process exit 127, not a returned error.
+        command("save_allocations")  # Harness requires exit 127, not a returned error.
         raise AssertionError("unknown D2H completion returned")
-        assert cuda.carrier_calls(RETAIN) == count
-        print("PASS carrier", mode)
-        return
     if mode in ("save-copy", "save-sync", "save-unmap", "save-released"):
         failed = {"save-copy": D2H, "save-sync": SYNC, "save-unmap": UNMAP,
                   "save-released": D2H}[mode]
         cuda.carrier_fail(failed, 2 if failed == D2H else 1, int(failed == UNMAP), 711)
-        response = command(4, False)
-        assert b"CUDA error 711" in response[57:153]
+        response = command("save_allocations", False)
+        assert "CUDA error 711" in response
         assert stats().phase == 5
         assert cuda.fakeLiveAllocations() == count and cuda.fakeMappedCount() == count
         assert cuda.carrier_calls(UNMAP) == count and cuda.carrier_calls(FREE) == 1
@@ -204,8 +183,8 @@ def main():
     if mode == "context-failure":
         cuda.carrier_fail(SET_CONTEXT, 1, 0, 711)
         cuda.carrier_fail(RELEASE_PRIMARY, 1, 1, 712)
-        response = command(4, False)
-        assert b"CUDA error 711" in response[57:153]
+        response = command("save_allocations", False)
+        assert "CUDA error 711" in response
         assert cuda.carrier_calls(RELEASE_PRIMARY) == 1
         assert cuda.fakePrimaryContextsHeld() == 0 and cuda.fakeRegisteredHostRanges() == 0
         print("PASS carrier", mode)
@@ -215,14 +194,14 @@ def main():
         cuda.carrier_delay(D2H, 10000)
         cuda.carrier_delay(SYNC, 10000)
     start = time.monotonic()
-    response = command(4)
+    response = command("save_allocations")
     duration_us = (time.monotonic() - start) * 1e6
     if mode == "timing":
-        copy_us = struct.unpack_from("<I", response, 188)[0]
+        copy_us = response["copy_us"]
         assert copy_us >= 30000 and duration_us - copy_us >= 150000, (duration_us, copy_us)
         assert cuda.carrier_calls(SYNC) == 1
         assert cuda.carrier_calls(SET_CONTEXT) == 0
-    command(5)
+    command("prepare_unicast")
     if mode == "native":
         native_prop = Properties.from_buffer_copy(props)
         native_prop.handles = 0
@@ -252,11 +231,8 @@ def main():
     if mode == "load-pending":
         cuda.fakeForgetHostRegistrations()
         cuda.carrier_pending_copies()
-        command(7)  # Harness requires process exit 127, not a returned error.
+        command("load_allocations")  # Harness requires exit 127, not a returned error.
         raise AssertionError("unknown H2D completion returned")
-        assert cuda.carrier_calls(REGISTER) == 1
-        print("PASS carrier", mode)
-        return
     if mode.startswith("load-"):
         failed = {"load-create": CREATE, "load-map": MAP, "load-copy": H2D,
                   "load-sync": SYNC, "load-unmap": UNMAP, "load-cleanup": H2D}[mode]
@@ -269,8 +245,8 @@ def main():
             cuda.carrier_fail(UNMAP, 1, 1, 713)
             cuda.carrier_fail(FREE, 1, 1, 714)
         cuda.fakeForgetHostRegistrations()
-        response = command(7, False)
-        assert b"CUDA error 711" in response[57:153]
+        response = command("load_allocations", False)
+        assert "CUDA error 711" in response
         assert stats().phase == 5
         assert cuda.fakeLiveAllocations() == 0 and cuda.fakeMappedCount() == 0
         assert cuda.carrier_streams() == 0 and cuda.carrier_reservations() == 0
@@ -284,9 +260,9 @@ def main():
     if mode.startswith("zero"):
         cuda.carrier_zero()  # The first fresh backing allocation is also zero.
     cuda.fakeForgetHostRegistrations()
-    command(7)
+    command("load_allocations")
     assert cuda.carrier_calls(REGISTER) == 1
-    for operation in (8, 9, 10, 11, 12):
+    for operation in LIFECYCLE[4:]:
         command(operation)
     assert cuda.fakeCopiedToHost() == count * length and cuda.fakeCopiedToDevice() == count * length
     if mode in ("zero-released", "zero-member"):

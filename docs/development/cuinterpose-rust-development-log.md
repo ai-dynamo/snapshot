@@ -1352,3 +1352,67 @@ from starting. The first GPU staging attempt rejected a malformed patch hunk
 length; correcting that length allowed staging and parser checks to pass.
 These were local editing/staging errors, not CUDA failures or test retries
 after a failed workload.
+
+## 17. Typed MessagePack metadata and owned Unix transport
+
+The next cleanup replaces the fixed v2 packet/ticket/record codecs and hex
+state writer with versioned Serde/MessagePack documents. `Record` has
+variant-specific fields, participant and allocation IDs are distinct binary
+newtypes, and resource/binding kinds are enums. The same metadata types serve
+inspection and state publication. `rustix` supplies ancillary-message, owned
+FD, and memfd APIs; `thiserror` composes the codec and I/O errors. There is no
+legacy production codec. This intentionally breaks experimental v2 artifacts.
+
+The frontend changes only its diagnostic protocol-version value. Its
+dependency tree remains `abi` plus `libc`, and the private host/core ABI stays
+version 5. No ELF bootstrap, symbol-discovery, resolver, launch-job, CUDA
+lifecycle barrier, or shared-only content-ownership policy is changed.
+
+Compared with `7dfa4e2`, production Rust source under the workspace's `src/`
+directories decreases from 6,906 to 6,394 lines (512 fewer, about 7.4%).
+Counting Rust, Python, C, and patch fixtures together decreases from 10,360
+to 10,230 lines. These counts exclude Cargo metadata and documentation; the
+lockfile grows for the standard crates. They are cleanup deltas, not the
+entire branch's diff against main.
+
+The process fixtures now share a Python MessagePack client. The original C
+coordinator's 14 behavioral cases are covered by typed Rust executable tests;
+the direct-v2 multicast cache-drop case is reproduced in Python with its
+original assertions. The remaining 13 tracking, five unicast lifecycle,
+and five multicast C cases run against the Rust artifacts without changes to
+their CUDA assertions. A fresh reference build still runs the original C
+self-tests first. The old C/Rust ticket-format interoperability helper is
+deleted rather than pretending the new formats interoperate.
+
+Validation passed on the final local implementation:
+
+- GNU workspace: 27 Rust tests, including table-driven coordinator contracts.
+- Pinned build/test gate: formatting, GNU tests, 23 loader cases, 19 endpoint
+  cases, musl protocol/coordinator tests, artifact ABI/dependency checks.
+- Full reference runner against the packaged GNU libraries and static musl
+  coordinator, including nine Python multicast, 22 carrier, eight RPC, and six
+  fork modes.
+- Strict Clippy for the changed protocol/coordinator crates and Go
+  `agent/internal/cuda` and `agent/internal/executor` tests.
+
+The workspace-wide strict Clippy experiment is not green: existing frontend
+FFI safety-doc and style warnings remain. It was not suppressed or used to
+justify changing the deliberately stable ELF frontend.
+
+Implementation failures and fixes: the endpoint runner first lacked `sys`
+after switching subprocesses to the selected virtual-environment interpreter;
+adding the import fixed it. An attempted reuse of old prebuilt C fixtures was
+rejected for lacking the current report-patch fingerprint, so the runner built
+fresh fixtures. The first RPC rendezvous failed because its injector recognized
+a 256-byte EXPORT packet and intercepted libc `sendmsg`; neither assumption
+holds for typed frames and rustix's direct Linux syscall path. It now pauses
+the armed worker at its peer UDS connection, independent of serialization.
+The reciprocal unicast and multicast tests then passed without production
+retry logic or lifecycle changes.
+
+Local evidence is `.cuinterpose-reference-v3.log`,
+`.cuinterpose-packaging-v3.log`, and `.cuinterpose-build-v3.log` in the session
+directory. The physical-GPU and GLM results in earlier sections remain
+attributed to their earlier revisions. Version 3 has not yet been run on
+physical GPUs or through two-node GLM capture/restore; it requires fresh
+artifacts and a new checkpoint, not restore of the retained v2 artifact.

@@ -101,7 +101,7 @@ mod tests {
         assert_eq!(SWITCHED.load(Ordering::Relaxed), 0);
         assert_eq!(Context::enter(0, 0).err(), Some(711));
         assert_eq!(RELEASED.load(Ordering::Relaxed), 1);
-        let id = [1; 16];
+        let id = AllocationId([1; 16]);
         let arena = Arena {
             base: 0x1000,
             size: 4096,
@@ -121,14 +121,10 @@ mod tests {
                 flags: AllocationFlags::default(),
             },
             ticket: cuinterpose_protocol::Ticket {
-                creator: [0; 33],
+                creator: cuinterpose_protocol::ParticipantId::default(),
                 allocation: id,
                 endpoint: "/test".into(),
-                resource: 1,
-                devices: 0,
-                size: 0,
-                handle_types: 0,
-                flags: 0,
+                resource: cuinterpose_protocol::Resource::Unicast,
             },
             creator: true,
             shared: true,

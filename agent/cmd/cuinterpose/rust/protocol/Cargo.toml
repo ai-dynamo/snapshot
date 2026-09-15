@@ -9,4 +9,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-libc.workspace = true
+serde.workspace = true
+serde_bytes.workspace = true
+rmp-serde.workspace = true
+rustix.workspace = true
+thiserror.workspace = true

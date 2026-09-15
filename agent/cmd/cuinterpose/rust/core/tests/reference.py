@@ -71,7 +71,7 @@ def main():
                 "cd /work/agent/cmd/cuinterpose && "
                 "make BUILD_DIR=/work/build CUDA_HOME=/usr/local/cuda-13.1 "
                 f"SANITIZE={'address,undefined' if args.sanitized else ''} "
-                "/work/build/test/coordinator_test /work/build/test/lifecycle_preload_test "
+                "/work/build/test/lifecycle_preload_test "
                 "/work/build/test/multicast_preload_test",
             ], check=True, timeout=600)
             (fixtures / "rust-json-reports.sha256").write_text(report_patch_hash)
@@ -94,12 +94,18 @@ def main():
             "SNAPSHOT_CONTROL_DIR": str(control),
             "CUINTERPOSE_COORDINATOR": str(artifacts / "cuinterpose-coordinator"),
         }
-        subprocess.run([str(fixtures / "test/coordinator_test")], env=env,
-                       check=True, timeout=90)
+        # The C coordinator fixture speaks the obsolete v2 wire protocol.
+        # Its behavioral cases live in coordinator/tests; CUDA call fixtures
+        # below still exercise the original lifecycle assertions against Rust.
         env["LD_PRELOAD"] = ("/lib/x86_64-linux-gnu/libasan.so.8:" if args.sanitized else "") + str(
             artifacts / "libcuinterpose.so")
         for name in ("state_preload_test", "lifecycle_preload_test", "multicast_preload_test"):
-            subprocess.run([str(fixtures / "test" / name)], env=env,
+            argv = [str(fixtures / "test" / name)]
+            if name == "multicast_preload_test":
+                # This one case sends a v2 packet directly. The "cached-export"
+                # Python case below carries the same assertions using v3.
+                argv += ["--gtest_filter=-Multicast.PrepareMulticastClosesTheCachedDescriptorBeforeReleasingTheObject"]
+            subprocess.run(argv, env=env,
                            check=True, timeout=90)
         blocker = temporary / "multicast-block.so"
         subprocess.run([
@@ -108,11 +114,11 @@ def main():
             str(Path(__file__).with_name("multicast_block.c")), "-ldl",
         ], env=environment, check=True)
         for mode in ("released", "kind", "access", "failure", "native-address", "inflight",
-                     "pending-map", "create-output"):
+                     "pending-map", "create-output", "cached-export"):
             multicast_env = env | {
                 "LD_PRELOAD": env["LD_PRELOAD"] + f":{blocker}:{fixtures / 'test/libcuda.so.1'}",
             }
-            subprocess.run(["/usr/bin/python3", str(Path(__file__).with_name("multicast.py")), mode],
+            subprocess.run([sys.executable, str(Path(__file__).with_name("multicast.py")), mode],
                            env=multicast_env, check=True, timeout=60)
         carrier = temporary / "carrier-faults.so"
         subprocess.run([
@@ -128,7 +134,7 @@ def main():
                 "LD_PRELOAD": env["LD_PRELOAD"] + f":{carrier}:{fixtures / 'test/libcuda.so.1'}",
             }
             result = subprocess.run(
-                ["/usr/bin/python3", str(Path(__file__).with_name("carrier.py")), mode],
+                [sys.executable, str(Path(__file__).with_name("carrier.py")), mode],
                 env=carrier_env, timeout=60, capture_output=True, text=True)
             print(result.stdout, end="")
             print(result.stderr, end="", file=sys.stderr)
@@ -153,7 +159,7 @@ def main():
         ], env=environment, check=True)
         for mode in ("startup1", "startup2", "queue", "unicast", "multicast",
                      "constructor0", "constructor1", "constructor2"):
-            subprocess.run(["/usr/bin/python3", str(Path(__file__).with_name("rpc.py")),
+            subprocess.run([sys.executable, str(Path(__file__).with_name("rpc.py")),
                             mode, str(rpc_constructor)],
                            env=env | {"LD_PRELOAD": env["LD_PRELOAD"] +
                                       f":{rpc}:{fixtures / 'test/libcuda.so.1'}"},
@@ -162,7 +168,7 @@ def main():
         env["CUINTERPOSE_PARTICIPANT_ID"] = "123456789abcdef0123456789abcdef0"
         for mode in ("preinit", "descriptors", "poison", "nested", "carrier", "startup-failure"):
             case_env = env | {"SNAPSHOT_CONTROL_TIMEOUT_SECONDS": "1"}
-            subprocess.run(["/usr/bin/python3", str(Path(__file__).with_name("fork.py")),
+            subprocess.run([sys.executable, str(Path(__file__).with_name("fork.py")),
                             mode],
                            env=case_env, check=True, timeout=60)
     print(f"PASS Rust unicast/multicast/carrier/fork with C reference {REFERENCE}; no GPU qualification")

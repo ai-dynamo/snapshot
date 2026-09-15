@@ -1,76 +1,102 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-use cuinterpose_protocol::{Header, Operation, TICKET_SIZE, Ticket};
-use std::io;
-use std::os::fd::{FromRawFd, OwnedFd};
-use std::os::unix::net::UnixStream;
+use cuinterpose_protocol::{
+    self as protocol, Error, MAX_TICKET_BYTES, Operation, Reply, Request, Response, Result,
+    TICKET_MAGIC, Ticket,
+};
+use rustix::fs::{MemfdFlags, SealFlags, fcntl_add_seals, fcntl_get_seals, memfd_create};
+use std::fs::File;
+use std::io::Write;
+use std::os::fd::{BorrowedFd, OwnedFd};
+use std::os::unix::{fs::FileExt, net::UnixStream};
 
-/// OS transport stays in the core; only the protocol crate knows ticket bytes.
-pub fn export(ticket: &Ticket) -> io::Result<OwnedFd> {
-    let bytes = ticket.encode()?;
-    let raw = unsafe {
-        libc::memfd_create(
-            c"cuinterpose-ticket".as_ptr(),
-            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-        )
-    };
-    if raw < 0 {
-        return Err(io::Error::last_os_error());
+const SEALS: SealFlags = SealFlags::SEAL
+    .union(SealFlags::WRITE)
+    .union(SealFlags::GROW)
+    .union(SealFlags::SHRINK);
+
+pub fn export(ticket: &Ticket) -> Result<OwnedFd> {
+    ticket.validate()?;
+    let bytes = protocol::encode(ticket)?;
+    if bytes.len() + TICKET_MAGIC.len() > MAX_TICKET_BYTES {
+        return Err(Error::Invalid("ticket exceeds size limit"));
     }
-    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
-    let count = unsafe { libc::pwrite(raw, bytes.as_ptr().cast(), bytes.len(), 0) };
-    if count != bytes.len() as isize {
-        return Err(io::Error::other("cannot write ticket"));
-    }
-    let seals = libc::F_SEAL_SEAL | libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK;
-    if unsafe { libc::fcntl(raw, libc::F_ADD_SEALS, seals) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(fd)
+    let fd = memfd_create(
+        c"cuinterpose-ticket",
+        MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING,
+    )
+    .map_err(std::io::Error::from)?;
+    let mut file = File::from(fd);
+    file.write_all(TICKET_MAGIC)?;
+    file.write_all(&bytes)?;
+    fcntl_add_seals(&file, SEALS).map_err(std::io::Error::from)?;
+    Ok(file.into())
 }
 
-pub fn read(fd: i32) -> io::Result<Ticket> {
-    let seals = libc::F_SEAL_SEAL | libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK;
-    let actual = unsafe { libc::fcntl(fd, libc::F_GET_SEALS) };
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if actual < 0
-        || actual & seals != seals
-        || unsafe { libc::fstat(fd, &mut stat) } != 0
-        || stat.st_size != TICKET_SIZE as i64
-    {
-        return Err(io::Error::other("not a sealed ticket"));
+/// A foreign FD is a native import. A recognizable but invalid/obsolete shim
+/// ticket is an error, not an invitation to pass a memfd into the CUDA driver.
+pub fn read(fd: i32) -> Result<Option<Ticket>> {
+    if fd < 0 {
+        return Err(Error::Invalid("negative import descriptor"));
     }
-    let mut bytes = [0u8; TICKET_SIZE];
-    if unsafe { libc::pread(fd, bytes.as_mut_ptr().cast(), bytes.len(), 0) } != bytes.len() as isize
-    {
-        return Err(io::Error::other("cannot read ticket"));
+    // The caller lends the FD for this call; never close its application-owned
+    // descriptor. Clone it so positional File reads are safe and RAII-owned.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+    let file = File::from(borrowed.try_clone_to_owned()?);
+    let mut magic = [0; 4];
+    if file.read_exact_at(&mut magic, 0).is_err() || &magic != TICKET_MAGIC {
+        return Ok(None);
     }
-    Ticket::decode(&bytes)
+    let size = file.metadata()?.len() as usize;
+    if !(TICKET_MAGIC.len()..=MAX_TICKET_BYTES).contains(&size)
+        || !fcntl_get_seals(&file)
+            .map_err(std::io::Error::from)?
+            .contains(SEALS)
+    {
+        return Err(Error::Invalid("invalid ticket size or seals"));
+    }
+    let mut bytes = vec![0; size - magic.len()];
+    file.read_exact_at(&mut bytes, magic.len() as u64)?;
+    let ticket: Ticket = protocol::decode(&bytes)?;
+    ticket.validate()?;
+    Ok(Some(ticket))
 }
 
-pub fn request(ticket: &Ticket) -> io::Result<OwnedFd> {
-    let socket = UnixStream::connect(&ticket.endpoint)?;
-    let timeout = Some(cuinterpose_protocol::timeout(Operation::Export));
+pub fn request(ticket: &Ticket) -> Result<OwnedFd> {
+    let socket = super::process::Socket::open(|| UnixStream::connect(&ticket.endpoint))?;
+    let timeout = Some(protocol::timeout(Operation::Export));
     socket.set_read_timeout(timeout)?;
     socket.set_write_timeout(timeout)?;
-    let mut request = Header::new(Operation::Export, ticket.creator);
-    request.resource_kind = ticket.resource;
-    request.allocation = ticket.allocation;
-    cuinterpose_protocol::send_header(&socket, &request, None)?;
-    let (response, fd) = cuinterpose_protocol::receive_header(&socket)?;
-    if response.operation != Operation::Export
-        || response.participant != ticket.creator
-        || response.resource_kind != ticket.resource
-        || response.allocation != ticket.allocation
-        || response.status != 0
-        || response.count != 0
-        || response.payload_size != 0
-    {
-        return Err(io::Error::other("creator rejected export"));
+    let resource = ticket.resource.kind();
+    protocol::send(
+        &socket,
+        &Request::Export {
+            participant: ticket.creator,
+            resource,
+            allocation: ticket.allocation,
+        },
+        None,
+    )?;
+    let (response, fd): (Response, _) = protocol::receive(&socket)?;
+    match response {
+        Response {
+            participant,
+            result:
+                Ok(Reply::Export {
+                    resource: actual,
+                    allocation,
+                }),
+        } if participant == ticket.creator
+            && actual == resource
+            && allocation == ticket.allocation =>
+        {
+            fd.ok_or(Error::Invalid("creator sent no descriptor"))
+        }
+        _ => Err(Error::Invalid("creator rejected export")),
     }
-    fd.ok_or_else(|| io::Error::other("creator sent no descriptor"))
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,65 +105,25 @@ mod tests {
     #[test]
     fn sealed_ticket_round_trip() {
         let ticket = Ticket {
-            creator: cuinterpose_protocol::parse_identity(b"0123456789abcdef0123456789abcdef")
-                .unwrap(),
-            allocation: [4; 16],
+            creator: "0123456789abcdef0123456789abcdef".parse().unwrap(),
+            allocation: protocol::AllocationId([4; 16]),
             endpoint: "/tmp/cuinterpose-123.sock".into(),
-            resource: 1,
-            devices: 0,
-            size: 0,
-            handle_types: 0,
-            flags: 0,
+            resource: protocol::Resource::Unicast,
         };
         let fd = export(&ticket).unwrap();
-        assert_eq!(read(fd.as_raw_fd()).unwrap(), ticket);
-        assert_eq!(
-            unsafe { libc::pwrite(fd.as_raw_fd(), b"x".as_ptr().cast(), 1, 0) },
-            -1
-        );
+        assert_eq!(read(fd.as_raw_fd()).unwrap(), Some(ticket));
+        assert!(File::from(fd).write_at(b"x", 0).is_err());
     }
 
     #[test]
-    #[ignore = "run python3 core/tests/ticket_interop.py to compile the pinned C reader"]
-    fn c_v2_sealed_ticket_interoperability() {
-        use std::process::{Command, Stdio};
-
-        let helper = std::env::var_os("CUINTERPOSE_C_TICKET_HELPER")
-            .expect("the interoperability runner supplies the pinned C helper");
-        let ticket = Ticket {
-            creator: cuinterpose_protocol::parse_identity(b"0123456789abcdef0123456789abcdef")
-                .unwrap(),
-            allocation: [4; 16],
-            endpoint: "/tmp/cuinterpose-interop.sock".into(),
-            resource: 1,
-            devices: 0,
-            size: 0,
-            handle_types: 0,
-            flags: 0,
-        };
-        let rust_ticket = export(&ticket).unwrap();
-        let (socket, child_socket) = UnixStream::pair().unwrap();
-        socket
-            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-            .unwrap();
-        // Stdio duplicates the sealed Rust ticket to fd 0 and the return socket
-        // to fd 1. No pre_exec closure or inherited-CLOEXEC workaround is needed.
-        let mut child = Command::new(helper)
-            .stdin(Stdio::from(rust_ticket))
-            .stdout(Stdio::from(OwnedFd::from(child_socket)))
-            .spawn()
-            .unwrap();
-        let response = cuinterpose_protocol::receive_header(&socket);
-        let status = child.wait().unwrap();
-        assert!(status.success(), "pinned C reader/writer failed: {status}");
-        let (header, c_ticket) = response.unwrap();
-        assert_eq!(header.operation, Operation::Export);
-        assert_eq!(header.participant, ticket.creator);
-        assert_eq!(header.allocation, ticket.allocation);
-        // The C helper has read the Rust-produced sealed ticket, then created a
-        // new sealed ticket with the reference writer. Validate that new FD in
-        // Rust, including its sealing and decoded fields.
-        let c_ticket = c_ticket.unwrap();
-        assert_eq!(read(c_ticket.as_raw_fd()).unwrap(), ticket);
+    fn foreign_fd_is_not_a_ticket_but_obsolete_shim_ticket_is_rejected() {
+        let foreign = File::open("/dev/null").unwrap();
+        assert_eq!(read(foreign.as_raw_fd()).unwrap(), None);
+        let fd = memfd_create(c"obsolete-ticket", MemfdFlags::ALLOW_SEALING).unwrap();
+        let mut file = File::from(fd);
+        file.write_all(TICKET_MAGIC).unwrap();
+        file.write_all(&[0; 252]).unwrap();
+        fcntl_add_seals(&file, SEALS).unwrap();
+        assert!(read(file.as_raw_fd()).is_err());
     }
 }

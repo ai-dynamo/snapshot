@@ -2,30 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{Participant, Result};
-use cuinterpose_protocol::{AllocationId, Identity, RecordFlags, RecordKind};
+use cuinterpose_protocol::{AllocationId, BindingKind, MAX_ACCESS, ParticipantId, Record};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[derive(Default)]
 pub struct Allocation {
-    pub creator: Identity,
+    pub creator: ParticipantId,
     pub size: u64,
     pub preserve_content: bool,
-    creator_handle: bool,
-    creator_mapping: bool,
-}
-
-impl Default for Allocation {
-    fn default() -> Self {
-        Self {
-            creator: [0; 33],
-            size: 0,
-            preserve_content: false,
-            creator_handle: false,
-            creator_mapping: false,
-        }
-    }
+    creator_seen: bool,
+    anchor: bool,
 }
 struct Multicast {
-    creator: Identity,
+    creator: ParticipantId,
     size: u64,
     handle_types: u64,
     flags: u64,
@@ -41,160 +30,183 @@ pub fn validate(participants: &[Participant]) -> Result<Vec<Allocation>> {
     if participants.is_empty() {
         return Err("topology validate failed: no participants".into());
     }
+    // Gather definitions before references. Participant/record ordering must
+    // not determine whether an import or multicast dependency is valid.
     for participant in participants {
-        if participant.id[32] != 0
-            || cuinterpose_protocol::parse_identity(&participant.id[..32]).is_err()
-        {
-            return Err("invalid participant identity".into());
-        }
         if !identities.insert(participant.id) {
             return Err("duplicate participant identity".into());
         }
         for record in &participant.records {
-            let id = record.allocation_id;
-            let creator = record.flags.0 & RecordFlags::CREATOR != 0;
-            match record.kind {
-                RecordKind::Allocation => {
-                    let allocation = allocations.entry(id).or_default();
-                    if creator {
-                        if record.requested_handle_types != 1 {
-                            return Err("non-POSIX requested handle type".into());
-                        }
-                        if record.allocation_size == 0 {
-                            return Err("zero creator allocation size".into());
-                        }
-                        if allocation.creator != [0; 33] && allocation.creator != participant.id {
-                            return Err("conflicting creators".into());
+            match record {
+                Record::Allocation {
+                    id,
+                    creator,
+                    content,
+                    size,
+                    handle_types,
+                    handles,
+                    ..
+                } => {
+                    let allocation = allocations.entry(*id).or_default();
+                    if *creator {
+                        if *handle_types != 1 || *size == 0 || allocation.creator_seen {
+                            return Err("invalid or duplicate allocation creator".into());
                         }
                         allocation.creator = participant.id;
-                        allocation.size = record.allocation_size;
-                        allocation.creator_handle =
-                            record.flags.0 & RecordFlags::APPLICATION_HANDLE_LIVE != 0;
-                        allocation.preserve_content =
-                            record.flags.0 & RecordFlags::ALLOCATION_CONTENT != 0;
-                    } else if record.flags.0 & RecordFlags::ALLOCATION_CONTENT != 0 {
+                        allocation.creator_seen = true;
+                        allocation.size = *size;
+                        allocation.anchor |= *handles != 0;
+                        allocation.preserve_content = *content;
+                    } else if *content {
                         return Err("allocation content flag on importer".into());
                     }
                 }
-                RecordKind::Mapping => {
-                    if record.address == 0 || record.size == 0 || record.access_count > 32 {
-                        return Err("invalid mapping".into());
-                    }
-                    allocations.entry(id).or_default().creator_mapping |= creator;
-                }
-                RecordKind::Multicast => {
-                    let identity =
-                        cuinterpose_protocol::parse_identity(&record.creator_participant[..32])?;
-                    if record.creator_participant[32] != 0
-                        || record.handle_types != 1
-                        || record.allocation_size == 0
-                        || record.num_devices == 0
-                    {
+                Record::Multicast {
+                    id,
+                    creator,
+                    owned,
+                    size,
+                    handle_types,
+                    flags,
+                    devices,
+                    ..
+                } => {
+                    if *handle_types != 1 || *size == 0 || *devices == 0 {
                         return Err("invalid multicast properties".into());
                     }
-                    let multicast = multicasts.entry(id).or_insert_with(|| Multicast {
-                        creator: identity,
-                        size: record.allocation_size,
-                        handle_types: record.handle_types,
-                        flags: record.object_flags,
-                        num_devices: record.num_devices,
+                    let multicast = multicasts.entry(*id).or_insert_with(|| Multicast {
+                        creator: *creator,
+                        size: *size,
+                        handle_types: *handle_types,
+                        flags: *flags,
+                        num_devices: *devices,
                         creators: 0,
                         devices: BTreeMap::new(),
                     });
-                    if multicast.creator != identity
-                        || multicast.handle_types != record.handle_types
-                        || multicast.flags != record.object_flags
-                        || multicast.num_devices != record.num_devices
+                    if multicast.creator != *creator
+                        || multicast.handle_types != *handle_types
+                        || multicast.flags != *flags
+                        || multicast.num_devices != *devices
                     {
                         return Err("inconsistent multicast properties".into());
                     }
-                    multicast.size = multicast.size.max(record.allocation_size);
-                    if creator {
-                        if participant.id != identity {
+                    multicast.size = multicast.size.max(*size);
+                    if *owned {
+                        if participant.id != *creator {
                             return Err("invalid multicast creator".into());
                         }
                         multicast.creators += 1;
                     }
                 }
-                RecordKind::MulticastDevice => {
-                    let multicast = multicasts
-                        .get_mut(&id)
-                        .ok_or("multicast device precedes object")?;
-                    if multicast.devices.insert(record.device, false).is_some() {
-                        return Err("duplicate multicast device".into());
+                _ => {}
+            }
+        }
+    }
+    for record in participants.iter().flat_map(|p| &p.records) {
+        if let Record::MulticastDevice { id, device } = record
+            && multicasts
+                .get_mut(id)
+                .ok_or("missing multicast object")?
+                .devices
+                .insert(*device, false)
+                .is_some()
+        {
+            return Err("duplicate multicast device".into());
+        }
+    }
+    for participant in participants {
+        for record in &participant.records {
+            match record {
+                Record::Mapping {
+                    id,
+                    creator,
+                    address,
+                    size,
+                    offset,
+                    access,
+                } => {
+                    let allocation = allocations.get_mut(id).ok_or("missing creator")?;
+                    if *address == 0
+                        || *size == 0
+                        || access.len() > MAX_ACCESS
+                        || offset
+                            .checked_add(*size)
+                            .is_none_or(|end| end > allocation.size)
+                    {
+                        return Err("invalid mapping or mapping out of bounds".into());
                     }
+                    allocation.anchor |= *creator && allocation.creator == participant.id;
                 }
-                RecordKind::MulticastBinding => {
-                    let multicast = multicasts
-                        .get_mut(&id)
-                        .ok_or("multicast binding precedes object")?;
-                    if record.size == 0
-                        || record
-                            .offset
-                            .checked_add(record.size)
+                Record::MulticastBinding {
+                    id,
+                    member,
+                    address,
+                    size,
+                    offset,
+                    member_offset,
+                    binding,
+                    device,
+                    ..
+                } => {
+                    let multicast = multicasts.get_mut(id).ok_or("missing multicast object")?;
+                    if *size == 0
+                        || offset
+                            .checked_add(*size)
                             .is_none_or(|end| end > multicast.size)
-                        || !matches!(record.binding_kind, 1 | 2)
-                        || !matches!(record.api_version, 1 | 2)
                     {
                         return Err("invalid multicast binding".into());
                     }
-                    if (record.binding_kind == 1
-                        && (record.address != 0 || !allocations.contains_key(&record.member_id)))
-                        || (record.binding_kind == 2 && record.address == 0)
-                    {
-                        return Err("invalid multicast member".into());
+                    match binding {
+                        BindingKind::Memory => {
+                            let allocation =
+                                allocations.get(member).ok_or("invalid multicast member")?;
+                            if *address != 0
+                                || member_offset
+                                    .checked_add(*size)
+                                    .is_none_or(|end| end > allocation.size)
+                            {
+                                return Err("multicast binding out of member bounds".into());
+                            }
+                        }
+                        BindingKind::Address if *address == 0 => {
+                            return Err("invalid multicast member".into());
+                        }
+                        BindingKind::Address => {}
                     }
                     *multicast
                         .devices
-                        .get_mut(&record.device)
+                        .get_mut(device)
                         .ok_or("multicast binding device is absent")? = true;
                 }
-                RecordKind::MulticastMapping => {
-                    let multicast = multicasts
-                        .get(&id)
-                        .ok_or("multicast mapping precedes object")?;
-                    if record.address == 0
-                        || record.size == 0
-                        || record.access_count > 32
-                        || record
-                            .offset
-                            .checked_add(record.size)
+                Record::MulticastMapping {
+                    id,
+                    address,
+                    size,
+                    offset,
+                    access,
+                    ..
+                } => {
+                    let multicast = multicasts.get(id).ok_or("missing multicast object")?;
+                    if *address == 0
+                        || *size == 0
+                        || access.len() > MAX_ACCESS
+                        || offset
+                            .checked_add(*size)
                             .is_none_or(|end| end > multicast.size)
                     {
                         return Err("invalid multicast mapping".into());
                     }
                 }
+                _ => {}
             }
         }
     }
     for allocation in allocations.values() {
-        if allocation.creator == [0; 33] {
+        if !allocation.creator_seen {
             return Err("missing creator".into());
         }
-        if !allocation.creator_handle && !allocation.creator_mapping {
+        if !allocation.anchor {
             return Err("missing creator anchor".into());
-        }
-    }
-    for participant in participants {
-        for record in &participant.records {
-            let (allocation, offset) = match record.kind {
-                RecordKind::Mapping => (&allocations[&record.allocation_id], record.offset),
-                RecordKind::MulticastBinding if record.binding_kind == 1 => {
-                    (&allocations[&record.member_id], record.member_offset)
-                }
-                _ => continue,
-            };
-            if offset
-                .checked_add(record.size)
-                .is_none_or(|end| end > allocation.size)
-            {
-                return Err(if record.kind == RecordKind::Mapping {
-                    "mapping out of bounds"
-                } else {
-                    "multicast binding out of member bounds"
-                }
-                .into());
-            }
         }
     }
     for multicast in multicasts.values() {

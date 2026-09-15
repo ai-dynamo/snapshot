@@ -7,26 +7,10 @@
 import ctypes as c
 import os
 from pathlib import Path
-import socket
-import struct
 import sys
 
-
-def handshake():
-    endpoint = Path(os.environ["SNAPSHOT_CONTROL_DIR"]) / f"cuinterpose-{os.getpid()}.sock"
-    with socket.socket(socket.AF_UNIX) as stream:
-        stream.settimeout(5)
-        stream.connect(str(endpoint))
-        request = bytearray(256)
-        struct.pack_into("<IHH", request, 0, 0x44564D4D, 2, 1)
-        stream.sendall(request)
-        response = bytearray()
-        while len(response) < 256:
-            chunk = stream.recv(256 - len(response))
-            assert chunk
-            response.extend(chunk)
-        assert struct.unpack_from("<i", response, 8)[0] == 0
-        return bytes(response[24:57])
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "core/tests"))
+from protocol_client import inspect
 
 
 driver = c.CDLL("libcuda.so.1", mode=os.RTLD_LOCAL)
@@ -88,7 +72,7 @@ else:
         assert query(*args) == 0 and output.value
 
 activate()
-parent = handshake()
+parent = inspect()["participant"]
 child = os.fork()
 if child == 0:
     try:
@@ -98,12 +82,12 @@ if child == 0:
             plugin.fixture_join_generation_worker()
         else:
             activate()
-        assert handshake() != parent
+        assert inspect()["participant"] != parent
         os._exit(0)
     except BaseException:
         import traceback
         traceback.print_exc()
         os._exit(1)
 assert os.waitpid(child, 0)[1] == 0
-assert handshake() == parent
+assert inspect()["participant"] == parent
 print(f"PASS actual Rust endpoint {mode}: parent and child, no VMM")

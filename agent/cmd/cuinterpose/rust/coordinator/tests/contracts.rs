@@ -1,0 +1,434 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Behavioral cases from the C coordinator suite, using typed v3 messages.
+use cuinterpose_protocol::{
+    AllocationId, BindingKind, BindingVersion, Operation, Participant, ParticipantId, Record,
+    Reply, Request, Response, decode, receive, send,
+};
+use std::os::unix::net::UnixListener;
+use std::{
+    path::PathBuf,
+    process::{Command, Output},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    thread::{self, JoinHandle},
+    time::Duration,
+};
+
+const ID: AllocationId = AllocationId([1; 16]);
+const GROUP: AllocationId = AllocationId([2; 16]);
+
+#[derive(Default)]
+struct Model {
+    records: Vec<Record>,
+    raw: u64,
+    unsupported: u64,
+    fail: Option<Operation>,
+    operations: Vec<Operation>,
+    identity: u8,
+}
+
+struct Fixture {
+    directory: PathBuf,
+    models: Vec<Arc<Mutex<Model>>>,
+    stop: Arc<AtomicBool>,
+    servers: Vec<JoinHandle<()>>,
+}
+
+impl Fixture {
+    fn new(count: usize, rendezvous: Option<Operation>) -> Self {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let directory = std::env::temp_dir().join(format!(
+            "cui-contract-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new((Mutex::new(0), Condvar::new()));
+        let released = Arc::new(AtomicBool::new(false));
+        let mut models = Vec::new();
+        let mut servers = Vec::new();
+        for index in 0..count {
+            let listener =
+                UnixListener::bind(directory.join(format!("cuinterpose-{}.sock", index + 1)))
+                    .unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let model = Arc::new(Mutex::new(Model {
+                identity: index as u8 + 1,
+                ..Model::default()
+            }));
+            models.push(model.clone());
+            let (stop, gate, released) = (stop.clone(), gate.clone(), released.clone());
+            servers.push(thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let stream = match listener.accept() {
+                        Ok((stream, _)) => stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(1));
+                            continue;
+                        }
+                        Err(error) => panic!("{error}"),
+                    };
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let (request, fd): (Request, _) = receive(&stream).unwrap();
+                    assert!(fd.is_none());
+                    let mut model = model.lock().unwrap();
+                    let (operation, response) = match request {
+                        Request::Handshake => (Operation::Handshake, Reply::Handshake),
+                        Request::Inspect { .. } => (
+                            Operation::Inspect,
+                            Reply::Inspection {
+                                records: model.records.clone(),
+                                live_raw_imports: model.raw,
+                                unsupported_creations: model.unsupported,
+                            },
+                        ),
+                        Request::Execute { operation, .. } => (
+                            operation,
+                            Reply::Completed {
+                                operation,
+                                bytes: 0,
+                                copy_us: 0,
+                            },
+                        ),
+                        Request::Export { .. } => panic!("coordinator must not request CUDA FDs"),
+                    };
+                    model.operations.push(operation);
+                    let response = Response {
+                        participant: ParticipantId([model.identity; 16]),
+                        result: if model.fail == Some(operation) {
+                            Err("injected participant failure".into())
+                        } else {
+                            Ok(response)
+                        },
+                    };
+                    drop(model);
+                    if rendezvous == Some(operation) {
+                        let mut arrived = gate.0.lock().unwrap();
+                        *arrived += 1;
+                        gate.1.notify_all();
+                        let (arrived, _) = gate
+                            .1
+                            .wait_timeout_while(arrived, Duration::from_secs(2), |n| *n < count)
+                            .unwrap();
+                        assert_eq!(*arrived, count, "phase dispatched serially");
+                        drop(arrived);
+                        // Hold one reply after every rank has arrived. The
+                        // coordinator must not advance any rank past this join.
+                        if index == 0 {
+                            thread::sleep(Duration::from_millis(100));
+                            released.store(true, Ordering::SeqCst);
+                        }
+                    } else if matches!(
+                        (rendezvous, operation),
+                        (
+                            Some(Operation::PrepareMulticast),
+                            Operation::SaveAllocations
+                        ) | (
+                            Some(Operation::RestoreMulticastDevices),
+                            Operation::RestoreMulticastBindings
+                        )
+                    ) {
+                        assert_eq!(
+                            *gate.0.lock().unwrap(),
+                            count,
+                            "advanced before all ranks arrived"
+                        );
+                        assert!(
+                            released.load(Ordering::SeqCst),
+                            "advanced before the held reply"
+                        );
+                    }
+                    send(&stream, &response, None).unwrap();
+                }
+            }));
+        }
+        Self {
+            directory,
+            models,
+            stop,
+            servers,
+        }
+    }
+
+    fn run(&self, mode: &str) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cuinterpose-coordinator"));
+        command
+            .args([mode, "--proc-root", "", "--checkpoint-dir"])
+            .arg(&self.directory)
+            .arg("--control-dir")
+            .arg(&self.directory);
+        for index in 1..=self.models.len() {
+            command.args(["--process", &index.to_string(), &index.to_string()]);
+        }
+        let output = command.output().unwrap();
+        if output.status.success() {
+            let reports: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let phases: &[&str] = if mode == "--prepare" {
+                &[
+                    "inspect",
+                    "validate",
+                    "prepare_multicast",
+                    "save_allocations",
+                    "prepare_unicast",
+                    "state_write",
+                ]
+            } else {
+                &[
+                    "handshake",
+                    "load_allocations",
+                    "restore_unicast",
+                    "restore_multicast",
+                    "validate",
+                ]
+            };
+            assert_eq!(
+                reports
+                    .iter()
+                    .map(|r| r["phase"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                phases
+            );
+            for report in reports {
+                assert_eq!(report["status"], "ok");
+                assert_eq!(report["participants"], self.models.len());
+                assert!(report["elapsed_ms"].is_number());
+            }
+        }
+        output
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        for server in self.servers.drain(..) {
+            server.join().unwrap();
+        }
+        std::fs::remove_dir_all(&self.directory).unwrap();
+    }
+}
+
+fn allocation(creator: bool) -> Record {
+    Record::Allocation {
+        id: ID,
+        creator,
+        content: false,
+        size: 4096,
+        allocation_type: 1,
+        handle_types: 1,
+        location_type: 1,
+        location_id: 0,
+        handles: 1,
+    }
+}
+
+fn mapping(size: u64, address: u64) -> Record {
+    Record::Mapping {
+        id: ID,
+        creator: true,
+        address,
+        size,
+        offset: 0,
+        access: vec![],
+    }
+}
+
+#[test]
+fn preflight_refusals_do_not_mutate_or_publish_state() {
+    for case in ["raw", "unsupported", "missing-creator", "mapping", "member"] {
+        let fixture = Fixture::new(1, None);
+        {
+            let mut model = fixture.models[0].lock().unwrap();
+            match case {
+                "raw" => model.raw = 3,
+                "unsupported" => model.unsupported = 2,
+                "missing-creator" => model.records = vec![allocation(false)],
+                "mapping" => model.records = vec![allocation(true), mapping(8192, 0x10000)],
+                "member" => {
+                    model.records = vec![
+                        allocation(true),
+                        Record::Multicast {
+                            id: GROUP,
+                            creator: ParticipantId([1; 16]),
+                            owned: true,
+                            size: 16384,
+                            handles: 1,
+                            handle_types: 1,
+                            flags: 0,
+                            devices: 1,
+                        },
+                        Record::MulticastDevice {
+                            id: GROUP,
+                            device: 0,
+                        },
+                        Record::MulticastBinding {
+                            id: GROUP,
+                            member: ID,
+                            address: 0,
+                            size: 8192,
+                            offset: 0,
+                            member_offset: 0,
+                            flags: 0,
+                            binding: BindingKind::Memory,
+                            version: BindingVersion::V1,
+                            device: 0,
+                        },
+                    ]
+                }
+                _ => unreachable!(),
+            }
+        }
+        let output = fixture.run("--prepare");
+        assert!(!output.status.success(), "{case}: {output:?}");
+        assert_eq!(
+            fixture.models[0].lock().unwrap().operations,
+            [Operation::Handshake, Operation::Inspect],
+            "{case}"
+        );
+        assert!(!fixture.directory.join("cuinterpose.state").exists());
+    }
+}
+
+#[test]
+fn failed_phase_stops_before_next_phase_and_state_publication() {
+    let fixture = Fixture::new(2, None);
+    fixture.models[1].lock().unwrap().fail = Some(Operation::PrepareMulticast);
+    assert!(!fixture.run("--prepare").status.success());
+    for model in &fixture.models {
+        assert_eq!(
+            model.lock().unwrap().operations,
+            [
+                Operation::Handshake,
+                Operation::Inspect,
+                Operation::PrepareMulticast
+            ]
+        );
+    }
+    assert!(!fixture.directory.join("cuinterpose.state").exists());
+}
+
+#[test]
+fn parallel_prepare_and_restore_barriers_preserve_canonical_state() {
+    for barrier in [
+        Operation::PrepareMulticast,
+        Operation::RestoreMulticastDevices,
+    ] {
+        let fixture = Fixture::new(2, Some(barrier));
+        fixture.models[0].lock().unwrap().records = vec![mapping(4096, 0x10000), allocation(true)];
+        fixture.models[1].lock().unwrap().records = vec![allocation(false)];
+        let output = fixture.run("--prepare");
+        assert!(output.status.success(), "{output:?}");
+        let state = std::fs::read(fixture.directory.join("cuinterpose.state")).unwrap();
+        let participants: Vec<Participant> = decode(&state).unwrap();
+        assert_eq!(participants.len(), 2);
+        for participant in participants {
+            let mut expected = fixture.models[participant.id.0[0] as usize - 1]
+                .lock()
+                .unwrap()
+                .records
+                .clone();
+            expected.sort();
+            assert_eq!(participant.records, expected);
+        }
+        // Input record order is immaterial to final topology comparison.
+        fixture.models[0].lock().unwrap().records.reverse();
+        let output = fixture.run("--restore");
+        assert!(output.status.success(), "{output:?}");
+        for model in &fixture.models {
+            assert_eq!(
+                model.lock().unwrap().operations,
+                [
+                    Operation::Handshake,
+                    Operation::Inspect,
+                    Operation::PrepareMulticast,
+                    Operation::SaveAllocations,
+                    Operation::PrepareUnicast,
+                    Operation::Handshake,
+                    Operation::LoadAllocations,
+                    Operation::RestoreUnicast,
+                    Operation::RestoreMulticastCreators,
+                    Operation::RestoreMulticastImporters,
+                    Operation::RestoreMulticastDevices,
+                    Operation::RestoreMulticastBindings,
+                    Operation::Handshake,
+                    Operation::Inspect,
+                ]
+            );
+        }
+    }
+}
+
+#[test]
+fn restore_rejects_missing_corrupt_or_changed_state() {
+    for case in ["missing", "corrupt", "identity", "topology"] {
+        let fixture = Fixture::new(1, None);
+        if case != "missing" {
+            fixture.models[0].lock().unwrap().records =
+                vec![allocation(true), mapping(4096, 0x10000)];
+            let output = fixture.run("--prepare");
+            assert!(output.status.success(), "{output:?}");
+        }
+        {
+            let mut model = fixture.models[0].lock().unwrap();
+            model.operations.clear();
+            match case {
+                "corrupt" => std::fs::write(
+                    fixture.directory.join("cuinterpose.state"),
+                    b"cuinterpose-state-v2\n",
+                )
+                .unwrap(),
+                "identity" => model.identity = 3,
+                "topology" => model.records = vec![allocation(true), mapping(4096, 0x30000)],
+                _ => {}
+            }
+        }
+        let output = fixture.run("--restore");
+        assert!(!output.status.success(), "{case}: {output:?}");
+        let model = fixture.models[0].lock().unwrap();
+        match case {
+            "missing" | "corrupt" => assert!(model.operations.is_empty()),
+            "identity" => assert_eq!(model.operations, [Operation::Handshake]),
+            "topology" => assert_eq!(model.operations.last(), Some(&Operation::Inspect)),
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn usage_errors() {
+    for args in [
+        vec![],
+        vec!["--prepare", "--proc-root", "", "--checkpoint-dir", "/tmp"],
+        vec![
+            "--prepare",
+            "--proc-root",
+            "",
+            "--checkpoint-dir",
+            "/tmp",
+            "--control-dir",
+            "relative",
+            "--process",
+            "1",
+            "1",
+        ],
+    ] {
+        assert!(
+            !Command::new(env!("CARGO_BIN_EXE_cuinterpose-coordinator"))
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+}
