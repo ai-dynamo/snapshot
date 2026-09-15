@@ -4,14 +4,47 @@
 package criu
 
 import (
+	"errors"
 	"os"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
+	"github.com/go-logr/logr"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
+
+func TestGPUMountAliases(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		deviceMap string
+		targets   map[string]string
+		want      map[string]string
+		wantErr   bool
+	}{
+		{"overlapping paths", "A=C,B=D", map[string]string{"C": "/dev/nvidia1", "D": "/dev/nvidia2"}, map[string]string{"/dev/nvidia0": "/dev/nvidia1", "/dev/nvidia1": "/dev/nvidia2"}, false},
+		{"swap", "A=C,B=D", map[string]string{"C": "/dev/nvidia1", "D": "/dev/nvidia0"}, map[string]string{"/dev/nvidia0": "/dev/nvidia1", "/dev/nvidia1": "/dev/nvidia0"}, false},
+		{"identity UUID with changed path", "", map[string]string{"A": "/dev/nvidia2", "B": "/dev/nvidia1"}, map[string]string{"/dev/nvidia0": "/dev/nvidia2"}, false},
+		{"missing target", "A=C,B=D", map[string]string{"C": "/dev/nvidia2"}, nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &types.CheckpointManifest{
+				CUDA:     types.CUDAManifest{SourceGPUUUIDs: []string{"A", "B"}, DevicePaths: map[string]string{"A": "/dev/nvidia0", "B": "/dev/nvidia1"}},
+				CRIUDump: types.CRIUDumpManifest{ExtMnt: map[string]string{"/dev/nvidia0": "/dev/nvidia0", "/dev/nvidia1": "/dev/nvidia1"}},
+			}
+			got, err := gpuMountAliases(m, tc.deviceMap, tc.targets)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("error = %v", err)
+			}
+			if !tc.wantErr && !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("aliases = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
 
 func TestParseManageCgroupsMode(t *testing.T) {
 	tests := []struct {
@@ -289,4 +322,177 @@ func TestBuildRestoreExtMounts(t *testing.T) {
 			t.Error("expected error for empty ExtMnt")
 		}
 	})
+}
+
+func TestLegacyNVIDIADeviceRemap(t *testing.T) {
+	tests := []struct {
+		name    string
+		extMnt  map[string]string
+		targets []string
+		wantSrc string
+		wantDst string
+		wantErr string
+	}{
+		{
+			name:    "legacy ordinal mismatch",
+			extMnt:  map[string]string{"/dev/nvidia7": "/dev/nvidia7"},
+			targets: []string{"/dev/nvidia2"},
+			wantSrc: "/dev/nvidia7",
+			wantDst: "/dev/nvidia2",
+		},
+		{
+			name:    "matching ordinal needs no alias",
+			extMnt:  map[string]string{"/dev/nvidia1": "/dev/nvidia1"},
+			targets: []string{"/dev/nvidia1"},
+		},
+		{
+			name:    "checkpoint without physical GPU mounts needs no alias",
+			extMnt:  map[string]string{"/etc/hostname": "/etc/hostname"},
+			targets: nil,
+		},
+		{
+			name: "matching multi-GPU paths remain unchanged",
+			extMnt: map[string]string{
+				"/dev/nvidia1": "/dev/nvidia1",
+				"/dev/nvidia7": "/dev/nvidia7",
+			},
+			targets: []string{"/dev/nvidia1", "/dev/nvidia7"},
+		},
+		{
+			name: "ambiguous multi-GPU mismatch fails closed",
+			extMnt: map[string]string{
+				"/dev/nvidia1": "/dev/nvidia1",
+				"/dev/nvidia7": "/dev/nvidia7",
+			},
+			targets: []string{"/dev/nvidia2", "/dev/nvidia3"},
+			wantErr: "single-GPU checkpoints only",
+		},
+		{
+			name:    "missing restore GPU fails closed",
+			extMnt:  map[string]string{"/dev/nvidia7": "/dev/nvidia7"},
+			targets: nil,
+			wantErr: "need exactly one",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &types.CheckpointManifest{
+				CRIUDump: types.CRIUDumpManifest{ExtMnt: tc.extMnt},
+			}
+			gotSrc, gotDst, err := legacyNVIDIADeviceRemap(m, tc.targets)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("legacyNVIDIADeviceRemap() error = %v, want substring %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("legacyNVIDIADeviceRemap() error = %v", err)
+			}
+			if gotSrc != tc.wantSrc || gotDst != tc.wantDst {
+				t.Fatalf(
+					"legacyNVIDIADeviceRemap() = (%q, %q), want (%q, %q)",
+					gotSrc,
+					gotDst,
+					tc.wantSrc,
+					tc.wantDst,
+				)
+			}
+		})
+	}
+}
+
+func TestPrepareLegacyNVIDIADeviceMount(t *testing.T) {
+	m := &types.CheckpointManifest{
+		CRIUDump: types.CRIUDumpManifest{
+			ExtMnt: map[string]string{"/dev/nvidia7": "/dev/nvidia7"},
+		},
+	}
+	var calls []string
+	ops := legacyNVIDIADeviceMountOps{
+		create: func(path string) error {
+			calls = append(calls, "create "+path)
+			return nil
+		},
+		mount: func(source, target string) error {
+			calls = append(calls, "mount "+source+" "+target)
+			return nil
+		},
+		unmount: func(target string) error {
+			calls = append(calls, "unmount "+target)
+			return nil
+		},
+		remove: func(path string) error {
+			calls = append(calls, "remove "+path)
+			return nil
+		},
+	}
+
+	cleanup, err := prepareLegacyNVIDIADeviceMount(
+		m,
+		[]string{"/dev/nvidia2"},
+		ops,
+		logr.Discard(),
+	)
+	if err != nil {
+		t.Fatalf("prepareLegacyNVIDIADeviceMount: %v", err)
+	}
+	if err := cleanup(); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	want := []string{
+		"create /dev/nvidia7",
+		"mount /dev/nvidia2 /dev/nvidia7",
+		"unmount /dev/nvidia7",
+		"remove /dev/nvidia7",
+	}
+	if !slices.Equal(calls, want) {
+		t.Fatalf("calls = %v, want %v", calls, want)
+	}
+}
+
+func TestPrepareLegacyNVIDIADeviceMountCleansCreatedPathAfterMountFailure(t *testing.T) {
+	m := &types.CheckpointManifest{
+		CRIUDump: types.CRIUDumpManifest{
+			ExtMnt: map[string]string{"/dev/nvidia7": "/dev/nvidia7"},
+		},
+	}
+	var calls []string
+	ops := legacyNVIDIADeviceMountOps{
+		create: func(path string) error {
+			calls = append(calls, "create "+path)
+			return nil
+		},
+		mount: func(source, target string) error {
+			calls = append(calls, "mount "+source+" "+target)
+			return errors.New("mount failed")
+		},
+		remove: func(path string) error {
+			calls = append(calls, "remove "+path)
+			return nil
+		},
+	}
+
+	cleanup, err := prepareLegacyNVIDIADeviceMount(
+		m,
+		[]string{"/dev/nvidia2"},
+		ops,
+		logr.Discard(),
+	)
+	if err == nil || !strings.Contains(err.Error(), "mount failed") {
+		t.Fatalf("prepareLegacyNVIDIADeviceMount() error = %v, want mount failure", err)
+	}
+	if cleanup != nil {
+		t.Fatal("prepareLegacyNVIDIADeviceMount() returned cleanup after mount failure")
+	}
+
+	want := []string{
+		"create /dev/nvidia7",
+		"mount /dev/nvidia2 /dev/nvidia7",
+		"remove /dev/nvidia7",
+	}
+	if !slices.Equal(calls, want) {
+		t.Fatalf("calls = %v, want %v", calls, want)
+	}
 }

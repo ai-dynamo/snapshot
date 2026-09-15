@@ -244,22 +244,35 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 		log.V(1).Info("Resolved checkpoint CUDA PID mapping", "host_pids", cudaHostPIDs, "namespace_pids", cudaNamespacePIDs)
 	}
 	var gpuUUIDs []string
+	var gpuDevicePaths map[string]string
 	var gpuDeviceMapDuration time.Duration
 	if len(cudaHostPIDs) > 0 {
 		gpuStart := time.Now()
-		gpuUUIDs, err = cuda.DiscoverGPUUUIDs(
-			ctx,
-			req.Clientset,
-			req.PodName,
-			req.PodNamespace,
-			req.ContainerName,
-			snapshotruntime.HostProcPath,
-			pid,
-			log,
-		)
+		if ociSpec != nil && ociSpec.Process != nil {
+			gpuUUIDs, err = cuda.ResolveVisibleDevices(ctx, ociSpec.Process.Env)
+			if err != nil {
+				return nil, 0, err
+			}
+		}
+		if len(gpuUUIDs) == 0 {
+			gpuUUIDs, err = cuda.DiscoverGPUUUIDs(
+				ctx,
+				req.Clientset,
+				req.PodName,
+				req.PodNamespace,
+				req.ContainerName,
+				snapshotruntime.HostProcPath,
+				pid,
+				log,
+			)
+		}
 		gpuDeviceMapDuration = time.Since(gpuStart)
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to discover source GPU UUIDs: %w", err)
+		}
+		gpuDevicePaths, err = cuda.ResolveDevicePaths(snapshotruntime.HostProcPath, pid, gpuUUIDs)
+		if err != nil {
+			return nil, 0, err
 		}
 	}
 
@@ -275,6 +288,7 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 		CUDAHostPIDs:   cudaHostPIDs,
 		CUDANSPIDs:     cudaNamespacePIDs,
 		GPUUUIDs:       gpuUUIDs,
+		GPUDevicePaths: gpuDevicePaths,
 	}, gpuDeviceMapDuration, nil
 }
 
@@ -299,6 +313,10 @@ func configureCheckpoint(
 	)
 	if len(state.CUDANSPIDs) > 0 {
 		m.CUDA = types.NewCUDAManifest(state.CUDANSPIDs, state.GPUUUIDs)
+		m.CUDA.DevicePaths = state.GPUDevicePaths
+		if state.OCISpec != nil && state.OCISpec.Process != nil {
+			m.CUDA.NVIDIAVisibleDevices = cuda.VisibleDevicesValue(state.OCISpec.Process.Env)
+		}
 	}
 
 	if err := types.WriteManifest(checkpointDir, m); err != nil {

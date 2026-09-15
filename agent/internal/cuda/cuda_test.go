@@ -7,12 +7,15 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
+	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -22,6 +25,74 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	podresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
 )
+
+func TestResolveDevicePathsValidatesPhysicalMinor(t *testing.T) {
+	root := t.TempDir()
+	infoDir := filepath.Join(root, "driver/nvidia/gpus/0000:41:00.0")
+	deviceDir := filepath.Join(root, "100/root/dev")
+	for _, dir := range []string{infoDir, deviceDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(infoDir, "information"),
+		[]byte("GPU UUID: GPU-A\nDevice Minor: 7\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(deviceDir, "nvidia7")
+	if err := unix.Mknod(path, unix.S_IFCHR|0600, int(unix.Mkdev(195, 7))); err != nil {
+		if errors.Is(err, unix.EPERM) {
+			t.Skip("requires permission to create a test character device")
+		}
+		t.Fatal(err)
+	}
+	got, err := ResolveDevicePaths(root, 100, []string{"GPU-A"})
+	if err != nil || got["GPU-A"] != "/dev/nvidia7" {
+		t.Fatalf("paths = %v, error = %v", got, err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveDevicePaths(root, 100, []string{"GPU-A"}); err == nil {
+		t.Fatal("accepted a regular file in place of the allocated GPU")
+	}
+}
+
+func TestResolveVisibleDevices(t *testing.T) {
+	dir := t.TempDir()
+	const a = "GPU-11111111-1111-1111-1111-111111111111"
+	const b = "GPU-22222222-2222-2222-2222-222222222222"
+	script := "#!/bin/sh\ncase \"$2\" in\n0|" + a + ") echo " + a + ";;\n2|" + b + ") echo " + b + ";;\n*) exit 1;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(dir, "nvidia-smi"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	for _, tc := range []struct {
+		value   string
+		want    []string
+		wantErr bool
+	}{
+		{"0,2", []string{a, b}, false},
+		{b + "," + a, []string{b, a}, false},
+		{"all", nil, false},
+		{"", nil, false},
+		{"0," + a, nil, true},
+		{"MIG-invalid", nil, true},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			got, err := ResolveVisibleDevices(context.Background(), []string{"NVIDIA_VISIBLE_DEVICES=" + tc.value, "CUDA_VISIBLE_DEVICES=1"})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("error = %v", err)
+			}
+			if !tc.wantErr && !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("UUIDs = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
 
 func TestBuildDeviceMap(t *testing.T) {
 	tests := []struct {

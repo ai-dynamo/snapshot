@@ -5,6 +5,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 type RestoreOptions struct {
 	CheckpointPath string
 	CUDADeviceMap  string
+	GPUDevicePaths map[string]string
 	CgroupRoot     string
 	TargetPodIP    string
 	// BundleDir is the path where the agent's binary bundle is mounted inside this namespace.
@@ -146,6 +148,20 @@ func executeRestore(
 		}
 	}
 
+	cleanupLegacyNVIDIADeviceMount, err := criu.PrepareGPUDeviceMounts(m, opts.CUDADeviceMap, opts.GPUDevicePaths, log)
+	if err != nil {
+		return nil, 0, nil, fmt.Errorf("prepare legacy NVIDIA device mount: %w", err)
+	}
+	legacyNVIDIADeviceMountCommitted := false
+	defer func() {
+		if legacyNVIDIADeviceMountCommitted {
+			return
+		}
+		if err := cleanupLegacyNVIDIADeviceMount(); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("clean legacy NVIDIA device mount: %w", err))
+		}
+	}()
+
 	// Unmount placeholder's /dev/shm so CRIU can recreate tmpfs with checkpointed content
 	if err := syscall.Unmount("/dev/shm", 0); err != nil {
 		return nil, 0, nil, fmt.Errorf("failed to unmount /dev/shm before restore: %w", err)
@@ -191,6 +207,7 @@ func executeRestore(
 	if err != nil {
 		return nil, 0, nil, err
 	}
+	legacyNVIDIADeviceMountCommitted = true
 	restoredPID = int(criuPID)
 	// Cleanup runs after CUDA unlock. A cleanup-only failure is returned
 	// separately so the host controller can warn without killing the workload.

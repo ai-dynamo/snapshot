@@ -17,6 +17,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/criu"
@@ -298,12 +299,13 @@ func inspectRestore(
 ) (*types.RestoreContainerSnapshot, time.Duration, error) {
 	var (
 		placeholderPID int
+		ociSpec        *specs.Spec
 		err            error
 	)
 	if req.ContainerID != "" {
-		placeholderPID, _, err = rt.ResolveContainer(ctx, req.ContainerID)
+		placeholderPID, ociSpec, err = rt.ResolveContainer(ctx, req.ContainerID)
 	} else {
-		placeholderPID, _, err = rt.ResolveContainerByPod(ctx, req.PodName, req.PodNamespace, req.DestinationContainerName)
+		placeholderPID, ociSpec, err = rt.ResolveContainerByPod(ctx, req.PodName, req.PodNamespace, req.DestinationContainerName)
 	}
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to resolve placeholder container: %w", err)
@@ -317,22 +319,32 @@ func inspectRestore(
 	}
 
 	cudaDeviceMap := ""
+	var gpuDevicePaths map[string]string
 	var gpuDeviceMapDuration time.Duration
 	if !manifest.CUDA.IsEmpty() {
 		if len(manifest.CUDA.SourceGPUUUIDs) == 0 {
 			return nil, 0, fmt.Errorf("missing source GPU UUIDs in checkpoint manifest")
 		}
 		gpuStart := time.Now()
-		targetGPUUUIDs, err := cuda.DiscoverGPUUUIDs(
-			ctx,
-			req.Clientset,
-			req.PodName,
-			req.PodNamespace,
-			req.DestinationContainerName,
-			snapshotruntime.HostProcPath,
-			placeholderPID,
-			log,
-		)
+		var targetGPUUUIDs []string
+		if ociSpec != nil && ociSpec.Process != nil {
+			targetGPUUUIDs, err = cuda.ResolveVisibleDevices(ctx, ociSpec.Process.Env)
+			if err != nil {
+				return nil, 0, err
+			}
+		}
+		if len(targetGPUUUIDs) == 0 {
+			targetGPUUUIDs, err = cuda.DiscoverGPUUUIDs(
+				ctx,
+				req.Clientset,
+				req.PodName,
+				req.PodNamespace,
+				req.DestinationContainerName,
+				snapshotruntime.HostProcPath,
+				placeholderPID,
+				log,
+			)
+		}
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to get target GPU UUIDs: %w", err)
 		}
@@ -343,6 +355,10 @@ func inspectRestore(
 		gpuDeviceMapDuration = time.Since(gpuStart)
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to build CUDA device map: %w", err)
+		}
+		gpuDevicePaths, err = cuda.ResolveDevicePaths(snapshotruntime.HostProcPath, placeholderPID, targetGPUUUIDs)
+		if err != nil {
+			return nil, 0, err
 		}
 		log.V(1).Info("GPU UUIDs for device map",
 			"source_uuids", manifest.CUDA.SourceGPUUUIDs,
@@ -356,6 +372,7 @@ func inspectRestore(
 		TargetRoot:     fmt.Sprintf("%s/%d/root", snapshotruntime.HostProcPath, placeholderPID),
 		CgroupRoot:     cgroupRoot,
 		CUDADeviceMap:  cudaDeviceMap,
+		GPUDevicePaths: gpuDevicePaths,
 	}, gpuDeviceMapDuration, nil
 }
 
@@ -417,6 +434,13 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	)
 	if snap.CUDADeviceMap != "" {
 		args = append(args, "--cuda-device-map", snap.CUDADeviceMap)
+	}
+	if len(snap.GPUDevicePaths) > 0 {
+		paths, err := json.Marshal(snap.GPUDevicePaths)
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, "--gpu-device-paths", string(paths))
 	}
 	if snap.CgroupRoot != "" {
 		args = append(args, "--cgroup-root", snap.CgroupRoot)
