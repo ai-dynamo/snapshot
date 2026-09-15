@@ -183,7 +183,8 @@ def run_benchmark(
     run_id = run_id or uuid.uuid4().hex[:12]
     workload = cfg.workload_e2e_config()
     k8s.configure(workload)
-    _validate_snapshot_agent_present(cfg)
+    if mode == "both":
+        _validate_snapshot_agent_present(cfg)
 
     source_name = f"bench-source-{run_id}"
 
