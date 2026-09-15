@@ -46,6 +46,17 @@ func (r *ContainerdRuntime) ResolveContainerImageID(ctx context.Context, contain
 	return resolveContainerImageID(ctx, r.cri, containerID)
 }
 
+func (r *ContainerdRuntime) TerminateContainer(ctx context.Context, containerID string) error {
+	id, err := containerIDForRuntime(containerID, "containerd://")
+	if err != nil {
+		return fmt.Errorf("invalid containerd container ID %q: %w", containerID, err)
+	}
+	if err := r.cri.StopContainer(ctx, id, 0); err != nil {
+		return fmt.Errorf("failed to terminate container %s: %w", containerID, err)
+	}
+	return nil
+}
+
 func (r *ContainerdRuntime) ResolveContainer(ctx context.Context, containerID string) (int, *specs.Spec, error) {
 	ctx = namespaces.WithNamespace(ctx, k8sNamespace)
 

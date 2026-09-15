@@ -6,6 +6,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -30,6 +31,10 @@ type Runtime interface {
 	ResolveContainerIDByPod(ctx context.Context, pod, ns, ctr string) (string, error)
 	ResolveContainerByPod(ctx context.Context, pod, ns, ctr string) (int, *specs.Spec, error)
 	ResolveContainerImageID(ctx context.Context, id string) (string, error)
+	// TerminateContainer stops the container identified by its runtime ID with
+	// zero grace. Unlike signaling a resolved PID, the runtime performs the
+	// final identity check and cannot target a process that reused the PID.
+	TerminateContainer(ctx context.Context, id string) error
 	Close() error
 }
 
@@ -46,6 +51,36 @@ func StripCRIScheme(id string) string {
 		}
 	}
 	return id
+}
+
+// containerIDForRuntime validates the kubelet-format runtime scheme before a
+// destructive operation. Bare CRI IDs remain valid for internal callers, but a
+// recognized scheme for another backend and unknown scheme-like prefixes fail
+// closed instead of being retargeted to the active runtime.
+func containerIDForRuntime(id string, allowedSchemes ...string) (string, error) {
+	if id == "" {
+		return "", errors.New("container ID is empty")
+	}
+	for _, scheme := range allowedSchemes {
+		if stripped, ok := strings.CutPrefix(id, scheme); ok {
+			if stripped == "" {
+				return "", fmt.Errorf("container ID after %q is empty", scheme)
+			}
+			if strings.Contains(stripped, "://") {
+				return "", errors.New("container ID contains a nested runtime scheme")
+			}
+			return stripped, nil
+		}
+	}
+	for _, scheme := range criSchemes {
+		if strings.HasPrefix(id, scheme) {
+			return "", fmt.Errorf("container ID uses mismatched runtime scheme %q", scheme)
+		}
+	}
+	if strings.Contains(id, "://") {
+		return "", errors.New("container ID uses an unknown runtime scheme")
+	}
+	return id, nil
 }
 
 // defaultSocketFor returns the conventional socket path for a runtime type.
