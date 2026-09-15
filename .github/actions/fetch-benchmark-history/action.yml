@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Fetch benchmark history
+description: >-
+  Check out the data-only E2E benchmark history branch into a temporary
+  directory. When the branch does not exist yet, either leave an empty
+  repository ready for the first history commit or report that no history
+  exists, depending on the bootstrap input.
+
+inputs:
+  token:
+    description: Token used to read (and, for the publisher, push) the history branch.
+    required: true
+  branch:
+    description: Name of the data-only history branch.
+    required: false
+    default: e2e-benchmark-history
+  bootstrap:
+    description: When "true", a missing branch is initialized locally so the caller can create it.
+    required: false
+    default: "false"
+  path:
+    description: Directory that receives the history checkout.
+    required: false
+    default: ${{ runner.temp }}/e2e-benchmark-history
+
+outputs:
+  history_dir:
+    description: Directory containing the history checkout (or the empty bootstrap repository).
+    value: ${{ steps.fetch.outputs.history_dir }}
+  exists:
+    description: '"true" when the remote branch exists, otherwise "false".'
+    value: ${{ steps.fetch.outputs.exists }}
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch benchmark history
+      id: fetch
+      shell: bash
+      env:
+        HISTORY_TOKEN: ${{ inputs.token }}
+        HISTORY_BRANCH: ${{ inputs.branch }}
+        HISTORY_BOOTSTRAP: ${{ inputs.bootstrap }}
+        HISTORY_DIR: ${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        mkdir -p "${HISTORY_DIR}"
+        git -C "${HISTORY_DIR}" init --quiet --initial-branch="${HISTORY_BRANCH}"
+        git -C "${HISTORY_DIR}" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        auth="$(printf 'x-access-token:%s' "${HISTORY_TOKEN}" | base64 -w0)"
+        git -C "${HISTORY_DIR}" config "http.${GITHUB_SERVER_URL}/.extraheader" \
+          "AUTHORIZATION: basic ${auth}"
+
+        set +e
+        git -C "${HISTORY_DIR}" ls-remote --quiet --exit-code --heads origin "${HISTORY_BRANCH}" >/dev/null
+        status=$?
+        set -e
+
+        exists=false
+        case "${status}" in
+          0)
+            git -C "${HISTORY_DIR}" fetch --quiet --depth=1 origin "refs/heads/${HISTORY_BRANCH}"
+            git -C "${HISTORY_DIR}" checkout --quiet -B "${HISTORY_BRANCH}" FETCH_HEAD
+            exists=true
+            ;;
+          2)
+            if [[ "${HISTORY_BOOTSTRAP}" == "true" ]]; then
+              echo "::notice::Bootstrapping the orphan ${HISTORY_BRANCH} branch."
+            else
+              echo "::notice::No ${HISTORY_BRANCH} branch exists yet."
+            fi
+            ;;
+          *)
+            echo "::error::Could not inspect the ${HISTORY_BRANCH} branch (git exit ${status})."
+            exit "${status}"
+            ;;
+        esac
+        echo "history_dir=${HISTORY_DIR}" >> "${GITHUB_OUTPUT}"
+        echo "exists=${exists}" >> "${GITHUB_OUTPUT}"
