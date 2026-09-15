@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Only the report consumer changes; GPU workload/assertions remain pinned.
+--- a/harness.py
++++ b/harness.py
+@@ -12,6 +12,7 @@
+ 
+ from __future__ import annotations
+ 
++import json
+ import os
+ import re
+ import signal
+@@ -41,11 +42,6 @@
+ # 32 lowercase hex digits; the shim accepts it as the parent's identity.
+ PARENT_PARTICIPANT_ID = "a" * 32
+ 
+-PHASE_LINE = re.compile(
+-    r"^cuinterpose-coordinator phase=(?P<phase>\S+) status=(?P<status>\S+)"
+-    r"(?P<rest>(?: \S+=\S+)*)$"
+-)
+-
+ 
+ class Tools(NamedTuple):
+     interposer: Path
+@@ -104,20 +100,22 @@
+     status: int
+     out: str
+     err: str
+-    phases: dict[str, dict[str, str]] = field(default_factory=dict)
++    phases: dict[str, dict[str, str | int | float]] = field(default_factory=dict)
+ 
+ 
+-def parse_phase_lines(stdout: str) -> dict[str, dict[str, str]]:
+-    phases: dict[str, dict[str, str]] = {}
++def parse_phase_lines(stdout: str) -> dict[str, dict[str, str | int | float]]:
++    phases: dict[str, dict[str, str | int | float]] = {}
+     for line in stdout.splitlines():
+-        match = PHASE_LINE.match(line.strip())
+-        if match is None:
++        try:
++            report = json.loads(line)
++        except json.JSONDecodeError:
+             continue
+-        fields = {"status": match.group("status")}
+-        for pair in match.group("rest").split():
+-            key, _, value = pair.partition("=")
+-            fields[key] = value
+-        phases[match.group("phase")] = fields
++        if not isinstance(report, dict):
++            continue
++        phase = report.pop("phase", None)
++        if not isinstance(phase, str) or not phase or report.get("status") != "ok":
++            continue
++        phases[phase] = report
+     return phases
+ 
+ 

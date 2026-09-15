@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
+mod report;
 mod state;
 mod topology;
 
 use cuinterpose_protocol::{Header, Identity, MAX_RECORDS, Operation, RECORD_SIZE, Record};
-use std::io::{Read, Write};
+use report::{Metrics, Phase, write as report};
+use std::io::Read;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -116,17 +118,6 @@ impl Participant {
     }
 }
 
-fn report(phase: &str, start: Instant, participants: usize, extra: &str) {
-    println!(
-        "cuinterpose-coordinator phase={phase} status=ok elapsed_ms={:.1} participants={participants}{}{}",
-        start.elapsed().as_secs_f64() * 1000.0,
-        if extra.is_empty() { "" } else { " " },
-        extra
-    );
-    // Progress must be visible while a subsequent collective is blocked.
-    let _ = std::io::stdout().flush();
-}
-
 /// Scoped threads are the global barrier. Even if one exchange fails, all
 /// started exchanges are joined before returning the first failure.
 fn command_all(
@@ -186,7 +177,7 @@ fn transfer(
     participants: &mut [Participant],
     operation: Operation,
     allocations: &[Allocation],
-    phase: &str,
+    phase: Phase,
 ) -> Result<()> {
     let start = Instant::now();
     let copy_us = command_all(participants, operation, Some(allocations)).map_err(|error| {
@@ -211,16 +202,17 @@ fn transfer(
         phase,
         start,
         participants.len(),
-        &format!(
-            "allocation_count={count} allocation_bytes={bytes} gb_per_s={:.2} copy_gb_per_s={:.2}",
-            bytes as f64 / 1e9 / start.elapsed().as_secs_f64(),
-            if copy_us == 0 {
+        Metrics::Transfer {
+            allocation_count: count,
+            allocation_bytes: bytes,
+            gb_per_s: bytes as f64 / 1e9 / start.elapsed().as_secs_f64(),
+            copy_gb_per_s: if copy_us == 0 {
                 0.0
             } else {
                 bytes as f64 / 1000.0 / f64::from(copy_us)
-            }
-        ),
-    );
+            },
+        },
+    )?;
     Ok(())
 }
 
@@ -277,22 +269,18 @@ fn run() -> Result<()> {
         let start = Instant::now();
         inspect(&mut participants)?;
         report(
-            "inspect",
+            Phase::Inspect,
             start,
             participants.len(),
-            &format!(
-                "records={} live_raw_imports={} unsupported_exportable_creations={}",
-                participants.iter().map(|p| p.records.len()).sum::<usize>(),
-                participants
-                    .iter()
-                    .map(|p| u64::from(p.raw_imports))
-                    .sum::<u64>(),
-                participants
+            Metrics::Inspection {
+                records: participants.iter().map(|p| p.records.len()).sum(),
+                live_raw_imports: participants.iter().map(|p| u64::from(p.raw_imports)).sum(),
+                unsupported_exportable_creations: participants
                     .iter()
                     .map(|p| u64::from(p.unsupported))
-                    .sum::<u64>()
-            ),
-        );
+                    .sum(),
+            },
+        )?;
         for participant in &participants {
             if participant.raw_imports != 0 {
                 return Err(format!(
@@ -307,23 +295,38 @@ fn run() -> Result<()> {
         }
         let start = Instant::now();
         let allocations = topology::validate(&participants)?;
-        report("validate", start, participants.len(), "");
+        report(Phase::Validate, start, participants.len(), Metrics::None {})?;
         let start = Instant::now();
         command_all(&mut participants, Operation::PrepareMulticast, None)
             .map_err(|error| format!("multicast teardown: {error}"))?;
-        report("prepare_multicast", start, participants.len(), "");
+        report(
+            Phase::PrepareMulticast,
+            start,
+            participants.len(),
+            Metrics::None {},
+        )?;
         transfer(
             &mut participants,
             Operation::SaveAllocations,
             &allocations,
-            "save_allocations",
+            Phase::SaveAllocations,
         )?;
         let start = Instant::now();
         command_all(&mut participants, Operation::PrepareUnicast, None)?;
-        report("prepare_unicast", start, participants.len(), "");
+        report(
+            Phase::PrepareUnicast,
+            start,
+            participants.len(),
+            Metrics::None {},
+        )?;
         let start = Instant::now();
         state::write_atomic(&path, &mut participants)?;
-        report("state_write", start, participants.len(), "");
+        report(
+            Phase::StateWrite,
+            start,
+            participants.len(),
+            Metrics::None {},
+        )?;
     } else {
         let start = Instant::now();
         for participant in &mut participants {
@@ -339,16 +342,26 @@ fn run() -> Result<()> {
             return Err("restored processes do not match the checkpointed participants".into());
         }
         let allocations = topology::validate(&expected)?;
-        report("handshake", start, participants.len(), "");
+        report(
+            Phase::Handshake,
+            start,
+            participants.len(),
+            Metrics::None {},
+        )?;
         transfer(
             &mut participants,
             Operation::LoadAllocations,
             &allocations,
-            "load_allocations",
+            Phase::LoadAllocations,
         )?;
         let start = Instant::now();
         command_all(&mut participants, Operation::RestoreUnicast, None)?;
-        report("restore_unicast", start, participants.len(), "");
+        report(
+            Phase::RestoreUnicast,
+            start,
+            participants.len(),
+            Metrics::None {},
+        )?;
         let start = Instant::now();
         for operation in [
             Operation::RestoreMulticastCreators,
@@ -358,7 +371,12 @@ fn run() -> Result<()> {
         ] {
             command_all(&mut participants, operation, None)?;
         }
-        report("restore_multicast", start, participants.len(), "");
+        report(
+            Phase::RestoreMulticast,
+            start,
+            participants.len(),
+            Metrics::None {},
+        )?;
         let start = Instant::now();
         inspect(&mut participants)?;
         topology::validate(&participants)?;
@@ -370,7 +388,7 @@ fn run() -> Result<()> {
                 return Err("restored topology does not match the checkpoint".into());
             }
         }
-        report("validate", start, participants.len(), "");
+        report(Phase::Validate, start, participants.len(), Metrics::None {})?;
     }
     Ok(())
 }

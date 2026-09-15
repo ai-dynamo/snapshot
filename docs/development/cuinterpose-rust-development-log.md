@@ -1322,3 +1322,33 @@ Serde/MessagePack, move coordinator reports to typed JSON with coordinated
 Go/Python consumer changes, and use established Unix APIs for FD transport.
 Those changes will deliberately break the experimental format rather than
 maintain a production legacy codec.
+
+## 16. Typed coordinator reports
+
+The coordinator now serializes typed phase/metric structs to JSON Lines using
+Serde and `serde_json`. The Go agent decodes typed fields with `encoding/json`,
+including numeric counters and throughput. Ordinary phases carry no unrelated
+inspection/transfer fields. Output is flushed after each phase; a failed
+write is returned rather than ignored.
+
+This changes the old key/value report contract, not the v2 control/ticket
+format. The C fixture runner first executes the original reference self-tests,
+then applies a checked, format-only patch to progress assertions and rebuilds
+the callers for Rust. A separate GPU staging command applies the corresponding
+Python parser change without modifying CUDA workload bodies or thresholds.
+Prebuilt reference fixtures require the current patch fingerprint.
+
+Workspace tests, the actual executable CLI contract, Go CUDA/executor tests,
+the complete adapted fake-driver reference runner, and containerized GNU/musl
+artifact/build/test gates passed. The staged Python report parser also passed
+its host-side checks. The frontend dependency graph remains only `abi` and
+`libc`; the ABI crate has no dependencies. GPU and GLM results still refer to
+the earlier tested baseline, not this report change.
+
+During implementation, the first combined patch applied its new fixture file
+but missed the runner hunk; the runner was then patched against its actual
+context. An incorrect relative log path prevented one reference invocation
+from starting. The first GPU staging attempt rejected a malformed patch hunk
+length; correcting that length allowed staging and parser checks to pass.
+These were local editing/staging errors, not CUDA failures or test retries
+after a failed workload.

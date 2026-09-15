@@ -78,6 +78,17 @@ identity checks are retained.
 
 ## Implementation boundaries
 
+Core lifecycle operations and phases use enums rather than numeric states.
+The numeric `DebugPhase` values exist only at the diagnostic C ABI boundary.
+
+The coordinator emits one typed JSON report per completed phase using Serde
+and `serde_json`, with numeric timings and allocation counts. The Go agent
+decodes the same fields using `encoding/json`. This replaces the experimental
+key/value progress format; producer and consumer must be updated together.
+Serde is currently coordinator-only: the frontend still depends only on the
+ABI crate and `libc`. MessagePack transport and typed topology records are
+the next cleanup increment, not implemented by this report-format change.
+
 | Crate | Owns |
 | --- | --- |
 | `frontend` | CUDA/resolver exports, checked allocation-free ELF bootstrap, caller-relative lookup, provider retention, and lazy core loading |
@@ -299,7 +310,10 @@ real multicast reconstruction.
 `reference.py` builds the pinned C fixtures using a local CUDA 13.1/gtest Docker
 image, then runs all 14 coordinator, 13 tracking, 5 unicast lifecycle, and
 6 multicast tests against Rust, including ordinary forked importers. The pinned
-fixtures are unmodified; there is no coordinator-fork retry adapter.
+fixtures retain their CUDA assertions. After the original C self-tests run,
+`core/tests/json-reports.patch` changes only their progress-output assertions
+before rebuilding them for Rust. There is no coordinator-fork retry adapter.
+Prebuilt fixtures must carry the matching patch fingerprint.
 By default `SANITIZE=` explicitly disables fixture instrumentation and readelf
 checks actual linkage. `--sanitized` selects separate ASan/UBSan diagnostic
 coverage; `--fixtures` reuse must match the selected linkage.
@@ -320,3 +334,9 @@ ASan instruments the C fixtures only, with leak detection disabled; it does not
 instrument Rust. The frontend suite checks same/cross-thread constructor reentry,
 not fork from those constructors. Real workloads should use spawn/exec or fork before CUDA
 initialization; shim reset cannot repair inherited NVIDIA runtime state.
+
+For the physical-GPU suite, `core/tests/stage_gpu.py DEST --artifacts DIR
+--cuda-checkpoint PATH` extracts the pinned test sources and applies only
+`gpu-json-reports.patch` to the harness parser. It stages both Rust libraries
+and the coordinator, and exercises the staged JSON parser without loading CUDA
+on the build host. GPU test bodies and throughput assertions are unchanged.

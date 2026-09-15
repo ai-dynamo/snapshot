@@ -142,14 +142,19 @@ func TestRemoveStaleCuinterposeSockets(t *testing.T) {
 }
 
 func TestParseCoordinatorReport(t *testing.T) {
-	phase, ok := parseCoordinatorReport("cuinterpose-coordinator phase=save_allocations status=ok elapsed_ms=12.5 participants=8 allocation_count=3 allocation_bytes=1610612736 gb_per_s=41.20")
+	phase, ok := parseCoordinatorReport(`{"phase":"save_allocations","status":"ok","elapsed_ms":12.5,"participants":8,"allocation_count":3,"allocation_bytes":1610612736,"gb_per_s":41.20}`)
 	if !ok || phase.Phase != "save_allocations" {
 		t.Fatalf("parse = %+v, %v", phase, ok)
 	}
-	if phase.Fields["allocation_bytes"] != "1610612736" || phase.Fields["gb_per_s"] != "41.20" || phase.Fields["status"] != "ok" {
-		t.Fatalf("fields = %v", phase.Fields)
+	if phase.AllocationBytes == nil || *phase.AllocationBytes != 1610612736 ||
+		phase.GBPerS == nil || *phase.GBPerS != 41.20 || phase.Status != "ok" {
+		t.Fatalf("report = %+v", phase)
 	}
-	for _, junk := range []string{"", "prepare failed: participant inspect", "cuinterpose-coordinator status=ok", "phase=inspect"} {
+	for _, junk := range []string{
+		"", "prepare failed: participant inspect", "cuinterpose-coordinator status=ok", "phase=inspect",
+		`{"status":"ok"}`, `{"phase":"inspect"}`, `{"phase":"inspect","status":"ok","records":"four"}`,
+		`{"phase":"inspect","status":"ok"} trailing`,
+	} {
 		if _, ok := parseCoordinatorReport(junk); ok {
 			t.Fatalf("parsed %q as a report", junk)
 		}
@@ -165,9 +170,9 @@ func fakeCoordinator(t *testing.T, exitCode int) (binary, argvFile string) {
 	binary = filepath.Join(dir, "coordinator.sh")
 	script := "#!/bin/sh\n" +
 		"printf '%s\\n' \"$@\" > " + argvFile + "\n" +
-		"echo 'cuinterpose-coordinator phase=inspect status=ok elapsed_ms=1.0 participants=2 records=4'\n" +
+		"echo '{\"phase\":\"inspect\",\"status\":\"ok\",\"elapsed_ms\":1.0,\"participants\":2,\"records\":4}'\n" +
 		"echo 'not a report line'\n" +
-		"echo 'cuinterpose-coordinator phase=validate status=ok elapsed_ms=0.2 participants=2'\n" +
+		"echo '{\"phase\":\"validate\",\"status\":\"ok\",\"elapsed_ms\":0.2,\"participants\":2}'\n" +
 		"echo 'prepare failed: participant prepare' >&2\n" +
 		"exit " + strconv.Itoa(exitCode) + "\n"
 	if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
@@ -236,7 +241,8 @@ func TestCoordinatorArgvContractAndReports(t *testing.T) {
 	if string(argv) != want {
 		t.Fatalf("argv:\n%s\nwant:\n%s", argv, want)
 	}
-	if len(phases) != 2 || phases[0].Phase != "inspect" || phases[1].Phase != "validate" || phases[0].Fields["records"] != "4" {
+	if len(phases) != 2 || phases[0].Phase != "inspect" || phases[1].Phase != "validate" ||
+		phases[0].Records == nil || *phases[0].Records != 4 {
 		t.Fatalf("phases = %+v", phases)
 	}
 	nsenterArgv, _ := os.ReadFile(nsenterArgvFile)
@@ -321,9 +327,6 @@ func TestGoConstantsMatchTheRustSources(t *testing.T) {
 		if !strings.Contains(string(coordinator), `"`+flag+`"`) {
 			t.Errorf("Rust coordinator does not parse %s", flag)
 		}
-	}
-	if !strings.Contains(string(coordinator), `"cuinterpose-coordinator phase={phase} status=ok`) {
-		t.Error("Rust progress line format changed; update parseCoordinatorReport")
 	}
 }
 

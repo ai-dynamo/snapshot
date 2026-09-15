@@ -5,6 +5,7 @@
 """Build pinned C fake-driver fixtures and exercise the Rust implementation."""
 
 import argparse
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -42,6 +43,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix="cuinterpose-reference-") as directory:
         temporary = Path(directory)
         fixtures = args.fixtures.resolve() if args.fixtures else temporary / "build"
+        report_patch = Path(__file__).with_name("json-reports.patch")
+        report_patch_hash = hashlib.sha256(report_patch.read_bytes()).hexdigest()
         if not args.fixtures:
             archive = subprocess.check_output([
                 "git", "archive", REFERENCE, "agent/cmd/cuinterpose",
@@ -57,6 +60,23 @@ def main():
                 "make BUILD_DIR=/work/build CUDA_HOME=/usr/local/cuda-13.1 "
                 f"SANITIZE={'address,undefined' if args.sanitized else ''} test",
             ], check=True, timeout=600)
+            # The original C self-tests run above. Only report assertions are
+            # adapted before rebuilding the callers that exercise Rust.
+            subprocess.run(["git", "apply", str(report_patch.resolve())],
+                           cwd=temporary / "agent/cmd/cuinterpose", check=True)
+            subprocess.run([
+                "docker", "run", "--runtime=runc", "--rm", "--entrypoint", "bash",
+                "--user", f"{os.getuid()}:{os.getgid()}",
+                "-v", f"{temporary}:/work", args.image, "-lc",
+                "cd /work/agent/cmd/cuinterpose && "
+                "make BUILD_DIR=/work/build CUDA_HOME=/usr/local/cuda-13.1 "
+                f"SANITIZE={'address,undefined' if args.sanitized else ''} "
+                "/work/build/test/coordinator_test /work/build/test/lifecycle_preload_test "
+                "/work/build/test/multicast_preload_test",
+            ], check=True, timeout=600)
+            (fixtures / "rust-json-reports.sha256").write_text(report_patch_hash)
+        if (fixtures / "rust-json-reports.sha256").read_text() != report_patch_hash:
+            parser.error("fixtures must be rebuilt with the current JSON report assertions")
         for binary in ("coordinator_test", "state_preload_test", "lifecycle_preload_test",
                        "multicast_preload_test", "libcuda.so.1"):
             linkage = subprocess.check_output(["readelf", "-d", str(fixtures / "test" / binary)],

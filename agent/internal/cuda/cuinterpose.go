@@ -6,6 +6,7 @@ package cuda
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -41,7 +42,6 @@ const (
 
 	cuinterposeSocketPrefix = "cuinterpose-"
 	cuinterposeSocketSuffix = ".sock"
-	coordinatorReportPrefix = "cuinterpose-coordinator "
 )
 
 // cuinterposeEndpointPath is the shim's control socket for one CUDA process,
@@ -172,11 +172,19 @@ func RemoveStaleCuinterposeSockets(controlDir string) (int, error) {
 	return removed, nil
 }
 
-// CoordinatorPhase is one progress line the coordinator printed:
-// "cuinterpose-coordinator phase=<name> status=ok key=value ...".
+// CoordinatorPhase is one JSON progress report from the coordinator.
 type CoordinatorPhase struct {
-	Phase  string
-	Fields map[string]string
+	Phase                          string   `json:"phase"`
+	Status                         string   `json:"status"`
+	ElapsedMS                      float64  `json:"elapsed_ms"`
+	Participants                   uint64   `json:"participants"`
+	Records                        *uint64  `json:"records,omitempty"`
+	LiveRawImports                 *uint64  `json:"live_raw_imports,omitempty"`
+	UnsupportedExportableCreations *uint64  `json:"unsupported_exportable_creations,omitempty"`
+	AllocationCount                *uint64  `json:"allocation_count,omitempty"`
+	AllocationBytes                *uint64  `json:"allocation_bytes,omitempty"`
+	GBPerS                         *float64 `json:"gb_per_s,omitempty"`
+	CopyGBPerS                     *float64 `json:"copy_gb_per_s,omitempty"`
 }
 
 // PrepareCuinterpose runs the coordinator in the live target container's mount,
@@ -293,12 +301,7 @@ func executeCoordinator(cmd *exec.Cmd, binary, operation string, log logr.Logger
 	runErr := cmd.Run()
 	phases := parseCoordinatorReports(stdout.String())
 	for _, phase := range phases {
-		values := make([]any, 0, 2+2*len(phase.Fields))
-		values = append(values, "operation", operation, "phase", phase.Phase)
-		for key, value := range phase.Fields {
-			values = append(values, key, value)
-		}
-		log.Info("cuinterpose coordinator phase", values...)
+		log.Info("cuinterpose coordinator phase", "operation", operation, "report", phase)
 	}
 	if runErr != nil {
 		completed := make([]string, 0, len(phases))
@@ -328,23 +331,8 @@ func parseCoordinatorReports(output string) []CoordinatorPhase {
 }
 
 func parseCoordinatorReport(line string) (CoordinatorPhase, bool) {
-	line = strings.TrimSpace(line)
-	if !strings.HasPrefix(line, coordinatorReportPrefix) {
-		return CoordinatorPhase{}, false
-	}
-	phase := CoordinatorPhase{Fields: map[string]string{}}
-	for _, field := range strings.Fields(strings.TrimPrefix(line, coordinatorReportPrefix)) {
-		key, value, found := strings.Cut(field, "=")
-		if !found {
-			continue
-		}
-		if key == "phase" {
-			phase.Phase = value
-			continue
-		}
-		phase.Fields[key] = value
-	}
-	if phase.Phase == "" {
+	var phase CoordinatorPhase
+	if err := json.Unmarshal([]byte(line), &phase); err != nil || phase.Phase == "" || phase.Status != "ok" {
 		return CoordinatorPhase{}, false
 	}
 	return phase, true

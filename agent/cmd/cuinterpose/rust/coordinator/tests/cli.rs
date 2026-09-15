@@ -60,11 +60,22 @@ fn empty_participant_capture_restore_contract() {
             .unwrap();
         assert!(output.status.success(), "{:?}", output);
         let stdout = String::from_utf8(output.stdout).unwrap();
-        for phase in phases {
-            assert!(
-                stdout.contains(&format!("cuinterpose-coordinator phase={phase} status=ok ")),
-                "{stdout}"
-            );
+        let reports: Vec<serde_json::Value> = stdout
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            reports
+                .iter()
+                .map(|report| report["phase"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            phases,
+            "{stdout}"
+        );
+        for report in reports {
+            assert_eq!(report["status"], "ok");
+            assert_eq!(report["participants"], 1);
+            assert!(report["elapsed_ms"].is_number());
         }
     }
     assert!(directory.join("cuinterpose.state").is_file());
