@@ -117,6 +117,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
        g++=4:12.2.0-3 nlohmann-json3-dev=3.11.2-2 libcli11-dev=2.1.2+ds-1 \
        make binutils python3 python3-msgpack \
     && rm -rf /var/lib/apt/lists/*
+WORKDIR /cuinterpose
+COPY cmd/cuinterpose/ ./
+RUN make native
+# Preserve header-only dependency sources and attribution beside project source.
+RUN mkdir -p /cpp-dependencies/include /cpp-dependencies/notices \
+    && cp -a /usr/include/nlohmann /usr/include/CLI /cpp-dependencies/include/ \
+    && cp -aL /usr/share/doc/nlohmann-json3-dev /usr/share/doc/libcli11-dev \
+              /usr/share/doc/libstdc++6 /usr/share/doc/libgcc-s1 /cpp-dependencies/notices/ \
+    && test -r /cpp-dependencies/notices/libstdc++6/copyright \
+    && test -r /cpp-dependencies/notices/libgcc-s1/copyright
+# The static coordinator includes LGPL glibc. Preserve its matching source
+# package and our linkable objects so recipients can relink with modified libc.
+RUN sed -i 's/Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && mkdir -p /cpp-dependencies/glibc-source /cpp-dependencies/relink \
+    && cd /cpp-dependencies/glibc-source \
+    && apt-get source --download-only "glibc=$(dpkg-query -W -f='${source:Version}' libc6)" \
+    && cp /cuinterpose/build/coordinator.o /cuinterpose/build/protocol.o /cpp-dependencies/relink/ \
+    && cp -a /usr/share/doc/libc6 /cpp-dependencies/notices/ \
+    && rm -rf /var/lib/apt/lists/*
+
+FROM scratch AS cuinterpose-export
+COPY --from=cuinterpose-builder /cuinterpose/build/libcuinterpose.so /
+COPY --from=cuinterpose-builder /cuinterpose/build/libcuinterpose_core.so /
+COPY --from=cuinterpose-builder /cuinterpose/build/cuinterpose-coordinator /
 
 # =============================================================================
 # Stage: Go base - Common setup for Go builds
@@ -352,6 +377,11 @@ RUN criu --version
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
 COPY --from=criu-builder /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
+COPY --from=cuinterpose-builder /cuinterpose/build/libcuinterpose.so /usr/local/lib/snapshot/libcuinterpose.so
+COPY --from=cuinterpose-builder /cuinterpose/build/libcuinterpose_core.so /usr/local/lib/snapshot/libcuinterpose_core.so
+COPY --from=cuinterpose-builder /cuinterpose/build/cuinterpose-coordinator /usr/local/bin/cuinterpose-coordinator
+COPY --from=cuinterpose-builder /cpp-dependencies/ /legal/cuinterpose/dependencies/
+COPY cmd/cuinterpose/ /legal/cuinterpose/source/
 # nsmount resolves this helper at /usr/local/sbin/ns-bind-mount (see
 # agent/internal/nsmount/mount.go defaultBinaryPath).
 COPY --from=cuda-helper-builder /ns-bind-mount /usr/local/sbin/ns-bind-mount
@@ -371,6 +401,11 @@ RUN output=$(/usr/local/bin/pagebroker 2>&1); status=$?; \
 # mechanisms into the mount: criu's libdir -> criu-plugins/ (criu.overrideLibDir),
 # LD_LIBRARY_PATH -> lib/, and PATH -> the bundle root.
 RUN mkdir -p /snapshot-binaries/lib /snapshot-binaries/criu-plugins
+RUN mkdir -p /snapshot-binaries/snapshot-cuda \
+    && install -m 0755 /usr/local/sbin/cuda-checkpoint /snapshot-binaries/snapshot-cuda/cuda-checkpoint \
+    && install -m 0644 /usr/local/lib/snapshot/libcuinterpose.so /snapshot-binaries/snapshot-cuda/libcuinterpose.so \
+    && install -m 0644 /usr/local/lib/snapshot/libcuinterpose_core.so /snapshot-binaries/snapshot-cuda/libcuinterpose_core.so \
+    && install -m 0755 /usr/local/bin/cuinterpose-coordinator /snapshot-binaries/cuinterpose-coordinator
 COPY --from=builder /nsrestore /snapshot-binaries/nsrestore
 COPY --from=criu-builder /criu-install/usr/local/sbin/criu /snapshot-binaries/criu
 COPY --from=criu-builder /criu-install/usr/local/lib/snapshot/criu-plugins/ /snapshot-binaries/criu-plugins/
@@ -432,6 +467,8 @@ COPY --from=compliance go-licenses.sh /tmp/go-licenses.sh
 RUN sh /tmp/gen-attribution.sh /legal/source/dpkg/DELTA.tsv /legal/source/go/vendor \
       /legal/THIRD-PARTY.txt /legal/source/dpkg/SKIPPED.txt /tmp/go-licenses.sh \
     && rm -f /tmp/gen-attribution.sh
+RUN printf '\nCuinterpose C frontend and C++ core/coordinator: Apache-2.0; source in /legal/cuinterpose/source.\nCLI11: BSD-3-Clause; nlohmann/json: MIT; sources and notices in /legal/cuinterpose/dependencies.\nGNU C++ runtime: GPL-3.0 with GCC Runtime Library Exception; notices in /legal/cuinterpose/dependencies/notices.\n' \
+    >> /legal/THIRD-PARTY.txt
 
 # Create directories
 RUN mkdir -p /checkpoints /var/run/snapshot
@@ -465,8 +502,9 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 #     EROFS. An emptyDir at /tmp (either medium) makes it work again, since
 #     volume mounts stay writable independently of the root filesystem.
 #
-# cuda-checkpoint wrapping is opt-in (--cuda-checkpoint-wrap in snapshotctl).
-# When used, the source workload image must have cuda-checkpoint at the same
+# CUDA tools are delivered by the operator. Possible multi-GPU sources use
+# cuda-checkpoint --launch-job; cuinterpose opt-in only affects LD_PRELOAD.
+# The restored workload resolves these tools at the same
 # path as it runs from — CRIU restores file-backed mappings by path, not via
 # PATH search — and so must this placeholder image (same BASE_IMAGE).
 #

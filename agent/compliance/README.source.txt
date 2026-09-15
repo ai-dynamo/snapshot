@@ -14,6 +14,11 @@ Upstream source for the third-party components redistributed in this image.
   go/vendor/   Source for the Go modules linked into the binaries in this
                image; modules.txt records the exact module set.
 
+Cuinterpose C and C++ sources are in /legal/cuinterpose/source. Pinned CLI11
+and nlohmann/json header sources and license notices are under
+/legal/cuinterpose/dependencies. GNU runtime notices are included there too;
+the builder pins Debian Bookworm by container digest and uses GCC 12.
+
 Source for the base image's own contents is published by NVIDIA and is not
 duplicated here:
 

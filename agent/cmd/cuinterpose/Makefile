@@ -1,11 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 
-.DEFAULT_GOAL := native
+.DEFAULT_GOAL := build
 .PHONY: build test frontend native test-native
 CXXFLAGS := -std=c++20 -O2 -g -Wall -Wextra -Werror -pthread
 CORE := protocol state process control export_cache host_carrier multicast
 OBJECTS := $(addprefix build/,$(addsuffix .o,$(CORE)))
+
+# The coordinator is fully static because it enters an arbitrary workload root.
+# The backend shares the workload's normal GNU C++ runtime.
+build:
+	docker buildx build --platform linux/amd64 --target cuinterpose-export \
+		--output type=local,dest=build -f ../../Dockerfile ../..
 
 frontend:
 	mkdir -p build
@@ -25,3 +31,4 @@ build/cuinterpose-coordinator: build/coordinator.o build/protocol.o
 	$(CXX) $(CXXFLAGS) -static build/coordinator.o build/protocol.o -o $@
 
 native: frontend build/libcuinterpose_core.so build/cuinterpose-coordinator
+	python3 verify_artifacts.py build
