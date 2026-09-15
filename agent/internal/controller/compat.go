@@ -22,11 +22,15 @@ import (
 func (w *NodeController) refuseRestore(ctx context.Context, pod *corev1.Pod, incompatible *compat.IncompatibleError) bool {
 	reason := compat.Reasons(incompatible.Mismatches)
 	w.logRestoreRefusal(pod, incompatible, reason)
+	statusReason := podcontract.RestoreReasonIncompatible
+	if restorePhaseForPod(pod) == restoreReplenishing {
+		statusReason = podcontract.RestoreReasonReplenishmentIncompatible
+	}
 	return w.finishRestore(
 		ctx,
 		pod,
 		corev1.ConditionFalse,
-		podcontract.RestoreReasonIncompatible,
+		statusReason,
 		refusalMessage(reason),
 	) != nil
 }
@@ -54,12 +58,12 @@ func restoreRefused(pod *corev1.Pod) bool {
 	condition := findRestoredCondition(pod)
 	return condition != nil &&
 		condition.Status == corev1.ConditionFalse &&
-		condition.Reason == podcontract.RestoreReasonIncompatible
+		(condition.Reason == podcontract.RestoreReasonIncompatible || condition.Reason == podcontract.RestoreReasonReplenishmentIncompatible)
 }
 
 // skipRequestedAfterRefusal reports a pod that the gates turned down and that
-// has since asked for them to be skipped. Nothing else reopens a terminal
-// restore, which is what makes the skip request an escape hatch and not a retry.
+// has since asked for them to be skipped. This escape hatch never retries an
+// execution failure; replenishment after success is handled separately.
 func (w *NodeController) skipRequestedAfterRefusal(pod *corev1.Pod) bool {
 	return restoreRefused(pod) && w.skipCompatCheckRequested(pod)
 }

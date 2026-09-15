@@ -5,6 +5,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -25,9 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ktypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
-	corev1listers "k8s.io/client-go/listers/core/v1"
 	clientgotesting "k8s.io/client-go/testing"
-	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	clocktesting "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -53,6 +52,286 @@ type fakeRuntime struct {
 	containerIDByPod     string
 	resolvedContainerIDs []string
 	resolveContainerPID  int
+}
+
+func TestReplenishmentSkipsUntrackedDestinationWithoutContainerID(t *testing.T) {
+	pod := multiRestorePod()
+	pod.Status.ContainerStatuses[1].ContainerID = ""
+	w := makeTestController(t, pod)
+	// No runtime lookup can succeed. The untracked guard must still return
+	// success immediately instead of treating this sibling as pending.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result := w.restoreDestination(ctx, pod, &restorePlan{artifact: &restoreArtifact{}}, "engine-1", "inference/restore-worker", restoreReplenishing, nil)
+	assert.Equal(t, restoreResultSucceeded, result.state)
+	assert.Empty(t, liveRestoredContainerID(t, w, pod, "engine-1"))
+}
+
+func TestCopiedReplenishmentMarkerCannotSkipInitialRestore(t *testing.T) {
+	pod := multiRestorePod()
+	pod.Annotations["nvidia.com/restore-replenishing"] = "true"
+	w := makeTestController(t, pod)
+	calls := 0
+	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
+		calls++
+		return 4242, nil
+	}
+	plan := &restorePlan{artifact: &restoreArtifact{}, mappings: []podcontract.ContainerMapping{{Source: "main", Destination: "engine-0"}}}
+	assert.False(t, w.restorePodContainers(context.Background(), pod, plan, "inference/restore-worker"))
+	assert.Equal(t, 1, calls)
+}
+
+func TestReplenishmentStatusWriteFailureDoesNotStartWorkers(t *testing.T) {
+	pod := multiRestorePod()
+	setRestoredContainerIDs(t, pod, map[string]string{"engine-0": "engine-0-id"})
+	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+		Type: corev1.PodConditionType(podcontract.RestoredCondition), Status: corev1.ConditionTrue, Reason: podcontract.RestoreReasonSucceeded,
+	})
+	w := makeTestController(t, pod)
+	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
+		t.Error("workers must not start after a status write failure")
+		return 0, nil
+	}
+	w.clientset.(*fake.Clientset).PrependReactor("patch", "pods", func(action clientgotesting.Action) (bool, runtime.Object, error) {
+		patch := action.(clientgotesting.PatchAction)
+		if patch.GetSubresource() == "status" {
+			assert.Contains(t, string(patch.GetPatch()), podcontract.RestoreReasonReplenishing)
+			return true, nil, errors.New("status write failed")
+		}
+		return false, nil, nil
+	})
+	plan := &restorePlan{
+		artifact: &restoreArtifact{SnapshotName: "snapshot-a"},
+		mappings: []podcontract.ContainerMapping{{Source: "main", Destination: "engine-0"}},
+	}
+	assert.True(t, w.restorePodContainers(context.Background(), pod, plan, "inference/restore-worker"))
+	live, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.True(t, isRestoreSucceeded(live))
+	assert.True(t, isRestoreSucceeded(pod), "failed status writes must not advance local state")
+	assert.Empty(t, live.Annotations["nvidia.com/restore-replenishing"])
+}
+
+func TestInitialRestoreStillRestoresUntrackedDestination(t *testing.T) {
+	pod := multiRestorePod()
+	setRestoredContainerIDs(t, pod, map[string]string{"engine-0": "engine-0-id"})
+	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+		Type: corev1.PodConditionType(podcontract.RestoredCondition), Status: corev1.ConditionFalse, Reason: podcontract.RestoreReasonInProgress,
+	})
+	w := makeTestController(t, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
+	var restored []string
+	w.restoreFn = func(_ context.Context, _ snapshotruntime.Runtime, _ logr.Logger, req executor.RestoreRequest, _ executor.RestoreMounter) (int, error) {
+		restored = append(restored, req.DestinationContainerName)
+		return 4242, nil
+	}
+	plan := &restorePlan{
+		artifact: &restoreArtifact{SnapshotName: "snapshot-a"},
+		mappings: []podcontract.ContainerMapping{{Source: "main", Destination: "engine-0"}, {Source: "main", Destination: "engine-1"}},
+	}
+	assert.False(t, w.restorePodContainers(context.Background(), pod, plan, "inference/restore-worker"))
+	assert.Equal(t, []string{"engine-1"}, restored)
+	assert.Equal(t, "engine-1-id", liveRestoredContainerID(t, w, pod, "engine-1"))
+	assert.Empty(t, pod.Annotations["nvidia.com/restore-replenishing"])
+}
+
+func TestReplenishmentDoesNotReopenTerminalFailures(t *testing.T) {
+	for _, reason := range []string{podcontract.RestoreReasonFailed, podcontract.RestoreReasonPartiallySucceeded} {
+		t.Run(reason, func(t *testing.T) {
+			pod := multiRestorePod()
+			setRestoredContainerIDs(t, pod, map[string]string{"engine-0": "old-container"})
+			pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+				Type: corev1.PodConditionType(podcontract.RestoredCondition), Status: corev1.ConditionFalse, Reason: reason,
+			})
+			w := makeTestController(t, pod)
+			w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
+				t.Error("a replenishment marker must not reopen a failed restore")
+				return 0, nil
+			}
+			processQueuedRestorePod(t, w, pod)
+			assert.False(t, hasPodStatusApply(w))
+		})
+	}
+}
+
+func TestReplenishmentWaitsForRunningReplacement(t *testing.T) {
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+	setRestoredContainerIDs(t, pod, map[string]string{"main": testContainerID})
+	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+		Type: corev1.PodConditionType(podcontract.RestoredCondition), Status: corev1.ConditionTrue, Reason: podcontract.RestoreReasonSucceeded,
+	})
+	pod.Status.ContainerStatuses[0].ContainerID = "containerd://replacement"
+	pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}}
+	snapshot, content := readySnapshotObjects()
+	w := makeTestController(t, pod, snapshot, content)
+	path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, string(content.UID), "main")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(path, 0o700))
+	restoreCalls := 0
+	w.restoreFn = func(_ context.Context, _ snapshotruntime.Runtime, _ logr.Logger, req executor.RestoreRequest, _ executor.RestoreMounter) (int, error) {
+		restoreCalls++
+		assert.Equal(t, "replacement", req.ContainerID)
+		return 4242, nil
+	}
+
+	// Bound runtime polling while the replacement is unavailable. The fake API
+	// permits publishing the pending result even after this deadline.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	w.restoreQueue.Add(client.ObjectKeyFromObject(pod))
+	key, shutdown := w.restoreQueue.Get()
+	require.False(t, shutdown)
+	w.processRestoreQueueItem(ctx, key)
+	assert.Zero(t, restoreCalls)
+	assert.False(t, sawEventReason(w.clientset.(*fake.Clientset), restoreAlreadyCompletedReason))
+	live, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.True(t, hasFinalizer(live, restorePodFinalizer))
+	require.NotNil(t, restoredPodCondition(live))
+	assert.Equal(t, podcontract.RestoreReasonReplenishing, restoredPodCondition(live).Reason)
+	assert.Equal(t, testContainerID, liveRestoredContainerID(t, w, pod, "main"))
+
+	live.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+	_, err = w.clientset.CoreV1().Pods(live.Namespace).UpdateStatus(context.Background(), live, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
+	processQueuedRestorePod(t, w, live)
+	assert.Equal(t, 1, restoreCalls)
+	assert.Equal(t, "replacement", liveRestoredContainerID(t, w, pod, "main"))
+	processQueuedRestorePod(t, w, live)
+	assert.Equal(t, 1, restoreCalls, "the replacement must only be restored once")
+}
+
+func TestReplenishmentSkipsUntrackedDestination(t *testing.T) {
+	pod := multiRestorePod()
+	setRestoredContainerIDs(t, pod, map[string]string{"engine-0": "engine-0-id"})
+	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+		Type: corev1.PodConditionType(podcontract.RestoredCondition), Status: corev1.ConditionTrue, Reason: podcontract.RestoreReasonSucceeded,
+	})
+	pod.Status.ContainerStatuses[1].ContainerID = "containerd://replacement"
+	w := makeTestController(t, pod)
+	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
+		t.Error("an untracked destination must not be replayed")
+		return 0, nil
+	}
+	plan := &restorePlan{
+		artifact: &restoreArtifact{SnapshotName: "snapshot-a"},
+		mappings: []podcontract.ContainerMapping{{Source: "main", Destination: "engine-0"}, {Source: "main", Destination: "engine-1"}},
+	}
+	assert.False(t, w.restorePodContainers(context.Background(), pod, plan, "inference/restore-worker"))
+	assert.Equal(t, "engine-0-id", liveRestoredContainerID(t, w, pod, "engine-0"))
+	assert.Empty(t, liveRestoredContainerID(t, w, pod, "engine-1"))
+}
+
+func TestReplenishmentKeepsUntrackedSiblingSafeAcrossPendingPasses(t *testing.T) {
+	for _, pendingID := range []string{"", "containerd://replacement"} {
+		t.Run("pending ID="+pendingID, func(t *testing.T) {
+			pod := multiRestorePod()
+			setRestoredContainerIDs(t, pod, map[string]string{"engine-0": "engine-0-id"})
+			pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+				Type: corev1.PodConditionType(podcontract.RestoredCondition), Status: corev1.ConditionTrue, Reason: podcontract.RestoreReasonSucceeded,
+			})
+			pod.Status.ContainerStatuses[0].ContainerID = "containerd://replacement"
+			pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}}
+			snapshot, content := readySnapshotObjects()
+			w := makeTestController(t, pod, snapshot, content)
+			path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, string(content.UID), "main")
+			require.NoError(t, err)
+			require.NoError(t, os.MkdirAll(path, 0o700))
+			basePath := w.config.Storage.BasePath
+			var restored []string
+			restoreFn := func(_ context.Context, _ snapshotruntime.Runtime, _ logr.Logger, req executor.RestoreRequest, _ executor.RestoreMounter) (int, error) {
+				restored = append(restored, req.DestinationContainerName)
+				return 4242, nil
+			}
+			w.restoreFn = restoreFn
+
+			// Bound runtime polling; the fake API can still persist pending
+			// status after the deadline, as in the other pending-worker tests.
+			processPending := func(controller *NodeController) {
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+				defer cancel()
+				controller.restoreQueue.Add(client.ObjectKeyFromObject(pod))
+				key, shutdown := controller.restoreQueue.Get()
+				require.False(t, shutdown)
+				controller.processRestoreQueueItem(ctx, key)
+			}
+			processPending(w)
+			require.Empty(t, restored)
+
+			live, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			require.Equal(t, podcontract.RestoreReasonReplenishing, restoredPodCondition(live).Reason)
+			live.Status.ContainerStatuses[0].ContainerID = pendingID
+
+			// A new agent has only persisted state. No sentinel exists for the
+			// untracked sibling, so sentinel recovery cannot mask unsafe replay.
+			w = makeTestController(t, live, snapshot, content)
+			w.config.Storage.BasePath = basePath
+			w.runtime = &fakeRuntime{resolveContainerPID: 4242}
+			w.restoreFn = restoreFn
+			processPending(w)
+			require.Empty(t, restored, "an untracked sibling must stay untouched on later passes")
+			assert.Empty(t, liveRestoredContainerID(t, w, pod, "engine-1"))
+			assert.False(t, sawEventReason(w.clientset.(*fake.Clientset), restoreAlreadyCompletedReason))
+
+			live, err = w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			require.Equal(t, podcontract.RestoreReasonReplenishing, restoredPodCondition(live).Reason)
+			live.Status.ContainerStatuses[0].ContainerID = "containerd://replacement"
+			live.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+			_, err = w.clientset.CoreV1().Pods(pod.Namespace).UpdateStatus(context.Background(), live, metav1.UpdateOptions{})
+			require.NoError(t, err)
+			processQueuedRestorePod(t, w, live)
+			assert.Equal(t, []string{"engine-0"}, restored)
+			assert.Equal(t, "replacement", liveRestoredContainerID(t, w, pod, "engine-0"))
+			assert.Empty(t, liveRestoredContainerID(t, w, pod, "engine-1"))
+		})
+	}
+}
+
+func TestRestartDetectionDoesNotRequireRunningContainer(t *testing.T) {
+	for _, state := range []corev1.ContainerState{
+		{Running: &corev1.ContainerStateRunning{}},
+		{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+		{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}},
+	} {
+		for _, id := range []string{"", "containerd://engine-1-id", "containerd://replacement"} {
+			pod := multiRestorePod()
+			setRestoredContainerIDs(t, pod, map[string]string{"engine-1": "engine-1-id"})
+			pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+				Type: corev1.PodConditionType(podcontract.RestoredCondition), Status: corev1.ConditionTrue, Reason: podcontract.RestoreReasonSucceeded,
+			})
+			pod.Status.ContainerStatuses[1].State = state
+			pod.Status.ContainerStatuses[1].ContainerID = id
+			assert.Equal(t, id != "containerd://engine-1-id", makeTestController(t, pod).hasRestartedRestoreDestination(pod))
+		}
+	}
+}
+
+func TestPageBrokerReadConcurrentWithContainerIDRecords(t *testing.T) {
+	pod := multiRestorePod()
+	pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] = snapshotv1alpha1.PageBrokerAnnotationEnabled
+	w := makeTestController(t, pod)
+	w.restoreFn = func(_ context.Context, _ snapshotruntime.Runtime, _ logr.Logger, req executor.RestoreRequest, _ executor.RestoreMounter) (int, error) {
+		assert.True(t, req.PageBrokerRequested)
+		return 4242, nil
+	}
+	op := w.newRestoreOperation(pod, &restorePlan{artifact: &restoreArtifact{}}, "engine-0", "engine-0-id", time.Now())
+	var workers sync.WaitGroup
+	workers.Go(func() {
+		for range 100 {
+			_, err := op.executeRestore(context.Background())
+			assert.NoError(t, err)
+		}
+	})
+	workers.Go(func() {
+		for range 100 {
+			assert.NoError(t, w.recordRestoredContainerID(context.Background(), pod, "engine-1", "engine-1-id"))
+		}
+	})
+	workers.Wait()
+	assert.Equal(t, "engine-1-id", liveRestoredContainerID(t, w, pod, "engine-1"))
 }
 
 var _ snapshotruntime.Runtime = (*fakeRuntime)(nil)
@@ -155,11 +434,12 @@ func makeTestController(t *testing.T, pod *corev1.Pod, apiObjects ...runtime.Obj
 		},
 		clientset:               fake.NewClientset(coreObjects...),
 		client:                  clientBuilder.Build(),
-		runtime:                 &fakeRuntime{},
+		runtime:                 &fakeRuntime{resolveContainerPID: 4242},
 		injector:                noopInjector{},
 		restoreFn:               executor.Restore,
 		writeControlSentinelFn:  func(int, string) error { return nil },
 		controlSentinelExistsFn: func(int, string) (bool, error) { return false, nil },
+		removeControlSentinelFn: func(int, string) error { return nil },
 		sendSignalFn:            func(logr.Logger, int, syscall.Signal, string) error { return nil },
 		restoreQueue:            workqueue.NewTypedDelayingQueue[client.ObjectKey](),
 		compareFn:               compat.Compare,
@@ -326,9 +606,6 @@ func multiRestorePod() *corev1.Pod {
 
 func processQueuedRestorePod(t *testing.T, w *NodeController, pod *corev1.Pod) {
 	t.Helper()
-	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
-	require.NoError(t, indexer.Add(pod))
-	w.restorePodLister = corev1listers.NewPodLister(indexer)
 	w.restoreQueue.Add(client.ObjectKeyFromObject(pod))
 	item, shutdown := w.restoreQueue.Get()
 	require.False(t, shutdown)
@@ -342,6 +619,25 @@ func restoredPodCondition(pod *corev1.Pod) *corev1.PodCondition {
 		}
 	}
 	return nil
+}
+
+func liveRestoredContainerID(t *testing.T, w *NodeController, pod *corev1.Pod, destination string) string {
+	t.Helper()
+	live, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	ids, err := restoredContainerIDs(live)
+	require.NoError(t, err)
+	return ids[destination]
+}
+
+func setRestoredContainerIDs(t *testing.T, pod *corev1.Pod, ids map[string]string) {
+	t.Helper()
+	value, err := json.Marshal(ids)
+	require.NoError(t, err)
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
+	}
+	pod.Annotations[podcontract.RestoredContainerIDsAnnotation] = string(value)
 }
 
 func readySnapshotObjects() (*snapshotv1alpha1.PodSnapshot, *snapshotv1alpha1.PodSnapshotContent) {
@@ -426,16 +722,16 @@ func TestRestoreQueueRequeuesDirtyKeyAfterDone(t *testing.T) {
 	w.restoreQueue.Done(item)
 }
 
-func TestProcessRestoreQueueItemUsesCachedPod(t *testing.T) {
+func TestProcessRestoreQueueItemRequeuesAPIServerReadFailure(t *testing.T) {
 	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	w := makeTestController(t, pod)
+	w.clientset.(*fake.Clientset).PrependReactor("get", "pods", func(clientgotesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("API read failed")
+	})
 	w.restoreQueue.ShutDown()
 	testClock := clocktesting.NewFakeClock(time.Now())
 	w.restoreQueue = workqueue.NewTypedDelayingQueueWithConfig(workqueue.TypedDelayingQueueConfig[client.ObjectKey]{Clock: testClock})
 	t.Cleanup(w.restoreQueue.ShutDown)
-	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
-	require.NoError(t, indexer.Add(pod))
-	w.restorePodLister = corev1listers.NewPodLister(indexer)
 	key := client.ObjectKeyFromObject(pod)
 	w.restoreQueue.Add(key)
 	item, shutdown := w.restoreQueue.Get()
@@ -443,7 +739,6 @@ func TestProcessRestoreQueueItemUsesCachedPod(t *testing.T) {
 
 	w.processRestoreQueueItem(context.Background(), item)
 
-	assert.Contains(t, string(lastPodStatusApply(t, w).GetPatch()), `"reason":"SnapshotPending"`)
 	assert.Zero(t, w.restoreQueue.Len())
 	testClock.Step(restoreSafetyRequeueInterval)
 	assert.Eventually(t, func() bool { return w.restoreQueue.Len() == 1 }, time.Second, time.Millisecond)
@@ -490,8 +785,9 @@ func TestReconcileRestorePodRunsMappedDestinationsConcurrently(t *testing.T) {
 	}
 	sentinels := make(chan int, 2)
 	w.writeControlSentinelFn = func(pid int, name string) error {
-		assert.Equal(t, podcontract.RestoreCompleteFile, name)
-		sentinels <- pid
+		if name == podcontract.RestoreCompleteFile {
+			sentinels <- pid
+		}
 		return nil
 	}
 
@@ -516,6 +812,8 @@ func TestReconcileRestorePodRunsMappedDestinationsConcurrently(t *testing.T) {
 	payload := string(lastPodStatusApply(t, w).GetPatch())
 	assert.Contains(t, payload, `"status":"True"`)
 	assert.Contains(t, payload, `"reason":"RestoreSucceeded"`)
+	assert.Equal(t, "engine-0-id", liveRestoredContainerID(t, w, pod, "engine-0"))
+	assert.Equal(t, "engine-1-id", liveRestoredContainerID(t, w, pod, "engine-1"))
 }
 
 func TestReconcileRestorePodReportsPartialSuccess(t *testing.T) {
@@ -619,6 +917,48 @@ func TestRestorePodContainersKeepsAggregateInProgressWhileDestinationIsPending(t
 	assert.Contains(t, payload, `"reason":"RestoreInProgress"`)
 	assert.Contains(t, payload, "1 succeeded")
 	assert.Contains(t, payload, "1 pending")
+}
+
+func TestRestorePodContainersRejectsInvalidContainerIDRecords(t *testing.T) {
+	for name, value := range map[string]string{
+		"malformed JSON": "{",
+		"JSON null":      "null",
+	} {
+		t.Run(name, func(t *testing.T) {
+			pod := restorePod(map[string]string{
+				podcontract.RestoreFromAnnotation:          "snapshot-a",
+				podcontract.RestoredContainerIDsAnnotation: value,
+			})
+			w := makeTestController(t, pod)
+			w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
+				t.Fatal("invalid container ID records must fail before restore")
+				return 0, nil
+			}
+			plan := &restorePlan{
+				artifact: &restoreArtifact{SnapshotName: "snapshot-a"},
+				mappings: []podcontract.ContainerMapping{{Source: "main", Destination: "main"}},
+			}
+
+			assert.False(t, w.restorePodContainers(context.Background(), pod, plan, "inference/restore-worker"))
+			assert.Contains(t, string(lastPodStatusApply(t, w).GetPatch()), `"reason":"RestoreFailed"`)
+		})
+	}
+}
+
+func TestInvalidContainerIDRecordsDoNotReplenishTerminalRestore(t *testing.T) {
+	for name, value := range map[string]string{"malformed JSON": "{", "JSON null": "null"} {
+		t.Run(name, func(t *testing.T) {
+			pod := restorePod(map[string]string{
+				podcontract.RestoreFromAnnotation:          "snapshot-a",
+				podcontract.RestoredContainerIDsAnnotation: value,
+			})
+			pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+				Type: corev1.PodConditionType(podcontract.RestoredCondition), Status: corev1.ConditionTrue, Reason: podcontract.RestoreReasonSucceeded,
+			})
+
+			assert.False(t, makeTestController(t, pod).hasRestartedRestoreDestination(pod))
+		})
+	}
 }
 
 func TestRestoreTallyVerdictCoversEveryOutcome(t *testing.T) {
@@ -1128,20 +1468,108 @@ func TestReconcileRestorePodReportsInvalidBacklinkAsFailedCondition(t *testing.T
 	assert.Contains(t, payload, `"reason":"RestoreFailed"`)
 }
 
-func TestProcessRestoreQueueItemEmitsEventWhenRestoreAlreadyCompleted(t *testing.T) {
-	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
-	pod.Finalizers = []string{restorePodFinalizer}
-	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+func TestProcessRestoreQueueItemUsesLivePodState(t *testing.T) {
+	stale := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+	stale.Finalizers = []string{restorePodFinalizer}
+	setRestoredContainerIDs(t, stale, map[string]string{"main": testContainerID})
+	stale.Status.ContainerStatuses[0].ContainerID = "containerd://restarted-container"
+	stale.Status.Conditions = append(stale.Status.Conditions, corev1.PodCondition{
 		Type: corev1.PodConditionType(podcontract.RestoredCondition), Status: corev1.ConditionTrue, Reason: "RestoreSucceeded",
 	})
+	live := stale.DeepCopy()
+	setRestoredContainerIDs(t, live, map[string]string{"main": "restarted-container"})
+	w := makeTestController(t, live)
+	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
+		t.Fatal("a stale informer event must not replay restore")
+		return 0, nil
+	}
+
+	processQueuedRestorePod(t, w, stale)
+
+	assert.True(t, sawEventReason(w.clientset.(*fake.Clientset), "RestoreAlreadyCompleted"))
+	got, err := w.clientset.CoreV1().Pods(live.Namespace).Get(context.Background(), live.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.False(t, hasFinalizer(got, restorePodFinalizer))
+}
+
+func TestPartiallySuccessfulRestoreDoesNotReplenishRestartedDestination(t *testing.T) {
+	pod := multiRestorePod()
+	pod.Finalizers = []string{restorePodFinalizer}
+	setRestoredContainerIDs(t, pod, map[string]string{"engine-0": "engine-0-id"})
+	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+		Type:    corev1.PodConditionType(podcontract.RestoredCondition),
+		Status:  corev1.ConditionFalse,
+		Reason:  podcontract.RestoreReasonPartiallySucceeded,
+		Message: "engine-1 failed",
+	})
+	pod.Status.ContainerStatuses[0].ContainerID = "containerd://engine-0-restarted-id"
 	w := makeTestController(t, pod)
+	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
+		t.Fatal("a partially successful restore must require a new restore Pod")
+		return 0, nil
+	}
+
+	assert.False(t, w.hasRestartedRestoreDestination(pod))
+	processQueuedRestorePod(t, w, pod)
+
+	assert.True(t, sawEventReason(w.clientset.(*fake.Clientset), restoreAlreadyPartialReason))
+	assert.Equal(t, "engine-0-id", liveRestoredContainerID(t, w, pod, "engine-0"))
+	assert.Empty(t, liveRestoredContainerID(t, w, pod, "engine-1"))
+}
+
+func TestRestoreReplenishesOnlyRestartedDestination(t *testing.T) {
+	pod := multiRestorePod()
+	pod.Finalizers = []string{restorePodFinalizer}
+	setRestoredContainerIDs(t, pod, map[string]string{
+		"engine-0": "engine-0-id",
+		"engine-1": "engine-1-id",
+	})
+	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+		Type: corev1.PodConditionType(podcontract.RestoredCondition), Status: corev1.ConditionTrue, Reason: podcontract.RestoreReasonSucceeded,
+	})
+	pod.Status.ContainerStatuses[1].ContainerID = "containerd://engine-1-restarted-id"
+	snapshot, content := readySnapshotObjects()
+	w := makeTestController(t, pod, snapshot, content)
+	path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, string(content.UID), "main")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(path, 0o700))
+	var restored []executor.RestoreRequest
+	var mu sync.Mutex
+	w.restoreFn = func(_ context.Context, _ snapshotruntime.Runtime, _ logr.Logger, req executor.RestoreRequest, _ executor.RestoreMounter) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		restored = append(restored, req)
+		return 4242, nil
+	}
 
 	processQueuedRestorePod(t, w, pod)
 
-	assert.True(t, sawEventReason(w.clientset.(*fake.Clientset), "RestoreAlreadyCompleted"))
-	live, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
-	require.NoError(t, err)
-	assert.False(t, hasFinalizer(live, restorePodFinalizer))
+	require.Len(t, restored, 1, "a live restored sibling must not be replayed")
+	assert.Equal(t, "engine-1", restored[0].DestinationContainerName)
+	assert.Equal(t, "engine-1-restarted-id", restored[0].ContainerID)
+	assert.Equal(t, "engine-0-id", liveRestoredContainerID(t, w, pod, "engine-0"))
+	assert.Equal(t, "engine-1-restarted-id", liveRestoredContainerID(t, w, pod, "engine-1"))
+}
+
+func TestRestoreDestinationFailsWhenContainerIDRecordCannotBePersisted(t *testing.T) {
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+	w := makeTestController(t, pod)
+	w.clientset.(*fake.Clientset).PrependReactor("patch", "pods", func(action clientgotesting.Action) (bool, runtime.Object, error) {
+		patch := action.(clientgotesting.PatchAction)
+		if !strings.Contains(string(patch.GetPatch()), podcontract.RestoredContainerIDsAnnotation) {
+			return false, nil, nil
+		}
+		return true, nil, errors.New("annotation patch failed")
+	})
+	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
+		return 4242, nil
+	}
+	artifact := &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"}
+
+	result := w.restoreDestination(context.Background(), pod, &restorePlan{artifact: artifact}, "main", "inference/restore-worker", restoreInitial, nil)
+
+	assert.Equal(t, restoreResultFailed, result.state, "an unrecorded container ID would risk replaying into a live engine")
+	assert.True(t, sawEventReason(w.clientset.(*fake.Clientset), "RestoreRecordFailed"))
 }
 
 // A terminal restore pod outlives the restore, and the agent that restarts under
@@ -1331,7 +1759,7 @@ func TestRestoreFinalizerProtectsExecutionAndIsRemovedAfterSuccess(t *testing.T)
 	assert.Contains(t, string(lastPodStatusApply(t, w).GetPatch()), `"reason":"RestoreSucceeded"`)
 }
 
-func TestRestoreStatusRetryUsesCompletionSentinelWithoutReplayingRestore(t *testing.T) {
+func TestRestoreStatusRetryUsesPersistedContainerIDWithoutReplayingRestore(t *testing.T) {
 	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
 	snapshot, content := readySnapshotObjects()
 	w := makeTestController(t, pod, snapshot, content)
@@ -1348,14 +1776,14 @@ func TestRestoreStatusRetryUsesCompletionSentinelWithoutReplayingRestore(t *test
 	sentinelWritten := false
 	w.writeControlSentinelFn = func(pid int, name string) error {
 		assert.Equal(t, 4242, pid)
-		assert.Equal(t, podcontract.RestoreCompleteFile, name)
-		sentinelWritten = true
+		if strings.HasPrefix(name, "restore-completed-") {
+			sentinelWritten = true
+		}
 		return nil
 	}
 	w.controlSentinelExistsFn = func(pid int, name string) (bool, error) {
 		assert.Equal(t, 4242, pid)
-		assert.Equal(t, podcontract.RestoreCompleteFile, name)
-		return sentinelWritten, nil
+		return strings.HasPrefix(name, "restore-completed-") && sentinelWritten, nil
 	}
 	statusPatches := 0
 	w.clientset.(*fake.Clientset).PrependReactor("patch", "pods", func(action clientgotesting.Action) (bool, runtime.Object, error) {
@@ -1372,7 +1800,7 @@ func TestRestoreStatusRetryUsesCompletionSentinelWithoutReplayingRestore(t *test
 
 	processQueuedRestorePod(t, w, pod)
 	assert.Equal(t, 1, restoreCalls)
-	assert.False(t, w.restoreHandled(pod))
+	assert.False(t, sawEventReason(w.clientset.(*fake.Clientset), restoreAlreadyCompletedReason))
 	assert.True(t, sawEventReason(w.clientset.(*fake.Clientset), restoreStatusUpdateFailedReason))
 
 	live, err := w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
@@ -1382,9 +1810,19 @@ func TestRestoreStatusRetryUsesCompletionSentinelWithoutReplayingRestore(t *test
 	require.NotNil(t, condition)
 	assert.Equal(t, podcontract.RestoreReasonInProgress, condition.Reason)
 
-	processQueuedRestorePod(t, w, live)
-	assert.Equal(t, 1, restoreCalls, "completion sentinel must prevent CRIU replay")
-	assert.True(t, w.restoreHandled(live))
+	// A fresh controller must use the persisted record without even consulting
+	// the sentinel. Sentinel-only recovery is tested separately.
+	restarted := makeTestController(t, live, snapshot, content)
+	restarted.config.Storage.BasePath = w.config.Storage.BasePath
+	restarted.restoreFn = w.restoreFn
+	restarted.controlSentinelExistsFn = func(int, string) (bool, error) {
+		t.Error("the persisted ID should skip sentinel recovery")
+		return false, nil
+	}
+	processQueuedRestorePod(t, restarted, live)
+	w = restarted
+	assert.Equal(t, 1, restoreCalls, "persisted container ID must prevent CRIU replay")
+	assert.Equal(t, testContainerID, liveRestoredContainerID(t, w, pod, "main"))
 
 	live, err = w.clientset.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
 	require.NoError(t, err)
@@ -1407,14 +1845,14 @@ func TestRestoreFinalizerRemovalRetriesWithoutReplayingRestore(t *testing.T) {
 		restoreCalls++
 		return 4242, nil
 	}
-	metadataPatches := 0
+	finalizerPatches := 0
 	w.clientset.(*fake.Clientset).PrependReactor("patch", "pods", func(action clientgotesting.Action) (bool, runtime.Object, error) {
 		patch := action.(clientgotesting.PatchAction)
-		if patch.GetSubresource() != "" {
+		if patch.GetSubresource() != "" || !strings.Contains(string(patch.GetPatch()), "finalizers") {
 			return false, nil, nil
 		}
-		metadataPatches++
-		if metadataPatches == 2 {
+		finalizerPatches++
+		if finalizerPatches == 2 {
 			return true, nil, errors.New("finalizer update failed")
 		}
 		return false, nil, nil
@@ -1495,7 +1933,7 @@ func TestRunRestoreCleanupFailureStillCompletesRestore(t *testing.T) {
 		return nil
 	}
 
-	err := w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "engine-0", "ctr-abc", time.Time{}, false)
+	err := w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "engine-0", "ctr-abc", time.Time{})
 	require.NoError(t, err)
 	assert.Equal(t, "content-uid", request.ContentUID)
 	assert.Equal(t, w.config.Storage.BasePath, request.BasePath)
@@ -1524,11 +1962,11 @@ func TestRunRestoreRetriesFullRestoreUntilFailureCleanupSucceeds(t *testing.T) {
 		return nil
 	}
 
-	err := w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Time{}, true)
+	err := w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Time{})
 	require.Error(t, err)
 	assert.Equal(t, 1, restoreCalls)
 
-	err = w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Time{}, false)
+	err = w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Time{})
 	require.Error(t, err)
 	assert.Equal(t, 2, restoreCalls, "CRIU restore should retry when the previous cleanup did not finish")
 }
@@ -1549,7 +1987,7 @@ func TestRunRestoreFailureKillsPlaceholder(t *testing.T) {
 		signalCalls++
 		return nil
 	}
-	err := w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Time{}, true)
+	err := w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Time{})
 	require.Error(t, err)
 	assert.Equal(t, 1, restoreCalls)
 	assert.Equal(t, 1, signalCalls)
@@ -1566,7 +2004,7 @@ func TestRunRestoreFinalizesExistingCompletionSentinelWithoutReplay(t *testing.T
 	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
 	w.controlSentinelExistsFn = func(pid int, name string) (bool, error) {
 		assert.Equal(t, 4242, pid)
-		assert.Equal(t, podcontract.RestoreCompleteFile, name)
+		assert.True(t, strings.HasPrefix(name, "restore-completed-"))
 		return true, nil
 	}
 	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
@@ -1575,7 +2013,7 @@ func TestRunRestoreFinalizesExistingCompletionSentinelWithoutReplay(t *testing.T
 	}
 	artifact := &restoreArtifact{SnapshotName: "snapshot-a", ContentUID: "content-uid", SourceContainerName: "main"}
 
-	err := w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Time{}, true)
+	err := w.runRestore(context.Background(), pod, &restorePlan{artifact: artifact}, "main", "ctr-abc", time.Time{})
 	require.NoError(t, err)
 }
 
