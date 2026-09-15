@@ -1,0 +1,4 @@
+{
+    global: cuinterpose_core_init;
+    local: *;
+};
