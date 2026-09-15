@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Prune Registry
+
+# Every push to main publishes a v0.0.0-g<sha8> image, so untagged manifests
+# accumulate indefinitely. hack/prune-ghcr.py deletes only digests that are both
+# untagged and unreachable from any tagged version — see its module docstring for
+# why "untagged" alone would break published releases.
+on:
+  schedule:
+    # Fridays 04:00 UTC. Off-hours, so a bad run is noticed before the next release.
+    - cron: '0 4 * * 5'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Report what would be deleted without deleting it'
+        type: boolean
+        default: true
+      keep_days:
+        description: 'Keep untagged versions newer than this many days'
+        type: string
+        default: '90'
+
+permissions: {}
+
+concurrency:
+  group: prune-registry
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    name: Prune untagged GHCR versions
+    runs-on: ubuntu-latest
+    permissions:
+      # Read the source of the prune script.
+      contents: read
+      # List and delete container package versions.
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # DRY_RUN defaults to true on the schedule as well: this deletes published
+      # artifacts, so it reports for a few cycles and a maintainer flips the
+      # default here once the output has been reviewed.
+      - name: Prune
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run == false && 'false' || 'true' }}
+          KEEP_DAYS: ${{ inputs.keep_days || '90' }}
+        run: |
+          python3 hack/prune-ghcr.py \
+            --org "${GITHUB_REPOSITORY%%/*}" \
+            --keep-days "${KEEP_DAYS}" \
+            --dry-run "${DRY_RUN}"

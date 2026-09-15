@@ -48,6 +48,25 @@ security bulletin for the issue. Recognition is discretionary and arranged by
 PSIRT as part of the process above. It is never given through GitHub Security
 Advisories; Snapshot does not publish those.
 
+## Verifying what you run
+
+Every published artifact — the operator image, the agent image, and the Helm
+chart — is signed in CI with [Sigstore](https://www.sigstore.dev/) cosign
+keyless signing. There is no key to distribute: the signing identity is this
+repository's release workflow, and each signature is recorded in the public
+Rekor transparency log. Images additionally carry SLSA provenance and an SBOM
+as OCI attestations, and each release ships SPDX and CycloneDX SBOMs alongside
+a signed `SHA256SUMS`.
+
+Before trusting a pulled image or chart, verify it. The exact `cosign verify`
+and `cosign verify-blob` invocations, including the certificate identity to
+require, are in [RELEASE.md](RELEASE.md#verifying-a-release). Verification needs
+cosign v3.0 or newer.
+
+A signature proves an artifact came from this repository's CI at the commit it
+claims. It is not a statement that the artifact is free of vulnerabilities — for
+that, report anything you find through the process above.
+
 ## Supported versions
 
 Snapshot is pre-1.0. Security fixes are applied to the most recent minor release
