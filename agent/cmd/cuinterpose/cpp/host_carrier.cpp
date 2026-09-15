@@ -41,7 +41,10 @@ std::pair<std::unique_ptr<Arena>, uint32_t> Arena::save(const std::vector<Conten
     }
     arena->context = allocations.front().context;
     arena->device = allocations.front().properties.location.id;
-    arena->base = ::mmap(nullptr, arena->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    // Fault in the arena before CUDA pins it. Letting host registration fault
+    // these pages itself is much slower in large, multi-GPU workloads.
+    arena->base = ::mmap(nullptr, arena->size, PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
     if (arena->base == MAP_FAILED) throw CudaError{out_of_memory};
     bool registered = false;
     try {

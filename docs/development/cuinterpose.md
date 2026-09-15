@@ -181,7 +181,9 @@ sequenceDiagram
 
 The core selects shared, creator-owned, exportable pinned device allocations
 and passes content plans to the host-carrier module. The module uses one
-registered host arena per process and batches staging/copies by CUDA context.
+anonymous host arena per process, prefaulted with `MAP_POPULATE` before CUDA
+registration to avoid faulting pages on the driver's pinning path. It batches
+staging/copies by CUDA context.
 A mapped shared creator with no remaining logical handle can recover a
 temporary handle before saving. Never-shared allocations are excluded from both
 handle recovery and teardown.

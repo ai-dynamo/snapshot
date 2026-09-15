@@ -13,11 +13,22 @@ using namespace cuinterpose;
 
 namespace {
 int switched{}, released{}, registered{}, registrations{};
+bool check_resident{};
 int get_context(void** out) { *out = reinterpret_cast<void*>(1); return 0; }
 int set_context(void*) { ++switched; return 711; }
 int retain(void** out, int) { *out = reinterpret_cast<void*>(2); return 0; }
 int release(int) { ++released; return 0; }
-int register_host(void*, size_t, uint32_t) { ++registered; ++registrations; return 0; }
+int register_host(void* address, size_t size, uint32_t) {
+    if (check_resident) {
+        auto page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
+        std::vector<unsigned char> resident((size + page - 1) / page);
+        assert(::mincore(address, size, resident.data()) == 0);
+        for (auto entry : resident) assert(entry & 1);
+    }
+    ++registered;
+    ++registrations;
+    return 0;
+}
 int unregister_host(void*) { --registered; return 0; }
 int create(uint64_t*, size_t, const AllocationProp*, uint64_t) { return 713; }
 void* resolve(const char* name) {
@@ -94,6 +105,15 @@ int main() {
     try { arena.load(contents); assert(false); }
     catch (const CudaError& error) { assert(error.code == 713); }
     assert(registrations == 1 && registered == 0 && !contents.front().driver);
+
+    // Host registration must receive prefaulted pages, not an untouched
+    // anonymous arena. The missing staging symbol also exercises save cleanup.
+    check_resident = true;
+    contents.front().driver = 1;
+    contents.front().size = page * 16;
+    try { Arena::save(contents); assert(false); }
+    catch (const CudaError& error) { assert(error.code == not_initialized); }
+    assert(registrations == 2 && registered == 0);
 
     // Missing entry points must not publish the zero-initialized temporary
     // handle. Exercise the real exported callback table, not a backend helper.
