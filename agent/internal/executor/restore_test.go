@@ -22,6 +22,40 @@ import (
 	"github.com/ai-dynamo/snapshot/api/compat"
 )
 
+func TestInspectCompatibilityChecksMappedGPUMountAndOrdinaryMounts(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "dev"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "dev/nvidia1"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := &types.CheckpointManifest{
+		CUDA: types.CUDAManifest{
+			SourceGPUUUIDs: []string{"GPU-source"},
+			DevicePaths:    map[string]string{"GPU-source": "/dev/nvidia0"},
+		},
+		CRIUDump: types.CRIUDumpManifest{ExtMnt: map[string]string{"/dev/nvidia0": "/dev/nvidia0"}},
+	}
+	target := compat.GPUInfo{Devices: []compat.GPUDevice{{UUID: "GPU-target"}}}
+	paths := map[string]string{"GPU-target": "/dev/nvidia1"}
+	check := func() error {
+		return inspectCompatibility(testr.New(t), manifest, target, paths, root, "", false)
+	}
+	if err := check(); err != nil {
+		t.Fatalf("validated destination alias refused: %v", err)
+	}
+	manifest.CRIUDump.ExtMnt["/missing-data"] = "/missing-data"
+	if err := check(); err == nil {
+		t.Fatal("missing ordinary mount was accepted")
+	}
+	delete(manifest.CRIUDump.ExtMnt, "/missing-data")
+	delete(paths, "GPU-target")
+	if err := check(); err == nil {
+		t.Fatal("missing GPU mount without a validated destination was accepted")
+	}
+}
+
 // testMountPoint satisfies nsmount.MountPoint for executor unit tests.
 type testMountPoint struct{}
 

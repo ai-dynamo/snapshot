@@ -18,6 +18,7 @@ func inspectCompatibility(
 	log logr.Logger,
 	manifest *types.CheckpointManifest,
 	targetGPUs compat.GPUInfo,
+	targetDevicePaths map[string]string,
 	targetRoot string,
 	targetImageID string,
 	skipCompatCheck bool,
@@ -28,6 +29,25 @@ func inspectCompatibility(
 	}
 
 	sourceEnv := manifest.CompatEnvironment()
+	// Inspect the mapped destination paths that nsrestore will alias, rather
+	// than requiring the checkpoint-time physical ordinals to exist already.
+	// Only validated GPU paths participate; ordinary mounts keep their checks.
+	if len(manifest.CUDA.SourceGPUUUIDs) == len(targetGPUs.Devices) {
+		mappedPaths := make(map[string]string)
+		for i, sourceUUID := range manifest.CUDA.SourceGPUUUIDs {
+			sourcePath := manifest.CUDA.DevicePaths[sourceUUID]
+			targetPath := targetDevicePaths[targetGPUs.Devices[i].UUID]
+			if sourcePath == "" || targetPath == "" {
+				continue
+			}
+			mappedPaths[sourcePath] = targetPath
+		}
+		for j, path := range sourceEnv.ExternalizedMounts {
+			if targetPath, ok := mappedPaths[path]; ok {
+				sourceEnv.ExternalizedMounts[j] = targetPath
+			}
+		}
+	}
 	targetEnv := compat.Environment{
 		ImageID:            targetImageID,
 		DriverVersion:      targetGPUs.DriverVersion,

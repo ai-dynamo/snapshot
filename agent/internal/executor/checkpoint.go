@@ -259,22 +259,39 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 		log.V(1).Info("Resolved checkpoint CUDA PID mapping", "host_pids", cudaHostPIDs, "namespace_pids", cudaNamespacePIDs)
 	}
 	var gpus compat.GPUInfo
+	var gpuDevicePaths map[string]string
 	var gpuDeviceMapDuration time.Duration
 	if len(cudaHostPIDs) > 0 {
 		gpuStart := time.Now()
-		gpus, err = cuda.DiscoverGPUs(
-			ctx,
-			req.Clientset,
-			req.PodName,
-			req.PodNamespace,
-			req.ContainerName,
-			snapshotruntime.HostProcPath,
-			pid,
-			log,
-		)
+		if ociSpec != nil && ociSpec.Process != nil {
+			gpus, err = cuda.ResolveVisibleGPUs(ctx, ociSpec.Process.Env)
+			if err != nil {
+				return nil, 0, err
+			}
+		}
+		if len(gpus.Devices) == 0 {
+			gpus, err = cuda.DiscoverGPUs(
+				ctx,
+				req.Clientset,
+				req.PodName,
+				req.PodNamespace,
+				req.ContainerName,
+				snapshotruntime.HostProcPath,
+				pid,
+				log,
+			)
+		}
 		gpuDeviceMapDuration = time.Since(gpuStart)
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to discover source GPU UUIDs: %w", err)
+		}
+		var gpuUUIDs []string
+		for _, device := range gpus.Devices {
+			gpuUUIDs = append(gpuUUIDs, device.UUID)
+		}
+		gpuDevicePaths, err = cuda.ResolveDevicePaths(snapshotruntime.HostProcPath, pid, gpuUUIDs)
+		if err != nil {
+			return nil, 0, err
 		}
 	}
 
@@ -290,6 +307,7 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 		HostCgroupPath: hostCgroupPath,
 		CUDAHostPIDs:   cudaHostPIDs,
 		CUDANSPIDs:     cudaNamespacePIDs,
+		GPUDevicePaths: gpuDevicePaths,
 		GPUs:           gpus,
 	}, gpuDeviceMapDuration, nil
 }
@@ -319,6 +337,10 @@ func configureCheckpoint(
 	)
 	if len(state.CUDANSPIDs) > 0 {
 		m.CUDA = types.NewCUDAManifest(state.CUDANSPIDs, state.GPUs)
+		m.CUDA.DevicePaths = state.GPUDevicePaths
+		if state.OCISpec != nil && state.OCISpec.Process != nil {
+			m.CUDA.NVIDIAVisibleDevices = cuda.VisibleDevicesValue(state.OCISpec.Process.Env)
+		}
 	}
 
 	if err := types.WriteManifest(checkpointDir, m); err != nil {
