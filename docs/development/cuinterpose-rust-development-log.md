@@ -1648,3 +1648,82 @@ cuinterpose-test` pass, including artifact verification, headless lifecycle
 tests, five static-musl coordinator contracts, and six protocol tests. The
 packaged gate log is `/tmp/cuinterpose-clap-contract-gate.log`. This run did not
 export new local `build/` artifacts or run GPU/cross-node tests.
+
+### Version-4 GPU and segmented cross-node GLM qualification
+
+At `b83ee57d17d93eb4f49e3a15780ee7293ad2ce12`, the pinned packaged gate,
+fresh artifact export, and Go CUDA/executor suites passed. The physical-GPU
+suite passed all three cases with zero skips in 22.85 seconds: shared POSIX
+restoration, multicast reconstruction, and live raw-import refusal. The
+report-only test was deselected, not counted as a GPU test.
+
+GLM used `nvidia/GLM-5.2-NVFP4`, vLLM 0.27.1, TP8 plus expert parallelism,
+and default `moe_backend=auto`, selecting `FLASHINFER_TRTLLM`. Source tx5tk
+and destination s2877 each allocated eight B200 GPUs through DRA.
+
+The first adapter setup omitted `SNAPSHOT_E2E_WORKLOAD_IMAGE` and failed
+before creating a workload. Supplying the pinned image corrected the adapter,
+without changing production. The next attempt generated `I am ready to assist
+you.` and started capture, but pytest lost its virtual-API port-forward with
+`broken pipe`/`lost connection to pod`, failing after 593.03 seconds.
+Capture continued independently and completed in 1,222.486931408 seconds:
+2.092476276 seconds Rust prepare, 34.850944822 seconds native CUDA checkpoint,
+and 1,185.165871356 seconds CRIU dump.
+
+One environment retry resumed that retained checkpoint rather than repeating
+capture. The adapter used the virtual API only for resource CRUD/polling and
+host API translated pod names for streaming logs/exec. No tunnel failure
+occurred. This is segmented qualification, not an uninterrupted pytest pass.
+
+| Restore measurement | Seconds |
+| --- | ---: |
+| External restore | 123.364178695 |
+| CRIU | 51.630099388 |
+| CUDA | 69.903152432 |
+| Rust coordinator | 1.380071963 |
+| Subsequent vLLM wakeup | 401.303557 |
+| Pod creation through final inference/GPU assertions | 559.143966662 |
+
+All coordinator phases and final topology validation passed for ten
+participants. Version-4 state contained 8,624 records: 4,216 allocations,
+4,216 unicast mappings, and 48 each multicast objects, devices, bindings, and
+mappings. Content load restored 1,072 shared allocations totaling
+15,904,800,768 bytes. All eight TP/EP ranks were present. First post-restore
+generation returned `I have a question for you.`; a fresh HTTP `/generate`
+returned 200 with `{"text": "(No need to mention the worker's"}`. The
+destination did not emit the pre-checkpoint-generation marker: this was
+restoration, not a cold-start substitute.
+
+During wakeup, shared-memory broadcast wait warnings appeared. Python stacks
+showed workers waiting for messages; keeping the existing 2,400-second timeout
+allowed completion without intervention. Native `py-spy` diagnostics failed
+with `UNW_EBADREG`; Python-only dumps worked. A local observation shell timed
+out while the independent test continued successfully. Neither triggered a
+product retry, production patch, C fallback, or workload restart.
+
+Exact image references:
+
+```text
+Agent: nvcr.io/nvidian/dynamo-dev/schwinns@sha256:6396f2a747f3a78634d4e757ab550b89a730a9fcbb585b9a3c75d877043b1906
+Operator: nvcr.io/nvidian/dynamo-dev/schwinns@sha256:ca16978ed9fd10d5c867fb33a4c03fec96f7c24b930aac542f0945e0bb2315f8
+Workload: vllm/vllm-openai:v0.27.1-ubuntu2404@sha256:dafea057f24b7d42716331a48e2db4e1f204f877a3aa759cb7e4c37e64ca2eee
+```
+
+Retained snapshot: `rust-v4-b83ee57-glm-f8a6d2-snapshot`; content:
+`podsnapshotcontent-d32d05da-773b-486e-b12f-c9ebadca8c9d`; artifact UID:
+`794d6c15-87c0-41e4-9680-37a7ddce0f5c`. Source/destination test pods,
+ConfigMaps, and claims were removed. Original agent/operator templates were
+restored after comparing them with this run's patches; both agents and the
+operator were Ready. No unrelated workload eviction or shared-cache deletion
+was needed.
+
+The first attempt's disposable local evidence directory was unavailable when
+the parent tried to copy it; its handoff and transcript retained the reported
+results. Resume evidence was deliberately persisted on existing owned test
+storage at `/artifacts/rust-v4-b83ee57-resume-evidence.tar.gz`, accessible through
+host namespace `schwinns-vcluster`, pod
+`bench-shell-x-schwinns-vcluster-x-schwinns-vcluster`. Bundle SHA256:
+`143b3ebac0525a94791947e71c981ea20f8f2151163cfc75145973787829153e`.
+It includes the resume/cleanup adapters, manifest/state, phase logs, inference,
+GPU and timing evidence, resource snapshots, and diagnostics, but no kubeconfig.
+CustomStorage/NIXL/compression composition was not tested in this run.
