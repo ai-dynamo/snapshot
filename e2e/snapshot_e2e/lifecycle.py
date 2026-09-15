@@ -206,7 +206,7 @@ def wait_for_file(namespace: str, pod: str, path: str, timeout: int = 180) -> No
             )
             response = k8s.exec_command(namespace, pod, command)
             last_error = None
-            return True if marker in response else None
+            return True if response == marker else None
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
             return None

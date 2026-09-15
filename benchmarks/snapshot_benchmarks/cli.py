@@ -137,7 +137,17 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 2
     model = models[args.model_label]
 
-    result = run_benchmark(
+    result = _run_one(cfg, engine, model, args)
+    out_dir = results.invocation_dir(Path(args.output_dir), git_sha=result.git_sha)
+    path = results.write_result(result, out_dir)
+    print(f"wrote {path}")
+    return 0
+
+
+def _run_one(
+    cfg: BenchmarkConfig, engine, model, args: argparse.Namespace
+) -> run.RunResult:
+    return run_benchmark(
         cfg,
         engine,
         model,
@@ -146,14 +156,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         tolerations=args.toleration,
         mode=args.mode,
         keep=args.keep,
-        pod_ready_timeout=args.pod_ready_timeout,
-        snapshot_ready_timeout=args.pod_ready_timeout,
-        restore_timeout=args.pod_ready_timeout,
+        timeout=args.timeout,
     )
-    out_dir = results.invocation_dir(Path(args.output_dir), git_sha=result.git_sha)
-    path = results.write_result(result, out_dir)
-    print(f"wrote {path}")
-    return 0
 
 
 def cmd_sweep(args: argparse.Namespace) -> int:
@@ -167,19 +171,7 @@ def cmd_sweep(args: argparse.Namespace) -> int:
     for model in models:
         print(f"=== {model.label} ===")
         try:
-            result = run_benchmark(
-                cfg,
-                engine,
-                model,
-                image=args.image,
-                image_pull_policy=args.image_pull_policy,
-                tolerations=args.toleration,
-                mode=args.mode,
-                keep=args.keep,
-                pod_ready_timeout=args.pod_ready_timeout,
-                snapshot_ready_timeout=args.pod_ready_timeout,
-                restore_timeout=args.pod_ready_timeout,
-            )
+            result = _run_one(cfg, engine, model, args)
         except CleanupError as exc:
             # Cleanup itself failed -- a pod, PodSnapshot, or
             # PodSnapshotContent from this model may still be on the cluster.
@@ -254,12 +246,12 @@ def build_parser() -> argparse.ArgumentParser:
         "e.g. --toleration nvidia.com/gpu=true:NoSchedule for a tainted GPU pool.",
     )
     run_parser.add_argument(
-        "--pod-ready-timeout",
+        "--timeout",
         type=int,
-        default=run.DEFAULT_POD_READY_TIMEOUT,
-        help="Seconds to wait for the source/restore pod to become Ready and for the "
-        "checkpoint to become Ready (default: %(default)ss). Raise for models too big "
-        "to load within the default window.",
+        default=run.DEFAULT_TIMEOUT,
+        help="Seconds to wait for each stage (source pod Ready, checkpoint Ready, "
+        "restore, restore pod Ready) (default: %(default)ss). Raise for models too "
+        "big to load within the default window.",
     )
     run_parser.set_defaults(func=cmd_run)
 
@@ -285,12 +277,12 @@ def build_parser() -> argparse.ArgumentParser:
         "e.g. --toleration nvidia.com/gpu=true:NoSchedule for a tainted GPU pool.",
     )
     sweep_parser.add_argument(
-        "--pod-ready-timeout",
+        "--timeout",
         type=int,
-        default=run.DEFAULT_POD_READY_TIMEOUT,
-        help="Seconds to wait for the source/restore pod to become Ready and for the "
-        "checkpoint to become Ready (default: %(default)ss). Raise for models too big "
-        "to load within the default window.",
+        default=run.DEFAULT_TIMEOUT,
+        help="Seconds to wait for each stage (source pod Ready, checkpoint Ready, "
+        "restore, restore pod Ready) (default: %(default)ss). Raise for models too "
+        "big to load within the default window.",
     )
     sweep_parser.set_defaults(func=cmd_sweep)
 

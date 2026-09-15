@@ -137,8 +137,8 @@ class RestoreTiming:
     already running, because CRIU injects the restored process into a
     container that has already started" (docs/development/benchmarks.md).
 
-    `snapshot_restore_seconds` and `vllm_wake_and_copy_seconds` are the split
-    the benchmark exists to report: the node agent's `nvidia.com/Restored` pod
+    `snapshot_restore_seconds` and `wake_and_copy_seconds` are the split the
+    benchmark exists to report: the node agent's `nvidia.com/Restored` pod
     condition fires the moment Snapshot itself believes the restore is done —
     before the workload's own wake_up()/resume_generation()/warmup sequence in
     app.py runs. Everything before that condition is Snapshot's own work;
@@ -160,7 +160,7 @@ class RestoreTiming:
         return _seconds(self.restored_condition_at, self.restore_container_started_at)
 
     @property
-    def vllm_wake_and_copy_seconds(self) -> float | None:
+    def wake_and_copy_seconds(self) -> float | None:
         return _seconds(self.restore_ready_at, self.restored_condition_at)
 
     @property
@@ -181,7 +181,7 @@ class AgentLogPhases:
     the published "wake / remap" stage is not represented in the agent log at
     all (inet-remap happens inside `criu_restore`'s wall time; the workload's
     own wake-up is outside the agent process entirely). Use
-    `RestoreTiming.vllm_wake_and_copy_seconds` for that instead — it is
+    `RestoreTiming.wake_and_copy_seconds` for that instead — it is
     reported alongside this, never folded into it.
     """
 
@@ -227,7 +227,7 @@ class RunResult:
     schema_version: int
     run_id: str
     timestamp_utc: str
-    mode: str  # "cold_start" | "restore" | "both"
+    mode: str  # "cold_start" | "both"
     environment: BenchmarkEnvironment
     engine: BenchmarkEngine
     model: ModelInfo

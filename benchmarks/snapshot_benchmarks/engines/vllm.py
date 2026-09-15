@@ -32,8 +32,6 @@ RESTORE_DEPLOYMENT_PATH = _REPO_ROOT / "docs/guides/vllm/restore-deployment.yaml
 
 CONTAINER_NAME = "main"
 VERSION_PROBE_COMMAND = 'python3 -c "import vllm; print(vllm.__version__)"'
-SOURCE_READY_PATH = "/snapshot-control/ready-for-snapshot"
-RESTORE_READY_PATH = "/snapshot-control/vllm-restore-ready"
 
 RESTORE_FROM_ANNOTATION = "nvidia.com/restore-from"
 SNAPSHOT_MODEL_ENV = "SNAPSHOT_MODEL"
@@ -150,42 +148,5 @@ class VLLMEngine:
     container_name = CONTAINER_NAME
     version_probe_command = VERSION_PROBE_COMMAND
 
-    def build_source_pod(
-        self,
-        *,
-        name: str,
-        namespace: str,
-        image: str,
-        model: ModelSpec,
-        image_pull_policy: str | None = None,
-        tolerations: list[dict[str, str]] | None = None,
-    ) -> dict[str, Any]:
-        return build_source_pod(
-            name=name,
-            namespace=namespace,
-            image=image,
-            model=model,
-            image_pull_policy=image_pull_policy,
-            tolerations=tolerations,
-        )
-
-    def build_restore_pod(
-        self,
-        *,
-        name: str,
-        namespace: str,
-        image: str,
-        model: ModelSpec,
-        snapshot_name: str,
-        image_pull_policy: str | None = None,
-        tolerations: list[dict[str, str]] | None = None,
-    ) -> dict[str, Any]:
-        return build_restore_pod(
-            name=name,
-            namespace=namespace,
-            image=image,
-            model=model,
-            snapshot_name=snapshot_name,
-            image_pull_policy=image_pull_policy,
-            tolerations=tolerations,
-        )
+    build_source_pod = staticmethod(build_source_pod)
+    build_restore_pod = staticmethod(build_restore_pod)
