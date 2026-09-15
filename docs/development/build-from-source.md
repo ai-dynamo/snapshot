@@ -66,7 +66,10 @@ See [Installation](../operations/install.md) for storage and uninstall options.
 
 Common `make` targets from the repo root:
 
-- `make build` — compile the agent and operator
+- `make build` — compile the agent and operator, and build the C/C++ cuinterpose
+  libraries/static coordinator in a pinned Docker builder
+- `make -C agent cuinterpose-test` — containerized C++ unit, loader, endpoint,
+  static coordinator, and ELF artifact checks (no GPU required)
 - `make test` — run unit tests across the `api`, `agent`, and `operator` modules
 - `make lint` — run linters
 - `make helm-lint` — lint the Helm chart
