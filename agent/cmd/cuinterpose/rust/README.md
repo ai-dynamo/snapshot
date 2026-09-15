@@ -399,7 +399,11 @@ real workloads should use spawn/exec or fork before CUDA initialization.
 
 For the physical-GPU suite, `core/tests/stage_gpu.py DEST --artifacts DIR
 --cuda-checkpoint PATH` copies the locally owned `../tests/gpu` suite and matched
-artifacts. Its report parser is an ordinary CUDA-independent Python module.
+artifacts to `DEST/tests/gpu` and `DEST/build`, with cuda-checkpoint at
+`DEST/bin/cuda-checkpoint`. Run pytest against `DEST/tests/gpu`; the suite's
+default artifact lookup resolves `DEST/build`, just as it resolves `../build`
+in the repository. `CUINTERPOSE_BUILD_DIR` explicitly overrides that lookup.
+Its report parser is an ordinary CUDA-independent Python module.
 The three physical-GPU cases use the real driver through the shim and native
 cuda-checkpoint; the headless fake provider is never staged. They remain an
 explicit separate gate, and v4 requires a fresh checkpoint.

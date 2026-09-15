@@ -17,8 +17,8 @@ def main():
     args = parser.parse_args()
     args.destination.mkdir(parents=True, exist_ok=False)
     source = Path(__file__).resolve().parents[3] / "tests/gpu"
-    suite = args.destination / "gpu"
-    suite.mkdir()
+    suite = args.destination / "tests/gpu"
+    suite.mkdir(parents=True)
     for path in source.iterdir():
         if path.is_file() and (path.suffix == ".py" or path.name == "pyproject.toml"):
             shutil.copy2(path, suite / path.name)

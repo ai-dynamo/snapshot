@@ -1591,3 +1591,24 @@ No Go integration, upstream compatibility, C draft branches, or cluster state
 was changed. The parent still needs review and the pinned GNU/musl final gate.
 Fresh version-4 physical GPU and vLLM capture/restore/inference qualification
 has not been run and is not implied by these headless results.
+
+### Review fixes: independent ABI and staged artifact lookup
+
+Review found that the fake header's 64-bit access flags gave `CUmemAccessDesc`
+a 16-byte stride instead of CUDA's 12 bytes. The field is now `uint32_t`, with
+compile-time size and offset assertions. The fake provider still builds without
+CUDA headers. Review also found that staging to `DEST/gpu` made the fixture
+look outside `DEST` for artifacts. Staging now preserves the repository shape:
+`DEST/tests/gpu`, `DEST/build`, and `DEST/bin/cuda-checkpoint`. The existing
+`CUINTERPOSE_BUILD_DIR` override is unchanged. Coordinator transport errors now
+include the request as well as endpoint, transport action, and underlying cause.
+
+GCC layout/provider compilation, workspace GNU check/release build, rustfmt,
+strict Clippy, five coordinator tests, and the headless report-parser test pass.
+A CUDA-independent staging check invoked the real `tools` fixture and verified
+default lookup against freshly built/copied GNU artifacts, explicit override,
+missing-artifact refusal, and unchanged repository-default path resolution.
+Its non-executable cuda-checkpoint copy sentinel was never run; this is not GPU
+validation. A missing-socket smoke also verified contextual coordinator errors.
+The first formatting check requested a multiline `ensure!`; rustfmt fixed it.
+Pinned GNU/musl packaging and fresh v4 GPU/vLLM qualification remain pending.

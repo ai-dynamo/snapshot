@@ -48,19 +48,27 @@ struct Inspection {
 
 // Transport errors retain their cause; remote refusals are application errors.
 fn exchange(endpoint: &str, request: &Request) -> Result<Response> {
-    let socket =
-        UnixStream::connect(endpoint).with_context(|| format!("{endpoint}: connect failed"))?;
+    let socket = UnixStream::connect(endpoint)
+        .with_context(|| format!("{endpoint}: {request:?}: connect failed"))?;
     let operation = match request {
         Request::Execute { operation, .. } => Some(*operation),
         _ => None,
     };
     let timeout = Some(protocol::timeout(operation));
-    socket.set_read_timeout(timeout)?;
-    socket.set_write_timeout(timeout)?;
-    protocol::send(&socket, request, None).with_context(|| format!("{endpoint}: send failed"))?;
-    let (response, fd): (Response, _) =
-        protocol::receive(&socket).with_context(|| format!("{endpoint}: receive failed"))?;
-    ensure!(fd.is_none(), "{endpoint}: unexpected descriptor");
+    socket
+        .set_read_timeout(timeout)
+        .with_context(|| format!("{endpoint}: {request:?}: set read timeout failed"))?;
+    socket
+        .set_write_timeout(timeout)
+        .with_context(|| format!("{endpoint}: {request:?}: set write timeout failed"))?;
+    protocol::send(&socket, request, None)
+        .with_context(|| format!("{endpoint}: {request:?}: send failed"))?;
+    let (response, fd): (Response, _) = protocol::receive(&socket)
+        .with_context(|| format!("{endpoint}: {request:?}: receive failed"))?;
+    ensure!(
+        fd.is_none(),
+        "{endpoint}: {request:?}: unexpected descriptor"
+    );
     Ok(response)
 }
 

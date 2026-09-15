@@ -26,7 +26,10 @@ typedef struct {
   void *win32HandleMetaData;
   struct { uint8_t compressionType, gpuDirectRDMACapable; uint16_t usage; uint8_t reserved[4]; } allocFlags;
 } CUmemAllocationProp;
-typedef struct { CUmemLocation location; uint64_t flags; } CUmemAccessDesc;
+typedef struct { CUmemLocation location; uint32_t flags; } CUmemAccessDesc;
+_Static_assert(sizeof(CUmemAccessDesc) == 12, "CUDA access descriptor stride");
+_Static_assert(offsetof(CUmemAccessDesc, location) == 0, "CUDA access location offset");
+_Static_assert(offsetof(CUmemAccessDesc, flags) == 8, "CUDA access flags offset");
 typedef struct { unsigned numDevices; size_t size; uint64_t handleTypes, flags; } CUmulticastObjectProp;
 enum {
   CUDA_SUCCESS = 0, CUDA_ERROR_INVALID_VALUE = 1, CUDA_ERROR_OUT_OF_MEMORY = 2,
