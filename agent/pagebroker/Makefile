@@ -5,10 +5,10 @@ PROTO := v1/pagebroker.proto
 GTEST_FLAGS = $(shell pkg-config --cflags --libs gtest_main)
 MODEL_STREAMER_LIB_DIR ?= /usr/local/lib
 MODEL_STREAMER_FLAGS := -L$(MODEL_STREAMER_LIB_DIR) -lstreamer -Wl,-rpath,$(MODEL_STREAMER_LIB_DIR)
-BROKER_SOURCES := broker.cpp checkpoint_transaction_descriptor.cpp file_descriptor.cpp restore_transaction_descriptor.cpp transaction.cpp transfer/model_streamer_restore.cpp transfer/model_streamer_transfer_engine.cpp transfer/posix_copy_engine.cpp transfer/transfer_engine.cpp utils/event_loop.cpp
+BROKER_SOURCES := broker.cpp checkpoint_transaction_descriptor.cpp file_descriptor.cpp restore_transaction_descriptor.cpp transaction.cpp transfer/filesystem_storage.cpp transfer/model_streamer_restore.cpp transfer/model_streamer_transfer_engine.cpp transfer/posix_copy_engine.cpp transfer/transfer_engine.cpp utils/event_loop.cpp
 DAEMON_SOURCES := $(BROKER_SOURCES) daemon.cpp main.cpp
 TEST_SOURCES := daemon_test.cpp utils/event_loop_test.cpp
-MODEL_STREAMER_RECOVERY_TEST_SOURCES := file_descriptor.cpp transfer/model_streamer_restore.cpp transfer/model_streamer_transfer_engine.cpp transfer/model_streamer_transfer_engine_test.cpp transfer/posix_copy_engine.cpp transfer/transfer_engine.cpp utils/event_loop.cpp
+MODEL_STREAMER_RECOVERY_TEST_SOURCES := file_descriptor.cpp transfer/filesystem_storage.cpp transfer/model_streamer_restore.cpp transfer/model_streamer_transfer_engine.cpp transfer/model_streamer_transfer_engine_test.cpp transfer/transfer_engine.cpp utils/event_loop.cpp
 
 .PHONY: daemon generate test
 

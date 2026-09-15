@@ -5,41 +5,13 @@
 
 #include <filesystem>
 #include <stdexcept>
-#include <string>
 #include <utility>
+
+#include "filesystem_storage.hpp"
 
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
 namespace {
-Path
-StoragePath(const StorageBackend& storage, const Path& storage_root, const char* label)
-{
-  if (!storage.has_filesystem() || storage.filesystem().directory().empty())
-    throw std::invalid_argument(std::string("filesystem ") + label + " is required");
-  const Path path(storage.filesystem().directory());
-  const Path relative = path.lexically_relative(storage_root);
-  if (!path.is_absolute() || path.lexically_normal() != path || relative.empty() ||
-      relative == "." || relative.string().starts_with("../") || relative == "..")
-    throw std::invalid_argument(std::string(label) + " must be within storage root");
-
-  Path component = storage_root;
-  for (const auto& part : relative) {
-    component /= part;
-    if (fs::is_symlink(component))
-      throw std::invalid_argument(std::string(label) + " contains symlink");
-  }
-  return path;
-}
-
-Path
-SourcePath(const StorageBackend& source, const Path& storage_root)
-{
-  const Path path = StoragePath(source, storage_root, "source");
-  if (!fs::is_directory(path))
-    throw std::invalid_argument("source must be a storage directory");
-  return path;
-}
-
 RestorePlan
 BuildFilesystemRestorePlan(const Path& source)
 {
@@ -68,7 +40,7 @@ BuildFilesystemRestorePlan(const Path& source)
 }  // namespace
 
 ModelStreamerTransferEngine::ModelStreamerTransferEngine(Path storage_root)
-    : storage_root_(fs::weakly_canonical(std::move(storage_root))), posix_(storage_root_),
+    : storage_root_(fs::weakly_canonical(std::move(storage_root))),
       restore_(std::make_shared<ModelStreamerRestore>())
 {
 }
@@ -102,31 +74,31 @@ ModelStreamerTransferEngine::type() const
 uintmax_t
 ModelStreamerTransferEngine::RestoreSize(const StorageBackend& source) const
 {
-  return posix_.RestoreSize(source);
+  return filesystem_storage::RestoreSize(source, storage_root_);
 }
 
 void
 ModelStreamerTransferEngine::StageRestore(const StorageBackend& source, const Path& destination) const
 {
   const auto restore = AcquireRestore();
-  restore->Stage(BuildFilesystemRestorePlan(SourcePath(source, storage_root_)), destination);
+  restore->Stage(BuildFilesystemRestorePlan(filesystem_storage::SourcePath(source, storage_root_)), destination);
 }
 
 void
 ModelStreamerTransferEngine::ValidateCheckpointDestination(const StorageBackend& destination) const
 {
-  posix_.ValidateCheckpointDestination(destination);
+  filesystem_storage::DestinationPath(destination, storage_root_);
 }
 
 bool
 ModelStreamerTransferEngine::CheckpointDestinationConflicts(const StorageBackend& destination) const
 {
-  return posix_.CheckpointDestinationConflicts(destination);
+  return filesystem_storage::CheckpointDestinationConflicts(destination, storage_root_);
 }
 
 void
 ModelStreamerTransferEngine::PublishCheckpoint(const Path& source, const StorageBackend& destination) const
 {
-  posix_.PublishCheckpoint(source, destination);
+  filesystem_storage::PublishCheckpoint(source, destination, storage_root_);
 }
 }  // namespace snapshot::pagebroker

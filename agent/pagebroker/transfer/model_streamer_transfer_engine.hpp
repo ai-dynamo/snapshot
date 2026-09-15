@@ -7,7 +7,6 @@
 #include <mutex>
 
 #include "model_streamer_restore.hpp"
-#include "posix_copy_engine.hpp"
 #include "transfer_engine.hpp"
 
 namespace snapshot::pagebroker {
@@ -26,7 +25,6 @@ class ModelStreamerTransferEngine final : public TransferEngine {
   std::shared_ptr<ModelStreamerRestore> AcquireRestore() const;
 
   Path storage_root_;
-  PosixCopyEngine posix_;
   mutable std::mutex restore_mutex_;
   mutable std::shared_ptr<ModelStreamerRestore> restore_;
 };

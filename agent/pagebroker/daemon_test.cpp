@@ -62,6 +62,22 @@ class BrokerTest : public ::testing::Test {
   unsigned request_number_ = 0;
 };
 
+class FilesystemEngineTest : public BrokerTest, public ::testing::WithParamInterface<TransferEngineType> {
+ protected:
+  void Configure(StorageBackend* storage, IOEngine* engine, const fs::path& directory)
+  {
+    BrokerTest::Configure(storage, engine, directory, GetParam());
+  }
+};
+
+INSTANTIATE_TEST_SUITE_P(
+    TransferEngines,
+    FilesystemEngineTest,
+    ::testing::Values(TransferEngineType::POSIX_COPY, TransferEngineType::MODEL_STREAMER),
+    [](const ::testing::TestParamInfo<TransferEngineType>& info) {
+      return info.param == TransferEngineType::POSIX_COPY ? "PosixCopy" : "ModelStreamer";
+    });
+
 TEST_F(BrokerTest, StagesRestoreAndCleansUpOnCommit)
 {
   auto restore = RequestFor("restore");
@@ -245,7 +261,7 @@ TEST_F(BrokerTest, RejectsUnsafeTransactionIDs)
   }
 }
 
-TEST_F(BrokerTest, RejectsSymlinkInRestoreSource)
+TEST_P(FilesystemEngineTest, RejectsSymlinkInRestoreSource)
 {
   fs::create_symlink(root_ / "storage" / "elsewhere", source_ / "link");
   auto restore = RequestFor("symlink");
@@ -257,7 +273,7 @@ TEST_F(BrokerTest, RejectsSymlinkInRestoreSource)
   EXPECT_EQ(response.failure().code(), Failure::STORAGE_ERROR);
 }
 
-TEST_F(BrokerTest, InvalidRestoreDoesNotReserveTransaction)
+TEST_P(FilesystemEngineTest, InvalidRestoreDoesNotReserveTransaction)
 {
   auto invalid = RequestFor("restore");
   Configure(
@@ -272,7 +288,7 @@ TEST_F(BrokerTest, InvalidRestoreDoesNotReserveTransaction)
   EXPECT_TRUE(broker().HandleRequest(restore).has_staged_restore_directory());
 }
 
-TEST_F(BrokerTest, RejectsPathsOutsideStorageRoot)
+TEST_P(FilesystemEngineTest, RejectsPathsOutsideStorageRoot)
 {
   const fs::path outside = root_ / "outside";
   fs::create_directories(outside);
@@ -413,7 +429,7 @@ TEST_F(BrokerTest, AbortsFailedCheckpointStaging)
   EXPECT_EQ(retry.failure().code(), Failure::TRANSACTION_CONFLICT);
 }
 
-TEST_F(BrokerTest, PublishesCheckpoint)
+TEST_P(FilesystemEngineTest, PublishesCheckpoint)
 {
   const fs::path published = root_ / "storage" / "published";
   auto prepare = RequestFor("checkpoint");
@@ -434,7 +450,7 @@ TEST_F(BrokerTest, PublishesCheckpoint)
   EXPECT_FALSE(fs::exists(staging_directory));
 }
 
-TEST_F(BrokerTest, ReplacesExistingCheckpoint)
+TEST_P(FilesystemEngineTest, ReplacesExistingCheckpoint)
 {
   const fs::path published = root_ / "storage" / "published";
   const fs::path previous = published.string() + ".pagebroker-previous";
@@ -457,7 +473,7 @@ TEST_F(BrokerTest, ReplacesExistingCheckpoint)
   EXPECT_FALSE(fs::exists(previous));
 }
 
-TEST_F(BrokerTest, PreservesExistingCheckpointWhenReplacementFails)
+TEST_P(FilesystemEngineTest, PreservesExistingCheckpointWhenReplacementFails)
 {
   const fs::path published = root_ / "storage" / "published";
   const fs::path previous = published.string() + ".pagebroker-previous";
@@ -480,7 +496,7 @@ TEST_F(BrokerTest, PreservesExistingCheckpointWhenReplacementFails)
   EXPECT_TRUE(fs::exists(previous));
 }
 
-TEST_F(BrokerTest, PreservesExistingPartialCheckpointDestination)
+TEST_P(FilesystemEngineTest, PreservesExistingPartialCheckpointDestination)
 {
   const fs::path destination = root_ / "storage" / "blocked";
   auto prepare = RequestFor("checkpoint");
