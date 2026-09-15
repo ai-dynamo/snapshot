@@ -7,8 +7,8 @@ SPDX-License-Identifier: Apache-2.0
 
 This workspace is an incomplete, main-based port. It builds a run-ai-style
 `libcuinterpose.so` front end, a separate `libcuinterpose_core.so`, and
-`cuinterpose-coordinator`. Unicast bookkeeping and host-carrier code exist;
-multicast reconstruction is not implemented. Fork generation reset is covered
+`cuinterpose-coordinator`. Unicast, host-carrier, and multicast reconstruction
+are implemented and exercised against fake CUDA. Fork generation reset is covered
 by fake-driver tests, not qualified for real post-CUDA fork. Do not treat
 a successful build or loader test as GPU, CRIU, or vLLM qualification.
 
@@ -44,6 +44,31 @@ The peer-export cache is separate from CUDA state. Each transmission leases
 a duplicated descriptor. Replacement/removal retires only the affected entry
 and waits only for its leases; capture's clear drains the whole cache.
 Descriptor close precedes the wakeup that permits CUDA teardown.
+Cache identity includes resource kind and allocation ID, so a unicast request
+cannot retrieve a multicast descriptor even if it names the same allocation ID.
+
+The multicast module shares logical handles and VA mappings with unicast while
+owning object/device/binding records. Runtime create, import, add-device, bind,
+and map calls drop the state mutex around CUDA; an in-flight counter prevents
+inspection or preparation while their results are not yet recorded. Objects
+and tracked unicast members are pinned against concurrent release/unmap.
+Driver handles in multicast records use `Option<u64>`: zero is a valid handle,
+not the prepared-state marker.
+
+Capture drains multicast exports, unmaps, unbinds, and releases objects before
+saving shared unicast members. Successful BindMem or tracked BindAddr marks
+the member shared even without a unicast ticket export. Restore recreates
+creators, imports objects, attaches devices, then replays bindings/mappings,
+with a global barrier after each operation. These driver calls also run
+outside the state mutex under an exclusive lifecycle phase. Original requested
+properties and v1/v2 ABIs are retained; inspection reports the largest extent
+accepted by CUDA. BindMem replay temporarily retains mapped members whose
+application handles were released, then drops that temporary reference.
+
+Wrong-phase requests, unsupported sharing, and in-flight collectives refuse
+without poisoning state. A driver failure after lifecycle mutation starts is
+fail-stop. Per-resource checkpoint markers govern replay, and inspection
+refuses more than 4096 topology records before allocating the response.
 
 The frontend registers `pthread_atfork` hooks and supplies a reentrant operation
 gate to the core. Public fork atomically closes admission only when no operation
@@ -114,9 +139,25 @@ general post-CUDA fork-without-exec, local `RTLD_NEXT` scopes, arbitrary loader 
 real multicast reconstruction.
 
 `reference.py` builds the pinned C fixtures using a local CUDA 13.1/gtest Docker
-image, then runs all 14 coordinator, 13 tracking, and 5 unicast lifecycle tests
-against Rust, with no fork exclusions. `--fixtures <build-directory>` explicitly
-reuses an existing build instead. Eight extra process-isolated regressions cover
+image, then runs all 14 coordinator, 13 tracking, 5 unicast lifecycle, and
+6 multicast tests against Rust, with no fork exclusions. The temporary extracted
+test harness receives one explicit adaptation: coordinator process creation
+retries only `fork()` returning `EAGAIN`, up to a five-second absolute deadline,
+and reports its retry count. Other errors or deadline exhaustion abort before
+`waitpid`; no CUDA call, coordinator phase, child operation, or suite is retried.
+The runner validates the pinned coordinator-header checksum before overlaying
+that one launch site. Runtime sources, the fake driver, test assertions, and
+actual fork-generation calls are unchanged. Five deterministic launch-helper
+cases exercise recovery, terminal errors, deadline exhaustion, and child return.
+`--fixtures <build-directory>` reuses an existing build with a warning that this
+adaptation cannot be applied or verified; the default fresh build is authoritative.
+Eight additional multicast modes cover
+released handles and binding-only sharing, resource-kind/ticket mismatch,
+partial mappings and unknown access, destructive versus harmless refusal,
+native-address binding replay, a blocked collective with simultaneous control
+requests, retain refusal during map publication, and driver-written create-error
+output. Eight extra
+process-isolated fork regressions cover
 pre-init fork, identity and descriptor reset, nested-fork FD reuse, saved-carrier
 unmapping without CUDA cleanup, concurrent activity, and generation
 poisoning, post-fork constructor/worker contention using the actual Rust core,

@@ -5,6 +5,7 @@
 mod control;
 mod export_cache;
 mod host_carrier;
+mod multicast;
 mod process;
 mod state;
 mod ticket;

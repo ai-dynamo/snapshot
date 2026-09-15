@@ -203,9 +203,15 @@ def main():
         assert not errors
         assert stats().allocations == 1
     elif mode == "poison":
-        # A phase-order failure poisons the parent's generation.
+        # Protocol/order rejection must not poison the workload. A real copy
+        # failure does, and only that generation's poison is reset by fork.
         response = inspect(5)
         assert struct.unpack_from("<i", response, 8)[0] != 0
+        assert stats().phase == 1
+        assert struct.unpack_from("<i", inspect(3), 8)[0] == 0
+        cuda.fakeFailNext.argtypes = [c.c_char_p]
+        cuda.fakeFailNext(b"cuMemcpyDtoHAsync_v2")
+        assert struct.unpack_from("<i", inspect(4), 8)[0] != 0
         assert stats().phase == 5
         child = fork_when_idle()
         if child == 0:

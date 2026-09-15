@@ -1,0 +1,108 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+// SPDX-License-Identifier: Apache-2.0
+
+// Test-only provider layer: block a collective or a successful map before the
+// Rust shim can publish it, exposing concurrent control and ownership paths.
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <pthread.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdatomic.h>
+
+static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t changed = PTHREAD_COND_INITIALIZER;
+static int armed, entered, released;
+static atomic_int access_failure;
+static atomic_int create_failure;
+atomic_uint_fast64_t multicast_mapped_handle;
+atomic_int multicast_retain_calls;
+
+void multicast_fail_access(void) {
+    atomic_store(&access_failure, 1);
+}
+
+void multicast_fail_create(void) {
+    atomic_store(&create_failure, 1);
+}
+
+int cuMulticastCreate(uint64_t *handle, const void *properties) {
+    if (atomic_exchange(&create_failure, 0)) {
+        // The pinned forwarding driver writes this output even on failure.
+        *handle = 0x456;
+        return 110;
+    }
+    void *(*original)(const char *) = dlsym(RTLD_NEXT, "fakeOriginal");
+    int (*next)(uint64_t *, const void *) =
+        original ? original("cuMulticastCreate") : 0;
+    return next ? next(handle, properties) : 3;
+}
+
+int cuMemSetAccess(uint64_t address, size_t size, const void *descriptors, size_t count) {
+    if (atomic_exchange(&access_failure, 0)) return 999;
+    void *(*original)(const char *) = dlsym(RTLD_NEXT, "fakeOriginal");
+    int (*next)(uint64_t, size_t, const void *, size_t) =
+        original ? original("cuMemSetAccess") : 0;
+    return next ? next(address, size, descriptors, count) : 3;
+}
+
+void multicast_block_arm(int operation) {
+    pthread_mutex_lock(&lock);
+    armed = operation;
+    entered = released = 0;
+    pthread_mutex_unlock(&lock);
+}
+
+void multicast_block_wait(void) {
+    pthread_mutex_lock(&lock);
+    while (!entered) pthread_cond_wait(&changed, &lock);
+    pthread_mutex_unlock(&lock);
+}
+
+void multicast_block_release(void) {
+    pthread_mutex_lock(&lock);
+    released = 1;
+    pthread_cond_broadcast(&changed);
+    pthread_mutex_unlock(&lock);
+}
+
+int cuMulticastAddDevice(uint64_t handle, int device) {
+    pthread_mutex_lock(&lock);
+    if (armed == 1) {
+        armed = 0;
+        entered = 1;
+        pthread_cond_broadcast(&changed);
+        while (!released) pthread_cond_wait(&changed, &lock);
+    }
+    pthread_mutex_unlock(&lock);
+    // Deliberately select the fixture implementation, not another intercepted
+    // CUDA name. The test concerns core concurrency, not resolver chaining.
+    void *(*original)(const char *) = dlsym(RTLD_NEXT, "fakeOriginal");
+    int (*next)(uint64_t, int) = original ? original("cuMulticastAddDevice") : 0;
+    return next ? next(handle, device) : 3;
+}
+
+int cuMemMap(uint64_t address, size_t size, size_t offset, uint64_t handle, uint64_t flags) {
+    void *(*original)(const char *) = dlsym(RTLD_NEXT, "fakeOriginal");
+    int (*next)(uint64_t, size_t, size_t, uint64_t, uint64_t) =
+        original ? original("cuMemMap") : 0;
+    int result = next ? next(address, size, offset, handle, flags) : 3;
+    pthread_mutex_lock(&lock);
+    if (armed == 2 && result == 0) {
+        atomic_store(&multicast_mapped_handle, handle);
+        armed = 0;
+        entered = 1;
+        pthread_cond_broadcast(&changed);
+        while (!released) pthread_cond_wait(&changed, &lock);
+    }
+    pthread_mutex_unlock(&lock);
+    return result;
+}
+
+int cuMemRetainAllocationHandle(uint64_t *handle, void *address) {
+    atomic_fetch_add(&multicast_retain_calls, 1);
+    void *(*original)(const char *) = dlsym(RTLD_NEXT, "fakeOriginal");
+    int (*next)(uint64_t *, void *) =
+        original ? original("cuMemRetainAllocationHandle") : 0;
+    return next ? next(handle, address) : 3;
+}

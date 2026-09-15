@@ -12,9 +12,12 @@ use std::collections::BTreeMap;
 use std::os::fd::OwnedFd;
 use std::sync::{Condvar, Mutex};
 
+/// Resource kind is part of the lookup key, not an authorization token.
+pub type Key = (u32, AllocationId);
+
 #[derive(Default)]
 struct Entries {
-    descriptors: BTreeMap<AllocationId, Entry>,
+    descriptors: BTreeMap<Key, Entry>,
     transfers: usize,
     draining: bool,
 }
@@ -37,7 +40,7 @@ pub struct ExportCache {
 
 pub struct Lease<'a> {
     cache: &'a ExportCache,
-    id: AllocationId,
+    id: Key,
     descriptor: Option<OwnedFd>,
 }
 
@@ -52,7 +55,7 @@ impl ExportCache {
                 .map(|entry| entry.descriptor.as_raw_fd()),
         );
     }
-    pub fn contains(&self, id: &AllocationId) -> Result<bool> {
+    pub fn contains(&self, id: &Key) -> Result<bool> {
         let entries = self.entries.lock().map_err(|_| UNKNOWN)?;
         Ok(entries.descriptors.contains_key(id))
     }
@@ -62,7 +65,7 @@ impl ExportCache {
         Ok(entries.descriptors.len())
     }
 
-    pub fn acquire(&self, id: &AllocationId) -> Result<Lease<'_>> {
+    pub fn acquire(&self, id: &Key) -> Result<Lease<'_>> {
         let mut entries = self.entries.lock().map_err(|_| UNKNOWN)?;
         if entries.draining {
             return Err(INVALID_HANDLE);
@@ -85,7 +88,7 @@ impl ExportCache {
     /// Retire only this ID. A new insert or missing removal does not affect
     /// admission or itself drain unrelated transfers. Mutations are serialized,
     /// so replacing B can still wait behind an already-running retirement of A.
-    pub fn replace(&self, id: AllocationId, descriptor: Option<OwnedFd>) -> Result<()> {
+    pub fn replace(&self, id: Key, descriptor: Option<OwnedFd>) -> Result<()> {
         let _mutation = self.mutations.lock().map_err(|_| UNKNOWN)?;
         let mut entries = self.entries.lock().map_err(|_| UNKNOWN)?;
         if let Some(entry) = entries.descriptors.get_mut(&id) {
@@ -152,9 +155,22 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn resource_kind_is_part_of_descriptor_identity() {
+        let cache = ExportCache::default();
+        let id = [8; 16];
+        cache
+            .replace((2, id), Some(File::open("/dev/null").unwrap().into()))
+            .unwrap();
+        assert!(cache.acquire(&(1, id)).is_err());
+        assert!(cache.acquire(&(2, id)).is_ok());
+        cache.replace((1, id), None).unwrap();
+        assert!(cache.acquire(&(2, id)).is_ok());
+    }
+
+    #[test]
     fn teardown_drains_transfers_and_rejects_new_requests() {
         let cache = Arc::new(ExportCache::default());
-        let id = [1; 16];
+        let id = (1, [1; 16]);
         cache
             .replace(id, Some(File::open("/dev/null").unwrap().into()))
             .unwrap();
@@ -187,8 +203,8 @@ mod tests {
     fn replacement_waits_until_the_old_descriptor_is_sent() {
         use std::io::Read;
         let cache = Arc::new(ExportCache::default());
-        let id = [2; 16];
-        let unrelated = [4; 16];
+        let id = (2, [2; 16]);
+        let unrelated = (1, [4; 16]);
         cache
             .replace(unrelated, Some(File::open("/dev/null").unwrap().into()))
             .unwrap();
@@ -226,8 +242,8 @@ mod tests {
     #[test]
     fn unrelated_mutations_do_not_drain_or_reject_active_exports() {
         let cache = ExportCache::default();
-        let a = [1; 16];
-        let b = [2; 16];
+        let a = (1, [1; 16]);
+        let b = (2, [2; 16]);
         cache
             .replace(a, Some(File::open("/dev/null").unwrap().into()))
             .unwrap();
@@ -259,7 +275,7 @@ mod tests {
         use cuinterpose_protocol::{Header, Operation, send_header};
         use std::os::unix::net::UnixStream;
         let cache = Arc::new(ExportCache::default());
-        let id = [3; 16];
+        let id = (1, [3; 16]);
         cache
             .replace(id, Some(File::open("/dev/null").unwrap().into()))
             .unwrap();

@@ -76,16 +76,16 @@ fn serve(mut socket: Socket<UnixStream>, identity: Identity) -> std::io::Result<
             return Err("cuinterpose state failed");
         }
         if request.operation == Operation::Export {
-            if request.resource_kind != 1 {
+            if !matches!(request.resource_kind, 1 | 2) {
                 return Err("creator resource is unavailable");
             }
             passed = Some(
                 state::cache()
                     .map_err(|_| "export cache unavailable")?
-                    .acquire(&request.allocation)
+                    .acquire(&(request.resource_kind, request.allocation))
                     .map_err(|_| "creator resource is unavailable")?,
             );
-            response.resource_kind = 1;
+            response.resource_kind = request.resource_kind;
             response.allocation = request.allocation;
             return Ok(());
         }
@@ -108,8 +108,17 @@ fn serve(mut socket: Socket<UnixStream>, identity: Identity) -> std::io::Result<
                     .map_err(|_| "cannot inspect current CUDA state")?;
             }
             _ => {
+                state
+                    .validate_lifecycle(request.operation as u16)
+                    .map_err(|_| "CUDA lifecycle operation refused without mutation")?;
                 let start = std::time::Instant::now();
-                match state.lifecycle(request.operation as u16) {
+                let operation = request.operation as u16;
+                let result = if (9..=12).contains(&operation) {
+                    super::multicast::restore_phase(state, operation)
+                } else {
+                    state.lifecycle(operation)
+                };
+                match result {
                     Ok(bytes) => {
                         response.payload_size = bytes;
                         response.copy_us =
