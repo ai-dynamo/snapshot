@@ -121,6 +121,9 @@ RUN test "$(rustc --version | cut -d' ' -f2)" = 1.95.0 \
     && rustup component add rust-src rustfmt clippy
 WORKDIR /cuinterpose
 COPY cmd/cuinterpose/ ./
+COPY pagebroker/v1/ /pagebroker/v1/
+RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
 RUN make native
 # Ship corresponding dependency and standard-library sources, including their
 # license files, alongside the repository source in the image's legal tree.

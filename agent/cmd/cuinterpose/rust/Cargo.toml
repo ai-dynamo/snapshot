@@ -25,6 +25,8 @@ thiserror = "2"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
+prost = "0.14"
+prost-build = "0.14"
 cuinterpose-protocol = { path = "protocol", version = "0.1.0" }
 cuinterpose-abi = { path = "abi", version = "0.1.0" }
 
