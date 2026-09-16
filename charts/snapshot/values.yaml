@@ -14,6 +14,15 @@ image:
     tag: ""
     pullPolicy: Always
 
+# The operator copies cuda-checkpoint (and the cuinterpose shim) out of
+# image.agent into source Pods whose checkpoint target may use more than one
+# GPU, and launches the target under cuda-checkpoint --launch-job.
+cudaTools:
+  # Names of imagePullSecrets that exist in the workload namespaces, added to
+  # such source Pods so the init container can pull image.agent from a private
+  # registry. The DaemonSet's own pull secrets do not apply there.
+  imagePullSecrets: []
+
 replicaCount: 1
 
 operator:
