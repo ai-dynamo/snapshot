@@ -15,7 +15,7 @@
 #include <map>
 #include <memory>
 #include <sstream>
-#include <future>
+#include <sys/stat.h>
 #include <system_error>
 
 namespace {
@@ -81,20 +81,26 @@ v1::AllocationSessionReply Transfer(const v1::AllocationWorkerRequest& request,
                                    std::map<CUdevice, std::unique_ptr<DeviceTransfer>>& transfers)
 {
   const int count = request.batch().extents_size();
-  if (count <= 0 || count > static_cast<int>(kAllocationBatchLimit) || descriptors.size() != 2 * size_t(count) ||
+  if (count <= 0 || count > static_cast<int>(kAllocationBatchLimit) || descriptors.size() != size_t(count) + 1 ||
+      request.storage_offsets_size() != count ||
       (request.direction() != v1::BindAllocationSession::SAVE && request.direction() != v1::BindAllocationSession::LOAD))
     throw std::runtime_error("invalid allocation worker batch");
   v1::AllocationSessionReply reply;
   const auto operation = request.direction() == v1::BindAllocationSession::SAVE
       ? transfer::TransferOperation::kCheckpoint : transfer::TransferOperation::kRestore;
-  // Allocations are serial within a participant, with four slots overlapping
-  // DMA and storage. Contexts, streams and slots survive subsequent batches.
+  // Import the whole batch before I/O. A single ring then spans allocation
+  // boundaries, keeping small extents from draining the pipeline individually.
   transfer::TransferCancellation cancellation(std::chrono::steady_clock::now() + std::chrono::seconds(240));
+  struct Mapping {
+    CUmemGenericAllocationHandle handle;
+    transfer::AllocationTransfer transfer;
+  };
+  std::map<CUdevice, std::vector<Mapping>> mappings;
+  const auto started = std::chrono::steady_clock::now();
   for (int index = 0; index < count; ++index) {
     const auto& extent = request.batch().extents(index);
     if (!extent.size() || extent.size() > SIZE_MAX)
       throw std::runtime_error("invalid allocation size");
-    const auto start = std::chrono::steady_clock::now();
     const auto found = devices.find(extent.device_uuid());
     if (found == devices.end())
       throw std::runtime_error("allocation GPU is not visible to worker");
@@ -103,7 +109,6 @@ v1::AllocationSessionReply Transfer(const v1::AllocationWorkerRequest& request,
     if (!resources)
       resources = std::make_unique<DeviceTransfer>(device);
     CUcontext context = resources->context;
-    CUstream stream = resources->stream;
     Check(cuCtxSetCurrent(context));
     CUmemGenericAllocationHandle handle;
     Check(cuMemImportFromShareableHandle(&handle,
@@ -119,61 +124,48 @@ v1::AllocationSessionReply Transfer(const v1::AllocationWorkerRequest& request,
     Check(cuMemMap(address, extent.size(), 0, handle, 0));
     CUmemAccessDesc access{{CU_MEM_LOCATION_TYPE_DEVICE, device}, CU_MEM_ACCESS_FLAGS_PROT_READWRITE};
     Check(cuMemSetAccess(address, extent.size(), &access, 1));
-    const auto mapped = std::chrono::steady_clock::now();
-    transfer::StorageLayout storage{
-        {{"", static_cast<size_t>(extent.size()), descriptors[count + index].get()}},
-        {{0, static_cast<size_t>(extent.size()), 0, 0}}};
+    mappings[device].push_back({handle, {address, static_cast<size_t>(extent.size()),
+                                        static_cast<size_t>(request.storage_offsets(index))}});
+  }
+  const auto mapped = std::chrono::steady_clock::now();
+  double pipeline_seconds = 0;
+  for (const auto& [device, group] : mappings) {
+    auto& resources = transfers.at(device);
+    Check(cuCtxSetCurrent(resources->context));
+    std::vector<transfer::AllocationTransfer> allocations;
+    allocations.reserve(group.size());
+    for (const auto& mapping : group)
+      allocations.push_back(mapping.transfer);
     transfer::TransferMetrics metrics;
     std::string error;
-    const bool success = resources->buffers->Transfer(address, extent.size(), stream, context, storage, operation,
-                                                      &cancellation, &metrics, &error, false);
+    const bool success = resources->buffers->TransferBatch(allocations, descriptors[count].get(),
+        resources->stream, resources->context, operation, &cancellation, &metrics, &error);
     // Any error exits the process; broker reaps before releasing admission.
     if (!success)
       throw std::runtime_error("allocation transfer: " + error);
-    Check(cuStreamSynchronize(stream));
-    const auto copied = std::chrono::steady_clock::now();
-    Check(cuMemUnmap(address, extent.size()));
-    Check(cuMemAddressFree(address, extent.size()));
-    Check(cuMemRelease(handle));
-    const auto cleaned = std::chrono::steady_clock::now();
-    std::ostringstream record;
-    record << "allocation_transfer id=" << extent.allocation_id()
-              << " direction=" << (operation == transfer::TransferOperation::kCheckpoint ? "save" : "load")
-              << " bytes=" << extent.size()
-              << " mapping_setup_s=" << std::chrono::duration<double>(mapped - start).count()
-              << " buffer_setup_s=" << metrics.setup_seconds
-              << " pipeline_s=" << metrics.pipeline_seconds
-              << " cuda_wait_s=" << metrics.cuda_wait_seconds
-              << " storage_io_s=" << metrics.storage_io_seconds
-              << " fsync_s=" << metrics.fsync_seconds
-              << " cleanup_s=" << std::chrono::duration<double>(cleaned - copied).count() << '\n';
-    // One bounded write keeps independent worker records from interleaving.
-    const auto line = record.str();
-    const auto logged = write(STDERR_FILENO, line.data(), line.size());
-    (void)logged;
-    auto* completed = reply.mutable_completed()->add_extents();
-    *completed = extent;
+    pipeline_seconds += metrics.pipeline_seconds;
+    Check(cuStreamSynchronize(resources->stream));
+    for (const auto& mapping : group) {
+      Check(cuMemUnmap(mapping.transfer.address, mapping.transfer.size));
+      Check(cuMemAddressFree(mapping.transfer.address, mapping.transfer.size));
+      Check(cuMemRelease(mapping.handle));
+    }
   }
   if (operation == transfer::TransferOperation::kCheckpoint) {
-    // The protocol acknowledges batches, not individual extents. All files
-    // must be durable before that acknowledgment, but independent fsyncs need
-    // not serialize 32 network round trips. The wire batch bounds concurrency.
-    const auto started = std::chrono::steady_clock::now();
-    std::vector<std::future<void>> syncs;
-    for (int index = 0; index < count; ++index) {
-      const int fd = descriptors[count + index].get();
-      syncs.push_back(std::async(std::launch::async, [fd] {
-        if (fsync(fd) != 0)
-          throw std::system_error(errno, std::generic_category(), "sync allocation content");
-      }));
-    }
-    for (auto& sync : syncs)
-      sync.get();
-    const auto line = "allocation_batch_fsync files=" + std::to_string(count) + " seconds=" +
-        std::to_string(std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count()) + "\n";
-    const auto logged = write(STDERR_FILENO, line.data(), line.size());
-    (void)logged;
+    // One shared payload needs one durability barrier per acknowledged batch.
+    if (fsync(descriptors[count].get()) != 0)
+      throw std::system_error(errno, std::generic_category(), "sync participant content");
   }
+  *reply.mutable_completed() = request.batch();
+  std::ostringstream record;
+  record << "allocation_batch extents=" << count
+         << " direction=" << (operation == transfer::TransferOperation::kCheckpoint ? "save" : "load")
+         << " mapping_setup_s=" << std::chrono::duration<double>(mapped - started).count()
+         << " pipeline_s=" << pipeline_seconds
+         << " wall_s=" << std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() << '\n';
+  const auto line = record.str();
+  const auto logged = write(STDERR_FILENO, line.data(), line.size());
+  (void)logged;
   return reply;
 }
 }  // namespace

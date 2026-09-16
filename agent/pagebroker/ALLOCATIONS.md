@@ -71,8 +71,9 @@ The backend pipelines D2H/H2D operations and storage I/O through pinned host
 buffers without computing content checksums. It is not a
 GPU-direct storage backend.
 
-Allocations within one batch are processed serially; participant sessions run
-concurrently. Each worker retains a context, stream, and four 64-MiB transfer
+Each batch is imported and mapped before I/O, then the bounded ring spans
+allocation boundaries per device; participant sessions run concurrently.
+Each worker retains a context, stream, and four 64-MiB transfer
 slots per used GPU across batches. The GPU image uses NIXL POSIX asynchronous
 I/O to overlap storage requests with DMA. The CPU-test implementation uses
 POSIX reads and writes; it is not a runtime fallback if NIXL fails.
@@ -90,14 +91,17 @@ transaction cleanup must not race a process retaining CUDA references.
 During capture, content lives at:
 
 ```text
-<transaction staging>/allocations/<participant-id>/<allocation-id>
+<transaction staging>/allocations/<participant-id>/content.bin
 <transaction staging>/allocations/<participant-id>/manifest.pb
 ```
 
-`AllocationManifest` version 1 records the participant, allocation IDs,
-sizes, and source device UUIDs. Save batches fsync content; `finish`
+`AllocationManifest` version 2 records the participant, allocation IDs,
+sizes, source device UUIDs, and offsets into the participant payload. Earlier
+versions are rejected. Offsets are assigned by the broker, not the shim.
+Save batches fsync the shared payload once; `finish`
 atomically publishes and fsyncs the complete participant manifest. Load binding
-validates the manifest and regular-file sizes before accepting allocation FDs.
+validates exact nonoverlapping payload coverage and the regular-file size
+before accepting allocation FDs.
 LOAD reads the published `allocations/` files relative to the direct
 transaction's retained source descriptor. Commit, abort, and expiry release
 that descriptor without deleting published content. The caller must keep

@@ -64,15 +64,18 @@ def fake_worker():
         if request is None:
             return
         count = len(request.batch.extents)
-        assert len(fds) == count * 2
+        assert len(fds) == count + 1
+        assert len(request.storage_offsets) == count
         reply = pb.AllocationSessionReply()
         for index, extent in enumerate(request.batch.extents):
-            source, destination = fds[index], fds[count + index]
+            source, destination = fds[index], fds[count]
+            source_offset, destination_offset = 0, request.storage_offsets[index]
             if request.direction == pb.BindAllocationSession.LOAD:
                 source, destination = destination, source
-            data = os.pread(source, extent.size, 0)
+                source_offset, destination_offset = destination_offset, source_offset
+            data = os.pread(source, extent.size, source_offset)
             assert len(data) == extent.size
-            assert os.pwrite(destination, data, 0) == len(data)
+            assert os.pwrite(destination, data, destination_offset) == len(data)
             os.fsync(destination)
             completed = reply.completed.extents.add()
             completed.CopyFrom(extent)
@@ -170,6 +173,25 @@ class AllocationSessions(unittest.TestCase):
         self.assertFalse(fds)
         return reply
 
+    def test_packed_allocations_restore_in_reverse_order(self):
+        self.request("save", "prepare_staged_checkpoint")
+        connection, _ = self.bind("save", pb.BindAllocationSession.SAVE)
+        for allocation, data in ((self.allocation, b"first"), ("c" * 32, b"second")):
+            self.assertTrue(self.batch(connection, data, allocation)[1].HasField("completed"))
+        self.assertTrue(self.finish(connection).HasField("finished"))
+        self.request("save", "commit")
+        directory = self.storage / "artifact" / "allocations" / self.participant
+        self.assertEqual({path.name for path in directory.iterdir()}, {"content.bin", "manifest.pb"})
+        self.assertEqual((directory / "content.bin").read_bytes(), b"firstsecond")
+        self.request("load", "direct_restore")
+        connection, _ = self.bind("load", pb.BindAllocationSession.LOAD)
+        for allocation, data in (("c" * 32, b"second"), (self.allocation, b"first")):
+            fd, reply = self.batch(connection, bytes(len(data)), allocation)
+            self.assertTrue(reply.HasField("completed"))
+            self.assertEqual(os.pread(fd, len(data), 0), data)
+        self.assertTrue(self.finish(connection).HasField("finished"))
+        self.assertTrue(self.request("load", "commit").HasField("commit_complete"))
+
     def test_save_load_commit_and_admission(self):
         self.assertTrue(self.request("save", "prepare_staged_checkpoint").HasField("staged_checkpoint_directory"))
         save, ready = self.bind("save", pb.BindAllocationSession.SAVE)
@@ -237,7 +259,7 @@ class AllocationSessions(unittest.TestCase):
         self.batch(connection, b"contents")
         self.assertTrue(self.finish(connection).HasField("finished"))
         self.request("save", "commit")
-        path = self.storage / "artifact" / "allocations" / self.participant / self.allocation
+        path = self.storage / "artifact" / "allocations" / self.participant / "content.bin"
         path.write_bytes(b"short")
         self.request("load", "staged_restore")
         _, failed = self.bind("load", pb.BindAllocationSession.LOAD)

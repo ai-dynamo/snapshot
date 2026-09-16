@@ -713,7 +713,7 @@ func (x *AllocationExtent) GetDeviceUuid() []byte {
 type AllocationBatch struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// One CUDA export FD per extent, attached in this order with SCM_RIGHTS.
-	// At most 32 extents per frame; the worker also receives 32 storage FDs.
+	// At most 32 extents per frame; the worker also receives one storage FD.
 	Extents       []*AllocationExtent `protobuf:"bytes,1,rep,name=extents,proto3" json:"extents,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -940,13 +940,15 @@ func (*AllocationSessionReply_Finished) isAllocationSessionReply_Result() {}
 func (*AllocationSessionReply_Failure) isAllocationSessionReply_Result() {}
 
 // Private broker-to-worker envelope, using the same extent/batch schema.
-// Descriptors are [CUDA exports..., opened storage files...].
+// Descriptors are [CUDA exports..., participant content file].
 type AllocationWorkerRequest struct {
-	state         protoimpl.MessageState          `protogen:"open.v1"`
-	Direction     BindAllocationSession_Direction `protobuf:"varint,1,opt,name=direction,proto3,enum=snapshot.pagebroker.v1.BindAllocationSession_Direction" json:"direction,omitempty"`
-	Batch         *AllocationBatch                `protobuf:"bytes,2,opt,name=batch,proto3" json:"batch,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state     protoimpl.MessageState          `protogen:"open.v1"`
+	Direction BindAllocationSession_Direction `protobuf:"varint,1,opt,name=direction,proto3,enum=snapshot.pagebroker.v1.BindAllocationSession_Direction" json:"direction,omitempty"`
+	Batch     *AllocationBatch                `protobuf:"bytes,2,opt,name=batch,proto3" json:"batch,omitempty"`
+	// Broker-owned offsets, in batch extent order; never supplied by callers.
+	StorageOffsets []uint64 `protobuf:"varint,3,rep,packed,name=storage_offsets,json=storageOffsets,proto3" json:"storage_offsets,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *AllocationWorkerRequest) Reset() {
@@ -993,13 +995,22 @@ func (x *AllocationWorkerRequest) GetBatch() *AllocationBatch {
 	return nil
 }
 
+func (x *AllocationWorkerRequest) GetStorageOffsets() []uint64 {
+	if x != nil {
+		return x.StorageOffsets
+	}
+	return nil
+}
+
 type AllocationManifest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Version       uint32                 `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"`
 	ParticipantId string                 `protobuf:"bytes,2,opt,name=participant_id,json=participantId,proto3" json:"participant_id,omitempty"`
 	Extents       []*AllocationExtent    `protobuf:"bytes,3,rep,name=extents,proto3" json:"extents,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Version 2 packs extent bytes into content.bin, in extent order.
+	StorageOffsets []uint64 `protobuf:"varint,4,rep,packed,name=storage_offsets,json=storageOffsets,proto3" json:"storage_offsets,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *AllocationManifest) Reset() {
@@ -1049,6 +1060,13 @@ func (x *AllocationManifest) GetParticipantId() string {
 func (x *AllocationManifest) GetExtents() []*AllocationExtent {
 	if x != nil {
 		return x.Extents
+	}
+	return nil
+}
+
+func (x *AllocationManifest) GetStorageOffsets() []uint64 {
+	if x != nil {
+		return x.StorageOffsets
 	}
 	return nil
 }
@@ -1699,14 +1717,16 @@ const file_v1_pagebroker_proto_rawDesc = "" +
 	"\tcompleted\x18\x01 \x01(\v2'.snapshot.pagebroker.v1.AllocationBatchH\x00R\tcompleted\x12D\n" +
 	"\bfinished\x18\x02 \x01(\v2&.snapshot.pagebroker.v1.CommitCompleteH\x00R\bfinished\x12;\n" +
 	"\afailure\x18\x03 \x01(\v2\x1f.snapshot.pagebroker.v1.FailureH\x00R\afailureB\b\n" +
-	"\x06result\"\xaf\x01\n" +
+	"\x06result\"\xd8\x01\n" +
 	"\x17AllocationWorkerRequest\x12U\n" +
 	"\tdirection\x18\x01 \x01(\x0e27.snapshot.pagebroker.v1.BindAllocationSession.DirectionR\tdirection\x12=\n" +
-	"\x05batch\x18\x02 \x01(\v2'.snapshot.pagebroker.v1.AllocationBatchR\x05batch\"\x99\x01\n" +
+	"\x05batch\x18\x02 \x01(\v2'.snapshot.pagebroker.v1.AllocationBatchR\x05batch\x12'\n" +
+	"\x0fstorage_offsets\x18\x03 \x03(\x04R\x0estorageOffsets\"\xc2\x01\n" +
 	"\x12AllocationManifest\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\rR\aversion\x12%\n" +
 	"\x0eparticipant_id\x18\x02 \x01(\tR\rparticipantId\x12B\n" +
-	"\aextents\x18\x03 \x03(\v2(.snapshot.pagebroker.v1.AllocationExtentR\aextents\"\x85\x05\n" +
+	"\aextents\x18\x03 \x03(\v2(.snapshot.pagebroker.v1.AllocationExtentR\aextents\x12'\n" +
+	"\x0fstorage_offsets\x18\x04 \x03(\x04R\x0estorageOffsets\"\x85\x05\n" +
 	"\aRequest\x12\"\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tH\x01R\trequestId\x88\x01\x01\x12*\n" +
