@@ -3,6 +3,7 @@
 
 #include "allocation_transport.hpp"
 #include "pagebroker_types.hpp"
+#include "cuda_posix_transfer.hpp"
 #include "../cmd/cuda-checkpoint-helper/transfer_engine.hpp"
 
 #include <cuda.h>
@@ -11,6 +12,8 @@
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
+#include <map>
+#include <memory>
 
 namespace {
 using namespace snapshot::pagebroker;
@@ -25,10 +28,36 @@ void Check(CUresult result)
   }
 }
 
-CUdevice FindDevice(const std::string& uuid)
+struct DeviceTransfer {
+  CUdevice device;
+  CUcontext context{};
+  CUstream stream{};
+  std::unique_ptr<transfer::TransferBuffers> buffers;
+
+  explicit DeviceTransfer(CUdevice device) : device(device)
+  {
+    Check(cuDevicePrimaryCtxRetain(&context, device));
+    Check(cuCtxSetCurrent(context));
+    Check(cuStreamCreate(&stream, CU_STREAM_NON_BLOCKING));
+    buffers = std::make_unique<transfer::TransferBuffers>(
+        transfer::TransferOptions{2, transfer::kDefaultChunkBytes});
+  }
+  ~DeviceTransfer()
+  {
+    // This destructor runs only on clean worker exit. The exception boundary
+    // below uses _exit so uncertain DMA never triggers resource destruction.
+    if (cuCtxSetCurrent(context) != CUDA_SUCCESS || cuStreamSynchronize(stream) != CUDA_SUCCESS)
+      _exit(1);
+    buffers.reset();
+    if (cuStreamDestroy(stream) != CUDA_SUCCESS || cuCtxSetCurrent(nullptr) != CUDA_SUCCESS ||
+        cuDevicePrimaryCtxRelease(device) != CUDA_SUCCESS)
+      _exit(1);
+  }
+};
+
+std::map<std::string, CUdevice> Devices()
 {
-  if (uuid.size() != sizeof(CUuuid))
-    throw std::runtime_error("invalid allocation GPU UUID");
+  std::map<std::string, CUdevice> devices;
   int count = 0;
   Check(cuDeviceGetCount(&count));
   for (int ordinal = 0; ordinal < count; ++ordinal) {
@@ -36,16 +65,17 @@ CUdevice FindDevice(const std::string& uuid)
     CUuuid actual;
     Check(cuDeviceGet(&device, ordinal));
     Check(cuDeviceGetUuid(&actual, device));
-    if (!std::memcmp(actual.bytes, uuid.data(), sizeof(actual.bytes)))
-      return device;
+    devices.emplace(std::string(actual.bytes, sizeof(actual.bytes)), device);
   }
-  throw std::runtime_error("allocation GPU is not visible to worker");
+  return devices;
 }
 
 // CUDA cleanup is explicit, not a destructor: a failed synchronization must
 // terminate this disposable process without unmapping potentially live DMA.
 v1::AllocationSessionReply Transfer(const v1::AllocationWorkerRequest& request,
-                                   const std::vector<FileDescriptor>& descriptors)
+                                   const std::vector<FileDescriptor>& descriptors,
+                                   const std::map<std::string, CUdevice>& devices,
+                                   std::map<CUdevice, std::unique_ptr<DeviceTransfer>>& transfers)
 {
   const int count = request.batch().extents_size();
   if (count <= 0 || count > static_cast<int>(kAllocationBatchLimit) || descriptors.size() != 2 * size_t(count) ||
@@ -54,18 +84,23 @@ v1::AllocationSessionReply Transfer(const v1::AllocationWorkerRequest& request,
   v1::AllocationSessionReply reply;
   const auto operation = request.direction() == v1::BindAllocationSession::SAVE
       ? transfer::TransferOperation::kCheckpoint : transfer::TransferOperation::kRestore;
-  // One stream/context at a time bounds pinned memory per participant. Rank
-  // sessions execute concurrently; TransferExtent pipelines chunks within an
-  // allocation. A scheduler can group small allocations later without changing
-  // the session or transfer-backend interfaces.
+  // Allocations are serial within a participant, with two slots overlapping
+  // DMA and storage. Contexts, streams and slots survive subsequent batches.
   transfer::TransferCancellation cancellation(std::chrono::steady_clock::now() + std::chrono::seconds(240));
   for (int index = 0; index < count; ++index) {
     const auto& extent = request.batch().extents(index);
     if (!extent.size() || extent.size() > SIZE_MAX)
       throw std::runtime_error("invalid allocation size");
-    CUdevice device = FindDevice(extent.device_uuid());
-    CUcontext context;
-    Check(cuDevicePrimaryCtxRetain(&context, device));
+    const auto start = std::chrono::steady_clock::now();
+    const auto found = devices.find(extent.device_uuid());
+    if (found == devices.end())
+      throw std::runtime_error("allocation GPU is not visible to worker");
+    CUdevice device = found->second;
+    auto& resources = transfers[device];
+    if (!resources)
+      resources = std::make_unique<DeviceTransfer>(device);
+    CUcontext context = resources->context;
+    CUstream stream = resources->stream;
     Check(cuCtxSetCurrent(context));
     CUmemGenericAllocationHandle handle;
     Check(cuMemImportFromShareableHandle(&handle,
@@ -81,27 +116,35 @@ v1::AllocationSessionReply Transfer(const v1::AllocationWorkerRequest& request,
     Check(cuMemMap(address, extent.size(), 0, handle, 0));
     CUmemAccessDesc access{{CU_MEM_LOCATION_TYPE_DEVICE, device}, CU_MEM_ACCESS_FLAGS_PROT_READWRITE};
     Check(cuMemSetAccess(address, extent.size(), &access, 1));
-    CUstream stream;
-    Check(cuStreamCreate(&stream, CU_STREAM_NON_BLOCKING));
+    const auto mapped = std::chrono::steady_clock::now();
     transfer::StorageLayout storage{
         {{"", static_cast<size_t>(extent.size()), descriptors[count + index].get()}},
         {{0, static_cast<size_t>(extent.size()), 0, 0}}};
     transfer::TransferMetrics metrics;
     std::string error;
-    const bool success = transfer::TransferExtent(address, extent.size(), stream, context, storage, operation,
-                                                  {}, &cancellation, &metrics, &error);
+    const bool success = resources->buffers->Transfer(address, extent.size(), stream, context, storage, operation,
+                                                      &cancellation, &metrics, &error);
     // Any error exits the process; broker reaps before releasing admission.
     if (!success)
       throw std::runtime_error("allocation transfer: " + error);
     if (request.direction() == v1::BindAllocationSession::LOAD && metrics.sha256 != extent.sha256())
       throw std::runtime_error("allocation content digest mismatch");
     Check(cuStreamSynchronize(stream));
-    Check(cuStreamDestroy(stream));
+    const auto copied = std::chrono::steady_clock::now();
     Check(cuMemUnmap(address, extent.size()));
     Check(cuMemAddressFree(address, extent.size()));
     Check(cuMemRelease(handle));
-    Check(cuCtxSetCurrent(nullptr));
-    Check(cuDevicePrimaryCtxRelease(device));
+    const auto cleaned = std::chrono::steady_clock::now();
+    std::cerr << "allocation_transfer id=" << extent.allocation_id()
+              << " direction=" << (operation == transfer::TransferOperation::kCheckpoint ? "save" : "load")
+              << " bytes=" << extent.size()
+              << " mapping_setup_s=" << std::chrono::duration<double>(mapped - start).count()
+              << " buffer_setup_s=" << metrics.setup_seconds
+              << " pipeline_s=" << metrics.pipeline_seconds
+              << " cuda_wait_s=" << metrics.cuda_wait_seconds
+              << " storage_io_s=" << metrics.storage_io_seconds
+              << " fsync_s=" << metrics.fsync_seconds
+              << " cleanup_s=" << std::chrono::duration<double>(cleaned - copied).count() << '\n';
     auto* completed = reply.mutable_completed()->add_extents();
     *completed = extent;
     completed->set_sha256(metrics.sha256);
@@ -114,12 +157,16 @@ int main(int argc, char** argv)
 {
   if (argc != 2 || std::string_view(argv[1]) != "--socket-fd=3")
     return 2;
+  // Keep resources outside the catch scope: failure exits without unwinding
+  // CUDA owners. Broker reaping is the proof that uncertain DMA has stopped.
+  std::map<CUdevice, std::unique_ptr<DeviceTransfer>> transfers;
   try {
     Check(cuInit(0));
     int count;
     Check(cuDeviceGetCount(&count));
     if (!count)
       throw std::runtime_error("allocation worker has no visible CUDA devices");
+    const auto devices = Devices();
     SetAllocationTimeout(3);
     v1::AllocationSessionReply ready;
     ready.mutable_completed();
@@ -129,7 +176,7 @@ int main(int argc, char** argv)
       std::vector<FileDescriptor> descriptors;
       if (!ReceiveFrame(3, request, descriptors))
         return 0;
-      auto reply = Transfer(request, descriptors);
+      auto reply = Transfer(request, descriptors, devices, transfers);
       // Export FDs themselves retain backing. Drop them before acknowledging,
       // not at the end of the next receive iteration.
       descriptors.clear();
