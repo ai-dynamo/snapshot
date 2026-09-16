@@ -309,11 +309,15 @@ type IOEngine_PosixCopy struct {
 func (*IOEngine_PosixCopy) isIOEngine_Kind() {}
 
 type StagedRestoreRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Source        *StorageBackend        `protobuf:"bytes,1,opt,name=source,proto3" json:"source,omitempty"`
-	IoEngine      *IOEngine              `protobuf:"bytes,2,opt,name=io_engine,json=ioEngine,proto3" json:"io_engine,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Source   *StorageBackend        `protobuf:"bytes,1,opt,name=source,proto3" json:"source,omitempty"`
+	IoEngine *IOEngine              `protobuf:"bytes,2,opt,name=io_engine,json=ioEngine,proto3" json:"io_engine,omitempty"`
+	// Remaining restore timeout, rounded up to seconds. Must be positive when set.
+	// PageBroker retains staging for this timeout plus five minutes, measured from
+	// the start of staging. Omission uses the default two-hour timeout.
+	RestoreTimeoutSeconds *int64 `protobuf:"varint,3,opt,name=restore_timeout_seconds,json=restoreTimeoutSeconds,proto3,oneof" json:"restore_timeout_seconds,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *StagedRestoreRequest) Reset() {
@@ -358,6 +362,13 @@ func (x *StagedRestoreRequest) GetIoEngine() *IOEngine {
 		return x.IoEngine
 	}
 	return nil
+}
+
+func (x *StagedRestoreRequest) GetRestoreTimeoutSeconds() int64 {
+	if x != nil && x.RestoreTimeoutSeconds != nil {
+		return *x.RestoreTimeoutSeconds
+	}
+	return 0
 }
 
 // Allows a future GPU engine to read source data without a staging directory.
@@ -548,7 +559,8 @@ type Request struct {
 	// Snapshot assigns an ID to each request.
 	RequestId *string `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3,oneof" json:"request_id,omitempty"`
 	// Snapshot assigns a unique transaction ID before the first request and does not reuse it while PageBroker retains it.
-	// An uncommitted transaction expires one hour after staging begins.
+	// Uncommitted staged transactions expire after two hours plus five minutes,
+	// unless StagedRestoreRequest supplies a restore timeout.
 	TransactionId *string `protobuf:"bytes,2,opt,name=transaction_id,json=transactionId,proto3,oneof" json:"transaction_id,omitempty"`
 	// Types that are valid to be assigned to Command:
 	//
@@ -1122,10 +1134,12 @@ const file_v1_pagebroker_proto_rawDesc = "" +
 	"\bIOEngine\x12J\n" +
 	"\n" +
 	"posix_copy\x18\x01 \x01(\v2).snapshot.pagebroker.v1.PosixCopyIOEngineH\x00R\tposixCopyB\x06\n" +
-	"\x04kind\"\x95\x01\n" +
+	"\x04kind\"\xee\x01\n" +
 	"\x14StagedRestoreRequest\x12>\n" +
 	"\x06source\x18\x01 \x01(\v2&.snapshot.pagebroker.v1.StorageBackendR\x06source\x12=\n" +
-	"\tio_engine\x18\x02 \x01(\v2 .snapshot.pagebroker.v1.IOEngineR\bioEngine\"\x95\x01\n" +
+	"\tio_engine\x18\x02 \x01(\v2 .snapshot.pagebroker.v1.IOEngineR\bioEngine\x12;\n" +
+	"\x17restore_timeout_seconds\x18\x03 \x01(\x03H\x00R\x15restoreTimeoutSeconds\x88\x01\x01B\x1a\n" +
+	"\x18_restore_timeout_seconds\"\x95\x01\n" +
 	"\x14DirectRestoreRequest\x12>\n" +
 	"\x06source\x18\x01 \x01(\v2&.snapshot.pagebroker.v1.StorageBackendR\x06source\x12=\n" +
 	"\tio_engine\x18\x02 \x01(\v2 .snapshot.pagebroker.v1.IOEngineR\bioEngine\"\xa9\x01\n" +
@@ -1257,6 +1271,7 @@ func file_v1_pagebroker_proto_init() {
 	file_v1_pagebroker_proto_msgTypes[3].OneofWrappers = []any{
 		(*IOEngine_PosixCopy)(nil),
 	}
+	file_v1_pagebroker_proto_msgTypes[4].OneofWrappers = []any{}
 	file_v1_pagebroker_proto_msgTypes[9].OneofWrappers = []any{
 		(*Request_StagedRestore)(nil),
 		(*Request_PrepareStagedCheckpoint)(nil),
