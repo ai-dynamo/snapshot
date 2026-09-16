@@ -33,6 +33,7 @@ import {
   seriesForMetric,
   shortCommit,
   stringProperty,
+  suiteNeedsPendingChunks,
 } from "./data.ts";
 import type {
   BenchmarkResult,
@@ -98,6 +99,7 @@ async function start() {
   try {
     history = await loadHistory(new URL("./", document.baseURI));
     configureSuites();
+    await ensureRangeLoaded();
     configureSuiteFilters();
     bindEvents();
     render();
@@ -112,7 +114,7 @@ async function start() {
 }
 
 function renderStatus() {
-  elements.status.classList.remove("status--stale");
+  elements.status.classList.remove("status--stale", "status--error");
   const chunkCount = history.manifest.chunks.length;
   const loadedChunks = chunkCount - history.pendingChunks.length;
   const parts = [
@@ -164,7 +166,15 @@ function renderWarnings() {
 }
 
 function configureSuites() {
-  const suites = [...new Set(history.records.map((result) => result.identity.suite))].sort();
+  // Union loaded records with the manifest's per-chunk suites so a suite whose
+  // runs all predate the eager window is still offered; selecting it loads
+  // the pending chunks (see ensureRangeLoaded).
+  const suites = [
+    ...new Set([
+      ...history.records.map((result) => result.identity.suite),
+      ...history.manifest.chunks.flatMap((chunk) => chunk.suites ?? []),
+    ]),
+  ].sort();
   setOptions(
     elements.suite,
     suites.map((suite) => ({ value: suite, label: displayIdentifier(suite) })),
@@ -211,8 +221,10 @@ function configureSuiteFilters() {
 
 function bindEvents() {
   elements.suite.addEventListener("change", () => {
-    configureSuiteFilters();
-    render();
+    void ensureRangeLoaded().then(() => {
+      configureSuiteFilters();
+      render();
+    });
   });
   elements.date.addEventListener("change", () => {
     void ensureRangeLoaded().then(render);
@@ -233,16 +245,27 @@ function bindEvents() {
   });
 }
 
+// Never rejects: a failed on-demand load is reported in the status line and
+// the caller still re-renders, so the filters and the view stay consistent.
 async function ensureRangeLoaded(): Promise<void> {
   if (history.pendingChunks.length === 0) return;
   const selected = elements.date.value;
-  if (selected !== "all" && Number(selected) <= Number(DEFAULT_RANGE)) return;
+  const widerThanEager = selected === "all" || Number(selected) > Number(DEFAULT_RANGE);
+  if (!widerThanEager && !suiteNeedsPendingChunks(history, elements.suite.value, selectedDays())) {
+    // A previous on-demand load may have failed; this view doesn't need it.
+    if (elements.status.classList.contains("status--error")) renderStatus();
+    return;
+  }
   elements.status.textContent = "Loading older benchmark history…";
   try {
     history = await loadRemainingHistory(history);
     configureSuiteFilters();
-  } finally {
     renderStatus();
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    renderStatus();
+    elements.status.textContent = `Older benchmark history unavailable: ${message}`;
+    elements.status.classList.add("status--error");
   }
 }
 

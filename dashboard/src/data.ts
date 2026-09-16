@@ -28,6 +28,8 @@ export interface HistoryChunk {
   recordCount: number;
   firstStartedAt: string;
   lastStartedAt: string;
+  /** Suites with at least one record in this chunk; absent in older manifests. */
+  suites?: string[];
 }
 
 export interface HistoryManifest {
@@ -217,8 +219,41 @@ export function parseManifest(value: unknown): HistoryManifest {
     );
     requireTimestamp(chunk.firstStartedAt, `manifest.chunks[${index}].firstStartedAt`);
     requireTimestamp(chunk.lastStartedAt, `manifest.chunks[${index}].lastStartedAt`);
+    if (chunk.suites !== undefined) {
+      if (!Array.isArray(chunk.suites)) {
+        throw new DashboardDataError(`manifest.chunks[${index}].suites must be an array`);
+      }
+      for (const [suiteIndex, suite] of chunk.suites.entries()) {
+        requireString(suite, `manifest.chunks[${index}].suites[${suiteIndex}]`);
+      }
+    }
   }
   return parsed as unknown as HistoryManifest;
+}
+
+/**
+ * Whether the selected suite's view needs chunks outside the eager window.
+ *
+ * The eager window is `newest - recentDays` across every suite, but "Latest N
+ * days" is relative to the selected suite's own newest run, so a suite that
+ * last ran long before the newest overall result lives partly or entirely in
+ * pending chunks. Chunks advertise their suites in the manifest; manifests
+ * written before that field existed return false here and fall back to the
+ * explicit "All history" load.
+ */
+export function suiteNeedsPendingChunks(
+  history: LoadedHistory,
+  suite: string,
+  days: number | null,
+): boolean {
+  const candidates = history.pendingChunks.filter((chunk) => chunk.suites?.includes(suite));
+  if (candidates.length === 0) return false;
+  if (days == null) return true;
+  const loaded = history.records.filter((result) => result.identity.suite === suite);
+  if (loaded.length === 0) return true;
+  const newest = Math.max(...loaded.map((result) => Date.parse(result.startedAt)));
+  const cutoff = newest - days * DAY_MILLISECONDS;
+  return candidates.some((chunk) => Date.parse(chunk.lastStartedAt) >= cutoff);
 }
 
 export function parseChunk(

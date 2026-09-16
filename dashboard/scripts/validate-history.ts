@@ -29,6 +29,16 @@ for (const chunk of manifest.chunks) {
     );
   }
   records += parsed.records.length;
+  if (chunk.suites) {
+    const actual = [...new Set(parsed.records.map((record) => record.identity.suite))].sort();
+    const declared = [...chunk.suites].sort();
+    if (JSON.stringify(actual) !== JSON.stringify(declared)) {
+      throw new Error(
+        `${chunk.path} suites do not match the manifest ` +
+          `(${JSON.stringify(actual)} != ${JSON.stringify(declared)})`,
+      );
+    }
+  }
   for (const warning of parsed.warnings) {
     const rawPath = rawPathOf(lines[(warning.line ?? 1) - 1]);
     const location = `${chunk.path}:${warning.line}${rawPath ? ` (${rawPath})` : ""}`;

@@ -21,6 +21,7 @@ import {
   parseChunk,
   parseManifest,
   seriesForMetric,
+  suiteNeedsPendingChunks,
   validateResult,
 } from "./data.ts";
 import type { BenchmarkResult, HistoryManifest, Measurement, Outcome } from "./data.ts";
@@ -55,6 +56,33 @@ describe("history parsing", () => {
         chunks: [{ ...manifest.chunks[0]!, path: "../../private.json" }],
       }),
     ).toThrow(DashboardDataError);
+  });
+
+  it("accepts per-chunk suites and rejects non-string entries", () => {
+    const chunk = {
+      path: "index/v1/2026-09.ndjson",
+      recordCount: 1,
+      firstStartedAt: "2026-09-09T01:00:00.000Z",
+      lastStartedAt: "2026-09-09T01:00:00.000Z",
+    };
+    const base = {
+      manifestVersion: 1,
+      historyFormatVersion: 1,
+      supportedSchemaVersions: [1],
+      recordCount: 1,
+      newestResultAt: null,
+    };
+
+    expect(parseManifest({ ...base, chunks: [chunk] }).chunks[0]!.suites).toBeUndefined();
+    expect(
+      parseManifest({ ...base, chunks: [{ ...chunk, suites: ["a", "b"] }] }).chunks[0]!.suites,
+    ).toEqual(["a", "b"]);
+    expect(() => parseManifest({ ...base, chunks: [{ ...chunk, suites: "a" }] })).toThrow(
+      DashboardDataError,
+    );
+    expect(() => parseManifest({ ...base, chunks: [{ ...chunk, suites: ["a", 1] }] })).toThrow(
+      DashboardDataError,
+    );
   });
 
   it("keeps valid partial failures and skips unknown schema versions", () => {
@@ -167,6 +195,29 @@ describe("history loading", () => {
 
     expect(all.records).toHaveLength(3);
     expect(all.pendingChunks).toEqual([]);
+  });
+
+  it("asks for pending chunks only when the selected suite's window reaches them", async () => {
+    const recent = await loadHistory("http://dashboard.test/", fakeFetch([]), {
+      recentDays: 90,
+    });
+    const pending = recent.pendingChunks[0]!;
+    const stale = {
+      ...recent,
+      pendingChunks: [{ ...pending, suites: ["soak", "framework-checkpoint-restore"] }],
+    };
+
+    // Manifest without suites: nothing to go on, defer to the explicit "all" load.
+    expect(suiteNeedsPendingChunks(recent, "framework-checkpoint-restore", 90)).toBe(false);
+    // Suite with no loaded records but present in a pending chunk.
+    expect(suiteNeedsPendingChunks(stale, "soak", 90)).toBe(true);
+    expect(suiteNeedsPendingChunks(stale, "soak", null)).toBe(true);
+    // Loaded suite whose 90-day window (from 2026-09-09) ends long after 2026-03-01.
+    expect(suiteNeedsPendingChunks(stale, "framework-checkpoint-restore", 90)).toBe(false);
+    // The same suite with a window wide enough to reach the March chunk.
+    expect(suiteNeedsPendingChunks(stale, "framework-checkpoint-restore", 365)).toBe(true);
+    // A suite the pending chunks do not list.
+    expect(suiteNeedsPendingChunks(stale, "other", null)).toBe(false);
   });
 });
 

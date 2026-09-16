@@ -5,27 +5,38 @@
       "lastStartedAt": "2026-09-09T02:00:00.000Z",
       "month": "2026-09",
       "path": "index/v1/2026-09.ndjson",
-      "recordCount": 5
+      "recordCount": 5,
+      "suites": [
+        "framework-checkpoint-restore",
+        "storage-throughput"
+      ]
     },
     {
       "firstStartedAt": "2026-08-01T01:00:00.000Z",
       "lastStartedAt": "2026-08-01T01:00:00.000Z",
       "month": "2026-08",
       "path": "index/v1/2026-08.ndjson",
-      "recordCount": 1
+      "recordCount": 1,
+      "suites": [
+        "framework-checkpoint-restore"
+      ]
     },
     {
       "firstStartedAt": "2026-06-01T01:00:00.000Z",
-      "lastStartedAt": "2026-06-01T01:00:00.000Z",
+      "lastStartedAt": "2026-06-01T03:00:00.000Z",
       "month": "2026-06",
       "path": "index/v1/2026-06.ndjson",
-      "recordCount": 1
+      "recordCount": 2,
+      "suites": [
+        "framework-checkpoint-restore",
+        "quarterly-soak"
+      ]
     }
   ],
   "historyFormatVersion": 1,
   "manifestVersion": 1,
   "newestResultAt": "2026-09-09T02:02:00.000Z",
-  "recordCount": 7,
+  "recordCount": 8,
   "supportedSchemaVersions": [
     1
   ]

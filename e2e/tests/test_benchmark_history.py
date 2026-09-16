@@ -74,6 +74,10 @@ def test_store_is_idempotent_and_rebuilds_monthly_indexes(tmp_path: Path) -> Non
         "2026-09",
         "2026-08",
     ]
+    assert [chunk["suites"] for chunk in manifest["chunks"]] == [
+        ["framework-checkpoint-restore"],
+        ["framework-checkpoint-restore"],
+    ]
 
 
 def test_same_identity_is_ignored_without_creating_a_duplicate(tmp_path: Path) -> None:

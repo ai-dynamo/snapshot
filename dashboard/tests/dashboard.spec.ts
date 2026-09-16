@@ -83,10 +83,45 @@ test("loads older monthly chunks on demand", async ({ page }) => {
 
   await page.getByLabel("Date range").selectOption("all");
   await expect(page.getByRole("status")).toContainText(
-    "Loaded 7 benchmark results from 3 of 3 monthly indexes",
+    "Loaded 8 benchmark results from 3 of 3 monthly indexes",
   );
   await expect(page.locator("#latest-body tr")).toHaveCount(6);
   expect(chunkRequests.some((url) => url.endsWith("2026-06.ndjson"))).toBe(true);
+});
+
+test("offers a suite whose runs all predate the eager window and loads it on selection", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.getByRole("status")).toContainText("Loaded 6 benchmark results");
+  await expect(page.getByLabel("Suite").locator('option[value="quarterly-soak"]')).toHaveCount(1);
+
+  await page.getByLabel("Suite").selectOption("quarterly-soak");
+
+  await expect(page.getByRole("status")).toContainText(
+    "Loaded 8 benchmark results from 3 of 3 monthly indexes",
+  );
+  await expect(page.getByRole("heading", { name: "Copy throughput" })).toBeVisible();
+  await expect(page.locator("#latest-body tr")).toHaveCount(1);
+  await expect(page.locator("#latest-body")).toContainText("Azure Files");
+});
+
+test("reports a failed on-demand load and keeps the view consistent", async ({ page }) => {
+  await page.route("**/index/v1/2026-06.ndjson", (route) => route.abort());
+
+  await page.goto("/");
+  await expect(page.getByRole("status")).toContainText("Loaded 6 benchmark results");
+
+  await page.getByLabel("Date range").selectOption("all");
+
+  const status = page.getByRole("status");
+  await expect(status).toContainText("Older benchmark history unavailable");
+  await expect(status).toHaveClass(/status--error/);
+  await expect(page.locator("#latest-body tr")).toHaveCount(5);
+
+  await page.getByLabel("Date range").selectOption("90");
+  await expect(status).not.toHaveClass(/status--error/);
+  await expect(status).toContainText("Loaded 6 benchmark results");
 });
 
 test("discovers a new suite and metric without UI code changes", async ({ page }) => {
