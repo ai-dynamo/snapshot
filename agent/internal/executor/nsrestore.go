@@ -207,7 +207,6 @@ func executeRestore(
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	gpuMountsCommitted = true
 	restoredPID = int(criuPID)
 	// Cleanup runs after CUDA unlock. A cleanup-only failure is returned
 	// separately so the host controller can warn without killing the workload.
@@ -272,5 +271,7 @@ func executeRestore(
 		}
 	}
 
+	// Retain aliases only once CUDA restore and unlock have also succeeded.
+	gpuMountsCommitted = true
 	return timings, restoredPID, nil, nil
 }

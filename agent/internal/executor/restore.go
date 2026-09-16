@@ -38,42 +38,28 @@ type RestoreMounter interface {
 	MountPageBroker(ctx context.Context, namespaceMount nsmount.MountPoint, stagingPath string) (nsmount.MountPoint, error)
 }
 
-// inspectGPUCompatibility resolves aliases before checking mounts, and returns
-// exactly the plan nsrestore will apply. It does not mutate the source manifest.
-func inspectGPUCompatibility(log logr.Logger, manifest *types.CheckpointManifest, target compat.GPUInfo,
-	targetRoot, imageID string, skip bool, resolvePaths func() (map[string]string, error),
+// prepareGPUMapping produces the plan used by both mount inspection and nsrestore.
+// Compatibility policy remains in the registered checks, not in this preparation.
+func prepareGPUMapping(log logr.Logger, manifest *types.CheckpointManifest, uuids []string,
+	resolvePaths func() (map[string]string, error),
 ) (string, map[string]string, error) {
-	var uuids []string
-	for _, device := range target.Devices {
-		uuids = append(uuids, device.UUID)
-	}
-	var deviceMap string
-	var aliases map[string]string
 	// Let the compatibility gate report count mismatches before positional pairing.
-	if len(uuids) > 0 && len(uuids) == len(manifest.CUDA.SourceGPUUUIDs) {
-		var err error
-		deviceMap, err = cuda.BuildDeviceMap(manifest.CUDA.SourceGPUUUIDs, uuids, log)
-		if err != nil {
-			return "", nil, err
-		}
-		if len(manifest.CUDA.DevicePaths) > 0 {
-			paths, err := resolvePaths()
-			if err != nil {
-				return "", nil, err
-			}
-			aliases, err = criu.GPUMountAliases(manifest, deviceMap, paths)
-			if err != nil {
-				return "", nil, err
-			}
-		}
+	if len(uuids) == 0 || len(uuids) != len(manifest.CUDA.SourceGPUUUIDs) {
+		return "", nil, nil
 	}
-	if err := inspectCompatibility(log, manifest, target, aliases, targetRoot, imageID, skip); err != nil {
+	deviceMap, err := cuda.BuildDeviceMap(manifest.CUDA.SourceGPUUUIDs, uuids, log)
+	if err != nil {
 		return "", nil, err
 	}
-	if len(uuids) != len(manifest.CUDA.SourceGPUUUIDs) {
-		return "", nil, fmt.Errorf("source and target GPU counts differ")
+	if len(manifest.CUDA.DevicePaths) == 0 {
+		return deviceMap, nil, nil
 	}
-	return deviceMap, aliases, nil
+	paths, err := resolvePaths()
+	if err != nil {
+		return "", nil, err
+	}
+	aliases, err := criu.GPUMountAliases(manifest, deviceMap, paths)
+	return deviceMap, aliases, err
 }
 
 // RestoreCleanupError reports a successful restore whose cleanup did not fully
@@ -405,8 +391,8 @@ func inspectRestore(
 	}
 
 	deviceMapStart := time.Now()
-	cudaDeviceMap, gpuMountAliases, err := inspectGPUCompatibility(
-		log, manifest, targetGPUs, targetRoot, targetImageID, req.SkipCompatCheck,
+	cudaDeviceMap, gpuMountAliases, err := prepareGPUMapping(
+		log, manifest, targetGPUUUIDs,
 		func() (map[string]string, error) {
 			return cuda.ResolveDevicePaths(snapshotruntime.HostProcPath, placeholderPID, targetGPUUUIDs)
 		},
@@ -415,6 +401,14 @@ func inspectRestore(
 		return nil, 0, err
 	}
 	deviceMapDuration := time.Since(deviceMapStart)
+
+	if err := inspectCompatibility(log, manifest, targetGPUs, gpuMountAliases, targetRoot, targetImageID, req.SkipCompatCheck); err != nil {
+		return nil, 0, err
+	}
+	// Even when policy checks are skipped, CUDA requires one target per source.
+	if len(targetGPUUUIDs) != len(manifest.CUDA.SourceGPUUUIDs) {
+		return nil, 0, fmt.Errorf("source and target GPU counts differ")
+	}
 
 	return &types.RestoreContainerSnapshot{
 		PlaceholderPID:  placeholderPID,
