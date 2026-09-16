@@ -296,6 +296,32 @@ can detect corruption after GPU writes; failure keeps the workload parked and
 never falls back to host carriers. Disconnect poisons the transaction, and abort
 waits for worker admission to drain before removing files.
 
+```mermaid
+sequenceDiagram
+    participant Agent
+    participant Coordinator
+    participant Shim
+    participant Broker as PageBroker
+    participant Worker as Allocation worker
+    Agent->>Coordinator: Read captured participant identities
+    Agent->>Broker: Bind LOAD sessions before CRIU
+    Broker-->>Agent: Validated manifests, file geometry, worker readiness
+    Agent->>Agent: CRIU and regular native CUDA restore
+    Note over Agent,Shim: Application threads remain parked
+    Agent->>Coordinator: Inherit bound sessions in restored namespaces
+    Coordinator->>Shim: LOAD_ALLOCATIONS with matching session FD
+    Shim->>Shim: Create and export fresh device backing
+    Shim->>Broker: Destination UUIDs and fresh export FDs
+    Broker->>Worker: Fill imported backing and verify digests
+    Worker-->>Broker: DMA drained and imported references released
+    Broker-->>Shim: Exact allocation coverage completed
+    Shim->>Shim: Remap addresses, access grants, and peer export cache
+    Shim-->>Coordinator: LOAD complete
+    Note over Coordinator,Shim: Global barrier before unicast and multicast replay
+    Coordinator-->>Agent: Restored topology validated
+    Agent->>Shim: Release workload through restore-complete sentinel
+```
+
 Build the opt-in broker image from `agent/` with
 `docker build -f pagebroker/Dockerfile.gpu -t <image> .` (or use
 `make -C agent/pagebroker image-gpu GPU_IMAGE=<image>`). Configure
