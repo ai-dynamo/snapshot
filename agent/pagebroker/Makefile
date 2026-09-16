@@ -16,14 +16,21 @@ image-gpu:
 CUDA_ROOT ?= /usr/local/cuda
 CUDA_LIB_DIR ?= $(CUDA_ROOT)/lib64/stubs
 TRANSFER_DIR := ../cmd/cuda-checkpoint-helper
+# GPU images use the pinned NIXL POSIX adapter. The no-NIXL build remains useful
+# for CPU-only transfer-contract tests, not a runtime fallback.
+NIXL_ROOT ?=
+ifneq ($(NIXL_ROOT),)
+TRANSFER_FLAGS := -DPAGEBROKER_NIXL -I$(NIXL_ROOT)/include -L$(NIXL_ROOT)/lib -lnixl -lnixl_build
+TRANSFER_SOURCES := nixl_transfer.cpp
+endif
 
 .PHONY: allocation-worker
 allocation-worker: generate
 	mkdir -p build
-	$(CXX) -std=c++20 -Wall -Wextra -Werror -I. -I$(CUDA_ROOT)/include -I$(TRANSFER_DIR) \
-		allocation_worker.cpp allocation_transport.cpp file_descriptor.cpp cuda_posix_transfer.cpp \
+	$(CXX) -O2 -std=c++20 -Wall -Wextra -Werror -I. -I$(CUDA_ROOT)/include -I$(TRANSFER_DIR) \
+		allocation_worker.cpp allocation_transport.cpp file_descriptor.cpp cuda_posix_transfer.cpp $(TRANSFER_SOURCES) \
 		$(TRANSFER_DIR)/transfer_config.cpp $(TRANSFER_DIR)/content_digest.cpp v1/pagebroker.pb.cc \
-		-L$(CUDA_LIB_DIR) -lcuda -lprotobuf -lcrypto -pthread -o build/pagebroker-allocation-worker
+		-L$(CUDA_LIB_DIR) -lcuda -lprotobuf -lcrypto -pthread $(TRANSFER_FLAGS) -o build/pagebroker-allocation-worker
 
 generate:
 	protoc --proto_path=. --cpp_out=. $(PROTO)
@@ -45,8 +52,8 @@ test-allocations: daemon
 .PHONY: test-allocation-transfer
 test-allocation-transfer: generate
 	mkdir -p build
-	$(CXX) -std=c++20 -Wall -Wextra -Werror -I. -I$(CUDA_ROOT)/include -I$(TRANSFER_DIR) \
-		cuda_posix_transfer_test.cpp cuda_posix_transfer.cpp file_descriptor.cpp \
+	$(CXX) -O2 -std=c++20 -Wall -Wextra -Werror -I. -I$(CUDA_ROOT)/include -I$(TRANSFER_DIR) \
+		cuda_posix_transfer_test.cpp cuda_posix_transfer.cpp file_descriptor.cpp $(TRANSFER_SOURCES) \
 		$(TRANSFER_DIR)/transfer_config.cpp $(TRANSFER_DIR)/content_digest.cpp \
-		-lcrypto $(GTEST_FLAGS) -o build/allocation-transfer-test
+		-lcrypto $(GTEST_FLAGS) -pthread $(TRANSFER_FLAGS) -o build/allocation-transfer-test
 	./build/allocation-transfer-test
