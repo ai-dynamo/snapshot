@@ -52,6 +52,68 @@ message CommitRequest {}
 // or unknown transaction returns TRANSACTION_NOT_FOUND.
 message AbortRequest {}
 
+// Bind a connection to one participant in an existing STAGED transaction.
+// After binding, the connection accepts only AllocationSessionRequest frames.
+// The trusted agent opens this connection before passing it into the workload.
+message BindAllocationSession
+{
+  enum Direction {
+    UNSPECIFIED = 0;
+    SAVE = 1;
+    LOAD = 2;
+  }
+  Direction direction = 1;
+  // Lowercase, 32-character hex cuinterpose participant identity.
+  string participant_id = 2;
+}
+message AllocationExtent
+{
+  string allocation_id = 1;
+  uint64 size = 2;
+  // CUDA UUID bytes, not a process-local device ordinal. On load this is the
+  // destination UUID; the manifest retains the captured source UUID.
+  bytes device_uuid = 3;
+  // Populated only in broker-owned manifests and successful worker responses.
+  string sha256 = 4;
+}
+message AllocationBatch
+{
+  // One CUDA export FD per extent, attached in this order with SCM_RIGHTS.
+  // At most 32 extents per frame; the worker also receives 32 storage FDs.
+  repeated AllocationExtent extents = 1;
+}
+message AllocationSessionRequest
+{
+  oneof command {
+    AllocationBatch batch = 1;
+    // Complete exactly the allocation set submitted on this connection.
+    CommitRequest finish = 2;
+  }
+}
+message AllocationSessionReply
+{
+  oneof result {
+    // An empty batch acknowledges session readiness. Batch replies contain
+    // the transferred extents and their content digests.
+    AllocationBatch completed = 1;
+    CommitComplete finished = 2;
+    Failure failure = 3;
+  }
+}
+// Private broker-to-worker envelope, using the same extent/batch schema.
+// Descriptors are [CUDA exports..., opened storage files...].
+message AllocationWorkerRequest
+{
+  BindAllocationSession.Direction direction = 1;
+  AllocationBatch batch = 2;
+}
+message AllocationManifest
+{
+  uint32 version = 1;
+  string participant_id = 2;
+  repeated AllocationExtent extents = 3;
+}
+
 message Request
 {
   // Snapshot assigns an ID to each request.
@@ -66,6 +128,7 @@ message Request
     CommitRequest commit = 5;
     AbortRequest abort = 6;
     DirectRestoreRequest direct_restore = 7;
+    BindAllocationSession bind_allocations = 8;
   }
 }
 
@@ -115,5 +178,7 @@ message Response
     AbortComplete abort_complete = 6;
     Failure failure = 7;
     DirectRestoreReady direct_restore_ready = 8;
+    // The connection is now allocation-only, not a general broker capability.
+    AllocationSessionReply allocation_session = 9;
   }
 }
