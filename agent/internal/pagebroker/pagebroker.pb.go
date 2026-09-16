@@ -654,9 +654,7 @@ type AllocationExtent struct {
 	Size         uint64                 `protobuf:"varint,2,opt,name=size,proto3" json:"size,omitempty"`
 	// CUDA UUID bytes, not a process-local device ordinal. On load this is the
 	// destination UUID; the manifest retains the captured source UUID.
-	DeviceUuid []byte `protobuf:"bytes,3,opt,name=device_uuid,json=deviceUuid,proto3" json:"device_uuid,omitempty"`
-	// Populated only in broker-owned manifests and successful worker responses.
-	Sha256        string `protobuf:"bytes,4,opt,name=sha256,proto3" json:"sha256,omitempty"`
+	DeviceUuid    []byte `protobuf:"bytes,3,opt,name=device_uuid,json=deviceUuid,proto3" json:"device_uuid,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -710,13 +708,6 @@ func (x *AllocationExtent) GetDeviceUuid() []byte {
 		return x.DeviceUuid
 	}
 	return nil
-}
-
-func (x *AllocationExtent) GetSha256() string {
-	if x != nil {
-		return x.Sha256
-	}
-	return ""
 }
 
 type AllocationBatch struct {
@@ -930,7 +921,7 @@ type isAllocationSessionReply_Result interface {
 
 type AllocationSessionReply_Completed struct {
 	// An empty batch acknowledges session readiness. Batch replies contain
-	// the transferred extents and their content digests.
+	// the transferred extents.
 	Completed *AllocationBatch `protobuf:"bytes,1,opt,name=completed,proto3,oneof"`
 }
 
@@ -1692,13 +1683,12 @@ const file_v1_pagebroker_proto_rawDesc = "" +
 	"\tDirection\x12\x0f\n" +
 	"\vUNSPECIFIED\x10\x00\x12\b\n" +
 	"\x04SAVE\x10\x01\x12\b\n" +
-	"\x04LOAD\x10\x02\"\x84\x01\n" +
+	"\x04LOAD\x10\x02\"z\n" +
 	"\x10AllocationExtent\x12#\n" +
 	"\rallocation_id\x18\x01 \x01(\tR\fallocationId\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x04R\x04size\x12\x1f\n" +
 	"\vdevice_uuid\x18\x03 \x01(\fR\n" +
-	"deviceUuid\x12\x16\n" +
-	"\x06sha256\x18\x04 \x01(\tR\x06sha256\"U\n" +
+	"deviceUuidJ\x04\b\x04\x10\x05R\x06sha256\"U\n" +
 	"\x0fAllocationBatch\x12B\n" +
 	"\aextents\x18\x01 \x03(\v2(.snapshot.pagebroker.v1.AllocationExtentR\aextents\"\xa7\x01\n" +
 	"\x18AllocationSessionRequest\x12?\n" +

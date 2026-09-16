@@ -22,7 +22,6 @@ struct ManifestExtent {
   std::string source_uuid;
   size_t size = 0;
   std::string filename;
-  std::string sha256;
 };
 
 struct DeviceExtent {
@@ -59,14 +58,6 @@ bool BuildTransferJobs(const std::vector<ManifestExtent> &extents,
                        const std::vector<DeviceExtent> &devices,
                        const std::vector<DevicePair> &device_pairs,
                        std::vector<TransferJob> *jobs, std::string *error);
-
-// ApplyOrVerifyExtentDigests records inline checkpoint digests or verifies the
-// digests produced by the sole restore read against the durable manifest.
-bool ApplyOrVerifyExtentDigests(bool checkpoint,
-                                const std::vector<TransferJob> &jobs,
-                                const std::vector<std::string> &digests,
-                                std::vector<ManifestExtent> *extents,
-                                std::string *error);
 
 // Manifest lifecycle functions require the caller to own the participant
 // directory exclusively for the operation. PageBroker provides one trusted

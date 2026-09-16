@@ -5,8 +5,6 @@
 
 #include "storage_manifest.hpp"
 
-#include "content_digest.hpp"
-
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -86,11 +84,6 @@ bool NormalizeExtent(const ManifestExtent &extent, size_t index,
   normalized->filename = extent.filename;
   if (normalized->filename != DeviceFilename(index)) {
     *error = "invalid deterministic extent filename in helper manifest";
-    return false;
-  }
-  normalized->sha256 = extent.sha256;
-  if (!normalized->sha256.empty() && !IsSHA256Hex(normalized->sha256)) {
-    *error = "invalid SHA-256 digest in helper manifest";
     return false;
   }
   return true;
@@ -225,11 +218,7 @@ bool ParseVersionHeader(std::istringstream &input, std::string *error) {
     *error = "invalid helper manifest version header";
     return false;
   }
-  if (version < 3) {
-    *error = "unsafe helper manifest without extent digests is not supported";
-    return false;
-  }
-  if (version != 3) {
+  if (version != 4) {
     *error = "unsupported helper manifest version";
     return false;
   }
@@ -243,7 +232,7 @@ bool ParseDeviceEntry(std::istringstream &input, size_t expected_index,
   std::string size_text;
   size_t index = 0;
   if (!(input >> key >> index_text >> extent->source_uuid >> size_text >>
-        extent->filename >> extent->sha256) ||
+        extent->filename) ||
       key != "device" || !ParseUnsigned(index_text, &index) ||
       index != expected_index || !ParseUnsigned(size_text, &extent->size)) {
     *error = "invalid helper manifest device entry";
@@ -254,10 +243,6 @@ bool ParseDeviceEntry(std::istringstream &input, size_t expected_index,
   if (!CanonicalizeGPUUUID(extent->source_uuid, &canonical) ||
       canonical != extent->source_uuid) {
     *error = "helper manifest source GPU UUID is not canonical";
-    return false;
-  }
-  if (!IsSHA256Hex(extent->sha256)) {
-    *error = "helper manifest extent SHA-256 digest is invalid";
     return false;
   }
   return true;
@@ -361,7 +346,7 @@ bool BuildCheckpointManifest(const std::vector<DeviceExtent> &devices,
       return false;
     }
     extents->push_back({std::move(source_uuid), devices[index].size,
-                        DeviceFilename(index), ""});
+                        DeviceFilename(index)});
   }
   return true;
 }
@@ -457,46 +442,6 @@ bool BuildTransferJobs(const std::vector<ManifestExtent> &extents,
   return true;
 }
 
-bool ApplyOrVerifyExtentDigests(bool checkpoint,
-                                const std::vector<TransferJob> &jobs,
-                                const std::vector<std::string> &digests,
-                                std::vector<ManifestExtent> *extents,
-                                std::string *error) {
-  if (extents == nullptr || error == nullptr) {
-    return false;
-  }
-  if (jobs.size() != digests.size()) {
-    *error = "custom storage digest coverage mismatch";
-    return false;
-  }
-  std::vector<unsigned char> covered(extents->size(), 0);
-  for (size_t job_index = 0; job_index < jobs.size(); ++job_index) {
-    const size_t extent_index = jobs[job_index].extent_index;
-    if (extent_index >= extents->size() || covered[extent_index] != 0 ||
-        !IsSHA256Hex(digests[job_index])) {
-      *error = "custom storage digest metadata is invalid";
-      return false;
-    }
-    covered[extent_index] = 1;
-    auto &extent = (*extents)[extent_index];
-    if (checkpoint) {
-      extent.sha256 = digests[job_index];
-      continue;
-    }
-    if (extent.sha256 != digests[job_index]) {
-      *error = "custom storage extent SHA-256 mismatch for " + extent.filename;
-      return false;
-    }
-  }
-  for (const unsigned char value : covered) {
-    if (value == 0) {
-      *error = "one or more custom storage extents lack digest coverage";
-      return false;
-    }
-  }
-  return true;
-}
-
 bool WriteManifest(const std::filesystem::path &directory,
                    const std::vector<ManifestExtent> &extents,
                    std::string *error) {
@@ -506,12 +451,6 @@ bool WriteManifest(const std::filesystem::path &directory,
   std::vector<ManifestExtent> normalized;
   if (!NormalizeManifest(extents, &normalized, error)) {
     return false;
-  }
-  for (const auto &extent : normalized) {
-    if (!IsSHA256Hex(extent.sha256)) {
-      *error = "helper manifest extent is missing a valid SHA-256 digest";
-      return false;
-    }
   }
 
   bool removed_temporary = false;
@@ -524,13 +463,12 @@ bool WriteManifest(const std::filesystem::path &directory,
   const auto temporary = directory / temporary_name;
   const auto manifest_path = directory / kManifestName;
   std::ostringstream serialized;
-  serialized << "version 3\n";
+  serialized << "version 4\n";
   serialized << "device_count " << normalized.size() << "\n";
   for (size_t index = 0; index < normalized.size(); ++index) {
     serialized << "device " << index << " " << normalized[index].source_uuid
                << " " << normalized[index].size << " "
-               << normalized[index].filename << " "
-               << normalized[index].sha256 << "\n";
+               << normalized[index].filename << "\n";
   }
 
   FileDescriptor fd(open(temporary.c_str(),

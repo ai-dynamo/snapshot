@@ -68,7 +68,7 @@ VMM handle, checks its pinned/device properties, maps a worker-local address,
 and transfers through a reusable ring. It reuses the
 bounded POSIX transfer-ring design from the PageBroker CUDA foundation.
 The backend pipelines D2H/H2D operations and storage I/O through pinned host
-buffers and computes SHA-256 during the sole content pass. It is not a
+buffers without computing content checksums. It is not a
 GPU-direct storage backend.
 
 Allocations within one batch are processed serially; participant sessions run
@@ -95,7 +95,7 @@ During capture, content lives at:
 ```
 
 `AllocationManifest` version 1 records the participant, allocation IDs,
-sizes, source device UUIDs, and digests. Save batches fsync content; `finish`
+sizes, and source device UUIDs. Save batches fsync content; `finish`
 atomically publishes and fsyncs the complete participant manifest. Load binding
 validates the manifest and regular-file sizes before accepting allocation FDs.
 LOAD reads the published `allocations/` files relative to the direct
@@ -103,9 +103,10 @@ transaction's retained source descriptor. Commit, abort, and expiry release
 that descriptor without deleting published content. The caller must keep
 the artifact and its children available; an open directory FD alone does not
 prevent another process from deleting its files.
-Load completion requires exact coverage of the saved allocation set. Digest
-verification occurs during transfer, so corruption may be detected **after
-GPU writes**; the caller must keep the workload parked and fail closed.
+Load completion requires exact coverage of the saved allocation set. This path
+does not detect same-size payload corruption: checkpoint storage is trusted.
+Transfer failures may occur after GPU writes; the caller must keep the workload
+parked and fail closed.
 
 Transaction mutexes protect short admission/state transitions, not the GPU
 transfer. Commit refuses active or failed/incomplete sessions. Abort returns
