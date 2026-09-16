@@ -659,7 +659,9 @@ const UNIT_FORMATS: Readonly<Record<string, (value: number) => string>> = {
 
 export function formatValue(value: number | null, unit: string): string {
   if (value == null) return "—";
-  const format = UNIT_FORMATS[unit];
+  // `unit` comes from untrusted history JSON; a plain index would resolve
+  // Object.prototype members for units like "constructor" or "toString".
+  const format = Object.hasOwn(UNIT_FORMATS, unit) ? UNIT_FORMATS[unit] : undefined;
   if (format) return format(value);
   return `${value.toFixed(2)} ${humanizeUnit(unit)}`;
 }

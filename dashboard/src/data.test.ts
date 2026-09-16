@@ -292,6 +292,12 @@ describe("generic discovery and filtering", () => {
     expect(formatValue(null, "seconds")).toBe("—");
   });
 
+  it("does not resolve prototype members as unit formatters", () => {
+    expect(formatValue(1, "toString")).toBe("1.00 toString");
+    expect(formatValue(1, "constructor")).toBe("1.00 constructor");
+    expect(formatValue(1, "hasOwnProperty")).toBe("1.00 hasOwnProperty");
+  });
+
   it("assigns fallback colors deterministically per case", () => {
     expect(caseColorIndex("azure-files", 4)).toBe(caseColorIndex("azure-files", 4));
     expect(caseColorIndex("azure-files", 4)).toBeLessThan(4);

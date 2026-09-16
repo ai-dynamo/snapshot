@@ -89,6 +89,30 @@ test("loads older monthly chunks on demand", async ({ page }) => {
   expect(chunkRequests.some((url) => url.endsWith("2026-06.ndjson"))).toBe(true);
 });
 
+test("keeps filter selections when widening the date range and resets them on demand", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.getByRole("status")).toContainText("Loaded 6 benchmark results");
+
+  const sglang = page.getByRole("checkbox", { name: "SGLang" });
+  await sglang.uncheck();
+  await page.getByLabel("Outcome").selectOption("passed");
+  await page.getByLabel("Date range").selectOption("all");
+
+  await expect(page.getByRole("status")).toContainText("3 of 3 monthly indexes");
+  await expect(sglang).not.toBeChecked();
+  await expect(page.getByLabel("Outcome")).toHaveValue("passed");
+  await expect(page.locator("#latest-body")).not.toContainText("SGLang");
+
+  await page.getByRole("button", { name: "Reset filters" }).click();
+
+  await expect(page.getByLabel("Date range")).toHaveValue("90");
+  await expect(page.getByLabel("Outcome")).toHaveValue("all");
+  await expect(sglang).toBeChecked();
+  await expect(page.locator("#latest-body")).toContainText("SGLang");
+});
+
 test("offers a suite whose runs all predate the eager window and loads it on selection", async ({
   page,
 }) => {

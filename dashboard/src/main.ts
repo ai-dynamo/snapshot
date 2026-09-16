@@ -181,7 +181,30 @@ function configureSuites() {
   );
 }
 
-function configureSuiteFilters() {
+interface FilterSnapshot {
+  gpu: string;
+  outcome: string;
+  channel: string;
+  cases: ReadonlyMap<string, boolean>;
+  metrics: ReadonlyMap<string, boolean>;
+}
+
+function snapshotFilters(): FilterSnapshot {
+  return {
+    gpu: elements.gpu.value,
+    outcome: elements.outcome.value,
+    channel: elements.channel.value,
+    cases: checkboxStates(elements.cases),
+    metrics: checkboxStates(elements.metrics),
+  };
+}
+
+// Rebuilding the suite-scoped controls resets them to defaults. Pass
+// `preserve` when the rebuild is a side effect of loading more history rather
+// than a deliberate suite change or reset, so the user's selections survive;
+// values that no longer exist fall back to defaults, new ones get defaults.
+function configureSuiteFilters({ preserve = false }: { preserve?: boolean } = {}) {
+  const previous = preserve ? snapshotFilters() : null;
   const dimensions = discoverDimensions(history.records, elements.suite.value);
   setOptions(elements.gpu, [
     { value: "all", label: "All GPU models" },
@@ -198,12 +221,17 @@ function configureSuiteFilters() {
       label: displayIdentifier(channel),
     })),
   ]);
+  if (previous) {
+    restoreSelection(elements.gpu, previous.gpu);
+    restoreSelection(elements.outcome, previous.outcome);
+    restoreSelection(elements.channel, previous.channel);
+  }
   renderCheckboxes(
     elements.cases,
     dimensions.cases.map((caseName) => ({
       value: caseName,
       label: frameworkLabel(caseName),
-      checked: true,
+      checked: previous?.cases.get(caseName) ?? true,
     })),
     "case",
   );
@@ -213,9 +241,24 @@ function configureSuiteFilters() {
     dimensions.metrics.map((item, index) => ({
       value: item.name,
       label: item.displayName,
-      checked: hasDefaults ? DEFAULT_METRIC_NAMES.has(item.name) : index < 3,
+      checked:
+        previous?.metrics.get(item.name) ??
+        (hasDefaults ? DEFAULT_METRIC_NAMES.has(item.name) : index < 3),
     })),
     "metric",
+  );
+}
+
+function restoreSelection(select: HTMLSelectElement, value: string): void {
+  if ([...select.options].some((option) => option.value === value)) select.value = value;
+}
+
+function checkboxStates(container: HTMLElement): Map<string, boolean> {
+  return new Map(
+    [...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].map((input) => [
+      input.value,
+      input.checked,
+    ]),
   );
 }
 
@@ -236,8 +279,11 @@ function bindEvents() {
   elements.metrics.addEventListener("change", render);
   elements.reset.addEventListener("click", () => {
     elements.date.value = DEFAULT_RANGE;
-    configureSuiteFilters();
-    render();
+    elements.suite.selectedIndex = 0;
+    void ensureRangeLoaded().then(() => {
+      configureSuiteFilters();
+      render();
+    });
   });
   elements.closeDialog.addEventListener("click", () => elements.dialog.close());
   elements.dialog.addEventListener("click", (event) => {
@@ -259,7 +305,7 @@ async function ensureRangeLoaded(): Promise<void> {
   elements.status.textContent = "Loading older benchmark history…";
   try {
     history = await loadRemainingHistory(history);
-    configureSuiteFilters();
+    configureSuiteFilters({ preserve: true });
     renderStatus();
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
