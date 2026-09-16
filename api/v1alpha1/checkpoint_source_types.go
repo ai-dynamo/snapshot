@@ -58,6 +58,13 @@ type NvidiaCheckpointSourceInstance struct {
 	// ProductName is the GPU model, as nvidia-smi reports it.
 	// +optional
 	ProductName string `json:"productName,omitempty"`
+
+	// MIGProfile is the MIG slice shape the capture ran on, such as "1g.10gb".
+	// It is absent when the capture had a whole GPU, and absent for a slice
+	// captured before this field existed. ProductName does not imply it:
+	// nvidia-smi reports a slice under its parent GPU's model name.
+	// +optional
+	MIGProfile string `json:"migProfile,omitempty"`
 }
 
 // CheckpointSourceNode is the machine a checkpoint was captured on.

@@ -228,6 +228,13 @@ spec:
                                 they identify a physical card rather than describe what a restore target has
                                 to match.
                               properties:
+                                migProfile:
+                                  description: |-
+                                    MIGProfile is the MIG slice shape the capture ran on, such as "1g.10gb".
+                                    It is absent when the capture had a whole GPU, and absent for a slice
+                                    captured before this field existed. ProductName does not imply it:
+                                    nvidia-smi reports a slice under its parent GPU's model name.
+                                  type: string
                                 productName:
                                   description: ProductName is the GPU model, as nvidia-smi
                                     reports it.
