@@ -258,6 +258,9 @@ Broker::HandleRequest(const Request& request)
       case Request::kStagedRestore:
         response = Restore(request);
         break;
+      case Request::kDirectRestore:
+        response = DirectRestore(request);
+        break;
       case Request::kPrepareStagedCheckpoint:
         response = PrepareCheckpoint(request);
         break;
@@ -290,6 +293,25 @@ Broker::Restore(const Request& request)
   const auto& source = ValidateStagedRestore(operation);
   const auto& engine = Engine(operation.io_engine());
   return StageRestore(request, source, engine);
+}
+
+Response
+Broker::DirectRestore(const Request& request)
+{
+  const auto& operation = request.direct_restore();
+  if (!operation.has_source() || operation.source().kind_case() == StorageBackend::KIND_NOT_SET)
+    return Fail(request, Failure::INVALID_REQUEST, "restore source is required");
+  auto source = Engine(operation.io_engine()).OpenRestoreSource(operation.source());
+  auto transaction = CreateOrGetTransaction(request.transaction_id());
+  std::lock_guard lock(transaction->mutex());
+  if (transaction->state() != Transaction::State::NEW)
+    return Fail(request, Failure::TRANSACTION_CONFLICT, "restore transaction conflicts");
+  transaction->set_state(Transaction::State::PREPARING);
+  transaction->set_descriptor(DirectRestoreDescriptor{std::move(source)});
+  transaction->set_state(Transaction::State::STAGED);
+  auto response = Reply(request);
+  response.mutable_direct_restore_ready();
+  return response;
 }
 
 Response
@@ -376,6 +398,12 @@ Broker::Commit(const Request& request)
     return Fail(request, Failure::TRANSACTION_CONFLICT, "transaction is preparing");
   if (transaction->state() == Transaction::State::COMMITTED)
     return CommitSucceeded(request);
+
+  if (std::holds_alternative<DirectRestoreDescriptor>(transaction->descriptor())) {
+    transaction->clear_descriptor();
+    transaction->set_state(Transaction::State::COMMITTED);
+    return CommitSucceeded(request);
+  }
 
   if (const auto* restore = std::get_if<RestoreTransactionDescriptor>(&transaction->descriptor()))
     return CleanupRestore(request, *transaction, *restore);

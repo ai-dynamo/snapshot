@@ -10,6 +10,7 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include "file_descriptor.hpp"
+#include <system_error>
 
 namespace snapshot::pagebroker {
 namespace {
@@ -158,6 +159,18 @@ PosixCopyEngine::StageRestore(const StorageBackend& source, const Path& destinat
       throw std::runtime_error("checkpoint contains non-regular entry");
     }
   }
+}
+
+FileDescriptor
+PosixCopyEngine::OpenRestoreSource(const StorageBackend& source) const
+{
+  const auto path = SourcePath(source, storage_root_);
+  // Match staged restore's source validation, without reading file contents.
+  DirectorySize(path);
+  FileDescriptor directory(open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+  if (directory.get() < 0)
+    throw std::system_error(errno, std::generic_category(), "open direct restore source");
+  return directory;
 }
 
 void

@@ -12,6 +12,8 @@
 
 #include "broker.hpp"
 #include "posix_copy_engine.hpp"
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace fs = std::filesystem;
 using namespace snapshot::pagebroker;
@@ -518,6 +520,69 @@ TEST_F(BrokerTest, AbortsRestore)
   const auto commit_response = broker().HandleRequest(commit);
   ASSERT_TRUE(commit_response.has_failure());
   EXPECT_EQ(commit_response.failure().code(), Failure::TRANSACTION_NOT_FOUND);
+}
+
+TEST_F(BrokerTest, DirectRestoreNeverStagesOrDeletesSource)
+{
+  for (const std::string finish : {"commit", "abort", "expire"}) {
+    auto restore = RequestFor(finish);
+    Configure(restore.mutable_direct_restore()->mutable_source(),
+              restore.mutable_direct_restore()->mutable_io_engine(), source_);
+    ASSERT_TRUE(broker().HandleRequest(restore).has_direct_restore_ready());
+    EXPECT_TRUE(fs::is_empty(root_ / "tmpfs" / "restore"));
+    EXPECT_EQ(broker().HandleRequest(restore).failure().code(), Failure::TRANSACTION_CONFLICT);
+    auto terminal = RequestFor(finish);
+    if (finish == "commit") {
+      terminal.mutable_commit();
+      EXPECT_TRUE(broker().HandleRequest(terminal).has_commit_complete());
+      EXPECT_TRUE(broker().HandleRequest(terminal).has_commit_complete());
+    } else if (finish == "abort") {
+      terminal.mutable_abort();
+      EXPECT_TRUE(broker().HandleRequest(terminal).has_abort_complete());
+      EXPECT_TRUE(broker().HandleRequest(terminal).has_abort_complete());
+    } else {
+      broker().ReapExpiredTransactions(std::chrono::steady_clock::now() + std::chrono::hours(3));
+      terminal.mutable_commit();
+      EXPECT_EQ(broker().HandleRequest(terminal).failure().code(), Failure::TRANSACTION_NOT_FOUND);
+    }
+    std::string contents;
+    std::ifstream(source_ / "image") >> contents;
+    EXPECT_EQ(contents, "image");
+  }
+}
+
+TEST_F(BrokerTest, DirectRestoreValidatesBeforeReservingTransaction)
+{
+  auto request = RequestFor("direct");
+  request.mutable_direct_restore();
+  EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::INVALID_REQUEST);
+  request.mutable_direct_restore()->mutable_source()->mutable_filesystem()->set_directory(source_.string());
+  EXPECT_EQ(broker().HandleRequest(request).failure().code(), Failure::INVALID_REQUEST);
+  request.mutable_direct_restore()->mutable_io_engine()->mutable_posix_copy();
+  fs::create_symlink(source_ / "image", source_ / "link");
+  EXPECT_TRUE(broker().HandleRequest(request).has_failure());
+  fs::remove(source_ / "link");
+  request.mutable_direct_restore()->mutable_source()->mutable_filesystem()->set_directory(root_.string());
+  EXPECT_TRUE(broker().HandleRequest(request).has_failure());
+  request.mutable_direct_restore()->mutable_source()->mutable_filesystem()->set_directory(source_.string());
+  EXPECT_TRUE(broker().HandleRequest(request).has_direct_restore_ready());
+}
+
+TEST_F(BrokerTest, DirectConsumerReadsRetainedDirectoryAfterRename)
+{
+  StorageBackend source;
+  source.mutable_filesystem()->set_directory(source_.string());
+  PosixCopyEngine engine(root_ / "storage");
+  auto directory = engine.OpenRestoreSource(source);
+  EXPECT_EQ(fcntl(directory.get(), F_GETFL) & O_ACCMODE, O_RDONLY);
+  fs::rename(source_, root_ / "storage" / "renamed");
+  fs::create_directories(source_);
+  std::ofstream(source_ / "image") << "replacement";
+  FileDescriptor image(openat(directory.get(), "image", O_RDONLY | O_NOFOLLOW));
+  ASSERT_GE(image.get(), 0);
+  char bytes[5];
+  ASSERT_EQ(read(image.get(), bytes, sizeof(bytes)), sizeof(bytes));
+  EXPECT_EQ(std::string(bytes, sizeof(bytes)), "image");
 }
 
 }  // namespace

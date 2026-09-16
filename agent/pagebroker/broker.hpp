@@ -47,6 +47,7 @@ class Broker {
   Response AbortStaging(
       const Request& request, Transaction& transaction, const Path& staging_directory, const std::exception& error);
   Response Restore(const Request& request);
+  Response DirectRestore(const Request& request);
   Response StageRestore(const Request& request, const StorageBackend& source, const TransferEngine& engine);
   Response PrepareCheckpoint(const Request& request);
   Response StageCheckpoint(const Request& request, const StorageBackend& destination, const TransferEngine& engine);
