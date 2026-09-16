@@ -334,24 +334,15 @@ func gpuModels(devices []GPUDevice) (string, bool) {
 	if len(devices) == 0 {
 		return "", false
 	}
-	counts := make(map[string]int, len(devices))
+	models := make([]string, 0, len(devices))
 	for _, device := range devices {
 		model := strings.TrimSpace(device.ProductName)
 		if model == "" {
 			return "", false
 		}
-		counts[model]++
-	}
-
-	models := make([]string, 0, len(counts))
-	for model := range counts {
 		models = append(models, model)
 	}
-	sort.Strings(models)
-	for i, model := range models {
-		models[i] = model + " x" + strconv.Itoa(counts[model])
-	}
-	return strings.Join(models, ", "), true
+	return summariseByCount(models), true
 }
 
 // migUUIDPrefix is how NVIDIA spells a MIG device's UUID, in both the current
@@ -368,6 +359,10 @@ const (
 // slices. It reads UUID rather than MIGProfile so that it also holds for an
 // artifact captured before any profile was recorded: the UUIDs have been
 // recorded since the first release, and only a slice carries the MIG- prefix.
+//
+// Which kinds are present is a categorical question, so the counts are left
+// out: how many devices there are is gpu-count's, and how they are shaped is
+// mig-profile's, which does keep them.
 func gpuPartitioning(devices []GPUDevice) (string, bool) {
 	if len(devices) == 0 {
 		return "", false
@@ -406,12 +401,11 @@ func gpuMIGProfiles(devices []GPUDevice) (string, bool) {
 	if len(profiles) == 0 {
 		return "", false
 	}
-	return distinctSorted(profiles), true
+	return summariseByCount(profiles), true
 }
 
-// distinctSorted renders which values are present and ignores how many devices
-// share each one, because a change in count is gpu-count's to report. Sorting
-// ignores allocation order, which is #246's concern rather than a mismatch.
+// distinctSorted renders which values are present, ignoring how many devices
+// share each. Sorting ignores allocation order, which is #246's concern.
 func distinctSorted(values []string) string {
 	seen := make(map[string]struct{}, len(values))
 	distinct := make([]string, 0, len(values))
@@ -423,6 +417,26 @@ func distinctSorted(values []string) string {
 		distinct = append(distinct, value)
 	}
 	sort.Strings(distinct)
+	return strings.Join(distinct, ", ")
+}
+
+// summariseByCount renders a stable multiset summary: sorting ignores
+// allocation order, while "xN" preserves how many devices share each value.
+// The count has to survive, because gpu-count compares only the total and so
+// cannot tell two slices of one shape and one of another from the reverse.
+func summariseByCount(values []string) string {
+	counts := make(map[string]int, len(values))
+	for _, value := range values {
+		counts[value]++
+	}
+	distinct := make([]string, 0, len(counts))
+	for value := range counts {
+		distinct = append(distinct, value)
+	}
+	sort.Strings(distinct)
+	for i, value := range distinct {
+		distinct[i] = value + " x" + strconv.Itoa(counts[value])
+	}
 	return strings.Join(distinct, ", ")
 }
 

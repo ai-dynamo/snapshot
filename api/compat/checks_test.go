@@ -637,6 +637,24 @@ func TestMIGPartitioningCheck(t *testing.T) {
 			}},
 		},
 		{
+			// The same total, repartitioned: a slice appears where there was
+			// none, so the set of kinds changes even though the count does not.
+			name: "one of two devices sliced instead of whole",
+			source: Environment{GPUDevices: []GPUDevice{
+				{UUID: "GPU-a", ProductName: migParentModel},
+				{UUID: "GPU-b", ProductName: migParentModel},
+			}},
+			target: Environment{GPUDevices: []GPUDevice{
+				{UUID: "GPU-a", ProductName: migParentModel},
+				{UUID: "MIG-b", ProductName: migParentModel, MIGProfile: "1g.10gb"},
+			}},
+			want: []Mismatch{{
+				Check:  CheckMIGPartitioning,
+				Source: "whole GPU",
+				Target: "MIG slice, whole GPU",
+			}},
+		},
+		{
 			// UUIDs have been recorded since the first release, so this
 			// refusal reaches artifacts captured before any profile was.
 			name:   "a slice captured before profiles were recorded",
@@ -660,8 +678,8 @@ func TestMIGPartitioningCheck(t *testing.T) {
 			}},
 		},
 		{
-			// Losing a GPU is a count, not a repartitioning, and the count rule
-			// is the one with something to say about it.
+			// Losing a GPU is fewer devices, not a different kind of device,
+			// so the count rule is the one with something to say about it.
 			name:   "fewer whole GPUs than were captured",
 			source: wholeGPUsOf(2),
 			target: wholeGPUsOf(1),
@@ -711,8 +729,8 @@ func TestMIGProfileCheck(t *testing.T) {
 			target: migSlicesOf("1g.10gb"),
 			want: []Mismatch{{
 				Check:  CheckMIGProfile,
-				Source: "3g.40gb",
-				Target: "1g.10gb",
+				Source: "3g.40gb x1",
+				Target: "1g.10gb x1",
 			}},
 		},
 		{
@@ -721,8 +739,21 @@ func TestMIGProfileCheck(t *testing.T) {
 			target: migSlicesOf("3g.40gb"),
 			want: []Mismatch{{
 				Check:  CheckMIGProfile,
-				Source: "1g.10gb",
-				Target: "3g.40gb",
+				Source: "1g.10gb x1",
+				Target: "3g.40gb x1",
+			}},
+		},
+		{
+			// The same shapes and the same total, redistributed. Nothing else
+			// can see it: the count is three either way and the model is the
+			// parent card's either way.
+			name:   "the same shapes in different proportions",
+			source: migSlicesOf("1g.10gb", "1g.10gb", "3g.40gb"),
+			target: migSlicesOf("1g.10gb", "3g.40gb", "3g.40gb"),
+			want: []Mismatch{{
+				Check:  CheckMIGProfile,
+				Source: "1g.10gb x2, 3g.40gb x1",
+				Target: "1g.10gb x1, 3g.40gb x2",
 			}},
 		},
 		{
@@ -738,8 +769,8 @@ func TestMIGProfileCheck(t *testing.T) {
 			target: migSlicesOf("1g.10gb", "1g.10gb"),
 			want: []Mismatch{{
 				Check:  CheckMIGProfile,
-				Source: "1g.10gb, 3g.40gb",
-				Target: "1g.10gb",
+				Source: "1g.10gb x1, 3g.40gb x1",
+				Target: "1g.10gb x2",
 			}},
 		},
 		{
@@ -760,14 +791,15 @@ func TestMIGProfileCheck(t *testing.T) {
 			target: wholeGPUsOf(1),
 		},
 		{
-			// Two of a shape against one of it is a count. The shape rule stays
-			// quiet so the refusal is not reported twice under two names.
+			// Still slices on both sides, so the partitioning holds while the
+			// shape rule counts one fewer of it, as the model rule does.
 			name:   "fewer slices of the same shape",
 			source: migSlicesOf("1g.10gb", "1g.10gb"),
 			target: migSlicesOf("1g.10gb"),
 			want: []Mismatch{
 				{Check: CheckGPUModel, Source: migParentModel + " x2", Target: migParentModel + " x1"},
 				{Check: CheckGPUCount, Source: "2", Target: "1"},
+				{Check: CheckMIGProfile, Source: "1g.10gb x2", Target: "1g.10gb x1"},
 			},
 		},
 	}
