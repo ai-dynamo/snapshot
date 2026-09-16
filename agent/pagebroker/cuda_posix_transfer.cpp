@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-#include "../cmd/cuda-checkpoint-helper/transfer_engine.hpp"
+#include "cuda_posix_transfer.hpp"
 #include "../cmd/cuda-checkpoint-helper/content_digest.hpp"
 #include "file_descriptor.hpp"
 
@@ -93,30 +93,6 @@ class TransferSlot {
 
   void Complete() { pending_ = false; cuda_may_access_ = false; }
   void* data() const { return data_; }
-
-  bool Close(std::string* error)
-  {
-    if (cuda_may_access_) {
-      *error = "CUDA transfer buffer retained: completion unknown";
-      return false;
-    }
-    bool success = true;
-    if (event_) {
-      success = cuEventDestroy(event_) == CUDA_SUCCESS;
-      event_ = nullptr;
-    }
-    if (data_) {
-      if (cuMemHostUnregister(data_) == CUDA_SUCCESS) {
-        free(data_);
-        data_ = nullptr;
-      } else {
-        success = false;
-      }
-    }
-    if (!success)
-      *error = "CUDA transfer buffer cleanup failed";
-    return success;
-  }
 
  private:
   void* data_ = nullptr;
@@ -228,14 +204,28 @@ bool TransferPipeline(const std::vector<TransferChunk>& chunks, const std::vecto
 
 bool TransferBackendAvailable() { return true; }
 
-bool TransferExtent(CUdeviceptr device, size_t size, CUstream stream, CUcontext context,
-                    const StorageLayout& storage, TransferOperation operation, const TransferOptions& options,
-                    TransferCancellation* cancellation, TransferMetrics* metrics, std::string* error)
+struct TransferBuffers::Impl {
+  TransferOptions options;
+  std::vector<std::unique_ptr<TransferSlot>> slots;
+};
+
+TransferBuffers::TransferBuffers(TransferOptions options) : impl_(std::make_unique<Impl>())
+{
+  impl_->options = options;
+}
+
+TransferBuffers::~TransferBuffers() = default;
+
+bool TransferBuffers::Transfer(CUdeviceptr device, size_t size, CUstream stream, CUcontext context,
+                              const StorageLayout& storage, TransferOperation operation,
+                              TransferCancellation* cancellation, TransferMetrics* metrics, std::string* error)
 {
   if (!metrics || !error)
     return false;
   *metrics = {};
   error->clear();
+  const auto& options = impl_->options;
+  auto& slots = impl_->slots;
   const auto total_start = Clock::now();
   std::vector<TransferChunk> chunks;
   if (!device || !context || size > std::numeric_limits<CUdeviceptr>::max() - device ||
@@ -248,8 +238,7 @@ bool TransferExtent(CUdeviceptr device, size_t size, CUstream stream, CUcontext 
   std::vector<FileDescriptor> files;
   if (!OpenStorageFiles(storage, files, error))
     return false;
-  std::vector<std::unique_ptr<TransferSlot>> slots;
-  for (size_t i = 0; i < options.buffer_count; ++i) {
+  for (size_t i = slots.size(); i < options.buffer_count; ++i) {
     auto slot = std::make_unique<TransferSlot>();
     const auto status = slot->Allocate(options.chunk_bytes);
     if (status != CUDA_SUCCESS) {
@@ -284,10 +273,6 @@ bool TransferExtent(CUdeviceptr device, size_t size, CUstream stream, CUcontext 
       }
     }
   }
-  const auto cleanup_start = Clock::now();
-  for (auto& slot : slots)
-    if (!slot->Close(error)) success = false;
-  metrics->cleanup_seconds = ElapsedSeconds(cleanup_start);
   metrics->total_seconds = ElapsedSeconds(total_start);
   if (success && cancellation && cancellation->IsCancelled()) {
     *error = "allocation transfer canceled before completion";
@@ -296,5 +281,13 @@ bool TransferExtent(CUdeviceptr device, size_t size, CUstream stream, CUcontext 
   if (success) metrics->bytes = size;
   else if (cancellation) cancellation->Cancel();
   return success;
+}
+
+bool TransferExtent(CUdeviceptr device, size_t size, CUstream stream, CUcontext context,
+                    const StorageLayout& storage, TransferOperation operation, const TransferOptions& options,
+                    TransferCancellation* cancellation, TransferMetrics* metrics, std::string* error)
+{
+  TransferBuffers buffers(options);
+  return buffers.Transfer(device, size, stream, context, storage, operation, cancellation, metrics, error);
 }
 }  // namespace cuda_checkpoint_transfer
