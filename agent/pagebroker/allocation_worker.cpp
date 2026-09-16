@@ -14,6 +14,9 @@
 #include <stdexcept>
 #include <map>
 #include <memory>
+#include <sstream>
+#include <future>
+#include <system_error>
 
 namespace {
 using namespace snapshot::pagebroker;
@@ -40,7 +43,7 @@ struct DeviceTransfer {
     Check(cuCtxSetCurrent(context));
     Check(cuStreamCreate(&stream, CU_STREAM_NON_BLOCKING));
     buffers = std::make_unique<transfer::TransferBuffers>(
-        transfer::TransferOptions{2, transfer::kDefaultChunkBytes});
+        transfer::TransferOptions{4, transfer::kDefaultChunkBytes});
   }
   ~DeviceTransfer()
   {
@@ -84,7 +87,7 @@ v1::AllocationSessionReply Transfer(const v1::AllocationWorkerRequest& request,
   v1::AllocationSessionReply reply;
   const auto operation = request.direction() == v1::BindAllocationSession::SAVE
       ? transfer::TransferOperation::kCheckpoint : transfer::TransferOperation::kRestore;
-  // Allocations are serial within a participant, with two slots overlapping
+  // Allocations are serial within a participant, with four slots overlapping
   // DMA and storage. Contexts, streams and slots survive subsequent batches.
   transfer::TransferCancellation cancellation(std::chrono::steady_clock::now() + std::chrono::seconds(240));
   for (int index = 0; index < count; ++index) {
@@ -123,7 +126,7 @@ v1::AllocationSessionReply Transfer(const v1::AllocationWorkerRequest& request,
     transfer::TransferMetrics metrics;
     std::string error;
     const bool success = resources->buffers->Transfer(address, extent.size(), stream, context, storage, operation,
-                                                      &cancellation, &metrics, &error);
+                                                      &cancellation, &metrics, &error, false);
     // Any error exits the process; broker reaps before releasing admission.
     if (!success)
       throw std::runtime_error("allocation transfer: " + error);
@@ -135,7 +138,8 @@ v1::AllocationSessionReply Transfer(const v1::AllocationWorkerRequest& request,
     Check(cuMemAddressFree(address, extent.size()));
     Check(cuMemRelease(handle));
     const auto cleaned = std::chrono::steady_clock::now();
-    std::cerr << "allocation_transfer id=" << extent.allocation_id()
+    std::ostringstream record;
+    record << "allocation_transfer id=" << extent.allocation_id()
               << " direction=" << (operation == transfer::TransferOperation::kCheckpoint ? "save" : "load")
               << " bytes=" << extent.size()
               << " mapping_setup_s=" << std::chrono::duration<double>(mapped - start).count()
@@ -145,9 +149,33 @@ v1::AllocationSessionReply Transfer(const v1::AllocationWorkerRequest& request,
               << " storage_io_s=" << metrics.storage_io_seconds
               << " fsync_s=" << metrics.fsync_seconds
               << " cleanup_s=" << std::chrono::duration<double>(cleaned - copied).count() << '\n';
+    // One bounded write keeps independent worker records from interleaving.
+    const auto line = record.str();
+    const auto logged = write(STDERR_FILENO, line.data(), line.size());
+    (void)logged;
     auto* completed = reply.mutable_completed()->add_extents();
     *completed = extent;
     completed->set_sha256(metrics.sha256);
+  }
+  if (operation == transfer::TransferOperation::kCheckpoint) {
+    // The protocol acknowledges batches, not individual extents. All files
+    // must be durable before that acknowledgment, but independent fsyncs need
+    // not serialize 32 network round trips. The wire batch bounds concurrency.
+    const auto started = std::chrono::steady_clock::now();
+    std::vector<std::future<void>> syncs;
+    for (int index = 0; index < count; ++index) {
+      const int fd = descriptors[count + index].get();
+      syncs.push_back(std::async(std::launch::async, [fd] {
+        if (fsync(fd) != 0)
+          throw std::system_error(errno, std::generic_category(), "sync allocation content");
+      }));
+    }
+    for (auto& sync : syncs)
+      sync.get();
+    const auto line = "allocation_batch_fsync files=" + std::to_string(count) + " seconds=" +
+        std::to_string(std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count()) + "\n";
+    const auto logged = write(STDERR_FILENO, line.data(), line.size());
+    (void)logged;
   }
   return reply;
 }

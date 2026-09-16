@@ -15,7 +15,8 @@ class TransferBuffers {
   ~TransferBuffers();
   bool Transfer(CUdeviceptr device, size_t size, CUstream stream, CUcontext context,
                 const StorageLayout& storage, TransferOperation operation,
-                TransferCancellation* cancellation, TransferMetrics* metrics, std::string* error);
+                TransferCancellation* cancellation, TransferMetrics* metrics, std::string* error,
+                bool sync_file = true);
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
