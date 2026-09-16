@@ -15,12 +15,11 @@ on:
     types: [completed]
   workflow_dispatch:
 
-# Preview publication and Pages deployment both update shared state. Serialize
-# every trigger so two completed benchmark runs cannot overwrite each other.
-concurrency:
-  group: e2e-benchmark-pages
-  cancel-in-progress: false
-
+# Concurrency is set per job, not per workflow: a workflow-level group keeps
+# at most one pending run and cancels earlier pending ones, so a stacked push
+# whose framework runs finish together would silently drop all but two of
+# their previews. Publication is keyed by source run (never contends), and
+# only the Pages deployment itself is serialized.
 permissions:
   contents: read
 
@@ -35,9 +34,13 @@ jobs:
       github.event.workflow_run.conclusion != 'cancelled'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    concurrency:
+      group: e2e-benchmark-pages-publish-${{ github.event.workflow_run.id }}
+      cancel-in-progress: false
     permissions:
       actions: read
       contents: write
+      pages: read
     outputs:
       preview-key: ${{ steps.metadata.outputs.key }}
     steps:
@@ -55,8 +58,11 @@ jobs:
           SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
           set -euo pipefail
+          # head_branch is GitHub-supplied metadata, so a manual dispatch on a
+          # PR mirror branch refreshes that PR's stable preview instead of
+          # publishing a one-off run-<id> preview beside it.
           pull_request=""
-          if [[ "${SOURCE_EVENT}" == "push" && "${SOURCE_BRANCH}" =~ ^pull-request/([1-9][0-9]*)$ ]]; then
+          if [[ "${SOURCE_BRANCH}" =~ ^pull-request/([1-9][0-9]*)$ ]]; then
             pull_request="${BASH_REMATCH[1]}"
             key="pr-${pull_request}"
           else
@@ -73,9 +79,11 @@ jobs:
         run: |
           set -euo pipefail
           comparison_dir="${RUNNER_TEMP}/e2e-framework-benchmark-comparison"
+          # Must match the upload name in e2e-frameworks.yaml
+          # (test_pages_workflow_downloads_the_uploaded_comparison_artifact).
           gh run download "${SOURCE_RUN_ID}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --name "e2e-framework-benchmark-comparison-${SOURCE_RUN_ID}-${SOURCE_RUN_ATTEMPT}" \
+            --name "e2e-benchmark-comparison-${SOURCE_RUN_ID}-${SOURCE_RUN_ATTEMPT}" \
             --dir "${comparison_dir}"
           echo "BENCHMARK_COMPARISON_DIR=${comparison_dir}" >> "${GITHUB_ENV}"
 
@@ -114,8 +122,14 @@ jobs:
           esac
           echo "BENCHMARK_PREVIEWS_WORKTREE=${previews_worktree}" >> "${GITHUB_ENV}"
 
-      - name: Validate and prepare preview index
+      # Publications from different source runs are not serialized, so a
+      # sibling can land on e2e-benchmark-previews between our fetch and our
+      # push. The publisher only rewrites previews/<key> and prunes expired
+      # entries, so on a rejected push we re-sync to the remote tip, regenerate,
+      # and push again.
+      - name: Validate, prepare, and publish preview index
         env:
+          GH_TOKEN: ${{ github.token }}
           HISTORY_DIR: ${{ steps.history.outputs.history_dir }}
           PREVIEW_KEY: ${{ steps.metadata.outputs.key }}
           PREVIEW_PULL_REQUEST: ${{ steps.metadata.outputs.pull-request }}
@@ -131,40 +145,67 @@ jobs:
           if [[ -n "${PREVIEW_PULL_REQUEST}" ]]; then
             preview_args+=(--pull-request "${PREVIEW_PULL_REQUEST}")
           fi
-          PYTHONPATH=e2e python3 -m snapshot_e2e.benchmark_preview \
-            --results-dir "${BENCHMARK_COMPARISON_DIR}/current" \
-            --history-dir "${HISTORY_DIR}" \
-            --previews-dir "${BENCHMARK_PREVIEWS_WORKTREE}/previews" \
-            --key "${PREVIEW_KEY}" \
-            --run-id "${SOURCE_RUN_ID}" \
-            --run-attempt "${SOURCE_RUN_ATTEMPT}" \
-            --source-event "${SOURCE_EVENT}" \
-            --source-branch "${SOURCE_BRANCH}" \
-            --source-commit "${SOURCE_COMMIT}" \
-            --source-run-url "${SOURCE_RUN_URL}" \
-            --retention-days 14 \
-            "${preview_args[@]}"
+          worktree="${BENCHMARK_PREVIEWS_WORKTREE}"
+          git -C "${worktree}" config user.name "github-actions[bot]"
+          git -C "${worktree}" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          gh auth setup-git
 
-      - name: Commit and push expiring preview data
+          for attempt in 1 2 3; do
+            if [[ "${attempt}" -gt 1 ]]; then
+              echo "::notice::Retrying preview publication (${attempt}/3) after a rejected push."
+              git -C "${worktree}" fetch --quiet --depth=1 origin refs/heads/e2e-benchmark-previews
+              git -C "${worktree}" checkout --quiet -B e2e-benchmark-previews FETCH_HEAD
+            fi
+            PYTHONPATH=e2e python3 -m snapshot_e2e.benchmark_preview \
+              --results-dir "${BENCHMARK_COMPARISON_DIR}/current" \
+              --history-dir "${HISTORY_DIR}" \
+              --previews-dir "${worktree}/previews" \
+              --key "${PREVIEW_KEY}" \
+              --run-id "${SOURCE_RUN_ID}" \
+              --run-attempt "${SOURCE_RUN_ATTEMPT}" \
+              --source-event "${SOURCE_EVENT}" \
+              --source-branch "${SOURCE_BRANCH}" \
+              --source-commit "${SOURCE_COMMIT}" \
+              --source-run-url "${SOURCE_RUN_URL}" \
+              --retention-days 14 \
+              "${preview_args[@]}"
+            git -C "${worktree}" add previews
+            if git -C "${worktree}" diff --cached --quiet; then
+              echo "Preview ${PREVIEW_KEY} is already current."
+              exit 0
+            fi
+            git -C "${worktree}" commit --quiet --signoff \
+              --message "data(e2e): preview benchmark run ${SOURCE_RUN_ID}-${SOURCE_RUN_ATTEMPT}"
+            if git -C "${worktree}" push origin HEAD:refs/heads/e2e-benchmark-previews; then
+              exit 0
+            fi
+          done
+          echo "::error::Could not publish preview ${PREVIEW_KEY} after 3 attempts."
+          exit 1
+
+      # The deploy job is serialized and a pending deploy can be cancelled by a
+      # later one, which would also lose its summary link; the preview is on
+      # the data branch at this point, so report the URL from here as well.
+      - name: Report preview URL
         env:
           GH_TOKEN: ${{ github.token }}
           PREVIEW_KEY: ${{ steps.metadata.outputs.key }}
-          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
-          SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
         run: |
           set -euo pipefail
-          git -C "${BENCHMARK_PREVIEWS_WORKTREE}" config user.name "github-actions[bot]"
-          git -C "${BENCHMARK_PREVIEWS_WORKTREE}" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git -C "${BENCHMARK_PREVIEWS_WORKTREE}" add previews
-          if git -C "${BENCHMARK_PREVIEWS_WORKTREE}" diff --cached --quiet; then
-            echo "Preview ${PREVIEW_KEY} is already current."
-            exit 0
-          fi
-          git -C "${BENCHMARK_PREVIEWS_WORKTREE}" commit --signoff \
-            --message "data(e2e): preview benchmark run ${SOURCE_RUN_ID}-${SOURCE_RUN_ATTEMPT}"
-          gh auth setup-git
-          git -C "${BENCHMARK_PREVIEWS_WORKTREE}" push \
-            origin HEAD:refs/heads/e2e-benchmark-previews
+          page_url="$(gh api "repos/${GITHUB_REPOSITORY}/pages" --jq '.html_url' 2>/dev/null || true)"
+          {
+            echo "## Benchmark preview"
+            echo ""
+            if [[ -n "${page_url}" ]]; then
+              echo "[Open ${PREVIEW_KEY} benchmark results](${page_url%/}/previews/${PREVIEW_KEY}/)"
+              echo ""
+              echo "The link goes live once the next Pages deployment in this workflow finishes."
+            else
+              echo "Preview \`${PREVIEW_KEY}\` is published on the \`e2e-benchmark-previews\` branch, but GitHub Pages is not enabled for this repository, so there is no URL to open yet."
+            fi
+            echo ""
+            echo "This preview expires after 14 days and is not written to durable nightly history."
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   build:
     needs: prepare-preview
@@ -290,6 +331,12 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Only the Pages deployment mutates shared state. Queue rather than cancel
+    # an in-flight deployment; a cancelled *pending* deploy is harmless because
+    # the next one rebuilds the whole site from the data branches.
+    concurrency:
+      group: e2e-benchmark-pages-deploy
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ needs.build.outputs.preview-key != '' && format('{0}previews/{1}/', steps.deployment.outputs.page_url, needs.build.outputs.preview-key) || steps.deployment.outputs.page_url }}

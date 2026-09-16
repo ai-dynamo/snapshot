@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -146,11 +147,113 @@ def test_pages_workflow_isolates_preview_write_permissions() -> None:
     publisher = workflow["jobs"]["prepare-preview"]
     builder = workflow["jobs"]["build"]
     deployer = workflow["jobs"]["deploy"]
-    assert publisher["permissions"] == {"actions": "read", "contents": "write"}
+    assert publisher["permissions"] == {
+        "actions": "read",
+        "contents": "write",
+        "pages": "read",
+    }
     assert publisher["steps"][0]["with"]["ref"] == "main"
     assert "workflow_run.event != 'schedule'" in publisher["if"]
-    assert builder["permissions"] == {"contents": "read"}
+    assert builder["permissions"] == {"contents": "read", "pages": "read"}
     assert deployer["permissions"] == {"pages": "write", "id-token": "write"}
+
+
+def test_pages_workflow_never_cancels_a_pending_publication() -> None:
+    workflow = _workflow("e2e-benchmark-pages.yaml")
+
+    # A workflow-level group keeps one pending run and cancels earlier pending
+    # ones, which drops previews whenever several framework runs finish
+    # together; publication must be keyed by source run instead.
+    assert "concurrency" not in workflow
+    publisher = workflow["jobs"]["prepare-preview"]["concurrency"]
+    assert "github.event.workflow_run.id" in publisher["group"]
+    assert publisher["cancel-in-progress"] is False
+    assert "concurrency" not in workflow["jobs"]["build"]
+    deployer = workflow["jobs"]["deploy"]["concurrency"]
+    assert "workflow_run" not in deployer["group"]
+    assert deployer["cancel-in-progress"] is False
+
+
+def test_pages_workflow_downloads_the_uploaded_comparison_artifact() -> None:
+    pages = _workflow("e2e-benchmark-pages.yaml")
+    frameworks = _workflow("e2e-frameworks.yaml")
+
+    download = next(
+        step
+        for step in pages["jobs"]["prepare-preview"]["steps"]
+        if "gh run download" in step.get("run", "")
+    )
+    match = re.search(r'--name\s+"([^"]+)"', download["run"])
+    assert match is not None
+    downloaded = (
+        match.group(1)
+        .replace("${SOURCE_RUN_ID}", "<run>")
+        .replace("${SOURCE_RUN_ATTEMPT}", "<attempt>")
+    )
+
+    uploaded = {
+        step["with"]["name"]
+        .replace("${{ github.run_id }}", "<run>")
+        .replace("${{ github.run_attempt }}", "<attempt>")
+        for job in frameworks["jobs"].values()
+        for step in job.get("steps", [])
+        if "upload-artifact" in step.get("uses", "")
+        and "comparison" in step.get("with", {}).get("name", "")
+    }
+    assert uploaded == {downloaded}
+
+
+def test_prepare_preview_accepts_results_carried_from_earlier_attempts(
+    tmp_path: Path,
+) -> None:
+    results_dir = tmp_path / "current"
+    results_dir.mkdir()
+    carried = _result(case="vllm", run_id="200", run_attempt=1)
+    rerun = _result(case="sglang", run_id="200", run_attempt=2)
+    (results_dir / "vllm.json").write_text(json.dumps(carried), encoding="utf-8")
+    (results_dir / "sglang.json").write_text(json.dumps(rerun), encoding="utf-8")
+
+    metadata = preview.prepare_preview(
+        results_dir=results_dir,
+        history_dir=tmp_path / "history",
+        previews_dir=tmp_path / "previews",
+        key="pr-250",
+        run_id="200",
+        run_attempt=2,
+        source_event="push",
+        source_branch="pull-request/250",
+        source_commit="0123456789abcdef",
+        source_run_url="https://github.com/ai-dynamo/snapshot/actions/runs/200",
+        pull_request=250,
+        generated_at=START,
+    )
+
+    assert metadata["previewRecordCount"] == 2
+
+    (results_dir / "future.json").write_text(
+        json.dumps(_result(case="tensorrt-llm", run_id="200", run_attempt=3)),
+        encoding="utf-8",
+    )
+    with pytest.raises(preview.PreviewValidationError, match="does not belong"):
+        preview.prepare_preview(
+            results_dir=results_dir,
+            history_dir=tmp_path / "history",
+            previews_dir=tmp_path / "previews",
+            key="pr-250",
+            run_id="200",
+            run_attempt=2,
+            source_event="push",
+            source_branch="pull-request/250",
+            source_commit="0123456789abcdef",
+            source_run_url="https://github.com/ai-dynamo/snapshot/actions/runs/200",
+            pull_request=250,
+            generated_at=START,
+        )
+
+
+def _workflow(name: str) -> dict:
+    repository_root = Path(__file__).resolve().parents[2]
+    return yaml.safe_load((repository_root / ".github/workflows" / name).read_text())
 
 
 def _timestamp(value: datetime) -> str:

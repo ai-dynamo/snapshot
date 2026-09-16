@@ -118,13 +118,13 @@ export function measurementStageSegments(
 
 export interface StageRun {
   result: BenchmarkResult;
-  /** Seconds per stage, aligned to a shared stage-name order across runs. */
+  /** Seconds per measurement name, aligned to `StageComparison.stages`. */
   values: ReadonlyMap<string, number>;
 }
 
 export interface StageComparison {
-  /** Stage display names in a stable, shared left-to-right order. */
-  stageNames: string[];
+  /** Measurements in a stable, shared left-to-right order. */
+  stages: Array<{ name: string; displayName: string }>;
   runs: StageRun[];
 }
 
@@ -153,29 +153,31 @@ export function recentStageComparison(
     .sort((left, right) => Date.parse(right.startedAt) - Date.parse(left.startedAt))
     .slice(0, count);
 
+  // Keyed by measurement `name`, the field the validator guarantees unique;
+  // two measurements may legitimately share a displayName.
   const breakdowns = results.map((result) => measurementStageSegments(result, selectedMetrics));
   const seen = new Set<string>();
   const discovered: StageSegment[] = [];
   for (const segments of breakdowns) {
     for (const segment of segments) {
-      if (!seen.has(segment.displayName)) {
-        seen.add(segment.displayName);
+      if (!seen.has(segment.name)) {
+        seen.add(segment.name);
         discovered.push(segment);
       }
     }
   }
   discovered.sort((a, b) => stagePrefixRank(a.name) - stagePrefixRank(b.name));
-  const stageNames = discovered.map((segment) => segment.displayName);
+  const stages = discovered.map(({ name, displayName }) => ({ name, displayName }));
 
   const runs: StageRun[] = results.map((result, index) => {
     const values = new Map<string, number>();
     for (const segment of breakdowns[index]!) {
-      values.set(segment.displayName, (values.get(segment.displayName) ?? 0) + segment.seconds);
+      values.set(segment.name, (values.get(segment.name) ?? 0) + segment.seconds);
     }
     return { result, values };
   });
 
-  return { stageNames, runs };
+  return { stages, runs };
 }
 
 export interface HistoryWarning {

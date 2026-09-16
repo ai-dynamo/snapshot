@@ -178,7 +178,12 @@ def _load_current_results(
         except ResultValidationError as exc:
             raise PreviewValidationError(str(exc)) from exc
         identity = result["identity"]
-        if str(identity["runId"]) != run_id or int(identity["runAttempt"]) != run_attempt:
+        # Same rule as collect_current_results: "Re-run failed jobs" carries a
+        # passing framework forward with its original attempt number, so any
+        # attempt up to the triggering one belongs to this bundle. The artifact
+        # name already pins the bundle to the exact attempt that produced it.
+        attempt = int(identity["runAttempt"])
+        if str(identity["runId"]) != run_id or not 1 <= attempt <= run_attempt:
             raise PreviewValidationError(
                 f"{path.name} does not belong to workflow run {run_id}-{run_attempt}"
             )

@@ -119,6 +119,12 @@ const STAGE_COLORS = [
   "#8a5cf6",
 ] as const;
 
+// Colour by measurement name, not by position in the current selection, so a
+// stage keeps its colour when other measurements are checked or unchecked.
+function stageColor(name: string): string {
+  return STAGE_COLORS[caseColorIndex(name, STAGE_COLORS.length)]!;
+}
+
 async function start() {
   try {
     const root = new URL("./", document.baseURI);
@@ -769,7 +775,7 @@ function renderStageComparisonCharts(
       STAGE_COMPARISON_RUN_COUNT,
       selectedMetrics,
     );
-    if (comparison.runs.length === 0 || comparison.stageNames.length === 0) continue;
+    if (comparison.runs.length === 0 || comparison.stages.length === 0) continue;
 
     const card = document.createElement("article");
     card.className = "chart-card";
@@ -801,10 +807,10 @@ function renderStageComparisonCharts(
       type: "bar",
       data: {
         labels,
-        datasets: comparison.stageNames.map((name, index): ChartDataset<"bar", number[]> => ({
-          label: name,
-          data: runs.map((run) => run.values.get(name) ?? 0),
-          backgroundColor: STAGE_COLORS[index % STAGE_COLORS.length],
+        datasets: comparison.stages.map((stage): ChartDataset<"bar", number[]> => ({
+          label: stage.displayName,
+          data: runs.map((run) => run.values.get(stage.name) ?? 0),
+          backgroundColor: stageColor(stage.name),
           stack: "timeline",
         })),
       },
@@ -854,10 +860,10 @@ function renderStageBreakdown(result: BenchmarkResult): void {
     type: "bar",
     data: {
       labels: ["Timeline"],
-      datasets: segments.map((segment, index): ChartDataset<"bar", number[]> => ({
+      datasets: segments.map((segment): ChartDataset<"bar", number[]> => ({
         label: segment.displayName,
         data: [segment.seconds],
-        backgroundColor: STAGE_COLORS[index % STAGE_COLORS.length],
+        backgroundColor: stageColor(segment.name),
         stack: "timeline",
       })),
     },
