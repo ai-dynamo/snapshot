@@ -282,7 +282,11 @@ through bounded pinned buffers into POSIX files. It reuses the helper's transfer
 contracts and digest code, not its native checkpoint operation service. This
 implementation transfers allocations serially within each participant; participants run concurrently. Each worker caches device UUIDs and retains one primary-context reference, stream, and two-slot pinned transfer ring per used GPU across batches. Allocation-specific imported handles and mappings are released before each reply. The ring overlaps storage I/O with DMA and is reused on both SAVE and LOAD; only the broker worker copies bytes. Per-allocation diagnostics distinguish mapping setup, buffer setup, pipeline time, CUDA waits, storage I/O, file synchronization, and cleanup. It is not a direct-to-storage GPU or NIXL path.
 
-The existing staged-checkpoint and staged-restore RPC contracts are unchanged. Publication moves staging to the partial publication name with a same-filesystem rename, then publishes it under the final name; cross-filesystem publication retains the copying path. A failed publication moves staged input back for retry or abort. Restore staging creates an independently writable transaction-owned directory: files use filesystem reflinks when supported, then `copy_file_range` (which can use NFS server-side COPY), then ordinary copying where neither is supported. No hard links or borrowed source-directory aliases are returned. Consequently restore mutation and cleanup cannot modify or delete the published artifact. These filesystem optimizations do not enable NIXL or CRIU compression, and a filesystem lacking clone/offloaded-copy support still incurs restore copying.
+Publication moves staging to the partial publication name with a same-filesystem rename, then publishes it under the final name; cross-filesystem publication retains the copying path. A failed publication moves staged input back for retry or abort.
+
+PageBroker allocation restore uses `DirectRestoreRequest`, not `StagedRestoreRequest`. The broker retains a read-only descriptor to the published source, and LOAD sessions open allocation manifests and content relative to it. `DirectRestoreReady` means the source is available for subsequent LOAD requests, not that CUDA memory is already restored. No allocation files are copied, cloned, or hard-linked into a restore directory. Commit, abort, and expiry release source references without deleting the artifact; the caller keeps the artifact available throughout the transaction.
+
+CPU/native state uses the existing read-only artifact mount and CRIU's private replacement metadata and scratch directory. Large CRIU images are not staged merely because allocation content uses PageBroker. The separate staged-restore contract remains available for callers that require an independently writable copy. Direct restore avoids filesystem staging; the CUDA worker still transfers through bounded pinned buffers, and this does not enable NIXL, GPUDirect Storage, or CRIU compression.
 
 `manifest.yaml` records `cuinterpose.allocationStorage: pagebroker`; an absent
 field means host-carrier, and unknown modes fail before restore. Files are
@@ -308,6 +312,8 @@ sequenceDiagram
     participant Broker as PageBroker
     participant Worker as Allocation worker
     Agent->>Coordinator: Read captured participant identities
+    Agent->>Broker: DirectRestore from published artifact
+    Broker-->>Agent: DirectRestoreReady with source retained
     Agent->>Broker: Bind LOAD sessions before CRIU
     Broker-->>Agent: Validated manifests, file geometry, worker readiness
     Agent->>Agent: CRIU and regular native CUDA restore
@@ -316,7 +322,8 @@ sequenceDiagram
     Coordinator->>Shim: LOAD_ALLOCATIONS with matching session FD
     Shim->>Shim: Create and export fresh device backing
     Shim->>Broker: Destination UUIDs and fresh export FDs
-    Broker->>Worker: Fill imported backing and verify digests
+    Broker->>Worker: Published content FDs and destination allocation FDs
+    Worker->>Worker: Read source, fill imported backing, verify digests
     Worker-->>Broker: DMA drained and imported references released
     Broker-->>Shim: Exact allocation coverage completed
     Shim->>Shim: Remap addresses, access grants, and peer export cache

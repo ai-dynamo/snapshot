@@ -180,16 +180,24 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		transactionID = uuid.NewString()
 		broker = pagebroker.Client{ControlSocketPath: req.PageBrokerControlSocketPath}
 		stageStart := time.Now()
-		staged, err := broker.StagedRestore(ctx, transactionID, artifactPath)
-		pageBrokerStageDuration = time.Since(stageStart)
-		if err != nil {
-			return 0, fmt.Errorf("stage PageBroker restore: %w", err)
+		if manifest.Cuinterpose.AllocationStorage == "pagebroker" {
+			// GPU contents stay in the published artifact. CRIU uses the normal
+			// read-only artifact mount and its private writable image view.
+			if err := broker.DirectRestore(ctx, transactionID, artifactPath); err != nil {
+				return 0, fmt.Errorf("prepare direct PageBroker restore: %w", err)
+			}
+		} else {
+			staged, err := broker.StagedRestore(ctx, transactionID, artifactPath)
+			if err != nil {
+				return 0, fmt.Errorf("stage PageBroker restore: %w", err)
+			}
+			stagedPath = staged
 		}
-		stagedPath = staged
+		pageBrokerStageDuration = time.Since(stageStart)
 	}
 	var sessions cuda.AllocationSessions
 	if manifest.Cuinterpose.AllocationStorage == "pagebroker" {
-		ids, err := cuda.CapturedParticipants(ctx, stagedPath, manifest.CUDA.PIDs)
+		ids, err := cuda.CapturedParticipants(ctx, artifactPath, manifest.CUDA.PIDs)
 		if err != nil {
 			return 0, err
 		}
@@ -215,12 +223,14 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
 	}
-	if brokered {
+	if stagedPath != "" {
 		stagingMount := activeMounts[len(activeMounts)-1]
 		if err := stagingMount.point.Unmount(ctx); err != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("%s: %w", stagingMount.action, err))
 		}
 		activeMounts = activeMounts[:len(activeMounts)-1]
+	}
+	if brokered {
 		commitStart := time.Now()
 		if err := broker.Commit(ctx, transactionID); err != nil {
 			log.Error(err, "failed to commit PageBroker restore")

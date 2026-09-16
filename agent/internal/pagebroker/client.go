@@ -33,6 +33,21 @@ type Client struct {
 	ControlSocketPath string
 }
 
+// DirectRestore retains a published source for allocation LOAD sessions without
+// copying it. The caller must keep the artifact available until Commit or Abort.
+func (c Client) DirectRestore(ctx context.Context, transactionID, source string) error {
+	response, err := c.request(ctx, transactionID, &Request_DirectRestore{
+		DirectRestore: &DirectRestoreRequest{Source: filesystem(source), IoEngine: posixCopy()},
+	})
+	if err != nil {
+		return err
+	}
+	if response.GetDirectRestoreReady() == nil {
+		return fmt.Errorf("unexpected PageBroker direct restore response")
+	}
+	return nil
+}
+
 // BindAllocations consumes the general broker connection and returns only a
 // participant-scoped capability. The caller must close it before aborting.
 func (c Client) BindAllocations(ctx context.Context, transactionID, participant string, direction BindAllocationSession_Direction) (*os.File, error) {
