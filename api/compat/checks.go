@@ -272,7 +272,7 @@ var migPartitioningCheck = check{
 		if !sourceOK || !targetOK || sourceKinds == targetKinds {
 			return nil
 		}
-		return []Mismatch{{Source: sourceKinds, Target: targetKinds}}
+		return []Mismatch{{Source: sourceKinds.String(), Target: targetKinds.String()}}
 	},
 }
 
@@ -355,31 +355,51 @@ const (
 	wholeGPU = "whole GPU"
 )
 
-// gpuPartitioning summarises whether the visible GPUs are whole devices or MIG
-// slices. It reads UUID rather than MIGProfile so that it also holds for an
-// artifact captured before any profile was recorded: the UUIDs have been
-// recorded since the first release, and only a slice carries the MIG- prefix.
-//
-// Which kinds are present is a categorical question, so the counts are left
-// out: how many devices there are is gpu-count's, and how they are shaped is
-// mig-profile's, which does keep them.
-func gpuPartitioning(devices []GPUDevice) (string, bool) {
-	if len(devices) == 0 {
-		return "", false
+// partitioning is which kinds of device a set of GPUs holds. Under the device
+// plugin's mixed MIG strategy slices and whole cards are separate resources, so
+// one set can hold both and has to compare as neither pure set.
+type partitioning struct {
+	whole bool
+	slice bool
+}
+
+// String names the kinds present, in a fixed order so a refusal always reads
+// the same way. Which kinds are present is a categorical question, so the
+// counts are left out: how many devices there are is gpu-count's, and how they
+// are shaped is mig-profile's, which does keep them.
+func (p partitioning) String() string {
+	switch {
+	case p.slice && p.whole:
+		return migSlice + ", " + wholeGPU
+	case p.slice:
+		return migSlice
+	case p.whole:
+		return wholeGPU
+	default:
+		return ""
 	}
-	kinds := make([]string, 0, len(devices))
+}
+
+// gpuPartitioning reads UUID rather than MIGProfile so that it also holds for
+// an artifact captured before any profile was recorded: the UUIDs have been
+// recorded since the first release, and only a slice carries the MIG- prefix.
+func gpuPartitioning(devices []GPUDevice) (partitioning, bool) {
+	if len(devices) == 0 {
+		return partitioning{}, false
+	}
+	var kinds partitioning
 	for _, device := range devices {
 		uuid := strings.TrimSpace(device.UUID)
 		if uuid == "" {
-			return "", false
+			return partitioning{}, false
 		}
 		if strings.HasPrefix(uuid, migUUIDPrefix) {
-			kinds = append(kinds, migSlice)
+			kinds.slice = true
 			continue
 		}
-		kinds = append(kinds, wholeGPU)
+		kinds.whole = true
 	}
-	return distinctSorted(kinds), true
+	return kinds, true
 }
 
 // gpuMIGProfiles summarises the shape of every slice among the visible GPUs,
@@ -402,22 +422,6 @@ func gpuMIGProfiles(devices []GPUDevice) (string, bool) {
 		return "", false
 	}
 	return summariseByCount(profiles), true
-}
-
-// distinctSorted renders which values are present, ignoring how many devices
-// share each. Sorting ignores allocation order, which is #246's concern.
-func distinctSorted(values []string) string {
-	seen := make(map[string]struct{}, len(values))
-	distinct := make([]string, 0, len(values))
-	for _, value := range values {
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		distinct = append(distinct, value)
-	}
-	sort.Strings(distinct)
-	return strings.Join(distinct, ", ")
 }
 
 // summariseByCount renders a stable multiset summary: sorting ignores
