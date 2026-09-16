@@ -467,7 +467,7 @@ jobs:
   benchmark-history-read-only:
     name: compare framework benchmark history
     needs: e2e
-    if: ${{ always() && !(github.event_name == 'schedule' && github.ref == 'refs/heads/main') }}
+    if: ${{ !cancelled() && !(github.event_name == 'schedule' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -533,7 +533,10 @@ jobs:
   benchmark-history-publish:
     name: publish framework benchmark history
     needs: e2e
-    if: ${{ always() && github.event_name == 'schedule' && github.ref == 'refs/heads/main' }}
+    # !cancelled(), not always(): an operator-cancelled nightly must not
+    # synthesize and permanently publish infrastructure_failed records that
+    # identity dedup then stops a re-run from replacing.
+    if: ${{ !cancelled() && github.event_name == 'schedule' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     concurrency:

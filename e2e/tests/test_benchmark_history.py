@@ -476,6 +476,9 @@ def test_only_scheduled_main_history_job_has_write_permission() -> None:
     assert "github.event_name == 'schedule'" in publisher["if"]
     assert "github.ref == 'refs/heads/main'" in publisher["if"]
     assert publisher["concurrency"]["cancel-in-progress"] is False
+    for job in (read_only, publisher):
+        assert "!cancelled()" in job["if"]
+        assert "always()" not in job["if"]
 
 
 def _result(
