@@ -59,6 +59,10 @@ func (r *restoreFakeRuntime) ResolveContainerImageID(_ context.Context, _ string
 	return r.imageID, r.imageIDError
 }
 
+func (r *restoreFakeRuntime) TerminateContainer(context.Context, string) error {
+	return errors.New("not implemented")
+}
+
 func (r *restoreFakeRuntime) Close() error { return nil }
 
 func TestInspectRestoreUsesContainerIDWhenProvided(t *testing.T) {

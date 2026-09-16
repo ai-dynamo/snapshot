@@ -84,6 +84,10 @@ func (r *fakeRuntime) ResolveContainerImageID(_ context.Context, _ string) (stri
 	return "", errors.New("not implemented")
 }
 
+func (r *fakeRuntime) TerminateContainer(_ context.Context, _ string) error {
+	return errors.New("not implemented")
+}
+
 func (r *fakeRuntime) Close() error { return nil }
 
 type noopInjector struct{}
