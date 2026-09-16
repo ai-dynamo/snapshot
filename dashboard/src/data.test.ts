@@ -199,6 +199,42 @@ describe("history loading", () => {
     expect(all.pendingChunks).toEqual([]);
   });
 
+  it("keeps chunks whose fetch returned an error pending and retries them later", async () => {
+    let failing = new Set(["index/v1/2026-08.ndjson", "index/v1/2026-03.ndjson"]);
+    const requested: string[] = [];
+    const flaky = (async (input: string | URL | Request) => {
+      const url = new URL(input instanceof Request ? input.url : input);
+      if (failing.has(url.pathname.replace(/^\//, ""))) {
+        return new Response("upstream error", { status: 502 });
+      }
+      return fakeFetch(requested)(input);
+    }) as typeof fetch;
+
+    // An eager chunk that fails stays pending rather than counting as loaded.
+    const recent = await loadHistory("http://dashboard.test/", flaky, { recentDays: 90 });
+    expect(recent.records.map((item) => item.identity.runId)).toEqual(["3"]);
+    expect(recent.pendingChunks.map((chunk) => chunk.path)).toEqual([
+      "index/v1/2026-08.ndjson",
+      "index/v1/2026-03.ndjson",
+    ]);
+    expect(recent.warnings).toEqual([]);
+    expect(recent.loadFailures).toMatchObject([
+      { code: "network", path: "index/v1/2026-08.ndjson" },
+    ]);
+
+    // A failed on-demand load keeps the failed month pending too.
+    const attempted = await loadRemainingHistory(recent, flaky);
+    expect(attempted.records.map((item) => item.identity.runId)).toEqual(["3"]);
+    expect(attempted.pendingChunks).toEqual(recent.pendingChunks);
+    expect(attempted.loadFailures).toHaveLength(2);
+
+    failing = new Set();
+    const complete = await loadRemainingHistory(attempted, flaky);
+    expect(complete.records.map((item) => item.identity.runId)).toEqual(["1", "2", "3"]);
+    expect(complete.pendingChunks).toEqual([]);
+    expect(complete.loadFailures).toEqual([]);
+  });
+
   it("asks for pending chunks only when the selected suite's window reaches them", async () => {
     const recent = await loadHistory("http://dashboard.test/", fakeFetch([]), {
       recentDays: 90,

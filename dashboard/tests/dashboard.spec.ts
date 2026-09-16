@@ -148,6 +148,31 @@ test("reports a failed on-demand load and keeps the view consistent", async ({ p
   await expect(status).toContainText("Loaded 6 benchmark results");
 });
 
+test("keeps a month whose index returned an error pending and retries it", async ({ page }) => {
+  let failing = true;
+  await page.route("**/index/v1/2026-06.ndjson", async (route) => {
+    if (failing) {
+      await route.fulfill({ status: 502, body: "upstream error" });
+    } else {
+      await route.continue();
+    }
+  });
+
+  await page.goto("/");
+  await page.getByLabel("Date range").selectOption("all");
+
+  const status = page.getByRole("status");
+  await expect(status).toContainText("Could not load index/v1/2026-06.ndjson (502)");
+  await expect(status).toContainText("from 2 of 3 monthly indexes");
+  await expect(status).toHaveClass(/status--error/);
+  await expect(page.locator("#latest-body tr")).toHaveCount(5);
+
+  failing = false;
+  await page.getByLabel("Date range").selectOption("180");
+  await expect(status).toContainText("Loaded 8 benchmark results from 3 of 3 monthly indexes");
+  await expect(status).not.toHaveClass(/status--error/);
+});
+
 test("discovers a new suite and metric without UI code changes", async ({ page }) => {
   await page.goto("/");
   await page.getByLabel("Suite").selectOption("storage-throughput");

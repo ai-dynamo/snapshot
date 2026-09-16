@@ -95,7 +95,10 @@ export interface LoadedHistory {
   manifest: HistoryManifest;
   records: BenchmarkResult[];
   warnings: HistoryWarning[];
+  /** Chunks not loaded yet, including any whose last fetch failed. */
   pendingChunks: HistoryChunk[];
+  /** Non-OK responses from the most recent fetch; those chunks stay pending. */
+  loadFailures: HistoryWarning[];
 }
 
 export interface LoadOptions {
@@ -373,7 +376,14 @@ export async function loadHistory(
   );
   const pending = manifest.chunks.filter((chunk) => !eager.includes(chunk));
   const loaded = await fetchChunks(root, eager, fetchImpl);
-  return assembleHistory(root.href, manifest, loaded.records, loaded.warnings, pending);
+  return assembleHistory(
+    root.href,
+    manifest,
+    loaded.records,
+    loaded.warnings,
+    [...loaded.failed, ...pending],
+    loaded.failures,
+  );
 }
 
 export async function loadRemainingHistory(
@@ -387,7 +397,8 @@ export async function loadRemainingHistory(
     history.manifest,
     [...history.records, ...loaded.records],
     [...history.warnings, ...loaded.warnings],
-    [],
+    loaded.failed,
+    loaded.failures,
   );
 }
 
@@ -395,14 +406,24 @@ async function fetchChunks(
   root: URL,
   chunks: readonly HistoryChunk[],
   fetchImpl: typeof fetch,
-): Promise<{ records: BenchmarkResult[]; warnings: HistoryWarning[] }> {
+): Promise<{
+  records: BenchmarkResult[];
+  warnings: HistoryWarning[];
+  failed: HistoryChunk[];
+  failures: HistoryWarning[];
+}> {
+  // A non-OK response is a transport failure, not a data problem: the chunk
+  // is reported separately and stays pending so a later load retries it,
+  // instead of being counted as loaded with a record warning.
   const results = await Promise.all(
     chunks.map(async (chunk) => {
       const response = await fetchImpl(new URL(chunk.path, root));
       if (!response.ok) {
         return {
           records: [] as BenchmarkResult[],
-          warnings: [
+          warnings: [] as HistoryWarning[],
+          failed: [chunk],
+          failures: [
             {
               code: "network",
               message: `Could not load ${chunk.path} (${response.status})`,
@@ -415,12 +436,16 @@ async function fetchChunks(
       return {
         records: parsed.records,
         warnings: parsed.warnings.map((warning) => ({ ...warning, path: chunk.path })),
+        failed: [] as HistoryChunk[],
+        failures: [] as HistoryWarning[],
       };
     }),
   );
   return {
     records: results.flatMap((item) => item.records),
     warnings: results.flatMap((item) => item.warnings),
+    failed: results.flatMap((item) => item.failed),
+    failures: results.flatMap((item) => item.failures),
   };
 }
 
@@ -430,6 +455,7 @@ function assembleHistory(
   records: readonly BenchmarkResult[],
   warnings: readonly HistoryWarning[],
   pendingChunks: HistoryChunk[],
+  loadFailures: HistoryWarning[],
 ): LoadedHistory {
   const unique = new Map<string, BenchmarkResult>();
   const duplicates: HistoryWarning[] = [];
@@ -447,6 +473,7 @@ function assembleHistory(
     records: [...unique.values()].sort(compareResults),
     warnings: [...warnings, ...duplicates],
     pendingChunks,
+    loadFailures,
   };
 }
 

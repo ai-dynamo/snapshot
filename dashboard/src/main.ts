@@ -140,6 +140,13 @@ function renderStatus() {
       `${history.warnings.length} record warning${history.warnings.length === 1 ? "" : "s"}`,
     );
   }
+  if (history.loadFailures.length) {
+    elements.status.classList.add("status--error");
+    parts.push(
+      ...history.loadFailures.map((failure) => failure.message),
+      "those months stay pending; change the date range or suite to retry",
+    );
+  }
   elements.status.textContent = `${parts.join(" · ")}.`;
   renderWarnings();
 }
