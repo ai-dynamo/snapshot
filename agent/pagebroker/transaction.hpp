@@ -6,6 +6,8 @@
 #include <chrono>
 #include <mutex>
 #include <variant>
+#include <set>
+#include <string>
 
 #include "checkpoint_transaction_descriptor.hpp"
 #include "restore_transaction_descriptor.hpp"
@@ -32,6 +34,13 @@ class Transaction {
   void clear_descriptor();
   bool retain_terminal();
   bool expired(std::chrono::steady_clock::time_point now, std::chrono::steady_clock::duration lifetime) const;
+
+  // Protected by mutex(). Sessions own admission until their worker exits.
+  // A failed/unfinished session makes publication invalid, but permits Abort
+  // after the last worker has drained. Participant IDs cannot be rebound.
+  size_t allocation_sessions = 0;
+  bool allocation_failed = false;
+  std::set<std::string> allocation_participants;
 
  private:
   std::mutex mutex_;
