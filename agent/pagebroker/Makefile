@@ -30,3 +30,18 @@ test: generate $(BROKER_SOURCES) daemon_test.cpp
 	mkdir -p build
 	c++ -I. -std=c++20 -Wall -Werror $(BROKER_SOURCES) daemon_test.cpp v1/pagebroker.pb.cc -lprotobuf $(GTEST_FLAGS) -o build/pagebroker-test
 	./build/pagebroker-test
+
+.PHONY: test-allocations
+test-allocations: daemon
+	mkdir -p build
+	protoc --proto_path=. --python_out=build $(PROTO)
+	python3 allocation_session_test.py
+
+.PHONY: test-allocation-transfer
+test-allocation-transfer: generate
+	mkdir -p build
+	$(CXX) -std=c++20 -Wall -Wextra -Werror -I. -I$(CUDA_ROOT)/include -I$(TRANSFER_DIR) \
+		cuda_posix_transfer_test.cpp cuda_posix_transfer.cpp file_descriptor.cpp \
+		$(TRANSFER_DIR)/transfer_config.cpp $(TRANSFER_DIR)/content_digest.cpp \
+		-lcrypto $(GTEST_FLAGS) -o build/allocation-transfer-test
+	./build/allocation-transfer-test
