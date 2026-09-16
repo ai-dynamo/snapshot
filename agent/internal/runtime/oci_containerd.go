@@ -7,13 +7,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	internalapi "k8s.io/cri-api/pkg/apis"
-	remote "k8s.io/cri-client/pkg"
 )
 
 // k8sNamespace is containerd's conventional namespace for kubelet-managed
@@ -30,7 +28,7 @@ func NewContainerdRuntime(socket string) (*ContainerdRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial containerd at %s: %w", socket, err)
 	}
-	cri, err := remote.NewRemoteRuntimeService(context.Background(), socket, 2*time.Second, nil, false)
+	cri, err := newRemoteRuntimeService(socket)
 	if err != nil {
 		_ = client.Close()
 		return nil, fmt.Errorf("failed to dial containerd CRI at %s: %w", socket, err)
@@ -51,7 +49,7 @@ func (r *ContainerdRuntime) TerminateContainer(ctx context.Context, containerID 
 	if err != nil {
 		return fmt.Errorf("invalid containerd container ID %q: %w", containerID, err)
 	}
-	if err := r.cri.StopContainer(ctx, id, 0); err != nil {
+	if err := stopContainerIfPresent(ctx, r.cri, id); err != nil {
 		return fmt.Errorf("failed to terminate container %s: %w", containerID, err)
 	}
 	return nil

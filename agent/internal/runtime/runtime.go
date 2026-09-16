@@ -10,9 +10,14 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	securejoin "github.com/cyphar/filepath-securejoin"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	internalapi "k8s.io/cri-api/pkg/apis"
+	remote "k8s.io/cri-client/pkg"
 )
 
 // Default socket paths and runtime-type identifiers.
@@ -22,6 +27,9 @@ const (
 
 	RuntimeContainerd = "containerd"
 	RuntimeCRIO       = "crio"
+
+	criConnectTimeout = 2 * time.Second
+	criCallTimeout    = 10 * time.Second
 )
 
 // Runtime abstracts the container-identity APIs behind a two-backend switch.
@@ -31,9 +39,9 @@ type Runtime interface {
 	ResolveContainerIDByPod(ctx context.Context, pod, ns, ctr string) (string, error)
 	ResolveContainerByPod(ctx context.Context, pod, ns, ctr string) (int, *specs.Spec, error)
 	ResolveContainerImageID(ctx context.Context, id string) (string, error)
-	// TerminateContainer stops the container identified by its runtime ID with
-	// zero grace. Unlike signaling a resolved PID, the runtime performs the
-	// final identity check and cannot target a process that reused the PID.
+	// TerminateContainer requests zero-grace termination through CRI using the
+	// runtime container ID. Implementations validate any supplied runtime scheme
+	// before dispatch.
 	TerminateContainer(ctx context.Context, id string) error
 	Close() error
 }
@@ -81,6 +89,30 @@ func containerIDForRuntime(id string, allowedSchemes ...string) (string, error) 
 		return "", errors.New("container ID uses an unknown runtime scheme")
 	}
 	return id, nil
+}
+
+// newRemoteRuntimeService bounds connection establishment separately from the
+// timeout that cri-client stores and reapplies to runtime RPCs.
+func newRemoteRuntimeService(socket string) (internalapi.RuntimeService, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), criConnectTimeout)
+	defer cancel()
+	// The context and useStreaming arguments were added in cri-client v0.36.2
+	// (CVE pin); re-check this call when Dynamo updates that dependency.
+	return remote.NewRemoteRuntimeService(ctx, socket, criCallTimeout, nil, false)
+}
+
+// stopContainerIfPresent is the shared desired-state operation for retrying
+// recovery and finalizer callers. A missing container already satisfies the
+// postcondition; every other CRI error remains actionable.
+func stopContainerIfPresent(ctx context.Context, service internalapi.RuntimeService, id string) error {
+	ctx, cancel := context.WithTimeout(ctx, criCallTimeout)
+	defer cancel()
+
+	err := service.StopContainer(ctx, id, 0)
+	if status.Code(err) == codes.NotFound {
+		return nil
+	}
+	return err
 }
 
 // defaultSocketFor returns the conventional socket path for a runtime type.

@@ -7,8 +7,11 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	internalapi "k8s.io/cri-api/pkg/apis"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 	critesting "k8s.io/cri-api/pkg/apis/testing"
@@ -16,16 +19,19 @@ import (
 
 type recordingRuntimeService struct {
 	*critesting.FakeRuntimeService
-	stopCalls   int
-	stopID      string
-	stopTimeout int64
-	stopErr     error
+	stopCalls    int
+	stopID       string
+	stopTimeout  int64
+	stopErr      error
+	stopDeadline time.Time
+	hasDeadline  bool
 }
 
 func (s *recordingRuntimeService) StopContainer(ctx context.Context, id string, timeout int64) error {
 	s.stopCalls++
 	s.stopID = id
 	s.stopTimeout = timeout
+	s.stopDeadline, s.hasDeadline = ctx.Deadline()
 	if s.stopErr != nil {
 		return s.stopErr
 	}
@@ -91,6 +97,7 @@ func TestTerminateContainerUsesMatchingRuntimeIdentity(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			service, container := newRecordingRuntimeService()
+			started := time.Now()
 
 			err := test.withRuntime(service).TerminateContainer(context.Background(), test.containerID)
 
@@ -98,6 +105,47 @@ func TestTerminateContainerUsesMatchingRuntimeIdentity(t *testing.T) {
 			require.Equal(t, 1, service.stopCalls)
 			require.Equal(t, "container-id", service.stopID)
 			require.Zero(t, service.stopTimeout)
+			require.True(t, service.hasDeadline)
+			require.WithinDuration(t, started.Add(criCallTimeout), service.stopDeadline, time.Second)
+			require.Equal(t, runtimeapi.ContainerState_CONTAINER_EXITED, container.State)
+		})
+	}
+}
+
+func TestTerminateContainerIsIdempotentWhenContainerIsGone(t *testing.T) {
+	tests := []struct {
+		name        string
+		withRuntime func(internalapi.RuntimeService) Runtime
+		containerID string
+	}{
+		{
+			name: "containerd",
+			withRuntime: func(service internalapi.RuntimeService) Runtime {
+				return &ContainerdRuntime{cri: service}
+			},
+			containerID: "containerd://container-id",
+		},
+		{
+			name: "CRI-O",
+			withRuntime: func(service internalapi.RuntimeService) Runtime {
+				return &CRIORuntime{svc: service}
+			},
+			containerID: "cri-o://container-id",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service, container := newRecordingRuntimeService()
+			runtime := test.withRuntime(service)
+
+			require.NoError(t, runtime.TerminateContainer(context.Background(), test.containerID))
+			service.stopErr = status.Error(codes.NotFound, "container is gone")
+			require.NoError(t, runtime.TerminateContainer(context.Background(), test.containerID))
+
+			require.Equal(t, 2, service.stopCalls)
+			require.Equal(t, "container-id", service.stopID)
+			require.True(t, service.hasDeadline)
 			require.Equal(t, runtimeapi.ContainerState_CONTAINER_EXITED, container.State)
 		})
 	}
@@ -187,6 +235,18 @@ func TestTerminateContainerPreservesContextAndBackendErrors(t *testing.T) {
 
 		require.ErrorIs(t, err, backendErr)
 		require.ErrorContains(t, err, "cri-o://container-id")
+		require.Equal(t, 1, service.stopCalls)
+		require.Equal(t, runtimeapi.ContainerState_CONTAINER_RUNNING, container.State)
+	})
+
+	t.Run("non-NotFound gRPC error", func(t *testing.T) {
+		service, container := newRecordingRuntimeService()
+		service.stopErr = status.Error(codes.Unavailable, "runtime unavailable")
+
+		err := (&ContainerdRuntime{cri: service}).TerminateContainer(context.Background(), "containerd://container-id")
+
+		require.Equal(t, codes.Unavailable, status.Code(err))
+		require.ErrorContains(t, err, "containerd://container-id")
 		require.Equal(t, 1, service.stopCalls)
 		require.Equal(t, runtimeapi.ContainerState_CONTAINER_RUNNING, container.State)
 	})
