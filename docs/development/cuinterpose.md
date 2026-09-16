@@ -280,13 +280,15 @@ sequenceDiagram
 The worker imports CUDA backing using ordinary public VMM APIs and copies
 through bounded pinned buffers into POSIX files. It reuses the helper's transfer
 contracts and digest code, not its native checkpoint operation service. This
-implementation transfers allocations serially within each participant; participants run concurrently. Each worker caches device UUIDs and retains one primary-context reference, stream, and two-slot pinned transfer ring per used GPU across batches. Allocation-specific imported handles and mappings are released before each reply. The ring overlaps storage I/O with DMA and is reused on both SAVE and LOAD; only the broker worker copies bytes. Per-allocation diagnostics distinguish mapping setup, buffer setup, pipeline time, CUDA waits, storage I/O, file synchronization, and cleanup. It is not a direct-to-storage GPU or NIXL path.
+implementation transfers allocations serially within each participant; participants run concurrently. Each worker caches device UUIDs and retains one primary-context reference, stream, and four-slot pinned transfer ring per used GPU across batches. The GPU broker image uses the pinned NIXL POSIX backend under `agent/pagebroker`: storage requests operate on the worker's registered host buffers, not the shim's address space. The ring submits multiple storage requests and overlaps their completion with hashing and CUDA copies. Allocation-specific imported handles and mappings are released before each reply. SAVE synchronizes the batch's independent content files concurrently and acknowledges only after every file is durable. Digest verification remains enabled on LOAD. Diagnostics distinguish mapping setup, buffer setup, pipeline time, CUDA waits, storage I/O, batch synchronization, and cleanup. This is buffered NIXL POSIX I/O, not GPUDirect Storage, and does not settle the generic storage-engine/worker boundary.
+
+The broker worker's `PAGEBROKER_ALLOCATION_DIRECT_IO=1` setting enables aligned `O_DIRECT` storage reads and writes, avoiding page-cache double buffering for large allocation files. It requires aligned ranges and filesystem support and fails rather than silently reverting to buffered I/O. The default is buffered. Both modes retain content digest verification and the batch durability barrier; this setting belongs to the broker, not the workload shim.
 
 Publication moves staging to the partial publication name with a same-filesystem rename, then publishes it under the final name; cross-filesystem publication retains the copying path. A failed publication moves staged input back for retry or abort.
 
 PageBroker allocation restore uses `DirectRestoreRequest`, not `StagedRestoreRequest`. The broker retains a read-only descriptor to the published source, and LOAD sessions open allocation manifests and content relative to it. `DirectRestoreReady` means the source is available for subsequent LOAD requests, not that CUDA memory is already restored. No allocation files are copied, cloned, or hard-linked into a restore directory. Commit, abort, and expiry release source references without deleting the artifact; the caller keeps the artifact available throughout the transaction.
 
-CPU/native state uses the existing read-only artifact mount and CRIU's private replacement metadata and scratch directory. Large CRIU images are not staged merely because allocation content uses PageBroker. The separate staged-restore contract remains available for callers that require an independently writable copy. Direct restore avoids filesystem staging; the CUDA worker still transfers through bounded pinned buffers, and this does not enable NIXL, GPUDirect Storage, or CRIU compression.
+CPU/native state uses the existing read-only artifact mount and CRIU's private replacement metadata and scratch directory. Large CRIU images are not staged merely because allocation content uses PageBroker. The separate staged-restore contract remains available for callers that require an independently writable copy. Direct restore avoids filesystem staging; the CUDA worker still transfers through bounded pinned buffers. CRIU's independent `config.criu.compress` option enables lossless page compression and zero-page omission for CPU/native images; it does not change allocation ownership or enable native CUDA CustomStorage.
 
 `manifest.yaml` records `cuinterpose.allocationStorage: pagebroker`; an absent
 field means host-carrier, and unknown modes fail before restore. Files are
@@ -375,6 +377,6 @@ and cross-node workload tests must additionally verify device bytes, real
 multicast collectives, native restore, and post-restore inference.
 
 There is no C fallback or compatibility codec for earlier experimental state.
-FABRIC sharing, save-all mode, and NIXL content transport require separate
+FABRIC sharing and non-VMM allocator ownership require separate
 designs. The concrete host-carrier module
 is the replacement boundary, not a speculative backend registry.

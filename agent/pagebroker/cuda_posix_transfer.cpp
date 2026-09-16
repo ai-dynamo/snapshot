@@ -4,6 +4,9 @@
 #include "cuda_posix_transfer.hpp"
 #include "../cmd/cuda-checkpoint-helper/content_digest.hpp"
 #include "file_descriptor.hpp"
+#ifdef PAGEBROKER_NIXL
+#include "nixl_transfer.hpp"
+#endif
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -23,6 +26,34 @@ double ElapsedSeconds(Clock::time_point start)
 {
   return std::chrono::duration<double>(Clock::now() - start).count();
 }
+
+#ifdef PAGEBROKER_NIXL
+bool ConfigureDirectIO(const std::vector<TransferChunk>& chunks,
+                       const std::vector<FileDescriptor>& files, std::string* error)
+{
+  const char* configured = std::getenv("PAGEBROKER_ALLOCATION_DIRECT_IO");
+  if (!configured || std::strcmp(configured, "0") == 0)
+    return true;
+  if (std::strcmp(configured, "1") != 0) {
+    *error = "PAGEBROKER_ALLOCATION_DIRECT_IO must be 0 or 1";
+    return false;
+  }
+  for (const auto& chunk : chunks) {
+    if (chunk.file_offset % kBufferAlignment || chunk.size % kBufferAlignment) {
+      *error = "direct allocation I/O requires aligned file ranges";
+      return false;
+    }
+  }
+  for (const auto& file : files) {
+    const int flags = fcntl(file.get(), F_GETFL);
+    if (flags < 0 || fcntl(file.get(), F_SETFL, flags | O_DIRECT) < 0) {
+      *error = "enable direct allocation I/O: " + std::string(std::strerror(errno));
+      return false;
+    }
+  }
+  return true;
+}
+#endif
 
 std::string CudaError(CUresult status)
 {
@@ -131,6 +162,7 @@ bool OpenStorageFiles(const StorageLayout& storage, std::vector<FileDescriptor>&
   return true;
 }
 
+#ifndef PAGEBROKER_NIXL
 bool PosixTransfer(bool write, void* buffer, int fd, size_t offset, size_t size,
                    TransferCancellation* cancellation, std::string* error)
 {
@@ -200,6 +232,7 @@ bool TransferPipeline(const std::vector<TransferChunk>& chunks, const std::vecto
       return false;
   return true;
 }
+#endif
 }  // namespace
 
 bool TransferBackendAvailable() { return true; }
@@ -207,6 +240,10 @@ bool TransferBackendAvailable() { return true; }
 struct TransferBuffers::Impl {
   TransferOptions options;
   std::vector<std::unique_ptr<TransferSlot>> slots;
+#ifdef PAGEBROKER_NIXL
+  // Destroy registrations before their pinned buffers.
+  std::unique_ptr<NixlTransfer> storage;
+#endif
 };
 
 TransferBuffers::TransferBuffers(TransferOptions options) : impl_(std::make_unique<Impl>())
@@ -218,7 +255,8 @@ TransferBuffers::~TransferBuffers() = default;
 
 bool TransferBuffers::Transfer(CUdeviceptr device, size_t size, CUstream stream, CUcontext context,
                               const StorageLayout& storage, TransferOperation operation,
-                              TransferCancellation* cancellation, TransferMetrics* metrics, std::string* error)
+                              TransferCancellation* cancellation, TransferMetrics* metrics, std::string* error,
+                              bool sync_file)
 {
   if (!metrics || !error)
     return false;
@@ -238,6 +276,10 @@ bool TransferBuffers::Transfer(CUdeviceptr device, size_t size, CUstream stream,
   std::vector<FileDescriptor> files;
   if (!OpenStorageFiles(storage, files, error))
     return false;
+#ifdef PAGEBROKER_NIXL
+  if (!ConfigureDirectIO(chunks, files, error))
+    return false;
+#endif
   for (size_t i = slots.size(); i < options.buffer_count; ++i) {
     auto slot = std::make_unique<TransferSlot>();
     const auto status = slot->Allocate(options.chunk_bytes);
@@ -253,13 +295,88 @@ bool TransferBuffers::Transfer(CUdeviceptr device, size_t size, CUstream stream,
   {
     StreamDrainGuard drain(stream, slots);
     const auto start = Clock::now();
+#ifdef PAGEBROKER_NIXL
+    // Each allocation is one immutable file. Keep registration/request policy
+    // in PageBroker, independent of shim interception and CUDA handle exchange.
+    if (files.size() != 1) {
+      *error = "allocation transfer requires one content file";
+      return false;
+    }
+    if (!impl_->storage) {
+      std::vector<void*> addresses;
+      for (const auto& slot : slots)
+        addresses.push_back(slot->data());
+      impl_->storage = std::make_unique<NixlTransfer>(addresses, options.chunk_bytes);
+    }
+    auto& io = *impl_->storage;
+    io.Open(files[0].get(), size);
+    const bool save = operation == TransferOperation::kCheckpoint;
+    success = true;
+    try {
+      const size_t width = slots.size();
+      // Prime the entire ring, not one blocking file read at a time.
+      for (size_t i = 0; i < std::min(width, chunks.size()); ++i) {
+        const auto& chunk = chunks[i];
+        if (save) {
+          if (!slots[i]->Copy(operation, chunk, device, stream, error)) {
+            success = false;
+            break;
+          }
+        } else {
+          io.Submit(i, false, chunk.file_offset, chunk.size);
+        }
+      }
+      for (size_t i = 0; success && i < chunks.size(); ++i) {
+        const auto& chunk = chunks[i];
+        const size_t index = chunk.slot_index;
+        auto& slot = *slots[index];
+        if ((cancellation && cancellation->IsCancelled()) ||
+            !io.Wait(index, cancellation, &metrics->storage_io_seconds, error)) {
+          success = false;
+          break;
+        }
+        if (save && i >= width && !slot.Copy(operation, chunk, device, stream, error)) {
+          success = false;
+          break;
+        }
+        if (!slot.Wait(metrics, error) || !digest.Update(slot.data(), chunk.size, error)) {
+          success = false;
+          break;
+        }
+        if (save) {
+          io.Submit(index, true, chunk.file_offset, chunk.size);
+        } else {
+          if (!slot.Copy(operation, chunk, device, stream, error) || !slot.Wait(metrics, error)) {
+            success = false;
+            break;
+          }
+          if (i + width < chunks.size()) {
+            const auto& next = chunks[i + width];
+            io.Submit(index, false, next.file_offset, next.size);
+          }
+        }
+        metrics->files[0].bytes += chunk.size;
+      }
+      for (size_t i = 0; i < slots.size(); ++i)
+        if (!io.Wait(i, cancellation, &metrics->storage_io_seconds, error))
+          success = false;
+      io.Close();
+    } catch (...) {
+      // Drain storage before local file descriptors unwind. The CUDA drain
+      // guard similarly keeps DMA from outliving its registered memory.
+      io.Close();
+      throw;
+    }
+    metrics->files[0].storage_io_seconds = metrics->storage_io_seconds;
+#else
     success = TransferPipeline(chunks, files, slots, device, stream, operation, digest, metrics, cancellation, error);
+#endif
     metrics->pipeline_seconds = ElapsedSeconds(start);
     if (success) drain.Disarm();
   }
   if (success)
     success = digest.Finalize(&metrics->sha256, error);
-  if (success && operation == TransferOperation::kCheckpoint) {
+  if (success && sync_file && operation == TransferOperation::kCheckpoint) {
     for (size_t i = 0; i < files.size(); ++i) {
       const auto start = Clock::now();
       const int result = fsync(files[i].get());
