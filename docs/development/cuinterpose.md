@@ -6,9 +6,11 @@ SPDX-License-Identifier: Apache-2.0
 # Cuinterpose: shared CUDA memory with a C frontend and Rust core
 
 Cuinterpose extends Snapshot's native CUDA/CRIU path to reconstruct same-node
-CUDA VMM sharing and multicast. Native CUDA owns private allocations and CUDA
-process state; CRIU owns CPU state and host memory. Cuinterpose temporarily
-removes and rebuilds only tracked allocations that have become shared.
+CUDA VMM sharing and multicast. Native CUDA owns CUDA process state and memory
+outside the selected VMM lifecycle; CRIU owns CPU state and host memory.
+The default host-carrier mode removes and rebuilds shared tracked allocations.
+PageBroker mode instead owns all supported device-pinned `cuMemCreate`
+allocations, including application-private backing.
 
 ## Components and interception
 
@@ -70,7 +72,7 @@ integer fields for enum-bearing caller structures and driver errors: unknown
 values must reach the driver without constructing invalid Rust enums. Compile-time
 layout checks compare those structures with cudarc. Neither cudarc's loader nor
 its context/buffer ownership wrappers participate in interception or restore.
-The private version-5 C ABI carries borrowed pointers,
+The private version-6 C ABI carries borrowed pointers,
 C-layout tables, and scalars only. Cbindgen generates the C callback table
 from explicit Rust `repr(C)` declarations without expanding macros or parsing
 CUDA dependencies. C and Rust forwarding functions are checked against that
@@ -112,7 +114,7 @@ descriptors while a worker is blocked in a driver collective.
 
 | Allocation | Checkpoint owner |
 | --- | --- |
-| Non-exportable or never-shared supported VMM | Native CUDA |
+| Non-exportable or never-shared supported VMM | Native CUDA by default; PageBroker in the opt-in mode |
 | Successfully exported supported allocation | Cuinterpose creator carries canonical bytes |
 | Ticket import | Cuinterpose reconnects it to the original creator |
 | Tracked allocation bound into multicast | Cuinterpose, even without a unicast export |
@@ -163,7 +165,7 @@ sequenceDiagram
     CRIU->>Artifact: CPU images including host-carrier arenas
 ```
 
-The core selects shared, creator-owned, exportable pinned device allocations
+In the default host-carrier mode, the core selects shared, creator-owned, exportable pinned device allocations
 and passes content plans to the host-carrier module. The module uses one
 registered host arena per process and batches staging/copies by CUDA context.
 A mapped shared creator with no remaining logical handle can recover a
@@ -237,10 +239,11 @@ Host carriers remain the default. A workload can instead select external
 allocation contents with both `nvidia.com/cuinterpose: enabled` and
 `nvidia.com/cuinterpose-allocation-storage: pagebroker`. Capture also requires
 `nvidia.com/snapshot-pagebroker: "true"` and an enabled PageBroker deployment.
-This does not expand checkpoint ownership: only shared, creator-owned,
-POSIX-exportable pinned device allocations use this path. Native CUDA still
-handles private allocations and legacy IPC, and conditional `--launch-job`
-wrapping is unchanged. Native CustomStorage is not used.
+This selects all supported creator-owned, device-pinned `cuMemCreate` allocations, whether or not the application exported them. Other allocator families, legacy IPC, and CUDA process state remain native-owned. Conditional `--launch-job` wrapping is unchanged; native CustomStorage is not used.
+
+Pod shaping derives `CUINTERPOSE_ALLOCATION_STORAGE=pagebroker` from the annotation before the process starts. Allocation ownership cannot be switched by a capture command. For an application creation requesting handle type zero, the shim requests POSIX-FD backing internally. It preserves the original application properties, refuses application export of that private handle, and adjusts `cuMemGetAllocationGranularity` to the actual backing requirements. Property lookup and retained logical handles continue to advertise the original export permissions. A private allocation is never marked shared merely because PageBroker owns its contents.
+
+Never-shared POSIX allocations need no creation-property substitution. Both they and internally exportable type-zero allocations participate in SAVE, handle recovery from surviving mappings, unicast teardown, LOAD, and creator remapping. Only genuinely shared objects populate the peer export cache. Successful unsupported FABRIC or mixed-handle creations still refuse checkpoint inspection; this path does not silently replace FABRIC. “All allocations” here means supported device-pinned VMM creations, not `cudaMalloc`, managed memory, arrays, or arbitrary library allocations.
 
 The trusted agent obtains participant IDs from a read-only coordinator
 inspection, binds one allocation-only broker connection per participant, and
@@ -277,8 +280,9 @@ sequenceDiagram
 The worker imports CUDA backing using ordinary public VMM APIs and copies
 through bounded pinned buffers into POSIX files. It reuses the helper's transfer
 contracts and digest code, not its native checkpoint operation service. This
-initial implementation transfers allocations serially within each participant;
-participants run concurrently. It is not a direct-to-storage GPU or NIXL path.
+implementation transfers allocations serially within each participant; participants run concurrently. Each worker caches device UUIDs and retains one primary-context reference, stream, and two-slot pinned transfer ring per used GPU across batches. Allocation-specific imported handles and mappings are released before each reply. The ring overlaps storage I/O with DMA and is reused on both SAVE and LOAD; only the broker worker copies bytes. Per-allocation diagnostics distinguish mapping setup, buffer setup, pipeline time, CUDA waits, storage I/O, file synchronization, and cleanup. It is not a direct-to-storage GPU or NIXL path.
+
+The existing staged-checkpoint and staged-restore RPC contracts are unchanged. Publication moves staging to the partial publication name with a same-filesystem rename, then publishes it under the final name; cross-filesystem publication retains the copying path. A failed publication moves staged input back for retry or abort. Restore staging creates an independently writable transaction-owned directory: files use filesystem reflinks when supported, then `copy_file_range` (which can use NFS server-side COPY), then ordinary copying where neither is supported. No hard links or borrowed source-directory aliases are returned. Consequently restore mutation and cleanup cannot modify or delete the published artifact. These filesystem optimizations do not enable NIXL or CRIU compression, and a filesystem lacking clone/offloaded-copy support still incurs restore copying.
 
 `manifest.yaml` records `cuinterpose.allocationStorage: pagebroker`; an absent
 field means host-carrier, and unknown modes fail before restore. Files are
