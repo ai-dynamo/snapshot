@@ -76,6 +76,36 @@ TEST(AllocationTransfer, AsyncRingDrainsCancellationAndReusesFiles)
   }
 }
 
+TEST(AllocationTransfer, BatchRingSpansAllocationBoundariesAndFileOffsets)
+{
+  namespace transfer = cuda_checkpoint_transfer;
+  constexpr size_t size = 65536;
+  FileDescriptor file(memfd_create("participant", MFD_CLOEXEC));
+  ASSERT_EQ(ftruncate(file.get(), 12 * size), 0);
+  std::vector<std::vector<unsigned char>> source(9, std::vector<unsigned char>(size));
+  std::vector<std::vector<unsigned char>> restored(9, std::vector<unsigned char>(size));
+  std::vector<transfer::AllocationTransfer> save, load;
+  for (size_t i = 0; i < source.size(); ++i) {
+    std::fill(source[i].begin(), source[i].end(), i + 1);
+    save.push_back({reinterpret_cast<CUdeviceptr>(source[i].data()), size, (i + 2) * size});
+    load.push_back({reinterpret_cast<CUdeviceptr>(restored[i].data()), size, (i + 2) * size});
+  }
+  transfer::TransferBuffers buffers({4, transfer::kMinimumChunkBytes});
+  transfer::TransferMetrics metrics;
+  std::string error;
+  auto context = reinterpret_cast<CUcontext>(1);
+  auto stream = reinterpret_cast<CUstream>(1);
+  ASSERT_TRUE(buffers.TransferBatch(save, file.get(), stream, context,
+      transfer::TransferOperation::kCheckpoint, nullptr, &metrics, &error)) << error;
+  std::reverse(load.begin(), load.end());
+  ASSERT_TRUE(buffers.TransferBatch(load, file.get(), stream, context,
+      transfer::TransferOperation::kRestore, nullptr, &metrics, &error)) << error;
+  EXPECT_EQ(restored, source);
+  load[0].file_offset = 12 * size;
+  EXPECT_FALSE(buffers.TransferBatch(load, file.get(), stream, context,
+      transfer::TransferOperation::kRestore, nullptr, &metrics, &error));
+}
+
 extern "C" {
 CUresult CUDAAPI cuGetErrorName(CUresult, const char** name)
 {

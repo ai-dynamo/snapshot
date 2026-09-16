@@ -28,6 +28,9 @@ class AllocationSession {
   std::shared_ptr<Transaction> transaction_;
   v1::BindAllocationSession binding_;
   FileDescriptor directory_fd_{-1};
+  FileDescriptor content_fd_{-1};
+  uint64_t content_size_ = 0;
+  std::map<std::string, uint64_t> offsets_;
   std::map<std::string, v1::AllocationExtent> extents_;
   std::set<std::string> transferred_;
   bool admitted_ = false;
