@@ -143,3 +143,49 @@ pub unsafe extern "C" fn cuinterpose_core_init(host: *const Host, output: *mut *
         SUCCESS
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn incompatible_host_prefix_is_rejected_before_reading_callbacks() {
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        assert!(page_size > 0);
+        let page_size = page_size as usize;
+        let mapping = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                page_size * 2,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(mapping, libc::MAP_FAILED);
+        let guard_page = unsafe { mapping.cast::<u8>().add(page_size) };
+        assert_eq!(
+            unsafe { libc::mprotect(guard_page.cast(), page_size, libc::PROT_NONE) },
+            0
+        );
+        let prefix = unsafe { guard_page.sub(8).cast::<u32>() };
+        for (version, size) in [(999, size_of::<Host>() as u32), (ABI_VERSION, 8)] {
+            unsafe {
+                prefix.write(version);
+                prefix.add(1).write(size);
+            }
+            let mut output = std::ptr::null();
+            assert_eq!(
+                unsafe { cuinterpose_core_init(prefix.cast(), &mut output) },
+                INVALID_VALUE
+            );
+            assert!(output.is_null());
+            assert!(
+                G_HOST.get().is_none(),
+                "invalid prefix initialized core state"
+            );
+        }
+        assert_eq!(unsafe { libc::munmap(mapping, page_size * 2) }, 0);
+    }
+}

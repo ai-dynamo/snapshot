@@ -105,3 +105,34 @@ pub fn request(ticket: &Ticket) -> Result<OwnedFd> {
         )),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::AsRawFd;
+
+    #[test]
+    fn sealed_ticket_round_trip() {
+        let ticket = Ticket {
+            creator: "0123456789abcdef0123456789abcdef".parse().unwrap(),
+            allocation: protocol::AllocationId([4; 16]),
+            endpoint: "/tmp/cuinterpose-123.sock".into(),
+            resource: protocol::Resource::Unicast,
+        };
+        let fd = export(&ticket).unwrap();
+        assert_eq!(read(fd.as_raw_fd()).unwrap(), Some(ticket));
+        assert!(File::from(fd).write_at(b"x", 0).is_err());
+    }
+
+    #[test]
+    fn foreign_fd_is_not_a_ticket_but_obsolete_shim_ticket_is_rejected() {
+        let foreign = File::open("/dev/null").unwrap();
+        assert_eq!(read(foreign.as_raw_fd()).unwrap(), None);
+        let fd = memfd_create(c"obsolete-ticket", MemfdFlags::ALLOW_SEALING).unwrap();
+        let mut file = File::from(fd);
+        file.write_all(TICKET_MAGIC).unwrap();
+        file.write_all(&[0; 252]).unwrap();
+        fcntl_add_seals(&file, SEALS).unwrap();
+        assert!(read(file.as_raw_fd()).is_err());
+    }
+}

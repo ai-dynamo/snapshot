@@ -383,3 +383,130 @@ impl Arena {
         unregistered.and(left).and(unmapped)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::{CStr, c_char};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static G_REGISTERED: AtomicUsize = AtomicUsize::new(0);
+    static G_REGISTER_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static G_RELEASED: AtomicUsize = AtomicUsize::new(0);
+    static G_SWITCHED: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn current(output: *mut *mut c_void) -> i32 {
+        unsafe {
+            output.write(std::ptr::dangling_mut::<c_void>());
+        }
+        SUCCESS
+    }
+    unsafe extern "C" fn switch(_: *mut c_void) -> i32 {
+        G_SWITCHED.fetch_add(1, Ordering::Relaxed);
+        711
+    }
+    unsafe extern "C" fn retain(output: *mut *mut c_void, _: i32) -> i32 {
+        unsafe {
+            output.write(2usize as *mut c_void);
+        }
+        SUCCESS
+    }
+    unsafe extern "C" fn release(_: i32) -> i32 {
+        G_RELEASED.fetch_add(1, Ordering::Relaxed);
+        712
+    }
+    unsafe extern "C" fn register(_: *mut c_void, _: usize, _: u32) -> i32 {
+        G_REGISTERED.fetch_add(1, Ordering::Relaxed);
+        G_REGISTER_CALLS.fetch_add(1, Ordering::Relaxed);
+        SUCCESS
+    }
+    unsafe extern "C" fn unregister(_: *mut c_void) -> i32 {
+        G_REGISTERED.fetch_sub(1, Ordering::Relaxed);
+        SUCCESS
+    }
+    unsafe extern "C" fn create(_: *mut u64, _: usize, _: *const AllocationProp, _: u64) -> i32 {
+        // Preserve driver errors even when cudarc's CUresult has no such variant.
+        123_456
+    }
+    unsafe extern "C" fn resolve(name: *const c_char) -> *mut c_void {
+        match unsafe { CStr::from_ptr(name) }.to_bytes() {
+            b"cuCtxGetCurrent" => current as *const () as *mut c_void,
+            b"cuCtxSetCurrent" => switch as *const () as *mut c_void,
+            b"cuDevicePrimaryCtxRetain" => retain as *const () as *mut c_void,
+            b"cuDevicePrimaryCtxRelease_v2" => release as *const () as *mut c_void,
+            b"cuMemHostRegister_v2" => register as *const () as *mut c_void,
+            b"cuMemHostUnregister" => unregister as *const () as *mut c_void,
+            b"cuMemCreate" => create as *const () as *mut c_void,
+            // Deliberately absent, not merely a driver error.
+            b"cuMemHostGetFlags" => std::ptr::null_mut(),
+            _ => std::ptr::null_mut(),
+        }
+    }
+
+    #[test]
+    fn missing_registration_query_and_primary_cleanup_preserve_ownership() {
+        // HOST is process-lifetime production state. Keep this fake resolver
+        // out of the parallel ABI-prefix tests, which require an unset HOST.
+        if std::env::var_os("CUINTERPOSE_CARRIER_UNIT_CHILD").is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "host_carrier::tests::missing_registration_query_and_primary_cleanup_preserve_ownership"])
+                .env("CUINTERPOSE_CARRIER_UNIT_CHILD", "1")
+                .status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        assert!(
+            crate::G_HOST
+                .set(Host {
+                    version: ABI_VERSION,
+                    size: size_of::<Host>() as u32,
+                    resolve,
+                    origin_pid: unsafe { libc::getpid() },
+                })
+                .is_ok()
+        );
+        Context::enter(1, 0).unwrap().leave().unwrap();
+        assert_eq!(G_SWITCHED.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            Context::enter(0, 0).err(),
+            Some(crate::driver::CudaError(711))
+        );
+        assert_eq!(G_RELEASED.load(Ordering::Relaxed), 1);
+        let id = AllocationId([1; 16]);
+        let arena = Arena {
+            base: 0x1000,
+            size: 4096,
+            context: 1,
+            device: 0,
+            offsets: BTreeMap::from([(id, 0)]),
+        };
+        let mut allocations = [AllocationContent {
+            id,
+            driver: None,
+            size: 4096,
+            properties: AllocationProp {
+                kind: ALLOCATION_PINNED,
+                handle_types: POSIX_FD,
+                location: Location {
+                    kind: LOCATION_DEVICE,
+                    id: 0,
+                },
+                win32_metadata: std::ptr::null_mut(),
+                flags: AllocationFlags {
+                    compressionType: 0,
+                    gpuDirectRDMACapable: 0,
+                    usage: 0,
+                    reserved: [0; 4],
+                },
+            },
+            context: 1,
+        }];
+        assert_eq!(
+            arena.load(&mut allocations),
+            Err(crate::driver::CudaError(123_456))
+        );
+        assert_eq!(G_REGISTER_CALLS.load(Ordering::Relaxed), 1);
+        assert_eq!(G_REGISTERED.load(Ordering::Relaxed), 0);
+        assert_eq!(allocations[0].driver, None);
+    }
+}

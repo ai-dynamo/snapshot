@@ -9,6 +9,118 @@ use cuinterpose_abi::*;
 use cuinterpose_protocol::Ticket;
 use cuinterpose_protocol::{AllocationId, Operation, ParticipantId, Resource, ResourceKind};
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lifecycle_transitions_require_each_local_milestone() {
+        let transitions = [
+            (
+                Phase::Active,
+                Operation::PrepareMulticast,
+                Phase::MulticastPrepared,
+            ),
+            (
+                Phase::MulticastPrepared,
+                Operation::SaveAllocations,
+                Phase::AllocationsSaved,
+            ),
+            (
+                Phase::AllocationsSaved,
+                Operation::PrepareUnicast,
+                Phase::UnicastPrepared,
+            ),
+            (
+                Phase::UnicastPrepared,
+                Operation::LoadAllocations,
+                Phase::AllocationsLoaded,
+            ),
+            (
+                Phase::AllocationsLoaded,
+                Operation::RestoreUnicast,
+                Phase::UnicastRestored,
+            ),
+            (
+                Phase::UnicastRestored,
+                Operation::RestoreMulticastCreators,
+                Phase::MulticastCreatorsRestored,
+            ),
+            (
+                Phase::MulticastCreatorsRestored,
+                Operation::RestoreMulticastImporters,
+                Phase::MulticastImportersRestored,
+            ),
+            (
+                Phase::MulticastImportersRestored,
+                Operation::RestoreMulticastDevices,
+                Phase::MulticastDevicesRestored,
+            ),
+            (
+                Phase::MulticastDevicesRestored,
+                Operation::RestoreMulticastBindings,
+                Phase::Active,
+            ),
+        ];
+        for (phase, operation, next) in transitions {
+            assert_eq!(phase.next(operation), Ok(next));
+            for (other, _, _) in transitions {
+                if other != phase {
+                    assert_eq!(
+                        other.next(operation),
+                        Err(crate::driver::CudaError(NOT_READY))
+                    );
+                }
+            }
+            assert_eq!(
+                Phase::ReconstructingMulticast.next(operation),
+                Err(crate::driver::CudaError(NOT_READY))
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_inspection_is_refused_before_building_records() {
+        let state = State {
+            identity: ParticipantId::default(),
+            endpoint: String::new(),
+            allocations: BTreeMap::new(),
+            multicasts: BTreeMap::new(),
+            handles: BTreeMap::new(),
+            mappings: (0..=cuinterpose_protocol::MAX_RECORDS)
+                .map(|index| {
+                    let address = (index * 4096) as u64;
+                    (
+                        address,
+                        Mapping {
+                            id: AllocationId::default(),
+                            address,
+                            size: 4096,
+                            offset: 0,
+                            access: Vec::new(),
+                            unknown: false,
+                            flags: 0,
+                            checkpointed: false,
+                        },
+                    )
+                })
+                .collect(),
+            raw: BTreeMap::new(),
+            unreleased_handles: Vec::new(),
+            unsupported: 0,
+            phase: Phase::Active,
+            arena: None,
+            inflight: 0,
+            pending_maps: Vec::new(),
+            next: 1,
+        };
+        // Missing allocation records would panic if serialization began.
+        assert_eq!(
+            state.inspect(),
+            Err(crate::driver::CudaError(NOT_SUPPORTED))
+        );
+    }
+}
 use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::os::fd::{AsFd, IntoRawFd};

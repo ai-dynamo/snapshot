@@ -181,3 +181,23 @@ pub fn boundary<T: Copy>(failed: &AtomicBool, error: T, operation: impl FnOnce()
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panic_poisoning_is_sticky() {
+        let failed = AtomicBool::new(false);
+        assert_eq!(boundary(&failed, UNKNOWN, || panic!("injected")), UNKNOWN);
+        assert_eq!(boundary(&failed, UNKNOWN, || SUCCESS), UNKNOWN);
+    }
+
+    #[test]
+    fn cuda_abi_layouts() {
+        assert_eq!(size_of::<AllocationProp>(), 32);
+        assert_eq!(std::mem::offset_of!(AllocationProp, flags), 24);
+        assert_eq!(size_of::<MulticastProp>(), 32);
+        assert_eq!(std::mem::offset_of!(MulticastProp, size), 8);
+        assert_eq!(size_of::<Access>(), 12);
+    }
+}

@@ -12,7 +12,8 @@ driven by the guide's own program and manifests (see framework_workloads):
    is checkpointable.
 2. A PodSnapshot captures it. The dump terminates the source process.
 3. A restore pod built from the guide's restore manifest is pinned to the
-   source node. Its own entrypoint stays inert (`sleep infinity`); the agent
+   source node, or SNAPSHOT_E2E_RESTORE_NODE for a cross-node test with shared
+   storage. Its own entrypoint stays inert (`sleep infinity`); the agent
    restores the checkpointed process into it, which resumes the engine,
    generates again, and serves /generate.
 4. The test asserts the restore condition, the restore-ready file, a live
@@ -25,6 +26,8 @@ unpublished guide change.
 """
 
 from __future__ import annotations
+
+import os
 
 import pytest
 
@@ -74,6 +77,9 @@ def test_framework_checkpoint_restore_serves_inference(
             timeout=frameworks.SOURCE_READY_TIMEOUT_SECONDS,
         )
         source_node = source.spec.node_name
+        destination = os.environ.get("SNAPSHOT_E2E_RESTORE_NODE", source_node)
+        if "SNAPSHOT_E2E_RESTORE_NODE" in os.environ:
+            assert destination != source_node, "cross-node test destination must differ from source"
         # Recorded on success too, so a flaky restore failure can be correlated
         # with whether Datadog GPU monitoring was active on the node.
         print(
@@ -113,6 +119,8 @@ def test_framework_checkpoint_restore_serves_inference(
             "RestoreSucceeded",
             timeout=framework.restore_timeout_seconds,
         )
+        restored_pod = k8s.read_pod(config.namespace, run.restore_pod)
+        assert restored_pod.spec.node_name == destination
         restored_text = snap.wait_for_restore_outcome(
             config.namespace,
             run.restore_pod,

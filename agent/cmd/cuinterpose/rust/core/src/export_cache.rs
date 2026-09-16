@@ -153,3 +153,155 @@ impl Drop for Lease<'_> {
         self.cache.drained.notify_all();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+
+    #[test]
+    fn resource_kind_is_part_of_descriptor_identity() {
+        let cache = ExportCache::default();
+        let id = AllocationId([8; 16]);
+        cache
+            .replace(
+                (ResourceKind::Multicast, id),
+                Some(File::open("/dev/null").unwrap().into()),
+            )
+            .unwrap();
+        assert!(cache.acquire(&(ResourceKind::Unicast, id)).is_err());
+        assert!(cache.acquire(&(ResourceKind::Multicast, id)).is_ok());
+        cache.replace((ResourceKind::Unicast, id), None).unwrap();
+        assert!(cache.acquire(&(ResourceKind::Multicast, id)).is_ok());
+    }
+
+    #[test]
+    fn teardown_drains_transfers_and_rejects_new_requests() {
+        let cache = Arc::new(ExportCache::default());
+        let id = (ResourceKind::Unicast, AllocationId([1; 16]));
+        cache
+            .replace(id, Some(File::open("/dev/null").unwrap().into()))
+            .unwrap();
+        let lease = cache.acquire(&id).unwrap();
+        let (done, completion) = mpsc::channel();
+        let copy = Arc::clone(&cache);
+        let worker = std::thread::spawn(move || {
+            copy.clear().unwrap();
+            done.send(()).unwrap();
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !cache.entries.lock().unwrap().draining {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert!(cache.acquire(&id).is_err());
+        assert!(completion.try_recv().is_err());
+        drop(lease);
+        completion.recv_timeout(Duration::from_secs(5)).unwrap();
+        worker.join().unwrap();
+        assert_eq!(cache.len().unwrap(), 0);
+        assert!(cache.acquire(&id).is_err());
+        cache
+            .replace(id, Some(File::open("/dev/zero").unwrap().into()))
+            .unwrap();
+        assert!(cache.acquire(&id).is_ok());
+    }
+
+    #[test]
+    fn replacement_waits_until_the_old_descriptor_is_sent() {
+        use std::io::Read;
+        let cache = Arc::new(ExportCache::default());
+        let id = (ResourceKind::Multicast, AllocationId([2; 16]));
+        let unrelated = (ResourceKind::Unicast, AllocationId([4; 16]));
+        cache
+            .replace(unrelated, Some(File::open("/dev/null").unwrap().into()))
+            .unwrap();
+        let unrelated_lease = cache.acquire(&unrelated).unwrap();
+        cache
+            .replace(id, Some(File::open("/dev/null").unwrap().into()))
+            .unwrap();
+        let lease = cache.acquire(&id).unwrap();
+        let copy = Arc::clone(&cache);
+        let worker = std::thread::spawn(move || {
+            copy.replace(id, Some(File::open("/dev/zero").unwrap().into()))
+                .unwrap();
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !cache.entries.lock().unwrap().descriptors[&id].retiring {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert!(cache.acquire(&id).is_err());
+        let second_unrelated = cache.acquire(&unrelated);
+        let mut original = File::from(lease.descriptor().try_clone().unwrap());
+        assert_eq!(original.read(&mut [0; 1]).unwrap(), 0);
+        drop(original);
+        drop(lease);
+        drop(unrelated_lease);
+        worker.join().unwrap();
+        assert!(second_unrelated.is_ok(), "retiring B rejected unrelated A");
+        let fresh = cache.acquire(&id).unwrap();
+        let mut fresh = File::from(fresh.descriptor().try_clone().unwrap());
+        let mut byte = [1];
+        assert_eq!(fresh.read(&mut byte).unwrap(), 1);
+        assert_eq!(byte, [0]);
+    }
+
+    #[test]
+    fn unrelated_mutations_do_not_drain_or_reject_active_exports() {
+        let cache = ExportCache::default();
+        let a = (ResourceKind::Unicast, AllocationId([1; 16]));
+        let b = (ResourceKind::Multicast, AllocationId([2; 16]));
+        cache
+            .replace(a, Some(File::open("/dev/null").unwrap().into()))
+            .unwrap();
+        let first = cache.acquire(&a).unwrap();
+        std::thread::scope(|scope| {
+            let (done, completion) = mpsc::channel();
+            let shared = &cache;
+            let worker = scope.spawn(move || {
+                shared
+                    .replace(b, Some(File::open("/dev/zero").unwrap().into()))
+                    .unwrap();
+                shared.replace(b, None).unwrap();
+                shared.replace(b, None).unwrap(); // Missing removal is a no-op.
+                done.send(()).unwrap();
+            });
+            let finished = completion.recv_timeout(Duration::from_secs(5));
+            let second = cache.acquire(&a);
+            // Drop even on regression so a blocked mutation can finish before
+            // the test reports failure rather than stranding its scoped thread.
+            drop(first);
+            worker.join().unwrap();
+            assert!(finished.is_ok(), "unrelated mutation waited for A");
+            assert!(second.is_ok(), "unrelated mutation rejected A");
+        });
+    }
+
+    #[test]
+    fn failed_socket_send_releases_lease_and_allows_clear() {
+        use cuinterpose_protocol::{Request, send};
+        use std::os::unix::net::UnixStream;
+        let cache = Arc::new(ExportCache::default());
+        let id = (ResourceKind::Unicast, AllocationId([3; 16]));
+        cache
+            .replace(id, Some(File::open("/dev/null").unwrap().into()))
+            .unwrap();
+        let lease = cache.acquire(&id).unwrap();
+        let (socket, peer) = UnixStream::pair().unwrap();
+        drop(peer);
+        assert!(send(&socket, &Request::Handshake, Some(lease.descriptor())).is_err());
+        let (done, completion) = mpsc::channel();
+        let copy = Arc::clone(&cache);
+        let worker = std::thread::spawn(move || {
+            copy.clear().unwrap();
+            done.send(()).unwrap();
+        });
+        drop(lease);
+        completion.recv_timeout(Duration::from_secs(5)).unwrap();
+        worker.join().unwrap();
+        assert_eq!(cache.len().unwrap(), 0);
+    }
+}
