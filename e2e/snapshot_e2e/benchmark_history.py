@@ -646,7 +646,13 @@ def render_summary(aggregate_result: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _history_from_cli(path: Path) -> Path:
+def _history_from_cli(path: Path, *, require_results: bool = False) -> Path:
+    if require_results:
+        # rebuild is a repair tool; an empty raw tree means the wrong directory,
+        # and silently writing a recordCount: 0 manifest would look like success.
+        root = path / "results" / f"v{HISTORY_FORMAT_VERSION}"
+        if not root.is_dir() or not any(root.rglob("*.json")):
+            raise SystemExit(f"no raw benchmark results under {root}; nothing to rebuild")
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -684,7 +690,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "rebuild":
-        manifest = rebuild_indexes(_history_from_cli(args.history_dir))
+        manifest = rebuild_indexes(_history_from_cli(args.history_dir, require_results=True))
         print(json.dumps(manifest, indent=2))
         return 0
 

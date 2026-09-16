@@ -482,8 +482,10 @@ jobs:
       # All attempts of this run: "Re-run failed jobs" re-executes only the
       # failed matrix jobs, so the passing frameworks' results still live in
       # the earlier attempt's artifacts.
+      # No continue-on-error: a pattern matching nothing is not a failure for
+      # this action, so the flag would only turn a real API error into a set of
+      # fabricated infrastructure_failed results.
       - name: Download framework benchmark results
-        continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: e2e-framework-benchmark-*-${{ github.run_id }}-*
@@ -551,8 +553,10 @@ jobs:
         with:
           persist-credentials: false
 
+      # No continue-on-error: a pattern matching nothing is not a failure for
+      # this action, so the flag would only turn a real API error into a set of
+      # fabricated infrastructure_failed results.
       - name: Download framework benchmark results
-        continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: e2e-framework-benchmark-*-${{ github.run_id }}-*
@@ -565,6 +569,7 @@ jobs:
         with:
           token: ${{ github.token }}
           bootstrap: "true"
+          persist-credentials: "true"
 
       - name: Aggregate and index benchmark results
         env:

@@ -24,6 +24,14 @@ inputs:
     description: Directory that receives the history checkout.
     required: false
     default: ${{ runner.temp }}/e2e-benchmark-history
+  persist-credentials:
+    description: >-
+      When "true", keep the token in the checkout's git config so the caller can
+      push. Leave "false" for read-only callers: the read-only comparison job
+      runs pull-request code after this step, and the token must not be within
+      its reach.
+    required: false
+    default: "false"
 
 outputs:
   history_dir:
@@ -44,14 +52,18 @@ runs:
         HISTORY_BRANCH: ${{ inputs.branch }}
         HISTORY_BOOTSTRAP: ${{ inputs.bootstrap }}
         HISTORY_DIR: ${{ inputs.path }}
+        HISTORY_PERSIST_CREDENTIALS: ${{ inputs.persist-credentials }}
       run: |
         set -euo pipefail
         mkdir -p "${HISTORY_DIR}"
         git -C "${HISTORY_DIR}" init --quiet --initial-branch="${HISTORY_BRANCH}"
         git -C "${HISTORY_DIR}" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
         auth="$(printf 'x-access-token:%s' "${HISTORY_TOKEN}" | base64 -w0)"
-        git -C "${HISTORY_DIR}" config "http.${GITHUB_SERVER_URL}/.extraheader" \
-          "AUTHORIZATION: basic ${auth}"
+        auth_key="http.${GITHUB_SERVER_URL}/.extraheader"
+        git -C "${HISTORY_DIR}" config "${auth_key}" "AUTHORIZATION: basic ${auth}"
+        if [[ "${HISTORY_PERSIST_CREDENTIALS}" != "true" ]]; then
+          trap 'git -C "${HISTORY_DIR}" config --unset-all "${auth_key}" || true' EXIT
+        fi
 
         set +e
         git -C "${HISTORY_DIR}" ls-remote --quiet --exit-code --heads origin "${HISTORY_BRANCH}" >/dev/null

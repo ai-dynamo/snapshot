@@ -447,6 +447,19 @@ def test_rebuild_restores_derived_files_from_raw_results(tmp_path: Path) -> None
     assert (tmp_path / "index" / "manifest.json").is_file()
 
 
+def test_cli_rebuild_refuses_a_missing_or_empty_raw_tree(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit, match="nothing to rebuild"):
+        history.main(["rebuild", "--history-dir", str(tmp_path / "missing")])
+
+    empty = tmp_path / "empty"
+    (empty / "results" / "v1").mkdir(parents=True)
+    with pytest.raises(SystemExit, match="nothing to rebuild"):
+        history.main(["rebuild", "--history-dir", str(empty)])
+
+    assert not (tmp_path / "missing" / "index").exists()
+    assert not (empty / "index").exists()
+
+
 def test_summary_escapes_untrusted_text_and_rejects_unsafe_links() -> None:
     result = _result(case="bad|<script>")
     result["source"]["runUrl"] = "javascript:alert(1)"
@@ -479,6 +492,20 @@ def test_only_scheduled_main_history_job_has_write_permission() -> None:
     for job in (read_only, publisher):
         assert "!cancelled()" in job["if"]
         assert "always()" not in job["if"]
+
+    def step(job: dict, uses: str) -> dict:
+        return next(item for item in job["steps"] if uses in item.get("uses", ""))
+
+    # A swallowed download failure would be published as fabricated
+    # infrastructure_failed results; the job must fail instead.
+    for job in (read_only, publisher):
+        assert "continue-on-error" not in step(job, "download-artifact")
+
+    # Only the publisher pushes, so only it may keep the token in the history
+    # checkout; the read-only job runs pull-request code after this step.
+    fetch_action = "fetch-benchmark-history"
+    assert step(publisher, fetch_action)["with"]["persist-credentials"] == "true"
+    assert "persist-credentials" not in step(read_only, fetch_action)["with"]
 
 
 def _result(
