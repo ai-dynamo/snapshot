@@ -126,6 +126,21 @@ spec:
             - --max-concurrent-requests
             - {{ .Values.pageBroker.maxConcurrentRequests | quote }}
             {{- end }}
+            {{- if .Values.pageBroker.allocationWorker }}
+            - --allocation-worker
+            - {{ .Values.pageBroker.allocationWorker | quote }}
+            {{- end }}
+          {{- if .Values.pageBroker.allocationWorker }}
+          # The trusted node broker imports allocations for multiple Pods; GPU
+          # assignment/identity remains scoped by agent-bound session capabilities.
+          securityContext:
+            privileged: true
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: compute,utility
+          {{- end }}
           resources:
             {{- toYaml .Values.pageBroker.resources | nindent 12 }}
           volumeMounts:

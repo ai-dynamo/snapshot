@@ -8,6 +8,11 @@ DAEMON_SOURCES := $(BROKER_SOURCES) daemon.cpp main.cpp
 
 .PHONY: daemon generate test
 
+GPU_IMAGE ?= snapshot-pagebroker-gpu:local
+.PHONY: image-gpu
+image-gpu:
+	docker build --platform linux/amd64 -f Dockerfile.gpu -t $(GPU_IMAGE) ..
+
 CUDA_ROOT ?= /usr/local/cuda
 CUDA_LIB_DIR ?= $(CUDA_ROOT)/lib64/stubs
 TRANSFER_DIR := ../cmd/cuda-checkpoint-helper
