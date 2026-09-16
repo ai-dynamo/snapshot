@@ -339,7 +339,6 @@ function renderMetricGroups(
   metrics: MetricDefinition[],
   previous?: ReadonlyMap<string, boolean>,
 ): void {
-  const hasDefaults = metrics.some((item) => DEFAULT_METRIC_NAMES.has(item.name));
   elements.metrics.replaceChildren();
 
   const groups = METRIC_GROUPS
@@ -351,6 +350,11 @@ function renderMetricGroups(
     }))
     .filter((group) => group.items.length > 0);
   const effectiveGroups = groups.length > 0 ? groups : [{ label: null, items: metrics }];
+  // Decide from what is actually shown: a default that only exists among the
+  // hidden measurements must not leave the picker with nothing checked.
+  const hasDefaults = effectiveGroups.some((group) =>
+    group.items.some((item) => DEFAULT_METRIC_NAMES.has(item.name)),
+  );
 
   for (const { label, items } of effectiveGroups) {
     const group = document.createElement("div");

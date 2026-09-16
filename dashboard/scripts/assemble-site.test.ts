@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
@@ -81,6 +81,49 @@ describe("assembleSite", () => {
         now: new Date("2026-09-10T12:00:00.000Z"),
       }),
     ).rejects.toThrow("Unsafe preview entry");
+  });
+
+  it("rejects a symlink nested inside a preview directory", async () => {
+    const root = await temporaryRoot();
+    const dist = resolve(root, "dist");
+    await mkdir(resolve(dist, "assets"), { recursive: true });
+    await writeFile(resolve(dist, "index.html"), "dashboard");
+    const historyIndex = resolve(root, "history", "index");
+    await writeIndex(historyIndex, 0);
+    const preview = resolve(root, "preview-data", "pr-250");
+    await writeIndex(resolve(preview, "index"), 0);
+    await writeFile(resolve(preview, "preview.json"), JSON.stringify(previewMetadata("pr-250")));
+    await symlink(dist, resolve(preview, "index", "escape"));
+
+    await expect(
+      assembleSite({
+        distDirectory: dist,
+        historyIndexDirectory: historyIndex,
+        previewsDirectory: resolve(root, "preview-data"),
+        now: new Date("2026-09-10T12:00:00.000Z"),
+      }),
+    ).rejects.toThrow("Symlinks are not allowed");
+  });
+
+  it("rejects preview metadata whose key does not match its directory", async () => {
+    const root = await temporaryRoot();
+    const dist = resolve(root, "dist");
+    await mkdir(resolve(dist, "assets"), { recursive: true });
+    await writeFile(resolve(dist, "index.html"), "dashboard");
+    const historyIndex = resolve(root, "history", "index");
+    await writeIndex(historyIndex, 0);
+    const preview = resolve(root, "preview-data", "pr-250");
+    await writeIndex(resolve(preview, "index"), 0);
+    await writeFile(resolve(preview, "preview.json"), JSON.stringify(previewMetadata("pr-251")));
+
+    await expect(
+      assembleSite({
+        distDirectory: dist,
+        historyIndexDirectory: historyIndex,
+        previewsDirectory: resolve(root, "preview-data"),
+        now: new Date("2026-09-10T12:00:00.000Z"),
+      }),
+    ).rejects.toThrow("Preview metadata key does not match pr-250");
   });
 });
 

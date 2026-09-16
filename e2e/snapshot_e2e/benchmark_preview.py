@@ -103,18 +103,45 @@ def prepare_preview(
     previews_dir.mkdir(parents=True, exist_ok=True)
     if previews_dir.is_symlink():
         raise PreviewValidationError(f"preview root may not be a symlink: {previews_dir}")
-    with tempfile.TemporaryDirectory(prefix=f".{key}-", dir=previews_dir) as temporary:
-        staged = Path(temporary) / key
-        shutil.copytree(history_dir / "index", staged / "index")
-        _write_json(staged / "preview.json", metadata)
-        target = previews_dir / key
-        if target.exists() or target.is_symlink():
-            _remove_preview(previews_dir, target)
-        os.replace(staged, target)
+    target = previews_dir / key
+    # Publications are not serialized across source runs, so an older run can
+    # finish after a newer one already refreshed this PR's stable preview.
+    superseded = _existing_preview_is_newer(target, run_id=run_id, run_attempt=run_attempt)
+    if not superseded:
+        with tempfile.TemporaryDirectory(prefix=f".{key}-", dir=previews_dir) as temporary:
+            staged = Path(temporary) / key
+            shutil.copytree(history_dir / "index", staged / "index")
+            _write_json(staged / "preview.json", metadata)
+            if target.exists() or target.is_symlink():
+                _remove_preview(previews_dir, target)
+            os.replace(staged, target)
 
     removed = prune_expired_previews(previews_dir, now=generated, keep_key=key)
     metadata["removedExpiredPreviews"] = removed
+    metadata["superseded"] = superseded
     return metadata
+
+
+def _existing_preview_is_newer(target: Path, *, run_id: str, run_attempt: int) -> bool:
+    """True when `target` already holds a preview from a later run or attempt.
+
+    GitHub run IDs are monotonic, so a numerically higher runId is a later run;
+    within one run a higher attempt is later. Anything unreadable is treated
+    as replaceable so a corrupt preview never blocks publication.
+    """
+    if target.is_symlink() or not target.is_dir():
+        return False
+    try:
+        source = json.loads((target / "preview.json").read_text(encoding="utf-8"))["source"]
+        existing_id = str(source["runId"])
+        existing_attempt = int(source["runAttempt"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    if existing_id == run_id:
+        return existing_attempt > run_attempt
+    if existing_id.isdigit() and run_id.isdigit():
+        return int(existing_id) > int(run_id)
+    return False
 
 
 def prune_expired_previews(
@@ -274,6 +301,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         pull_request=args.pull_request,
         retention_days=args.retention_days,
     )
+    if metadata["superseded"]:
+        print(
+            f"::notice::Preview {args.key} already holds a newer run; "
+            f"run {args.run_id}-{args.run_attempt} was not published."
+        )
     print(json.dumps(metadata, indent=2, sort_keys=True))
     return 0
 

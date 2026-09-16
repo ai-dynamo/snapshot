@@ -40,6 +40,15 @@ describe("parsePreviewMetadata", () => {
   ])("rejects invalid metadata", (value) => {
     expect(() => parsePreviewMetadata(value)).toThrow();
   });
+
+  it("names the field when the run URL is not a URL at all", () => {
+    expect(() =>
+      parsePreviewMetadata({
+        ...metadata,
+        source: { ...metadata.source, runUrl: "not a url" },
+      }),
+    ).toThrow("preview.source.runUrl is not a valid URL");
+  });
 });
 
 describe("loadPreviewMetadata", () => {

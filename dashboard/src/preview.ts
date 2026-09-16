@@ -75,7 +75,12 @@ export function parsePreviewMetadata(value: unknown): PreviewMetadata {
   }
   requirePositiveInteger(parsed.source.runAttempt, "preview.source.runAttempt");
   requireString(parsed.source.runUrl, "preview.source.runUrl");
-  const url = new URL(parsed.source.runUrl);
+  let url: URL;
+  try {
+    url = new URL(parsed.source.runUrl);
+  } catch {
+    throw new PreviewMetadataError("preview.source.runUrl is not a valid URL");
+  }
   if (url.protocol !== "https:" && url.protocol !== "http:") {
     throw new PreviewMetadataError("preview.source.runUrl must use HTTP(S)");
   }

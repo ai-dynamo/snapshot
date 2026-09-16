@@ -251,6 +251,49 @@ def test_prepare_preview_accepts_results_carried_from_earlier_attempts(
         )
 
 
+def test_prepare_preview_keeps_a_newer_run_and_replaces_an_older_one(tmp_path: Path) -> None:
+    def publish(run_id: str, run_attempt: int) -> dict:
+        results_dir = tmp_path / f"current-{run_id}-{run_attempt}"
+        results_dir.mkdir(exist_ok=True)
+        (results_dir / "vllm.json").write_text(
+            json.dumps(_result(run_id=run_id, run_attempt=run_attempt)),
+            encoding="utf-8",
+        )
+        return preview.prepare_preview(
+            results_dir=results_dir,
+            history_dir=tmp_path / "history",
+            previews_dir=tmp_path / "previews",
+            key="pr-250",
+            run_id=run_id,
+            run_attempt=run_attempt,
+            source_event="push",
+            source_branch="pull-request/250",
+            source_commit="0123456789abcdef",
+            source_run_url=f"https://github.com/ai-dynamo/snapshot/actions/runs/{run_id}",
+            pull_request=250,
+            generated_at=START,
+        )
+
+    def published_source() -> tuple[str, int]:
+        value = json.loads((tmp_path / "previews" / "pr-250" / "preview.json").read_text())
+        return value["source"]["runId"], value["source"]["runAttempt"]
+
+    assert publish("300", 1)["superseded"] is False
+    assert published_source() == ("300", 1)
+
+    # An older run finishing late must not overwrite the newer preview.
+    assert publish("200", 1)["superseded"] is True
+    assert published_source() == ("300", 1)
+
+    # A later attempt of the same run does replace it.
+    assert publish("300", 2)["superseded"] is False
+    assert published_source() == ("300", 2)
+
+    # An earlier attempt of that run arriving afterwards is superseded too.
+    assert publish("300", 1)["superseded"] is True
+    assert published_source() == ("300", 2)
+
+
 def _workflow(name: str) -> dict:
     repository_root = Path(__file__).resolve().parents[2]
     return yaml.safe_load((repository_root / ".github/workflows" / name).read_text())
