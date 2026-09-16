@@ -82,6 +82,7 @@ const elements = {
   previewRunLink: requiredElement<HTMLAnchorElement>("#preview-run-link"),
   status: requiredElement<HTMLElement>("#load-status"),
   suite: requiredElement<HTMLSelectElement>("#suite-filter"),
+  suiteField: requiredElement<HTMLElement>("#suite-field"),
   date: requiredElement<HTMLSelectElement>("#date-filter"),
   gpu: requiredElement<HTMLSelectElement>("#gpu-filter"),
   outcome: requiredElement<HTMLSelectElement>("#outcome-filter"),
@@ -235,6 +236,7 @@ function configureSuites() {
     elements.suite,
     suites.map((suite) => ({ value: suite, label: displayIdentifier(suite) })),
   );
+  elements.suiteField.classList.toggle("controls__field--hidden", suites.length <= 1);
 }
 
 interface FilterSnapshot {
@@ -300,25 +302,39 @@ const METRIC_GROUPS = [
 ] as const;
 
 // Only the checkpoint/restore measurements are actionable in the stage
-// breakdown; everything else (test.total.duration, source.image_pull*, ...)
-// is dropped from the picker rather than shown ungrouped.
+// breakdown, so a suite shaped like the framework benchmark drops everything
+// else (test.total.duration, source.image_pull*, ...) from the picker rather
+// than showing it ungrouped. A suite with none of those measurements at all
+// (an unrelated future suite, for example) isn't shaped like that benchmark,
+// so it falls back to the old flat, ungrouped list instead of emptying the
+// picker -- this is what keeps a newly discovered suite's own measurements
+// selectable without a UI code change.
 function renderMetricGroups(
   metrics: MetricDefinition[],
   previous?: ReadonlyMap<string, boolean>,
 ): void {
   const hasDefaults = metrics.some((item) => DEFAULT_METRIC_NAMES.has(item.name));
   elements.metrics.replaceChildren();
-  for (const { label, prefix } of METRIC_GROUPS) {
-    const items = metrics.filter((item) => item.name.startsWith(prefix));
-    if (items.length === 0) continue;
 
+  const groups = METRIC_GROUPS
+    .map(({ label, prefix }) => ({
+      label: label as string | null,
+      items: metrics.filter((item) => item.name.startsWith(prefix)),
+    }))
+    .filter((group) => group.items.length > 0);
+  const effectiveGroups = groups.length > 0 ? groups : [{ label: null, items: metrics }];
+
+  for (const { label, items } of effectiveGroups) {
     const group = document.createElement("div");
     group.className = "toggle-group";
-    const heading = document.createElement("h4");
-    heading.textContent = label;
+    if (label) {
+      const heading = document.createElement("h4");
+      heading.textContent = label;
+      group.append(heading);
+    }
     const list = document.createElement("div");
     list.className = "toggle-list";
-    group.append(heading, list);
+    group.append(list);
     elements.metrics.append(group);
 
     renderCheckboxes(
@@ -707,11 +723,22 @@ function showDetails(result: BenchmarkResult): void {
   elements.dialog.showModal();
 }
 
+// The stage chart only makes sense for the checkpoint/restore benchmark
+// shape; a suite whose selected measurements are all something else (a
+// single-value throughput metric, say) has no business getting a "stage
+// breakdown" bar with one meaningless segment.
+function hasStageShapedMetrics(names: Iterable<string>): boolean {
+  for (const name of names) {
+    if (METRIC_GROUPS.some((group) => name.startsWith(group.prefix))) return true;
+  }
+  return false;
+}
+
 function renderStageComparisonCharts(
   records: BenchmarkResult[],
   selectedMetrics: ReadonlySet<string>,
 ): void {
-  if (selectedMetrics.size === 0) return;
+  if (!hasStageShapedMetrics(selectedMetrics)) return;
   const cases = [...new Set(records.map((result) => result.identity.case))].sort();
   for (const caseName of cases) {
     const comparison = recentStageComparison(
@@ -781,6 +808,7 @@ function stageRunLabel(result: BenchmarkResult): string {
 function renderStageBreakdown(result: BenchmarkResult): void {
   stageChart?.destroy();
   stageChart = null;
+  if (!hasStageShapedMetrics(currentMetrics)) return;
   const segments = measurementStageSegments(result, currentMetrics);
   if (segments.length === 0) return;
 
