@@ -502,8 +502,12 @@ function tooltipLines(point: DashboardPoint, metric: MetricDefinition): string[]
   return [
     `${frameworkLabel(point.result.identity.case)}: ${formatValue(point.y, metric.unit)}`,
     `Outcome: ${displayIdentifier(point.outcome)}`,
-    `Previous: ${formatComparison(point.comparison.previous, metric.unit)}`,
-    `Median (last 7): ${formatComparison(point.comparison.median7, metric.unit)}`,
+    ...(point.comparison.skippedReason
+      ? [`Comparison: ${point.comparison.skippedReason}`]
+      : [
+          `Previous: ${formatComparison(point.comparison.previous, metric.unit)}`,
+          `Median (last 7): ${formatComparison(point.comparison.median7, metric.unit)}`,
+        ]),
     `GPU: ${gpuModels(point.result).join(", ") || "unknown"}`,
     `Commit: ${shortCommit(point.result) ?? "unknown"}`,
     `Snapshot: ${stringProperty(point.result.source, "snapshotTag") ?? "unknown"}`,
@@ -593,7 +597,9 @@ function showDetails(result: BenchmarkResult): void {
       list,
       item.displayName,
       item.status === "complete"
-        ? `${formatValue(item.value, item.unit)} · previous ${formatComparison(comparison.previous, item.unit)} · median (last 7) ${formatComparison(comparison.median7, item.unit)}`
+        ? comparison.skippedReason
+          ? `${formatValue(item.value, item.unit)} · ${comparison.skippedReason}`
+          : `${formatValue(item.value, item.unit)} · previous ${formatComparison(comparison.previous, item.unit)} · median (last 7) ${formatComparison(comparison.median7, item.unit)}`
         : `Incomplete · ${item.missingReason}`,
     );
   }

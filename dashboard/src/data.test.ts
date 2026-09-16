@@ -7,6 +7,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   DashboardDataError,
+  TEST_TOTAL_METRIC,
+  TOTAL_NOT_COMPARABLE,
   caseColorIndex,
   comparableStats,
   compareResults,
@@ -390,6 +392,42 @@ describe("comparisons and chart points", () => {
 
     expect(comparison.previous).toMatchObject({ value: 10, deltaPercent: 20 });
     expect(comparison.median7).toMatchObject({ value: 10, sampleSize: 1 });
+  });
+
+  it("does not compare the total duration of a run that did not pass", () => {
+    const total = { metric: TEST_TOTAL_METRIC, displayName: "Full E2E test" } as const;
+    const history = [
+      result({ ...total, runId: "1", value: 300, startedAt: "2026-08-01T01:00:00.000Z" }),
+      result({ ...total, runId: "2", value: 310, startedAt: "2026-08-02T01:00:00.000Z" }),
+    ];
+    // Aborted early: the total is elapsed time to the failure, not a faster run.
+    const failed = result({
+      ...total,
+      runId: "3",
+      outcome: "failed",
+      value: 45,
+      startedAt: "2026-08-03T01:00:00.000Z",
+    });
+
+    expect(comparableStats(failed, TEST_TOTAL_METRIC, history)).toEqual({
+      previous: null,
+      median7: null,
+      skippedReason: TOTAL_NOT_COMPARABLE,
+    });
+    // A phase that genuinely completed on the failed run still compares.
+    const phaseHistory = [result({ runId: "1", value: 10, startedAt: "2026-08-01T01:00:00.000Z" })];
+    const failedPhase = result({
+      runId: "3",
+      outcome: "failed",
+      value: 12,
+      startedAt: "2026-08-03T01:00:00.000Z",
+    });
+    expect(comparableStats(failedPhase, "checkpoint.duration", phaseHistory).previous).toMatchObject({
+      value: 10,
+    });
+    // A passed run's total compares normally.
+    const passed = result({ ...total, runId: "4", value: 290, startedAt: "2026-08-04T01:00:00.000Z" });
+    expect(comparableStats(passed, TEST_TOTAL_METRIC, history).previous).toMatchObject({ value: 310 });
   });
 
   it("does not compare records across relevant environment dimensions", () => {

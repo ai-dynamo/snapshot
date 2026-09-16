@@ -143,7 +143,12 @@ export interface MedianComparison {
 export interface MetricComparison {
   previous: PreviousComparison | null;
   median7: MedianComparison | null;
+  /** Why no baseline was consulted, when that is deliberate rather than absent data. */
+  skippedReason?: string;
 }
+
+export const TEST_TOTAL_METRIC = "test.total.duration";
+export const TOTAL_NOT_COMPARABLE = "not comparable: run did not pass";
 
 export interface MetricPoint {
   x: number;
@@ -563,6 +568,12 @@ export function comparableStats(
   const currentMeasurement = measurement(current, metricName);
   if (!currentMeasurement || currentMeasurement.status !== "complete") {
     return { previous: null, median7: null };
+  }
+  // The total of a run that did not pass is the elapsed-to-abort time, so
+  // against passed baselines an early failure would read as an improvement.
+  // Mirrors compare_result in snapshot_e2e.benchmark_history.
+  if (metricName === TEST_TOTAL_METRIC && current.outcome !== "passed") {
+    return { previous: null, median7: null, skippedReason: TOTAL_NOT_COMPARABLE };
   }
   const bucket = comparisonIndex(history).get(comparisonKey(current)) ?? [];
   const currentIdentity = resultIdentity(current);
