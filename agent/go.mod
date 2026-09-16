@@ -112,3 +112,11 @@ require (
 )
 
 replace github.com/ai-dynamo/snapshot/api => ../api
+
+// Pre-split genproto still carries googleapis/rpc/status, which collides with the
+// genproto/googleapis/rpc submodule ttrpc imports. hcsshim v0.15 swapped its
+// requirement on the monolith for a replace, which main modules ignore, leaving MVS
+// to pick v0.0.0-20200526211855 via go.opencensus.io. A require does not hold here:
+// go mod tidy drops it because no package imports the monolith. Same version hcsshim
+// replaces to; remove once it requires genproto again.
+replace google.golang.org/genproto => google.golang.org/genproto v0.0.0-20250428153025-10db94c68c34
