@@ -116,7 +116,8 @@ linux-build:
 	  -e HOME=/tmp -e GOCACHE=/tmp/go-build \
 	  -v "$(CURDIR):/workspace" -w /workspace \
 	  $(LINUX_GO_IMAGE) \
-	  make -C agent build
+	  make -C agent go-build
+	$(MAKE) -C agent cuinterpose-build
 
 linux-test:
 	docker run --rm \
