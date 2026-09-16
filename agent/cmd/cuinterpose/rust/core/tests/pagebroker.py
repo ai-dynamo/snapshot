@@ -18,7 +18,7 @@ import subprocess
 import sys
 import unittest
 
-from support import driver, props, stats
+from support import driver, props, stats, Properties, Location
 from protocol_client import command
 
 agent = Path(__file__).resolve().parents[5]
@@ -37,9 +37,30 @@ class ShimSessions(AllocationSessions):
         empty = sys.argv[1:] == ["empty"]
         corrupt = sys.argv[1:] == ["corrupt"]
         count = 0 if empty else 33
-        # Initialize a participant whose native-owned allocation is never shared.
+        # Never-shared POSIX and internally exportable type-zero backing are
+        # PageBroker-owned, but remain application-private.
         private = c.c_uint64()
         assert cuda.cuMemCreate(c.byref(private), 4096, c.byref(props), 0) == 0
+        plain = c.c_uint64()
+        plain_props = Properties(1, 0, Location(1, 0), None)
+        cuda.cuMemGetAllocationGranularity.argtypes = [c.POINTER(c.c_size_t), c.POINTER(Properties), c.c_uint]
+        granularity = c.c_size_t()
+        assert cuda.cuMemGetAllocationGranularity(c.byref(granularity), c.byref(plain_props), 0) == 0
+        assert granularity.value == 4096
+        assert cuda.cuMemCreate(c.byref(plain), 4096, c.byref(plain_props), 0) == 0
+        cuda.cuMemGetAllocationPropertiesFromHandle.argtypes = [c.POINTER(Properties), c.c_uint64]
+        actual = Properties()
+        assert cuda.cuMemGetAllocationPropertiesFromHandle(c.byref(actual), plain) == 0
+        assert actual.handles == 0
+        denied = c.c_int(-1)
+        assert cuda.cuMemExportToShareableHandle(c.byref(denied), plain, 1, 0) != 0
+        assert denied.value == -1
+        assert cuda.cuMemMap(0x10000000, 4096, 0, plain, 0) == 0
+        assert cuda.cuMemRelease(plain) == 0
+        # Empty participant sessions are still required to finish.
+        if empty:
+            assert cuda.cuMemUnmap(c.c_uint64(0x10000000), 4096) == 0
+            assert cuda.cuMemRelease(private) == 0
         # 33 extents cross the bounded 32-FD batch boundary.
         for index in range(count):
             handle = c.c_uint64()
@@ -80,7 +101,7 @@ class ShimSessions(AllocationSessions):
         assert cuda.fakeCopiedToHost() == 0
         manifest = pb.AllocationManifest.FromString(
             (staging / "allocations" / participant / "manifest.pb").read_bytes())
-        assert len(manifest.extents) == count
+        assert len(manifest.extents) == (0 if empty else count + 2)
         assert all(item.size == 4096 and len(item.sha256) == 64 for item in manifest.extents)
         for item in manifest.extents:
             data = (staging / "allocations" / participant / item.allocation_id).read_bytes()
@@ -106,11 +127,19 @@ class ShimSessions(AllocationSessions):
             return
         restored.check_returncode()
         assert stats(cuda).phase == 1
-        assert cuda.fakeMappedCount() == count
+        assert cuda.fakeMappedCount() == (0 if empty else count + 1)
         assert cuda.fakeCopiedToDevice() == 0
+        if not empty:
+            recovered = c.c_uint64()
+            cuda.cuMemRetainAllocationHandle.argtypes = [c.POINTER(c.c_uint64), c.c_void_p]
+            assert cuda.cuMemRetainAllocationHandle(c.byref(recovered), c.c_void_p(0x10000000)) == 0
+            assert cuda.cuMemGetAllocationPropertiesFromHandle(c.byref(actual), recovered) == 0
+            assert actual.handles == 0
+            assert cuda.cuMemExportToShareableHandle(c.byref(denied), recovered, 1, 0) != 0
+            assert cuda.cuMemRelease(recovered) == 0
         assert self.request("load", "commit").HasField("commit_complete")
         # Both broker transfers complete before topology inspection is legal.
-        assert len(command("inspect")["records"]) == count * 2 + 1
+        assert len(command("inspect")["records"]) == (0 if empty else count * 2 + 3)
         assert len(os.listdir("/proc/self/fd")) == before_fds
         print(f"PASS PageBroker shim: {count} allocations, no host arena, restore barriers, session FD cleanup")
 

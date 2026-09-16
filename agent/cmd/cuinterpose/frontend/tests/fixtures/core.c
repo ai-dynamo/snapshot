@@ -25,6 +25,7 @@ struct core_api {
     void (*fork_child)(void);
     int (*ensure_ready)(void);
     create_fn cuMemCreate;
+    int (*cuMemGetAllocationGranularity)(size_t *, const void *, unsigned);
     int (*cuMemRelease)(uint64_t);
     int (*cuMemRetainAllocationHandle)(uint64_t *, void *);
     int (*cuMemMap)(uint64_t, size_t, size_t, uint64_t, uint64_t);
@@ -81,9 +82,9 @@ static int unbind(uint64_t handle, int device, size_t offset, size_t size) {
 }
 
 int cuinterpose_core_init(const struct host_api *host, const struct core_api **output) {
-    if (!host || !output || host->version != 5 || host->size != sizeof(*host))
+    if (!host || !output || host->version != 6 || host->size != sizeof(*host))
         return 1;
-    api.version = 5;
+    api.version = 6;
     api.size = sizeof(api);
     api.debug_stats = debug_stats;
     api.fork_prepare = fork_hook;
@@ -102,6 +103,7 @@ int cuinterpose_core_init(const struct host_api *host, const struct core_api **o
     api.cuMulticastGetGranularity = granularity;
     api.cuMulticastUnbind = unbind;
     api.cuMemCreate = (create_fn)host->resolve("cuMemCreate");
+    api.cuMemGetAllocationGranularity = granularity;
     api.cuMemMap = host->resolve("cuMemMap");
     api.cuMulticastBindMem = (bind_v1)host->resolve("cuMulticastBindMem");
     api.cuMulticastBindMem_v2 = (bind_v2)host->resolve("cuMulticastBindMem_v2");

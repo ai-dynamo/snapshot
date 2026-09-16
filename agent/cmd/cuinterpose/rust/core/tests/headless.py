@@ -55,7 +55,8 @@ def main():
             for mode in ("shared", "empty", "corrupt"):
                 subprocess.run(
                     [sys.executable, str(Path(__file__).with_name("pagebroker.py")), mode],
-                    env=lifecycle_env | {"FAKE_PAGEBROKER": "1"}, check=True, timeout=60)
+                    env=lifecycle_env | {"FAKE_PAGEBROKER": "1", "CUINTERPOSE_ALLOCATION_STORAGE": "pagebroker"},
+                    check=True, timeout=60)
         for mode in ("tracking", "exports", "exhaustion", "access", "shared",
                      "private-released", "no-context", "raw", "unsupported"):
             subprocess.run([sys.executable, str(Path(__file__).with_name("lifecycle.py")), mode],

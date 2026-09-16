@@ -3,7 +3,29 @@
 
 package podcontract
 
-import "testing"
+import (
+	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+)
+
+func TestAllocationStorageIsFixedBeforeProcessLaunch(t *testing.T) {
+	template := enabledTemplate(corev1.Container{Name: "worker"})
+	template.Annotations[CuinterposeAllocationStorageAnnotation] = "pagebroker"
+	if err := ShapeCuinterposeCapture(template, []string{"worker"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := envValue(template.Spec.Containers[0].Env, CuinterposeAllocationStorageEnv); got != "pagebroker" {
+		t.Fatalf("allocation storage = %q", got)
+	}
+	if err := ShapeCuinterposeCapture(template, []string{"worker"}); err != nil {
+		t.Fatal(err)
+	}
+	template.Annotations[CuinterposeAllocationStorageAnnotation] = "host-carrier"
+	if err := ShapeCuinterposeCapture(template, []string{"worker"}); err == nil {
+		t.Fatal("accepted a conflicting launch-time allocation mode")
+	}
+}
 
 func TestAllocationStorageRequiresExplicitSupportedOptIn(t *testing.T) {
 	for _, test := range []struct {

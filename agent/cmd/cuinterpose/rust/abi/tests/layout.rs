@@ -53,6 +53,7 @@ fn generated_c_layout_matches_rust() {
         fork_child,
         ensure_ready,
         cuMemCreate,
+        cuMemGetAllocationGranularity,
         cuMemRelease,
         cuMemRetainAllocationHandle,
         cuMemMap,

@@ -219,6 +219,16 @@ CUresult CUDAAPI cuMemCreate(CUmemGenericAllocationHandle *output, size_t size, 
   return fakeCuMemCreate(output, size, properties, flags);
 }
 
+CUresult CUDAAPI cuMemGetAllocationGranularity(size_t *output, const CUmemAllocationProp *properties,
+                                               CUmemAllocationGranularity_flags flags)
+{
+  (void)flags;
+  if (!output || !properties)
+    return CUDA_ERROR_INVALID_VALUE;
+  *output = properties->requestedHandleTypes == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR ? 4096 : 2048;
+  return CUDA_SUCCESS;
+}
+
 CUresult CUDAAPI fakeCuMemRelease(CUmemGenericAllocationHandle handle)
 {
   int index = handle_index(handle);

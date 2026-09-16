@@ -5,6 +5,7 @@
 // use host addresses; this does not qualify driver import/map behavior.
 #include "../cmd/cuda-checkpoint-helper/transfer_engine.hpp"
 #include "file_descriptor.hpp"
+#include "cuda_posix_transfer.hpp"
 
 #include <gtest/gtest.h>
 #include <sys/mman.h>
@@ -14,7 +15,38 @@
 
 namespace {
 int registrations = 0;
+int registration_calls = 0;
 bool fail_copy = false;
+}
+
+TEST(AllocationTransfer, ReusesPinnedRingAcrossSaveAndLoad)
+{
+  namespace transfer = cuda_checkpoint_transfer;
+  const size_t size = 3 * transfer::kMinimumChunkBytes + 17;
+  std::vector<unsigned char> source(size, 37), restored(size);
+  FileDescriptor file(memfd_create("reusable-content", MFD_CLOEXEC));
+  ASSERT_GE(file.get(), 0);
+  ASSERT_EQ(ftruncate(file.get(), size), 0);
+  transfer::StorageLayout storage{{{"", size, file.get()}}, {{0, size, 0, 0}}};
+  const int before = registration_calls;
+  {
+    transfer::TransferBuffers buffers({2, transfer::kMinimumChunkBytes});
+    transfer::TransferMetrics saved, loaded;
+    std::string error;
+    const auto context = reinterpret_cast<CUcontext>(1);
+    const auto stream = reinterpret_cast<CUstream>(1);
+    for (int batch = 0; batch < 3; ++batch) {
+      ASSERT_TRUE(buffers.Transfer(reinterpret_cast<CUdeviceptr>(source.data()), size, stream, context,
+                                   storage, transfer::TransferOperation::kCheckpoint, nullptr, &saved, &error)) << error;
+      ASSERT_TRUE(buffers.Transfer(reinterpret_cast<CUdeviceptr>(restored.data()), size, stream, context,
+                                   storage, transfer::TransferOperation::kRestore, nullptr, &loaded, &error)) << error;
+      EXPECT_EQ(restored, source);
+      EXPECT_EQ(saved.sha256, loaded.sha256);
+      EXPECT_EQ(registration_calls - before, 2);
+      EXPECT_EQ(registrations, 2);
+    }
+  }
+  EXPECT_EQ(registrations, 0);
 }
 
 extern "C" {
@@ -27,6 +59,7 @@ CUresult CUDAAPI cuCtxSetCurrent(CUcontext) { return CUDA_SUCCESS; }
 CUresult CUDAAPI cuMemHostRegister(void*, size_t, unsigned int)
 {
   ++registrations;
+  ++registration_calls;
   return CUDA_SUCCESS;
 }
 CUresult CUDAAPI cuMemHostUnregister(void*)
