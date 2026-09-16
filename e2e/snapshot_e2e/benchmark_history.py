@@ -32,6 +32,7 @@ from snapshot_e2e.benchmark import (
 HISTORY_FORMAT_VERSION = 1
 MANIFEST_VERSION = 1
 SUPPORTED_SCHEMA_VERSIONS = {SCHEMA_VERSION}
+TOTAL_NOT_COMPARABLE = "run did not pass; total duration is not comparable"
 DEFAULT_SUITE = "framework-checkpoint-restore"
 DEFAULT_TEST = "test_framework_checkpoint_restore_serves_inference"
 
@@ -491,6 +492,7 @@ def compare_result(
         and comparison_dimensions(item.result) == dimensions
     ]
     compatible.sort(key=_result_sort_key, reverse=True)
+    passed = current.get("outcome") == "passed"
     output: list[dict[str, Any]] = []
     for measurement in current["measurements"]:
         comparison: dict[str, Any] = {
@@ -502,6 +504,13 @@ def compare_result(
             "median7": None,
         }
         if measurement["status"] != "complete":
+            output.append(comparison)
+            continue
+        # The total is finalized with the elapsed-to-abort time on a run that
+        # did not pass, so against passed baselines an early failure would read
+        # as a large improvement. Phases that genuinely completed still compare.
+        if measurement["name"] == TEST_TOTAL and not passed:
+            comparison["skippedReason"] = TOTAL_NOT_COMPARABLE
             output.append(comparison)
             continue
         candidates: list[tuple[dict[str, Any], Mapping[str, Any]]] = []
@@ -622,20 +631,26 @@ def render_summary(aggregate_result: Mapping[str, Any]) -> str:
             unit = str(comparison["unit"])
             previous = comparison.get("previous")
             median = comparison.get("median7")
-            lines.append(
-                "| "
-                + " | ".join(
-                    [
-                        _markdown(str(comparison["displayName"])),
-                        _format_value(comparison.get("current"), unit),
-                        _linked_value(previous, unit),
-                        _format_delta(previous),
-                        _median_value(median, unit),
-                        _format_delta(median),
-                    ]
-                )
-                + " |"
-            )
+            skipped = comparison.get("skippedReason")
+            if isinstance(skipped, str) and skipped:
+                cells = [
+                    _markdown(str(comparison["displayName"])),
+                    _format_value(comparison.get("current"), unit),
+                    f"_{_markdown(skipped)}_",
+                    "—",
+                    "—",
+                    "—",
+                ]
+            else:
+                cells = [
+                    _markdown(str(comparison["displayName"])),
+                    _format_value(comparison.get("current"), unit),
+                    _linked_value(previous, unit),
+                    _format_delta(previous),
+                    _median_value(median, unit),
+                    _format_delta(median),
+                ]
+            lines.append("| " + " | ".join(cells) + " |")
         lines.append("")
 
     warnings = aggregate_result.get("collectionWarnings", [])

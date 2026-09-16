@@ -147,6 +147,48 @@ def test_comparison_does_not_cross_environment_dimensions(change) -> None:
     assert comparison["median7"] is None
 
 
+def test_total_duration_of_a_failed_run_is_not_compared() -> None:
+    def with_total(result: dict, total: float) -> dict:
+        result["measurements"].append(
+            {
+                "name": history.TEST_TOTAL,
+                "displayName": "Full E2E test",
+                "unit": "seconds",
+                "value": total,
+                "status": "complete",
+            }
+        )
+        return result
+
+    stored = [
+        history.StoredResult(
+            with_total(_result(run_id=str(index), started=START + timedelta(days=index), value=10), 300),
+            f"result-{index}.json",
+        )
+        for index in range(1, 4)
+    ]
+    # Aborted early: the total is real elapsed time, not a faster test.
+    current = with_total(
+        _result(run_id="9", started=START + timedelta(days=9), value=12, outcome="failed"),
+        45,
+    )
+
+    comparisons = {item["name"]: item for item in history.compare_result(current, stored)}
+
+    total = comparisons[history.TEST_TOTAL]
+    assert total["previous"] is None
+    assert total["median7"] is None
+    assert total["skippedReason"] == history.TOTAL_NOT_COMPARABLE
+    checkpoint = comparisons["checkpoint.duration"]
+    assert checkpoint["previous"]["value"] == 10
+    assert "skippedReason" not in checkpoint
+
+    summary = history.render_summary(
+        {"published": False, "benchmarks": [{"result": current, "comparisons": list(comparisons.values())}]}
+    )
+    assert f"| Full E2E test | 45.00 s | _{history.TOTAL_NOT_COMPARABLE}_ | — | — | — |" in summary
+
+
 def test_failed_history_is_visible_but_excluded_from_baseline(tmp_path: Path) -> None:
     passed = _result(run_id="1", started=START, value=10)
     failed = _result(
