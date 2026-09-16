@@ -12,6 +12,7 @@
 #include <system_error>
 
 #include "posix_copy_engine.hpp"
+#include "allocation_session.hpp"
 
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
@@ -104,7 +105,8 @@ TransactionDirectory(const Path& transaction_root, const std::string& transactio
 
 }  // namespace
 
-Broker::Broker(Path staging_root, Path storage_root) : staging_root_(fs::weakly_canonical(std::move(staging_root)))
+Broker::Broker(Path staging_root, Path storage_root, Path allocation_worker)
+    : staging_root_(fs::weakly_canonical(std::move(staging_root))), allocation_worker_(std::move(allocation_worker))
 {
   io_engines_.push_back(std::make_unique<PosixCopyEngine>(std::move(storage_root)));
   fs::remove_all(staging_root_ / "restore");
@@ -124,7 +126,7 @@ Broker::ReapExpiredTransactions(std::chrono::steady_clock::time_point now)
 
   for (const auto& [id, transaction] : transactions) {
     std::lock_guard transaction_lock(transaction->mutex());
-    if (!transaction->expired(now, kLiveTransactionLifetime))
+    if (transaction->allocation_sessions || !transaction->expired(now, kLiveTransactionLifetime))
       continue;
 
     std::error_code restore_error;
@@ -388,6 +390,8 @@ Broker::Commit(const Request& request)
   if (!transaction)
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
   std::lock_guard lock(transaction->mutex());
+  if (transaction->allocation_sessions || transaction->allocation_failed)
+    return Fail(request, Failure::TRANSACTION_CONFLICT, "allocation sessions active or incomplete");
   if (transaction->state() == Transaction::State::NEW || transaction->state() == Transaction::State::ABORTED)
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
   if (transaction->state() == Transaction::State::PREPARING)
@@ -450,6 +454,8 @@ Broker::Abort(const Request& request)
   if (!transaction)
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
   std::lock_guard lock(transaction->mutex());
+  if (transaction->allocation_sessions)
+    return Fail(request, Failure::TRANSACTION_CONFLICT, "close allocation sessions before abort");
   if (transaction->state() == Transaction::State::NEW || transaction->state() == Transaction::State::COMMITTED)
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
   if (transaction->state() == Transaction::State::ABORTED)
@@ -462,6 +468,17 @@ Broker::Abort(const Request& request)
   transaction->clear_descriptor();
   transaction->set_state(Transaction::State::ABORTED);
   return AbortSucceeded(request);
+}
+
+std::unique_ptr<AllocationSession>
+Broker::BindAllocations(const Request& request)
+{
+  if (!request.has_request_id() || request.request_id().empty() || !request.has_bind_allocations())
+    throw std::invalid_argument("allocation binding requires request identity");
+  auto transaction = FindTransaction(request.transaction_id());
+  if (!transaction)
+    throw std::invalid_argument("allocation transaction not found");
+  return std::make_unique<AllocationSession>(transaction, request.bind_allocations(), allocation_worker_);
 }
 
 }  // namespace snapshot::pagebroker

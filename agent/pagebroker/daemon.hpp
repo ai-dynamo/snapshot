@@ -12,4 +12,5 @@ ExitCode RunDaemon(
     const std::filesystem::path& socket_path,
     const std::filesystem::path& staging_directory,
     const std::filesystem::path& storage_root,
-    size_t max_concurrent_requests);
+    size_t max_concurrent_requests,
+    const std::filesystem::path& allocation_worker = {});
