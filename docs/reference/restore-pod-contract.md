@@ -80,8 +80,12 @@ Failed and partially successful restores require a new restore Pod, not an
 automatic retry. Compatibility refusals retain their explicit skip-check
 override; `RestoreReplenishmentIncompatible` retains the replacement-only policy
 when that override is applied. Successful legacy Pods without recorded IDs, and
-untracked destinations during replenishment, are left alone because their state cannot
-prove replay is safe. Invalid records cannot authorize replay and are logged.
+untracked destinations during replenishment, are left alone because their state
+cannot prove replay is safe. A missing or empty container-ID annotation is valid
+legacy state, not an error: initial restores populate it, while already
+successful legacy Pods retain their successful status without automatic
+replenishment. Malformed JSON and explicit JSON `null` are invalid records;
+they cannot authorize replay and are logged.
 
 Drain active restore operations before upgrading the agent. In-progress
 operations from agents that did not write incarnation-scoped recovery evidence

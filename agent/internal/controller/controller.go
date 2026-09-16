@@ -1159,6 +1159,8 @@ func restoredContainerIDs(pod *corev1.Pod) (map[string]string, error) {
 	ids := make(map[string]string)
 	raw := pod.Annotations[podcontract.RestoredContainerIDsAnnotation]
 	if raw == "" {
+		// Pods created before incarnation tracking have no record. Absence is
+		// valid legacy state; an explicit JSON null is corrupt, not absence.
 		return ids, nil
 	}
 	if err := json.Unmarshal([]byte(raw), &ids); err != nil {
@@ -1212,7 +1214,8 @@ func (w *NodeController) recordRestoredContainerID(ctx context.Context, pod *cor
 	w.restoredContainerIDsMu.Lock()
 	defer w.restoredContainerIDsMu.Unlock()
 
-	ids, err := restoredContainerIDs(pod)
+	next := pod.DeepCopy()
+	ids, err := restoredContainerIDs(next)
 	if err != nil {
 		return err
 	}
@@ -1221,23 +1224,18 @@ func (w *NodeController) recordRestoredContainerID(ctx context.Context, pod *cor
 	if err != nil {
 		return err
 	}
-	patch, err := json.Marshal(map[string]any{
-		"metadata": map[string]any{
-			"annotations": map[string]string{
-				podcontract.RestoredContainerIDsAnnotation: string(value),
-			},
-		},
-	})
+	if next.Annotations == nil {
+		next.Annotations = make(map[string]string)
+	}
+	next.Annotations[podcontract.RestoredContainerIDsAnnotation] = string(value)
+	patch, err := client.MergeFrom(pod).Data(next)
 	if err != nil {
 		return err
 	}
 	if _, err := w.clientset.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, ktypes.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
 		return fmt.Errorf("record restored container ID: %w", err)
 	}
-	if pod.Annotations == nil {
-		pod.Annotations = map[string]string{}
-	}
-	pod.Annotations[podcontract.RestoredContainerIDsAnnotation] = string(value)
+	pod.Annotations = next.Annotations
 	return nil
 }
 

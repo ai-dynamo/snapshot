@@ -1479,6 +1479,10 @@ func TestProcessRestoreQueueItemUsesLivePodState(t *testing.T) {
 	live := stale.DeepCopy()
 	setRestoredContainerIDs(t, live, map[string]string{"main": "restarted-container"})
 	w := makeTestController(t, live)
+	// Keep the controller-runtime client stale too, not just the event payload.
+	// A regression to reading this client must not be hidden by both fakes
+	// returning the same current Pod.
+	w.client = ctrlfake.NewClientBuilder().WithScheme(w.client.Scheme()).WithObjects(stale).Build()
 	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
 		t.Fatal("a stale informer event must not replay restore")
 		return 0, nil
@@ -1490,6 +1494,20 @@ func TestProcessRestoreQueueItemUsesLivePodState(t *testing.T) {
 	got, err := w.clientset.CoreV1().Pods(live.Namespace).Get(context.Background(), live.Name, metav1.GetOptions{})
 	require.NoError(t, err)
 	assert.False(t, hasFinalizer(got, restorePodFinalizer))
+}
+
+func TestProcessRestoreQueueItemDoesNotFallBackToCacheOnReadFailure(t *testing.T) {
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+	w := makeTestController(t, pod)
+	w.clientset.(*fake.Clientset).PrependReactor("get", "pods", func(clientgotesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("API read unavailable")
+	})
+	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
+		t.Error("an unavailable authoritative read must not authorize restore")
+		return 0, nil
+	}
+	processQueuedRestorePod(t, w, pod)
+	assert.False(t, hasPodStatusApply(w), "cached state must not drive a status transition either")
 }
 
 func TestPartiallySuccessfulRestoreDoesNotReplenishRestartedDestination(t *testing.T) {
