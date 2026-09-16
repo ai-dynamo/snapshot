@@ -91,6 +91,8 @@ pub fn transfer(
     let socket = UnixStream::from(session);
     let start = Instant::now();
     let result = (|| -> Result<()> {
+        // Capabilities may originate from an agent runtime's nonblocking poller.
+        socket.set_nonblocking(false).map_err(failed)?;
         socket
             .set_read_timeout(Some(Duration::from_secs(300)))
             .map_err(failed)?;
