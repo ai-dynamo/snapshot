@@ -232,6 +232,44 @@ GPU 1: NVIDIA A100-SXM4-40GB (UUID: GPU-bbb)
 			output: "\n",
 			want:   map[string]string{},
 		},
+		{
+			// The listing from the cluster this was validated on.
+			name:   "a whole GPU and nothing else",
+			output: "GPU 0: Tesla T4 (UUID: GPU-698b3416-207f-8e8f-99b8-533f00103ca9)\n",
+			want:   map[string]string{},
+		},
+		{
+			name:   "a slice named the older MIG-GPU-<parent>/<gi>/<ci> way",
+			output: "  MIG 1g.5gb      Device  0: (UUID: MIG-GPU-6ecb3c0f-aaa/1/0)\n",
+			want:   map[string]string{"MIG-GPU-6ecb3c0f-aaa/1/0": "1g.5gb"},
+		},
+		{
+			name:   "a profile carrying the media-extension suffix",
+			output: "  MIG 1g.10gb+me  Device  0: (UUID: MIG-abc)\n",
+			want:   map[string]string{"MIG-abc": "1g.10gb+me"},
+		},
+		{
+			// Padding only aligns the columns, so its width and whether it is
+			// spaces or tabs leaves every value in the same column.
+			name:   "padded with single spaces",
+			output: "MIG 1g.10gb Device 0: (UUID: MIG-abc)\n",
+			want:   map[string]string{"MIG-abc": "1g.10gb"},
+		},
+		{
+			name:   "padded with tabs",
+			output: "\tMIG\t1g.10gb\tDevice\t0:\t(UUID:\tMIG-abc)\n",
+			want:   map[string]string{"MIG-abc": "1g.10gb"},
+		},
+		{
+			name:   "trailing text after the UUID",
+			output: "  MIG 1g.10gb     Device  0: (UUID: MIG-abc)  extra\n",
+			want:   map[string]string{"MIG-abc": "1g.10gb"},
+		},
+		{
+			name:   "a MIG line whose device ordinal is not a number",
+			output: "  MIG 1g.10gb     Device  X: (UUID: MIG-abc)\n",
+			want:   map[string]string{},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

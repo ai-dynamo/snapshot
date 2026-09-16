@@ -138,26 +138,46 @@ func nsenterNvidiaSMI(ctx context.Context, hostProcPath string, pid int, args ..
 	return exec.CommandContext(ctx, "nsenter", nsenterArgs...).Output()
 }
 
-// migListEntry matches the indented MIG device lines nvidia-smi -L writes under
-// each parent GPU, capturing the profile and the device's own UUID:
+// nvidia-smi -L indents each MIG device under its parent GPU as a fixed run of
+// whitespace-padded columns. The padding aligns the columns and so varies in
+// width, which is why the line is read by column rather than by offset:
 //
 //	GPU 0: NVIDIA H100 80GB HBM3 (UUID: GPU-b1c4...)
 //	  MIG 3g.40gb     Device  0: (UUID: MIG-7089d0f3-293f-58c9-8f8c-5ea666eedbde)
-var migListEntry = regexp.MustCompile(`^MIG\s+(\S+)\s+Device\s+\d+:\s*\(UUID:\s*([^)]+)\)`)
+const (
+	migListKind = iota
+	migListProfile
+	migListDeviceLabel
+	migListOrdinal
+	migListUUIDLabel
+	migListUUID
+	migListColumns
+)
 
 // parseNvidiaSmiMIGProfiles maps each listed MIG device's UUID to its profile.
-// Parent GPU lines carry no profile and are skipped, so a node with MIG disabled
-// yields an empty map rather than an error.
+// A parent GPU line opens with its own name rather than the MIG label, so a node
+// with MIG disabled yields an empty map rather than an error.
 func parseNvidiaSmiMIGProfiles(output string) map[string]string {
 	profiles := make(map[string]string)
 	for _, line := range strings.Split(output, "\n") {
-		match := migListEntry.FindStringSubmatch(strings.TrimSpace(line))
-		if match == nil {
+		columns := strings.Fields(line)
+		if len(columns) < migListColumns ||
+			columns[migListKind] != "MIG" ||
+			columns[migListDeviceLabel] != "Device" ||
+			columns[migListUUIDLabel] != "(UUID:" {
 			continue
 		}
-		if uuid := strings.TrimSpace(match[2]); uuid != "" {
-			profiles[uuid] = match[1]
+		if _, err := strconv.Atoi(strings.TrimSuffix(columns[migListOrdinal], ":")); err != nil {
+			continue
 		}
+		uuid := columns[migListUUID]
+		if !strings.HasSuffix(uuid, ")") {
+			continue
+		}
+		if uuid = strings.TrimSuffix(uuid, ")"); uuid == "" {
+			continue
+		}
+		profiles[uuid] = columns[migListProfile]
 	}
 	return profiles
 }
