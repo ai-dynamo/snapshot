@@ -30,7 +30,13 @@ func NewContainerdRuntime(socket string) (*ContainerdRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial containerd at %s: %w", socket, err)
 	}
-	cri, err := remote.NewRemoteRuntimeService(context.Background(), socket, 2*time.Second, nil, false)
+	// The explicit nil tracer provider opts out of the otelgrpc stats handler;
+	// omitting the call installs one backed by a noop provider instead.
+	cri, err := remote.NewRemoteRuntimeServiceBuilder().
+		WithEndpoint(socket).
+		WithConnectionTimeout(2 * time.Second).
+		WithTracerProvider(nil).
+		Build(context.Background())
 	if err != nil {
 		_ = client.Close()
 		return nil, fmt.Errorf("failed to dial containerd CRI at %s: %w", socket, err)

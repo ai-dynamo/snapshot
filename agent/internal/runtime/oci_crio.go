@@ -26,8 +26,13 @@ type CRIORuntime struct {
 }
 
 func NewCRIORuntime(socket string) (*CRIORuntime, error) {
-	// context.Background()+false: signature added in cri-client v0.36.2 (CVE pin); re-check on Dynamo sync.
-	svc, err := remote.NewRemoteRuntimeService(context.Background(), socket, crioConnectTimeout, nil, false)
+	// The explicit nil tracer provider opts out of the otelgrpc stats handler;
+	// omitting the call installs one backed by a noop provider instead.
+	svc, err := remote.NewRemoteRuntimeServiceBuilder().
+		WithEndpoint(socket).
+		WithConnectionTimeout(crioConnectTimeout).
+		WithTracerProvider(nil).
+		Build(context.Background())
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial CRI-O at %s: %w", socket, err)
 	}
