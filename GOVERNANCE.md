@@ -26,7 +26,7 @@ are made, and how the set of decision-makers changes.
 | Role | Who | What they do |
 | --- | --- | --- |
 | **Contributor** | Anyone who opens an issue, a pull request, or a discussion | Proposes and implements changes |
-| **Maintainer** | Listed in [MAINTAINERS.md](MAINTAINERS.md) and [`.github/CODEOWNERS`](.github/CODEOWNERS) | Reviews and merges pull requests, triages issues, sets priorities, cuts releases |
+| **Maintainer** | A member of a code owners team listed in [MAINTAINERS.md](MAINTAINERS.md) and referenced from [`.github/CODEOWNERS`](.github/CODEOWNERS) | Reviews and merges pull requests, triages issues, sets priorities, cuts releases |
 
 There is no separate committer tier. Maintainers hold write access; everyone
 else contributes through pull requests from forks.
@@ -87,12 +87,12 @@ count of pull requests.
 
 To propose a new maintainer, an existing maintainer opens an issue naming the
 candidate. If no maintainer objects within two weeks, the candidate is added to
-[MAINTAINERS.md](MAINTAINERS.md) and `.github/CODEOWNERS` in a pull request.
+the relevant code owners team listed in [MAINTAINERS.md](MAINTAINERS.md).
 
 ## Stepping down and inactivity
 
-Maintainers may step down at any time by opening a pull request removing
-themselves. Maintainers who have been inactive for six months may be moved to
+Maintainers may step down at any time by asking to be removed from their code
+owners team. Maintainers who have been inactive for six months may be moved to
 emeritus status by consensus of the remaining maintainers; this is not a
 judgment on past contributions, and returning maintainers can be reinstated by
 the same process that added them.
