@@ -387,8 +387,8 @@ RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-help
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
 COPY --from=pagebroker-builder /workspace/pagebroker/pagebroker /usr/local/bin/pagebroker
 RUN output=$(/usr/local/bin/pagebroker 2>&1); status=$?; \
-    [ "$status" -eq 2 ]; \
-    [ "$output" = "usage: pagebroker socket_path staging_directory storage_root --max-concurrent-requests max_concurrent_requests" ]
+    [ "$status" -eq 2 ] && \
+    [ "$output" = "usage: pagebroker socket_path staging_directory storage_root --max-concurrent-requests count [--allocation-worker absolute_path]" ]
 
 # Assemble the injection bundle: bind-mounted read-only into the placeholder's
 # mount namespace at /tmp/snapshot-binaries during restore (internal/nsmount).
