@@ -9,9 +9,11 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"github.com/go-logr/logr"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	"github.com/ai-dynamo/snapshot/agent/internal/logging"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
@@ -26,7 +28,28 @@ func main() {
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
 	targetPodIP := flag.String("target-pod-ip", "", "Restore pod IP for CRIU TCP socket remapping")
 	bundleDir := flag.String("bundle-dir", nsmount.SnapshotBinDst, "Path where the agent binary bundle is mounted in this namespace")
+	allocationSessions := flag.String("allocation-sessions", "", "Inherited participant-to-bound-session FD map")
 	flag.Parse()
+	var sessions cuda.AllocationSessions
+	if *allocationSessions != "" {
+		var inherited map[string]int
+		if err := json.Unmarshal([]byte(*allocationSessions), &inherited); err != nil {
+			fatal(log, err, "invalid allocation session descriptor map")
+		}
+		sessions = make(cuda.AllocationSessions, len(inherited))
+		seen := make(map[int]bool)
+		for id, fd := range inherited {
+			if fd < 10 || seen[fd] {
+				fatal(log, nil, "invalid or duplicate allocation session descriptor")
+			}
+			seen[fd] = true
+			// CRIU/helper children must never inherit the capability. The later
+			// coordinator receives explicit ExtraFiles after native restore.
+			syscall.CloseOnExec(fd)
+			sessions[id] = os.NewFile(uintptr(fd), "allocation-session")
+		}
+		defer sessions.Close()
+	}
 
 	if *checkpointPath == "" {
 		fatal(log, nil, "--checkpoint-path is required")
@@ -37,11 +60,12 @@ func main() {
 	}
 
 	opts := executor.RestoreOptions{
-		CheckpointPath: *checkpointPath,
-		CUDADeviceMap:  *cudaDeviceMap,
-		CgroupRoot:     *cgroupRoot,
-		TargetPodIP:    *targetPodIP,
-		BundleDir:      *bundleDir,
+		AllocationSessions: sessions,
+		CheckpointPath:     *checkpointPath,
+		CUDADeviceMap:      *cudaDeviceMap,
+		CgroupRoot:         *cgroupRoot,
+		TargetPodIP:        *targetPodIP,
+		BundleDir:          *bundleDir,
 	}
 
 	result, err := executor.RestoreInNamespace(context.Background(), opts, log)
