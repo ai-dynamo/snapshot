@@ -107,6 +107,8 @@ storage:
 
 pageBroker:
   enabled: false
+  # Requires the GPU PageBroker image. Empty preserves the CPU-only deployment.
+  allocationWorker: ""
   command: []
   args: []
   maxConcurrentRequests: 16

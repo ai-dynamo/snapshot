@@ -231,6 +231,81 @@ Uncertain asynchronous-copy completion is fail-stop without freeing memory
 that DMA might still reference. Never-shared records are not replayed; their
 physical backing and preserved handles remain native CUDA's responsibility.
 
+## Opt-in PageBroker allocation contents
+
+Host carriers remain the default. A workload can instead select external
+allocation contents with both `nvidia.com/cuinterpose: enabled` and
+`nvidia.com/cuinterpose-allocation-storage: pagebroker`. Capture also requires
+`nvidia.com/snapshot-pagebroker: "true"` and an enabled PageBroker deployment.
+This does not expand checkpoint ownership: only shared, creator-owned,
+POSIX-exportable pinned device allocations use this path. Native CUDA still
+handles private allocations and legacy IPC, and conditional `--launch-job`
+wrapping is unchanged. Native CustomStorage is not used.
+
+The trusted agent obtains participant IDs from a read-only coordinator
+inspection, binds one allocation-only broker connection per participant, and
+passes those descriptors through namespace entry. The node-wide broker socket
+is never mounted into the workload. The coordinator rechecks the participant
+set before mutation, then transfers each capability to its matching shim with
+`SAVE_ALLOCATIONS` or `LOAD_ALLOCATIONS`. Even participants with no owned content
+complete an empty manifest. No session descriptor survives capture.
+
+```mermaid
+sequenceDiagram
+    participant Agent
+    participant Coordinator
+    participant Shim
+    participant Broker as PageBroker
+    participant Worker as Allocation worker
+    Agent->>Coordinator: Read-only participant inspection
+    Coordinator-->>Agent: Participant identities
+    Agent->>Broker: Bind staged transaction and participant
+    Broker->>Worker: Spawn and initialize CUDA
+    Broker-->>Agent: Allocation-only session
+    Agent->>Coordinator: Inherit scoped sessions into target namespaces
+    Coordinator->>Shim: SAVE_ALLOCATIONS with matching session FD
+    Shim->>Broker: Typed protobuf batches and CUDA export FDs
+    Broker->>Worker: Export FDs and broker-opened storage FDs
+    Worker-->>Broker: Copies drained, CUDA references closed, digests
+    Broker-->>Shim: Batch complete
+    Shim->>Broker: Finish participant
+    Broker-->>Shim: Durable allocation manifest
+    Shim-->>Coordinator: Content saved without a host arena
+    Note over Coordinator,Shim: Continue unicast teardown, native CUDA and CRIU
+```
+
+The worker imports CUDA backing using ordinary public VMM APIs and copies
+through bounded pinned buffers into POSIX files. It reuses the helper's transfer
+contracts and digest code, not its native checkpoint operation service. This
+initial implementation transfers allocations serially within each participant;
+participants run concurrently. It is not a direct-to-storage GPU or NIXL path.
+
+`manifest.yaml` records `cuinterpose.allocationStorage: pagebroker`; an absent
+field means host-carrier, and unknown modes fail before restore. Files are
+`allocations/<participant>/<allocation-id>` with a version-1 `manifest.pb` per
+participant. Before CRIU, the agent validates the participant directory set
+against `cuinterpose.state`, and binding LOAD validates manifests/file geometry
+and worker readiness. Restore obeys the captured mode, not a new Pod preference.
+
+After native restore, `LOAD_ALLOCATIONS` creates fresh backing, exports its FDs
+with the destination GPU UUID, and waits for the broker to fill it. Only after
+all copies and worker-reference cleanup succeed does the shim remap addresses
+and publish peer exports. The existing global LOAD barrier precedes unicast
+imports and multicast reconstruction. Digest checking happens during LOAD and
+can detect corruption after GPU writes; failure keeps the workload parked and
+never falls back to host carriers. Disconnect poisons the transaction, and abort
+waits for worker admission to drain before removing files.
+
+Build the opt-in broker image from `agent/` with
+`docker build -f pagebroker/Dockerfile.gpu -t <image> .` (or use
+`make -C agent/pagebroker image-gpu GPU_IMAGE=<image>`). Configure
+`pageBroker.image` to that image and set
+`pageBroker.allocationWorker=/usr/local/bin/pagebroker-allocation-worker`.
+This explicitly enables privileged node-wide GPU visibility for the trusted
+broker. Leaving the worker setting empty preserves the CPU-only deployment.
+The NVIDIA runtime supplies `libcuda.so.1`; the image contains only the worker
+and ordinary protobuf/OpenSSL runtime dependencies.
+
 ## Isolation and fork limits
 
 Snapshot delivers all three CUDA tools to every checkpoint target. Only
@@ -263,6 +338,6 @@ and cross-node workload tests must additionally verify device bytes, real
 multicast collectives, native restore, and post-restore inference.
 
 There is no C fallback or compatibility codec for earlier experimental state.
-PageBroker GPU content transport, FABRIC sharing, save-all mode, and selectable
-content backends require separate designs. The concrete host-carrier module
+FABRIC sharing, save-all mode, and NIXL content transport require separate
+designs. The concrete host-carrier module
 is the replacement boundary, not a speculative backend registry.
