@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <future>
+#include <sys/stat.h>
 #include <fstream>
 #include <optional>
 #include <string>
@@ -137,6 +138,40 @@ TEST_F(BrokerTest, NativeEngineReusesProcessAndHoldsAdmissionUntilDrain)
     EXPECT_EQ(kill(engine, 0), 0);
     EXPECT_TRUE(fs::exists(source_ / "image"));
   }
+}
+
+TEST_F(BrokerTest, RestoreFilesRemainPrivateAndPublicationMovesSameFilesystem)
+{
+  auto restore = RequestFor("private-restore");
+  Configure(restore.mutable_staged_restore()->mutable_source(),
+            restore.mutable_staged_restore()->mutable_io_engine(), source_);
+  const auto staged = broker().HandleRequest(restore);
+  ASSERT_TRUE(staged.has_staged_restore_directory());
+  const fs::path view(staged.staged_restore_directory().image_directory());
+  std::ofstream(view / "image", std::ios::trunc) << "modified";
+  std::ifstream original(source_ / "image");
+  std::string contents;
+  original >> contents;
+  EXPECT_EQ(contents, "image");
+
+  auto prepare = RequestFor("move");
+  const auto destination = root_ / "storage" / "published";
+  Configure(prepare.mutable_prepare_staged_checkpoint()->mutable_destination(),
+            prepare.mutable_prepare_staged_checkpoint()->mutable_io_engine(), destination);
+  const auto prepared = broker().HandleRequest(prepare);
+  ASSERT_TRUE(prepared.has_staged_checkpoint_directory());
+  const fs::path staging(prepared.staged_checkpoint_directory().image_directory());
+  std::ofstream(staging / "pages.img") << "pages";
+  struct stat before{}, after{};
+  ASSERT_EQ(stat((staging / "pages.img").c_str(), &before), 0);
+  auto commit = RequestFor("move");
+  commit.mutable_commit();
+  ASSERT_TRUE(broker().HandleRequest(commit).has_commit_complete());
+  ASSERT_EQ(stat((destination / "pages.img").c_str(), &after), 0);
+  EXPECT_EQ(before.st_ino, after.st_ino);
+  EXPECT_EQ(before.st_dev, after.st_dev);
+  EXPECT_FALSE(fs::exists(staging));
+  EXPECT_TRUE(broker().HandleRequest(commit).has_commit_complete());
 }
 
 TEST_F(BrokerTest, StagesRestoreAndCleansUpOnCommit)
@@ -493,6 +528,28 @@ TEST_F(BrokerTest, PreservesExistingCheckpointWhenReplacementFails)
   EXPECT_TRUE(broker().HandleRequest(commit).has_failure());
   EXPECT_TRUE(fs::exists(published / "old"));
   EXPECT_TRUE(fs::exists(previous));
+}
+
+TEST_F(BrokerTest, CrossFilesystemPublicationKeepsCopySemantics)
+{
+  const auto staging = fs::path("/dev/shm") / ("pagebroker-cross-device-" + std::to_string(getpid()));
+  fs::create_directory(staging);
+  std::ofstream(staging / "image") << "cross-device";
+  struct stat source_stat{}, target_stat{};
+  ASSERT_EQ(stat(staging.c_str(), &source_stat), 0);
+  ASSERT_EQ(stat((root_ / "storage").c_str(), &target_stat), 0);
+  if (source_stat.st_dev == target_stat.st_dev) {
+    fs::remove_all(staging);
+    GTEST_SKIP() << "test needs separate filesystems";
+  }
+  PosixCopyEngine engine(root_ / "storage");
+  StorageBackend destination;
+  const auto published = root_ / "storage" / "copied";
+  destination.mutable_filesystem()->set_directory(published.string());
+  engine.PublishCheckpoint(staging, destination);
+  EXPECT_TRUE(fs::exists(staging / "image"));
+  EXPECT_TRUE(fs::exists(published / "image"));
+  fs::remove_all(staging);
 }
 
 TEST_F(BrokerTest, PreservesExistingPartialCheckpointDestination)
