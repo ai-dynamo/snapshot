@@ -73,8 +73,8 @@ message AllocationExtent
   // CUDA UUID bytes, not a process-local device ordinal. On load this is the
   // destination UUID; the manifest retains the captured source UUID.
   bytes device_uuid = 3;
-  // Populated only in broker-owned manifests and successful worker responses.
-  string sha256 = 4;
+  reserved 4;
+  reserved "sha256";
 }
 message AllocationBatch
 {
@@ -94,7 +94,7 @@ message AllocationSessionReply
 {
   oneof result {
     // An empty batch acknowledges session readiness. Batch replies contain
-    // the transferred extents and their content digests.
+    // the transferred extents.
     AllocationBatch completed = 1;
     CommitComplete finished = 2;
     Failure failure = 3;

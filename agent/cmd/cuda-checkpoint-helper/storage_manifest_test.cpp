@@ -29,10 +29,6 @@ constexpr const char *kDestinationB =
     "GPU-10000000-0000-0000-0000-00000000000b";
 constexpr const char *kDestinationFallback =
     "GPU-10000000-0000-0000-0000-00000000000c";
-constexpr const char *kDigestA =
-    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-constexpr const char *kDigestB =
-    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 bool Check(bool condition, const std::string &message) {
   if (!condition) {
@@ -61,8 +57,8 @@ bool TestGPUUUIDParsing() {
 
 bool TestEqualSizeNonOrderPreservingMap() {
   const std::vector<storage::ManifestExtent> extents{
-      {kSourceA, 4096, storage::DeviceFilename(0), ""},
-      {kSourceB, 4096, storage::DeviceFilename(1), ""},
+      {kSourceA, 4096, storage::DeviceFilename(0)},
+      {kSourceB, 4096, storage::DeviceFilename(1)},
   };
   // CUDA returns destination B first. Equal sizes must not permit an
   // index-based A/B swap.
@@ -92,7 +88,7 @@ bool TestEqualSizeNonOrderPreservingMap() {
              "destination A was not matched to source A's deterministic file");
 }
 
-bool TestEmptyV3Manifest() {
+bool TestEmptyV4Manifest() {
   char path[] = "/tmp/cuda-storage-manifest-test-XXXXXX";
   const char *directory = mkdtemp(path);
   if (!Check(directory != nullptr, "mkdtemp failed")) {
@@ -105,7 +101,7 @@ bool TestEmptyV3Manifest() {
   const bool result =
       Check(storage::WriteManifest(directory, {}, &error), error) &&
       Check(storage::ReadManifest(directory, &loaded, &error), error) &&
-      Check(loaded.empty(), "empty v3 manifest did not round-trip") &&
+      Check(loaded.empty(), "empty v4 manifest did not round-trip") &&
       Check(storage::BuildTransferJobs(loaded, {}, {}, &jobs, &error), error) &&
       Check(jobs.empty(), "zero-device restore produced transfer jobs");
   std::error_code ignored;
@@ -113,15 +109,15 @@ bool TestEmptyV3Manifest() {
   return result;
 }
 
-bool TestNonemptyV3ManifestRoundTrip() {
+bool TestNonemptyV4ManifestRoundTrip() {
   char path[] = "/tmp/cuda-storage-manifest-roundtrip-test-XXXXXX";
   const char *directory = mkdtemp(path);
   if (!Check(directory != nullptr, "mkdtemp failed")) {
     return false;
   }
   const std::vector<storage::ManifestExtent> extents{
-      {kSourceA, 4096, storage::DeviceFilename(0), kDigestA},
-      {kSourceB, 8192, storage::DeviceFilename(1), kDigestB},
+      {kSourceA, 4096, storage::DeviceFilename(0)},
+      {kSourceB, 8192, storage::DeviceFilename(1)},
   };
 
   std::string error;
@@ -139,11 +135,9 @@ bool TestNonemptyV3ManifestRoundTrip() {
       Check(loaded.size() == 2 && loaded[0].source_uuid == kSourceA &&
                 loaded[0].size == 4096 &&
                 loaded[0].filename == "device-0000.bin" &&
-                loaded[0].sha256 == kDigestA &&
                 loaded[1].source_uuid == kSourceB && loaded[1].size == 8192 &&
-                loaded[1].filename == "device-0001.bin" &&
-                loaded[1].sha256 == kDigestB,
-            "nonempty v3 manifest did not preserve UUID, size, filename, and digest");
+                loaded[1].filename == "device-0001.bin",
+            "nonempty v4 manifest did not preserve UUID, size, and filename");
   std::error_code ignored;
   std::filesystem::remove_all(directory, ignored);
   return result;
@@ -167,16 +161,16 @@ bool TestV1Rejected() {
   std::string error;
   const bool result = Check(!storage::ReadManifest(directory, &extents, &error),
                             "unsafe v1 manifest was accepted") &&
-                      Check(error.find("without extent digests") !=
+                      Check(error.find("unsupported helper manifest version") !=
                                 std::string::npos,
-                            "v1 rejection did not identify missing integrity metadata");
+                            "v1 rejection did not identify unsupported version");
   std::error_code ignored;
   std::filesystem::remove_all(directory, ignored);
   return result;
 }
 
-bool TestV2RejectedWithoutDigest() {
-  char path[] = "/tmp/cuda-storage-manifest-v2-test-XXXXXX";
+bool TestV3Rejected() {
+  char path[] = "/tmp/cuda-storage-manifest-v3-test-XXXXXX";
   const char *directory = mkdtemp(path);
   if (!Check(directory != nullptr, "mkdtemp failed")) {
     return false;
@@ -184,19 +178,19 @@ bool TestV2RejectedWithoutDigest() {
   {
     std::ofstream output(std::filesystem::path(directory) /
                          storage::kManifestName);
-    output << "version 2\n"
+    output << "version 3\n"
               "device_count 1\n"
               "device 0 "
-           << kSourceA << " 4096 device-0000.bin\n";
+           << kSourceA << " 4096 device-0000.bin " << std::string(64, 'a') << "\n";
   }
 
   std::vector<storage::ManifestExtent> extents;
   std::string error;
   const bool result =
       Check(!storage::ReadManifest(directory, &extents, &error),
-            "unsafe v2 manifest without digest was accepted") &&
-      Check(error.find("without extent digests") != std::string::npos,
-            "v2 rejection did not identify missing integrity metadata");
+            "old v3 manifest was accepted") &&
+      Check(error.find("unsupported helper manifest version") != std::string::npos,
+            "v3 rejection did not identify unsupported version");
   std::error_code ignored;
   std::filesystem::remove_all(directory, ignored);
   return result;
@@ -221,26 +215,25 @@ bool TestInvalidUnsignedFieldsRejected() {
   };
 
   const std::string device_prefix =
-      std::string("version 3\ndevice_count 1\ndevice 0 ") + kSourceA;
+      std::string("version 4\ndevice_count 1\ndevice 0 ") + kSourceA;
   const bool result =
       rejected("version -1\ndevice_count 0\n",
                "negative manifest version was accepted") &&
-      rejected("version +3\ndevice_count 0\n",
+      rejected("version +4\ndevice_count 0\n",
                "explicitly signed manifest version was accepted") &&
-      rejected("version 3\ndevice_count -1\n",
+      rejected("version 4\ndevice_count -1\n",
                "negative device count was accepted") &&
-      rejected("version 3\ndevice_count +1\n",
+      rejected("version 4\ndevice_count +1\n",
                "explicitly signed device count was accepted") &&
-      rejected(std::string("version 3\ndevice_count 1\ndevice -1 ") +
-                   kSourceA + " 1 device-0000.bin " + kDigestA + "\n",
+      rejected(std::string("version 4\ndevice_count 1\ndevice -1 ") +
+                   kSourceA + " 1 device-0000.bin\n",
                "negative device index was accepted") &&
-      rejected(device_prefix + " -1 device-0000.bin " + kDigestA + "\n",
+      rejected(device_prefix + " -1 device-0000.bin\n",
                "negative extent size was accepted") &&
-      rejected(device_prefix + " +1 device-0000.bin " + kDigestA + "\n",
+      rejected(device_prefix + " +1 device-0000.bin\n",
                "explicitly signed extent size was accepted") &&
       rejected(device_prefix +
-                   " 184467440737095516160 device-0000.bin " + kDigestA +
-                   "\n",
+                   " 184467440737095516160 device-0000.bin\n",
                "overflowing extent size was accepted");
   std::error_code ignored;
   std::filesystem::remove_all(directory, ignored);
@@ -258,7 +251,7 @@ bool TestManifestSymlinkRejected() {
       std::filesystem::path(directory) / storage::kManifestName;
   {
     std::ofstream output(target);
-    output << "version 3\ndevice_count 0\n";
+    output << "version 4\ndevice_count 0\n";
   }
   const bool linked = symlink(target.c_str(), manifest.c_str()) == 0;
 
@@ -274,8 +267,8 @@ bool TestManifestSymlinkRejected() {
 
 bool TestUnconsumedExtentRejected() {
   const std::vector<storage::ManifestExtent> extents{
-      {kSourceA, 4096, storage::DeviceFilename(0), ""},
-      {kSourceB, 4096, storage::DeviceFilename(1), ""},
+      {kSourceA, 4096, storage::DeviceFilename(0)},
+      {kSourceB, 4096, storage::DeviceFilename(1)},
   };
   const std::vector<storage::DeviceExtent> destinations{{kSourceA, 4096}};
   std::vector<storage::TransferJob> jobs;
@@ -287,8 +280,8 @@ bool TestUnconsumedExtentRejected() {
 
 bool TestUnsafeMappingsRejected() {
   const std::vector<storage::ManifestExtent> extents{
-      {kSourceA, 4096, storage::DeviceFilename(0), ""},
-      {kSourceB, 4096, storage::DeviceFilename(1), ""},
+      {kSourceA, 4096, storage::DeviceFilename(0)},
+      {kSourceB, 4096, storage::DeviceFilename(1)},
   };
   std::vector<storage::TransferJob> jobs;
   std::string error;
@@ -314,8 +307,8 @@ bool TestUnsafeMappingsRejected() {
     return false;
   }
   if (!Check(!storage::BuildTransferJobs(
-                 {{kSourceA, 4096, storage::DeviceFilename(0), ""},
-                  {kSourceA, 4096, storage::DeviceFilename(1), ""}},
+                 {{kSourceA, 4096, storage::DeviceFilename(0)},
+                  {kSourceA, 4096, storage::DeviceFilename(1)}},
                  {{kSourceA, 4096}, {kSourceB, 4096}}, {}, &jobs, &error),
              "restore accepted duplicate saved source UUIDs")) {
     return false;
@@ -334,39 +327,11 @@ bool TestDuplicateCheckpointUUIDRejected() {
                "checkpoint accepted duplicate source UUIDs");
 }
 
-bool TestExtentDigestApplyAndSameSizeCorruptionRejection() {
-  std::vector<storage::ManifestExtent> extents{
-      {kSourceA, 4096, storage::DeviceFilename(0), ""},
-      {kSourceB, 4096, storage::DeviceFilename(1), ""},
-  };
-  const std::vector<storage::TransferJob> jobs{{0, 1}, {1, 0}};
-  std::string error;
-  if (!Check(storage::ApplyOrVerifyExtentDigests(
-                 true, jobs, {kDigestB, kDigestA}, &extents, &error),
-             error) ||
-      !Check(extents[0].sha256 == kDigestA &&
-                 extents[1].sha256 == kDigestB,
-             "checkpoint digests were not mapped by extent identity")) {
-    return false;
-  }
-  if (!Check(storage::ApplyOrVerifyExtentDigests(
-                 false, jobs, {kDigestB, kDigestA}, &extents, &error),
-             error)) {
-    return false;
-  }
-  return Check(!storage::ApplyOrVerifyExtentDigests(
-                   false, jobs, {kDigestB, std::string(64, 'c')}, &extents,
-                   &error),
-               "same-size extent corruption was accepted") &&
-         Check(error.find("SHA-256 mismatch") != std::string::npos,
-               "corruption rejection did not report a digest mismatch");
-}
-
 bool TestWrongDeterministicFilenameRejected() {
   std::vector<storage::TransferJob> jobs;
   std::string error;
   return Check(!storage::BuildTransferJobs(
-                   {{kSourceA, 4096, "device-0001.bin", ""}},
+                   {{kSourceA, 4096, "device-0001.bin"}},
                    {{kSourceA, 4096}}, {}, &jobs, &error),
                "manifest accepted an extent with the wrong deterministic "
                "filename");
@@ -385,7 +350,7 @@ bool TestValidateExtentFiles() {
     extent << "bad";
   }
   const std::vector<storage::ManifestExtent> extents{
-      {kSourceA, 4, storage::DeviceFilename(0), ""},
+      {kSourceA, 4, storage::DeviceFilename(0)},
   };
   std::string error;
   const bool rejected_wrong_size =
@@ -469,13 +434,12 @@ bool TestStaleTemporaryManifestDoesNotBlockWrite() {
 
 int main() {
   if (!TestGPUUUIDParsing() || !TestEqualSizeNonOrderPreservingMap() ||
-      !TestEmptyV3Manifest() ||
-      !TestNonemptyV3ManifestRoundTrip() || !TestV1Rejected() ||
-      !TestV2RejectedWithoutDigest() || !TestInvalidUnsignedFieldsRejected() ||
+      !TestEmptyV4Manifest() ||
+      !TestNonemptyV4ManifestRoundTrip() || !TestV1Rejected() ||
+      !TestV3Rejected() || !TestInvalidUnsignedFieldsRejected() ||
       !TestManifestSymlinkRejected() ||
       !TestUnconsumedExtentRejected() || !TestUnsafeMappingsRejected() ||
       !TestDuplicateCheckpointUUIDRejected() ||
-      !TestExtentDigestApplyAndSameSizeCorruptionRejection() ||
       !TestWrongDeterministicFilenameRejected() ||
       !TestValidateExtentFiles() || !TestRemoveManifest() ||
       !TestStaleTemporaryManifestDoesNotBlockWrite()) {

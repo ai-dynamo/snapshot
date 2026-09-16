@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-// Exercise the real chunked POSIX/digest pipeline without a GPU. CUDA copies
+// Exercise the real chunked POSIX pipeline without a GPU. CUDA copies
 // use host addresses; this does not qualify driver import/map behavior.
 #include "../cmd/cuda-checkpoint-helper/transfer_engine.hpp"
 #include "file_descriptor.hpp"
@@ -41,7 +41,6 @@ TEST(AllocationTransfer, ReusesPinnedRingAcrossSaveAndLoad)
       ASSERT_TRUE(buffers.Transfer(reinterpret_cast<CUdeviceptr>(restored.data()), size, stream, context,
                                    storage, transfer::TransferOperation::kRestore, nullptr, &loaded, &error)) << error;
       EXPECT_EQ(restored, source);
-      EXPECT_EQ(saved.sha256, loaded.sha256);
       EXPECT_EQ(registration_calls - before, 2);
       EXPECT_EQ(registrations, 2);
     }
@@ -74,7 +73,6 @@ TEST(AllocationTransfer, AsyncRingDrainsCancellationAndReusesFiles)
     ASSERT_TRUE(buffers.Transfer(reinterpret_cast<CUdeviceptr>(restored.data()), size, stream, context,
                                 storage, transfer::TransferOperation::kRestore, nullptr, &loaded, &error)) << error;
     EXPECT_EQ(restored, source);
-    EXPECT_EQ(saved.sha256, loaded.sha256);
   }
 }
 
@@ -146,7 +144,6 @@ TEST(AllocationTransfer, RingRoundTripAndFailedCopyCleanup)
                                       storage, transfer::TransferOperation::kRestore, options,
                                       nullptr, &loaded, &error)) << error;
   EXPECT_EQ(restored, source);
-  EXPECT_EQ(saved.sha256, loaded.sha256);
   EXPECT_EQ(registrations, 0);
   fail_copy = true;
   EXPECT_FALSE(transfer::TransferExtent(reinterpret_cast<CUdeviceptr>(source.data()), size, stream, context,

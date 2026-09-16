@@ -6,14 +6,25 @@ SPDX-License-Identifier: Apache-2.0
 # Explicit allocation transfer sessions
 
 PageBroker can save and load externally supplied CUDA VMM backing without
-enabling native CUDA CustomStorage. This is a broker-side building block:
-the Snapshot agent and Rust cuinterpose caller are not connected to it yet.
+enabling native CUDA CustomStorage. This broker-side building block has no
+dependency on an interposer implementation. A caller supplies the backing
+and owns CUDA topology reconstruction; PageBroker owns content transfer.
 Ordinary PageBroker filesystem transactions do not require CUDA.
+
+This implementation consolidates the allocation-transfer use case of the
+experimental `hannahz/pagebroker-nixl-prototype` branch with the bounded
+asynchronous NIXL transfer work in commits `a79ec05` and `e1a06b2`. It does
+not import the native CustomStorage orchestration or C interposer from
+`hannahz/pagebroker-cuda-foundation-integration`. The NIXL adapter is currently
+filesystem-specific, not a generic FD-only contract for future storage backends.
+It does not depend on the CUDA helper command codec proposed in PR #312.
 
 ## Session boundary
 
-The trusted agent creates a staged checkpoint or restore transaction through
-the existing broker protocol. On a new connection it sends
+The trusted agent creates a staged checkpoint transaction for SAVE or a
+`DirectRestore` transaction for LOAD through the existing broker protocol.
+Direct restore retains a read-only published source without staging its bytes.
+On a new connection the agent sends
 `Request.bind_allocations` with the transaction ID, a lowercase 128-bit
 participant ID, and `SAVE` or `LOAD`. The broker verifies the transaction's
 direction and starts a CUDA worker before acknowledging the binding.
@@ -54,16 +65,17 @@ adapter, rather than reopened from workload-provided paths.
 
 For each allocation the worker selects a visible device by UUID, imports the
 VMM handle, checks its pinned/device properties, maps a worker-local address,
-and calls the transfer-neutral `TransferExtent` interface. It reuses the
+and transfers through a reusable ring. It reuses the
 bounded POSIX transfer-ring design from the PageBroker CUDA foundation.
 The backend pipelines D2H/H2D operations and storage I/O through pinned host
-buffers and computes SHA-256 during the sole content pass. It is not a
+buffers without computing content checksums. It is not a
 GPU-direct storage backend.
 
-Allocations within one batch are processed serially, with a 64-MiB transfer
-slot; participant sessions run concurrently. This deliberately bounds memory
-without introducing a worker pool. Grouping small allocations and reusing
-contexts/streams is a future performance improvement at the same interface.
+Allocations within one batch are processed serially; participant sessions run
+concurrently. Each worker retains a context, stream, and four 64-MiB transfer
+slots per used GPU across batches. The GPU image uses NIXL POSIX asynchronous
+I/O to overlap storage requests with DMA. The CPU-test implementation uses
+POSIX reads and writes; it is not a runtime fallback if NIXL fails.
 
 A batch succeeds only after transfers and CUDA cleanup complete and the
 worker and broker drop their temporary export FDs. Failed operations terminate
@@ -75,7 +87,7 @@ transaction cleanup must not race a process retaining CUDA references.
 
 ## Artifact and transaction lifetime
 
-Content lives at:
+During capture, content lives at:
 
 ```text
 <transaction staging>/allocations/<participant-id>/<allocation-id>
@@ -83,12 +95,18 @@ Content lives at:
 ```
 
 `AllocationManifest` version 1 records the participant, allocation IDs,
-sizes, source device UUIDs, and digests. Save batches fsync content; `finish`
+sizes, and source device UUIDs. Save batches fsync content; `finish`
 atomically publishes and fsyncs the complete participant manifest. Load binding
 validates the manifest and regular-file sizes before accepting allocation FDs.
-Load completion requires exact coverage of the saved allocation set. Digest
-verification occurs during transfer, so corruption may be detected **after
-GPU writes**; the caller must keep the workload parked and fail closed.
+LOAD reads the published `allocations/` files relative to the direct
+transaction's retained source descriptor. Commit, abort, and expiry release
+that descriptor without deleting published content. The caller must keep
+the artifact and its children available; an open directory FD alone does not
+prevent another process from deleting its files.
+Load completion requires exact coverage of the saved allocation set. This path
+does not detect same-size payload corruption: checkpoint storage is trusted.
+Transfer failures may occur after GPU writes; the caller must keep the workload
+parked and fail closed.
 
 Transaction mutexes protect short admission/state transitions, not the GPU
 transfer. Commit refuses active or failed/incomplete sessions. Abort returns
@@ -116,7 +134,18 @@ make -C agent/pagebroker allocation-worker \
 It also needs protobuf and OpenSSL development libraries. At runtime the
 worker needs the NVIDIA driver library and access to the selected GPUs.
 It does not call or link native checkpoint/CustomStorage operations. The
-default PageBroker image does not yet package or enable this worker.
+default CPU-only PageBroker image does not enable this worker. The optional
+`Dockerfile.gpu` image packages the worker and pinned NIXL POSIX backend:
+
+```sh
+make -C agent/pagebroker image-gpu GPU_IMAGE=<registry>/<image>:<tag>
+```
+
+Set the chart's `pageBroker.allocationWorker` to
+`/usr/local/bin/pagebroker-allocation-worker` and select that GPU image to
+enable it. The worker's environment variable
+`PAGEBROKER_ALLOCATION_DIRECT_IO=1` opts into aligned direct file I/O;
+unsupported direct I/O fails rather than silently reverting to buffered I/O.
 
 `make -C agent/pagebroker test-allocations` requires Python protobuf bindings
 and exercises actual broker connections, spawned fake workers, FD transport,
