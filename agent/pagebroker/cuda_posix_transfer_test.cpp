@@ -49,6 +49,35 @@ TEST(AllocationTransfer, ReusesPinnedRingAcrossSaveAndLoad)
   EXPECT_EQ(registrations, 0);
 }
 
+TEST(AllocationTransfer, AsyncRingDrainsCancellationAndReusesFiles)
+{
+  namespace transfer = cuda_checkpoint_transfer;
+  const size_t size = 17 * transfer::kMinimumChunkBytes + 13;
+  std::vector<unsigned char> source(size), restored(size);
+  for (size_t i = 0; i < size; ++i)
+    source[i] = (i * 7 + i / 4096) % 251;
+  transfer::TransferBuffers buffers({4, transfer::kMinimumChunkBytes});
+  auto context = reinterpret_cast<CUcontext>(1);
+  auto stream = reinterpret_cast<CUstream>(1);
+  for (int iteration = 0; iteration < 3; ++iteration) {
+    FileDescriptor file(memfd_create("async-ring", MFD_CLOEXEC));
+    ASSERT_EQ(ftruncate(file.get(), size), 0);
+    transfer::StorageLayout storage{{{"", size, file.get()}}, {{0, size, 0, 0}}};
+    transfer::TransferMetrics saved, loaded;
+    std::string error;
+    ASSERT_TRUE(buffers.Transfer(reinterpret_cast<CUdeviceptr>(source.data()), size, stream, context,
+                                storage, transfer::TransferOperation::kCheckpoint, nullptr, &saved, &error)) << error;
+    transfer::TransferCancellation cancelled;
+    cancelled.Cancel();
+    EXPECT_FALSE(buffers.Transfer(reinterpret_cast<CUdeviceptr>(restored.data()), size, stream, context,
+                                  storage, transfer::TransferOperation::kRestore, &cancelled, &loaded, &error));
+    ASSERT_TRUE(buffers.Transfer(reinterpret_cast<CUdeviceptr>(restored.data()), size, stream, context,
+                                storage, transfer::TransferOperation::kRestore, nullptr, &loaded, &error)) << error;
+    EXPECT_EQ(restored, source);
+    EXPECT_EQ(saved.sha256, loaded.sha256);
+  }
+}
+
 extern "C" {
 CUresult CUDAAPI cuGetErrorName(CUresult, const char** name)
 {
