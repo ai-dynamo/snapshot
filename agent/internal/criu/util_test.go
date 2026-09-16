@@ -80,6 +80,15 @@ func TestReadLogTail(t *testing.T) {
 	})
 }
 
+func TestBuildCRIUConfCompression(t *testing.T) {
+	if got := buildCRIUConf(&types.CRIUSettings{Compress: true}); got != "compress\ndecompress-threads 0\n" {
+		t.Fatalf("unexpected compression configuration: %q", got)
+	}
+	if got := buildCRIUConf(&types.CRIUSettings{}); got != "" {
+		t.Fatalf("compression must remain opt-in: %q", got)
+	}
+}
+
 func TestApplyCommonSettings(t *testing.T) {
 	t.Run("valid mode sets all fields", func(t *testing.T) {
 		opts := &criurpc.CriuOpts{}
