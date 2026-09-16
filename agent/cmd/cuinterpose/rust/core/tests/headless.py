@@ -18,6 +18,8 @@ def main():
     parser.add_argument("--artifacts", type=Path,
                         default=workspace.parent / "build",
                         help="Packaged frontend, core, and coordinator (default: ../build)")
+    parser.add_argument("--pagebroker", action="store_true",
+                        help="Also exercise the real daemon (build agent/pagebroker test-allocations first)")
     args = parser.parse_args()
     subprocess.run([sys.executable, str(workspace.parent / "tests/gpu/test_reports.py")],
                    check=True)
@@ -49,6 +51,11 @@ def main():
         env["LD_PRELOAD"] = str(artifacts / "libcuinterpose.so")
         lifecycle_env = env | {"LD_PRELOAD": env["LD_PRELOAD"] +
                               f":{fixtures / 'test/libcuda.so.1'}"}
+        if args.pagebroker:
+            for mode in ("shared", "empty", "corrupt"):
+                subprocess.run(
+                    [sys.executable, str(Path(__file__).with_name("pagebroker.py")), mode],
+                    env=lifecycle_env | {"FAKE_PAGEBROKER": "1"}, check=True, timeout=60)
         for mode in ("tracking", "exports", "exhaustion", "access", "shared",
                      "private-released", "no-context", "raw", "unsupported"):
             subprocess.run([sys.executable, str(Path(__file__).with_name("lifecycle.py")), mode],

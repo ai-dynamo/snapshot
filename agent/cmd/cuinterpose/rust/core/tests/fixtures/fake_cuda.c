@@ -106,6 +106,12 @@ static int handle_index(CUmemGenericAllocationHandle handle)
   return (int)(handle - FAKE_HANDLE_BASE);
 }
 
+CUresult CUDAAPI cuDeviceGetUuid(void *uuid, CUdevice device)
+{
+  memset(uuid, device, 16);
+  return CUDA_SUCCESS;
+}
+
 /* Caller holds model_lock. */
 static CUmemGenericAllocationHandle new_handle(int allocation)
 {
@@ -344,6 +350,11 @@ CUresult CUDAAPI fakeCuMemExportToShareableHandle(void *output, CUmemGenericAllo
   pthread_mutex_unlock(&model_lock);
   fd = memfd_create("fake-cuda-export", MFD_CLOEXEC);
   if (fd < 0 || write(fd, text, strlen(text)) != (ssize_t)strlen(text))
+    return CUDA_ERROR_UNKNOWN;
+  /* The PageBroker fake worker copies these descriptor bytes, not GPU memory.
+   * Pad its payload only in that test, preserving the existing IPC fixture. */
+  if (getenv("FAKE_PAGEBROKER") != NULL &&
+      ftruncate(fd, (off_t)allocations[handles[index].allocation].size) != 0)
     return CUDA_ERROR_UNKNOWN;
   *(int *)output = fd;
   return CUDA_SUCCESS;
