@@ -57,15 +57,11 @@ FROM ${AGENT_BASE_IMAGE} AS cuda-transfer-contracts-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
 
 COPY --from=cuda-helper-headers /usr/local/cuda-13.4/targets/x86_64-linux/include/cuda.h /opt/cuda-13.4/include/cuda.h
-COPY cmd/cuda-checkpoint-helper/content_digest.cpp ./cmd/cuda-checkpoint-helper/content_digest.cpp
-COPY cmd/cuda-checkpoint-helper/content_digest.hpp ./cmd/cuda-checkpoint-helper/content_digest.hpp
-COPY cmd/cuda-checkpoint-helper/content_digest_test.cpp ./cmd/cuda-checkpoint-helper/content_digest_test.cpp
 COPY cmd/cuda-checkpoint-helper/storage_manifest.cpp ./cmd/cuda-checkpoint-helper/storage_manifest.cpp
 COPY cmd/cuda-checkpoint-helper/storage_manifest.hpp ./cmd/cuda-checkpoint-helper/storage_manifest.hpp
 COPY cmd/cuda-checkpoint-helper/storage_manifest_test.cpp ./cmd/cuda-checkpoint-helper/storage_manifest_test.cpp
@@ -84,18 +80,9 @@ RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread \
 
 RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
       -o /cuda-checkpoint-helper-storage-test \
-      ./cmd/cuda-checkpoint-helper/content_digest.cpp \
       ./cmd/cuda-checkpoint-helper/storage_manifest.cpp \
       ./cmd/cuda-checkpoint-helper/storage_manifest_test.cpp \
-      -lcrypto \
     && /cuda-checkpoint-helper-storage-test
-
-RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
-      -o /cuda-checkpoint-helper-content-digest-test \
-      ./cmd/cuda-checkpoint-helper/content_digest.cpp \
-      ./cmd/cuda-checkpoint-helper/content_digest_test.cpp \
-      -lcrypto \
-    && /cuda-checkpoint-helper-content-digest-test
 
 RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
       -o /cuda-checkpoint-helper-transfer-config-test \

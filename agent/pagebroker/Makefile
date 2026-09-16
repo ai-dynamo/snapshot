@@ -29,8 +29,8 @@ allocation-worker: generate
 	mkdir -p build
 	$(CXX) -O2 -std=c++20 -Wall -Wextra -Werror -I. -I$(CUDA_ROOT)/include -I$(TRANSFER_DIR) \
 		allocation_worker.cpp allocation_transport.cpp file_descriptor.cpp cuda_posix_transfer.cpp $(TRANSFER_SOURCES) \
-		$(TRANSFER_DIR)/transfer_config.cpp $(TRANSFER_DIR)/content_digest.cpp v1/pagebroker.pb.cc \
-		-L$(CUDA_LIB_DIR) -lcuda -lprotobuf -lcrypto -pthread $(TRANSFER_FLAGS) -o build/pagebroker-allocation-worker
+		$(TRANSFER_DIR)/transfer_config.cpp v1/pagebroker.pb.cc \
+		-L$(CUDA_LIB_DIR) -lcuda -lprotobuf -pthread $(TRANSFER_FLAGS) -o build/pagebroker-allocation-worker
 
 generate:
 	protoc --proto_path=. --cpp_out=. $(PROTO)
@@ -54,6 +54,6 @@ test-allocation-transfer: generate
 	mkdir -p build
 	$(CXX) -O2 -std=c++20 -Wall -Wextra -Werror -I. -I$(CUDA_ROOT)/include -I$(TRANSFER_DIR) \
 		cuda_posix_transfer_test.cpp cuda_posix_transfer.cpp file_descriptor.cpp $(TRANSFER_SOURCES) \
-		$(TRANSFER_DIR)/transfer_config.cpp $(TRANSFER_DIR)/content_digest.cpp \
-		-lcrypto $(GTEST_FLAGS) -pthread $(TRANSFER_FLAGS) -o build/allocation-transfer-test
+		$(TRANSFER_DIR)/transfer_config.cpp \
+		$(GTEST_FLAGS) -pthread $(TRANSFER_FLAGS) -o build/allocation-transfer-test
 	./build/allocation-transfer-test

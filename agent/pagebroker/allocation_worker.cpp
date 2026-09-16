@@ -130,8 +130,6 @@ v1::AllocationSessionReply Transfer(const v1::AllocationWorkerRequest& request,
     // Any error exits the process; broker reaps before releasing admission.
     if (!success)
       throw std::runtime_error("allocation transfer: " + error);
-    if (request.direction() == v1::BindAllocationSession::LOAD && metrics.sha256 != extent.sha256())
-      throw std::runtime_error("allocation content digest mismatch");
     Check(cuStreamSynchronize(stream));
     const auto copied = std::chrono::steady_clock::now();
     Check(cuMemUnmap(address, extent.size()));
@@ -155,7 +153,6 @@ v1::AllocationSessionReply Transfer(const v1::AllocationWorkerRequest& request,
     (void)logged;
     auto* completed = reply.mutable_completed()->add_extents();
     *completed = extent;
-    completed->set_sha256(metrics.sha256);
   }
   if (operation == transfer::TransferOperation::kCheckpoint) {
     // The protocol acknowledges batches, not individual extents. All files

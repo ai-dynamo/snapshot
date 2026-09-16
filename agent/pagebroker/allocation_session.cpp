@@ -199,8 +199,7 @@ AllocationSession::AllocationSession(std::shared_ptr<Transaction> transaction,
             manifest.participant_id() == binding.participant_id(), "invalid allocation manifest");
     for (const auto& extent : manifest.extents()) {
       ValidateExtent(extent);
-      Require(Hex(extent.sha256(), 64) && extents_.emplace(extent.allocation_id(), extent).second,
-              "invalid allocation digest or duplicate");
+      Require(extents_.emplace(extent.allocation_id(), extent).second, "duplicate allocation");
       struct stat extent_stat{};
       Check(fstatat(directory_fd_.get(), extent.allocation_id().c_str(), &extent_stat, AT_SYMLINK_NOFOLLOW),
             "stat allocation content");
@@ -264,7 +263,7 @@ v1::AllocationSessionReply AllocationSession::Execute(const v1::AllocationSessio
       rights.push_back(descriptor.get());
     for (const auto& extent : request.batch().extents()) {
       ValidateExtent(extent);
-      Require(extent.sha256().empty() && transferred_.insert(extent.allocation_id()).second, "duplicate allocation or client digest");
+      Require(transferred_.insert(extent.allocation_id()).second, "duplicate allocation");
       // Keep session metadata bounded as well as individual wire frames.
       Require(transferred_.size() <= 65536, "allocation session exceeds extent limit");
       auto* target = work.mutable_batch()->add_extents();
@@ -273,7 +272,6 @@ v1::AllocationSessionReply AllocationSession::Execute(const v1::AllocationSessio
       if (!save) {
         const auto found = extents_.find(extent.allocation_id());
         Require(found != extents_.end() && found->second.size() == extent.size(), "allocation absent from saved manifest");
-        target->set_sha256(found->second.sha256());
       }
       files.emplace_back(openat(directory_fd_.get(), extent.allocation_id().c_str(),
                                 (save ? O_RDWR | O_CREAT | O_EXCL : O_RDONLY | O_NONBLOCK) | O_CLOEXEC | O_NOFOLLOW, 0600));
@@ -294,11 +292,9 @@ v1::AllocationSessionReply AllocationSession::Execute(const v1::AllocationSessio
       const auto& extent = reply.completed().extents(i);
       const auto& expected = work.batch().extents(i);
       Require(extent.allocation_id() == expected.allocation_id() && extent.size() == expected.size() &&
-              extent.device_uuid() == expected.device_uuid() && Hex(extent.sha256(), 64), "worker extent mismatch");
+              extent.device_uuid() == expected.device_uuid(), "worker extent mismatch");
       if (binding_.direction() == v1::BindAllocationSession::SAVE)
         extents_.emplace(extent.allocation_id(), extent);
-      else
-        Require(extent.sha256() == expected.sha256(), "allocation content digest mismatch");
     }
   } catch (const std::exception& error) {
     // Stop/reap before returning failure. No automatic retry can reuse a

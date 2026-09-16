@@ -31,7 +31,6 @@ struct TransferMetrics {
   double fsync_seconds = 0.0;
   double cleanup_seconds = 0.0;
   double total_seconds = 0.0;
-  std::string sha256;
   std::vector<StorageFileMetrics> files;
 };
 

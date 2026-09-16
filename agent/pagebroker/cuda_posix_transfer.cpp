@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "cuda_posix_transfer.hpp"
-#include "../cmd/cuda-checkpoint-helper/content_digest.hpp"
 #include "file_descriptor.hpp"
 #ifdef PAGEBROKER_NIXL
 #include "nixl_transfer.hpp"
@@ -191,7 +190,7 @@ bool PosixTransfer(bool write, void* buffer, int fd, size_t offset, size_t size,
 // each slot only after its previous H2D completes. No native checkpoint API.
 bool TransferPipeline(const std::vector<TransferChunk>& chunks, const std::vector<FileDescriptor>& files,
                       std::vector<std::unique_ptr<TransferSlot>>& slots, CUdeviceptr device, CUstream stream,
-                      TransferOperation operation, cuda_checkpoint_storage::ContentDigest& digest,
+                      TransferOperation operation,
                       TransferMetrics* metrics, TransferCancellation* cancellation, std::string* error)
 {
   const bool save = operation == TransferOperation::kCheckpoint;
@@ -205,8 +204,6 @@ bool TransferPipeline(const std::vector<TransferChunk>& chunks, const std::vecto
     auto& slot = *slots[chunk.slot_index];
     if ((cancellation && cancellation->IsCancelled()) || !slot.Wait(metrics, error))
       return false;
-    if (save && !digest.Update(slot.data(), chunk.size, error))
-      return false;
     const auto start = Clock::now();
     if (!PosixTransfer(save, slot.data(), files[chunk.file_index].get(), chunk.file_offset,
                        chunk.size, cancellation, error))
@@ -216,7 +213,7 @@ bool TransferPipeline(const std::vector<TransferChunk>& chunks, const std::vecto
     metrics->files[chunk.file_index].storage_io_seconds += elapsed;
     metrics->files[chunk.file_index].bytes += chunk.size;
     if (!save) {
-      if (!digest.Update(slot.data(), chunk.size, error) || !slot.Copy(operation, chunk, device, stream, error))
+      if (!slot.Copy(operation, chunk, device, stream, error))
         return false;
     } else if (next < chunks.size()) {
       if (chunks[next].slot_index != chunk.slot_index) {
@@ -290,7 +287,6 @@ bool TransferBuffers::Transfer(CUdeviceptr device, size_t size, CUstream stream,
     slots.push_back(std::move(slot));
   }
   metrics->setup_seconds = ElapsedSeconds(setup_start);
-  cuda_checkpoint_storage::ContentDigest digest;
   bool success;
   {
     StreamDrainGuard drain(stream, slots);
@@ -339,7 +335,7 @@ bool TransferBuffers::Transfer(CUdeviceptr device, size_t size, CUstream stream,
           success = false;
           break;
         }
-        if (!slot.Wait(metrics, error) || !digest.Update(slot.data(), chunk.size, error)) {
+        if (!slot.Wait(metrics, error)) {
           success = false;
           break;
         }
@@ -369,13 +365,11 @@ bool TransferBuffers::Transfer(CUdeviceptr device, size_t size, CUstream stream,
     }
     metrics->files[0].storage_io_seconds = metrics->storage_io_seconds;
 #else
-    success = TransferPipeline(chunks, files, slots, device, stream, operation, digest, metrics, cancellation, error);
+    success = TransferPipeline(chunks, files, slots, device, stream, operation, metrics, cancellation, error);
 #endif
     metrics->pipeline_seconds = ElapsedSeconds(start);
     if (success) drain.Disarm();
   }
-  if (success)
-    success = digest.Finalize(&metrics->sha256, error);
   if (success && sync_file && operation == TransferOperation::kCheckpoint) {
     for (size_t i = 0; i < files.size(); ++i) {
       const auto start = Clock::now();

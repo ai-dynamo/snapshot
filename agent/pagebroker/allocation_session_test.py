@@ -9,7 +9,6 @@ state machine. Real worker compilation and GPU execution are separate checks.
 """
 
 import array
-import hashlib
 import os
 from pathlib import Path
 import socket
@@ -77,7 +76,6 @@ def fake_worker():
             os.fsync(destination)
             completed = reply.completed.extents.add()
             completed.CopyFrom(extent)
-            completed.sha256 = hashlib.sha256(data).hexdigest()
         for fd in fds:
             os.close(fd)
         send(connection, reply)
@@ -180,7 +178,7 @@ class AllocationSessions(unittest.TestCase):
         self.assertEqual(self.request("save", "abort").failure.code, pb.Failure.TRANSACTION_CONFLICT)
         data = b"canonical allocation contents" * 100
         _, saved = self.batch(save, data)
-        self.assertEqual(saved.completed.extents[0].sha256, hashlib.sha256(data).hexdigest())
+        self.assertEqual(saved.completed.extents[0].allocation_id, self.allocation)
         # Different participants may hold sessions concurrently in one transaction.
         second, ready = self.bind("save", pb.BindAllocationSession.SAVE, "c" * 32)
         self.assertTrue(ready.HasField("allocation_session"))
@@ -233,19 +231,17 @@ class AllocationSessions(unittest.TestCase):
         except (ConnectionResetError, EOFError):
             pass
 
-    def test_corrupt_restore(self):
+    def test_truncated_restore(self):
         self.request("save", "prepare_staged_checkpoint")
         connection, _ = self.bind("save", pb.BindAllocationSession.SAVE)
         self.batch(connection, b"contents")
         self.assertTrue(self.finish(connection).HasField("finished"))
         self.request("save", "commit")
         path = self.storage / "artifact" / "allocations" / self.participant / self.allocation
-        path.write_bytes(b"corrupt!")
+        path.write_bytes(b"short")
         self.request("load", "staged_restore")
-        connection, _ = self.bind("load", pb.BindAllocationSession.LOAD)
-        _, failed = self.batch(connection, bytes(8))
+        _, failed = self.bind("load", pb.BindAllocationSession.LOAD)
         self.assertTrue(failed.HasField("failure"))
-        # Digest verification occurs during/after I/O, not before GPU writes.
         self.assertEqual(self.request("load", "commit").failure.code, pb.Failure.TRANSACTION_CONFLICT)
 
     def test_duplicate_allocation_refuses_commit(self):
