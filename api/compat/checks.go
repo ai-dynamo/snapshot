@@ -252,6 +252,43 @@ var gpuCountCheck = check{
 	},
 }
 
+// CheckMIGPartitioning refuses a restore that crosses the boundary between a
+// whole GPU and a MIG slice. gpu-model cannot catch it: nvidia-smi reports a
+// slice under its parent's product name, so a whole H100 and a 1g.10gb slice of
+// one are the same model and the same count, and only the partitioning differs.
+const CheckMIGPartitioning Check = "mig-partitioning"
+
+// CheckMIGProfile refuses a restore onto a differently shaped slice. Device
+// state built against one slice's memory and SM allocation has nowhere to land
+// in a smaller one, and no meaning in a larger one.
+const CheckMIGProfile Check = "mig-profile"
+
+var migPartitioningCheck = check{
+	name: CheckMIGPartitioning,
+	gate: GateInspect,
+	compare: func(source, target Environment) []Mismatch {
+		sourceKinds, sourceOK := gpuPartitioning(source.GPUDevices)
+		targetKinds, targetOK := gpuPartitioning(target.GPUDevices)
+		if !sourceOK || !targetOK || sourceKinds == targetKinds {
+			return nil
+		}
+		return []Mismatch{{Source: sourceKinds, Target: targetKinds}}
+	},
+}
+
+var migProfileCheck = check{
+	name: CheckMIGProfile,
+	gate: GateInspect,
+	compare: func(source, target Environment) []Mismatch {
+		sourceProfiles, sourceOK := gpuMIGProfiles(source.GPUDevices)
+		targetProfiles, targetOK := gpuMIGProfiles(target.GPUDevices)
+		if !sourceOK || !targetOK || sourceProfiles == targetProfiles {
+			return nil
+		}
+		return []Mismatch{{Source: sourceProfiles, Target: targetProfiles}}
+	},
+}
+
 // CheckDriverVersion refuses a restore on a driver build other than the captured
 // one. Build granularity is not caution for its own sake: upstream reproduces a
 // restore failure between 560.35.03 and 560.35.05.
@@ -315,6 +352,78 @@ func gpuModels(devices []GPUDevice) (string, bool) {
 		models[i] = model + " x" + strconv.Itoa(counts[model])
 	}
 	return strings.Join(models, ", "), true
+}
+
+// migUUIDPrefix is how NVIDIA spells a MIG device's UUID, in both the current
+// MIG-<uuid> form and the older MIG-GPU-<parent>/<gi>/<ci> one:
+// https://docs.nvidia.com/datacenter/tesla/mig-user-guide/#device-enumeration
+const migUUIDPrefix = "MIG-"
+
+const (
+	migSlice = "MIG slice"
+	wholeGPU = "whole GPU"
+)
+
+// gpuPartitioning summarises whether the visible GPUs are whole devices or MIG
+// slices. It reads UUID rather than MIGProfile so that it also holds for an
+// artifact captured before any profile was recorded: the UUIDs have been
+// recorded since the first release, and only a slice carries the MIG- prefix.
+func gpuPartitioning(devices []GPUDevice) (string, bool) {
+	if len(devices) == 0 {
+		return "", false
+	}
+	kinds := make([]string, 0, len(devices))
+	for _, device := range devices {
+		uuid := strings.TrimSpace(device.UUID)
+		if uuid == "" {
+			return "", false
+		}
+		if strings.HasPrefix(uuid, migUUIDPrefix) {
+			kinds = append(kinds, migSlice)
+			continue
+		}
+		kinds = append(kinds, wholeGPU)
+	}
+	return distinctSorted(kinds), true
+}
+
+// gpuMIGProfiles summarises the shape of every slice among the visible GPUs,
+// ignoring whole GPUs so that a mixed set still compares its slices. nvidia-smi
+// publishes the profile only in -L, so a slice whose profile was never read
+// returns unknown, and an unknown value never refuses a restore.
+func gpuMIGProfiles(devices []GPUDevice) (string, bool) {
+	profiles := make([]string, 0, len(devices))
+	for _, device := range devices {
+		if !strings.HasPrefix(strings.TrimSpace(device.UUID), migUUIDPrefix) {
+			continue
+		}
+		profile := strings.TrimSpace(device.MIGProfile)
+		if profile == "" {
+			return "", false
+		}
+		profiles = append(profiles, profile)
+	}
+	if len(profiles) == 0 {
+		return "", false
+	}
+	return distinctSorted(profiles), true
+}
+
+// distinctSorted renders which values are present and ignores how many devices
+// share each one, because a change in count is gpu-count's to report. Sorting
+// ignores allocation order, which is #246's concern rather than a mismatch.
+func distinctSorted(values []string) string {
+	seen := make(map[string]struct{}, len(values))
+	distinct := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		distinct = append(distinct, value)
+	}
+	sort.Strings(distinct)
+	return strings.Join(distinct, ", ")
 }
 
 // mustMatch reports a mismatch unless the two values are identical. A value
