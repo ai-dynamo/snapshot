@@ -1,0 +1,385 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Canonical bytes in CRIU-captured memory. Unpublished backing is rolled back
+//! explicitly; CUDA cleanup never runs from Drop or in a fork child.
+
+use super::state::{Allocation, Result};
+use cuinterpose_abi::*;
+use cuinterpose_protocol::AllocationId;
+use std::collections::BTreeMap;
+use std::ffi::c_void;
+use std::time::{Duration, Instant};
+
+#[derive(Default)]
+pub struct Transfer {
+    pub bytes: u64,
+    pub copy_us: u32,
+}
+
+/// Only the inputs needed to move bytes; tickets and mapping topology stay in State.
+#[derive(Clone)]
+pub struct AllocationContent {
+    pub id: AllocationId,
+    pub driver: Option<u64>,
+    pub size: usize,
+    pub properties: AllocationProp,
+    pub context: usize,
+}
+
+impl From<&Allocation> for AllocationContent {
+    fn from(allocation: &Allocation) -> Self {
+        Self {
+            id: allocation.id,
+            driver: allocation.driver,
+            size: allocation.size,
+            properties: allocation.properties,
+            context: allocation.context,
+        }
+    }
+}
+
+pub struct Context {
+    previous: *mut c_void,
+    primary: Option<i32>,
+    changed: bool,
+}
+
+impl Context {
+    pub fn run<T>(context: usize, device: i32, body: impl FnOnce() -> Result<T>) -> Result<T> {
+        let context = Self::enter(context, device)?;
+        let result = body();
+        let left = context.leave();
+        // Evaluate cleanup even when the body failed, preserving its first error.
+        let value = result?;
+        left?;
+        Ok(value)
+    }
+    pub fn enter(context: usize, device: i32) -> Result<Self> {
+        let mut previous = std::ptr::null_mut();
+        unsafe { crate::driver::cuCtxGetCurrent(&mut previous) }?;
+        let mut target = context as *mut c_void;
+        let mut primary = None;
+        if target.is_null() {
+            unsafe { crate::driver::cuDevicePrimaryCtxRetain(&mut target, device) }?;
+            primary = Some(device);
+        }
+        let changed = target != previous;
+        if changed && let Err(error) = unsafe { crate::driver::cuCtxSetCurrent(target) } {
+            if let Some(device) = primary {
+                let _ = unsafe { crate::driver::cuDevicePrimaryCtxRelease_v2(device) };
+            }
+            return Err(error);
+        }
+        Ok(Self {
+            previous,
+            primary,
+            changed,
+        })
+    }
+
+    pub fn leave(self) -> Result<()> {
+        let mut result = Ok(());
+        if self.changed {
+            result = unsafe { crate::driver::cuCtxSetCurrent(self.previous) };
+        }
+        if let Some(device) = self.primary {
+            result = result.and(unsafe { crate::driver::cuDevicePrimaryCtxRelease_v2(device) });
+        }
+        result
+    }
+}
+
+pub struct Arena {
+    pub(super) base: usize,
+    pub(super) size: usize,
+    context: usize,
+    device: i32,
+    offsets: BTreeMap<AllocationId, usize>,
+}
+
+impl Arena {
+    pub fn save(allocations: &[AllocationContent]) -> Result<(Option<Self>, u32)> {
+        if allocations.is_empty() {
+            return Ok((None, 0));
+        }
+        let mut offsets = BTreeMap::new();
+        let mut size = 0usize;
+        for allocation in allocations {
+            if allocation.driver.is_none()
+                || allocation.size == 0
+                || offsets.insert(allocation.id, size).is_some()
+            {
+                return Err(crate::driver::CudaError(INVALID_VALUE));
+            }
+            size = size.checked_add(allocation.size).ok_or(OUT_OF_MEMORY)?;
+        }
+        let base = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        if base == libc::MAP_FAILED {
+            return Err(crate::driver::CudaError(OUT_OF_MEMORY));
+        }
+        let first = &allocations[0];
+        let arena = Self {
+            base: base as usize,
+            size,
+            context: first.context,
+            device: first.properties.location.id,
+            offsets,
+        };
+        let context = match Context::enter(arena.context, arena.device) {
+            Ok(context) => context,
+            Err(error) => {
+                unsafe {
+                    libc::munmap(base, size);
+                }
+                return Err(error);
+            }
+        };
+        let registered =
+            unsafe { crate::driver::cuMemHostRegister_v2(base, size, CU_MEMHOSTREGISTER_PORTABLE) };
+        let left = context.leave();
+        if let Err(error) = registered {
+            unsafe {
+                libc::munmap(base, size);
+            }
+            return Err(error);
+        }
+        if let Err(error) = left {
+            let _ = arena.release();
+            return Err(error);
+        }
+        match arena.copy(allocations, false) {
+            Ok(elapsed) => Ok((Some(arena), elapsed)),
+            Err(error) => {
+                let _ = arena.release();
+                Err(error)
+            }
+        }
+    }
+
+    /// Keep every fresh handle private until all copies and staging cleanup
+    /// succeed. A handle value of zero is valid; None alone means no ownership.
+    pub fn load(&self, allocations: &mut [AllocationContent]) -> Result<u32> {
+        let mut fresh = allocations.to_vec();
+        let mut size = 0usize;
+        for allocation in &fresh {
+            if allocation.driver.is_some() || self.offsets.get(&allocation.id) != Some(&size) {
+                return Err(crate::driver::CudaError(INVALID_VALUE));
+            }
+            size = size.checked_add(allocation.size).ok_or(INVALID_VALUE)?;
+        }
+        if size != self.size {
+            return Err(crate::driver::CudaError(INVALID_VALUE));
+        }
+        let mut registered = false;
+        let loaded = (|| -> Result<u32> {
+            Context::run(self.context, self.device, || {
+                let mut flags = 0u32;
+                let valid = unsafe {
+                    crate::driver::cuMemHostGetFlags(&mut flags, self.base as *mut c_void)
+                }
+                .is_ok();
+                if !valid {
+                    unsafe {
+                        crate::driver::cuMemHostRegister_v2(
+                            self.base as *mut c_void,
+                            self.size,
+                            CU_MEMHOSTREGISTER_PORTABLE,
+                        )
+                    }?;
+                    registered = true;
+                }
+                Ok(())
+            })?;
+            for allocation in &mut fresh {
+                Context::run(
+                    allocation.context,
+                    allocation.properties.location.id,
+                    || {
+                        let mut driver = 0;
+                        unsafe {
+                            crate::driver::cuMemCreate(
+                                &mut driver,
+                                allocation.size,
+                                &allocation.properties,
+                                0,
+                            )
+                        }?;
+                        allocation.driver = Some(driver);
+                        Ok(())
+                    },
+                )?;
+            }
+            self.copy(&fresh, true)
+        })();
+        match loaded {
+            Ok(elapsed) => {
+                for (allocation, fresh) in allocations.iter_mut().zip(fresh) {
+                    allocation.driver = fresh.driver;
+                }
+                Ok(elapsed)
+            }
+            Err(error) => {
+                for allocation in fresh {
+                    if let Some(driver) = allocation.driver
+                        && let Ok(context) =
+                            Context::enter(allocation.context, allocation.properties.location.id)
+                    {
+                        let _ = unsafe { crate::driver::cuMemRelease(driver) };
+                        let _ = context.leave();
+                    }
+                }
+                if registered && let Ok(context) = Context::enter(self.context, self.device) {
+                    let _ = unsafe { crate::driver::cuMemHostUnregister(self.base as *mut c_void) };
+                    let _ = context.leave();
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn copy(&self, allocations: &[AllocationContent], load: bool) -> Result<u32> {
+        let mut groups: BTreeMap<(usize, i32), Vec<&AllocationContent>> = BTreeMap::new();
+        for allocation in allocations {
+            groups
+                .entry((allocation.context, allocation.properties.location.id))
+                .or_default()
+                .push(allocation);
+        }
+        let mut elapsed = Duration::ZERO;
+        for ((context, device), group) in groups {
+            let total = group.iter().try_fold(0usize, |sum, a| {
+                sum.checked_add(a.size).ok_or(OUT_OF_MEMORY)
+            })?;
+            let mut mapped = Vec::new();
+            mapped
+                .try_reserve_exact(group.len())
+                .map_err(|_| OUT_OF_MEMORY)?;
+            let context = Context::enter(context, device)?;
+            let mut reserved = None;
+            let mut stream = None;
+            let mut synchronized = false;
+            let transfer = (|| -> Result<()> {
+                let mut base = 0u64;
+                unsafe { crate::driver::cuMemAddressReserve(&mut base, total, 0, 0, 0) }?;
+                reserved = Some(base);
+                let mut offset = 0usize;
+                for allocation in &group {
+                    let address = base.checked_add(offset as u64).ok_or(INVALID_VALUE)?;
+                    unsafe {
+                        crate::driver::cuMemMap(
+                            address,
+                            allocation.size,
+                            0,
+                            allocation.driver.ok_or(INVALID_HANDLE)?,
+                            0,
+                        )
+                    }?;
+                    mapped.push((address, allocation.size));
+                    let access = Access {
+                        location: allocation.properties.location,
+                        flags: ACCESS_READWRITE,
+                    };
+                    unsafe { crate::driver::cuMemSetAccess(address, allocation.size, &access, 1) }?;
+                    offset += allocation.size;
+                }
+                let mut raw_stream = std::ptr::null_mut::<c_void>();
+                unsafe { crate::driver::cuStreamCreate(&mut raw_stream, STREAM_NON_BLOCKING) }?;
+                stream = Some(raw_stream);
+                // Staging/context/allocation work is deliberately outside the
+                // copy metric, matching the coordinator's copy-throughput label.
+                let started = Instant::now();
+                let copies = (|| -> Result<()> {
+                    for (allocation, (address, _)) in group.iter().zip(&mapped) {
+                        let offset = *self.offsets.get(&allocation.id).ok_or(INVALID_HANDLE)?;
+                        let host =
+                            self.base.checked_add(offset).ok_or(INVALID_VALUE)? as *mut c_void;
+                        if load {
+                            unsafe {
+                                crate::driver::cuMemcpyHtoDAsync_v2(
+                                    *address,
+                                    host,
+                                    allocation.size,
+                                    raw_stream,
+                                )
+                            }?;
+                        } else {
+                            unsafe {
+                                crate::driver::cuMemcpyDtoHAsync_v2(
+                                    host,
+                                    *address,
+                                    allocation.size,
+                                    raw_stream,
+                                )
+                            }?;
+                        }
+                    }
+                    unsafe { crate::driver::cuStreamSynchronize(raw_stream) }?;
+                    synchronized = true;
+                    Ok(())
+                })();
+                elapsed = elapsed.saturating_add(started.elapsed());
+                copies
+            })();
+            // Evaluate every cleanup even if an earlier one failed. Preserve
+            // the original operation error; cleanup failures still fail-stop.
+            let mut result = transfer;
+            if let Some(stream) = stream {
+                if !synchronized {
+                    let drained = unsafe { crate::driver::cuStreamSynchronize(stream) };
+                    if drained.is_err() {
+                        // Completion is unknown: neither rollback nor returning
+                        // to a caller may free DMA-referenced memory. Fail-stop
+                        // the process without running Rust/CUDA cleanup.
+                        let message = b"cuinterpose: CUDA copy completion unknown; terminating without cleanup\n";
+                        unsafe {
+                            libc::write(
+                                libc::STDERR_FILENO,
+                                message.as_ptr().cast(),
+                                message.len(),
+                            );
+                            libc::_exit(127);
+                        }
+                    }
+                }
+                result = result.and(unsafe { crate::driver::cuStreamDestroy_v2(stream) });
+            }
+            for (address, size) in mapped {
+                result = result.and(unsafe { crate::driver::cuMemUnmap(address, size) });
+            }
+            if let Some(address) = reserved {
+                result = result.and(unsafe { crate::driver::cuMemAddressFree(address, total) });
+            }
+            result = result.and(context.leave());
+            result?;
+        }
+        Ok(elapsed.as_micros().min(u128::from(u32::MAX)) as u32)
+    }
+
+    pub fn release(self) -> Result<()> {
+        let context = Context::enter(self.context, self.device)?;
+        let unregistered = unsafe { crate::driver::cuMemHostUnregister(self.base as *mut c_void) };
+        let left = context.leave();
+        // Do not unmap an arena still registered with CUDA. If unregister
+        // succeeded, a context-restoration error must not prevent CPU cleanup.
+        let unmapped = if unregistered.is_ok() {
+            if unsafe { libc::munmap(self.base as *mut c_void, self.size) } == 0 {
+                Ok(())
+            } else {
+                Err(crate::driver::CudaError(UNKNOWN))
+            }
+        } else {
+            Ok(())
+        };
+        unregistered.and(left).and(unmapped)
+    }
+}
