@@ -107,12 +107,12 @@ class ShimSessions(AllocationSessions):
             data = (staging / "allocations" / participant / item.allocation_id).read_bytes()
             assert hashlib.sha256(data).hexdigest() == item.sha256
         assert self.request("save", "commit").HasField("commit_complete")
-        staged = self.request("load", "staged_restore")
-        assert staged.HasField("staged_restore_directory")
+        ready = self.request("load", "direct_restore")
+        assert ready.HasField("direct_restore_ready")
         destination, reply = self.bind("load", pb.BindAllocationSession.LOAD, participant)
         assert reply.HasField("allocation_session"), reply
         if corrupt:
-            allocation = Path(staged.staged_restore_directory.image_directory) / "allocations" / participant / manifest.extents[0].allocation_id
+            allocation = self.storage / "artifact" / "allocations" / participant / manifest.extents[0].allocation_id
             allocation.write_bytes(b"X" * 4096)
         restored = subprocess.run(args + ["--restore", "--content-storage", "pagebroker",
                               "--allocation-session", participant, str(destination.fileno())],
