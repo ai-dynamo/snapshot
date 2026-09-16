@@ -358,13 +358,18 @@ def _node_gpu_product(
     role: str,
     node: str | None,
 ) -> str | None:
+    # Error text is persisted in the published result, so none of it may carry
+    # the node name -- including the API server's own message.
     try:
         if not node:
             raise ValueError("pod has no node")
-        labels = k8s.read_node(node).metadata.labels or {}
+        try:
+            labels = k8s.read_node(node).metadata.labels or {}
+        except Exception as exc:  # noqa: BLE001 - metadata is not a functional assertion
+            raise ValueError(f"{type(exc).__name__} reading node labels") from exc
         product = labels.get(GPU_PRODUCT_NODE_LABEL)
         if not product:
-            raise ValueError(f"node {node} has no {GPU_PRODUCT_NODE_LABEL} label")
+            raise ValueError(f"node has no {GPU_PRODUCT_NODE_LABEL} label")
         result.update_environment(**{f"{role}NodeGpuProduct": product})
         return product
     except Exception as exc:  # noqa: BLE001 - metadata is not a functional assertion

@@ -225,10 +225,13 @@ def test_parse_nvidia_smi_csv_rejects_incomplete_output(output: str) -> None:
         benchmark.parse_nvidia_smi_csv(output)
 
 
-def test_public_gpus_strips_hardware_identifiers() -> None:
+def test_public_gpus_keeps_only_comparison_fields() -> None:
     gpus = benchmark.parse_nvidia_smi_csv("NVIDIA B200, GPU-one, 580.1\n")
     assert benchmark.public_gpus(gpus) == [{"model": "NVIDIA B200", "driverVersion": "580.1"}]
     assert gpus[0]["uuid"] == "GPU-one"
+
+    widened = [{**gpus[0], "serial": "0324", "pciBusId": "00000000:01:00.0"}]
+    assert benchmark.public_gpus(widened) == [{"model": "NVIDIA B200", "driverVersion": "580.1"}]
 
 
 @pytest.mark.parametrize(

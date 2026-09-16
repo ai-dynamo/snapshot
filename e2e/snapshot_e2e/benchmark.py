@@ -105,18 +105,19 @@ def parse_nvidia_smi_csv(output: str) -> list[dict[str, str]]:
     return gpus
 
 
-GPU_IDENTITY_FIELDS = frozenset({"uuid"})
+GPU_PUBLIC_FIELDS = ("model", "driverVersion")
 
 
 def public_gpus(gpus: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Copies GPU records without stable hardware identifiers.
+    """Copies only the comparison fields of GPU records.
 
     Results are published from a public repository and retained by the history
-    branch, so GPU UUIDs (and node names) stay out of them; source/restore
-    placement is preserved as an affinity indicator instead.
+    branch, so this is an allowlist: anything nvidia-smi returns beyond the
+    model and driver (the UUID today, whatever a wider query adds tomorrow) is
+    dropped, and source/restore placement is kept as an affinity indicator.
     """
     return [
-        {key: value for key, value in gpu.items() if key not in GPU_IDENTITY_FIELDS}
+        {key: gpu[key] for key in GPU_PUBLIC_FIELDS if key in gpu}
         for gpu in gpus
     ]
 
