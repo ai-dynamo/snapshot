@@ -189,6 +189,10 @@ func executeRestore(
 		if err := requireCuinterposeState(m, opts.CheckpointPath); err != nil {
 			return nil, 0, nil, err
 		}
+		if (m.Cuinterpose.AllocationStorage == "pagebroker") != (len(opts.AllocationSessions) != 0) ||
+			(m.Cuinterpose.AllocationStorage == "pagebroker" && len(opts.AllocationSessions) != len(m.CUDA.PIDs)) {
+			return nil, 0, nil, fmt.Errorf("allocation session capabilities do not match captured storage mode or CUDA participants")
+		}
 		coordinator, err := os.Open(filepath.Join(opts.BundleDir, cuda.CoordinatorBinaryName))
 		if err != nil {
 			return nil, 0, nil, fmt.Errorf("failed to open %s before CRIU restore: %w", cuda.CoordinatorBinaryName, err)
