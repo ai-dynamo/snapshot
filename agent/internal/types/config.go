@@ -102,6 +102,7 @@ func (c *RestoreSpec) Validate() error {
 
 // CRIUSettings holds CRIU-specific configuration options.
 type CRIUSettings struct {
+	Compress          bool   `yaml:"compress"`
 	GhostLimit        uint32 `yaml:"ghostLimit"`
 	LogLevel          int32  `yaml:"logLevel"`
 	WorkDir           string `yaml:"workDir"`

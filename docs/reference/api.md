@@ -232,3 +232,4 @@ defaults; see [Storage](../operations/storage.md) for the storage model.
 | `libDir` | `/usr/local/lib/snapshot/criu-plugins` | CRIU plugin directory used by the chart. |
 | `allowUprobes` | `true` | Kernel/userspace probe compatibility. |
 | `skipInFlight` | `true` | Skip in-flight TCP connections. |
+| `compress` | `false` | Enable lossless CRIU per-page LZ4 compression, zero-page omission, and automatic restore decompression concurrency. Compressed images use buffered I/O. |
