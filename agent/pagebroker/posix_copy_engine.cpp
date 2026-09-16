@@ -5,6 +5,11 @@
 
 #include <filesystem>
 #include <stdexcept>
+#include <fcntl.h>
+#include <linux/fs.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+#include "file_descriptor.hpp"
 
 namespace snapshot::pagebroker {
 namespace {
@@ -110,7 +115,49 @@ PosixCopyEngine::RestoreSize(const StorageBackend& source) const
 void
 PosixCopyEngine::StageRestore(const StorageBackend& source, const Path& destination) const
 {
-  CopyDirectory(SourcePath(source, storage_root_), destination);
+  const Path root = SourcePath(source, storage_root_);
+  std::filesystem::create_directory(destination);
+  for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
+    const Path target = destination / entry.path().lexically_relative(root);
+    if (entry.is_symlink())
+      throw std::runtime_error("checkpoint contains symlink");
+    if (entry.is_directory()) {
+      std::filesystem::create_directory(target);
+    } else if (entry.is_regular_file()) {
+      // A reflink retains the staged-restore contract: independently writable
+      // files, even when a consumer rewrites metadata. Never substitute hard
+      // links, which would let a restore corrupt the published checkpoint.
+      FileDescriptor input(open(entry.path().c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+      FileDescriptor output(open(target.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600));
+      if (input.get() < 0 || output.get() < 0)
+        throw std::system_error(errno, std::generic_category(), "open restore clone");
+      if (ioctl(output.get(), FICLONE, input.get()) != 0) {
+        if (errno != EXDEV && errno != EOPNOTSUPP && errno != ENOTTY && errno != EINVAL)
+          throw std::system_error(errno, std::generic_category(), "clone restore file");
+        // NFSv4.2 can perform COPY server-side even when CLONE is unavailable.
+        // Unlike hard links this still creates independently writable files.
+        uintmax_t remaining = entry.file_size();
+        while (remaining) {
+          ssize_t copied = copy_file_range(input.get(), nullptr, output.get(), nullptr,
+                                          std::min<uintmax_t>(remaining, 1ULL << 30), 0);
+          if (copied > 0) {
+            remaining -= copied;
+          } else if (copied < 0 && errno == EINTR) {
+            continue;
+          } else if (copied == 0 || errno == EXDEV || errno == EOPNOTSUPP || errno == ENOSYS ||
+                     errno == EINVAL || errno == EPERM) {
+            std::filesystem::copy_file(entry.path(), target, std::filesystem::copy_options::overwrite_existing);
+            break;
+          } else {
+            throw std::system_error(errno, std::generic_category(), "copy restore file");
+          }
+        }
+      }
+      std::filesystem::permissions(target, entry.status().permissions());
+    } else {
+      throw std::runtime_error("checkpoint contains non-regular entry");
+    }
+  }
 }
 
 void
@@ -131,9 +178,18 @@ PosixCopyEngine::PublishCheckpoint(const Path& source, const StorageBackend& des
   const Path published = DestinationPath(destination, storage_root_);
   const Path partial = PartialPath(published);
   const Path previous = PreviousPath(published);
+  bool moved = false;
   try {
     std::filesystem::create_directories(published.parent_path());
-    CopyDirectory(source, partial);
+    std::error_code error;
+    std::filesystem::rename(source, partial, error);
+    if (!error) {
+      moved = true;
+    } else if (error == std::errc::cross_device_link) {
+      CopyDirectory(source, partial);
+    } else {
+      throw std::filesystem::filesystem_error("stage publication", source, partial, error);
+    }
     if (std::filesystem::exists(published)) {
       std::filesystem::rename(published, previous);
       RestorePreviousOnFailure restore_previous(previous, published);
@@ -147,7 +203,13 @@ PosixCopyEngine::PublishCheckpoint(const Path& source, const StorageBackend& des
   }
   catch (...) {
     std::error_code cleanup_error;
-    std::filesystem::remove_all(partial, cleanup_error);
+    if (moved) {
+      // Preserve the transaction's input for retry or abort when publication
+      // failed after the same-filesystem move.
+      std::filesystem::rename(partial, source, cleanup_error);
+    } else {
+      std::filesystem::remove_all(partial, cleanup_error);
+    }
     throw;
   }
 }
