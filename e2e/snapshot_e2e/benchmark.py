@@ -13,7 +13,7 @@ import re
 import tempfile
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -103,6 +103,31 @@ def parse_nvidia_smi_csv(output: str) -> list[dict[str, str]]:
     if not gpus:
         raise ValueError("nvidia-smi returned no GPUs")
     return gpus
+
+
+GPU_IDENTITY_FIELDS = frozenset({"uuid"})
+
+
+def public_gpus(gpus: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Copies GPU records without stable hardware identifiers.
+
+    Results are published from a public repository and retained by the history
+    branch, so GPU UUIDs (and node names) stay out of them; source/restore
+    placement is preserved as an affinity indicator instead.
+    """
+    return [
+        {key: value for key, value in gpu.items() if key not in GPU_IDENTITY_FIELDS}
+        for gpu in gpus
+    ]
+
+
+def affinity(source: Iterable[str] | None, restore: Iterable[str] | None) -> str:
+    """"same" | "different" | "unknown" for two identifier sets, without keeping them."""
+    source_ids = {item for item in (source or ()) if item and item != "unknown"}
+    restore_ids = {item for item in (restore or ()) if item and item != "unknown"}
+    if not source_ids or not restore_ids:
+        return "unknown"
+    return "same" if source_ids == restore_ids else "different"
 
 
 def public_storage_parameters(
@@ -455,7 +480,12 @@ class BenchmarkRecorder:
     def _write(self) -> Path:
         self._result_dir.mkdir(parents=True, exist_ok=True)
         path = result_path(
-            self._result_dir, self.suite, self.case, self._run_id, self._run_attempt
+            self._result_dir,
+            self.suite,
+            self.case,
+            self.test,
+            self._run_id,
+            self._run_attempt,
         )
         temporary = path.with_suffix(".json.tmp")
         temporary.write_text(
@@ -524,11 +554,14 @@ def result_path(
     directory: Path,
     suite: str,
     case: str,
+    test: str,
     run_id: str,
     run_attempt: int,
 ) -> Path:
+    # Every identity field is in the name so two tests sharing a suite and
+    # case in one run cannot overwrite each other's result.
     filename = "-".join(
-        _safe_filename(part) for part in (suite, case, run_id, str(run_attempt))
+        _safe_filename(part) for part in (suite, case, test, run_id, str(run_attempt))
     )
     return directory / f"{filename}.json"
 
@@ -565,7 +598,7 @@ def write_fallback(
     """
     directory = result_dir or result_directory()
     run_id, run_attempt = run_identity(run_id, run_attempt)
-    existing = result_path(directory, suite, case, run_id, run_attempt)
+    existing = result_path(directory, suite, case, test, run_id, run_attempt)
     if existing.exists():
         print(f"Benchmark result already exists: {existing}")
         return existing
@@ -592,10 +625,16 @@ def write_fallback(
 
 
 def _gpu_summary_lines(environment: Mapping[str, Any]) -> list[str]:
-    return [
+    lines = [
         _gpu_summary(environment, role="source"),
         _gpu_summary(environment, role="restore"),
     ]
+    if "gpuAffinity" in environment or "nodeAffinity" in environment:
+        lines.append(
+            f"Restore placement: GPU {environment.get('gpuAffinity', 'unknown')}, "
+            f"node {environment.get('nodeAffinity', 'unknown')}"
+        )
+    return lines
 
 
 def _gpu_summary(environment: Mapping[str, Any], *, role: str) -> str:
@@ -607,12 +646,10 @@ def _gpu_summary(environment: Mapping[str, Any], *, role: str) -> str:
             if not isinstance(gpu, Mapping):
                 continue
             rendered.append(
-                f"{gpu.get('model', 'unknown')} "
-                f"({gpu.get('uuid', 'unknown')}, driver {gpu.get('driverVersion', 'unknown')})"
+                f"{gpu.get('model', 'unknown')} (driver {gpu.get('driverVersion', 'unknown')})"
             )
         if rendered:
-            node = environment.get(f"{role}Node", "unknown node")
-            return f"{title} GPU: {'; '.join(rendered)}, node {node}"
+            return f"{title} GPU: {'; '.join(rendered)}"
     reason = environment.get(f"{role}GpuCollectionError")
     unknown = f"unknown ({reason})" if reason else "unknown"
     return f"{title} GPU: {unknown}"

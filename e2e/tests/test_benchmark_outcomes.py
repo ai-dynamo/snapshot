@@ -251,11 +251,10 @@ def test_result_document_matches_golden(tmp_path, monkeypatch) -> None:
             "model": "Qwen/Qwen3-0.6B",
             "frameworkImage": "registry.example/vllm:tag",
             "frameworkImageDigest": "registry.example/vllm@sha256:abc123",
-            "sourceNode": "gpu-node-a",
-            "sourceGpus": [
-                {"model": "NVIDIA B200", "uuid": "GPU-1", "driverVersion": "580.1"}
-            ],
+            "sourceGpus": [{"model": "NVIDIA B200", "driverVersion": "580.1"}],
             "restoreGpus": [],
+            "gpuAffinity": "unknown",
+            "nodeAffinity": "unknown",
             "restoreGpuCollectionError": "exec failed",
             "restoreNodeGpuProduct": "NVIDIA-B200",
         },

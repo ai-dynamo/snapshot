@@ -229,10 +229,13 @@ runner, and the console summary warns when the gap is negative or larger than
 a few seconds. The result also keeps the underlying events, test outcome,
 source revision, framework image tag and resolved digest, model, cache mode,
 and storage metadata (CSI provisioner, storage class, requested size, bound
-capacity, access modes, and volume mode). Source and restore GPU model, UUID,
-driver, and node are recorded separately because restore may receive a
-different physical GPU; the node's `nvidia.com/gpu.product` label is recorded
-too and stands in for the model when `nvidia-smi` is unavailable. Missing
+capacity, access modes, and volume mode). Source and restore GPU model and
+driver are recorded separately because restore may receive a different
+physical GPU; whether it did is kept as `gpuAffinity` and `nodeAffinity`
+(`same`, `different`, or `unknown`) rather than as GPU UUIDs or node names,
+which are stable infrastructure identifiers and never enter a published
+result. The node's `nvidia.com/gpu.product` label is recorded too and stands
+in for the model when `nvidia-smi` is unavailable. Missing
 boundaries remain explicit incomplete measurements and are never serialized as
 zero.
 

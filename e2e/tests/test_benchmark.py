@@ -35,22 +35,10 @@ def test_recorder_writes_events_measurements_and_environment(tmp_path) -> None:
         case="vllm",
         test="test_framework",
         environment={
-            "sourceNode": "gpu-node-source",
-            "restoreNode": "gpu-node-restore",
-            "sourceGpus": [
-                {
-                    "model": "NVIDIA B200",
-                    "uuid": "GPU-123",
-                    "driverVersion": "580.1",
-                }
-            ],
-            "restoreGpus": [
-                {
-                    "model": "NVIDIA B200",
-                    "uuid": "GPU-456",
-                    "driverVersion": "580.1",
-                }
-            ],
+            "gpuAffinity": "different",
+            "nodeAffinity": "different",
+            "sourceGpus": [{"model": "NVIDIA B200", "driverVersion": "580.1"}],
+            "restoreGpus": [{"model": "NVIDIA B200", "driverVersion": "580.1"}],
             "storage": {
                 "storageClass": "azurefile-csi-premium",
                 "type": "Premium_LRS",
@@ -79,7 +67,7 @@ def test_recorder_writes_events_measurements_and_environment(tmp_path) -> None:
     path = recorder.finalize("passed")
     result = json.loads(path.read_text(encoding="utf-8"))
 
-    assert path.name == "framework-checkpoint-restore-vllm-12345-2.json"
+    assert path.name == "framework-checkpoint-restore-vllm-test_framework-12345-2.json"
     assert result["schemaVersion"] == 1
     assert result["benchmarkVersion"] == 1
     assert result["identity"] == {
@@ -91,8 +79,10 @@ def test_recorder_writes_events_measurements_and_environment(tmp_path) -> None:
     }
     assert result["outcome"] == "passed"
     assert result["finishedAt"] == "2026-09-09T00:00:18.750Z"
-    assert result["environment"]["sourceGpus"][0]["uuid"] == "GPU-123"
-    assert result["environment"]["restoreGpus"][0]["uuid"] == "GPU-456"
+    assert result["environment"]["sourceGpus"] == [
+        {"model": "NVIDIA B200", "driverVersion": "580.1"}
+    ]
+    assert result["environment"]["gpuAffinity"] == "different"
     assert _measurement(result, "checkpoint.duration") == {
         "name": "checkpoint.duration",
         "displayName": "Checkpoint",
@@ -118,8 +108,10 @@ def test_recorder_writes_events_measurements_and_environment(tmp_path) -> None:
         "test.finished",
     ]
     summary = recorder.summary()
-    assert "Source GPU: NVIDIA B200 (GPU-123, driver 580.1), node gpu-node-source" in summary
-    assert "Restore GPU: NVIDIA B200 (GPU-456, driver 580.1), node gpu-node-restore" in summary
+    assert "Source GPU: NVIDIA B200 (driver 580.1)" in summary
+    assert "Restore GPU: NVIDIA B200 (driver 580.1)" in summary
+    assert "Restore placement: GPU different, node different" in summary
+    assert "GPU-" not in summary and "gpu-node" not in summary
     assert (
         "Storage: Premium_LRS (file.csi.azure.com), class azurefile-csi-premium, "
         "requested 1Ti, capacity 1Ti"
@@ -231,6 +223,36 @@ def test_parse_nvidia_smi_csv() -> None:
 def test_parse_nvidia_smi_csv_rejects_incomplete_output(output: str) -> None:
     with pytest.raises(ValueError):
         benchmark.parse_nvidia_smi_csv(output)
+
+
+def test_public_gpus_strips_hardware_identifiers() -> None:
+    gpus = benchmark.parse_nvidia_smi_csv("NVIDIA B200, GPU-one, 580.1\n")
+    assert benchmark.public_gpus(gpus) == [{"model": "NVIDIA B200", "driverVersion": "580.1"}]
+    assert gpus[0]["uuid"] == "GPU-one"
+
+
+@pytest.mark.parametrize(
+    ("source", "restore", "expected"),
+    [
+        (["GPU-a"], ["GPU-a"], "same"),
+        (["GPU-a"], ["GPU-b"], "different"),
+        (["GPU-a", "GPU-b"], ["GPU-b", "GPU-a"], "same"),
+        (["GPU-a"], None, "unknown"),
+        ([], ["GPU-a"], "unknown"),
+        (["unknown"], ["GPU-a"], "unknown"),
+    ],
+)
+def test_affinity(source: list[str] | None, restore: list[str] | None, expected: str) -> None:
+    assert benchmark.affinity(source, restore) == expected
+
+
+def test_result_path_includes_every_identity_field(tmp_path) -> None:
+    assert benchmark.result_path(
+        tmp_path, "suite", "vllm", "test_storage", "run/1", 3
+    ) == tmp_path / "suite-vllm-test_storage-run-1-3.json"
+    assert benchmark.result_path(tmp_path, "suite", "vllm", "test_a", "1", 1) != (
+        benchmark.result_path(tmp_path, "suite", "vllm", "test_b", "1", 1)
+    )
 
 
 @pytest.mark.parametrize(
@@ -448,7 +470,7 @@ def test_fallback_does_not_reuse_a_stale_result_from_another_run(
     )
 
     assert current != stale
-    assert current.name == "framework-checkpoint-restore-sglang-run-2-3.json"
+    assert current.name == "framework-checkpoint-restore-sglang-test_framework-run-2-3.json"
     written = json.loads(current.read_text(encoding="utf-8"))
     assert written["identity"] == {
         "suite": "framework-checkpoint-restore",

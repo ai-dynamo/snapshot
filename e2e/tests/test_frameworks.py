@@ -166,9 +166,8 @@ def test_framework_checkpoint_restore_serves_inference(
         )
         source_node = source.spec.node_name
         result.mark_event("source.ready")
-        result.update_environment(sourceNode=source_node)
         _record_framework_image_digest(result, source)
-        _record_gpu_environment(
+        source_gpu_ids = _record_gpu_environment(
             result,
             config.namespace,
             run.source_pod,
@@ -242,7 +241,6 @@ def test_framework_checkpoint_restore_serves_inference(
         )
         restored_text = restored_text.strip()
         restore_node = restored_pod.spec.node_name
-        result.update_environment(restoreNode=restore_node)
         assert restored_text, f"{framework.restore_ready_file} is empty"
         print(f"[{framework.name}] first post-restore generation: {restored_text!r}")
 
@@ -263,12 +261,21 @@ def test_framework_checkpoint_restore_serves_inference(
         # exec/log calls do not inflate test.total.duration. The source-side
         # storage, digest, and GPU collection above is inside the window: the
         # source pod is deleted before restore, so it cannot be deferred.
-        _record_gpu_environment(
+        restore_gpu_ids = _record_gpu_environment(
             result,
             config.namespace,
             run.restore_pod,
             role="restore",
             node=restore_node,
+        )
+        # Placement is recorded as same/different only; GPU UUIDs and node
+        # names are stable infrastructure identifiers and stay out of results.
+        result.update_environment(
+            gpuAffinity=benchmark_result.affinity(source_gpu_ids, restore_gpu_ids),
+            nodeAffinity=benchmark_result.affinity(
+                [source_node] if source_node else None,
+                [restore_node] if restore_node else None,
+            ),
         )
         _record_image_pulls(
             result,
@@ -305,12 +312,13 @@ def _record_gpu_environment(
     *,
     role: str,
     node: str | None,
-) -> None:
+) -> list[str] | None:
     """Records the GPU visible to the workload without failing the e2e test.
 
     `nvidia-smi` inside the workload is the preferred source. The node's
     `nvidia.com/gpu.product` label is recorded alongside it and stands in as
-    the GPU model when the exec fails, so the result stays comparable.
+    the GPU model when the exec fails, so the result stays comparable. Returns
+    the GPU UUIDs for affinity comparison; they are not written to the result.
     """
     if role not in {"source", "restore"}:
         raise ValueError(f"unknown GPU role {role!r}")
@@ -321,16 +329,15 @@ def _record_gpu_environment(
             pod,
             f"{benchmark_result.NVIDIA_SMI_QUERY} 2>/dev/null",
         )
-        result.update_environment(
-            **{f"{role}Gpus": benchmark_result.parse_nvidia_smi_csv(output)}
-        )
+        gpus = benchmark_result.parse_nvidia_smi_csv(output)
+        result.update_environment(**{f"{role}Gpus": benchmark_result.public_gpus(gpus)})
+        return [gpu["uuid"] for gpu in gpus]
     except Exception as exc:  # noqa: BLE001 - metadata is not a functional assertion
         message = f"{type(exc).__name__}: {exc}"
         fallback = (
             [
                 {
                     "model": gpu_product,
-                    "uuid": "unknown",
                     "driverVersion": "unknown",
                     "source": GPU_PRODUCT_NODE_LABEL,
                 }
@@ -342,6 +349,7 @@ def _record_gpu_environment(
             **{f"{role}Gpus": fallback, f"{role}GpuCollectionError": message}
         )
         print(f"benchmark {role} GPU metadata unavailable: {message}")
+        return None
 
 
 def _node_gpu_product(
