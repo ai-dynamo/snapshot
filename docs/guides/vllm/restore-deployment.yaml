@@ -29,8 +29,8 @@ spec:
         nvidia.com/gpu.present: "true"
       containers:
         - name: main
-          image: vllm-snapshot:replace-me
-          imagePullPolicy: Always
+          image: vllm/vllm-openai:v0.27.1-ubuntu2404@sha256:dafea057f24b7d42716331a48e2db4e1f204f877a3aa759cb7e4c37e64ca2eee
+          imagePullPolicy: IfNotPresent
           # Inert placeholder: the agent restores the checkpointed process into
           # this container, so app.py must not run here.
           command:
@@ -61,6 +61,12 @@ spec:
               subPath: main
             - name: tun
               mountPath: /dev/net/tun
+            # The checkpointed process's mount namespace includes this
+            # mount (from the source Pod); restore recreates it here too,
+            # even though this placeholder's own command never reads it.
+            - name: app
+              mountPath: /snapshot-app
+              readOnly: true
       volumes:
         - name: snapshot-control
           emptyDir: {}
@@ -68,3 +74,6 @@ spec:
           hostPath:
             path: /dev/net/tun
             type: CharDevice
+        - name: app
+          configMap:
+            name: vllm-app
