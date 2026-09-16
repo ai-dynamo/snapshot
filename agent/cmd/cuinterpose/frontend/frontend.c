@@ -219,6 +219,7 @@ __attribute__((constructor)) static void initialize_process(void) {
 
 #define MEMORY_API(X) \
     X(cuMemCreate, (uint64_t *out, size_t size, const struct AllocationProp *prop, uint64_t flags), (out, size, prop, flags)) \
+    X(cuMemGetAllocationGranularity, (size_t *out, const struct AllocationProp *prop, uint32_t flags), (out, prop, flags)) \
     X(cuMemRelease, (uint64_t handle), (handle)) \
     X(cuMemRetainAllocationHandle, (uint64_t *out, void *address), (out, address)) \
     X(cuMemMap, (uint64_t address, size_t size, size_t offset, uint64_t handle, uint64_t flags), (address, size, offset, handle, flags)) \

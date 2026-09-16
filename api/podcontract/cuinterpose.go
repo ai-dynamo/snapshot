@@ -74,6 +74,23 @@ func ShapeCuinterposeCapture(
 		if err := setCuinterposePreload(container); err != nil {
 			return err
 		}
+		storage := shaped.Annotations[CuinterposeAllocationStorageAnnotation]
+		if storage == "" {
+			storage = "host-carrier"
+		}
+		found := false
+		for _, env := range container.Env {
+			if env.Name != CuinterposeAllocationStorageEnv {
+				continue
+			}
+			if found || env.ValueFrom != nil || env.Value != storage {
+				return fmt.Errorf("container %q has conflicting %s", name, CuinterposeAllocationStorageEnv)
+			}
+			found = true
+		}
+		if !found {
+			container.Env = append(container.Env, corev1.EnvVar{Name: CuinterposeAllocationStorageEnv, Value: storage})
+		}
 	}
 	*podTemplate = *shaped
 	return nil

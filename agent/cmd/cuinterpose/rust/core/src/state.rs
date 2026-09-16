@@ -205,6 +205,16 @@ pub struct Allocation {
     pub pins: usize,
 }
 
+impl Allocation {
+    fn owns_content(&self, storage: ContentStorage) -> bool {
+        self.creator
+            && self.properties.kind == ALLOCATION_PINNED
+            && self.properties.location.kind == LOCATION_DEVICE
+            && (storage == ContentStorage::Pagebroker
+                || (self.shared && self.properties.handle_types != 0))
+    }
+}
+
 // AllocationProp's Win32 pointer is opaque and is never dereferenced on Linux.
 // Driver access and allocation metadata are serialized under State's mutex.
 unsafe impl Send for Allocation {}
@@ -317,11 +327,7 @@ impl State {
             let record = Record::Allocation {
                 id: allocation.id,
                 creator: allocation.creator,
-                content: allocation.creator
-                    && allocation.shared
-                    && allocation.properties.handle_types != 0
-                    && allocation.properties.kind == ALLOCATION_PINNED
-                    && allocation.properties.location.kind == LOCATION_DEVICE,
+                content: allocation.owns_content(self.content_storage),
                 size: allocation.size as u64,
                 allocation_type: allocation.properties.kind,
                 handle_types: allocation.properties.handle_types,
@@ -385,13 +391,12 @@ impl State {
     ) -> Result<super::host_carrier::Transfer> {
         use super::host_carrier::{AllocationContent, Arena, Context};
         let next_phase = self.phase.next(operation)?;
-        let selected = |a: &Allocation| {
-            a.creator
-                && a.shared
-                && a.properties.handle_types != 0
-                && a.properties.kind == ALLOCATION_PINNED
-                && a.properties.location.kind == LOCATION_DEVICE
-        };
+        // Ownership is chosen at creation, when export capability can still be
+        // requested. A coordinator cannot switch an existing workload's mode.
+        if storage != self.content_storage {
+            return Err(crate::driver::CudaError(INVALID_VALUE));
+        }
+        let selected = |a: &Allocation| a.owns_content(storage);
         let mut bytes = 0u64;
         let mut copy_us = 0u32;
         match operation {
@@ -480,7 +485,11 @@ impl State {
             }
             Operation::PrepareUnicast => {
                 cache()?.clear()?;
-                for allocation in self.allocations.values_mut().filter(|a| a.shared) {
+                for allocation in self
+                    .allocations
+                    .values_mut()
+                    .filter(|a| a.shared || selected(a))
+                {
                     Context::run(
                         allocation.context,
                         allocation.properties.location.id,
@@ -616,7 +625,7 @@ impl State {
                         }
                         mapping.checkpointed = false;
                     }
-                    if creator {
+                    if creator && allocation.shared {
                         let fd =
                             crate::driver::export_posix(allocation.driver.ok_or(INVALID_HANDLE)?)?;
                         cache()?.replace((ResourceKind::Unicast, allocation.id), Some(fd))?;
@@ -790,6 +799,11 @@ fn initialize_generation() -> Result<()> {
     }
     let endpoint = format!("{directory}/cuinterpose-{pid}.sock");
     std::os::unix::net::SocketAddr::from_pathname(&endpoint).map_err(|_| INVALID_VALUE)?;
+    let content_storage = match std::env::var("CUINTERPOSE_ALLOCATION_STORAGE").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("host-carrier") => ContentStorage::HostCarrier,
+        Ok("pagebroker") => ContentStorage::Pagebroker,
+        _ => return Err(crate::driver::CudaError(INVALID_VALUE)),
+    };
     let state = State {
         identity,
         endpoint,
@@ -803,7 +817,7 @@ fn initialize_generation() -> Result<()> {
         next: 1,
         phase: Phase::Active,
         arena: None,
-        content_storage: ContentStorage::HostCarrier,
+        content_storage,
         inflight: 0,
         pending_maps: Vec::new(),
     };
@@ -852,6 +866,28 @@ pub(super) fn context() -> usize {
     context as usize
 }
 
+pub fn cuMemGetAllocationGranularity(
+    out: *mut usize,
+    prop: *const AllocationProp,
+    flags: u32,
+) -> Result<()> {
+    if prop.is_null() {
+        return Err(crate::driver::CudaError(INVALID_VALUE));
+    }
+    let mut backing = unsafe { *prop };
+    let state = get()?;
+    if state.content_storage == ContentStorage::Pagebroker
+        && backing.handle_types == 0
+        && backing.kind == ALLOCATION_PINNED
+        && backing.location.kind == LOCATION_DEVICE
+    {
+        backing.handle_types = POSIX_FD;
+    }
+    // Applications must reserve/map sizes compatible with the actual backing,
+    // even though its checkpoint-only export capability is not advertised.
+    unsafe { crate::driver::cuMemGetAllocationGranularity(out, &backing, flags) }
+}
+
 pub fn cuMemCreate(
     out: *mut u64,
     size: usize,
@@ -863,12 +899,17 @@ pub fn cuMemCreate(
     }
     let properties = unsafe { *prop };
     let mut state = get()?;
-    if properties.handle_types == POSIX_FD && state.phase != Phase::Active {
+    let private_vmm = state.content_storage == ContentStorage::Pagebroker
+        && properties.handle_types == 0
+        && properties.kind == ALLOCATION_PINNED
+        && properties.location.kind == LOCATION_DEVICE;
+    let supported = properties.handle_types == POSIX_FD || private_vmm;
+    if supported && state.phase != Phase::Active {
         return Err(crate::driver::CudaError(NOT_READY));
     }
     // Reserve the logical identity before acquiring backing. Recoverable
     // metadata errors must not leave an unpublished CUDA allocation behind.
-    let tracked = if properties.handle_types == POSIX_FD {
+    let tracked = if supported {
         if state.next & HANDLE_MASK != 0 {
             return Err(crate::driver::CudaError(OUT_OF_MEMORY));
         }
@@ -877,9 +918,15 @@ pub fn cuMemCreate(
         None
     };
     let mut driver = 0;
+    // Keep the application's properties in the record. Only the backing gains
+    // an internal export capability; application exports remain disallowed.
+    let mut backing = properties;
+    if private_vmm {
+        backing.handle_types = POSIX_FD;
+    }
     let create = crate::driver::symbols::cuMemCreate()?;
     if let Err(error) =
-        crate::driver::CudaError::result(unsafe { create(&mut driver, size, prop, flags) })
+        crate::driver::CudaError::result(unsafe { create(&mut driver, size, &backing, flags) })
     {
         unsafe {
             out.write(driver);
@@ -890,7 +937,7 @@ pub fn cuMemCreate(
         let _ = unsafe { crate::driver::cuMemRelease(driver) };
         return Err(crate::driver::CudaError(INVALID_HANDLE));
     }
-    if properties.handle_types != POSIX_FD {
+    if !supported {
         if properties.handle_types != 0 {
             state.unsupported += 1;
         }
@@ -1172,6 +1219,9 @@ pub fn cuMemExportToShareableHandle(
         return super::multicast::export(&mut state, id, out);
     }
     let allocation = state.allocations.get_mut(&id).ok_or(INVALID_HANDLE)?;
+    if allocation.properties.handle_types & kind == 0 {
+        return Err(crate::driver::CudaError(INVALID_VALUE));
+    }
     if allocation.creator && !cache()?.contains(&(ResourceKind::Unicast, id))? {
         let fd = crate::driver::export_posix(allocation.driver.ok_or(INVALID_HANDLE)?)?;
         cache()?.replace((ResourceKind::Unicast, id), Some(fd))?;
@@ -1297,6 +1347,15 @@ pub fn cuMemGetAllocationPropertiesFromHandle(out: *mut AllocationProp, handle: 
         None => handle,
     };
     unsafe { crate::driver::cuMemGetAllocationPropertiesFromHandle(out, driver) }?;
+    if let Some(allocation) = state
+        .handles
+        .get(&handle)
+        .and_then(|id| state.allocations.get(id))
+    {
+        // Preserve driver-returned flags while hiding the internal POSIX
+        // capability of an application-private allocation.
+        unsafe { (*out).handle_types = allocation.properties.handle_types };
+    }
     Ok(())
 }
 

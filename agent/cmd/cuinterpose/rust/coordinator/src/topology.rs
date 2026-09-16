@@ -48,7 +48,7 @@ pub fn validate(participants: &[Participant]) -> Result<Vec<Allocation>> {
                 } => {
                     if *creator {
                         ensure!(
-                            *handle_types == 1 && *size > 0,
+                            (*handle_types == 1 || (*handle_types == 0 && *content)) && *size > 0,
                             "invalid allocation creator"
                         );
                         let std::collections::btree_map::Entry::Vacant(entry) =

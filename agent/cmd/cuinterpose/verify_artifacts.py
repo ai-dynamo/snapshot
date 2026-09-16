@@ -16,7 +16,7 @@ frontend = {
     "cudaGetDriverEntryPointByVersion_ptsz", "cuMemCreate", "cuMemRelease",
     "cuMemRetainAllocationHandle", "cuMemMap", "cuMemUnmap", "cuMemSetAccess",
     "cuMemExportToShareableHandle", "cuMemImportFromShareableHandle",
-    "cuMemGetAllocationPropertiesFromHandle", "cuMulticastCreate",
+    "cuMemGetAllocationPropertiesFromHandle", "cuMemGetAllocationGranularity", "cuMulticastCreate",
     "cuMulticastAddDevice", "cuMulticastBindMem", "cuMulticastBindMem_v2",
     "cuMulticastBindAddr", "cuMulticastBindAddr_v2", "cuMulticastGetGranularity",
     "cuMulticastUnbind", "cuinterpose_build_info", "cuinterpose_debug_stats",

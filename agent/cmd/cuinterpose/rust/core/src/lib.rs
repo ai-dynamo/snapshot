@@ -58,6 +58,7 @@ macro_rules! exports {
 // Initializing Core checks these adapters against the canonical ABI signatures.
 exports! {
     cuMemCreate(out: *mut u64, size: usize, prop: *const AllocationProp, flags: u64);
+    cuMemGetAllocationGranularity(out: *mut usize, prop: *const AllocationProp, flags: u32);
     cuMemRelease(handle: u64);
     cuMemRetainAllocationHandle(out: *mut u64, address: *mut c_void);
     cuMemMap(address: u64, size: usize, offset: usize, handle: u64, flags: u64);

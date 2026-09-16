@@ -35,6 +35,8 @@ const (
 	// CuinterposeAllocationStorageAnnotation selects external allocation content.
 	// It does not change which allocations belong to cuinterpose.
 	CuinterposeAllocationStorageAnnotation = "nvidia.com/cuinterpose-allocation-storage"
+	// CuinterposeAllocationStorageEnv fixes allocation ownership before CUDA creation.
+	CuinterposeAllocationStorageEnv = "CUINTERPOSE_ALLOCATION_STORAGE"
 
 	// CuinterposeAnnotationEnabled is the only accepted CuinterposeAnnotation value.
 	CuinterposeAnnotationEnabled = "enabled"

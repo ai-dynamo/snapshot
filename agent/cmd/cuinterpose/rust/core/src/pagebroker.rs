@@ -112,13 +112,12 @@ pub fn transfer(
                                 return Err(CudaError(INVALID_HANDLE));
                             }
                             let mut handle = 0;
+                            let mut backing = allocation.properties;
+                            if backing.handle_types == 0 {
+                                backing.handle_types = cuinterpose_abi::POSIX_FD;
+                            }
                             unsafe {
-                                driver::cuMemCreate(
-                                    &mut handle,
-                                    allocation.size,
-                                    &allocation.properties,
-                                    0,
-                                )
+                                driver::cuMemCreate(&mut handle, allocation.size, &backing, 0)
                             }?;
                             allocation.driver = Some(handle);
                         }

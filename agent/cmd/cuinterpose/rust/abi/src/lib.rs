@@ -14,7 +14,7 @@ pub use cudarc::driver::sys::{
     CUmemGenericAllocationHandle as AllocationHandle, CUmulticastObjectProp as MulticastProp,
 };
 
-pub const ABI_VERSION: u32 = 5;
+pub const ABI_VERSION: u32 = 6;
 // Keep the C header independent of cudarc's generated implementation details.
 pub const CUDA_VERSION: u32 = 13010;
 const _: () = assert!(CUDA_VERSION == cuda::CUDA_VERSION);
@@ -62,6 +62,8 @@ pub struct Core {
     pub fork_child: unsafe extern "C" fn(),
     pub ensure_ready: unsafe extern "C" fn() -> i32,
     pub cuMemCreate: unsafe extern "C" fn(*mut u64, usize, *const AllocationProp, u64) -> i32,
+    pub cuMemGetAllocationGranularity:
+        unsafe extern "C" fn(*mut usize, *const AllocationProp, u32) -> i32,
     pub cuMemRelease: unsafe extern "C" fn(u64) -> i32,
     pub cuMemRetainAllocationHandle: unsafe extern "C" fn(*mut u64, *mut c_void) -> i32,
     pub cuMemMap: unsafe extern "C" fn(u64, usize, usize, u64, u64) -> i32,

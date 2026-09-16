@@ -209,6 +209,9 @@ fn serve(
                 })
             }
             ControlRequest::Execute(operation, storage, session) => {
+                if storage != state.content_storage {
+                    return Err("allocation storage differs from process launch mode".into());
+                }
                 state
                     .validate_lifecycle(operation)
                     .map_err(|_| "CUDA lifecycle operation refused without mutation")?;

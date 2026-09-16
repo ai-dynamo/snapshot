@@ -91,6 +91,7 @@ functions! {
     cuMemAddressFree(address: DevicePtr, size: usize);
     cuMemAddressReserve(address: *mut DevicePtr, size: usize, alignment: usize, requested: DevicePtr, flags: u64);
     cuMemCreate(handle: *mut AllocationHandle, size: usize, properties: *const AllocationProp, flags: u64);
+    cuMemGetAllocationGranularity(size: *mut usize, properties: *const AllocationProp, flags: u32);
     cuMemExportToShareableHandle(output: *mut c_void, handle: AllocationHandle, handle_type: u32, flags: u64);
     cuMemGetAllocationPropertiesFromHandle(properties: *mut AllocationProp, handle: AllocationHandle);
     cuMemHostRegister_v2(address: *mut c_void, size: usize, flags: u32);
