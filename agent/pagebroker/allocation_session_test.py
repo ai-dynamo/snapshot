@@ -131,9 +131,10 @@ class AllocationSessions(unittest.TestCase):
         if command == "prepare_staged_checkpoint":
             request.prepare_staged_checkpoint.destination.filesystem.directory = str(self.storage / "artifact")
             request.prepare_staged_checkpoint.io_engine.posix_copy.SetInParent()
-        if command == "staged_restore":
-            request.staged_restore.source.filesystem.directory = str(self.storage / "artifact")
-            request.staged_restore.io_engine.posix_copy.SetInParent()
+        if command in ("staged_restore", "direct_restore"):
+            restore = getattr(request, command)
+            restore.source.filesystem.directory = str(self.storage / "artifact")
+            restore.io_engine.posix_copy.SetInParent()
         connection = self.connect()
         send(connection, request)
         reply, fds = receive(connection, pb.Response)
@@ -186,7 +187,8 @@ class AllocationSessions(unittest.TestCase):
         self.assertTrue(self.finish(second).HasField("finished"))
         self.assertTrue(self.finish(save).HasField("finished"))
         self.assertTrue(self.request("save", "commit").HasField("commit_complete"))
-        self.assertTrue(self.request("load", "staged_restore").HasField("staged_restore_directory"))
+        self.assertTrue(self.request("load", "direct_restore").HasField("direct_restore_ready"))
+        self.assertFalse(any((self.root / "stage" / "restore").iterdir()))
         load, ready = self.bind("load", pb.BindAllocationSession.LOAD)
         self.assertTrue(ready.HasField("allocation_session"))
         target, loaded = self.batch(load, bytes(len(data)))
