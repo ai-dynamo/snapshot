@@ -491,8 +491,9 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 #     EROFS. An emptyDir at /tmp (either medium) makes it work again, since
 #     volume mounts stay writable independently of the root filesystem.
 #
-# cuda-checkpoint wrapping is opt-in (--cuda-checkpoint-wrap in snapshotctl).
-# When used, the source workload image must have cuda-checkpoint at the same
+# CUDA tools are delivered by the operator. Possible multi-GPU sources use
+# cuda-checkpoint --launch-job; cuinterpose opt-in only affects LD_PRELOAD.
+# The restored workload resolves these tools at the same
 # path as it runs from — CRIU restores file-backed mappings by path, not via
 # PATH search — and so must this placeholder image (same BASE_IMAGE).
 #
