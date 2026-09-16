@@ -40,7 +40,12 @@ func TestInspectCompatibilityChecksMappedGPUMountAndOrdinaryMounts(t *testing.T)
 	target := compat.GPUInfo{Devices: []compat.GPUDevice{{UUID: "GPU-target"}}}
 	paths := map[string]string{"GPU-target": "/dev/nvidia1"}
 	check := func() error {
-		return inspectCompatibility(testr.New(t), manifest, target, paths, root, "", false)
+		_, aliases, err := inspectGPUCompatibility(testr.New(t), manifest, target, root, "", false,
+			func() (map[string]string, error) { return paths, nil })
+		if err == nil && aliases["/dev/nvidia0"] != "/dev/nvidia1" {
+			t.Fatalf("restore plan = %v", aliases)
+		}
+		return err
 	}
 	if err := check(); err != nil {
 		t.Fatalf("validated destination alias refused: %v", err)
@@ -352,13 +357,13 @@ func TestExistingMountPaths(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	got := existingMountPaths(targetRoot, []string{"/model-cache", "/data", "/etc-hostname"})
+	got := existingMountPaths(targetRoot, []string{"/model-cache", "/data", "/etc-hostname"}, nil)
 	want := []string{"/model-cache", "/etc-hostname"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("existingMountPaths = %#v, want %#v", got, want)
 	}
 
-	if got := existingMountPaths(targetRoot, nil); len(got) != 0 {
+	if got := existingMountPaths(targetRoot, nil, nil); len(got) != 0 {
 		t.Errorf("existingMountPaths of nothing = %#v, want empty", got)
 	}
 }

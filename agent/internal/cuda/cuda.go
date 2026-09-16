@@ -167,7 +167,7 @@ type visibleGPUDiscovery func(context.Context, string, int, time.Duration) (comp
 
 // DiscoverGPUUUIDs resolves GPU UUIDs in the container's runtime ordinal order.
 func DiscoverGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName, hostProcPath string, pid int, log logr.Logger) ([]string, error) {
-	env, err := DiscoverGPUs(ctx, clientset, podName, podNamespace, containerName, hostProcPath, pid, log)
+	env, err := DiscoverGPUs(ctx, clientset, podName, podNamespace, containerName, hostProcPath, pid, nil, log)
 	if err != nil {
 		return nil, err
 	}
@@ -178,7 +178,17 @@ func DiscoverGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podNa
 // order, described by model and driver version wherever nvidia-smi can be
 // reached. Whichever path finds the GPUs, they come out the same shape, so
 // what gets recorded does not depend on how this cluster allocates GPUs.
-func DiscoverGPUs(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName, hostProcPath string, pid int, log logr.Logger) (compat.GPUInfo, error) {
+// Explicit environment selections are resolved on the host; disabled legacy
+// selections inspect only container visibility, which can include CDI devices.
+func DiscoverGPUs(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName, hostProcPath string, pid int, env []string, log logr.Logger) (compat.GPUInfo, error) {
+	if value := VisibleDevicesValue(env); value != nil && *value != "all" {
+		if *value == "" || *value == "none" || *value == "void" {
+			// These disable legacy injection, not CDI. Inspect only actual
+			// container visibility; never substitute host/allocation UUIDs.
+			return DiscoverVisibleGPUs(ctx, hostProcPath, pid, nvidiaSMITimeout)
+		}
+		return resolveSelectedGPUs(ctx, *value)
+	}
 	return discoverGPUs(
 		ctx,
 		clientset,

@@ -6,6 +6,7 @@ package cuda
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -38,13 +39,57 @@ func TestResolveVisibleGPUsPreservesCompatibilityMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	got, err := ResolveVisibleGPUs(context.Background(), []string{"NVIDIA_VISIBLE_DEVICES=7"})
+	got, err := resolveSelectedGPUs(context.Background(), "7")
 	want := compat.GPUInfo{
 		DriverVersion: "595.58.03",
 		Devices:       []compat.GPUDevice{{UUID: uuid, ProductName: "NVIDIA B200"}},
 	}
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("GPU metadata = %#v, %v; want %#v", got, err, want)
+	}
+}
+
+func TestDisabledLegacySelectionUsesOnlyContainerVisibility(t *testing.T) {
+	for _, value := range []string{"", "none", "void"} {
+		for _, visible := range []string{"", "GPU-cdi, NVIDIA B200, 595.58.03"} {
+			t.Run(value+"/"+visible, func(t *testing.T) {
+				installFakeNSenter(t, fmt.Sprintf("printf '%%s\\n' '%s'\n", visible))
+				// No Kubernetes or PodResources client: an allocation fallback
+				// would fail instead of returning the container's actual view.
+				got, err := DiscoverGPUs(context.Background(), nil, "", "", "", "/host/proc", 42,
+					[]string{"NVIDIA_VISIBLE_DEVICES=" + value}, logr.Discard())
+				if err != nil || !reflect.DeepEqual(got, parseNvidiaSmiGPUs(visible)) {
+					t.Fatalf("container discovery = %#v, %v", got, err)
+				}
+			})
+		}
+	}
+}
+
+func TestSelectionLookupHonorsDeadline(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "nvidia-smi"), []byte("#!/bin/sh\nexec sleep 30\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := resolveSelectedGPUs(ctx, "0"); err == nil {
+		t.Fatal("stalled lookup succeeded")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("lookup ignored deadline: %s", elapsed)
+	}
+}
+
+func TestVisibleDevicesValueUsesLastAssignment(t *testing.T) {
+	got := VisibleDevicesValue([]string{"NVIDIA_VISIBLE_DEVICES=0", "NVIDIA_VISIBLE_DEVICES="})
+	if got == nil || *got != "" {
+		t.Fatalf("selection = %v, want explicitly empty", got)
+	}
+	if VisibleDevicesValue(nil) != nil {
+		t.Fatal("absent selection became explicit")
 	}
 }
 
@@ -99,13 +144,12 @@ func TestResolveVisibleDevices(t *testing.T) {
 	}{
 		{"0,2", []string{a, b}, false},
 		{b + "," + a, []string{b, a}, false},
-		{"all", nil, false},
-		{"", nil, false},
 		{"0," + a, nil, true},
 		{"MIG-invalid", nil, true},
 	} {
 		t.Run(tc.value, func(t *testing.T) {
-			got, err := ResolveVisibleDevices(context.Background(), []string{"NVIDIA_VISIBLE_DEVICES=" + tc.value, "CUDA_VISIBLE_DEVICES=1"})
+			gpus, err := resolveSelectedGPUs(context.Background(), tc.value)
+			got := gpuUUIDsOf(gpus)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("error = %v", err)
 			}
@@ -759,7 +803,7 @@ func TestDiscoverGPUsUseVisibleGPUDescriptions(t *testing.T) {
 	installFakeNSenter(t, "printf '%s\\n' 'GPU-a, NVIDIA L4, 580.65.06'\n")
 
 	got, err := DiscoverGPUs(
-		context.Background(), nil, "test-pod", "default", "main", "/host/proc", 42, logr.Discard(),
+		context.Background(), nil, "test-pod", "default", "main", "/host/proc", 42, nil, logr.Discard(),
 	)
 	if err != nil {
 		t.Fatalf("DiscoverGPUs: %v", err)

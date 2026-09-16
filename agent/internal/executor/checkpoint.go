@@ -263,24 +263,12 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 	var gpuDeviceMapDuration time.Duration
 	if len(cudaHostPIDs) > 0 {
 		gpuStart := time.Now()
+		var env []string
 		if ociSpec != nil && ociSpec.Process != nil {
-			gpus, err = cuda.ResolveVisibleGPUs(ctx, ociSpec.Process.Env)
-			if err != nil {
-				return nil, 0, err
-			}
+			env = ociSpec.Process.Env
 		}
-		if len(gpus.Devices) == 0 {
-			gpus, err = cuda.DiscoverGPUs(
-				ctx,
-				req.Clientset,
-				req.PodName,
-				req.PodNamespace,
-				req.ContainerName,
-				snapshotruntime.HostProcPath,
-				pid,
-				log,
-			)
-		}
+		gpus, err = cuda.DiscoverGPUs(ctx, req.Clientset, req.PodName, req.PodNamespace,
+			req.ContainerName, snapshotruntime.HostProcPath, pid, env, log)
 		gpuDeviceMapDuration = time.Since(gpuStart)
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to discover source GPU UUIDs: %w", err)

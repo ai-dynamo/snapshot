@@ -24,11 +24,11 @@ import (
 
 // RestoreOptions holds configuration for an in-namespace restore.
 type RestoreOptions struct {
-	CheckpointPath string
-	CUDADeviceMap  string
-	GPUDevicePaths map[string]string
-	CgroupRoot     string
-	TargetPodIP    string
+	CheckpointPath  string
+	CUDADeviceMap   string
+	GPUMountAliases map[string]string
+	CgroupRoot      string
+	TargetPodIP     string
 	// BundleDir is the path where the agent's binary bundle is mounted inside this namespace.
 	BundleDir string
 }
@@ -148,17 +148,17 @@ func executeRestore(
 		}
 	}
 
-	cleanupLegacyNVIDIADeviceMount, err := criu.PrepareGPUDeviceMounts(m, opts.CUDADeviceMap, opts.GPUDevicePaths, log)
+	cleanupGPUMounts, err := criu.PrepareGPUDeviceMounts(opts.GPUMountAliases, log)
 	if err != nil {
-		return nil, 0, nil, fmt.Errorf("prepare legacy NVIDIA device mount: %w", err)
+		return nil, 0, nil, fmt.Errorf("prepare GPU device mounts: %w", err)
 	}
-	legacyNVIDIADeviceMountCommitted := false
+	gpuMountsCommitted := false
 	defer func() {
-		if legacyNVIDIADeviceMountCommitted {
+		if gpuMountsCommitted {
 			return
 		}
-		if err := cleanupLegacyNVIDIADeviceMount(); err != nil {
-			retErr = errors.Join(retErr, fmt.Errorf("clean legacy NVIDIA device mount: %w", err))
+		if err := cleanupGPUMounts(); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("clean GPU device mounts: %w", err))
 		}
 	}()
 
@@ -207,7 +207,7 @@ func executeRestore(
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	legacyNVIDIADeviceMountCommitted = true
+	gpuMountsCommitted = true
 	restoredPID = int(criuPID)
 	// Cleanup runs after CUDA unlock. A cleanup-only failure is returned
 	// separately so the host controller can warn without killing the workload.

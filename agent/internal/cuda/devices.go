@@ -17,76 +17,58 @@ import (
 	"github.com/ai-dynamo/snapshot/api/compat"
 )
 
-// ResolveVisibleGPUs preserves explicit selection order and includes the model
-// and driver metadata used by the restore compatibility gate.
-func ResolveVisibleGPUs(ctx context.Context, env []string) (compat.GPUInfo, error) {
-	uuids, err := ResolveVisibleDevices(ctx, env)
-	if err != nil || len(uuids) == 0 {
-		return compat.GPUInfo{}, err
-	}
+// resolveSelectedGPUs resolves host indices (not CUDA ordinals), preserving list
+// order. One deadline covers all lookups, including model/driver metadata.
+func resolveSelectedGPUs(ctx context.Context, value string) (compat.GPUInfo, error) {
 	ctx, cancel := context.WithTimeout(ctx, nvidiaSMITimeout)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, "nvidia-smi", "-i", strings.Join(uuids, ","),
-		"--query-gpu=uuid,name,driver_version", "--format=csv,noheader").Output()
-	if err != nil {
-		return compat.GPUInfo{}, fmt.Errorf("describe NVIDIA_VISIBLE_DEVICES GPUs: %w", err)
-	}
-	return describeGPUs(uuids, parseNvidiaSmiGPUs(string(output))), nil
-}
-
-// ResolveVisibleDevices resolves an explicit legacy runtime selection on the
-// host, before container-local CUDA enumeration can reinterpret numeric indices.
-// A nil selection leaves allocation discovery to the caller.
-func ResolveVisibleDevices(ctx context.Context, env []string) ([]string, error) {
-	value := VisibleDevicesValue(env)
-	if value == nil {
-		return nil, nil
-	}
-	return resolveVisibleDevices(ctx, *value)
-}
-
-// VisibleDevicesValue distinguishes an absent selection from an explicit empty value.
-func VisibleDevicesValue(env []string) *string {
-	var value *string
-	for _, entry := range env {
-		if v, ok := strings.CutPrefix(entry, "NVIDIA_VISIBLE_DEVICES="); ok {
-			value = &v
-		}
-	}
-	return value
-}
-
-func resolveVisibleDevices(ctx context.Context, value string) ([]string, error) {
-	switch value {
-	case "", "all", "none", "void":
-		return nil, nil
-	}
-	var uuids []string
+	var gpus compat.GPUInfo
 	seen := map[string]bool{}
 	for _, selection := range strings.Split(value, ",") {
 		selection = strings.TrimSpace(selection)
 		if _, err := strconv.ParseUint(selection, 10, 32); err != nil && !gpuUUIDPattern.MatchString(selection) {
-			return nil, fmt.Errorf("unsupported NVIDIA_VISIBLE_DEVICES selection %q", selection)
+			return gpus, fmt.Errorf("unsupported NVIDIA_VISIBLE_DEVICES selection %q", selection)
 		}
 		output, err := exec.CommandContext(ctx, "nvidia-smi", "-i", selection,
-			"--query-gpu=uuid", "--format=csv,noheader").Output()
+			"--query-gpu=uuid,name,driver_version", "--format=csv,noheader").Output()
 		if err != nil {
-			return nil, fmt.Errorf("resolve NVIDIA_VISIBLE_DEVICES selection %q: %w", selection, err)
+			return gpus, fmt.Errorf("resolve NVIDIA_VISIBLE_DEVICES selection %q: %w", selection, err)
 		}
-		uuid := strings.TrimSpace(string(output))
+		resolved := parseNvidiaSmiGPUs(string(output))
+		if len(resolved.Devices) != 1 {
+			return gpus, fmt.Errorf("NVIDIA_VISIBLE_DEVICES selection %q did not resolve one GPU", selection)
+		}
+		uuid := resolved.Devices[0].UUID
 		if !gpuUUIDPattern.MatchString(uuid) || seen[uuid] {
-			return nil, fmt.Errorf("invalid or duplicate resolved GPU UUID %q", uuid)
+			return gpus, fmt.Errorf("invalid or duplicate resolved GPU UUID %q", uuid)
 		}
 		seen[uuid] = true
-		uuids = append(uuids, uuid)
+		gpus.Devices = append(gpus.Devices, resolved.Devices[0])
+		gpus.DriverVersion = resolved.DriverVersion
 	}
-	return uuids, nil
+	return gpus, nil
+}
+
+// VisibleDevicesValue distinguishes absent from explicitly empty. Scan backwards
+// to match the last-assignment-wins convention used for process environments.
+func VisibleDevicesValue(env []string) *string {
+	for i := len(env) - 1; i >= 0; i-- {
+		if value, ok := strings.CutPrefix(env[i], "NVIDIA_VISIBLE_DEVICES="); ok {
+			return &value
+		}
+	}
+	return nil
 }
 
 // ResolveDevicePaths associates physical UUIDs with host minor numbers and
 // verifies that those exact devices are exposed in the workload namespace.
 func ResolveDevicePaths(hostProc string, pid int, uuids []string) (map[string]string, error) {
+	if len(uuids) == 0 {
+		return nil, nil
+	}
 	inventory := map[string]uint32{}
+	// The NVIDIA kernel driver publishes each physical GPU's UUID and device
+	// minor here. The minor names /dev/nvidiaN; it is not a CUDA ordinal.
 	files, err := filepath.Glob(filepath.Join(hostProc, "driver/nvidia/gpus/*/information"))
 	if err != nil {
 		return nil, err
@@ -119,14 +101,26 @@ func ResolveDevicePaths(hostProc string, pid int, uuids []string) (map[string]st
 			return nil, fmt.Errorf("no physical device minor for GPU %s", uuid)
 		}
 		path := fmt.Sprintf("/dev/nvidia%d", minor)
-		var stat unix.Stat_t
-		if err := unix.Stat(filepath.Join(hostProc, strconv.Itoa(pid), "root", path), &stat); err != nil {
-			return nil, fmt.Errorf("GPU %s is not exposed at %s: %w", uuid, path, err)
-		}
-		if stat.Mode&unix.S_IFMT != unix.S_IFCHR || unix.Major(stat.Rdev) != 195 || unix.Minor(stat.Rdev) != minor {
-			return nil, fmt.Errorf("GPU %s device mismatch at %s", uuid, path)
+		if err := validateGPUDevice(filepath.Join(hostProc, strconv.Itoa(pid), "root", path), minor); err != nil {
+			return nil, fmt.Errorf("GPU %s at %s: %w", uuid, path, err)
 		}
 		paths[uuid] = path
 	}
 	return paths, nil
+}
+
+// NVIDIA's Linux /dev/nvidiaN character devices use major 195. Checking rdev in
+// the workload root prevents a same-named file or another device from qualifying.
+// See https://docs.kernel.org/admin-guide/devices.html (195 char).
+const nvidiaDeviceMajor = 195
+
+func validateGPUDevice(path string, minor uint32) error {
+	var stat unix.Stat_t
+	if err := unix.Stat(path, &stat); err != nil {
+		return err
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFCHR || unix.Major(stat.Rdev) != nvidiaDeviceMajor || unix.Minor(stat.Rdev) != minor {
+		return fmt.Errorf("expected NVIDIA character device %d:%d", nvidiaDeviceMajor, minor)
+	}
+	return nil
 }

@@ -23,7 +23,7 @@ func main() {
 
 	checkpointPath := flag.String("checkpoint-path", "", "Path to checkpoint directory")
 	cudaDeviceMap := flag.String("cuda-device-map", "", "CUDA device map for cuda-checkpoint-helper restore")
-	gpuDevicePaths := flag.String("gpu-device-paths", "{}", "Resolved destination GPU UUID to device path JSON")
+	gpuMountAliases := flag.String("gpu-mount-aliases", "{}", "Checkpoint path to destination GPU path JSON")
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
 	targetPodIP := flag.String("target-pod-ip", "", "Restore pod IP for CRIU TCP socket remapping")
 	bundleDir := flag.String("bundle-dir", nsmount.SnapshotBinDst, "Path where the agent binary bundle is mounted in this namespace")
@@ -45,7 +45,7 @@ func main() {
 		BundleDir:      *bundleDir,
 	}
 
-	if err := json.Unmarshal([]byte(*gpuDevicePaths), &opts.GPUDevicePaths); err != nil {
+	if err := json.Unmarshal([]byte(*gpuMountAliases), &opts.GPUMountAliases); err != nil {
 		fatal(log, err, "invalid GPU device paths")
 	}
 	result, err := executor.RestoreInNamespace(context.Background(), opts, log)

@@ -38,6 +38,44 @@ type RestoreMounter interface {
 	MountPageBroker(ctx context.Context, namespaceMount nsmount.MountPoint, stagingPath string) (nsmount.MountPoint, error)
 }
 
+// inspectGPUCompatibility resolves aliases before checking mounts, and returns
+// exactly the plan nsrestore will apply. It does not mutate the source manifest.
+func inspectGPUCompatibility(log logr.Logger, manifest *types.CheckpointManifest, target compat.GPUInfo,
+	targetRoot, imageID string, skip bool, resolvePaths func() (map[string]string, error),
+) (string, map[string]string, error) {
+	var uuids []string
+	for _, device := range target.Devices {
+		uuids = append(uuids, device.UUID)
+	}
+	var deviceMap string
+	var aliases map[string]string
+	// Let the compatibility gate report count mismatches before positional pairing.
+	if len(uuids) > 0 && len(uuids) == len(manifest.CUDA.SourceGPUUUIDs) {
+		var err error
+		deviceMap, err = cuda.BuildDeviceMap(manifest.CUDA.SourceGPUUUIDs, uuids, log)
+		if err != nil {
+			return "", nil, err
+		}
+		if len(manifest.CUDA.DevicePaths) > 0 {
+			paths, err := resolvePaths()
+			if err != nil {
+				return "", nil, err
+			}
+			aliases, err = criu.GPUMountAliases(manifest, deviceMap, paths)
+			if err != nil {
+				return "", nil, err
+			}
+		}
+	}
+	if err := inspectCompatibility(log, manifest, target, aliases, targetRoot, imageID, skip); err != nil {
+		return "", nil, err
+	}
+	if len(uuids) != len(manifest.CUDA.SourceGPUUUIDs) {
+		return "", nil, fmt.Errorf("source and target GPU counts differ")
+	}
+	return deviceMap, aliases, nil
+}
+
 // RestoreCleanupError reports a successful restore whose cleanup did not fully
 // complete. The controller logs it, emits a warning event, and completes restore.
 type RestoreCleanupError struct {
@@ -339,38 +377,24 @@ func inspectRestore(
 		cgroupRoot = ""
 	}
 
-	var gpuDevicePaths map[string]string
 	targetRoot := fmt.Sprintf("%s/%d/root", snapshotruntime.HostProcPath, placeholderPID)
 
 	var (
-		targetGPUs        compat.GPUInfo
-		targetGPUUUIDs    []string
-		discoverDuration  time.Duration
-		deviceMapDuration time.Duration
+		targetGPUs       compat.GPUInfo
+		targetGPUUUIDs   []string
+		discoverDuration time.Duration
 	)
 	if !manifest.CUDA.IsEmpty() {
 		if len(manifest.CUDA.SourceGPUUUIDs) == 0 {
 			return nil, 0, fmt.Errorf("missing source GPU UUIDs in checkpoint manifest")
 		}
 		discoverStart := time.Now()
+		var env []string
 		if ociSpec != nil && ociSpec.Process != nil {
-			targetGPUs, err = cuda.ResolveVisibleGPUs(ctx, ociSpec.Process.Env)
-			if err != nil {
-				return nil, 0, err
-			}
+			env = ociSpec.Process.Env
 		}
-		if len(targetGPUs.Devices) == 0 {
-			targetGPUs, err = cuda.DiscoverGPUs(
-				ctx,
-				req.Clientset,
-				req.PodName,
-				req.PodNamespace,
-				req.DestinationContainerName,
-				snapshotruntime.HostProcPath,
-				placeholderPID,
-				log,
-			)
-		}
+		targetGPUs, err = cuda.DiscoverGPUs(ctx, req.Clientset, req.PodName, req.PodNamespace,
+			req.DestinationContainerName, snapshotruntime.HostProcPath, placeholderPID, env, log)
 		discoverDuration = time.Since(discoverStart)
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to get target GPU UUIDs: %w", err)
@@ -380,44 +404,24 @@ func inspectRestore(
 		}
 	}
 
-	// Ahead of BuildDeviceMap, whose positional pairing turns a GPU difference
-	// into a device-map error that names neither GPU.
-	if err := inspectCompatibility(log, manifest, targetGPUs, gpuDevicePaths, targetRoot, targetImageID, req.SkipCompatCheck); err != nil {
+	deviceMapStart := time.Now()
+	cudaDeviceMap, gpuMountAliases, err := inspectGPUCompatibility(
+		log, manifest, targetGPUs, targetRoot, targetImageID, req.SkipCompatCheck,
+		func() (map[string]string, error) {
+			return cuda.ResolveDevicePaths(snapshotruntime.HostProcPath, placeholderPID, targetGPUUUIDs)
+		},
+	)
+	if err != nil {
 		return nil, 0, err
 	}
-
-	// Only reachable with the gate skipped: with it on, a target discovery read
-	// as having no GPUs is a count refusal, and one it could not read at all
-	// failed above.
-	if !manifest.CUDA.IsEmpty() && len(targetGPUUUIDs) == 0 {
-		return nil, 0, fmt.Errorf("missing target GPU UUIDs for %s/%s container %s", req.PodNamespace, req.PodName, req.DestinationContainerName)
-	}
-
-	cudaDeviceMap := ""
-	if len(targetGPUUUIDs) > 0 {
-		deviceMapStart := time.Now()
-		cudaDeviceMap, err = cuda.BuildDeviceMap(manifest.CUDA.SourceGPUUUIDs, targetGPUUUIDs, log)
-		deviceMapDuration = time.Since(deviceMapStart)
-		if err != nil {
-			return nil, 0, fmt.Errorf("failed to build CUDA device map: %w", err)
-		}
-		gpuDevicePaths, err = cuda.ResolveDevicePaths(snapshotruntime.HostProcPath, placeholderPID, targetGPUUUIDs)
-		if err != nil {
-			return nil, 0, err
-		}
-		log.V(1).Info("GPU UUIDs for device map",
-			"source_uuids", manifest.CUDA.SourceGPUUUIDs,
-			"target_uuids", targetGPUUUIDs,
-			"device_map", cudaDeviceMap,
-		)
-	}
+	deviceMapDuration := time.Since(deviceMapStart)
 
 	return &types.RestoreContainerSnapshot{
-		PlaceholderPID: placeholderPID,
-		TargetRoot:     targetRoot,
-		CgroupRoot:     cgroupRoot,
-		CUDADeviceMap:  cudaDeviceMap,
-		GPUDevicePaths: gpuDevicePaths,
+		PlaceholderPID:  placeholderPID,
+		TargetRoot:      targetRoot,
+		CgroupRoot:      cgroupRoot,
+		CUDADeviceMap:   cudaDeviceMap,
+		GPUMountAliases: gpuMountAliases,
 	}, discoverDuration + deviceMapDuration, nil
 }
 
@@ -428,10 +432,14 @@ func inspectRestore(
 // Only a path that is definitely absent is left out. Any other stat failure is
 // this agent failing to look rather than the pod missing a volume, and reporting
 // it as missing would refuse a restore that would have worked.
-func existingMountPaths(targetRoot string, destinations []string) []string {
+func existingMountPaths(targetRoot string, destinations []string, aliases map[string]string) []string {
 	existing := make([]string, 0, len(destinations))
 	for _, destination := range destinations {
-		if _, err := os.Stat(filepath.Join(targetRoot, destination)); !os.IsNotExist(err) {
+		path := destination
+		if alias, ok := aliases[path]; ok {
+			path = alias
+		}
+		if _, err := os.Stat(filepath.Join(targetRoot, path)); !os.IsNotExist(err) {
 			existing = append(existing, destination)
 		}
 	}
@@ -497,12 +505,12 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	if snap.CUDADeviceMap != "" {
 		args = append(args, "--cuda-device-map", snap.CUDADeviceMap)
 	}
-	if len(snap.GPUDevicePaths) > 0 {
-		paths, err := json.Marshal(snap.GPUDevicePaths)
+	if len(snap.GPUMountAliases) > 0 {
+		paths, err := json.Marshal(snap.GPUMountAliases)
 		if err != nil {
 			return nil, err
 		}
-		args = append(args, "--gpu-device-paths", string(paths))
+		args = append(args, "--gpu-mount-aliases", string(paths))
 	}
 	if snap.CgroupRoot != "" {
 		args = append(args, "--cgroup-root", snap.CgroupRoot)
