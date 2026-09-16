@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-License-Identifier: Apache-2.0
+
+# Build from agent/ so the worker shares the native helper's transfer contracts.
+# Only public driver headers and link stubs are used; runtime libcuda comes from
+# the NVIDIA container runtime, not from this image.
+ARG CUDA_HEADERS_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04@sha256:edd686dcb3e87806dfc869623ccb0a7e62c0d09bd720a82014c23efcecc8d9a2
+FROM ${CUDA_HEADERS_IMAGE} AS headers
+FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254 AS build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential pkg-config libprotobuf-dev protobuf-compiler libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=headers /usr/local/cuda/include/ /opt/cuda/include/
+COPY --from=headers /usr/local/cuda/lib64/stubs/ /opt/cuda/lib64/stubs/
+WORKDIR /src
+COPY pagebroker/ pagebroker/
+COPY cmd/cuda-checkpoint-helper/ cmd/cuda-checkpoint-helper/
+RUN make -C pagebroker daemon allocation-worker CUDA_ROOT=/opt/cuda
+
+FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254
+RUN apt-get update && apt-get install -y --no-install-recommends libprotobuf32t64 libssl3t64 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/pagebroker/pagebroker /usr/local/bin/pagebroker
+COPY --from=build /src/pagebroker/build/pagebroker-allocation-worker /usr/local/bin/pagebroker-allocation-worker
+ENTRYPOINT ["/usr/local/bin/pagebroker"]
