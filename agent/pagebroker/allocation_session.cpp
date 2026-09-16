@@ -143,20 +143,27 @@ AllocationSession::AllocationSession(std::shared_ptr<Transaction> transaction,
           "allocation transaction is not staged");
   Require(!transaction_->allocation_participants.contains(binding.participant_id()), "participant already bound");
   Path staging;
+  FileDescriptor root(-1);
   if (binding.direction() == v1::BindAllocationSession::SAVE) {
     const auto* descriptor = std::get_if<CheckpointTransactionDescriptor>(&transaction_->descriptor());
     Require(descriptor != nullptr, "save requires checkpoint transaction");
     staging = descriptor->staging_directory();
   } else {
-    const auto* descriptor = std::get_if<RestoreTransactionDescriptor>(&transaction_->descriptor());
-    Require(descriptor != nullptr, "load requires restore transaction");
-    staging = descriptor->staging_directory();
+    if (const auto* direct = std::get_if<DirectRestoreDescriptor>(&transaction_->descriptor())) {
+      root = FileDescriptor(fcntl(direct->source_directory.get(), F_DUPFD_CLOEXEC, 0));
+      Check(root.get(), "retain direct allocation source");
+    } else {
+      const auto* descriptor = std::get_if<RestoreTransactionDescriptor>(&transaction_->descriptor());
+      Require(descriptor != nullptr, "load requires restore transaction");
+      staging = descriptor->staging_directory();
+    }
   }
   // A failed bind after creating filesystem state must also prevent Commit.
   // This mutex excludes other admissions until setup has either succeeded or
   // left this sticky failure behind. Abort remains available.
   transaction_->allocation_failed = true;
-  FileDescriptor root(open(staging.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+  if (root.get() < 0)
+    root = FileDescriptor(open(staging.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
   Check(root.get(), "open allocation staging root");
   if (binding.direction() == v1::BindAllocationSession::SAVE) {
     if (mkdirat(root.get(), "allocations", 0700) < 0 && errno != EEXIST)
