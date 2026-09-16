@@ -121,11 +121,11 @@ bool BuildTransferChunks(size_t extent_size, const StorageLayout &storage,
 
   std::set<std::filesystem::path> paths;
   for (const auto &file : storage.files) {
-    if (file.path.empty() || !file.path.is_absolute() || file.size == 0) {
+    if (file.size == 0 || (file.descriptor_fd < 0 && (file.path.empty() || !file.path.is_absolute()))) {
       *error = "storage files must have absolute paths and nonzero sizes";
       return false;
     }
-    if (!paths.insert(file.path.lexically_normal()).second) {
+    if (file.descriptor_fd < 0 && !paths.insert(file.path.lexically_normal()).second) {
       *error = "storage file paths must be unique";
       return false;
     }

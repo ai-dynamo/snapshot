@@ -38,6 +38,9 @@ struct TransferOptions {
 struct StorageFile {
   std::filesystem::path path;
   size_t size = 0;
+  // Borrowed, broker-opened descriptor. Transfer adapters duplicate it and
+  // never resolve a path supplied by the workload.
+  int descriptor_fd = -1;
 };
 
 struct StorageRange {

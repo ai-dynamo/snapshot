@@ -20,10 +20,11 @@ int
 main(int argc, char** argv)
 {
   size_t max_concurrent_requests;
-  if (argc != 6 || std::string_view(argv[4]) != "--max-concurrent-requests" ||
+  if ((argc != 6 && argc != 8) || std::string_view(argv[4]) != "--max-concurrent-requests" ||
+      (argc == 8 && std::string_view(argv[6]) != "--allocation-worker") ||
       !ParseMaxConcurrentRequests(argv[5], max_concurrent_requests)) {
-    std::cerr << "usage: pagebroker socket_path staging_directory storage_root --max-concurrent-requests max_concurrent_requests\n";
+    std::cerr << "usage: pagebroker socket_path staging_directory storage_root --max-concurrent-requests count [--allocation-worker absolute_path]\n";
     return static_cast<int>(ExitCode::INVALID_ARGUMENTS);
   }
-  return static_cast<int>(RunDaemon(argv[1], argv[2], argv[3], max_concurrent_requests));
+  return static_cast<int>(RunDaemon(argv[1], argv[2], argv[3], max_concurrent_requests, argc == 8 ? argv[7] : ""));
 }
