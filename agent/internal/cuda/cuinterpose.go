@@ -206,9 +206,46 @@ func PrepareCuinterpose(
 	namespacePIDs []int,
 	coordinatorBinaryPath string,
 	log logr.Logger,
+	sessions ...AllocationSessions,
 ) ([]CoordinatorPhase, error) {
+	cmd, closeFiles, err := prepareCoordinatorCommand(ctx, "prepare", checkpointDir, procRoot, targetPID, observedPIDs, namespacePIDs, coordinatorBinaryPath)
+	if err != nil {
+		return nil, err
+	}
+	defer closeFiles()
+	if len(sessions) != 0 {
+		sessions[0].AppendTo(cmd)
+	}
+	return executeCoordinator(cmd, coordinatorBinaryPath, "--prepare", log)
+}
+
+// IdentifyCuinterpose validates live topology without mutation in the same
+// pinned namespace environment as prepare.
+func IdentifyCuinterpose(ctx context.Context, checkpointDir, procRoot string, targetPID int, observedPIDs, namespacePIDs []int, binary string) ([]string, error) {
+	cmd, closeFiles, err := prepareCoordinatorCommand(ctx, "identify", checkpointDir, procRoot, targetPID, observedPIDs, namespacePIDs, binary)
+	if err != nil {
+		return nil, err
+	}
+	defer closeFiles()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("identify cuinterpose: %w: %s", err, stderr.String())
+	}
+	var ids []string
+	if err := json.Unmarshal(output, &ids); err != nil {
+		return nil, err
+	}
+	if len(ids) != len(namespacePIDs) {
+		return nil, fmt.Errorf("cuinterpose participant/PID count differs")
+	}
+	return ids, nil
+}
+
+func prepareCoordinatorCommand(ctx context.Context, operation, checkpointDir, procRoot string, targetPID int, observedPIDs, namespacePIDs []int, coordinatorBinaryPath string) (*exec.Cmd, func(), error) {
 	if targetPID <= 0 {
-		return nil, fmt.Errorf("invalid cuinterpose target PID %d", targetPID)
+		return nil, nil, fmt.Errorf("invalid cuinterpose target PID %d", targetPID)
 	}
 
 	const (
@@ -222,7 +259,7 @@ func PrepareCuinterpose(
 		rootFD       = 10
 	)
 	args, err := cuinterposeArgs(
-		"prepare",
+		operation,
 		fmt.Sprintf("/proc/self/fd/%d", checkpointFD),
 		"",
 		podcontract.SnapshotControlMountPath,
@@ -230,15 +267,15 @@ func PrepareCuinterpose(
 		namespacePIDs,
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	files := make([]*os.File, 0, 8)
-	defer func() {
+	closeFiles := func() {
 		for _, file := range files {
 			_ = file.Close()
 		}
-	}()
+	}
 	for _, path := range []string{
 		coordinatorBinaryPath,
 		checkpointDir,
@@ -251,7 +288,8 @@ func PrepareCuinterpose(
 	} {
 		file, err := os.Open(path)
 		if err != nil {
-			return nil, fmt.Errorf("open cuinterpose prepare input %q: %w", path, err)
+			closeFiles()
+			return nil, nil, fmt.Errorf("open cuinterpose prepare input %q: %w", path, err)
 		}
 		files = append(files, file)
 	}
@@ -272,7 +310,7 @@ func PrepareCuinterpose(
 	nsenterArgs = append(nsenterArgs, args...)
 	cmd := exec.CommandContext(ctx, "nsenter", nsenterArgs...)
 	cmd.ExtraFiles = files
-	return executeCoordinator(cmd, coordinatorBinaryPath, args[0], log)
+	return cmd, closeFiles, nil
 }
 
 // RestoreCuinterpose runs from nsrestore, which already occupies the restored
@@ -285,12 +323,26 @@ func RestoreCuinterpose(
 	namespacePIDs []int,
 	coordinatorBinaryPath string,
 	log logr.Logger,
+	sessions ...AllocationSessions,
 ) ([]CoordinatorPhase, error) {
 	args, err := cuinterposeArgs("restore", checkpointDir, "", podcontract.SnapshotControlMountPath, observedPIDs, namespacePIDs)
 	if err != nil {
 		return nil, err
 	}
 	cmd := exec.CommandContext(ctx, coordinatorBinaryPath, args...)
+	if len(sessions) != 0 {
+		// Pin the executable into its own child slot before appending sessions:
+		// nsrestore's /proc/self/fd/N may otherwise be overwritten by ExtraFiles.
+		binary, err := os.Open(coordinatorBinaryPath)
+		if err != nil {
+			return nil, err
+		}
+		defer binary.Close()
+		cmd.Path = "/proc/self/fd/3"
+		cmd.Args[0] = cmd.Path
+		cmd.ExtraFiles = []*os.File{binary}
+		sessions[0].AppendTo(cmd)
+	}
 	return executeCoordinator(cmd, coordinatorBinaryPath, args[0], log)
 }
 

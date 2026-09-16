@@ -24,6 +24,15 @@ const ldPreloadEnv = "LD_PRELOAD"
 // through CuinterposeAnnotation. An absent annotation disables it; any value
 // other than "enabled" is an error rather than a silent no.
 func CuinterposeEnabled(annotations map[string]string) (bool, error) {
+	switch storage := annotations[CuinterposeAllocationStorageAnnotation]; storage {
+	case "", "host-carrier":
+	case "pagebroker":
+		if annotations[CuinterposeAnnotation] != CuinterposeAnnotationEnabled {
+			return false, fmt.Errorf("%s requires enabled cuinterpose", CuinterposeAllocationStorageAnnotation)
+		}
+	default:
+		return false, fmt.Errorf("unsupported %s %q", CuinterposeAllocationStorageAnnotation, storage)
+	}
 	raw, found := annotations[CuinterposeAnnotation]
 	if !found {
 		return false, nil

@@ -57,6 +57,14 @@ pub enum Operation {
     RestoreMulticastBindings,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ContentStorage {
+    #[default]
+    HostCarrier,
+    Pagebroker,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Request {
@@ -67,6 +75,8 @@ pub enum Request {
     Execute {
         participant: ParticipantId,
         operation: Operation,
+        #[serde(default)]
+        content_storage: ContentStorage,
     },
     Export {
         participant: ParticipantId,

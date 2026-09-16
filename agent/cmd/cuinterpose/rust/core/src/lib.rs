@@ -12,6 +12,7 @@ mod driver;
 mod export_cache;
 mod host_carrier;
 mod multicast;
+mod pagebroker;
 mod process;
 mod state;
 mod ticket;

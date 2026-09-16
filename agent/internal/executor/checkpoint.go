@@ -66,7 +66,8 @@ type CheckpointRequest struct {
 	CUDAToolsDelivered bool
 	// CuinterposeRequested is the source Pod's nvidia.com/cuinterpose opt-in.
 	// Detection is checked against it and it is recorded in the manifest.
-	CuinterposeRequested bool
+	CuinterposeRequested         bool
+	CuinterposeAllocationStorage string
 }
 
 type checkpointPhaseTimings struct {
@@ -90,6 +91,15 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		return fmt.Errorf("resolve checkpoint artifact path: %w", err)
 	}
 	brokered := req.PageBrokerRequested && cfg.PageBroker.Enabled
+	switch req.CuinterposeAllocationStorage {
+	case "", "host-carrier":
+	case "pagebroker":
+		if !brokered || !req.CuinterposeRequested {
+			return fmt.Errorf("PageBroker allocation storage requires cuinterpose and an enabled PageBroker transaction")
+		}
+	default:
+		return fmt.Errorf("unknown cuinterpose allocation storage %q", req.CuinterposeAllocationStorage)
+	}
 	transactionID := uuid.NewString()
 	var broker pagebroker.Client
 	committed := false
@@ -100,7 +110,7 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 			if !committed {
 				abortCtx, cancel := context.WithTimeout(context.Background(), pageBrokerAbortTimeout)
 				defer cancel()
-				if err := broker.Abort(abortCtx, transactionID); err != nil {
+				if err := broker.AbortDrained(abortCtx, transactionID); err != nil {
 					retErr = errors.Join(retErr, fmt.Errorf("abort PageBroker checkpoint %q: %w", transactionID, err))
 				}
 			}
@@ -145,7 +155,19 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		return err
 	}
 
-	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log)
+	var sessions cuda.AllocationSessions
+	if req.CuinterposeAllocationStorage == "pagebroker" {
+		ids, err := cuda.IdentifyCuinterpose(ctx, tmpDir, snapshotruntime.HostProcPath, state.PID, state.CUDAHostPIDs, state.CUDANSPIDs, cuda.DefaultCoordinatorBinaryPath)
+		if err != nil {
+			return err
+		}
+		sessions, err = cuda.BindAllocationSessions(ctx, broker, transactionID, ids, pagebroker.BindAllocationSession_SAVE)
+		if err != nil {
+			return err
+		}
+		defer sessions.Close()
+	}
+	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, sessions)
 	if err != nil {
 		return checkpointNeedsSourceKill(err)
 	}
@@ -339,6 +361,7 @@ func configureCheckpoint(
 	}
 	m.CUDATools.Delivered = req.CUDAToolsDelivered
 	m.Cuinterpose.Requested = req.CuinterposeRequested
+	m.Cuinterpose.AllocationStorage = req.CuinterposeAllocationStorage
 
 	if err := types.WriteManifest(checkpointDir, m); err != nil {
 		return nil, nil, fmt.Errorf("failed to write checkpoint manifest: %w", err)
@@ -347,7 +370,7 @@ func configureCheckpoint(
 	return criuOpts, m, nil
 }
 
-func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger) (*checkpointPhaseTimings, error) {
+func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger, sessions ...cuda.AllocationSessions) (*checkpointPhaseTimings, error) {
 	timings := &checkpointPhaseTimings{}
 
 	// CUDA lock+checkpoint must happen before CRIU dump
@@ -367,7 +390,11 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 				state.CUDANSPIDs,
 				cuda.DefaultCoordinatorBinaryPath,
 				log,
+				sessions...,
 			)
+			for _, session := range sessions {
+				session.Close()
+			}
 			timings.CuinterposePrepareDuration = time.Since(prepareStart)
 			if err != nil {
 				return nil, fmt.Errorf("prepare cuinterpose: %w", err)

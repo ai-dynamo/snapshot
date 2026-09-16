@@ -51,6 +51,8 @@ type CuinterposeManifest struct {
 	// the state file. Restore then runs the coordinator, and a missing state
 	// file is an error rather than a plain restore.
 	Prepared bool `yaml:"prepared"`
+	// Empty means host-carrier for artifacts predating external content storage.
+	AllocationStorage string `yaml:"allocationStorage,omitempty"`
 }
 
 // CUDAToolsManifest is the restore side's source of truth for the tools mount.

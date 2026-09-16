@@ -108,7 +108,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		if transactionID != "" && !committed {
 			abortCtx, cancel := context.WithTimeout(context.Background(), pageBrokerAbortTimeout)
 			defer cancel()
-			_ = broker.Abort(abortCtx, transactionID)
+			retErr = errors.Join(retErr, broker.AbortDrained(abortCtx, transactionID))
 		}
 	}()
 
@@ -152,6 +152,13 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if err := requireCuinterposeState(manifest, artifactPath); err != nil {
 		return 0, err
 	}
+	if manifest.Cuinterpose.AllocationStorage == "pagebroker" {
+		if !req.PageBrokerEnabled {
+			return 0, fmt.Errorf("checkpoint requires PageBroker allocation storage")
+		}
+		// Captured storage ownership is authoritative, not the restore Pod's annotation.
+		brokered = true
+	}
 
 	snap, gpuDeviceMapDuration, err := inspectRestore(ctx, rt, log, req, manifest)
 	if err != nil {
@@ -180,6 +187,18 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		}
 		stagedPath = staged
 	}
+	var sessions cuda.AllocationSessions
+	if manifest.Cuinterpose.AllocationStorage == "pagebroker" {
+		ids, err := cuda.CapturedParticipants(ctx, stagedPath, manifest.CUDA.PIDs)
+		if err != nil {
+			return 0, err
+		}
+		sessions, err = cuda.BindAllocationSessions(ctx, broker, transactionID, ids, pagebroker.BindAllocationSession_LOAD)
+		if err != nil {
+			return 0, err
+		}
+		defer sessions.Close()
+	}
 	mountStart := time.Now()
 	inputMounts, containerCheckpointPath, err := mountRestoreInputs(
 		ctx, mounts, manifest.CUDATools.Delivered, bundleMount, artifactPath, stagedPath)
@@ -191,7 +210,8 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		pageBrokerMountDuration = time.Since(mountStart)
 	}
 
-	result, err := execNSRestore(ctx, log, req, snap, bundleMount, containerCheckpointPath)
+	result, err := execNSRestore(ctx, log, req, snap, bundleMount, containerCheckpointPath, sessions)
+	sessions.Close()
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
 	}
@@ -435,7 +455,7 @@ func existingMountPaths(targetRoot string, destinations []string) []string {
 //     container. Binaries that nsrestore subsequently loads (criu, ip, tar, .so
 //     files) are still resolved by PATH/LD_LIBRARY_PATH inside the container's
 //     mount namespace.
-func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot, mp nsmount.MountPoint, checkpointPath string) (*RestoreInNamespaceResult, error) {
+func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot, mp nsmount.MountPoint, checkpointPath string, sessions ...cuda.AllocationSessions) (*RestoreInNamespaceResult, error) {
 
 	// Open nsrestore from the agent host side before entering the container
 	// namespace, so the binary fd is immune to rename attacks inside the container.
@@ -509,6 +529,18 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	cmd.Env = os.Environ()
 	cmd.ExtraFiles = []*os.File{nsFd, binaryFile, rootFile}
 	cmd.ExtraFiles = append(cmd.ExtraFiles, namespaceFiles...)
+	if len(sessions) != 0 && sessions[0] != nil {
+		inherited := make(map[string]int, len(sessions[0]))
+		for id, file := range sessions[0] {
+			inherited[id] = 3 + len(cmd.ExtraFiles)
+			cmd.ExtraFiles = append(cmd.ExtraFiles, file)
+		}
+		encoded, err := json.Marshal(inherited)
+		if err != nil {
+			return nil, err
+		}
+		cmd.Args = append(cmd.Args, "--allocation-sessions", string(encoded))
+	}
 	log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())
 
 	var stdout bytes.Buffer

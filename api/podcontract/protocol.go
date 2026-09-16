@@ -32,6 +32,9 @@ const (
 	// CuinterposeAnnotationEnabled. Snapshot supplies and mounts the shim in
 	// every checkpoint target; this annotation only adds it to LD_PRELOAD.
 	CuinterposeAnnotation = "nvidia.com/cuinterpose"
+	// CuinterposeAllocationStorageAnnotation selects external allocation content.
+	// It does not change which allocations belong to cuinterpose.
+	CuinterposeAllocationStorageAnnotation = "nvidia.com/cuinterpose-allocation-storage"
 
 	// CuinterposeAnnotationEnabled is the only accepted CuinterposeAnnotation value.
 	CuinterposeAnnotationEnabled = "enabled"

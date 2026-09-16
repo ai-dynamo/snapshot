@@ -82,6 +82,7 @@ macro_rules! functions {
 }
 
 functions! {
+    cuDeviceGetUuid(uuid: *mut cudarc::driver::sys::CUuuid, device: Device);
     cuCtxGetCurrent(context: *mut *mut c_void);
     cuCtxGetDevice(device: *mut Device);
     cuCtxSetCurrent(context: *mut c_void);

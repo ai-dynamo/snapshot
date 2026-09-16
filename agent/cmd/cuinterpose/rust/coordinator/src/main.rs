@@ -10,9 +10,12 @@ mod topology;
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
 use cuinterpose_protocol::{
-    self as protocol, Operation, Participant, ParticipantId, Reply, Request, Response,
+    self as protocol, ContentStorage, Operation, Participant, ParticipantId, Reply, Request,
+    Response,
 };
 use report::{Event, Transfer, write as report};
+use std::collections::BTreeMap;
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::net::{SocketAddr, UnixStream};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -20,10 +23,18 @@ use topology::Allocation;
 
 #[derive(Parser)]
 struct Arguments {
-    #[arg(long, required_unless_present = "restore", conflicts_with = "restore")]
+    #[arg(long, group = "action")]
     prepare: bool,
-    #[arg(long)]
+    #[arg(long, group = "action")]
     restore: bool,
+    #[arg(long, group = "action")]
+    identify: bool,
+    #[arg(long, group = "action")]
+    state_participants: bool,
+    #[arg(long, value_parser = ["host-carrier", "pagebroker"], default_value = "host-carrier")]
+    content_storage: String,
+    #[arg(long, num_args = 2, action = clap::ArgAction::Append)]
+    allocation_session: Vec<String>,
     #[arg(long)]
     proc_root: String,
     #[arg(long)]
@@ -38,6 +49,8 @@ struct Arguments {
 struct Peer {
     endpoint: String,
     id: ParticipantId,
+    session: Option<OwnedFd>,
+    storage: ContentStorage,
 }
 
 struct Inspection {
@@ -47,7 +60,7 @@ struct Inspection {
 }
 
 // Transport errors retain their cause; remote refusals are application errors.
-fn exchange(endpoint: &str, request: &Request) -> Result<Response> {
+fn exchange(endpoint: &str, request: &Request, descriptor: Option<&OwnedFd>) -> Result<Response> {
     let socket = UnixStream::connect(endpoint)
         .with_context(|| format!("{endpoint}: {request:?}: connect failed"))?;
     let operation = match request {
@@ -61,7 +74,7 @@ fn exchange(endpoint: &str, request: &Request) -> Result<Response> {
     socket
         .set_write_timeout(timeout)
         .with_context(|| format!("{endpoint}: {request:?}: set write timeout failed"))?;
-    protocol::send(&socket, request, None)
+    protocol::send(&socket, request, descriptor)
         .with_context(|| format!("{endpoint}: {request:?}: send failed"))?;
     let (response, fd): (Response, _) = protocol::receive(&socket)
         .with_context(|| format!("{endpoint}: {request:?}: receive failed"))?;
@@ -74,7 +87,7 @@ fn exchange(endpoint: &str, request: &Request) -> Result<Response> {
 
 impl Peer {
     fn identify(endpoint: String) -> Result<Self> {
-        let response = exchange(&endpoint, &Request::Handshake)?;
+        let response = exchange(&endpoint, &Request::Handshake, None)?;
         ensure!(
             matches!(
                 response.result.map_err(anyhow::Error::msg)?,
@@ -85,6 +98,8 @@ impl Peer {
         Ok(Self {
             endpoint,
             id: response.participant,
+            session: None,
+            storage: ContentStorage::HostCarrier,
         })
     }
 
@@ -94,6 +109,7 @@ impl Peer {
             &Request::Inspect {
                 participant: self.id,
             },
+            None,
         )?;
         ensure!(
             response.participant == self.id,
@@ -117,13 +133,20 @@ impl Peer {
         }
     }
 
-    fn execute(&self, operation: Operation, expected_bytes: u64) -> Result<u32> {
+    fn execute(
+        &self,
+        operation: Operation,
+        expected_bytes: u64,
+        session: Option<OwnedFd>,
+    ) -> Result<u32> {
         let response = exchange(
             &self.endpoint,
             &Request::Execute {
                 participant: self.id,
                 operation,
+                content_storage: self.storage,
             },
+            session.as_ref(),
         )?;
         ensure!(
             response.participant == self.id,
@@ -146,10 +169,22 @@ impl Peer {
 
 /// Join every started exchange, including when one participant fails. A phase
 /// cannot advance until every rank has replied; a bounded worker pool is unsafe.
-fn command_all(peers: &[Peer], operation: Operation, allocations: &[Allocation]) -> Result<u32> {
+fn command_all(
+    peers: &mut [Peer],
+    operation: Operation,
+    allocations: &[Allocation],
+) -> Result<u32> {
     std::thread::scope(|scope| {
         let mut jobs = Vec::with_capacity(peers.len());
         for peer in peers {
+            let session = if matches!(
+                operation,
+                Operation::SaveAllocations | Operation::LoadAllocations
+            ) {
+                peer.session.take()
+            } else {
+                None
+            };
             let bytes = allocations
                 .iter()
                 .filter(|a| a.preserve_content && a.creator == peer.id)
@@ -158,7 +193,7 @@ fn command_all(peers: &[Peer], operation: Operation, allocations: &[Allocation])
                 })?;
             jobs.push(
                 std::thread::Builder::new()
-                    .spawn_scoped(scope, move || peer.execute(operation, bytes))?,
+                    .spawn_scoped(scope, move || peer.execute(operation, bytes, session))?,
             );
         }
         let mut longest = 0;
@@ -193,7 +228,7 @@ fn inspect(peers: &[Peer]) -> Result<(Vec<Participant>, u64, u64)> {
     Ok((participants, raw, unsupported))
 }
 
-fn transfer(peers: &[Peer], operation: Operation, allocations: &[Allocation]) -> Result<()> {
+fn transfer(peers: &mut [Peer], operation: Operation, allocations: &[Allocation]) -> Result<()> {
     let start = Instant::now();
     let copy_us = command_all(peers, operation, allocations).context("allocation transfer")?;
     let (count, bytes) =
@@ -229,15 +264,28 @@ fn transfer(peers: &[Peer], operation: Operation, allocations: &[Allocation]) ->
 fn run() -> Result<()> {
     let args = Arguments::parse();
     ensure!(
+        args.prepare || args.restore || args.identify || args.state_participants,
+        "an action is required"
+    );
+    ensure!(
         args.control_dir.starts_with('/'),
         "--control-dir must be an absolute path"
     );
     let path = args.checkpoint_dir.join("cuinterpose.state");
-    let mut expected = if args.prepare {
+    let mut expected = if args.prepare || args.identify {
         Vec::new()
     } else {
         state::read(&path).with_context(|| format!("cannot parse {}", path.display()))?
     };
+    if args.state_participants {
+        topology::validate(&expected)?;
+        let ids: Vec<_> = expected
+            .iter()
+            .map(|participant| participant.id.to_string())
+            .collect();
+        serde_json::to_writer(std::io::stdout().lock(), &ids)?;
+        return Ok(());
+    }
     let start = Instant::now();
     let mut peers = Vec::with_capacity(args.processes.len() / 2);
     for process in args.processes.chunks_exact(2) {
@@ -254,6 +302,49 @@ fn run() -> Result<()> {
         SocketAddr::from_pathname(&endpoint)?;
         peers.push(Peer::identify(endpoint)?);
     }
+    if args.identify {
+        let (participants, raw, unsupported) = inspect(&peers)?;
+        ensure!(
+            raw == 0 && unsupported == 0,
+            "unsupported CUDA sharing state"
+        );
+        topology::validate(&participants)?;
+        let ids: Vec<_> = peers.iter().map(|peer| peer.id.to_string()).collect();
+        serde_json::to_writer(std::io::stdout().lock(), &ids)?;
+        return Ok(());
+    }
+    let storage = if args.content_storage == "pagebroker" {
+        ContentStorage::Pagebroker
+    } else {
+        ContentStorage::HostCarrier
+    };
+    let mut sessions = BTreeMap::new();
+    let mut seen_fds = std::collections::BTreeSet::new();
+    for pair in args.allocation_session.chunks_exact(2) {
+        let id: ParticipantId = pair[0].parse()?;
+        let fd: i32 = pair[1].parse()?;
+        ensure!(
+            fd >= 3 && seen_fds.insert(fd) && !sessions.contains_key(&id),
+            "duplicate or invalid session capability"
+        );
+        // These descriptors are explicitly inherited from the trusted agent.
+        let descriptor = unsafe { OwnedFd::from_raw_fd(fd) };
+        rustix::io::fcntl_setfd(&descriptor, rustix::io::FdFlags::CLOEXEC)?;
+        sessions.insert(id, descriptor);
+    }
+    for peer in &mut peers {
+        peer.storage = storage;
+        peer.session = sessions.remove(&peer.id);
+        ensure!(
+            peer.session.is_some() == (storage == ContentStorage::Pagebroker),
+            "missing or unexpected allocation session for {}",
+            peer.id
+        );
+    }
+    ensure!(
+        sessions.is_empty(),
+        "allocation sessions do not match participants"
+    );
     if args.prepare {
         let (mut participants, raw, unsupported) = inspect(&peers)?;
         report(
@@ -277,11 +368,11 @@ fn run() -> Result<()> {
         let allocations = topology::validate(&participants)?;
         report(Event::Validate, start, peers.len())?;
         let start = Instant::now();
-        command_all(&peers, Operation::PrepareMulticast, &[]).context("multicast teardown")?;
+        command_all(&mut peers, Operation::PrepareMulticast, &[]).context("multicast teardown")?;
         report(Event::PrepareMulticast, start, peers.len())?;
-        transfer(&peers, Operation::SaveAllocations, &allocations)?;
+        transfer(&mut peers, Operation::SaveAllocations, &allocations)?;
         let start = Instant::now();
-        command_all(&peers, Operation::PrepareUnicast, &[])?;
+        command_all(&mut peers, Operation::PrepareUnicast, &[])?;
         report(Event::PrepareUnicast, start, peers.len())?;
         let start = Instant::now();
         state::write_atomic(&path, &mut participants)?;
@@ -295,9 +386,9 @@ fn run() -> Result<()> {
         );
         let allocations = topology::validate(&expected)?;
         report(Event::Handshake, start, peers.len())?;
-        transfer(&peers, Operation::LoadAllocations, &allocations)?;
+        transfer(&mut peers, Operation::LoadAllocations, &allocations)?;
         let start = Instant::now();
-        command_all(&peers, Operation::RestoreUnicast, &[])?;
+        command_all(&mut peers, Operation::RestoreUnicast, &[])?;
         report(Event::RestoreUnicast, start, peers.len())?;
         let start = Instant::now();
         for operation in [
@@ -306,7 +397,7 @@ fn run() -> Result<()> {
             Operation::RestoreMulticastDevices,
             Operation::RestoreMulticastBindings,
         ] {
-            command_all(&peers, operation, &[])?;
+            command_all(&mut peers, operation, &[])?;
         }
         report(Event::RestoreMulticast, start, peers.len())?;
         let start = Instant::now();

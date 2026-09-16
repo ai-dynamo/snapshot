@@ -6,8 +6,8 @@
 
 use super::ticket;
 use cuinterpose_abi::*;
-use cuinterpose_protocol::Ticket;
 use cuinterpose_protocol::{AllocationId, Operation, ParticipantId, Resource, ResourceKind};
+use cuinterpose_protocol::{ContentStorage, Ticket};
 
 #[cfg(test)]
 mod tests {
@@ -110,6 +110,7 @@ mod tests {
             unsupported: 0,
             phase: Phase::Active,
             arena: None,
+            content_storage: ContentStorage::HostCarrier,
             inflight: 0,
             pending_maps: Vec::new(),
             next: 1,
@@ -200,7 +201,7 @@ pub struct Allocation {
     pub shared: bool,
     pub context: usize,
     pub checkpointed: bool,
-    pub host_checkpointed: bool,
+    pub content_saved: bool,
     pub pins: usize,
 }
 
@@ -278,6 +279,7 @@ pub struct State {
     pub unsupported: u64,
     pub phase: Phase,
     pub arena: Option<super::host_carrier::Arena>,
+    pub content_storage: ContentStorage,
     pub inflight: usize,
     pub pending_maps: Vec<(u64, usize)>,
     next: u64,
@@ -375,7 +377,12 @@ impl State {
     }
 
     /// Validation has completed without mutation. Failures here are fail-stop.
-    pub fn lifecycle(&mut self, operation: Operation) -> Result<super::host_carrier::Transfer> {
+    pub fn lifecycle(
+        &mut self,
+        operation: Operation,
+        storage: ContentStorage,
+        session: Option<std::os::fd::OwnedFd>,
+    ) -> Result<super::host_carrier::Transfer> {
         use super::host_carrier::{AllocationContent, Arena, Context};
         let next_phase = self.phase.next(operation)?;
         let selected = |a: &Allocation| {
@@ -431,7 +438,17 @@ impl State {
                             .ok_or(OUT_OF_MEMORY)?;
                         allocations.push(AllocationContent::from(&*allocation));
                     }
-                    Arena::save(&allocations)
+                    match storage {
+                        ContentStorage::HostCarrier => Arena::save(&allocations),
+                        ContentStorage::Pagebroker => {
+                            let elapsed = super::pagebroker::transfer(
+                                session.ok_or(INVALID_VALUE)?,
+                                &mut allocations,
+                                false,
+                            )?;
+                            Ok((None, elapsed))
+                        }
+                    }
                 })();
                 let (arena, elapsed) = match saved {
                     Ok(saved) => saved,
@@ -455,9 +472,10 @@ impl State {
                     }
                 };
                 self.arena = arena;
+                self.content_storage = storage;
                 copy_us = elapsed;
                 for allocation in self.allocations.values_mut().filter(|a| selected(a)) {
-                    allocation.host_checkpointed = true;
+                    allocation.content_saved = true;
                 }
             }
             Operation::PrepareUnicast => {
@@ -486,16 +504,34 @@ impl State {
                 }
             }
             Operation::LoadAllocations => {
+                if storage != self.content_storage {
+                    return Err(crate::driver::CudaError(INVALID_VALUE));
+                }
                 let mut allocations: Vec<_> = self
                     .allocations
                     .values()
-                    .filter(|a| a.host_checkpointed)
+                    .filter(|a| a.content_saved)
                     .map(AllocationContent::from)
                     .collect();
                 bytes = allocations.iter().try_fold(0u64, |sum, a| {
                     sum.checked_add(a.size as u64).ok_or(OUT_OF_MEMORY)
                 })?;
-                if let Some(arena) = &self.arena {
+                if storage == ContentStorage::Pagebroker {
+                    let loaded = super::pagebroker::transfer(
+                        session.ok_or(INVALID_VALUE)?,
+                        &mut allocations,
+                        true,
+                    );
+                    // Even failed transfers may have outstanding worker references.
+                    // Keep the fresh handles owned until fail-stop termination.
+                    for allocation in &allocations {
+                        self.allocations
+                            .get_mut(&allocation.id)
+                            .ok_or(INVALID_HANDLE)?
+                            .driver = allocation.driver;
+                    }
+                    copy_us = loaded?;
+                } else if let Some(arena) = &self.arena {
                     copy_us = arena.load(&mut allocations)?;
                 } else if !allocations.is_empty() {
                     return Err(crate::driver::CudaError(INVALID_VALUE));
@@ -592,7 +628,7 @@ impl State {
                         allocation.driver = None;
                     }
                     allocation.checkpointed = false;
-                    allocation.host_checkpointed = false;
+                    allocation.content_saved = false;
                     Ok(())
                 },
             )?;
@@ -767,6 +803,7 @@ fn initialize_generation() -> Result<()> {
         next: 1,
         phase: Phase::Active,
         arena: None,
+        content_storage: ContentStorage::HostCarrier,
         inflight: 0,
         pending_maps: Vec::new(),
     };
@@ -879,7 +916,7 @@ pub fn cuMemCreate(
         shared: false,
         context: context(),
         checkpointed: false,
-        host_checkpointed: false,
+        content_saved: false,
         pins: 0,
     };
     let logical = match state.mint(id) {
@@ -1234,7 +1271,7 @@ pub fn cuMemImportFromShareableHandle(out: *mut u64, fd: *mut c_void, kind: u32)
             shared: true,
             context: context(),
             checkpointed: false,
-            host_checkpointed: false,
+            content_saved: false,
             pins: 0,
         },
     );

@@ -6,8 +6,11 @@
 
 use super::process::Socket;
 use super::state::{self, Result};
-use cuinterpose_protocol::{self as protocol, Operation, ParticipantId, Reply, Request, Response};
+use cuinterpose_protocol::{
+    self as protocol, ContentStorage, Operation, ParticipantId, Reply, Request, Response,
+};
 use rustix::event::{PollFd, PollFlags, poll};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::Ordering;
@@ -20,7 +23,7 @@ const CONTROL_QUEUE_CAPACITY: usize = 8;
 enum ControlRequest {
     Handshake,
     Inspect,
-    Execute(Operation),
+    Execute(Operation, ContentStorage, Option<OwnedFd>),
 }
 
 pub fn start(endpoint: &str, identity: ParticipantId) -> Result<()> {
@@ -105,13 +108,25 @@ fn dispatch(
         | Request::Execute { participant, .. }
         | Request::Export { participant, .. } => *participant == identity,
     };
-    if descriptor.is_some() || !identified {
+    let external = matches!(
+        &request,
+        Request::Execute {
+            operation: Operation::SaveAllocations | Operation::LoadAllocations,
+            content_storage: ContentStorage::Pagebroker,
+            ..
+        }
+    );
+    if descriptor.is_some() != external || !identified {
         return refuse(&socket, identity, "invalid cuinterpose control request");
     }
     let request = match request {
         Request::Handshake => ControlRequest::Handshake,
         Request::Inspect { .. } => ControlRequest::Inspect,
-        Request::Execute { operation, .. } => ControlRequest::Execute(operation),
+        Request::Execute {
+            operation,
+            content_storage,
+            ..
+        } => ControlRequest::Execute(operation, content_storage, descriptor),
         Request::Export {
             resource,
             allocation,
@@ -171,7 +186,10 @@ fn serve(
     request: ControlRequest,
     identity: ParticipantId,
 ) -> protocol::Result<()> {
-    let loading = matches!(request, ControlRequest::Execute(Operation::LoadAllocations));
+    let loading = matches!(
+        request,
+        ControlRequest::Execute(Operation::LoadAllocations, ContentStorage::HostCarrier, _)
+    );
     let result = (|| -> std::result::Result<Reply, String> {
         if super::G_FAILED.load(Ordering::Acquire) {
             return Err("cuinterpose state failed".into());
@@ -190,7 +208,7 @@ fn serve(
                     unsupported_creations: stats.unsupported_exportable_creations,
                 })
             }
-            ControlRequest::Execute(operation) => {
+            ControlRequest::Execute(operation, storage, session) => {
                 state
                     .validate_lifecycle(operation)
                     .map_err(|_| "CUDA lifecycle operation refused without mutation")?;
@@ -204,7 +222,7 @@ fn serve(
                     super::multicast::restore_phase(state, operation)
                         .map(|bytes| super::host_carrier::Transfer { bytes, copy_us: 0 })
                 } else {
-                    state.lifecycle(operation)
+                    state.lifecycle(operation, storage, session)
                 };
                 match result {
                     Ok(transfer) => Ok(Reply::Completed {

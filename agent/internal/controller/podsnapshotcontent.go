@@ -613,19 +613,20 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		return fmt.Errorf("source pod %s/%s: %w", params.Pod.Namespace, params.Pod.Name, err)
 	}
 	req := executor.CheckpointRequest{
-		ContainerID:          params.ContainerID,
-		ContainerName:        params.ContainerName,
-		ContentUID:           params.ContentUID,
-		StartedAt:            params.StartedAt,
-		NodeName:             w.config.NodeName,
-		PodName:              params.Pod.Name,
-		PodNamespace:         params.Pod.Namespace,
-		PodIP:                params.Pod.Status.PodIP,
-		Pod:                  podEnvironment(params.Pod, params.ContainerName),
-		Clientset:            w.clientset,
-		PageBrokerRequested:  params.Pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] == snapshotv1alpha1.PageBrokerAnnotationEnabled,
-		CUDAToolsDelivered:   podcontract.CUDAToolsDelivered(&params.Pod.Spec, params.ContainerName),
-		CuinterposeRequested: cuinterposeRequested,
+		ContainerID:                  params.ContainerID,
+		ContainerName:                params.ContainerName,
+		ContentUID:                   params.ContentUID,
+		StartedAt:                    params.StartedAt,
+		NodeName:                     w.config.NodeName,
+		PodName:                      params.Pod.Name,
+		PodNamespace:                 params.Pod.Namespace,
+		PodIP:                        params.Pod.Status.PodIP,
+		Pod:                          podEnvironment(params.Pod, params.ContainerName),
+		Clientset:                    w.clientset,
+		PageBrokerRequested:          params.Pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] == snapshotv1alpha1.PageBrokerAnnotationEnabled,
+		CUDAToolsDelivered:           podcontract.CUDAToolsDelivered(&params.Pod.Spec, params.ContainerName),
+		CuinterposeRequested:         cuinterposeRequested,
+		CuinterposeAllocationStorage: params.Pod.Annotations[podcontract.CuinterposeAllocationStorageAnnotation],
 	}
 	if err := executor.Checkpoint(ctx, w.runtime, log, req, w.config); err != nil {
 		if executor.CheckpointNeedsSourceKill(err) {

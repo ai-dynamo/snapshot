@@ -23,10 +23,11 @@ import (
 
 // RestoreOptions holds configuration for an in-namespace restore.
 type RestoreOptions struct {
-	CheckpointPath string
-	CUDADeviceMap  string
-	CgroupRoot     string
-	TargetPodIP    string
+	AllocationSessions cuda.AllocationSessions
+	CheckpointPath     string
+	CUDADeviceMap      string
+	CgroupRoot         string
+	TargetPodIP        string
 	// BundleDir is the path where the agent's binary bundle is mounted inside this namespace.
 	BundleDir string
 }
@@ -56,6 +57,7 @@ func (e *CleanupError) Error() string {
 
 // RestoreInNamespace performs a full restore from inside the target container's namespaces.
 func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logger) (*RestoreInNamespaceResult, error) {
+	defer opts.AllocationSessions.Close()
 	log.Info("Starting nsrestore workflow",
 		"checkpoint_path", opts.CheckpointPath,
 		"has_cuda_map", opts.CUDADeviceMap != "",
@@ -288,7 +290,8 @@ func executeRestore(
 			// loop, so nothing else touches the shared memory while the
 			// coordinator rebuilds it.
 			cuinterposeStart := time.Now()
-			_, err := cuda.RestoreCuinterpose(ctx, opts.CheckpointPath, restorePIDs, m.CUDA.PIDs, coordinatorFdPath, log)
+			_, err := cuda.RestoreCuinterpose(ctx, opts.CheckpointPath, restorePIDs, m.CUDA.PIDs, coordinatorFdPath, log, opts.AllocationSessions)
+			opts.AllocationSessions.Close()
 			timings.cuinterposeRestoreDuration = time.Since(cuinterposeStart)
 			if err != nil {
 				return nil, 0, nil, fmt.Errorf("restore cuinterpose: %w", err)
@@ -304,6 +307,15 @@ func executeRestore(
 // the shims inside the restored processes would stay frozen mid-checkpoint
 // forever, so restoring such an artifact is refused up front.
 func requireCuinterposeState(m *types.CheckpointManifest, checkpointPath string) error {
+	switch m.Cuinterpose.AllocationStorage {
+	case "", "host-carrier":
+	case "pagebroker":
+		if !m.Cuinterpose.Prepared {
+			return fmt.Errorf("PageBroker allocation storage without prepared cuinterpose state")
+		}
+	default:
+		return fmt.Errorf("unknown cuinterpose allocation storage %q", m.Cuinterpose.AllocationStorage)
+	}
 	if !m.Cuinterpose.Prepared {
 		return nil
 	}
