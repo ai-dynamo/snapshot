@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"time"
 
 	"github.com/google/uuid"
@@ -30,6 +31,60 @@ var (
 // Client uses the deployment-wide filesystem/POSIX PageBroker plan.
 type Client struct {
 	ControlSocketPath string
+}
+
+// DirectRestore retains a published source for allocation LOAD sessions without
+// copying it. The caller must keep the artifact available until Commit or Abort.
+func (c Client) DirectRestore(ctx context.Context, transactionID, source string) error {
+	response, err := c.request(ctx, transactionID, &Request_DirectRestore{
+		DirectRestore: &DirectRestoreRequest{Source: filesystem(source), IoEngine: posixCopy()},
+	})
+	if err != nil {
+		return err
+	}
+	if response.GetDirectRestoreReady() == nil {
+		return fmt.Errorf("unexpected PageBroker direct restore response")
+	}
+	return nil
+}
+
+// BindAllocations consumes the general broker connection and returns only a
+// participant-scoped capability. The caller must close it before aborting.
+func (c Client) BindAllocations(ctx context.Context, transactionID, participant string, direction BindAllocationSession_Direction) (*os.File, error) {
+	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", c.ControlSocketPath)
+	if err != nil {
+		return nil, err
+	}
+	defer connection.Close()
+	stop := context.AfterFunc(ctx, func() { _ = connection.Close() })
+	defer stop()
+	response, err := exchange(connection, transactionID, &Request_BindAllocations{
+		BindAllocations: &BindAllocationSession{Direction: direction, ParticipantId: participant},
+	})
+	if err != nil {
+		return nil, err
+	}
+	if response.GetAllocationSession().GetCompleted() == nil {
+		return nil, fmt.Errorf("PageBroker did not bind allocation session")
+	}
+	return connection.(*net.UnixConn).File()
+}
+
+// AbortDrained waits for disconnected allocation workers to relinquish backing.
+// The broker refuses deletion while a worker still owns allocation references.
+func (c Client) AbortDrained(ctx context.Context, transactionID string) error {
+	for {
+		err := c.Abort(ctx, transactionID)
+		var failure failureError
+		if !errors.As(err, &failure) || failure.code != Failure_TRANSACTION_CONFLICT {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Join(err, ctx.Err())
+		case <-time.After(commitRetryDelay):
+		}
+	}
 }
 
 func (c Client) StagedRestore(ctx context.Context, transactionID, source string) (string, error) {
@@ -117,7 +172,10 @@ func (c Client) request(ctx context.Context, transactionID string, command isReq
 	defer connection.Close()
 	stopCancel := context.AfterFunc(ctx, func() { _ = connection.Close() })
 	defer stopCancel()
+	return exchange(connection, transactionID, command)
+}
 
+func exchange(connection net.Conn, transactionID string, command isRequest_Command) (*Response, error) {
 	requestID := uuid.NewString()
 	request := &Request{RequestId: &requestID, TransactionId: &transactionID, Command: command}
 	message, err := proto.Marshal(request)
