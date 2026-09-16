@@ -26,6 +26,21 @@ const (
 	// SkipCompatCheckAnnotation disables compatibility checks for one restore.
 	SkipCompatCheckAnnotation = "nvidia.com/snapshot-skip-compat-check"
 
+	// CuinterposeAnnotation opts a SnapshotJob's checkpoint targets into the
+	// CUDA interposer (cuinterpose), which lets Snapshot checkpoint and restore
+	// CUDA memory shared between processes. The only supported value is
+	// CuinterposeAnnotationEnabled. Snapshot supplies and mounts the shim in
+	// every checkpoint target; this annotation only adds it to LD_PRELOAD.
+	CuinterposeAnnotation = "nvidia.com/cuinterpose"
+	// CuinterposeAllocationStorageAnnotation selects external allocation content.
+	// It does not change which allocations belong to cuinterpose.
+	CuinterposeAllocationStorageAnnotation = "nvidia.com/cuinterpose-allocation-storage"
+	// CuinterposeAllocationStorageEnv fixes allocation ownership before CUDA creation.
+	CuinterposeAllocationStorageEnv = "CUINTERPOSE_ALLOCATION_STORAGE"
+
+	// CuinterposeAnnotationEnabled is the only accepted CuinterposeAnnotation value.
+	CuinterposeAnnotationEnabled = "enabled"
+
 	// DefaultSeccompLocalhostProfile is the kubelet-local profile installed by
 	// the Snapshot Helm chart to block io_uring for CRIU.
 	DefaultSeccompLocalhostProfile = "profiles/block-iouring.json"
