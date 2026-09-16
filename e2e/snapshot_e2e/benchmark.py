@@ -458,7 +458,9 @@ class BenchmarkRecorder:
             self._result_dir, self.suite, self.case, self._run_id, self._run_attempt
         )
         temporary = path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(self.as_dict(), indent=2) + "\n", encoding="utf-8")
+        temporary.write_text(
+            json.dumps(self.as_dict(), indent=2, allow_nan=False) + "\n", encoding="utf-8"
+        )
         os.replace(temporary, path)
         return path
 

@@ -93,4 +93,8 @@ def report_message(report: pytest.TestReport) -> str:
     message = getattr(crash, "message", None)
     if message:
         return str(message)
-    return getattr(report, "longreprtext", "") or str(longrepr)
+    # Plain-string longrepr (e.g. --tb=no) is a whole traceback; keep only the
+    # crash line so the durable error stays a single line.
+    text = str(getattr(report, "longreprtext", "") or str(longrepr)).strip()
+    lines = [line for line in text.splitlines() if line.strip()]
+    return lines[-1].strip() if lines else ""

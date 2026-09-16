@@ -16,10 +16,11 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from snapshot_e2e import benchmark
+from snapshot_e2e import benchmark, lifecycle
 
 CONFTEST = Path(__file__).with_name("conftest.py")
 GOLDEN = Path(__file__).with_name("data") / "benchmark-result-v1.json"
@@ -122,6 +123,41 @@ def _run_inner_test(
 def _load(paths: list[Path]) -> dict:
     assert len(paths) == 1, paths
     return json.loads(paths[0].read_text(encoding="utf-8"))
+
+
+def test_missing_call_report_maps_to_infrastructure_failed() -> None:
+    from conftest import benchmark_outcome
+
+    outcome, error = benchmark_outcome(report=None, excinfo=None, interrupted=False)
+
+    assert outcome == "infrastructure_failed"
+    assert error == {"phase": "pytest", "message": "pytest produced no call report"}
+
+
+def test_report_message_fallback_keeps_only_the_crash_line() -> None:
+    from conftest import report_message
+
+    report = SimpleNamespace(
+        longrepr="Traceback (most recent call last):\n  File x, line 1\nRuntimeError: boom\n",
+        longreprtext="",
+    )
+
+    assert report_message(report) == "RuntimeError: boom"
+
+
+def test_outcome_marker_is_found_after_shell_profile_noise() -> None:
+    marker = "__snapshot_e2e_outcome__"
+
+    assert lifecycle._parse_outcome_marker(f"motd\n{marker}:ready\ntoken\n", marker) == (
+        "ready",
+        "token\n",
+    )
+    assert lifecycle._parse_outcome_marker(f"{marker}:error\nboom", marker) == (
+        "error",
+        "boom",
+    )
+    assert lifecycle._parse_outcome_marker("motd only", marker) is None
+    assert lifecycle._parse_outcome_marker(f"{marker}:other\nx", marker) is None
 
 
 def test_passed_test_is_recorded_as_passed(pytester, monkeypatch) -> None:

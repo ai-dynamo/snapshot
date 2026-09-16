@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-logr/logr"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -185,9 +186,12 @@ func (w *NodeController) releaseLease(ctx context.Context, key client.ObjectKey)
 	return nil
 }
 
-// eventMessageLengthLimit is the core/v1 Event message limit the API server
-// enforces once eventTime is set.
-const eventMessageLengthLimit = 1024
+// core/v1 Event field limits the API server enforces once eventTime is set.
+// A node name may be up to 253 characters, so ReportingInstance needs the cap.
+const (
+	eventMessageLengthLimit           = 1024
+	eventReportingInstanceLengthLimit = 128
+)
 
 func emitPodEvent(ctx context.Context, clientset kubernetes.Interface, log logr.Logger, pod *corev1.Pod, component, eventType, reason, message string) {
 	now := time.Now()
@@ -195,6 +199,7 @@ func emitPodEvent(ctx context.Context, clientset kubernetes.Interface, log logr.
 	if reportingInstance == "" {
 		reportingInstance = component
 	}
+	reportingInstance = truncateUTF8(reportingInstance, eventReportingInstanceLengthLimit)
 	event := &corev1.Event{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: fmt.Sprintf("%s-", pod.Name),
@@ -236,12 +241,19 @@ func truncateEventMessage(message string) string {
 		return message
 	}
 	const marker = "..."
-	runes := []rune(message)
-	limit := eventMessageLengthLimit - len(marker)
-	for len(string(runes)) > limit {
-		runes = runes[:len(runes)-1]
+	return truncateUTF8(message, eventMessageLengthLimit-len(marker)) + marker
+}
+
+// truncateUTF8 cuts s to at most limit bytes without splitting a rune.
+func truncateUTF8(s string, limit int) string {
+	if len(s) <= limit {
+		return s
 	}
-	return string(runes) + marker
+	cut := s[:limit]
+	for len(cut) > 0 && !utf8.RuneStart(s[len(cut)]) {
+		cut = cut[:len(cut)-1]
+	}
+	return cut
 }
 
 func setPodCondition(status *corev1.PodStatus, condition corev1.PodCondition) {

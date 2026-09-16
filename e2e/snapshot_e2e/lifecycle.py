@@ -227,6 +227,24 @@ def wait_for_file(namespace: str, pod: str, path: str, timeout: int = 180) -> No
     wait_for(f"{namespace}/{pod}:{path}", exists, timeout, detail=detail)
 
 
+def _parse_outcome_marker(output: str, marker: str) -> tuple[str, str] | None:
+    """Return (kind, body) for the last outcome marker in exec output.
+
+    exec_command runs a login shell with stderr merged, so anything the
+    container's profile prints lands before the marker; only the text from the
+    last marker onwards is the sentinel.
+    """
+    marker_at = output.rfind(marker)
+    if marker_at < 0:
+        return None
+    tail = output[marker_at:]
+    body = tail.split("\n", 1)[1] if "\n" in tail else ""
+    for kind in ("error", "ready"):
+        if tail.startswith(f"{marker}:{kind}"):
+            return kind, body
+    return None
+
+
 def wait_for_restore_outcome(
     namespace: str,
     pod: str,
@@ -260,19 +278,16 @@ def wait_for_restore_outcome(
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
             return None
-        marker_at = output.rfind(marker)
-        if marker_at < 0:
+        parsed = _parse_outcome_marker(output, marker)
+        if parsed is None:
             return None
-        tail = output[marker_at:]
-        body = tail.split("\n", 1)[1] if "\n" in tail else ""
-        if tail.startswith(f"{marker}:error"):
+        kind, body = parsed
+        if kind == "error":
             raise AssertionError(
                 f"restored program in {namespace}/{pod} failed after restore "
                 f"({error_file}):\n{body}"
             )
-        if tail.startswith(f"{marker}:ready"):
-            return body
-        return None
+        return body
 
     def detail() -> str:
         return f"last_error={last_error}" if last_error else "neither sentinel observed yet"
@@ -353,14 +368,15 @@ def wait_for_restore_traffic_ready(
             except Exception as exc:  # transient while the restored process settles
                 last_exec_error = f"{type(exc).__name__}: {exc}"
             else:
-                if output.startswith(f"{marker}:error"):
-                    body = output.split("\n", 1)[1] if "\n" in output else ""
-                    raise AssertionError(
-                        f"restored program in {namespace}/{pod_name} failed after "
-                        f"restore ({error_file}):\n{body}"
-                    )
-                if output.startswith(f"{marker}:ready"):
-                    ready_text = output.split("\n", 1)[1] if "\n" in output else ""
+                parsed = _parse_outcome_marker(output, marker)
+                if parsed is not None:
+                    kind, body = parsed
+                    if kind == "error":
+                        raise AssertionError(
+                            f"restored program in {namespace}/{pod_name} failed after "
+                            f"restore ({error_file}):\n{body}"
+                        )
+                    ready_text = body
                     if on_traffic_ready is not None:
                         on_traffic_ready()
 
@@ -742,7 +758,12 @@ def wait_for_restore_past_the_gate(
     RestoreInProgress is transient, so waiting for it alone is a race a fast
     restore wins. A restore refused at the gate never reaches any of these.
     """
-    past = ("RestoreInProgress", "RestoreSucceeded", "RestoreFailed")
+    past = (
+        "RestoreInProgress",
+        "RestoreSucceeded",
+        "RestorePartiallySucceeded",
+        "RestoreFailed",
+    )
 
     def check() -> client.V1Pod | None:
         pod = k8s.read_pod(namespace, pod_name)

@@ -259,8 +259,10 @@ def test_framework_checkpoint_restore_serves_inference(
         )
         result.mark_event("inference.verified")
         result.finish_test()
-        # Metadata collection is deliberately outside test.total.duration so
-        # extra exec/log calls do not inflate the functional benchmark.
+        # Restore-side metadata collection runs after finish_test so these
+        # exec/log calls do not inflate test.total.duration. The source-side
+        # storage, digest, and GPU collection above is inside the window: the
+        # source pod is deleted before restore, so it cannot be deferred.
         _record_gpu_environment(
             result,
             config.namespace,
