@@ -255,6 +255,58 @@ bool TransferBuffers::Transfer(CUdeviceptr device, size_t size, CUstream stream,
                               TransferCancellation* cancellation, TransferMetrics* metrics, std::string* error,
                               bool sync_file)
 {
+  std::vector<TransferChunk> chunks;
+  if (!error || !device || size > std::numeric_limits<CUdeviceptr>::max() - device ||
+      !BuildTransferChunks(size, storage, impl_->options, &chunks, error))
+    return false;
+  for (auto& chunk : chunks)
+    chunk.logical_offset += device;
+  return TransferChunks(chunks, size, stream, context, storage, operation, cancellation, metrics, error, sync_file);
+}
+
+bool TransferBuffers::TransferBatch(const std::vector<AllocationTransfer>& allocations, int content_fd,
+                                   CUstream stream, CUcontext context, TransferOperation operation,
+                                   TransferCancellation* cancellation, TransferMetrics* metrics, std::string* error)
+{
+  if (!error || !ValidateTransferOptions(impl_->options, error))
+    return false;
+  struct stat info{};
+  if (fstat(content_fd, &info) || !S_ISREG(info.st_mode) || info.st_size < 0) {
+    *error = "invalid participant content file";
+    return false;
+  }
+  std::vector<TransferChunk> chunks;
+  size_t size = 0;
+  for (const auto& allocation : allocations) {
+    if (!allocation.address || !allocation.size ||
+        allocation.size > std::numeric_limits<CUdeviceptr>::max() - allocation.address ||
+        allocation.file_offset > static_cast<uint64_t>(info.st_size) ||
+        allocation.size > static_cast<uint64_t>(info.st_size) - allocation.file_offset ||
+        allocation.size > SIZE_MAX - size) {
+      *error = "allocation exceeds address or content bounds";
+      return false;
+    }
+    size += allocation.size;
+    for (size_t offset = 0; offset < allocation.size;) {
+      if (chunks.size() == kMaximumTransferChunkCount) {
+        *error = "allocation batch has too many chunks";
+        return false;
+      }
+      const size_t length = std::min(impl_->options.chunk_bytes, allocation.size - offset);
+      chunks.push_back({allocation.address + offset, length, 0, allocation.file_offset + offset,
+                        chunks.size() % impl_->options.buffer_count});
+      offset += length;
+    }
+  }
+  StorageLayout storage{{{"", static_cast<size_t>(info.st_size), content_fd}}, {}};
+  return TransferChunks(chunks, size, stream, context, storage, operation, cancellation, metrics, error, false);
+}
+
+bool TransferBuffers::TransferChunks(const std::vector<TransferChunk>& chunks, size_t size,
+                                    CUstream stream, CUcontext context, const StorageLayout& storage,
+                                    TransferOperation operation, TransferCancellation* cancellation,
+                                    TransferMetrics* metrics, std::string* error, bool sync_file)
+{
   if (!metrics || !error)
     return false;
   *metrics = {};
@@ -262,9 +314,7 @@ bool TransferBuffers::Transfer(CUdeviceptr device, size_t size, CUstream stream,
   const auto& options = impl_->options;
   auto& slots = impl_->slots;
   const auto total_start = Clock::now();
-  std::vector<TransferChunk> chunks;
-  if (!device || !context || size > std::numeric_limits<CUdeviceptr>::max() - device ||
-      !BuildTransferChunks(size, storage, options, &chunks, error) || cuCtxSetCurrent(context) != CUDA_SUCCESS) {
+  if (!size || !context || cuCtxSetCurrent(context) != CUDA_SUCCESS) {
     if (cancellation) cancellation->Cancel();
     return false;
   }
@@ -292,7 +342,7 @@ bool TransferBuffers::Transfer(CUdeviceptr device, size_t size, CUstream stream,
     StreamDrainGuard drain(stream, slots);
     const auto start = Clock::now();
 #ifdef PAGEBROKER_NIXL
-    // Each allocation is one immutable file. Keep registration/request policy
+    // All allocation ranges in a batch share one participant file. Keep policy
     // in PageBroker, independent of shim interception and CUDA handle exchange.
     if (files.size() != 1) {
       *error = "allocation transfer requires one content file";
@@ -305,7 +355,7 @@ bool TransferBuffers::Transfer(CUdeviceptr device, size_t size, CUstream stream,
       impl_->storage = std::make_unique<NixlTransfer>(addresses, options.chunk_bytes);
     }
     auto& io = *impl_->storage;
-    io.Open(files[0].get(), size);
+    io.Open(files[0].get(), storage.files[0].size);
     const bool save = operation == TransferOperation::kCheckpoint;
     success = true;
     try {
@@ -314,7 +364,7 @@ bool TransferBuffers::Transfer(CUdeviceptr device, size_t size, CUstream stream,
       for (size_t i = 0; i < std::min(width, chunks.size()); ++i) {
         const auto& chunk = chunks[i];
         if (save) {
-          if (!slots[i]->Copy(operation, chunk, device, stream, error)) {
+          if (!slots[i]->Copy(operation, chunk, 0, stream, error)) {
             success = false;
             break;
           }
@@ -331,7 +381,7 @@ bool TransferBuffers::Transfer(CUdeviceptr device, size_t size, CUstream stream,
           success = false;
           break;
         }
-        if (save && i >= width && !slot.Copy(operation, chunk, device, stream, error)) {
+        if (save && i >= width && !slot.Copy(operation, chunk, 0, stream, error)) {
           success = false;
           break;
         }
@@ -342,7 +392,7 @@ bool TransferBuffers::Transfer(CUdeviceptr device, size_t size, CUstream stream,
         if (save) {
           io.Submit(index, true, chunk.file_offset, chunk.size);
         } else {
-          if (!slot.Copy(operation, chunk, device, stream, error) || !slot.Wait(metrics, error)) {
+          if (!slot.Copy(operation, chunk, 0, stream, error) || !slot.Wait(metrics, error)) {
             success = false;
             break;
           }
@@ -365,7 +415,7 @@ bool TransferBuffers::Transfer(CUdeviceptr device, size_t size, CUstream stream,
     }
     metrics->files[0].storage_io_seconds = metrics->storage_io_seconds;
 #else
-    success = TransferPipeline(chunks, files, slots, device, stream, operation, metrics, cancellation, error);
+    success = TransferPipeline(chunks, files, slots, 0, stream, operation, metrics, cancellation, error);
 #endif
     metrics->pipeline_seconds = ElapsedSeconds(start);
     if (success) drain.Disarm();

@@ -79,7 +79,7 @@ message AllocationExtent
 message AllocationBatch
 {
   // One CUDA export FD per extent, attached in this order with SCM_RIGHTS.
-  // At most 32 extents per frame; the worker also receives 32 storage FDs.
+  // At most 32 extents per frame; the worker also receives one storage FD.
   repeated AllocationExtent extents = 1;
 }
 message AllocationSessionRequest
@@ -101,17 +101,21 @@ message AllocationSessionReply
   }
 }
 // Private broker-to-worker envelope, using the same extent/batch schema.
-// Descriptors are [CUDA exports..., opened storage files...].
+// Descriptors are [CUDA exports..., participant content file].
 message AllocationWorkerRequest
 {
   BindAllocationSession.Direction direction = 1;
   AllocationBatch batch = 2;
+  // Broker-owned offsets, in batch extent order; never supplied by callers.
+  repeated uint64 storage_offsets = 3;
 }
 message AllocationManifest
 {
   uint32 version = 1;
   string participant_id = 2;
   repeated AllocationExtent extents = 3;
+  // Version 2 packs extent bytes into content.bin, in extent order.
+  repeated uint64 storage_offsets = 4;
 }
 
 message Request

@@ -179,6 +179,10 @@ AllocationSession::AllocationSession(std::shared_ptr<Transaction> transaction,
   directory_fd_ = FileDescriptor(openat(allocations.get(), binding.participant_id().c_str(),
                                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
   Check(directory_fd_.get(), "open participant directory");
+  content_fd_ = FileDescriptor(openat(directory_fd_.get(), "content.bin",
+      (binding.direction() == v1::BindAllocationSession::SAVE ? O_RDWR | O_CREAT | O_EXCL : O_RDONLY | O_NONBLOCK) |
+          O_CLOEXEC | O_NOFOLLOW, 0600));
+  Check(content_fd_.get(), "open participant content");
   if (binding.direction() == v1::BindAllocationSession::LOAD) {
     FileDescriptor manifest_fd(openat(directory_fd_.get(), "manifest.pb", O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW));
     Check(manifest_fd.get(), "open allocation manifest");
@@ -195,17 +199,29 @@ AllocationSession::AllocationSession(std::shared_ptr<Transaction> transaction,
       offset += count;
     }
     v1::AllocationManifest manifest;
-    Require(manifest.ParseFromString(bytes) && manifest.version() == 1 &&
+    Require(manifest.ParseFromString(bytes) && manifest.version() == 2 &&
+            manifest.storage_offsets_size() == manifest.extents_size() &&
             manifest.participant_id() == binding.participant_id(), "invalid allocation manifest");
-    for (const auto& extent : manifest.extents()) {
+    std::vector<std::pair<uint64_t, uint64_t>> ranges;
+    for (int index = 0; index < manifest.extents_size(); ++index) {
+      const auto& extent = manifest.extents(index);
       ValidateExtent(extent);
       Require(extents_.emplace(extent.allocation_id(), extent).second, "duplicate allocation");
-      struct stat extent_stat{};
-      Check(fstatat(directory_fd_.get(), extent.allocation_id().c_str(), &extent_stat, AT_SYMLINK_NOFOLLOW),
-            "stat allocation content");
-      Require(S_ISREG(extent_stat.st_mode) && extent_stat.st_size >= 0 &&
-              static_cast<uint64_t>(extent_stat.st_size) == extent.size(), "allocation content size mismatch");
+      const uint64_t offset = manifest.storage_offsets(index);
+      Require(offset <= static_cast<uint64_t>(std::numeric_limits<off_t>::max()) - extent.size(),
+              "allocation content offset overflow");
+      offsets_.emplace(extent.allocation_id(), offset);
+      ranges.emplace_back(offset, offset + extent.size());
     }
+    std::sort(ranges.begin(), ranges.end());
+    for (const auto& [begin, end] : ranges) {
+      Require(begin == content_size_, "allocation content ranges overlap or leave gaps");
+      content_size_ = end;
+    }
+    struct stat content_stat{};
+    Check(fstat(content_fd_.get(), &content_stat), "stat participant content");
+    Require(S_ISREG(content_stat.st_mode) && content_stat.st_size >= 0 &&
+            static_cast<uint64_t>(content_stat.st_size) == content_size_, "participant content size mismatch");
   }
   transaction_->allocation_participants.insert(binding.participant_id());
   ++transaction_->allocation_sessions;
@@ -232,11 +248,14 @@ v1::AllocationSessionReply AllocationSession::Execute(const v1::AllocationSessio
     if (request.has_finish()) {
       Require(descriptors.empty(), "finish cannot carry descriptors");
       if (binding_.direction() == v1::BindAllocationSession::SAVE) {
+        Check(fsync(content_fd_.get()), "sync participant content");
         v1::AllocationManifest manifest;
-        manifest.set_version(1);
+        manifest.set_version(2);
         manifest.set_participant_id(binding_.participant_id());
-        for (const auto& [id, extent] : extents_)
+        for (const auto& [id, extent] : extents_) {
           *manifest.add_extents() = extent;
+          manifest.add_storage_offsets(offsets_.at(id));
+        }
         Require(manifest.ByteSizeLong() <= (16 << 20), "allocation manifest exceeds limit");
         WriteManifest(directory_fd_.get(), manifest);
       } else {
@@ -257,7 +276,6 @@ v1::AllocationSessionReply AllocationSession::Execute(const v1::AllocationSessio
             descriptors.size() == static_cast<size_t>(request.batch().extents_size()), "invalid allocation batch");
     v1::AllocationWorkerRequest work;
     work.set_direction(binding_.direction());
-    std::vector<FileDescriptor> files;
     std::vector<int> rights;
     for (const auto& descriptor : descriptors)
       rights.push_back(descriptor.get());
@@ -266,26 +284,22 @@ v1::AllocationSessionReply AllocationSession::Execute(const v1::AllocationSessio
       Require(transferred_.insert(extent.allocation_id()).second, "duplicate allocation");
       // Keep session metadata bounded as well as individual wire frames.
       Require(transferred_.size() <= 65536, "allocation session exceeds extent limit");
-      auto* target = work.mutable_batch()->add_extents();
-      *target = extent;
+      *work.mutable_batch()->add_extents() = extent;
       const bool save = binding_.direction() == v1::BindAllocationSession::SAVE;
       if (!save) {
         const auto found = extents_.find(extent.allocation_id());
         Require(found != extents_.end() && found->second.size() == extent.size(), "allocation absent from saved manifest");
+      } else {
+        Require(content_size_ <= static_cast<uint64_t>(std::numeric_limits<off_t>::max()) - extent.size(),
+                "participant content size overflow");
+        offsets_.emplace(extent.allocation_id(), content_size_);
+        content_size_ += extent.size();
       }
-      files.emplace_back(openat(directory_fd_.get(), extent.allocation_id().c_str(),
-                                (save ? O_RDWR | O_CREAT | O_EXCL : O_RDONLY | O_NONBLOCK) | O_CLOEXEC | O_NOFOLLOW, 0600));
-      Check(files.back().get(), "open allocation content");
-      if (save)
-        Check(ftruncate(files.back().get(), extent.size()), "size allocation content");
-      else {
-        struct stat stat{};
-        Check(fstat(files.back().get(), &stat), "stat opened allocation content");
-        Require(S_ISREG(stat.st_mode) && stat.st_size >= 0 &&
-                static_cast<uint64_t>(stat.st_size) == extent.size(), "opened allocation content size mismatch");
-      }
-      rights.push_back(files.back().get());
+      work.add_storage_offsets(offsets_.at(extent.allocation_id()));
     }
+    if (binding_.direction() == v1::BindAllocationSession::SAVE)
+      Check(ftruncate(content_fd_.get(), content_size_), "size participant content");
+    rights.push_back(content_fd_.get());
     reply = worker_->Transfer(work, rights);
     Require(reply.completed().extents_size() == work.batch().extents_size(), "worker returned incomplete batch");
     for (int i = 0; i < reply.completed().extents_size(); ++i) {
