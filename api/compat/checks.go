@@ -219,7 +219,7 @@ var gpuModelCheck = check{
 	compare: func(source, target Environment) []Mismatch {
 		sourceModels, sourceOK := gpuModels(source.GPUDevices)
 		targetModels, targetOK := gpuModels(target.GPUDevices)
-		if !sourceOK || !targetOK || sameRegardlessOfOrder(sourceModels, targetModels) {
+		if !sourceOK || !targetOK || elementsMatch(sourceModels, targetModels) {
 			return nil
 		}
 		return []Mismatch{{
@@ -285,7 +285,7 @@ var migProfileCheck = check{
 	compare: func(source, target Environment) []Mismatch {
 		sourceProfiles, sourceOK := gpuMIGProfiles(source.GPUDevices)
 		targetProfiles, targetOK := gpuMIGProfiles(target.GPUDevices)
-		if !sourceOK || !targetOK || sameRegardlessOfOrder(sourceProfiles, targetProfiles) {
+		if !sourceOK || !targetOK || elementsMatch(sourceProfiles, targetProfiles) {
 			return nil
 		}
 		return []Mismatch{{
@@ -429,12 +429,12 @@ func gpuMIGProfiles(devices []GPUDevice) ([]string, bool) {
 	return profiles, true
 }
 
-// sameRegardlessOfOrder reports whether both sides hold the same values the
-// same number of times. Order is left out because which physical device a
-// checkpoint lands on is #246's concern. Multiplicity is kept because gpu-count
-// compares only the total, and so cannot tell two slices of one shape and one
-// of another from the reverse.
-func sameRegardlessOfOrder(source, target []string) bool {
+// elementsMatch reports whether both sides hold the same values the same number
+// of times. Order is left out because which physical device a checkpoint lands
+// on is #246's concern. Multiplicity is kept because gpu-count compares only the
+// total, and so cannot tell two slices of one shape and one of another from the
+// reverse.
+func elementsMatch(source, target []string) bool {
 	if len(source) != len(target) {
 		return false
 	}
