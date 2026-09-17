@@ -21,6 +21,95 @@ func TestFailureCodeMapsUnknownValuesToUnspecified(t *testing.T) {
 	}
 }
 
+func TestStagedRestorePropagatesDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		timeout time.Duration
+	}{
+		{name: "no deadline"},
+		{name: "fractional second", timeout: time.Minute + 500*time.Millisecond},
+		{name: "long restore", timeout: 3 * time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "pagebroker.sock"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+
+			requests := make(chan *StagedRestoreRequest, 1)
+			server := make(chan error, 1)
+			go func() {
+				connection, err := listener.Accept()
+				if err != nil {
+					server <- err
+					return
+				}
+				defer connection.Close()
+				message, err := readMessage(connection)
+				if err != nil {
+					server <- err
+					return
+				}
+				request := new(Request)
+				if err := proto.Unmarshal(message, request); err != nil {
+					server <- err
+					return
+				}
+				requests <- request.GetStagedRestore()
+				message, err = proto.Marshal(&Response{
+					RequestId: request.RequestId, TransactionId: request.TransactionId,
+					Result: &Response_StagedRestoreDirectory{StagedRestoreDirectory: &StagedRestoreDirectory{
+						ImageDirectory: proto.String("/pagebroker/restore/transaction"),
+					}},
+				})
+				if err == nil {
+					err = writeMessage(connection, message)
+				}
+				server <- err
+			}()
+
+			ctx := context.Background()
+			if tc.timeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tc.timeout)
+				defer cancel()
+			}
+			directory, err := (Client{ControlSocketPath: listener.Addr().String()}).StagedRestore(ctx, "transaction", "/checkpoints/source")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if directory != "/pagebroker/restore/transaction" {
+				t.Fatalf("unexpected staging directory: %q", directory)
+			}
+			if err := <-server; err != nil {
+				t.Fatal(err)
+			}
+			request := <-requests
+			if tc.timeout == 0 {
+				if request.RestoreTimeoutSeconds != nil {
+					t.Fatal("request without a deadline must preserve the broker's default lifetime")
+				}
+				return
+			}
+			deadline, _ := ctx.Deadline()
+			got := time.Duration(request.GetRestoreTimeoutSeconds()) * time.Second
+			if got < time.Until(deadline) || got >= tc.timeout+time.Second {
+				t.Fatalf("restore timeout %v does not cover the remaining deadline rounded up to seconds", got)
+			}
+		})
+	}
+}
+
+func TestStagedRestoreRejectsExpiredContext(t *testing.T) {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	// There is no broker socket: deadline validation must happen before dialing.
+	if _, err := (Client{}).StagedRestore(ctx, "transaction", "/checkpoints/source"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("StagedRestore() error = %v, want deadline exceeded", err)
+	}
+}
+
 func TestRequestStopsWhenContextIsCanceled(t *testing.T) {
 	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "pagebroker.sock"))
 	if err != nil {
