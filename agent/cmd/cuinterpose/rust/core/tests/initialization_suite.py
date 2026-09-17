@@ -43,6 +43,14 @@ def main():
             "cbindgen", "--quiet", "--config", "abi/cbindgen.toml",
             "--crate", "cuinterpose-abi", "--output", str(fixtures / "core_abi.h"), ".",
         ], cwd=workspace, env=clean, check=True)
+        # The lifecycle fake implements allocation operations but not cuInit.
+        # Reuse the loader suite's minimal driver for initialization schedules.
+        driver = workspace.parent / "frontend/tests/fixtures/driver.c"
+        subprocess.run([
+            "/usr/bin/gcc", "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror",
+            "-shared", "-fPIC", "-Wl,-Bsymbolic-functions,-soname,libcuda.so.1",
+            str(driver), "-o", str(fixtures / "libcuda.so.1"), "-ldl",
+        ], env=clean, check=True)
         for source, output, extra in (
             ("generation_constructor.c", "generation-constructor.so", ["-shared", "-fPIC"]),
             ("initialization_faults.c", "initialization-faults.so", ["-shared", "-fPIC"]),
@@ -54,6 +62,10 @@ def main():
                 str(sources / source), "-o", str(fixtures / output), "-ldl", *extra,
             ], env=clean, check=True)
         return
+    environment = clean | {
+        "LD_PRELOAD": str(artifacts / "libcuinterpose.so"),
+        "LD_LIBRARY_PATH": str(fixtures),
+    }
     count = 0
     for mode, argument in (
         ("cold", "32"), ("fork", "32"),
@@ -62,14 +74,14 @@ def main():
     ):
         with tempfile.TemporaryDirectory(prefix="cuinterpose-init-") as control:
             run([sys.executable, str(sources / "initialization.py"), mode, argument],
-                os.environ | {"SNAPSHOT_CONTROL_DIR": control})
+                environment | {"SNAPSHOT_CONTROL_DIR": control})
         count += 1
     for mode in ("failure-race", "delayed", "recursive", "first-spawn", "second-spawn",
                  "collision", "permissions"):
         with tempfile.TemporaryDirectory(prefix="cuinterpose-init-") as control:
-            env = os.environ | {
+            env = environment | {
                 "SNAPSHOT_CONTROL_DIR": control,
-                "LD_PRELOAD": os.environ["LD_PRELOAD"] + ":" + str(fixtures / "initialization-faults.so"),
+                "LD_PRELOAD": environment["LD_PRELOAD"] + ":" + str(fixtures / "initialization-faults.so"),
             }
             if mode == "permissions":
                 env["CUINTERPOSE_TEST_CHMOD_FAILURE"] = "1"
