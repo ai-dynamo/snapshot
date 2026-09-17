@@ -28,6 +28,10 @@ for name, exports in [
         for version in re.findall(r"GLIBC_(\d+(?:\.\d+)+)", versions)
     ), (name, "requires glibc newer than 2.34")
     dynamic = subprocess.check_output(["readelf", "-dW", path], text=True)
+    if name == "libcuinterpose_core.so":
+        # Runtime installation may run under a DSO constructor's loader lock.
+        # No first-use PLT lookup may occur under the installation mutex.
+        assert re.search(r"\(FLAGS\).*\bBIND_NOW\b", dynamic), dynamic
     assert not re.search(r"NEEDED.*(?:libcuda|libcudart|libstdc\+\+|libstd-)", dynamic), dynamic
     undefined = subprocess.check_output(["nm", "-D", "--undefined-only", path], text=True)
     assert not re.search(r"\b(?:cu[A-Z]|cuda[A-Z])\w*", undefined), undefined
