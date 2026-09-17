@@ -1,0 +1,29 @@
+%% SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+%% SPDX-License-Identifier: Apache-2.0
+
+sequenceDiagram
+    autonumber
+    participant O as Workload owner
+    participant W as Grove or scheduler
+    participant G as Group controller
+    participant A0 as Node agent rank 0
+    participant A1 as Node agent rank 1
+
+    O->>W: Request the complete target Pod group
+    W-->>O: Create and schedule all target Pods
+    O->>G: Create PodGroupRestore with Pod names and UIDs
+    G->>G: Validate targets and build the complete identity map
+    par Existing rank 0 restore
+        G->>A0: Activate restore with complete group context
+        A0-->>G: Restored True or terminal failure
+    and Existing rank 1 restore
+        G->>A1: Activate restore with complete group context
+        A1-->>G: Restored True or terminal failure
+    end
+    alt Every member reports Restored True
+        G-->>O: PodGroupRestore Ready
+        O->>O: Observe Pod readiness before serving
+    else Any member reports terminal failure
+        G-->>O: PodGroupRestore Failed with all member outcomes
+        Note over O,G: The workload owner chooses recovery
+    end
