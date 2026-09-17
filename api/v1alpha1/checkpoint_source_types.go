@@ -60,9 +60,11 @@ type NvidiaCheckpointSourceInstance struct {
 	ProductName string `json:"productName,omitempty"`
 
 	// MIGProfile is the MIG slice shape the capture ran on, such as "1g.10gb".
-	// It is absent when the capture had a whole GPU, and absent for a slice
-	// captured before this field existed. ProductName does not imply it:
-	// nvidia-smi reports a slice under its parent GPU's model name.
+	// Absent means unknown rather than whole GPU, because an agent released
+	// before this field captured slices without recording their shape. Whether
+	// a device was a slice at all is read from its UUID, which every release
+	// has recorded. ProductName does not say: nvidia-smi reports a slice under
+	// its parent GPU's model name.
 	// +optional
 	MIGProfile string `json:"migProfile,omitempty"`
 }

@@ -70,9 +70,10 @@ type GPUDevice struct {
 	UUID        string
 	ProductName string
 
-	// MIGProfile is the slice shape, such as "1g.10gb", and is empty both for a
-	// whole GPU and for a slice captured before it was recorded. Whether a
-	// device is a slice at all comes from UUID instead, which is always present.
+	// MIGProfile is the slice shape, such as "1g.10gb". Empty means unknown
+	// rather than whole GPU, because an agent released before this field
+	// captured slices without recording their shape. Whether a device is a
+	// slice at all comes from UUID instead, which is always present.
 	MIGProfile string
 }
 

@@ -185,9 +185,10 @@ type GPUManifest struct {
 	UUID        string `yaml:"uuid"`
 	ProductName string `yaml:"productName,omitempty"`
 
-	// MIGProfile is the slice shape, such as "1g.10gb". It is absent for a whole
-	// GPU and for a slice captured before this field existed; UUID tells those
-	// two apart, because only a slice's carries the MIG- prefix.
+	// MIGProfile is the slice shape, such as "1g.10gb". Absent means unknown
+	// rather than whole GPU, because an agent released before this field
+	// captured slices without recording their shape. UUID tells the two apart,
+	// because only a slice's carries the MIG- prefix.
 	MIGProfile string `yaml:"migProfile,omitempty"`
 }
 
