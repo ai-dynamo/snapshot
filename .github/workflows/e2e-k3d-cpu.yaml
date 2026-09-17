@@ -164,6 +164,7 @@ jobs:
           echo "  uv run --locked --project e2e pytest e2e/tests/test_snapshot_lifecycle.py::test_one_cpu_snapshot_restores_into_two_containers -vv -s"
 
       - name: Install Python tooling
+        if: ${{ always() }}
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.10.11"
@@ -212,8 +213,25 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      # Sourced from the tmate shell so manual pytest runs get the same
+      # environment the automated step would have used.
+      - name: Write debug env file
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          cat > "${GITHUB_WORKSPACE}/k3d-e2e.env" <<EOF
+          export KUBECONFIG=${SNAPSHOT_E2E_KUBECONFIG}
+          export SNAPSHOT_E2E_MODE=direct
+          export SNAPSHOT_E2E_TEST_NAMESPACE=${SNAPSHOT_E2E_TEST_NAMESPACE}
+          export SNAPSHOT_E2E_SNAPSHOT_RELEASE=${SNAPSHOT_E2E_SNAPSHOT_RELEASE}
+          export SNAPSHOT_E2E_PVC_NAME=${SNAPSHOT_E2E_PVC_NAME}
+          export SNAPSHOT_E2E_SNAPSHOT_TAG=${IMAGE_TAG}
+          export SNAPSHOT_E2E_WORKLOAD_IMAGE=${IMAGE_REGISTRY}/agent:${IMAGE_TAG}
+          EOF
+          cat "${GITHUB_WORKSPACE}/k3d-e2e.env"
+
       - name: tmate (manual debug)
-        if: ${{ success() && (github.event_name != 'workflow_dispatch' || inputs.pause_for_tmate) }}
+        if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.pause_for_tmate) }}
         timeout-minutes: 180
         env:
           KUBECONFIG: ${{ env.SNAPSHOT_E2E_KUBECONFIG }}

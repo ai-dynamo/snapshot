@@ -12,6 +12,10 @@ CLUSTER_NAME="${SNAPSHOT_E2E_K3D_CLUSTER:-snapshot-k3d-cpu}"
 TEST_NAMESPACE="${SNAPSHOT_E2E_TEST_NAMESPACE:-snapshot-e2e}"
 PVC_NAME="${SNAPSHOT_E2E_PVC_NAME:-snapshot-pvc}"
 PVC_SIZE="${SNAPSHOT_E2E_PVC_SIZE:-2Gi}"
+# The CRDs use the CEL `format` library (format.qualifiedName()), which the
+# apiserver only exposes from 1.32 on, so k3d's default k3s is too old to
+# install them. Track the Kubernetes version the GPU e2e already targets.
+K3S_IMAGE="${SNAPSHOT_E2E_K3S_IMAGE:-docker.io/rancher/k3s:v1.32.13-k3s1}"
 HOST_CHECKPOINTS="${SNAPSHOT_E2E_CHECKPOINT_HOST:-${RUNNER_TEMP:-/tmp}/snapshot-checkpoints}"
 NODE_CHECKPOINTS="${SNAPSHOT_E2E_CHECKPOINT_NODE:-/checkpoints-data}"
 KUBECONFIG_OUT="${SNAPSHOT_E2E_KUBECONFIG:-${KUBECONFIG:-}}"
@@ -37,9 +41,10 @@ cluster_up() {
     k3d cluster delete "${CLUSTER_NAME}"
   fi
 
-  log "creating k3d cluster ${CLUSTER_NAME}"
+  log "creating k3d cluster ${CLUSTER_NAME} (${K3S_IMAGE})"
   k3d cluster create "${CLUSTER_NAME}" \
     --wait \
+    --image "${K3S_IMAGE}" \
     --kubeconfig-update-default=false \
     --kubeconfig-switch-context=false \
     --k3s-arg '--disable=traefik@server:0' \
