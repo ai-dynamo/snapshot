@@ -11,7 +11,7 @@ HELM_VERSION           ?= v3.17.3
 # Protobuf's v21.12 release reports itself as libprotoc 3.21.12.
 override PROTOC_VERSION := 3.21.12
 PROTOC_RELEASE := 21.12
-MDTOC_VERSION          ?= latest
+MDTOC_VERSION          ?= v1.4.0
 
 # Install tools into an explicit bin dir and put it ahead on PATH so callers
 # (including submakes) resolve the pinned binaries. Defaults to GOPATH/bin.
@@ -29,6 +29,7 @@ GOVULNCHECK    := $(TOOLS_BIN_DIR)/govulncheck
 HELM           := $(TOOLS_BIN_DIR)/helm
 PROTOC         := $(TOOLS_BIN_DIR)/protoc
 MDTOC          := $(TOOLS_BIN_DIR)/mdtoc
+MDTOC_VERSION_STAMP := $(TOOLS_BIN_DIR)/.mdtoc-version
 
 # A tool that type-checks our source has to be built with at least our Go
 # version: golangci-lint refuses to start when it was built with an older one,
@@ -71,8 +72,19 @@ $(PROTOC):
 protoc: $(PROTOC)
 	@test "$$($(PROTOC) --version)" = "libprotoc $(PROTOC_VERSION)"
 
-$(MDTOC):
-	GOBIN=$(TOOLS_BIN_DIR) GOWORK=off go install sigs.k8s.io/mdtoc@$(MDTOC_VERSION)
+# Recheck the requested version on every invocation. The install only runs when
+# the recorded version changes, so a deliberate MDTOC_VERSION update replaces
+# an existing binary without reinstalling it for every make target.
+.PHONY: force-mdtoc-version-check
+force-mdtoc-version-check:
+
+$(MDTOC): force-mdtoc-version-check
+	@if test ! -x "$@" || test ! -f "$(MDTOC_VERSION_STAMP)" || \
+	    test "$$(cat "$(MDTOC_VERSION_STAMP)")" != "$(MDTOC_VERSION)"; then \
+	  mkdir -p $(TOOLS_BIN_DIR); \
+	  GOBIN=$(TOOLS_BIN_DIR) GOWORK=off go install sigs.k8s.io/mdtoc@$(MDTOC_VERSION); \
+	  printf '%s\n' "$(MDTOC_VERSION)" > "$(MDTOC_VERSION_STAMP)"; \
+	fi
 
 .PHONY: install-tools
 install-tools: $(CONTROLLER_GEN) $(GOLANGCI_LINT) $(ADDLICENSE) $(GOVULNCHECK) $(HELM) $(MDTOC)

@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# SEP-NNNN: Short descriptive title
+# SNEP-NNNN: Short descriptive title
 
 <!-- toc -->
 - [Summary](#summary)
@@ -16,6 +16,10 @@ SPDX-License-Identifier: Apache-2.0
     - [Story 2 (<em>Optional</em>)](#story-2-optional)
   - [Limitations, Risks, and Mitigations](#limitations-risks-and-mitigations)
 - [Design Details](#design-details)
+  - [API](#api)
+  - [Security](#security)
+  - [Configuration (<em>Optional</em>)](#configuration-optional)
+  - [Performance and Scalability (<em>Optional</em>)](#performance-and-scalability-optional)
   - [Monitoring](#monitoring)
   - [Dependencies (<em>Optional</em>)](#dependencies-optional)
   - [Test Plan](#test-plan)
@@ -46,13 +50,13 @@ Explain why this change matters and the problem it solves.
 ### Goals
 
 <!--
-List the concrete outcomes this SEP must achieve.
+List the concrete outcomes this SNEP must achieve.
 -->
 
 ### Non-Goals
 
 <!--
-List related work that is explicitly outside this SEP's scope.
+List related work that is explicitly outside this SNEP's scope.
 -->
 
 ## Proposal
@@ -83,9 +87,39 @@ risks. Describe how each important risk will be mitigated.
 ## Design Details
 
 <!--
-Specify the API, lifecycle, data model, algorithms, failure handling, and
-implementation plan needed to build the proposal. Include diagrams or examples
-when they make the design clearer.
+Specify the API, lifecycle, data model, algorithms, and implementation plan
+needed to build the proposal. Include diagrams or examples when they make the
+design clearer.
+-->
+
+### API
+
+<!--
+Describe public interfaces, including CRDs, CLI commands, configuration
+contracts, and compatibility expectations. State explicitly when the SNEP does
+not change a public API.
+-->
+
+### Security
+
+<!--
+Describe the security impact, including authorization, isolation, credentials,
+data exposure, and abuse cases. State explicitly when no security impact is
+expected.
+-->
+
+### Configuration (*Optional*)
+
+<!--
+Describe new or changed configuration, defaults, feature gates, and migration
+behavior when the SNEP requires them.
+-->
+
+### Performance and Scalability (*Optional*)
+
+<!--
+Describe expected resource use, throughput, latency, scale limits, and how
+they will be evaluated when this SNEP changes them.
 -->
 
 ### Monitoring
@@ -99,7 +133,7 @@ users and operators understand the feature's health and behavior.
 
 <!--
 List required external systems, Snapshot components, feature gates, or prior
-SEPs. Link to setup instructions when useful.
+SNEPs. Link to setup instructions when useful.
 -->
 
 ### Test Plan

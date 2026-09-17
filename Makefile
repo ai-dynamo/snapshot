@@ -110,7 +110,7 @@ pagebroker-check-generated:
 	$(MAKE) -C agent pagebroker-check-generated
 
 # Refresh or check the generated tables of contents in Snapshot Enhancement
-# Proposals. Keeping this separate makes authoring proposals convenient while
+# Proposals (SNEPs). Keeping this separate makes authoring proposals convenient while
 # ensuring CI catches a stale TOC.
 update-toc: $(MDTOC)
 	@sh hack/update-toc.sh
