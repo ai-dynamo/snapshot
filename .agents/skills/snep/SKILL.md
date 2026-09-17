@@ -84,8 +84,8 @@ they make the design clearer.
 
 - **API:** address public CRDs, CLI commands, configuration contracts, and
   compatibility. Explicitly state when no public API changes.
-- **Security:** this is a required, standalone **SNEP-only template section**;
-  it is separate from API and Design Details. Cover authorization, isolation,
+- **Security:** this is a required, standalone **SNEP-only subsection within
+  Design Details**, separate from API. Cover authorization, isolation,
   credentials, data exposure, and abuse cases, or explicitly state why no
   security impact is expected.
 - **Configuration** and **Performance and Scalability** (optional): include
@@ -113,5 +113,6 @@ would interrupt the main narrative.
 ## Finish
 
 Run `make update-toc` after all heading changes, then run `make verify-toc`.
-Confirm the saved path and remind the user that the proposal is submitted as a
-GitHub pull request under the repository's SNEP process.
+Before submission, run `make check`, `make test`, and `make build`, then review
+the diff. Confirm the saved path and remind the user that the proposal is
+submitted as a GitHub pull request under the repository's SNEP process.
