@@ -4,6 +4,9 @@
 package protocol
 
 import (
+	"fmt"
+	"reflect"
+
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -14,28 +17,38 @@ import (
 // each see an isolated view), and sets both SnapshotControlDirEnv (canonical)
 // and LegacySnapshotControlDirEnv (deprecated) on the container's env, so
 // workload images can migrate off the legacy name independently of the
-// operator release. Idempotent — safe to call from multiple code paths
-// (operator source job, restore pod shaping, etc.); each env var is
-// guarded independently so a pod that already carries one (e.g. a
-// hand-crafted template with only the legacy name) still gets the other
-// injected without duplicating either.
+// operator release. Existing reserved volumes, mounts, and variables must
+// match this exact contract; conflicting workload entries are rejected rather
+// than silently weakening the control directory's isolation. Idempotent —
+// safe to call repeatedly.
 //
 // Callers must pass the container's own name; the subPath makes the mount
 // container-scoped on disk even though the in-container path is the same.
-func EnsureControlVolume(podSpec *corev1.PodSpec, container *corev1.Container) {
+func EnsureControlVolume(podSpec *corev1.PodSpec, container *corev1.Container) error {
 	if podSpec == nil || container == nil {
-		return
+		return fmt.Errorf("snapshot control volume requires a pod spec and target container")
 	}
 
-	hasVolume := false
-	for _, v := range podSpec.Volumes {
-		if v.Name == podcontract.SnapshotControlVolumeName {
-			hasVolume = true
-			break
+	shapedSpec := podSpec.DeepCopy()
+	shapedContainer := container.DeepCopy()
+
+	foundVolume := false
+	for i := range shapedSpec.Volumes {
+		volume := &shapedSpec.Volumes[i]
+		if volume.Name != podcontract.SnapshotControlVolumeName {
+			continue
+		}
+		if foundVolume {
+			return fmt.Errorf("duplicate %s volume", podcontract.SnapshotControlVolumeName)
+		}
+		foundVolume = true
+		if volume.EmptyDir == nil ||
+			!reflect.DeepEqual(volume.VolumeSource, corev1.VolumeSource{EmptyDir: volume.EmptyDir}) {
+			return fmt.Errorf("volume %q must be an emptyDir", podcontract.SnapshotControlVolumeName)
 		}
 	}
-	if !hasVolume {
-		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+	if !foundVolume {
+		shapedSpec.Volumes = append(shapedSpec.Volumes, corev1.Volume{
 			Name:         podcontract.SnapshotControlVolumeName,
 			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 		})
@@ -47,33 +60,68 @@ func EnsureControlVolume(podSpec *corev1.PodSpec, container *corev1.Container) {
 	// behavior for single-container pods.
 	subPath := container.Name
 
-	hasMount := false
-	for _, m := range container.VolumeMounts {
-		if m.Name == podcontract.SnapshotControlVolumeName {
-			hasMount = true
-			break
+	foundMount := false
+	for i := range shapedContainer.VolumeMounts {
+		mount := &shapedContainer.VolumeMounts[i]
+		if mount.Name != podcontract.SnapshotControlVolumeName &&
+			mount.MountPath != podcontract.SnapshotControlMountPath {
+			continue
+		}
+		if foundMount {
+			return fmt.Errorf("container %q has duplicate snapshot control mounts", container.Name)
+		}
+		foundMount = true
+		if mount.Name != podcontract.SnapshotControlVolumeName ||
+			mount.MountPath != podcontract.SnapshotControlMountPath ||
+			mount.SubPath != subPath ||
+			mount.ReadOnly ||
+			mount.RecursiveReadOnly != nil ||
+			mount.SubPathExpr != "" ||
+			(mount.MountPropagation != nil && *mount.MountPropagation != corev1.MountPropagationNone) {
+			return fmt.Errorf(
+				"container %q requires writable volume %q mounted at %s with subPath %q",
+				container.Name,
+				podcontract.SnapshotControlVolumeName,
+				podcontract.SnapshotControlMountPath,
+				subPath,
+			)
 		}
 	}
-	if !hasMount {
-		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+	if !foundMount {
+		shapedContainer.VolumeMounts = append(shapedContainer.VolumeMounts, corev1.VolumeMount{
 			Name:      podcontract.SnapshotControlVolumeName,
 			MountPath: podcontract.SnapshotControlMountPath,
 			SubPath:   subPath,
 		})
 	}
 
-	ensureEnv(container, podcontract.SnapshotControlDirEnv, podcontract.SnapshotControlMountPath)
-	ensureEnv(container, podcontract.LegacySnapshotControlDirEnv, podcontract.SnapshotControlMountPath)
-}
-
-// ensureEnv sets name=value on the container if name is not already present,
-// so repeated calls (e.g. dual-injecting the canonical and legacy control-dir
-// env var names) never duplicate an entry.
-func ensureEnv(container *corev1.Container, name, value string) {
-	for _, e := range container.Env {
-		if e.Name == name {
-			return
+	for _, name := range []string{
+		podcontract.SnapshotControlDirEnv,
+		podcontract.LegacySnapshotControlDirEnv,
+	} {
+		found := false
+		for i := range shapedContainer.Env {
+			env := &shapedContainer.Env[i]
+			if env.Name != name {
+				continue
+			}
+			if found {
+				return fmt.Errorf("container %q has duplicate %s environment variables", container.Name, name)
+			}
+			found = true
+			if env.Value != podcontract.SnapshotControlMountPath || env.ValueFrom != nil {
+				return fmt.Errorf("container %q has conflicting %s environment variable", container.Name, name)
+			}
+		}
+		if !found {
+			shapedContainer.Env = append(
+				shapedContainer.Env,
+				corev1.EnvVar{Name: name, Value: podcontract.SnapshotControlMountPath},
+			)
 		}
 	}
-	container.Env = append(container.Env, corev1.EnvVar{Name: name, Value: value})
+
+	podSpec.Volumes = shapedSpec.Volumes
+	*container = *shapedContainer
+	return nil
 }
