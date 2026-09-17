@@ -116,6 +116,15 @@ the bulk of the review.
 AI assistance is welcome. Agent-specific repository guidance lives in
 [AGENTS.md](AGENTS.md).
 
+### Repository agent skills
+
+Repository-maintained skills live in [`.agents/skills`](.agents/skills). A
+compatible coding agent discovers these skills automatically when it works from
+this checkout. Available skills:
+
+- [`snep`](.agents/skills/snep/SKILL.md) — guides an interactive,
+  section-by-section draft or revision of a Snapshot Enhancement Proposal.
+
 The rules are the same as for any other contribution, because the obligations
 do not change based on how the code was produced:
 
