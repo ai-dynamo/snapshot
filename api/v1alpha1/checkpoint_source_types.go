@@ -63,8 +63,7 @@ type NvidiaCheckpointSourceInstance struct {
 	// Absent means unknown rather than whole GPU, because an agent released
 	// before this field captured slices without recording their shape. Whether
 	// a device was a slice at all is read from its UUID, which every release
-	// has recorded. ProductName does not say: nvidia-smi reports a slice under
-	// its parent GPU's model name.
+	// has recorded.
 	// +optional
 	MIGProfile string `json:"migProfile,omitempty"`
 }

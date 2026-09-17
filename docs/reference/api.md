@@ -66,7 +66,7 @@ when it binds a `PodSnapshot`; callers never create it.
 | `source.pod.cpu` | string | Container CPU limit; absent if it had none. |
 | `source.devices.nvidia.driverVersion` | string | NVIDIA driver the capture ran against. |
 | `source.devices.nvidia.instances[].productName` | string | GPU model as `nvidia-smi` reports it, one entry per GPU the captured container could see. |
-| `source.devices.nvidia.instances[].migProfile` | string | MIG slice shape the capture ran on, such as `1g.10gb`. Absent both when the capture had a whole GPU and when an agent released before this field captured a slice, so absent means unknown rather than whole GPU. `productName` does not imply it: `nvidia-smi` reports a slice under its parent card's model name. |
+| `source.devices.nvidia.instances[].migProfile` | string | MIG slice shape the capture ran on, such as `1g.10gb`. Absent both when the capture had a whole GPU and when an agent released before this field captured a slice, so absent means unknown rather than whole GPU. |
 
 ### SnapshotJob
 
