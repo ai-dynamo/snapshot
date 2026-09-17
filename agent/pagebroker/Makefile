@@ -25,6 +25,14 @@ TRANSFER_SOURCES := nixl_transfer.cpp
 endif
 
 .PHONY: allocation-worker
+.PHONY: custom-storage-worker
+custom-storage-worker:
+	mkdir -p build
+	$(CXX) -O2 -std=c++20 -Wall -Wextra -Werror -I. -I$(CUDA_ROOT)/include -I$(TRANSFER_DIR) \
+		custom_storage_worker.cpp file_descriptor.cpp cuda_posix_transfer.cpp $(TRANSFER_SOURCES) \
+		$(TRANSFER_DIR)/transfer_config.cpp $(TRANSFER_DIR)/storage_manifest.cpp \
+		-L$(CUDA_LIB_DIR) -lcuda -pthread $(TRANSFER_FLAGS) -o build/pagebroker-custom-storage-worker
+
 allocation-worker: generate
 	mkdir -p build
 	$(CXX) -O2 -std=c++20 -Wall -Wextra -Werror -I. -I$(CUDA_ROOT)/include -I$(TRANSFER_DIR) \
