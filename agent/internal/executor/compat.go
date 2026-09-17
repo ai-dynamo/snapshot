@@ -4,10 +4,13 @@
 package executor
 
 import (
+	"slices"
+
 	"github.com/go-logr/logr"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
 // inspectCompatibility runs the inspect gate for one restore, the counterpart of
@@ -29,6 +32,13 @@ func inspectCompatibility(
 	}
 
 	sourceEnv := manifest.CompatEnvironment()
+	if manifest.CUDATools.Delivered {
+		// Restore installs and validates this Snapshot-owned mount after
+		// inspection. Workload mounts must already exist in the placeholder.
+		sourceEnv.ExternalizedMounts = slices.DeleteFunc(sourceEnv.ExternalizedMounts, func(path string) bool {
+			return path == podcontract.CUDAToolsMountPath
+		})
+	}
 	targetEnv := compat.Environment{
 		ImageID:            targetImageID,
 		DriverVersion:      targetGPUs.DriverVersion,

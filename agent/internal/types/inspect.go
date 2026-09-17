@@ -37,7 +37,8 @@ type CheckpointContainerSnapshot struct {
 
 	// GPUs holds the GPUs the checkpointed container could see, in allocation
 	// order, with the model and driver version where they could be read.
-	GPUs compat.GPUInfo
+	GPUs        compat.GPUInfo
+	Cuinterpose bool // every CUDA process runs the cuinterpose shim (its control socket is present)
 }
 
 // RestoreContainerSnapshot holds inspected state for the restore target.
