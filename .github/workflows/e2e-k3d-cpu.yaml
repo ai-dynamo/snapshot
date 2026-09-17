@@ -1,0 +1,228 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Experiment: prove nested CRIU on k3d (issue 241 gap 14).
+# Not a required PR check. Do not merge until the CPU restore test passes.
+#
+# workflow_dispatch only appears in the Actions UI after this file is on main.
+# Until then, push this branch (or use workflow_dispatch from the Actions tab
+# if GitHub lists it).
+
+name: E2E k3d CPU (experiment)
+
+on:
+  push:
+    branches:
+      - experiment/k3d-cpu-e2e
+  workflow_dispatch:
+    inputs:
+      pause_for_tmate:
+        description: >-
+          After Snapshot is Ready, open a tmate SSH session and skip pytest.
+          Use this to kubectl/pytest by hand on the runner. limit-access-to-actor
+          is on; leave the session when finished or the job hits timeout.
+        type: boolean
+        default: true
+
+concurrency:
+  group: snapshot-e2e-k3d-cpu-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+  UV_LINK_MODE: copy
+  K3D_VERSION: v5.8.3
+  KUBECTL_VERSION: v1.32.13
+  IMAGE_REGISTRY: snapshot.local
+  IMAGE_TAG: k3d-e2e
+  CLUSTER_NAME: snapshot-k3d-cpu
+  SNAPSHOT_E2E_MODE: direct
+  SNAPSHOT_E2E_TEST_NAMESPACE: snapshot-e2e
+  SNAPSHOT_E2E_SNAPSHOT_RELEASE: snapshot
+  SNAPSHOT_E2E_PVC_NAME: snapshot-pvc
+  SNAPSHOT_E2E_K3D_CLUSTER: snapshot-k3d-cpu
+
+jobs:
+  k3d-cpu:
+    name: k3d CPU checkpoint/restore
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      SNAPSHOT_E2E_KUBECONFIG: ${{ github.workspace }}/.kubeconfig-k3d-cpu
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Free disk space
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL || true
+          df -h
+
+      - name: Build operator image
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          make docker-build-operator \
+            REGISTRY="${IMAGE_REGISTRY}" \
+            TAGS="${IMAGE_TAG}" \
+            DOCKER_BUILD_ARGS="--load"
+
+      - name: Build agent image
+        timeout-minutes: 50
+        run: |
+          set -euo pipefail
+          make docker-build-agent \
+            REGISTRY="${IMAGE_REGISTRY}" \
+            TAGS="${IMAGE_TAG}" \
+            DOCKER_BUILD_ARGS="--load"
+
+      - name: Install kubectl
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/kubectl \
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+          kubectl version --client
+
+      - name: Install Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - name: Install k3d
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/k3d \
+            "https://github.com/k3d-io/k3d/releases/download/${K3D_VERSION}/k3d-linux-amd64"
+          sudo install -m 0755 /tmp/k3d /usr/local/bin/k3d
+          k3d version
+
+      - name: Create k3d cluster
+        run: |
+          set -euo pipefail
+          chmod +x hack/k3d-cpu-e2e.sh
+          hack/k3d-cpu-e2e.sh cluster-up
+
+      - name: Import images into k3d
+        run: |
+          set -euo pipefail
+          k3d image import \
+            "${IMAGE_REGISTRY}/operator:${IMAGE_TAG}" \
+            "${IMAGE_REGISTRY}/agent:${IMAGE_TAG}" \
+            --cluster "${CLUSTER_NAME}"
+
+      - name: Install Snapshot chart
+        env:
+          KUBECONFIG: ${{ env.SNAPSHOT_E2E_KUBECONFIG }}
+        run: |
+          set -euo pipefail
+          helm upgrade --install snapshot ./charts/snapshot \
+            --namespace "${SNAPSHOT_E2E_TEST_NAMESPACE}" \
+            --create-namespace \
+            --wait \
+            --timeout 6m \
+            --set "image.operator.repository=${IMAGE_REGISTRY}/operator" \
+            --set "image.operator.tag=${IMAGE_TAG}" \
+            --set "image.operator.pullPolicy=IfNotPresent" \
+            --set "image.agent.repository=${IMAGE_REGISTRY}/agent" \
+            --set "image.agent.tag=${IMAGE_TAG}" \
+            --set "image.agent.pullPolicy=IfNotPresent" \
+            --set storage.pvc.create=false \
+            --set "storage.pvc.name=${SNAPSHOT_E2E_PVC_NAME}" \
+            --set runtime.socketPath=/run/k3s/containerd/containerd.sock \
+            --set runtime.storageDir=/var/lib/rancher/k3s/agent/containerd \
+            --set operator.artifactCleanup.scanInterval=5s \
+            --set daemonset.resources.requests.cpu=200m \
+            --set daemonset.resources.requests.memory=256Mi \
+            --set daemonset.resources.limits.cpu=2 \
+            --set daemonset.resources.limits.memory=2Gi \
+            --set-json 'daemonset.imagePullSecrets=[]'
+
+      - name: Wait for Snapshot components
+        env:
+          KUBECONFIG: ${{ env.SNAPSHOT_E2E_KUBECONFIG }}
+        run: |
+          set -euo pipefail
+          kubectl get nodes -o wide
+          kubectl get runtimeclass
+          kubectl get pods -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" -o wide
+          kubectl get pvc -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" -o wide
+          kubectl wait --for=condition=available \
+            deploy -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" \
+            -l app.kubernetes.io/component=operator --timeout=5m
+          kubectl rollout status daemonset \
+            -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" \
+            -l app.kubernetes.io/component=snapshot-agent --timeout=5m
+          echo "KUBECONFIG=${SNAPSHOT_E2E_KUBECONFIG}"
+          echo "Manual pytest:"
+          echo "  export KUBECONFIG=${SNAPSHOT_E2E_KUBECONFIG} SNAPSHOT_E2E_MODE=direct SNAPSHOT_E2E_TEST_NAMESPACE=snapshot-e2e SNAPSHOT_E2E_SNAPSHOT_TAG=k3d-e2e SNAPSHOT_E2E_WORKLOAD_IMAGE=snapshot.local/agent:k3d-e2e"
+          echo "  uv run --locked --project e2e pytest e2e/tests/test_snapshot_lifecycle.py::test_one_cpu_snapshot_restores_into_two_containers -vv -s"
+
+      - name: Install Python tooling
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.10.11"
+          checksum: "5a360b0de092ddf4131f5313d0411b48c4e95e8107e40c3f8f2e9fcb636b3583"
+          enable-cache: "false"
+          download-from-astral-mirror: "false"
+
+      - name: Run CPU snapshot/restore test
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.pause_for_tmate }}
+        timeout-minutes: 25
+        env:
+          KUBECONFIG: ${{ env.SNAPSHOT_E2E_KUBECONFIG }}
+          SNAPSHOT_E2E_SNAPSHOT_TAG: ${{ env.IMAGE_TAG }}
+          SNAPSHOT_E2E_WORKLOAD_IMAGE: snapshot.local/agent:k3d-e2e
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e pytest \
+            e2e/tests/test_snapshot_lifecycle.py::test_one_cpu_snapshot_restores_into_two_containers \
+            -vv -s
+
+      - name: Collect diagnostics
+        if: ${{ failure() }}
+        env:
+          KUBECONFIG: ${{ env.SNAPSHOT_E2E_KUBECONFIG }}
+        run: |
+          set +e
+          out="${RUNNER_TEMP}/diagnostics"
+          mkdir -p "${out}"
+          kubectl get pods -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" -o yaml > "${out}/pods.yaml"
+          kubectl describe pods -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" > "${out}/pods-describe.txt"
+          kubectl get events -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" --sort-by=.lastTimestamp > "${out}/events.txt"
+          kubectl get podsnapshots -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" -o yaml > "${out}/podsnapshots.yaml"
+          kubectl get podsnapshotcontents -o yaml > "${out}/podsnapshotcontents.yaml"
+          kubectl logs -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" -l app.kubernetes.io/component=snapshot-agent \
+            --all-containers --tail=-1 --prefix > "${out}/snapshot-agent.log"
+          kubectl logs -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" -l app.kubernetes.io/component=operator \
+            --all-containers --tail=-1 --prefix > "${out}/snapshot-operator.log"
+          echo "DIAGNOSTICS_DIR=${out}" >> "${GITHUB_ENV}"
+
+      - name: Upload diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-k3d-cpu-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.DIAGNOSTICS_DIR }}
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: tmate (manual debug)
+        if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.pause_for_tmate || failure()) }}
+        timeout-minutes: 180
+        env:
+          KUBECONFIG: ${{ env.SNAPSHOT_E2E_KUBECONFIG }}
+          SNAPSHOT_E2E_SNAPSHOT_TAG: k3d-e2e
+          SNAPSHOT_E2E_WORKLOAD_IMAGE: snapshot.local/agent:k3d-e2e
+        uses: mxschmitt/action-tmate@35b54afac29c97fb54faba5b513f8fbd1882f113 # v3.24
+        with:
+          limit-access-to-actor: true
+
+      - name: Delete k3d cluster
+        if: ${{ always() }}
+        run: hack/k3d-cpu-e2e.sh cluster-down || true
