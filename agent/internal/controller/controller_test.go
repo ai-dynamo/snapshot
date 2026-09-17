@@ -1466,6 +1466,26 @@ func TestApplyRestoredConditionPreservesTransitionTimeForSameStatus(t *testing.T
 	assert.Contains(t, string(lastPodStatusApply(t, w).GetPatch()), transition.UTC().Format(time.RFC3339))
 }
 
+func TestReconcileRestorePodLogsControllerPhaseTimings(t *testing.T) {
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "missing-snapshot"})
+	w := makeTestController(t, pod)
+	logs := &logRecorder{}
+	w.log = logr.New(&recordingSink{recorder: logs})
+
+	w.reconcileRestorePod(context.Background(), pod)
+
+	records := logs.fieldsOf("Restore controller pass timing summary")
+	require.Len(t, records, 1)
+	assert.Equal(t, pod.Namespace+"/"+pod.Name, records[0]["pod"])
+	assert.Equal(t, "preflight-error", records[0]["result"])
+	assert.IsType(t, time.Duration(0), records[0]["duration"])
+	phases, ok := records[0]["phases"].(map[string]string)
+	require.True(t, ok)
+	assert.Contains(t, phases, "preflight")
+	assert.Contains(t, phases, "finalizer")
+	assert.Contains(t, phases, "restore")
+}
+
 func TestInFlightKeyIsDeduplicatedForCapture(t *testing.T) {
 	w := makeTestController(t, restorePod(nil))
 	key := "inference/restore-worker/main/ctr-abc"
