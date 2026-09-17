@@ -6,16 +6,21 @@ package cuda
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
+	"golang.org/x/sys/unix"
 
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
@@ -55,6 +60,113 @@ func cuinterposeEndpointPath(procRoot string, observedPID, namespacePID int) str
 		strings.TrimPrefix(podcontract.SnapshotControlMountPath, string(os.PathSeparator)),
 		cuinterposeSocketName(namespacePID),
 	)
+}
+
+// RestorePipelined overlaps only PageBroker allocation loading with the next
+// process's native restore. Native restores must remain serial: CUDA's launch-job
+// file is shared. Workload threads must remain parked behind restore-complete.
+// On failure the coordinator drains started loads before this operation returns.
+func RestorePipelined(ctx context.Context, checkpointDir string, observedPIDs, namespacePIDs []int, deviceMap, helperPath, coordinatorPath string, sessions AllocationSessions, log logr.Logger) error {
+	args, err := cuinterposeArgs("restore", checkpointDir, "", podcontract.SnapshotControlMountPath, observedPIDs, namespacePIDs)
+	if err != nil {
+		return err
+	}
+	executable, err := os.Open(coordinatorPath)
+	if err != nil {
+		return err
+	}
+	defer executable.Close()
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	parent := os.NewFile(uintptr(fds[0]), "restore-ready-parent")
+	child := os.NewFile(uintptr(fds[1]), "restore-ready-child")
+	defer child.Close()
+	connection, err := net.FileConn(parent)
+	_ = parent.Close()
+	if err != nil {
+		return err
+	}
+	defer connection.Close()
+	socket := connection.(*net.UnixConn)
+	cmd := exec.CommandContext(ctx, "/proc/self/fd/3", args...)
+	cmd.ExtraFiles = []*os.File{executable, child}
+	cmd.Args = append(cmd.Args, "--restore-ready-fd", "4")
+	sessions.AppendTo(cmd)
+	return runPipelinedRestore(ctx, cmd, socket, observedPIDs, func(ctx context.Context, pid int) error {
+		if err := restoreProcess(ctx, pid, deviceMap, helperPath, log); err != nil {
+			return err
+		}
+		if err := unlock(ctx, pid, helperPath, log); err != nil {
+			state, stateErr := getState(ctx, pid, helperPath)
+			if stateErr != nil || state != "running" {
+				return err
+			}
+			log.Info("cuda-checkpoint-helper unlock returned error but process is already running", "pid", pid)
+		}
+		return nil
+	}, log)
+}
+
+func runPipelinedRestore(ctx context.Context, cmd *exec.Cmd, socket *net.UnixConn, pids []int, restore func(context.Context, int) error, log logr.Logger) error {
+	nativeCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	start := time.Now()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	// Only the child may retain the readiness endpoint. Keeping our copy open
+	// would hide coordinator death from the native-restore loop.
+	_ = cmd.ExtraFiles[1].Close()
+	done := make(chan error, 1)
+	go func() {
+		_, err := coordinatorResult(cmd.Wait(), stdout.String(), stderr.String(), cmd.Path, "--restore", log)
+		if err != nil {
+			cancel()
+			_ = socket.Close()
+		}
+		done <- err
+	}()
+	nativeErr := func() error {
+		// A missing peer or invalid topology must fail before touching CUDA.
+		if err := socket.SetDeadline(time.Now().Add(10 * time.Minute)); err != nil {
+			return err
+		}
+		var message [4]byte
+		if _, err := io.ReadFull(socket, message[:]); err != nil {
+			return fmt.Errorf("coordinator preflight: %w", err)
+		}
+		if binary.BigEndian.Uint32(message[:]) != 0 {
+			return errors.New("invalid coordinator preflight acknowledgment")
+		}
+		go func() {
+			var extra [1]byte
+			_, _ = socket.Read(extra[:])
+			cancel()
+		}()
+		for _, pid := range pids {
+			if err := nativeCtx.Err(); err != nil {
+				return err
+			}
+			if err := restore(nativeCtx, pid); err != nil {
+				return err
+			}
+			binary.BigEndian.PutUint32(message[:], uint32(pid))
+			if _, err := socket.Write(message[:]); err != nil {
+				return fmt.Errorf("notify ready PID %d: %w", pid, err)
+			}
+		}
+		return nil
+	}()
+	// EOF is the end-of-native barrier. On an incomplete sequence the
+	// coordinator refuses topology replay but joins all started exchanges.
+	_ = socket.CloseWrite()
+	err := errors.Join(nativeErr, <-done)
+	log.Info("CUDA restore pipeline completed", "duration", time.Since(start), "succeeded", err == nil)
+	return err
 }
 
 func cuinterposeSocketName(namespacePID int) string {
@@ -174,6 +286,9 @@ func RemoveStaleCuinterposeSockets(controlDir string) (int, error) {
 
 // CoordinatorPhase is one JSON progress report from the coordinator.
 type CoordinatorPhase struct {
+	PID                            int      `json:"pid,omitempty"`
+	UnixMS                         uint64   `json:"unix_ms,omitempty"`
+	Succeeded                      *bool    `json:"succeeded,omitempty"`
 	Phase                          string   `json:"phase"`
 	Status                         string   `json:"status"`
 	ElapsedMS                      float64  `json:"elapsed_ms"`
@@ -351,7 +466,11 @@ func executeCoordinator(cmd *exec.Cmd, binary, operation string, log logr.Logger
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	runErr := cmd.Run()
-	phases := parseCoordinatorReports(stdout.String())
+	return coordinatorResult(runErr, stdout.String(), stderr.String(), binary, operation, log)
+}
+
+func coordinatorResult(runErr error, stdout, stderr, binary, operation string, log logr.Logger) ([]CoordinatorPhase, error) {
+	phases := parseCoordinatorReports(stdout)
 	for _, phase := range phases {
 		log.Info("cuinterpose coordinator phase", "operation", operation, "report", phase)
 	}
@@ -364,7 +483,7 @@ func executeCoordinator(cmd *exec.Cmd, binary, operation string, log logr.Logger
 			"%s %s failed: %w (completed phases: %s; stderr: %s)",
 			binary, operation, runErr,
 			strings.Join(completed, ","),
-			strings.TrimSpace(stderr.String()),
+			strings.TrimSpace(stderr),
 		)
 	}
 	return phases, nil

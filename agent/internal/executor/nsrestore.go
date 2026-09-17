@@ -42,6 +42,9 @@ type RestoreInNamespaceResult struct {
 	// CuinterposeRestoreDuration is the coordinator's restore step, which runs
 	// after the native CUDA restore and rebuilds shared memory topology.
 	CuinterposeRestoreDuration time.Duration `json:"cuinterposeRestoreDuration"`
+	// CUDAPipelineDuration is the combined wall time of overlapping native CUDA
+	// restore and cuinterpose; the two sequential duration fields remain zero.
+	CUDAPipelineDuration time.Duration `json:"cudaPipelineDuration"`
 }
 
 // CleanupError is the wire representation of a successful restore whose
@@ -105,6 +108,7 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		CRIURestoreDuration:        executeTimings.criuRestoreDuration,
 		CUDARestoreDuration:        executeTimings.cudaRestoreDuration,
 		CuinterposeRestoreDuration: executeTimings.cuinterposeRestoreDuration,
+		CUDAPipelineDuration:       executeTimings.cudaPipelineDuration,
 	}
 	if cleanupErr != nil {
 		result.CleanupError = &CleanupError{
@@ -121,6 +125,7 @@ type nsrestorePhaseTimings struct {
 	criuRestoreDuration        time.Duration
 	cudaRestoreDuration        time.Duration
 	cuinterposeRestoreDuration time.Duration
+	cudaPipelineDuration       time.Duration
 }
 
 func executeRestore(
@@ -283,6 +288,15 @@ func executeRestore(
 			"criu_callback_pid", restoredPID,
 		)
 		cudaStart := time.Now()
+		if m.Cuinterpose.AllocationStorage == "pagebroker" {
+			err = cuda.RestorePipelined(ctx, opts.CheckpointPath, restorePIDs, m.CUDA.PIDs, opts.CUDADeviceMap, cudaHelperFdPath, coordinatorFdPath, opts.AllocationSessions, log)
+			opts.AllocationSessions.Close()
+			timings.cudaPipelineDuration = time.Since(cudaStart)
+			if err != nil {
+				return nil, 0, nil, fmt.Errorf("CUDA restore pipeline failed: %w", err)
+			}
+			return timings, restoredPID, nil, nil
+		}
 		_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, log)
 		timings.cudaRestoreDuration = time.Since(cudaStart)
 		if err != nil {

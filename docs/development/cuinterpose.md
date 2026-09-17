@@ -182,8 +182,11 @@ rollback after destructive prepare; later failure must not resume the source.
 
 The agent recreates tool mounts and control-directory paths before CRIU,
 removes stale socket entries, and rejects prepared artifacts missing state.
-Native CUDA restore and unlock precede shim reconstruction, but application
-threads remain parked behind the restore-complete sentinel.
+In host-carrier mode, native CUDA restore and unlock precede shim reconstruction.
+In PageBroker mode, each rank starts loading after its own native restore and
+unlock, overlapping the next rank's native restore. Application threads remain
+parked behind the restore-complete sentinel in both modes. The diagram below
+shows the host-carrier ordering; the PageBroker ordering is detailed later.
 
 ```mermaid
 sequenceDiagram
@@ -297,7 +300,7 @@ allocation manifest versions are rejected. Before CRIU, the agent validates the 
 against `cuinterpose.state`, and binding LOAD validates manifests/file geometry
 and worker readiness. Restore obeys the captured mode, not a new Pod preference.
 
-After native restore, `LOAD_ALLOCATIONS` creates fresh backing, exports its FDs
+After each rank's native restore, `LOAD_ALLOCATIONS` creates fresh backing, exports its FDs
 with the destination GPU UUID, and waits for the broker to fill it. Only after
 all copies and worker-reference cleanup succeed does the shim remap addresses
 and publish peer exports. The existing global LOAD barrier precedes unicast
@@ -306,6 +309,24 @@ remain, but same-size payload corruption is not detected; checkpoint storage is 
 Transfer failure keeps the workload parked and
 never falls back to host carriers. Disconnect poisons the transaction, and abort
 waits for worker admission to drain before removing files.
+
+The coordinator handshakes with every restored process and validates captured
+identities, topology, and session bindings before acknowledging a private readiness
+socket inherited from nsrestore. Nsrestore restores and unlocks one PID at a time,
+then sends that PID to the coordinator. The coordinator starts its LOAD without
+waiting for earlier ranks' transfers. Native restores never overlap each other:
+the CUDA launch-job file contains shared restore metadata. This mixed per-job
+lifecycle is an optimization inferred from driver implementation, not a documented
+cross-release CUDA guarantee; workloads must keep all application CUDA activity
+parked until restore-complete.
+
+EOF before every PID, an unknown/duplicate PID, or any failed LOAD prevents
+topology replay. A failed LOAD shuts down readiness immediately, cancelling further
+native work. The coordinator joins started exchanges before returning, and the
+outer PageBroker transaction abort drains workers on failure. No rank is retried
+independently. The `cuda_pipeline` timing is the combined wall time, not the sum
+of overlapping native and LOAD durations; per-PID native and LOAD events retain
+timestamps for measuring actual overlap.
 
 ```mermaid
 sequenceDiagram
@@ -319,10 +340,17 @@ sequenceDiagram
     Broker-->>Agent: DirectRestoreReady with source retained
     Agent->>Broker: Bind LOAD sessions before CRIU
     Broker-->>Agent: Validated manifests, file geometry, worker readiness
-    Agent->>Agent: CRIU and regular native CUDA restore
+    Agent->>Agent: CRIU restore
     Note over Agent,Shim: Application threads remain parked
     Agent->>Coordinator: Inherit bound sessions in restored namespaces
-    Coordinator->>Shim: LOAD_ALLOCATIONS with matching session FD
+    Coordinator->>Shim: HANDSHAKE all participants
+    Coordinator-->>Agent: Identities, topology and sessions validated
+    loop Each PID, native restore strictly serial
+        Agent->>Agent: Native restore PID, then unlock PID
+        Agent->>Coordinator: PID ready
+        Coordinator->>Shim: Start this PID's LOAD_ALLOCATIONS
+        Note over Agent,Worker: Next native restore overlaps earlier rank LOADs
+    end
     Shim->>Shim: Create and export fresh device backing
     Shim->>Broker: Destination UUIDs and fresh export FDs
     Broker->>Worker: Published content FDs and destination allocation FDs

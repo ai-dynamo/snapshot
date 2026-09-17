@@ -258,6 +258,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		result.CRIURestoreDuration,
 		result.CUDARestoreDuration,
 		result.CuinterposeRestoreDuration,
+		result.CUDAPipelineDuration,
 	)
 	summary := map[string]any{
 		"duration": wall.String(),
@@ -271,6 +272,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 			"criu_restore":        result.CRIURestoreDuration.String(),
 			"cuda_restore":        result.CUDARestoreDuration.String(),
 			"cuinterpose_restore": result.CuinterposeRestoreDuration.String(),
+			"cuda_pipeline":       result.CUDAPipelineDuration.String(),
 			"unaccounted":         unaccounted.String(),
 		},
 	}

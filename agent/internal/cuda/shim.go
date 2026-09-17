@@ -98,7 +98,8 @@ func runAction(ctx context.Context, pid int, action, deviceMap, helperBinaryPath
 		)
 		return fmt.Errorf("cuda-checkpoint-helper %v failed for pid %d after %s: %w (output: %s)", args, pid, duration, err, out)
 	}
-	log.V(1).Info("cuda-checkpoint-helper command succeeded",
+	log.Info("cuda-checkpoint-helper command succeeded",
+		"started_at", start.UTC().Format(time.RFC3339Nano),
 		"pid", pid,
 		"outermost_pid", details.OutermostPID,
 		"innermost_pid", details.InnermostPID,

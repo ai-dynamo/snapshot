@@ -15,6 +15,8 @@ use cuinterpose_protocol::{
 };
 use report::{Event, Transfer, write as report};
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
+use std::net::Shutdown;
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::net::{SocketAddr, UnixStream};
 use std::path::PathBuf;
@@ -35,6 +37,9 @@ struct Arguments {
     content_storage: String,
     #[arg(long, num_args = 2, action = clap::ArgAction::Append)]
     allocation_session: Vec<String>,
+    /// Agent-owned socket: preflight acknowledgment, then native-ready observed PIDs.
+    #[arg(long, requires = "restore")]
+    restore_ready_fd: Option<i32>,
     #[arg(long)]
     proc_root: String,
     #[arg(long)]
@@ -46,7 +51,15 @@ struct Arguments {
     processes: Vec<i32>,
 }
 
+fn unix_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
 struct Peer {
+    pid: i32,
     endpoint: String,
     id: ParticipantId,
     session: Option<OwnedFd>,
@@ -96,6 +109,7 @@ impl Peer {
             "{endpoint}: unexpected handshake response"
         );
         Ok(Self {
+            pid: 0,
             endpoint,
             id: response.participant,
             session: None,
@@ -173,31 +187,91 @@ fn command_all(
     peers: &mut [Peer],
     operation: Operation,
     allocations: &[Allocation],
+    mut ready: Option<UnixStream>,
 ) -> Result<u32> {
     std::thread::scope(|scope| {
         let mut jobs = Vec::with_capacity(peers.len());
-        for peer in peers {
-            let session = if matches!(
-                operation,
-                Operation::SaveAllocations | Operation::LoadAllocations
-            ) {
-                peer.session.take()
-            } else {
-                None
-            };
-            let bytes = allocations
-                .iter()
-                .filter(|a| a.preserve_content && a.creator == peer.id)
-                .try_fold(0u64, |sum, a| {
-                    sum.checked_add(a.size).context("allocation size overflow")
-                })?;
-            jobs.push(
-                std::thread::Builder::new()
-                    .spawn_scoped(scope, move || peer.execute(operation, bytes, session))?,
-            );
-        }
+        let count = peers.len();
+        let mut pending: BTreeMap<_, _> = peers.iter_mut().map(|peer| (peer.pid, peer)).collect();
+        ensure!(pending.len() == count, "duplicate process PID");
+        let schedule = (|| -> Result<()> {
+            if let Some(socket) = &mut ready {
+                // All identities, topology, and session capabilities were checked
+                // before allowing the first native restore.
+                socket.write_all(&0i32.to_be_bytes())?;
+            }
+            while !pending.is_empty() {
+                let peer = if let Some(socket) = &mut ready {
+                    let mut pid = [0; 4];
+                    socket
+                        .read_exact(&mut pid)
+                        .context("native restore readiness ended early")?;
+                    pending
+                        .remove(&i32::from_be_bytes(pid))
+                        .context("unknown or duplicate ready PID")?
+                } else {
+                    pending.pop_first().expect("pending is nonempty").1
+                };
+                let session = if matches!(
+                    operation,
+                    Operation::SaveAllocations | Operation::LoadAllocations
+                ) {
+                    peer.session.take()
+                } else {
+                    None
+                };
+                let bytes = allocations
+                    .iter()
+                    .filter(|a| a.preserve_content && a.creator == peer.id)
+                    .try_fold(0u64, |sum, a| {
+                        sum.checked_add(a.size).context("allocation size overflow")
+                    })?;
+                let cancel = ready.as_ref().map(UnixStream::try_clone).transpose()?;
+                jobs.push(std::thread::Builder::new().spawn_scoped(scope, move || {
+                    let start = Instant::now();
+                    if operation == Operation::LoadAllocations {
+                        report(
+                            Event::RankLoadStarted {
+                                pid: peer.pid,
+                                unix_ms: unix_ms(),
+                            },
+                            start,
+                            1,
+                        )?;
+                    }
+                    let result = peer.execute(operation, bytes, session);
+                    if result.is_err() {
+                        // Wake readiness scheduling and the agent immediately;
+                        // scoped threads still drain before topology can advance.
+                        if let Some(socket) = cancel {
+                            let _ = socket.shutdown(Shutdown::Both);
+                        }
+                    }
+                    if operation == Operation::LoadAllocations {
+                        report(
+                            Event::RankLoadFinished {
+                                pid: peer.pid,
+                                unix_ms: unix_ms(),
+                                succeeded: result.is_ok(),
+                            },
+                            start,
+                            1,
+                        )?;
+                    }
+                    result
+                })?);
+            }
+            if let Some(socket) = &mut ready {
+                let mut extra = [0];
+                ensure!(
+                    socket.read(&mut extra)? == 0,
+                    "unexpected extra readiness message"
+                );
+            }
+            Ok(())
+        })();
         let mut longest = 0;
-        let mut failure = None;
+        let mut failure = schedule.err();
         for job in jobs {
             match job.join() {
                 Ok(Ok(copy_us)) => longest = longest.max(copy_us),
@@ -228,9 +302,15 @@ fn inspect(peers: &[Peer]) -> Result<(Vec<Participant>, u64, u64)> {
     Ok((participants, raw, unsupported))
 }
 
-fn transfer(peers: &mut [Peer], operation: Operation, allocations: &[Allocation]) -> Result<()> {
+fn transfer(
+    peers: &mut [Peer],
+    operation: Operation,
+    allocations: &[Allocation],
+    ready: Option<UnixStream>,
+) -> Result<()> {
     let start = Instant::now();
-    let copy_us = command_all(peers, operation, allocations).context("allocation transfer")?;
+    let copy_us =
+        command_all(peers, operation, allocations, ready).context("allocation transfer")?;
     let (count, bytes) =
         allocations
             .iter()
@@ -300,7 +380,9 @@ fn run() -> Result<()> {
             )
         };
         SocketAddr::from_pathname(&endpoint)?;
-        peers.push(Peer::identify(endpoint)?);
+        let mut peer = Peer::identify(endpoint)?;
+        peer.pid = observed;
+        peers.push(peer);
     }
     if args.identify {
         let (participants, raw, unsupported) = inspect(&peers)?;
@@ -320,6 +402,21 @@ fn run() -> Result<()> {
     };
     let mut sessions = BTreeMap::new();
     let mut seen_fds = std::collections::BTreeSet::new();
+    let ready = if let Some(fd) = args.restore_ready_fd {
+        ensure!(
+            storage == ContentStorage::Pagebroker && fd >= 3,
+            "readiness requires PageBroker restore"
+        );
+        seen_fds.insert(fd);
+        // The agent explicitly passes this socket, disjoint from session FDs.
+        let socket = unsafe { UnixStream::from_raw_fd(fd) };
+        rustix::io::fcntl_setfd(&socket, rustix::io::FdFlags::CLOEXEC)?;
+        socket.set_read_timeout(Some(protocol::timeout(Some(Operation::LoadAllocations))))?;
+        socket.set_write_timeout(Some(protocol::timeout(None)))?;
+        Some(socket)
+    } else {
+        None
+    };
     for pair in args.allocation_session.chunks_exact(2) {
         let id: ParticipantId = pair[0].parse()?;
         let fd: i32 = pair[1].parse()?;
@@ -368,11 +465,12 @@ fn run() -> Result<()> {
         let allocations = topology::validate(&participants)?;
         report(Event::Validate, start, peers.len())?;
         let start = Instant::now();
-        command_all(&mut peers, Operation::PrepareMulticast, &[]).context("multicast teardown")?;
+        command_all(&mut peers, Operation::PrepareMulticast, &[], None)
+            .context("multicast teardown")?;
         report(Event::PrepareMulticast, start, peers.len())?;
-        transfer(&mut peers, Operation::SaveAllocations, &allocations)?;
+        transfer(&mut peers, Operation::SaveAllocations, &allocations, None)?;
         let start = Instant::now();
-        command_all(&mut peers, Operation::PrepareUnicast, &[])?;
+        command_all(&mut peers, Operation::PrepareUnicast, &[], None)?;
         report(Event::PrepareUnicast, start, peers.len())?;
         let start = Instant::now();
         state::write_atomic(&path, &mut participants)?;
@@ -386,9 +484,9 @@ fn run() -> Result<()> {
         );
         let allocations = topology::validate(&expected)?;
         report(Event::Handshake, start, peers.len())?;
-        transfer(&mut peers, Operation::LoadAllocations, &allocations)?;
+        transfer(&mut peers, Operation::LoadAllocations, &allocations, ready)?;
         let start = Instant::now();
-        command_all(&mut peers, Operation::RestoreUnicast, &[])?;
+        command_all(&mut peers, Operation::RestoreUnicast, &[], None)?;
         report(Event::RestoreUnicast, start, peers.len())?;
         let start = Instant::now();
         for operation in [
@@ -397,7 +495,7 @@ fn run() -> Result<()> {
             Operation::RestoreMulticastDevices,
             Operation::RestoreMulticastBindings,
         ] {
-            command_all(&mut peers, operation, &[])?;
+            command_all(&mut peers, operation, &[], None)?;
         }
         report(Event::RestoreMulticast, start, peers.len())?;
         let start = Instant::now();

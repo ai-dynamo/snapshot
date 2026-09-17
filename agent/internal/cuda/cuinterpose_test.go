@@ -5,6 +5,7 @@ package cuda
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"os/exec"
@@ -12,12 +13,91 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/testr"
+	"golang.org/x/sys/unix"
 
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
+
+func TestPipelinedNativeRestore(t *testing.T) {
+	for _, failure := range []string{"", "native", "load", "preflight"} {
+		t.Run(failure, func(t *testing.T) {
+			// Stand-in coordinator speaks only the internal readiness seam.
+			script := `import os,socket,struct,sys
+s=socket.socket(fileno=4)
+if sys.argv[1]=="preflight": sys.exit(1)
+s.sendall(bytes(4))
+assert struct.unpack("!i",s.recv(4))[0]==11
+open(sys.argv[2],"w").close()
+if sys.argv[1]=="load": sys.exit(1)
+b=s.recv(4)
+if sys.argv[1]=="native":
+ assert not b
+ sys.exit(1)
+assert struct.unpack("!i",b)[0]==22
+assert not s.recv(1)
+`
+			fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parent, child := os.NewFile(uintptr(fds[0]), "parent"), os.NewFile(uintptr(fds[1]), "child")
+			defer child.Close()
+			connection, err := net.FileConn(parent)
+			_ = parent.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer connection.Close()
+			unused, err := os.Open("/dev/null")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer unused.Close()
+			marker := filepath.Join(t.TempDir(), "load-started")
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "python3", "-c", script, failure, marker)
+			cmd.ExtraFiles = []*os.File{unused, child}
+			var calls []int
+			err = runPipelinedRestore(ctx, cmd, connection.(*net.UnixConn), []int{11, 22}, func(ctx context.Context, pid int) error {
+				calls = append(calls, pid)
+				if pid == 22 {
+					for {
+						if _, err := os.Stat(marker); err == nil {
+							break
+						}
+						select {
+						case <-ctx.Done():
+							return ctx.Err()
+						case <-time.After(time.Millisecond):
+						}
+					}
+					if failure == "native" {
+						return errors.New("injected native failure")
+					}
+					if failure == "load" {
+						<-ctx.Done()
+						return ctx.Err()
+					}
+				}
+				return nil
+			}, logr.Discard())
+			if (err != nil) != (failure != "") {
+				t.Fatalf("error=%v", err)
+			}
+			if failure == "preflight" && len(calls) != 0 {
+				t.Fatalf("native restore ran before preflight: %v", calls)
+			}
+			if failure == "" && (len(calls) != 2 || calls[0] != 11 || calls[1] != 22) {
+				t.Fatalf("native order=%v", calls)
+			}
+		})
+	}
+}
 
 func TestDetectCuinterpose(t *testing.T) {
 	cases := map[string]struct {

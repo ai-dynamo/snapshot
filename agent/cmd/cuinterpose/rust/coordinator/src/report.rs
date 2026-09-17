@@ -28,6 +28,15 @@ pub enum Event {
     StateWrite,
     Handshake,
     LoadAllocations(Transfer),
+    RankLoadStarted {
+        pid: i32,
+        unix_ms: u128,
+    },
+    RankLoadFinished {
+        pid: i32,
+        unix_ms: u128,
+        succeeded: bool,
+    },
     RestoreUnicast,
     RestoreMulticast,
 }

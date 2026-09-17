@@ -6,7 +6,9 @@ use cuinterpose_protocol::{
     AllocationId, BindingSource, BindingVersion, MemberRange, Operation, Participant,
     ParticipantId, Record, Reply, Request, Response, decode, receive, send,
 };
-use std::os::unix::net::UnixListener;
+use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::{
     path::PathBuf,
     process::{Command, Output},
@@ -29,6 +31,98 @@ struct Model {
     fail: Option<Operation>,
     operations: Vec<String>,
     identity: u8,
+}
+
+#[test]
+fn pipelined_load_readiness_and_failures() {
+    for case in ["overlap", "unknown", "duplicate", "eof", "load-failure"] {
+        let fixture = Fixture::new(2, (case == "overlap").then_some(Operation::LoadAllocations));
+        assert!(fixture.run("--prepare").status.success());
+        for model in &fixture.models {
+            model.lock().unwrap().operations.clear();
+        }
+        if case == "load-failure" {
+            fixture.models[0].lock().unwrap().fail = Some(Operation::LoadAllocations);
+        }
+        let (mut agent, coordinator) = UnixStream::pair().unwrap();
+        agent
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        rustix::io::fcntl_setfd(&coordinator, rustix::io::FdFlags::empty()).unwrap();
+        let sessions: Vec<_> = (0..2)
+            .map(|_| std::fs::File::open("/dev/null").unwrap())
+            .collect();
+        let mut command = fixture.command("--restore");
+        command.args([
+            "--content-storage",
+            "pagebroker",
+            "--restore-ready-fd",
+            &coordinator.as_raw_fd().to_string(),
+        ]);
+        for (index, session) in sessions.iter().enumerate() {
+            rustix::io::fcntl_setfd(session, rustix::io::FdFlags::empty()).unwrap();
+            command.args([
+                "--allocation-session",
+                &ParticipantId([index as u8 + 1; 16]).to_string(),
+                &session.as_raw_fd().to_string(),
+            ]);
+        }
+        command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let child = command.spawn().unwrap();
+        drop(coordinator);
+        drop(sessions);
+        let mut ack = [1; 4];
+        agent.read_exact(&mut ack).unwrap();
+        assert_eq!(ack, [0; 4]);
+        if case == "unknown" {
+            agent.write_all(&99i32.to_be_bytes()).unwrap();
+        } else if case != "eof" {
+            agent.write_all(&1i32.to_be_bytes()).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !fixture.models[0]
+                .lock()
+                .unwrap()
+                .operations
+                .contains(&"load_allocations".into())
+            {
+                assert!(std::time::Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(1));
+            }
+            // First LOAD starts while rank 2 has not finished native restore.
+            assert!(
+                !fixture.models[1]
+                    .lock()
+                    .unwrap()
+                    .operations
+                    .contains(&"load_allocations".into())
+            );
+            match case {
+                "overlap" => agent.write_all(&2i32.to_be_bytes()).unwrap(),
+                "duplicate" => agent.write_all(&1i32.to_be_bytes()).unwrap(),
+                "load-failure" => assert_eq!(agent.read(&mut ack).unwrap(), 0),
+                _ => unreachable!(),
+            }
+        }
+        agent.shutdown(std::net::Shutdown::Write).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(
+            output.status.success(),
+            case == "overlap",
+            "{case}: {output:?}"
+        );
+        for model in &fixture.models {
+            assert_eq!(
+                model
+                    .lock()
+                    .unwrap()
+                    .operations
+                    .contains(&"restore_unicast".into()),
+                case == "overlap"
+            );
+        }
+    }
 }
 
 struct Fixture {
@@ -73,7 +167,7 @@ impl Fixture {
                         .set_read_timeout(Some(Duration::from_secs(5)))
                         .unwrap();
                     let (request, fd): (Request, _) = receive(&stream).unwrap();
-                    assert!(fd.is_none());
+                    drop(fd);
                     let mut model = model.lock().unwrap();
                     let (operation, response) = match request {
                         Request::Handshake => (None, Reply::Handshake),
@@ -133,6 +227,9 @@ impl Fixture {
                     } else if matches!(
                         (rendezvous, operation),
                         (
+                            Some(Operation::LoadAllocations),
+                            Some(Operation::RestoreUnicast)
+                        ) | (
                             Some(Operation::PrepareMulticast),
                             Some(Operation::SaveAllocations)
                         ) | (
@@ -163,7 +260,7 @@ impl Fixture {
         }
     }
 
-    fn run(&self, mode: &str) -> Output {
+    fn command(&self, mode: &str) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cuinterpose-coordinator"));
         command
             .args([mode, "--proc-root", "", "--checkpoint-dir"])
@@ -173,11 +270,18 @@ impl Fixture {
         for index in 1..=self.models.len() {
             command.args(["--process", &index.to_string(), &index.to_string()]);
         }
-        let output = command.output().unwrap();
+        command
+    }
+
+    fn run(&self, mode: &str) -> Output {
+        let output = self.command(mode).output().unwrap();
         if output.status.success() {
             let reports: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stdout)
                 .lines()
                 .map(|line| serde_json::from_str(line).unwrap())
+                .filter(|r: &serde_json::Value| {
+                    !r["phase"].as_str().unwrap().starts_with("rank_load_")
+                })
                 .collect();
             let phases: &[&str] = if mode == "--prepare" {
                 &[
