@@ -61,11 +61,9 @@ void Run(int pid, const std::filesystem::path& directory, bool jobfile_experimen
   Check(cuInit(0), "cuInit");
   int count = 0;
   Check(cuDeviceGetCount(&count), "cuDeviceGetCount");
-  if (count != 1 && !jobfile_experiment)
-    throw std::runtime_error("qualification worker requires exactly one visible GPU");
-  // Jobfile experiments must keep all peer GPUs visible, even when this
-  // target's payload belongs to just one device. CUDA legacy IPC resolves
-  // cross-device aliases during native preparation.
+  // Native preparation validates the target's visible GPU set, including
+  // zero-payload parents. Keep that set visible even without a jobfile;
+  // the selected UUID controls context ownership, not CUDA enumeration.
   std::map<CUcontext, std::pair<CUdevice, std::string>> contexts;
   for (int index = 0; index < count; ++index) {
     CUdevice device;
@@ -76,7 +74,7 @@ void Run(int pid, const std::filesystem::path& directory, bool jobfile_experimen
     std::copy(std::begin(uuid.bytes), std::end(uuid.bytes), bytes.begin());
     const auto device_uuid = storage::FormatGPUUUID(bytes);
     const char* selected = std::getenv("PAGEBROKER_NATIVE_SELECTED_GPU");
-    if (jobfile_experiment && selected && device_uuid != selected)
+    if (selected && device_uuid != selected)
       continue;
     CUcontext context;
     Check(cuDevicePrimaryCtxRetain(&context, device), "cuDevicePrimaryCtxRetain");
