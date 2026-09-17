@@ -18,5 +18,7 @@ func bindArtifactCleanupFlags(flags *flag.FlagSet) *operatortypes.ArtifactCleanu
 		"Maximum orphan artifact roots removed per scan")
 	flags.IntVar(&cfg.ListAttempts, "artifact-cleanup-list-attempts", operatortypes.DefaultArtifactListAttempts,
 		"Maximum complete metadata-list attempts per scan")
+	flags.IntVar(&cfg.Workers, "artifact-cleanup-workers", operatortypes.DefaultArtifactWorkers,
+		"Concurrent maintenance workers processing delete-content and sweep work items")
 	return cfg
 }
