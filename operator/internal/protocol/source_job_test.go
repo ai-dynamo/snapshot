@@ -25,25 +25,6 @@ func requireCheckpointContainer(t *testing.T, containers []corev1.Container, nam
 	return nil
 }
 
-func requireStableLaunchJobWrapper(t *testing.T, container *corev1.Container, original []string) {
-	t.Helper()
-	if strings.Join(container.Command, "|") != "cuda-checkpoint" {
-		t.Fatalf("expected cuda-checkpoint wrapper command, got %#v", container.Command)
-	}
-	if len(container.Args) < 6 {
-		t.Fatalf("launch-job wrapper args too short: %#v", container.Args)
-	}
-	if container.Args[0] != "--launch-job" || container.Args[1] != "/bin/sh" || container.Args[2] != "-c" || container.Args[4] != "dynamo-cuda-checkpoint" {
-		t.Fatalf("unexpected launch-job wrapper prefix: %#v", container.Args[:6])
-	}
-	if container.Args[5] != podcontract.CUDAJobFilePath {
-		t.Fatalf("stable job file = %q, want %q", container.Args[5], podcontract.CUDAJobFilePath)
-	}
-	if got := container.Args[6:]; strings.Join(got, "|") != strings.Join(original, "|") {
-		t.Fatalf("original command = %#v, want %#v", got, original)
-	}
-}
-
 func TestNewSourceJob(t *testing.T) {
 	job, err := NewSourceJob(&corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
@@ -68,7 +49,6 @@ func TestNewSourceJob(t *testing.T) {
 		Name:                  "test-job",
 		ActiveDeadlineSeconds: ptr.To(int64(60)),
 		TTLSecondsAfterFinish: ptr.To(int32(300)),
-		WrapLaunchJob:         true,
 	})
 	if err != nil {
 		t.Fatalf("expected source job, got error: %v", err)
@@ -103,7 +83,9 @@ func TestNewSourceJob(t *testing.T) {
 	if job.Spec.Template.Spec.SecurityContext == nil || job.Spec.Template.Spec.SecurityContext.SeccompProfile == nil {
 		t.Fatalf("expected seccomp profile to be injected: %#v", job.Spec.Template.Spec.SecurityContext)
 	}
-	requireStableLaunchJobWrapper(t, main, []string{"python3", "-m", "dynamo.vllm", "--model", "Qwen"})
+	if strings.Join(main.Command, " ") != "python3 -m dynamo.vllm" || strings.Join(main.Args, " ") != "--model Qwen" {
+		t.Fatalf("application command changed: %#v", main)
+	}
 	if job.Spec.BackoffLimit == nil || *job.Spec.BackoffLimit != 0 {
 		t.Fatalf("expected backoffLimit 0, got %#v", job.Spec.BackoffLimit)
 	}
@@ -129,14 +111,15 @@ func TestNewSourceJobWrapsTargetContainer(t *testing.T) {
 		TargetContainer:       "worker",
 		Name:                  "test-job",
 		TTLSecondsAfterFinish: ptr.To(int32(300)),
-		WrapLaunchJob:         true,
 	})
 	if err != nil {
 		t.Fatalf("expected source job, got error: %v", err)
 	}
 
 	worker := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, "worker")
-	requireStableLaunchJobWrapper(t, worker, []string{"python3", "-m", "dynamo.vllm", "--model", "Qwen"})
+	if strings.Join(worker.Command, " ") != "python3 -m dynamo.vllm" || strings.Join(worker.Args, " ") != "--model Qwen" {
+		t.Fatalf("application command changed: %#v", worker)
+	}
 
 	sidecar := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, "sidecar")
 	if len(sidecar.Command) != 1 || sidecar.Command[0] != "sleep" {
@@ -306,7 +289,7 @@ func TestNewSourceJobRejectsUnknownTarget(t *testing.T) {
 }
 
 // TestNewSourceJobNoWrapByDefault verifies that the container command is
-// preserved unchanged when WrapLaunchJob is false (the default). This guards
+// preserved unchanged. This guards
 // against accidentally re-introducing cuda-checkpoint wrapping as the default,
 // which would require cuda-checkpoint to be present in the placeholder image
 // at the exact path CRIU checkpointed it from.
@@ -327,7 +310,6 @@ func TestNewSourceJobNoWrapByDefault(t *testing.T) {
 		Namespace:       "test-ns",
 		TargetContainer: "main",
 		Name:            "test-job",
-		WrapLaunchJob:   false, // explicit: this is the default from snapshotctl
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -335,10 +317,10 @@ func TestNewSourceJobNoWrapByDefault(t *testing.T) {
 
 	main := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, "main")
 	if strings.Join(main.Command, " ") != strings.Join(originalCmd, " ") {
-		t.Errorf("command must be unchanged without WrapLaunchJob: got %v, want %v", main.Command, originalCmd)
+		t.Errorf("command must be unchanged: got %v, want %v", main.Command, originalCmd)
 	}
 	if strings.Join(main.Args, " ") != strings.Join(originalArgs, " ") {
-		t.Errorf("args must be unchanged without WrapLaunchJob: got %v, want %v", main.Args, originalArgs)
+		t.Errorf("args must be unchanged: got %v, want %v", main.Args, originalArgs)
 	}
 	if len(main.Command) > 0 && main.Command[0] == "cuda-checkpoint" {
 		t.Errorf("command must not be wrapped with cuda-checkpoint by default")
