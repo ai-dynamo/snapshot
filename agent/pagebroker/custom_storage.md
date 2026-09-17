@@ -44,6 +44,12 @@ In a container assigned multiple GPUs, `--targets 2` (or `--targets 8`) runs ind
 
 The installed qualification driver is patched R615. These calls use public APIs and deliberately avoid the patched jobfile-plus-CustomStorage combination, but successful qualification on that installation does not prove compatibility with an unpatched driver.
 
+### Patched-driver workload experiment
+
+The explicit `--jobfile-experiment` argument permits a nonempty `CUDA_CHECKPOINT_JOB_FILE` for real-model qualification on the patched driver. It is not a production compatibility mode: the default invocation still rejects any jobfile environment. All peers remain visible to the helper for legacy IPC resolution. `PAGEBROKER_NATIVE_SELECTED_GPU` can restrict the helper's retained primary context to a known target GPU UUID; targets without a selected GPU retain all visible contexts. The helper initializes its own CUDA contexts before joining the target's checkpoint job, so helper contexts do not become members of that job.
+
+The test owner uses `lock` on every target before issuing any `prepare-save`, keeps native preparation calls serial, and waits for every transfer before completing targets in child-before-parent order. The existing shim can use host carriers to remove shared VMM/multicast state before native capture and reconstruct it after native restore; bulk private bytes still use CustomStorage and the PageBroker engine, not the shim's allocation-storage path. This experiment does not establish stock-driver compatibility or production supervision.
+
 ## Remaining integration boundary
 
 The daemon does not yet admit native CustomStorage sessions, bind them to transactions, or launch this executable. Production integration must supply trusted target identities and storage capabilities, own target termination on failure, and preserve context ownership until target exit. The multi-target harness qualifies independent, single-GPU targets only: a single process spanning multiple GPUs, cross-node UUID remapping, IPC dependencies, CRIU, and production failure supervision remain outside this slice. Native preparation remains serial even when transfers overlap it. No additional wire protocol or speculative backend framework is introduced.

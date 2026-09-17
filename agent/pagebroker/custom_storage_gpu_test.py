@@ -187,6 +187,11 @@ def run_multiple(directory, mib, count):
         for iteration, mode in enumerate(("sequential", "pipeline", "pipeline", "sequential")):
             for operation in ("save", "load"):
                 started = time.monotonic()
+                if operation == "save":
+                    for worker in workers:
+                        worker.stdin.write("lock\n")
+                        worker.stdin.flush()
+                        assert json.loads(line(worker))["event"] == "locked"
                 pipeline = operation == "load" and mode == "pipeline"
                 preparations, transfers = [], []
                 for rank, worker in enumerate(workers):
