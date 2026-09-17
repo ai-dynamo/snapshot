@@ -181,6 +181,7 @@ class BenchmarkRecorder:
         self._error: dict[str, str] | None = None
         self._finished_at: datetime | None = None
         self._result_path: Path | None = None
+        self._redactions: dict[str, str] = {}
 
         self.define_duration(TEST_TOTAL, "Full E2E test")
         if start_test:
@@ -321,6 +322,22 @@ class BenchmarkRecorder:
     def update_environment(self, **values: Any) -> None:
         self.environment.update(values)
 
+    def redact(self, value: str | None, placeholder: str) -> None:
+        """Replaces `value` with `<placeholder>` in persisted free text.
+
+        Results are published, so infrastructure identifiers the test learns at
+        runtime (node names, agent pod names) are registered here and scrubbed
+        from every error message at the point it is persisted, instead of
+        trusting each raise site to leave them out.
+        """
+        if value and value != "unknown":
+            self._redactions[value] = f"<{placeholder}>"
+
+    def scrub(self, text: str) -> str:
+        for value in sorted(self._redactions, key=len, reverse=True):
+            text = text.replace(value, self._redactions[value])
+        return text
+
     def finish_test(self) -> None:
         measurement = self._measurement(TEST_TOTAL)
         if measurement.value is not None:
@@ -347,6 +364,8 @@ class BenchmarkRecorder:
         self.finish_test()
         self._outcome = outcome
         self._error = _bounded_error(error)
+        if self._error is not None:
+            self._error["message"] = self.scrub(self._error["message"])
         self._finished_at = self._finished_at or self._clock.now()
         self._result_path = self._write()
         print(self.summary(), flush=True)

@@ -234,7 +234,11 @@ driver are recorded separately because restore may receive a different
 physical GPU; whether it did is kept as `gpuAffinity` and `nodeAffinity`
 (`same`, `different`, or `unknown`) rather than as GPU UUIDs or node names,
 which are stable infrastructure identifiers and never enter a published
-result. The node's `nvidia.com/gpu.product` label is recorded too and stands
+result: the test registers the node and agent pod names it learns with the
+recorder, which replaces them with `<source-node>`, `<restore-node>`, and
+`<agent-pod>` in the durable `error.message` and in every recorded collection
+error (the full text still goes to the job log). The node's
+`nvidia.com/gpu.product` label is recorded too and stands
 in for the model when `nvidia-smi` is unavailable. Missing
 boundaries remain explicit incomplete measurements and are never serialized as
 zero.

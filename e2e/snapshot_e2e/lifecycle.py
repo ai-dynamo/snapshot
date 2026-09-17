@@ -939,9 +939,8 @@ def checkpoint_agent_pod(config: k8s.E2EConfig, node: str) -> str:
         if pod.spec.node_name == node
     ]
     if len(agents) != 1:
-        names = [pod.metadata.name for pod in agents]
         raise AssertionError(
-            f"expected one snapshot agent on node {node!r}, found {names}"
+            f"expected one snapshot agent on node {node!r}, found {len(agents)}"
         )
     return agents[0].metadata.name
 

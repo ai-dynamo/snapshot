@@ -177,6 +177,39 @@ def test_external_event_from_a_clock_ahead_of_the_runner_is_flagged(tmp_path) ->
     assert warnings[0] in recorder.summary()
 
 
+def test_registered_identifiers_are_redacted_from_persisted_error_text(tmp_path) -> None:
+    recorder = benchmark.BenchmarkRecorder(
+        suite="suite",
+        case="case",
+        test="test",
+        result_dir=tmp_path,
+        clock=FakeClock(),
+        run_id="local-test",
+    )
+    recorder.redact("aks-gpu-000001", "source-node")
+    recorder.redact("aks-gpu-000001-extra", "restore-node")
+    recorder.redact("snapshot-agent-k7xq2", "agent-pod")
+    recorder.redact(None, "ignored")
+    recorder.redact("unknown", "ignored")
+
+    scrubbed = recorder.scrub(
+        "expected one snapshot agent on node 'aks-gpu-000001-extra', "
+        "found ['snapshot-agent-k7xq2']; source aks-gpu-000001 unknown"
+    )
+    assert scrubbed == (
+        "expected one snapshot agent on node '<restore-node>', "
+        "found ['<agent-pod>']; source <source-node> unknown"
+    )
+
+    result = json.loads(
+        recorder.finalize(
+            "failed",
+            error={"phase": "call", "message": "pod restore-1 on aks-gpu-000001 never became Ready"},
+        ).read_text(encoding="utf-8")
+    )
+    assert result["error"]["message"] == "pod restore-1 on <source-node> never became Ready"
+
+
 def test_failure_keeps_incomplete_measurements_and_bounds_error(tmp_path) -> None:
     clock = FakeClock()
     recorder = benchmark.BenchmarkRecorder(

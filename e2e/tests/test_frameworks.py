@@ -165,6 +165,7 @@ def test_framework_checkpoint_restore_serves_inference(
             timeout=frameworks.SOURCE_READY_TIMEOUT_SECONDS,
         )
         source_node = source.spec.node_name
+        result.redact(source_node, "source-node")
         result.mark_event("source.ready")
         _record_framework_image_digest(result, source)
         source_gpu_ids = _record_gpu_environment(
@@ -241,6 +242,7 @@ def test_framework_checkpoint_restore_serves_inference(
         )
         restored_text = restored_text.strip()
         restore_node = restored_pod.spec.node_name
+        result.redact(restore_node, "restore-node")
         assert restored_text, f"{framework.restore_ready_file} is empty"
         print(f"[{framework.name}] first post-restore generation: {restored_text!r}")
 
@@ -515,6 +517,7 @@ def _record_agent_timings(
     def agent_logs(node: str) -> str:
         if node not in logs_by_node:
             agent = snap.checkpoint_agent_pod(config, node)
+            result.redact(agent, "agent-pod")
             logs_by_node[node] = k8s.pod_logs(
                 config.namespace,
                 agent,
@@ -595,7 +598,7 @@ def _record_environment_error(
     error: Exception,
 ) -> None:
     errors = dict(result.environment.get(category, {}))
-    message = f"{type(error).__name__}: {error}"
+    message = result.scrub(f"{type(error).__name__}: {error}")
     errors[key] = message
     result.update_environment(**{category: errors})
     print(f"benchmark {key} metadata unavailable: {message}")
