@@ -454,13 +454,20 @@ Broker::Abort(const Request& request)
   auto transaction = FindTransaction(request.transaction_id());
   if (!transaction)
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
-  std::lock_guard lock(transaction->mutex());
-  if (transaction->allocation_sessions)
-    return Fail(request, Failure::TRANSACTION_CONFLICT, "close allocation sessions before abort");
+  std::unique_lock lock(transaction->mutex());
   if (transaction->state() == Transaction::State::NEW || transaction->state() == Transaction::State::COMMITTED)
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
   if (transaction->state() == Transaction::State::ABORTED)
     return AbortSucceeded(request);
+
+  // Closing a client session starts teardown in another handler. Do not race
+  // its worker cleanup or admit new sessions while waiting. Release the mutex
+  // during the wait so destructors can relinquish admission. Stay within the
+  // agent's five-second Abort deadline; a stuck worker must keep its files intact.
+  transaction->allocation_failed |= transaction->allocation_sessions != 0;
+  if (!transaction->allocation_drained.wait_for(
+          lock, std::chrono::seconds(4), [&] { return transaction->allocation_sessions == 0; }))
+    return Fail(request, Failure::TRANSACTION_CONFLICT, "allocation sessions did not drain before abort deadline");
 
   const Path restore_root = staging_root_ / "restore";
   const Path checkpoint_root = staging_root_ / "checkpoint";

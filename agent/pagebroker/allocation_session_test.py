@@ -197,7 +197,6 @@ class AllocationSessions(unittest.TestCase):
         save, ready = self.bind("save", pb.BindAllocationSession.SAVE)
         self.assertTrue(ready.HasField("allocation_session"))
         self.assertEqual(self.request("save", "commit").failure.code, pb.Failure.TRANSACTION_CONFLICT)
-        self.assertEqual(self.request("save", "abort").failure.code, pb.Failure.TRANSACTION_CONFLICT)
         data = b"canonical allocation contents" * 100
         _, saved = self.batch(save, data)
         self.assertEqual(saved.completed.extents[0].allocation_id, self.allocation)
@@ -224,12 +223,25 @@ class AllocationSessions(unittest.TestCase):
         connection.close()
         # Commit refuses both active and disconnected-incomplete sessions.
         self.assertEqual(self.request("save", "commit").failure.code, pb.Failure.TRANSACTION_CONFLICT)
-        for _ in range(100):
-            reply = self.request("save", "abort")
-            if reply.HasField("abort_complete"):
-                break
-            time.sleep(.01)
+        reply = self.request("save", "abort")
         self.assertTrue(reply.HasField("abort_complete"))
+        self.assertFalse(any((self.root / "stage" / "checkpoint").iterdir()))
+
+    def test_abort_deadline_preserves_files_until_session_drains(self):
+        self.request("save", "prepare_staged_checkpoint")
+        connection, _ = self.bind("save", pb.BindAllocationSession.SAVE)
+        reply = self.request("save", "abort")
+        self.assertEqual(reply.failure.code, pb.Failure.TRANSACTION_CONFLICT)
+        self.assertIn("drain", reply.failure.message)
+        self.assertTrue(any((self.root / "stage" / "checkpoint").iterdir()))
+        # Abort has started cancellation; no new participant or publication
+        # may race cleanup, even if an existing worker has not exited yet.
+        _, rejected = self.bind("save", pb.BindAllocationSession.SAVE, "c" * 32)
+        self.assertTrue(rejected.HasField("failure"))
+        self.assertEqual(self.request("save", "commit").failure.code, pb.Failure.TRANSACTION_CONFLICT)
+        connection.close()
+        self.assertTrue(self.request("save", "abort").HasField("abort_complete"))
+        self.assertFalse(any((self.root / "stage" / "checkpoint").iterdir()))
 
     def test_descriptor_count_and_capability_restrictions(self):
         self.request("save", "prepare_staged_checkpoint")
@@ -238,10 +250,7 @@ class AllocationSessions(unittest.TestCase):
         self.assertTrue(failed.HasField("failure"))
         self.assertEqual(self.request("save", "commit").failure.code, pb.Failure.TRANSACTION_CONFLICT)
         # Abort releases the destination reservation before another save.
-        for _ in range(100):
-            if self.request("save", "abort").HasField("abort_complete"):
-                break
-            time.sleep(.01)
+        self.assertTrue(self.request("save", "abort").HasField("abort_complete"))
         self.request("other", "prepare_staged_checkpoint")
         connection, ready = self.bind("other", pb.BindAllocationSession.SAVE)
         self.assertTrue(ready.HasField("allocation_session"))

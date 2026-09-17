@@ -236,6 +236,7 @@ AllocationSession::~AllocationSession()
     std::lock_guard lock(transaction_->mutex());
     --transaction_->allocation_sessions;
     transaction_->allocation_failed |= !finished_;
+    transaction_->allocation_drained.notify_all();
   }
 }
 
@@ -267,6 +268,7 @@ v1::AllocationSessionReply AllocationSession::Execute(const v1::AllocationSessio
         std::lock_guard lock(transaction_->mutex());
         --transaction_->allocation_sessions;
         admitted_ = false;
+        transaction_->allocation_drained.notify_all();
       }
       reply.mutable_finished();
       return reply;

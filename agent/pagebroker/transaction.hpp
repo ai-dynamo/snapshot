@@ -4,6 +4,7 @@
 #pragma once
 
 #include <chrono>
+#include <condition_variable>
 #include <mutex>
 #include <variant>
 #include <set>
@@ -39,6 +40,7 @@ class Transaction {
   // A failed/unfinished session makes publication invalid, but permits Abort
   // after the last worker has drained. Participant IDs cannot be rebound.
   size_t allocation_sessions = 0;
+  std::condition_variable allocation_drained;
   bool allocation_failed = false;
   std::set<std::string> allocation_participants;
 
