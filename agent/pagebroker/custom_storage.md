@@ -3,9 +3,11 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Native CustomStorage transfer qualification
+# Native CustomStorage transfers
 
-`pagebroker-custom-storage-worker` is a standalone PageBroker GPU-engine qualification executable, not an agent-enabled storage mode or a daemon RPC endpoint. It establishes the native CustomStorage-to-transfer boundary without involving the shim, legacy IPC, CUDA jobfiles, or CRIU. Existing allocation-worker and host-carrier paths are unchanged.
+`pagebroker-custom-storage-worker` executes native CustomStorage operations inside the PageBroker GPU engine. The agent opts into this path with `nvidia.com/cuinterpose-allocation-storage: custom-storage`, together with enabled cuinterpose and PageBroker. Cuinterpose uses host carriers for shared VMM, multicast members, and adapted memory IPC; private CUDA state uses native CustomStorage. Existing allocation-worker and host-carrier-only modes remain separate.
+
+The pod contract omits `--launch-job` only for this explicit mode. Native memory IPC handles are replaced by the shim's VMM-backed adapter; foreign native IPC handles are not supported. The artifact records the content mode, and restore requires matching PageBroker capabilities rather than falling back to ordinary native restore.
 
 The worker owns the complete CUDA operation. Native CustomStorage returns an aggregate device-memory view and stream for each participating GPU in the calling process. Those pointers cannot be sent to another process. The same worker passes the returned view to PageBroker's existing `TransferBuffers` ring, which pipelines pinned-memory CUDA copies and NIXL POSIX storage requests. It calls `cuCheckpointOperationComplete` only after transfer success. No payload digest or compression is performed.
 
@@ -25,7 +27,7 @@ For controlled multi-target scheduling, `prepare-save` or `prepare-load` perform
 
 Each target has a separate worker with both processes pinned by GPU UUID through `CUDA_VISIBLE_DEVICES`. This avoids assuming that a target's ordinal agrees with a helper's ordinal. Native preparation calls execute serially across workers. The sequential schedule prepares every target before starting concurrent transfers; the pipeline schedule starts each prepared target's transfer while preparing the next target. Both schedules join every successful transfer before sending any COMPLETE. A failure terminates all test targets rather than completing a partially transferred batch.
 
-There is no public native abort after preparation. A failure returns no successful completion, does not unlock the target, and terminates the worker; the trusted owner must terminate the target. The GPU test harness does this in its cleanup path. This standalone executable is not suitable for untrusted requests or unattended production orchestration.
+There is no public native abort after preparation. A failure returns no successful completion, does not unlock the target, and terminates the worker; the trusted owner must terminate the target. The agent does this through the owning container's CRI identity. The standalone test harness terminates its own targets in cleanup. The executable is not an untrusted request interface.
 
 ## Timing and qualification
 
@@ -50,6 +52,12 @@ The explicit `--jobfile-experiment` argument permits a nonempty `CUDA_CHECKPOINT
 
 The test owner uses `lock` on every target before issuing any `prepare-save`, keeps native preparation calls serial, and waits for every transfer before completing targets in child-before-parent order. The existing shim can use host carriers to remove shared VMM/multicast state before native capture and reconstruct it after native restore; bulk private bytes still use CustomStorage and the PageBroker engine, not the shim's allocation-storage path. This experiment does not establish stock-driver compatibility or production supervision.
 
-## Remaining integration boundary
+## Transaction and process ownership
 
-The daemon does not yet admit native CustomStorage sessions, bind them to transactions, or launch this executable. Production integration must supply trusted target identities and storage capabilities, own target termination on failure, and preserve context ownership until target exit. The multi-target harness qualifies independent, single-GPU targets only: a single process spanning multiple GPUs, cross-node UUID remapping, IPC dependencies, CRIU, and production failure supervision remain outside this slice. Native preparation remains serial even when transfers overlap it. No additional wire protocol or speculative backend framework is introduced.
+The trusted agent admits one native session per captured namespace PID against a staged PageBroker transaction. The daemon pins the target container's PID namespace and a per-target directory beneath that transaction. A bound connection accepts only LOCK, PREPARE, TRANSFER, and COMPLETE; it cannot select another storage path or a process outside that namespace subtree. At the first operation, the agent supplies the target PID as observed from the pinned placeholder namespace. This differs from the restored process's innermost PID when CRIU creates a child namespace: the placeholder and restored root can both have innermost PID 1. The daemon resolves the observed PID at the pinned namespace's depth before spawning its worker, whose target remains fixed for the session. Workers retain the full target GPU visibility and apply the agent's source-to-destination UUID map on restore.
+
+Capture runs shim prepare, locks every native target, prepares native targets serially, transfers concurrently, and completes every target before CRIU. Restore uses the published artifact directly, restores CPU state with CRIU, prepares native targets serially, and overlaps earlier transfers with later preparation. All transfers must succeed before any COMPLETE/unlock. Shim restore then reconstructs shared mappings before the restore-complete sentinel releases application threads.
+
+Unfinished sessions prevent transaction publication. The agent terminates the owning container through CRI on destructive failure. Failed workers are killed and reaped before transaction cleanup; successful workers relinquish storage admission but retain CUDA context ownership until their target exits. This context-lifetime requirement is independent of the artifact transaction lifetime.
+
+The standalone whole-operation and phase commands remain useful for native GPU qualification. They are not the daemon's public protocol and do not substitute for CRIU or cross-node tests. IPC events, memory-pool IPC, and untracked sharing remain outside the supported memory-IPC adapter.

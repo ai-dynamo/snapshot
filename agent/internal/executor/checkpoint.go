@@ -25,6 +25,7 @@ import (
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
 const pageBrokerAbortTimeout = 5 * time.Second
@@ -93,7 +94,7 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	brokered := req.PageBrokerRequested && cfg.PageBroker.Enabled
 	switch req.CuinterposeAllocationStorage {
 	case "", "host-carrier":
-	case "pagebroker":
+	case "pagebroker", "custom-storage":
 		if !brokered || !req.CuinterposeRequested {
 			return fmt.Errorf("PageBroker allocation storage requires cuinterpose and an enabled PageBroker transaction")
 		}
@@ -143,7 +144,7 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		return err
 	}
 	cudaJobFile := ""
-	if len(state.CUDAHostPIDs) > 0 {
+	if len(state.CUDAHostPIDs) > 0 && req.CuinterposeAllocationStorage != "custom-storage" {
 		cudaJobFile, err = cuda.StageJobFile(state.RootFS, tmpDir, len(state.GPUs.Devices))
 		if err != nil {
 			return err
@@ -156,6 +157,20 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	}
 
 	var sessions cuda.AllocationSessions
+	if req.CuinterposeAllocationStorage == "custom-storage" {
+		if !state.Cuinterpose || len(state.CUDANSPIDs) == 0 {
+			return fmt.Errorf("native CustomStorage requires completely interposed CUDA targets")
+		}
+		if _, err := os.Stat(filepath.Join(state.RootFS, podcontract.CUDAJobFilePath)); !os.IsNotExist(err) {
+			return fmt.Errorf("native CustomStorage source must not have a CUDA jobfile")
+		}
+		sessions, err = cuda.BindNativeSessions(ctx, broker, transactionID, state.PID,
+			state.CUDANSPIDs, data.CUDA.SourceGPUUUIDs, "", true)
+		if err != nil {
+			return err
+		}
+		defer sessions.Close()
+	}
 	if req.CuinterposeAllocationStorage == "pagebroker" {
 		ids, err := cuda.IdentifyCuinterpose(ctx, tmpDir, snapshotruntime.HostProcPath, state.PID, state.CUDAHostPIDs, state.CUDANSPIDs, cuda.DefaultCoordinatorBinaryPath)
 		if err != nil {
@@ -169,6 +184,11 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	}
 	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, sessions)
 	if err != nil {
+		if req.CuinterposeAllocationStorage == "custom-storage" {
+			terminateCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			err = errors.Join(err, rt.TerminateContainer(terminateCtx, req.ContainerID))
+		}
 		return checkpointNeedsSourceKill(err)
 	}
 
@@ -381,6 +401,10 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 			// memory. There is no rollback; if anything after this fails the
 			// caller terminates the source (checkpointNeedsSourceKill).
 			prepareStart := time.Now()
+			shimSessions := sessions
+			if data.Cuinterpose.AllocationStorage == "custom-storage" {
+				shimSessions = nil
+			}
 			_, err := cuda.PrepareCuinterpose(
 				ctx,
 				checkpointDir,
@@ -390,9 +414,9 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 				state.CUDANSPIDs,
 				cuda.DefaultCoordinatorBinaryPath,
 				log,
-				sessions...,
+				shimSessions...,
 			)
-			for _, session := range sessions {
+			for _, session := range shimSessions {
 				session.Close()
 			}
 			timings.CuinterposePrepareDuration = time.Since(prepareStart)
@@ -404,11 +428,23 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 				return nil, fmt.Errorf("record cuinterpose prepare in checkpoint manifest: %w", err)
 			}
 		}
-		cudaTimings, err := cuda.CheckpointProcessTree(ctx, state.CUDAHostPIDs, cudaJobFile, checkpointDir, log)
-		if err != nil {
-			return nil, fmt.Errorf("CUDA checkpoint failed: %w", err)
+		if data.Cuinterpose.AllocationStorage == "custom-storage" {
+			start := time.Now()
+			if len(sessions) != 1 {
+				return nil, fmt.Errorf("native capture requires broker sessions")
+			}
+			if err := cuda.RunNativeSessions(ctx, sessions[0], state.CUDANSPIDs, true, false, log); err != nil {
+				return nil, fmt.Errorf("native CustomStorage capture: %w", err)
+			}
+			sessions[0].Close()
+			timings.CUDACheckpointDuration = time.Since(start)
+		} else {
+			cudaTimings, err := cuda.CheckpointProcessTree(ctx, state.CUDAHostPIDs, cudaJobFile, checkpointDir, log)
+			if err != nil {
+				return nil, fmt.Errorf("CUDA checkpoint failed: %w", err)
+			}
+			timings.CUDACheckpointDuration = cudaTimings.TotalDuration
 		}
-		timings.CUDACheckpointDuration = cudaTimings.TotalDuration
 	}
 
 	criuDumpDuration, err := criu.ExecuteDump(criuOpts, checkpointDir, criuSettings, log)

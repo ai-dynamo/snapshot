@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -152,7 +153,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if err := requireCuinterposeState(manifest, artifactPath); err != nil {
 		return 0, err
 	}
-	if manifest.Cuinterpose.AllocationStorage == "pagebroker" {
+	if manifest.Cuinterpose.AllocationStorage == "pagebroker" || manifest.Cuinterpose.AllocationStorage == "custom-storage" {
 		if !req.PageBrokerEnabled {
 			return 0, fmt.Errorf("checkpoint requires PageBroker allocation storage")
 		}
@@ -180,7 +181,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		transactionID = uuid.NewString()
 		broker = pagebroker.Client{ControlSocketPath: req.PageBrokerControlSocketPath}
 		stageStart := time.Now()
-		if manifest.Cuinterpose.AllocationStorage == "pagebroker" {
+		if manifest.Cuinterpose.AllocationStorage == "pagebroker" || manifest.Cuinterpose.AllocationStorage == "custom-storage" {
 			// GPU contents stay in the published artifact. CRIU uses the normal
 			// read-only artifact mount and its private writable image view.
 			if err := broker.DirectRestore(ctx, transactionID, artifactPath); err != nil {
@@ -197,6 +198,22 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	}
 	var sessions cuda.AllocationSessions
 	var allocationBindDuration time.Duration
+	if manifest.Cuinterpose.AllocationStorage == "custom-storage" {
+		var devices []string
+		for _, pair := range strings.Split(snap.CUDADeviceMap, ",") {
+			_, destination, ok := strings.Cut(pair, "=")
+			if !ok {
+				return 0, fmt.Errorf("native CustomStorage requires explicit destination GPU mapping")
+			}
+			devices = append(devices, destination)
+		}
+		sessions, err = cuda.BindNativeSessions(ctx, broker, transactionID, snap.PlaceholderPID,
+			manifest.CUDA.PIDs, devices, snap.CUDADeviceMap, false)
+		if err != nil {
+			return 0, err
+		}
+		defer sessions.Close()
+	}
 	if manifest.Cuinterpose.AllocationStorage == "pagebroker" {
 		bindStart := time.Now()
 		ids, err := cuda.CapturedParticipants(ctx, artifactPath, manifest.CUDA.PIDs)
@@ -223,6 +240,11 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	}
 
 	result, err := execNSRestore(ctx, log, req, snap, bundleMount, containerCheckpointPath, sessions)
+	if err != nil && manifest.Cuinterpose.AllocationStorage == "custom-storage" {
+		terminateCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		err = errors.Join(err, rt.TerminateContainer(terminateCtx, req.ContainerID))
+	}
 	sessions.Close()
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)

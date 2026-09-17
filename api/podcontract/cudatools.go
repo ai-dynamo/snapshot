@@ -176,6 +176,21 @@ func ShapeCUDATools(
 		if err != nil {
 			return nil, err
 		}
+		if shaped.Annotations[CuinterposeAllocationStorageAnnotation] == "custom-storage" {
+			enabled, err := CuinterposeEnabled(shaped.Annotations)
+			if err != nil || !enabled {
+				return nil, fmt.Errorf("native CustomStorage requires cuinterpose")
+			}
+			for _, env := range container.Env {
+				if env.Name == "CUDA_CHECKPOINT_JOB_FILE" {
+					return nil, fmt.Errorf("native CustomStorage must not use CUDA_CHECKPOINT_JOB_FILE")
+				}
+			}
+			if isCUDACheckpointLaunchJob(container.Args) {
+				return nil, fmt.Errorf("native CustomStorage must not use launch-job")
+			}
+			needed = false
+		}
 		if !needed {
 			continue
 		}

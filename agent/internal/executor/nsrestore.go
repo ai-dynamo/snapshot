@@ -83,7 +83,10 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		if err != nil {
 			return nil, err
 		}
-		if len(m.CUDA.SourceGPUUUIDs) > 1 && cudaJobFile == "" {
+		if m.Cuinterpose.AllocationStorage == "custom-storage" && cudaJobFile != "" {
+			return nil, fmt.Errorf("native CustomStorage artifact must not contain launch-job state")
+		}
+		if len(m.CUDA.SourceGPUUUIDs) > 1 && cudaJobFile == "" && m.Cuinterpose.AllocationStorage != "custom-storage" {
 			return nil, fmt.Errorf("multi-GPU checkpoint is missing CUDA launch-job state")
 		}
 	}
@@ -194,8 +197,9 @@ func executeRestore(
 		if err := requireCuinterposeState(m, opts.CheckpointPath); err != nil {
 			return nil, 0, nil, err
 		}
-		if (m.Cuinterpose.AllocationStorage == "pagebroker") != (len(opts.AllocationSessions) != 0) ||
-			(m.Cuinterpose.AllocationStorage == "pagebroker" && len(opts.AllocationSessions) != len(m.CUDA.PIDs)) {
+		external := m.Cuinterpose.AllocationStorage == "pagebroker" || m.Cuinterpose.AllocationStorage == "custom-storage"
+		if external != (len(opts.AllocationSessions) != 0) ||
+			(external && len(opts.AllocationSessions) != len(m.CUDA.PIDs)) {
 			return nil, 0, nil, fmt.Errorf("allocation session capabilities do not match captured storage mode or CUDA participants")
 		}
 		coordinator, err := os.Open(filepath.Join(opts.BundleDir, cuda.CoordinatorBinaryName))
@@ -297,7 +301,12 @@ func executeRestore(
 			}
 			return timings, restoredPID, nil, nil
 		}
-		_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, log)
+		if m.Cuinterpose.AllocationStorage == "custom-storage" {
+			err = cuda.RunNativeSessions(ctx, opts.AllocationSessions, m.CUDA.PIDs, false, true, log, restorePIDs)
+			opts.AllocationSessions.Close()
+		} else {
+			_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, log)
+		}
 		timings.cudaRestoreDuration = time.Since(cudaStart)
 		if err != nil {
 			return nil, 0, nil, fmt.Errorf("CUDA restore failed: %w", err)
@@ -308,7 +317,11 @@ func executeRestore(
 			// loop, so nothing else touches the shared memory while the
 			// coordinator rebuilds it.
 			cuinterposeStart := time.Now()
-			_, err := cuda.RestoreCuinterpose(ctx, opts.CheckpointPath, restorePIDs, m.CUDA.PIDs, coordinatorFdPath, log, opts.AllocationSessions)
+			sessions := opts.AllocationSessions
+			if m.Cuinterpose.AllocationStorage == "custom-storage" {
+				sessions = nil
+			}
+			_, err := cuda.RestoreCuinterpose(ctx, opts.CheckpointPath, restorePIDs, m.CUDA.PIDs, coordinatorFdPath, log, sessions)
 			opts.AllocationSessions.Close()
 			timings.cuinterposeRestoreDuration = time.Since(cuinterposeStart)
 			if err != nil {
@@ -327,7 +340,7 @@ func executeRestore(
 func requireCuinterposeState(m *types.CheckpointManifest, checkpointPath string) error {
 	switch m.Cuinterpose.AllocationStorage {
 	case "", "host-carrier":
-	case "pagebroker":
+	case "pagebroker", "custom-storage":
 		if !m.Cuinterpose.Prepared {
 			return fmt.Errorf("PageBroker allocation storage without prepared cuinterpose state")
 		}

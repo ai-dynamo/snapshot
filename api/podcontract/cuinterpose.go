@@ -26,7 +26,7 @@ const ldPreloadEnv = "LD_PRELOAD"
 func CuinterposeEnabled(annotations map[string]string) (bool, error) {
 	switch storage := annotations[CuinterposeAllocationStorageAnnotation]; storage {
 	case "", "host-carrier":
-	case "pagebroker":
+	case "pagebroker", "custom-storage":
 		if annotations[CuinterposeAnnotation] != CuinterposeAnnotationEnabled {
 			return false, fmt.Errorf("%s requires enabled cuinterpose", CuinterposeAllocationStorageAnnotation)
 		}
@@ -75,7 +75,7 @@ func ShapeCuinterposeCapture(
 			return err
 		}
 		storage := shaped.Annotations[CuinterposeAllocationStorageAnnotation]
-		if storage == "" {
+		if storage == "" || storage == "custom-storage" {
 			storage = "host-carrier"
 		}
 		found := false
