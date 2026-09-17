@@ -112,6 +112,9 @@ would interrupt the main narrative.
 ## Finish
 
 Run `make update-toc` after all heading changes, then run `make verify-toc`.
-Before submission, run `make check`, `make test`, and `make build`, then review
-the diff. Confirm the saved path and remind the user that the proposal is
-submitted as a GitHub pull request under the repository's SNEP process.
+Review and commit the proposal and generated TOC with DCO sign-off before
+running `make check`, which requires a clean working tree. Then run `make
+check`, `make test`, and `make build`. If `make check` changes files, amend the
+commit and rerun it. Confirm the saved path and remind the user that the
+proposal is submitted as a GitHub pull request under the repository's SNEP
+process.
