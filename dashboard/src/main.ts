@@ -103,9 +103,24 @@ const elements = {
 let history: LoadedHistory;
 let charts: Chart<"line", DashboardPoint[]>[] = [];
 let stageChart: Chart<"bar", number[]> | null = null;
-let stageComparisonCharts: Chart<"bar", number[]>[] = [];
+let stageComparisonCharts: Chart<"bar", (number | null)[]>[] = [];
 let currentMetrics: ReadonlySet<string> = new Set();
+let currentPreview: PreviewMetadata | null = null;
+
+// A preview overlays one workflow run on nightly history; its records are the
+// ones whose run ID matches the preview source (earlier attempts carried
+// forward by the collector share that run ID).
+function isPreviewRun(result: BenchmarkResult): boolean {
+  return currentPreview !== null && result.identity.runId === currentPreview.source.runId;
+}
+
+function previewLabel(): string {
+  const source = currentPreview?.source;
+  if (!source) return "Preview";
+  return source.pullRequest ? `PR #${source.pullRequest}` : `Run ${source.runId}`;
+}
 const STAGE_COMPARISON_RUN_COUNT = 7;
+const PREVIEW_OUTLINE = "#192527";
 
 const STAGE_COLORS = [
   "#76b900",
@@ -209,6 +224,7 @@ function renderWarnings() {
 }
 
 function renderPreview(preview: PreviewMetadata | null): void {
+  currentPreview = preview;
   if (preview === null) return;
   const source = preview.source;
   elements.previewTitle.textContent = source.pullRequest
@@ -576,11 +592,17 @@ function chartDataset(
     spanGaps: false,
     pointRadius: 4,
     pointHoverRadius: 7,
-    pointBorderWidth: 2,
+    pointBorderWidth: (context) => {
+      const point = chartPoint(context);
+      return point && isPreviewRun(point.result) ? 3 : 2;
+    },
     pointBackgroundColor: (context) =>
       chartPoint(context)?.outcome === "passed" ? color : "#e24a3b",
-    pointBorderColor: (context) =>
-      chartPoint(context)?.outcome === "passed" ? "#ffffff" : "#7d2018",
+    pointBorderColor: (context) => {
+      const point = chartPoint(context);
+      if (point && isPreviewRun(point.result)) return PREVIEW_OUTLINE;
+      return point?.outcome === "passed" ? "#ffffff" : "#7d2018";
+    },
     pointStyle: (context) =>
       chartPoint(context)?.outcome === "passed" ? "circle" : "crossRot",
   };
@@ -639,6 +661,7 @@ function tooltipLines(point: DashboardPoint, metric: MetricDefinition): string[]
   const environment = point.result.environment;
   return [
     `${frameworkLabel(point.result.identity.case)}: ${formatValue(point.y, metric.unit)}`,
+    ...(isPreviewRun(point.result) ? [`Preview: ${previewLabel()} (not in nightly history)`] : []),
     `Outcome: ${displayIdentifier(point.outcome)}`,
     ...(point.comparison.skippedReason
       ? [`Comparison: ${point.comparison.skippedReason}`]
@@ -678,7 +701,7 @@ function renderTable(
     row.className = `outcome--${result.outcome}`;
     appendCell(row, fullDate(result.startedAt));
     appendCell(row, frameworkLabel(result.identity.case));
-    appendOutcomeCell(row, result.outcome);
+    appendOutcomeCell(row, result.outcome, isPreviewRun(result));
     appendCell(row, gpuModels(result).join(", ") || "unknown");
     for (const metric of metrics) {
       const item = measurement(result, metric.name);
@@ -715,6 +738,16 @@ function showDetails(result: BenchmarkResult): void {
     ["Outcome", displayIdentifier(result.outcome)],
     ["Started", fullDate(result.startedAt)],
     ["Run", `${result.identity.runId} (attempt ${result.identity.runAttempt})`],
+    ...(currentPreview
+      ? [
+          [
+            "Source",
+            isPreviewRun(result)
+              ? `${previewLabel()} preview · not in nightly history`
+              : "Durable nightly history",
+          ] as const,
+        ]
+      : []),
     ["GPU", gpuModels(result).join(", ") || "unknown"],
     ["Model", stringProperty(environment, "model") ?? "unknown"],
     ["Storage", `${storageType} · ${storageSize}`],
@@ -806,15 +839,23 @@ function renderStageComparisonCharts(
     // Index 0 is the most recent run; reverse so the chart reads oldest to
     // newest top-to-bottom, matching the line charts' left-to-right time axis.
     const runs = [...comparison.runs].reverse();
-    const labels = runs.map((run) => stageRunLabel(run.result));
+    const labels = runs.map((run) => stageRunLabel(run.result, run.missing));
     const chart = new Chart(canvas, {
       type: "bar",
       data: {
         labels,
-        datasets: comparison.stages.map((stage): ChartDataset<"bar", number[]> => ({
+        datasets: comparison.stages.map((stage): ChartDataset<"bar", (number | null)[]> => ({
           label: stage.displayName,
-          data: runs.map((run) => run.values.get(stage.name) ?? 0),
+          // null, not 0: Chart.js draws nothing and shows no tooltip for it,
+          // so an incomplete stage never reads as a zero-second one.
+          data: runs.map((run) => run.values.get(stage.name) ?? null),
           backgroundColor: stageColor(stage.name),
+          borderColor: PREVIEW_OUTLINE,
+          borderWidth: (context) => {
+            const run = runs[context.dataIndex];
+            return run && isPreviewRun(run.result) ? 2 : 0;
+          },
+          borderSkipped: false,
           stack: "timeline",
         })),
       },
@@ -832,9 +873,11 @@ function renderStageComparisonCharts(
   }
 }
 
-function stageRunLabel(result: BenchmarkResult): string {
+function stageRunLabel(result: BenchmarkResult, missing: readonly string[] = []): string {
   const outcome = result.outcome === "passed" ? "" : ` · ${displayIdentifier(result.outcome)}`;
-  return `${shortDate(result.startedAt)}${outcome}`;
+  const preview = isPreviewRun(result) ? ` · ${previewLabel()}` : "";
+  const gaps = missing.length ? ` · missing ${missing.join(", ")}` : "";
+  return `${shortDate(result.startedAt)}${outcome}${preview}${gaps}`;
 }
 
 function renderStageBreakdown(result: BenchmarkResult): void {
@@ -966,12 +1009,18 @@ function appendCell(row: HTMLTableRowElement, value: string): void {
   row.append(cell);
 }
 
-function appendOutcomeCell(row: HTMLTableRowElement, outcome: Outcome): void {
+function appendOutcomeCell(row: HTMLTableRowElement, outcome: Outcome, preview = false): void {
   const cell = document.createElement("td");
   const badge = document.createElement("span");
   badge.className = `badge badge--${outcome}`;
   badge.textContent = displayIdentifier(outcome);
   cell.append(badge);
+  if (preview) {
+    const marker = document.createElement("span");
+    marker.className = "badge badge--preview";
+    marker.textContent = previewLabel();
+    cell.append(marker);
+  }
   row.append(cell);
 }
 

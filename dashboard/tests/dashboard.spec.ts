@@ -232,9 +232,9 @@ test("labels a pull request overlay as temporary history", async ({ page }) => {
           event: "push",
           branch: "pull-request/250",
           commit: "0123456789abcdef",
-          runId: "12345",
+          runId: "101",
           runAttempt: 1,
-          runUrl: "https://github.com/ai-dynamo/snapshot/actions/runs/12345",
+          runUrl: "https://github.com/ai-dynamo/snapshot/actions/runs/101",
           pullRequest: 250,
         },
       }),
@@ -249,6 +249,17 @@ test("labels a pull request overlay as temporary history", async ({ page }) => {
   await expect(banner).toContainText("not part of benchmark history");
   await expect(banner.getByRole("link", { name: "Open workflow run" })).toHaveAttribute(
     "href",
-    "https://github.com/ai-dynamo/snapshot/actions/runs/12345",
+    "https://github.com/ai-dynamo/snapshot/actions/runs/101",
   );
+
+  const previewRows = page.locator("#latest-body tr", { has: page.locator(".badge--preview") });
+  await expect(previewRows).toHaveCount(1);
+  await expect(previewRows.locator(".badge--preview")).toHaveText("PR #250");
+  await previewRows.getByRole("button", { name: "Details" }).click();
+  await expect(page.getByRole("dialog")).toContainText("PR #250 preview");
+  await page.getByRole("button", { name: "Close" }).click();
+
+  const nightlyRow = page.locator("#latest-body tr").filter({ hasNot: page.locator(".badge--preview") }).first();
+  await nightlyRow.getByRole("button", { name: "Details" }).click();
+  await expect(page.getByRole("dialog")).toContainText("Durable nightly history");
 });

@@ -120,6 +120,8 @@ export interface StageRun {
   result: BenchmarkResult;
   /** Seconds per measurement name, aligned to `StageComparison.stages`. */
   values: ReadonlyMap<string, number>;
+  /** Display names of selected stages this run has no complete value for. */
+  missing: string[];
 }
 
 export interface StageComparison {
@@ -174,7 +176,12 @@ export function recentStageComparison(
     for (const segment of breakdowns[index]!) {
       values.set(segment.name, (values.get(segment.name) ?? 0) + segment.seconds);
     }
-    return { result, values };
+    // An absent stage is an incomplete measurement, not a zero-second one; the
+    // chart leaves a gap and names it rather than drawing a 0 width segment.
+    const missing = stages
+      .filter((stage) => !values.has(stage.name))
+      .map((stage) => stage.displayName);
+    return { result, values, missing };
   });
 
   return { stages, runs };

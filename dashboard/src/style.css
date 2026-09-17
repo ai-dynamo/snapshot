@@ -241,6 +241,7 @@ select {
   width: 100%;
   min-height: 1.8rem;
   padding: 0.35rem 2rem 0.35rem 0.75rem;
+  font-size: 0.68rem;
   border: 1px solid #c8d0c7;
   border-radius: 0.55rem;
   color: var(--ink);
@@ -314,7 +315,7 @@ fieldset {
   border-radius: 5px;
   color: var(--muted);
   background: white;
-  font-size: 0.88rem;
+  font-size: 0.68rem;
   transition: 120ms ease;
 }
 
@@ -441,7 +442,7 @@ fieldset {
 table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.88rem;
+  font-size: 0.68rem;
 }
 
 th,
@@ -492,6 +493,13 @@ td {
   background: #e7e9e7;
 }
 
+.badge--preview {
+  margin-left: 0.35rem;
+  color: #273c00;
+  background: #eaf5d7;
+  border: 1px solid var(--green-dark);
+}
+
 dialog {
   width: min(48rem, calc(100% - 2rem));
   max-height: calc(100vh - 2rem);
@@ -515,6 +523,12 @@ dialog::backdrop {
 
 .dialog__heading h2 {
   margin: 0;
+  font-size: 1rem;
+}
+
+/* Scoped to the content so the dialog title and close button keep their size. */
+#details-content {
+  font-size: 0.68rem;
 }
 
 .icon-button {
