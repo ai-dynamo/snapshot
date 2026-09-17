@@ -130,11 +130,12 @@ mod tests {
         );
     }
 }
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::os::fd::{AsFd, IntoRawFd};
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
-use std::sync::{Mutex, MutexGuard, TryLockError};
+use std::sync::{Mutex, MutexGuard};
 
 pub use crate::driver::Result;
 struct Generation {
@@ -698,42 +699,117 @@ pub(super) fn random<const N: usize>() -> Result<[u8; N]> {
     Ok(bytes)
 }
 
+pub(super) fn initialized() -> bool {
+    !G_STATE.load(Ordering::Acquire).is_null()
+}
+
 pub fn initialize() -> Result<()> {
-    // STATE denotes a ready generation, never one whose listener is still
-    // starting. A caller may own the loader lock needed by another initializer,
-    // so it must not wait for that initializer's thread/TLS setup.
-    if !G_STATE.load(Ordering::Acquire).is_null() {
-        return Ok(());
-    }
     if super::G_FAILED.load(Ordering::Acquire) {
         return Err(CudaError::from(CUDA_ERROR_UNKNOWN));
     }
-    let _initializing = match G_INITIALIZING.try_lock() {
-        Ok(guard) => guard,
-        Err(TryLockError::WouldBlock) => {
-            return Err(CudaError::from(CUDA_ERROR_NOT_INITIALIZED));
-        }
-        Err(TryLockError::Poisoned(poison)) if G_CHILD.load(Ordering::Acquire) => {
-            poison.into_inner()
-        }
-        Err(TryLockError::Poisoned(_)) => return Err(CudaError::from(CUDA_ERROR_UNKNOWN)),
-    };
-    if !G_STATE.load(Ordering::Acquire).is_null() {
+    if initialized() {
         return Ok(());
     }
-    if super::G_FAILED.load(Ordering::Acquire) {
-        return Err(CudaError::from(CUDA_ERROR_UNKNOWN));
+    thread_local! {
+        // Non-Drop TLS: initialize this module's TLS before the commit lock,
+        // without registering a destructor with the dynamic loader.
+        static PREPARING: Cell<bool> = const { Cell::new(false) };
     }
-    let result = initialize_generation();
-    if result.is_err() {
-        // Actual setup failure is sticky; contention above is a transient
-        // refusal and must not poison the initializer that is making progress.
-        super::G_FAILED.store(true, Ordering::Release);
+    if PREPARING.replace(true) {
+        return Err(CUDA_ERROR_NOT_INITIALIZED.into());
     }
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            PREPARING.set(false);
+        }
+    }
+    let _reset = Reset;
+    // Thread creation/TLS registration must never own process-wide installation
+    // exclusion. A constructor holding the loader lock can prepare its own
+    // candidate while a different caller waits in Rust's spawn hooks.
+    let mut candidate = RuntimeCandidate::prepare();
+    let result = (|| {
+        let _installing = match G_INITIALIZING.lock() {
+            Ok(guard) => guard,
+            Err(poison) if G_CHILD.load(Ordering::Acquire) => poison.into_inner(),
+            Err(_) => return Err(CUDA_ERROR_UNKNOWN.into()),
+        };
+        let result = (|| {
+            if super::G_FAILED.load(Ordering::Acquire) {
+                return Err(CUDA_ERROR_UNKNOWN.into());
+            }
+            // A private candidate is dispensable once a healthy runtime exists.
+            // Never hide installed failure, or wait for an unfinished preparer.
+            if initialized() {
+                return Ok(());
+            }
+            let candidate = match candidate.as_mut() {
+                Ok(candidate) => candidate,
+                Err(error) => return Err(*error),
+            };
+            let Some(candidate) = candidate else {
+                return Ok(());
+            };
+            let generation = candidate.generation.as_mut().unwrap();
+            let state = generation.state.get_mut().map_err(|_| CUDA_ERROR_UNKNOWN)?;
+            candidate.workers.activate(&state.endpoint)?;
+            G_STATE.store(
+                Box::into_raw(candidate.generation.take().unwrap()),
+                Ordering::Release,
+            );
+            Ok(())
+        })();
+        if result.is_err() {
+            super::G_FAILED.store(true, Ordering::Release);
+        }
+        result
+    })();
+    // Cancel/destroy private workers and failed listeners after releasing the
+    // installation mutex. JoinHandle was detached when each spawn returned.
+    drop(candidate);
     result
 }
 
-fn initialize_generation() -> Result<()> {
+struct RuntimeCandidate {
+    generation: Option<Box<Generation>>,
+    workers: super::control::PreparedWorkers,
+}
+
+impl RuntimeCandidate {
+    fn prepare() -> Result<Option<Self>> {
+        let mut generation = prepare_generation()?;
+        if !G_STATE.load(Ordering::Acquire).is_null() {
+            return Ok(None);
+        }
+        let identity = generation
+            .state
+            .get_mut()
+            .map_err(|_| CUDA_ERROR_UNKNOWN)?
+            .identity;
+        let Some(workers) = super::control::PreparedWorkers::prepare(identity)? else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            generation: Some(generation),
+            workers,
+        }))
+    }
+}
+
+impl Drop for RuntimeCandidate {
+    fn drop(&mut self) {
+        if let Some(generation) = &mut self.generation {
+            let state = generation
+                .state
+                .get_mut()
+                .unwrap_or_else(|e| e.into_inner());
+            self.workers.cleanup(&state.endpoint);
+        }
+    }
+}
+
+fn prepare_generation() -> Result<Box<Generation>> {
     let pid = unsafe { libc::getpid() };
     let configured = if G_CHILD.load(Ordering::Acquire)
         || super::G_FRONTEND_ABI
@@ -773,16 +849,10 @@ fn initialize_generation() -> Result<()> {
         inflight: 0,
         pending_maps: Vec::new(),
     };
-    let mut generation = Box::new(Generation {
+    Ok(Box::new(Generation {
         state: Mutex::new(state),
         cache: super::export_cache::ExportCache::default(),
-    });
-    let state = generation.state.get_mut().map_err(|_| CUDA_ERROR_UNKNOWN)?;
-    super::control::start(&state.endpoint, state.identity)?;
-    // No fallible work follows successful startup. Failed startup drops only
-    // the unpublished, empty generation; no CUDA resources have been created.
-    G_STATE.store(Box::into_raw(generation), Ordering::Release);
-    Ok(())
+    }))
 }
 
 pub fn get() -> Result<MutexGuard<'static, State>> {

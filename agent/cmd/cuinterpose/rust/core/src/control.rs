@@ -24,14 +24,20 @@ enum ControlRequest {
     Execute(Operation),
 }
 
-pub fn start(endpoint: &str, identity: ParticipantId) -> Result<()> {
-    let listener =
-        Socket::open(|| UnixListener::bind(endpoint)).map_err(|_| CUDA_ERROR_NOT_INITIALIZED)?;
-    let started = (|| -> std::io::Result<()> {
-        listener.set_nonblocking(true)?;
-        std::fs::set_permissions(endpoint, std::fs::Permissions::from_mode(0o600))?;
+/// Private workers cannot dispatch until the single listener handoff succeeds.
+/// Dropping this owner cancels them without joining: a caller may hold the
+/// loader lock needed by a worker's Rust TLS startup or teardown.
+pub struct PreparedWorkers {
+    activation: mpsc::SyncSender<Socket<UnixListener>>,
+    listener: Option<Socket<UnixListener>>,
+    bound: bool,
+}
+
+impl PreparedWorkers {
+    pub fn prepare(identity: ParticipantId) -> Result<Option<Self>> {
         let (sender, receiver) =
             mpsc::sync_channel::<(Socket<UnixStream>, ControlRequest)>(CONTROL_QUEUE_CAPACITY);
+        let (activation, parked) = mpsc::sync_channel::<Socket<UnixListener>>(1);
         let _worker = std::thread::Builder::new()
             .name("cuinterpose-control".into())
             .spawn(move || {
@@ -44,11 +50,17 @@ pub fn start(endpoint: &str, identity: ParticipantId) -> Result<()> {
             })
             .map_err(|error| {
                 eprintln!("cuinterpose: control worker startup failed: {error}");
-                error
+                CUDA_ERROR_NOT_INITIALIZED
             })?;
+        if state::initialized() {
+            return Ok(None);
+        }
         let started = std::thread::Builder::new()
             .name("cuinterpose-peer".into())
             .spawn(move || {
+                let Ok(listener) = parked.recv() else {
+                    return;
+                };
                 loop {
                     let mut events = [PollFd::new(&*listener, PollFlags::IN)];
                     match poll(&mut events, None) {
@@ -69,23 +81,55 @@ pub fn start(endpoint: &str, identity: ParticipantId) -> Result<()> {
                 }
             });
         if let Err(error) = started {
-            // Failed spawn drops its closure, closing the listener and the
-            // only sender. Detach the idle worker: initialization may run in a
-            // DSO constructor holding the loader lock, which worker TLS startup
-            // or teardown also needs. Joining here would deadlock. No request
-            // was queued; recv exits once thread startup can finish.
+            // The failed closure drops the only control-queue sender.
             eprintln!("cuinterpose: peer listener startup failed: {error}");
-            return Err(error);
+            return Err(CUDA_ERROR_NOT_INITIALIZED.into());
         }
-        Ok(())
-    })();
-    if started.is_err() {
-        // We successfully bound this path, so it is ours to remove. A bind
-        // failure above must never unlink an application-owned filesystem entry.
-        let _ = std::fs::remove_file(endpoint);
-        return Err(CUDA_ERROR_NOT_INITIALIZED.into());
+        Ok(Some(Self {
+            activation,
+            listener: None,
+            bound: false,
+        }))
     }
-    Ok(())
+
+    /// No spawn, blocking channel operation, formatting, or callback is allowed
+    /// here. The caller holds the generation installation lock.
+    /// With pinned Rust/glibc, mutexes and try_send wakeups use futexes and
+    /// non-Drop TLS, not loader registration. The channel is preallocated;
+    /// socket registration may grow its Vec using the ordinary glibc allocator.
+    /// Eager ELF binding prevents first-use loader lookup in these libc calls.
+    pub fn activate(&mut self, endpoint: &str) -> Result<()> {
+        self.listener = Some(
+            Socket::open(|| UnixListener::bind(endpoint))
+                .map_err(|_| CUDA_ERROR_NOT_INITIALIZED)?,
+        );
+        self.bound = true;
+        let listener = self.listener.as_ref().unwrap();
+        listener
+            .set_nonblocking(true)
+            .map_err(|_| CUDA_ERROR_NOT_INITIALIZED)?;
+        std::fs::set_permissions(endpoint, std::fs::Permissions::from_mode(0o600))
+            .map_err(|_| CUDA_ERROR_NOT_INITIALIZED)?;
+        match self.activation.try_send(self.listener.take().unwrap()) {
+            Ok(()) => {
+                self.bound = false;
+                Ok(())
+            }
+            Err(TrySendError::Full(listener) | TrySendError::Disconnected(listener)) => {
+                self.listener = Some(listener);
+                Err(CUDA_ERROR_NOT_INITIALIZED.into())
+            }
+        }
+    }
+
+    pub fn cleanup(&mut self, endpoint: &str) {
+        // Only successfully bound, unpublished endpoints belong to this owner.
+        // Cleanup is deliberately outside the installation lock.
+        if self.bound {
+            self.listener.take();
+            let _ = std::fs::remove_file(endpoint);
+        }
+    }
 }
 
 fn dispatch(
@@ -239,4 +283,31 @@ fn serve(
         super::G_FAILED.store(true, Ordering::Release);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disconnected_activation_retains_listener_for_unlocked_cleanup() {
+        let directory =
+            std::env::temp_dir().join(format!("cuinterpose-activation-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let endpoint = directory.join("control.sock");
+        let endpoint = endpoint.to_str().unwrap();
+        let (activation, receiver) = mpsc::sync_channel(1);
+        drop(receiver);
+        let mut workers = PreparedWorkers {
+            activation,
+            listener: None,
+            bound: false,
+        };
+        assert!(workers.activate(endpoint).is_err());
+        assert!(workers.bound && workers.listener.is_some());
+        workers.cleanup(endpoint);
+        assert!(!std::path::Path::new(endpoint).exists());
+        assert!(workers.listener.is_none());
+        std::fs::remove_dir(directory).unwrap();
+    }
 }
