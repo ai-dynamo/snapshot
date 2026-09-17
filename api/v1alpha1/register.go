@@ -17,6 +17,12 @@ var SchemeGroupVersion = schema.GroupVersion{Group: "nvidia.com", Version: "v1al
 // typed objects (e.g. the operator setting APIVersion on a PodSnapshotContent).
 var GroupVersion = SchemeGroupVersion
 
+// Kind names, for callers that set TypeMeta explicitly when building objects.
+const (
+	KindPodSnapshot        = "PodSnapshot"
+	KindPodSnapshotContent = "PodSnapshotContent"
+)
+
 func AddToScheme(s *runtime.Scheme) error {
 	s.AddKnownTypes(SchemeGroupVersion,
 		&PodSnapshot{}, &PodSnapshotList{},

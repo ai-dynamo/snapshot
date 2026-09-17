@@ -1,96 +1,58 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package controller
+package maintenance
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/ai-dynamo/snapshot/agent/pkg/artifact"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
-	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 	"github.com/go-logr/logr"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
 const podSnapshotContentMetadataListPageLimit int64 = 500
 
-// AddArtifactOrphanScanner registers the scanner with the manager's existing
-// leader-election group. RunnableFunc is leader-elected by default.
-func AddArtifactOrphanScanner(mgr ctrl.Manager, cfg operatortypes.ArtifactCleanupConfig) error {
-	if err := cfg.Validate(); err != nil {
+// errUnsafeArtifactRoot means deletion stopped before touching the
+// filesystem; the finalizer is retained.
+var errUnsafeArtifactRoot = errors.New("artifact root is not an ordinary directory")
+
+// removeArtifactRoot refuses to touch anything unless the artifacts root and
+// the content root both validate as ordinary (non-symlink) directories.
+func removeArtifactRoot(basePath, contentUID string) error {
+	artifactsRoot, err := artifact.ResolveRoot(basePath)
+	if err != nil {
 		return err
 	}
-	scanner := artifactOrphanScanner{apiReader: mgr.GetAPIReader(), config: cfg}
-	return mgr.Add(manager.RunnableFunc(scanner.run))
-}
-
-type artifactOrphanScanner struct {
-	apiReader client.Reader
-	config    operatortypes.ArtifactCleanupConfig
-}
-
-func (s *artifactOrphanScanner) run(ctx context.Context) error {
-	logger := log.FromContext(ctx).WithName("artifact-orphan-scanner")
-	s.scanAndLog(ctx, logger)
-	ticker := time.NewTicker(s.config.ScanInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
+	if err := artifact.ValidateDirectory(artifactsRoot); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil
-		case <-ticker.C:
-			s.scanAndLog(ctx, logger)
 		}
+		return fmt.Errorf("%w: %w", errUnsafeArtifactRoot, err)
 	}
-}
-
-func (s *artifactOrphanScanner) scanAndLog(ctx context.Context, logger logr.Logger) {
-	if err := s.scanOnce(ctx, logger); err != nil {
-		logger.Error(err, "Artifact orphan scan failed; remaining candidates were left in place")
-	}
-}
-
-func (s *artifactOrphanScanner) scanOnce(ctx context.Context, logger logr.Logger) error {
-	candidates, err := s.enumerateCandidates(logger)
+	root, err := artifact.ResolveContentRoot(basePath, contentUID)
 	if err != nil {
 		return err
 	}
-	existing, err := s.listExistingUIDs(ctx)
-	if err != nil {
-		return err
+	if err := artifact.ValidateDirectory(root); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%w: %w", errUnsafeArtifactRoot, err)
 	}
-	var scanErrors []error
-	processed := 0
-	for uid := range candidates {
-		if _, protected := existing[types.UID(uid)]; protected {
-			continue
-		}
-		if processed == s.config.BatchSize {
-			break
-		}
-		processed++
-		if err := removeArtifactRoot(s.config.BasePath, uid); err != nil {
-			scanErrors = append(scanErrors, err)
-			logger.Error(err, "Unable to reclaim orphan PodSnapshotContent artifact root", "content_uid", uid)
-			continue
-		}
-		logger.Info("Reclaimed orphan PodSnapshotContent artifact root", "content_uid", uid)
+	if err := os.RemoveAll(root); err != nil {
+		return fmt.Errorf("remove artifact root %q: %w", root, err)
 	}
-	return errors.Join(scanErrors...)
+	return nil
 }
 
-func (s *artifactOrphanScanner) enumerateCandidates(logger logr.Logger) (map[string]struct{}, error) {
-	artifactsRoot, err := artifact.ResolveRoot(s.config.BasePath)
+// enumerateSweepCandidates lists on-disk content UIDs under basePath's
+// artifacts root; unsafe entries are logged and skipped, not deleted.
+func enumerateSweepCandidates(basePath string, logger logr.Logger) (map[string]struct{}, error) {
+	artifactsRoot, err := artifact.ResolveRoot(basePath)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +76,7 @@ func (s *artifactOrphanScanner) enumerateCandidates(logger logr.Logger) (map[str
 			logger.Error(err, "Ignoring unsafe artifact directory entry", "entry", name)
 			continue
 		}
-		path, err := artifact.ResolveContentRoot(s.config.BasePath, name)
+		path, err := artifact.ResolveContentRoot(basePath, name)
 		if err != nil {
 			logger.Error(err, "Ignoring unresolved artifact directory entry", "entry", name)
 			continue
@@ -130,19 +92,22 @@ func (s *artifactOrphanScanner) enumerateCandidates(logger logr.Logger) (map[str
 	return candidates, nil
 }
 
-func (s *artifactOrphanScanner) listExistingUIDs(ctx context.Context) (map[types.UID]struct{}, error) {
+// listExistingContentUIDs fails closed (deletes nothing) if the resource
+// version drifts or a continuation token repeats across pages, since either
+// means a concurrent write raced the list.
+func listExistingContentUIDs(ctx context.Context, apiReader client.Reader, listAttempts int) (map[types.UID]struct{}, error) {
 	var lastErr error
-	for attempt := 1; attempt <= s.config.ListAttempts; attempt++ {
-		uids, err := s.listExistingUIDsOnce(ctx)
+	for attempt := 1; attempt <= listAttempts; attempt++ {
+		uids, err := listExistingContentUIDsOnce(ctx, apiReader)
 		if err == nil {
 			return uids, nil
 		}
 		lastErr = err
 	}
-	return nil, fmt.Errorf("list PodSnapshotContent metadata failed after %d attempts: %w", s.config.ListAttempts, lastErr)
+	return nil, fmt.Errorf("list PodSnapshotContent metadata failed after %d attempts: %w", listAttempts, lastErr)
 }
 
-func (s *artifactOrphanScanner) listExistingUIDsOnce(ctx context.Context) (map[types.UID]struct{}, error) {
+func listExistingContentUIDsOnce(ctx context.Context, apiReader client.Reader) (map[types.UID]struct{}, error) {
 	uids := make(map[types.UID]struct{})
 	continueToken := ""
 	snapshotResourceVersion := ""
@@ -154,7 +119,7 @@ func (s *artifactOrphanScanner) listExistingUIDsOnce(ctx context.Context) (map[t
 			Continue: continueToken,
 			Raw:      &metav1.ListOptions{ResourceVersion: ""},
 		}
-		if err := s.apiReader.List(ctx, list, options); err != nil {
+		if err := apiReader.List(ctx, list, options); err != nil {
 			return nil, err
 		}
 		if snapshotResourceVersion == "" {
