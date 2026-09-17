@@ -5,7 +5,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # Native CustomStorage transfer qualification
 
-`pagebroker-custom-storage-worker` is a standalone PageBroker GPU-engine qualification executable, not an agent-enabled storage mode or a daemon RPC endpoint. It establishes the native CustomStorage-to-transfer boundary without involving the shim, legacy IPC, CUDA jobfiles, or CRIU. Existing allocation-worker and host-carrier paths are unchanged.
+`pagebroker-custom-storage-worker` is the PageBroker-owned process that executes native CUDA CustomStorage operations and transfers their bytes. The agent uses this path when a workload opts into both PageBroker and cuinterpose and has CUDA processes. The shim still uses host carriers for shared creator allocations; it receives no PageBroker connections or storage settings.
+
+The checkpoint manifest records `cuda.customStorage: true`. Restore requires PageBroker for such an artifact and uses DirectRestore rather than copying the native payload into a staging tree. Before entering the restore namespaces, the agent binds one transaction-scoped session per captured CUDA PID. The inherited session FDs go only to `nsrestore`, not the workload or shim coordinator. The broker pins the target PID namespace, resolves the restored PID within it or its descendants, and starts the CUDA worker. Native preparation is serial, LOAD transfers overlap subsequent preparation, and every transfer must finish before any process is completed and unlocked. The cuinterpose coordinator then reconstructs shared allocations and multicast state.
 
 The worker owns the complete CUDA operation. Native CustomStorage returns an aggregate device-memory view and stream for each participating GPU in the calling process. Those pointers cannot be sent to another process. The same worker passes the returned view to PageBroker's existing `TransferBuffers` ring, which pipelines pinned-memory CUDA copies and NIXL POSIX storage requests. It calls `cuCheckpointOperationComplete` only after transfer success. No payload digest or compression is performed.
 
@@ -31,7 +33,7 @@ There is no public native abort after preparation. A failure returns no successf
 
 JSON reports separate initial worker/context admission, native preparation API time, transfer wall time, transfer setup, storage-request service time, COMPLETE, and total operation wall time. Native preparation includes internal driver reconstruction/export work; it is **not** an export-only measurement. Storage-request service times can overlap, so they must not be added to the transfer wall time.
 
-`custom_storage_gpu_test.py` verifies every byte of distinct seeded patterns before capture and after each of two save/load cycles. Run it in a one-GPU container with the worker installed and permission to checkpoint its child:
+The worker also has a standalone qualification harness. `custom_storage_gpu_test.py` verifies every byte of distinct seeded patterns before capture and after each of two save/load cycles. Run it in a one-GPU container with the worker installed and permission to checkpoint its child:
 
 ```sh
 PAGEBROKER_ALLOCATION_DIRECT_IO=1 \
