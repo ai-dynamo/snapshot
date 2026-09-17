@@ -52,6 +52,11 @@ spec:
               value: "0"
             - name: UCX_TLS
               value: tcp,self
+            # Keep MPI request broadcasts off UCX across checkpoint/restore.
+            - name: OMPI_MCA_pml
+              value: ob1
+            - name: OMPI_MCA_btl
+              value: tcp,self
           ports:
             - name: api
               containerPort: 8000
