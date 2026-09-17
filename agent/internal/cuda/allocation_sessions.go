@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/pagebroker"
 )
@@ -46,19 +47,48 @@ func BindAllocationSessions(ctx context.Context, broker pagebroker.Client, trans
 	sessions := make(AllocationSessions, len(ids))
 	for _, id := range ids {
 		decoded, err := hex.DecodeString(id)
-		if err != nil || len(decoded) != 16 || sessions[id] != nil {
-			sessions.Close()
+		if _, exists := sessions[id]; err != nil || len(decoded) != 16 || exists {
 			return nil, fmt.Errorf("invalid or duplicate cuinterpose participant %q", id)
 		}
-		file, err := broker.BindAllocations(ctx, transaction, id, direction)
-		if err != nil {
-			sessions.Close()
-			return nil, fmt.Errorf("bind allocation participant %s: %w", id, err)
-		}
-		sessions[id] = file
+		sessions[id] = nil
 	}
 	if len(sessions) == 0 {
 		return nil, fmt.Errorf("allocation storage requires CUDA participants")
+	}
+	// LOAD admission starts an independent broker CUDA worker per participant.
+	// Serial admission needlessly adds every worker's initialization latency
+	// before CRIU. Join all admissions before returning any capabilities.
+	type admission struct {
+		file *os.File
+		err  error
+	}
+	results := make([]admission, len(ids))
+	var jobs sync.WaitGroup
+	for i, id := range ids {
+		bind := func() {
+			results[i].file, results[i].err = broker.BindAllocations(ctx, transaction, id, direction)
+		}
+		if direction == pagebroker.BindAllocationSession_LOAD {
+			jobs.Go(bind)
+		} else {
+			bind()
+		}
+	}
+	jobs.Wait()
+	var failure error
+	for i, result := range results {
+		if result.err != nil {
+			failure = fmt.Errorf("bind allocation participant %s: %w", ids[i], result.err)
+		}
+		if result.file != nil {
+			sessions[ids[i]] = result.file
+		} else {
+			delete(sessions, ids[i])
+		}
+	}
+	if failure != nil {
+		sessions.Close()
+		return nil, failure
 	}
 	return sessions, nil
 }

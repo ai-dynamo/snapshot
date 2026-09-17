@@ -299,6 +299,10 @@ each allocation's identity, size, and broker-assigned payload offset. Earlier
 allocation manifest versions are rejected. Before CRIU, the agent validates the participant directory set
 against `cuinterpose.state`, and binding LOAD validates manifests/file geometry
 and worker readiness. Restore obeys the captured mode, not a new Pod preference.
+LOAD session admissions run concurrently because each starts an independent
+broker worker; every admission completes before CRIU begins. Failed admission
+closes all acquired capabilities. The `allocation_bind` metric includes captured
+inventory validation and worker admission, separately from native/LOAD execution.
 
 After each rank's native restore, `LOAD_ALLOCATIONS` creates fresh backing, exports its FDs
 with the destination GPU UUID, and waits for the broker to fill it. Only after

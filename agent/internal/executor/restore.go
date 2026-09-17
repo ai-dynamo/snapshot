@@ -196,12 +196,16 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		pageBrokerStageDuration = time.Since(stageStart)
 	}
 	var sessions cuda.AllocationSessions
+	var allocationBindDuration time.Duration
 	if manifest.Cuinterpose.AllocationStorage == "pagebroker" {
+		bindStart := time.Now()
 		ids, err := cuda.CapturedParticipants(ctx, artifactPath, manifest.CUDA.PIDs)
 		if err != nil {
 			return 0, err
 		}
 		sessions, err = cuda.BindAllocationSessions(ctx, broker, transactionID, ids, pagebroker.BindAllocationSession_LOAD)
+		allocationBindDuration = time.Since(bindStart)
+		log.Info("PageBroker allocation restore admission", "duration", allocationBindDuration, "participants", len(ids))
 		if err != nil {
 			return 0, err
 		}
@@ -259,6 +263,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		result.CUDARestoreDuration,
 		result.CuinterposeRestoreDuration,
 		result.CUDAPipelineDuration,
+		allocationBindDuration,
 	)
 	summary := map[string]any{
 		"duration": wall.String(),
@@ -273,6 +278,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 			"cuda_restore":        result.CUDARestoreDuration.String(),
 			"cuinterpose_restore": result.CuinterposeRestoreDuration.String(),
 			"cuda_pipeline":       result.CUDAPipelineDuration.String(),
+			"allocation_bind":     allocationBindDuration.String(),
 			"unaccounted":         unaccounted.String(),
 		},
 	}
