@@ -93,6 +93,9 @@ macro_rules! functions {
 }
 
 functions! {
+    cuCtxSynchronize();
+    cuMemFree_v2(address: CUdeviceptr);
+    cuMemGetAddressRange_v2(base: *mut CUdeviceptr, size: *mut usize, address: CUdeviceptr);
     cuCtxGetCurrent(context: *mut *mut c_void);
     cuCtxGetDevice(device: *mut CUdevice);
     cuCtxSetCurrent(context: *mut c_void);
