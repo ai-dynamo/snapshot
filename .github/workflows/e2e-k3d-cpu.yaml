@@ -18,11 +18,12 @@ on:
     inputs:
       pause_for_tmate:
         description: >-
-          After Snapshot is Ready, open a tmate SSH session and skip pytest.
-          Use this to kubectl/pytest by hand on the runner. limit-access-to-actor
-          is on; leave the session when finished or the job hits timeout.
+          Skip pytest and open a tmate SSH session instead, to kubectl by hand
+          on the runner. limit-access-to-actor is on. The relay is sometimes
+          unreachable from hosted runners, in which case the step just waits
+          out its timeout.
         type: boolean
-        default: true
+        default: false
 
 concurrency:
   group: snapshot-e2e-k3d-cpu-${{ github.ref }}
@@ -172,8 +173,23 @@ jobs:
           enable-cache: "false"
           download-from-astral-mirror: "false"
 
+      # Direct read on gap 14: CRIU's own feature probe inside the nested
+      # container, independent of whether the full lifecycle works.
+      - name: Probe CRIU in the agent container
+        continue-on-error: true
+        env:
+          KUBECONFIG: ${{ env.SNAPSHOT_E2E_KUBECONFIG }}
+        run: |
+          set -euo pipefail
+          pod=$(kubectl get pods -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" \
+            -l app.kubernetes.io/component=snapshot-agent \
+            -o jsonpath='{.items[0].metadata.name}')
+          echo "agent pod: ${pod}"
+          kubectl exec -n "${SNAPSHOT_E2E_TEST_NAMESPACE}" "${pod}" -- \
+            sh -c 'criu --version; criu check --all' 2>&1 | tail -60
+
       - name: Run CPU snapshot/restore test
-        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.pause_for_tmate }}
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.pause_for_tmate }}
         timeout-minutes: 25
         env:
           KUBECONFIG: ${{ env.SNAPSHOT_E2E_KUBECONFIG }}
@@ -230,9 +246,11 @@ jobs:
           EOF
           cat "${GITHUB_WORKSPACE}/k3d-e2e.env"
 
+      # Opt-in only. The relay is not always reachable from hosted runners, and
+      # a stuck session blocks the job, so keep the timeout short.
       - name: tmate (manual debug)
-        if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.pause_for_tmate) }}
-        timeout-minutes: 180
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.pause_for_tmate }}
+        timeout-minutes: 30
         env:
           KUBECONFIG: ${{ env.SNAPSHOT_E2E_KUBECONFIG }}
           SNAPSHOT_E2E_SNAPSHOT_TAG: k3d-e2e
