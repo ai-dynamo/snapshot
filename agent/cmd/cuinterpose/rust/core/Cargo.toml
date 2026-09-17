@@ -21,5 +21,3 @@ libc.workspace = true
 rustix.workspace = true
 thiserror.workspace = true
 cudarc.workspace = true
-
-[build-dependencies]
