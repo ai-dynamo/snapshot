@@ -15,6 +15,7 @@ import (
 
 	"github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/snapshot/operator/internal/controller"
+	"github.com/ai-dynamo/snapshot/operator/internal/maintenance"
 )
 
 // version is overridable at build time via -ldflags "-X main.version=<tag>".
@@ -73,13 +74,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := controller.SetupSnapshotContentReconciler(mgr, artifactCleanupConfig.BasePath); err != nil {
-		ctrl.Log.Error(err, "unable to set up PodSnapshotContent artifact cleanup controller")
+	maintenanceQueue := maintenance.NewQueue(
+		mgr.GetClient(),
+		mgr.GetAPIReader(),
+		mgr.GetEventRecorderFor("podsnapshotcontent-artifact-cleanup"),
+		*artifactCleanupConfig,
+	)
+	if err := mgr.Add(maintenanceQueue); err != nil {
+		ctrl.Log.Error(err, "unable to set up maintenance workqueue")
 		os.Exit(1)
 	}
 
-	if err := controller.AddArtifactOrphanScanner(mgr, *artifactCleanupConfig); err != nil {
-		ctrl.Log.Error(err, "unable to set up artifact orphan scanner")
+	if err := controller.SetupSnapshotContentReconciler(mgr, maintenanceQueue); err != nil {
+		ctrl.Log.Error(err, "unable to set up PodSnapshotContent artifact cleanup controller")
 		os.Exit(1)
 	}
 

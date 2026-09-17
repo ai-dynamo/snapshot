@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/operator/internal/maintenance"
 )
 
 const (
@@ -377,11 +378,11 @@ func (sr *PodSnapshotReconciler) buildPodSnapshotContent(snap *snapshotv1alpha1.
 	return &snapshotv1alpha1.PodSnapshotContent{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: snapshotv1alpha1.GroupVersion.String(),
-			Kind:       "PodSnapshotContent",
+			Kind:       snapshotv1alpha1.KindPodSnapshotContent,
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       contentName,
-			Finalizers: []string{PodSnapshotContentArtifactCleanupFinalizer},
+			Finalizers: []string{maintenance.PodSnapshotContentArtifactCleanupFinalizer},
 			Labels: map[string]string{
 				snapshotv1alpha1.SnapshotNodeLabel: pod.Spec.NodeName,
 			},

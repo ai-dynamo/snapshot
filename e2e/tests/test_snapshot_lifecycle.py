@@ -502,7 +502,7 @@ def test_snapshot_deletion_cascades_content_and_artifact_cleanup(
 
 
 @pytest.mark.snapshot_success
-def test_orphan_scanner_reclaims_uid_root(
+def test_orphan_sweep_reclaims_uid_root(
     config: k8s.E2EConfig,
     run: snap.TestRun,
 ) -> None:
