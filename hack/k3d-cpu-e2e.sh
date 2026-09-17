@@ -57,8 +57,9 @@ cluster_up() {
       nvidia.com/mig.config=all-disabled
   done
 
-  log "creating dummy RuntimeClass nvidia (handler runc)"
-  kubectl apply -f - <<EOF
+  log "ensuring RuntimeClass nvidia uses handler runc (k3s may already define nvidia; handler is immutable)"
+  kubectl delete runtimeclass nvidia --ignore-not-found
+  kubectl create -f - <<EOF
 apiVersion: node.k8s.io/v1
 kind: RuntimeClass
 metadata:

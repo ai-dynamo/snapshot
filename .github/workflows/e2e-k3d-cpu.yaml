@@ -213,7 +213,7 @@ jobs:
           retention-days: 7
 
       - name: tmate (manual debug)
-        if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.pause_for_tmate || failure()) }}
+        if: ${{ success() && (github.event_name != 'workflow_dispatch' || inputs.pause_for_tmate) }}
         timeout-minutes: 180
         env:
           KUBECONFIG: ${{ env.SNAPSHOT_E2E_KUBECONFIG }}
