@@ -19,10 +19,12 @@
 
 namespace snapshot::pagebroker {
 class AllocationSession;
+class NativeSession;
 class Broker {
  public:
   Broker(Path staging_root, Path storage_root, Path allocation_worker = {});
   std::unique_ptr<AllocationSession> BindAllocations(const Request& request);
+  std::unique_ptr<NativeSession> BindNative(const Request& request);
   Response HandleRequest(const Request& request);
   void ReapExpiredTransactions(std::chrono::steady_clock::time_point now);
 

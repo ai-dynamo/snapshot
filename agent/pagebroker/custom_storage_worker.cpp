@@ -49,7 +49,7 @@ void Run(int pid, const std::filesystem::path& directory, bool jobfile_experimen
   if (jobfile_experiment && unsetenv("CUDA_CHECKPOINT_JOB_FILE"))
     throw std::runtime_error("clear helper initialization jobfile");
   struct stat info{};
-  if (!directory.is_absolute() || lstat(directory.c_str(), &info) || !S_ISDIR(info.st_mode) ||
+  if (!directory.is_absolute() || stat(directory.c_str(), &info) || !S_ISDIR(info.st_mode) ||
       (info.st_mode & 0022))
     throw std::runtime_error("expected an existing private absolute storage directory");
 
@@ -92,6 +92,28 @@ void Run(int pid, const std::filesystem::path& directory, bool jobfile_experimen
   if (!symbol || query != CU_GET_PROC_ADDRESS_SUCCESS)
     throw std::runtime_error("driver does not expose CustomStorage COMPLETE");
   const auto complete = reinterpret_cast<decltype(&cuCheckpointOperationComplete)>(symbol);
+  std::vector<storage::DevicePair> device_pairs;
+  std::vector<CUcheckpointGpuPair> gpu_pairs;
+  if (const char* text = std::getenv("PAGEBROKER_NATIVE_DEVICE_MAP"); text && *text) {
+    std::string mapping(text);
+    size_t offset = 0;
+    while (offset < mapping.size()) {
+      const auto end = mapping.find(',', offset);
+      const auto pair = mapping.substr(offset, end - offset);
+      const auto equal = pair.find('=');
+      std::array<unsigned char, 16> source{}, destination{};
+      if (equal == std::string::npos || !storage::ParseGPUUUID(pair.substr(0, equal), &source) ||
+          !storage::ParseGPUUUID(pair.substr(equal + 1), &destination))
+        throw std::runtime_error("invalid native source/destination GPU map");
+      CUcheckpointGpuPair gpu{};
+      std::copy(source.begin(), source.end(), gpu.oldUuid.bytes);
+      std::copy(destination.begin(), destination.end(), gpu.newUuid.bytes);
+      gpu_pairs.push_back(gpu);
+      device_pairs.push_back({pair.substr(0, equal), pair.substr(equal + 1)});
+      if (end == std::string::npos) break;
+      offset = end + 1;
+    }
+  }
   const double admission = std::chrono::duration<double>(Clock::now() - admission_start).count();
   std::printf("{\"event\":\"ready\",\"admission_seconds\":%.6f}\n", admission);
   std::fflush(stdout);
@@ -166,6 +188,8 @@ void Run(int pid, const std::filesystem::path& directory, bool jobfile_experimen
         } else {
           CUcheckpointRestoreArgs args{};
           args.customStorageInfo_out = &view;
+          args.gpuPairs = gpu_pairs.data();
+          args.gpuPairsCount = gpu_pairs.size();
           Check(cuCheckpointProcessRestore(pid, &args), "native restore prepare");
         }
         prepare_end = Clock::now();
@@ -188,7 +212,7 @@ void Run(int pid, const std::filesystem::path& directory, bool jobfile_experimen
         }
         if (save && !storage::BuildCheckpointManifest(extents, &manifest, &error))
           throw std::runtime_error(error);
-        if (!storage::BuildTransferJobs(manifest, extents, {}, &jobs, &error))
+        if (!storage::BuildTransferJobs(manifest, extents, device_pairs, &jobs, &error))
           throw std::runtime_error(error);
         prepared = true;
         if (!whole) {

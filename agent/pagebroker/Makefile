@@ -3,7 +3,7 @@
 
 PROTO := v1/pagebroker.proto
 GTEST_FLAGS := $(shell pkg-config --cflags --libs gtest_main)
-BROKER_SOURCES := broker.cpp checkpoint_transaction_descriptor.cpp posix_copy_engine.cpp restore_transaction_descriptor.cpp transaction.cpp transfer_engine.cpp allocation_session.cpp allocation_transport.cpp file_descriptor.cpp
+BROKER_SOURCES := broker.cpp checkpoint_transaction_descriptor.cpp posix_copy_engine.cpp restore_transaction_descriptor.cpp transaction.cpp transfer_engine.cpp allocation_session.cpp native_session.cpp allocation_transport.cpp file_descriptor.cpp
 DAEMON_SOURCES := $(BROKER_SOURCES) daemon.cpp main.cpp
 
 .PHONY: daemon generate test
