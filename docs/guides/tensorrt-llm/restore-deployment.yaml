@@ -51,6 +51,10 @@ spec:
               value: "0"
             - name: UCX_TLS
               value: tcp,self
+            - name: OMPI_MCA_pml
+              value: ob1
+            - name: OMPI_MCA_btl
+              value: tcp,self
           ports:
             - name: api
               containerPort: 8000

@@ -16,6 +16,8 @@ import (
 	"testing"
 
 	"github.com/go-logr/logr"
+
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
 func writeFakeBinary(t *testing.T, script string) string {
@@ -27,6 +29,51 @@ func writeFakeBinary(t *testing.T, script string) string {
 	return p
 }
 
+func TestCHelperRejectsIncompleteRustToolsBeforeMount(t *testing.T) {
+	gcc, err := exec.LookPath("gcc")
+	if err != nil {
+		t.Skip("gcc is required to validate the C helper")
+	}
+	root := t.TempDir()
+	tools := filepath.Join(root, "tools")
+	if err := os.Mkdir(tools, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.ReadFile(filepath.Join("..", "..", "cmd", "ns-bind-mount", "main.c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Change only the trusted bundle location to a private fixture. The actual
+	// validation must reject each missing library before any namespace syscall.
+	source = []byte(strings.ReplaceAll(string(source), SnapshotBinSrc+"/snapshot-cuda", tools))
+	path := filepath.Join(root, "main.c")
+	if err := os.WriteFile(path, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(root, "ns-bind-mount")
+	if output, err := exec.Command(gcc, "-O2", "-Wall", "-Wextra", "-o", binary, path).CombinedOutput(); err != nil {
+		t.Fatalf("compile: %v\n%s", err, output)
+	}
+	for _, missing := range []string{"cuda-checkpoint", "libcuinterpose.so", "libcuinterpose_core.so"} {
+		t.Run(missing, func(t *testing.T) {
+			for _, name := range []string{"cuda-checkpoint", "libcuinterpose.so", "libcuinterpose_core.so"} {
+				if err := os.WriteFile(filepath.Join(tools, name), []byte("fixture"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Remove(filepath.Join(tools, missing)); err != nil {
+				t.Fatal(err)
+			}
+			output, err := exec.Command(binary, "mount-snapshot-cuda-fd", "3").CombinedOutput()
+			if err == nil || !strings.Contains(string(output), "missing or unreadable CUDA tool: "+filepath.Join(tools, missing)) {
+				t.Fatalf("missing %s: err=%v output=%s", missing, err, output)
+			}
+			if strings.Contains(string(output), "open_tree") || strings.Contains(string(output), "setns") {
+				t.Fatalf("attempted mount with missing tool: %s", output)
+			}
+		})
+	}
+}
 func newMounterForTest(t *testing.T, bin string) *execMounter {
 	t.Helper()
 	return newExecMounter(bin, logr.Discard())
@@ -191,10 +238,29 @@ func TestCHelperRejectsUnsafeSourcesBeforeMountSyscalls(t *testing.T) {
 	for _, args := range [][]string{
 		{"mount-fd", "3", "/etc", "/tmp/checkpoint"},
 		{"mount-bundle-fd", "3", "/etc"},
+		{"mount-snapshot-cuda-fd", "3", "/etc"},
 		{"unmount-checkpoint-fd", "3", "unexpected"},
 	} {
 		if output, err := exec.Command(binary, args...).CombinedOutput(); err == nil {
 			t.Fatalf("helper accepted %v: %s", args, output)
+		}
+	}
+}
+
+// The C helper hard-codes the CUDA tools destination. It must equal the path
+// podcontract bakes into the cuda-checkpoint command (and LD_PRELOAD) of the
+// source workload, because CRIU re-opens those file-backed mappings by path.
+func TestCHelperCUDAToolsDestinationMatchesPodContract(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join("..", "..", "cmd", "ns-bind-mount", "main.c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`#define SNAPSHOT_CUDA_DESTINATION "` + podcontract.CUDAToolsMountPath + `"`,
+		`#define SNAPSHOT_CUDA_SOURCE "` + SnapshotBinSrc + `/snapshot-cuda"`,
+	} {
+		if !strings.Contains(string(source), want) {
+			t.Errorf("ns-bind-mount/main.c lacks %q", want)
 		}
 	}
 }
