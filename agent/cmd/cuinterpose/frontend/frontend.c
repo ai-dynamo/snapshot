@@ -24,7 +24,8 @@ static const char GLIBC_DLSYM_VERSION[] = "GLIBC_2.34";
 static pthread_once_t resolver_once = PTHREAD_ONCE_INIT;
 static void *(*real_dlsym)(void *, const char *);
 static _Atomic(const struct BackendAbi *) backend_api;
-static atomic_bool initializing, failed, backend_unavailable;
+static atomic_bool failed, backend_unavailable;
+static _Thread_local bool loading_backend;
 static int origin_pid;
 
 // Published nodes and their dlopen references live until exit. Readers need no
@@ -144,7 +145,7 @@ static void *resolve(const char *name) {
     return address;
 }
 
-static const struct BackendAbi *load_backend(void) {
+static const struct BackendAbi *load_backend(void **reference) {
     Dl_info info;
     if (!dladdr((void *)load_backend, &info))
         return NULL;
@@ -168,14 +169,14 @@ static const struct BackendAbi *load_backend(void) {
     }
     struct FrontendAbi frontend = {ABI_VERSION, sizeof(frontend), resolve, origin_pid};
     const struct BackendAbi *api = NULL;
-    // Initialization may start Rust workers even before reporting failure.
-    // Once called, retain the library on both outcomes rather than unloading
-    // code while a failed-startup worker finishes its asynchronous cleanup.
+    // The handshake only registers the frontend and returns an immutable table;
+    // it must not call back into the loader or start runtime workers.
     if (initialize(&frontend, &api) != CUDA_SUCCESS || !api ||
-        api->version != ABI_VERSION || api->size != sizeof(*api))
+        api->version != ABI_VERSION || api->size != sizeof(*api)) {
+        dlclose(library);
         return NULL;
-    // Keep the successful dlopen reference: callbacks and Rust threads outlive
-    // the initializing call. Matching version/size promises a valid full table.
+    }
+    *reference = library;
     return api;
 }
 
@@ -185,20 +186,26 @@ static const struct BackendAbi *backend(void) {
     const struct BackendAbi *api = atomic_load(&backend_api);
     if (api)
         return api;
-    // A constructor may own the loader lock while another thread initializes.
-    // Reentry must return transient not-initialized rather than wait on it.
-    bool expected = false;
-    if (!atomic_compare_exchange_strong(&initializing, &expected, true))
+    // Refuse same-thread constructor reentry before dlopen has finished. Other
+    // threads may load independently: glibc serializes DSO construction, and
+    // the ABI handshake is idempotent. Never wait under a shim lock around dlopen.
+    if (loading_backend)
         return NULL;
-    api = atomic_load(&backend_api);
-    if (!api) {
-        api = load_backend();
-        if (api)
-            atomic_store(&backend_api, api);
-        else
-            atomic_store(&backend_unavailable, true);
+    loading_backend = true;
+    void *reference = NULL;
+    api = load_backend(&reference);
+    if (api) {
+        const struct BackendAbi *expected = NULL;
+        // Retain the winner's reference for process-lifetime callbacks/workers.
+        // A losing caller owns only an extra reference to that same DSO.
+        if (!atomic_compare_exchange_strong(&backend_api, &expected, api)) {
+            dlclose(reference);
+            api = expected;
+        }
+    } else {
+        atomic_store(&backend_unavailable, true);
     }
-    atomic_store(&initializing, false);
+    loading_backend = false;
     return api;
 }
 
