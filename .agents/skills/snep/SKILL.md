@@ -1,12 +1,11 @@
 ---
 name: snep
 description: Guide users through creating or revising a Snapshot Enhancement Proposal (SNEP), including an interactive section-by-section draft. Use for significant Snapshot design changes, not ordinary implementation or small documentation changes.
+license: Apache-2.0
+metadata:
+  SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  SPDX-License-Identifier: Apache-2.0
 ---
-
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
 
 # Snapshot Enhancement Proposals
 
