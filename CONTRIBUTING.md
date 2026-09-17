@@ -140,11 +140,12 @@ closed. The bar is reviewer time: a change nobody has read wastes it.
 
 ## How pull requests are reviewed
 
-**Who reviews.** Every pull request is reviewed by a maintainer. The maintainers
-are the code owners for the whole repository — see
+**Who reviews.** Every pull request is reviewed by a maintainer. Ownership is
+recorded as GitHub teams — `@ai-dynamo/snapshot-codeowners` for the repository
+and `@ai-dynamo/snapshot-docs-codeowners` for `docs/` and Markdown files; see
 [`.github/CODEOWNERS`](.github/CODEOWNERS) and [MAINTAINERS.md](MAINTAINERS.md) —
-so GitHub requests review from that group automatically. At least one maintainer
-approval is required before a pull request can merge.
+so GitHub requests review from the right team automatically. At least one
+maintainer approval is required before a pull request can merge.
 
 **What has to pass.** Alongside the approval, CI must be green: the `check`,
 `build`, and `test` jobs, the DCO check, and `Validate Issue Reference`. A
