@@ -141,6 +141,7 @@ pub unsafe extern "C" fn cuinterpose_core_init(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::c_char;
 
     #[test]
     fn frontend_registration_is_validated_and_idempotent() {
@@ -211,8 +212,14 @@ mod tests {
             }
         });
         for incompatible in [
-            FrontendAbi { resolve: other_resolve, ..frontend },
-            FrontendAbi { origin_pid: frontend.origin_pid + 1, ..frontend },
+            FrontendAbi {
+                resolve: other_resolve,
+                ..frontend
+            },
+            FrontendAbi {
+                origin_pid: frontend.origin_pid + 1,
+                ..frontend
+            },
         ] {
             let mut output = std::ptr::null();
             assert_eq!(
