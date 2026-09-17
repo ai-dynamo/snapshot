@@ -9,7 +9,7 @@ SPDX-License-Identifier: Apache-2.0
 
 The worker owns the complete CUDA operation. Native CustomStorage returns an aggregate device-memory view and stream for each participating GPU in the calling process. Those pointers cannot be sent to another process. The same worker passes the returned view to PageBroker's existing `TransferBuffers` ring, which pipelines pinned-memory CUDA copies and NIXL POSIX storage requests. It calls `cuCheckpointOperationComplete` only after transfer success. No payload digest or compression is performed.
 
-The qualification scope is intentionally one trusted, quiescent target with one visible GPU and private allocations. `CUDA_CHECKPOINT_JOB_FILE` must be absent, and the caller must not create IPC/multicast resources or use `cuda-checkpoint --launch-job`. Tests allocate through both `cuMemAlloc` and nonexportable `cuMemCreate`; using the former does not itself create legacy IPC.
+The qualification scope is intentionally one trusted, quiescent target. Its visible GPU set must match the worker's, including GPUs with no payload in parent processes. `PAGEBROKER_NATIVE_SELECTED_GPU` optionally limits retained contexts to the target's payload GPU without changing CUDA enumeration. `CUDA_CHECKPOINT_JOB_FILE` must be absent unless the explicit jobfile experiment is selected. Native IPC remains outside the jobfile-free qualification: an interposed target may use the legacy-memory adapter only after cuinterpose has removed its managed shared mappings. Private tests allocate through both `cuMemAlloc` and nonexportable `cuMemCreate`; using the former does not itself create legacy IPC.
 
 ## Lifecycle
 
