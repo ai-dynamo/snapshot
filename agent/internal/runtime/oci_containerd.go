@@ -7,13 +7,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	internalapi "k8s.io/cri-api/pkg/apis"
-	remote "k8s.io/cri-client/pkg"
 )
 
 // k8sNamespace is containerd's conventional namespace for kubelet-managed
@@ -30,13 +28,7 @@ func NewContainerdRuntime(socket string) (*ContainerdRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial containerd at %s: %w", socket, err)
 	}
-	// The explicit nil tracer provider opts out of the otelgrpc stats handler;
-	// omitting the call installs one backed by a noop provider instead.
-	cri, err := remote.NewRemoteRuntimeServiceBuilder().
-		WithEndpoint(socket).
-		WithConnectionTimeout(2 * time.Second).
-		WithTracerProvider(nil).
-		Build(context.Background())
+	cri, err := newRemoteRuntimeService(socket)
 	if err != nil {
 		_ = client.Close()
 		return nil, fmt.Errorf("failed to dial containerd CRI at %s: %w", socket, err)
@@ -50,6 +42,17 @@ func (r *ContainerdRuntime) Close() error {
 
 func (r *ContainerdRuntime) ResolveContainerImageID(ctx context.Context, containerID string) (string, error) {
 	return resolveContainerImageID(ctx, r.cri, containerID)
+}
+
+func (r *ContainerdRuntime) TerminateContainer(ctx context.Context, containerID string) error {
+	id, err := containerIDForRuntime(containerID, "containerd://")
+	if err != nil {
+		return fmt.Errorf("invalid containerd container ID %q: %w", containerID, err)
+	}
+	if err := stopContainerIfPresent(ctx, r.cri, id); err != nil {
+		return fmt.Errorf("failed to terminate container %s: %w", containerID, err)
+	}
+	return nil
 }
 
 func (r *ContainerdRuntime) ResolveContainer(ctx context.Context, containerID string) (int, *specs.Spec, error) {
