@@ -22,6 +22,7 @@ import {
   newestResultAt,
   parseChunk,
   parseManifest,
+  recentStageComparison,
   seriesForMetric,
   suiteNeedsPendingChunks,
   validateResult,
@@ -376,6 +377,38 @@ describe("comparison keys", () => {
     expect(key.custom).toBeNull();
     expect(key.sourceGpuModels).toEqual(["100"]);
     expect(key.restoreGpuModels).toEqual(["NVIDIA A100-SXM4-80GB"]);
+  });
+});
+
+describe("stage comparison", () => {
+  it("reports a stage a run has no complete value for instead of a zero", () => {
+    const complete = result({ runId: "1", startedAt: "2026-09-08T01:00:00.000Z", value: 12 });
+    const incomplete = result({ runId: "2", startedAt: "2026-09-09T01:00:00.000Z", value: null });
+    const otherStage = result({
+      runId: "3",
+      startedAt: "2026-09-10T01:00:00.000Z",
+      metric: "restore.to_traffic.duration",
+      displayName: "Restore to traffic",
+      value: 30,
+    });
+
+    const comparison = recentStageComparison(
+      [complete, incomplete, otherStage],
+      "vllm",
+      7,
+      new Set(["checkpoint.duration", "restore.to_traffic.duration"]),
+    );
+
+    expect(comparison.stages.map((stage) => stage.displayName)).toEqual([
+      "Checkpoint",
+      "Restore to traffic",
+    ]);
+    const byRun = new Map(comparison.runs.map((run) => [run.result.identity.runId, run]));
+    expect(byRun.get("1")!.values.get("checkpoint.duration")).toBe(12);
+    expect(byRun.get("1")!.missing).toEqual(["Restore to traffic"]);
+    expect(byRun.get("2")!.values.has("checkpoint.duration")).toBe(false);
+    expect(byRun.get("2")!.missing).toEqual(["Checkpoint", "Restore to traffic"]);
+    expect(byRun.get("3")!.missing).toEqual(["Checkpoint"]);
   });
 });
 

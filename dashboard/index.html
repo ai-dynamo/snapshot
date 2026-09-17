@@ -17,12 +17,7 @@ SPDX-License-Identifier: Apache-2.0
     <a class="skip-link" href="#main-content">Skip to benchmark results</a>
     <header class="hero">
       <div class="hero__content">
-        <p class="eyebrow">AI-Dynamo · Snapshot</p>
         <h1>Framework E2E benchmarks</h1>
-        <p class="hero__summary">
-          Nightly checkpoint and restore performance, with hardware and runtime
-          context preserved for every result.
-        </p>
         <p id="load-status" class="status" role="status" aria-live="polite">
           Loading benchmark history…
         </p>
@@ -31,6 +26,15 @@ SPDX-License-Identifier: Apache-2.0
     </header>
 
     <main id="main-content">
+      <aside id="preview-banner" class="preview-banner" aria-live="polite" hidden>
+        <div>
+          <p class="eyebrow">Temporary preview</p>
+          <h2 id="preview-title">Pre-merge benchmark results</h2>
+          <p id="preview-description"></p>
+        </div>
+        <a id="preview-run-link" class="button" href="#">Open workflow run</a>
+      </aside>
+
       <section class="controls" aria-labelledby="filters-heading">
         <div class="section-heading">
           <div>
@@ -43,13 +47,19 @@ SPDX-License-Identifier: Apache-2.0
         </div>
 
         <div class="controls__grid">
-          <label>
+          <!--
+            Hidden by default: only one suite exists today. configureSuites()
+            un-hides this as soon as a second suite is discovered, so it
+            still works for the discoverability the suite select exists for.
+          -->
+          <label id="suite-field" class="controls__field--hidden">
             <span>Suite</span>
             <select id="suite-filter"></select>
           </label>
           <label>
             <span>Date range</span>
             <select id="date-filter">
+              <option value="7">Latest 7 days</option>
               <option value="30">Latest 30 days</option>
               <option value="90" selected>Latest 90 days</option>
               <option value="180">Latest 180 days</option>
@@ -64,7 +74,8 @@ SPDX-License-Identifier: Apache-2.0
             <span>Outcome</span>
             <select id="outcome-filter"></select>
           </label>
-          <label>
+          <!-- Hidden, not removed: same reasoning as the Suite field above. -->
+          <label class="controls__field--hidden">
             <span>Run channel</span>
             <select id="channel-filter"></select>
           </label>
