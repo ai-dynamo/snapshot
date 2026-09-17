@@ -219,10 +219,13 @@ var gpuModelCheck = check{
 	compare: func(source, target Environment) []Mismatch {
 		sourceModels, sourceOK := gpuModels(source.GPUDevices)
 		targetModels, targetOK := gpuModels(target.GPUDevices)
-		if !sourceOK || !targetOK || sourceModels == targetModels {
+		if !sourceOK || !targetOK || sameRegardlessOfOrder(sourceModels, targetModels) {
 			return nil
 		}
-		return []Mismatch{{Source: sourceModels, Target: targetModels}}
+		return []Mismatch{{
+			Source: summariseByCount(sourceModels),
+			Target: summariseByCount(targetModels),
+		}}
 	},
 }
 
@@ -282,10 +285,13 @@ var migProfileCheck = check{
 	compare: func(source, target Environment) []Mismatch {
 		sourceProfiles, sourceOK := gpuMIGProfiles(source.GPUDevices)
 		targetProfiles, targetOK := gpuMIGProfiles(target.GPUDevices)
-		if !sourceOK || !targetOK || sourceProfiles == targetProfiles {
+		if !sourceOK || !targetOK || sameRegardlessOfOrder(sourceProfiles, targetProfiles) {
 			return nil
 		}
-		return []Mismatch{{Source: sourceProfiles, Target: targetProfiles}}
+		return []Mismatch{{
+			Source: summariseByCount(sourceProfiles),
+			Target: summariseByCount(targetProfiles),
+		}}
 	},
 }
 
@@ -323,26 +329,25 @@ var driverMinimumCheck = check{
 	},
 }
 
-// gpuModels builds a stable model summary: sorting ignores allocation order,
-// while "xN" preserves how many GPUs have each name. ProductName comes from
+// gpuModels lists the model name of every visible GPU. ProductName comes from
 // nvidia-smi --query-gpu=name, documented as the GPU's official product name:
 // https://docs.nvidia.com/deploy/nvidia-smi/index.html#product-name
 //
 // It returns unknown if any GPU has no name because partial data cannot prove
 // that the source and target models differ.
-func gpuModels(devices []GPUDevice) (string, bool) {
+func gpuModels(devices []GPUDevice) ([]string, bool) {
 	if len(devices) == 0 {
-		return "", false
+		return nil, false
 	}
 	models := make([]string, 0, len(devices))
 	for _, device := range devices {
 		model := strings.TrimSpace(device.ProductName)
 		if model == "" {
-			return "", false
+			return nil, false
 		}
 		models = append(models, model)
 	}
-	return summariseByCount(models), true
+	return models, true
 }
 
 // migUUIDPrefix is how NVIDIA spells a MIG device's UUID, in both the current
@@ -402,11 +407,11 @@ func gpuPartitioning(devices []GPUDevice) (partitioning, bool) {
 	return kinds, true
 }
 
-// gpuMIGProfiles summarises the shape of every slice among the visible GPUs,
+// gpuMIGProfiles lists the shape of every slice among the visible GPUs,
 // ignoring whole GPUs so that a mixed set still compares its slices. nvidia-smi
 // publishes the profile only in -L, so a slice whose profile was never read
 // returns unknown, and an unknown value never refuses a restore.
-func gpuMIGProfiles(devices []GPUDevice) (string, bool) {
+func gpuMIGProfiles(devices []GPUDevice) ([]string, bool) {
 	profiles := make([]string, 0, len(devices))
 	for _, device := range devices {
 		if !strings.HasPrefix(strings.TrimSpace(device.UUID), migUUIDPrefix) {
@@ -414,20 +419,44 @@ func gpuMIGProfiles(devices []GPUDevice) (string, bool) {
 		}
 		profile := strings.TrimSpace(device.MIGProfile)
 		if profile == "" {
-			return "", false
+			return nil, false
 		}
 		profiles = append(profiles, profile)
 	}
 	if len(profiles) == 0 {
-		return "", false
+		return nil, false
 	}
-	return summariseByCount(profiles), true
+	return profiles, true
 }
 
-// summariseByCount renders a stable multiset summary: sorting ignores
-// allocation order, while "xN" preserves how many devices share each value.
-// The count has to survive, because gpu-count compares only the total and so
-// cannot tell two slices of one shape and one of another from the reverse.
+// sameRegardlessOfOrder reports whether both sides hold the same values the
+// same number of times. Order is left out because which physical device a
+// checkpoint lands on is #246's concern. Multiplicity is kept because gpu-count
+// compares only the total, and so cannot tell two slices of one shape and one
+// of another from the reverse.
+func sameRegardlessOfOrder(source, target []string) bool {
+	if len(source) != len(target) {
+		return false
+	}
+	remaining := make(map[string]int, len(source))
+	for _, value := range source {
+		remaining[value]++
+	}
+	for _, value := range target {
+		// A value absent from source decrements from zero to -1, so the guard
+		// below rejects it rather than reading the absence as a match.
+		remaining[value]--
+		if remaining[value] < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// summariseByCount renders values for a refusal message, counted so that a node
+// holding eight of one GPU reads as one entry rather than eight. Sorting is here
+// only to keep the message stable, map iteration order not being, and nothing is
+// compared on the result.
 func summariseByCount(values []string) string {
 	counts := make(map[string]int, len(values))
 	for _, value := range values {
