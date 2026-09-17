@@ -125,7 +125,8 @@ linux-build:
 	  -e HOME=/tmp -e GOCACHE=/tmp/go-build \
 	  -v "$(CURDIR):/workspace" -w /workspace \
 	  $(LINUX_GO_IMAGE) \
-	  make -C agent build
+	  make -C agent go-build
+	$(MAKE) -C agent cuinterpose-build
 
 linux-test:
 	docker run --rm \
@@ -134,6 +135,7 @@ linux-test:
 	  -v "$(CURDIR):/workspace" -w /workspace \
 	  $(LINUX_GO_IMAGE) \
 	  make -C agent test
+	$(MAKE) -C agent cuinterpose-test
 
 # Refresh the agent's base-image package baseline. Run whenever AGENT_BASE_IMAGE
 # changes; verify-base-packages fails the agent build if you forget.
