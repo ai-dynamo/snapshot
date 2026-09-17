@@ -123,7 +123,7 @@ def main():
                             "SNAPSHOT_CONTROL_DIR": str(actual)}
         subprocess.run([str(build / "init-only")], env=actual_env, check=True, timeout=20)
         modes = ["init", "init-handle", "init-failure", "private", *map(str, range(7)),
-                 "tracked-query", "fork", "constructor"]
+                 "tracked-query", "fork", "constructor", "concurrent"]
         for mode in modes:
             subprocess.run([sys.executable, str(fixtures.parent / "endpoint.py"), mode, str(constructor)],
                            env=actual_env, check=True, timeout=20)
