@@ -33,6 +33,7 @@ type CheckpointContainerSnapshot struct {
 	HostCgroupPath string   // host filesystem path for CRIU's --freeze-cgroup
 	CUDAHostPIDs   []int    // host-visible PIDs used for checkpoint-side CUDA actions
 	CUDANSPIDs     []int    // namespace-relative PIDs stored in the checkpoint manifest
+	GPUDevicePaths map[string]string
 
 	// GPUs holds the GPUs the checkpointed container could see, in allocation
 	// order, with the model and driver version where they could be read.
@@ -41,8 +42,9 @@ type CheckpointContainerSnapshot struct {
 
 // RestoreContainerSnapshot holds inspected state for the restore target.
 type RestoreContainerSnapshot struct {
-	PlaceholderPID int
-	TargetRoot     string
-	CgroupRoot     string
-	CUDADeviceMap  string
+	PlaceholderPID  int
+	TargetRoot      string
+	CgroupRoot      string
+	CUDADeviceMap   string
+	GPUMountAliases map[string]string
 }

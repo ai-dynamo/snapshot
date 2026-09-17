@@ -22,6 +22,71 @@ import (
 	"github.com/ai-dynamo/snapshot/api/compat"
 )
 
+func TestInspectCompatibilityChecksMappedGPUMountAndOrdinaryMounts(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "dev"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "dev/nvidia1"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := &types.CheckpointManifest{
+		CUDA: types.CUDAManifest{
+			SourceGPUUUIDs: []string{"GPU-source"},
+			DevicePaths:    map[string]string{"GPU-source": "/dev/nvidia0"},
+		},
+		CRIUDump: types.CRIUDumpManifest{ExtMnt: map[string]string{"/dev/nvidia0": "/dev/nvidia0"}},
+	}
+	target := compat.GPUInfo{Devices: []compat.GPUDevice{{UUID: "GPU-target"}}}
+	paths := map[string]string{"GPU-target": "/dev/nvidia1"}
+	check := func() error {
+		_, aliases, err := prepareGPUMapping(testr.New(t), manifest, []string{"GPU-target"},
+			func() (map[string]string, error) { return paths, nil })
+		if err != nil {
+			return err
+		}
+		if aliases["/dev/nvidia0"] != "/dev/nvidia1" {
+			t.Fatalf("restore plan = %v", aliases)
+		}
+		return inspectCompatibility(testr.New(t), manifest, target, aliases, root, "", false)
+	}
+	if err := check(); err != nil {
+		t.Fatalf("validated destination alias refused: %v", err)
+	}
+	manifest.CRIUDump.ExtMnt["/missing-data"] = "/missing-data"
+	if err := check(); err == nil {
+		t.Fatal("missing ordinary mount was accepted")
+	}
+	delete(manifest.CRIUDump.ExtMnt, "/missing-data")
+	delete(paths, "GPU-target")
+	if err := check(); err == nil {
+		t.Fatal("missing GPU mount without a validated destination was accepted")
+	}
+}
+
+func TestGPUMappingLeavesCountPolicyToInspectGate(t *testing.T) {
+	manifest := &types.CheckpointManifest{
+		CUDA: types.CUDAManifest{SourceGPUUUIDs: []string{"GPU-source"}},
+	}
+	target := compat.GPUInfo{Devices: []compat.GPUDevice{{UUID: "GPU-a"}, {UUID: "GPU-b"}}}
+	deviceMap, aliases, err := prepareGPUMapping(testr.New(t), manifest, []string{"GPU-a", "GPU-b"},
+		func() (map[string]string, error) {
+			t.Fatal("count mismatch should not resolve device paths")
+			return nil, nil
+		})
+	if err != nil || deviceMap != "" || len(aliases) != 0 {
+		t.Fatalf("mapping preparation = %q, %v, %v", deviceMap, aliases, err)
+	}
+	err = inspectCompatibility(testr.New(t), manifest, target, aliases, t.TempDir(), "", false)
+	var incompatible *compat.IncompatibleError
+	if !errors.As(err, &incompatible) || incompatible.Gate != compat.GateInspect {
+		t.Fatalf("expected registered inspect refusal, got %v", err)
+	}
+	if len(incompatible.Mismatches) != 1 || incompatible.Mismatches[0].Check != compat.CheckGPUCount {
+		t.Fatalf("expected GPU count check, got %+v", incompatible.Mismatches)
+	}
+}
+
 // testMountPoint satisfies nsmount.MountPoint for executor unit tests.
 type testMountPoint struct{}
 
@@ -322,13 +387,13 @@ func TestExistingMountPaths(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	got := existingMountPaths(targetRoot, []string{"/model-cache", "/data", "/etc-hostname"})
+	got := existingMountPaths(targetRoot, []string{"/model-cache", "/data", "/etc-hostname"}, nil)
 	want := []string{"/model-cache", "/etc-hostname"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("existingMountPaths = %#v, want %#v", got, want)
 	}
 
-	if got := existingMountPaths(targetRoot, nil); len(got) != 0 {
+	if got := existingMountPaths(targetRoot, nil, nil); len(got) != 0 {
 		t.Errorf("existingMountPaths of nothing = %#v, want empty", got)
 	}
 }

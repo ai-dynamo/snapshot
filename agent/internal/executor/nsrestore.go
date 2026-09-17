@@ -5,6 +5,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,10 +24,11 @@ import (
 
 // RestoreOptions holds configuration for an in-namespace restore.
 type RestoreOptions struct {
-	CheckpointPath string
-	CUDADeviceMap  string
-	CgroupRoot     string
-	TargetPodIP    string
+	CheckpointPath  string
+	CUDADeviceMap   string
+	GPUMountAliases map[string]string
+	CgroupRoot      string
+	TargetPodIP     string
 	// BundleDir is the path where the agent's binary bundle is mounted inside this namespace.
 	BundleDir string
 }
@@ -146,6 +148,20 @@ func executeRestore(
 		}
 	}
 
+	cleanupGPUMounts, err := criu.PrepareGPUDeviceMounts(opts.GPUMountAliases, log)
+	if err != nil {
+		return nil, 0, nil, fmt.Errorf("prepare GPU device mounts: %w", err)
+	}
+	gpuMountsCommitted := false
+	defer func() {
+		if gpuMountsCommitted {
+			return
+		}
+		if err := cleanupGPUMounts(); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("clean GPU device mounts: %w", err))
+		}
+	}()
+
 	// Unmount placeholder's /dev/shm so CRIU can recreate tmpfs with checkpointed content
 	if err := syscall.Unmount("/dev/shm", 0); err != nil {
 		return nil, 0, nil, fmt.Errorf("failed to unmount /dev/shm before restore: %w", err)
@@ -255,5 +271,7 @@ func executeRestore(
 		}
 	}
 
+	// Retain aliases only once CUDA restore and unlock have also succeeded.
+	gpuMountsCommitted = true
 	return timings, restoredPID, nil, nil
 }
