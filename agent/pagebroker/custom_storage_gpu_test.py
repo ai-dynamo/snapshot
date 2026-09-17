@@ -9,12 +9,14 @@ The last argument is MiB per allocation (one cuMemAlloc, one cuMemCreate).
 """
 
 import ctypes as C
+import argparse
 import json
 import os
 from pathlib import Path
 import selectors
 import subprocess
 import sys
+import time
 
 
 def target(size):
@@ -56,7 +58,9 @@ def target(size):
     access = Access(Location(1, 0), 3)
     call("cuMemSetAccess", vmm, C.c_size_t(size), C.byref(access), C.c_size_t(1))
     # Distinct nonconstant patterns, checked over every byte, not sampled.
-    patterns = [bytes(range(256)) * 4096, bytes(reversed(range(256))) * 4096]
+    rank = int(os.environ.get("CUSTOM_STORAGE_TEST_RANK", "0"))
+    pattern = bytes((value + rank * 17) % 256 for value in range(256))
+    patterns = [pattern * 4096, pattern[::-1] * 4096]
     for address, pattern in zip((legacy, vmm), patterns):
         buffer = C.create_string_buffer(pattern)
         for offset in range(0, size, len(pattern)):
@@ -135,8 +139,142 @@ def run(directory, mib):
             worker.wait(timeout=30)
 
 
+def run_multiple(directory, mib, count):
+    """Drive independent workers; native calls never execute concurrently."""
+    assert "CUDA_CHECKPOINT_JOB_FILE" not in os.environ
+    assert not os.environ.get("LD_PRELOAD")
+    uuids = subprocess.check_output(
+        ["nvidia-smi", "--query-gpu=uuid", "--format=csv,noheader"], text=True,
+    ).splitlines()
+    assert len(uuids) >= count
+    assert len(set(uuids)) == len(uuids)
+    directory.mkdir(mode=0o700, parents=True, exist_ok=False)
+    workloads, workers = [], []
+    try:
+        admission_start = time.monotonic()
+        # Pin both processes by UUID, not ordinal; each sees exactly one GPU.
+        for rank, uuid in enumerate(uuids[:count]):
+            env = dict(os.environ, CUDA_VISIBLE_DEVICES=uuid,
+                       CUSTOM_STORAGE_TEST_RANK=str(rank))
+            path = directory / str(rank)
+            path.mkdir(mode=0o700)
+            workload = subprocess.Popen(
+                [sys.executable, "-u", __file__, "--target", str(mib * 1024 * 1024)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=env,
+            )
+            workloads.append(workload)
+            assert line(workload) == "ready"
+            environ = Path(f"/proc/{workload.pid}/environ").read_bytes()
+            assert b"CUDA_CHECKPOINT_JOB_FILE=" not in environ
+            worker = subprocess.Popen(
+                ["pagebroker-custom-storage-worker", str(workload.pid), str(path)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=env,
+            )
+            workers.append(worker)
+            ready = json.loads(line(worker))
+            assert ready["event"] == "ready"
+            print(json.dumps(dict(ready, rank=rank, uuid=uuid)), flush=True)
+        print(json.dumps({"event": "admitted", "seconds": time.monotonic() - admission_start,
+                          "includes_target_allocation_and_seeding": True}), flush=True)
+        for workload in workloads:
+            workload.stdin.write("verify\n")
+            workload.stdin.flush()
+        for workload in workloads:
+            assert line(workload) == "verified"
+
+        # ABBA balances first-touch and run-order effects. Save uses the same
+        # schedule in every cycle; only the LOAD schedule changes.
+        for iteration, mode in enumerate(("sequential", "pipeline", "pipeline", "sequential")):
+            for operation in ("save", "load"):
+                started = time.monotonic()
+                pipeline = operation == "load" and mode == "pipeline"
+                preparations, transfers = [], []
+                for rank, worker in enumerate(workers):
+                    worker.stdin.write(f"prepare-{operation}\n")
+                    worker.stdin.flush()
+                    prepared = json.loads(line(worker))
+                    assert prepared["event"] == "prepared"
+                    preparations.append(prepared)
+                    if pipeline:
+                        worker.stdin.write("transfer\n")
+                        worker.stdin.flush()
+                if not pipeline:
+                    for worker in workers:
+                        worker.stdin.write("transfer\n")
+                        worker.stdin.flush()
+                # All transfers must succeed before ANY target receives COMPLETE.
+                for rank, worker in enumerate(workers):
+                    transferred = json.loads(line(worker))
+                    assert transferred["event"] == "transferred"
+                    assert transferred["bytes"] >= 2 * mib * 1024 * 1024
+                    transfers.append(transferred)
+                results = []
+                for worker in workers:
+                    worker.stdin.write("complete\n")
+                    worker.stdin.flush()
+                    result = json.loads(line(worker))
+                    assert result["event"] == "complete"
+                    results.append(result)
+                ended = time.monotonic()
+                # Native intervals must be disjoint. Compute actual overlap with
+                # the UNION of copy intervals, not a sum of concurrent copies.
+                spans = sorted((x["transfer_start_ns"], x["transfer_end_ns"]) for x in transfers)
+                merged = []
+                for begin, end in spans:
+                    if merged and begin <= merged[-1][1]:
+                        merged[-1][1] = max(merged[-1][1], end)
+                    else:
+                        merged.append([begin, end])
+                overlap = 0
+                previous = 0
+                for prepared in preparations:
+                    begin, end = prepared["prepare_start_ns"], prepared["prepare_end_ns"]
+                    assert begin >= previous
+                    previous = end
+                    overlap += sum(max(0, min(end, right) - max(begin, left))
+                                   for left, right in merged)
+                print(json.dumps({
+                    "event": "batch", "operation": operation, "iteration": iteration,
+                    "mode": mode if operation == "load" else "sequential",
+                    "total_seconds": ended - started,
+                    "native_transfer_overlap_seconds": overlap / 1e9,
+                    "bytes": sum(item["bytes"] for item in transfers),
+                    "preparations": preparations, "transfers": transfers, "results": results,
+                }), flush=True)
+            for workload in workloads:
+                workload.stdin.write("verify\n")
+                workload.stdin.flush()
+            for workload in workloads:
+                assert line(workload) == "verified"
+            print(f"iteration {iteration}: all {count} ranks' private bytes verified", flush=True)
+        for workload in workloads:
+            workload.stdin.close()
+        for workload in workloads:
+            assert workload.wait(timeout=30) == 0
+        for worker in workers:
+            worker.stdin.close()
+        for worker in workers:
+            assert worker.wait(timeout=30) == 0
+    finally:
+        # No public abort exists: stop all targets before discarding worker contexts.
+        for process in workloads + workers:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=30)
+
+
 if __name__ == "__main__":
     if sys.argv[1] == "--target":
         target(int(sys.argv[2]))
     else:
-        run(Path(sys.argv[1]), int(sys.argv[2]))
+        parser = argparse.ArgumentParser(description=__doc__)
+        parser.add_argument("directory", type=Path)
+        parser.add_argument("mib", type=int)
+        parser.add_argument("--targets", type=int, default=1)
+        args = parser.parse_args()
+        if args.mib <= 0 or args.targets <= 0:
+            parser.error("allocation size and target count must be positive")
+        if args.targets == 1:
+            run(args.directory, args.mib)
+        else:
+            run_multiple(args.directory, args.mib, args.targets)
