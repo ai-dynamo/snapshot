@@ -347,9 +347,8 @@ func orderDRAUUIDsByRuntime(allocatedUUIDs, visibleUUIDs []string) ([]string, er
 
 // FilterProcesses returns the subset of candidate PIDs that hold actual CUDA contexts.
 // Uses --get-restore-tid (the same technique as the CRIU CUDA plugin) instead of
-// --get-state, because --get-state incorrectly matches coordinator processes like
-// cuda-checkpoint --launch-job that share a /proc namespace with CUDA processes but
-// don't hold CUDA contexts themselves.
+// --get-state, because --get-state also matches processes that share a /proc
+// namespace with CUDA processes but don't hold CUDA contexts themselves.
 func FilterProcesses(ctx context.Context, allPIDs []int, log logr.Logger) []int {
 	cudaPIDs := make([]int, 0, len(allPIDs))
 	for _, pid := range allPIDs {
@@ -436,28 +435,24 @@ func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string,
 }
 
 // CheckpointProcessTree locks and checkpoints CUDA state for all given PIDs,
-// then persists the launch-job state needed to restore them.
+// after every participant has been locked.
 // On failure, the caller is expected to fail the operation and terminate the workload.
-func CheckpointProcessTree(ctx context.Context, cudaPIDs []int, jobFile, checkpointDir string, log logr.Logger) (CheckpointPhaseTimings, error) {
+func CheckpointProcessTree(ctx context.Context, cudaPIDs []int, log logr.Logger) (CheckpointPhaseTimings, error) {
 	var timings CheckpointPhaseTimings
 
 	start := time.Now()
 	for _, pid := range cudaPIDs {
-		if err := lockWithJobFile(ctx, pid, jobFile, log); err != nil {
+		if err := lock(ctx, pid, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
 	}
 
 	for _, pid := range cudaPIDs {
-		if err := checkpointWithJobFile(ctx, pid, jobFile, log); err != nil {
+		if err := checkpoint(ctx, pid, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
-	}
-	if err := refreshJobFileArtifact(jobFile, checkpointDir); err != nil {
-		timings.TotalDuration = time.Since(start)
-		return timings, err
 	}
 	timings.TotalDuration = time.Since(start)
 
