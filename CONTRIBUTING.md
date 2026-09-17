@@ -116,6 +116,41 @@ the bulk of the review.
 AI assistance is welcome. Agent-specific repository guidance lives in
 [AGENTS.md](AGENTS.md).
 
+### Repository agent skills
+
+Repository-maintained skills live in [`.agents/skills`](.agents/skills). A
+compatible coding agent discovers these skills automatically when it works from
+this checkout. Available skills:
+
+- [`snep`](.agents/skills/snep/SKILL.md) — guides an interactive,
+  section-by-section draft or revision of a Snapshot Enhancement Proposal.
+
+The repository-local skill is available automatically to compatible agents
+working in this checkout. To make a skill available in every local project,
+create a symlink from the repository root using the directory for your agent:
+
+```sh
+# Codex
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
+ln -s "$PWD/.agents/skills/snep" "${CODEX_HOME:-$HOME/.codex}/skills/snep"
+
+# Claude Code
+mkdir -p "$HOME/.claude/skills"
+ln -s "$PWD/.agents/skills/snep" "$HOME/.claude/skills/snep"
+
+# Cursor CLI
+mkdir -p "$HOME/.cursor/skills"
+ln -s "$PWD/.agents/skills/snep" "$HOME/.cursor/skills/snep"
+
+# Pi
+mkdir -p "$HOME/.pi/agent/skills"
+ln -s "$PWD/.agents/skills/snep" "$HOME/.pi/agent/skills/snep"
+```
+
+Each command links the same versioned repository skill; remove the matching
+symlink to uninstall it. Restart the agent if it does not reload skills
+automatically.
+
 The rules are the same as for any other contribution, because the obligations
 do not change based on how the code was produced:
 

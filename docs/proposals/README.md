@@ -25,6 +25,11 @@ Submit SNEPs as Markdown files in a GitHub pull request. Follow these rules:
    updating the pull request. Check it without modifying files by running
    `make verify-toc`.
 
+When working with a compatible coding agent, invoke the repository's `$snep`
+skill for a guided, section-by-section proposal draft. The skill is located at
+`.agents/skills/snep` and follows this process and the template; it does not
+replace proposal review.
+
 > SNEP is inspired by the Kubernetes Enhancement Proposal (KEP) process and the
 > Grove Enhancement Proposal (GREP) convention.
 
