@@ -83,11 +83,63 @@ Loading the backend and starting its runtime are separate operations:
 | --- | --- |
 | ABI registration (`cuinterpose_core_init`) | Copies the frontend table and returns an immutable backend table. Repeated or concurrent registrations must agree on the resolver and origin PID. It starts no workers and makes no frontend callbacks. |
 | Frontend publication | Concurrent callers may each `dlopen` the backend; glibc serializes its construction. Atomic publication retains one process-lifetime library reference and closes redundant references. Same-thread constructor reentry returns `CUDA_ERROR_NOT_INITIALIZED` without poisoning a later call. |
-| Runtime startup | CUDA callbacks and `ensure_cuinterpose_initialized` create one process generation, control socket, and worker pair. A contending caller receives transient `CUDA_ERROR_NOT_INITIALIZED`; it does not wait while potentially holding the loader lock. |
+| Runtime startup | CUDA callbacks and `ensure_cuinterpose_initialized` prepare private candidates, then install one process generation, control socket, and worker pair. Concurrent callers reuse the installed runtime; same-thread preparation reentry returns `CUDA_ERROR_NOT_INITIALIZED` without poisoning it. |
 
 There is no frontend-wide loading lock. The backend's generation lock remains
 necessary for unique runtime resources and quiescent-fork coordination.
 Obtaining the ABI table alone does not mean runtime services are ready.
+
+### Backend runtime installation
+
+```mermaid
+flowchart TD
+    A["Prepare private tracking state and channels"] --> B["Spawn workers parked on empty channels"]
+    B --> C["Acquire installation mutex"]
+    C --> D{"Failed runtime / healthy winner / no winner?"}
+    D -->|failed| E["Return sticky failure"]
+    D -->|healthy winner| F["Reuse installed runtime"]
+    D -->|no winner| G["Bind, configure, activate listener; publish state"]
+    E --> H["Unlock, then discard private candidate"]
+    F --> H
+    G --> H
+```
+
+Thread creation can register Rust TLS destructors with glibc's loader. A CUDA
+caller in a DSO constructor already holds that loader lock. Preparation therefore
+owns no installation mutex: that caller can prepare its own candidate instead
+of waiting for another thread blocked in loader-sensitive startup. Installation
+never waits for a worker-running acknowledgment. Readiness means successful
+thread creation, not proof that a worker has already been scheduled.
+
+Only the installer binds the canonical endpoint. One nonblocking listener
+handoff activates the peer worker, which owns the control queue's only sender.
+Discarding a candidate disconnects that chain so both workers eventually exit;
+callers never join them. Cleanup, unlinking, logging, and candidate destruction
+happen outside the installation mutex. There can temporarily be two private
+workers per contender, but only one installed pair.
+
+Installed failure is checked before installed state. A failed private candidate
+may reuse an already-installed healthy winner; it never waits for an unfinished
+candidate. Without a winner, a real preparation or installation error remains
+sticky. No call bypasses tracking to reach CUDA after initialization failure.
+
+The bounded commit path is audited for the pinned Rust/Linux/glibc implementation:
+
+- Backend ELF eager binding prevents first-use PLT lookup while holding the mutex.
+- The preparation guard initializes non-destructible backend TLS before commit.
+  Rust futex mutexes and panic-count TLS do not register loader destructors.
+- The capacity-one activation channel is preallocated. `try_send` never enters
+  blocking-send context initialization; wakeups use non-Drop TLS and futex
+  unparking. Receiver context setup happens before its waker lock is held.
+- Bind/listen, nonblocking setup, chmod, and descriptor registration make no
+  frontend callbacks or formatted/logging calls. The descriptor registry can
+  grow its Vec using ordinary glibc allocation; arbitrary allocator/libc
+  interposers that call the loader are outside this assumption.
+
+Fork remains supported only with CUDA/lifecycle calls and active RPC quiescent.
+Retiring private workers have no generation reference or socket. This does not
+promise safe arbitrary fork during preparation or reclaim every inherited
+allocation belonging to a vanished thread.
 
 Ordinary Rust panics are caught at the backend entry points and converted into CUDA errors. A failed backend stops accepting further CUDA work rather than continuing with possibly inconsistent records. This does not make invalid application pointers, foreign C++ exceptions, or allocator aborts recoverable.
 
