@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
+#include <map>
 #include <stdexcept>
 #include <string>
 
@@ -33,14 +34,20 @@ void Check(CUresult result, const char* operation)
   }
 }
 
-// This qualification worker deliberately supports only one private-memory
-// target on one visible GPU. The driver-owned aggregate view never crosses a
-// process boundary: native preparation, PageBroker transfer and COMPLETE all
-// execute here. It is not a daemon RPC endpoint.
-void Run(int pid, const std::filesystem::path& directory)
+// The default qualifier supports one private-memory target on one visible GPU.
+// The explicit jobfile experiment keeps peer devices visible for native IPC.
+// Aggregate pointers never cross a process boundary: native preparation,
+// PageBroker transfer and COMPLETE execute here, not in a daemon RPC endpoint.
+void Run(int pid, const std::filesystem::path& directory, bool jobfile_experiment)
 {
-  if (std::getenv("CUDA_CHECKPOINT_JOB_FILE"))
+  if (std::getenv("CUDA_CHECKPOINT_JOB_FILE") && !jobfile_experiment)
     throw std::runtime_error("CustomStorage qualification requires no CUDA_CHECKPOINT_JOB_FILE");
+  if (jobfile_experiment && (!std::getenv("CUDA_CHECKPOINT_JOB_FILE") ||
+                            !*std::getenv("CUDA_CHECKPOINT_JOB_FILE")))
+    throw std::runtime_error("jobfile experiment requires a live CUDA_CHECKPOINT_JOB_FILE");
+  const std::string jobfile = jobfile_experiment ? std::getenv("CUDA_CHECKPOINT_JOB_FILE") : "";
+  if (jobfile_experiment && unsetenv("CUDA_CHECKPOINT_JOB_FILE"))
+    throw std::runtime_error("clear helper initialization jobfile");
   struct stat info{};
   if (!directory.is_absolute() || lstat(directory.c_str(), &info) || !S_ISDIR(info.st_mode) ||
       (info.st_mode & 0022))
@@ -54,17 +61,29 @@ void Run(int pid, const std::filesystem::path& directory)
   Check(cuInit(0), "cuInit");
   int count = 0;
   Check(cuDeviceGetCount(&count), "cuDeviceGetCount");
-  if (count != 1)
-    throw std::runtime_error("qualification worker requires exactly one visible GPU");
-  CUdevice device;
-  Check(cuDeviceGet(&device, 0), "cuDeviceGet");
-  CUcontext context;
-  Check(cuDevicePrimaryCtxRetain(&context, device), "cuDevicePrimaryCtxRetain");
-  CUuuid uuid;
-  Check(cuDeviceGetUuid(&uuid, device), "cuDeviceGetUuid");
-  std::array<unsigned char, 16> bytes{};
-  std::copy(std::begin(uuid.bytes), std::end(uuid.bytes), bytes.begin());
-  const auto device_uuid = storage::FormatGPUUUID(bytes);
+  // Native preparation validates the target's visible GPU set, including
+  // zero-payload parents. Keep that set visible even without a jobfile;
+  // the selected UUID controls context ownership, not CUDA enumeration.
+  std::map<CUcontext, std::pair<CUdevice, std::string>> contexts;
+  for (int index = 0; index < count; ++index) {
+    CUdevice device;
+    Check(cuDeviceGet(&device, index), "cuDeviceGet");
+    CUuuid uuid;
+    Check(cuDeviceGetUuid(&uuid, device), "cuDeviceGetUuid");
+    std::array<unsigned char, 16> bytes{};
+    std::copy(std::begin(uuid.bytes), std::end(uuid.bytes), bytes.begin());
+    const auto device_uuid = storage::FormatGPUUUID(bytes);
+    const char* selected = std::getenv("PAGEBROKER_NATIVE_SELECTED_GPU");
+    if (selected && device_uuid != selected)
+      continue;
+    CUcontext context;
+    Check(cuDevicePrimaryCtxRetain(&context, device), "cuDevicePrimaryCtxRetain");
+    contexts.emplace(context, std::make_pair(device, device_uuid));
+  }
+  if (contexts.empty())
+    throw std::runtime_error("no selected CUDA device");
+  if (jobfile_experiment && setenv("CUDA_CHECKPOINT_JOB_FILE", jobfile.c_str(), 1))
+    throw std::runtime_error("configure native operation jobfile");
   void* symbol = nullptr;
   CUdriverProcAddressQueryResult query;
   Check(cuGetProcAddress("cuCheckpointOperationComplete", &symbol, 13040,
@@ -84,13 +103,26 @@ void Run(int pid, const std::filesystem::path& directory)
     bool prepared = false;
     bool copied = false;
     bool save = false;
+    bool locked = false;
     CUcheckpointCustomStorageInfo* view = nullptr;
     std::vector<storage::ManifestExtent> manifest;
     std::vector<storage::TransferJob> jobs;
+    std::vector<CUcontext> owners;
     Clock::time_point start, prepare_start, prepare_end, transfer_start, transfer_end;
     double prepare = 0, transfer_time = 0, setup_time = 0, storage_time = 0;
     size_t transferred = 0;
     while (std::getline(std::cin, command)) {
+      if (command == "lock") {
+        if (prepared || locked)
+          throw std::runtime_error("target is already locked or prepared");
+        CUcheckpointLockArgs lock{};
+        lock.timeoutMs = 10000;
+        Check(cuCheckpointProcessLock(pid, &lock), "native lock");
+        locked = true;
+        std::puts("{\"event\":\"locked\"}");
+        std::fflush(stdout);
+        continue;
+      }
       const bool whole = command == "save" || command == "load";
       const bool begin = whole || command == "prepare-save" || command == "prepare-load";
       if (!begin && command != "transfer" && command != "complete")
@@ -118,9 +150,10 @@ void Run(int pid, const std::filesystem::path& directory)
         }
         CUprocessState state;
         Check(cuCheckpointProcessGetState(pid, &state), "target state");
-        if (state != (save ? CU_PROCESS_STATE_RUNNING : CU_PROCESS_STATE_CHECKPOINTED))
+        if (state != (save ? (locked ? CU_PROCESS_STATE_LOCKED : CU_PROCESS_STATE_RUNNING)
+                           : CU_PROCESS_STATE_CHECKPOINTED))
           throw std::runtime_error("target has unexpected native state");
-        if (save) {
+        if (save && !locked) {
           CUcheckpointLockArgs lock{};
           lock.timeoutMs = 10000;
           Check(cuCheckpointProcessLock(pid, &lock), "native lock");
@@ -139,16 +172,19 @@ void Run(int pid, const std::filesystem::path& directory)
         prepare = std::chrono::duration<double>(prepare_end - prepare_start).count();
         // There is no public abort after preparation. Any error below terminates
         // this worker without COMPLETE; its owner must terminate the target.
-        if (!view || !view->handle || view->deviceCount > 1 ||
+        if (!view || !view->handle || view->deviceCount > static_cast<unsigned>(count) ||
             (view->deviceCount && !view->perDeviceData))
           throw std::runtime_error("invalid CustomStorage view");
         std::vector<storage::DeviceExtent> extents;
-        if (view->deviceCount) {
+        owners.clear();
+        for (unsigned index = 0; index < view->deviceCount; ++index) {
           CUcontext owner;
-          Check(cuStreamGetCtx(view->perDeviceData[0].stream, &owner), "stream context");
-          if (owner != context)
+          Check(cuStreamGetCtx(view->perDeviceData[index].stream, &owner), "stream context");
+          const auto found = contexts.find(owner);
+          if (found == contexts.end())
             throw std::runtime_error("CustomStorage stream belongs to an unexpected context");
-          extents.push_back({device_uuid, view->perDeviceData[0].size});
+          owners.push_back(owner);
+          extents.push_back({found->second.second, view->perDeviceData[index].size});
         }
         if (save && !storage::BuildCheckpointManifest(extents, &manifest, &error))
           throw std::runtime_error(error);
@@ -188,7 +224,7 @@ void Run(int pid, const std::filesystem::path& directory)
             throw std::runtime_error("open or size CustomStorage extent failed");
           transfer::StorageLayout layout{{{path, data.size, file.get()}}, {{0, data.size, 0, 0}}};
           transfer::TransferMetrics metrics;
-          if (!buffers.Transfer(data.devPtr, data.size, data.stream, context, layout,
+          if (!buffers.Transfer(data.devPtr, data.size, data.stream, owners[job.device_index], layout,
                                 save ? transfer::TransferOperation::kCheckpoint
                                      : transfer::TransferOperation::kRestore,
                                 nullptr, &metrics, &error))
@@ -236,6 +272,7 @@ void Run(int pid, const std::filesystem::path& directory)
           complete_time, std::chrono::duration<double>(Clock::now() - start).count());
       std::fflush(stdout);
       prepared = false;
+      locked = false;
     }
     if (prepared)
       throw std::runtime_error("input closed during prepared operation");
@@ -245,9 +282,11 @@ void Run(int pid, const std::filesystem::path& directory)
     while (poll(&target, 1, -1) < 0)
       if (errno != EINTR)
         throw std::runtime_error("wait for target exit failed");
-    Check(cuCtxSetCurrent(context), "cleanup context");
   }
-  Check(cuDevicePrimaryCtxRelease(device), "release context");
+  for (const auto& [context, device] : contexts) {
+    Check(cuCtxSetCurrent(context), "cleanup context");
+    Check(cuDevicePrimaryCtxRelease(device.first), "release context");
+  }
   close(pidfd);
 }
 }  // namespace
@@ -256,14 +295,15 @@ int main(int argc, char** argv)
 {
   try {
     int pid = 0;
-    if (argc != 3)
-      throw std::runtime_error("usage: pagebroker-custom-storage-worker PID DIRECTORY");
+    const bool jobfile_experiment = argc == 4 && std::string(argv[3]) == "--jobfile-experiment";
+    if (argc != 3 && !jobfile_experiment)
+      throw std::runtime_error("usage: pagebroker-custom-storage-worker PID DIRECTORY [--jobfile-experiment]");
     const std::string text = argv[1];
     const auto parsed = std::from_chars(text.data(), text.data() + text.size(), pid);
     if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() || pid <= 0 ||
         pid == getpid())
       throw std::runtime_error("invalid target PID");
-    Run(pid, argv[2]);
+    Run(pid, argv[2], jobfile_experiment);
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "CustomStorage worker failed: %s; terminate target before cleanup\n",
