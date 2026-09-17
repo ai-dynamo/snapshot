@@ -1,0 +1,34 @@
+%% SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+%% SPDX-License-Identifier: Apache-2.0
+
+sequenceDiagram
+    autonumber
+    participant O as Workload owner
+    participant G as Group controller
+    participant A0 as Node agent rank 0
+    participant A1 as Node agent rank 1
+    participant S as Artifact storage
+
+    O->>G: Create PodGroupSnapshot with every member
+    G->>G: Pin membership and validate the group
+    alt Group validation fails
+        G-->>O: Group Failed before capture starts
+    else Group validation succeeds
+        par Existing rank 0 capture
+            G->>A0: Create subordinate snapshot work
+            A0->>S: Capture and persist rank 0
+            A0-->>G: Ready or Failed
+        and Existing rank 1 capture
+            G->>A1: Create subordinate snapshot work
+            A1->>S: Capture and persist rank 1
+            A1-->>G: Ready or Failed
+        end
+        Note over A0,A1: Successful captures terminate their source processes
+        alt Every member is Ready
+            G->>G: Publish PodGroupSnapshotContent
+            G-->>O: Group Ready
+        else Any member Failed
+            G-->>O: Group Failed with all member outcomes
+            Note over O,G: No rollback or group-wide fencing
+        end
+    end

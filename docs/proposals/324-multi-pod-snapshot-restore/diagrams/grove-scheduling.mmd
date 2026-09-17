@@ -1,0 +1,20 @@
+%% SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+%% SPDX-License-Identifier: Apache-2.0
+
+flowchart TB
+    subgraph Unsafe["Inter-member startsAfter can block group activation"]
+        U1["Group restore needs every target placeholder"]
+        U2["Rank 1 creation waits for rank 0 Pod Ready"]
+        U3["Rank 0 restore waits for the complete target group"]
+        U1 --> U2 --> U3 --> U1
+    end
+
+    subgraph Safe["Restore-safe scheduling"]
+        S1["Grove creates and gang-schedules all target Pods"]
+        S2["Caller pins every target name and UID"]
+        S3["Snapshot builds the complete identity map"]
+        S4["Per-Pod restores run concurrently"]
+        S5["Group result aggregates Restored conditions"]
+        S6["Workload owner evaluates Pod readiness"]
+        S1 --> S2 --> S3 --> S4 --> S5 --> S6
+    end

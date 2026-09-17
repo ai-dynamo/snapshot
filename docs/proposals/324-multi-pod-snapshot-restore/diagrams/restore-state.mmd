@@ -1,0 +1,17 @@
+%% SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+%% SPDX-License-Identifier: Apache-2.0
+
+stateDiagram-v2
+    [*] --> Pending
+    Pending --> TargetsAvailable: every target name and UID resolves
+    Pending --> Failed: target mapping is invalid
+    TargetsAvailable --> Restoring: identity map is valid and leaves activated
+    Restoring --> Ready: every target reports Restored True
+    Restoring --> Failed: any target reports terminal failure
+    Ready --> [*]
+    Failed --> [*]
+
+    note right of Ready
+        Kubernetes Pod readiness and serving
+        readiness remain external to Snapshot.
+    end note

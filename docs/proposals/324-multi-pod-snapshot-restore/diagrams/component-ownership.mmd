@@ -1,0 +1,29 @@
+%% SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+%% SPDX-License-Identifier: Apache-2.0
+
+flowchart TB
+    Owner["Workload owner"]
+    Grove["Grove or another workload manager"]
+    Pods["Source and target Pods"]
+    Group["Snapshot group controller"]
+    Capture["PodGroupSnapshot"]
+    Content["PodGroupSnapshotContent"]
+    Restore["PodGroupRestore"]
+    Leaf0["Existing per-Pod path - rank 0"]
+    Leaf1["Existing per-Pod path - rank 1"]
+    Result["Aggregate group result"]
+
+    Owner -->|"defines members"| Capture
+    Owner -->|"requests Pod creation"| Grove
+    Grove -->|"creates and schedules"| Pods
+    Owner -->|"references existing Pod UIDs"| Restore
+    Pods -->|"source identities"| Capture
+    Pods -->|"target identities"| Restore
+    Capture --> Group
+    Restore --> Group
+    Group -->|"fans out"| Leaf0
+    Group -->|"fans out"| Leaf1
+    Leaf0 -->|"member outcome"| Result
+    Leaf1 -->|"member outcome"| Result
+    Result -->|"all captures succeeded"| Content
+    Result -->|"Ready or Failed"| Restore
