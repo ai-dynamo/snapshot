@@ -20,6 +20,7 @@ runtime = c.CDLL("libcudart.so.13", mode=os.RTLD_LOCAL)
 mode = sys.argv[1]
 path = Path(os.environ["SNAPSHOT_CONTROL_DIR"]) / f"cuinterpose-{os.getpid()}.sock"
 assert not path.exists()
+sockets_before = set(path.parent.glob("cuinterpose-*.sock"))
 
 if mode in ("init", "init-handle", "init-failure", "fork", "constructor", "concurrent"):
     initialize = driver.cuInit if mode == "init-handle" else cuda.cuInit
@@ -94,7 +95,7 @@ if mode == "concurrent":
         assert initialize(0) == 0
         assert inspect()["participant"] == parent
     assert path.stat().st_ino == inode
-    assert list(path.parent.glob("cuinterpose-*.sock")) == [path]
+    assert set(path.parent.glob("cuinterpose-*.sock")) == sockets_before | {path}
     names = [task.joinpath("comm").read_text().strip()
              for task in Path("/proc/self/task").iterdir()]
     # Linux comm truncates thread names to 15 characters.

@@ -172,10 +172,10 @@ static const struct BackendAbi *load_backend(void **reference) {
     // The handshake only registers the frontend and returns an immutable table;
     // it must not call back into the loader or start runtime workers.
     if (initialize(&frontend, &api) != CUDA_SUCCESS || !api ||
-        api->version != ABI_VERSION || api->size != sizeof(*api)) {
-        dlclose(library);
+        api->version != ABI_VERSION || api->size != sizeof(*api))
+        // Retain a rejected backend conservatively: an incompatible library
+        // may not honor the handshake-only contract and could have live workers.
         return NULL;
-    }
     *reference = library;
     return api;
 }
