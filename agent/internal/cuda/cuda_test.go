@@ -529,6 +529,7 @@ func TestDiscoverGPUUUIDsOrdersDRAPodByContainerOrdinal(t *testing.T) {
 		"main",
 		"/proc",
 		123,
+		false,
 		nvidiaSMITimeout,
 		func(context.Context, string, int, time.Duration) (compat.GPUInfo, error) {
 			return compat.GPUInfo{
@@ -635,7 +636,7 @@ func TestDiscoverGPUsDescribePodResourcesGPUs(t *testing.T) {
 			defer cancel()
 
 			got, err := discoverGPUs(
-				ctx, nil, "test-pod", "default", "main", "/proc", 123, nvidiaSMITimeout, tc.visible, logr.Discard(),
+				ctx, nil, "test-pod", "default", "main", "/proc", 123, false, nvidiaSMITimeout, tc.visible, logr.Discard(),
 			)
 			if err != nil {
 				t.Fatalf("discoverGPUs: %v", err)
@@ -644,6 +645,34 @@ func TestDiscoverGPUsDescribePodResourcesGPUs(t *testing.T) {
 				t.Fatalf("discoverGPUs() = %#v, want %#v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestDiscoverGPUsForPodWithoutClaimsSkipsPodAPIRead(t *testing.T) {
+	installTestPodResourcesServer(t, &podresourcesv1.ListPodResourcesResponse{
+		PodResources: []*podresourcesv1.PodResources{{
+			Name: "test-pod", Namespace: "default",
+			Containers: []*podresourcesv1.ContainerResources{{
+				Name:    "main",
+				Devices: []*podresourcesv1.ContainerDevices{{ResourceName: nvidiaGPUResource, DeviceIds: []string{"GPU-a"}}},
+			}},
+		}},
+	})
+	installFakeNSenter(t, "printf '%s\n' 'GPU-a, NVIDIA L4, 580.65.06'\n")
+	clientset := fake.NewClientset()
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"}}
+
+	got, err := DiscoverGPUsForPod(context.Background(), clientset, pod, pod.Name, pod.Namespace, "main", "/host/proc", 42, logr.Discard())
+	if err != nil {
+		t.Fatalf("DiscoverGPUsForPod: %v", err)
+	}
+	if len(got.Devices) != 1 || got.Devices[0].UUID != "GPU-a" {
+		t.Fatalf("DiscoverGPUsForPod() = %#v", got)
+	}
+	for _, action := range clientset.Actions() {
+		if action.GetVerb() == "get" && action.GetResource().Resource == "pods" {
+			t.Fatal("Pod without resource claims triggered a redundant API read")
+		}
 	}
 }
 
@@ -699,6 +728,7 @@ func TestDiscoverGPUsFallBackToVisibleGPUs(t *testing.T) {
 		"main",
 		"/host/proc",
 		42,
+		false,
 		nvidiaSMITimeout,
 		func(context.Context, string, int, time.Duration) (compat.GPUInfo, error) {
 			return want, nil

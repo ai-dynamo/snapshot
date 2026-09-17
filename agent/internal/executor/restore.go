@@ -17,6 +17,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/criu"
@@ -74,6 +75,7 @@ type RestoreRequest struct {
 	StartedAt                   time.Time
 	PodName                     string
 	PodNamespace                string
+	Pod                         *corev1.Pod
 	TargetPodIP                 string
 	ArtifactContainerName       string
 	DestinationContainerName    string
@@ -350,9 +352,10 @@ func inspectRestore(
 			return nil, 0, fmt.Errorf("missing source GPU UUIDs in checkpoint manifest")
 		}
 		discoverStart := time.Now()
-		targetGPUs, err = cuda.DiscoverGPUs(
+		targetGPUs, err = cuda.DiscoverGPUsForPod(
 			ctx,
 			req.Clientset,
+			req.Pod,
 			req.PodName,
 			req.PodNamespace,
 			req.DestinationContainerName,

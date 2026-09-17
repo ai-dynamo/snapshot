@@ -17,6 +17,7 @@ import (
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 	podresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
 
@@ -187,6 +188,31 @@ func DiscoverGPUs(ctx context.Context, clientset kubernetes.Interface, podName, 
 		containerName,
 		hostProcPath,
 		pid,
+		false,
+		nvidiaSMITimeout,
+		DiscoverVisibleGPUs,
+		log,
+	)
+}
+
+// DiscoverGPUsForPod uses the Pod already observed by the node controller to
+// avoid a redundant API read when the immutable Pod spec contains no resource
+// claims. Pods that may use DRA still take the live API path because generated
+// claim names are published asynchronously in Pod status.
+func DiscoverGPUsForPod(ctx context.Context, clientset kubernetes.Interface, pod *corev1.Pod, podName, podNamespace, containerName, hostProcPath string, pid int, log logr.Logger) (compat.GPUInfo, error) {
+	skipDRA := pod != nil &&
+		pod.Name == podName &&
+		pod.Namespace == podNamespace &&
+		len(pod.Spec.ResourceClaims) == 0
+	return discoverGPUs(
+		ctx,
+		clientset,
+		podName,
+		podNamespace,
+		containerName,
+		hostProcPath,
+		pid,
+		skipDRA,
 		nvidiaSMITimeout,
 		DiscoverVisibleGPUs,
 		log,
@@ -201,21 +227,27 @@ func discoverGPUs(
 	containerName,
 	hostProcPath string,
 	pid int,
+	skipDRA bool,
 	timeout time.Duration,
 	discoverVisibleGPUs visibleGPUDiscovery,
 	log logr.Logger,
 ) (compat.GPUInfo, error) {
-	gpuUUIDs, hasNVIDIADRAAllocation, err := GetGPUUUIDsViaDRAAPI(ctx, clientset, podName, podNamespace, containerName, log)
-	if err != nil {
-		if hasNVIDIADRAAllocation {
-			return compat.GPUInfo{}, fmt.Errorf("DRA GPU UUID lookup failed: %w", err)
+	var gpuUUIDs []string
+	var hasNVIDIADRAAllocation bool
+	var err error
+	if !skipDRA {
+		gpuUUIDs, hasNVIDIADRAAllocation, err = GetGPUUUIDsViaDRAAPI(ctx, clientset, podName, podNamespace, containerName, log)
+		if err != nil {
+			if hasNVIDIADRAAllocation {
+				return compat.GPUInfo{}, fmt.Errorf("DRA GPU UUID lookup failed: %w", err)
+			}
+			log.Error(
+				err,
+				"DRA API GPU UUID lookup failed, trying other discovery paths",
+				"pod", podNamespace+"/"+podName,
+			)
+			gpuUUIDs = nil
 		}
-		log.Error(
-			err,
-			"DRA API GPU UUID lookup failed, trying other discovery paths",
-			"pod", podNamespace+"/"+podName,
-		)
-		gpuUUIDs = nil
 	}
 
 	if hasNVIDIADRAAllocation {

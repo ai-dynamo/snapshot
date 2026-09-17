@@ -990,6 +990,7 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (int, error) {
 		StartedAt:                   op.startedAt,
 		PodName:                     op.pod.Name,
 		PodNamespace:                op.pod.Namespace,
+		Pod:                         op.pod,
 		TargetPodIP:                 op.pod.Status.PodIP,
 		ArtifactContainerName:       op.artifact.SourceContainerName,
 		DestinationContainerName:    op.destination,
