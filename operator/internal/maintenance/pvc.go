@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 const podSnapshotContentMetadataListPageLimit int64 = 500
@@ -92,28 +93,31 @@ func enumerateSweepCandidates(basePath string, logger logr.Logger) (map[string]s
 	return candidates, nil
 }
 
-// listExistingContentUIDs fails closed (deletes nothing) if the resource
-// version drifts or a continuation token repeats across pages, since either
-// means a concurrent write raced the list.
-func listExistingContentUIDs(ctx context.Context, apiReader client.Reader, listAttempts int) (map[types.UID]struct{}, error) {
+type contentScanResult struct {
+	ExistingUIDs   map[types.UID]struct{}
+	PendingDeletes []WorkItemKey
+}
+
+// collectContentScanResult returns only a complete, consistent metadata snapshot.
+func collectContentScanResult(ctx context.Context, apiReader client.Reader, listAttempts int) (*contentScanResult, error) {
 	var lastErr error
 	for attempt := 1; attempt <= listAttempts; attempt++ {
-		uids, err := listExistingContentUIDsOnce(ctx, apiReader)
+		scanResult, err := collectContentScanResultOnce(ctx, apiReader)
 		if err == nil {
-			return uids, nil
+			return scanResult, nil
 		}
 		lastErr = err
 	}
 	return nil, fmt.Errorf("list PodSnapshotContent metadata failed after %d attempts: %w", listAttempts, lastErr)
 }
 
-func listExistingContentUIDsOnce(ctx context.Context, apiReader client.Reader) (map[types.UID]struct{}, error) {
-	uids := make(map[types.UID]struct{})
+func collectContentScanResultOnce(ctx context.Context, apiReader client.Reader) (*contentScanResult, error) {
+	scanResult := &contentScanResult{ExistingUIDs: make(map[types.UID]struct{})}
 	continueToken := ""
 	snapshotResourceVersion := ""
 	for {
 		list := &metav1.PartialObjectMetadataList{}
-		list.SetGroupVersionKind(snapshotv1alpha1.GroupVersion.WithKind("PodSnapshotContentList"))
+		list.SetGroupVersionKind(snapshotv1alpha1.GroupVersion.WithKind(snapshotv1alpha1.KindPodSnapshotContentList))
 		options := &client.ListOptions{
 			Limit:    podSnapshotContentMetadataListPageLimit,
 			Continue: continueToken,
@@ -131,13 +135,17 @@ func listExistingContentUIDsOnce(ctx context.Context, apiReader client.Reader) (
 			return nil, fmt.Errorf("PodSnapshotContent metadata list resource version changed from %q to %q", snapshotResourceVersion, list.ResourceVersion)
 		}
 		for i := range list.Items {
-			if list.Items[i].UID == "" {
-				return nil, fmt.Errorf("PodSnapshotContent %q returned without UID", list.Items[i].Name)
+			content := &list.Items[i]
+			if content.UID == "" {
+				return nil, fmt.Errorf("PodSnapshotContent %q returned without UID", content.Name)
 			}
-			uids[list.Items[i].UID] = struct{}{}
+			scanResult.ExistingUIDs[content.UID] = struct{}{}
+			if !content.DeletionTimestamp.IsZero() && controllerutil.ContainsFinalizer(content, PodSnapshotContentArtifactCleanupFinalizer) {
+				scanResult.PendingDeletes = append(scanResult.PendingDeletes, newDeleteContentKey(content.Namespace, content.Name, content.UID))
+			}
 		}
 		if list.Continue == "" {
-			return uids, nil
+			return scanResult, nil
 		}
 		if list.Continue == continueToken {
 			return nil, fmt.Errorf("PodSnapshotContent metadata list repeated continuation token %q", list.Continue)

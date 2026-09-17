@@ -13,7 +13,7 @@ func bindArtifactCleanupFlags(flags *flag.FlagSet) *operatortypes.ArtifactCleanu
 	cfg := &operatortypes.ArtifactCleanupConfig{}
 	flags.StringVar(&cfg.BasePath, "snapshot-storage-base-path", "", "Base path of the shared snapshot storage PVC")
 	flags.DurationVar(&cfg.ScanInterval, "artifact-cleanup-scan-interval", operatortypes.DefaultArtifactScanInterval,
-		"Interval between orphan artifact scans")
+		"Interval between pending finalizer recovery and orphan artifact scans")
 	flags.IntVar(&cfg.BatchSize, "artifact-cleanup-batch-size", operatortypes.DefaultArtifactBatchSize,
 		"Maximum orphan artifact roots removed per scan")
 	flags.IntVar(&cfg.ListAttempts, "artifact-cleanup-list-attempts", operatortypes.DefaultArtifactListAttempts,

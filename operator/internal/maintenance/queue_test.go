@@ -5,18 +5,23 @@ package maintenance
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/workqueue"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func TestEnqueueDeleteContentCoalescesDuplicates(t *testing.T) {
 	q, _ := newTestQueue(t, t.TempDir())
-	q.queue = workqueue.NewTypedRateLimitingQueue[WorkItemKey](workqueue.DefaultTypedControllerRateLimiter[WorkItemKey]())
 
 	q.EnqueueDeleteContent("ns", "content", "uid-1")
 	q.EnqueueDeleteContent("ns", "content", "uid-1")
@@ -27,7 +32,6 @@ func TestEnqueueDeleteContentCoalescesDuplicates(t *testing.T) {
 
 func TestEnqueueSweepCoalescesDuplicates(t *testing.T) {
 	q, _ := newTestQueue(t, t.TempDir())
-	q.queue = workqueue.NewTypedRateLimitingQueue[WorkItemKey](workqueue.DefaultTypedControllerRateLimiter[WorkItemKey]())
 
 	q.EnqueueSweep()
 	q.EnqueueSweep()
@@ -39,7 +43,6 @@ func TestStartRunsImmediateSweepAndShutsDownCleanly(t *testing.T) {
 	q, _ := newTestQueue(t, t.TempDir())
 	q.config.Workers = 2
 	q.config.ScanInterval = time.Hour
-	q.queue = workqueue.NewTypedRateLimitingQueue[WorkItemKey](workqueue.DefaultTypedControllerRateLimiter[WorkItemKey]())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -57,6 +60,80 @@ func TestStartRunsImmediateSweepAndShutsDownCleanly(t *testing.T) {
 
 func TestNewQueueDefaults(t *testing.T) {
 	q := NewQueue(nil, nil, nil, operatortypes.ArtifactCleanupConfig{BasePath: "/checkpoints"})
+	t.Cleanup(q.queue.ShutDown)
 	require.NotNil(t, q.queue)
 	assert.Equal(t, "/checkpoints", q.config.BasePath)
+}
+
+type failingPatchClient struct {
+	client.Client
+	fail bool
+}
+
+func (c *failingPatchClient) Patch(ctx context.Context, object client.Object, patch client.Patch, options ...client.PatchOption) error {
+	if c.fail {
+		return apierrors.NewServiceUnavailable("temporary API write failure")
+	}
+	return c.Client.Patch(ctx, object, patch, options...)
+}
+
+func TestSweepRecoversDeleteContentAfterRetryExhaustion(t *testing.T) {
+	for _, failure := range []string{"storage failure", "finalizer patch failure"} {
+		t.Run(failure, func(t *testing.T) {
+			ctx := context.Background()
+			base, root := prepareTestArtifactRoot(t, "pending-uid")
+			now := metav1.Now()
+			content := &snapshotv1alpha1.PodSnapshotContent{ObjectMeta: metav1.ObjectMeta{
+				Name: "pending", UID: "pending-uid", ResourceVersion: "1", DeletionTimestamp: &now,
+				Finalizers: []string{PodSnapshotContentArtifactCleanupFinalizer},
+			}}
+			q, recorder := newTestQueue(t, base, content)
+			patchClient := &failingPatchClient{Client: q.client, fail: failure == "finalizer patch failure"}
+			q.client = patchClient
+			if failure == "storage failure" {
+				require.NoError(t, os.RemoveAll(root))
+				require.NoError(t, os.WriteFile(root, []byte("not a directory"), 0o600))
+			}
+			// Keep the real retry budget, but avoid waiting for exponential backoff.
+			q.queue.ShutDown()
+			q.queue = workqueue.NewTypedRateLimitingQueue[WorkItemKey](workqueue.NewTypedItemExponentialFailureRateLimiter[WorkItemKey](0, 0))
+			t.Cleanup(q.queue.ShutDown)
+			key := newDeleteContentKey("", content.Name, content.UID)
+			q.EnqueueDeleteContent(key.Namespace, key.Name, key.UID)
+			for attempt := 0; attempt <= maxKeyRetries; attempt++ {
+				require.Equal(t, 1, q.queue.Len())
+				require.Equal(t, attempt, q.queue.NumRequeues(key))
+				require.True(t, q.processNextItem(ctx, logr.Discard()))
+				if failure == "storage failure" {
+					<-recorder.Events
+				}
+			}
+			require.Zero(t, q.queue.Len())
+			require.Zero(t, q.queue.NumRequeues(key))
+			current := &snapshotv1alpha1.PodSnapshotContent{}
+			require.NoError(t, q.client.Get(ctx, client.ObjectKey{Name: content.Name}, current))
+			require.Contains(t, current.Finalizers, PodSnapshotContentArtifactCleanupFinalizer)
+
+			patchClient.fail = false
+			if failure == "storage failure" {
+				require.NoError(t, os.Remove(root))
+				require.NoError(t, os.Mkdir(root, 0o750))
+			} else {
+				require.NoDirExists(t, root, "artifacts were removed before the finalizer patch failed")
+			}
+			q.apiReader = &metadataReader{list: func(list *metav1.PartialObjectMetadataList, _ *client.ListOptions) error {
+				emptyMetadataPage(list, "10", "")
+				list.Items = []metav1.PartialObjectMetadata{{ObjectMeta: current.ObjectMeta}}
+				return nil
+			}}
+			q.EnqueueSweep()
+			require.True(t, q.processNextItem(ctx, logr.Discard()))
+			require.Equal(t, 1, q.queue.Len(), "sweep must rediscover the dropped deletion")
+			require.True(t, q.processNextItem(ctx, logr.Discard()))
+			require.Zero(t, q.queue.Len())
+			require.NoDirExists(t, root)
+			err := q.client.Get(ctx, client.ObjectKey{Name: content.Name}, current)
+			require.True(t, apierrors.IsNotFound(err), "finalizer removal must finish deletion: %v", err)
+		})
+	}
 }

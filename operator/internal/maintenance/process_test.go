@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/ai-dynamo/snapshot/agent/pkg/artifact"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
@@ -45,12 +46,11 @@ func newTestQueue(t *testing.T, basePath string, objects ...client.Object) (*Que
 	t.Helper()
 	kubeClient := ctrlfake.NewClientBuilder().WithScheme(maintenanceTestScheme(t)).WithObjects(objects...).Build()
 	recorder := record.NewFakeRecorder(10)
-	return &Queue{
-		client:    kubeClient,
-		apiReader: kubeClient,
-		recorder:  recorder,
-		config:    operatortypes.ArtifactCleanupConfig{BasePath: basePath, ScanInterval: 0, BatchSize: 10, ListAttempts: 3, Workers: 1},
-	}, recorder
+	q := NewQueue(kubeClient, kubeClient, recorder, operatortypes.ArtifactCleanupConfig{
+		BasePath: basePath, ScanInterval: time.Hour, BatchSize: 10, ListAttempts: 3, Workers: 1,
+	})
+	t.Cleanup(q.queue.ShutDown)
+	return q, recorder
 }
 
 func TestProcessDeleteContentRemovesRootAndFinalizer(t *testing.T) {
@@ -253,4 +253,98 @@ func TestProcessSweepProcessesBoundedBatch(t *testing.T) {
 func fmtUID(i int) string {
 	const hex = "0123456789"
 	return "uid-" + string(hex[i/10]) + string(hex[i%10])
+}
+
+func TestProcessSweepEnqueuesOnlyPendingFinalizers(t *testing.T) {
+	now := metav1.Now()
+	q, _ := newTestQueue(t, t.TempDir()) // No artifact directories exist.
+	reader := &metadataReader{list: func(list *metav1.PartialObjectMetadataList, options *client.ListOptions) error {
+		switch options.Continue {
+		case "":
+			emptyMetadataPage(list, "10", "next")
+			list.Items = []metav1.PartialObjectMetadata{
+				{ObjectMeta: metav1.ObjectMeta{Name: "active", UID: "active", Finalizers: []string{PodSnapshotContentArtifactCleanupFinalizer}}},
+				{ObjectMeta: metav1.ObjectMeta{Name: "other-finalizer", UID: "other", DeletionTimestamp: &now, Finalizers: []string{"example.com/other"}}},
+				{ObjectMeta: metav1.ObjectMeta{Name: "no-finalizer", UID: "none", DeletionTimestamp: &now}},
+			}
+		case "next":
+			require.Zero(t, q.queue.Len(), "wait for the complete metadata list before enqueuing")
+			emptyMetadataPage(list, "10", "")
+			list.Items = []metav1.PartialObjectMetadata{{ObjectMeta: metav1.ObjectMeta{
+				Name: "pending", UID: "pending-uid", DeletionTimestamp: &now,
+				Finalizers: []string{PodSnapshotContentArtifactCleanupFinalizer, "example.com/other"},
+			}}}
+		default:
+			t.Fatalf("unexpected continuation token %q", options.Continue)
+		}
+		return nil
+	}}
+	q.apiReader = reader
+
+	require.NoError(t, q.processSweep(context.Background(), log.Log))
+	require.Equal(t, 1, q.queue.Len())
+	key, shutdown := q.queue.Get()
+	require.False(t, shutdown)
+	defer q.queue.Done(key)
+	assert.Equal(t, newDeleteContentKey("", "pending", "pending-uid"), key)
+	assert.Equal(t, 2, reader.calls)
+}
+
+func TestProcessSweepDiscardsPendingFinalizersFromIncompleteList(t *testing.T) {
+	for _, failure := range []string{"list error", "resource version drift", "repeated continuation"} {
+		t.Run(failure, func(t *testing.T) {
+			base, root := prepareTestArtifactRoot(t, "orphan-uid")
+			q, _ := newTestQueue(t, base)
+			now := metav1.Now()
+			reader := &metadataReader{list: func(list *metav1.PartialObjectMetadataList, options *client.ListOptions) error {
+				if options.Continue == "" {
+					emptyMetadataPage(list, "10", "next")
+					list.Items = []metav1.PartialObjectMetadata{{ObjectMeta: metav1.ObjectMeta{
+						Name: "pending", UID: "pending-uid", DeletionTimestamp: &now,
+						Finalizers: []string{PodSnapshotContentArtifactCleanupFinalizer},
+					}}}
+					return nil
+				}
+				switch failure {
+				case "list error":
+					return assert.AnError
+				case "resource version drift":
+					emptyMetadataPage(list, "11", "")
+				case "repeated continuation":
+					emptyMetadataPage(list, "10", "next")
+				}
+				return nil
+			}}
+			q.apiReader = reader
+
+			require.Error(t, q.processSweep(context.Background(), log.Log))
+			assert.Equal(t, 2*q.config.ListAttempts, reader.calls)
+			assert.Zero(t, q.queue.Len(), "partial metadata must not schedule finalization")
+			assert.DirExists(t, root, "partial metadata must not authorize orphan removal")
+		})
+	}
+}
+
+func TestProcessSweepEnqueuesPendingFinalizersWhenEnumerationFails(t *testing.T) {
+	base := t.TempDir()
+	artifactsRoot, err := artifact.ResolveRoot(base)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(artifactsRoot, []byte("not a directory"), 0o600))
+	q, _ := newTestQueue(t, base)
+	now := metav1.Now()
+	q.apiReader = &metadataReader{list: func(list *metav1.PartialObjectMetadataList, _ *client.ListOptions) error {
+		emptyMetadataPage(list, "10", "")
+		list.Items = []metav1.PartialObjectMetadata{{ObjectMeta: metav1.ObjectMeta{
+			Name: "pending", UID: "pending-uid", DeletionTimestamp: &now,
+			Finalizers: []string{PodSnapshotContentArtifactCleanupFinalizer},
+		}}}
+		return nil
+	}}
+
+	require.ErrorContains(t, q.processSweep(context.Background(), log.Log), "must be a non-symlink directory")
+	require.Equal(t, 1, q.queue.Len(), "filesystem enumeration must not block rediscovery of pending finalizers")
+	key, shutdown := q.queue.Get()
+	require.False(t, shutdown)
+	defer q.queue.Done(key)
+	assert.Equal(t, newDeleteContentKey("", "pending", "pending-uid"), key)
 }
