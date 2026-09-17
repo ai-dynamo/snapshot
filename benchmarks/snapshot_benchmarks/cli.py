@@ -126,10 +126,14 @@ def _to_json(dataclass_instance) -> dict:
     return dataclasses.asdict(dataclass_instance)
 
 
-def cmd_run(args: argparse.Namespace) -> int:
+def _setup(args: argparse.Namespace) -> tuple[BenchmarkConfig, Any]:
     cfg = _benchmark_config(args)
     k8s.configure(cfg.workload_e2e_config())
-    engine = ENGINES[args.engine]
+    return cfg, ENGINES[args.engine]
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    cfg, engine = _setup(args)
     models = {m.label: m for m in _load_models(Path(args.models))}
     if args.model_label not in models:
         print(f"error: {args.model_label!r} not found in {args.models}", file=sys.stderr)
@@ -161,9 +165,7 @@ def _run_one(
 
 
 def cmd_sweep(args: argparse.Namespace) -> int:
-    cfg = _benchmark_config(args)
-    k8s.configure(cfg.workload_e2e_config())
-    engine = ENGINES[args.engine]
+    cfg, engine = _setup(args)
     models = _load_models(Path(args.models))
 
     out_dir: Path | None = None

@@ -21,7 +21,6 @@ SGLang and TensorRT-LLM can be added later without redesigning the tool — see
 - A pre-built snapshot-ready vLLM image — follow
   [Build and deploy a vLLM replica](../guides/vllm.md) steps 1–2 first; the
   benchmark deploys that image, it does not build it
-- A Hugging Face token/cache if the model you're benchmarking is gated
 
 ## Quick start
 
@@ -76,10 +75,11 @@ remap": **Snapshot's own restore work** and **the engine's own wake and
 copy-to-GPU work**. The boundary is the node agent's `nvidia.com/Restored` pod
 condition, which fires the moment Snapshot believes the restore is done —
 before vLLM's own `wake_up()`/`resume_generation()`/warmup sequence runs. So,
-in each run's JSON:
+in each run's result JSON (the per-model file written to `benchmarks/results/`,
+see [Quick start](#quick-start)):
 
 - `restore.snapshot_restore_seconds` — container start → `nvidia.com/Restored`
-- `restore.vllm_wake_and_copy_seconds` — `nvidia.com/Restored` → pod `Ready`
+- `restore.wake_and_copy_seconds` — `nvidia.com/Restored` → pod `Ready`
 
 These come from Kubernetes condition timestamps, which have one-second
 resolution — a large relative error for the smallest models. For the headline
@@ -90,7 +90,8 @@ agent's own phase names to the published doc's 4-stage vocabulary
 (`agent_setup_approx`, `criu_restore_approx`, `cuda_restore_approx`) — these
 are approximate by construction; `cuda_restore_approx` is the one exact 1:1
 mapping. `wake_remap_approx` is always `null`: that published stage isn't
-represented in the agent log at all, use `vllm_wake_and_copy_seconds` instead.
+represented in the agent log at all, so if you're reproducing the published
+"wake / remap" number, read `wake_and_copy_seconds` instead.
 
 Cold start is timed from pod creation to the source pod's `Ready` condition
 (model load + one warmup generation + pause — the readiness gate
@@ -105,7 +106,7 @@ exposes a size field.
 ## Interpreting results
 
 The published numbers were measured on a single B200 (driver 595) with a VAST
-NFS PVC — see [Storage throughput sets the floor](benchmarks.md#storage-throughput-sets-the-floor)
+NFS PVC with `direct_io` enabled — see [Storage throughput sets the floor](benchmarks.md#storage-throughput-sets-the-floor)
 and [Checkpoint size is what predicts restore time](benchmarks.md#checkpoint-size-is-what-predicts-restore-time).
 A run on different hardware produces a **valid, different-baseline** result,
 not an invalid comparison — this is exactly why every run self-reports its own

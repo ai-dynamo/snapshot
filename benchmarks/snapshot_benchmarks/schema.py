@@ -263,4 +263,4 @@ def _to_json_value(value: Any) -> Any:
     return value
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 1

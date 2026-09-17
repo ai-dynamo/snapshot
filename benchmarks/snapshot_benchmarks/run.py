@@ -195,7 +195,11 @@ def run_benchmark(
         mode=mode,
         environment=metadata.BenchmarkEnvironment(),
         engine=BenchmarkEngine(name=engine.name),
-        model=ModelInfo(label=model.label, hf_id_or_path=model.hf_id_or_path),
+        model=ModelInfo(
+            label=model.label,
+            hf_id_or_path=model.hf_id_or_path,
+            reported_weights_bytes=model.reported_weights_bytes,
+        ),
     )
 
     # No try/except around the benchmark logic itself: on failure this raises

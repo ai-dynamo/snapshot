@@ -13,7 +13,9 @@ walkthrough. This README only covers the local dev/CI shape of the directory.
 
 - `uv`
 - `kubectl`
-- A Snapshot Helm release already installed and reachable via `KUBECONFIG`
+- A Snapshot Helm release already installed and reachable via `KUBECONFIG`,
+  including its checkpoint PVC (provisioned by the chart by default — see
+  [Installation](../docs/operations/install.md))
 - A pre-built snapshot-ready vLLM image (see
   [Build and deploy a vLLM replica](../docs/guides/vllm.md))
 

@@ -13,46 +13,21 @@ from __future__ import annotations
 
 from typing import Any
 
-SUPPORTED_SCHEMA_VERSIONS = (1, 2)
-
-
-def _normalize_environment_v1(env: dict) -> dict:
-    """Schema v1 stored a single flat GPU identity (`gpu_product` /
-    `gpu_driver_version` / `cuda_driver_major_label`) with no capture/restore
-    split -- that split was introduced in v2 once heterogeneous restores could
-    report a GPU that differs from the capture node's (see `BenchmarkEnvironment`
-    in schema.py). Promote the flat identity into `capture`; only mirror it into
-    `restore` when the run captured and restored on the same node, since v1 never
-    actually measured the restore node's GPU separately and a `different_node` run
-    would otherwise silently misattribute the capture GPU to the restore node."""
-    identity = {
-        "gpu_product": env.get("gpu_product"),
-        "gpu_driver_version": env.get("gpu_driver_version"),
-        "cuda_driver_major_label": env.get("cuda_driver_major_label"),
-    }
-    normalized = dict(env)
-    normalized["capture"] = identity
-    normalized["restore"] = identity if env.get("placement") == "same_node" else None
-    return normalized
+SUPPORTED_SCHEMA_VERSIONS = (1,)
 
 
 def _normalize_result(result: dict) -> dict:
-    """Upgrades a raw `RunResult` dict to the shape `render` expects, or raises
-    for a `schema_version` this report renderer doesn't know how to read --
-    silently rendering an unsupported/unrecognized shape would display missing
-    GPU metadata as "no data" rather than "can't read this file", masking a
-    real schema mismatch in a directory of mixed-version results."""
+    """Returns `result` unchanged, or raises for a `schema_version` this report
+    renderer doesn't know how to read -- silently rendering an unsupported/
+    unrecognized shape would display missing GPU metadata as "no data" rather
+    than "can't read this file", masking a real schema mismatch in a directory
+    of mixed-version results."""
     version = result.get("schema_version")
     # `type(...) is int` rather than `isinstance`/`==` on purpose: `bool` is an
     # `int` subclass (`isinstance(True, int)` is `True`) and `1.0 == 1`, so
     # either check would silently accept `True`/`1.0` as schema_version 1.
-    if type(version) is int:
-        if version == 2:
-            return result
-        if version == 1:
-            normalized = dict(result)
-            normalized["environment"] = _normalize_environment_v1(result.get("environment") or {})
-            return normalized
+    if type(version) is int and version == 1:
+        return result
     run_id = result.get("run_id", "<unknown>")
     label = (result.get("model") or {}).get("label", "<unknown>")
     raise ValueError(
