@@ -49,6 +49,10 @@ def main():
         env["LD_PRELOAD"] = str(artifacts / "libcuinterpose.so")
         lifecycle_env = env | {"LD_PRELOAD": env["LD_PRELOAD"] +
                               f":{fixtures / 'test/libcuda.so.1'}"}
+        initialization = [sys.executable, str(Path(__file__).with_name("initialization_suite.py")),
+                          "--artifacts", str(artifacts), "--fixtures", str(fixtures)]
+        subprocess.run(initialization + ["--prepare-only"], env=environment, check=True)
+        subprocess.run(initialization, env=lifecycle_env, check=True)
         subprocess.run([sys.executable, str(Path(__file__).with_name("memory_ipc.py"))],
                        env=lifecycle_env, check=True, timeout=60)
         for mode in ("tracking", "exports", "exhaustion", "access", "shared",
