@@ -9,6 +9,33 @@ message FilesystemStorage
 {
   optional string directory = 1;
 }
+
+// Trusted agent admission for native CUDA contents. The broker pins the target
+// PID namespace and artifact directory; the workload never receives this socket.
+message BindNativeSession {
+  BindAllocationSession.Direction direction = 1;
+  uint32 container_pid = 2;
+  uint32 namespace_pid = 3;
+  repeated string visible_devices = 4;
+  string device_map = 5;
+}
+message NativeSessionRequest {
+  enum Operation {
+    UNSPECIFIED = 0;
+    LOCK = 1;
+    PREPARE = 2;
+    TRANSFER = 3;
+    COMPLETE = 4;
+  }
+  Operation operation = 1;
+  // PID as observed in the pinned placeholder namespace, supplied by nsrestore
+  // after CRIU. Zero uses the captured namespace PID for source operations.
+  uint32 target_pid = 2;
+}
+message NativeSessionReply {
+  string report = 1;
+  Failure failure = 2;
+}
 message StorageBackend
 {
   // Requests require exactly one storage kind.
@@ -133,6 +160,7 @@ message Request
     AbortRequest abort = 6;
     DirectRestoreRequest direct_restore = 7;
     BindAllocationSession bind_allocations = 8;
+    BindNativeSession bind_native = 9;
   }
 }
 
@@ -184,5 +212,6 @@ message Response
     DirectRestoreReady direct_restore_ready = 8;
     // The connection is now allocation-only, not a general broker capability.
     AllocationSessionReply allocation_session = 9;
+    NativeSessionReply native_session = 10;
   }
 }

@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 
 #include "broker.hpp"
+#include "native_session.hpp"
 #include "posix_copy_engine.hpp"
 #include <fcntl.h>
 #include <unistd.h>
@@ -56,6 +57,34 @@ class BrokerTest : public ::testing::Test {
   std::optional<Broker> broker_;
   unsigned request_number_ = 0;
 };
+
+TEST_F(BrokerTest, NativeSessionsBindTransactionAndRejectPrematureComplete)
+{
+  Broker native(root_ / "native-staging", root_ / "storage", "/unused/pagebroker-allocation-worker");
+  auto prepare = RequestFor("native");
+  Configure(prepare.mutable_prepare_staged_checkpoint()->mutable_destination(),
+            prepare.mutable_prepare_staged_checkpoint()->mutable_io_engine(), root_ / "storage" / "native");
+  ASSERT_TRUE(native.HandleRequest(prepare).has_staged_checkpoint_directory());
+  auto binding = RequestFor("native");
+  auto* request = binding.mutable_bind_native();
+  request->set_direction(v1::BindAllocationSession::SAVE);
+  request->set_container_pid(getpid());
+  request->set_namespace_pid(getpid());
+  request->add_visible_devices("GPU-00000000-0000-0000-0000-000000000001");
+  auto session = native.BindNative(binding);
+  EXPECT_THROW(native.BindNative(binding), std::runtime_error);
+  auto commit = RequestFor("native");
+  commit.mutable_commit();
+  EXPECT_TRUE(native.HandleRequest(commit).has_failure());
+  v1::NativeSessionRequest complete;
+  complete.set_operation(v1::NativeSessionRequest::COMPLETE);
+  EXPECT_TRUE(session->Execute(complete).has_failure());
+  session.reset();
+  EXPECT_TRUE(native.HandleRequest(commit).has_failure());
+  auto abort = RequestFor("native");
+  abort.mutable_abort();
+  EXPECT_TRUE(native.HandleRequest(abort).has_abort_complete());
+}
 
 TEST_F(BrokerTest, RestoreFilesRemainPrivateAndPublicationMovesSameFilesystem)
 {

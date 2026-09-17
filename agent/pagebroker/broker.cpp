@@ -13,6 +13,7 @@
 
 #include "posix_copy_engine.hpp"
 #include "allocation_session.hpp"
+#include "native_session.hpp"
 
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
@@ -479,6 +480,18 @@ Broker::BindAllocations(const Request& request)
   if (!transaction)
     throw std::invalid_argument("allocation transaction not found");
   return std::make_unique<AllocationSession>(transaction, request.bind_allocations(), allocation_worker_);
+}
+
+std::unique_ptr<NativeSession>
+Broker::BindNative(const Request& request)
+{
+  if (!request.has_request_id() || request.request_id().empty() || !request.has_bind_native() ||
+      allocation_worker_.empty())
+    throw std::invalid_argument("native binding requires identity and GPU worker configuration");
+  auto transaction = FindTransaction(request.transaction_id());
+  if (!transaction) throw std::invalid_argument("native transaction not found");
+  return std::make_unique<NativeSession>(transaction, request.bind_native(),
+      allocation_worker_.parent_path() / "pagebroker-custom-storage-worker");
 }
 
 }  // namespace snapshot::pagebroker
