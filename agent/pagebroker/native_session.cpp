@@ -212,6 +212,7 @@ NativeSession::~NativeSession() {
     std::lock_guard lock(transaction_->mutex());
     --transaction_->allocation_sessions;
     transaction_->allocation_failed |= !finished_;
+    transaction_->allocation_drained.notify_all();
   }
 }
 }  // namespace snapshot::pagebroker

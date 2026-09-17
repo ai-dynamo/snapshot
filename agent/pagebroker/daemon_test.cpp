@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <optional>
 #include <string>
 #include <thread>
@@ -79,10 +80,16 @@ TEST_F(BrokerTest, NativeSessionsBindTransactionAndRejectPrematureComplete)
   v1::NativeSessionRequest complete;
   complete.set_operation(v1::NativeSessionRequest::COMPLETE);
   EXPECT_TRUE(session->Execute(complete).has_failure());
-  session.reset();
   EXPECT_TRUE(native.HandleRequest(commit).has_failure());
   auto abort = RequestFor("native");
   abort.mutable_abort();
+  auto pending = std::async(std::launch::async, [&] { return native.HandleRequest(abort); });
+  EXPECT_EQ(pending.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+  // The wait releases the transaction mutex, so teardown can return admission.
+  session.reset();
+  ASSERT_EQ(pending.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+  EXPECT_TRUE(pending.get().has_abort_complete());
+  EXPECT_TRUE(fs::is_empty(root_ / "native-staging" / "checkpoint"));
   EXPECT_TRUE(native.HandleRequest(abort).has_abort_complete());
 }
 
