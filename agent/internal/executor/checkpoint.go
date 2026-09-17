@@ -56,17 +56,24 @@ type CheckpointRequest struct {
 	PodIP               string
 	Clientset           kubernetes.Interface
 	PageBrokerRequested bool
-
 	// Pod carries the image reference and limits the target container runs with, read from
 	// the live pod by the caller rather than here: the capture path has no API
 	// client for the pod, and the reconciler already holds it.
 	Pod compat.Environment
+	// CUDAToolsDelivered is true when the source container mounts Snapshot's
+	// CUDA tools (podcontract.CUDAToolsDelivered); recorded in the manifest so
+	// restore mounts them at the same path.
+	CUDAToolsDelivered bool
+	// CuinterposeRequested is the source Pod's nvidia.com/cuinterpose opt-in.
+	// Detection is checked against it and it is recorded in the manifest.
+	CuinterposeRequested bool
 }
 
 type checkpointPhaseTimings struct {
-	CUDACheckpointDuration time.Duration
-	CRIUDumpDuration       time.Duration
-	OverlayCaptureDuration time.Duration
+	CuinterposePrepareDuration time.Duration
+	CUDACheckpointDuration     time.Duration
+	CRIUDumpDuration           time.Duration
+	OverlayCaptureDuration     time.Duration
 }
 
 // Checkpoint performs a CRIU dump of a container.
@@ -125,20 +132,13 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	if err != nil {
 		return err
 	}
-	cudaJobFile := ""
-	if len(state.CUDAHostPIDs) > 0 {
-		cudaJobFile, err = cuda.StageJobFile(state.RootFS, tmpDir, len(state.GPUs.Devices))
-		if err != nil {
-			return err
-		}
-	}
 
 	criuOpts, data, err := configureCheckpoint(log, state, req, cfg, tmpDir)
 	if err != nil {
 		return err
 	}
 
-	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log)
+	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, log)
 	if err != nil {
 		return checkpointNeedsSourceKill(err)
 	}
@@ -164,6 +164,7 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	wall := time.Since(checkpointStart)
 	unaccounted := remainingDuration(wall,
 		gpuDeviceMapDuration,
+		captureTimings.CuinterposePrepareDuration,
 		captureTimings.CUDACheckpointDuration,
 		captureTimings.CRIUDumpDuration,
 		captureTimings.OverlayCaptureDuration,
@@ -173,6 +174,7 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		"duration": wall.String(),
 		"phases": map[string]string{
 			"gpu_device_map":                gpuDeviceMapDuration.String(),
+			"cuinterpose_prepare":           captureTimings.CuinterposePrepareDuration.String(),
 			"cuda_checkpoint":               captureTimings.CUDACheckpointDuration.String(),
 			"criu_dump":                     captureTimings.CRIUDumpDuration.String(),
 			"overlay_capture":               captureTimings.OverlayCaptureDuration.String(),
@@ -259,6 +261,13 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 		log.V(1).Info("Resolved checkpoint CUDA PID mapping", "host_pids", cudaHostPIDs, "namespace_pids", cudaNamespacePIDs)
 	}
 	var gpus compat.GPUInfo
+	cuinterpose, err := cuda.DetectCuinterpose(snapshotruntime.HostProcPath, cudaHostPIDs, cudaNamespacePIDs)
+	if err != nil {
+		return nil, 0, fmt.Errorf("detect cuinterpose: %w", err)
+	}
+	if err := cuda.CheckCuinterposeEnablement(req.CuinterposeRequested, cuinterpose, len(cudaHostPIDs)); err != nil {
+		return nil, 0, err
+	}
 	var gpuDeviceMapDuration time.Duration
 	if len(cudaHostPIDs) > 0 {
 		gpuStart := time.Now()
@@ -291,6 +300,7 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 		CUDAHostPIDs:   cudaHostPIDs,
 		CUDANSPIDs:     cudaNamespacePIDs,
 		GPUs:           gpus,
+		Cuinterpose:    cuinterpose,
 	}, gpuDeviceMapDuration, nil
 }
 
@@ -320,6 +330,8 @@ func configureCheckpoint(
 	if len(state.CUDANSPIDs) > 0 {
 		m.CUDA = types.NewCUDAManifest(state.CUDANSPIDs, state.GPUs)
 	}
+	m.CUDATools.Delivered = req.CUDAToolsDelivered
+	m.Cuinterpose.Requested = req.CuinterposeRequested
 
 	if err := types.WriteManifest(checkpointDir, m); err != nil {
 		return nil, nil, fmt.Errorf("failed to write checkpoint manifest: %w", err)
@@ -328,12 +340,38 @@ func configureCheckpoint(
 	return criuOpts, m, nil
 }
 
-func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger) (*checkpointPhaseTimings, error) {
+func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir string, log logr.Logger) (*checkpointPhaseTimings, error) {
 	timings := &checkpointPhaseTimings{}
 
 	// CUDA lock+checkpoint must happen before CRIU dump
 	if len(state.CUDAHostPIDs) > 0 {
-		cudaTimings, err := cuda.CheckpointProcessTree(ctx, state.CUDAHostPIDs, cudaJobFile, checkpointDir, log)
+		if state.Cuinterpose {
+			// Prepare runs on the live workload before the native CUDA lock: it
+			// tears down shared mappings so the native checkpoint sees plain
+			// memory. There is no rollback; if anything after this fails the
+			// caller terminates the source (checkpointNeedsSourceKill).
+			prepareStart := time.Now()
+			_, err := cuda.PrepareCuinterpose(
+				ctx,
+				checkpointDir,
+				snapshotruntime.HostProcPath,
+				state.PID,
+				state.CUDAHostPIDs,
+				state.CUDANSPIDs,
+				cuda.DefaultCoordinatorBinaryPath,
+				log,
+			)
+			timings.CuinterposePrepareDuration = time.Since(prepareStart)
+			if err != nil {
+				return nil, fmt.Errorf("prepare cuinterpose: %w", err)
+			}
+			data.Cuinterpose.Prepared = true
+			data.Cuinterpose.Format = types.CuinterposeFormat
+			if err := types.WriteManifest(checkpointDir, data); err != nil {
+				return nil, fmt.Errorf("record cuinterpose prepare in checkpoint manifest: %w", err)
+			}
+		}
+		cudaTimings, err := cuda.CheckpointProcessTree(ctx, state.CUDAHostPIDs, log)
 		if err != nil {
 			return nil, fmt.Errorf("CUDA checkpoint failed: %w", err)
 		}
