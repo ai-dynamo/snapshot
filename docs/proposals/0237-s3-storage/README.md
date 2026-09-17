@@ -80,9 +80,11 @@ PVC or S3 through their own backend adapters.
 - **Credentials or S3 outage:** check destination access before capture and source
   access before restore; bound retries/timeouts. Preflight cannot guarantee later
   access. Access denial never proves that an artifact is missing.
-- **Uncertain publication:** publish the index last; retry lost Commit replies with
-  the same transaction. After restart, recover metadata through maintenance. Resume
-  uploads only from complete staging; never replay successful or uncertain CUDA/CRIU.
+- **Uncertain publication:** publish the index last, tagged with a per-attempt
+  `commitID`; retry lost Commit replies idempotently against that same `commitID`.
+  After restart, recover metadata through maintenance, selecting deterministically
+  among confirmed indexes. Resume uploads only from complete staging; never replay
+  successful or uncertain CUDA/CRIU.
 - **Cleanup races:** retain finalizers on failed, partial or unknown deletion.
   Coordinate readers/publishers with maintenance and fence stale writers. A work
   item's success must mean complete scoped cleanup, not just a dequeue.
@@ -120,6 +122,13 @@ The operator sets `spec.storage.storeID`. Compute it as
 `store-v1-` + SHA-256 of a canonical storage identity: backend, endpoint/bucket/prefix
 for S3; backend, namespace/claim/base path for PVC. Credentials and access options
 are excluded. Operator, PageBroker and maintenance must produce identical digests.
+
+These digest inputs are raw identity only — the S3 store prefix used in artifact
+keys additionally appends installation/store identifiers derived from Helm, not
+fed into the SHA-256 itself. Normalize the endpoint (scheme + host, no trailing
+slash) and prefix (no leading/trailing slash) before hashing. Operator, PageBroker
+and maintenance share one Go/C++ fixture set asserting identical digests for the
+same normalized inputs.
 
 `PodSnapshot` and `SnapshotJob` retain their current workload request APIs. Later
 storage-class selection can bind the same content fields without changing restore
@@ -278,9 +287,13 @@ it cannot undo committed data or CUDA/CRIU. Restore `Commit` cleans local stagin
 
 ### Security
 
-Helm values contain Secret references only. Kubelet mounts the selected credential
-file into node PageBroker and the operator manager container. The agent receives
-no credential file; workload requests and RPCs carry references.
+Helm values contain Secret references only. Kubelet projects the selected credential
+Secret to a fixed path, `/etc/snapshot/s3-credentials/credentials`, in both node
+PageBroker and the operator manager container, using the provider SDK's native
+credentials-file format (e.g. the AWS shared-credentials-file syntax). This
+path and format are part of the wire contract, not implementation-defined per
+component. The agent receives no credential file; workload requests and RPCs
+carry references.
 
 The operator manager is an S3-credentialed component, not just a Kubernetes-API
 client: a process compromise exposes storage credentials, and a maintenance-path
@@ -300,6 +313,11 @@ and status. Maintenance checks UID, store binding and fresh ownership before
 deletion; protect against arbitrary paths and symlinks. Grant the operator's
 service account only the storage permissions needed for cleanup and metadata
 repair, without GPU or host-process access.
+
+Require encryption at rest for every checkpoint artifact — SSE-S3, SSE-KMS or
+an equivalent provider guarantee. Installation fails validation if the
+configured provider/bucket cannot demonstrate it. TLS covers transit only; this
+is a separate, mandatory requirement before S3 is enabled.
 
 ### Configuration
 
@@ -341,6 +359,14 @@ the configured prefix and installation/store identifiers. Upload immutable paylo
 then publish the index last. The index binds store/content/container and format
 version, and lists file/directory paths, permissions, sizes and file SHA-256 digests.
 Reject unsafe paths, unsupported formats, missing files and checksum mismatches.
+
+Each index also carries a `commitID` (a ULID, generated once per checkpoint
+attempt). `Commit` reuses the same `commitID` across retries of the same
+attempt, making publish idempotent per `commitID` rather than per
+store/content/container. `recover-metadata` selects deterministically: if more
+than one confirmed index exists for the same content/container, it picks the
+newest by index write time and reconciles or flags the rest as conflicting
+instead of guessing.
 
 Example publication descriptors; digest values are placeholders:
 
