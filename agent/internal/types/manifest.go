@@ -204,6 +204,9 @@ func NewOverlayManifest(exclusions OverlaySettings, upperDir string, ociSpec *sp
 
 // CUDAManifest captures CUDA state from checkpoint time for restore.
 type CUDAManifest struct {
+	// CustomStorage saves native-owned GPU bytes through PageBroker. Shared
+	// cuinterpose allocations still use the creator's host carrier.
+	CustomStorage  bool     `yaml:"customStorage,omitempty"`
 	PIDs           []int    `yaml:"pids"`
 	SourceGPUUUIDs []string `yaml:"sourceGpuUuids"`
 

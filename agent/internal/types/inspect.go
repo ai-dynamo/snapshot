@@ -46,4 +46,5 @@ type RestoreContainerSnapshot struct {
 	TargetRoot     string
 	CgroupRoot     string
 	CUDADeviceMap  string
+	TargetGPUUUIDs []string
 }
