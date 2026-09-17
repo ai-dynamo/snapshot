@@ -1,8 +1,7 @@
 * @ai-dynamo/snapshot-codeowners
 
-# Last matching pattern wins, so these must stay below the catch-all.
+# Last matching pattern wins, so this must stay below the catch-all.
 /docs/ @ai-dynamo/snapshot-docs-codeowners
-*.md @ai-dynamo/snapshot-docs-codeowners
 
 # Proposal design documents are reviewed by the repository owners responsible
 # for the proposed change, rather than the documentation owners.
