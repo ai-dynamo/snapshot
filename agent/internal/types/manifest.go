@@ -21,6 +21,10 @@ import (
 
 const manifestFilename = "manifest.yaml"
 
+// CuinterposeFormat identifies the host-carrier artifact and matching shim layout.
+// Older draft artifacts, including external allocation storage, are not compatible.
+const CuinterposeFormat = 1
+
 // CheckpointManifest is saved as manifest.yaml at checkpoint time and loaded at restore.
 type CheckpointManifest struct {
 	Artifact  ArtifactManifest `yaml:"artifact"`
@@ -31,6 +35,36 @@ type CheckpointManifest struct {
 	Overlay  OverlayManifest   `yaml:"overlay"`
 	CUDA     CUDAManifest      `yaml:"cudaRestore,omitempty"`
 	Host     HostManifest      `yaml:"host,omitempty"`
+	// CUDATools records whether the source ran with Snapshot's CUDA tools
+	// (cuda-checkpoint, the cuinterpose shim) delivered into the container.
+	CUDATools CUDAToolsManifest `yaml:"cudaTools,omitempty"`
+	// Cuinterpose records whether the CUDA interposer shim was in play. It is
+	// the restore side's only source of truth: the restore Pod's annotations
+	// may be absent or edited, and the state file alone cannot say whether
+	// prepare was supposed to have run.
+	Cuinterpose CuinterposeManifest `yaml:"cuinterpose,omitempty"`
+}
+
+// CuinterposeManifest carries two separate facts about the shim.
+type CuinterposeManifest struct {
+	// Requested is true when the source Pod opted in. Restore then removes
+	// stale shim sockets before CRIU recreates the processes. The shim itself
+	// is mounted through the CUDA tools delivery (CUDAToolsManifest).
+	Requested bool `yaml:"requested"`
+	// Prepared is true when the coordinator's prepare step completed and wrote
+	// the state file. Restore then runs the coordinator, and a missing state
+	// file is an error rather than a plain restore.
+	Prepared bool `yaml:"prepared"`
+	Format   int  `yaml:"format,omitempty"`
+}
+
+// CUDAToolsManifest is the restore side's source of truth for the tools mount.
+type CUDAToolsManifest struct {
+	// Delivered is true when the source container mounted the tools volume at
+	// podcontract.CUDAToolsMountPath. Restore then bind-mounts the agent's copy
+	// at the same path before CRIU runs, because the checkpointed processes
+	// have cuda-checkpoint (and possibly the shim) mapped by that path.
+	Delivered bool `yaml:"delivered"`
 }
 
 // ArtifactManifest pins an on-disk checkpoint to the Kubernetes content object
