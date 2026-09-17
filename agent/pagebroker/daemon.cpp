@@ -29,6 +29,7 @@
 #include "broker.hpp"
 #include "file_descriptor.hpp"
 #include "allocation_session.hpp"
+#include "native_session.hpp"
 
 namespace fs = std::filesystem;
 using snapshot::pagebroker::Broker;
@@ -217,12 +218,18 @@ HandleConnection(int connection, Broker& broker)
   Request request;
   std::vector<FileDescriptor> descriptors;
   std::unique_ptr<AllocationSession> session;
+  std::unique_ptr<NativeSession> native;
   try {
     if (!ReceiveFrame(connection, request, descriptors))
       return;
     if (!descriptors.empty())
       throw std::invalid_argument("general broker requests cannot carry descriptors");
-    if (request.has_bind_allocations()) {
+    if (request.has_bind_native()) {
+      native = broker.BindNative(request);
+      response.set_request_id(request.request_id());
+      response.set_transaction_id(request.transaction_id());
+      response.mutable_native_session();
+    } else if (request.has_bind_allocations()) {
       session = broker.BindAllocations(request);
       response.set_request_id(request.request_id());
       response.set_transaction_id(request.transaction_id());
@@ -244,6 +251,17 @@ HandleConnection(int connection, Broker& broker)
     response.mutable_failure()->set_message(error.what());
   }
   SendFrame(connection, response);
+  if (native) {
+    SetAllocationTimeout(connection);
+    v1::NativeSessionRequest operation;
+    while (ReceiveFrame(connection, operation, descriptors)) {
+      if (!descriptors.empty()) throw std::invalid_argument("native command cannot carry descriptors");
+      auto reply = native->Execute(operation);
+      SendFrame(connection, reply);
+      if (reply.has_failure() || operation.operation() == v1::NativeSessionRequest::COMPLETE) return;
+    }
+    return;
+  }
   if (!session)
     return;
   SetAllocationTimeout(connection);
