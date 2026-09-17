@@ -44,6 +44,16 @@ int main(int argc, char **argv) {
     query_v2 query2 = symbol(driver, "cuGetProcAddress_v2");
     in_shim((void *)query, "cuGetProcAddress");
     in_shim((void *)query2, "cuGetProcAddress_v2");
+    const char *queries[] = {"cuMemAlloc", "cuMemFree", "cuMemGetAddressRange", "cuIpcOpenMemHandle"};
+    const char *resolved[] = {"cuMemAlloc_v2", "cuMemFree_v2", "cuMemGetAddressRange_v2", "cuIpcOpenMemHandle_v2"};
+    if (strcmp(argv[1], "queries") == 0) {
+        for (unsigned i = 0; i < 4; ++i) {
+            void *pointer = NULL;
+            assert(query(queries[i], &pointer, 13010, 0) == 0);
+            in_shim(pointer, resolved[i]);
+            assert(pointer == symbol(driver, resolved[i]));
+        }
+    }
     int early_plugin = strcmp(argv[1], "early-plugin") == 0 || strcmp(argv[1], "early-plugin-nested") == 0;
     if (!early_plugin)
         assert(symbol(RTLD_DEFAULT, "cuMemCreate") == symbol(driver, "cuMemCreate"));

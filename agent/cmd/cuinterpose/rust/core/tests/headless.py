@@ -51,6 +51,8 @@ def main():
         env["LD_PRELOAD"] = str(artifacts / "libcuinterpose.so")
         lifecycle_env = env | {"LD_PRELOAD": env["LD_PRELOAD"] +
                               f":{fixtures / 'test/libcuda.so.1'}"}
+        subprocess.run([sys.executable, str(Path(__file__).with_name("memory_ipc.py"))],
+                       env=lifecycle_env, check=True, timeout=60)
         if args.pagebroker:
             for mode in ("shared", "empty", "truncated"):
                 subprocess.run(

@@ -4,9 +4,15 @@
 //! Per-generation logical handles, mappings, and shared-allocation lifecycle state.
 //! The generation owns its locks and CUDA records; fork abandons rather than drops it.
 
+pub use super::legacy_ipc::cuIpcOpenMemHandle as cuIpcOpenMemHandle_v2;
 use super::ticket;
 use cuinterpose_abi::*;
 use cuinterpose_protocol::{AllocationId, Operation, ParticipantId, Resource, ResourceKind};
+
+pub use super::legacy_ipc::{
+    cuIpcCloseMemHandle, cuIpcGetMemHandle, cuIpcOpenMemHandle, cuMemAlloc_v2, cuMemFree_v2,
+    cuMemGetAddressRange_v2,
+};
 use cuinterpose_protocol::{ContentStorage, Ticket};
 
 #[cfg(test)]
@@ -106,6 +112,7 @@ mod tests {
                 })
                 .collect(),
             raw: BTreeMap::new(),
+            mallocs: BTreeMap::new(),
             unreleased_handles: Vec::new(),
             unsupported: 0,
             phase: Phase::Active,
@@ -283,6 +290,7 @@ pub struct State {
     pub handles: BTreeMap<u64, AllocationId>,
     pub mappings: BTreeMap<u64, Mapping>,
     pub raw: BTreeMap<u64, u32>,
+    pub mallocs: BTreeMap<u64, super::legacy_ipc::Mapping>,
     // Failed redundant-reference cleanup poisons capture, but ownership remains
     // recorded until the failed process is terminated.
     pub unreleased_handles: Vec<u64>,
@@ -686,7 +694,7 @@ impl State {
         }
     }
 
-    fn settle(&mut self, id: AllocationId) -> Result<()> {
+    pub(super) fn settle(&mut self, id: AllocationId) -> Result<()> {
         if self.multicasts.contains_key(&id) {
             return super::multicast::settle(self, id);
         }
@@ -807,6 +815,7 @@ fn initialize_generation() -> Result<()> {
     let state = State {
         identity,
         endpoint,
+        mallocs: BTreeMap::new(),
         allocations: BTreeMap::new(),
         multicasts: BTreeMap::new(),
         handles: BTreeMap::new(),
@@ -974,9 +983,7 @@ pub fn cuMemCreate(
         }
     };
     state.allocations.insert(id, allocation);
-    unsafe {
-        out.write(logical);
-    }
+    unsafe { out.write(logical) };
     Ok(())
 }
 
@@ -1260,6 +1267,18 @@ pub fn cuMemImportFromShareableHandle(out: *mut u64, fd: *mut c_void, kind: u32)
         }
         return Ok(());
     };
+    if matches!(ticket.resource, Resource::Multicast { .. }) {
+        if state.phase != Phase::Active {
+            return Err(crate::driver::CudaError(NOT_READY));
+        }
+        return super::multicast::import(state, out, ticket);
+    }
+    let logical = import_ticket(&mut state, ticket)?;
+    unsafe { out.write(logical) };
+    Ok(())
+}
+
+pub(super) fn import_ticket(state: &mut State, ticket: Ticket) -> Result<u64> {
     if state.phase != Phase::Active {
         return Err(crate::driver::CudaError(NOT_READY));
     }
@@ -1267,7 +1286,7 @@ pub fn cuMemImportFromShareableHandle(out: *mut u64, fd: *mut c_void, kind: u32)
         return Err(crate::driver::CudaError(OUT_OF_MEMORY));
     }
     if matches!(ticket.resource, Resource::Multicast { .. }) {
-        return super::multicast::import(state, out, ticket);
+        return Err(crate::driver::CudaError(INVALID_VALUE));
     }
     let id = ticket.allocation;
     if state.multicasts.contains_key(&id) {
@@ -1283,10 +1302,7 @@ pub fn cuMemImportFromShareableHandle(out: *mut u64, fd: *mut c_void, kind: u32)
             allocation.driver = Some(driver);
         }
         allocation.shared = true;
-        unsafe {
-            out.write(state.mint(id)?);
-        }
-        return Ok(());
+        return state.mint(id);
     }
     // EXPORT service uses only CACHE, never STATE, so a same-process request
     // can complete while this call holds its allocation metadata lock.
@@ -1325,10 +1341,7 @@ pub fn cuMemImportFromShareableHandle(out: *mut u64, fd: *mut c_void, kind: u32)
             pins: 0,
         },
     );
-    unsafe {
-        out.write(logical);
-    }
-    Ok(())
+    Ok(logical)
 }
 
 pub fn cuMemGetAllocationPropertiesFromHandle(out: *mut AllocationProp, handle: u64) -> Result<()> {

@@ -12,6 +12,7 @@
 #include "cuda.h"
 
 typedef void *(*resolve_fn)(const char *);
+struct ipc_handle { unsigned char bytes[64]; };
 struct host_api {
     uint32_t version, size;
     resolve_fn resolve;
@@ -24,6 +25,13 @@ struct core_api {
     void (*fork_parent)(void);
     void (*fork_child)(void);
     int (*ensure_ready)(void);
+    int (*cuMemAlloc_v2)(uint64_t *, size_t);
+    int (*cuMemFree_v2)(uint64_t);
+    int (*cuMemGetAddressRange_v2)(uint64_t *, size_t *, uint64_t);
+    int (*cuIpcGetMemHandle)(struct ipc_handle *, uint64_t);
+    int (*cuIpcOpenMemHandle)(uint64_t *, struct ipc_handle, unsigned);
+    int (*cuIpcOpenMemHandle_v2)(uint64_t *, struct ipc_handle, unsigned);
+    int (*cuIpcCloseMemHandle)(uint64_t);
     create_fn cuMemCreate;
     int (*cuMemGetAllocationGranularity)(size_t *, const void *, unsigned);
     int (*cuMemRelease)(uint64_t);
@@ -82,15 +90,22 @@ static int unbind(uint64_t handle, int device, size_t offset, size_t size) {
 }
 
 int cuinterpose_core_init(const struct host_api *host, const struct core_api **output) {
-    if (!host || !output || host->version != 6 || host->size != sizeof(*host))
+    if (!host || !output || host->version != 7 || host->size != sizeof(*host))
         return 1;
-    api.version = 6;
+    api.version = 7;
     api.size = sizeof(api);
     api.debug_stats = debug_stats;
     api.fork_prepare = fork_hook;
     api.fork_parent = fork_hook;
     api.fork_child = fork_hook;
     api.ensure_ready = ensure_ready;
+    api.cuMemAlloc_v2 = host->resolve("cuMemAlloc_v2");
+    api.cuMemFree_v2 = host->resolve("cuMemFree_v2");
+    api.cuMemGetAddressRange_v2 = host->resolve("cuMemGetAddressRange_v2");
+    api.cuIpcGetMemHandle = host->resolve("cuIpcGetMemHandle");
+    api.cuIpcOpenMemHandle = host->resolve("cuIpcOpenMemHandle");
+    api.cuIpcOpenMemHandle_v2 = host->resolve("cuIpcOpenMemHandle_v2");
+    api.cuIpcCloseMemHandle = host->resolve("cuIpcCloseMemHandle");
     api.cuMemRelease = release;
     api.cuMemRetainAllocationHandle = retain;
     api.cuMemUnmap = unmap;

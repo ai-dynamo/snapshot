@@ -218,6 +218,13 @@ __attribute__((constructor)) static void initialize_process(void) {
 }
 
 #define MEMORY_API(X) \
+    X(cuMemAlloc_v2, (uint64_t *out, size_t size), (out, size)) \
+    X(cuMemFree_v2, (uint64_t address), (address)) \
+    X(cuMemGetAddressRange_v2, (uint64_t *base, size_t *size, uint64_t address), (base, size, address)) \
+    X(cuIpcGetMemHandle, (struct IpcMemHandle *out, uint64_t address), (out, address)) \
+    X(cuIpcOpenMemHandle, (uint64_t *out, struct IpcMemHandle handle, uint32_t flags), (out, handle, flags)) \
+    X(cuIpcOpenMemHandle_v2, (uint64_t *out, struct IpcMemHandle handle, uint32_t flags), (out, handle, flags)) \
+    X(cuIpcCloseMemHandle, (uint64_t address), (address)) \
     X(cuMemCreate, (uint64_t *out, size_t size, const struct AllocationProp *prop, uint64_t flags), (out, size, prop, flags)) \
     X(cuMemGetAllocationGranularity, (size_t *out, const struct AllocationProp *prop, uint32_t flags), (out, prop, flags)) \
     X(cuMemRelease, (uint64_t handle), (handle)) \
@@ -286,12 +293,19 @@ API void *dlsym(void *handle, const char *name) {
 static int finish_query(const char *name, void **output) {
     if (!name || !output)
         return INVALID_VALUE;
-    if (replacement(name)) {
+    /* Query aliases select the ABI from the returned symbol. Do not redirect
+       direct dlsym of the legacy 32-bit cuMemAlloc ABI to a 64-bit wrapper. */
+    if (replacement(name) || strcmp(name, "cuMemAlloc") == 0 ||
+        strcmp(name, "cuMemFree") == 0 || strcmp(name, "cuMemGetAddressRange") == 0) {
         Dl_info info;
         void *wrapper = NULL;
         if (*output && dladdr(*output, &info) && info.dli_sname && info.dli_saddr == *output) {
             const char *actual = info.dli_sname;
             bool same = strcmp(name, actual) == 0 ||
+                (strcmp(name, "cuIpcOpenMemHandle") == 0 && strcmp(actual, "cuIpcOpenMemHandle_v2") == 0) ||
+                (strcmp(name, "cuMemAlloc") == 0 && strcmp(actual, "cuMemAlloc_v2") == 0) ||
+                (strcmp(name, "cuMemFree") == 0 && strcmp(actual, "cuMemFree_v2") == 0) ||
+                (strcmp(name, "cuMemGetAddressRange") == 0 && strcmp(actual, "cuMemGetAddressRange_v2") == 0) ||
                 (strcmp(name, "cuGetProcAddress") == 0 &&
                  (strcmp(actual, "cuGetProcAddress_v2") == 0 || strcmp(actual, "cuGetProcAddress_v2_ptsz") == 0)) ||
                 (strcmp(name, "cuGetProcAddress_v2") == 0 && strcmp(actual, "cuGetProcAddress_v2_ptsz") == 0) ||

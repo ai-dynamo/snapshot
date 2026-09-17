@@ -11,6 +11,7 @@ mod control;
 mod driver;
 mod export_cache;
 mod host_carrier;
+mod legacy_ipc;
 mod multicast;
 mod pagebroker;
 mod process;
@@ -57,6 +58,13 @@ macro_rules! exports {
 }
 // Initializing Core checks these adapters against the canonical ABI signatures.
 exports! {
+    cuMemAlloc_v2(out: *mut u64, size: usize);
+    cuMemFree_v2(address: u64);
+    cuMemGetAddressRange_v2(base: *mut u64, size: *mut usize, address: u64);
+    cuIpcGetMemHandle(out: *mut IpcMemHandle, address: u64);
+    cuIpcOpenMemHandle(out: *mut u64, handle: IpcMemHandle, flags: u32);
+    cuIpcOpenMemHandle_v2(out: *mut u64, handle: IpcMemHandle, flags: u32);
+    cuIpcCloseMemHandle(address: u64);
     cuMemCreate(out: *mut u64, size: usize, prop: *const AllocationProp, flags: u64);
     cuMemGetAllocationGranularity(out: *mut usize, prop: *const AllocationProp, flags: u32);
     cuMemRelease(handle: u64);

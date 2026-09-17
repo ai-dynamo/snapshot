@@ -10,6 +10,7 @@
 #define CUDA_VERSION 13010
 typedef int CUresult;
 typedef int CUdevice;
+typedef struct { char bytes[16]; } CUuuid;
 typedef uint64_t CUdeviceptr;
 typedef uint64_t CUmemGenericAllocationHandle;
 typedef uint64_t cuuint64_t;

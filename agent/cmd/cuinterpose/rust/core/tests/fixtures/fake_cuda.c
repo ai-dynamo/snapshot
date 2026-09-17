@@ -18,6 +18,7 @@
 #include <unistd.h>
 
 #undef cuGetProcAddress
+#undef cuDeviceGetUuid
 #undef cuMulticastBindAddr
 #undef cuMulticastBindMem
 
@@ -106,7 +107,18 @@ static int handle_index(CUmemGenericAllocationHandle handle)
   return (int)(handle - FAKE_HANDLE_BASE);
 }
 
-CUresult CUDAAPI cuDeviceGetUuid(void *uuid, CUdevice device)
+CUresult CUDAAPI cuCtxGetDevice(CUdevice *device)
+{
+  *device = 0;
+  return CUDA_SUCCESS;
+}
+
+CUresult CUDAAPI cuCtxSynchronize(void)
+{
+  return should_fail("cuCtxSynchronize") ? CUDA_ERROR_UNKNOWN : CUDA_SUCCESS;
+}
+
+CUresult CUDAAPI cuDeviceGetUuid(CUuuid *uuid, CUdevice device)
 {
   memset(uuid, device, 16);
   return CUDA_SUCCESS;

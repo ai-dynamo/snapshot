@@ -100,6 +100,26 @@ int cuFixtureUnwrapped(void) {
     return 77;
 }
 
+int cuMemAlloc_v2(uint64_t *out, size_t size) {
+    *out = size;
+    return 0;
+}
+int cuMemFree_v2(uint64_t address) { (void)address; return 0; }
+int cuMemGetAddressRange_v2(uint64_t *base, size_t *size, uint64_t address) {
+    *base = address; *size = 4096; return 0;
+}
+struct ipc_handle { unsigned char bytes[64]; };
+int cuIpcGetMemHandle(struct ipc_handle *out, uint64_t address) {
+    memset(out, (unsigned char)address, sizeof(*out)); return 0;
+}
+int cuIpcOpenMemHandle_v2(uint64_t *out, struct ipc_handle handle, unsigned flags) {
+    *out = handle.bytes[0]; return flags == 1 ? 0 : 1;
+}
+int cuIpcOpenMemHandle(uint64_t *out, struct ipc_handle handle, unsigned flags) {
+    return cuIpcOpenMemHandle_v2(out, handle, flags);
+}
+int cuIpcCloseMemHandle(uint64_t address) { (void)address; return 0; }
+
 int cuFixtureQuery(const char *name, void **output, int version, uint64_t flags, int *status) {
     last.version = version;
     last.query_flags = flags;
@@ -134,6 +154,14 @@ int cuFixtureQuery(const char *name, void **output, int version, uint64_t flags,
     // must point to its real CUDA-named definitions, not preempted wrappers.
     if (strcmp(name, "cuInit") == 0)
         *output = (void *)cuInit;
+    else if (strcmp(name, "cuMemAlloc") == 0)
+        *output = (void *)cuMemAlloc_v2;
+    else if (strcmp(name, "cuMemFree") == 0)
+        *output = (void *)cuMemFree_v2;
+    else if (strcmp(name, "cuMemGetAddressRange") == 0)
+        *output = (void *)cuMemGetAddressRange_v2;
+    else if (strcmp(name, "cuIpcOpenMemHandle") == 0)
+        *output = (void *)cuIpcOpenMemHandle_v2;
     else if (strcmp(name, "cuMemCreate") == 0)
         *output = (void *)cuMemCreate;
     else if (strcmp(name, "cuMemMap") == 0)

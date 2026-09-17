@@ -82,6 +82,9 @@ macro_rules! functions {
 }
 
 functions! {
+    cuCtxSynchronize();
+    cuMemFree_v2(address: DevicePtr);
+    cuMemGetAddressRange_v2(base: *mut DevicePtr, size: *mut usize, address: DevicePtr);
     cuDeviceGetUuid(uuid: *mut cudarc::driver::sys::CUuuid, device: Device);
     cuCtxGetCurrent(context: *mut *mut c_void);
     cuCtxGetDevice(device: *mut Device);

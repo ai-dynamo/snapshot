@@ -14,7 +14,7 @@ pub use cudarc::driver::sys::{
     CUmemGenericAllocationHandle as AllocationHandle, CUmulticastObjectProp as MulticastProp,
 };
 
-pub const ABI_VERSION: u32 = 6;
+pub const ABI_VERSION: u32 = 7;
 // Keep the C header independent of cudarc's generated implementation details.
 pub const CUDA_VERSION: u32 = 13010;
 const _: () = assert!(CUDA_VERSION == cuda::CUDA_VERSION);
@@ -46,6 +46,18 @@ pub struct Location {
     pub id: i32,
 }
 
+/// CUDA's fixed-size, by-value legacy memory IPC handle.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct IpcMemHandle {
+    pub bytes: [u8; 64],
+}
+
+const _: () = {
+    assert!(size_of::<IpcMemHandle>() == size_of::<cuda::CUipcMemHandle>());
+    assert!(align_of::<IpcMemHandle>() == align_of::<cuda::CUipcMemHandle>());
+};
+
 /// Canonical private ABI. cbindgen emits the C declaration from this table.
 #[repr(C)]
 #[derive(Debug)]
@@ -61,6 +73,13 @@ pub struct Core {
     pub fork_parent: unsafe extern "C" fn(),
     pub fork_child: unsafe extern "C" fn(),
     pub ensure_ready: unsafe extern "C" fn() -> i32,
+    pub cuMemAlloc_v2: unsafe extern "C" fn(*mut u64, usize) -> i32,
+    pub cuMemFree_v2: unsafe extern "C" fn(u64) -> i32,
+    pub cuMemGetAddressRange_v2: unsafe extern "C" fn(*mut u64, *mut usize, u64) -> i32,
+    pub cuIpcGetMemHandle: unsafe extern "C" fn(*mut IpcMemHandle, u64) -> i32,
+    pub cuIpcOpenMemHandle: unsafe extern "C" fn(*mut u64, IpcMemHandle, u32) -> i32,
+    pub cuIpcOpenMemHandle_v2: unsafe extern "C" fn(*mut u64, IpcMemHandle, u32) -> i32,
+    pub cuIpcCloseMemHandle: unsafe extern "C" fn(u64) -> i32,
     pub cuMemCreate: unsafe extern "C" fn(*mut u64, usize, *const AllocationProp, u64) -> i32,
     pub cuMemGetAllocationGranularity:
         unsafe extern "C" fn(*mut usize, *const AllocationProp, u32) -> i32,

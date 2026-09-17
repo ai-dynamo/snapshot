@@ -10,6 +10,8 @@ import sys
 
 directory = pathlib.Path(sys.argv[1])
 frontend = {
+    "cuMemAlloc_v2", "cuMemFree_v2", "cuMemGetAddressRange_v2",
+    "cuIpcGetMemHandle", "cuIpcOpenMemHandle", "cuIpcOpenMemHandle_v2", "cuIpcCloseMemHandle",
     "dlsym", "cuInit", "cuGetProcAddress", "cuGetProcAddress_v2",
     "cuGetProcAddress_v2_ptsz", "cudaGetDriverEntryPoint",
     "cudaGetDriverEntryPoint_ptsz", "cudaGetDriverEntryPointByVersion",
