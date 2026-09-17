@@ -147,13 +147,15 @@ CUresult cuinterpose_core_init(const struct FrontendAbi *frontend,
         assert(result == 0 || result == PTHREAD_BARRIER_SERIAL_THREAD);
     }
     assert(pthread_mutex_lock(&registration) == 0);
-    if (!registered.resolve)
+    if (!registered.resolve) {
         registered = *frontend;
+        // Observed only by this process, to prove registration is lazy.
+        assert(setenv("CUINTERPOSE_TEST_CORE_INITIALIZED", "1", 1) == 0);
+    }
     int matches = registered.resolve == frontend->resolve && registered.origin_pid == frontend->origin_pid;
     assert(pthread_mutex_unlock(&registration) == 0);
     if (!matches)
         return 1;
     *output = &api;
-    // Observed only by this process, to prove initialization is lazy.
-    return setenv("CUINTERPOSE_TEST_CORE_INITIALIZED", "1", 1) == 0 ? 0 : 999;
+    return CUDA_SUCCESS;
 }
