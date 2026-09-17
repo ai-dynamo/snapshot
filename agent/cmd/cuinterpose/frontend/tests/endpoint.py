@@ -8,6 +8,7 @@ import ctypes as c
 import os
 from pathlib import Path
 import sys
+import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "rust/core/tests"))
 from protocol_client import inspect
@@ -20,11 +21,25 @@ mode = sys.argv[1]
 path = Path(os.environ["SNAPSHOT_CONTROL_DIR"]) / f"cuinterpose-{os.getpid()}.sock"
 assert not path.exists()
 
-if mode in ("init", "init-handle", "init-failure", "fork", "constructor"):
+if mode in ("init", "init-handle", "init-failure", "fork", "constructor", "concurrent"):
     initialize = driver.cuInit if mode == "init-handle" else cuda.cuInit
     initialize.argtypes = [c.c_uint]
 
     def activate():
+        if mode == "concurrent":
+            barrier = threading.Barrier(16)
+            results = [None] * 16
+
+            def call(index):
+                barrier.wait()
+                results[index] = initialize(0)
+
+            workers = [threading.Thread(target=call, args=(index,)) for index in range(16)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join()
+            assert 0 in results and set(results) <= {0, 3}, results
         if mode == "init-failure":
             assert initialize(1) == 1
             assert not (Path(os.environ["SNAPSHOT_CONTROL_DIR"]) / f"cuinterpose-{os.getpid()}.sock").exists()
@@ -73,6 +88,18 @@ else:
 
 activate()
 parent = inspect()["participant"]
+if mode == "concurrent":
+    inode = path.stat().st_ino
+    for _ in range(16):
+        assert initialize(0) == 0
+        assert inspect()["participant"] == parent
+    assert path.stat().st_ino == inode
+    assert list(path.parent.glob("cuinterpose-*.sock")) == [path]
+    names = [task.joinpath("comm").read_text().strip()
+             for task in Path("/proc/self/task").iterdir()]
+    # Linux comm truncates thread names to 15 characters.
+    assert names.count("cuinterpose-pee") == 1, names
+    assert names.count("cuinterpose-con") == 1, names
 if mode not in ("fork", "constructor"):
     print(f"PASS actual Rust endpoint {mode}: activation, no VMM")
     sys.exit(0)
