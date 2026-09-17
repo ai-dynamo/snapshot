@@ -77,6 +77,18 @@ The frontend obtains glibc's real `dlsym` with `dlvsym(RTLD_NEXT, "dlsym", "GLIB
 
 The private C ABI contains `FrontendAbi` and `BackendAbi` tables. Cbindgen generates the table declarations, while NVIDIA's `cuda.h` supplies C CUDA types and cudarc supplies the corresponding Rust definitions. Backend driver calls use the frontend resolver; cudarc's loader and buffer/context wrappers are not used. Rust objects and ownership do not cross the ABI.
 
+Loading the backend and starting its runtime are separate operations:
+
+| Operation | Concurrency and lifetime |
+| --- | --- |
+| ABI registration (`cuinterpose_core_init`) | Copies the frontend table and returns an immutable backend table. Repeated or concurrent registrations must agree on the resolver and origin PID. It starts no workers and makes no frontend callbacks. |
+| Frontend publication | Concurrent callers may each `dlopen` the backend; glibc serializes its construction. Atomic publication retains one process-lifetime library reference and closes redundant references. Same-thread constructor reentry returns `CUDA_ERROR_NOT_INITIALIZED` without poisoning a later call. |
+| Runtime startup | CUDA callbacks and `ensure_cuinterpose_initialized` create one process generation, control socket, and worker pair. A contending caller receives transient `CUDA_ERROR_NOT_INITIALIZED`; it does not wait while potentially holding the loader lock. |
+
+There is no frontend-wide loading lock. The backend's generation lock remains
+necessary for unique runtime resources and quiescent-fork coordination.
+Obtaining the ABI table alone does not mean runtime services are ready.
+
 Ordinary Rust panics are caught at the backend entry points and converted into CUDA errors. A failed backend stops accepting further CUDA work rather than continuing with possibly inconsistent records. This does not make invalid application pointers, foreign C++ exceptions, or allocator aborts recoverable.
 
 | Intercepted APIs | What the shim does |
@@ -202,7 +214,7 @@ The adapter never calls native CUDA memory-IPC functions. It therefore does not 
 
 ### Threads and synchronization
 
-Application CUDA wrappers run on the calling application thread. On shim initialization, two additional threads start in that process:
+Application CUDA wrappers run on the calling application thread. On runtime startup (not ABI registration), two additional threads start in that process:
 
 | Thread | Work |
 | --- | --- |
