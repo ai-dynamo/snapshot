@@ -94,7 +94,10 @@ unsafe extern "C" fn ensure_cuinterpose_initialized() -> CUresult {
     })
 }
 
-/// Initializes this core generation and returns its process-lifetime dispatch table.
+/// Registers the frontend and returns the immutable process-lifetime table.
+///
+/// This idempotent handshake does not resolve CUDA symbols or start runtime
+/// services. Those are initialized by the table's CUDA and readiness callbacks.
 ///
 /// # Safety
 /// `frontend` must expose an aligned readable version/size prefix. A matching
@@ -102,6 +105,7 @@ unsafe extern "C" fn ensure_cuinterpose_initialized() -> CUresult {
 /// remains callable for the process lifetime and never unwinds into Rust.
 /// `output` must be writable pointer storage. The returned table is borrowed:
 /// callers must not free it or unload this library while using its callbacks.
+/// Repeated registrations must use the same resolver and origin PID.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuinterpose_core_init(
     frontend: *const FrontendAbi,
@@ -119,15 +123,13 @@ pub unsafe extern "C" fn cuinterpose_core_init(
             return CUDA_ERROR_INVALID_VALUE;
         }
         let frontend = unsafe { *frontend };
-        if let Some(existing) = G_FRONTEND_ABI.get() {
-            if existing.resolve as usize != frontend.resolve as usize {
-                return CUDA_ERROR_INVALID_VALUE;
-            }
-        } else if G_FRONTEND_ABI.set(frontend).is_err() {
-            return CUDA_ERROR_NOT_READY;
-        }
-        if let Err(error) = state::initialize() {
-            return error.0;
+        // Only copy the table while initializing OnceLock. Loader operations,
+        // callbacks and worker startup here could deadlock a constructor caller.
+        let existing = G_FRONTEND_ABI.get_or_init(|| frontend);
+        if existing.resolve as usize != frontend.resolve as usize
+            || existing.origin_pid != frontend.origin_pid
+        {
+            return CUDA_ERROR_INVALID_VALUE;
         }
         unsafe {
             *output = &G_BACKEND_ABI;
@@ -141,7 +143,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn incompatible_frontend_prefix_is_rejected_before_reading_callbacks() {
+    fn frontend_registration_is_validated_and_idempotent() {
         let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
         assert!(page_size > 0);
         let page_size = page_size as usize;
@@ -179,5 +181,45 @@ mod tests {
             );
         }
         assert_eq!(unsafe { libc::munmap(mapping, page_size * 2) }, 0);
+
+        unsafe extern "C" fn resolve(_: *const c_char) -> *mut c_void {
+            panic!("ABI registration must not invoke the resolver");
+        }
+        unsafe extern "C" fn other_resolve(_: *const c_char) -> *mut c_void {
+            std::ptr::null_mut()
+        }
+        let frontend = FrontendAbi {
+            version: ABI_VERSION,
+            size: size_of::<FrontendAbi>() as u32,
+            resolve,
+            origin_pid: unsafe { libc::getpid() },
+        };
+        let barrier = std::sync::Barrier::new(32);
+        std::thread::scope(|scope| {
+            for _ in 0..32 {
+                scope.spawn(|| {
+                    barrier.wait();
+                    for _ in 0..2 {
+                        let mut output = std::ptr::null();
+                        assert_eq!(
+                            unsafe { cuinterpose_core_init(&frontend, &mut output) },
+                            CUDA_SUCCESS
+                        );
+                        assert!(std::ptr::eq(output, &G_BACKEND_ABI));
+                    }
+                });
+            }
+        });
+        for incompatible in [
+            FrontendAbi { resolve: other_resolve, ..frontend },
+            FrontendAbi { origin_pid: frontend.origin_pid + 1, ..frontend },
+        ] {
+            let mut output = std::ptr::null();
+            assert_eq!(
+                unsafe { cuinterpose_core_init(&incompatible, &mut output) },
+                CUDA_ERROR_INVALID_VALUE
+            );
+            assert!(output.is_null());
+        }
     }
 }
