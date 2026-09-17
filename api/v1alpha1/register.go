@@ -19,8 +19,9 @@ var GroupVersion = SchemeGroupVersion
 
 // Kind names, for callers that set TypeMeta explicitly when building objects.
 const (
-	KindPodSnapshot        = "PodSnapshot"
-	KindPodSnapshotContent = "PodSnapshotContent"
+	KindPodSnapshot            = "PodSnapshot"
+	KindPodSnapshotContent     = "PodSnapshotContent"
+	KindPodSnapshotContentList = "PodSnapshotContentList"
 )
 
 func AddToScheme(s *runtime.Scheme) error {

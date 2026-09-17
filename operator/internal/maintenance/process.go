@@ -52,20 +52,27 @@ func (q *Queue) processDeleteContent(ctx context.Context, key WorkItemKey) error
 	return q.client.Patch(ctx, content, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 }
 
-// processSweep removes up to config.BatchSize confirmed orphans.
+// processSweep reschedules pending finalization and removes up to
+// config.BatchSize confirmed orphans.
 func (q *Queue) processSweep(ctx context.Context, logger logr.Logger) error {
-	candidates, err := enumerateSweepCandidates(q.config.BasePath, logger)
+	// Enumerate directories before listing content so roots created after the
+	// metadata snapshot cannot be mistaken for orphans.
+	candidates, enumerationErr := enumerateSweepCandidates(q.config.BasePath, logger)
+	scanResult, err := collectContentScanResult(ctx, q.apiReader, q.config.ListAttempts)
 	if err != nil {
-		return err
+		return errors.Join(enumerationErr, err)
 	}
-	existing, err := listExistingContentUIDs(ctx, q.apiReader, q.config.ListAttempts)
-	if err != nil {
-		return err
+	// Retry pending finalizers even when artifacts are absent or enumeration failed.
+	for _, key := range scanResult.PendingDeletes {
+		q.EnqueueDeleteContent(key.Namespace, key.Name, key.UID)
+	}
+	if enumerationErr != nil {
+		return enumerationErr
 	}
 	var sweepErrors []error
 	processed := 0
 	for uid := range candidates {
-		if _, protected := existing[apitypes.UID(uid)]; protected {
+		if _, protected := scanResult.ExistingUIDs[apitypes.UID(uid)]; protected {
 			continue
 		}
 		if processed == q.config.BatchSize {
