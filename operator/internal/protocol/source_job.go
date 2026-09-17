@@ -22,7 +22,6 @@ type SourceJobOptions struct {
 	Name                  string
 	ActiveDeadlineSeconds *int64
 	TTLSecondsAfterFinish *int32
-	WrapLaunchJob         bool
 }
 
 func NewSourceJob(podTemplate *corev1.PodTemplateSpec, opts SourceJobOptions) (*batchv1.Job, error) {
@@ -74,7 +73,9 @@ func NewSourceJob(podTemplate *corev1.PodTemplateSpec, opts SourceJobOptions) (*
 	// $SNAPSHOT_CONTROL_DIR/ready-for-snapshot. Any per-container
 	// liveness/startup probes are cleared — a source job runs to a
 	// quiesce-and-sit state, not a long-lived serving state.
-	EnsureControlVolume(&podTemplate.Spec, targetContainer)
+	if err := EnsureControlVolume(&podTemplate.Spec, targetContainer); err != nil {
+		return nil, fmt.Errorf("source job: %w", err)
+	}
 	targetContainer.ReadinessProbe = &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
 			Exec: &corev1.ExecAction{
@@ -85,16 +86,6 @@ func NewSourceJob(podTemplate *corev1.PodTemplateSpec, opts SourceJobOptions) (*
 	}
 	targetContainer.LivenessProbe = nil
 	targetContainer.StartupProbe = nil
-
-	if opts.WrapLaunchJob {
-		if len(targetContainer.Command) == 0 {
-			return nil, fmt.Errorf("source job requires container.command when cuda-checkpoint launch-job wrapping is enabled")
-		}
-		targetContainer.Command, targetContainer.Args = wrapWithCudaCheckpointLaunchJob(
-			targetContainer.Command,
-			targetContainer.Args,
-		)
-	}
 
 	return &batchv1.Job{
 		TypeMeta: metav1.TypeMeta{APIVersion: "batch/v1", Kind: "Job"},
@@ -143,30 +134,4 @@ func DisableSidecarInjection(annotations map[string]string) map[string]string {
 	annotations[linkerdInjectAnnotation] = linkerdInjectDisabled
 	annotations[istioSidecarInjectAnnotation] = istioSidecarInjectDisabled
 	return annotations
-}
-
-// wrapWithCudaCheckpointLaunchJob rewrites the container's entrypoint so the
-// workload is launched under `cuda-checkpoint --launch-job`, required for
-// multi-GPU checkpoints. The launch-job file is copied from its transient
-// procfs FD into the per-pod snapshot control volume before the original
-// command starts. The workload inherits that stable path, while the snapshot
-// agent stages the capture-time contents into the content-owned artifact.
-func wrapWithCudaCheckpointLaunchJob(command []string, args []string) ([]string, []string) {
-	const persistJobFileScript = `set -eu
-job_file="$1"
-shift
-if [ -z "${CUDA_CHECKPOINT_JOB_FILE:-}" ]; then
-    echo "CUDA_CHECKPOINT_JOB_FILE is missing; cuda-checkpoint --launch-job requires NVIDIA driver 610 or newer" >&2
-    exit 1
-fi
-umask 077
-cat "$CUDA_CHECKPOINT_JOB_FILE" > "$job_file"
-export CUDA_CHECKPOINT_JOB_FILE="$job_file"
-exec "$@"`
-
-	wrappedArgs := make([]string, 0, len(command)+len(args)+7)
-	wrappedArgs = append(wrappedArgs, "--launch-job", "/bin/sh", "-c", persistJobFileScript, "dynamo-cuda-checkpoint", podcontract.CUDAJobFilePath)
-	wrappedArgs = append(wrappedArgs, command...)
-	wrappedArgs = append(wrappedArgs, args...)
-	return []string{"cuda-checkpoint"}, wrappedArgs
 }
