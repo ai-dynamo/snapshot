@@ -51,7 +51,7 @@ __attribute__((constructor)) static void contend_with_generation_startup(void) {
     for (;;) {
         assert(time(NULL) < deadline);
         int tid = atomic_load(&worker_tid);
-        if (tid && access(endpoint, F_OK) == 0) {
+        if (tid) {
             char path[128], state[128] = {0};
             snprintf(path, sizeof(path), "/proc/self/task/%d/syscall", tid);
             FILE *file = fopen(path, "r");
@@ -66,16 +66,17 @@ __attribute__((constructor)) static void contend_with_generation_startup(void) {
         sched_yield();
     }
 
-    // The child endpoint has been bound, but B is blocked in thread/TLS startup
-    // on our loader lock. A must neither wait for B nor expose partially ready
-    // state. Public CUDA entry points must refuse transiently rather than wait.
+    // B is preparing private workers and has not bound the canonical endpoint.
+    // A owns the loader lock and must be able to prepare and install its own
+    // candidate, rather than waiting for B's loader-sensitive work.
+    assert(access(endpoint, F_OK) != 0);
     if (query) {
         void *output = (void *)42;
-        assert(query("cuFixtureUnwrapped", &output, 13010, 0) == 3);
-        assert(output == NULL);
+        assert(query("cuFixtureUnwrapped", &output, 13010, 0) == 0);
+        assert(output != NULL);
     }
     uint64_t handle = 42;
-    assert(create(&handle, 4096, NULL, 0) == 3); // CUDA_ERROR_NOT_INITIALIZED
+    assert(create(&handle, 4096, NULL, 0) == 1); // CUDA_ERROR_INVALID_VALUE
     assert(handle == 42);
 }
 
