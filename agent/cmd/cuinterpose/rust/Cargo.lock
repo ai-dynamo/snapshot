@@ -37,6 +37,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cuinterpose-core"
+version = "0.1.0"
+dependencies = [
+ "cudarc",
+ "cuinterpose-abi",
+ "cuinterpose-protocol",
+ "libc",
+ "rustix",
+ "thiserror",
+]
+
+[[package]]
 name = "cuinterpose-protocol"
 version = "0.1.0"
 dependencies = [
