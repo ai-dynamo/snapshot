@@ -186,6 +186,7 @@ operations, indexed below.
 **More**
 
 - [Limitations & known issues](docs/limitations.md) — current limitations and what's on the roadmap.
+- [Snapshot Enhancement Proposals](docs/proposals/README.md) — the design process for significant Snapshot changes.
 
 ## Adopters
 
