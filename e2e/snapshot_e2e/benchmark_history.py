@@ -398,6 +398,7 @@ def rebuild_indexes(
                 "recordCount": len(items),
                 "firstStartedAt": items[0].result["startedAt"],
                 "lastStartedAt": items[-1].result["startedAt"],
+                "suites": sorted({item.result["identity"]["suite"] for item in items}),
             }
         )
     for stale in index_root.glob("*.ndjson"):
