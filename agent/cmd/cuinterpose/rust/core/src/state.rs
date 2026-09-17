@@ -93,6 +93,7 @@ mod tests {
         let state = State {
             identity: ParticipantId::default(),
             endpoint: String::new(),
+            mallocs: BTreeMap::new(),
             allocations: BTreeMap::new(),
             multicasts: BTreeMap::new(),
             handles: BTreeMap::new(),
@@ -136,6 +137,11 @@ use std::os::fd::{AsFd, IntoRawFd};
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::{Mutex, MutexGuard, TryLockError};
 
+pub use super::legacy_ipc::{
+    cuIpcCloseMemHandle, cuIpcGetMemHandle, cuIpcOpenMemHandle,
+    cuIpcOpenMemHandle as cuIpcOpenMemHandle_v2, cuMemAlloc_v2, cuMemFree_v2,
+    cuMemGetAddressRange_v2,
+};
 pub use crate::driver::Result;
 struct Generation {
     state: Mutex<State>,
@@ -286,6 +292,7 @@ impl Phase {
 pub struct State {
     pub identity: ParticipantId,
     pub endpoint: String,
+    pub mallocs: BTreeMap<u64, super::legacy_ipc::Mapping>,
     pub allocations: BTreeMap<AllocationId, Allocation>,
     pub multicasts: BTreeMap<AllocationId, super::multicast::Object>,
     pub handles: BTreeMap<u64, AllocationId>,
@@ -760,6 +767,7 @@ fn initialize_generation() -> Result<()> {
     let state = State {
         identity,
         endpoint,
+        mallocs: BTreeMap::new(),
         allocations: BTreeMap::new(),
         multicasts: BTreeMap::new(),
         handles: BTreeMap::new(),

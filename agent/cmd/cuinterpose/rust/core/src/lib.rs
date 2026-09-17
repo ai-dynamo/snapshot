@@ -12,6 +12,7 @@ mod control;
 mod driver;
 mod export_cache;
 mod host_carrier;
+mod legacy_ipc;
 mod logical_handle;
 mod multicast;
 mod process;
@@ -68,6 +69,13 @@ macro_rules! exports {
 }
 // Initializing BackendAbi checks these adapters against the canonical signatures.
 exports! {
+    cuMemAlloc_v2(out: *mut CUdeviceptr, size: usize);
+    cuMemFree_v2(address: CUdeviceptr);
+    cuMemGetAddressRange_v2(base: *mut CUdeviceptr, size: *mut usize, address: CUdeviceptr);
+    cuIpcGetMemHandle(out: *mut CUipcMemHandle, address: CUdeviceptr);
+    cuIpcOpenMemHandle(out: *mut CUdeviceptr, handle: CUipcMemHandle, flags: u32);
+    cuIpcOpenMemHandle_v2(out: *mut CUdeviceptr, handle: CUipcMemHandle, flags: u32);
+    cuIpcCloseMemHandle(address: CUdeviceptr);
     cuMemCreate(out: *mut CUmemGenericAllocationHandle, size: usize, prop: *const CUmemAllocationProp, flags: u64);
     cuMemGetAllocationGranularity(out: *mut usize, prop: *const CUmemAllocationProp, flags: CUmemAllocationGranularity_flags);
     cuMemRelease(handle: CUmemGenericAllocationHandle);
