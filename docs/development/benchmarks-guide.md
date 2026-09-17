@@ -56,13 +56,13 @@ uv run --project benchmarks python -m snapshot_benchmarks sweep \
   --image <registry>/vllm-snapshot:<tag>
 ```
 
-Each run writes one JSON file per model to `benchmarks/results/<date>-<git-sha>/`
+Each run writes one JSON file per model to `benchmarks/results/<date>-<git-sha>-<invocation-id>/`
 (gitignored — these are local artifacts, not published content). Render a
 standalone text summary from a results directory:
 
 ```bash
 uv run --project benchmarks python -m snapshot_benchmarks report \
-  --results-dir benchmarks/results/<date>-<git-sha>
+  --results-dir benchmarks/results/<date>-<git-sha>-<invocation-id>
 ```
 
 `report` never edits [benchmarks.md](benchmarks.md) or any other doc — it

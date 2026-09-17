@@ -46,15 +46,24 @@ def parse_go_duration(value: str | None) -> float | None:
     """Parses a Go `time.Duration.String()` value (e.g. "3.506021s",
     "659.262378ms", "1m2.5s") into float seconds. Returns None for falsy/
     unparseable input rather than raising, since this is a best-effort
-    diagnostic parse, never a required value."""
+    diagnostic parse, never a required value.
+
+    Matched terms must consume the entire string contiguously from the
+    start -- `re.findall` alone would silently skip over any unmatched text
+    between or around terms (e.g. "3.5s garbage 2ms" or "xx3s"), accumulating
+    a bogus partial total instead of reporting the value as unparseable."""
     if not value:
         return None
-    matches = _GO_DURATION_TERM.findall(value)
-    if not matches:
-        return None
     total = 0.0
-    for amount, unit in matches:
+    pos = 0
+    for match in _GO_DURATION_TERM.finditer(value):
+        if match.start() != pos:
+            return None
+        amount, unit = match.groups()
         total += float(amount) * _GO_DURATION_UNIT_SECONDS[unit]
+        pos = match.end()
+    if pos == 0 or pos != len(value):
+        return None
     return total
 
 

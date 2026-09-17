@@ -204,14 +204,16 @@ class AgentLogPhases:
     @property
     def agent_setup_approx(self) -> float | None:
         parts = [self.gpu_device_map, self.pagebroker_stage, self.pagebroker_mount, self.pagebroker_commit]
-        present = [p for p in parts if p is not None]
-        return sum(present) if present else None
+        if any(p is None for p in parts):
+            return None
+        return sum(parts)
 
     @property
     def criu_restore_approx(self) -> float | None:
         parts = [self.criu_prepare, self.criu_restore, self.overlay_capture]
-        present = [p for p in parts if p is not None]
-        return sum(present) if present else None
+        if any(p is None for p in parts):
+            return None
+        return sum(parts)
 
     @property
     def cuda_restore_approx(self) -> float | None:
