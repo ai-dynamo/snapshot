@@ -141,7 +141,7 @@ func createPodSnapshot(ctx context.Context, crClient client.Client, namespace, s
 	snap := &snapshotv1alpha1.PodSnapshot{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: snapshotv1alpha1.GroupVersion.String(),
-			Kind:       "PodSnapshot",
+			Kind:       snapshotv1alpha1.KindPodSnapshot,
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      snapName,
