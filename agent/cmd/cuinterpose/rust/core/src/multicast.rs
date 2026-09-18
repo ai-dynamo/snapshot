@@ -2,13 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Multicast objects wrap unicast members. This module owns their CUDA lifetime
-//! and replay; common memory APIs share State's logical handles and VA ranges.
+//! and replay; common memory APIs share State's virtual allocation handles and VA ranges.
 
 use super::host_carrier::Context;
 use super::state::{self, Mapping, Phase, Result, State};
-use super::ticket;
+use super::virtual_shareable_handle;
 use crate::driver::CudaError;
-use crate::logical_handle::{LOGICAL_HANDLE_MASK, LOGICAL_HANDLE_TAG};
+use crate::virtual_allocation_handle::{
+    VIRTUAL_ALLOCATION_HANDLE_MASK, VIRTUAL_ALLOCATION_HANDLE_TAG,
+};
 use cudarc::driver::sys::CUresult::{
     CUDA_ERROR_INVALID_HANDLE, CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_NOT_READY,
     CUDA_ERROR_NOT_SUPPORTED, CUDA_ERROR_OUT_OF_MEMORY, CUDA_SUCCESS,
@@ -17,8 +19,8 @@ use cudarc::driver::sys::{
     CUmemAllocationHandleType, CUmulticastGranularity_flags, CUmulticastObjectProp,
 };
 use cuinterpose_protocol::{
-    AllocationId, AllocationReference, BindingSource, BindingVersion, MemberRange, Operation,
-    ParticipantId, StateEntry,
+    AllocationId, AllocationReference, BindingSource, BindingVersion, MemberRange, NamespacePid,
+    Operation, Record,
 };
 use std::ffi::c_void;
 use std::os::fd::{AsFd, AsRawFd, IntoRawFd};
@@ -148,7 +150,7 @@ pub fn cuMulticastCreate(out: *mut u64, properties: *const CUmulticastObjectProp
         }
     };
     created?;
-    if driver & LOGICAL_HANDLE_MASK == LOGICAL_HANDLE_TAG {
+    if driver & VIRTUAL_ALLOCATION_HANDLE_MASK == VIRTUAL_ALLOCATION_HANDLE_TAG {
         unsafe { crate::driver::cuMemRelease(driver) }?;
         return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
     }
@@ -163,7 +165,7 @@ pub fn cuMulticastCreate(out: *mut u64, properties: *const CUmulticastObjectProp
         }
         return Ok(());
     }
-    let logical = match state.mint(id) {
+    let virtual_multicast_handle = match state.mint_virtual_allocation_handle(id) {
         Ok(handle) => handle,
         Err(error) => {
             unsafe { crate::driver::cuMemRelease(driver) }?;
@@ -171,7 +173,7 @@ pub fn cuMulticastCreate(out: *mut u64, properties: *const CUmulticastObjectProp
         }
     };
     let reference = AllocationReference {
-        creator: state.identity,
+        creator_pid: state.namespace_pid,
         id,
     };
     state.multicasts.insert(
@@ -190,15 +192,15 @@ pub fn cuMulticastCreate(out: *mut u64, properties: *const CUmulticastObjectProp
         },
     );
     unsafe {
-        out.write(logical);
+        out.write(virtual_multicast_handle);
     }
     Ok(())
 }
 
 pub fn cuMulticastAddDevice(handle: u64, device: i32) -> Result<()> {
     let mut state = state::active()?;
-    let Some(id) = state.handles.get(&handle).copied() else {
-        if handle & LOGICAL_HANDLE_MASK == LOGICAL_HANDLE_TAG {
+    let Some(id) = state.virtual_allocation_handles.get(&handle).copied() else {
+        if handle & VIRTUAL_ALLOCATION_HANDLE_MASK == VIRTUAL_ALLOCATION_HANDLE_TAG {
             return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
         }
         drop(state);
@@ -302,7 +304,10 @@ pub fn map(
 }
 
 pub fn settle(state: &mut State, id: AllocationId) -> Result<()> {
-    if state.handles.values().any(|value| *value == id)
+    if state
+        .virtual_allocation_handles
+        .values()
+        .any(|value| *value == id)
         || state.mappings.values().any(|mapping| mapping.id == id)
     {
         return Ok(());
@@ -324,11 +329,12 @@ pub fn export(state: &mut State, id: AllocationId, out: *mut c_void) -> Result<(
         .multicasts
         .get_mut(&id)
         .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
-    if object.reference.creator == state.identity && !state::cache()?.contains(&id)? {
+    if object.reference.creator_pid == state.namespace_pid && !state::cache()?.contains(&id)? {
         let fd = crate::driver::export_posix(object.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?)?;
         state::cache()?.replace(id, Some((fd, Some(object.properties))))?;
     }
-    let fd = ticket::export(object.reference).map_err(|_| CUDA_ERROR_OUT_OF_MEMORY)?;
+    let fd =
+        virtual_shareable_handle::create(object.reference).map_err(|_| CUDA_ERROR_OUT_OF_MEMORY)?;
     object.shared = true;
     unsafe {
         out.cast::<i32>().write(fd.into_raw_fd());
@@ -353,7 +359,7 @@ pub fn import(
         }
         object.shared = true;
         unsafe {
-            out.write(state.mint(id)?);
+            out.write(state.mint_virtual_allocation_handle(id)?);
         }
         return Ok(());
     }
@@ -380,7 +386,7 @@ pub fn import(
         }
     };
     imported?;
-    if driver & LOGICAL_HANDLE_MASK == LOGICAL_HANDLE_TAG {
+    if driver & VIRTUAL_ALLOCATION_HANDLE_MASK == VIRTUAL_ALLOCATION_HANDLE_TAG {
         unsafe { crate::driver::cuMemRelease(driver) }?;
         return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
     }
@@ -409,7 +415,7 @@ pub fn import(
         );
         true
     };
-    let logical = match state.mint(id) {
+    let virtual_multicast_handle = match state.mint_virtual_allocation_handle(id) {
         Ok(handle) => handle,
         Err(error) => {
             if inserted {
@@ -420,7 +426,7 @@ pub fn import(
         }
     };
     unsafe {
-        out.write(logical);
+        out.write(virtual_multicast_handle);
     }
     Ok(())
 }
@@ -484,8 +490,9 @@ fn bind(
     input: BindInput,
 ) -> Result<()> {
     let mut state = state::active()?;
-    let target = state.handles.get(&handle).copied();
-    if target.is_none() && handle & LOGICAL_HANDLE_MASK == LOGICAL_HANDLE_TAG {
+    let target = state.virtual_allocation_handles.get(&handle).copied();
+    if target.is_none() && handle & VIRTUAL_ALLOCATION_HANDLE_MASK == VIRTUAL_ALLOCATION_HANDLE_TAG
+    {
         return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
     }
     let (source, member, member_driver) = match input {
@@ -494,7 +501,7 @@ fn bind(
             offset: member_offset,
         } => {
             let member = state
-                .handles
+                .virtual_allocation_handles
                 .get(&member_handle)
                 .copied()
                 .filter(|id| state.allocations.contains_key(id));
@@ -518,7 +525,7 @@ fn bind(
                     allocation.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?,
                 )
             } else {
-                if member_handle & LOGICAL_HANDLE_MASK == LOGICAL_HANDLE_TAG {
+                if member_handle & VIRTUAL_ALLOCATION_HANDLE_MASK == VIRTUAL_ALLOCATION_HANDLE_TAG {
                     return Err(CUDA_ERROR_INVALID_HANDLE.into());
                 }
                 if target.is_some() {
@@ -620,7 +627,7 @@ fn bind(
         checkpointed: false,
     };
     let Some(id) = target else {
-        if handle & LOGICAL_HANDLE_MASK == LOGICAL_HANDLE_TAG {
+        if handle & VIRTUAL_ALLOCATION_HANDLE_MASK == VIRTUAL_ALLOCATION_HANDLE_TAG {
             return Err(CUDA_ERROR_INVALID_HANDLE.into());
         }
         drop(state);
@@ -774,8 +781,8 @@ pub fn cuMulticastGetGranularity(
 
 pub fn cuMulticastUnbind(handle: u64, device: i32, offset: usize, size: usize) -> Result<()> {
     let mut state = state::active()?;
-    let Some(id) = state.handles.get(&handle).copied() else {
-        if handle & LOGICAL_HANDLE_MASK == LOGICAL_HANDLE_TAG {
+    let Some(id) = state.virtual_allocation_handles.get(&handle).copied() else {
+        if handle & VIRTUAL_ALLOCATION_HANDLE_MASK == VIRTUAL_ALLOCATION_HANDLE_TAG {
             return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
         }
         drop(state);
@@ -813,31 +820,31 @@ pub fn cuMulticastUnbind(handle: u64, device: i32, offset: usize, size: usize) -
     Ok(())
 }
 
-pub fn describe(state: &State, records: &mut Vec<StateEntry>) -> Result<()> {
+pub fn describe(state: &State, records: &mut Vec<Record>) -> Result<()> {
     for (id, object) in &state.multicasts {
-        let logical_handle_count = state
-            .handles
+        let virtual_multicast_handle_count = state
+            .virtual_allocation_handles
             .values()
             .filter(|value| *value == id)
             .count()
             .try_into()
             .map_err(|_| CUDA_ERROR_OUT_OF_MEMORY)?;
-        records.push(StateEntry::Multicast {
+        records.push(Record::Multicast {
             allocation: object.reference,
             devices: object.properties.numDevices,
             size: object.effective_size as u64,
             handle_types: object.properties.handleTypes,
             flags: object.properties.flags,
-            logical_handle_count,
+            virtual_multicast_handle_count,
         });
         for device in &object.devices {
-            records.push(StateEntry::MulticastDevice {
+            records.push(Record::MulticastDevice {
                 allocation: object.reference,
                 device: *device,
             });
         }
         for binding in &object.bindings {
-            records.push(StateEntry::MulticastBinding {
+            records.push(Record::MulticastBinding {
                 allocation: object.reference,
                 source: binding.source,
                 size: binding.size as u64,
@@ -851,7 +858,7 @@ pub fn describe(state: &State, records: &mut Vec<StateEntry>) -> Result<()> {
             if mapping.unknown {
                 return Err(CudaError::from(CUDA_ERROR_NOT_SUPPORTED));
             }
-            let record = StateEntry::MulticastMapping {
+            let record = Record::MulticastMapping {
                 allocation: object.reference,
                 address: mapping.address,
                 size: mapping.size as u64,
@@ -928,14 +935,14 @@ pub fn restore_phase(mut state: MutexGuard<'static, State>, operation: Operation
         .filter(|_| bindings)
         .map(|(id, allocation)| (*id, allocation.driver))
         .collect();
-    let identity = state.identity;
+    let namespace_pid = state.namespace_pid;
     state.phase = Phase::ReconstructingMulticast;
     drop(state);
     let result = restore(
         &mut objects,
         &mut mappings,
         &allocations,
-        identity,
+        namespace_pid,
         operation,
     );
     let mut state = state::get()?;
@@ -950,14 +957,14 @@ fn restore(
     objects: &mut std::collections::BTreeMap<AllocationId, Object>,
     mappings: &mut std::collections::BTreeMap<u64, Mapping>,
     allocations: &std::collections::BTreeMap<AllocationId, Option<u64>>,
-    identity: ParticipantId,
+    namespace_pid: NamespacePid,
     operation: Operation,
 ) -> Result<()> {
     for (id, object) in objects {
         if !object.checkpointed {
             continue;
         }
-        let creator = object.reference.creator == identity;
+        let creator = object.reference.creator_pid == namespace_pid;
         if (operation == Operation::RestoreMulticastCreators && !creator)
             || (operation == Operation::RestoreMulticastImporters && creator)
         {
@@ -982,7 +989,8 @@ fn restore(
                 }
                 Operation::RestoreMulticastImporters if !creator => {
                     let (fd, properties) =
-                        ticket::request(object.reference).map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
+                        virtual_shareable_handle::request_export(object.reference)
+                            .map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
                     if properties != Some(object.properties) {
                         return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
                     }
