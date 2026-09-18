@@ -13,11 +13,6 @@
 #include <string.h>
 #include <unistd.h>
 
-// CUDA headers map the source-level legacy spelling to the latest prototype.
-// The interposer must still define both ELF symbol spellings independently.
-#undef cuGetProcAddress
-#undef cuIpcOpenMemHandle
-
 #define API __attribute__((visibility("default")))
 static const char GLIBC_DLSYM_VERSION[] = "GLIBC_2.34";
 
