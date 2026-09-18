@@ -61,7 +61,7 @@ fn ticket_layout_is_fixed_and_versioned() {
 }
 
 #[test]
-fn inspection_with_access_round_trips() {
+fn inspection_metadata_round_trips() {
     let mapping = StateEntry::Mapping {
         allocation: AllocationReference {
             id: [1; 16],
@@ -70,15 +70,7 @@ fn inspection_with_access_round_trips() {
         address: 0x10000,
         size: 8192,
         offset: 4096,
-        access: [0, 1]
-            .map(|id| CUmemAccessDesc {
-                location: CUmemLocation {
-                    type_: CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE,
-                    id,
-                },
-                flags: CUmemAccess_flags::CU_MEM_ACCESS_FLAGS_PROT_READWRITE,
-            })
-            .into(),
+        access: vec![(1, 0, 3), (1, 1, 3)],
     };
     let reply = Reply::Inspection {
         entries: vec![mapping.clone()],

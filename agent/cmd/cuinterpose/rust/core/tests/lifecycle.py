@@ -103,7 +103,7 @@ def main():
             assert cuda.cuMemSetAccess(address, length, c.byref(access), 1) == 0
         records = command("inspect")["entries"]
         mapping = next(record["mapping"] for record in records if "mapping" in record)
-        assert {entry["location"]["id"] for entry in mapping["access"]} == {0, 1}
+        assert {entry[1] for entry in mapping["access"]} == {0, 1}
         assert cuda.cuMemSetAccess(address, length // 2, c.byref(access), 1) != 0
         return
     if mode == "exports":

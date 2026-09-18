@@ -178,7 +178,7 @@ def main():
             reply = response["result"]["Ok"]
             assert expected in reply
             if expected == "multicast_export":
-                assert reply[expected]["properties"]["devices"] == 1
+                assert reply[expected]["devices"] == 1
         alias = u64()
         assert cuda.cuMemImportFromShareableHandle(
             c.byref(alias), c.c_void_p(tickets[1]), 1) == 0

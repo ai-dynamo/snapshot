@@ -3,9 +3,8 @@
 
 //! Behavioral cases from the C coordinator suite, using the typed protocol.
 use cuinterpose_protocol::{
-    AllocationId, AllocationReference, BindingSource, BindingVersion, CUmemAllocationHandleType,
-    CUmemAllocationType, CUmemLocation, CUmemLocationType, CUmulticastObjectProp, Manifest,
-    MemberRange, Operation, Reply, Request, Response, StateEntry, decode, receive, send,
+    AllocationId, AllocationReference, BindingSource, BindingVersion, Manifest, MemberRange,
+    Operation, Reply, Request, Response, StateEntry, decode, receive, send,
 };
 use std::os::unix::net::UnixListener;
 use std::{
@@ -259,12 +258,9 @@ fn allocation(creator: u8) -> StateEntry {
         },
         content: false,
         size: 4096,
-        allocation_type: CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED,
-        handle_types: CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
-        location: CUmemLocation {
-            type_: CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE,
-            id: 0,
-        },
+        allocation_type: 1,
+        handle_types: 1,
+        location: (1, 0),
         logical_handle_count: 1,
     }
 }
@@ -295,12 +291,10 @@ fn preflight_refusals_do_not_mutate_or_publish_state() {
                         allocation(1),
                         StateEntry::Multicast {
                             allocation: MULTICAST,
-                            properties: CUmulticastObjectProp {
-                                numDevices: 1,
-                                size: 16384,
-                                handleTypes: 1,
-                                flags: 0,
-                            },
+                            devices: 1,
+                            size: 16384,
+                            handle_types: 1,
+                            flags: 0,
                             logical_handle_count: 1,
                         },
                         StateEntry::MulticastDevice {
