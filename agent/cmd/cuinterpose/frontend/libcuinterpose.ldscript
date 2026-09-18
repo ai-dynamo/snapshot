@@ -1,0 +1,45 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+{
+    global:
+        cuMemAlloc_v2;
+        cuMemFree_v2;
+        cuMemGetAddressRange_v2;
+        cuIpcGetMemHandle;
+        cuIpcOpenMemHandle;
+        cuIpcOpenMemHandle_v2;
+        cuIpcCloseMemHandle;
+        dlsym;
+        cuInit;
+        cuGetProcAddress;
+        cuGetProcAddress_v2;
+        cuGetProcAddress_v2_ptsz;
+        cudaGetDriverEntryPoint;
+        cudaGetDriverEntryPoint_ptsz;
+        cudaGetDriverEntryPointByVersion;
+        cudaGetDriverEntryPointByVersion_ptsz;
+        cuMemCreate;
+        cuMemGetAllocationGranularity;
+        cuMemRelease;
+        cuMemRetainAllocationHandle;
+        cuMemMap;
+        cuMemUnmap;
+        cuMemSetAccess;
+        cuMemExportToShareableHandle;
+        cuMemImportFromShareableHandle;
+        cuMemGetAllocationPropertiesFromHandle;
+        cuMulticastCreate;
+        cuMulticastAddDevice;
+        cuMulticastBindMem;
+        cuMulticastBindMem_v2;
+        cuMulticastBindAddr;
+        cuMulticastBindAddr_v2;
+        cuMulticastGetGranularity;
+        cuMulticastUnbind;
+
+    local:
+        *;
+};
