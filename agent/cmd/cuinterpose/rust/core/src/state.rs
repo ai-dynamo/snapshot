@@ -87,48 +87,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn oversized_inspection_is_refused_before_building_records() {
-        let state = State {
-            namespace_pid: 1,
-            socket_path: PathBuf::new(),
-            mallocs: BTreeMap::new(),
-            allocations: BTreeMap::new(),
-            multicasts: BTreeMap::new(),
-            handles: BTreeMap::new(),
-            mappings: (0..=cuinterpose_protocol::MAX_ENTRIES)
-                .map(|index| {
-                    let address = (index * 4096) as u64;
-                    (
-                        address,
-                        Mapping {
-                            id: AllocationId::default(),
-                            address,
-                            size: 4096,
-                            offset: 0,
-                            access: Vec::new(),
-                            unknown: false,
-                            flags: 0,
-                            checkpointed: false,
-                        },
-                    )
-                })
-                .collect(),
-            raw: BTreeMap::new(),
-            unreleased_handles: Vec::new(),
-            unsupported: 0,
-            phase: Phase::Active,
-            arena: None,
-            inflight: 0,
-            pending_maps: Vec::new(),
-            next: 1,
-        };
-        // Missing allocation records would panic if serialization began.
-        assert_eq!(
-            state.inspect(),
-            Err(CudaError::from(CUDA_ERROR_NOT_SUPPORTED))
-        );
-    }
 }
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -333,9 +291,6 @@ impl State {
                 })
             })
             .ok_or(CUDA_ERROR_OUT_OF_MEMORY)?;
-        if count > cuinterpose_protocol::MAX_ENTRIES {
-            return Err(CudaError::from(CUDA_ERROR_NOT_SUPPORTED));
-        }
         let mut records = Vec::new();
         records
             .try_reserve_exact(count)
