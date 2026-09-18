@@ -450,7 +450,10 @@ Capture and restore reverse the dependency order, not the number of messages. Ca
 
 `cuinterpose.state` is a **binary, versioned MessagePack file**. Its body is a
 map from participant ID to that participant's canonical workload socket path
-and state entries. Here is a shortened decoded view for the two-worker example.
+and state entries. Control messages and `cuinterpose.state` are limited to 32
+MiB to bound allocations from socket frame prefixes and checkpoint files; they
+contain metadata, never allocation contents. Here is a shortened decoded view
+for the two-worker example.
 Allocation-property and handle-count fields are omitted; the names and nesting
 shown are the actual serialized fields:
 
