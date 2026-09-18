@@ -9,12 +9,14 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 static int (*real_create)(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *);
 static int (*initialize)(unsigned);
-static _Thread_local int mode, attempts;
+static _Thread_local const char *mode;
+static _Thread_local int attempts;
 static atomic_int entered, release_call, release_worker, recursive_result;
 #define NEXT(name) \
     ((void *(*)(void *, const char *))dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.34"))(RTLD_NEXT, name)
@@ -28,11 +30,11 @@ int fault_entered(void) { return atomic_load(&entered); }
 void fault_release(void) { atomic_store(&release_call, 1); }
 void fault_release_workers(void) { atomic_store(&release_worker, 1); }
 int fault_recursive_result(void) { return atomic_load(&recursive_result); }
-int fault_call(int selected) {
+int fault_call(const char *selected) {
     mode = selected;
     attempts = 0;
     int result = initialize(0);
-    mode = 0;
+    mode = NULL;
     return result;
 }
 static void *delayed(void *pointer) {
@@ -45,12 +47,12 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
                    void *(*start)(void *), void *argument) {
     if (mode) {
         int attempt = ++attempts;
-        if (mode == 1 && attempt == 1) {
+        if (strcmp(mode, "failure-race") == 0 && attempt == 1) {
             atomic_store(&entered, 1);
             while (!atomic_load(&release_call)) usleep(1000);
             return EAGAIN;
         }
-        if (mode == 2) {
+        if (strcmp(mode, "delayed") == 0) {
             if (attempt == 2) {
                 atomic_store(&entered, 1);
                 while (!atomic_load(&release_call)) usleep(1000);
@@ -60,9 +62,10 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
             *parked = (struct parked){start, argument};
             return real_create(thread, attr, delayed, parked);
         }
-        if (mode == 3 && attempt == 1)
+        if (strcmp(mode, "recursive") == 0 && attempt == 1)
             atomic_store(&recursive_result, initialize(0));
-        if ((mode == 4 && attempt == 1) || (mode == 5 && attempt == 2))
+        if ((strcmp(mode, "first-spawn") == 0 && attempt == 1) ||
+            (strcmp(mode, "second-spawn") == 0 && attempt == 2))
             return EAGAIN;
     }
     return real_create(thread, attr, start, argument);

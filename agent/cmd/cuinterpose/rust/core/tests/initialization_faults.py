@@ -12,12 +12,13 @@ import threading
 import time
 
 cuda = c.CDLL(None)
+cuda.fault_call.argtypes = [c.c_char_p]
 mode = sys.argv[1]
 path = Path(os.environ["SNAPSHOT_CONTROL_DIR"]) / f"cuinterpose-{os.getpid()}.sock"
 before_fd = len(os.listdir("/proc/self/fd"))
 if mode in ("failure-race", "delayed"):
     result = []
-    worker = threading.Thread(target=lambda: result.append(cuda.fault_call(1 if mode == "failure-race" else 2)))
+    worker = threading.Thread(target=lambda: result.append(cuda.fault_call(mode.encode())))
     worker.start()
     deadline = time.monotonic() + 2
     while not cuda.fault_entered() and time.monotonic() < deadline:
@@ -41,14 +42,14 @@ if mode in ("failure-race", "delayed"):
         assert os.waitpid(child, 0)[1] == 0
         cuda.fault_release_workers()
 elif mode == "recursive":
-    assert cuda.fault_call(3) == 0
+    assert cuda.fault_call(mode.encode()) == 0
     assert cuda.fault_recursive_result() == 3
     assert cuda.cuInit(0) == 0
 elif mode in ("first-spawn", "second-spawn", "collision", "permissions"):
     if mode == "collision":
         path.write_text("owned by application")
     if mode in ("first-spawn", "second-spawn"):
-        assert cuda.fault_call(4 if mode == "first-spawn" else 5) == 3
+        assert cuda.fault_call(mode.encode()) == 3
     else:
         assert cuda.cuInit(0) == 3
     if mode == "collision":
