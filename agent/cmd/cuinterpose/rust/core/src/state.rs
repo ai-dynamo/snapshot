@@ -729,49 +729,48 @@ pub fn initialize() -> Result<()> {
     // exclusion. A constructor holding the loader lock can prepare its own
     // candidate while a different caller waits in Rust's spawn hooks.
     let mut candidate = RuntimeCandidate::prepare();
-    let result = (|| {
-        let _installing = match G_INITIALIZING.lock() {
-            Ok(guard) => guard,
-            Err(poison) if G_CHILD.load(Ordering::Acquire) => poison.into_inner(),
-            Err(_) => return Err(CUDA_ERROR_UNKNOWN.into()),
-        };
-        let result = (|| {
-            if super::G_FAILED.load(Ordering::Acquire) {
-                return Err(CUDA_ERROR_UNKNOWN.into());
-            }
-            // A private candidate is dispensable once a healthy runtime exists.
-            // Never hide installed failure, or wait for an unfinished preparer.
-            if initialized() {
-                return Ok(());
-            }
-            let candidate = match candidate.as_mut() {
-                Ok(candidate) => candidate,
-                Err(error) => return Err(*error),
-            };
-            let Some(candidate) = candidate else {
-                return Ok(());
-            };
-            let generation = candidate.generation.as_mut().unwrap();
-            let state = generation.state.get_mut().map_err(|_| CUDA_ERROR_UNKNOWN)?;
-            candidate.workers.activate(&state.endpoint)?;
-            G_STATE.store(
-                Box::into_raw(candidate.generation.take().unwrap()),
-                Ordering::Release,
-            );
-            Ok(())
-        })();
-        if result.is_err() {
-            super::G_FAILED.store(true, Ordering::Release);
-        }
-        result
-    })();
+    let installing = match G_INITIALIZING.lock() {
+        Ok(guard) => guard,
+        Err(poison) if G_CHILD.load(Ordering::Acquire) => poison.into_inner(),
+        Err(_) => return Err(CUDA_ERROR_UNKNOWN.into()),
+    };
+    let result = install_generation(&mut candidate);
+    if result.is_err() {
+        super::G_FAILED.store(true, Ordering::Release);
+    }
+    drop(installing);
     // Cancel/destroy private workers and failed listeners after releasing the
     // installation mutex. JoinHandle was detached when each spawn returned.
     drop(candidate);
     result
 }
 
+// Called with G_INITIALIZING held. Borrow the candidate so even an early return
+// leaves its cleanup to initialize(), after the installation lock is released.
+fn install_generation(candidate: &mut Result<Option<RuntimeCandidate>>) -> Result<()> {
+    if super::G_FAILED.load(Ordering::Acquire) {
+        return Err(CUDA_ERROR_UNKNOWN.into());
+    }
+    // A private candidate is dispensable once a healthy runtime exists.
+    // Never hide installed failure, or wait for an unfinished preparer.
+    if initialized() {
+        return Ok(());
+    }
+    let Some(candidate) = candidate.as_mut().map_err(|error| *error)? else {
+        return Ok(());
+    };
+    let generation = candidate.generation.as_mut().unwrap();
+    let state = generation.state.get_mut().map_err(|_| CUDA_ERROR_UNKNOWN)?;
+    candidate.workers.activate(&state.endpoint)?;
+    G_STATE.store(
+        Box::into_raw(candidate.generation.take().unwrap()),
+        Ordering::Release,
+    );
+    Ok(())
+}
+
 struct RuntimeCandidate {
+    // Taken only when ownership transfers to G_STATE; losers retain cleanup.
     generation: Option<Box<Generation>>,
     workers: super::control::PreparedWorkers,
 }
@@ -779,7 +778,8 @@ struct RuntimeCandidate {
 impl RuntimeCandidate {
     fn prepare() -> Result<Option<Self>> {
         let mut generation = prepare_generation()?;
-        if !G_STATE.load(Ordering::Acquire).is_null() {
+        // None means another runtime won before we needed further workers.
+        if initialized() {
             return Ok(None);
         }
         let identity = generation
