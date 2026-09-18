@@ -4,16 +4,10 @@
 //! Owned inspection metadata and versioned MessagePack messages. No CUDA
 //! handles or process pointers enter this format.
 
-mod cuda_serde;
 mod identity;
 mod record;
 mod transport;
 
-#[doc(inline)]
-pub use cudarc::driver::sys::{
-    CUmemAccess_flags, CUmemAccessDesc, CUmemAllocationHandleType, CUmemAllocationType,
-    CUmemLocation, CUmemLocationType, CUmulticastObjectProp,
-};
 #[doc(inline)]
 pub use identity::{
     AllocationId, AllocationReference, ParticipantId, format_id, parse_participant_id,
@@ -118,8 +112,10 @@ pub enum Reply {
     },
     UnicastExport,
     MulticastExport {
-        #[serde(with = "cuda_serde::multicast_properties")]
-        properties: CUmulticastObjectProp,
+        devices: u32,
+        size: u64,
+        handle_types: u64,
+        flags: u64,
     },
 }
 

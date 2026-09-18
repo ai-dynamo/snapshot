@@ -1,10 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{
-    AllocationReference, CUmemAccessDesc, CUmemAllocationHandleType, CUmemAllocationType,
-    CUmemLocation, CUmulticastObjectProp, cuda_serde,
-};
+use crate::AllocationReference;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -41,12 +38,12 @@ pub enum StateEntry {
         allocation: AllocationReference,
         content: bool,
         size: u64,
-        #[serde(with = "cuda_serde::allocation_type")]
-        allocation_type: CUmemAllocationType,
-        #[serde(with = "cuda_serde::allocation_handle_type")]
-        handle_types: CUmemAllocationHandleType,
-        #[serde(with = "cuda_serde::location")]
-        location: CUmemLocation,
+        /// `CUmemAllocationProp::type_`.
+        allocation_type: u32,
+        /// `CUmemAllocationProp::requestedHandleTypes` bits.
+        handle_types: u32,
+        /// `CUmemAllocationProp::location` as `(type_, id)`.
+        location: (u32, i32),
         logical_handle_count: u64,
     },
     Mapping {
@@ -54,13 +51,16 @@ pub enum StateEntry {
         address: u64,
         size: u64,
         offset: u64,
-        #[serde(with = "cuda_serde::access")]
-        access: Vec<CUmemAccessDesc>,
+        /// `CUmemAccessDesc` values as `(location.type_, location.id, flags)`.
+        access: Vec<(u32, i32, u32)>,
     },
     Multicast {
         allocation: AllocationReference,
-        #[serde(with = "cuda_serde::multicast_properties")]
-        properties: CUmulticastObjectProp,
+        /// Fields from `CUmulticastObjectProp`.
+        devices: u32,
+        size: u64,
+        handle_types: u64,
+        flags: u64,
         logical_handle_count: u64,
     },
     MulticastDevice {
@@ -82,7 +82,7 @@ pub enum StateEntry {
         size: u64,
         offset: u64,
         flags: u64,
-        #[serde(with = "cuda_serde::access")]
-        access: Vec<CUmemAccessDesc>,
+        /// `CUmemAccessDesc` values as `(location.type_, location.id, flags)`.
+        access: Vec<(u32, i32, u32)>,
     },
 }
