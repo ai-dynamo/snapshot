@@ -40,7 +40,6 @@ dependencies = [
 name = "cuinterpose-protocol"
 version = "0.1.0"
 dependencies = [
- "cudarc",
  "rmp-serde",
  "rustix",
  "serde",
