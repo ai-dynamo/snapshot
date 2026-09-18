@@ -63,6 +63,7 @@ def main():
             ("core.c", "bad-core.so", shared + ["-DBAD_CORE_ABI", "-pthread"]),
             ("core.c", "bad-size-core.so", shared + ["-DBAD_CORE_SIZE", "-pthread"]),
             ("constructor.c", "constructor.so", shared + ["-pthread"]),
+            ("failures.c", "failures.so", shared + ["-ldl"]),
             ("plugin.c", "plugin.so", shared),
             ("plugin.c", "libcuda.so.fake", shared),
             ("probe.c", "probe", ["-ldl", "-rdynamic", "-pthread"]),
@@ -85,7 +86,8 @@ def main():
                  "constructor-reentry", "constructor-concurrent", "concurrent",
                  "providers", "identities", "ready-failure",
                  "missing-core", "bad-core", "bad-size-core",
-                 "runtime-nested", "early-plugin", "early-plugin-nested"]
+                 "runtime-nested", "early-plugin", "early-plugin-nested",
+                 "backend-race", "backend-late-winner", "backend-failure", "retention-failure"]
         for case in cases:
             case_env = env.copy()
             if case in ("runtime-nested", "early-plugin-nested"):
@@ -98,6 +100,8 @@ def main():
                 case_env["CUINTERPOSE_TEST_CONCURRENT_CORE"] = "1"
             if case in ("early-plugin", "early-plugin-nested"):
                 case_env["LD_PRELOAD"] = str(build / "plugin.so") + ":" + case_env["LD_PRELOAD"]
+            elif case in ("backend-race", "backend-late-winner", "backend-failure", "retention-failure"):
+                case_env["LD_PRELOAD"] += ":" + str(build / "failures.so")
             elif case in ("missing-core", "bad-core", "bad-size-core"):
                 variant = build / case
                 variant.mkdir()
