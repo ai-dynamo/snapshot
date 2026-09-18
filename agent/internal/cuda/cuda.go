@@ -107,21 +107,91 @@ func DiscoverVisibleGPUs(ctx context.Context, hostProcPath string, pid int, time
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	mountPath := fmt.Sprintf("%s/%d/ns/mnt", strings.TrimRight(hostProcPath, "/"), pid)
-	pidPath := fmt.Sprintf("%s/%d/ns/pid", strings.TrimRight(hostProcPath, "/"), pid)
-	cmd := exec.CommandContext(
-		ctx,
-		"nsenter",
-		fmt.Sprintf("--mount=%s", mountPath),
-		fmt.Sprintf("--pid=%s", pidPath),
-		"--",
-		"nvidia-smi", "--query-gpu=gpu_uuid,name,driver_version", "--format=csv,noheader",
+	output, err := nsenterNvidiaSMI(ctx, hostProcPath, pid,
+		"--query-gpu=gpu_uuid,name,driver_version", "--format=csv,noheader",
 	)
-	output, err := cmd.Output()
 	if err != nil {
 		return compat.GPUInfo{}, fmt.Errorf("nvidia-smi via nsenter (pid %d) failed: %w", pid, err)
 	}
-	return parseNvidiaSmiGPUs(string(output)), nil
+	env := parseNvidiaSmiGPUs(string(output))
+
+	// --query-gpu exposes no MIG field at all, so the slice shape has to come
+	// from a second call. A failure here costs the shape, not the checkpoint:
+	// the profile stays unknown, and an unknown value admits a restore rather
+	// than refusing one.
+	listed, err := nsenterNvidiaSMI(ctx, hostProcPath, pid, "-L")
+	if err != nil {
+		return env, nil
+	}
+	return withMIGProfiles(env, parseNvidiaSmiMIGProfiles(string(listed))), nil
+}
+
+func nsenterNvidiaSMI(ctx context.Context, hostProcPath string, pid int, args ...string) ([]byte, error) {
+	mountPath := fmt.Sprintf("%s/%d/ns/mnt", strings.TrimRight(hostProcPath, "/"), pid)
+	pidPath := fmt.Sprintf("%s/%d/ns/pid", strings.TrimRight(hostProcPath, "/"), pid)
+	nsenterArgs := append([]string{
+		fmt.Sprintf("--mount=%s", mountPath),
+		fmt.Sprintf("--pid=%s", pidPath),
+		"--",
+		"nvidia-smi",
+	}, args...)
+	return exec.CommandContext(ctx, "nsenter", nsenterArgs...).Output()
+}
+
+// nvidia-smi -L indents each MIG device under its parent GPU as a fixed run of
+// whitespace-padded columns. The padding aligns the columns and so varies in
+// width, which is why the line is read by column rather than by offset:
+//
+//	GPU 0: NVIDIA H100 80GB HBM3 (UUID: GPU-b1c4...)
+//	  MIG 3g.40gb     Device  0: (UUID: MIG-7089d0f3-293f-58c9-8f8c-5ea666eedbde)
+const (
+	migListKind = iota
+	migListProfile
+	migListDeviceLabel
+	migListOrdinal
+	migListUUIDLabel
+	migListUUID
+	migListColumns
+)
+
+// parseNvidiaSmiMIGProfiles maps each listed MIG device's UUID to its profile.
+// A parent GPU line opens with its own name rather than the MIG label, so a node
+// with MIG disabled yields an empty map rather than an error.
+func parseNvidiaSmiMIGProfiles(output string) map[string]string {
+	profiles := make(map[string]string)
+	for _, line := range strings.Split(output, "\n") {
+		columns := strings.Fields(line)
+		if len(columns) < migListColumns ||
+			columns[migListKind] != "MIG" ||
+			columns[migListDeviceLabel] != "Device" ||
+			columns[migListUUIDLabel] != "(UUID:" {
+			continue
+		}
+		if _, err := strconv.Atoi(strings.TrimSuffix(columns[migListOrdinal], ":")); err != nil {
+			continue
+		}
+		uuid := columns[migListUUID]
+		if !strings.HasSuffix(uuid, ")") {
+			continue
+		}
+		if uuid = strings.TrimSuffix(uuid, ")"); uuid == "" {
+			continue
+		}
+		profiles[uuid] = columns[migListProfile]
+	}
+	return profiles
+}
+
+// withMIGProfiles joins the profiles onto the devices discovery already found,
+// keyed on UUID. A device no profile was listed for keeps none, which leaves the
+// shape unknown instead of guessing at it by position.
+func withMIGProfiles(env compat.GPUInfo, profiles map[string]string) compat.GPUInfo {
+	for i, device := range env.Devices {
+		if profile, ok := profiles[device.UUID]; ok {
+			env.Devices[i].MIGProfile = profile
+		}
+	}
+	return env
 }
 
 // parseNvidiaSmiGPUs reads the unquoted CSV nvidia-smi writes. Splitting on

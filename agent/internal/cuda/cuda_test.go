@@ -243,14 +243,24 @@ func installFakeNSenter(t *testing.T, body string) {
 
 func TestDiscoverVisibleGPUs(t *testing.T) {
 	installFakeNSenter(t, `
-test "$#" = 6
 test "$1" = "--mount=/host/proc/42/ns/mnt"
 test "$2" = "--pid=/host/proc/42/ns/pid"
 test "$3" = "--"
 test "$4" = "nvidia-smi"
-test "$5" = "--query-gpu=gpu_uuid,name,driver_version"
-test "$6" = "--format=csv,noheader"
-printf '%s\n' 'GPU-a, NVIDIA L4, 580.65.06'
+case "$5" in
+"--query-gpu=gpu_uuid,name,driver_version")
+	test "$#" = 6
+	test "$6" = "--format=csv,noheader"
+	printf '%s\n' 'GPU-a, NVIDIA L4, 580.65.06'
+	;;
+"-L")
+	test "$#" = 5
+	printf '%s\n' 'GPU 0: NVIDIA L4 (UUID: GPU-a)'
+	;;
+*)
+	exit 64
+	;;
+esac
 `)
 
 	got, err := DiscoverVisibleGPUs(context.Background(), "/host/proc/", 42, nvidiaSMITimeout)
@@ -263,6 +273,143 @@ printf '%s\n' 'GPU-a, NVIDIA L4, 580.65.06'
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("DiscoverVisibleGPUs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestDiscoverVisibleGPUsRecordsTheMIGProfile(t *testing.T) {
+	installFakeNSenter(t, `
+case "$5" in
+"--query-gpu=gpu_uuid,name,driver_version")
+	printf '%s\n' 'MIG-7089d0f3-293f-58c9-8f8c-5ea666eedbde, NVIDIA H100 80GB HBM3, 580.65.06'
+	;;
+"-L")
+	printf '%s\n' 'GPU 0: NVIDIA H100 80GB HBM3 (UUID: GPU-b1c4)' '  MIG 3g.40gb     Device  0: (UUID: MIG-7089d0f3-293f-58c9-8f8c-5ea666eedbde)'
+	;;
+esac
+`)
+
+	got, err := DiscoverVisibleGPUs(context.Background(), "/host/proc", 42, nvidiaSMITimeout)
+	if err != nil {
+		t.Fatalf("DiscoverVisibleGPUs: %v", err)
+	}
+	want := compat.GPUInfo{
+		DriverVersion: "580.65.06",
+		Devices: []compat.GPUDevice{{
+			UUID:        "MIG-7089d0f3-293f-58c9-8f8c-5ea666eedbde",
+			ProductName: "NVIDIA H100 80GB HBM3",
+			MIGProfile:  "3g.40gb",
+		}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("DiscoverVisibleGPUs() = %#v, want %#v", got, want)
+	}
+}
+
+// The profile is a description, so losing it costs the shape comparison rather
+// than the checkpoint.
+func TestDiscoverVisibleGPUsSurvivesAFailedListing(t *testing.T) {
+	installFakeNSenter(t, `
+case "$5" in
+"--query-gpu=gpu_uuid,name,driver_version")
+	printf '%s\n' 'MIG-aaa, NVIDIA H100 80GB HBM3, 580.65.06'
+	;;
+*)
+	exit 17
+	;;
+esac
+`)
+
+	got, err := DiscoverVisibleGPUs(context.Background(), "/host/proc", 42, nvidiaSMITimeout)
+	if err != nil {
+		t.Fatalf("DiscoverVisibleGPUs: %v", err)
+	}
+	want := compat.GPUInfo{
+		DriverVersion: "580.65.06",
+		Devices:       []compat.GPUDevice{{UUID: "MIG-aaa", ProductName: "NVIDIA H100 80GB HBM3"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("DiscoverVisibleGPUs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestParseNvidiaSmiMIGProfiles(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   map[string]string
+	}{
+		{
+			name: "every slice under one parent",
+			output: `GPU 0: NVIDIA H100 80GB HBM3 (UUID: GPU-b1c4)
+  MIG 3g.40gb     Device  0: (UUID: MIG-7089d0f3-293f-58c9-8f8c-5ea666eedbde)
+  MIG 2g.20gb     Device  1: (UUID: MIG-56c30729-317f-5dd6-8da0-c3cc59e969e0)
+  MIG 1g.10gb     Device  2: (UUID: MIG-9d14fb21-4ae1-546f-a636-011582899c39)
+`,
+			want: map[string]string{
+				"MIG-7089d0f3-293f-58c9-8f8c-5ea666eedbde": "3g.40gb",
+				"MIG-56c30729-317f-5dd6-8da0-c3cc59e969e0": "2g.20gb",
+				"MIG-9d14fb21-4ae1-546f-a636-011582899c39": "1g.10gb",
+			},
+		},
+		{
+			// A parent GPU line carries no profile, so a node with MIG off
+			// yields nothing rather than failing.
+			name: "no MIG anywhere",
+			output: `GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-aaa)
+GPU 1: NVIDIA A100-SXM4-40GB (UUID: GPU-bbb)
+`,
+			want: map[string]string{},
+		},
+		{
+			name:   "nothing listed at all",
+			output: "\n",
+			want:   map[string]string{},
+		},
+		{
+			// The listing from the cluster this was validated on.
+			name:   "a whole GPU and nothing else",
+			output: "GPU 0: Tesla T4 (UUID: GPU-698b3416-207f-8e8f-99b8-533f00103ca9)\n",
+			want:   map[string]string{},
+		},
+		{
+			name:   "a slice named the older MIG-GPU-<parent>/<gi>/<ci> way",
+			output: "  MIG 1g.5gb      Device  0: (UUID: MIG-GPU-6ecb3c0f-aaa/1/0)\n",
+			want:   map[string]string{"MIG-GPU-6ecb3c0f-aaa/1/0": "1g.5gb"},
+		},
+		{
+			name:   "a profile carrying the media-extension suffix",
+			output: "  MIG 1g.10gb+me  Device  0: (UUID: MIG-abc)\n",
+			want:   map[string]string{"MIG-abc": "1g.10gb+me"},
+		},
+		{
+			// Padding only aligns the columns, so its width and whether it is
+			// spaces or tabs leaves every value in the same column.
+			name:   "padded with single spaces",
+			output: "MIG 1g.10gb Device 0: (UUID: MIG-abc)\n",
+			want:   map[string]string{"MIG-abc": "1g.10gb"},
+		},
+		{
+			name:   "padded with tabs",
+			output: "\tMIG\t1g.10gb\tDevice\t0:\t(UUID:\tMIG-abc)\n",
+			want:   map[string]string{"MIG-abc": "1g.10gb"},
+		},
+		{
+			name:   "trailing text after the UUID",
+			output: "  MIG 1g.10gb     Device  0: (UUID: MIG-abc)  extra\n",
+			want:   map[string]string{"MIG-abc": "1g.10gb"},
+		},
+		{
+			name:   "a MIG line whose device ordinal is not a number",
+			output: "  MIG 1g.10gb     Device  X: (UUID: MIG-abc)\n",
+			want:   map[string]string{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseNvidiaSmiMIGProfiles(tc.output); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("parseNvidiaSmiMIGProfiles() = %#v, want %#v", got, tc.want)
+			}
+		})
 	}
 }
 

@@ -228,6 +228,14 @@ spec:
                                 they identify a physical card rather than describe what a restore target has
                                 to match.
                               properties:
+                                migProfile:
+                                  description: |-
+                                    MIGProfile is the MIG slice shape the capture ran on, such as "1g.10gb".
+                                    Absent means unknown rather than whole GPU, because an agent released
+                                    before this field captured slices without recording their shape. Whether
+                                    a device was a slice at all is read from its UUID, which every release
+                                    has recorded.
+                                  type: string
                                 productName:
                                   description: ProductName is the GPU model, as nvidia-smi
                                     reports it.

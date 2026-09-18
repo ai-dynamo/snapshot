@@ -219,10 +219,13 @@ var gpuModelCheck = check{
 	compare: func(source, target Environment) []Mismatch {
 		sourceModels, sourceOK := gpuModels(source.GPUDevices)
 		targetModels, targetOK := gpuModels(target.GPUDevices)
-		if !sourceOK || !targetOK || sourceModels == targetModels {
+		if !sourceOK || !targetOK || elementsMatch(sourceModels, targetModels) {
 			return nil
 		}
-		return []Mismatch{{Source: sourceModels, Target: targetModels}}
+		return []Mismatch{{
+			Source: summariseByCount(sourceModels),
+			Target: summariseByCount(targetModels),
+		}}
 	},
 }
 
@@ -248,6 +251,46 @@ var gpuCountCheck = check{
 		return []Mismatch{{
 			Source: strconv.Itoa(sourceCount),
 			Target: strconv.Itoa(targetCount),
+		}}
+	},
+}
+
+// CheckMIGPartitioning refuses a restore that crosses the boundary between a
+// whole GPU and a MIG slice. gpu-model cannot catch it: nvidia-smi reports a
+// slice under its parent's product name, so a whole H100 and a 1g.10gb slice of
+// one are the same model and the same count, and only the partitioning differs.
+const CheckMIGPartitioning Check = "mig-partitioning"
+
+// CheckMIGProfile refuses a restore onto a differently shaped slice. Device
+// state built against one slice's memory and SM allocation has nowhere to land
+// in a smaller one, and no meaning in a larger one.
+const CheckMIGProfile Check = "mig-profile"
+
+var migPartitioningCheck = check{
+	name: CheckMIGPartitioning,
+	gate: GateInspect,
+	compare: func(source, target Environment) []Mismatch {
+		sourceKinds, sourceOK := gpuPartitioning(source.GPUDevices)
+		targetKinds, targetOK := gpuPartitioning(target.GPUDevices)
+		if !sourceOK || !targetOK || sourceKinds == targetKinds {
+			return nil
+		}
+		return []Mismatch{{Source: sourceKinds.String(), Target: targetKinds.String()}}
+	},
+}
+
+var migProfileCheck = check{
+	name: CheckMIGProfile,
+	gate: GateInspect,
+	compare: func(source, target Environment) []Mismatch {
+		sourceProfiles, sourceOK := gpuMIGProfiles(source.GPUDevices)
+		targetProfiles, targetOK := gpuMIGProfiles(target.GPUDevices)
+		if !sourceOK || !targetOK || elementsMatch(sourceProfiles, targetProfiles) {
+			return nil
+		}
+		return []Mismatch{{
+			Source: summariseByCount(sourceProfiles),
+			Target: summariseByCount(targetProfiles),
 		}}
 	},
 }
@@ -286,35 +329,148 @@ var driverMinimumCheck = check{
 	},
 }
 
-// gpuModels builds a stable model summary: sorting ignores allocation order,
-// while "xN" preserves how many GPUs have each name. ProductName comes from
+// gpuModels lists the model name of every visible GPU. ProductName comes from
 // nvidia-smi --query-gpu=name, documented as the GPU's official product name:
 // https://docs.nvidia.com/deploy/nvidia-smi/index.html#product-name
 //
 // It returns unknown if any GPU has no name because partial data cannot prove
 // that the source and target models differ.
-func gpuModels(devices []GPUDevice) (string, bool) {
+func gpuModels(devices []GPUDevice) ([]string, bool) {
 	if len(devices) == 0 {
-		return "", false
+		return nil, false
 	}
-	counts := make(map[string]int, len(devices))
+	models := make([]string, 0, len(devices))
 	for _, device := range devices {
 		model := strings.TrimSpace(device.ProductName)
 		if model == "" {
-			return "", false
+			return nil, false
 		}
-		counts[model]++
-	}
-
-	models := make([]string, 0, len(counts))
-	for model := range counts {
 		models = append(models, model)
 	}
-	sort.Strings(models)
-	for i, model := range models {
-		models[i] = model + " x" + strconv.Itoa(counts[model])
+	return models, true
+}
+
+// migUUIDPrefix is how NVIDIA spells a MIG device's UUID, in both the current
+// MIG-<uuid> form and the older MIG-GPU-<parent>/<gi>/<ci> one:
+// https://docs.nvidia.com/datacenter/tesla/mig-user-guide/#device-enumeration
+const migUUIDPrefix = "MIG-"
+
+const (
+	migSlice = "MIG slice"
+	wholeGPU = "whole GPU"
+)
+
+// partitioning is which kinds of device a set of GPUs holds. Under the device
+// plugin's mixed MIG strategy slices and whole cards are separate resources, so
+// one set can hold both and has to compare as neither pure set.
+type partitioning struct {
+	whole bool
+	slice bool
+}
+
+// String names the kinds present, in a fixed order so a refusal always reads
+// the same way. Which kinds are present is a categorical question, so the
+// counts are left out: how many devices there are is gpu-count's, and how they
+// are shaped is mig-profile's, which does keep them.
+func (p partitioning) String() string {
+	switch {
+	case p.slice && p.whole:
+		return migSlice + ", " + wholeGPU
+	case p.slice:
+		return migSlice
+	case p.whole:
+		return wholeGPU
+	default:
+		return ""
 	}
-	return strings.Join(models, ", "), true
+}
+
+// gpuPartitioning reads UUID rather than MIGProfile so that it also holds for
+// an artifact captured before any profile was recorded: the UUIDs have been
+// recorded since the first release, and only a slice carries the MIG- prefix.
+func gpuPartitioning(devices []GPUDevice) (partitioning, bool) {
+	if len(devices) == 0 {
+		return partitioning{}, false
+	}
+	var kinds partitioning
+	for _, device := range devices {
+		uuid := strings.TrimSpace(device.UUID)
+		if uuid == "" {
+			return partitioning{}, false
+		}
+		if strings.HasPrefix(uuid, migUUIDPrefix) {
+			kinds.slice = true
+			continue
+		}
+		kinds.whole = true
+	}
+	return kinds, true
+}
+
+// gpuMIGProfiles lists the shape of every slice among the visible GPUs,
+// ignoring whole GPUs so that a mixed set still compares its slices. nvidia-smi
+// publishes the profile only in -L, so a slice whose profile was never read
+// returns unknown, and an unknown value never refuses a restore.
+func gpuMIGProfiles(devices []GPUDevice) ([]string, bool) {
+	profiles := make([]string, 0, len(devices))
+	for _, device := range devices {
+		if !strings.HasPrefix(strings.TrimSpace(device.UUID), migUUIDPrefix) {
+			continue
+		}
+		profile := strings.TrimSpace(device.MIGProfile)
+		if profile == "" {
+			return nil, false
+		}
+		profiles = append(profiles, profile)
+	}
+	if len(profiles) == 0 {
+		return nil, false
+	}
+	return profiles, true
+}
+
+// elementsMatch reports whether both sides hold the same values the same number
+// of times. Order is left out because which physical device a checkpoint lands
+// on is #246's concern. Multiplicity is kept because gpu-count compares only the
+// total, and so cannot tell two slices of one shape and one of another from the
+// reverse.
+func elementsMatch(source, target []string) bool {
+	if len(source) != len(target) {
+		return false
+	}
+	remaining := make(map[string]int, len(source))
+	for _, value := range source {
+		remaining[value]++
+	}
+	for _, value := range target {
+		// A value absent from source decrements from zero to -1, so the guard
+		// below rejects it rather than reading the absence as a match.
+		remaining[value]--
+		if remaining[value] < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// summariseByCount renders values for a refusal message, counted so that a node
+// holding eight of one GPU reads as one entry rather than eight. Sorting is here
+// only to keep the message stable, map iteration order not being, and nothing is
+// compared on the result.
+func summariseByCount(values []string) string {
+	counts := make(map[string]int, len(values))
+	for _, value := range values {
+		counts[value]++
+	}
+	distinct := make([]string, 0, len(counts))
+	for value := range counts {
+		distinct = append(distinct, value)
+	}
+	sort.Strings(distinct)
+	for i, value := range distinct {
+		distinct[i] = value + " x" + strconv.Itoa(counts[value])
+	}
+	return strings.Join(distinct, ", ")
 }
 
 // mustMatch reports a mismatch unless the two values are identical. A value

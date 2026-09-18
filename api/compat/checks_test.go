@@ -570,6 +570,255 @@ func TestGPUCountCheck(t *testing.T) {
 	}
 }
 
+// migParentModel is what nvidia-smi calls a slice of this card as well as the
+// whole card, which is the whole reason the model rule cannot separate them.
+const migParentModel = "NVIDIA H100 80GB HBM3"
+
+func wholeGPUsOf(count int) Environment {
+	devices := make([]GPUDevice, 0, count)
+	for i := range count {
+		devices = append(devices, GPUDevice{
+			UUID:        "GPU-" + string(rune('a'+i)),
+			ProductName: migParentModel,
+		})
+	}
+	return Environment{GPUDevices: devices}
+}
+
+func migSlicesOf(profiles ...string) Environment {
+	devices := make([]GPUDevice, 0, len(profiles))
+	for i, profile := range profiles {
+		devices = append(devices, GPUDevice{
+			UUID:        "MIG-" + string(rune('a'+i)),
+			ProductName: migParentModel,
+			MIGProfile:  profile,
+		})
+	}
+	return Environment{GPUDevices: devices}
+}
+
+func TestMIGPartitioningCheck(t *testing.T) {
+	tests := []struct {
+		name   string
+		source Environment
+		target Environment
+		want   []Mismatch
+	}{
+		{
+			name:   "whole GPUs on both sides",
+			source: wholeGPUsOf(1),
+			target: wholeGPUsOf(1),
+		},
+		{
+			name:   "slices on both sides",
+			source: migSlicesOf("1g.10gb"),
+			target: migSlicesOf("1g.10gb"),
+		},
+		{
+			// The case no other rule catches: one model name, one GPU each
+			// side, and a checkpoint that cannot possibly fit.
+			name:   "captured whole, offered a slice",
+			source: wholeGPUsOf(1),
+			target: migSlicesOf("1g.10gb"),
+			want: []Mismatch{{
+				Check:  CheckMIGPartitioning,
+				Source: "whole GPU",
+				Target: "MIG slice",
+			}},
+		},
+		{
+			name:   "captured on a slice, offered a whole GPU",
+			source: migSlicesOf("1g.10gb"),
+			target: wholeGPUsOf(1),
+			want: []Mismatch{{
+				Check:  CheckMIGPartitioning,
+				Source: "MIG slice",
+				Target: "whole GPU",
+			}},
+		},
+		{
+			// The same total, repartitioned: a slice appears where there was
+			// none, so the set of kinds changes even though the count does not.
+			name: "one of two devices sliced instead of whole",
+			source: Environment{GPUDevices: []GPUDevice{
+				{UUID: "GPU-a", ProductName: migParentModel},
+				{UUID: "GPU-b", ProductName: migParentModel},
+			}},
+			target: Environment{GPUDevices: []GPUDevice{
+				{UUID: "GPU-a", ProductName: migParentModel},
+				{UUID: "MIG-b", ProductName: migParentModel, MIGProfile: "1g.10gb"},
+			}},
+			want: []Mismatch{{
+				Check:  CheckMIGPartitioning,
+				Source: "whole GPU",
+				Target: "MIG slice, whole GPU",
+			}},
+		},
+		{
+			// UUIDs have been recorded since the first release, so this
+			// refusal reaches artifacts captured before any profile was.
+			name:   "a slice captured before profiles were recorded",
+			source: Environment{GPUDevices: []GPUDevice{{UUID: "MIG-a"}}},
+			target: wholeGPUsOf(1),
+			want: []Mismatch{{
+				Check:  CheckMIGPartitioning,
+				Source: "MIG slice",
+				Target: "whole GPU",
+			}},
+		},
+		{
+			// The older MIG-GPU-<parent>/<gi>/<ci> spelling is still a slice.
+			name:   "a slice named the older way",
+			source: Environment{GPUDevices: []GPUDevice{{UUID: "MIG-GPU-aaa/1/0"}}},
+			target: wholeGPUsOf(1),
+			want: []Mismatch{{
+				Check:  CheckMIGPartitioning,
+				Source: "MIG slice",
+				Target: "whole GPU",
+			}},
+		},
+		{
+			// Losing a GPU is fewer devices, not a different kind of device,
+			// so the count rule is the one with something to say about it.
+			name:   "fewer whole GPUs than were captured",
+			source: wholeGPUsOf(2),
+			target: wholeGPUsOf(1),
+			want: []Mismatch{
+				{Check: CheckGPUModel, Source: migParentModel + " x2", Target: migParentModel + " x1"},
+				{Check: CheckGPUCount, Source: "2", Target: "1"},
+			},
+		},
+		{
+			// Nothing to partition is not another partitioning.
+			name:   "no GPUs on the target at all",
+			source: wholeGPUsOf(1),
+			want:   []Mismatch{{Check: CheckGPUCount, Source: "1", Target: "0"}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Compare(GateInspect, tc.source, tc.target)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("Compare = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+
+	// Whether the target holds a slice is only readable once it exists.
+	if got := Compare(GatePreflight, wholeGPUsOf(1), migSlicesOf("1g.10gb")); len(got) != 0 {
+		t.Errorf("the first gate judged a GPU it cannot see: %+v", got)
+	}
+}
+
+func TestMIGProfileCheck(t *testing.T) {
+	tests := []struct {
+		name   string
+		source Environment
+		target Environment
+		want   []Mismatch
+	}{
+		{
+			name:   "the same shape",
+			source: migSlicesOf("1g.10gb"),
+			target: migSlicesOf("1g.10gb"),
+		},
+		{
+			name:   "a smaller shape than was captured",
+			source: migSlicesOf("3g.40gb"),
+			target: migSlicesOf("1g.10gb"),
+			want: []Mismatch{{
+				Check:  CheckMIGProfile,
+				Source: "3g.40gb x1",
+				Target: "1g.10gb x1",
+			}},
+		},
+		{
+			name:   "a larger shape than was captured",
+			source: migSlicesOf("1g.10gb"),
+			target: migSlicesOf("3g.40gb"),
+			want: []Mismatch{{
+				Check:  CheckMIGProfile,
+				Source: "1g.10gb x1",
+				Target: "3g.40gb x1",
+			}},
+		},
+		{
+			// The same shapes and the same total, redistributed. Nothing else
+			// can see it: the count is three either way and the model is the
+			// parent card's either way.
+			name:   "the same shapes in different proportions",
+			source: migSlicesOf("1g.10gb", "1g.10gb", "3g.40gb"),
+			target: migSlicesOf("1g.10gb", "3g.40gb", "3g.40gb"),
+			want: []Mismatch{{
+				Check:  CheckMIGProfile,
+				Source: "1g.10gb x2, 3g.40gb x1",
+				Target: "1g.10gb x1, 3g.40gb x2",
+			}},
+		},
+		{
+			// Which slice is allocated at which index is the device map's
+			// concern, as it is for the model.
+			name:   "the same shapes in another order",
+			source: migSlicesOf("1g.10gb", "3g.40gb"),
+			target: migSlicesOf("3g.40gb", "1g.10gb"),
+		},
+		{
+			name:   "one shape replaced in a mixed set",
+			source: migSlicesOf("1g.10gb", "3g.40gb"),
+			target: migSlicesOf("1g.10gb", "1g.10gb"),
+			want: []Mismatch{{
+				Check:  CheckMIGProfile,
+				Source: "1g.10gb x1, 3g.40gb x1",
+				Target: "1g.10gb x2",
+			}},
+		},
+		{
+			// A shape nobody recorded cannot prove a shape changed, so the
+			// artifact stays restorable.
+			name:   "a slice captured before profiles were recorded",
+			source: Environment{GPUDevices: []GPUDevice{{UUID: "MIG-a", ProductName: migParentModel}}},
+			target: migSlicesOf("1g.10gb"),
+		},
+		{
+			name:   "the target's shape could not be read",
+			source: migSlicesOf("1g.10gb"),
+			target: Environment{GPUDevices: []GPUDevice{{UUID: "MIG-a", ProductName: migParentModel}}},
+		},
+		{
+			name:   "whole GPUs have no shape to compare",
+			source: wholeGPUsOf(1),
+			target: wholeGPUsOf(1),
+		},
+		{
+			// Still slices on both sides, so the partitioning holds while the
+			// shape rule counts one fewer of it, as the model rule does.
+			name:   "fewer slices of the same shape",
+			source: migSlicesOf("1g.10gb", "1g.10gb"),
+			target: migSlicesOf("1g.10gb"),
+			want: []Mismatch{
+				{Check: CheckGPUModel, Source: migParentModel + " x2", Target: migParentModel + " x1"},
+				{Check: CheckGPUCount, Source: "2", Target: "1"},
+				{Check: CheckMIGProfile, Source: "1g.10gb x2", Target: "1g.10gb x1"},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Compare(GateInspect, tc.source, tc.target)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("Compare = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+
+	// The shape of a slice is only readable once the container holding it exists.
+	if got := Compare(GatePreflight, migSlicesOf("3g.40gb"), migSlicesOf("1g.10gb")); len(got) != 0 {
+		t.Errorf("the first gate judged a GPU it cannot see: %+v", got)
+	}
+}
+
 func TestDriverVersionCheck(t *testing.T) {
 	driver := func(version string) Environment {
 		return Environment{DriverVersion: version}
