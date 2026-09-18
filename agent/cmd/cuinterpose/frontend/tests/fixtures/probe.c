@@ -10,9 +10,18 @@
 #include <string.h>
 #include <link.h>
 #include <pthread.h>
+#include <unistd.h>
 
 create_fn fixture_create;
 static int (*fixture_initialize)(unsigned);
+static void (*fail_load)(const char *);
+
+static void *race_backend_from_worker(void *mode) {
+    fail_load(mode);
+    uint64_t handle = 0;
+    assert(fixture_create(&handle, 4096, NULL, 0) == 0 && handle == 0xabcdef);
+    return NULL;
+}
 
 static void *initialize_from_worker(void *unused) {
     (void)unused;
@@ -58,7 +67,60 @@ int main(int argc, char **argv) {
     assert(symbol(driver, "cuMemCreate") != original(driver, "cuMemCreate"));
     assert(symbol(driver, "cuFixtureUnwrapped") == original(driver, "cuFixtureUnwrapped"));
 
-    if (early_plugin) {
+    if (strcmp(argv[1], "backend-race") == 0 ||
+        strcmp(argv[1], "backend-late-winner") == 0 ||
+        strcmp(argv[1], "backend-failure") == 0 ||
+        strcmp(argv[1], "retention-failure") == 0) {
+        fail_load = symbol(RTLD_DEFAULT, "fixture_fail_load");
+        fixture_create = symbol(driver, "cuMemCreate");
+        uint64_t handle = 42;
+        if (strcmp(argv[1], "backend-race") == 0 ||
+            strcmp(argv[1], "backend-late-winner") == 0) {
+            int (*entered)(void) = symbol(RTLD_DEFAULT, "fixture_load_entered");
+            void (*release)(void) = symbol(RTLD_DEFAULT, "fixture_release_load");
+            pthread_t worker;
+            assert(pthread_create(&worker, NULL, race_backend_from_worker, argv[1]) == 0);
+            while (!entered())
+                usleep(1000);
+            if (strcmp(argv[1], "backend-late-winner") == 0) {
+                fail_load("backend");
+                assert(fixture_create(&handle, 4096, NULL, 0) == 3);
+            } else {
+                assert(fixture_create(&handle, 4096, NULL, 0) == 0);
+            }
+            release(); // Exercise failure both before and after publication.
+            assert(pthread_join(worker, NULL) == 0);
+            assert(fixture_create(&handle, 4096, NULL, 0) == 0);
+        } else if (strcmp(argv[1], "backend-failure") == 0) {
+            fail_load("backend");
+            assert(fixture_create(&handle, 4096, NULL, 0) == 3 && handle == 42);
+            // The fault is one-shot, but no published winner means sticky failure.
+            assert(fixture_create(&handle, 4096, NULL, 0) == 3 && handle == 42);
+        } else {
+            assert(fixture_create(&handle, 4096, NULL, 0) == 0);
+            void *libc = dlopen("libc.so.6", RTLD_NOW | RTLD_LOCAL);
+            void *plugin = dlopen("plugin.so", RTLD_NOW | RTLD_LOCAL);
+            void *isolated = dlmopen(LM_ID_NEWLM, "libcuda.so.1", RTLD_NOW | RTLD_LOCAL);
+            assert(libc && plugin && isolated);
+            fail_load("retention");
+            assert(dlsym(driver, "cuMemCreate") == NULL);
+            // Even a previously retained provider and a published backend must
+            // fail closed. Non-CUDA and excluded-handle lookups stay untouched.
+            assert(symbol(libc, "malloc") == original(libc, "malloc"));
+            assert(dlsym(driver, "cuMemCreate") == NULL);
+            assert(dlsym(driver, "cuFixtureUnwrapped") == NULL);
+            handle = 42;
+            assert(fixture_create(&handle, 4096, NULL, 0) == 3 && handle == 42);
+            void *pointer = NULL;
+            assert(query("cuMemCreate", &pointer, 13010, 0) == 3);
+            assert(symbol(plugin, "cuMemCreate") == original(plugin, "cuMemCreate"));
+            assert(symbol(runtime, "cuMemCreate") == original(runtime, "cuMemCreate"));
+            assert(symbol(isolated, "cuMemCreate") == original(isolated, "cuMemCreate"));
+            dlclose(isolated);
+            dlclose(plugin);
+            dlclose(libc);
+        }
+    } else if (early_plugin) {
         void *plugin = dlopen("plugin.so", RTLD_NOW | RTLD_NOLOAD);
         assert(plugin);
         void *foreign = original(plugin, "cuMemCreate");

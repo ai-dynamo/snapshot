@@ -25,6 +25,9 @@ runtime services; its dispatch table is immutable. The concurrent case holds
 16 callers in the handshake before any can publish, and constructor overlap
 requires both callers to succeed without a frontend-wide loading lock.
 Same-thread constructor reentry is refused without poisoning later calls.
+Thread-scoped loader faults verify that a failed private load reuses a published
+backend, failure without a winner stays sticky, and CUDA retention failure
+blocks CUDA without breaking unrelated or excluded-namespace symbol lookups.
 Actual-core cases verify endpoint
 activation, focused fork identity reset, and sticky startup failure. These
 fixtures are not CUDA device or checkpoint/restore qualification.
