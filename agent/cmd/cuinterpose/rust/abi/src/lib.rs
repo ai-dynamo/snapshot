@@ -8,7 +8,7 @@ use std::ffi::{c_char, c_ulonglong, c_void};
 
 use cudarc::driver::sys as cuda;
 
-pub const ABI_VERSION: u32 = 7;
+pub const ABI_VERSION: u32 = 1;
 
 /// ABI table provided by the Rust backend and consumed by the C frontend.
 /// cbindgen emits the corresponding C declaration.
