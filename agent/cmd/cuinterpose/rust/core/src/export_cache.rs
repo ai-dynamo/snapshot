@@ -6,14 +6,14 @@
 //! before dropping the driver's cached exports.
 
 use crate::state::Result;
+use cudarc::driver::sys::CUmulticastObjectProp;
 use cudarc::driver::sys::CUresult::{CUDA_ERROR_INVALID_HANDLE, CUDA_ERROR_UNKNOWN};
-use cuinterpose_protocol::{AllocationId, ResourceKind};
+use cuinterpose_protocol::AllocationId;
 use std::collections::BTreeMap;
 use std::os::fd::OwnedFd;
 use std::sync::{Condvar, Mutex, MutexGuard};
 
-/// Resource kind is part of the lookup key, not an authorization token.
-pub type Key = (ResourceKind, AllocationId);
+pub type Key = AllocationId;
 
 #[derive(Default)]
 pub(super) struct Entries {
@@ -24,6 +24,7 @@ pub(super) struct Entries {
 
 struct Entry {
     descriptor: OwnedFd,
+    multicast_properties: Option<CUmulticastObjectProp>,
     transfers: usize,
     retiring: bool,
 }
@@ -42,6 +43,7 @@ pub struct Lease<'a> {
     cache: &'a ExportCache,
     id: Key,
     descriptor: Option<OwnedFd>,
+    multicast_properties: Option<CUmulticastObjectProp>,
 }
 
 impl ExportCache {
@@ -90,19 +92,25 @@ impl ExportCache {
             .descriptor
             .try_clone()
             .map_err(|_| CUDA_ERROR_UNKNOWN)?;
+        let multicast_properties = entry.multicast_properties;
         entry.transfers = entry.transfers.checked_add(1).ok_or(CUDA_ERROR_UNKNOWN)?;
         entries.transfers = total;
         Ok(Lease {
             cache: self,
             id: *id,
             descriptor: Some(descriptor),
+            multicast_properties,
         })
     }
 
     /// Retire only this ID. A new insert or missing removal does not affect
     /// admission or itself drain unrelated transfers. Mutations are serialized,
     /// so replacing B can still wait behind an already-running retirement of A.
-    pub fn replace(&self, id: Key, descriptor: Option<OwnedFd>) -> Result<()> {
+    pub fn replace(
+        &self,
+        id: Key,
+        export: Option<(OwnedFd, Option<CUmulticastObjectProp>)>,
+    ) -> Result<()> {
         let _mutation = self.mutations.lock().map_err(|_| CUDA_ERROR_UNKNOWN)?;
         let mut entries = self.entries.lock().map_err(|_| CUDA_ERROR_UNKNOWN)?;
         if let Some(entry) = entries.descriptors.get_mut(&id) {
@@ -113,11 +121,12 @@ impl ExportCache {
                 .map_err(|_| CUDA_ERROR_UNKNOWN)?;
         }
         entries.descriptors.remove(&id);
-        if let Some(descriptor) = descriptor {
+        if let Some((descriptor, multicast_properties)) = export {
             entries.descriptors.insert(
                 id,
                 Entry {
                     descriptor,
+                    multicast_properties,
                     transfers: 0,
                     retiring: false,
                 },
@@ -145,6 +154,10 @@ impl Lease<'_> {
         // Only Drop removes the descriptor, after this borrow has ended.
         self.descriptor.as_ref().expect("live export lease")
     }
+
+    pub fn multicast_properties(&self) -> Option<CUmulticastObjectProp> {
+        self.multicast_properties
+    }
 }
 
 impl Drop for Lease<'_> {
@@ -171,27 +184,33 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn resource_kind_is_part_of_descriptor_identity() {
+    fn lease_carries_multicast_properties() {
         let cache = ExportCache::default();
-        let id = AllocationId([8; 16]);
+        let id = [8; 16];
+        let properties = CUmulticastObjectProp {
+            numDevices: 2,
+            size: 4096,
+            handleTypes: 1,
+            flags: 0,
+        };
         cache
             .replace(
-                (ResourceKind::Multicast, id),
-                Some(File::open("/dev/null").unwrap().into()),
+                id,
+                Some((File::open("/dev/null").unwrap().into(), Some(properties))),
             )
             .unwrap();
-        assert!(cache.acquire(&(ResourceKind::Unicast, id)).is_err());
-        assert!(cache.acquire(&(ResourceKind::Multicast, id)).is_ok());
-        cache.replace((ResourceKind::Unicast, id), None).unwrap();
-        assert!(cache.acquire(&(ResourceKind::Multicast, id)).is_ok());
+        assert_eq!(
+            cache.acquire(&id).unwrap().multicast_properties(),
+            Some(properties)
+        );
     }
 
     #[test]
     fn teardown_drains_transfers_and_rejects_new_requests() {
         let cache = Arc::new(ExportCache::default());
-        let id = (ResourceKind::Unicast, AllocationId([1; 16]));
+        let id = [1; 16];
         cache
-            .replace(id, Some(File::open("/dev/null").unwrap().into()))
+            .replace(id, Some((File::open("/dev/null").unwrap().into(), None)))
             .unwrap();
         let lease = cache.acquire(&id).unwrap();
         let (done, completion) = mpsc::channel();
@@ -213,7 +232,7 @@ mod tests {
         assert_eq!(cache.len().unwrap(), 0);
         assert!(cache.acquire(&id).is_err());
         cache
-            .replace(id, Some(File::open("/dev/zero").unwrap().into()))
+            .replace(id, Some((File::open("/dev/zero").unwrap().into(), None)))
             .unwrap();
         assert!(cache.acquire(&id).is_ok());
     }
@@ -222,19 +241,22 @@ mod tests {
     fn replacement_waits_until_the_old_descriptor_is_sent() {
         use std::io::Read;
         let cache = Arc::new(ExportCache::default());
-        let id = (ResourceKind::Multicast, AllocationId([2; 16]));
-        let unrelated = (ResourceKind::Unicast, AllocationId([4; 16]));
+        let id = [2; 16];
+        let unrelated = [4; 16];
         cache
-            .replace(unrelated, Some(File::open("/dev/null").unwrap().into()))
+            .replace(
+                unrelated,
+                Some((File::open("/dev/null").unwrap().into(), None)),
+            )
             .unwrap();
         let unrelated_lease = cache.acquire(&unrelated).unwrap();
         cache
-            .replace(id, Some(File::open("/dev/null").unwrap().into()))
+            .replace(id, Some((File::open("/dev/null").unwrap().into(), None)))
             .unwrap();
         let lease = cache.acquire(&id).unwrap();
         let copy = Arc::clone(&cache);
         let worker = std::thread::spawn(move || {
-            copy.replace(id, Some(File::open("/dev/zero").unwrap().into()))
+            copy.replace(id, Some((File::open("/dev/zero").unwrap().into(), None)))
                 .unwrap();
         });
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -261,10 +283,10 @@ mod tests {
     #[test]
     fn unrelated_mutations_do_not_drain_or_reject_active_exports() {
         let cache = ExportCache::default();
-        let a = (ResourceKind::Unicast, AllocationId([1; 16]));
-        let b = (ResourceKind::Multicast, AllocationId([2; 16]));
+        let a = [1; 16];
+        let b = [2; 16];
         cache
-            .replace(a, Some(File::open("/dev/null").unwrap().into()))
+            .replace(a, Some((File::open("/dev/null").unwrap().into(), None)))
             .unwrap();
         let first = cache.acquire(&a).unwrap();
         std::thread::scope(|scope| {
@@ -272,7 +294,7 @@ mod tests {
             let shared = &cache;
             let worker = scope.spawn(move || {
                 shared
-                    .replace(b, Some(File::open("/dev/zero").unwrap().into()))
+                    .replace(b, Some((File::open("/dev/zero").unwrap().into(), None)))
                     .unwrap();
                 shared.replace(b, None).unwrap();
                 shared.replace(b, None).unwrap(); // Missing removal is a no-op.
@@ -294,14 +316,14 @@ mod tests {
         use cuinterpose_protocol::{Request, send};
         use std::os::unix::net::UnixStream;
         let cache = Arc::new(ExportCache::default());
-        let id = (ResourceKind::Unicast, AllocationId([3; 16]));
+        let id = [3; 16];
         cache
-            .replace(id, Some(File::open("/dev/null").unwrap().into()))
+            .replace(id, Some((File::open("/dev/null").unwrap().into(), None)))
             .unwrap();
         let lease = cache.acquire(&id).unwrap();
         let (socket, peer) = UnixStream::pair().unwrap();
         drop(peer);
-        assert!(send(&socket, &Request::Handshake, Some(lease.descriptor())).is_err());
+        assert!(send(&socket, &Request::Identify, Some(lease.descriptor())).is_err());
         let (done, completion) = mpsc::channel();
         let copy = Arc::clone(&cache);
         let worker = std::thread::spawn(move || {

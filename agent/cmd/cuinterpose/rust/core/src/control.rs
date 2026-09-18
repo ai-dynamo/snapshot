@@ -7,7 +7,9 @@
 use super::process::Socket;
 use super::state::{self, Result};
 use cudarc::driver::sys::CUresult::CUDA_ERROR_NOT_INITIALIZED;
-use cuinterpose_protocol::{self as protocol, Operation, ParticipantId, Reply, Request, Response};
+use cuinterpose_protocol::{
+    self as protocol, Operation, ParticipantDirectory, ParticipantId, Reply, Request, Response,
+};
 use rustix::event::{PollFd, PollFlags, poll};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -19,19 +21,51 @@ use std::sync::mpsc::{self, TrySendError};
 const CONTROL_QUEUE_CAPACITY: usize = 8;
 
 enum ControlRequest {
-    Handshake,
     Inspect,
     Execute(Operation),
 }
 
-pub fn start(endpoint: &str, identity: ParticipantId) -> Result<()> {
-    let listener =
-        Socket::open(|| UnixListener::bind(endpoint)).map_err(|_| CUDA_ERROR_NOT_INITIALIZED)?;
-    let started = (|| -> std::io::Result<()> {
-        listener.set_nonblocking(true)?;
-        std::fs::set_permissions(endpoint, std::fs::Permissions::from_mode(0o600))?;
+fn install_directory(
+    identity: ParticipantId,
+    participants: ParticipantDirectory,
+) -> protocol::Result<()> {
+    if participants.is_empty() || !participants.contains_key(&identity) {
+        return Err(protocol::Error::Invalid(
+            "rendezvous directory omits this participant",
+        ));
+    }
+    let mut paths = std::collections::BTreeSet::new();
+    for path in participants.values() {
+        if !path.is_absolute()
+            || !paths.insert(path)
+            || std::os::unix::net::SocketAddr::from_pathname(path).is_err()
+        {
+            return Err(protocol::Error::Invalid(
+                "invalid rendezvous participant directory",
+            ));
+        }
+    }
+    *state::participant_directory()
+        .map_err(|_| protocol::Error::Invalid("cuinterpose state is unavailable"))?
+        .lock()
+        .map_err(|_| protocol::Error::Invalid("participant directory is poisoned"))? = participants;
+    Ok(())
+}
+
+/// Private workers cannot dispatch until the single listener handoff succeeds.
+/// Dropping this owner cancels them without joining: a caller may hold the
+/// loader lock needed by a worker's Rust TLS startup or teardown.
+pub struct PreparedWorkers {
+    activation: mpsc::SyncSender<Socket<UnixListener>>,
+    // Owned only between a successful bind and the worker handoff.
+    listener: Option<Socket<UnixListener>>,
+}
+
+impl PreparedWorkers {
+    pub fn prepare(identity: ParticipantId) -> Result<Option<Self>> {
         let (sender, receiver) =
             mpsc::sync_channel::<(Socket<UnixStream>, ControlRequest)>(CONTROL_QUEUE_CAPACITY);
+        let (activation, parked) = mpsc::sync_channel::<Socket<UnixListener>>(1);
         let _worker = std::thread::Builder::new()
             .name("cuinterpose-control".into())
             .spawn(move || {
@@ -44,11 +78,17 @@ pub fn start(endpoint: &str, identity: ParticipantId) -> Result<()> {
             })
             .map_err(|error| {
                 eprintln!("cuinterpose: control worker startup failed: {error}");
-                error
+                CUDA_ERROR_NOT_INITIALIZED
             })?;
+        if state::initialized() {
+            return Ok(None);
+        }
         let started = std::thread::Builder::new()
             .name("cuinterpose-peer".into())
             .spawn(move || {
+                let Ok(listener) = parked.recv() else {
+                    return;
+                };
                 loop {
                     let mut events = [PollFd::new(&*listener, PollFlags::IN)];
                     match poll(&mut events, None) {
@@ -69,23 +109,50 @@ pub fn start(endpoint: &str, identity: ParticipantId) -> Result<()> {
                 }
             });
         if let Err(error) = started {
-            // Failed spawn drops its closure, closing the listener and the
-            // only sender. Detach the idle worker: initialization may run in a
-            // DSO constructor holding the loader lock, which worker TLS startup
-            // or teardown also needs. Joining here would deadlock. No request
-            // was queued; recv exits once thread startup can finish.
+            // The failed closure drops the only control-queue sender.
             eprintln!("cuinterpose: peer listener startup failed: {error}");
-            return Err(error);
+            return Err(CUDA_ERROR_NOT_INITIALIZED.into());
         }
-        Ok(())
-    })();
-    if started.is_err() {
-        // We successfully bound this path, so it is ours to remove. A bind
-        // failure above must never unlink an application-owned filesystem entry.
-        let _ = std::fs::remove_file(endpoint);
-        return Err(CUDA_ERROR_NOT_INITIALIZED.into());
+        Ok(Some(Self {
+            activation,
+            listener: None,
+        }))
     }
-    Ok(())
+
+    /// No spawn, blocking channel operation, formatting, or callback is allowed
+    /// here. The caller holds the generation installation lock.
+    /// With pinned Rust/glibc, mutexes and try_send wakeups use futexes and
+    /// non-Drop TLS, not loader registration. The channel is preallocated;
+    /// socket registration may grow its Vec using the ordinary glibc allocator.
+    /// Eager ELF binding prevents first-use loader lookup in these libc calls.
+    pub fn activate(&mut self, endpoint: &str) -> Result<()> {
+        self.listener = Some(
+            Socket::open(|| UnixListener::bind(endpoint))
+                .map_err(|_| CUDA_ERROR_NOT_INITIALIZED)?,
+        );
+        let listener = self.listener.as_ref().unwrap();
+        listener
+            .set_nonblocking(true)
+            .map_err(|_| CUDA_ERROR_NOT_INITIALIZED)?;
+        std::fs::set_permissions(endpoint, std::fs::Permissions::from_mode(0o600))
+            .map_err(|_| CUDA_ERROR_NOT_INITIALIZED)?;
+        match self.activation.try_send(self.listener.take().unwrap()) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(listener) | TrySendError::Disconnected(listener)) => {
+                self.listener = Some(listener);
+                Err(CUDA_ERROR_NOT_INITIALIZED.into())
+            }
+        }
+    }
+
+    pub fn cleanup(&mut self, endpoint: &str) {
+        // Only successfully bound, unpublished endpoints belong to this owner.
+        // Cleanup is deliberately outside the installation lock.
+        if let Some(listener) = self.listener.take() {
+            drop(listener);
+            let _ = std::fs::remove_file(endpoint);
+        }
+    }
 }
 
 fn dispatch(
@@ -101,39 +168,56 @@ fn dispatch(
     socket.set_write_timeout(timeout)?;
     let (request, descriptor): (Request, _) = protocol::receive(&socket)?;
     let identified = match &request {
-        Request::Handshake => true,
-        Request::Inspect { participant }
-        | Request::Execute { participant, .. }
-        | Request::Export { participant, .. } => *participant == identity,
+        Request::Identify => true,
+        Request::Rendezvous { participant, .. }
+        | Request::Inspect { participant }
+        | Request::Execute { participant, .. } => *participant == identity,
+        Request::Export { allocation } => allocation.creator == identity,
     };
     if descriptor.is_some() || !identified {
         return refuse(&socket, identity, "invalid cuinterpose control request");
     }
     let request = match request {
-        Request::Handshake => ControlRequest::Handshake,
-        Request::Inspect { .. } => ControlRequest::Inspect,
-        Request::Execute { operation, .. } => ControlRequest::Execute(operation),
-        Request::Export {
-            resource,
-            allocation,
-            ..
-        } => {
-            if super::G_FAILED.load(Ordering::Acquire) {
-                return refuse(&socket, identity, "cuinterpose state failed");
-            }
-            let lease =
-                match state::cache().and_then(|cache| cache.acquire(&(resource, allocation))) {
-                    Ok(lease) => lease,
-                    Err(_) => return refuse(&socket, identity, "creator resource is unavailable"),
-                };
+        Request::Identify => {
             return protocol::send(
                 &socket,
                 &Response {
                     participant: identity,
-                    result: Ok(Reply::Export {
-                        resource,
-                        allocation,
-                    }),
+                    result: Ok(Reply::Identified),
+                },
+                None,
+            );
+        }
+        Request::Rendezvous { participants, .. } => {
+            install_directory(identity, participants)?;
+            return protocol::send(
+                &socket,
+                &Response {
+                    participant: identity,
+                    result: Ok(Reply::Ready),
+                },
+                None,
+            );
+        }
+        Request::Inspect { .. } => ControlRequest::Inspect,
+        Request::Execute { operation, .. } => ControlRequest::Execute(operation),
+        Request::Export { allocation } => {
+            if super::G_FAILED.load(Ordering::Acquire) {
+                return refuse(&socket, identity, "cuinterpose state failed");
+            }
+            let lease = match state::cache().and_then(|cache| cache.acquire(&allocation.id)) {
+                Ok(lease) => lease,
+                Err(_) => return refuse(&socket, identity, "creator resource is unavailable"),
+            };
+            let reply = match lease.multicast_properties() {
+                Some(properties) => Reply::MulticastExport { properties },
+                None => Reply::UnicastExport,
+            };
+            return protocol::send(
+                &socket,
+                &Response {
+                    participant: identity,
+                    result: Ok(reply),
                 },
                 Some(lease.descriptor()),
             );
@@ -179,7 +263,6 @@ fn serve(
         }
         let mut state = state::get().map_err(|_| "cuinterpose state is unavailable")?;
         match request {
-            ControlRequest::Handshake => Ok(Reply::Handshake),
             ControlRequest::Inspect => {
                 let live_raw_imports = state.live_raw_imports();
                 let unsupported_creations = state.unsupported_exportable_creations();
@@ -187,7 +270,7 @@ fn serve(
                     .inspect()
                     .map_err(|_| "cannot inspect current CUDA state")?;
                 Ok(Reply::Inspection {
-                    records,
+                    entries: records,
                     live_raw_imports,
                     unsupported_creations,
                 })
@@ -239,4 +322,30 @@ fn serve(
         super::G_FAILED.store(true, Ordering::Release);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disconnected_activation_retains_listener_for_unlocked_cleanup() {
+        let directory =
+            std::env::temp_dir().join(format!("cuinterpose-activation-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let endpoint = directory.join("control.sock");
+        let endpoint = endpoint.to_str().unwrap();
+        let (activation, receiver) = mpsc::sync_channel(1);
+        drop(receiver);
+        let mut workers = PreparedWorkers {
+            activation,
+            listener: None,
+        };
+        assert!(workers.activate(endpoint).is_err());
+        assert!(workers.listener.is_some());
+        workers.cleanup(endpoint);
+        assert!(!std::path::Path::new(endpoint).exists());
+        assert!(workers.listener.is_none());
+        std::fs::remove_dir(directory).unwrap();
+    }
 }
