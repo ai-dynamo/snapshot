@@ -25,7 +25,7 @@ pub struct Transfer {
     pub copy_us: u32,
 }
 
-/// Only the inputs needed to move bytes; tickets and mapping topology stay in State.
+/// Only the inputs needed to move bytes; virtual handles and mapping topology stay in State.
 #[derive(Clone)]
 pub struct AllocationContent {
     pub id: AllocationId,
@@ -38,7 +38,7 @@ pub struct AllocationContent {
 impl From<&Allocation> for AllocationContent {
     fn from(allocation: &Allocation) -> Self {
         Self {
-            id: allocation.id,
+            id: allocation.reference.id,
             driver: allocation.driver,
             size: allocation.size,
             properties: allocation.properties,
@@ -511,7 +511,7 @@ mod tests {
             Some(crate::driver::CudaError(CUDA_ERROR_INVALID_CONTEXT))
         );
         assert_eq!(G_RELEASED.load(Ordering::Relaxed), 1);
-        let id = AllocationId([1; 16]);
+        let id: AllocationId = [1; 16];
         let arena = Arena {
             base: 0x1000,
             size: 4096,
