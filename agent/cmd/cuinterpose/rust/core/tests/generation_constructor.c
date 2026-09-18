@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-// Loaded only in a child whose parent already initialized the actual Rust core.
-// The worker must initialize a new process generation, not lazy-load a mock core.
+// Loaded in a cold process or a child whose parent initialized the actual core.
+// The worker initializes a process generation, not a mock backend.
 #define _GNU_SOURCE
 #include <assert.h>
 #include <dlfcn.h>
