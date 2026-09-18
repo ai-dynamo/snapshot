@@ -11,7 +11,7 @@ from pathlib import Path
 import socket
 import sys
 import time
-from protocol_client import TICKET_MAGIC, command, inspect
+from protocol_client import command, inspect
 from support import driver, props
 
 cuda = driver()
@@ -35,7 +35,9 @@ def wait(child):
     os.waitpid(child, 0)
     raise AssertionError("fork child did not complete")
 
-def child_checks(parent_id, inherited=(), ticket=None, application_socket=None):
+def child_checks(
+    parent_pid, inherited=(), virtual_shareable_handle=None, application_socket=None
+):
     try:
         # Check before any child shim work can reuse these descriptor numbers.
         for fd in inherited:
@@ -45,15 +47,14 @@ def child_checks(parent_id, inherited=(), ticket=None, application_socket=None):
                 assert error.errno == errno.EBADF
             else:
                 raise AssertionError(f"inherited shim fd {fd} remains open")
-        if ticket is not None:
-            assert os.pread(ticket, len(TICKET_MAGIC), 0) == TICKET_MAGIC
+        if virtual_shareable_handle is not None:
+            os.fstat(virtual_shareable_handle)
         if application_socket is not None:
             os.fstat(application_socket)
         initialize()
         assert command("inspect")["entries"] == []
-        identity = inspect()["participant"]
-        assert identity != parent_id
-        assert identity.hex() != os.environ["CUINTERPOSE_PARTICIPANT_ID"]
+        assert inspect()["namespace_pid"] == os.getpid()
+        assert os.getpid() != parent_pid
         value = c.c_uint64()
         assert cuda.cuMemCreate(c.byref(value), 4096, c.byref(props), 0) == 0
         assert cuda.cuMemRelease(value) == 0
@@ -67,21 +68,27 @@ def child_checks(parent_id, inherited=(), ticket=None, application_socket=None):
 def main():
     mode = sys.argv[1]
     if mode == "preinit":
+        parent_pid = os.getpid()
         child = os.fork()
         if child == 0:
-            child_checks(b"")
+            child_checks(parent_pid)
         wait(child)
         initialize()
         assert command("inspect")["entries"] == []
-        assert inspect()["participant"].hex() == os.environ["CUINTERPOSE_PARTICIPANT_ID"]
+        assert inspect()["namespace_pid"] == os.getpid()
         return
 
     value = c.c_uint64()
     assert cuda.cuMemCreate(c.byref(value), 4096, c.byref(props), 0) == 0
-    ticket = c.c_int(-1)
-    assert cuda.cuMemExportToShareableHandle(c.byref(ticket), value, 1, 0) == 0
-    parent_id = inspect()["participant"]
-    assert parent_id.hex() == os.environ["CUINTERPOSE_PARTICIPANT_ID"]
+    virtual_shareable_handle = c.c_int(-1)
+    assert (
+        cuda.cuMemExportToShareableHandle(
+            c.byref(virtual_shareable_handle), value, 1, 0
+        )
+        == 0
+    )
+    parent_pid = inspect()["namespace_pid"]
+    assert parent_pid == os.getpid()
 
     if mode == "descriptors":
         # An idle accepted socket belongs to the shim's FD inventory, while the
@@ -105,11 +112,13 @@ def main():
         assert len(inherited) >= 2, inherited
         child = os.fork()
         if child == 0:
-            child_checks(parent_id, inherited, ticket.value, idle.fileno())
+            child_checks(
+                parent_pid, inherited, virtual_shareable_handle.value, idle.fileno()
+            )
         wait(child)
         records = command("inspect")["entries"]
         assert sum("allocation" in record for record in records) == 1
-        assert inspect()["participant"] == parent_id
+        assert inspect()["namespace_pid"] == parent_pid
         idle.close()
     elif mode == "poison":
         # Protocol/order rejection must not poison the workload. A real copy
@@ -123,10 +132,12 @@ def main():
         assert cuda.cuMemRelease(value) == 600
         child = os.fork()
         if child == 0:
-            child_checks(parent_id, ticket=ticket.value)
+            child_checks(
+                parent_pid, virtual_shareable_handle=virtual_shareable_handle.value
+            )
         wait(child)
         assert cuda.cuMemRelease(value) == 600
-        os.close(ticket.value)
+        os.close(virtual_shareable_handle.value)
         return
     elif mode == "nested":
         # Find the parent's listening socket. No child CUDA/control call
@@ -151,7 +162,7 @@ def main():
                 if grandchild == 0:
                     try:
                         assert os.read(listener, 1) == b""
-                        assert os.pread(ticket.value, len(TICKET_MAGIC), 0) == TICKET_MAGIC
+                        os.fstat(virtual_shareable_handle.value)
                         os._exit(0)
                     except BaseException:
                         os._exit(77)
@@ -163,10 +174,10 @@ def main():
                 traceback.print_exc()
                 os._exit(1)
         wait(child)
-        assert inspect()["participant"] == parent_id
+        assert inspect()["namespace_pid"] == parent_pid
     else:
         raise AssertionError(mode)
-    os.close(ticket.value)
+    os.close(virtual_shareable_handle.value)
     assert cuda.cuMemRelease(value) == 0
 
 

@@ -16,7 +16,7 @@ tensor-parallel server:
   releases it again, or keeps it alive in ``hold-raw-import`` mode so the
   coordinator has something to refuse;
 * in unicast mode, exports its small allocation through the shim, exchanges
-  the ticket with the other worker, and keeps the peer import mapped across
+  the virtual shareable handle with the other worker, and keeps the peer import mapped across
   checkpoint and restore;
 * shares a PyTorch symmetric-memory buffer with the other rank and captures a
   collective into a CUDA graph;
@@ -181,7 +181,7 @@ def _worker(rank: int, options: Options, peer_channel: socket.socket) -> None:
     peer_handle = None
     peer_address = 0
     if not options.multicast and not options.hold_raw_import:
-        ticket_fd = int(
+        virtual_shareable_handle_fd = int(
             cuda_call(
                 driver.cuMemExportToShareableHandle,
                 private_handle,
@@ -190,19 +190,21 @@ def _worker(rank: int, options: Options, peer_channel: socket.socket) -> None:
             )
         )
         try:
-            send_handle(peer_channel, ticket_fd, os.getppid())
+            send_handle(peer_channel, virtual_shareable_handle_fd, os.getppid())
         finally:
-            os.close(ticket_fd)
-        peer_ticket_fd = recv_handle(peer_channel)
+            os.close(virtual_shareable_handle_fd)
+        peer_virtual_shareable_handle_fd = recv_handle(peer_channel)
         try:
             peer_handle = cuda_call(
                 driver.cuMemImportFromShareableHandle,
-                peer_ticket_fd,
+                peer_virtual_shareable_handle_fd,
                 POSIX_FD_HANDLE_TYPE,
             )
-            cuda_driver.assert_handle_namespace(peer_handle, True, "ticket-backed peer import")
+            cuda_driver.assert_handle_namespace(
+                peer_handle, True, "virtual-shareable-handle peer import"
+            )
         finally:
-            os.close(peer_ticket_fd)
+            os.close(peer_virtual_shareable_handle_fd)
         try:
             peer_address = cuda_driver.map_allocation(peer_handle, private_size, device)
         except Exception:
@@ -213,7 +215,7 @@ def _worker(rank: int, options: Options, peer_channel: socket.socket) -> None:
             private_size,
             options.seed + 2 * (1 - rank),
             rank,
-            "ticket-backed peer mapping before checkpoint",
+            "virtual-shareable-handle peer mapping before checkpoint",
         )
     peer_channel.close()
 
@@ -226,12 +228,12 @@ def _worker(rank: int, options: Options, peer_channel: socket.socket) -> None:
     native_handle = cuda_call(driver.cuMemCreate, private_size, properties, 0)
     native_address = cuda_driver.map_allocation(native_handle, private_size, device)
     _fill(native_address, private_size, bulk_seed + WORLD_SIZE, rank)
-    bulk_ticket = int(
+    bulk_virtual_shareable_handle = int(
         cuda_call(
             driver.cuMemExportToShareableHandle, bulk_handle, POSIX_FD_HANDLE_TYPE, 0
         )
     )
-    os.close(bulk_ticket)
+    os.close(bulk_virtual_shareable_handle)
     shared_count = 1 + int(peer_handle is not None)
     shared_bytes = bulk_size + (private_size if peer_handle is not None else 0)
     (options.sync_dir / f"carrier-{rank}").write_text(f"{shared_count} {shared_bytes}\n")
@@ -305,7 +307,7 @@ def _worker(rank: int, options: Options, peer_channel: socket.socket) -> None:
             private_size,
             options.seed + 2 * (1 - rank),
             rank,
-            "ticket-backed peer mapping after restore",
+            "virtual-shareable-handle peer mapping after restore",
         )
     graph.replay()
     torch.cuda.synchronize()
@@ -408,13 +410,15 @@ def _fork_workers(options: Options) -> None:
     for _, worker_channel in peer_channels:
         worker_channel.close()
     if not options.multicast and not options.hold_raw_import:
-        tickets = [recv_handle(parent_channel) for parent_channel, _ in peer_channels]
+        virtual_shareable_handles = [
+            recv_handle(parent_channel) for parent_channel, _ in peer_channels
+        ]
         try:
             for rank, ((parent_channel, _), (_, child)) in enumerate(zip(peer_channels, children)):
-                send_handle(parent_channel, tickets[1 - rank], child)
+                send_handle(parent_channel, virtual_shareable_handles[1 - rank], child)
         finally:
-            for ticket in tickets:
-                os.close(ticket)
+            for virtual_shareable_handle in virtual_shareable_handles:
+                os.close(virtual_shareable_handle)
     for parent_channel, _ in peer_channels:
         parent_channel.close()
 

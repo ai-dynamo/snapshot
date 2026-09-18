@@ -116,7 +116,6 @@ def main():
                            env=case_env,
                            check=True, timeout=60)
         env["LD_PRELOAD"] += f":{fixtures / 'test/libcuda.so.1'}"
-        env["CUINTERPOSE_PARTICIPANT_ID"] = "123456789abcdef0123456789abcdef0"
         for mode in ("preinit", "descriptors", "poison", "nested"):
             case_env = env | {"SNAPSHOT_CONTROL_TIMEOUT_SECONDS": "1"}
             subprocess.run([sys.executable, str(Path(__file__).with_name("fork.py")),

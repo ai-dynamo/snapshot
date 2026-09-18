@@ -1,10 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 
-"""MessagePack control/ticket client shared by the process-isolated tests."""
+"""MessagePack control and virtual-handle client for process-isolated tests."""
 
 import array
-import fcntl
 import os
 import socket
 import struct
@@ -12,7 +11,6 @@ import struct
 import msgpack
 
 VERSION = 1
-TICKET_MAGIC = b"CUI" + bytes([VERSION])
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 LIFECYCLE = (
     "prepare_multicast", "save_allocations", "prepare_unicast",
@@ -69,12 +67,10 @@ def receive(connection):
     return response
 
 
-def request(path, operation, identity=None):
-    body = {"kind": operation}
-    if operation != "identify":
-        body["participant"] = identity
-        if operation != "inspect":
-            body.update(kind="execute", operation=operation)
+def request(path, operation, namespace_pid):
+    body = {"kind": operation, "namespace_pid": namespace_pid}
+    if operation != "inspect":
+        body.update(kind="execute", operation=operation)
     connection = socket.socket(socket.AF_UNIX)
     connection.settimeout(10)
     try:
@@ -94,12 +90,9 @@ def reply(connection, success=True):
         return response
 
 
-def inspect(operation="identify"):
+def inspect(operation="inspect"):
     path = f"{os.environ['SNAPSHOT_CONTROL_DIR']}/cuinterpose-{os.getpid()}.sock"
-    # Identify before opening the operation connection: an idle first
-    # connection would occupy the listener while we awaited identification.
-    identity = None if operation == "identify" else inspect()["participant"]
-    with request(path, operation, identity) as connection:
+    with request(path, operation, os.getpid()) as connection:
         return receive(connection)
 
 
@@ -109,12 +102,6 @@ def command(operation, success=True):
     value = response["result"]["Ok" if success else "Err"]
     # Externally tagged replies deserialize directly without buffering entries.
     return next(iter(value.values())) if success and isinstance(value, dict) else value
-
-
-def read_ticket(fd):
-    ticket = os.pread(fd, 36, 0)
-    assert len(ticket) == 36 and ticket[:4] == TICKET_MAGIC
-    return {"creator": ticket[4:20], "id": ticket[20:36]}
 
 
 def request_export(path, reference):
@@ -128,16 +115,3 @@ def request_export(path, reference):
         return response, fd
     finally:
         connection.close()
-
-
-def seal_ticket(reference):
-    assert len(reference["creator"]) == len(reference["id"]) == 16
-    fd = os.memfd_create("cuinterpose-test-ticket", os.MFD_ALLOW_SEALING)
-    try:
-        os.write(fd, TICKET_MAGIC + reference["creator"] + reference["id"])
-        fcntl.fcntl(fd, fcntl.F_ADD_SEALS, fcntl.F_SEAL_SEAL | fcntl.F_SEAL_WRITE |
-                    fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK)
-        return fd
-    except BaseException:
-        os.close(fd)
-        raise

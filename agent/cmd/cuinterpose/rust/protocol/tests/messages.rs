@@ -8,35 +8,6 @@ use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 
 #[test]
-fn identities_are_arrays_and_hex_only_at_configuration_boundary() {
-    for (text, bytes) in [
-        ("00000000000000000000000000000000", [0; 16]),
-        ("ffffffffffffffffffffffffffffffff", [255; 16]),
-        (
-            "000102030405060708090a0b0c0d0e0f",
-            std::array::from_fn(|index| index as u8),
-        ),
-    ] {
-        let id = parse_participant_id(text).unwrap();
-        assert_eq!(id, bytes);
-        assert_eq!(format_id(&id), text);
-        let encoded = encode(&id).unwrap();
-        assert_eq!(decode::<ParticipantId>(&encoded).unwrap(), id);
-    }
-    for invalid in [
-        "",
-        "A123456789abcdef0123456789abcdef0",
-        "0123456789abcdef",
-        "+123456789abcdef0123456789abcdef0",
-        " 123456789abcdef0123456789abcdef0",
-        "0123456789abcdef0123456789abcdef00",
-        "é23456789abcdef0123456789abcdef0",
-    ] {
-        assert!(parse_participant_id(invalid).is_err());
-    }
-}
-
-#[test]
 fn versions_and_trailing_data_are_rejected() {
     #[derive(serde::Serialize)]
     struct Message {
@@ -45,27 +16,46 @@ fn versions_and_trailing_data_are_rejected() {
     }
     let old = rmp_serde::to_vec_named(&Message {
         version: VERSION - 1,
-        body: Request::Identify,
+        body: Request::Inspect { namespace_pid: 1 },
     })
     .unwrap();
     assert!(decode::<Request>(&old).is_err());
-    let mut bytes = encode(&Request::Identify).unwrap();
+    let mut bytes = encode(&Request::Inspect { namespace_pid: 1 }).unwrap();
     bytes.push(0);
     assert!(decode::<Request>(&bytes).is_err());
 }
 
 #[test]
-fn ticket_layout_is_fixed_and_versioned() {
-    assert_eq!(TICKET_MAGIC, [b'C', b'U', b'I', 1]);
-    assert_eq!(TICKET_BYTES, 36);
+fn virtual_shareable_handle_codec_owns_the_fixed_layout() {
+    assert_eq!(VIRTUAL_SHAREABLE_HANDLE_MAGIC, [b'C', b'U', b'I', 1]);
+    assert_eq!(VIRTUAL_SHAREABLE_HANDLE_BYTES, 24);
+    let reference = AllocationReference {
+        id: [0x22; 16],
+        creator_pid: 0x11223344,
+    };
+    let encoded = encode_virtual_shareable_handle(reference).unwrap();
+    assert_eq!(
+        encoded,
+        [
+            b'C', b'U', b'I', 1, 0x44, 0x33, 0x22, 0x11, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
+            0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
+        ]
+    );
+    assert_eq!(
+        decode_virtual_shareable_handle(&encoded).unwrap(),
+        reference
+    );
+    let mut invalid = encoded;
+    invalid[4..8].fill(0);
+    assert!(decode_virtual_shareable_handle(&invalid).is_err());
 }
 
 #[test]
 fn inspection_metadata_round_trips() {
-    let mapping = StateEntry::Mapping {
+    let mapping = Record::Mapping {
         allocation: AllocationReference {
             id: [1; 16],
-            creator: [2; 16],
+            creator_pid: 2,
         },
         address: 0x10000,
         size: 8192,
@@ -87,10 +77,11 @@ fn inspection_metadata_round_trips() {
 fn socket_preserves_frames_and_transfers_an_owned_cloexec_fd() {
     let (sender, receiver) = UnixStream::pair().unwrap();
     let fd: OwnedFd = File::open("/dev/zero").unwrap().into();
-    send(&sender, &Request::Identify, Some(&fd)).unwrap();
-    send(&sender, &Request::Identify, None).unwrap();
+    let request = Request::Inspect { namespace_pid: 1 };
+    send(&sender, &request, Some(&fd)).unwrap();
+    send(&sender, &request, None).unwrap();
     let (message, received): (Request, _) = receive(&receiver).unwrap();
-    assert!(matches!(message, Request::Identify));
+    assert!(matches!(message, Request::Inspect { namespace_pid: 1 }));
     let received = received.unwrap();
     assert!(
         rustix::io::fcntl_getfd(&received)
@@ -106,7 +97,7 @@ fn socket_preserves_frames_and_transfers_an_owned_cloexec_fd() {
 #[test]
 fn fragmented_prefix_and_body_are_accepted_and_oversized_prefix_is_refused() {
     let (mut sender, receiver) = UnixStream::pair().unwrap();
-    let bytes = encode(&Request::Identify).unwrap();
+    let bytes = encode(&Request::Inspect { namespace_pid: 1 }).unwrap();
     let worker = std::thread::spawn(move || {
         for byte in (bytes.len() as u32).to_le_bytes().into_iter().chain(bytes) {
             sender.write_all(&[byte]).unwrap();
@@ -114,7 +105,7 @@ fn fragmented_prefix_and_body_are_accepted_and_oversized_prefix_is_refused() {
     });
     assert!(matches!(
         receive::<Request>(&receiver).unwrap().0,
-        Request::Identify
+        Request::Inspect { namespace_pid: 1 }
     ));
     worker.join().unwrap();
     let (mut sender, receiver) = UnixStream::pair().unwrap();
@@ -143,7 +134,7 @@ fn malformed_or_excess_ancillary_data_closes_received_descriptors() {
         let body = if count == 1 {
             vec![0xc1]
         } else {
-            encode(&Request::Identify).unwrap()
+            encode(&Request::Inspect { namespace_pid: 1 }).unwrap()
         };
         let frame = [(body.len() as u32).to_le_bytes().as_slice(), &body].concat();
         rustix::net::sendmsg(

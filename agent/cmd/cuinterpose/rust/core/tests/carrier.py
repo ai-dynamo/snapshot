@@ -20,14 +20,19 @@ def main():
     length = 1 << 20
     cuda.cuMemMap.argtypes = [c.c_uint64, c.c_size_t, c.c_size_t, c.c_uint64, c.c_uint64]
     cuda.fakeFailNext.argtypes = [c.c_char_p]
-    handles, tickets = [], []
+    handles, virtual_shareable_handles = [], []
     for index in range(3):
-        handle, ticket = c.c_uint64(), c.c_int(-1)
+        handle, virtual_shareable_handle = c.c_uint64(), c.c_int(-1)
         assert cuda.cuMemCreate(c.byref(handle), length, c.byref(props), 0) == 0
         assert cuda.cuMemMap(0x10000000 + index * length, length, 0, handle, 0) == 0
-        assert cuda.cuMemExportToShareableHandle(c.byref(ticket), handle, 1, 0) == 0
+        assert (
+            cuda.cuMemExportToShareableHandle(
+                c.byref(virtual_shareable_handle), handle, 1, 0
+            )
+            == 0
+        )
         handles.append(handle)
-        tickets.append(ticket.value)
+        virtual_shareable_handles.append(virtual_shareable_handle.value)
     command("prepare_multicast")
     saving = mode.startswith("save")
     if not saving:
@@ -47,7 +52,7 @@ def main():
     assert cuda.fakeLiveAllocations() == (3 if saving else 0)
     assert cuda.fakeMappedCount() == (3 if saving else 0)
     assert cuda.cuMemRelease(handles[0]) == 600, "failed generation resumed"
-    for fd in tickets:
+    for fd in virtual_shareable_handles:
         os.close(fd)
     print("PASS carrier", mode)
 

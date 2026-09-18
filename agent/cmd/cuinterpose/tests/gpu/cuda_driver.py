@@ -23,9 +23,9 @@ POSIX_FD_HANDLE_TYPE = (
     driver.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
 )
 
-# Logical handles carry this tag in the top 16 bits (interpose.c).
-LOGICAL_HANDLE_TAG = 0xD94D000000000000
-LOGICAL_HANDLE_TAG_MASK = 0xFFFF000000000000
+# Virtual allocation handles carry this tag in the top 16 bits.
+VIRTUAL_ALLOCATION_HANDLE_TAG = 0xD94D000000000000
+VIRTUAL_ALLOCATION_HANDLE_TAG_MASK = 0xFFFF000000000000
 
 
 def cuda_call(function, *arguments):
@@ -58,10 +58,13 @@ def allocation_properties(device) -> driver.CUmemAllocationProp:
     return properties
 
 
-def assert_handle_namespace(handle, logical: bool, stage: str) -> None:
-    tagged = int(handle) & LOGICAL_HANDLE_TAG_MASK == LOGICAL_HANDLE_TAG
-    if tagged != logical:
-        expected = "logical" if logical else "raw"
+def assert_handle_namespace(handle, virtual: bool, stage: str) -> None:
+    tagged = (
+        int(handle) & VIRTUAL_ALLOCATION_HANDLE_TAG_MASK
+        == VIRTUAL_ALLOCATION_HANDLE_TAG
+    )
+    if tagged != virtual:
+        expected = "virtual" if virtual else "raw"
         raise AssertionError(f"{stage}: handle {int(handle):#x} is not {expected}")
 
 
