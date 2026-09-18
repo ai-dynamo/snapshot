@@ -822,11 +822,12 @@ pub fn describe(state: &State, records: &mut Vec<StateEntry>) -> Result<()> {
             .count()
             .try_into()
             .map_err(|_| CUDA_ERROR_OUT_OF_MEMORY)?;
-        let mut properties = object.properties;
-        properties.size = object.effective_size;
         records.push(StateEntry::Multicast {
             allocation: object.reference,
-            properties,
+            devices: object.properties.numDevices,
+            size: object.effective_size as u64,
+            handle_types: object.properties.handleTypes,
+            flags: object.properties.flags,
             logical_handle_count,
         });
         for device in &object.devices {
@@ -850,15 +851,13 @@ pub fn describe(state: &State, records: &mut Vec<StateEntry>) -> Result<()> {
             if mapping.unknown {
                 return Err(CudaError::from(CUDA_ERROR_NOT_SUPPORTED));
             }
-            let mut access = mapping.access.clone();
-            access.sort();
             let record = StateEntry::MulticastMapping {
                 allocation: object.reference,
                 address: mapping.address,
                 size: mapping.size as u64,
                 offset: mapping.offset as u64,
                 flags: mapping.flags,
-                access,
+                access: state::access_metadata(&mapping.access),
             };
             records.push(record);
         }
