@@ -29,8 +29,8 @@ enum ControlRequest {
 /// loader lock needed by a worker's Rust TLS startup or teardown.
 pub struct PreparedWorkers {
     activation: mpsc::SyncSender<Socket<UnixListener>>,
+    // Owned only between a successful bind and the worker handoff.
     listener: Option<Socket<UnixListener>>,
-    bound: bool,
 }
 
 impl PreparedWorkers {
@@ -88,7 +88,6 @@ impl PreparedWorkers {
         Ok(Some(Self {
             activation,
             listener: None,
-            bound: false,
         }))
     }
 
@@ -103,7 +102,6 @@ impl PreparedWorkers {
             Socket::open(|| UnixListener::bind(endpoint))
                 .map_err(|_| CUDA_ERROR_NOT_INITIALIZED)?,
         );
-        self.bound = true;
         let listener = self.listener.as_ref().unwrap();
         listener
             .set_nonblocking(true)
@@ -111,10 +109,7 @@ impl PreparedWorkers {
         std::fs::set_permissions(endpoint, std::fs::Permissions::from_mode(0o600))
             .map_err(|_| CUDA_ERROR_NOT_INITIALIZED)?;
         match self.activation.try_send(self.listener.take().unwrap()) {
-            Ok(()) => {
-                self.bound = false;
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             Err(TrySendError::Full(listener) | TrySendError::Disconnected(listener)) => {
                 self.listener = Some(listener);
                 Err(CUDA_ERROR_NOT_INITIALIZED.into())
@@ -125,8 +120,8 @@ impl PreparedWorkers {
     pub fn cleanup(&mut self, endpoint: &str) {
         // Only successfully bound, unpublished endpoints belong to this owner.
         // Cleanup is deliberately outside the installation lock.
-        if self.bound {
-            self.listener.take();
+        if let Some(listener) = self.listener.take() {
+            drop(listener);
             let _ = std::fs::remove_file(endpoint);
         }
     }
@@ -301,10 +296,9 @@ mod tests {
         let mut workers = PreparedWorkers {
             activation,
             listener: None,
-            bound: false,
         };
         assert!(workers.activate(endpoint).is_err());
-        assert!(workers.bound && workers.listener.is_some());
+        assert!(workers.listener.is_some());
         workers.cleanup(endpoint);
         assert!(!std::path::Path::new(endpoint).exists());
         assert!(workers.listener.is_none());
