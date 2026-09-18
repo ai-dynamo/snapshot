@@ -4,8 +4,8 @@
 use super::Result;
 use anyhow::{Context, bail, ensure};
 use cuinterpose_protocol::{
-    AllocationId, AllocationReference, BindingSource, CUmemAllocationHandleType, MAX_ACCESS,
-    Manifest, StateEntry,
+    AllocationId, AllocationReference, BindingSource, CUmemAllocationHandleType, Manifest,
+    StateEntry,
 };
 use std::collections::BTreeMap;
 
@@ -138,7 +138,7 @@ pub fn validate(participants: &Manifest) -> Result<Vec<Allocation>> {
                     address,
                     size,
                     offset,
-                    access,
+                    ..
                 } => {
                     let known = allocations
                         .get_mut(&allocation.id)
@@ -149,7 +149,6 @@ pub fn validate(participants: &Manifest) -> Result<Vec<Allocation>> {
                     );
                     if *address == 0
                         || *size == 0
-                        || access.len() > MAX_ACCESS
                         || offset.checked_add(*size).is_none_or(|end| end > known.size)
                     {
                         bail!("invalid mapping or mapping out of bounds");
@@ -214,7 +213,6 @@ pub fn validate(participants: &Manifest) -> Result<Vec<Allocation>> {
                     address,
                     size,
                     offset,
-                    access,
                     ..
                 } => {
                     let multicast = multicasts
@@ -226,7 +224,6 @@ pub fn validate(participants: &Manifest) -> Result<Vec<Allocation>> {
                     );
                     if *address == 0
                         || *size == 0
-                        || access.len() > MAX_ACCESS
                         || offset
                             .checked_add(*size)
                             .is_none_or(|end| end > multicast.size)
