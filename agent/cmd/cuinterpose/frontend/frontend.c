@@ -72,50 +72,56 @@ static int cuda_library_family(const char *path) {
 // Accept only addresses from libcuda or libcudart in the base loader namespace.
 // Keep that CUDA library open so an application dlclose cannot invalidate a
 // function pointer cached by the frontend or Rust backend.
-static bool retain_cuda_library(void *selected, void *address) {
+enum CudaRetention { CUDA_OUT_OF_SCOPE, CUDA_RETAINED, CUDA_UNAVAILABLE };
+
+static enum CudaRetention retain_cuda_library(void *selected, void *address) {
     Dl_info info;
     if (!address || !dladdr(address, &info))
-        return false;
+        return CUDA_OUT_OF_SCOPE;
     int family = cuda_library_family(info.dli_fname);
     if (!family)
-        return false;
+        return CUDA_OUT_OF_SCOPE;
     if (selected != RTLD_DEFAULT && selected != RTLD_NEXT) {
         struct link_map *map = NULL;
         Lmid_t namespace;
         if (dlinfo(selected, RTLD_DI_LINKMAP, &map) != 0 || !map ||
             dlinfo(selected, RTLD_DI_LMID, &namespace) != 0 || namespace != LM_ID_BASE ||
             cuda_library_family(map->l_name) != family)
-            return false;
+            return CUDA_OUT_OF_SCOPE;
     }
     void *handle = dlopen(info.dli_fname, RTLD_LAZY | RTLD_NOLOAD);
     if (!handle) {
         atomic_store(&failed, true);
-        return false;
+        return CUDA_UNAVAILABLE;
     }
     struct link_map *map = NULL;
     if (dlinfo(handle, RTLD_DI_LINKMAP, &map) != 0 || !map ||
         (void *)map->l_addr != info.dli_fbase) {
         dlclose(handle);
-        return false;
+        return CUDA_OUT_OF_SCOPE;
+    }
+    if (atomic_load(&failed)) {
+        dlclose(handle);
+        return CUDA_UNAVAILABLE;
     }
     struct CudaLibrary *head = atomic_load(&cuda_libraries);
     for (struct CudaLibrary *node = head; node; node = node->next) {
         if (node->handle == handle) {
             dlclose(handle);
-            return true;
+            return CUDA_RETAINED;
         }
     }
     struct CudaLibrary *node = malloc(sizeof(*node));
     if (!node) {
         dlclose(handle);
         atomic_store(&failed, true);
-        return false;
+        return CUDA_UNAVAILABLE;
     }
     node->handle = handle;
     do {
         node->next = head;
     } while (!atomic_compare_exchange_weak(&cuda_libraries, &head, node));
-    return true;
+    return CUDA_RETAINED;
 }
 
 static void *resolve(const char *name) {
@@ -139,7 +145,7 @@ static void *resolve(const char *name) {
     if (!handle)
         return NULL;
     address = lookup(handle, name);
-    if (!retain_cuda_library(handle, address))
+    if (retain_cuda_library(handle, address) != CUDA_RETAINED)
         address = NULL;
     dlclose(handle);
     return address;
@@ -181,11 +187,13 @@ static const struct BackendAbi *load_backend(void **reference) {
 }
 
 static const struct BackendAbi *backend(void) {
-    if (atomic_load(&failed) || atomic_load(&backend_unavailable))
+    if (atomic_load(&failed))
         return NULL;
     const struct BackendAbi *api = atomic_load(&backend_api);
     if (api)
         return api;
+    if (atomic_load(&backend_unavailable))
+        return NULL;
     // Refuse same-thread constructor reentry before dlopen has finished. Other
     // threads may load independently: glibc serializes DSO construction, and
     // the ABI handshake is idempotent. Never wait under a shim lock around dlopen.
@@ -203,7 +211,10 @@ static const struct BackendAbi *backend(void) {
             api = expected;
         }
     } else {
-        atomic_store(&backend_unavailable, true);
+        // A failed private load must not hide another caller's published table.
+        api = atomic_load(&backend_api);
+        if (!api)
+            atomic_store(&backend_unavailable, true);
     }
     loading_backend = false;
     return api;
@@ -299,8 +310,12 @@ static void *replacement(const char *name) {
 
 API void *dlsym(void *handle, const char *name) {
     void *address = lookup(handle, name);
-    if (!address || !retain_cuda_library(handle, address))
-        return atomic_load(&failed) ? NULL : address;
+    enum CudaRetention retained = retain_cuda_library(handle, address);
+    // A broken shim must not break unrelated or out-of-scope loader lookups.
+    if (retained == CUDA_OUT_OF_SCOPE)
+        return address;
+    if (retained == CUDA_UNAVAILABLE || atomic_load(&failed))
+        return NULL;
     void *wrapper = replacement(name);
     return wrapper ? wrapper : address;
 }
@@ -327,7 +342,8 @@ static CUresult finish_query(const char *name, void **output) {
                 (strcmp(name, "cuMulticastBindMem") == 0 && strcmp(actual, "cuMulticastBindMem_v2") == 0) ||
                 (strcmp(name, "cuMulticastBindAddr") == 0 && strcmp(actual, "cuMulticastBindAddr_v2") == 0);
             void *candidate = same ? replacement(actual) : NULL;
-            if (candidate && (*output == candidate || retain_cuda_library(RTLD_DEFAULT, *output)))
+            if (candidate && (*output == candidate ||
+                              retain_cuda_library(RTLD_DEFAULT, *output) == CUDA_RETAINED))
                 wrapper = candidate;
         }
         if (!wrapper) {
