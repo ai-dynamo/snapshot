@@ -79,7 +79,7 @@ HEADER
 
     # Fold in the license texts the Dockerfile stages separately, so this file
     # is self-contained.
-    for extra in /legal/CRIU/COPYING /legal/cuda-checkpoint/LICENSE; do
+    for extra in /legal/CRIU/COPYING /legal/cuda-checkpoint/LICENSE /legal/gnu-tar/COPYING; do
         [ -f "$extra" ] || continue
         echo
         echo "================================================================================"
