@@ -26,7 +26,6 @@ pub enum Event {
     SaveAllocations(Transfer),
     PrepareUnicast,
     StateWrite,
-    Rendezvous,
     LoadAllocations(Transfer),
     RestoreUnicast,
     RestoreMulticast,
