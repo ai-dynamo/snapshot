@@ -88,12 +88,12 @@ else:
         assert query(*args) == 0 and output.value
 
 activate()
-parent = inspect()["participant"]
+parent = inspect()["namespace_pid"]
 if mode == "concurrent":
     inode = path.stat().st_ino
     for _ in range(16):
         assert initialize(0) == 0
-        assert inspect()["participant"] == parent
+        assert inspect()["namespace_pid"] == parent
     assert path.stat().st_ino == inode
     assert set(path.parent.glob("cuinterpose-*.sock")) == sockets_before | {path}
     # Private loser workers retire asynchronously; initialization.py checks
@@ -110,12 +110,12 @@ if child == 0:
             plugin.fixture_join_generation_worker()
         else:
             activate()
-        assert inspect()["participant"] != parent
+        assert inspect()["namespace_pid"] != parent
         os._exit(0)
     except BaseException:
         import traceback
         traceback.print_exc()
         os._exit(1)
 assert os.waitpid(child, 0)[1] == 0
-assert inspect()["participant"] == parent
+assert inspect()["namespace_pid"] == parent
 print(f"PASS actual Rust endpoint {mode}: parent and child, no VMM")

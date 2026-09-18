@@ -42,10 +42,10 @@ def main():
                 raw = u64()
                 assert cuda.cuMemImportFromShareableHandle(c.byref(raw), foreign.fileno(), 1) == 0
         coordinator = subprocess.run([
-            os.environ["CUINTERPOSE_COORDINATOR"], "--prepare", "--proc-root", "/proc",
+            os.environ["CUINTERPOSE_COORDINATOR"], "--prepare",
             "--checkpoint-dir", os.environ["SNAPSHOT_CONTROL_DIR"],
             "--control-dir", os.environ["SNAPSHOT_CONTROL_DIR"],
-            "--process", str(os.getpid()), str(os.getpid()),
+            "--process", str(os.getpid()),
         ], capture_output=True, text=True)
         assert coordinator.returncode != 0, coordinator
         inspection = command("inspect")
@@ -61,15 +61,25 @@ def main():
                 opened.append(os.open("/dev/null", os.O_RDONLY))
         except OSError:
             pass
-        ticket = c.c_int(-1)
-        assert cuda.cuMemExportToShareableHandle(c.byref(ticket), handle, 1, 0) != 0
+        virtual_shareable_handle = c.c_int(-1)
+        assert (
+            cuda.cuMemExportToShareableHandle(
+                c.byref(virtual_shareable_handle), handle, 1, 0
+            )
+            != 0
+        )
         for fd in opened:
             os.close(fd)
         allocation = next(record["allocation"] for record in command("inspect")["entries"]
                           if "allocation" in record)
-        assert allocation["logical_handle_count"] == 1
-        assert cuda.cuMemExportToShareableHandle(c.byref(ticket), handle, 1, 0) == 0
-        os.close(ticket.value)
+        assert allocation["virtual_allocation_handle_count"] == 1
+        assert (
+            cuda.cuMemExportToShareableHandle(
+                c.byref(virtual_shareable_handle), handle, 1, 0
+            )
+            == 0
+        )
+        os.close(virtual_shareable_handle.value)
         return
     if mode == "tracking":
         retained = u64()
@@ -77,7 +87,7 @@ def main():
         assert retained.value != handle.value
         allocation = next(record["allocation"] for record in command("inspect")["entries"]
                           if "allocation" in record)
-        assert allocation["logical_handle_count"] == 2
+        assert allocation["virtual_allocation_handle_count"] == 2
         properties = Properties()
         assert cuda.cuMemGetAllocationPropertiesFromHandle(c.byref(properties), retained) == 0
         assert properties.handles == 1
@@ -109,9 +119,14 @@ def main():
     if mode == "exports":
         descriptors = []
         def export():
-            ticket = c.c_int(-1)
-            assert cuda.cuMemExportToShareableHandle(c.byref(ticket), handle, 1, 0) == 0
-            descriptors.append(ticket.value)
+            virtual_shareable_handle = c.c_int(-1)
+            assert (
+                cuda.cuMemExportToShareableHandle(
+                    c.byref(virtual_shareable_handle), handle, 1, 0
+                )
+                == 0
+            )
+            descriptors.append(virtual_shareable_handle.value)
         workers = [threading.Thread(target=export) for _ in range(8)]
         for worker in workers:
             worker.start()
@@ -125,19 +140,29 @@ def main():
             os.close(fd)
         allocation = next(record["allocation"] for record in command("inspect")["entries"]
                           if "allocation" in record)
-        assert allocation["logical_handle_count"] == 1
+        assert allocation["virtual_allocation_handle_count"] == 1
         return
     shared = mode in ("shared", "no-context")
     if shared:
-        ticket = c.c_int(-1)
-        assert cuda.cuMemExportToShareableHandle(c.byref(ticket), handle, 1, 0) == 0
+        virtual_shareable_handle = c.c_int(-1)
+        assert (
+            cuda.cuMemExportToShareableHandle(
+                c.byref(virtual_shareable_handle), handle, 1, 0
+            )
+            == 0
+        )
         if mode != "no-context":
             imported = u64()
-            assert cuda.cuMemImportFromShareableHandle(c.byref(imported), ticket.value, 1) == 0
+            assert (
+                cuda.cuMemImportFromShareableHandle(
+                    c.byref(imported), virtual_shareable_handle.value, 1
+                )
+                == 0
+            )
             allocation = next(record["allocation"] for record in command("inspect")["entries"]
                               if "allocation" in record)
-            assert allocation["logical_handle_count"] == 2
-        os.close(ticket.value)
+            assert allocation["virtual_allocation_handle_count"] == 2
+        os.close(virtual_shareable_handle.value)
         if mode == "no-context":
             assert cuda.cuCtxSetCurrent(7) == 0
     else:

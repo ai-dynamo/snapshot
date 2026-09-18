@@ -88,7 +88,6 @@ func TestPrepareCuinterposeRejectsInvalidTargetPIDBeforeOpeningInputs(t *testing
 		"/missing-proc",
 		0,
 		[]int{1},
-		[]int{1},
 		"/missing-coordinator",
 		logr.Discard(),
 	)
@@ -116,12 +115,13 @@ func TestRemoveStaleCuinterposeSockets(t *testing.T) {
 	control := shortTempDir(t)
 	listenUnix(t, filepath.Join(control, cuinterposeSocketName(7)))
 	listenUnix(t, filepath.Join(control, cuinterposeSocketName(8)))
+	listenUnix(t, filepath.Join(control, cuinterposeSocketName(9)))
 	for _, keep := range []string{"restore-complete", "cuda-checkpoint-job", "other-1.sock"} {
 		if err := os.WriteFile(filepath.Join(control, keep), []byte("x"), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	removed, err := RemoveStaleCuinterposeSockets(control)
+	removed, err := RemoveStaleCuinterposeSockets(control, []int{7, 8})
 	if err != nil {
 		t.Fatalf("RemoveStaleCuinterposeSockets() error = %v", err)
 	}
@@ -133,11 +133,11 @@ func TestRemoveStaleCuinterposeSockets(t *testing.T) {
 	for _, entry := range entries {
 		names = append(names, entry.Name())
 	}
-	if strings.Join(names, ",") != "cuda-checkpoint-job,other-1.sock,restore-complete" {
+	if strings.Join(names, ",") != "cuda-checkpoint-job,cuinterpose-9.sock,other-1.sock,restore-complete" {
 		t.Fatalf("unexpected leftovers: %v", names)
 	}
-	if _, err := RemoveStaleCuinterposeSockets(filepath.Join(control, "missing")); err == nil {
-		t.Fatal("a missing control directory must be an error, not a silent no-op")
+	if _, err := RemoveStaleCuinterposeSockets(control, []int{0}); err == nil {
+		t.Fatal("a zero namespace PID must be rejected")
 	}
 }
 
@@ -224,7 +224,6 @@ func TestCoordinatorArgvContractAndReports(t *testing.T) {
 		t.TempDir(),
 		procRoot,
 		4242,
-		[]int{4242, 4243},
 		[]int{7, 9},
 		binary,
 		testr.New(t),
@@ -234,9 +233,9 @@ func TestCoordinatorArgvContractAndReports(t *testing.T) {
 	}
 	argv, _ := os.ReadFile(argvFile)
 	want := strings.Join([]string{
-		"--prepare", "--proc-root", "", "--checkpoint-dir", "/proc/self/fd/4",
+		"--prepare", "--checkpoint-dir", "/proc/self/fd/4",
 		"--control-dir", podcontract.SnapshotControlMountPath,
-		"--process", "4242", "7", "--process", "4243", "9", "",
+		"--process", "7", "--process", "9", "",
 	}, "\n")
 	if string(argv) != want {
 		t.Fatalf("argv:\n%s\nwant:\n%s", argv, want)
@@ -262,20 +261,20 @@ func TestCoordinatorArgvContractAndReports(t *testing.T) {
 		t.Fatalf("nsenter argv:\n%s\nwant prefix:\n%s", nsenterArgv, wantNSenterPrefix)
 	}
 
-	// Restore already runs inside the restored namespaces: no proc root.
+	// Restore already runs inside the restored namespaces.
 	binary, argvFile = fakeCoordinator(t, 0)
-	if _, err := RestoreCuinterpose(context.Background(), "/tmp/checkpoint", []int{100}, []int{1}, binary, logr.Discard()); err != nil {
+	if _, err := RestoreCuinterpose(context.Background(), "/tmp/checkpoint", []int{1}, binary, logr.Discard()); err != nil {
 		t.Fatalf("RestoreCuinterpose() error = %v", err)
 	}
 	argv, _ = os.ReadFile(argvFile)
-	if !strings.HasPrefix(string(argv), "--restore\n--proc-root\n\n--checkpoint-dir\n/tmp/checkpoint\n--control-dir\n"+podcontract.SnapshotControlMountPath+"\n") {
+	if !strings.HasPrefix(string(argv), "--restore\n--checkpoint-dir\n/tmp/checkpoint\n--control-dir\n"+podcontract.SnapshotControlMountPath+"\n") {
 		t.Fatalf("restore argv:\n%s", argv)
 	}
 }
 
 func TestCoordinatorFailureReportsStderrAndCompletedPhases(t *testing.T) {
 	binary, _ := fakeCoordinator(t, 3)
-	args, err := cuinterposeArgs("prepare", "/c", "/p", podcontract.SnapshotControlMountPath, []int{1}, []int{1})
+	args, err := cuinterposeArgs("prepare", "/c", podcontract.SnapshotControlMountPath, []int{1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,12 +293,12 @@ func TestCoordinatorFailureReportsStderrAndCompletedPhases(t *testing.T) {
 	}
 }
 
-func TestCuinterposeArgsRejectsEmptyOrMismatchedPIDs(t *testing.T) {
-	if _, err := cuinterposeArgs("prepare", "/c", "/p", "/snapshot-control", nil, nil); err == nil {
+func TestCuinterposeArgsRejectsEmptyOrInvalidPIDs(t *testing.T) {
+	if _, err := cuinterposeArgs("prepare", "/c", "/snapshot-control", nil); err == nil {
 		t.Fatal("no processes must be an error")
 	}
-	if _, err := cuinterposeArgs("prepare", "/c", "/p", "/snapshot-control", []int{1, 2}, []int{1}); err == nil {
-		t.Fatal("mismatched PID lists must be an error")
+	if _, err := cuinterposeArgs("prepare", "/c", "/snapshot-control", []int{0}); err == nil {
+		t.Fatal("zero namespace PID must be an error")
 	}
 }
 
@@ -311,11 +310,18 @@ func TestGoConstantsMatchTheRustSources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	protocol, err := os.ReadFile(filepath.Join(root, "protocol", "src", "lib.rs"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	coordinator, err := os.ReadFile(filepath.Join(root, "coordinator", "src", "main.rs"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, value := range []string{cuinterposeSocketPrefix, podcontract.SnapshotControlMountPath, podcontract.SnapshotControlDirEnv} {
+	if !strings.Contains(string(protocol), cuinterposeSocketPrefix) {
+		t.Errorf("Rust protocol lacks endpoint contract %q", cuinterposeSocketPrefix)
+	}
+	for _, value := range []string{podcontract.SnapshotControlMountPath, podcontract.SnapshotControlDirEnv} {
 		if !strings.Contains(string(core), value) {
 			t.Errorf("Rust core lacks endpoint contract %q", value)
 		}

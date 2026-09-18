@@ -37,9 +37,6 @@ WORKER_TIMEOUT_SECONDS = 240
 SOCKET_PREFIX = "cuinterpose-"
 STATE_FILENAME = "cuinterpose.state"
 CONTROL_DIR_ENV = "SNAPSHOT_CONTROL_DIR"
-PARTICIPANT_ID_ENV = "CUINTERPOSE_PARTICIPANT_ID"
-# 32 lowercase hex digits; the shim accepts it as the parent's identity.
-PARENT_PARTICIPANT_ID = "a" * 32
 
 
 class Tools(NamedTuple):
@@ -90,15 +87,13 @@ def run_coordinator(
     command = [
         str(coordinator),
         operation,
-        "--proc-root",
-        "",
         "--checkpoint-dir",
         str(checkpoint_dir),
         "--control-dir",
         str(control_dir),
     ]
     for process_id in process_ids:
-        command.extend(["--process", str(process_id), str(process_id)])
+        command.extend(["--process", str(process_id)])
     environment = os.environ.copy()
     environment.pop("LD_PRELOAD", None)
     result = subprocess.run(
@@ -254,7 +249,6 @@ class Workload:
         environment.update(
             {
                 "CUDA_VISIBLE_DEVICES": ",".join(self.environment.gpus),
-                PARTICIPANT_ID_ENV: PARENT_PARTICIPANT_ID,
                 CONTROL_DIR_ENV: str(self.control_dir),
                 "LD_PRELOAD": str(self.environment.tools.interposer),
                 "PYTHONFAULTHANDLER": "1",

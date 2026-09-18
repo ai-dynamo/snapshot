@@ -26,12 +26,12 @@ cuda.cuIpcOpenMemHandle_v2.argtypes = [c.POINTER(u64), Handle, c.c_uint]
 cuda.cuIpcCloseMemHandle.argtypes = [u64]
 
 
-def check_import(ticket):
+def check_import(virtual_ipc_mem_handle):
     address, repeated = u64(), u64()
-    assert cuda.cuIpcOpenMemHandle_v2(c.byref(address), ticket, 0) != 0
+    assert cuda.cuIpcOpenMemHandle_v2(c.byref(address), virtual_ipc_mem_handle, 0) != 0
     assert cuda.cuIpcOpenMemHandle_v2(c.byref(address), Handle(), 1) != 0
-    assert cuda.cuIpcOpenMemHandle_v2(c.byref(address), ticket, 1) == 0
-    assert cuda.cuIpcOpenMemHandle_v2(c.byref(repeated), ticket, 1) == 0
+    assert cuda.cuIpcOpenMemHandle_v2(c.byref(address), virtual_ipc_mem_handle, 1) == 0
+    assert cuda.cuIpcOpenMemHandle_v2(c.byref(repeated), virtual_ipc_mem_handle, 1) == 0
     assert address.value == repeated.value
     assert cuda.fakeMappedCount() == 1
     assert cuda.cuMemFree_v2(address) != 0
@@ -51,13 +51,15 @@ else:
     base, size = u64(), c.c_size_t()
     assert cuda.cuMemGetAddressRange_v2(c.byref(base), c.byref(size), shared.value + 1) == 0
     assert base.value == shared.value and size.value == 17
-    ticket, repeated = Handle(), Handle()
-    assert cuda.cuIpcGetMemHandle(c.byref(ticket), shared.value + 1) != 0
-    assert cuda.cuIpcGetMemHandle(c.byref(ticket), shared) == 0
+    virtual_ipc_mem_handle, repeated = Handle(), Handle()
+    assert cuda.cuIpcGetMemHandle(c.byref(virtual_ipc_mem_handle), shared.value + 1) != 0
+    assert cuda.cuIpcGetMemHandle(c.byref(virtual_ipc_mem_handle), shared) == 0
     assert cuda.cuIpcGetMemHandle(c.byref(repeated), shared) == 0
-    assert bytes(ticket) == bytes(repeated)
+    assert bytes(virtual_ipc_mem_handle) == bytes(repeated)
     assert cuda.fakeExportCalls() == 1
-    subprocess.run([sys.executable, __file__, bytes(ticket).hex()], check=True)
+    subprocess.run(
+        [sys.executable, __file__, bytes(virtual_ipc_mem_handle).hex()], check=True
+    )
     for operation in LIFECYCLE[:3]:
         command(operation)
     assert cuda.fakeMappedCount() == 1  # Private malloc stays native-owned.
@@ -66,11 +68,15 @@ else:
     for operation in LIFECYCLE[3:]:
         command(operation)
     assert cuda.fakeMappedCount() == 2
-    subprocess.run([sys.executable, __file__, bytes(ticket).hex()], check=True)
+    subprocess.run(
+        [sys.executable, __file__, bytes(virtual_ipc_mem_handle).hex()], check=True
+    )
     cuda.fakeFailNext(b"cuCtxSynchronize")
     assert cuda.cuMemFree_v2(shared) != 0
     assert cuda.fakeMappedCount() == 2
     assert cuda.cuMemFree_v2(shared) == 0
     assert cuda.cuMemFree_v2(private) == 0
     assert not command("inspect")["entries"]
-    print("PASS memory IPC: private memory, peer tickets, repeat opens, restore, cleanup")
+    print(
+        "PASS memory IPC: private memory, peer virtual handles, repeat opens, restore, cleanup"
+    )

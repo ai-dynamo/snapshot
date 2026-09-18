@@ -4,7 +4,7 @@
 //! Behavioral cases from the C coordinator suite, using the typed protocol.
 use cuinterpose_protocol::{
     AllocationId, AllocationReference, BindingSource, BindingVersion, Manifest, MemberRange,
-    Operation, Reply, Request, Response, StateEntry, decode, receive, send,
+    Operation, Record, Reply, Request, Response, decode, receive, send,
 };
 use std::os::unix::net::UnixListener;
 use std::{
@@ -22,21 +22,21 @@ const ID: AllocationId = [1; 16];
 const GROUP: AllocationId = [2; 16];
 const ALLOCATION: AllocationReference = AllocationReference {
     id: ID,
-    creator: [1; 16],
+    creator_pid: 1,
 };
 const MULTICAST: AllocationReference = AllocationReference {
     id: GROUP,
-    creator: [1; 16],
+    creator_pid: 1,
 };
 
 #[derive(Default)]
 struct Model {
-    entries: Vec<StateEntry>,
+    entries: Vec<Record>,
     raw: u64,
     unsupported: u64,
     fail: Option<Operation>,
     operations: Vec<String>,
-    identity: u8,
+    namespace_pid: u32,
 }
 
 struct Fixture {
@@ -48,7 +48,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(count: usize, rendezvous: Option<Operation>) -> Self {
+    fn new(count: usize, barrier: Option<Operation>) -> Self {
         let temporary = tempfile::tempdir().unwrap();
         let directory = temporary.path().to_path_buf();
         let stop = Arc::new(AtomicBool::new(false));
@@ -62,12 +62,11 @@ impl Fixture {
                     .unwrap();
             listener.set_nonblocking(true).unwrap();
             let model = Arc::new(Mutex::new(Model {
-                identity: index as u8 + 1,
+                namespace_pid: index as u32 + 1,
                 ..Model::default()
             }));
             models.push(model.clone());
             let (stop, gate, released) = (stop.clone(), gate.clone(), released.clone());
-            let server_directory = directory.clone();
             servers.push(thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
                     let stream = match listener.accept() {
@@ -85,44 +84,34 @@ impl Fixture {
                     assert!(fd.is_none());
                     let mut model = model.lock().unwrap();
                     let (operation, response) = match request {
-                        Request::Identify => (None, Reply::Identified),
-                        Request::Rendezvous {
-                            participant,
-                            participants,
-                        } => {
-                            assert_eq!(participant, [model.identity; 16]);
-                            assert_eq!(participants.len(), count);
-                            assert_eq!(
-                                participants[&participant],
-                                PathBuf::from(format!(
-                                    "{}/cuinterpose-{}.sock",
-                                    server_directory.display(),
-                                    index + 1
-                                ))
-                            );
-                            (None, Reply::Ready)
+                        Request::Inspect { namespace_pid } => {
+                            assert_eq!(namespace_pid, index as u32 + 1);
+                            (
+                                None,
+                                Reply::Inspection {
+                                    entries: model.entries.clone(),
+                                    live_raw_imports: model.raw,
+                                    unsupported_creations: model.unsupported,
+                                },
+                            )
                         }
-                        Request::Inspect { .. } => (
-                            None,
-                            Reply::Inspection {
-                                entries: model.entries.clone(),
-                                live_raw_imports: model.raw,
-                                unsupported_creations: model.unsupported,
-                            },
-                        ),
-                        Request::Execute { operation, .. } => (
-                            Some(operation),
-                            Reply::Completed {
-                                operation,
-                                bytes: 0,
-                                copy_us: 0,
-                            },
-                        ),
+                        Request::Execute {
+                            namespace_pid,
+                            operation,
+                        } => {
+                            assert_eq!(namespace_pid, index as u32 + 1);
+                            (
+                                Some(operation),
+                                Reply::Completed {
+                                    operation,
+                                    bytes: 0,
+                                    copy_us: 0,
+                                },
+                            )
+                        }
                         Request::Export { .. } => panic!("coordinator must not request CUDA FDs"),
                     };
                     model.operations.push(match &response {
-                        Reply::Identified => "identify".into(),
-                        Reply::Ready => "rendezvous".into(),
                         Reply::Inspection { .. } => "inspect".into(),
                         Reply::Completed { operation, .. } => serde_json::to_value(operation)
                             .unwrap()
@@ -132,7 +121,7 @@ impl Fixture {
                         _ => panic!("unexpected response"),
                     });
                     let response = Response {
-                        participant: [model.identity; 16],
+                        namespace_pid: model.namespace_pid,
                         result: if model.fail.is_some() && model.fail == operation {
                             Err("injected participant failure".into())
                         } else {
@@ -140,7 +129,7 @@ impl Fixture {
                         },
                     };
                     drop(model);
-                    if rendezvous.is_some() && rendezvous == operation {
+                    if barrier.is_some() && barrier == operation {
                         let mut arrived = gate.0.lock().unwrap();
                         *arrived += 1;
                         gate.1.notify_all();
@@ -157,7 +146,7 @@ impl Fixture {
                             released.store(true, Ordering::SeqCst);
                         }
                     } else if matches!(
-                        (rendezvous, operation),
+                        (barrier, operation),
                         (
                             Some(Operation::PrepareMulticast),
                             Some(Operation::SaveAllocations)
@@ -192,12 +181,12 @@ impl Fixture {
     fn run(&self, mode: &str) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cuinterpose-coordinator"));
         command
-            .args([mode, "--proc-root", "", "--checkpoint-dir"])
+            .args([mode, "--checkpoint-dir"])
             .arg(&self.directory)
             .arg("--control-dir")
             .arg(&self.directory);
         for index in 1..=self.models.len() {
-            command.args(["--process", &index.to_string(), &index.to_string()]);
+            command.args(["--process", &index.to_string()]);
         }
         let output = command.output().unwrap();
         if output.status.success() {
@@ -207,7 +196,6 @@ impl Fixture {
                 .collect();
             let phases: &[&str] = if mode == "--prepare" {
                 &[
-                    "rendezvous",
                     "inspect",
                     "validate",
                     "prepare_multicast",
@@ -217,7 +205,7 @@ impl Fixture {
                 ]
             } else {
                 &[
-                    "rendezvous",
+                    "inspect",
                     "load_allocations",
                     "restore_unicast",
                     "restore_multicast",
@@ -250,23 +238,23 @@ impl Drop for Fixture {
     }
 }
 
-fn allocation(creator: u8) -> StateEntry {
-    StateEntry::Allocation {
+fn allocation(creator: u8) -> Record {
+    Record::Allocation {
         allocation: AllocationReference {
             id: ID,
-            creator: [creator; 16],
+            creator_pid: creator.into(),
         },
         content: false,
         size: 4096,
         allocation_type: 1,
         handle_types: 1,
         location: (1, 0),
-        logical_handle_count: 1,
+        virtual_allocation_handle_count: 1,
     }
 }
 
-fn mapping(size: u64, address: u64) -> StateEntry {
-    StateEntry::Mapping {
+fn mapping(size: u64, address: u64) -> Record {
+    Record::Mapping {
         allocation: ALLOCATION,
         address,
         size,
@@ -289,19 +277,19 @@ fn preflight_refusals_do_not_mutate_or_publish_state() {
                 "member" => {
                     model.entries = vec![
                         allocation(1),
-                        StateEntry::Multicast {
+                        Record::Multicast {
                             allocation: MULTICAST,
                             devices: 1,
                             size: 16384,
                             handle_types: 1,
                             flags: 0,
-                            logical_handle_count: 1,
+                            virtual_multicast_handle_count: 1,
                         },
-                        StateEntry::MulticastDevice {
+                        Record::MulticastDevice {
                             allocation: MULTICAST,
                             device: 0,
                         },
-                        StateEntry::MulticastBinding {
+                        Record::MulticastBinding {
                             allocation: MULTICAST,
                             source: BindingSource::Memory(MemberRange {
                                 allocation: ALLOCATION,
@@ -322,7 +310,7 @@ fn preflight_refusals_do_not_mutate_or_publish_state() {
         assert!(!output.status.success(), "{case}: {output:?}");
         assert_eq!(
             fixture.models[0].lock().unwrap().operations,
-            ["identify", "rendezvous", "inspect"],
+            ["inspect"],
             "{case}"
         );
         assert!(!fixture.directory.join("cuinterpose.state").exists());
@@ -337,7 +325,7 @@ fn failed_phase_stops_before_next_phase_and_state_publication() {
     for model in &fixture.models {
         assert_eq!(
             model.lock().unwrap().operations,
-            ["identify", "rendezvous", "inspect", "prepare_multicast"]
+            ["inspect", "prepare_multicast"]
         );
     }
     assert!(!fixture.directory.join("cuinterpose.state").exists());
@@ -358,19 +346,13 @@ fn parallel_prepare_and_restore_barriers_preserve_canonical_state() {
         let participants: Manifest = decode(&state).unwrap();
         assert_eq!(participants.len(), 2);
         for (id, participant) in participants {
-            let mut expected = fixture.models[id[0] as usize - 1]
+            let mut expected = fixture.models[id as usize - 1]
                 .lock()
                 .unwrap()
                 .entries
                 .clone();
             expected.sort();
             assert_eq!(participant.entries, expected);
-            assert_eq!(
-                participant.socket_path,
-                fixture
-                    .directory
-                    .join(format!("cuinterpose-{}.sock", id[0]))
-            );
         }
         // Input record order is immaterial to final topology comparison.
         fixture.models[0].lock().unwrap().entries.reverse();
@@ -380,21 +362,17 @@ fn parallel_prepare_and_restore_barriers_preserve_canonical_state() {
             assert_eq!(
                 model.lock().unwrap().operations,
                 [
-                    "identify",
-                    "rendezvous",
                     "inspect",
                     "prepare_multicast",
                     "save_allocations",
                     "prepare_unicast",
-                    "identify",
-                    "rendezvous",
+                    "inspect",
                     "load_allocations",
                     "restore_unicast",
                     "restore_multicast_creators",
                     "restore_multicast_importers",
                     "restore_multicast_devices",
                     "restore_multicast_bindings",
-                    "identify",
                     "inspect",
                 ]
             );
@@ -420,7 +398,7 @@ fn restore_rejects_missing_corrupt_or_changed_state() {
                     b"not-cuinterpose-state\n",
                 )
                 .unwrap(),
-                "identity" => model.identity = 3,
+                "identity" => model.namespace_pid = 3,
                 "topology" => model.entries = vec![allocation(1), mapping(4096, 0x30000)],
                 _ => {}
             }
@@ -430,7 +408,7 @@ fn restore_rejects_missing_corrupt_or_changed_state() {
         let model = fixture.models[0].lock().unwrap();
         match case {
             "missing" | "corrupt" => assert!(model.operations.is_empty()),
-            "identity" => assert_eq!(model.operations, ["identify"]),
+            "identity" => assert_eq!(model.operations, ["inspect"]),
             "topology" => assert_eq!(model.operations.last(), Some(&"inspect".to_string())),
             _ => unreachable!(),
         }
@@ -441,53 +419,44 @@ fn restore_rejects_missing_corrupt_or_changed_state() {
 fn usage_errors() {
     for args in [
         vec![],
-        vec!["--prepare", "--proc-root", "", "--checkpoint-dir", "/tmp"],
+        vec!["--prepare", "--checkpoint-dir", "/tmp"],
         vec![
             "--prepare",
-            "--proc-root",
-            "",
             "--checkpoint-dir",
             "/tmp",
             "--control-dir",
             "relative",
             "--process",
             "1",
-            "1",
         ],
         vec![
             "--prepare",
-            "--proc-root",
-            "",
-            "--checkpoint-dir",
-            "/tmp",
-            "--control-dir",
-            "/tmp",
-            "--process",
-            "1",
-        ],
-        vec![
-            "--prepare",
-            "--proc-root",
-            "",
             "--checkpoint-dir",
             "/tmp",
             "--control-dir",
             "/tmp",
             "--process",
             "0",
+        ],
+        vec![
+            "--prepare",
+            "--checkpoint-dir",
+            "/tmp",
+            "--control-dir",
+            "/tmp",
+            "--process",
+            "1",
+            "--process",
             "1",
         ],
         vec![
             "--prepare",
-            "--proc-root",
-            "",
             "--checkpoint-dir",
             "/tmp",
             "--control-dir",
             "/tmp",
             "--process",
             "not-a-pid",
-            "1",
         ],
     ] {
         assert!(

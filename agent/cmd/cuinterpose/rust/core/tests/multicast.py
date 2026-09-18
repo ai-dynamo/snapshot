@@ -13,7 +13,7 @@ import threading
 from support import driver, props, Properties
 
 cuda = driver()
-from protocol_client import LIFECYCLE, command, read_ticket, request_export
+from protocol_client import LIFECYCLE, command, request_export
 
 
 class Multicast(c.Structure):
@@ -62,10 +62,10 @@ def main():
         assert inspection["entries"] == [] and inspection["unsupported_creations"] == 1
         assert cuda.cuMemRelease(group) == 0
         result = subprocess.run([
-            os.environ["CUINTERPOSE_COORDINATOR"], "--prepare", "--proc-root", "/proc",
+            os.environ["CUINTERPOSE_COORDINATOR"], "--prepare",
             "--control-dir", os.environ["SNAPSHOT_CONTROL_DIR"],
             "--checkpoint-dir", os.environ["SNAPSHOT_CONTROL_DIR"],
-            "--process", str(os.getpid()), str(os.getpid()),
+            "--process", str(os.getpid()),
         ], capture_output=True)
         assert result.returncode != 0
         command("inspect")
@@ -137,20 +137,24 @@ def main():
     else:
         assert cuda.cuMemMap(0x70000000, mapped_size, 0, group, 0) == 0
     if mode == "cached-export":
-        tickets = []
+        multicast_reference = next(
+            record["multicast"]["allocation"]
+            for record in command("inspect")["entries"]
+            if "multicast" in record
+        )
+        virtual_shareable_handles = []
         for handle in (member, group):
             fd = c.c_int(-1)
             assert cuda.cuMemExportToShareableHandle(c.byref(fd), handle, 1, 0) == 0
-            tickets.append(fd.value)
+            virtual_shareable_handles.append(fd.value)
         command("prepare_multicast")
-        multicast_ticket = read_ticket(tickets[1])
         path = f"{os.environ['SNAPSHOT_CONTROL_DIR']}/cuinterpose-{os.getpid()}.sock"
-        response, exported = request_export(path, multicast_ticket)
+        response, exported = request_export(path, multicast_reference)
         assert "Err" in response["result"] and exported is None
         assert cuda.fakeMulticastObjects() == 0
         assert cuda.fakeMulticastBindings(0) == 0
         assert cuda.fakeMappedCount() == 1, "member mapping remains until PREPARE_UNICAST"
-        for fd in tickets:
+        for fd in virtual_shareable_handles:
             os.close(fd)
         print("PASS multicast cached-export")
         return  # Deliberately leave the process mid-prepare, as the C case did.
@@ -167,12 +171,26 @@ def main():
         assert cuda.cuMemRetainAllocationHandle(c.byref(member), c.c_void_p(0x10000000)) == 0
     elif mode == "kind":
         path = f"{os.environ['SNAPSHOT_CONTROL_DIR']}/cuinterpose-{os.getpid()}.sock"
-        tickets = []
-        for handle, expected in ((member, "unicast_export"), (group, "multicast_export")):
+        records = command("inspect")["entries"]
+        unicast_reference = next(
+            record["allocation"]["allocation"]
+            for record in records
+            if "allocation" in record
+        )
+        multicast_reference = next(
+            record["multicast"]["allocation"]
+            for record in records
+            if "multicast" in record
+        )
+        virtual_shareable_handles = []
+        for handle, reference, expected in (
+            (member, unicast_reference, "unicast_export"),
+            (group, multicast_reference, "multicast_export"),
+        ):
             fd = c.c_int(-1)
             assert cuda.cuMemExportToShareableHandle(c.byref(fd), handle, 1, 0) == 0
-            tickets.append(fd.value)
-            response, exported = request_export(path, read_ticket(fd.value))
+            virtual_shareable_handles.append(fd.value)
+            response, exported = request_export(path, reference)
             assert exported is not None
             os.close(exported)
             reply = response["result"]["Ok"]
@@ -181,9 +199,9 @@ def main():
                 assert reply[expected]["devices"] == 1
         alias = u64()
         assert cuda.cuMemImportFromShareableHandle(
-            c.byref(alias), c.c_void_p(tickets[1]), 1) == 0
+            c.byref(alias), c.c_void_p(virtual_shareable_handles[1]), 1) == 0
         assert cuda.cuMemRelease(alias) == 0
-        for fd in tickets:
+        for fd in virtual_shareable_handles:
             os.close(fd)
         replay()
     elif mode == "access":
