@@ -33,7 +33,7 @@ pub enum BindingVersion {
 /// One entry in a participant's persisted CUDA state.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum StateEntry {
+pub enum Record {
     Allocation {
         allocation: AllocationReference,
         content: bool,
@@ -44,7 +44,7 @@ pub enum StateEntry {
         handle_types: u32,
         /// `CUmemAllocationProp::location` as `(type_, id)`.
         location: (u32, i32),
-        logical_handle_count: u64,
+        virtual_allocation_handle_count: u64,
     },
     Mapping {
         allocation: AllocationReference,
@@ -61,7 +61,7 @@ pub enum StateEntry {
         size: u64,
         handle_types: u64,
         flags: u64,
-        logical_handle_count: u64,
+        virtual_multicast_handle_count: u64,
     },
     MulticastDevice {
         allocation: AllocationReference,
