@@ -55,10 +55,10 @@ names = [task.joinpath("comm").read_text().strip() for task in Path("/proc/self/
 assert names.count("cuinterpose-pee") == names.count("cuinterpose-con") == 1, names
 path = root / f"cuinterpose-{os.getpid()}.sock"
 inode = path.stat().st_ino
-identity = reply(request(str(path), "handshake"))["participant"]
+identity = reply(request(str(path), "identify"))["participant"]
 for _ in range(16):
     assert cuda.cuInit(0) == 0
-    assert reply(request(str(path), "handshake"))["participant"] == identity
+    assert reply(request(str(path), "identify"))["participant"] == identity
     assert path.stat().st_ino == inode
 deadline = time.monotonic() + 2
 while len(list(Path("/proc/self/fd").iterdir())) != baseline_fds + 1 and time.monotonic() < deadline:

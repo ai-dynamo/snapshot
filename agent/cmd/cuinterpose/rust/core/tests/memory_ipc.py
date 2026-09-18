@@ -38,7 +38,7 @@ def check_import(ticket):
     assert cuda.cuIpcCloseMemHandle(address) == 0
     assert cuda.fakeMappedCount() == 1
     assert cuda.cuIpcCloseMemHandle(address) == 0
-    assert not command("inspect")["records"]
+    assert not command("inspect")["entries"]
     assert cuda.cuIpcCloseMemHandle(address) != 0
 
 
@@ -72,5 +72,5 @@ else:
     assert cuda.fakeMappedCount() == 2
     assert cuda.cuMemFree_v2(shared) == 0
     assert cuda.cuMemFree_v2(private) == 0
-    assert not command("inspect")["records"]
+    assert not command("inspect")["entries"]
     print("PASS memory IPC: private memory, peer tickets, repeat opens, restore, cleanup")
