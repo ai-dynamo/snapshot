@@ -4,10 +4,13 @@
 use super::Result;
 use anyhow::{Context, bail, ensure};
 use cuinterpose_protocol::{
-    AllocationId, AllocationReference, BindingSource, CUmemAllocationHandleType, Manifest,
-    StateEntry,
+    AllocationId, AllocationReference, BindingSource, Manifest, StateEntry,
 };
 use std::collections::BTreeMap;
+
+// CUmemAllocationHandleType values used by the Linux FD transport.
+const CU_MEM_HANDLE_TYPE_NONE: u32 = 0;
+const CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR: u32 = 1;
 
 pub struct Allocation {
     pub reference: AllocationReference,
@@ -46,11 +49,8 @@ pub fn validate(participants: &Manifest) -> Result<Vec<Allocation>> {
                 } => {
                     if allocation.creator == *participant_id {
                         ensure!(
-                            (*handle_types
-                                == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
-                                || (*handle_types
-                                    == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_NONE
-                                    && *content))
+                            (*handle_types == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+                                || (*handle_types == CU_MEM_HANDLE_TYPE_NONE && *content))
                                 && *size > 0,
                             "invalid allocation creator"
                         );
@@ -71,15 +71,15 @@ pub fn validate(participants: &Manifest) -> Result<Vec<Allocation>> {
                 }
                 StateEntry::Multicast {
                     allocation,
-                    properties,
+                    devices,
+                    size,
+                    handle_types,
+                    flags,
                     ..
                 } => {
-                    if properties.handleTypes
-                        != u64::from(
-                            CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0,
-                        )
-                        || properties.size == 0
-                        || properties.numDevices == 0
+                    if *handle_types != u64::from(CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR)
+                        || *size == 0
+                        || *devices == 0
                     {
                         bail!("invalid multicast properties");
                     }
@@ -87,21 +87,21 @@ pub fn validate(participants: &Manifest) -> Result<Vec<Allocation>> {
                         .entry(allocation.id)
                         .or_insert_with(|| Multicast {
                             reference: *allocation,
-                            size: properties.size as u64,
-                            handle_types: properties.handleTypes,
-                            flags: properties.flags,
-                            num_devices: properties.numDevices,
+                            size: *size,
+                            handle_types: *handle_types,
+                            flags: *flags,
+                            num_devices: *devices,
                             creators: 0,
                             devices: BTreeMap::new(),
                         });
                     if multicast.reference != *allocation
-                        || multicast.handle_types != properties.handleTypes
-                        || multicast.flags != properties.flags
-                        || multicast.num_devices != properties.numDevices
+                        || multicast.handle_types != *handle_types
+                        || multicast.flags != *flags
+                        || multicast.num_devices != *devices
                     {
                         bail!("inconsistent multicast properties");
                     }
-                    multicast.size = multicast.size.max(properties.size as u64);
+                    multicast.size = multicast.size.max(*size);
                     if participant_id == &allocation.creator {
                         multicast.creators += 1;
                     }
