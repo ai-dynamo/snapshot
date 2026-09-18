@@ -12,11 +12,11 @@ mod control;
 mod driver;
 mod export_cache;
 mod host_carrier;
-mod logical_handle;
 mod multicast;
 mod process;
 mod state;
-mod ticket;
+mod virtual_allocation_handle;
+mod virtual_shareable_handle;
 
 use cudarc::driver::sys::CUresult::{
     CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_NOT_INITIALIZED, CUDA_ERROR_NOT_READY, CUDA_ERROR_UNKNOWN,

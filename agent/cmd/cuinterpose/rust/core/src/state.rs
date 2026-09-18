@@ -1,12 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Per-generation logical handles, mappings, and shared-allocation lifecycle state.
+//! Per-generation virtual allocation handles, mappings, and shared-allocation lifecycle state.
 //! The generation owns its locks and CUDA records; fork abandons rather than drops it.
 
-use super::ticket;
+use super::virtual_shareable_handle;
 use crate::driver::CudaError;
-use crate::logical_handle::{LOGICAL_HANDLE_MASK, LOGICAL_HANDLE_TAG};
+use crate::virtual_allocation_handle::{
+    VIRTUAL_ALLOCATION_HANDLE_MASK, VIRTUAL_ALLOCATION_HANDLE_TAG,
+};
 use cudarc::driver::sys::CUresult::{
     CUDA_ERROR_INVALID_HANDLE, CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_NOT_INITIALIZED,
     CUDA_ERROR_NOT_READY, CUDA_ERROR_NOT_SUPPORTED, CUDA_ERROR_OUT_OF_MEMORY, CUDA_ERROR_UNKNOWN,
@@ -261,7 +263,7 @@ pub struct State {
     pub mallocs: BTreeMap<u64, super::legacy_ipc::Mapping>,
     pub allocations: BTreeMap<AllocationId, Allocation>,
     pub multicasts: BTreeMap<AllocationId, super::multicast::Object>,
-    pub handles: BTreeMap<u64, AllocationId>,
+    pub virtual_allocation_handles: BTreeMap<u64, AllocationId>,
     pub mappings: BTreeMap<u64, Mapping>,
     pub raw: BTreeMap<u64, u32>,
     // Failed redundant-reference cleanup poisons capture, but ownership remains
@@ -272,12 +274,12 @@ pub struct State {
     pub arena: Option<super::host_carrier::Arena>,
     pub inflight: usize,
     pub pending_maps: Vec<(u64, usize)>,
-    next: u64,
+    next_virtual_allocation_handle: u64,
 }
 
 impl State {
-    pub fn inspect(&self) -> Result<Vec<cuinterpose_protocol::StateEntry>> {
-        use cuinterpose_protocol::StateEntry;
+    pub fn inspect(&self) -> Result<Vec<cuinterpose_protocol::Record>> {
+        use cuinterpose_protocol::Record;
         if self.phase != Phase::Active || self.inflight != 0 {
             return Err(CudaError::from(CUDA_ERROR_NOT_READY));
         }
@@ -296,14 +298,14 @@ impl State {
             .try_reserve_exact(count)
             .map_err(|_| CUDA_ERROR_OUT_OF_MEMORY)?;
         for allocation in self.allocations.values() {
-            let logical_handle_count = self
-                .handles
+            let virtual_allocation_handle_count = self
+                .virtual_allocation_handles
                 .values()
                 .filter(|id| **id == allocation.reference.id)
                 .count()
                 .try_into()
                 .map_err(|_| CUDA_ERROR_OUT_OF_MEMORY)?;
-            let record = StateEntry::Allocation {
+            let record = Record::Allocation {
                 allocation: allocation.reference,
                 content: allocation.owns_content(self.namespace_pid),
                 size: allocation.size as u64,
@@ -313,7 +315,7 @@ impl State {
                     allocation.properties.location.type_ as u32,
                     allocation.properties.location.id,
                 ),
-                logical_handle_count,
+                virtual_allocation_handle_count,
             };
             records.push(record);
         }
@@ -324,7 +326,7 @@ impl State {
             if self.multicasts.contains_key(&mapping.id) {
                 continue;
             }
-            let record = StateEntry::Mapping {
+            let record = Record::Mapping {
                 allocation: self.allocations[&mapping.id].reference,
                 address: mapping.address,
                 size: mapping.size as u64,
@@ -494,8 +496,9 @@ impl State {
                     .values_mut()
                     .filter(|a| a.reference.creator_pid != self.namespace_pid && a.checkpointed)
                 {
-                    let (raw, properties) = ticket::request(allocation.reference)
-                        .map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
+                    let (raw, properties) =
+                        virtual_shareable_handle::request_export(allocation.reference)
+                            .map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
                     if properties.is_some() {
                         return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
                     }
@@ -572,7 +575,7 @@ impl State {
                         cache()?.replace(allocation.reference.id, Some((fd, None)))?;
                     }
                     if !self
-                        .handles
+                        .virtual_allocation_handles
                         .values()
                         .any(|id| *id == allocation.reference.id)
                     {
@@ -592,13 +595,13 @@ impl State {
         Ok(())
     }
 
-    pub(super) fn mint(&mut self, id: AllocationId) -> Result<u64> {
-        if self.next & LOGICAL_HANDLE_MASK != 0 {
+    pub(super) fn mint_virtual_allocation_handle(&mut self, id: AllocationId) -> Result<u64> {
+        if self.next_virtual_allocation_handle & VIRTUAL_ALLOCATION_HANDLE_MASK != 0 {
             return Err(CudaError::from(CUDA_ERROR_OUT_OF_MEMORY));
         }
-        let handle = LOGICAL_HANDLE_TAG | self.next;
-        self.next += 1;
-        self.handles.insert(handle, id);
+        let handle = VIRTUAL_ALLOCATION_HANDLE_TAG | self.next_virtual_allocation_handle;
+        self.next_virtual_allocation_handle += 1;
+        self.virtual_allocation_handles.insert(handle, id);
         Ok(handle)
     }
 
@@ -614,7 +617,10 @@ impl State {
         if self.multicasts.contains_key(&id) {
             return super::multicast::settle(self, id);
         }
-        let handle_live = self.handles.values().any(|value| *value == id);
+        let handle_live = self
+            .virtual_allocation_handles
+            .values()
+            .any(|value| *value == id);
         let mapped = self.mappings.values().any(|mapping| mapping.id == id);
         let allocation = self
             .allocations
@@ -821,12 +827,12 @@ fn prepare_generation() -> Result<Box<Generation>> {
         mallocs: BTreeMap::new(),
         allocations: BTreeMap::new(),
         multicasts: BTreeMap::new(),
-        handles: BTreeMap::new(),
+        virtual_allocation_handles: BTreeMap::new(),
         mappings: BTreeMap::new(),
         raw: BTreeMap::new(),
         unreleased_handles: Vec::new(),
         unsupported: 0,
-        next: 1,
+        next_virtual_allocation_handle: 1,
         phase: Phase::Active,
         arena: None,
         inflight: 0,
@@ -902,10 +908,10 @@ pub fn cuMemCreate(
     if supported && state.phase != Phase::Active {
         return Err(CudaError::from(CUDA_ERROR_NOT_READY));
     }
-    // Reserve the logical identity before acquiring backing. Recoverable
+    // Reserve the virtual allocation identity before acquiring backing. Recoverable
     // metadata errors must not leave an unpublished CUDA allocation behind.
     let tracked = if supported {
-        if state.next & LOGICAL_HANDLE_MASK != 0 {
+        if state.next_virtual_allocation_handle & VIRTUAL_ALLOCATION_HANDLE_MASK != 0 {
             return Err(CudaError::from(CUDA_ERROR_OUT_OF_MEMORY));
         }
         Some(random()?)
@@ -922,7 +928,7 @@ pub fn cuMemCreate(
         }
         return Err(error);
     }
-    if driver & LOGICAL_HANDLE_MASK == LOGICAL_HANDLE_TAG {
+    if driver & VIRTUAL_ALLOCATION_HANDLE_MASK == VIRTUAL_ALLOCATION_HANDLE_TAG {
         let _ = unsafe { crate::driver::cuMemRelease(driver) };
         return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
     }
@@ -951,8 +957,8 @@ pub fn cuMemCreate(
         content_saved: false,
         pins: 0,
     };
-    let logical = match state.mint(id) {
-        Ok(logical) => logical,
+    let virtual_allocation_handle = match state.mint_virtual_allocation_handle(id) {
+        Ok(virtual_allocation_handle) => virtual_allocation_handle,
         Err(error) => {
             let _ = unsafe { crate::driver::cuMemRelease(driver) };
             return Err(error);
@@ -960,27 +966,27 @@ pub fn cuMemCreate(
     };
     state.allocations.insert(id, allocation);
     unsafe {
-        out.write(logical);
+        out.write(virtual_allocation_handle);
     }
     Ok(())
 }
 
 pub fn cuMemRelease(handle: u64) -> Result<()> {
     let mut state = get()?;
-    if let Some(id) = state.handles.get(&handle)
+    if let Some(id) = state.virtual_allocation_handles.get(&handle)
         && (state.phase != Phase::Active
             || state.multicasts.get(id).is_some_and(|a| a.inflight != 0)
             || state.allocations.get(id).is_some_and(|a| a.pins != 0))
     {
         return Err(CudaError::from(CUDA_ERROR_NOT_READY));
     }
-    if let Some(id) = state.handles.remove(&handle) {
+    if let Some(id) = state.virtual_allocation_handles.remove(&handle) {
         if let Err(error) = state.settle(id) {
-            state.handles.insert(handle, id);
+            state.virtual_allocation_handles.insert(handle, id);
             return Err(error);
         }
     } else {
-        if handle & LOGICAL_HANDLE_MASK == LOGICAL_HANDLE_TAG {
+        if handle & VIRTUAL_ALLOCATION_HANDLE_MASK == VIRTUAL_ALLOCATION_HANDLE_TAG {
             return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
         }
         unsafe { crate::driver::cuMemRelease(handle) }?;
@@ -1019,7 +1025,7 @@ pub fn cuMemRetainAllocationHandle(out: *mut u64, address: *mut c_void) -> Resul
         if state.phase != Phase::Active {
             return Err(CudaError::from(CUDA_ERROR_NOT_READY));
         }
-        if state.next & LOGICAL_HANDLE_MASK != 0 {
+        if state.next_virtual_allocation_handle & VIRTUAL_ALLOCATION_HANDLE_MASK != 0 {
             return Err(CudaError::from(CUDA_ERROR_OUT_OF_MEMORY));
         }
         if let Some(object) = state.multicasts.get(&id) {
@@ -1027,7 +1033,7 @@ pub fn cuMemRetainAllocationHandle(out: *mut u64, address: *mut c_void) -> Resul
                 return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
             }
             unsafe {
-                out.write(state.mint(id)?);
+                out.write(state.mint_virtual_allocation_handle(id)?);
             }
             return Ok(());
         }
@@ -1049,10 +1055,10 @@ pub fn cuMemRetainAllocationHandle(out: *mut u64, address: *mut c_void) -> Resul
             allocation.driver = Some(driver);
         }
         unsafe {
-            out.write(state.mint(id)?);
+            out.write(state.mint_virtual_allocation_handle(id)?);
         }
     } else {
-        if driver & LOGICAL_HANDLE_MASK == LOGICAL_HANDLE_TAG {
+        if driver & VIRTUAL_ALLOCATION_HANDLE_MASK == VIRTUAL_ALLOCATION_HANDLE_TAG {
             let _ = unsafe { crate::driver::cuMemRelease(driver) };
             return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
         }
@@ -1065,8 +1071,8 @@ pub fn cuMemRetainAllocationHandle(out: *mut u64, address: *mut c_void) -> Resul
 
 pub fn cuMemMap(address: u64, size: usize, offset: usize, handle: u64, flags: u64) -> Result<()> {
     let mut state = get()?;
-    let Some(id) = state.handles.get(&handle).copied() else {
-        if handle & LOGICAL_HANDLE_MASK == LOGICAL_HANDLE_TAG {
+    let Some(id) = state.virtual_allocation_handles.get(&handle).copied() else {
+        if handle & VIRTUAL_ALLOCATION_HANDLE_MASK == VIRTUAL_ALLOCATION_HANDLE_TAG {
             return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
         }
         // Native handles must not overwrite tracked or pending ranges while
@@ -1201,8 +1207,8 @@ pub fn cuMemExportToShareableHandle(
     flags: u64,
 ) -> Result<()> {
     let mut state = get()?;
-    let Some(id) = state.handles.get(&handle).copied() else {
-        if handle & LOGICAL_HANDLE_MASK == LOGICAL_HANDLE_TAG {
+    let Some(id) = state.virtual_allocation_handles.get(&handle).copied() else {
+        if handle & VIRTUAL_ALLOCATION_HANDLE_MASK == VIRTUAL_ALLOCATION_HANDLE_TAG {
             return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
         }
         unsafe { crate::driver::cuMemExportToShareableHandle(out, handle, kind, flags) }?;
@@ -1233,13 +1239,15 @@ pub fn cuMemExportToShareableHandle(
         let fd = crate::driver::export_posix(allocation.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?)?;
         cache()?.replace(id, Some((fd, None)))?;
     }
-    let ticket = ticket::export(allocation.reference).map_err(|_| CUDA_ERROR_OUT_OF_MEMORY)?;
+    let virtual_shareable_handle = virtual_shareable_handle::create(allocation.reference)
+        .map_err(|_| CUDA_ERROR_OUT_OF_MEMORY)?;
     allocation.shared = true;
     if allocation.context == 0 {
         allocation.context = context();
     }
     unsafe {
-        out.cast::<i32>().write(ticket.into_raw_fd());
+        out.cast::<i32>()
+            .write(virtual_shareable_handle.into_raw_fd());
     }
     Ok(())
 }
@@ -1253,7 +1261,8 @@ pub fn cuMemImportFromShareableHandle(
         return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
     }
     let reference = if kind == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR {
-        ticket::read(fd as isize as i32).map_err(|_| CUDA_ERROR_INVALID_HANDLE)?
+        virtual_shareable_handle::decode(fd as isize as i32)
+            .map_err(|_| CUDA_ERROR_INVALID_HANDLE)?
     } else {
         None
     };
@@ -1261,7 +1270,7 @@ pub fn cuMemImportFromShareableHandle(
     let Some(reference) = reference else {
         let mut driver = 0;
         unsafe { crate::driver::cuMemImportFromShareableHandle(&mut driver, fd, kind) }?;
-        if driver & LOGICAL_HANDLE_MASK == LOGICAL_HANDLE_TAG {
+        if driver & VIRTUAL_ALLOCATION_HANDLE_MASK == VIRTUAL_ALLOCATION_HANDLE_TAG {
             let _ = unsafe { crate::driver::cuMemRelease(driver) };
             return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
         }
@@ -1282,7 +1291,7 @@ pub(super) fn import_reference(
     if state.phase != Phase::Active {
         return Err(CudaError::from(CUDA_ERROR_NOT_READY));
     }
-    if state.next & LOGICAL_HANDLE_MASK != 0 {
+    if state.next_virtual_allocation_handle & VIRTUAL_ALLOCATION_HANDLE_MASK != 0 {
         return Err(CudaError::from(CUDA_ERROR_OUT_OF_MEMORY));
     }
     let id = reference.id;
@@ -1295,8 +1304,8 @@ pub(super) fn import_reference(
             return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
         }
         object.shared = true;
-        let logical = state.mint(id)?;
-        unsafe { out.write(logical) };
+        let virtual_multicast_handle = state.mint_virtual_allocation_handle(id)?;
+        unsafe { out.write(virtual_multicast_handle) };
         return Ok(());
     }
     if let Some(allocation) = state.allocations.get_mut(&id) {
@@ -1304,8 +1313,8 @@ pub(super) fn import_reference(
             return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
         }
         if allocation.driver.is_none() {
-            let (raw, properties) =
-                ticket::request(reference).map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
+            let (raw, properties) = virtual_shareable_handle::request_export(reference)
+                .map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
             if properties.is_some() {
                 return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
             }
@@ -1313,30 +1322,30 @@ pub(super) fn import_reference(
             allocation.driver = Some(driver);
         }
         allocation.shared = true;
-        let logical = state.mint(id)?;
-        unsafe { out.write(logical) };
+        let virtual_allocation_handle = state.mint_virtual_allocation_handle(id)?;
+        unsafe { out.write(virtual_allocation_handle) };
         return Ok(());
     }
     // EXPORT service uses only CACHE, never STATE, so a same-process request
     // can complete while this call holds its allocation metadata lock.
-    let (raw, multicast_properties) =
-        ticket::request(reference).map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
+    let (raw, multicast_properties) = virtual_shareable_handle::request_export(reference)
+        .map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
     if let Some(properties) = multicast_properties {
         return super::multicast::import(state, out, reference, raw, properties);
     }
     let driver = crate::driver::import_posix(raw.as_fd())?;
     let mut properties = std::mem::MaybeUninit::<CUmemAllocationProp>::zeroed();
     let recorded = (|| -> Result<u64> {
-        if driver & LOGICAL_HANDLE_MASK == LOGICAL_HANDLE_TAG {
+        if driver & VIRTUAL_ALLOCATION_HANDLE_MASK == VIRTUAL_ALLOCATION_HANDLE_TAG {
             return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
         }
         unsafe {
             crate::driver::cuMemGetAllocationPropertiesFromHandle(properties.as_mut_ptr(), driver)
         }?;
-        state.mint(id)
+        state.mint_virtual_allocation_handle(id)
     })();
-    let logical = match recorded {
-        Ok(logical) => logical,
+    let virtual_allocation_handle = match recorded {
+        Ok(virtual_allocation_handle) => virtual_allocation_handle,
         Err(error) => {
             let _ = unsafe { crate::driver::cuMemRelease(driver) };
             return Err(error);
@@ -1356,7 +1365,7 @@ pub(super) fn import_reference(
             pins: 0,
         },
     );
-    unsafe { out.write(logical) };
+    unsafe { out.write(virtual_allocation_handle) };
     Ok(())
 }
 
@@ -1365,24 +1374,24 @@ pub fn cuMemGetAllocationPropertiesFromHandle(
     handle: u64,
 ) -> Result<()> {
     let state = get()?;
-    if state.handles.contains_key(&handle) && state.phase != Phase::Active {
+    if state.virtual_allocation_handles.contains_key(&handle) && state.phase != Phase::Active {
         return Err(CudaError::from(CUDA_ERROR_NOT_READY));
     }
-    let driver = match state.handles.get(&handle) {
+    let driver = match state.virtual_allocation_handles.get(&handle) {
         Some(id) => match state.multicasts.get(id) {
             Some(object) => object.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?,
             None => state.allocations[id]
                 .driver
                 .ok_or(CUDA_ERROR_INVALID_HANDLE)?,
         },
-        None if handle & LOGICAL_HANDLE_MASK == LOGICAL_HANDLE_TAG => {
+        None if handle & VIRTUAL_ALLOCATION_HANDLE_MASK == VIRTUAL_ALLOCATION_HANDLE_TAG => {
             return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
         }
         None => handle,
     };
     unsafe { crate::driver::cuMemGetAllocationPropertiesFromHandle(out, driver) }?;
     if let Some(allocation) = state
-        .handles
+        .virtual_allocation_handles
         .get(&handle)
         .and_then(|id| state.allocations.get(id))
     {
