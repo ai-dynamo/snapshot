@@ -65,9 +65,9 @@ def main():
         assert cuda.cuMemExportToShareableHandle(c.byref(ticket), handle, 1, 0) != 0
         for fd in opened:
             os.close(fd)
-        allocation = next(record["allocation"] for record in command("inspect")["records"]
+        allocation = next(record["allocation"] for record in command("inspect")["entries"]
                           if "allocation" in record)
-        assert allocation["handles"] == 1
+        assert allocation["logical_handle_count"] == 1
         assert cuda.cuMemExportToShareableHandle(c.byref(ticket), handle, 1, 0) == 0
         os.close(ticket.value)
         return
@@ -75,9 +75,9 @@ def main():
         retained = u64()
         assert cuda.cuMemRetainAllocationHandle(c.byref(retained), address) == 0
         assert retained.value != handle.value
-        allocation = next(record["allocation"] for record in command("inspect")["records"]
+        allocation = next(record["allocation"] for record in command("inspect")["entries"]
                           if "allocation" in record)
-        assert allocation["handles"] == 2
+        assert allocation["logical_handle_count"] == 2
         properties = Properties()
         assert cuda.cuMemGetAllocationPropertiesFromHandle(c.byref(properties), retained) == 0
         assert properties.handles == 1
@@ -85,14 +85,14 @@ def main():
         assert cuda.cuMemUnmap(address, length // 2) != 0
         assert cuda.cuMemRelease(retained) == 0
         assert cuda.cuMemRelease(handle) == 0
-        records = command("inspect")["records"]
+        records = command("inspect")["entries"]
         assert sum("allocation" in record for record in records) == 1
         assert cuda.cuMemUnmap(address, length) == 0
-        assert command("inspect")["records"] == []
+        assert command("inspect")["entries"] == []
         for _ in range(100):
             assert cuda.cuMemCreate(c.byref(handle), length, c.byref(props), 0) == 0
             assert cuda.cuMemRelease(handle) == 0
-        assert command("inspect")["records"] == []
+        assert command("inspect")["entries"] == []
         return
     if mode == "access":
         class Access(c.Structure):
@@ -101,9 +101,9 @@ def main():
         for device in (0, 1):
             access = Access(Location(1, device), 3)
             assert cuda.cuMemSetAccess(address, length, c.byref(access), 1) == 0
-        records = command("inspect")["records"]
+        records = command("inspect")["entries"]
         mapping = next(record["mapping"] for record in records if "mapping" in record)
-        assert {entry["location_id"] for entry in mapping["access"]} == {0, 1}
+        assert {entry["location"]["id"] for entry in mapping["access"]} == {0, 1}
         assert cuda.cuMemSetAccess(address, length // 2, c.byref(access), 1) != 0
         return
     if mode == "exports":
@@ -123,9 +123,9 @@ def main():
             assert cuda.cuMemImportFromShareableHandle(c.byref(imported), fd, 1) == 0
             assert cuda.cuMemRelease(imported) == 0
             os.close(fd)
-        allocation = next(record["allocation"] for record in command("inspect")["records"]
+        allocation = next(record["allocation"] for record in command("inspect")["entries"]
                           if "allocation" in record)
-        assert allocation["handles"] == 1
+        assert allocation["logical_handle_count"] == 1
         return
     shared = mode in ("shared", "no-context")
     if shared:
@@ -134,9 +134,9 @@ def main():
         if mode != "no-context":
             imported = u64()
             assert cuda.cuMemImportFromShareableHandle(c.byref(imported), ticket.value, 1) == 0
-            allocation = next(record["allocation"] for record in command("inspect")["records"]
+            allocation = next(record["allocation"] for record in command("inspect")["entries"]
                               if "allocation" in record)
-            assert allocation["handles"] == 2
+            assert allocation["logical_handle_count"] == 2
         os.close(ticket.value)
         if mode == "no-context":
             assert cuda.cuCtxSetCurrent(7) == 0

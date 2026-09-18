@@ -60,7 +60,7 @@ def worker(kind, transport_fd, ready_fd, release_fd):
     for address, allocation in ((0x10000000, handle), (0x20000000, imported)):
         assert cuda.cuMemMap(address, length, 0, allocation, 0) == 0
     path = f"{os.environ['SNAPSHOT_CONTROL_DIR']}/cuinterpose-{os.getpid()}.sock"
-    identity = reply(request(path, "handshake"))["participant"]
+    identity = reply(request(path, "identify"))["participant"]
     assert cuda.rpc_attempts() == 2, "only the two mandatory threads should exist"
     # Confirm pressure is real, then leave it armed for the entire lifecycle.
     cuda.rpc_fail_workers(1000)
@@ -191,10 +191,10 @@ def constructor(nth, library):
         assert result == 0
         assert path.exists() and cuda.rpc_refused() == 0
         assert len(os.listdir("/proc/self/task")) == len(before_tasks) + 2
-        identity = reply(request(str(path), "handshake"))["participant"]
+        identity = reply(request(str(path), "identify"))["participant"]
         inspection = reply(request(str(path), "inspect", identity))
-        records = inspection["result"]["Ok"]["inspection"]["records"]
-        assert sum("allocation" in record for record in records) == 1
+        entries = inspection["result"]["Ok"]["inspection"]["entries"]
+        assert sum("allocation" in entry for entry in entries) == 1
         assert cuda.cuMemRelease(handle) == 0
     print(f"PASS RPC constructor {nth}: prompt return, "
           + ("sticky failure, FD/path cleanup, eventual worker exit" if nth else "live endpoint"))
@@ -205,7 +205,7 @@ def queue_full():
     assert cuda.cuMemCreate(c.byref(handle), 1 << 20, c.byref(props), 0) == 0
     assert cuda.cuMemExportToShareableHandle(c.byref(ticket), handle, 1, 0) == 0
     path = f"{os.environ['SNAPSHOT_CONTROL_DIR']}/cuinterpose-{os.getpid()}.sock"
-    identity = reply(request(path, "handshake"))["participant"]
+    identity = reply(request(path, "identify"))["participant"]
     reply(request(path, "prepare_multicast", identity))
     cuda.rpc_block_copy()
     saving = request(path, "save_allocations", identity)

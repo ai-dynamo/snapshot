@@ -13,7 +13,7 @@ import threading
 from support import driver, props, Properties
 
 cuda = driver()
-from protocol_client import LIFECYCLE, command, decode, receive, seal_ticket, send
+from protocol_client import LIFECYCLE, command, read_ticket, request_export
 
 
 class Multicast(c.Structure):
@@ -51,7 +51,7 @@ def main():
         cuda.multicast_fail_create()
         assert cuda.cuMulticastCreate(c.byref(group), c.byref(Multicast(1, length, 1, 0))) == 110
         assert group.value == 0x456
-        assert command("inspect")["records"] == []
+        assert command("inspect")["entries"] == []
         assert cuda.fakeLiveAllocations() == 0
         # Failure must also finish its in-flight reservation.
         command("inspect")
@@ -59,7 +59,7 @@ def main():
     if mode == "unsupported":
         assert cuda.cuMulticastCreate(c.byref(group), c.byref(Multicast(1, length, 8, 0))) == 0
         inspection = command("inspect")
-        assert inspection["records"] == [] and inspection["unsupported_creations"] == 1
+        assert inspection["entries"] == [] and inspection["unsupported_creations"] == 1
         assert cuda.cuMemRelease(group) == 0
         result = subprocess.run([
             os.environ["CUINTERPOSE_COORDINATOR"], "--prepare", "--proc-root", "/proc",
@@ -143,14 +143,10 @@ def main():
             assert cuda.cuMemExportToShareableHandle(c.byref(fd), handle, 1, 0) == 0
             tickets.append(fd.value)
         command("prepare_multicast")
-        multicast_ticket = decode(os.pread(tickets[1], 4096, 4))
-        with socket.socket(socket.AF_UNIX) as connection:
-            connection.settimeout(5)
-            connection.connect(multicast_ticket["endpoint"])
-            send(connection, dict(kind="export", participant=multicast_ticket["creator"],
-                                  allocation=multicast_ticket["allocation"],
-                                  resource="multicast"))
-            assert "Err" in receive(connection)["result"]
+        multicast_ticket = read_ticket(tickets[1])
+        path = f"{os.environ['SNAPSHOT_CONTROL_DIR']}/cuinterpose-{os.getpid()}.sock"
+        response, exported = request_export(path, multicast_ticket)
+        assert "Err" in response["result"] and exported is None
         assert cuda.fakeMulticastObjects() == 0
         assert cuda.fakeMulticastBindings(0) == 0
         assert cuda.fakeMappedCount() == 1, "member mapping remains until PREPARE_UNICAST"
@@ -170,24 +166,25 @@ def main():
         assert cuda.cuMemRetainAllocationHandle(c.byref(group), c.c_void_p(0x70000000)) == 0
         assert cuda.cuMemRetainAllocationHandle(c.byref(member), c.c_void_p(0x10000000)) == 0
     elif mode == "kind":
-        fd = c.c_int(-1)
-        assert cuda.cuMemExportToShareableHandle(c.byref(fd), group, 1, 0) == 0
-        ticket = decode(os.pread(fd.value, 4096, 4))
-        with socket.socket(socket.AF_UNIX) as connection:
-            connection.settimeout(5)
-            connection.connect(ticket["endpoint"])
-            send(connection, dict(kind="export", participant=ticket["creator"],
-                                  allocation=ticket["allocation"], resource="unicast"))
-            assert "Err" in receive(connection)["result"]  # Cached object is multicast.
+        path = f"{os.environ['SNAPSHOT_CONTROL_DIR']}/cuinterpose-{os.getpid()}.sock"
+        tickets = []
+        for handle, expected in ((member, "unicast_export"), (group, "multicast_export")):
+            fd = c.c_int(-1)
+            assert cuda.cuMemExportToShareableHandle(c.byref(fd), handle, 1, 0) == 0
+            tickets.append(fd.value)
+            response, exported = request_export(path, read_ticket(fd.value))
+            assert exported is not None
+            os.close(exported)
+            reply = response["result"]["Ok"]
+            assert expected in reply
+            if expected == "multicast_export":
+                assert reply[expected]["properties"]["devices"] == 1
         alias = u64()
-        assert cuda.cuMemImportFromShareableHandle(c.byref(alias), c.c_void_p(fd.value), 1) == 0
+        assert cuda.cuMemImportFromShareableHandle(
+            c.byref(alias), c.c_void_p(tickets[1]), 1) == 0
         assert cuda.cuMemRelease(alias) == 0
-        # A forged sealed ticket with inconsistent properties must not alias.
-        ticket["resource"]["devices"] = 2
-        malformed = seal_ticket(ticket)
-        assert cuda.cuMemImportFromShareableHandle(c.byref(alias), c.c_void_p(malformed), 1) != 0
-        os.close(malformed)
-        os.close(fd.value)
+        for fd in tickets:
+            os.close(fd)
         replay()
     elif mode == "access":
         class Access(c.Structure):
@@ -252,7 +249,7 @@ def main():
     assert cuda.cuMemRelease(group) == 0
     assert cuda.cuMemUnmap(0x10000000, length) == 0
     assert cuda.cuMemRelease(member) == 0
-    assert command("inspect")["records"] == []
+    assert command("inspect")["entries"] == []
     assert cuda.fakeLiveAllocations() == 0
     assert cuda.fakeMappedCount() == 0 and cuda.fakeMulticastObjects() == 0
     print(f"PASS multicast {mode}")

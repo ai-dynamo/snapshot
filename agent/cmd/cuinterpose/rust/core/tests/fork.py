@@ -9,10 +9,9 @@ import errno
 import os
 from pathlib import Path
 import socket
-import struct
 import sys
 import time
-from protocol_client import command, inspect
+from protocol_client import TICKET_MAGIC, command, inspect
 from support import driver, props
 
 cuda = driver()
@@ -47,11 +46,11 @@ def child_checks(parent_id, inherited=(), ticket=None, application_socket=None):
             else:
                 raise AssertionError(f"inherited shim fd {fd} remains open")
         if ticket is not None:
-            assert os.pread(ticket, 4, 0) == struct.pack("<I", 0x44564D43)
+            assert os.pread(ticket, len(TICKET_MAGIC), 0) == TICKET_MAGIC
         if application_socket is not None:
             os.fstat(application_socket)
         initialize()
-        assert command("inspect")["records"] == []
+        assert command("inspect")["entries"] == []
         identity = inspect()["participant"]
         assert identity != parent_id
         assert identity.hex() != os.environ["CUINTERPOSE_PARTICIPANT_ID"]
@@ -73,7 +72,7 @@ def main():
             child_checks(b"")
         wait(child)
         initialize()
-        assert command("inspect")["records"] == []
+        assert command("inspect")["entries"] == []
         assert inspect()["participant"].hex() == os.environ["CUINTERPOSE_PARTICIPANT_ID"]
         return
 
@@ -108,7 +107,7 @@ def main():
         if child == 0:
             child_checks(parent_id, inherited, ticket.value, idle.fileno())
         wait(child)
-        records = command("inspect")["records"]
+        records = command("inspect")["entries"]
         assert sum("allocation" in record for record in records) == 1
         assert inspect()["participant"] == parent_id
         idle.close()
@@ -152,7 +151,7 @@ def main():
                 if grandchild == 0:
                     try:
                         assert os.read(listener, 1) == b""
-                        assert os.pread(ticket.value, 4, 0) == struct.pack("<I", 0x44564D43)
+                        assert os.pread(ticket.value, len(TICKET_MAGIC), 0) == TICKET_MAGIC
                         os._exit(0)
                     except BaseException:
                         os._exit(77)
