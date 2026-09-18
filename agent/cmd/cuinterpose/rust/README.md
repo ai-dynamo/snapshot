@@ -61,12 +61,12 @@ requires cross-node capture, restore, and post-restore workload inference.
 | Crate | Responsibility |
 | --- | --- |
 | `abi` | Private C-layout frontend/backend tables using cudarc CUDA types |
-| `protocol` | Typed identities, tickets, records, bounded MessagePack and FD transport |
+| `protocol` | CUDA metadata, allocation references, state entries, versioned MessagePack, and FD transport |
 | `core` | Driver calls, process generations, tracking, host carriers, lifecycle |
 | `coordinator` | CLI, participants, topology validation, barriers, durable state |
 
-The private C ABI is version **7**; the MessagePack wire/state format is version
-**5**. The 64-byte memory-IPC ticket has its own version marker.
+The private C ABI, MessagePack wire/state format, and ticket formats are all
+version **1**.
 Earlier experimental artifacts are rejected, not translated. Rust
 objects, allocators, mutexes, and unwinding never cross the library boundary.
 `FrontendAbi` contains the resolver and process identity supplied by the C
@@ -106,7 +106,9 @@ the last avoids a link-time or runtime CUDA library requirement. No cudarc loade
 wrapper is invoked: every call still uses the frontend's `FrontendAbi.resolve`
 callback. Its safe context/buffer owners are not used because the workload owns
 those resources, and checkpoint teardown/reconstruction requires explicit
-context and DMA cleanup. The coordinator does not depend on cudarc.
+context and DMA cleanup. The coordinator shares cudarc's generated CUDA types
+through the protocol crate, but it does not load the CUDA driver or issue CUDA
+calls.
 
 ## Operating constraints
 

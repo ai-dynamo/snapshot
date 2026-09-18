@@ -51,13 +51,13 @@ flowchart TB
 
 ### Cuinterpose shim
 
-The shim is loaded inside each CUDA process, not run as a sidecar. Its C frontend, `libcuinterpose.so`, receives intercepted calls. Its Rust backend, `libcuinterpose_core.so`, owns allocation records, mapping records, cached export descriptors, and host carriers. CUDA calls execute inside the process that owns the CUDA contexts.
+The shim is loaded inside each CUDA process, not run as a sidecar. Its C frontend, `libcuinterpose.so`, receives intercepted calls. Its Rust backend, `libcuinterpose_core.so`, owns allocation state, mappings, cached export descriptors, and host carriers. CUDA calls execute inside the process that owns the CUDA contexts.
 
 Each shim listens on `/snapshot-control/cuinterpose-<namespace-pid>.sock`. The same Unix socket accepts coordinator commands and peer requests for export descriptors. Peer connections are opened when needed; there is no permanent all-to-all connection set.
 
 ### Cuinterpose coordinator
 
-The Rust `cuinterpose-coordinator` is a short-lived executable. One instance runs before native capture; another runs after native restore. It reads records from all shims, checks that creators and importers agree, and starts each capture or restore phase. It does not call CUDA or copy allocation bytes.
+The Rust `cuinterpose-coordinator` is a short-lived executable. One instance runs before native capture; another runs after native restore. It reads state entries from all shims, checks that creators and importers agree, and starts each capture or restore phase. It does not call CUDA or copy allocation bytes.
 
 For each phase, it sends requests to the participants concurrently and waits for every reply before starting the next phase. This matters for multicast calls that need other ranks to make progress.
 
@@ -164,7 +164,18 @@ Explicit `dlvsym` calls and CUDA libraries loaded in separate linker namespaces 
 
 A namespace PID locates a socket. A random 128-bit participant ID identifies the shim process across capture and restore. A separate random allocation ID identifies each tracked allocation or multicast object. A valid `CUINTERPOSE_PARTICIPANT_ID` may supply the participant ID; it must be unique among participants.
 
-The shim returns its participant ID during `HANDSHAKE`. The coordinator uses the captured participant set to verify restored processes. CRIU preserves participant IDs, allocation IDs, mapping records, logical handles, and ticket bytes in process memory.
+The shim returns its participant ID in response to `IDENTIFY`. The agent supplies one
+`--process` pair for every expected CUDA process, so the coordinator knows how
+many shims must identify. It rejects duplicate IDs, builds a
+participant-ID-to-socket-path directory, and sends that complete directory to
+every shim in `RENDEZVOUS` before inspection or restore starts. The same
+directory is persisted in `cuinterpose.state`; restore requires the newly
+identified participant set to match it.
+
+CRIU preserves participant IDs, allocation IDs, state entries, logical handles,
+and ticket bytes in process memory. A participant ID has no generation field:
+forked children create a new random participant ID, while restored processes
+retain the captured ID.
 
 For example, suppose A creates a 2 MiB allocation and B imports it:
 
@@ -193,32 +204,40 @@ Only pinned, device-located, supported exportable creator allocations marked sha
 
 ### VMM export and import
 
-For POSIX export, the shim caches a real CUDA export FD and returns a sealed memfd ticket instead. The application passes that FD through its existing communication mechanism. For the allocation above, the ticket contains the `CMVD` prefix followed by this MessagePack value:
+For POSIX export, the shim caches a real CUDA export FD and returns a sealed
+memfd ticket instead. The application passes that FD through its existing
+communication mechanism. The ticket has one fixed 36-byte layout:
+
+| Bytes | Value |
+| --- | --- |
+| 4 | `CUI\x01` |
+| 16 | Creator participant ID |
+| 16 | Allocation ID |
+
+The last two fields form an `AllocationReference`. A ticket contains neither a
+socket path nor a unicast/multicast discriminator. The importing shim resolves
+the creator through its in-memory participant directory. Before a coordinator
+rendezvous has occurred, it can populate a missing directory entry on demand by
+identifying sockets in `SNAPSHOT_CONTROL_DIR`.
+
+On import, B sends A the allocation reference:
 
 ```yaml
-version: 5
-body:
-  creator: "11111111111111111111111111111111"
-  allocation: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-  endpoint: /snapshot-control/cuinterpose-41.sock
-  resource:
-    kind: unicast
-```
-
-This and the MessagePack examples below are **decoded views written as YAML for readability**, not files consumed by the implementation. IDs are shown as hex strings; the actual encoding uses 16-byte binary values.
-
-On import, B connects to the ticket's endpoint and requests A's cached allocation FD:
-
-```yaml
-version: 5
+version: 1
 body:
   kind: export
-  participant: "11111111111111111111111111111111"
-  resource: unicast
-  allocation: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  allocation:
+    id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    creator: "11111111111111111111111111111111"
 ```
 
-Here `participant` identifies the creator that must answer, not the requesting importer. A sends a duplicate of its cached FD using `SCM_RIGHTS`. B calls the real CUDA import and records the resulting local handle. Re-exporting B's import still names A. Neither the ticket nor the request contains a durable CUDA FD number.
+A sends a duplicate of its cached FD using `SCM_RIGHTS` and replies with either
+`unicast_export` or `multicast_export`. Only the multicast reply includes
+`CUmulticastObjectProp`: CUDA exposes no equivalent query after multicast
+import. A unicast importer obtains the authoritative `CUmemAllocationProp`
+directly from CUDA after importing the FD. B records the resulting local
+handle. Re-exporting B's import still names A. Neither the ticket nor the
+request contains a durable CUDA FD number.
 
 ```mermaid
 sequenceDiagram
@@ -253,12 +272,11 @@ Synchronous `cuMemAlloc_v2` is implemented with POSIX-capable VMM backing from a
 | `version` | 8 | ASCII `CUIPC001` |
 | `creator` | 16 | `11111111111111111111111111111111` |
 | `allocation` | 16 | `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` |
-| `pid` | 4 | `41` |
-| `reserved` | 4 | All zero |
+| `reserved` | 8 | All zero |
 | `requested` | 8 | `2097152` |
 | `extent` | 8 | `2097152` |
 
-The numeric PID and sizes use little-endian encoding. This example assumes the request already meets the device's allocation granularity; otherwise `extent` is larger than `requested`. `cuIpcOpenMemHandle*` derives A's socket path from PID 41, uses the same peer FD service as VMM import, and maps the allocation in B.
+The sizes use little-endian encoding. This example assumes the request already meets the device's allocation granularity; otherwise `extent` is larger than `requested`. `cuIpcOpenMemHandle*` resolves A through the participant directory, uses the same peer FD service as VMM import, and maps the allocation in B.
 
 Repeated opens in the supported context return the same address and increment a reference count. The final close removes the imported mapping. `cuMemFree_v2` synchronizes the owning context before removing a malloc mapping; a synchronization failure leaves that mapping intact. An imported pointer must be closed, not freed. Foreign native IPC handles are rejected.
 
@@ -271,7 +289,7 @@ Application CUDA wrappers run on the calling application thread. On runtime star
 | Thread | Work |
 | --- | --- |
 | `cuinterpose-peer` | Accepts socket connections and classifies requests. Handles peer export requests using the descriptor cache without the main allocation-state lock or CUDA calls. |
-| `cuinterpose-control` | Processes handshake, inspection, and lifecycle commands one at a time. It enters the recorded CUDA context when a lifecycle operation needs driver calls. |
+| `cuinterpose-control` | Processes inspection and lifecycle commands one at a time. It enters the recorded CUDA context when a lifecycle operation needs driver calls. |
 
 The peer thread queues control commands; it does not wait for their CUDA operations. A bounded queue refuses excess control requests. This separation lets an importer obtain an FD even while the creator's control thread is busy reconstructing another object.
 
@@ -309,7 +327,7 @@ Fork handlers lock metadata, close inherited shim descriptors in the child, and 
 
 The application must first stop submitting work, finish outstanding GPU work, and arrange to stay parked through restore. The coordinator does not pause application threads. In particular, **shim preparation runs before native CUDA lock** because saving and removing shared allocations requires working CUDA calls.
 
-The agent requires valid shim sockets for every discovered CUDA process in an opted-in workload. It starts the coordinator, which handshakes, inspects all records, and checks creators, ranges, access permissions, and complete multicast groups before changing driver state.
+The agent requires valid shim sockets for every discovered CUDA process in an opted-in workload. It starts the coordinator, which identifies every expected shim, distributes the participant directory at rendezvous, inspects all entries, and checks creators, ranges, access permissions, and complete multicast groups before changing driver state.
 
 ```mermaid
 sequenceDiagram
@@ -322,8 +340,10 @@ sequenceDiagram
     participant Files as Checkpoint files
     App->>App: Finish work and remain parked
     Agent->>Coord: Start prepare in target namespaces
-    Coord->>Shims: HANDSHAKE and INSPECT
-    Shims-->>Coord: Identities and allocation records
+    Coord->>Shims: IDENTIFY
+    Coord->>Shims: RENDEZVOUS with complete participant directory
+    Coord->>Shims: INSPECT
+    Shims-->>Coord: Identities and state entries
     Coord->>Coord: Validate all participants
     Coord->>Shims: PREPARE_MULTICAST
     Shims->>CUDA: Drop exports, unmap, unbind, release multicast
@@ -349,7 +369,7 @@ Capture removes the outer objects before their dependencies:
 2. `SAVE_ALLOCATIONS` saves the shared creator bytes while unicast allocations still exist.
 3. `PREPARE_UNICAST` drains peer export requests, removes shared mappings, and releases shared driver handles.
 
-Logical handles, mapping records, ticket identities, and carrier addresses remain in CPU memory for CRIU. Private allocations remain native CUDA state. If a destructive phase or later checkpoint step fails, the source must be terminated rather than resumed with sharing removed.
+Logical handles, mappings, allocation references, and carrier addresses remain in CPU memory for CRIU. Private allocations remain native CUDA state. If a destructive phase or later checkpoint step fails, the source must be terminated rather than resumed with sharing removed.
 
 For the 2 MiB example, `SAVE_ALLOCATIONS` copies A's allocation into A's host arena. B saves no second copy. CRIU captures that arena as process memory; there is no separate `aaaaaaaa….bin` file. If A also has a never-shared allocation, that allocation stays on the native CUDA path instead of entering the arena.
 
@@ -370,9 +390,11 @@ sequenceDiagram
     Agent->>CRIU: Restore process tree and host carriers
     Agent->>CUDA: Restore native state, then unlock CUDA
     Agent->>Coord: Start restore in target namespaces
-    Coord->>Creators: HANDSHAKE and INSPECT
-    Coord->>Importers: HANDSHAKE and INSPECT
-    Coord->>Coord: Match captured identities and records
+    Coord->>Creators: IDENTIFY
+    Coord->>Importers: IDENTIFY
+    Coord->>Creators: RENDEZVOUS with complete participant directory
+    Coord->>Importers: RENDEZVOUS with complete participant directory
+    Coord->>Coord: Match captured participant set
     Coord->>Creators: LOAD_ALLOCATIONS
     Creators->>CUDA: Create shared backing and copy host bytes to GPU
     Creators->>CUDA: Restore creator mappings, access and export FDs
@@ -403,7 +425,7 @@ sequenceDiagram
     Note over Coord,Importers: Wait for all participants
     Coord->>Creators: INSPECT
     Coord->>Importers: INSPECT
-    Coord->>Coord: Compare with captured records
+    Coord->>Coord: Compare with captured entries
     Coord-->>Agent: Restore succeeded and exit
     Agent->>App: Publish restore-complete sentinel
     App->>App: Resume
@@ -426,53 +448,76 @@ Capture and restore reverse the dependency order, not the number of messages. Ca
 
 ## Checkpoint files and compatibility
 
-`cuinterpose.state` is a **binary, versioned MessagePack file**. Here is a shortened decoded view for the two-worker example. Allocation-property and handle-count fields are omitted; the names and nesting shown are the actual serialized fields:
+`cuinterpose.state` is a **binary, versioned MessagePack file**. Its body is a
+map from participant ID to that participant's canonical workload socket path
+and state entries. Here is a shortened decoded view for the two-worker example.
+Allocation-property and handle-count fields are omitted; the names and nesting
+shown are the actual serialized fields:
 
 ```yaml
-version: 5
+version: 1
 body:
-  - id: "11111111111111111111111111111111"
-    records:
-      - allocation:
+  "11111111111111111111111111111111":
+    socket_path: /snapshot-control/cuinterpose-41.sock
+    entries:
+    - allocation:
+        allocation:
           id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-          creator: true
-          content: true
-          size: 2097152
-      - mapping:
+          creator: "11111111111111111111111111111111"
+        content: true
+        size: 2097152
+    - mapping:
+        allocation:
           id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-          creator: true
-          address: 0x700000000000
-          size: 2097152
-          offset: 0
-          access:
-            - {location_type: 1, location_id: 0, flags: 3}
-  - id: "22222222222222222222222222222222"
-    records:
-      - allocation:
+          creator: "11111111111111111111111111111111"
+        address: 0x700000000000
+        size: 2097152
+        offset: 0
+        access:
+        - {location: {kind: 1, id: 0}, flags: 3}
+  "22222222222222222222222222222222":
+    socket_path: /snapshot-control/cuinterpose-42.sock
+    entries:
+    - allocation:
+        allocation:
           id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-          creator: false
-          content: false
-          size: 2097152
-      - mapping:
+          creator: "11111111111111111111111111111111"
+        content: false
+        size: 2097152
+    - mapping:
+        allocation:
           id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-          creator: false
-          address: 0x710000000000
-          size: 2097152
-          offset: 0
-          access:
-            - {location_type: 1, location_id: 1, flags: 3}
+          creator: "11111111111111111111111111111111"
+        address: 0x710000000000
+        size: 2097152
+        offset: 0
+        access:
+        - {location: {kind: 1, id: 1}, flags: 3}
 ```
 
-The outer `id` identifies the process; each record's `id` identifies the allocation. `content: true` means A owns the content copy, not that bytes appear in this file. `offset: 0` maps from the start of the allocation. In the access entries, location type `1` means a CUDA device and flags `3` mean read/write: A grants GPU 0 access, and B grants GPU 1 access. Addresses are shown in hex for readability; they are encoded as integers.
+The outer key identifies the process. The repeated allocation reference
+identifies both the allocation and its creator without a separate `creator:
+true/false` field. `content: true` means A owns the content copy, not that bytes
+appear in this file. `offset: 0` maps from the start of the allocation. In the
+access entries, location kind `1` means a CUDA device and flags `3` mean
+read/write: A grants GPU 0 access, and B grants GPU 1 access. Addresses are
+shown in hex for readability; they are encoded as integers.
 
-Multicast adds records to the same participant list. For example, this complete `multicast_binding` record says that GPU 0 binds the first 2 MiB of allocation `aaaaaaaa…` into the start of multicast object `bbbbbbbb…` using `BindMem`'s v1 ABI:
+Multicast adds entries to the same participant state. For example, this complete
+`multicast_binding` entry says that GPU 0 binds the first 2 MiB of allocation
+`aaaaaaaa…` into the start of multicast object `bbbbbbbb…` using `BindMem`'s v1
+ABI:
 
 ```yaml
 multicast_binding:
-  id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  allocation:
+    id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    creator: "11111111111111111111111111111111"
   source:
     memory:
-      allocation: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      allocation:
+        id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        creator: "11111111111111111111111111111111"
       offset: 0
   size: 2097152
   offset: 0
@@ -481,9 +526,16 @@ multicast_binding:
   device: 0
 ```
 
-The member offset is nested under `source`; the outer offset is into the multicast object. Separate `multicast`, `multicast_device`, and `multicast_mapping` records describe the object, attached devices, and virtual mappings. This binding alone is not a complete multicast checkpoint.
+The member offset is nested under `source`; the outer offset is into the
+multicast object. Separate `multicast`, `multicast_device`, and
+`multicast_mapping` entries describe the object, attached devices, and virtual
+mappings. This binding alone is not a complete multicast checkpoint.
 
-The coordinator sorts participants and records and publishes the state through a temporary file, file `fsync`, atomic rename, and directory `fsync`. On restore it checks the participant IDs, rebuilds sharing, then compares a fresh inspection against these records. Allocation bytes come from CRIU's host-carrier images, not this file.
+The coordinator sorts entries and publishes the state through a temporary file,
+file `fsync`, atomic rename, and directory `fsync`. On restore it checks the
+participant IDs, distributes current socket paths, rebuilds sharing, then
+compares a fresh inspection against the captured entries. Allocation bytes come
+from CRIU's host-carrier images, not this file.
 
 The corresponding section of `manifest.yaml` is ordinary YAML:
 
@@ -494,9 +546,9 @@ cuinterpose:
   format: 1
 ```
 
-`requested` records workload opt-in; `prepared` records successful coordinator preparation and state publication. `format: 1` identifies the agent's artifact contract, distinct from the MessagePack envelope's `version: 5`. A prepared checkpoint must also have CUDA process metadata and readable cuinterpose state. Missing or different formats and old `cuda-checkpoint-job` artifacts are rejected before CRIU.
+`requested` records workload opt-in; `prepared` records successful coordinator preparation and state publication. `format: 1` identifies the agent's artifact contract. The MessagePack envelope is also version `1`. A prepared checkpoint must also have CUDA process metadata and readable cuinterpose state. Missing or different formats and old `cuda-checkpoint-job` artifacts are rejected before CRIU.
 
-The private frontend/backend ABI is version **7**. The MessagePack protocol and state envelope are version **5**. The inline memory-IPC ticket has its own fixed-size version marker. Older draft artifacts, including shim PageBroker artifacts, are not migrated or silently interpreted as host-carrier checkpoints.
+The private frontend/backend ABI, MessagePack protocol and state envelope, sealed ticket, and inline memory-IPC ticket are all version **1**. Older draft artifacts, including shim PageBroker artifacts, are not migrated or silently interpreted as host-carrier checkpoints.
 
 The shim libraries themselves are part of the checkpointed process. Their files must be available at the original paths, and the coordinator must understand their protocol. Ship a matching frontend, backend, and coordinator set; the format checks are not permission to substitute arbitrary library builds.
 
