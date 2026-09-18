@@ -2,24 +2,35 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::{Context, Result, ensure};
-use cuinterpose_protocol::{self as protocol, MAX_BYTES, Participant};
+use cuinterpose_protocol::{self as protocol, MAX_ENTRIES, MAX_MESSAGE_BYTES, Manifest};
 use std::io::{Read, Write};
 use std::path::Path;
 
-pub fn read(path: &Path) -> Result<Vec<Participant>> {
+pub fn read(path: &Path) -> Result<Manifest> {
     let mut bytes = Vec::new();
     std::fs::File::open(path)?
-        .take(MAX_BYTES as u64 + 1)
+        .take(MAX_MESSAGE_BYTES as u64 + 1)
         .read_to_end(&mut bytes)?;
-    let participants: Vec<Participant> = protocol::decode(&bytes)?;
+    let participants: Manifest = protocol::decode(&bytes)?;
     ensure!(!participants.is_empty(), "state has no participants");
+    ensure!(
+        participants
+            .values()
+            .all(|participant| participant.entries.len() <= MAX_ENTRIES),
+        "state participant has too many entries"
+    );
     Ok(participants)
 }
 
-pub fn write_atomic(path: &Path, participants: &mut [Participant]) -> Result<()> {
-    participants.sort_by_key(|p| p.id);
-    for participant in participants.iter_mut() {
-        participant.records.sort();
+pub fn write_atomic(path: &Path, participants: &mut Manifest) -> Result<()> {
+    ensure!(
+        participants
+            .values()
+            .all(|participant| participant.entries.len() <= MAX_ENTRIES),
+        "state participant has too many entries"
+    );
+    for participant in participants.values_mut() {
+        participant.entries.sort();
     }
     let bytes = protocol::encode(&participants)?;
     let directory = path.parent().context("missing checkpoint directory")?;
