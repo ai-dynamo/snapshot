@@ -57,11 +57,15 @@ FROM ${AGENT_BASE_IMAGE} AS cuda-transfer-contracts-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
 
 COPY --from=cuda-helper-headers /usr/local/cuda-13.4/targets/x86_64-linux/include/cuda.h /opt/cuda-13.4/include/cuda.h
+COPY cmd/cuda-checkpoint-helper/content_digest.cpp ./cmd/cuda-checkpoint-helper/content_digest.cpp
+COPY cmd/cuda-checkpoint-helper/content_digest.hpp ./cmd/cuda-checkpoint-helper/content_digest.hpp
+COPY cmd/cuda-checkpoint-helper/content_digest_test.cpp ./cmd/cuda-checkpoint-helper/content_digest_test.cpp
 COPY cmd/cuda-checkpoint-helper/storage_manifest.cpp ./cmd/cuda-checkpoint-helper/storage_manifest.cpp
 COPY cmd/cuda-checkpoint-helper/storage_manifest.hpp ./cmd/cuda-checkpoint-helper/storage_manifest.hpp
 COPY cmd/cuda-checkpoint-helper/storage_manifest_test.cpp ./cmd/cuda-checkpoint-helper/storage_manifest_test.cpp
@@ -80,9 +84,18 @@ RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread \
 
 RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
       -o /cuda-checkpoint-helper-storage-test \
+      ./cmd/cuda-checkpoint-helper/content_digest.cpp \
       ./cmd/cuda-checkpoint-helper/storage_manifest.cpp \
       ./cmd/cuda-checkpoint-helper/storage_manifest_test.cpp \
+      -lcrypto \
     && /cuda-checkpoint-helper-storage-test
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+      -o /cuda-checkpoint-helper-content-digest-test \
+      ./cmd/cuda-checkpoint-helper/content_digest.cpp \
+      ./cmd/cuda-checkpoint-helper/content_digest_test.cpp \
+      -lcrypto \
+    && /cuda-checkpoint-helper-content-digest-test
 
 RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
       -o /cuda-checkpoint-helper-transfer-config-test \
@@ -361,8 +374,8 @@ RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-help
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
 COPY --from=pagebroker-builder /workspace/pagebroker/pagebroker /usr/local/bin/pagebroker
 RUN output=$(/usr/local/bin/pagebroker 2>&1); status=$?; \
-    [ "$status" -eq 2 ] && \
-    [ "$output" = "usage: pagebroker socket_path staging_directory storage_root --max-concurrent-requests count [--allocation-worker absolute_path]" ]
+    [ "$status" -eq 2 ]; \
+    [ "$output" = "usage: pagebroker socket_path staging_directory storage_root --max-concurrent-requests max_concurrent_requests" ]
 
 # Assemble the injection bundle: bind-mounted read-only into the placeholder's
 # mount namespace at /tmp/snapshot-binaries during restore (internal/nsmount).
