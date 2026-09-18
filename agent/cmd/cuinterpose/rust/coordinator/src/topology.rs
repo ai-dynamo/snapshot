@@ -3,9 +3,7 @@
 
 use super::Result;
 use anyhow::{Context, bail, ensure};
-use cuinterpose_protocol::{
-    AllocationId, AllocationReference, BindingSource, Manifest, StateEntry,
-};
+use cuinterpose_protocol::{AllocationId, AllocationReference, BindingSource, Manifest, Record};
 use std::collections::BTreeMap;
 
 // CUmemAllocationHandleType values used by the Linux FD transport.
@@ -36,18 +34,18 @@ pub fn validate(participants: &Manifest) -> Result<Vec<Allocation>> {
     }
     // Gather definitions before references. Participant/entry ordering must
     // not determine whether an import or multicast dependency is valid.
-    for (participant_id, participant) in participants {
+    for (namespace_pid, participant) in participants {
         for record in &participant.entries {
             match record {
-                StateEntry::Allocation {
+                Record::Allocation {
                     allocation,
                     content,
                     size,
                     handle_types,
-                    logical_handle_count,
+                    virtual_allocation_handle_count,
                     ..
                 } => {
-                    if allocation.creator == *participant_id {
+                    if allocation.creator_pid == *namespace_pid {
                         ensure!(
                             (*handle_types == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
                                 || (*handle_types == CU_MEM_HANDLE_TYPE_NONE && *content))
@@ -62,14 +60,14 @@ pub fn validate(participants: &Manifest) -> Result<Vec<Allocation>> {
                         entry.insert(Allocation {
                             reference: *allocation,
                             size: *size,
-                            anchor: *logical_handle_count != 0,
+                            anchor: *virtual_allocation_handle_count != 0,
                             preserve_content: *content,
                         });
                     } else if *content {
                         bail!("allocation content flag on importer");
                     }
                 }
-                StateEntry::Multicast {
+                Record::Multicast {
                     allocation,
                     devices,
                     size,
@@ -102,7 +100,7 @@ pub fn validate(participants: &Manifest) -> Result<Vec<Allocation>> {
                         bail!("inconsistent multicast properties");
                     }
                     multicast.size = multicast.size.max(*size);
-                    if participant_id == &allocation.creator {
+                    if namespace_pid == &allocation.creator_pid {
                         multicast.creators += 1;
                     }
                 }
@@ -111,7 +109,7 @@ pub fn validate(participants: &Manifest) -> Result<Vec<Allocation>> {
         }
     }
     for record in participants.values().flat_map(|p| &p.entries) {
-        if let StateEntry::MulticastDevice { allocation, device } = record
+        if let Record::MulticastDevice { allocation, device } = record
             && multicasts
                 .get_mut(&allocation.id)
                 .context("missing multicast object")?
@@ -122,10 +120,10 @@ pub fn validate(participants: &Manifest) -> Result<Vec<Allocation>> {
             bail!("duplicate multicast device");
         }
     }
-    for (participant_id, participant) in participants {
+    for (namespace_pid, participant) in participants {
         for record in &participant.entries {
             match record {
-                StateEntry::Allocation { allocation, .. } => {
+                Record::Allocation { allocation, .. } => {
                     ensure!(
                         allocations
                             .get(&allocation.id)
@@ -133,7 +131,7 @@ pub fn validate(participants: &Manifest) -> Result<Vec<Allocation>> {
                         "missing creator"
                     );
                 }
-                StateEntry::Mapping {
+                Record::Mapping {
                     allocation,
                     address,
                     size,
@@ -153,9 +151,9 @@ pub fn validate(participants: &Manifest) -> Result<Vec<Allocation>> {
                     {
                         bail!("invalid mapping or mapping out of bounds");
                     }
-                    known.anchor |= allocation.creator == *participant_id;
+                    known.anchor |= allocation.creator_pid == *namespace_pid;
                 }
-                StateEntry::MulticastBinding {
+                Record::MulticastBinding {
                     allocation,
                     source,
                     size,
@@ -208,7 +206,7 @@ pub fn validate(participants: &Manifest) -> Result<Vec<Allocation>> {
                         .get_mut(device)
                         .context("multicast binding device is absent")? = true;
                 }
-                StateEntry::MulticastMapping {
+                Record::MulticastMapping {
                     allocation,
                     address,
                     size,
