@@ -2,17 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Synchronous malloc and memory IPC over tracked VMM sharing.
-//! The CUDA IPC handle carries an identity ticket; native memory IPC is never called.
+//! Virtual IPC memory handles carry allocation identity; native memory IPC is never called.
 
 use crate::{driver, state};
 use cudarc::driver::sys::*;
-use cuinterpose_protocol::{AllocationId, ParticipantId, Resource, ResourceKind, Ticket};
+use cuinterpose_protocol::{AllocationReference, VERSION as PROTOCOL_VERSION};
 use driver::{CudaError, Result};
-use std::path::Path;
 
 #[derive(Clone)]
 pub struct Mapping {
-    handle: CUmemGenericAllocationHandle,
+    virtual_allocation_handle: CUmemGenericAllocationHandle,
     requested: usize,
     extent: usize,
     context: usize,
@@ -23,43 +22,52 @@ pub struct Mapping {
 // local to the adapter; ordinary peer messages use the existing typed codec.
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct InlineTicket {
-    version: [u8; 8],
-    creator: [u8; 16],
+struct VirtualIpcMemHandle {
+    magic: [u8; 8],
+    creator_pid: [u8; 4],
     allocation: [u8; 16],
-    pid: [u8; 4],
-    reserved: [u8; 4],
+    reserved: [u8; 20],
     requested: [u8; 8],
     extent: [u8; 8],
 }
-const VERSION: [u8; 8] = *b"CUIPC001";
-const _: () = assert!(size_of::<InlineTicket>() == size_of::<CUipcMemHandle>());
+const VIRTUAL_IPC_MEM_HANDLE_MAGIC: [u8; 8] = [
+    b'C',
+    b'U',
+    b'I',
+    b'P',
+    b'C',
+    b'0',
+    b'0',
+    b'0' + PROTOCOL_VERSION,
+];
+const _: () = assert!(size_of::<VirtualIpcMemHandle>() == size_of::<CUipcMemHandle>());
 
-impl InlineTicket {
+impl VirtualIpcMemHandle {
     fn decode(handle: CUipcMemHandle) -> Result<Self> {
         // Both representations contain only bytes with identical size/alignment.
-        let ticket: Self = unsafe { std::mem::transmute(handle) };
-        if ticket.version != VERSION
-            || ticket.reserved != [0; 4]
-            || u32::from_le_bytes(ticket.pid) == 0
-            || u64::from_le_bytes(ticket.requested) == 0
-            || u64::from_le_bytes(ticket.requested) > u64::from_le_bytes(ticket.extent)
+        let virtual_ipc_mem_handle: Self = unsafe { std::mem::transmute(handle) };
+        if virtual_ipc_mem_handle.magic != VIRTUAL_IPC_MEM_HANDLE_MAGIC
+            || u32::from_le_bytes(virtual_ipc_mem_handle.creator_pid) == 0
+            || virtual_ipc_mem_handle.reserved != [0; 20]
+            || u64::from_le_bytes(virtual_ipc_mem_handle.requested) == 0
+            || u64::from_le_bytes(virtual_ipc_mem_handle.requested)
+                > u64::from_le_bytes(virtual_ipc_mem_handle.extent)
         {
             return Err(CudaError(CUresult::CUDA_ERROR_INVALID_HANDLE));
         }
-        Ok(ticket)
+        Ok(virtual_ipc_mem_handle)
     }
 }
 
-/// Attach a new VA to an existing logical handle while holding the state lock.
+/// Attach a new VA to an existing virtual allocation handle while holding the state lock.
 fn map(
     state: &mut state::State,
-    handle: CUmemGenericAllocationHandle,
+    virtual_allocation_handle: CUmemGenericAllocationHandle,
     requested: usize,
     extent: usize,
     opens: usize,
 ) -> Result<CUdeviceptr> {
-    let id = state.handles[&handle];
+    let id = state.virtual_allocation_handles[&virtual_allocation_handle];
     let allocation = &state.allocations[&id];
     let backing = allocation
         .driver
@@ -100,7 +108,7 @@ fn map(
     state.mallocs.insert(
         address,
         Mapping {
-            handle,
+            virtual_allocation_handle,
             requested,
             extent,
             context: state::context(),
@@ -139,11 +147,11 @@ pub fn cuMemAlloc_v2(out: *mut CUdeviceptr, size: usize) -> Result<()> {
     let extent = size
         .checked_next_multiple_of(granularity)
         .ok_or(CUresult::CUDA_ERROR_OUT_OF_MEMORY)?;
-    let mut handle = 0;
-    state::cuMemCreate(&mut handle, extent, &properties, 0)?;
+    let mut virtual_allocation_handle = 0;
+    state::cuMemCreate(&mut virtual_allocation_handle, extent, &properties, 0)?;
     let result = {
         let mut state = state::active()?;
-        map(&mut state, handle, size, extent, 0)
+        map(&mut state, virtual_allocation_handle, size, extent, 0)
     };
     match result {
         Ok(address) => {
@@ -151,7 +159,7 @@ pub fn cuMemAlloc_v2(out: *mut CUdeviceptr, size: usize) -> Result<()> {
             Ok(())
         }
         Err(error) => {
-            state::cuMemRelease(handle)?;
+            state::cuMemRelease(virtual_allocation_handle)?;
             Err(error)
         }
     }
@@ -170,30 +178,33 @@ pub fn cuIpcGetMemHandle(out: *mut CUipcMemHandle, address: CUdeviceptr) -> Resu
     if mapping.opens != 0 {
         return Err(CudaError(CUresult::CUDA_ERROR_INVALID_VALUE));
     }
-    let id = state.handles[&mapping.handle];
+    let id = state.virtual_allocation_handles[&mapping.virtual_allocation_handle];
     let allocation = state
         .allocations
         .get_mut(&id)
         .ok_or(CUresult::CUDA_ERROR_INVALID_HANDLE)?;
-    if !state::cache()?.contains(&(ResourceKind::Unicast, id))? {
+    if !state::cache()?.contains(&id)? {
         let fd = driver::export_posix(
             allocation
                 .driver
                 .ok_or(CUresult::CUDA_ERROR_INVALID_HANDLE)?,
         )?;
-        state::cache()?.replace((ResourceKind::Unicast, id), Some(fd))?;
+        state::cache()?.replace(id, Some((fd, None)))?;
     }
-    let ticket = InlineTicket {
-        version: VERSION,
-        creator: allocation.ticket.creator.0,
-        allocation: id.0,
-        pid: (unsafe { libc::getpid() } as u32).to_le_bytes(),
-        reserved: [0; 4],
+    let virtual_ipc_mem_handle = VirtualIpcMemHandle {
+        magic: VIRTUAL_IPC_MEM_HANDLE_MAGIC,
+        creator_pid: allocation.reference.creator_pid.to_le_bytes(),
+        allocation: id,
+        reserved: [0; 20],
         requested: (mapping.requested as u64).to_le_bytes(),
         extent: (mapping.extent as u64).to_le_bytes(),
     };
     allocation.shared = true;
-    unsafe { out.write(std::mem::transmute::<InlineTicket, CUipcMemHandle>(ticket)) };
+    unsafe {
+        out.write(std::mem::transmute::<VirtualIpcMemHandle, CUipcMemHandle>(
+            virtual_ipc_mem_handle,
+        ))
+    };
     Ok(())
 }
 
@@ -201,20 +212,26 @@ pub fn cuIpcOpenMemHandle(out: *mut CUdeviceptr, handle: CUipcMemHandle, flags: 
     if out.is_null() || flags != CUipcMem_flags::CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS as u32 {
         return Err(CudaError(CUresult::CUDA_ERROR_INVALID_VALUE));
     }
-    let inline = InlineTicket::decode(handle)?;
+    let virtual_ipc_mem_handle = VirtualIpcMemHandle::decode(handle)?;
     let mut state = state::active()?;
-    let id = AllocationId(inline.allocation);
+    let id = virtual_ipc_mem_handle.allocation;
     let context = state::context();
     if let Some(allocation) = state.allocations.get(&id)
-        && allocation.ticket.creator != ParticipantId(inline.creator)
+        && allocation.reference.creator_pid
+            != u32::from_le_bytes(virtual_ipc_mem_handle.creator_pid)
     {
         return Err(CudaError(CUresult::CUDA_ERROR_INVALID_HANDLE));
     }
     let state_ref = &mut *state;
     for (&address, mapping) in &mut state_ref.mallocs {
-        if mapping.opens != 0 && state_ref.handles.get(&mapping.handle) == Some(&id) {
-            if mapping.requested != u64::from_le_bytes(inline.requested) as usize
-                || mapping.extent != u64::from_le_bytes(inline.extent) as usize
+        if mapping.opens != 0
+            && state_ref
+                .virtual_allocation_handles
+                .get(&mapping.virtual_allocation_handle)
+                == Some(&id)
+        {
+            if mapping.requested != u64::from_le_bytes(virtual_ipc_mem_handle.requested) as usize
+                || mapping.extent != u64::from_le_bytes(virtual_ipc_mem_handle.extent) as usize
             {
                 return Err(CudaError(CUresult::CUDA_ERROR_INVALID_HANDLE));
             }
@@ -229,31 +246,19 @@ pub fn cuIpcOpenMemHandle(out: *mut CUdeviceptr, handle: CUipcMemHandle, flags: 
             return Ok(());
         }
     }
-    if ParticipantId(inline.creator) == state.identity {
+    let creator_pid = u32::from_le_bytes(virtual_ipc_mem_handle.creator_pid);
+    if creator_pid == state.namespace_pid {
         return Err(CudaError(CUresult::CUDA_ERROR_INVALID_HANDLE));
     }
-    let directory = Path::new(&state.endpoint)
-        .parent()
-        .ok_or(CUresult::CUDA_ERROR_INVALID_HANDLE)?;
-    let ticket = Ticket {
-        creator: ParticipantId(inline.creator),
-        allocation: id,
-        resource: Resource::Unicast,
-        endpoint: directory
-            .join(format!(
-                "cuinterpose-{}.sock",
-                u32::from_le_bytes(inline.pid)
-            ))
-            .to_str()
-            .ok_or(CUresult::CUDA_ERROR_INVALID_HANDLE)?
-            .to_owned(),
-    };
-    let logical = state::import_ticket(&mut state, ticket)?;
+    let reference = AllocationReference { creator_pid, id };
+    let mut virtual_allocation_handle = 0;
+    state::import_reference(state, &mut virtual_allocation_handle, reference)?;
+    let mut state = state::active()?;
     let result = map(
         &mut state,
-        logical,
-        u64::from_le_bytes(inline.requested) as usize,
-        u64::from_le_bytes(inline.extent) as usize,
+        virtual_allocation_handle,
+        u64::from_le_bytes(virtual_ipc_mem_handle.requested) as usize,
+        u64::from_le_bytes(virtual_ipc_mem_handle.extent) as usize,
         1,
     );
     match result {
@@ -262,7 +267,9 @@ pub fn cuIpcOpenMemHandle(out: *mut CUdeviceptr, handle: CUipcMemHandle, flags: 
             Ok(())
         }
         Err(error) => {
-            state.handles.remove(&logical);
+            state
+                .virtual_allocation_handles
+                .remove(&virtual_allocation_handle);
             state.settle(id)?;
             Err(error)
         }
@@ -318,10 +325,12 @@ fn release(address: CUdeviceptr, imported: bool) -> Result<()> {
         .get(&address)
         .ok_or(CUresult::CUDA_ERROR_INVALID_VALUE)?
         .clone();
-    let id = state.handles[&mapping.handle];
+    let id = state.virtual_allocation_handles[&mapping.virtual_allocation_handle];
     unsafe { driver::cuMemUnmap(address, mapping.extent) }?;
     state.mappings.remove(&address);
-    state.handles.remove(&mapping.handle);
+    state
+        .virtual_allocation_handles
+        .remove(&mapping.virtual_allocation_handle);
     state.mallocs.remove(&address);
     state.settle(id)?;
     unsafe { driver::cuMemAddressFree(address, mapping.extent) }
@@ -355,27 +364,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn inline_ticket_rejects_foreign_handles_and_invalid_lengths() {
-        assert!(InlineTicket::decode(unsafe { std::mem::zeroed() }).is_err());
-        let mut ticket = InlineTicket {
-            version: VERSION,
-            creator: [1; 16],
+    fn virtual_ipc_mem_handle_rejects_foreign_handles_and_invalid_lengths() {
+        assert!(VirtualIpcMemHandle::decode(unsafe { std::mem::zeroed() }).is_err());
+        let mut virtual_ipc_mem_handle = VirtualIpcMemHandle {
+            magic: VIRTUAL_IPC_MEM_HANDLE_MAGIC,
+            creator_pid: 1u32.to_le_bytes(),
             allocation: [2; 16],
-            pid: 42u32.to_le_bytes(),
-            reserved: [0; 4],
+            reserved: [0; 20],
             requested: 17u64.to_le_bytes(),
             extent: 4096u64.to_le_bytes(),
         };
-        let decoded = InlineTicket::decode(unsafe {
-            std::mem::transmute::<InlineTicket, CUipcMemHandle>(ticket)
+        let decoded = VirtualIpcMemHandle::decode(unsafe {
+            std::mem::transmute::<VirtualIpcMemHandle, CUipcMemHandle>(virtual_ipc_mem_handle)
         })
-        .expect("valid inline ticket");
-        assert_eq!(decoded.creator, [1; 16]);
+        .expect("valid virtual IPC memory handle");
+        assert_eq!(u32::from_le_bytes(decoded.creator_pid), 1);
         assert_eq!(u64::from_le_bytes(decoded.requested), 17);
-        ticket.extent = 16u64.to_le_bytes();
+        virtual_ipc_mem_handle.extent = 16u64.to_le_bytes();
         assert!(
-            InlineTicket::decode(unsafe {
-                std::mem::transmute::<InlineTicket, CUipcMemHandle>(ticket)
+            VirtualIpcMemHandle::decode(unsafe {
+                std::mem::transmute::<VirtualIpcMemHandle, CUipcMemHandle>(virtual_ipc_mem_handle)
             })
             .is_err()
         );
