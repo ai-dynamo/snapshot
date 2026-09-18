@@ -10,11 +10,13 @@ mod topology;
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
 use cuinterpose_protocol::{
-    self as protocol, Operation, Participant, ParticipantId, Reply, Request, Response,
+    self as protocol, Manifest, Operation, ParticipantDirectory, ParticipantId, ParticipantState,
+    Reply, Request, Response,
 };
 use report::{Event, Transfer, write as report};
+use std::collections::BTreeMap;
 use std::os::unix::net::{SocketAddr, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use topology::Allocation;
 
@@ -36,20 +38,22 @@ struct Arguments {
 }
 
 struct Peer {
-    endpoint: String,
+    endpoint: PathBuf,
+    socket_path: PathBuf,
     id: ParticipantId,
 }
 
 struct Inspection {
-    participant: Participant,
+    participant: ParticipantState,
     raw_imports: u64,
     unsupported_creations: u64,
 }
 
 // Transport errors retain their cause; remote refusals are application errors.
-fn exchange(endpoint: &str, request: &Request) -> Result<Response> {
+fn exchange(endpoint: &Path, request: &Request) -> Result<Response> {
+    let display = endpoint.display();
     let socket = UnixStream::connect(endpoint)
-        .with_context(|| format!("{endpoint}: {request:?}: connect failed"))?;
+        .with_context(|| format!("{display}: {request:?}: connect failed"))?;
     let operation = match request {
         Request::Execute { operation, .. } => Some(*operation),
         _ => None,
@@ -57,35 +61,54 @@ fn exchange(endpoint: &str, request: &Request) -> Result<Response> {
     let timeout = Some(protocol::timeout(operation));
     socket
         .set_read_timeout(timeout)
-        .with_context(|| format!("{endpoint}: {request:?}: set read timeout failed"))?;
+        .with_context(|| format!("{display}: {request:?}: set read timeout failed"))?;
     socket
         .set_write_timeout(timeout)
-        .with_context(|| format!("{endpoint}: {request:?}: set write timeout failed"))?;
+        .with_context(|| format!("{display}: {request:?}: set write timeout failed"))?;
     protocol::send(&socket, request, None)
-        .with_context(|| format!("{endpoint}: {request:?}: send failed"))?;
+        .with_context(|| format!("{display}: {request:?}: send failed"))?;
     let (response, fd): (Response, _) = protocol::receive(&socket)
-        .with_context(|| format!("{endpoint}: {request:?}: receive failed"))?;
+        .with_context(|| format!("{display}: {request:?}: receive failed"))?;
     ensure!(
         fd.is_none(),
-        "{endpoint}: {request:?}: unexpected descriptor"
+        "{display}: {request:?}: unexpected descriptor"
     );
     Ok(response)
 }
 
 impl Peer {
-    fn identify(endpoint: String) -> Result<Self> {
-        let response = exchange(&endpoint, &Request::Handshake)?;
+    fn identify(endpoint: PathBuf, socket_path: PathBuf) -> Result<Self> {
+        let response = exchange(&endpoint, &Request::Identify)?;
         ensure!(
             matches!(
                 response.result.map_err(anyhow::Error::msg)?,
-                Reply::Handshake
+                Reply::Identified
             ),
-            "{endpoint}: unexpected handshake response"
+            "{}: unexpected identify response",
+            endpoint.display()
         );
         Ok(Self {
             endpoint,
+            socket_path,
             id: response.participant,
         })
+    }
+
+    fn rendezvous(&self, participants: &ParticipantDirectory) -> Result<()> {
+        let response = exchange(
+            &self.endpoint,
+            &Request::Rendezvous {
+                participant: self.id,
+                participants: participants.clone(),
+            },
+        )?;
+        ensure!(
+            response.participant == self.id
+                && matches!(response.result.map_err(anyhow::Error::msg)?, Reply::Ready),
+            "{}: unexpected rendezvous response",
+            self.endpoint.display()
+        );
+        Ok(())
     }
 
     fn inspect(&self) -> Result<Inspection> {
@@ -98,22 +121,29 @@ impl Peer {
         ensure!(
             response.participant == self.id,
             "{}: participant changed",
-            self.endpoint
+            self.endpoint.display()
         );
         match response.result.map_err(anyhow::Error::msg)? {
             Reply::Inspection {
-                records,
+                entries,
                 live_raw_imports,
                 unsupported_creations,
-            } => Ok(Inspection {
-                participant: Participant {
-                    id: self.id,
-                    records,
-                },
-                raw_imports: live_raw_imports,
-                unsupported_creations,
-            }),
-            _ => bail!("{}: unexpected inspection reply", self.endpoint),
+            } => {
+                ensure!(
+                    entries.len() <= cuinterpose_protocol::MAX_ENTRIES,
+                    "{}: inspection has too many entries",
+                    self.endpoint.display()
+                );
+                Ok(Inspection {
+                    participant: ParticipantState {
+                        socket_path: self.socket_path.clone(),
+                        entries,
+                    },
+                    raw_imports: live_raw_imports,
+                    unsupported_creations,
+                })
+            }
+            _ => bail!("{}: unexpected inspection reply", self.endpoint.display()),
         }
     }
 
@@ -128,7 +158,7 @@ impl Peer {
         ensure!(
             response.participant == self.id,
             "{}: participant changed",
-            self.endpoint
+            self.endpoint.display()
         );
         match response.result.map_err(anyhow::Error::msg)? {
             Reply::Completed {
@@ -138,7 +168,7 @@ impl Peer {
             } if actual == operation && bytes == expected_bytes => Ok(copy_us),
             _ => bail!(
                 "{}: unexpected {operation:?} response or transfer size",
-                self.endpoint
+                self.endpoint.display()
             ),
         }
     }
@@ -156,7 +186,7 @@ fn command_all(
         for peer in peers {
             let bytes = allocations
                 .iter()
-                .filter(|a| a.preserve_content && a.creator == peer.id)
+                .filter(|a| a.preserve_content && a.reference.creator == peer.id)
                 .try_fold(0u64, |sum, a| {
                     sum.checked_add(a.size).context("allocation size overflow")
                 })?;
@@ -185,12 +215,17 @@ fn command_all(
     })
 }
 
-fn inspect(peers: &[Peer]) -> Result<(Vec<Participant>, u64, u64)> {
-    let mut participants = Vec::with_capacity(peers.len());
+fn inspect(peers: &[Peer]) -> Result<(Manifest, u64, u64)> {
+    let mut participants = BTreeMap::new();
     let (mut raw, mut unsupported) = (0, 0);
     for peer in peers {
         let inspection = peer.inspect()?;
-        participants.push(inspection.participant);
+        ensure!(
+            participants
+                .insert(peer.id, inspection.participant)
+                .is_none(),
+            "duplicate participant identity"
+        );
         raw += inspection.raw_imports;
         unsupported += inspection.unsupported_creations;
     }
@@ -239,7 +274,7 @@ fn run() -> Result<()> {
     );
     let path = args.checkpoint_dir.join("cuinterpose.state");
     let mut expected = if args.prepare {
-        Vec::new()
+        Manifest::new()
     } else {
         state::read(&path).with_context(|| format!("cannot parse {}", path.display()))?
     };
@@ -248,22 +283,41 @@ fn run() -> Result<()> {
     for process in args.processes.chunks_exact(2) {
         let (observed, namespace) = (process[0], process[1]);
         let control = &args.control_dir;
+        let socket_path = PathBuf::from(format!("{control}/cuinterpose-{namespace}.sock"));
         let endpoint = if args.proc_root.is_empty() {
-            format!("{control}/cuinterpose-{namespace}.sock")
+            socket_path.clone()
         } else {
-            format!(
+            PathBuf::from(format!(
                 "{}/{observed}/root{control}/cuinterpose-{namespace}.sock",
                 args.proc_root
-            )
+            ))
         };
         SocketAddr::from_pathname(&endpoint)?;
-        peers.push(Peer::identify(endpoint)?);
+        peers.push(Peer::identify(endpoint, socket_path)?);
     }
+    let directory: ParticipantDirectory = peers
+        .iter()
+        .map(|peer| (peer.id, peer.socket_path.clone()))
+        .collect();
+    ensure!(
+        directory.len() == peers.len(),
+        "duplicate participant identity"
+    );
+    if args.restore {
+        ensure!(
+            directory.keys().eq(expected.keys()),
+            "restored processes do not match the checkpointed participants"
+        );
+    }
+    for peer in &peers {
+        peer.rendezvous(&directory)?;
+    }
+    report(Event::Rendezvous, start, peers.len())?;
     if args.prepare {
         let (mut participants, raw, unsupported) = inspect(&peers)?;
         report(
             Event::Inspect {
-                records: participants.iter().map(|p| p.records.len()).sum(),
+                entries: participants.values().map(|p| p.entries.len()).sum(),
                 live_raw_imports: raw,
                 unsupported_exportable_creations: unsupported,
             },
@@ -292,14 +346,7 @@ fn run() -> Result<()> {
         state::write_atomic(&path, &mut participants)?;
         report(Event::StateWrite, start, peers.len())?;
     } else {
-        peers.sort_by_key(|p| p.id);
-        expected.sort_by_key(|p| p.id);
-        ensure!(
-            peers.iter().map(|p| p.id).eq(expected.iter().map(|p| p.id)),
-            "restored processes do not match the checkpointed participants"
-        );
         let allocations = topology::validate(&expected)?;
-        report(Event::Handshake, start, peers.len())?;
         transfer(&mut peers, Operation::LoadAllocations, &allocations)?;
         let start = Instant::now();
         command_all(&mut peers, Operation::RestoreUnicast, &[])?;
@@ -318,7 +365,7 @@ fn run() -> Result<()> {
         // Re-identify before inspecting, preserving the final identity barrier.
         for peer in &peers {
             ensure!(
-                Peer::identify(peer.endpoint.clone())?.id == peer.id,
+                Peer::identify(peer.endpoint.clone(), peer.socket_path.clone())?.id == peer.id,
                 "restored participant changed"
             );
         }
@@ -328,11 +375,14 @@ fn run() -> Result<()> {
             "restored participant has unsupported CUDA state"
         );
         topology::validate(&participants)?;
-        for (actual, expected) in participants.iter_mut().zip(&mut expected) {
-            actual.records.sort();
-            expected.records.sort();
+        for (id, actual) in &mut participants {
+            let expected = expected
+                .get_mut(id)
+                .context("restored participant is not in the manifest")?;
+            actual.entries.sort();
+            expected.entries.sort();
             ensure!(
-                actual.id == expected.id && actual.records == expected.records,
+                actual.entries == expected.entries,
                 "restored topology does not match the checkpoint"
             );
         }
