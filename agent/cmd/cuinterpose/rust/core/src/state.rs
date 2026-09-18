@@ -307,9 +307,12 @@ impl State {
                 allocation: allocation.reference,
                 content: allocation.owns_content(self.namespace_pid),
                 size: allocation.size as u64,
-                allocation_type: allocation.properties.type_,
-                handle_types: allocation.properties.requestedHandleTypes,
-                location: allocation.properties.location,
+                allocation_type: allocation.properties.type_ as u32,
+                handle_types: allocation.properties.requestedHandleTypes.0,
+                location: (
+                    allocation.properties.location.type_ as u32,
+                    allocation.properties.location.id,
+                ),
                 logical_handle_count,
             };
             records.push(record);
@@ -321,14 +324,12 @@ impl State {
             if self.multicasts.contains_key(&mapping.id) {
                 continue;
             }
-            let mut access = mapping.access.clone();
-            access.sort();
             let record = StateEntry::Mapping {
                 allocation: self.allocations[&mapping.id].reference,
                 address: mapping.address,
                 size: mapping.size as u64,
                 offset: mapping.offset as u64,
-                access,
+                access: access_metadata(&mapping.access),
             };
             records.push(record);
         }
@@ -653,6 +654,21 @@ impl State {
         }
         Ok(result)
     }
+}
+
+pub(super) fn access_metadata(access: &[CUmemAccessDesc]) -> Vec<(u32, i32, u32)> {
+    let mut metadata: Vec<_> = access
+        .iter()
+        .map(|entry| {
+            (
+                entry.location.type_ as u32,
+                entry.location.id,
+                entry.flags as u32,
+            )
+        })
+        .collect();
+    metadata.sort();
+    metadata
 }
 
 pub(super) fn random<const N: usize>() -> Result<[u8; N]> {
