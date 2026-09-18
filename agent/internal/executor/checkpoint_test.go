@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
@@ -123,16 +124,21 @@ func TestConfigureCheckpointRecordsRuntimeImageID(t *testing.T) {
 func TestCheckpointPageBrokerPrepareFailureDoesNotMutate(t *testing.T) {
 	cfg := &types.AgentConfig{
 		Storage:    types.StorageSpec{BasePath: t.TempDir()},
-		PageBroker: types.PageBrokerSpec{Enabled: true, ControlSocketPath: t.TempDir() + "/pagebroker.sock"},
+		PageBroker: types.PageBrokerSpec{ControlSocketPath: t.TempDir() + "/pagebroker.sock"},
 	}
 
-	err := Checkpoint(context.Background(), checkpointPathRuntime{}, logr.Discard(), CheckpointRequest{
-		ContentUID:          "content-uid",
-		ContainerName:       "main",
-		PageBrokerRequested: true,
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	start := time.Now()
+	err := Checkpoint(ctx, checkpointPathRuntime{}, logr.Discard(), CheckpointRequest{
+		ContentUID:    "content-uid",
+		ContainerName: "main",
 	}, cfg)
 	require.ErrorContains(t, err, "prepare PageBroker checkpoint")
+	assert.NotContains(t, err.Error(), "abort PageBroker checkpoint")
+	assert.Less(t, time.Since(start), 3*time.Second)
 	assert.False(t, CheckpointNeedsSourceKill(err))
+	assert.NoDirExists(t, filepath.Join(cfg.Storage.BasePath, "artifacts"))
 }
 
 func TestCheckpointNeedsSourceKill(t *testing.T) {
