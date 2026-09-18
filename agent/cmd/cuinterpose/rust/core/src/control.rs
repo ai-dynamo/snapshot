@@ -210,7 +210,12 @@ fn dispatch(
                 Err(_) => return refuse(&socket, identity, "creator resource is unavailable"),
             };
             let reply = match lease.multicast_properties() {
-                Some(properties) => Reply::MulticastExport { properties },
+                Some(properties) => Reply::MulticastExport {
+                    devices: properties.numDevices,
+                    size: properties.size as u64,
+                    handle_types: properties.handleTypes,
+                    flags: properties.flags,
+                },
                 None => Reply::UnicastExport,
             };
             return protocol::send(

@@ -1,42 +1,30 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
+use cudarc::driver::sys::CUmulticastObjectProp;
 use cuinterpose_protocol::{
-    self as protocol, AllocationReference, CUmulticastObjectProp, Error, Reply, Request, Response,
-    Result, TICKET_BYTES, TICKET_MAGIC,
+    self as protocol, AllocationReference, Error, Reply, Request, Response, Result,
+    VIRTUAL_SHAREABLE_HANDLE_BYTES, VIRTUAL_SHAREABLE_HANDLE_MAGIC,
 };
-use rustix::fs::{MemfdFlags, SealFlags, fcntl_add_seals, fcntl_get_seals, memfd_create};
+use rustix::fs::{MemfdFlags, memfd_create};
 use std::fs::File;
 use std::io::Write;
 use std::os::fd::{BorrowedFd, OwnedFd};
 use std::os::unix::{fs::FileExt, net::UnixStream};
 use std::path::{Path, PathBuf};
 
-const SEALS: SealFlags = SealFlags::SEAL
-    .union(SealFlags::WRITE)
-    .union(SealFlags::GROW)
-    .union(SealFlags::SHRINK);
-
-pub fn export(reference: AllocationReference) -> Result<OwnedFd> {
-    if reference.id == [0; 16] {
-        return Err(Error::Invalid("invalid allocation reference"));
-    }
-    let fd = memfd_create(
-        c"cuinterpose-ticket",
-        MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING,
-    )
-    .map_err(std::io::Error::from)?;
+pub fn create(reference: AllocationReference) -> Result<OwnedFd> {
+    let bytes = protocol::encode_virtual_shareable_handle(reference)?;
+    let fd = memfd_create(c"cuinterpose-virtual-shareable-handle", MemfdFlags::CLOEXEC)
+        .map_err(std::io::Error::from)?;
     let mut file = File::from(fd);
-    file.write_all(&TICKET_MAGIC)?;
-    file.write_all(&reference.creator)?;
-    file.write_all(&reference.id)?;
-    fcntl_add_seals(&file, SEALS).map_err(std::io::Error::from)?;
+    file.write_all(&bytes)?;
     Ok(file.into())
 }
 
-/// A foreign FD is a native import. A recognizable but invalid/obsolete shim
-/// ticket is an error, not an invitation to pass a memfd into the CUDA driver.
-pub fn read(fd: i32) -> Result<Option<AllocationReference>> {
+/// A foreign FD is a native import. A recognizable but invalid or obsolete
+/// virtual shareable handle must not be passed through to the CUDA driver.
+pub fn decode(fd: i32) -> Result<Option<AllocationReference>> {
     if fd < 0 {
         return Err(Error::Invalid("negative import descriptor"));
     }
@@ -45,27 +33,22 @@ pub fn read(fd: i32) -> Result<Option<AllocationReference>> {
     let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
     let file = File::from(borrowed.try_clone_to_owned()?);
     let mut magic = [0; 4];
-    if file.read_exact_at(&mut magic, 0).is_err() || magic != TICKET_MAGIC {
+    if file.read_exact_at(&mut magic, 0).is_err() || magic != VIRTUAL_SHAREABLE_HANDLE_MAGIC {
         return Ok(None);
     }
-    if file.metadata()?.len() as usize != TICKET_BYTES
-        || !fcntl_get_seals(&file)
-            .map_err(std::io::Error::from)?
-            .contains(SEALS)
-    {
-        return Err(Error::Invalid("invalid ticket size or seals"));
+    if file.metadata()?.len() as usize != VIRTUAL_SHAREABLE_HANDLE_BYTES {
+        return Err(Error::Invalid("invalid virtual shareable handle size"));
     }
-    let mut creator = [0; 16];
-    let mut id = [0; 16];
-    file.read_exact_at(&mut creator, TICKET_MAGIC.len() as u64)?;
-    file.read_exact_at(&mut id, (TICKET_MAGIC.len() + creator.len()) as u64)?;
-    if id == [0; 16] {
-        return Err(Error::Invalid("invalid allocation reference"));
-    }
-    Ok(Some(AllocationReference { id, creator }))
+    let mut bytes = [0; VIRTUAL_SHAREABLE_HANDLE_BYTES];
+    bytes[..VIRTUAL_SHAREABLE_HANDLE_MAGIC.len()].copy_from_slice(&magic);
+    file.read_exact_at(
+        &mut bytes[VIRTUAL_SHAREABLE_HANDLE_MAGIC.len()..],
+        VIRTUAL_SHAREABLE_HANDLE_MAGIC.len() as u64,
+    )?;
+    Ok(Some(protocol::decode_virtual_shareable_handle(&bytes)?))
 }
 
-pub fn request(
+pub fn request_export(
     allocation: AllocationReference,
 ) -> Result<(OwnedFd, Option<CUmulticastObjectProp>)> {
     let path = resolve(allocation.creator)?;
@@ -97,11 +80,26 @@ fn request_at(
     let descriptor = fd.ok_or(Error::Invalid("creator sent no descriptor"))?;
     match response.result.map_err(Error::Remote)? {
         Reply::UnicastExport => Ok((descriptor, None)),
-        Reply::MulticastExport { properties } => {
-            if properties.numDevices == 0 || properties.size == 0 {
+        Reply::MulticastExport {
+            devices,
+            size,
+            handle_types,
+            flags,
+        } => {
+            if devices == 0 || size == 0 {
                 return Err(Error::Invalid("invalid multicast export properties"));
             }
-            Ok((descriptor, Some(properties)))
+            Ok((
+                descriptor,
+                Some(CUmulticastObjectProp {
+                    numDevices: devices,
+                    size: size
+                        .try_into()
+                        .map_err(|_| Error::Invalid("multicast size exceeds host size"))?,
+                    handleTypes: handle_types,
+                    flags,
+                }),
+            ))
         }
         _ => Err(Error::Invalid("invalid export response")),
     }
@@ -181,28 +179,27 @@ mod tests {
     use std::os::fd::AsRawFd;
 
     #[test]
-    fn sealed_ticket_round_trip() {
+    fn virtual_shareable_handle_round_trip() {
         let reference = AllocationReference {
             creator: [1; 16],
             id: [4; 16],
         };
-        let fd = export(reference).unwrap();
-        assert_eq!(read(fd.as_raw_fd()).unwrap(), Some(reference));
+        let fd = create(reference).unwrap();
+        assert_eq!(decode(fd.as_raw_fd()).unwrap(), Some(reference));
         assert_eq!(
             File::from(fd).metadata().unwrap().len(),
-            TICKET_BYTES as u64
+            VIRTUAL_SHAREABLE_HANDLE_BYTES as u64
         );
     }
 
     #[test]
-    fn foreign_fd_is_not_a_ticket_but_obsolete_shim_ticket_is_rejected() {
+    fn foreign_fd_is_native_but_obsolete_virtual_shareable_handle_is_rejected() {
         let foreign = File::open("/dev/null").unwrap();
-        assert_eq!(read(foreign.as_raw_fd()).unwrap(), None);
-        let fd = memfd_create(c"obsolete-ticket", MemfdFlags::ALLOW_SEALING).unwrap();
+        assert_eq!(decode(foreign.as_raw_fd()).unwrap(), None);
+        let fd = memfd_create(c"obsolete-virtual-handle", MemfdFlags::empty()).unwrap();
         let mut file = File::from(fd);
-        file.write_all(&TICKET_MAGIC).unwrap();
+        file.write_all(&VIRTUAL_SHAREABLE_HANDLE_MAGIC).unwrap();
         file.write_all(&[0; 252]).unwrap();
-        fcntl_add_seals(&file, SEALS).unwrap();
-        assert!(read(file.as_raw_fd()).is_err());
+        assert!(decode(file.as_raw_fd()).is_err());
     }
 }
