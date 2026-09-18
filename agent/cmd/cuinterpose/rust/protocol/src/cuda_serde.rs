@@ -3,7 +3,6 @@
 
 //! Stable MessagePack representations for the CUDA ABI values in the protocol.
 
-use crate::MAX_ACCESS;
 use cudarc::driver::sys::{
     CUmemAccess_flags, CUmemAccessDesc, CUmemAllocationHandleType, CUmemAllocationType,
     CUmemLocation, CUmemLocationType, CUmulticastObjectProp,
@@ -101,9 +100,6 @@ pub mod access {
     where
         S: Serializer,
     {
-        if values.len() > MAX_ACCESS {
-            return Err(ser::Error::custom("too many access descriptors"));
-        }
         values
             .iter()
             .map(|value| AccessWire {
@@ -118,11 +114,7 @@ pub mod access {
     where
         D: Deserializer<'de>,
     {
-        let values = Vec::<AccessWire>::deserialize(deserializer)?;
-        if values.len() > MAX_ACCESS {
-            return Err(de::Error::custom("too many access descriptors"));
-        }
-        values
+        Vec::<AccessWire>::deserialize(deserializer)?
             .into_iter()
             .map(|value| {
                 Ok(CUmemAccessDesc {

@@ -26,10 +26,8 @@ use std::{collections::BTreeMap, io, path::PathBuf, time::Duration};
 pub use transport::{receive, send};
 
 pub const VERSION: u8 = 1;
-pub const MAX_ENTRIES: usize = 4096;
-pub const MAX_ACCESS: usize = 32;
-// A maximal inspection (4096 mappings, 32 named access grants each) fits here.
-// Also limits cuinterpose.state, which stores every participant's entries.
+// Bound allocations controlled by socket frame prefixes and checkpoint files.
+// Protocol payloads contain metadata, never allocation contents.
 pub const MAX_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
 pub const TICKET_MAGIC: [u8; 4] = [b'C', b'U', b'I', VERSION];
 pub const TICKET_BYTES: usize =
@@ -104,7 +102,6 @@ pub struct Response {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-// Select the variant before reading bounded collections, without Content buffering.
 #[serde(rename_all = "snake_case")]
 pub enum Reply {
     Identified,
