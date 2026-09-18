@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{Error, MAX_BYTES, Result, decode, encode};
+use crate::{Error, MAX_MESSAGE_BYTES, Result, decode, encode};
 use rustix::net::{
     RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags, SendAncillaryBuffer,
     SendAncillaryMessage, SendFlags, recvmsg, sendmsg,
@@ -91,7 +91,7 @@ pub fn receive<T: DeserializeOwned>(socket: &UnixStream) -> Result<(T, Option<Ow
     }
     (&*socket).read_exact(&mut prefix[received.bytes..])?;
     let size = u32::from_le_bytes(prefix) as usize;
-    if size > MAX_BYTES {
+    if size > MAX_MESSAGE_BYTES {
         return Err(Error::Invalid("message exceeds size limit"));
     }
     let mut bytes = vec![0; size];

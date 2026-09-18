@@ -1,19 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{AllocationId, MAX_ACCESS, ParticipantId, bounded_vec};
+use crate::{
+    AllocationReference, CUmemAccessDesc, CUmemAllocationHandleType, CUmemAllocationType,
+    CUmemLocation, CUmulticastObjectProp, cuda_serde,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Access {
-    pub location_type: i32,
-    pub location_id: i32,
-    pub flags: u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct MemberRange {
-    pub allocation: AllocationId,
+    pub allocation: AllocationReference,
     pub offset: u64,
 }
 
@@ -37,47 +33,42 @@ pub enum BindingVersion {
     V2,
 }
 
-/// Each variant contains only metadata meaningful for that resource. Ordering
-/// is semantic (including variant order), not an encoding-dependent memcmp.
+/// One entry in a participant's persisted CUDA state.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Record {
+pub enum StateEntry {
     Allocation {
-        id: AllocationId,
-        creator: bool,
+        allocation: AllocationReference,
         content: bool,
         size: u64,
-        allocation_type: i32,
-        handle_types: u32,
-        location_type: i32,
-        location_id: i32,
-        handles: u32,
+        #[serde(with = "cuda_serde::allocation_type")]
+        allocation_type: CUmemAllocationType,
+        #[serde(with = "cuda_serde::allocation_handle_type")]
+        handle_types: CUmemAllocationHandleType,
+        #[serde(with = "cuda_serde::location")]
+        location: CUmemLocation,
+        logical_handle_count: u64,
     },
     Mapping {
-        id: AllocationId,
-        creator: bool,
+        allocation: AllocationReference,
         address: u64,
         size: u64,
         offset: u64,
-        #[serde(deserialize_with = "bounded_vec::<_, _, MAX_ACCESS>")]
-        access: Vec<Access>,
+        #[serde(with = "cuda_serde::access")]
+        access: Vec<CUmemAccessDesc>,
     },
     Multicast {
-        id: AllocationId,
-        creator: ParticipantId,
-        owned: bool,
-        size: u64,
-        handles: u32,
-        handle_types: u64,
-        flags: u64,
-        devices: u32,
+        allocation: AllocationReference,
+        #[serde(with = "cuda_serde::multicast_properties")]
+        properties: CUmulticastObjectProp,
+        logical_handle_count: u64,
     },
     MulticastDevice {
-        id: AllocationId,
+        allocation: AllocationReference,
         device: i32,
     },
     MulticastBinding {
-        id: AllocationId,
+        allocation: AllocationReference,
         source: BindingSource,
         size: u64,
         offset: u64,
@@ -86,12 +77,12 @@ pub enum Record {
         device: i32,
     },
     MulticastMapping {
-        id: AllocationId,
+        allocation: AllocationReference,
         address: u64,
         size: u64,
         offset: u64,
         flags: u64,
-        #[serde(deserialize_with = "bounded_vec::<_, _, MAX_ACCESS>")]
-        access: Vec<Access>,
+        #[serde(with = "cuda_serde::access")]
+        access: Vec<CUmemAccessDesc>,
     },
 }
