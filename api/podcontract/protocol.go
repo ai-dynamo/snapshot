@@ -23,6 +23,10 @@ const (
 	// uses the captured container name as the destination.
 	RestoreContainerMapAnnotation = "nvidia.com/restore-container-map"
 
+	// RestoredContainerIDsAnnotation records the container ID into which each
+	// restore destination was most recently restored.
+	RestoredContainerIDsAnnotation = "nvidia.com/restored-container-ids"
+
 	// SkipCompatCheckAnnotation disables compatibility checks for one restore.
 	SkipCompatCheckAnnotation = "nvidia.com/snapshot-skip-compat-check"
 
