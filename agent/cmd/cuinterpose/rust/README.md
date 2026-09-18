@@ -29,6 +29,9 @@ Verification checks ELF exports, GNU libraries' glibc baseline, lack of CUDA
 link dependencies, static coordinator linkage, permissions, and CLI options.
 Always test and ship a matched frontend/core/coordinator set.
 
+The protocol records CUDA metadata as explicit fixed-width primitive fields.
+CUDA FFI structs stay inside the core crate and are never serialized directly.
+
 For local development, install GNU and musl targets and musl tools, then run
 `make native` or `make test-native` from `agent/cmd/cuinterpose`. On hosts
 whose default linker is not the system GNU toolchain, set
@@ -65,8 +68,8 @@ requires cross-node capture, restore, and post-restore workload inference.
 | `core` | Driver calls, process generations, tracking, host carriers, lifecycle |
 | `coordinator` | CLI, participants, topology validation, barriers, durable state |
 
-The private C ABI, MessagePack wire/state format, and ticket formats are all
-version **1**.
+The private C ABI, MessagePack wire/state format, virtual shareable handle, and
+virtual IPC memory handle are all version **1**.
 Earlier experimental artifacts are rejected, not translated. Rust
 objects, allocators, mutexes, and unwinding never cross the library boundary.
 `FrontendAbi` contains the resolver and process identity supplied by the C
