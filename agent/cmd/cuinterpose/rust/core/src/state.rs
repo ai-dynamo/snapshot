@@ -15,8 +15,7 @@ use cudarc::driver::sys::{
     CUmemAccess_flags, CUmemAccessDesc, CUmemAllocationGranularity_flags,
     CUmemAllocationHandleType, CUmemAllocationProp, CUmemAllocationType, CUmemLocationType,
 };
-use cuinterpose_protocol::Ticket;
-use cuinterpose_protocol::{AllocationId, Operation, ParticipantId, Resource, ResourceKind};
+use cuinterpose_protocol::{AllocationId, AllocationReference, NamespacePid, Operation};
 
 #[cfg(test)]
 mod tests {
@@ -91,12 +90,13 @@ mod tests {
     #[test]
     fn oversized_inspection_is_refused_before_building_records() {
         let state = State {
-            identity: ParticipantId::default(),
-            endpoint: String::new(),
+            namespace_pid: 1,
+            socket_path: PathBuf::new(),
+            mallocs: BTreeMap::new(),
             allocations: BTreeMap::new(),
             multicasts: BTreeMap::new(),
             handles: BTreeMap::new(),
-            mappings: (0..=cuinterpose_protocol::MAX_RECORDS)
+            mappings: (0..=cuinterpose_protocol::MAX_ENTRIES)
                 .map(|index| {
                     let address = (index * 4096) as u64;
                     (
@@ -134,13 +134,20 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::os::fd::{AsFd, IntoRawFd};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
+pub use super::legacy_ipc::{
+    cuIpcCloseMemHandle, cuIpcGetMemHandle, cuIpcOpenMemHandle,
+    cuIpcOpenMemHandle as cuIpcOpenMemHandle_v2, cuMemAlloc_v2, cuMemFree_v2,
+    cuMemGetAddressRange_v2,
+};
 pub use crate::driver::Result;
 struct Generation {
     state: Mutex<State>,
     cache: super::export_cache::ExportCache,
+    control_dir: PathBuf,
 }
 // Release publication follows successful worker startup; Acquire readers may
 // then borrow the generation for its process lifetime. Only a quiescent fork
@@ -199,14 +206,20 @@ pub fn cache() -> Result<&'static super::export_cache::ExportCache> {
     Ok(&unsafe { &*pointer }.cache)
 }
 
+pub fn control_dir() -> Result<&'static Path> {
+    let pointer = G_STATE.load(Ordering::Acquire);
+    if pointer.is_null() {
+        return Err(CudaError::from(CUDA_ERROR_NOT_INITIALIZED));
+    }
+    Ok(&unsafe { &*pointer }.control_dir)
+}
+
 #[derive(Clone)]
 pub struct Allocation {
-    pub id: AllocationId,
-    pub ticket: Ticket,
+    pub reference: AllocationReference,
     pub driver: Option<u64>,
     pub size: usize,
     pub properties: CUmemAllocationProp,
-    pub creator: bool,
     pub shared: bool,
     pub context: usize,
     pub checkpointed: bool,
@@ -215,8 +228,8 @@ pub struct Allocation {
 }
 
 impl Allocation {
-    fn owns_content(&self) -> bool {
-        self.creator
+    fn owns_content(&self, namespace_pid: NamespacePid) -> bool {
+        self.reference.creator_pid == namespace_pid
             && self.properties.type_ == CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED
             && self.properties.location.type_ == CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE
             && self.shared
@@ -285,8 +298,9 @@ impl Phase {
 }
 
 pub struct State {
-    pub identity: ParticipantId,
-    pub endpoint: String,
+    pub namespace_pid: NamespacePid,
+    pub socket_path: PathBuf,
+    pub mallocs: BTreeMap<u64, super::legacy_ipc::Mapping>,
     pub allocations: BTreeMap<AllocationId, Allocation>,
     pub multicasts: BTreeMap<AllocationId, super::multicast::Object>,
     pub handles: BTreeMap<u64, AllocationId>,
@@ -304,8 +318,8 @@ pub struct State {
 }
 
 impl State {
-    pub fn inspect(&self) -> Result<Vec<cuinterpose_protocol::Record>> {
-        use cuinterpose_protocol::Record;
+    pub fn inspect(&self) -> Result<Vec<cuinterpose_protocol::StateEntry>> {
+        use cuinterpose_protocol::StateEntry;
         if self.phase != Phase::Active || self.inflight != 0 {
             return Err(CudaError::from(CUDA_ERROR_NOT_READY));
         }
@@ -319,7 +333,7 @@ impl State {
                 })
             })
             .ok_or(CUDA_ERROR_OUT_OF_MEMORY)?;
-        if count > cuinterpose_protocol::MAX_RECORDS {
+        if count > cuinterpose_protocol::MAX_ENTRIES {
             return Err(CudaError::from(CUDA_ERROR_NOT_SUPPORTED));
         }
         let mut records = Vec::new();
@@ -327,21 +341,21 @@ impl State {
             .try_reserve_exact(count)
             .map_err(|_| CUDA_ERROR_OUT_OF_MEMORY)?;
         for allocation in self.allocations.values() {
-            let handles = self
+            let logical_handle_count = self
                 .handles
                 .values()
-                .filter(|id| **id == allocation.id)
-                .count() as u32;
-            let record = Record::Allocation {
-                id: allocation.id,
-                creator: allocation.creator,
-                content: allocation.owns_content(),
+                .filter(|id| **id == allocation.reference.id)
+                .count()
+                .try_into()
+                .map_err(|_| CUDA_ERROR_OUT_OF_MEMORY)?;
+            let record = StateEntry::Allocation {
+                allocation: allocation.reference,
+                content: allocation.owns_content(self.namespace_pid),
                 size: allocation.size as u64,
-                allocation_type: allocation.properties.type_ as i32,
-                handle_types: allocation.properties.requestedHandleTypes.0,
-                location_type: allocation.properties.location.type_ as i32,
-                location_id: allocation.properties.location.id,
-                handles,
+                allocation_type: allocation.properties.type_,
+                handle_types: allocation.properties.requestedHandleTypes,
+                location: allocation.properties.location,
+                logical_handle_count,
             };
             records.push(record);
         }
@@ -352,19 +366,10 @@ impl State {
             if self.multicasts.contains_key(&mapping.id) {
                 continue;
             }
-            let mut access: Vec<_> = mapping
-                .access
-                .iter()
-                .map(|access| cuinterpose_protocol::Access {
-                    location_type: access.location.type_ as i32,
-                    location_id: access.location.id,
-                    flags: access.flags as u64,
-                })
-                .collect();
+            let mut access = mapping.access.clone();
             access.sort();
-            let record = Record::Mapping {
-                creator: self.allocations[&mapping.id].creator,
-                id: mapping.id,
+            let record = StateEntry::Mapping {
+                allocation: self.allocations[&mapping.id].reference,
                 address: mapping.address,
                 size: mapping.size as u64,
                 offset: mapping.offset as u64,
@@ -404,8 +409,8 @@ impl State {
                 let ids: Vec<_> = self
                     .allocations
                     .values()
-                    .filter(|a| a.owns_content())
-                    .map(|a| a.id)
+                    .filter(|a| a.owns_content(self.namespace_pid))
+                    .map(|a| a.reference.id)
                     .collect();
                 let mut recovered = Vec::new();
                 let saved = (|| -> Result<(Option<Arena>, u32)> {
@@ -468,7 +473,11 @@ impl State {
                 };
                 self.arena = arena;
                 copy_us = elapsed;
-                for allocation in self.allocations.values_mut().filter(|a| a.owns_content()) {
+                for allocation in self
+                    .allocations
+                    .values_mut()
+                    .filter(|a| a.owns_content(self.namespace_pid))
+                {
                     allocation.content_saved = true;
                 }
             }
@@ -479,8 +488,10 @@ impl State {
                         allocation.context,
                         allocation.properties.location.id,
                         || {
-                            for mapping in
-                                self.mappings.values_mut().filter(|m| m.id == allocation.id)
+                            for mapping in self
+                                .mappings
+                                .values_mut()
+                                .filter(|m| m.id == allocation.reference.id)
                             {
                                 unsafe {
                                     crate::driver::cuMemUnmap(mapping.address, mapping.size)
@@ -525,10 +536,13 @@ impl State {
                 for allocation in self
                     .allocations
                     .values_mut()
-                    .filter(|a| !a.creator && a.checkpointed)
+                    .filter(|a| a.reference.creator_pid != self.namespace_pid && a.checkpointed)
                 {
-                    let raw = ticket::request(&allocation.ticket)
+                    let (raw, properties) = ticket::request(allocation.reference)
                         .map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
+                    if properties.is_some() {
+                        return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
+                    }
                     let mut imported = None;
                     let result = Context::run(
                         allocation.context,
@@ -559,10 +573,11 @@ impl State {
     }
 
     fn remap(&mut self, creator: bool) -> Result<()> {
+        let namespace_pid = self.namespace_pid;
         for allocation in self
             .allocations
             .values_mut()
-            .filter(|a| a.checkpointed && a.creator == creator)
+            .filter(|a| a.checkpointed && (a.reference.creator_pid == namespace_pid) == creator)
         {
             super::host_carrier::Context::run(
                 allocation.context,
@@ -571,7 +586,7 @@ impl State {
                     for mapping in self
                         .mappings
                         .values_mut()
-                        .filter(|m| m.id == allocation.id && m.checkpointed)
+                        .filter(|m| m.id == allocation.reference.id && m.checkpointed)
                     {
                         unsafe {
                             crate::driver::cuMemMap(
@@ -598,9 +613,13 @@ impl State {
                         let fd = crate::driver::export_posix(
                             allocation.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?,
                         )?;
-                        cache()?.replace((ResourceKind::Unicast, allocation.id), Some(fd))?;
+                        cache()?.replace(allocation.reference.id, Some((fd, None)))?;
                     }
-                    if !self.handles.values().any(|id| *id == allocation.id) {
+                    if !self
+                        .handles
+                        .values()
+                        .any(|id| *id == allocation.reference.id)
+                    {
                         unsafe {
                             crate::driver::cuMemRelease(
                                 allocation.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?,
@@ -650,7 +669,7 @@ impl State {
             allocation.driver = None;
         }
         if !handle_live && !mapped {
-            cache()?.replace((ResourceKind::Unicast, id), None)?;
+            cache()?.replace(id, None)?;
             self.allocations.remove(&id);
         }
         Ok(())
@@ -761,7 +780,9 @@ fn install_generation(candidate: &mut Result<Option<RuntimeCandidate>>) -> Resul
     };
     let generation = candidate.generation.as_mut().unwrap();
     let state = generation.state.get_mut().map_err(|_| CUDA_ERROR_UNKNOWN)?;
-    candidate.workers.activate(&state.endpoint)?;
+    candidate
+        .workers
+        .activate(state.socket_path.to_str().ok_or(CUDA_ERROR_INVALID_VALUE)?)?;
     G_STATE.store(
         Box::into_raw(candidate.generation.take().unwrap()),
         Ordering::Release,
@@ -782,12 +803,12 @@ impl RuntimeCandidate {
         if initialized() {
             return Ok(None);
         }
-        let identity = generation
+        let namespace_pid = generation
             .state
             .get_mut()
             .map_err(|_| CUDA_ERROR_UNKNOWN)?
-            .identity;
-        let Some(workers) = super::control::PreparedWorkers::prepare(identity)? else {
+            .namespace_pid;
+        let Some(workers) = super::control::PreparedWorkers::prepare(namespace_pid)? else {
             return Ok(None);
         };
         Ok(Some(Self {
@@ -804,38 +825,29 @@ impl Drop for RuntimeCandidate {
                 .state
                 .get_mut()
                 .unwrap_or_else(|e| e.into_inner());
-            self.workers.cleanup(&state.endpoint);
+            if let Some(path) = state.socket_path.to_str() {
+                self.workers.cleanup(path);
+            }
         }
     }
 }
 
 fn prepare_generation() -> Result<Box<Generation>> {
     let pid = unsafe { libc::getpid() };
-    let configured = if G_CHILD.load(Ordering::Acquire)
-        || super::G_FRONTEND_ABI
-            .get()
-            .is_some_and(|host| host.origin_pid != pid)
-    {
-        Err(std::env::VarError::NotPresent)
-    } else {
-        std::env::var("CUINTERPOSE_PARTICIPANT_ID")
-    };
-    let identity = match configured {
-        Ok(value) => value.parse().map_err(|_| CUDA_ERROR_INVALID_VALUE)?,
-        Err(std::env::VarError::NotPresent) => ParticipantId(random()?),
-        Err(_) => return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE)),
-    };
+    let namespace_pid = NamespacePid::try_from(pid).map_err(|_| CUDA_ERROR_INVALID_VALUE)?;
     let directory =
         std::env::var("SNAPSHOT_CONTROL_DIR").unwrap_or_else(|_| "/snapshot-control".into());
     if !directory.starts_with('/') {
         return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
     }
-    let endpoint = format!("{directory}/cuinterpose-{pid}.sock");
-    std::os::unix::net::SocketAddr::from_pathname(&endpoint)
+    let control_dir = PathBuf::from(directory);
+    let socket_path = cuinterpose_protocol::socket_path(&control_dir, namespace_pid);
+    std::os::unix::net::SocketAddr::from_pathname(&socket_path)
         .map_err(|_| CUDA_ERROR_INVALID_VALUE)?;
     let state = State {
-        identity,
-        endpoint,
+        namespace_pid,
+        socket_path: socket_path.clone(),
+        mallocs: BTreeMap::new(),
         allocations: BTreeMap::new(),
         multicasts: BTreeMap::new(),
         handles: BTreeMap::new(),
@@ -852,6 +864,7 @@ fn prepare_generation() -> Result<Box<Generation>> {
     Ok(Box::new(Generation {
         state: Mutex::new(state),
         cache: super::export_cache::ExportCache::default(),
+        control_dir,
     }))
 }
 
@@ -924,7 +937,7 @@ pub fn cuMemCreate(
         if state.next & LOGICAL_HANDLE_MASK != 0 {
             return Err(CudaError::from(CUDA_ERROR_OUT_OF_MEMORY));
         }
-        Some(AllocationId(random()?))
+        Some(random()?)
     } else {
         None
     };
@@ -952,19 +965,15 @@ pub fn cuMemCreate(
         return Ok(());
     }
     let id = tracked.ok_or(CUDA_ERROR_INVALID_HANDLE)?;
-    let ticket = Ticket {
-        creator: state.identity,
-        allocation: id,
-        endpoint: state.endpoint.clone(),
-        resource: Resource::Unicast,
+    let reference = AllocationReference {
+        creator_pid: state.namespace_pid,
+        id,
     };
     let allocation = Allocation {
-        id,
-        ticket,
+        reference,
         driver: Some(driver),
         size,
         properties,
-        creator: true,
         shared: false,
         context: context(),
         checkpointed: false,
@@ -1240,6 +1249,7 @@ pub fn cuMemExportToShareableHandle(
     if state.multicasts.contains_key(&id) {
         return super::multicast::export(&mut state, id, out);
     }
+    let namespace_pid = state.namespace_pid;
     let allocation = state
         .allocations
         .get_mut(&id)
@@ -1247,11 +1257,12 @@ pub fn cuMemExportToShareableHandle(
     if allocation.properties.requestedHandleTypes.0 & kind.0 == 0 {
         return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
     }
-    if allocation.creator && !cache()?.contains(&(ResourceKind::Unicast, id))? {
+    let creator = allocation.reference.creator_pid == namespace_pid;
+    if creator && !cache()?.contains(&id)? {
         let fd = crate::driver::export_posix(allocation.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?)?;
-        cache()?.replace((ResourceKind::Unicast, id), Some(fd))?;
+        cache()?.replace(id, Some((fd, None)))?;
     }
-    let ticket = ticket::export(&allocation.ticket).map_err(|_| CUDA_ERROR_OUT_OF_MEMORY)?;
+    let ticket = ticket::export(allocation.reference).map_err(|_| CUDA_ERROR_OUT_OF_MEMORY)?;
     allocation.shared = true;
     if allocation.context == 0 {
         allocation.context = context();
@@ -1270,13 +1281,13 @@ pub fn cuMemImportFromShareableHandle(
     if out.is_null() {
         return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
     }
-    let ticket = if kind == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR {
+    let reference = if kind == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR {
         ticket::read(fd as isize as i32).map_err(|_| CUDA_ERROR_INVALID_HANDLE)?
     } else {
         None
     };
     let mut state = get()?;
-    let Some(ticket) = ticket else {
+    let Some(reference) = reference else {
         let mut driver = 0;
         unsafe { crate::driver::cuMemImportFromShareableHandle(&mut driver, fd, kind) }?;
         if driver & LOGICAL_HANDLE_MASK == LOGICAL_HANDLE_TAG {
@@ -1289,43 +1300,59 @@ pub fn cuMemImportFromShareableHandle(
         }
         return Ok(());
     };
-    if matches!(ticket.resource, Resource::Multicast { .. }) {
-        if state.phase != Phase::Active {
-            return Err(CudaError::from(CUDA_ERROR_NOT_READY));
-        }
-        return super::multicast::import(state, out, ticket);
-    }
-    let logical = import_ticket(&mut state, ticket)?;
-    unsafe { out.write(logical) };
-    Ok(())
+    import_reference(state, out, reference)
 }
 
-pub(super) fn import_ticket(state: &mut State, ticket: Ticket) -> Result<u64> {
+pub(super) fn import_reference(
+    mut state: MutexGuard<'static, State>,
+    out: *mut u64,
+    reference: AllocationReference,
+) -> Result<()> {
     if state.phase != Phase::Active {
         return Err(CudaError::from(CUDA_ERROR_NOT_READY));
     }
     if state.next & LOGICAL_HANDLE_MASK != 0 {
         return Err(CudaError::from(CUDA_ERROR_OUT_OF_MEMORY));
     }
-    let id = ticket.allocation;
+    let id = reference.id;
     if state.multicasts.contains_key(&id) {
-        return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
+        let object = state
+            .multicasts
+            .get_mut(&id)
+            .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+        if object.reference != reference {
+            return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
+        }
+        object.shared = true;
+        let logical = state.mint(id)?;
+        unsafe { out.write(logical) };
+        return Ok(());
     }
     if let Some(allocation) = state.allocations.get_mut(&id) {
-        if allocation.ticket != ticket {
+        if allocation.reference != reference {
             return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
         }
         if allocation.driver.is_none() {
-            let raw = ticket::request(&ticket).map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
+            let (raw, properties) =
+                ticket::request(reference).map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
+            if properties.is_some() {
+                return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
+            }
             let driver = crate::driver::import_posix(raw.as_fd())?;
             allocation.driver = Some(driver);
         }
         allocation.shared = true;
-        return state.mint(id);
+        let logical = state.mint(id)?;
+        unsafe { out.write(logical) };
+        return Ok(());
     }
     // EXPORT service uses only CACHE, never STATE, so a same-process request
     // can complete while this call holds its allocation metadata lock.
-    let raw = ticket::request(&ticket).map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
+    let (raw, multicast_properties) =
+        ticket::request(reference).map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
+    if let Some(properties) = multicast_properties {
+        return super::multicast::import(state, out, reference, raw, properties);
+    }
     let driver = crate::driver::import_posix(raw.as_fd())?;
     let mut properties = std::mem::MaybeUninit::<CUmemAllocationProp>::zeroed();
     let recorded = (|| -> Result<u64> {
@@ -1347,12 +1374,10 @@ pub(super) fn import_ticket(state: &mut State, ticket: Ticket) -> Result<u64> {
     state.allocations.insert(
         id,
         Allocation {
-            id,
-            ticket,
+            reference,
             driver: Some(driver),
             size: 0,
             properties: unsafe { properties.assume_init() },
-            creator: false,
             shared: true,
             context: context(),
             checkpointed: false,
@@ -1360,7 +1385,8 @@ pub(super) fn import_ticket(state: &mut State, ticket: Ticket) -> Result<u64> {
             pins: 0,
         },
     );
-    Ok(logical)
+    unsafe { out.write(logical) };
+    Ok(())
 }
 
 pub fn cuMemGetAllocationPropertiesFromHandle(
