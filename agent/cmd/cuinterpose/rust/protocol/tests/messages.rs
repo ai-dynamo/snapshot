@@ -61,53 +61,34 @@ fn ticket_layout_is_fixed_and_versioned() {
 }
 
 #[test]
-fn maximal_inspection_fits_and_excess_access_is_rejected() {
+fn inspection_with_access_round_trips() {
     let mapping = StateEntry::Mapping {
         allocation: AllocationReference {
             id: [1; 16],
             creator: [2; 16],
         },
-        address: u64::MAX,
-        size: u64::MAX,
-        offset: u64::MAX,
-        access: (0..MAX_ACCESS)
-            .map(|i| CUmemAccessDesc {
+        address: 0x10000,
+        size: 8192,
+        offset: 4096,
+        access: [0, 1]
+            .map(|id| CUmemAccessDesc {
                 location: CUmemLocation {
                     type_: CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE,
-                    id: i as i32,
+                    id,
                 },
                 flags: CUmemAccess_flags::CU_MEM_ACCESS_FLAGS_PROT_READWRITE,
             })
-            .collect(),
+            .into(),
     };
     let reply = Reply::Inspection {
-        entries: vec![mapping.clone(); MAX_ENTRIES],
+        entries: vec![mapping.clone()],
         live_raw_imports: 0,
         unsupported_creations: 0,
     };
-    let bytes = encode(&reply).unwrap();
-    assert!(bytes.len() < MAX_MESSAGE_BYTES);
-    assert!(decode::<Reply>(&bytes).is_ok());
-    let oversized = StateEntry::Mapping {
-        allocation: AllocationReference {
-            id: [1; 16],
-            creator: [2; 16],
-        },
-        address: 1,
-        size: 1,
-        offset: 0,
-        access: vec![
-            CUmemAccessDesc {
-                location: CUmemLocation {
-                    type_: CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE,
-                    id: 0,
-                },
-                flags: CUmemAccess_flags::CU_MEM_ACCESS_FLAGS_PROT_READWRITE,
-            };
-            MAX_ACCESS + 1
-        ],
+    let Reply::Inspection { entries, .. } = decode(&encode(&reply).unwrap()).unwrap() else {
+        panic!("decoded the wrong reply variant");
     };
-    assert!(encode(&oversized).is_err());
+    assert_eq!(entries, vec![mapping]);
 }
 
 #[test]

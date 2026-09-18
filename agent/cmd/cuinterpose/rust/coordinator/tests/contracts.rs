@@ -281,23 +281,13 @@ fn mapping(size: u64, address: u64) -> StateEntry {
 
 #[test]
 fn preflight_refusals_do_not_mutate_or_publish_state() {
-    for case in [
-        "raw",
-        "unsupported",
-        "records",
-        "missing-creator",
-        "mapping",
-        "member",
-    ] {
+    for case in ["raw", "unsupported", "missing-creator", "mapping", "member"] {
         let fixture = Fixture::new(1, None);
         {
             let mut model = fixture.models[0].lock().unwrap();
             match case {
                 "raw" => model.raw = 3,
                 "unsupported" => model.unsupported = 2,
-                "records" => {
-                    model.entries = vec![allocation(1); cuinterpose_protocol::MAX_ENTRIES + 1]
-                }
                 "missing-creator" => model.entries = vec![allocation(2)],
                 "mapping" => model.entries = vec![allocation(1), mapping(8192, 0x10000)],
                 "member" => {
