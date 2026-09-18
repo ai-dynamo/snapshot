@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::{Context, Result, ensure};
-use cuinterpose_protocol::{self as protocol, MAX_ENTRIES, MAX_MESSAGE_BYTES, Manifest};
+use cuinterpose_protocol::{self as protocol, MAX_MESSAGE_BYTES, Manifest};
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -13,22 +13,10 @@ pub fn read(path: &Path) -> Result<Manifest> {
         .read_to_end(&mut bytes)?;
     let participants: Manifest = protocol::decode(&bytes)?;
     ensure!(!participants.is_empty(), "state has no participants");
-    ensure!(
-        participants
-            .values()
-            .all(|participant| participant.entries.len() <= MAX_ENTRIES),
-        "state participant has too many entries"
-    );
     Ok(participants)
 }
 
 pub fn write_atomic(path: &Path, participants: &mut Manifest) -> Result<()> {
-    ensure!(
-        participants
-            .values()
-            .all(|participant| participant.entries.len() <= MAX_ENTRIES),
-        "state participant has too many entries"
-    );
     for participant in participants.values_mut() {
         participant.entries.sort();
     }

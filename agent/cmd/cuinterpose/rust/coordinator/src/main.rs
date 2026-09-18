@@ -128,21 +128,14 @@ impl Peer {
                 entries,
                 live_raw_imports,
                 unsupported_creations,
-            } => {
-                ensure!(
-                    entries.len() <= cuinterpose_protocol::MAX_ENTRIES,
-                    "{}: inspection has too many entries",
-                    self.endpoint.display()
-                );
-                Ok(Inspection {
-                    participant: ParticipantState {
-                        socket_path: self.socket_path.clone(),
-                        entries,
-                    },
-                    raw_imports: live_raw_imports,
-                    unsupported_creations,
-                })
-            }
+            } => Ok(Inspection {
+                participant: ParticipantState {
+                    socket_path: self.socket_path.clone(),
+                    entries,
+                },
+                raw_imports: live_raw_imports,
+                unsupported_creations,
+            }),
             _ => bail!("{}: unexpected inspection reply", self.endpoint.display()),
         }
     }
