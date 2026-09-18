@@ -2,32 +2,47 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Owned inspection metadata and versioned MessagePack messages. No CUDA
-//! handles, process pointers, or Rust/driver object layouts enter this format.
+//! handles or process pointers enter this format.
 
+mod cuda_serde;
 mod identity;
 mod record;
-mod ticket;
 mod transport;
 
 #[doc(inline)]
-pub use identity::{AllocationId, ParticipantId};
+pub use cudarc::driver::sys::{
+    CUmemAccess_flags, CUmemAccessDesc, CUmemAllocationHandleType, CUmemAllocationType,
+    CUmemLocation, CUmemLocationType, CUmulticastObjectProp,
+};
 #[doc(inline)]
-pub use record::{Access, BindingSource, BindingVersion, MemberRange, Record};
+pub use identity::{
+    AllocationId, AllocationReference, ParticipantId, format_id, parse_participant_id,
+};
+#[doc(inline)]
+pub use record::{BindingSource, BindingVersion, MemberRange, StateEntry};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::{io, time::Duration};
-#[doc(inline)]
-pub use ticket::{Resource, ResourceKind, TICKET_MAGIC, Ticket};
+use std::{collections::BTreeMap, io, path::PathBuf, time::Duration};
 #[doc(inline)]
 pub use transport::{receive, send};
 
-pub const VERSION: u16 = 5;
-pub const MAX_RECORDS: usize = 4096;
+pub const VERSION: u8 = 1;
+pub const MAX_ENTRIES: usize = 4096;
 pub const MAX_ACCESS: usize = 32;
 // A maximal inspection (4096 mappings, 32 named access grants each) fits here.
-// Also limits cuinterpose.state, which stores every participant's records.
-// Tickets have a separate, smaller limit.
-pub const MAX_BYTES: usize = 32 * 1024 * 1024;
-pub const MAX_TICKET_BYTES: usize = 4096;
+// Also limits cuinterpose.state, which stores every participant's entries.
+pub const MAX_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
+pub const TICKET_MAGIC: [u8; 4] = [b'C', b'U', b'I', VERSION];
+pub const TICKET_BYTES: usize =
+    TICKET_MAGIC.len() + size_of::<ParticipantId>() + size_of::<AllocationId>();
+
+pub type ParticipantDirectory = BTreeMap<ParticipantId, PathBuf>;
+pub type Manifest = BTreeMap<ParticipantId, ParticipantState>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParticipantState {
+    pub socket_path: PathBuf,
+    pub entries: Vec<StateEntry>,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -61,23 +76,29 @@ pub enum Operation {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Request {
-    Handshake,
+    Identify,
+    Rendezvous {
+        #[serde(with = "serde_bytes")]
+        participant: ParticipantId,
+        participants: ParticipantDirectory,
+    },
     Inspect {
+        #[serde(with = "serde_bytes")]
         participant: ParticipantId,
     },
     Execute {
+        #[serde(with = "serde_bytes")]
         participant: ParticipantId,
         operation: Operation,
     },
     Export {
-        participant: ParticipantId,
-        resource: ResourceKind,
-        allocation: AllocationId,
+        allocation: AllocationReference,
     },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Response {
+    #[serde(with = "serde_bytes")]
     pub participant: ParticipantId,
     pub result: std::result::Result<Reply, String>,
 }
@@ -86,10 +107,10 @@ pub struct Response {
 // Select the variant before reading bounded collections, without Content buffering.
 #[serde(rename_all = "snake_case")]
 pub enum Reply {
-    Handshake,
+    Identified,
+    Ready,
     Inspection {
-        #[serde(deserialize_with = "bounded_vec::<_, _, MAX_RECORDS>")]
-        records: Vec<Record>,
+        entries: Vec<StateEntry>,
         live_raw_imports: u64,
         unsupported_creations: u64,
     },
@@ -98,35 +119,30 @@ pub enum Reply {
         bytes: u64,
         copy_us: u32,
     },
-    Export {
-        resource: ResourceKind,
-        allocation: AllocationId,
+    UnicastExport,
+    MulticastExport {
+        #[serde(with = "cuda_serde::multicast_properties")]
+        properties: CUmulticastObjectProp,
     },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Participant {
-    pub id: ParticipantId,
-    #[serde(deserialize_with = "bounded_vec::<_, _, MAX_RECORDS>")]
-    pub records: Vec<Record>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct Envelope<T> {
-    version: u16,
+    version: u8,
     body: T,
 }
 
 /// Encodes an owned metadata value inside the current version envelope.
 ///
 /// # Errors
-/// Returns serialization failures or an error when the encoded size exceeds `MAX_BYTES`.
+/// Returns serialization failures or an error when the encoded size exceeds
+/// `MAX_MESSAGE_BYTES`.
 pub fn encode<T: Serialize>(body: &T) -> Result<Vec<u8>> {
     let bytes = rmp_serde::to_vec_named(&Envelope {
         version: VERSION,
         body,
     })?;
-    if bytes.len() > MAX_BYTES {
+    if bytes.len() > MAX_MESSAGE_BYTES {
         return Err(Error::Invalid("message exceeds size limit"));
     }
     Ok(bytes)
@@ -137,7 +153,7 @@ pub fn encode<T: Serialize>(body: &T) -> Result<Vec<u8>> {
 /// # Errors
 /// Rejects malformed, oversized, too deeply nested, obsolete, or trailing data.
 pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
-    if bytes.len() > MAX_BYTES {
+    if bytes.len() > MAX_MESSAGE_BYTES {
         return Err(Error::Invalid("message exceeds size limit"));
     }
     let mut decoder = rmp_serde::Deserializer::new(io::Cursor::new(bytes));
@@ -149,41 +165,6 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
         ));
     }
     Ok(envelope.body)
-}
-
-/// Reject oversized sequences before Serde allocates from their size hint.
-/// This is shared only by the two bounded collections in inspection metadata.
-fn bounded_vec<'de, D, T, const LIMIT: usize>(
-    deserializer: D,
-) -> std::result::Result<Vec<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    struct Sequence<T, const N: usize>(std::marker::PhantomData<T>);
-    impl<'de, T: Deserialize<'de>, const N: usize> serde::de::Visitor<'de> for Sequence<T, N> {
-        type Value = Vec<T>;
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            write!(f, "at most {N} entries")
-        }
-        fn visit_seq<A: serde::de::SeqAccess<'de>>(
-            self,
-            mut seq: A,
-        ) -> std::result::Result<Vec<T>, A::Error> {
-            if seq.size_hint().is_some_and(|count| count > N) {
-                return Err(serde::de::Error::custom("too many entries"));
-            }
-            let mut entries = Vec::with_capacity(seq.size_hint().unwrap_or(0));
-            while let Some(entry) = seq.next_element()? {
-                if entries.len() == N {
-                    return Err(serde::de::Error::custom("too many entries"));
-                }
-                entries.push(entry);
-            }
-            Ok(entries)
-        }
-    }
-    deserializer.deserialize_seq(Sequence::<T, LIMIT>(std::marker::PhantomData))
 }
 
 pub fn timeout(operation: Option<Operation>) -> Duration {
