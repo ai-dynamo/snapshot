@@ -30,10 +30,18 @@ def check_import(virtual_ipc_mem_handle):
     address, repeated = u64(), u64()
     assert cuda.cuIpcOpenMemHandle_v2(c.byref(address), virtual_ipc_mem_handle, 0) != 0
     assert cuda.cuIpcOpenMemHandle_v2(c.byref(address), Handle(), 1) != 0
+    cuda.fakeFailNext(b"cuMemAddressReserve")
+    address.value = 123
+    assert cuda.cuIpcOpenMemHandle_v2(c.byref(address), virtual_ipc_mem_handle, 1) != 0
+    assert address.value == 123
+    assert cuda.fakeLiveAllocations() == 0
+    assert not command("inspect")["records"]
     assert cuda.cuIpcOpenMemHandle_v2(c.byref(address), virtual_ipc_mem_handle, 1) == 0
     assert cuda.cuIpcOpenMemHandle_v2(c.byref(repeated), virtual_ipc_mem_handle, 1) == 0
     assert address.value == repeated.value
     assert cuda.fakeMappedCount() == 1
+    assert cuda.cuIpcGetMemHandle(c.byref(Handle()), address) != 0
+    assert cuda.fakeExportCalls() == 0
     assert cuda.cuMemFree_v2(address) != 0
     assert cuda.cuIpcCloseMemHandle(address) == 0
     assert cuda.fakeMappedCount() == 1
@@ -45,6 +53,14 @@ def check_import(virtual_ipc_mem_handle):
 if len(sys.argv) > 1:
     check_import(Handle.from_buffer_copy(bytes.fromhex(sys.argv[1])))
 else:
+    for failure in (b"cuMemCreate", b"cuMemAddressReserve"):
+        failed = u64(123)
+        cuda.fakeFailNext(failure)
+        assert cuda.cuMemAlloc_v2(c.byref(failed), 17) != 0
+        assert failed.value == 123
+        assert cuda.fakeLiveAllocations() == 0
+        assert cuda.fakeMappedCount() == 0
+        assert not command("inspect")["records"]
     shared, private = u64(), u64()
     assert cuda.cuMemAlloc_v2(c.byref(shared), 17) == 0
     assert cuda.cuMemAlloc_v2(c.byref(private), 17) == 0
