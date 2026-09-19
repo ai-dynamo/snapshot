@@ -135,7 +135,7 @@ spec:
               mountPath: {{ .Values.storage.pvc.basePath }}
         {{- end }}
         - name: agent
-          image: "{{ .Values.image.agent.repository }}:{{ .Values.image.agent.tag | default .Chart.AppVersion }}"
+          image: {{ include "snapshot.agentImage" . | quote }}
           imagePullPolicy: {{ .Values.image.agent.pullPolicy }}
           args:
             - "--runtime"

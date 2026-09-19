@@ -4,6 +4,7 @@
 package protocol
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/ai-dynamo/snapshot/api/podcontract"
@@ -13,7 +14,9 @@ import (
 func TestEnsureControlVolume(t *testing.T) {
 	t.Run("adds volume mount and env from empty", func(t *testing.T) {
 		ps := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}}
-		EnsureControlVolume(ps, &ps.Containers[0])
+		if err := EnsureControlVolume(ps, &ps.Containers[0]); err != nil {
+			t.Fatal(err)
+		}
 
 		if len(ps.Volumes) != 1 || ps.Volumes[0].Name != podcontract.SnapshotControlVolumeName || ps.Volumes[0].EmptyDir == nil {
 			t.Fatalf("expected one %s emptyDir volume, got %#v", podcontract.SnapshotControlVolumeName, ps.Volumes)
@@ -49,8 +52,12 @@ func TestEnsureControlVolume(t *testing.T) {
 			{Name: "engine-0"},
 			{Name: "engine-1"},
 		}}
-		EnsureControlVolume(ps, &ps.Containers[0])
-		EnsureControlVolume(ps, &ps.Containers[1])
+		if err := EnsureControlVolume(ps, &ps.Containers[0]); err != nil {
+			t.Fatal(err)
+		}
+		if err := EnsureControlVolume(ps, &ps.Containers[1]); err != nil {
+			t.Fatal(err)
+		}
 
 		if len(ps.Volumes) != 1 {
 			t.Fatalf("expected single shared emptyDir, got %#v", ps.Volumes)
@@ -65,8 +72,12 @@ func TestEnsureControlVolume(t *testing.T) {
 
 	t.Run("idempotent", func(t *testing.T) {
 		ps := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}}
-		EnsureControlVolume(ps, &ps.Containers[0])
-		EnsureControlVolume(ps, &ps.Containers[0])
+		if err := EnsureControlVolume(ps, &ps.Containers[0]); err != nil {
+			t.Fatal(err)
+		}
+		if err := EnsureControlVolume(ps, &ps.Containers[0]); err != nil {
+			t.Fatal(err)
+		}
 		c := ps.Containers[0]
 		if len(ps.Volumes) != 1 || len(c.VolumeMounts) != 1 || len(c.Env) != 2 {
 			t.Fatalf("expected single volume/mount and two envs after two calls, got volumes=%d mounts=%d env=%d", len(ps.Volumes), len(c.VolumeMounts), len(c.Env))
@@ -78,7 +89,9 @@ func TestEnsureControlVolume(t *testing.T) {
 			Name: "main",
 			Env:  []corev1.EnvVar{{Name: podcontract.LegacySnapshotControlDirEnv, Value: podcontract.SnapshotControlMountPath}},
 		}}}
-		EnsureControlVolume(ps, &ps.Containers[0])
+		if err := EnsureControlVolume(ps, &ps.Containers[0]); err != nil {
+			t.Fatal(err)
+		}
 		c := ps.Containers[0]
 		if len(c.Env) != 2 {
 			t.Fatalf("expected legacy env preserved and canonical env added, got %#v", c.Env)
@@ -99,7 +112,9 @@ func TestEnsureControlVolume(t *testing.T) {
 			Name: "main",
 			Env:  []corev1.EnvVar{{Name: podcontract.SnapshotControlDirEnv, Value: podcontract.SnapshotControlMountPath}},
 		}}}
-		EnsureControlVolume(ps, &ps.Containers[0])
+		if err := EnsureControlVolume(ps, &ps.Containers[0]); err != nil {
+			t.Fatal(err)
+		}
 		c := ps.Containers[0]
 		if len(c.Env) != 2 {
 			t.Fatalf("expected canonical env preserved and legacy env added, got %#v", c.Env)
@@ -115,18 +130,17 @@ func TestEnsureControlVolume(t *testing.T) {
 		}
 	})
 
-	t.Run("nil pod spec no-op", func(t *testing.T) {
-		defer func() {
-			if r := recover(); r != nil {
-				t.Fatalf("expected no panic, got %v", r)
-			}
-		}()
-		EnsureControlVolume(nil, &corev1.Container{})
+	t.Run("nil pod spec rejected", func(t *testing.T) {
+		if err := EnsureControlVolume(nil, &corev1.Container{}); err == nil {
+			t.Fatal("expected nil pod spec error")
+		}
 	})
 
-	t.Run("nil container no-op", func(t *testing.T) {
+	t.Run("nil container rejected", func(t *testing.T) {
 		ps := &corev1.PodSpec{}
-		EnsureControlVolume(ps, nil)
+		if err := EnsureControlVolume(ps, nil); err == nil {
+			t.Fatal("expected nil container error")
+		}
 		if len(ps.Volumes) != 0 {
 			t.Fatalf("expected no volumes when container is nil, got %#v", ps.Volumes)
 		}
@@ -144,10 +158,102 @@ func TestEnsureControlVolume(t *testing.T) {
 				Env:          []corev1.EnvVar{{Name: "OTHER", Value: "x"}},
 			}},
 		}
-		EnsureControlVolume(ps, &ps.Containers[0])
+		if err := EnsureControlVolume(ps, &ps.Containers[0]); err != nil {
+			t.Fatal(err)
+		}
 		c := ps.Containers[0]
 		if len(ps.Volumes) != 2 || len(c.VolumeMounts) != 2 || len(c.Env) != 3 {
 			t.Fatalf("expected existing + control entries, got volumes=%#v mounts=%#v env=%#v", ps.Volumes, c.VolumeMounts, c.Env)
+		}
+	})
+
+	t.Run("conflicting reserved entries are rejected atomically", func(t *testing.T) {
+		cases := map[string]func(*corev1.PodSpec){
+			"duplicate volume": func(ps *corev1.PodSpec) {
+				volume := corev1.Volume{
+					Name:         podcontract.SnapshotControlVolumeName,
+					VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+				}
+				ps.Volumes = []corev1.Volume{volume, volume}
+			},
+			"non-emptyDir volume": func(ps *corev1.PodSpec) {
+				ps.Volumes = []corev1.Volume{{
+					Name: podcontract.SnapshotControlVolumeName,
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "shared"},
+					},
+				}}
+			},
+			"wrong mount path": func(ps *corev1.PodSpec) {
+				ps.Containers[0].VolumeMounts = []corev1.VolumeMount{{
+					Name:      podcontract.SnapshotControlVolumeName,
+					MountPath: "/shared-control",
+					SubPath:   "main",
+				}}
+			},
+			"wrong mount volume": func(ps *corev1.PodSpec) {
+				ps.Containers[0].VolumeMounts = []corev1.VolumeMount{{
+					Name:      "shared",
+					MountPath: podcontract.SnapshotControlMountPath,
+				}}
+			},
+			"wrong subPath": func(ps *corev1.PodSpec) {
+				ps.Containers[0].VolumeMounts = []corev1.VolumeMount{{
+					Name:      podcontract.SnapshotControlVolumeName,
+					MountPath: podcontract.SnapshotControlMountPath,
+					SubPath:   "other",
+				}}
+			},
+			"read-only mount": func(ps *corev1.PodSpec) {
+				ps.Containers[0].VolumeMounts = []corev1.VolumeMount{{
+					Name:      podcontract.SnapshotControlVolumeName,
+					MountPath: podcontract.SnapshotControlMountPath,
+					SubPath:   "main",
+					ReadOnly:  true,
+				}}
+			},
+			"duplicate mount": func(ps *corev1.PodSpec) {
+				mount := corev1.VolumeMount{
+					Name:      podcontract.SnapshotControlVolumeName,
+					MountPath: podcontract.SnapshotControlMountPath,
+					SubPath:   "main",
+				}
+				ps.Containers[0].VolumeMounts = []corev1.VolumeMount{mount, mount}
+			},
+			"wrong environment": func(ps *corev1.PodSpec) {
+				ps.Containers[0].Env = []corev1.EnvVar{{
+					Name:  podcontract.SnapshotControlDirEnv,
+					Value: "/shared-control",
+				}}
+			},
+			"valueFrom environment": func(ps *corev1.PodSpec) {
+				ps.Containers[0].Env = []corev1.EnvVar{{
+					Name: podcontract.SnapshotControlDirEnv,
+					ValueFrom: &corev1.EnvVarSource{
+						FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
+					},
+				}}
+			},
+			"duplicate environment": func(ps *corev1.PodSpec) {
+				env := corev1.EnvVar{
+					Name:  podcontract.SnapshotControlDirEnv,
+					Value: podcontract.SnapshotControlMountPath,
+				}
+				ps.Containers[0].Env = []corev1.EnvVar{env, env}
+			},
+		}
+		for name, mutate := range cases {
+			t.Run(name, func(t *testing.T) {
+				ps := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}}
+				mutate(ps)
+				before := ps.DeepCopy()
+				if err := EnsureControlVolume(ps, &ps.Containers[0]); err == nil {
+					t.Fatal("expected conflicting reserved entry to be rejected")
+				}
+				if !reflect.DeepEqual(ps, before) {
+					t.Fatalf("failed shaping mutated pod spec:\ngot  %#v\nwant %#v", ps, before)
+				}
+			})
 		}
 	})
 }
