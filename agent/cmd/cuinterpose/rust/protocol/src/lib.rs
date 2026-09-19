@@ -30,12 +30,7 @@ pub const VIRTUAL_SHAREABLE_HANDLE_MAGIC: [u8; 4] = [b'C', b'U', b'I', VERSION];
 pub const VIRTUAL_SHAREABLE_HANDLE_BYTES: usize =
     VIRTUAL_SHAREABLE_HANDLE_MAGIC.len() + size_of::<NamespacePid>() + size_of::<AllocationId>();
 
-pub type Manifest = BTreeMap<NamespacePid, ParticipantState>;
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ParticipantState {
-    pub entries: Vec<Record>,
-}
+pub type Manifest = BTreeMap<NamespacePid, Vec<Record>>;
 
 pub fn socket_path(control_dir: &Path, namespace_pid: NamespacePid) -> PathBuf {
     control_dir.join(format!("cuinterpose-{namespace_pid}.sock"))
@@ -133,11 +128,11 @@ pub struct Response {
     pub result: std::result::Result<Reply, String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reply {
     Inspection {
-        entries: Vec<Record>,
+        records: Vec<Record>,
         live_raw_imports: u64,
         unsupported_creations: u64,
     },
