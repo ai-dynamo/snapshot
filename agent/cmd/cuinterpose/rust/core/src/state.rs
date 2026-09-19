@@ -88,7 +88,6 @@ mod tests {
             );
         }
     }
-
 }
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -105,7 +104,7 @@ pub use super::legacy_ipc::{
 };
 pub use crate::driver::Result;
 struct Generation {
-    state: Mutex<State>,
+    state: Mutex<ProcessState>,
     cache: super::export_cache::ExportCache,
     control_dir: PathBuf,
 }
@@ -118,8 +117,8 @@ static G_CHILD: AtomicBool = AtomicBool::new(false);
 
 pub struct ForkState {
     // Field order releases locks in reverse acquisition order in the parent.
-    cache: Option<MutexGuard<'static, super::export_cache::Entries>>,
-    state: Option<MutexGuard<'static, State>>,
+    cache: Option<MutexGuard<'static, super::export_cache::Exports>>,
+    state: Option<MutexGuard<'static, ProcessState>>,
     initializing: Option<MutexGuard<'static, ()>>,
 }
 
@@ -198,7 +197,7 @@ impl Allocation {
 }
 
 // CUmemAllocationProp's Win32 pointer is opaque and is never dereferenced on Linux.
-// Driver access and allocation metadata are serialized under State's mutex.
+// Driver access and allocation metadata are serialized under ProcessState's mutex.
 unsafe impl Send for Allocation {}
 
 #[derive(Clone)]
@@ -228,7 +227,7 @@ pub enum Phase {
 }
 
 impl Phase {
-    /// Validate ordering before mutation and identify the state to publish on
+    /// Validate ordering before mutation and determine the state to publish on
     /// success. The coordinator, not this local state, owns global barriers.
     pub(super) fn next(self, operation: Operation) -> Result<Self> {
         let (expected, next) = match operation {
@@ -257,12 +256,91 @@ impl Phase {
     }
 }
 
-pub struct State {
+/// One ID and virtual-handle namespace covers unicast and multicast resources.
+/// Keep their different CUDA properties and reconstruction state in the variants.
+#[derive(Clone)]
+pub enum Resource {
+    Unicast(Allocation),
+    Multicast(super::multicast::MulticastObject),
+}
+
+impl Resource {
+    pub fn unicast(&self) -> Option<&Allocation> {
+        match self {
+            Self::Unicast(allocation) => Some(allocation),
+            _ => None,
+        }
+    }
+
+    pub fn unicast_mut(&mut self) -> Option<&mut Allocation> {
+        match self {
+            Self::Unicast(allocation) => Some(allocation),
+            _ => None,
+        }
+    }
+
+    pub fn multicast(&self) -> Option<&super::multicast::MulticastObject> {
+        match self {
+            Self::Multicast(object) => Some(object),
+            _ => None,
+        }
+    }
+
+    pub fn multicast_mut(&mut self) -> Option<&mut super::multicast::MulticastObject> {
+        match self {
+            Self::Multicast(object) => Some(object),
+            _ => None,
+        }
+    }
+
+    fn reference(&self) -> AllocationReference {
+        match self {
+            Self::Unicast(allocation) => allocation.reference,
+            Self::Multicast(object) => object.reference,
+        }
+    }
+
+    fn driver(&self) -> Result<u64> {
+        match self {
+            Self::Unicast(allocation) => allocation.driver,
+            Self::Multicast(object) => object.driver,
+        }
+        .ok_or(CUDA_ERROR_INVALID_HANDLE.into())
+    }
+
+    /// Publish the creator's export without making peer service acquire ProcessState.
+    pub fn share(&mut self, namespace_pid: NamespacePid) -> Result<AllocationReference> {
+        let reference = self.reference();
+        if reference.creator_pid == namespace_pid && !cache()?.contains(&reference.id)? {
+            let fd = crate::driver::export_posix(self.driver()?)?;
+            let properties = self.multicast().map(|object| object.properties);
+            cache()?.insert(reference.id, fd, properties)?;
+        }
+        match self {
+            Self::Unicast(allocation) => {
+                allocation.shared = true;
+                if allocation.context == 0 {
+                    allocation.context = context();
+                }
+            }
+            Self::Multicast(object) => object.shared = true,
+        }
+        Ok(reference)
+    }
+
+    fn busy(&self) -> bool {
+        match self {
+            Self::Unicast(allocation) => allocation.pins != 0,
+            Self::Multicast(object) => object.inflight != 0,
+        }
+    }
+}
+
+pub struct ProcessState {
     pub namespace_pid: NamespacePid,
     pub socket_path: PathBuf,
-    pub mallocs: BTreeMap<u64, super::legacy_ipc::Mapping>,
-    pub allocations: BTreeMap<AllocationId, Allocation>,
-    pub multicasts: BTreeMap<AllocationId, super::multicast::Object>,
+    pub malloc_regions: BTreeMap<u64, super::legacy_ipc::MallocRegion>,
+    pub resources: BTreeMap<AllocationId, Resource>,
     pub virtual_allocation_handles: BTreeMap<u64, AllocationId>,
     pub mappings: BTreeMap<u64, Mapping>,
     pub raw: BTreeMap<u64, u32>,
@@ -277,27 +355,32 @@ pub struct State {
     next_virtual_allocation_handle: u64,
 }
 
-impl State {
+impl ProcessState {
     pub fn inspect(&self) -> Result<Vec<cuinterpose_protocol::Record>> {
         use cuinterpose_protocol::Record;
         if self.phase != Phase::Active || self.inflight != 0 {
             return Err(CudaError::from(CUDA_ERROR_NOT_READY));
         }
         let count = self
-            .allocations
-            .len()
+            .resources
+            .values()
+            .filter_map(Resource::unicast)
+            .count()
             .checked_add(self.mappings.len())
             .and_then(|n| {
-                self.multicasts.values().try_fold(n, |n, object| {
-                    n.checked_add(1 + object.devices.len() + object.bindings.len())
-                })
+                self.resources
+                    .values()
+                    .filter_map(Resource::multicast)
+                    .try_fold(n, |n, object| {
+                        n.checked_add(1 + object.devices.len() + object.bindings.len())
+                    })
             })
             .ok_or(CUDA_ERROR_OUT_OF_MEMORY)?;
         let mut records = Vec::new();
         records
             .try_reserve_exact(count)
             .map_err(|_| CUDA_ERROR_OUT_OF_MEMORY)?;
-        for allocation in self.allocations.values() {
+        for allocation in self.resources.values().filter_map(Resource::unicast) {
             let virtual_allocation_handle_count = self
                 .virtual_allocation_handles
                 .values()
@@ -323,11 +406,19 @@ impl State {
             if mapping.unknown {
                 return Err(CudaError::from(CUDA_ERROR_NOT_SUPPORTED));
             }
-            if self.multicasts.contains_key(&mapping.id) {
+            if self
+                .resources
+                .get(&mapping.id)
+                .and_then(Resource::multicast)
+                .is_some()
+            {
                 continue;
             }
             let record = Record::Mapping {
-                allocation: self.allocations[&mapping.id].reference,
+                allocation: self.resources[&mapping.id]
+                    .unicast()
+                    .ok_or(CUDA_ERROR_INVALID_HANDLE)?
+                    .reference,
                 address: mapping.address,
                 size: mapping.size as u64,
                 offset: mapping.offset as u64,
@@ -365,8 +456,9 @@ impl State {
             }
             Operation::SaveAllocations => {
                 let ids: Vec<_> = self
-                    .allocations
+                    .resources
                     .values()
+                    .filter_map(Resource::unicast)
                     .filter(|a| a.owns_content(self.namespace_pid))
                     .map(|a| a.reference.id)
                     .collect();
@@ -375,8 +467,9 @@ impl State {
                     let mut allocations = Vec::new();
                     for id in ids {
                         let allocation = self
-                            .allocations
+                            .resources
                             .get_mut(&id)
+                            .and_then(Resource::unicast_mut)
                             .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
                         if allocation.driver.is_none() {
                             let mapping = self
@@ -412,7 +505,8 @@ impl State {
                     Ok(saved) => saved,
                     Err(error) => {
                         for id in recovered {
-                            if let Some(allocation) = self.allocations.get_mut(&id)
+                            if let Some(allocation) =
+                                self.resources.get_mut(&id).and_then(Resource::unicast_mut)
                                 && let Ok(context) = Context::enter(
                                     allocation.context,
                                     allocation.properties.location.id,
@@ -432,8 +526,9 @@ impl State {
                 self.arena = arena;
                 copy_us = elapsed;
                 for allocation in self
-                    .allocations
+                    .resources
                     .values_mut()
+                    .filter_map(Resource::unicast_mut)
                     .filter(|a| a.owns_content(self.namespace_pid))
                 {
                     allocation.content_saved = true;
@@ -441,7 +536,12 @@ impl State {
             }
             Operation::PrepareUnicast => {
                 cache()?.clear()?;
-                for allocation in self.allocations.values_mut().filter(|a| a.shared) {
+                for allocation in self
+                    .resources
+                    .values_mut()
+                    .filter_map(Resource::unicast_mut)
+                    .filter(|a| a.shared)
+                {
                     Context::run(
                         allocation.context,
                         allocation.properties.location.id,
@@ -468,8 +568,9 @@ impl State {
             }
             Operation::LoadAllocations => {
                 let mut allocations: Vec<_> = self
-                    .allocations
+                    .resources
                     .values()
+                    .filter_map(Resource::unicast)
                     .filter(|a| a.content_saved)
                     .map(AllocationContent::from)
                     .collect();
@@ -483,8 +584,9 @@ impl State {
                     return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
                 }
                 for allocation in allocations {
-                    self.allocations
+                    self.resources
                         .get_mut(&allocation.id)
+                        .and_then(Resource::unicast_mut)
                         .ok_or(CUDA_ERROR_INVALID_HANDLE)?
                         .driver = allocation.driver;
                 }
@@ -492,8 +594,9 @@ impl State {
             }
             Operation::RestoreUnicast => {
                 for allocation in self
-                    .allocations
+                    .resources
                     .values_mut()
+                    .filter_map(Resource::unicast_mut)
                     .filter(|a| a.reference.creator_pid != self.namespace_pid && a.checkpointed)
                 {
                     let (raw, properties) =
@@ -534,8 +637,9 @@ impl State {
     fn remap(&mut self, creator: bool) -> Result<()> {
         let namespace_pid = self.namespace_pid;
         for allocation in self
-            .allocations
+            .resources
             .values_mut()
+            .filter_map(Resource::unicast_mut)
             .filter(|a| a.checkpointed && (a.reference.creator_pid == namespace_pid) == creator)
         {
             super::host_carrier::Context::run(
@@ -572,7 +676,7 @@ impl State {
                         let fd = crate::driver::export_posix(
                             allocation.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?,
                         )?;
-                        cache()?.replace(allocation.reference.id, Some((fd, None)))?;
+                        cache()?.insert(allocation.reference.id, fd, None)?;
                     }
                     if !self
                         .virtual_allocation_handles
@@ -614,26 +718,41 @@ impl State {
     }
 
     pub(super) fn settle(&mut self, id: AllocationId) -> Result<()> {
-        if self.multicasts.contains_key(&id) {
-            return super::multicast::settle(self, id);
-        }
         let handle_live = self
             .virtual_allocation_handles
             .values()
             .any(|value| *value == id);
         let mapped = self.mappings.values().any(|mapping| mapping.id == id);
-        let allocation = self
-            .allocations
+        let resource = self
+            .resources
             .get_mut(&id)
             .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
-        if !handle_live && let Some(driver) = allocation.driver {
-            unsafe { crate::driver::cuMemRelease(driver) }?;
-            allocation.driver = None;
+        match resource {
+            Resource::Unicast(allocation) => {
+                // Unicast mappings retain the backing after its last handle is released.
+                if !handle_live && let Some(driver) = allocation.driver {
+                    unsafe { crate::driver::cuMemRelease(driver) }?;
+                    allocation.driver = None;
+                }
+                if handle_live || mapped {
+                    return Ok(());
+                }
+                cache()?.remove(&id)?;
+            }
+            Resource::Multicast(object) => {
+                if handle_live || mapped {
+                    return Ok(());
+                }
+                if object.inflight != 0 || object.checkpointed {
+                    return Err(CudaError::from(CUDA_ERROR_NOT_READY));
+                }
+                cache()?.remove(&id)?;
+                if let Some(driver) = object.driver {
+                    unsafe { crate::driver::cuMemRelease(driver) }?;
+                }
+            }
         }
-        if !handle_live && !mapped {
-            cache()?.replace(id, None)?;
-            self.allocations.remove(&id);
-        }
+        self.resources.remove(&id);
         Ok(())
     }
 
@@ -821,12 +940,11 @@ fn prepare_generation() -> Result<Box<Generation>> {
     let socket_path = cuinterpose_protocol::socket_path(&control_dir, namespace_pid);
     std::os::unix::net::SocketAddr::from_pathname(&socket_path)
         .map_err(|_| CUDA_ERROR_INVALID_VALUE)?;
-    let state = State {
+    let state = ProcessState {
         namespace_pid,
         socket_path: socket_path.clone(),
-        mallocs: BTreeMap::new(),
-        allocations: BTreeMap::new(),
-        multicasts: BTreeMap::new(),
+        malloc_regions: BTreeMap::new(),
+        resources: BTreeMap::new(),
         virtual_allocation_handles: BTreeMap::new(),
         mappings: BTreeMap::new(),
         raw: BTreeMap::new(),
@@ -845,7 +963,7 @@ fn prepare_generation() -> Result<Box<Generation>> {
     }))
 }
 
-pub fn get() -> Result<MutexGuard<'static, State>> {
+pub fn get() -> Result<MutexGuard<'static, ProcessState>> {
     if super::G_FAILED.load(Ordering::Acquire) {
         return Err(CudaError::from(CUDA_ERROR_UNKNOWN));
     }
@@ -865,7 +983,7 @@ pub fn get() -> Result<MutexGuard<'static, State>> {
     Ok(state)
 }
 
-pub(super) fn active() -> Result<MutexGuard<'static, State>> {
+pub(super) fn active() -> Result<MutexGuard<'static, ProcessState>> {
     let state = get()?;
     if state.phase != Phase::Active {
         return Err(CudaError::from(CUDA_ERROR_NOT_READY));
@@ -964,7 +1082,7 @@ pub fn cuMemCreate(
             return Err(error);
         }
     };
-    state.allocations.insert(id, allocation);
+    state.resources.insert(id, Resource::Unicast(allocation));
     unsafe {
         out.write(virtual_allocation_handle);
     }
@@ -974,9 +1092,7 @@ pub fn cuMemCreate(
 pub fn cuMemRelease(handle: u64) -> Result<()> {
     let mut state = get()?;
     if let Some(id) = state.virtual_allocation_handles.get(&handle)
-        && (state.phase != Phase::Active
-            || state.multicasts.get(id).is_some_and(|a| a.inflight != 0)
-            || state.allocations.get(id).is_some_and(|a| a.pins != 0))
+        && (state.phase != Phase::Active || state.resources.get(id).is_some_and(Resource::busy))
     {
         return Err(CudaError::from(CUDA_ERROR_NOT_READY));
     }
@@ -1028,7 +1144,7 @@ pub fn cuMemRetainAllocationHandle(out: *mut u64, address: *mut c_void) -> Resul
         if state.next_virtual_allocation_handle & VIRTUAL_ALLOCATION_HANDLE_MASK != 0 {
             return Err(CudaError::from(CUDA_ERROR_OUT_OF_MEMORY));
         }
-        if let Some(object) = state.multicasts.get(&id) {
+        if let Some(object) = state.resources.get(&id).and_then(Resource::multicast) {
             if object.driver.is_none() {
                 return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
             }
@@ -1042,8 +1158,9 @@ pub fn cuMemRetainAllocationHandle(out: *mut u64, address: *mut c_void) -> Resul
     unsafe { crate::driver::cuMemRetainAllocationHandle(&mut driver, address) }?;
     if let Some(id) = id {
         let allocation = state
-            .allocations
+            .resources
             .get_mut(&id)
+            .and_then(Resource::unicast_mut)
             .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
         if allocation.driver.is_some() {
             if let Err(error) = unsafe { crate::driver::cuMemRelease(driver) } {
@@ -1086,15 +1203,21 @@ pub fn cuMemMap(address: u64, size: usize, offset: usize, handle: u64, flags: u6
     if state.phase != Phase::Active {
         return Err(CudaError::from(CUDA_ERROR_NOT_READY));
     }
-    if state.multicasts.contains_key(&id) {
+    if state
+        .resources
+        .get(&id)
+        .and_then(Resource::multicast)
+        .is_some()
+    {
         return super::multicast::map(state, id, address, size, offset, flags);
     }
     if size == 0 || !state.covered(address, size)?.is_empty() {
         return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
     }
     let allocation = state
-        .allocations
+        .resources
         .get_mut(&id)
+        .and_then(Resource::unicast_mut)
         .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
     unsafe {
         crate::driver::cuMemMap(
@@ -1132,9 +1255,7 @@ pub fn cuMemUnmap(address: u64, size: usize) -> Result<()> {
     }
     for base in &mappings {
         let id = &state.mappings[base].id;
-        if state.multicasts.get(id).is_some_and(|a| a.inflight != 0)
-            || state.allocations.get(id).is_some_and(|a| a.pins != 0)
-        {
+        if state.resources.get(id).is_some_and(Resource::busy) {
             return Err(CudaError::from(CUDA_ERROR_NOT_READY));
         }
     }
@@ -1223,32 +1344,20 @@ pub fn cuMemExportToShareableHandle(
     {
         return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
     }
-    if state.multicasts.contains_key(&id) {
-        return super::multicast::export(&mut state, id, out);
-    }
     let namespace_pid = state.namespace_pid;
-    let allocation = state
-        .allocations
+    let resource = state
+        .resources
         .get_mut(&id)
         .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
-    if allocation.properties.requestedHandleTypes.0 & kind.0 == 0 {
+    if let Resource::Unicast(allocation) = resource
+        && allocation.properties.requestedHandleTypes.0 & kind.0 == 0
+    {
         return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
     }
-    let creator = allocation.reference.creator_pid == namespace_pid;
-    if creator && !cache()?.contains(&id)? {
-        let fd = crate::driver::export_posix(allocation.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?)?;
-        cache()?.replace(id, Some((fd, None)))?;
-    }
-    let virtual_shareable_handle = virtual_shareable_handle::create(allocation.reference)
+    let fd = virtual_shareable_handle::create(resource.reference())
         .map_err(|_| CUDA_ERROR_OUT_OF_MEMORY)?;
-    allocation.shared = true;
-    if allocation.context == 0 {
-        allocation.context = context();
-    }
-    unsafe {
-        out.cast::<i32>()
-            .write(virtual_shareable_handle.into_raw_fd());
-    }
+    resource.share(namespace_pid)?;
+    unsafe { out.cast::<i32>().write(fd.into_raw_fd()) };
     Ok(())
 }
 
@@ -1284,7 +1393,7 @@ pub fn cuMemImportFromShareableHandle(
 }
 
 pub(super) fn import_reference(
-    mut state: MutexGuard<'static, State>,
+    mut state: MutexGuard<'static, ProcessState>,
     out: *mut u64,
     reference: AllocationReference,
 ) -> Result<()> {
@@ -1295,35 +1404,26 @@ pub(super) fn import_reference(
         return Err(CudaError::from(CUDA_ERROR_OUT_OF_MEMORY));
     }
     let id = reference.id;
-    if state.multicasts.contains_key(&id) {
-        let object = state
-            .multicasts
-            .get_mut(&id)
-            .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
-        if object.reference != reference {
+    if let Some(resource) = state.resources.get_mut(&id) {
+        if resource.reference() != reference {
             return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
         }
-        object.shared = true;
-        let virtual_multicast_handle = state.mint_virtual_allocation_handle(id)?;
-        unsafe { out.write(virtual_multicast_handle) };
-        return Ok(());
-    }
-    if let Some(allocation) = state.allocations.get_mut(&id) {
-        if allocation.reference != reference {
-            return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
-        }
-        if allocation.driver.is_none() {
-            let (raw, properties) = virtual_shareable_handle::request_export(reference)
-                .map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
-            if properties.is_some() {
-                return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
+        match resource {
+            Resource::Unicast(allocation) => {
+                if allocation.driver.is_none() {
+                    let (raw, properties) = virtual_shareable_handle::request_export(reference)
+                        .map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
+                    if properties.is_some() {
+                        return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
+                    }
+                    allocation.driver = Some(crate::driver::import_posix(raw.as_fd())?);
+                }
+                allocation.shared = true;
             }
-            let driver = crate::driver::import_posix(raw.as_fd())?;
-            allocation.driver = Some(driver);
+            Resource::Multicast(object) => object.shared = true,
         }
-        allocation.shared = true;
-        let virtual_allocation_handle = state.mint_virtual_allocation_handle(id)?;
-        unsafe { out.write(virtual_allocation_handle) };
+        let handle = state.mint_virtual_allocation_handle(id)?;
+        unsafe { out.write(handle) };
         return Ok(());
     }
     // EXPORT service uses only CACHE, never STATE, so a same-process request
@@ -1351,9 +1451,9 @@ pub(super) fn import_reference(
             return Err(error);
         }
     };
-    state.allocations.insert(
+    state.resources.insert(
         id,
-        Allocation {
+        Resource::Unicast(Allocation {
             reference,
             driver: Some(driver),
             size: 0,
@@ -1363,7 +1463,7 @@ pub(super) fn import_reference(
             checkpointed: false,
             content_saved: false,
             pins: 0,
-        },
+        }),
     );
     unsafe { out.write(virtual_allocation_handle) };
     Ok(())
@@ -1378,12 +1478,11 @@ pub fn cuMemGetAllocationPropertiesFromHandle(
         return Err(CudaError::from(CUDA_ERROR_NOT_READY));
     }
     let driver = match state.virtual_allocation_handles.get(&handle) {
-        Some(id) => match state.multicasts.get(id) {
-            Some(object) => object.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?,
-            None => state.allocations[id]
-                .driver
-                .ok_or(CUDA_ERROR_INVALID_HANDLE)?,
-        },
+        Some(id) => state
+            .resources
+            .get(id)
+            .ok_or(CUDA_ERROR_INVALID_HANDLE)?
+            .driver()?,
         None if handle & VIRTUAL_ALLOCATION_HANDLE_MASK == VIRTUAL_ALLOCATION_HANDLE_TAG => {
             return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
         }
@@ -1393,7 +1492,7 @@ pub fn cuMemGetAllocationPropertiesFromHandle(
     if let Some(allocation) = state
         .virtual_allocation_handles
         .get(&handle)
-        .and_then(|id| state.allocations.get(id))
+        .and_then(|id| state.resources.get(id).and_then(Resource::unicast))
     {
         // Preserve driver-returned flags while hiding the internal POSIX
         // capability of an application-private allocation.
