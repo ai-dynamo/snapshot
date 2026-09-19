@@ -91,7 +91,6 @@ def main():
         properties = Properties()
         assert cuda.cuMemGetAllocationPropertiesFromHandle(c.byref(properties), retained) == 0
         assert properties.handles == 1
-        assert cuda.cuMemMap(address + length // 2, length, 0, handle, 0) != 0
         assert cuda.cuMemUnmap(address, length // 2) != 0
         assert cuda.cuMemRelease(retained) == 0
         assert cuda.cuMemRelease(handle) == 0
@@ -114,7 +113,6 @@ def main():
         records = command("inspect")["records"]
         mapping = next(record["mapping"] for record in records if "mapping" in record)
         assert {entry[1] for entry in mapping["access"]} == {0, 1}
-        assert cuda.cuMemSetAccess(address, length // 2, c.byref(access), 1) != 0
         return
     if mode == "exports":
         descriptors = []

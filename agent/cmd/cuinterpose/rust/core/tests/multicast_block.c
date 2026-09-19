@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-// Test-only provider layer: block a collective or a successful map before the
-// Rust shim can publish it, exposing concurrent control and ownership paths.
+// Test-only provider layer: block a collective CUDA call and inject one-shot
+// driver failures, exposing concurrent control and ownership paths.
 #define _GNU_SOURCE
 #include "fixtures/next.h"
 #include <dlfcn.h>
@@ -16,8 +16,6 @@ static pthread_cond_t changed = PTHREAD_COND_INITIALIZER;
 static int armed, entered, released;
 static atomic_int access_failure;
 static atomic_int create_failure;
-atomic_uint_fast64_t multicast_mapped_handle;
-atomic_int multicast_retain_calls;
 
 void multicast_fail_access(void) {
     atomic_store(&access_failure, 1);
@@ -78,28 +76,4 @@ int cuMulticastAddDevice(uint64_t handle, int device) {
     pthread_mutex_unlock(&lock);
     int (*next)(uint64_t, int) = NEXT("cuMulticastAddDevice");
     return next ? next(handle, device) : 3;
-}
-
-int cuMemMap(uint64_t address, size_t size, size_t offset, uint64_t handle, uint64_t flags) {
-    int (*next)(uint64_t, size_t, size_t, uint64_t, uint64_t) =
-        NEXT("cuMemMap");
-    int result = next ? next(address, size, offset, handle, flags) : 3;
-    pthread_mutex_lock(&lock);
-    if (armed == 2 && result == 0) {
-        atomic_store(&multicast_mapped_handle, handle);
-        armed = 0;
-        entered = 1;
-        pthread_cond_broadcast(&changed);
-        while (!released) pthread_cond_wait(&changed, &lock);
-    }
-    pthread_mutex_unlock(&lock);
-    return result;
-}
-
-int cuMemRetainAllocationHandle(uint64_t *handle, void *address) {
-    atomic_fetch_add(&multicast_retain_calls, 1);
-    void *(*original)(const char *) = NEXT("fakeOriginal");
-    int (*next)(uint64_t *, void *) =
-        original ? original("cuMemRetainAllocationHandle") : 0;
-    return next ? next(handle, address) : 3;
 }

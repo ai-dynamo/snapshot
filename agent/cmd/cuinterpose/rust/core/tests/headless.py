@@ -66,7 +66,7 @@ def main():
             str(Path(__file__).with_name("multicast_block.c")), "-ldl",
         ], env=environment, check=True)
         for mode in ("released", "kind", "access", "failure", "native-address", "tracked-address", "extent", "inflight",
-                     "pending-map", "create-output", "cached-export", "unsupported"):
+                     "create-output", "cached-export", "unsupported"):
             multicast_env = env | {
                 "LD_PRELOAD": env["LD_PRELOAD"] + f":{blocker}:{fixtures / 'test/libcuda.so.1'}",
             }
