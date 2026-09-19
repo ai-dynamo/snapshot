@@ -233,6 +233,8 @@ fn serve(
         ControlRequest::Inspect => checkpoint::inspect(),
         ControlRequest::Execute(operation) => checkpoint::execute(operation),
     };
+    let loaded =
+        matches!(request, ControlRequest::Execute(Operation::LoadAllocations)) && result.is_ok();
     protocol::send(
         &socket,
         &Response {
@@ -241,6 +243,9 @@ fn serve(
         },
         None,
     )?;
+    if loaded {
+        checkpoint::load_acknowledged();
+    }
     Ok(())
 }
 
