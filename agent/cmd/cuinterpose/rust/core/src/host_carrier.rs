@@ -25,7 +25,7 @@ pub struct Transfer {
     pub copy_us: u32,
 }
 
-/// Only the inputs needed to move bytes; virtual handles and mapping topology stay in State.
+/// Only the inputs needed to move bytes; virtual handles and mapping topology stay in ProcessState.
 #[derive(Clone)]
 pub struct AllocationContent {
     pub id: AllocationId,
