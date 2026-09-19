@@ -137,12 +137,66 @@ impl ProcessState {
 
     /// Validation has completed without mutation. Failures here are fail-stop.
     pub fn lifecycle(&mut self, operation: Operation) -> Result<Transfer> {
+        use super::host_carrier::{AllocationContent, Arena};
         let next_phase = self.phase.next(operation)?;
-        let bytes = 0u64;
-        let copy_us = 0u32;
+        let mut bytes = 0u64;
+        let mut copy_us = 0u32;
         match operation {
             Operation::PrepareMulticast => {}
-
+            Operation::SaveAllocations => {
+                let ids: Vec<_> = self
+                    .resources
+                    .values()
+                    .filter_map(Resource::unicast)
+                    .filter(|a| a.owns_content(self.namespace_pid))
+                    .map(|a| a.reference.id)
+                    .collect();
+                let mut allocations = Vec::new();
+                for id in ids {
+                    let allocation = self
+                        .resources
+                        .get_mut(&id)
+                        .and_then(Resource::unicast_mut)
+                        .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+                    if allocation.driver.is_none() {
+                        let mapping = self
+                            .mappings
+                            .values()
+                            .find(|m| m.id == id)
+                            .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+                        Context::run(
+                            allocation.context,
+                            allocation.properties.location.id,
+                            || {
+                                let mut driver = 0;
+                                unsafe {
+                                    crate::driver::cuMemRetainAllocationHandle(
+                                        &mut driver,
+                                        mapping.address as usize as *mut c_void,
+                                    )
+                                }?;
+                                allocation.driver = Some(driver);
+                                Ok(())
+                            },
+                        )?;
+                    }
+                    bytes = bytes
+                        .checked_add(allocation.size as u64)
+                        .ok_or(CUDA_ERROR_OUT_OF_MEMORY)?;
+                    allocations.push(AllocationContent::from(&*allocation));
+                }
+                let (arena, elapsed) = Arena::save(&allocations)?;
+                self.arena = arena;
+                copy_us = elapsed;
+                for allocation in self
+                    .resources
+                    .values_mut()
+                    .filter_map(Resource::unicast_mut)
+                    .filter(|a| a.owns_content(self.namespace_pid))
+                {
+                    allocation.content_saved = true;
+                }
+            }
             Operation::PrepareUnicast => {
                 cache()?.clear()?;
                 for allocation in self
@@ -175,7 +229,32 @@ impl ProcessState {
                     )?;
                 }
             }
-
+            Operation::LoadAllocations => {
+                let mut allocations: Vec<_> = self
+                    .resources
+                    .values()
+                    .filter_map(Resource::unicast)
+                    .filter(|a| a.content_saved)
+                    .map(AllocationContent::from)
+                    .collect();
+                bytes = allocations.iter().try_fold(0u64, |sum, a| {
+                    sum.checked_add(a.size as u64)
+                        .ok_or(CUDA_ERROR_OUT_OF_MEMORY)
+                })?;
+                if let Some(arena) = &self.arena {
+                    copy_us = arena.load(&mut allocations)?;
+                } else if !allocations.is_empty() {
+                    return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
+                }
+                for allocation in allocations {
+                    self.resources
+                        .get_mut(&allocation.id)
+                        .and_then(Resource::unicast_mut)
+                        .ok_or(CUDA_ERROR_INVALID_HANDLE)?
+                        .driver = allocation.driver;
+                }
+                self.remap(true)?;
+            }
             Operation::RestoreUnicast => {
                 for allocation in self
                     .resources
@@ -295,6 +374,16 @@ pub(crate) fn execute(operation: Operation) -> std::result::Result<Reply, String
             runtime::G_FAILED.store(true, Ordering::Release);
             Err(format!("CUDA lifecycle operation failed: {code}"))
         }
+    }
+}
+
+/// The carrier must remain captured until the successful LOAD reply is sent.
+pub(crate) fn load_acknowledged() {
+    if let Ok(mut state) = runtime::get()
+        && let Some(arena) = state.arena.take()
+        && arena.release().is_err()
+    {
+        runtime::G_FAILED.store(true, Ordering::Release);
     }
 }
 

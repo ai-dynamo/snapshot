@@ -4,6 +4,7 @@
 //! Resource identity, virtual-handle ownership, and tracked address ranges.
 
 pub(crate) mod checkpoint;
+mod host_carrier;
 pub(crate) mod ipc;
 pub(crate) mod sharing;
 pub(crate) mod vmm;
@@ -71,6 +72,7 @@ pub struct ProcessState {
     pub raw: BTreeMap<u64, u32>,
     pub unsupported: u64,
     pub phase: Phase,
+    pub arena: Option<host_carrier::Arena>,
     pub inflight: usize,
     next_virtual_allocation_handle: u64,
 }
@@ -87,6 +89,7 @@ impl ProcessState {
             unsupported: 0,
             next_virtual_allocation_handle: 1,
             phase: Phase::Active,
+            arena: None,
             inflight: 0,
         }
     }
