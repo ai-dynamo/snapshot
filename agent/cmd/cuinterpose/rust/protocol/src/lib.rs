@@ -9,13 +9,16 @@ mod record;
 mod transport;
 
 #[doc(inline)]
-pub use identity::{
-    AllocationId, AllocationReference, ParticipantId, format_id, parse_participant_id,
-};
+pub use identity::{AllocationId, AllocationReference, NamespacePid};
 #[doc(inline)]
 pub use record::{BindingSource, BindingVersion, MemberRange, Record};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::{collections::BTreeMap, io, path::PathBuf, time::Duration};
+use std::{
+    collections::BTreeMap,
+    io,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 #[doc(inline)]
 pub use transport::{receive, send};
 
@@ -25,15 +28,17 @@ pub const VERSION: u8 = 1;
 pub const MAX_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
 pub const VIRTUAL_SHAREABLE_HANDLE_MAGIC: [u8; 4] = [b'C', b'U', b'I', VERSION];
 pub const VIRTUAL_SHAREABLE_HANDLE_BYTES: usize =
-    VIRTUAL_SHAREABLE_HANDLE_MAGIC.len() + size_of::<ParticipantId>() + size_of::<AllocationId>();
+    VIRTUAL_SHAREABLE_HANDLE_MAGIC.len() + size_of::<NamespacePid>() + size_of::<AllocationId>();
 
-pub type ParticipantDirectory = BTreeMap<ParticipantId, PathBuf>;
-pub type Manifest = BTreeMap<ParticipantId, ParticipantState>;
+pub type Manifest = BTreeMap<NamespacePid, ParticipantState>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParticipantState {
-    pub socket_path: PathBuf,
     pub entries: Vec<Record>,
+}
+
+pub fn socket_path(control_dir: &Path, namespace_pid: NamespacePid) -> PathBuf {
+    control_dir.join(format!("cuinterpose-{namespace_pid}.sock"))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -51,7 +56,7 @@ pub enum Error {
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Encode `magic | creator participant ID | allocation ID`.
+/// Encode `magic | creator namespace PID | allocation ID`.
 pub fn encode_virtual_shareable_handle(
     reference: AllocationReference,
 ) -> Result<[u8; VIRTUAL_SHAREABLE_HANDLE_BYTES]> {
@@ -60,14 +65,17 @@ pub fn encode_virtual_shareable_handle(
     }
     let mut bytes = [0; VIRTUAL_SHAREABLE_HANDLE_BYTES];
     let (magic, fields) = bytes.split_at_mut(VIRTUAL_SHAREABLE_HANDLE_MAGIC.len());
-    let (creator, id) = fields.split_at_mut(size_of::<ParticipantId>());
+    let (creator_pid, id) = fields.split_at_mut(size_of::<NamespacePid>());
     magic.copy_from_slice(&VIRTUAL_SHAREABLE_HANDLE_MAGIC);
-    creator.copy_from_slice(&reference.creator);
+    if reference.creator_pid == 0 {
+        return Err(Error::Invalid("invalid creator namespace PID"));
+    }
+    creator_pid.copy_from_slice(&reference.creator_pid.to_le_bytes());
     id.copy_from_slice(&reference.id);
     Ok(bytes)
 }
 
-/// Decode `magic | creator participant ID | allocation ID`.
+/// Decode `magic | creator namespace PID | allocation ID`.
 pub fn decode_virtual_shareable_handle(
     bytes: &[u8; VIRTUAL_SHAREABLE_HANDLE_BYTES],
 ) -> Result<AllocationReference> {
@@ -75,15 +83,19 @@ pub fn decode_virtual_shareable_handle(
     if magic != VIRTUAL_SHAREABLE_HANDLE_MAGIC {
         return Err(Error::Invalid("invalid virtual shareable handle magic"));
     }
-    let (creator_bytes, id_bytes) = fields.split_at(size_of::<ParticipantId>());
-    let mut creator = [0; size_of::<ParticipantId>()];
+    let (creator_pid_bytes, id_bytes) = fields.split_at(size_of::<NamespacePid>());
+    let mut creator_pid = [0; size_of::<NamespacePid>()];
     let mut id = [0; size_of::<AllocationId>()];
-    creator.copy_from_slice(creator_bytes);
+    creator_pid.copy_from_slice(creator_pid_bytes);
     id.copy_from_slice(id_bytes);
+    let creator_pid = NamespacePid::from_le_bytes(creator_pid);
+    if creator_pid == 0 {
+        return Err(Error::Invalid("invalid creator namespace PID"));
+    }
     if id == [0; size_of::<AllocationId>()] {
         return Err(Error::Invalid("invalid allocation reference"));
     }
-    Ok(AllocationReference { id, creator })
+    Ok(AllocationReference { id, creator_pid })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,19 +115,11 @@ pub enum Operation {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Request {
-    Identify,
-    Rendezvous {
-        #[serde(with = "serde_bytes")]
-        participant: ParticipantId,
-        participants: ParticipantDirectory,
-    },
     Inspect {
-        #[serde(with = "serde_bytes")]
-        participant: ParticipantId,
+        namespace_pid: NamespacePid,
     },
     Execute {
-        #[serde(with = "serde_bytes")]
-        participant: ParticipantId,
+        namespace_pid: NamespacePid,
         operation: Operation,
     },
     Export {
@@ -125,16 +129,13 @@ pub enum Request {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Response {
-    #[serde(with = "serde_bytes")]
-    pub participant: ParticipantId,
+    pub namespace_pid: NamespacePid,
     pub result: std::result::Result<Reply, String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reply {
-    Identified,
-    Ready,
     Inspection {
         entries: Vec<Record>,
         live_raw_imports: u64,
