@@ -178,7 +178,7 @@ Ordinary Rust panics are caught at the backend entry points and converted into C
 | Intercepted APIs | What the shim does |
 | --- | --- |
 | `cuInit` | Initializes the shim alongside CUDA. |
-| `cuMemCreate`, `cuMemRelease`, `cuMemRetainAllocationHandle` | Tracks supported VMM allocations and translates application-visible virtual allocation handles to driver handles. |
+| `cuMemCreate`, `cuMemRelease`, `cuMemRetainAllocationHandle` | Tracks supported VMM allocations and translates application-visible virtual allocation handles to the CUDA backing handle. |
 | `cuMemMap`, `cuMemUnmap`, `cuMemSetAccess` | Records address ranges, allocation offsets, and access permissions. |
 | `cuMemGetAllocationGranularity`, `cuMemGetAllocationPropertiesFromHandle` | Preserves CUDA queries while resolving tracked handles where required. |
 | `cuMemExportToShareableHandle`, `cuMemImportFromShareableHandle` | Replaces raw export FDs with virtual shareable handles and imports the creator's real allocation through a peer request. |
@@ -327,10 +327,10 @@ The peer thread queues control commands; it does not wait for their CUDA operati
 
 Allocation and mapping changes normally hold the shim's state mutex. Multicast calls that can block waiting for other devices release that mutex around the driver call, then recheck the object and phase before recording success. The peer listener holds the export-cache mutex through each socket send. Cache removal, checkpoint teardown, and fork take the same mutex, so they wait for that send to finish. Sends use the socket timeout; a slow receiver can delay cache mutations until the send finishes or fails.
 
-`ProcessState` owns one resource registry keyed by allocation ID. Each `Resource`
+`ProcessState` owns one memblock registry keyed by allocation ID. Each `Memblock`
 is either a unicast `Allocation` or a `MulticastObject`; virtual handles and
 address mappings refer to that same registry. Export publication, handle release,
-and existing-resource imports share the registry's lifetime bookkeeping.
+and existing-memblock imports share the registry's lifetime bookkeeping.
 `MallocRegion` additionally tracks malloc/IPC reservations, requested sizes, and
 open counts. A reservation's lifetime is distinct from its current mapping.
 
@@ -339,7 +339,7 @@ Multicast replies include the creation properties needed by importers to record
 and reconstruct the object. This copy lets peer service run without taking the
 CUDA state mutex, including while another thread holds that mutex during import.
 
-Inspection projects live resources into serializable `Record` values. The
+Inspection projects live memblocks into serializable `Record` values. The
 checkpoint manifest maps each namespace PID directly to its records; live CUDA
 handles and transient lifecycle bookkeeping remain inside the shim.
 
