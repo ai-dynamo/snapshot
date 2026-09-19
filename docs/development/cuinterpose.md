@@ -178,7 +178,7 @@ Ordinary Rust panics are caught at the backend entry points and converted into C
 | Intercepted APIs | What the shim does |
 | --- | --- |
 | `cuInit` | Initializes the shim alongside CUDA. |
-| `cuMemCreate`, `cuMemRelease`, `cuMemRetainAllocationHandle` | Tracks supported VMM allocations and translates application-visible virtual allocation handles to the CUDA backing handle. |
+| `cuMemCreate`, `cuMemRelease`, `cuMemRetainAllocationHandle` | Tracks supported VMM allocations and translates application-visible virtual allocation handles to the CUDA driver handle. |
 | `cuMemMap`, `cuMemUnmap`, `cuMemSetAccess` | Records address ranges, allocation offsets, and access permissions. |
 | `cuMemGetAllocationGranularity`, `cuMemGetAllocationPropertiesFromHandle` | Preserves CUDA queries while resolving tracked handles where required. |
 | `cuMemExportToShareableHandle`, `cuMemImportFromShareableHandle` | Replaces raw export FDs with virtual shareable handles and imports the creator's real allocation through a peer request. |
