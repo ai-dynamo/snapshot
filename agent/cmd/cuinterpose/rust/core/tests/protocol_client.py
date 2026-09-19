@@ -100,7 +100,7 @@ def command(operation, success=True):
     response = inspect(operation)
     assert ("Ok" in response["result"]) == success, (operation, response)
     value = response["result"]["Ok" if success else "Err"]
-    # Externally tagged replies deserialize directly without buffering entries.
+    # Externally tagged replies deserialize directly without buffering records.
     return next(iter(value.values())) if success and isinstance(value, dict) else value
 
 

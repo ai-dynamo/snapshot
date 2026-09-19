@@ -63,14 +63,14 @@ fn inspection_metadata_round_trips() {
         access: vec![(1, 0, 3), (1, 1, 3)],
     };
     let reply = Reply::Inspection {
-        entries: vec![mapping.clone()],
+        records: vec![mapping.clone()],
         live_raw_imports: 0,
         unsupported_creations: 0,
     };
-    let Reply::Inspection { entries, .. } = decode(&encode(&reply).unwrap()).unwrap() else {
+    let Reply::Inspection { records, .. } = decode(&encode(&reply).unwrap()).unwrap() else {
         panic!("decoded the wrong reply variant");
     };
-    assert_eq!(entries, vec![mapping]);
+    assert_eq!(records, vec![mapping]);
 }
 
 #[test]

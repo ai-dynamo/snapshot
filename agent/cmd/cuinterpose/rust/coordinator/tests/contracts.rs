@@ -31,7 +31,7 @@ const MULTICAST: AllocationReference = AllocationReference {
 
 #[derive(Default)]
 struct Model {
-    entries: Vec<Record>,
+    records: Vec<Record>,
     raw: u64,
     unsupported: u64,
     fail: Option<Operation>,
@@ -89,7 +89,7 @@ impl Fixture {
                             (
                                 None,
                                 Reply::Inspection {
-                                    entries: model.entries.clone(),
+                                    records: model.records.clone(),
                                     live_raw_imports: model.raw,
                                     unsupported_creations: model.unsupported,
                                 },
@@ -272,10 +272,10 @@ fn preflight_refusals_do_not_mutate_or_publish_state() {
             match case {
                 "raw" => model.raw = 3,
                 "unsupported" => model.unsupported = 2,
-                "missing-creator" => model.entries = vec![allocation(2)],
-                "mapping" => model.entries = vec![allocation(1), mapping(8192, 0x10000)],
+                "missing-creator" => model.records = vec![allocation(2)],
+                "mapping" => model.records = vec![allocation(1), mapping(8192, 0x10000)],
                 "member" => {
-                    model.entries = vec![
+                    model.records = vec![
                         allocation(1),
                         Record::Multicast {
                             allocation: MULTICAST,
@@ -338,8 +338,8 @@ fn parallel_prepare_and_restore_barriers_preserve_canonical_state() {
         Operation::RestoreMulticastDevices,
     ] {
         let fixture = Fixture::new(2, Some(barrier));
-        fixture.models[0].lock().unwrap().entries = vec![mapping(4096, 0x10000), allocation(1)];
-        fixture.models[1].lock().unwrap().entries = vec![allocation(1)];
+        fixture.models[0].lock().unwrap().records = vec![mapping(4096, 0x10000), allocation(1)];
+        fixture.models[1].lock().unwrap().records = vec![allocation(1)];
         let output = fixture.run("--prepare");
         assert!(output.status.success(), "{output:?}");
         let state = std::fs::read(fixture.directory.join("cuinterpose.state")).unwrap();
@@ -349,13 +349,13 @@ fn parallel_prepare_and_restore_barriers_preserve_canonical_state() {
             let mut expected = fixture.models[id as usize - 1]
                 .lock()
                 .unwrap()
-                .entries
+                .records
                 .clone();
             expected.sort();
-            assert_eq!(participant.entries, expected);
+            assert_eq!(participant, expected);
         }
         // Input record order is immaterial to final topology comparison.
-        fixture.models[0].lock().unwrap().entries.reverse();
+        fixture.models[0].lock().unwrap().records.reverse();
         let output = fixture.run("--restore");
         assert!(output.status.success(), "{output:?}");
         for model in &fixture.models {
@@ -385,7 +385,7 @@ fn restore_rejects_missing_corrupt_or_changed_state() {
     for case in ["missing", "corrupt", "identity", "topology"] {
         let fixture = Fixture::new(1, None);
         if case != "missing" {
-            fixture.models[0].lock().unwrap().entries = vec![allocation(1), mapping(4096, 0x10000)];
+            fixture.models[0].lock().unwrap().records = vec![allocation(1), mapping(4096, 0x10000)];
             let output = fixture.run("--prepare");
             assert!(output.status.success(), "{output:?}");
         }
@@ -399,7 +399,7 @@ fn restore_rejects_missing_corrupt_or_changed_state() {
                 )
                 .unwrap(),
                 "identity" => model.namespace_pid = 3,
-                "topology" => model.entries = vec![allocation(1), mapping(4096, 0x30000)],
+                "topology" => model.records = vec![allocation(1), mapping(4096, 0x30000)],
                 _ => {}
             }
         }

@@ -38,7 +38,7 @@ def check_import(virtual_ipc_mem_handle):
     assert cuda.cuIpcCloseMemHandle(address) == 0
     assert cuda.fakeMappedCount() == 1
     assert cuda.cuIpcCloseMemHandle(address) == 0
-    assert not command("inspect")["entries"]
+    assert not command("inspect")["records"]
     assert cuda.cuIpcCloseMemHandle(address) != 0
 
 
@@ -76,7 +76,7 @@ else:
     assert cuda.fakeMappedCount() == 2
     assert cuda.cuMemFree_v2(shared) == 0
     assert cuda.cuMemFree_v2(private) == 0
-    assert not command("inspect")["entries"]
+    assert not command("inspect")["records"]
     print(
         "PASS memory IPC: private memory, peer virtual handles, repeat opens, restore, cleanup"
     )
