@@ -301,7 +301,23 @@ Application CUDA wrappers run on the calling application thread. On runtime star
 
 The peer thread queues control commands; it does not wait for their CUDA operations. A bounded queue refuses excess control requests. This separation lets an importer obtain an FD even while the creator's control thread is busy reconstructing another object.
 
-Allocation and mapping changes normally hold the shim's state mutex. Multicast calls that can block waiting for other devices release that mutex around the driver call, then recheck the object and phase before recording success. Export-cache users hold a descriptor lease; teardown waits for those users before closing cached descriptors.
+Allocation and mapping changes normally hold the shim's state mutex. Multicast calls that can block waiting for other devices release that mutex around the driver call, then recheck the object and phase before recording success. The peer listener holds the export-cache mutex through each socket send. Cache removal, checkpoint teardown, and fork take the same mutex, so they wait for that send to finish. Sends use the socket timeout; a slow receiver can delay cache mutations until the send finishes or fails.
+
+`ProcessState` owns one resource registry keyed by allocation ID. Each `Resource`
+is either a unicast `Allocation` or a `MulticastObject`; virtual handles and
+address mappings refer to that same registry. Export publication, handle release,
+and existing-resource imports share the registry's lifetime bookkeeping.
+`MallocRegion` additionally tracks malloc/IPC reservations, requested sizes, and
+open counts. A reservation's lifetime is distinct from its current mapping.
+
+The export cache stores an FD and its reply metadata under each allocation ID.
+Multicast replies include the creation properties needed by importers to record
+and reconstruct the object. This copy lets peer service run without taking the
+CUDA state mutex, including while another thread holds that mutex during import.
+
+Inspection projects live resources into serializable `Record` values. The
+checkpoint manifest maps each namespace PID directly to its records; live CUDA
+handles and transient lifecycle bookkeeping remain inside the shim.
 
 These simplified paths show the main actions, not error cleanup:
 
@@ -352,7 +368,7 @@ sequenceDiagram
     App->>App: Finish work and remain parked
     Agent->>Coord: Start prepare in target namespaces
     Coord->>Shims: INSPECT on each namespace-PID socket
-    Shims-->>Coord: Namespace PID and state entries
+    Shims-->>Coord: Namespace PID and state records
     Coord->>Coord: Validate all participants
     Coord->>Shims: PREPARE_MULTICAST
     Shims->>CUDA: Drop exports, unmap, unbind, release multicast
@@ -437,7 +453,7 @@ sequenceDiagram
     Note over Coord,Importers: Wait for all participants
     Coord->>Creators: INSPECT
     Coord->>Importers: INSPECT
-    Coord->>Coord: Compare with captured entries
+    Coord->>Coord: Compare with captured records
     Coord-->>Agent: Restore succeeded and exit
     Agent->>App: Publish restore-complete sentinel
     App->>App: Resume
@@ -461,19 +477,18 @@ Capture and restore reverse the dependency order, not the number of messages. Ca
 ## Checkpoint files and compatibility
 
 `cuinterpose.state` is a **binary, versioned MessagePack file**. Its body is a
-map from namespace PID to that process's state entries. Socket paths are derived
+map from namespace PID directly to that process's records. Socket paths are derived
 from those keys and are not persisted. Control messages and `cuinterpose.state` are limited to 32
 MiB to bound allocations from socket frame prefixes and checkpoint files; they
 contain metadata, never allocation contents. Here is a shortened decoded view
 for the two-worker example.
-Allocation-property and handle-count fields are omitted; the names and nesting
-shown are the actual serialized fields:
+Allocation-property and handle-count fields are omitted, and binary allocation
+IDs are shown as hex strings. Field names and nesting match the serialized data:
 
 ```yaml
 version: 1
 body:
   41:
-    entries:
     - allocation:
         allocation:
           id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -488,9 +503,8 @@ body:
         size: 2097152
         offset: 0
         access:
-        - {location: {kind: 1, id: 0}, flags: 3}
+        - [1, 0, 3]
   42:
-    entries:
     - allocation:
         allocation:
           id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -505,19 +519,19 @@ body:
         size: 2097152
         offset: 0
         access:
-        - {location: {kind: 1, id: 1}, flags: 3}
+        - [1, 1, 3]
 ```
 
 The outer namespace-PID key identifies the process. The repeated allocation reference
 identifies both the allocation and its creator without a separate `creator:
 true/false` field. `content: true` means A owns the content copy, not that bytes
 appear in this file. `offset: 0` maps from the start of the allocation. In the
-access entries, location kind `1` means a CUDA device and flags `3` mean
+access tuples `(location type, location ID, flags)`, type `1` means a CUDA device and flags `3` mean
 read/write: A grants GPU 0 access, and B grants GPU 1 access. Addresses are
 shown in hex for readability; they are encoded as integers.
 
-Multicast adds entries to the same process state. For example, this complete
-`multicast_binding` entry says that GPU 0 binds the first 2 MiB of allocation
+Multicast adds records to the same process state. For example, this complete
+`multicast_binding` record says that GPU 0 binds the first 2 MiB of allocation
 `aaaaaaaa…` into the start of multicast object `bbbbbbbb…` using `BindMem`'s v1
 ABI:
 
@@ -541,13 +555,13 @@ multicast_binding:
 
 The member offset is nested under `source`; the outer offset is into the
 multicast object. Separate `multicast`, `multicast_device`, and
-`multicast_mapping` entries describe the object, attached devices, and virtual
+`multicast_mapping` records describe the object, attached devices, and virtual
 mappings. This binding alone is not a complete multicast checkpoint.
 
-The coordinator sorts entries and publishes the state through a temporary file,
+The coordinator sorts records and publishes the state through a temporary file,
 file `fsync`, atomic rename, and directory `fsync`. On restore it checks the
 namespace PID set, derives the exact socket paths, rebuilds sharing, then
-compares a fresh inspection against the captured entries. Allocation bytes come
+compares a fresh inspection against the captured records. Allocation bytes come
 from CRIU's host-carrier images, not this file.
 
 The corresponding section of `manifest.yaml` is ordinary YAML:
