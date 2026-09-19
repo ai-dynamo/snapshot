@@ -140,12 +140,11 @@ pub fn cuMemMap(address: u64, size: usize, offset: usize, handle: u64, flags: u6
 
 pub fn cuMemUnmap(address: u64, size: usize) -> Result<()> {
     let mut state = get()?;
-    if let Some(mapping) = state.mappings.get(&address) {
-        if state.phase != Phase::Active
-            || state.resources.get(&mapping.id).is_some_and(Resource::busy)
-        {
-            return Err(CudaError::from(CUDA_ERROR_NOT_READY));
-        }
+    if let Some(mapping) = state.mappings.get(&address)
+        && (state.phase != Phase::Active
+            || state.resources.get(&mapping.id).is_some_and(Resource::busy))
+    {
+        return Err(CudaError::from(CUDA_ERROR_NOT_READY));
     }
     unsafe { crate::driver::cuMemUnmap(address, size) }?;
     if let Some(mapping) = state.mappings.remove(&address) {
