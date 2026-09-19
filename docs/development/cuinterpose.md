@@ -55,6 +55,30 @@ The shim is loaded inside each CUDA process, not run as a sidecar. Its C fronten
 
 Each shim listens on `/snapshot-control/cuinterpose-<namespace-pid>.sock`. The same Unix socket accepts coordinator commands and peer requests for export descriptors. Peer connections are opened when needed; there is no permanent all-to-all connection set.
 
+The backend separates CUDA API policy from resource ownership:
+
+| Module | Responsibility |
+| --- | --- |
+| `handlers.rs` | Argument validation, native versus tracked decisions, and API-level orchestration. |
+| `driver.rs` | Real CUDA calls and temporary context switching. |
+| `runtime/` | Generation installation, sticky failure, registered sockets, fork cleanup, and control workers. |
+| `memory/mod.rs` | The resource registry, virtual handle ownership, and tracked address ranges. |
+| `memory/vmm.rs` | Unicast backing adoption, retain/map bookkeeping, and access permissions. |
+| `memory/sharing.rs` | Shareable-handle encoding, exact-PID peer requests, cached exports, and imports. |
+| `memory/ipc.rs` | Malloc reservations, IPC-handle encoding, repeated opens, and synchronized release. |
+| `memory/multicast.rs` | Multicast lifetime, unlocked collective calls, bindings, and reconstruction. |
+| `memory/checkpoint.rs` | Inspection, local phase validation, checkpoint mutation, and completion. |
+| `memory/host_carrier.rs` | Saving and loading shared allocation bytes. |
+
+Handlers do not call other CUDA handlers. They share memory operations that own
+their bookkeeping and rollback. Operations that release the registry lock for a
+collective CUDA call also own pinning and post-call validation. Peer FD service
+uses only the export cache lock, never the registry lock.
+
+The control worker routes requests and sends replies; checkpoint code owns phase
+transitions and fail-stop decisions. After sending a successful LOAD reply, the
+worker reports completion to checkpoint code so it can release the host carrier.
+
 ### Cuinterpose coordinator
 
 The Rust `cuinterpose-coordinator` is a short-lived executable. One instance runs before native capture; another runs after native restore. It reads state entries from all shims, checks that creators and importers agree, and starts each capture or restore phase. It does not call CUDA or copy allocation bytes.
