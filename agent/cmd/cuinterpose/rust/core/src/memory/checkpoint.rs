@@ -12,6 +12,7 @@ use cudarc::driver::sys::CUresult::*;
 use cuinterpose_protocol::Operation;
 use cuinterpose_protocol::Reply;
 use runtime::cache;
+use std::ffi::c_void;
 use std::os::fd::AsFd;
 use std::sync::atomic::Ordering;
 
