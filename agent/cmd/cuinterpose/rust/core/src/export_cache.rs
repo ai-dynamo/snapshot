@@ -323,7 +323,14 @@ mod tests {
         let lease = cache.acquire(&id).unwrap();
         let (socket, peer) = UnixStream::pair().unwrap();
         drop(peer);
-        assert!(send(&socket, &Request::Identify, Some(lease.descriptor())).is_err());
+        assert!(
+            send(
+                &socket,
+                &Request::Inspect { namespace_pid: 1 },
+                Some(lease.descriptor()),
+            )
+            .is_err()
+        );
         let (done, completion) = mpsc::channel();
         let copy = Arc::clone(&cache);
         let worker = std::thread::spawn(move || {

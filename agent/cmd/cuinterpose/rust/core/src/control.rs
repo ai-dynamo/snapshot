@@ -7,9 +7,7 @@
 use super::process::Socket;
 use super::state::{self, Result};
 use cudarc::driver::sys::CUresult::CUDA_ERROR_NOT_INITIALIZED;
-use cuinterpose_protocol::{
-    self as protocol, Operation, ParticipantDirectory, ParticipantId, Reply, Request, Response,
-};
+use cuinterpose_protocol::{self as protocol, NamespacePid, Operation, Reply, Request, Response};
 use rustix::event::{PollFd, PollFlags, poll};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -25,33 +23,6 @@ enum ControlRequest {
     Execute(Operation),
 }
 
-fn install_directory(
-    identity: ParticipantId,
-    participants: ParticipantDirectory,
-) -> protocol::Result<()> {
-    if participants.is_empty() || !participants.contains_key(&identity) {
-        return Err(protocol::Error::Invalid(
-            "rendezvous directory omits this participant",
-        ));
-    }
-    let mut paths = std::collections::BTreeSet::new();
-    for path in participants.values() {
-        if !path.is_absolute()
-            || !paths.insert(path)
-            || std::os::unix::net::SocketAddr::from_pathname(path).is_err()
-        {
-            return Err(protocol::Error::Invalid(
-                "invalid rendezvous participant directory",
-            ));
-        }
-    }
-    *state::participant_directory()
-        .map_err(|_| protocol::Error::Invalid("cuinterpose state is unavailable"))?
-        .lock()
-        .map_err(|_| protocol::Error::Invalid("participant directory is poisoned"))? = participants;
-    Ok(())
-}
-
 /// Private workers cannot dispatch until the single listener handoff succeeds.
 /// Dropping this owner cancels them without joining: a caller may hold the
 /// loader lock needed by a worker's Rust TLS startup or teardown.
@@ -62,7 +33,7 @@ pub struct PreparedWorkers {
 }
 
 impl PreparedWorkers {
-    pub fn prepare(identity: ParticipantId) -> Result<Option<Self>> {
+    pub fn prepare(namespace_pid: NamespacePid) -> Result<Option<Self>> {
         let (sender, receiver) =
             mpsc::sync_channel::<(Socket<UnixStream>, ControlRequest)>(CONTROL_QUEUE_CAPACITY);
         let (activation, parked) = mpsc::sync_channel::<Socket<UnixListener>>(1);
@@ -72,7 +43,7 @@ impl PreparedWorkers {
                 // Queued sockets remain in the atfork FD registry.
                 while let Ok((socket, request)) = receiver.recv() {
                     crate::boundary::call(&super::G_FAILED, (), || {
-                        let _ = serve(socket, request, identity);
+                        let _ = serve(socket, request, namespace_pid);
                     });
                 }
             })
@@ -104,7 +75,7 @@ impl PreparedWorkers {
                         continue;
                     };
                     crate::boundary::call(&super::G_FAILED, (), || {
-                        let _ = dispatch(socket, identity, &sender);
+                        let _ = dispatch(socket, namespace_pid, &sender);
                     });
                 }
             });
@@ -157,7 +128,7 @@ impl PreparedWorkers {
 
 fn dispatch(
     socket: Socket<UnixStream>,
-    identity: ParticipantId,
+    namespace_pid: NamespacePid,
     sender: &mpsc::SyncSender<(Socket<UnixStream>, ControlRequest)>,
 ) -> protocol::Result<()> {
     // Classification uses per-I/O socket timeouts, not a total header deadline.
@@ -167,47 +138,35 @@ fn dispatch(
     socket.set_read_timeout(timeout)?;
     socket.set_write_timeout(timeout)?;
     let (request, descriptor): (Request, _) = protocol::receive(&socket)?;
-    let identified = match &request {
-        Request::Identify => true,
-        Request::Rendezvous { participant, .. }
-        | Request::Inspect { participant }
-        | Request::Execute { participant, .. } => *participant == identity,
-        Request::Export { allocation } => allocation.creator == identity,
+    let addressed = match &request {
+        Request::Inspect {
+            namespace_pid: target,
+        }
+        | Request::Execute {
+            namespace_pid: target,
+            ..
+        } => *target == namespace_pid,
+        Request::Export { allocation } => allocation.creator_pid == namespace_pid,
     };
-    if descriptor.is_some() || !identified {
-        return refuse(&socket, identity, "invalid cuinterpose control request");
+    if descriptor.is_some() || !addressed {
+        return refuse(
+            &socket,
+            namespace_pid,
+            "invalid cuinterpose control request",
+        );
     }
     let request = match request {
-        Request::Identify => {
-            return protocol::send(
-                &socket,
-                &Response {
-                    participant: identity,
-                    result: Ok(Reply::Identified),
-                },
-                None,
-            );
-        }
-        Request::Rendezvous { participants, .. } => {
-            install_directory(identity, participants)?;
-            return protocol::send(
-                &socket,
-                &Response {
-                    participant: identity,
-                    result: Ok(Reply::Ready),
-                },
-                None,
-            );
-        }
         Request::Inspect { .. } => ControlRequest::Inspect,
         Request::Execute { operation, .. } => ControlRequest::Execute(operation),
         Request::Export { allocation } => {
             if super::G_FAILED.load(Ordering::Acquire) {
-                return refuse(&socket, identity, "cuinterpose state failed");
+                return refuse(&socket, namespace_pid, "cuinterpose state failed");
             }
             let lease = match state::cache().and_then(|cache| cache.acquire(&allocation.id)) {
                 Ok(lease) => lease,
-                Err(_) => return refuse(&socket, identity, "creator resource is unavailable"),
+                Err(_) => {
+                    return refuse(&socket, namespace_pid, "creator resource is unavailable");
+                }
             };
             let reply = match lease.multicast_properties() {
                 Some(properties) => Reply::MulticastExport {
@@ -221,7 +180,7 @@ fn dispatch(
             return protocol::send(
                 &socket,
                 &Response {
-                    participant: identity,
+                    namespace_pid,
                     result: Ok(reply),
                 },
                 Some(lease.descriptor()),
@@ -240,16 +199,16 @@ fn dispatch(
                     "control worker unavailable; refused without mutation",
                 ),
             };
-            refuse(&socket, identity, message)
+            refuse(&socket, namespace_pid, message)
         }
     }
 }
 
-fn refuse(socket: &UnixStream, identity: ParticipantId, message: &str) -> protocol::Result<()> {
+fn refuse(socket: &UnixStream, namespace_pid: NamespacePid, message: &str) -> protocol::Result<()> {
     protocol::send(
         socket,
         &Response {
-            participant: identity,
+            namespace_pid,
             result: Err(message.into()),
         },
         None,
@@ -259,7 +218,7 @@ fn refuse(socket: &UnixStream, identity: ParticipantId, message: &str) -> protoc
 fn serve(
     socket: Socket<UnixStream>,
     request: ControlRequest,
-    identity: ParticipantId,
+    namespace_pid: NamespacePid,
 ) -> protocol::Result<()> {
     let loading = matches!(request, ControlRequest::Execute(Operation::LoadAllocations));
     let result = (|| -> std::result::Result<Reply, String> {
@@ -314,7 +273,7 @@ fn serve(
     protocol::send(
         &socket,
         &Response {
-            participant: identity,
+            namespace_pid,
             result,
         },
         None,
