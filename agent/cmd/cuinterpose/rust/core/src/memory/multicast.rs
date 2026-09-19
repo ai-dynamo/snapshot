@@ -129,13 +129,6 @@ pub fn map(
     flags: u64,
 ) -> Result<()> {
     let end = offset.checked_add(size).ok_or(CUDA_ERROR_INVALID_VALUE)?;
-    if size == 0 || !state.covered(address, size)?.is_empty() {
-        return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
-    }
-    state
-        .pending_maps
-        .try_reserve(1)
-        .map_err(|_| CUDA_ERROR_OUT_OF_MEMORY)?;
     let driver = state
         .memblocks
         .get(&id)
@@ -144,22 +137,12 @@ pub fn map(
         .driver
         .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
     let flight = Flight::begin(&mut state, Some(id), None)?;
-    state.pending_maps.push((address, size));
     drop(state);
     let mapped = (|| -> Result<()> {
         unsafe { crate::driver::cuMemMap(address, size, offset, driver, flags) }?;
         Ok(())
     })();
-    let mut state = match flight.finish() {
-        Ok(state) => state,
-        Err(error) => {
-            if mapped.is_ok() {
-                unsafe { crate::driver::cuMemUnmap(address, size) }?;
-            }
-            return Err(error);
-        }
-    };
-    state.pending_maps.retain(|range| *range != (address, size));
+    let mut state = flight.finish()?;
     mapped?;
     let object = state
         .memblocks
@@ -179,7 +162,6 @@ pub fn map(
             offset,
             flags,
             access: Vec::new(),
-            unknown: false,
             checkpointed: false,
         },
     );
@@ -225,19 +207,11 @@ pub fn import(
         }?;
         Ok(())
     })();
-    let mut state = match flight.finish() {
-        Ok(state) => state,
-        Err(error) => {
-            if imported.is_ok() {
-                unsafe { crate::driver::cuMemRelease(driver) }?;
-            }
-            return Err(error);
-        }
-    };
+    let mut state = flight.finish()?;
     imported?;
     let driver = VirtualAllocationHandle::from_driver(driver)?;
     // Another importer can have completed while this thread waited in CUDA.
-    let inserted = if let Some(object) = state
+    if let Some(object) = state
         .memblocks
         .get_mut(&id)
         .and_then(Memblock::multicast_mut)
@@ -246,7 +220,6 @@ pub fn import(
         if object.reference != reference {
             return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
         }
-        false
     } else {
         state.memblocks.insert(
             id,
@@ -263,18 +236,8 @@ pub fn import(
                 inflight: 0,
             }),
         );
-        true
-    };
-    let virtual_multicast_handle = match state.mint_virtual_allocation_handle(id) {
-        Ok(handle) => handle,
-        Err(error) => {
-            if inserted {
-                state.memblocks.remove(&id);
-                unsafe { crate::driver::cuMemRelease(driver) }?;
-            }
-            return Err(error);
-        }
-    };
+    }
+    let virtual_multicast_handle = state.mint_virtual_allocation_handle(id)?;
     Ok(virtual_multicast_handle)
 }
 
@@ -424,13 +387,6 @@ pub(crate) fn bind(
                     {
                         return Err(CUDA_ERROR_INVALID_VALUE.into());
                     }
-                }
-                if state
-                    .pending_maps
-                    .iter()
-                    .any(|&(base, length)| base < end && base + length as u64 > address)
-                {
-                    return Err(CUDA_ERROR_NOT_READY.into());
                 }
             }
             let mapping = state.mappings.values().find(|mapping| {
@@ -592,9 +548,6 @@ pub fn describe(state: &ProcessState, records: &mut Vec<Record>) -> Result<()> {
             });
         }
         for mapping in state.mappings.values().filter(|mapping| mapping.id == *id) {
-            if mapping.unknown {
-                return Err(CudaError::from(CUDA_ERROR_NOT_SUPPORTED));
-            }
             let record = Record::MulticastMapping {
                 allocation: object.reference,
                 address: mapping.address,
@@ -832,7 +785,7 @@ fn restore(
     Ok(())
 }
 /// Create without holding the registry across a collective CUDA call.
-/// Preserve the driver's error output at the ABI boundary and reclaim unpublished backing.
+/// Preserve the driver's error output at the ABI boundary.
 pub(crate) fn create_backing(
     mut state: MutexGuard<'static, ProcessState>,
     properties: &CUmulticastObjectProp,
@@ -854,15 +807,7 @@ pub(crate) fn create_backing(
         }
         Ok(())
     })();
-    let state = match flight.finish() {
-        Ok(state) => state,
-        Err(error) => {
-            if created.is_ok() {
-                unsafe { crate::driver::cuMemRelease(driver) }?;
-            }
-            return Err(error);
-        }
-    };
+    let state = flight.finish()?;
     created?;
 
     Ok((state, driver))
@@ -875,13 +820,7 @@ impl ProcessState {
         driver: u64,
         properties: CUmulticastObjectProp,
     ) -> Result<u64> {
-        let virtual_multicast_handle = match self.mint_virtual_allocation_handle(id) {
-            Ok(handle) => handle,
-            Err(error) => {
-                unsafe { crate::driver::cuMemRelease(driver) }?;
-                return Err(error);
-            }
-        };
+        let virtual_multicast_handle = self.mint_virtual_allocation_handle(id)?;
         let reference = AllocationReference {
             creator_pid: self.namespace_pid,
             id,
