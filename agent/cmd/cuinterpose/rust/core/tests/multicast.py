@@ -51,7 +51,7 @@ def main():
         cuda.multicast_fail_create()
         assert cuda.cuMulticastCreate(c.byref(group), c.byref(Multicast(1, length, 1, 0))) == 110
         assert group.value == 0x456
-        assert command("inspect")["entries"] == []
+        assert command("inspect")["records"] == []
         assert cuda.fakeLiveAllocations() == 0
         # Failure must also finish its in-flight reservation.
         command("inspect")
@@ -59,7 +59,7 @@ def main():
     if mode == "unsupported":
         assert cuda.cuMulticastCreate(c.byref(group), c.byref(Multicast(1, length, 8, 0))) == 0
         inspection = command("inspect")
-        assert inspection["entries"] == [] and inspection["unsupported_creations"] == 1
+        assert inspection["records"] == [] and inspection["unsupported_creations"] == 1
         assert cuda.cuMemRelease(group) == 0
         result = subprocess.run([
             os.environ["CUINTERPOSE_COORDINATOR"], "--prepare",
@@ -139,7 +139,7 @@ def main():
     if mode == "cached-export":
         multicast_reference = next(
             record["multicast"]["allocation"]
-            for record in command("inspect")["entries"]
+            for record in command("inspect")["records"]
             if "multicast" in record
         )
         virtual_shareable_handles = []
@@ -171,7 +171,7 @@ def main():
         assert cuda.cuMemRetainAllocationHandle(c.byref(member), c.c_void_p(0x10000000)) == 0
     elif mode == "kind":
         path = f"{os.environ['SNAPSHOT_CONTROL_DIR']}/cuinterpose-{os.getpid()}.sock"
-        records = command("inspect")["entries"]
+        records = command("inspect")["records"]
         unicast_reference = next(
             record["allocation"]["allocation"]
             for record in records
@@ -267,7 +267,7 @@ def main():
     assert cuda.cuMemRelease(group) == 0
     assert cuda.cuMemUnmap(0x10000000, length) == 0
     assert cuda.cuMemRelease(member) == 0
-    assert command("inspect")["entries"] == []
+    assert command("inspect")["records"] == []
     assert cuda.fakeLiveAllocations() == 0
     assert cuda.fakeMappedCount() == 0 and cuda.fakeMulticastObjects() == 0
     print(f"PASS multicast {mode}")

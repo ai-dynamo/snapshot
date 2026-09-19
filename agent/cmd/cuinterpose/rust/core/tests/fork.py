@@ -52,7 +52,7 @@ def child_checks(
         if application_socket is not None:
             os.fstat(application_socket)
         initialize()
-        assert command("inspect")["entries"] == []
+        assert command("inspect")["records"] == []
         assert inspect()["namespace_pid"] == os.getpid()
         assert os.getpid() != parent_pid
         value = c.c_uint64()
@@ -74,7 +74,7 @@ def main():
             child_checks(parent_pid)
         wait(child)
         initialize()
-        assert command("inspect")["entries"] == []
+        assert command("inspect")["records"] == []
         assert inspect()["namespace_pid"] == os.getpid()
         return
 
@@ -116,7 +116,7 @@ def main():
                 parent_pid, inherited, virtual_shareable_handle.value, idle.fileno()
             )
         wait(child)
-        records = command("inspect")["entries"]
+        records = command("inspect")["records"]
         assert sum("allocation" in record for record in records) == 1
         assert inspect()["namespace_pid"] == parent_pid
         idle.close()

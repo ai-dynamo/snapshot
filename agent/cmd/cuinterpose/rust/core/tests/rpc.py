@@ -199,8 +199,8 @@ def constructor(nth, library):
         assert path.exists() and cuda.rpc_refused() == 0
         assert len(os.listdir("/proc/self/task")) == len(before_tasks) + 2
         inspection = reply(request(str(path), "inspect", os.getpid()))
-        entries = inspection["result"]["Ok"]["inspection"]["entries"]
-        assert sum("allocation" in entry for entry in entries) == 1
+        records = inspection["result"]["Ok"]["inspection"]["records"]
+        assert sum("allocation" in entry for entry in records) == 1
         assert cuda.cuMemRelease(handle) == 0
     print(f"PASS RPC constructor {nth}: prompt return, "
           + ("sticky failure, FD/path cleanup, eventual worker exit" if nth else "live endpoint"))

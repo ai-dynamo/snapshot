@@ -70,7 +70,7 @@ def main():
         )
         for fd in opened:
             os.close(fd)
-        allocation = next(record["allocation"] for record in command("inspect")["entries"]
+        allocation = next(record["allocation"] for record in command("inspect")["records"]
                           if "allocation" in record)
         assert allocation["virtual_allocation_handle_count"] == 1
         assert (
@@ -85,7 +85,7 @@ def main():
         retained = u64()
         assert cuda.cuMemRetainAllocationHandle(c.byref(retained), address) == 0
         assert retained.value != handle.value
-        allocation = next(record["allocation"] for record in command("inspect")["entries"]
+        allocation = next(record["allocation"] for record in command("inspect")["records"]
                           if "allocation" in record)
         assert allocation["virtual_allocation_handle_count"] == 2
         properties = Properties()
@@ -95,14 +95,14 @@ def main():
         assert cuda.cuMemUnmap(address, length // 2) != 0
         assert cuda.cuMemRelease(retained) == 0
         assert cuda.cuMemRelease(handle) == 0
-        records = command("inspect")["entries"]
+        records = command("inspect")["records"]
         assert sum("allocation" in record for record in records) == 1
         assert cuda.cuMemUnmap(address, length) == 0
-        assert command("inspect")["entries"] == []
+        assert command("inspect")["records"] == []
         for _ in range(100):
             assert cuda.cuMemCreate(c.byref(handle), length, c.byref(props), 0) == 0
             assert cuda.cuMemRelease(handle) == 0
-        assert command("inspect")["entries"] == []
+        assert command("inspect")["records"] == []
         return
     if mode == "access":
         class Access(c.Structure):
@@ -111,7 +111,7 @@ def main():
         for device in (0, 1):
             access = Access(Location(1, device), 3)
             assert cuda.cuMemSetAccess(address, length, c.byref(access), 1) == 0
-        records = command("inspect")["entries"]
+        records = command("inspect")["records"]
         mapping = next(record["mapping"] for record in records if "mapping" in record)
         assert {entry[1] for entry in mapping["access"]} == {0, 1}
         assert cuda.cuMemSetAccess(address, length // 2, c.byref(access), 1) != 0
@@ -138,7 +138,7 @@ def main():
             assert cuda.cuMemImportFromShareableHandle(c.byref(imported), fd, 1) == 0
             assert cuda.cuMemRelease(imported) == 0
             os.close(fd)
-        allocation = next(record["allocation"] for record in command("inspect")["entries"]
+        allocation = next(record["allocation"] for record in command("inspect")["records"]
                           if "allocation" in record)
         assert allocation["virtual_allocation_handle_count"] == 1
         return
@@ -159,7 +159,7 @@ def main():
                 )
                 == 0
             )
-            allocation = next(record["allocation"] for record in command("inspect")["entries"]
+            allocation = next(record["allocation"] for record in command("inspect")["records"]
                               if "allocation" in record)
             assert allocation["virtual_allocation_handle_count"] == 2
         os.close(virtual_shareable_handle.value)
