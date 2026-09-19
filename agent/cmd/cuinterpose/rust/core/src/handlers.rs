@@ -298,7 +298,6 @@ pub fn cuMemAlloc_v2(out: *mut CUdeviceptr, size: usize) -> Result<()> {
     let mut backing = 0;
     unsafe { driver::cuMemCreate(&mut backing, extent, &properties, 0) }?;
     if backing & VIRTUAL_ALLOCATION_HANDLE_MASK == VIRTUAL_ALLOCATION_HANDLE_TAG {
-        let _ = unsafe { driver::cuMemRelease(backing) };
         return Err(CUDA_ERROR_INVALID_HANDLE.into());
     }
     let handle = state.adopt_unicast(reference, backing, extent, properties, false)?;

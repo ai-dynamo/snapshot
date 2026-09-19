@@ -6,7 +6,6 @@
 
 use super::{ProcessState, Resource};
 use crate::{driver, runtime};
-use cudarc::driver::sys::CUresult::CUDA_ERROR_INVALID_HANDLE;
 use cudarc::driver::sys::*;
 use cuinterpose_protocol::{AllocationReference, VERSION as PROTOCOL_VERSION};
 use driver::{CudaError, Result};
@@ -77,10 +76,7 @@ impl ProcessState {
             unsafe { driver::cuCtxGetDevice(&mut device) }?;
             let mut address = 0;
             unsafe { driver::cuMemAddressReserve(&mut address, extent, 0, 0, 0) }?;
-            if let Err(error) = self.map_unicast(id, address, extent, 0, 0) {
-                unsafe { driver::cuMemAddressFree(address, extent) }?;
-                return Err(error);
-            }
+            self.map_unicast(id, address, extent, 0, 0)?;
             let access = CUmemAccessDesc {
                 location: CUmemLocation {
                     type_: CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE,
@@ -88,12 +84,7 @@ impl ProcessState {
                 },
                 flags: CUmemAccess_flags::CU_MEM_ACCESS_FLAGS_PROT_READWRITE,
             };
-            if let Err(error) = unsafe { driver::cuMemSetAccess(address, extent, &access, 1) } {
-                unsafe { driver::cuMemUnmap(address, extent) }?;
-                self.mappings.remove(&address);
-                unsafe { driver::cuMemAddressFree(address, extent) }?;
-                return Err(error);
-            }
+            unsafe { driver::cuMemSetAccess(address, extent, &access, 1) }?;
             self.mappings.get_mut(&address).unwrap().access = vec![access];
             self.malloc_regions.insert(
                 address,
@@ -108,11 +99,7 @@ impl ProcessState {
             Ok(address)
         })();
         if result.is_err() {
-            let id = self
-                .virtual_allocation_handles
-                .remove(&virtual_allocation_handle)
-                .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
-            self.settle(id)?;
+            runtime::G_FAILED.store(true, std::sync::atomic::Ordering::Release);
         }
         result
     }
