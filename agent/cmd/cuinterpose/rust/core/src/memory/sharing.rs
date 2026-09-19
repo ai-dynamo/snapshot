@@ -186,7 +186,8 @@ impl Memblock {
         let reference = self.reference();
         if reference.creator_pid == namespace_pid && !export_cache()?.contains(&reference.id)? {
             let fd = crate::driver::export_posix(self.driver_handle()?)?;
-            export_cache()?.insert(reference.id, fd, None)?;
+            let properties = self.multicast().map(|object| object.properties);
+            export_cache()?.insert(reference.id, fd, properties)?;
         }
         match self {
             Self::Unicast(allocation) => {
@@ -195,6 +196,7 @@ impl Memblock {
                     allocation.context = context();
                 }
             }
+            Self::Multicast(object) => object.shared = true,
         }
         Ok(reference)
     }
@@ -225,6 +227,7 @@ pub(crate) fn import_reference(
                 }
                 allocation.shared = true;
             }
+            Memblock::Multicast(object) => object.shared = true,
         }
         return state.mint_virtual_allocation_handle(id);
     }
@@ -232,8 +235,8 @@ pub(crate) fn import_reference(
     // can complete while this call holds its allocation metadata lock.
     let (raw, multicast_properties) =
         request_export(reference).map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
-    if multicast_properties.is_some() {
-        return Err(CUDA_ERROR_INVALID_HANDLE.into());
+    if let Some(properties) = multicast_properties {
+        return super::multicast::import(state, reference, raw, properties);
     }
     let driver = crate::driver::import_posix(raw.as_fd())?;
     let driver = runtime::must_complete(VirtualAllocationHandle::from_driver(driver));

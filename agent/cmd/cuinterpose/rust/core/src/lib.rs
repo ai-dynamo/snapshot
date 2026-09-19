@@ -70,6 +70,14 @@ exports! {
     cuMemExportToShareableHandle(out: *mut c_void, handle: CUmemGenericAllocationHandle, kind: CUmemAllocationHandleType, flags: u64);
     cuMemImportFromShareableHandle(out: *mut CUmemGenericAllocationHandle, fd: *mut c_void, kind: CUmemAllocationHandleType);
     cuMemGetAllocationPropertiesFromHandle(out: *mut CUmemAllocationProp, handle: CUmemGenericAllocationHandle);
+    cuMulticastCreate(out: *mut CUmemGenericAllocationHandle, prop: *const CUmulticastObjectProp);
+    cuMulticastAddDevice(handle: CUmemGenericAllocationHandle, device: CUdevice);
+    cuMulticastBindMem(handle: CUmemGenericAllocationHandle, offset: usize, member: CUmemGenericAllocationHandle, member_offset: usize, size: usize, flags: u64);
+    cuMulticastBindMem_v2(handle: CUmemGenericAllocationHandle, device: CUdevice, offset: usize, member: CUmemGenericAllocationHandle, member_offset: usize, size: usize, flags: u64);
+    cuMulticastBindAddr(handle: CUmemGenericAllocationHandle, offset: usize, address: CUdeviceptr, size: usize, flags: u64);
+    cuMulticastBindAddr_v2(handle: CUmemGenericAllocationHandle, device: CUdevice, offset: usize, address: CUdeviceptr, size: usize, flags: u64);
+    cuMulticastGetGranularity(out: *mut usize, prop: *const CUmulticastObjectProp, flags: CUmulticastGranularity_flags);
+    cuMulticastUnbind(handle: CUmemGenericAllocationHandle, device: CUdevice, offset: usize, size: usize);
 }
 
 unsafe extern "C" fn ensure_cuinterpose_initialized() -> CUresult {

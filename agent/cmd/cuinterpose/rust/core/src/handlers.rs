@@ -11,6 +11,8 @@ use crate::runtime;
 use cudarc::driver::sys::CUresult::*;
 use cudarc::driver::sys::*;
 use runtime::active;
+use crate::memory::multicast::{self, BindInput};
+use cuinterpose_protocol::BindingVersion;
 use std::ffi::c_void;
 use std::os::fd::IntoRawFd;
 
@@ -85,8 +87,17 @@ pub fn cuMemRetainAllocationHandle(out: *mut u64, address: *mut c_void) -> Resul
     }
     let mut state = active()?;
     let id = state.mapped_memblock(address as u64);
-    if id.is_some() {
+    if let Some(id) = id {
         state.check_handle_capacity()?;
+        if let Some(object) = state.memblocks.get(&id).and_then(Memblock::multicast) {
+            if object.driver.is_none() {
+                return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
+            }
+            unsafe {
+                out.write(state.mint_virtual_allocation_handle(id)?);
+            }
+            return Ok(());
+        }
     }
     let mut driver = 0;
     unsafe { crate::driver::cuMemRetainAllocationHandle(&mut driver, address) }?;
@@ -107,7 +118,14 @@ pub fn cuMemMap(address: u64, size: usize, offset: usize, handle: u64, flags: u6
         unsafe { crate::driver::cuMemMap(address, size, offset, handle, flags) }?;
         return Ok(());
     };
-
+    if state
+        .memblocks
+        .get(&id)
+        .and_then(Memblock::multicast)
+        .is_some()
+    {
+        return multicast::map(state, id, address, size, offset, flags);
+    }
     state.map_unicast(id, address, size, offset, flags)
 }
 
@@ -232,6 +250,147 @@ pub fn cuMemGetAllocationPropertiesFromHandle(
         }
     }
     Ok(())
+}
+
+pub fn cuMulticastCreate(out: *mut u64, properties: *const CUmulticastObjectProp) -> Result<()> {
+    if out.is_null() || properties.is_null() {
+        return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
+    }
+    let properties = unsafe { *properties };
+    let state = runtime::active()?;
+    let id = memory::random()?;
+    let (mut state, driver) = multicast::create_backing(state, &properties, out)?;
+    let driver = VirtualAllocationHandle::from_driver(driver)?;
+    if properties.handleTypes
+        != u64::from(CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0)
+    {
+        if properties.handleTypes != 0 {
+            state.unsupported += 1;
+        }
+        unsafe {
+            out.write(driver);
+        }
+        return Ok(());
+    }
+    let handle = state.adopt_multicast(id, driver, properties)?;
+    unsafe { out.write(handle) };
+    Ok(())
+}
+
+pub fn cuMulticastAddDevice(handle: u64, device: i32) -> Result<()> {
+    let state = runtime::active()?;
+    let Some(id) = state.tracked(handle)? else {
+        drop(state);
+        unsafe { crate::driver::cuMulticastAddDevice(handle, device) }?;
+        return Ok(());
+    };
+    multicast::add_device(state, id, device)
+}
+
+pub fn cuMulticastBindMem(
+    handle: u64,
+    offset: usize,
+    member: u64,
+    member_offset: usize,
+    size: usize,
+    flags: u64,
+) -> Result<()> {
+    multicast::bind(
+        handle,
+        offset,
+        size,
+        flags,
+        0,
+        BindingVersion::V1,
+        BindInput::Memory {
+            handle: member,
+            offset: member_offset,
+        },
+    )
+}
+
+pub fn cuMulticastBindMem_v2(
+    handle: u64,
+    device: i32,
+    offset: usize,
+    member: u64,
+    member_offset: usize,
+    size: usize,
+    flags: u64,
+) -> Result<()> {
+    multicast::bind(
+        handle,
+        offset,
+        size,
+        flags,
+        device,
+        BindingVersion::V2,
+        BindInput::Memory {
+            handle: member,
+            offset: member_offset,
+        },
+    )
+}
+
+pub fn cuMulticastBindAddr(
+    handle: u64,
+    offset: usize,
+    address: u64,
+    size: usize,
+    flags: u64,
+) -> Result<()> {
+    multicast::bind(
+        handle,
+        offset,
+        size,
+        flags,
+        0,
+        BindingVersion::V1,
+        BindInput::Address(address),
+    )
+}
+
+pub fn cuMulticastBindAddr_v2(
+    handle: u64,
+    device: i32,
+    offset: usize,
+    address: u64,
+    size: usize,
+    flags: u64,
+) -> Result<()> {
+    multicast::bind(
+        handle,
+        offset,
+        size,
+        flags,
+        device,
+        BindingVersion::V2,
+        BindInput::Address(address),
+    )
+}
+
+pub fn cuMulticastGetGranularity(
+    out: *mut usize,
+    properties: *const CUmulticastObjectProp,
+    flags: CUmulticastGranularity_flags,
+) -> Result<()> {
+    unsafe { crate::driver::cuMulticastGetGranularity(out, properties, flags) }?;
+    Ok(())
+}
+
+pub fn cuMulticastUnbind(handle: u64, device: i32, offset: usize, size: usize) -> Result<()> {
+    let mut state = runtime::active()?;
+    let Some(id) = state.tracked(handle)? else {
+        drop(state);
+        unsafe { crate::driver::cuMulticastUnbind(handle, device, offset, size) }?;
+        return Ok(());
+    };
+    let object = state
+        .memblocks
+        .get_mut(&id)
+        .and_then(Memblock::multicast_mut)
+        .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+    object.unbind(device, offset, size)
 }
 
 pub use cuIpcOpenMemHandle as cuIpcOpenMemHandle_v2;

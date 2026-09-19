@@ -97,6 +97,14 @@ impl ProcessState {
             records.push(record);
         }
         for mapping in self.mappings.values() {
+            if self
+                .memblocks
+                .get(&mapping.id)
+                .and_then(Memblock::multicast)
+                .is_some()
+            {
+                continue;
+            }
             let record = Record::Mapping {
                 allocation: self.memblocks[&mapping.id]
                     .unicast()
@@ -109,6 +117,7 @@ impl ProcessState {
             };
             records.push(record);
         }
+        super::multicast::describe(self, &mut records)?;
         Ok(records)
     }
 
@@ -131,7 +140,9 @@ impl ProcessState {
         let mut bytes = 0u64;
         let mut copy_us = 0u32;
         match operation {
-            Operation::PrepareMulticast => {}
+            Operation::PrepareMulticast => {
+                super::multicast::prepare(self)?;
+            }
             Operation::SaveAllocations => {
                 let ids: Vec<_> = self
                     .memblocks
