@@ -67,13 +67,9 @@ pub struct ProcessState {
     pub virtual_allocation_handles: BTreeMap<u64, AllocationId>,
     pub mappings: BTreeMap<u64, Mapping>,
     pub raw: BTreeMap<u64, u32>,
-    // Failed redundant-reference cleanup poisons capture, but ownership remains
-    // recorded until the failed process is terminated.
-    pub unreleased_handles: Vec<u64>,
     pub unsupported: u64,
     pub phase: Phase,
     pub inflight: usize,
-    pub pending_maps: Vec<(u64, usize)>,
     next_virtual_allocation_handle: u64,
 }
 
@@ -85,12 +81,10 @@ impl ProcessState {
             virtual_allocation_handles: BTreeMap::new(),
             mappings: BTreeMap::new(),
             raw: BTreeMap::new(),
-            unreleased_handles: Vec::new(),
             unsupported: 0,
             next_virtual_allocation_handle: 1,
             phase: Phase::Active,
             inflight: 0,
-            pending_maps: Vec::new(),
         }
     }
 
@@ -113,21 +107,11 @@ impl ProcessState {
         Ok(())
     }
 
-    /// Find a tracked address without exposing a still-unpublished multicast mapping.
-    pub(crate) fn mapped_resource(&self, address: u64) -> Result<Option<AllocationId>> {
-        for &(base, size) in &self.pending_maps {
-            let end = base
-                .checked_add(size as u64)
-                .ok_or(CUDA_ERROR_INVALID_VALUE)?;
-            if address >= base && address < end {
-                return Err(CUDA_ERROR_NOT_READY.into());
-            }
-        }
-        Ok(self
-            .mappings
+    pub(crate) fn mapped_resource(&self, address: u64) -> Option<AllocationId> {
+        self.mappings
             .values()
             .find(|m| address >= m.address && address - m.address < m.size as u64)
-            .map(|m| m.id))
+            .map(|m| m.id)
     }
 
     pub(crate) fn mint_virtual_allocation_handle(&mut self, id: AllocationId) -> Result<u64> {
@@ -170,30 +154,6 @@ impl ProcessState {
         self.resources.remove(&id);
         Ok(())
     }
-
-    pub(crate) fn covered(&self, address: u64, size: usize) -> Result<Vec<u64>> {
-        let end = address
-            .checked_add(size as u64)
-            .ok_or(CUDA_ERROR_INVALID_VALUE)?;
-        for &(base, length) in &self.pending_maps {
-            if base < end && base + length as u64 > address {
-                return Err(CudaError::from(CUDA_ERROR_NOT_READY));
-            }
-        }
-        let mut result = Vec::new();
-        for (base, mapping) in &self.mappings {
-            let limit = base
-                .checked_add(mapping.size as u64)
-                .ok_or(CUDA_ERROR_INVALID_VALUE)?;
-            if *base < end && limit > address {
-                if *base < address || limit > end {
-                    return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
-                }
-                result.push(*base);
-            }
-        }
-        Ok(result)
-    }
 }
 
 pub(crate) fn random<const N: usize>() -> Result<[u8; N]> {
@@ -216,23 +176,6 @@ pub(crate) fn random<const N: usize>() -> Result<[u8; N]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pending_maps_cannot_escape_as_native_handles() {
-        let mut state = ProcessState::new(41);
-        state.pending_maps.push((4096, 4096));
-        assert_eq!(state.mapped_resource(4095), Ok(None));
-        assert_eq!(
-            state.mapped_resource(4096),
-            Err(CUDA_ERROR_NOT_READY.into())
-        );
-        assert_eq!(
-            state.mapped_resource(8191),
-            Err(CUDA_ERROR_NOT_READY.into())
-        );
-        assert_eq!(state.mapped_resource(8192), Ok(None));
-        assert_eq!(state.covered(0, 8192), Err(CUDA_ERROR_NOT_READY.into()));
-    }
 
     #[test]
     fn identities_require_an_active_registry_and_handle_capacity() {

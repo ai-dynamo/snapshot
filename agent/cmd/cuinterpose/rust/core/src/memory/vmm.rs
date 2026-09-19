@@ -43,7 +43,6 @@ pub struct Mapping {
     pub size: usize,
     pub offset: usize,
     pub access: Vec<CUmemAccessDesc>,
-    pub unknown: bool,
     pub flags: u64,
     pub checkpointed: bool,
 }
@@ -63,7 +62,6 @@ pub(crate) fn access_metadata(access: &[CUmemAccessDesc]) -> Vec<(u32, i32, u32)
     metadata
 }
 impl ProcessState {
-    /// Consume newly acquired backing, releasing it if publication fails.
     pub(crate) fn adopt_unicast(
         &mut self,
         reference: AllocationReference,
@@ -72,13 +70,7 @@ impl ProcessState {
         properties: CUmemAllocationProp,
         shared: bool,
     ) -> Result<u64> {
-        let handle = match self.mint_virtual_allocation_handle(reference.id) {
-            Ok(handle) => handle,
-            Err(error) => {
-                let _ = unsafe { crate::driver::cuMemRelease(driver) };
-                return Err(error);
-            }
-        };
+        let handle = self.mint_virtual_allocation_handle(reference.id)?;
         self.resources.insert(
             reference.id,
             Resource::Unicast(Allocation {
@@ -104,11 +96,7 @@ impl ProcessState {
             .and_then(Resource::unicast_mut)
             .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
         if allocation.driver.is_some() {
-            if let Err(error) = unsafe { crate::driver::cuMemRelease(driver) } {
-                self.unreleased_handles.push(driver);
-                crate::runtime::G_FAILED.store(true, std::sync::atomic::Ordering::Release);
-                return Err(error);
-            }
+            let _ = unsafe { crate::driver::cuMemRelease(driver) };
         } else {
             allocation.driver = Some(driver);
         }
@@ -123,9 +111,6 @@ impl ProcessState {
         offset: usize,
         flags: u64,
     ) -> Result<()> {
-        if size == 0 || !self.covered(address, size)?.is_empty() {
-            return Err(CUDA_ERROR_INVALID_VALUE.into());
-        }
         let allocation = self
             .resources
             .get_mut(&id)
@@ -151,7 +136,6 @@ impl ProcessState {
                 size,
                 offset,
                 access: Vec::new(),
-                unknown: false,
                 flags,
                 checkpointed: false,
             },
@@ -203,7 +187,6 @@ mod tests {
                 0,
                 CUmemAccess_flags::CU_MEM_ACCESS_FLAGS_PROT_READ,
             )],
-            unknown: false,
             flags: 0,
             checkpointed: false,
         };

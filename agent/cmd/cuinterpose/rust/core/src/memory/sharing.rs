@@ -242,20 +242,13 @@ pub(crate) fn import_reference(
         return Err(CUDA_ERROR_INVALID_HANDLE.into());
     }
     let driver = crate::driver::import_posix(raw.as_fd())?;
-    let mut properties = std::mem::MaybeUninit::<CUmemAllocationProp>::zeroed();
-    let recorded = (|| -> Result<()> {
-        if driver & VIRTUAL_ALLOCATION_HANDLE_MASK == VIRTUAL_ALLOCATION_HANDLE_TAG {
-            return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
-        }
-        unsafe {
-            crate::driver::cuMemGetAllocationPropertiesFromHandle(properties.as_mut_ptr(), driver)
-        }?;
-        Ok(())
-    })();
-    if let Err(error) = recorded {
-        let _ = unsafe { crate::driver::cuMemRelease(driver) };
-        return Err(error);
+    if driver & VIRTUAL_ALLOCATION_HANDLE_MASK == VIRTUAL_ALLOCATION_HANDLE_TAG {
+        return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
     }
+    let mut properties = std::mem::MaybeUninit::<CUmemAllocationProp>::zeroed();
+    unsafe {
+        crate::driver::cuMemGetAllocationPropertiesFromHandle(properties.as_mut_ptr(), driver)
+    }?;
     state.adopt_unicast(
         reference,
         driver,

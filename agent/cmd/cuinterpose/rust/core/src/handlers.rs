@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! CUDA API policy and orchestration; memory modules own bookkeeping and rollback.
+//! CUDA API policy and orchestration; memory modules own bookkeeping.
 
 use crate::driver::{self};
 use crate::driver::{CudaError, Result};
@@ -56,7 +56,6 @@ pub fn cuMemCreate(
         return Err(error);
     }
     if driver & VIRTUAL_ALLOCATION_HANDLE_MASK == VIRTUAL_ALLOCATION_HANDLE_TAG {
-        let _ = unsafe { crate::driver::cuMemRelease(driver) };
         return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
     }
     let handle = match reference {
@@ -80,10 +79,7 @@ pub fn cuMemRelease(handle: u64) -> Result<()> {
         return Err(CudaError::from(CUDA_ERROR_NOT_READY));
     }
     if let Some(id) = state.virtual_allocation_handles.remove(&handle) {
-        if let Err(error) = state.settle(id) {
-            state.virtual_allocation_handles.insert(handle, id);
-            return Err(error);
-        }
+        state.settle(id)?;
     } else {
         if handle & VIRTUAL_ALLOCATION_HANDLE_MASK == VIRTUAL_ALLOCATION_HANDLE_TAG {
             return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
@@ -104,7 +100,7 @@ pub fn cuMemRetainAllocationHandle(out: *mut u64, address: *mut c_void) -> Resul
         return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
     }
     let mut state = get()?;
-    let id = state.mapped_resource(address as u64)?;
+    let id = state.mapped_resource(address as u64);
     if let Some(id) = id {
         if state.phase != Phase::Active {
             return Err(CudaError::from(CUDA_ERROR_NOT_READY));
@@ -117,7 +113,6 @@ pub fn cuMemRetainAllocationHandle(out: *mut u64, address: *mut c_void) -> Resul
         unsafe { out.write(state.retain_backing(id, driver)?) };
     } else {
         if driver & VIRTUAL_ALLOCATION_HANDLE_MASK == VIRTUAL_ALLOCATION_HANDLE_TAG {
-            let _ = unsafe { crate::driver::cuMemRelease(driver) };
             return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
         }
         unsafe {
@@ -133,11 +128,6 @@ pub fn cuMemMap(address: u64, size: usize, offset: usize, handle: u64, flags: u6
         if handle & VIRTUAL_ALLOCATION_HANDLE_MASK == VIRTUAL_ALLOCATION_HANDLE_TAG {
             return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
         }
-        // Native handles must not overwrite tracked or pending ranges while
-        // those mappings are temporarily absent from CUDA during checkpoint.
-        if !state.covered(address, size)?.is_empty() {
-            return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
-        }
         unsafe { crate::driver::cuMemMap(address, size, offset, handle, flags) }?;
         return Ok(());
     };
@@ -150,22 +140,15 @@ pub fn cuMemMap(address: u64, size: usize, offset: usize, handle: u64, flags: u6
 
 pub fn cuMemUnmap(address: u64, size: usize) -> Result<()> {
     let mut state = get()?;
-    let mappings = state.covered(address, size)?;
-    if !mappings.is_empty() && state.phase != Phase::Active {
-        return Err(CudaError::from(CUDA_ERROR_NOT_READY));
-    }
-    for base in &mappings {
-        let id = &state.mappings[base].id;
-        if state.resources.get(id).is_some_and(Resource::busy) {
+    if let Some(mapping) = state.mappings.get(&address) {
+        if state.phase != Phase::Active
+            || state.resources.get(&mapping.id).is_some_and(Resource::busy)
+        {
             return Err(CudaError::from(CUDA_ERROR_NOT_READY));
         }
     }
     unsafe { crate::driver::cuMemUnmap(address, size) }?;
-    for base in mappings {
-        let mapping = state
-            .mappings
-            .remove(&base)
-            .ok_or(CUDA_ERROR_INVALID_VALUE)?;
+    if let Some(mapping) = state.mappings.remove(&address) {
         state.settle(mapping.id)?;
     }
     Ok(())
@@ -178,11 +161,14 @@ pub fn cuMemSetAccess(
     count: usize,
 ) -> Result<()> {
     let mut state = get()?;
-    let mappings = state.covered(address, size)?;
-    if !mappings.is_empty() && state.phase != Phase::Active {
+    let Some(mapping) = state.mappings.get(&address) else {
+        unsafe { crate::driver::cuMemSetAccess(address, size, access, count) }?;
+        return Ok(());
+    };
+    if state.phase != Phase::Active {
         return Err(CudaError::from(CUDA_ERROR_NOT_READY));
     }
-    if mappings.is_empty() || access.is_null() {
+    if access.is_null() {
         unsafe { crate::driver::cuMemSetAccess(address, size, access, count) }?;
         return Ok(());
     }
@@ -190,23 +176,10 @@ pub fn cuMemSetAccess(
         return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
     }
     let descriptors = unsafe { std::slice::from_raw_parts(access, count) };
-    let merged = mappings
-        .iter()
-        .map(|base| state.mappings[base].merged_access(descriptors))
-        .collect::<Result<Vec<_>>>()?;
-    let result = unsafe { crate::driver::cuMemSetAccess(address, size, access, count) };
-    for (base, entries) in mappings.iter().zip(merged) {
-        let mapping = state
-            .mappings
-            .get_mut(base)
-            .ok_or(CUDA_ERROR_INVALID_VALUE)?;
-        if result.is_ok() {
-            mapping.access = entries;
-        } else {
-            mapping.unknown = true;
-        }
-    }
-    result
+    let merged = mapping.merged_access(descriptors)?;
+    unsafe { crate::driver::cuMemSetAccess(address, size, access, count) }?;
+    state.mappings.get_mut(&address).unwrap().access = merged;
+    Ok(())
 }
 
 pub fn cuMemExportToShareableHandle(
@@ -266,7 +239,6 @@ pub fn cuMemImportFromShareableHandle(
         let mut driver = 0;
         unsafe { crate::driver::cuMemImportFromShareableHandle(&mut driver, fd, kind) }?;
         if driver & VIRTUAL_ALLOCATION_HANDLE_MASK == VIRTUAL_ALLOCATION_HANDLE_TAG {
-            let _ = unsafe { crate::driver::cuMemRelease(driver) };
             return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
         }
         *state.raw.entry(driver).or_insert(0) += 1;

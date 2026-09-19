@@ -12,7 +12,6 @@ use cudarc::driver::sys::CUresult::*;
 use cuinterpose_protocol::Operation;
 use cuinterpose_protocol::Reply;
 use runtime::cache;
-use std::ffi::c_void;
 use std::os::fd::AsFd;
 use std::sync::atomic::Ordering;
 
@@ -106,10 +105,6 @@ impl ProcessState {
             records.push(record);
         }
         for mapping in self.mappings.values() {
-            if mapping.unknown {
-                return Err(CudaError::from(CUDA_ERROR_NOT_SUPPORTED));
-            }
-
             let record = Record::Mapping {
                 allocation: self.resources[&mapping.id]
                     .unicast()
@@ -192,26 +187,11 @@ impl ProcessState {
                     if properties.is_some() {
                         return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
                     }
-                    let mut imported = None;
-                    let result = Context::run(
+                    allocation.driver = Some(Context::run(
                         allocation.context,
                         allocation.properties.location.id,
-                        || {
-                            imported = Some(crate::driver::import_posix(raw.as_fd())?);
-                            Ok(())
-                        },
-                    );
-                    if let Err(error) = result {
-                        if let Some(driver) = imported {
-                            let _ = Context::run(
-                                allocation.context,
-                                allocation.properties.location.id,
-                                || unsafe { crate::driver::cuMemRelease(driver) },
-                            );
-                        }
-                        return Err(error);
-                    }
-                    allocation.driver = imported;
+                        || crate::driver::import_posix(raw.as_fd()),
+                    )?);
                 }
                 self.remap(false)?;
             }
