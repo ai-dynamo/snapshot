@@ -162,29 +162,13 @@ fn dispatch(
             if super::G_FAILED.load(Ordering::Acquire) {
                 return refuse(&socket, namespace_pid, "cuinterpose state failed");
             }
-            let lease = match state::cache().and_then(|cache| cache.acquire(&allocation.id)) {
-                Ok(lease) => lease,
+            let cache = match state::cache() {
+                Ok(cache) => cache,
                 Err(_) => {
                     return refuse(&socket, namespace_pid, "creator resource is unavailable");
                 }
             };
-            let reply = match lease.multicast_properties() {
-                Some(properties) => Reply::MulticastExport {
-                    devices: properties.numDevices,
-                    size: properties.size as u64,
-                    handle_types: properties.handleTypes,
-                    flags: properties.flags,
-                },
-                None => Reply::UnicastExport,
-            };
-            return protocol::send(
-                &socket,
-                &Response {
-                    namespace_pid,
-                    result: Ok(reply),
-                },
-                Some(lease.descriptor()),
-            );
+            return cache.send(&socket, namespace_pid, &allocation.id);
         }
     };
     match sender.try_send((socket, request)) {
@@ -234,7 +218,7 @@ fn serve(
                     .inspect()
                     .map_err(|_| "cannot inspect current CUDA state")?;
                 Ok(Reply::Inspection {
-                    entries: records,
+                    records,
                     live_raw_imports,
                     unsupported_creations,
                 })

@@ -1,178 +1,100 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The listener never takes the CUDA state lock. A lease pins a duplicated
-//! descriptor through sendmsg; teardown stops admission and drains those leases
-//! before dropping the driver's cached exports.
+//! Peer exports never take the CUDA state lock. Hold the cache lock through
+//! each send so removal, checkpoint teardown, and fork wait for it to finish.
+//! The peer listener is already serial; no per-export transfer state is needed.
 
 use crate::state::Result;
 use cudarc::driver::sys::CUmulticastObjectProp;
-use cudarc::driver::sys::CUresult::{CUDA_ERROR_INVALID_HANDLE, CUDA_ERROR_UNKNOWN};
-use cuinterpose_protocol::AllocationId;
+use cudarc::driver::sys::CUresult::CUDA_ERROR_UNKNOWN;
+use cuinterpose_protocol::{self as protocol, AllocationId, NamespacePid, Reply, Response};
 use std::collections::BTreeMap;
-use std::os::fd::OwnedFd;
-use std::sync::{Condvar, Mutex, MutexGuard};
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::unix::net::UnixStream;
+use std::sync::{Mutex, MutexGuard};
 
-pub type Key = AllocationId;
-
-#[derive(Default)]
-pub(super) struct Entries {
-    descriptors: BTreeMap<Key, Entry>,
-    transfers: usize,
-    draining: bool,
-}
-
-struct Entry {
-    descriptor: OwnedFd,
-    multicast_properties: Option<CUmulticastObjectProp>,
-    transfers: usize,
-    retiring: bool,
-}
+// Multicast importers need the creation properties for checkpoint reconstruction.
+// Cache the wire reply alongside its FD so sending never consults CUDA state.
+pub(super) type Exports = BTreeMap<AllocationId, (OwnedFd, Reply)>;
 
 #[derive(Default)]
 pub struct ExportCache {
-    entries: Mutex<Entries>,
-    // Mutations may wait with the entries lock released. Serialize them without
-    // blocking peer admission for other IDs or letting a second mutation replace
-    // the entry whose leases the first mutation is waiting to drain.
-    mutations: Mutex<()>,
-    drained: Condvar,
-}
-
-pub struct Lease<'a> {
-    cache: &'a ExportCache,
-    id: Key,
-    descriptor: Option<OwnedFd>,
-    multicast_properties: Option<CUmulticastObjectProp>,
+    exports: Mutex<Exports>,
 }
 
 impl ExportCache {
-    pub fn fork_lock(&self, descriptors: &mut Vec<i32>) -> MutexGuard<'_, Entries> {
-        use std::os::fd::AsRawFd;
-        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        while entries.transfers != 0 {
-            entries = self
-                .drained
-                .wait(entries)
-                .unwrap_or_else(|e| e.into_inner());
-        }
-        descriptors.extend(
-            entries
-                .descriptors
-                .values()
-                .map(|entry| entry.descriptor.as_raw_fd()),
-        );
-        entries
-    }
-    pub fn contains(&self, id: &Key) -> Result<bool> {
-        let entries = self.entries.lock().map_err(|_| CUDA_ERROR_UNKNOWN)?;
-        Ok(entries.descriptors.contains_key(id))
+    pub fn fork_lock(&self, descriptors: &mut Vec<i32>) -> MutexGuard<'_, Exports> {
+        let exports = self.exports.lock().unwrap_or_else(|e| e.into_inner());
+        descriptors.extend(exports.values().map(|(fd, _)| fd.as_raw_fd()));
+        exports
     }
 
-    #[cfg(test)]
-    pub fn len(&self) -> Result<usize> {
-        let entries = self.entries.lock().map_err(|_| CUDA_ERROR_UNKNOWN)?;
-        Ok(entries.descriptors.len())
+    pub fn contains(&self, id: &AllocationId) -> Result<bool> {
+        Ok(self
+            .exports
+            .lock()
+            .map_err(|_| CUDA_ERROR_UNKNOWN)?
+            .contains_key(id))
     }
 
-    pub fn acquire(&self, id: &Key) -> Result<Lease<'_>> {
-        let mut entries = self.entries.lock().map_err(|_| CUDA_ERROR_UNKNOWN)?;
-        if entries.draining {
-            return Err(CUDA_ERROR_INVALID_HANDLE.into());
-        }
-        let total = entries.transfers.checked_add(1).ok_or(CUDA_ERROR_UNKNOWN)?;
-        let entry = entries
-            .descriptors
-            .get_mut(id)
-            .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
-        if entry.retiring {
-            return Err(CUDA_ERROR_INVALID_HANDLE.into());
-        }
-        let descriptor = entry
-            .descriptor
-            .try_clone()
-            .map_err(|_| CUDA_ERROR_UNKNOWN)?;
-        let multicast_properties = entry.multicast_properties;
-        entry.transfers = entry.transfers.checked_add(1).ok_or(CUDA_ERROR_UNKNOWN)?;
-        entries.transfers = total;
-        Ok(Lease {
-            cache: self,
-            id: *id,
-            descriptor: Some(descriptor),
-            multicast_properties,
-        })
-    }
-
-    /// Retire only this ID. A new insert or missing removal does not affect
-    /// admission or itself drain unrelated transfers. Mutations are serialized,
-    /// so replacing B can still wait behind an already-running retirement of A.
-    pub fn replace(
+    pub fn insert(
         &self,
-        id: Key,
-        export: Option<(OwnedFd, Option<CUmulticastObjectProp>)>,
+        id: AllocationId,
+        descriptor: OwnedFd,
+        multicast: Option<CUmulticastObjectProp>,
     ) -> Result<()> {
-        let _mutation = self.mutations.lock().map_err(|_| CUDA_ERROR_UNKNOWN)?;
-        let mut entries = self.entries.lock().map_err(|_| CUDA_ERROR_UNKNOWN)?;
-        if let Some(entry) = entries.descriptors.get_mut(&id) {
-            entry.retiring = true;
-            entries = self
-                .drained
-                .wait_while(entries, |entries| entries.descriptors[&id].transfers != 0)
-                .map_err(|_| CUDA_ERROR_UNKNOWN)?;
-        }
-        entries.descriptors.remove(&id);
-        if let Some((descriptor, multicast_properties)) = export {
-            entries.descriptors.insert(
-                id,
-                Entry {
-                    descriptor,
-                    multicast_properties,
-                    transfers: 0,
-                    retiring: false,
-                },
-            );
-        }
+        let reply = match multicast {
+            Some(properties) => Reply::MulticastExport {
+                devices: properties.numDevices,
+                size: properties.size as u64,
+                handle_types: properties.handleTypes,
+                flags: properties.flags,
+            },
+            None => Reply::UnicastExport,
+        };
+        self.exports
+            .lock()
+            .map_err(|_| CUDA_ERROR_UNKNOWN)?
+            .insert(id, (descriptor, reply));
+        Ok(())
+    }
+
+    pub fn remove(&self, id: &AllocationId) -> Result<()> {
+        self.exports
+            .lock()
+            .map_err(|_| CUDA_ERROR_UNKNOWN)?
+            .remove(id);
         Ok(())
     }
 
     pub fn clear(&self) -> Result<()> {
-        let _mutation = self.mutations.lock().map_err(|_| CUDA_ERROR_UNKNOWN)?;
-        let mut entries = self.entries.lock().map_err(|_| CUDA_ERROR_UNKNOWN)?;
-        entries.draining = true;
-        let mut entries = self
-            .drained
-            .wait_while(entries, |entries| entries.transfers != 0)
-            .map_err(|_| CUDA_ERROR_UNKNOWN)?;
-        entries.descriptors.clear();
-        entries.draining = false;
+        self.exports.lock().map_err(|_| CUDA_ERROR_UNKNOWN)?.clear();
         Ok(())
     }
-}
 
-impl Lease<'_> {
-    pub fn descriptor(&self) -> &OwnedFd {
-        // Only Drop removes the descriptor, after this borrow has ended.
-        self.descriptor.as_ref().expect("live export lease")
-    }
-
-    pub fn multicast_properties(&self) -> Option<CUmulticastObjectProp> {
-        self.multicast_properties
-    }
-}
-
-impl Drop for Lease<'_> {
-    fn drop(&mut self) {
-        // Close before waking teardown: otherwise an export can remain live
-        // after the last CUDA driver reference has been released.
-        drop(self.descriptor.take());
-        let mut entries = self.cache.entries.lock().unwrap_or_else(|e| e.into_inner());
-        entries.transfers -= 1;
-        let entry = entries
-            .descriptors
-            .get_mut(&self.id)
-            .expect("leased entry stays until drained");
-        entry.transfers -= 1;
-        self.cache.drained.notify_all();
+    pub fn send(
+        &self,
+        socket: &UnixStream,
+        namespace_pid: NamespacePid,
+        id: &AllocationId,
+    ) -> protocol::Result<()> {
+        let exports = self
+            .exports
+            .lock()
+            .map_err(|_| protocol::Error::Invalid("export cache poisoned"))?;
+        let (result, descriptor) = match exports.get(id) {
+            Some((fd, reply)) => (Ok(reply.clone()), Some(fd)),
+            None => (Err("creator resource is unavailable".into()), None),
+        };
+        protocol::send(
+            socket,
+            &Response {
+                namespace_pid,
+                result,
+            },
+            descriptor,
+        )
     }
 }
 
@@ -180,166 +102,121 @@ impl Drop for Lease<'_> {
 mod tests {
     use super::*;
     use std::fs::File;
+    use std::io::{Read, Write};
     use std::sync::{Arc, mpsc};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[test]
-    fn lease_carries_multicast_properties() {
+    fn exports_send_descriptors_and_multicast_metadata() {
         let cache = ExportCache::default();
-        let id = [8; 16];
-        let properties = CUmulticastObjectProp {
-            numDevices: 2,
-            size: 4096,
-            handleTypes: 1,
-            flags: 0,
-        };
-        cache
-            .replace(
-                id,
-                Some((File::open("/dev/null").unwrap().into(), Some(properties))),
-            )
-            .unwrap();
-        assert_eq!(
-            cache.acquire(&id).unwrap().multicast_properties(),
-            Some(properties)
-        );
-    }
-
-    #[test]
-    fn teardown_drains_transfers_and_rejects_new_requests() {
-        let cache = Arc::new(ExportCache::default());
         let id = [1; 16];
-        cache
-            .replace(id, Some((File::open("/dev/null").unwrap().into(), None)))
-            .unwrap();
-        let lease = cache.acquire(&id).unwrap();
-        let (done, completion) = mpsc::channel();
-        let copy = Arc::clone(&cache);
-        let worker = std::thread::spawn(move || {
-            copy.clear().unwrap();
-            done.send(()).unwrap();
-        });
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !cache.entries.lock().unwrap().draining {
-            assert!(std::time::Instant::now() < deadline);
-            std::thread::yield_now();
-        }
-        assert!(cache.acquire(&id).is_err());
-        assert!(completion.try_recv().is_err());
-        drop(lease);
-        completion.recv_timeout(Duration::from_secs(5)).unwrap();
-        worker.join().unwrap();
-        assert_eq!(cache.len().unwrap(), 0);
-        assert!(cache.acquire(&id).is_err());
-        cache
-            .replace(id, Some((File::open("/dev/zero").unwrap().into(), None)))
-            .unwrap();
-        assert!(cache.acquire(&id).is_ok());
-    }
-
-    #[test]
-    fn replacement_waits_until_the_old_descriptor_is_sent() {
-        use std::io::Read;
-        let cache = Arc::new(ExportCache::default());
-        let id = [2; 16];
-        let unrelated = [4; 16];
-        cache
-            .replace(
-                unrelated,
-                Some((File::open("/dev/null").unwrap().into(), None)),
-            )
-            .unwrap();
-        let unrelated_lease = cache.acquire(&unrelated).unwrap();
-        cache
-            .replace(id, Some((File::open("/dev/null").unwrap().into(), None)))
-            .unwrap();
-        let lease = cache.acquire(&id).unwrap();
-        let copy = Arc::clone(&cache);
-        let worker = std::thread::spawn(move || {
-            copy.replace(id, Some((File::open("/dev/zero").unwrap().into(), None)))
+        let (socket, peer) = UnixStream::pair().unwrap();
+        for multicast in [
+            None,
+            Some(CUmulticastObjectProp {
+                numDevices: 2,
+                size: 4096,
+                handleTypes: 1,
+                flags: 0,
+            }),
+        ] {
+            cache
+                .insert(id, File::open("/dev/zero").unwrap().into(), multicast)
                 .unwrap();
-        });
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !cache.entries.lock().unwrap().descriptors[&id].retiring {
-            assert!(std::time::Instant::now() < deadline);
-            std::thread::yield_now();
+            cache.send(&socket, 7, &id).unwrap();
+            let (reply, fd): (Response, _) = protocol::receive(&peer).unwrap();
+            assert_eq!(reply.namespace_pid, 7);
+            match (reply.result.unwrap(), multicast) {
+                (Reply::UnicastExport, None) => {}
+                (
+                    Reply::MulticastExport {
+                        devices: 2,
+                        size: 4096,
+                        handle_types: 1,
+                        flags: 0,
+                    },
+                    Some(_),
+                ) => {}
+                unexpected => panic!("wrong export reply: {unexpected:?}"),
+            }
+            let mut byte = [1];
+            File::from(fd.unwrap()).read_exact(&mut byte).unwrap();
+            assert_eq!(byte, [0]);
         }
-        assert!(cache.acquire(&id).is_err());
-        let second_unrelated = cache.acquire(&unrelated);
-        let mut original = File::from(lease.descriptor().try_clone().unwrap());
-        assert_eq!(original.read(&mut [0; 1]).unwrap(), 0);
-        drop(original);
-        drop(lease);
-        drop(unrelated_lease);
-        worker.join().unwrap();
-        assert!(second_unrelated.is_ok(), "retiring B rejected unrelated A");
-        let fresh = cache.acquire(&id).unwrap();
-        let mut fresh = File::from(fresh.descriptor().try_clone().unwrap());
-        let mut byte = [1];
-        assert_eq!(fresh.read(&mut byte).unwrap(), 1);
-        assert_eq!(byte, [0]);
+        cache.remove(&id).unwrap();
+        cache.send(&socket, 7, &id).unwrap();
+        let (reply, fd): (Response, _) = protocol::receive(&peer).unwrap();
+        assert!(reply.result.is_err());
+        assert!(fd.is_none());
     }
 
     #[test]
-    fn unrelated_mutations_do_not_drain_or_reject_active_exports() {
-        let cache = ExportCache::default();
-        let a = [1; 16];
-        let b = [2; 16];
-        cache
-            .replace(a, Some((File::open("/dev/null").unwrap().into(), None)))
-            .unwrap();
-        let first = cache.acquire(&a).unwrap();
-        std::thread::scope(|scope| {
+    fn teardown_and_replacement_wait_for_socket_send() {
+        for replace in [false, true] {
+            let cache = Arc::new(ExportCache::default());
+            let id = [2; 16];
+            cache
+                .insert(id, File::open("/dev/zero").unwrap().into(), None)
+                .unwrap();
+            let (mut socket, mut peer) = UnixStream::pair().unwrap();
+            socket.set_nonblocking(true).unwrap();
+            let mut filled = 0;
+            loop {
+                match socket.write(&[0; 4096]) {
+                    Ok(bytes) => filled += bytes,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    result => panic!("filling socket: {result:?}"),
+                }
+            }
+            socket.set_nonblocking(false).unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let sender_cache = Arc::clone(&cache);
+            let sender = std::thread::spawn(move || sender_cache.send(&socket, 7, &id).unwrap());
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while cache.exports.try_lock().is_ok() {
+                assert!(Instant::now() < deadline);
+                std::thread::yield_now();
+            }
+            let mutation_cache = Arc::clone(&cache);
             let (done, completion) = mpsc::channel();
-            let shared = &cache;
-            let worker = scope.spawn(move || {
-                shared
-                    .replace(b, Some((File::open("/dev/zero").unwrap().into(), None)))
-                    .unwrap();
-                shared.replace(b, None).unwrap();
-                shared.replace(b, None).unwrap(); // Missing removal is a no-op.
+            let mutation = std::thread::spawn(move || {
+                if replace {
+                    mutation_cache
+                        .insert(id, File::open("/dev/null").unwrap().into(), None)
+                        .unwrap();
+                } else {
+                    mutation_cache.clear().unwrap();
+                }
                 done.send(()).unwrap();
             });
-            let finished = completion.recv_timeout(Duration::from_secs(5));
-            let second = cache.acquire(&a);
-            // Drop even on regression so a blocked mutation can finish before
-            // the test reports failure rather than stranding its scoped thread.
-            drop(first);
-            worker.join().unwrap();
-            assert!(finished.is_ok(), "unrelated mutation waited for A");
-            assert!(second.is_ok(), "unrelated mutation rejected A");
-        });
+            assert!(completion.recv_timeout(Duration::from_millis(50)).is_err());
+            peer.read_exact(&mut vec![0; filled]).unwrap();
+            let (reply, fd): (Response, _) = protocol::receive(&peer).unwrap();
+            assert!(matches!(reply.result, Ok(Reply::UnicastExport)));
+            let mut byte = [1];
+            File::from(fd.unwrap()).read_exact(&mut byte).unwrap();
+            assert_eq!(byte, [0]);
+            sender.join().unwrap();
+            completion.recv_timeout(Duration::from_secs(5)).unwrap();
+            mutation.join().unwrap();
+            assert_eq!(cache.contains(&id).unwrap(), replace);
+        }
     }
 
     #[test]
-    fn failed_socket_send_releases_lease_and_allows_clear() {
-        use cuinterpose_protocol::{Request, send};
-        use std::os::unix::net::UnixStream;
-        let cache = Arc::new(ExportCache::default());
+    fn failed_send_does_not_block_teardown() {
+        let cache = ExportCache::default();
         let id = [3; 16];
         cache
-            .replace(id, Some((File::open("/dev/null").unwrap().into(), None)))
+            .insert(id, File::open("/dev/null").unwrap().into(), None)
             .unwrap();
-        let lease = cache.acquire(&id).unwrap();
         let (socket, peer) = UnixStream::pair().unwrap();
         drop(peer);
-        assert!(
-            send(
-                &socket,
-                &Request::Inspect { namespace_pid: 1 },
-                Some(lease.descriptor()),
-            )
-            .is_err()
-        );
-        let (done, completion) = mpsc::channel();
-        let copy = Arc::clone(&cache);
-        let worker = std::thread::spawn(move || {
-            copy.clear().unwrap();
-            done.send(()).unwrap();
-        });
-        drop(lease);
-        completion.recv_timeout(Duration::from_secs(5)).unwrap();
-        worker.join().unwrap();
-        assert_eq!(cache.len().unwrap(), 0);
+        assert!(cache.send(&socket, 7, &id).is_err());
+        cache.clear().unwrap();
+        assert!(!cache.contains(&id).unwrap());
     }
 }
