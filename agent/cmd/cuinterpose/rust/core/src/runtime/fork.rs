@@ -110,6 +110,9 @@ struct ForkState {
 
 impl ForkState {
     fn abandon(&mut self) {
+        if let Some(arena) = self.state.as_ref().and_then(|state| state.arena.as_ref()) {
+            unsafe { libc::syscall(libc::SYS_munmap, arena.base, arena.size) };
+        }
         // These guards protect CUDA state belonging to the parent's generation.
         // The child must neither unlock nor drop that state through Rust/CUDA.
         std::mem::forget(self.state.take());

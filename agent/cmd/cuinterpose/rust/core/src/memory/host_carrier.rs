@@ -4,8 +4,9 @@
 //! Canonical bytes in CRIU-captured memory. Unpublished backing is rolled back
 //! explicitly; CUDA cleanup never runs from Drop or in a fork child.
 
-use super::state::{Allocation, Result};
+use super::vmm::Allocation;
 use crate::driver::CudaError;
+use crate::driver::{Context, Result};
 use cudarc::driver::sys::CUresult::{
     CUDA_ERROR_INVALID_HANDLE, CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_OUT_OF_MEMORY,
     CUDA_ERROR_UNKNOWN,
@@ -18,12 +19,6 @@ use cuinterpose_protocol::AllocationId;
 use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::time::{Duration, Instant};
-
-#[derive(Default)]
-pub struct Transfer {
-    pub bytes: u64,
-    pub copy_us: u32,
-}
 
 /// Only the inputs needed to move bytes; virtual handles and mapping topology stay in ProcessState.
 #[derive(Clone)]
@@ -47,60 +42,9 @@ impl From<&Allocation> for AllocationContent {
     }
 }
 
-pub struct Context {
-    previous: *mut c_void,
-    primary: Option<i32>,
-    changed: bool,
-}
-
-impl Context {
-    pub fn run<T>(context: usize, device: i32, body: impl FnOnce() -> Result<T>) -> Result<T> {
-        let context = Self::enter(context, device)?;
-        let result = body();
-        let left = context.leave();
-        // Evaluate cleanup even when the body failed, preserving its first error.
-        let value = result?;
-        left?;
-        Ok(value)
-    }
-    pub fn enter(context: usize, device: i32) -> Result<Self> {
-        let mut previous = std::ptr::null_mut();
-        unsafe { crate::driver::cuCtxGetCurrent(&mut previous) }?;
-        let mut target = context as *mut c_void;
-        let mut primary = None;
-        if target.is_null() {
-            unsafe { crate::driver::cuDevicePrimaryCtxRetain(&mut target, device) }?;
-            primary = Some(device);
-        }
-        let changed = target != previous;
-        if changed && let Err(error) = unsafe { crate::driver::cuCtxSetCurrent(target) } {
-            if let Some(device) = primary {
-                let _ = unsafe { crate::driver::cuDevicePrimaryCtxRelease_v2(device) };
-            }
-            return Err(error);
-        }
-        Ok(Self {
-            previous,
-            primary,
-            changed,
-        })
-    }
-
-    pub fn leave(self) -> Result<()> {
-        let mut result = Ok(());
-        if self.changed {
-            result = unsafe { crate::driver::cuCtxSetCurrent(self.previous) };
-        }
-        if let Some(device) = self.primary {
-            result = result.and(unsafe { crate::driver::cuDevicePrimaryCtxRelease_v2(device) });
-        }
-        result
-    }
-}
-
 pub struct Arena {
-    pub(super) base: usize,
-    pub(super) size: usize,
+    pub(crate) base: usize,
+    pub(crate) size: usize,
     context: usize,
     device: i32,
     offsets: BTreeMap<AllocationId, usize>,
@@ -486,7 +430,7 @@ mod tests {
             let status = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
-                    "host_carrier::tests::failed_setup_releases_temporary_resources",
+                    "memory::host_carrier::tests::failed_setup_releases_temporary_resources",
                 ])
                 .env("CUINTERPOSE_CARRIER_UNIT_CHILD", "1")
                 .status()
