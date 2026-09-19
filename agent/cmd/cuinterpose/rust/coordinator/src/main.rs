@@ -10,14 +10,14 @@ mod topology;
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
 use cuinterpose_protocol::{
-    self as protocol, Manifest, NamespacePid, Operation, ParticipantState, Reply, Request, Response,
+    self as protocol, Manifest, NamespacePid, Operation, Record, Reply, Request, Response,
 };
 use report::{Event, Transfer, write as report};
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::net::{SocketAddr, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use topology::Allocation;
+use topology::AllocationSummary;
 
 #[derive(Parser)]
 struct Arguments {
@@ -40,7 +40,7 @@ struct Peer {
 }
 
 struct Inspection {
-    participant: ParticipantState,
+    records: Vec<Record>,
     raw_imports: u64,
     unsupported_creations: u64,
 }
@@ -87,11 +87,11 @@ impl Peer {
         );
         match response.result.map_err(anyhow::Error::msg)? {
             Reply::Inspection {
-                entries,
+                records,
                 live_raw_imports,
                 unsupported_creations,
             } => Ok(Inspection {
-                participant: ParticipantState { entries },
+                records,
                 raw_imports: live_raw_imports,
                 unsupported_creations,
             }),
@@ -131,7 +131,7 @@ impl Peer {
 fn command_all(
     peers: &mut [Peer],
     operation: Operation,
-    allocations: &[Allocation],
+    allocations: &[AllocationSummary],
 ) -> Result<u32> {
     std::thread::scope(|scope| {
         let mut jobs = Vec::with_capacity(peers.len());
@@ -174,7 +174,7 @@ fn inspect(peers: &[Peer]) -> Result<(Manifest, u64, u64)> {
         let inspection = peer.inspect()?;
         ensure!(
             participants
-                .insert(peer.namespace_pid, inspection.participant)
+                .insert(peer.namespace_pid, inspection.records)
                 .is_none(),
             "duplicate namespace PID"
         );
@@ -184,7 +184,11 @@ fn inspect(peers: &[Peer]) -> Result<(Manifest, u64, u64)> {
     Ok((participants, raw, unsupported))
 }
 
-fn transfer(peers: &mut [Peer], operation: Operation, allocations: &[Allocation]) -> Result<()> {
+fn transfer(
+    peers: &mut [Peer],
+    operation: Operation,
+    allocations: &[AllocationSummary],
+) -> Result<()> {
     let start = Instant::now();
     let copy_us = command_all(peers, operation, allocations).context("allocation transfer")?;
     let (count, bytes) =
@@ -252,7 +256,7 @@ fn run() -> Result<()> {
     let (mut participants, raw, unsupported) = inspect(&peers)?;
     report(
         Event::Inspect {
-            entries: participants.values().map(|p| p.entries.len()).sum(),
+            records: participants.values().map(Vec::len).sum(),
             live_raw_imports: raw,
             unsupported_exportable_creations: unsupported,
         },
@@ -308,10 +312,10 @@ fn run() -> Result<()> {
             let expected = expected
                 .get_mut(id)
                 .context("restored participant is not in the manifest")?;
-            actual.entries.sort();
-            expected.entries.sort();
+            actual.sort();
+            expected.sort();
             ensure!(
-                actual.entries == expected.entries,
+                actual == expected,
                 "restored topology does not match the checkpoint"
             );
         }
