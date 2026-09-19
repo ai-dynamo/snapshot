@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 const CU_MEM_HANDLE_TYPE_NONE: u32 = 0;
 const CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR: u32 = 1;
 
-pub struct Allocation {
+pub struct AllocationSummary {
     pub reference: AllocationReference,
     pub size: u64,
     pub preserve_content: bool,
@@ -26,8 +26,8 @@ struct Multicast {
     devices: BTreeMap<i32, bool>,
 }
 
-pub fn validate(participants: &Manifest) -> Result<Vec<Allocation>> {
-    let mut allocations: BTreeMap<AllocationId, Allocation> = BTreeMap::new();
+pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
+    let mut allocations: BTreeMap<AllocationId, AllocationSummary> = BTreeMap::new();
     let mut multicasts: BTreeMap<AllocationId, Multicast> = BTreeMap::new();
     if participants.is_empty() {
         bail!("topology validate failed: no participants");
@@ -35,7 +35,7 @@ pub fn validate(participants: &Manifest) -> Result<Vec<Allocation>> {
     // Gather definitions before references. Participant/entry ordering must
     // not determine whether an import or multicast dependency is valid.
     for (namespace_pid, participant) in participants {
-        for record in &participant.entries {
+        for record in participant {
             match record {
                 Record::Allocation {
                     allocation,
@@ -57,7 +57,7 @@ pub fn validate(participants: &Manifest) -> Result<Vec<Allocation>> {
                         else {
                             bail!("duplicate allocation creator");
                         };
-                        entry.insert(Allocation {
+                        entry.insert(AllocationSummary {
                             reference: *allocation,
                             size: *size,
                             anchor: *virtual_allocation_handle_count != 0,
@@ -108,7 +108,7 @@ pub fn validate(participants: &Manifest) -> Result<Vec<Allocation>> {
             }
         }
     }
-    for record in participants.values().flat_map(|p| &p.entries) {
+    for record in participants.values().flatten() {
         if let Record::MulticastDevice { allocation, device } = record
             && multicasts
                 .get_mut(&allocation.id)
@@ -121,7 +121,7 @@ pub fn validate(participants: &Manifest) -> Result<Vec<Allocation>> {
         }
     }
     for (namespace_pid, participant) in participants {
-        for record in &participant.entries {
+        for record in participant {
             match record {
                 Record::Allocation { allocation, .. } => {
                     ensure!(

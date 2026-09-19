@@ -18,7 +18,7 @@ pub fn read(path: &Path) -> Result<Manifest> {
 
 pub fn write_atomic(path: &Path, participants: &mut Manifest) -> Result<()> {
     for participant in participants.values_mut() {
-        participant.entries.sort();
+        participant.sort();
     }
     let bytes = protocol::encode(&participants)?;
     let directory = path.parent().context("missing checkpoint directory")?;
