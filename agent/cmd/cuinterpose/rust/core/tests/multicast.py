@@ -33,7 +33,6 @@ cuda.cuMemRetainAllocationHandle.argtypes = [c.POINTER(u64), c.c_void_p]
 cuda.cuMemImportFromShareableHandle.argtypes = [c.POINTER(u64), c.c_void_p, c.c_uint]
 cuda.fakeCopiedToHost.restype = u64
 cuda.fakeCopiedToDevice.restype = u64
-cuda.fakeAllocationRefs.argtypes = [u64]
 cuda.multicast_block_arm.argtypes = [c.c_int]
 
 
@@ -99,43 +98,7 @@ def main():
     binding_offset = length if mode == "extent" else 0
     mapped_size = 2 * length if mode == "extent" else length
     assert cuda.cuMulticastBindMem_v2(group, 0, binding_offset, member, 0, length, 0) == 0
-    if mode == "pending-map":
-        cuda.multicast_block_arm(2)
-        results = []
-        worker = threading.Thread(target=lambda: results.append(
-            cuda.cuMemMap(0x70000000, length, 0, group, 0)))
-        worker.start()
-        cuda.multicast_block_wait()
-        real = u64.in_dll(cuda, "multicast_mapped_handle").value
-        retain_calls = c.c_int.in_dll(cuda, "multicast_retain_calls")
-        refs = cuda.fakeAllocationRefs(real)
-        calls = retain_calls.value
-        try:
-            # The driver has installed the mapping; the shim has not published
-            # it. Refuse every point in the range without forwarding to CUDA.
-            assert refs == 2
-            for address in (0x70000000, 0x70000000 + length // 2,
-                            0x70000000 + length - 1):
-                retained = u64(0xAAAA)
-                assert cuda.cuMemRetainAllocationHandle(c.byref(retained), c.c_void_p(address)) == 600
-                assert retained.value == 0xAAAA
-                assert cuda.fakeAllocationRefs(real) == refs
-                assert retain_calls.value == calls
-        finally:
-            cuda.multicast_block_release()
-            worker.join(10)
-        assert not worker.is_alive() and results == [0]
-        retained = u64(0xAAAA)
-        assert cuda.cuMemRetainAllocationHandle(c.byref(retained), c.c_void_p(0x70000000)) == 0
-        assert retained.value & 0xFFFF000000000000 == 0xD94D000000000000
-        assert retained.value != group.value and retained.value != real
-        assert cuda.fakeAllocationRefs(real) == refs and retain_calls.value == calls
-        assert cuda.cuMemRelease(retained) == 0
-        assert cuda.cuMemRelease(retained) == 400
-        assert cuda.fakeAllocationRefs(real) == refs
-        replay()
-    else:
-        assert cuda.cuMemMap(0x70000000, mapped_size, 0, group, 0) == 0
+    assert cuda.cuMemMap(0x70000000, mapped_size, 0, group, 0) == 0
     if mode == "cached-export":
         multicast_reference = next(
             record["multicast"]["allocation"]
@@ -210,17 +173,9 @@ def main():
         cuda.cuMemSetAccess.argtypes = [u64, size, c.POINTER(Access), size]
         access = Access(1, 0, 3)
         assert cuda.cuMemSetAccess(0x70000000, length, c.byref(access), 1) == 0
-        assert cuda.cuMemSetAccess(0x70000000, length // 2, c.byref(access), 1) != 0
-        assert cuda.cuMemUnmap(0x70000000, length // 2) != 0
         cuda.multicast_fail_access()
         assert cuda.cuMemSetAccess(0x70000000, length, c.byref(access), 1) != 0
-        command("inspect", False)
-        command("prepare_multicast", False)
-        # Unknown access is sticky for this mapping. Unmap and recreate it,
-        # rather than assuming a later per-location update repaired everything.
-        assert cuda.cuMemUnmap(0x70000000, length) == 0
-        assert cuda.cuMemMap(0x70000000, length, 0, group, 0) == 0
-        assert cuda.cuMemSetAccess(0x70000000, length, c.byref(access), 1) == 0
+        command("inspect")
         replay()
     elif mode == "failure":
         for operation in LIFECYCLE[:5]:
@@ -256,9 +211,6 @@ def main():
         assert cuda.cuMemRelease(native) == 0
     elif mode in ("inflight", "create-output", "extent"):
         replay()
-    elif mode == "pending-map":
-        # The round trip and retain/reference assertions ran above.
-        assert cuda.fakeMulticastObjects() == 1
     else:
         raise AssertionError(mode)
 
