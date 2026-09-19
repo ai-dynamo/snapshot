@@ -17,9 +17,11 @@ import (
 	"github.com/go-logr/logr/testr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
 func TestInspectCompatibilityChecksMappedGPUMountAndOrdinaryMounts(t *testing.T) {
@@ -84,6 +86,29 @@ func TestGPUMappingLeavesCountPolicyToInspectGate(t *testing.T) {
 	}
 	if len(incompatible.Mismatches) != 1 || incompatible.Mismatches[0].Check != compat.CheckGPUCount {
 		t.Fatalf("expected GPU count check, got %+v", incompatible.Mismatches)
+	}
+}
+
+func TestInspectCompatibilityManagedCUDAToolsMount(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		delivered bool
+		mount     string
+		wantError bool
+	}{
+		{"delivered tools installed later", true, podcontract.CUDAToolsMountPath, false},
+		{"unmanaged tools still required", false, podcontract.CUDAToolsMountPath, true},
+		{"workload mount still required", true, "/models", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manifest := &types.CheckpointManifest{}
+			manifest.CUDATools.Delivered = tc.delivered
+			manifest.CRIUDump.ExtMnt = map[string]string{tc.mount: tc.mount}
+			err := inspectCompatibility(testr.New(t), manifest, compat.GPUInfo{}, nil, t.TempDir(), "", false)
+			if (err != nil) != tc.wantError {
+				t.Fatalf("inspectCompatibility() = %v, wantError %v", err, tc.wantError)
+			}
+		})
 	}
 }
 
@@ -345,7 +370,7 @@ func TestValidateRestoreManifest(t *testing.T) {
 	}
 }
 
-func TestRestoreInNamespaceRejectsMultiGPUCheckpointWithoutLaunchJobState(t *testing.T) {
+func TestRestoreInNamespaceRejectsLegacyJobfileCheckpoint(t *testing.T) {
 	checkpointDir := t.TempDir()
 	manifest := types.NewCheckpointManifest(
 		"content-uid-123",
@@ -361,10 +386,13 @@ func TestRestoreInNamespaceRejectsMultiGPUCheckpointWithoutLaunchJobState(t *tes
 	if err := types.WriteManifest(checkpointDir, manifest); err != nil {
 		t.Fatalf("WriteManifest: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(checkpointDir, "cuda-checkpoint-job"), []byte("legacy"), 0600); err != nil {
+		t.Fatal(err)
+	}
 
-	_, err := RestoreInNamespace(context.Background(), RestoreOptions{CheckpointPath: checkpointDir}, testr.New(t))
-	if err == nil || !strings.Contains(err.Error(), "missing CUDA launch-job state") {
-		t.Fatalf("expected missing multi-GPU launch-job error, got %v", err)
+	err := requireCuinterposeState(manifest, checkpointDir)
+	if err == nil || !strings.Contains(err.Error(), "legacy CUDA jobfile") {
+		t.Fatalf("expected unsupported jobfile error, got %v", err)
 	}
 }
 
@@ -395,5 +423,124 @@ func TestExistingMountPaths(t *testing.T) {
 
 	if got := existingMountPaths(targetRoot, nil, nil); len(got) != 0 {
 		t.Errorf("existingMountPaths of nothing = %#v, want empty", got)
+	}
+}
+
+// recordingMounter records the order of role mounts for mountRestoreInputs.
+type recordingMounter struct {
+	calls   []string
+	failOn  string
+	failErr error
+}
+
+func (m *recordingMounter) record(role string) (nsmount.MountPoint, error) {
+	m.calls = append(m.calls, role)
+	if role == m.failOn {
+		return nil, m.failErr
+	}
+	return testMountPoint{}, nil
+}
+
+func (m *recordingMounter) MountBundle(context.Context, int) (nsmount.MountPoint, error) {
+	return m.record("bundle")
+}
+
+func (m *recordingMounter) MountCUDATools(context.Context, nsmount.MountPoint) (nsmount.MountPoint, error) {
+	return m.record("cudatools")
+}
+
+func (m *recordingMounter) MountArtifact(context.Context, nsmount.MountPoint, string) (nsmount.MountPoint, error) {
+	return m.record("artifact")
+}
+
+func (m *recordingMounter) MountPageBroker(context.Context, nsmount.MountPoint, string) (nsmount.MountPoint, error) {
+	return m.record("pagebroker")
+}
+
+func TestMountRestoreInputsOrdersCUDAToolsBeforeStaging(t *testing.T) {
+	cases := map[string]struct {
+		tools     bool
+		staged    string
+		wantCalls []string
+		wantPath  string
+	}{
+		"plain artifact":      {wantCalls: []string{"artifact"}, wantPath: nsmount.CheckpointDst},
+		"tools then artifact": {tools: true, wantCalls: []string{"cudatools", "artifact"}, wantPath: nsmount.CheckpointDst},
+		"brokered":            {staged: "/pagebroker/staging/restore/tx", wantCalls: []string{"pagebroker"}, wantPath: nsmount.PageBrokerDst},
+		"tools then brokered": {tools: true, staged: "/pagebroker/staging/restore/tx", wantCalls: []string{"cudatools", "pagebroker"}, wantPath: nsmount.PageBrokerDst},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			m := &recordingMounter{}
+			mounted, path, err := mountRestoreInputs(context.Background(), m, tc.tools, testMountPoint{}, "/checkpoints/x", tc.staged)
+			if err != nil {
+				t.Fatalf("mountRestoreInputs: %v", err)
+			}
+			if strings.Join(m.calls, ",") != strings.Join(tc.wantCalls, ",") {
+				t.Fatalf("mount order = %v, want %v", m.calls, tc.wantCalls)
+			}
+			if path != tc.wantPath {
+				t.Fatalf("checkpoint path = %q, want %q", path, tc.wantPath)
+			}
+			if len(mounted) != len(tc.wantCalls) {
+				t.Fatalf("mounted %d, want %d", len(mounted), len(tc.wantCalls))
+			}
+			// The brokered path unmounts the last active mount early; it must
+			// be the staging mount, never the tools mount.
+			if tc.staged != "" && mounted[len(mounted)-1].action != "unmount PageBroker staging from placeholder" {
+				t.Fatalf("last mount = %q, want the staging mount", mounted[len(mounted)-1].action)
+			}
+		})
+	}
+}
+
+func TestMountRestoreInputsReturnsEarlierMountsOnFailure(t *testing.T) {
+	m := &recordingMounter{failOn: "artifact", failErr: errors.New("boom")}
+	mounted, _, err := mountRestoreInputs(context.Background(), m, true, testMountPoint{}, "/checkpoints/x", "")
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("expected the artifact mount error, got %v", err)
+	}
+	if len(mounted) != 1 || mounted[0].action != "unmount CUDA tools from placeholder" {
+		t.Fatalf("earlier mounts must be returned for cleanup, got %+v", mounted)
+	}
+}
+
+func TestRequireCuinterposeState(t *testing.T) {
+	dir := t.TempDir()
+	plain := &types.CheckpointManifest{}
+	if err := requireCuinterposeState(plain, dir); err != nil {
+		t.Fatalf("a checkpoint without cuinterpose needs no state file: %v", err)
+	}
+	prepared := &types.CheckpointManifest{
+		CUDA:        types.NewCUDAManifest([]int{1}, compat.GPUInfo{}),
+		CUDATools:   types.CUDAToolsManifest{Delivered: true},
+		Cuinterpose: types.CuinterposeManifest{Requested: true, Prepared: true, Format: types.CuinterposeFormat},
+	}
+	if err := requireCuinterposeState(prepared, dir); err == nil {
+		t.Fatal("a prepared checkpoint without its state file must be refused")
+	}
+	if err := os.WriteFile(dir+"/"+cuda.CuinterposeStateFile, []byte("cuinterpose-state-v2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := requireCuinterposeState(prepared, dir); err != nil {
+		t.Fatalf("state present: %v", err)
+	}
+	prepared.Cuinterpose.Format = 0
+	if err := requireCuinterposeState(prepared, dir); err == nil {
+		t.Fatal("old draft artifacts must be refused before CRIU")
+	}
+	prepared.Cuinterpose.Format = types.CuinterposeFormat
+	prepared.CUDATools.Delivered = false
+	if err := requireCuinterposeState(prepared, dir); err == nil {
+		t.Fatal("prepared without delivered tools must not take the native path")
+	}
+	prepared.CUDATools.Delivered = true
+	prepared.Cuinterpose.Requested = false
+	if err := requireCuinterposeState(prepared, dir); err == nil {
+		t.Fatal("prepared without requested interposition is inconsistent")
+	}
+	noCUDA := &types.CheckpointManifest{Cuinterpose: types.CuinterposeManifest{Prepared: true}}
+	if err := requireCuinterposeState(noCUDA, dir); err == nil {
+		t.Fatal("prepared without CUDA processes is inconsistent")
 	}
 }
