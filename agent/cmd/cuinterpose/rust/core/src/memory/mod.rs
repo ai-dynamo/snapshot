@@ -6,6 +6,7 @@
 pub(crate) mod checkpoint;
 mod host_carrier;
 pub(crate) mod ipc;
+pub(crate) mod multicast;
 pub(crate) mod sharing;
 pub(crate) mod vmm;
 
@@ -27,12 +28,14 @@ pub const VIRTUAL_ALLOCATION_HANDLE_MASK: u64 = 0xffff_0000_0000_0000;
 #[derive(Clone)]
 pub enum Resource {
     Unicast(Allocation),
+    Multicast(multicast::MulticastObject),
 }
 
 impl Resource {
     pub fn unicast(&self) -> Option<&Allocation> {
         match self {
             Self::Unicast(allocation) => Some(allocation),
+            _ => None,
         }
     }
 
@@ -43,15 +46,31 @@ impl Resource {
         }
     }
 
+    pub fn multicast(&self) -> Option<&multicast::MulticastObject> {
+        match self {
+            Self::Multicast(object) => Some(object),
+            _ => None,
+        }
+    }
+
+    pub fn multicast_mut(&mut self) -> Option<&mut multicast::MulticastObject> {
+        match self {
+            Self::Multicast(object) => Some(object),
+            _ => None,
+        }
+    }
+
     pub(crate) fn reference(&self) -> AllocationReference {
         match self {
             Self::Unicast(allocation) => allocation.reference,
+            Self::Multicast(object) => object.reference,
         }
     }
 
     pub(crate) fn driver(&self) -> Result<u64> {
         match self {
             Self::Unicast(allocation) => allocation.driver,
+            Self::Multicast(object) => object.driver,
         }
         .ok_or(CUDA_ERROR_INVALID_HANDLE.into())
     }
@@ -59,6 +78,7 @@ impl Resource {
     pub(crate) fn busy(&self) -> bool {
         match self {
             Self::Unicast(allocation) => allocation.pins != 0,
+            Self::Multicast(object) => object.inflight != 0,
         }
     }
 }
@@ -155,6 +175,18 @@ impl ProcessState {
                     return Ok(());
                 }
                 cache()?.remove(&id)?;
+            }
+            Resource::Multicast(object) => {
+                if handle_live || mapped {
+                    return Ok(());
+                }
+                if object.inflight != 0 || object.checkpointed {
+                    return Err(CudaError::from(CUDA_ERROR_NOT_READY));
+                }
+                cache()?.remove(&id)?;
+                if let Some(driver) = object.driver {
+                    unsafe { crate::driver::cuMemRelease(driver) }?;
+                }
             }
         }
         self.resources.remove(&id);
