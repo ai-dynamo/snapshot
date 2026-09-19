@@ -104,26 +104,69 @@ functions! {
     cuMemGetAllocationGranularity(size: *mut usize, properties: *const CUmemAllocationProp, flags: CUmemAllocationGranularity_flags);
     cuMemExportToShareableHandle(output: *mut c_void, handle: CUmemGenericAllocationHandle, handle_type: CUmemAllocationHandleType, flags: u64);
     cuMemGetAllocationPropertiesFromHandle(properties: *mut CUmemAllocationProp, handle: CUmemGenericAllocationHandle);
-    cuMemHostRegister_v2(address: *mut c_void, size: usize, flags: u32);
-    cuMemHostGetFlags(flags: *mut u32, address: *mut c_void);
-    cuMemHostUnregister(address: *mut c_void);
     cuMemImportFromShareableHandle(handle: *mut CUmemGenericAllocationHandle, shareable: *mut c_void, handle_type: CUmemAllocationHandleType);
     cuMemMap(address: CUdeviceptr, size: usize, offset: usize, handle: CUmemGenericAllocationHandle, flags: u64);
     cuMemRelease(handle: CUmemGenericAllocationHandle);
     cuMemRetainAllocationHandle(handle: *mut CUmemGenericAllocationHandle, address: *mut c_void);
     cuMemSetAccess(address: CUdeviceptr, size: usize, access: *const CUmemAccessDesc, count: usize);
     cuMemUnmap(address: CUdeviceptr, size: usize);
-    cuMemcpyDtoHAsync_v2(host: *mut c_void, device: CUdeviceptr, size: usize, stream: *mut c_void);
-    cuMemcpyHtoDAsync_v2(device: CUdeviceptr, host: *const c_void, size: usize, stream: *mut c_void);
-    cuMulticastAddDevice(group: CUmemGenericAllocationHandle, device: CUdevice);
-    cuMulticastBindAddr(group: CUmemGenericAllocationHandle, offset: usize, address: CUdeviceptr, size: usize, flags: u64);
-    cuMulticastBindAddr_v2(group: CUmemGenericAllocationHandle, device: CUdevice, offset: usize, address: CUdeviceptr, size: usize, flags: u64);
-    cuMulticastBindMem(group: CUmemGenericAllocationHandle, offset: usize, member: CUmemGenericAllocationHandle, member_offset: usize, size: usize, flags: u64);
-    cuMulticastBindMem_v2(group: CUmemGenericAllocationHandle, device: CUdevice, offset: usize, member: CUmemGenericAllocationHandle, member_offset: usize, size: usize, flags: u64);
-    cuMulticastCreate(group: *mut CUmemGenericAllocationHandle, properties: *const CUmulticastObjectProp);
-    cuMulticastGetGranularity(granularity: *mut usize, properties: *const CUmulticastObjectProp, flags: CUmulticastGranularity_flags);
-    cuMulticastUnbind(group: CUmemGenericAllocationHandle, device: CUdevice, offset: usize, size: usize);
-    cuStreamCreate(stream: *mut *mut c_void, flags: CUstream_flags);
-    cuStreamDestroy_v2(stream: *mut c_void);
-    cuStreamSynchronize(stream: *mut c_void);
+}
+
+pub(super) fn context() -> usize {
+    let mut context = std::ptr::null_mut::<c_void>();
+    if unsafe { crate::driver::cuCtxGetCurrent(&mut context) }.is_err() {
+        return 0;
+    }
+    context as usize
+}
+
+pub struct Context {
+    previous: *mut c_void,
+    primary: Option<i32>,
+    changed: bool,
+}
+
+impl Context {
+    pub fn run<T>(context: usize, device: i32, body: impl FnOnce() -> Result<T>) -> Result<T> {
+        let context = Self::enter(context, device)?;
+        let result = body();
+        let left = context.leave();
+        // Evaluate cleanup even when the body failed, preserving its first error.
+        let value = result?;
+        left?;
+        Ok(value)
+    }
+    pub fn enter(context: usize, device: i32) -> Result<Self> {
+        let mut previous = std::ptr::null_mut();
+        unsafe { crate::driver::cuCtxGetCurrent(&mut previous) }?;
+        let mut target = context as *mut c_void;
+        let mut primary = None;
+        if target.is_null() {
+            unsafe { crate::driver::cuDevicePrimaryCtxRetain(&mut target, device) }?;
+            primary = Some(device);
+        }
+        let changed = target != previous;
+        if changed && let Err(error) = unsafe { crate::driver::cuCtxSetCurrent(target) } {
+            if let Some(device) = primary {
+                let _ = unsafe { crate::driver::cuDevicePrimaryCtxRelease_v2(device) };
+            }
+            return Err(error);
+        }
+        Ok(Self {
+            previous,
+            primary,
+            changed,
+        })
+    }
+
+    pub fn leave(self) -> Result<()> {
+        let mut result = Ok(());
+        if self.changed {
+            result = unsafe { crate::driver::cuCtxSetCurrent(self.previous) };
+        }
+        if let Some(device) = self.primary {
+            result = result.and(unsafe { crate::driver::cuDevicePrimaryCtxRelease_v2(device) });
+        }
+        result
+    }
 }

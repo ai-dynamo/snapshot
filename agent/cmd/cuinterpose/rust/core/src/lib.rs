@@ -8,15 +8,10 @@
 
 #![allow(non_snake_case, reason = "CUDA dispatch mirrors the NVIDIA ABI names")]
 mod boundary;
-mod control;
 mod driver;
-mod export_cache;
-mod host_carrier;
-mod multicast;
-mod process;
-mod state;
-mod virtual_allocation_handle;
-mod virtual_shareable_handle;
+mod handlers;
+mod memory;
+mod runtime;
 
 use cudarc::driver::sys::CUresult::{
     CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_NOT_INITIALIZED, CUDA_ERROR_NOT_READY, CUDA_ERROR_UNKNOWN,
@@ -30,10 +25,9 @@ use cudarc::driver::sys::{
 use cuinterpose_abi::*;
 use std::ffi::{CStr, c_void};
 use std::sync::OnceLock;
-use std::sync::atomic::AtomicBool;
 
 static G_FRONTEND_ABI: OnceLock<FrontendAbi> = OnceLock::new();
-static G_FAILED: AtomicBool = AtomicBool::new(false);
+use runtime::G_FAILED;
 
 fn driver(name: &CStr) -> *mut c_void {
     match G_FRONTEND_ABI.get() {
@@ -50,17 +44,17 @@ macro_rules! exports {
                     return CUDA_ERROR_NOT_READY;
                 }
                 boundary::call(&G_FAILED, CUDA_ERROR_UNKNOWN, || {
-                    if let Err(code) = state::initialize() { return code.0; }
-                    let result = state::$name($($arg),*);
+                    if let Err(code) = runtime::initialize() { return code.0; }
+                    let result = handlers::$name($($arg),*);
                     result.map_or_else(|code| code.0, |()| CUDA_SUCCESS)
                 })
             }
         )*
         static G_BACKEND_ABI: BackendAbi = BackendAbi {
             version: ABI_VERSION, size: size_of::<BackendAbi>() as u32,
-            fork_prepare: process::prepare,
-            fork_parent: process::parent,
-            fork_child: process::child,
+            fork_prepare: runtime::fork::prepare,
+            fork_parent: runtime::fork::parent,
+            fork_child: runtime::fork::child,
             ensure_cuinterpose_initialized,
             $($name,)*
         };
@@ -78,19 +72,11 @@ exports! {
     cuMemExportToShareableHandle(out: *mut c_void, handle: CUmemGenericAllocationHandle, kind: CUmemAllocationHandleType, flags: u64);
     cuMemImportFromShareableHandle(out: *mut CUmemGenericAllocationHandle, fd: *mut c_void, kind: CUmemAllocationHandleType);
     cuMemGetAllocationPropertiesFromHandle(out: *mut CUmemAllocationProp, handle: CUmemGenericAllocationHandle);
-    cuMulticastCreate(out: *mut CUmemGenericAllocationHandle, prop: *const CUmulticastObjectProp);
-    cuMulticastAddDevice(handle: CUmemGenericAllocationHandle, device: CUdevice);
-    cuMulticastBindMem(handle: CUmemGenericAllocationHandle, offset: usize, member: CUmemGenericAllocationHandle, member_offset: usize, size: usize, flags: u64);
-    cuMulticastBindMem_v2(handle: CUmemGenericAllocationHandle, device: CUdevice, offset: usize, member: CUmemGenericAllocationHandle, member_offset: usize, size: usize, flags: u64);
-    cuMulticastBindAddr(handle: CUmemGenericAllocationHandle, offset: usize, address: CUdeviceptr, size: usize, flags: u64);
-    cuMulticastBindAddr_v2(handle: CUmemGenericAllocationHandle, device: CUdevice, offset: usize, address: CUdeviceptr, size: usize, flags: u64);
-    cuMulticastGetGranularity(out: *mut usize, prop: *const CUmulticastObjectProp, flags: CUmulticastGranularity_flags);
-    cuMulticastUnbind(handle: CUmemGenericAllocationHandle, device: CUdevice, offset: usize, size: usize);
 }
 
 unsafe extern "C" fn ensure_cuinterpose_initialized() -> CUresult {
     boundary::call(&G_FAILED, CUDA_ERROR_NOT_INITIALIZED, || {
-        state::initialize().map_or_else(|error| error.0, |()| CUDA_SUCCESS)
+        runtime::initialize().map_or_else(|error| error.0, |()| CUDA_SUCCESS)
     })
 }
 

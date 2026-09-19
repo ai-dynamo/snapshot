@@ -3,10 +3,14 @@
 
 //! Shareable-handle codec, peer exports, and imported resource ownership.
 
-use crate::driver::Result;
-use crate::runtime;
-use cudarc::driver::sys::CUmulticastObjectProp;
+use super::checkpoint::Phase;
+use super::{
+    ProcessState, Resource, VIRTUAL_ALLOCATION_HANDLE_MASK, VIRTUAL_ALLOCATION_HANDLE_TAG,
+};
+use crate::driver::{CudaError, Result, context};
+use crate::runtime::{self, cache};
 use cudarc::driver::sys::CUresult::*;
+use cudarc::driver::sys::{CUmemAllocationProp, CUmulticastObjectProp};
 use cuinterpose_protocol::{
     self as protocol, AllocationId, AllocationReference, Error, NamespacePid, Reply, Request,
     Response, VIRTUAL_SHAREABLE_HANDLE_BYTES, VIRTUAL_SHAREABLE_HANDLE_MAGIC,
@@ -15,7 +19,7 @@ use rustix::fs::{MemfdFlags, memfd_create};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Write;
-use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::{fs::FileExt, net::UnixStream};
 use std::sync::{Mutex, MutexGuard};
 
@@ -182,6 +186,84 @@ impl ExportCache {
     }
 }
 
+impl Resource {
+    /// Publish the creator's export without making peer service acquire ProcessState.
+    pub fn share(&mut self, namespace_pid: NamespacePid) -> Result<AllocationReference> {
+        let reference = self.reference();
+        if reference.creator_pid == namespace_pid && !cache()?.contains(&reference.id)? {
+            let fd = crate::driver::export_posix(self.driver()?)?;
+            cache()?.insert(reference.id, fd, None)?;
+        }
+        match self {
+            Self::Unicast(allocation) => {
+                allocation.shared = true;
+                if allocation.context == 0 {
+                    allocation.context = context();
+                }
+            }
+        }
+        Ok(reference)
+    }
+}
+
+pub(crate) fn import_reference(
+    mut state: MutexGuard<'static, ProcessState>,
+    reference: AllocationReference,
+) -> Result<u64> {
+    if state.phase != Phase::Active {
+        return Err(CudaError::from(CUDA_ERROR_NOT_READY));
+    }
+    state.check_handle_capacity()?;
+    let id = reference.id;
+    if let Some(resource) = state.resources.get_mut(&id) {
+        if resource.reference() != reference {
+            return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
+        }
+        match resource {
+            Resource::Unicast(allocation) => {
+                if allocation.driver.is_none() {
+                    let (raw, properties) =
+                        request_export(reference).map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
+                    if properties.is_some() {
+                        return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
+                    }
+                    allocation.driver = Some(crate::driver::import_posix(raw.as_fd())?);
+                }
+                allocation.shared = true;
+            }
+        }
+        return state.mint_virtual_allocation_handle(id);
+    }
+    // EXPORT service uses only CACHE, never STATE, so a same-process request
+    // can complete while this call holds its allocation metadata lock.
+    let (raw, multicast_properties) =
+        request_export(reference).map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
+    if multicast_properties.is_some() {
+        return Err(CUDA_ERROR_INVALID_HANDLE.into());
+    }
+    let driver = crate::driver::import_posix(raw.as_fd())?;
+    let mut properties = std::mem::MaybeUninit::<CUmemAllocationProp>::zeroed();
+    let recorded = (|| -> Result<()> {
+        if driver & VIRTUAL_ALLOCATION_HANDLE_MASK == VIRTUAL_ALLOCATION_HANDLE_TAG {
+            return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
+        }
+        unsafe {
+            crate::driver::cuMemGetAllocationPropertiesFromHandle(properties.as_mut_ptr(), driver)
+        }?;
+        Ok(())
+    })();
+    if let Err(error) = recorded {
+        let _ = unsafe { crate::driver::cuMemRelease(driver) };
+        return Err(error);
+    }
+    state.adopt_unicast(
+        reference,
+        driver,
+        0,
+        unsafe { properties.assume_init() },
+        true,
+    )
+}
 #[cfg(test)]
 mod codec_tests {
     use super::*;
