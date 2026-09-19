@@ -78,6 +78,14 @@ impl ProcessState {
             .filter_map(Resource::unicast)
             .count()
             .checked_add(self.mappings.len())
+            .and_then(|n| {
+                self.resources
+                    .values()
+                    .filter_map(Resource::multicast)
+                    .try_fold(n, |n, object| {
+                        n.checked_add(1 + object.devices.len() + object.bindings.len())
+                    })
+            })
             .ok_or(CUDA_ERROR_OUT_OF_MEMORY)?;
         let mut records = Vec::new();
         records
@@ -106,6 +114,14 @@ impl ProcessState {
             records.push(record);
         }
         for mapping in self.mappings.values() {
+            if self
+                .resources
+                .get(&mapping.id)
+                .and_then(Resource::multicast)
+                .is_some()
+            {
+                continue;
+            }
             let record = Record::Mapping {
                 allocation: self.resources[&mapping.id]
                     .unicast()
@@ -118,6 +134,7 @@ impl ProcessState {
             };
             records.push(record);
         }
+        super::multicast::describe(self, &mut records)?;
         Ok(records)
     }
 
@@ -142,7 +159,9 @@ impl ProcessState {
         let mut bytes = 0u64;
         let mut copy_us = 0u32;
         match operation {
-            Operation::PrepareMulticast => {}
+            Operation::PrepareMulticast => {
+                super::multicast::prepare(self)?;
+            }
             Operation::SaveAllocations => {
                 let ids: Vec<_> = self
                     .resources
@@ -363,7 +382,18 @@ pub(crate) fn execute(operation: Operation) -> std::result::Result<Reply, String
     state
         .validate_lifecycle(operation)
         .map_err(|_| "CUDA lifecycle operation refused without mutation")?;
-    let result = state.lifecycle(operation);
+    let result = if matches!(
+        operation,
+        Operation::RestoreMulticastCreators
+            | Operation::RestoreMulticastImporters
+            | Operation::RestoreMulticastDevices
+            | Operation::RestoreMulticastBindings
+    ) {
+        super::multicast::restore_phase(state, operation)
+            .map(|bytes| Transfer { bytes, copy_us: 0 })
+    } else {
+        state.lifecycle(operation)
+    };
     match result {
         Ok(transfer) => Ok(Reply::Completed {
             operation,
