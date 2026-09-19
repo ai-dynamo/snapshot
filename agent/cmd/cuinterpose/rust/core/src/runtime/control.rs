@@ -4,10 +4,12 @@
 //! Two prestarted workers separate peer FD service from serialized CUDA control.
 //! Queue pressure refuses requests before mutation; no operation is retried.
 
-use super::process::Socket;
-use super::state::{self, Result};
+use super::fork::Socket;
+use crate::driver::Result;
+use crate::memory::checkpoint;
+use crate::runtime as state;
 use cudarc::driver::sys::CUresult::CUDA_ERROR_NOT_INITIALIZED;
-use cuinterpose_protocol::{self as protocol, NamespacePid, Operation, Reply, Request, Response};
+use cuinterpose_protocol::{self as protocol, NamespacePid, Operation, Request, Response};
 use rustix::event::{PollFd, PollFlags, poll};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -204,56 +206,10 @@ fn serve(
     request: ControlRequest,
     namespace_pid: NamespacePid,
 ) -> protocol::Result<()> {
-    let loading = matches!(request, ControlRequest::Execute(Operation::LoadAllocations));
-    let result = (|| -> std::result::Result<Reply, String> {
-        if super::G_FAILED.load(Ordering::Acquire) {
-            return Err("cuinterpose state failed".into());
-        }
-        let mut state = state::get().map_err(|_| "cuinterpose state is unavailable")?;
-        match request {
-            ControlRequest::Inspect => {
-                let live_raw_imports = state.live_raw_imports();
-                let unsupported_creations = state.unsupported_exportable_creations();
-                let records = state
-                    .inspect()
-                    .map_err(|_| "cannot inspect current CUDA state")?;
-                Ok(Reply::Inspection {
-                    records,
-                    live_raw_imports,
-                    unsupported_creations,
-                })
-            }
-            ControlRequest::Execute(operation) => {
-                state
-                    .validate_lifecycle(operation)
-                    .map_err(|_| "CUDA lifecycle operation refused without mutation")?;
-                let result = if matches!(
-                    operation,
-                    Operation::RestoreMulticastCreators
-                        | Operation::RestoreMulticastImporters
-                        | Operation::RestoreMulticastDevices
-                        | Operation::RestoreMulticastBindings
-                ) {
-                    super::multicast::restore_phase(state, operation)
-                        .map(|bytes| super::host_carrier::Transfer { bytes, copy_us: 0 })
-                } else {
-                    state.lifecycle(operation)
-                };
-                match result {
-                    Ok(transfer) => Ok(Reply::Completed {
-                        operation,
-                        bytes: transfer.bytes,
-                        copy_us: transfer.copy_us,
-                    }),
-                    Err(code) => {
-                        super::G_FAILED.store(true, Ordering::Release);
-                        Err(format!("CUDA lifecycle operation failed: {code}"))
-                    }
-                }
-            }
-        }
-    })();
-    let loaded = loading && result.is_ok();
+    let result = match request {
+        ControlRequest::Inspect => checkpoint::inspect(),
+        ControlRequest::Execute(operation) => checkpoint::execute(operation),
+    };
     protocol::send(
         &socket,
         &Response {
@@ -262,13 +218,6 @@ fn serve(
         },
         None,
     )?;
-    if loaded
-        && let Ok(mut state) = state::get()
-        && let Some(arena) = state.arena.take()
-        && arena.release().is_err()
-    {
-        super::G_FAILED.store(true, Ordering::Release);
-    }
     Ok(())
 }
 

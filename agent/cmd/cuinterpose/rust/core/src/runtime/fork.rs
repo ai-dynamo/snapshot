@@ -4,6 +4,8 @@
 //! Atfork locks metadata, not every CUDA/resolver call. The caller must quiesce
 //! CUDA and lifecycle operations before fork, as with the C implementation.
 
+use super::{G_CHILD, G_FAILED, G_INITIALIZING, G_STATE};
+use crate::memory::{ProcessState, sharing};
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::{
     Mutex, MutexGuard,
@@ -18,7 +20,7 @@ static G_SNAPSHOT: AtomicPtr<Snapshot> = AtomicPtr::new(std::ptr::null_mut());
 struct Snapshot {
     // Release the registry before state/cache/initialization in the parent.
     sockets: Option<MutexGuard<'static, Vec<RawFd>>>,
-    state: super::state::ForkState,
+    state: ForkState,
     descriptors: Vec<RawFd>,
 }
 
@@ -56,9 +58,9 @@ pub unsafe extern "C" fn prepare() {
     let result = std::panic::catch_unwind(|| {
         let mut descriptors = Vec::new();
         // Runtime order: initialization -> STATE -> cache -> socket registry.
-        // Peer EXPORT never needs STATE; draining its leases cannot deadlock a
+        // Peer EXPORT never needs STATE; waiting for its send cannot deadlock a
         // worker waiting for a creator while holding its local STATE.
-        let state = super::state::fork_lock(&mut descriptors);
+        let state = fork_lock(&mut descriptors);
         let sockets = G_SOCKETS.lock().unwrap_or_else(|e| e.into_inner());
         descriptors.extend(sockets.iter().copied());
         G_SNAPSHOT.store(
@@ -96,5 +98,45 @@ pub unsafe extern "C" fn child() {
         }
         snapshot.state.abandon();
         // The snapshot allocation is intentionally abandoned in the child.
+    }
+}
+
+struct ForkState {
+    // Field order releases locks in reverse acquisition order in the parent.
+    cache: Option<MutexGuard<'static, sharing::Exports>>,
+    state: Option<MutexGuard<'static, ProcessState>>,
+    initializing: Option<MutexGuard<'static, ()>>,
+}
+
+impl ForkState {
+    fn abandon(&mut self) {
+        // These guards protect CUDA state belonging to the parent's generation.
+        // The child must neither unlock nor drop that state through Rust/CUDA.
+        std::mem::forget(self.state.take());
+        std::mem::forget(self.cache.take());
+        drop(self.initializing.take());
+        G_STATE.store(std::ptr::null_mut(), Ordering::Release);
+        G_CHILD.store(true, Ordering::Release);
+        G_FAILED.store(false, Ordering::Release);
+    }
+}
+
+fn fork_lock(descriptors: &mut Vec<i32>) -> ForkState {
+    let initializing = G_INITIALIZING.lock().unwrap_or_else(|e| e.into_inner());
+    let pointer = G_STATE.load(Ordering::Acquire);
+    if pointer.is_null() {
+        return ForkState {
+            initializing: Some(initializing),
+            state: None,
+            cache: None,
+        };
+    }
+    let generation = unsafe { &*pointer };
+    let state = generation.state.lock().unwrap_or_else(|e| e.into_inner());
+    let cache = generation.cache.fork_lock(descriptors);
+    ForkState {
+        initializing: Some(initializing),
+        state: Some(state),
+        cache: Some(cache),
     }
 }
