@@ -120,8 +120,7 @@ impl Arena {
         }
     }
 
-    /// Keep every fresh handle private until all copies and staging cleanup
-    /// succeed. A handle value of zero is valid; None alone means no ownership.
+    /// Recreate device backing from the captured host arena.
     pub fn load(&self, allocations: &mut [AllocationContent]) -> Result<u32> {
         let mut fresh = allocations.to_vec();
         let mut size = 0usize;
@@ -136,7 +135,6 @@ impl Arena {
         if size != self.size {
             return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
         }
-        let mut registered = false;
         let loaded = (|| -> Result<u32> {
             Context::run(self.context, self.device, || {
                 let mut flags = 0u32;
@@ -152,7 +150,6 @@ impl Arena {
                             CU_MEMHOSTREGISTER_PORTABLE,
                         )
                     }?;
-                    registered = true;
                 }
                 Ok(())
             })?;
@@ -177,30 +174,11 @@ impl Arena {
             }
             self.copy(&fresh, true)
         })();
-        match loaded {
-            Ok(elapsed) => {
-                for (allocation, fresh) in allocations.iter_mut().zip(fresh) {
-                    allocation.driver = fresh.driver;
-                }
-                Ok(elapsed)
-            }
-            Err(error) => {
-                for allocation in fresh {
-                    if let Some(driver) = allocation.driver
-                        && let Ok(context) =
-                            Context::enter(allocation.context, allocation.properties.location.id)
-                    {
-                        let _ = unsafe { crate::driver::cuMemRelease(driver) };
-                        let _ = context.leave();
-                    }
-                }
-                if registered && let Ok(context) = Context::enter(self.context, self.device) {
-                    let _ = unsafe { crate::driver::cuMemHostUnregister(self.base as *mut c_void) };
-                    let _ = context.leave();
-                }
-                Err(error)
-            }
+        let elapsed = loaded?;
+        for (allocation, fresh) in allocations.iter_mut().zip(fresh) {
+            allocation.driver = fresh.driver;
         }
+        Ok(elapsed)
     }
 
     fn copy(&self, allocations: &[AllocationContent], load: bool) -> Result<u32> {

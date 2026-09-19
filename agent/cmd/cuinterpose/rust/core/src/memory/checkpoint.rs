@@ -140,67 +140,41 @@ impl ProcessState {
                     .filter(|a| a.owns_content(self.namespace_pid))
                     .map(|a| a.reference.id)
                     .collect();
-                let mut recovered = Vec::new();
-                let saved = (|| -> Result<(Option<Arena>, u32)> {
-                    let mut allocations = Vec::new();
-                    for id in ids {
-                        let allocation = self
-                            .resources
-                            .get_mut(&id)
-                            .and_then(Resource::unicast_mut)
+                let mut allocations = Vec::new();
+                for id in ids {
+                    let allocation = self
+                        .resources
+                        .get_mut(&id)
+                        .and_then(Resource::unicast_mut)
+                        .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+                    if allocation.driver.is_none() {
+                        let mapping = self
+                            .mappings
+                            .values()
+                            .find(|m| m.id == id)
                             .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
-                        if allocation.driver.is_none() {
-                            let mapping = self
-                                .mappings
-                                .values()
-                                .find(|m| m.id == id)
-                                .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
-                            Context::run(
-                                allocation.context,
-                                allocation.properties.location.id,
-                                || {
-                                    let mut driver = 0;
-                                    unsafe {
-                                        crate::driver::cuMemRetainAllocationHandle(
-                                            &mut driver,
-                                            mapping.address as usize as *mut c_void,
-                                        )
-                                    }?;
-                                    allocation.driver = Some(driver);
-                                    recovered.push(id);
-                                    Ok(())
-                                },
-                            )?;
-                        }
-                        bytes = bytes
-                            .checked_add(allocation.size as u64)
-                            .ok_or(CUDA_ERROR_OUT_OF_MEMORY)?;
-                        allocations.push(AllocationContent::from(&*allocation));
+                        Context::run(
+                            allocation.context,
+                            allocation.properties.location.id,
+                            || {
+                                let mut driver = 0;
+                                unsafe {
+                                    crate::driver::cuMemRetainAllocationHandle(
+                                        &mut driver,
+                                        mapping.address as usize as *mut c_void,
+                                    )
+                                }?;
+                                allocation.driver = Some(driver);
+                                Ok(())
+                            },
+                        )?;
                     }
-                    Arena::save(&allocations)
-                })();
-                let (arena, elapsed) = match saved {
-                    Ok(saved) => saved,
-                    Err(error) => {
-                        for id in recovered {
-                            if let Some(allocation) =
-                                self.resources.get_mut(&id).and_then(Resource::unicast_mut)
-                                && let Ok(context) = Context::enter(
-                                    allocation.context,
-                                    allocation.properties.location.id,
-                                )
-                            {
-                                if let Some(driver) = allocation.driver
-                                    && unsafe { crate::driver::cuMemRelease(driver) }.is_ok()
-                                {
-                                    allocation.driver = None;
-                                }
-                                let _ = context.leave();
-                            }
-                        }
-                        return Err(error);
-                    }
-                };
+                    bytes = bytes
+                        .checked_add(allocation.size as u64)
+                        .ok_or(CUDA_ERROR_OUT_OF_MEMORY)?;
+                    allocations.push(AllocationContent::from(&*allocation));
+                }
+                let (arena, elapsed) = Arena::save(&allocations)?;
                 self.arena = arena;
                 copy_us = elapsed;
                 for allocation in self
