@@ -468,7 +468,8 @@ mod tests {
             Err(crate::driver::CudaError(CUDA_ERROR_OUT_OF_MEMORY))
         );
         assert_eq!(G_REGISTER_CALLS.load(Ordering::Relaxed), 1);
-        assert_eq!(G_REGISTERED.load(Ordering::Relaxed), 0);
+        // Create failed after host registration. Fail-stop does not unwind it.
+        assert_eq!(G_REGISTERED.load(Ordering::Relaxed), 1);
         assert_eq!(allocations[0].driver, None);
     }
 }
