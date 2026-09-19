@@ -71,7 +71,7 @@ The backend separates CUDA API policy from resource ownership:
 | `memory/host_carrier.rs` | Saving and loading shared allocation bytes. |
 
 Handlers do not call other CUDA handlers. They share memory operations that own
-their bookkeeping and rollback. Operations that release the registry lock for a
+their bookkeeping. Operations that release the registry lock for a
 collective CUDA call also own pinning and post-call validation. Peer FD service
 uses only the export cache lock, never the registry lock.
 
@@ -625,4 +625,4 @@ The implementation targets Linux/amd64 and glibc 2.34 or newer for the preload l
 
 Supported memory IPC requires fully interposed peers and the documented single owning-context behavior. Event IPC, memory-pool IPC, managed/async/pitched allocation families, historical 32-bit allocation entry points, and general cross-context peer-access emulation are not supported by this adapter. Removing jobfile support does not make unannotated native-IPC workloads checkpointable.
 
-Exactly POSIX-FD exportable VMM is tracked. A successful unsupported exportable creation, including FABRIC or a mixed handle type, is remembered and makes capture inspection fail before destructive preparation. Live raw VMM imports, incomplete multicast groups, unknown access permissions, missing participants, and failed copies also stop capture or restore rather than produce an apparently usable checkpoint.
+Exactly POSIX-FD exportable VMM is tracked. A successful unsupported exportable creation, including FABRIC or a mixed handle type, is remembered and makes capture inspection fail before destructive preparation. Live raw VMM imports, incomplete multicast groups, missing participants, and failed copies also stop capture or restore rather than produce an apparently usable checkpoint.
