@@ -4,15 +4,18 @@
 //! Synchronous malloc and memory IPC over tracked VMM sharing.
 //! Virtual IPC memory handles carry allocation identity; native memory IPC is never called.
 
+use crate::state::Resource;
 use crate::{driver, state};
+use cudarc::driver::sys::CUresult::CUDA_ERROR_INVALID_HANDLE;
 use cudarc::driver::sys::*;
 use cuinterpose_protocol::{AllocationReference, VERSION as PROTOCOL_VERSION};
 use driver::{CudaError, Result};
 
 #[derive(Clone)]
-pub struct Mapping {
+pub struct MallocRegion {
     virtual_allocation_handle: CUmemGenericAllocationHandle,
     requested: usize,
+    // The VA reservation survives independently of its current mapping.
     extent: usize,
     context: usize,
     opens: usize,
@@ -59,63 +62,83 @@ impl VirtualIpcMemHandle {
     }
 }
 
-/// Attach a new VA to an existing virtual allocation handle while holding the state lock.
-fn map(
-    state: &mut state::State,
-    virtual_allocation_handle: CUmemGenericAllocationHandle,
-    requested: usize,
-    extent: usize,
-    opens: usize,
-) -> Result<CUdeviceptr> {
-    let id = state.virtual_allocation_handles[&virtual_allocation_handle];
-    let allocation = &state.allocations[&id];
-    let backing = allocation
-        .driver
-        .ok_or(CUresult::CUDA_ERROR_INVALID_HANDLE)?;
-    let mut device = 0;
-    unsafe { driver::cuCtxGetDevice(&mut device) }?;
-    let mut address = 0;
-    unsafe { driver::cuMemAddressReserve(&mut address, extent, 0, 0, 0) }?;
-    if let Err(error) = unsafe { driver::cuMemMap(address, extent, 0, backing, 0) } {
-        unsafe { driver::cuMemAddressFree(address, extent) }?;
-        return Err(error);
-    }
-    let access = CUmemAccessDesc {
-        location: CUmemLocation {
-            type_: CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE,
-            id: device,
-        },
-        flags: CUmemAccess_flags::CU_MEM_ACCESS_FLAGS_PROT_READWRITE,
-    };
-    if let Err(error) = unsafe { driver::cuMemSetAccess(address, extent, &access, 1) } {
-        unsafe { driver::cuMemUnmap(address, extent) }?;
-        unsafe { driver::cuMemAddressFree(address, extent) }?;
-        return Err(error);
-    }
-    state.mappings.insert(
-        address,
-        state::Mapping {
-            id,
+impl state::ProcessState {
+    /// Attach a new VA to an existing virtual allocation handle while holding the state lock.
+    fn map_malloc(
+        &mut self,
+        virtual_allocation_handle: CUmemGenericAllocationHandle,
+        requested: usize,
+        extent: usize,
+        opens: usize,
+    ) -> Result<CUdeviceptr> {
+        let id = self.virtual_allocation_handles[&virtual_allocation_handle];
+        let allocation = &self.resources[&id]
+            .unicast()
+            .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+        let backing = allocation
+            .driver
+            .ok_or(CUresult::CUDA_ERROR_INVALID_HANDLE)?;
+        let mut device = 0;
+        unsafe { driver::cuCtxGetDevice(&mut device) }?;
+        let mut address = 0;
+        unsafe { driver::cuMemAddressReserve(&mut address, extent, 0, 0, 0) }?;
+        if let Err(error) = unsafe { driver::cuMemMap(address, extent, 0, backing, 0) } {
+            unsafe { driver::cuMemAddressFree(address, extent) }?;
+            return Err(error);
+        }
+        let access = CUmemAccessDesc {
+            location: CUmemLocation {
+                type_: CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE,
+                id: device,
+            },
+            flags: CUmemAccess_flags::CU_MEM_ACCESS_FLAGS_PROT_READWRITE,
+        };
+        if let Err(error) = unsafe { driver::cuMemSetAccess(address, extent, &access, 1) } {
+            unsafe { driver::cuMemUnmap(address, extent) }?;
+            unsafe { driver::cuMemAddressFree(address, extent) }?;
+            return Err(error);
+        }
+        self.mappings.insert(
             address,
-            size: extent,
-            offset: 0,
-            access: vec![access],
-            unknown: false,
-            flags: 0,
-            checkpointed: false,
-        },
-    );
-    state.mallocs.insert(
-        address,
-        Mapping {
-            virtual_allocation_handle,
-            requested,
-            extent,
-            context: state::context(),
-            opens,
-        },
-    );
-    Ok(address)
+            state::Mapping {
+                id,
+                address,
+                size: extent,
+                offset: 0,
+                access: vec![access],
+                unknown: false,
+                flags: 0,
+                checkpointed: false,
+            },
+        );
+        self.malloc_regions.insert(
+            address,
+            MallocRegion {
+                virtual_allocation_handle,
+                requested,
+                extent,
+                context: state::context(),
+                opens,
+            },
+        );
+        Ok(address)
+    }
+
+    fn unmap_malloc(&mut self, address: CUdeviceptr) -> Result<()> {
+        let mapping = self
+            .malloc_regions
+            .get(&address)
+            .ok_or(CUresult::CUDA_ERROR_INVALID_VALUE)?
+            .clone();
+        let id = self.virtual_allocation_handles[&mapping.virtual_allocation_handle];
+        unsafe { driver::cuMemUnmap(address, mapping.extent) }?;
+        self.mappings.remove(&address);
+        self.virtual_allocation_handles
+            .remove(&mapping.virtual_allocation_handle);
+        self.malloc_regions.remove(&address);
+        self.settle(id)?;
+        unsafe { driver::cuMemAddressFree(address, mapping.extent) }
+    }
 }
 
 pub fn cuMemAlloc_v2(out: *mut CUdeviceptr, size: usize) -> Result<()> {
@@ -151,7 +174,7 @@ pub fn cuMemAlloc_v2(out: *mut CUdeviceptr, size: usize) -> Result<()> {
     state::cuMemCreate(&mut virtual_allocation_handle, extent, &properties, 0)?;
     let result = {
         let mut state = state::active()?;
-        map(&mut state, virtual_allocation_handle, size, extent, 0)
+        state.map_malloc(virtual_allocation_handle, size, extent, 0)
     };
     match result {
         Ok(address) => {
@@ -171,7 +194,7 @@ pub fn cuIpcGetMemHandle(out: *mut CUipcMemHandle, address: CUdeviceptr) -> Resu
     }
     let mut state = state::active()?;
     let mapping = state
-        .mallocs
+        .malloc_regions
         .get(&address)
         .ok_or(CUresult::CUDA_ERROR_INVALID_VALUE)?
         .clone();
@@ -179,27 +202,20 @@ pub fn cuIpcGetMemHandle(out: *mut CUipcMemHandle, address: CUdeviceptr) -> Resu
         return Err(CudaError(CUresult::CUDA_ERROR_INVALID_VALUE));
     }
     let id = state.virtual_allocation_handles[&mapping.virtual_allocation_handle];
-    let allocation = state
-        .allocations
+    let namespace_pid = state.namespace_pid;
+    let reference = state
+        .resources
         .get_mut(&id)
-        .ok_or(CUresult::CUDA_ERROR_INVALID_HANDLE)?;
-    if !state::cache()?.contains(&id)? {
-        let fd = driver::export_posix(
-            allocation
-                .driver
-                .ok_or(CUresult::CUDA_ERROR_INVALID_HANDLE)?,
-        )?;
-        state::cache()?.replace(id, Some((fd, None)))?;
-    }
+        .ok_or(CUresult::CUDA_ERROR_INVALID_HANDLE)?
+        .share(namespace_pid)?;
     let virtual_ipc_mem_handle = VirtualIpcMemHandle {
         magic: VIRTUAL_IPC_MEM_HANDLE_MAGIC,
-        creator_pid: allocation.reference.creator_pid.to_le_bytes(),
+        creator_pid: reference.creator_pid.to_le_bytes(),
         allocation: id,
         reserved: [0; 20],
         requested: (mapping.requested as u64).to_le_bytes(),
         extent: (mapping.extent as u64).to_le_bytes(),
     };
-    allocation.shared = true;
     unsafe {
         out.write(std::mem::transmute::<VirtualIpcMemHandle, CUipcMemHandle>(
             virtual_ipc_mem_handle,
@@ -215,15 +231,15 @@ pub fn cuIpcOpenMemHandle(out: *mut CUdeviceptr, handle: CUipcMemHandle, flags: 
     let virtual_ipc_mem_handle = VirtualIpcMemHandle::decode(handle)?;
     let mut state = state::active()?;
     let id = virtual_ipc_mem_handle.allocation;
+    let creator_pid = u32::from_le_bytes(virtual_ipc_mem_handle.creator_pid);
     let context = state::context();
-    if let Some(allocation) = state.allocations.get(&id)
-        && allocation.reference.creator_pid
-            != u32::from_le_bytes(virtual_ipc_mem_handle.creator_pid)
+    if let Some(allocation) = state.resources.get(&id).and_then(Resource::unicast)
+        && allocation.reference.creator_pid != creator_pid
     {
         return Err(CudaError(CUresult::CUDA_ERROR_INVALID_HANDLE));
     }
     let state_ref = &mut *state;
-    for (&address, mapping) in &mut state_ref.mallocs {
+    for (&address, mapping) in &mut state_ref.malloc_regions {
         if mapping.opens != 0
             && state_ref
                 .virtual_allocation_handles
@@ -246,7 +262,6 @@ pub fn cuIpcOpenMemHandle(out: *mut CUdeviceptr, handle: CUipcMemHandle, flags: 
             return Ok(());
         }
     }
-    let creator_pid = u32::from_le_bytes(virtual_ipc_mem_handle.creator_pid);
     if creator_pid == state.namespace_pid {
         return Err(CudaError(CUresult::CUDA_ERROR_INVALID_HANDLE));
     }
@@ -254,8 +269,7 @@ pub fn cuIpcOpenMemHandle(out: *mut CUdeviceptr, handle: CUipcMemHandle, flags: 
     let mut virtual_allocation_handle = 0;
     state::import_reference(state, &mut virtual_allocation_handle, reference)?;
     let mut state = state::active()?;
-    let result = map(
-        &mut state,
+    let result = state.map_malloc(
         virtual_allocation_handle,
         u64::from_le_bytes(virtual_ipc_mem_handle.requested) as usize,
         u64::from_le_bytes(virtual_ipc_mem_handle.extent) as usize,
@@ -289,7 +303,7 @@ fn release(address: CUdeviceptr, imported: bool) -> Result<()> {
     // shim or peer listener to complete the kernels being synchronized.
     {
         let mut state = state::active()?;
-        let Some(mapping) = state.mallocs.get_mut(&address) else {
+        let Some(mapping) = state.malloc_regions.get_mut(&address) else {
             if imported {
                 return Err(CudaError(CUresult::CUDA_ERROR_INVALID_VALUE));
             }
@@ -311,7 +325,7 @@ fn release(address: CUdeviceptr, imported: bool) -> Result<()> {
     let mut state = state::active()?;
     if imported {
         let mapping = state
-            .mallocs
+            .malloc_regions
             .get_mut(&address)
             .ok_or(CUresult::CUDA_ERROR_INVALID_VALUE)?;
         // An open may acquire a reference while synchronization runs unlocked.
@@ -320,20 +334,7 @@ fn release(address: CUdeviceptr, imported: bool) -> Result<()> {
             return Ok(());
         }
     }
-    let mapping = state
-        .mallocs
-        .get(&address)
-        .ok_or(CUresult::CUDA_ERROR_INVALID_VALUE)?
-        .clone();
-    let id = state.virtual_allocation_handles[&mapping.virtual_allocation_handle];
-    unsafe { driver::cuMemUnmap(address, mapping.extent) }?;
-    state.mappings.remove(&address);
-    state
-        .virtual_allocation_handles
-        .remove(&mapping.virtual_allocation_handle);
-    state.mallocs.remove(&address);
-    state.settle(id)?;
-    unsafe { driver::cuMemAddressFree(address, mapping.extent) }
+    state.unmap_malloc(address)
 }
 
 pub fn cuMemGetAddressRange_v2(
@@ -342,7 +343,7 @@ pub fn cuMemGetAddressRange_v2(
     address: CUdeviceptr,
 ) -> Result<()> {
     let state = state::active()?;
-    if let Some((&start, mapping)) = state.mallocs.range(..=address).next_back()
+    if let Some((&start, mapping)) = state.malloc_regions.range(..=address).next_back()
         && address - start < mapping.requested as u64
     {
         unsafe {
