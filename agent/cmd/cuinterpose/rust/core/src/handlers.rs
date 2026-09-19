@@ -313,7 +313,6 @@ pub fn cuMulticastCreate(out: *mut u64, properties: *const CUmulticastObjectProp
     let id = memory::random()?;
     let (mut state, driver) = multicast::create_backing(state, &properties, out)?;
     if driver & VIRTUAL_ALLOCATION_HANDLE_MASK == VIRTUAL_ALLOCATION_HANDLE_TAG {
-        unsafe { crate::driver::cuMemRelease(driver) }?;
         return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
     }
     if properties.handleTypes
