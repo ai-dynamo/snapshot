@@ -14,8 +14,7 @@ mod memory;
 mod runtime;
 
 use cudarc::driver::sys::CUresult::{
-    CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_NOT_INITIALIZED, CUDA_ERROR_NOT_READY, CUDA_ERROR_UNKNOWN,
-    CUDA_SUCCESS,
+    CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_NOT_INITIALIZED, CUDA_ERROR_UNKNOWN, CUDA_SUCCESS,
 };
 use cudarc::driver::sys::{
     CUdevice, CUdeviceptr, CUipcMemHandle, CUmemAccessDesc, CUmemAllocationGranularity_flags,
@@ -40,11 +39,10 @@ macro_rules! exports {
     ($($name:ident($($arg:ident: $ty:ty),*);)*) => {
         $(
             unsafe extern "C" fn $name($($arg: $ty),*) -> CUresult {
-                if RUNTIME_FAILED.load(std::sync::atomic::Ordering::Acquire) {
-                    return CUDA_ERROR_NOT_READY;
+                if let Err(error) = runtime::ready() {
+                    return error.0;
                 }
                 boundary::call(&RUNTIME_FAILED, CUDA_ERROR_UNKNOWN, || {
-                    if let Err(code) = runtime::initialize() { return code.0; }
                     let result = handlers::$name($($arg),*);
                     result.map_or_else(|code| code.0, |()| CUDA_SUCCESS)
                 })
@@ -52,9 +50,6 @@ macro_rules! exports {
         )*
         static G_BACKEND_ABI: BackendAbi = BackendAbi {
             version: ABI_VERSION, size: size_of::<BackendAbi>() as u32,
-            fork_prepare: runtime::fork::prepare,
-            fork_parent: runtime::fork::parent,
-            fork_child: runtime::fork::child,
             ensure_cuinterpose_initialized,
             $($name,)*
         };
@@ -83,7 +78,7 @@ unsafe extern "C" fn ensure_cuinterpose_initialized() -> CUresult {
 /// Registers the frontend and returns the immutable process-lifetime table.
 ///
 /// This idempotent handshake does not resolve CUDA symbols or start runtime
-/// services. Those are initialized by the table's CUDA and readiness callbacks.
+/// services. Those are initialized by the table's initialization callback.
 ///
 /// # Safety
 /// `frontend` must expose an aligned readable version/size prefix. A matching
@@ -91,7 +86,7 @@ unsafe extern "C" fn ensure_cuinterpose_initialized() -> CUresult {
 /// remains callable for the process lifetime and never unwinds into Rust.
 /// `output` must be writable pointer storage. The returned table is borrowed:
 /// callers must not free it or unload this library while using its callbacks.
-/// Repeated registrations must use the same resolver and origin PID.
+/// Repeated registrations must use the same resolver.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuinterpose_core_init(
     frontend: *const FrontendAbi,
@@ -112,9 +107,7 @@ pub unsafe extern "C" fn cuinterpose_core_init(
         // Only copy the table while initializing OnceLock. Loader operations,
         // callbacks and worker startup here could deadlock a constructor caller.
         let existing = G_FRONTEND_ABI.get_or_init(|| frontend);
-        if existing.resolve as usize != frontend.resolve as usize
-            || existing.origin_pid != frontend.origin_pid
-        {
+        if existing.resolve as usize != frontend.resolve as usize {
             return CUDA_ERROR_INVALID_VALUE;
         }
         unsafe {
@@ -179,7 +172,6 @@ mod tests {
             version: ABI_VERSION,
             size: size_of::<FrontendAbi>() as u32,
             resolve,
-            origin_pid: unsafe { libc::getpid() },
         };
         let barrier = std::sync::Barrier::new(32);
         std::thread::scope(|scope| {
@@ -197,22 +189,15 @@ mod tests {
                 });
             }
         });
-        for incompatible in [
-            FrontendAbi {
-                resolve: other_resolve,
-                ..frontend
-            },
-            FrontendAbi {
-                origin_pid: frontend.origin_pid + 1,
-                ..frontend
-            },
-        ] {
-            let mut output = std::ptr::null();
-            assert_eq!(
-                unsafe { cuinterpose_core_init(&incompatible, &mut output) },
-                CUDA_ERROR_INVALID_VALUE
-            );
-            assert!(output.is_null());
-        }
+        let incompatible = FrontendAbi {
+            resolve: other_resolve,
+            ..frontend
+        };
+        let mut output = std::ptr::null();
+        assert_eq!(
+            unsafe { cuinterpose_core_init(&incompatible, &mut output) },
+            CUDA_ERROR_INVALID_VALUE
+        );
+        assert!(output.is_null());
     }
 }

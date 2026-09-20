@@ -53,7 +53,10 @@ pub fn export_posix(handle: CUmemGenericAllocationHandle) -> Result<OwnedFd> {
         return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
     }
     // CUDA transfers ownership of a fresh descriptor on successful POSIX export.
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC)
+        .map_err(|_| CUresult::CUDA_ERROR_OPERATING_SYSTEM)?;
+    Ok(fd)
 }
 pub type Result<T> = std::result::Result<T, CudaError>;
 
