@@ -178,6 +178,7 @@ dependencies = [
  "cudarc",
  "cuinterpose-abi",
  "cuinterpose-protocol",
+ "getrandom",
  "libc",
  "rustix",
  "thiserror",
