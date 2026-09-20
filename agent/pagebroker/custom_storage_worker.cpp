@@ -7,6 +7,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <cstdio>
@@ -34,11 +35,20 @@ void Check(CUresult result, const char* operation)
   }
 }
 
-// The default qualifier supports one private-memory target on one visible GPU.
-// The explicit jobfile experiment keeps peer devices visible for native IPC.
+int ReadTargetPID() {
+  std::string identity;
+  std::getline(std::cin, identity);
+  int pid = 0;
+  const auto parsed = std::from_chars(identity.data(), identity.data() + identity.size(), pid);
+  if (parsed.ec != std::errc{} || parsed.ptr != identity.data() + identity.size() ||
+      pid <= 0 || pid == getpid())
+    throw std::runtime_error("invalid restored target PID");
+  return pid;
+}
+
 // Aggregate pointers never cross a process boundary: native preparation,
 // PageBroker transfer and COMPLETE execute here, not in a daemon RPC endpoint.
-void Run(int pid, const std::filesystem::path& directory, bool jobfile_experiment)
+void Run(int pid, const std::filesystem::path& directory, bool jobfile_experiment, bool restore_worker)
 {
   if (std::getenv("CUDA_CHECKPOINT_JOB_FILE") && !jobfile_experiment)
     throw std::runtime_error("CustomStorage qualification requires no CUDA_CHECKPOINT_JOB_FILE");
@@ -53,37 +63,27 @@ void Run(int pid, const std::filesystem::path& directory, bool jobfile_experimen
       (info.st_mode & 0022))
     throw std::runtime_error("expected an existing private absolute storage directory");
 
-  const int pidfd = static_cast<int>(syscall(SYS_pidfd_open, pid, 0));
-  if (pidfd < 0)
+  std::vector<storage::ManifestExtent> restore_manifest;
+  std::string manifest_error;
+  if (restore_worker && !storage::ReadManifest(directory, &restore_manifest, &manifest_error))
+    throw std::runtime_error(manifest_error);
+  // Empty targets have no transfer to put on the critical path. Initialize
+  // their CUDA helpers when requested, keeping prewarm contention off the
+  // payload workers that must become ready as CRIU finishes.
+  const bool defer_initialization = !pid && restore_manifest.empty();
+  if (defer_initialization) {
+    std::puts("{\"event\":\"ready\",\"retained_contexts\":0,\"deferred_initialization\":true}");
+    std::fflush(stdout);
+    pid = ReadTargetPID();
+  }
+
+  int pidfd = pid ? static_cast<int>(syscall(SYS_pidfd_open, pid, 0)) : -1;
+  if (pid && pidfd < 0)
     throw std::runtime_error("pidfd_open failed");
-  pollfd target{pidfd, POLLIN, 0};
   const auto admission_start = Clock::now();
   Check(cuInit(0), "cuInit");
   int count = 0;
   Check(cuDeviceGetCount(&count), "cuDeviceGetCount");
-  // Native preparation validates the target's visible GPU set, including
-  // zero-payload parents. Keep that set visible even without a jobfile;
-  // the selected UUID controls context ownership, not CUDA enumeration.
-  std::map<CUcontext, std::pair<CUdevice, std::string>> contexts;
-  for (int index = 0; index < count; ++index) {
-    CUdevice device;
-    Check(cuDeviceGet(&device, index), "cuDeviceGet");
-    CUuuid uuid;
-    Check(cuDeviceGetUuid(&uuid, device), "cuDeviceGetUuid");
-    std::array<unsigned char, 16> bytes{};
-    std::copy(std::begin(uuid.bytes), std::end(uuid.bytes), bytes.begin());
-    const auto device_uuid = storage::FormatGPUUUID(bytes);
-    const char* selected = std::getenv("PAGEBROKER_NATIVE_SELECTED_GPU");
-    if (selected && device_uuid != selected)
-      continue;
-    CUcontext context;
-    Check(cuDevicePrimaryCtxRetain(&context, device), "cuDevicePrimaryCtxRetain");
-    contexts.emplace(context, std::make_pair(device, device_uuid));
-  }
-  if (contexts.empty())
-    throw std::runtime_error("no selected CUDA device");
-  if (jobfile_experiment && setenv("CUDA_CHECKPOINT_JOB_FILE", jobfile.c_str(), 1))
-    throw std::runtime_error("configure native operation jobfile");
   void* symbol = nullptr;
   CUdriverProcAddressQueryResult query;
   Check(cuGetProcAddress("cuCheckpointOperationComplete", &symbol, 13040,
@@ -114,13 +114,57 @@ void Run(int pid, const std::filesystem::path& directory, bool jobfile_experimen
       offset = end + 1;
     }
   }
+  // Keep the complete CUDA enumeration for native target validation. On LOAD,
+  // the manifest identifies the contexts needed for the returned mappings;
+  // retaining every visible GPU needlessly initializes eight contexts per PID.
+  std::map<CUcontext, std::pair<CUdevice, std::string>> contexts;
+  for (int index = 0; index < count; ++index) {
+    CUdevice device;
+    Check(cuDeviceGet(&device, index), "cuDeviceGet");
+    CUuuid uuid;
+    Check(cuDeviceGetUuid(&uuid, device), "cuDeviceGetUuid");
+    std::array<unsigned char, 16> bytes{};
+    std::copy(std::begin(uuid.bytes), std::end(uuid.bytes), bytes.begin());
+    const auto device_uuid = storage::FormatGPUUUID(bytes);
+    if (restore_worker && std::none_of(restore_manifest.begin(), restore_manifest.end(),
+        [&](const auto& extent) {
+          const auto pair = std::find_if(device_pairs.begin(), device_pairs.end(),
+              [&](const auto& value) { return value.source_uuid == extent.source_uuid; });
+          return device_uuid == (pair == device_pairs.end() ? extent.source_uuid : pair->destination_uuid);
+        }))
+      continue;
+    const char* selected = std::getenv("PAGEBROKER_NATIVE_SELECTED_GPU");
+    if (selected && device_uuid != selected)
+      continue;
+    CUcontext context;
+    Check(cuDevicePrimaryCtxRetain(&context, device), "cuDevicePrimaryCtxRetain");
+    contexts.emplace(context, std::make_pair(device, device_uuid));
+  }
+  if (jobfile_experiment && setenv("CUDA_CHECKPOINT_JOB_FILE", jobfile.c_str(), 1))
+    throw std::runtime_error("configure native operation jobfile");
   const double admission = std::chrono::duration<double>(Clock::now() - admission_start).count();
-  std::printf("{\"event\":\"ready\",\"admission_seconds\":%.6f}\n", admission);
-  std::fflush(stdout);
+  if (!defer_initialization) {
+    std::printf("{\"event\":\"ready\",\"admission_seconds\":%.6f,\"retained_contexts\":%zu}\n",
+                admission, contexts.size());
+    std::fflush(stdout);
+  }
+  if (!pid) {
+    // A prewarmed LOAD has no target until CRIU finishes. Its broker supplies
+    // the resolved host PID before sending the first native command.
+    pid = ReadTargetPID();
+    pidfd = static_cast<int>(syscall(SYS_pidfd_open, pid, 0));
+    if (pidfd < 0)
+      throw std::runtime_error("pidfd_open restored target failed");
+  }
+  pollfd target{pidfd, POLLIN, 0};
   {
-    // Reuse the same pinned ring, NIXL registrations and context across SAVE
-    // and LOAD. Four slots match the existing allocation worker.
-    transfer::TransferBuffers buffers({4, transfer::kDefaultChunkBytes});
+    // Large LOADs need a deeper byte window to saturate NFS: eight 128-MiB
+    // slots keep 1 GiB in flight. Small targets and SAVE retain the smaller ring.
+    const bool large_restore = std::any_of(restore_manifest.begin(), restore_manifest.end(),
+        [](const auto& extent) { return extent.size >= transfer::kMaximumPinnedBytesPerDevice; });
+    transfer::TransferBuffers buffers(large_restore
+        ? transfer::TransferOptions{8, 128ULL * 1024 * 1024}
+        : transfer::TransferOptions{4, transfer::kDefaultChunkBytes});
     std::string command;
     bool prepared = false;
     bool copied = false;
@@ -131,7 +175,7 @@ void Run(int pid, const std::filesystem::path& directory, bool jobfile_experimen
     std::vector<storage::TransferJob> jobs;
     std::vector<CUcontext> owners;
     Clock::time_point start, prepare_start, prepare_end, transfer_start, transfer_end;
-    double prepare = 0, transfer_time = 0, setup_time = 0, storage_time = 0;
+    double prepare = 0, transfer_time = 0, setup_time = 0, storage_time = 0, cuda_wait_time = 0;
     size_t transferred = 0;
     while (std::getline(std::cin, command)) {
       if (command == "lock") {
@@ -162,7 +206,7 @@ void Run(int pid, const std::filesystem::path& directory, bool jobfile_experimen
         view = nullptr;
         copied = false;
         transferred = 0;
-        setup_time = storage_time = 0;
+        setup_time = storage_time = cuda_wait_time = 0;
         if (save) {
           if (!storage::RemoveManifest(directory, &error))
             throw std::runtime_error(error);
@@ -256,6 +300,7 @@ void Run(int pid, const std::filesystem::path& directory, bool jobfile_experimen
           transferred += metrics.bytes;
           setup_time += metrics.setup_seconds;
           storage_time += metrics.storage_io_seconds;
+          cuda_wait_time += metrics.cuda_wait_seconds;
         }
         transfer_end = Clock::now();
         transfer_time = std::chrono::duration<double>(transfer_end - transfer_start).count();
@@ -290,9 +335,9 @@ void Run(int pid, const std::filesystem::path& directory, bool jobfile_experimen
       std::printf(
           "{\"event\":\"%s\",\"bytes\":%zu,\"native_prepare_seconds\":%.6f,"
           "\"transfer_seconds\":%.6f,\"transfer_setup_seconds\":%.6f,"
-          "\"storage_request_service_seconds\":%.6f,"
+          "\"storage_request_service_seconds\":%.6f,\"cuda_wait_seconds\":%.6f,"
           "\"complete_seconds\":%.6f,\"total_seconds\":%.6f}\n",
-          command.c_str(), transferred, prepare, transfer_time, setup_time, storage_time,
+          command.c_str(), transferred, prepare, transfer_time, setup_time, storage_time, cuda_wait_time,
           complete_time, std::chrono::duration<double>(Clock::now() - start).count());
       std::fflush(stdout);
       prepared = false;
@@ -320,14 +365,15 @@ int main(int argc, char** argv)
   try {
     int pid = 0;
     const bool jobfile_experiment = argc == 4 && std::string(argv[3]) == "--jobfile-experiment";
-    if (argc != 3 && !jobfile_experiment)
-      throw std::runtime_error("usage: pagebroker-custom-storage-worker PID DIRECTORY [--jobfile-experiment]");
+    const bool restore_worker = argc == 4 && std::string(argv[3]) == "--restore";
+    if (argc != 3 && !jobfile_experiment && !restore_worker)
+      throw std::runtime_error("usage: pagebroker-custom-storage-worker PID DIRECTORY [--jobfile-experiment|--restore]");
     const std::string text = argv[1];
     const auto parsed = std::from_chars(text.data(), text.data() + text.size(), pid);
-    if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() || pid <= 0 ||
+    if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() || pid < 0 || (pid == 0 && !restore_worker) ||
         pid == getpid())
       throw std::runtime_error("invalid target PID");
-    Run(pid, argv[2], jobfile_experiment);
+    Run(pid, argv[2], jobfile_experiment, restore_worker);
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "CustomStorage worker failed: %s; terminate target before cleanup\n",

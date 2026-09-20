@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include <fstream>
+#include <cstdio>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
@@ -37,6 +38,12 @@ std::string ReadLine(int fd) {
     line += byte;
   }
   throw std::runtime_error("native worker report exceeds limit");
+}
+std::string ReadReady(int fd) {
+  auto ready = ReadLine(fd);
+  Require(ready.find("\"event\":\"ready\"") != std::string::npos,
+          "native worker did not become ready");
+  return ready;
 }
 }
 
@@ -89,9 +96,12 @@ NativeSession::NativeSession(std::shared_ptr<Transaction> transaction,
 }
 
 void NativeSession::Start(uint32_t target_pid) {
+  std::string ready;
+  if (binding_.direction() == v1::BindAllocationSession::LOAD)
+    ready = ReadReady(connection_.get());
   // The agent supplies the PID observed from the pinned placeholder namespace,
   // not the restored process's innermost PID (both roots can have inner PID 1).
-  // The worker opens a pidfd before any CUDA operation.
+  // The worker opens a pidfd before any operation on the target.
   struct stat expected{};
   Require(fstat(namespace_fd_.get(), &expected) == 0, "stat target namespace");
   int target = 0;
@@ -129,6 +139,24 @@ void NativeSession::Start(uint32_t target_pid) {
     }
   }
   Require(target > 0, "native target absent from pinned namespace");
+  if (binding_.direction() == v1::BindAllocationSession::SAVE) {
+    Spawn(target);
+    ready = ReadReady(connection_.get());
+  } else {
+    const auto identity = std::to_string(target) + "\n";
+    Require(send(connection_.get(), identity.data(), identity.size(), MSG_NOSIGNAL) ==
+                static_cast<ssize_t>(identity.size()), "bind native worker target");
+  }
+  std::fprintf(stderr, "Native worker target=%d %s\n", target, ready.c_str());
+}
+
+void NativeSession::Prewarm() {
+  // CUDA initialization can run while CRIU recreates the target. The worker
+  // receives its target identity only when the first native operation arrives.
+  if (binding_.direction() == v1::BindAllocationSession::LOAD) Spawn(0);
+}
+
+void NativeSession::Spawn(int target) {
   int sockets[2];
   Require(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets) == 0, "native socketpair");
   connection_ = FileDescriptor(sockets[0]);
@@ -152,7 +180,9 @@ void NativeSession::Start(uint32_t target_pid) {
   for (auto& value : environment) env.push_back(value.data());
   env.push_back(nullptr);
   std::string binary = executable_.string(), pid = std::to_string(target), directory = "/proc/self/fd/3";
-  char* argv[] = {binary.data(), pid.data(), directory.data(), nullptr};
+  char restore[] = "--restore";
+  char* argv[] = {binary.data(), pid.data(), directory.data(),
+                  binding_.direction() == v1::BindAllocationSession::LOAD ? restore : nullptr, nullptr};
   posix_spawn_file_actions_t actions;
   Require(posix_spawn_file_actions_init(&actions) == 0, "native spawn actions");
   int error = posix_spawn_file_actions_adddup2(&actions, child.get(), STDIN_FILENO);
@@ -162,8 +192,6 @@ void NativeSession::Start(uint32_t target_pid) {
   if (!error) error = posix_spawn(&worker_, binary.c_str(), &actions, nullptr, argv, env.data());
   posix_spawn_file_actions_destroy(&actions);
   Require(error == 0, "spawn native worker");
-  Require(ReadLine(connection_.get()).find("\"event\":\"ready\"") != std::string::npos,
-          "native worker did not become ready");
 }
 
 v1::NativeSessionReply NativeSession::Execute(const v1::NativeSessionRequest& request) {
@@ -175,7 +203,8 @@ v1::NativeSessionReply NativeSession::Execute(const v1::NativeSessionRequest& re
                       phase_ == Op::LOCK ? Op::PREPARE :
                       phase_ == Op::PREPARE ? Op::TRANSFER : Op::COMPLETE;
     Require(!finished_ && request.operation() == next, "invalid native phase order");
-    if (worker_ < 0) Start(request.target_pid() ? request.target_pid() : binding_.namespace_pid());
+    if (phase_ == Op::UNSPECIFIED)
+      Start(request.target_pid() ? request.target_pid() : binding_.namespace_pid());
     const std::string command = next == Op::LOCK ? "lock\n" : next == Op::PREPARE ?
         (save ? "prepare-save\n" : "prepare-load\n") : next == Op::TRANSFER ? "transfer\n" : "complete\n";
     Require(send(connection_.get(), command.data(), command.size(), MSG_NOSIGNAL) ==

@@ -12,9 +12,11 @@ class NativeSession {
  public:
   NativeSession(std::shared_ptr<Transaction>, const v1::BindNativeSession&, const Path&);
   ~NativeSession();
+  void Prewarm();
   v1::NativeSessionReply Execute(const v1::NativeSessionRequest&);
  private:
   void Start(uint32_t target_pid);
+  void Spawn(int target);
   void Stop() noexcept;
   std::shared_ptr<Transaction> transaction_;
   v1::BindNativeSession binding_;

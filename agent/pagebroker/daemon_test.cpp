@@ -10,6 +10,7 @@
 #include <string>
 #include <thread>
 #include <sys/stat.h>
+#include <signal.h>
 
 #include "broker.hpp"
 #include "native_session.hpp"
@@ -91,6 +92,56 @@ TEST_F(BrokerTest, NativeSessionsBindTransactionAndRejectPrematureComplete)
   EXPECT_TRUE(pending.get().has_abort_complete());
   EXPECT_TRUE(fs::is_empty(root_ / "native-staging" / "checkpoint"));
   EXPECT_TRUE(native.HandleRequest(abort).has_abort_complete());
+}
+
+TEST_F(BrokerTest, NativeLoadPrewarmsBeforeTargetBindingAndReapsOnAbort)
+{
+  const auto directory = source_ / "native" / "999999";
+  fs::create_directories(directory);
+  const auto executable = root_ / "pagebroker-custom-storage-worker";
+  std::ofstream(executable) << R"(#!/bin/sh
+test "$1" = 0 && test "$3" = --restore || exit 1
+printf '%s\n' "$$" > "$2/worker-pid"
+printf '{"event":"ready"}\n'
+read -r identity
+printf '%s\n' "$identity" > "$2/target-pid"
+while read -r command; do printf '{"event":"ok"}\n'; done
+)";
+  fs::permissions(executable, fs::perms::owner_all);
+  Broker native(root_ / "native-staging", root_ / "storage", root_ / "pagebroker-allocation-worker");
+  auto restore = RequestFor("native-load");
+  Configure(restore.mutable_direct_restore()->mutable_source(),
+            restore.mutable_direct_restore()->mutable_io_engine(), source_);
+  ASSERT_TRUE(native.HandleRequest(restore).has_direct_restore_ready());
+  auto binding = RequestFor("native-load");
+  auto* request = binding.mutable_bind_native();
+  request->set_direction(v1::BindAllocationSession::LOAD);
+  request->set_container_pid(getpid());
+  request->set_namespace_pid(999999);
+  request->add_visible_devices("GPU-00000000-0000-0000-0000-000000000001");
+  auto session = native.BindNative(binding);
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  int worker = 0;
+  while (worker == 0 && std::chrono::steady_clock::now() < deadline) {
+    std::ifstream(directory / "worker-pid") >> worker;
+    if (worker == 0) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  ASSERT_GT(worker, 0);
+  EXPECT_FALSE(fs::exists(directory / "target-pid"));
+  v1::NativeSessionRequest prepare;
+  prepare.set_operation(v1::NativeSessionRequest::PREPARE);
+  prepare.set_target_pid(getpid());
+  ASSERT_FALSE(session->Execute(prepare).has_failure());
+  int target = 0;
+  std::ifstream(directory / "target-pid") >> target;
+  EXPECT_EQ(target, getpid());
+  session.reset();
+  EXPECT_EQ(kill(worker, 0), -1);
+  EXPECT_EQ(errno, ESRCH);
+  auto abort = RequestFor("native-load");
+  abort.mutable_abort();
+  EXPECT_TRUE(native.HandleRequest(abort).has_abort_complete());
+  EXPECT_TRUE(fs::exists(source_ / "image"));
 }
 
 TEST_F(BrokerTest, RestoreFilesRemainPrivateAndPublicationMovesSameFilesystem)

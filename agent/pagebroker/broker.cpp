@@ -497,8 +497,10 @@ Broker::BindNative(const Request& request)
     throw std::invalid_argument("native binding requires identity and GPU worker configuration");
   auto transaction = FindTransaction(request.transaction_id());
   if (!transaction) throw std::invalid_argument("native transaction not found");
-  return std::make_unique<NativeSession>(transaction, request.bind_native(),
+  auto session = std::make_unique<NativeSession>(transaction, request.bind_native(),
       allocation_worker_.parent_path() / "pagebroker-custom-storage-worker");
+  session->Prewarm();
+  return session;
 }
 
 }  // namespace snapshot::pagebroker
