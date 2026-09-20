@@ -4,7 +4,6 @@
 //! Two prestarted workers separate peer FD service from serialized CUDA control.
 //! Queue pressure refuses requests before mutation; no operation is retried.
 
-use super::fork::Socket;
 use crate::driver::Result;
 use crate::memory::checkpoint;
 use crate::runtime as state;
@@ -30,20 +29,19 @@ enum ControlRequest {
 /// Dropping this owner cancels them without joining: a caller may hold the
 /// loader lock needed by a worker's Rust TLS startup or teardown.
 pub struct PreparedWorkers {
-    activation: mpsc::SyncSender<Socket<UnixListener>>,
+    activation: mpsc::SyncSender<UnixListener>,
     // Owned only between a successful bind and the worker handoff.
-    listener: Option<Socket<UnixListener>>,
+    listener: Option<UnixListener>,
 }
 
 impl PreparedWorkers {
     pub fn prepare(namespace_pid: NamespacePid) -> Result<Option<Self>> {
         let (sender, receiver) =
-            mpsc::sync_channel::<(Socket<UnixStream>, ControlRequest)>(CONTROL_QUEUE_CAPACITY);
-        let (activation, parked) = mpsc::sync_channel::<Socket<UnixListener>>(1);
+            mpsc::sync_channel::<(UnixStream, ControlRequest)>(CONTROL_QUEUE_CAPACITY);
+        let (activation, parked) = mpsc::sync_channel::<UnixListener>(1);
         let _worker = std::thread::Builder::new()
             .name("cuinterpose-control".into())
             .spawn(move || {
-                // Queued sockets remain in the atfork FD registry.
                 while let Ok((socket, request)) = receiver.recv() {
                     crate::boundary::call(&super::RUNTIME_FAILED, (), || {
                         let _ = serve(socket, request, namespace_pid);
@@ -64,7 +62,7 @@ impl PreparedWorkers {
                     return;
                 };
                 loop {
-                    let mut events = [PollFd::new(&*listener, PollFlags::IN)];
+                    let mut events = [PollFd::new(&listener, PollFlags::IN)];
                     match poll(&mut events, None) {
                         Err(rustix::io::Errno::INTR) => continue,
                         Ok(_) if events[0].revents() == PollFlags::IN => {}
@@ -73,8 +71,7 @@ impl PreparedWorkers {
                             break;
                         }
                     }
-                    let Ok(socket) = Socket::open(|| listener.accept().map(|(socket, _)| socket))
-                    else {
+                    let Ok(socket) = listener.accept().map(|(socket, _)| socket) else {
                         continue;
                     };
                     crate::boundary::call(&super::RUNTIME_FAILED, (), || {
@@ -96,14 +93,10 @@ impl PreparedWorkers {
     /// No spawn, blocking channel operation, formatting, or callback is allowed
     /// here. The caller holds the runtime installation lock.
     /// With pinned Rust/glibc, mutexes and try_send wakeups use futexes and
-    /// non-Drop TLS, not loader registration. The channel is preallocated;
-    /// socket registration may grow its Vec using the ordinary glibc allocator.
+    /// non-Drop TLS, not loader registration. The channel is preallocated.
     /// Eager ELF binding prevents first-use loader lookup in these libc calls.
     pub fn activate(&mut self, endpoint: &str) -> Result<()> {
-        self.listener = Some(
-            Socket::open(|| UnixListener::bind(endpoint))
-                .map_err(|_| CUDA_ERROR_NOT_INITIALIZED)?,
-        );
+        self.listener = Some(UnixListener::bind(endpoint).map_err(|_| CUDA_ERROR_NOT_INITIALIZED)?);
         let listener = self.listener.as_ref().unwrap();
         listener
             .set_nonblocking(true)
@@ -130,13 +123,13 @@ impl PreparedWorkers {
 }
 
 fn dispatch(
-    socket: Socket<UnixStream>,
+    socket: UnixStream,
     namespace_pid: NamespacePid,
-    sender: &mpsc::SyncSender<(Socket<UnixStream>, ControlRequest)>,
+    sender: &mpsc::SyncSender<(UnixStream, ControlRequest)>,
 ) -> protocol::Result<()> {
     // Classification uses per-I/O socket timeouts, not a total header deadline.
     // A slow peer can delay acceptance, but never waits on STATE or lifecycle
-    // CUDA calls. Fork during active protocol traffic is outside the contract.
+    // CUDA calls.
     let timeout = Some(cuinterpose_protocol::timeout(None));
     socket.set_read_timeout(timeout)?;
     socket.set_write_timeout(timeout)?;
@@ -207,7 +200,7 @@ fn refuse(socket: &UnixStream, namespace_pid: NamespacePid, message: &str) -> pr
 }
 
 fn serve(
-    socket: Socket<UnixStream>,
+    socket: UnixStream,
     request: ControlRequest,
     namespace_pid: NamespacePid,
 ) -> protocol::Result<()> {

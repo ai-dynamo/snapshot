@@ -59,9 +59,7 @@ pub fn request_export(
 ) -> protocol::Result<(OwnedFd, Option<CUmulticastObjectProp>)> {
     let control_dir =
         runtime::control_dir().map_err(|_| Error::Invalid("cuinterpose state is unavailable"))?;
-    let socket = runtime::fork::Socket::open(|| {
-        UnixStream::connect(protocol::socket_path(control_dir, allocation.creator_pid))
-    })?;
+    let socket = UnixStream::connect(protocol::socket_path(control_dir, allocation.creator_pid))?;
     let timeout = Some(protocol::timeout(None));
     socket.set_read_timeout(timeout)?;
     socket.set_write_timeout(timeout)?;
