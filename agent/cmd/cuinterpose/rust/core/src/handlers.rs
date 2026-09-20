@@ -115,9 +115,12 @@ pub fn cuMemUnmap(address: u64, size: usize) -> Result<()> {
     let mut state = active()?;
     unsafe { crate::driver::cuMemUnmap(address, size) }?;
     // CUDA only unmaps whole mappings; a successful range can contain several.
-    let addresses: Vec<_> = state.mappings.range(address..)
+    let addresses: Vec<_> = state
+        .mappings
+        .range(address..)
         .take_while(|(start, _)| **start - address < size as u64)
-        .map(|(start, _)| *start).collect();
+        .map(|(start, _)| *start)
+        .collect();
     for start in addresses {
         let mapping = state.mappings.remove(&start).unwrap();
         runtime::must_complete(state.release_unused_memblock(mapping.id));
@@ -142,7 +145,9 @@ pub fn cuMemSetAccess(
     let descriptors = unsafe { std::slice::from_raw_parts(access, count) };
     // Access applies to a fully mapped range, potentially spanning allocations.
     // Prepare metadata before CUDA and publish it only after the call succeeds.
-    let updates: Vec<_> = state.mappings.range(address..)
+    let updates: Vec<_> = state
+        .mappings
+        .range(address..)
         .take_while(|(start, _)| **start - address < size as u64)
         .map(|(start, mapping)| (*start, mapping.merged_access(descriptors)))
         .collect();
