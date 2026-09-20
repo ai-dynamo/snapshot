@@ -217,7 +217,7 @@ impl ProcessState {
                 if handle_live || mapped {
                     return Ok(());
                 }
-                cache()?.remove(&id)?;
+                export_cache()?.remove(&id)?;
                 if let Some(driver) = object.driver {
                     unsafe { crate::driver::cuMemRelease(driver) }?;
                 }

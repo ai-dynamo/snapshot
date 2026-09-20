@@ -438,7 +438,7 @@ pub fn prepare(state: &mut ProcessState) -> Result<()> {
             continue;
         };
         let driver = object.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?;
-        runtime::cache()?.remove(id)?;
+        runtime::export_cache()?.remove(id)?;
         let device = object
             .devices
             .first()
@@ -506,7 +506,7 @@ pub fn restore(state: &mut ProcessState, operation: Operation) -> Result<()> {
                     object.driver = Some(driver);
                     if object.shared {
                         let fd = crate::driver::export_posix(driver)?;
-                        runtime::cache()?.insert(*id, fd, Some(object.properties))?;
+                        runtime::export_cache()?.insert(*id, fd, Some(object.properties))?;
                     }
                 }
                 Operation::RestoreMulticastImporters if !creator => {
