@@ -22,7 +22,7 @@ use std::{
 #[doc(inline)]
 pub use transport::{receive, send};
 
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 // Bound allocations controlled by socket frame prefixes and checkpoint files.
 // Protocol payloads contain metadata, never allocation contents.
 pub const MAX_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
@@ -110,6 +110,11 @@ pub enum Operation {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Request {
+    /// Enter checkpoint mode and return stable records. The application must
+    /// already be parked; this request does not synchronize GPU work.
+    BeginCheckpoint {
+        namespace_pid: NamespacePid,
+    },
     Inspect {
         namespace_pid: NamespacePid,
     },
@@ -133,8 +138,6 @@ pub struct Response {
 pub enum Reply {
     Inspection {
         records: Vec<Record>,
-        live_raw_imports: u64,
-        unsupported_creations: u64,
     },
     Completed {
         operation: Operation,
