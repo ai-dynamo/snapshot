@@ -273,7 +273,9 @@ pub fn cuMulticastCreate(out: *mut u64, properties: *const CUmulticastObjectProp
 
 pub fn cuMulticastAddDevice(handle: u64, device: i32) -> Result<()> {
     let state = runtime::active()?;
-    let id = state.tracked(handle)?.ok_or(CUDA_ERROR_NOT_SUPPORTED)?;
+    let id = state
+        .resolve_virtual_handle(handle)?
+        .ok_or(CUDA_ERROR_NOT_SUPPORTED)?;
     multicast::add_device(state, id, device)
 }
 
@@ -370,7 +372,9 @@ pub fn cuMulticastGetGranularity(
 
 pub fn cuMulticastUnbind(handle: u64, device: i32, offset: usize, size: usize) -> Result<()> {
     let mut state = runtime::active()?;
-    let id = state.tracked(handle)?.ok_or(CUDA_ERROR_NOT_SUPPORTED)?;
+    let id = state
+        .resolve_virtual_handle(handle)?
+        .ok_or(CUDA_ERROR_NOT_SUPPORTED)?;
     let object = state
         .memblocks
         .get_mut(&id)

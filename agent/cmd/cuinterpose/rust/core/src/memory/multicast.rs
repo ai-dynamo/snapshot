@@ -216,13 +216,15 @@ pub(crate) fn bind(
     input: BindInput,
 ) -> Result<()> {
     let mut state = runtime::active()?;
-    let target = state.tracked(handle)?.ok_or(CUDA_ERROR_NOT_SUPPORTED)?;
+    let target = state
+        .resolve_virtual_handle(handle)?
+        .ok_or(CUDA_ERROR_NOT_SUPPORTED)?;
     let (source, member, member_driver) = match input {
         BindInput::Memory {
             handle: member_handle,
             offset: member_offset,
         } => {
-            let member = match state.tracked(member_handle)? {
+            let member = match state.resolve_virtual_handle(member_handle)? {
                 Some(id)
                     if state
                         .memblocks
