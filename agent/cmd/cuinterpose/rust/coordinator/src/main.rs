@@ -13,7 +13,7 @@ use cuinterpose_protocol::{
     self as protocol, Manifest, NamespacePid, Operation, Record, Reply, Request, Response,
 };
 use report::{Event, Transfer, write as report};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::os::unix::net::{SocketAddr, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -37,12 +37,6 @@ struct Arguments {
 struct Peer {
     endpoint: PathBuf,
     namespace_pid: NamespacePid,
-}
-
-struct Inspection {
-    records: Vec<Record>,
-    raw_imports: u64,
-    unsupported_creations: u64,
 }
 
 // Transport errors retain their cause; remote refusals are application errors.
@@ -73,11 +67,17 @@ fn exchange(endpoint: &Path, request: &Request) -> Result<Response> {
 }
 
 impl Peer {
-    fn inspect(&self) -> Result<Inspection> {
+    fn inspect(&self, begin_checkpoint: bool) -> Result<Vec<Record>> {
         let response = exchange(
             &self.endpoint,
-            &Request::Inspect {
-                namespace_pid: self.namespace_pid,
+            &if begin_checkpoint {
+                Request::BeginCheckpoint {
+                    namespace_pid: self.namespace_pid,
+                }
+            } else {
+                Request::Inspect {
+                    namespace_pid: self.namespace_pid,
+                }
             },
         )?;
         ensure!(
@@ -86,15 +86,7 @@ impl Peer {
             self.endpoint.display()
         );
         match response.result.map_err(anyhow::Error::msg)? {
-            Reply::Inspection {
-                records,
-                live_raw_imports,
-                unsupported_creations,
-            } => Ok(Inspection {
-                records,
-                raw_imports: live_raw_imports,
-                unsupported_creations,
-            }),
+            Reply::Inspection { records } => Ok(records),
             _ => bail!("{}: unexpected inspection reply", self.endpoint.display()),
         }
     }
@@ -167,21 +159,14 @@ fn command_all(
     })
 }
 
-fn inspect(peers: &[Peer]) -> Result<(Manifest, u64, u64)> {
-    let mut participants = BTreeMap::new();
-    let (mut raw, mut unsupported) = (0, 0);
-    for peer in peers {
-        let inspection = peer.inspect()?;
-        ensure!(
-            participants
-                .insert(peer.namespace_pid, inspection.records)
-                .is_none(),
-            "duplicate namespace PID"
-        );
-        raw += inspection.raw_imports;
-        unsupported += inspection.unsupported_creations;
-    }
-    Ok((participants, raw, unsupported))
+fn inspect(peers: &[Peer], begin_checkpoint: bool) -> Result<Manifest> {
+    peers
+        .iter()
+        .map(|peer| {
+            peer.inspect(begin_checkpoint)
+                .map(|records| (peer.namespace_pid, records))
+        })
+        .collect()
 }
 
 fn transfer(
@@ -253,21 +238,14 @@ fn run() -> Result<()> {
             "restored processes do not match the checkpointed participants"
         );
     }
-    let (mut participants, raw, unsupported) = inspect(&peers)?;
+    let mut participants = inspect(&peers, args.prepare)?;
     report(
         Event::Inspect {
             records: participants.values().map(Vec::len).sum(),
-            live_raw_imports: raw,
-            unsupported_exportable_creations: unsupported,
         },
         start,
         peers.len(),
     )?;
-    ensure!(raw == 0, "participants hold {raw} live raw imports");
-    ensure!(
-        unsupported == 0,
-        "participants created {unsupported} CUDA resources with unsupported exportable handle types"
-    );
     let inspected_allocations = topology::validate(&participants)?;
     if args.prepare {
         let start = Instant::now();
@@ -302,11 +280,7 @@ fn run() -> Result<()> {
         }
         report(Event::RestoreMulticast, start, peers.len())?;
         let start = Instant::now();
-        let (mut participants, raw, unsupported) = inspect(&peers)?;
-        ensure!(
-            raw == 0 && unsupported == 0,
-            "restored participant has unsupported CUDA state"
-        );
+        let mut participants = inspect(&peers, false)?;
         topology::validate(&participants)?;
         for (id, actual) in &mut participants {
             let expected = expected

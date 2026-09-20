@@ -16,11 +16,7 @@ pub struct Transfer {
 #[derive(Serialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum Event {
-    Inspect {
-        records: usize,
-        live_raw_imports: u64,
-        unsupported_exportable_creations: u64,
-    },
+    Inspect { records: usize },
     Validate,
     PrepareMulticast,
     SaveAllocations(Transfer),
