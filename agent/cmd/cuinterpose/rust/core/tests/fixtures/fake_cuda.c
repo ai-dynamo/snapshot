@@ -252,6 +252,7 @@ CUresult CUDAAPI cuMemGetAllocationGranularity(size_t *output, const CUmemAlloca
 
 CUresult CUDAAPI fakeCuMemRelease(CUmemGenericAllocationHandle handle)
 {
+  if (should_fail("cuMemRelease")) return CUDA_ERROR_INVALID_VALUE;
   int index = handle_index(handle);
   pthread_mutex_lock(&model_lock);
   if (index < 0 || !handles[index].used) {
@@ -345,6 +346,7 @@ CUresult CUDAAPI cuMemUnmap(CUdeviceptr address, size_t size) { return fakeCuMem
 
 CUresult CUDAAPI fakeCuMemSetAccess(CUdeviceptr address, size_t size, const CUmemAccessDesc *descriptors, size_t count)
 {
+  if (should_fail("cuMemSetAccess")) return CUDA_ERROR_INVALID_VALUE;
   (void)address;
   (void)size;
   (void)count;

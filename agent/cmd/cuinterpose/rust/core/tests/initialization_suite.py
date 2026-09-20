@@ -54,6 +54,7 @@ def main():
             ("generation_constructor.c", "generation-constructor.so", ["-shared", "-fPIC"]),
             ("initialization_faults.c", "initialization-faults.so", ["-shared", "-fPIC"]),
             ("abi_race.c", "abi-race", []),
+            ("symbol_cache.c", "symbol-cache", []),
         ):
             subprocess.run([
                 "/usr/bin/gcc", "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror",
@@ -65,6 +66,9 @@ def main():
         "LD_PRELOAD": str(artifacts / "libcuinterpose.so"),
         "LD_LIBRARY_PATH": str(fixtures),
     }
+    with tempfile.TemporaryDirectory(prefix="cuinterpose-symbols-") as control:
+        run([str(fixtures / "symbol-cache"), str(artifacts / "libcuinterpose_core.so"),
+             str(fixtures / "test/libcuda.so.1")], clean | {"SNAPSHOT_CONTROL_DIR": control})
     count = 0
     for mode, argument in (
         ("cold", "32"), ("fork", "32"),

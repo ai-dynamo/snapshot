@@ -10,6 +10,8 @@ import subprocess
 import sys
 import threading
 import resource
+import socket
+import time
 from support import driver, props, Properties, Location
 from protocol_client import LIFECYCLE, command
 
@@ -56,6 +58,51 @@ def main():
     assert cuda.cuMemCreate(c.byref(handle), length, c.byref(props), 0) == 0
     if mode != "no-context":
         assert cuda.cuMemMap(address, length, 0, handle, 0) == 0
+    if mode == "accept-exhaustion":
+        peer = socket.socket(socket.AF_UNIX)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
+        opened = []
+        try:
+            while True:
+                opened.append(os.open("/dev/null", os.O_RDONLY))
+        except OSError:
+            pass
+        started = time.process_time()
+        peer.connect(os.path.join(os.environ["SNAPSHOT_CONTROL_DIR"],
+                                  f"cuinterpose-{os.getpid()}.sock"))
+        time.sleep(0.3)
+        assert time.process_time() - started < 0.15, "accept spins under FD exhaustion"
+        for fd in opened:
+            os.close(fd)
+        peer.close()
+        assert command("inspect")["records"]
+        return
+    if mode == "ranges":
+        class Access(c.Structure):
+            _fields_ = [("location", Location), ("flags", c.c_uint)]
+        cuda.cuMemSetAccess.argtypes = [u64, size, c.POINTER(Access), size]
+        second = u64()
+        assert cuda.cuMemCreate(c.byref(second), length, c.byref(props), 0) == 0
+        assert cuda.cuMemMap(address + length, length, 0, second, 0) == 0
+        access = Access(Location(1, 0), 3)
+        assert cuda.cuMemSetAccess(address, 2 * length, c.byref(access), 1) == 0
+        records = command("inspect")["records"]
+        mappings = [r["mapping"] for r in records if "mapping" in r]
+        assert len(mappings) == 2 and all(m["access"] == [[1, 0, 3]] for m in mappings), mappings
+        # Failed driver calls leave both records unchanged.
+        cuda.fakeFailNext(b"cuMemSetAccess")
+        access.flags = 1
+        assert cuda.cuMemSetAccess(address, 2 * length, c.byref(access), 1) != 0
+        assert command("inspect")["records"] == records
+        assert cuda.cuMemRelease(handle) == 0
+        assert cuda.cuMemRelease(second) == 0
+        assert cuda.cuMemUnmap(address, 2 * length) == 0
+        assert command("inspect")["records"] == []
+        return
+    if mode == "retain-release-failure":
+        cuda.fakeFailNext(b"cuMemRelease")
+        cuda.cuMemRetainAllocationHandle(c.byref(u64()), address)
+        raise AssertionError("failed redundant release returned to application")
     if mode == "checkpoint-entry":
         before = command("inspect")
         command("prepare_multicast", False)  # Reading alone never reserves state.

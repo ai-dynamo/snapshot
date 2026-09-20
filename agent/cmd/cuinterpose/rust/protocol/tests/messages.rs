@@ -150,3 +150,23 @@ fn malformed_or_excess_ancillary_data_closes_received_descriptors() {
         assert_eq!((&reader).read(&mut [0]).unwrap(), 0);
     }
 }
+
+#[test]
+fn connect_times_out_when_the_peer_backlog_is_full() {
+    use rustix::net::{AddressFamily, SocketAddrUnix, SocketType, bind, listen, socket};
+    use std::time::{Duration, Instant};
+    let path =
+        std::env::temp_dir().join(format!("cuinterpose-backlog-{}.sock", std::process::id()));
+    let listener = socket(AddressFamily::UNIX, SocketType::STREAM, None).unwrap();
+    bind(&listener, &SocketAddrUnix::new(&path).unwrap()).unwrap();
+    listen(&listener, 0).unwrap();
+    // Linux permits backlog + 1 pending connections.
+    let first = cuinterpose_protocol::connect(&path, Duration::from_millis(100)).unwrap();
+    let started = Instant::now();
+    let error = cuinterpose_protocol::connect(&path, Duration::from_millis(100)).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    assert!(started.elapsed() >= Duration::from_millis(50));
+    assert!(started.elapsed() < Duration::from_secs(2));
+    drop(first);
+    std::fs::remove_file(path).unwrap();
+}

@@ -258,6 +258,60 @@ mod codec_tests {
     use std::os::fd::AsRawFd;
 
     #[test]
+    fn export_refusal_preserves_remote_error() {
+        const CHILD: &str = "CUINTERPOSE_EXPORT_REFUSAL_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory =
+                std::env::temp_dir().join(format!("cuinterpose-refusal-{}", std::process::id()));
+            std::fs::create_dir(&directory).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "memory::sharing::tests::export_refusal_preserves_remote_error",
+                ])
+                .env(CHILD, "1")
+                .env("SNAPSHOT_CONTROL_DIR", &directory)
+                .output()
+                .unwrap();
+            std::fs::remove_dir_all(directory).unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        runtime::initialize().unwrap();
+        let creator_pid = std::process::id() + 1;
+        let listener = std::os::unix::net::UnixListener::bind(protocol::socket_path(
+            runtime::control_dir().unwrap(),
+            creator_pid,
+        ))
+        .unwrap();
+        let peer = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            let _: (Request, _) = protocol::receive(&socket).unwrap();
+            protocol::send(
+                &socket,
+                &Response {
+                    namespace_pid: creator_pid,
+                    result: Err("allocation unavailable".into()),
+                },
+                None,
+            )
+            .unwrap();
+        });
+        let result = request_export(AllocationReference {
+            creator_pid,
+            id: [1; 16],
+        });
+        assert!(
+            matches!(result, Err(Error::Remote(message)) if message == "allocation unavailable")
+        );
+        peer.join().unwrap();
+    }
+
+    #[test]
     fn virtual_shareable_handle_round_trip() {
         let reference = AllocationReference {
             creator_pid: 1,

@@ -59,9 +59,15 @@ def main():
         subprocess.run([sys.executable, str(Path(__file__).with_name("memory_ipc.py"))],
                        env=lifecycle_env, check=True, timeout=60)
         for mode in ("tracking", "exports", "exhaustion", "access", "shared",
-                     "private-released", "no-context", "raw", "unsupported", "checkpoint-entry"):
+                     "private-released", "no-context", "raw", "unsupported", "checkpoint-entry",
+                     "ranges", "accept-exhaustion"):
             subprocess.run([sys.executable, str(Path(__file__).with_name("lifecycle.py")), mode],
                            env=lifecycle_env, check=True, timeout=60)
+        failure = subprocess.run(
+            [sys.executable, str(Path(__file__).with_name("lifecycle.py")), "retain-release-failure"],
+            env=lifecycle_env, capture_output=True, text=True, timeout=60)
+        assert failure.returncode == -signal.SIGABRT, failure
+        assert "unrecoverable state change" in failure.stderr, failure.stderr
         blocker = temporary / "multicast-block.so"
         subprocess.run([
             "/usr/bin/gcc", "-std=c11", "-Wall", "-Wextra", "-Werror",
