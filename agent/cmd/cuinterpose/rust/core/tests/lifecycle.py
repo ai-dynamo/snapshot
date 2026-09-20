@@ -81,22 +81,28 @@ def main():
         class Access(c.Structure):
             _fields_ = [("location", Location), ("flags", c.c_uint)]
         cuda.cuMemSetAccess.argtypes = [u64, size, c.POINTER(Access), size]
+        native = u64()
+        native_properties = Properties.from_buffer_copy(props)
+        native_properties.handles = 0
+        assert cuda.cuMemCreate(c.byref(native), length, c.byref(native_properties), 0) == 0
+        assert cuda.cuMemMap(address - length, length, 0, native, 0) == 0
         second = u64()
         assert cuda.cuMemCreate(c.byref(second), length, c.byref(props), 0) == 0
         assert cuda.cuMemMap(address + length, length, 0, second, 0) == 0
         access = Access(Location(1, 0), 3)
-        assert cuda.cuMemSetAccess(address, 2 * length, c.byref(access), 1) == 0
+        assert cuda.cuMemSetAccess(address - length, 3 * length, c.byref(access), 1) == 0
         records = command("inspect")["records"]
         mappings = [r["mapping"] for r in records if "mapping" in r]
         assert len(mappings) == 2 and all(m["access"] == [[1, 0, 3]] for m in mappings), mappings
         # Failed driver calls leave both records unchanged.
         cuda.fakeFailNext(b"cuMemSetAccess")
         access.flags = 1
-        assert cuda.cuMemSetAccess(address, 2 * length, c.byref(access), 1) != 0
+        assert cuda.cuMemSetAccess(address - length, 3 * length, c.byref(access), 1) != 0
         assert command("inspect")["records"] == records
         assert cuda.cuMemRelease(handle) == 0
         assert cuda.cuMemRelease(second) == 0
-        assert cuda.cuMemUnmap(address, 2 * length) == 0
+        assert cuda.cuMemUnmap(address - length, 3 * length) == 0
+        assert cuda.cuMemRelease(native) == 0
         assert command("inspect")["records"] == []
         return
     if mode == "retain-release-failure":
