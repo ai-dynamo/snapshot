@@ -68,13 +68,12 @@ requires cross-node capture, restore, and post-restore workload inference.
 | `core` | Driver calls, process runtimes, tracking, host carriers, lifecycle |
 | `coordinator` | CLI, participants, topology validation, barriers, durable state |
 
-The private C ABI is version **1**. The MessagePack wire/state format, virtual
+The private C ABI is version **2**. The MessagePack wire/state format, virtual
 shareable handle, and virtual IPC memory handle are version **2**.
 Earlier experimental artifacts are rejected, not translated. Rust
 objects, allocators, mutexes, and unwinding never cross the library boundary.
-`FrontendAbi` contains the resolver and process identity supplied by the C
-frontend; `BackendAbi` contains the lifecycle and CUDA callbacks supplied by
-the Rust backend.
+`FrontendAbi` contains the resolver supplied by the C frontend; `BackendAbi`
+contains the initialization and memory callbacks supplied by the Rust backend.
 The frontend is outside this workspace in `../frontend`. `make frontend`
 uses cbindgen 0.29.4 to generate the C header from the ABI crate's explicit
 `repr(C)` tables, then compiles it with GCC. The pinned cbindgen CLI reads
@@ -127,10 +126,13 @@ ambiguous phases are never retried, rolled back, or resumed. Per-object progress
 flags are unnecessary because a mutation failure terminates the process.
 Never-shared allocations remain native-owned even when exportable.
 
-Fork resets the child's shim runtime and closes inherited shim-owned
-descriptors; it does not make CUDA use after arbitrary multithreaded fork safe.
-Prefer spawn/exec. Failed destructive capture or reconstruction cannot safely
-resume the application. Unknown asynchronous-copy completion is fail-stop.
+Successful intercepted `cuInit` starts the shim; function lookup creates no
+workers or endpoint. Fork before CUDA initialization allows each child to
+initialize independently. After CUDA initialization, children must exec or exit;
+CUDA initialization errors propagate, and shim memory calls reject inherited
+runtime state before taking any lock. Shim-owned FDs are close-on-exec.
+Long-lived fork children during checkpoint are outside this contract.
+Failed destructive capture or reconstruction cannot safely resume the application. Unknown asynchronous-copy completion is fail-stop.
 Host carriers are the only shim storage implementation. They save shared creator
 bytes; private allocations remain native CUDA state. There is no PageBroker
 client, backend selection, or save-all mode in the shim.

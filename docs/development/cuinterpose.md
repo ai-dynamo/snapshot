@@ -61,7 +61,7 @@ The backend separates CUDA API policy from resource ownership:
 | --- | --- |
 | `handlers.rs` | Argument validation, native versus tracked decisions, and API-level orchestration. |
 | `driver.rs` | Real CUDA calls and temporary context switching. |
-| `runtime/` | Runtime installation, sticky failure, registered sockets, fork cleanup, and control workers. |
+| `runtime/` | Runtime installation, process ownership, sticky failure, and control workers. |
 | `memory/mod.rs` | The resource registry, virtual handle ownership, and tracked address ranges. |
 | `memory/vmm.rs` | Unicast backing adoption, retain/map bookkeeping, and access permissions. |
 | `memory/sharing.rs` | Shareable-handle encoding, exact-PID peer requests, cached exports, and imports. |
@@ -113,12 +113,13 @@ Loading the backend and starting its runtime are separate operations:
 
 | Operation | Concurrency and lifetime |
 | --- | --- |
-| ABI registration (`cuinterpose_core_init`) | Copies the frontend table and returns an immutable backend table. Repeated or concurrent registrations must agree on the resolver and origin PID. It starts no workers and makes no frontend callbacks. |
+| ABI registration (`cuinterpose_core_init`) | Copies the frontend table and returns an immutable backend table. Repeated or concurrent registrations must agree on the resolver. It starts no workers and makes no frontend callbacks. |
 | Frontend publication | Concurrent callers may each `dlopen` the backend; glibc serializes its construction. Atomic publication retains one process-lifetime library reference and closes redundant references. Same-thread constructor reentry returns `CUDA_ERROR_NOT_INITIALIZED` without poisoning a later call. |
-| Runtime startup | CUDA callbacks and `ensure_cuinterpose_initialized` prepare private candidates, then install one process runtime, control socket, and worker pair. Concurrent callers reuse the installed runtime; same-thread preparation reentry returns `CUDA_ERROR_NOT_INITIALIZED` without poisoning it. |
+| Runtime startup | Only successful intercepted `cuInit` calls `ensure_cuinterpose_initialized`, which prepares private candidates and installs one process runtime, control socket, and worker pair. Concurrent callers reuse the installed runtime; same-thread preparation reentry returns `CUDA_ERROR_NOT_INITIALIZED` without poisoning it. |
 
 There is no frontend-wide loading lock. The backend's installation lock remains
-necessary for unique runtime resources and quiescent-fork coordination.
+necessary for unique runtime resources. A `OnceLock` publishes the completed
+runtime; its initializer never performs loader-sensitive startup.
 Obtaining the ABI table alone does not mean runtime services are ready.
 
 ### Backend runtime installation
@@ -153,7 +154,8 @@ workers per contender, but only one installed pair.
 Installed failure is checked before installed state. A failed private candidate
 may reuse an already-installed healthy winner; it never waits for an unfinished
 candidate. Without a winner, a real preparation or installation error remains
-sticky. No call bypasses tracking to reach CUDA after initialization failure.
+sticky. Memory calls require a ready runtime owned by the calling PID; they never start
+it themselves. Function lookup remains independent of runtime readiness.
 
 The bounded commit path is audited for the pinned Rust/Linux/glibc implementation:
 
@@ -163,15 +165,15 @@ The bounded commit path is audited for the pinned Rust/Linux/glibc implementatio
 - The capacity-one activation channel is preallocated. `try_send` never enters
   blocking-send context initialization; wakeups use non-Drop TLS and futex
   unparking. Receiver context setup happens before its waker lock is held.
-- Bind/listen, nonblocking setup, chmod, and descriptor registration make no
-  frontend callbacks or formatted/logging calls. The descriptor registry can
-  grow its Vec using ordinary glibc allocation; arbitrary allocator/libc
-  interposers that call the loader are outside this assumption.
+- Bind/listen, nonblocking setup, and chmod make no frontend callbacks or
+  formatted/logging calls. Arbitrary allocator/libc interposers that call the
+  loader are outside this assumption.
 
-Fork remains supported only with CUDA/lifecycle calls and active RPC quiescent.
-Retiring private workers have no runtime reference or socket. This does not
-promise safe arbitrary fork during preparation or reclaim every inherited
-allocation belonging to a vanished thread.
+Lookup alone starts no workers and creates no endpoint. Fork before CUDA
+initialization permits independent initialization in each child. Once CUDA is
+initialized, fork children must exec or exit; they cannot restart the shim.
+Fork during initialization and long-lived fork children during checkpoint are
+outside this contract.
 
 Rust panics at backend entry points terminate the process without unwinding through the C ABI. The shim cannot continue after a panic that may have interrupted a state-changing operation. This does not make invalid application pointers, foreign C++ exceptions, or allocator aborts recoverable.
 
@@ -208,8 +210,10 @@ directory or asking shims to identify themselves. Its first capture request is
 keys saved in `cuinterpose.state`.
 
 CRIU preserves namespace PIDs, allocation IDs, state records, virtual allocation
-handles, and virtual handle bytes in process memory. A forked child gets its own
-namespace PID and listener, while restore recreates the captured namespace PID.
+handles, and virtual handle bytes in process memory. Restore recreates the
+captured namespace PID, so the runtime ownership check continues to match.
+A child forked before CUDA initialization gets its own runtime on successful
+`cuInit`.
 
 For example, suppose A creates a 2 MiB allocation and B imports it:
 
@@ -325,7 +329,7 @@ Application CUDA wrappers run on the calling application thread. On runtime star
 
 The peer thread queues control commands; it does not wait for their CUDA operations. A bounded queue refuses excess control requests. This separation lets an importer obtain an FD even while the creator's control thread is busy reconstructing another object.
 
-Allocation and mapping changes normally hold the shim's state mutex. Application multicast calls that can block waiting for other devices, and IPC synchronization, release that mutex around the driver call. One `unlocked_driver_calls` counter prevents checkpoint entry until they have returned and recorded their results. The application must synchronize object destruction against calls using that object; the shim has no per-object pins or busy counts. During restore the application stays parked, so reconstruction holds the state mutex and updates records directly. The peer listener holds the export-cache mutex through each socket send. Cache removal, checkpoint teardown, and fork take the same mutex, so they wait for that send to finish. Sends use the socket timeout; a slow receiver can delay cache mutations until the send finishes or fails.
+Allocation and mapping changes normally hold the shim's state mutex. Application multicast calls that can block waiting for other devices, and IPC synchronization, release that mutex around the driver call. One `unlocked_driver_calls` counter prevents checkpoint entry until they have returned and recorded their results. The application must synchronize object destruction against calls using that object; the shim has no per-object pins or busy counts. During restore the application stays parked, so reconstruction holds the state mutex and updates records directly. The peer listener holds the export-cache mutex through each socket send. Cache removal and checkpoint teardown take the same mutex, so they wait for that send to finish. Sends use the socket timeout; a slow receiver can delay cache mutations until the send finishes or fails.
 
 `ProcessState` owns one memblock registry keyed by allocation ID. Each `Memblock`
 is either a unicast `Allocation` or a `MulticastObject`; virtual handles and
@@ -369,7 +373,12 @@ import(virtual_shareable_handle):
     return the virtual handle, or map an address for memory IPC
 ```
 
-Fork handlers lock metadata, close inherited shim descriptors in the child, and discard its inherited CUDA records. The child's next CUDA activity creates a listener named with its own namespace PID. This does not make arbitrary CUDA use after a multithreaded fork safe; CUDA and shim activity must be quiescent at fork. Prefer spawn/exec.
+The runtime records its creating PID and rejects inherited state before taking
+any mutex. There are no at-fork handlers or child-runtime resets. Real `cuInit`
+errors propagate unchanged; memory wrappers return `CUDA_ERROR_NOT_INITIALIZED`
+when no current-process runtime exists. Shim-owned sockets and cached export FDs
+are close-on-exec. They remain inherited until exec or exit; the shim does not
+support checkpointing a long-lived child forked after CUDA initialization.
 
 ## Capture
 
@@ -621,7 +630,7 @@ cuinterpose:
 
 `requested` records workload opt-in; `prepared` records successful coordinator preparation and state publication. `format: 2` identifies the agent's artifact contract. The MessagePack envelope is also version `2`. A prepared checkpoint must also have CUDA process metadata and readable cuinterpose state. Missing or different formats and old `cuda-checkpoint-job` artifacts are rejected before CRIU.
 
-The private frontend/backend ABI is version **1**. The MessagePack protocol and state envelope, virtual shareable handle, and virtual IPC memory handle are version **2**. Older draft artifacts, including shim PageBroker artifacts, are not migrated or silently interpreted as host-carrier checkpoints.
+The private frontend/backend ABI is version **2**. The MessagePack protocol and state envelope, virtual shareable handle, and virtual IPC memory handle are version **2**. Older draft artifacts, including shim PageBroker artifacts, are not migrated or silently interpreted as host-carrier checkpoints.
 
 The shim libraries themselves are part of the checkpointed process. Their files must be available at the original paths, and the coordinator must understand their protocol. Ship a matching frontend, backend, and coordinator set; the format checks are not permission to substitute arbitrary library builds.
 
