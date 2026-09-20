@@ -172,17 +172,15 @@ func RemoveStaleCuinterposeSockets(controlDir string, namespacePIDs []int) (int,
 
 // CoordinatorPhase is one JSON progress report from the coordinator.
 type CoordinatorPhase struct {
-	Phase                          string   `json:"phase"`
-	Status                         string   `json:"status"`
-	ElapsedMS                      float64  `json:"elapsed_ms"`
-	Participants                   uint64   `json:"participants"`
-	Records                        *uint64  `json:"records,omitempty"`
-	LiveRawImports                 *uint64  `json:"live_raw_imports,omitempty"`
-	UnsupportedExportableCreations *uint64  `json:"unsupported_exportable_creations,omitempty"`
-	AllocationCount                *uint64  `json:"allocation_count,omitempty"`
-	AllocationBytes                *uint64  `json:"allocation_bytes,omitempty"`
-	GBPerS                         *float64 `json:"gb_per_s,omitempty"`
-	CopyGBPerS                     *float64 `json:"copy_gb_per_s,omitempty"`
+	Phase           string   `json:"phase"`
+	Status          string   `json:"status"`
+	ElapsedMS       float64  `json:"elapsed_ms"`
+	Participants    uint64   `json:"participants"`
+	Records         *uint64  `json:"records,omitempty"`
+	AllocationCount *uint64  `json:"allocation_count,omitempty"`
+	AllocationBytes *uint64  `json:"allocation_bytes,omitempty"`
+	GBPerS          *float64 `json:"gb_per_s,omitempty"`
+	CopyGBPerS      *float64 `json:"copy_gb_per_s,omitempty"`
 }
 
 // PrepareCuinterpose runs the coordinator in the live target container's mount,
