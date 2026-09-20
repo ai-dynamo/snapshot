@@ -5,14 +5,14 @@
 
 use crate::driver::{self};
 use crate::driver::{CudaError, Result};
+use crate::memory::multicast::{self, BindInput};
 use crate::memory::{self, Memblock, VirtualAllocationHandle};
 use crate::memory::{ipc, sharing};
 use crate::runtime;
 use cudarc::driver::sys::CUresult::*;
 use cudarc::driver::sys::*;
-use runtime::active;
-use crate::memory::multicast::{self, BindInput};
 use cuinterpose_protocol::BindingVersion;
+use runtime::active;
 use std::ffi::c_void;
 use std::os::fd::IntoRawFd;
 
@@ -257,33 +257,23 @@ pub fn cuMulticastCreate(out: *mut u64, properties: *const CUmulticastObjectProp
         return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
     }
     let properties = unsafe { *properties };
-    let state = runtime::active()?;
-    let id = memory::random()?;
-    let (mut state, driver) = multicast::create_backing(state, &properties, out)?;
-    let driver = VirtualAllocationHandle::from_driver(driver)?;
     if properties.handleTypes
         != u64::from(CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0)
     {
-        if properties.handleTypes != 0 {
-            state.unsupported += 1;
-        }
-        unsafe {
-            out.write(driver);
-        }
-        return Ok(());
+        return Err(CUDA_ERROR_NOT_SUPPORTED.into());
     }
-    let handle = state.adopt_multicast(id, driver, properties)?;
+    let state = runtime::active()?;
+    let id = memory::random()?;
+    let (mut state, driver) = multicast::create_backing(state, &properties, out)?;
+    let driver = runtime::must_complete(VirtualAllocationHandle::from_driver(driver));
+    let handle = runtime::must_complete(state.adopt_multicast(id, driver, properties));
     unsafe { out.write(handle) };
     Ok(())
 }
 
 pub fn cuMulticastAddDevice(handle: u64, device: i32) -> Result<()> {
     let state = runtime::active()?;
-    let Some(id) = state.tracked(handle)? else {
-        drop(state);
-        unsafe { crate::driver::cuMulticastAddDevice(handle, device) }?;
-        return Ok(());
-    };
+    let id = state.tracked(handle)?.ok_or(CUDA_ERROR_NOT_SUPPORTED)?;
     multicast::add_device(state, id, device)
 }
 
@@ -380,11 +370,7 @@ pub fn cuMulticastGetGranularity(
 
 pub fn cuMulticastUnbind(handle: u64, device: i32, offset: usize, size: usize) -> Result<()> {
     let mut state = runtime::active()?;
-    let Some(id) = state.tracked(handle)? else {
-        drop(state);
-        unsafe { crate::driver::cuMulticastUnbind(handle, device, offset, size) }?;
-        return Ok(());
-    };
+    let id = state.tracked(handle)?.ok_or(CUDA_ERROR_NOT_SUPPORTED)?;
     let object = state
         .memblocks
         .get_mut(&id)

@@ -217,9 +217,6 @@ impl ProcessState {
                 if handle_live || mapped {
                     return Ok(());
                 }
-                if object.inflight != 0 || object.checkpointed {
-                    return Err(CudaError::from(CUDA_ERROR_NOT_READY));
-                }
                 cache()?.remove(&id)?;
                 if let Some(driver) = object.driver {
                     unsafe { crate::driver::cuMemRelease(driver) }?;

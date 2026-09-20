@@ -265,7 +265,10 @@ impl ProcessState {
                 }
                 self.remap(false)?;
             }
-            _ => return Err(CudaError::from(CUDA_ERROR_NOT_SUPPORTED)),
+            Operation::RestoreMulticastCreators
+            | Operation::RestoreMulticastImporters
+            | Operation::RestoreMulticastDevices
+            | Operation::RestoreMulticastBindings => super::multicast::restore(self, operation)?,
         }
         self.phase = next_phase;
         Ok(Transfer { bytes, copy_us })
