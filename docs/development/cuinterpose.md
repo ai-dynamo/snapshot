@@ -107,7 +107,7 @@ The frontend handles direct CUDA symbol calls, `dlsym`, `cuGetProcAddress*`, and
 
 The frontend obtains glibc's real `dlsym` with `dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.34")`. On first relevant CUDA activity it loads the adjacent Rust backend with `RTLD_LAZY | RTLD_LOCAL`. This is glibc-based lookup, not a custom ELF loader. The frontend's linker export list exposes only its intended CUDA/resolver functions; `-Bsymbolic-functions` keeps its own internal function references local.
 
-The private C ABI contains `FrontendAbi` and `BackendAbi` tables. Cbindgen generates the table declarations, while NVIDIA's `cuda.h` supplies C CUDA types and cudarc supplies the corresponding Rust definitions. Backend driver calls use the frontend resolver; cudarc's loader and buffer/context wrappers are not used. Rust objects and ownership do not cross the ABI.
+The private C ABI contains `FrontendAbi` and `BackendAbi` tables. Cbindgen generates the table declarations, while NVIDIA's `cuda.h` supplies C CUDA types and cudarc supplies the corresponding Rust definitions. Runtime preparation resolves the backend's driver function table through the frontend before acquiring the installation or process-state mutex. It publishes the completed table without running loader calls inside a `OnceLock` initializer. Backend driver calls then use cached pointers, including context and cleanup calls; missing optional symbols fail only when used. CUDA providers remain loaded for the process lifetime. Cudarc's loader and buffer/context wrappers are not used. Rust objects and ownership do not cross the ABI.
 
 Loading the backend and starting its runtime are separate operations:
 
