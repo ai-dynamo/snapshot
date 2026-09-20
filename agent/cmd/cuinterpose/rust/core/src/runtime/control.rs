@@ -43,9 +43,9 @@ impl PreparedWorkers {
             .name("cuinterpose-control".into())
             .spawn(move || {
                 while let Ok((socket, request)) = receiver.recv() {
-                    crate::boundary::call(&super::RUNTIME_FAILED, (), || {
+                    if !super::RUNTIME_FAILED.load(Ordering::Acquire) {
                         let _ = serve(socket, request, namespace_pid);
-                    });
+                    }
                 }
             })
             .map_err(|error| {
@@ -74,9 +74,9 @@ impl PreparedWorkers {
                     let Ok(socket) = listener.accept().map(|(socket, _)| socket) else {
                         continue;
                     };
-                    crate::boundary::call(&super::RUNTIME_FAILED, (), || {
+                    if !super::RUNTIME_FAILED.load(Ordering::Acquire) {
                         let _ = dispatch(socket, namespace_pid, &sender);
-                    });
+                    }
                 }
             });
         if let Err(error) = started {
