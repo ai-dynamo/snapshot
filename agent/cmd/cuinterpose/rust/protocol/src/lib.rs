@@ -20,7 +20,7 @@ use std::{
     time::Duration,
 };
 #[doc(inline)]
-pub use transport::{receive, send};
+pub use transport::{connect, receive, send};
 
 pub const VERSION: u8 = 2;
 // Bound allocations controlled by socket frame prefixes and checkpoint files.

@@ -11,6 +11,25 @@ use std::io::{self, IoSlice, IoSliceMut, Read, Write};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::UnixStream;
+use std::path::Path;
+use std::time::Duration;
+
+/// Connect to a local peer with a bounded wait for space in its listen queue.
+///
+/// # Errors
+/// Returns socket creation, timeout configuration, or connection errors.
+pub fn connect(path: &Path, timeout: Duration) -> io::Result<UnixStream> {
+    use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType, socket_with};
+    use rustix::net::sockopt::{Timeout, set_socket_timeout};
+
+    let address = SocketAddrUnix::new(path)?;
+    let socket = socket_with(AddressFamily::UNIX, SocketType::STREAM, SocketFlags::CLOEXEC, None)?;
+    // Linux SO_SNDTIMEO bounds blocking AF_UNIX connect as well as writes.
+    // Set it before connecting; read/write timeouts set afterwards cannot bound connect.
+    set_socket_timeout(&socket, Timeout::Send, Some(timeout))?;
+    rustix::net::connect(&socket, &address)?;
+    Ok(UnixStream::from(socket))
+}
 
 /// Sends one bounded message, optionally transferring a borrowed descriptor.
 ///
