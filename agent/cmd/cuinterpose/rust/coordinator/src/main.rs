@@ -14,7 +14,7 @@ use cuinterpose_protocol::{
 };
 use report::{Event, Transfer, write as report};
 use std::collections::BTreeSet;
-use std::os::unix::net::{SocketAddr, UnixStream};
+use std::os::unix::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use topology::AllocationSummary;
@@ -42,7 +42,7 @@ struct Peer {
 // Transport errors retain their cause; remote refusals are application errors.
 fn exchange(endpoint: &Path, request: &Request) -> Result<Response> {
     let display = endpoint.display();
-    let socket = UnixStream::connect(endpoint)
+    let socket = protocol::connect(endpoint, protocol::timeout(None))
         .with_context(|| format!("{display}: {request:?}: connect failed"))?;
     let operation = match request {
         Request::Execute { operation, .. } => Some(*operation),
