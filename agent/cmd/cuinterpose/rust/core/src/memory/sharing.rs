@@ -6,7 +6,7 @@
 use super::checkpoint::Phase;
 use super::{Memblock, ProcessState, VirtualAllocationHandle};
 use crate::driver::{CudaError, Result, context};
-use crate::runtime::{self, cache};
+use crate::runtime::{self, export_cache};
 use cudarc::driver::sys::CUresult::*;
 use cudarc::driver::sys::{CUmemAllocationProp, CUmulticastObjectProp};
 use cuinterpose_protocol::{
@@ -184,9 +184,9 @@ impl Memblock {
     /// Publish the creator's export without making peer service acquire ProcessState.
     pub fn export(&mut self, namespace_pid: NamespacePid) -> Result<AllocationReference> {
         let reference = self.reference();
-        if reference.creator_pid == namespace_pid && !cache()?.contains(&reference.id)? {
+        if reference.creator_pid == namespace_pid && !export_cache()?.contains(&reference.id)? {
             let fd = crate::driver::export_posix(self.driver_handle()?)?;
-            cache()?.insert(reference.id, fd, None)?;
+            export_cache()?.insert(reference.id, fd, None)?;
         }
         match self {
             Self::Unicast(allocation) => {

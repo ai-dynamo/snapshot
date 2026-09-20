@@ -12,7 +12,7 @@ use crate::runtime;
 use checkpoint::Phase;
 use cudarc::driver::sys::CUresult::*;
 use cuinterpose_protocol::{AllocationId, AllocationReference, NamespacePid};
-use runtime::cache;
+use runtime::export_cache;
 use std::collections::BTreeMap;
 use vmm::{Allocation, Mapping};
 
@@ -186,7 +186,7 @@ impl ProcessState {
                 if handle_live || mapped {
                     return Ok(());
                 }
-                cache()?.remove(&id)?;
+                export_cache()?.remove(&id)?;
             }
         }
         self.memblocks.remove(&id);

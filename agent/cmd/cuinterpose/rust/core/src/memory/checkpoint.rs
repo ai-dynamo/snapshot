@@ -11,7 +11,7 @@ use crate::runtime;
 use cudarc::driver::sys::CUresult::*;
 use cuinterpose_protocol::Operation;
 use cuinterpose_protocol::Reply;
-use runtime::cache;
+use runtime::export_cache;
 use std::ffi::c_void;
 use std::os::fd::AsFd;
 
@@ -133,7 +133,7 @@ impl ProcessState {
             Operation::PrepareMulticast => {}
 
             Operation::PrepareUnicast => {
-                cache()?.clear()?;
+                export_cache()?.clear()?;
                 for allocation in self
                     .memblocks
                     .values_mut()
@@ -230,7 +230,7 @@ impl ProcessState {
                         let fd = crate::driver::export_posix(
                             allocation.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?,
                         )?;
-                        cache()?.insert(allocation.reference.id, fd, None)?;
+                        export_cache()?.insert(allocation.reference.id, fd, None)?;
                     }
                     if !self
                         .virtual_allocation_handles

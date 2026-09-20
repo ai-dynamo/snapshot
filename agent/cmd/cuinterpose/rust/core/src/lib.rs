@@ -27,7 +27,7 @@ use std::ffi::{CStr, c_void};
 use std::sync::OnceLock;
 
 static G_FRONTEND_ABI: OnceLock<FrontendAbi> = OnceLock::new();
-use runtime::G_FAILED;
+use runtime::RUNTIME_FAILED;
 
 fn driver(name: &CStr) -> *mut c_void {
     match G_FRONTEND_ABI.get() {
@@ -40,10 +40,10 @@ macro_rules! exports {
     ($($name:ident($($arg:ident: $ty:ty),*);)*) => {
         $(
             unsafe extern "C" fn $name($($arg: $ty),*) -> CUresult {
-                if G_FAILED.load(std::sync::atomic::Ordering::Acquire) {
+                if RUNTIME_FAILED.load(std::sync::atomic::Ordering::Acquire) {
                     return CUDA_ERROR_NOT_READY;
                 }
-                boundary::call(&G_FAILED, CUDA_ERROR_UNKNOWN, || {
+                boundary::call(&RUNTIME_FAILED, CUDA_ERROR_UNKNOWN, || {
                     if let Err(code) = runtime::initialize() { return code.0; }
                     let result = handlers::$name($($arg),*);
                     result.map_or_else(|code| code.0, |()| CUDA_SUCCESS)
@@ -75,7 +75,7 @@ exports! {
 }
 
 unsafe extern "C" fn ensure_cuinterpose_initialized() -> CUresult {
-    boundary::call(&G_FAILED, CUDA_ERROR_NOT_INITIALIZED, || {
+    boundary::call(&RUNTIME_FAILED, CUDA_ERROR_NOT_INITIALIZED, || {
         runtime::initialize().map_or_else(|error| error.0, |()| CUDA_SUCCESS)
     })
 }
@@ -97,7 +97,7 @@ pub unsafe extern "C" fn cuinterpose_core_init(
     frontend: *const FrontendAbi,
     output: *mut *const BackendAbi,
 ) -> CUresult {
-    boundary::call(&G_FAILED, CUDA_ERROR_UNKNOWN, || {
+    boundary::call(&RUNTIME_FAILED, CUDA_ERROR_UNKNOWN, || {
         if frontend.is_null() || output.is_null() {
             return CUDA_ERROR_INVALID_VALUE;
         }
