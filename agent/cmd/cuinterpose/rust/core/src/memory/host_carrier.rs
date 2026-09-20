@@ -425,6 +425,7 @@ mod tests {
                 })
                 .is_ok()
         );
+        crate::driver::initialize();
         Context::enter(1, 0).unwrap().leave().unwrap();
         assert_eq!(G_SWITCHED.load(Ordering::Relaxed), 0);
         assert_eq!(
