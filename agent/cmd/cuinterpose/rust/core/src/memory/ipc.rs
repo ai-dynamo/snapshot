@@ -32,16 +32,11 @@ struct VirtualIpcMemHandle {
     pub(crate) requested: [u8; 8],
     extent: [u8; 8],
 }
-const VIRTUAL_IPC_MEM_HANDLE_MAGIC: [u8; 8] = [
-    b'C',
-    b'U',
-    b'I',
-    b'P',
-    b'C',
-    b'0',
-    b'0',
-    b'0' + PROTOCOL_VERSION,
-];
+const VIRTUAL_IPC_MEM_HANDLE_MAGIC: [u8; 8] = {
+    let mut magic = *b"CUIPC000";
+    magic[7] += PROTOCOL_VERSION;
+    magic
+};
 const _: () = assert!(size_of::<VirtualIpcMemHandle>() == size_of::<CUipcMemHandle>());
 
 impl VirtualIpcMemHandle {
