@@ -7,7 +7,6 @@
 //! locks, allocation storage, and panic state never cross the library boundary.
 
 #![allow(non_snake_case, reason = "CUDA dispatch mirrors the NVIDIA ABI names")]
-mod boundary;
 mod driver;
 mod handlers;
 mod memory;
@@ -22,11 +21,11 @@ use cudarc::driver::sys::{
     CUmulticastGranularity_flags, CUmulticastObjectProp, CUresult,
 };
 use cuinterpose_abi::*;
+use runtime::RUNTIME_FAILED;
 use std::ffi::{CStr, c_void};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, atomic::Ordering};
 
 static G_FRONTEND_ABI: OnceLock<FrontendAbi> = OnceLock::new();
-use runtime::RUNTIME_FAILED;
 
 fn driver(name: &CStr) -> *mut c_void {
     match G_FRONTEND_ABI.get() {
@@ -42,10 +41,7 @@ macro_rules! exports {
                 if let Err(error) = runtime::ready() {
                     return error.0;
                 }
-                boundary::call(&RUNTIME_FAILED, CUDA_ERROR_UNKNOWN, || {
-                    let result = handlers::$name($($arg),*);
-                    result.map_or_else(|code| code.0, |()| CUDA_SUCCESS)
-                })
+                handlers::$name($($arg),*).map_or_else(|code| code.0, |()| CUDA_SUCCESS)
             }
         )*
         static G_BACKEND_ABI: BackendAbi = BackendAbi {
@@ -70,9 +66,10 @@ exports! {
 }
 
 unsafe extern "C" fn ensure_cuinterpose_initialized() -> CUresult {
-    boundary::call(&RUNTIME_FAILED, CUDA_ERROR_NOT_INITIALIZED, || {
-        runtime::initialize().map_or_else(|error| error.0, |()| CUDA_SUCCESS)
-    })
+    if RUNTIME_FAILED.load(Ordering::Acquire) {
+        return CUDA_ERROR_NOT_INITIALIZED;
+    }
+    runtime::initialize().map_or_else(|error| error.0, |()| CUDA_SUCCESS)
 }
 
 /// Registers the frontend and returns the immutable process-lifetime table.
@@ -92,29 +89,30 @@ pub unsafe extern "C" fn cuinterpose_core_init(
     frontend: *const FrontendAbi,
     output: *mut *const BackendAbi,
 ) -> CUresult {
-    boundary::call(&RUNTIME_FAILED, CUDA_ERROR_UNKNOWN, || {
-        if frontend.is_null() || output.is_null() {
-            return CUDA_ERROR_INVALID_VALUE;
-        }
-        // A mismatched frontend may supply only the version/size prefix. Check it
-        // before reading the resolver field or copying the full structure.
-        let version = unsafe { std::ptr::addr_of!((*frontend).version).read() };
-        let size = unsafe { std::ptr::addr_of!((*frontend).size).read() };
-        if version != ABI_VERSION || size as usize != size_of::<FrontendAbi>() {
-            return CUDA_ERROR_INVALID_VALUE;
-        }
-        let frontend = unsafe { *frontend };
-        // Only copy the table while initializing OnceLock. Loader operations,
-        // callbacks and worker startup here could deadlock a constructor caller.
-        let existing = G_FRONTEND_ABI.get_or_init(|| frontend);
-        if existing.resolve as usize != frontend.resolve as usize {
-            return CUDA_ERROR_INVALID_VALUE;
-        }
-        unsafe {
-            *output = &G_BACKEND_ABI;
-        }
-        CUDA_SUCCESS
-    })
+    if RUNTIME_FAILED.load(Ordering::Acquire) {
+        return CUDA_ERROR_UNKNOWN;
+    }
+    if frontend.is_null() || output.is_null() {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    // A mismatched frontend may supply only the version/size prefix. Check it
+    // before reading the resolver field or copying the full structure.
+    let version = unsafe { std::ptr::addr_of!((*frontend).version).read() };
+    let size = unsafe { std::ptr::addr_of!((*frontend).size).read() };
+    if version != ABI_VERSION || size as usize != size_of::<FrontendAbi>() {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    let frontend = unsafe { *frontend };
+    // Only copy the table while initializing OnceLock. Loader operations,
+    // callbacks and worker startup here could deadlock a constructor caller.
+    let existing = G_FRONTEND_ABI.get_or_init(|| frontend);
+    if existing.resolve as usize != frontend.resolve as usize {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    unsafe {
+        *output = &G_BACKEND_ABI;
+    }
+    CUDA_SUCCESS
 }
 
 #[cfg(test)]
