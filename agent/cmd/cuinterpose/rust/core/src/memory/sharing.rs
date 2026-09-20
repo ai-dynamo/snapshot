@@ -17,7 +17,7 @@ use std::fs::File;
 use std::io::Write;
 use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::{fs::FileExt, net::UnixStream};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::Mutex;
 
 pub fn create(reference: AllocationReference) -> protocol::Result<OwnedFd> {
     let bytes = protocol::encode_virtual_shareable_handle(reference)?;
