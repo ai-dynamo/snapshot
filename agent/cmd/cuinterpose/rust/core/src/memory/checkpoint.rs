@@ -137,7 +137,7 @@ impl ProcessState {
                     .memblocks
                     .values()
                     .filter_map(Memblock::unicast)
-                    .filter(|a| a.owns_content(self.namespace_pid))
+                    .filter(|a| a.needs_content_checkpoint(self.namespace_pid))
                     .map(|a| a.reference.id)
                     .collect();
                 let mut allocations = Vec::new();
@@ -213,7 +213,7 @@ impl ProcessState {
                     .memblocks
                     .values()
                     .filter_map(Memblock::unicast)
-                    .filter(|a| a.owns_content(self.namespace_pid))
+                    .filter(|a| a.needs_content_checkpoint(self.namespace_pid))
                     .map(AllocationContent::from)
                     .collect();
                 bytes = allocations.iter().try_fold(0u64, |sum, a| {
