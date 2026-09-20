@@ -89,7 +89,7 @@ impl ProcessState {
             .and_then(Memblock::unicast_mut)
             .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
         if allocation.driver.is_some() {
-            let _ = unsafe { crate::driver::cuMemRelease(driver) };
+            unsafe { crate::driver::cuMemRelease(driver) }?;
         } else {
             allocation.driver = Some(driver);
         }

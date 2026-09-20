@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! One typed boundary for CUDA entry points, resolved through the frontend.
-//! Signatures follow NVIDIA cuda.h/cudaTypedefs.h; optional symbols stay lazy.
+//! Signatures follow NVIDIA cuda.h/cudaTypedefs.h; missing optional symbols fail on use.
 //! Raw calls retain driver-written outputs even on failure.
 //! cudarc supplies CUDA types/constants, not its loader or safe resource owners.
 
@@ -72,18 +72,38 @@ impl CudaError {
 
 macro_rules! functions {
     ($($name:ident($($arg:ident: $ty:ty),*);)*) => {
-        pub mod symbols {
-            use super::*;
-            $(
-                pub fn $name() -> Result<unsafe extern "C" fn($($ty),*) -> CUresult> {
+        struct Symbols {
+            $($name: Option<unsafe extern "C" fn($($ty),*) -> CUresult>,)*
+        }
+        static SYMBOLS: std::sync::OnceLock<Symbols> = std::sync::OnceLock::new();
+
+        pub(crate) fn initialize() {
+            // Resolve privately: neither a state mutex nor OnceLock initialization
+            // may be held while the frontend enters the dynamic loader. Concurrent
+            // runtime candidates can publish equivalent tables without waiting.
+            let symbols = Symbols {
+                $($name: {
                     let address = crate::driver(
                         std::ffi::CStr::from_bytes_with_nul(
                             concat!(stringify!($name), "\0").as_bytes()).expect("static CUDA symbol"));
                     if address.is_null() {
-                        return Err(CudaError::from(CUDA_ERROR_NOT_INITIALIZED));
+                        None
+                    } else {
+                        // The frontend resolves this exact NVIDIA driver signature.
+                        Some(unsafe { std::mem::transmute::<*mut c_void,
+                            unsafe extern "C" fn($($ty),*) -> CUresult>(address) })
                     }
-                    // The frontend resolves this exact NVIDIA driver signature.
-                    Ok(unsafe { std::mem::transmute::<*mut c_void, unsafe extern "C" fn($($ty),*) -> CUresult>(address) })
+                },)*
+            };
+            let _ = SYMBOLS.set(symbols);
+        }
+
+        pub mod symbols {
+            use super::*;
+            $(
+                pub fn $name() -> Result<unsafe extern "C" fn($($ty),*) -> CUresult> {
+                    SYMBOLS.get().and_then(|symbols| symbols.$name)
+                        .ok_or(CudaError::from(CUDA_ERROR_NOT_INITIALIZED))
                 }
             )*
         }

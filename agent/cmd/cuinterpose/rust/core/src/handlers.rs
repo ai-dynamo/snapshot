@@ -114,7 +114,12 @@ pub fn cuMemMap(address: u64, size: usize, offset: usize, handle: u64, flags: u6
 pub fn cuMemUnmap(address: u64, size: usize) -> Result<()> {
     let mut state = active()?;
     unsafe { crate::driver::cuMemUnmap(address, size) }?;
-    if let Some(mapping) = state.mappings.remove(&address) {
+    // CUDA only unmaps whole mappings; a successful range can contain several.
+    let addresses: Vec<_> = state.mappings.range(address..)
+        .take_while(|(start, _)| **start - address < size as u64)
+        .map(|(start, _)| *start).collect();
+    for start in addresses {
+        let mapping = state.mappings.remove(&start).unwrap();
         runtime::must_complete(state.release_unused_memblock(mapping.id));
     }
     Ok(())
@@ -127,10 +132,6 @@ pub fn cuMemSetAccess(
     count: usize,
 ) -> Result<()> {
     let mut state = active()?;
-    let Some(mapping) = state.mappings.get(&address) else {
-        unsafe { crate::driver::cuMemSetAccess(address, size, access, count) }?;
-        return Ok(());
-    };
     if access.is_null() {
         unsafe { crate::driver::cuMemSetAccess(address, size, access, count) }?;
         return Ok(());
@@ -139,9 +140,16 @@ pub fn cuMemSetAccess(
         return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
     }
     let descriptors = unsafe { std::slice::from_raw_parts(access, count) };
-    let merged = mapping.merged_access(descriptors);
+    // Access applies to a fully mapped range, potentially spanning allocations.
+    // Prepare metadata before CUDA and publish it only after the call succeeds.
+    let updates: Vec<_> = state.mappings.range(address..)
+        .take_while(|(start, _)| **start - address < size as u64)
+        .map(|(start, mapping)| (*start, mapping.merged_access(descriptors)))
+        .collect();
     unsafe { crate::driver::cuMemSetAccess(address, size, access, count) }?;
-    state.mappings.get_mut(&address).unwrap().access = merged;
+    for (start, access) in updates {
+        state.mappings.get_mut(&start).unwrap().access = access;
+    }
     Ok(())
 }
 
