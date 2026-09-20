@@ -422,7 +422,6 @@ mod tests {
                     version: ABI_VERSION,
                     size: size_of::<FrontendAbi>() as u32,
                     resolve,
-                    origin_pid: unsafe { libc::getpid() },
                 })
                 .is_ok()
         );
