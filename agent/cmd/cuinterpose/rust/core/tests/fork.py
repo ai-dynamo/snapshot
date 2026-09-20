@@ -120,23 +120,16 @@ def main():
         assert sum("allocation" in record for record in records) == 1
         assert inspect()["namespace_pid"] == parent_pid
         idle.close()
-    elif mode == "poison":
-        # Protocol/order rejection must not poison the workload. A real copy
-        # failure does, and only that generation's poison is reset by fork.
+    elif mode == "order":
+        # Out-of-order requests refuse without changing state. Destructive
+        # failures terminate; there is no failed generation to revive by fork.
         command("prepare_unicast", False)
         command("inspect")
-        command("prepare_multicast")
-        cuda.fakeFailNext.argtypes = [c.c_char_p]
-        cuda.fakeFailNext(b"cuMemcpyDtoHAsync_v2")
-        command("save_allocations", False)
-        assert cuda.cuMemRelease(value) == 600
         child = os.fork()
         if child == 0:
-            child_checks(
-                parent_pid, virtual_shareable_handle=virtual_shareable_handle.value
-            )
+            child_checks(parent_pid, virtual_shareable_handle=virtual_shareable_handle.value)
         wait(child)
-        assert cuda.cuMemRelease(value) == 600
+        assert cuda.cuMemRelease(value) == 0
         os.close(virtual_shareable_handle.value)
         return
     elif mode == "nested":

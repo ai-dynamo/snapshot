@@ -10,7 +10,7 @@ import struct
 
 import msgpack
 
-VERSION = 1
+VERSION = 2
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 LIFECYCLE = (
     "prepare_multicast", "save_allocations", "prepare_unicast",
@@ -69,7 +69,7 @@ def receive(connection):
 
 def request(path, operation, namespace_pid):
     body = {"kind": operation, "namespace_pid": namespace_pid}
-    if operation != "inspect":
+    if operation not in ("inspect", "begin_checkpoint"):
         body.update(kind="execute", operation=operation)
     connection = socket.socket(socket.AF_UNIX)
     connection.settimeout(10)

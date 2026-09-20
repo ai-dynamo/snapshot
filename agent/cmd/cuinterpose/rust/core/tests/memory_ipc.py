@@ -7,6 +7,7 @@
 import ctypes as c
 import subprocess
 import sys
+import signal
 
 from protocol_client import LIFECYCLE, command
 from support import driver
@@ -47,9 +48,14 @@ def check_import(virtual_ipc_mem_handle):
 def brick_on_reserve_failure(call):
     failed = u64(123)
     cuda.fakeFailNext(b"cuMemAddressReserve")
-    assert call(failed) != 0
-    assert failed.value == 123
-    assert call(failed) != 0
+    call(failed)
+    raise AssertionError("failed allocation adoption returned")
+
+
+def expect_abort(*args):
+    result = subprocess.run([sys.executable, __file__, *args], capture_output=True, text=True)
+    assert result.returncode == -signal.SIGABRT, result
+    assert "unrecoverable state change" in result.stderr, result.stderr
 
 
 if len(sys.argv) > 1:
@@ -71,7 +77,7 @@ else:
     assert cuda.fakeLiveAllocations() == 0
     assert cuda.fakeMappedCount() == 0
     assert not command("inspect")["records"]
-    subprocess.run([sys.executable, __file__, "reserve-fail"], check=True)
+    expect_abort("reserve-fail")
     shared, private = u64(), u64()
     assert cuda.cuMemAlloc_v2(c.byref(shared), 17) == 0
     assert cuda.cuMemAlloc_v2(c.byref(private), 17) == 0
@@ -85,8 +91,9 @@ else:
     assert bytes(virtual_ipc_mem_handle) == bytes(repeated)
     assert cuda.fakeExportCalls() == 1
     hex_handle = bytes(virtual_ipc_mem_handle).hex()
-    subprocess.run([sys.executable, __file__, hex_handle, "reserve-fail"], check=True)
+    expect_abort(hex_handle, "reserve-fail")
     subprocess.run([sys.executable, __file__, hex_handle], check=True)
+    command("begin_checkpoint")
     for operation in LIFECYCLE[:3]:
         command(operation)
     assert cuda.fakeMappedCount() == 1  # Private malloc stays native-owned.

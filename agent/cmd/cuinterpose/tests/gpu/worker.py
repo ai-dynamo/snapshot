@@ -12,9 +12,9 @@ tensor-parallel server:
   any CUDA context exists (the driver allows that) and one large one whose
   contents must travel through the host carrier, both filled with seeded
   random bytes;
-* imports a descriptor from a process without the shim (a raw import) and
-  releases it again, or keeps it alive in ``hold-raw-import`` mode so the
-  coordinator has something to refuse;
+* checks that importing a descriptor from a process without the shim is
+  rejected immediately; ``admission-only`` mode verifies continued execution
+  without running checkpoint;
 * in unicast mode, exports its small allocation through the shim, exchanges
   the virtual shareable handle with the other worker, and keeps the peer import mapped across
   checkpoint and restore;
@@ -57,7 +57,7 @@ class Options:
             raise SystemExit(
                 "usage: worker.py RAW_FD_0 RAW_FD_1 RESTORE_FD_0 RESTORE_FD_1 SYNC_DIR "
                 "STORE_PATH (unicast|multicast) CARRIER_BYTES SEED "
-                "(hold-raw-import|release-raw-import)"
+                "(admission-only|checkpoint)"
             )
         self.raw_fds = (int(argv[1]), int(argv[2]))
         self.restore_fds = (int(argv[3]), int(argv[4]))
@@ -68,9 +68,9 @@ class Options:
         self.multicast = argv[7] == "multicast"
         self.carrier_bytes = int(argv[8])
         self.seed = int(argv[9])
-        if argv[10] not in {"hold-raw-import", "release-raw-import"}:
-            raise SystemExit("raw import handling must be hold-raw-import or release-raw-import")
-        self.hold_raw_import = argv[10] == "hold-raw-import"
+        if argv[10] not in {"admission-only", "checkpoint"}:
+            raise SystemExit("mode must be admission-only or checkpoint")
+        self.admission_only = argv[10] == "admission-only"
 
 
 # --- seeded contents ----------------------------------------------------------
@@ -115,25 +115,13 @@ def _wait_for_continue(sync_dir: Path) -> None:
         time.sleep(0.05)
 
 
-def _import_raw(fd: int, size: int, device, expected: bytes, stage: str) -> tuple[object, int]:
-    """Import a descriptor from an uninterposed process, map it, and check its
-    contents. Returns the (raw) handle and the mapped address."""
+def _reject_raw_import(fd: int) -> None:
+    """Foreign sharing is rejected before a driver handle is acquired."""
     try:
-        handle = cuda_call(driver.cuMemImportFromShareableHandle, fd, POSIX_FD_HANDLE_TYPE)
-        cuda_driver.assert_handle_namespace(handle, False, stage)
+        status, *_ = driver.cuMemImportFromShareableHandle(fd, POSIX_FD_HANDLE_TYPE)
+        assert status == driver.CUresult.CUDA_ERROR_NOT_SUPPORTED, status
     finally:
         os.close(fd)
-    try:
-        address = cuda_driver.map_allocation(handle, size, device)
-    except Exception:
-        cuda_call(driver.cuMemRelease, handle)
-        raise
-    try:
-        cuda_driver.assert_bytes(address, expected, stage)
-    except Exception:
-        cuda_driver.destroy_mapped_allocation(address, size, handle)
-        raise
-    return handle, address
 
 
 def _worker(rank: int, options: Options, peer_channel: socket.socket) -> None:
@@ -166,11 +154,7 @@ def _worker(rank: int, options: Options, peer_channel: socket.socket) -> None:
             os.close(fd)
     restore_socket = socket.socket(fileno=options.restore_fds[rank])
 
-    raw_handle, raw_address = _import_raw(
-        options.raw_fds[rank], granularity, device, bytes([rank + 1]) * 32, "raw import"
-    )
-    if not options.hold_raw_import:
-        cuda_driver.destroy_mapped_allocation(raw_address, granularity, raw_handle)
+    _reject_raw_import(options.raw_fds[rank])
 
     private_address = cuda_driver.map_allocation(private_handle, private_size, device)
     retained_handle = cuda_call(driver.cuMemRetainAllocationHandle, private_address)
@@ -180,7 +164,7 @@ def _worker(rank: int, options: Options, peer_channel: socket.socket) -> None:
 
     peer_handle = None
     peer_address = 0
-    if not options.multicast and not options.hold_raw_import:
+    if not options.multicast and not options.admission_only:
         virtual_shareable_handle_fd = int(
             cuda_call(
                 driver.cuMemExportToShareableHandle,
@@ -238,18 +222,16 @@ def _worker(rank: int, options: Options, peer_channel: socket.socket) -> None:
     shared_bytes = bulk_size + (private_size if peer_handle is not None else 0)
     (options.sync_dir / f"carrier-{rank}").write_text(f"{shared_count} {shared_bytes}\n")
 
-    if options.hold_raw_import:
-        # Nothing to restore in this mode: the test only checks that prepare is
-        # refused and that the workload keeps working afterwards.
+    if options.admission_only:
+        # Rejected imports never changed driver state; normal execution continues.
         restore_socket.close()
         (options.sync_dir / f"ready-{rank}").touch()
         _wait_for_continue(options.sync_dir)
-        cuda_driver.destroy_mapped_allocation(raw_address, granularity, raw_handle)
         probe = cuda_call(driver.cuMemCreate, granularity, properties, 0)
-        cuda_driver.assert_handle_namespace(probe, True, "cuMemCreate after a refused prepare")
+        cuda_driver.assert_handle_namespace(probe, True, "cuMemCreate after a rejected import")
         cuda_call(driver.cuMemRelease, probe)
-        _verify(private_address, private_size, private_seed, rank, "private after refused prepare")
-        _verify(bulk_address, bulk_size, bulk_seed, rank, "bulk after refused prepare")
+        _verify(private_address, private_size, private_seed, rank, "private after rejected import")
+        _verify(bulk_address, bulk_size, bulk_seed, rank, "bulk after rejected import")
         (options.sync_dir / f"done-{rank}").touch()
         cuda_driver.destroy_mapped_allocation(bulk_address, bulk_size, bulk_handle)
         cuda_driver.destroy_mapped_allocation(native_address, private_size, native_handle)
@@ -284,13 +266,10 @@ def _worker(rank: int, options: Options, peer_channel: socket.socket) -> None:
 
     _wait_for_continue(options.sync_dir)
 
-    # A raw import made after restore must work like before.
+    # Admission remains strict after restore too.
     fresh_fd = recv_handle(restore_socket)
     restore_socket.close()
-    fresh_handle, fresh_address = _import_raw(
-        fresh_fd, granularity, device, bytes([0x40 + rank]) * 32, "raw import after restore"
-    )
-    cuda_driver.destroy_mapped_allocation(fresh_address, granularity, fresh_handle)
+    _reject_raw_import(fresh_fd)
 
     _verify(private_address, private_size, private_seed, rank, "private allocation after restore")
     _verify(bulk_address, bulk_size, bulk_seed, rank, "bulk allocation after restore")
@@ -409,7 +388,7 @@ def _fork_workers(options: Options) -> None:
 
     for _, worker_channel in peer_channels:
         worker_channel.close()
-    if not options.multicast and not options.hold_raw_import:
+    if not options.multicast and not options.admission_only:
         virtual_shareable_handles = [
             recv_handle(parent_channel) for parent_channel, _ in peer_channels
         ]

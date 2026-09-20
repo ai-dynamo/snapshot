@@ -27,7 +27,7 @@ fn versions_and_trailing_data_are_rejected() {
 
 #[test]
 fn virtual_shareable_handle_codec_owns_the_fixed_layout() {
-    assert_eq!(VIRTUAL_SHAREABLE_HANDLE_MAGIC, [b'C', b'U', b'I', 1]);
+    assert_eq!(VIRTUAL_SHAREABLE_HANDLE_MAGIC, [b'C', b'U', b'I', 2]);
     assert_eq!(VIRTUAL_SHAREABLE_HANDLE_BYTES, 24);
     let reference = AllocationReference {
         id: [0x22; 16],
@@ -37,7 +37,7 @@ fn virtual_shareable_handle_codec_owns_the_fixed_layout() {
     assert_eq!(
         encoded,
         [
-            b'C', b'U', b'I', 1, 0x44, 0x33, 0x22, 0x11, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
+            b'C', b'U', b'I', 2, 0x44, 0x33, 0x22, 0x11, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
             0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
         ]
     );
@@ -45,6 +45,9 @@ fn virtual_shareable_handle_codec_owns_the_fixed_layout() {
         decode_virtual_shareable_handle(&encoded).unwrap(),
         reference
     );
+    let mut obsolete = encoded;
+    obsolete[3] = VERSION - 1;
+    assert!(decode_virtual_shareable_handle(&obsolete).is_err());
     let mut invalid = encoded;
     invalid[4..8].fill(0);
     assert!(decode_virtual_shareable_handle(&invalid).is_err());
@@ -64,8 +67,6 @@ fn inspection_metadata_round_trips() {
     };
     let reply = Reply::Inspection {
         records: vec![mapping.clone()],
-        live_raw_imports: 0,
-        unsupported_creations: 0,
     };
     let Reply::Inspection { records, .. } = decode(&encode(&reply).unwrap()).unwrap() else {
         panic!("decoded the wrong reply variant");

@@ -32,26 +32,44 @@ def main():
     if mode == "no-context":
         assert cuda.cuCtxSetCurrent(None) == 0
     handle = u64()
-    creation = Properties(1, 8, Location(1, 0), None) if mode == "unsupported" else props
-    assert cuda.cuMemCreate(c.byref(handle), length, c.byref(creation), 0) == 0
+    if mode == "unsupported":
+        for kind in (8, 9):
+            creation = Properties(1, kind, Location(1, 0), None)
+            handle.value = 123
+            assert cuda.cuMemCreate(c.byref(handle), length, c.byref(creation), 0) == 801
+            assert handle.value == 123
+        assert cuda.fakeLiveAllocations() == 0
+        assert command("inspect") == {"records": []}
+        return
+    if mode == "raw":
+        with open("/dev/null", "rb") as foreign:
+            for kind in (1, 8):
+                raw = u64(123)
+                assert cuda.cuMemImportFromShareableHandle(c.byref(raw), foreign.fileno(), kind) == 801
+                assert raw.value == 123
+        assert cuda.fakeLiveAllocations() == 0
+        assert command("begin_checkpoint") == {"records": []}
+        for operation in LIFECYCLE:
+            command(operation)
+        return
+    assert cuda.cuMemCreate(c.byref(handle), length, c.byref(props), 0) == 0
     if mode != "no-context":
         assert cuda.cuMemMap(address, length, 0, handle, 0) == 0
-    if mode in ("raw", "unsupported"):
-        if mode == "raw":
-            with open("/dev/null", "rb") as foreign:
-                raw = u64()
-                assert cuda.cuMemImportFromShareableHandle(c.byref(raw), foreign.fileno(), 1) == 0
-        coordinator = subprocess.run([
-            os.environ["CUINTERPOSE_COORDINATOR"], "--prepare",
-            "--checkpoint-dir", os.environ["SNAPSHOT_CONTROL_DIR"],
-            "--control-dir", os.environ["SNAPSHOT_CONTROL_DIR"],
-            "--process", str(os.getpid()),
-        ], capture_output=True, text=True)
-        assert coordinator.returncode != 0, coordinator
-        inspection = command("inspect")
-        assert inspection["live_raw_imports"] == (1 if mode == "raw" else 0)
-        assert inspection["unsupported_creations"] == (1 if mode == "unsupported" else 0)
-        assert cuda.fakeMappedCount() == 1
+    if mode == "checkpoint-entry":
+        before = command("inspect")
+        command("prepare_multicast", False)  # Reading alone never reserves state.
+        assert command("begin_checkpoint") == before
+        command("begin_checkpoint", False)
+        assert cuda.cuMemRelease(handle) == 600
+        assert cuda.cuMemUnmap(address, length) == 600
+        private = Properties.from_buffer_copy(props)
+        private.handles = 0
+        assert cuda.cuMemCreate(c.byref(u64()), length, c.byref(private), 0) == 600
+        assert command("inspect") == before
+        for operation in LIFECYCLE:
+            command(operation)
+        assert cuda.cuMemUnmap(address, length) == 0
+        assert cuda.cuMemRelease(handle) == 0
         return
     if mode == "exhaustion":
         resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
@@ -166,6 +184,7 @@ def main():
     else:
         assert mode == "private-released"
         assert cuda.cuMemRelease(handle) == 0
+    command("begin_checkpoint")
     for operation in LIFECYCLE:
         command(operation)
         if operation == "prepare_unicast":

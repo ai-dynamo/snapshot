@@ -73,7 +73,26 @@ int cuMulticastAddDevice(uint64_t handle, int device) {
         pthread_cond_broadcast(&changed);
         while (!released) pthread_cond_wait(&changed, &lock);
     }
+    if (armed == 2 && entered) {
+        released = 1;
+        pthread_cond_broadcast(&changed);
+    }
     pthread_mutex_unlock(&lock);
     int (*next)(uint64_t, int) = NEXT("cuMulticastAddDevice");
     return next ? next(handle, device) : 3;
+}
+
+int cuMulticastBindMem_v2(uint64_t group, int device, size_t offset,
+                         uint64_t member, size_t member_offset, size_t size, uint64_t flags) {
+    pthread_mutex_lock(&lock);
+    if (armed == 2) {
+        entered = 1;
+        pthread_cond_broadcast(&changed);
+        while (!released) pthread_cond_wait(&changed, &lock);
+        armed = 0;
+    }
+    pthread_mutex_unlock(&lock);
+    int (*next)(uint64_t, int, size_t, uint64_t, size_t, size_t, uint64_t) =
+        NEXT("cuMulticastBindMem_v2");
+    return next ? next(group, device, offset, member, member_offset, size, flags) : 3;
 }

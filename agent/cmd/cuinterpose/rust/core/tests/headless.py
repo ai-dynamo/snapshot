@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import signal
+import resource
 import tempfile
 
 
@@ -19,6 +21,7 @@ def main():
                         default=workspace.parent / "build",
                         help="Packaged frontend, core, and coordinator (default: ../build)")
     args = parser.parse_args()
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     subprocess.run([sys.executable, str(workspace.parent / "tests/gpu/test_reports.py")],
                    check=True)
     environment = os.environ.copy()
@@ -56,7 +59,7 @@ def main():
         subprocess.run([sys.executable, str(Path(__file__).with_name("memory_ipc.py"))],
                        env=lifecycle_env, check=True, timeout=60)
         for mode in ("tracking", "exports", "exhaustion", "access", "shared",
-                     "private-released", "no-context", "raw", "unsupported"):
+                     "private-released", "no-context", "raw", "unsupported", "checkpoint-entry"):
             subprocess.run([sys.executable, str(Path(__file__).with_name("lifecycle.py")), mode],
                            env=lifecycle_env, check=True, timeout=60)
         blocker = temporary / "multicast-block.so"
@@ -65,13 +68,20 @@ def main():
             "-shared", "-fPIC", "-pthread", "-o", str(blocker),
             str(Path(__file__).with_name("multicast_block.c")), "-ldl",
         ], env=environment, check=True)
-        for mode in ("released", "kind", "access", "failure", "native-address", "tracked-address", "extent", "inflight",
+        for mode in ("released", "kind", "access", "failure", "native-address", "tracked-address", "extent", "inflight", "blocking-bind",
                      "create-output", "cached-export", "unsupported"):
             multicast_env = env | {
                 "LD_PRELOAD": env["LD_PRELOAD"] + f":{blocker}:{fixtures / 'test/libcuda.so.1'}",
             }
-            subprocess.run([sys.executable, str(Path(__file__).with_name("multicast.py")), mode],
-                           env=multicast_env, check=True, timeout=60)
+            result = subprocess.run([sys.executable, str(Path(__file__).with_name("multicast.py")), mode],
+                                    env=multicast_env, capture_output=True, text=True, timeout=60)
+            if mode == "failure":
+                assert result.returncode == -signal.SIGABRT, result
+                assert "unrecoverable state change" in result.stderr, result.stderr
+            else:
+                print(result.stdout, end="")
+                print(result.stderr, end="", file=sys.stderr)
+                result.check_returncode()
         carrier = temporary / "carrier-pending.so"
         subprocess.run([
             "/usr/bin/gcc", "-std=c11", "-Wall", "-Wextra", "-Werror",
@@ -93,7 +103,8 @@ def main():
                 assert "UNSAFE pending-copy cleanup" not in result.stderr
                 print(f"PASS carrier {mode}: fail-stop without cleanup", flush=True)
             else:
-                result.check_returncode()
+                assert result.returncode == -signal.SIGABRT, result
+                assert "unrecoverable state change" in result.stderr, result.stderr
         rpc = temporary / "rpc-threads.so"
         subprocess.run([
             "/usr/bin/gcc", "-std=c11", "-Wall", "-Wextra", "-Werror",
@@ -116,7 +127,7 @@ def main():
                            env=case_env,
                            check=True, timeout=60)
         env["LD_PRELOAD"] += f":{fixtures / 'test/libcuda.so.1'}"
-        for mode in ("preinit", "descriptors", "poison", "nested"):
+        for mode in ("preinit", "descriptors", "order", "nested"):
             case_env = env | {"SNAPSHOT_CONTROL_TIMEOUT_SECONDS": "1"}
             subprocess.run([sys.executable, str(Path(__file__).with_name("fork.py")),
                             mode],

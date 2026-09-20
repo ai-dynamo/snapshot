@@ -107,29 +107,18 @@ def test_checkpoint_restores_shared_posix_memory(
 
 
 @pytest.mark.gpu
-def test_prepare_is_refused_while_a_raw_import_is_alive(gpu_environment, tmp_path, seed) -> None:
-    """An import of a descriptor from a process without the shim cannot be
-    repaired after restore, so the coordinator refuses to checkpoint while one
-    is alive, and the workload keeps running untouched."""
+def test_foreign_import_is_rejected_before_checkpoint(gpu_environment, tmp_path, seed) -> None:
+    """Workers reject foreign descriptors and continue with supported allocations."""
     with Workload(
         tmp_path,
         gpu_environment,
         mode="unicast",
         carrier_bytes=1 << 20,
         seed=seed,
-        hold_raw_import=True,
+        admission_only=True,
     ) as workload:
         workload.start()
 
-        prepare = harness.run_coordinator(
-            workload.environment.tools.coordinator,
-            "--prepare",
-            workload.checkpoint_dir,
-            workload.control_dir,
-            workload.child_pids,
-        )
-        assert prepare.status != 0, "prepare must be refused while a raw import is alive"
-        assert "live raw imports" in prepare.err, prepare.err
         assert not (workload.checkpoint_dir / harness.STATE_FILENAME).exists()
 
         (workload.sync_dir / "continue").touch()

@@ -32,9 +32,8 @@ const MULTICAST: AllocationReference = AllocationReference {
 #[derive(Default)]
 struct Model {
     records: Vec<Record>,
-    raw: u64,
-    unsupported: u64,
     fail: Option<Operation>,
+    disconnect: Option<Operation>,
     operations: Vec<String>,
     namespace_pid: u32,
 }
@@ -83,15 +82,15 @@ impl Fixture {
                     let (request, fd): (Request, _) = receive(&stream).unwrap();
                     assert!(fd.is_none());
                     let mut model = model.lock().unwrap();
+                    let beginning = matches!(request, Request::BeginCheckpoint { .. });
                     let (operation, response) = match request {
-                        Request::Inspect { namespace_pid } => {
+                        Request::BeginCheckpoint { namespace_pid }
+                        | Request::Inspect { namespace_pid } => {
                             assert_eq!(namespace_pid, index as u32 + 1);
                             (
                                 None,
                                 Reply::Inspection {
                                     records: model.records.clone(),
-                                    live_raw_imports: model.raw,
-                                    unsupported_creations: model.unsupported,
                                 },
                             )
                         }
@@ -112,7 +111,12 @@ impl Fixture {
                         Request::Export { .. } => panic!("coordinator must not request CUDA FDs"),
                     };
                     model.operations.push(match &response {
-                        Reply::Inspection { .. } => "inspect".into(),
+                        Reply::Inspection { .. } => if beginning {
+                            "begin_checkpoint"
+                        } else {
+                            "inspect"
+                        }
+                        .into(),
                         Reply::Completed { operation, .. } => serde_json::to_value(operation)
                             .unwrap()
                             .as_str()
@@ -120,6 +124,11 @@ impl Fixture {
                             .into(),
                         _ => panic!("unexpected response"),
                     });
+                    if model.disconnect.is_some() && model.disconnect == operation {
+                        // The command may have completed, but its reply was lost.
+                        // Reconnecting and repeating it would replay mutation.
+                        continue;
+                    }
                     let response = Response {
                         namespace_pid: model.namespace_pid,
                         result: if model.fail.is_some() && model.fail == operation {
@@ -265,13 +274,11 @@ fn mapping(size: u64, address: u64) -> Record {
 
 #[test]
 fn preflight_refusals_do_not_mutate_or_publish_state() {
-    for case in ["raw", "unsupported", "missing-creator", "mapping", "member"] {
+    for case in ["missing-creator", "mapping", "member"] {
         let fixture = Fixture::new(1, None);
         {
             let mut model = fixture.models[0].lock().unwrap();
             match case {
-                "raw" => model.raw = 3,
-                "unsupported" => model.unsupported = 2,
                 "missing-creator" => model.records = vec![allocation(2)],
                 "mapping" => model.records = vec![allocation(1), mapping(8192, 0x10000)],
                 "member" => {
@@ -310,7 +317,7 @@ fn preflight_refusals_do_not_mutate_or_publish_state() {
         assert!(!output.status.success(), "{case}: {output:?}");
         assert_eq!(
             fixture.models[0].lock().unwrap().operations,
-            ["inspect"],
+            ["begin_checkpoint"],
             "{case}"
         );
         assert!(!fixture.directory.join("cuinterpose.state").exists());
@@ -325,7 +332,21 @@ fn failed_phase_stops_before_next_phase_and_state_publication() {
     for model in &fixture.models {
         assert_eq!(
             model.lock().unwrap().operations,
-            ["inspect", "prepare_multicast"]
+            ["begin_checkpoint", "prepare_multicast"]
+        );
+    }
+    assert!(!fixture.directory.join("cuinterpose.state").exists());
+}
+
+#[test]
+fn lost_reply_is_not_retried_or_followed_by_another_phase() {
+    let fixture = Fixture::new(2, None);
+    fixture.models[1].lock().unwrap().disconnect = Some(Operation::PrepareMulticast);
+    assert!(!fixture.run("--prepare").status.success());
+    for model in &fixture.models {
+        assert_eq!(
+            model.lock().unwrap().operations,
+            ["begin_checkpoint", "prepare_multicast"]
         );
     }
     assert!(!fixture.directory.join("cuinterpose.state").exists());
@@ -362,7 +383,7 @@ fn parallel_prepare_and_restore_barriers_preserve_canonical_state() {
             assert_eq!(
                 model.lock().unwrap().operations,
                 [
-                    "inspect",
+                    "begin_checkpoint",
                     "prepare_multicast",
                     "save_allocations",
                     "prepare_unicast",

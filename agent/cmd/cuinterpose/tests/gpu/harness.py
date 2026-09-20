@@ -128,7 +128,7 @@ class Workload:
         mode: str,
         carrier_bytes: int,
         seed: int,
-        hold_raw_import: bool = False,
+        admission_only: bool = False,
     ) -> None:
         if mode not in {"unicast", "multicast"}:
             raise ValueError(mode)
@@ -136,7 +136,7 @@ class Workload:
         self.mode = mode
         self.carrier_bytes = carrier_bytes
         self.seed = seed
-        self.hold_raw_import = hold_raw_import
+        self.admission_only = admission_only
         self.control_dir = tmp_path / "control"
         self.checkpoint_dir = tmp_path / "checkpoint"
         self.sync_dir = tmp_path / "sync"
@@ -208,14 +208,13 @@ class Workload:
             receiver.close()
         self.child_pids = self._wait_for_child_pids()
         self.wait_for_workers("ready")
-        # The workers have imported and released (or are holding) their raw
-        # imports; the creator side can go away either way.
+        # Workers have checked that foreign imports are rejected.
         cuda_driver.destroy_external_allocations(self._externals)
         for process_id in (self.parent.pid, *self.child_pids):
             self.assert_worker_runtime(process_id)
 
     def hand_fresh_imports(self) -> None:
-        """Give every worker a brand-new raw descriptor to import after restore."""
+        """Give each worker a fresh foreign FD to verify rejection after restore."""
         self._externals = cuda_driver.create_external_allocations(WORLD_SIZE, 0x40)
         for rank, (sender, _) in enumerate(self._restore_channels):
             send_handle(sender, self._externals[rank].fd, self.child_pids[rank])
@@ -274,7 +273,7 @@ class Workload:
                 self.mode,
                 str(self.carrier_bytes),
                 str(self.seed),
-                "hold-raw-import" if self.hold_raw_import else "release-raw-import",
+                "admission-only" if self.admission_only else "checkpoint",
             ],
             env=environment,
             stdout=subprocess.PIPE,

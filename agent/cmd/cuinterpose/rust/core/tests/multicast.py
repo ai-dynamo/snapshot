@@ -37,6 +37,7 @@ cuda.multicast_block_arm.argtypes = [c.c_int]
 
 
 def replay():
+    command("begin_checkpoint")
     for operation in LIFECYCLE:
         command(operation)
 
@@ -56,18 +57,13 @@ def main():
         command("inspect")
         group.value = 0
     if mode == "unsupported":
-        assert cuda.cuMulticastCreate(c.byref(group), c.byref(Multicast(1, length, 8, 0))) == 0
-        inspection = command("inspect")
-        assert inspection["records"] == [] and inspection["unsupported_creations"] == 1
-        assert cuda.cuMemRelease(group) == 0
-        result = subprocess.run([
-            os.environ["CUINTERPOSE_COORDINATOR"], "--prepare",
-            "--control-dir", os.environ["SNAPSHOT_CONTROL_DIR"],
-            "--checkpoint-dir", os.environ["SNAPSHOT_CONTROL_DIR"],
-            "--process", str(os.getpid()),
-        ], capture_output=True)
-        assert result.returncode != 0
-        command("inspect")
+        for kind in (0, 8, 9):
+            group.value = 123
+            assert cuda.cuMulticastCreate(c.byref(group), c.byref(Multicast(1, length, kind, 0))) == 801
+            assert group.value == 123
+        assert command("inspect") == {"records": []}
+        assert cuda.fakeLiveAllocations() == 0
+        replay()
         return
     assert cuda.cuMemCreate(c.byref(member), length, c.byref(props), 0) == 0
     assert cuda.cuMemMap(0x10000000, length, 0, member, 0) == 0
@@ -81,9 +77,8 @@ def main():
         cuda.multicast_block_wait()
         try:
             command("inspect", False)
-            command("prepare_multicast", False)
+            command("begin_checkpoint", False)
             command("restore_multicast_creators", False)
-            assert cuda.cuMemRelease(group) == 600
             # State remains available while the driver collective is blocked.
             other = u64()
             assert cuda.cuMemCreate(c.byref(other), 4096, c.byref(props), 0) == 0
@@ -92,12 +87,24 @@ def main():
             cuda.multicast_block_release()
             worker.join(10)
         assert not worker.is_alive() and results == [0]
+    elif mode == "blocking-bind":
+        cuda.multicast_block_arm(2)
+        results = []
+        worker = threading.Thread(target=lambda: results.append(
+            cuda.cuMulticastBindMem_v2(group, 0, 0, member, 0, length, 0)))
+        worker.start()
+        cuda.multicast_block_wait()
+        command("begin_checkpoint", False)
+        assert cuda.cuMulticastAddDevice(group, 0) == 0
+        worker.join(10)
+        assert not worker.is_alive() and results == [0]
     else:
         assert cuda.cuMulticastAddDevice(group, 0) == 0
 
     binding_offset = length if mode == "extent" else 0
     mapped_size = 2 * length if mode == "extent" else length
-    assert cuda.cuMulticastBindMem_v2(group, 0, binding_offset, member, 0, length, 0) == 0
+    if mode != "blocking-bind":
+        assert cuda.cuMulticastBindMem_v2(group, 0, binding_offset, member, 0, length, 0) == 0
     assert cuda.cuMemMap(0x70000000, mapped_size, 0, group, 0) == 0
     if mode == "cached-export":
         multicast_reference = next(
@@ -110,6 +117,7 @@ def main():
             fd = c.c_int(-1)
             assert cuda.cuMemExportToShareableHandle(c.byref(fd), handle, 1, 0) == 0
             virtual_shareable_handles.append(fd.value)
+        command("begin_checkpoint")
         command("prepare_multicast")
         path = f"{os.environ['SNAPSHOT_CONTROL_DIR']}/cuinterpose-{os.getpid()}.sock"
         response, exported = request_export(path, multicast_reference)
@@ -178,15 +186,14 @@ def main():
         command("inspect")
         replay()
     elif mode == "failure":
+        command("begin_checkpoint")
         for operation in LIFECYCLE[:5]:
             command(operation)
         command("restore_multicast_importers", False)
         cuda.fakeFailNext.argtypes = [c.c_char_p]
         cuda.fakeFailNext(b"cuMulticastCreate")
-        command("restore_multicast_creators", False)
-        assert cuda.cuMemRelease(group) == 600
-        print("PASS multicast failure")
-        return
+        command("restore_multicast_creators")
+        raise AssertionError("destructive failure returned")
     elif mode == "tracked-address":
         assert cuda.cuMulticastUnbind(group, 0, 0, length) == 0
         assert cuda.cuMulticastBindAddr_v2(group, 0, 0, 0x10000000, length, 0) == 0
@@ -209,7 +216,7 @@ def main():
         assert cuda.fakeMulticastBindings(2) == 1
         assert cuda.cuMemUnmap(0x30000000, length) == 0
         assert cuda.cuMemRelease(native) == 0
-    elif mode in ("inflight", "create-output", "extent"):
+    elif mode in ("inflight", "blocking-bind", "create-output", "extent"):
         replay()
     else:
         raise AssertionError(mode)

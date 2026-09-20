@@ -124,6 +124,8 @@ def reciprocal(kind):
             pipes.append((ready_read, release_write))
         for process in workers:
             endpoints.append(json.loads(process.stdout.readline()))
+        for path, namespace_pid in endpoints:
+            reply(request(path, "begin_checkpoint", namespace_pid))
         for operation in LIFECYCLE:
             barrier = operation == (
                 "restore_unicast" if kind == "unicast" else "restore_multicast_importers")
@@ -217,6 +219,7 @@ def queue_full():
     )
     path = f"{os.environ['SNAPSHOT_CONTROL_DIR']}/cuinterpose-{os.getpid()}.sock"
     namespace_pid = os.getpid()
+    reply(request(path, "begin_checkpoint", namespace_pid))
     reply(request(path, "prepare_multicast", namespace_pid))
     cuda.rpc_block_copy()
     saving = request(path, "save_allocations", namespace_pid)

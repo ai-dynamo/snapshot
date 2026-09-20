@@ -16,6 +16,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/testr"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
@@ -306,7 +307,7 @@ func TestCuinterposeArgsRejectsEmptyOrInvalidPIDs(t *testing.T) {
 // wire-protocol implementation. The packaged verifier checks the actual CLI.
 func TestGoConstantsMatchTheRustSources(t *testing.T) {
 	root := filepath.Join("..", "..", "cmd", "cuinterpose", "rust")
-	core, err := os.ReadFile(filepath.Join(root, "core", "src", "state.rs"))
+	core, err := os.ReadFile(filepath.Join(root, "core", "src", "runtime", "mod.rs"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,6 +318,9 @@ func TestGoConstantsMatchTheRustSources(t *testing.T) {
 	coordinator, err := os.ReadFile(filepath.Join(root, "coordinator", "src", "main.rs"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(string(protocol), "pub const VERSION: u8 = "+strconv.Itoa(types.CuinterposeFormat)+";") {
+		t.Error("Rust protocol version differs from the Go checkpoint artifact format")
 	}
 	if !strings.Contains(string(protocol), cuinterposeSocketPrefix) {
 		t.Errorf("Rust protocol lacks endpoint contract %q", cuinterposeSocketPrefix)
