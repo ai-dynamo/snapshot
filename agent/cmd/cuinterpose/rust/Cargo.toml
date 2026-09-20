@@ -26,7 +26,11 @@ unused_lifetimes = "warn"
 all = "warn"
 allow_attributes_without_reason = "warn"
 
+# Runtime workers must not outlive a panic that interrupted CUDA bookkeeping.
+[profile.dev]
+panic = "abort"
+
 [profile.release]
-panic = "unwind"
+panic = "abort"
 lto = true
 codegen-units = 1
