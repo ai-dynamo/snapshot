@@ -1,12 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shareable-handle codec, peer exports, and imported resource ownership.
+//! Shareable-handle codec, peer exports, and imported memblock ownership.
 
-use crate::driver::Result;
-use crate::runtime;
-use cudarc::driver::sys::CUmulticastObjectProp;
+use super::checkpoint::Phase;
+use super::{Memblock, ProcessState, VirtualAllocationHandle};
+use crate::driver::{CudaError, Result, context};
+use crate::runtime::{self, cache};
 use cudarc::driver::sys::CUresult::*;
+use cudarc::driver::sys::{CUmemAllocationProp, CUmulticastObjectProp};
 use cuinterpose_protocol::{
     self as protocol, AllocationId, AllocationReference, Error, NamespacePid, Reply, Request,
     Response, VIRTUAL_SHAREABLE_HANDLE_BYTES, VIRTUAL_SHAREABLE_HANDLE_MAGIC,
@@ -15,7 +17,7 @@ use rustix::fs::{MemfdFlags, memfd_create};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Write;
-use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::{fs::FileExt, net::UnixStream};
 use std::sync::Mutex;
 
@@ -28,8 +30,8 @@ pub fn create(reference: AllocationReference) -> protocol::Result<OwnedFd> {
     Ok(file.into())
 }
 
-/// A foreign FD is a native import. A recognizable but invalid or obsolete
-/// virtual shareable handle must not be passed through to the CUDA driver.
+/// Return None for foreign FDs so admission rejects them before calling CUDA.
+/// Recognizable but malformed virtual handles are invalid handles.
 pub fn decode(fd: i32) -> protocol::Result<Option<AllocationReference>> {
     if fd < 0 {
         return Err(Error::Invalid("negative import descriptor"));
@@ -178,6 +180,75 @@ impl ExportCache {
     }
 }
 
+impl Memblock {
+    /// Publish the creator's export without making peer service acquire ProcessState.
+    pub fn export(&mut self, namespace_pid: NamespacePid) -> Result<AllocationReference> {
+        let reference = self.reference();
+        if reference.creator_pid == namespace_pid && !cache()?.contains(&reference.id)? {
+            let fd = crate::driver::export_posix(self.driver_handle()?)?;
+            cache()?.insert(reference.id, fd, None)?;
+        }
+        match self {
+            Self::Unicast(allocation) => {
+                allocation.shared = true;
+                if allocation.context == 0 {
+                    allocation.context = context();
+                }
+            }
+        }
+        Ok(reference)
+    }
+}
+
+pub(crate) fn import_reference(
+    mut state: MutexGuard<'static, ProcessState>,
+    reference: AllocationReference,
+) -> Result<u64> {
+    if state.phase != Phase::Active {
+        return Err(CudaError::from(CUDA_ERROR_NOT_READY));
+    }
+    state.check_handle_capacity()?;
+    let id = reference.id;
+    if let Some(memblock) = state.memblocks.get_mut(&id) {
+        if memblock.reference() != reference {
+            return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
+        }
+        match memblock {
+            Memblock::Unicast(allocation) => {
+                if allocation.driver.is_none() {
+                    let (raw, properties) =
+                        request_export(reference).map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
+                    if properties.is_some() {
+                        return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
+                    }
+                    allocation.driver = Some(crate::driver::import_posix(raw.as_fd())?);
+                }
+                allocation.shared = true;
+            }
+        }
+        return state.mint_virtual_allocation_handle(id);
+    }
+    // EXPORT service uses only CACHE, never STATE, so a same-process request
+    // can complete while this call holds its allocation metadata lock.
+    let (raw, multicast_properties) =
+        request_export(reference).map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
+    if multicast_properties.is_some() {
+        return Err(CUDA_ERROR_INVALID_HANDLE.into());
+    }
+    let driver = crate::driver::import_posix(raw.as_fd())?;
+    let driver = runtime::must_complete(VirtualAllocationHandle::from_driver(driver));
+    let mut properties = std::mem::MaybeUninit::<CUmemAllocationProp>::zeroed();
+    runtime::must_complete(unsafe {
+        crate::driver::cuMemGetAllocationPropertiesFromHandle(properties.as_mut_ptr(), driver)
+    });
+    Ok(runtime::must_complete(state.adopt_unicast(
+        reference,
+        driver,
+        0,
+        unsafe { properties.assume_init() },
+        true,
+    )))
+}
 #[cfg(test)]
 mod codec_tests {
     use super::*;
@@ -197,7 +268,7 @@ mod codec_tests {
     }
 
     #[test]
-    fn foreign_fd_is_native_but_obsolete_virtual_shareable_handle_is_rejected() {
+    fn foreign_fd_is_untracked_and_malformed_virtual_handle_is_rejected() {
         let foreign = File::open("/dev/null").unwrap();
         assert_eq!(decode(foreign.as_raw_fd()).unwrap(), None);
         let fd = memfd_create(c"obsolete-virtual-handle", MemfdFlags::empty()).unwrap();
