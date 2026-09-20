@@ -21,7 +21,6 @@ static void *(*real_dlsym)(void *, const char *);
 static _Atomic(const struct BackendAbi *) backend_api;
 static atomic_bool failed, backend_unavailable;
 static _Thread_local bool loading_backend;
-static int origin_pid;
 
 // Published nodes and their dlopen references live until exit. Readers need no
 // lock, including after quiescent fork; no loader call runs under a shim mutex.
@@ -168,7 +167,7 @@ static const struct BackendAbi *load_backend(void **reference) {
         dlclose(library);
         return NULL;
     }
-    struct FrontendAbi frontend = {ABI_VERSION, sizeof(frontend), resolve, origin_pid};
+    struct FrontendAbi frontend = {ABI_VERSION, sizeof(frontend), resolve};
     const struct BackendAbi *api = NULL;
     // The handshake only registers the frontend and returns an immutable table;
     // it must not call back into the loader or start runtime workers.
@@ -213,27 +212,6 @@ static const struct BackendAbi *backend(void) {
     }
     loading_backend = false;
     return api;
-}
-
-static void fork_prepare(void) {
-    const struct BackendAbi *api = atomic_load(&backend_api);
-    if (api)
-        api->fork_prepare();
-}
-static void fork_parent(void) {
-    const struct BackendAbi *api = atomic_load(&backend_api);
-    if (api)
-        api->fork_parent();
-}
-static void fork_child(void) {
-    const struct BackendAbi *api = atomic_load(&backend_api);
-    if (api)
-        api->fork_child();
-}
-__attribute__((constructor)) static void initialize_process(void) {
-    origin_pid = getpid();
-    if (pthread_atfork(fork_prepare, fork_parent, fork_child) != 0)
-        atomic_store(&failed, true);
 }
 
 #define MEMORY_API(X) \
@@ -347,11 +325,7 @@ static CUresult finish_query(const char *name, void **output) {
         }
         *output = wrapper;
     }
-    const struct BackendAbi *api = backend();
-    CUresult result = api ? api->ensure_cuinterpose_initialized() : CUDA_ERROR_NOT_INITIALIZED;
-    if (result != CUDA_SUCCESS)
-        *output = NULL;
-    return result;
+    return CUDA_SUCCESS;
 }
 
 API CUresult cuInit(unsigned flags) {

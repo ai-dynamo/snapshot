@@ -8,7 +8,7 @@ use std::ffi::{c_char, c_ulonglong, c_void};
 
 use cudarc::driver::sys as cuda;
 
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 
 /// ABI table provided by the Rust backend and consumed by the C frontend.
 /// cbindgen emits the corresponding C declaration.
@@ -25,12 +25,7 @@ pub const ABI_VERSION: u32 = 1;
 pub struct BackendAbi {
     pub version: u32,
     pub size: u32,
-    pub fork_prepare: unsafe extern "C" fn(),
-    pub fork_parent: unsafe extern "C" fn(),
-    pub fork_child: unsafe extern "C" fn(),
-    /// Starts this process generation's runtime services, as do CUDA callbacks.
-    /// Unlike the ABI handshake, runtime startup can return NOT_INITIALIZED
-    /// during contention rather than wait while a caller holds the loader lock.
+    /// Starts runtime services only after the real cuInit succeeds.
     pub ensure_cuinterpose_initialized: unsafe extern "C" fn() -> cuda::CUresult,
     pub cuMemAlloc_v2: unsafe extern "C" fn(*mut cuda::CUdeviceptr, usize) -> cuda::CUresult,
     pub cuMemFree_v2: unsafe extern "C" fn(cuda::CUdeviceptr) -> cuda::CUresult,
@@ -150,12 +145,11 @@ pub type Resolve = unsafe extern "C" fn(*const c_char) -> *mut c_void;
 /// Matching version/size promises a fully initialized table of non-null
 /// callbacks with the declared signatures and process-lifetime validity.
 /// A mismatched table need only provide the aligned eight-byte prefix.
-/// Repeated registrations must agree on both `resolve` and `origin_pid`.
+/// Repeated registrations must agree on `resolve`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct FrontendAbi {
     pub version: u32,
     pub size: u32,
     pub resolve: Resolve,
-    pub origin_pid: i32,
 }
