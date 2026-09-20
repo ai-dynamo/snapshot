@@ -73,11 +73,22 @@ impl PreparedWorkers {
                     }
                     let socket = match listener.accept() {
                         Ok((socket, _)) => socket,
-                        Err(error) if matches!(error.kind(),
-                            std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
-                            | std::io::ErrorKind::ConnectionAborted) => continue,
-                        Err(error) if matches!(error.raw_os_error(),
-                            Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM)) => {
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::Interrupted
+                                    | std::io::ErrorKind::WouldBlock
+                                    | std::io::ErrorKind::ConnectionAborted
+                            ) =>
+                        {
+                            continue;
+                        }
+                        Err(error)
+                            if matches!(
+                                error.raw_os_error(),
+                                Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM)
+                            ) =>
+                        {
                             // A queued connection stays readable while resources are exhausted.
                             std::thread::sleep(std::time::Duration::from_millis(50));
                             continue;
