@@ -134,18 +134,18 @@ impl ProcessState {
             Operation::PrepareMulticast => {}
             Operation::SaveAllocations => {
                 let ids: Vec<_> = self
-                    .resources
+                    .memblocks
                     .values()
-                    .filter_map(Resource::unicast)
+                    .filter_map(Memblock::unicast)
                     .filter(|a| a.owns_content(self.namespace_pid))
                     .map(|a| a.reference.id)
                     .collect();
                 let mut allocations = Vec::new();
                 for id in ids {
                     let allocation = self
-                        .resources
+                        .memblocks
                         .get_mut(&id)
-                        .and_then(Resource::unicast_mut)
+                        .and_then(Memblock::unicast_mut)
                         .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
                     if allocation.driver.is_none() {
                         let mapping = self
@@ -177,14 +177,6 @@ impl ProcessState {
                 let (arena, elapsed) = Arena::save(&allocations)?;
                 self.arena = arena;
                 copy_us = elapsed;
-                for allocation in self
-                    .resources
-                    .values_mut()
-                    .filter_map(Resource::unicast_mut)
-                    .filter(|a| a.owns_content(self.namespace_pid))
-                {
-                    allocation.content_saved = true;
-                }
             }
             Operation::PrepareUnicast => {
                 export_cache()?.clear()?;
@@ -218,10 +210,10 @@ impl ProcessState {
             }
             Operation::LoadAllocations => {
                 let mut allocations: Vec<_> = self
-                    .resources
+                    .memblocks
                     .values()
-                    .filter_map(Resource::unicast)
-                    .filter(|a| a.content_saved)
+                    .filter_map(Memblock::unicast)
+                    .filter(|a| a.owns_content(self.namespace_pid))
                     .map(AllocationContent::from)
                     .collect();
                 bytes = allocations.iter().try_fold(0u64, |sum, a| {
@@ -234,9 +226,9 @@ impl ProcessState {
                     return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
                 }
                 for allocation in allocations {
-                    self.resources
+                    self.memblocks
                         .get_mut(&allocation.id)
-                        .and_then(Resource::unicast_mut)
+                        .and_then(Memblock::unicast_mut)
                         .ok_or(CUDA_ERROR_INVALID_HANDLE)?
                         .driver = allocation.driver;
                 }
@@ -366,9 +358,8 @@ pub(crate) fn execute(operation: Operation) -> std::result::Result<Reply, String
 pub(crate) fn load_acknowledged() {
     if let Ok(mut state) = runtime::get()
         && let Some(arena) = state.arena.take()
-        && arena.release().is_err()
     {
-        runtime::G_FAILED.store(true, Ordering::Release);
+        runtime::must_complete(arena.release());
     }
 }
 
