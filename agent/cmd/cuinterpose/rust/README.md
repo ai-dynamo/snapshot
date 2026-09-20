@@ -65,7 +65,7 @@ requires cross-node capture, restore, and post-restore workload inference.
 | --- | --- |
 | `abi` | Private C-layout frontend/backend tables using cudarc CUDA types |
 | `protocol` | CUDA metadata, allocation references, state entries, versioned MessagePack, and FD transport |
-| `core` | Driver calls, process generations, tracking, host carriers, lifecycle |
+| `core` | Driver calls, process runtimes, tracking, host carriers, lifecycle |
 | `coordinator` | CLI, participants, topology validation, barriers, durable state |
 
 The private C ABI is version **1**. The MessagePack wire/state format, virtual
@@ -127,7 +127,7 @@ ambiguous phases are never retried, rolled back, or resumed. Per-object progress
 flags are unnecessary because a mutation failure terminates the process.
 Never-shared allocations remain native-owned even when exportable.
 
-Fork resets the child's shim generation and closes inherited shim-owned
+Fork resets the child's shim runtime and closes inherited shim-owned
 descriptors; it does not make CUDA use after arbitrary multithreaded fork safe.
 Prefer spawn/exec. Failed destructive capture or reconstruction cannot safely
 resume the application. Unknown asynchronous-copy completion is fail-stop.

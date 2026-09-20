@@ -61,7 +61,7 @@ The backend separates CUDA API policy from resource ownership:
 | --- | --- |
 | `handlers.rs` | Argument validation, native versus tracked decisions, and API-level orchestration. |
 | `driver.rs` | Real CUDA calls and temporary context switching. |
-| `runtime/` | Generation installation, sticky failure, registered sockets, fork cleanup, and control workers. |
+| `runtime/` | Runtime installation, sticky failure, registered sockets, fork cleanup, and control workers. |
 | `memory/mod.rs` | The resource registry, virtual handle ownership, and tracked address ranges. |
 | `memory/vmm.rs` | Unicast backing adoption, retain/map bookkeeping, and access permissions. |
 | `memory/sharing.rs` | Shareable-handle encoding, exact-PID peer requests, cached exports, and imports. |
@@ -115,9 +115,9 @@ Loading the backend and starting its runtime are separate operations:
 | --- | --- |
 | ABI registration (`cuinterpose_core_init`) | Copies the frontend table and returns an immutable backend table. Repeated or concurrent registrations must agree on the resolver and origin PID. It starts no workers and makes no frontend callbacks. |
 | Frontend publication | Concurrent callers may each `dlopen` the backend; glibc serializes its construction. Atomic publication retains one process-lifetime library reference and closes redundant references. Same-thread constructor reentry returns `CUDA_ERROR_NOT_INITIALIZED` without poisoning a later call. |
-| Runtime startup | CUDA callbacks and `ensure_cuinterpose_initialized` prepare private candidates, then install one process generation, control socket, and worker pair. Concurrent callers reuse the installed runtime; same-thread preparation reentry returns `CUDA_ERROR_NOT_INITIALIZED` without poisoning it. |
+| Runtime startup | CUDA callbacks and `ensure_cuinterpose_initialized` prepare private candidates, then install one process runtime, control socket, and worker pair. Concurrent callers reuse the installed runtime; same-thread preparation reentry returns `CUDA_ERROR_NOT_INITIALIZED` without poisoning it. |
 
-There is no frontend-wide loading lock. The backend's generation lock remains
+There is no frontend-wide loading lock. The backend's installation lock remains
 necessary for unique runtime resources and quiescent-fork coordination.
 Obtaining the ABI table alone does not mean runtime services are ready.
 
@@ -169,7 +169,7 @@ The bounded commit path is audited for the pinned Rust/Linux/glibc implementatio
   interposers that call the loader are outside this assumption.
 
 Fork remains supported only with CUDA/lifecycle calls and active RPC quiescent.
-Retiring private workers have no generation reference or socket. This does not
+Retiring private workers have no runtime reference or socket. This does not
 promise safe arbitrary fork during preparation or reclaim every inherited
 allocation belonging to a vanished thread.
 
