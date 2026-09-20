@@ -31,14 +31,15 @@ void rpc_block_copy(void) { atomic_store(&block_copy, 1); }
 int rpc_copy_entered(void) { return atomic_load(&copy_entered); }
 void rpc_release_copy(void) { atomic_store(&copy_release, 1); }
 
-int connect(int fd, const struct sockaddr *address, socklen_t length) {
-    // Only the lifecycle worker opens a peer connection while this rendezvous
-    // is armed. Stop at that semantic boundary, not at packet byte offsets or
-    // libc sendmsg (rustix may issue sendmsg directly as a Linux syscall).
-    if (ready_fd >= 0 && address->sa_family == AF_UNIX &&
-        length > offsetof(struct sockaddr_un, sun_path) &&
-        memmem(((const struct sockaddr_un *)address)->sun_path,
-               length - offsetof(struct sockaddr_un, sun_path),
+int setsockopt(int fd, int level, int option, const void *value, socklen_t size) {
+    // Outgoing peers configure their read timeout after connecting, before
+    // sending a request. This stays observable when rustix connects by syscall.
+    struct sockaddr_un peer = {0};
+    socklen_t length = sizeof(peer);
+    if (ready_fd >= 0 && level == SOL_SOCKET && option == SO_RCVTIMEO &&
+        getpeername(fd, (struct sockaddr *)&peer, &length) == 0 &&
+        peer.sun_family == AF_UNIX && length > offsetof(struct sockaddr_un, sun_path) &&
+        memmem(peer.sun_path, length - offsetof(struct sockaddr_un, sun_path),
                "/cuinterpose-", strlen("/cuinterpose-"))) {
         char token = 'R';
         if (write(ready_fd, &token, 1) != 1 ||
@@ -46,8 +47,8 @@ int connect(int fd, const struct sockaddr *address, socklen_t length) {
             _exit(91);
         ready_fd = release_fd = -1;
     }
-    int (*next)(int, const struct sockaddr *, socklen_t) = NEXT("connect");
-    return next(fd, address, length);
+    int (*next)(int, int, int, const void *, socklen_t) = NEXT("setsockopt");
+    return next(fd, level, option, value, size);
 }
 
 int cuMemcpyDtoHAsync_v2(void *host, uint64_t device, size_t size, void *stream) {
