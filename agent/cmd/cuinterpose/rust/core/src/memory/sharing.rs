@@ -110,12 +110,6 @@ pub struct ExportCache {
 }
 
 impl ExportCache {
-    pub fn fork_lock(&self, descriptors: &mut Vec<i32>) -> MutexGuard<'_, Exports> {
-        let exports = self.exports.lock().expect("export cache lock poisoned");
-        descriptors.extend(exports.values().map(|(fd, _)| fd.as_raw_fd()));
-        exports
-    }
-
     pub fn contains(&self, id: &AllocationId) -> Result<bool> {
         Ok(self
             .exports

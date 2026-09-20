@@ -4,7 +4,6 @@
 //! Process runtime publication, startup, and failure state.
 
 mod control;
-pub(crate) mod fork;
 
 use crate::driver::{CudaError, Result};
 use crate::memory::{ProcessState, sharing};
@@ -12,29 +11,37 @@ use cudarc::driver::sys::CUresult::*;
 use cuinterpose_protocol::NamespacePid;
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 pub(crate) static RUNTIME_FAILED: AtomicBool = AtomicBool::new(false);
 
 struct ProcessRuntime {
+    pid: libc::pid_t,
     state: Mutex<ProcessState>,
     export_cache: sharing::ExportCache,
     control_dir: PathBuf,
     socket_path: PathBuf,
 }
-// Release publication follows successful worker startup; Acquire readers may
-// then borrow the runtime for its process lifetime. Only a quiescent fork
-// child abandons the inherited pointer; it never frees the parent's runtime.
-static RUNTIME_PTR: AtomicPtr<ProcessRuntime> = AtomicPtr::new(std::ptr::null_mut());
+// Published once after CUDA initialization; never reset or reused in a fork child.
+static RUNTIME: OnceLock<ProcessRuntime> = OnceLock::new();
 static INSTALL_LOCK: Mutex<()> = Mutex::new(());
 
-// Installed runtimes live for the process lifetime. A quiescent fork child
-// abandons its inherited pointer rather than freeing the parent's runtime.
 fn process_runtime() -> Result<&'static ProcessRuntime> {
-    let pointer = RUNTIME_PTR.load(Ordering::Acquire);
-    // Acquire observes the fully initialized runtime published by the installer.
-    unsafe { pointer.as_ref() }.ok_or(CUDA_ERROR_NOT_INITIALIZED.into())
+    let runtime = RUNTIME.get().ok_or(CUDA_ERROR_NOT_INITIALIZED)?;
+    // Check ownership before touching any mutex inherited from another process.
+    if runtime.pid != unsafe { libc::getpid() } {
+        return Err(CUDA_ERROR_NOT_INITIALIZED.into());
+    }
+    Ok(runtime)
+}
+
+pub fn ready() -> Result<()> {
+    process_runtime()?;
+    if RUNTIME_FAILED.load(Ordering::Acquire) {
+        return Err(CUDA_ERROR_NOT_READY.into());
+    }
+    Ok(())
 }
 
 pub fn export_cache() -> Result<&'static sharing::ExportCache> {
@@ -46,15 +53,15 @@ pub fn control_dir() -> Result<&'static Path> {
 }
 
 pub(super) fn initialized() -> bool {
-    !RUNTIME_PTR.load(Ordering::Acquire).is_null()
+    RUNTIME.get().is_some()
 }
 
 pub fn initialize() -> Result<()> {
+    if initialized() {
+        return ready();
+    }
     if RUNTIME_FAILED.load(Ordering::Acquire) {
         return Err(CudaError::from(CUDA_ERROR_UNKNOWN));
-    }
-    if initialized() {
-        return Ok(());
     }
     thread_local! {
         // Non-Drop TLS: initialize this module's TLS before the commit lock,
@@ -108,10 +115,10 @@ fn install_runtime(candidate: &mut Result<Option<RuntimeCandidate>>) -> Result<(
             .to_str()
             .ok_or(CUDA_ERROR_INVALID_VALUE)?,
     )?;
-    RUNTIME_PTR.store(
-        Box::into_raw(candidate.runtime.take().unwrap()),
-        Ordering::Release,
-    );
+    // Installation is serialized; OnceLock only publishes, never runs startup.
+    if RUNTIME.set(*candidate.runtime.take().unwrap()).is_err() {
+        unreachable!("runtime installed under installation lock");
+    }
     Ok(())
 }
 
@@ -167,6 +174,7 @@ fn prepare_runtime() -> Result<Box<ProcessRuntime>> {
         .map_err(|_| CUDA_ERROR_INVALID_VALUE)?;
     let state = ProcessState::new(namespace_pid);
     Ok(Box::new(ProcessRuntime {
+        pid,
         state: Mutex::new(state),
         export_cache: sharing::ExportCache::default(),
         control_dir,
@@ -175,13 +183,11 @@ fn prepare_runtime() -> Result<Box<ProcessRuntime>> {
 }
 
 pub fn get() -> Result<MutexGuard<'static, ProcessState>> {
+    let runtime = process_runtime()?;
     if RUNTIME_FAILED.load(Ordering::Acquire) {
         return Err(CudaError::from(CUDA_ERROR_UNKNOWN));
     }
-    let state = process_runtime()?
-        .state
-        .lock()
-        .map_err(|_| CUDA_ERROR_UNKNOWN)?;
+    let state = runtime.state.lock().map_err(|_| CUDA_ERROR_UNKNOWN)?;
     // The peer service may have failed while this caller waited for the lock.
     // Check again before admitting work against the runtime.
     if RUNTIME_FAILED.load(Ordering::Acquire) {
