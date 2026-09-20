@@ -18,6 +18,8 @@ import time
 from support import driver, props
 
 cuda = driver()
+if not sys.argv[1].startswith("constructor"):
+    assert cuda.cuInit(0) == 0
 from protocol_client import LIFECYCLE, request, reply
 
 

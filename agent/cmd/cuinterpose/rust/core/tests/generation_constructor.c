@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-// Loaded in a cold process or a child whose parent initialized the actual core.
+// Loaded in a cold process or a child forked before CUDA initialization.
 // The worker initializes a process generation, not a mock backend.
 #define _GNU_SOURCE
 #include <assert.h>
@@ -19,15 +19,13 @@
 static pthread_t worker;
 static atomic_int worker_tid;
 static int worker_result = -1;
-static int (*create)(uint64_t *, size_t, const void *, uint64_t);
+static int (*initialize)(unsigned);
 static int (*query)(const char *, void **, int, uint64_t);
 
 static void *initialize_generation(void *unused) {
     (void)unused;
     atomic_store(&worker_tid, (int)syscall(SYS_gettid));
-    uint64_t handle = 42;
-    worker_result = create(&handle, 4096, NULL, 0);
-    assert(handle == 42);
+    worker_result = initialize(0);
     if (query) {
         void *output = NULL;
         assert(query("cuFixtureUnwrapped", &output, 13010, 0) == 0 && output);
@@ -36,8 +34,8 @@ static void *initialize_generation(void *unused) {
 }
 
 __attribute__((constructor)) static void contend_with_generation_startup(void) {
-    create = dlsym(RTLD_DEFAULT, "cuMemCreate");
-    assert(create);
+    initialize = dlsym(RTLD_DEFAULT, "cuInit");
+    assert(initialize);
     if (getenv("CUINTERPOSE_TEST_GENERATION_QUERY")) {
         query = dlsym(RTLD_DEFAULT, "cuGetProcAddress");
         assert(query);
@@ -75,13 +73,11 @@ __attribute__((constructor)) static void contend_with_generation_startup(void) {
         assert(query("cuFixtureUnwrapped", &output, 13010, 0) == 0);
         assert(output != NULL);
     }
-    uint64_t handle = 42;
-    assert(create(&handle, 4096, NULL, 0) == 1); // CUDA_ERROR_INVALID_VALUE
-    assert(handle == 42);
+    assert(initialize(0) == 0);
 }
 
 void fixture_join_generation_worker(void) {
     // Called after dlopen returns and releases the loader lock needed by B.
     assert(pthread_join(worker, NULL) == 0);
-    assert(worker_result == 1); // CUDA_ERROR_INVALID_VALUE after initialization.
+    assert(worker_result == 0);
 }

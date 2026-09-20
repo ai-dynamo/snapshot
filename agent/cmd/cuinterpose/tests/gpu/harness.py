@@ -210,7 +210,7 @@ class Workload:
         self.wait_for_workers("ready")
         # Workers have checked that foreign imports are rejected.
         cuda_driver.destroy_external_allocations(self._externals)
-        for process_id in (self.parent.pid, *self.child_pids):
+        for process_id in self.child_pids:
             self.assert_worker_runtime(process_id)
 
     def hand_fresh_imports(self) -> None:

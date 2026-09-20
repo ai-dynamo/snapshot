@@ -14,6 +14,7 @@ from support import driver, props, Properties, Location
 from protocol_client import LIFECYCLE, command
 
 cuda = driver()
+assert cuda.cuInit(0) == 0
 u64, size = c.c_uint64, c.c_size_t
 cuda.cuMemMap.argtypes = [u64, size, size, u64, u64]
 cuda.cuMemUnmap.argtypes = [u64, size]

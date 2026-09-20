@@ -2,25 +2,32 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Process-isolated fake-driver fork regressions; no real CUDA fork claim."""
+"""Fork before CUDA initialization, and rejection of inherited runtimes."""
 
 import ctypes as c
-import errno
+import fcntl
 import os
 from pathlib import Path
-import socket
 import sys
 import time
-from protocol_client import command, inspect
+from protocol_client import inspect
 from support import driver, props
 
 cuda = driver()
 
 
-def initialize():
-    handle = c.c_uint64(42)
-    assert cuda.cuMemCreate(c.byref(handle), 4096, None, 0) == 1
-    assert handle.value == 42
+def endpoint():
+    return Path(os.environ["SNAPSHOT_CONTROL_DIR"]) / f"cuinterpose-{os.getpid()}.sock"
+
+
+def descriptors():
+    result = {}
+    for path in Path("/proc/self/fd").iterdir():
+        try:
+            result[int(path.name)] = os.readlink(path)
+        except FileNotFoundError:
+            pass
+    return result
 
 
 def wait(child):
@@ -35,143 +42,75 @@ def wait(child):
     os.waitpid(child, 0)
     raise AssertionError("fork child did not complete")
 
-def child_checks(
-    parent_pid, inherited=(), virtual_shareable_handle=None, application_socket=None
-):
-    try:
-        # Check before any child shim work can reuse these descriptor numbers.
-        for fd in inherited:
-            try:
-                os.fstat(fd)
-            except OSError as error:
-                assert error.errno == errno.EBADF
-            else:
-                raise AssertionError(f"inherited shim fd {fd} remains open")
-        if virtual_shareable_handle is not None:
-            os.fstat(virtual_shareable_handle)
-        if application_socket is not None:
-            os.fstat(application_socket)
-        initialize()
-        assert command("inspect")["records"] == []
-        assert inspect()["namespace_pid"] == os.getpid()
-        assert os.getpid() != parent_pid
-        value = c.c_uint64()
-        assert cuda.cuMemCreate(c.byref(value), 4096, c.byref(props), 0) == 0
-        assert cuda.cuMemRelease(value) == 0
-        os._exit(0)
-    except BaseException:
-        import traceback
-        traceback.print_exc()
-        os._exit(1)
+
+def allocate():
+    value = c.c_uint64()
+    assert cuda.cuMemCreate(c.byref(value), 4096, c.byref(props), 0) == 0
+    return value
 
 
 def main():
     mode = sys.argv[1]
-    if mode == "preinit":
-        parent_pid = os.getpid()
-        child = os.fork()
-        if child == 0:
-            child_checks(parent_pid)
-        wait(child)
-        initialize()
-        assert command("inspect")["records"] == []
+    if mode == "exec-check":
+        assert not set(sys.argv[2:]) & set(descriptors().values())
+        assert not endpoint().exists()
+        assert cuda.cuInit(0) == 0
         assert inspect()["namespace_pid"] == os.getpid()
         return
 
-    value = c.c_uint64()
-    assert cuda.cuMemCreate(c.byref(value), 4096, c.byref(props), 0) == 0
-    virtual_shareable_handle = c.c_int(-1)
-    assert (
-        cuda.cuMemExportToShareableHandle(
-            c.byref(virtual_shareable_handle), value, 1, 0
-        )
-        == 0
-    )
-    parent_pid = inspect()["namespace_pid"]
-    assert parent_pid == os.getpid()
-
-    if mode == "descriptors":
-        # An idle accepted socket belongs to the shim's FD inventory, while the
-        # application's end survives. No CUDA or lifecycle call is in flight.
-        before = set(os.listdir("/proc/self/fd"))
-        idle = socket.socket(socket.AF_UNIX)
-        idle.connect(f"{os.environ['SNAPSHOT_CONTROL_DIR']}/cuinterpose-{os.getpid()}.sock")
-        deadline = time.monotonic() + 5
-        while len(set(os.listdir("/proc/self/fd")) - before) < 2:
-            assert time.monotonic() < deadline
-            time.sleep(0.001)
-        inherited = []
-        for path in Path("/proc/self/fd").iterdir():
-            try:
-                name = os.readlink(path)
-            except FileNotFoundError:
-                continue
-            fd = int(path.name)
-            if fd != idle.fileno() and ("fake-cuda" in name or name.startswith("socket:")):
-                inherited.append(fd)
-        assert len(inherited) >= 2, inherited
+    if mode == "preinit":
+        before_threads = set(os.listdir("/proc/self/task"))
+        before_fds = descriptors()
+        # Resolve the initializer before fork: lookup must not start the shim.
+        query = cuda.cuGetProcAddress
+        query.argtypes = [c.c_char_p, c.POINTER(c.c_void_p), c.c_int, c.c_uint64]
+        pointer = c.c_void_p()
+        assert query(b"cuInit", c.byref(pointer), 13010, 0) == 0 and pointer.value
+        initialize = c.CFUNCTYPE(c.c_int, c.c_uint)(pointer.value)
+        assert cuda.cuInit(1) == 1
+        value = c.c_uint64(42)
+        assert cuda.cuMemCreate(c.byref(value), 4096, c.byref(props), 0) == 3
+        assert value.value == 42
+        assert not endpoint().exists()
+        assert set(os.listdir("/proc/self/task")) == before_threads
+        assert descriptors() == before_fds
         child = os.fork()
         if child == 0:
-            child_checks(
-                parent_pid, inherited, virtual_shareable_handle.value, idle.fileno()
-            )
+            assert initialize(0) == 0
+            assert inspect()["namespace_pid"] == os.getpid()
+            assert cuda.cuMemRelease(allocate()) == 0
+            os._exit(0)
         wait(child)
-        records = command("inspect")["records"]
-        assert sum("allocation" in record for record in records) == 1
-        assert inspect()["namespace_pid"] == parent_pid
-        idle.close()
-    elif mode == "order":
-        # Out-of-order requests refuse without changing state. Destructive
-        # failures terminate; there is no failed generation to revive by fork.
-        command("prepare_unicast", False)
-        command("inspect")
-        child = os.fork()
-        if child == 0:
-            child_checks(parent_pid, virtual_shareable_handle=virtual_shareable_handle.value)
-        wait(child)
-        assert cuda.cuMemRelease(value) == 0
-        os.close(virtual_shareable_handle.value)
+        assert not endpoint().exists()
+        assert initialize(0) == 0
+        assert inspect()["namespace_pid"] == os.getpid()
         return
-    elif mode == "nested":
-        # Find the parent's listening socket. No child CUDA/control call
-        # is allowed before the second fork: it would mask stale-registry bugs.
-        sockets = []
-        for path in Path("/proc/self/fd").iterdir():
-            try:
-                if os.readlink(path).startswith("socket:"):
-                    sockets.append(int(path.name))
-            except FileNotFoundError:
-                continue
-        assert sockets
-        listener = min(sockets)
-        child = os.fork()
-        if child == 0:
-            try:
-                replacement = os.open("/dev/null", os.O_RDONLY)
-                if replacement != listener:
-                    os.dup2(replacement, listener)
-                    os.close(replacement)
-                grandchild = os.fork()
-                if grandchild == 0:
-                    try:
-                        assert os.read(listener, 1) == b""
-                        os.fstat(virtual_shareable_handle.value)
-                        os._exit(0)
-                    except BaseException:
-                        os._exit(77)
-                wait(grandchild)
-                assert os.read(listener, 1) == b""
-                os._exit(0)
-            except BaseException:
-                import traceback
-                traceback.print_exc()
-                os._exit(1)
-        wait(child)
-        assert inspect()["namespace_pid"] == parent_pid
-    else:
-        raise AssertionError(mode)
-    os.close(virtual_shareable_handle.value)
+
+    assert cuda.cuInit(0) == 0
+    value = allocate()
+    share = c.c_int(-1)
+    assert cuda.cuMemExportToShareableHandle(c.byref(share), value, 1, 0) == 0
+    owned = {fd: name for fd, name in descriptors().items()
+             if fd != share.value and ("fake-cuda" in name or name.startswith("socket:"))}
+    assert len(owned) >= 2, owned
+    for fd in owned:
+        assert fcntl.fcntl(fd, fcntl.F_GETFD) & fcntl.FD_CLOEXEC
+    child = os.fork()
+    if child == 0:
+        # CUDA itself rejects initialization. Shim-only operations must reject
+        # too, without touching the inherited mutexes or virtual handle table.
+        assert cuda.cuInit(0) == 3
+        assert cuda.cuMemRelease(value) == 3
+        assert cuda.cuMemCreate(c.byref(value), 4096, c.byref(props), 0) == 3
+        assert not endpoint().exists()
+        if mode == "exec":
+            os.execv(sys.executable, [sys.executable, __file__, "exec-check", *owned.values()])
+        assert mode == "rejected"
+        os._exit(0)
+    wait(child)
+    assert inspect()["namespace_pid"] == os.getpid()
     assert cuda.cuMemRelease(value) == 0
+    os.close(share.value)
 
 
 if __name__ == "__main__":

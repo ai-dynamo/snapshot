@@ -194,7 +194,7 @@ int main(int argc, char **argv) {
         void *pointer = (void *)0x1234;
         int (*initialize)(unsigned) = symbol(driver, "cuInit");
         assert(initialize(0) == 3);
-        assert(query("cuMemCreate", &pointer, 13010, 0) == 3 && pointer == NULL);
+        assert(query("cuMemCreate", &pointer, 13010, 0) == 0 && pointer != NULL);
         unsetenv("CUINTERPOSE_TEST_READY_FAILURE");
         assert(initialize(0) == 0);
     } else if (strcmp(argv[1], "concurrent") == 0) {
@@ -360,7 +360,7 @@ int main(int argc, char **argv) {
                            : ((runtime_version_query)resolver)("query-error", &pointer, 12000, 0, &status);
             assert(result == 1 && pointer == (void *)0x1234);
         }
-        assert(getenv("CUINTERPOSE_TEST_CORE_INITIALIZED") != NULL);
+        assert(getenv("CUINTERPOSE_TEST_CORE_INITIALIZED") == NULL);
     } else if (strcmp(argv[1], "local-lifetime") == 0) {
         create_fn create = symbol(driver, "cuMemCreate");
         assert(getenv("CUINTERPOSE_TEST_CORE_INITIALIZED") == NULL);

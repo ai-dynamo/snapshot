@@ -37,7 +37,7 @@ if mode in ("failure-race", "delayed"):
         assert len(os.listdir("/proc/self/task")) == 5
         child = os.fork()
         if child == 0:
-            assert cuda.cuInit(0) == 0
+            assert cuda.cuInit(0) == 3
             os._exit(0)
         assert os.waitpid(child, 0)[1] == 0
         cuda.fault_release_workers()

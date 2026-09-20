@@ -16,12 +16,22 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <stdatomic.h>
 
 #undef cuGetProcAddress
 #undef cuMulticastBindAddr
 #undef cuMulticastBindMem
 
 CUresult CUDAAPI fakeCuGetProcAddress(const char *, void **, int, cuuint64_t);
+
+static atomic_int initialized_pid;
+CUresult CUDAAPI cuInit(unsigned int flags) {
+    if (flags) return 1;
+    int pid = getpid();
+    int expected = 0;
+    atomic_compare_exchange_strong(&initialized_pid, &expected, pid);
+    return atomic_load(&initialized_pid) == pid ? 0 : 3;
+}
 
 #define FAKE_MAX_HOST 256
 
@@ -972,6 +982,7 @@ void *fakeOriginalForVersion(const char *symbol, int version)
     const char *name;
     void *function;
   } table[] = {
+      {"cuInit", (void *)&cuInit},
       {"cuMemCreate", (void *)&fakeCuMemCreate},
       {"cuMemRelease", (void *)&fakeCuMemRelease},
       {"cuMemRetainAllocationHandle", (void *)&fakeCuMemRetainAllocationHandle},

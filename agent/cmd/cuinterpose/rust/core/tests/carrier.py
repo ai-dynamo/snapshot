@@ -11,6 +11,7 @@ import sys
 from support import driver, props
 
 cuda = driver()
+assert cuda.cuInit(0) == 0
 from protocol_client import command
 
 

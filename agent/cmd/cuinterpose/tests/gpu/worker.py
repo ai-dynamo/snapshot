@@ -366,7 +366,9 @@ def _assert_exact_result(output: torch.Tensor, stage: str) -> None:
 def _fork_workers(options: Options) -> None:
     if torch.cuda.is_initialized():
         raise RuntimeError("parent initialized CUDA before forking workers")
-    cuda_driver.assert_no_current_context("parent before forking workers")
+    status, _ = driver.cuCtxGetCurrent()
+    if status != driver.CUresult.CUDA_ERROR_NOT_INITIALIZED:
+        raise RuntimeError(f"parent CUDA driver initialized before fork: {status}")
 
     peer_channels = [socket.socketpair() for _ in range(WORLD_SIZE)]
     children = []

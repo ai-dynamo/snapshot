@@ -26,7 +26,7 @@ int main(int argc, char **argv) {
     assert(library);
     initialize = dlsym(library, "cuinterpose_core_init");
     assert(initialize);
-    frontend = (struct FrontendAbi){ABI_VERSION, sizeof(frontend), resolve, getpid()};
+    frontend = (struct FrontendAbi){ABI_VERSION, sizeof(frontend), resolve};
     assert(pthread_barrier_init(&barrier, NULL, 32) == 0);
     pthread_t threads[32];
     for (size_t i = 0; i < 32; ++i)

@@ -19,7 +19,7 @@ cuda.cuInit.argtypes = [c.c_uint]
 mode = sys.argv[1]
 forked = mode in ("fork", "fork-constructor")
 if forked:
-    assert cuda.cuInit(0) == 0
+    # Fork before CUDA initialization; each child can initialize independently.
     child = os.fork()
     if child:
         assert os.waitpid(child, 0)[1] == 0

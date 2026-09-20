@@ -127,7 +127,7 @@ def main():
                            env=case_env,
                            check=True, timeout=60)
         env["LD_PRELOAD"] += f":{fixtures / 'test/libcuda.so.1'}"
-        for mode in ("preinit", "descriptors", "order", "nested"):
+        for mode in ("preinit", "rejected", "exec"):
             case_env = env | {"SNAPSHOT_CONTROL_TIMEOUT_SECONDS": "1"}
             subprocess.run([sys.executable, str(Path(__file__).with_name("fork.py")),
                             mode],

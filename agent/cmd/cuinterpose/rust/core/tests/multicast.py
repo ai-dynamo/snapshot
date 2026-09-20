@@ -13,6 +13,7 @@ import threading
 from support import driver, props, Properties
 
 cuda = driver()
+assert cuda.cuInit(0) == 0
 from protocol_client import LIFECYCLE, command, request_export
 
 

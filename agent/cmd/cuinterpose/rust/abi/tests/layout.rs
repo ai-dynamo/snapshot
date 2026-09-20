@@ -31,14 +31,11 @@ fn generated_c_layout_matches_rust() {
                 stringify!($ty), stringify!($field)).expect("write to string");)+
         };
     }
-    layout!(FrontendAbi, version, size, resolve, origin_pid);
+    layout!(FrontendAbi, version, size, resolve);
     layout!(
         BackendAbi,
         version,
         size,
-        fork_prepare,
-        fork_parent,
-        fork_child,
         ensure_cuinterpose_initialized,
         cuMemAlloc_v2,
         cuMemFree_v2,

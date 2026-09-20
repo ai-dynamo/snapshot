@@ -24,7 +24,6 @@ __attribute__((constructor)) static void reenter_frontend(void) {
     CUmemGenericAllocationHandle handle = 0;
     assert(create && create(&handle, 4096, NULL, 0) == 3);
 }
-static void fork_hook(void) {}
 static CUresult ensure_cuinterpose_initialized(void) {
     return getenv("CUINTERPOSE_TEST_READY_FAILURE") ? 3 : 0;
 }
@@ -106,9 +105,6 @@ static const struct BackendAbi api = {
 #else
     .size = sizeof(api),
 #endif
-    .fork_prepare = fork_hook,
-    .fork_parent = fork_hook,
-    .fork_child = fork_hook,
     .ensure_cuinterpose_initialized = ensure_cuinterpose_initialized,
     .cuMemAlloc_v2 = forward_cuMemAlloc_v2,
     .cuMemFree_v2 = forward_cuMemFree_v2,
@@ -152,7 +148,7 @@ CUresult cuinterpose_core_init(const struct FrontendAbi *frontend,
         // Observed only by this process, to prove registration is lazy.
         assert(setenv("CUINTERPOSE_TEST_CORE_INITIALIZED", "1", 1) == 0);
     }
-    int matches = registered.resolve == frontend->resolve && registered.origin_pid == frontend->origin_pid;
+    int matches = registered.resolve == frontend->resolve;
     assert(pthread_mutex_unlock(&registration) == 0);
     if (!matches)
         return 1;

@@ -22,7 +22,7 @@ path = Path(os.environ["SNAPSHOT_CONTROL_DIR"]) / f"cuinterpose-{os.getpid()}.so
 assert not path.exists()
 sockets_before = set(path.parent.glob("cuinterpose-*.sock"))
 
-if mode in ("init", "init-handle", "init-failure", "fork", "constructor", "concurrent"):
+if mode in ("init", "init-handle", "init-failure", "concurrent"):
     initialize = driver.cuInit if mode == "init-handle" else cuda.cuInit
     initialize.argtypes = [c.c_uint]
 
@@ -75,19 +75,27 @@ else:
         args += [13010, 0] if index < 3 or index >= 5 else [0]
         if index:
             args += [c.byref(status)]
+        # Even a blocked endpoint must not turn a successful lookup into failure.
         if mode == "resolver-startup-failure":
-            # The inner resolver cannot establish an endpoint. The outer
-            # runtime must preserve that refusal, not return a usable pointer.
             path.touch(exist_ok=False)
-            assert query(*args) == 3 and output.value is None and status.value == 0
-            path.unlink()
-            output.value = 0x1234
-            assert query(*args) == 3 and output.value is None and not path.exists()
-            print("PASS actual Rust endpoint resolver-startup-failure: sticky refusal")
-            sys.exit(0)
+        before_tasks = set(os.listdir("/proc/self/task"))
+        before_fds = set(os.listdir("/proc/self/fd"))
         assert query(*args) == 0 and output.value
+        assert set(os.listdir("/proc/self/task")) == before_tasks
+        assert set(os.listdir("/proc/self/fd")) == before_fds
+        if mode == "resolver-startup-failure":
+            assert cuda.cuInit(0) == 3
+            path.unlink()
+            assert query(*args) == 0 and output.value
+            assert cuda.cuInit(0) == 3 and not path.exists()
+        else:
+            assert not path.exists()
+            assert cuda.cuInit(0) == 0
 
 activate()
+if mode == "resolver-startup-failure":
+    print("PASS lookup independent of runtime startup failure")
+    sys.exit(0)
 parent = inspect()["namespace_pid"]
 if mode == "concurrent":
     inode = path.stat().st_ino
@@ -98,24 +106,4 @@ if mode == "concurrent":
     assert set(path.parent.glob("cuinterpose-*.sock")) == sockets_before | {path}
     # Private loser workers retire asynchronously; initialization.py checks
     # eventual worker/FD singleton ownership with a bounded deadline.
-if mode not in ("fork", "constructor"):
-    print(f"PASS actual Rust endpoint {mode}: activation, no VMM")
-    sys.exit(0)
-child = os.fork()
-if child == 0:
-    try:
-        if mode == "constructor":
-            os.environ["CUINTERPOSE_TEST_GENERATION_QUERY"] = "1"
-            plugin = c.CDLL(sys.argv[2])
-            plugin.fixture_join_generation_worker()
-        else:
-            activate()
-        assert inspect()["namespace_pid"] != parent
-        os._exit(0)
-    except BaseException:
-        import traceback
-        traceback.print_exc()
-        os._exit(1)
-assert os.waitpid(child, 0)[1] == 0
-assert inspect()["namespace_pid"] == parent
-print(f"PASS actual Rust endpoint {mode}: parent and child, no VMM")
+print(f"PASS actual Rust endpoint {mode}: starts only after cuInit")

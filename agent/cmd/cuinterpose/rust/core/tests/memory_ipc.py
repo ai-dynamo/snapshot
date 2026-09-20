@@ -18,6 +18,7 @@ class Handle(c.Structure):
 
 
 cuda = driver()
+assert cuda.cuInit(0) == 0
 u64 = c.c_uint64
 cuda.cuMemAlloc_v2.argtypes = [c.POINTER(u64), c.c_size_t]
 cuda.cuMemFree_v2.argtypes = [u64]

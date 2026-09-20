@@ -43,8 +43,7 @@ def main():
             "cbindgen", "--quiet", "--config", "abi/cbindgen.toml",
             "--crate", "cuinterpose-abi", "--output", str(fixtures / "core_abi.h"), ".",
         ], cwd=workspace, env=clean, check=True)
-        # The lifecycle fake implements allocation operations but not cuInit.
-        # Reuse the loader suite's minimal driver for initialization schedules.
+        # Use the minimal driver to isolate initialization scheduling from VMM.
         driver = workspace.parent / "frontend/tests/fixtures/driver.c"
         subprocess.run([
             "/usr/bin/gcc", "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror",

@@ -6,15 +6,22 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <stdatomic.h>
 #include <assert.h>
 #include <dlfcn.h>
 #include <sys/wait.h>
 #include <stdlib.h>
 
 static struct fixture_call last;
+static atomic_int initialized_pid;
 int cuInit(unsigned flags) {
-    return flags ? 1 : 0;
+    if (flags) return 1;
+    int pid = getpid();
+    int expected = 0;
+    atomic_compare_exchange_strong(&initialized_pid, &expected, pid);
+    return atomic_load(&initialized_pid) == pid ? 0 : 3;
 }
+
 
 // Models a runtime-only allocation path that initializes the driver but never
 // calls VMM. Lookup through the default scope permits the cuInit interceptor.

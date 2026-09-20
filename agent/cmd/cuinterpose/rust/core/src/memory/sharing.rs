@@ -17,7 +17,7 @@ use rustix::fs::{MemfdFlags, memfd_create};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Write;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::{fs::FileExt, net::UnixStream};
 use std::sync::{Mutex, MutexGuard};
 
@@ -255,6 +255,7 @@ pub(crate) fn import_reference(
 #[cfg(test)]
 mod codec_tests {
     use super::*;
+    use std::os::fd::AsRawFd;
 
     #[test]
     fn virtual_shareable_handle_round_trip() {
