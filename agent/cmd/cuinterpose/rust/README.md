@@ -68,8 +68,8 @@ requires cross-node capture, restore, and post-restore workload inference.
 | `core` | Driver calls, process generations, tracking, host carriers, lifecycle |
 | `coordinator` | CLI, participants, topology validation, barriers, durable state |
 
-The private C ABI, MessagePack wire/state format, virtual shareable handle, and
-virtual IPC memory handle are all version **1**.
+The private C ABI is version **1**. The MessagePack wire/state format, virtual
+shareable handle, and virtual IPC memory handle are version **2**.
 Earlier experimental artifacts are rejected, not translated. Rust
 objects, allocators, mutexes, and unwinding never cross the library boundary.
 `FrontendAbi` contains the resolver and process identity supplied by the C
@@ -115,9 +115,16 @@ calls.
 
 ## Operating constraints
 
-Applications must be quiescent during prepare and remain parked through restore.
-Only exactly POSIX-FD exportable VMM is supported. Unsupported exportable
-creations and live raw imports are refused at checkpoint inspection.
+Applications must finish all CUDA calls and GPU work before `BEGIN_CHECKPOINT`
+and remain parked through restore. Entry closes the memory API and returns stable
+records under the process mutex. A process-wide counter excludes entry during
+unlocked driver calls; application code owns synchronization of object lifetimes.
+Only exactly POSIX-FD exportable VMM and multicast are supported. Unsupported
+exportable creations, non-POSIX multicast, and foreign imports fail at the API
+before creating driver state. All sharing peers must use the shim and belong to
+the fixed checkpoint group. One coordinator executes each phase once; failed or
+ambiguous phases are never retried, rolled back, or resumed. Per-object progress
+flags are unnecessary because a mutation failure terminates the process.
 Never-shared allocations remain native-owned even when exportable.
 
 Fork resets the child's shim generation and closes inherited shim-owned

@@ -72,7 +72,7 @@ The backend separates CUDA API policy from resource ownership:
 
 Handlers do not call other CUDA handlers. They share memory operations that own
 their bookkeeping. Operations that release the registry lock for a
-collective CUDA call also own pinning and post-call validation. Peer FD service
+blocking CUDA call use one process-wide `unlocked_driver_calls` counter. Peer FD service
 uses only the export cache lock, never the registry lock.
 
 The control worker routes requests and sends replies; checkpoint code owns phase
@@ -86,7 +86,7 @@ The Rust `cuinterpose-coordinator` is a short-lived executable. One instance run
 For each phase, it sends requests to the participants concurrently and waits for every reply before starting the next phase. This matters for multicast calls that need other ranks to make progress.
 
 There are no identity or rendezvous messages. Preparation sends four coordinator
-requests to each process: `INSPECT`, `PREPARE_MULTICAST`, `SAVE_ALLOCATIONS`,
+requests to each process: `BEGIN_CHECKPOINT`, `PREPARE_MULTICAST`, `SAVE_ALLOCATIONS`,
 and `PREPARE_UNICAST`. Restore sends eight: an initial `INSPECT`,
 `LOAD_ALLOCATIONS`, `RESTORE_UNICAST`, the four ordered multicast operations,
 and a final `INSPECT`. Restoring an imported allocation or multicast object also
@@ -173,7 +173,7 @@ Retiring private workers have no generation reference or socket. This does not
 promise safe arbitrary fork during preparation or reclaim every inherited
 allocation belonging to a vanished thread.
 
-Ordinary Rust panics are caught at the backend entry points and converted into CUDA errors. A failed backend stops accepting further CUDA work rather than continuing with possibly inconsistent records. This does not make invalid application pointers, foreign C++ exceptions, or allocator aborts recoverable.
+Rust panics at backend entry points terminate the process without unwinding through the C ABI. The shim cannot continue after a panic that may have interrupted a state-changing operation. This does not make invalid application pointers, foreign C++ exceptions, or allocator aborts recoverable.
 
 | Intercepted APIs | What the shim does |
 | --- | --- |
@@ -203,8 +203,8 @@ allocation across processes.
 The agent supplies one `--process <namespace-pid>` argument for every expected
 CUDA process. Because the coordinator runs inside the target PID and mount
 namespaces, it can connect to each exact socket without scanning the control
-directory or asking shims to identify themselves. Its first request is
-`INSPECT`; restore also requires the supplied namespace PID set to match the
+directory or asking shims to identify themselves. Its first capture request is
+`BEGIN_CHECKPOINT`; restore also requires the supplied namespace PID set to match the
 keys saved in `cuinterpose.state`.
 
 CRIU preserves namespace PIDs, allocation IDs, state records, virtual allocation
@@ -244,7 +244,7 @@ fixed 24-byte layout:
 
 | Bytes | Value |
 | --- | --- |
-| 4 | `CUI\x01` |
+| 4 | `CUI\x02` |
 | 4 | Creator namespace PID, little-endian |
 | 16 | Allocation ID |
 
@@ -255,7 +255,7 @@ importing shim derives the creator's exact socket path from its namespace PID.
 On import, B sends A the allocation reference:
 
 ```yaml
-version: 1
+version: 2
 body:
   kind: export
   allocation:
@@ -291,7 +291,7 @@ sequenceDiagram
     SB-->>B: Virtual allocation or multicast handle
 ```
 
-A POSIX import whose FD is not a virtual shareable handle is allowed during execution but counted as a raw import. Capture refuses while such an import remains live: the shim does not know how to reconnect it.
+A POSIX import whose FD is not a virtual shareable handle returns `CUDA_ERROR_NOT_SUPPORTED` before calling CUDA. Non-POSIX imports and unsupported exportable creates are also rejected before acquiring backing. The shim never records unsupported resources for a later checkpoint refusal.
 
 ### Memory IPC adapter
 
@@ -301,7 +301,7 @@ Synchronous `cuMemAlloc_v2` is implemented with POSIX-capable VMM backing from a
 
 | Field | Bytes | Example value |
 | --- | --- | --- |
-| `version` | 8 | ASCII `CUIPC001` |
+| `version` | 8 | ASCII `CUIPC002` |
 | `creator_pid` | 4 | `41` |
 | `allocation` | 16 | `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` |
 | `reserved` | 20 | All zero |
@@ -325,7 +325,7 @@ Application CUDA wrappers run on the calling application thread. On runtime star
 
 The peer thread queues control commands; it does not wait for their CUDA operations. A bounded queue refuses excess control requests. This separation lets an importer obtain an FD even while the creator's control thread is busy reconstructing another object.
 
-Allocation and mapping changes normally hold the shim's state mutex. Multicast calls that can block waiting for other devices release that mutex around the driver call, then recheck the object and phase before recording success. The peer listener holds the export-cache mutex through each socket send. Cache removal, checkpoint teardown, and fork take the same mutex, so they wait for that send to finish. Sends use the socket timeout; a slow receiver can delay cache mutations until the send finishes or fails.
+Allocation and mapping changes normally hold the shim's state mutex. Application multicast calls that can block waiting for other devices, and IPC synchronization, release that mutex around the driver call. One `unlocked_driver_calls` counter prevents checkpoint entry until they have returned and recorded their results. The application must synchronize object destruction against calls using that object; the shim has no per-object pins or busy counts. During restore the application stays parked, so reconstruction holds the state mutex and updates records directly. The peer listener holds the export-cache mutex through each socket send. Cache removal, checkpoint teardown, and fork take the same mutex, so they wait for that send to finish. Sends use the socket timeout; a slow receiver can delay cache mutations until the send finishes or fails.
 
 `ProcessState` owns one memblock registry keyed by allocation ID. Each `Memblock`
 is either a unicast `Allocation` or a `MulticastObject`; virtual handles and
@@ -377,8 +377,30 @@ The application must first stop submitting work, finish outstanding GPU work, an
 
 The agent requires the exact namespace-PID socket for every discovered CUDA
 process in an opted-in workload. It starts the coordinator with those namespace
-PIDs. The coordinator inspects those sockets and checks creators, ranges, access
-permissions, and complete multicast groups before changing driver state.
+PIDs. The coordinator sends `BEGIN_CHECKPOINT` to each shim and checks creators,
+ranges, access permissions, and complete multicast groups before changing driver
+state. Under the process mutex, checkpoint entry requires `Active` and zero
+unlocked driver calls, returns the inspection records, and changes the phase to
+`Checkpointing`. Application memory APIs then refuse mutation. `INSPECT` remains
+a read-only query; it does not authorize destructive preparation.
+
+Every application CUDA call must have returned, outstanding GPU work must have
+completed, and the participant set must remain fixed before checkpoint entry.
+All sharing peers must be interposed and included in the checkpoint group;
+creators must remain available. Neither the counter nor checkpoint entry parks
+application threads or drains GPU work.
+
+One coordinator issues each phase once, in order. There are no lifecycle retries,
+rollback, or reconnect-and-resume semantics. A lost reply or timeout makes the
+attempt unusable; the agent terminates the affected workload. A driver error
+before an ordinary application operation changes tracked state can be returned
+to the caller. Failure after a state-changing operation, or during destructive
+capture/restore, terminates the process.
+
+The process phase and stable ownership determine each phase's complete work.
+Allocations, mappings, multicast objects, and bindings carry no per-object
+checkpoint progress flags. Shared creator allocations own host-carrier contents;
+importers reconnect to their creator. A failed phase never resumes halfway.
 
 ```mermaid
 sequenceDiagram
@@ -391,7 +413,7 @@ sequenceDiagram
     participant Files as Checkpoint files
     App->>App: Finish work and remain parked
     Agent->>Coord: Start prepare in target namespaces
-    Coord->>Shims: INSPECT on each namespace-PID socket
+    Coord->>Shims: BEGIN_CHECKPOINT on each namespace-PID socket
     Shims-->>Coord: Namespace PID and state records
     Coord->>Coord: Validate all participants
     Coord->>Shims: PREPARE_MULTICAST
@@ -510,7 +532,7 @@ Allocation-property and handle-count fields are omitted, and binary allocation
 IDs are shown as hex strings. Field names and nesting match the serialized data:
 
 ```yaml
-version: 1
+version: 2
 body:
   41:
     - allocation:
@@ -594,12 +616,12 @@ The corresponding section of `manifest.yaml` is ordinary YAML:
 cuinterpose:
   requested: true
   prepared: true
-  format: 1
+  format: 2
 ```
 
-`requested` records workload opt-in; `prepared` records successful coordinator preparation and state publication. `format: 1` identifies the agent's artifact contract. The MessagePack envelope is also version `1`. A prepared checkpoint must also have CUDA process metadata and readable cuinterpose state. Missing or different formats and old `cuda-checkpoint-job` artifacts are rejected before CRIU.
+`requested` records workload opt-in; `prepared` records successful coordinator preparation and state publication. `format: 2` identifies the agent's artifact contract. The MessagePack envelope is also version `2`. A prepared checkpoint must also have CUDA process metadata and readable cuinterpose state. Missing or different formats and old `cuda-checkpoint-job` artifacts are rejected before CRIU.
 
-The private frontend/backend ABI, MessagePack protocol and state envelope, virtual shareable handle, and virtual IPC memory handle are all version **1**. Older draft artifacts, including shim PageBroker artifacts, are not migrated or silently interpreted as host-carrier checkpoints.
+The private frontend/backend ABI is version **1**. The MessagePack protocol and state envelope, virtual shareable handle, and virtual IPC memory handle are version **2**. Older draft artifacts, including shim PageBroker artifacts, are not migrated or silently interpreted as host-carrier checkpoints.
 
 The shim libraries themselves are part of the checkpointed process. Their files must be available at the original paths, and the coordinator must understand their protocol. Ship a matching frontend, backend, and coordinator set; the format checks are not permission to substitute arbitrary library builds.
 
@@ -625,4 +647,4 @@ The implementation targets Linux/amd64 and glibc 2.34 or newer for the preload l
 
 Supported memory IPC requires fully interposed peers and the documented single owning-context behavior. Event IPC, memory-pool IPC, managed/async/pitched allocation families, historical 32-bit allocation entry points, and general cross-context peer-access emulation are not supported by this adapter. Removing jobfile support does not make unannotated native-IPC workloads checkpointable.
 
-Exactly POSIX-FD exportable VMM is tracked. A successful unsupported exportable creation, including FABRIC or a mixed handle type, is remembered and makes capture inspection fail before destructive preparation. Live raw VMM imports, incomplete multicast groups, missing participants, and failed copies also stop capture or restore rather than produce an apparently usable checkpoint.
+Exactly POSIX-FD exportable VMM and multicast objects are supported. FABRIC, mixed exportable types, non-POSIX multicast objects (including handle type zero), and foreign VMM imports are rejected at the API call before CUDA creates or imports anything. Private unicast VMM remains native-owned. Incomplete multicast groups, missing creators or participants, and failed copies stop capture or restore.
