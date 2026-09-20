@@ -59,7 +59,10 @@ pub fn request_export(
 ) -> protocol::Result<(OwnedFd, Option<CUmulticastObjectProp>)> {
     let control_dir =
         runtime::control_dir().map_err(|_| Error::Invalid("cuinterpose state is unavailable"))?;
-    let socket = UnixStream::connect(protocol::socket_path(control_dir, allocation.creator_pid))?;
+    let socket = protocol::connect(
+        &protocol::socket_path(control_dir, allocation.creator_pid),
+        protocol::timeout(None),
+    )?;
     let timeout = Some(protocol::timeout(None));
     socket.set_read_timeout(timeout)?;
     socket.set_write_timeout(timeout)?;
@@ -68,8 +71,9 @@ pub fn request_export(
     if response.namespace_pid != allocation.creator_pid {
         return Err(Error::Invalid("wrong creator namespace PID"));
     }
+    let reply = response.result.map_err(Error::Remote)?;
     let descriptor = fd.ok_or(Error::Invalid("creator sent no descriptor"))?;
-    match response.result.map_err(Error::Remote)? {
+    match reply {
         Reply::UnicastExport => Ok((descriptor, None)),
         Reply::MulticastExport {
             devices,
