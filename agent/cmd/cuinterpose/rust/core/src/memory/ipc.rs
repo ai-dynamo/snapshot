@@ -100,10 +100,7 @@ impl ProcessState {
             );
             Ok(address)
         })();
-        if result.is_err() {
-            runtime::G_FAILED.store(true, std::sync::atomic::Ordering::Release);
-        }
-        result
+        Ok(runtime::must_complete(result))
     }
 
     pub(crate) fn unmap_malloc(&mut self, address: CUdeviceptr) -> Result<()> {
@@ -118,22 +115,23 @@ impl ProcessState {
         self.virtual_allocation_handles
             .remove(&mapping.virtual_allocation_handle);
         self.malloc_regions.remove(&address);
-        self.settle(id)?;
-        unsafe { driver::cuMemAddressFree(address, mapping.extent) }
+        runtime::must_complete(self.settle(id));
+        runtime::must_complete(unsafe { driver::cuMemAddressFree(address, mapping.extent) });
+        Ok(())
     }
 }
 
 pub(crate) fn release(address: CUdeviceptr, imported: bool) -> Result<()> {
     // Synchronization must not hold STATE: another host thread may need the
     // shim or peer listener to complete the kernels being synchronized.
+    let mut state = runtime::active()?;
     {
-        let mut state = runtime::active()?;
         let Some(mapping) = state.malloc_regions.get_mut(&address) else {
             if imported {
                 return Err(CudaError(CUresult::CUDA_ERROR_INVALID_VALUE));
             }
-            drop(state);
-            return unsafe { driver::cuMemFree_v2(address) };
+            return runtime::call_unlocked(state, || unsafe { driver::cuMemFree_v2(address) })
+                .map(|_| ());
         };
         if (mapping.opens != 0) != imported {
             return Err(CudaError(CUresult::CUDA_ERROR_INVALID_VALUE));
@@ -146,8 +144,7 @@ pub(crate) fn release(address: CUdeviceptr, imported: bool) -> Result<()> {
             return Err(CudaError(CUresult::CUDA_ERROR_NOT_SUPPORTED));
         }
     }
-    unsafe { driver::cuCtxSynchronize() }?;
-    let mut state = runtime::active()?;
+    let (mut state, ()) = runtime::call_unlocked(state, || unsafe { driver::cuCtxSynchronize() })?;
     if imported {
         let mapping = state
             .malloc_regions

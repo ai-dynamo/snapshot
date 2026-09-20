@@ -5,8 +5,8 @@
 
 use crate::driver::{self};
 use crate::driver::{CudaError, Result};
-use crate::memory::{ipc, sharing};
 use crate::memory::{self, Memblock, VirtualAllocationHandle};
+use crate::memory::{ipc, sharing};
 use crate::runtime;
 use cudarc::driver::sys::CUresult::*;
 use cudarc::driver::sys::*;
@@ -245,8 +245,9 @@ pub fn cuMemAlloc_v2(out: *mut CUdeviceptr, size: usize) -> Result<()> {
     let reference = state.new_reference()?;
     let mut backing = 0;
     unsafe { driver::cuMemCreate(&mut backing, extent, &properties, 0) }?;
-    let backing = VirtualAllocationHandle::from_driver(backing)?;
-    let handle = state.adopt_unicast(reference, backing, extent, properties, false)?;
+    let backing = runtime::must_complete(VirtualAllocationHandle::from_driver(backing));
+    let handle =
+        runtime::must_complete(state.adopt_unicast(reference, backing, extent, properties, false));
     let address = state.map_malloc(handle, size, extent, 0)?;
     unsafe { out.write(address) };
     Ok(())
