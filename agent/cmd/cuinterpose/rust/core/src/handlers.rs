@@ -275,7 +275,7 @@ pub fn cuIpcGetMemHandle(out: *mut CUipcMemHandle, address: CUdeviceptr) -> Resu
         .memblocks
         .get_mut(&id)
         .ok_or(CUresult::CUDA_ERROR_INVALID_HANDLE)?
-        .share(namespace_pid)?;
+        .export(namespace_pid)?;
     unsafe { out.write(ipc_handle) };
     Ok(())
 }

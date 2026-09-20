@@ -115,7 +115,7 @@ impl ProcessState {
         self.virtual_allocation_handles
             .remove(&mapping.virtual_allocation_handle);
         self.malloc_regions.remove(&address);
-        runtime::must_complete(self.settle(id));
+        runtime::must_complete(self.release_unused_memblock(id));
         runtime::must_complete(unsafe { driver::cuMemAddressFree(address, mapping.extent) });
         Ok(())
     }
