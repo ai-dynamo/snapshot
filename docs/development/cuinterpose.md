@@ -175,7 +175,13 @@ initialized, fork children must exec or exit; they cannot restart the shim.
 Fork during initialization and long-lived fork children during checkpoint are
 outside this contract.
 
-Rust panics at backend entry points terminate the process without unwinding through the C ABI. The shim cannot continue after a panic that may have interrupted a state-changing operation. This does not make invalid application pointers, foreign C++ exceptions, or allocator aborts recoverable.
+The Rust workspace uses `panic = "abort"` in debug and release builds. A panic
+in any shim thread, including background workers, terminates the process
+without stack unwinding or destructor cleanup. No catch-and-abort wrapper is
+needed at the C ABI. Cargo unit tests still use unwinding; their panic behavior
+does not qualify the shipped libraries. The shim cannot continue after a panic
+that may have interrupted a state-changing operation. This does not make invalid
+application pointers, foreign C++ exceptions, or allocator aborts recoverable.
 
 | Intercepted APIs | What the shim does |
 | --- | --- |

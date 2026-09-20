@@ -72,6 +72,10 @@ The private C ABI is version **2**. The MessagePack wire/state format, virtual
 shareable handle, and virtual IPC memory handle are version **2**.
 Earlier experimental artifacts are rejected, not translated. Rust
 objects, allocators, mutexes, and unwinding never cross the library boundary.
+Debug and release builds use `panic = "abort"` for the entire Rust workspace,
+including the coordinator. A panic terminates the process without stack
+unwinding; ordinary `Result` errors retain their normal handling. Cargo's unit
+test harness still uses unwinding.
 `FrontendAbi` contains the resolver supplied by the C frontend; `BackendAbi`
 contains the initialization and memory callbacks supplied by the Rust backend.
 The frontend is outside this workspace in `../frontend`. `make frontend`
