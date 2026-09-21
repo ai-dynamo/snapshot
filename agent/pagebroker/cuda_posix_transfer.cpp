@@ -71,20 +71,43 @@ class TransferSlot {
       return;
     if (event_)
       cuEventDestroy(event_);
-    if (data_ && cuMemHostUnregister(data_) == CUDA_SUCCESS)
-      free(data_);
+    if (mapped_) cuMemUnmap(address_, size_);
+    if (allocation_) cuMemRelease(allocation_);
+    if (address_) cuMemAddressFree(address_, size_);
   }
 
   CUresult Allocate(size_t size)
   {
-    if (posix_memalign(&data_, kBufferAlignment, size))
-      return CUDA_ERROR_OUT_OF_MEMORY;
-    auto status = cuMemHostRegister(data_, size, 0);
-    if (status != CUDA_SUCCESS) {
-      free(data_);
-      data_ = nullptr;
-      return status;
-    }
+    // Place the persistent staging ring near the GPU that consumes it.
+    CUdevice device;
+    auto status = cuCtxGetDevice(&device);
+    if (status != CUDA_SUCCESS) return status;
+    int node = -1;
+    status = cuDeviceGetAttribute(&node, CU_DEVICE_ATTRIBUTE_HOST_NUMA_ID, device);
+    if (status != CUDA_SUCCESS) return status;
+    CUmemAllocationProp properties{};
+    properties.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+    properties.location.type = CU_MEM_LOCATION_TYPE_HOST_NUMA;
+    // CUDA reports -1 without NUMA; host allocations then require node 0.
+    properties.location.id = node == -1 ? 0 : node;
+    size_t granularity;
+    status = cuMemGetAllocationGranularity(&granularity, &properties, CU_MEM_ALLOC_GRANULARITY_MINIMUM);
+    if (status != CUDA_SUCCESS) return status;
+    size_ = ((size + granularity - 1) / granularity) * granularity;
+    status = cuMemCreate(&allocation_, size_, &properties, 0);
+    if (status != CUDA_SUCCESS) return status;
+    status = cuMemAddressReserve(&address_, size_, granularity, 0, 0);
+    if (status != CUDA_SUCCESS) return status;
+    status = cuMemMap(address_, size_, 0, allocation_, 0);
+    if (status != CUDA_SUCCESS) return status;
+    mapped_ = true;
+    CUmemAccessDesc access[2]{};
+    access[0].location = properties.location;
+    access[1].location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+    access[1].location.id = device;
+    for (auto& descriptor : access) descriptor.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+    status = cuMemSetAccess(address_, size_, access, 2);
+    if (status != CUDA_SUCCESS) return status;
     return cuEventCreate(&event_, CU_EVENT_DISABLE_TIMING);
   }
 
@@ -109,8 +132,8 @@ class TransferSlot {
     // Set before enqueue: failure does not establish that no DMA was posted.
     cuda_may_access_ = true;
     auto status = operation == TransferOperation::kCheckpoint
-        ? cuMemcpyDtoHAsync(data_, device + chunk.logical_offset, chunk.size, stream)
-        : cuMemcpyHtoDAsync(device + chunk.logical_offset, data_, chunk.size, stream);
+        ? cuMemcpyDtoHAsync(data(), device + chunk.logical_offset, chunk.size, stream)
+        : cuMemcpyHtoDAsync(device + chunk.logical_offset, data(), chunk.size, stream);
     if (status == CUDA_SUCCESS)
       status = cuEventRecord(event_, stream);
     if (status != CUDA_SUCCESS) {
@@ -122,10 +145,13 @@ class TransferSlot {
   }
 
   void Complete() { pending_ = false; cuda_may_access_ = false; }
-  void* data() const { return data_; }
+  void* data() const { return reinterpret_cast<void*>(address_); }
 
  private:
-  void* data_ = nullptr;
+  CUmemGenericAllocationHandle allocation_ = 0;
+  CUdeviceptr address_ = 0;
+  size_t size_ = 0;
+  bool mapped_ = false;
   CUevent event_ = nullptr;
   bool pending_ = false;
   bool cuda_may_access_ = false;
@@ -267,7 +293,7 @@ bool TransferBuffers::Initialize(CUcontext context, std::string* error)
     auto slot = std::make_unique<TransferSlot>();
     status = slot->Allocate(options.chunk_bytes);
     if (status != CUDA_SUCCESS) {
-      *error = "allocate registered transfer slot: " + CudaError(status);
+      *error = "allocate CUDA host-NUMA transfer slot: " + CudaError(status);
       return false;
     }
     slots.push_back(std::move(slot));
