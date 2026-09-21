@@ -1,0 +1,20 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+package snapshot.pagebroker.internal;
+import "v1/pagebroker.proto";
+
+// Private CPU broker -> GPU engine protocol. Admission transfers a session
+// socket and the pinned storage directory via SCM_RIGHTS, in that order.
+message NativeBinding {
+  v1.BindNativeSession binding = 1;
+  uint32 host_pid = 2;
+}
+message NativeCommand {
+  oneof command {
+    v1.NativeSessionRequest execute = 1;
+    // Finish an already completed session, or cancel an incomplete one.
+    // The reply acknowledges that native mappings and file I/O have drained.
+    bool drain = 2;
+  }
+}

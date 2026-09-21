@@ -24,6 +24,110 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type BindNativeSession_Direction int32
+
+const (
+	BindNativeSession_UNSPECIFIED BindNativeSession_Direction = 0
+	BindNativeSession_SAVE        BindNativeSession_Direction = 1
+	BindNativeSession_LOAD        BindNativeSession_Direction = 2
+)
+
+// Enum value maps for BindNativeSession_Direction.
+var (
+	BindNativeSession_Direction_name = map[int32]string{
+		0: "UNSPECIFIED",
+		1: "SAVE",
+		2: "LOAD",
+	}
+	BindNativeSession_Direction_value = map[string]int32{
+		"UNSPECIFIED": 0,
+		"SAVE":        1,
+		"LOAD":        2,
+	}
+)
+
+func (x BindNativeSession_Direction) Enum() *BindNativeSession_Direction {
+	p := new(BindNativeSession_Direction)
+	*p = x
+	return p
+}
+
+func (x BindNativeSession_Direction) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (BindNativeSession_Direction) Descriptor() protoreflect.EnumDescriptor {
+	return file_v1_pagebroker_proto_enumTypes[0].Descriptor()
+}
+
+func (BindNativeSession_Direction) Type() protoreflect.EnumType {
+	return &file_v1_pagebroker_proto_enumTypes[0]
+}
+
+func (x BindNativeSession_Direction) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use BindNativeSession_Direction.Descriptor instead.
+func (BindNativeSession_Direction) EnumDescriptor() ([]byte, []int) {
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{1, 0}
+}
+
+type NativeSessionRequest_Operation int32
+
+const (
+	NativeSessionRequest_UNSPECIFIED NativeSessionRequest_Operation = 0
+	NativeSessionRequest_LOCK        NativeSessionRequest_Operation = 1
+	NativeSessionRequest_PREPARE     NativeSessionRequest_Operation = 2
+	NativeSessionRequest_TRANSFER    NativeSessionRequest_Operation = 3
+	NativeSessionRequest_COMPLETE    NativeSessionRequest_Operation = 4
+)
+
+// Enum value maps for NativeSessionRequest_Operation.
+var (
+	NativeSessionRequest_Operation_name = map[int32]string{
+		0: "UNSPECIFIED",
+		1: "LOCK",
+		2: "PREPARE",
+		3: "TRANSFER",
+		4: "COMPLETE",
+	}
+	NativeSessionRequest_Operation_value = map[string]int32{
+		"UNSPECIFIED": 0,
+		"LOCK":        1,
+		"PREPARE":     2,
+		"TRANSFER":    3,
+		"COMPLETE":    4,
+	}
+)
+
+func (x NativeSessionRequest_Operation) Enum() *NativeSessionRequest_Operation {
+	p := new(NativeSessionRequest_Operation)
+	*p = x
+	return p
+}
+
+func (x NativeSessionRequest_Operation) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (NativeSessionRequest_Operation) Descriptor() protoreflect.EnumDescriptor {
+	return file_v1_pagebroker_proto_enumTypes[1].Descriptor()
+}
+
+func (NativeSessionRequest_Operation) Type() protoreflect.EnumType {
+	return &file_v1_pagebroker_proto_enumTypes[1]
+}
+
+func (x NativeSessionRequest_Operation) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use NativeSessionRequest_Operation.Descriptor instead.
+func (NativeSessionRequest_Operation) EnumDescriptor() ([]byte, []int) {
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{2, 0}
+}
+
 type Failure_Code int32
 
 const (
@@ -76,11 +180,11 @@ func (x Failure_Code) String() string {
 }
 
 func (Failure_Code) Descriptor() protoreflect.EnumDescriptor {
-	return file_v1_pagebroker_proto_enumTypes[0].Descriptor()
+	return file_v1_pagebroker_proto_enumTypes[2].Descriptor()
 }
 
 func (Failure_Code) Type() protoreflect.EnumType {
-	return &file_v1_pagebroker_proto_enumTypes[0]
+	return &file_v1_pagebroker_proto_enumTypes[2]
 }
 
 func (x Failure_Code) Number() protoreflect.EnumNumber {
@@ -89,7 +193,7 @@ func (x Failure_Code) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Failure_Code.Descriptor instead.
 func (Failure_Code) EnumDescriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{15, 0}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{18, 0}
 }
 
 type FilesystemStorage struct {
@@ -136,6 +240,190 @@ func (x *FilesystemStorage) GetDirectory() string {
 	return ""
 }
 
+// Trusted agent admission for native CUDA contents. The broker pins the target
+// PID namespace and artifact directory; the workload never receives this socket.
+type BindNativeSession struct {
+	state          protoimpl.MessageState      `protogen:"open.v1"`
+	Direction      BindNativeSession_Direction `protobuf:"varint,1,opt,name=direction,proto3,enum=snapshot.pagebroker.v1.BindNativeSession_Direction" json:"direction,omitempty"`
+	ContainerPid   uint32                      `protobuf:"varint,2,opt,name=container_pid,json=containerPid,proto3" json:"container_pid,omitempty"`
+	NamespacePid   uint32                      `protobuf:"varint,3,opt,name=namespace_pid,json=namespacePid,proto3" json:"namespace_pid,omitempty"`
+	VisibleDevices []string                    `protobuf:"bytes,4,rep,name=visible_devices,json=visibleDevices,proto3" json:"visible_devices,omitempty"`
+	DeviceMap      string                      `protobuf:"bytes,5,opt,name=device_map,json=deviceMap,proto3" json:"device_map,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *BindNativeSession) Reset() {
+	*x = BindNativeSession{}
+	mi := &file_v1_pagebroker_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BindNativeSession) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BindNativeSession) ProtoMessage() {}
+
+func (x *BindNativeSession) ProtoReflect() protoreflect.Message {
+	mi := &file_v1_pagebroker_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BindNativeSession.ProtoReflect.Descriptor instead.
+func (*BindNativeSession) Descriptor() ([]byte, []int) {
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *BindNativeSession) GetDirection() BindNativeSession_Direction {
+	if x != nil {
+		return x.Direction
+	}
+	return BindNativeSession_UNSPECIFIED
+}
+
+func (x *BindNativeSession) GetContainerPid() uint32 {
+	if x != nil {
+		return x.ContainerPid
+	}
+	return 0
+}
+
+func (x *BindNativeSession) GetNamespacePid() uint32 {
+	if x != nil {
+		return x.NamespacePid
+	}
+	return 0
+}
+
+func (x *BindNativeSession) GetVisibleDevices() []string {
+	if x != nil {
+		return x.VisibleDevices
+	}
+	return nil
+}
+
+func (x *BindNativeSession) GetDeviceMap() string {
+	if x != nil {
+		return x.DeviceMap
+	}
+	return ""
+}
+
+type NativeSessionRequest struct {
+	state     protoimpl.MessageState         `protogen:"open.v1"`
+	Operation NativeSessionRequest_Operation `protobuf:"varint,1,opt,name=operation,proto3,enum=snapshot.pagebroker.v1.NativeSessionRequest_Operation" json:"operation,omitempty"`
+	// PID as observed in the pinned placeholder namespace, supplied by nsrestore
+	// after CRIU. Zero uses the captured namespace PID for source operations.
+	TargetPid     uint32 `protobuf:"varint,2,opt,name=target_pid,json=targetPid,proto3" json:"target_pid,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NativeSessionRequest) Reset() {
+	*x = NativeSessionRequest{}
+	mi := &file_v1_pagebroker_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NativeSessionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NativeSessionRequest) ProtoMessage() {}
+
+func (x *NativeSessionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_v1_pagebroker_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NativeSessionRequest.ProtoReflect.Descriptor instead.
+func (*NativeSessionRequest) Descriptor() ([]byte, []int) {
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *NativeSessionRequest) GetOperation() NativeSessionRequest_Operation {
+	if x != nil {
+		return x.Operation
+	}
+	return NativeSessionRequest_UNSPECIFIED
+}
+
+func (x *NativeSessionRequest) GetTargetPid() uint32 {
+	if x != nil {
+		return x.TargetPid
+	}
+	return 0
+}
+
+type NativeSessionReply struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Report        string                 `protobuf:"bytes,1,opt,name=report,proto3" json:"report,omitempty"`
+	Failure       *Failure               `protobuf:"bytes,2,opt,name=failure,proto3" json:"failure,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NativeSessionReply) Reset() {
+	*x = NativeSessionReply{}
+	mi := &file_v1_pagebroker_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NativeSessionReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NativeSessionReply) ProtoMessage() {}
+
+func (x *NativeSessionReply) ProtoReflect() protoreflect.Message {
+	mi := &file_v1_pagebroker_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NativeSessionReply.ProtoReflect.Descriptor instead.
+func (*NativeSessionReply) Descriptor() ([]byte, []int) {
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *NativeSessionReply) GetReport() string {
+	if x != nil {
+		return x.Report
+	}
+	return ""
+}
+
+func (x *NativeSessionReply) GetFailure() *Failure {
+	if x != nil {
+		return x.Failure
+	}
+	return nil
+}
+
 type StorageBackend struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Requests require exactly one storage kind.
@@ -150,7 +438,7 @@ type StorageBackend struct {
 
 func (x *StorageBackend) Reset() {
 	*x = StorageBackend{}
-	mi := &file_v1_pagebroker_proto_msgTypes[1]
+	mi := &file_v1_pagebroker_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -162,7 +450,7 @@ func (x *StorageBackend) String() string {
 func (*StorageBackend) ProtoMessage() {}
 
 func (x *StorageBackend) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[1]
+	mi := &file_v1_pagebroker_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -175,7 +463,7 @@ func (x *StorageBackend) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StorageBackend.ProtoReflect.Descriptor instead.
 func (*StorageBackend) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{1}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *StorageBackend) GetKind() isStorageBackend_Kind {
@@ -212,7 +500,7 @@ type PosixCopyIOEngine struct {
 
 func (x *PosixCopyIOEngine) Reset() {
 	*x = PosixCopyIOEngine{}
-	mi := &file_v1_pagebroker_proto_msgTypes[2]
+	mi := &file_v1_pagebroker_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -224,7 +512,7 @@ func (x *PosixCopyIOEngine) String() string {
 func (*PosixCopyIOEngine) ProtoMessage() {}
 
 func (x *PosixCopyIOEngine) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[2]
+	mi := &file_v1_pagebroker_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -237,7 +525,7 @@ func (x *PosixCopyIOEngine) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PosixCopyIOEngine.ProtoReflect.Descriptor instead.
 func (*PosixCopyIOEngine) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{2}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{5}
 }
 
 type IOEngine struct {
@@ -254,7 +542,7 @@ type IOEngine struct {
 
 func (x *IOEngine) Reset() {
 	*x = IOEngine{}
-	mi := &file_v1_pagebroker_proto_msgTypes[3]
+	mi := &file_v1_pagebroker_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -266,7 +554,7 @@ func (x *IOEngine) String() string {
 func (*IOEngine) ProtoMessage() {}
 
 func (x *IOEngine) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[3]
+	mi := &file_v1_pagebroker_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -279,7 +567,7 @@ func (x *IOEngine) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IOEngine.ProtoReflect.Descriptor instead.
 func (*IOEngine) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{3}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *IOEngine) GetKind() isIOEngine_Kind {
@@ -318,7 +606,7 @@ type StagedRestoreRequest struct {
 
 func (x *StagedRestoreRequest) Reset() {
 	*x = StagedRestoreRequest{}
-	mi := &file_v1_pagebroker_proto_msgTypes[4]
+	mi := &file_v1_pagebroker_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -330,7 +618,7 @@ func (x *StagedRestoreRequest) String() string {
 func (*StagedRestoreRequest) ProtoMessage() {}
 
 func (x *StagedRestoreRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[4]
+	mi := &file_v1_pagebroker_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -343,7 +631,7 @@ func (x *StagedRestoreRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StagedRestoreRequest.ProtoReflect.Descriptor instead.
 func (*StagedRestoreRequest) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{4}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *StagedRestoreRequest) GetSource() *StorageBackend {
@@ -371,7 +659,7 @@ type DirectRestoreRequest struct {
 
 func (x *DirectRestoreRequest) Reset() {
 	*x = DirectRestoreRequest{}
-	mi := &file_v1_pagebroker_proto_msgTypes[5]
+	mi := &file_v1_pagebroker_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -383,7 +671,7 @@ func (x *DirectRestoreRequest) String() string {
 func (*DirectRestoreRequest) ProtoMessage() {}
 
 func (x *DirectRestoreRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[5]
+	mi := &file_v1_pagebroker_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -396,7 +684,7 @@ func (x *DirectRestoreRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DirectRestoreRequest.ProtoReflect.Descriptor instead.
 func (*DirectRestoreRequest) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{5}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *DirectRestoreRequest) GetSource() *StorageBackend {
@@ -423,7 +711,7 @@ type PrepareStagedCheckpointRequest struct {
 
 func (x *PrepareStagedCheckpointRequest) Reset() {
 	*x = PrepareStagedCheckpointRequest{}
-	mi := &file_v1_pagebroker_proto_msgTypes[6]
+	mi := &file_v1_pagebroker_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -435,7 +723,7 @@ func (x *PrepareStagedCheckpointRequest) String() string {
 func (*PrepareStagedCheckpointRequest) ProtoMessage() {}
 
 func (x *PrepareStagedCheckpointRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[6]
+	mi := &file_v1_pagebroker_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -448,7 +736,7 @@ func (x *PrepareStagedCheckpointRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrepareStagedCheckpointRequest.ProtoReflect.Descriptor instead.
 func (*PrepareStagedCheckpointRequest) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{6}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *PrepareStagedCheckpointRequest) GetDestination() *StorageBackend {
@@ -476,7 +764,7 @@ type CommitRequest struct {
 
 func (x *CommitRequest) Reset() {
 	*x = CommitRequest{}
-	mi := &file_v1_pagebroker_proto_msgTypes[7]
+	mi := &file_v1_pagebroker_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -488,7 +776,7 @@ func (x *CommitRequest) String() string {
 func (*CommitRequest) ProtoMessage() {}
 
 func (x *CommitRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[7]
+	mi := &file_v1_pagebroker_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -501,7 +789,7 @@ func (x *CommitRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitRequest.ProtoReflect.Descriptor instead.
 func (*CommitRequest) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{7}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{10}
 }
 
 // Releases PageBroker state for a live transaction. PageBroker retains up to 1,024 terminal transactions for up to
@@ -515,7 +803,7 @@ type AbortRequest struct {
 
 func (x *AbortRequest) Reset() {
 	*x = AbortRequest{}
-	mi := &file_v1_pagebroker_proto_msgTypes[8]
+	mi := &file_v1_pagebroker_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -527,7 +815,7 @@ func (x *AbortRequest) String() string {
 func (*AbortRequest) ProtoMessage() {}
 
 func (x *AbortRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[8]
+	mi := &file_v1_pagebroker_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -540,7 +828,7 @@ func (x *AbortRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AbortRequest.ProtoReflect.Descriptor instead.
 func (*AbortRequest) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{8}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{11}
 }
 
 type Request struct {
@@ -564,7 +852,7 @@ type Request struct {
 
 func (x *Request) Reset() {
 	*x = Request{}
-	mi := &file_v1_pagebroker_proto_msgTypes[9]
+	mi := &file_v1_pagebroker_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -576,7 +864,7 @@ func (x *Request) String() string {
 func (*Request) ProtoMessage() {}
 
 func (x *Request) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[9]
+	mi := &file_v1_pagebroker_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -589,7 +877,7 @@ func (x *Request) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Request.ProtoReflect.Descriptor instead.
 func (*Request) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{9}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *Request) GetRequestId() string {
@@ -701,7 +989,7 @@ type StagedRestoreDirectory struct {
 
 func (x *StagedRestoreDirectory) Reset() {
 	*x = StagedRestoreDirectory{}
-	mi := &file_v1_pagebroker_proto_msgTypes[10]
+	mi := &file_v1_pagebroker_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -713,7 +1001,7 @@ func (x *StagedRestoreDirectory) String() string {
 func (*StagedRestoreDirectory) ProtoMessage() {}
 
 func (x *StagedRestoreDirectory) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[10]
+	mi := &file_v1_pagebroker_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -726,7 +1014,7 @@ func (x *StagedRestoreDirectory) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StagedRestoreDirectory.ProtoReflect.Descriptor instead.
 func (*StagedRestoreDirectory) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{10}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *StagedRestoreDirectory) GetImageDirectory() string {
@@ -744,7 +1032,7 @@ type DirectRestoreReady struct {
 
 func (x *DirectRestoreReady) Reset() {
 	*x = DirectRestoreReady{}
-	mi := &file_v1_pagebroker_proto_msgTypes[11]
+	mi := &file_v1_pagebroker_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -756,7 +1044,7 @@ func (x *DirectRestoreReady) String() string {
 func (*DirectRestoreReady) ProtoMessage() {}
 
 func (x *DirectRestoreReady) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[11]
+	mi := &file_v1_pagebroker_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -769,7 +1057,7 @@ func (x *DirectRestoreReady) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DirectRestoreReady.ProtoReflect.Descriptor instead.
 func (*DirectRestoreReady) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{11}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{14}
 }
 
 type StagedCheckpointDirectory struct {
@@ -781,7 +1069,7 @@ type StagedCheckpointDirectory struct {
 
 func (x *StagedCheckpointDirectory) Reset() {
 	*x = StagedCheckpointDirectory{}
-	mi := &file_v1_pagebroker_proto_msgTypes[12]
+	mi := &file_v1_pagebroker_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -793,7 +1081,7 @@ func (x *StagedCheckpointDirectory) String() string {
 func (*StagedCheckpointDirectory) ProtoMessage() {}
 
 func (x *StagedCheckpointDirectory) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[12]
+	mi := &file_v1_pagebroker_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -806,7 +1094,7 @@ func (x *StagedCheckpointDirectory) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StagedCheckpointDirectory.ProtoReflect.Descriptor instead.
 func (*StagedCheckpointDirectory) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{12}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *StagedCheckpointDirectory) GetImageDirectory() string {
@@ -824,7 +1112,7 @@ type CommitComplete struct {
 
 func (x *CommitComplete) Reset() {
 	*x = CommitComplete{}
-	mi := &file_v1_pagebroker_proto_msgTypes[13]
+	mi := &file_v1_pagebroker_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -836,7 +1124,7 @@ func (x *CommitComplete) String() string {
 func (*CommitComplete) ProtoMessage() {}
 
 func (x *CommitComplete) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[13]
+	mi := &file_v1_pagebroker_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -849,7 +1137,7 @@ func (x *CommitComplete) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitComplete.ProtoReflect.Descriptor instead.
 func (*CommitComplete) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{13}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{16}
 }
 
 // Confirms only that PageBroker transaction state/content was released; it says nothing about the target
@@ -862,7 +1150,7 @@ type AbortComplete struct {
 
 func (x *AbortComplete) Reset() {
 	*x = AbortComplete{}
-	mi := &file_v1_pagebroker_proto_msgTypes[14]
+	mi := &file_v1_pagebroker_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -874,7 +1162,7 @@ func (x *AbortComplete) String() string {
 func (*AbortComplete) ProtoMessage() {}
 
 func (x *AbortComplete) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[14]
+	mi := &file_v1_pagebroker_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -887,7 +1175,7 @@ func (x *AbortComplete) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AbortComplete.ProtoReflect.Descriptor instead.
 func (*AbortComplete) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{14}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{17}
 }
 
 type Failure struct {
@@ -900,7 +1188,7 @@ type Failure struct {
 
 func (x *Failure) Reset() {
 	*x = Failure{}
-	mi := &file_v1_pagebroker_proto_msgTypes[15]
+	mi := &file_v1_pagebroker_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -912,7 +1200,7 @@ func (x *Failure) String() string {
 func (*Failure) ProtoMessage() {}
 
 func (x *Failure) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[15]
+	mi := &file_v1_pagebroker_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -925,7 +1213,7 @@ func (x *Failure) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Failure.ProtoReflect.Descriptor instead.
 func (*Failure) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{15}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *Failure) GetCode() Failure_Code {
@@ -961,7 +1249,7 @@ type Response struct {
 
 func (x *Response) Reset() {
 	*x = Response{}
-	mi := &file_v1_pagebroker_proto_msgTypes[16]
+	mi := &file_v1_pagebroker_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -973,7 +1261,7 @@ func (x *Response) String() string {
 func (*Response) ProtoMessage() {}
 
 func (x *Response) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[16]
+	mi := &file_v1_pagebroker_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -986,7 +1274,7 @@ func (x *Response) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Response.ProtoReflect.Descriptor instead.
 func (*Response) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{16}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *Response) GetRequestId() string {
@@ -1112,7 +1400,31 @@ const file_v1_pagebroker_proto_rawDesc = "" +
 	"\x11FilesystemStorage\x12!\n" +
 	"\tdirectory\x18\x01 \x01(\tH\x00R\tdirectory\x88\x01\x01B\f\n" +
 	"\n" +
-	"_directory\"e\n" +
+	"_directory\"\xaa\x02\n" +
+	"\x11BindNativeSession\x12Q\n" +
+	"\tdirection\x18\x01 \x01(\x0e23.snapshot.pagebroker.v1.BindNativeSession.DirectionR\tdirection\x12#\n" +
+	"\rcontainer_pid\x18\x02 \x01(\rR\fcontainerPid\x12#\n" +
+	"\rnamespace_pid\x18\x03 \x01(\rR\fnamespacePid\x12'\n" +
+	"\x0fvisible_devices\x18\x04 \x03(\tR\x0evisibleDevices\x12\x1d\n" +
+	"\n" +
+	"device_map\x18\x05 \x01(\tR\tdeviceMap\"0\n" +
+	"\tDirection\x12\x0f\n" +
+	"\vUNSPECIFIED\x10\x00\x12\b\n" +
+	"\x04SAVE\x10\x01\x12\b\n" +
+	"\x04LOAD\x10\x02\"\xdc\x01\n" +
+	"\x14NativeSessionRequest\x12T\n" +
+	"\toperation\x18\x01 \x01(\x0e26.snapshot.pagebroker.v1.NativeSessionRequest.OperationR\toperation\x12\x1d\n" +
+	"\n" +
+	"target_pid\x18\x02 \x01(\rR\ttargetPid\"O\n" +
+	"\tOperation\x12\x0f\n" +
+	"\vUNSPECIFIED\x10\x00\x12\b\n" +
+	"\x04LOCK\x10\x01\x12\v\n" +
+	"\aPREPARE\x10\x02\x12\f\n" +
+	"\bTRANSFER\x10\x03\x12\f\n" +
+	"\bCOMPLETE\x10\x04\"g\n" +
+	"\x12NativeSessionReply\x12\x16\n" +
+	"\x06report\x18\x01 \x01(\tR\x06report\x129\n" +
+	"\afailure\x18\x02 \x01(\v2\x1f.snapshot.pagebroker.v1.FailureR\afailure\"e\n" +
 	"\x0eStorageBackend\x12K\n" +
 	"\n" +
 	"filesystem\x18\x01 \x01(\v2).snapshot.pagebroker.v1.FilesystemStorageH\x00R\n" +
@@ -1195,54 +1507,62 @@ func file_v1_pagebroker_proto_rawDescGZIP() []byte {
 	return file_v1_pagebroker_proto_rawDescData
 }
 
-var file_v1_pagebroker_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_v1_pagebroker_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_v1_pagebroker_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_v1_pagebroker_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
 var file_v1_pagebroker_proto_goTypes = []any{
-	(Failure_Code)(0),                      // 0: snapshot.pagebroker.v1.Failure.Code
-	(*FilesystemStorage)(nil),              // 1: snapshot.pagebroker.v1.FilesystemStorage
-	(*StorageBackend)(nil),                 // 2: snapshot.pagebroker.v1.StorageBackend
-	(*PosixCopyIOEngine)(nil),              // 3: snapshot.pagebroker.v1.PosixCopyIOEngine
-	(*IOEngine)(nil),                       // 4: snapshot.pagebroker.v1.IOEngine
-	(*StagedRestoreRequest)(nil),           // 5: snapshot.pagebroker.v1.StagedRestoreRequest
-	(*DirectRestoreRequest)(nil),           // 6: snapshot.pagebroker.v1.DirectRestoreRequest
-	(*PrepareStagedCheckpointRequest)(nil), // 7: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest
-	(*CommitRequest)(nil),                  // 8: snapshot.pagebroker.v1.CommitRequest
-	(*AbortRequest)(nil),                   // 9: snapshot.pagebroker.v1.AbortRequest
-	(*Request)(nil),                        // 10: snapshot.pagebroker.v1.Request
-	(*StagedRestoreDirectory)(nil),         // 11: snapshot.pagebroker.v1.StagedRestoreDirectory
-	(*DirectRestoreReady)(nil),             // 12: snapshot.pagebroker.v1.DirectRestoreReady
-	(*StagedCheckpointDirectory)(nil),      // 13: snapshot.pagebroker.v1.StagedCheckpointDirectory
-	(*CommitComplete)(nil),                 // 14: snapshot.pagebroker.v1.CommitComplete
-	(*AbortComplete)(nil),                  // 15: snapshot.pagebroker.v1.AbortComplete
-	(*Failure)(nil),                        // 16: snapshot.pagebroker.v1.Failure
-	(*Response)(nil),                       // 17: snapshot.pagebroker.v1.Response
+	(BindNativeSession_Direction)(0),       // 0: snapshot.pagebroker.v1.BindNativeSession.Direction
+	(NativeSessionRequest_Operation)(0),    // 1: snapshot.pagebroker.v1.NativeSessionRequest.Operation
+	(Failure_Code)(0),                      // 2: snapshot.pagebroker.v1.Failure.Code
+	(*FilesystemStorage)(nil),              // 3: snapshot.pagebroker.v1.FilesystemStorage
+	(*BindNativeSession)(nil),              // 4: snapshot.pagebroker.v1.BindNativeSession
+	(*NativeSessionRequest)(nil),           // 5: snapshot.pagebroker.v1.NativeSessionRequest
+	(*NativeSessionReply)(nil),             // 6: snapshot.pagebroker.v1.NativeSessionReply
+	(*StorageBackend)(nil),                 // 7: snapshot.pagebroker.v1.StorageBackend
+	(*PosixCopyIOEngine)(nil),              // 8: snapshot.pagebroker.v1.PosixCopyIOEngine
+	(*IOEngine)(nil),                       // 9: snapshot.pagebroker.v1.IOEngine
+	(*StagedRestoreRequest)(nil),           // 10: snapshot.pagebroker.v1.StagedRestoreRequest
+	(*DirectRestoreRequest)(nil),           // 11: snapshot.pagebroker.v1.DirectRestoreRequest
+	(*PrepareStagedCheckpointRequest)(nil), // 12: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest
+	(*CommitRequest)(nil),                  // 13: snapshot.pagebroker.v1.CommitRequest
+	(*AbortRequest)(nil),                   // 14: snapshot.pagebroker.v1.AbortRequest
+	(*Request)(nil),                        // 15: snapshot.pagebroker.v1.Request
+	(*StagedRestoreDirectory)(nil),         // 16: snapshot.pagebroker.v1.StagedRestoreDirectory
+	(*DirectRestoreReady)(nil),             // 17: snapshot.pagebroker.v1.DirectRestoreReady
+	(*StagedCheckpointDirectory)(nil),      // 18: snapshot.pagebroker.v1.StagedCheckpointDirectory
+	(*CommitComplete)(nil),                 // 19: snapshot.pagebroker.v1.CommitComplete
+	(*AbortComplete)(nil),                  // 20: snapshot.pagebroker.v1.AbortComplete
+	(*Failure)(nil),                        // 21: snapshot.pagebroker.v1.Failure
+	(*Response)(nil),                       // 22: snapshot.pagebroker.v1.Response
 }
 var file_v1_pagebroker_proto_depIdxs = []int32{
-	1,  // 0: snapshot.pagebroker.v1.StorageBackend.filesystem:type_name -> snapshot.pagebroker.v1.FilesystemStorage
-	3,  // 1: snapshot.pagebroker.v1.IOEngine.posix_copy:type_name -> snapshot.pagebroker.v1.PosixCopyIOEngine
-	2,  // 2: snapshot.pagebroker.v1.StagedRestoreRequest.source:type_name -> snapshot.pagebroker.v1.StorageBackend
-	4,  // 3: snapshot.pagebroker.v1.StagedRestoreRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
-	2,  // 4: snapshot.pagebroker.v1.DirectRestoreRequest.source:type_name -> snapshot.pagebroker.v1.StorageBackend
-	4,  // 5: snapshot.pagebroker.v1.DirectRestoreRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
-	2,  // 6: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.destination:type_name -> snapshot.pagebroker.v1.StorageBackend
-	4,  // 7: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
-	5,  // 8: snapshot.pagebroker.v1.Request.staged_restore:type_name -> snapshot.pagebroker.v1.StagedRestoreRequest
-	7,  // 9: snapshot.pagebroker.v1.Request.prepare_staged_checkpoint:type_name -> snapshot.pagebroker.v1.PrepareStagedCheckpointRequest
-	8,  // 10: snapshot.pagebroker.v1.Request.commit:type_name -> snapshot.pagebroker.v1.CommitRequest
-	9,  // 11: snapshot.pagebroker.v1.Request.abort:type_name -> snapshot.pagebroker.v1.AbortRequest
-	6,  // 12: snapshot.pagebroker.v1.Request.direct_restore:type_name -> snapshot.pagebroker.v1.DirectRestoreRequest
-	0,  // 13: snapshot.pagebroker.v1.Failure.code:type_name -> snapshot.pagebroker.v1.Failure.Code
-	11, // 14: snapshot.pagebroker.v1.Response.staged_restore_directory:type_name -> snapshot.pagebroker.v1.StagedRestoreDirectory
-	13, // 15: snapshot.pagebroker.v1.Response.staged_checkpoint_directory:type_name -> snapshot.pagebroker.v1.StagedCheckpointDirectory
-	14, // 16: snapshot.pagebroker.v1.Response.commit_complete:type_name -> snapshot.pagebroker.v1.CommitComplete
-	15, // 17: snapshot.pagebroker.v1.Response.abort_complete:type_name -> snapshot.pagebroker.v1.AbortComplete
-	16, // 18: snapshot.pagebroker.v1.Response.failure:type_name -> snapshot.pagebroker.v1.Failure
-	12, // 19: snapshot.pagebroker.v1.Response.direct_restore_ready:type_name -> snapshot.pagebroker.v1.DirectRestoreReady
-	20, // [20:20] is the sub-list for method output_type
-	20, // [20:20] is the sub-list for method input_type
-	20, // [20:20] is the sub-list for extension type_name
-	20, // [20:20] is the sub-list for extension extendee
-	0,  // [0:20] is the sub-list for field type_name
+	0,  // 0: snapshot.pagebroker.v1.BindNativeSession.direction:type_name -> snapshot.pagebroker.v1.BindNativeSession.Direction
+	1,  // 1: snapshot.pagebroker.v1.NativeSessionRequest.operation:type_name -> snapshot.pagebroker.v1.NativeSessionRequest.Operation
+	21, // 2: snapshot.pagebroker.v1.NativeSessionReply.failure:type_name -> snapshot.pagebroker.v1.Failure
+	3,  // 3: snapshot.pagebroker.v1.StorageBackend.filesystem:type_name -> snapshot.pagebroker.v1.FilesystemStorage
+	8,  // 4: snapshot.pagebroker.v1.IOEngine.posix_copy:type_name -> snapshot.pagebroker.v1.PosixCopyIOEngine
+	7,  // 5: snapshot.pagebroker.v1.StagedRestoreRequest.source:type_name -> snapshot.pagebroker.v1.StorageBackend
+	9,  // 6: snapshot.pagebroker.v1.StagedRestoreRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
+	7,  // 7: snapshot.pagebroker.v1.DirectRestoreRequest.source:type_name -> snapshot.pagebroker.v1.StorageBackend
+	9,  // 8: snapshot.pagebroker.v1.DirectRestoreRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
+	7,  // 9: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.destination:type_name -> snapshot.pagebroker.v1.StorageBackend
+	9,  // 10: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
+	10, // 11: snapshot.pagebroker.v1.Request.staged_restore:type_name -> snapshot.pagebroker.v1.StagedRestoreRequest
+	12, // 12: snapshot.pagebroker.v1.Request.prepare_staged_checkpoint:type_name -> snapshot.pagebroker.v1.PrepareStagedCheckpointRequest
+	13, // 13: snapshot.pagebroker.v1.Request.commit:type_name -> snapshot.pagebroker.v1.CommitRequest
+	14, // 14: snapshot.pagebroker.v1.Request.abort:type_name -> snapshot.pagebroker.v1.AbortRequest
+	11, // 15: snapshot.pagebroker.v1.Request.direct_restore:type_name -> snapshot.pagebroker.v1.DirectRestoreRequest
+	2,  // 16: snapshot.pagebroker.v1.Failure.code:type_name -> snapshot.pagebroker.v1.Failure.Code
+	16, // 17: snapshot.pagebroker.v1.Response.staged_restore_directory:type_name -> snapshot.pagebroker.v1.StagedRestoreDirectory
+	18, // 18: snapshot.pagebroker.v1.Response.staged_checkpoint_directory:type_name -> snapshot.pagebroker.v1.StagedCheckpointDirectory
+	19, // 19: snapshot.pagebroker.v1.Response.commit_complete:type_name -> snapshot.pagebroker.v1.CommitComplete
+	20, // 20: snapshot.pagebroker.v1.Response.abort_complete:type_name -> snapshot.pagebroker.v1.AbortComplete
+	21, // 21: snapshot.pagebroker.v1.Response.failure:type_name -> snapshot.pagebroker.v1.Failure
+	17, // 22: snapshot.pagebroker.v1.Response.direct_restore_ready:type_name -> snapshot.pagebroker.v1.DirectRestoreReady
+	23, // [23:23] is the sub-list for method output_type
+	23, // [23:23] is the sub-list for method input_type
+	23, // [23:23] is the sub-list for extension type_name
+	23, // [23:23] is the sub-list for extension extendee
+	0,  // [0:23] is the sub-list for field type_name
 }
 
 func init() { file_v1_pagebroker_proto_init() }
@@ -1251,23 +1571,23 @@ func file_v1_pagebroker_proto_init() {
 		return
 	}
 	file_v1_pagebroker_proto_msgTypes[0].OneofWrappers = []any{}
-	file_v1_pagebroker_proto_msgTypes[1].OneofWrappers = []any{
+	file_v1_pagebroker_proto_msgTypes[4].OneofWrappers = []any{
 		(*StorageBackend_Filesystem)(nil),
 	}
-	file_v1_pagebroker_proto_msgTypes[3].OneofWrappers = []any{
+	file_v1_pagebroker_proto_msgTypes[6].OneofWrappers = []any{
 		(*IOEngine_PosixCopy)(nil),
 	}
-	file_v1_pagebroker_proto_msgTypes[9].OneofWrappers = []any{
+	file_v1_pagebroker_proto_msgTypes[12].OneofWrappers = []any{
 		(*Request_StagedRestore)(nil),
 		(*Request_PrepareStagedCheckpoint)(nil),
 		(*Request_Commit)(nil),
 		(*Request_Abort)(nil),
 		(*Request_DirectRestore)(nil),
 	}
-	file_v1_pagebroker_proto_msgTypes[10].OneofWrappers = []any{}
-	file_v1_pagebroker_proto_msgTypes[12].OneofWrappers = []any{}
+	file_v1_pagebroker_proto_msgTypes[13].OneofWrappers = []any{}
 	file_v1_pagebroker_proto_msgTypes[15].OneofWrappers = []any{}
-	file_v1_pagebroker_proto_msgTypes[16].OneofWrappers = []any{
+	file_v1_pagebroker_proto_msgTypes[18].OneofWrappers = []any{}
+	file_v1_pagebroker_proto_msgTypes[19].OneofWrappers = []any{
 		(*Response_StagedRestoreDirectory)(nil),
 		(*Response_StagedCheckpointDirectory)(nil),
 		(*Response_CommitComplete)(nil),
@@ -1280,8 +1600,8 @@ func file_v1_pagebroker_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_v1_pagebroker_proto_rawDesc), len(file_v1_pagebroker_proto_rawDesc)),
-			NumEnums:      1,
-			NumMessages:   17,
+			NumEnums:      3,
+			NumMessages:   20,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
