@@ -6,7 +6,7 @@
 mod control;
 
 use crate::driver::{CudaError, Result};
-use crate::memory::{ProcessState, sharing};
+use crate::memory::{ProcessState, checkpoint::Phase, sharing};
 use cudarc::driver::sys::CUresult::*;
 use cuinterpose_protocol::NamespacePid;
 use std::cell::Cell;
@@ -130,6 +130,7 @@ struct RuntimeCandidate {
 
 impl RuntimeCandidate {
     fn prepare() -> Result<Option<Self>> {
+        crate::driver::initialize();
         let mut runtime = prepare_runtime()?;
         // None means another runtime won before we needed further workers.
         if initialized() {
@@ -194,4 +195,21 @@ pub fn get() -> Result<MutexGuard<'static, ProcessState>> {
         return Err(CudaError::from(CUDA_ERROR_UNKNOWN));
     }
     Ok(state)
+}
+
+pub(super) fn active() -> Result<MutexGuard<'static, ProcessState>> {
+    let state = get()?;
+    if state.phase != Phase::Active {
+        return Err(CudaError::from(CUDA_ERROR_NOT_READY));
+    }
+    Ok(state)
+}
+
+/// Once CUDA or tracking state has changed, failure is not recoverable. Do not
+/// return to an application whose recorded state no longer matches the driver.
+pub(crate) fn must_complete<T>(result: Result<T>) -> T {
+    result.unwrap_or_else(|error| {
+        eprintln!("cuinterpose: unrecoverable state change: {error}");
+        std::process::abort();
+    })
 }
