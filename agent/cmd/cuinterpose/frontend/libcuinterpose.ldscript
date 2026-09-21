@@ -22,7 +22,6 @@
         cudaGetDriverEntryPointByVersion;
         cudaGetDriverEntryPointByVersion_ptsz;
         cuMemCreate;
-        cuMemGetAllocationGranularity;
         cuMemRelease;
         cuMemRetainAllocationHandle;
         cuMemMap;
@@ -37,7 +36,6 @@
         cuMulticastBindMem_v2;
         cuMulticastBindAddr;
         cuMulticastBindAddr_v2;
-        cuMulticastGetGranularity;
         cuMulticastUnbind;
 
     local:

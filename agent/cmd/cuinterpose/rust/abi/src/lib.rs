@@ -8,7 +8,7 @@ use std::ffi::{c_char, c_ulonglong, c_void};
 
 use cudarc::driver::sys as cuda;
 
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 3;
 
 /// ABI table provided by the Rust backend and consumed by the C frontend.
 /// cbindgen emits the corresponding C declaration.
@@ -46,11 +46,6 @@ pub struct BackendAbi {
         usize,
         *const cuda::CUmemAllocationProp,
         c_ulonglong,
-    ) -> cuda::CUresult,
-    pub cuMemGetAllocationGranularity: unsafe extern "C" fn(
-        *mut usize,
-        *const cuda::CUmemAllocationProp,
-        cuda::CUmemAllocationGranularity_flags,
     ) -> cuda::CUresult,
     pub cuMemRelease: unsafe extern "C" fn(cuda::CUmemGenericAllocationHandle) -> cuda::CUresult,
     pub cuMemRetainAllocationHandle: unsafe extern "C" fn(
@@ -123,11 +118,6 @@ pub struct BackendAbi {
         cuda::CUdeviceptr,
         usize,
         c_ulonglong,
-    ) -> cuda::CUresult,
-    pub cuMulticastGetGranularity: unsafe extern "C" fn(
-        *mut usize,
-        *const cuda::CUmulticastObjectProp,
-        cuda::CUmulticastGranularity_flags,
     ) -> cuda::CUresult,
     pub cuMulticastUnbind: unsafe extern "C" fn(
         cuda::CUmemGenericAllocationHandle,
