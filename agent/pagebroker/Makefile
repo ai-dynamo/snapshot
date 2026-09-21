@@ -46,3 +46,19 @@ CUDA_ROOT ?= /usr/local/cuda
 check-transfer-contracts-cuda:
 	mkdir -p build
 	$(CXX) -std=c++20 -O2 -Wall -Wextra -Werror -I$(CUDA_ROOT)/include -c transfer_contracts/transfer_backend_unavailable.cpp -o build/transfer-backend-unavailable.o
+
+NIXL_ROOT ?=
+# CPU contract tests can use synchronous POSIX; GPU images select NIXL at build
+# time. There is no runtime fallback or per-transfer backend negotiation.
+ifneq ($(NIXL_ROOT),)
+TRANSFER_FLAGS := -DPAGEBROKER_NIXL -I$(NIXL_ROOT)/include -L$(NIXL_ROOT)/lib -lnixl -lnixl_build
+TRANSFER_SOURCES := nixl_transfer.cpp
+endif
+
+.PHONY: test-cuda-transfer
+test-cuda-transfer:
+	mkdir -p build
+	$(CXX) -O2 -std=c++20 -Wall -Wextra -Werror -I. -I$(CUDA_ROOT)/include \
+		cuda_posix_transfer_test.cpp cuda_posix_transfer.cpp file_descriptor.cpp $(TRANSFER_SOURCES) \
+		$(GTEST_FLAGS) -pthread $(TRANSFER_FLAGS) -o build/cuda-transfer-test
+	./build/cuda-transfer-test
