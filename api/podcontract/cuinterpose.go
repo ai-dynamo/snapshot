@@ -13,7 +13,6 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-// CuinterposeMountPath must also match the ns-bind-mount helper's destination.
 const (
 	CuinterposeMountPath         = "/tmp/snapshot-cuda"
 	CuinterposeLibraryPath       = CuinterposeMountPath + "/libcuinterpose.so"
@@ -38,7 +37,7 @@ func CuinterposeEnabled(annotations map[string]string) (bool, error) {
 	return true, nil
 }
 
-// ShapeCuinterposeCapture installs the shim for opted-in templates. Call once before Job creation.
+// Apply once, before Job creation.
 func ShapeCuinterposeCapture(
 	podTemplate *corev1.PodTemplateSpec,
 	targetContainers []string,
@@ -97,8 +96,7 @@ func ShapeCuinterposeCapture(
 	return nil
 }
 
-// VerifyCuinterposeCapture prevents adoption of a Job whose target containers
-// would run without the requested shim.
+// Reject adoption of a Job that would run without the requested shim.
 func VerifyCuinterposeCapture(spec *corev1.PodSpec, targetContainers []string) error {
 	for _, name := range targetContainers {
 		container := findContainer(spec, name)
@@ -125,7 +123,7 @@ func setCuinterposePreload(container *corev1.Container) error {
 			continue
 		}
 		if index != -1 {
-			return fmt.Errorf("container %q has duplicate %s environment variables", container.Name, ldPreloadEnv)
+			return fmt.Errorf("container %q has duplicate %s", container.Name, ldPreloadEnv)
 		}
 		index = i
 	}
@@ -138,7 +136,7 @@ func setCuinterposePreload(container *corev1.Container) error {
 	}
 	env := &container.Env[index]
 	if env.ValueFrom != nil {
-		return fmt.Errorf("container %q uses valueFrom for %s", container.Name, ldPreloadEnv)
+		return fmt.Errorf("container %q: cannot prepend to %s supplied by valueFrom", container.Name, ldPreloadEnv)
 	}
 	fields := preloadFields(env.Value)
 	filtered := make([]string, 0, len(fields)+1)
