@@ -41,4 +41,5 @@ ENV LD_LIBRARY_PATH=/usr/local/lib
 ENV NIXL_PLUGIN_DIR=/usr/local/lib/plugins
 WORKDIR /src
 COPY pagebroker/ pagebroker/
-RUN make -C pagebroker test-storage test-cuda-transfer check-transfer-contracts-cuda CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local
+COPY cmd/cuda-checkpoint-helper/custom_storage* cmd/cuda-checkpoint-helper/
+RUN make -C pagebroker test-storage test-cuda-transfer test-cuda-helper check-transfer-contracts-cuda CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local
