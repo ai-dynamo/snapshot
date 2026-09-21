@@ -37,4 +37,6 @@ test-native: native
 	cd rust && cargo fmt --all -- --check
 	cd rust && cargo clippy --locked --workspace --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
 	cd rust && cargo test --locked --workspace --target x86_64-unknown-linux-gnu
+	python3 frontend/tests/run.py --artifacts build
+	python3 tests/coordinator.py
 	cd rust && cargo test --locked --release -p cuinterpose-coordinator -p cuinterpose-protocol --target x86_64-unknown-linux-musl
