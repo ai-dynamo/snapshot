@@ -22,13 +22,13 @@ const JobFileEnv = "CUDA_CHECKPOINT_JOB_FILE"
 // helpers must use that live file so they join the same CUDA job as the target
 // processes; the artifact copy is only a seed for later restore pods. The
 // launch wrapper persists the driver-created file at a fixed path before
-// starting the workload.
-func StageJobFile(sourceRootPath, checkpointDir string, sourceGPUCount int) (string, error) {
+// starting the workload. When required is false, an absent job file is allowed.
+func StageJobFile(sourceRootPath, checkpointDir string, required bool) (string, error) {
 	sourcePath := filepath.Join(sourceRootPath, strings.TrimPrefix(podcontract.CUDAJobFilePath, string(os.PathSeparator)))
 	destinationPath := filepath.Join(checkpointDir, podcontract.CUDAJobFileName)
 	if err := copyJobFile(sourcePath, destinationPath); err != nil {
 		if os.IsNotExist(err) {
-			if sourceGPUCount > 1 {
+			if required {
 				return "", fmt.Errorf("multi-GPU CUDA source is missing %s; source must be launched under cuda-checkpoint --launch-job", podcontract.CUDAJobFilePath)
 			}
 			return "", nil

@@ -71,6 +71,9 @@ spec:
             - {{ printf "--artifact-cleanup-scan-interval=%v" .Values.operator.artifactCleanup.scanInterval | quote }}
             - {{ printf "--artifact-cleanup-batch-size=%v" .Values.operator.artifactCleanup.batchSize | quote }}
             - {{ printf "--artifact-cleanup-list-attempts=%v" .Values.operator.artifactCleanup.listAttempts | quote }}
+            # CuInterpose libraries for opted-in workloads.
+            - {{ printf "--agent-image=%s:%s" .Values.image.agent.repository (.Values.image.agent.tag | default .Chart.AppVersion) | quote }}
+            - {{ printf "--agent-image-pull-policy=%s" .Values.image.agent.pullPolicy | quote }}
           volumeMounts:
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath | quote }}

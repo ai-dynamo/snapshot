@@ -27,7 +27,7 @@ func TestStageJobFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	helperJobFile, err := StageJobFile(sourceRoot, checkpointDir, 2)
+	helperJobFile, err := StageJobFile(sourceRoot, checkpointDir, true)
 	if err != nil {
 		t.Fatalf("StageJobFile() error = %v", err)
 	}
@@ -43,6 +43,18 @@ func TestStageJobFile(t *testing.T) {
 	if string(content) != "job-state" {
 		t.Fatalf("staged content = %q", content)
 	}
+	// CuInterpose makes the file optional, but an existing file must still be
+	// staged and passed to the native helper.
+	optionalDir := t.TempDir()
+	optionalJobFile, err := StageJobFile(sourceRoot, optionalDir, false)
+	if err != nil || optionalJobFile != wantHelperJobFile {
+		t.Fatalf("optional StageJobFile() = %q, %v", optionalJobFile, err)
+	}
+	content, err = os.ReadFile(filepath.Join(optionalDir, podcontract.CUDAJobFileName))
+	if err != nil || string(content) != "job-state" {
+		t.Fatalf("optional staged content = %q, %v", content, err)
+	}
+
 }
 
 func TestStageJobFileRejectsSymlink(t *testing.T) {
@@ -61,7 +73,7 @@ func TestStageJobFileRejectsSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := StageJobFile(sourceRoot, checkpointDir, 1)
+	_, err := StageJobFile(sourceRoot, checkpointDir, false)
 	if err == nil {
 		t.Fatal("expected symlink source to be rejected")
 	}
@@ -96,14 +108,14 @@ func TestRefreshJobFileArtifactCapturesPostCheckpointState(t *testing.T) {
 	}
 }
 
-func TestStageJobFileRequiresLaunchJobStateForMultiGPU(t *testing.T) {
+func TestStageJobFileRequiredOrOptional(t *testing.T) {
 	sourceRoot := t.TempDir()
 
-	jobFile, err := StageJobFile(sourceRoot, t.TempDir(), 1)
+	jobFile, err := StageJobFile(sourceRoot, t.TempDir(), false)
 	if err != nil || jobFile != "" {
-		t.Fatalf("legacy single-GPU StageJobFile() = %q, %v", jobFile, err)
+		t.Fatalf("optional StageJobFile() = %q, %v", jobFile, err)
 	}
-	_, err = StageJobFile(sourceRoot, t.TempDir(), 2)
+	_, err = StageJobFile(sourceRoot, t.TempDir(), true)
 	if err == nil || !strings.Contains(err.Error(), "source must be launched under cuda-checkpoint --launch-job") {
 		t.Fatalf("expected missing multi-GPU launch-job error, got %v", err)
 	}

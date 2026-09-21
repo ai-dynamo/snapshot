@@ -72,6 +72,18 @@ func (nsm *NSMounter) MountBundle(ctx context.Context, pid int) (MountPoint, err
 	return &mountPoint{mount: ref}, nil
 }
 
+func (nsm *NSMounter) MountCuInterpose(ctx context.Context, namespaceMount MountPoint) (MountPoint, error) {
+	if namespaceMount == nil || namespaceMount.NsFd() == nil {
+		return nil, fmt.Errorf("cuinterpose mount needs a pinned namespace")
+	}
+	nsm.log.Info("mounting cuinterpose libraries into placeholder namespace")
+	ref, err := nsm.mounter.MountCuInterpose(ctx, namespaceMount.NsFd())
+	if err != nil {
+		return nil, err
+	}
+	return &mountPoint{mount: ref}, nil
+}
+
 // MountArtifact exposes one validated checkpoint artifact read-only and
 // non-executable in the namespace pinned by namespaceMount.
 func (nsm *NSMounter) MountArtifact(ctx context.Context, namespaceMount MountPoint, src string) (MountPoint, error) {
