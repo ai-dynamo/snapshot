@@ -67,13 +67,18 @@ impl ProcessState {
     ) -> Result<CUdeviceptr> {
         let handle = VirtualAllocationHandle::from_raw(virtual_allocation_handle)
             .ok_or(CUresult::CUDA_ERROR_INVALID_HANDLE)?;
+        let id = handle.id(self)?;
+        let mut reserved = None;
+        let mut mapped = false;
         let result = (|| {
-            let id = handle.id(self)?;
+            let context = driver::context()?;
             let mut device = 0;
             unsafe { driver::cuCtxGetDevice(&mut device) }?;
             let mut address = 0;
             unsafe { driver::cuMemAddressReserve(&mut address, extent, 0, 0, 0) }?;
-            self.map_unicast(id, address, extent, 0, 0)?;
+            reserved = Some(address);
+            self.map_unicast(id, handle, address, extent, 0, 0)?;
+            mapped = true;
             let access = CUmemAccessDesc {
                 location: CUmemLocation {
                     type_: CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE,
@@ -89,13 +94,25 @@ impl ProcessState {
                     virtual_allocation_handle: handle,
                     requested,
                     extent,
-                    context: crate::driver::context(),
+                    context,
                     opens,
                 },
             );
             Ok(address)
         })();
-        Ok(runtime::must_complete(result))
+        if result.is_err() {
+            // This application call owns its unpublished mapping and handle.
+            // Undo only its work, then return the original CUDA error.
+            if let Some(address) = reserved {
+                if mapped {
+                    runtime::must_complete(unsafe { driver::cuMemUnmap(address, extent) });
+                    self.mappings.remove(&address);
+                }
+                runtime::must_complete(unsafe { driver::cuMemAddressFree(address, extent) });
+            }
+            runtime::must_complete(self.release_virtual_handle(handle));
+        }
+        result
     }
 
     pub(crate) fn unmap_malloc(&mut self, address: CUdeviceptr) -> Result<()> {
@@ -104,13 +121,10 @@ impl ProcessState {
             .get(&address)
             .ok_or(CUresult::CUDA_ERROR_INVALID_VALUE)?
             .clone();
-        let id = mapping.virtual_allocation_handle.id(self)?;
         unsafe { driver::cuMemUnmap(address, mapping.extent) }?;
         self.mappings.remove(&address);
-        self.virtual_allocation_handles
-            .remove(&mapping.virtual_allocation_handle);
         self.malloc_regions.remove(&address);
-        runtime::must_complete(self.release_unused_memblock(id));
+        runtime::must_complete(self.release_virtual_handle(mapping.virtual_allocation_handle));
         runtime::must_complete(unsafe { driver::cuMemAddressFree(address, mapping.extent) });
         Ok(())
     }
@@ -135,7 +149,7 @@ pub(crate) fn release(address: CUdeviceptr, imported: bool) -> Result<()> {
             mapping.opens -= 1;
             return Ok(());
         }
-        if mapping.context != crate::driver::context() {
+        if mapping.context != crate::driver::context()? {
             return Err(CudaError(CUresult::CUDA_ERROR_NOT_SUPPORTED));
         }
     }
@@ -204,12 +218,13 @@ impl ProcessState {
                 && self
                     .virtual_allocation_handles
                     .get(&region.virtual_allocation_handle)
-                    == Some(&reference.id)
+                    .map(|entry| entry.id)
+                    == Some(reference.id)
             {
                 if region.requested != requested || region.extent != extent {
                     return Err(CUresult::CUDA_ERROR_INVALID_HANDLE.into());
                 }
-                if region.context != driver::context() {
+                if region.context != driver::context()? {
                     return Err(CUresult::CUDA_ERROR_NOT_SUPPORTED.into());
                 }
                 region.opens = region

@@ -45,7 +45,7 @@ impl VirtualAllocationHandle {
         state
             .virtual_allocation_handles
             .get(&self)
-            .copied()
+            .map(|entry| entry.id)
             .ok_or(CUDA_ERROR_INVALID_HANDLE.into())
     }
 
@@ -96,11 +96,16 @@ impl Memblock {
     }
 }
 
+pub struct HandleEntry {
+    pub id: AllocationId,
+    pub references: u64,
+}
+
 pub struct ProcessState {
     pub namespace_pid: NamespacePid,
     pub malloc_regions: BTreeMap<u64, ipc::MallocRegion>,
     pub memblocks: BTreeMap<AllocationId, Memblock>,
-    pub virtual_allocation_handles: BTreeMap<VirtualAllocationHandle, AllocationId>,
+    pub virtual_allocation_handles: BTreeMap<VirtualAllocationHandle, HandleEntry>,
     pub mappings: BTreeMap<u64, Mapping>,
     pub phase: Phase,
     pub unlocked_driver_calls: usize,
@@ -121,30 +126,15 @@ impl ProcessState {
         }
     }
 
-    /// Check metadata capacity before acquiring CUDA backing.
+    /// Assign the identity used by the shim and its sharing peers.
     pub(crate) fn new_reference(&self) -> Result<AllocationReference> {
         if self.phase != Phase::Active {
             return Err(CUDA_ERROR_NOT_READY.into());
         }
-        self.check_handle_capacity()?;
         Ok(AllocationReference {
             creator_pid: self.namespace_pid,
             id: random()?,
         })
-    }
-
-    pub(crate) fn check_handle_capacity(&self) -> Result<()> {
-        if self.next_virtual_allocation_handle & VirtualAllocationHandle::MASK != 0 {
-            return Err(CUDA_ERROR_OUT_OF_MEMORY.into());
-        }
-        Ok(())
-    }
-
-    pub(crate) fn mapped_memblock(&self, address: u64) -> Option<AllocationId> {
-        self.mappings
-            .values()
-            .find(|m| address >= m.address && address - m.address < m.size as u64)
-            .map(|m| m.id)
     }
 
     pub(crate) fn mint_virtual_allocation_handle(&mut self, id: AllocationId) -> Result<u64> {
@@ -155,8 +145,24 @@ impl ProcessState {
             VirtualAllocationHandle::TAG | self.next_virtual_allocation_handle,
         );
         self.next_virtual_allocation_handle += 1;
-        self.virtual_allocation_handles.insert(handle, id);
+        self.virtual_allocation_handles
+            .insert(handle, HandleEntry { id, references: 1 });
         Ok(handle.as_raw())
+    }
+
+    /// Drop one application reference; mappings retain their original handle value.
+    pub(crate) fn release_virtual_handle(&mut self, handle: VirtualAllocationHandle) -> Result<()> {
+        let entry = self
+            .virtual_allocation_handles
+            .get_mut(&handle)
+            .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+        let id = entry.id;
+        entry.references -= 1;
+        if entry.references == 0 {
+            self.virtual_allocation_handles.remove(&handle);
+            runtime::must_complete(self.release_unused_memblock(id));
+        }
+        Ok(())
     }
 
     /// Resolve a virtual handle to its allocation ID; native handles return `None`.
@@ -173,7 +179,7 @@ impl ProcessState {
         let handle_live = self
             .virtual_allocation_handles
             .values()
-            .any(|value| *value == id);
+            .any(|entry| entry.id == id);
         let mapped = self.mappings.values().any(|mapping| mapping.id == id);
         let memblock = self
             .memblocks
@@ -207,14 +213,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn identities_require_an_active_registry_and_handle_capacity() {
+    fn identities_require_an_active_registry() {
         let mut state = ProcessState::new(41);
         assert_eq!(state.new_reference().unwrap().creator_pid, 41);
         state.phase = Phase::UnicastPrepared;
         assert_eq!(state.new_reference(), Err(CUDA_ERROR_NOT_READY.into()));
-        state.phase = Phase::Active;
-        state.next_virtual_allocation_handle = VirtualAllocationHandle::MASK;
-        assert_eq!(state.new_reference(), Err(CUDA_ERROR_OUT_OF_MEMORY.into()));
+
         assert!(state.virtual_allocation_handles.is_empty());
     }
 
