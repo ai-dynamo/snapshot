@@ -1,0 +1,324 @@
+{
+  "benchmarkVersion": 1,
+  "environment": {
+    "datadogGpuMonitoringMode": "disable",
+    "frameworkImage": "lmsysorg/sglang:v0.5.17-cu130-runtime@sha256:3ea7c6d74312d964edbcf9b3819425ea42117eb967ef1cfec632a70c926027df",
+    "frameworkImageDigest": "dynamoci.azurecr.io/docker.io/lmsysorg/sglang@sha256:3ea7c6d74312d964edbcf9b3819425ea42117eb967ef1cfec632a70c926027df",
+    "gpuAffinity": "different",
+    "imagePulls": {
+      "restore": {
+        "cacheHit": true,
+        "imageSizeBytes": null,
+        "includingWaitSeconds": 0.0
+      },
+      "source": {
+        "cacheHit": true,
+        "imageSizeBytes": null,
+        "includingWaitSeconds": 0.0
+      }
+    },
+    "model": "Qwen/Qwen3-0.6B",
+    "modelCacheMode": "shared-nfs",
+    "namespace": "snapshot-e2e",
+    "nodeAffinity": "same",
+    "restoreGpus": [
+      {
+        "driverVersion": "595.58.03",
+        "model": "NVIDIA A100-SXM4-80GB"
+      }
+    ],
+    "restoreNodeGpuProduct": "NVIDIA-A100-SXM4-80GB",
+    "sourceGpus": [
+      {
+        "driverVersion": "595.58.03",
+        "model": "NVIDIA A100-SXM4-80GB"
+      }
+    ],
+    "sourceNodeGpuProduct": "NVIDIA-A100-SXM4-80GB",
+    "storage": {
+      "accessModes": [
+        "ReadWriteMany"
+      ],
+      "capacity": "64Gi",
+      "parameters": {
+        "skuName": "Standard_LRS"
+      },
+      "provisioner": "file.csi.azure.com",
+      "requestedSize": "64Gi",
+      "storageClass": "azurefile-csi",
+      "type": "Standard_LRS",
+      "volumeMode": "Filesystem"
+    },
+    "storageClass": "azurefile-csi"
+  },
+  "error": null,
+  "events": [
+    {
+      "name": "test.started",
+      "offsetSeconds": 0.0,
+      "timestamp": "2026-09-21T09:05:57.522Z"
+    },
+    {
+      "name": "source.ready",
+      "offsetSeconds": 124.988749,
+      "timestamp": "2026-09-21T09:08:02.511Z"
+    },
+    {
+      "name": "checkpoint.requested",
+      "offsetSeconds": 129.602523,
+      "timestamp": "2026-09-21T09:08:07.125Z"
+    },
+    {
+      "name": "checkpoint.ready",
+      "offsetSeconds": 202.858842,
+      "timestamp": "2026-09-21T09:09:20.381Z"
+    },
+    {
+      "name": "restore.pod_create.requested",
+      "offsetSeconds": 209.597189,
+      "timestamp": "2026-09-21T09:09:27.120Z"
+    },
+    {
+      "name": "restore.pod_created",
+      "offsetSeconds": 210.041002,
+      "timestamp": "2026-09-21T09:09:27.563Z"
+    },
+    {
+      "externalTimestamp": true,
+      "name": "restore.requested",
+      "observationDelaySeconds": 1.250766,
+      "offsetSeconds": 212.655877,
+      "timestamp": "2026-09-21T09:09:30.178Z"
+    },
+    {
+      "name": "restore.succeeded",
+      "offsetSeconds": 281.871792,
+      "timestamp": "2026-09-21T09:10:39.394Z"
+    },
+    {
+      "name": "traffic.ready",
+      "offsetSeconds": 283.605399,
+      "timestamp": "2026-09-21T09:10:41.128Z"
+    },
+    {
+      "name": "inference.verified",
+      "offsetSeconds": 285.879247,
+      "timestamp": "2026-09-21T09:10:43.402Z"
+    },
+    {
+      "name": "test.finished",
+      "offsetSeconds": 285.879267,
+      "timestamp": "2026-09-21T09:10:43.402Z"
+    }
+  ],
+  "finishedAt": "2026-09-21T09:10:43.402Z",
+  "identity": {
+    "case": "sglang",
+    "runAttempt": 1,
+    "runId": "35581138911",
+    "suite": "framework-checkpoint-restore",
+    "test": "test_framework_checkpoint_restore_serves_inference"
+  },
+  "measurements": [
+    {
+      "displayName": "Full E2E test",
+      "endEvent": "test.finished",
+      "name": "test.total.duration",
+      "startEvent": "test.started",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 285.879267
+    },
+    {
+      "displayName": "Checkpoint (API to Ready)",
+      "endEvent": "checkpoint.ready",
+      "name": "checkpoint.duration",
+      "startEvent": "checkpoint.requested",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 73.25632
+    },
+    {
+      "displayName": "Restore requested to traffic ready",
+      "endEvent": "traffic.ready",
+      "name": "restore.to_traffic.duration",
+      "startEvent": "restore.requested",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 70.949522
+    },
+    {
+      "displayName": "Restore pod create to traffic",
+      "endEvent": "traffic.ready",
+      "name": "restore.pod_create_to_traffic.duration",
+      "startEvent": "restore.pod_create.requested",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 74.008211
+    },
+    {
+      "displayName": "Checkpoint (agent)",
+      "name": "checkpoint.agent.duration",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 69.057951
+    },
+    {
+      "displayName": "Checkpoint CRIU dump",
+      "name": "checkpoint.criu_dump.duration",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 67.263675
+    },
+    {
+      "displayName": "Restore (agent)",
+      "name": "restore.agent.duration",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 68.638803
+    },
+    {
+      "displayName": "Restore CRIU restore",
+      "name": "restore.criu_restore.duration",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 67.146521
+    },
+    {
+      "displayName": "Agent restore complete to traffic ready",
+      "name": "restore.agent_complete_to_traffic.duration",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 2.305738
+    },
+    {
+      "displayName": "Source image pull",
+      "name": "source.image_pull.duration",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 0.0
+    },
+    {
+      "displayName": "Source image pull including wait",
+      "name": "source.image_pull_including_wait.duration",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 0.0
+    },
+    {
+      "displayName": "Restore image pull",
+      "name": "restore.image_pull.duration",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 0.0
+    },
+    {
+      "displayName": "Restore image pull including wait",
+      "name": "restore.image_pull_including_wait.duration",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 0.0
+    },
+    {
+      "displayName": "Checkpoint CUDA checkpoint",
+      "name": "checkpoint.cuda_checkpoint.duration",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 1.05881
+    },
+    {
+      "displayName": "Checkpoint GPU device map",
+      "name": "checkpoint.gpu_device_map.duration",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 0.081482
+    },
+    {
+      "displayName": "Checkpoint overlay capture",
+      "name": "checkpoint.overlay_capture.duration",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 0.385438
+    },
+    {
+      "displayName": "Checkpoint remove old version and switch",
+      "name": "checkpoint.remove_old_version_and_switch.duration",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 0.047796
+    },
+    {
+      "displayName": "Checkpoint unaccounted",
+      "name": "checkpoint.unaccounted.duration",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 0.22075
+    },
+    {
+      "displayName": "Restore CRIU prepare",
+      "name": "restore.criu_prepare.duration",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 0.033691
+    },
+    {
+      "displayName": "Restore CUDA restore",
+      "name": "restore.cuda_restore.duration",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 1.142685
+    },
+    {
+      "displayName": "Restore GPU device map",
+      "name": "restore.gpu_device_map.duration",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 0.070966
+    },
+    {
+      "displayName": "Restore overlay capture",
+      "name": "restore.overlay_capture.duration",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 0.162579
+    },
+    {
+      "displayName": "Restore pagebroker commit",
+      "name": "restore.pagebroker_commit.duration",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 0.0
+    },
+    {
+      "displayName": "Restore pagebroker mount",
+      "name": "restore.pagebroker_mount.duration",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 0.0
+    },
+    {
+      "displayName": "Restore pagebroker stage",
+      "name": "restore.pagebroker_stage.duration",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 0.0
+    },
+    {
+      "displayName": "Restore unaccounted",
+      "name": "restore.unaccounted.duration",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 0.082362
+    }
+  ],
+  "outcome": "passed",
+  "schemaVersion": 1,
+  "source": {
+    "commit": "fdd5bd8ee85273d397a6b13cfad81b426a65175e",
+    "event": "schedule",
+    "ref": "refs/heads/main",
+    "runUrl": "https://github.com/ai-dynamo/snapshot/actions/runs/35581138911",
+    "snapshotTag": "v0.0.0-gfdd5bd8e"
+  },
+  "startedAt": "2026-09-21T09:05:57.522Z"
+}
