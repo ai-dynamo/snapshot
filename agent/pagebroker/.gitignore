@@ -2,3 +2,4 @@
 /pagebroker
 /pagebroker.pb.*
 /v1/pagebroker.pb.*
+/gpu_engine.pb.*

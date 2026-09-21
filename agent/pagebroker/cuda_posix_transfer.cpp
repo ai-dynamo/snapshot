@@ -137,8 +137,11 @@ class StreamDrainGuard {
       : stream_(stream), slots_(slots) {}
   ~StreamDrainGuard()
   {
-    if (armed_ && cuStreamSynchronize(stream_) == CUDA_SUCCESS)
-      for (auto& slot : slots_) slot->Complete();
+    if (!armed_) return;
+    // A persistent ring cannot be leased again after an uncertain DMA result.
+    // Process exit is the fault boundary when the driver cannot drain it.
+    if (cuStreamSynchronize(stream_) != CUDA_SUCCESS) _exit(1);
+    for (auto& slot : slots_) slot->Complete();
   }
   void Disarm() { armed_ = false; }
  private:
@@ -250,6 +253,35 @@ TransferBuffers::TransferBuffers(TransferOptions options) : impl_(std::make_uniq
 
 TransferBuffers::~TransferBuffers() = default;
 
+bool TransferBuffers::Initialize(CUcontext context, std::string* error)
+{
+  if (!ValidateTransferOptions(impl_->options, error)) return false;
+  auto status = cuCtxSetCurrent(context);
+  if (status != CUDA_SUCCESS) {
+    *error = "set transfer context: " + CudaError(status);
+    return false;
+  }
+  auto& slots = impl_->slots;
+  const auto& options = impl_->options;
+  for (size_t i = slots.size(); i < options.buffer_count; ++i) {
+    auto slot = std::make_unique<TransferSlot>();
+    status = slot->Allocate(options.chunk_bytes);
+    if (status != CUDA_SUCCESS) {
+      *error = "allocate registered transfer slot: " + CudaError(status);
+      return false;
+    }
+    slots.push_back(std::move(slot));
+  }
+#ifdef PAGEBROKER_NIXL
+  if (!impl_->storage) {
+    std::vector<void*> addresses;
+    for (const auto& slot : slots) addresses.push_back(slot->data());
+    impl_->storage = std::make_unique<NixlTransfer>(addresses, options.chunk_bytes);
+  }
+#endif
+  return true;
+}
+
 bool TransferBuffers::Transfer(CUdeviceptr device, size_t size, CUstream stream, CUcontext context,
                               const StorageLayout& storage, TransferOperation operation,
                               TransferCancellation* cancellation, TransferMetrics* metrics, std::string* error,
@@ -311,7 +343,6 @@ bool TransferBuffers::TransferChunks(const std::vector<TransferChunk>& chunks, s
     return false;
   *metrics = {};
   error->clear();
-  const auto& options = impl_->options;
   auto& slots = impl_->slots;
   const auto total_start = Clock::now();
   if (!size || !context || cuCtxSetCurrent(context) != CUDA_SUCCESS) {
@@ -327,20 +358,11 @@ bool TransferBuffers::TransferChunks(const std::vector<TransferChunk>& chunks, s
   if (!ConfigureDirectIO(chunks, files, error))
     return false;
 #endif
-  for (size_t i = slots.size(); i < options.buffer_count; ++i) {
-    auto slot = std::make_unique<TransferSlot>();
-    const auto status = slot->Allocate(options.chunk_bytes);
-    if (status != CUDA_SUCCESS) {
-      *error = "allocate registered transfer slot: " + CudaError(status);
-      return false;
-    }
-    slots.push_back(std::move(slot));
-  }
+  if (!Initialize(context, error)) return false;
   metrics->setup_seconds = ElapsedSeconds(setup_start);
   bool success;
   {
     StreamDrainGuard drain(stream, slots);
-    const auto start = Clock::now();
 #ifdef PAGEBROKER_NIXL
     // All allocation ranges in a batch share one participant file. Keep policy
     // in PageBroker, independent of shim interception and CUDA handle exchange.
@@ -348,14 +370,10 @@ bool TransferBuffers::TransferChunks(const std::vector<TransferChunk>& chunks, s
       *error = "allocation transfer requires one content file";
       return false;
     }
-    if (!impl_->storage) {
-      std::vector<void*> addresses;
-      for (const auto& slot : slots)
-        addresses.push_back(slot->data());
-      impl_->storage = std::make_unique<NixlTransfer>(addresses, options.chunk_bytes);
-    }
     auto& io = *impl_->storage;
     io.Open(files[0].get(), storage.files[0].size);
+    metrics->setup_seconds = ElapsedSeconds(setup_start);
+    const auto start = Clock::now();
     const bool save = operation == TransferOperation::kCheckpoint;
     success = true;
     try {
@@ -415,6 +433,7 @@ bool TransferBuffers::TransferChunks(const std::vector<TransferChunk>& chunks, s
     }
     metrics->files[0].storage_io_seconds = metrics->storage_io_seconds;
 #else
+    const auto start = Clock::now();
     success = TransferPipeline(chunks, files, slots, 0, stream, operation, metrics, cancellation, error);
 #endif
     metrics->pipeline_seconds = ElapsedSeconds(start);

@@ -3,58 +3,35 @@
 
 #include "native_session.hpp"
 #include "allocation_transport.hpp"
+#include "gpu_engine.hpp"
+#include "gpu_engine.pb.h"
 
 #include <fcntl.h>
-#include <signal.h>
-#include <spawn.h>
-#include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <linux/nsfs.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 #include <fstream>
 #include <cstdio>
 #include <sstream>
 #include <stdexcept>
-#include <thread>
-
-extern char** environ;
 
 namespace snapshot::pagebroker {
 namespace {
 void Require(bool ok, const char* message) {
   if (!ok) throw std::runtime_error(message);
 }
-std::string ReadLine(int fd) {
-  std::string line;
-  char byte;
-  while (line.size() < 65536) {
-    const auto size = read(fd, &byte, 1);
-    if (size < 0 && errno == EINTR) continue;
-    Require(size == 1, "native worker disconnected or timed out");
-    if (byte == '\n') return line;
-    line += byte;
-  }
-  throw std::runtime_error("native worker report exceeds limit");
-}
-std::string ReadReady(int fd) {
-  auto ready = ReadLine(fd);
-  Require(ready.find("\"event\":\"ready\"") != std::string::npos,
-          "native worker did not become ready");
-  return ready;
-}
 }
 
 NativeSession::NativeSession(std::shared_ptr<Transaction> transaction,
-                             const v1::BindNativeSession& binding, const Path& executable)
-    : transaction_(std::move(transaction)), binding_(binding), executable_(executable) {
+                             const v1::BindNativeSession& binding, std::shared_ptr<GpuEngine> engine)
+    : transaction_(std::move(transaction)), binding_(binding), engine_(std::move(engine)) {
   Require(binding.container_pid() > 1 && binding.namespace_pid() > 0 &&
           binding.visible_devices_size() > 0, "native binding requires target identity and GPUs");
   Require(binding.direction() == v1::BindAllocationSession::SAVE ||
           binding.direction() == v1::BindAllocationSession::LOAD, "invalid native direction");
-  Require(executable.is_absolute(), "native worker must be configured");
+  Require(engine_ != nullptr, "GPU engine must be configured");
   for (const auto& uuid : binding.visible_devices())
     Require(uuid.size() == 40 && uuid.starts_with("GPU-") &&
             uuid.find_first_not_of("GPU-0123456789abcdefABCDEF") == std::string::npos,
@@ -96,12 +73,9 @@ NativeSession::NativeSession(std::shared_ptr<Transaction> transaction,
 }
 
 void NativeSession::Start(uint32_t target_pid) {
-  std::string ready;
-  if (binding_.direction() == v1::BindAllocationSession::LOAD)
-    ready = ReadReady(connection_.get());
   // The agent supplies the PID observed from the pinned placeholder namespace,
   // not the restored process's innermost PID (both roots can have inner PID 1).
-  // The worker opens a pidfd before any operation on the target.
+  // The GPU engine opens a pidfd before any operation on the target.
   struct stat expected{};
   Require(fstat(namespace_fd_.get(), &expected) == 0, "stat target namespace");
   int target = 0;
@@ -139,59 +113,12 @@ void NativeSession::Start(uint32_t target_pid) {
     }
   }
   Require(target > 0, "native target absent from pinned namespace");
-  if (binding_.direction() == v1::BindAllocationSession::SAVE) {
-    Spawn(target);
-    ready = ReadReady(connection_.get());
-  } else {
-    const auto identity = std::to_string(target) + "\n";
-    Require(send(connection_.get(), identity.data(), identity.size(), MSG_NOSIGNAL) ==
-                static_cast<ssize_t>(identity.size()), "bind native worker target");
-  }
-  std::fprintf(stderr, "Native worker target=%d %s\n", target, ready.c_str());
-}
-
-void NativeSession::Prewarm() {
-  // CUDA initialization can run while CRIU recreates the target. The worker
-  // receives its target identity only when the first native operation arrives.
-  if (binding_.direction() == v1::BindAllocationSession::LOAD) Spawn(0);
-}
-
-void NativeSession::Spawn(int target) {
-  int sockets[2];
-  Require(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets) == 0, "native socketpair");
-  connection_ = FileDescriptor(sockets[0]);
-  FileDescriptor child(sockets[1]);
-  SetAllocationTimeout(connection_.get());
-  std::vector<std::string> environment;
-  for (char** item = environ; *item; ++item) {
-    const std::string value(*item);
-    if (!value.starts_with("CUDA_VISIBLE_DEVICES=") && !value.starts_with("CUDA_CHECKPOINT_JOB_FILE=") &&
-        !value.starts_with("PAGEBROKER_NATIVE_DEVICE_MAP=") && !value.starts_with("PAGEBROKER_NATIVE_SELECTED_GPU="))
-      environment.push_back(value);
-  }
-  std::string visible;
-  for (const auto& uuid : binding_.visible_devices()) {
-    if (!visible.empty()) visible += ',';
-    visible += uuid;
-  }
-  environment.push_back("CUDA_VISIBLE_DEVICES=" + visible);
-  environment.push_back("PAGEBROKER_NATIVE_DEVICE_MAP=" + binding_.device_map());
-  std::vector<char*> env;
-  for (auto& value : environment) env.push_back(value.data());
-  env.push_back(nullptr);
-  std::string binary = executable_.string(), pid = std::to_string(target), directory = "/proc/self/fd/3";
-  char restore[] = "--restore";
-  char* argv[] = {binary.data(), pid.data(), directory.data(),
-                  binding_.direction() == v1::BindAllocationSession::LOAD ? restore : nullptr, nullptr};
-  posix_spawn_file_actions_t actions;
-  Require(posix_spawn_file_actions_init(&actions) == 0, "native spawn actions");
-  int error = posix_spawn_file_actions_adddup2(&actions, child.get(), STDIN_FILENO);
-  if (!error) error = posix_spawn_file_actions_adddup2(&actions, child.get(), STDOUT_FILENO);
-  if (!error) error = posix_spawn_file_actions_adddup2(&actions, directory_fd_.get(), 3);
-  if (!error) error = posix_spawn_file_actions_addclosefrom_np(&actions, 4);
-  if (!error) error = posix_spawn(&worker_, binary.c_str(), &actions, nullptr, argv, env.data());
-  posix_spawn_file_actions_destroy(&actions);
-  Require(error == 0, "spawn native worker");
+  connection_ = engine_->Bind(binding_, target, directory_fd_.get());
+  v1::NativeSessionReply reply;
+  std::vector<FileDescriptor> descriptors;
+  Require(ReceiveFrame(connection_.get(), reply, descriptors), "GPU engine disconnected during bind");
+  Require(!reply.has_failure(), reply.failure().message().c_str());
+  std::fprintf(stderr, "Native session target=%d %s\n", target, reply.report().c_str());
 }
 
 v1::NativeSessionReply NativeSession::Execute(const v1::NativeSessionRequest& request) {
@@ -205,11 +132,12 @@ v1::NativeSessionReply NativeSession::Execute(const v1::NativeSessionRequest& re
     Require(!finished_ && request.operation() == next, "invalid native phase order");
     if (phase_ == Op::UNSPECIFIED)
       Start(request.target_pid() ? request.target_pid() : binding_.namespace_pid());
-    const std::string command = next == Op::LOCK ? "lock\n" : next == Op::PREPARE ?
-        (save ? "prepare-save\n" : "prepare-load\n") : next == Op::TRANSFER ? "transfer\n" : "complete\n";
-    Require(send(connection_.get(), command.data(), command.size(), MSG_NOSIGNAL) ==
-                static_cast<ssize_t>(command.size()), "write native command");
-    reply.set_report(ReadLine(connection_.get()));
+    internal::NativeCommand command;
+    *command.mutable_execute() = request;
+    SendFrame(connection_.get(), command);
+    std::vector<FileDescriptor> descriptors;
+    Require(ReceiveFrame(connection_.get(), reply, descriptors), "GPU engine disconnected during operation");
+    if (reply.has_failure()) return reply;
     phase_ = next;
     finished_ = next == Op::COMPLETE;
   } catch (const std::exception& error) {
@@ -220,21 +148,22 @@ v1::NativeSessionReply NativeSession::Execute(const v1::NativeSessionRequest& re
 }
 
 void NativeSession::Stop() noexcept {
-  if (worker_ <= 0) return;
-  if (!finished_) {
-    kill(worker_, SIGKILL);
-    while (waitpid(worker_, nullptr, 0) < 0 && errno == EINTR) {}
-    worker_ = -1;
-    return;
+  if (connection_.get() < 0) return;
+  try {
+    internal::NativeCommand command;
+    command.set_drain(true);
+    SendFrame(connection_.get(), command);
+    v1::NativeSessionReply drained;
+    std::vector<FileDescriptor> descriptors;
+    Require(ReceiveFrame(connection_.get(), drained, descriptors) && !drained.has_failure() &&
+            drained.report() == "drained", "GPU engine did not acknowledge drain");
+  } catch (const std::exception& error) {
+    std::fprintf(stderr, "GPU engine drain failed: %s\n", error.what());
+    engine_->Stop();
   }
-  // Successful workers retain CUDA context ownership until the target exits.
-  // Their completed storage operations no longer pin the transaction. Reaping
-  // is independent of admission and must not keep a daemon handler occupied.
   connection_ = FileDescriptor(-1);
-  const auto pid = worker_;
-  std::thread([pid] { while (waitpid(pid, nullptr, 0) < 0 && errno == EINTR) {} }).detach();
-  worker_ = -1;
 }
+
 NativeSession::~NativeSession() {
   Stop();
   if (admitted_) {

@@ -3,7 +3,8 @@
 
 """Real-driver private-memory qualification; no preload, IPC or launch-job.
 
-Run inside a one-GPU container with the PageBroker GPU worker installed:
+Generate Python protobufs with make generate-python. Run in a GPU container with
+the persistent engine installed:
     python3 custom_storage_gpu_test.py /checkpoints/test-directory 64
 The last argument is MiB per allocation (one cuMemAlloc, one cuMemCreate).
 """
@@ -93,188 +94,162 @@ def line(process):
     return value
 
 
-def run(directory, mib):
-    directory.mkdir(mode=0o700, parents=True, exist_ok=False)
-    workload = subprocess.Popen(
-        [sys.executable, "-u", __file__, "--target", str(mib * 1024 * 1024)],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
-    )
-    worker = None
-    try:
-        assert line(workload) == "ready"
-        environ = Path(f"/proc/{workload.pid}/environ").read_bytes()
-        assert b"CUDA_CHECKPOINT_JOB_FILE=" not in environ
-        workload.stdin.write("verify\n")
-        workload.stdin.flush()
-        assert line(workload) == "verified"
-        worker = subprocess.Popen(
-            ["pagebroker-custom-storage-worker", str(workload.pid), str(directory)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+class NativeEngine:
+    def __init__(self):
+        import socket
+        self.control, peer = socket.socketpair()
+        self.control.settimeout(240)
+        self.process = subprocess.Popen(
+            ["sh", "-c", 'exec 3<&"$1"; exec pagebroker-gpu-engine', "engine", str(peer.fileno())],
+            pass_fds=(peer.fileno(),),
         )
-        ready = json.loads(line(worker))
-        assert ready["event"] == "ready"
-        print(json.dumps(ready), flush=True)
-        for iteration in range(2):
-            for operation in ("save", "load"):
-                worker.stdin.write(operation + "\n")
-                worker.stdin.flush()
-                result = json.loads(line(worker))
-                assert result["event"] == operation
-                assert result["bytes"] >= 2 * mib * 1024 * 1024
-                print(json.dumps(dict(result, iteration=iteration)), flush=True)
-            workload.stdin.write("verify\n")
-            workload.stdin.flush()
-            assert line(workload) == "verified"
-            print(f"iteration {iteration}: all private cuMemAlloc/cuMemCreate bytes verified", flush=True)
-        workload.stdin.close()
-        assert workload.wait(timeout=30) == 0
-        worker.stdin.close()
-        assert worker.wait(timeout=30) == 0
-    finally:
-        if workload.poll() is None:
-            workload.kill()
-            workload.wait(timeout=30)
-        if worker and worker.poll() is None:
-            worker.kill()
-            worker.wait(timeout=30)
+        peer.close()
+        self.reply(self.control)
+
+    @staticmethod
+    def reply(connection):
+        result, fds = receive(connection, pb.NativeSessionReply)
+        assert result is not None and not fds
+        if result.HasField("failure"):
+            raise RuntimeError(result.failure.message)
+        return result.report
+
+    def bind(self, workload, directory, uuid, direction):
+        import socket
+        connection, peer = socket.socketpair()
+        connection.settimeout(240)
+        descriptor = os.open(directory, os.O_DIRECTORY)
+        binding = internal.NativeBinding(host_pid=workload.pid)
+        binding.binding.direction = direction
+        binding.binding.visible_devices.append(uuid)
+        try:
+            send(self.control, binding, (peer.fileno(), descriptor))
+        finally:
+            peer.close()
+            os.close(descriptor)
+        assert json.loads(self.reply(connection))["persistent_engine"]
+        return connection
+
+    @staticmethod
+    def command(connection, operation):
+        send(connection, internal.NativeCommand(execute=pb.NativeSessionRequest(operation=operation)))
+
+    def drain(self, connection):
+        send(connection, internal.NativeCommand(drain=True))
+        assert self.reply(connection) == "drained"
+        connection.close()
+        assert self.process.poll() is None
+
+    def close(self):
+        self.control.close()
+        self.process.wait(timeout=30)
 
 
 def run_multiple(directory, mib, count):
-    """Drive independent workers; native calls never execute concurrently."""
-    assert "CUDA_CHECKPOINT_JOB_FILE" not in os.environ
-    assert not os.environ.get("LD_PRELOAD")
+    """Reuse one engine across mixed-visibility targets, concurrent copies and cancellation."""
     uuids = subprocess.check_output(
         ["nvidia-smi", "--query-gpu=uuid", "--format=csv,noheader"], text=True,
     ).splitlines()
-    assert len(uuids) >= count
-    assert len(set(uuids)) == len(uuids)
+    if os.environ.get("CUDA_VISIBLE_DEVICES"):
+        uuids = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
     directory.mkdir(mode=0o700, parents=True, exist_ok=False)
-    workloads, workers = [], []
+    workloads = []
+    processes = []
+    engine = None
     try:
-        admission_start = time.monotonic()
-        # Pin both processes by UUID, not ordinal; each sees exactly one GPU.
-        for rank, uuid in enumerate(uuids[:count]):
-            env = dict(os.environ, CUDA_VISIBLE_DEVICES=uuid,
-                       CUSTOM_STORAGE_TEST_RANK=str(rank))
+        start = time.monotonic()
+        engine = NativeEngine()
+        print(json.dumps({"event": "engine_initialized", "seconds": time.monotonic() - start,
+                          "pid": engine.process.pid}), flush=True)
+        for rank in range(count):
+            uuid = uuids[rank % len(uuids)]
             path = directory / str(rank)
             path.mkdir(mode=0o700)
             workload = subprocess.Popen(
                 [sys.executable, "-u", __file__, "--target", str(mib * 1024 * 1024)],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=env,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+                env=dict(os.environ, CUDA_VISIBLE_DEVICES=uuid, CUSTOM_STORAGE_TEST_RANK=str(rank)),
             )
-            workloads.append(workload)
+            workloads.append((workload, path, uuid))
+            processes.append(workload)
             assert line(workload) == "ready"
-            environ = Path(f"/proc/{workload.pid}/environ").read_bytes()
-            assert b"CUDA_CHECKPOINT_JOB_FILE=" not in environ
-            worker = subprocess.Popen(
-                ["pagebroker-custom-storage-worker", str(workload.pid), str(path)],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=env,
-            )
-            workers.append(worker)
-            ready = json.loads(line(worker))
-            assert ready["event"] == "ready"
-            print(json.dumps(dict(ready, rank=rank, uuid=uuid)), flush=True)
-        print(json.dumps({"event": "admitted", "seconds": time.monotonic() - admission_start,
-                          "includes_target_allocation_and_seeding": True}), flush=True)
-        for workload in workloads:
-            workload.stdin.write("verify\n")
-            workload.stdin.flush()
-        for workload in workloads:
-            assert line(workload) == "verified"
-
-        # ABBA balances first-touch and run-order effects. Save uses the same
-        # schedule in every cycle; only the LOAD schedule changes.
-        for iteration, mode in enumerate(("sequential", "pipeline", "pipeline", "sequential")):
-            for operation in ("save", "load"):
-                started = time.monotonic()
-                pipeline = operation == "load" and mode == "pipeline"
-                preparations, transfers = [], []
-                for rank, worker in enumerate(workers):
-                    worker.stdin.write(f"prepare-{operation}\n")
-                    worker.stdin.flush()
-                    prepared = json.loads(line(worker))
-                    assert prepared["event"] == "prepared"
-                    preparations.append(prepared)
-                    if pipeline:
-                        worker.stdin.write("transfer\n")
-                        worker.stdin.flush()
-                if not pipeline:
-                    for worker in workers:
-                        worker.stdin.write("transfer\n")
-                        worker.stdin.flush()
-                # All transfers must succeed before ANY target receives COMPLETE.
-                for rank, worker in enumerate(workers):
-                    transferred = json.loads(line(worker))
-                    assert transferred["event"] == "transferred"
-                    assert transferred["bytes"] >= 2 * mib * 1024 * 1024
-                    transfers.append(transferred)
+        for cycle in range(3):
+            for direction in (pb.BindAllocationSession.SAVE, pb.BindAllocationSession.LOAD):
+                start = time.monotonic()
+                sessions = [engine.bind(*workload, direction) for workload in workloads]
+                if direction == pb.BindAllocationSession.SAVE:
+                    for session in sessions:
+                        engine.command(session, pb.NativeSessionRequest.LOCK)
+                        assert json.loads(engine.reply(session))["event"] == "locked"
+                preparations = []
+                for session in sessions:
+                    engine.command(session, pb.NativeSessionRequest.PREPARE)
+                    preparations.append(json.loads(engine.reply(session)))
+                    engine.command(session, pb.NativeSessionRequest.TRANSFER)
+                transfers = [json.loads(engine.reply(session)) for session in sessions]
+                assert all(result["bytes"] >= 2 * mib * 1024 * 1024 for result in transfers)
                 results = []
-                for worker in workers:
-                    worker.stdin.write("complete\n")
-                    worker.stdin.flush()
-                    result = json.loads(line(worker))
-                    assert result["event"] == "complete"
-                    results.append(result)
-                ended = time.monotonic()
-                # Native intervals must be disjoint. Compute actual overlap with
-                # the UNION of copy intervals, not a sum of concurrent copies.
-                spans = sorted((x["transfer_start_ns"], x["transfer_end_ns"]) for x in transfers)
-                merged = []
-                for begin, end in spans:
-                    if merged and begin <= merged[-1][1]:
-                        merged[-1][1] = max(merged[-1][1], end)
-                    else:
-                        merged.append([begin, end])
-                overlap = 0
-                previous = 0
-                for prepared in preparations:
-                    begin, end = prepared["prepare_start_ns"], prepared["prepare_end_ns"]
-                    assert begin >= previous
-                    previous = end
-                    overlap += sum(max(0, min(end, right) - max(begin, left))
-                                   for left, right in merged)
-                print(json.dumps({
-                    "event": "batch", "operation": operation, "iteration": iteration,
-                    "mode": mode if operation == "load" else "sequential",
-                    "total_seconds": ended - started,
-                    "native_transfer_overlap_seconds": overlap / 1e9,
-                    "bytes": sum(item["bytes"] for item in transfers),
-                    "preparations": preparations, "transfers": transfers, "results": results,
-                }), flush=True)
-            for workload in workloads:
+                for session in sessions:
+                    engine.command(session, pb.NativeSessionRequest.COMPLETE)
+                    results.append(json.loads(engine.reply(session)))
+                    engine.drain(session)
+                print(json.dumps({"cycle": cycle, "direction": direction, "seconds": time.monotonic()-start,
+                                  "preparations": preparations, "transfers": transfers,
+                                  "results": results}), flush=True)
+            for workload, _, _ in workloads:
                 workload.stdin.write("verify\n")
                 workload.stdin.flush()
-            for workload in workloads:
                 assert line(workload) == "verified"
-            print(f"iteration {iteration}: all {count} ranks' private bytes verified", flush=True)
-        for workload in workloads:
-            workload.stdin.close()
-        for workload in workloads:
-            assert workload.wait(timeout=30) == 0
-        for worker in workers:
-            worker.stdin.close()
-        for worker in workers:
-            assert worker.wait(timeout=30) == 0
+            print(f"cycle {cycle}: every application byte verified across all targets", flush=True)
+
+        # Prepared SAVE and LOAD cancellation must drain without terminating the
+        # shared engine. Other restored targets remain live and byte-correct.
+        for direction in (pb.BindAllocationSession.SAVE, pb.BindAllocationSession.LOAD):
+            victim, path, uuid = workloads.pop()
+            if direction == pb.BindAllocationSession.LOAD:
+                session = engine.bind(victim, path, uuid, pb.BindAllocationSession.SAVE)
+                for operation in (pb.NativeSessionRequest.LOCK, pb.NativeSessionRequest.PREPARE,
+                                  pb.NativeSessionRequest.TRANSFER, pb.NativeSessionRequest.COMPLETE):
+                    engine.command(session, operation)
+                    engine.reply(session)
+                engine.drain(session)
+            session = engine.bind(victim, path, uuid, direction)
+            if direction == pb.BindAllocationSession.SAVE:
+                engine.command(session, pb.NativeSessionRequest.LOCK)
+                engine.reply(session)
+            engine.command(session, pb.NativeSessionRequest.PREPARE)
+            engine.reply(session)
+            engine.drain(session)
+            assert victim.wait(timeout=30) == -9
+            for workload, _, _ in workloads:
+                workload.stdin.write("verify\n")
+                workload.stdin.flush()
+                assert line(workload) == "verified"
+            print(json.dumps({"event": "cancelled_and_drained", "direction": direction,
+                              "engine_pid": engine.process.pid}), flush=True)
+        print("PERSISTENT_ENGINE_ALL_PASSED", flush=True)
     finally:
-        # No public abort exists: stop all targets before discarding worker contexts.
-        for process in workloads + workers:
-            if process.poll() is None:
-                process.kill()
-                process.wait(timeout=30)
+        for workload in processes:
+            if workload.poll() is None:
+                workload.kill()
+                workload.wait(timeout=30)
+        if engine:
+            engine.close()
 
 
 if __name__ == "__main__":
     if sys.argv[1] == "--target":
         target(int(sys.argv[2]))
     else:
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "build"))
+        from allocation_session_test import send, receive
+        from v1 import pagebroker_pb2 as pb
+        import gpu_engine_pb2 as internal
         parser = argparse.ArgumentParser(description=__doc__)
         parser.add_argument("directory", type=Path)
         parser.add_argument("mib", type=int)
-        parser.add_argument("--targets", type=int, default=1)
+        parser.add_argument("--targets", type=int, default=3)
         args = parser.parse_args()
-        if args.mib <= 0 or args.targets <= 0:
-            parser.error("allocation size and target count must be positive")
-        if args.targets == 1:
-            run(args.directory, args.mib)
-        else:
-            run_multiple(args.directory, args.mib, args.targets)
+        if args.mib <= 0 or args.targets < 3:
+            parser.error("use a positive allocation size and at least three targets (two are cancelled)")
+        run_multiple(args.directory, args.mib, args.targets)

@@ -22,7 +22,7 @@ constexpr size_t kDefaultBufferCount = 1;
 constexpr size_t kDefaultChunkBytes = 64ULL * 1024ULL * 1024ULL;
 constexpr size_t kMinimumChunkBytes = 1ULL * 1024ULL * 1024ULL;
 constexpr size_t kMaximumChunkBytes = 256ULL * 1024ULL * 1024ULL;
-constexpr size_t kMaximumBufferCount = 8;
+constexpr size_t kMaximumBufferCount = 32;
 constexpr size_t kMaximumPinnedBytesPerDevice =
     1ULL * 1024ULL * 1024ULL * 1024ULL;
 constexpr size_t kMaximumPinnedBytesPerOperation =

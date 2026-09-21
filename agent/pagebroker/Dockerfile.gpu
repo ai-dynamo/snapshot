@@ -42,14 +42,14 @@ ENV NIXL_PLUGIN_DIR=/usr/local/lib/plugins
 WORKDIR /src
 COPY pagebroker/ pagebroker/
 COPY cmd/cuda-checkpoint-helper/ cmd/cuda-checkpoint-helper/
-RUN make -C pagebroker daemon allocation-worker custom-storage-worker test-allocation-transfer CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local
+RUN make -C pagebroker daemon allocation-worker gpu-engine test-allocation-transfer CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local
 
 FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254
 RUN apt-get update && apt-get install -y --no-install-recommends libprotobuf32t64 libaio1t64 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/pagebroker/pagebroker /usr/local/bin/pagebroker
 COPY --from=build /src/pagebroker/build/pagebroker-allocation-worker /usr/local/bin/pagebroker-allocation-worker
-COPY --from=build /src/pagebroker/build/pagebroker-custom-storage-worker /usr/local/bin/pagebroker-custom-storage-worker
+COPY --from=build /src/pagebroker/build/pagebroker-gpu-engine /usr/local/bin/pagebroker-gpu-engine
 COPY --from=nixl /nixl-runtime/lib/ /usr/local/lib/
 COPY --from=nixl /nixl-runtime/NIXL_COMMIT /usr/local/share/nixl/NIXL_COMMIT
 COPY --from=nixl /tmp/nixl/LICENSE /legal/NIXL/LICENSE

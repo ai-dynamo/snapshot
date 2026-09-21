@@ -398,6 +398,7 @@ RunDaemon(
     return Fail("create listener", error);
 
   Broker broker(staging_directory, storage_root, allocation_worker);
+  broker.StartGpuEngine();
   Serve(listener, broker, max_concurrent_requests);
   return ExitCode::SUCCESS;
 }

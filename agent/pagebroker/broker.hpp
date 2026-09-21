@@ -20,9 +20,11 @@
 namespace snapshot::pagebroker {
 class AllocationSession;
 class NativeSession;
+class GpuEngine;
 class Broker {
  public:
   Broker(Path staging_root, Path storage_root, Path allocation_worker = {});
+  void StartGpuEngine();
   std::unique_ptr<AllocationSession> BindAllocations(const Request& request);
   std::unique_ptr<NativeSession> BindNative(const Request& request);
   Response HandleRequest(const Request& request);
@@ -62,6 +64,7 @@ class Broker {
   Response Abort(const Request& request);
   Path staging_root_;
   Path allocation_worker_;
+  std::shared_ptr<GpuEngine> gpu_engine_;
   Engines io_engines_;
   std::mutex transactions_mutex_;
   Transactions transactions_;

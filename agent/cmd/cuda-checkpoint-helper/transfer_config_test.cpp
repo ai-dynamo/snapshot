@@ -80,7 +80,7 @@ bool TestPinnedMemoryCalculation() {
                "default eight-device pinned bytes are wrong") &&
          Check(!transfer::CalculatePinnedBytes(
                    3,
-                   {transfer::kMaximumBufferCount, 128ULL * 1024ULL * 1024ULL},
+                   {8, 128ULL * 1024ULL * 1024ULL},
                    &bytes, &error),
                "operation pinned-memory cap was not enforced") &&
          Check(!transfer::CalculatePinnedBytes(

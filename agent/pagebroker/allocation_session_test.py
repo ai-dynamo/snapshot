@@ -92,10 +92,12 @@ class AllocationSessions(unittest.TestCase):
         self.storage = self.root / "storage"
         self.storage.mkdir()
         self.log = open(self.root / "broker.log", "w")
+        (self.root / "allocation-worker").symlink_to(Path(__file__).resolve())
+        (self.root / "pagebroker-gpu-engine").symlink_to(Path(__file__).resolve().parent / "build/fake-gpu-engine")
         self.process = subprocess.Popen(
             [str(Path(__file__).resolve().parent / "pagebroker"), self.socket,
              str(self.root / "stage"), str(self.storage), "--max-concurrent-requests", "8",
-             "--allocation-worker", str(Path(__file__).resolve())],
+             "--allocation-worker", str(self.root / "allocation-worker")],
             stderr=self.log,
         )
         self.connections = []
@@ -328,7 +330,7 @@ class AllocationSessions(unittest.TestCase):
         self.process = subprocess.Popen(
             [str(Path(__file__).resolve().parent / "pagebroker"), self.socket,
              str(self.root / "stage"), str(self.storage), "--max-concurrent-requests", "8",
-             "--allocation-worker", "/does-not-exist"],
+             "--allocation-worker", str(self.root / "missing-allocation-worker")],
             stderr=self.log,
         )
         time.sleep(.1)

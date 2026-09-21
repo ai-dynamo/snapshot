@@ -18,6 +18,7 @@ class TransferBuffers {
  public:
   explicit TransferBuffers(TransferOptions options);
   ~TransferBuffers();
+  bool Initialize(CUcontext context, std::string* error);
   bool Transfer(CUdeviceptr device, size_t size, CUstream stream, CUcontext context,
                 const StorageLayout& storage, TransferOperation operation,
                 TransferCancellation* cancellation, TransferMetrics* metrics, std::string* error,

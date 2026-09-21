@@ -3,7 +3,7 @@
 
 PROTO := v1/pagebroker.proto
 GTEST_FLAGS := $(shell pkg-config --cflags --libs gtest_main)
-BROKER_SOURCES := broker.cpp checkpoint_transaction_descriptor.cpp posix_copy_engine.cpp restore_transaction_descriptor.cpp transaction.cpp transfer_engine.cpp allocation_session.cpp native_session.cpp allocation_transport.cpp file_descriptor.cpp
+BROKER_SOURCES := broker.cpp checkpoint_transaction_descriptor.cpp posix_copy_engine.cpp restore_transaction_descriptor.cpp transaction.cpp transfer_engine.cpp allocation_session.cpp native_session.cpp gpu_engine.cpp allocation_transport.cpp file_descriptor.cpp
 DAEMON_SOURCES := $(BROKER_SOURCES) daemon.cpp main.cpp
 
 .PHONY: daemon generate test
@@ -25,13 +25,13 @@ TRANSFER_SOURCES := nixl_transfer.cpp
 endif
 
 .PHONY: allocation-worker
-.PHONY: custom-storage-worker
-custom-storage-worker:
+.PHONY: gpu-engine
+gpu-engine: generate
 	mkdir -p build
 	$(CXX) -O2 -std=c++20 -Wall -Wextra -Werror -I. -I$(CUDA_ROOT)/include -I$(TRANSFER_DIR) \
-		custom_storage_worker.cpp file_descriptor.cpp cuda_posix_transfer.cpp $(TRANSFER_SOURCES) \
+		gpu_engine_worker.cpp allocation_transport.cpp v1/pagebroker.pb.cc gpu_engine.pb.cc file_descriptor.cpp cuda_posix_transfer.cpp $(TRANSFER_SOURCES) \
 		$(TRANSFER_DIR)/transfer_config.cpp $(TRANSFER_DIR)/storage_manifest.cpp \
-		-L$(CUDA_LIB_DIR) -lcuda -pthread $(TRANSFER_FLAGS) -o build/pagebroker-custom-storage-worker
+		-L$(CUDA_LIB_DIR) -lcuda -lprotobuf -pthread $(TRANSFER_FLAGS) -o build/pagebroker-gpu-engine
 
 allocation-worker: generate
 	mkdir -p build
@@ -41,20 +41,23 @@ allocation-worker: generate
 		-L$(CUDA_LIB_DIR) -lcuda -lprotobuf -pthread $(TRANSFER_FLAGS) -o build/pagebroker-allocation-worker
 
 generate:
-	protoc --proto_path=. --cpp_out=. $(PROTO)
+	protoc --proto_path=. --cpp_out=. $(PROTO) gpu_engine.proto
 
 daemon: generate
-	c++ -I. -std=c++20 -Wall -Werror $(DAEMON_SOURCES) v1/pagebroker.pb.cc -lprotobuf -o pagebroker
+	c++ -I. -std=c++20 -Wall -Werror $(DAEMON_SOURCES) v1/pagebroker.pb.cc gpu_engine.pb.cc -lprotobuf -o pagebroker
 
 test: generate $(BROKER_SOURCES) daemon_test.cpp
 	mkdir -p build
-	c++ -I. -std=c++20 -Wall -Werror $(BROKER_SOURCES) daemon_test.cpp v1/pagebroker.pb.cc -lprotobuf $(GTEST_FLAGS) -o build/pagebroker-test
+	c++ -I. -std=c++20 -Wall -Werror fake_gpu_engine.cpp allocation_transport.cpp file_descriptor.cpp gpu_engine.pb.cc v1/pagebroker.pb.cc -lprotobuf -pthread -o build/fake-gpu-engine
+	c++ -I. -std=c++20 -Wall -Werror $(BROKER_SOURCES) daemon_test.cpp v1/pagebroker.pb.cc gpu_engine.pb.cc -lprotobuf $(GTEST_FLAGS) -o build/pagebroker-test
 	./build/pagebroker-test
 
-.PHONY: test-allocations
-test-allocations: daemon
+.PHONY: generate-python test-allocations
+generate-python:
 	mkdir -p build
-	protoc --proto_path=. --python_out=build $(PROTO)
+	protoc --proto_path=. --python_out=build $(PROTO) gpu_engine.proto
+
+test-allocations: daemon test generate-python
 	python3 allocation_session_test.py
 
 .PHONY: test-allocation-transfer

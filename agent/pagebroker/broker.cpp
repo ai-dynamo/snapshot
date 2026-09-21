@@ -14,6 +14,7 @@
 #include "posix_copy_engine.hpp"
 #include "allocation_session.hpp"
 #include "native_session.hpp"
+#include "gpu_engine.hpp"
 
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
@@ -109,12 +110,16 @@ TransactionDirectory(const Path& transaction_root, const std::string& transactio
 Broker::Broker(Path staging_root, Path storage_root, Path allocation_worker)
     : staging_root_(fs::weakly_canonical(std::move(staging_root))), allocation_worker_(std::move(allocation_worker))
 {
+  if (!allocation_worker_.empty())
+    gpu_engine_ = std::make_shared<GpuEngine>(allocation_worker_.parent_path() / "pagebroker-gpu-engine");
   io_engines_.push_back(std::make_unique<PosixCopyEngine>(std::move(storage_root)));
   fs::remove_all(staging_root_ / "restore");
   fs::remove_all(staging_root_ / "checkpoint");
   fs::create_directories(staging_root_ / "restore");
   fs::create_directories(staging_root_ / "checkpoint");
 }
+
+void Broker::StartGpuEngine() { if (gpu_engine_) gpu_engine_->Start(); }
 
 void
 Broker::ReapExpiredTransactions(std::chrono::steady_clock::time_point now)
@@ -497,10 +502,7 @@ Broker::BindNative(const Request& request)
     throw std::invalid_argument("native binding requires identity and GPU worker configuration");
   auto transaction = FindTransaction(request.transaction_id());
   if (!transaction) throw std::invalid_argument("native transaction not found");
-  auto session = std::make_unique<NativeSession>(transaction, request.bind_native(),
-      allocation_worker_.parent_path() / "pagebroker-custom-storage-worker");
-  session->Prewarm();
-  return session;
+  return std::make_unique<NativeSession>(transaction, request.bind_native(), gpu_engine_);
 }
 
 }  // namespace snapshot::pagebroker
