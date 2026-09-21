@@ -6,6 +6,7 @@ package podcontract
 import (
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -26,15 +27,9 @@ type CuinterposeDelivery struct {
 	PullPolicy corev1.PullPolicy
 }
 
-func CuinterposeEnabled(annotations map[string]string) (bool, error) {
-	raw, found := annotations[CuinterposeAnnotation]
-	if !found {
-		return false, nil
-	}
-	if raw != CuinterposeAnnotationEnabled {
-		return false, fmt.Errorf("%s must be %q", CuinterposeAnnotation, CuinterposeAnnotationEnabled)
-	}
-	return true, nil
+func CuinterposeEnabled(annotations map[string]string) bool {
+	enabled, err := strconv.ParseBool(strings.TrimSpace(annotations[CuinterposeAnnotation]))
+	return err == nil && enabled
 }
 
 // Apply once, before Job creation.
@@ -43,9 +38,8 @@ func ShapeCuinterposeCapture(
 	targetContainers []string,
 	delivery CuinterposeDelivery,
 ) error {
-	enabled, err := CuinterposeEnabled(podTemplate.Annotations)
-	if err != nil || !enabled {
-		return err
+	if !CuinterposeEnabled(podTemplate.Annotations) {
+		return nil
 	}
 	if delivery.AgentImage == "" {
 		return fmt.Errorf("cuinterpose requires the Snapshot agent image")
@@ -96,25 +90,6 @@ func ShapeCuinterposeCapture(
 	return nil
 }
 
-// Reject adoption of a Job that would run without the requested shim.
-func VerifyCuinterposeCapture(spec *corev1.PodSpec, targetContainers []string) error {
-	for _, name := range targetContainers {
-		container := findContainer(spec, name)
-		if container == nil {
-			return fmt.Errorf("container %q not found", name)
-		}
-		if !slices.Contains(preloadFields(envValue(container.Env, ldPreloadEnv)), CuinterposeLibraryPath) {
-			return fmt.Errorf("container %q does not preload %s", name, CuinterposeLibraryPath)
-		}
-		if !slices.ContainsFunc(container.VolumeMounts, func(m corev1.VolumeMount) bool {
-			return m.Name == cuinterposeVolumeName && m.MountPath == CuinterposeMountPath
-		}) {
-			return fmt.Errorf("container %q does not mount %s", name, CuinterposeMountPath)
-		}
-	}
-	return nil
-}
-
 // The shim must precede other interposers in the loader search order.
 func setCuinterposePreload(container *corev1.Container) error {
 	index := -1
@@ -138,7 +113,9 @@ func setCuinterposePreload(container *corev1.Container) error {
 	if env.ValueFrom != nil {
 		return fmt.Errorf("container %q: cannot prepend to %s supplied by valueFrom", container.Name, ldPreloadEnv)
 	}
-	fields := preloadFields(env.Value)
+	fields := strings.FieldsFunc(env.Value, func(r rune) bool {
+		return r == ':' || unicode.IsSpace(r)
+	})
 	filtered := make([]string, 0, len(fields)+1)
 	filtered = append(filtered, CuinterposeLibraryPath)
 	for _, field := range fields {
@@ -148,19 +125,4 @@ func setCuinterposePreload(container *corev1.Container) error {
 	}
 	env.Value = strings.Join(filtered, " ")
 	return nil
-}
-
-func preloadFields(value string) []string {
-	return strings.FieldsFunc(value, func(r rune) bool {
-		return r == ':' || unicode.IsSpace(r)
-	})
-}
-
-func envValue(env []corev1.EnvVar, name string) string {
-	for i := range env {
-		if env[i].Name == name {
-			return env[i].Value
-		}
-	}
-	return ""
 }
