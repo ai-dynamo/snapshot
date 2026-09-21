@@ -35,6 +35,7 @@ pub fn cuMemCreate(
     } else {
         None
     };
+    let context = if supported { driver::context()? } else { 0 };
     let mut driver = 0;
     let create = crate::driver::symbols::cuMemCreate()?;
     if let Err(error) =
@@ -47,9 +48,9 @@ pub fn cuMemCreate(
     }
     let driver = runtime::must_complete(VirtualAllocationHandle::from_driver(driver));
     let handle = match reference {
-        Some(reference) => {
-            runtime::must_complete(state.adopt_unicast(reference, driver, size, properties, false))
-        }
+        Some(reference) => runtime::must_complete(
+            state.adopt_unicast(reference, driver, size, properties, false, context),
+        ),
         None => driver,
     };
     unsafe { out.write(handle) };
@@ -59,9 +60,7 @@ pub fn cuMemCreate(
 pub fn cuMemRelease(handle: u64) -> Result<()> {
     let mut state = active()?;
     if let Some(handle) = VirtualAllocationHandle::from_raw(handle) {
-        let id = handle.id(&state)?;
-        state.virtual_allocation_handles.remove(&handle);
-        runtime::must_complete(state.release_unused_memblock(id));
+        state.release_virtual_handle(handle)?;
     } else {
         unsafe { crate::driver::cuMemRelease(handle) }?;
     }
@@ -73,14 +72,20 @@ pub fn cuMemRetainAllocationHandle(out: *mut u64, address: *mut c_void) -> Resul
         return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
     }
     let mut state = active()?;
-    let id = state.mapped_memblock(address as u64);
-    if id.is_some() {
-        state.check_handle_capacity()?;
-    }
+    let mapping = state
+        .mappings
+        .range(..=address as u64)
+        .next_back()
+        .filter(|(_, mapping)| address as u64 - mapping.address < mapping.size as u64)
+        .map(|(_, mapping)| (mapping.id, mapping.handle));
     let mut driver = 0;
     unsafe { crate::driver::cuMemRetainAllocationHandle(&mut driver, address) }?;
-    if let Some(id) = id {
-        unsafe { out.write(runtime::must_complete(state.retain_backing(id, driver))) };
+    if let Some((id, handle)) = mapping {
+        unsafe {
+            out.write(runtime::must_complete(
+                state.retain_backing(id, handle, driver),
+            ))
+        };
     } else {
         let driver = runtime::must_complete(VirtualAllocationHandle::from_driver(driver));
         unsafe {
@@ -97,7 +102,14 @@ pub fn cuMemMap(address: u64, size: usize, offset: usize, handle: u64, flags: u6
         return Ok(());
     };
 
-    state.map_unicast(id, address, size, offset, flags)
+    state.map_unicast(
+        id,
+        VirtualAllocationHandle::from_raw(handle).unwrap(),
+        address,
+        size,
+        offset,
+        flags,
+    )
 }
 
 pub fn cuMemUnmap(address: u64, size: usize) -> Result<()> {
@@ -195,7 +207,7 @@ pub fn cuMemImportFromShareableHandle(
         .map_err(|_| CUDA_ERROR_INVALID_HANDLE)?
         .ok_or(CUDA_ERROR_NOT_SUPPORTED)?;
     let state = active()?;
-    let handle = sharing::import_reference(state, reference)?;
+    let (_state, handle) = sharing::import_reference(state, reference)?;
     unsafe { out.write(handle) };
     Ok(())
 }
