@@ -10,15 +10,25 @@ import (
 	"unicode"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/ptr"
 )
 
-// cuinterpose is the CUDA interposer: an LD_PRELOAD library that lets Snapshot
-// checkpoint and restore CUDA memory shared between processes on one node. A
-// Pod opts in with CuinterposeAnnotation. The CUDA tools contract
-// (cudatools.go) puts the shim in every checkpoint target independently of
-// that annotation; shaping only puts the already-mounted shim first in
-// LD_PRELOAD.
-const ldPreloadEnv = "LD_PRELOAD"
+// CuinterposeMountPath must also match the ns-bind-mount helper's destination.
+const (
+	CuinterposeMountPath         = "/tmp/snapshot-cuda"
+	CuinterposeLibraryPath       = CuinterposeMountPath + "/libcuinterpose.so"
+	cuinterposeVolumeName        = "snapshot-cuda"
+	cuinterposeInitContainerName = "snapshot-cuda-install"
+	ldPreloadEnv                 = "LD_PRELOAD"
+)
+
+// CuinterposeDelivery selects the agent image that supplies both shim libraries.
+// Pull secrets must exist in the workload namespace.
+type CuinterposeDelivery struct {
+	AgentImage       string
+	PullPolicy       corev1.PullPolicy
+	ImagePullSecrets []string
+}
 
 // CuinterposeEnabled reports whether a workload opted into the CUDA interposer
 // through CuinterposeAnnotation. An absent annotation disables it; any value
@@ -28,36 +38,35 @@ func CuinterposeEnabled(annotations map[string]string) (bool, error) {
 	if !found {
 		return false, nil
 	}
-	if raw != strings.TrimSpace(raw) {
-		return false, fmt.Errorf("%s must not contain surrounding whitespace", CuinterposeAnnotation)
-	}
 	if raw != CuinterposeAnnotationEnabled {
 		return false, fmt.Errorf("%s must be %q", CuinterposeAnnotation, CuinterposeAnnotationEnabled)
 	}
 	return true, nil
 }
 
-// ShapeCuinterposeCapture preloads the shim in every target container when the
-// template opts in. CUDA tool delivery is owned by ShapeCUDATools.
-// Reapplying to an already shaped template is
-// a no-op. On error the template is left unchanged.
+// ShapeCuinterposeCapture installs both shim libraries and preloads the frontend
+// for an opted-in source template. Apply once, before creating the Job. Commands and
+// existing preload entries are preserved; unannotated templates are untouched.
 func ShapeCuinterposeCapture(
 	podTemplate *corev1.PodTemplateSpec,
 	targetContainers []string,
+	delivery CuinterposeDelivery,
 ) error {
-	if podTemplate == nil {
-		return fmt.Errorf("cuinterpose requires a pod template")
-	}
 	enabled, err := CuinterposeEnabled(podTemplate.Annotations)
 	if err != nil || !enabled {
 		return err
+	}
+	if delivery.AgentImage == "" {
+		return fmt.Errorf("cuinterpose requires the Snapshot agent image")
 	}
 	if len(targetContainers) == 0 {
 		return fmt.Errorf("cuinterpose requires at least one target container")
 	}
 	shaped := podTemplate.DeepCopy()
-	targets := uniqueNames(targetContainers)
-	for _, name := range targets {
+	for i, name := range targetContainers {
+		if slices.Contains(targetContainers[:i], name) {
+			continue
+		}
 		container := findContainer(&shaped.Spec, name)
 		if container == nil {
 			return fmt.Errorf("cuinterpose target container %q does not exist", name)
@@ -65,14 +74,45 @@ func ShapeCuinterposeCapture(
 		if err := setCuinterposePreload(container); err != nil {
 			return err
 		}
+		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+			Name: cuinterposeVolumeName, MountPath: CuinterposeMountPath, ReadOnly: true,
+		})
+	}
+	shaped.Spec.Volumes = append(shaped.Spec.Volumes, corev1.Volume{
+		Name:         cuinterposeVolumeName,
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	})
+	shaped.Spec.InitContainers = append(shaped.Spec.InitContainers, corev1.Container{
+		Name:            cuinterposeInitContainerName,
+		Image:           delivery.AgentImage,
+		ImagePullPolicy: delivery.PullPolicy,
+		Command:         []string{"/bin/cp"},
+		Args: []string{
+			"--",
+			"/usr/local/lib/snapshot/libcuinterpose.so",
+			"/usr/local/lib/snapshot/libcuinterpose_core.so",
+			CuinterposeMountPath + "/",
+		},
+		VolumeMounts: []corev1.VolumeMount{{Name: cuinterposeVolumeName, MountPath: CuinterposeMountPath}},
+		SecurityContext: &corev1.SecurityContext{
+			AllowPrivilegeEscalation: ptr.To(false),
+			ReadOnlyRootFilesystem:   ptr.To(true),
+			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+			SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+		},
+	})
+	for _, name := range delivery.ImagePullSecrets {
+		ref := corev1.LocalObjectReference{Name: name}
+		if !slices.Contains(shaped.Spec.ImagePullSecrets, ref) {
+			shaped.Spec.ImagePullSecrets = append(shaped.Spec.ImagePullSecrets, ref)
+		}
 	}
 	*podTemplate = *shaped
 	return nil
 }
 
-// VerifyCuinterposeCapture reports whether every target preloads the shim. The
-// operator verifies the independent CUDA tools contract
-// separately before calling this function.
+// VerifyCuinterposeCapture prevents adoption of a Job whose target containers
+// would run without the requested shim.
 func VerifyCuinterposeCapture(spec *corev1.PodSpec, targetContainers []string) error {
 	for _, name := range targetContainers {
 		container := findContainer(spec, name)
@@ -81,6 +121,11 @@ func VerifyCuinterposeCapture(spec *corev1.PodSpec, targetContainers []string) e
 		}
 		if !slices.Contains(preloadFields(envValue(container.Env, ldPreloadEnv)), CuinterposeLibraryPath) {
 			return fmt.Errorf("container %q does not preload %s", name, CuinterposeLibraryPath)
+		}
+		if !slices.ContainsFunc(container.VolumeMounts, func(m corev1.VolumeMount) bool {
+			return m.Name == cuinterposeVolumeName && m.MountPath == CuinterposeMountPath
+		}) {
+			return fmt.Errorf("container %q does not mount %s", name, CuinterposeMountPath)
 		}
 	}
 	return nil
