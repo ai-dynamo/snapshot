@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [workspace]
-members = ["abi", "protocol"]
+members = ["abi"]
 resolver = "3"
 
 [workspace.package]
@@ -15,11 +15,6 @@ rust-version = "1.88"
 # Only generated driver definitions are used. CUDA calls still go through
 # FrontendAbi.resolve; dynamic-loading prevents a link-time libcuda requirement.
 cudarc = { version = "=0.19.9", default-features = false, features = ["std", "driver", "cuda-13010", "dynamic-loading"] }
-serde = { version = "1", features = ["derive"] }
-serde_bytes = "0.11"
-rmp-serde = "1"
-rustix = { version = "1", features = ["net", "fs", "event"] }
-thiserror = "2"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
