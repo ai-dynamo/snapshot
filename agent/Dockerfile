@@ -110,7 +110,7 @@ RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
     && /cuda-checkpoint-helper-transfer-cancellation-test
 
 # =============================================================================
-# C CUDA interposition frontend - pinned GNU builder
+# C frontend and Rust core - pinned GNU builder, static musl coordinator
 # =============================================================================
 # GCC 15 builds the C frontend, which requires musttail. The Bookworm image keeps
 # the builder's glibc 2.36.
@@ -124,13 +124,20 @@ COPY --from=gcc-15 /usr/local/libexec/gcc/ /opt/gcc-15/libexec/gcc/
 COPY --from=gcc-15 /usr/local/lib64/ /opt/gcc-15/lib64/
 RUN test "$(rustc --version | cut -d' ' -f2)" = 1.95.0 \
     && apt-get update && apt-get install -y --no-install-recommends \
-       make gcc binutils \
+       musl-tools make gcc binutils python3 python3-msgpack \
     && rm -rf /var/lib/apt/lists/* \
     && cargo install cbindgen --version 0.29.4 --locked \
-    && rustup component add rustfmt clippy
+    && rustup target add x86_64-unknown-linux-musl \
+    && rustup component add rust-src rustfmt clippy
 WORKDIR /cuinterpose
 COPY cmd/cuinterpose/ ./
-RUN make frontend
+RUN make native
+# Ship corresponding dependency and standard-library sources, including their
+# license files, alongside the repository source in the image's legal tree.
+RUN mkdir -p /rust-sources && cd rust && cargo vendor --locked /rust-sources/vendor \
+    && cp Cargo.lock /rust-sources/ \
+    && cp -a "$(rustc --print sysroot)/lib/rustlib/src/rust" /rust-sources/standard-library \
+    && cp -a "$(rustc --print sysroot)/share/doc/rust" /rust-sources/toolchain-notices
 
 FROM cuinterpose-builder AS cuinterpose-test
 RUN make test-native
@@ -372,6 +379,11 @@ RUN criu --version
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
 COPY --from=criu-builder /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
+COPY --from=cuinterpose-builder /cuinterpose/build/libcuinterpose.so /usr/local/lib/snapshot/libcuinterpose.so
+COPY --from=cuinterpose-builder /cuinterpose/build/libcuinterpose_core.so /usr/local/lib/snapshot/libcuinterpose_core.so
+COPY --from=cuinterpose-builder /cuinterpose/build/cuinterpose-coordinator /usr/local/bin/cuinterpose-coordinator
+COPY --from=cuinterpose-builder /rust-sources/ /legal/cuinterpose/rust/
+COPY cmd/cuinterpose/ /legal/cuinterpose/source/
 # nsmount resolves this helper at /usr/local/sbin/ns-bind-mount (see
 # agent/internal/nsmount/mount.go defaultBinaryPath).
 COPY --from=cuda-helper-builder /ns-bind-mount /usr/local/sbin/ns-bind-mount
@@ -391,6 +403,10 @@ RUN output=$(/usr/local/bin/pagebroker 2>&1); status=$?; \
 # mechanisms into the mount: criu's libdir -> criu-plugins/ (criu.overrideLibDir),
 # LD_LIBRARY_PATH -> lib/, and PATH -> the bundle root.
 RUN mkdir -p /snapshot-binaries/lib /snapshot-binaries/criu-plugins
+RUN mkdir -p /snapshot-binaries/snapshot-cuda \
+    && install -m 0644 /usr/local/lib/snapshot/libcuinterpose.so /snapshot-binaries/snapshot-cuda/libcuinterpose.so \
+    && install -m 0644 /usr/local/lib/snapshot/libcuinterpose_core.so /snapshot-binaries/snapshot-cuda/libcuinterpose_core.so \
+    && install -m 0755 /usr/local/bin/cuinterpose-coordinator /snapshot-binaries/cuinterpose-coordinator
 COPY --from=builder /nsrestore /snapshot-binaries/nsrestore
 COPY --from=criu-builder /criu-install/usr/local/sbin/criu /snapshot-binaries/criu
 COPY --from=criu-builder /criu-install/usr/local/lib/snapshot/criu-plugins/ /snapshot-binaries/criu-plugins/
@@ -452,6 +468,8 @@ COPY --from=compliance go-licenses.sh /tmp/go-licenses.sh
 RUN sh /tmp/gen-attribution.sh /legal/source/dpkg/DELTA.tsv /legal/source/go/vendor \
       /legal/THIRD-PARTY.txt /legal/source/dpkg/SKIPPED.txt /tmp/go-licenses.sh \
     && rm -f /tmp/gen-attribution.sh
+RUN printf '\nCuInterpose C frontend and Rust core/coordinator: Apache-2.0; source in /legal/cuinterpose/source.\nRust standard library and libc crate: MIT OR Apache-2.0 and bundled third-party notices; corresponding sources and licenses in /legal/cuinterpose/rust.\n' \
+    >> /legal/THIRD-PARTY.txt
 
 # Create directories
 RUN mkdir -p /checkpoints /var/run/snapshot
@@ -489,6 +507,10 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 # When used, the source workload image must have cuda-checkpoint at the same
 # path as it runs from — CRIU restores file-backed mappings by path, not via
 # PATH search — and so must this placeholder image (same BASE_IMAGE).
+#
+# Opted-in source workloads preload the cuinterpose libraries. The agent
+# mounts matching libraries at their original paths before CRIU restores their
+# file-backed mappings. The placeholder must provide a compatible glibc.
 #
 # Standby-aware workload entrypoints stay inert when the restore Pod sets
 # SNAPSHOT_RESTORE_STANDBY=1, then sleep while the snapshot-agent restores

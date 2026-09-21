@@ -17,11 +17,19 @@ REQUIRE_CUDA_HELPER_TESTS ?= $(if $(CI),1,0)
 
 .DEFAULT_GOAL := build
 
-.PHONY: build test test-go test-cuda-helper tidy lint fmt pagebroker-generate pagebroker-check-generated
+.PHONY: build go-build cuinterpose-build cuinterpose-test test test-go test-cuda-helper tidy lint fmt pagebroker-generate pagebroker-check-generated
 
 PROTOC_GEN_GO := $(TOOLS_BIN_DIR)/protoc-gen-go
 
-build:
+build: go-build cuinterpose-build
+
+cuinterpose-build:
+	$(MAKE) -C cmd/cuinterpose build
+
+cuinterpose-test:
+	$(MAKE) -C cmd/cuinterpose test
+
+go-build:
 	GOOS=linux GOARCH=amd64 go build -o bin/agent ./cmd/agent
 	GOOS=linux GOARCH=amd64 go build -o bin/nsrestore ./cmd/nsrestore
 
