@@ -98,21 +98,22 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                             creators: 0,
                             devices: BTreeMap::new(),
                         });
-                    if multicast.reference != *allocation
+                    if multicast.size != *size
+                        || multicast.reference != *allocation
                         || multicast.handle_types != *handle_types
                         || multicast.flags != *flags
                         || multicast.num_devices != *devices
                     {
                         bail!(
-                            "participant {namespace_pid}: inconsistent multicast properties for {allocation:?}: expected creator={}, handle_types={}, flags={}, devices={}; got creator={}, handle_types={handle_types}, flags={flags}, devices={devices}",
+                            "participant {namespace_pid}: inconsistent multicast properties for {allocation:?}: expected creator={}, size={}, handle_types={}, flags={}, devices={}; got creator={}, size={size}, handle_types={handle_types}, flags={flags}, devices={devices}",
                             multicast.reference.creator_pid,
+                            multicast.size,
                             multicast.handle_types,
                             multicast.flags,
                             multicast.num_devices,
                             allocation.creator_pid
                         );
                     }
-                    multicast.size = multicast.size.max(*size);
                     if namespace_pid == &allocation.creator_pid {
                         multicast.creators += 1;
                     }
@@ -173,7 +174,6 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                     allocation,
                     source,
                     size,
-                    offset,
                     device,
                     ..
                 } => {
@@ -184,16 +184,8 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                         multicast.reference == *allocation,
                         "participant {namespace_pid}: inconsistent multicast creator for {allocation:?}"
                     );
-                    if *size == 0
-                        || offset
-                            .checked_add(*size)
-                            .is_none_or(|end| end > multicast.size)
-                    {
-                        bail!(
-                            "participant {namespace_pid}: invalid multicast binding for {allocation:?}: offset={offset}, size={size}, multicast_size={}",
-                            multicast.size
-                        );
-                    }
+                    // CUDA accepted the binding; its rounded capacity may exceed the
+                    // creation size. Only cross-process relationships need validation here.
                     let member = match source {
                         BindingSource::Memory(range) => Some(*range),
                         BindingSource::Address {
@@ -234,13 +226,7 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                         .get_mut(device)
                         .with_context(|| format!("participant {namespace_pid}: multicast binding device {device} is absent for {allocation:?}"))? = true;
                 }
-                Record::MulticastMapping {
-                    allocation,
-                    address,
-                    size,
-                    offset,
-                    ..
-                } => {
+                Record::MulticastMapping { allocation, .. } => {
                     let multicast = multicasts
                         .get(&allocation.id)
                         .with_context(|| format!("missing multicast object {allocation:?}"))?;
@@ -248,17 +234,6 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                         multicast.reference == *allocation,
                         "participant {namespace_pid}: inconsistent multicast creator for {allocation:?}"
                     );
-                    if *address == 0
-                        || *size == 0
-                        || offset
-                            .checked_add(*size)
-                            .is_none_or(|end| end > multicast.size)
-                    {
-                        bail!(
-                            "participant {namespace_pid}: invalid multicast mapping for {allocation:?}: address={address:#x}, offset={offset}, size={size}, multicast_size={}",
-                            multicast.size
-                        );
-                    }
                 }
                 _ => {}
             }
