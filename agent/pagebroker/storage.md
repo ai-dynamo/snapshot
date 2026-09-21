@@ -57,3 +57,27 @@ synchronous POSIX implementation for CPU tests, not a runtime fallback. Tests
 cover multi-ring round trips, file changes, partial final chunks, failed-copy
 and failed-read reuse, and cleanup after each host-NUMA allocation failure.
 Real GPU/driver performance requires cluster qualification.
+
+## Persistent GPU worker and CUDA helper
+
+The CPU broker owns one `pagebroker-gpu-engine` process. Its CUDA helper module
+owns the CustomStorage driver lifecycle and target cleanup; PageBroker owns
+storage, transfer scheduling, pinned buffers, copies and events. Both modules
+run in this process because driver regions and streams are process-local. The engine retains all
+visible GPU primary contexts, initializes the host-NUMA rings and NIXL agents,
+and only then reports readiness. A session receives a socket and an open artifact
+directory. Session commands use protobuf frames with SCM_RIGHTS; no CUDA exports
+or workload-facing allocation protocol is involved.
+
+SAVE follows LOCK → PREPARE → TRANSFER → COMPLETE. LOAD follows PREPARE → TRANSFER
+→ COMPLETE, then unlocks the target. PREPARE obtains the driver's CustomStorage
+view. TRANSFER uses its device pointer and stream directly, with no extra device
+allocation. Per-device mutexes serialize ring use; different GPUs can transfer
+concurrently. The engine does not release its primary contexts between sessions.
+
+An incomplete session drains after the synchronous command finishes. If native
+preparation began, the engine kills the target through its pinned pidfd and calls
+COMPLETE on the abandoned operation. This requires the qualified CustomStorage
+driver's cleanup semantics. A drain transport failure terminates and reaps the
+engine before the CPU broker releases admission. No public CUDA abort API is
+assumed. Successful sessions retain the engine for subsequent restores.

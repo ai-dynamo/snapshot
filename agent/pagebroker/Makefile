@@ -9,7 +9,7 @@ DAEMON_SOURCES := $(BROKER_SOURCES) daemon.cpp main.cpp
 .PHONY: daemon generate test
 
 generate:
-	protoc --proto_path=. --cpp_out=. $(PROTO)
+	protoc --proto_path=. --cpp_out=. $(PROTO) gpu_engine.proto
 
 daemon: generate
 	c++ -I. -std=c++20 -Wall -Werror $(DAEMON_SOURCES) v1/pagebroker.pb.cc -lprotobuf -o pagebroker
@@ -62,6 +62,25 @@ test-cuda-transfer:
 		cuda_posix_transfer_test.cpp cuda_posix_transfer.cpp file_descriptor.cpp $(TRANSFER_SOURCES) \
 		$(GTEST_FLAGS) -pthread $(TRANSFER_FLAGS) -o build/cuda-transfer-test
 	./build/cuda-transfer-test
+
+CUDA_LIB_DIR ?= $(CUDA_ROOT)/lib64/stubs
+.PHONY: gpu-engine
+gpu-engine: generate
+	mkdir -p build
+	$(CXX) -O2 -std=c++20 -Wall -Wextra -Werror -I. -I$(CUDA_ROOT)/include \
+		gpu_engine_worker.cpp fd_transport.cpp v1/pagebroker.pb.cc gpu_engine.pb.cc \
+		file_descriptor.cpp cuda_posix_transfer.cpp $(TRANSFER_SOURCES) storage_manifest.cpp \
+		../cmd/cuda-checkpoint-helper/custom_storage.cpp \
+		-L$(CUDA_LIB_DIR) -lcuda -lprotobuf -pthread $(TRANSFER_FLAGS) -o build/pagebroker-gpu-engine
+
+.PHONY: test-gpu-engine
+test-gpu-engine: generate
+	mkdir -p build
+	$(CXX) -std=c++20 -Wall -Wextra -Werror -I. fake_gpu_engine.cpp fd_transport.cpp \
+		file_descriptor.cpp gpu_engine.pb.cc v1/pagebroker.pb.cc -lprotobuf -pthread -o build/fake-gpu-engine
+	$(CXX) -std=c++20 -Wall -Wextra -Werror -I. gpu_engine_test.cpp gpu_engine.cpp fd_transport.cpp \
+		file_descriptor.cpp gpu_engine.pb.cc v1/pagebroker.pb.cc -lprotobuf $(GTEST_FLAGS) -pthread -o build/gpu-engine-test
+	./build/gpu-engine-test
 
 .PHONY: test-cuda-helper
 test-cuda-helper:
