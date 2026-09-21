@@ -32,6 +32,21 @@ type Client struct {
 	ControlSocketPath string
 }
 
+// DirectRestore retains a published source for native LOAD sessions without
+// copying it. The caller must keep the artifact available until Commit or Abort.
+func (c Client) DirectRestore(ctx context.Context, transactionID, source string) error {
+	response, err := c.request(ctx, transactionID, &Request_DirectRestore{
+		DirectRestore: &DirectRestoreRequest{Source: filesystem(source), IoEngine: posixCopy()},
+	})
+	if err != nil {
+		return err
+	}
+	if response.GetDirectRestoreReady() == nil {
+		return fmt.Errorf("unexpected PageBroker direct restore response")
+	}
+	return nil
+}
+
 func (c Client) StagedRestore(ctx context.Context, transactionID, source string) (string, error) {
 	response, err := c.request(ctx, transactionID, &Request_StagedRestore{
 		StagedRestore: &StagedRestoreRequest{Source: filesystem(source), IoEngine: posixCopy()},
@@ -118,6 +133,10 @@ func (c Client) request(ctx context.Context, transactionID string, command isReq
 	stopCancel := context.AfterFunc(ctx, func() { _ = connection.Close() })
 	defer stopCancel()
 
+	return exchange(connection, transactionID, command)
+}
+
+func exchange(connection net.Conn, transactionID string, command isRequest_Command) (*Response, error) {
 	requestID := uuid.NewString()
 	request := &Request{RequestId: &requestID, TransactionId: &transactionID, Command: command}
 	message, err := proto.Marshal(request)

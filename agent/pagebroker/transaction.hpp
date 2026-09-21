@@ -4,8 +4,11 @@
 #pragma once
 
 #include <chrono>
+#include <condition_variable>
 #include <mutex>
 #include <variant>
+#include <set>
+#include <cstdint>
 
 #include "checkpoint_transaction_descriptor.hpp"
 #include "restore_transaction_descriptor.hpp"
@@ -32,6 +35,14 @@ class Transaction {
   void clear_descriptor();
   bool retain_terminal();
   bool expired(std::chrono::steady_clock::time_point now, std::chrono::steady_clock::duration lifetime) const;
+
+  // Protected by mutex(). Sessions own admission until the engine acknowledges drain.
+  // A failed/unfinished session makes publication invalid, but permits Abort
+  // after the last session has drained. Target IDs cannot be rebound.
+  size_t native_sessions = 0;
+  std::condition_variable native_drained;
+  bool native_failed = false;
+  std::set<uint32_t> native_targets;
 
  private:
   std::mutex mutex_;

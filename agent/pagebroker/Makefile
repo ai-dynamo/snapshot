@@ -3,7 +3,7 @@
 
 PROTO := v1/pagebroker.proto
 GTEST_FLAGS = $(shell pkg-config --cflags --libs gtest_main)
-BROKER_SOURCES := broker.cpp checkpoint_transaction_descriptor.cpp posix_copy_engine.cpp restore_transaction_descriptor.cpp transaction.cpp transfer_engine.cpp file_descriptor.cpp
+BROKER_SOURCES := broker.cpp checkpoint_transaction_descriptor.cpp posix_copy_engine.cpp restore_transaction_descriptor.cpp transaction.cpp transfer_engine.cpp file_descriptor.cpp native_session.cpp gpu_engine.cpp fd_transport.cpp
 DAEMON_SOURCES := $(BROKER_SOURCES) daemon.cpp main.cpp
 
 .PHONY: daemon generate test
@@ -12,11 +12,11 @@ generate:
 	protoc --proto_path=. --cpp_out=. $(PROTO) gpu_engine.proto
 
 daemon: generate
-	c++ -I. -std=c++20 -Wall -Werror $(DAEMON_SOURCES) v1/pagebroker.pb.cc -lprotobuf -o pagebroker
+	c++ -I. -std=c++20 -Wall -Werror $(DAEMON_SOURCES) v1/pagebroker.pb.cc gpu_engine.pb.cc -lprotobuf -o pagebroker
 
-test: generate $(BROKER_SOURCES) daemon_test.cpp
+test: test-gpu-engine generate $(BROKER_SOURCES) daemon_test.cpp
 	mkdir -p build
-	c++ -I. -std=c++20 -Wall -Werror $(BROKER_SOURCES) daemon_test.cpp v1/pagebroker.pb.cc -lprotobuf $(GTEST_FLAGS) -o build/pagebroker-test
+	c++ -I. -std=c++20 -Wall -Werror $(BROKER_SOURCES) daemon_test.cpp v1/pagebroker.pb.cc gpu_engine.pb.cc -lprotobuf $(GTEST_FLAGS) -o build/pagebroker-test
 	./build/pagebroker-test
 
 .PHONY: test-storage

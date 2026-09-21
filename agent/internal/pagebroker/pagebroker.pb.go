@@ -845,6 +845,7 @@ type Request struct {
 	//	*Request_Commit
 	//	*Request_Abort
 	//	*Request_DirectRestore
+	//	*Request_BindNative
 	Command       isRequest_Command `protobuf_oneof:"command"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -946,6 +947,15 @@ func (x *Request) GetDirectRestore() *DirectRestoreRequest {
 	return nil
 }
 
+func (x *Request) GetBindNative() *BindNativeSession {
+	if x != nil {
+		if x, ok := x.Command.(*Request_BindNative); ok {
+			return x.BindNative
+		}
+	}
+	return nil
+}
+
 type isRequest_Command interface {
 	isRequest_Command()
 }
@@ -970,6 +980,10 @@ type Request_DirectRestore struct {
 	DirectRestore *DirectRestoreRequest `protobuf:"bytes,7,opt,name=direct_restore,json=directRestore,proto3,oneof"`
 }
 
+type Request_BindNative struct {
+	BindNative *BindNativeSession `protobuf:"bytes,9,opt,name=bind_native,json=bindNative,proto3,oneof"`
+}
+
 func (*Request_StagedRestore) isRequest_Command() {}
 
 func (*Request_PrepareStagedCheckpoint) isRequest_Command() {}
@@ -979,6 +993,8 @@ func (*Request_Commit) isRequest_Command() {}
 func (*Request_Abort) isRequest_Command() {}
 
 func (*Request_DirectRestore) isRequest_Command() {}
+
+func (*Request_BindNative) isRequest_Command() {}
 
 type StagedRestoreDirectory struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
@@ -1242,6 +1258,7 @@ type Response struct {
 	//	*Response_AbortComplete
 	//	*Response_Failure
 	//	*Response_DirectRestoreReady
+	//	*Response_NativeSession
 	Result        isResponse_Result `protobuf_oneof:"result"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1352,6 +1369,15 @@ func (x *Response) GetDirectRestoreReady() *DirectRestoreReady {
 	return nil
 }
 
+func (x *Response) GetNativeSession() *NativeSessionReply {
+	if x != nil {
+		if x, ok := x.Result.(*Response_NativeSession); ok {
+			return x.NativeSession
+		}
+	}
+	return nil
+}
+
 type isResponse_Result interface {
 	isResponse_Result()
 }
@@ -1380,6 +1406,10 @@ type Response_DirectRestoreReady struct {
 	DirectRestoreReady *DirectRestoreReady `protobuf:"bytes,8,opt,name=direct_restore_ready,json=directRestoreReady,proto3,oneof"`
 }
 
+type Response_NativeSession struct {
+	NativeSession *NativeSessionReply `protobuf:"bytes,10,opt,name=native_session,json=nativeSession,proto3,oneof"`
+}
+
 func (*Response_StagedRestoreDirectory) isResponse_Result() {}
 
 func (*Response_StagedCheckpointDirectory) isResponse_Result() {}
@@ -1391,6 +1421,8 @@ func (*Response_AbortComplete) isResponse_Result() {}
 func (*Response_Failure) isResponse_Result() {}
 
 func (*Response_DirectRestoreReady) isResponse_Result() {}
+
+func (*Response_NativeSession) isResponse_Result() {}
 
 var File_v1_pagebroker_proto protoreflect.FileDescriptor
 
@@ -1445,7 +1477,7 @@ const file_v1_pagebroker_proto_rawDesc = "" +
 	"\vdestination\x18\x01 \x01(\v2&.snapshot.pagebroker.v1.StorageBackendR\vdestination\x12=\n" +
 	"\tio_engine\x18\x02 \x01(\v2 .snapshot.pagebroker.v1.IOEngineR\bioEngine\"\x0f\n" +
 	"\rCommitRequest\"\x0e\n" +
-	"\fAbortRequest\"\xa9\x04\n" +
+	"\fAbortRequest\"\xf7\x04\n" +
 	"\aRequest\x12\"\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tH\x01R\trequestId\x88\x01\x01\x12*\n" +
@@ -1454,7 +1486,9 @@ const file_v1_pagebroker_proto_rawDesc = "" +
 	"\x19prepare_staged_checkpoint\x18\x04 \x01(\v26.snapshot.pagebroker.v1.PrepareStagedCheckpointRequestH\x00R\x17prepareStagedCheckpoint\x12?\n" +
 	"\x06commit\x18\x05 \x01(\v2%.snapshot.pagebroker.v1.CommitRequestH\x00R\x06commit\x12<\n" +
 	"\x05abort\x18\x06 \x01(\v2$.snapshot.pagebroker.v1.AbortRequestH\x00R\x05abort\x12U\n" +
-	"\x0edirect_restore\x18\a \x01(\v2,.snapshot.pagebroker.v1.DirectRestoreRequestH\x00R\rdirectRestoreB\t\n" +
+	"\x0edirect_restore\x18\a \x01(\v2,.snapshot.pagebroker.v1.DirectRestoreRequestH\x00R\rdirectRestore\x12L\n" +
+	"\vbind_native\x18\t \x01(\v2).snapshot.pagebroker.v1.BindNativeSessionH\x00R\n" +
+	"bindNativeB\t\n" +
 	"\acommandB\r\n" +
 	"\v_request_idB\x11\n" +
 	"\x0f_transaction_id\"Z\n" +
@@ -1480,7 +1514,7 @@ const file_v1_pagebroker_proto_rawDesc = "" +
 	"\x0eINTERNAL_ERROR\x10\x06B\a\n" +
 	"\x05_codeB\n" +
 	"\n" +
-	"\b_message\"\xa7\x05\n" +
+	"\b_message\"\xfc\x05\n" +
 	"\bResponse\x12\"\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tH\x01R\trequestId\x88\x01\x01\x12*\n" +
@@ -1490,7 +1524,9 @@ const file_v1_pagebroker_proto_rawDesc = "" +
 	"\x0fcommit_complete\x18\x05 \x01(\v2&.snapshot.pagebroker.v1.CommitCompleteH\x00R\x0ecommitComplete\x12N\n" +
 	"\x0eabort_complete\x18\x06 \x01(\v2%.snapshot.pagebroker.v1.AbortCompleteH\x00R\rabortComplete\x12;\n" +
 	"\afailure\x18\a \x01(\v2\x1f.snapshot.pagebroker.v1.FailureH\x00R\afailure\x12^\n" +
-	"\x14direct_restore_ready\x18\b \x01(\v2*.snapshot.pagebroker.v1.DirectRestoreReadyH\x00R\x12directRestoreReadyB\b\n" +
+	"\x14direct_restore_ready\x18\b \x01(\v2*.snapshot.pagebroker.v1.DirectRestoreReadyH\x00R\x12directRestoreReady\x12S\n" +
+	"\x0enative_session\x18\n" +
+	" \x01(\v2*.snapshot.pagebroker.v1.NativeSessionReplyH\x00R\rnativeSessionB\b\n" +
 	"\x06resultB\r\n" +
 	"\v_request_idB\x11\n" +
 	"\x0f_transaction_idB9Z7github.com/ai-dynamo/snapshot/agent/internal/pagebrokerb\x06proto3"
@@ -1551,18 +1587,20 @@ var file_v1_pagebroker_proto_depIdxs = []int32{
 	13, // 13: snapshot.pagebroker.v1.Request.commit:type_name -> snapshot.pagebroker.v1.CommitRequest
 	14, // 14: snapshot.pagebroker.v1.Request.abort:type_name -> snapshot.pagebroker.v1.AbortRequest
 	11, // 15: snapshot.pagebroker.v1.Request.direct_restore:type_name -> snapshot.pagebroker.v1.DirectRestoreRequest
-	2,  // 16: snapshot.pagebroker.v1.Failure.code:type_name -> snapshot.pagebroker.v1.Failure.Code
-	16, // 17: snapshot.pagebroker.v1.Response.staged_restore_directory:type_name -> snapshot.pagebroker.v1.StagedRestoreDirectory
-	18, // 18: snapshot.pagebroker.v1.Response.staged_checkpoint_directory:type_name -> snapshot.pagebroker.v1.StagedCheckpointDirectory
-	19, // 19: snapshot.pagebroker.v1.Response.commit_complete:type_name -> snapshot.pagebroker.v1.CommitComplete
-	20, // 20: snapshot.pagebroker.v1.Response.abort_complete:type_name -> snapshot.pagebroker.v1.AbortComplete
-	21, // 21: snapshot.pagebroker.v1.Response.failure:type_name -> snapshot.pagebroker.v1.Failure
-	17, // 22: snapshot.pagebroker.v1.Response.direct_restore_ready:type_name -> snapshot.pagebroker.v1.DirectRestoreReady
-	23, // [23:23] is the sub-list for method output_type
-	23, // [23:23] is the sub-list for method input_type
-	23, // [23:23] is the sub-list for extension type_name
-	23, // [23:23] is the sub-list for extension extendee
-	0,  // [0:23] is the sub-list for field type_name
+	4,  // 16: snapshot.pagebroker.v1.Request.bind_native:type_name -> snapshot.pagebroker.v1.BindNativeSession
+	2,  // 17: snapshot.pagebroker.v1.Failure.code:type_name -> snapshot.pagebroker.v1.Failure.Code
+	16, // 18: snapshot.pagebroker.v1.Response.staged_restore_directory:type_name -> snapshot.pagebroker.v1.StagedRestoreDirectory
+	18, // 19: snapshot.pagebroker.v1.Response.staged_checkpoint_directory:type_name -> snapshot.pagebroker.v1.StagedCheckpointDirectory
+	19, // 20: snapshot.pagebroker.v1.Response.commit_complete:type_name -> snapshot.pagebroker.v1.CommitComplete
+	20, // 21: snapshot.pagebroker.v1.Response.abort_complete:type_name -> snapshot.pagebroker.v1.AbortComplete
+	21, // 22: snapshot.pagebroker.v1.Response.failure:type_name -> snapshot.pagebroker.v1.Failure
+	17, // 23: snapshot.pagebroker.v1.Response.direct_restore_ready:type_name -> snapshot.pagebroker.v1.DirectRestoreReady
+	6,  // 24: snapshot.pagebroker.v1.Response.native_session:type_name -> snapshot.pagebroker.v1.NativeSessionReply
+	25, // [25:25] is the sub-list for method output_type
+	25, // [25:25] is the sub-list for method input_type
+	25, // [25:25] is the sub-list for extension type_name
+	25, // [25:25] is the sub-list for extension extendee
+	0,  // [0:25] is the sub-list for field type_name
 }
 
 func init() { file_v1_pagebroker_proto_init() }
@@ -1583,6 +1621,7 @@ func file_v1_pagebroker_proto_init() {
 		(*Request_Commit)(nil),
 		(*Request_Abort)(nil),
 		(*Request_DirectRestore)(nil),
+		(*Request_BindNative)(nil),
 	}
 	file_v1_pagebroker_proto_msgTypes[13].OneofWrappers = []any{}
 	file_v1_pagebroker_proto_msgTypes[15].OneofWrappers = []any{}
@@ -1594,6 +1633,7 @@ func file_v1_pagebroker_proto_init() {
 		(*Response_AbortComplete)(nil),
 		(*Response_Failure)(nil),
 		(*Response_DirectRestoreReady)(nil),
+		(*Response_NativeSession)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{

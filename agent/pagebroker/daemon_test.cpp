@@ -4,12 +4,15 @@
 #include <gtest/gtest.h>
 
 #include <filesystem>
+#include <future>
 #include <fstream>
 #include <optional>
 #include <string>
 #include <thread>
 
 #include "broker.hpp"
+#include "native_session.hpp"
+#include <signal.h>
 #include "posix_copy_engine.hpp"
 #include <fcntl.h>
 #include <unistd.h>
@@ -55,6 +58,86 @@ class BrokerTest : public ::testing::Test {
   std::optional<Broker> broker_;
   unsigned request_number_ = 0;
 };
+
+TEST_F(BrokerTest, NativeSessionsBindTransactionAndRejectPrematureComplete)
+{
+  Broker native(root_ / "native-staging", root_ / "storage", "/unused/pagebroker-gpu-engine");
+  auto prepare = RequestFor("native");
+  Configure(prepare.mutable_prepare_staged_checkpoint()->mutable_destination(),
+            prepare.mutable_prepare_staged_checkpoint()->mutable_io_engine(), root_ / "storage" / "native");
+  ASSERT_TRUE(native.HandleRequest(prepare).has_staged_checkpoint_directory());
+  auto binding = RequestFor("native");
+  auto* request = binding.mutable_bind_native();
+  request->set_direction(v1::BindNativeSession::SAVE);
+  request->set_container_pid(getpid());
+  request->set_namespace_pid(getpid());
+  request->add_visible_devices("GPU-00000000-0000-0000-0000-000000000001");
+  auto session = native.BindNative(binding);
+  EXPECT_THROW(native.BindNative(binding), std::runtime_error);
+  auto commit = RequestFor("native");
+  commit.mutable_commit();
+  EXPECT_TRUE(native.HandleRequest(commit).has_failure());
+  v1::NativeSessionRequest complete;
+  complete.set_operation(v1::NativeSessionRequest::COMPLETE);
+  EXPECT_TRUE(session->Execute(complete).has_failure());
+  EXPECT_TRUE(native.HandleRequest(commit).has_failure());
+  auto abort = RequestFor("native");
+  abort.mutable_abort();
+  auto pending = std::async(std::launch::async, [&] { return native.HandleRequest(abort); });
+  EXPECT_EQ(pending.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+  // The wait releases the transaction mutex, so teardown can return admission.
+  session.reset();
+  ASSERT_EQ(pending.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+  EXPECT_TRUE(pending.get().has_abort_complete());
+  EXPECT_TRUE(fs::is_empty(root_ / "native-staging" / "checkpoint"));
+  EXPECT_TRUE(native.HandleRequest(abort).has_abort_complete());
+}
+
+TEST_F(BrokerTest, NativeEngineReusesProcessAndHoldsAdmissionUntilDrain)
+{
+  fs::create_symlink(fs::absolute("build/fake-gpu-engine"), root_ / "pagebroker-gpu-engine");
+  Broker native(root_ / "native-staging", root_ / "storage", root_ / "pagebroker-gpu-engine");
+  native.StartGpuEngine();
+  int engine = 0;
+  for (int index = 0; index < 2; ++index) {
+    const auto target = std::to_string(999998 + index);
+    const auto directory = source_ / "native" / target;
+    fs::create_directories(directory);
+    const auto id = "native-load-" + target;
+    auto restore = RequestFor(id);
+    restore.mutable_direct_restore()->mutable_source()->mutable_filesystem()->set_directory(source_.string());
+    restore.mutable_direct_restore()->mutable_io_engine()->mutable_posix_copy();
+    ASSERT_TRUE(native.HandleRequest(restore).has_direct_restore_ready());
+    auto binding = RequestFor(id);
+    auto* request = binding.mutable_bind_native();
+    request->set_direction(v1::BindNativeSession::LOAD);
+    request->set_container_pid(getpid());
+    request->set_namespace_pid(std::stoi(target));
+    request->add_visible_devices("GPU-00000000-0000-0000-0000-000000000001");
+    auto session = native.BindNative(binding);
+    v1::NativeSessionRequest prepare;
+    prepare.set_operation(v1::NativeSessionRequest::PREPARE);
+    prepare.set_target_pid(getpid());
+    ASSERT_FALSE(session->Execute(prepare).has_failure());
+    int observed = 0;
+    std::ifstream(directory / "engine-pid") >> observed;
+    if (!engine) engine = observed;
+    EXPECT_EQ(engine, observed);
+    std::ifstream(directory / "target-pid") >> observed;
+    EXPECT_EQ(observed, getpid());
+    auto abort = RequestFor(id);
+    abort.mutable_abort();
+    auto pending = std::async(std::launch::async, [&] { return native.HandleRequest(abort); });
+    auto closing = std::async(std::launch::async, [&] { session.reset(); });
+    EXPECT_EQ(closing.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+    EXPECT_EQ(pending.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+    std::ofstream(directory / "allow-drain") << "true";
+    closing.get();
+    EXPECT_TRUE(pending.get().has_abort_complete());
+    EXPECT_EQ(kill(engine, 0), 0);
+    EXPECT_TRUE(fs::exists(source_ / "image"));
+  }
+}
 
 TEST_F(BrokerTest, StagesRestoreAndCleansUpOnCommit)
 {

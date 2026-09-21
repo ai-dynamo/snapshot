@@ -28,6 +28,8 @@
 
 #include "broker.hpp"
 #include "file_descriptor.hpp"
+#include "native_session.hpp"
+#include "fd_transport.hpp"
 
 namespace fs = std::filesystem;
 using snapshot::pagebroker::Broker;
@@ -36,7 +38,6 @@ using snapshot::pagebroker::Request;
 using snapshot::pagebroker::Response;
 
 namespace {
-constexpr uint32_t kMaxMessageSize = 64 << 10;  // 64 KB
 constexpr timeval kConnectionTimeout{30, 0};
 constexpr rlim_t kRequiredFileDescriptors = 4096;
 constexpr int kShutdownPollTimeoutMs = 1000;
@@ -162,40 +163,6 @@ CreateListener(const fs::path& socket_path)
   return std::make_pair(std::move(listener), std::error_code{});
 }
 
-bool
-ReadAll(int fd, void* buffer, size_t size)
-{
-  auto* bytes = static_cast<char*>(buffer);
-  while (size > 0) {
-    ssize_t read;
-    do {
-      read = recv(fd, bytes, size, 0);
-    } while (read < 0 && errno == EINTR);
-    if (read <= 0)
-      return false;
-    bytes += read;
-    size -= read;
-  }
-  return true;
-}
-
-bool
-WriteAll(int fd, const void* buffer, size_t size)
-{
-  const auto* bytes = static_cast<const char*>(buffer);
-  while (size > 0) {
-    ssize_t written;
-    do {
-      written = send(fd, bytes, size, MSG_NOSIGNAL);
-    } while (written < 0 && errno == EINTR);
-    if (written <= 0)
-      return false;
-    bytes += written;
-    size -= written;
-  }
-  return true;
-}
-
 Response
 InvalidRequest()
 {
@@ -246,19 +213,21 @@ ResultName(const Response& response)
 void
 HandleConnection(int connection, Broker& broker)
 {
-  uint32_t size = 0;
-  if (!ReadAll(connection, &size, sizeof(size)))
-    return;
-  size = ntohl(size);
-
+  using namespace snapshot::pagebroker;
   Response response;
-  if (size > kMaxMessageSize) {
-    response = InvalidRequest();
-  } else {
-    std::string message(size, '\0');
-    Request request;
-    if (!ReadAll(connection, message.data(), size) || !request.ParseFromString(message) || !request.IsInitialized()) {
-      response = InvalidRequest();
+  Request request;
+  std::vector<FileDescriptor> descriptors;
+  std::unique_ptr<NativeSession> native;
+  try {
+    if (!ReceiveFrame(connection, request, descriptors))
+      return;
+    if (!descriptors.empty())
+      throw std::invalid_argument("general broker requests cannot carry descriptors");
+    if (request.has_bind_native()) {
+      native = broker.BindNative(request);
+      response.set_request_id(request.request_id());
+      response.set_transaction_id(request.transaction_id());
+      response.mutable_native_session();
     } else {
       const auto request_start = std::chrono::steady_clock::now();
       response = broker.HandleRequest(request);
@@ -269,12 +238,25 @@ HandleConnection(int connection, Broker& broker)
                                   << " result=" << ResultName(response) << " duration_ms=" << duration.count()
                                   << (response.has_failure() ? " error=" + response.failure().message() : "") << '\n';
     }
+  } catch (const std::exception& error) {
+    response = InvalidRequest();
+    response.set_request_id(request.request_id());
+    response.set_transaction_id(request.transaction_id());
+    response.mutable_failure()->set_message(error.what());
+  }
+  SendFrame(connection, response);
+  if (native) {
+    SetSessionTimeout(connection);
+    v1::NativeSessionRequest operation;
+    while (ReceiveFrame(connection, operation, descriptors)) {
+      if (!descriptors.empty()) throw std::invalid_argument("native command cannot carry descriptors");
+      auto reply = native->Execute(operation);
+      SendFrame(connection, reply);
+      if (reply.has_failure() || operation.operation() == v1::NativeSessionRequest::COMPLETE) return;
+    }
+    return;
   }
 
-  std::string message = response.SerializeAsString();
-  size = htonl(message.size());
-  WriteAll(connection, &size, sizeof(size));
-  WriteAll(connection, message.data(), message.size());
 }
 
 void
@@ -379,7 +361,8 @@ RunDaemon(
     const fs::path& socket_path,
     const fs::path& staging_directory,
     const fs::path& storage_root,
-    size_t max_concurrent_requests)
+    size_t max_concurrent_requests,
+    const fs::path& gpu_engine_path)
 {
   shutting_down = 0;
   if (!RaiseFileDescriptorLimit())
@@ -396,7 +379,8 @@ RunDaemon(
   if (error)
     return Fail("create listener", error);
 
-  Broker broker(staging_directory, storage_root);
+  Broker broker(staging_directory, storage_root, gpu_engine_path);
+  broker.StartGpuEngine();
   Serve(listener, broker, max_concurrent_requests);
   return ExitCode::SUCCESS;
 }

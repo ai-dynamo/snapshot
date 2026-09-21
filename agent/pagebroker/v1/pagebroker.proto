@@ -97,6 +97,7 @@ message Request
     CommitRequest commit = 5;
     AbortRequest abort = 6;
     DirectRestoreRequest direct_restore = 7;
+    BindNativeSession bind_native = 9;
   }
 }
 
@@ -146,5 +147,6 @@ message Response
     AbortComplete abort_complete = 6;
     Failure failure = 7;
     DirectRestoreReady direct_restore_ready = 8;
+    NativeSessionReply native_session = 10;
   }
 }
