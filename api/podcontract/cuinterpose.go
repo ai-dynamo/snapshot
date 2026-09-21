@@ -22,15 +22,11 @@ const (
 	ldPreloadEnv                 = "LD_PRELOAD"
 )
 
-// CuinterposeDelivery selects the agent image that supplies both shim libraries.
 type CuinterposeDelivery struct {
 	AgentImage string
 	PullPolicy corev1.PullPolicy
 }
 
-// CuinterposeEnabled reports whether a workload opted into the CUDA interposer
-// through CuinterposeAnnotation. An absent annotation disables it; any value
-// other than "enabled" is an error rather than a silent no.
 func CuinterposeEnabled(annotations map[string]string) (bool, error) {
 	raw, found := annotations[CuinterposeAnnotation]
 	if !found {
@@ -42,9 +38,7 @@ func CuinterposeEnabled(annotations map[string]string) (bool, error) {
 	return true, nil
 }
 
-// ShapeCuinterposeCapture installs both shim libraries and preloads the frontend
-// for an opted-in source template. Apply once, before creating the Job. Commands and
-// existing preload entries are preserved; unannotated templates are untouched.
+// ShapeCuinterposeCapture installs the shim for opted-in templates. Call once before Job creation.
 func ShapeCuinterposeCapture(
 	podTemplate *corev1.PodTemplateSpec,
 	targetContainers []string,
@@ -67,7 +61,7 @@ func ShapeCuinterposeCapture(
 		}
 		container := findContainer(&shaped.Spec, name)
 		if container == nil {
-			return fmt.Errorf("cuinterpose target container %q does not exist", name)
+			return fmt.Errorf("container %q not found", name)
 		}
 		if err := setCuinterposePreload(container); err != nil {
 			return err
@@ -109,7 +103,7 @@ func VerifyCuinterposeCapture(spec *corev1.PodSpec, targetContainers []string) e
 	for _, name := range targetContainers {
 		container := findContainer(spec, name)
 		if container == nil {
-			return fmt.Errorf("cuinterpose target container %q does not exist", name)
+			return fmt.Errorf("container %q not found", name)
 		}
 		if !slices.Contains(preloadFields(envValue(container.Env, ldPreloadEnv)), CuinterposeLibraryPath) {
 			return fmt.Errorf("container %q does not preload %s", name, CuinterposeLibraryPath)
@@ -123,10 +117,7 @@ func VerifyCuinterposeCapture(spec *corev1.PodSpec, targetContainers []string) e
 	return nil
 }
 
-// setCuinterposePreload puts the shim first in LD_PRELOAD, keeping any entries
-// the workload already had. First position matters: the dynamic loader
-// resolves symbols in LD_PRELOAD order, and the shim must see CUDA calls
-// before any other interposer.
+// The shim must precede other interposers in the loader search order.
 func setCuinterposePreload(container *corev1.Container) error {
 	index := -1
 	for i := range container.Env {
