@@ -16,17 +16,6 @@ use runtime::active;
 use std::ffi::c_void;
 use std::os::fd::IntoRawFd;
 
-pub fn cuMemGetAllocationGranularity(
-    out: *mut usize,
-    prop: *const CUmemAllocationProp,
-    flags: CUmemAllocationGranularity_flags,
-) -> Result<()> {
-    if prop.is_null() {
-        return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
-    }
-    unsafe { crate::driver::cuMemGetAllocationGranularity(out, prop, flags) }
-}
-
 pub fn cuMemCreate(
     out: *mut u64,
     size: usize,
@@ -359,15 +348,6 @@ pub fn cuMulticastBindAddr_v2(
         BindingVersion::V2,
         BindInput::Address(address),
     )
-}
-
-pub fn cuMulticastGetGranularity(
-    out: *mut usize,
-    properties: *const CUmulticastObjectProp,
-    flags: CUmulticastGranularity_flags,
-) -> Result<()> {
-    unsafe { crate::driver::cuMulticastGetGranularity(out, properties, flags) }?;
-    Ok(())
 }
 
 pub fn cuMulticastUnbind(handle: u64, device: i32, offset: usize, size: usize) -> Result<()> {

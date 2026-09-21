@@ -13,9 +13,10 @@ workspace = true
 
 [dependencies]
 cuinterpose-protocol.workspace = true
-serde.workspace = true
-serde_json.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tempfile.workspace = true
 rustix.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
