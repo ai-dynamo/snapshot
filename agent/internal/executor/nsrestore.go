@@ -273,7 +273,7 @@ func executeRestore(
 			// loop, so nothing else touches the shared memory while the
 			// coordinator rebuilds it.
 			cuinterposeStart := time.Now()
-			_, err := cuda.RestoreCuinterpose(ctx, opts.CheckpointPath, m.CUDA.PIDs, coordinatorFdPath, log)
+			err := cuda.RestoreCuinterpose(ctx, opts.CheckpointPath, m.CUDA.PIDs, coordinatorFdPath)
 			timings.cuinterposeRestoreDuration = time.Since(cuinterposeStart)
 			if err != nil {
 				return nil, 0, nil, fmt.Errorf("restore cuinterpose: %w", err)

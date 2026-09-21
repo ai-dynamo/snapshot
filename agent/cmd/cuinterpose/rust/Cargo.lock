@@ -166,7 +166,6 @@ dependencies = [
  "clap",
  "cuinterpose-protocol",
  "rustix",
- "serde",
  "serde_json",
  "tempfile",
 ]

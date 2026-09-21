@@ -23,7 +23,7 @@ const manifestFilename = "manifest.yaml"
 
 // CuinterposeFormat identifies the host-carrier artifact and matching shim layout.
 // Older draft artifacts, including external allocation storage, are not compatible.
-const CuinterposeFormat = 2
+const CuinterposeFormat = 3
 
 // CheckpointManifest is saved as manifest.yaml at checkpoint time and loaded at restore.
 type CheckpointManifest struct {

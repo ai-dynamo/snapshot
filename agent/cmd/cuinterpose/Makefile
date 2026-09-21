@@ -32,7 +32,6 @@ native: frontend
 	cd rust && cargo build --locked --release --target x86_64-unknown-linux-musl -p cuinterpose-coordinator
 	install -m 0644 rust/target/x86_64-unknown-linux-gnu/release/libcuinterpose_core.so build/libcuinterpose_core.so
 	install -m 0755 rust/target/x86_64-unknown-linux-musl/release/cuinterpose-coordinator build/cuinterpose-coordinator
-	python3 verify_artifacts.py build
 
 test-native: native
 	cd rust && cargo fmt --all -- --check

@@ -361,14 +361,13 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 			// memory. There is no rollback; if anything after this fails the
 			// caller terminates the source (checkpointNeedsSourceKill).
 			prepareStart := time.Now()
-			_, err := cuda.PrepareCuinterpose(
+			err := cuda.PrepareCuinterpose(
 				ctx,
 				checkpointDir,
 				snapshotruntime.HostProcPath,
 				state.PID,
 				state.CUDANSPIDs,
 				cuda.DefaultCoordinatorBinaryPath,
-				log,
 			)
 			timings.CuinterposePrepareDuration = time.Since(prepareStart)
 			if err != nil {

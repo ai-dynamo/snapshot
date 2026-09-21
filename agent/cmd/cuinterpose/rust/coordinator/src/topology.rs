@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::Result;
+use anyhow::Result;
 use anyhow::{Context, bail, ensure};
 use cuinterpose_protocol::{AllocationId, AllocationReference, BindingSource, Manifest, Record};
 use std::collections::BTreeMap;
@@ -50,12 +50,14 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                             (*handle_types == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
                                 || (*handle_types == CU_MEM_HANDLE_TYPE_NONE && *content))
                                 && *size > 0,
-                            "invalid allocation creator"
+                            "participant {namespace_pid}: invalid allocation creator {allocation:?}: size={size}, handle_types={handle_types}"
                         );
                         let std::collections::btree_map::Entry::Vacant(entry) =
                             allocations.entry(allocation.id)
                         else {
-                            bail!("duplicate allocation creator");
+                            bail!(
+                                "participant {namespace_pid}: duplicate allocation creator {allocation:?}"
+                            );
                         };
                         entry.insert(AllocationSummary {
                             reference: *allocation,
@@ -64,7 +66,9 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                             preserve_content: *content,
                         });
                     } else if *content {
-                        bail!("allocation content flag on importer");
+                        bail!(
+                            "participant {namespace_pid}: allocation content flag on importer of {allocation:?}"
+                        );
                     }
                 }
                 Record::Multicast {
@@ -79,7 +83,9 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                         || *size == 0
                         || *devices == 0
                     {
-                        bail!("invalid multicast properties");
+                        bail!(
+                            "participant {namespace_pid}: invalid multicast properties for {allocation:?}: size={size}, handle_types={handle_types}, devices={devices}"
+                        );
                     }
                     let multicast = multicasts
                         .entry(allocation.id)
@@ -97,7 +103,14 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                         || multicast.flags != *flags
                         || multicast.num_devices != *devices
                     {
-                        bail!("inconsistent multicast properties");
+                        bail!(
+                            "participant {namespace_pid}: inconsistent multicast properties for {allocation:?}: expected creator={}, handle_types={}, flags={}, devices={}; got creator={}, handle_types={handle_types}, flags={flags}, devices={devices}",
+                            multicast.reference.creator_pid,
+                            multicast.handle_types,
+                            multicast.flags,
+                            multicast.num_devices,
+                            allocation.creator_pid
+                        );
                     }
                     multicast.size = multicast.size.max(*size);
                     if namespace_pid == &allocation.creator_pid {
@@ -112,12 +125,12 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
         if let Record::MulticastDevice { allocation, device } = record
             && multicasts
                 .get_mut(&allocation.id)
-                .context("missing multicast object")?
+                .with_context(|| format!("missing multicast object {allocation:?}"))?
                 .devices
                 .insert(*device, false)
                 .is_some()
         {
-            bail!("duplicate multicast device");
+            bail!("duplicate multicast device {device} for {allocation:?}");
         }
     }
     for (namespace_pid, participant) in participants {
@@ -128,7 +141,7 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                         allocations
                             .get(&allocation.id)
                             .is_some_and(|known| known.reference == *allocation),
-                        "missing creator"
+                        "participant {namespace_pid}: missing creator for {allocation:?}"
                     );
                 }
                 Record::Mapping {
@@ -138,18 +151,21 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                     offset,
                     ..
                 } => {
-                    let known = allocations
-                        .get_mut(&allocation.id)
-                        .context("missing creator")?;
+                    let known = allocations.get_mut(&allocation.id).with_context(|| {
+                        format!("participant {namespace_pid}: missing creator for {allocation:?}")
+                    })?;
                     ensure!(
                         known.reference == *allocation,
-                        "inconsistent allocation creator"
+                        "participant {namespace_pid}: inconsistent allocation creator for {allocation:?}"
                     );
                     if *address == 0
                         || *size == 0
                         || offset.checked_add(*size).is_none_or(|end| end > known.size)
                     {
-                        bail!("invalid mapping or mapping out of bounds");
+                        bail!(
+                            "participant {namespace_pid}: invalid mapping or mapping out of bounds for {allocation:?}: address={address:#x}, offset={offset}, size={size}, allocation_size={}",
+                            known.size
+                        );
                     }
                     known.anchor |= allocation.creator_pid == *namespace_pid;
                 }
@@ -163,17 +179,20 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                 } => {
                     let multicast = multicasts
                         .get_mut(&allocation.id)
-                        .context("missing multicast object")?;
+                        .with_context(|| format!("missing multicast object {allocation:?}"))?;
                     ensure!(
                         multicast.reference == *allocation,
-                        "inconsistent multicast creator"
+                        "participant {namespace_pid}: inconsistent multicast creator for {allocation:?}"
                     );
                     if *size == 0
                         || offset
                             .checked_add(*size)
                             .is_none_or(|end| end > multicast.size)
                     {
-                        bail!("invalid multicast binding");
+                        bail!(
+                            "participant {namespace_pid}: invalid multicast binding for {allocation:?}: offset={offset}, size={size}, multicast_size={}",
+                            multicast.size
+                        );
                     }
                     let member = match source {
                         BindingSource::Memory(range) => Some(*range),
@@ -181,30 +200,39 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                             address,
                             tracked_member,
                         } => {
-                            ensure!(*address != 0, "invalid multicast member");
+                            ensure!(
+                                *address != 0,
+                                "participant {namespace_pid}: invalid multicast member of {allocation:?}"
+                            );
                             *tracked_member
                         }
                     };
                     if let Some(range) = member {
                         let allocation = allocations
                             .get(&range.allocation.id)
-                            .context("invalid multicast member")?;
+                            .with_context(|| format!("participant {namespace_pid}: invalid multicast member {:?} of {allocation:?}", range.allocation))?;
                         ensure!(
                             allocation.reference == range.allocation,
-                            "inconsistent allocation creator"
+                            "participant {namespace_pid}: inconsistent allocation creator for {:?}",
+                            range.allocation
                         );
                         if range
                             .offset
                             .checked_add(*size)
                             .is_none_or(|end| end > allocation.size)
                         {
-                            bail!("multicast binding out of member bounds");
+                            bail!(
+                                "participant {namespace_pid}: multicast binding out of member bounds for {:?}: offset={}, size={size}, allocation_size={}",
+                                range.allocation,
+                                range.offset,
+                                allocation.size
+                            );
                         }
                     }
                     *multicast
                         .devices
                         .get_mut(device)
-                        .context("multicast binding device is absent")? = true;
+                        .with_context(|| format!("participant {namespace_pid}: multicast binding device {device} is absent for {allocation:?}"))? = true;
                 }
                 Record::MulticastMapping {
                     allocation,
@@ -215,10 +243,10 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                 } => {
                     let multicast = multicasts
                         .get(&allocation.id)
-                        .context("missing multicast object")?;
+                        .with_context(|| format!("missing multicast object {allocation:?}"))?;
                     ensure!(
                         multicast.reference == *allocation,
-                        "inconsistent multicast creator"
+                        "participant {namespace_pid}: inconsistent multicast creator for {allocation:?}"
                     );
                     if *address == 0
                         || *size == 0
@@ -226,7 +254,10 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                             .checked_add(*size)
                             .is_none_or(|end| end > multicast.size)
                     {
-                        bail!("invalid multicast mapping");
+                        bail!(
+                            "participant {namespace_pid}: invalid multicast mapping for {allocation:?}: address={address:#x}, offset={offset}, size={size}, multicast_size={}",
+                            multicast.size
+                        );
                     }
                 }
                 _ => {}
@@ -235,18 +266,35 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
     }
     for allocation in allocations.values() {
         if !allocation.anchor {
-            bail!("missing creator anchor");
+            bail!("missing creator anchor for {:?}", allocation.reference);
         }
     }
     for multicast in multicasts.values() {
         if multicast.creators != 1 {
-            bail!("multicast group must have exactly one creator");
+            bail!(
+                "multicast group {:?} must have exactly one creator; found {}",
+                multicast.reference,
+                multicast.creators
+            );
         }
         if multicast.devices.len() != multicast.num_devices as usize {
-            bail!("incomplete multicast device group");
+            bail!(
+                "incomplete multicast device group {:?}: expected {}, found {}",
+                multicast.reference,
+                multicast.num_devices,
+                multicast.devices.len()
+            );
         }
         if multicast.devices.values().any(|bound| !bound) {
-            bail!("incomplete multicast binding group");
+            bail!(
+                "incomplete multicast binding group {:?}: unbound devices {:?}",
+                multicast.reference,
+                multicast
+                    .devices
+                    .iter()
+                    .filter_map(|(device, bound)| (!bound).then_some(device))
+                    .collect::<Vec<_>>()
+            );
         }
     }
     Ok(allocations.into_values().collect())

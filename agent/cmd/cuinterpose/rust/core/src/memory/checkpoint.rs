@@ -15,12 +15,6 @@ use runtime::export_cache;
 use std::ffi::c_void;
 use std::os::fd::AsFd;
 
-#[derive(Default)]
-pub(crate) struct Transfer {
-    pub bytes: u64,
-    pub copy_us: u32,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     Active,
@@ -134,11 +128,10 @@ impl ProcessState {
     }
 
     /// Called after phase validation; mutation failures terminate the process.
-    pub fn lifecycle(&mut self, operation: Operation) -> Result<Transfer> {
+    pub fn lifecycle(&mut self, operation: Operation) -> Result<u64> {
         use super::host_carrier::{AllocationContent, Arena};
         let next_phase = self.phase.next(operation)?;
         let mut bytes = 0u64;
-        let mut copy_us = 0u32;
         match operation {
             Operation::PrepareMulticast => {
                 super::multicast::prepare(self)?;
@@ -185,9 +178,7 @@ impl ProcessState {
                         .ok_or(CUDA_ERROR_OUT_OF_MEMORY)?;
                     allocations.push(AllocationContent::from(&*allocation));
                 }
-                let (arena, elapsed) = Arena::save(&allocations)?;
-                self.arena = arena;
-                copy_us = elapsed;
+                self.arena = Arena::save(&allocations)?;
             }
             Operation::PrepareUnicast => {
                 export_cache()?.clear()?;
@@ -232,7 +223,7 @@ impl ProcessState {
                         .ok_or(CUDA_ERROR_OUT_OF_MEMORY)
                 })?;
                 if let Some(arena) = &self.arena {
-                    copy_us = arena.load(&mut allocations)?;
+                    arena.load(&mut allocations)?;
                 } else if !allocations.is_empty() {
                     return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
                 }
@@ -271,7 +262,7 @@ impl ProcessState {
             | Operation::RestoreMulticastBindings => super::multicast::restore(self, operation)?,
         }
         self.phase = next_phase;
-        Ok(Transfer { bytes, copy_us })
+        Ok(bytes)
     }
 
     fn remap(&mut self, creator: bool) -> Result<()> {
@@ -360,12 +351,8 @@ pub(crate) fn execute(operation: Operation) -> std::result::Result<Reply, String
         .phase
         .next(operation)
         .map_err(|_| "CUDA lifecycle operation out of order")?;
-    let transfer = runtime::must_complete(state.lifecycle(operation));
-    Ok(Reply::Completed {
-        operation,
-        bytes: transfer.bytes,
-        copy_us: transfer.copy_us,
-    })
+    let bytes = runtime::must_complete(state.lifecycle(operation));
+    Ok(Reply::Completed { operation, bytes })
 }
 
 /// The carrier must remain captured until the successful LOAD reply is sent.

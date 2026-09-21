@@ -6,7 +6,6 @@ package cuda
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,8 +13,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-
-	"github.com/go-logr/logr"
 
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
@@ -170,19 +167,6 @@ func RemoveStaleCuinterposeSockets(controlDir string, namespacePIDs []int) (int,
 	return removed, nil
 }
 
-// CoordinatorPhase is one JSON progress report from the coordinator.
-type CoordinatorPhase struct {
-	Phase           string   `json:"phase"`
-	Status          string   `json:"status"`
-	ElapsedMS       float64  `json:"elapsed_ms"`
-	Participants    uint64   `json:"participants"`
-	Records         *uint64  `json:"records,omitempty"`
-	AllocationCount *uint64  `json:"allocation_count,omitempty"`
-	AllocationBytes *uint64  `json:"allocation_bytes,omitempty"`
-	GBPerS          *float64 `json:"gb_per_s,omitempty"`
-	CopyGBPerS      *float64 `json:"copy_gb_per_s,omitempty"`
-}
-
 // PrepareCuinterpose runs the coordinator in the live target container's mount,
 // UTS, IPC, network, and PID namespaces before the native CUDA checkpoint. The
 // executable and checkpoint directory are opened by the agent first and passed
@@ -200,14 +184,13 @@ func PrepareCuinterpose(
 	targetPID int,
 	namespacePIDs []int,
 	coordinatorBinaryPath string,
-	log logr.Logger,
-) ([]CoordinatorPhase, error) {
+) error {
 	cmd, closeFiles, err := prepareCoordinatorCommand(ctx, "prepare", checkpointDir, procRoot, targetPID, namespacePIDs, coordinatorBinaryPath)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer closeFiles()
-	return executeCoordinator(cmd, coordinatorBinaryPath, "--prepare", log)
+	return executeCoordinator(cmd, coordinatorBinaryPath, "--prepare")
 }
 
 func prepareCoordinatorCommand(ctx context.Context, operation, checkpointDir, procRoot string, targetPID int, namespacePIDs []int, coordinatorBinaryPath string) (*exec.Cmd, func(), error) {
@@ -286,58 +269,22 @@ func RestoreCuinterpose(
 	checkpointDir string,
 	namespacePIDs []int,
 	coordinatorBinaryPath string,
-	log logr.Logger,
-) ([]CoordinatorPhase, error) {
+) error {
 	args, err := cuinterposeArgs("restore", checkpointDir, podcontract.SnapshotControlMountPath, namespacePIDs)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	cmd := exec.CommandContext(ctx, coordinatorBinaryPath, args...)
-	return executeCoordinator(cmd, coordinatorBinaryPath, args[0], log)
+	return executeCoordinator(cmd, coordinatorBinaryPath, args[0])
 }
 
-func executeCoordinator(cmd *exec.Cmd, binary, operation string, log logr.Logger) ([]CoordinatorPhase, error) {
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
+func executeCoordinator(cmd *exec.Cmd, binary, operation string) error {
+	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	runErr := cmd.Run()
-	phases := parseCoordinatorReports(stdout.String())
-	for _, phase := range phases {
-		log.Info("cuinterpose coordinator phase", "operation", operation, "report", phase)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s %s failed: %w (stderr: %s)", binary, operation, err, strings.TrimSpace(stderr.String()))
 	}
-	if runErr != nil {
-		completed := make([]string, 0, len(phases))
-		for _, phase := range phases {
-			completed = append(completed, phase.Phase)
-		}
-		return phases, fmt.Errorf(
-			"%s %s failed: %w (completed phases: %s; stderr: %s)",
-			binary, operation, runErr,
-			strings.Join(completed, ","),
-			strings.TrimSpace(stderr.String()),
-		)
-	}
-	return phases, nil
-}
-
-// parseCoordinatorReports extracts progress lines from the coordinator's
-// stdout; anything else on stdout is ignored.
-func parseCoordinatorReports(output string) []CoordinatorPhase {
-	var phases []CoordinatorPhase
-	for line := range strings.SplitSeq(output, "\n") {
-		if phase, ok := parseCoordinatorReport(line); ok {
-			phases = append(phases, phase)
-		}
-	}
-	return phases
-}
-
-func parseCoordinatorReport(line string) (CoordinatorPhase, bool) {
-	var phase CoordinatorPhase
-	if err := json.Unmarshal([]byte(line), &phase); err != nil || phase.Phase == "" || phase.Status != "ok" {
-		return CoordinatorPhase{}, false
-	}
-	return phase, true
+	return nil
 }
 
 func cuinterposeArgs(operation, checkpointDir, controlDir string, namespacePIDs []int) ([]string, error) {
