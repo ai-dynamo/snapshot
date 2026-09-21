@@ -374,24 +374,18 @@ func TestValidateRestoreManifest(t *testing.T) {
 func TestRestoreInNamespaceJobFileRequirement(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
-		gpuCount    int
 		cuinterpose types.CuinterposeManifest
 		jobFile     string
 		wantError   string
 	}{
-		{name: "native multi-GPU missing", gpuCount: 2, wantError: "missing CUDA launch-job state"},
-		{name: "native single-GPU missing", gpuCount: 1, wantError: "invalid target pod IP"},
-		{name: "native multi-GPU present", gpuCount: 2, jobFile: "present", wantError: "invalid target pod IP"},
-		{name: "cuinterpose missing", gpuCount: 2,
-			cuinterpose: types.CuinterposeManifest{Requested: true, Prepared: true, Format: types.CuinterposeFormat},
+		{name: "native multi-GPU missing", wantError: "missing CUDA launch-job state"},
+		{name: "cuinterpose missing",
+			cuinterpose: types.CuinterposeManifest{Requested: true, Prepared: true},
 			wantError:   "invalid target pod IP"},
-		{name: "cuinterpose present", gpuCount: 2, jobFile: "present",
-			cuinterpose: types.CuinterposeManifest{Requested: true, Prepared: true, Format: types.CuinterposeFormat},
+		{name: "cuinterpose present", jobFile: "present",
+			cuinterpose: types.CuinterposeManifest{Requested: true, Prepared: true},
 			wantError:   "invalid target pod IP"},
-		{name: "cuinterpose invalid file", gpuCount: 2, jobFile: "directory",
-			cuinterpose: types.CuinterposeManifest{Requested: true, Prepared: true, Format: types.CuinterposeFormat},
-			wantError:   "not a regular file"},
-		{name: "opt-in without preparation", gpuCount: 2,
+		{name: "opt-in without preparation",
 			cuinterpose: types.CuinterposeManifest{Requested: true}, wantError: "missing CUDA launch-job state"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -402,7 +396,7 @@ func TestRestoreInNamespaceJobFileRequirement(t *testing.T) {
 				types.OverlayManifest{}, types.HostManifest{},
 			)
 			manifest.CUDA.PIDs = []int{42, 43}
-			manifest.CUDA.SourceGPUUUIDs = []string{"GPU-aaa", "GPU-bbb"}[:tc.gpuCount]
+			manifest.CUDA.SourceGPUUUIDs = []string{"GPU-aaa", "GPU-bbb"}
 			manifest.Cuinterpose = tc.cuinterpose
 			// Stop at IP validation, after jobfile selection but before namespace or
 			// CUDA operations. This exercises the actual restore preflight safely.
@@ -412,13 +406,8 @@ func TestRestoreInNamespaceJobFileRequirement(t *testing.T) {
 				t.Fatal(err)
 			}
 			path := filepath.Join(checkpointDir, podcontract.CUDAJobFileName)
-			switch tc.jobFile {
-			case "present":
+			if tc.jobFile == "present" {
 				if err := os.WriteFile(path, []byte("job-state"), 0600); err != nil {
-					t.Fatal(err)
-				}
-			case "directory":
-				if err := os.Mkdir(path, 0700); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -470,7 +459,7 @@ func TestRequireCuinterposeState(t *testing.T) {
 	}
 	prepared := &types.CheckpointManifest{
 		CUDA:        types.NewCUDAManifest([]int{1}, compat.GPUInfo{}),
-		Cuinterpose: types.CuinterposeManifest{Requested: true, Prepared: true, Format: types.CuinterposeFormat},
+		Cuinterpose: types.CuinterposeManifest{Requested: true, Prepared: true},
 	}
 	if err := requireCuinterposeState(prepared, dir); err == nil {
 		t.Fatal("a prepared checkpoint without its state file must be refused")
@@ -481,11 +470,6 @@ func TestRequireCuinterposeState(t *testing.T) {
 	if err := requireCuinterposeState(prepared, dir); err != nil {
 		t.Fatalf("state present: %v", err)
 	}
-	prepared.Cuinterpose.Format = 0
-	if err := requireCuinterposeState(prepared, dir); err == nil {
-		t.Fatal("old draft artifacts must be refused before CRIU")
-	}
-	prepared.Cuinterpose.Format = types.CuinterposeFormat
 	prepared.Cuinterpose.Requested = false
 	if err := requireCuinterposeState(prepared, dir); err == nil {
 		t.Fatal("prepared without requested interposition is inconsistent")

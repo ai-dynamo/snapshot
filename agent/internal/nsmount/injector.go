@@ -72,8 +72,6 @@ func (nsm *NSMounter) MountBundle(ctx context.Context, pid int) (MountPoint, err
 	return &mountPoint{mount: ref}, nil
 }
 
-// MountArtifact exposes one validated checkpoint artifact read-only and
-// non-executable in the namespace pinned by namespaceMount.
 // MountCuinterpose exposes the cuinterpose libraries at the path
 // the source workload used (podcontract.CuinterposeMountPath). Both the source
 // and destination are fixed inside the ns-bind-mount helper.
@@ -89,6 +87,8 @@ func (nsm *NSMounter) MountCuinterpose(ctx context.Context, namespaceMount Mount
 	return &mountPoint{mount: ref}, nil
 }
 
+// MountArtifact exposes one validated checkpoint artifact read-only and
+// non-executable in the namespace pinned by namespaceMount.
 func (nsm *NSMounter) MountArtifact(ctx context.Context, namespaceMount MountPoint, src string) (MountPoint, error) {
 	if err := validateWithin(CheckpointSrc, src); err != nil {
 		return nil, err

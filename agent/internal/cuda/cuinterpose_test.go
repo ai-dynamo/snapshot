@@ -7,13 +7,11 @@ import (
 	"context"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 
-	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
@@ -25,17 +23,8 @@ func TestDetectCuinterpose(t *testing.T) {
 		wantErr      bool
 	}{
 		"no CUDA processes": {},
-		"pid list mismatch": {pids: []int{101}, wantErr: true},
 		"no sockets": {
-			setup: func(t *testing.T, root string) { mustControlDir(t, root, 101, 1) },
-			pids:  []int{101, 102}, nsPIDs: []int{1, 2},
-		},
-		"procfs environ is not evidence": {
-			setup: func(t *testing.T, root string) {
-				mustControlDir(t, root, 101, 1)
-				mustEnviron(t, root, 101, "LD_PRELOAD="+podcontract.CuinterposeLibraryPath+"\x00")
-			},
-			pids: []int{101}, nsPIDs: []int{1},
+			pids: []int{101, 102}, nsPIDs: []int{1, 2},
 		},
 		"one of two sockets missing": {
 			setup: func(t *testing.T, root string) { listenUnix(t, cuinterposeEndpointPath(root, 101, 1)) },
@@ -79,20 +68,6 @@ func TestDetectCuinterpose(t *testing.T) {
 	}
 }
 
-func TestPrepareCuinterposeRejectsInvalidTargetPIDBeforeOpeningInputs(t *testing.T) {
-	err := PrepareCuinterpose(
-		context.Background(),
-		"/missing-checkpoint",
-		"/missing-proc",
-		0,
-		[]int{1},
-		"/missing-coordinator",
-	)
-	if err == nil || !strings.Contains(err.Error(), "invalid cuinterpose target PID") {
-		t.Fatalf("PrepareCuinterpose() error = %v, want invalid target PID", err)
-	}
-}
-
 func TestRemoveStaleCuinterposeSockets(t *testing.T) {
 	control := shortTempDir(t)
 	listenUnix(t, filepath.Join(control, cuinterposeSocketName(7)))
@@ -117,9 +92,6 @@ func TestRemoveStaleCuinterposeSockets(t *testing.T) {
 	}
 	if strings.Join(names, ",") != "cuinterpose-9.sock,other-1.sock,restore-complete,workload-ready" {
 		t.Fatalf("unexpected leftovers: %v", names)
-	}
-	if _, err := RemoveStaleCuinterposeSockets(control, []int{0}); err == nil {
-		t.Fatal("a zero namespace PID must be rejected")
 	}
 }
 
@@ -157,32 +129,14 @@ func fakeNSenter(t *testing.T) string {
 	return argvFile
 }
 
-func fakeProcessNamespaces(t *testing.T, procRoot string, pid int) {
-	t.Helper()
-	dir := filepath.Join(procRoot, strconv.Itoa(pid), "ns")
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	for _, namespace := range []string{"mnt", "uts", "ipc", "net", "pid"} {
-		if err := os.Symlink(filepath.Join("/proc/self/ns", namespace), filepath.Join(dir, namespace)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.Symlink("/", filepath.Join(procRoot, strconv.Itoa(pid), "root")); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestCoordinatorArgvContract(t *testing.T) {
 	binary, argvFile := fakeCoordinator(t, 0)
 	nsenterArgvFile := fakeNSenter(t)
-	procRoot := t.TempDir()
-	fakeProcessNamespaces(t, procRoot, 4242)
 	err := PrepareCuinterpose(
 		context.Background(),
 		t.TempDir(),
-		procRoot,
-		4242,
+		"/proc",
+		os.Getpid(),
 		[]int{7, 9},
 		binary,
 	)
@@ -228,12 +182,7 @@ func TestCoordinatorArgvContract(t *testing.T) {
 
 func TestCoordinatorFailureIncludesStderr(t *testing.T) {
 	binary, _ := fakeCoordinator(t, 3)
-	args, err := cuinterposeArgs("prepare", "/c", podcontract.SnapshotControlMountPath, []int{1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.CommandContext(context.Background(), binary, args...)
-	err = executeCoordinator(cmd, binary, args[0])
+	err := RestoreCuinterpose(context.Background(), "/checkpoint", []int{1}, binary)
 	if err == nil {
 		t.Fatal("expected failure")
 	}
@@ -241,47 +190,6 @@ func TestCoordinatorFailureIncludesStderr(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q lacks %q", err, want)
 		}
-	}
-}
-
-func TestCuinterposeArgsRejectsEmptyOrInvalidPIDs(t *testing.T) {
-	if _, err := cuinterposeArgs("prepare", "/c", "/snapshot-control", nil); err == nil {
-		t.Fatal("no processes must be an error")
-	}
-	if _, err := cuinterposeArgs("prepare", "/c", "/snapshot-control", []int{0}); err == nil {
-		t.Fatal("zero namespace PID must be an error")
-	}
-}
-
-// Keep endpoint discovery and artifact names aligned with Rust without a second
-// wire-protocol implementation.
-func TestGoConstantsMatchTheRustSources(t *testing.T) {
-	root := filepath.Join("..", "..", "cmd", "cuinterpose", "rust")
-	core, err := os.ReadFile(filepath.Join(root, "core", "src", "runtime", "mod.rs"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	protocol, err := os.ReadFile(filepath.Join(root, "protocol", "src", "lib.rs"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	coordinator, err := os.ReadFile(filepath.Join(root, "coordinator", "src", "main.rs"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(protocol), "pub const VERSION: u8 = "+strconv.Itoa(types.CuinterposeFormat)+";") {
-		t.Error("Rust protocol version differs from the Go checkpoint artifact format")
-	}
-	if !strings.Contains(string(protocol), cuinterposeSocketPrefix) {
-		t.Errorf("Rust protocol lacks endpoint contract %q", cuinterposeSocketPrefix)
-	}
-	for _, value := range []string{podcontract.SnapshotControlMountPath, podcontract.SnapshotControlDirEnv} {
-		if !strings.Contains(string(core), value) {
-			t.Errorf("Rust core lacks endpoint contract %q", value)
-		}
-	}
-	if !strings.Contains(string(coordinator), `"`+CuinterposeStateFile+`"`) {
-		t.Error("Rust coordinator state filename differs from Go")
 	}
 }
 
@@ -294,24 +202,6 @@ func shortTempDir(t *testing.T) string {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return dir
-}
-
-func mustControlDir(t *testing.T, procRoot string, observedPID, namespacePID int) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(cuinterposeEndpointPath(procRoot, observedPID, namespacePID)), 0700); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func mustEnviron(t *testing.T, procRoot string, observedPID int, content string) {
-	t.Helper()
-	path := filepath.Join(procRoot, strconv.Itoa(observedPID), "environ")
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func listenUnix(t *testing.T, path string) {

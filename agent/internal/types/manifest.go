@@ -21,10 +21,6 @@ import (
 
 const manifestFilename = "manifest.yaml"
 
-// CuinterposeFormat identifies the host-carrier artifact and matching shim layout.
-// Older draft artifacts, including external allocation storage, are not compatible.
-const CuinterposeFormat = 3
-
 // CheckpointManifest is saved as manifest.yaml at checkpoint time and loaded at restore.
 type CheckpointManifest struct {
 	Artifact  ArtifactManifest `yaml:"artifact"`
@@ -51,7 +47,6 @@ type CuinterposeManifest struct {
 	// the state file. Restore then runs the coordinator, and a missing state
 	// file is an error rather than a plain restore.
 	Prepared bool `yaml:"prepared"`
-	Format   int  `yaml:"format,omitempty"`
 }
 
 // ArtifactManifest pins an on-disk checkpoint to the Kubernetes content object

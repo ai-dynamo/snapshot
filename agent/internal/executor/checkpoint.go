@@ -67,10 +67,9 @@ type CheckpointRequest struct {
 }
 
 type checkpointPhaseTimings struct {
-	CuinterposePrepareDuration time.Duration
-	CUDACheckpointDuration     time.Duration
-	CRIUDumpDuration           time.Duration
-	OverlayCaptureDuration     time.Duration
+	CUDACheckpointDuration time.Duration
+	CRIUDumpDuration       time.Duration
+	OverlayCaptureDuration time.Duration
 }
 
 // Checkpoint performs a CRIU dump of a container.
@@ -168,7 +167,6 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	wall := time.Since(checkpointStart)
 	unaccounted := remainingDuration(wall,
 		gpuDeviceMapDuration,
-		captureTimings.CuinterposePrepareDuration,
 		captureTimings.CUDACheckpointDuration,
 		captureTimings.CRIUDumpDuration,
 		captureTimings.OverlayCaptureDuration,
@@ -178,7 +176,6 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		"duration": wall.String(),
 		"phases": map[string]string{
 			"gpu_device_map":                gpuDeviceMapDuration.String(),
-			"cuinterpose_prepare":           captureTimings.CuinterposePrepareDuration.String(),
 			"cuda_checkpoint":               captureTimings.CUDACheckpointDuration.String(),
 			"criu_dump":                     captureTimings.CRIUDumpDuration.String(),
 			"overlay_capture":               captureTimings.OverlayCaptureDuration.String(),
@@ -363,7 +360,6 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 			// tears down shared mappings so the native checkpoint sees plain
 			// memory. There is no rollback; if anything after this fails the
 			// caller terminates the source (checkpointNeedsSourceKill).
-			prepareStart := time.Now()
 			err := cuda.PrepareCuinterpose(
 				ctx,
 				checkpointDir,
@@ -372,12 +368,10 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 				state.CUDANSPIDs,
 				cuda.DefaultCoordinatorBinaryPath,
 			)
-			timings.CuinterposePrepareDuration = time.Since(prepareStart)
 			if err != nil {
 				return nil, fmt.Errorf("prepare cuinterpose: %w", err)
 			}
 			data.Cuinterpose.Prepared = true
-			data.Cuinterpose.Format = types.CuinterposeFormat
 			if err := types.WriteManifest(checkpointDir, data); err != nil {
 				return nil, fmt.Errorf("record cuinterpose prepare in checkpoint manifest: %w", err)
 			}

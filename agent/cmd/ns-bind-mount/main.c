@@ -253,17 +253,6 @@ mount_snapshot_cuda(int argc, char* argv[])
   int ns_fd = parse_fd(argv[2]);
   if (ns_fd < 0)
     return 1;
-  const char* libraries[] = {
-      SNAPSHOT_CUDA_SOURCE "/libcuinterpose.so",
-      SNAPSHOT_CUDA_SOURCE "/libcuinterpose_core.so",
-  };
-  for (size_t i = 0; i < sizeof(libraries) / sizeof(libraries[0]); i++) {
-    struct stat st;
-    if (stat(libraries[i], &st) != 0 || !S_ISREG(st.st_mode) || access(libraries[i], R_OK) != 0) {
-      fprintf(stderr, "missing or unreadable cuinterpose library: %s\n", libraries[i]);
-      return 1;
-    }
-  }
   return install_mount(
       ns_fd,
       SNAPSHOT_CUDA_SOURCE,

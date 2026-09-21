@@ -272,21 +272,19 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		result.CRIUPrepareDuration,
 		result.CRIURestoreDuration,
 		result.CUDARestoreDuration,
-		result.CuinterposeRestoreDuration,
 	)
 	summary := map[string]any{
 		"duration": wall.String(),
 		"phases": map[string]string{
-			"pagebroker_stage":    pageBrokerStageDuration.String(),
-			"pagebroker_mount":    pageBrokerMountDuration.String(),
-			"pagebroker_commit":   pageBrokerCommitDuration.String(),
-			"gpu_device_map":      gpuDeviceMapDuration.String(),
-			"overlay_capture":     result.OverlayCaptureDuration.String(),
-			"criu_prepare":        result.CRIUPrepareDuration.String(),
-			"criu_restore":        result.CRIURestoreDuration.String(),
-			"cuda_restore":        result.CUDARestoreDuration.String(),
-			"cuinterpose_restore": result.CuinterposeRestoreDuration.String(),
-			"unaccounted":         unaccounted.String(),
+			"pagebroker_stage":  pageBrokerStageDuration.String(),
+			"pagebroker_mount":  pageBrokerMountDuration.String(),
+			"pagebroker_commit": pageBrokerCommitDuration.String(),
+			"gpu_device_map":    gpuDeviceMapDuration.String(),
+			"overlay_capture":   result.OverlayCaptureDuration.String(),
+			"criu_prepare":      result.CRIUPrepareDuration.String(),
+			"criu_restore":      result.CRIURestoreDuration.String(),
+			"cuda_restore":      result.CUDARestoreDuration.String(),
+			"unaccounted":       unaccounted.String(),
 		},
 	}
 	if !req.StartedAt.IsZero() {
@@ -464,8 +462,8 @@ func existingMountPaths(targetRoot string, destinations []string, aliases map[st
 //
 //  1. Mount-namespace pinning: mp.NsFd() is the /proc/<pid>/ns/mnt fd opened at
 //     mount time. Passing it via --mount=/proc/self/fd/N to nsenter pins the mount
-//     namespace against PID reuse. The remaining namespaces and filesystem root
-//     are opened before entry as well, so nsenter never re-resolves the PID.
+//     namespace against PID reuse. The remaining four namespaces (uts, ipc, net,
+//     pid) are still resolved via -t <pid> and are not protected against reuse.
 //
 //  2. nsrestore binary fd: we open nsrestore from the agent host side (SnapshotBinSrc)
 //     before entering any namespace and exec it via /proc/self/fd/N. This protects
@@ -487,19 +485,6 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 		return nil, fmt.Errorf("open restore target root: %w", err)
 	}
 	defer rootFile.Close()
-	namespaceFiles := make([]*os.File, 0, 4)
-	defer func() {
-		for _, file := range namespaceFiles {
-			_ = file.Close()
-		}
-	}()
-	for _, namespace := range []string{"uts", "ipc", "net", "pid"} {
-		file, err := os.Open(filepath.Join(snapshotruntime.HostProcPath, strconv.Itoa(snap.PlaceholderPID), "ns", namespace))
-		if err != nil {
-			return nil, fmt.Errorf("open restore %s namespace: %w", namespace, err)
-		}
-		namespaceFiles = append(namespaceFiles, file)
-	}
 
 	// ExtraFiles[0] → child fd 3, ExtraFiles[1] → child fd 4.
 	// These constants mirror nsFdChildNum in mount.go (ExtraFiles[0] = fd 3).
@@ -514,13 +499,13 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 
 	nsFd := mp.NsFd()
 	if nsFd != nil {
-		// Use only pinned descriptors for namespace entry.
+		// Enter the container root as well as its mount namespace so injected
+		// libraries and control sockets resolve at their workload paths.
 		args = []string{
 			fmt.Sprintf("--mount=/proc/self/fd/%d", nsFdChild),
 			// Intentionally exclude cgroup namespace (-C): CRIU must manage cgroups
 			// from the host-visible hierarchy so --cgroup-root remap works.
-			"--uts=/proc/self/fd/6", "--ipc=/proc/self/fd/7",
-			"--net=/proc/self/fd/8", "--pid=/proc/self/fd/9",
+			"-t", strconv.Itoa(snap.PlaceholderPID), "-u", "-i", "-n", "-p",
 			fmt.Sprintf("--root=/proc/self/fd/%d", rootFdChild),
 			fmt.Sprintf("--wd=/proc/self/fd/%d", rootFdChild),
 			"--", fmt.Sprintf("/proc/self/fd/%d", binaryFdChild),
@@ -553,7 +538,6 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	// Inherit the agent environment so nsrestore uses the same logger settings.
 	cmd.Env = os.Environ()
 	cmd.ExtraFiles = []*os.File{nsFd, binaryFile, rootFile}
-	cmd.ExtraFiles = append(cmd.ExtraFiles, namespaceFiles...)
 	log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())
 
 	var stdout bytes.Buffer

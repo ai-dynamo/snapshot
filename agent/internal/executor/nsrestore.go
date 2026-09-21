@@ -40,9 +40,6 @@ type RestoreInNamespaceResult struct {
 	CRIUPrepareDuration    time.Duration `json:"criuPrepareDuration"`
 	CRIURestoreDuration    time.Duration `json:"criuRestoreDuration"`
 	CUDARestoreDuration    time.Duration `json:"cudaRestoreDuration"`
-	// CuinterposeRestoreDuration is the coordinator's restore step, which runs
-	// after the native CUDA restore and rebuilds shared memory topology.
-	CuinterposeRestoreDuration time.Duration `json:"cuinterposeRestoreDuration"`
 }
 
 // CleanupError is the wire representation of a successful restore whose
@@ -99,12 +96,11 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 	}
 
 	result := &RestoreInNamespaceResult{
-		RestoredPID:                restoredPID,
-		OverlayCaptureDuration:     executeTimings.overlayCaptureDuration,
-		CRIUPrepareDuration:        executeTimings.criuPrepareDuration,
-		CRIURestoreDuration:        executeTimings.criuRestoreDuration,
-		CUDARestoreDuration:        executeTimings.cudaRestoreDuration,
-		CuinterposeRestoreDuration: executeTimings.cuinterposeRestoreDuration,
+		RestoredPID:            restoredPID,
+		OverlayCaptureDuration: executeTimings.overlayCaptureDuration,
+		CRIUPrepareDuration:    executeTimings.criuPrepareDuration,
+		CRIURestoreDuration:    executeTimings.criuRestoreDuration,
+		CUDARestoreDuration:    executeTimings.cudaRestoreDuration,
 	}
 	if cleanupErr != nil {
 		result.CleanupError = &CleanupError{
@@ -116,11 +112,10 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 }
 
 type nsrestorePhaseTimings struct {
-	overlayCaptureDuration     time.Duration
-	criuPrepareDuration        time.Duration
-	criuRestoreDuration        time.Duration
-	cudaRestoreDuration        time.Duration
-	cuinterposeRestoreDuration time.Duration
+	overlayCaptureDuration time.Duration
+	criuPrepareDuration    time.Duration
+	criuRestoreDuration    time.Duration
+	cudaRestoreDuration    time.Duration
 }
 
 func executeRestore(
@@ -200,9 +195,6 @@ func executeRestore(
 		cudaHelperFdPath = fmt.Sprintf("/proc/self/fd/%d", f.Fd())
 	}
 	if m.Cuinterpose.Prepared {
-		if err := requireCuinterposeState(m, opts.CheckpointPath); err != nil {
-			return nil, 0, nil, err
-		}
 		coordinator, err := os.Open(filepath.Join(opts.BundleDir, cuda.CoordinatorBinaryName))
 		if err != nil {
 			return nil, 0, nil, fmt.Errorf("failed to open %s before CRIU restore: %w", cuda.CoordinatorBinaryName, err)
@@ -303,9 +295,7 @@ func executeRestore(
 			// application itself is still parked in its restore-complete poll
 			// loop, so nothing else touches the shared memory while the
 			// coordinator rebuilds it.
-			cuinterposeStart := time.Now()
 			err := cuda.RestoreCuinterpose(ctx, opts.CheckpointPath, m.CUDA.PIDs, coordinatorFdPath)
-			timings.cuinterposeRestoreDuration = time.Since(cuinterposeStart)
 			if err != nil {
 				return nil, 0, nil, fmt.Errorf("restore cuinterpose: %w", err)
 			}
@@ -324,9 +314,6 @@ func executeRestore(
 func requireCuinterposeState(m *types.CheckpointManifest, checkpointPath string) error {
 	if !m.Cuinterpose.Prepared {
 		return nil
-	}
-	if m.Cuinterpose.Format != types.CuinterposeFormat {
-		return fmt.Errorf("unsupported cuinterpose artifact format %d", m.Cuinterpose.Format)
 	}
 	if m.CUDA.IsEmpty() {
 		return fmt.Errorf("checkpoint manifest records a cuinterpose prepare but no CUDA processes")

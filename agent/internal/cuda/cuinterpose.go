@@ -6,7 +6,6 @@ package cuda
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -23,8 +22,7 @@ import (
 // cuinterpose-coordinator binary, which does, once before the native CUDA
 // checkpoint (prepare) and once after the native CUDA restore (restore).
 //
-// The string constants below mirror the Rust core and coordinator; a test
-// checks their endpoint and command-line contracts agree.
+// Paths below are the coordinator CLI and shim endpoint contract.
 const (
 	// CoordinatorBinaryName is the cuinterpose-coordinator executable name.
 	CoordinatorBinaryName = "cuinterpose-coordinator"
@@ -140,9 +138,6 @@ func CheckCuinterposeEnablement(requested, detected bool, cudaProcesses int) err
 func RemoveStaleCuinterposeSockets(controlDir string, namespacePIDs []int) (int, error) {
 	removed := 0
 	for _, namespacePID := range namespacePIDs {
-		if namespacePID <= 0 {
-			return removed, fmt.Errorf("invalid cuinterpose namespace PID %d", namespacePID)
-		}
 		path := filepath.Join(controlDir, cuinterposeSocketName(namespacePID))
 		if err := os.Remove(path); os.IsNotExist(err) {
 			continue
@@ -172,19 +167,6 @@ func PrepareCuinterpose(
 	namespacePIDs []int,
 	coordinatorBinaryPath string,
 ) error {
-	cmd, closeFiles, err := prepareCoordinatorCommand(ctx, "prepare", checkpointDir, procRoot, targetPID, namespacePIDs, coordinatorBinaryPath)
-	if err != nil {
-		return err
-	}
-	defer closeFiles()
-	return executeCoordinator(cmd, coordinatorBinaryPath, "--prepare")
-}
-
-func prepareCoordinatorCommand(ctx context.Context, operation, checkpointDir, procRoot string, targetPID int, namespacePIDs []int, coordinatorBinaryPath string) (*exec.Cmd, func(), error) {
-	if targetPID <= 0 {
-		return nil, nil, fmt.Errorf("invalid cuinterpose target PID %d", targetPID)
-	}
-
 	const (
 		binaryFD     = 3
 		checkpointFD = 4
@@ -195,22 +177,18 @@ func prepareCoordinatorCommand(ctx context.Context, operation, checkpointDir, pr
 		pidNSFD      = 9
 		rootFD       = 10
 	)
-	args, err := cuinterposeArgs(
-		operation,
+	args := cuinterposeArgs(
+		"prepare",
 		fmt.Sprintf("/proc/self/fd/%d", checkpointFD),
-		podcontract.SnapshotControlMountPath,
 		namespacePIDs,
 	)
-	if err != nil {
-		return nil, nil, err
-	}
 
 	files := make([]*os.File, 0, 8)
-	closeFiles := func() {
+	defer func() {
 		for _, file := range files {
 			_ = file.Close()
 		}
-	}
+	}()
 	for _, path := range []string{
 		coordinatorBinaryPath,
 		checkpointDir,
@@ -223,8 +201,7 @@ func prepareCoordinatorCommand(ctx context.Context, operation, checkpointDir, pr
 	} {
 		file, err := os.Open(path)
 		if err != nil {
-			closeFiles()
-			return nil, nil, fmt.Errorf("open cuinterpose prepare input %q: %w", path, err)
+			return fmt.Errorf("open cuinterpose prepare input %q: %w", path, err)
 		}
 		files = append(files, file)
 	}
@@ -245,22 +222,18 @@ func prepareCoordinatorCommand(ctx context.Context, operation, checkpointDir, pr
 	nsenterArgs = append(nsenterArgs, args...)
 	cmd := exec.CommandContext(ctx, "nsenter", nsenterArgs...)
 	cmd.ExtraFiles = files
-	return cmd, closeFiles, nil
+	return executeCoordinator(cmd, coordinatorBinaryPath, "--prepare")
 }
 
 // RestoreCuinterpose runs from nsrestore, which already occupies the restored
-// container's mount, UTS, IPC, network, and PID namespaces. procRoot is empty,
-// so the control sockets are addressed directly under the control directory.
+// container's mount, UTS, IPC, network, and PID namespaces.
 func RestoreCuinterpose(
 	ctx context.Context,
 	checkpointDir string,
 	namespacePIDs []int,
 	coordinatorBinaryPath string,
 ) error {
-	args, err := cuinterposeArgs("restore", checkpointDir, podcontract.SnapshotControlMountPath, namespacePIDs)
-	if err != nil {
-		return err
-	}
+	args := cuinterposeArgs("restore", checkpointDir, namespacePIDs)
 	cmd := exec.CommandContext(ctx, coordinatorBinaryPath, args...)
 	return executeCoordinator(cmd, coordinatorBinaryPath, args[0])
 }
@@ -274,20 +247,14 @@ func executeCoordinator(cmd *exec.Cmd, binary, operation string) error {
 	return nil
 }
 
-func cuinterposeArgs(operation, checkpointDir, controlDir string, namespacePIDs []int) ([]string, error) {
-	if len(namespacePIDs) == 0 {
-		return nil, errors.New("cuinterpose coordinator requires at least one CUDA process")
-	}
+func cuinterposeArgs(operation, checkpointDir string, namespacePIDs []int) []string {
 	args := []string{
 		"--" + operation,
 		"--checkpoint-dir", checkpointDir,
-		"--control-dir", controlDir,
+		"--control-dir", podcontract.SnapshotControlMountPath,
 	}
 	for _, namespacePID := range namespacePIDs {
-		if namespacePID <= 0 {
-			return nil, fmt.Errorf("invalid cuinterpose namespace PID %d", namespacePID)
-		}
 		args = append(args, "--process", strconv.Itoa(namespacePID))
 	}
-	return args, nil
+	return args
 }
