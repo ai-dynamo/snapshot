@@ -15,12 +15,6 @@ use runtime::export_cache;
 use std::ffi::c_void;
 use std::os::fd::AsFd;
 
-#[derive(Default)]
-pub(crate) struct Transfer {
-    pub bytes: u64,
-    pub copy_us: u32,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     Active,
@@ -125,10 +119,9 @@ impl ProcessState {
     }
 
     /// Called after phase validation; mutation failures terminate the process.
-    pub fn lifecycle(&mut self, operation: Operation) -> Result<Transfer> {
+    pub fn lifecycle(&mut self, operation: Operation) -> Result<u64> {
         let next_phase = self.phase.next(operation)?;
         let bytes = 0u64;
-        let copy_us = 0u32;
         match operation {
             Operation::PrepareMulticast => {}
 
@@ -186,7 +179,7 @@ impl ProcessState {
             _ => return Err(CudaError::from(CUDA_ERROR_NOT_SUPPORTED)),
         }
         self.phase = next_phase;
-        Ok(Transfer { bytes, copy_us })
+        Ok(bytes)
     }
 
     fn remap(&mut self, creator: bool) -> Result<()> {
@@ -275,12 +268,8 @@ pub(crate) fn execute(operation: Operation) -> std::result::Result<Reply, String
         .phase
         .next(operation)
         .map_err(|_| "CUDA lifecycle operation out of order")?;
-    let transfer = runtime::must_complete(state.lifecycle(operation));
-    Ok(Reply::Completed {
-        operation,
-        bytes: transfer.bytes,
-        copy_us: transfer.copy_us,
-    })
+    let bytes = runtime::must_complete(state.lifecycle(operation));
+    Ok(Reply::Completed { operation, bytes })
 }
 
 #[cfg(test)]

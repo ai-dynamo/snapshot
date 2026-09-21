@@ -14,17 +14,6 @@ use runtime::active;
 use std::ffi::c_void;
 use std::os::fd::IntoRawFd;
 
-pub fn cuMemGetAllocationGranularity(
-    out: *mut usize,
-    prop: *const CUmemAllocationProp,
-    flags: CUmemAllocationGranularity_flags,
-) -> Result<()> {
-    if prop.is_null() {
-        return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
-    }
-    unsafe { crate::driver::cuMemGetAllocationGranularity(out, prop, flags) }
-}
-
 pub fn cuMemCreate(
     out: *mut u64,
     size: usize,
