@@ -154,6 +154,11 @@ SNAPSHOT_E2E_FRAMEWORK=vllm SNAPSHOT_E2E_FRAMEWORK_IMAGE=<registry>/vllm-snapsho
   uv run --project e2e pytest e2e/tests/test_frameworks.py -vv -s
 ```
 
+Set `SNAPSHOT_E2E_RESTORE_NODE` to test a distinct destination node with shared
+checkpoint storage. The test requires that node to differ from the actual
+source and verifies the restored Pod's placement. Without it, restore stays
+on the source node.
+
 Model weights come from one of two places:
 
 - **Shared model cache** (CI): set `SNAPSHOT_E2E_MODEL_CACHE_SERVER` and
