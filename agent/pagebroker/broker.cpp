@@ -12,6 +12,8 @@
 #include <system_error>
 
 #include "posix_copy_engine.hpp"
+#include "native_session.hpp"
+#include "gpu_engine.hpp"
 
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
@@ -104,14 +106,19 @@ TransactionDirectory(const Path& transaction_root, const std::string& transactio
 
 }  // namespace
 
-Broker::Broker(Path staging_root, Path storage_root) : staging_root_(fs::weakly_canonical(std::move(staging_root)))
+Broker::Broker(Path staging_root, Path storage_root, Path gpu_engine_path)
+    : staging_root_(fs::weakly_canonical(std::move(staging_root)))
 {
+  if (!gpu_engine_path.empty())
+    gpu_engine_ = std::make_shared<GpuEngine>(std::move(gpu_engine_path));
   io_engines_.push_back(std::make_unique<PosixCopyEngine>(std::move(storage_root)));
   fs::remove_all(staging_root_ / "restore");
   fs::remove_all(staging_root_ / "checkpoint");
   fs::create_directories(staging_root_ / "restore");
   fs::create_directories(staging_root_ / "checkpoint");
 }
+
+void Broker::StartGpuEngine() { if (gpu_engine_) gpu_engine_->Start(); }
 
 void
 Broker::ReapExpiredTransactions(std::chrono::steady_clock::time_point now)
@@ -124,7 +131,7 @@ Broker::ReapExpiredTransactions(std::chrono::steady_clock::time_point now)
 
   for (const auto& [id, transaction] : transactions) {
     std::lock_guard transaction_lock(transaction->mutex());
-    if (!transaction->expired(now, kLiveTransactionLifetime))
+    if (transaction->native_sessions || !transaction->expired(now, kLiveTransactionLifetime))
       continue;
 
     std::error_code restore_error;
@@ -388,6 +395,8 @@ Broker::Commit(const Request& request)
   if (!transaction)
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
   std::lock_guard lock(transaction->mutex());
+  if (transaction->native_sessions || transaction->native_failed)
+    return Fail(request, Failure::TRANSACTION_CONFLICT, "native sessions active or incomplete");
   if (transaction->state() == Transaction::State::NEW || transaction->state() == Transaction::State::ABORTED)
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
   if (transaction->state() == Transaction::State::PREPARING)
@@ -449,11 +458,20 @@ Broker::Abort(const Request& request)
   auto transaction = FindTransaction(request.transaction_id());
   if (!transaction)
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
-  std::lock_guard lock(transaction->mutex());
+  std::unique_lock lock(transaction->mutex());
   if (transaction->state() == Transaction::State::NEW || transaction->state() == Transaction::State::COMMITTED)
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
   if (transaction->state() == Transaction::State::ABORTED)
     return AbortSucceeded(request);
+
+  // Closing a client session starts teardown in another handler. Do not race
+  // its worker cleanup or admit new sessions while waiting. Release the mutex
+  // during the wait so destructors can relinquish admission. Stay within the
+  // agent's five-second Abort deadline; a stuck worker must keep its files intact.
+  transaction->native_failed |= transaction->native_sessions != 0;
+  if (!transaction->native_drained.wait_for(
+          lock, std::chrono::seconds(4), [&] { return transaction->native_sessions == 0; }))
+    return Fail(request, Failure::TRANSACTION_CONFLICT, "native sessions did not drain before abort deadline");
 
   const Path restore_root = staging_root_ / "restore";
   const Path checkpoint_root = staging_root_ / "checkpoint";
@@ -462,6 +480,17 @@ Broker::Abort(const Request& request)
   transaction->clear_descriptor();
   transaction->set_state(Transaction::State::ABORTED);
   return AbortSucceeded(request);
+}
+
+std::unique_ptr<NativeSession>
+Broker::BindNative(const Request& request)
+{
+  if (!request.has_request_id() || request.request_id().empty() || !request.has_bind_native() ||
+      !gpu_engine_)
+    throw std::invalid_argument("native binding requires identity and GPU worker configuration");
+  auto transaction = FindTransaction(request.transaction_id());
+  if (!transaction) throw std::invalid_argument("native transaction not found");
+  return std::make_unique<NativeSession>(transaction, request.bind_native(), gpu_engine_);
 }
 
 }  // namespace snapshot::pagebroker
