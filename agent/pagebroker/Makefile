@@ -62,3 +62,11 @@ test-cuda-transfer:
 		cuda_posix_transfer_test.cpp cuda_posix_transfer.cpp file_descriptor.cpp $(TRANSFER_SOURCES) \
 		$(GTEST_FLAGS) -pthread $(TRANSFER_FLAGS) -o build/cuda-transfer-test
 	./build/cuda-transfer-test
+
+.PHONY: test-cuda-helper
+test-cuda-helper:
+	mkdir -p build
+	$(CXX) -O2 -std=c++20 -Wall -Wextra -Werror -I$(CUDA_ROOT)/include \
+		../cmd/cuda-checkpoint-helper/custom_storage.cpp ../cmd/cuda-checkpoint-helper/custom_storage_test.cpp \
+		$(GTEST_FLAGS) -pthread -o build/cuda-helper-test
+	./build/cuda-helper-test
