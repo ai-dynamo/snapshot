@@ -36,17 +36,14 @@ whose default linker is not the system GNU toolchain, set
 `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/gcc`.
 
 The packaged gate runs GCC warnings-as-errors, rustfmt, strict Clippy, Rust
-unit/contract tests, and process-isolated headless tests. Small C loader probes and a stateful fake CUDA
-provider are test-only; they do not require CUDA headers, C++/gtest, or Git
-history. The fake models ownership and calls, not physical device bytes.
-Its default behavior is stateful; frontend forwarding tests have a separate
-minimal provider.
+unit/contract tests, and process-isolated loader/startup checks. The loader
+fixtures provide CUDA symbol addresses and return values; CUDA memory behavior
+is tested on real GPUs.
 
-Physical-GPU tests live in `../tests/gpu`. Stage a matched build and the real
-NVIDIA checkpoint tool:
+Physical-GPU tests live in `../tests/gpu`. Stage a matched artifact set with:
 
 ```sh
-python3 core/tests/stage_gpu.py --help
+python3 ../tests/gpu/stage.py --help
 ```
 
 The staging layout is `DEST/tests/gpu` and `DEST/build`. Run pytest and
