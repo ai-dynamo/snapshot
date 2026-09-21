@@ -7,9 +7,13 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/go-logr/logr"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
@@ -27,6 +31,18 @@ func main() {
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
 	targetPodIP := flag.String("target-pod-ip", "", "Restore pod IP for CRIU TCP socket remapping")
 	bundleDir := flag.String("bundle-dir", nsmount.SnapshotBinDst, "Path where the agent binary bundle is mounted in this namespace")
+	sessions := cuda.NativeSessions{}
+	defer sessions.Close()
+	flag.Func("native-session", "Captured CUDA PID:inherited PageBroker session FD", func(value string) error {
+		pidText, fdText, ok := strings.Cut(value, ":")
+		pid, pidErr := strconv.Atoi(pidText)
+		fd, fdErr := strconv.Atoi(fdText)
+		if !ok || pidErr != nil || fdErr != nil || pid <= 0 || fd < 3 || sessions[pidText] != nil {
+			return fmt.Errorf("invalid native session %q", value)
+		}
+		sessions[pidText] = os.NewFile(uintptr(fd), "native-session")
+		return nil
+	})
 	flag.Parse()
 
 	if *checkpointPath == "" {
@@ -38,6 +54,7 @@ func main() {
 	}
 
 	opts := executor.RestoreOptions{
+		NativeSessions: sessions,
 		CheckpointPath: *checkpointPath,
 		CUDADeviceMap:  *cudaDeviceMap,
 		CgroupRoot:     *cgroupRoot,

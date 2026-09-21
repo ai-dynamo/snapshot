@@ -72,6 +72,7 @@ type StorageSpec struct {
 }
 
 type PageBrokerSpec struct {
+	NativeCUDA        bool   `yaml:"nativeCUDA"`
 	Enabled           bool   `yaml:"enabled"`
 	ControlSocketPath string `yaml:"controlSocketPath"`
 }

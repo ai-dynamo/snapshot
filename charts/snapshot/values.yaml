@@ -98,6 +98,8 @@ storage:
 
 pageBroker:
   enabled: false
+  # Native CUDA requires the GPU PageBroker image and 4 GiB of host memory per GPU.
+  gpuEngine: ""
   command: []
   args: []
   maxConcurrentRequests: 16
