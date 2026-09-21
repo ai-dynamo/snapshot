@@ -60,8 +60,7 @@ type CheckpointRequest struct {
 	// Pod carries the image reference and limits the target container runs with, read from
 	// the live pod by the caller rather than here: the capture path has no API
 	// client for the pod, and the reconciler already holds it.
-	Pod compat.Environment
-	// Source Pod opt-in, recorded for restore.
+	Pod                  compat.Environment
 	CuinterposeRequested bool
 }
 

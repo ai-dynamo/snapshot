@@ -20,21 +20,17 @@ const (
 	DefaultCoordinatorBinaryPath = "/usr/local/bin/" + CoordinatorBinaryName
 )
 
-// RemoveStaleCuinterposeSockets clears the exact endpoints CRIU's restored PIDs
-// will bind, leaving other processes' sockets and control files untouched.
 func RemoveStaleCuinterposeSockets(controlDir string, namespacePIDs []int) error {
 	for _, pid := range namespacePIDs {
 		path := filepath.Join(controlDir, fmt.Sprintf("cuinterpose-%d.sock", pid))
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove stale cuinterpose socket: %w", err)
+			return err
 		}
 	}
 	return nil
 }
 
-// PrepareCuinterpose runs before native CUDA checkpoint. Open the executable,
-// artifact directory, mount namespace, and container root before namespace entry.
-// A failed prepare cannot be rolled back; the caller terminates the source.
+// Prepare tears down shared mappings; the caller must terminate the source on failure.
 func PrepareCuinterpose(ctx context.Context, checkpointDir, procRoot string, targetPID int, namespacePIDs []int, binary string) error {
 	processDir := filepath.Join(procRoot, strconv.Itoa(targetPID))
 	var files []*os.File
@@ -47,7 +43,7 @@ func PrepareCuinterpose(ctx context.Context, checkpointDir, procRoot string, tar
 	for _, path := range []string{binary, checkpointDir, filepath.Join(processDir, "ns/mnt"), filepath.Join(processDir, "root")} {
 		file, err := os.Open(path)
 		if err != nil {
-			return fmt.Errorf("open cuinterpose prepare input: %w", err)
+			return err
 		}
 		files = append(files, file)
 	}
@@ -63,8 +59,7 @@ func PrepareCuinterpose(ctx context.Context, checkpointDir, procRoot string, tar
 	return executeCoordinator(cmd)
 }
 
-// RestoreCuinterpose runs after native CUDA restore/unlock, inside the restored
-// namespaces. binary is a descriptor path opened before CRIU replaced mounts.
+// Called inside the restored namespaces with a binary descriptor opened before CRIU.
 func RestoreCuinterpose(ctx context.Context, checkpointDir string, namespacePIDs []int, binary string) error {
 	return executeCoordinator(exec.CommandContext(ctx, binary, cuinterposeArgs("restore", checkpointDir, namespacePIDs)...))
 }

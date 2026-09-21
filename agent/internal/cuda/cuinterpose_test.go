@@ -37,8 +37,6 @@ func TestRemoveStaleCuinterposeSockets(t *testing.T) {
 	}
 }
 
-// A shell script standing in for the coordinator: records its argv, prints
-// an error diagnostic, and exits as told.
 func fakeCoordinator(t *testing.T, exitCode int) (binary, argvFile string) {
 	t.Helper()
 	dir := t.TempDir()

@@ -26,13 +26,8 @@ const (
 	// SkipCompatCheckAnnotation disables compatibility checks for one restore.
 	SkipCompatCheckAnnotation = "nvidia.com/snapshot-skip-compat-check"
 
-	// CuinterposeAnnotation opts a SnapshotJob's checkpoint targets into the
-	// CUDA interposer (cuinterpose), which lets Snapshot checkpoint and restore
-	// CUDA memory shared between processes. The only supported value is
-	// CuinterposeAnnotationEnabled. Snapshot installs the shim libraries and
-	// adds the frontend to LD_PRELOAD only for opted-in workloads.
-	CuinterposeAnnotation = "nvidia.com/cuinterpose"
-	// CuinterposeAnnotationEnabled is the only accepted CuinterposeAnnotation value.
+	// CuinterposeAnnotation enables the CUDA interposer for checkpoint targets.
+	CuinterposeAnnotation        = "nvidia.com/cuinterpose"
 	CuinterposeAnnotationEnabled = "enabled"
 
 	// DefaultSeccompLocalhostProfile is the kubelet-local profile installed by

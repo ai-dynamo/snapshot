@@ -197,7 +197,7 @@ func executeRestore(
 	if m.Cuinterpose && !m.CUDA.IsEmpty() {
 		coordinator, err := os.Open(filepath.Join(opts.BundleDir, cuda.CoordinatorBinaryName))
 		if err != nil {
-			return nil, 0, nil, fmt.Errorf("failed to open %s before CRIU restore: %w", cuda.CoordinatorBinaryName, err)
+			return nil, 0, nil, err
 		}
 		defer coordinator.Close()
 		coordinatorFdPath = fmt.Sprintf("/proc/self/fd/%d", coordinator.Fd())

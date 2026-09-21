@@ -72,7 +72,6 @@ func (nsm *NSMounter) MountBundle(ctx context.Context, pid int) (MountPoint, err
 	return &mountPoint{mount: ref}, nil
 }
 
-// MountCuinterpose restores the library mount at its capture-time path.
 func (nsm *NSMounter) MountCuinterpose(ctx context.Context, namespaceMount MountPoint) (MountPoint, error) {
 	if namespaceMount == nil || namespaceMount.NsFd() == nil {
 		return nil, fmt.Errorf("cuinterpose mount needs a pinned namespace")

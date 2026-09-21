@@ -60,11 +60,7 @@ struct mount_attr {
 
 #define BUNDLE_SOURCE "/snapshot-binaries"
 #define BUNDLE_DESTINATION "/tmp/snapshot-binaries"
-/*
- * Both cuinterpose libraries, as delivered to opted-in source workloads.
- * The destination must equal podcontract.CuinterposeMountPath because CRIU
- * re-opens their file-backed mappings by path.
- */
+/* CRIU reopens library mappings at their capture-time paths. */
 #define SNAPSHOT_CUDA_SOURCE "/snapshot-binaries/snapshot-cuda"
 #define SNAPSHOT_CUDA_DESTINATION "/tmp/snapshot-cuda"
 #define CHECKPOINT_ROOT "/checkpoints"
