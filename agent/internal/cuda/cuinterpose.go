@@ -132,19 +132,6 @@ func CheckCuinterposeEnablement(requested, detected bool, cudaProcesses int) err
 	return nil
 }
 
-// HasCuinterposeState reports whether the checkpoint directory holds the
-// coordinator's state file.
-func HasCuinterposeState(checkpointDir string) (bool, error) {
-	_, err := os.Stat(filepath.Join(checkpointDir, CuinterposeStateFile))
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
 // RemoveStaleCuinterposeSockets deletes leftover shim sockets from an earlier
 // incarnation of the pod. Each shim binds its socket by namespace PID, and
 // CRIU recreates the checkpointed process with the same namespace PID, so a

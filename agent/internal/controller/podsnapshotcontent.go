@@ -624,7 +624,6 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		Pod:                  podEnvironment(params.Pod, params.ContainerName),
 		Clientset:            w.clientset,
 		PageBrokerRequested:  params.Pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] == snapshotv1alpha1.PageBrokerAnnotationEnabled,
-		CUDAToolsDelivered:   podcontract.CUDAToolsDelivered(&params.Pod.Spec, params.ContainerName),
 		CuinterposeRequested: cuinterposeRequested,
 	}
 	if err := executor.Checkpoint(ctx, w.runtime, log, req, w.config); err != nil {

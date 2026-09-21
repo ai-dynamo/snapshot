@@ -51,7 +51,7 @@ func (m *mockMounter) MountBundle(_ context.Context, pid int) (mountRef, error) 
 	return m.mount("bundle", pid, "")
 }
 
-func (m *mockMounter) MountCUDATools(_ context.Context, nsFd *os.File) (mountRef, error) {
+func (m *mockMounter) MountCuinterpose(_ context.Context, nsFd *os.File) (mountRef, error) {
 	i := len(m.calls)
 	m.calls = append(m.calls, mountCall{role: "cudatools", nsFd: nsFd})
 	if i < len(m.results) && m.results[i] != nil {
@@ -105,8 +105,8 @@ func TestRoleMountsUseFixedPathsAndPolicies(t *testing.T) {
 	if _, err := nsm.MountArtifact(context.Background(), bundle, "/checkpoints/artifacts/content-uid/containers/main"); err != nil {
 		t.Fatalf("MountArtifact: %v", err)
 	}
-	if _, err := nsm.MountCUDATools(context.Background(), bundle); err != nil {
-		t.Fatalf("MountCUDATools: %v", err)
+	if _, err := nsm.MountCuinterpose(context.Background(), bundle); err != nil {
+		t.Fatalf("MountCuinterpose: %v", err)
 	}
 
 	want := []mountCall{
@@ -126,7 +126,7 @@ func TestRoleMountsUseFixedPathsAndPolicies(t *testing.T) {
 		t.Fatal("checkpoint mount did not reuse the bundle's pinned namespace fd")
 	}
 	if m.calls[2].nsFd != bundle.NsFd() {
-		t.Fatal("CUDA tools mount did not reuse the bundle's pinned namespace fd")
+		t.Fatal("cuinterpose libraries mount did not reuse the bundle's pinned namespace fd")
 	}
 }
 

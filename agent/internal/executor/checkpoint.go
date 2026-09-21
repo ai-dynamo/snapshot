@@ -60,10 +60,6 @@ type CheckpointRequest struct {
 	// the live pod by the caller rather than here: the capture path has no API
 	// client for the pod, and the reconciler already holds it.
 	Pod compat.Environment
-	// CUDAToolsDelivered is true when the source container mounts Snapshot's
-	// CUDA tools (podcontract.CUDAToolsDelivered); recorded in the manifest so
-	// restore mounts them at the same path.
-	CUDAToolsDelivered bool
 	// CuinterposeRequested is the source Pod's nvidia.com/cuinterpose opt-in.
 	// Detection is checked against it and it is recorded in the manifest.
 	CuinterposeRequested bool
@@ -340,7 +336,6 @@ func configureCheckpoint(
 			m.CUDA.NVIDIAVisibleDevices = cuda.VisibleDevicesValue(state.OCISpec.Process.Env)
 		}
 	}
-	m.CUDATools.Delivered = req.CUDAToolsDelivered
 	m.Cuinterpose.Requested = req.CuinterposeRequested
 
 	if err := types.WriteManifest(checkpointDir, m); err != nil {

@@ -61,10 +61,9 @@ struct mount_attr {
 #define BUNDLE_SOURCE "/snapshot-binaries"
 #define BUNDLE_DESTINATION "/tmp/snapshot-binaries"
 /*
- * snapshot-cuda: cuda-checkpoint and the cuinterpose
- * shim, as delivered to the source workload. The destination must equal
- * podcontract.CUDAToolsMountPath, because CRIU re-opens the file-backed mappings
- * of both by that path.
+ * Both cuinterpose libraries, as delivered to opted-in source workloads.
+ * The destination must equal podcontract.CuinterposeMountPath because CRIU
+ * re-opens their file-backed mappings by path.
  */
 #define SNAPSHOT_CUDA_SOURCE "/snapshot-binaries/snapshot-cuda"
 #define SNAPSHOT_CUDA_DESTINATION "/tmp/snapshot-cuda"
@@ -254,15 +253,14 @@ mount_snapshot_cuda(int argc, char* argv[])
   int ns_fd = parse_fd(argv[2]);
   if (ns_fd < 0)
     return 1;
-  const char* tools[] = {
-      SNAPSHOT_CUDA_SOURCE "/cuda-checkpoint",
+  const char* libraries[] = {
       SNAPSHOT_CUDA_SOURCE "/libcuinterpose.so",
       SNAPSHOT_CUDA_SOURCE "/libcuinterpose_core.so",
   };
-  for (size_t i = 0; i < sizeof(tools) / sizeof(tools[0]); i++) {
+  for (size_t i = 0; i < sizeof(libraries) / sizeof(libraries[0]); i++) {
     struct stat st;
-    if (stat(tools[i], &st) != 0 || !S_ISREG(st.st_mode) || access(tools[i], R_OK) != 0) {
-      fprintf(stderr, "missing or unreadable CUDA tool: %s\n", tools[i]);
+    if (stat(libraries[i], &st) != 0 || !S_ISREG(st.st_mode) || access(libraries[i], R_OK) != 0) {
+      fprintf(stderr, "missing or unreadable cuinterpose library: %s\n", libraries[i]);
       return 1;
     }
   }

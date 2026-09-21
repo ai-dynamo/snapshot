@@ -250,7 +250,7 @@ func executeRestore(
 	}
 
 	// CUDA restore — remap checkpoint-time innermost namespace PIDs onto the
-	// current visible restored PIDs before invoking cuda-checkpoint.
+	// current visible restored PIDs before invoking the CUDA helper.
 	if !m.CUDA.IsEmpty() {
 		restorePIDs, err := snapshotruntime.ResolveManifestPIDsToObservedPIDs(processes, restoredPID, m.CUDA.PIDs)
 		if err != nil {
@@ -291,12 +291,6 @@ func executeRestore(
 // the shims inside the restored processes would stay frozen mid-checkpoint
 // forever, so restoring such an artifact is refused up front.
 func requireCuinterposeState(m *types.CheckpointManifest, checkpointPath string) error {
-	// Refuse legacy jobfile artifacts before CRIU, rather than lose sharing.
-	if _, err := os.Lstat(filepath.Join(checkpointPath, "cuda-checkpoint-job")); err == nil {
-		return fmt.Errorf("legacy CUDA jobfile checkpoints are unsupported")
-	} else if !os.IsNotExist(err) {
-		return err
-	}
 	if !m.Cuinterpose.Prepared {
 		return nil
 	}
@@ -306,17 +300,12 @@ func requireCuinterposeState(m *types.CheckpointManifest, checkpointPath string)
 	if m.CUDA.IsEmpty() {
 		return fmt.Errorf("checkpoint manifest records a cuinterpose prepare but no CUDA processes")
 	}
-	if !m.Cuinterpose.Requested || !m.CUDATools.Delivered {
-		return fmt.Errorf("checkpoint manifest records a cuinterpose prepare without requested interposition and delivered CUDA tools")
+	if !m.Cuinterpose.Requested {
+		return fmt.Errorf("checkpoint manifest records a cuinterpose prepare without requested interposition")
 	}
-	hasState, err := cuda.HasCuinterposeState(checkpointPath)
-	if err != nil {
+	if _, err := os.Stat(filepath.Join(checkpointPath, cuda.CuinterposeStateFile)); err != nil {
 		return fmt.Errorf("stat cuinterpose state: %w", err)
 	}
-	if !hasState {
-		return fmt.Errorf(
-			"checkpoint manifest records a cuinterpose prepare but %s is missing from %s; the artifact is incomplete",
-			cuda.CuinterposeStateFile, checkpointPath)
-	}
+
 	return nil
 }

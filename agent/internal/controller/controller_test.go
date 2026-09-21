@@ -100,7 +100,7 @@ func (noopInjector) MountArtifact(_ context.Context, _ nsmount.MountPoint, _ str
 	return noopMountPoint{}, nil
 }
 
-func (noopInjector) MountCUDATools(context.Context, nsmount.MountPoint) (nsmount.MountPoint, error) {
+func (noopInjector) MountCuinterpose(context.Context, nsmount.MountPoint) (nsmount.MountPoint, error) {
 	return nil, nil
 }
 

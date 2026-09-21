@@ -32,11 +32,11 @@ func inspectCompatibility(
 	}
 
 	sourceEnv := manifest.CompatEnvironment()
-	if manifest.CUDATools.Delivered {
+	if manifest.Cuinterpose.Requested {
 		// Restore installs and validates this Snapshot-owned mount after
 		// inspection. Workload mounts must already exist in the placeholder.
 		sourceEnv.ExternalizedMounts = slices.DeleteFunc(sourceEnv.ExternalizedMounts, func(path string) bool {
-			return path == podcontract.CUDAToolsMountPath
+			return path == podcontract.CuinterposeMountPath
 		})
 	}
 	targetEnv := compat.Environment{

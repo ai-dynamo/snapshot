@@ -74,15 +74,15 @@ func (nsm *NSMounter) MountBundle(ctx context.Context, pid int) (MountPoint, err
 
 // MountArtifact exposes one validated checkpoint artifact read-only and
 // non-executable in the namespace pinned by namespaceMount.
-// MountCUDATools exposes cuda-checkpoint and the cuinterpose shim at the path
-// the source workload used (podcontract.CUDAToolsMountPath). Both the source
+// MountCuinterpose exposes the cuinterpose libraries at the path
+// the source workload used (podcontract.CuinterposeMountPath). Both the source
 // and destination are fixed inside the ns-bind-mount helper.
-func (nsm *NSMounter) MountCUDATools(ctx context.Context, namespaceMount MountPoint) (MountPoint, error) {
+func (nsm *NSMounter) MountCuinterpose(ctx context.Context, namespaceMount MountPoint) (MountPoint, error) {
 	if namespaceMount == nil || namespaceMount.NsFd() == nil {
-		return nil, fmt.Errorf("mount CUDA tools: pinned mount namespace is required")
+		return nil, fmt.Errorf("mount cuinterpose libraries: pinned mount namespace is required")
 	}
-	nsm.log.Info("mounting CUDA tools into placeholder namespace")
-	ref, err := nsm.mounter.MountCUDATools(ctx, namespaceMount.NsFd())
+	nsm.log.Info("mounting cuinterpose libraries into placeholder namespace")
+	ref, err := nsm.mounter.MountCuinterpose(ctx, namespaceMount.NsFd())
 	if err != nil {
 		return nil, err
 	}
