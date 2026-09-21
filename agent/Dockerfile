@@ -299,8 +299,6 @@ RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \
       -o /criu-install/usr/local/lib/snapshot/criu-plugins/snapshot_inet_remap.so \
       /tmp/snapshot_inet_remap.c
 
-RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
-
 # CRIU source at the exact ref built from: this is a from-source build, and
 # CRIU_REF may be a moving branch.
 RUN tar -czf /criu-src.tar.gz -C /tmp --exclude-vcs criu
@@ -315,7 +313,7 @@ FROM ${AGENT_BASE_IMAGE} AS runtime-deps
 ARG TARGETARCH=amd64
 
 RUN if [ "${TARGETARCH}" != "amd64" ]; then \
-      echo "ERROR: Snapshot requires x86_64 (cuda-checkpoint has no ${TARGETARCH} binary)" >&2; exit 1; \
+      echo "ERROR: Snapshot requires x86_64 (only linux/amd64 is supported)" >&2; exit 1; \
     fi
 
 # Install CRIU runtime dependencies
@@ -367,9 +365,7 @@ COPY --from=criu-builder /criu-install/usr/local /usr/local
 COPY --from=criu-builder /tmp/criu/COPYING /legal/CRIU/COPYING
 RUN criu --version
 
-# Copy CUDA checkpoint binaries
-COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
-COPY --from=criu-builder /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
+# Copy the native CUDA helper and cuinterpose artifacts
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
 COPY --from=cuinterpose-builder /cuinterpose/build/libcuinterpose.so /usr/local/lib/snapshot/libcuinterpose.so
 COPY --from=cuinterpose-builder /cuinterpose/build/libcuinterpose_core.so /usr/local/lib/snapshot/libcuinterpose_core.so
@@ -379,7 +375,7 @@ COPY cmd/cuinterpose/ /legal/cuinterpose/source/
 # nsmount resolves this helper at /usr/local/sbin/ns-bind-mount (see
 # agent/internal/nsmount/mount.go defaultBinaryPath).
 COPY --from=cuda-helper-builder /ns-bind-mount /usr/local/sbin/ns-bind-mount
-RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper \
+RUN chmod +x /usr/local/bin/cuda-checkpoint-helper \
     /usr/local/sbin/ns-bind-mount
 
 # Copy the built binaries
@@ -396,14 +392,12 @@ RUN output=$(/usr/local/bin/pagebroker 2>&1); status=$?; \
 # LD_LIBRARY_PATH -> lib/, and PATH -> the bundle root.
 RUN mkdir -p /snapshot-binaries/lib /snapshot-binaries/criu-plugins
 RUN mkdir -p /snapshot-binaries/snapshot-cuda \
-    && install -m 0755 /usr/local/sbin/cuda-checkpoint /snapshot-binaries/snapshot-cuda/cuda-checkpoint \
     && install -m 0644 /usr/local/lib/snapshot/libcuinterpose.so /snapshot-binaries/snapshot-cuda/libcuinterpose.so \
     && install -m 0644 /usr/local/lib/snapshot/libcuinterpose_core.so /snapshot-binaries/snapshot-cuda/libcuinterpose_core.so \
     && install -m 0755 /usr/local/bin/cuinterpose-coordinator /snapshot-binaries/cuinterpose-coordinator
 COPY --from=builder /nsrestore /snapshot-binaries/nsrestore
 COPY --from=criu-builder /criu-install/usr/local/sbin/criu /snapshot-binaries/criu
 COPY --from=criu-builder /criu-install/usr/local/lib/snapshot/criu-plugins/ /snapshot-binaries/criu-plugins/
-COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /snapshot-binaries/cuda-checkpoint
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-checkpoint-helper
 
 # Network binaries needed during restore:
@@ -417,7 +411,7 @@ COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-
 RUN set -eu; \
     cp -L "$(command -v ip)" "$(command -v tar)" /snapshot-binaries/; \
     chmod +x /snapshot-binaries/criu /snapshot-binaries/nsrestore \
-             /snapshot-binaries/cuda-checkpoint /snapshot-binaries/cuda-checkpoint-helper \
+             /snapshot-binaries/cuda-checkpoint-helper \
              /snapshot-binaries/ip /snapshot-binaries/tar
 
 # Shared-library closure of the bundled binaries and plugins.
@@ -476,7 +470,7 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 #
 # This is the runtime image with the same default execution contract
 # (entrypoint/cmd), running as root so the agent can restore into it. It ships
-# NO checkpoint/restore tooling: criu, nsrestore, the cuda-checkpoint binaries,
+# NO checkpoint/restore tooling: criu, nsrestore, cuda-checkpoint-helper,
 # their shared libraries, and the criu plugins are all bind-mounted on demand
 # from the agent's /snapshot-binaries bundle at restore time (internal/nsmount).
 # The mount destination is created by the ns-bind-mount helper inside this
@@ -496,11 +490,9 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 #     EROFS. An emptyDir at /tmp (either medium) makes it work again, since
 #     volume mounts stay writable independently of the root filesystem.
 #
-# CUDA tools are delivered by the operator without changing workload commands.
-# Cuinterpose opt-in only affects LD_PRELOAD.
-# The restored workload resolves these tools at the same
-# path as it runs from — CRIU restores file-backed mappings by path, not via
-# PATH search — and so must this placeholder image (same BASE_IMAGE).
+# Opted-in source workloads preload the cuinterpose libraries. The agent
+# mounts matching libraries at their original paths before CRIU restores their
+# file-backed mappings. The placeholder must provide a compatible glibc.
 #
 # Standby-aware workload entrypoints stay inert when the restore Pod sets
 # SNAPSHOT_RESTORE_STANDBY=1, then sleep while the snapshot-agent restores
