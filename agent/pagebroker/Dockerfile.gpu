@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-License-Identifier: Apache-2.0
+
+# Build from agent/. PageBroker owns the CUDA transfer implementation.
+# Only public driver headers and link stubs are used; runtime libcuda comes from
+# the NVIDIA container runtime, not from this image.
+ARG CUDA_HEADERS_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04@sha256:edd686dcb3e87806dfc869623ccb0a7e62c0d09bd720a82014c23efcecc8d9a2
+FROM ${CUDA_HEADERS_IMAGE} AS headers
+FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254 AS nixl
+# Reuse the validated POSIX-only NIXL revision from the transfer prototype.
+ARG NIXL_REF=71ca3cb249a481ae892fcc042a456e1a9b87463d
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential ca-certificates git libaio-dev meson ninja-build pkg-config pybind11-dev python3 \
+    && rm -rf /var/lib/apt/lists/*
+RUN git init /tmp/nixl && cd /tmp/nixl \
+    && git remote add origin https://github.com/ai-dynamo/nixl.git \
+    && git fetch --depth 1 origin ${NIXL_REF} \
+    && test "$(git rev-parse FETCH_HEAD)" = "${NIXL_REF}" \
+    && git checkout --detach ${NIXL_REF} \
+    && meson setup build --prefix=/usr/local --libdir=lib --buildtype=release \
+      -Dbuild_tests=false -Dbuild_examples=false -Denable_plugins=POSIX \
+    && meson compile -C build \
+    && DESTDIR=/nixl-install meson install -C build --strip \
+    && mkdir -p /nixl-runtime/lib/plugins \
+    && cp /nixl-install/usr/local/lib/libnixl*.so /nixl-runtime/lib/ \
+    && cp /nixl-install/usr/local/lib/libserdes.so /nixl-install/usr/local/lib/libstream.so \
+      /nixl-install/usr/local/lib/libfile_utils.so /nixl-runtime/lib/ \
+    && cp -a /nixl-install/usr/local/lib/liburing.so* /nixl-runtime/lib/ \
+    && cp /nixl-install/usr/local/lib/plugins/libplugin_POSIX.so /nixl-runtime/lib/plugins/ \
+    && cp subprojects/liburing-liburing-2.14/LICENSE /nixl-runtime/liburing-LICENSE \
+    && printf '%s\n' "${NIXL_REF}" > /nixl-runtime/NIXL_COMMIT \
+    && tar -czf /nixl-src.tar.gz -C /tmp --exclude-vcs nixl
+FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254 AS build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential pkg-config libprotobuf-dev protobuf-compiler libgtest-dev libaio-dev libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=headers /usr/local/cuda/include/ /opt/cuda/include/
+COPY --from=headers /usr/local/cuda/lib64/stubs/ /opt/cuda/lib64/stubs/
+COPY --from=nixl /nixl-install/usr/local/ /usr/local/
+ENV LD_LIBRARY_PATH=/usr/local/lib
+ENV NIXL_PLUGIN_DIR=/usr/local/lib/plugins
+WORKDIR /src
+COPY pagebroker/ pagebroker/
+RUN make -C pagebroker test-storage test-cuda-transfer check-transfer-contracts-cuda CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local
