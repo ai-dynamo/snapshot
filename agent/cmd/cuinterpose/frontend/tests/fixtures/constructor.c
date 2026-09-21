@@ -1,0 +1,71 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+// SPDX-License-Identifier: Apache-2.0
+
+#define _GNU_SOURCE
+#include "cuda.h"
+#include <assert.h>
+#include <dlfcn.h>
+#include <pthread.h>
+#include <sched.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/syscall.h>
+#include <time.h>
+#include <unistd.h>
+
+extern create_fn fixture_create;
+static atomic_int worker_tid;
+static pthread_t worker;
+
+// "create" makes both threads load the backend. "lookup" makes both threads
+// find glibc's dlsym, so it must be the process's first intercepted dlsym.
+static void contend(void) {
+    const char *mode = getenv("CUINTERPOSE_TEST_CONSTRUCTOR");
+    if (mode && strcmp(mode, "lookup") == 0) {
+        assert(dlsym(RTLD_DEFAULT, "malloc") != NULL);
+        return;
+    }
+    uint64_t handle = 42;
+    assert(fixture_create(&handle, 4096, NULL, 0) == 0);
+    assert(handle == 0xabcdef);
+}
+
+static void *contend_from_worker(void *unused) {
+    (void)unused;
+    atomic_store(&worker_tid, (int)syscall(SYS_gettid));
+    contend();
+    return NULL;
+}
+
+__attribute__((constructor)) static void contend_with_loader(void) {
+    assert(pthread_create(&worker, NULL, contend_from_worker, NULL) == 0);
+    // dlopen holds glibc's loader lock while this constructor runs. Wait until the
+    // worker is blocked in a futex inside contend(), waiting for that lock.
+    const time_t deadline = time(NULL) + 5;
+    for (;;) {
+        assert(time(NULL) < deadline);
+        int tid = atomic_load(&worker_tid);
+        if (tid) {
+            char path[128], state[128] = {0};
+            snprintf(path, sizeof(path), "/proc/self/task/%d/syscall", tid);
+            FILE *file = fopen(path, "r");
+            assert(file);
+            assert(fgets(state, sizeof(state), file));
+            fclose(file);
+            char *end;
+            long number = strtol(state, &end, 10);
+            if (end != state && number == SYS_futex)
+                break;
+        }
+        sched_yield();
+    }
+    // The worker is waiting for our loader lock, so this call deadlocks if it
+    // waits for the worker.
+    contend();
+}
+
+void fixture_join_worker(void) {
+    assert(pthread_join(worker, NULL) == 0);
+}
