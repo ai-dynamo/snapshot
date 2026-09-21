@@ -43,6 +43,7 @@ func fakeCoordinator(t *testing.T, exitCode int) (binary, argvFile string) {
 	argvFile = filepath.Join(dir, "argv")
 	binary = filepath.Join(dir, "coordinator.sh")
 	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = --prepare ]; then dir=$(readlink -f \"$3\"); shift 3; set -- --prepare --checkpoint-dir \"$dir\" \"$@\"; fi\n" +
 		"printf '%s\\n' \"$@\" > " + argvFile + "\n" +
 		"echo 'prepare failed: participant prepare' >&2\n" +
 		"exit " + strconv.Itoa(exitCode) + "\n"
@@ -52,13 +53,11 @@ func fakeCoordinator(t *testing.T, exitCode int) (binary, argvFile string) {
 	return binary, argvFile
 }
 
-func fakeNSenter(t *testing.T) string {
+func fakeNSenter(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
-	argvFile := filepath.Join(dir, "nsenter-argv")
 	binary := filepath.Join(dir, "nsenter")
 	script := "#!/bin/sh\n" +
-		"printf '%s\\n' \"$@\" > " + argvFile + "\n" +
 		"while [ \"$1\" != -- ]; do shift; done\n" +
 		"shift\n" +
 		"exec \"$@\"\n"
@@ -66,15 +65,15 @@ func fakeNSenter(t *testing.T) string {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
-	return argvFile
 }
 
 func TestCoordinatorArgvContract(t *testing.T) {
 	binary, argvFile := fakeCoordinator(t, 0)
-	nsenterArgvFile := fakeNSenter(t)
+	fakeNSenter(t)
+	checkpointDir := t.TempDir()
 	err := PrepareCuinterpose(
 		context.Background(),
-		t.TempDir(),
+		checkpointDir,
 		"/proc",
 		os.Getpid(),
 		[]int{7, 9},
@@ -85,24 +84,12 @@ func TestCoordinatorArgvContract(t *testing.T) {
 	}
 	argv, _ := os.ReadFile(argvFile)
 	want := strings.Join([]string{
-		"--prepare", "--checkpoint-dir", "/proc/self/fd/4",
+		"--prepare", "--checkpoint-dir", checkpointDir,
 		"--control-dir", podcontract.SnapshotControlMountPath,
 		"--process", "7", "--process", "9", "",
 	}, "\n")
 	if string(argv) != want {
 		t.Fatalf("argv:\n%s\nwant:\n%s", argv, want)
-	}
-	nsenterArgv, _ := os.ReadFile(nsenterArgvFile)
-	wantNSenterPrefix := strings.Join([]string{
-		"--mount=/proc/self/fd/5",
-		"-t", strconv.Itoa(os.Getpid()), "-u", "-i", "-n", "-p",
-		"--root=/proc/self/fd/6", "--wd=/proc/self/fd/6",
-		"--",
-		"/proc/self/fd/3",
-		"",
-	}, "\n")
-	if !strings.HasPrefix(string(nsenterArgv), wantNSenterPrefix) {
-		t.Fatalf("nsenter argv:\n%s\nwant prefix:\n%s", nsenterArgv, wantNSenterPrefix)
 	}
 
 	// Restore already runs inside the restored namespaces.

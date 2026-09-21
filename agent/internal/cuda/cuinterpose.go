@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
@@ -33,29 +34,23 @@ func RemoveStaleCuinterposeSockets(controlDir string, namespacePIDs []int) error
 // Prepare tears down shared mappings; the caller must terminate the source on failure.
 func PrepareCuinterpose(ctx context.Context, checkpointDir, procRoot string, targetPID int, namespacePIDs []int, binary string) error {
 	processDir := filepath.Join(procRoot, strconv.Itoa(targetPID))
-	var files []*os.File
-	defer func() {
-		for _, file := range files {
-			_ = file.Close()
-		}
-	}()
-	// ExtraFiles become child descriptors 3 through 6, in this order.
-	for _, path := range []string{binary, checkpointDir, filepath.Join(processDir, "ns/mnt"), filepath.Join(processDir, "root")} {
-		file, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		files = append(files, file)
+	mountNS, err := os.Open(filepath.Join(processDir, "ns/mnt"))
+	if err != nil {
+		return err
 	}
-	args := []string{
-		"--mount=/proc/self/fd/5", "-t", strconv.Itoa(targetPID), "-u", "-i", "-n", "-p",
-		// Entering a mount namespace alone does not change the filesystem root.
-		"--root=/proc/self/fd/6", "--wd=/proc/self/fd/6",
-		"--", "/proc/self/fd/3",
+	defer mountNS.Close()
+	checkpoint, err := os.Open(checkpointDir)
+	if err != nil {
+		return err
 	}
-	args = append(args, cuinterposeArgs("prepare", "/proc/self/fd/4", namespacePIDs)...)
-	cmd := exec.CommandContext(ctx, "nsenter", args...)
-	cmd.ExtraFiles = files
+	defer checkpoint.Close()
+	cmd, closeFiles, err := snapshotruntime.CommandInNamespaces(ctx, targetPID, mountNS, filepath.Join(processDir, "root"), binary)
+	if err != nil {
+		return err
+	}
+	defer closeFiles()
+	args := cuinterposeArgs("prepare", snapshotruntime.InheritFile(cmd, checkpoint), namespacePIDs)
+	cmd.Args = append(cmd.Args, args...)
 	return executeCoordinator(cmd)
 }
 
