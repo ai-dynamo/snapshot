@@ -15,14 +15,11 @@
 namespace cuda_checkpoint_storage {
 
 constexpr const char *kManifestName = "manifest.txt";
-constexpr const char *kLegacyTemporaryManifestName = "manifest.txt.tmp";
-constexpr const char *kTemporaryManifestPrefix = "manifest.txt.tmp.";
 
 struct ManifestExtent {
   std::string source_uuid;
   size_t size = 0;
   std::string filename;
-  std::string sha256;
 };
 
 struct DeviceExtent {
@@ -60,14 +57,8 @@ bool BuildTransferJobs(const std::vector<ManifestExtent> &extents,
                        const std::vector<DevicePair> &device_pairs,
                        std::vector<TransferJob> *jobs, std::string *error);
 
-// ApplyOrVerifyExtentDigests records inline checkpoint digests or verifies the
-// digests produced by the sole restore read against the durable manifest.
-bool ApplyOrVerifyExtentDigests(bool checkpoint,
-                                const std::vector<TransferJob> &jobs,
-                                const std::vector<std::string> &digests,
-                                std::vector<ManifestExtent> *extents,
-                                std::string *error);
-
+// WriteManifest requires a fresh participant directory. The broker publishes
+// the enclosing checkpoint transaction after all participants complete.
 // Manifest lifecycle functions require the caller to own the participant
 // directory exclusively for the operation. PageBroker provides one trusted
 // directory per CUDA participant beneath its transaction-exclusive staging
@@ -81,6 +72,5 @@ bool ReadManifest(const std::filesystem::path &directory,
 bool ValidateExtentFiles(const std::filesystem::path &directory,
                          const std::vector<ManifestExtent> &extents,
                          std::string *error);
-bool RemoveManifest(const std::filesystem::path &directory, std::string *error);
 
 } // namespace cuda_checkpoint_storage
