@@ -74,8 +74,9 @@ impl ProcessState {
             let virtual_allocation_handle_count = self
                 .virtual_allocation_handles
                 .values()
-                .filter(|id| **id == allocation.reference.id)
-                .count() as u64;
+                .filter(|entry| entry.id == allocation.reference.id)
+                .map(|entry| entry.references)
+                .sum();
             let record = Record::Allocation {
                 allocation: allocation.reference,
                 content: allocation.needs_content_checkpoint(self.namespace_pid),
@@ -311,7 +312,7 @@ impl ProcessState {
                     if !self
                         .virtual_allocation_handles
                         .values()
-                        .any(|id| *id == allocation.reference.id)
+                        .any(|entry| entry.id == allocation.reference.id)
                     {
                         unsafe {
                             crate::driver::cuMemRelease(
