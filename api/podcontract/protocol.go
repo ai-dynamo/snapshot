@@ -29,8 +29,8 @@ const (
 	// CuinterposeAnnotation opts a SnapshotJob's checkpoint targets into the
 	// CUDA interposer (cuinterpose), which lets Snapshot checkpoint and restore
 	// CUDA memory shared between processes. The only supported value is
-	// CuinterposeAnnotationEnabled. Snapshot supplies and mounts the shim in
-	// every checkpoint target; this annotation only adds it to LD_PRELOAD.
+	// CuinterposeAnnotationEnabled. Snapshot installs the shim libraries and
+	// adds the frontend to LD_PRELOAD only for opted-in workloads.
 	CuinterposeAnnotation = "nvidia.com/cuinterpose"
 	// CuinterposeAnnotationEnabled is the only accepted CuinterposeAnnotation value.
 	CuinterposeAnnotationEnabled = "enabled"

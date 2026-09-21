@@ -56,6 +56,7 @@ type CheckpointRequest struct {
 	PodIP               string
 	Clientset           kubernetes.Interface
 	PageBrokerRequested bool
+
 	// Pod carries the image reference and limits the target container runs with, read from
 	// the live pod by the caller rather than here: the capture path has no API
 	// client for the pod, and the reconciler already holds it.
@@ -128,13 +129,20 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	if err != nil {
 		return err
 	}
+	cudaJobFile := ""
+	if len(state.CUDAHostPIDs) > 0 {
+		cudaJobFile, err = cuda.StageJobFile(state.RootFS, tmpDir, len(state.GPUs.Devices) > 1 && !state.Cuinterpose)
+		if err != nil {
+			return err
+		}
+	}
 
 	criuOpts, data, err := configureCheckpoint(log, state, req, cfg, tmpDir)
 	if err != nil {
 		return err
 	}
 
-	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, log)
+	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log)
 	if err != nil {
 		return checkpointNeedsSourceKill(err)
 	}
@@ -345,7 +353,7 @@ func configureCheckpoint(
 	return criuOpts, m, nil
 }
 
-func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir string, log logr.Logger) (*checkpointPhaseTimings, error) {
+func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger) (*checkpointPhaseTimings, error) {
 	timings := &checkpointPhaseTimings{}
 
 	// CUDA lock+checkpoint must happen before CRIU dump
@@ -374,7 +382,7 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 				return nil, fmt.Errorf("record cuinterpose prepare in checkpoint manifest: %w", err)
 			}
 		}
-		cudaTimings, err := cuda.CheckpointProcessTree(ctx, state.CUDAHostPIDs, log)
+		cudaTimings, err := cuda.CheckpointProcessTree(ctx, state.CUDAHostPIDs, cudaJobFile, checkpointDir, log)
 		if err != nil {
 			return nil, fmt.Errorf("CUDA checkpoint failed: %w", err)
 		}

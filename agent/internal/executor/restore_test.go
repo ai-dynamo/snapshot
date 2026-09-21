@@ -17,6 +17,7 @@ import (
 	"github.com/go-logr/logr/testr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/criu"
 	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
@@ -365,6 +366,67 @@ func TestValidateRestoreManifest(t *testing.T) {
 			}
 			if tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
 				t.Fatalf("validateRestoreManifest() error = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestRestoreInNamespaceJobFileRequirement(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		gpuCount    int
+		cuinterpose types.CuinterposeManifest
+		jobFile     string
+		wantError   string
+	}{
+		{name: "native multi-GPU missing", gpuCount: 2, wantError: "missing CUDA launch-job state"},
+		{name: "native single-GPU missing", gpuCount: 1, wantError: "invalid target pod IP"},
+		{name: "native multi-GPU present", gpuCount: 2, jobFile: "present", wantError: "invalid target pod IP"},
+		{name: "cuinterpose missing", gpuCount: 2,
+			cuinterpose: types.CuinterposeManifest{Requested: true, Prepared: true, Format: types.CuinterposeFormat},
+			wantError:   "invalid target pod IP"},
+		{name: "cuinterpose present", gpuCount: 2, jobFile: "present",
+			cuinterpose: types.CuinterposeManifest{Requested: true, Prepared: true, Format: types.CuinterposeFormat},
+			wantError:   "invalid target pod IP"},
+		{name: "cuinterpose invalid file", gpuCount: 2, jobFile: "directory",
+			cuinterpose: types.CuinterposeManifest{Requested: true, Prepared: true, Format: types.CuinterposeFormat},
+			wantError:   "not a regular file"},
+		{name: "opt-in without preparation", gpuCount: 2,
+			cuinterpose: types.CuinterposeManifest{Requested: true}, wantError: "missing CUDA launch-job state"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			checkpointDir := t.TempDir()
+			manifest := types.NewCheckpointManifest(
+				"content-uid-123", "main", types.CRIUDumpManifest{},
+				types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
+				types.OverlayManifest{}, types.HostManifest{},
+			)
+			manifest.CUDA.PIDs = []int{42, 43}
+			manifest.CUDA.SourceGPUUUIDs = []string{"GPU-aaa", "GPU-bbb"}[:tc.gpuCount]
+			manifest.Cuinterpose = tc.cuinterpose
+			// Stop at IP validation, after jobfile selection but before namespace or
+			// CUDA operations. This exercises the actual restore preflight safely.
+			manifest.CRIUDump.CRIU.TcpEstablished = true
+			t.Setenv(criu.InetRemapEnvVar, "")
+			if err := types.WriteManifest(checkpointDir, manifest); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(checkpointDir, podcontract.CUDAJobFileName)
+			switch tc.jobFile {
+			case "present":
+				if err := os.WriteFile(path, []byte("job-state"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "directory":
+				if err := os.Mkdir(path, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err := RestoreInNamespace(context.Background(), RestoreOptions{
+				CheckpointPath: checkpointDir, TargetPodIP: "invalid",
+			}, testr.New(t))
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("RestoreInNamespace() = %v, want %q", err, tc.wantError)
 			}
 		})
 	}
