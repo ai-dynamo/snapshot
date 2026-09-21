@@ -60,7 +60,8 @@ type CheckpointRequest struct {
 	// Pod carries the image reference and limits the target container runs with, read from
 	// the live pod by the caller rather than here: the capture path has no API
 	// client for the pod, and the reconciler already holds it.
-	Pod compat.Environment
+	Pod                  compat.Environment
+	CuInterposeRequested bool
 }
 
 type checkpointPhaseTimings struct {
@@ -127,7 +128,7 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	}
 	cudaJobFile := ""
 	if len(state.CUDAHostPIDs) > 0 {
-		cudaJobFile, err = cuda.StageJobFile(state.RootFS, tmpDir, len(state.GPUs.Devices))
+		cudaJobFile, err = cuda.StageJobFile(state.RootFS, tmpDir, len(state.GPUs.Devices) > 1 && !req.CuInterposeRequested)
 		if err != nil {
 			return err
 		}
@@ -330,6 +331,7 @@ func configureCheckpoint(
 			m.CUDA.NVIDIAVisibleDevices = cuda.VisibleDevicesValue(state.OCISpec.Process.Env)
 		}
 	}
+	m.CuInterpose = req.CuInterposeRequested
 
 	if err := types.WriteManifest(checkpointDir, m); err != nil {
 		return nil, nil, fmt.Errorf("failed to write checkpoint manifest: %w", err)
@@ -343,6 +345,20 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 
 	// CUDA lock+checkpoint must happen before CRIU dump
 	if len(state.CUDAHostPIDs) > 0 {
+		if data.CuInterpose {
+			// Tear down shared mappings before native CUDA lock/checkpoint.
+			err := cuda.PrepareCuInterpose(
+				ctx,
+				checkpointDir,
+				snapshotruntime.HostProcPath,
+				state.PID,
+				state.CUDANSPIDs,
+				cuda.DefaultCoordinatorBinaryPath,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("prepare cuinterpose: %w", err)
+			}
+		}
 		cudaTimings, err := cuda.CheckpointProcessTree(ctx, state.CUDAHostPIDs, cudaJobFile, checkpointDir, log)
 		if err != nil {
 			return nil, fmt.Errorf("CUDA checkpoint failed: %w", err)

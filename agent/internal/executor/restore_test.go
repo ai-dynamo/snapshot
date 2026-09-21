@@ -17,9 +17,11 @@ import (
 	"github.com/go-logr/logr/testr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/criu"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
 func TestInspectCompatibilityChecksMappedGPUMountAndOrdinaryMounts(t *testing.T) {
@@ -84,6 +86,29 @@ func TestGPUMappingLeavesCountPolicyToInspectGate(t *testing.T) {
 	}
 	if len(incompatible.Mismatches) != 1 || incompatible.Mismatches[0].Check != compat.CheckGPUCount {
 		t.Fatalf("expected GPU count check, got %+v", incompatible.Mismatches)
+	}
+}
+
+func TestInspectCompatibilityManagedCuInterposeMount(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		delivered bool
+		mount     string
+		wantError bool
+	}{
+		{"delivered tools installed later", true, podcontract.CuInterposeMountPath, false},
+		{"unmanaged tools still required", false, podcontract.CuInterposeMountPath, true},
+		{"workload mount still required", true, "/models", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manifest := &types.CheckpointManifest{}
+			manifest.CuInterpose = tc.delivered
+			manifest.CRIUDump.ExtMnt = map[string]string{tc.mount: tc.mount}
+			err := inspectCompatibility(testr.New(t), manifest, compat.GPUInfo{}, nil, t.TempDir(), "", false)
+			if (err != nil) != tc.wantError {
+				t.Fatalf("inspectCompatibility() = %v, wantError %v", err, tc.wantError)
+			}
+		})
 	}
 }
 
@@ -345,26 +370,51 @@ func TestValidateRestoreManifest(t *testing.T) {
 	}
 }
 
-func TestRestoreInNamespaceRejectsMultiGPUCheckpointWithoutLaunchJobState(t *testing.T) {
-	checkpointDir := t.TempDir()
-	manifest := types.NewCheckpointManifest(
-		"content-uid-123",
-		"main",
-		types.CRIUDumpManifest{},
-		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
-		types.OverlayManifest{},
-		types.HostManifest{},
-	)
-	manifest.CUDA = types.NewCUDAManifest([]int{42, 43}, compat.GPUInfo{
-		Devices: []compat.GPUDevice{{UUID: "GPU-aaa"}, {UUID: "GPU-bbb"}},
-	})
-	if err := types.WriteManifest(checkpointDir, manifest); err != nil {
-		t.Fatalf("WriteManifest: %v", err)
-	}
-
-	_, err := RestoreInNamespace(context.Background(), RestoreOptions{CheckpointPath: checkpointDir}, testr.New(t))
-	if err == nil || !strings.Contains(err.Error(), "missing CUDA launch-job state") {
-		t.Fatalf("expected missing multi-GPU launch-job error, got %v", err)
+func TestRestoreInNamespaceJobFileRequirement(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		cuInterpose bool
+		jobFile     string
+		wantError   string
+	}{
+		{name: "native multi-GPU missing", wantError: "missing CUDA launch-job state"},
+		{name: "cuinterpose missing",
+			cuInterpose: true,
+			wantError:   "invalid target pod IP"},
+		{name: "cuinterpose present", jobFile: "present",
+			cuInterpose: true,
+			wantError:   "invalid target pod IP"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			checkpointDir := t.TempDir()
+			manifest := types.NewCheckpointManifest(
+				"content-uid-123", "main", types.CRIUDumpManifest{},
+				types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "10.0.0.11", nil),
+				types.OverlayManifest{}, types.HostManifest{},
+			)
+			manifest.CUDA.PIDs = []int{42, 43}
+			manifest.CUDA.SourceGPUUUIDs = []string{"GPU-aaa", "GPU-bbb"}
+			manifest.CuInterpose = tc.cuInterpose
+			// Stop at IP validation, after jobfile selection but before namespace or
+			// CUDA operations. This exercises the actual restore preflight safely.
+			manifest.CRIUDump.CRIU.TcpEstablished = true
+			t.Setenv(criu.InetRemapEnvVar, "")
+			if err := types.WriteManifest(checkpointDir, manifest); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(checkpointDir, podcontract.CUDAJobFileName)
+			if tc.jobFile == "present" {
+				if err := os.WriteFile(path, []byte("job-state"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err := RestoreInNamespace(context.Background(), RestoreOptions{
+				CheckpointPath: checkpointDir, TargetPodIP: "invalid",
+			}, testr.New(t))
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("RestoreInNamespace() = %v, want %q", err, tc.wantError)
+			}
+		})
 	}
 }
 

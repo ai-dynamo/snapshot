@@ -6,6 +6,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -26,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -785,4 +788,35 @@ func TestSnapshotJobReconcileSkipsTerminalAndDeleted(t *testing.T) {
 		_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "inference", Name: "gone"}})
 		require.NoError(t, err)
 	})
+}
+
+func TestSnapshotJobReconcileCuInterpose(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(strconv.FormatBool(enabled), func(t *testing.T) {
+			sj := minimalSnapshotJob()
+			sj.Spec.PodTemplate.Annotations = map[string]string{podcontract.CuInterposeAnnotation: strconv.FormatBool(enabled)}
+			worker := &sj.Spec.PodTemplate.Spec.Containers[0]
+			worker.Command = []string{"python3", "-m", "worker"}
+			worker.Resources.Limits = corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("2")}
+			r := makeSnapshotJobReconciler(snapshotJobReconcilerScheme(), sj)
+			if enabled {
+				r.CuInterpose.AgentImage = "registry.example/agent:dev"
+			}
+			_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+			require.NoError(t, err)
+			job := getSourceJob(t, r.Client, sj)
+			container := requireContainer(t, job.Spec.Template.Spec.Containers, "worker")
+			assert.Equal(t, worker.Command, container.Command)
+			if enabled {
+				installer := requireContainer(t, job.Spec.Template.Spec.InitContainers, "snapshot-cuda-install")
+				assert.Equal(t, r.CuInterpose.AgentImage, installer.Image)
+				assert.Contains(t, container.Env, corev1.EnvVar{Name: "LD_PRELOAD", Value: podcontract.CuInterposeLibraryPath})
+			} else {
+				assert.Empty(t, job.Spec.Template.Spec.InitContainers)
+				for _, mount := range container.VolumeMounts {
+					assert.NotEqual(t, podcontract.CuInterposeMountPath, mount.MountPath)
+				}
+			}
+		})
+	}
 }
