@@ -20,7 +20,7 @@ DOCKER_BUILD_ARGS ?=
 # committed package baseline would describe a different image than we build on.
 AGENT_BASE_IMAGE ?= $(shell sed -n 's/^ARG AGENT_BASE_IMAGE=//p' agent/Dockerfile)
 
-# The agent supports x86_64 only and the package
+# The agent is x86_64-only (cuda-checkpoint ships no other arch) and the package
 # baseline is captured for this platform, so pin it rather than inheriting
 # whatever the buildx builder defaults to.
 AGENT_PLATFORM ?= linux/amd64
