@@ -12,7 +12,7 @@ use cudarc::driver::sys::CUresult::{
 use cudarc::driver::sys::{
     CUdevice, CUdeviceptr, CUmemAccessDesc, CUmemAllocationGranularity_flags,
     CUmemAllocationHandleType, CUmemAllocationProp, CUmemGenericAllocationHandle,
-    CUmulticastGranularity_flags, CUmulticastObjectProp, CUresult, CUstream_flags,
+    CUmulticastObjectProp, CUresult, CUstream_flags,
 };
 use std::ffi::c_void;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
@@ -147,7 +147,6 @@ functions! {
     cuMulticastBindMem(group: CUmemGenericAllocationHandle, offset: usize, member: CUmemGenericAllocationHandle, member_offset: usize, size: usize, flags: u64);
     cuMulticastBindMem_v2(group: CUmemGenericAllocationHandle, device: CUdevice, offset: usize, member: CUmemGenericAllocationHandle, member_offset: usize, size: usize, flags: u64);
     cuMulticastCreate(group: *mut CUmemGenericAllocationHandle, properties: *const CUmulticastObjectProp);
-    cuMulticastGetGranularity(granularity: *mut usize, properties: *const CUmulticastObjectProp, flags: CUmulticastGranularity_flags);
     cuMulticastUnbind(group: CUmemGenericAllocationHandle, device: CUdevice, offset: usize, size: usize);
     cuStreamCreate(stream: *mut *mut c_void, flags: CUstream_flags);
     cuStreamDestroy_v2(stream: *mut c_void);
