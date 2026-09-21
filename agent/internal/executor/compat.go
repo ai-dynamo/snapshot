@@ -32,7 +32,7 @@ func inspectCompatibility(
 	}
 
 	sourceEnv := manifest.CompatEnvironment()
-	if manifest.Cuinterpose.Requested {
+	if manifest.Cuinterpose {
 		// Restore installs and validates this Snapshot-owned mount after
 		// inspection. Workload mounts must already exist in the placeholder.
 		sourceEnv.ExternalizedMounts = slices.DeleteFunc(sourceEnv.ExternalizedMounts, func(path string) bool {

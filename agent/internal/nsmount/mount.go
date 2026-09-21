@@ -93,8 +93,6 @@ func (m *execMounter) MountCheckpoint(ctx context.Context, nsFd *os.File, checkp
 	return m.mountInNamespace(ctx, nsFd, "mount-checkpoint-fd", "unmount-checkpoint-fd", checkpointPath)
 }
 
-// MountCuinterpose exposes the shim libraries at podcontract.CuinterposeMountPath; source and destination
-// are fixed inside the helper.
 func (m *execMounter) MountCuinterpose(ctx context.Context, nsFd *os.File) (mountRef, error) {
 	return m.mountInNamespace(ctx, nsFd, "mount-snapshot-cuda-fd", "unmount-snapshot-cuda-fd")
 }

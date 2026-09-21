@@ -18,7 +18,6 @@ import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/criu"
-	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
@@ -103,7 +102,7 @@ func TestInspectCompatibilityManagedCuinterposeMount(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			manifest := &types.CheckpointManifest{}
-			manifest.Cuinterpose.Requested = tc.delivered
+			manifest.Cuinterpose = tc.delivered
 			manifest.CRIUDump.ExtMnt = map[string]string{tc.mount: tc.mount}
 			err := inspectCompatibility(testr.New(t), manifest, compat.GPUInfo{}, nil, t.TempDir(), "", false)
 			if (err != nil) != tc.wantError {
@@ -374,19 +373,17 @@ func TestValidateRestoreManifest(t *testing.T) {
 func TestRestoreInNamespaceJobFileRequirement(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
-		cuinterpose types.CuinterposeManifest
+		cuinterpose bool
 		jobFile     string
 		wantError   string
 	}{
 		{name: "native multi-GPU missing", wantError: "missing CUDA launch-job state"},
 		{name: "cuinterpose missing",
-			cuinterpose: types.CuinterposeManifest{Requested: true, Prepared: true},
+			cuinterpose: true,
 			wantError:   "invalid target pod IP"},
 		{name: "cuinterpose present", jobFile: "present",
-			cuinterpose: types.CuinterposeManifest{Requested: true, Prepared: true},
+			cuinterpose: true,
 			wantError:   "invalid target pod IP"},
-		{name: "opt-in without preparation",
-			cuinterpose: types.CuinterposeManifest{Requested: true}, wantError: "missing CUDA launch-job state"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			checkpointDir := t.TempDir()
@@ -448,34 +445,5 @@ func TestExistingMountPaths(t *testing.T) {
 
 	if got := existingMountPaths(targetRoot, nil, nil); len(got) != 0 {
 		t.Errorf("existingMountPaths of nothing = %#v, want empty", got)
-	}
-}
-
-func TestRequireCuinterposeState(t *testing.T) {
-	dir := t.TempDir()
-	plain := &types.CheckpointManifest{}
-	if err := requireCuinterposeState(plain, dir); err != nil {
-		t.Fatalf("a checkpoint without cuinterpose needs no state file: %v", err)
-	}
-	prepared := &types.CheckpointManifest{
-		CUDA:        types.NewCUDAManifest([]int{1}, compat.GPUInfo{}),
-		Cuinterpose: types.CuinterposeManifest{Requested: true, Prepared: true},
-	}
-	if err := requireCuinterposeState(prepared, dir); err == nil {
-		t.Fatal("a prepared checkpoint without its state file must be refused")
-	}
-	if err := os.WriteFile(dir+"/"+cuda.CuinterposeStateFile, []byte("cuinterpose-state-v2\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := requireCuinterposeState(prepared, dir); err != nil {
-		t.Fatalf("state present: %v", err)
-	}
-	prepared.Cuinterpose.Requested = false
-	if err := requireCuinterposeState(prepared, dir); err == nil {
-		t.Fatal("prepared without requested interposition is inconsistent")
-	}
-	noCUDA := &types.CheckpointManifest{Cuinterpose: types.CuinterposeManifest{Prepared: true}}
-	if err := requireCuinterposeState(noCUDA, dir); err == nil {
-		t.Fatal("prepared without CUDA processes is inconsistent")
 	}
 }

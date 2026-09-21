@@ -72,12 +72,10 @@ func (nsm *NSMounter) MountBundle(ctx context.Context, pid int) (MountPoint, err
 	return &mountPoint{mount: ref}, nil
 }
 
-// MountCuinterpose exposes the cuinterpose libraries at the path
-// the source workload used (podcontract.CuinterposeMountPath). Both the source
-// and destination are fixed inside the ns-bind-mount helper.
+// MountCuinterpose restores the library mount at its capture-time path.
 func (nsm *NSMounter) MountCuinterpose(ctx context.Context, namespaceMount MountPoint) (MountPoint, error) {
 	if namespaceMount == nil || namespaceMount.NsFd() == nil {
-		return nil, fmt.Errorf("mount cuinterpose libraries: pinned mount namespace is required")
+		return nil, fmt.Errorf("cuinterpose mount needs a pinned namespace")
 	}
 	nsm.log.Info("mounting cuinterpose libraries into placeholder namespace")
 	ref, err := nsm.mounter.MountCuinterpose(ctx, namespaceMount.NsFd())

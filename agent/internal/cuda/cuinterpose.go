@@ -4,7 +4,6 @@
 package cuda
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -16,245 +15,71 @@ import (
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
-// cuinterpose is the CUDA interposer shim (agent/cmd/cuinterpose). Each CUDA
-// process running it listens on a Unix socket under the pod's snapshot control
-// directory. The agent never talks to those sockets itself; it runs the
-// cuinterpose-coordinator binary, which does, once before the native CUDA
-// checkpoint (prepare) and once after the native CUDA restore (restore).
-//
-// Paths below are the coordinator CLI and shim endpoint contract.
 const (
-	// CoordinatorBinaryName is the cuinterpose-coordinator executable name.
-	CoordinatorBinaryName = "cuinterpose-coordinator"
-	// DefaultCoordinatorBinaryPath is where the agent image installs the
-	// coordinator, used for prepare. Restore runs inside the restored
-	// container's mount namespace, which does not contain the agent bundle, so
-	// that call site passes a /proc/self/fd path opened before CRIU ran.
+	CoordinatorBinaryName        = "cuinterpose-coordinator"
 	DefaultCoordinatorBinaryPath = "/usr/local/bin/" + CoordinatorBinaryName
-	// CuinterposeStateFile is the topology sidecar the coordinator writes into
-	// the checkpoint directory during prepare and reads during restore.
-	CuinterposeStateFile = "cuinterpose.state"
-
-	cuinterposeSocketPrefix = "cuinterpose-"
-	cuinterposeSocketSuffix = ".sock"
 )
 
-// cuinterposeEndpointPath is the shim's control socket for one CUDA process,
-// reached through the host's /proc mount: <procRoot>/<pid>/root is the
-// process's own root filesystem.
-func cuinterposeEndpointPath(procRoot string, observedPID, namespacePID int) string {
-	return filepath.Join(
-		procRoot,
-		strconv.Itoa(observedPID),
-		"root",
-		strings.TrimPrefix(podcontract.SnapshotControlMountPath, string(os.PathSeparator)),
-		cuinterposeSocketName(namespacePID),
-	)
-}
-
-func cuinterposeSocketName(namespacePID int) string {
-	return fmt.Sprintf("%s%d%s", cuinterposeSocketPrefix, namespacePID, cuinterposeSocketSuffix)
-}
-
-// DetectCuinterpose reports whether the live CUDA processes run the shim. The
-// signal is the shim's control socket, one per CUDA process, not the process
-// environment: Python's setproctitle (vLLM, SGLang) overwrites what /proc
-// shows as the environment while the sockets remain. No sockets at all means
-// the workload is not interposed and is checkpointed natively. Some but not
-// all sockets, or a non-socket file in a socket's place, is an error: a
-// half-interposed process tree cannot be checkpointed consistently.
-func DetectCuinterpose(procRoot string, observedPIDs, namespacePIDs []int) (bool, error) {
-	if len(observedPIDs) != len(namespacePIDs) {
-		return false, fmt.Errorf(
-			"cuinterpose PID mapping count mismatch: observed=%d namespace=%d",
-			len(observedPIDs),
-			len(namespacePIDs),
-		)
-	}
-	if len(namespacePIDs) == 0 {
-		return false, nil
-	}
-	valid := 0
-	seen := 0
-	for index, observedPID := range observedPIDs {
-		endpoint := cuinterposeEndpointPath(procRoot, observedPID, namespacePIDs[index])
-		info, err := os.Lstat(endpoint)
-		if os.IsNotExist(err) {
-			continue
+// RemoveStaleCuinterposeSockets clears the exact endpoints CRIU's restored PIDs
+// will bind, leaving other processes' sockets and control files untouched.
+func RemoveStaleCuinterposeSockets(controlDir string, namespacePIDs []int) error {
+	for _, pid := range namespacePIDs {
+		path := filepath.Join(controlDir, fmt.Sprintf("cuinterpose-%d.sock", pid))
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove stale cuinterpose socket: %w", err)
 		}
-		if err != nil {
-			return false, fmt.Errorf("stat cuinterpose endpoint %q: %w", endpoint, err)
-		}
-		seen++
-		if info.Mode()&os.ModeSocket != 0 {
-			valid++
-		}
-	}
-	if seen == 0 {
-		return false, nil
-	}
-	if valid != len(observedPIDs) {
-		return false, fmt.Errorf(
-			"cuinterpose endpoint missing or invalid for %d of %d CUDA processes",
-			len(observedPIDs)-valid,
-			len(observedPIDs),
-		)
-	}
-	return true, nil
-}
-
-// CheckCuinterposeEnablement is the rule for what the Pod asked for versus what
-// the CUDA processes are running. Both disagreements are refused:
-//
-//   - requested but no process exposes a socket: the shim never loaded (wrong
-//     path, glibc too old, LD_PRELOAD stripped). A native checkpoint would look
-//     fine and restore with stale sharing, so it must not be taken.
-//   - not requested but sockets are present: something other than Snapshot
-//     preloaded the shim; the restore side would not mount it.
-//
-// With no CUDA processes there is nothing to interpose and nothing to check.
-func CheckCuinterposeEnablement(requested, detected bool, cudaProcesses int) error {
-	if cudaProcesses == 0 {
-		return nil
-	}
-	if requested && !detected {
-		return fmt.Errorf(
-			"cuinterpose was requested (%s) but no CUDA process exposes a control socket; the shim did not load, refusing to checkpoint without it",
-			podcontract.CuinterposeAnnotation)
-	}
-	if !requested && detected {
-		return fmt.Errorf(
-			"CUDA processes run the cuinterpose shim but the source Pod did not request it (%s); restore would not mount the shim",
-			podcontract.CuinterposeAnnotation)
 	}
 	return nil
 }
 
-// RemoveStaleCuinterposeSockets deletes leftover shim sockets from an earlier
-// incarnation of the pod. Each shim binds its socket by namespace PID, and
-// CRIU recreates the checkpointed process with the same namespace PID, so a
-// stale file at that path makes the restored bind() fail. Called inside the
-// container's mount namespace before CRIU runs. Returns how many were removed.
-func RemoveStaleCuinterposeSockets(controlDir string, namespacePIDs []int) (int, error) {
-	removed := 0
-	for _, namespacePID := range namespacePIDs {
-		path := filepath.Join(controlDir, cuinterposeSocketName(namespacePID))
-		if err := os.Remove(path); os.IsNotExist(err) {
-			continue
-		} else if err != nil {
-			return removed, fmt.Errorf("remove stale cuinterpose socket %s: %w", path, err)
-		}
-		removed++
-	}
-	return removed, nil
-}
-
-// PrepareCuinterpose runs the coordinator in the live target container's mount,
-// UTS, IPC, network, and PID namespaces before the native CUDA checkpoint. The
-// executable and checkpoint directory are opened by the agent first and passed
-// through file descriptors, so neither depends on a path supplied by the
-// workload. On success the coordinator has written CuinterposeStateFile into
-// checkpointDir.
-//
-// There is no undo: once prepare has torn down shared mappings the source
-// workload can only continue by being restored, so a later checkpoint failure
-// is fail-stop for the source (the caller terminates it).
-func PrepareCuinterpose(
-	ctx context.Context,
-	checkpointDir string,
-	procRoot string,
-	targetPID int,
-	namespacePIDs []int,
-	coordinatorBinaryPath string,
-) error {
-	const (
-		binaryFD     = 3
-		checkpointFD = 4
-		mountNSFD    = 5
-		utsNSFD      = 6
-		ipcNSFD      = 7
-		networkNSFD  = 8
-		pidNSFD      = 9
-		rootFD       = 10
-	)
-	args := cuinterposeArgs(
-		"prepare",
-		fmt.Sprintf("/proc/self/fd/%d", checkpointFD),
-		namespacePIDs,
-	)
-
-	files := make([]*os.File, 0, 8)
+// PrepareCuinterpose runs before native CUDA checkpoint. Open the executable,
+// artifact directory, mount namespace, and container root before namespace entry.
+// A failed prepare cannot be rolled back; the caller terminates the source.
+func PrepareCuinterpose(ctx context.Context, checkpointDir, procRoot string, targetPID int, namespacePIDs []int, binary string) error {
+	processDir := filepath.Join(procRoot, strconv.Itoa(targetPID))
+	var files []*os.File
 	defer func() {
 		for _, file := range files {
 			_ = file.Close()
 		}
 	}()
-	for _, path := range []string{
-		coordinatorBinaryPath,
-		checkpointDir,
-		filepath.Join(procRoot, strconv.Itoa(targetPID), "ns", "mnt"),
-		filepath.Join(procRoot, strconv.Itoa(targetPID), "ns", "uts"),
-		filepath.Join(procRoot, strconv.Itoa(targetPID), "ns", "ipc"),
-		filepath.Join(procRoot, strconv.Itoa(targetPID), "ns", "net"),
-		filepath.Join(procRoot, strconv.Itoa(targetPID), "ns", "pid"),
-		filepath.Join(procRoot, strconv.Itoa(targetPID), "root"),
-	} {
+	// ExtraFiles become child descriptors 3 through 6, in this order.
+	for _, path := range []string{binary, checkpointDir, filepath.Join(processDir, "ns/mnt"), filepath.Join(processDir, "root")} {
 		file, err := os.Open(path)
 		if err != nil {
-			return fmt.Errorf("open cuinterpose prepare input %q: %w", path, err)
+			return fmt.Errorf("open cuinterpose prepare input: %w", err)
 		}
 		files = append(files, file)
 	}
-
-	nsenterArgs := []string{
-		fmt.Sprintf("--mount=/proc/self/fd/%d", mountNSFD),
-		fmt.Sprintf("--uts=/proc/self/fd/%d", utsNSFD),
-		fmt.Sprintf("--ipc=/proc/self/fd/%d", ipcNSFD),
-		fmt.Sprintf("--net=/proc/self/fd/%d", networkNSFD),
-		fmt.Sprintf("--pid=/proc/self/fd/%d", pidNSFD),
-		// setns(CLONE_NEWNS) alone does not replace fs.root or cwd.
-		// Pin the target root before entry just like its namespace descriptors.
-		fmt.Sprintf("--root=/proc/self/fd/%d", rootFD),
-		fmt.Sprintf("--wd=/proc/self/fd/%d", rootFD),
-		"--",
-		fmt.Sprintf("/proc/self/fd/%d", binaryFD),
+	args := []string{
+		"--mount=/proc/self/fd/5", "-t", strconv.Itoa(targetPID), "-u", "-i", "-n", "-p",
+		// Entering a mount namespace alone does not change the filesystem root.
+		"--root=/proc/self/fd/6", "--wd=/proc/self/fd/6",
+		"--", "/proc/self/fd/3",
 	}
-	nsenterArgs = append(nsenterArgs, args...)
-	cmd := exec.CommandContext(ctx, "nsenter", nsenterArgs...)
+	args = append(args, cuinterposeArgs("prepare", "/proc/self/fd/4", namespacePIDs)...)
+	cmd := exec.CommandContext(ctx, "nsenter", args...)
 	cmd.ExtraFiles = files
-	return executeCoordinator(cmd, coordinatorBinaryPath, "--prepare")
+	return executeCoordinator(cmd)
 }
 
-// RestoreCuinterpose runs from nsrestore, which already occupies the restored
-// container's mount, UTS, IPC, network, and PID namespaces.
-func RestoreCuinterpose(
-	ctx context.Context,
-	checkpointDir string,
-	namespacePIDs []int,
-	coordinatorBinaryPath string,
-) error {
-	args := cuinterposeArgs("restore", checkpointDir, namespacePIDs)
-	cmd := exec.CommandContext(ctx, coordinatorBinaryPath, args...)
-	return executeCoordinator(cmd, coordinatorBinaryPath, args[0])
+// RestoreCuinterpose runs after native CUDA restore/unlock, inside the restored
+// namespaces. binary is a descriptor path opened before CRIU replaced mounts.
+func RestoreCuinterpose(ctx context.Context, checkpointDir string, namespacePIDs []int, binary string) error {
+	return executeCoordinator(exec.CommandContext(ctx, binary, cuinterposeArgs("restore", checkpointDir, namespacePIDs)...))
 }
 
-func executeCoordinator(cmd *exec.Cmd, binary, operation string) error {
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s %s failed: %w (stderr: %s)", binary, operation, err, strings.TrimSpace(stderr.String()))
+func executeCoordinator(cmd *exec.Cmd) error {
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("cuinterpose coordinator: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
 }
 
 func cuinterposeArgs(operation, checkpointDir string, namespacePIDs []int) []string {
-	args := []string{
-		"--" + operation,
-		"--checkpoint-dir", checkpointDir,
-		"--control-dir", podcontract.SnapshotControlMountPath,
-	}
-	for _, namespacePID := range namespacePIDs {
-		args = append(args, "--process", strconv.Itoa(namespacePID))
+	args := []string{"--" + operation, "--checkpoint-dir", checkpointDir, "--control-dir", podcontract.SnapshotControlMountPath}
+	for _, pid := range namespacePIDs {
+		args = append(args, "--process", strconv.Itoa(pid))
 	}
 	return args
 }

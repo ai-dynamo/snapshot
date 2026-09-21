@@ -5,7 +5,6 @@ package cuda
 
 import (
 	"context"
-	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,82 +14,25 @@ import (
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
-func TestDetectCuinterpose(t *testing.T) {
-	cases := map[string]struct {
-		setup        func(t *testing.T, procRoot string)
-		pids, nsPIDs []int
-		want         bool
-		wantErr      bool
-	}{
-		"no CUDA processes": {},
-		"no sockets": {
-			pids: []int{101, 102}, nsPIDs: []int{1, 2},
-		},
-		"one of two sockets missing": {
-			setup: func(t *testing.T, root string) { listenUnix(t, cuinterposeEndpointPath(root, 101, 1)) },
-			pids:  []int{101, 102}, nsPIDs: []int{1, 2}, wantErr: true,
-		},
-		"every process has a socket": {
-			setup: func(t *testing.T, root string) {
-				listenUnix(t, cuinterposeEndpointPath(root, 101, 1))
-				listenUnix(t, cuinterposeEndpointPath(root, 102, 2))
-			},
-			pids: []int{101, 102}, nsPIDs: []int{1, 2}, want: true,
-		},
-		"endpoint is not a socket": {
-			setup: func(t *testing.T, root string) {
-				listenUnix(t, cuinterposeEndpointPath(root, 101, 1))
-				path := cuinterposeEndpointPath(root, 102, 2)
-				if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(path, []byte("not a socket"), 0600); err != nil {
-					t.Fatal(err)
-				}
-			},
-			pids: []int{101, 102}, nsPIDs: []int{1, 2}, wantErr: true,
-		},
-	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			procRoot := shortTempDir(t)
-			if tc.setup != nil {
-				tc.setup(t, procRoot)
-			}
-			got, err := DetectCuinterpose(procRoot, tc.pids, tc.nsPIDs)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("DetectCuinterpose() error = %v, wantErr %v", err, tc.wantErr)
-			}
-			if got != tc.want {
-				t.Fatalf("DetectCuinterpose() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
 func TestRemoveStaleCuinterposeSockets(t *testing.T) {
-	control := shortTempDir(t)
-	listenUnix(t, filepath.Join(control, cuinterposeSocketName(7)))
-	listenUnix(t, filepath.Join(control, cuinterposeSocketName(8)))
-	listenUnix(t, filepath.Join(control, cuinterposeSocketName(9)))
-	for _, keep := range []string{"restore-complete", "workload-ready", "other-1.sock"} {
-		if err := os.WriteFile(filepath.Join(control, keep), []byte("x"), 0600); err != nil {
+	control := t.TempDir()
+	for _, name := range []string{"cuinterpose-7.sock", "cuinterpose-9.sock", "restore-complete", "workload-ready"} {
+		if err := os.WriteFile(filepath.Join(control, name), nil, 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	removed, err := RemoveStaleCuinterposeSockets(control, []int{7, 8})
+	if err := RemoveStaleCuinterposeSockets(control, []int{7, 8}); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(control)
 	if err != nil {
-		t.Fatalf("RemoveStaleCuinterposeSockets() error = %v", err)
+		t.Fatal(err)
 	}
-	if removed != 2 {
-		t.Fatalf("removed %d, want 2", removed)
-	}
-	entries, _ := os.ReadDir(control)
 	var names []string
 	for _, entry := range entries {
 		names = append(names, entry.Name())
 	}
-	if strings.Join(names, ",") != "cuinterpose-9.sock,other-1.sock,restore-complete,workload-ready" {
+	if strings.Join(names, ",") != "cuinterpose-9.sock,restore-complete,workload-ready" {
 		t.Fatalf("unexpected leftovers: %v", names)
 	}
 }
@@ -155,12 +97,8 @@ func TestCoordinatorArgvContract(t *testing.T) {
 	nsenterArgv, _ := os.ReadFile(nsenterArgvFile)
 	wantNSenterPrefix := strings.Join([]string{
 		"--mount=/proc/self/fd/5",
-		"--uts=/proc/self/fd/6",
-		"--ipc=/proc/self/fd/7",
-		"--net=/proc/self/fd/8",
-		"--pid=/proc/self/fd/9",
-		"--root=/proc/self/fd/10",
-		"--wd=/proc/self/fd/10",
+		"-t", strconv.Itoa(os.Getpid()), "-u", "-i", "-n", "-p",
+		"--root=/proc/self/fd/6", "--wd=/proc/self/fd/6",
 		"--",
 		"/proc/self/fd/3",
 		"",
@@ -182,58 +120,18 @@ func TestCoordinatorArgvContract(t *testing.T) {
 
 func TestCoordinatorFailureIncludesStderr(t *testing.T) {
 	binary, _ := fakeCoordinator(t, 3)
-	err := RestoreCuinterpose(context.Background(), "/checkpoint", []int{1}, binary)
-	if err == nil {
-		t.Fatal("expected failure")
-	}
-	for _, want := range []string{"exit status 3", "prepare failed: participant prepare"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error %q lacks %q", err, want)
+	fakeNSenter(t)
+	for _, err := range []error{
+		PrepareCuinterpose(context.Background(), t.TempDir(), "/proc", os.Getpid(), []int{1}, binary),
+		RestoreCuinterpose(context.Background(), "/checkpoint", []int{1}, binary),
+	} {
+		if err == nil {
+			t.Fatal("expected failure")
 		}
-	}
-}
-
-func shortTempDir(t *testing.T) string {
-	t.Helper()
-	// Unix socket paths are limited to 108 bytes; t.TempDir() paths are long.
-	dir, err := os.MkdirTemp("", "cui")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return dir
-}
-
-func listenUnix(t *testing.T, path string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		t.Fatal(err)
-	}
-	_ = os.Remove(path)
-	listener, err := net.Listen("unix", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
-}
-
-func TestCheckCuinterposeEnablement(t *testing.T) {
-	cases := []struct {
-		requested, detected bool
-		cuda                int
-		wantErr             bool
-	}{
-		{false, false, 0, false},
-		{true, false, 0, false}, // no CUDA processes: nothing to interpose
-		{false, false, 4, false},
-		{true, true, 4, false},
-		{true, false, 4, true}, // asked for, shim never loaded
-		{false, true, 4, true}, // shim present without the opt-in
-	}
-	for _, tc := range cases {
-		err := CheckCuinterposeEnablement(tc.requested, tc.detected, tc.cuda)
-		if (err != nil) != tc.wantErr {
-			t.Errorf("CheckCuinterposeEnablement(%v, %v, %d) = %v, wantErr %v", tc.requested, tc.detected, tc.cuda, err, tc.wantErr)
+		for _, want := range []string{"exit status 3", "prepare failed: participant prepare"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error %q lacks %q", err, want)
+			}
 		}
 	}
 }

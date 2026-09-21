@@ -174,9 +174,6 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if err := validateRestoreManifest(req, manifest); err != nil {
 		return 0, err
 	}
-	if err := requireCuinterposeState(manifest, artifactPath); err != nil {
-		return 0, err
-	}
 
 	snap, gpuDeviceMapDuration, err := inspectRestore(ctx, rt, log, req, manifest)
 	if err != nil {
@@ -192,7 +189,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		point:  bundleMount,
 	})
 
-	if manifest.Cuinterpose.Requested {
+	if manifest.Cuinterpose {
 		shimMount, err := mounts.MountCuinterpose(ctx, bundleMount)
 		if err != nil {
 			return 0, fmt.Errorf("mount cuinterpose into placeholder: %w", err)

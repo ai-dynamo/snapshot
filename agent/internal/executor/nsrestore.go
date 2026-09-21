@@ -77,7 +77,7 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		if err != nil {
 			return nil, err
 		}
-		if len(m.CUDA.SourceGPUUUIDs) > 1 && !m.Cuinterpose.Prepared && cudaJobFile == "" {
+		if len(m.CUDA.SourceGPUUUIDs) > 1 && !m.Cuinterpose && cudaJobFile == "" {
 			return nil, fmt.Errorf("multi-GPU checkpoint is missing CUDA launch-job state")
 		}
 	}
@@ -194,7 +194,7 @@ func executeRestore(
 		defer f.Close()
 		cudaHelperFdPath = fmt.Sprintf("/proc/self/fd/%d", f.Fd())
 	}
-	if m.Cuinterpose.Prepared {
+	if m.Cuinterpose && !m.CUDA.IsEmpty() {
 		coordinator, err := os.Open(filepath.Join(opts.BundleDir, cuda.CoordinatorBinaryName))
 		if err != nil {
 			return nil, 0, nil, fmt.Errorf("failed to open %s before CRIU restore: %w", cuda.CoordinatorBinaryName, err)
@@ -211,16 +211,9 @@ func executeRestore(
 	if err := snapshotruntime.RemoveControlSentinel(podcontract.SnapshotControlMountPath, podcontract.RestoreCompleteFile); err != nil {
 		return nil, 0, nil, fmt.Errorf("remove stale restore-complete sentinel: %w", err)
 	}
-	if m.Cuinterpose.Requested {
-		// The shim binds its control socket by namespace PID, which CRIU
-		// reproduces exactly; a socket file left by an earlier incarnation of
-		// this pod (agent restart, replaced container) would make that bind fail.
-		removed, err := cuda.RemoveStaleCuinterposeSockets(podcontract.SnapshotControlMountPath, m.CUDA.PIDs)
-		if err != nil {
-			return nil, 0, nil, fmt.Errorf("remove stale cuinterpose sockets: %w", err)
-		}
-		if removed > 0 {
-			log.Info("Removed stale cuinterpose control sockets before restore", "count", removed)
+	if m.Cuinterpose {
+		if err := cuda.RemoveStaleCuinterposeSockets(podcontract.SnapshotControlMountPath, m.CUDA.PIDs); err != nil {
+			return nil, 0, nil, err
 		}
 	}
 
@@ -290,11 +283,8 @@ func executeRestore(
 		if err != nil {
 			return nil, 0, nil, fmt.Errorf("CUDA restore failed: %w", err)
 		}
-		if m.Cuinterpose.Prepared {
-			// The driver is unlocked so the shims can issue CUDA calls, but the
-			// application itself is still parked in its restore-complete poll
-			// loop, so nothing else touches the shared memory while the
-			// coordinator rebuilds it.
+		if m.Cuinterpose {
+			// CUDA is unlocked; the application still awaits restore-complete.
 			err := cuda.RestoreCuinterpose(ctx, opts.CheckpointPath, m.CUDA.PIDs, coordinatorFdPath)
 			if err != nil {
 				return nil, 0, nil, fmt.Errorf("restore cuinterpose: %w", err)
@@ -305,25 +295,4 @@ func executeRestore(
 	// Retain aliases only once CUDA restore and unlock have also succeeded.
 	gpuMountsCommitted = true
 	return timings, restoredPID, nil, nil
-}
-
-// requireCuinterposeState checks that a checkpoint whose manifest records a
-// cuinterpose prepare also carries the coordinator's state file. Without it
-// the shims inside the restored processes would stay frozen mid-checkpoint
-// forever, so restoring such an artifact is refused up front.
-func requireCuinterposeState(m *types.CheckpointManifest, checkpointPath string) error {
-	if !m.Cuinterpose.Prepared {
-		return nil
-	}
-	if m.CUDA.IsEmpty() {
-		return fmt.Errorf("checkpoint manifest records a cuinterpose prepare but no CUDA processes")
-	}
-	if !m.Cuinterpose.Requested {
-		return fmt.Errorf("checkpoint manifest records a cuinterpose prepare without requested interposition")
-	}
-	if _, err := os.Stat(filepath.Join(checkpointPath, cuda.CuinterposeStateFile)); err != nil {
-		return fmt.Errorf("stat cuinterpose state: %w", err)
-	}
-
-	return nil
 }
