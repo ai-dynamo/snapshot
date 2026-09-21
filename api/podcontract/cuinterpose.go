@@ -23,11 +23,9 @@ const (
 )
 
 // CuinterposeDelivery selects the agent image that supplies both shim libraries.
-// Pull secrets must exist in the workload namespace.
 type CuinterposeDelivery struct {
-	AgentImage       string
-	PullPolicy       corev1.PullPolicy
-	ImagePullSecrets []string
+	AgentImage string
+	PullPolicy corev1.PullPolicy
 }
 
 // CuinterposeEnabled reports whether a workload opted into the CUDA interposer
@@ -101,12 +99,6 @@ func ShapeCuinterposeCapture(
 			SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 		},
 	})
-	for _, name := range delivery.ImagePullSecrets {
-		ref := corev1.LocalObjectReference{Name: name}
-		if !slices.Contains(shaped.Spec.ImagePullSecrets, ref) {
-			shaped.Spec.ImagePullSecrets = append(shaped.Spec.ImagePullSecrets, ref)
-		}
-	}
 	*podTemplate = *shaped
 	return nil
 }
