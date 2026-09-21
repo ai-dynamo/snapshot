@@ -12,7 +12,7 @@ use cudarc::driver::sys::CUresult::{
 use cudarc::driver::sys::{
     CUdevice, CUdeviceptr, CUmemAccessDesc, CUmemAllocationGranularity_flags,
     CUmemAllocationHandleType, CUmemAllocationProp, CUmemGenericAllocationHandle,
-    CUmulticastGranularity_flags, CUmulticastObjectProp, CUresult, CUstream_flags,
+    CUmulticastObjectProp, CUresult, CUstream_flags,
 };
 use std::ffi::c_void;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
