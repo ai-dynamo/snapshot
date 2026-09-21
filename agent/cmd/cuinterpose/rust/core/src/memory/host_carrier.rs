@@ -18,7 +18,6 @@ use cudarc::driver::sys::{
 use cuinterpose_protocol::AllocationId;
 use std::collections::BTreeMap;
 use std::ffi::c_void;
-use std::time::{Duration, Instant};
 
 /// Only the inputs needed to move bytes; virtual handles and mapping topology stay in ProcessState.
 #[derive(Clone)]
@@ -51,9 +50,9 @@ pub struct Arena {
 }
 
 impl Arena {
-    pub fn save(allocations: &[AllocationContent]) -> Result<(Option<Self>, u32)> {
+    pub fn save(allocations: &[AllocationContent]) -> Result<Option<Self>> {
         if allocations.is_empty() {
-            return Ok((None, 0));
+            return Ok(None);
         }
         let mut offsets = BTreeMap::new();
         let mut size = 0usize;
@@ -112,7 +111,7 @@ impl Arena {
             return Err(error);
         }
         match arena.copy(allocations, false) {
-            Ok(elapsed) => Ok((Some(arena), elapsed)),
+            Ok(()) => Ok(Some(arena)),
             Err(error) => {
                 let _ = arena.release();
                 Err(error)
@@ -121,7 +120,7 @@ impl Arena {
     }
 
     /// Recreate device backing from the captured host arena.
-    pub fn load(&self, allocations: &mut [AllocationContent]) -> Result<u32> {
+    pub fn load(&self, allocations: &mut [AllocationContent]) -> Result<()> {
         let mut fresh = allocations.to_vec();
         let mut size = 0usize;
         for allocation in &fresh {
@@ -135,7 +134,7 @@ impl Arena {
         if size != self.size {
             return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
         }
-        let loaded = (|| -> Result<u32> {
+        let loaded = (|| -> Result<()> {
             Context::run(self.context, self.device, || {
                 let mut flags = 0u32;
                 let valid = unsafe {
@@ -174,14 +173,14 @@ impl Arena {
             }
             self.copy(&fresh, true)
         })();
-        let elapsed = loaded?;
+        loaded?;
         for (allocation, fresh) in allocations.iter_mut().zip(fresh) {
             allocation.driver = fresh.driver;
         }
-        Ok(elapsed)
+        Ok(())
     }
 
-    fn copy(&self, allocations: &[AllocationContent], load: bool) -> Result<u32> {
+    fn copy(&self, allocations: &[AllocationContent], load: bool) -> Result<()> {
         let mut groups: BTreeMap<(usize, i32), Vec<&AllocationContent>> = BTreeMap::new();
         for allocation in allocations {
             groups
@@ -189,7 +188,6 @@ impl Arena {
                 .or_default()
                 .push(allocation);
         }
-        let mut elapsed = Duration::ZERO;
         for ((context, device), group) in groups {
             let total = group.iter().try_fold(0usize, |sum, a| {
                 sum.checked_add(a.size).ok_or(CUDA_ERROR_OUT_OF_MEMORY)
@@ -236,10 +234,7 @@ impl Arena {
                     )
                 }?;
                 stream = Some(raw_stream);
-                // Staging/context/allocation work is deliberately outside the
-                // copy metric, matching the coordinator's copy-throughput label.
-                let started = Instant::now();
-                let copies = (|| -> Result<()> {
+                (|| -> Result<()> {
                     for (allocation, (address, _)) in group.iter().zip(&mapped) {
                         let offset = *self
                             .offsets
@@ -273,9 +268,7 @@ impl Arena {
                     unsafe { crate::driver::cuStreamSynchronize(raw_stream) }?;
                     synchronized = true;
                     Ok(())
-                })();
-                elapsed = elapsed.saturating_add(started.elapsed());
-                copies
+                })()
             })();
             // Evaluate every cleanup even if an earlier one failed. Preserve
             // the original operation error; cleanup failures still fail-stop.
@@ -309,7 +302,7 @@ impl Arena {
             result = result.and(context.leave());
             result?;
         }
-        Ok(elapsed.as_micros().min(u128::from(u32::MAX)) as u32)
+        Ok(())
     }
 
     pub fn release(self) -> Result<()> {

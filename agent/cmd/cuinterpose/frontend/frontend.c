@@ -223,7 +223,6 @@ static const struct BackendAbi *backend(void) {
     X(cuIpcOpenMemHandle_v2, (CUdeviceptr *out, CUipcMemHandle handle, unsigned flags), (out, handle, flags)) \
     X(cuIpcCloseMemHandle, (CUdeviceptr address), (address)) \
     X(cuMemCreate, (CUmemGenericAllocationHandle *out, size_t size, const CUmemAllocationProp *prop, unsigned long long flags), (out, size, prop, flags)) \
-    X(cuMemGetAllocationGranularity, (size_t *out, const CUmemAllocationProp *prop, CUmemAllocationGranularity_flags flags), (out, prop, flags)) \
     X(cuMemRelease, (CUmemGenericAllocationHandle handle), (handle)) \
     X(cuMemRetainAllocationHandle, (CUmemGenericAllocationHandle *out, void *address), (out, address)) \
     X(cuMemMap, (CUdeviceptr address, size_t size, size_t offset, CUmemGenericAllocationHandle handle, unsigned long long flags), (address, size, offset, handle, flags)) \
@@ -238,7 +237,6 @@ static const struct BackendAbi *backend(void) {
     X(cuMulticastBindMem_v2, (CUmemGenericAllocationHandle handle, CUdevice device, size_t offset, CUmemGenericAllocationHandle member, size_t member_offset, size_t size, unsigned long long flags), (handle, device, offset, member, member_offset, size, flags)) \
     X(cuMulticastBindAddr, (CUmemGenericAllocationHandle handle, size_t offset, CUdeviceptr address, size_t size, unsigned long long flags), (handle, offset, address, size, flags)) \
     X(cuMulticastBindAddr_v2, (CUmemGenericAllocationHandle handle, CUdevice device, size_t offset, CUdeviceptr address, size_t size, unsigned long long flags), (handle, device, offset, address, size, flags)) \
-    X(cuMulticastGetGranularity, (size_t *out, const CUmulticastObjectProp *prop, CUmulticastGranularity_flags flags), (out, prop, flags)) \
     X(cuMulticastUnbind, (CUmemGenericAllocationHandle handle, CUdevice device, size_t offset, size_t size), (handle, device, offset, size))
 
 // The generated Rust table is authoritative. Check the adapters' full pointer

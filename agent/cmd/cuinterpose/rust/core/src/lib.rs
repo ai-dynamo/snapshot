@@ -16,9 +16,8 @@ use cudarc::driver::sys::CUresult::{
     CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_NOT_INITIALIZED, CUDA_ERROR_UNKNOWN, CUDA_SUCCESS,
 };
 use cudarc::driver::sys::{
-    CUdevice, CUdeviceptr, CUipcMemHandle, CUmemAccessDesc, CUmemAllocationGranularity_flags,
-    CUmemAllocationHandleType, CUmemAllocationProp, CUmemGenericAllocationHandle,
-    CUmulticastGranularity_flags, CUmulticastObjectProp, CUresult,
+    CUdevice, CUdeviceptr, CUipcMemHandle, CUmemAccessDesc, CUmemAllocationHandleType,
+    CUmemAllocationProp, CUmemGenericAllocationHandle, CUmulticastObjectProp, CUresult,
 };
 use cuinterpose_abi::*;
 use runtime::RUNTIME_FAILED;
@@ -61,7 +60,6 @@ exports! {
     cuIpcOpenMemHandle_v2(out: *mut CUdeviceptr, handle: CUipcMemHandle, flags: u32);
     cuIpcCloseMemHandle(address: CUdeviceptr);
     cuMemCreate(out: *mut CUmemGenericAllocationHandle, size: usize, prop: *const CUmemAllocationProp, flags: u64);
-    cuMemGetAllocationGranularity(out: *mut usize, prop: *const CUmemAllocationProp, flags: CUmemAllocationGranularity_flags);
     cuMemRelease(handle: CUmemGenericAllocationHandle);
     cuMemRetainAllocationHandle(out: *mut CUmemGenericAllocationHandle, address: *mut c_void);
     cuMemMap(address: CUdeviceptr, size: usize, offset: usize, handle: CUmemGenericAllocationHandle, flags: u64);
