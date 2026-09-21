@@ -81,3 +81,20 @@ COMPLETE on the abandoned operation. This requires the qualified CustomStorage
 driver's cleanup semantics. A drain transport failure terminates and reaps the
 engine before the CPU broker releases admission. No public CUDA abort API is
 assumed. Successful sessions retain the engine for subsequent restores.
+
+## Transaction admission
+
+`--gpu-engine /absolute/path` enables native sessions explicitly. The CPU broker
+waits for that executable's ready reply before serving requests. The executable
+path is not inferred from a second worker's path.
+
+BindNative pins the transaction storage and target PID namespace before CRIU.
+The first operation identifies the live target in that namespace or its CRIU
+child namespace. Each captured PID can be admitted once. Commit requires every
+session to complete and drain; Abort waits for disconnected sessions to drain
+before deleting staging. Live sessions also prevent transaction expiry from
+removing their backing files. Failed sessions permit Abort but prevent Commit.
+
+The Go client returns only the bound session socket for nsrestore to inherit.
+The workload has no general broker connection. The session direction is native
+SAVE or LOAD, independent of cuinterpose's host-carrier protocol.

@@ -18,9 +18,13 @@
 #include "transfer_engine.hpp"
 
 namespace snapshot::pagebroker {
+class NativeSession;
+class GpuEngine;
 class Broker {
  public:
-  Broker(Path staging_root, Path storage_root);
+  Broker(Path staging_root, Path storage_root, Path gpu_engine_path = {});
+  void StartGpuEngine();
+  std::unique_ptr<NativeSession> BindNative(const Request& request);
   Response HandleRequest(const Request& request);
   void ReapExpiredTransactions(std::chrono::steady_clock::time_point now);
 
@@ -57,6 +61,7 @@ class Broker {
       const Request& request, Transaction& transaction, const CheckpointTransactionDescriptor& descriptor);
   Response Abort(const Request& request);
   Path staging_root_;
+  std::shared_ptr<GpuEngine> gpu_engine_;
   Engines io_engines_;
   std::mutex transactions_mutex_;
   Transactions transactions_;
