@@ -1,0 +1,18 @@
+{
+  "combinedRecordCount": 15,
+  "expiresAt": "2026-10-05T21:11:42.152Z",
+  "formatVersion": 1,
+  "generatedAt": "2026-09-21T21:11:42.152Z",
+  "historyRecordCount": 12,
+  "key": "pr-323",
+  "previewRecordCount": 3,
+  "source": {
+    "branch": "pull-request/323",
+    "commit": "d6eae2df017edd5af998af4275e1ea474e5cb43f",
+    "event": "push",
+    "pullRequest": 323,
+    "runAttempt": 1,
+    "runId": "35654515038",
+    "runUrl": "https://github.com/ai-dynamo/snapshot/actions/runs/35654515038"
+  }
+}
