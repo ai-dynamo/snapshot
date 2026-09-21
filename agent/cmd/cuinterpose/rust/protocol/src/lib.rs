@@ -22,7 +22,7 @@ use std::{
 #[doc(inline)]
 pub use transport::{connect, receive, send};
 
-pub const VERSION: u8 = 2;
+pub const VERSION: u8 = 3;
 // Bound allocations controlled by socket frame prefixes and checkpoint files.
 // Protocol payloads contain metadata, never allocation contents.
 pub const MAX_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
@@ -142,7 +142,6 @@ pub enum Reply {
     Completed {
         operation: Operation,
         bytes: u64,
-        copy_us: u32,
     },
     UnicastExport,
     MulticastExport {
