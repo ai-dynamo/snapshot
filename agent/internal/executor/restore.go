@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -173,6 +174,10 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		return 0, err
 	}
 
+	if manifest.CUDA.CustomStorage && !brokered {
+		return 0, fmt.Errorf("native CustomStorage checkpoint requires PageBroker restore")
+	}
+
 	snap, gpuDeviceMapDuration, err := inspectRestore(ctx, rt, log, req, manifest)
 	if err != nil {
 		return 0, err
@@ -198,28 +203,48 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		})
 	}
 
+	var sessions cuda.NativeSessions
 	containerCheckpointPath := nsmount.CheckpointDst
 	var pageBrokerStageDuration, pageBrokerMountDuration, pageBrokerCommitDuration time.Duration
 	if brokered {
 		transactionID = uuid.NewString()
 		broker = pagebroker.Client{ControlSocketPath: req.PageBrokerControlSocketPath}
 		stageStart := time.Now()
-		staged, err := broker.StagedRestore(ctx, transactionID, artifactPath)
+		var staged string
+		if manifest.CUDA.CustomStorage {
+			err = broker.DirectRestore(ctx, transactionID, artifactPath)
+		} else {
+			staged, err = broker.StagedRestore(ctx, transactionID, artifactPath)
+		}
 		pageBrokerStageDuration = time.Since(stageStart)
 		if err != nil {
 			return 0, fmt.Errorf("stage PageBroker restore: %w", err)
 		}
-		mountStart := time.Now()
-		stagingMount, err := mounts.MountPageBroker(ctx, bundleMount, staged)
-		pageBrokerMountDuration = time.Since(mountStart)
-		if err != nil {
-			return 0, fmt.Errorf("mount PageBroker staging: %w", err)
+		if manifest.CUDA.CustomStorage {
+			sessions, err = cuda.BindNativeSessions(ctx, broker, transactionID, snap.PlaceholderPID,
+				manifest.CUDA.PIDs, snap.TargetGPUUUIDs, snap.CUDADeviceMap, false)
+			if err != nil {
+				return 0, err
+			}
+			defer sessions.Close()
+			artifactMount, err := mounts.MountArtifact(ctx, bundleMount, artifactPath)
+			if err != nil {
+				return 0, fmt.Errorf("mount native checkpoint: %w", err)
+			}
+			activeMounts = append(activeMounts, restoreMount{action: "unmount native checkpoint", point: artifactMount})
+		} else {
+			mountStart := time.Now()
+			stagingMount, err := mounts.MountPageBroker(ctx, bundleMount, staged)
+			pageBrokerMountDuration = time.Since(mountStart)
+			if err != nil {
+				return 0, fmt.Errorf("mount PageBroker staging: %w", err)
+			}
+			activeMounts = append(activeMounts, restoreMount{
+				action: "unmount PageBroker staging from placeholder",
+				point:  stagingMount,
+			})
+			containerCheckpointPath = nsmount.PageBrokerDst
 		}
-		activeMounts = append(activeMounts, restoreMount{
-			action: "unmount PageBroker staging from placeholder",
-			point:  stagingMount,
-		})
-		containerCheckpointPath = nsmount.PageBrokerDst
 	} else {
 		artifactMount, err := mounts.MountArtifact(ctx, bundleMount, artifactPath)
 		if err != nil {
@@ -231,8 +256,13 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		})
 	}
 
-	result, err := execNSRestore(ctx, log, req, snap, bundleMount, containerCheckpointPath)
+	result, err := execNSRestore(ctx, log, req, snap, bundleMount, containerCheckpointPath, sessions)
 	if err != nil {
+		if manifest.CUDA.CustomStorage {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			err = errors.Join(err, rt.TerminateContainer(stopCtx, req.ContainerID))
+		}
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
 	}
 	if brokered {
@@ -426,6 +456,7 @@ func inspectRestore(
 		CgroupRoot:      cgroupRoot,
 		CUDADeviceMap:   cudaDeviceMap,
 		GPUMountAliases: gpuMountAliases,
+		TargetGPUUUIDs:  targetGPUUUIDs,
 	}, discoverDuration + deviceMapDuration, nil
 }
 
@@ -450,7 +481,7 @@ func existingMountPaths(targetRoot string, destinations []string, aliases map[st
 	return existing
 }
 
-func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot, mp nsmount.MountPoint, checkpointPath string) (*RestoreInNamespaceResult, error) {
+func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot, mp nsmount.MountPoint, checkpointPath string, native cuda.NativeSessions) (*RestoreInNamespaceResult, error) {
 
 	cmd, closeFiles, err := snapshotruntime.CommandInNamespaces(ctx, snap.PlaceholderPID, mp.NsFd(),
 		snap.TargetRoot, filepath.Join(nsmount.SnapshotBinSrc, "nsrestore"))
@@ -478,6 +509,10 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	}
 
 	cmd.Args = append(cmd.Args, args...)
+	for pid, file := range native {
+		cmd.Args = append(cmd.Args, "--native-session", pid+":"+strconv.Itoa(3+len(cmd.ExtraFiles)))
+		cmd.ExtraFiles = append(cmd.ExtraFiles, file)
+	}
 	log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())
 
 	var stdout bytes.Buffer

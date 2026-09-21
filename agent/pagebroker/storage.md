@@ -41,9 +41,15 @@ buffer allocation in this interface.
 
 Each device ring initializes once, before accepting work. CUDA host-NUMA VMM
 allocations place staging memory near that GPU; a non-NUMA host uses node zero.
-The production ring has 32 slots of 128 MiB (4 GiB per GPU). The storage-only `NixlTransfer` adapter accepts ordinary host buffers and file
-ranges; it contains no CUDA or CRIU types. NIXL registers these buffers once, uses its POSIX asynchronous backend, and registers only the current
-file per transfer. Direct I/O is an engine policy, not negotiated per request.
+The production ring has 32 slots of 128 MiB (4 GiB per GPU). The storage-only
+`NixlTransfer` adapter accepts ordinary host buffers and file ranges; it contains
+no CUDA or CRIU types. NIXL registers these buffers once, uses its POSIX
+asynchronous backend, and registers only the current file per transfer. Direct
+I/O is an engine policy, not negotiated per request.
+
+NIXL POSIX is available through this generic file-to-host-buffer adapter and is
+used by the GPU transfer ring. CRIU `StagedRestore` uses ordinary POSIX directory
+copies; NIXL is not wired into that path. These restore APIs remain separate.
 
 LOAD primes all reads, then overlaps subsequent reads with H2D copies. SAVE
 primes D2H copies and overlaps writes with the next copies. Both storage and CUDA
@@ -98,3 +104,25 @@ removing their backing files. Failed sessions permit Abort but prevent Commit.
 The Go client returns only the bound session socket for nsrestore to inherit.
 The workload has no general broker connection. The session direction is native
 SAVE or LOAD, independent of cuinterpose's host-carrier protocol.
+
+## Agent integration
+
+Set `pageBroker.enabled: true` and `pageBroker.gpuEngine:
+/usr/local/bin/pagebroker-gpu-engine`, with the GPU PageBroker image. The chart
+sets the agent's `pageBroker.nativeCUDA` accordingly. CPU-only PageBroker keeps
+its existing behavior when the engine is not configured. Budget at least 4 GiB
+of host memory per visible GPU plus daemon and filesystem overhead; the engine
+uses direct I/O for page-aligned CUDA extent files.
+
+The checkpoint manifest records `cudaRestore.customStorage`. CPU `StagedRestore` retains its independently writable directory contract.
+GPU `DirectRestore` retains the immutable artifact for streaming and passes bound sockets through nsrestore. Each
+cuCheckpointProcessRestore call finishes before the next begins. Its transfer
+starts immediately and overlaps subsequent preparation. All transfers must
+succeed before COMPLETE and unlock. Capture locks all targets before preparing
+any, then transfers all prepared targets before completing them.
+
+Phase logs report native preparation and transfer start/end timestamps, bytes,
+CUDA waits, and total duration. These support an overlap timeline without
+charging engine startup to restore. Performance qualification also requires
+fresh, coherent model responses after restore; successful RPCs alone are not
+sufficient.

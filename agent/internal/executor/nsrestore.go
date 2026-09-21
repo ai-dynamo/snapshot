@@ -24,6 +24,7 @@ import (
 
 // RestoreOptions holds configuration for an in-namespace restore.
 type RestoreOptions struct {
+	NativeSessions  cuda.NativeSessions
 	CheckpointPath  string
 	CUDADeviceMap   string
 	GPUMountAliases map[string]string
@@ -65,6 +66,10 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 	if err != nil {
 		return nil, fmt.Errorf("failed to read manifest: %w", err)
 	}
+	if m.CUDA.CustomStorage != (len(opts.NativeSessions) != 0) ||
+		(m.CUDA.CustomStorage && len(opts.NativeSessions) != len(m.CUDA.PIDs)) {
+		return nil, fmt.Errorf("native session capabilities do not match checkpoint CUDA participants")
+	}
 	log.V(1).Info("Loaded checkpoint manifest",
 		"ext_mounts", len(m.CRIUDump.ExtMnt),
 		"criu_log_level", m.CRIUDump.CRIU.LogLevel,
@@ -72,7 +77,7 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		"checkpoint_has_cuda", !m.CUDA.IsEmpty(),
 	)
 	cudaJobFile := ""
-	if !m.CUDA.IsEmpty() {
+	if !m.CUDA.IsEmpty() && !m.CUDA.CustomStorage {
 		cudaJobFile, err = cuda.JobFileFromCheckpoint(opts.CheckpointPath)
 		if err != nil {
 			return nil, err
@@ -278,7 +283,12 @@ func executeRestore(
 			"criu_callback_pid", restoredPID,
 		)
 		cudaStart := time.Now()
-		_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, log)
+		if m.CUDA.CustomStorage {
+			err = cuda.RunNativeSessions(ctx, opts.NativeSessions, m.CUDA.PIDs, false, log, restorePIDs)
+			opts.NativeSessions.Close()
+		} else {
+			_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, log)
+		}
 		timings.cudaRestoreDuration = time.Since(cudaStart)
 		if err != nil {
 			return nil, 0, nil, fmt.Errorf("CUDA restore failed: %w", err)

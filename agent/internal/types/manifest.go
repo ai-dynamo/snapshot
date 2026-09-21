@@ -172,6 +172,8 @@ func NewOverlayManifest(exclusions OverlaySettings, upperDir string, ociSpec *sp
 
 // CUDAManifest captures CUDA state from checkpoint time for restore.
 type CUDAManifest struct {
+	// CustomStorage stores native GPU extents through PageBroker.
+	CustomStorage        bool              `yaml:"customStorage,omitempty"`
 	PIDs                 []int             `yaml:"pids"`
 	SourceGPUUUIDs       []string          `yaml:"sourceGpuUuids"`
 	DevicePaths          map[string]string `yaml:"devicePaths,omitempty"`
