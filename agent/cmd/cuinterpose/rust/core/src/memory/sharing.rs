@@ -183,6 +183,11 @@ impl ExportCache {
 impl Memblock {
     /// Publish the creator's export without making peer service acquire ProcessState.
     pub fn export(&mut self, namespace_pid: NamespacePid) -> Result<AllocationReference> {
+        if let Self::Unicast(allocation) = self
+            && allocation.context == 0
+        {
+            allocation.context = context()?;
+        }
         let reference = self.reference();
         if reference.creator_pid == namespace_pid && !export_cache()?.contains(&reference.id)? {
             let fd = crate::driver::export_posix(self.driver_handle()?)?;
@@ -191,9 +196,6 @@ impl Memblock {
         match self {
             Self::Unicast(allocation) => {
                 allocation.shared = true;
-                if allocation.context == 0 {
-                    allocation.context = context();
-                }
             }
         }
         Ok(reference)
@@ -203,11 +205,10 @@ impl Memblock {
 pub(crate) fn import_reference(
     mut state: MutexGuard<'static, ProcessState>,
     reference: AllocationReference,
-) -> Result<u64> {
+) -> Result<(MutexGuard<'static, ProcessState>, u64)> {
     if state.phase != Phase::Active {
         return Err(CudaError::from(CUDA_ERROR_NOT_READY));
     }
-    state.check_handle_capacity()?;
     let id = reference.id;
     if let Some(memblock) = state.memblocks.get_mut(&id) {
         if memblock.reference() != reference {
@@ -226,7 +227,8 @@ pub(crate) fn import_reference(
                 allocation.shared = true;
             }
         }
-        return state.mint_virtual_allocation_handle(id);
+        let handle = state.mint_virtual_allocation_handle(id)?;
+        return Ok((state, handle));
     }
     // EXPORT service uses only CACHE, never STATE, so a same-process request
     // can complete while this call holds its allocation metadata lock.
@@ -235,19 +237,22 @@ pub(crate) fn import_reference(
     if multicast_properties.is_some() {
         return Err(CUDA_ERROR_INVALID_HANDLE.into());
     }
+    let context = context()?;
     let driver = crate::driver::import_posix(raw.as_fd())?;
     let driver = runtime::must_complete(VirtualAllocationHandle::from_driver(driver));
     let mut properties = std::mem::MaybeUninit::<CUmemAllocationProp>::zeroed();
     runtime::must_complete(unsafe {
         crate::driver::cuMemGetAllocationPropertiesFromHandle(properties.as_mut_ptr(), driver)
     });
-    Ok(runtime::must_complete(state.adopt_unicast(
+    let handle = runtime::must_complete(state.adopt_unicast(
         reference,
         driver,
         0,
         unsafe { properties.assume_init() },
         true,
-    )))
+        context,
+    ));
+    Ok((state, handle))
 }
 #[cfg(test)]
 mod codec_tests {

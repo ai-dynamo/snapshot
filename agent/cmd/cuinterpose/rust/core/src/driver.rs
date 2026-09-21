@@ -146,12 +146,10 @@ functions! {
     cuStreamSynchronize(stream: *mut c_void);
 }
 
-pub(super) fn context() -> usize {
+pub(super) fn context() -> Result<usize> {
     let mut context = std::ptr::null_mut::<c_void>();
-    if unsafe { crate::driver::cuCtxGetCurrent(&mut context) }.is_err() {
-        return 0;
-    }
-    context as usize
+    unsafe { crate::driver::cuCtxGetCurrent(&mut context) }?;
+    Ok(context as usize)
 }
 
 pub struct Context {
