@@ -130,12 +130,20 @@ functions! {
     cuMemGetAllocationGranularity(size: *mut usize, properties: *const CUmemAllocationProp, flags: CUmemAllocationGranularity_flags);
     cuMemExportToShareableHandle(output: *mut c_void, handle: CUmemGenericAllocationHandle, handle_type: CUmemAllocationHandleType, flags: u64);
     cuMemGetAllocationPropertiesFromHandle(properties: *mut CUmemAllocationProp, handle: CUmemGenericAllocationHandle);
+    cuMemHostRegister_v2(address: *mut c_void, size: usize, flags: u32);
+    cuMemHostGetFlags(flags: *mut u32, address: *mut c_void);
+    cuMemHostUnregister(address: *mut c_void);
     cuMemImportFromShareableHandle(handle: *mut CUmemGenericAllocationHandle, shareable: *mut c_void, handle_type: CUmemAllocationHandleType);
     cuMemMap(address: CUdeviceptr, size: usize, offset: usize, handle: CUmemGenericAllocationHandle, flags: u64);
     cuMemRelease(handle: CUmemGenericAllocationHandle);
     cuMemRetainAllocationHandle(handle: *mut CUmemGenericAllocationHandle, address: *mut c_void);
     cuMemSetAccess(address: CUdeviceptr, size: usize, access: *const CUmemAccessDesc, count: usize);
     cuMemUnmap(address: CUdeviceptr, size: usize);
+    cuMemcpyDtoHAsync_v2(host: *mut c_void, device: CUdeviceptr, size: usize, stream: *mut c_void);
+    cuMemcpyHtoDAsync_v2(device: CUdeviceptr, host: *const c_void, size: usize, stream: *mut c_void);
+    cuStreamCreate(stream: *mut *mut c_void, flags: CUstream_flags);
+    cuStreamDestroy_v2(stream: *mut c_void);
+    cuStreamSynchronize(stream: *mut c_void);
 }
 
 pub(super) fn context() -> Result<usize> {
