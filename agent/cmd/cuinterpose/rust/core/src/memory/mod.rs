@@ -4,6 +4,7 @@
 //! Memblock identity, virtual-handle ownership, and tracked address ranges.
 
 pub(crate) mod checkpoint;
+pub(crate) mod ipc;
 pub(crate) mod sharing;
 pub(crate) mod vmm;
 
@@ -102,6 +103,7 @@ pub struct HandleEntry {
 
 pub struct ProcessState {
     pub namespace_pid: NamespacePid,
+    pub malloc_regions: BTreeMap<u64, ipc::MallocRegion>,
     pub memblocks: BTreeMap<AllocationId, Memblock>,
     pub virtual_allocation_handles: BTreeMap<VirtualAllocationHandle, HandleEntry>,
     pub mappings: BTreeMap<u64, Mapping>,
@@ -114,6 +116,7 @@ impl ProcessState {
     pub(crate) fn new(namespace_pid: NamespacePid) -> Self {
         Self {
             namespace_pid,
+            malloc_regions: BTreeMap::new(),
             memblocks: BTreeMap::new(),
             virtual_allocation_handles: BTreeMap::new(),
             mappings: BTreeMap::new(),
