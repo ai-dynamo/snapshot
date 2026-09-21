@@ -121,15 +121,20 @@ fn command_all(
     operation: Operation,
     allocations: &[AllocationSummary],
 ) -> Result<()> {
-    std::thread::scope(|scope| {
-        let mut jobs = Vec::with_capacity(peers.len());
-        for peer in peers {
-            let bytes = allocations
+    let expected_bytes: Vec<_> = peers
+        .iter()
+        .map(|peer| {
+            allocations
                 .iter()
                 .filter(|a| a.preserve_content && a.reference.creator_pid == peer.namespace_pid)
                 .try_fold(0u64, |sum, a| {
                     sum.checked_add(a.size).context("allocation size overflow")
-                })?;
+                })
+        })
+        .collect::<Result<_>>()?;
+    std::thread::scope(|scope| {
+        let mut jobs = Vec::with_capacity(peers.len());
+        for (peer, bytes) in peers.iter().zip(expected_bytes) {
             jobs.push(
                 std::thread::Builder::new()
                     .spawn_scoped(scope, move || peer.execute(operation, bytes))?,

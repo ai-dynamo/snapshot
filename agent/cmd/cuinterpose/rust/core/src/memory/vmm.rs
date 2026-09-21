@@ -3,7 +3,7 @@
 
 //! Unicast backing and mapping metadata.
 
-use super::{Memblock, ProcessState};
+use super::{HandleEntry, Memblock, ProcessState, VirtualAllocationHandle};
 use crate::driver::Result;
 use cudarc::driver::sys::CUresult::*;
 use cudarc::driver::sys::*;
@@ -36,6 +36,7 @@ unsafe impl Send for Allocation {}
 #[derive(Clone)]
 pub struct Mapping {
     pub id: AllocationId,
+    pub handle: VirtualAllocationHandle,
     pub address: u64,
     pub size: usize,
     pub offset: usize,
@@ -65,6 +66,7 @@ impl ProcessState {
         size: usize,
         properties: CUmemAllocationProp,
         shared: bool,
+        context: usize,
     ) -> Result<u64> {
         let handle = self.mint_virtual_allocation_handle(reference.id)?;
         self.memblocks.insert(
@@ -75,30 +77,42 @@ impl ProcessState {
                 size,
                 properties,
                 shared,
-                context: crate::driver::context(),
+                context,
             }),
         );
         Ok(handle)
     }
 
-    /// A CUDA retain may recover the backing or return a redundant reference.
-    pub(crate) fn retain_backing(&mut self, id: AllocationId, driver: u64) -> Result<u64> {
-        let allocation = self
+    /// Recover the driver reference if needed while retaining the original application handle.
+    pub(crate) fn retain_backing(
+        &mut self,
+        id: AllocationId,
+        handle: VirtualAllocationHandle,
+        driver: u64,
+    ) -> Result<u64> {
+        let memblock = self
             .memblocks
             .get_mut(&id)
-            .and_then(Memblock::unicast_mut)
             .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
-        if allocation.driver.is_some() {
-            unsafe { crate::driver::cuMemRelease(driver) }?;
-        } else {
+        if let Memblock::Unicast(allocation) = memblock
+            && allocation.driver.is_none()
+        {
             allocation.driver = Some(driver);
+        } else {
+            unsafe { crate::driver::cuMemRelease(driver) }?;
         }
-        self.mint_virtual_allocation_handle(id)
+        let entry = self
+            .virtual_allocation_handles
+            .entry(handle)
+            .or_insert(HandleEntry { id, references: 0 });
+        entry.references += 1;
+        Ok(handle.as_raw())
     }
 
     pub(crate) fn map_unicast(
         &mut self,
         id: AllocationId,
+        handle: VirtualAllocationHandle,
         address: u64,
         size: usize,
         offset: usize,
@@ -109,6 +123,11 @@ impl ProcessState {
             .get_mut(&id)
             .and_then(Memblock::unicast_mut)
             .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+        let context = if allocation.context == 0 {
+            crate::driver::context()?
+        } else {
+            allocation.context
+        };
         unsafe {
             crate::driver::cuMemMap(
                 address,
@@ -119,12 +138,13 @@ impl ProcessState {
             )
         }?;
         if allocation.context == 0 {
-            allocation.context = crate::driver::context();
+            allocation.context = context;
         }
         self.mappings.insert(
             address,
             Mapping {
                 id,
+                handle,
                 address,
                 size,
                 offset,
@@ -166,6 +186,7 @@ mod tests {
         };
         let mut mapping = Mapping {
             id: [1; 16],
+            handle: VirtualAllocationHandle::from_raw(VirtualAllocationHandle::TAG | 1).unwrap(),
             address: 4096,
             size: 4096,
             offset: 0,
