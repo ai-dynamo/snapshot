@@ -126,7 +126,7 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		return err
 	}
 	cudaJobFile := ""
-	if len(state.CUDAHostPIDs) > 0 {
+	if len(state.CUDAHostPIDs) > 0 && !(brokered && cfg.PageBroker.NativeCUDA) {
 		cudaJobFile, err = cuda.StageJobFile(state.RootFS, tmpDir, len(state.GPUs.Devices))
 		if err != nil {
 			return err
@@ -138,7 +138,20 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		return err
 	}
 
-	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log)
+	var sessions cuda.NativeSessions
+	if brokered && cfg.PageBroker.NativeCUDA && len(state.CUDANSPIDs) > 0 {
+		sessions, err = cuda.BindNativeSessions(ctx, broker, transactionID, state.PID,
+			state.CUDANSPIDs, data.CUDA.SourceGPUUUIDs, "", true)
+		if err != nil {
+			return err
+		}
+		defer sessions.Close()
+		data.CUDA.CustomStorage = true
+		if err := types.WriteManifest(tmpDir, data); err != nil {
+			return err
+		}
+	}
+	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, sessions)
 	if err != nil {
 		return checkpointNeedsSourceKill(err)
 	}
@@ -338,16 +351,25 @@ func configureCheckpoint(
 	return criuOpts, m, nil
 }
 
-func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger) (*checkpointPhaseTimings, error) {
+func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger, native cuda.NativeSessions) (*checkpointPhaseTimings, error) {
 	timings := &checkpointPhaseTimings{}
 
 	// CUDA lock+checkpoint must happen before CRIU dump
 	if len(state.CUDAHostPIDs) > 0 {
-		cudaTimings, err := cuda.CheckpointProcessTree(ctx, state.CUDAHostPIDs, cudaJobFile, checkpointDir, log)
-		if err != nil {
-			return nil, fmt.Errorf("CUDA checkpoint failed: %w", err)
+		if data.CUDA.CustomStorage {
+			start := time.Now()
+			if err := cuda.RunNativeSessions(ctx, native, state.CUDANSPIDs, true, log); err != nil {
+				return nil, fmt.Errorf("native CustomStorage capture: %w", err)
+			}
+			native.Close()
+			timings.CUDACheckpointDuration = time.Since(start)
+		} else {
+			cudaTimings, err := cuda.CheckpointProcessTree(ctx, state.CUDAHostPIDs, cudaJobFile, checkpointDir, log)
+			if err != nil {
+				return nil, fmt.Errorf("CUDA checkpoint failed: %w", err)
+			}
+			timings.CUDACheckpointDuration = cudaTimings.TotalDuration
 		}
-		timings.CUDACheckpointDuration = cudaTimings.TotalDuration
 	}
 
 	criuDumpDuration, err := criu.ExecuteDump(criuOpts, checkpointDir, criuSettings, log)
