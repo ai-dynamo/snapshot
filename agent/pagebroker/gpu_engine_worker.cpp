@@ -50,12 +50,14 @@ std::string Report(const char* format, Args... args) {
   return std::string(buffer, length);
 }
 
+constexpr transfer::TransferOptions kTransferOptions{32, 128ULL * 1024 * 1024};
+
 struct Device {
   CUdevice device;
   CUcontext context;
   std::string uuid;
   std::mutex mutex;
-  transfer::TransferBuffers buffers{{32, 32ULL * 1024 * 1024}};
+  transfer::TransferBuffers buffers{kTransferOptions};
 };
 
 // Immutable device ownership, initialized before the CPU broker starts serving.
@@ -91,7 +93,9 @@ class Engine {
     }
     Require(!devices.empty(), "GPU engine has no devices");
     ready = Report("{\"event\":\"ready\",\"initialization_seconds\":%.6f,\"retained_contexts\":%zu,"
-                   "\"pinned_bytes_per_device\":1073741824,\"buffer_count\":32,\"chunk_bytes\":33554432}", Seconds(start), devices.size());
+                   "\"pinned_bytes_per_device\":%zu,\"buffer_count\":%zu,\"chunk_bytes\":%zu}",
+                   Seconds(start), devices.size(), kTransferOptions.buffer_count * kTransferOptions.chunk_bytes,
+                   kTransferOptions.buffer_count, kTransferOptions.chunk_bytes);
   }
   std::map<CUcontext, std::unique_ptr<Device>> devices;
   decltype(&cuCheckpointOperationComplete) complete = nullptr;

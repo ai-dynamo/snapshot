@@ -26,7 +26,7 @@ func (sessions NativeSessions) Close() {
 }
 
 // BindNativeSessions pins each restored PID's future namespace and transaction
-// directory. Workers start only once CRIU has recreated their target.
+// directory. After CRIU, the persistent GPU engine binds the recreated target.
 func BindNativeSessions(ctx context.Context, broker pagebroker.Client, transaction string, containerPID int, pids []int, devices []string, deviceMap string, save bool) (NativeSessions, error) {
 	direction := pagebroker.BindAllocationSession_LOAD
 	if save {

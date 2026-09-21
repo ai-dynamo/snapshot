@@ -67,7 +67,7 @@ bool TestOptionParsingAndBounds() {
              !transfer::ValidateTransferOptions(
                  {transfer::kMaximumBufferCount, transfer::kMaximumChunkBytes},
                  &error),
-             "more than 1 GiB per device was accepted");
+             "per-device pinned-memory limit was not enforced");
 }
 
 bool TestPinnedMemoryCalculation() {

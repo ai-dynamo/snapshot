@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Persistent native CustomStorage engine
 
-PageBroker owns a long-lived `pagebroker-gpu-engine` process. Before the CPU broker serves requests, this process initializes CUDA, retains one primary context per visible GPU, and allocates and registers one NIXL transfer ring per GPU. Contexts and rings remain alive across checkpoint and restore sessions. Each ring uses 32 slots of 32 MiB (1 GiB of pinned memory per GPU). The daemon needs memory for those rings in addition to its other resources.
+PageBroker owns a long-lived `pagebroker-gpu-engine` process. Before the CPU broker serves requests, this process initializes CUDA, retains one primary context per visible GPU, and allocates and registers one NIXL transfer ring per GPU. Contexts and rings remain alive across checkpoint and restore sessions. Each ring uses 32 slots of 128 MiB (4 GiB of pinned memory per GPU). Eight GPUs therefore need 32 GiB of pinned memory plus runtime overhead; the full-model qualification uses a 64-GiB PageBroker container limit. This memory is shared across successive sessions rather than allocated for each target.
 
 The agent uses native CustomStorage when a workload opts into PageBroker and cuinterpose and has CUDA processes. The shim still uses host carriers for shared creator allocations; it receives no PageBroker connections or storage settings. This native path is separate from the descriptor-based allocation-session worker.
 

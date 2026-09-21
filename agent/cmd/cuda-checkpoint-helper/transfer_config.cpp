@@ -72,7 +72,8 @@ bool ValidateTransferOptions(const TransferOptions &options,
   if (!CheckedMultiply(options.buffer_count, options.chunk_bytes,
                        &pinned_bytes) ||
       pinned_bytes > kMaximumPinnedBytesPerDevice) {
-    *error = "transfer buffers exceed the 1 GiB per-device pinned-memory limit";
+    *error = "transfer buffers exceed the per-device pinned-memory limit of " +
+             std::to_string(kMaximumPinnedBytesPerDevice) + " bytes";
     return false;
   }
   return true;
