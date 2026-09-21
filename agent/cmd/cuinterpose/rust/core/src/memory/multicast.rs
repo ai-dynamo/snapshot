@@ -12,8 +12,7 @@ use crate::driver::CudaError;
 use crate::driver::Result;
 use crate::runtime;
 use cudarc::driver::sys::CUresult::{
-    CUDA_ERROR_INVALID_HANDLE, CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_NOT_SUPPORTED,
-    CUDA_ERROR_OUT_OF_MEMORY, CUDA_SUCCESS,
+    CUDA_ERROR_INVALID_HANDLE, CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_NOT_SUPPORTED, CUDA_SUCCESS,
 };
 use cudarc::driver::sys::{CUmemAllocationHandleType, CUmulticastObjectProp};
 use cuinterpose_protocol::{
@@ -31,7 +30,6 @@ pub struct MulticastObject {
     pub driver: Option<u64>,
     pub context: usize,
     pub shared: bool,
-    pub effective_size: usize,
     pub devices: Vec<i32>,
     pub bindings: Vec<Binding>,
 }
@@ -49,19 +47,23 @@ pub struct Binding {
 pub fn map(
     state: MutexGuard<'static, ProcessState>,
     id: AllocationId,
+    handle: VirtualAllocationHandle,
     address: u64,
     size: usize,
     offset: usize,
     flags: u64,
 ) -> Result<()> {
-    let end = offset.checked_add(size).ok_or(CUDA_ERROR_INVALID_VALUE)?;
-    let driver = state
+    let object = state
         .memblocks
         .get(&id)
         .and_then(Memblock::multicast)
-        .ok_or(CUDA_ERROR_INVALID_HANDLE)?
-        .driver
         .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+    let driver = object.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+    let context = if object.context == 0 {
+        crate::driver::context()?
+    } else {
+        object.context
+    };
     let (mut state, ()) = runtime::call_unlocked(state, || unsafe {
         crate::driver::cuMemMap(address, size, offset, driver, flags)
     })?;
@@ -72,14 +74,14 @@ pub fn map(
             .and_then(Memblock::multicast_mut)
             .ok_or(CUDA_ERROR_INVALID_HANDLE.into()),
     );
-    object.effective_size = object.effective_size.max(end);
     if object.context == 0 {
-        object.context = crate::driver::context();
+        object.context = context;
     }
     state.mappings.insert(
         address,
         Mapping {
             id,
+            handle,
             address,
             size,
             offset,
@@ -95,7 +97,7 @@ pub fn import(
     reference: AllocationReference,
     fd: std::os::fd::OwnedFd,
     properties: CUmulticastObjectProp,
-) -> Result<u64> {
+) -> Result<(MutexGuard<'static, ProcessState>, u64)> {
     let id = reference.id;
     if state
         .memblocks
@@ -114,9 +116,11 @@ pub fn import(
             return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
         }
         object.shared = true;
-        return state.mint_virtual_allocation_handle(id);
+        let handle = state.mint_virtual_allocation_handle(id)?;
+        return Ok((state, handle));
     }
     let mut driver = 0;
+    let context = crate::driver::context()?;
     let (mut state, ()) = runtime::call_unlocked(state, || {
         unsafe {
             crate::driver::cuMemImportFromShareableHandle(
@@ -145,16 +149,15 @@ pub fn import(
                 reference,
                 properties,
                 driver: Some(driver),
-                context: crate::driver::context(),
+                context,
                 shared: true,
-                effective_size: properties.size,
                 devices: Vec::new(),
                 bindings: Vec::new(),
             }),
         );
     }
     let virtual_multicast_handle = runtime::must_complete(state.mint_virtual_allocation_handle(id));
-    Ok(virtual_multicast_handle)
+    Ok((state, virtual_multicast_handle))
 }
 
 impl Binding {
@@ -341,19 +344,17 @@ pub(crate) fn bind(
         version,
     };
     let id = target;
-    let end = binding
-        .offset
-        .checked_add(binding.size)
-        .ok_or(CUDA_ERROR_INVALID_VALUE)?;
-    if binding.size == 0 {
-        return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
-    }
     let object = state
         .memblocks
         .get_mut(&id)
         .and_then(Memblock::multicast_mut)
         .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
     let driver = object.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+    let context = if object.context == 0 {
+        crate::driver::context()?
+    } else {
+        object.context
+    };
     let (mut state, ()) = runtime::call_unlocked(state, || binding.apply(driver, member_driver))?;
     if let Some(id) = member {
         runtime::must_complete(
@@ -372,10 +373,9 @@ pub(crate) fn bind(
             .and_then(Memblock::multicast_mut)
             .ok_or(CUDA_ERROR_INVALID_HANDLE.into()),
     );
-    object.effective_size = object.effective_size.max(end);
     object.bindings.push(binding);
     if object.context == 0 {
-        object.context = crate::driver::context();
+        object.context = context;
     }
     Ok(())
 }
@@ -388,14 +388,13 @@ pub fn describe(state: &ProcessState, records: &mut Vec<Record>) -> Result<()> {
         let virtual_multicast_handle_count = state
             .virtual_allocation_handles
             .values()
-            .filter(|value| *value == id)
-            .count()
-            .try_into()
-            .map_err(|_| CUDA_ERROR_OUT_OF_MEMORY)?;
+            .filter(|entry| entry.id == *id)
+            .map(|entry| entry.references)
+            .sum();
         records.push(Record::Multicast {
             allocation: object.reference,
             devices: object.properties.numDevices,
-            size: object.effective_size as u64,
+            size: object.properties.size as u64,
             handle_types: object.properties.handleTypes,
             flags: object.properties.flags,
             virtual_multicast_handle_count,
@@ -616,6 +615,7 @@ impl ProcessState {
         id: AllocationId,
         driver: u64,
         properties: CUmulticastObjectProp,
+        context: usize,
     ) -> Result<u64> {
         let virtual_multicast_handle = self.mint_virtual_allocation_handle(id)?;
         let reference = AllocationReference {
@@ -628,9 +628,8 @@ impl ProcessState {
                 reference,
                 properties,
                 driver: Some(driver),
-                context: crate::driver::context(),
+                context,
                 shared: false,
-                effective_size: properties.size,
                 devices: Vec::new(),
                 bindings: Vec::new(),
             }),
@@ -650,6 +649,11 @@ pub(crate) fn add_device(
         .and_then(Memblock::multicast_mut)
         .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
     let driver = object.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+    let context = if object.context == 0 {
+        crate::driver::context()?
+    } else {
+        object.context
+    };
     let (mut state, ()) = runtime::call_unlocked(state, || unsafe {
         crate::driver::cuMulticastAddDevice(driver, device)
     })?;
@@ -664,7 +668,7 @@ pub(crate) fn add_device(
         object.devices.push(device);
     }
     if object.context == 0 {
-        object.context = crate::driver::context();
+        object.context = context;
     }
     Ok(())
 }
