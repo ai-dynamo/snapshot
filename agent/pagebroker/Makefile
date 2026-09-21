@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 PROTO := v1/pagebroker.proto
-GTEST_FLAGS := $(shell pkg-config --cflags --libs gtest_main)
+GTEST_FLAGS = $(shell pkg-config --cflags --libs gtest_main)
 BROKER_SOURCES := broker.cpp checkpoint_transaction_descriptor.cpp posix_copy_engine.cpp restore_transaction_descriptor.cpp transaction.cpp transfer_engine.cpp file_descriptor.cpp
 DAEMON_SOURCES := $(BROKER_SOURCES) daemon.cpp main.cpp
 
@@ -18,3 +18,31 @@ test: generate $(BROKER_SOURCES) daemon_test.cpp
 	mkdir -p build
 	c++ -I. -std=c++20 -Wall -Werror $(BROKER_SOURCES) daemon_test.cpp v1/pagebroker.pb.cc -lprotobuf $(GTEST_FLAGS) -o build/pagebroker-test
 	./build/pagebroker-test
+
+.PHONY: test-storage
+test-storage: test-integrity test-transfer-contracts
+	mkdir -p build
+	$(CXX) -std=c++20 -O2 -Wall -Wextra -Werror storage_manifest.cpp storage_manifest_test.cpp -o build/storage-manifest-test
+	./build/storage-manifest-test
+
+# Optional modules are tested here but are not linked into the production data
+# plane. Keeping them available adds no hashing or layout planning to transfers.
+.PHONY: test-integrity test-transfer-contracts check-transfer-contracts-cuda
+test-integrity:
+	mkdir -p build
+	$(CXX) -std=c++20 -O2 -Wall -Wextra -Werror integrity/content_digest.cpp integrity/content_digest_test.cpp -lcrypto -o build/content-digest-test
+	./build/content-digest-test
+	$(CXX) -std=c++20 -O2 -Wall -Wextra -Werror integrity/content_digest.cpp integrity/extent_digests.cpp integrity/extent_digests_test.cpp -lcrypto -o build/extent-digests-test
+	./build/extent-digests-test
+
+test-transfer-contracts:
+	mkdir -p build
+	$(CXX) -std=c++20 -O2 -Wall -Wextra -Werror transfer_contracts/transfer_config.cpp transfer_contracts/transfer_config_test.cpp -o build/transfer-config-test
+	./build/transfer-config-test
+	$(CXX) -std=c++20 -O2 -Wall -Wextra -Werror transfer_contracts/transfer_engine_test.cpp -o build/transfer-cancellation-test
+	./build/transfer-cancellation-test
+
+CUDA_ROOT ?= /usr/local/cuda
+check-transfer-contracts-cuda:
+	mkdir -p build
+	$(CXX) -std=c++20 -O2 -Wall -Wextra -Werror -I$(CUDA_ROOT)/include -c transfer_contracts/transfer_backend_unavailable.cpp -o build/transfer-backend-unavailable.o
