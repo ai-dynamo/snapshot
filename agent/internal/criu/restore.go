@@ -216,10 +216,10 @@ func (m *GPUDeviceMounts) Close(committed bool) error {
 		}
 	}
 	m.cleanups = nil
-	for path, f := range m.devices {
+	for _, f := range m.devices {
 		errs = append(errs, f.Close())
-		delete(m.devices, path)
 	}
+	m.devices = nil
 	return errors.Join(errs...)
 }
 
@@ -232,11 +232,6 @@ func PrepareGPUDeviceMounts(aliases map[string]string, log logr.Logger) (_ *GPUD
 			retErr = errors.Join(retErr, m.Close(false))
 		}
 	}()
-	type pinnedAlias struct {
-		path string
-		fd   string
-	}
-	var pins []pinnedAlias
 	for path, target := range aliases {
 		if !isPhysicalNVIDIADevicePath(path) || !isPhysicalNVIDIADevicePath(target) {
 			return nil, fmt.Errorf("invalid GPU mount alias %q -> %q", path, target)
@@ -248,22 +243,19 @@ func PrepareGPUDeviceMounts(aliases map[string]string, log logr.Logger) (_ *GPUD
 		if err != nil {
 			return nil, fmt.Errorf("pin destination device %s: %w", target, err)
 		}
+		m.devices[target] = f
 		info, err := f.Stat()
 		if err != nil {
-			_ = f.Close()
 			return nil, fmt.Errorf("stat destination GPU path %s: %w", target, err)
 		}
 		if info.Mode()&os.ModeCharDevice == 0 {
-			_ = f.Close()
 			return nil, fmt.Errorf("destination GPU path %s is not a character device", target)
 		}
-		m.devices[target] = f
-		pins = append(pins, pinnedAlias{path, fmt.Sprintf("/proc/self/fd/%d", f.Fd())})
 	}
-	for _, pin := range pins {
+	for path, target := range aliases {
 		created := false
-		if info, err := os.Lstat(pin.path); os.IsNotExist(err) {
-			f, err := os.OpenFile(pin.path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if info, err := os.Lstat(path); os.IsNotExist(err) {
+			f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 			if err != nil {
 				return nil, err
 			}
@@ -272,24 +264,25 @@ func PrepareGPUDeviceMounts(aliases map[string]string, log logr.Logger) (_ *GPUD
 		} else if err != nil {
 			return nil, err
 		} else if info.Mode()&os.ModeCharDevice == 0 {
-			return nil, fmt.Errorf("checkpoint GPU path %s is not a character device", pin.path)
+			return nil, fmt.Errorf("checkpoint GPU path %s is not a character device", path)
 		}
-		if err := unix.Mount(pin.fd, pin.path, "", unix.MS_BIND, ""); err != nil {
+		source := fmt.Sprintf("/proc/self/fd/%d", m.devices[target].Fd())
+		if err := unix.Mount(source, path, "", unix.MS_BIND, ""); err != nil {
 			if created {
-				err = errors.Join(err, os.Remove(pin.path))
+				err = errors.Join(err, os.Remove(path))
 			}
 			return nil, err
 		}
 		m.cleanups = append(m.cleanups, func() error {
-			if err := unix.Unmount(pin.path, unix.MNT_DETACH); err != nil {
+			if err := unix.Unmount(path, unix.MNT_DETACH); err != nil {
 				return err
 			}
 			if created {
-				return os.Remove(pin.path)
+				return os.Remove(path)
 			}
 			return nil
 		})
-		log.Info("Aliased GPU device mount", "checkpoint_device", pin.path, "restore_device", aliases[pin.path])
+		log.Info("Aliased GPU device mount", "checkpoint_device", path, "restore_device", target)
 	}
 	return m, nil
 }
@@ -312,6 +305,11 @@ func (m *GPUDeviceMounts) RestoreNativePaths(pid int) error {
 		return err
 	}
 	defer root.Close()
+	devFD, err := unix.Openat(int(root.Fd()), "dev", unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("open restored /dev for pid %d: %w", pid, err)
+	}
+	defer unix.Close(devFD)
 
 	// Detached mounts can cross namespaces; ordinary bind mounts from the
 	// placeholder namespace cannot. Clone from the pins, never the aliased paths.
@@ -342,7 +340,7 @@ func (m *GPUDeviceMounts) RestoreNativePaths(pid int) error {
 			return
 		}
 		for path, fd := range mounts {
-			if err := installGPUDeviceMount(int(root.Fd()), path, fd); err != nil {
+			if err := installGPUDeviceMount(devFD, filepath.Base(path), fd); err != nil {
 				done <- fmt.Errorf("restore native GPU path %s for pid %d: %w", path, pid, err)
 				return
 			}
@@ -352,12 +350,11 @@ func (m *GPUDeviceMounts) RestoreNativePaths(pid int) error {
 	return <-done
 }
 
-func installGPUDeviceMount(rootFD int, path string, mountFD int) error {
-	relative := strings.TrimPrefix(path, "/")
-	if err := unix.Mknodat(rootFD, relative, unix.S_IFREG|0o600, 0); err != nil && !errors.Is(err, unix.EEXIST) {
+func installGPUDeviceMount(devFD int, name string, mountFD int) error {
+	if err := unix.Mknodat(devFD, name, unix.S_IFREG|0o600, 0); err != nil && !errors.Is(err, unix.EEXIST) {
 		return err
 	}
-	targetFD, err := unix.Openat(rootFD, relative, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	targetFD, err := unix.Openat(devFD, name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return err
 	}
