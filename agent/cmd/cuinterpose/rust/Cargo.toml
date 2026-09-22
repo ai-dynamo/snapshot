@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-License-Identifier: Apache-2.0
+
+[workspace]
+members = ["abi"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.88"
+
+[workspace.dependencies]
+# Only generated driver definitions are used. CUDA calls still go through
+# FrontendAbi.resolve; dynamic-loading prevents a link-time libcuda requirement.
+cudarc = { version = "=0.19.9", default-features = false, features = ["std", "driver", "cuda-13010", "dynamic-loading"] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+redundant_imports = "warn"
+redundant_lifetimes = "warn"
+unused_lifetimes = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+allow_attributes_without_reason = "warn"
+
+# Runtime workers must not outlive a panic that interrupted CUDA bookkeeping.
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1

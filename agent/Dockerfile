@@ -110,6 +110,27 @@ RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
     && /cuda-checkpoint-helper-transfer-cancellation-test
 
 # =============================================================================
+# C CUDA interposition frontend - pinned GNU builder
+# =============================================================================
+FROM rust:1.95.0-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082 AS cuinterpose-builder
+COPY --from=cuda-helper-headers /usr/local/cuda-13.4/targets/x86_64-linux/include/cuda.h /opt/cuda/include/cuda.h
+RUN test "$(rustc --version | cut -d' ' -f2)" = 1.95.0 \
+    && apt-get update && apt-get install -y --no-install-recommends \
+       make gcc binutils \
+    && rm -rf /var/lib/apt/lists/* \
+    && cargo install cbindgen --version 0.29.4 --locked \
+    && rustup component add rustfmt clippy
+WORKDIR /cuinterpose
+COPY cmd/cuinterpose/ ./
+RUN make frontend
+
+FROM cuinterpose-builder AS cuinterpose-test
+RUN make test-native
+
+FROM scratch AS cuinterpose-export
+COPY --from=cuinterpose-builder /cuinterpose/build/ /
+
+# =============================================================================
 # Stage: Go base - Common setup for Go builds
 # =============================================================================
 FROM ${DOCKER_PROXY}library/golang:${GO_VERSION}@${GO_IMAGE_DIGEST} AS go-base
