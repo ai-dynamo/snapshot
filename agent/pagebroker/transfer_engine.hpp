@@ -22,6 +22,5 @@ class TransferEngine {
   virtual void ValidateCheckpointDestination(const StorageBackend& destination) const = 0;
   virtual bool CheckpointDestinationConflicts(const StorageBackend& destination) const = 0;
   virtual void PublishCheckpoint(const Path& source, const StorageBackend& destination) const = 0;
-  virtual void CopyDirectory(const Path& source, const Path& destination) const = 0;
 };
 }  // namespace snapshot::pagebroker

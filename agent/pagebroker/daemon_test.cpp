@@ -10,6 +10,7 @@
 #include <thread>
 
 #include "broker.hpp"
+#include "checkpoint_archive.hpp"
 
 namespace fs = std::filesystem;
 using namespace snapshot::pagebroker;
@@ -24,8 +25,7 @@ class BrokerTest : public ::testing::Test {
             ::testing::UnitTest::GetInstance()->current_test_info()->name();
     fs::remove_all(root_);
     source_ = root_ / "storage" / "source";
-    fs::create_directories(source_);
-    std::ofstream(source_ / "image") << "image";
+    BuildPublishedCheckpoint(source_, "image");
     broker_.emplace(root_ / "tmpfs", root_ / "storage");
   }
 
@@ -44,6 +44,24 @@ class BrokerTest : public ::testing::Test {
     storage->mutable_filesystem()->set_directory(directory.string());
     engine->mutable_posix_copy();
   }
+
+  // A restore source must look like what PublishCheckpoint actually
+  // produces: manifest.yaml plus checkpoint.tar.gz, not a raw directory of
+  // files. `content` becomes the single archived file "image".
+  void BuildPublishedCheckpoint(const fs::path& directory, const std::string& content)
+  {
+    fs::create_directories(directory);
+    std::ofstream(directory / "manifest.yaml") << "manifest";
+    const fs::path raw = root_ / "scratch" / directory.filename();
+    fs::create_directories(raw);
+    std::ofstream(raw / "image") << content;
+    ArchiveDirectory(raw, directory / "checkpoint.tar.gz", "manifest.yaml");
+    fs::remove_all(raw);
+  }
+
+  // Written by the Go agent before every real checkpoint commit; PageBroker
+  // requires it as a real, standalone file (see posix_copy_engine.cpp).
+  void WriteManifest(const fs::path& staging_directory) { std::ofstream(staging_directory / "manifest.yaml") << "manifest"; }
 
   Broker& broker() { return *broker_; }
 
@@ -176,7 +194,12 @@ TEST_F(BrokerTest, RejectsUnsafeTransactionIDs)
 
 TEST_F(BrokerTest, RejectsSymlinkInRestoreSource)
 {
-  fs::create_symlink(root_ / "storage" / "elsewhere", source_ / "link");
+  // PageBroker only ever reads two well-known filenames from a checkpoint
+  // directory (see posix_copy_engine.cpp); it no longer walks arbitrary
+  // directory contents, so the meaningful symlink target is one of those
+  // two names, not an arbitrary extra file.
+  fs::remove(source_ / "checkpoint.tar.gz");
+  fs::create_symlink(root_ / "storage" / "elsewhere", source_ / "checkpoint.tar.gz");
   auto restore = RequestFor("symlink");
   Configure(
       restore.mutable_staged_restore()->mutable_source(), restore.mutable_staged_restore()->mutable_io_engine(),
@@ -236,12 +259,18 @@ TEST_F(BrokerTest, RejectsPathsOutsideStorageRoot)
 
 TEST_F(BrokerTest, InsufficientStagingDoesNotReserveTransaction)
 {
+  // The declared size must genuinely exceed real available tmpfs space --
+  // RestoreSize now reads it from the archive's own header rather than a
+  // cheap directory walk, so a sparse-file trick (the pre-archive format's
+  // approach) no longer works: gzip has to read through real bytes to
+  // compress them, so a genuinely huge checkpoint would make this test slow
+  // regardless of how compressible its content is. WriteOversizedEntryForTesting
+  // writes just a header claiming this size, exercising the same capacity
+  // check without materializing any of it.
   const fs::path large = root_ / "storage" / "large";
   fs::create_directories(large);
-  std::ofstream file(large / "image");
-  file.seekp(1LL << 40);
-  file.put('\0');
-  file.close();
+  std::ofstream(large / "manifest.yaml") << "manifest";
+  WriteOversizedEntryForTesting(large / "checkpoint.tar.gz", fs::space(root_).available + (1ULL << 30));
 
   auto insufficient = RequestFor("restore");
   Configure(
@@ -293,7 +322,9 @@ TEST_F(BrokerTest, EvictsOldTerminalTransactionsButRetainsRecentCompletions)
   Configure(
       oldest.mutable_prepare_staged_checkpoint()->mutable_destination(),
       oldest.mutable_prepare_staged_checkpoint()->mutable_io_engine(), root_ / "storage" / "oldest");
-  ASSERT_TRUE(broker().HandleRequest(oldest).has_staged_checkpoint_directory());
+  const auto oldest_prepared = broker().HandleRequest(oldest);
+  ASSERT_TRUE(oldest_prepared.has_staged_checkpoint_directory());
+  WriteManifest(fs::path(oldest_prepared.staged_checkpoint_directory().image_directory()));
   auto oldest_commit = RequestFor("oldest");
   oldest_commit.mutable_commit();
   ASSERT_TRUE(broker().HandleRequest(oldest_commit).has_commit_complete());
@@ -304,7 +335,9 @@ TEST_F(BrokerTest, EvictsOldTerminalTransactionsButRetainsRecentCompletions)
     Configure(
         prepare.mutable_prepare_staged_checkpoint()->mutable_destination(),
         prepare.mutable_prepare_staged_checkpoint()->mutable_io_engine(), root_ / "storage" / id);
-    ASSERT_TRUE(broker().HandleRequest(prepare).has_staged_checkpoint_directory());
+    const auto prepared = broker().HandleRequest(prepare);
+    ASSERT_TRUE(prepared.has_staged_checkpoint_directory());
+    WriteManifest(fs::path(prepared.staged_checkpoint_directory().image_directory()));
     auto commit = RequestFor(id);
     commit.mutable_commit();
     ASSERT_TRUE(broker().HandleRequest(commit).has_commit_complete());
@@ -352,15 +385,22 @@ TEST_F(BrokerTest, PublishesCheckpoint)
   const auto output = broker().HandleRequest(prepare);
   ASSERT_TRUE(output.has_staged_checkpoint_directory());
   const fs::path staging_directory(output.staged_checkpoint_directory().image_directory());
+  WriteManifest(staging_directory);
   std::ofstream(staging_directory / "image") << "image";
   std::ofstream(staging_directory / ".destination") << "image";
 
   auto commit = RequestFor("checkpoint");
   commit.mutable_commit();
   EXPECT_TRUE(broker().HandleRequest(commit).has_commit_complete());
-  EXPECT_TRUE(fs::exists(published / "image"));
-  EXPECT_TRUE(fs::exists(published / ".destination"));
+  EXPECT_TRUE(fs::exists(published / "manifest.yaml"));
+  EXPECT_TRUE(fs::exists(published / "checkpoint.tar.gz"));
   EXPECT_FALSE(fs::exists(staging_directory));
+
+  const fs::path extracted = root_ / "scratch" / "published-extracted";
+  fs::create_directories(extracted);
+  ExtractArchive(published / "checkpoint.tar.gz", extracted);
+  EXPECT_TRUE(fs::exists(extracted / "image"));
+  EXPECT_TRUE(fs::exists(extracted / ".destination"));
 }
 
 TEST_F(BrokerTest, ReplacesExistingCheckpoint)
@@ -376,14 +416,21 @@ TEST_F(BrokerTest, ReplacesExistingCheckpoint)
       prepare.mutable_prepare_staged_checkpoint()->mutable_io_engine(), published);
   const auto output = broker().HandleRequest(prepare);
   ASSERT_TRUE(output.has_staged_checkpoint_directory());
-  std::ofstream(fs::path(output.staged_checkpoint_directory().image_directory()) / "new") << "new";
+  const fs::path staging_directory(output.staged_checkpoint_directory().image_directory());
+  WriteManifest(staging_directory);
+  std::ofstream(staging_directory / "new") << "new";
 
   auto commit = RequestFor("checkpoint");
   commit.mutable_commit();
   EXPECT_TRUE(broker().HandleRequest(commit).has_commit_complete());
   EXPECT_FALSE(fs::exists(published / "old"));
-  EXPECT_TRUE(fs::exists(published / "new"));
+  EXPECT_TRUE(fs::exists(published / "checkpoint.tar.gz"));
   EXPECT_FALSE(fs::exists(previous));
+
+  const fs::path extracted = root_ / "scratch" / "replaced-extracted";
+  fs::create_directories(extracted);
+  ExtractArchive(published / "checkpoint.tar.gz", extracted);
+  EXPECT_TRUE(fs::exists(extracted / "new"));
 }
 
 TEST_F(BrokerTest, PreservesExistingCheckpointWhenReplacementFails)
@@ -400,7 +447,9 @@ TEST_F(BrokerTest, PreservesExistingCheckpointWhenReplacementFails)
       prepare.mutable_prepare_staged_checkpoint()->mutable_io_engine(), published);
   const auto output = broker().HandleRequest(prepare);
   ASSERT_TRUE(output.has_staged_checkpoint_directory());
-  std::ofstream(fs::path(output.staged_checkpoint_directory().image_directory()) / "new") << "new";
+  const fs::path staging_directory(output.staged_checkpoint_directory().image_directory());
+  WriteManifest(staging_directory);
+  std::ofstream(staging_directory / "new") << "new";
 
   auto commit = RequestFor("checkpoint");
   commit.mutable_commit();
