@@ -16,11 +16,14 @@ namespace {
 // Workers split the file list between them, to overlap network round-trips
 // on the many small CRIU metadata files without the added complication of
 // chunking the few large pages-*.img files that dominate checkpoint size
-// (see the PVC<->tmpfs copy's benchmark write-up). 2 workers measured
-// within noise of 1; trying 4 to see whether the bottleneck is
-// concurrency at all, or storage/network throughput regardless of thread
-// count (e.g. a non-multichannel SMB session).
-constexpr size_t kCopyWorkerCount = 4;
+// (see the PVC<->tmpfs copy's benchmark write-up). Measured neutral (not
+// regressed) on single-channel SMB at 2 workers; 4 workers measured worse
+// in one case with no multichannel to route the extra concurrency through.
+// The real payoff is on multichannel-enabled storage (e.g. Premium Azure
+// Files with SMB Multichannel), where this stays dormant-but-harmless
+// until that's available, per Microsoft's published 2x-4x gains for this
+// exact multi-threaded/multiple-files access pattern.
+constexpr size_t kCopyWorkerCount = 2;
 Path
 StoragePath(const StorageBackend& storage, const Path& storage_root, const char* label)
 {
