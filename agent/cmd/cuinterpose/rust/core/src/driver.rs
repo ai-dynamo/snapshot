@@ -141,6 +141,13 @@ functions! {
     cuMemUnmap(address: CUdeviceptr, size: usize);
     cuMemcpyDtoHAsync_v2(host: *mut c_void, device: CUdeviceptr, size: usize, stream: *mut c_void);
     cuMemcpyHtoDAsync_v2(device: CUdeviceptr, host: *const c_void, size: usize, stream: *mut c_void);
+    cuMulticastAddDevice(group: CUmemGenericAllocationHandle, device: CUdevice);
+    cuMulticastBindAddr(group: CUmemGenericAllocationHandle, offset: usize, address: CUdeviceptr, size: usize, flags: u64);
+    cuMulticastBindAddr_v2(group: CUmemGenericAllocationHandle, device: CUdevice, offset: usize, address: CUdeviceptr, size: usize, flags: u64);
+    cuMulticastBindMem(group: CUmemGenericAllocationHandle, offset: usize, member: CUmemGenericAllocationHandle, member_offset: usize, size: usize, flags: u64);
+    cuMulticastBindMem_v2(group: CUmemGenericAllocationHandle, device: CUdevice, offset: usize, member: CUmemGenericAllocationHandle, member_offset: usize, size: usize, flags: u64);
+    cuMulticastCreate(group: *mut CUmemGenericAllocationHandle, properties: *const CUmulticastObjectProp);
+    cuMulticastUnbind(group: CUmemGenericAllocationHandle, device: CUdevice, offset: usize, size: usize);
     cuStreamCreate(stream: *mut *mut c_void, flags: CUstream_flags);
     cuStreamDestroy_v2(stream: *mut c_void);
     cuStreamSynchronize(stream: *mut c_void);
