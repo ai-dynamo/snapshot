@@ -31,6 +31,7 @@ to tag them for the registry:
 ```bash
 make docker-build-agent docker-build-pagebroker docker-build-operator \
   MODEL_STREAMER_WHEEL_DIR=/path/to/pinned-wheel-directory \
+  MODEL_STREAMER_S3_WHEEL_DIR=/path/to/pinned-s3-wheel-directory \
   REGISTRY=<registry> \
   VERSION=<tag>
 ```
@@ -40,14 +41,19 @@ This produces `<registry>/agent:<tag>`, `<registry>/pagebroker:<tag>`, and
 the same checkout: they speak an internal protocol and the chart pulls both at
 `image.agent.tag`.
 
-The PageBroker build requires exactly one compatible Model Streamer wheel in
+The PageBroker build requires exactly one compatible Model Streamer core wheel in
 `MODEL_STREAMER_WHEEL_DIR` (default: the sibling `runai-model-streamer` checkout's
 `py/runai_model_streamer/dist` directory). The build checks its SHA-256 against
 `agent/pagebroker/model-streamer-wheel.sha256` before extracting the native
-library. Supply that exact artifact to local and CI image builds until a
-compatible Streamer release replaces the pin. The Streamer library and its
-license metadata are included only in the PageBroker image; the agent image
-build does not require the wheel.
+library. It also requires exactly one S3 wheel in `MODEL_STREAMER_S3_WHEEL_DIR`
+(default: `../runai-model-streamer/py/runai_model_streamer_s3/dist`), checked
+against `agent/pagebroker/model-streamer-s3-wheel.sha256`. Both pins refer to
+artifacts built from Model Streamer commit
+`bc21fd4182cc06ce9475452d16697d50ce3588c4`, with the multi-submission native ABI.
+The S3 wheel must match the core wheel's backend ABI; a wheel from a different
+release is not interchangeable. The image includes `libstreamer.so`,
+`libstreamers3.so`, their license metadata, and OpenSSL libcrypto for SHA-256.
+The agent image build does not require these wheels.
 
 ## 3. Push the images
 
@@ -87,3 +93,68 @@ Common `make` targets from the repo root:
 
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the contribution process and DCO
 sign-off.
+
+### PageBroker native S3 read tests
+
+The native restore component accepts explicit `s3://bucket/key` source locators
+and optional expected SHA-256 values in an in-memory `RestorePlan`. Digests are
+checked after native reads complete and before final permissions are applied.
+Existing PageBroker RPCs remain filesystem-only; these tests do not define an
+artifact index or expose S3 through filesystem protobuf fields.
+
+Local native builds require a C++20 compiler, protobuf, GoogleTest, OpenSSL
+development headers, and both pinned native libraries. Run
+`make -C agent/pagebroker test daemon MODEL_STREAMER_LIB_DIR=/path/to/libraries`
+for filesystem, digest, and session-recovery tests. These tests need no S3
+endpoint or credentials.
+
+To exercise S3 in the actual distroless runtime, build the dedicated image target:
+
+```bash
+make docker-build-pagebroker REGISTRY=local VERSION=s3-test \
+  DOCKER_BUILD_ARGS="--load --target s3-test"
+python3 -m venv /tmp/pagebroker-s3-tests
+/tmp/pagebroker-s3-tests/bin/pip install -r agent/pagebroker/tests/requirements.txt
+PATH="/tmp/pagebroker-s3-tests/bin:$PATH" make -C agent/pagebroker s3-fixture-test
+/tmp/pagebroker-s3-tests/bin/python agent/pagebroker/tests/s3_integration.py \
+  --image local/pagebroker:s3-test
+/tmp/pagebroker-s3-tests/bin/python agent/pagebroker/tests/s3_integration.py \
+  --tls --image local/pagebroker:s3-test
+```
+
+The runner always starts a disposable local Moto service and uses fixed test
+credentials. Inherited AWS credentials, profiles, endpoints, and configuration
+files are ignored. The Linux Docker runner uses host networking to reach the
+disposable Moto service. It uploads a fixture with nested and empty directories,
+zero-length objects, binary contents, special key characters, and a file larger
+than the native S3 chunk size. Downloads go through the real Model Streamer S3 plugin.
+The tests check hashes, permissions, concurrent restores, missing objects,
+truncation, and endpoint failures, and report throughput and peak RSS.
+The `--tls` run uses a temporary CA, checks verified HTTPS reads, and checks that
+a separate native process without that CA rejects the endpoint.
+Moto does not enforce authentication, so these tests do not validate IAM policies.
+
+To test a locally built executable, use `make -C agent/pagebroker s3-test` with
+the Python dependencies installed; `--binary` can also be passed directly to the
+runner. This uses the same disposable local service.
+
+The native component supports the following configuration. Keep it consistent
+for the process lifetime; the local test runner supplies its own region,
+endpoint, credentials, and CA.
+
+| Input | Behavior |
+| --- | --- |
+| `ModelStreamerSessionOptions.region` / `.endpoint` | Explicit connection settings fixed when the native session starts |
+| `.access_key_id`, `.secret_access_key`, `.session_token` | Optional credentials fixed for the session; omit all to use the native AWS provider chain |
+| `RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING` | `0` for path addressing with compatible endpoints; otherwise the native default uses virtual addressing |
+| `AWS_CA_BUNDLE` | Custom CA file for verified HTTPS; the file must be available in the runtime |
+| `RUNAI_STREAMER_CONCURRENCY`, `RUNAI_STREAMER_S3_MAX_INFLIGHT_MIB` | Native worker count and S3 in-flight read window |
+| `RUNAI_STREAMER_S3_MAX_RETRIES`, `RUNAI_STREAMER_S3_TIMEOUT`, `RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS` | Native retry, chunk-retry deadline, and low-speed request timeout settings |
+
+The pinned native API has no per-submission cancellation or live credential
+replacement. The wrapper preserves its existing session teardown and recovery
+behavior. Its 10 GB submission target is not a total staging-memory limit.
+Empty files are created locally without a remote read, so the fixture separately
+checks that the empty S3 object exists. Source keys are passed literally to the
+pinned URI parser, without percent-encoding; keys containing newline characters
+are not supported by that parser.

@@ -12,8 +12,10 @@ Upstream source for the third-party components redistributed in this image.
                artifacts and protoc-generated files are excluded; `make
                generate` reproduces the latter from the shipped .proto.
 
-This image is distroless and installs no system packages, so statically linked
-protobuf is the only third-party content this image adds. The base image
+This image also ships the pinned Model Streamer core and S3 native libraries,
+with their wheel licenses and metadata in /legal/model-streamer/ and
+/legal/model-streamer-s3/. OpenSSL libcrypto provides SHA-256; its attribution
+is in /legal/openssl/copyright. The base image
 contains third-party components of its own -- glibc, libstdc++ and libgcc,
 which this binary links dynamically. Source for the base image's own contents
 is published by NVIDIA and is not duplicated here:
@@ -23,4 +25,5 @@ is published by NVIDIA and is not duplicated here:
 NVIDIA-authored code in this image is Apache-2.0 and published at
 https://github.com/ai-dynamo/snapshot.
 
-Per-component license texts are in /legal/THIRD-PARTY.txt.
+The protobuf license text is in /legal/THIRD-PARTY.txt; the additional component
+licenses are in the locations listed above.

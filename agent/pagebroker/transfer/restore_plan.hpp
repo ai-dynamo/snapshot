@@ -5,8 +5,11 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
+
+#include "utils/sha256.hpp"
 
 namespace snapshot::pagebroker {
 using Path = std::filesystem::path;
@@ -18,12 +21,14 @@ struct RestoreDirectory {
 };
 
 struct RestoreFile {
-  // Source to read: a full filesystem path today; future backends may use object URIs.
+  // Source to read: a full filesystem path or a native Model Streamer object URI.
   std::string source_locator;
   // Path within the checkpoint tree; appended to the destination staging root.
   Path relative_path;
   uintmax_t size_bytes = 0;
   std::filesystem::perms permissions = std::filesystem::perms::unknown;
+  // Verified after native access finishes, before applying final permissions.
+  std::optional<utils::Sha256Digest> expected_sha256;
 };
 
 // A transfer engine resolves its storage source into this neutral plan before
