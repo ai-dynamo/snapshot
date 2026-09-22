@@ -3,11 +3,22 @@
 
 #include "posix_copy_engine.hpp"
 
+#include "checkpoint_archive.hpp"
+
 #include <filesystem>
 #include <stdexcept>
 
 namespace snapshot::pagebroker {
 namespace {
+// Written by the Go agent directly into the checkpoint staging directory
+// (agent/internal/types/manifest.go's manifestFilename) and read back
+// directly off the PVC by the operator controller
+// (agent/internal/controller/podsnapshotcontent.go's artifactPresent),
+// neither of which goes through PageBroker. Must stay a real, uncompressed,
+// standalone file at this exact name for both of those to keep working.
+const Path kManifestFilename = "manifest.yaml";
+const Path kArchiveFilename = "checkpoint.tar.gz";
+
 Path
 StoragePath(const StorageBackend& storage, const Path& storage_root, const char* label)
 {
@@ -34,6 +45,18 @@ SourcePath(const StorageBackend& source, const Path& storage_root)
   const Path path = StoragePath(source, storage_root, "source");
   if (!std::filesystem::is_directory(path))
     throw std::invalid_argument("source must be a storage directory");
+  return path;
+}
+
+// StoragePath only guards the path *to* a checkpoint directory; this guards
+// the two well-known files PageBroker actually reads or writes inside it,
+// since it no longer walks the directory's full contents the way a generic
+// recursive copy did.
+Path
+NotSymlink(const Path& path)
+{
+  if (std::filesystem::is_symlink(path))
+    throw std::runtime_error(path.string() + " is a symlink");
   return path;
 }
 
@@ -79,18 +102,6 @@ class RestorePreviousOnFailure {
   bool cancelled_ = false;
 };
 
-uintmax_t
-DirectorySize(const Path& path)
-{
-  uintmax_t bytes = 0;
-  for (const auto& entry : std::filesystem::recursive_directory_iterator(path)) {
-    if (entry.is_symlink())
-      throw std::runtime_error("checkpoint contains symlink");
-    if (entry.is_regular_file())
-      bytes += entry.file_size();
-  }
-  return bytes;
-}
 }  // namespace
 
 PosixCopyEngine::PosixCopyEngine(Path storage_root) : storage_root_(std::filesystem::weakly_canonical(std::move(storage_root))) {}
@@ -104,13 +115,21 @@ PosixCopyEngine::type() const
 uintmax_t
 PosixCopyEngine::RestoreSize(const StorageBackend& source) const
 {
-  return DirectorySize(SourcePath(source, storage_root_));
+  const Path published = SourcePath(source, storage_root_);
+  // The uncompressed size that will actually land in the tmpfs staging
+  // volume, not the smaller compressed size on the PVC -- this sizes the
+  // capacity reservation in broker.cpp's StageRestore.
+  return ArchiveUncompressedSize(NotSymlink(published / kArchiveFilename)) +
+         std::filesystem::file_size(NotSymlink(published / kManifestFilename));
 }
 
 void
 PosixCopyEngine::StageRestore(const StorageBackend& source, const Path& destination) const
 {
-  CopyDirectory(SourcePath(source, storage_root_), destination);
+  const Path published = SourcePath(source, storage_root_);
+  std::filesystem::create_directories(destination);
+  std::filesystem::copy_file(NotSymlink(published / kManifestFilename), destination / kManifestFilename);
+  ExtractArchive(NotSymlink(published / kArchiveFilename), destination);
 }
 
 void
@@ -133,7 +152,9 @@ PosixCopyEngine::PublishCheckpoint(const Path& source, const StorageBackend& des
   const Path previous = PreviousPath(published);
   try {
     std::filesystem::create_directories(published.parent_path());
-    CopyDirectory(source, partial);
+    std::filesystem::create_directories(partial);
+    std::filesystem::copy_file(NotSymlink(source / kManifestFilename), partial / kManifestFilename);
+    ArchiveDirectory(source, partial / kArchiveFilename, kManifestFilename);
     if (std::filesystem::exists(published)) {
       std::filesystem::rename(published, previous);
       RestorePreviousOnFailure restore_previous(previous, published);
@@ -150,11 +171,5 @@ PosixCopyEngine::PublishCheckpoint(const Path& source, const StorageBackend& des
     std::filesystem::remove_all(partial, cleanup_error);
     throw;
   }
-}
-
-void
-PosixCopyEngine::CopyDirectory(const Path& source, const Path& destination) const
-{
-  std::filesystem::copy(source, destination, std::filesystem::copy_options::recursive);
 }
 }  // namespace snapshot::pagebroker
