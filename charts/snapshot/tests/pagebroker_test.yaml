@@ -181,26 +181,17 @@ tests:
           path: data["config.yaml"]
           pattern: "pageBroker:\n  controlSocketPath: \"/pagebroker/control/pagebroker.sock\""
 
-  - it: sets fsGroup so the non-root sidecar can write to the checkpoint PVC
+  - it: runs the sidecar as a hardened root so it can write to the checkpoint PVC on any backend
     template: templates/daemonset.yaml
     asserts:
       - equal:
-          path: spec.template.spec.securityContext.fsGroup
-          value: 1000
-
-  - it: honours a daemonset.fsGroup override
-    template: templates/daemonset.yaml
-    set:
-      daemonset.fsGroup: 2000
-    asserts:
-      - equal:
-          path: spec.template.spec.securityContext.fsGroup
-          value: 2000
-
-  - it: omits pod securityContext when fsGroup is cleared
-    template: templates/daemonset.yaml
-    set:
-      daemonset.fsGroup: null
-    asserts:
-      - notExists:
-          path: spec.template.spec.securityContext
+          path: spec.template.spec.containers[1].securityContext
+          value:
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
