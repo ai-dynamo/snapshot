@@ -45,9 +45,11 @@ on:
         options: [all, vllm, sglang, tensorrt-llm]
       snapshot_tag:
         description: >-
-          Operator/agent image tag to install. Leave empty to resolve from the
-          commit under test (pull-request/* mirror branches fall back to the
-          newest main build when the commit has no published images).
+          Operator/agent image tag to install. pull-request/<number> mirror
+          branches require an explicit tag. Leave empty on main/release/*
+          branches to resolve from the commit under test; other non-PR
+          branches fall back to the newest main build when the commit has no
+          published images.
         required: false
         type: string
       datadog_gpu_monitoring:
