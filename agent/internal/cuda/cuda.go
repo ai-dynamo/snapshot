@@ -307,7 +307,7 @@ func DiscoverGPUs(ctx context.Context, clientset kubernetes.Interface, podName, 
 		if *value == "" || *value == "none" || *value == "void" {
 			// These disable legacy injection, not CDI. Inspect only actual
 			// container visibility; never substitute host/allocation UUIDs.
-			return DiscoverVisibleGPUs(ctx, hostProcPath, pid, nvidiaSMITimeout)
+			return DiscoverVisibleGPUs(ctx, hostProcPath, pid, nvidiaSMITimeout, log)
 		}
 		return resolveSelectedGPUs(ctx, *value)
 	}
