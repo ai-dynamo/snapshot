@@ -10,7 +10,7 @@ around native CUDA checkpoint/restore. It consists of the GNU/glibc
 `libcuinterpose.so` C frontend, lazily loaded Rust `libcuinterpose_core.so`, and a
 static-musl `cuinterpose-coordinator`.
 
-See the [design](../../../../docs/development/cuinterpose.md) for interception,
+See the [SNEP-295](../../../../docs/proposals/295-cuinterpose/README.md) for interception,
 ownership, protocol, capture/restore ordering, and isolation.
 
 ## Build and test
