@@ -7,7 +7,6 @@ import (
 	"context"
 	"os"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -215,11 +214,8 @@ func TestFreshCapturePublishesTheSourceItRecorded(t *testing.T) {
 		return nil
 	}
 
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 
-	require.Eventually(t, func() bool {
-		return getContent(t, w, content.Name).Status.Source != nil
-	}, time.Second, 5*time.Millisecond)
 	assertPublishedTheRecordedSource(t, getContent(t, w, content.Name))
 }
 
@@ -237,7 +233,7 @@ func TestArtifactRecoveryPublishesTheSourceItRecorded(t *testing.T) {
 	w := makeNodeController(t, fc, content, pod)
 	committedArtifact(t, w, string(content.UID))
 
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 
 	assert.False(t, fc.wasCalled())
 	assertPublishedTheRecordedSource(t, getContent(t, w, content.Name))
@@ -251,7 +247,7 @@ func TestDeferredCommittedCapturePublishesTheSourceItRecorded(t *testing.T) {
 	w := makeNodeController(t, fc, content)
 	committedArtifact(t, w, string(content.UID))
 
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 
 	assert.False(t, fc.wasCalled())
 	got := getContent(t, w, content.Name)

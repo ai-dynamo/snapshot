@@ -213,7 +213,6 @@ func TestReconcileRestorePodLeavesARefusedPodAlone(t *testing.T) {
 	assert.Empty(t, r.comparison.calls, "already refused restore was compared again")
 	assert.Empty(t, r.events(t, podcontract.RestoreReasonIncompatible), "already refused restore was refused again")
 	assert.Len(t, r.events(t, restoreAlreadyFailedReason), 1)
-	assert.Empty(t, r.controller.inFlight, "already refused restore claimed an attempt")
 }
 
 // The escape hatches: with either one set, neither gate runs, so a checkpoint
@@ -384,7 +383,6 @@ func TestReconcileRestorePodRefusesBeforeEnteringRestore(t *testing.T) {
 
 	assert.Len(t, r.comparison.calls, 1)
 	assert.Empty(t, r.events(t, restoreRequestedReason), "refused restore still announced a request")
-	assert.Empty(t, r.controller.inFlight, "refused restore claimed an attempt")
 }
 
 func refuseWith(mismatches ...compat.Mismatch) func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {

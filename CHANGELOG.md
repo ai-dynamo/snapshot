@@ -42,6 +42,16 @@ commit-level history for each release is on its
   populated for captures that reach `Ready` after the upgrade, so a content
   already `Ready` before it is not backfilled.
 
+### Changed
+
+- The agent's capture path is driven by a workqueue keyed on the work order,
+  replacing the per-capture `coordination.k8s.io` Lease and the in-process
+  guard that arbitrated between the validation and dump paths. A failed
+  reconcile is now retried with backoff instead of waiting for the next resync,
+  and the `LeaseCancelled` failure reason no longer occurs. The agent
+  `ClusterRole` no longer requests `leases`; a hand-maintained copy of that role
+  can drop the `coordination.k8s.io` rule.
+
 ## [0.1.0] - 2026-09-06
 
 First release. Snapshot checkpoints a fully initialized GPU pod — running

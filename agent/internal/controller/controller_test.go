@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"reflect"
-	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -168,8 +167,7 @@ func makeTestController(t *testing.T, pod *corev1.Pod, apiObjects ...runtime.Obj
 		restoreQueue:            workqueue.NewTypedDelayingQueue[client.ObjectKey](),
 		compareFn:               compat.Compare,
 		log:                     testr.New(t),
-		holderID:                "test-holder",
-		inFlight:                make(map[string]struct{}),
+		captureQueue:            newTestCaptureQueue(t),
 		stopCh:                  make(chan struct{}),
 	}
 	t.Cleanup(w.restoreQueue.ShutDown)
@@ -1466,15 +1464,78 @@ func TestApplyRestoredConditionPreservesTransitionTimeForSameStatus(t *testing.T
 	assert.Contains(t, string(lastPodStatusApply(t, w).GetPatch()), transition.UTC().Format(time.RFC3339))
 }
 
-func TestInFlightKeyIsDeduplicatedForCapture(t *testing.T) {
+// TestCaptureQueueHoldsRetriggersUntilDone is the property that replaced the capture Lease: while
+// a work order is being reconciled, every further trigger for it is folded into one redelivery
+// that arrives only after the in-progress reconcile calls Done.
+func TestCaptureQueueHoldsRetriggersUntilDone(t *testing.T) {
 	w := makeTestController(t, restorePod(nil))
-	key := "inference/restore-worker/main/ctr-abc"
+	const name = "podsnapshotcontent-abc"
 
-	assert.True(t, w.tryAcquire(key))
-	assert.False(t, w.tryAcquire(key))
-	w.release(key)
-	assert.True(t, w.tryAcquire(key))
-	w.release(key)
+	w.captureQueue.Add(name)
+	got, shutdown := w.captureQueue.Get()
+	require.False(t, shutdown)
+	assert.Equal(t, name, got)
+
+	// Three triggers arrive mid-reconcile (content event, resync, source-pod event).
+	w.captureQueue.Add(name)
+	w.captureQueue.Add(name)
+	w.captureQueue.Add(name)
+	assert.Equal(t, 0, w.captureQueue.Len(), "a key being processed is not handed out again")
+
+	w.captureQueue.Done(name)
+	assert.Equal(t, 1, w.captureQueue.Len(), "the triggers collapse into a single redelivery")
+
+	got, shutdown = w.captureQueue.Get()
+	require.False(t, shutdown)
+	assert.Equal(t, name, got)
+	w.captureQueue.Done(name)
+}
+
+func TestEnqueueCaptureForSourcePodQueuesEveryNamedWorkOrder(t *testing.T) {
+	w := makeTestController(t, restorePod(nil))
+	w.contentIndexer = seedIndex(t,
+		contentForWorker0("podsnapshotcontent-a", metav1.Unix(1000, 0), ""),
+		contentForWorker0("podsnapshotcontent-b", metav1.Unix(2000, 0), ""),
+	)
+
+	w.enqueueCaptureForSourcePod(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "inference", Name: "worker-0"},
+	})
+
+	assert.Equal(t, 2, w.captureQueue.Len())
+}
+
+func TestEnqueueCaptureForSourcePodIgnoresUnknownPod(t *testing.T) {
+	w := makeTestController(t, restorePod(nil))
+	w.contentIndexer = seedIndex(t)
+
+	w.enqueueCaptureForSourcePod(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "inference", Name: "worker-0"},
+	})
+	w.enqueueCaptureForSourcePod("not-a-pod")
+
+	assert.Equal(t, 0, w.captureQueue.Len())
+}
+
+// TestProcessCaptureQueueItemRequeuesOnError proves a failed reconcile is retried rather than
+// dropped — the workqueue is what replaced "the informer resync will come round again".
+func TestProcessCaptureQueueItemRequeuesOnError(t *testing.T) {
+	w := makeTestController(t, restorePod(nil))
+	// An indexer without podRefIndex makes captureOwnerForPod fail; any reconcile error will do.
+	w.contentIndexer = cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	content := makeWorkOrder("podsnapshotcontent-abc", testNodeName, "abc")
+	pod := makeSourcePod()
+	pod.Spec.NodeName = testNodeName
+	w.client = ctrlfake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(content, pod).
+		WithStatusSubresource(&snapshotv1alpha1.PodSnapshotContent{}).Build()
+
+	w.captureQueue.Add(content.Name)
+	got, _ := w.captureQueue.Get()
+	w.processCaptureQueueItem(context.Background(), got)
+
+	assert.Eventually(t, func() bool { return w.captureQueue.Len() == 1 }, time.Second, 5*time.Millisecond,
+		"a reconcile error must be requeued with backoff")
 }
 
 func TestRunRestoreCleanupFailureStillCompletesRestore(t *testing.T) {
@@ -1593,11 +1654,4 @@ func TestRestoreArtifactReady(t *testing.T) {
 	require.NoError(t, os.WriteFile(file, []byte("x"), 0o600))
 	_, err = w.restoreArtifactReady(testr.New(t), "inference/restore-worker", file)
 	require.Error(t, err)
-}
-
-func TestCheckpointLeaseNameUsesContentAndContainer(t *testing.T) {
-	a := checkpointLeaseName("content-uid", "main")
-	b := checkpointLeaseName("content-uid", "worker")
-	assert.NotEqual(t, a, b)
-	assert.True(t, strings.HasPrefix(a, "snapshot-capture-"))
 }

@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package controller implements the node-local control loop inside snapshot-agent.
-// It does not own CRDs or replace the operator. Instead it watches pod, job, and
-// lease state on the current node and delegates CRIU/CUDA execution to the
+// It does not own CRDs or replace the operator. Instead it watches pod and work
+// order state on the current node and delegates CRIU/CUDA execution to the
 // snapshot executor workflows.
 package controller
 
@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -53,10 +52,11 @@ import (
 )
 
 // NodeController watches local-node pods with checkpoint metadata and reconciles
-// snapshot execution for checkpoint and restore requests. The restore path is
-// driven by a client-go pod informer; the capture path is driven by a dynamic
-// informer over PodSnapshotContent work orders filtered to this node, with typed
-// reads/writes via an uncached controller-runtime client.
+// snapshot execution for checkpoint and restore requests. Both paths are workqueue
+// driven: the restore path from a client-go pod informer, and the capture path from
+// a dynamic informer over PodSnapshotContent work orders filtered to this node plus
+// a source-pod informer, with typed reads/writes via an uncached controller-runtime
+// client.
 type NodeController struct {
 	config                  *types.AgentConfig
 	clientset               kubernetes.Interface
@@ -65,7 +65,6 @@ type NodeController struct {
 	runtime                 snapshotruntime.Runtime
 	injector                executor.RestoreMounter
 	log                     logr.Logger
-	holderID                string
 	checkpointFn            func(ctx context.Context, params CheckpointParams) error
 	restoreFn               func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error)
 	writeControlSentinelFn  func(int, string) error
@@ -75,8 +74,12 @@ type NodeController struct {
 	restorePodLister        corev1listers.PodLister
 	compareFn               func(compat.Gate, compat.Environment, compat.Environment) []compat.Mismatch
 
-	inFlight   map[string]struct{}
-	inFlightMu sync.Mutex
+	// captureQueue holds PodSnapshotContent names. One key per work order is the capture path's
+	// only mutual exclusion, and exactly one snapshot-agent runs per node (the DaemonSet has no
+	// surge), so process-local exclusion is cluster-wide exclusion. Losing it on restart is safe:
+	// the informers' initial LIST re-enqueues every work order, and what a capture actually
+	// resumes from is the work order's status and the artifact on disk.
+	captureQueue workqueue.TypedRateLimitingInterface[string]
 
 	handledRestores sync.Map
 
@@ -217,11 +220,13 @@ func newDefaultController(
 		runtime:   rt,
 		injector:  injector,
 		log:       log,
-		holderID:  "snapshot-agent/" + uuid.NewString(),
-		inFlight:  make(map[string]struct{}),
 		stopCh:    make(chan struct{}),
 		restoreQueue: workqueue.NewTypedDelayingQueueWithConfig(
 			workqueue.TypedDelayingQueueConfig[client.ObjectKey]{Name: "restore-pods"},
+		),
+		captureQueue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.DefaultTypedControllerRateLimiter[string](),
+			workqueue.TypedRateLimitingQueueConfig[string]{Name: "capture-contents"},
 		),
 
 		restoreFn:               executor.Restore,
@@ -237,6 +242,7 @@ func newDefaultController(
 // Run starts the local pod informers and processes checkpoint/restore events.
 func (w *NodeController) Run(ctx context.Context) error {
 	defer w.restoreQueue.ShutDown()
+	defer w.captureQueue.ShutDown()
 	// Seed the agent logger onto ctx so the capture path resolves it via log.FromContext.
 	ctx = logr.NewContext(ctx, w.log)
 	w.log.Info("Starting snapshot node controller",
@@ -273,7 +279,7 @@ func (w *NodeController) Run(ctx context.Context) error {
 
 	// Capture path: a dynamic informer over PodSnapshotContent work orders, filtered at
 	// the list/watch level to this node's mirror label. The node-label filter is the
-	// node scoping; reconcilePodSnapshotContent keeps a defensive nodeName check.
+	// node scoping; reconcileCapture keeps a defensive nodeName check.
 	nodeContentSelector := labels.SelectorFromSet(labels.Set{snapshotv1alpha1.SnapshotNodeLabel: w.config.NodeName}).String()
 	dynFactory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(
 		w.dynClient, snapshotContentResyncInterval, metav1.NamespaceAll,
@@ -288,16 +294,13 @@ func (w *NodeController) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to add snapshot-content podRef indexer: %w", err)
 	}
 	w.contentIndexer = contentInformer.GetIndexer()
+	// Handlers only enqueue: reconciling inline would block the informer's delivery goroutine for
+	// the length of a dump. The resync re-enqueues every work order, which is the backstop that
+	// re-checks a not-yet-quiesced source.
 	if _, err := contentInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			if name, ok := contentNameFromInformerObj(obj); ok {
-				w.reconcilePodSnapshotContent(ctx, name)
-			}
-		},
+		AddFunc: w.enqueueContent,
 		UpdateFunc: func(_, newObj interface{}) {
-			if name, ok := contentNameFromInformerObj(newObj); ok {
-				w.reconcilePodSnapshotContent(ctx, name)
-			}
+			w.enqueueContent(newObj)
 		},
 	}); err != nil {
 		return fmt.Errorf("failed to add snapshot-content informer handler: %w", err)
@@ -305,9 +308,8 @@ func (w *NodeController) Run(ctx context.Context) error {
 	go dynFactory.Start(w.stopCh)
 	syncFuncs = append(syncFuncs, contentInformer.HasSynced)
 
-	// Source-pod informer: keyed on CaptureEligibleLabel, the promotion label the pre-bind gate
-	// (reconcilePodSnapshotContent) adds only after a source pod passes validation, so only
-	// gate-validated pods drive the capture path.
+	// Source-pod informer: keyed on CaptureEligibleLabel, the promotion label reconcileCapture adds
+	// only after a source pod passes validation, so only validated pods feed the queue.
 	// A pod status change (a checkpoint container crashing, or the target becoming ready) does
 	// not touch the PodSnapshotContent, so without this trigger it would only be acted on at the
 	// content informer's resync. It needs its own factory: its selector is disjoint from the restore
@@ -321,19 +323,9 @@ func (w *NodeController) Run(ctx context.Context) error {
 	)
 	sourceInformer := sourceFactory.Core().V1().Pods().Informer()
 	if _, err := sourceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			if pod, ok := podFromInformerObj(obj); ok {
-				if err := w.reconcileSourcePod(ctx, pod); err != nil {
-					w.log.Error(err, "Failed to reconcile source pod", "pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
-				}
-			}
-		},
+		AddFunc: w.enqueueCaptureForSourcePod,
 		UpdateFunc: func(_, newObj interface{}) {
-			if pod, ok := podFromInformerObj(newObj); ok {
-				if err := w.reconcileSourcePod(ctx, pod); err != nil {
-					w.log.Error(err, "Failed to reconcile source pod", "pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
-				}
-			}
+			w.enqueueCaptureForSourcePod(newObj)
 		},
 	}); err != nil {
 		return fmt.Errorf("failed to add source-pod informer handler: %w", err)
@@ -347,6 +339,7 @@ func (w *NodeController) Run(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
 		w.restoreQueue.ShutDown()
+		w.captureQueue.ShutDown()
 		stopOnce.Do(func() { close(w.stopCh) })
 	}()
 
@@ -355,6 +348,7 @@ func (w *NodeController) Run(ctx context.Context) error {
 	}
 
 	go w.runRestoreQueue(ctx)
+	go w.runCaptureQueue(ctx)
 	w.log.Info("PodSnapshot node controller started and caches synced")
 	<-ctx.Done()
 	stopOnce.Do(func() { close(w.stopCh) })
@@ -1179,29 +1173,58 @@ func (w *NodeController) handleRestorePreflightError(ctx context.Context, pod *c
 	return true
 }
 
-func (w *NodeController) tryAcquire(key string) bool {
-	w.inFlightMu.Lock()
-	defer w.inFlightMu.Unlock()
-	if _, held := w.inFlight[key]; held {
-		return false
+func (w *NodeController) enqueueContent(obj interface{}) {
+	if name, ok := contentNameFromInformerObj(obj); ok {
+		w.captureQueue.Add(name)
 	}
-	w.inFlight[key] = struct{}{}
-	return true
 }
 
-func (w *NodeController) release(key string) {
-	w.inFlightMu.Lock()
-	defer w.inFlightMu.Unlock()
-	delete(w.inFlight, key)
+// enqueueCaptureForSourcePod maps a source-pod event back to every work order naming that pod. The
+// index can hold several: a PodSnapshotContent is named after its PodSnapshot's UID, so every
+// PodSnapshot taken of one pod adds another. Which of them may dump is decided during reconcile.
+func (w *NodeController) enqueueCaptureForSourcePod(obj interface{}) {
+	pod, ok := podFromInformerObj(obj)
+	if !ok {
+		return
+	}
+	objs, err := w.contentIndexer.ByIndex(podRefIndex, pod.Namespace+"/"+pod.Name)
+	if err != nil {
+		w.log.Error(err, "Failed to look up PodSnapshotContent by source pod", "pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
+		return
+	}
+	for _, obj := range objs {
+		if content, ok := contentFromInformerObj(obj); ok {
+			w.captureQueue.Add(content.Name)
+		}
+	}
 }
 
-// checkpointInFlight reports whether a capture currently holds the in-flight
-// guard for key without acquiring it.
-func (w *NodeController) checkpointInFlight(key string) bool {
-	w.inFlightMu.Lock()
-	defer w.inFlightMu.Unlock()
-	_, held := w.inFlight[key]
-	return held
+// runCaptureQueue gives each item its own goroutine — a dump can take minutes and must not
+// head-of-line block unrelated work orders — which is safe because the queue guarantees one worker
+// per key.
+func (w *NodeController) runCaptureQueue(ctx context.Context) {
+	for {
+		name, shutdown := w.captureQueue.Get()
+		if shutdown {
+			return
+		}
+		go w.processCaptureQueueItem(ctx, name)
+	}
+}
+
+// processCaptureQueueItem holds the work order's key for the whole reconcile, dump included: Done
+// is what releases it, and Adds that arrive meanwhile collapse into one redelivery.
+func (w *NodeController) processCaptureQueueItem(ctx context.Context, name string) {
+	defer w.captureQueue.Done(name)
+
+	if err := w.reconcileCapture(ctx, name); err != nil {
+		w.log.Error(err, "Failed to reconcile capture work order", "content", name)
+		if ctx.Err() == nil {
+			w.captureQueue.AddRateLimited(name)
+		}
+		return
+	}
+	w.captureQueue.Forget(name)
 }
 
 // podRefIndex is the PodSnapshotContent informer index keyed by source pod ("<namespace>/<name>").
