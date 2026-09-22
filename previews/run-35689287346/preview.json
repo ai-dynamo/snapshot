@@ -1,0 +1,18 @@
+{
+  "combinedRecordCount": 15,
+  "expiresAt": "2026-10-06T05:13:45.624Z",
+  "formatVersion": 1,
+  "generatedAt": "2026-09-22T05:13:45.624Z",
+  "historyRecordCount": 12,
+  "key": "run-35689287346",
+  "previewRecordCount": 3,
+  "source": {
+    "branch": "feat/pagebroker-always-on",
+    "commit": "2725ed02666cb37a580e6bb72d4d12e66eb8d190",
+    "event": "workflow_dispatch",
+    "pullRequest": null,
+    "runAttempt": 1,
+    "runId": "35689287346",
+    "runUrl": "https://github.com/ai-dynamo/snapshot/actions/runs/35689287346"
+  }
+}
