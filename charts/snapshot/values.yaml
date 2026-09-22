@@ -159,6 +159,13 @@ daemonset:
   # Affinity rules
   affinity: {}
 
+  # Supplemental group applied to every container in the pod so the
+  # non-root PageBroker sidecar can write to the checkpoint PVC alongside
+  # the privileged agent container. Most RWX-capable CSI drivers honor
+  # fsGroup regardless of access mode; azurefile-csi is a known exception
+  # for ReadWriteMany claims. See docs/operations/storage.md.
+  fsGroup: 1000
+
   # Init container configuration
   initContainer:
     # Busybox image for seccomp profile deployment. Pinned by digest: this is
