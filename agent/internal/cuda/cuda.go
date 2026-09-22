@@ -96,9 +96,9 @@ func GetPodGPUUUIDs(ctx context.Context, podName, podNamespace, containerName st
 
 // DiscoverVisibleGPUs describes the GPUs a container can see, by running
 // nvidia-smi inside its mount and PID namespaces. The model and the driver
-// version come from the same call as the UUIDs: nothing else on the restore path
-// gets to look at the source node's GPUs, so what is not read here cannot be
-// compared later.
+// version come from the first call and the MIG slices from a second: nothing
+// else on the restore path gets to look at the source node's GPUs, so what is
+// not read here cannot be compared later.
 //
 // Every path ends here, and under DRA this is the only path that reports GPUs
 // at all, because the kubelet publishes no nvidia.com/gpu devices when the
@@ -115,9 +115,10 @@ func DiscoverVisibleGPUs(ctx context.Context, hostProcPath string, pid int, time
 	}
 	env := parseNvidiaSmiGPUs(string(output))
 
-	// --query-gpu exposes no MIG field at all, so the slice shape has to come
-	// from a second call. A failure here costs the shape, not the checkpoint:
-	// the profile stays unknown, and an unknown value admits a restore rather
+	// --query-gpu enumerates GPUs, and a MIG slice is not one: a container
+	// holding a slice sees the parent card there and nothing of the slice. A
+	// failure here costs the slice, not the checkpoint: the device stays
+	// recorded as its parent, and an unknown profile admits a restore rather
 	// than refusing one.
 	listed, err := nsenterNvidiaSMI(ctx, hostProcPath, pid, "-L")
 	if err != nil {
@@ -127,7 +128,7 @@ func DiscoverVisibleGPUs(ctx context.Context, hostProcPath string, pid int, time
 		)
 		return env, nil
 	}
-	return withMIGProfiles(env, parseNvidiaSmiMIGProfiles(string(listed))), nil
+	return withMIGDevices(env, parseNvidiaSmiMIGDevices(string(listed))), nil
 }
 
 func nsenterNvidiaSMI(ctx context.Context, hostProcPath string, pid int, args ...string) ([]byte, error) {
@@ -158,43 +159,90 @@ const (
 	migListColumns
 )
 
-// parseNvidiaSmiMIGProfiles maps each listed MIG device's UUID to its profile.
-// A parent GPU line opens with its own name rather than the MIG label, so a node
-// with MIG disabled yields an empty map rather than an error.
-func parseNvidiaSmiMIGProfiles(output string) map[string]string {
-	profiles := make(map[string]string)
-	for _, line := range strings.Split(output, "\n") {
-		columns := strings.Fields(line)
-		if len(columns) < migListColumns ||
-			columns[migListKind] != "MIG" ||
-			columns[migListDeviceLabel] != "Device" ||
-			columns[migListUUIDLabel] != "(UUID:" {
-			continue
-		}
-		if _, err := strconv.Atoi(strings.TrimSuffix(columns[migListOrdinal], ":")); err != nil {
-			continue
-		}
-		uuid := columns[migListUUID]
-		if !strings.HasSuffix(uuid, ")") {
-			continue
-		}
-		if uuid = strings.TrimSuffix(uuid, ")"); uuid == "" {
-			continue
-		}
-		profiles[uuid] = columns[migListProfile]
-	}
-	return profiles
+// migDevice is one MIG slice as nvidia-smi -L lists it under its parent GPU.
+type migDevice struct {
+	uuid    string
+	profile string
 }
 
-// withMIGProfiles joins the profiles onto the devices discovery already found,
-// keyed on UUID. A device no profile was listed for keeps none, which leaves the
-// shape unknown instead of guessing at it by position.
-func withMIGProfiles(env compat.GPUInfo, profiles map[string]string) compat.GPUInfo {
-	for i, device := range env.Devices {
-		if profile, ok := profiles[device.UUID]; ok {
-			env.Devices[i].MIGProfile = profile
+// parseNvidiaSmiMIGDevices groups the listed MIG slices under the UUID of the
+// GPU they were carved from. That nesting is the whole reason the listing is
+// worth a second call: it is the only output tying a slice UUID to the parent
+// UUID that --query-gpu reports. A parent GPU line opens with its own label
+// rather than the MIG one, so a node with MIG disabled yields an empty map
+// rather than an error.
+func parseNvidiaSmiMIGDevices(output string) map[string][]migDevice {
+	byParent := make(map[string][]migDevice)
+	var parent string
+	for _, line := range strings.Split(output, "\n") {
+		columns := strings.Fields(line)
+		if len(columns) == 0 {
+			continue
+		}
+		switch columns[migListKind] {
+		case "GPU":
+			parent = listedUUID(columns)
+		case "MIG":
+			if parent == "" ||
+				len(columns) < migListColumns ||
+				columns[migListDeviceLabel] != "Device" ||
+				columns[migListUUIDLabel] != "(UUID:" {
+				continue
+			}
+			if _, err := strconv.Atoi(strings.TrimSuffix(columns[migListOrdinal], ":")); err != nil {
+				continue
+			}
+			uuid := columns[migListUUID]
+			if !strings.HasSuffix(uuid, ")") {
+				continue
+			}
+			if uuid = strings.TrimSuffix(uuid, ")"); uuid == "" {
+				continue
+			}
+			byParent[parent] = append(byParent[parent], migDevice{uuid: uuid, profile: columns[migListProfile]})
 		}
 	}
+	return byParent
+}
+
+// listedUUID reads the "(UUID: <id>)" pair closing a parent GPU line, which sits
+// at no fixed column because the product name ahead of it varies in word count.
+func listedUUID(columns []string) string {
+	for i, column := range columns {
+		if column != "(UUID:" || i+1 == len(columns) {
+			continue
+		}
+		if uuid := strings.TrimSuffix(columns[i+1], ")"); uuid != "" {
+			return uuid
+		}
+	}
+	return ""
+}
+
+// withMIGDevices replaces each parent GPU with the slices carved out of it, so a
+// captured slice is recorded under its own UUID and shape rather than under the
+// card nvidia-smi enumerated it beneath. The parent's model carries over, that
+// being the only name nvidia-smi gives a slice.
+func withMIGDevices(env compat.GPUInfo, byParent map[string][]migDevice) compat.GPUInfo {
+	if len(byParent) == 0 || len(env.Devices) == 0 {
+		return env
+	}
+	devices := make([]compat.GPUDevice, 0, len(env.Devices))
+	for _, device := range env.Devices {
+		carved := byParent[device.UUID]
+		if len(carved) == 0 {
+			devices = append(devices, device)
+			continue
+		}
+		for _, mig := range carved {
+			devices = append(devices, compat.GPUDevice{
+				UUID:        mig.uuid,
+				ProductName: device.ProductName,
+				MIGProfile:  mig.profile,
+			})
+		}
+	}
+	env.Devices = devices
 	return env
 }
 
