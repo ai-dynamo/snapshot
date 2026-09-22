@@ -45,6 +45,12 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "snapshot.serviceAccountName" . }}
+      {{- with .Values.daemonset.fsGroup }}
+      # Lets the non-root pagebroker container write to the checkpoint PVC
+      # alongside the privileged agent container. See docs/operations/storage.md.
+      securityContext:
+        fsGroup: {{ . }}
+      {{- end }}
       hostPID: true
       hostIPC: true
       hostNetwork: true
