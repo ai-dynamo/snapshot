@@ -53,16 +53,18 @@ node. Both containers mount the same PVC
 at `/checkpoints`, so artifacts land in the same place regardless of which
 container wrote them. The PVC layout is unchanged.
 
-Unlike the agent container, PageBroker does not run privileged, so the pod sets
-`daemonset.fsGroup` (default `1000`) to give it write access to the PVC
-alongside the agent. Most RWX-capable CSI drivers (EFS, most NFS- and
-block-based drivers) honor `fsGroup` regardless of access mode. `azurefile-csi`
-is a known exception: its `fsGroupPolicy` is `ReadWriteOnceWithFSType`, which
-does not apply to `ReadWriteMany` claims, and SMB/CIFS has no native per-file
-POSIX ownership for the driver to chown in the first place. On Azure Files,
-grant the same access through the StorageClass's `mountOptions` instead (for
-example `uid`, `gid`, `file_mode`, `dir_mode`) rather than relying on
-`daemonset.fsGroup`.
+PageBroker's container runs as a hardened root user (`runAsUser: 0` with all
+capabilities dropped, no privilege escalation, and the default seccomp
+profile — the same pattern the operator's artifact-cleanup container uses) so
+it can write to the PVC on any storage backend, without needing the agent
+container's full `privileged: true`. A `fsGroup`-based approach was considered
+instead,
+but it is not portable across backends: most RWX-capable CSI drivers (EFS,
+most NFS- and block-based drivers) honor `fsGroup` regardless of access mode,
+but `azurefile-csi` does not — its `fsGroupPolicy` is
+`ReadWriteOnceWithFSType`, which does not apply to `ReadWriteMany` claims, and
+SMB/CIFS has no native per-file POSIX ownership for the driver to chown in the
+first place.
 
 PageBroker adds one memory-backed volume per agent pod, shared by the agent and
 the sidecar:
