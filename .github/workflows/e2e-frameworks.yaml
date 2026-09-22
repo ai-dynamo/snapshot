@@ -236,11 +236,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # A PR mirror dispatch with no snapshot_tag would silently fall back
+          # to main's images (see --fallback-main below) and still publish a
+          # benchmark preview keyed to that PR, looking like it tested the
+          # PR's own changes when it didn't. Require snapshot_tag there.
+          if [[ "${GITHUB_REF_NAME}" =~ ^pull-request/[0-9]+$ ]]; then
+            echo "::error::Dispatching against PR mirror branch ${GITHUB_REF_NAME} requires an explicit snapshot_tag, otherwise the run silently falls back to testing main's images. Dispatch push-artifacts.yaml on the PR's source branch first, then re-dispatch this workflow with the resulting tag." >&2
+            exit 1
+          fi
           # push-artifacts publishes only main/release, so any other ref (a
-          # pull-request/* mirror branch, or a feature branch dispatched by
-          # hand) normally has no images of its own; fall back to main's,
-          # loudly. main and release refs stay strict: a nightly must test
-          # the commit it checked out.
+          # non-PR feature branch dispatched by hand) normally has no images
+          # of its own; fall back to main's, loudly. main and release refs
+          # stay strict: a nightly must test the commit it checked out.
           case "${GITHUB_REF_NAME}" in
             main|release/*) python3 hack/resolve-snapshot-image-tag.py ;;
             *) python3 hack/resolve-snapshot-image-tag.py --fallback-main ;;
