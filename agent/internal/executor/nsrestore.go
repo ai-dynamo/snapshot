@@ -148,16 +148,13 @@ func executeRestore(
 		}
 	}
 
-	cleanupGPUMounts, err := criu.PrepareGPUDeviceMounts(opts.GPUMountAliases, log)
+	gpuMounts, err := criu.PrepareGPUDeviceMounts(opts.GPUMountAliases, log)
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("prepare GPU device mounts: %w", err)
 	}
 	gpuMountsCommitted := false
 	defer func() {
-		if gpuMountsCommitted {
-			return
-		}
-		if err := cleanupGPUMounts(); err != nil {
+		if err := gpuMounts.Close(gpuMountsCommitted); err != nil {
 			retErr = errors.Join(retErr, fmt.Errorf("clean GPU device mounts: %w", err))
 		}
 	}()
@@ -264,6 +261,11 @@ func executeRestore(
 			"criu_callback_pid", restoredPID,
 		)
 		cudaStart := time.Now()
+		for _, pid := range restorePIDs {
+			if err := gpuMounts.RestoreNativePaths(pid); err != nil {
+				return nil, 0, nil, fmt.Errorf("restore native GPU device mounts: %w", err)
+			}
+		}
 		_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, log)
 		timings.cudaRestoreDuration = time.Since(cudaStart)
 		if err != nil {
