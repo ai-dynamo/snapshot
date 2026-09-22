@@ -28,6 +28,9 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].args[4]
           value: --artifact-cleanup-workers=5
+      - equal:
+          path: spec.template.spec.containers[0].args[5]
+          value: --artifact-cleanup-backend-type=pvc
 
   - it: carries every non-default cleanup setting to the operator
     set:
@@ -48,6 +51,9 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].args[4]
           value: --artifact-cleanup-workers=8
+      - equal:
+          path: spec.template.spec.containers[0].args[5]
+          value: --artifact-cleanup-backend-type=pvc
 
   - it: hardens the root-running artifact cleanup manager
     asserts:

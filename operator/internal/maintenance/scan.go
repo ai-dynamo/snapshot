@@ -7,11 +7,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 
-	"github.com/ai-dynamo/snapshot/agent/pkg/artifact"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
-	"github.com/go-logr/logr"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -19,79 +16,6 @@ import (
 )
 
 const podSnapshotContentMetadataListPageLimit int64 = 500
-
-// errUnsafeArtifactRoot means deletion stopped before touching the
-// filesystem; the finalizer is retained.
-var errUnsafeArtifactRoot = errors.New("artifact root is not an ordinary directory")
-
-// removeArtifactRoot refuses to touch anything unless the artifacts root and
-// the content root both validate as ordinary (non-symlink) directories.
-func removeArtifactRoot(basePath, contentUID string) error {
-	artifactsRoot, err := artifact.ResolveRoot(basePath)
-	if err != nil {
-		return err
-	}
-	if err := artifact.ValidateDirectory(artifactsRoot); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("%w: %w", errUnsafeArtifactRoot, err)
-	}
-	root, err := artifact.ResolveContentRoot(basePath, contentUID)
-	if err != nil {
-		return err
-	}
-	if err := artifact.ValidateDirectory(root); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("%w: %w", errUnsafeArtifactRoot, err)
-	}
-	if err := os.RemoveAll(root); err != nil {
-		return fmt.Errorf("remove artifact root %q: %w", root, err)
-	}
-	return nil
-}
-
-// enumerateSweepCandidates lists on-disk content UIDs under basePath's
-// artifacts root; unsafe entries are logged and skipped, not deleted.
-func enumerateSweepCandidates(basePath string, logger logr.Logger) (map[string]struct{}, error) {
-	artifactsRoot, err := artifact.ResolveRoot(basePath)
-	if err != nil {
-		return nil, err
-	}
-	if err := artifact.ValidateDirectory(artifactsRoot); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return map[string]struct{}{}, nil
-		}
-		return nil, err
-	}
-	entries, err := os.ReadDir(artifactsRoot)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return map[string]struct{}{}, nil
-		}
-		return nil, fmt.Errorf("enumerate artifact roots: %w", err)
-	}
-	candidates := make(map[string]struct{}, len(entries))
-	for _, entry := range entries {
-		name := entry.Name()
-		if err := artifact.ValidatePathElement("artifact directory entry", name); err != nil {
-			logger.Error(err, "Ignoring unsafe artifact directory entry", "entry", name)
-			continue
-		}
-		path, err := artifact.ResolveContentRoot(basePath, name)
-		if err != nil {
-			logger.Error(err, "Ignoring unresolved artifact directory entry", "entry", name)
-			continue
-		}
-		if err := artifact.ValidateDirectory(path); err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				logger.Error(err, "Ignoring unexpected artifact directory entry", "entry", name)
-			}
-			continue
-		}
-		candidates[name] = struct{}{}
-	}
-	return candidates, nil
-}
 
 type contentScanResult struct {
 	ExistingUIDs   map[types.UID]struct{}

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ai-dynamo/snapshot/operator/internal/maintenance/backends"
 	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/types"
@@ -31,21 +32,40 @@ type Queue struct {
 	recorder  record.EventRecorder
 	config    operatortypes.ArtifactCleanupConfig
 
+	registry          BackendRegistry
+	configuredBackend string
+
 	queue workqueue.TypedRateLimitingInterface[WorkItemKey]
 }
 
 // NewQueue constructs a Queue; register it with the manager (mgr.Add) to run it.
 func NewQueue(kubeClient client.Client, apiReader client.Reader, recorder record.EventRecorder, cfg operatortypes.ArtifactCleanupConfig) *Queue {
-	return &Queue{
-		client:    kubeClient,
-		apiReader: apiReader,
-		recorder:  recorder,
-		config:    cfg,
+	configuredBackend := cfg.BackendType
+	if configuredBackend == "" {
+		configuredBackend = backends.NamePVC
+	}
+	q := &Queue{
+		client:            kubeClient,
+		apiReader:         apiReader,
+		recorder:          recorder,
+		config:            cfg,
+		configuredBackend: configuredBackend,
 		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
 			workqueue.DefaultTypedControllerRateLimiter[WorkItemKey](),
 			workqueue.TypedRateLimitingQueueConfig[WorkItemKey]{Name: "podsnapshotcontent-maintenance"},
 		),
 	}
+	q.registry.Init(cfg)
+	return q
+}
+
+// backend returns the installation's one configured Backend.
+func (q *Queue) backend() (Backend, error) {
+	backend, ok := q.registry.Get(q.configuredBackend)
+	if !ok {
+		return nil, fmt.Errorf("no maintenance backend implementation registered for configured store %q", q.configuredBackend)
+	}
+	return backend, nil
 }
 
 // EnqueueDeleteContent schedules cleanup for one content. Repeated calls for

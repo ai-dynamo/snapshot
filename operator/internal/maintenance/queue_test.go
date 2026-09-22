@@ -10,6 +10,7 @@ import (
 	"time"
 
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/operator/internal/maintenance/backends"
 	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -63,6 +64,38 @@ func TestNewQueueDefaults(t *testing.T) {
 	t.Cleanup(q.queue.ShutDown)
 	require.NotNil(t, q.queue)
 	assert.Equal(t, "/checkpoints", q.config.BasePath)
+	assert.Equal(t, backends.NamePVC, q.configuredBackend)
+	_, ok := q.registry.Get(backends.NamePVC)
+	require.True(t, ok)
+}
+
+func TestQueueBackendReturnsTheConfiguredBackend(t *testing.T) {
+	q := NewQueue(nil, nil, nil, operatortypes.ArtifactCleanupConfig{BasePath: "/checkpoints"})
+	t.Cleanup(q.queue.ShutDown)
+
+	backend, err := q.backend()
+	require.NoError(t, err)
+	registered, _ := q.registry.Get(backends.NamePVC)
+	assert.Same(t, registered, backend)
+}
+
+func TestQueueBackendFailsWhenConfiguredBackendIsNotRegistered(t *testing.T) {
+	q := NewQueue(nil, nil, nil, operatortypes.ArtifactCleanupConfig{BasePath: "/checkpoints"})
+	t.Cleanup(q.queue.ShutDown)
+	q.configuredBackend = "S3"
+
+	_, err := q.backend()
+	require.ErrorContains(t, err, `no maintenance backend implementation registered for configured store "S3"`)
+}
+
+func TestQueueBackendResolvesHelmsLowercaseBackendType(t *testing.T) {
+	q := NewQueue(nil, nil, nil, operatortypes.ArtifactCleanupConfig{BasePath: "/checkpoints", BackendType: "pvc"})
+	t.Cleanup(q.queue.ShutDown)
+
+	backend, err := q.backend()
+	require.NoError(t, err)
+	registered, _ := q.registry.Get(backends.NamePVC)
+	assert.Same(t, registered, backend)
 }
 
 type failingPatchClient struct {
