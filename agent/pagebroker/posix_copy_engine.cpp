@@ -13,11 +13,14 @@
 
 namespace snapshot::pagebroker {
 namespace {
-// Two workers split the file list between them: enough to overlap network
-// round-trips on the many small CRIU metadata files without the added
-// complication of chunking the few large pages-*.img files that dominate
-// checkpoint size (see the PVC<->tmpfs copy's benchmark write-up).
-constexpr size_t kCopyWorkerCount = 2;
+// Workers split the file list between them, to overlap network round-trips
+// on the many small CRIU metadata files without the added complication of
+// chunking the few large pages-*.img files that dominate checkpoint size
+// (see the PVC<->tmpfs copy's benchmark write-up). 2 workers measured
+// within noise of 1; trying 4 to see whether the bottleneck is
+// concurrency at all, or storage/network throughput regardless of thread
+// count (e.g. a non-multichannel SMB session).
+constexpr size_t kCopyWorkerCount = 4;
 Path
 StoragePath(const StorageBackend& storage, const Path& storage_root, const char* label)
 {
