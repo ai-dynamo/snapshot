@@ -83,6 +83,9 @@ verify-license-headers: $(ADDLICENSE)
 	  echo "Add the two-line header from hack/boilerplate.addlicense.txt"; \
 	  exit 1; \
 	fi
+	@# addlicense checks only that a header is present, not its shape, so a
+	@# folded SPDX-License-Identifier passes it. Check the shape separately.
+	@sh hack/verify-spdx-format.sh
 
 # Ordered before generate: afterwards it would compare freshly repaired copies.
 verify-crds:
