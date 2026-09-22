@@ -6,6 +6,7 @@
 package criu
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -279,27 +280,41 @@ func testGPUDeviceMounts(t *testing.T, aliases map[string]string) {
 	for path, f := range replayed {
 		must(unix.Mount(fmt.Sprintf("/proc/self/fd/%d", f.Fd()), path, "", unix.MS_BIND, ""))
 	}
-	// Use a separate target namespace, not the caller's /dev.
-	target := exec.Command("sleep", "60")
-	target.SysProcAttr = &syscall.SysProcAttr{Cloneflags: unix.CLONE_NEWNS}
-	must(target.Start())
-	defer func() {
-		_ = target.Process.Kill()
-		_ = target.Wait()
-	}()
 	before := map[string]unix.Stat_t{}
 	for _, path := range aliases {
 		before[path] = statFile(t, path)
 	}
-	for range 2 { // repeated CUDA processes in one namespace must also work
-		must(m.RestoreNativePaths(target.Process.Pid))
-		for _, path := range aliases {
-			st := statFile(t, fmt.Sprintf("/proc/%d/root%s", target.Process.Pid, path))
-			if st.Mode&unix.S_IFMT != unix.S_IFCHR || st.Rdev != want[path] {
-				t.Fatalf("%s: mode=%o rdev=%d, want character device %d", path, st.Mode, st.Rdev, want[path])
+	// Two namespaces, each with two processes sharing its /dev.
+	for range 2 {
+		target := exec.Command("sh", "-c", "sleep 60 &\necho $!\nwait")
+		target.SysProcAttr = &syscall.SysProcAttr{Cloneflags: unix.CLONE_NEWNS, Setpgid: true}
+		stdout, err := target.StdoutPipe()
+		must(err)
+		must(target.Start())
+		defer func() {
+			_ = unix.Kill(-target.Process.Pid, unix.SIGKILL)
+			_ = target.Wait()
+		}()
+		var childPID int
+		_, err = fmt.Fscan(stdout, &childPID)
+		must(err)
+		var mounts []byte
+		for _, pid := range []int{target.Process.Pid, childPID} {
+			must(m.RestoreNativePaths(pid))
+			current, err := os.ReadFile(fmt.Sprintf("/proc/%d/mountinfo", pid))
+			must(err)
+			if mounts != nil && !bytes.Equal(mounts, current) {
+				t.Fatal("mounted devices again for a process sharing the mount namespace")
 			}
-			if st = statFile(t, path); st.Rdev != before[path].Rdev || st.Mode != before[path].Mode {
-				t.Fatalf("modified caller's device path %s", path)
+			mounts = current
+			for _, path := range aliases {
+				st := statFile(t, fmt.Sprintf("/proc/%d/root%s", pid, path))
+				if st.Mode&unix.S_IFMT != unix.S_IFCHR || st.Rdev != want[path] {
+					t.Fatalf("%s: mode=%o rdev=%d, want character device %d", path, st.Mode, st.Rdev, want[path])
+				}
+				if st = statFile(t, path); st.Rdev != before[path].Rdev || st.Mode != before[path].Mode {
+					t.Fatalf("modified caller's device path %s", path)
+				}
 			}
 		}
 	}

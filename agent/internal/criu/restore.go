@@ -204,8 +204,9 @@ func buildRestoreExtMounts(m *types.CheckpointManifest) ([]*criurpc.ExtMountMap,
 
 // GPUDeviceMounts keeps the allocated devices pinned across CRIU's mount replay.
 type GPUDeviceMounts struct {
-	devices map[string]*os.File
-	aliases []gpuMountAlias
+	devices    map[string]*os.File
+	aliases    []gpuMountAlias
+	restoredNS map[uint64]bool
 }
 
 type gpuMountAlias struct {
@@ -234,6 +235,7 @@ func (m *GPUDeviceMounts) Close(committed bool) error {
 		errs = append(errs, f.Close())
 	}
 	m.devices = nil
+	m.restoredNS = nil
 	return errors.Join(errs...)
 }
 
@@ -306,6 +308,14 @@ func (m *GPUDeviceMounts) RestoreNativePaths(pid int) error {
 		return err
 	}
 	defer ns.Close()
+	var nsStat unix.Stat_t
+	if err := unix.Fstat(int(ns.Fd()), &nsStat); err != nil {
+		return err
+	}
+	// CUDA processes can share a mount namespace. Install each set of mounts once.
+	if m.restoredNS[nsStat.Ino] {
+		return nil
+	}
 	root, err := os.Open(fmt.Sprintf("/proc/%d/root", pid))
 	if err != nil {
 		return err
@@ -353,7 +363,14 @@ func (m *GPUDeviceMounts) RestoreNativePaths(pid int) error {
 		}
 		done <- nil
 	}()
-	return <-done
+	if err := <-done; err != nil {
+		return err
+	}
+	if m.restoredNS == nil {
+		m.restoredNS = make(map[uint64]bool)
+	}
+	m.restoredNS[nsStat.Ino] = true
+	return nil
 }
 
 func installGPUDeviceMount(devFD int, name string, mountFD int) error {
