@@ -8,7 +8,7 @@ require (
 	github.com/ai-dynamo/snapshot/api v0.0.0
 	github.com/checkpoint-restore/go-criu/v8 v8.4.0
 	github.com/containerd/containerd/v2 v2.3.5
-	github.com/cyphar/filepath-securejoin v0.6.0
+	github.com/cyphar/filepath-securejoin v0.7.0
 	github.com/go-logr/logr v1.4.4
 	github.com/go-logr/zapr v1.3.0
 	github.com/google/uuid v1.6.0
@@ -28,7 +28,7 @@ require (
 	k8s.io/cri-client v0.37.0
 	k8s.io/kubelet v0.37.0
 	k8s.io/utils v0.0.0-20260626114624-be93311217bd
-	sigs.k8s.io/controller-runtime v0.25.0
+	sigs.k8s.io/controller-runtime v0.25.1
 )
 
 require (
