@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -203,19 +204,32 @@ func buildRestoreExtMounts(m *types.CheckpointManifest) ([]*criurpc.ExtMountMap,
 
 // GPUDeviceMounts keeps the allocated devices pinned across CRIU's mount replay.
 type GPUDeviceMounts struct {
-	devices  map[string]*os.File
-	cleanups []func() error
+	devices map[string]*os.File
+	aliases []gpuMountAlias
+}
+
+type gpuMountAlias struct {
+	path    string
+	created bool
 }
 
 // Close releases the pinned devices and, unless committed, unwinds the aliases.
 func (m *GPUDeviceMounts) Close(committed bool) error {
 	var errs []error
 	if !committed {
-		for i := len(m.cleanups) - 1; i >= 0; i-- {
-			errs = append(errs, m.cleanups[i]())
+		// Unwind completed setup steps in reverse order, including partial
+		// failures. Detach aliases before removing their mountpoint files.
+		for _, alias := range slices.Backward(m.aliases) {
+			if err := unix.Unmount(alias.path, unix.MNT_DETACH); err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			if alias.created {
+				errs = append(errs, os.Remove(alias.path))
+			}
 		}
 	}
-	m.cleanups = nil
+	m.aliases = nil
 	for _, f := range m.devices {
 		errs = append(errs, f.Close())
 	}
@@ -273,15 +287,7 @@ func PrepareGPUDeviceMounts(aliases map[string]string, log logr.Logger) (_ *GPUD
 			}
 			return nil, err
 		}
-		m.cleanups = append(m.cleanups, func() error {
-			if err := unix.Unmount(path, unix.MNT_DETACH); err != nil {
-				return err
-			}
-			if created {
-				return os.Remove(path)
-			}
-			return nil
-		})
+		m.aliases = append(m.aliases, gpuMountAlias{path: path, created: created})
 		log.Info("Aliased GPU device mount", "checkpoint_device", path, "restore_device", target)
 	}
 	return m, nil
