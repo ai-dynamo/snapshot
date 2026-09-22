@@ -40,6 +40,10 @@ TERMINAL_POD_PHASES = {"Failed", "Succeeded"}
 AGENT_CHECKPOINT_DIR = "/checkpoints"
 
 
+class LifecycleTimeoutError(AssertionError, TimeoutError):
+    """A lifecycle wait exhausted its budget before the awaited state appeared."""
+
+
 def wait_for_pod_deleted(namespace: str, name: str, timeout: int = 180) -> None:
     def gone() -> bool | None:
         try:
@@ -223,6 +227,24 @@ def wait_for_file(namespace: str, pod: str, path: str, timeout: int = 180) -> No
     wait_for(f"{namespace}/{pod}:{path}", exists, timeout, detail=detail)
 
 
+def _parse_outcome_marker(output: str, marker: str) -> tuple[str, str] | None:
+    """Return (kind, body) for the last outcome marker in exec output.
+
+    exec_command runs a login shell with stderr merged, so anything the
+    container's profile prints lands before the marker; only the text from the
+    last marker onwards is the sentinel.
+    """
+    marker_at = output.rfind(marker)
+    if marker_at < 0:
+        return None
+    tail = output[marker_at:]
+    body = tail.split("\n", 1)[1] if "\n" in tail else ""
+    for kind in ("error", "ready"):
+        if tail.startswith(f"{marker}:{kind}"):
+            return kind, body
+    return None
+
+
 def wait_for_restore_outcome(
     namespace: str,
     pod: str,
@@ -256,19 +278,16 @@ def wait_for_restore_outcome(
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
             return None
-        marker_at = output.rfind(marker)
-        if marker_at < 0:
+        parsed = _parse_outcome_marker(output, marker)
+        if parsed is None:
             return None
-        tail = output[marker_at:]
-        body = tail.split("\n", 1)[1] if "\n" in tail else ""
-        if tail.startswith(f"{marker}:error"):
+        kind, body = parsed
+        if kind == "error":
             raise AssertionError(
                 f"restored program in {namespace}/{pod} failed after restore "
                 f"({error_file}):\n{body}"
             )
-        if tail.startswith(f"{marker}:ready"):
-            return body
-        return None
+        return body
 
     def detail() -> str:
         return f"last_error={last_error}" if last_error else "neither sentinel observed yet"
@@ -278,6 +297,110 @@ def wait_for_restore_outcome(
         outcome,
         timeout,
         detail=detail,
+    )
+
+
+def wait_for_restore_traffic_ready(
+    namespace: str,
+    pod_name: str,
+    *,
+    ready_file: str,
+    error_file: str,
+    timeout: int,
+    on_restore_succeeded: Callable[[], None] | None = None,
+    on_traffic_ready: Callable[[], None] | None = None,
+    poll_interval: float = 1.0,
+) -> tuple[client.V1Pod, str]:
+    """Observes restore completion and traffic readiness in one tight loop.
+
+    Waiting for the pod condition and then starting a separate sentinel wait
+    can add two independent polling delays to the reported duration. This
+    waiter records each boundary the first time it is seen, still requires
+    both success signals, and fails fast on either restore or workload errors.
+
+    The sentinel exec starts only after ``nvidia.com/Restored`` reports
+    ``RestoreSucceeded``. The agent restores the checkpointed process tree
+    into the placeholder's PID namespace with its original PIDs, and an exec
+    session in that namespace during the restore could occupy one of them.
+    The poll interval bounds the delay this adds to the traffic boundary.
+    """
+    marker = "__snapshot_e2e_outcome__"
+    restored_pod: client.V1Pod | None = None
+    ready_text: str | None = None
+    last_exec_error: str | None = None
+
+    def check() -> tuple[client.V1Pod, str] | None:
+        nonlocal restored_pod, ready_text, last_exec_error
+        pod = k8s.read_pod(namespace, pod_name)
+        if pod.status.phase in TERMINAL_POD_PHASES:
+            raise AssertionError(
+                f"pod {namespace}/{pod_name} reached phase {pod.status.phase} "
+                "before restore and traffic readiness"
+            )
+        restored = pod_condition(pod, "nvidia.com/Restored")
+        if restored and restored.status == "True" and restored.reason == "RestoreSucceeded":
+            if restored_pod is None and on_restore_succeeded is not None:
+                on_restore_succeeded()
+            restored_pod = pod
+        else:
+            terminal_reasons = {
+                "RestoreSucceeded",
+                "RestorePartiallySucceeded",
+                "RestoreFailed",
+            }
+            if restored and restored.reason in terminal_reasons:
+                raise AssertionError(
+                    f"restore reached unexpected terminal condition for "
+                    f"{namespace}/{pod_name}: {restored.reason}: {restored.message}"
+                )
+
+        if restored_pod is not None and ready_text is None:
+            try:
+                output = k8s.exec_command(
+                    namespace,
+                    pod_name,
+                    f"if [[ -f {shlex.quote(error_file)} ]]; then printf '%s:error\\n' {shlex.quote(marker)}; "
+                    f"cat {shlex.quote(error_file)}; "
+                    f"elif [[ -f {shlex.quote(ready_file)} ]]; then printf '%s:ready\\n' {shlex.quote(marker)}; "
+                    f"cat {shlex.quote(ready_file)}; fi",
+                )
+                last_exec_error = None
+            except Exception as exc:  # transient while the restored process settles
+                last_exec_error = f"{type(exc).__name__}: {exc}"
+            else:
+                parsed = _parse_outcome_marker(output, marker)
+                if parsed is not None:
+                    kind, body = parsed
+                    if kind == "error":
+                        raise AssertionError(
+                            f"restored program in {namespace}/{pod_name} failed after "
+                            f"restore ({error_file}):\n{body}"
+                        )
+                    ready_text = body
+                    if on_traffic_ready is not None:
+                        on_traffic_ready()
+
+        if restored_pod is not None and ready_text is not None:
+            return restored_pod, ready_text
+        return None
+
+    def detail() -> str:
+        try:
+            pod = k8s.read_pod(namespace, pod_name)
+            restored = pod_condition(pod, "nvidia.com/Restored")
+            condition_detail = condition_summary(restored)
+        except ApiException as exc:
+            condition_detail = f"api_error={k8s.api_error_detail(exc)}"
+        sentinel = "ready" if ready_text is not None else "not ready"
+        exec_detail = f" last_exec_error={last_exec_error}" if last_exec_error else ""
+        return f"nvidia.com/Restored={condition_detail} sentinel={sentinel}{exec_detail}"
+
+    return wait_for(
+        f"restore and traffic readiness on {namespace}/{pod_name}",
+        check,
+        timeout,
+        detail=detail,
+        poll_interval=poll_interval,
     )
 
 
@@ -519,6 +642,71 @@ def wait_for_restored_condition(
     )
 
 
+def wait_for_pod_event(
+    namespace: str,
+    pod_name: str,
+    reason: str,
+    *,
+    pod_uid: str | None = None,
+    timeout: int = 600,
+    poll_interval: float = 1.0,
+) -> client.CoreV1Event:
+    """Waits for a named event on one pod.
+
+    Benchmark callers use a shorter poll than the ordinary lifecycle waits so
+    observing an agent event adds at most one second to the timing boundary.
+    The server-side field selector keeps that poll cheap in a busy namespace;
+    the UID guard avoids matching an event from a re-created pod with the
+    same name.
+    """
+    selector = {"involvedObject.name": pod_name, "reason": reason}
+    if pod_uid:
+        selector["involvedObject.uid"] = pod_uid
+
+    def matching_event() -> client.CoreV1Event | None:
+        for event in reversed(k8s.list_events(namespace, field_selector=selector)):
+            involved = event.involved_object
+            if not involved or involved.name != pod_name or event.reason != reason:
+                continue
+            if pod_uid and str(involved.uid or "") != pod_uid:
+                continue
+            return event
+        return None
+
+    def detail() -> str:
+        reasons = [
+            event.reason
+            for event in k8s.list_events(
+                namespace, field_selector={"involvedObject.name": pod_name}
+            )
+        ]
+        return f"observed_reasons={reasons[-10:]}"
+
+    return wait_for(
+        f"event {reason} on pod {namespace}/{pod_name}",
+        matching_event,
+        timeout,
+        detail=detail,
+        poll_interval=poll_interval,
+    )
+
+
+def pod_event_timestamp(event: client.CoreV1Event) -> datetime:
+    """Returns the best available occurrence timestamp for a Kubernetes event."""
+    candidates = (
+        getattr(event, "event_time", None),
+        getattr(event, "last_timestamp", None),
+        getattr(event, "first_timestamp", None),
+        getattr(getattr(event, "metadata", None), "creation_timestamp", None),
+    )
+    for value in candidates:
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc)
+    raise ValueError("Kubernetes event has no timestamp")
+
+
 def pod_condition(pod: client.V1Pod, condition_type: str) -> client.V1PodCondition | None:
     for item in pod.status.conditions or []:
         if item.type == condition_type:
@@ -570,7 +758,12 @@ def wait_for_restore_past_the_gate(
     RestoreInProgress is transient, so waiting for it alone is a race a fast
     restore wins. A restore refused at the gate never reaches any of these.
     """
-    past = ("RestoreInProgress", "RestoreSucceeded", "RestoreFailed")
+    past = (
+        "RestoreInProgress",
+        "RestoreSucceeded",
+        "RestorePartiallySucceeded",
+        "RestoreFailed",
+    )
 
     def check() -> client.V1Pod | None:
         pod = k8s.read_pod(namespace, pod_name)
@@ -746,9 +939,8 @@ def checkpoint_agent_pod(config: k8s.E2EConfig, node: str) -> str:
         if pod.spec.node_name == node
     ]
     if len(agents) != 1:
-        names = [pod.metadata.name for pod in agents]
         raise AssertionError(
-            f"expected one snapshot agent on node {node!r}, found {names}"
+            f"expected one snapshot agent on node {node!r}, found {len(agents)}"
         )
     return agents[0].metadata.name
 
@@ -1324,6 +1516,7 @@ def wait_for(
     timeout: int,
     *,
     detail: Callable[[], str] | None = None,
+    poll_interval: float = 5.0,
 ) -> Any:
     start = time.monotonic()
     deadline = time.monotonic() + timeout
@@ -1344,6 +1537,6 @@ def wait_for(
                 flush=True,
             )
             last_report = now
-        time.sleep(5)
+        time.sleep(poll_interval)
     suffix = f": {last_detail}" if last_detail else ""
-    raise AssertionError(f"timed out waiting for {description}{suffix}")
+    raise LifecycleTimeoutError(f"timed out waiting for {description}{suffix}")

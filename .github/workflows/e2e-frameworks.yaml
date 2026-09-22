@@ -8,9 +8,17 @@ name: E2E Framework Tests
 # e2e.yaml; the differences are the 64Gi checkpoint PVC (framework artifacts
 # are multi-GB), the framework image resolution, and the diagnostics upload.
 #
-# Pull requests are tested through their copy-pr-bot mirror branch
-# (pull-request/<number>, see .github/copy-pr-bot.yaml): the GPU runners admit
-# push, schedule, and workflow_dispatch events but reject pull_request.
+# Pull requests are tested by manually dispatching this workflow on their
+# copy-pr-bot mirror branch (pull-request/<number>, see
+# .github/copy-pr-bot.yaml): the GPU runners admit push, schedule, and
+# workflow_dispatch events but reject pull_request. There is no automatic
+# per-push trigger -- mirror branches usually have no operator/agent/pagebroker
+# images of their own, so an automatic run would silently fall back to
+# testing main's Snapshot instead of the PR's own changes (see
+# hack/resolve-snapshot-image-tag.py). Dispatch push-artifacts.yaml on the PR
+# branch first to build its own images, then dispatch this workflow with the
+# resulting snapshot_tag against the pull-request/<number> mirror branch (not
+# the source branch) so the benchmark preview keys to that PR.
 #
 # Known-red on this gate, kept red on purpose (not this workflow's bug):
 #   - vLLM: intermittent CRIU restore segfault ("criu swrk failed: signal:
@@ -24,19 +32,6 @@ name: E2E Framework Tests
 # failure matches one of the above first.
 
 on:
-  push:
-    branches:
-      - 'pull-request/[0-9]+'
-    # Only changes to the workloads, the tests, and this wiring gate a PR:
-    # mirror branches have no operator/agent images of their own, so a run
-    # here tests main's Snapshot and would say nothing about an agent/operator
-    # change. Those are covered nightly against main. The framework fixtures
-    # (app.py, deployment.yaml, ...) live under e2e/, not docs/guides/, so
-    # e2e/** alone covers them.
-    paths:
-      - 'e2e/**'
-      - 'hack/**'
-      - '.github/workflows/e2e-frameworks.yaml'
   schedule:
     # 01:00 Pacific Standard Time, after the nightly e2e.yaml run.
     - cron: "0 9 * * *"
@@ -50,9 +45,11 @@ on:
         options: [all, vllm, sglang, tensorrt-llm]
       snapshot_tag:
         description: >-
-          Operator/agent image tag to install. Leave empty to resolve from the
-          commit under test (pull-request/* mirror branches fall back to the
-          newest main build when the commit has no published images).
+          Operator/agent image tag to install. pull-request/<number> mirror
+          branches require an explicit tag. Leave empty on main/release/*
+          branches to resolve from the commit under test; other non-PR
+          branches fall back to the newest main build when the commit has no
+          published images.
         required: false
         type: string
       datadog_gpu_monitoring:
@@ -143,6 +140,8 @@ jobs:
       SNAPSHOT_E2E_READY_TIMEOUT_SECONDS: "480"
       SNAPSHOT_E2E_RESULT_FILE: ${{ github.workspace }}/.snapshot-e2e-setup-result.json
       SNAPSHOT_E2E_FRAMEWORK: ${{ matrix.framework }}
+      SNAPSHOT_E2E_BENCHMARK_DIR: ${{ github.workspace }}/.e2e-benchmark-results
+      SNAPSHOT_E2E_DATADOG_GPU_MONITORING: ${{ needs.datadog-gate.outputs.mode }}
       # Shared CI model cache (HF cache layout on an NFS export): pods here
       # can't resolve huggingface.co, and per-run downloads cost minutes
       # anyway. Repository variables override the literals below, which are
@@ -239,11 +238,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # A PR mirror dispatch with no snapshot_tag would silently fall back
+          # to main's images (see --fallback-main below) and still publish a
+          # benchmark preview keyed to that PR, looking like it tested the
+          # PR's own changes when it didn't. Require snapshot_tag there.
+          if [[ "${GITHUB_REF_NAME}" =~ ^pull-request/[0-9]+$ ]]; then
+            echo "::error::Dispatching against PR mirror branch ${GITHUB_REF_NAME} requires an explicit snapshot_tag, otherwise the run silently falls back to testing main's images. Dispatch push-artifacts.yaml on the PR's source branch first, then re-dispatch this workflow with the resulting tag." >&2
+            exit 1
+          fi
           # push-artifacts publishes only main/release, so any other ref (a
-          # pull-request/* mirror branch, or a feature branch dispatched by
-          # hand) normally has no images of its own; fall back to main's,
-          # loudly. main and release refs stay strict: a nightly must test
-          # the commit it checked out.
+          # non-PR feature branch dispatched by hand) normally has no images
+          # of its own; fall back to main's, loudly. main and release refs
+          # stay strict: a nightly must test the commit it checked out.
           case "${GITHUB_REF_NAME}" in
             main|release/*) python3 hack/resolve-snapshot-image-tag.py ;;
             *) python3 hack/resolve-snapshot-image-tag.py --fallback-main ;;
@@ -339,15 +345,53 @@ jobs:
           set -euo pipefail
           uv run --locked --project e2e pytest e2e/tests -m environment -vv
 
-      # Must exceed the phase budgets in e2e/snapshot_e2e/frameworks.py plus the
-      # request timeout (~43 min with sglang's 600s restore_timeout_seconds
-      # override), or GitHub kills pytest before its dump runs.
+      # The inner timeout must exceed the phase budgets in
+      # e2e/snapshot_e2e/frameworks.py plus the request timeout (45 min with
+      # sglang's 600s restore_timeout_seconds override). SIGINT reaches the
+      # whole process group, so pytest raises KeyboardInterrupt, runs its
+      # fixture finalizers (benchmark result, cluster cleanup), and exits
+      # before the KILL backstop; GNU timeout still returns 124.
       - name: Run ${{ matrix.framework }} checkpoint/restore test
         if: ${{ steps.selected.outputs.run == 'true' }}
+        id: framework_test
         timeout-minutes: 50
         run: |
+          set -uo pipefail
+          timeout --signal=INT --kill-after=150s 46m \
+            uv run --locked --project e2e pytest e2e/tests/test_frameworks.py -vv -s
+          status=$?
+          if [[ "${status}" -eq 124 ]]; then
+            PYTHONPATH=e2e python3 -m snapshot_e2e.benchmark fallback \
+              --suite framework-checkpoint-restore \
+              --case "${{ matrix.framework }}" \
+              --test test_framework_checkpoint_restore_serves_inference \
+              --outcome timed_out \
+              --message "pytest exceeded the 46 minute benchmark timeout"
+          fi
+          exit "${status}"
+
+      - name: Ensure benchmark result exists
+        if: ${{ always() && steps.selected.outputs.run == 'true' }}
+        env:
+          TEST_STEP_OUTCOME: ${{ steps.framework_test.outcome }}
+        run: |
           set -euo pipefail
-          uv run --locked --project e2e pytest e2e/tests/test_frameworks.py -vv -s
+          PYTHONPATH=e2e python3 -m snapshot_e2e.benchmark fallback \
+            --suite framework-checkpoint-restore \
+            --case "${{ matrix.framework }}" \
+            --test test_framework_checkpoint_restore_serves_inference \
+            --outcome infrastructure_failed \
+            --message "pytest produced no benchmark result; step outcome=${TEST_STEP_OUTCOME}"
+
+      - name: Upload benchmark result
+        if: ${{ always() && steps.selected.outputs.run == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-framework-benchmark-${{ matrix.framework }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SNAPSHOT_E2E_BENCHMARK_DIR }}/*.json
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 30
 
       # The test already prints its own dump; this preserves the raw cluster
       # state and full agent logs, which do not fit in a job log.
@@ -419,3 +463,152 @@ jobs:
 
       - name: Restore Datadog GPU monitoring
         run: python3 hack/datadog-gpu-monitoring.py restore --holder "${{ github.run_id }}-${{ github.run_attempt }}"
+
+  # PR mirrors and ordinary dispatches compare against history with a
+  # read-only token. Keep this separate from the scheduled publisher: mirror
+  # branches contain PR code but run as push events, so merely guarding a
+  # write step inside one write-capable job would still expose that token.
+  benchmark-history-read-only:
+    name: compare framework benchmark history
+    needs: e2e
+    if: ${{ !cancelled() && !(github.event_name == 'schedule' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # All attempts of this run: "Re-run failed jobs" re-executes only the
+      # failed matrix jobs, so the passing frameworks' results still live in
+      # the earlier attempt's artifacts.
+      # No continue-on-error: a pattern matching nothing is not a failure for
+      # this action, so the flag would only turn a real API error into a set of
+      # fabricated infrastructure_failed results.
+      - name: Download framework benchmark results
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: e2e-framework-benchmark-*-${{ github.run_id }}-*
+          path: ${{ runner.temp }}/e2e-framework-benchmark-results
+          merge-multiple: true
+
+      - name: Fetch benchmark history
+        id: history
+        uses: ./.github/actions/fetch-benchmark-history
+        with:
+          token: ${{ github.token }}
+
+      - name: Compare benchmark results
+        env:
+          SELECTED_FRAMEWORK: ${{ inputs.framework || 'all' }}
+          SNAPSHOT_E2E_HISTORY_DIR: ${{ steps.history.outputs.history_dir }}
+          SNAPSHOT_E2E_SNAPSHOT_TAG: ${{ inputs.snapshot_tag || '' }}
+        run: |
+          set -euo pipefail
+          cases=()
+          if [[ "${SELECTED_FRAMEWORK}" == "all" ]]; then
+            cases=(vllm sglang tensorrt-llm)
+          else
+            cases=("${SELECTED_FRAMEWORK}")
+          fi
+          case_args=()
+          for framework in "${cases[@]}"; do
+            case_args+=(--expected-case "${framework}")
+          done
+          PYTHONPATH=e2e python3 -m snapshot_e2e.benchmark_history aggregate \
+            --artifacts-dir "${RUNNER_TEMP}/e2e-framework-benchmark-results" \
+            --history-dir "${SNAPSHOT_E2E_HISTORY_DIR}" \
+            --output-dir "${RUNNER_TEMP}/e2e-framework-benchmark-comparison" \
+            --summary-file "${GITHUB_STEP_SUMMARY}" \
+            "${case_args[@]}"
+
+      - name: Upload benchmark comparison
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-benchmark-comparison-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/e2e-framework-benchmark-comparison
+          if-no-files-found: error
+          retention-days: 30
+
+  # Exactly one scheduled default-branch job receives contents:write. It
+  # aggregates all matrix artifacts and pushes one serialized history commit.
+  benchmark-history-publish:
+    name: publish framework benchmark history
+    needs: e2e
+    # !cancelled(), not always(): an operator-cancelled nightly must not
+    # synthesize and permanently publish infrastructure_failed records that
+    # identity dedup then stops a re-run from replacing.
+    if: ${{ !cancelled() && github.event_name == 'schedule' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: snapshot-e2e-benchmark-history
+      cancel-in-progress: false
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # No continue-on-error: a pattern matching nothing is not a failure for
+      # this action, so the flag would only turn a real API error into a set of
+      # fabricated infrastructure_failed results.
+      - name: Download framework benchmark results
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: e2e-framework-benchmark-*-${{ github.run_id }}-*
+          path: ${{ runner.temp }}/e2e-framework-benchmark-results
+          merge-multiple: true
+
+      - name: Fetch or initialize benchmark history
+        id: history
+        uses: ./.github/actions/fetch-benchmark-history
+        with:
+          token: ${{ github.token }}
+          bootstrap: "true"
+          persist-credentials: "true"
+
+      - name: Aggregate and index benchmark results
+        env:
+          SNAPSHOT_E2E_HISTORY_DIR: ${{ steps.history.outputs.history_dir }}
+        run: |
+          set -euo pipefail
+          echo "SNAPSHOT_E2E_HISTORY_DIR=${SNAPSHOT_E2E_HISTORY_DIR}" >> "${GITHUB_ENV}"
+          PYTHONPATH=e2e python3 -m snapshot_e2e.benchmark_history aggregate \
+            --artifacts-dir "${RUNNER_TEMP}/e2e-framework-benchmark-results" \
+            --history-dir "${SNAPSHOT_E2E_HISTORY_DIR}" \
+            --output-dir "${RUNNER_TEMP}/e2e-framework-benchmark-comparison" \
+            --summary-file "${GITHUB_STEP_SUMMARY}" \
+            --expected-case vllm \
+            --expected-case sglang \
+            --expected-case tensorrt-llm \
+            --publish
+
+      - name: Commit and push benchmark history
+        run: |
+          set -euo pipefail
+          git -C "${SNAPSHOT_E2E_HISTORY_DIR}" config user.name "github-actions[bot]"
+          git -C "${SNAPSHOT_E2E_HISTORY_DIR}" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "${SNAPSHOT_E2E_HISTORY_DIR}" add results index
+          if git -C "${SNAPSHOT_E2E_HISTORY_DIR}" diff --cached --quiet; then
+            echo "History already contains this workflow attempt; nothing to push."
+            exit 0
+          fi
+          git -C "${SNAPSHOT_E2E_HISTORY_DIR}" commit --signoff \
+            --message "data(e2e): record benchmark run ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git -C "${SNAPSHOT_E2E_HISTORY_DIR}" push origin HEAD:refs/heads/e2e-benchmark-history
+
+      - name: Upload benchmark comparison
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-benchmark-comparison-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/e2e-framework-benchmark-comparison
+          if-no-files-found: error
+          retention-days: 30

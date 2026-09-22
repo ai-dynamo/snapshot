@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-logr/logr"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -184,7 +185,21 @@ func (w *NodeController) releaseLease(ctx context.Context, key client.ObjectKey)
 	}
 	return nil
 }
+
+// core/v1 Event field limits the API server enforces once eventTime is set.
+// A node name may be up to 253 characters, so ReportingInstance needs the cap.
+const (
+	eventMessageLengthLimit           = 1024
+	eventReportingInstanceLengthLimit = 128
+)
+
 func emitPodEvent(ctx context.Context, clientset kubernetes.Interface, log logr.Logger, pod *corev1.Pod, component, eventType, reason, message string) {
+	now := time.Now()
+	reportingInstance := pod.Spec.NodeName
+	if reportingInstance == "" {
+		reportingInstance = component
+	}
+	reportingInstance = truncateUTF8(reportingInstance, eventReportingInstanceLengthLimit)
 	event := &corev1.Event{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: fmt.Sprintf("%s-", pod.Name),
@@ -199,13 +214,17 @@ func emitPodEvent(ctx context.Context, clientset kubernetes.Interface, log logr.
 		},
 		Type:    eventType,
 		Reason:  reason,
-		Message: message,
+		Message: truncateEventMessage(message),
 		Source: corev1.EventSource{
 			Component: component,
 		},
-		Count:          1,
-		FirstTimestamp: metav1.Now(),
-		LastTimestamp:  metav1.Now(),
+		Count:               1,
+		FirstTimestamp:      metav1.NewTime(now),
+		LastTimestamp:       metav1.NewTime(now),
+		EventTime:           metav1.NewMicroTime(now),
+		Action:              reason,
+		ReportingController: component,
+		ReportingInstance:   reportingInstance,
 	}
 
 	if _, err := clientset.CoreV1().Events(pod.Namespace).Create(ctx, event, metav1.CreateOptions{}); err != nil {
@@ -215,6 +234,26 @@ func emitPodEvent(ctx context.Context, clientset kubernetes.Interface, log logr.
 			"message", message,
 		)
 	}
+}
+
+func truncateEventMessage(message string) string {
+	if len(message) <= eventMessageLengthLimit {
+		return message
+	}
+	const marker = "..."
+	return truncateUTF8(message, eventMessageLengthLimit-len(marker)) + marker
+}
+
+// truncateUTF8 cuts s to at most limit bytes without splitting a rune.
+func truncateUTF8(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	cut := s[:limit]
+	for len(cut) > 0 && !utf8.RuneStart(s[len(cut)]) {
+		cut = cut[:len(cut)-1]
+	}
+	return cut
 }
 
 func setPodCondition(status *corev1.PodStatus, condition corev1.PodCondition) {

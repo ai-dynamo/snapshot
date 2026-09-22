@@ -31,6 +31,13 @@ workloads. It checkpoints a fully initialized GPU pod — running process, CPU a
 GPU memory — and restores that state on another compatible node. It provides
 primitives, not orchestration.
 
+## Agent skills
+
+Repository agent skills live in `.agents/skills/` and are versioned with the
+checkout. Use the `snep` skill when drafting or revising a Snapshot Enhancement
+Proposal (SNEP); it guides the proposal section by section and follows the
+process in `docs/proposals/README.md`.
+
 ## Repository layout
 
 | Path | Go module | What lives there |

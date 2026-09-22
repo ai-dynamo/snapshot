@@ -6,6 +6,7 @@ package cuda
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -26,6 +28,137 @@ import (
 
 	"github.com/ai-dynamo/snapshot/api/compat"
 )
+
+func TestResolveVisibleGPUsPreservesCompatibilityMetadata(t *testing.T) {
+	const uuid = "GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	dir := t.TempDir()
+	script := "#!/bin/sh\ncase \"$*\" in\n" +
+		"*uuid,name,driver_version*) echo '" + uuid + ", NVIDIA B200, 595.58.03';;\n" +
+		"*) echo '" + uuid + "';;\nesac\n"
+	if err := os.WriteFile(filepath.Join(dir, "nvidia-smi"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	got, err := resolveSelectedGPUs(context.Background(), "7")
+	want := compat.GPUInfo{
+		DriverVersion: "595.58.03",
+		Devices:       []compat.GPUDevice{{UUID: uuid, ProductName: "NVIDIA B200"}},
+	}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("GPU metadata = %#v, %v; want %#v", got, err, want)
+	}
+}
+
+func TestDisabledLegacySelectionUsesOnlyContainerVisibility(t *testing.T) {
+	for _, value := range []string{"", "none", "void"} {
+		for _, visible := range []string{"", "GPU-cdi, NVIDIA B200, 595.58.03"} {
+			t.Run(value+"/"+visible, func(t *testing.T) {
+				installFakeNSenter(t, fmt.Sprintf("printf '%%s\\n' '%s'\n", visible))
+				// No Kubernetes or PodResources client: an allocation fallback
+				// would fail instead of returning the container's actual view.
+				got, err := DiscoverGPUs(context.Background(), nil, "", "", "", "/host/proc", 42,
+					[]string{"NVIDIA_VISIBLE_DEVICES=" + value}, logr.Discard())
+				if err != nil || !reflect.DeepEqual(got, parseNvidiaSmiGPUs(visible)) {
+					t.Fatalf("container discovery = %#v, %v", got, err)
+				}
+			})
+		}
+	}
+}
+
+func TestSelectionLookupHonorsDeadline(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "nvidia-smi"), []byte("#!/bin/sh\nexec sleep 30\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := resolveSelectedGPUs(ctx, "0"); err == nil {
+		t.Fatal("stalled lookup succeeded")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("lookup ignored deadline: %s", elapsed)
+	}
+}
+
+func TestVisibleDevicesValueUsesLastAssignment(t *testing.T) {
+	got := VisibleDevicesValue([]string{"NVIDIA_VISIBLE_DEVICES=0", "NVIDIA_VISIBLE_DEVICES="})
+	if got == nil || *got != "" {
+		t.Fatalf("selection = %v, want explicitly empty", got)
+	}
+	if VisibleDevicesValue(nil) != nil {
+		t.Fatal("absent selection became explicit")
+	}
+}
+
+func TestResolveDevicePathsValidatesPhysicalMinor(t *testing.T) {
+	root := t.TempDir()
+	infoDir := filepath.Join(root, "driver/nvidia/gpus/0000:41:00.0")
+	deviceDir := filepath.Join(root, "100/root/dev")
+	for _, dir := range []string{infoDir, deviceDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(infoDir, "information"),
+		[]byte("GPU UUID: GPU-A\nDevice Minor: 7\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(deviceDir, "nvidia7")
+	if err := unix.Mknod(path, unix.S_IFCHR|0600, int(unix.Mkdev(195, 7))); err != nil {
+		if errors.Is(err, unix.EPERM) {
+			t.Skip("requires permission to create a test character device")
+		}
+		t.Fatal(err)
+	}
+	got, err := ResolveDevicePaths(root, 100, []string{"GPU-A"})
+	if err != nil || got["GPU-A"] != "/dev/nvidia7" {
+		t.Fatalf("paths = %v, error = %v", got, err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveDevicePaths(root, 100, []string{"GPU-A"}); err == nil {
+		t.Fatal("accepted a regular file in place of the allocated GPU")
+	}
+}
+
+func TestResolveVisibleDevices(t *testing.T) {
+	dir := t.TempDir()
+	const a = "GPU-11111111-1111-1111-1111-111111111111"
+	const b = "GPU-22222222-2222-2222-2222-222222222222"
+	script := "#!/bin/sh\ncase \"$2\" in\n0|" + a + ") echo " + a + ";;\n2|" + b + ") echo " + b + ";;\n*) exit 1;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(dir, "nvidia-smi"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	for _, tc := range []struct {
+		value   string
+		want    []string
+		wantErr bool
+	}{
+		{"0,2", []string{a, b}, false},
+		{b + "," + a, []string{b, a}, false},
+		{"0," + a, nil, true},
+		{"MIG-invalid", nil, true},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			gpus, err := resolveSelectedGPUs(context.Background(), tc.value)
+			got := gpuUUIDsOf(gpus)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("error = %v", err)
+			}
+			if !tc.wantErr && !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("UUIDs = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
 
 func TestParseNvidiaSmiGPUs(t *testing.T) {
 	tests := []struct {
@@ -867,7 +1000,7 @@ func TestDiscoverGPUsUseVisibleGPUDescriptions(t *testing.T) {
 	installFakeNSenter(t, "printf '%s\\n' 'GPU-a, NVIDIA L4, 580.65.06'\n")
 
 	got, err := DiscoverGPUs(
-		context.Background(), nil, "test-pod", "default", "main", "/host/proc", 42, logr.Discard(),
+		context.Background(), nil, "test-pod", "default", "main", "/host/proc", 42, nil, logr.Discard(),
 	)
 	if err != nil {
 		t.Fatalf("DiscoverGPUs: %v", err)

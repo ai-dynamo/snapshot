@@ -18,6 +18,7 @@ func inspectCompatibility(
 	log logr.Logger,
 	manifest *types.CheckpointManifest,
 	targetGPUs compat.GPUInfo,
+	gpuMountAliases map[string]string,
 	targetRoot string,
 	targetImageID string,
 	skipCompatCheck bool,
@@ -32,7 +33,7 @@ func inspectCompatibility(
 		ImageID:            targetImageID,
 		DriverVersion:      targetGPUs.DriverVersion,
 		GPUDevices:         targetGPUs.Devices,
-		ExistingMountPaths: existingMountPaths(targetRoot, sourceEnv.ExternalizedMounts),
+		ExistingMountPaths: existingMountPaths(targetRoot, sourceEnv.ExternalizedMounts, gpuMountAliases),
 	}
 	mismatches := compat.Compare(compat.GateInspect, sourceEnv, targetEnv)
 	if len(mismatches) == 0 {

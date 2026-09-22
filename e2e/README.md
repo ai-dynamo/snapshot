@@ -175,6 +175,202 @@ Model weights come from one of two places:
 `tests/test_framework_manifests.py` pins the guide manifests, and the cache
 rewrite, to the restore-pod contract without a cluster.
 
+### Framework benchmark results
+
+Every selected framework test prints a benchmark summary and writes one
+versioned JSON result. CI uploads the JSON as a 30-day artifact even when the
+functional test fails. Set `SNAPSHOT_E2E_BENCHMARK_DIR` to choose the local
+output directory; without it, results go under the system temporary directory.
+
+The required durations use these stable boundaries:
+
+- `checkpoint.duration`: immediately before the `PodSnapshot` create request
+  until both `PodSnapshot` and its bound `PodSnapshotContent` report Ready.
+- `restore.to_traffic.duration`: the Snapshot agent's timestamp for the
+  `RestoreRequested` event until the framework writes its restore-ready
+  sentinel, which happens after its API is listening and its first
+  post-restore generation completes.
+- `restore.pod_create_to_traffic.duration`: immediately before restore pod
+  creation until the same traffic-ready sentinel. This secondary measurement
+  includes scheduling and target discovery.
+- `test.total.duration` (`Full E2E test` in the console): entry into the test
+  body through restored inference verification and the no-cold-start
+  assertion. Failure diagnostics, fixture cleanup, and post-test benchmark
+  metadata collection are excluded.
+
+The same result separates system work from test-observation overhead with the
+agent's structured durations. `checkpoint.agent.duration` and
+`restore.agent.duration` are the agent totals; every reported agent phase is
+also emitted as `<operation>.<phase>.duration`, including
+`checkpoint.criu_dump.duration` and `restore.criu_restore.duration`.
+`restore.agent_complete_to_traffic.duration` shows framework wake-up time after
+the agent completes. Restore success and the traffic sentinel are watched in
+one one-second polling loop. The sentinel check execs into the restore pod, so
+it starts only after the `nvidia.com/Restored` condition reports
+`RestoreSucceeded`: the agent restores the checkpointed process tree with its
+original PIDs, and an exec session in that PID namespace during the restore
+could collide with one of them. The one-second poll bounds the delay this adds.
+
+`source.image_pull.duration` and `restore.image_pull.duration` come from the
+kubelet's `Pulled` events. The companion `*_including_wait.duration` includes
+kubelet queueing. A content-addressed image already present on the node is
+recorded as a zero-second cache hit in `environment.imagePulls`, rather than as
+a network pull.
+
+Most durations use the test runner's monotonic clock. The restore start is
+backdated once from the Kubernetes event timestamp to remove event-observation
+delay, and the agent-to-traffic gap compares the agent log timestamp with the
+observed traffic-ready timestamp. Both cross the boundary between the cluster's
+clock and the runner's clock. The agent stamps its events with a microsecond
+`eventTime`, and the `restore.requested` event in the result records
+`observationDelaySeconds`, the signed gap between the agent's timestamp and the
+runner's observation; a negative value means the cluster clock is ahead of the
+runner, and the console summary warns when the gap is negative or larger than
+a few seconds. The result also keeps the underlying events, test outcome,
+source revision, framework image tag and resolved digest, model, cache mode,
+and storage metadata (CSI provisioner, storage class, requested size, bound
+capacity, access modes, and volume mode). Source and restore GPU model and
+driver are recorded separately because restore may receive a different
+physical GPU; whether it did is kept as `gpuAffinity` and `nodeAffinity`
+(`same`, `different`, or `unknown`) rather than as GPU UUIDs or node names,
+which are stable infrastructure identifiers and never enter a published
+result: the test registers the node and agent pod names it learns with the
+recorder, which replaces them with `<source-node>`, `<restore-node>`, and
+`<agent-pod>` in the durable `error.message` and in every recorded collection
+error (the full text still goes to the job log). The node's
+`nvidia.com/gpu.product` label is recorded too and stands
+in for the model when `nvidia-smi` is unavailable. Missing
+boundaries remain explicit incomplete measurements and are never serialized as
+zero.
+
+Outcomes are `passed`, `failed`, `timed_out`, `skipped`, and
+`infrastructure_failed`. A lifecycle wait that exhausts its budget, or a pytest
+run interrupted by the workflow's timeout, is `timed_out`; other assertion
+failures are `failed`; a run that never produced a pytest call report is
+`infrastructure_failed`. The durable `error.message` holds only the final
+exception line. Full tracebacks stay in the pytest log and the short-lived
+diagnostics artifact because results are retained outside the cluster.
+
+`snapshot_e2e.benchmark.BenchmarkSession` is intentionally independent of the
+framework schema: another E2E suite can name its own case, events, and duration
+measurements while producing the same result envelope.
+
+### Benchmark history and comparison
+
+After the matrix finishes, one CPU-only job downloads all selected framework
+results and compares every completed measurement with the previous compatible
+successful run and the median of the previous seven. The comparison, including
+GPU, storage, image-cache state, commit, outcome, and workflow links, is written
+to the GitHub Actions step summary and uploaded as another 30-day artifact.
+Failed and timed-out results remain visible but do not contribute values to a
+baseline. A missing or invalid matrix artifact becomes an explicit
+`infrastructure_failed` result instead of disappearing from history. The
+aggregation reads the artifacts of every attempt of the workflow run and keeps
+the newest attempt per framework, so "Re-run failed jobs" does not turn the
+frameworks that already passed into missing artifacts. A synthesized result
+takes its Snapshot tag from a sibling framework result of the same run when the
+aggregation job itself does not know it.
+
+Only the scheduled workflow on `main` can publish. Pull-request mirror,
+ordinary branch, and manually dispatched runs use a separate read-only job and
+cannot mutate durable history. Both jobs check the history branch out through
+the `.github/actions/fetch-benchmark-history` composite action, which uses the
+job's own token so it works for private repositories and GitHub Enterprise
+hosts. The publisher serializes updates, commits all frameworks from one
+workflow in one commit, and bootstraps the data-only orphan branch
+`e2e-benchmark-history` on its first successful invocation.
+
+After a pull-request mirror or manual run completes, the trusted dashboard
+workflow validates its comparison artifact and publishes a 14-day preview.
+Pull requests use the stable path `/previews/pr-<number>/`; other manual runs
+use `/previews/run-<workflow-run-id>/`. Each preview combines that run with a
+read-only copy of nightly history. Generated preview indexes are isolated on
+the `e2e-benchmark-previews` branch and never enter `e2e-benchmark-history`.
+The dashboard deployment summary links to the resulting Pages URL.
+
+#### Viewing a pull request's benchmark preview
+
+1. Get an `E2E Framework Tests` run against your PR. This does not happen
+   automatically: first dispatch `push-artifacts.yaml` (Actions tab,
+   `workflow_dispatch`) on your PR's source branch to build its own
+   operator/agent/pagebroker images, then dispatch
+   `.github/workflows/e2e-frameworks.yaml` (`workflow_dispatch`, `ref`: your
+   PR's `pull-request/<number>` mirror branch, created by `copy-pr-bot`) with
+   `snapshot_tag` set to the tag `push-artifacts.yaml` just built. Dispatching
+   against the `pull-request/<number>` branch (not your source branch) is what
+   keys the benchmark preview to your PR.
+2. Wait for it to finish, then open the **E2E Benchmark Dashboard** workflow
+   run it triggers (`.github/workflows/e2e-benchmark-pages.yaml`, via
+   `workflow_run`) -- filter the Actions tab to that workflow and your PR's
+   commit if it's not the latest run.
+3. Open that run's `deploy` job and read its summary (or the `url` shown for
+   the `github-pages` environment): that's the Pages URL for
+   `/previews/pr-<number>/`.
+4. The preview page overlays your PR's results on the read-only nightly
+   history baseline -- a "Temporary preview" banner at the top says how many
+   results are yours versus durable history, and links back to the source
+   workflow run. It's the same dashboard as the durable one, so the
+   Measurements/Cases filters, stage breakdown charts, and run-details
+   dialog all work the same way; nothing here mutates `e2e-benchmark-history`,
+   and the preview expires after 14 days.
+
+This needs GitHub Pages enabled once for the repository (**Settings → Pages →
+Build and deployment → Source → GitHub Actions**) and the `E2E Benchmark
+Dashboard` workflow to already exist on `main` -- `workflow_run` triggers are
+evaluated from the default branch's copy of the workflow file, not the PR's,
+so a preview pipeline added in the same PR it's meant to preview won't fire
+until that PR merges.
+
+Raw results are the source of truth. They are stored under:
+
+```text
+results/v1/<suite>/<case>/<test>/<year>/<month>/<day>/<run-id>-<attempt>.json
+```
+
+Derived monthly indexes live at `index/v1/<year>-<month>.ndjson`; the small
+`index/manifest.json` lists chunks newest-first. Every index line carries the
+raw path, the result, and a `comparisonKey`: the canonical JSON of the
+comparison dimensions below, so readers group compatible results by that
+string instead of re-deriving the rules. Identity is the GitHub run ID,
+attempt, suite, case, and test, so publishing the same attempt again recognizes
+the immutable record instead of duplicating it.
+
+Compatible baselines have the same suite, case, test, schema and benchmark
+versions, measurement unit, GPU models, framework image (the resolved digest
+when the test recorded one, otherwise the tag), model, storage configuration,
+model-cache mode, image-cache state, and GPU-monitoring mode. GPU UUID, node,
+Snapshot commit, and Snapshot image tag stay diagnostic: they do not split the
+baseline. Future suites can add stable suite-specific values under
+`environment.comparisonDimensions`.
+
+The monthly indexes and manifest can be reconstructed from a checked-out
+history branch without modifying any raw result:
+
+```bash
+PYTHONPATH=e2e python3 -m snapshot_e2e.benchmark_history rebuild \
+  --history-dir /path/to/e2e-benchmark-history
+```
+
+After inspecting the diff, commit and push the rebuilt `index/` directory. If
+the history branch is lost, restore the raw `results/` tree from a backup or
+retained workflow artifacts and run the same rebuild command; indexes alone
+cannot reconstruct the raw records.
+
+### Benchmark dashboard
+
+The static dashboard source lives under `dashboard/`. It graphs the latest 90
+days by default, exposes suite, case, GPU, outcome, channel, and measurement
+filters, and compares completed points with the previous compatible run and
+seven-run median. Failed and timed-out measurements remain visible as explicit
+gaps instead of zero values.
+
+The `E2E Benchmark Dashboard` workflow builds the TypeScript application from
+`main` and combines it with the data-only `e2e-benchmark-history` branch plus
+any unexpired pre-merge previews. A completed framework run triggers a new
+Pages deployment without merging generated benchmark data into `main`. See
+[`dashboard/README.md`](../dashboard/README.md) for local development and the
+one-time GitHub Pages configuration.
+
 ## Framework Images
 
 The framework e2e workloads are the programs and manifests under

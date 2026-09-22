@@ -6,12 +6,18 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	securejoin "github.com/cyphar/filepath-securejoin"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	internalapi "k8s.io/cri-api/pkg/apis"
+	remote "k8s.io/cri-client/pkg"
 )
 
 // Default socket paths and runtime-type identifiers.
@@ -21,6 +27,9 @@ const (
 
 	RuntimeContainerd = "containerd"
 	RuntimeCRIO       = "crio"
+
+	criConnectTimeout = 2 * time.Second
+	criCallTimeout    = 10 * time.Second
 )
 
 // Runtime abstracts the container-identity APIs behind a two-backend switch.
@@ -30,6 +39,10 @@ type Runtime interface {
 	ResolveContainerIDByPod(ctx context.Context, pod, ns, ctr string) (string, error)
 	ResolveContainerByPod(ctx context.Context, pod, ns, ctr string) (int, *specs.Spec, error)
 	ResolveContainerImageID(ctx context.Context, id string) (string, error)
+	// TerminateContainer requests zero-grace termination through CRI using the
+	// runtime container ID. Implementations validate any supplied runtime scheme
+	// before dispatch.
+	TerminateContainer(ctx context.Context, id string) error
 	Close() error
 }
 
@@ -46,6 +59,64 @@ func StripCRIScheme(id string) string {
 		}
 	}
 	return id
+}
+
+// containerIDForRuntime validates the kubelet-format runtime scheme before a
+// destructive operation. Bare CRI IDs remain valid for internal callers, but a
+// recognized scheme for another backend and unknown scheme-like prefixes fail
+// closed instead of being retargeted to the active runtime.
+func containerIDForRuntime(id string, allowedSchemes ...string) (string, error) {
+	if id == "" {
+		return "", errors.New("container ID is empty")
+	}
+	for _, scheme := range allowedSchemes {
+		if stripped, ok := strings.CutPrefix(id, scheme); ok {
+			if stripped == "" {
+				return "", fmt.Errorf("container ID after %q is empty", scheme)
+			}
+			if strings.Contains(stripped, "://") {
+				return "", errors.New("container ID contains a nested runtime scheme")
+			}
+			return stripped, nil
+		}
+	}
+	for _, scheme := range criSchemes {
+		if strings.HasPrefix(id, scheme) {
+			return "", fmt.Errorf("container ID uses mismatched runtime scheme %q", scheme)
+		}
+	}
+	if strings.Contains(id, "://") {
+		return "", errors.New("container ID uses an unknown runtime scheme")
+	}
+	return id, nil
+}
+
+// newRemoteRuntimeService bounds connection establishment separately from the
+// timeout that cri-client stores and reapplies to runtime RPCs.
+func newRemoteRuntimeService(socket string) (internalapi.RuntimeService, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), criConnectTimeout)
+	defer cancel()
+	// The explicit nil tracer provider opts out of the otelgrpc stats handler;
+	// omitting the call installs one backed by a noop provider instead.
+	return remote.NewRemoteRuntimeServiceBuilder().
+		WithEndpoint(socket).
+		WithConnectionTimeout(criCallTimeout).
+		WithTracerProvider(nil).
+		Build(ctx)
+}
+
+// stopContainerIfPresent is the shared desired-state operation for retrying
+// recovery and finalizer callers. A missing container already satisfies the
+// postcondition; every other CRI error remains actionable.
+func stopContainerIfPresent(ctx context.Context, service internalapi.RuntimeService, id string) error {
+	ctx, cancel := context.WithTimeout(ctx, criCallTimeout)
+	defer cancel()
+
+	err := service.StopContainer(ctx, id, 0)
+	if status.Code(err) == codes.NotFound {
+		return nil
+	}
+	return err
 }
 
 // defaultSocketFor returns the conventional socket path for a runtime type.

@@ -5,6 +5,7 @@ package criu
 
 import (
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -12,6 +13,46 @@ import (
 
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
+
+func TestGPUMountAliases(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		deviceMap string
+		targets   map[string]string
+		want      map[string]string
+		wantErr   bool
+	}{
+		{"overlapping paths", "A=C,B=D", map[string]string{"C": "/dev/nvidia1", "D": "/dev/nvidia2"}, map[string]string{"/dev/nvidia0": "/dev/nvidia1", "/dev/nvidia1": "/dev/nvidia2"}, false},
+		{"swap", "A=C,B=D", map[string]string{"C": "/dev/nvidia1", "D": "/dev/nvidia0"}, map[string]string{"/dev/nvidia0": "/dev/nvidia1", "/dev/nvidia1": "/dev/nvidia0"}, false},
+		{"identity UUID with changed path", "", map[string]string{"A": "/dev/nvidia2", "B": "/dev/nvidia1"}, map[string]string{"/dev/nvidia0": "/dev/nvidia2"}, false},
+		{"missing target", "A=C,B=D", map[string]string{"C": "/dev/nvidia2"}, nil, true},
+		{"unknown source", "X=C", map[string]string{"C": "/dev/nvidia2"}, nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &types.CheckpointManifest{
+				CUDA:     types.CUDAManifest{SourceGPUUUIDs: []string{"A", "B"}, DevicePaths: map[string]string{"A": "/dev/nvidia0", "B": "/dev/nvidia1"}},
+				CRIUDump: types.CRIUDumpManifest{ExtMnt: map[string]string{"/dev/nvidia0": "/dev/nvidia0", "/dev/nvidia1": "/dev/nvidia1"}},
+			}
+			got, err := GPUMountAliases(m, tc.deviceMap, tc.targets)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("error = %v", err)
+			}
+			if !tc.wantErr && !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("aliases = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestGPUMountAliasesLeavesOldCheckpointsUnchanged(t *testing.T) {
+	m := &types.CheckpointManifest{
+		CRIUDump: types.CRIUDumpManifest{ExtMnt: map[string]string{"/dev/nvidia7": "/dev/nvidia7"}},
+	}
+	got, err := GPUMountAliases(m, "", nil)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("old checkpoint aliases = %v, %v", got, err)
+	}
+}
 
 func TestParseManageCgroupsMode(t *testing.T) {
 	tests := []struct {

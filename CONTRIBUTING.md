@@ -116,6 +116,41 @@ the bulk of the review.
 AI assistance is welcome. Agent-specific repository guidance lives in
 [AGENTS.md](AGENTS.md).
 
+### Repository agent skills
+
+Repository-maintained skills live in [`.agents/skills`](.agents/skills). A
+compatible coding agent discovers these skills automatically when it works from
+this checkout. Available skills:
+
+- [`snep`](.agents/skills/snep/SKILL.md) — guides an interactive,
+  section-by-section draft or revision of a Snapshot Enhancement Proposal.
+
+The repository-local skill is available automatically to compatible agents
+working in this checkout. To make a skill available in every local project,
+create a symlink from the repository root using the directory for your agent:
+
+```sh
+# Codex
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
+ln -s "$PWD/.agents/skills/snep" "${CODEX_HOME:-$HOME/.codex}/skills/snep"
+
+# Claude Code
+mkdir -p "$HOME/.claude/skills"
+ln -s "$PWD/.agents/skills/snep" "$HOME/.claude/skills/snep"
+
+# Cursor CLI
+mkdir -p "$HOME/.cursor/skills"
+ln -s "$PWD/.agents/skills/snep" "$HOME/.cursor/skills/snep"
+
+# Pi
+mkdir -p "$HOME/.pi/agent/skills"
+ln -s "$PWD/.agents/skills/snep" "$HOME/.pi/agent/skills/snep"
+```
+
+Each command links the same versioned repository skill; remove the matching
+symlink to uninstall it. Restart the agent if it does not reload skills
+automatically.
+
 The rules are the same as for any other contribution, because the obligations
 do not change based on how the code was produced:
 
@@ -140,11 +175,13 @@ closed. The bar is reviewer time: a change nobody has read wastes it.
 
 ## How pull requests are reviewed
 
-**Who reviews.** Every pull request is reviewed by a maintainer. The maintainers
-are the code owners for the whole repository — see
-[`.github/CODEOWNERS`](.github/CODEOWNERS) and [MAINTAINERS.md](MAINTAINERS.md) —
-so GitHub requests review from that group automatically. At least one maintainer
-approval is required before a pull request can merge.
+**Who reviews.** Every pull request is reviewed by a maintainer. Ownership is
+recorded as GitHub teams — `@ai-dynamo/snapshot-codeowners` for the repository
+and `@ai-dynamo/snapshot-docs-codeowners` for `docs/` and Markdown files, apart
+from proposal documents; see [`.github/CODEOWNERS`](.github/CODEOWNERS) and
+[MAINTAINERS.md](MAINTAINERS.md) —
+so GitHub requests review from the right team automatically. At least one
+maintainer approval is required before a pull request can merge.
 
 **What has to pass.** Alongside the approval, CI must be green: the `check`,
 `build`, and `test` jobs, the DCO check, and `Validate Issue Reference`. A
@@ -317,3 +354,10 @@ By making a contribution to this project, I certify that:
     maintained indefinitely and may be redistributed consistent with
     this project or the open source license(s) involved.
 ```
+
+## Snapshot Enhancement Proposals (SNEPs)
+
+For a substantial new capability, public API change, or architectural change,
+start a [Snapshot Enhancement Proposal (SNEP)](docs/proposals/README.md) before
+implementation. A SNEP records the motivation, design, trade-offs, and test
+plan so maintainers and contributors can discuss the direction early.

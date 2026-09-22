@@ -1,1 +1,8 @@
-* @shmuel-runai @shayasoolin @danbar2 @Ronkahn21 @oleg-kushniriov @yoedgin @dfeigin-nv @galletas1712 @julienmancuso @Hutm @hhzhang16
+* @ai-dynamo/snapshot-codeowners
+
+# Last matching pattern wins, so this must stay below the catch-all.
+/docs/ @ai-dynamo/snapshot-docs-codeowners
+
+# Proposal design documents are reviewed by the repository owners responsible
+# for the proposed change, rather than the documentation owners.
+/docs/proposals/** @ai-dynamo/snapshot-codeowners
