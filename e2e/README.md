@@ -290,12 +290,15 @@ The dashboard deployment summary links to the resulting Pages URL.
 
 #### Viewing a pull request's benchmark preview
 
-1. Get an `E2E Framework Tests` run against your PR. Pushing to the PR
-   normally does this automatically (`.github/workflows/e2e-frameworks.yaml`
-   runs on push to its `pull-request/<number>` mirror branch, created by
-   `copy-pr-bot`); to force a fresh run without a new push, dispatch it
-   manually from the Actions tab (`workflow_dispatch`, `ref`: your PR's
-   `pull-request/<number>` branch).
+1. Get an `E2E Framework Tests` run against your PR. This does not happen
+   automatically: first dispatch `push-artifacts.yaml` (Actions tab,
+   `workflow_dispatch`) on your PR's source branch to build its own
+   operator/agent/pagebroker images, then dispatch
+   `.github/workflows/e2e-frameworks.yaml` (`workflow_dispatch`, `ref`: your
+   PR's `pull-request/<number>` mirror branch, created by `copy-pr-bot`) with
+   `snapshot_tag` set to the tag `push-artifacts.yaml` just built. Dispatching
+   against the `pull-request/<number>` branch (not your source branch) is what
+   keys the benchmark preview to your PR.
 2. Wait for it to finish, then open the **E2E Benchmark Dashboard** workflow
    run it triggers (`.github/workflows/e2e-benchmark-pages.yaml`, via
    `workflow_run`) -- filter the Actions tab to that workflow and your PR's

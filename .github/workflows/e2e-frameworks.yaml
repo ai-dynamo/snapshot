@@ -8,9 +8,17 @@ name: E2E Framework Tests
 # e2e.yaml; the differences are the 64Gi checkpoint PVC (framework artifacts
 # are multi-GB), the framework image resolution, and the diagnostics upload.
 #
-# Pull requests are tested through their copy-pr-bot mirror branch
-# (pull-request/<number>, see .github/copy-pr-bot.yaml): the GPU runners admit
-# push, schedule, and workflow_dispatch events but reject pull_request.
+# Pull requests are tested by manually dispatching this workflow on their
+# copy-pr-bot mirror branch (pull-request/<number>, see
+# .github/copy-pr-bot.yaml): the GPU runners admit push, schedule, and
+# workflow_dispatch events but reject pull_request. There is no automatic
+# per-push trigger -- mirror branches usually have no operator/agent/pagebroker
+# images of their own, so an automatic run would silently fall back to
+# testing main's Snapshot instead of the PR's own changes (see
+# hack/resolve-snapshot-image-tag.py). Dispatch push-artifacts.yaml on the PR
+# branch first to build its own images, then dispatch this workflow with the
+# resulting snapshot_tag against the pull-request/<number> mirror branch (not
+# the source branch) so the benchmark preview keys to that PR.
 #
 # Known-red on this gate, kept red on purpose (not this workflow's bug):
 #   - vLLM: intermittent CRIU restore segfault ("criu swrk failed: signal:
@@ -24,19 +32,6 @@ name: E2E Framework Tests
 # failure matches one of the above first.
 
 on:
-  push:
-    branches:
-      - 'pull-request/[0-9]+'
-    # Only changes to the workloads, the tests, and this wiring gate a PR:
-    # mirror branches have no operator/agent images of their own, so a run
-    # here tests main's Snapshot and would say nothing about an agent/operator
-    # change. Those are covered nightly against main. The framework fixtures
-    # (app.py, deployment.yaml, ...) live under e2e/, not docs/guides/, so
-    # e2e/** alone covers them.
-    paths:
-      - 'e2e/**'
-      - 'hack/**'
-      - '.github/workflows/e2e-frameworks.yaml'
   schedule:
     # 01:00 Pacific Standard Time, after the nightly e2e.yaml run.
     - cron: "0 9 * * *"
@@ -50,9 +45,11 @@ on:
         options: [all, vllm, sglang, tensorrt-llm]
       snapshot_tag:
         description: >-
-          Operator/agent image tag to install. Leave empty to resolve from the
-          commit under test (pull-request/* mirror branches fall back to the
-          newest main build when the commit has no published images).
+          Operator/agent image tag to install. pull-request/<number> mirror
+          branches require an explicit tag. Leave empty on main/release/*
+          branches to resolve from the commit under test; other non-PR
+          branches fall back to the newest main build when the commit has no
+          published images.
         required: false
         type: string
       datadog_gpu_monitoring:
@@ -241,11 +238,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # A PR mirror dispatch with no snapshot_tag would silently fall back
+          # to main's images (see --fallback-main below) and still publish a
+          # benchmark preview keyed to that PR, looking like it tested the
+          # PR's own changes when it didn't. Require snapshot_tag there.
+          if [[ "${GITHUB_REF_NAME}" =~ ^pull-request/[0-9]+$ ]]; then
+            echo "::error::Dispatching against PR mirror branch ${GITHUB_REF_NAME} requires an explicit snapshot_tag, otherwise the run silently falls back to testing main's images. Dispatch push-artifacts.yaml on the PR's source branch first, then re-dispatch this workflow with the resulting tag." >&2
+            exit 1
+          fi
           # push-artifacts publishes only main/release, so any other ref (a
-          # pull-request/* mirror branch, or a feature branch dispatched by
-          # hand) normally has no images of its own; fall back to main's,
-          # loudly. main and release refs stay strict: a nightly must test
-          # the commit it checked out.
+          # non-PR feature branch dispatched by hand) normally has no images
+          # of its own; fall back to main's, loudly. main and release refs
+          # stay strict: a nightly must test the commit it checked out.
           case "${GITHUB_REF_NAME}" in
             main|release/*) python3 hack/resolve-snapshot-image-tag.py ;;
             *) python3 hack/resolve-snapshot-image-tag.py --fallback-main ;;
