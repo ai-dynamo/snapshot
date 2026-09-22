@@ -130,7 +130,7 @@ case "$5" in
 esac
 `)
 
-	got, err := DiscoverVisibleGPUs(context.Background(), "/host/proc/", 42, nvidiaSMITimeout)
+	got, err := DiscoverVisibleGPUs(context.Background(), "/host/proc/", 42, nvidiaSMITimeout, logr.Discard())
 	if err != nil {
 		t.Fatalf("DiscoverVisibleGPUs: %v", err)
 	}
@@ -155,7 +155,7 @@ case "$5" in
 esac
 `)
 
-	got, err := DiscoverVisibleGPUs(context.Background(), "/host/proc", 42, nvidiaSMITimeout)
+	got, err := DiscoverVisibleGPUs(context.Background(), "/host/proc", 42, nvidiaSMITimeout, logr.Discard())
 	if err != nil {
 		t.Fatalf("DiscoverVisibleGPUs: %v", err)
 	}
@@ -186,7 +186,7 @@ case "$5" in
 esac
 `)
 
-	got, err := DiscoverVisibleGPUs(context.Background(), "/host/proc", 42, nvidiaSMITimeout)
+	got, err := DiscoverVisibleGPUs(context.Background(), "/host/proc", 42, nvidiaSMITimeout, logr.Discard())
 	if err != nil {
 		t.Fatalf("DiscoverVisibleGPUs: %v", err)
 	}
@@ -283,7 +283,7 @@ GPU 1: NVIDIA A100-SXM4-40GB (UUID: GPU-bbb)
 func TestDiscoverVisibleGPUsReturnCommandFailure(t *testing.T) {
 	installFakeNSenter(t, "exit 17\n")
 
-	_, err := DiscoverVisibleGPUs(context.Background(), "/host/proc", 42, nvidiaSMITimeout)
+	_, err := DiscoverVisibleGPUs(context.Background(), "/host/proc", 42, nvidiaSMITimeout, logr.Discard())
 	if err == nil {
 		t.Fatal("DiscoverVisibleGPUs succeeded after nsenter failed")
 	}
@@ -677,7 +677,7 @@ func TestDiscoverGPUUUIDsOrdersDRAPodByContainerOrdinal(t *testing.T) {
 		"/proc",
 		123,
 		nvidiaSMITimeout,
-		func(context.Context, string, int, time.Duration) (compat.GPUInfo, error) {
+		func(context.Context, string, int, time.Duration, logr.Logger) (compat.GPUInfo, error) {
 			return compat.GPUInfo{
 				DriverVersion: "580.65.06",
 				Devices: []compat.GPUDevice{
@@ -731,12 +731,12 @@ func TestDiscoverGPUsDescribePodResourcesGPUs(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		visible func(context.Context, string, int, time.Duration) (compat.GPUInfo, error)
+		visible func(context.Context, string, int, time.Duration, logr.Logger) (compat.GPUInfo, error)
 		want    compat.GPUInfo
 	}{
 		{
 			name: "described in the kubelet's order",
-			visible: func(context.Context, string, int, time.Duration) (compat.GPUInfo, error) {
+			visible: func(context.Context, string, int, time.Duration, logr.Logger) (compat.GPUInfo, error) {
 				return compat.GPUInfo{
 					DriverVersion: "580.65.06",
 					Devices: []compat.GPUDevice{
@@ -755,7 +755,7 @@ func TestDiscoverGPUsDescribePodResourcesGPUs(t *testing.T) {
 		},
 		{
 			name: "undescribed when nvidia-smi cannot be reached",
-			visible: func(context.Context, string, int, time.Duration) (compat.GPUInfo, error) {
+			visible: func(context.Context, string, int, time.Duration, logr.Logger) (compat.GPUInfo, error) {
 				return compat.GPUInfo{}, errors.New("nsenter unavailable")
 			},
 			want: compat.GPUInfo{
@@ -764,7 +764,7 @@ func TestDiscoverGPUsDescribePodResourcesGPUs(t *testing.T) {
 		},
 		{
 			name: "undescribed when nvidia-smi reports other GPUs",
-			visible: func(context.Context, string, int, time.Duration) (compat.GPUInfo, error) {
+			visible: func(context.Context, string, int, time.Duration, logr.Logger) (compat.GPUInfo, error) {
 				return compat.GPUInfo{
 					DriverVersion: "580.65.06",
 					Devices:       []compat.GPUDevice{{UUID: "GPU-z", ProductName: "NVIDIA L4"}},
@@ -847,7 +847,7 @@ func TestDiscoverGPUsFallBackToVisibleGPUs(t *testing.T) {
 		"/host/proc",
 		42,
 		nvidiaSMITimeout,
-		func(context.Context, string, int, time.Duration) (compat.GPUInfo, error) {
+		func(context.Context, string, int, time.Duration, logr.Logger) (compat.GPUInfo, error) {
 			return want, nil
 		},
 		logr.Discard(),
