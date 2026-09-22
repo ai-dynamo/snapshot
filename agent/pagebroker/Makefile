@@ -12,9 +12,9 @@ generate:
 	protoc --proto_path=. --cpp_out=. $(PROTO)
 
 daemon: generate
-	c++ -I. -std=c++20 -Wall -Werror $(DAEMON_SOURCES) v1/pagebroker.pb.cc -Wl,-Bstatic -lprotobuf -Wl,-Bdynamic -o pagebroker
+	c++ -I. -std=c++20 -Wall -Werror -pthread $(DAEMON_SOURCES) v1/pagebroker.pb.cc -Wl,-Bstatic -lprotobuf -Wl,-Bdynamic -o pagebroker
 
 test: generate $(BROKER_SOURCES) daemon_test.cpp
 	mkdir -p build
-	c++ -I. -std=c++20 -Wall -Werror $(BROKER_SOURCES) daemon_test.cpp v1/pagebroker.pb.cc -lprotobuf $(GTEST_FLAGS) -o build/pagebroker-test
+	c++ -I. -std=c++20 -Wall -Werror -pthread $(BROKER_SOURCES) daemon_test.cpp v1/pagebroker.pb.cc -lprotobuf $(GTEST_FLAGS) -o build/pagebroker-test
 	./build/pagebroker-test

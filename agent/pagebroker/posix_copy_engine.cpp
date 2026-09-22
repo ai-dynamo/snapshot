@@ -3,11 +3,21 @@
 
 #include "posix_copy_engine.hpp"
 
+#include <algorithm>
+#include <exception>
 #include <filesystem>
 #include <stdexcept>
+#include <thread>
+#include <utility>
+#include <vector>
 
 namespace snapshot::pagebroker {
 namespace {
+// Two workers split the file list between them: enough to overlap network
+// round-trips on the many small CRIU metadata files without the added
+// complication of chunking the few large pages-*.img files that dominate
+// checkpoint size (see the PVC<->tmpfs copy's benchmark write-up).
+constexpr size_t kCopyWorkerCount = 2;
 Path
 StoragePath(const StorageBackend& storage, const Path& storage_root, const char* label)
 {
@@ -91,6 +101,20 @@ DirectorySize(const Path& path)
   }
   return bytes;
 }
+
+// Copies files.at(begin..end) sequentially, capturing the first failure
+// instead of letting an exception cross the thread boundary.
+void
+CopyFileRange(const std::vector<std::pair<Path, Path>>& files, size_t begin, size_t end, std::exception_ptr& error)
+{
+  try {
+    for (size_t i = begin; i < end; ++i)
+      std::filesystem::copy_file(files[i].first, files[i].second);
+  }
+  catch (...) {
+    error = std::current_exception();
+  }
+}
 }  // namespace
 
 PosixCopyEngine::PosixCopyEngine(Path storage_root) : storage_root_(std::filesystem::weakly_canonical(std::move(storage_root))) {}
@@ -155,6 +179,42 @@ PosixCopyEngine::PublishCheckpoint(const Path& source, const StorageBackend& des
 void
 PosixCopyEngine::CopyDirectory(const Path& source, const Path& destination) const
 {
-  std::filesystem::copy(source, destination, std::filesystem::copy_options::recursive);
+  std::filesystem::create_directories(destination);
+
+  // Walk once to mirror the directory structure and collect the file list,
+  // then copy files across a small worker pool: network-backed storage
+  // gets its throughput from concurrent in-flight requests, not from one
+  // sequential stream.
+  std::vector<std::pair<Path, Path>> files;
+  for (const auto& entry : std::filesystem::recursive_directory_iterator(source)) {
+    if (entry.is_symlink())
+      throw std::runtime_error("checkpoint contains symlink");
+    const Path relative = std::filesystem::relative(entry.path(), source);
+    const Path target = destination / relative;
+    if (entry.is_directory())
+      std::filesystem::create_directories(target);
+    else if (entry.is_regular_file())
+      files.emplace_back(entry.path(), target);
+  }
+
+  if (files.empty())
+    return;
+
+  const size_t worker_count = std::min(kCopyWorkerCount, files.size());
+  const size_t chunk_size = (files.size() + worker_count - 1) / worker_count;
+  std::vector<std::exception_ptr> errors(worker_count);
+  std::vector<std::thread> workers;
+  workers.reserve(worker_count);
+  for (size_t worker = 0; worker < worker_count; ++worker) {
+    const size_t begin = worker * chunk_size;
+    const size_t end = std::min(begin + chunk_size, files.size());
+    workers.emplace_back(CopyFileRange, std::cref(files), begin, end, std::ref(errors[worker]));
+  }
+  for (auto& thread : workers)
+    thread.join();
+  for (const auto& error : errors) {
+    if (error)
+      std::rethrow_exception(error);
+  }
 }
 }  // namespace snapshot::pagebroker

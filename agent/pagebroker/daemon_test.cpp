@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <thread>
@@ -79,6 +80,37 @@ TEST_F(BrokerTest, StagesRestoreAndCleansUpOnCommit)
   const auto abort_response = broker().HandleRequest(abort);
   ASSERT_TRUE(abort_response.has_failure());
   EXPECT_EQ(abort_response.failure().code(), Failure::TRANSACTION_NOT_FOUND);
+}
+
+// More files than copy workers, plus a nested subdirectory, so the worker
+// split and directory-structure mirroring both get exercised.
+TEST_F(BrokerTest, StagesRestoreWithManyFilesAndSubdirectories)
+{
+  fs::create_directories(source_ / "nested");
+  for (int i = 0; i < 5; ++i)
+    std::ofstream(source_ / ("file-" + std::to_string(i))) << "content-" << i;
+  std::ofstream(source_ / "nested" / "leaf") << "nested-content";
+
+  auto restore = RequestFor("restore");
+  Configure(
+      restore.mutable_staged_restore()->mutable_source(), restore.mutable_staged_restore()->mutable_io_engine(),
+      source_);
+  const auto staged = broker().HandleRequest(restore);
+  ASSERT_TRUE(staged.has_staged_restore_directory());
+  const fs::path staging_directory(staged.staged_restore_directory().image_directory());
+
+  EXPECT_TRUE(fs::exists(staging_directory / "image"));
+  for (int i = 0; i < 5; ++i) {
+    const fs::path copied = staging_directory / ("file-" + std::to_string(i));
+    ASSERT_TRUE(fs::exists(copied));
+    std::ifstream stream(copied);
+    std::string content((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    EXPECT_EQ(content, "content-" + std::to_string(i));
+  }
+  ASSERT_TRUE(fs::exists(staging_directory / "nested" / "leaf"));
+  std::ifstream nested_stream(staging_directory / "nested" / "leaf");
+  std::string nested_content((std::istreambuf_iterator<char>(nested_stream)), std::istreambuf_iterator<char>());
+  EXPECT_EQ(nested_content, "nested-content");
 }
 
 TEST_F(BrokerTest, StagesIndependentRestoresConcurrently)
