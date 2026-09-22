@@ -1,0 +1,249 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Memblock identity, virtual-handle ownership, and tracked address ranges.
+
+pub(crate) mod checkpoint;
+pub(crate) mod sharing;
+pub(crate) mod vmm;
+
+use crate::driver::{CudaError, Result};
+use crate::runtime;
+use checkpoint::Phase;
+use cudarc::driver::sys::CUresult::*;
+use cuinterpose_protocol::{AllocationId, AllocationReference, NamespacePid};
+use runtime::export_cache;
+use std::collections::BTreeMap;
+use vmm::{Allocation, Mapping};
+
+/// Application-visible allocation handle. High bits distinguish it from CUDA's.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct VirtualAllocationHandle(u64);
+
+impl VirtualAllocationHandle {
+    pub const TAG: u64 = 0xd94d_0000_0000_0000;
+    pub const MASK: u64 = 0xffff_0000_0000_0000;
+
+    pub(crate) fn from_raw(handle: u64) -> Option<Self> {
+        (handle & Self::MASK == Self::TAG).then_some(Self(handle))
+    }
+
+    pub(crate) fn as_raw(self) -> u64 {
+        self.0
+    }
+
+    /// CUDA-minted handle. Tagged values collide with the virtual namespace.
+    pub(crate) fn from_driver(handle: u64) -> Result<u64> {
+        match Self::from_raw(handle) {
+            Some(_) => Err(CUDA_ERROR_INVALID_HANDLE.into()),
+            None => Ok(handle),
+        }
+    }
+
+    pub(crate) fn id(self, state: &ProcessState) -> Result<AllocationId> {
+        state
+            .virtual_allocation_handles
+            .get(&self)
+            .map(|entry| entry.id)
+            .ok_or(CUDA_ERROR_INVALID_HANDLE.into())
+    }
+
+    /// CUDA generic allocation handle currently retained for this virtual handle.
+    pub(crate) fn driver_handle(self, state: &ProcessState) -> Result<u64> {
+        state
+            .memblocks
+            .get(&self.id(state)?)
+            .ok_or(CUDA_ERROR_INVALID_HANDLE)?
+            .driver_handle()
+    }
+}
+
+/// CUDA memblock: physical allocation behind a generic handle.
+/// Unicast and multicast share one ID and virtual-handle namespace;
+/// they keep different CUDA properties and reconstruction state in the variants.
+#[derive(Clone)]
+pub enum Memblock {
+    Unicast(Allocation),
+}
+
+impl Memblock {
+    pub fn unicast(&self) -> Option<&Allocation> {
+        match self {
+            Self::Unicast(allocation) => Some(allocation),
+        }
+    }
+
+    pub fn unicast_mut(&mut self) -> Option<&mut Allocation> {
+        match self {
+            Self::Unicast(allocation) => Some(allocation),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn reference(&self) -> AllocationReference {
+        match self {
+            Self::Unicast(allocation) => allocation.reference,
+        }
+    }
+
+    /// CUDA generic allocation handle currently retained for this memblock.
+    pub(crate) fn driver_handle(&self) -> Result<u64> {
+        match self {
+            Self::Unicast(allocation) => allocation.driver,
+        }
+        .ok_or(CUDA_ERROR_INVALID_HANDLE.into())
+    }
+}
+
+pub struct HandleEntry {
+    pub id: AllocationId,
+    pub references: u64,
+}
+
+pub struct ProcessState {
+    pub namespace_pid: NamespacePid,
+    pub memblocks: BTreeMap<AllocationId, Memblock>,
+    pub virtual_allocation_handles: BTreeMap<VirtualAllocationHandle, HandleEntry>,
+    pub mappings: BTreeMap<u64, Mapping>,
+    pub phase: Phase,
+    pub unlocked_driver_calls: usize,
+    next_virtual_allocation_handle: u64,
+}
+
+impl ProcessState {
+    pub(crate) fn new(namespace_pid: NamespacePid) -> Self {
+        Self {
+            namespace_pid,
+            memblocks: BTreeMap::new(),
+            virtual_allocation_handles: BTreeMap::new(),
+            mappings: BTreeMap::new(),
+            next_virtual_allocation_handle: 1,
+            phase: Phase::Active,
+            unlocked_driver_calls: 0,
+        }
+    }
+
+    /// Assign the identity used by the shim and its sharing peers.
+    pub(crate) fn new_reference(&self) -> Result<AllocationReference> {
+        if self.phase != Phase::Active {
+            return Err(CUDA_ERROR_NOT_READY.into());
+        }
+        Ok(AllocationReference {
+            creator_pid: self.namespace_pid,
+            id: random()?,
+        })
+    }
+
+    pub(crate) fn mint_virtual_allocation_handle(&mut self, id: AllocationId) -> Result<u64> {
+        if self.next_virtual_allocation_handle & VirtualAllocationHandle::MASK != 0 {
+            return Err(CudaError::from(CUDA_ERROR_OUT_OF_MEMORY));
+        }
+        let handle = VirtualAllocationHandle(
+            VirtualAllocationHandle::TAG | self.next_virtual_allocation_handle,
+        );
+        self.next_virtual_allocation_handle += 1;
+        self.virtual_allocation_handles
+            .insert(handle, HandleEntry { id, references: 1 });
+        Ok(handle.as_raw())
+    }
+
+    /// Drop one application reference; mappings retain their original handle value.
+    pub(crate) fn release_virtual_handle(&mut self, handle: VirtualAllocationHandle) -> Result<()> {
+        let entry = self
+            .virtual_allocation_handles
+            .get_mut(&handle)
+            .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+        let id = entry.id;
+        entry.references -= 1;
+        if entry.references == 0 {
+            self.virtual_allocation_handles.remove(&handle);
+            runtime::must_complete(self.release_unused_memblock(id));
+        }
+        Ok(())
+    }
+
+    /// Resolve a virtual handle to its allocation ID; native handles return `None`.
+    /// A tagged handle absent from the registry is stale and returns `INVALID_HANDLE`.
+    pub(crate) fn resolve_virtual_handle(&self, handle: u64) -> Result<Option<AllocationId>> {
+        VirtualAllocationHandle::from_raw(handle)
+            .map(|handle| handle.id(self))
+            .transpose()
+    }
+
+    /// Release an unicast driver handle after its last virtual handle is dropped.
+    /// Remove the memblock once neither virtual handles nor mappings refer to it.
+    pub(crate) fn release_unused_memblock(&mut self, id: AllocationId) -> Result<()> {
+        let handle_live = self
+            .virtual_allocation_handles
+            .values()
+            .any(|entry| entry.id == id);
+        let mapped = self.mappings.values().any(|mapping| mapping.id == id);
+        let memblock = self
+            .memblocks
+            .get_mut(&id)
+            .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+        match memblock {
+            Memblock::Unicast(allocation) => {
+                // Unicast mappings retain the backing after its last handle is released.
+                if !handle_live && let Some(driver) = allocation.driver {
+                    unsafe { crate::driver::cuMemRelease(driver) }?;
+                    allocation.driver = None;
+                }
+                if handle_live || mapped {
+                    return Ok(());
+                }
+                export_cache()?.remove(&id)?;
+            }
+        }
+        self.memblocks.remove(&id);
+        Ok(())
+    }
+}
+
+pub(crate) fn random<const N: usize>() -> Result<[u8; N]> {
+    let mut bytes = [0; N];
+    getrandom::fill(&mut bytes).map_err(|_| CUDA_ERROR_NOT_INITIALIZED)?;
+    Ok(bytes)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identities_require_an_active_registry() {
+        let mut state = ProcessState::new(41);
+        assert_eq!(state.new_reference().unwrap().creator_pid, 41);
+        state.phase = Phase::UnicastPrepared;
+        assert_eq!(state.new_reference(), Err(CUDA_ERROR_NOT_READY.into()));
+
+        assert!(state.virtual_allocation_handles.is_empty());
+    }
+
+    #[test]
+    fn tagged_handles_resolve_or_reject_stale() {
+        let mut state = ProcessState::new(41);
+        let id = [7; 16];
+        let handle = state.mint_virtual_allocation_handle(id).unwrap();
+        assert_eq!(state.resolve_virtual_handle(handle).unwrap(), Some(id));
+        assert_eq!(
+            VirtualAllocationHandle::from_raw(handle)
+                .unwrap()
+                .id(&state)
+                .unwrap(),
+            id
+        );
+        assert_eq!(state.resolve_virtual_handle(0x1000).unwrap(), None);
+        assert_eq!(
+            state.resolve_virtual_handle(VirtualAllocationHandle::TAG | 99),
+            Err(CUDA_ERROR_INVALID_HANDLE.into())
+        );
+        assert_eq!(
+            VirtualAllocationHandle::from_driver(0x1000).unwrap(),
+            0x1000
+        );
+        assert_eq!(
+            VirtualAllocationHandle::from_driver(VirtualAllocationHandle::TAG),
+            Err(CUDA_ERROR_INVALID_HANDLE.into())
+        );
+    }
+}
