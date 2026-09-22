@@ -145,8 +145,9 @@ bounded pool of worker goroutines drains it, calling directly into
   and backend implementations for PVC, then S3 and future stores, called in-process
   by workers. They access storage directly; maintenance does not call PageBroker.
 - **Work item keys:** a typed key carries mode (`delete-content`, `sweep` or
-  `recover-metadata`), the expected store ID and configuration; deletion also names
-  the content and its UID. These identify authorized scope, not an arbitrary path.
+  `recover-metadata`), the expected store ID and configuration; deletion also
+  names the content and its artifact UID. These identify authorized scope, not
+  an arbitrary path.
   Each deletion covers every container and unfinished attempt for that content.
 - **Enqueue sources:** the content reconciler enqueues `delete-content` on a
   deletion timestamp, a periodic ticker enqueues `sweep`, and the reconciler
@@ -207,7 +208,7 @@ reconciled with the separate CUDA integration. Only new fields are shown.
 ```protobuf
 // Identity before an artifact has been published.
 message ArtifactIdentity {
-  string artifact_uid = 1;      // Owning PodSnapshotContent UID.
+  string artifact_uid = 1;      // Stable artifact UID for the owning PodSnapshotContent.
   string container_name = 2;    // Captured container within that content.
 }
 
@@ -309,10 +310,10 @@ Secret-read permissions.
 
 Use verified TLS and an optional custom CA. Scope storage permissions to the
 configured store, restrict local sockets/staging, and exclude secrets from logs
-and status. Maintenance checks UID, store binding and fresh ownership before
-deletion; protect against arbitrary paths and symlinks. Grant the operator's
-service account only the storage permissions needed for cleanup and metadata
-repair, without GPU or host-process access.
+and status. Maintenance checks artifact UID, store binding and fresh ownership
+before deletion; protect against arbitrary paths and symlinks. Grant the
+operator's service account only the storage permissions needed for cleanup and
+metadata repair, without GPU or host-process access.
 
 Require encryption at rest for every checkpoint artifact — SSE-S3, SSE-KMS or
 an equivalent provider guarantee. Installation fails validation if the
@@ -356,15 +357,15 @@ storage:
 Store the existing per-container bundle under
 `<store-prefix>/artifacts/<artifactUID>/containers/<name>/`; the store prefix includes
 the configured prefix and installation/store identifiers. Upload immutable payloads,
-then publish the index last. The index binds store/content/container and format
+then publish the index last. The index binds store/artifact/container and format
 version, and lists file/directory paths, permissions, sizes and file SHA-256 digests.
 Reject unsafe paths, unsupported formats, missing files and checksum mismatches.
 
 Each index also carries a `commitID` (a ULID, generated once per checkpoint
 attempt). `Commit` reuses the same `commitID` across retries of the same
 attempt, making publish idempotent per `commitID` rather than per
-store/content/container. `recover-metadata` selects deterministically: if more
-than one confirmed index exists for the same content/container, it picks the
+store/artifact/container. `recover-metadata` selects deterministically: if more
+than one confirmed index exists for the same artifact/container, it picks the
 newest by index write time and reconciles or flags the rest as conflicting
 instead of guessing.
 
@@ -436,7 +437,7 @@ directly → confirmed deletion lets the same goroutine remove the finalizer;
 otherwise the key is requeued with backoff.
 
 **Recovery:** reconciler enqueues `recover-metadata` on detecting a
-confirmed-but-unrecorded publication → a worker locates it by store/content/container
+confirmed-but-unrecorded publication → a worker locates it by store/artifact/container
 → repairs missing descriptors without deleting data.
 
 After all restore consumers finish, unmount staging before Commit cleanup.
@@ -481,11 +482,12 @@ backend integration with a disposable S3-compatible service, and GPU end-to-end 
   PageBroker/operator manager; matching images and an operator service account
   without GPU/host mounts.
 - **PVC-first maintenance:** per-content deletion and scheduled sweeps through the
-  in-process worker pool; legacy layout, UID checks, symlink refusal and finalizer completion.
+  in-process worker pool; legacy layout, artifact UID checks, symlink refusal and
+  finalizer completion.
 - **Workqueue lifecycle:** duplicate enqueues coalescing to one key, operator
   restart/leadership change rebuilding pending work, retry backoff and exhaustion
   (cap then surface a condition), graceful `ShutDownWithDrain` under SIGTERM, and
-  no two workers racing the same content key.
+  no two workers racing the same artifact key.
 - **Storage/RPC:** disposable S3-compatible service; upload/index publication,
   format/path/digest rejection, bounded messages, maintenance pagination, Abort and inspection expiry.
 - **Failure/recovery:** invalid credentials before capture, outage during transfer,
