@@ -1481,6 +1481,12 @@ func TestRunQueueWorkersBoundsConcurrency(t *testing.T) {
 	release := make(chan struct{})
 	admitted := make(chan struct{}, items)
 
+	// Every worker parks on release, so a failure before the normal close would strand them.
+	// Cleanup runs before the queue's own ShutDown (LIFO), which is the order they need to exit.
+	var releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseAll)
+
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -1499,17 +1505,24 @@ func TestRunQueueWorkersBoundsConcurrency(t *testing.T) {
 		})
 	}()
 
-	// Let exactly one pool's worth start, then confirm the pool refuses to admit more.
-	for range nodeQueueWorkers {
-		<-admitted
+	// Let exactly one pool's worth start, then confirm the pool refuses to admit more. Each wait
+	// is bounded: a pool that admits too few would otherwise hang here until the package-wide test
+	// timeout, reporting a panic instead of the assertion that actually failed.
+	for started := range nodeQueueWorkers {
+		select {
+		case <-admitted:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("only %d of %d workers started; the pool is not admitting its full width",
+				started, nodeQueueWorkers)
+		}
 	}
 	select {
 	case <-admitted:
-		t.Fatal("a item was admitted beyond nodeQueueWorkers")
+		t.Fatal("an item was admitted beyond nodeQueueWorkers")
 	case <-time.After(100 * time.Millisecond):
 	}
 
-	close(release)
+	releaseAll()
 	require.Eventually(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
