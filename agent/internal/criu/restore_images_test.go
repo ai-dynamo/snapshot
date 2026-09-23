@@ -21,6 +21,18 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+func TestRestoreTCPSocketCloseOnExec(t *testing.T) {
+	fd, err := newRestoreTCPSocket()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Close(fd) }()
+	flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
+	if err != nil || flags&unix.FD_CLOEXEC == 0 {
+		t.Fatalf("socket flags = %d, %v; want close-on-exec", flags, err)
+	}
+}
+
 func TestRewriteSocketMetadataRewritesInternalUnixSocketPair(t *testing.T) {
 	first := newUnixSocketEntry(1, []byte("\x00first"), 101, unix.SOCK_DGRAM, linuxTCPStateEstablished)
 	second := newUnixSocketEntry(2, []byte("\x00second"), 102, unix.SOCK_DGRAM, linuxTCPStateEstablished)
@@ -376,11 +388,11 @@ func observedSocketTopology() []*fdinfo.FileEntry {
 	client := newTCPSocketEntry(6, 106, 46730, 52103, linuxTCPStateEstablished, podAddress, podAddress)
 	server := newTCPSocketEntry(7, 107, 52103, 46730, linuxTCPStateEstablished, podAddress, podAddress)
 	outbound := newTCPSocketEntry(8, 108, 45336, 443, linuxTCPStateEstablished, podIPv4Address, remoteIPv4Address)
-	outbound.Isk.Family = proto.Uint32(unix.AF_INET)
+	outbound.Isk.Family = proto.Uint32(linuxAFInet)
 	outbound.Isk.V6Only = nil
 	dualStackListener := newTCPSocketEntry(9, 109, 53103, 0, linuxTCPStateListen, wildcard, wildcard)
 	dualStackClient := newTCPSocketEntry(10, 110, 47730, 53103, linuxTCPStateEstablished, podIPv4Address, podIPv4Address)
-	dualStackClient.Isk.Family = proto.Uint32(unix.AF_INET)
+	dualStackClient.Isk.Family = proto.Uint32(linuxAFInet)
 	dualStackClient.Isk.V6Only = nil
 	dualStackServer := newTCPSocketEntry(11, 111, 53103, 47730, linuxTCPStateEstablished, podAddress, podAddress)
 	return []*fdinfo.FileEntry{
@@ -451,7 +463,7 @@ func newTCPSocketEntry(
 		Isk: &sk_inet.InetSkEntry{
 			Id:      proto.Uint32(id),
 			Ino:     proto.Uint32(inode),
-			Family:  proto.Uint32(unix.AF_INET6),
+			Family:  proto.Uint32(linuxAFInet6),
 			Type:    proto.Uint32(unix.SOCK_STREAM),
 			Proto:   proto.Uint32(unix.IPPROTO_TCP),
 			State:   proto.Uint32(state),

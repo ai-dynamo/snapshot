@@ -21,14 +21,17 @@ import (
 )
 
 const (
-	filesImageFilename            = "files.img"
-	placeholderMountNamespacePath = "/proc/self/ns/mnt"
-	criuUnixSocketUflagExternal   = 1 << 0
-	linuxUnixSocketStateListen    = 10
-	linuxUnixSocketStateClose     = 7
-	linuxTCPStateEstablished      = 1
-	linuxTCPStateClose            = 7
-	linuxTCPStateListen           = 10
+	// Address families in CRIU images use the Linux ABI, even on a macOS host.
+	linuxAFInet  = 2
+	linuxAFInet6 = 10
+
+	filesImageFilename          = "files.img"
+	criuUnixSocketUflagExternal = 1 << 0
+	linuxUnixSocketStateListen  = 10
+	linuxUnixSocketStateClose   = 7
+	linuxTCPStateEstablished    = 1
+	linuxTCPStateClose          = 7
+	linuxTCPStateListen         = 10
 )
 
 type tcpPortRewrite struct {
@@ -38,15 +41,6 @@ type tcpPortRewrite struct {
 }
 
 type mountFilesImageFunc func(checkpointPath, replacementFilesImagePath string) (func() error, error)
-
-func prepareRestoreImageDir(checkpointPath, scratchDir string) (string, func() error, error) {
-	// The placeholder mount namespace remains container-specific with shareProcessNamespace.
-	var stat unix.Stat_t
-	if err := unix.Stat(placeholderMountNamespacePath, &stat); err != nil {
-		return "", nil, fmt.Errorf("failed to stat placeholder mount namespace at %s: %w", placeholderMountNamespacePath, err)
-	}
-	return prepareRestoreImageDirForRestoreID(checkpointPath, stat.Ino, scratchDir)
-}
 
 func prepareRestoreImageDirForRestoreID(checkpointPath string, restoreID uint64, scratchDir string) (string, func() error, error) {
 	return prepareRestoreImageDirForRestoreIDWithMount(
@@ -302,8 +296,8 @@ func isTCPSocket(socket *sk_inet.InetSkEntry) bool {
 		socket.SrcPort != nil &&
 		socket.DstPort != nil &&
 		socket.NsId != nil &&
-		(socket.GetFamily() == uint32(unix.AF_INET) ||
-			socket.GetFamily() == uint32(unix.AF_INET6)) &&
+		(socket.GetFamily() == uint32(linuxAFInet) ||
+			socket.GetFamily() == uint32(linuxAFInet6)) &&
 		socket.GetType() == uint32(unix.SOCK_STREAM) &&
 		socket.GetProto() == uint32(unix.IPPROTO_TCP)
 }
@@ -339,14 +333,14 @@ func hasSupportedTCPAddresses(socket *sk_inet.InetSkEntry) bool {
 
 func normalizedIPAddress(family uint32, words []uint32) (netip.Addr, bool) {
 	switch family {
-	case unix.AF_INET:
+	case linuxAFInet:
 		if len(words) != 1 {
 			return netip.Addr{}, false
 		}
 		var address [4]byte
 		binary.LittleEndian.PutUint32(address[:], words[0])
 		return netip.AddrFrom4(address), true
-	case unix.AF_INET6:
+	case linuxAFInet6:
 		if len(words) != 4 {
 			return netip.Addr{}, false
 		}
@@ -387,7 +381,7 @@ func reserveDualStackTCPPort(forbidden map[uint32]struct{}) (uint32, int, error)
 	}()
 
 	for {
-		fd, err := unix.Socket(unix.AF_INET6, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, unix.IPPROTO_TCP)
+		fd, err := newRestoreTCPSocket()
 		if err != nil {
 			return 0, -1, err
 		}
