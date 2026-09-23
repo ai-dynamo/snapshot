@@ -24,6 +24,12 @@ extern "C" {
 int runai_start(void** streamer);
 void runai_end(void* streamer);
 
+int runai_set_credentials(
+    void* streamer,
+    const char** param_keys,
+    const char** param_values,
+    unsigned num_params);
+
 int runai_request(
     void* streamer,
     SubmissionId* out_submission_id,
