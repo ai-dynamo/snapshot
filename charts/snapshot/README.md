@@ -122,6 +122,43 @@ helm upgrade --install snapshot ./charts/snapshot \
   --set storage.pvc.name=my-snapshot-pvc
 ```
 
+## PageBroker transfer engines
+
+Every checkpoint and restore goes through PageBroker. The Snapshot Agent
+uses the configured transfer engine for these requests. Build
+the agent and dedicated PageBroker images from the same checkout and tag them
+alike. Only the PageBroker image includes the native Model Streamer library:
+
+```bash
+# In this repository. Add --push through DOCKER_BUILD_ARGS for a remote cluster.
+make docker-build-agent docker-build-pagebroker \
+  MODEL_STREAMER_WHEEL_DIR=/path/to/pinned-wheel-directory \
+  REGISTRY=ghcr.io/YOUR_ACCOUNT/snapshot \
+  TAGS=pagebroker-model-streamer
+
+helm upgrade --install snapshot ./charts/snapshot \
+  --namespace "${NAMESPACE}" --create-namespace \
+  --set pageBroker.transferEngine=model-streamer \
+  --set image.agent.repository=ghcr.io/YOUR_ACCOUNT/snapshot/agent \
+  --set image.agent.tag=pagebroker-model-streamer \
+  --set image.pageBroker.repository=ghcr.io/YOUR_ACCOUNT/snapshot/pagebroker
+```
+
+Model Streamer currently accelerates restore reads only; its checkpoint path
+uses filesystem copy because Model Streamer does not provide a write API. The
+`pageBroker.transferEngine` value accepts `posix-copy` (the default) or
+`model-streamer`.
+
+The PageBroker Docker build expects exactly one wheel in `MODEL_STREAMER_WHEEL_DIR`, which
+defaults to the sibling repository's
+`py/runai_model_streamer/dist` directory. Its SHA-256 must match the
+artifact pinned in `agent/pagebroker/model-streamer-wheel.sha256`. That artifact
+was built from Model Streamer commit
+`bc21fd4182cc06ce9475452d16697d50ce3588c4`; PyPI version `0.16.1` uses an older
+ABI and is not compatible with this PageBroker engine.
+The agent build does not require the wheel. The PageBroker image always includes
+the library, including when `posix-copy` is selected at runtime.
+
 ## CRD upgrades
 
 Helm creates the CRDs in [crds/](./crds) on a fresh install and then leaves them
@@ -189,6 +226,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `storage.pvc.size`                 | Requested PVC size                                                                                                                                                            | `1Ti`                                          |
 | `storage.pvc.storageClass`         | Storage class name                                                                                                                                                            | `""`                                           |
 | `storage.pvc.basePath`             | Fixed checkpoint mount path enforced by the privileged helper                                                                                                                 | `/checkpoints`                                 |
+| `pageBroker.transferEngine` | PageBroker transfer engine: `posix-copy` or `model-streamer` | `posix-copy` |
 | `pageBroker.staging.sizeLimit`     | Cap on the memory-backed staging volume shared by the agent and PageBroker. Keep at or below both memory limits so oversized transfers are refused instead of OOM-killed      | `64Gi`                                         |
 | `pageBroker.maxConcurrentRequests` | Concurrent control-socket requests the daemon serves                                                                                                                          | `16`                                           |
 | `pageBroker.resources`             | CPU and memory requests/limits for the PageBroker sidecar. The memory limit bounds restore prefetch into staging                                                              | 1 CPU / 2Gi request, 32 CPU / 256Gi limit      |

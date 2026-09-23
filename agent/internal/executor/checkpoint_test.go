@@ -108,8 +108,11 @@ func TestConfigureCheckpointRecordsRuntimeImageID(t *testing.T) {
 
 func TestCheckpointPageBrokerPrepareFailureDoesNotMutate(t *testing.T) {
 	cfg := &types.AgentConfig{
-		Storage:    types.StorageSpec{BasePath: t.TempDir()},
-		PageBroker: types.PageBrokerSpec{ControlSocketPath: t.TempDir() + "/pagebroker.sock"},
+		Storage: types.StorageSpec{BasePath: t.TempDir()},
+		PageBroker: types.PageBrokerSpec{
+			ControlSocketPath: t.TempDir() + "/pagebroker.sock",
+			TransferEngine:    "posix-copy",
+		},
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
