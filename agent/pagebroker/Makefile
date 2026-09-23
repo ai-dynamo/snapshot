@@ -14,7 +14,7 @@ generate:
 daemon: generate
 	c++ -I. -std=c++20 -Wall -Werror $(DAEMON_SOURCES) v1/pagebroker.pb.cc -Wl,-Bstatic -lprotobuf -Wl,-Bdynamic -o pagebroker
 
-test: generate $(BROKER_SOURCES) daemon_test.cpp
+test: generate $(BROKER_SOURCES) daemon_test.cpp storage_contract_test.cpp
 	mkdir -p build
-	c++ -I. -std=c++20 -Wall -Werror $(BROKER_SOURCES) daemon_test.cpp v1/pagebroker.pb.cc -lprotobuf $(GTEST_FLAGS) -o build/pagebroker-test
+	c++ -I. -std=c++20 -Wall -Werror $(BROKER_SOURCES) daemon_test.cpp storage_contract_test.cpp v1/pagebroker.pb.cc -lprotobuf $(GTEST_FLAGS) -o build/pagebroker-test
 	./build/pagebroker-test
