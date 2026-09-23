@@ -140,7 +140,12 @@ def test_snapshot_records_the_environment_a_restore_is_checked_against(
         limits = (container.resources.limits or {}) if container.resources else {}
         recorded_pod = manifest["k8s"]
         assert recorded_pod["image"] == container.image
-        assert recorded_pod["imageId"] == source_image_id
+        if source_image_id:
+            assert recorded_pod["imageId"] == source_image_id
+        else:
+            # Missing CRI image_id is a supported unknown, not a failed capture.
+            # Verify omission rather than skipping this environment test.
+            assert "imageId" not in recorded_pod
         assert recorded_pod["memoryLimit"] == limits["memory"]
         # This pod sets no CPU limit, and an absent value is recorded as absent
         # rather than invented, which is what makes it refuse nothing later.
@@ -161,11 +166,15 @@ def test_snapshot_records_the_environment_a_restore_is_checked_against(
         }
         # Exact equality, because the CPU limit this pod never set must stay
         # absent here as well as in the manifest.
-        assert published["pod"] == {
+        expected_pod = {
             "image": container.image,
-            "imageDigest": source_image_id.split("://")[-1].rsplit("@", 1)[-1],
             "memory": limits["memory"],
         }
+        if source_image_id:
+            expected_pod["imageDigest"] = (
+                source_image_id.split("://")[-1].rsplit("@", 1)[-1]
+            )
+        assert published["pod"] == expected_pod
         nvidia = published["devices"]["nvidia"]
         assert nvidia["driverVersion"] == visible_gpus[0]["driver"]
         assert sorted(
