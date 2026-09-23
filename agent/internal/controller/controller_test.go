@@ -1466,6 +1466,30 @@ func TestApplyRestoredConditionPreservesTransitionTimeForSameStatus(t *testing.T
 	assert.Contains(t, string(lastPodStatusApply(t, w).GetPatch()), transition.UTC().Format(time.RFC3339))
 }
 
+func TestApplyRestoredConditionSkipsIdenticalCondition(t *testing.T) {
+	transition := metav1.NewTime(time.Unix(123, 0))
+	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+		Type:               corev1.PodConditionType(podcontract.RestoredCondition),
+		Status:             corev1.ConditionFalse,
+		Reason:             "SnapshotPending",
+		Message:            "waiting",
+		LastTransitionTime: transition,
+	})
+	w := makeTestController(t, pod)
+	clientset := w.clientset.(*fake.Clientset)
+	clientset.ClearActions()
+
+	err := w.applyRestoredCondition(context.Background(), pod, corev1.ConditionFalse, "SnapshotPending", "waiting")
+	require.NoError(t, err)
+	assert.Empty(t, clientset.Actions())
+
+	err = w.applyRestoredCondition(context.Background(), pod, corev1.ConditionFalse, "ArtifactPending", "waiting")
+	require.NoError(t, err)
+	assert.Len(t, clientset.Actions(), 1)
+	assert.Contains(t, string(lastPodStatusApply(t, w).GetPatch()), `"reason":"ArtifactPending"`)
+}
+
 func TestInFlightKeyIsDeduplicatedForCapture(t *testing.T) {
 	w := makeTestController(t, restorePod(nil))
 	key := "inference/restore-worker/main/ctr-abc"
