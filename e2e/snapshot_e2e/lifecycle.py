@@ -803,32 +803,24 @@ def checkpoint_manifest(
     return yaml.safe_load(checkpoint_artifact_manifest(config, node, content_uid))
 
 
-def runtime_image_id(
-    config: k8s.E2EConfig, node: str, container_id: str, timeout: int = 30
-) -> str:
-    """The container's image ID as containerd reports it.
+def runtime_image_id(config: k8s.E2EConfig, node: str, container_id: str) -> str:
+    """The optional CRI ContainerStatus.image_id that the agent records.
 
-    containerd's CRI status can briefly omit imageId right after a pull —
-    buildx attestations (SLSA provenance/SBOM) make every pushed image a
-    multi-manifest index, and containerd needs an extra moment to resolve
-    that index down to the platform image's config digest. Poll instead of
-    asserting on the first read.
+    Older runtimes, including containerd 1.7, never populate this field. The
+    agent treats it as unknown and omits it from the checkpoint; waiting will
+    not make it appear. Do not substitute imageRef or an image-service lookup,
+    which would test a different source of identity than the agent uses.
     """
     runtime_id = container_id.split("://", 1)[-1]
-
-    def read() -> str | None:
-        output = k8s.exec_payload(
-            config.namespace,
-            checkpoint_agent_pod(config, node),
-            f"nsenter -t 1 -m -- crictl inspect {shlex.quote(runtime_id)}",
-        )
-        status = json.loads(output).get("status") or {}
-        image_id = status.get("imageId") or None
-        if not image_id:
-            print(f"[debug] crictl inspect status for {container_id!r}: {status}")
-        return image_id
-
-    return wait_for(f"runtime image ID for {container_id!r}", read, timeout)
+    output = k8s.exec_payload(
+        config.namespace,
+        checkpoint_agent_pod(config, node),
+        f"nsenter -t 1 -m -- crictl inspect {shlex.quote(runtime_id)}",
+    )
+    status = json.loads(output).get("status")
+    if not isinstance(status, dict) or not status:
+        raise AssertionError(f"runtime reported no container status for {container_id!r}")
+    return (status.get("imageId") or "").strip()
 
 
 def visible_gpus(namespace: str, pod: str) -> list[dict[str, str]]:

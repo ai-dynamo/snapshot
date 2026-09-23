@@ -82,6 +82,7 @@ jobs:
             e2e/tests/test_benchmark_history.py \
             e2e/tests/test_benchmark_preview.py \
             e2e/tests/test_framework_manifests.py \
+            e2e/tests/test_runtime_image_id.py \
             e2e/tests/test_workload_scripts.py -vv
 
   # Runs on every pull request so cross-cutting changes (shared workflows, the
