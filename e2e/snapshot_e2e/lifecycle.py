@@ -803,17 +803,28 @@ def checkpoint_manifest(
     return yaml.safe_load(checkpoint_artifact_manifest(config, node, content_uid))
 
 
-def runtime_image_id(config: k8s.E2EConfig, node: str, container_id: str) -> str:
+def runtime_image_id(
+    config: k8s.E2EConfig, node: str, container_id: str, timeout: int = 30
+) -> str:
+    """The container's image ID as containerd reports it.
+
+    containerd's CRI status can briefly omit imageId right after a pull —
+    buildx attestations (SLSA provenance/SBOM) make every pushed image a
+    multi-manifest index, and containerd needs an extra moment to resolve
+    that index down to the platform image's config digest. Poll instead of
+    asserting on the first read.
+    """
     runtime_id = container_id.split("://", 1)[-1]
-    output = k8s.exec_payload(
-        config.namespace,
-        checkpoint_agent_pod(config, node),
-        f"nsenter -t 1 -m -- crictl inspect {shlex.quote(runtime_id)}",
-    )
-    image_id = (json.loads(output).get("status") or {}).get("imageId")
-    if not image_id:
-        raise AssertionError(f"runtime reported no image ID for {container_id!r}")
-    return image_id
+
+    def read() -> str | None:
+        output = k8s.exec_payload(
+            config.namespace,
+            checkpoint_agent_pod(config, node),
+            f"nsenter -t 1 -m -- crictl inspect {shlex.quote(runtime_id)}",
+        )
+        return (json.loads(output).get("status") or {}).get("imageId") or None
+
+    return wait_for(f"runtime image ID for {container_id!r}", read, timeout)
 
 
 def visible_gpus(namespace: str, pod: str) -> list[dict[str, str]]:
