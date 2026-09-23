@@ -101,15 +101,18 @@ storage:
   oci:
     uri: ""
 
+# PageBroker sidecar: stages checkpoint images in memory and publishes them to
+# the checkpoint PVC it shares with the agent. See docs/operations/storage.md.
 pageBroker:
-  enabled: false
-  command: []
-  args: []
   maxConcurrentRequests: 16
+  staging:
+    # Keep at or below both memory limits; see docs/operations/storage.md.
+    sizeLimit: 64Gi
+  # Requests cover the idle daemon; limits cover restore prefetch into staging.
   resources:
     requests:
-      cpu: 8
-      memory: 32Gi
+      cpu: 1
+      memory: 2Gi
     limits:
       cpu: 32
       memory: 256Gi
@@ -123,11 +126,13 @@ daemonset:
   # override is hosted in a private registry.
   imagePullSecrets: []
 
-  # Resource limits and requests
+  # CRIU writes the checkpoint image into the memory-backed PageBroker staging
+  # volume from this container, so limits.memory also bounds the largest
+  # checkpoint image.
   resources:
     limits:
       cpu: 4
-      memory: 4Gi
+      memory: 64Gi
     requests:
       cpu: 2
       memory: 1Gi

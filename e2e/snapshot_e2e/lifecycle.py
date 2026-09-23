@@ -38,6 +38,7 @@ SNAPSHOTJOBS = "snapshotjobs"
 PROGRESS_INTERVAL_SECONDS = 30
 TERMINAL_POD_PHASES = {"Failed", "Succeeded"}
 AGENT_CHECKPOINT_DIR = "/checkpoints"
+AGENT_CONTAINER = "agent"
 
 
 class LifecycleTimeoutError(AssertionError, TimeoutError):
@@ -793,6 +794,7 @@ def checkpoint_artifact_manifest(
         config.namespace,
         checkpoint_agent_pod(config, node),
         f"cat {checkpoint_artifact_path(content_uid)}/manifest.yaml",
+        container=AGENT_CONTAINER,
     )
 
 
@@ -845,6 +847,7 @@ def checkpoint_artifact_listing(
         f"cd {checkpoint_artifact_path(content_uid)} && "
         "find . -maxdepth 1 -type f -print | sort && "
         "tar -tf rootfs-diff.tar | sort",
+        container=AGENT_CONTAINER,
     )
 
 
@@ -859,6 +862,7 @@ def checkpoint_rootfs_file(
         checkpoint_agent_pod(config, node),
         f"cd {checkpoint_artifact_path(content_uid)} && "
         f"tar -xOf rootfs-diff.tar {path}",
+        container=AGENT_CONTAINER,
     )
 
 
@@ -878,6 +882,7 @@ def artifact_root_exists(config: k8s.E2EConfig, node: str, content_uid: str) -> 
         config.namespace,
         checkpoint_agent_pod(config, node),
         f"test -d {checkpoint_artifact_root(content_uid)} && printf '%s' {marker}",
+        container=AGENT_CONTAINER,
     )
     return output == marker
 
@@ -905,6 +910,7 @@ def create_artifact_staging_file(
         checkpoint_agent_pod(config, node),
         f"mkdir -p {checkpoint_artifact_root(content_uid)}/.tmp && "
         f"printf orphan > {checkpoint_artifact_root(content_uid)}/.tmp/partial",
+        container=AGENT_CONTAINER,
     )
 
 
@@ -927,6 +933,7 @@ def host_monitoring_agents(config: k8s.E2EConfig, node: str) -> str:
         "| grep -iE 'datadog|dd-agent|system-probe|process-agent|trace-agent|security-agent|dcgm' "
         "| grep -vE 'grep -iE' "
         "|| echo '<no datadog/dcgm processes on host>'",
+        container=AGENT_CONTAINER,
     )
 
 
@@ -1042,7 +1049,14 @@ def print_snapshot_controller_logs(config: k8s.E2EConfig) -> None:
         return
     for pod in pods[:8]:
         print(f"snapshot pod {pod.metadata.name} phase={pod.status.phase}")
-        print(k8s.pod_logs(config.namespace, pod.metadata.name, tail_lines=50))
+        print(
+            k8s.pod_logs(
+                config.namespace,
+                pod.metadata.name,
+                tail_lines=50,
+                container=pod.spec.containers[0].name,
+            )
+        )
 
 
 def cleanup(config: k8s.E2EConfig, run: TestRun) -> None:
@@ -1334,12 +1348,23 @@ def _dump_agent_diagnostics(config: k8s.E2EConfig, run: TestRun, source_node: st
 
 def _dump_agent_logs(config: k8s.E2EConfig, agent: str, source_node: str) -> None:
     print(f"--- agent {agent} on {source_node} (tail 200) ---")
-    print(k8s.pod_logs(config.namespace, agent, tail_lines=200))
+    print(
+        k8s.pod_logs(
+            config.namespace, agent, tail_lines=200, container=AGENT_CONTAINER
+        )
+    )
 
 
 def _dump_nvidia_smi(config: k8s.E2EConfig, agent: str, source_node: str) -> None:
     print(f"--- nvidia-smi on {source_node} ---")
-    print(k8s.exec_command(config.namespace, agent, "nvidia-smi 2>&1 || true"))
+    print(
+        k8s.exec_command(
+            config.namespace,
+            agent,
+            "nvidia-smi 2>&1 || true",
+            container=AGENT_CONTAINER,
+        )
+    )
 
 
 def _dump_host_monitoring(config: k8s.E2EConfig, source_node: str) -> None:
@@ -1363,6 +1388,7 @@ def _dump_kernel_log(config: k8s.E2EConfig, agent: str, source_node: str) -> Non
             "dmesg -T 2>/dev/null "
             "| grep -iE 'criu|segfault|traps|nsrestore|cuda|out of memory|killed process|oom|memory cgroup' "
             "| tail -40 || echo '<dmesg unavailable>'",
+            container=AGENT_CONTAINER,
         )
     )
 
