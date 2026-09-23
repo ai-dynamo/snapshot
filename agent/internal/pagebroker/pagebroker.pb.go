@@ -43,19 +43,36 @@ const (
 	Failure_INTERNAL_ERROR Failure_Code = 6
 	// PageBroker is stopping or its GPU handler budget is full. No operation started.
 	Failure_UNAVAILABLE Failure_Code = 7
+	// Storage extensions use 20+ to avoid the CUDA workstream's failure codes.
+	Failure_STORE_MISMATCH       Failure_Code = 20 // Descriptor/target names another configured store; no storage I/O.
+	Failure_ACCESS_DENIED        Failure_Code = 21 // Authentication, authorization or decryption refused; not proof of absence.
+	Failure_STORAGE_UNAVAILABLE  Failure_Code = 22 // Transient storage/transport failure after bounded retries.
+	Failure_ARTIFACT_NOT_FOUND   Failure_Code = 23 // Authoritative absence of the requested publication.
+	Failure_ARTIFACT_CORRUPT     Failure_Code = 24 // Invalid index, unsafe paths, missing indexed data or digest mismatch.
+	Failure_UNSUPPORTED_ARTIFACT Failure_Code = 25 // No reader for the backend/version pair.
+	Failure_OUTCOME_UNKNOWN      Failure_Code = 26 // Cannot establish publication outcome; never authorizes process replay.
+	Failure_TRANSACTION_EXPIRED  Failure_Code = 27 // Fixed transaction deadline elapsed; no new storage operations.
 )
 
 // Enum value maps for Failure_Code.
 var (
 	Failure_Code_name = map[int32]string{
-		0: "UNSPECIFIED",
-		1: "INVALID_REQUEST",
-		2: "TRANSACTION_NOT_FOUND",
-		3: "TRANSACTION_CONFLICT",
-		4: "INSUFFICIENT_STORAGE",
-		5: "STORAGE_ERROR",
-		6: "INTERNAL_ERROR",
-		7: "UNAVAILABLE",
+		0:  "UNSPECIFIED",
+		1:  "INVALID_REQUEST",
+		2:  "TRANSACTION_NOT_FOUND",
+		3:  "TRANSACTION_CONFLICT",
+		4:  "INSUFFICIENT_STORAGE",
+		5:  "STORAGE_ERROR",
+		6:  "INTERNAL_ERROR",
+		7:  "UNAVAILABLE",
+		20: "STORE_MISMATCH",
+		21: "ACCESS_DENIED",
+		22: "STORAGE_UNAVAILABLE",
+		23: "ARTIFACT_NOT_FOUND",
+		24: "ARTIFACT_CORRUPT",
+		25: "UNSUPPORTED_ARTIFACT",
+		26: "OUTCOME_UNKNOWN",
+		27: "TRANSACTION_EXPIRED",
 	}
 	Failure_Code_value = map[string]int32{
 		"UNSPECIFIED":           0,
@@ -66,6 +83,14 @@ var (
 		"STORAGE_ERROR":         5,
 		"INTERNAL_ERROR":        6,
 		"UNAVAILABLE":           7,
+		"STORE_MISMATCH":        20,
+		"ACCESS_DENIED":         21,
+		"STORAGE_UNAVAILABLE":   22,
+		"ARTIFACT_NOT_FOUND":    23,
+		"ARTIFACT_CORRUPT":      24,
+		"UNSUPPORTED_ARTIFACT":  25,
+		"OUTCOME_UNKNOWN":       26,
+		"TRANSACTION_EXPIRED":   27,
 	}
 )
 
@@ -93,7 +118,7 @@ func (x Failure_Code) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Failure_Code.Descriptor instead.
 func (Failure_Code) EnumDescriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{26, 0}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{31, 0}
 }
 
 type FilesystemStorage struct {
@@ -638,17 +663,189 @@ func (*CapabilitiesRequest) Descriptor() ([]byte, []int) {
 	return file_v1_pagebroker_proto_rawDescGZIP(), []int{9}
 }
 
-type StagedRestoreRequest struct {
+// Logical identity before publication. Neither field is a filesystem path.
+type ArtifactIdentity struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Source        *StorageBackend        `protobuf:"bytes,1,opt,name=source,proto3" json:"source,omitempty"`
-	IoEngine      *IOEngine              `protobuf:"bytes,2,opt,name=io_engine,json=ioEngine,proto3" json:"io_engine,omitempty"`
+	ArtifactUid   string                 `protobuf:"bytes,1,opt,name=artifact_uid,json=artifactUid,proto3" json:"artifact_uid,omitempty"`       // Owning PodSnapshotContent UID.
+	ContainerName string                 `protobuf:"bytes,2,opt,name=container_name,json=containerName,proto3" json:"container_name,omitempty"` // Captured container within that content.
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ArtifactIdentity) Reset() {
+	*x = ArtifactIdentity{}
+	mi := &file_v1_pagebroker_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ArtifactIdentity) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ArtifactIdentity) ProtoMessage() {}
+
+func (x *ArtifactIdentity) ProtoReflect() protoreflect.Message {
+	mi := &file_v1_pagebroker_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ArtifactIdentity.ProtoReflect.Descriptor instead.
+func (*ArtifactIdentity) Descriptor() ([]byte, []int) {
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *ArtifactIdentity) GetArtifactUid() string {
+	if x != nil {
+		return x.ArtifactUid
+	}
+	return ""
+}
+
+func (x *ArtifactIdentity) GetContainerName() string {
+	if x != nil {
+		return x.ContainerName
+	}
+	return ""
+}
+
+// Selects the configured store and destination before capture begins.
+type ArtifactTarget struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	StoreId       string                 `protobuf:"bytes,1,opt,name=store_id,json=storeId,proto3" json:"store_id,omitempty"` // Must match the configured store before I/O.
+	Artifact      *ArtifactIdentity      `protobuf:"bytes,2,opt,name=artifact,proto3" json:"artifact,omitempty"`              // Logical destination within that store.
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ArtifactTarget) Reset() {
+	*x = ArtifactTarget{}
+	mi := &file_v1_pagebroker_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ArtifactTarget) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ArtifactTarget) ProtoMessage() {}
+
+func (x *ArtifactTarget) ProtoReflect() protoreflect.Message {
+	mi := &file_v1_pagebroker_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ArtifactTarget.ProtoReflect.Descriptor instead.
+func (*ArtifactTarget) Descriptor() ([]byte, []int) {
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *ArtifactTarget) GetStoreId() string {
+	if x != nil {
+		return x.StoreId
+	}
+	return ""
+}
+
+func (x *ArtifactTarget) GetArtifact() *ArtifactIdentity {
+	if x != nil {
+		return x.Artifact
+	}
+	return nil
+}
+
+// Immutable publication descriptor, persisted by Snapshot after checkpoint Commit.
+// Handles are opaque to callers; the configured backend and version select the reader.
+type PublishedArtifact struct {
+	state                 protoimpl.MessageState `protogen:"open.v1"`
+	StoreId               string                 `protobuf:"bytes,1,opt,name=store_id,json=storeId,proto3" json:"store_id,omitempty"`                                             // Bind subsequent reads to the original store.
+	ArtifactHandle        string                 `protobuf:"bytes,2,opt,name=artifact_handle,json=artifactHandle,proto3" json:"artifact_handle,omitempty"`                        // Backend locator; callers persist it unchanged.
+	ArtifactFormatVersion string                 `protobuf:"bytes,3,opt,name=artifact_format_version,json=artifactFormatVersion,proto3" json:"artifact_format_version,omitempty"` // Select the configured backend's reader.
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
+}
+
+func (x *PublishedArtifact) Reset() {
+	*x = PublishedArtifact{}
+	mi := &file_v1_pagebroker_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PublishedArtifact) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PublishedArtifact) ProtoMessage() {}
+
+func (x *PublishedArtifact) ProtoReflect() protoreflect.Message {
+	mi := &file_v1_pagebroker_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PublishedArtifact.ProtoReflect.Descriptor instead.
+func (*PublishedArtifact) Descriptor() ([]byte, []int) {
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *PublishedArtifact) GetStoreId() string {
+	if x != nil {
+		return x.StoreId
+	}
+	return ""
+}
+
+func (x *PublishedArtifact) GetArtifactHandle() string {
+	if x != nil {
+		return x.ArtifactHandle
+	}
+	return ""
+}
+
+func (x *PublishedArtifact) GetArtifactFormatVersion() string {
+	if x != nil {
+		return x.ArtifactFormatVersion
+	}
+	return ""
+}
+
+type StagedRestoreRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Legacy filesystem selector; mutually exclusive with artifact.
+	Source *StorageBackend `protobuf:"bytes,1,opt,name=source,proto3" json:"source,omitempty"`
+	// Required for legacy source. Optional with artifact: absence uses the configured
+	// engine; an explicit engine must support the bound store. It cannot select a store.
+	IoEngine      *IOEngine          `protobuf:"bytes,2,opt,name=io_engine,json=ioEngine,proto3" json:"io_engine,omitempty"`
+	Artifact      *PublishedArtifact `protobuf:"bytes,3,opt,name=artifact,proto3" json:"artifact,omitempty"` // Exact committed source; never substitute another publication.
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *StagedRestoreRequest) Reset() {
 	*x = StagedRestoreRequest{}
-	mi := &file_v1_pagebroker_proto_msgTypes[10]
+	mi := &file_v1_pagebroker_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -660,7 +857,7 @@ func (x *StagedRestoreRequest) String() string {
 func (*StagedRestoreRequest) ProtoMessage() {}
 
 func (x *StagedRestoreRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[10]
+	mi := &file_v1_pagebroker_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -673,7 +870,7 @@ func (x *StagedRestoreRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StagedRestoreRequest.ProtoReflect.Descriptor instead.
 func (*StagedRestoreRequest) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{10}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *StagedRestoreRequest) GetSource() *StorageBackend {
@@ -690,6 +887,13 @@ func (x *StagedRestoreRequest) GetIoEngine() *IOEngine {
 	return nil
 }
 
+func (x *StagedRestoreRequest) GetArtifact() *PublishedArtifact {
+	if x != nil {
+		return x.Artifact
+	}
+	return nil
+}
+
 // Keeps the source open for direct reads. Does not create CPU staging files.
 type DirectRestoreRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -701,7 +905,7 @@ type DirectRestoreRequest struct {
 
 func (x *DirectRestoreRequest) Reset() {
 	*x = DirectRestoreRequest{}
-	mi := &file_v1_pagebroker_proto_msgTypes[11]
+	mi := &file_v1_pagebroker_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -713,7 +917,7 @@ func (x *DirectRestoreRequest) String() string {
 func (*DirectRestoreRequest) ProtoMessage() {}
 
 func (x *DirectRestoreRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[11]
+	mi := &file_v1_pagebroker_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -726,7 +930,7 @@ func (x *DirectRestoreRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DirectRestoreRequest.ProtoReflect.Descriptor instead.
 func (*DirectRestoreRequest) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{11}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *DirectRestoreRequest) GetSource() *StorageBackend {
@@ -744,16 +948,19 @@ func (x *DirectRestoreRequest) GetIoEngine() *IOEngine {
 }
 
 type PrepareStagedCheckpointRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Destination   *StorageBackend        `protobuf:"bytes,1,opt,name=destination,proto3" json:"destination,omitempty"`
-	IoEngine      *IOEngine              `protobuf:"bytes,2,opt,name=io_engine,json=ioEngine,proto3" json:"io_engine,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Legacy filesystem selector; mutually exclusive with target.
+	Destination *StorageBackend `protobuf:"bytes,1,opt,name=destination,proto3" json:"destination,omitempty"`
+	// Required for legacy destination; optional with target (configured engine by default).
+	IoEngine      *IOEngine       `protobuf:"bytes,2,opt,name=io_engine,json=ioEngine,proto3" json:"io_engine,omitempty"`
+	Target        *ArtifactTarget `protobuf:"bytes,3,opt,name=target,proto3" json:"target,omitempty"` // Validate the configured store and destination before capture.
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *PrepareStagedCheckpointRequest) Reset() {
 	*x = PrepareStagedCheckpointRequest{}
-	mi := &file_v1_pagebroker_proto_msgTypes[12]
+	mi := &file_v1_pagebroker_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -765,7 +972,7 @@ func (x *PrepareStagedCheckpointRequest) String() string {
 func (*PrepareStagedCheckpointRequest) ProtoMessage() {}
 
 func (x *PrepareStagedCheckpointRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[12]
+	mi := &file_v1_pagebroker_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -778,7 +985,7 @@ func (x *PrepareStagedCheckpointRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrepareStagedCheckpointRequest.ProtoReflect.Descriptor instead.
 func (*PrepareStagedCheckpointRequest) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{12}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *PrepareStagedCheckpointRequest) GetDestination() *StorageBackend {
@@ -795,6 +1002,59 @@ func (x *PrepareStagedCheckpointRequest) GetIoEngine() *IOEngine {
 	return nil
 }
 
+func (x *PrepareStagedCheckpointRequest) GetTarget() *ArtifactTarget {
+	if x != nil {
+		return x.Target
+	}
+	return nil
+}
+
+// Fetch verified manifest.yaml for this exact publication into private shared staging.
+// Snapshot interprets the manifest. This does not verify all checkpoint payloads.
+type GetArtifactMetadataRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Artifact      *PublishedArtifact     `protobuf:"bytes,1,opt,name=artifact,proto3" json:"artifact,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetArtifactMetadataRequest) Reset() {
+	*x = GetArtifactMetadataRequest{}
+	mi := &file_v1_pagebroker_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetArtifactMetadataRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetArtifactMetadataRequest) ProtoMessage() {}
+
+func (x *GetArtifactMetadataRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_v1_pagebroker_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetArtifactMetadataRequest.ProtoReflect.Descriptor instead.
+func (*GetArtifactMetadataRequest) Descriptor() ([]byte, []int) {
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *GetArtifactMetadataRequest) GetArtifact() *PublishedArtifact {
+	if x != nil {
+		return x.Artifact
+	}
+	return nil
+}
+
 type PrepareDirectCheckpointRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Destination   *StorageBackend        `protobuf:"bytes,1,opt,name=destination,proto3" json:"destination,omitempty"`
@@ -805,7 +1065,7 @@ type PrepareDirectCheckpointRequest struct {
 
 func (x *PrepareDirectCheckpointRequest) Reset() {
 	*x = PrepareDirectCheckpointRequest{}
-	mi := &file_v1_pagebroker_proto_msgTypes[13]
+	mi := &file_v1_pagebroker_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -817,7 +1077,7 @@ func (x *PrepareDirectCheckpointRequest) String() string {
 func (*PrepareDirectCheckpointRequest) ProtoMessage() {}
 
 func (x *PrepareDirectCheckpointRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[13]
+	mi := &file_v1_pagebroker_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -830,7 +1090,7 @@ func (x *PrepareDirectCheckpointRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrepareDirectCheckpointRequest.ProtoReflect.Descriptor instead.
 func (*PrepareDirectCheckpointRequest) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{13}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *PrepareDirectCheckpointRequest) GetDestination() *StorageBackend {
@@ -848,8 +1108,8 @@ func (x *PrepareDirectCheckpointRequest) GetIoEngine() *IOEngine {
 }
 
 // Completes a live transaction. PageBroker retains up to 1,024 terminal transactions for up to one hour.
-// Repeating Commit for a retained committed transaction returns CommitComplete.
-// Aborted, expired, or unknown transactions return TRANSACTION_NOT_FOUND.
+// Repeating Commit returns the same retained result, including any PublishedArtifact.
+// Commit for an aborted, expired, or unknown transaction returns TRANSACTION_NOT_FOUND.
 type CommitRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -858,7 +1118,7 @@ type CommitRequest struct {
 
 func (x *CommitRequest) Reset() {
 	*x = CommitRequest{}
-	mi := &file_v1_pagebroker_proto_msgTypes[14]
+	mi := &file_v1_pagebroker_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -870,7 +1130,7 @@ func (x *CommitRequest) String() string {
 func (*CommitRequest) ProtoMessage() {}
 
 func (x *CommitRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[14]
+	mi := &file_v1_pagebroker_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -883,7 +1143,7 @@ func (x *CommitRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitRequest.ProtoReflect.Descriptor instead.
 func (*CommitRequest) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{14}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{18}
 }
 
 // Releases PageBroker state for a live transaction. PageBroker retains up to 1,024 terminal transactions for up to
@@ -897,7 +1157,7 @@ type AbortRequest struct {
 
 func (x *AbortRequest) Reset() {
 	*x = AbortRequest{}
-	mi := &file_v1_pagebroker_proto_msgTypes[15]
+	mi := &file_v1_pagebroker_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -909,7 +1169,7 @@ func (x *AbortRequest) String() string {
 func (*AbortRequest) ProtoMessage() {}
 
 func (x *AbortRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[15]
+	mi := &file_v1_pagebroker_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -922,7 +1182,7 @@ func (x *AbortRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AbortRequest.ProtoReflect.Descriptor instead.
 func (*AbortRequest) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{15}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{19}
 }
 
 type Request struct {
@@ -932,6 +1192,8 @@ type Request struct {
 	// Snapshot assigns a unique transaction ID before the first request and does not reuse it while PageBroker retains it.
 	// After two hours and five minutes, the transaction expires. This cancels GPU
 	// work. Expiry cleanup waits for active GPU transfers to stop.
+	// This is distinct from the deterministic commitID derived from the artifact target.
+	// Retries never extend a transaction's lifetime.
 	TransactionId *string `protobuf:"bytes,2,opt,name=transaction_id,json=transactionId,proto3,oneof" json:"transaction_id,omitempty"`
 	// Types that are valid to be assigned to Command:
 	//
@@ -944,6 +1206,7 @@ type Request struct {
 	//	*Request_CheckpointGpu
 	//	*Request_RestoreGpu
 	//	*Request_Capabilities
+	//	*Request_GetArtifactMetadata
 	Command       isRequest_Command `protobuf_oneof:"command"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -951,7 +1214,7 @@ type Request struct {
 
 func (x *Request) Reset() {
 	*x = Request{}
-	mi := &file_v1_pagebroker_proto_msgTypes[16]
+	mi := &file_v1_pagebroker_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -963,7 +1226,7 @@ func (x *Request) String() string {
 func (*Request) ProtoMessage() {}
 
 func (x *Request) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[16]
+	mi := &file_v1_pagebroker_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -976,7 +1239,7 @@ func (x *Request) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Request.ProtoReflect.Descriptor instead.
 func (*Request) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{16}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *Request) GetRequestId() string {
@@ -1081,6 +1344,15 @@ func (x *Request) GetCapabilities() *CapabilitiesRequest {
 	return nil
 }
 
+func (x *Request) GetGetArtifactMetadata() *GetArtifactMetadataRequest {
+	if x != nil {
+		if x, ok := x.Command.(*Request_GetArtifactMetadata); ok {
+			return x.GetArtifactMetadata
+		}
+	}
+	return nil
+}
+
 type isRequest_Command interface {
 	isRequest_Command()
 }
@@ -1121,6 +1393,11 @@ type Request_Capabilities struct {
 	Capabilities *CapabilitiesRequest `protobuf:"bytes,11,opt,name=capabilities,proto3,oneof"`
 }
 
+type Request_GetArtifactMetadata struct {
+	// Storage extensions use 20+; 8-19 remain available to the separate CUDA workstream.
+	GetArtifactMetadata *GetArtifactMetadataRequest `protobuf:"bytes,20,opt,name=get_artifact_metadata,json=getArtifactMetadata,proto3,oneof"`
+}
+
 func (*Request_StagedRestore) isRequest_Command() {}
 
 func (*Request_PrepareStagedCheckpoint) isRequest_Command() {}
@@ -1139,6 +1416,8 @@ func (*Request_RestoreGpu) isRequest_Command() {}
 
 func (*Request_Capabilities) isRequest_Command() {}
 
+func (*Request_GetArtifactMetadata) isRequest_Command() {}
+
 type StagedRestoreDirectory struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	ImageDirectory *string                `protobuf:"bytes,1,opt,name=image_directory,json=imageDirectory,proto3,oneof" json:"image_directory,omitempty"`
@@ -1148,7 +1427,7 @@ type StagedRestoreDirectory struct {
 
 func (x *StagedRestoreDirectory) Reset() {
 	*x = StagedRestoreDirectory{}
-	mi := &file_v1_pagebroker_proto_msgTypes[17]
+	mi := &file_v1_pagebroker_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1160,7 +1439,7 @@ func (x *StagedRestoreDirectory) String() string {
 func (*StagedRestoreDirectory) ProtoMessage() {}
 
 func (x *StagedRestoreDirectory) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[17]
+	mi := &file_v1_pagebroker_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1173,7 +1452,7 @@ func (x *StagedRestoreDirectory) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StagedRestoreDirectory.ProtoReflect.Descriptor instead.
 func (*StagedRestoreDirectory) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{17}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *StagedRestoreDirectory) GetImageDirectory() string {
@@ -1191,7 +1470,7 @@ type DirectRestoreReady struct {
 
 func (x *DirectRestoreReady) Reset() {
 	*x = DirectRestoreReady{}
-	mi := &file_v1_pagebroker_proto_msgTypes[18]
+	mi := &file_v1_pagebroker_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1203,7 +1482,7 @@ func (x *DirectRestoreReady) String() string {
 func (*DirectRestoreReady) ProtoMessage() {}
 
 func (x *DirectRestoreReady) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[18]
+	mi := &file_v1_pagebroker_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1216,7 +1495,7 @@ func (x *DirectRestoreReady) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DirectRestoreReady.ProtoReflect.Descriptor instead.
 func (*DirectRestoreReady) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{18}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{22}
 }
 
 type DirectCheckpointDirectory struct {
@@ -1228,7 +1507,7 @@ type DirectCheckpointDirectory struct {
 
 func (x *DirectCheckpointDirectory) Reset() {
 	*x = DirectCheckpointDirectory{}
-	mi := &file_v1_pagebroker_proto_msgTypes[19]
+	mi := &file_v1_pagebroker_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1240,7 +1519,7 @@ func (x *DirectCheckpointDirectory) String() string {
 func (*DirectCheckpointDirectory) ProtoMessage() {}
 
 func (x *DirectCheckpointDirectory) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[19]
+	mi := &file_v1_pagebroker_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1253,7 +1532,7 @@ func (x *DirectCheckpointDirectory) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DirectCheckpointDirectory.ProtoReflect.Descriptor instead.
 func (*DirectCheckpointDirectory) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{19}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *DirectCheckpointDirectory) GetImageDirectory() string {
@@ -1272,7 +1551,7 @@ type Capabilities struct {
 
 func (x *Capabilities) Reset() {
 	*x = Capabilities{}
-	mi := &file_v1_pagebroker_proto_msgTypes[20]
+	mi := &file_v1_pagebroker_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1284,7 +1563,7 @@ func (x *Capabilities) String() string {
 func (*Capabilities) ProtoMessage() {}
 
 func (x *Capabilities) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[20]
+	mi := &file_v1_pagebroker_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1297,7 +1576,7 @@ func (x *Capabilities) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Capabilities.ProtoReflect.Descriptor instead.
 func (*Capabilities) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{20}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *Capabilities) GetCustomStorageAvailable() bool {
@@ -1317,7 +1596,7 @@ type GpuParticipantResult struct {
 
 func (x *GpuParticipantResult) Reset() {
 	*x = GpuParticipantResult{}
-	mi := &file_v1_pagebroker_proto_msgTypes[21]
+	mi := &file_v1_pagebroker_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1329,7 +1608,7 @@ func (x *GpuParticipantResult) String() string {
 func (*GpuParticipantResult) ProtoMessage() {}
 
 func (x *GpuParticipantResult) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[21]
+	mi := &file_v1_pagebroker_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1342,7 +1621,7 @@ func (x *GpuParticipantResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GpuParticipantResult.ProtoReflect.Descriptor instead.
 func (*GpuParticipantResult) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{21}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *GpuParticipantResult) GetCapturedPid() uint32 {
@@ -1368,7 +1647,7 @@ type GpuComplete struct {
 
 func (x *GpuComplete) Reset() {
 	*x = GpuComplete{}
-	mi := &file_v1_pagebroker_proto_msgTypes[22]
+	mi := &file_v1_pagebroker_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1380,7 +1659,7 @@ func (x *GpuComplete) String() string {
 func (*GpuComplete) ProtoMessage() {}
 
 func (x *GpuComplete) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[22]
+	mi := &file_v1_pagebroker_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1393,7 +1672,7 @@ func (x *GpuComplete) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GpuComplete.ProtoReflect.Descriptor instead.
 func (*GpuComplete) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{22}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *GpuComplete) GetParticipants() []*GpuParticipantResult {
@@ -1412,7 +1691,7 @@ type StagedCheckpointDirectory struct {
 
 func (x *StagedCheckpointDirectory) Reset() {
 	*x = StagedCheckpointDirectory{}
-	mi := &file_v1_pagebroker_proto_msgTypes[23]
+	mi := &file_v1_pagebroker_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1424,7 +1703,7 @@ func (x *StagedCheckpointDirectory) String() string {
 func (*StagedCheckpointDirectory) ProtoMessage() {}
 
 func (x *StagedCheckpointDirectory) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[23]
+	mi := &file_v1_pagebroker_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1437,7 +1716,7 @@ func (x *StagedCheckpointDirectory) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StagedCheckpointDirectory.ProtoReflect.Descriptor instead.
 func (*StagedCheckpointDirectory) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{23}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *StagedCheckpointDirectory) GetImageDirectory() string {
@@ -1448,14 +1727,16 @@ func (x *StagedCheckpointDirectory) GetImageDirectory() string {
 }
 
 type CommitComplete struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Required for target-addressed checkpoints. Absent for legacy checkpoints and restore cleanup.
+	PublishedArtifact *PublishedArtifact `protobuf:"bytes,1,opt,name=published_artifact,json=publishedArtifact,proto3" json:"published_artifact,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *CommitComplete) Reset() {
 	*x = CommitComplete{}
-	mi := &file_v1_pagebroker_proto_msgTypes[24]
+	mi := &file_v1_pagebroker_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1467,7 +1748,7 @@ func (x *CommitComplete) String() string {
 func (*CommitComplete) ProtoMessage() {}
 
 func (x *CommitComplete) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[24]
+	mi := &file_v1_pagebroker_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1480,11 +1761,65 @@ func (x *CommitComplete) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitComplete.ProtoReflect.Descriptor instead.
 func (*CommitComplete) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{24}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *CommitComplete) GetPublishedArtifact() *PublishedArtifact {
+	if x != nil {
+		return x.PublishedArtifact
+	}
+	return nil
+}
+
+type GetArtifactMetadataComplete struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Absolute local directory, shared with Snapshot; valid until Abort or metadata transaction expiry.
+	ManifestDirectory string `protobuf:"bytes,1,opt,name=manifest_directory,json=manifestDirectory,proto3" json:"manifest_directory,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *GetArtifactMetadataComplete) Reset() {
+	*x = GetArtifactMetadataComplete{}
+	mi := &file_v1_pagebroker_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetArtifactMetadataComplete) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetArtifactMetadataComplete) ProtoMessage() {}
+
+func (x *GetArtifactMetadataComplete) ProtoReflect() protoreflect.Message {
+	mi := &file_v1_pagebroker_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetArtifactMetadataComplete.ProtoReflect.Descriptor instead.
+func (*GetArtifactMetadataComplete) Descriptor() ([]byte, []int) {
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *GetArtifactMetadataComplete) GetManifestDirectory() string {
+	if x != nil {
+		return x.ManifestDirectory
+	}
+	return ""
 }
 
 // GPU work and cleanup have finished before transaction files are released.
 // This does not stop a workload that has already restored successfully.
+// Confirms only that PageBroker transaction state/content was released; it says nothing about the target
+// process or CUDA state.
 type AbortComplete struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -1493,7 +1828,7 @@ type AbortComplete struct {
 
 func (x *AbortComplete) Reset() {
 	*x = AbortComplete{}
-	mi := &file_v1_pagebroker_proto_msgTypes[25]
+	mi := &file_v1_pagebroker_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1505,7 +1840,7 @@ func (x *AbortComplete) String() string {
 func (*AbortComplete) ProtoMessage() {}
 
 func (x *AbortComplete) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[25]
+	mi := &file_v1_pagebroker_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1518,20 +1853,20 @@ func (x *AbortComplete) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AbortComplete.ProtoReflect.Descriptor instead.
 func (*AbortComplete) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{25}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{30}
 }
 
 type Failure struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Code          *Failure_Code          `protobuf:"varint,1,opt,name=code,proto3,enum=snapshot.pagebroker.v1.Failure_Code,oneof" json:"code,omitempty"`
-	Message       *string                `protobuf:"bytes,2,opt,name=message,proto3,oneof" json:"message,omitempty"`
+	Message       *string                `protobuf:"bytes,2,opt,name=message,proto3,oneof" json:"message,omitempty"` // New storage handlers: at most 1024 UTF-8 bytes, no credentials/SDK bodies.
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Failure) Reset() {
 	*x = Failure{}
-	mi := &file_v1_pagebroker_proto_msgTypes[26]
+	mi := &file_v1_pagebroker_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1543,7 +1878,7 @@ func (x *Failure) String() string {
 func (*Failure) ProtoMessage() {}
 
 func (x *Failure) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[26]
+	mi := &file_v1_pagebroker_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1556,7 +1891,7 @@ func (x *Failure) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Failure.ProtoReflect.Descriptor instead.
 func (*Failure) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{26}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *Failure) GetCode() Failure_Code {
@@ -1589,6 +1924,7 @@ type Response struct {
 	//	*Response_GpuCheckpointComplete
 	//	*Response_GpuRestoreComplete
 	//	*Response_Capabilities
+	//	*Response_GetArtifactMetadataComplete
 	Result        isResponse_Result `protobuf_oneof:"result"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1596,7 +1932,7 @@ type Response struct {
 
 func (x *Response) Reset() {
 	*x = Response{}
-	mi := &file_v1_pagebroker_proto_msgTypes[27]
+	mi := &file_v1_pagebroker_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1608,7 +1944,7 @@ func (x *Response) String() string {
 func (*Response) ProtoMessage() {}
 
 func (x *Response) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[27]
+	mi := &file_v1_pagebroker_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1621,7 +1957,7 @@ func (x *Response) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Response.ProtoReflect.Descriptor instead.
 func (*Response) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{27}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *Response) GetRequestId() string {
@@ -1735,6 +2071,15 @@ func (x *Response) GetCapabilities() *Capabilities {
 	return nil
 }
 
+func (x *Response) GetGetArtifactMetadataComplete() *GetArtifactMetadataComplete {
+	if x != nil {
+		if x, ok := x.Result.(*Response_GetArtifactMetadataComplete); ok {
+			return x.GetArtifactMetadataComplete
+		}
+	}
+	return nil
+}
+
 type isResponse_Result interface {
 	isResponse_Result()
 }
@@ -1779,6 +2124,10 @@ type Response_Capabilities struct {
 	Capabilities *Capabilities `protobuf:"bytes,12,opt,name=capabilities,proto3,oneof"`
 }
 
+type Response_GetArtifactMetadataComplete struct {
+	GetArtifactMetadataComplete *GetArtifactMetadataComplete `protobuf:"bytes,20,opt,name=get_artifact_metadata_complete,json=getArtifactMetadataComplete,proto3,oneof"`
+}
+
 func (*Response_StagedRestoreDirectory) isResponse_Result() {}
 
 func (*Response_StagedCheckpointDirectory) isResponse_Result() {}
@@ -1799,6 +2148,8 @@ func (*Response_GpuRestoreComplete) isResponse_Result() {}
 
 func (*Response_Capabilities) isResponse_Result() {}
 
+func (*Response_GetArtifactMetadataComplete) isResponse_Result() {}
+
 // Registered-buffer transfers. Directory staging is not implemented for NIXL.
 type NixlIOEngine struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1808,7 +2159,7 @@ type NixlIOEngine struct {
 
 func (x *NixlIOEngine) Reset() {
 	*x = NixlIOEngine{}
-	mi := &file_v1_pagebroker_proto_msgTypes[28]
+	mi := &file_v1_pagebroker_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1820,7 +2171,7 @@ func (x *NixlIOEngine) String() string {
 func (*NixlIOEngine) ProtoMessage() {}
 
 func (x *NixlIOEngine) ProtoReflect() protoreflect.Message {
-	mi := &file_v1_pagebroker_proto_msgTypes[28]
+	mi := &file_v1_pagebroker_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1833,7 +2184,7 @@ func (x *NixlIOEngine) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NixlIOEngine.ProtoReflect.Descriptor instead.
 func (*NixlIOEngine) Descriptor() ([]byte, []int) {
-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{28}
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{33}
 }
 
 var File_v1_pagebroker_proto protoreflect.FileDescriptor
@@ -1877,21 +2228,35 @@ const file_v1_pagebroker_proto_rawDesc = "" +
 	"\x11RestoreGpuRequest\x12;\n" +
 	"\atargets\x18\x01 \x03(\v2!.snapshot.pagebroker.v1.GpuTargetR\atargets\x12<\n" +
 	"\acontext\x18\x02 \x01(\v2\".snapshot.pagebroker.v1.GpuContextR\acontext\"\x15\n" +
-	"\x13CapabilitiesRequest\"\x95\x01\n" +
+	"\x13CapabilitiesRequest\"\\\n" +
+	"\x10ArtifactIdentity\x12!\n" +
+	"\fartifact_uid\x18\x01 \x01(\tR\vartifactUid\x12%\n" +
+	"\x0econtainer_name\x18\x02 \x01(\tR\rcontainerName\"q\n" +
+	"\x0eArtifactTarget\x12\x19\n" +
+	"\bstore_id\x18\x01 \x01(\tR\astoreId\x12D\n" +
+	"\bartifact\x18\x02 \x01(\v2(.snapshot.pagebroker.v1.ArtifactIdentityR\bartifact\"\x8f\x01\n" +
+	"\x11PublishedArtifact\x12\x19\n" +
+	"\bstore_id\x18\x01 \x01(\tR\astoreId\x12'\n" +
+	"\x0fartifact_handle\x18\x02 \x01(\tR\x0eartifactHandle\x126\n" +
+	"\x17artifact_format_version\x18\x03 \x01(\tR\x15artifactFormatVersion\"\xdc\x01\n" +
 	"\x14StagedRestoreRequest\x12>\n" +
 	"\x06source\x18\x01 \x01(\v2&.snapshot.pagebroker.v1.StorageBackendR\x06source\x12=\n" +
-	"\tio_engine\x18\x02 \x01(\v2 .snapshot.pagebroker.v1.IOEngineR\bioEngine\"\x95\x01\n" +
+	"\tio_engine\x18\x02 \x01(\v2 .snapshot.pagebroker.v1.IOEngineR\bioEngine\x12E\n" +
+	"\bartifact\x18\x03 \x01(\v2).snapshot.pagebroker.v1.PublishedArtifactR\bartifact\"\x95\x01\n" +
 	"\x14DirectRestoreRequest\x12>\n" +
 	"\x06source\x18\x01 \x01(\v2&.snapshot.pagebroker.v1.StorageBackendR\x06source\x12=\n" +
-	"\tio_engine\x18\x02 \x01(\v2 .snapshot.pagebroker.v1.IOEngineR\bioEngine\"\xa9\x01\n" +
+	"\tio_engine\x18\x02 \x01(\v2 .snapshot.pagebroker.v1.IOEngineR\bioEngine\"\xe9\x01\n" +
 	"\x1ePrepareStagedCheckpointRequest\x12H\n" +
 	"\vdestination\x18\x01 \x01(\v2&.snapshot.pagebroker.v1.StorageBackendR\vdestination\x12=\n" +
-	"\tio_engine\x18\x02 \x01(\v2 .snapshot.pagebroker.v1.IOEngineR\bioEngine\"\xa9\x01\n" +
+	"\tio_engine\x18\x02 \x01(\v2 .snapshot.pagebroker.v1.IOEngineR\bioEngine\x12>\n" +
+	"\x06target\x18\x03 \x01(\v2&.snapshot.pagebroker.v1.ArtifactTargetR\x06target\"c\n" +
+	"\x1aGetArtifactMetadataRequest\x12E\n" +
+	"\bartifact\x18\x01 \x01(\v2).snapshot.pagebroker.v1.PublishedArtifactR\bartifact\"\xa9\x01\n" +
 	"\x1ePrepareDirectCheckpointRequest\x12H\n" +
 	"\vdestination\x18\x01 \x01(\v2&.snapshot.pagebroker.v1.StorageBackendR\vdestination\x12=\n" +
 	"\tio_engine\x18\x02 \x01(\v2 .snapshot.pagebroker.v1.IOEngineR\bioEngine\"\x0f\n" +
 	"\rCommitRequest\"\x0e\n" +
-	"\fAbortRequest\"\x97\a\n" +
+	"\fAbortRequest\"\x81\b\n" +
 	"\aRequest\x12\"\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tH\x01R\trequestId\x88\x01\x01\x12*\n" +
@@ -1906,7 +2271,8 @@ const file_v1_pagebroker_proto_rawDesc = "" +
 	"\vrestore_gpu\x18\n" +
 	" \x01(\v2).snapshot.pagebroker.v1.RestoreGpuRequestH\x00R\n" +
 	"restoreGpu\x12Q\n" +
-	"\fcapabilities\x18\v \x01(\v2+.snapshot.pagebroker.v1.CapabilitiesRequestH\x00R\fcapabilitiesB\t\n" +
+	"\fcapabilities\x18\v \x01(\v2+.snapshot.pagebroker.v1.CapabilitiesRequestH\x00R\fcapabilities\x12h\n" +
+	"\x15get_artifact_metadata\x18\x14 \x01(\v22.snapshot.pagebroker.v1.GetArtifactMetadataRequestH\x00R\x13getArtifactMetadataB\t\n" +
 	"\acommandB\r\n" +
 	"\v_request_idB\x11\n" +
 	"\x0f_transaction_id\"Z\n" +
@@ -1926,12 +2292,15 @@ const file_v1_pagebroker_proto_rawDesc = "" +
 	"\fparticipants\x18\x01 \x03(\v2,.snapshot.pagebroker.v1.GpuParticipantResultR\fparticipants\"]\n" +
 	"\x19StagedCheckpointDirectory\x12,\n" +
 	"\x0fimage_directory\x18\x01 \x01(\tH\x00R\x0eimageDirectory\x88\x01\x01B\x12\n" +
-	"\x10_image_directory\"\x10\n" +
-	"\x0eCommitComplete\"\x0f\n" +
-	"\rAbortComplete\"\xb2\x02\n" +
+	"\x10_image_directory\"j\n" +
+	"\x0eCommitComplete\x12X\n" +
+	"\x12published_artifact\x18\x01 \x01(\v2).snapshot.pagebroker.v1.PublishedArtifactR\x11publishedArtifact\"L\n" +
+	"\x1bGetArtifactMetadataComplete\x12-\n" +
+	"\x12manifest_directory\x18\x01 \x01(\tR\x11manifestDirectory\"\x0f\n" +
+	"\rAbortComplete\"\xe8\x03\n" +
 	"\aFailure\x12=\n" +
 	"\x04code\x18\x01 \x01(\x0e2$.snapshot.pagebroker.v1.Failure.CodeH\x00R\x04code\x88\x01\x01\x12\x1d\n" +
-	"\amessage\x18\x02 \x01(\tH\x01R\amessage\x88\x01\x01\"\xb3\x01\n" +
+	"\amessage\x18\x02 \x01(\tH\x01R\amessage\x88\x01\x01\"\xe9\x02\n" +
 	"\x04Code\x12\x0f\n" +
 	"\vUNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fINVALID_REQUEST\x10\x01\x12\x19\n" +
@@ -1940,10 +2309,18 @@ const file_v1_pagebroker_proto_rawDesc = "" +
 	"\x14INSUFFICIENT_STORAGE\x10\x04\x12\x11\n" +
 	"\rSTORAGE_ERROR\x10\x05\x12\x12\n" +
 	"\x0eINTERNAL_ERROR\x10\x06\x12\x0f\n" +
-	"\vUNAVAILABLE\x10\aB\a\n" +
+	"\vUNAVAILABLE\x10\a\x12\x12\n" +
+	"\x0eSTORE_MISMATCH\x10\x14\x12\x11\n" +
+	"\rACCESS_DENIED\x10\x15\x12\x17\n" +
+	"\x13STORAGE_UNAVAILABLE\x10\x16\x12\x16\n" +
+	"\x12ARTIFACT_NOT_FOUND\x10\x17\x12\x14\n" +
+	"\x10ARTIFACT_CORRUPT\x10\x18\x12\x18\n" +
+	"\x14UNSUPPORTED_ARTIFACT\x10\x19\x12\x13\n" +
+	"\x0fOUTCOME_UNKNOWN\x10\x1a\x12\x17\n" +
+	"\x13TRANSACTION_EXPIRED\x10\x1bB\a\n" +
 	"\x05_codeB\n" +
 	"\n" +
-	"\b_message\"\xa0\b\n" +
+	"\b_message\"\x9c\t\n" +
 	"\bResponse\x12\"\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tH\x01R\trequestId\x88\x01\x01\x12*\n" +
@@ -1958,7 +2335,8 @@ const file_v1_pagebroker_proto_rawDesc = "" +
 	"\x17gpu_checkpoint_complete\x18\n" +
 	" \x01(\v2#.snapshot.pagebroker.v1.GpuCompleteH\x00R\x15gpuCheckpointComplete\x12W\n" +
 	"\x14gpu_restore_complete\x18\v \x01(\v2#.snapshot.pagebroker.v1.GpuCompleteH\x00R\x12gpuRestoreComplete\x12J\n" +
-	"\fcapabilities\x18\f \x01(\v2$.snapshot.pagebroker.v1.CapabilitiesH\x00R\fcapabilitiesB\b\n" +
+	"\fcapabilities\x18\f \x01(\v2$.snapshot.pagebroker.v1.CapabilitiesH\x00R\fcapabilities\x12z\n" +
+	"\x1eget_artifact_metadata_complete\x18\x14 \x01(\v23.snapshot.pagebroker.v1.GetArtifactMetadataCompleteH\x00R\x1bgetArtifactMetadataCompleteB\b\n" +
 	"\x06resultB\r\n" +
 	"\v_request_idB\x11\n" +
 	"\x0f_transaction_id\"\x0e\n" +
@@ -1977,7 +2355,7 @@ func file_v1_pagebroker_proto_rawDescGZIP() []byte {
 }
 
 var file_v1_pagebroker_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_v1_pagebroker_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
+var file_v1_pagebroker_proto_msgTypes = make([]protoimpl.MessageInfo, 34)
 var file_v1_pagebroker_proto_goTypes = []any{
 	(Failure_Code)(0),                      // 0: snapshot.pagebroker.v1.Failure.Code
 	(*FilesystemStorage)(nil),              // 1: snapshot.pagebroker.v1.FilesystemStorage
@@ -1990,69 +2368,81 @@ var file_v1_pagebroker_proto_goTypes = []any{
 	(*CheckpointGpuRequest)(nil),           // 8: snapshot.pagebroker.v1.CheckpointGpuRequest
 	(*RestoreGpuRequest)(nil),              // 9: snapshot.pagebroker.v1.RestoreGpuRequest
 	(*CapabilitiesRequest)(nil),            // 10: snapshot.pagebroker.v1.CapabilitiesRequest
-	(*StagedRestoreRequest)(nil),           // 11: snapshot.pagebroker.v1.StagedRestoreRequest
-	(*DirectRestoreRequest)(nil),           // 12: snapshot.pagebroker.v1.DirectRestoreRequest
-	(*PrepareStagedCheckpointRequest)(nil), // 13: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest
-	(*PrepareDirectCheckpointRequest)(nil), // 14: snapshot.pagebroker.v1.PrepareDirectCheckpointRequest
-	(*CommitRequest)(nil),                  // 15: snapshot.pagebroker.v1.CommitRequest
-	(*AbortRequest)(nil),                   // 16: snapshot.pagebroker.v1.AbortRequest
-	(*Request)(nil),                        // 17: snapshot.pagebroker.v1.Request
-	(*StagedRestoreDirectory)(nil),         // 18: snapshot.pagebroker.v1.StagedRestoreDirectory
-	(*DirectRestoreReady)(nil),             // 19: snapshot.pagebroker.v1.DirectRestoreReady
-	(*DirectCheckpointDirectory)(nil),      // 20: snapshot.pagebroker.v1.DirectCheckpointDirectory
-	(*Capabilities)(nil),                   // 21: snapshot.pagebroker.v1.Capabilities
-	(*GpuParticipantResult)(nil),           // 22: snapshot.pagebroker.v1.GpuParticipantResult
-	(*GpuComplete)(nil),                    // 23: snapshot.pagebroker.v1.GpuComplete
-	(*StagedCheckpointDirectory)(nil),      // 24: snapshot.pagebroker.v1.StagedCheckpointDirectory
-	(*CommitComplete)(nil),                 // 25: snapshot.pagebroker.v1.CommitComplete
-	(*AbortComplete)(nil),                  // 26: snapshot.pagebroker.v1.AbortComplete
-	(*Failure)(nil),                        // 27: snapshot.pagebroker.v1.Failure
-	(*Response)(nil),                       // 28: snapshot.pagebroker.v1.Response
-	(*NixlIOEngine)(nil),                   // 29: snapshot.pagebroker.v1.NixlIOEngine
+	(*ArtifactIdentity)(nil),               // 11: snapshot.pagebroker.v1.ArtifactIdentity
+	(*ArtifactTarget)(nil),                 // 12: snapshot.pagebroker.v1.ArtifactTarget
+	(*PublishedArtifact)(nil),              // 13: snapshot.pagebroker.v1.PublishedArtifact
+	(*StagedRestoreRequest)(nil),           // 14: snapshot.pagebroker.v1.StagedRestoreRequest
+	(*DirectRestoreRequest)(nil),           // 15: snapshot.pagebroker.v1.DirectRestoreRequest
+	(*PrepareStagedCheckpointRequest)(nil), // 16: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest
+	(*GetArtifactMetadataRequest)(nil),     // 17: snapshot.pagebroker.v1.GetArtifactMetadataRequest
+	(*PrepareDirectCheckpointRequest)(nil), // 18: snapshot.pagebroker.v1.PrepareDirectCheckpointRequest
+	(*CommitRequest)(nil),                  // 19: snapshot.pagebroker.v1.CommitRequest
+	(*AbortRequest)(nil),                   // 20: snapshot.pagebroker.v1.AbortRequest
+	(*Request)(nil),                        // 21: snapshot.pagebroker.v1.Request
+	(*StagedRestoreDirectory)(nil),         // 22: snapshot.pagebroker.v1.StagedRestoreDirectory
+	(*DirectRestoreReady)(nil),             // 23: snapshot.pagebroker.v1.DirectRestoreReady
+	(*DirectCheckpointDirectory)(nil),      // 24: snapshot.pagebroker.v1.DirectCheckpointDirectory
+	(*Capabilities)(nil),                   // 25: snapshot.pagebroker.v1.Capabilities
+	(*GpuParticipantResult)(nil),           // 26: snapshot.pagebroker.v1.GpuParticipantResult
+	(*GpuComplete)(nil),                    // 27: snapshot.pagebroker.v1.GpuComplete
+	(*StagedCheckpointDirectory)(nil),      // 28: snapshot.pagebroker.v1.StagedCheckpointDirectory
+	(*CommitComplete)(nil),                 // 29: snapshot.pagebroker.v1.CommitComplete
+	(*GetArtifactMetadataComplete)(nil),    // 30: snapshot.pagebroker.v1.GetArtifactMetadataComplete
+	(*AbortComplete)(nil),                  // 31: snapshot.pagebroker.v1.AbortComplete
+	(*Failure)(nil),                        // 32: snapshot.pagebroker.v1.Failure
+	(*Response)(nil),                       // 33: snapshot.pagebroker.v1.Response
+	(*NixlIOEngine)(nil),                   // 34: snapshot.pagebroker.v1.NixlIOEngine
 }
 var file_v1_pagebroker_proto_depIdxs = []int32{
 	1,  // 0: snapshot.pagebroker.v1.StorageBackend.filesystem:type_name -> snapshot.pagebroker.v1.FilesystemStorage
 	3,  // 1: snapshot.pagebroker.v1.IOEngine.posix_copy:type_name -> snapshot.pagebroker.v1.PosixCopyIOEngine
-	29, // 2: snapshot.pagebroker.v1.IOEngine.nixl:type_name -> snapshot.pagebroker.v1.NixlIOEngine
+	34, // 2: snapshot.pagebroker.v1.IOEngine.nixl:type_name -> snapshot.pagebroker.v1.NixlIOEngine
 	5,  // 3: snapshot.pagebroker.v1.GpuContext.device_map:type_name -> snapshot.pagebroker.v1.GpuDeviceMapping
 	7,  // 4: snapshot.pagebroker.v1.CheckpointGpuRequest.targets:type_name -> snapshot.pagebroker.v1.GpuTarget
 	6,  // 5: snapshot.pagebroker.v1.CheckpointGpuRequest.context:type_name -> snapshot.pagebroker.v1.GpuContext
 	7,  // 6: snapshot.pagebroker.v1.RestoreGpuRequest.targets:type_name -> snapshot.pagebroker.v1.GpuTarget
 	6,  // 7: snapshot.pagebroker.v1.RestoreGpuRequest.context:type_name -> snapshot.pagebroker.v1.GpuContext
-	2,  // 8: snapshot.pagebroker.v1.StagedRestoreRequest.source:type_name -> snapshot.pagebroker.v1.StorageBackend
-	4,  // 9: snapshot.pagebroker.v1.StagedRestoreRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
-	2,  // 10: snapshot.pagebroker.v1.DirectRestoreRequest.source:type_name -> snapshot.pagebroker.v1.StorageBackend
-	4,  // 11: snapshot.pagebroker.v1.DirectRestoreRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
-	2,  // 12: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.destination:type_name -> snapshot.pagebroker.v1.StorageBackend
-	4,  // 13: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
-	2,  // 14: snapshot.pagebroker.v1.PrepareDirectCheckpointRequest.destination:type_name -> snapshot.pagebroker.v1.StorageBackend
-	4,  // 15: snapshot.pagebroker.v1.PrepareDirectCheckpointRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
-	11, // 16: snapshot.pagebroker.v1.Request.staged_restore:type_name -> snapshot.pagebroker.v1.StagedRestoreRequest
-	13, // 17: snapshot.pagebroker.v1.Request.prepare_staged_checkpoint:type_name -> snapshot.pagebroker.v1.PrepareStagedCheckpointRequest
-	15, // 18: snapshot.pagebroker.v1.Request.commit:type_name -> snapshot.pagebroker.v1.CommitRequest
-	16, // 19: snapshot.pagebroker.v1.Request.abort:type_name -> snapshot.pagebroker.v1.AbortRequest
-	12, // 20: snapshot.pagebroker.v1.Request.direct_restore:type_name -> snapshot.pagebroker.v1.DirectRestoreRequest
-	14, // 21: snapshot.pagebroker.v1.Request.prepare_direct_checkpoint:type_name -> snapshot.pagebroker.v1.PrepareDirectCheckpointRequest
-	8,  // 22: snapshot.pagebroker.v1.Request.checkpoint_gpu:type_name -> snapshot.pagebroker.v1.CheckpointGpuRequest
-	9,  // 23: snapshot.pagebroker.v1.Request.restore_gpu:type_name -> snapshot.pagebroker.v1.RestoreGpuRequest
-	10, // 24: snapshot.pagebroker.v1.Request.capabilities:type_name -> snapshot.pagebroker.v1.CapabilitiesRequest
-	22, // 25: snapshot.pagebroker.v1.GpuComplete.participants:type_name -> snapshot.pagebroker.v1.GpuParticipantResult
-	0,  // 26: snapshot.pagebroker.v1.Failure.code:type_name -> snapshot.pagebroker.v1.Failure.Code
-	18, // 27: snapshot.pagebroker.v1.Response.staged_restore_directory:type_name -> snapshot.pagebroker.v1.StagedRestoreDirectory
-	24, // 28: snapshot.pagebroker.v1.Response.staged_checkpoint_directory:type_name -> snapshot.pagebroker.v1.StagedCheckpointDirectory
-	25, // 29: snapshot.pagebroker.v1.Response.commit_complete:type_name -> snapshot.pagebroker.v1.CommitComplete
-	26, // 30: snapshot.pagebroker.v1.Response.abort_complete:type_name -> snapshot.pagebroker.v1.AbortComplete
-	27, // 31: snapshot.pagebroker.v1.Response.failure:type_name -> snapshot.pagebroker.v1.Failure
-	19, // 32: snapshot.pagebroker.v1.Response.direct_restore_ready:type_name -> snapshot.pagebroker.v1.DirectRestoreReady
-	20, // 33: snapshot.pagebroker.v1.Response.direct_checkpoint_directory:type_name -> snapshot.pagebroker.v1.DirectCheckpointDirectory
-	23, // 34: snapshot.pagebroker.v1.Response.gpu_checkpoint_complete:type_name -> snapshot.pagebroker.v1.GpuComplete
-	23, // 35: snapshot.pagebroker.v1.Response.gpu_restore_complete:type_name -> snapshot.pagebroker.v1.GpuComplete
-	21, // 36: snapshot.pagebroker.v1.Response.capabilities:type_name -> snapshot.pagebroker.v1.Capabilities
-	37, // [37:37] is the sub-list for method output_type
-	37, // [37:37] is the sub-list for method input_type
-	37, // [37:37] is the sub-list for extension type_name
-	37, // [37:37] is the sub-list for extension extendee
-	0,  // [0:37] is the sub-list for field type_name
+	11, // 8: snapshot.pagebroker.v1.ArtifactTarget.artifact:type_name -> snapshot.pagebroker.v1.ArtifactIdentity
+	2,  // 9: snapshot.pagebroker.v1.StagedRestoreRequest.source:type_name -> snapshot.pagebroker.v1.StorageBackend
+	4,  // 10: snapshot.pagebroker.v1.StagedRestoreRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
+	13, // 11: snapshot.pagebroker.v1.StagedRestoreRequest.artifact:type_name -> snapshot.pagebroker.v1.PublishedArtifact
+	2,  // 12: snapshot.pagebroker.v1.DirectRestoreRequest.source:type_name -> snapshot.pagebroker.v1.StorageBackend
+	4,  // 13: snapshot.pagebroker.v1.DirectRestoreRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
+	2,  // 14: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.destination:type_name -> snapshot.pagebroker.v1.StorageBackend
+	4,  // 15: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
+	12, // 16: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.target:type_name -> snapshot.pagebroker.v1.ArtifactTarget
+	13, // 17: snapshot.pagebroker.v1.GetArtifactMetadataRequest.artifact:type_name -> snapshot.pagebroker.v1.PublishedArtifact
+	2,  // 18: snapshot.pagebroker.v1.PrepareDirectCheckpointRequest.destination:type_name -> snapshot.pagebroker.v1.StorageBackend
+	4,  // 19: snapshot.pagebroker.v1.PrepareDirectCheckpointRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
+	14, // 20: snapshot.pagebroker.v1.Request.staged_restore:type_name -> snapshot.pagebroker.v1.StagedRestoreRequest
+	16, // 21: snapshot.pagebroker.v1.Request.prepare_staged_checkpoint:type_name -> snapshot.pagebroker.v1.PrepareStagedCheckpointRequest
+	19, // 22: snapshot.pagebroker.v1.Request.commit:type_name -> snapshot.pagebroker.v1.CommitRequest
+	20, // 23: snapshot.pagebroker.v1.Request.abort:type_name -> snapshot.pagebroker.v1.AbortRequest
+	15, // 24: snapshot.pagebroker.v1.Request.direct_restore:type_name -> snapshot.pagebroker.v1.DirectRestoreRequest
+	18, // 25: snapshot.pagebroker.v1.Request.prepare_direct_checkpoint:type_name -> snapshot.pagebroker.v1.PrepareDirectCheckpointRequest
+	8,  // 26: snapshot.pagebroker.v1.Request.checkpoint_gpu:type_name -> snapshot.pagebroker.v1.CheckpointGpuRequest
+	9,  // 27: snapshot.pagebroker.v1.Request.restore_gpu:type_name -> snapshot.pagebroker.v1.RestoreGpuRequest
+	10, // 28: snapshot.pagebroker.v1.Request.capabilities:type_name -> snapshot.pagebroker.v1.CapabilitiesRequest
+	17, // 29: snapshot.pagebroker.v1.Request.get_artifact_metadata:type_name -> snapshot.pagebroker.v1.GetArtifactMetadataRequest
+	26, // 30: snapshot.pagebroker.v1.GpuComplete.participants:type_name -> snapshot.pagebroker.v1.GpuParticipantResult
+	13, // 31: snapshot.pagebroker.v1.CommitComplete.published_artifact:type_name -> snapshot.pagebroker.v1.PublishedArtifact
+	0,  // 32: snapshot.pagebroker.v1.Failure.code:type_name -> snapshot.pagebroker.v1.Failure.Code
+	22, // 33: snapshot.pagebroker.v1.Response.staged_restore_directory:type_name -> snapshot.pagebroker.v1.StagedRestoreDirectory
+	28, // 34: snapshot.pagebroker.v1.Response.staged_checkpoint_directory:type_name -> snapshot.pagebroker.v1.StagedCheckpointDirectory
+	29, // 35: snapshot.pagebroker.v1.Response.commit_complete:type_name -> snapshot.pagebroker.v1.CommitComplete
+	31, // 36: snapshot.pagebroker.v1.Response.abort_complete:type_name -> snapshot.pagebroker.v1.AbortComplete
+	32, // 37: snapshot.pagebroker.v1.Response.failure:type_name -> snapshot.pagebroker.v1.Failure
+	23, // 38: snapshot.pagebroker.v1.Response.direct_restore_ready:type_name -> snapshot.pagebroker.v1.DirectRestoreReady
+	24, // 39: snapshot.pagebroker.v1.Response.direct_checkpoint_directory:type_name -> snapshot.pagebroker.v1.DirectCheckpointDirectory
+	27, // 40: snapshot.pagebroker.v1.Response.gpu_checkpoint_complete:type_name -> snapshot.pagebroker.v1.GpuComplete
+	27, // 41: snapshot.pagebroker.v1.Response.gpu_restore_complete:type_name -> snapshot.pagebroker.v1.GpuComplete
+	25, // 42: snapshot.pagebroker.v1.Response.capabilities:type_name -> snapshot.pagebroker.v1.Capabilities
+	30, // 43: snapshot.pagebroker.v1.Response.get_artifact_metadata_complete:type_name -> snapshot.pagebroker.v1.GetArtifactMetadataComplete
+	44, // [44:44] is the sub-list for method output_type
+	44, // [44:44] is the sub-list for method input_type
+	44, // [44:44] is the sub-list for extension type_name
+	44, // [44:44] is the sub-list for extension extendee
+	0,  // [0:44] is the sub-list for field type_name
 }
 
 func init() { file_v1_pagebroker_proto_init() }
@@ -2068,7 +2458,7 @@ func file_v1_pagebroker_proto_init() {
 		(*IOEngine_PosixCopy)(nil),
 		(*IOEngine_Nixl)(nil),
 	}
-	file_v1_pagebroker_proto_msgTypes[16].OneofWrappers = []any{
+	file_v1_pagebroker_proto_msgTypes[20].OneofWrappers = []any{
 		(*Request_StagedRestore)(nil),
 		(*Request_PrepareStagedCheckpoint)(nil),
 		(*Request_Commit)(nil),
@@ -2078,12 +2468,13 @@ func file_v1_pagebroker_proto_init() {
 		(*Request_CheckpointGpu)(nil),
 		(*Request_RestoreGpu)(nil),
 		(*Request_Capabilities)(nil),
+		(*Request_GetArtifactMetadata)(nil),
 	}
-	file_v1_pagebroker_proto_msgTypes[17].OneofWrappers = []any{}
-	file_v1_pagebroker_proto_msgTypes[19].OneofWrappers = []any{}
+	file_v1_pagebroker_proto_msgTypes[21].OneofWrappers = []any{}
 	file_v1_pagebroker_proto_msgTypes[23].OneofWrappers = []any{}
-	file_v1_pagebroker_proto_msgTypes[26].OneofWrappers = []any{}
-	file_v1_pagebroker_proto_msgTypes[27].OneofWrappers = []any{
+	file_v1_pagebroker_proto_msgTypes[27].OneofWrappers = []any{}
+	file_v1_pagebroker_proto_msgTypes[31].OneofWrappers = []any{}
+	file_v1_pagebroker_proto_msgTypes[32].OneofWrappers = []any{
 		(*Response_StagedRestoreDirectory)(nil),
 		(*Response_StagedCheckpointDirectory)(nil),
 		(*Response_CommitComplete)(nil),
@@ -2094,6 +2485,7 @@ func file_v1_pagebroker_proto_init() {
 		(*Response_GpuCheckpointComplete)(nil),
 		(*Response_GpuRestoreComplete)(nil),
 		(*Response_Capabilities)(nil),
+		(*Response_GetArtifactMetadataComplete)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -2101,7 +2493,7 @@ func file_v1_pagebroker_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_v1_pagebroker_proto_rawDesc), len(file_v1_pagebroker_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   29,
+			NumMessages:   34,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
