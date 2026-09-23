@@ -37,7 +37,8 @@ SPDX-License-Identifier: Apache-2.0
 
 Allow Snapshot to save checkpoint artifacts to S3 and restore workloads from them.
 PVC remains the default. Stage 1 uses one store per installation, selected at
-Helm install/upgrade.
+Helm install/upgrade, and a bounded quiescence period before deletion. Stage 2
+adds explicit coordination between active storage operations and maintenance.
 
 ## Motivation
 
@@ -51,6 +52,8 @@ future stores be added with minimal changes to workload APIs.
 - Use the same in-process maintenance workqueue model for PVC, S3 and future backends.
 - Preserve artifact identity and verify publication, restore and deletion across
   retries, restarts and storage configuration changes.
+- Reject new operations after deletion begins. Stage 1 drains admitted operations
+  through bounded transaction lifetimes; Stage 2 adds active-operation fencing.
 - Keep storage credentials outside workload APIs and the agent process. The
   operator manager is the one exception: since maintenance runs in-process, it
   carries storage credentials, scoped to maintenance operations only.
@@ -60,6 +63,8 @@ future stores be added with minimal changes to workload APIs.
 - Storage classes, simultaneous stores, automatic fallback or artifact migration.
 - Direct streaming, new feature-discovery APIs or workload-identity implementation.
 - Moving CRIU/process orchestration into PageBroker or redesigning CUDA execution.
+- Cross-component operation leases and generation fencing in Stage 1; those are
+  deferred to Stage 2 after the conservative deletion contract is qualified.
 
 ## Proposal
 
@@ -80,14 +85,21 @@ PVC or S3 through their own backend adapters.
 - **Credentials or S3 outage:** check destination access before capture and source
   access before restore; bound retries/timeouts. Preflight cannot guarantee later
   access. Access denial never proves that an artifact is missing.
-- **Uncertain publication:** publish the index last, tagged with a per-attempt
-  `commitID`; retry lost Commit replies idempotently against that same `commitID`.
-  After restart, recover metadata through maintenance, selecting deterministically
-  among confirmed indexes. Resume uploads only from complete staging; never replay
-  successful or uncertain CUDA/CRIU.
-- **Cleanup races:** retain finalizers on failed, partial or unknown deletion.
-  Coordinate readers/publishers with maintenance and fence stale writers. A work
-  item's success must mean complete scoped cleanup, not just a dequeue.
+- **Uncertain publication:** publish the index last, tagged with the deterministic
+  `commitID` derived from store, artifact and container identity; retry lost Commit
+  replies idempotently against that same `commitID`. Recovery derives the expected
+  value and never chooses by object timestamp. Resume uploads only from complete
+  staging; never replay successful or uncertain CUDA/CRIU.
+- **Cleanup races:** existing agent admission checks reject new checkpoint and
+  restore operations after the content receives a deletion timestamp. In Stage 1,
+  each agent performs an uncached content read and must start its PageBroker
+  transaction within a bounded admission window or reread. Maintenance retains the
+  finalizer until that window plus the maximum PageBroker transaction lifetime and
+  clock-skew allowance has elapsed from the deletion timestamp. PageBroker expires
+  every admitted transaction within that bound and checks expiry immediately before
+  publishing an index or issuing another storage read. Failed, partial, unknown or
+  premature cleanup retains the finalizer. Stage 2 replaces the conservative wait
+  with explicit active-operation tracking and generation fencing.
 - **Metadata loss:** back up Kubernetes content metadata separately. During ownership
   recovery, pause capture, restore and orphan deletion across restarts until
   administrator resume.
@@ -118,17 +130,30 @@ status:
         artifactFormatVersion: snapshot.pagebroker/v1  # Select that backend's reader
 ```
 
-The operator sets `spec.storage.storeID`. Compute it as
-`store-v1-` + SHA-256 of a canonical storage identity: backend, endpoint/bucket/prefix
-for S3; backend, namespace/claim/base path for PVC. Credentials and access options
-are excluded. Operator, PageBroker and maintenance must produce identical digests.
+The operator sets immutable `spec.storage.storeID` before capture. A
+`PodSnapshotContent` represents one capture attempt, so its immutable UID already
+distinguishes a new attempt from a retry of the same attempt. Derive each container's
+`commitID` as `commit-v1-` + SHA-256 of a versioned, fixed-field encoding of
+`storeID`, `artifactUID` and `containerName`. Operator, agent, PageBroker and
+maintenance use the same derivation and shared Go/C++ fixtures; no additional
+Kubernetes API field is needed.
 
-These digest inputs are raw identity only — the S3 store prefix used in artifact
-keys additionally appends installation/store identifiers derived from Helm, not
-fed into the SHA-256 itself. Normalize the endpoint (scheme + host, no trailing
-slash) and prefix (no leading/trailing slash) before hashing. Operator, PageBroker
-and maintenance share one Go/C++ fixture set asserting identical digests for the
-same normalized inputs.
+Compute `storeID` as `store-v1-` + SHA-256 of a versioned, fixed-field canonical
+storage identity. For S3, encode backend, resolved endpoint, region, bucket,
+normalized prefix and addressing mode. Normalize the endpoint to lowercase scheme
+and DNS host, omit the scheme's default port, retain a non-default port and remove
+only a root trailing slash. Reject user information, query strings, fragments and
+non-root endpoint paths. Resolve an empty/default endpoint to an explicit provider
+endpoint before hashing. Normalize the prefix by removing leading/trailing slashes.
+For PVC, encode backend, namespace, claim and normalized base path. Credentials and
+access options are excluded.
+
+These fields are raw identity inputs. The S3 store prefix used in artifact keys
+additionally appends installation/store identifiers derived from Helm; those values
+are not fed back into the SHA-256. Operator, PageBroker and maintenance share one
+Go/C++ fixture set covering default and non-default ports, rejected paths, regions,
+addressing modes and prefixes, and must produce identical digests and effective
+artifact prefixes.
 
 `PodSnapshot` and `SnapshotJob` retain their current workload request APIs. Later
 storage-class selection can bind the same content fields without changing restore
@@ -166,28 +191,48 @@ bounded pool of worker goroutines drains it, calling directly into
   the next sweep or an explicit re-enqueue (from a subsequent reconcile) rather than
   requeuing forever.
 - **Results:** deletion is confirmed successful only after the worker itself
-  verifies scoped cleanup against the backend. The operator removes the finalizer
-  directly, from the same goroutine, once cleanup is confirmed. Denied, partial or
-  unknown cleanup requeues through `AddRateLimited` and keeps the finalizer. A
-  sweep processes bounded batches after fresh ownership checks.
+  verifies that the Stage 1 quiescence deadline has elapsed and confirms scoped
+  cleanup against the backend. The deadline is the content deletion timestamp plus
+  the maximum admission window, PageBroker transaction lifetime and clock-skew
+  allowance. The operator removes the finalizer directly, from the same goroutine,
+  once cleanup is confirmed. Denied, partial, premature or unknown cleanup requeues
+  through `AddRateLimited` and keeps the finalizer. A sweep processes bounded
+  batches after fresh ownership checks.
 - **Recovery:** an inspection-only work item may repair missing publication
-  descriptors in content status using optimistic updates. Preserve terminal failure
-  and reject conflicting results; readiness requires all required publications.
-- **Concurrency and shutdown:** size the worker pool explicitly — bounded parallel
-  `processNextWorkItem` goroutines; a per-key lock or the workqueue's own in-flight
-  tracking prevents two workers from racing the same content. On graceful shutdown,
-  call `queue.ShutDownWithDrain()` so in-flight workers finish their current item
-  before the process exits. Backend operations must be idempotent, since a crash
-  before `Forget`/`Done` re-delivers the key after restart. A missing or crashed
-  worker never implies successful storage deletion — only a worker-confirmed
-  result does.
+  descriptors in content status using optimistic updates. It derives the expected
+  `commitID` from `(storeID, artifactUID, containerName)` and accepts only a
+  confirmed index with that value. Multiple matches or another confirmed
+  `commitID` is a conflict, not a timestamp-selection problem. Preserve terminal
+  failure and reject conflicting results; readiness requires all required
+  publications.
+- **Concurrency:** size the worker pool explicitly with bounded parallel
+  `processNextWorkItem` goroutines. Every maintenance mode acquires a shared keyed
+  lock on `(storeID, artifactUID)` before backend access and holds it through the
+  ownership recheck, storage operation and related status or finalizer update. A
+  sweep resolves one candidate, acquires the same lock and rereads ownership before
+  acting. The mode remains part of the work-item key for retry behavior only;
+  workqueue in-flight tracking does not replace the shared artifact lock.
+- **Shutdown and leadership:** on graceful process shutdown, call
+  `queue.ShutDownWithDrain()` so in-flight workers finish their current item. On
+  unexpected leadership loss, cancel the leader-scoped worker context and shut down
+  without draining. Backend calls accept that context; workers check cancellation
+  before storage mutations and Kubernetes writes, and status/finalizer updates use
+  resource-version preconditions. The new leader rebuilds pending work from cluster
+  state. Backend operations remain idempotent because an already-issued request may
+  finish after cancellation.
 
-Maintenance and PageBroker share the store-ID, artifact format and durable
-publication/read/delete coordination contracts, with Go/C++ compatibility fixtures.
+Maintenance and PageBroker share the store-ID, artifact format and Stage 1
+transaction/quiescence contracts, with Go/C++ compatibility fixtures. Stage 2 adds
+the cross-component active-operation and generation-fencing contract.
 
 #### Snapshot agent
 
-- Pass logical artifact identity and the expected store to checkpoint preparation.
+- Reject new checkpoint and restore admission after `PodSnapshotContent` receives a
+  deletion timestamp; this preserves the existing behavior. Use an uncached API
+  read and start the PageBroker transaction within the configured admission window;
+  if the window expires first, reread the content before proceeding.
+- Pass logical artifact identity and the expected store to checkpoint preparation;
+  all components derive the same `commitID` from those values.
 - Persist committed descriptors in content status; set Ready only after all required
   containers have confirmed publications. The operator projects content readiness.
 - Obtain S3 metadata through `GetArtifactMetadata`, then run existing Snapshot
@@ -278,13 +323,20 @@ PageBroker RPC. PageBroker still releases its own transaction resources through
 `Abort` and restore `Commit`; these never delete retained checkpoints.
 
 Extend `Failure.code` with `STORE_MISMATCH`, `ACCESS_DENIED`, `STORAGE_UNAVAILABLE`,
-`ARTIFACT_NOT_FOUND`, `ARTIFACT_CORRUPT`, `UNSUPPORTED_ARTIFACT` and `OUTCOME_UNKNOWN`.
-An access error never proves absence. Use existing conditions with storage-specific
-reasons. Keep errors bounded and credential-free.
+`ARTIFACT_NOT_FOUND`, `ARTIFACT_CORRUPT`, `UNSUPPORTED_ARTIFACT`,
+`TRANSACTION_EXPIRED` and `OUTCOME_UNKNOWN`. An access error never proves absence.
+Use existing conditions with storage-specific reasons. Keep errors bounded and
+credential-free.
 
-Reuse request/transaction IDs and the 64 KiB message limit. Bound transfers through
-broker timeouts and SDK retries. Extend `Abort` to stop transfers before cleanup;
-it cannot undo committed data or CUDA/CRIU. Restore `Commit` cleans local staging.
+Reuse request/transaction IDs and the 64 KiB message limit. A transaction's maximum
+lifetime starts at successful Prepare and retries never extend it. PageBroker checks
+expiry before every new storage operation and immediately before publishing the
+checkpoint index; expiry returns `TRANSACTION_EXPIRED` and leaves unconfirmed data
+for sweeping. Every SDK request uses a deadline no later than the transaction expiry,
+so an already-issued transfer cannot outlive the quiescence bound. Bound individual
+transfers through broker timeouts and SDK retries. Extend `Abort` to stop transfers
+before cleanup; it cannot undo committed data or CUDA/CRIU. Restore `Commit` cleans
+local staging.
 
 ### Security
 
@@ -303,10 +355,14 @@ reconcile loop that owns every other content object. Mitigate with panic recover
 per work item, resource limits sized for the combined workload, and keeping the
 storage SDKs on the same audited dependency set PageBroker uses.
 
-An external manager or administrator rotates the Secret. Both PageBroker and the
-operator manager reload the projected file without restart. Use a projection that
-supports updates, without a fixed `subPath`. Storage clients do not need Kubernetes
-Secret-read permissions.
+An external manager or administrator rotates the Secret. Use a projection that
+supports updates, without a fixed `subPath`. Both PageBroker and the operator
+manager use refreshable credential providers. If an SDK cannot reload the projected
+file, the component observes the projection directory and atomically replaces its
+storage client after parsing a valid update. New operations use the replacement;
+in-flight operations retain the old client only for their bounded lifetime. An
+invalid update fails new operations closed and surfaces a credential condition.
+Neither component requires Kubernetes Secret-read permission or a Pod restart.
 
 Use verified TLS and an optional custom CA. Scope storage permissions to the
 configured store, restrict local sockets/staging, and exclude secrets from logs
@@ -347,6 +403,10 @@ storage:
   PVC mode, the operator manager mounts the shared claim directly.
 - Configure the maintenance worker pool size, per-task timeout and retry backoff on
   the operator manager itself.
+- Configure a maximum agent admission window, PageBroker transaction lifetime and
+  clock-skew allowance in every participating component. Helm rejects zero or
+  unbounded values and validates that the operator's Stage 1 deletion delay is at
+  least their sum.
 - Match Snapshot/PageBroker image versions. PageBroker reads mounted configuration
   and has no Kubernetes client.
 
@@ -361,13 +421,15 @@ then publish the index last. The index binds store/artifact/container and format
 version, and lists file/directory paths, permissions, sizes and file SHA-256 digests.
 Reject unsafe paths, unsupported formats, missing files and checksum mismatches.
 
-Each index also carries a `commitID` (a ULID, generated once per checkpoint
-attempt). `Commit` reuses the same `commitID` across retries of the same
-attempt, making publish idempotent per `commitID` rather than per
-store/artifact/container. `recover-metadata` selects deterministically: if more
-than one confirmed index exists for the same artifact/container, it picks the
-newest by index write time and reconciles or flags the rest as conflicting
-instead of guessing.
+Each index also carries the deterministic `commitID` derived from `storeID`,
+`artifactUID` and container name. Since a new capture attempt receives a new
+`artifactUID`, retries and restarts of one attempt derive the same value while a new
+attempt cannot adopt its publication. `Commit` publishes under
+`publications/<commitID>/` and is idempotent for that exact path.
+`recover-metadata` derives the expected value and accepts only a confirmed index
+with the same identity fields and `commitID`. It never selects by object write time.
+Multiple matching indexes or a confirmed different ID is a conflict that requires
+explicit repair.
 
 Example publication descriptors; digest values are placeholders:
 
@@ -381,7 +443,7 @@ artifact_format_version: "snapshot.pagebroker/v1"
 ```protobuf
 // S3
 store_id: "store-v1-<s3-digest>"
-artifact_handle: "artifacts/<artifactUID>/containers/main/publications/p-01/index.json"
+artifact_handle: "artifacts/<artifactUID>/containers/main/publications/<commitID>/index.json"
 artifact_format_version: "snapshot.pagebroker/v1"
 ```
 
@@ -425,20 +487,28 @@ flowchart TB
 ```
 
 **Checkpoint:** agent → prepare/validate destination → CUDA then CRIU/filesystem
-capture into staging → PageBroker Commit/upload/publication → agent persists Ready.
+capture into staging → PageBroker derives `commitID` and commits the matching
+publication → agent persists the descriptor and Ready.
 
 **Restore:** agent → GetArtifactMetadata → Snapshot compatibility gates → StagedRestore
 downloads/verifies the full bundle → CRIU/CUDA restore → unmount → Commit cleanup.
 The later executor compatibility gate still runs before process restore.
 
-**Cleanup:** reconciler enqueues a `delete-content` key on deletion timestamp (or a
-`sweep` key on a periodic tick) → a worker dequeues it and talks to the backend
-directly → confirmed deletion lets the same goroutine remove the finalizer;
-otherwise the key is requeued with backoff.
+**Cleanup:** the deletion timestamp blocks new checkpoint and restore admission.
+The reconciler enqueues a `delete-content` key (or a `sweep` key on a periodic
+tick). In Stage 1, the worker waits until the deletion timestamp plus maximum
+admission window, transaction lifetime and clock-skew allowance, then acquires the
+artifact lock, rereads ownership and talks to the backend directly. Confirmed scoped
+deletion lets the same goroutine remove the finalizer; premature, partial or unknown
+deletion is requeued with backoff. Stage 2 replaces the fixed quiescence period with
+explicit active-operation tracking and a generation fence shared by agents,
+PageBroker and maintenance; the coordination location and protocol are a Stage 2
+design decision.
 
 **Recovery:** reconciler enqueues `recover-metadata` on detecting a
-confirmed-but-unrecorded publication → a worker locates it by store/artifact/container
-→ repairs missing descriptors without deleting data.
+confirmed-but-unrecorded publication → a worker locates the exact expected
+store/artifact/container/`commitID` → repairs missing descriptors without deleting
+data. Conflicts fail closed rather than choosing the newest object.
 
 After all restore consumers finish, unmount staging before Commit cleanup.
 Once fully staged, restore needs no further S3 reads. Keep cleanup failures
@@ -457,8 +527,10 @@ peak memory and latency before setting defaults.
 Use existing conditions with storage-specific reasons and rate-limited updates.
 Measure phase duration, transfer bytes/retries, credential failures, staging
 pressure and cleanup backlog. Expose workqueue depth, per-key retry counts and
-worker utilization as operator metrics; correlate logs with content, transaction
-and work-item key. Report cleanup separately and preserve historical success.
+worker utilization as operator metrics. Count transaction expiry, credential reload
+success/failure and cleanup deferrals; expose remaining Stage 1 quiescence time.
+Correlate logs with content, transaction and work-item key. Report cleanup separately
+and preserve historical success.
 
 ### Dependencies
 
@@ -468,8 +540,10 @@ and work-item key. Report cleanup separately and preserve historical success.
 - Shared store-ID, artifact-format and publication/read/delete contracts.
 
 Before coding, finalize the credentials-file format and SDKs, canonical store-ID
-encoding, protobuf tags, durable publication/deletion coordination, recovery-mode
-control and numeric resource/time limits. Build PVC maintenance before adding S3.
+encoding, protobuf tags, Stage 1 maximum transaction lifetime and deletion delay,
+admission window, recovery-mode control and numeric resource/time limits. Build PVC
+maintenance before adding S3. Finalize the active-operation and generation-fencing
+protocol before enabling Stage 2 concurrent deletion.
 
 ### Test Plan
 
@@ -477,27 +551,37 @@ Tracking and test issues are not yet assigned. Cover unit/configuration checks,
 backend integration with a disposable S3-compatible service, and GPU end-to-end tests.
 
 - **API/configuration:** immutable store bindings, unique container descriptors,
-  identical Go/C++ store-ID results, credential rotation/restart stability and legacy PVC.
+  identical Go/C++ `commitID` derivation, exact recovery matching, identical Go/C++
+  store-ID results for endpoint/region/addressing variants, and legacy PVC.
 - **Helm/security:** S3 installation without checkpoint PVC; credentials only in
   PageBroker/operator manager; matching images and an operator service account
-  without GPU/host mounts.
+  without GPU/host mounts. Rotate and revoke credentials while already-running Go
+  and C++ clients prove that subsequent operations use the replacement without a
+  Pod restart.
 - **PVC-first maintenance:** per-content deletion and scheduled sweeps through the
   in-process worker pool; legacy layout, artifact UID checks, symlink refusal and
   finalizer completion.
 - **Workqueue lifecycle:** duplicate enqueues coalescing to one key, operator
   restart/leadership change rebuilding pending work, retry backoff and exhaustion
-  (cap then surface a condition), graceful `ShutDownWithDrain` under SIGTERM, and
-  no two workers racing the same artifact key.
+  (cap then surface a condition), graceful `ShutDownWithDrain` under SIGTERM,
+  immediate cancellation on leadership loss, and every maintenance mode using the
+  same `(storeID, artifactUID)` lock, including candidates resolved by a sweep.
 - **Storage/RPC:** disposable S3-compatible service; upload/index publication,
-  format/path/digest rejection, bounded messages, maintenance pagination, Abort and inspection expiry.
+  format/path/digest rejection, fixed transaction expiry across retries, rejection
+  immediately before a late index publication, bounded messages, maintenance
+  pagination, Abort and inspection expiry.
 - **Failure/recovery:** invalid credentials before capture, outage during transfer,
-  lost replies/restarts, descriptor repair conflicts and no CUDA/CRIU replay.
+  lost replies/restarts, exact `commitID` repair, missing/duplicate/conflicting
+  publications and no CUDA/CRIU replay.
 - **Lifecycle/concurrency:** inspection cleanup on success/refusal/requeue/cancellation;
-  delete during downloads, stale publishers, incomplete attempts and capture-node loss.
+  uncached deletion checks and admission-window expiry; deletion waiting the complete
+  Stage 1 quiescence bound; expiration during upload/download; stale publishers,
+  incomplete attempts and capture-node loss. Stage 2 adds concurrent
+  delete/read/publish races, operation expiry and stale-generation rejection.
 - **End to end:** cross-node capture/restore/delete; recovered workload state and
   inference; restore after S3 loss following staging; PVC↔S3-A↔S3-B mismatch refusal.
-- **Operations:** Secret rotation, denied decryption/deletion, supported provider
-  versioning/retention, metadata recovery pause/restart/resume and PVC cleanup parity.
+- **Operations:** denied decryption/deletion, supported provider versioning/retention,
+  metadata recovery pause/restart/resume and PVC cleanup parity.
 
 Qualify the real CUDA path, multi-rank and partial-destination failures, and vLLM,
 SGLang and TensorRT-LLM workloads. Run the same lifecycle on an external S3 endpoint;
@@ -505,12 +589,16 @@ an emulator or mocked CUDA path alone does not qualify provider/GPU support.
 
 ### Graduation Criteria
 
-- **Alpha:** demonstrate S3 capture/restore/delete without a checkpoint PVC,
-  PVC compatibility, Secret rotation and core publication/recovery failures.
-- **Beta:** qualify advertised providers and GPU workloads, sustained load,
-  concurrent cleanup and recovery across component restarts.
+- **Alpha (Stage 1):** demonstrate S3 capture/restore without a checkpoint PVC and
+  deletion after the bounded quiescence period; prove admission-window and
+  transaction expiry, exact `commitID` recovery, PVC compatibility, credential
+  rotation and core failure paths.
+- **Beta (Stage 2):** qualify advertised providers and GPU workloads under sustained
+  load; add explicit active-operation tracking and generation fencing, then prove
+  concurrent cleanup/read/publication safety across component and leader restarts.
 - **GA:** document support, upgrades/rollback and recovery; demonstrate artifact/API
-  compatibility. Multi-store support is not required for Stage 1.
+  compatibility and supported versioning/retention behavior. Multi-store support is
+  not required.
 
 ## Alternatives
 
@@ -536,5 +624,11 @@ an emulator or mocked CUDA path alone does not qualify provider/GPU support.
   dispatching a `batch/v1` Job per task for credential/failure isolation. Not chosen
   for Stage 1 because it combines the workqueue's implementation cost with the
   Job model's per-task Pod overhead instead of removing it.
+- **Stage 2 fencing authority:** Kubernetes operation leases let the operator and
+  agents coordinate through the existing API but require PageBroker cancellation
+  to be authoritative; storage-resident epochs let every PageBroker enforce a fence
+  directly but require conditional-write and consistency guarantees from every
+  supported provider. Stage 2 selects one protocol after Stage 1 concurrency and
+  failure testing; Stage 1 does not claim either mechanism.
 - **Streaming restore or storage classes now:** useful later, but expand Stage 1
   lifetimes and selection semantics; retain full staging and one bound store.
