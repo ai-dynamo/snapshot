@@ -822,7 +822,11 @@ def runtime_image_id(
             checkpoint_agent_pod(config, node),
             f"nsenter -t 1 -m -- crictl inspect {shlex.quote(runtime_id)}",
         )
-        return (json.loads(output).get("status") or {}).get("imageId") or None
+        status = json.loads(output).get("status") or {}
+        image_id = status.get("imageId") or None
+        if not image_id:
+            print(f"[debug] crictl inspect status for {container_id!r}: {status}")
+        return image_id
 
     return wait_for(f"runtime image ID for {container_id!r}", read, timeout)
 
