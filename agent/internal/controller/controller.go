@@ -164,6 +164,15 @@ const (
 	// snapshotContentResyncInterval re-drives every PodSnapshotContent work order so a
 	// not-yet-Ready source pod is re-checked for quiesce without a busy loop.
 	snapshotContentResyncInterval = 10 * time.Second
+
+	// nodeQueueWorkers caps how many items the capture and restore queues each process at once,
+	// so one node cannot fan out a goroutine per work item. It is a ceiling against pathological
+	// fan-out, not a resource budget: both queues run CRIU against live containers, and what
+	// actually saturates first is node memory and disk, which this does not measure. The capture
+	// side is additionally bounded to one dump per source pod (see captureOwnerForPod), so on a
+	// GPU node this rarely binds. Deliberately not configurable — no deployment has yet needed a
+	// different value, and a knob nobody sets is a knob nobody maintains.
+	nodeQueueWorkers = 16
 )
 
 // podSnapshotContentGVR is the cluster-scoped resource the capture informer watches.
@@ -398,13 +407,28 @@ func (w *NodeController) restorePodRelevant(pod *corev1.Pod) bool {
 }
 
 func (w *NodeController) runRestoreQueue(ctx context.Context) {
-	for {
-		key, shutdown := w.restoreQueue.Get()
-		if shutdown {
-			return
-		}
-		go w.processRestoreQueueItem(ctx, key)
+	runQueueWorkers(w.restoreQueue.Get, func(key client.ObjectKey) {
+		w.processRestoreQueueItem(ctx, key)
+	})
+}
+
+// runQueueWorkers drives one queue with a fixed pool. Each item still needs its own goroutine —
+// a CRIU run holds its worker for minutes and must not head-of-line block unrelated pods — but
+// the pool is what stops a node fanning out one goroutine per work item without limit.
+func runQueueWorkers[T comparable](next func() (T, bool), process func(T)) {
+	var workers sync.WaitGroup
+	for range nodeQueueWorkers {
+		workers.Go(func() {
+			for {
+				item, shutdown := next()
+				if shutdown {
+					return
+				}
+				process(item)
+			}
+		})
 	}
+	workers.Wait()
 }
 
 func (w *NodeController) processRestoreQueueItem(ctx context.Context, key client.ObjectKey) {
@@ -1199,17 +1223,10 @@ func (w *NodeController) enqueueCaptureForSourcePod(obj interface{}) {
 	}
 }
 
-// runCaptureQueue gives each item its own goroutine — a dump can take minutes and must not
-// head-of-line block unrelated work orders — which is safe because the queue guarantees one worker
-// per key.
 func (w *NodeController) runCaptureQueue(ctx context.Context) {
-	for {
-		name, shutdown := w.captureQueue.Get()
-		if shutdown {
-			return
-		}
-		go w.processCaptureQueueItem(ctx, name)
-	}
+	runQueueWorkers(w.captureQueue.Get, func(name string) {
+		w.processCaptureQueueItem(ctx, name)
+	})
 }
 
 // processCaptureQueueItem holds the work order's key for the whole reconcile, dump included: Done

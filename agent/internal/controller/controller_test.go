@@ -1464,6 +1464,66 @@ func TestApplyRestoredConditionPreservesTransitionTimeForSameStatus(t *testing.T
 	assert.Contains(t, string(lastPodStatusApply(t, w).GetPatch()), transition.UTC().Format(time.RFC3339))
 }
 
+// TestRunQueueWorkersBoundsConcurrency pins the ceiling itself: with more items queued than
+// workers, no more than nodeQueueWorkers of them may be in flight at once, and every item must
+// still be processed.
+func TestRunQueueWorkersBoundsConcurrency(t *testing.T) {
+	const items = nodeQueueWorkers * 3
+
+	queue := workqueue.NewTypedDelayingQueue[int]()
+	t.Cleanup(queue.ShutDown)
+	for i := range items {
+		queue.Add(i)
+	}
+
+	var mu sync.Mutex
+	inFlight, peak, processed := 0, 0, 0
+	release := make(chan struct{})
+	admitted := make(chan struct{}, items)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runQueueWorkers(queue.Get, func(item int) {
+			defer queue.Done(item)
+			mu.Lock()
+			inFlight++
+			processed++
+			peak = max(peak, inFlight)
+			mu.Unlock()
+			admitted <- struct{}{}
+			<-release
+			mu.Lock()
+			inFlight--
+			mu.Unlock()
+		})
+	}()
+
+	// Let exactly one pool's worth start, then confirm the pool refuses to admit more.
+	for range nodeQueueWorkers {
+		<-admitted
+	}
+	select {
+	case <-admitted:
+		t.Fatal("a item was admitted beyond nodeQueueWorkers")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return processed == items
+	}, 5*time.Second, 5*time.Millisecond, "every queued item must still be processed")
+
+	queue.ShutDown()
+	<-done
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, nodeQueueWorkers, peak, "concurrency must be capped at the pool size")
+}
+
 // TestCaptureQueueHoldsRetriggersUntilDone is the property that replaced the capture Lease: while
 // a work order is being reconciled, every further trigger for it is folded into one redelivery
 // that arrives only after the in-progress reconcile calls Done.
