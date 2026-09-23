@@ -47,7 +47,7 @@ func newTestQueue(t *testing.T, basePath string, objects ...client.Object) (*Que
 	t.Helper()
 	kubeClient := ctrlfake.NewClientBuilder().WithScheme(maintenanceTestScheme(t)).WithObjects(objects...).Build()
 	recorder := record.NewFakeRecorder(10)
-	q, err := NewQueue(kubeClient, kubeClient, recorder, operatortypes.ArtifactCleanupConfig{
+	q, err := NewQueue(context.Background(), kubeClient, kubeClient, recorder, operatortypes.ArtifactCleanupConfig{
 		BasePath: basePath, ScanInterval: time.Hour, BatchSize: 10, ListAttempts: 3, Workers: 1,
 	})
 	require.NoError(t, err)

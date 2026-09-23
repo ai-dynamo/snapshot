@@ -41,7 +41,7 @@ type Queue struct {
 // NewQueue constructs a Queue; register it with the manager (mgr.Add) to run
 // it. It fails if the configured backend has no registered implementation,
 // so an unsupported --artifact-cleanup-backend-type cannot reach readiness.
-func NewQueue(kubeClient client.Client, apiReader client.Reader, recorder record.EventRecorder, cfg operatortypes.ArtifactCleanupConfig) (*Queue, error) {
+func NewQueue(ctx context.Context, kubeClient client.Client, apiReader client.Reader, recorder record.EventRecorder, cfg operatortypes.ArtifactCleanupConfig) (*Queue, error) {
 	configuredBackend := cfg.BackendType
 	if configuredBackend == "" {
 		configuredBackend = backends.NamePVC
@@ -57,7 +57,9 @@ func NewQueue(kubeClient client.Client, apiReader client.Reader, recorder record
 			workqueue.TypedRateLimitingQueueConfig[WorkItemKey]{Name: "podsnapshotcontent-maintenance"},
 		),
 	}
-	q.registry.Init(cfg)
+	if err := q.registry.Init(ctx, cfg); err != nil {
+		return nil, err
+	}
 	if _, err := q.backend(); err != nil {
 		return nil, err
 	}

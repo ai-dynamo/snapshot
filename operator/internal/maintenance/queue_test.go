@@ -61,7 +61,7 @@ func TestStartRunsImmediateSweepAndShutsDownCleanly(t *testing.T) {
 
 func newQueue(t *testing.T, cfg operatortypes.ArtifactCleanupConfig) *Queue {
 	t.Helper()
-	q, err := NewQueue(nil, nil, nil, cfg)
+	q, err := NewQueue(context.Background(), nil, nil, nil, cfg)
 	require.NoError(t, err)
 	t.Cleanup(q.queue.ShutDown)
 	return q
@@ -77,8 +77,13 @@ func TestNewQueueDefaults(t *testing.T) {
 }
 
 func TestNewQueueFailsWhenConfiguredBackendIsNotRegistered(t *testing.T) {
-	_, err := NewQueue(nil, nil, nil, operatortypes.ArtifactCleanupConfig{BasePath: "/checkpoints", BackendType: "s3"})
-	require.ErrorContains(t, err, `no maintenance backend implementation registered for configured store "s3"`)
+	_, err := NewQueue(context.Background(), nil, nil, nil, operatortypes.ArtifactCleanupConfig{BasePath: "/checkpoints", BackendType: "gcs"})
+	require.ErrorContains(t, err, `no maintenance backend implementation registered for configured store "gcs"`)
+}
+
+func TestNewQueueFailsWhenS3IsConfiguredBackendWithoutS3Config(t *testing.T) {
+	_, err := NewQueue(context.Background(), nil, nil, nil, operatortypes.ArtifactCleanupConfig{BackendType: "s3"})
+	require.ErrorContains(t, err, "s3 maintenance backend configured without an s3 config")
 }
 
 func TestQueueBackendReturnsTheConfiguredBackend(t *testing.T) {
@@ -96,6 +101,33 @@ func TestQueueBackendFailsWhenConfiguredBackendIsNotRegistered(t *testing.T) {
 
 	_, err := q.backend()
 	require.ErrorContains(t, err, `no maintenance backend implementation registered for configured store "S3"`)
+}
+
+func TestNewQueueRegistersS3BackendWhenItIsTheConfiguredBackend(t *testing.T) {
+	q := newQueue(t, operatortypes.ArtifactCleanupConfig{
+		BackendType: "s3",
+		S3: &operatortypes.S3Config{
+			Bucket: "checkpoints", Region: "us-east-1", CredentialsPath: t.TempDir() + "/credentials",
+		},
+	})
+
+	backend, ok := q.registry.Get(backends.NameS3)
+	require.True(t, ok)
+	assert.Equal(t, backends.NameS3, backend.Name())
+	_, ok = q.registry.Get(backends.NamePVC)
+	assert.False(t, ok, "PVC must not register when S3 is the configured backend")
+}
+
+func TestNewQueueDoesNotRegisterS3BackendWhenPVCIsConfigured(t *testing.T) {
+	q := newQueue(t, operatortypes.ArtifactCleanupConfig{
+		BasePath: "/checkpoints", BackendType: "pvc",
+		S3: &operatortypes.S3Config{
+			Bucket: "checkpoints", Region: "us-east-1", CredentialsPath: t.TempDir() + "/credentials",
+		},
+	})
+
+	_, ok := q.registry.Get(backends.NameS3)
+	assert.False(t, ok, "S3 must not register when it is not the configured backend")
 }
 
 func TestQueueBackendResolvesHelmsLowercaseBackendType(t *testing.T) {
