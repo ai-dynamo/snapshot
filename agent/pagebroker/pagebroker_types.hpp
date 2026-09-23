@@ -6,9 +6,14 @@
 #include "v1/pagebroker.pb.h"
 
 namespace snapshot::pagebroker {
+using v1::ArtifactIdentity;
+using v1::ArtifactTarget;
 using v1::Failure;
+using v1::GetArtifactMetadataComplete;
+using v1::GetArtifactMetadataRequest;
 using v1::IOEngine;
 using v1::PrepareStagedCheckpointRequest;
+using v1::PublishedArtifact;
 using v1::Request;
 using v1::Response;
 using v1::StagedRestoreRequest;

@@ -1,0 +1,130 @@
+{
+  "cases": [
+    {
+      "name": "legacy-checkpoint",
+      "type": "Request",
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" prepare_staged_checkpoint { destination { filesystem { directory: \"/checkpoints/output\" } } io_engine { posix_copy {} } }",
+      "wire_hex": "0a09726571756573742d31120474782d31221d0a170a150a132f636865636b706f696e74732f6f757470757412020a00"
+    },
+    {
+      "name": "legacy-restore",
+      "type": "Request",
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" staged_restore { source { filesystem { directory: \"/checkpoints/source\" } } io_engine { posix_copy {} } }",
+      "wire_hex": "0a09726571756573742d31120474782d311a1d0a170a150a132f636865636b706f696e74732f736f7572636512020a00"
+    },
+    {
+      "name": "checkpoint-target",
+      "type": "Request",
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" prepare_staged_checkpoint { target { store_id: \"store-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" artifact { artifact_uid: \"content-1\" container_name: \"main\" } } }",
+      "wire_hex": "0a09726571756573742d31120474782d3122601a5e0a4973746f72652d76312d6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616112110a09636f6e74656e742d3112046d61696e"
+    },
+    {
+      "name": "artifact-restore",
+      "type": "Request",
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" staged_restore { artifact { store_id: \"store-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" artifact_handle: \"artifacts/content-1/containers/main/publications/p-1/index.json\" artifact_format_version: \"snapshot.pagebroker/v1\" } }",
+      "wire_hex": "0a09726571756573742d31120474782d311aa7011aa4010a4973746f72652d76312d61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161123f6172746966616374732f636f6e74656e742d312f636f6e7461696e6572732f6d61696e2f7075626c69636174696f6e732f702d312f696e6465782e6a736f6e1a16736e617073686f742e7061676562726f6b65722f7631"
+    },
+    {
+      "name": "metadata-request",
+      "type": "Request",
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" get_artifact_metadata { artifact { store_id: \"store-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" artifact_handle: \"artifacts/content-1/containers/main/publications/p-1/index.json\" artifact_format_version: \"snapshot.pagebroker/v1\" } }",
+      "wire_hex": "0a09726571756573742d31120474782d31a201a7010aa4010a4973746f72652d76312d61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161123f6172746966616374732f636f6e74656e742d312f636f6e7461696e6572732f6d61696e2f7075626c69636174696f6e732f702d312f696e6465782e6a736f6e1a16736e617073686f742e7061676562726f6b65722f7631"
+    },
+    {
+      "name": "commit-request",
+      "type": "Request",
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" commit {}",
+      "wire_hex": "0a09726571756573742d31120474782d312a00"
+    },
+    {
+      "name": "abort-request",
+      "type": "Request",
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" abort {}",
+      "wire_hex": "0a09726571756573742d31120474782d313200"
+    },
+    {
+      "name": "checkpoint-result",
+      "type": "Response",
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" commit_complete { published_artifact { store_id: \"store-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" artifact_handle: \"artifacts/content-1/containers/main/publications/p-1/index.json\" artifact_format_version: \"snapshot.pagebroker/v1\" } }",
+      "wire_hex": "0a09726571756573742d31120474782d312aa7010aa4010a4973746f72652d76312d61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161123f6172746966616374732f636f6e74656e742d312f636f6e7461696e6572732f6d61696e2f7075626c69636174696f6e732f702d312f696e6465782e6a736f6e1a16736e617073686f742e7061676562726f6b65722f7631"
+    },
+    {
+      "name": "legacy-or-restore-commit",
+      "type": "Response",
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" commit_complete {}",
+      "wire_hex": "0a09726571756573742d31120474782d312a00"
+    },
+    {
+      "name": "abort-result",
+      "type": "Response",
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" abort_complete {}",
+      "wire_hex": "0a09726571756573742d31120474782d313200"
+    },
+    {
+      "name": "metadata-result",
+      "type": "Response",
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" get_artifact_metadata_complete { manifest_directory: \"/staging/metadata/tx-1\" }",
+      "wire_hex": "0a09726571756573742d31120474782d31a201180a162f73746167696e672f6d657461646174612f74782d31"
+    },
+    {
+      "name": "checkpoint-directory",
+      "type": "Response",
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" staged_checkpoint_directory { image_directory: \"/staging/checkpoint/tx-1\" }",
+      "wire_hex": "0a09726571756573742d31120474782d31221a0a182f73746167696e672f636865636b706f696e742f74782d31"
+    },
+    {
+      "name": "restore-directory",
+      "type": "Response",
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" staged_restore_directory { image_directory: \"/staging/restore/tx-1\" }",
+      "wire_hex": "0a09726571756573742d31120474782d311a170a152f73746167696e672f726573746f72652f74782d31"
+    },
+    {
+      "name": "store_mismatch",
+      "type": "Response",
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" failure { code: STORE_MISMATCH message: \"bounded storage failure\" }",
+      "wire_hex": "0a09726571756573742d31120474782d313a1b08141217626f756e6465642073746f72616765206661696c757265"
+    },
+    {
+      "name": "access_denied",
+      "type": "Response",
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" failure { code: ACCESS_DENIED message: \"bounded storage failure\" }",
+      "wire_hex": "0a09726571756573742d31120474782d313a1b08151217626f756e6465642073746f72616765206661696c757265"
+    },
+    {
+      "name": "storage_unavailable",
+      "type": "Response",
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" failure { code: STORAGE_UNAVAILABLE message: \"bounded storage failure\" }",
+      "wire_hex": "0a09726571756573742d31120474782d313a1b08161217626f756e6465642073746f72616765206661696c757265"
+    },
+    {
+      "name": "artifact_not_found",
+      "type": "Response",
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" failure { code: ARTIFACT_NOT_FOUND message: \"bounded storage failure\" }",
+      "wire_hex": "0a09726571756573742d31120474782d313a1b08171217626f756e6465642073746f72616765206661696c757265"
+    },
+    {
+      "name": "artifact_corrupt",
+      "type": "Response",
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" failure { code: ARTIFACT_CORRUPT message: \"bounded storage failure\" }",
+      "wire_hex": "0a09726571756573742d31120474782d313a1b08181217626f756e6465642073746f72616765206661696c757265"
+    },
+    {
+      "name": "unsupported_artifact",
+      "type": "Response",
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" failure { code: UNSUPPORTED_ARTIFACT message: \"bounded storage failure\" }",
+      "wire_hex": "0a09726571756573742d31120474782d313a1b08191217626f756e6465642073746f72616765206661696c757265"
+    },
+    {
+      "name": "outcome_unknown",
+      "type": "Response",
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" failure { code: OUTCOME_UNKNOWN message: \"bounded storage failure\" }",
+      "wire_hex": "0a09726571756573742d31120474782d313a1b081a1217626f756e6465642073746f72616765206661696c757265"
+    },
+    {
+      "name": "transaction_expired",
+      "type": "Response",
+      "text": "request_id: \"request-1\" transaction_id: \"tx-1\" failure { code: TRANSACTION_EXPIRED message: \"bounded storage failure\" }",
+      "wire_hex": "0a09726571756573742d31120474782d313a1b081b1217626f756e6465642073746f72616765206661696c757265"
+    }
+  ]
+}

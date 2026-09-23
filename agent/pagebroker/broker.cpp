@@ -65,6 +65,13 @@ IsSafePathComponent(const std::string& value)
 const StorageBackend&
 ValidateStagedRestore(const StagedRestoreRequest& request)
 {
+  // Do not silently fall back to a filesystem path when a caller asks for a
+  // store-bound artifact. Backend support lands separately from this contract.
+  if (request.has_artifact()) {
+    if (request.has_source())
+      throw std::invalid_argument("artifact cannot be combined with legacy source");
+    throw std::invalid_argument("artifact-addressed restore is not implemented");
+  }
   if (!request.has_source() || request.source().kind_case() == StorageBackend::KIND_NOT_SET)
     throw std::invalid_argument("restore source is required");
   return request.source();
@@ -73,6 +80,11 @@ ValidateStagedRestore(const StagedRestoreRequest& request)
 const StorageBackend&
 ValidateStagedCheckpoint(const PrepareStagedCheckpointRequest& request)
 {
+  if (request.has_target()) {
+    if (request.has_destination())
+      throw std::invalid_argument("target cannot be combined with legacy destination");
+    throw std::invalid_argument("artifact-addressed checkpoint is not implemented");
+  }
   if (!request.has_destination() || request.destination().kind_case() == StorageBackend::KIND_NOT_SET)
     throw std::invalid_argument("checkpoint destination is required");
   return request.destination();
@@ -264,6 +276,9 @@ Broker::HandleRequest(const Request& request)
         break;
       case Request::kAbort:
         response = Abort(request);
+        break;
+      case Request::kGetArtifactMetadata:
+        response = Fail(request, Failure::INVALID_REQUEST, "artifact metadata retrieval is not implemented");
         break;
       default:
         response = Fail(request, Failure::INVALID_REQUEST, "unsupported operation");
