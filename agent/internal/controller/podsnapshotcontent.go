@@ -138,8 +138,22 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 		return w.markCheckpointReady(ctx, content, artifactPath)
 	}
 
-	if w.failCheckpointOnContainerExit(ctx, content, pod) {
+	// Everything below reads live pod state, and the unstick sweep below acts on it. Queue keys are
+	// per work order, so several can name one pod; only the owner may draw conclusions from that
+	// pod. A non-owner reading the source mid-dump sees a container the owner is busy killing, and
+	// would SIGKILL the very container the owner is dumping. It waits instead: once the owner
+	// reaches a terminal state, ownership passes and this work order settles on its own.
+	chosen, err := w.captureOwnerForPod(pod)
+	if err != nil {
+		return err
+	}
+	if chosen != content.Name {
+		logger.V(1).Info("Another work order owns this source pod", "pod", pod.Name, "owner", chosen)
 		return nil
+	}
+
+	if handled, err := w.failCheckpointOnContainerExit(ctx, content, pod); handled {
+		return err
 	}
 	if reason, msg := classifySourcePodLiveness(pod); reason != "" {
 		err := w.setSnapshotContentFailed(ctx, content, reason, errors.New(msg))
@@ -156,18 +170,6 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 
 	if !isContainerReady(pod, containerName) {
 		logger.V(1).Info("Source container not ready, awaiting quiesce", "pod", pod.Name, "container", containerName)
-		return nil
-	}
-
-	// Queue keys are per work order, so the queue alone does not stop two work orders naming the
-	// same pod from dumping the same container. Oldest-active wins; the rest wait for it to reach
-	// a terminal state.
-	chosen, err := w.captureOwnerForPod(pod)
-	if err != nil {
-		return err
-	}
-	if chosen != content.Name {
-		logger.V(1).Info("Another work order owns this source pod", "pod", pod.Name, "owner", chosen)
 		return nil
 	}
 
@@ -256,13 +258,15 @@ func classifySourcePodLiveness(pod *corev1.Pod) (string, string) {
 }
 
 // failCheckpointOnContainerExit fails the work order and force-terminates the source pod's
-// still-running containers when any checkpoint container has terminated non-zero. It returns
-// true when a failure was handled and the caller must stop. Init containers
+// still-running containers when any checkpoint container has terminated non-zero. The bool
+// reports that the caller must stop; the error is the status write's, so a write that did not
+// land is retried by the queue rather than waiting out the resync. Callers must only reach this
+// for a source pod they own — the sweep kills every running container in the pod. Init containers
 // (pod.Status.InitContainerStatuses) are intentionally out of scope.
-func (w *NodeController) failCheckpointOnContainerExit(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, pod *corev1.Pod) bool {
+func (w *NodeController) failCheckpointOnContainerExit(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, pod *corev1.Pod) (bool, error) {
 	failed := failedCheckpointContainer(pod)
 	if failed == nil {
-		return false
+		return false, nil
 	}
 
 	term := failed.State.Terminated
@@ -275,9 +279,9 @@ func (w *NodeController) failCheckpointOnContainerExit(ctx context.Context, cont
 	emitPodEvent(ctx, w.clientset, logger, pod, snapshotEventComponent, corev1.EventTypeWarning, "CheckpointFailed", message)
 	w.killRunningContainers(ctx, logger, pod, fmt.Sprintf("checkpoint container %s failed", failed.Name))
 	if err := w.setSnapshotContentFailed(ctx, content, "CheckpointContainerFailed", errors.New(message)); err != nil {
-		logr.FromContextOrDiscard(ctx).Error(err, "Failed to write PodSnapshotContent failed status", "content", content.Name)
+		return true, fmt.Errorf("write PodSnapshotContent failed status %q: %w", content.Name, err)
 	}
-	return true
+	return true, nil
 }
 
 // failedCheckpointContainer returns the first checkpoint container that terminated non-zero, or

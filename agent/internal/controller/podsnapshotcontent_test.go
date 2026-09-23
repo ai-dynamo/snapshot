@@ -28,6 +28,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	snapshottypes "github.com/ai-dynamo/snapshot/agent/internal/types"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
@@ -396,8 +397,63 @@ func TestFailCheckpointOnContainerExit_IgnoresCleanExit(t *testing.T) {
 		{Name: "helper", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
 	}}}
 
-	handled := w.failCheckpointOnContainerExit(context.Background(), &snapshotv1alpha1.PodSnapshotContent{}, pod)
+	handled, err := w.failCheckpointOnContainerExit(context.Background(), &snapshotv1alpha1.PodSnapshotContent{}, pod)
+	require.NoError(t, err)
 	assert.False(t, handled)
+}
+
+// TestReconcileCapture_NonOwnerNeverKillsTheOwnersSource is the regression behind moving the
+// ownership guard above the unstick sweep. Mid-dump the target shows a non-zero exit, so a sibling
+// work order reaching failCheckpointOnContainerExit would SIGKILL the container the owner is still
+// dumping — and fail itself for good measure. A non-owner must read that state and do nothing.
+func TestReconcileCapture_NonOwnerNeverKillsTheOwnersSource(t *testing.T) {
+	owner := makeWorkOrder("podsnapshotcontent-old", "node-a", "abc")
+	owner.CreationTimestamp = metav1.Unix(1000, 0)
+	sibling := makeWorkOrder("podsnapshotcontent-new", "node-a", "abc")
+	sibling.CreationTimestamp = metav1.Unix(2000, 0)
+
+	// The pod as it looks while the owner's dump is terminating the target.
+	pod := makeSourcePod()
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+		{Name: "main", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137}}, ContainerID: "containerd://main-id"},
+		{Name: "helper", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}, ContainerID: "containerd://helper-id"},
+	}
+	fc := &fakeCheckpointer{}
+	rt := &fakeRuntime{}
+	w := makeNodeController(t, fc, owner, sibling, pod)
+	w.runtime = rt
+
+	require.NoError(t, w.reconcileCapture(context.Background(), sibling.Name))
+
+	assert.Empty(t, rt.resolvedContainerIDs,
+		"a non-owner must not resolve or signal containers of a pod another work order is dumping")
+	assert.False(t, sawEventReason(w.clientset.(*k8sfake.Clientset), "CheckpointFailed"),
+		"a non-owner must not announce a failure for the owner's pod")
+	assert.Empty(t, getContent(t, w, sibling.Name).Status.Conditions,
+		"a non-owner must not write its own terminal status from the owner's pod state")
+	assert.Empty(t, getContent(t, w, owner.Name).Status.Conditions)
+	assert.False(t, fc.wasCalled())
+}
+
+// TestReconcileCapture_ContainerExitStatusWriteErrorRequeues keeps the unstick path on the same
+// retry contract as every other terminal write in reconcileCapture: a status write that did not
+// land surfaces as an error so the queue retries, rather than being logged and left to the resync.
+func TestReconcileCapture_ContainerExitStatusWriteErrorRequeues(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	content.CreationTimestamp = metav1.Unix(1000, 0)
+	pod := podWithFailedSibling()
+	funcs := interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			return errors.New("status patch rejected")
+		},
+	}
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content, pod)
+
+	err := w.reconcileCapture(context.Background(), content.Name)
+
+	require.Error(t, err, "an unwritten terminal status must requeue, not be swallowed")
+	assert.Contains(t, err.Error(), "status patch rejected")
+	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
 }
 
 func TestReconcileCapture_UsesContentUIDArtifactIdentity(t *testing.T) {
