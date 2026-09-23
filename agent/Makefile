@@ -66,6 +66,11 @@ test-cuda-helper:
 		-o bin/cuda-checkpoint-helper-transfer-cancellation-test \
 		cmd/cuda-checkpoint-helper/transfer_engine_test.cpp
 	bin/cuda-checkpoint-helper-transfer-cancellation-test
+	$(CXX) $(CUDA_HELPER_CXXFLAGS) \
+		-o bin/cuda-checkpoint-helper-daemon-protocol-test \
+		cmd/cuda-checkpoint-helper/daemon_protocol.cpp \
+		cmd/cuda-checkpoint-helper/daemon_protocol_test.cpp
+	bin/cuda-checkpoint-helper-daemon-protocol-test
 
 fmt:
 	gofmt -w .
