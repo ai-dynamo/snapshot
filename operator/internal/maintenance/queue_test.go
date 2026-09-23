@@ -59,9 +59,16 @@ func TestStartRunsImmediateSweepAndShutsDownCleanly(t *testing.T) {
 	}
 }
 
-func TestNewQueueDefaults(t *testing.T) {
-	q := NewQueue(nil, nil, nil, operatortypes.ArtifactCleanupConfig{BasePath: "/checkpoints"})
+func newQueue(t *testing.T, cfg operatortypes.ArtifactCleanupConfig) *Queue {
+	t.Helper()
+	q, err := NewQueue(nil, nil, nil, cfg)
+	require.NoError(t, err)
 	t.Cleanup(q.queue.ShutDown)
+	return q
+}
+
+func TestNewQueueDefaults(t *testing.T) {
+	q := newQueue(t, operatortypes.ArtifactCleanupConfig{BasePath: "/checkpoints"})
 	require.NotNil(t, q.queue)
 	assert.Equal(t, "/checkpoints", q.config.BasePath)
 	assert.Equal(t, backends.NamePVC, q.configuredBackend)
@@ -69,9 +76,13 @@ func TestNewQueueDefaults(t *testing.T) {
 	require.True(t, ok)
 }
 
+func TestNewQueueFailsWhenConfiguredBackendIsNotRegistered(t *testing.T) {
+	_, err := NewQueue(nil, nil, nil, operatortypes.ArtifactCleanupConfig{BasePath: "/checkpoints", BackendType: "s3"})
+	require.ErrorContains(t, err, `no maintenance backend implementation registered for configured store "s3"`)
+}
+
 func TestQueueBackendReturnsTheConfiguredBackend(t *testing.T) {
-	q := NewQueue(nil, nil, nil, operatortypes.ArtifactCleanupConfig{BasePath: "/checkpoints"})
-	t.Cleanup(q.queue.ShutDown)
+	q := newQueue(t, operatortypes.ArtifactCleanupConfig{BasePath: "/checkpoints"})
 
 	backend, err := q.backend()
 	require.NoError(t, err)
@@ -80,8 +91,7 @@ func TestQueueBackendReturnsTheConfiguredBackend(t *testing.T) {
 }
 
 func TestQueueBackendFailsWhenConfiguredBackendIsNotRegistered(t *testing.T) {
-	q := NewQueue(nil, nil, nil, operatortypes.ArtifactCleanupConfig{BasePath: "/checkpoints"})
-	t.Cleanup(q.queue.ShutDown)
+	q := newQueue(t, operatortypes.ArtifactCleanupConfig{BasePath: "/checkpoints"})
 	q.configuredBackend = "S3"
 
 	_, err := q.backend()
@@ -89,8 +99,7 @@ func TestQueueBackendFailsWhenConfiguredBackendIsNotRegistered(t *testing.T) {
 }
 
 func TestQueueBackendResolvesHelmsLowercaseBackendType(t *testing.T) {
-	q := NewQueue(nil, nil, nil, operatortypes.ArtifactCleanupConfig{BasePath: "/checkpoints", BackendType: "pvc"})
-	t.Cleanup(q.queue.ShutDown)
+	q := newQueue(t, operatortypes.ArtifactCleanupConfig{BasePath: "/checkpoints", BackendType: "pvc"})
 
 	backend, err := q.backend()
 	require.NoError(t, err)
