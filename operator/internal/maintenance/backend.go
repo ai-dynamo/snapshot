@@ -5,6 +5,7 @@ package maintenance
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/ai-dynamo/snapshot/operator/internal/maintenance/backends"
@@ -25,8 +26,23 @@ type BackendRegistry struct {
 	backends map[string]Backend
 }
 
-func (r *BackendRegistry) Init(cfg operatortypes.ArtifactCleanupConfig) {
+func (r *BackendRegistry) Init(ctx context.Context, cfg operatortypes.ArtifactCleanupConfig) error {
 	r.register(backends.NewPVCBackend(cfg.BasePath))
+	if cfg.S3 != nil {
+		s3Backend, err := backends.NewS3Backend(ctx, backends.S3Config{
+			Bucket:          cfg.S3.Bucket,
+			Prefix:          cfg.S3.Prefix,
+			Region:          cfg.S3.Region,
+			Endpoint:        cfg.S3.Endpoint,
+			CredentialsPath: cfg.S3.CredentialsPath,
+			CABundlePath:    cfg.S3.CABundlePath,
+		})
+		if err != nil {
+			return fmt.Errorf("construct S3 maintenance backend: %w", err)
+		}
+		r.register(s3Backend)
+	}
+	return nil
 }
 
 func (r *BackendRegistry) register(backend Backend) {
