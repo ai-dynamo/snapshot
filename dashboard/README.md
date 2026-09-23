@@ -78,6 +78,31 @@ otherwise passing runs. Clicking a chart point opens the run details with the
 previous-run and seven-run-median comparison, the commit, and links to the
 GitHub Actions run and commit.
 
+## Colors
+
+`src/colors.ts` owns every series color. Framework cases have fixed colors
+(vLLM teal, SGLang blue, TensorRT-LLM amber) and unknown cases pick from a
+fallback list by a stable hash of the case name, so a case keeps its color
+regardless of which other cases are visible.
+
+Stage segments in the stacked run chart are colored by measurement name, never
+by position in the current selection. Every measurement the agent and the
+framework test emit today (26 names) has its own entry in a fixed table; only a
+name missing from the table falls back to a stable hash of the name into three
+reserved colors. The eight muted stage colors behind the table are split in
+half: checkpoint-side measurements take the cool stops
+(teal, blue, green, slate) and restore-side measurements take the warm stops
+(rust, plum, purple, ochre), while infrastructure measurements (image pulls,
+agent-complete-to-traffic, total test time) are neutral grays, so a stacked bar
+reads as checkpoint half, restore half, and overhead at a glance. Sub-phases
+are lighter or darker shades of the same stops. The primary stages are at least
+ΔE 8 apart in OKLab and every pair within a family at least ΔE 7 apart, so the
+legend and tooltips are the secondary cue for neighbours in the same half. A
+measurement name that is not in the table takes one of three reserved muted
+colors that no known measurement uses. `src/colors.test.ts` enforces these
+guarantees; add new agent phases to the table there rather than relying on the
+reserved colors.
+
 ## GitHub Pages deployment
 
 The `E2E Benchmark Dashboard` workflow builds source from `main`, checks out the

@@ -14,7 +14,6 @@ import {
   DEFAULT_METRICS,
   STALE_HISTORY_DAYS,
   VALID_OUTCOMES,
-  caseColorIndex,
   commitUrl,
   daysSince,
   discoverDimensions,
@@ -47,16 +46,11 @@ import type {
   Outcome,
 } from "./data.ts";
 import { loadPreviewMetadata, type PreviewMetadata } from "./preview.ts";
+import { frameworkColor, stageColor } from "./colors.ts";
 import "./style.css";
 
 Chart.register(...registerables);
 
-const COLORS: Readonly<Record<string, string>> = {
-  vllm: "#76b900",
-  sglang: "#5d7fe5",
-  "tensorrt-llm": "#ef9f27",
-};
-const FALLBACK_COLORS = ["#18a999", "#b05fd3", "#e05a47", "#517891"] as const;
 const DEFAULT_METRIC_NAMES: ReadonlySet<string> = new Set(DEFAULT_METRICS);
 const DEFAULT_RANGE = "90";
 
@@ -121,24 +115,6 @@ function previewLabel(): string {
 }
 const STAGE_COMPARISON_RUN_COUNT = 7;
 const PREVIEW_OUTLINE = "#192527";
-
-const STAGE_COLORS = [
-  "#76b900",
-  "#5d7fe5",
-  "#ef9f27",
-  "#18a999",
-  "#b05fd3",
-  "#e05a47",
-  "#517891",
-  "#c9a227",
-  "#8a5cf6",
-] as const;
-
-// Colour by measurement name, not by position in the current selection, so a
-// stage keeps its colour when other measurements are checked or unchecked.
-function stageColor(name: string): string {
-  return STAGE_COLORS[caseColorIndex(name, STAGE_COLORS.length)]!;
-}
 
 async function start() {
   try {
@@ -1049,10 +1025,6 @@ function formatComparison(
 ): string {
   if (!comparison) return "no comparable baseline";
   return `${formatValue(comparison.value, unit)} (${formatDelta(comparison.deltaPercent)})`;
-}
-
-function frameworkColor(caseName: string): string {
-  return COLORS[caseName] ?? FALLBACK_COLORS[caseColorIndex(caseName, FALLBACK_COLORS.length)]!;
 }
 
 function frameworkLabel(value: string): string {
