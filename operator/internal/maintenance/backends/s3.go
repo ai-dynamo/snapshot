@@ -17,6 +17,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/go-logr/logr"
+
+	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 )
 
 const (
@@ -42,6 +44,18 @@ type S3Config struct {
 	CABundlePath    string
 }
 
+// NewS3Config copies an operator-facing S3Config into a backends.S3Config.
+func NewS3Config(cfg operatortypes.S3Config) S3Config {
+	return S3Config{
+		Bucket:          cfg.Bucket,
+		Prefix:          cfg.Prefix,
+		Region:          cfg.Region,
+		Endpoint:        cfg.Endpoint,
+		CredentialsPath: cfg.CredentialsPath,
+		CABundlePath:    cfg.CABundlePath,
+	}
+}
+
 // S3Backend implements maintenance.Backend against one S3-compatible bucket.
 // Every artifact for a content lives under <prefix>/artifacts/<contentUID>/.
 type S3Backend struct {
@@ -65,17 +79,17 @@ func NewS3Backend(ctx context.Context, cfg S3Config) (*S3Backend, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load S3 client config: %w", err)
 	}
-	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+	b := &S3Backend{}
+	b.client = s3.NewFromConfig(awsCfg, func(o *s3.Options) {
 		if cfg.Endpoint != "" {
 			o.BaseEndpoint = aws.String(cfg.Endpoint)
 			o.UsePathStyle = true
 		}
 	})
-	return &S3Backend{
-		client:          client,
-		bucket:          cfg.Bucket,
-		artifactsPrefix: strings.Trim(cfg.Prefix, "/") + "/artifacts/",
-	}, nil
+	b.bucket = cfg.Bucket
+	// "artifacts" mirrors PageBroker's key layout (see SNEP-237); do not change independently.
+	b.artifactsPrefix = strings.Trim(cfg.Prefix, "/") + "/artifacts/"
+	return b, nil
 }
 
 func s3HTTPClient(caBundlePath string) (*http.Client, error) {

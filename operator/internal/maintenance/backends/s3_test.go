@@ -13,7 +13,20 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 )
+
+func TestNewS3ConfigCopiesEveryField(t *testing.T) {
+	cfg := operatortypes.S3Config{
+		Bucket: "checkpoints", Prefix: "snapshots", Region: "us-east-1",
+		Endpoint: "https://s3.example.com", CredentialsPath: "/etc/creds", CABundlePath: "/etc/ca.pem",
+	}
+	assert.Equal(t, S3Config{
+		Bucket: "checkpoints", Prefix: "snapshots", Region: "us-east-1",
+		Endpoint: "https://s3.example.com", CredentialsPath: "/etc/creds", CABundlePath: "/etc/ca.pem",
+	}, NewS3Config(cfg))
+}
 
 type fakeS3API struct {
 	listPages     []*s3.ListObjectsV2Output
