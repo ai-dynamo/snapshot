@@ -38,7 +38,9 @@ type Queue struct {
 	queue workqueue.TypedRateLimitingInterface[WorkItemKey]
 }
 
-// NewQueue constructs a Queue; register it with the manager (mgr.Add) to run it.
+// NewQueue constructs a Queue; register it with the manager (mgr.Add) to run
+// it. It fails if the configured backend has no registered implementation,
+// so an unsupported --artifact-cleanup-backend-type cannot reach readiness.
 func NewQueue(kubeClient client.Client, apiReader client.Reader, recorder record.EventRecorder, cfg operatortypes.ArtifactCleanupConfig) (*Queue, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -59,6 +61,9 @@ func NewQueue(kubeClient client.Client, apiReader client.Reader, recorder record
 		),
 	}
 	q.registry.Init(cfg)
+	if _, err := q.backend(); err != nil {
+		return nil, err
+	}
 	return q, nil
 }
 

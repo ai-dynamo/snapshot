@@ -140,6 +140,13 @@ func TestNewQueueDefaults(t *testing.T) {
 	require.True(t, ok)
 }
 
+func TestNewQueueFailsWhenConfiguredBackendIsNotRegistered(t *testing.T) {
+	cfg := testConfig("/checkpoints")
+	cfg.BackendType = "s3"
+	_, err := NewQueue(nil, nil, nil, cfg)
+	require.ErrorContains(t, err, `no maintenance backend implementation registered for configured store "s3"`)
+}
+
 func TestQueueBackendReturnsTheConfiguredBackend(t *testing.T) {
 	q := newQueue(t, testConfig("/checkpoints"))
 
