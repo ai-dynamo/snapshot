@@ -41,20 +41,38 @@ func IsDialError(err error) bool {
 	return errors.As(err, &dial)
 }
 
-// failureError carries a Failure reply from PageBroker.
-type failureError struct {
+// FailureError exposes the broker's classification through errors.As. Neither a
+// failure nor a missing transaction after restart authorizes replaying capture.
+type FailureError struct {
 	code    Failure_Code
 	message string
 }
 
-func (e failureError) Error() string {
+func (e *FailureError) Error() string {
 	return fmt.Sprintf("PageBroker %s: %s", e.code, e.message)
+}
+
+// Code returns a known wire failure code; unknown codes map to UNSPECIFIED.
+func (e *FailureError) Code() Failure_Code { return e.code }
+
+func isStorageFailure(code Failure_Code) bool {
+	switch code {
+	case Failure_STORE_MISMATCH, Failure_ACCESS_DENIED, Failure_STORAGE_UNAVAILABLE,
+		Failure_ARTIFACT_NOT_FOUND, Failure_ARTIFACT_CORRUPT, Failure_UNSUPPORTED_ARTIFACT,
+		Failure_OUTCOME_UNKNOWN, Failure_TRANSACTION_EXPIRED:
+		return true
+	default:
+		return false
+	}
 }
 
 func failureCode(code Failure_Code) Failure_Code {
 	switch code {
 	case Failure_UNSPECIFIED, Failure_INVALID_REQUEST, Failure_TRANSACTION_NOT_FOUND, Failure_TRANSACTION_CONFLICT,
-		Failure_INSUFFICIENT_STORAGE, Failure_STORAGE_ERROR, Failure_INTERNAL_ERROR:
+		Failure_INSUFFICIENT_STORAGE, Failure_STORAGE_ERROR, Failure_INTERNAL_ERROR,
+		Failure_STORE_MISMATCH, Failure_ACCESS_DENIED, Failure_STORAGE_UNAVAILABLE,
+		Failure_ARTIFACT_NOT_FOUND, Failure_ARTIFACT_CORRUPT, Failure_UNSUPPORTED_ARTIFACT,
+		Failure_OUTCOME_UNKNOWN, Failure_TRANSACTION_EXPIRED:
 		return code
 	default:
 		return Failure_UNSPECIFIED

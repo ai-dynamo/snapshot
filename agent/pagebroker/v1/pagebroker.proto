@@ -27,10 +27,35 @@ message IOEngine
   }
 }
 
+// Logical identity before publication. Neither field is a filesystem path.
+message ArtifactIdentity
+{
+  string artifact_uid = 1;    // Owning PodSnapshotContent UID.
+  string container_name = 2;  // Captured container within that content.
+}
+// Selects the configured store and destination before capture begins.
+message ArtifactTarget
+{
+  string store_id = 1;            // Must match the configured store before I/O.
+  ArtifactIdentity artifact = 2;  // Logical destination within that store.
+}
+// Immutable publication descriptor, persisted by Snapshot after checkpoint Commit.
+// Handles are opaque to callers; the configured backend and version select the reader.
+message PublishedArtifact
+{
+  string store_id = 1;                 // Bind subsequent reads to the original store.
+  string artifact_handle = 2;          // Backend locator; callers persist it unchanged.
+  string artifact_format_version = 3;  // Select the configured backend's reader.
+}
+
 message StagedRestoreRequest
 {
+  // Legacy filesystem selector; mutually exclusive with artifact.
   StorageBackend source = 1;
+  // Required for legacy source. Optional with artifact: absence uses the configured
+  // engine; an explicit engine must support the bound store. It cannot select a store.
   IOEngine io_engine = 2;
+  PublishedArtifact artifact = 3;  // Exact committed source; never substitute another publication.
 }
 // Allows a future GPU engine to read source data without a staging directory.
 message DirectRestoreRequest
@@ -40,12 +65,21 @@ message DirectRestoreRequest
 }
 message PrepareStagedCheckpointRequest
 {
+  // Legacy filesystem selector; mutually exclusive with target.
   StorageBackend destination = 1;
+  // Required for legacy destination; optional with target (configured engine by default).
   IOEngine io_engine = 2;
+  ArtifactTarget target = 3;  // Validate the configured store and destination before capture.
+}
+// Fetch verified manifest.yaml for this exact publication into private shared staging.
+// Snapshot interprets the manifest. This does not verify all checkpoint payloads.
+message GetArtifactMetadataRequest
+{
+  PublishedArtifact artifact = 1;
 }
 // Completes a live transaction. PageBroker retains up to 1,024 terminal transactions for up to one hour.
-// Repeating Commit for a retained committed transaction returns CommitComplete; Commit for an aborted, expired, or
-// unknown transaction returns TRANSACTION_NOT_FOUND.
+// Repeating Commit returns the same retained result, including any PublishedArtifact.
+// Commit for an aborted, expired, or unknown transaction returns TRANSACTION_NOT_FOUND.
 message CommitRequest {}
 // Releases PageBroker state for a live transaction. PageBroker retains up to 1,024 terminal transactions for up to
 // one hour. Repeating Abort for a retained aborted transaction returns AbortComplete; Abort for a committed, expired,
@@ -56,8 +90,9 @@ message Request
 {
   // Snapshot assigns an ID to each request.
   optional string request_id = 1;
-  // Snapshot assigns a unique transaction ID before the first request and does not reuse it while PageBroker retains it.
-  // An uncommitted transaction expires one hour after staging begins.
+  // Snapshot assigns a unique transaction ID before the first request and never reuses it.
+  // This is distinct from the deterministic commitID derived from the artifact target.
+  // Retries never extend a transaction's lifetime.
   optional string transaction_id = 2;
   oneof command
   {
@@ -66,6 +101,8 @@ message Request
     CommitRequest commit = 5;
     AbortRequest abort = 6;
     DirectRestoreRequest direct_restore = 7;
+    // Storage extensions use 20+; 8-19 remain available to the separate CUDA workstream.
+    GetArtifactMetadataRequest get_artifact_metadata = 20;
   }
 }
 
@@ -78,7 +115,16 @@ message StagedCheckpointDirectory
 {
   optional string image_directory = 1;
 }
-message CommitComplete {}
+message CommitComplete
+{
+  // Required for target-addressed checkpoints. Absent for legacy checkpoints and restore cleanup.
+  PublishedArtifact published_artifact = 1;
+}
+message GetArtifactMetadataComplete
+{
+  // Absolute local directory, shared with Snapshot; valid until Abort or metadata transaction expiry.
+  string manifest_directory = 1;
+}
 // Confirms only that PageBroker transaction state/content was released; it says nothing about the target
 // process or CUDA state.
 message AbortComplete {}
@@ -99,9 +145,18 @@ message Failure
     STORAGE_ERROR = 5;
     // An unexpected broker failure occurred. The caller may Abort the transaction before retrying.
     INTERNAL_ERROR = 6;
+    // Storage extensions use 20+ to avoid the CUDA workstream's failure codes.
+    STORE_MISMATCH = 20;       // Descriptor/target names another configured store; no storage I/O.
+    ACCESS_DENIED = 21;        // Authentication, authorization or decryption refused; not proof of absence.
+    STORAGE_UNAVAILABLE = 22;  // Transient storage/transport failure after bounded retries.
+    ARTIFACT_NOT_FOUND = 23;   // Authoritative absence of the requested publication.
+    ARTIFACT_CORRUPT = 24;     // Invalid index, unsafe paths, missing indexed data or digest mismatch.
+    UNSUPPORTED_ARTIFACT = 25; // No reader for the backend/version pair.
+    OUTCOME_UNKNOWN = 26;     // Cannot establish publication outcome; never authorizes process replay.
+    TRANSACTION_EXPIRED = 27; // Fixed transaction deadline elapsed; no new storage operations.
   }
   optional Code code = 1;
-  optional string message = 2;
+  optional string message = 2; // New storage handlers: at most 1024 UTF-8 bytes, no credentials/SDK bodies.
 }
 message Response
 {
@@ -115,5 +170,6 @@ message Response
     AbortComplete abort_complete = 6;
     Failure failure = 7;
     DirectRestoreReady direct_restore_ready = 8;
+    GetArtifactMetadataComplete get_artifact_metadata_complete = 20;
   }
 }
