@@ -219,6 +219,8 @@ CommandName(Request::CommandCase command)
       return "commit";
     case Request::kAbort:
       return "abort";
+    case Request::kGetArtifactMetadata:
+      return "get_artifact_metadata";
     default:
       return "invalid";
   }
@@ -236,6 +238,8 @@ ResultName(const Response& response)
       return "committed";
     case Response::kAbortComplete:
       return "aborted";
+    case Response::kGetArtifactMetadataComplete:
+      return "artifact_metadata";
     case Response::kFailure:
       return "failed";
     default:
