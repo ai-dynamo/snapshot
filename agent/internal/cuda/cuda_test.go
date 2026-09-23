@@ -243,17 +243,27 @@ func installFakeNSenter(t *testing.T, body string) {
 
 func TestDiscoverVisibleGPUs(t *testing.T) {
 	installFakeNSenter(t, `
-test "$#" = 6
 test "$1" = "--mount=/host/proc/42/ns/mnt"
 test "$2" = "--pid=/host/proc/42/ns/pid"
 test "$3" = "--"
 test "$4" = "nvidia-smi"
-test "$5" = "--query-gpu=gpu_uuid,name,driver_version"
-test "$6" = "--format=csv,noheader"
-printf '%s\n' 'GPU-a, NVIDIA L4, 580.65.06'
+case "$5" in
+"--query-gpu=gpu_uuid,name,driver_version")
+	test "$#" = 6
+	test "$6" = "--format=csv,noheader"
+	printf '%s\n' 'GPU-a, NVIDIA L4, 580.65.06'
+	;;
+"-L")
+	test "$#" = 5
+	printf '%s\n' 'GPU 0: NVIDIA L4 (UUID: GPU-a)'
+	;;
+*)
+	exit 64
+	;;
+esac
 `)
 
-	got, err := DiscoverVisibleGPUs(context.Background(), "/host/proc/", 42, nvidiaSMITimeout)
+	got, err := DiscoverVisibleGPUs(context.Background(), "/host/proc/", 42, nvidiaSMITimeout, logr.Discard())
 	if err != nil {
 		t.Fatalf("DiscoverVisibleGPUs: %v", err)
 	}
@@ -266,10 +276,197 @@ printf '%s\n' 'GPU-a, NVIDIA L4, 580.65.06'
 	}
 }
 
+// --query-gpu reports the parent card for a container holding a slice, so the
+// slice's own UUID and shape can only come from the listing.
+func TestDiscoverVisibleGPUsRecordsTheMIGProfile(t *testing.T) {
+	installFakeNSenter(t, `
+case "$5" in
+"--query-gpu=gpu_uuid,name,driver_version")
+	printf '%s\n' 'GPU-b1c4, NVIDIA H100 80GB HBM3, 580.65.06'
+	;;
+"-L")
+	printf '%s\n' 'GPU 0: NVIDIA H100 80GB HBM3 (UUID: GPU-b1c4)' '  MIG 3g.40gb     Device  0: (UUID: MIG-7089d0f3-293f-58c9-8f8c-5ea666eedbde)'
+	;;
+esac
+`)
+
+	got, err := DiscoverVisibleGPUs(context.Background(), "/host/proc", 42, nvidiaSMITimeout, logr.Discard())
+	if err != nil {
+		t.Fatalf("DiscoverVisibleGPUs: %v", err)
+	}
+	want := compat.GPUInfo{
+		DriverVersion: "580.65.06",
+		Devices: []compat.GPUDevice{{
+			UUID:        "MIG-7089d0f3-293f-58c9-8f8c-5ea666eedbde",
+			ProductName: "NVIDIA H100 80GB HBM3",
+			MIGProfile:  "3g.40gb",
+		}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("DiscoverVisibleGPUs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestDiscoverVisibleGPUsExpandsEverySliceOfAParent(t *testing.T) {
+	installFakeNSenter(t, `
+case "$5" in
+"--query-gpu=gpu_uuid,name,driver_version")
+	printf '%s\n' 'GPU-b1c4, NVIDIA H100 80GB HBM3, 580.65.06'
+	;;
+"-L")
+	printf '%s\n' 'GPU 0: NVIDIA H100 80GB HBM3 (UUID: GPU-b1c4)' '  MIG 3g.40gb     Device  0: (UUID: MIG-aaa)' '  MIG 1g.10gb     Device  1: (UUID: MIG-bbb)'
+	;;
+esac
+`)
+
+	got, err := DiscoverVisibleGPUs(context.Background(), "/host/proc", 42, nvidiaSMITimeout, logr.Discard())
+	if err != nil {
+		t.Fatalf("DiscoverVisibleGPUs: %v", err)
+	}
+	want := compat.GPUInfo{
+		DriverVersion: "580.65.06",
+		Devices: []compat.GPUDevice{
+			{UUID: "MIG-aaa", ProductName: "NVIDIA H100 80GB HBM3", MIGProfile: "3g.40gb"},
+			{UUID: "MIG-bbb", ProductName: "NVIDIA H100 80GB HBM3", MIGProfile: "1g.10gb"},
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("DiscoverVisibleGPUs() = %#v, want %#v", got, want)
+	}
+}
+
+// The listing is a description, so losing it leaves the parent card recorded
+// rather than costing the checkpoint.
+func TestDiscoverVisibleGPUsSurvivesAFailedListing(t *testing.T) {
+	installFakeNSenter(t, `
+case "$5" in
+"--query-gpu=gpu_uuid,name,driver_version")
+	printf '%s\n' 'GPU-aaa, NVIDIA H100 80GB HBM3, 580.65.06'
+	;;
+*)
+	exit 17
+	;;
+esac
+`)
+
+	got, err := DiscoverVisibleGPUs(context.Background(), "/host/proc", 42, nvidiaSMITimeout, logr.Discard())
+	if err != nil {
+		t.Fatalf("DiscoverVisibleGPUs: %v", err)
+	}
+	want := compat.GPUInfo{
+		DriverVersion: "580.65.06",
+		Devices:       []compat.GPUDevice{{UUID: "GPU-aaa", ProductName: "NVIDIA H100 80GB HBM3"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("DiscoverVisibleGPUs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestParseNvidiaSmiMIGDevices(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   map[string][]migDevice
+	}{
+		{
+			name: "every slice under one parent",
+			output: `GPU 0: NVIDIA H100 80GB HBM3 (UUID: GPU-b1c4)
+  MIG 3g.40gb     Device  0: (UUID: MIG-7089d0f3-293f-58c9-8f8c-5ea666eedbde)
+  MIG 2g.20gb     Device  1: (UUID: MIG-56c30729-317f-5dd6-8da0-c3cc59e969e0)
+  MIG 1g.10gb     Device  2: (UUID: MIG-9d14fb21-4ae1-546f-a636-011582899c39)
+`,
+			want: map[string][]migDevice{"GPU-b1c4": {
+				{uuid: "MIG-7089d0f3-293f-58c9-8f8c-5ea666eedbde", profile: "3g.40gb"},
+				{uuid: "MIG-56c30729-317f-5dd6-8da0-c3cc59e969e0", profile: "2g.20gb"},
+				{uuid: "MIG-9d14fb21-4ae1-546f-a636-011582899c39", profile: "1g.10gb"},
+			}},
+		},
+		{
+			// Each slice belongs to the card listed above it, which is the
+			// only thing tying it to the UUID --query-gpu reports.
+			name: "slices split across two parents",
+			output: `GPU 0: NVIDIA H100 80GB HBM3 (UUID: GPU-aaa)
+  MIG 3g.40gb     Device  0: (UUID: MIG-000)
+GPU 1: NVIDIA H100 80GB HBM3 (UUID: GPU-bbb)
+  MIG 1g.10gb     Device  0: (UUID: MIG-111)
+`,
+			want: map[string][]migDevice{
+				"GPU-aaa": {{uuid: "MIG-000", profile: "3g.40gb"}},
+				"GPU-bbb": {{uuid: "MIG-111", profile: "1g.10gb"}},
+			},
+		},
+		{
+			// A parent GPU line carries no profile, so a node with MIG off
+			// yields nothing rather than failing.
+			name: "no MIG anywhere",
+			output: `GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-aaa)
+GPU 1: NVIDIA A100-SXM4-40GB (UUID: GPU-bbb)
+`,
+			want: map[string][]migDevice{},
+		},
+		{
+			name:   "nothing listed at all",
+			output: "\n",
+			want:   map[string][]migDevice{},
+		},
+		{
+			// The listing from the cluster this was validated on.
+			name:   "a whole GPU and nothing else",
+			output: "GPU 0: Tesla T4 (UUID: GPU-698b3416-207f-8e8f-99b8-533f00103ca9)\n",
+			want:   map[string][]migDevice{},
+		},
+		{
+			// Without a parent there is nothing to attach the slice to.
+			name:   "a slice with no parent line above it",
+			output: "  MIG 1g.10gb     Device  0: (UUID: MIG-abc)\n",
+			want:   map[string][]migDevice{},
+		},
+		{
+			name:   "a slice named the older MIG-GPU-<parent>/<gi>/<ci> way",
+			output: "GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-6ecb3c0f-aaa)\n  MIG 1g.5gb      Device  0: (UUID: MIG-GPU-6ecb3c0f-aaa/1/0)\n",
+			want:   map[string][]migDevice{"GPU-6ecb3c0f-aaa": {{uuid: "MIG-GPU-6ecb3c0f-aaa/1/0", profile: "1g.5gb"}}},
+		},
+		{
+			name:   "a profile carrying the media-extension suffix",
+			output: "GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-aaa)\n  MIG 1g.10gb+me  Device  0: (UUID: MIG-abc)\n",
+			want:   map[string][]migDevice{"GPU-aaa": {{uuid: "MIG-abc", profile: "1g.10gb+me"}}},
+		},
+		{
+			// Padding only aligns the columns, so its width and whether it is
+			// spaces or tabs leaves every value in the same column.
+			name:   "padded with single spaces",
+			output: "GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-aaa)\nMIG 1g.10gb Device 0: (UUID: MIG-abc)\n",
+			want:   map[string][]migDevice{"GPU-aaa": {{uuid: "MIG-abc", profile: "1g.10gb"}}},
+		},
+		{
+			name:   "padded with tabs",
+			output: "GPU\t0:\tNVIDIA A100-SXM4-40GB\t(UUID:\tGPU-aaa)\n\tMIG\t1g.10gb\tDevice\t0:\t(UUID:\tMIG-abc)\n",
+			want:   map[string][]migDevice{"GPU-aaa": {{uuid: "MIG-abc", profile: "1g.10gb"}}},
+		},
+		{
+			name:   "trailing text after the UUID",
+			output: "GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-aaa)\n  MIG 1g.10gb     Device  0: (UUID: MIG-abc)  extra\n",
+			want:   map[string][]migDevice{"GPU-aaa": {{uuid: "MIG-abc", profile: "1g.10gb"}}},
+		},
+		{
+			name:   "a MIG line whose device ordinal is not a number",
+			output: "GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-aaa)\n  MIG 1g.10gb     Device  X: (UUID: MIG-abc)\n",
+			want:   map[string][]migDevice{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseNvidiaSmiMIGDevices(tc.output); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("parseNvidiaSmiMIGDevices() = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestDiscoverVisibleGPUsReturnCommandFailure(t *testing.T) {
 	installFakeNSenter(t, "exit 17\n")
 
-	_, err := DiscoverVisibleGPUs(context.Background(), "/host/proc", 42, nvidiaSMITimeout)
+	_, err := DiscoverVisibleGPUs(context.Background(), "/host/proc", 42, nvidiaSMITimeout, logr.Discard())
 	if err == nil {
 		t.Fatal("DiscoverVisibleGPUs succeeded after nsenter failed")
 	}
@@ -663,7 +860,7 @@ func TestDiscoverGPUUUIDsOrdersDRAPodByContainerOrdinal(t *testing.T) {
 		"/proc",
 		123,
 		nvidiaSMITimeout,
-		func(context.Context, string, int, time.Duration) (compat.GPUInfo, error) {
+		func(context.Context, string, int, time.Duration, logr.Logger) (compat.GPUInfo, error) {
 			return compat.GPUInfo{
 				DriverVersion: "580.65.06",
 				Devices: []compat.GPUDevice{
@@ -717,12 +914,12 @@ func TestDiscoverGPUsDescribePodResourcesGPUs(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		visible func(context.Context, string, int, time.Duration) (compat.GPUInfo, error)
+		visible func(context.Context, string, int, time.Duration, logr.Logger) (compat.GPUInfo, error)
 		want    compat.GPUInfo
 	}{
 		{
 			name: "described in the kubelet's order",
-			visible: func(context.Context, string, int, time.Duration) (compat.GPUInfo, error) {
+			visible: func(context.Context, string, int, time.Duration, logr.Logger) (compat.GPUInfo, error) {
 				return compat.GPUInfo{
 					DriverVersion: "580.65.06",
 					Devices: []compat.GPUDevice{
@@ -741,7 +938,7 @@ func TestDiscoverGPUsDescribePodResourcesGPUs(t *testing.T) {
 		},
 		{
 			name: "undescribed when nvidia-smi cannot be reached",
-			visible: func(context.Context, string, int, time.Duration) (compat.GPUInfo, error) {
+			visible: func(context.Context, string, int, time.Duration, logr.Logger) (compat.GPUInfo, error) {
 				return compat.GPUInfo{}, errors.New("nsenter unavailable")
 			},
 			want: compat.GPUInfo{
@@ -750,7 +947,7 @@ func TestDiscoverGPUsDescribePodResourcesGPUs(t *testing.T) {
 		},
 		{
 			name: "undescribed when nvidia-smi reports other GPUs",
-			visible: func(context.Context, string, int, time.Duration) (compat.GPUInfo, error) {
+			visible: func(context.Context, string, int, time.Duration, logr.Logger) (compat.GPUInfo, error) {
 				return compat.GPUInfo{
 					DriverVersion: "580.65.06",
 					Devices:       []compat.GPUDevice{{UUID: "GPU-z", ProductName: "NVIDIA L4"}},
@@ -833,7 +1030,7 @@ func TestDiscoverGPUsFallBackToVisibleGPUs(t *testing.T) {
 		"/host/proc",
 		42,
 		nvidiaSMITimeout,
-		func(context.Context, string, int, time.Duration) (compat.GPUInfo, error) {
+		func(context.Context, string, int, time.Duration, logr.Logger) (compat.GPUInfo, error) {
 			return want, nil
 		},
 		logr.Discard(),
