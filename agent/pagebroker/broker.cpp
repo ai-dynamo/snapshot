@@ -19,7 +19,7 @@ namespace {
 
 constexpr auto kTerminalTransactionRetention = std::chrono::hours(1);
 constexpr size_t kMaxRetainedTerminalTransactions = 1024;
-constexpr auto kLiveTransactionLifetime = std::chrono::hours(2) + std::chrono::minutes(5);
+constexpr auto kRestoreCleanupMargin = std::chrono::minutes(5);
 
 Response
 Reply(const Request& request)
@@ -67,6 +67,12 @@ ValidateStagedRestore(const StagedRestoreRequest& request)
 {
   if (!request.has_source() || request.source().kind_case() == StorageBackend::KIND_NOT_SET)
     throw std::invalid_argument("restore source is required");
+  if (request.has_restore_timeout_seconds()) {
+    const auto max_timeout = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::duration::max() - kRestoreCleanupMargin);
+    if (request.restore_timeout_seconds() <= 0 || request.restore_timeout_seconds() > max_timeout.count())
+      throw std::invalid_argument("restore timeout must be positive and fit in a steady-clock duration with cleanup margin");
+  }
   return request.source();
 }
 
@@ -124,7 +130,7 @@ Broker::ReapExpiredTransactions(std::chrono::steady_clock::time_point now)
 
   for (const auto& [id, transaction] : transactions) {
     std::lock_guard transaction_lock(transaction->mutex());
-    if (!transaction->expired(now, kLiveTransactionLifetime))
+    if (!transaction->expired(now))
       continue;
 
     std::error_code restore_error;
@@ -309,6 +315,9 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
   }
   bool staging_reserved = true;
   try {
+    if (request.staged_restore().has_restore_timeout_seconds())
+      transaction->set_lifetime(
+          std::chrono::seconds(request.staged_restore().restore_timeout_seconds()) + kRestoreCleanupMargin);
     transaction->set_state(Transaction::State::PREPARING);
     engine.StageRestore(source, staging_directory);
     ReleaseStaging(bytes);
