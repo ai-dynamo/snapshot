@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 
@@ -27,6 +28,7 @@ func main() {
 	artifactCleanupConfig := bindArtifactCleanupFlags(flag.CommandLine)
 	cuInterposeConfig := bindCuInterposeFlags(flag.CommandLine)
 	flag.Parse()
+	finalizeArtifactCleanupFlags(artifactCleanupConfig)
 	if err := artifactCleanupConfig.Validate(); err != nil {
 		ctrl.Log.Error(err, "invalid artifact cleanup configuration")
 		os.Exit(1)
@@ -80,6 +82,7 @@ func main() {
 	}
 
 	maintenanceQueue, err := maintenance.NewQueue(
+		context.Background(),
 		mgr.GetClient(),
 		mgr.GetAPIReader(),
 		mgr.GetEventRecorderFor("podsnapshotcontent-artifact-cleanup"),

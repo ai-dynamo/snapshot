@@ -125,7 +125,7 @@ func TestProcessNextItemDoesNotRequeueItemCancelledInFlight(t *testing.T) {
 
 func newQueue(t *testing.T, cfg operatortypes.ArtifactCleanupConfig) *Queue {
 	t.Helper()
-	q, err := NewQueue(nil, nil, nil, cfg)
+	q, err := NewQueue(context.Background(), nil, nil, nil, cfg)
 	require.NoError(t, err)
 	t.Cleanup(q.queue.ShutDown)
 	return q
@@ -143,7 +143,7 @@ func TestNewQueueDefaults(t *testing.T) {
 func TestNewQueueFailsWhenConfiguredBackendIsNotRegistered(t *testing.T) {
 	cfg := testConfig("/checkpoints")
 	cfg.BackendType = "s3"
-	_, err := NewQueue(nil, nil, nil, cfg)
+	_, err := NewQueue(context.Background(), nil, nil, nil, cfg)
 	require.ErrorContains(t, err, `no maintenance backend implementation registered for configured store "s3"`)
 }
 
@@ -164,6 +164,18 @@ func TestQueueBackendFailsWhenConfiguredBackendIsNotRegistered(t *testing.T) {
 	require.ErrorContains(t, err, `no maintenance backend implementation registered for configured store "S3"`)
 }
 
+func TestNewQueueRegistersS3BackendWhenConfigured(t *testing.T) {
+	cfg := testConfig("/checkpoints")
+	cfg.S3 = &operatortypes.S3Config{
+		Bucket: "checkpoints", Region: "us-east-1", CredentialsPath: t.TempDir() + "/credentials",
+	}
+	q := newQueue(t, cfg)
+
+	backend, ok := q.registry.Get(backends.NameS3)
+	require.True(t, ok)
+	assert.Equal(t, backends.NameS3, backend.Name())
+}
+
 func TestQueueBackendResolvesHelmsLowercaseBackendType(t *testing.T) {
 	cfg := testConfig("/checkpoints")
 	cfg.BackendType = "pvc"
@@ -178,7 +190,7 @@ func TestQueueBackendResolvesHelmsLowercaseBackendType(t *testing.T) {
 func TestNewQueueRejectsInvalidConfig(t *testing.T) {
 	cfg := testConfig("/checkpoints")
 	cfg.Workers = 0
-	_, err := NewQueue(nil, nil, nil, cfg)
+	_, err := NewQueue(context.Background(), nil, nil, nil, cfg)
 	require.ErrorContains(t, err, "worker count must be positive")
 }
 
