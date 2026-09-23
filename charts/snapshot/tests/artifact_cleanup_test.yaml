@@ -25,12 +25,16 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].args[3]
           value: --artifact-cleanup-list-attempts=3
+      - equal:
+          path: spec.template.spec.containers[0].args[4]
+          value: --artifact-cleanup-workers=5
 
   - it: carries every non-default cleanup setting to the operator
     set:
       operator.artifactCleanup.scanInterval: 37s
       operator.artifactCleanup.batchSize: 7
       operator.artifactCleanup.listAttempts: 4
+      operator.artifactCleanup.workers: 8
     asserts:
       - equal:
           path: spec.template.spec.containers[0].args[1]
@@ -41,6 +45,9 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].args[3]
           value: --artifact-cleanup-list-attempts=4
+      - equal:
+          path: spec.template.spec.containers[0].args[4]
+          value: --artifact-cleanup-workers=8
 
   - it: hardens the root-running artifact cleanup manager
     asserts:
