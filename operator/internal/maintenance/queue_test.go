@@ -10,6 +10,7 @@ import (
 	"time"
 
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/operator/internal/maintenance/backends"
 	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -58,11 +59,52 @@ func TestStartRunsImmediateSweepAndShutsDownCleanly(t *testing.T) {
 	}
 }
 
-func TestNewQueueDefaults(t *testing.T) {
-	q := NewQueue(nil, nil, nil, operatortypes.ArtifactCleanupConfig{BasePath: "/checkpoints"})
+func newQueue(t *testing.T, cfg operatortypes.ArtifactCleanupConfig) *Queue {
+	t.Helper()
+	q, err := NewQueue(nil, nil, nil, cfg)
+	require.NoError(t, err)
 	t.Cleanup(q.queue.ShutDown)
+	return q
+}
+
+func TestNewQueueDefaults(t *testing.T) {
+	q := newQueue(t, operatortypes.ArtifactCleanupConfig{BasePath: "/checkpoints"})
 	require.NotNil(t, q.queue)
 	assert.Equal(t, "/checkpoints", q.config.BasePath)
+	assert.Equal(t, backends.NamePVC, q.configuredBackend)
+	_, ok := q.registry.Get(backends.NamePVC)
+	require.True(t, ok)
+}
+
+func TestNewQueueFailsWhenConfiguredBackendIsNotRegistered(t *testing.T) {
+	_, err := NewQueue(nil, nil, nil, operatortypes.ArtifactCleanupConfig{BasePath: "/checkpoints", BackendType: "s3"})
+	require.ErrorContains(t, err, `no maintenance backend implementation registered for configured store "s3"`)
+}
+
+func TestQueueBackendReturnsTheConfiguredBackend(t *testing.T) {
+	q := newQueue(t, operatortypes.ArtifactCleanupConfig{BasePath: "/checkpoints"})
+
+	backend, err := q.backend()
+	require.NoError(t, err)
+	registered, _ := q.registry.Get(backends.NamePVC)
+	assert.Same(t, registered, backend)
+}
+
+func TestQueueBackendFailsWhenConfiguredBackendIsNotRegistered(t *testing.T) {
+	q := newQueue(t, operatortypes.ArtifactCleanupConfig{BasePath: "/checkpoints"})
+	q.configuredBackend = "S3"
+
+	_, err := q.backend()
+	require.ErrorContains(t, err, `no maintenance backend implementation registered for configured store "S3"`)
+}
+
+func TestQueueBackendResolvesHelmsLowercaseBackendType(t *testing.T) {
+	q := newQueue(t, operatortypes.ArtifactCleanupConfig{BasePath: "/checkpoints", BackendType: "pvc"})
+
+	backend, err := q.backend()
+	require.NoError(t, err)
+	registered, _ := q.registry.Get(backends.NamePVC)
+	assert.Same(t, registered, backend)
 }
 
 type failingPatchClient struct {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/ai-dynamo/snapshot/agent/pkg/artifact"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/operator/internal/maintenance/backends"
 	operatortypes "github.com/ai-dynamo/snapshot/operator/internal/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -46,9 +47,10 @@ func newTestQueue(t *testing.T, basePath string, objects ...client.Object) (*Que
 	t.Helper()
 	kubeClient := ctrlfake.NewClientBuilder().WithScheme(maintenanceTestScheme(t)).WithObjects(objects...).Build()
 	recorder := record.NewFakeRecorder(10)
-	q := NewQueue(kubeClient, kubeClient, recorder, operatortypes.ArtifactCleanupConfig{
+	q, err := NewQueue(kubeClient, kubeClient, recorder, operatortypes.ArtifactCleanupConfig{
 		BasePath: basePath, ScanInterval: time.Hour, BatchSize: 10, ListAttempts: 3, Workers: 1,
 	})
+	require.NoError(t, err)
 	t.Cleanup(q.queue.ShutDown)
 	return q, recorder
 }
@@ -154,6 +156,25 @@ func TestProcessDeleteContentNoopWhenUIDMismatch(t *testing.T) {
 	assert.Contains(t, current.Finalizers, PodSnapshotContentArtifactCleanupFinalizer)
 }
 
+func TestProcessDeleteContentFailsWhenConfiguredBackendIsNotRegistered(t *testing.T) {
+	base, root := prepareTestArtifactRoot(t, "uid-7")
+	now := metav1.Now()
+	content := &snapshotv1alpha1.PodSnapshotContent{ObjectMeta: metav1.ObjectMeta{
+		Name: "content", UID: types.UID("uid-7"), ResourceVersion: "1", DeletionTimestamp: &now,
+		Finalizers: []string{PodSnapshotContentArtifactCleanupFinalizer},
+	}}
+	q, _ := newTestQueue(t, base, content)
+	q.configuredBackend = "S3"
+
+	err := q.processDeleteContent(context.Background(), newDeleteContentKey("", "content", "uid-7"))
+	require.ErrorContains(t, err, `no maintenance backend implementation registered for configured store "S3"`)
+	require.DirExists(t, root, "an unimplemented backend must not fall back to deleting via PVC")
+
+	current := &snapshotv1alpha1.PodSnapshotContent{}
+	require.NoError(t, q.client.Get(context.Background(), client.ObjectKey{Name: content.Name}, current))
+	assert.Contains(t, current.Finalizers, PodSnapshotContentArtifactCleanupFinalizer)
+}
+
 type metadataReader struct {
 	list  func(*metav1.PartialObjectMetadataList, *client.ListOptions) error
 	calls int
@@ -187,7 +208,7 @@ func TestProcessSweepDeletesOnFirstAuthoritativeAbsence(t *testing.T) {
 		emptyMetadataPage(list, "10", "")
 		return nil
 	}}
-	q := &Queue{apiReader: reader, config: operatortypes.ArtifactCleanupConfig{BasePath: base, BatchSize: 10, ListAttempts: 3}}
+	q := &Queue{apiReader: reader, config: operatortypes.ArtifactCleanupConfig{BasePath: base, BatchSize: 10, ListAttempts: 3}, registry: BackendRegistry{backends: map[string]Backend{backends.NamePVC: backends.NewPVCBackend(base)}}, configuredBackend: backends.NamePVC}
 	require.NoError(t, q.processSweep(context.Background(), log.Log))
 	_, err := os.Lstat(root)
 	require.True(t, os.IsNotExist(err))
@@ -207,7 +228,7 @@ func TestProcessSweepProtectsUIDOnFinalPage(t *testing.T) {
 		}
 		return nil
 	}}
-	q := &Queue{apiReader: reader, config: operatortypes.ArtifactCleanupConfig{BasePath: base, BatchSize: 10, ListAttempts: 3}}
+	q := &Queue{apiReader: reader, config: operatortypes.ArtifactCleanupConfig{BasePath: base, BatchSize: 10, ListAttempts: 3}, registry: BackendRegistry{backends: map[string]Backend{backends.NamePVC: backends.NewPVCBackend(base)}}, configuredBackend: backends.NamePVC}
 	require.NoError(t, q.processSweep(context.Background(), log.Log))
 	_, err := os.Lstat(root)
 	require.NoError(t, err)
@@ -219,7 +240,7 @@ func TestProcessSweepFailsClosedAfterListAttemptsExhausted(t *testing.T) {
 	reader := &metadataReader{list: func(*metav1.PartialObjectMetadataList, *client.ListOptions) error {
 		return assert.AnError
 	}}
-	q := &Queue{apiReader: reader, config: operatortypes.ArtifactCleanupConfig{BasePath: base, BatchSize: 10, ListAttempts: 3}}
+	q := &Queue{apiReader: reader, config: operatortypes.ArtifactCleanupConfig{BasePath: base, BatchSize: 10, ListAttempts: 3}, registry: BackendRegistry{backends: map[string]Backend{backends.NamePVC: backends.NewPVCBackend(base)}}, configuredBackend: backends.NamePVC}
 	require.Error(t, q.processSweep(context.Background(), log.Log))
 	assert.Equal(t, 3, reader.calls)
 	_, err := os.Lstat(root)
@@ -237,7 +258,7 @@ func TestProcessSweepProcessesBoundedBatch(t *testing.T) {
 		emptyMetadataPage(list, "30", "")
 		return nil
 	}}
-	q := &Queue{apiReader: reader, config: operatortypes.ArtifactCleanupConfig{BasePath: base, BatchSize: 10, ListAttempts: 3}}
+	q := &Queue{apiReader: reader, config: operatortypes.ArtifactCleanupConfig{BasePath: base, BatchSize: 10, ListAttempts: 3}, registry: BackendRegistry{backends: map[string]Backend{backends.NamePVC: backends.NewPVCBackend(base)}}, configuredBackend: backends.NamePVC}
 	require.NoError(t, q.processSweep(context.Background(), log.Log))
 	artifactsRoot, err := artifact.ResolveRoot(base)
 	require.NoError(t, err)
