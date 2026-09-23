@@ -124,8 +124,8 @@ helm upgrade --install snapshot ./charts/snapshot \
 
 ## PageBroker transfer engines
 
-PageBroker is opt-in at both deployment and workload level. The Snapshot Agent
-uses the configured transfer engine for checkpoint and restore requests. Build
+Every checkpoint and restore goes through PageBroker. The Snapshot Agent
+uses the configured transfer engine for these requests. Build
 the agent and dedicated PageBroker images from the same checkout and tag them
 alike. Only the PageBroker image includes the native Model Streamer library:
 
@@ -138,24 +138,12 @@ make docker-build-agent docker-build-pagebroker \
 
 helm upgrade --install snapshot ./charts/snapshot \
   --namespace "${NAMESPACE}" --create-namespace \
-  --set pageBroker.enabled=true \
   --set pageBroker.transferEngine=model-streamer \
   --set image.agent.repository=ghcr.io/YOUR_ACCOUNT/snapshot/agent \
   --set image.agent.tag=pagebroker-model-streamer \
   --set image.pageBroker.repository=ghcr.io/YOUR_ACCOUNT/snapshot/pagebroker
 ```
 
-Opt an individual workload into PageBroker by putting this annotation on the
-pod handled by the agent:
-
-```yaml
-metadata:
-  annotations:
-    nvidia.com/snapshot-pagebroker: "true"
-```
-
-For PageBroker restore, annotate the restore target pod. Annotating a
-checkpoint source pod also routes checkpoint staging through PageBroker, but
 Model Streamer currently accelerates restore reads only; its checkpoint path
 uses filesystem copy because Model Streamer does not provide a write API. The
 `pageBroker.transferEngine` value accepts `posix-copy` (the default) or
@@ -238,6 +226,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `storage.pvc.size`                 | Requested PVC size                                                                                                                                                            | `1Ti`                                          |
 | `storage.pvc.storageClass`         | Storage class name                                                                                                                                                            | `""`                                           |
 | `storage.pvc.basePath`             | Fixed checkpoint mount path enforced by the privileged helper                                                                                                                 | `/checkpoints`                                 |
+| `pageBroker.transferEngine` | PageBroker transfer engine: `posix-copy` or `model-streamer` | `posix-copy` |
 | `pageBroker.staging.sizeLimit`     | Cap on the memory-backed staging volume shared by the agent and PageBroker. Keep at or below both memory limits so oversized transfers are refused instead of OOM-killed      | `64Gi`                                         |
 | `pageBroker.maxConcurrentRequests` | Concurrent control-socket requests the daemon serves                                                                                                                          | `16`                                           |
 | `pageBroker.resources`             | CPU and memory requests/limits for the PageBroker sidecar. The memory limit bounds restore prefetch into staging                                                              | 1 CPU / 2Gi request, 32 CPU / 256Gi limit      |

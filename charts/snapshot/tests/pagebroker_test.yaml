@@ -179,7 +179,7 @@ tests:
     asserts:
       - matchRegex:
           path: data["config.yaml"]
-          pattern: "pageBroker:\n  controlSocketPath: \"/pagebroker/control/pagebroker.sock\""
+          pattern: "pageBroker:\n  transferEngine: \"posix-copy\"\n  controlSocketPath: \"/pagebroker/control/pagebroker.sock\""
 
   - it: runs the sidecar as a hardened root so it can write to the checkpoint PVC on any backend
     template: templates/daemonset.yaml
