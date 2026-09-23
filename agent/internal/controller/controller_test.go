@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"reflect"
-	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -168,8 +167,7 @@ func makeTestController(t *testing.T, pod *corev1.Pod, apiObjects ...runtime.Obj
 		restoreQueue:            workqueue.NewTypedDelayingQueue[client.ObjectKey](),
 		compareFn:               compat.Compare,
 		log:                     testr.New(t),
-		holderID:                "test-holder",
-		inFlight:                make(map[string]struct{}),
+		captureQueue:            newTestCaptureQueue(t),
 		stopCh:                  make(chan struct{}),
 	}
 	t.Cleanup(w.restoreQueue.ShutDown)
@@ -1466,15 +1464,151 @@ func TestApplyRestoredConditionPreservesTransitionTimeForSameStatus(t *testing.T
 	assert.Contains(t, string(lastPodStatusApply(t, w).GetPatch()), transition.UTC().Format(time.RFC3339))
 }
 
-func TestInFlightKeyIsDeduplicatedForCapture(t *testing.T) {
-	w := makeTestController(t, restorePod(nil))
-	key := "inference/restore-worker/main/ctr-abc"
+// TestRunQueueWorkersBoundsConcurrency pins the ceiling itself: with more items queued than
+// workers, no more than nodeQueueWorkers of them may be in flight at once, and every item must
+// still be processed.
+func TestRunQueueWorkersBoundsConcurrency(t *testing.T) {
+	const items = nodeQueueWorkers * 3
 
-	assert.True(t, w.tryAcquire(key))
-	assert.False(t, w.tryAcquire(key))
-	w.release(key)
-	assert.True(t, w.tryAcquire(key))
-	w.release(key)
+	queue := workqueue.NewTypedDelayingQueue[int]()
+	t.Cleanup(queue.ShutDown)
+	for i := range items {
+		queue.Add(i)
+	}
+
+	var mu sync.Mutex
+	inFlight, peak, processed := 0, 0, 0
+	release := make(chan struct{})
+	admitted := make(chan struct{}, items)
+
+	// Every worker parks on release, so a failure before the normal close would strand them.
+	// Cleanup runs before the queue's own ShutDown (LIFO), which is the order they need to exit.
+	var releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseAll)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runQueueWorkers(queue.Get, func(item int) {
+			defer queue.Done(item)
+			mu.Lock()
+			inFlight++
+			processed++
+			peak = max(peak, inFlight)
+			mu.Unlock()
+			admitted <- struct{}{}
+			<-release
+			mu.Lock()
+			inFlight--
+			mu.Unlock()
+		})
+	}()
+
+	// Let exactly one pool's worth start, then confirm the pool refuses to admit more. Each wait
+	// is bounded: a pool that admits too few would otherwise hang here until the package-wide test
+	// timeout, reporting a panic instead of the assertion that actually failed.
+	for started := range nodeQueueWorkers {
+		select {
+		case <-admitted:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("only %d of %d workers started; the pool is not admitting its full width",
+				started, nodeQueueWorkers)
+		}
+	}
+	select {
+	case <-admitted:
+		t.Fatal("an item was admitted beyond nodeQueueWorkers")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	releaseAll()
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return processed == items
+	}, 5*time.Second, 5*time.Millisecond, "every queued item must still be processed")
+
+	queue.ShutDown()
+	<-done
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, nodeQueueWorkers, peak, "concurrency must be capped at the pool size")
+}
+
+// TestCaptureQueueHoldsRetriggersUntilDone is the property that replaced the capture Lease: while
+// a work order is being reconciled, every further trigger for it is folded into one redelivery
+// that arrives only after the in-progress reconcile calls Done.
+func TestCaptureQueueHoldsRetriggersUntilDone(t *testing.T) {
+	w := makeTestController(t, restorePod(nil))
+	const name = "podsnapshotcontent-abc"
+
+	w.captureQueue.Add(name)
+	got, shutdown := w.captureQueue.Get()
+	require.False(t, shutdown)
+	assert.Equal(t, name, got)
+
+	// Three triggers arrive mid-reconcile (content event, resync, source-pod event).
+	w.captureQueue.Add(name)
+	w.captureQueue.Add(name)
+	w.captureQueue.Add(name)
+	assert.Equal(t, 0, w.captureQueue.Len(), "a key being processed is not handed out again")
+
+	w.captureQueue.Done(name)
+	assert.Equal(t, 1, w.captureQueue.Len(), "the triggers collapse into a single redelivery")
+
+	got, shutdown = w.captureQueue.Get()
+	require.False(t, shutdown)
+	assert.Equal(t, name, got)
+	w.captureQueue.Done(name)
+}
+
+func TestEnqueueCaptureForSourcePodQueuesEveryNamedWorkOrder(t *testing.T) {
+	w := makeTestController(t, restorePod(nil))
+	w.contentIndexer = seedIndex(t,
+		contentForWorker0("podsnapshotcontent-a", metav1.Unix(1000, 0), ""),
+		contentForWorker0("podsnapshotcontent-b", metav1.Unix(2000, 0), ""),
+	)
+
+	w.enqueueCaptureForSourcePod(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "inference", Name: "worker-0"},
+	})
+
+	assert.Equal(t, 2, w.captureQueue.Len())
+}
+
+func TestEnqueueCaptureForSourcePodIgnoresUnknownPod(t *testing.T) {
+	w := makeTestController(t, restorePod(nil))
+	w.contentIndexer = seedIndex(t)
+
+	w.enqueueCaptureForSourcePod(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "inference", Name: "worker-0"},
+	})
+	w.enqueueCaptureForSourcePod("not-a-pod")
+
+	assert.Equal(t, 0, w.captureQueue.Len())
+}
+
+// TestProcessCaptureQueueItemRequeuesOnError proves a failed reconcile is retried rather than
+// dropped — the workqueue is what replaced "the informer resync will come round again".
+func TestProcessCaptureQueueItemRequeuesOnError(t *testing.T) {
+	w := makeTestController(t, restorePod(nil))
+	// An indexer without podRefIndex makes captureOwnerForPod fail; any reconcile error will do.
+	w.contentIndexer = cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	content := makeWorkOrder("podsnapshotcontent-abc", testNodeName, "abc")
+	pod := makeSourcePod()
+	pod.Spec.NodeName = testNodeName
+	w.client = ctrlfake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(content, pod).
+		WithStatusSubresource(&snapshotv1alpha1.PodSnapshotContent{}).Build()
+
+	w.captureQueue.Add(content.Name)
+	got, _ := w.captureQueue.Get()
+	w.processCaptureQueueItem(context.Background(), got)
+
+	assert.Eventually(t, func() bool { return w.captureQueue.Len() == 1 }, time.Second, 5*time.Millisecond,
+		"a reconcile error must be requeued with backoff")
 }
 
 func TestRunRestoreCleanupFailureStillCompletesRestore(t *testing.T) {
@@ -1593,11 +1727,4 @@ func TestRestoreArtifactReady(t *testing.T) {
 	require.NoError(t, os.WriteFile(file, []byte("x"), 0o600))
 	_, err = w.restoreArtifactReady(testr.New(t), "inference/restore-worker", file)
 	require.Error(t, err)
-}
-
-func TestCheckpointLeaseNameUsesContentAndContainer(t *testing.T) {
-	a := checkpointLeaseName("content-uid", "main")
-	b := checkpointLeaseName("content-uid", "worker")
-	assert.NotEqual(t, a, b)
-	assert.True(t, strings.HasPrefix(a, "snapshot-capture-"))
 }

@@ -17,7 +17,6 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -76,8 +76,8 @@ func contentScheme(t *testing.T) *runtime.Scheme {
 
 // makeNodeController builds a NodeController wired to a fake typed client, runtime, and seam. Any
 // PodSnapshotContent in objs is also added to the podRef index (mirroring the content informer's
-// cache) so the pod-driven reconcileSourcePod can resolve it; tests that need a different index
-// state override w.contentIndexer after construction.
+// cache) so reconcileCapture can resolve which work order owns the source pod; tests that need a
+// different index state override w.contentIndexer after construction.
 func makeNodeController(t *testing.T, fc *fakeCheckpointer, objs ...client.Object) *NodeController {
 	t.Helper()
 	s := contentScheme(t)
@@ -94,12 +94,23 @@ func makeNodeController(t *testing.T, fc *fakeCheckpointer, objs ...client.Objec
 			WithStatusSubresource(&snapshotv1alpha1.PodSnapshotContent{}).Build(),
 		runtime:        &fakeRuntime{},
 		log:            logr.Discard(),
-		holderID:       "snapshot-agent/test",
-		inFlight:       make(map[string]struct{}),
 		contentIndexer: idx,
+		captureQueue:   newTestCaptureQueue(t),
 	}
 	w.checkpointFn = fc.fn
 	return w
+}
+
+// newTestCaptureQueue builds the capture workqueue with the production rate limiter. Shut down at
+// test end so its delaying goroutine does not outlive the test.
+func newTestCaptureQueue(t *testing.T) workqueue.TypedRateLimitingInterface[string] {
+	t.Helper()
+	q := workqueue.NewTypedRateLimitingQueueWithConfig(
+		workqueue.DefaultTypedControllerRateLimiter[string](),
+		workqueue.TypedRateLimitingQueueConfig[string]{Name: "capture-contents-test"},
+	)
+	t.Cleanup(q.ShutDown)
+	return q
 }
 
 // makeWorkOrder builds a PodSnapshotContent work order pinned to a node.
@@ -172,9 +183,9 @@ func TestSingleTargetContainer(t *testing.T) {
 	}
 }
 
-// TestReconcileSourcePod_InvalidTargetContainerFails proves the capture path self-defends against a
+// TestReconcileCapture_InvalidTargetContainerFails proves the capture path self-defends against a
 // work order whose PodReference.Containers violates the exactly-one CRD cap.
-func TestReconcileSourcePod_InvalidTargetContainerFails(t *testing.T) {
+func TestReconcileCapture_InvalidTargetContainerFails(t *testing.T) {
 	cases := []struct {
 		name       string
 		containers []string
@@ -190,7 +201,7 @@ func TestReconcileSourcePod_InvalidTargetContainerFails(t *testing.T) {
 			pod := makeSourcePod()
 			w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
 
-			require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+			require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 
 			got := getContent(t, w, content.Name)
 			cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
@@ -217,32 +228,38 @@ func getPod(t *testing.T, w *NodeController, namespace, name string) *corev1.Pod
 	return p
 }
 
-func TestReconcileSnapshotContent_IgnoresOtherNode(t *testing.T) {
+func TestReconcileCapture_IgnoresOtherNode(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-b", "x")
 	fc := &fakeCheckpointer{}
 	w := makeNodeController(t, fc, content)
 
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 	assert.False(t, fc.wasCalled())
 	got := getContent(t, w, content.Name)
 	assert.Empty(t, got.Status.Conditions)
 }
 
-func TestReconcileSnapshotContent_GateLabelsPodOnSuccess(t *testing.T) {
+// TestReconcileCapture_PromotesPodAndCaptures covers the happy path: a valid source pod is both
+// promoted with CaptureEligibleLabel and dumped in the same pass, because validation and the dump
+// are one serialized unit of work.
+func TestReconcileCapture_PromotesPodAndCaptures(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	pod := makeSourcePod()
 	fc := &fakeCheckpointer{}
 	w := makeNodeController(t, fc, content, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 7}
 
-	// The gate promotes a valid pod by labeling it; it must NOT run the capture flow itself.
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 
-	assert.False(t, fc.wasCalled(), "gate must not invoke the dump directly")
+	assert.True(t, fc.wasCalled())
 	assert.Equal(t, "true", getPod(t, w, "inference", "worker-0").Labels[snapshotv1alpha1.CaptureEligibleLabel])
-	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
+	assert.NotNil(t, meta.FindStatusCondition(
+		getContent(t, w, content.Name).Status.Conditions,
+		snapshotv1alpha1.PodSnapshotConditionReady,
+	))
 }
 
-func TestReconcileSnapshotContent_DeletingContentDoesNotLabelPod(t *testing.T) {
+func TestReconcileCapture_DeletingContentDoesNotLabelPod(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	now := metav1.Now()
 	content.DeletionTimestamp = &now
@@ -250,29 +267,14 @@ func TestReconcileSnapshotContent_DeletingContentDoesNotLabelPod(t *testing.T) {
 	pod := makeSourcePod()
 	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
 
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 
 	_, labeled := getPod(t, w, "inference", "worker-0").Labels[snapshotv1alpha1.CaptureEligibleLabel]
 	assert.False(t, labeled)
 	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
 }
 
-func TestReconcileSourcePod_InFlightGuard(t *testing.T) {
-	// The UID is unrelated to the content name, proving the guard is keyed on the
-	// immutable content UID and target container, not the content name.
-	content := makeWorkOrder("podsnapshotcontent-mywork", "node-a", "x")
-	content.UID = types.UID("unrelated-content-uid")
-	pod := makeSourcePod()
-	pod.Labels[snapshotv1alpha1.CaptureEligibleLabel] = "true"
-	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
-	w.inFlight[string(content.UID)+"/main"] = struct{}{}
-
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
-	got := getContent(t, w, content.Name)
-	assert.Empty(t, got.Status.Conditions, "in-flight guard must not write any status")
-}
-
-func TestReconcileSourcePod_DeletingContentDoesNotStartCapture(t *testing.T) {
+func TestReconcileCapture_DeletingContentDoesNotStartCapture(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	now := metav1.Now()
 	content.DeletionTimestamp = &now
@@ -283,22 +285,21 @@ func TestReconcileSourcePod_DeletingContentDoesNotStartCapture(t *testing.T) {
 	w := makeNodeController(t, fc, content, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: 7}
 
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 
 	assert.False(t, fc.wasCalled())
-	assert.Empty(t, w.inFlight)
 	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
 	assert.Empty(t, w.clientset.(*k8sfake.Clientset).Actions())
 }
 
-func TestReconcileSourcePod_ProvenanceInvalidFailsAndUnlabels(t *testing.T) {
+func TestReconcileCapture_ProvenanceInvalidFailsAndUnlabels(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	pod := makeSourcePod()
 	pod.UID = types.UID("stale-uid") // UID mismatch vs the work order's pinned source UID
 	pod.Labels[snapshotv1alpha1.CaptureEligibleLabel] = "true"
 	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
 
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 
 	cond := meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
 	require.NotNil(t, cond)
@@ -307,24 +308,53 @@ func TestReconcileSourcePod_ProvenanceInvalidFailsAndUnlabels(t *testing.T) {
 	assert.False(t, labeled, "eligible label must be removed on cancellation")
 }
 
-func TestReconcileSourcePod_InFlightShortCircuits(t *testing.T) {
-	// The guard is keyed on the immutable content UID and container.
-	content := makeWorkOrder("podsnapshotcontent-mywork", "node-a", "x")
+// TestReconcileCapture_ConcurrentTriggerCannotFailARunningCapture is the regression the capture
+// Lease used to cover. The source pod turns terminal the moment the dump kills it, so a trigger
+// that lands while the dump is running would read a dead source and write a sticky SourcePodGone.
+// The queue is what prevents it: the work order's key is in progress, so that trigger is held and
+// only redelivered once the capture has recorded its own outcome.
+func TestReconcileCapture_ConcurrentTriggerCannotFailARunningCapture(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	pod := makeSourcePod()
-	pod.Labels[snapshotv1alpha1.CaptureEligibleLabel] = "true"
-	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
-	// A dump is already in flight: tryAcquire short-circuits before any further work, so a second
-	// reconcile does nothing — no status write, no relabel.
-	w.inFlight[string(content.UID)+"/main"] = struct{}{}
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 7}
 
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	dumping := make(chan struct{})
+	finish := make(chan struct{})
+	w.checkpointFn = func(ctx context.Context, params CheckpointParams) error {
+		close(dumping)
+		<-finish
+		// The dump kills the source: by the time it returns, the pod is terminal.
+		terminal := makeSourcePod()
+		terminal.Status.Phase = corev1.PodFailed
+		require.NoError(t, w.client.Update(ctx, terminal))
+		return fc.fn(ctx, params)
+	}
 
-	got := getPod(t, w, "inference", "worker-0")
-	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions, "in-flight dump must not be touched")
-	assert.Equal(t, "true", got.Labels[snapshotv1alpha1.CaptureEligibleLabel], "in-flight dump must not be unlabeled")
+	w.captureQueue.Add(content.Name)
+	name, _ := w.captureQueue.Get()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.processCaptureQueueItem(context.Background(), name)
+	}()
+
+	<-dumping
+	// Both informers fire while the dump runs; neither may reach a reconcile.
+	w.enqueueContent(mustUnstructured(t, content))
+	w.enqueueCaptureForSourcePod(pod)
+	assert.Equal(t, 0, w.captureQueue.Len(), "a work order being captured must not be handed to a second worker")
+
+	close(finish)
+	<-done
+
+	got := getContent(t, w, content.Name)
+	assert.NotNil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
+	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
 }
 
-func TestReconcileSnapshotContent_FailedContainerUnsticksAndFails(t *testing.T) {
+func TestReconcileCapture_FailedContainerUnsticksAndFails(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -347,7 +377,7 @@ func TestReconcileSnapshotContent_FailedContainerUnsticksAndFails(t *testing.T) 
 	w := makeNodeController(t, fc, content, pod)
 	w.runtime = rt
 
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 
 	got := getContent(t, w, content.Name)
 	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
@@ -358,7 +388,6 @@ func TestReconcileSnapshotContent_FailedContainerUnsticksAndFails(t *testing.T) 
 	// Only the still-running sibling is resolved for the SIGKILL; the dead container is skipped.
 	assert.Equal(t, []string{"main-id"}, rt.resolvedContainerIDs)
 	assert.False(t, fc.wasCalled())
-	assert.Empty(t, w.inFlight)
 }
 
 func TestFailCheckpointOnContainerExit_IgnoresCleanExit(t *testing.T) {
@@ -368,35 +397,85 @@ func TestFailCheckpointOnContainerExit_IgnoresCleanExit(t *testing.T) {
 		{Name: "helper", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
 	}}}
 
-	handled := w.failCheckpointOnContainerExit(context.Background(), &snapshotv1alpha1.PodSnapshotContent{}, pod)
+	handled, err := w.failCheckpointOnContainerExit(context.Background(), &snapshotv1alpha1.PodSnapshotContent{}, pod)
+	require.NoError(t, err)
 	assert.False(t, handled)
 }
 
-func TestReconcileSnapshotContent_UsesContentUIDArtifactIdentity(t *testing.T) {
+// TestReconcileCapture_NonOwnerNeverKillsTheOwnersSource is the regression behind moving the
+// ownership guard above the unstick sweep. Mid-dump the target shows a non-zero exit, so a sibling
+// work order reaching failCheckpointOnContainerExit would SIGKILL the container the owner is still
+// dumping — and fail itself for good measure. A non-owner must read that state and do nothing.
+func TestReconcileCapture_NonOwnerNeverKillsTheOwnersSource(t *testing.T) {
+	owner := makeWorkOrder("podsnapshotcontent-old", "node-a", "abc")
+	owner.CreationTimestamp = metav1.Unix(1000, 0)
+	sibling := makeWorkOrder("podsnapshotcontent-new", "node-a", "abc")
+	sibling.CreationTimestamp = metav1.Unix(2000, 0)
+
+	// The pod as it looks while the owner's dump is terminating the target.
+	pod := makeSourcePod()
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+		{Name: "main", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137}}, ContainerID: "containerd://main-id"},
+		{Name: "helper", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}, ContainerID: "containerd://helper-id"},
+	}
+	fc := &fakeCheckpointer{}
+	rt := &fakeRuntime{}
+	w := makeNodeController(t, fc, owner, sibling, pod)
+	w.runtime = rt
+
+	require.NoError(t, w.reconcileCapture(context.Background(), sibling.Name))
+
+	assert.Empty(t, rt.resolvedContainerIDs,
+		"a non-owner must not resolve or signal containers of a pod another work order is dumping")
+	assert.False(t, sawEventReason(w.clientset.(*k8sfake.Clientset), "CheckpointFailed"),
+		"a non-owner must not announce a failure for the owner's pod")
+	assert.Empty(t, getContent(t, w, sibling.Name).Status.Conditions,
+		"a non-owner must not write its own terminal status from the owner's pod state")
+	assert.Empty(t, getContent(t, w, owner.Name).Status.Conditions)
+	assert.False(t, fc.wasCalled())
+}
+
+// TestReconcileCapture_ContainerExitStatusWriteErrorRequeues keeps the unstick path on the same
+// retry contract as every other terminal write in reconcileCapture: a status write that did not
+// land surfaces as an error so the queue retries, rather than being logged and left to the resync.
+func TestReconcileCapture_ContainerExitStatusWriteErrorRequeues(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	content.CreationTimestamp = metav1.Unix(1000, 0)
+	pod := podWithFailedSibling()
+	funcs := interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			return errors.New("status patch rejected")
+		},
+	}
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content, pod)
+
+	err := w.reconcileCapture(context.Background(), content.Name)
+
+	require.Error(t, err, "an unwritten terminal status must requeue, not be swallowed")
+	assert.Contains(t, err.Error(), "status patch rejected")
+	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
+}
+
+func TestReconcileCapture_UsesContentUIDArtifactIdentity(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-unrelated-name", "node-a", "abc")
 	pod := makeSourcePod()
 	fc := &fakeCheckpointer{}
 	w := makeNodeController(t, fc, content, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: 7}
 
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
-	require.Eventually(t, fc.wasCalled, time.Second, 5*time.Millisecond)
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 
+	require.True(t, fc.wasCalled())
 	params := fc.lastParams()
 	assert.Equal(t, string(content.UID), params.ContentUID)
 	assert.Equal(t, filepath.Join(w.config.Storage.BasePath, "artifacts", string(content.UID), "containers", "main"), params.HostPath)
-
-	// setSnapshotContentSucceeded runs after checkpointFn returns, so poll for the Ready condition rather than reading once.
-	require.Eventually(t, func() bool {
-		c := &snapshotv1alpha1.PodSnapshotContent{}
-		if err := w.client.Get(context.Background(), types.NamespacedName{Name: content.Name}, c); err != nil {
-			return false
-		}
-		return meta.FindStatusCondition(c.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady) != nil
-	}, time.Second, 5*time.Millisecond)
+	assert.NotNil(t, meta.FindStatusCondition(
+		getContent(t, w, content.Name).Status.Conditions,
+		snapshotv1alpha1.PodSnapshotConditionReady,
+	))
 }
 
-func TestReconcileSnapshotContent_ResumeWritesReady(t *testing.T) {
+func TestReconcileCapture_ResumeWritesReady(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	pod := makeSourcePod()
 	fc := &fakeCheckpointer{}
@@ -406,18 +485,18 @@ func TestReconcileSnapshotContent_ResumeWritesReady(t *testing.T) {
 	require.NoError(t, os.MkdirAll(dest, 0o755))
 	require.NoError(t, snapshottypes.WriteManifest(dest, &snapshottypes.CheckpointManifest{Artifact: snapshottypes.ArtifactManifest{ContentUID: string(content.UID), ContainerName: "main"}}))
 
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 	assert.False(t, fc.wasCalled())
 	got := getContent(t, w, content.Name)
 	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady)
 	require.NotNil(t, cond)
 }
 
-// TestReconcileSourcePod_ArtifactRecoveryPrecedesLivenessFailures covers the crash window:
+// TestReconcileCapture_ArtifactRecoveryPrecedesLivenessFailures covers the crash window:
 // the dump committed the artifact and terminated the source (pod Failed, target container
 // exited 137, PID unresolvable), but the agent died before the Ready write. Recovery must
 // mark Ready instead of tripping any liveness-derived failure.
-func TestReconcileSourcePod_ArtifactRecoveryPrecedesLivenessFailures(t *testing.T) {
+func TestReconcileCapture_ArtifactRecoveryPrecedesLivenessFailures(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	pod := makeSourcePod()
 	pod.Status.Phase = corev1.PodFailed
@@ -433,7 +512,7 @@ func TestReconcileSourcePod_ArtifactRecoveryPrecedesLivenessFailures(t *testing.
 	require.NoError(t, os.MkdirAll(dest, 0o755))
 	require.NoError(t, snapshottypes.WriteManifest(dest, &snapshottypes.CheckpointManifest{Artifact: snapshottypes.ArtifactManifest{ContentUID: string(content.UID), ContainerName: "main"}}))
 
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 
 	assert.False(t, fc.wasCalled())
 	assert.Empty(t, rt.resolvedContainerIDs, "recovery must not resolve or signal the dead container")
@@ -442,16 +521,16 @@ func TestReconcileSourcePod_ArtifactRecoveryPrecedesLivenessFailures(t *testing.
 	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
 }
 
-// TestReconcileSourcePod_TerminalPodWithoutArtifactFails proves the artifact-first ordering
+// TestReconcileCapture_TerminalPodWithoutArtifactFails proves the artifact-first ordering
 // does not swallow genuine failures: a dead source with no committed artifact stays terminal.
-func TestReconcileSourcePod_TerminalPodWithoutArtifactFails(t *testing.T) {
+func TestReconcileCapture_TerminalPodWithoutArtifactFails(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	pod := makeSourcePod()
 	pod.Status.Phase = corev1.PodFailed
 	pod.Status.ContainerStatuses = nil
 	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
 
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 
 	got := getContent(t, w, content.Name)
 	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
@@ -459,7 +538,9 @@ func TestReconcileSourcePod_TerminalPodWithoutArtifactFails(t *testing.T) {
 	assert.Equal(t, "SourcePodGone", cond.Reason)
 }
 
-func TestReconcileSourcePod_ReadyDoesNotStarveNewDump(t *testing.T) {
+// TestReconcileCapture_ReadyDoesNotStarveNewDump proves a finished work order does not keep
+// ownership of its source pod: the newer pending one is free to dump.
+func TestReconcileCapture_ReadyDoesNotStarveNewDump(t *testing.T) {
 	ready := makeWorkOrder("podsnapshotcontent-old", "node-a", "abc")
 	ready.CreationTimestamp = metav1.Unix(1000, 0)
 	meta.SetStatusCondition(&ready.Status.Conditions, metav1.Condition{
@@ -475,11 +556,11 @@ func TestReconcileSourcePod_ReadyDoesNotStarveNewDump(t *testing.T) {
 	w := makeNodeController(t, fc, ready, pending, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: 7}
 
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
-	require.Eventually(t, fc.wasCalled, time.Second, 5*time.Millisecond)
+	require.NoError(t, w.reconcileCapture(context.Background(), pending.Name))
+	assert.True(t, fc.wasCalled())
 }
 
-func TestReconcileSourcePod_InvalidReadySpecDoesNotStarveNewDump(t *testing.T) {
+func TestReconcileCapture_InvalidReadySpecDoesNotStarveNewDump(t *testing.T) {
 	ready := makeWorkOrder("podsnapshotcontent-old", "node-a", "abc")
 	ready.CreationTimestamp = metav1.Unix(1000, 0)
 	ready.Spec.Source.PodRef.Containers = nil
@@ -496,11 +577,29 @@ func TestReconcileSourcePod_InvalidReadySpecDoesNotStarveNewDump(t *testing.T) {
 	w := makeNodeController(t, fc, ready, pending, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: 7}
 
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
-	require.Eventually(t, fc.wasCalled, time.Second, 5*time.Millisecond)
+	require.NoError(t, w.reconcileCapture(context.Background(), pending.Name))
+	assert.True(t, fc.wasCalled())
 }
 
-func TestReconcileSourcePod_ReadyContentIsNoOp(t *testing.T) {
+// TestReconcileCapture_OlderWorkOrderOwnsTheSourcePod pins the one-capture-per-pod rule: keys are
+// per work order, so the newer sibling must stand down rather than dump the same container.
+func TestReconcileCapture_OlderWorkOrderOwnsTheSourcePod(t *testing.T) {
+	older := makeWorkOrder("podsnapshotcontent-old", "node-a", "abc")
+	older.CreationTimestamp = metav1.Unix(1000, 0)
+	newer := makeWorkOrder("podsnapshotcontent-new", "node-a", "abc")
+	newer.CreationTimestamp = metav1.Unix(2000, 0)
+	pod := makeSourcePod()
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, older, newer, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 7}
+
+	require.NoError(t, w.reconcileCapture(context.Background(), newer.Name))
+
+	assert.False(t, fc.wasCalled(), "the newer work order must not dump while an older one is active")
+	assert.Empty(t, getContent(t, w, newer.Name).Status.Conditions)
+}
+
+func TestReconcileCapture_ReadyContentIsNoOp(t *testing.T) {
 	ready := makeWorkOrder("podsnapshotcontent-ready", "node-a", "abc")
 	meta.SetStatusCondition(&ready.Status.Conditions, metav1.Condition{
 		Type:    snapshotv1alpha1.PodSnapshotConditionReady,
@@ -514,93 +613,15 @@ func TestReconcileSourcePod_ReadyContentIsNoOp(t *testing.T) {
 
 	// A Ready work order is terminal: nothing to dump, nothing to release —
 	// the dump already terminated the source process.
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	require.NoError(t, w.reconcileCapture(context.Background(), ready.Name))
 	assert.False(t, fc.wasCalled())
 }
 
-func TestRunCheckpoint_LeaseCancelledAfterDumpFailsAndKills(t *testing.T) {
-	orig := checkpointLeaseRenewInterval
-	checkpointLeaseRenewInterval = time.Millisecond
-	t.Cleanup(func() { checkpointLeaseRenewInterval = orig })
-
-	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
-	w := makeNodeController(t, &fakeCheckpointer{}, content)
-	w.checkpointFn = func(ctx context.Context, params CheckpointParams) error {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(2 * time.Second):
-			t.Fatal("lease ctx was not cancelled")
-			return nil
-		}
-	}
-	ctx, target := startKillableTarget(t)
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")}}
-	leaseKey := client.ObjectKey{Namespace: "inference", Name: "checkpoint-lease-abc"}
-	artifactPath := filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1")
-
-	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", target.Process.Pid, "abc", artifactPath, leaseKey, "abc")
-
-	requireKilledBySIGKILL(t, ctx, target)
-	got := getContent(t, w, content.Name)
-	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
-	failed := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
-	require.NotNil(t, failed)
-	assert.Equal(t, "LeaseCancelled", failed.Reason)
-}
-
-func TestRunCheckpoint_LeaseCancelledConflictReadyDoesNotKill(t *testing.T) {
-	orig := checkpointLeaseRenewInterval
-	checkpointLeaseRenewInterval = time.Millisecond
-	t.Cleanup(func() { checkpointLeaseRenewInterval = orig })
-
-	stored := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
-	meta.SetStatusCondition(&stored.Status.Conditions, metav1.Condition{
-		Type:    snapshotv1alpha1.PodSnapshotConditionReady,
-		Status:  metav1.ConditionTrue,
-		Reason:  "Captured",
-		Message: "Checkpoint captured and verified",
-	})
-	funcs := interceptor.Funcs{
-		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
-			sc, ok := obj.(*snapshotv1alpha1.PodSnapshotContent)
-			if ok {
-				if cond := meta.FindStatusCondition(sc.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed); cond != nil && cond.Status == metav1.ConditionTrue {
-					return conflictErr()
-				}
-			}
-			return c.Status().Patch(ctx, obj, patch, opts...)
-		},
-	}
-	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, stored)
-	w.checkpointFn = func(ctx context.Context, params CheckpointParams) error {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(2 * time.Second):
-			t.Fatal("lease ctx was not cancelled")
-			return nil
-		}
-	}
-	_, target := startKillableTarget(t)
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")}}
-	leaseKey := client.ObjectKey{Namespace: "inference", Name: "checkpoint-lease-abc"}
-	artifactPath := filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1")
-
-	w.runCheckpoint(context.Background(), makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc"), pod, "main", "abc123", target.Process.Pid, "abc", artifactPath, leaseKey, "abc")
-
-	require.NoError(t, target.Process.Signal(syscall.Signal(0)), "stale holder must not SIGKILL after another holder marked Ready")
-	require.NotNil(t, meta.FindStatusCondition(
-		getContent(t, w, stored.Name).Status.Conditions,
-		snapshotv1alpha1.PodSnapshotConditionReady,
-	))
-}
-
-func TestReconcileSnapshotContent_PodNotFoundFails(t *testing.T) {
+func TestReconcileCapture_PodNotFoundFails(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	w := makeNodeController(t, &fakeCheckpointer{}, content) // no pod
 
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 	got := getContent(t, w, content.Name)
 	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
 	require.NotNil(t, cond)
@@ -639,7 +660,7 @@ func TestClassifySourcePod(t *testing.T) {
 	assert.Equal(t, "SourcePodGone", reason)
 }
 
-func TestReconcileSnapshotContent_StalePodUIDFails(t *testing.T) {
+func TestReconcileCapture_StalePodUIDFails(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("different-uid")},
@@ -648,14 +669,14 @@ func TestReconcileSnapshotContent_StalePodUIDFails(t *testing.T) {
 	}
 	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
 
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 	got := getContent(t, w, content.Name)
 	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
 	require.NotNil(t, cond)
 	assert.Equal(t, "StalePodReference", cond.Reason)
 }
 
-func TestReconcileSnapshotContent_PodFailedFails(t *testing.T) {
+func TestReconcileCapture_PodFailedFails(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")},
@@ -664,57 +685,36 @@ func TestReconcileSnapshotContent_PodFailedFails(t *testing.T) {
 	}
 	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
 
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 	got := getContent(t, w, content.Name)
 	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
 	require.NotNil(t, cond)
 	assert.Equal(t, "SourcePodGone", cond.Reason)
 }
 
-func TestReconcileSnapshotContent_NotReadyQuiesceNoOp(t *testing.T) {
+func TestReconcileCapture_NotReadyQuiesceNoOp(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	pod := makeSourcePod()
 	pod.Status.ContainerStatuses[0].Ready = false
 	fc := &fakeCheckpointer{}
 	w := makeNodeController(t, fc, content, pod)
 
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 	assert.False(t, fc.wasCalled())
 	got := getContent(t, w, content.Name)
 	assert.Empty(t, got.Status.Conditions)
 }
 
-func TestReconcileSnapshotContent_CapturesFromPod(t *testing.T) {
+func TestReconcileCapture_CapturesFromPod(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	pod := makeSourcePod()
 	fc := &fakeCheckpointer{}
 	w := makeNodeController(t, fc, content, pod)
 	w.runtime = &fakeRuntime{resolveContainerPID: 7}
-	unblocked := make(chan struct{})
-	t.Cleanup(func() {
-		select {
-		case <-unblocked:
-		default:
-			close(unblocked)
-		}
-	})
-	w.checkpointFn = func(ctx context.Context, params CheckpointParams) error {
-		err := fc.fn(ctx, params)
-		<-unblocked
-		return err
-	}
 
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 
-	// acquireLease runs synchronously before the goroutine starts. Hold the dump so
-	// releaseLease cannot delete the Lease before this assertion.
-	leaseName := checkpointLeaseName(string(content.UID), "main")
-	_, err := w.clientset.CoordinationV1().Leases("inference").Get(context.Background(), leaseName, metav1.GetOptions{})
-	require.NoError(t, err, "capture Lease must exist in namespace inference")
-	close(unblocked)
-
-	require.Eventually(t, fc.wasCalled, time.Second, 5*time.Millisecond)
-
+	require.True(t, fc.wasCalled())
 	params := fc.lastParams()
 	assert.Equal(t, string(content.UID), params.ContentUID)
 	assert.Equal(t, "main", params.ContainerName)
@@ -722,15 +722,10 @@ func TestReconcileSnapshotContent_CapturesFromPod(t *testing.T) {
 	assert.Equal(t, 7, params.ContainerPID)
 	dest := filepath.Join(w.config.Storage.BasePath, "artifacts", string(content.UID), "containers", "main")
 	assert.Equal(t, dest, params.HostPath)
-
-	// Ready is written after checkpointFn returns, so poll rather than reading once.
-	require.Eventually(t, func() bool {
-		c := &snapshotv1alpha1.PodSnapshotContent{}
-		if err := w.client.Get(context.Background(), types.NamespacedName{Name: content.Name}, c); err != nil {
-			return false
-		}
-		return meta.FindStatusCondition(c.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady) != nil
-	}, time.Second, 5*time.Millisecond)
+	assert.NotNil(t, meta.FindStatusCondition(
+		getContent(t, w, content.Name).Status.Conditions,
+		snapshotv1alpha1.PodSnapshotConditionReady,
+	))
 }
 
 func TestRunCheckpoint_WritesReady(t *testing.T) {
@@ -738,10 +733,9 @@ func TestRunCheckpoint_WritesReady(t *testing.T) {
 	fc := &fakeCheckpointer{}
 	w := makeNodeController(t, fc, content)
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")}}
-	leaseKey := client.ObjectKey{Namespace: "inference", Name: checkpointLeaseName(string(content.UID), "main")}
 	artifactPath := filepath.Join(w.config.Storage.BasePath, "artifacts", string(content.UID), "containers", "main")
 
-	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, string(content.UID), artifactPath, leaseKey, string(content.UID)+"/main")
+	require.NoError(t, w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, string(content.UID), artifactPath))
 
 	assert.True(t, fc.wasCalled())
 	require.NotNil(t, meta.FindStatusCondition(
@@ -755,10 +749,10 @@ func TestRunCheckpoint_WritesFailedOnError(t *testing.T) {
 	fc := &fakeCheckpointer{err: errors.New("criu boom")}
 	w := makeNodeController(t, fc, content)
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")}}
-	leaseKey := client.ObjectKey{Namespace: "inference", Name: checkpointLeaseName(string(content.UID), "main")}
 	artifactPath := filepath.Join(w.config.Storage.BasePath, "artifacts", string(content.UID), "containers", "main")
 
-	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, string(content.UID), artifactPath, leaseKey, string(content.UID)+"/main")
+	// A recorded failure is a settled outcome, so the queue is told not to retry it.
+	require.NoError(t, w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, string(content.UID), artifactPath))
 
 	got := getContent(t, w, content.Name)
 	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
@@ -796,10 +790,10 @@ func TestExecutorCheckpointPageBrokerPrepareFailureDoesNotKill(t *testing.T) {
 	require.NoError(t, ctx.Err())
 }
 
-// TestReconcilePodSnapshotContent_TerminalPodWithArtifactRecoversReady covers the pre-bind
-// gate's resync racing a finished capture: the pod is already terminal (killed by the dump)
-// and the artifact is committed, so the gate must recover Ready instead of writing SourcePodGone.
-func TestReconcilePodSnapshotContent_TerminalPodWithArtifactRecoversReady(t *testing.T) {
+// TestReconcileCapture_TerminalPodWithArtifactRecoversReady covers a resync landing after a
+// capture that the agent did not live to finish recording: the pod is already terminal (killed by
+// the dump) and the artifact is committed, so this must recover Ready, not write SourcePodGone.
+func TestReconcileCapture_TerminalPodWithArtifactRecoversReady(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	pod := makeSourcePod()
 	pod.Status.Phase = corev1.PodFailed
@@ -808,178 +802,31 @@ func TestReconcilePodSnapshotContent_TerminalPodWithArtifactRecoversReady(t *tes
 	require.NoError(t, os.MkdirAll(dest, 0o755))
 	require.NoError(t, snapshottypes.WriteManifest(dest, &snapshottypes.CheckpointManifest{Artifact: snapshottypes.ArtifactManifest{ContentUID: string(content.UID), ContainerName: "main"}}))
 
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 
 	got := getContent(t, w, content.Name)
 	assert.NotNil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
 	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
 }
 
-// TestReconcilePodSnapshotContent_TerminalPodInFlightWritesNothing covers the gate racing a
-// capture that is still running: the capture goroutine holds the in-flight guard and owns the
-// outcome, so the gate must not write any terminal status for the dead-looking source.
-func TestReconcilePodSnapshotContent_TerminalPodInFlightWritesNothing(t *testing.T) {
-	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
-	pod := makeSourcePod()
-	pod.Status.Phase = corev1.PodFailed
-	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
-	artifactKey := string(content.UID) + "/main"
-	require.True(t, w.tryAcquire(artifactKey))
-	t.Cleanup(func() { w.release(artifactKey) })
-
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
-
-	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
-}
-
-// TestReconcilePodSnapshotContent_PodNotFoundWithArtifactRecoversReady covers the source pod
-// being deleted (not just terminal) after the dump committed the artifact but before the Ready
-// write landed: the gate must recover Ready instead of writing SourcePodNotFound.
-func TestReconcilePodSnapshotContent_PodNotFoundWithArtifactRecoversReady(t *testing.T) {
+// TestReconcileCapture_PodNotFoundWithArtifactRecoversReady covers the source pod being deleted
+// (not just terminal) after the dump committed the artifact but before the Ready write landed:
+// recovery must mark Ready instead of writing SourcePodNotFound.
+func TestReconcileCapture_PodNotFoundWithArtifactRecoversReady(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	w := makeNodeController(t, &fakeCheckpointer{}, content) // no pod
 	dest := filepath.Join(w.config.Storage.BasePath, "artifacts", string(content.UID), "containers", "main")
 	require.NoError(t, os.MkdirAll(dest, 0o755))
 	require.NoError(t, snapshottypes.WriteManifest(dest, &snapshottypes.CheckpointManifest{Artifact: snapshottypes.ArtifactManifest{ContentUID: string(content.UID), ContainerName: "main"}}))
 
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 
 	got := getContent(t, w, content.Name)
 	assert.NotNil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
 	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
 }
 
-// TestReconcilePodSnapshotContent_PodNotFoundInFlightWritesNothing covers the source pod being
-// deleted while the capture goroutine still holds the in-flight guard: the goroutine owns the
-// outcome, so the gate must not write SourcePodNotFound under it.
-func TestReconcilePodSnapshotContent_PodNotFoundInFlightWritesNothing(t *testing.T) {
-	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
-	w := makeNodeController(t, &fakeCheckpointer{}, content) // no pod
-	artifactKey := string(content.UID) + "/main"
-	require.True(t, w.tryAcquire(artifactKey))
-	t.Cleanup(func() { w.release(artifactKey) })
-
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
-
-	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
-}
-
-// foreignCaptureLease installs an unexpired (or expired) capture Lease held by another agent
-// instance into w's fake clientset, simulating an overlapping holder mid-dump.
-func foreignCaptureLease(t *testing.T, w *NodeController, content *snapshotv1alpha1.PodSnapshotContent, expired bool) {
-	t.Helper()
-	renewed := metav1.NewMicroTime(time.Now())
-	if expired {
-		renewed = metav1.NewMicroTime(time.Now().Add(-2 * checkpointLeaseDuration))
-	}
-	holder := "snapshot-agent/other-instance"
-	duration := int32(checkpointLeaseDuration.Seconds())
-	lease := &coordinationv1.Lease{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      checkpointLeaseName(string(content.UID), "main"),
-			Namespace: content.Spec.PodSnapshotRef.Namespace,
-		},
-		Spec: coordinationv1.LeaseSpec{
-			HolderIdentity:       &holder,
-			LeaseDurationSeconds: &duration,
-			AcquireTime:          &renewed,
-			RenewTime:            &renewed,
-		},
-	}
-	_, err := w.clientset.CoordinationV1().Leases(lease.Namespace).Create(context.Background(), lease, metav1.CreateOptions{})
-	require.NoError(t, err)
-}
-
-// TestReconcilePodSnapshotContent_ForeignLeaseDefersTerminalPodFailure covers two overlapping
-// agent instances: holder A owns the capture Lease and is between killing the source and
-// committing the artifact; B's gate sees the dead pod with no local in-flight entry and no
-// artifact, and must defer to the Lease instead of writing a sticky SourcePodGone. Once A
-// commits the artifact, B recovers it to Ready.
-func TestReconcilePodSnapshotContent_ForeignLeaseDefersTerminalPodFailure(t *testing.T) {
-	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
-	pod := makeSourcePod()
-	pod.Status.Phase = corev1.PodFailed
-	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
-	foreignCaptureLease(t, w, content, false)
-
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
-	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions,
-		"a foreign unexpired Lease means a capture is in flight; no terminal write is allowed")
-
-	// Holder A commits the artifact; B's next resync recovers Ready.
-	dest := filepath.Join(w.config.Storage.BasePath, "artifacts", string(content.UID), "containers", "main")
-	require.NoError(t, os.MkdirAll(dest, 0o755))
-	require.NoError(t, snapshottypes.WriteManifest(dest, &snapshottypes.CheckpointManifest{Artifact: snapshottypes.ArtifactManifest{ContentUID: string(content.UID), ContainerName: "main"}}))
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
-
-	got := getContent(t, w, content.Name)
-	assert.NotNil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady))
-	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
-}
-
-// TestReconcilePodSnapshotContent_ForeignLeaseDefersPodNotFoundFailure is the same overlap with
-// the source pod fully deleted rather than terminal.
-func TestReconcilePodSnapshotContent_ForeignLeaseDefersPodNotFoundFailure(t *testing.T) {
-	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
-	w := makeNodeController(t, &fakeCheckpointer{}, content) // no pod
-	foreignCaptureLease(t, w, content, false)
-
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
-
-	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
-}
-
-// TestReconcilePodSnapshotContent_ExpiredForeignLeaseStillFails keeps the failure bounded: a
-// dead source whose Lease holder stopped renewing must not defer forever.
-func TestReconcilePodSnapshotContent_ExpiredForeignLeaseStillFails(t *testing.T) {
-	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
-	pod := makeSourcePod()
-	pod.Status.Phase = corev1.PodFailed
-	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
-	foreignCaptureLease(t, w, content, true)
-
-	w.reconcilePodSnapshotContent(context.Background(), content.Name)
-
-	cond := meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
-	require.NotNil(t, cond)
-	assert.Equal(t, "SourcePodGone", cond.Reason)
-}
-
-// TestReconcileSourcePod_ForeignLeaseDefersContainerExitFailure covers the capture path's window:
-// B's reconcileSourcePod sees the target already killed by A's in-flight dump (exit 137, no
-// artifact yet) and must not write CheckpointContainerFailed or SIGKILL anything under A's Lease.
-func TestReconcileSourcePod_ForeignLeaseDefersContainerExitFailure(t *testing.T) {
-	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
-	pod := makeSourcePod()
-	pod.Status.ContainerStatuses[0].Ready = false
-	pod.Status.ContainerStatuses[0].State = corev1.ContainerState{
-		Terminated: &corev1.ContainerStateTerminated{ExitCode: 137},
-	}
-	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
-	foreignCaptureLease(t, w, content, false)
-
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
-
-	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions,
-		"the target's kill-exit under a foreign unexpired Lease is A's dump in progress, not a failure")
-}
-
-// TestReconcileSourcePod_ForeignLeaseDefersLivenessFailure is the same window observed through
-// the pod-phase liveness check instead of the container exit.
-func TestReconcileSourcePod_ForeignLeaseDefersLivenessFailure(t *testing.T) {
-	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
-	pod := makeSourcePod()
-	pod.Status.Phase = corev1.PodFailed
-	pod.Status.ContainerStatuses[0].Ready = false
-	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
-	foreignCaptureLease(t, w, content, false)
-
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
-
-	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
-}
-
-// startKillableTarget starts a short-lived sleep process the test can assert was SIGKILLed.
+// startKillableTarget starts a short-lived sleep process the test can assert was left alone.
 func startKillableTarget(t *testing.T) (context.Context, *exec.Cmd) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -992,16 +839,6 @@ func startKillableTarget(t *testing.T) (context.Context, *exec.Cmd) {
 		}
 	})
 	return ctx, target
-}
-
-func requireKilledBySIGKILL(t *testing.T, ctx context.Context, target *exec.Cmd) {
-	t.Helper()
-	err := target.Wait()
-	require.NoError(t, ctx.Err(), "killCheckpointProcess did not terminate the target before the test deadline")
-	require.Error(t, err)
-	waitStatus, ok := target.ProcessState.Sys().(syscall.WaitStatus)
-	require.True(t, ok)
-	assert.Equal(t, syscall.SIGKILL, waitStatus.Signal())
 }
 
 // mustUnstructured converts a typed object to the *unstructured.Unstructured the dynamic informer
@@ -1121,7 +958,7 @@ func seedIndex(t *testing.T, contents ...*snapshotv1alpha1.PodSnapshotContent) c
 	return idx
 }
 
-func TestReconcileSourcePod_TriggersUnstick(t *testing.T) {
+func TestReconcileCapture_TriggersUnstick(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	content.CreationTimestamp = metav1.Unix(1000, 0)
 	pod := podWithFailedSibling()
@@ -1130,7 +967,7 @@ func TestReconcileSourcePod_TriggersUnstick(t *testing.T) {
 	w := makeNodeController(t, fc, content, pod)
 	w.runtime = rt
 
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
 
 	got := getContent(t, w, content.Name)
 	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
@@ -1140,24 +977,34 @@ func TestReconcileSourcePod_TriggersUnstick(t *testing.T) {
 	assert.False(t, fc.wasCalled())
 }
 
-func TestReconcileSourcePod_PodNotIndexedNoOp(t *testing.T) {
+// TestReconcileCapture_PodNotIndexedNoOp guards the fail-closed side of source-pod ownership: with
+// nothing indexed for the pod there is no owner, so no dump may start.
+func TestReconcileCapture_PodNotIndexedNoOp(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
-	pod := podWithFailedSibling()
-	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+	pod := makeSourcePod()
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 7}
 	w.contentIndexer = seedIndex(t) // override: empty index
 
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	require.NoError(t, w.reconcileCapture(context.Background(), content.Name))
+
+	assert.False(t, fc.wasCalled())
 	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
 }
 
-func TestReconcileSourcePod_IndexErrorReturned(t *testing.T) {
+func TestReconcileCapture_IndexErrorReturned(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
-	pod := podWithFailedSibling()
-	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+	pod := makeSourcePod()
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 7}
 	// Indexer without podRefIndex registered → ByIndex returns an error; reconcile surfaces it
-	// (the informer handler logs it) and writes no status.
+	// so the queue retries, and writes no status.
 	w.contentIndexer = cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
 
-	require.Error(t, w.reconcileSourcePod(context.Background(), pod))
+	require.Error(t, w.reconcileCapture(context.Background(), content.Name))
+
+	assert.False(t, fc.wasCalled())
 	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
 }
