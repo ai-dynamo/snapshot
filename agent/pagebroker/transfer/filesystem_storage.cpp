@@ -1,0 +1,143 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+#include "filesystem_storage.hpp"
+
+#include <filesystem>
+#include <stdexcept>
+#include <string>
+#include <system_error>
+
+namespace snapshot::pagebroker::filesystem_storage {
+namespace fs = std::filesystem;
+namespace {
+Path
+StoragePath(const StorageBackend& storage, const Path& storage_root, const char* label)
+{
+  if (!storage.has_filesystem() || storage.filesystem().directory().empty())
+    throw std::invalid_argument(std::string("filesystem ") + label + " is required");
+  const Path path(storage.filesystem().directory());
+  const Path relative = path.lexically_relative(storage_root);
+  if (!path.is_absolute() || path.lexically_normal() != path || relative.empty() ||
+      relative == "." || relative.string().starts_with("../") || relative == "..")
+    throw std::invalid_argument(std::string(label) + " must be within storage root");
+
+  Path component = storage_root;
+  for (const auto& part : relative) {
+    component /= part;
+    if (fs::is_symlink(component))
+      throw std::invalid_argument(std::string(label) + " contains symlink");
+  }
+  return path;
+}
+
+Path
+PartialPath(const Path& destination)
+{
+  Path partial = destination;
+  partial += ".pagebroker-partial";
+  return partial;
+}
+
+Path
+PreviousPath(const Path& destination)
+{
+  Path previous = destination;
+  previous += ".pagebroker-previous";
+  return previous;
+}
+
+class RestorePreviousOnFailure {
+ public:
+  RestorePreviousOnFailure(const Path& previous, const Path& published) : previous_(previous), published_(published) {}
+
+  ~RestorePreviousOnFailure()
+  {
+    if (!cancelled_) {
+      std::error_code error;
+      std::filesystem::rename(previous_, published_, error);
+    }
+  }
+
+  void Cancel() { cancelled_ = true; }
+
+ private:
+  const Path& previous_;
+  const Path& published_;
+  bool cancelled_ = false;
+};
+
+uintmax_t
+DirectorySize(const Path& path)
+{
+  uintmax_t bytes = 0;
+  for (const auto& entry : fs::recursive_directory_iterator(path)) {
+    if (entry.is_symlink())
+      throw std::runtime_error("checkpoint contains symlink");
+    if (entry.is_regular_file())
+      bytes += entry.file_size();
+  }
+  return bytes;
+}
+
+void
+CopyDirectory(const Path& source, const Path& destination)
+{
+  fs::copy(source, destination, fs::copy_options::recursive);
+}
+}  // namespace
+
+Path
+SourcePath(const StorageBackend& source, const Path& storage_root)
+{
+  const Path path = StoragePath(source, storage_root, "source");
+  if (!fs::is_directory(path))
+    throw std::invalid_argument("source must be a storage directory");
+  return path;
+}
+
+Path
+DestinationPath(const StorageBackend& destination, const Path& storage_root)
+{
+  return StoragePath(destination, storage_root, "destination");
+}
+
+uintmax_t
+RestoreSize(const StorageBackend& source, const Path& storage_root)
+{
+  return DirectorySize(SourcePath(source, storage_root));
+}
+
+bool
+CheckpointDestinationConflicts(const StorageBackend& destination, const Path& storage_root)
+{
+  return fs::exists(PartialPath(DestinationPath(destination, storage_root)));
+}
+
+void
+PublishCheckpoint(const Path& source, const StorageBackend& destination, const Path& storage_root)
+{
+  const Path published = DestinationPath(destination, storage_root);
+  const Path partial = PartialPath(published);
+  const Path previous = PreviousPath(published);
+  try {
+    fs::create_directories(published.parent_path());
+    CopyDirectory(source, partial);
+    if (fs::exists(published)) {
+      fs::rename(published, previous);
+      RestorePreviousOnFailure restore_previous(previous, published);
+      fs::rename(partial, published);
+      restore_previous.Cancel();
+      std::error_code cleanup_error;
+      fs::remove_all(previous, cleanup_error);
+      return;
+    }
+    fs::rename(partial, published);
+  }
+  catch (...) {
+    std::error_code cleanup_error;
+    fs::remove_all(partial, cleanup_error);
+    throw;
+  }
+}
+}  // namespace snapshot::pagebroker::filesystem_storage
