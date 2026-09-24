@@ -7,7 +7,7 @@ version = "0.0.0"
 description = "Snapshot end-to-end infrastructure helpers"
 requires-python = ">=3.12"
 dependencies = [
-  "kubernetes>=32.0.1,<33.0.0",
+  "kubernetes>=32.0.1,<37.0.0",
   "packaging>=24.2,<26",
   "pytest>=8.4.0,<9",
   "PyYAML>=6.0.2,<7",
