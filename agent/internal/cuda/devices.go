@@ -5,10 +5,12 @@ package cuda
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -63,6 +65,9 @@ func VisibleDevicesValue(env []string) *string {
 func ResolveDevicePaths(hostProc string, pid int, uuids []string) (map[string]string, error) {
 	if len(uuids) == 0 {
 		return nil, nil
+	}
+	if runtime.GOOS != "linux" {
+		return nil, fmt.Errorf("GPU device resolution requires Linux: %w", errors.ErrUnsupported)
 	}
 	inventory := map[string]uint32{}
 	// The NVIDIA kernel driver publishes each physical GPU's UUID and device

@@ -18,4 +18,8 @@ func TestValidateGPUDeviceUnsupported(t *testing.T) {
 	if err != nil || paths != nil {
 		t.Fatalf("empty GPU selection = %v, %v; want nil, nil", paths, err)
 	}
+	paths, err = ResolveDevicePaths(t.TempDir(), 1, []string{"GPU-A"})
+	if !errors.Is(err, errors.ErrUnsupported) || paths != nil {
+		t.Fatalf("nonempty GPU selection = %v, %v; want nil, unsupported", paths, err)
+	}
 }
