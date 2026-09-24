@@ -14,6 +14,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
@@ -105,6 +106,9 @@ func writeTestArtifact(t *testing.T, basePath, contentUID string, manifest *type
 // reconcile drives the restore the way the queue worker does.
 func (r *gatedRestore) reconcile(t *testing.T) {
 	t.Helper()
+	// Reconciliation now reads the API server, not the fixture's informer copy.
+	_, err := r.controller.clientset.CoreV1().Pods(r.pod.Namespace).Update(context.Background(), r.pod, metav1.UpdateOptions{})
+	require.NoError(t, err)
 	processQueuedRestorePod(t, r.controller, r.pod)
 }
 
