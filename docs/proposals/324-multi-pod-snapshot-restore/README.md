@@ -17,9 +17,10 @@ SPDX-License-Identifier: Apache-2.0
   - [Limitations, Risks, and Mitigations](#limitations-risks-and-mitigations)
 - [Design Details](#design-details)
   - [API](#api)
-    - [<code>PodGroupSnapshot</code>](#podgroupsnapshot)
-    - [<code>PodGroupSnapshotContent</code>](#podgroupsnapshotcontent)
-    - [<code>PodGroupRestore</code>](#podgrouprestore)
+    - [<code>PodSetSnapshot</code>](#podsetsnapshot)
+    - [<code>PodSetSnapshotContent</code>](#podsetsnapshotcontent)
+    - [<code>PodSetRestore</code>](#podsetrestore)
+    - [<code>PodRestore</code>](#podrestore)
   - [Group Identity and Leaf Reuse](#group-identity-and-leaf-reuse)
   - [Security](#security)
   - [Checkpoint Flow](#checkpoint-flow)
@@ -27,7 +28,8 @@ SPDX-License-Identifier: Apache-2.0
   - [Network Identity and Socket Restore](#network-identity-and-socket-restore)
   - [Failure and Recovery](#failure-and-recovery)
   - [Ownership and Scheduling](#ownership-and-scheduling)
-  - [Initial Supported Profile](#initial-supported-profile)
+  - [Initial Qualification Target](#initial-qualification-target)
+  - [Open Design Decisions](#open-design-decisions)
   - [Normative Requirements](#normative-requirements)
   - [Configuration](#configuration)
   - [Performance and Scalability](#performance-and-scalability)
@@ -50,12 +52,13 @@ SPDX-License-Identifier: Apache-2.0
 ## Summary
 
 This SNEP defines a Kubernetes protocol for checkpointing and restoring a fixed
-group of mutually dependent Pods as one Snapshot operation. The protocol
-freezes group membership, assigns stable logical member identities, fans out
-the existing per-Pod checkpoint and restore operations, supplies every member
-with the complete source-to-target network identity map, and reports one
-aggregate group result. It does not make distributed checkpoint or restore
-atomic.
+set of mutually dependent Pods as one Snapshot operation. The protocol freezes
+membership, assigns stable logical member identities, admits every leaf before
+any leaf crosses its declared destructive boundary, coordinates bounded
+execution of the existing per-Pod checkpoint and restore paths, supplies every
+member with the network identity data required by its qualified profile, and
+reports one aggregate result. It does not make distributed checkpoint or
+restore atomic.
 
 ## Motivation
 
@@ -75,9 +78,12 @@ failure:
    restored process state also referenced its peer's old IP.
 
 The existing CRIU remap plugin accepts multiple address mappings, but the
-current Snapshot restore path constructs only the local Pod mapping. A
-multi-node restore therefore needs the complete group-level mapping at every
-member.
+current Snapshot restore path constructs only the local Pod mapping. The
+observed preserved-session path therefore needs the complete group-level
+mapping at every member. Whether a communicator-reconstruction profile also
+needs peer mappings depends on whether its disconnect path clears stale peer
+addresses before reconstruction; that remains an explicit qualification
+question.
 
 That mapping is necessary but not sufficient. The standalone restore path
 currently converts an established TCP socket whose reciprocal endpoint is
@@ -103,11 +109,13 @@ responsible for the lifecycle of persistent communication resources they own.
   restore attempt.
 - Reuse the existing per-Pod capture and restore machinery as subordinate leaf
   operations.
-- Validate every member as far as possible before creating subordinate capture
-  or restore work, then fan out that work without serializing members.
-- Publish group success only when every mandatory leaf operation succeeds.
-- Deliver the complete validated source-to-target network identity map to every
-  applicable restore.
+- Validate and admit every member before any member crosses its declared
+  destructive boundary.
+- Execute member work with capability-aware, bounded concurrency and explicit
+  synchronization points.
+- Publish group success only when every member operation succeeds.
+- Deliver the validated source-to-target network identity data required by each
+  qualified restore profile.
 - Preserve existing per-Pod checkpoint, restore, and failure semantics.
 - Make group publication, failure aggregation, retry, cancellation, and cleanup
   durable and idempotent.
@@ -125,7 +133,8 @@ responsible for the lifecycle of persistent communication resources they own.
 - Atomic all-or-nothing checkpoint or restore, rollback to the pre-operation
   workload state, or a guarantee that the source workload remains operational
   after capture starts.
-- Group-wide termination or fencing after a member failure.
+- Automatic termination or fencing of members that completed normally solely
+  because another member failed.
 - Determining whether a restored workload is healthy or ready to serve.
 - RDMA reconstruction.
 - NVSHMEM, MNNVL, NVLS, FlashInfer multi-node collectives, MoE, or
@@ -135,17 +144,20 @@ responsible for the lifecycle of persistent communication resources they own.
 
 ## Proposal
 
-Snapshot adds a group-level API above the current `PodSnapshot`,
-`PodSnapshotContent`, and restore-Pod contracts. A group checkpoint has one
-immutable member list and becomes Ready only when all mandatory member
-artifacts are durable. Each restore attempt maps every logical member to an
-existing target Pod, validates the complete mapping, starts the existing
-per-Pod restore path for every member, and becomes Ready only when every target
-reports `nvidia.com/Restored=True`.
+Snapshot adds a set-level API above the current `PodSnapshot`,
+`PodSnapshotContent`, and restore-Pod contracts. A set checkpoint has one
+immutable member list and becomes Ready only when every member artifact is
+durable. Each restore attempt maps every logical member to exactly one existing
+target Pod and destination container. A new `PodRestore` leaf makes target
+identity, container mapping, set ownership, profile-required identity data, and
+per-member outcome durable. The set becomes Ready only when every leaf reports
+successful restoration.
 
 The API is additive. Existing standalone APIs preserve their current
-cardinality and behavior. Group-created leaf objects are owned by the group and
-cannot be restored independently because they do not contain enough context to
+cardinality and behavior, including standalone one-to-many restore. V1 set
+operations support exactly one source container and one destination container
+per logical member. Set-created leaf objects are owned by the set operation and
+cannot be activated independently because they do not contain enough context to
 restore a rank safely.
 
 The workload owner remains responsible for creating source and target Pods and
@@ -161,50 +173,54 @@ coordination, and aggregates the existing per-Pod outcomes.
 #### Checkpoint a Multi-Node Replica
 
 As a workload controller, I can identify the complete set of Pods and target
-containers for one distributed replica and create one `PodGroupSnapshot`.
-Snapshot validates the complete group before fanning out per-Pod captures and
-publishes one reusable group checkpoint only if every member succeeds.
+containers for one distributed replica and create one `PodSetSnapshot`.
+Snapshot admits the complete set before starting destructive per-Pod capture
+and publishes one reusable set checkpoint only if every member succeeds.
 
 #### Restore a Multi-Node Replica
 
 As a workload controller, I can gang-schedule one replacement Pod per logical
-member and create a `PodGroupRestore` that maps the checkpoint's members to
-those existing Pods by name and UID. Snapshot validates the complete target
-group and network identity map before starting the per-Pod restores, then
-reports success only if every target reports successful restoration.
+member and create a `PodSetRestore` that maps the checkpoint's members to
+those existing Pods by name and UID. Snapshot creates one durable `PodRestore`
+per member, admits the complete target set and the profile-required identity
+data before starting process reconstruction, then reports success only if every
+target reports successful restoration.
 
 ### Limitations, Risks, and Mitigations
 
 | Risk or limitation | Mitigation |
 | --- | --- |
-| Capture is destructive and one member may fail after another was captured. | Validate the complete group before fan-out, never publish a partial group checkpoint as Ready, expose every member outcome, and leave workload recovery to its owner. Atomicity and rollback are explicitly not guaranteed. |
-| A complete IP map does not by itself preserve established cross-Pod sockets. | Distinguish in-group from external peers, retain qualified in-group connections, remap both endpoints, and fail closed when membership is ambiguous. |
-| One target may restore while another fails. | Preserve each node agent's existing restore behavior, fail the aggregate group attempt, expose every member outcome, and let the workload owner recreate or repair the group. |
+| Capture is destructive and one member may fail after another was captured. | Admit every member before releasing any member across its declared destructive boundary, never publish a partial set checkpoint as Ready, expose every member outcome, and leave workload recovery to its owner. Atomicity and rollback are explicitly not guaranteed. |
+| A complete IP map does not by itself preserve established cross-Pod sockets. | Each supported profile declares whether its backend reconstructs the communicator or Snapshot preserves sessions. Preservation additionally requires coordinated network/session handling and a restore release barrier. |
+| One target may restore while another fails. | Fail the aggregate set attempt, expose every member outcome, and apply the failure disposition declared by the selected profile. The disposition for an already-prepared sibling remains an open V1 decision. |
 | A controller or node agent can restart during fan-out. | Persist operation identity, member identity, observed generation, leaf references, and per-member outcomes. Make reconciliation idempotent. |
 | Grove `startsAfter` currently waits for Kubernetes Pod Ready and can prevent all restore placeholders from existing. | Omit or rewrite inter-member `startsAfter` dependencies for restore-shaped Pods, or add a Grove milestone that distinguishes placeholder availability from workload readiness. |
-| Successful process restore does not imply serving readiness. | Complete `PodGroupRestore` from the existing `nvidia.com/Restored` conditions. The workload owner separately observes Pod readiness and controls serving registration. |
+| Successful process restore does not imply serving readiness. | Complete `PodSetRestore` from the existing `nvidia.com/Restored` conditions. The workload owner separately observes Pod readiness and controls serving registration. |
 | Backend or transport state may not survive checkpoint and restore. | Publish an explicit capability profile and qualify backend/transport combinations separately. |
+| A pinned target may disappear or remain unschedulable indefinitely. | Fail immediately if the pinned UID disappears. Otherwise report a recoverable waiting condition and fail with a stable reason when the operation deadline expires. |
+| Source Pods may restart or be replaced while a destructive set capture is in progress. | Require the workload owner to hold the exact source UIDs until the operation terminates. The enforcement mechanism must be selected before alpha qualification. |
 
 ## Design Details
 
 ### API
 
-The API adds three resources in `nvidia.com/v1alpha1`. The field names below
+The API adds four resources in `nvidia.com/v1alpha1`. The field names below
 are the proposed contract; implementation review may refine individual names
 without collapsing the separation between checkpoint artifact and restore
 attempt.
 
-#### `PodGroupSnapshot`
+#### `PodSetSnapshot`
 
-`PodGroupSnapshot` is a namespaced capture request and binding. Its immutable
-specification contains the complete source group:
+`PodSetSnapshot` is a namespaced capture request and binding. Its immutable
+specification contains the complete source set and one operation deadline:
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
-kind: PodGroupSnapshot
+kind: PodSetSnapshot
 metadata:
   name: trtllm-replica-a
 spec:
+  deadlineSeconds: 1800
   members:
     - id: rank-0
       source:
@@ -224,38 +240,42 @@ Its status contains:
 
 - one subordinate `PodSnapshot` reference and local phase per logical member;
 - member-scoped errors with stable reason codes;
-- the bound `PodGroupSnapshotContent` name; and
+- the bound `PodSetSnapshotContent` name; and
 - group-level `Ready` and `Failed` conditions.
 
 The source Pod UID is frozen before preparation so a same-named replacement
-cannot be captured accidentally.
+cannot be captured accidentally. V1 requires `containers` to contain exactly
+one entry for every member. Supporting multi-container capture is separate
+work and does not change existing standalone behavior.
 
-#### `PodGroupSnapshotContent`
+#### `PodSetSnapshotContent`
 
-`PodGroupSnapshotContent` is the cluster-scoped, immutable artifact of record.
+`PodSetSnapshotContent` is the cluster-scoped, immutable artifact of record.
 It contains:
 
-- a namespace, name, and UID back-reference to its `PodGroupSnapshot`;
+- a namespace, name, and UID back-reference to its `PodSetSnapshot`;
 - the immutable logical member list;
-- each member's source network identity;
+- each member's source network identity data required by the declared profile;
 - one subordinate `PodSnapshotContent` reference per member; and
 - artifact, protocol, and capability versions required for restore.
 
 The content becomes Ready through one root publication point only after every
-mandatory leaf artifact is durable. Atomic publication does not require all
+leaf artifact is durable. Atomic publication does not require all
 artifacts to be stored in one file or storage transaction.
 
-#### `PodGroupRestore`
+#### `PodSetRestore`
 
-`PodGroupRestore` is a namespaced restore attempt. It references one immutable
-group checkpoint and maps every logical member to exactly one target Pod:
+`PodSetRestore` is a namespaced restore attempt. It references one immutable
+set checkpoint and maps every logical member to exactly one target Pod and
+destination container:
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
-kind: PodGroupRestore
+kind: PodSetRestore
 metadata:
   name: trtllm-replica-a-restore-1
 spec:
+  deadlineSeconds: 1800
   snapshotRef:
     name: trtllm-replica-a
     uid: "<group-snapshot-uid>"
@@ -264,24 +284,72 @@ spec:
       podRef:
         name: trtllm-rank-0-restored
         uid: "<target-pod-uid>"
+      containerMapping:
+        source: engine
+        destination: engine
     - id: rank-1
       podRef:
         name: trtllm-rank-1-restored
         uid: "<target-pod-uid>"
+      containerMapping:
+        source: engine
+        destination: engine
 ```
 
 The workload owner creates and schedules every target Pod before creating the
-`PodGroupRestore`. The caller supplies each existing target Pod's name and UID.
+`PodSetRestore`. The caller supplies each existing target Pod's name and UID.
 The controller validates and pins those identities, then derives their network
 identities; the caller does not author an unvalidated CRIU remap table.
 
-Status contains the canonical target-specific identity map, or a durable
-reference to it; durable per-member pending, restoring, restored, and error
-state; and group-level `Ready` and `Failed` conditions. `Ready` means every
+Every source member and every target appears exactly once. V1 has no optional
+members. The controller copies each validated container mapping into the
+member's `PodRestore`; it does not rely on a same-name-container default.
+
+Status contains the canonical profile-required target identity data, or a
+durable reference to it; one `PodRestore` reference and durable phase per
+member; and set-level `Ready` and `Failed` conditions. Deadline expiry is
+reported as `Failed=True` with reason `DeadlineExceeded`. `Ready` means every
 member reports `nvidia.com/Restored=True`; it does not mean every Pod is
 Kubernetes Ready or that the workload is ready to serve. Checkpoint artifacts
 and restore attempts have separate identities so one checkpoint can be
 restored repeatedly.
+
+#### `PodRestore`
+
+`PodRestore` is the namespaced, durable per-member restore work object. The set
+controller creates and owns it; callers continue to use the existing
+annotation-driven contract for standalone restore. A set-owned `PodSnapshot`
+cannot be named by that standalone annotation. The controller also rejects
+standalone activation when the referenced `PodSnapshot` resolves to a set-owned
+`PodSnapshotContent`.
+
+Each `PodRestore` contains:
+
+- the owning `PodSetRestore` name and exact UID;
+- the logical member ID;
+- the exact subordinate `PodSnapshotContent` name and UID;
+- the target Pod name and UID;
+- the explicit source-to-destination container mapping;
+- the validated profile-required network identity data or a durable reference
+  to it;
+- the selected backend/session capability profile; and
+- any durable hold and release input required by that profile.
+
+Its status contains stable per-member reasons and enough phase information to
+distinguish waiting for a placeholder, admitted, restoring, prepared and held,
+released, restored, failed, and deadline exceeded. Profiles that reconstruct
+their communicator may move from local restore directly to Restored. A profile
+that preserves established sessions must expose a prepared-and-held state and
+must not become Restored until the set controller authorizes release.
+
+The controller and admission layer validate the exact owning set UID and reject
+activation outside that context. A reference field alone is not treated as an
+authorization boundary.
+
+The set capture path also needs additive ownership plus held-admission and
+activation state on a set-owned `PodSnapshot` or an equivalent durable leaf
+work record. The exact encoding is part of the open leaf coordination contract;
+standalone `PodSnapshot` behavior remains unchanged.
 
 ### Group Identity and Leaf Reuse
 
@@ -291,14 +359,14 @@ component, replica, role, and rank tuple. The complete member list is resolved
 before the operation starts; Snapshot V1 does not discover members by
 understanding every possible workload-controller API.
 
-Existing `PodSnapshot`, `PodSnapshotContent`, and restore-Pod mechanisms remain
-the per-Pod execution path. Their artifacts are subordinate to the group
-checkpoint and are not independently advertised as usable workload
-checkpoints.
+Existing `PodSnapshot` and `PodSnapshotContent` mechanisms remain the per-Pod
+capture path. `PodRestore` makes the existing restore-Pod execution path durable
+for a set-owned member. Their artifacts are subordinate to the set checkpoint
+and are not independently advertised as usable workload checkpoints.
 
-Group-created leaf objects carry the group UID and logical member ID.
-Standalone restore of a group-owned leaf artifact is rejected unless an
-authorized group restore supplies the complete group context.
+Set-created leaf objects carry the set UID and logical member ID. Standalone
+restore of a set-owned leaf artifact is rejected unless an authorized
+`PodSetRestore` supplies the complete set context.
 
 `SnapshotJob` remains a single-Pod, capture-only convenience API that creates
 and owns a Kubernetes Job. It does not become the group coordinator because
@@ -314,45 +382,58 @@ workload secrets. Deployment policies and existing mechanisms for artifact
 encryption, access control, retention, and node isolation continue to apply to
 every subordinate artifact and to the group manifest.
 
-The group APIs add several authorization and isolation requirements:
+The set APIs add several authorization and isolation requirements:
 
-- V1 accepts source and target Pods only from the namespaced group object's
-  namespace. A caller cannot use a group operation to capture or restore a Pod
+- V1 accepts source and target Pods only from the namespaced set object's
+  namespace. A caller cannot use a set operation to capture or restore a Pod
   in another namespace.
 - Every Pod, group checkpoint, restore attempt, and subordinate artifact
   reference includes a UID where applicable. Reconcilers reject a same-named
   object recreated with a different UID.
-- Creating a `PodGroupRestore` does not grant access to its referenced
-  `PodGroupSnapshotContent` or leaf artifacts. The controller and node agents
+- Creating a `PodSetRestore` does not grant access to its referenced
+  `PodSetSnapshotContent` or leaf artifacts. The controller and node agents
   enforce the same RBAC and storage authorization as standalone restore.
-- Group-owned leaf artifacts reject standalone restore so a caller cannot
-  bypass the group mapping or compatibility checks.
+- Set-owned leaf artifacts reject standalone restore so a caller cannot bypass
+  the set mapping or compatibility checks.
 - The controller validates membership cardinality, uniqueness, and supported
   size before dispatching node work to limit resource-exhaustion and oversized
   API-object attacks.
 
-Group status exposes member identity, Pod references, failure reasons, and the
-network remap or a reference to it. RBAC must treat these fields as workload
-metadata and restrict them consistently with existing Snapshot resources.
-Logs and metrics must not expose checkpoint contents, credentials, or
-unbounded identity values.
+Group status exposes member identity, Pod references, failure reasons, and any
+profile-required network identity data or a reference to it. RBAC must treat
+these fields as workload metadata and restrict them consistently with existing
+Snapshot resources. Logs and metrics must not expose checkpoint contents,
+credentials, or unbounded identity values.
 
 ### Checkpoint Flow
 
-A group checkpoint proceeds as follows:
+A set checkpoint proceeds as follows:
 
-1. The caller supplies the complete source member list.
+1. The caller supplies the complete source member list. Every member is
+   required in V1.
 2. Snapshot freezes membership and validates every controller-observable,
-   non-destructive condition for the complete group, including Pod identity,
+   non-destructive condition for the complete set, including Pod identity,
    readiness, node-agent availability, artifact storage, and declared
    capabilities.
-3. If group validation succeeds, Snapshot creates subordinate per-Pod snapshot
-   requests approximately concurrently. The existing per-Pod controller and
-   node-agent paths perform their own validation and destructive capture.
-4. Snapshot waits for every mandatory leaf and artifact to succeed.
-5. If every leaf succeeds, Snapshot publishes the group checkpoint record as
-   Ready. If any leaf fails, Snapshot marks the group Failed and does not
-   publish a usable group checkpoint.
+3. Snapshot creates set-owned per-Pod snapshot leaves in a held admission mode.
+   Each leaf performs its node-local preflight and reports Admitted or Refused
+   without crossing its declared destructive boundary.
+4. Snapshot waits for every leaf to report Admitted. If any leaf refuses or the
+   deadline expires, Snapshot abandons work that has not crossed a destructive
+   boundary, marks the set Failed, and does not start capture.
+5. After every leaf is admitted, Snapshot releases capture work with
+   capability-aware bounded concurrency and any synchronization required by
+   the selected profile. Each leaf declares the point after which it cannot be
+   abandoned without changing the source workload. This point may precede CRIU
+   dump-and-kill when a CUDA interposition shim is involved.
+6. Snapshot waits for every leaf artifact. If every leaf succeeds, Snapshot
+   publishes `PodSetSnapshotContent` as Ready. If any leaf fails, Snapshot marks
+   the set Failed and does not publish a usable set checkpoint.
+
+The held admission mode is additive to the set-owned capture path. Creating a
+standalone `PodSnapshotContent` retains its existing self-starting behavior.
+The leaf contract must make the Admitted state durable and restart-safe before
+the group controller relies on it.
 
 The workload must complete any collective application quiescence or
 communicator preparation before its Pods become snapshot-ready. Snapshot's
@@ -360,101 +441,163 @@ group validation reduces predictable partial failure but cannot prove that
 every CRIU or CUDA capture will succeed.
 
 Checkpoint capture is destructive: Snapshot terminates the captured source
-process and does not publish a `snapshot-complete` sentinel. Group publication
-controls artifact visibility, not source-process lifetime. After leaf creation,
-the operation has the same failure semantics as independent single-Pod
-captures: some source processes may be terminated even when the group fails,
-and Snapshot does not roll them back or fence their replacements.
+process. Current standalone capture does not define a `snapshot-complete`
+sentinel. Set publication controls artifact visibility, not source-process
+lifetime. Once a released leaf crosses its declared destructive boundary, some
+source processes may be terminated even when the set fails; Snapshot does not
+roll them back.
+
+From the start of admission until the set operation terminates, the workload
+owner must keep the exact source Pod UIDs from restarting, being replaced, or
+resuming normal workload execution. A finalizer preserves an API record, not a
+process, and scheduling does not prevent kubelet restart. The enforcement
+mechanism is therefore an explicit open decision between a workload-owner or
+Grove hold contract and a snapshot-aware container wrapper. A workload-owner or
+Grove hold can observe set-level status. A wrapper running inside the Pod cannot
+and therefore requires a local terminal signal that distinguishes successful
+capture from failure. Choosing the wrapper also chooses that additional local
+protocol requirement.
 
 ![Group checkpoint sequence](diagrams/checkpoint-sequence.svg)
 
 ### Restore Flow
 
-A group restore proceeds as follows:
+A set restore proceeds as follows:
 
-1. Snapshot loads the complete group checkpoint record.
+1. Snapshot loads the complete set checkpoint record.
 2. The workload owner asks Grove or another workload manager to create and
    schedule one restore-shaped target Pod for every logical member.
-3. After every target Pod exists, the caller creates `PodGroupRestore` with the
-   exact Pod names and UIDs.
-4. Snapshot waits until all targets are scheduled and their placeholders are
-   available, validates the one-to-one mapping, and constructs the complete
-   source-to-target network identity map.
-5. Snapshot creates or activates durable per-member restore work approximately
-   concurrently. Each node agent performs the existing compatibility checks,
-   CRIU and CUDA restore, writes `restore-complete`, and reports the existing
-   `nvidia.com/Restored` condition.
-6. If every required target reports `nvidia.com/Restored=True`, Snapshot marks
-   `PodGroupRestore` Ready. If any target reports a terminal restore failure,
-   Snapshot marks the group Failed and retains every member outcome.
-7. The workload owner separately observes Kubernetes Pod readiness and decides
+3. After every target Pod exists, the caller creates `PodSetRestore` with the
+   exact Pod names, UIDs, and container mappings.
+4. Snapshot validates the pinned target identities and creates one `PodRestore`
+   per member with exact set ownership, target identity, container mapping, and
+   capability profile. Each leaf enters WaitingForPlaceholder until its target
+   is scheduled and its placeholder is available. An unscheduled or temporarily
+   unavailable target remains visible through its leaf while it may recover and
+   becomes terminal when the operation deadline expires. If the pinned target
+   UID disappears, that leaf fails immediately with a stable terminal reason
+   because the same identity cannot return.
+5. After every placeholder is available, Snapshot determines and validates the
+   identity data required by the selected profile and stores it in the leaves.
+   Every leaf then performs compatibility and node-local preflight and reports
+   Admitted or Refused before any leaf starts process reconstruction.
+6. After every leaf is admitted, Snapshot activates restore work with
+   capability-aware bounded concurrency and the selected profile's required
+   synchronization.
+7. A communicator-reconstruction profile completes each member through the
+   existing local restore path. A preserved-session profile instead holds each
+   member in Prepared after local reconstruction; only after every member is
+   Prepared may the set controller authorize release.
+8. If every target reports `nvidia.com/Restored=True`, Snapshot marks
+   `PodSetRestore` Ready. If any target reports a terminal restore failure or
+   the deadline expires, Snapshot marks the set Failed and retains every member
+   outcome.
+9. The workload owner separately observes Kubernetes Pod readiness and decides
    when the restored group may receive serving traffic.
 
 ![Group restore sequence](diagrams/restore-sequence.svg)
 
-The durable member phases are:
+The durable `PodRestore` member phases are profile-dependent:
 
 ```text
-Pending -> Restoring -> Restored
+Pending -> WaitingForPlaceholder -> Admitting -> Admitted -> Restoring
+  communicator reconstruction: -> Restored
+  preserved sessions:           -> Prepared -> Released -> Restored
 ```
 
-![PodGroupRestore state machine](diagrams/restore-state.svg)
+![PodRestore member and PodSetRestore group state](diagrams/restore-state.svg)
 
-Group restore deliberately retains the standalone restore completion semantic.
-The node agent writes `restore-complete` and reports
-`nvidia.com/Restored=True` as soon as its local restore succeeds. Snapshot does
-not redefine this condition to mean application health or serving readiness,
-and `PodGroupRestore` does not wait for Kubernetes Pod Ready.
+Set restore retains the standalone meaning of completion: the restored process
+has completed the selected local restore contract. For communicator
+reconstruction, the node agent writes `restore-complete` and reports
+`nvidia.com/Restored=True` when that local contract succeeds. For a
+preserved-session profile, local reconstruction ends in Prepared, not Restored;
+no agent may write `restore-complete` or report `nvidia.com/Restored=True` until
+every member is Prepared and release is authorized. Agents observe release
+asynchronously, so simultaneous Pod readiness is neither promised nor required.
+`PodSetRestore` does not wait for Kubernetes Pod Ready or serving readiness.
 
 ### Network Identity and Socket Restore
 
-For the initial established-TCP implementation, the identity map contains
-every changed source Pod IPv4 address and its corresponding target Pod IPv4
-address. Every applicable CRIU restore receives the same complete map so both
-local and peer endpoints can be rewritten.
+Identity-map scope is profile-dependent. A session-preservation profile receives
+the complete map of every changed source Pod IPv4 address to its corresponding
+target Pod IPv4 address so both local and peer endpoints can be rewritten.
 
-The preserved-session path does not apply the standalone external-peer
-disconnection behavior to an established socket whose remote endpoint belongs
-to the same group. Socket retention and remapping fail closed when the peer
-cannot be resolved uniquely to a member. If a backend chooses communicator
-reconstruction instead, the checkpoint records that capability and the path is
-qualified independently.
+For a communicator-reconstruction profile, the required scope is not yet
+confirmed. Qualification must determine whether the disconnect path clears all
+stale peer-address state before reconstruction. Until that is demonstrated, a
+reconstruction profile cannot assume that local-only mapping is sufficient.
 
-The immutable group checkpoint records each source identity. The complete
-target-specific map is a restore work order and belongs to
-`PodGroupRestore`, or to a durable leaf work object derived from it. Pod
-annotations are not the source of truth for the map or aggregate member state.
+Every qualified backend profile declares exactly one session policy:
 
-Missing, duplicate, ambiguous, or unsupported mappings fail restore before
-process reconstruction begins.
+- **Communicator reconstruction:** established communication sessions need not
+  survive, and the backend reconstructs and validates its communicator before
+  local restore completes.
+- **Session preservation:** the restore path does not apply the standalone
+  external-peer disconnection behavior to a qualified in-set connection. It
+  retains and remaps both endpoints, performs coordinated network/session
+  handling, and holds every member at a release barrier.
+
+Session preservation fails closed when a peer cannot be resolved uniquely to a
+member. Successful qualification of one policy does not imply qualification of
+the other.
+
+The immutable set checkpoint records each source identity. The profile-required
+target identity data is a restore work order and belongs to `PodSetRestore` and
+its `PodRestore` leaves. Pod annotations are not the source of truth for the
+mapping, ownership, activation, or aggregate member state.
+
+Missing, duplicate, ambiguous, or unsupported mappings required by the selected
+profile fail restore before process reconstruction begins.
 
 ### Failure and Recovery
 
-A failure in any mandatory member fails the group operation.
+A failure in any member fails the set operation; V1 has no optional members.
 
-If checkpoint group validation fails before leaf creation, no destructive
-capture has started. After leaf creation, every member follows the existing
-single-Pod checkpoint semantics. A failed group may therefore contain both a
-member whose source process was terminated and a member whose source remains
-running. Snapshot publishes no Ready group checkpoint, exposes every leaf
-outcome, and does not promise rollback or group-wide fencing. The workload
-owner decides how to recover or recreate the source workload.
+If any checkpoint leaf refuses admission, no member may cross its destructive
+boundary. After the controller releases admitted leaves, the operation is
+non-atomic. A failed set may contain both a member whose source process was
+terminated and a member whose source remains running. Snapshot publishes no
+Ready set checkpoint, exposes every leaf outcome, and does not promise rollback
+or group-wide fencing. The workload owner decides how to recover or recreate
+the source workload.
 
-Restore failure also preserves the existing per-Pod semantics. An incompatible
-target leaves its placeholder running and reports `RestoreIncompatible`. An
-execution failure follows the node agent's existing fail-closed behavior for
-that target and reports `RestoreFailed`. A successfully restored sibling stays
-`nvidia.com/Restored=True`; Snapshot does not delete, restart, terminate, or
-fence it solely because another member failed. `PodGroupRestore` reports
-Failed with every member outcome, and the workload owner decides how to repair
-or recreate the distributed replica.
+For restore, an incompatible target leaves its placeholder running and reports
+`RestoreIncompatible`. An execution failure follows the node agent's fail-closed
+behavior and reports `RestoreFailed`. Under communicator reconstruction, a
+successfully restored sibling retains the standalone outcome. Under session
+preservation, a sibling already in Prepared must not be released after another
+member fails; whether it remains parked or is terminated is an open V1 decision
+that the chosen profile must make explicit. `PodSetRestore` reports Failed with
+every member outcome, and the workload owner decides how to repair or recreate
+the distributed replica.
 
 Group operation state survives controller restart. Reconciliation does not
 duplicate leaf creation or already completed per-Pod work. Operation identity,
 member identity, observed generation, leaf references, and durable per-member
-outcomes fence repeated work. Cancellation or deletion stops work that has not
-started and records outstanding artifact cleanup, but it cannot undo a capture
-or restore that crossed its existing per-Pod destructive boundary.
+outcomes fence repeated work. Every wait is bounded by the object's operation
+deadline. A target that remains unscheduled or cannot reach its placeholder
+before that deadline produces a terminal `DeadlineExceeded` result. A pinned
+target UID that disappears fails immediately because that identity cannot
+return.
+
+Deletion and cancellation have distinct semantics. Deleting a
+`PodSetSnapshot` or `PodSetRestore` stops creation or activation of new leaf
+work, but cannot undo work past a destructive boundary. A controller-managed
+finalizer orders cleanup; Kubernetes finalizer ordering is not relied upon.
+Deletion of a set snapshot rejects new restore attempts and waits for existing
+referencing restores to terminate. It then removes its set-owned namespaced
+leaves, the cluster-scoped content record, subordinate content, and managed
+artifacts before the finalizer is removed. V1 does not provide a `Retain`
+policy. Deletion of a set restore removes its `PodRestore` leaves but never
+deletes caller-owned target Pods. While cleanup is incomplete the object remains
+Terminating and exposes the remaining cleanup through conditions and Events;
+after deletion, absence of the object is the caller-visible outcome.
+
+A durable user-requested cancellation API is still open. It may be terminal
+cancellation recorded on a surviving object or reversible suspension, but it
+must not be described as a durable outcome on an object whose deletion removes
+that status.
 
 ### Ownership and Scheduling
 
@@ -462,7 +605,9 @@ The workload owner or caller owns:
 
 - source and target Pod creation;
 - group membership and logical role or rank assignment;
-- placement and scheduling requirements; and
+- placement and scheduling requirements;
+- holding exact source Pod UIDs against restart, replacement, and normal
+  workload execution while a set capture is active; and
 - observing Pod readiness, recovering failed workloads, and deciding when a
   restored group may receive serving traffic.
 
@@ -470,9 +615,9 @@ Snapshot owns:
 
 - frozen operation membership and identity;
 - the group checkpoint and restore-attempt identities;
-- network identity remapping;
-- leaf fan-out, aggregate publication, failure reporting, and artifact cleanup;
-  and
+- profile-required network identity handling;
+- leaf admission, activation, bounded execution, aggregate publication,
+  failure reporting, and artifact cleanup; and
 - the final group result.
 
 Node agents and leaf execution paths own node-local runtime interaction, CRIU
@@ -483,10 +628,11 @@ post-restore communicator validation.
 
 Grove or another workload manager creates the source and target Pods and owns
 their gang scheduling and topology-aware placement. The caller creates
-`PodGroupRestore` only after every target Pod exists, including its UID.
+`PodSetRestore` only after every target Pod exists, including its UID.
 Snapshot does not duplicate those responsibilities. Restore adds one
-constraint: every mandatory target container must reach placeholder-available
-state before Snapshot starts group-owned per-Pod restore work.
+constraint: every target container must reach placeholder-available
+state before Snapshot admits or activates set-owned per-Pod restore work. The
+`PodRestore` leaf may already exist in WaitingForPlaceholder.
 
 Grove `startsAfter` currently waits for the prerequisite clique's Pods to
 become Kubernetes Ready. This can create a cycle when a dependent rank is not
@@ -504,9 +650,9 @@ placement. A Grove enhancement is required only if its existing API cannot
 express the placeholder-availability behavior needed before group restore
 activation.
 
-### Initial Supported Profile
+### Initial Qualification Target
 
-The first qualified profile is:
+The first qualification target is:
 
 - one TensorRT-LLM replica;
 - dense TP=2;
@@ -520,6 +666,15 @@ The first qualified profile is:
 - artifact storage accessible from all source and target nodes; and
 - restore may relocate either member and assign new Pod IPs.
 
+This target is not a supported profile until the experiment demonstrates either
+communicator reconstruction or session preservation and the SNEP records that
+choice. If it requires session preservation, the `PodRestore` prepared state,
+release input, restart recovery, and failed-sibling disposition are V1
+requirements. If TensorRT-LLM reconstructs and validates its communicator, that
+profile does not require a set release barrier. The same qualification must
+determine whether its disconnect and reconstruction path requires complete peer
+identity mappings or only local remapping.
+
 CUDA graphs are disabled unless the backend demonstrates that every
 graph-visible communicator and allocation remains valid across the selected
 checkpoint and restore lifecycle. Enabling CUDA graphs is a separate
@@ -528,183 +683,238 @@ qualification dimension, not an implied property of NCCL Socket support.
 Passing this profile does not imply support for other NCCL transports or
 communication-resource paths.
 
+### Open Design Decisions
+
+The following decisions remain open and keep this SNEP in draft:
+
+1. **Initial session policy.** The TensorRT-LLM TP=2 experiment must determine
+   whether the initial NCCL Socket profile reconstructs its communicator or
+   requires preservation of established cross-Pod sessions.
+2. **Leaf coordination contract.** The Snapshot leaf must expose side-effect-safe
+   refusal, a declared destructive boundary, durable admission or preparation,
+   and restart-safe activation. A preserved-session profile additionally needs
+   a durable external release input. This contract is being aligned with
+   SNEP-295 rather than inferred from its current implementation.
+3. **Prepared-sibling failure.** For session preservation, the proposal must
+   choose whether a prepared sibling remains parked or is terminated when
+   another member fails before release.
+4. **Source hold enforcement.** The proposal must choose a workload-owner or
+   Grove hold contract, or a snapshot-aware container wrapper. Finalizers and
+   scheduling alone do not keep a source process alive or prevent restart. A
+   wrapper also requires a local terminal capture signal because it cannot
+   observe set-level status directly.
+5. **Cancellation model.** The proposal must choose terminal cancellation or
+   reversible suspension and define its durable outcome independently of
+   deletion.
+6. **Identity-map scope.** The proposal must determine whether communicator
+   reconstruction still requires complete peer mappings or whether its
+   disconnect path clears stale peer-address state before reconstruction. Each
+   qualified profile must declare its required mapping scope.
+
 ### Normative Requirements
 
 The key words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY**
 are interpreted as described in [RFC 2119].
 
-1. A multi-Pod checkpoint **MUST** have one group operation identity and one
-   durable group checkpoint identity.
-2. The complete member list **MUST** be resolved and frozen before
-   state-changing preparation begins.
+1. A multi-Pod checkpoint **MUST** have one set operation identity and one
+   durable set checkpoint identity.
+2. The complete member list **MUST** be resolved and frozen before admission.
+   Every member is required in V1.
 3. Every member **MUST** have a stable logical identity independent of Pod name,
    UID, IP address, node, and creation order.
 4. Source and target Pods **MUST** map one-to-one through logical member
-   identity.
-5. Group checkpoint publication **MUST** require every mandatory member and
-   artifact.
-6. Per-member success **MUST NOT** be exposed as group success.
-7. Snapshot **MUST** fan out subordinate member operations without
-   intentionally serializing one member behind another.
-8. Snapshot **MUST NOT** claim atomic checkpoint, atomic restore, or rollback
-   of work that has crossed a per-Pod destructive boundary.
-9. Every applicable CRIU restore **MUST** receive the complete source-to-target
-   network identity map.
-10. Missing or unsupported identity mappings **MUST** fail before process
-    reconstruction.
-11. Controller-observable group identity, readiness, node-agent, storage,
-    backend, and transport checks **MUST** be evaluated for every member before
-    leaf creation. Each leaf **MUST** retain its existing node-local validation.
-12. A mandatory member failure **MUST** fail the group operation.
-13. A group failure **MUST NOT** cause Snapshot to terminate, restart, delete,
-    or fence a successful sibling solely because another member failed.
-14. Group state and reconciliation **MUST** survive controller restart and
-    remain idempotent.
-15. Cancellation or deletion **MUST** stop work that has not started and record
-    outstanding cleanup, but **MUST NOT** claim to roll back completed leaf
-    work.
+   identity. V1 **MUST** map exactly one source container to exactly one
+   destination container per member.
+5. Set checkpoint publication **MUST** require every member and artifact.
+   Per-member success **MUST NOT** be exposed as set success.
+6. Every leaf **MUST** complete its admission checks before any leaf crosses its
+   declared destructive boundary.
+7. A leaf **MUST** declare the point after which it cannot be abandoned without
+   changing the source or target workload. The group controller **MUST NOT**
+   assume that this boundary is CRIU dump-and-kill.
+8. Snapshot **MUST** use capability-aware bounded concurrency and honor the
+   synchronization points declared by the selected profile.
+9. Snapshot **MUST NOT** claim atomic checkpoint, atomic restore, or rollback
+   of work that has crossed a leaf's destructive boundary.
+10. Every restore **MUST** receive the validated source-to-target identity data
+    required by its qualified profile. A session-preservation profile **MUST**
+    receive the complete set mapping. Missing, duplicate, ambiguous, or
+    unsupported required mappings **MUST** fail before process reconstruction.
+11. A member failure **MUST** fail the set operation. A profile **MUST** define
+    the disposition of a sibling that has already reached a non-resumable or
+    prepared state.
+12. Set and leaf state **MUST** survive controller and agent restart, remain
+    idempotent, and **MUST NOT** duplicate completed per-Pod work.
+13. Every set operation **MUST** have a deadline. A target that cannot reach
+    placeholder-available state before that deadline **MUST** terminate with a
+    stable reason. A pinned target UID that disappears **MUST** fail immediately
+    with a distinct terminal reason.
+14. Deletion **MUST** stop work that has not been activated, order cleanup
+    through controller logic, preserve caller-owned Pods, and **MUST NOT** claim
+    to roll back completed leaf work.
+15. Any cancellation API **MUST** expose a durable outcome independently of
+    deletion and **MUST** state whether cancellation is terminal or reversible.
 16. The protocol **MUST NOT** depend on a particular workload controller or
-    scheduler.
+    scheduler. Gang and topology-aware scheduling **MUST NOT** be reimplemented
+    by Snapshot.
 17. V1 **MUST** remain within one Kubernetes namespace and cluster.
-18. Broader transport and topology support **MUST** be qualified separately
-    before being advertised.
+18. Backend, transport, topology, and session policy combinations **MUST** be
+    qualified separately before being advertised.
 19. Checkpoint artifacts and restore attempts **MUST** have separate identities
     so one checkpoint can be restored repeatedly.
-20. A group-owned leaf artifact **MUST NOT** be restored outside an authorized
-    group restore context.
-21. Snapshot **MUST NOT** create subordinate capture work until the complete
-    member list passes controller-level group validation.
-22. Each target **MUST** retain the standalone restore completion semantic:
-    its node agent writes `restore-complete` and reports
-    `nvidia.com/Restored=True` when its local restore succeeds.
-23. Restore target startup dependencies **MUST** allow every mandatory target
-    container to reach placeholder-available state before group restore
-    activation.
-24. Gang and topology-aware scheduling **MAY** be provided by Grove or another
-    workload manager and **MUST NOT** be reimplemented by Snapshot.
-25. The complete target-specific identity map **MUST** be represented by
-    durable Snapshot state.
-26. Repeated reconciliation **MUST NOT** duplicate leaf creation or already
-    completed per-Pod work.
-27. Snapshot **MUST** expose an additive durable API for the group checkpoint
-    artifact and each restore attempt.
-28. The group restore API **MUST** reference one immutable group checkpoint and
-    map every logical member to exactly one target Pod.
-29. The group API **MUST NOT** change `PodSnapshot` or `SnapshotJob` into
-    multi-Pod workload owners.
-30. Every target Pod **MUST** exist with a pinned UID, and the complete
-    identity map **MUST** be valid, before Snapshot activates any group-owned
-    per-Pod restore.
-31. A preserved-session restore **MUST** distinguish in-group TCP peers from
-    external peers and **MUST NOT** apply the standalone external-peer
-    disconnection policy to a qualified in-group connection.
-32. `PodGroupRestore` **MUST** become Ready from successful per-Pod
-    `nvidia.com/Restored` outcomes and **MUST NOT** depend on Kubernetes Pod
-    Ready or serving readiness.
+20. A set-owned leaf artifact **MUST NOT** be restored outside the exact
+    authorized `PodSetRestore` UID and member context.
+21. Snapshot **MUST** expose additive durable APIs for the set checkpoint,
+    immutable set content, set restore attempt, and per-member `PodRestore`.
+22. The set restore API **MUST** reference one immutable set checkpoint and map
+    every logical member to exactly one pinned target Pod UID and container.
+23. Existing standalone `PodSnapshot`, `SnapshotJob`, and annotation-driven
+    restore cardinality and behavior **MUST NOT** be changed by a set operation.
+24. Every target placeholder **MUST** be available, and all identity data
+    required by the selected profile **MUST** be valid, before Snapshot
+    activates any set-owned restore leaf.
+25. A communicator-reconstruction profile **MUST** reconstruct and validate the
+    communicator before reporting the member Restored.
+26. A preserved-session profile **MUST** distinguish in-set peers from external
+    peers, **MUST NOT** apply the standalone external-peer disconnection policy
+    to a qualified in-set connection, and **MUST** hold every member until all
+    members are Prepared and release is authorized.
+27. For a preserved-session profile, an agent **MUST NOT** write
+    `restore-complete` or report `nvidia.com/Restored=True` before release.
+28. `PodSetRestore` **MUST** become Ready only from successful `PodRestore`
+    outcomes and **MUST NOT** depend on Kubernetes Pod Ready or serving
+    readiness.
+29. The workload owner **MUST** keep exact source Pod UIDs from restarting,
+    being replaced, or resuming normal execution from admission until the set
+    capture terminates. The selected integration **MUST** enforce this contract.
 
 ### Configuration
 
-This proposal introduces no new user-facing runtime configuration and does not
-choose a feature-gate name or default. Whether an alpha implementation needs a
-feature gate is an implementation and release decision. Installing or enabling
-the group APIs does not change standalone `PodSnapshot` or `SnapshotJob`
-behavior.
+This proposal introduces no feature-gate framework. The four additive CRDs are
+installed and upgraded through Snapshot's existing CRD installation path.
+Creating no set resource leaves standalone `PodSnapshot`, `SnapshotJob`, and
+annotation-driven restore behavior unchanged. Operation deadlines and
+capability profiles are fields of the set API rather than out-of-band feature
+flags.
 
-The initial supported profile uses the existing Snapshot artifact-storage,
+The initial qualification target uses the existing Snapshot artifact-storage,
 CRIU, CUDA checkpoint, and restore compatibility configuration. Backend and
-transport capability are recorded in the checkpoint rather than selected by an
-out-of-band annotation. The initial qualification covers exactly two members;
-a general maximum group size remains an implementation decision informed by
-the scalability tests below.
+transport and session-policy capability are recorded in the checkpoint rather
+than selected by an out-of-band annotation. The initial qualification covers
+exactly two members; a general maximum set size remains an implementation
+decision informed by the scalability tests below.
 
 ### Performance and Scalability
 
-Group validation, capture, and restore fan out across members and must not be
-intentionally serialized by the group controller. Completion time is therefore
-bounded primarily by the slowest mandatory member, while artifact bytes remain
-the sum of the existing per-Pod artifacts plus a small group manifest.
+Set validation, admission, capture, and restore use bounded concurrency. A
+profile may require all members to run a phase concurrently or may permit a
+smaller controller-selected bound; the protocol does not impose unconditional
+fan-out. Completion time is dominated by the slowest member and by explicit
+barriers, while artifact bytes remain the sum of the existing per-Pod artifacts
+plus a small set manifest.
 
-API object size and controller work grow linearly with member count. A complete
-network identity map has linear size and is delivered to every applicable
-member, producing quadratic aggregate distribution work if every member needs
-every mapping. The initial two-member profile does not establish a general
-scale limit. Tests must measure reconciliation latency, API-object size,
-controller memory, identity-map distribution, and cleanup time at increasing
-group sizes before beta limits are selected.
+API object size and controller work grow linearly with member count. When a
+profile requires a complete network identity map, that map has linear size and
+is delivered to every member, producing quadratic aggregate distribution work.
+The initial two-member profile does not establish a general scale limit. Tests
+must measure reconciliation latency, API-object size, controller memory,
+identity-data distribution, and cleanup time at increasing set sizes before
+beta limits are selected.
 
 The implementation must avoid unbounded fan-out that can starve unrelated
-standalone or group operations. The precise concurrency policy is selected
-during implementation. Metrics and logs avoid member identity labels whose
-cardinality grows with group size.
+standalone or set operations. The selected concurrency bound must not violate a
+profile's collective timing requirements. Metrics and logs avoid member
+identity labels whose cardinality grows with set size.
 
 ### Monitoring
 
-The group resources expose Kubernetes conditions and member status sufficient
-to answer which phase is active, which leaf is still pending, whether a failure
-is terminal, and what cleanup remains. Conditions use stable reason codes and
-include observed generation and transition time.
+The set resources and `PodRestore` leaves expose Kubernetes conditions and
+member status sufficient to answer which phase is active, which leaf is still
+pending or held, whether every leaf is admitted or prepared, whether release is
+authorized, whether a failure is terminal, when the deadline expires, and what
+cleanup remains. Conditions use stable reason codes and include observed
+generation and transition time.
 
-The operator emits Kubernetes Events for group acceptance, validation failure,
-leaf creation, checkpoint publication, restore completion, group failure,
+The operator emits Kubernetes Events for set acceptance, validation failure,
+leaf admission or refusal, activation, checkpoint publication, restore
+preparation and release, completion, deadline expiry, set failure, deletion or
 cancellation, and cleanup failure.
 
 Metrics cover operation count, duration, and failure count by operation type,
 phase, result, and stable reason. Member IDs, Pod names, UIDs, IP addresses, and
 artifact paths are excluded from metric labels to avoid unbounded cardinality.
-Logs carry the group UID, restore-attempt UID, member ID, and leaf operation UID
+Logs carry the set UID, restore-attempt UID, member ID, and leaf operation UID
 as structured correlation fields.
 
 ### Dependencies
 
 - Existing Snapshot `PodSnapshot`, `PodSnapshotContent`, restore-Pod, CRIU,
-  CUDA checkpoint, compatibility-preflight, and artifact-storage paths.
-- A backend and communicator lifecycle qualified for checkpoint and restore.
+  CUDA checkpoint, compatibility-preflight, and artifact-storage paths, extended
+  with the durable leaf admission contract required by this SNEP.
+- The local admission, prepared/held, release, and restart contract being
+  aligned with SNEP-295.
+- A backend and communicator lifecycle qualified for checkpoint and restore,
+  including an explicit communicator-reconstruction or session-preservation
+  policy.
 - A workload owner capable of creating the complete source and target Pod set.
-- A scheduler or workload manager capable of placing the target group. Grove is
+- A workload-owner integration capable of enforcing the source hold contract.
+- A scheduler or workload manager capable of placing the target set. Grove is
   optional.
 - A placeholder-startup policy that does not wait for restored workload
   readiness before all required targets exist.
 
 ### Test Plan
 
-Unit tests cover API validation, immutable membership, one-to-one target
-mapping, leaf ownership, phase transitions, idempotent leaf creation, cleanup,
-and source-to-target identity-map construction.
+Unit tests cover API validation, immutable required membership, the
+one-container-per-member limit, explicit source-to-destination container
+mapping, exact UID ownership, deadlines, phase transitions, idempotent leaf
+creation, ordered cleanup, and profile-dependent identity-data construction.
 
 Controller integration tests cover:
 
-- failure before and after the destructive checkpoint boundary;
-- one incompatible target while another target restores successfully;
-- one member completing before another fails;
-- controller restart during leaf fan-out and result aggregation;
+- admission refusal before any leaf crosses its destructive boundary;
+- failure after one admitted leaf crosses its destructive boundary;
+- one incompatible target while every sibling remains admitted but inactive;
+- communicator-reconstruction and session-preservation state paths;
+- one prepared member followed by sibling failure, using the selected
+  disposition;
+- controller restart during admission, activation, prepared hold, release, and
+  result aggregation;
 - node-agent retry without duplicate capture or restore;
-- rejection of standalone restore from a group-owned leaf;
+- rejection of standalone restore from a set-owned leaf and of a mismatched set
+  UID;
+- missing, deleted, and unschedulable targets before and at the operation
+  deadline;
+- mapping-scope validation for communicator reconstruction and session
+  preservation;
 - cancellation and deletion during each nonterminal phase; and
-- confirmation that a member failure does not cause group-wide Pod fencing or
-  deletion.
+- source restart and replacement attempts while the source hold is active.
 
-End-to-end qualification uses the initial supported profile and verifies:
+End-to-end qualification uses the initial qualification target and verifies:
 
 1. cold initialization and inference;
 2. checkpoint of both members;
 3. restore onto newly scheduled Pods;
 4. both-changed, one-changed, and unchanged Pod-IP cases;
-5. delivery of the complete identity map to both members;
-6. preservation of qualified in-group TCP sessions without standalone
-   external-peer disconnection;
-7. successful process, CUDA, and communicator restoration;
-8. correct post-restore inference;
-9. repeated restore from the same checkpoint;
-10. injected single-member failure, exact per-member status, and workload-owner
+5. delivery of the mapping scope declared by the selected profile, including
+   complete peer mappings for session preservation;
+6. the selected communicator-reconstruction or session-preservation policy;
+7. for session preservation, no completion sentinel before every member is
+   Prepared and release is authorized;
+8. successful process, CUDA, and communicator restoration;
+9. correct post-restore inference;
+10. repeated restore from the same checkpoint;
+11. injected single-member failure, exact per-member status, and workload-owner
     recovery; and
-11. a Grove-managed restore with placeholder-safe `startsAfter` handling.
+12. a Grove-managed restore with placeholder-safe `startsAfter` handling.
 
 ### Graduation Criteria
 
-Alpha requires the three group resources in `v1alpha1`, the initial supported
-profile, controller and node-agent restart coverage, failure-injection
-coverage, and end-to-end evidence for repeated restore and Pod-IP relocation.
-Documentation must state the exact qualified backend, transport, CUDA-graph,
+Alpha requires the four resources in `v1alpha1`; resolution of every open design
+decision in this SNEP; the initial qualified profile; controller and node-agent
+restart coverage; deadline, deletion, and failure-injection coverage; and
+end-to-end evidence for repeated restore and Pod-IP relocation. Documentation
+must state the exact qualified backend, transport, session policy, CUDA-graph,
 namespace, and cluster boundaries.
 
 Beta requires operational evidence for the declared supported profiles,
@@ -723,9 +933,9 @@ profiles, and a migration plan from the alpha and beta APIs.
 
 ### Restore Every Pod Independently
 
-Independent restore cannot construct a complete peer identity map or provide
-one durable group result. A partial group may appear successful even though a
-required member failed.
+Independent restore cannot construct profile-required peer identity mappings
+when they are needed or provide one durable group result. A partial group may
+appear successful even though a required member failed.
 
 ### Preserve the Original Pod IP Addresses
 
