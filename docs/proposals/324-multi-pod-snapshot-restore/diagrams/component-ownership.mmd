@@ -6,14 +6,14 @@ flowchart TB
     Grove["Grove or another workload manager"]
     Pods["Source and target Pods"]
     Group["Snapshot group controller"]
-    Capture["PodGroupSnapshot"]
-    Content["PodGroupSnapshotContent"]
-    Restore["PodGroupRestore"]
-    Leaf0["Existing per-Pod path - rank 0"]
-    Leaf1["Existing per-Pod path - rank 1"]
+    Capture["PodSetSnapshot"]
+    Content["PodSetSnapshotContent"]
+    Restore["PodSetRestore"]
+    Leaf0["PodSnapshot or PodRestore - rank 0"]
+    Leaf1["PodSnapshot or PodRestore - rank 1"]
     Result["Aggregate group result"]
 
-    Owner -->|"defines members"| Capture
+    Owner -->|"defines members and source hold"| Capture
     Owner -->|"requests Pod creation"| Grove
     Grove -->|"creates and schedules"| Pods
     Owner -->|"references existing Pod UIDs"| Restore
@@ -21,8 +21,8 @@ flowchart TB
     Pods -->|"target identities"| Restore
     Capture --> Group
     Restore --> Group
-    Group -->|"fans out"| Leaf0
-    Group -->|"fans out"| Leaf1
+    Group -->|"admits then activates"| Leaf0
+    Group -->|"admits then activates"| Leaf1
     Leaf0 -->|"member outcome"| Result
     Leaf1 -->|"member outcome"| Result
     Result -->|"all captures succeeded"| Content

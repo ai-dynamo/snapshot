@@ -12,9 +12,11 @@ flowchart TB
     subgraph Safe["Restore-safe scheduling"]
         S1["Grove creates and gang-schedules all target Pods"]
         S2["Caller pins every target name and UID"]
-        S3["Snapshot builds the complete identity map"]
-        S4["Per-Pod restores run concurrently"]
-        S5["Group result aggregates Restored conditions"]
-        S6["Workload owner evaluates Pod readiness"]
-        S1 --> S2 --> S3 --> S4 --> S5 --> S6
+        S3["Snapshot creates PodRestore leaves waiting for placeholders"]
+        S4["Every target placeholder becomes available"]
+        S5["Snapshot validates profile-required identity data"]
+        S6["Leaves admit, then run with bounded concurrency"]
+        S7["Group result aggregates Restored conditions"]
+        S8["Workload owner evaluates Pod readiness"]
+        S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7 --> S8
     end
