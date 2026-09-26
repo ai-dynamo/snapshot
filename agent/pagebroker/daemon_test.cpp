@@ -15,7 +15,9 @@
 #include "native_session.hpp"
 #include <signal.h>
 #include "posix_copy_engine.hpp"
+#include "storage_manifest.hpp"
 #include <fcntl.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 namespace fs = std::filesystem;
@@ -53,6 +55,38 @@ class BrokerTest : public ::testing::Test {
   }
 
   Broker& broker() { return *broker_; }
+
+  // A restorable LOAD participant: one extent file and its manifest. The fake
+  // engine may drain its sessions immediately.
+  void WriteLoadParticipant(const fs::path& directory, size_t size = 4096)
+  {
+    fs::create_directories(directory);
+    std::ofstream(directory / "device-0000.bin") << std::string(size, 'x');
+    std::string error;
+    ASSERT_TRUE(cuda_checkpoint_storage::WriteManifest(directory, {{kGpu, size, "device-0000.bin"}}, &error)) << error;
+    std::ofstream(directory / "allow-drain") << "true";
+  }
+
+  Request DirectRestore(const std::string& id)
+  {
+    auto restore = RequestFor(id);
+    restore.mutable_direct_restore()->mutable_source()->mutable_filesystem()->set_directory(source_.string());
+    restore.mutable_direct_restore()->mutable_io_engine()->mutable_posix_copy();
+    return restore;
+  }
+
+  Request BindLoad(const std::string& id, uint32_t namespace_pid)
+  {
+    auto binding = RequestFor(id);
+    auto* request = binding.mutable_bind_native();
+    request->set_direction(v1::BindNativeSession::LOAD);
+    request->set_container_pid(getpid());
+    request->set_namespace_pid(namespace_pid);
+    request->add_visible_devices(kGpu);
+    return binding;
+  }
+
+  static constexpr const char* kGpu = "GPU-00000000-0000-0000-0000-000000000001";
 
   fs::path root_;
   fs::path source_;
@@ -103,19 +137,11 @@ TEST_F(BrokerTest, NativeEngineReusesProcessAndHoldsAdmissionUntilDrain)
   for (int index = 0; index < 2; ++index) {
     const auto target = std::to_string(999998 + index);
     const auto directory = source_ / "native" / target;
-    fs::create_directories(directory);
+    WriteLoadParticipant(directory);
+    fs::remove(directory / "allow-drain");
     const auto id = "native-load-" + target;
-    auto restore = RequestFor(id);
-    restore.mutable_direct_restore()->mutable_source()->mutable_filesystem()->set_directory(source_.string());
-    restore.mutable_direct_restore()->mutable_io_engine()->mutable_posix_copy();
-    ASSERT_TRUE(native.HandleRequest(restore).has_direct_restore_ready());
-    auto binding = RequestFor(id);
-    auto* request = binding.mutable_bind_native();
-    request->set_direction(v1::BindNativeSession::LOAD);
-    request->set_container_pid(getpid());
-    request->set_namespace_pid(std::stoi(target));
-    request->add_visible_devices("GPU-00000000-0000-0000-0000-000000000001");
-    auto session = native.BindNative(binding);
+    ASSERT_TRUE(native.HandleRequest(DirectRestore(id)).has_direct_restore_ready());
+    auto session = native.BindNative(BindLoad(id, std::stoi(target)));
     v1::NativeSessionRequest prepare;
     prepare.set_operation(v1::NativeSessionRequest::PREPARE);
     prepare.set_target_pid(getpid());
@@ -126,6 +152,9 @@ TEST_F(BrokerTest, NativeEngineReusesProcessAndHoldsAdmissionUntilDrain)
     EXPECT_EQ(engine, observed);
     std::ifstream(directory / "target-pid") >> observed;
     EXPECT_EQ(observed, getpid());
+    std::string admitted;
+    std::getline(std::ifstream(directory / "admitted-extents"), admitted);
+    EXPECT_EQ(admitted, std::string("device-0000.bin 4096 ") + kGpu);
     auto abort = RequestFor(id);
     abort.mutable_abort();
     auto pending = std::async(std::launch::async, [&] { return native.HandleRequest(abort); });
@@ -138,6 +167,69 @@ TEST_F(BrokerTest, NativeEngineReusesProcessAndHoldsAdmissionUntilDrain)
     EXPECT_EQ(kill(engine, 0), 0);
     EXPECT_TRUE(fs::exists(source_ / "image"));
   }
+}
+
+TEST_F(BrokerTest, NativeLoadChecksManifestAtBind)
+{
+  // A LOAD participant's manifest is read and size-checked when the session is
+  // bound, before CRIU, not in PREPARE after other participants start reading.
+  Broker native(root_ / "native-staging", root_ / "storage", "/unused/pagebroker-gpu-engine");
+  WriteLoadParticipant(source_ / "native" / "7");
+  fs::resize_file(source_ / "native" / "7" / "device-0000.bin", 100);
+  ASSERT_TRUE(native.HandleRequest(DirectRestore("native-short")).has_direct_restore_ready());
+  try {
+    native.BindNative(BindLoad("native-short", 7));
+    FAIL() << "short extent was admitted";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string(error.what()).find("wrong size"), std::string::npos) << error.what();
+  }
+}
+
+TEST_F(BrokerTest, NativeTargetsReuseResolvedPidsAndRejectStaleOnes)
+{
+  fs::create_symlink(fs::absolute("build/fake-gpu-engine"), root_ / "pagebroker-gpu-engine");
+  Broker native(root_ / "native-staging", root_ / "storage", root_ / "pagebroker-gpu-engine");
+  native.StartGpuEngine();
+  const pid_t child = fork();
+  if (child == 0) {
+    pause();
+    _exit(0);
+  }
+  ASSERT_GT(child, 0);
+  for (const auto* target : {"11", "12", "13"}) WriteLoadParticipant(source_ / "native" / target);
+  ASSERT_TRUE(native.HandleRequest(DirectRestore("native-pids")).has_direct_restore_ready());
+  auto first = native.BindNative(BindLoad("native-pids", 11));
+  auto second = native.BindNative(BindLoad("native-pids", 12));
+  auto third = native.BindNative(BindLoad("native-pids", 13));
+  const auto prepare = [](auto& session, pid_t target) {
+    v1::NativeSessionRequest request;
+    request.set_operation(v1::NativeSessionRequest::PREPARE);
+    request.set_target_pid(target);
+    return session->Execute(request);
+  };
+  const auto admitted = [&](const char* target) {
+    int pid = 0;
+    std::ifstream(source_ / "native" / target / "target-pid") >> pid;
+    return pid;
+  };
+  // The first scan records every process in the pinned namespace; the second
+  // session resolves from that record after re-checking the process.
+  ASSERT_FALSE(prepare(first, child).has_failure());
+  ASSERT_FALSE(prepare(second, getpid()).has_failure());
+  EXPECT_EQ(admitted("11"), child);
+  EXPECT_EQ(admitted("12"), getpid());
+  // A recorded PID whose process has exited must not be reused.
+  kill(child, SIGKILL);
+  waitpid(child, nullptr, 0);
+  const auto stale = prepare(third, child);
+  ASSERT_TRUE(stale.has_failure());
+  EXPECT_NE(stale.failure().message().find("absent"), std::string::npos) << stale.failure().message();
+  first.reset();
+  second.reset();
+  third.reset();
+  auto abort = RequestFor("native-pids");
+  abort.mutable_abort();
+  EXPECT_TRUE(native.HandleRequest(abort).has_abort_complete());
 }
 
 TEST_F(BrokerTest, RestoreFilesRemainPrivateAndPublicationMovesSameFilesystem)

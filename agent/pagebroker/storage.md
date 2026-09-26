@@ -7,6 +7,10 @@ PageBroker owns one private directory per CUDA participant. Its version-4
 manifest records each extent's source GPU UUID, byte length, and deterministic
 filename. Restore matches extents to destination GPU UUIDs and verifies the
 file lengths before transferring data. Earlier manifest versions are rejected.
+The CPU broker reads the manifest and checks the file lengths when a restore
+session is bound, before CRIU and before any participant transfers, and passes
+the parsed extents to the GPU engine. PREPARE therefore does no storage
+metadata I/O while earlier participants' reads occupy the same storage.
 
 Checkpoint storage is trusted and immutable during restore. Production payloads have no
 content hashes: layout and size validation do not detect same-size corruption.

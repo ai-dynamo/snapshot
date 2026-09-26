@@ -105,6 +105,13 @@ class Operation {
     struct stat info{};
     Require(!fstat(directory_fd_.get(), &info) && S_ISDIR(info.st_mode) && !(info.st_mode & 0022),
             "native storage must be a private directory");
+    if (!save_) {
+      // The broker read and size-checked the manifest at admission, while
+      // storage was idle; PREPARE must not queue behind other targets' reads.
+      Require(admission.has_load_manifest(), "native LOAD admission requires the broker-read manifest");
+      for (const auto& extent : admission.load_manifest().extents())
+        manifest_.push_back({extent.source_uuid(), static_cast<size_t>(extent.size()), extent.filename()});
+    }
     for (const auto& uuid : admission.binding().visible_devices()) {
       Require(std::any_of(engine_.devices.begin(), engine_.devices.end(),
                          [&](const auto& device) { return device.second->uuid == uuid; }),
@@ -156,8 +163,6 @@ class Operation {
   std::string Prepare() {
     start_ = Clock::now();
     std::string error;
-    if (!save_ && (!storage::ReadManifest(directory_, &manifest_, &error) ||
-                   !storage::ValidateExtentFiles(directory_, manifest_, &error))) throw std::runtime_error(error);
     const auto begin = Clock::now();
     view_ = &native_.Prepare(save_, gpu_pairs_);
     const auto end = Clock::now();

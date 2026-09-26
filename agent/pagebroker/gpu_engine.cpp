@@ -43,7 +43,8 @@ void GpuEngine::Start() {
   std::fprintf(stderr, "GPU engine pid=%d %s\n", process_, ready.report().c_str());
 }
 
-FileDescriptor GpuEngine::Bind(const v1::BindNativeSession& binding, int target, int directory) {
+FileDescriptor GpuEngine::Bind(const v1::BindNativeSession& binding, int target, int directory,
+                               const internal::LoadManifest* load) {
   std::lock_guard lock(mutex_);
   if (process_ <= 0) throw std::runtime_error("GPU engine is not running");
   int sockets[2];
@@ -54,6 +55,7 @@ FileDescriptor GpuEngine::Bind(const v1::BindNativeSession& binding, int target,
   internal::NativeBinding request;
   *request.mutable_binding() = binding;
   request.set_host_pid(target);
+  if (load) *request.mutable_load_manifest() = *load;
   SendFrame(control_.get(), request, {peer.get(), directory});
   return connection;
 }
