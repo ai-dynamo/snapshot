@@ -20,6 +20,11 @@ int main() {
       const std::filesystem::path path("/proc/self/fd/" + std::to_string(directory.get()));
       std::ofstream(path / "engine-pid") << getpid();
       std::ofstream(path / "target-pid") << binding.host_pid();
+      {
+        std::ofstream admitted(path / "admitted-extents");
+        for (const auto& extent : binding.load_manifest().extents())
+          admitted << extent.filename() << " " << extent.size() << " " << extent.source_uuid() << "\n";
+      }
       v1::NativeSessionReply reply;
       reply.set_report("ready");
       SendFrame(connection.get(), reply);

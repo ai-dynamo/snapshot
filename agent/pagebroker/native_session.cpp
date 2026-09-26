@@ -5,6 +5,7 @@
 #include "fd_transport.hpp"
 #include "gpu_engine.hpp"
 #include "gpu_engine.pb.h"
+#include "storage_manifest.hpp"
 
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -14,6 +15,7 @@
 
 #include <fstream>
 #include <cstdio>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 
@@ -21,6 +23,33 @@ namespace snapshot::pagebroker {
 namespace {
 void Require(bool ok, const char* message) {
   if (!ok) throw std::runtime_error(message);
+}
+
+// The PID of /proc/<pid> as seen from the pinned namespace, if the process runs
+// in that namespace or a descendant. CRIU may create a nested PID namespace
+// beneath the placeholder; siblings of the pinned namespace never match.
+std::optional<uint32_t> PinnedPid(const std::filesystem::path& process, const struct stat& pinned) {
+  FileDescriptor candidate(open((process / "ns/pid").c_str(), O_RDONLY | O_CLOEXEC));
+  size_t depth = 0;
+  while (true) {
+    struct stat actual{};
+    if (candidate.get() < 0 || fstat(candidate.get(), &actual)) return std::nullopt;
+    if (actual.st_dev == pinned.st_dev && actual.st_ino == pinned.st_ino) break;
+    candidate = FileDescriptor(ioctl(candidate.get(), NS_GET_PARENT));
+    ++depth;
+  }
+  std::ifstream status(process / "status");
+  std::string line;
+  while (std::getline(status, line)) {
+    if (!line.starts_with("NSpid:")) continue;
+    std::istringstream values(line.substr(6));
+    std::vector<uint32_t> pids;
+    uint32_t value;
+    while (values >> value) pids.push_back(value);
+    if (pids.size() > depth) return pids[pids.size() - depth - 1];
+    return std::nullopt;
+  }
+  return std::nullopt;
 }
 }
 
@@ -62,6 +91,20 @@ NativeSession::NativeSession(std::shared_ptr<Transaction> transaction,
     Require(mkdirat(native.get(), name.c_str(), 0700) == 0, "create native target directory");
   directory_fd_ = FileDescriptor(openat(native.get(), name.c_str(), O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
   Require(directory_fd_.get() >= 0, "pin native target directory");
+  if (binding.direction() == v1::BindNativeSession::LOAD) {
+    namespace storage = cuda_checkpoint_storage;
+    const std::filesystem::path directory("/proc/self/fd/" + std::to_string(directory_fd_.get()));
+    std::vector<storage::ManifestExtent> extents;
+    std::string error;
+    if (!storage::ReadManifest(directory, &extents, &error) || !storage::ValidateExtentFiles(directory, extents, &error))
+      throw std::runtime_error(error);
+    for (const auto& extent : extents) {
+      auto* loaded = load_manifest_.add_extents();
+      loaded->set_source_uuid(extent.source_uuid);
+      loaded->set_size(extent.size);
+      loaded->set_filename(extent.filename);
+    }
+  }
   transaction_->native_targets.insert(key);
   ++transaction_->native_sessions;
   transaction_->native_failed = false;
@@ -71,44 +114,38 @@ void NativeSession::Start(uint32_t target_pid) {
   // The agent supplies the PID observed from the pinned placeholder namespace,
   // not the restored process's innermost PID (both roots can have inner PID 1).
   // The GPU engine opens a pidfd before any operation on the target.
-  struct stat expected{};
-  Require(fstat(namespace_fd_.get(), &expected) == 0, "stat target namespace");
+  struct stat pinned{};
+  Require(fstat(namespace_fd_.get(), &pinned) == 0, "stat target namespace");
+  const auto key = std::make_pair(pinned.st_dev, pinned.st_ino);
   int target = 0;
-  for (const auto& entry : std::filesystem::directory_iterator("/proc")) {
-    const auto name = entry.path().filename().string();
-    if (name.find_first_not_of("0123456789") != std::string::npos) continue;
-    // CRIU may create a nested PID namespace beneath the placeholder. Accept
-    // only that pinned namespace or one of its descendants, never a sibling.
-    FileDescriptor candidate(open((entry.path() / "ns/pid").c_str(), O_RDONLY | O_CLOEXEC));
-    bool contained = false;
-    size_t depth = 0;
-    while (candidate.get() >= 0) {
-      struct stat actual{};
-      if (fstat(candidate.get(), &actual)) break;
-      if (actual.st_dev == expected.st_dev && actual.st_ino == expected.st_ino) {
-        contained = true;
-        break;
-      }
-      candidate = FileDescriptor(ioctl(candidate.get(), NS_GET_PARENT));
-      ++depth;
-    }
-    if (!contained) continue;
-    std::ifstream status(entry.path() / "status");
-    std::string line;
-    while (std::getline(status, line)) {
-      if (!line.starts_with("NSpid:")) continue;
-      std::istringstream values(line.substr(6));
-      std::vector<unsigned> pids;
-      unsigned value;
-      while (values >> value) pids.push_back(value);
-      if (pids.size() > depth && pids[pids.size() - depth - 1] == target_pid) {
-        Require(target == 0, "ambiguous native target");
-        target = std::stoi(name);
-      }
-    }
+  {
+    std::lock_guard lock(transaction_->mutex());
+    const auto& known = transaction_->native_host_pids[key];
+    if (const auto found = known.find(target_pid); found != known.end()) target = found->second;
   }
+  // Every participant of a restore lives in the same pinned namespace, so one
+  // /proc scan serves them all. A recorded PID is used only after the same
+  // identity check the scan applies, so a stale or reused PID falls back to a
+  // fresh scan rather than binding another process.
+  if (target <= 0 || PinnedPid("/proc/" + std::to_string(target), pinned) != target_pid) {
+    std::map<uint32_t, int> scanned;
+    for (const auto& entry : std::filesystem::directory_iterator("/proc")) {
+      const auto name = entry.path().filename().string();
+      if (name.find_first_not_of("0123456789") != std::string::npos) continue;
+      const auto pid = PinnedPid(entry.path(), pinned);
+      if (!pid) continue;
+      const auto [slot, inserted] = scanned.emplace(*pid, std::stoi(name));
+      if (!inserted) slot->second = -1;
+    }
+    const auto found = scanned.find(target_pid);
+    target = found == scanned.end() ? 0 : found->second;
+    std::lock_guard lock(transaction_->mutex());
+    transaction_->native_host_pids[key] = std::move(scanned);
+  }
+  Require(target != -1, "ambiguous native target");
   Require(target > 0, "native target absent from pinned namespace");
-  connection_ = engine_->Bind(binding_, target, directory_fd_.get());
+  connection_ = engine_->Bind(binding_, target, directory_fd_.get(),
+                              binding_.direction() == v1::BindNativeSession::LOAD ? &load_manifest_ : nullptr);
   v1::NativeSessionReply reply;
   std::vector<FileDescriptor> descriptors;
   Require(ReceiveFrame(connection_.get(), reply, descriptors), "GPU engine disconnected during bind");

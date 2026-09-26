@@ -9,6 +9,18 @@ import "v1/pagebroker.proto";
 message NativeBinding {
   v1.BindNativeSession binding = 1;
   uint32 host_pid = 2;
+  // LOAD only. The broker reads and size-checks the participant manifest when
+  // the session is bound, before CRIU and before any participant transfers, so
+  // PREPARE does no storage metadata I/O behind other participants' reads.
+  LoadManifest load_manifest = 3;
+}
+message LoadManifest {
+  repeated LoadExtent extents = 1;
+}
+message LoadExtent {
+  string source_uuid = 1;
+  uint64 size = 2;
+  string filename = 3;
 }
 message NativeCommand {
   oneof command {

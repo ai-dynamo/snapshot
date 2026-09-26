@@ -7,8 +7,10 @@
 #include <condition_variable>
 #include <mutex>
 #include <variant>
+#include <map>
 #include <set>
 #include <cstdint>
+#include <sys/types.h>
 
 #include "checkpoint_transaction_descriptor.hpp"
 #include "restore_transaction_descriptor.hpp"
@@ -43,6 +45,10 @@ class Transaction {
   std::condition_variable native_drained;
   bool native_failed = false;
   std::set<uint32_t> native_targets;
+  // Host PIDs by PID as seen from a pinned native PID namespace (keyed by the
+  // namespace's st_dev/st_ino), recorded by one /proc scan after CRIU. Entries
+  // are re-verified before use; -1 marks a PID claimed by more than one process.
+  std::map<std::pair<dev_t, ino_t>, std::map<uint32_t, int>> native_host_pids;
 
  private:
   std::mutex mutex_;
