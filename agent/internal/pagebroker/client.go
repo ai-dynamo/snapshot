@@ -113,6 +113,9 @@ func (c Client) dial(ctx context.Context) (net.Conn, error) {
 	for {
 		select {
 		case <-retryCtx.Done():
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			return nil, err
 		case <-time.After(dialRetryDelay):
 		}
