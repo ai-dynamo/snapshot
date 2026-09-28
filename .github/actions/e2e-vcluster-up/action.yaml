@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Create e2e vCluster
+description: >-
+  Install the e2e tooling, remove stale e2e namespaces, validate the host GPU
+  cluster, and create the per-run vCluster. Reads the SNAPSHOT_E2E_* and
+  HOST_NAMESPACE environment of the calling job.
+
+runs:
+  using: composite
+  steps:
+    - name: Install vCluster CLI
+      uses: ./.github/actions/install-vcluster-cli
+
+    - name: Cleanup stale e2e namespaces
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        cutoff_epoch="$(date -u -d '12 hours ago' +%s)"
+        kubectl get ns -l snapshot-e2e=true \
+          -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.creationTimestamp}{"\n"}{end}' |
+        while IFS=$'\t' read -r namespace created_at; do
+          if [[ -z "${namespace}" ]]; then
+            continue
+          fi
+          if [[ "${namespace}" == "${HOST_NAMESPACE}" ]]; then
+            echo "Keeping current namespace ${namespace}"
+            continue
+          fi
+
+          created_epoch="$(date -u -d "${created_at}" +%s)"
+          if (( created_epoch >= cutoff_epoch )); then
+            echo "Keeping recent namespace ${namespace} created at ${created_at}"
+            continue
+          fi
+
+          echo "Deleting stale Snapshot e2e namespace ${namespace} created at ${created_at}"
+          helm uninstall vcluster-hpm -n "${namespace}" || true
+          vcluster delete "${namespace}" --namespace "${namespace}" || true
+          kubectl delete namespace "${namespace}" --ignore-not-found --wait=false || true
+        done
+
+    - name: Install Python tooling (ARM64)
+      if: ${{ runner.arch == 'ARM64' }}
+      uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      with:
+        version: "0.10.11"
+        checksum: "23003df007937dd607409c8ddf010baa82bad2673e60e254632ca5b04edcce13"
+        enable-cache: "false"
+        download-from-astral-mirror: "false"
+
+    - name: Install Python tooling (X64)
+      if: ${{ runner.arch == 'X64' }}
+      uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      with:
+        version: "0.10.11"
+        checksum: "5a360b0de092ddf4131f5313d0411b48c4e95e8107e40c3f8f2e9fcb636b3583"
+        enable-cache: "false"
+        download-from-astral-mirror: "false"
+
+    - name: Validate Python tooling
+      shell: bash
+      run: |
+        set -euo pipefail
+        uv --version
+
+    - name: Validate host GPU cluster
+      shell: bash
+      run: |
+        set -euo pipefail
+        uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
+          --phase host-preflight
+
+    - name: Create vCluster target
+      shell: bash
+      run: |
+        set -euo pipefail
+        uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
+          --phase vcluster
