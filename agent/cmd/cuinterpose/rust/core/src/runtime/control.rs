@@ -10,7 +10,8 @@ use crate::runtime as state;
 use cudarc::driver::sys::CUresult::CUDA_ERROR_NOT_INITIALIZED;
 use cuinterpose_protocol::{self as protocol, NamespacePid, Operation, Request, Response};
 use rustix::event::{PollFd, PollFlags, poll};
-use std::os::unix::fs::PermissionsExt;
+use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType, socket_with};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, TrySendError};
@@ -120,7 +121,7 @@ impl PreparedWorkers {
     /// non-Drop TLS, not loader registration. The channel is preallocated.
     /// Eager ELF binding prevents first-use loader lookup in these libc calls.
     pub fn activate(&mut self, endpoint: &str) -> Result<()> {
-        self.listener = Some(UnixListener::bind(endpoint).map_err(|_| CUDA_ERROR_NOT_INITIALIZED)?);
+        self.listener = Some(bind_listener(endpoint).map_err(|_| CUDA_ERROR_NOT_INITIALIZED)?);
         let listener = self.listener.as_ref().unwrap();
         listener
             .set_nonblocking(true)
@@ -144,6 +145,44 @@ impl PreparedWorkers {
             let _ = std::fs::remove_file(endpoint);
         }
     }
+}
+
+fn bind_listener(endpoint: &str) -> std::io::Result<UnixListener> {
+    let error = match UnixListener::bind(endpoint) {
+        Ok(listener) => return Ok(listener),
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => error,
+        Err(error) => return Err(error),
+    };
+    // Exec closes the listener but leaves its pathname. Only the elected
+    // installer may reclaim this PID's endpoint, after checking for a healthy
+    // runtime under INSTALL_LOCK. Other PID namespaces must not share its name.
+    let previous = std::fs::symlink_metadata(endpoint)?;
+    let uid = unsafe { libc::geteuid() };
+    if !previous.file_type().is_socket() || previous.uid() != uid {
+        return Err(error);
+    }
+    let address = SocketAddrUnix::new(endpoint)?;
+    let probe = socket_with(
+        AddressFamily::UNIX,
+        SocketType::STREAM,
+        SocketFlags::NONBLOCK | SocketFlags::CLOEXEC,
+        None,
+    )?;
+    // No polling or protocol exchange under the installation lock. A full
+    // backlog (EAGAIN), live listener, or ambiguous error must preserve the path.
+    if rustix::net::connect(&probe, &address) != Err(rustix::io::Errno::CONNREFUSED) {
+        return Err(error);
+    }
+    let current = std::fs::symlink_metadata(endpoint)?;
+    if current.dev() != previous.dev()
+        || current.ino() != previous.ino()
+        || !current.file_type().is_socket()
+        || current.uid() != uid
+    {
+        return Err(error);
+    }
+    std::fs::remove_file(endpoint)?;
+    UnixListener::bind(endpoint)
 }
 
 fn dispatch(
