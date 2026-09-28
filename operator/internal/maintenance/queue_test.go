@@ -92,6 +92,36 @@ func TestProcessNextItemSkipsItemsAfterCancellation(t *testing.T) {
 	assert.Zero(t, q.queue.NumRequeues(key))
 }
 
+type cancellingPatchClient struct {
+	client.Client
+	cancel context.CancelFunc
+}
+
+func (c *cancellingPatchClient) Patch(ctx context.Context, _ client.Object, _ client.Patch, _ ...client.PatchOption) error {
+	c.cancel()
+	return ctx.Err()
+}
+
+func TestProcessNextItemDoesNotRequeueItemCancelledInFlight(t *testing.T) {
+	base, _ := prepareTestArtifactRoot(t, "uid-1")
+	now := metav1.Now()
+	content := &snapshotv1alpha1.PodSnapshotContent{ObjectMeta: metav1.ObjectMeta{
+		Name: "content", UID: "uid-1", ResourceVersion: "1", DeletionTimestamp: &now,
+		Finalizers: []string{PodSnapshotContentArtifactCleanupFinalizer},
+	}}
+	q, _ := newTestQueue(t, base, content)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	q.client = &cancellingPatchClient{Client: q.client, cancel: cancel}
+
+	key := newDeleteContentKey(content.Name, content.UID)
+	q.EnqueueDeleteContent(key.Name, key.UID)
+
+	require.True(t, q.processNextItem(ctx, logr.Discard()))
+	assert.Zero(t, q.queue.Len())
+	assert.Zero(t, q.queue.NumRequeues(key))
+}
+
 func newQueue(t *testing.T, cfg operatortypes.ArtifactCleanupConfig) *Queue {
 	t.Helper()
 	q, err := NewQueue(nil, nil, nil, cfg)

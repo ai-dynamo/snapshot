@@ -113,6 +113,7 @@ func (q *Queue) processNextItem(ctx context.Context, logger logr.Logger) bool {
 
 	if err := q.process(ctx, key, logger); err != nil {
 		switch {
+		case ctx.Err() != nil:
 		case key.Mode == ModeSweep:
 			logger.Error(err, "Maintenance sweep failed; retrying at the next scan interval")
 		case q.queue.NumRequeues(key) < maxKeyRetries:
