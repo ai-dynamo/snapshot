@@ -1,18 +1,18 @@
 {
   "combinedRecordCount": 33,
-  "expiresAt": "2026-10-12T03:13:12.198Z",
+  "expiresAt": "2026-10-12T03:45:15.321Z",
   "formatVersion": 1,
-  "generatedAt": "2026-09-28T03:13:12.198Z",
+  "generatedAt": "2026-09-28T03:45:15.321Z",
   "historyRecordCount": 30,
   "key": "pr-338",
   "previewRecordCount": 3,
   "source": {
     "branch": "pull-request/338",
-    "commit": "cd14ae0d316bf2cb7df2a9815bb059093ca48257",
+    "commit": "0672b12cb6c35bb3ac960369c9d623d4354dc23e",
     "event": "push",
     "pullRequest": 338,
     "runAttempt": 1,
-    "runId": "36372003069",
-    "runUrl": "https://github.com/ai-dynamo/snapshot/actions/runs/36372003069"
+    "runId": "36374045292",
+    "runUrl": "https://github.com/ai-dynamo/snapshot/actions/runs/36374045292"
   }
 }
