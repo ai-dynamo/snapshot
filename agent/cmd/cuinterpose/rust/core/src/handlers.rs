@@ -5,7 +5,7 @@
 
 use crate::driver::{self};
 use crate::driver::{CudaError, Result};
-use crate::memory::sharing;
+use crate::memory::{sharing, vmm};
 use crate::memory::{self, Memblock, VirtualAllocationHandle};
 use crate::runtime;
 use cudarc::driver::sys::CUresult::*;
@@ -24,12 +24,20 @@ pub fn cuMemCreate(
         return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
     }
     let properties = unsafe { *prop };
-    let mut state = active()?;
+    // HOST_NUMA needs a CPU carrier and NUMA-aware reconstruction. Native
+    // checkpointing of private HOST_NUMA allocations is not qualified either.
+    if properties.location.type_ == CUmemLocationType::CU_MEM_LOCATION_TYPE_HOST_NUMA {
+        return Err(CUDA_ERROR_NOT_SUPPORTED.into());
+    }
     let supported = properties.requestedHandleTypes
         == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
     if !supported && properties.requestedHandleTypes.0 != 0 {
         return Err(CUDA_ERROR_NOT_SUPPORTED.into());
     }
+    if supported {
+        vmm::validate_properties(&properties)?;
+    }
+    let mut state = active()?;
     let reference = if supported {
         Some(state.new_reference()?)
     } else {
@@ -234,3 +242,6 @@ pub fn cuMemGetAllocationPropertiesFromHandle(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

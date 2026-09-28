@@ -9,6 +9,16 @@ use cudarc::driver::sys::CUresult::*;
 use cudarc::driver::sys::*;
 use cuinterpose_protocol::{AllocationId, AllocationReference, NamespacePid};
 
+/// Tracked unicast memory must be reconstructible by the device-memory carrier.
+pub(crate) fn validate_properties(properties: &CUmemAllocationProp) -> Result<()> {
+    if properties.type_ != CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED
+        || properties.location.type_ != CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE
+    {
+        return Err(CUDA_ERROR_NOT_SUPPORTED.into());
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct Allocation {
     pub reference: AllocationReference,

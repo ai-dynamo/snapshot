@@ -244,14 +244,16 @@ pub(crate) fn import_reference(
     runtime::must_complete(unsafe {
         crate::driver::cuMemGetAllocationPropertiesFromHandle(properties.as_mut_ptr(), driver)
     });
-    let handle = runtime::must_complete(state.adopt_unicast(
-        reference,
-        driver,
-        0,
-        unsafe { properties.assume_init() },
-        true,
-        context,
-    ));
+    let properties = unsafe { properties.assume_init() };
+    if let Err(error) = super::vmm::validate_properties(&properties) {
+        // The peer may run a version that admits unsupported backing. Import
+        // only to inspect its properties, then release the unpublished handle.
+        runtime::must_complete(unsafe { crate::driver::cuMemRelease(driver) });
+        return Err(error);
+    }
+    let handle = runtime::must_complete(
+        state.adopt_unicast(reference, driver, 0, properties, true, context),
+    );
     Ok((state, handle))
 }
 #[cfg(test)]
