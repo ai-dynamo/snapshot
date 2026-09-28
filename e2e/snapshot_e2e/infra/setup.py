@@ -40,6 +40,7 @@ DEFAULT_STORAGE_CLASS = ""
 DEFAULT_VCLUSTER_K8S_VERSION = "v1.32.13"
 DEFAULT_VCLUSTER_LOCAL_PORT = 8443
 DEFAULT_HELM_TIMEOUT = "6m"
+DEFAULT_CHART = "./charts/snapshot"
 DEFAULT_READY_TIMEOUT_SECONDS = 900
 PROGRESS_INTERVAL_SECONDS = 30
 
@@ -158,6 +159,16 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--snapshot-tag",
         default=os.environ.get("SNAPSHOT_E2E_SNAPSHOT_TAG"),
         help="Operator and agent image tag for the Snapshot chart.",
+    )
+    parser.add_argument(
+        "--chart-ref",
+        default=os.environ.get("SNAPSHOT_E2E_CHART_REF") or DEFAULT_CHART,
+        help=f"Snapshot chart to install: a local path or an oci:// reference. Default: {DEFAULT_CHART}.",
+    )
+    parser.add_argument(
+        "--chart-version",
+        default=os.environ.get("SNAPSHOT_E2E_CHART_VERSION") or None,
+        help="Chart version for an oci:// --chart-ref, e.g. 0.1.0. Default: none.",
     )
     parser.add_argument(
         "--pvc-name",
@@ -361,6 +372,8 @@ def setup_snapshot_install(args: argparse.Namespace, context: SetupContext) -> N
         image_tag=args.snapshot_tag,
         pvc_name=args.pvc_name,
         timeout=args.helm_timeout,
+        chart=args.chart_ref,
+        chart_version=args.chart_version,
         helm_overrides=parse_helm_overrides(
             args.helm_set, os.environ.get("SNAPSHOT_E2E_HELM_SET")
         ),
@@ -896,6 +909,61 @@ def parse_helm_overrides(
     return overrides
 
 
+def snapshot_chart_command(
+    *,
+    namespace: str,
+    release: str,
+    image_tag: str,
+    pvc_name: str,
+    timeout: str,
+    chart: str = DEFAULT_CHART,
+    chart_version: str | None = None,
+    operator_tag: str | None = None,
+    agent_tag: str | None = None,
+    reuse_values: bool = False,
+    helm_overrides: Sequence[str] = (),
+) -> list[str]:
+    command = [
+        "helm",
+        "upgrade",
+        "--install",
+        release,
+        chart,
+        "--namespace",
+        namespace,
+        "--create-namespace",
+        "--timeout",
+        timeout,
+    ]
+    if chart_version:
+        command += ["--version", chart_version]
+    if reuse_values:
+        command.append("--reuse-values")
+    command += [
+        "--set",
+        f"image.operator.tag={operator_tag or image_tag}",
+        "--set",
+        f"image.agent.tag={agent_tag or image_tag}",
+    ]
+    if not reuse_values:
+        command += [
+            "--set",
+            "storage.pvc.create=false",
+            "--set",
+            f"storage.pvc.name={pvc_name}",
+            "--set",
+            "operator.artifactCleanup.scanInterval=5s",
+            "--set-json",
+            "daemonset.imagePullSecrets=[]",
+        ]
+    # Appended last so a caller can override any of the defaults above. Clusters
+    # without published images need this for image repositories, pull policy,
+    # and the container runtime paths.
+    for override in helm_overrides:
+        command.extend(["--set", override])
+    return command
+
+
 def install_snapshot_chart(
     *,
     kubeconfig: str | None,
@@ -904,38 +972,28 @@ def install_snapshot_chart(
     image_tag: str,
     pvc_name: str,
     timeout: str,
+    chart: str = DEFAULT_CHART,
+    chart_version: str | None = None,
+    operator_tag: str | None = None,
+    agent_tag: str | None = None,
+    reuse_values: bool = False,
     helm_overrides: Sequence[str] = (),
 ) -> None:
-    log(f"Installing Snapshot chart release {namespace}/{release}")
-    command = [
-        "helm",
-        "upgrade",
-        "--install",
-        release,
-        "./charts/snapshot",
-        "--namespace",
-        namespace,
-        "--create-namespace",
-        "--timeout",
-        timeout,
-        "--set",
-        f"image.operator.tag={image_tag}",
-        "--set",
-        f"image.agent.tag={image_tag}",
-        "--set",
-        "storage.pvc.create=false",
-        "--set",
-        f"storage.pvc.name={pvc_name}",
-        "--set",
-        "operator.artifactCleanup.scanInterval=5s",
-        "--set-json",
-        "daemonset.imagePullSecrets=[]",
-    ]
-    # Appended last so a caller can override any of the defaults above. Clusters
-    # without published images need this for image repositories, pull policy,
-    # and the container runtime paths.
-    for override in helm_overrides:
-        command.extend(["--set", override])
+    source = f"{chart} {chart_version}" if chart_version else chart
+    log(f"Installing Snapshot chart release {namespace}/{release} from {source}")
+    command = snapshot_chart_command(
+        namespace=namespace,
+        release=release,
+        image_tag=image_tag,
+        pvc_name=pvc_name,
+        timeout=timeout,
+        chart=chart,
+        chart_version=chart_version,
+        operator_tag=operator_tag,
+        agent_tag=agent_tag,
+        reuse_values=reuse_values,
+        helm_overrides=helm_overrides,
+    )
     env = os.environ.copy()
     if kubeconfig:
         env["KUBECONFIG"] = kubeconfig

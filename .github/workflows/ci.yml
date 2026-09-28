@@ -84,7 +84,9 @@ jobs:
             e2e/tests/test_benchmark_preview.py \
             e2e/tests/test_framework_manifests.py \
             e2e/tests/test_pod_status_writers.py \
+            e2e/tests/test_resolve_snapshot_image_tag.py \
             e2e/tests/test_runtime_image_id.py \
+            e2e/tests/test_setup_chart_command.py \
             e2e/tests/test_setup_helm_overrides.py \
             e2e/tests/test_workload_node_targeting.py \
             e2e/tests/test_workload_scripts.py -vv
