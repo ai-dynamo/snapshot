@@ -116,16 +116,26 @@ workload must not resume with partially removed or reconstructed sharing.
 Exactly POSIX-FD exportable VMM and multicast objects are supported. FABRIC,
 mixed exportable handle types, and non-POSIX multicast (including handle type
 zero) are rejected before CUDA allocation or import. Private unicast VMM remains
-native-owned. Memory IPC requires fully interposed peers and the adapter's single
+native-owned except that HOST_NUMA VMM creation is rejected with
+`CUDA_ERROR_NOT_SUPPORTED`, including creations without exportable handles.
+[Issue #404](https://github.com/ai-dynamo/snapshot/issues/404) tracks preservation
+of HOST_NUMA allocations using host carriers. Memory IPC requires fully
+interposed peers and the adapter's single
 owning-context behavior. CUDA allocation granularity can make backing larger
 than the requested malloc size.
+
+Each multicast participant must add and bind its device in the same process.
+Device ordinals are local to that participant, so different ranks may each use
+device zero. Adding a device in one process and binding it from another is
+outside this scope.
 
 | Constraint or risk | Contract or mitigation |
 | --- | --- |
 | Concurrent application activity | Applications finish all CUDA calls and GPU work before entry and stay parked. Checkpoint entry closes tracked memory mutation and rejects outstanding unlocked driver calls; it does not drain work. |
 | Partial capture or restore | Run each lifecycle operation once with global barriers. Terminate an unsafe workload; do not retry a lost reply or roll back partial driver mutation. |
+| Exported allocation lifetime | The original creator retains a generic handle or local mapping while exported descriptors or imported allocations remain usable. A virtual shareable FD alone does not retain creator backing. |
 | Host-memory pressure | Budget approximately one host copy of shared creator backing plus metadata and temporary mappings. Carriers use pinned memory during transfers and enlarge CRIU images. Importers do not save duplicate bytes. |
-| Platform and CUDA compatibility | Require Linux/amd64, glibc 2.34 or newer for the preload libraries, compatible GPUs/drivers, and the VMM/multicast APIs the workload uses. Existing Snapshot/CRIU privilege and compatibility requirements still apply. |
+| Platform and CUDA compatibility | Require Linux/amd64, glibc 2.34 or newer for the preload libraries, CUDA Runtime 12.0 or newer when using a runtime library, compatible GPUs/drivers, and the VMM/multicast APIs the workload uses. Existing Snapshot/CRIU privilege and compatibility requirements still apply. |
 | Fork and loader behavior | Lookup starts no runtime. Fork before CUDA initialization allows child initialization; children forked after initialization must exec or exit. Fork during initialization and long-lived fork children during checkpoint are unsupported. |
 | Checkpoint/artifact mismatch | Ship matching frontend, backend, and coordinator artifacts at capture-time library paths. Reject older formats and recreate old draft checkpoints. |
 | Incomplete qualification | The stack reports headless and repository checks, but its current revision has not been qualified on physical GPUs or across nodes. Those remain validation work, not established support evidence. |
@@ -147,9 +157,18 @@ cuinterpose. SnapshotJob applies library installation and preload immediately
 before Job creation, retaining its existing builder and adoption checks.
 The installer copies `libcuinterpose.so` and `libcuinterpose_core.so` from the
 agent image into an `emptyDir` mounted read-only at `/tmp/snapshot-cuda` in target
-containers. It prepends the frontend to `LD_PRELOAD` and preserves existing
-entries and workload commands. A duplicate `LD_PRELOAD` variable or one supplied
-through `valueFrom` is rejected because the installer cannot safely prepend it.
+containers. The installer uses the Pod's positive `runAsUser` when specified,
+otherwise UID 65532, with `runAsNonRoot: true`; it leaves the Pod and workload
+security contexts unchanged. It prepends the frontend to an explicit literal
+`LD_PRELOAD` and preserves its entries and workload commands. A duplicate
+`LD_PRELOAD` variable or one supplied through `valueFrom` is rejected because the
+installer cannot safely prepend it. When `envFrom` could supply `LD_PRELOAD`, the
+Pod must declare it explicitly: list the required preload libraries, or use an
+empty value to request only cuinterpose. Libraries supplied by the workload
+image's `LD_PRELOAD` must also be listed explicitly in the Pod.
+The injected shim path is always absolute. Manual injection must also use an
+absolute path: after a working-directory change, exec resolves relative preload
+paths again before the shim can run.
 
 The coordinator's internal CLI takes `--prepare` or `--restore`,
 `--checkpoint-dir`, `--control-dir`, and a repeated `--process` namespace PID.
@@ -250,7 +269,7 @@ For an opted-in workload, the agent finds CUDA processes and launches the coordi
 
 #### Host-carrier module
 
-The Rust `host_carrier` module copies shared creator allocations into one host arena per process and copies them back during restore. It registers the arena as pinned host memory, groups allocations by CUDA context, maps a temporary consecutive device-address range, and uses asynchronous copies on one stream per context. It waits for those copies before reporting completion. The temporary device mappings are not application mappings.
+The Rust `host_carrier` module copies shared creator allocations into one host arena per process and copies them back during restore. It registers the arena as pinned host memory for each save or load transfer, groups allocations by CUDA context, maps a temporary consecutive device-address range, and uses asynchronous copies on one stream per context. The registration's context remains alive until all copies finish and the arena is unregistered. Between transfers the carrier is ordinary anonymous memory. The temporary device mappings are not application mappings.
 
 ### How calls are intercepted
 
@@ -258,7 +277,7 @@ The frontend handles direct CUDA symbol calls, `dlsym`, `cuGetProcAddress*`, and
 
 The frontend obtains glibc's real `dlsym` with `dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.34")` and caches it without a once-guard. `dlvsym` takes glibc's loader lock, which `dlopen` holds while running constructors, so waiting for another thread's lookup could deadlock.
 
-glibc chooses the `RTLD_DEFAULT` and `RTLD_NEXT` search scope from its caller's return address. The frontend's `dlsym` therefore passes these lookups to glibc as a tail call (`musttail`, GCC 15 or newer) and returns the result unchanged. Only lookups with an explicit handle are made by the frontend and may return wrappers. On first relevant CUDA activity it loads the adjacent Rust backend with `RTLD_LAZY | RTLD_LOCAL`. This is glibc-based lookup, not a custom ELF loader. The frontend's linker export list exposes only its intended CUDA/resolver functions; `-Bsymbolic-functions` keeps its own internal function references local.
+glibc chooses the `RTLD_DEFAULT` and `RTLD_NEXT` search scope from its caller's return address. The frontend's `dlsym` therefore passes these lookups to glibc as a tail call (`musttail`, GCC 15 or newer) and returns the result unchanged. Only lookups with an explicit handle are made by the frontend and may return wrappers. On first relevant CUDA activity it loads `$ORIGIN/libcuinterpose_core.so` with `RTLD_LAZY | RTLD_LOCAL`. glibc expands the frontend's load-time directory, so a later `chdir` does not change backend discovery. This is glibc-based lookup, not a custom ELF loader. The frontend's linker export list exposes only its intended CUDA/resolver functions; `-Bsymbolic-functions` keeps its own internal function references local.
 
 The private C ABI contains `FrontendAbi` and `BackendAbi` tables. Cbindgen generates the table declarations, while NVIDIA's `cuda.h` supplies C CUDA types and cudarc supplies the corresponding Rust definitions. Runtime preparation resolves the backend's driver function table through the frontend before acquiring the installation or process-state mutex. It publishes the completed table without running loader calls inside a `OnceLock` initializer. Backend driver calls then use cached pointers, including context and cleanup calls; missing optional symbols fail only when used. CUDA providers remain loaded for the process lifetime. Cudarc's loader and buffer/context wrappers are not used. Rust objects and ownership do not cross the ABI.
 
@@ -344,12 +363,26 @@ application pointers, foreign C++ exceptions, or allocator aborts recoverable.
 | `cuMemGetAllocationPropertiesFromHandle` | Resolves virtual handles and preserves application-visible allocation properties. |
 | `cuMemExportToShareableHandle`, `cuMemImportFromShareableHandle` | Replaces raw export FDs with virtual shareable handles and imports the creator's real allocation through a peer request. |
 | `cuMemAlloc_v2`, `cuMemFree_v2`, `cuMemGetAddressRange_v2` | Implements synchronous device malloc with VMM backing, frees it, and reports the application's requested range. |
+| `cuCtxDestroy*`, `cuDevicePrimaryCtxReset*`, `cuDevicePrimaryCtxRelease*` | Reclaims converted malloc/IPC mappings after successful context teardown; nonfinal primary releases preserve them. |
 | `cuIpcGetMemHandle`, `cuIpcOpenMemHandle`, `cuIpcOpenMemHandle_v2`, `cuIpcCloseMemHandle` | Implements supported memory IPC using the same VMM records and peer export service, without native memory-IPC calls. |
 | `cuMulticastCreate`, `cuMulticastAddDevice`, `cuMulticastBindMem*`, `cuMulticastBindAddr*`, `cuMulticastUnbind` | Tracks multicast objects, device membership, bindings, and their reconstruction. |
 
 Property-only queries such as `cuMemGetAllocationGranularity` and `cuMulticastGetGranularity` go directly to CUDA.
 
 Modern proc-address aliases for malloc/free/address-range queries are handled without treating historical 32-bit ELF entry points as modern APIs.
+
+CUDA Runtime 11 is unsupported. Before calling a runtime driver-entry lookup,
+the frontend resolves `cudaRuntimeGetVersion` in the same library as the lookup
+function and requires version 12.0 or newer. Older versions, a missing version
+function, or a failed version query return `cudaErrorInitializationError` without
+calling the lookup or accessing the caller's output and status pointers. This
+also avoids reading the absent fourth argument of CUDA 11's three-argument API.
+The same version guard applies to the `ByVersion` and per-thread variants.
+
+One CUDA runtime library per process is supported. It must be visible globally
+or already retained through an intercepted handle lookup before a runtime
+wrapper resolves it. Multiple CUDA runtimes and an undiscovered runtime confined
+to `RTLD_LOCAL` are unsupported; the shim does not route calls by runtime caller.
 
 Explicit `dlvsym` calls and CUDA libraries loaded in separate linker namespaces bypass this interception. Arbitrary chains of other `dlsym` interposers are not supported. A library opened with `RTLD_DEEPBIND` that links a CUDA library directly resolves its direct calls and its `RTLD_DEFAULT` lookups to that library, not to the preloaded wrappers.
 
@@ -376,6 +409,13 @@ captured namespace PID, so the runtime ownership check continues to match.
 A child forked before CUDA initialization gets its own runtime on successful
 `cuInit`.
 
+After same-PID exec or PID reuse, the previous listener can be gone while its
+socket pathname remains. Runtime installation reclaims only an owned socket
+whose nonblocking connection probe immediately reports `ECONNREFUSED`. It
+rechecks the pathname identity before removing it and retrying bind once, under
+the runtime installation lock. Live listeners, full queues, non-socket paths,
+symlinks, and ambiguous probe failures are preserved.
+
 For example, suppose A creates a 2 MiB allocation and B imports it:
 
 | | Worker A | Worker B |
@@ -391,7 +431,8 @@ An allocation is *exportable* when its creation properties allow a shareable han
 
 | Allocation state | Who saves and restores its bytes? |
 | --- | --- |
-| Ordinary nonexportable `cuMemCreate` | Native CUDA. |
+| Ordinary nonexportable `cuMemCreate`, excluding HOST_NUMA | Native CUDA. |
+| HOST_NUMA `cuMemCreate`, exportable or not | Rejected before allocating backing. |
 | Tracked POSIX-capable allocation never shared | Native CUDA; cuinterpose leaves its driver handles and application mappings intact. |
 | Shim-managed malloc never shared | Native CUDA, even though its backing can be exported. |
 | Shared creator allocation | The creator shim's host carrier. |
@@ -416,6 +457,19 @@ fixed 24-byte layout:
 The last two fields form an `AllocationReference`. A virtual shareable handle
 contains neither a socket path nor a unicast/multicast discriminator. The
 importing shim derives the creator's exact socket path from its namespace PID.
+
+The original creator must retain at least one generic allocation handle or local
+mapping while any exported descriptor or imported allocation remains usable.
+Releasing a handle after mapping it is supported because the mapping retains
+the creator allocation. Releasing every creator handle and mapping while keeping
+only a virtual shareable FD is outside this contract: the FD stores identity,
+not an independent ownership reference to the backing. Imported allocations
+also do not extend the creator's lifetime through remote leases.
+
+This is a limitation relative to native CUDA shareable-FD ownership. Coordinator
+preflight detects missing creators referenced by tracked imports, but does not
+inventory arbitrary application FDs; it cannot detect every surviving FD-only
+token after the creator's allocation record has been removed.
 
 On import, B sends A the allocation reference:
 
@@ -477,6 +531,15 @@ The integer fields use little-endian encoding. This example assumes the request 
 
 Repeated opens in the supported context return the same address and increment a reference count. The final close removes the imported mapping. `cuMemFree_v2` synchronizes the owning context before removing a malloc mapping; a synchronization failure leaves that mapping intact. An imported pointer must be closed, not freed. Foreign native IPC handles are rejected.
 
+Context destruction, primary reset, and final primary release also reclaim
+malloc and imported IPC mappings owned by that context. The shim snapshots the
+affected records before forwarding teardown without the state mutex, then
+reclaims them only after CUDA succeeds. Failed teardown and nonfinal primary
+release preserve those records. Explicit VMM allocations survive context
+teardown; matching cached operational contexts are cleared so later carrier
+work can enter the device's primary context. Legacy and versioned teardown
+entry points retain their respective native semantics.
+
 The adapter never calls native CUDA memory-IPC functions. It therefore does not need a CUDA checkpoint jobfile to reconstruct this sharing.
 
 #### Threads and synchronization
@@ -490,7 +553,7 @@ Application CUDA wrappers run on the calling application thread. On runtime star
 
 The peer thread queues control commands; it does not wait for their CUDA operations. A bounded queue refuses excess control requests. This separation lets an importer obtain an FD even while the creator's control thread is busy reconstructing another object.
 
-Allocation and mapping changes normally hold the shim's state mutex. Application multicast calls that can block waiting for other devices, and IPC synchronization, release that mutex around the driver call. One `unlocked_driver_calls` counter prevents checkpoint entry until they have returned and recorded their results. The application must synchronize object destruction against calls using that object; the shim has no per-object pins or busy counts. During restore the application stays parked, so reconstruction holds the state mutex and updates records directly. The peer listener holds the export-cache mutex through each socket send. Cache removal and checkpoint teardown take the same mutex, so they wait for that send to finish. Sends use the socket timeout; a slow receiver can delay cache mutations until the send finishes or fails.
+Allocation and mapping changes normally hold the shim's state mutex. Application multicast calls that can block waiting for other devices, IPC synchronization, and context teardown release that mutex around the driver call. One `unlocked_driver_calls` counter prevents checkpoint entry until they have returned and recorded their results. The application must synchronize object destruction against calls using that object, including context lifetime changes; the shim has no per-object pins or busy counts. During restore the application stays parked, so reconstruction holds the state mutex and updates records directly. The peer listener holds the export-cache mutex through each socket send. Cache removal and checkpoint teardown take the same mutex, so they wait for that send to finish. Sends use the socket timeout; a slow receiver can delay cache mutations until the send finishes or fails.
 
 `ProcessState` owns one memblock registry keyed by allocation ID. Each `Memblock`
 is either a unicast `Allocation` or a `MulticastObject`; virtual handles and
@@ -505,7 +568,8 @@ including after an earlier release or checkpoint/restore.
 CUDA validates application arguments; the shim records successful calls and
 propagates ordinary driver errors. Failed malloc/IPC setup releases its unpublished
 resources before returning the original error. Context-query errors propagate;
-a successful query with no current context is the only case represented by zero.
+a successful query with no current context is recorded as zero. Surviving
+VMM objects also clear a cached context to zero after its successful teardown.
 Failed cleanup and irreversible checkpoint mutations remain fail-stop.
 
 The export cache stores an FD and its reply metadata under each allocation ID.
@@ -563,6 +627,10 @@ state. Under the process mutex, checkpoint entry requires `Active` and zero
 unlocked driver calls, returns the inspection records, and changes the phase to
 `Checkpointing`. Application memory APIs then refuse mutation. `INSPECT` remains
 a read-only query; it does not authorize destructive preparation.
+
+Multicast attachment and binding validation keys devices by namespace PID and
+local CUDA ordinal. A binding requires an attachment in that same participant;
+an equal ordinal in another participant does not satisfy it.
 
 Every application CUDA call must have returned, outstanding GPU work must have
 completed, and the participant set must remain fixed before checkpoint entry.
@@ -797,7 +865,7 @@ cuinterpose: true
 
 `cuinterpose` records source opt-in. When CUDA processes are present, capture must complete coordinator preparation before publishing the checkpoint, and restore must run the coordinator before releasing the workload. With no CUDA processes, restore only needs the library mount. The coordinator reads and validates its state; missing or invalid state fails restore.
 
-The private frontend/backend ABI is version **3**. The MessagePack protocol and state envelope, virtual shareable handle, and virtual IPC memory handle are version **3**. Older draft artifacts, including shim PageBroker artifacts, are not migrated or silently interpreted as host-carrier checkpoints.
+The private frontend/backend ABI is version **4**. The MessagePack protocol and state envelope, virtual shareable handle, and virtual IPC memory handle are version **3**. Older draft artifacts, including shim PageBroker artifacts, are not migrated or silently interpreted as host-carrier checkpoints.
 
 The shim libraries themselves are part of the checkpointed process. Their files must be available at the original paths, and the coordinator must understand their protocol. Ship a matching frontend, backend, and coordinator set; the format checks are not permission to substitute arbitrary library builds.
 
@@ -856,10 +924,10 @@ layers and are not all independently buildable backends.
 | Layer | Coverage and expected outcome |
 | --- | --- |
 | Rust unit/protocol and C/Rust ABI checks | Validate framing, versions, handle layouts, topology, ownership, lifecycle ordering, and ABI size/offset compatibility. |
-| Packaged headless probes | Exercise forwarding, lookup without startup, initialization and loader reentry, sticky failures, fork/exec ownership, and incompatible artifacts without a GPU. |
-| Scripted coordinator exchanges | Verify barriers, preflight refusal, transfer-size checks, lost replies without retry, and failed state publication or missing/corrupt restore state. |
+| Packaged headless probes | Exercise forwarding, runtime-version refusal, lookup without startup, initialization and loader reentry, relative preload followed by chdir, sticky failures, fork/exec ownership, and incompatible artifacts without a GPU. |
+| Scripted coordinator exchanges | Verify barriers, preflight refusal, process-local multicast ordinals, transfer-size checks, lost replies without retry, and failed state publication or missing/corrupt restore state. |
 | Go and Helm integration | Verify opt-in, library/preload delivery, unchanged commands, namespace execution, inherited descriptors, stale-socket cleanup, restore mounts, error propagation, and jobfiles that are present, absent, or invalid. |
-| Physical-GPU suite | Verify shared and private bytes, importer reconstruction, multicast collectives/graph replay, and foreign-import refusal using the real driver. Require zero skips on suitable hardware. |
+| Physical-GPU suite | Verify shared and private bytes, importer reconstruction, multicast collectives/graph replay, foreign-import refusal, and context teardown using the real driver. Context cases verify malloc cleanup, other-context isolation, and carrier reconstruction of surviving VMM. Require zero skips on suitable hardware. |
 | Cross-node Snapshot E2E | Capture and restore on compatible distinct nodes, then verify workload inference and sharing. The native GPU suite alone does not cover Go namespace orchestration. [#294](https://github.com/ai-dynamo/snapshot/issues/294) tracks opt-in 8-GPU cross-node coverage. |
 
 As reported by #338, `make -C agent cuinterpose-test`, `make check`, `make test`,

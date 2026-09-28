@@ -38,24 +38,23 @@ The C frontend requires GCC 15 or newer for `musttail`. The builder copies it fr
 the digest-pinned `gcc:15.2.0-bookworm` image. Set `FRONTEND_CC` for local builds.
 
 The packaged gate runs GCC warnings-as-errors, rustfmt, strict Clippy, Rust
-unit/contract tests, and process-isolated headless tests. Small C loader probes and a stateful fake CUDA
-provider are test-only; they do not require CUDA headers, C++/gtest, or Git
-history. The fake models ownership and calls, not physical device bytes.
-Its default behavior is stateful; frontend forwarding tests have a separate
-minimal provider.
+unit tests, scripted coordinator checks, and process-isolated loader/startup checks. The loader
+fixtures provide CUDA symbol addresses and return values; CUDA memory behavior
+is tested on real GPUs.
 
-Physical-GPU tests live in `../tests/gpu`. Stage a matched build and the real
-NVIDIA checkpoint tool:
+Physical-GPU tests live in `../tests/gpu`. Stage a matched artifact set with:
 
 ```sh
-python3 core/tests/stage_gpu.py --help
+python3 ../tests/gpu/stage.py --help
 ```
 
 The staging layout is `DEST/tests/gpu` and `DEST/build`. Run pytest and
 require all GPU cases to pass with zero skips. The suite calls the native
 CUDA checkpoint API directly.
 These tests cover shared/private contents, unicast import reconstruction,
-multicast collective/graph replay, and raw-import refusal. They do not exercise
+multicast collective/graph replay, raw-import refusal, and context teardown.
+The context cases require one GPU and verify malloc cleanup, surviving direct
+VMM, and carrier reconstruction after context destruction or reset. They do not exercise
 the Go agent's namespace-entry wrapper. Full Snapshot qualification additionally
 requires cross-node capture, restore, and post-restore workload inference.
 
@@ -68,7 +67,7 @@ requires cross-node capture, restore, and post-restore workload inference.
 | `core` | Driver calls, process runtimes, tracking, host carriers, lifecycle |
 | `coordinator` | CLI, participants, topology validation, barriers, durable state |
 
-The private C ABI is version **3**. The MessagePack wire/state format, virtual
+The private C ABI is version **4**. The MessagePack wire/state format, virtual
 shareable handle, and virtual IPC memory handle are version **3**.
 Earlier experimental artifacts are rejected, not translated. Rust
 objects, allocators, mutexes, and unwinding never cross the library boundary.
@@ -77,7 +76,7 @@ including the coordinator. A panic terminates the process without stack
 unwinding; ordinary `Result` errors retain their normal handling. Cargo's unit
 test harness still uses unwinding.
 `FrontendAbi` contains the resolver supplied by the C frontend; `BackendAbi`
-contains the initialization and memory callbacks supplied by the Rust backend.
+contains the initialization, context, and memory callbacks supplied by the Rust backend.
 The frontend is outside this workspace in `../frontend`. `make frontend`
 uses cbindgen 0.29.4 to generate the C header from the ABI crate's explicit
 `repr(C)` tables, then compiles it with GCC. The pinned cbindgen CLI reads
@@ -96,6 +95,10 @@ definition is localized. The `RTLD_LOCAL` Rust backend exports only
 `cuinterpose_core_init`.
 Its glibc `dlvsym` bootstrap requires glibc 2.34 or newer. It does not override
 explicit `dlvsym` or implement a custom ELF loader.
+The backend is loaded through glibc's `$ORIGIN` using the frontend's load-time
+directory, so changing directory does not break sibling discovery. Manual
+`LD_PRELOAD` paths must be absolute to remain valid across a later exec; the
+operator already injects an absolute path.
 
 ### CUDA bindings
 
@@ -113,6 +116,14 @@ those resources, and checkpoint teardown/reconstruction requires explicit
 context and DMA cleanup. The coordinator shares cudarc's generated CUDA types
 through the protocol crate, but it does not load the CUDA driver or issue CUDA
 calls.
+
+CUDA Runtime 11 is unsupported. Runtime driver-entry lookup wrappers require
+version 12.0 or newer, verified through `cudaRuntimeGetVersion` from the same
+library as the resolved lookup function. Older or unverifiable versions return
+`cudaErrorInitializationError` before calling the lookup or accessing its output
+and status pointers. Use one runtime library per process, visible globally or
+already retained through an intercepted handle lookup. Multiple runtimes and
+an undiscovered runtime confined to `RTLD_LOCAL` are outside the supported scope.
 
 ## Error handling
 
@@ -132,11 +143,22 @@ records under the process mutex. A process-wide counter excludes entry during
 unlocked driver calls; application code owns synchronization of object lifetimes.
 Only exactly POSIX-FD exportable VMM and multicast are supported. Unsupported
 exportable creations, non-POSIX multicast, and foreign imports fail at the API
-before creating driver state. All sharing peers must use the shim and belong to
+before creating driver state. HOST_NUMA VMM creation is rejected with
+`CUDA_ERROR_NOT_SUPPORTED`, with or without exportable handles; host-carrier
+support is tracked in [#404](https://github.com/ai-dynamo/snapshot/issues/404).
+All sharing peers must use the shim and belong to
 the fixed checkpoint group. One coordinator executes each phase once; failed or
 ambiguous phases are never retried, rolled back, or resumed. Per-object progress
 flags are unnecessary because a mutation failure terminates the process.
 Never-shared allocations remain native-owned even when exportable.
+
+The original creator must retain a generic allocation handle or local mapping
+while any exported descriptor or imported allocation remains usable. Releasing
+a handle while retaining its mapping is supported. A virtual shareable FD stores
+identity and does not independently retain creator backing; imported allocations
+do not acquire remote ownership leases. FD-only creator lifetime is therefore
+outside the supported contract. Preflight checks tracked imports, not arbitrary
+application FDs, and cannot detect every remaining FD-only token.
 
 Successful intercepted `cuInit` starts the shim; function lookup creates no
 workers or endpoint. Fork before CUDA initialization allows each child to
@@ -154,3 +176,17 @@ free, and address-range lookup through tracked VMM. It does not call native
 memory IPC. It requires fully interposed peers; foreign native handles are
 rejected. Event IPC, pool IPC, managed/async/pitched allocation families, and
 general cross-context peer-access emulation are outside its supported scope.
+
+Successful context destruction, primary-context reset, and final primary-context
+release reclaim that context's malloc and imported IPC mappings. A nonfinal
+primary release and failed teardown leave those allocations intact. Explicit
+VMM allocations survive; their cached operational context is cleared so later
+carrier work can use the device's primary context. Applications must synchronize
+context lifetime changes against other uses of that context.
+Carrier memory is registered only for a save/load transfer and unregistered
+before its registration context is released.
+
+Multicast membership uses `(namespace PID, local device ordinal)`. Each
+participant must add and bind its device in the same process. Different ranks
+may each use local device zero; adding a device in one process and binding it
+from another is outside the supported scope.

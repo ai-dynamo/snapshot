@@ -25,6 +25,22 @@ interposed peers, and remain parked until restore completes. Workload commands
 are preserved. Existing native CUDA jobfiles remain supported; opt-in permits
 one to be absent. Use matching frontend, backend, and coordinator artifacts.
 
+Creators must retain a generic allocation handle or local mapping while their
+exported descriptors or imported allocations remain usable; a virtual shareable
+FD alone does not retain backing. HOST_NUMA VMM allocations are rejected before
+allocation; [#404](https://github.com/ai-dynamo/snapshot/issues/404) tracks support
+using host carriers.
+
+Context destruction/reset and final primary-context release clean up converted
+malloc allocations and imported IPC mappings while preserving explicit VMM
+allocations. Multicast participants must add and bind their device in the same
+process; device ordinals are local to each participant.
+
+CUDA Runtime 11 is unsupported. Runtime driver-entry lookup requires CUDA
+Runtime 12.0 or newer and fails closed when the version cannot be verified.
+For manual injection, use an absolute `LD_PRELOAD` path so it remains valid
+after exec; the operator supplies an absolute path automatically.
+
 See [SNEP-295](../proposals/295-cuinterpose/README.md) for the motivation, supported
 scope, component responsibilities, interception and sharing protocols,
 capture/restore ordering, failure behavior, security, and validation plan.
