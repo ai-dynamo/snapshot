@@ -1464,9 +1464,8 @@ func TestApplyRestoredConditionPreservesTransitionTimeForSameStatus(t *testing.T
 	assert.Contains(t, string(lastPodStatusApply(t, w).GetPatch()), transition.UTC().Format(time.RFC3339))
 }
 
-// TestRunQueueWorkersBoundsConcurrency pins the ceiling itself: with more items queued than
-// workers, no more than nodeQueueWorkers of them may be in flight at once, and every item must
-// still be processed.
+// TestRunQueueWorkersBoundsConcurrency: with more items queued than workers, at most
+// nodeQueueWorkers run at once and every item is still processed.
 func TestRunQueueWorkersBoundsConcurrency(t *testing.T) {
 	const items = nodeQueueWorkers * 3
 
@@ -1481,8 +1480,8 @@ func TestRunQueueWorkersBoundsConcurrency(t *testing.T) {
 	release := make(chan struct{})
 	admitted := make(chan struct{}, items)
 
-	// Every worker parks on release, so a failure before the normal close would strand them.
-	// Cleanup runs before the queue's own ShutDown (LIFO), which is the order they need to exit.
+	// Workers park on release; cleanup runs before the queue's ShutDown (LIFO), the order they
+	// need to exit.
 	var releaseOnce sync.Once
 	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
 	t.Cleanup(releaseAll)
@@ -1505,9 +1504,8 @@ func TestRunQueueWorkersBoundsConcurrency(t *testing.T) {
 		})
 	}()
 
-	// Let exactly one pool's worth start, then confirm the pool refuses to admit more. Each wait
-	// is bounded: a pool that admits too few would otherwise hang here until the package-wide test
-	// timeout, reporting a panic instead of the assertion that actually failed.
+	// Let one pool's worth start, then confirm no more are admitted. Bounded, so a pool that
+	// admits too few fails here rather than hanging to the package timeout.
 	for started := range nodeQueueWorkers {
 		select {
 		case <-admitted:
@@ -1537,9 +1535,8 @@ func TestRunQueueWorkersBoundsConcurrency(t *testing.T) {
 	assert.Equal(t, nodeQueueWorkers, peak, "concurrency must be capped at the pool size")
 }
 
-// TestCaptureQueueHoldsRetriggersUntilDone is the property that replaced the capture Lease: while
-// a work order is being reconciled, every further trigger for it is folded into one redelivery
-// that arrives only after the in-progress reconcile calls Done.
+// TestCaptureQueueHoldsRetriggersUntilDone is the property that replaced the capture Lease:
+// triggers arriving mid-reconcile fold into one redelivery, after Done.
 func TestCaptureQueueHoldsRetriggersUntilDone(t *testing.T) {
 	w := makeTestController(t, restorePod(nil))
 	const name = "podsnapshotcontent-abc"
@@ -1590,8 +1587,8 @@ func TestEnqueueCaptureForSourcePodIgnoresUnknownPod(t *testing.T) {
 	assert.Equal(t, 0, w.captureQueue.Len())
 }
 
-// TestProcessCaptureQueueItemRequeuesOnError proves a failed reconcile is retried rather than
-// dropped — the workqueue is what replaced "the informer resync will come round again".
+// TestProcessCaptureQueueItemRequeuesOnError: a failed reconcile is retried rather than left to
+// the resync.
 func TestProcessCaptureQueueItemRequeuesOnError(t *testing.T) {
 	w := makeTestController(t, restorePod(nil))
 	// An indexer without podRefIndex makes captureOwnerForPod fail; any reconcile error will do.

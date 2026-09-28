@@ -53,10 +53,7 @@ import (
 
 // NodeController watches local-node pods with checkpoint metadata and reconciles
 // snapshot execution for checkpoint and restore requests. Both paths are workqueue
-// driven: the restore path from a client-go pod informer, and the capture path from
-// a dynamic informer over PodSnapshotContent work orders filtered to this node plus
-// a source-pod informer, with typed reads/writes via an uncached controller-runtime
-// client.
+// driven, with typed reads/writes via an uncached controller-runtime client.
 type NodeController struct {
 	config                  *types.AgentConfig
 	clientset               kubernetes.Interface
@@ -75,10 +72,9 @@ type NodeController struct {
 	compareFn               func(compat.Gate, compat.Environment, compat.Environment) []compat.Mismatch
 
 	// captureQueue holds PodSnapshotContent names. One key per work order is the capture path's
-	// only mutual exclusion, and exactly one snapshot-agent runs per node (the DaemonSet has no
-	// surge), so process-local exclusion is cluster-wide exclusion. Losing it on restart is safe:
-	// the informers' initial LIST re-enqueues every work order, and what a capture actually
-	// resumes from is the work order's status and the artifact on disk.
+	// only mutual exclusion, and exactly one agent runs per node (the DaemonSet has no surge), so
+	// process-local exclusion is cluster-wide. Losing it on restart is safe: the informers' LIST
+	// re-enqueues everything, and a capture resumes from status and the artifact on disk.
 	captureQueue workqueue.TypedRateLimitingInterface[string]
 
 	handledRestores sync.Map
@@ -165,13 +161,9 @@ const (
 	// not-yet-Ready source pod is re-checked for quiesce without a busy loop.
 	snapshotContentResyncInterval = 10 * time.Second
 
-	// nodeQueueWorkers caps how many items the capture and restore queues each process at once,
-	// so one node cannot fan out a goroutine per work item. It is a ceiling against pathological
-	// fan-out, not a resource budget: both queues run CRIU against live containers, and what
-	// actually saturates first is node memory and disk, which this does not measure. The capture
-	// side is additionally bounded to one dump per source pod (see captureOwnerForPod), so on a
-	// GPU node this rarely binds. Deliberately not configurable — no deployment has yet needed a
-	// different value, and a knob nobody sets is a knob nobody maintains.
+	// nodeQueueWorkers caps in-flight items per queue. A ceiling against fan-out, not a resource
+	// budget: what saturates a node during a dump is memory and disk, which a worker count does
+	// not measure.
 	nodeQueueWorkers = 16
 )
 
@@ -303,9 +295,8 @@ func (w *NodeController) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to add snapshot-content podRef indexer: %w", err)
 	}
 	w.contentIndexer = contentInformer.GetIndexer()
-	// Handlers only enqueue: reconciling inline would block the informer's delivery goroutine for
-	// the length of a dump. The resync re-enqueues every work order, which is the backstop that
-	// re-checks a not-yet-quiesced source.
+	// Handlers only enqueue: reconciling inline would block delivery for the length of a dump.
+	// The resync re-enqueues everything, which is the backstop for a not-yet-quiesced source.
 	if _, err := contentInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: w.enqueueContent,
 		UpdateFunc: func(_, newObj interface{}) {
@@ -412,9 +403,8 @@ func (w *NodeController) runRestoreQueue(ctx context.Context) {
 	})
 }
 
-// runQueueWorkers drives one queue with a fixed pool. Each item still needs its own goroutine —
-// a CRIU run holds its worker for minutes and must not head-of-line block unrelated pods — but
-// the pool is what stops a node fanning out one goroutine per work item without limit.
+// runQueueWorkers drives one queue with a fixed pool. A CRIU run holds its worker for minutes,
+// so items still need separate goroutines; the pool is what bounds how many.
 func runQueueWorkers[T comparable](next func() (T, bool), process func(T)) {
 	var workers sync.WaitGroup
 	for range nodeQueueWorkers {
@@ -1203,9 +1193,9 @@ func (w *NodeController) enqueueContent(obj interface{}) {
 	}
 }
 
-// enqueueCaptureForSourcePod maps a source-pod event back to every work order naming that pod. The
-// index can hold several: a PodSnapshotContent is named after its PodSnapshot's UID, so every
-// PodSnapshot taken of one pod adds another. Which of them may dump is decided during reconcile.
+// enqueueCaptureForSourcePod maps a source-pod event back to every work order naming that pod.
+// The index can hold several — contents are named after their PodSnapshot's UID, so each snapshot
+// of a pod adds one. Which may dump is decided during reconcile.
 func (w *NodeController) enqueueCaptureForSourcePod(obj interface{}) {
 	pod, ok := podFromInformerObj(obj)
 	if !ok {
@@ -1229,8 +1219,8 @@ func (w *NodeController) runCaptureQueue(ctx context.Context) {
 	})
 }
 
-// processCaptureQueueItem holds the work order's key for the whole reconcile, dump included: Done
-// is what releases it, and Adds that arrive meanwhile collapse into one redelivery.
+// processCaptureQueueItem holds the key for the whole reconcile, dump included; Adds arriving
+// meanwhile collapse into one redelivery after Done.
 func (w *NodeController) processCaptureQueueItem(ctx context.Context, name string) {
 	defer w.captureQueue.Done(name)
 

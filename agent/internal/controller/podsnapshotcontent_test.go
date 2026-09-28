@@ -101,7 +101,7 @@ func makeNodeController(t *testing.T, fc *fakeCheckpointer, objs ...client.Objec
 	return w
 }
 
-// newTestCaptureQueue builds the capture workqueue with the production rate limiter. Shut down at
+// newTestCaptureQueue builds the capture workqueue with the production rate limiter, shut down at
 // test end so its delaying goroutine does not outlive the test.
 func newTestCaptureQueue(t *testing.T) workqueue.TypedRateLimitingInterface[string] {
 	t.Helper()
@@ -239,9 +239,8 @@ func TestReconcileCapture_IgnoresOtherNode(t *testing.T) {
 	assert.Empty(t, got.Status.Conditions)
 }
 
-// TestReconcileCapture_PromotesPodAndCaptures covers the happy path: a valid source pod is both
-// promoted with CaptureEligibleLabel and dumped in the same pass, because validation and the dump
-// are one serialized unit of work.
+// TestReconcileCapture_PromotesPodAndCaptures covers the happy path: a valid source pod is
+// promoted and dumped in one pass, because validation and the dump are one unit of work.
 func TestReconcileCapture_PromotesPodAndCaptures(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	pod := makeSourcePod()
@@ -309,10 +308,8 @@ func TestReconcileCapture_ProvenanceInvalidFailsAndUnlabels(t *testing.T) {
 }
 
 // TestReconcileCapture_ConcurrentTriggerCannotFailARunningCapture is the regression the capture
-// Lease used to cover. The source pod turns terminal the moment the dump kills it, so a trigger
-// that lands while the dump is running would read a dead source and write a sticky SourcePodGone.
-// The queue is what prevents it: the work order's key is in progress, so that trigger is held and
-// only redelivered once the capture has recorded its own outcome.
+// Lease used to cover: the dump turns the source terminal, so a trigger landing mid-dump would
+// read a dead pod and write a sticky SourcePodGone. The key is in progress, so it is held.
 func TestReconcileCapture_ConcurrentTriggerCannotFailARunningCapture(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	pod := makeSourcePod()
@@ -403,9 +400,8 @@ func TestFailCheckpointOnContainerExit_IgnoresCleanExit(t *testing.T) {
 }
 
 // TestReconcileCapture_NonOwnerNeverKillsTheOwnersSource is the regression behind moving the
-// ownership guard above the unstick sweep. Mid-dump the target shows a non-zero exit, so a sibling
-// work order reaching failCheckpointOnContainerExit would SIGKILL the container the owner is still
-// dumping — and fail itself for good measure. A non-owner must read that state and do nothing.
+// ownership guard above the unstick sweep: mid-dump the target shows a non-zero exit, and a
+// sibling reaching that sweep would SIGKILL the container the owner is still dumping.
 func TestReconcileCapture_NonOwnerNeverKillsTheOwnersSource(t *testing.T) {
 	owner := makeWorkOrder("podsnapshotcontent-old", "node-a", "abc")
 	owner.CreationTimestamp = metav1.Unix(1000, 0)
@@ -436,8 +432,7 @@ func TestReconcileCapture_NonOwnerNeverKillsTheOwnersSource(t *testing.T) {
 }
 
 // TestReconcileCapture_ContainerExitStatusWriteErrorRequeues keeps the unstick path on the same
-// retry contract as every other terminal write in reconcileCapture: a status write that did not
-// land surfaces as an error so the queue retries, rather than being logged and left to the resync.
+// retry contract as every other terminal write: an unwritten status surfaces as an error.
 func TestReconcileCapture_ContainerExitStatusWriteErrorRequeues(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	content.CreationTimestamp = metav1.Unix(1000, 0)
@@ -538,8 +533,8 @@ func TestReconcileCapture_TerminalPodWithoutArtifactFails(t *testing.T) {
 	assert.Equal(t, "SourcePodGone", cond.Reason)
 }
 
-// TestReconcileCapture_ReadyDoesNotStarveNewDump proves a finished work order does not keep
-// ownership of its source pod: the newer pending one is free to dump.
+// TestReconcileCapture_ReadyDoesNotStarveNewDump: a finished work order does not keep ownership
+// of its source pod.
 func TestReconcileCapture_ReadyDoesNotStarveNewDump(t *testing.T) {
 	ready := makeWorkOrder("podsnapshotcontent-old", "node-a", "abc")
 	ready.CreationTimestamp = metav1.Unix(1000, 0)
@@ -581,8 +576,8 @@ func TestReconcileCapture_InvalidReadySpecDoesNotStarveNewDump(t *testing.T) {
 	assert.True(t, fc.wasCalled())
 }
 
-// TestReconcileCapture_OlderWorkOrderOwnsTheSourcePod pins the one-capture-per-pod rule: keys are
-// per work order, so the newer sibling must stand down rather than dump the same container.
+// TestReconcileCapture_OlderWorkOrderOwnsTheSourcePod pins one-capture-per-pod: keys are per work
+// order, so the newer sibling must stand down.
 func TestReconcileCapture_OlderWorkOrderOwnsTheSourcePod(t *testing.T) {
 	older := makeWorkOrder("podsnapshotcontent-old", "node-a", "abc")
 	older.CreationTimestamp = metav1.Unix(1000, 0)
@@ -790,9 +785,8 @@ func TestExecutorCheckpointPageBrokerPrepareFailureDoesNotKill(t *testing.T) {
 	require.NoError(t, ctx.Err())
 }
 
-// TestReconcileCapture_TerminalPodWithArtifactRecoversReady covers a resync landing after a
-// capture that the agent did not live to finish recording: the pod is already terminal (killed by
-// the dump) and the artifact is committed, so this must recover Ready, not write SourcePodGone.
+// TestReconcileCapture_TerminalPodWithArtifactRecoversReady: the agent died before recording a
+// finished capture, so a terminal pod with a committed artifact recovers Ready, not SourcePodGone.
 func TestReconcileCapture_TerminalPodWithArtifactRecoversReady(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	pod := makeSourcePod()
@@ -809,9 +803,8 @@ func TestReconcileCapture_TerminalPodWithArtifactRecoversReady(t *testing.T) {
 	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
 }
 
-// TestReconcileCapture_PodNotFoundWithArtifactRecoversReady covers the source pod being deleted
-// (not just terminal) after the dump committed the artifact but before the Ready write landed:
-// recovery must mark Ready instead of writing SourcePodNotFound.
+// TestReconcileCapture_PodNotFoundWithArtifactRecoversReady is the same recovery with the source
+// pod deleted outright rather than terminal.
 func TestReconcileCapture_PodNotFoundWithArtifactRecoversReady(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	w := makeNodeController(t, &fakeCheckpointer{}, content) // no pod
@@ -977,8 +970,8 @@ func TestReconcileCapture_TriggersUnstick(t *testing.T) {
 	assert.False(t, fc.wasCalled())
 }
 
-// TestReconcileCapture_PodNotIndexedNoOp guards the fail-closed side of source-pod ownership: with
-// nothing indexed for the pod there is no owner, so no dump may start.
+// TestReconcileCapture_PodNotIndexedNoOp guards the fail-closed side of ownership: nothing
+// indexed means no owner, so no dump may start.
 func TestReconcileCapture_PodNotIndexedNoOp(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	pod := makeSourcePod()

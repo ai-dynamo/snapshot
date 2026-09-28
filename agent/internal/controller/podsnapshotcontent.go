@@ -61,14 +61,12 @@ func singleTargetContainer(content *snapshotv1alpha1.PodSnapshotContent) (string
 	return containers[0], nil
 }
 
-// reconcileCapture drives one PodSnapshotContent work order end to end: it validates the source
-// pod, promotes it with CaptureEligibleLabel, and runs the dump inline. Every trigger for this work
-// order — content event, resync, or source-pod event — shares one capture queue key, which is what
-// lets validation and the dump live in one function: they cannot observe each other half-done, so
-// no terminal failure can be written out from under a running capture.
+// reconcileCapture drives one PodSnapshotContent work order end to end: validate the source pod,
+// promote it with CaptureEligibleLabel, run the dump inline. Every trigger for this work order
+// shares one queue key, which is what lets validation and the dump live in one function: neither
+// can observe the other half-done, so no terminal failure lands under a running capture.
 //
-// Capture parameters come from the source pod, which is the single source of truth; this never
-// mutates spec and writes status via Status().Patch only.
+// It never mutates spec and writes status via Status().Patch only.
 func (w *NodeController) reconcileCapture(ctx context.Context, name string) error {
 	logger := logr.FromContextOrDiscard(ctx).WithValues("content", name)
 	ctx = logr.NewContext(ctx, logger)
@@ -138,11 +136,10 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 		return w.markCheckpointReady(ctx, content, artifactPath)
 	}
 
-	// Everything below reads live pod state, and the unstick sweep below acts on it. Queue keys are
-	// per work order, so several can name one pod; only the owner may draw conclusions from that
-	// pod. A non-owner reading the source mid-dump sees a container the owner is busy killing, and
-	// would SIGKILL the very container the owner is dumping. It waits instead: once the owner
-	// reaches a terminal state, ownership passes and this work order settles on its own.
+	// Several work orders can name one pod, and everything below draws conclusions from live pod
+	// state — including a sweep that SIGKILLs its containers. Only the owner may. A non-owner
+	// reading the source mid-dump would kill the container the owner is dumping, so it waits:
+	// ownership passes when the owner goes terminal.
 	chosen, err := w.captureOwnerForPod(pod)
 	if err != nil {
 		return err
@@ -161,9 +158,8 @@ func (w *NodeController) reconcileCapture(ctx context.Context, name string) erro
 		return err
 	}
 
-	// The source-pod informer keys on CaptureEligibleLabel, so this patch is what makes pod status
-	// changes (quiesce, a container crashing) reach the queue instead of waiting for the resync.
-	// Failing it strands the work order, so it requeues rather than being logged and dropped.
+	// The source-pod informer keys on this label, so the patch is what makes pod status changes
+	// reach the queue instead of waiting for the resync. Failing it strands the work order.
 	if err := w.labelCaptureEligible(ctx, pod); err != nil {
 		return fmt.Errorf("mark source pod %s capture-eligible: %w", podKey.String(), err)
 	}
@@ -193,11 +189,9 @@ func (w *NodeController) captureOwnerForPod(pod *corev1.Pod) (string, error) {
 	return chooseActiveContent(objs), nil
 }
 
-// runCheckpoint executes the dump, then writes the terminal status. It runs on the capture queue
-// worker rather than a detached goroutine, which is what keeps the work order's key claimed for
-// the whole dump. The dump terminates the target process, so there is no post-Ready release step.
-// The container ID, host PID, and resolved locations are pre-resolved by the reconciler so the
-// dump does not re-resolve them.
+// runCheckpoint executes the dump, then writes the terminal status. It runs on the queue worker
+// rather than a detached goroutine, which is what keeps the key claimed for the whole dump. The
+// dump terminates the target, so there is no release step.
 //
 // A returned error means the outcome was not recorded and the queue should retry; a recorded
 // failure returns nil, because retrying a terminal work order achieves nothing.
@@ -257,11 +251,10 @@ func classifySourcePodLiveness(pod *corev1.Pod) (string, string) {
 	return "", ""
 }
 
-// failCheckpointOnContainerExit fails the work order and force-terminates the source pod's
-// still-running containers when any checkpoint container has terminated non-zero. The bool
-// reports that the caller must stop; the error is the status write's, so a write that did not
-// land is retried by the queue rather than waiting out the resync. Callers must only reach this
-// for a source pod they own — the sweep kills every running container in the pod. Init containers
+// failCheckpointOnContainerExit fails the work order and force-terminates the pod's still-running
+// containers when any checkpoint container has terminated non-zero. The bool says the caller must
+// stop; the error is the status write's, so one that did not land is retried. Only call this for a
+// pod this work order owns — the sweep kills every running container in it. Init containers
 // (pod.Status.InitContainerStatuses) are intentionally out of scope.
 func (w *NodeController) failCheckpointOnContainerExit(ctx context.Context, content *snapshotv1alpha1.PodSnapshotContent, pod *corev1.Pod) (bool, error) {
 	failed := failedCheckpointContainer(pod)
