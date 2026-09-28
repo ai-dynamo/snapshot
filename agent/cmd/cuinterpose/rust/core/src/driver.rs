@@ -137,7 +137,6 @@ functions! {
     cuMemExportToShareableHandle(output: *mut c_void, handle: CUmemGenericAllocationHandle, handle_type: CUmemAllocationHandleType, flags: u64);
     cuMemGetAllocationPropertiesFromHandle(properties: *mut CUmemAllocationProp, handle: CUmemGenericAllocationHandle);
     cuMemHostRegister_v2(address: *mut c_void, size: usize, flags: u32);
-    cuMemHostGetFlags(flags: *mut u32, address: *mut c_void);
     cuMemHostUnregister(address: *mut c_void);
     cuMemImportFromShareableHandle(handle: *mut CUmemGenericAllocationHandle, shareable: *mut c_void, handle_type: CUmemAllocationHandleType);
     cuMemMap(address: CUdeviceptr, size: usize, offset: usize, handle: CUmemGenericAllocationHandle, flags: u64);
