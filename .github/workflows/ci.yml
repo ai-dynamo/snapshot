@@ -86,6 +86,7 @@ jobs:
             e2e/tests/test_resolve_snapshot_image_tag.py \
             e2e/tests/test_runtime_image_id.py \
             e2e/tests/test_setup_chart_command.py \
+            e2e/tests/test_upgrade_harness.py \
             e2e/tests/test_workload_scripts.py -vv
 
   # Runs on every pull request so cross-cutting changes (shared workflows, the
