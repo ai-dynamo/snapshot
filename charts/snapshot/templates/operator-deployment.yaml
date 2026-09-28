@@ -68,6 +68,7 @@ spec:
           {{- end }}
           args:
             - {{ printf "--snapshot-storage-base-path=%v" .Values.storage.pvc.basePath | quote }}
+            - --snapshot-storage-config=/etc/snapshot/storage.yaml
             - {{ printf "--artifact-cleanup-scan-interval=%v" .Values.operator.artifactCleanup.scanInterval | quote }}
             - {{ printf "--artifact-cleanup-batch-size=%v" .Values.operator.artifactCleanup.batchSize | quote }}
             - {{ printf "--artifact-cleanup-list-attempts=%v" .Values.operator.artifactCleanup.listAttempts | quote }}
@@ -76,7 +77,16 @@ spec:
           volumeMounts:
             - name: checkpoints
               mountPath: {{ .Values.storage.pvc.basePath | quote }}
+            - name: storage-config
+              mountPath: /etc/snapshot
+              readOnly: true
       volumes:
         - name: checkpoints
           persistentVolumeClaim:
             claimName: {{ .Values.storage.pvc.name }}
+        - name: storage-config
+          configMap:
+            name: {{ include "snapshot.fullname" . }}-config
+            items:
+              - key: storage.yaml
+                path: storage.yaml
