@@ -1,0 +1,135 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: PVC storage identity configuration
+templates:
+  - templates/configmap.yaml
+  - templates/daemonset.yaml
+  - templates/operator-deployment.yaml
+  - templates/pvc.yaml
+release:
+  name: snapshot
+  namespace: storage-ns
+tests:
+  - it: derives backend identity from existing Helm values without changing agent configuration
+    template: templates/configmap.yaml
+    asserts:
+      - equal:
+          path: data["storage.yaml"]
+          value: |
+            type: "pvc"
+            pvc:
+              namespace: "storage-ns"
+              claimName: "snapshot-pvc"
+              # The entire claim is used; this is not the container-local mount path.
+              basePath: "/"
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'storage:\s+type: "pvc"\s+basePath: "/checkpoints"'
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: 'pvc:|claimName:|namespace:|storeID:'
+
+  - it: uses a custom existing claim for the resolved identity and both mounts
+    set:
+      storage.pvc.create: false
+      storage.pvc.name: existing-checkpoints
+    asserts:
+      - matchRegex:
+          path: data["storage.yaml"]
+          pattern: 'claimName: "existing-checkpoints"'
+        template: templates/configmap.yaml
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: checkpoints
+            persistentVolumeClaim:
+              claimName: existing-checkpoints
+        template: templates/daemonset.yaml
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: checkpoints
+            persistentVolumeClaim:
+              claimName: existing-checkpoints
+        template: templates/operator-deployment.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/pvc.yaml
+
+  - it: mounts resolved backend configuration only in PageBroker on the node
+    template: templates/daemonset.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: config
+            mountPath: /etc/snapshot
+            readOnly: true
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: storage-config
+          any: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: config
+            configMap:
+              name: snapshot-config
+              items:
+                - key: config.yaml
+                  path: config.yaml
+      - contains:
+          path: spec.template.spec.containers[1].volumeMounts
+          content:
+            name: storage-config
+            mountPath: /etc/snapshot
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: storage-config
+            configMap:
+              name: snapshot-config
+              items:
+                - key: storage.yaml
+                  path: storage.yaml
+
+  - it: gives the manager the same resolved backend configuration as PageBroker
+    template: templates/operator-deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --snapshot-storage-config=/etc/snapshot/storage.yaml
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: storage-config
+            mountPath: /etc/snapshot
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: storage-config
+            configMap:
+              name: snapshot-config
+              items:
+                - key: storage.yaml
+                  path: storage.yaml
+
+  - it: rejects a missing PVC name
+    template: templates/configmap.yaml
+    set:
+      storage.pvc.name: ""
+    asserts:
+      - failedTemplate:
+          errorMessage: storage.pvc.name is required
+
+  - it: does not activate S3
+    template: templates/configmap.yaml
+    set:
+      storage.type: s3
+    asserts:
+      - failedTemplate:
+          errorPattern: only pvc is currently implemented
