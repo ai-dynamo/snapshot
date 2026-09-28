@@ -139,7 +139,7 @@ tests:
               medium: Memory
               sizeLimit: "128Gi"
 
-  - it: renders when reused values carry no pageBroker.staging map
+  - it: falls back to the 64Gi default when reused values carry no pageBroker.staging map
     template: templates/daemonset.yaml
     set:
       pageBroker.staging: null
@@ -150,6 +150,7 @@ tests:
             name: pagebroker
             emptyDir:
               medium: Memory
+              sizeLimit: "64Gi"
 
   - it: requests only the idle daemon footprint
     template: templates/daemonset.yaml
