@@ -181,6 +181,38 @@ kubectl delete namespace "$SNAPSHOT_E2E_HOST_NAMESPACE" --ignore-not-found
 rm -f "$SNAPSHOT_E2E_TARGET_KUBECONFIG"
 ```
 
+## Installing a Published Version
+
+`snapshot-install` installs the local `./charts/snapshot` by default. To install
+a published release or main build instead, point it at the chart in GHCR:
+
+```bash
+export SNAPSHOT_E2E_SNAPSHOT_TAG=v0.1.0
+export SNAPSHOT_E2E_CHART_REF=oci://ghcr.io/ai-dynamo/snapshot/snapshot
+export SNAPSHOT_E2E_CHART_VERSION=0.1.0
+
+uv run --project e2e python -m snapshot_e2e.infra.setup --phase snapshot-install
+```
+
+The chart version is the image tag without the leading `v`. Main builds use
+`v0.0.0-g<sha8>` images and chart version `0.0.0-g<sha8>`.
+
+`hack/resolve-snapshot-image-tag.py` resolves which versions to upgrade from
+and checks that their operator and agent images and chart are published. It
+prints a JSON list of `{tag, chart_version}` and drops the version under test:
+
+```bash
+# Latest release
+python3 hack/resolve-snapshot-image-tag.py --from ""
+# Newest patch release of each of the last 3 minor versions
+python3 hack/resolve-snapshot-image-tag.py --from-minor-versions 3
+# Specific release tags and main commits
+python3 hack/resolve-snapshot-image-tag.py --from v0.1.0,1a2b3c4d
+```
+
+Only main and release-branch commits are published, so a feature-branch commit
+cannot be used. Set `GH_TOKEN` to avoid GitHub API rate limits.
+
 ## Restore Verification
 
 The success tests prove restore with explicit source and restore state tokens.
