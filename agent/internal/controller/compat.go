@@ -120,7 +120,7 @@ func (w *NodeController) preflightCompatibility(
 			"artifact_path", artifact.Path,
 			"error", err.Error(),
 		)
-		emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, corev1.EventTypeWarning,
+		w.emitPodEvent(ctx, log, pod, snapshotEventComponent, corev1.EventTypeWarning,
 			restoreCompatUncheckedReason,
 			fmt.Sprintf("Restore compatibility not checked for container %s: checkpoint manifest at %s is unreadable: %v",
 				artifact.SourceContainerName, artifact.Path, err),
