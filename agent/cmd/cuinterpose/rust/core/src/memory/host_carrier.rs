@@ -44,8 +44,6 @@ impl From<&Allocation> for AllocationContent {
 pub struct Arena {
     pub(crate) base: usize,
     pub(crate) size: usize,
-    context: usize,
-    device: i32,
     offsets: BTreeMap<AllocationId, usize>,
 }
 
@@ -80,36 +78,11 @@ impl Arena {
         if base == libc::MAP_FAILED {
             return Err(CudaError::from(CUDA_ERROR_OUT_OF_MEMORY));
         }
-        let first = &allocations[0];
         let arena = Self {
             base: base as usize,
             size,
-            context: first.context,
-            device: first.properties.location.id,
             offsets,
         };
-        let context = match Context::enter(arena.context, arena.device) {
-            Ok(context) => context,
-            Err(error) => {
-                unsafe {
-                    libc::munmap(base, size);
-                }
-                return Err(error);
-            }
-        };
-        let registered =
-            unsafe { crate::driver::cuMemHostRegister_v2(base, size, CU_MEMHOSTREGISTER_PORTABLE) };
-        let left = context.leave();
-        if let Err(error) = registered {
-            unsafe {
-                libc::munmap(base, size);
-            }
-            return Err(error);
-        }
-        if let Err(error) = left {
-            let _ = arena.release();
-            return Err(error);
-        }
         match arena.copy(allocations, false) {
             Ok(()) => Ok(Some(arena)),
             Err(error) => {
@@ -134,46 +107,26 @@ impl Arena {
         if size != self.size {
             return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
         }
-        let loaded = (|| -> Result<()> {
-            Context::run(self.context, self.device, || {
-                let mut flags = 0u32;
-                let valid = unsafe {
-                    crate::driver::cuMemHostGetFlags(&mut flags, self.base as *mut c_void)
-                }
-                .is_ok();
-                if !valid {
+        for allocation in &mut fresh {
+            Context::run(
+                allocation.context,
+                allocation.properties.location.id,
+                || {
+                    let mut driver = 0;
                     unsafe {
-                        crate::driver::cuMemHostRegister_v2(
-                            self.base as *mut c_void,
-                            self.size,
-                            CU_MEMHOSTREGISTER_PORTABLE,
+                        crate::driver::cuMemCreate(
+                            &mut driver,
+                            allocation.size,
+                            &allocation.properties,
+                            0,
                         )
                     }?;
-                }
-                Ok(())
-            })?;
-            for allocation in &mut fresh {
-                Context::run(
-                    allocation.context,
-                    allocation.properties.location.id,
-                    || {
-                        let mut driver = 0;
-                        unsafe {
-                            crate::driver::cuMemCreate(
-                                &mut driver,
-                                allocation.size,
-                                &allocation.properties,
-                                0,
-                            )
-                        }?;
-                        allocation.driver = Some(driver);
-                        Ok(())
-                    },
-                )?;
-            }
-            self.copy(&fresh, true)
-        })();
-        loaded?;
+                    allocation.driver = Some(driver);
+                    Ok(())
+                },
+            )?;
+        }
+        self.copy(&fresh, true)?;
         for (allocation, fresh) in allocations.iter_mut().zip(fresh) {
             allocation.driver = fresh.driver;
         }
@@ -181,6 +134,28 @@ impl Arena {
     }
 
     fn copy(&self, allocations: &[AllocationContent], load: bool) -> Result<()> {
+        let first = allocations.first().ok_or(CUDA_ERROR_INVALID_VALUE)?;
+        Context::run(first.context, first.properties.location.id, || {
+            // A fallback primary may lose its final retain when we leave. Keep
+            // registration in this scope; PORTABLE covers every copy group.
+            unsafe {
+                crate::driver::cuMemHostRegister_v2(
+                    self.base as *mut c_void,
+                    self.size,
+                    CU_MEMHOSTREGISTER_PORTABLE,
+                )
+            }?;
+            let result = self.copy_groups(allocations, load);
+            // Failed cleanup must not let save's error path unmap storage that
+            // CUDA still considers registered.
+            crate::runtime::must_complete(unsafe {
+                crate::driver::cuMemHostUnregister(self.base as *mut c_void)
+            });
+            result
+        })
+    }
+
+    fn copy_groups(&self, allocations: &[AllocationContent], load: bool) -> Result<()> {
         let mut groups: BTreeMap<(usize, i32), Vec<&AllocationContent>> = BTreeMap::new();
         for allocation in allocations {
             groups
@@ -306,21 +281,11 @@ impl Arena {
     }
 
     pub fn release(self) -> Result<()> {
-        let context = Context::enter(self.context, self.device)?;
-        let unregistered = unsafe { crate::driver::cuMemHostUnregister(self.base as *mut c_void) };
-        let left = context.leave();
-        // Do not unmap an arena still registered with CUDA. If unregister
-        // succeeded, a context-restoration error must not prevent CPU cleanup.
-        let unmapped = if unregistered.is_ok() {
-            if unsafe { libc::munmap(self.base as *mut c_void, self.size) } == 0 {
-                Ok(())
-            } else {
-                Err(CudaError::from(CUDA_ERROR_UNKNOWN))
-            }
-        } else {
+        if unsafe { libc::munmap(self.base as *mut c_void, self.size) } == 0 {
             Ok(())
-        };
-        unregistered.and(left).and(unmapped)
+        } else {
+            Err(CudaError::from(CUDA_ERROR_UNKNOWN))
+        }
     }
 }
 
@@ -334,24 +299,36 @@ mod tests {
     };
     use cuinterpose_abi::{ABI_VERSION, FrontendAbi};
     use std::ffi::{CStr, c_char};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     static G_REGISTERED: AtomicUsize = AtomicUsize::new(0);
     static G_REGISTER_CALLS: AtomicUsize = AtomicUsize::new(0);
     static G_RELEASED: AtomicUsize = AtomicUsize::new(0);
     static G_SWITCHED: AtomicUsize = AtomicUsize::new(0);
+    static G_TRANSFER: AtomicBool = AtomicBool::new(false);
+    static G_CURRENT: AtomicUsize = AtomicUsize::new(1);
+    static G_PRIMARY_REFS: AtomicUsize = AtomicUsize::new(0);
+    static G_COPIES: AtomicUsize = AtomicUsize::new(0);
+    static G_FAIL_COPY: AtomicBool = AtomicBool::new(false);
+    static G_FAIL_REGISTER: AtomicBool = AtomicBool::new(false);
 
     unsafe extern "C" fn current(output: *mut *mut c_void) -> CUresult {
         unsafe {
-            output.write(std::ptr::dangling_mut::<c_void>());
+            output.write(G_CURRENT.load(Ordering::Relaxed) as *mut c_void);
         }
         CUDA_SUCCESS
     }
-    unsafe extern "C" fn switch(_: *mut c_void) -> CUresult {
+    unsafe extern "C" fn switch(context: *mut c_void) -> CUresult {
         G_SWITCHED.fetch_add(1, Ordering::Relaxed);
-        CUDA_ERROR_INVALID_CONTEXT
+        if G_TRANSFER.load(Ordering::Relaxed) {
+            G_CURRENT.store(context as usize, Ordering::Relaxed);
+            CUDA_SUCCESS
+        } else {
+            CUDA_ERROR_INVALID_CONTEXT
+        }
     }
     unsafe extern "C" fn retain(output: *mut *mut c_void, _: i32) -> CUresult {
+        G_PRIMARY_REFS.fetch_add(1, Ordering::Relaxed);
         unsafe {
             output.write(2usize as *mut c_void);
         }
@@ -359,24 +336,80 @@ mod tests {
     }
     unsafe extern "C" fn release(_: i32) -> CUresult {
         G_RELEASED.fetch_add(1, Ordering::Relaxed);
-        CUDA_ERROR_INVALID_HANDLE
+        if G_TRANSFER.load(Ordering::Relaxed) {
+            if G_PRIMARY_REFS.fetch_sub(1, Ordering::Relaxed) == 1 {
+                assert_eq!(
+                    G_REGISTERED.load(Ordering::Relaxed),
+                    0,
+                    "final primary release invalidates host registration"
+                );
+            }
+            CUDA_SUCCESS
+        } else {
+            CUDA_ERROR_INVALID_HANDLE
+        }
     }
     unsafe extern "C" fn register(_: *mut c_void, _: usize, _: u32) -> CUresult {
+        if G_FAIL_REGISTER.load(Ordering::Relaxed) {
+            return CUDA_ERROR_OUT_OF_MEMORY;
+        }
         G_REGISTERED.fetch_add(1, Ordering::Relaxed);
         G_REGISTER_CALLS.fetch_add(1, Ordering::Relaxed);
         CUDA_SUCCESS
     }
     unsafe extern "C" fn unregister(_: *mut c_void) -> CUresult {
-        G_REGISTERED.fetch_sub(1, Ordering::Relaxed);
+        assert_eq!(G_REGISTERED.fetch_sub(1, Ordering::Relaxed), 1);
+        assert!(G_PRIMARY_REFS.load(Ordering::Relaxed) > 0);
         CUDA_SUCCESS
     }
     unsafe extern "C" fn create(
-        _: *mut u64,
+        output: *mut u64,
         _: usize,
         _: *const CUmemAllocationProp,
         _: u64,
     ) -> CUresult {
-        CUDA_ERROR_OUT_OF_MEMORY
+        if G_TRANSFER.load(Ordering::Relaxed) {
+            unsafe { output.write(42) };
+            CUDA_SUCCESS
+        } else {
+            CUDA_ERROR_OUT_OF_MEMORY
+        }
+    }
+    unsafe extern "C" fn reserve(out: *mut u64, _: usize, _: usize, _: u64, _: u64) -> CUresult {
+        unsafe { out.write(0x10000) };
+        CUDA_SUCCESS
+    }
+    unsafe extern "C" fn map(_: u64, _: usize, _: usize, _: u64, _: u64) -> CUresult {
+        CUDA_SUCCESS
+    }
+    unsafe extern "C" fn access(_: u64, _: usize, _: *const CUmemAccessDesc, _: usize) -> CUresult {
+        CUDA_SUCCESS
+    }
+    unsafe extern "C" fn free_mapping(_: u64, _: usize) -> CUresult {
+        CUDA_SUCCESS
+    }
+    unsafe extern "C" fn stream(out: *mut *mut c_void, _: CUstream_flags) -> CUresult {
+        unsafe { out.write(std::ptr::dangling_mut::<c_void>()) };
+        CUDA_SUCCESS
+    }
+    unsafe extern "C" fn finish_stream(_: *mut c_void) -> CUresult {
+        CUDA_SUCCESS
+    }
+    fn copied() -> CUresult {
+        assert_eq!(G_REGISTERED.load(Ordering::Relaxed), 1);
+        assert!(G_PRIMARY_REFS.load(Ordering::Relaxed) > 0);
+        G_COPIES.fetch_add(1, Ordering::Relaxed);
+        if G_FAIL_COPY.load(Ordering::Relaxed) {
+            CUDA_ERROR_INVALID_VALUE
+        } else {
+            CUDA_SUCCESS
+        }
+    }
+    unsafe extern "C" fn to_host(_: *mut c_void, _: u64, _: usize, _: *mut c_void) -> CUresult {
+        copied()
+    }
+    unsafe extern "C" fn to_device(_: u64, _: *const c_void, _: usize, _: *mut c_void) -> CUresult {
+        copied()
     }
     unsafe extern "C" fn resolve(name: *const c_char) -> *mut c_void {
         match unsafe { CStr::from_ptr(name) }.to_bytes() {
@@ -387,8 +420,16 @@ mod tests {
             b"cuMemHostRegister_v2" => register as *const () as *mut c_void,
             b"cuMemHostUnregister" => unregister as *const () as *mut c_void,
             b"cuMemCreate" => create as *const () as *mut c_void,
-            // Deliberately absent, not merely a driver error.
-            b"cuMemHostGetFlags" => std::ptr::null_mut(),
+            b"cuMemAddressReserve" => reserve as *const () as *mut c_void,
+            b"cuMemMap" => map as *const () as *mut c_void,
+            b"cuMemSetAccess" => access as *const () as *mut c_void,
+            b"cuMemUnmap" | b"cuMemAddressFree" => free_mapping as *const () as *mut c_void,
+            b"cuStreamCreate" => stream as *const () as *mut c_void,
+            b"cuStreamSynchronize" | b"cuStreamDestroy_v2" => {
+                finish_stream as *const () as *mut c_void
+            }
+            b"cuMemcpyHtoDAsync_v2" => to_device as *const () as *mut c_void,
+            b"cuMemcpyDtoHAsync_v2" => to_host as *const () as *mut c_void,
             _ => std::ptr::null_mut(),
         }
     }
@@ -430,8 +471,6 @@ mod tests {
         let arena = Arena {
             base: 0x1000,
             size: 4096,
-            context: 1,
-            device: 0,
             offsets: BTreeMap::from([(id, 0)]),
         };
         let mut allocations = [AllocationContent {
@@ -460,9 +499,97 @@ mod tests {
             arena.load(&mut allocations),
             Err(crate::driver::CudaError(CUDA_ERROR_OUT_OF_MEMORY))
         );
-        assert_eq!(G_REGISTER_CALLS.load(Ordering::Relaxed), 1);
-        // Create failed after host registration. Fail-stop does not unwind it.
-        assert_eq!(G_REGISTERED.load(Ordering::Relaxed), 1);
+        // No transfer means no host registration to clean up.
+        assert_eq!(G_REGISTER_CALLS.load(Ordering::Relaxed), 0);
+        assert_eq!(G_REGISTERED.load(Ordering::Relaxed), 0);
         assert_eq!(allocations[0].driver, None);
+    }
+
+    #[test]
+    fn fallback_registration_lives_only_during_transfer() {
+        if std::env::var_os("CUINTERPOSE_CARRIER_UNIT_CHILD").is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "memory::host_carrier::tests::fallback_registration_lives_only_during_transfer",
+                ])
+                .env("CUINTERPOSE_CARRIER_UNIT_CHILD", "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        assert!(
+            crate::G_FRONTEND_ABI
+                .set(FrontendAbi {
+                    version: ABI_VERSION,
+                    size: size_of::<FrontendAbi>() as u32,
+                    resolve,
+                })
+                .is_ok()
+        );
+        crate::driver::initialize();
+        G_TRANSFER.store(true, Ordering::Relaxed);
+        let mut allocations: Vec<_> = [0, 3]
+            .into_iter()
+            .enumerate()
+            .map(|(i, context)| AllocationContent {
+                id: [i as u8 + 1; 16],
+                driver: Some(42),
+                size: 4096,
+                properties: CUmemAllocationProp {
+                    type_: CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED,
+                    location: CUmemLocation {
+                        type_: CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE,
+                        id: i as i32,
+                    },
+                    ..unsafe { std::mem::zeroed() }
+                },
+                context,
+            })
+            .collect();
+        let arena = Arena::save(&allocations).unwrap().unwrap();
+        assert_eq!(
+            G_REGISTER_CALLS.load(Ordering::Relaxed),
+            1,
+            "portable registration spans both context groups"
+        );
+        assert_eq!(G_COPIES.load(Ordering::Relaxed), 2);
+        assert_eq!(G_REGISTERED.load(Ordering::Relaxed), 0);
+        assert_eq!(G_PRIMARY_REFS.load(Ordering::Relaxed), 0);
+        assert_eq!(G_CURRENT.load(Ordering::Relaxed), 1);
+        for allocation in &mut allocations {
+            allocation.driver = None;
+        }
+        arena.load(&mut allocations).unwrap();
+        assert!(
+            allocations
+                .iter()
+                .all(|allocation| allocation.driver == Some(42))
+        );
+        assert_eq!(G_REGISTER_CALLS.load(Ordering::Relaxed), 2);
+        assert_eq!(G_COPIES.load(Ordering::Relaxed), 4);
+        assert_eq!(G_REGISTERED.load(Ordering::Relaxed), 0);
+        assert_eq!(G_PRIMARY_REFS.load(Ordering::Relaxed), 0);
+        assert_eq!(G_CURRENT.load(Ordering::Relaxed), 1);
+        arena.release().unwrap();
+
+        G_FAIL_COPY.store(true, Ordering::Relaxed);
+        assert_eq!(
+            Arena::save(&allocations).err(),
+            Some(CudaError(CUDA_ERROR_INVALID_VALUE))
+        );
+        assert_eq!(G_REGISTERED.load(Ordering::Relaxed), 0);
+        assert_eq!(G_PRIMARY_REFS.load(Ordering::Relaxed), 0);
+        assert_eq!(G_CURRENT.load(Ordering::Relaxed), 1);
+        G_FAIL_COPY.store(false, Ordering::Relaxed);
+        G_FAIL_REGISTER.store(true, Ordering::Relaxed);
+        assert_eq!(
+            Arena::save(&allocations).err(),
+            Some(CudaError(CUDA_ERROR_OUT_OF_MEMORY))
+        );
+        assert_eq!(G_REGISTERED.load(Ordering::Relaxed), 0);
+        assert_eq!(G_PRIMARY_REFS.load(Ordering::Relaxed), 0);
+        assert_eq!(G_CURRENT.load(Ordering::Relaxed), 1);
     }
 }
