@@ -37,8 +37,61 @@ cuda = c.CDLL(None)
 runtime = c.CDLL("libcudart.so.13", mode=os.RTLD_LOCAL)
 mode = sys.argv[1]
 path = Path(os.environ["SNAPSHOT_CONTROL_DIR"]) / f"cuinterpose-{os.getpid()}.sock"
-assert not path.exists()
+if mode == "init-after-exec":
+    assert os.getpid() == int(sys.argv[2]) and path.is_socket()
+else:
+    assert not path.exists()
 sockets_before = set(path.parent.glob("cuinterpose-*.sock"))
+
+if mode == "relative-preload-chdir":
+    assert not Path(os.environ["LD_PRELOAD"]).is_absolute()
+    assert Path(os.environ["LD_PRELOAD"]).is_file()
+    os.chdir(sys.argv[2])
+    assert not Path(os.environ["LD_PRELOAD"]).exists()
+
+if mode == "same-pid-exec":
+    assert cuda.cuInit(0) == 0
+    assert inspect()["namespace_pid"] == os.getpid()
+    os.execv(sys.executable, [sys.executable, __file__, "init-after-exec", str(os.getpid())])
+
+if mode in ("stale", "stale-concurrent"):
+    with socket.socket(socket.AF_UNIX) as stale:
+        stale.bind(str(path))
+        stale.listen()
+
+if mode in ("existing-file", "existing-symlink", "existing-live", "existing-full"):
+    if mode == "existing-file":
+        path.write_text("preserve this file")
+    elif mode == "existing-symlink":
+        target = path.with_suffix(".target")
+        with socket.socket(socket.AF_UNIX) as stale:
+            stale.bind(str(target))
+        path.symlink_to(target)
+        target_inode = target.stat().st_ino
+    else:
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(str(path))
+        listener.listen(0 if mode == "existing-full" else 1)
+        if mode == "existing-full":
+            queued = socket.socket(socket.AF_UNIX)
+            queued.connect(str(path))
+    before = path.lstat()
+    # The full-backlog case must never wait for a socket timeout under the
+    # loader-sensitive installation lock.
+    signal.alarm(5)
+    assert cuda.cuInit(0) == 3
+    signal.alarm(0)
+    after = path.lstat()
+    assert (before.st_dev, before.st_ino, before.st_mode) == (after.st_dev, after.st_ino, after.st_mode)
+    if mode == "existing-file":
+        assert path.read_text() == "preserve this file"
+    elif mode == "existing-symlink":
+        assert path.is_symlink() and target.stat().st_ino == target_inode
+        target.unlink()
+    path.unlink()
+    assert cuda.cuInit(0) == 3 and not path.exists()  # Failure remains sticky.
+    print(f"PASS actual Rust endpoint {mode}: preserved existing endpoint")
+    sys.exit(0)
 
 if mode in ("fork-before-init", "fork-after-init", "exec"):
     if mode != "fork-before-init":
@@ -66,12 +119,13 @@ if mode == "constructor":
         plugin = c.CDLL(sys.argv[2])
         plugin.fixture_join_generation_worker()
 
-elif mode in ("init", "init-handle", "init-failure", "concurrent"):
+elif mode in ("init", "init-handle", "init-failure", "concurrent", "init-after-exec", "stale", "stale-concurrent",
+              "relative-preload-chdir"):
     initialize = driver.cuInit if mode == "init-handle" else cuda.cuInit
     initialize.argtypes = [c.c_uint]
 
     def activate():
-        if mode == "concurrent":
+        if mode in ("concurrent", "stale-concurrent"):
             barrier = threading.Barrier(16)
             results = [None] * 16
 
@@ -141,7 +195,7 @@ if mode == "resolver-startup-failure":
     print("PASS lookup independent of runtime startup failure")
     sys.exit(0)
 parent = inspect()["namespace_pid"]
-if mode == "concurrent":
+if mode in ("concurrent", "stale-concurrent"):
     inode = path.stat().st_ino
     for _ in range(16):
         assert initialize(0) == 0

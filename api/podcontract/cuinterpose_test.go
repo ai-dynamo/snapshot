@@ -4,12 +4,15 @@
 package podcontract
 
 import (
+	"path"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 )
 
 func enabledTemplate(containers ...corev1.Container) *corev1.PodTemplateSpec {
@@ -63,6 +66,9 @@ func TestShapeCuInterposeCapture(t *testing.T) {
 		if len(c.VolumeMounts) != 1 || !c.VolumeMounts[0].ReadOnly ||
 			c.VolumeMounts[0].Name != cuInterposeVolumeName || c.VolumeMounts[0].MountPath != CuInterposeMountPath {
 			t.Fatalf("missing read-only shim mount: %#v", c)
+		}
+		if preload := strings.Fields(c.Env[0].Value)[0]; !path.IsAbs(preload) {
+			t.Fatalf("container %q shim preload must be absolute: %q", c.Name, preload)
 		}
 	}
 	if !reflect.DeepEqual(template.Spec.Containers[2], before.Containers[2]) {
@@ -154,6 +160,114 @@ func TestCuInterposeEnabled(t *testing.T) {
 		if got := CuInterposeEnabled(map[string]string{CuInterposeAnnotation: tc.value}); got != tc.want {
 			t.Errorf("CuInterposeEnabled(%q) = %v, want %v", tc.value, got, tc.want)
 		}
+	}
+}
+
+func TestCuInterposeInstallerSecurityContext(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		security *corev1.PodSecurityContext
+		wantUID  int64
+	}{
+		{name: "default", wantUID: 65532},
+		{
+			name: "nonroot without UID or fsGroup", wantUID: 65532,
+			security: &corev1.PodSecurityContext{RunAsNonRoot: ptr.To(true)},
+		},
+		{
+			name: "explicit nonroot UID", wantUID: 1000,
+			security: &corev1.PodSecurityContext{RunAsUser: ptr.To[int64](1000)},
+		},
+		{
+			name: "root workload", wantUID: 65532,
+			security: &corev1.PodSecurityContext{RunAsUser: ptr.To[int64](0)},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			template := enabledTemplate(corev1.Container{
+				Name: "worker", SecurityContext: &corev1.SecurityContext{RunAsUser: ptr.To[int64](2000)},
+			})
+			template.Spec.SecurityContext = tc.security
+			before := template.DeepCopy()
+			if err := ShapeCuInterposeCapture(template, []string{"worker"}, testDelivery()); err != nil {
+				t.Fatal(err)
+			}
+			security := template.Spec.InitContainers[0].SecurityContext
+			if security == nil || security.RunAsUser == nil || *security.RunAsUser != tc.wantUID ||
+				security.RunAsNonRoot == nil || !*security.RunAsNonRoot {
+				t.Fatalf("installer must use nonroot UID %d: %#v", tc.wantUID, security)
+			}
+			if !reflect.DeepEqual(template.Spec.SecurityContext, before.Spec.SecurityContext) {
+				t.Fatal("installer changed Pod security context")
+			}
+			if !reflect.DeepEqual(
+				template.Spec.Containers[0].SecurityContext, before.Spec.Containers[0].SecurityContext,
+			) {
+				t.Fatal("installer changed workload security context")
+			}
+		})
+	}
+}
+
+func TestCuInterposePreloadWithEnvFrom(t *testing.T) {
+	configMap := corev1.EnvFromSource{
+		ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "workload-env"}},
+	}
+	secret := corev1.EnvFromSource{
+		SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "workload-env"}},
+	}
+	for _, tc := range []struct {
+		name      string
+		source    corev1.EnvFromSource
+		prefix    string
+		explicit  *string
+		wantError bool
+		wantValue string
+	}{
+		{name: "ambiguous ConfigMap", source: configMap, wantError: true},
+		{name: "ambiguous Secret", source: secret, wantError: true},
+		{name: "prefix can form preload", source: configMap, prefix: "LD_", wantError: true},
+		{name: "unrelated prefix", source: configMap, prefix: "APP_", wantValue: CuInterposeLibraryPath},
+		{
+			name: "prefix requires empty key", source: configMap,
+			prefix: ldPreloadEnv, wantValue: CuInterposeLibraryPath,
+		},
+		{
+			name: "explicit list", source: configMap, explicit: ptr.To("/opt/first.so:/opt/second.so"),
+			wantValue: CuInterposeLibraryPath + " /opt/first.so /opt/second.so",
+		},
+		{name: "explicit empty", source: secret, explicit: ptr.To(""), wantValue: CuInterposeLibraryPath},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := tc.source
+			source.Prefix = tc.prefix
+			worker := corev1.Container{Name: "worker", EnvFrom: []corev1.EnvFromSource{source}}
+			if tc.explicit != nil {
+				worker.Env = []corev1.EnvVar{{Name: ldPreloadEnv, Value: *tc.explicit}}
+			}
+			template := enabledTemplate(worker)
+			before := template.DeepCopy()
+			err := ShapeCuInterposeCapture(template, []string{"worker"}, testDelivery())
+			if tc.wantError {
+				if err == nil || !strings.Contains(err.Error(), "define LD_PRELOAD explicitly") {
+					t.Fatalf("want explicit-preload error, got %v", err)
+				}
+				if !reflect.DeepEqual(template, before) {
+					t.Fatal("rejected preload configuration changed the template")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := template.Spec.Containers[0]
+			if len(got.Env) != 1 || got.Env[0].Name != ldPreloadEnv || got.Env[0].Value != tc.wantValue {
+				t.Fatalf("preload environment = %#v, want %q", got.Env, tc.wantValue)
+			}
+			if !reflect.DeepEqual(got.EnvFrom, before.Spec.Containers[0].EnvFrom) {
+				t.Fatal("preload configuration changed envFrom sources")
+			}
+		})
 	}
 }
 

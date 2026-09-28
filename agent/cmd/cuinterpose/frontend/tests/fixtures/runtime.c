@@ -6,8 +6,29 @@
 #include <dlfcn.h>
 #include <stdlib.h>
 
+static unsigned queries;
+
+unsigned fixture_runtime_queries(void) {
+    return queries;
+}
+
+#ifndef NO_RUNTIME_VERSION
+int cudaRuntimeGetVersion(int *version) {
+    if (getenv("CUINTERPOSE_TEST_RUNTIME_VERSION_ERROR"))
+        return 1;
+#ifdef LEGACY_RUNTIME
+    *version = 11080;
+#else
+    const char *configured = getenv("CUINTERPOSE_TEST_RUNTIME_VERSION");
+    *version = configured ? atoi(configured) : 13010;
+#endif
+    return 0;
+}
+#endif
+
 static int runtime_lookup(const char *name, void **output, int version,
                           uint64_t flags, int *status) {
+    ++queries;
     const char *wrapper = getenv("CUINTERPOSE_TEST_RUNTIME_WRAPPER");
     if (wrapper) {
         // Model an already-interposed result independently of the inner
@@ -26,6 +47,15 @@ static int runtime_lookup(const char *name, void **output, int version,
     return cuFixtureQuery(name, output, version, flags, status);
 }
 
+#ifdef LEGACY_RUNTIME
+int cudaGetDriverEntryPoint(const char *name, void **output, uint64_t flags) {
+    return runtime_lookup(name, output, 11080, flags, NULL);
+}
+
+int cudaGetDriverEntryPoint_ptsz(const char *name, void **output, uint64_t flags) {
+    return runtime_lookup(name, output, 11080, flags | 2, NULL);
+}
+#else
 int cudaGetDriverEntryPoint(const char *name, void **output, uint64_t flags, int *status) {
     return runtime_lookup(name, output, 13010, flags, status);
 }
@@ -43,3 +73,4 @@ int cudaGetDriverEntryPointByVersion_ptsz(const char *name, void **output, unsig
                                           uint64_t flags, int *status) {
     return runtime_lookup(name, output, (int)version, flags | 2, status);
 }
+#endif

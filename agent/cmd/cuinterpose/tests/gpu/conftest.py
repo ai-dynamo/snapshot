@@ -18,7 +18,7 @@ import pytest
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
-        "markers", "gpu: needs two GPUs and a CUDA 13 driver"
+        "markers", "gpu: needs CUDA GPUs and a CUDA 13 driver (context cases need one GPU)"
     )
     config.addinivalue_line(
         "markers", "multicast: additionally needs NVLink between the two GPUs"

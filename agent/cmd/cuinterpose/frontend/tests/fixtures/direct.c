@@ -30,5 +30,11 @@ int main(void) {
     handle = 44;
     assert(cuMemCreate(&handle, 4096, prop, 999) == 2);
     assert(handle == 44);
+    assert(cuCtxDestroy((void *)0x1234) == 51 && call->handle == 0x1234);
+    assert(cuCtxDestroy_v2((void *)0x5678) == 52 && call->handle == 0x5678);
+    assert(cuDevicePrimaryCtxRelease(3) == 53 && call->device == 3);
+    assert(cuDevicePrimaryCtxRelease_v2(4) == 54 && call->device == 4);
+    assert(cuDevicePrimaryCtxReset(5) == 55 && call->device == 5);
+    assert(cuDevicePrimaryCtxReset_v2(6) == 56 && call->device == 6);
     return 0;
 }

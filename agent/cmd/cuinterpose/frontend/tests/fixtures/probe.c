@@ -45,8 +45,59 @@ static void in_shim(void *pointer, const char *name) {
     assert(info.dli_saddr == pointer);
 }
 
+// CUDA 11 passes three arguments. Deliberately leave a non-null invalid value
+// in the fourth argument register; a modern wrapper must not dereference it.
+int fixture_legacy_query(void *, const char *, void **, uint64_t);
+__asm__(".globl fixture_legacy_query\n"
+        ".type fixture_legacy_query,@function\n"
+        "fixture_legacy_query:\n"
+        "mov %rdi, %rax\n"
+        "mov %rsi, %rdi\n"
+        "mov %rdx, %rsi\n"
+        "mov %rcx, %rdx\n"
+        "mov $1, %ecx\n"
+        "jmp *%rax\n"
+        ".size fixture_legacy_query,.-fixture_legacy_query\n");
+
+static int refused_runtime_version(const char *mode) {
+    int legacy = strcmp(mode, "runtime-legacy") == 0;
+    const char *library = legacy ? "libcudart.so.11.0" :
+        strcmp(mode, "runtime-version-dependency") == 0 ? "libcudart.so.14" : "libcudart.so.13";
+    void *runtime = dlopen(library, RTLD_NOW | RTLD_LOCAL);
+    assert(runtime);
+    unsigned (*queries)(void) = symbol(runtime, "fixture_runtime_queries");
+    const char *names[] = {"cudaGetDriverEntryPoint", "cudaGetDriverEntryPoint_ptsz",
+        "cudaGetDriverEntryPointByVersion", "cudaGetDriverEntryPointByVersion_ptsz"};
+    for (unsigned i = 0; i < (legacy ? 2u : 4u); ++i) {
+        void *function = symbol(runtime, names[i]);
+        in_shim(function, names[i]);
+        void *pointer = (void *)0x1234;
+        int status = -1;
+        if (legacy) {
+            assert(fixture_legacy_query(function, "cuMemMap", &pointer, 0) == 3);
+            assert(fixture_legacy_query(function, "cuMemMap", (void **)1, 0) == 3);
+        } else if (i < 2) {
+            assert(((runtime_query)function)("cuMemMap", &pointer, 0, &status) == 3);
+            assert(((runtime_query)function)("cuMemMap", (void **)1, 0, (int *)1) == 3);
+        } else {
+            assert(((runtime_version_query)function)("cuMemMap", &pointer, 13010, 0, &status) == 3);
+            assert(((runtime_version_query)function)("cuMemMap", (void **)1, 13010, 0, (int *)1) == 3);
+        }
+        assert(pointer == (void *)0x1234 && status == -1);
+        assert(queries() == 0);
+    }
+    assert(getenv("CUINTERPOSE_TEST_CORE_INITIALIZED") == NULL);
+    dlclose(runtime);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     assert(argc == 2);
+    if (strcmp(argv[1], "runtime-legacy") == 0 ||
+        strcmp(argv[1], "runtime-unknown-version") == 0 ||
+        strcmp(argv[1], "runtime-version-error") == 0 ||
+        strcmp(argv[1], "runtime-version-dependency") == 0)
+        return refused_runtime_version(argv[1]);
     if (strcmp(argv[1], "resolver-bootstrap") == 0) {
         // Must precede every other intercepted dlsym call in this process.
         void *plugin = dlopen("constructor.so", RTLD_NOW | RTLD_LOCAL);
@@ -300,6 +351,26 @@ int main(int argc, char **argv) {
     } else if (strcmp(argv[1], "queries") == 0) {
         void *pointer = NULL;
         int status = -1;
+        for (int modern = 0; modern <= 1; ++modern) {
+            int version = modern ? 13010 : 2000;
+            assert(query("cuCtxDestroy", &pointer, version, 0) == 0);
+            in_shim(pointer, modern ? "cuCtxDestroy_v2" : "cuCtxDestroy");
+            assert(((int (*)(void *))pointer)((void *)0x1234) == 51 + modern);
+            assert(call->handle == 0x1234);
+            in_shim(symbol(driver, modern ? "cuCtxDestroy_v2" : "cuCtxDestroy"),
+                    modern ? "cuCtxDestroy_v2" : "cuCtxDestroy");
+            version = modern ? 13010 : 7000;
+            assert(query("cuDevicePrimaryCtxRelease", &pointer, version, 0) == 0);
+            in_shim(pointer, modern ? "cuDevicePrimaryCtxRelease_v2" : "cuDevicePrimaryCtxRelease");
+            assert(((int (*)(int))pointer)(7) == 53 + modern && call->device == 7);
+            in_shim(symbol(driver, modern ? "cuDevicePrimaryCtxRelease_v2" : "cuDevicePrimaryCtxRelease"),
+                    modern ? "cuDevicePrimaryCtxRelease_v2" : "cuDevicePrimaryCtxRelease");
+            assert(query("cuDevicePrimaryCtxReset", &pointer, version, 0) == 0);
+            in_shim(pointer, modern ? "cuDevicePrimaryCtxReset_v2" : "cuDevicePrimaryCtxReset");
+            assert(((int (*)(int))pointer)(8) == 55 + modern && call->device == 8);
+            in_shim(symbol(driver, modern ? "cuDevicePrimaryCtxReset_v2" : "cuDevicePrimaryCtxReset"),
+                    modern ? "cuDevicePrimaryCtxReset_v2" : "cuDevicePrimaryCtxReset");
+        }
         assert(query("cuMemAlloc", &pointer, 13010, 0) == 0);
         in_shim(pointer, "cuMemAlloc_v2");
         uint64_t allocation = 0;
