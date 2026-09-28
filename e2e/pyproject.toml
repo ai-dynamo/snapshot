@@ -22,6 +22,7 @@ markers = [
   "cpu: tests that run on a CPU-only cluster",
   "workload: cluster-free checks of the workload scripts themselves",
   "framework: checkpoint/restore of an inference framework guide workload",
+  "upgrade: state created on an older Snapshot version and validated after upgrading",
 ]
 testpaths = ["tests"]
 addopts = "-p pytester"
