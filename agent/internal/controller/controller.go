@@ -484,18 +484,44 @@ func (w *NodeController) handleTerminalRestorePod(ctx context.Context, pod *core
 	return w.removeRestoreFinalizerWithEvent(ctx, pod)
 }
 
-func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Pod) bool {
+func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Pod) (requeue bool) {
 	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+	passStarted := time.Now()
+	var preflightDuration, finalizerDuration, restoreDuration time.Duration
+	result := "restore-returned"
+	defer func() {
+		w.log.Info("Restore controller pass timing summary",
+			"pod", podKey,
+			"result", result,
+			"duration", time.Since(passStarted),
+			"phases", map[string]string{
+				"preflight": preflightDuration.String(),
+				"finalizer": finalizerDuration.String(),
+				"restore":   restoreDuration.String(),
+			},
+		)
+	}()
+
+	phaseStarted := time.Now()
 	plan, err := w.preflightRestore(ctx, pod)
+	preflightDuration = time.Since(phaseStarted)
 	if err != nil {
+		result = "preflight-error"
 		return w.handleRestorePreflightError(ctx, pod, err)
 	}
+	phaseStarted = time.Now()
 	if err := w.addRestoreFinalizer(ctx, pod); err != nil {
+		finalizerDuration = time.Since(phaseStarted)
+		result = "finalizer-error"
 		w.log.Error(err, "Failed to protect restore Pod", "pod", podKey)
 		emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeWarning, restoreFinalizerUpdateFailedReason, err.Error())
 		return true
 	}
-	return w.restorePodContainers(ctx, pod, plan, podKey)
+	finalizerDuration = time.Since(phaseStarted)
+	phaseStarted = time.Now()
+	requeue = w.restorePodContainers(ctx, pod, plan, podKey)
+	restoreDuration = time.Since(phaseStarted)
+	return requeue
 }
 
 // preflightRestore validates the restore Pod, its referenced PodSnapshot and
