@@ -150,3 +150,6 @@ pub fn cuDevicePrimaryCtxRelease_v2(device: CUdevice) -> Result<()> {
         driver::cuDevicePrimaryCtxRelease_v2(device)
     })
 }
+
+#[cfg(test)]
+mod tests;

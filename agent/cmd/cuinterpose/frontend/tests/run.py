@@ -59,6 +59,12 @@ def main():
             ("driver.c", "libcuda.so.1", shared + ["-Wl,-soname,libcuda.so.1"]),
             ("runtime.c", "libcudart.so.13", shared + [
                 "-Wl,-soname,libcudart.so.13", "-L" + str(build), "-l:libcuda.so.1", "-Wl,-rpath,$ORIGIN", "-ldl"]),
+            ("runtime.c", "libcudart.so.11.0", shared + [
+                "-DLEGACY_RUNTIME", "-Wl,-soname,libcudart.so.11.0", "-L" + str(build),
+                "-l:libcuda.so.1", "-Wl,-rpath,$ORIGIN", "-ldl"]),
+            ("runtime.c", "libcudart.so.14", shared + [
+                "-DNO_RUNTIME_VERSION", "-Wl,-soname,libcudart.so.14", "-L" + str(build),
+                "-l:libcuda.so.1", "-Wl,-rpath,$ORIGIN", "-ldl"]),
             ("core.c", "libcuinterpose_core.so", shared + ["-pthread"]),
             ("core.c", "bad-core.so", shared + ["-DBAD_CORE_ABI", "-pthread"]),
             ("core.c", "bad-size-core.so", shared + ["-DBAD_CORE_SIZE", "-pthread"]),
@@ -86,7 +92,9 @@ def main():
         env["LD_LIBRARY_PATH"] = str(build)
         env["LD_PRELOAD"] = str(build / "libcuinterpose.so")
         cases = ["direct", "lookup", "scope", "resolver-bootstrap", "queries", "missing", "bindings",
-                 "runtime", "local-lifetime", "constructor-reentry", "constructor-concurrent", "concurrent",
+                 "runtime", "runtime-12", "runtime-legacy", "runtime-unknown-version",
+                 "runtime-version-error", "runtime-version-dependency",
+                 "local-lifetime", "constructor-reentry", "constructor-concurrent", "concurrent",
                  "providers", "identities", "ready-failure",
                  "missing-core", "bad-core", "bad-size-core",
                  "runtime-nested", "early-plugin", "early-plugin-nested",
@@ -95,6 +103,12 @@ def main():
             case_env = env.copy()
             if case in ("runtime-nested", "early-plugin-nested"):
                 case_env["CUINTERPOSE_TEST_NESTED_RUNTIME"] = "1"
+            if case == "runtime-12":
+                case_env["CUINTERPOSE_TEST_RUNTIME_VERSION"] = "12000"
+            if case == "runtime-unknown-version":
+                case_env["CUINTERPOSE_TEST_RUNTIME_VERSION"] = "0"
+            if case == "runtime-version-error":
+                case_env["CUINTERPOSE_TEST_RUNTIME_VERSION_ERROR"] = "1"
             if case == "constructor-reentry":
                 case_env["CUINTERPOSE_TEST_REENTER_CORE"] = "1"
             if case == "constructor-concurrent":
@@ -115,6 +129,8 @@ def main():
                     shutil.copy2(build / f"{case}.so", variant / "libcuinterpose_core.so")
                 case_env["LD_PRELOAD"] = str(variant / "libcuinterpose.so")
             command = [str(build / "direct")] if case == "direct" else [str(build / "probe"), case]
+            if case == "runtime-12":
+                command = [str(build / "probe"), "runtime"]
             subprocess.run(command, env=case_env, timeout=20, check=True)
             print(f"PASS {case}", flush=True)
         print(f"{len(cases)} front-end loader cases passed; checkpoint core and GPU behavior not tested.")
@@ -130,12 +146,19 @@ def main():
         ] + shared + ["-pthread", "-ldl"], env=env, check=True)
         actual_env = env | {"LD_PRELOAD": str(actual / "libcuinterpose.so"),
                             "SNAPSHOT_CONTROL_DIR": str(actual)}
+        changed_cwd = build / "changed-cwd"
+        changed_cwd.mkdir()
         subprocess.run([str(build / "init-only")], env=actual_env, check=True, timeout=20)
-        modes = ["init", "init-handle", "init-failure", "private", *map(str, range(7)),
-                 "tracked-query", "concurrent", "constructor", "fork-before-init", "fork-after-init", "exec"]
+        modes = ["init", "init-handle", "init-failure", "relative-preload-chdir", "private", *map(str, range(7)),
+                 "tracked-query", "concurrent", "constructor", "fork-before-init", "fork-after-init", "exec",
+                 "same-pid-exec", "stale", "stale-concurrent", "existing-file", "existing-symlink",
+                 "existing-live", "existing-full"]
         for mode in modes:
-            subprocess.run([sys.executable, str(fixtures.parent / "endpoint.py"), mode, str(constructor)],
-                           env=actual_env, check=True, timeout=20)
+            relative_preload = mode == "relative-preload-chdir"
+            mode_env = actual_env | {"LD_PRELOAD": "./actual/libcuinterpose.so"} if relative_preload else actual_env
+            subprocess.run([sys.executable, str(fixtures.parent / "endpoint.py"), mode,
+                            str(changed_cwd if relative_preload else constructor)],
+                           cwd=build if relative_preload else None, env=mode_env, check=True, timeout=20)
         subprocess.run([sys.executable, str(fixtures.parent / "endpoint.py"),
                         "resolver-startup-failure", str(constructor)],
                        env=actual_env | {"CUINTERPOSE_TEST_NESTED_RUNTIME": "1"},

@@ -70,6 +70,12 @@ static CUresult unbind(CUmemGenericAllocationHandle handle, CUdevice device,
         assert(function); \
         return function arguments; \
     }
+FORWARD(cuCtxDestroy, (CUcontext context), (context))
+FORWARD(cuCtxDestroy_v2, (CUcontext context), (context))
+FORWARD(cuDevicePrimaryCtxRelease, (CUdevice device), (device))
+FORWARD(cuDevicePrimaryCtxRelease_v2, (CUdevice device), (device))
+FORWARD(cuDevicePrimaryCtxReset, (CUdevice device), (device))
+FORWARD(cuDevicePrimaryCtxReset_v2, (CUdevice device), (device))
 FORWARD(cuMemAlloc_v2, (CUdeviceptr *out, size_t size), (out, size))
 FORWARD(cuMemFree_v2, (CUdeviceptr address), (address))
 FORWARD(cuMemGetAddressRange_v2, (CUdeviceptr *base, size_t *size, CUdeviceptr address), (base, size, address))
@@ -98,6 +104,12 @@ static const struct BackendAbi api = {
     .size = sizeof(api),
 #endif
     .ensure_cuinterpose_initialized = ensure_cuinterpose_initialized,
+    .cuCtxDestroy = forward_cuCtxDestroy,
+    .cuCtxDestroy_v2 = forward_cuCtxDestroy_v2,
+    .cuDevicePrimaryCtxRelease = forward_cuDevicePrimaryCtxRelease,
+    .cuDevicePrimaryCtxRelease_v2 = forward_cuDevicePrimaryCtxRelease_v2,
+    .cuDevicePrimaryCtxReset = forward_cuDevicePrimaryCtxReset,
+    .cuDevicePrimaryCtxReset_v2 = forward_cuDevicePrimaryCtxReset_v2,
     .cuMemAlloc_v2 = forward_cuMemAlloc_v2,
     .cuMemFree_v2 = forward_cuMemFree_v2,
     .cuMemGetAddressRange_v2 = forward_cuMemGetAddressRange_v2,

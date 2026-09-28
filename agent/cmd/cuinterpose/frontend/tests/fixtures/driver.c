@@ -36,6 +36,19 @@ const struct fixture_call *fixture_last_call(void) {
     return &last;
 }
 
+// A missing runtime-owned version must not borrow this dependency's version.
+int cudaRuntimeGetVersion(int *version) {
+    *version = 13010;
+    return 0;
+}
+
+int cuCtxDestroy(void *context) { last.handle = (uintptr_t)context; return 51; }
+int cuCtxDestroy_v2(void *context) { last.handle = (uintptr_t)context; return 52; }
+int cuDevicePrimaryCtxRelease(int device) { last.device = device; return 53; }
+int cuDevicePrimaryCtxRelease_v2(int device) { last.device = device; return 54; }
+int cuDevicePrimaryCtxReset(int device) { last.device = device; return 55; }
+int cuDevicePrimaryCtxReset_v2(int device) { last.device = device; return 56; }
+
 int cuMemCreate(uint64_t *output, size_t size, const void *properties, uint64_t flags) {
     last.size = size;
     last.properties = properties;
@@ -155,6 +168,12 @@ int cuFixtureQuery(const char *name, void **output, int version, uint64_t flags,
     // must point to its real CUDA-named definitions, not preempted wrappers.
     if (strcmp(name, "cuInit") == 0)
         *output = (void *)cuInit;
+    else if (strcmp(name, "cuCtxDestroy") == 0)
+        *output = version >= 4000 ? (void *)cuCtxDestroy_v2 : (void *)cuCtxDestroy;
+    else if (strcmp(name, "cuDevicePrimaryCtxRelease") == 0)
+        *output = version >= 11000 ? (void *)cuDevicePrimaryCtxRelease_v2 : (void *)cuDevicePrimaryCtxRelease;
+    else if (strcmp(name, "cuDevicePrimaryCtxReset") == 0)
+        *output = version >= 11000 ? (void *)cuDevicePrimaryCtxReset_v2 : (void *)cuDevicePrimaryCtxReset;
     else if (strcmp(name, "cuMemAlloc") == 0)
         *output = (void *)cuMemAlloc_v2;
     else if (strcmp(name, "cuMemFree") == 0)

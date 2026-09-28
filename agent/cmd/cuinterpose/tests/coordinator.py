@@ -43,9 +43,13 @@ def multicast(size, devices=1):
         "handle_types": 1, "flags": 0, "virtual_multicast_handle_count": 1}}
 
 
-def binding(size, offset=0):
+def multicast_device(device=0):
+    return {"multicast_device": {"allocation": MULTICAST, "device": device}}
+
+
+def binding(size, offset=0, *, member=ALLOCATION):
     return {"multicast_binding": {"allocation": MULTICAST,
-        "source": {"memory": {"allocation": ALLOCATION, "offset": 0}},
+        "source": {"memory": {"allocation": member, "offset": 0}},
         "size": size, "offset": offset, "flags": 0, "version": "v1", "device": 0}}
 
 
@@ -120,6 +124,24 @@ class Contracts(unittest.TestCase):
             with self.subTest(records=records), self.coordinator("--prepare", "AllocationReference"):
                 self.inspect([records, []], begin=True)
 
+    def test_unsupported_allocation_properties_start_no_phases(self):
+        for field, value in (("location", [3, 0]), ("allocation_type", 0)):
+            for importer in (False, True):
+                unsupported = allocation()
+                unsupported["allocation"][field] = value
+                records = [[allocation()], [unsupported]] if importer else [[unsupported], []]
+                with self.subTest(field=field, importer=importer), \
+                        self.coordinator("--prepare", "unsupported allocation properties"):
+                    self.inspect(records, begin=True)
+                # Validate both the saved manifest and the live inspection on
+                # restore before any load or reconstruction command is sent.
+                for saved, live in ((records, [[allocation()], []]),
+                                    ([[allocation()], []], records)):
+                    self.state.write_bytes(encode({1: saved[0], 2: saved[1]}))
+                    with self.coordinator("--restore", "unsupported allocation properties"):
+                        self.inspect(live)
+                self.state.unlink()
+
     def test_failed_or_lost_reply_stops_without_retry(self):
         for lost in (False, True):
             error = "receive failed" if lost else "injected failure"
@@ -193,6 +215,37 @@ class Contracts(unittest.TestCase):
         for sizes in ((4096, 8192), (8192, 4096)):
             with self.subTest(sizes=sizes), self.coordinator("--prepare", "inconsistent multicast properties"):
                 self.inspect([[multicast(size, 2)] for size in sizes], begin=True)
+
+    def test_multicast_device_ordinals_are_process_local(self):
+        other = {"id": bytes([3] * 16), "creator_pid": 2}
+        records = [
+            [allocation(), multicast(4096, 2), multicast_device(), binding(4096)],
+            [allocation(2, identifier=other["id"]), multicast(4096, 2),
+             multicast_device(), binding(4096, member=other)],
+        ]
+        with self.coordinator("--prepare"):
+            self.inspect(records, begin=True)
+            for operation in PREPARE:
+                self.phase(operation)
+        with self.coordinator("--restore"):
+            self.inspect(records)
+            for operation in RESTORE:
+                self.phase(operation)
+            self.inspect(records)
+
+    def test_multicast_binding_requires_local_attachment(self):
+        records = [
+            [allocation(), multicast(4096), multicast_device(), binding(4096)],
+            [allocation(), multicast(4096), binding(4096)],
+        ]
+        with self.coordinator("--prepare", "participant 2: multicast binding device 0 is not attached"):
+            self.inspect(records, begin=True)
+
+    def test_multicast_duplicate_device_in_one_process_is_rejected(self):
+        records = [[allocation(), multicast(4096), multicast_device(),
+                    multicast_device(), binding(4096)], []]
+        with self.coordinator("--prepare", "participant 1: duplicate multicast device 0"):
+            self.inspect(records, begin=True)
 
     def test_rounded_multicast_extents_preserve_creation_size(self):
         records = [[allocation(), multicast(4096),
