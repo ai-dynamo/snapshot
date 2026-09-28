@@ -42,13 +42,18 @@ func prepareTestArtifactRoot(t *testing.T, uid string) (string, string) {
 	return base, root
 }
 
+func testConfig(basePath string) operatortypes.ArtifactCleanupConfig {
+	return operatortypes.ArtifactCleanupConfig{
+		BasePath: basePath, ScanInterval: time.Hour, BatchSize: 10, ListAttempts: 3, Workers: 1,
+	}
+}
+
 func newTestQueue(t *testing.T, basePath string, objects ...client.Object) (*Queue, *record.FakeRecorder) {
 	t.Helper()
 	kubeClient := ctrlfake.NewClientBuilder().WithScheme(maintenanceTestScheme(t)).WithObjects(objects...).Build()
 	recorder := record.NewFakeRecorder(10)
-	q := NewQueue(kubeClient, kubeClient, recorder, operatortypes.ArtifactCleanupConfig{
-		BasePath: basePath, ScanInterval: time.Hour, BatchSize: 10, ListAttempts: 3, Workers: 1,
-	})
+	q, err := NewQueue(kubeClient, kubeClient, recorder, testConfig(basePath))
+	require.NoError(t, err)
 	t.Cleanup(q.queue.ShutDown)
 	return q, recorder
 }

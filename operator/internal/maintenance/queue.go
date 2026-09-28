@@ -35,7 +35,10 @@ type Queue struct {
 }
 
 // NewQueue constructs a Queue; register it with the manager (mgr.Add) to run it.
-func NewQueue(kubeClient client.Client, apiReader client.Reader, recorder record.EventRecorder, cfg operatortypes.ArtifactCleanupConfig) *Queue {
+func NewQueue(kubeClient client.Client, apiReader client.Reader, recorder record.EventRecorder, cfg operatortypes.ArtifactCleanupConfig) (*Queue, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
 	return &Queue{
 		client:    kubeClient,
 		apiReader: apiReader,
@@ -45,7 +48,7 @@ func NewQueue(kubeClient client.Client, apiReader client.Reader, recorder record
 			workqueue.DefaultTypedControllerRateLimiter[WorkItemKey](),
 			workqueue.TypedRateLimitingQueueConfig[WorkItemKey]{Name: "podsnapshotcontent-maintenance"},
 		),
-	}
+	}, nil
 }
 
 // EnqueueDeleteContent schedules cleanup for one content. Repeated calls for

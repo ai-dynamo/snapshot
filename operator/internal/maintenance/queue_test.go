@@ -92,11 +92,25 @@ func TestProcessNextItemSkipsItemsAfterCancellation(t *testing.T) {
 	assert.Zero(t, q.queue.NumRequeues(key))
 }
 
-func TestNewQueueDefaults(t *testing.T) {
-	q := NewQueue(nil, nil, nil, operatortypes.ArtifactCleanupConfig{BasePath: "/checkpoints"})
+func newQueue(t *testing.T, cfg operatortypes.ArtifactCleanupConfig) *Queue {
+	t.Helper()
+	q, err := NewQueue(nil, nil, nil, cfg)
+	require.NoError(t, err)
 	t.Cleanup(q.queue.ShutDown)
+	return q
+}
+
+func TestNewQueueDefaults(t *testing.T) {
+	q := newQueue(t, testConfig("/checkpoints"))
 	require.NotNil(t, q.queue)
 	assert.Equal(t, "/checkpoints", q.config.BasePath)
+}
+
+func TestNewQueueRejectsInvalidConfig(t *testing.T) {
+	cfg := testConfig("/checkpoints")
+	cfg.Workers = 0
+	_, err := NewQueue(nil, nil, nil, cfg)
+	require.ErrorContains(t, err, "worker count must be positive")
 }
 
 type failingPatchClient struct {

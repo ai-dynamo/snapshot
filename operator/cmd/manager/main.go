@@ -74,12 +74,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	maintenanceQueue := maintenance.NewQueue(
+	maintenanceQueue, err := maintenance.NewQueue(
 		mgr.GetClient(),
 		mgr.GetAPIReader(),
 		mgr.GetEventRecorderFor("podsnapshotcontent-artifact-cleanup"),
 		*artifactCleanupConfig,
 	)
+	if err != nil {
+		ctrl.Log.Error(err, "unable to construct maintenance workqueue")
+		os.Exit(1)
+	}
 	if err := mgr.Add(maintenanceQueue); err != nil {
 		ctrl.Log.Error(err, "unable to set up maintenance workqueue")
 		os.Exit(1)
