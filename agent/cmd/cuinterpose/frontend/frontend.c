@@ -201,7 +201,8 @@ static void *resolve(const char *name) {
 }
 
 static const struct BackendAbi *load_backend(void **reference) {
-    // glibc expands ORIGIN from this DSO's load-time directory, even after chdir.
+    // Linux's dynamic linker expands $ORIGIN to this library's load-time
+    // directory, so backend lookup still works after chdir.
     void *library = dlopen(BACKEND_LIBRARY, RTLD_LAZY | RTLD_LOCAL);
     if (!library)
         return NULL;
