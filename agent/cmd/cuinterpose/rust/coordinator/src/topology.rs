@@ -3,12 +3,16 @@
 
 use anyhow::Result;
 use anyhow::{Context, bail, ensure};
-use cuinterpose_protocol::{AllocationId, AllocationReference, BindingSource, Manifest, Record};
+use cuinterpose_protocol::{
+    AllocationId, AllocationReference, BindingSource, Manifest, NamespacePid, Record,
+};
 use std::collections::BTreeMap;
 
-// CUmemAllocationHandleType values used by the Linux FD transport.
+// CUDA allocation properties supported by the Linux FD transport and carrier.
 const CU_MEM_HANDLE_TYPE_NONE: u32 = 0;
 const CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR: u32 = 1;
+const CU_MEM_ALLOCATION_TYPE_PINNED: u32 = 1;
+const CU_MEM_LOCATION_TYPE_DEVICE: u32 = 1;
 
 pub struct AllocationSummary {
     pub reference: AllocationReference,
@@ -23,7 +27,9 @@ struct Multicast {
     flags: u64,
     num_devices: u32,
     creators: u32,
-    devices: BTreeMap<i32, bool>,
+    // CUDA ordinals are process-local. Supported groups attach and bind each
+    // device in the same participant.
+    devices: BTreeMap<(NamespacePid, i32), bool>,
 }
 
 pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
@@ -41,10 +47,16 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                     allocation,
                     content,
                     size,
+                    allocation_type,
                     handle_types,
+                    location,
                     virtual_allocation_handle_count,
-                    ..
                 } => {
+                    ensure!(
+                        *allocation_type == CU_MEM_ALLOCATION_TYPE_PINNED
+                            && location.0 == CU_MEM_LOCATION_TYPE_DEVICE,
+                        "participant {namespace_pid}: unsupported allocation properties for {allocation:?}: allocation_type={allocation_type}, location={location:?}"
+                    );
                     if allocation.creator_pid == *namespace_pid {
                         ensure!(
                             (*handle_types == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
@@ -122,16 +134,20 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
             }
         }
     }
-    for record in participants.values().flatten() {
-        if let Record::MulticastDevice { allocation, device } = record
-            && multicasts
-                .get_mut(&allocation.id)
-                .with_context(|| format!("missing multicast object {allocation:?}"))?
-                .devices
-                .insert(*device, false)
-                .is_some()
-        {
-            bail!("duplicate multicast device {device} for {allocation:?}");
+    for (namespace_pid, participant) in participants {
+        for record in participant {
+            if let Record::MulticastDevice { allocation, device } = record
+                && multicasts
+                    .get_mut(&allocation.id)
+                    .with_context(|| format!("missing multicast object {allocation:?}"))?
+                    .devices
+                    .insert((*namespace_pid, *device), false)
+                    .is_some()
+            {
+                bail!(
+                    "participant {namespace_pid}: duplicate multicast device {device} for {allocation:?}"
+                );
+            }
         }
     }
     for (namespace_pid, participant) in participants {
@@ -223,8 +239,8 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                     }
                     *multicast
                         .devices
-                        .get_mut(device)
-                        .with_context(|| format!("participant {namespace_pid}: multicast binding device {device} is absent for {allocation:?}"))? = true;
+                        .get_mut(&(*namespace_pid, *device))
+                        .with_context(|| format!("participant {namespace_pid}: multicast binding device {device} is not attached in this participant for {allocation:?}"))? = true;
                 }
                 Record::MulticastMapping { allocation, .. } => {
                     let multicast = multicasts
@@ -262,7 +278,7 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
         }
         if multicast.devices.values().any(|bound| !bound) {
             bail!(
-                "incomplete multicast binding group {:?}: unbound devices {:?}",
+                "incomplete multicast binding group {:?}: unbound participant/device pairs {:?}",
                 multicast.reference,
                 multicast
                     .devices
