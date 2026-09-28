@@ -24,7 +24,7 @@ static const char GLIBC_DLSYM_VERSION[] = "GLIBC_2.34";
 static const char CUDA_DRIVER_SONAME[] = "libcuda.so.1";
 static const char CUDA_RUNTIME_SONAME[] = "libcudart.so.13";
 static const char CUDA_RUNTIME_PREFIX[] = "cuda";
-static const char BACKEND_LIBRARY[] = "libcuinterpose_core.so";
+static const char BACKEND_LIBRARY[] = "$ORIGIN/libcuinterpose_core.so";
 static const char BACKEND_INIT_SYMBOL[] = "cuinterpose_core_init";
 // Library names without version suffixes. Index + 1 is the library family.
 static const char *const CUDA_LIBRARY_NAMES[] = {"libcuda.so", "libcudart.so"};
@@ -201,18 +201,8 @@ static void *resolve(const char *name) {
 }
 
 static const struct BackendAbi *load_backend(void **reference) {
-    Dl_info info;
-    if (!dladdr((void *)load_backend, &info))
-        return NULL;
-    const char *slash = strrchr(info.dli_fname, '/');
-    size_t prefix = slash ? (size_t)(slash - info.dli_fname + 1) : 0;
-    char *path = malloc(prefix + sizeof(BACKEND_LIBRARY));
-    if (!path)
-        return NULL;
-    memcpy(path, info.dli_fname, prefix);
-    memcpy(path + prefix, BACKEND_LIBRARY, sizeof(BACKEND_LIBRARY));
-    void *library = dlopen(path, RTLD_LAZY | RTLD_LOCAL);
-    free(path);
+    // glibc expands ORIGIN from this DSO's load-time directory, even after chdir.
+    void *library = dlopen(BACKEND_LIBRARY, RTLD_LAZY | RTLD_LOCAL);
     if (!library)
         return NULL;
     CUresult (*initialize)(const struct FrontendAbi *, const struct BackendAbi **) =
@@ -434,10 +424,29 @@ API CUresult cuGetProcAddress_v2_ptsz(const char *name, void **out, int version,
     return cuGetProcAddress_v2(name, out, version, flags, status);
 }
 
+static bool runtime_query_supported(void *function) {
+    Dl_info provider, version_provider;
+    if (!dladdr(function, &provider))
+        return false;
+    void *library = dlopen(provider.dli_fname, RTLD_LAZY | RTLD_NOLOAD);
+    if (!library)
+        return false;
+    int (*get_version)(int *) = lookup(library, "cudaRuntimeGetVersion");
+    int version = 0;
+    // Handle lookup can find a dependency's symbol. Its version says nothing
+    // about the runtime that supplied the query function.
+    bool supported = get_version && dladdr((void *)get_version, &version_provider) &&
+        version_provider.dli_fbase == provider.dli_fbase &&
+        get_version(&version) == cudaSuccess && version >= 12000;
+    dlclose(library);
+    return supported;
+}
+
 #define RUNTIME_QUERY(function_name, version_parameter, version_argument) \
     API int function_name(const char *name, void **out, version_parameter uint64_t flags, int *status) { \
         int (*function)(const char *, void **, version_parameter uint64_t, int *) = resolve(#function_name); \
-        if (!function) \
+        /* CUDA 11 callers have no status argument; reject before accessing it. */ \
+        if (!function || !runtime_query_supported((void *)function)) \
             return cudaErrorInitializationError; \
         int result = function(name, out, version_argument flags, status); \
         if (result != cudaSuccess || (status && *status != cudaDriverEntryPointSuccess)) \
