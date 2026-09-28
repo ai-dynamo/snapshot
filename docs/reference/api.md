@@ -169,7 +169,8 @@ defaults; see [Storage](../operations/storage.md) for the storage model.
 | `image.operator.repository`   | `ghcr.io/ai-dynamo/snapshot/operator`   | Operator image.                                                       |
 | `image.agent.repository`      | `ghcr.io/ai-dynamo/snapshot/agent`      | Agent image.                                                          |
 | `image.pageBroker.repository` | `ghcr.io/ai-dynamo/snapshot/pagebroker` | PageBroker sidecar image, pulled at `image.agent.tag`.                |
-| `image.*.tag`                 | chart `appVersion`                      | Image tag; defaults to the chart's `appVersion` when empty.           |
+| `image.operator.tag`          | chart `appVersion`                      | Operator image tag; defaults to the chart's `appVersion` when empty.  |
+| `image.agent.tag`             | chart `appVersion`                      | Agent and PageBroker image tag; defaults to the chart's `appVersion` when empty. |
 | `crdUpgrade.enabled`          | `true`                                  | Re-apply the CRDs on every rollout via an init container.             |
 | `runtime.type`                | `containerd`                            | Container runtime: `containerd` or `crio`.                            |
 | `runtime.socketPath`          | `""`                                    | Runtime socket path; empty uses the conventional path for the type.   |
@@ -196,7 +197,7 @@ defaults; see [Storage](../operations/storage.md) for the storage model.
 | `pageBroker.staging.sizeLimit` | `64Gi`                                    | Cap on the memory-backed staging volume shared by the agent and PageBroker.                                                               |
 | `daemonset.nodeSelector`       | `nvidia.com/gpu.present: "true"`          | Targets GPU nodes.                                                                                                                        |
 | `daemonset.tolerations`        | GPU + `dedicated`                         | Node tolerations.                                                                                                                         |
-| `daemonset.imagePullSecrets`   | `ngc-secret`                              | Pull secrets for the agent image.                                                                                                         |
+| `daemonset.imagePullSecrets`   | `[]`                                      | Pull secrets for the agent image; empty for the public GHCR image.                                                                        |
 | `seccomp.deploy`               | `true`                                    | Install the block-iouring seccomp profile (required for CRIU; set `false` on RHCOS 9.6+).                                                 |
 | `rbac.create`                  | `true`                                    | Create agent and operator RBAC.                                                                                                           |
 | `serviceAccount.create`        | `true`                                    | Create the agent service account.                                                                                                         |
