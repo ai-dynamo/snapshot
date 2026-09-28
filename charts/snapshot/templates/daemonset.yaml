@@ -208,9 +208,11 @@ spec:
         - name: pagebroker
           emptyDir:
             medium: Memory
-            {{- with (.Values.pageBroker.staging | default dict).sizeLimit }}
-            sizeLimit: {{ . | quote }}
-            {{- end }}
+            # Falls back even when pageBroker.staging is explicitly null (e.g.
+            # helm upgrade --reuse-values from a release predating this key):
+            # an absent sizeLimit is an unbounded memory-backed volume, not a
+            # safe default.
+            sizeLimit: {{ (.Values.pageBroker.staging | default dict).sizeLimit | default "64Gi" | quote }}
         {{- if .Values.seccomp.deploy }}
         # Seccomp profile ConfigMap (used by initContainer)
         - name: seccomp-profiles
