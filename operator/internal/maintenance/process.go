@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/operator/internal/maintenance/backends"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -39,8 +40,12 @@ func (q *Queue) processDeleteContent(ctx context.Context, key WorkItemKey) error
 		return nil
 	}
 
-	if err := removeArtifactRoot(q.config.BasePath, string(content.UID)); err != nil {
-		if errors.Is(err, errUnsafeArtifactRoot) {
+	backend, err := q.backend()
+	if err != nil {
+		return err
+	}
+	if err := backend.Delete(ctx, string(content.UID)); err != nil {
+		if errors.Is(err, backends.ErrUnsafeArtifact) {
 			q.recorder.Eventf(content, corev1.EventTypeWarning, ArtifactCleanupBlockedReason,
 				"Artifact cleanup is blocked by an unsafe artifact root; remove it manually after verification: %v", err)
 		}
@@ -55,9 +60,13 @@ func (q *Queue) processDeleteContent(ctx context.Context, key WorkItemKey) error
 // processSweep reschedules pending finalization and removes up to
 // config.BatchSize confirmed orphans.
 func (q *Queue) processSweep(ctx context.Context, logger logr.Logger) error {
-	// Enumerate directories before listing content so roots created after the
-	// metadata snapshot cannot be mistaken for orphans.
-	candidates, enumerationErr := enumerateSweepCandidates(q.config.BasePath, logger)
+	backend, err := q.backend()
+	if err != nil {
+		return err
+	}
+
+	// Enumerate before listing content so new artifacts aren't mistaken for orphans.
+	candidates, enumerationErr := backend.Candidates(ctx, logger)
 	scanResult, err := collectContentScanResult(ctx, q.apiReader, q.config.ListAttempts)
 	if err != nil {
 		return errors.Join(enumerationErr, err)
@@ -79,7 +88,7 @@ func (q *Queue) processSweep(ctx context.Context, logger logr.Logger) error {
 			break
 		}
 		processed++
-		if err := removeArtifactRoot(q.config.BasePath, uid); err != nil {
+		if err := backend.Delete(ctx, uid); err != nil {
 			sweepErrors = append(sweepErrors, err)
 			logger.Error(err, "Unable to reclaim orphan PodSnapshotContent artifact root", "content_uid", uid)
 			continue

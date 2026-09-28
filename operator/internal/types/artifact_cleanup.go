@@ -14,6 +14,7 @@ const (
 	DefaultArtifactBatchSize    = 10
 	DefaultArtifactListAttempts = 3
 	DefaultArtifactWorkers      = 5
+	DefaultArtifactBackendType  = "pvc"
 )
 
 // ArtifactCleanupConfig configures content finalizer cleanup and orphan scans.
@@ -23,6 +24,7 @@ type ArtifactCleanupConfig struct {
 	BatchSize    int
 	ListAttempts int
 	Workers      int
+	BackendType  string
 }
 
 func (c ArtifactCleanupConfig) Validate() error {
@@ -37,6 +39,9 @@ func (c ArtifactCleanupConfig) Validate() error {
 	}
 	if c.Workers <= 0 {
 		return fmt.Errorf("artifact cleanup worker count must be positive")
+	}
+	if c.BackendType == "" {
+		return fmt.Errorf("artifact cleanup backend type is required")
 	}
 	return nil
 }
