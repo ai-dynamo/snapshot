@@ -67,6 +67,14 @@ func ShapeCuInterposeCapture(
 		Name:         cuInterposeVolumeName,
 		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 	})
+	// The agent image defaults to root, but this copy only needs read access to
+	// its libraries and write access to the new emptyDir. Use a numeric nonroot
+	// identity so Pods with runAsNonRoot can start the installer too.
+	installerUID := int64(65532)
+	if security := shaped.Spec.SecurityContext; security != nil &&
+		security.RunAsUser != nil && *security.RunAsUser > 0 {
+		installerUID = *security.RunAsUser
+	}
 	shaped.Spec.InitContainers = append(shaped.Spec.InitContainers, corev1.Container{
 		Name:            cuInterposeInitContainerName,
 		Image:           delivery.AgentImage,
@@ -80,6 +88,8 @@ func ShapeCuInterposeCapture(
 		},
 		VolumeMounts: []corev1.VolumeMount{{Name: cuInterposeVolumeName, MountPath: CuInterposeMountPath}},
 		SecurityContext: &corev1.SecurityContext{
+			RunAsUser:                ptr.To(installerUID),
+			RunAsNonRoot:             ptr.To(true),
 			AllowPrivilegeEscalation: ptr.To(false),
 			ReadOnlyRootFilesystem:   ptr.To(true),
 			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
@@ -103,6 +113,16 @@ func setCuInterposePreload(container *corev1.Container) error {
 		index = i
 	}
 	if index == -1 {
+		for _, source := range container.EnvFrom {
+			// Source keys are nonempty. A prefix that cannot form LD_PRELOAD
+			// cannot conflict with the explicit variable installed below.
+			if len(source.Prefix) < len(ldPreloadEnv) && strings.HasPrefix(ldPreloadEnv, source.Prefix) {
+				return fmt.Errorf(
+					"container %q: define %s explicitly (empty is allowed) because envFrom may supply it",
+					container.Name, ldPreloadEnv,
+				)
+			}
+		}
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  ldPreloadEnv,
 			Value: CuInterposeLibraryPath,
