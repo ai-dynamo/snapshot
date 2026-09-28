@@ -34,6 +34,7 @@ jobs:
             **/go.sum
             go.work.sum
       - run: make test
+      - run: make test-integration
 
   build:
     runs-on: ubuntu-latest
