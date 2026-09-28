@@ -50,8 +50,8 @@ func NewQueue(kubeClient client.Client, apiReader client.Reader, recorder record
 
 // EnqueueDeleteContent schedules cleanup for one content. Repeated calls for
 // the same key coalesce while it is queued or being processed.
-func (q *Queue) EnqueueDeleteContent(namespace, name string, uid types.UID) {
-	q.queue.Add(newDeleteContentKey(namespace, name, uid))
+func (q *Queue) EnqueueDeleteContent(name string, uid types.UID) {
+	q.queue.Add(newDeleteContentKey(name, uid))
 }
 
 // EnqueueSweep schedules an orphan sweep; repeated calls coalesce.
@@ -121,12 +121,12 @@ func (q *Queue) processNextItem(ctx context.Context, logger logr.Logger) bool {
 			logger.Error(err, "Maintenance sweep failed; retrying at the next scan interval")
 		case q.queue.NumRequeues(key) < maxKeyRetries:
 			logger.Error(err, "Maintenance work item failed; requeuing with backoff",
-				"mode", key.Mode, "namespace", key.Namespace, "name", key.Name, "attempt", q.queue.NumRequeues(key)+1)
+				"mode", key.Mode, "name", key.Name, "attempt", q.queue.NumRequeues(key)+1)
 			q.queue.AddRateLimited(key)
 			return true
 		default:
 			logger.Error(err, "Maintenance work item exhausted retries; dropping",
-				"mode", key.Mode, "namespace", key.Namespace, "name", key.Name)
+				"mode", key.Mode, "name", key.Name)
 			return true
 		}
 	}

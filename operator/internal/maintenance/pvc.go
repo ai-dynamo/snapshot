@@ -141,7 +141,7 @@ func collectContentScanResultOnce(ctx context.Context, apiReader client.Reader) 
 			}
 			scanResult.ExistingUIDs[content.UID] = struct{}{}
 			if !content.DeletionTimestamp.IsZero() && controllerutil.ContainsFinalizer(content, PodSnapshotContentArtifactCleanupFinalizer) {
-				scanResult.PendingDeletes = append(scanResult.PendingDeletes, newDeleteContentKey(content.Namespace, content.Name, content.UID))
+				scanResult.PendingDeletes = append(scanResult.PendingDeletes, newDeleteContentKey(content.Name, content.UID))
 			}
 		}
 		if list.Continue == "" {

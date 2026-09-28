@@ -28,16 +28,16 @@ func snapshotContentTestScheme(t *testing.T) *runtime.Scheme {
 }
 
 type deleteContentCall struct {
-	namespace, name string
-	uid             types.UID
+	name string
+	uid  types.UID
 }
 
 type fakeEnqueuer struct {
 	calls []deleteContentCall
 }
 
-func (f *fakeEnqueuer) EnqueueDeleteContent(namespace, name string, uid types.UID) {
-	f.calls = append(f.calls, deleteContentCall{namespace: namespace, name: name, uid: uid})
+func (f *fakeEnqueuer) EnqueueDeleteContent(name string, uid types.UID) {
+	f.calls = append(f.calls, deleteContentCall{name: name, uid: uid})
 }
 
 func TestSnapshotContentReconcilerAddsFinalizer(t *testing.T) {
@@ -70,19 +70,19 @@ func TestSnapshotContentReconcilerNoopWhenFinalizerAlreadyPresent(t *testing.T) 
 func TestSnapshotContentReconcilerEnqueuesDeleteContentWhenFinalizerPresent(t *testing.T) {
 	now := metav1.Now()
 	content := &snapshotv1alpha1.PodSnapshotContent{ObjectMeta: metav1.ObjectMeta{
-		Name: "content", Namespace: "ns", UID: types.UID("uid-3"), ResourceVersion: "1", DeletionTimestamp: &now,
+		Name: "content", UID: types.UID("uid-3"), ResourceVersion: "1", DeletionTimestamp: &now,
 		Finalizers: []string{"example.com/other", maintenance.PodSnapshotContentArtifactCleanupFinalizer},
 	}}
 	kubeClient := ctrlfake.NewClientBuilder().WithScheme(snapshotContentTestScheme(t)).WithObjects(content).Build()
 	enqueuer := &fakeEnqueuer{}
-	_, err := reconcileSnapshotContent(context.Background(), kubeClient, enqueuer, ctrl.Request{NamespacedName: client.ObjectKey{Namespace: "ns", Name: content.Name}})
+	_, err := reconcileSnapshotContent(context.Background(), kubeClient, enqueuer, ctrl.Request{NamespacedName: client.ObjectKey{Name: content.Name}})
 	require.NoError(t, err)
 
 	require.Len(t, enqueuer.calls, 1)
-	assert.Equal(t, deleteContentCall{namespace: "ns", name: "content", uid: types.UID("uid-3")}, enqueuer.calls[0])
+	assert.Equal(t, deleteContentCall{name: "content", uid: types.UID("uid-3")}, enqueuer.calls[0])
 
 	current := &snapshotv1alpha1.PodSnapshotContent{}
-	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: content.Name}, current))
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKey{Name: content.Name}, current))
 	assert.Contains(t, current.Finalizers, maintenance.PodSnapshotContentArtifactCleanupFinalizer)
 }
 

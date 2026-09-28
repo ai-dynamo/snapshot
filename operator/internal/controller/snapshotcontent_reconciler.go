@@ -43,6 +43,6 @@ func reconcileSnapshotContent(ctx context.Context, kubeClient client.Client, que
 	if !controllerutil.ContainsFinalizer(content, maintenance.PodSnapshotContentArtifactCleanupFinalizer) {
 		return ctrl.Result{}, nil
 	}
-	queue.EnqueueDeleteContent(content.Namespace, content.Name, content.UID)
+	queue.EnqueueDeleteContent(content.Name, content.UID)
 	return ctrl.Result{}, nil
 }

@@ -23,9 +23,9 @@ import (
 func TestEnqueueDeleteContentCoalescesDuplicates(t *testing.T) {
 	q, _ := newTestQueue(t, t.TempDir())
 
-	q.EnqueueDeleteContent("ns", "content", "uid-1")
-	q.EnqueueDeleteContent("ns", "content", "uid-1")
-	q.EnqueueDeleteContent("ns", "content", "uid-1")
+	q.EnqueueDeleteContent("content", "uid-1")
+	q.EnqueueDeleteContent("content", "uid-1")
+	q.EnqueueDeleteContent("content", "uid-1")
 
 	assert.Equal(t, 1, q.queue.Len())
 }
@@ -69,8 +69,8 @@ func TestProcessNextItemSkipsItemsAfterCancellation(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	key := newDeleteContentKey("", content.Name, content.UID)
-	q.EnqueueDeleteContent(key.Namespace, key.Name, key.UID)
+	key := newDeleteContentKey(content.Name, content.UID)
+	q.EnqueueDeleteContent(key.Name, key.UID)
 
 	require.True(t, q.processNextItem(ctx, logr.Discard()))
 	assert.DirExists(t, root)
@@ -118,8 +118,8 @@ func TestSweepRecoversDeleteContentAfterRetryExhaustion(t *testing.T) {
 			q.queue.ShutDown()
 			q.queue = workqueue.NewTypedRateLimitingQueue[WorkItemKey](workqueue.NewTypedItemExponentialFailureRateLimiter[WorkItemKey](0, 0))
 			t.Cleanup(q.queue.ShutDown)
-			key := newDeleteContentKey("", content.Name, content.UID)
-			q.EnqueueDeleteContent(key.Namespace, key.Name, key.UID)
+			key := newDeleteContentKey(content.Name, content.UID)
+			q.EnqueueDeleteContent(key.Name, key.UID)
 			for attempt := 0; attempt <= maxKeyRetries; attempt++ {
 				require.Equal(t, 1, q.queue.Len())
 				require.Equal(t, attempt, q.queue.NumRequeues(key))
@@ -131,7 +131,7 @@ func TestSweepRecoversDeleteContentAfterRetryExhaustion(t *testing.T) {
 			require.Zero(t, q.queue.Len())
 			require.Equal(t, maxKeyRetries, q.queue.NumRequeues(key))
 
-			q.EnqueueDeleteContent(key.Namespace, key.Name, key.UID)
+			q.EnqueueDeleteContent(key.Name, key.UID)
 			require.True(t, q.processNextItem(ctx, logr.Discard()))
 			if failure == "storage failure" {
 				<-recorder.Events

@@ -24,25 +24,24 @@ const (
 // Enqueuer is the subset of Queue used to schedule work, so callers (and
 // their tests) don't depend on the workqueue implementation directly.
 type Enqueuer interface {
-	EnqueueDeleteContent(namespace, name string, uid types.UID)
+	EnqueueDeleteContent(name string, uid types.UID)
 }
 
 // WorkItemKey identifies one unit of maintenance work; it is comparable so
 // the workqueue deduplicates repeated enqueues.
 //
-// Namespace/Name/UID matter only for ModeDeleteContent: the worker re-reads
+// Name/UID matter only for ModeDeleteContent: the worker re-reads
 // the object and compares UID, so a content deleted and recreated under the
 // same name never matches a stale key. ModeSweep carries no identity, so
 // duplicate sweep triggers coalesce into one key.
 type WorkItemKey struct {
-	Mode      Mode
-	Namespace string
-	Name      string
-	UID       types.UID
+	Mode Mode
+	Name string
+	UID  types.UID
 }
 
-func newDeleteContentKey(namespace, name string, uid types.UID) WorkItemKey {
-	return WorkItemKey{Mode: ModeDeleteContent, Namespace: namespace, Name: name, UID: uid}
+func newDeleteContentKey(name string, uid types.UID) WorkItemKey {
+	return WorkItemKey{Mode: ModeDeleteContent, Name: name, UID: uid}
 }
 
 func newSweepKey() WorkItemKey {

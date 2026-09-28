@@ -62,7 +62,7 @@ func TestProcessDeleteContentRemovesRootAndFinalizer(t *testing.T) {
 	}}
 	q, _ := newTestQueue(t, base, content)
 
-	require.NoError(t, q.processDeleteContent(context.Background(), newDeleteContentKey("", "content", "uid-2")))
+	require.NoError(t, q.processDeleteContent(context.Background(), newDeleteContentKey("content", "uid-2")))
 	_, err := os.Lstat(root)
 	require.True(t, os.IsNotExist(err))
 
@@ -79,7 +79,7 @@ func TestProcessDeleteContentNoopWhenArtifactsRootAbsent(t *testing.T) {
 	}}
 	q, _ := newTestQueue(t, t.TempDir(), content)
 
-	require.NoError(t, q.processDeleteContent(context.Background(), newDeleteContentKey("", "content", "uid-absent")))
+	require.NoError(t, q.processDeleteContent(context.Background(), newDeleteContentKey("content", "uid-absent")))
 
 	current := &snapshotv1alpha1.PodSnapshotContent{}
 	err := q.client.Get(context.Background(), client.ObjectKey{Name: content.Name}, current)
@@ -99,7 +99,7 @@ func TestProcessDeleteContentRetainsFinalizerWhenRootIsUnsafe(t *testing.T) {
 	}}
 	q, recorder := newTestQueue(t, base, content)
 
-	err = q.processDeleteContent(context.Background(), newDeleteContentKey("", "content", "uid-3"))
+	err = q.processDeleteContent(context.Background(), newDeleteContentKey("content", "uid-3"))
 	require.ErrorContains(t, err, "must be a non-symlink directory")
 
 	current := &snapshotv1alpha1.PodSnapshotContent{}
@@ -123,7 +123,7 @@ func TestProcessDeleteContentRetainsFinalizerWhenArtifactsRootIsSymlink(t *testi
 	}}
 	q, recorder := newTestQueue(t, base, content)
 
-	err = q.processDeleteContent(context.Background(), newDeleteContentKey("", "content", "uid-4"))
+	err = q.processDeleteContent(context.Background(), newDeleteContentKey("content", "uid-4"))
 	require.ErrorContains(t, err, "must be a non-symlink directory")
 	_, err = os.Lstat(externalContentRoot)
 	require.NoError(t, err, "cleanup must not follow the artifacts symlink")
@@ -136,7 +136,7 @@ func TestProcessDeleteContentRetainsFinalizerWhenArtifactsRootIsSymlink(t *testi
 
 func TestProcessDeleteContentNoopWhenContentGone(t *testing.T) {
 	q, _ := newTestQueue(t, t.TempDir())
-	require.NoError(t, q.processDeleteContent(context.Background(), newDeleteContentKey("", "missing", "uid-5")))
+	require.NoError(t, q.processDeleteContent(context.Background(), newDeleteContentKey("missing", "uid-5")))
 }
 
 func TestProcessDeleteContentNoopWhenUIDMismatch(t *testing.T) {
@@ -147,7 +147,7 @@ func TestProcessDeleteContentNoopWhenUIDMismatch(t *testing.T) {
 	}}
 	q, _ := newTestQueue(t, t.TempDir(), content)
 
-	require.NoError(t, q.processDeleteContent(context.Background(), newDeleteContentKey("", "content", "stale-uid")))
+	require.NoError(t, q.processDeleteContent(context.Background(), newDeleteContentKey("content", "stale-uid")))
 
 	current := &snapshotv1alpha1.PodSnapshotContent{}
 	require.NoError(t, q.client.Get(context.Background(), client.ObjectKey{Name: content.Name}, current))
@@ -286,7 +286,7 @@ func TestProcessSweepEnqueuesOnlyPendingFinalizers(t *testing.T) {
 	key, shutdown := q.queue.Get()
 	require.False(t, shutdown)
 	defer q.queue.Done(key)
-	assert.Equal(t, newDeleteContentKey("", "pending", "pending-uid"), key)
+	assert.Equal(t, newDeleteContentKey("pending", "pending-uid"), key)
 	assert.Equal(t, 2, reader.calls)
 }
 
@@ -346,5 +346,5 @@ func TestProcessSweepEnqueuesPendingFinalizersWhenEnumerationFails(t *testing.T)
 	key, shutdown := q.queue.Get()
 	require.False(t, shutdown)
 	defer q.queue.Done(key)
-	assert.Equal(t, newDeleteContentKey("", "pending", "pending-uid"), key)
+	assert.Equal(t, newDeleteContentKey("pending", "pending-uid"), key)
 }

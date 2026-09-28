@@ -22,12 +22,12 @@ import (
 // UID is a completed no-op, not an error.
 func (q *Queue) processDeleteContent(ctx context.Context, key WorkItemKey) error {
 	content := &snapshotv1alpha1.PodSnapshotContent{}
-	err := q.client.Get(ctx, apitypes.NamespacedName{Namespace: key.Namespace, Name: key.Name}, content)
+	err := q.client.Get(ctx, apitypes.NamespacedName{Name: key.Name}, content)
 	if apierrors.IsNotFound(err) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("get PodSnapshotContent %s/%s: %w", key.Namespace, key.Name, err)
+		return fmt.Errorf("get PodSnapshotContent %s: %w", key.Name, err)
 	}
 	if content.UID != key.UID {
 		return nil
@@ -64,7 +64,7 @@ func (q *Queue) processSweep(ctx context.Context, logger logr.Logger) error {
 	}
 	// Retry pending finalizers even when artifacts are absent or enumeration failed.
 	for _, key := range scanResult.PendingDeletes {
-		q.EnqueueDeleteContent(key.Namespace, key.Name, key.UID)
+		q.EnqueueDeleteContent(key.Name, key.UID)
 	}
 	if enumerationErr != nil {
 		return enumerationErr
