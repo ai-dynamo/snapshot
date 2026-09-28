@@ -58,6 +58,26 @@ func TestStartRunsImmediateSweepAndShutsDownCleanly(t *testing.T) {
 	}
 }
 
+func TestProcessNextItemSkipsItemsAfterCancellation(t *testing.T) {
+	base, root := prepareTestArtifactRoot(t, "uid-1")
+	now := metav1.Now()
+	content := &snapshotv1alpha1.PodSnapshotContent{ObjectMeta: metav1.ObjectMeta{
+		Name: "content", UID: "uid-1", ResourceVersion: "1", DeletionTimestamp: &now,
+		Finalizers: []string{PodSnapshotContentArtifactCleanupFinalizer},
+	}}
+	q, _ := newTestQueue(t, base, content)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	key := newDeleteContentKey("", content.Name, content.UID)
+	q.EnqueueDeleteContent(key.Namespace, key.Name, key.UID)
+
+	require.True(t, q.processNextItem(ctx, logr.Discard()))
+	assert.DirExists(t, root)
+	assert.Zero(t, q.queue.Len())
+	assert.Zero(t, q.queue.NumRequeues(key))
+}
+
 func TestNewQueueDefaults(t *testing.T) {
 	q := NewQueue(nil, nil, nil, operatortypes.ArtifactCleanupConfig{BasePath: "/checkpoints"})
 	t.Cleanup(q.queue.ShutDown)

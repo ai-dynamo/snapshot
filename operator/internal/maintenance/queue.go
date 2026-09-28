@@ -110,6 +110,11 @@ func (q *Queue) processNextItem(ctx context.Context, logger logr.Logger) bool {
 	}
 	defer q.queue.Done(key)
 
+	if ctx.Err() != nil {
+		q.queue.Forget(key)
+		return true
+	}
+
 	if err := q.process(ctx, key, logger); err != nil {
 		switch {
 		case key.Mode == ModeSweep:
