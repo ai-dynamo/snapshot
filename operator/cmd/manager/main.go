@@ -26,7 +26,7 @@ func main() {
 
 	artifactCleanupConfig := bindArtifactCleanupFlags(flag.CommandLine)
 	cuInterposeConfig := bindCuInterposeFlags(flag.CommandLine)
-	flag.Parse()
+	storeID := mustConfigureStoreID()
 	if err := artifactCleanupConfig.Validate(); err != nil {
 		ctrl.Log.Error(err, "invalid artifact cleanup configuration")
 		os.Exit(1)
@@ -37,6 +37,9 @@ func main() {
 	}
 
 	ctrl.Log.Info("starting snapshot operator", "version", version)
+	if storeID != "" {
+		ctrl.Log.Info("configured PVC store", "storeID", storeID)
+	}
 
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {

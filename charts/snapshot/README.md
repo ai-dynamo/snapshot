@@ -223,6 +223,13 @@ does not reduce this allocation. Set the memory limit to cover the rings,
 process memory, and CPU staging. See the
 [engine design](../../docs/proposals/238-pagebroker-gpu-engine/README.md).
 
+The existing `storage.pvc` values and release namespace also produce the resolved
+`storage.yaml` configuration mounted into the operator and PageBroker. The agent
+retains its existing `config.yaml` without a PVC identity block. Store identity
+uses the claim-relative root `/`, not `storage.pvc.basePath`'s `/checkpoints` mount
+path. No new storage-selection values or storage-class CRD are introduced; see
+[storage configuration](../../docs/operations/storage.md#configuration).
+
 See [values.yaml](./values.yaml) for the full configuration surface.
 
 ## Uninstall

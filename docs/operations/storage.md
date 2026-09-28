@@ -23,6 +23,27 @@ The chart's `storage.pvc` values control the PVC:
 | `storage.pvc.storageClass` | Storage class (empty = cluster default)             | `""`           |
 | `storage.pvc.basePath`     | Mount path inside the agent                         | `/checkpoints` |
 
+The claim is always in the Helm release namespace. The chart resolves these
+values into `storage.yaml` in the existing configuration ConfigMap, mounted at
+`/etc/snapshot/storage.yaml` in PageBroker and the operator manager. The agent
+receives only its existing `config.yaml`; its configuration has no PVC identity
+block. Provisioning settings (`create`, `size`, `storageClass`) do not identify
+the artifact store.
+
+The PVC store ID hashes the backend, claim namespace/name and normalized path
+inside the claim. The current installation uses the entire claim, so that path
+is `/`, independent of the container-local `/checkpoints` mount. Neither a
+caller-supplied store ID nor an additional PVC namespace setting is required.
+`storage.pvc.basePath` retains its existing mount-path meaning.
+
+The operator validates this resolved identity at startup. Content storage
+bindings and publication descriptors are additive API groundwork: the current
+checkpoint/restore callers still use the existing filesystem flow, and the
+current PageBroker executable keeps its existing arguments. Artifact-addressed
+flow activation requires a compatible PageBroker build that consumes the
+resolved storage configuration; mounting the file does not enable that flow.
+S3 remains unsupported.
+
 If the cluster has no default storage class that can provision RWX, set one:
 
 ```bash
