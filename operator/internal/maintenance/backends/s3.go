@@ -4,13 +4,14 @@
 package backends
 
 import (
+	"bytes"
 	"context"
-	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"net/http"
 	"os"
+	"path"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -26,6 +27,8 @@ const (
 
 	// deleteObjectsBatchSize is DeleteObjects' per-request object limit.
 	deleteObjectsBatchSize = 1000
+
+	s3CredentialsRefreshInterval = 5 * time.Minute
 )
 
 // s3API is the subset of the S3 client S3Backend depends on.
@@ -64,18 +67,22 @@ type S3Backend struct {
 	artifactsPrefix string
 }
 
-// NewS3Backend constructs an S3Backend using a refreshable, shared-credentials-file provider.
+// NewS3Backend constructs an S3Backend whose credentials are re-read from
+// cfg.CredentialsPath every s3CredentialsRefreshInterval.
 func NewS3Backend(ctx context.Context, cfg S3Config) (*S3Backend, error) {
-	httpClient, err := s3HTTPClient(cfg.CABundlePath)
-	if err != nil {
-		return nil, fmt.Errorf("build S3 HTTP client: %w", err)
-	}
-	awsCfg, err := config.LoadDefaultConfig(ctx,
+	loadOptions := []func(*config.LoadOptions) error{
 		config.WithRegion(cfg.Region),
-		config.WithSharedCredentialsFiles([]string{cfg.CredentialsPath}),
-		config.WithSharedConfigFiles(nil),
-		config.WithHTTPClient(httpClient),
-	)
+		config.WithSharedConfigFiles([]string{}),
+		config.WithCredentialsProvider(aws.NewCredentialsCache(sharedCredentialsFileProvider(cfg.CredentialsPath))),
+	}
+	if cfg.CABundlePath != "" {
+		caBundle, err := readCABundle(cfg.CABundlePath)
+		if err != nil {
+			return nil, err
+		}
+		loadOptions = append(loadOptions, config.WithCustomCABundle(bytes.NewReader(caBundle)))
+	}
+	awsCfg, err := config.LoadDefaultConfig(ctx, loadOptions...)
 	if err != nil {
 		return nil, fmt.Errorf("load S3 client config: %w", err)
 	}
@@ -87,24 +94,43 @@ func NewS3Backend(ctx context.Context, cfg S3Config) (*S3Backend, error) {
 		}
 	})
 	b.bucket = cfg.Bucket
-	// "artifacts" mirrors PageBroker's key layout (see SNEP-237); do not change independently.
-	b.artifactsPrefix = strings.Trim(cfg.Prefix, "/") + "/artifacts/"
+	b.artifactsPrefix = s3ArtifactsPrefix(cfg.Prefix)
 	return b, nil
 }
 
-func s3HTTPClient(caBundlePath string) (*http.Client, error) {
-	if caBundlePath == "" {
-		return nil, nil
+// s3ArtifactsPrefix mirrors PageBroker's key layout (see SNEP-237); do not change independently.
+func s3ArtifactsPrefix(prefix string) string {
+	return path.Join(strings.Trim(prefix, "/"), "artifacts") + "/"
+}
+
+func sharedCredentialsFileProvider(credentialsPath string) aws.CredentialsProviderFunc {
+	return func(ctx context.Context) (aws.Credentials, error) {
+		shared, err := config.LoadSharedConfigProfile(ctx, config.DefaultSharedConfigProfile, func(o *config.LoadSharedConfigOptions) {
+			o.CredentialsFiles = []string{credentialsPath}
+			o.ConfigFiles = []string{}
+		})
+		if err != nil {
+			return aws.Credentials{}, fmt.Errorf("load S3 credentials from %q: %w", credentialsPath, err)
+		}
+		if !shared.Credentials.HasKeys() {
+			return aws.Credentials{}, fmt.Errorf("S3 credentials file %q has no access key", credentialsPath)
+		}
+		credentials := shared.Credentials
+		credentials.CanExpire = true
+		credentials.Expires = time.Now().Add(s3CredentialsRefreshInterval)
+		return credentials, nil
 	}
+}
+
+func readCABundle(caBundlePath string) ([]byte, error) {
 	pem, err := os.ReadFile(caBundlePath)
 	if err != nil {
 		return nil, fmt.Errorf("read CA bundle %q: %w", caBundlePath, err)
 	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(pem) {
+	if !x509.NewCertPool().AppendCertsFromPEM(pem) {
 		return nil, fmt.Errorf("CA bundle %q contains no usable certificates", caBundlePath)
 	}
-	return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}, nil
+	return pem, nil
 }
 
 func (b *S3Backend) Name() string {
