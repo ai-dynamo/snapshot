@@ -109,8 +109,9 @@ func TestRequestStopsWaitingForSocketWhenContextExpires(t *testing.T) {
 
 	start := time.Now()
 	err := (Client{ControlSocketPath: filepath.Join(t.TempDir(), "missing.sock")}).Abort(ctx, "transaction")
-	if !isTransportError(err) || !IsDialError(err) {
-		t.Fatalf("Abort() error = %v, want dial transport error", err)
+	// Caller's context expired, not just the local retry budget.
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Abort() error = %v, want context.DeadlineExceeded", err)
 	}
 	if elapsed := time.Since(start); elapsed < limit || elapsed > 5*time.Second {
 		t.Fatalf("Abort() returned after %v, want about %v", elapsed, limit)
