@@ -208,6 +208,13 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 Reserved `s3` and `oci` values remain chart-owned placeholders for future
 snapshot backends, but only `pvc` is implemented today.
 
+The existing `storage.pvc` values and release namespace also produce the resolved
+`storage.yaml` configuration mounted into the operator and PageBroker. The agent
+retains its existing `config.yaml` without a PVC identity block. Store identity
+uses the claim-relative root `/`, not `storage.pvc.basePath`'s `/checkpoints` mount
+path. No new storage-selection values or storage-class CRD are introduced; see
+[storage configuration](../../docs/operations/storage.md#configuration).
+
 See [values.yaml](./values.yaml) for the full configuration surface.
 
 ## Uninstall

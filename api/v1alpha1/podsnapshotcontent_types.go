@@ -31,6 +31,12 @@ type PodSnapshotContentSpec struct {
 	// Source describes what to capture: the source pod and the node it runs on.
 	// +kubebuilder:validation:Required
 	Source PodSnapshotContentSource `json:"source"`
+
+	// Storage binds this content to one configured store. Omitted on legacy
+	// content; the producer will start writing it with artifact-flow integration.
+	// Like the rest of spec it cannot be added, removed or changed after creation.
+	// +optional
+	Storage *CheckpointStorageBinding `json:"storage,omitempty"`
 }
 
 // PodSnapshotReference is a cross-namespace reference to a PodSnapshot.
@@ -76,11 +82,18 @@ type PodSnapshotContentStatus struct {
 	// capture goes Ready.
 	// +optional
 	Source *CheckpointSource `json:"source,omitempty"`
+
+	// Storage records confirmed per-container publications. Existing filesystem
+	// callers leave this absent; its presence does not replace Ready/Failed.
+	// +optional
+	Storage *CheckpointStorageStatus `json:"storage,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster,shortName=podsnapcontent
+// +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.storage) || has(self.spec.storage)",message="publication descriptors require a storage binding"
+// +kubebuilder:validation:XValidation:rule="!has(self.status) || !has(self.status.storage) || self.status.storage.artifacts.all(a, self.spec.source.podRef.containers.exists(c, c == a.containerName))",message="publication descriptors must name captured containers"
 // +kubebuilder:printcolumn:name="PodSnapshot",type="string",JSONPath=".spec.snapshotRef.name",description="Bound PodSnapshot"
 // +kubebuilder:printcolumn:name="Namespace",type="string",JSONPath=".spec.snapshotRef.namespace",description="PodSnapshot namespace"
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status",description="Ready condition"
