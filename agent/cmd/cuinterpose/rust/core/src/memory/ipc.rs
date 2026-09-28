@@ -16,7 +16,7 @@ pub struct MallocRegion {
     pub(crate) requested: usize,
     // The VA reservation survives independently of its current mapping.
     extent: usize,
-    context: usize,
+    pub(super) context: usize,
     opens: usize,
 }
 

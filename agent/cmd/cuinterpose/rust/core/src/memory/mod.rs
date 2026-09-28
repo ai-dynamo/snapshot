@@ -4,6 +4,7 @@
 //! Memblock identity, virtual-handle ownership, and tracked address ranges.
 
 pub(crate) mod checkpoint;
+pub(crate) mod context;
 pub(crate) mod ipc;
 pub(crate) mod sharing;
 pub(crate) mod vmm;

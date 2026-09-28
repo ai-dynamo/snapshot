@@ -14,6 +14,11 @@ use runtime::active;
 use std::ffi::c_void;
 use std::os::fd::IntoRawFd;
 
+pub use crate::memory::context::{
+    cuCtxDestroy, cuCtxDestroy_v2, cuDevicePrimaryCtxRelease, cuDevicePrimaryCtxRelease_v2,
+    cuDevicePrimaryCtxReset, cuDevicePrimaryCtxReset_v2,
+};
+
 pub fn cuMemCreate(
     out: *mut u64,
     size: usize,

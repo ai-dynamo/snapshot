@@ -39,8 +39,14 @@ enum {
     cudaDriverEntryPointSymbolNotFound = 1,
 };
 
-// Every wrapped memory entry point. The backend implements each one.
+// Wrapped memory and owning-context entry points. The backend implements each one.
 #define MEMORY_API(X) \
+    X(cuCtxDestroy, (CUcontext context), (context)) \
+    X(cuCtxDestroy_v2, (CUcontext context), (context)) \
+    X(cuDevicePrimaryCtxRelease, (CUdevice device), (device)) \
+    X(cuDevicePrimaryCtxRelease_v2, (CUdevice device), (device)) \
+    X(cuDevicePrimaryCtxReset, (CUdevice device), (device)) \
+    X(cuDevicePrimaryCtxReset_v2, (CUdevice device), (device)) \
     X(cuMemAlloc_v2, (CUdeviceptr *out, size_t size), (out, size)) \
     X(cuMemFree_v2, (CUdeviceptr address), (address)) \
     X(cuMemGetAddressRange_v2, (CUdeviceptr *base, size_t *size, CUdeviceptr address), (base, size, address)) \
@@ -330,6 +336,9 @@ API void *dlsym(void *handle, const char *name) {
 static const struct {
     const char *requested, *returned;
 } QUERY_ALIASES[] = {
+    {"cuCtxDestroy", "cuCtxDestroy_v2"},
+    {"cuDevicePrimaryCtxRelease", "cuDevicePrimaryCtxRelease_v2"},
+    {"cuDevicePrimaryCtxReset", "cuDevicePrimaryCtxReset_v2"},
     {"cuMemAlloc", "cuMemAlloc_v2"},
     {"cuMemFree", "cuMemFree_v2"},
     {"cuMemGetAddressRange", "cuMemGetAddressRange_v2"},

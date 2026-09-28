@@ -10,7 +10,7 @@ use cudarc::driver::sys::CUresult::{
     CUDA_ERROR_INVALID_HANDLE, CUDA_ERROR_NOT_INITIALIZED, CUDA_SUCCESS,
 };
 use cudarc::driver::sys::{
-    CUdevice, CUdeviceptr, CUmemAccessDesc, CUmemAllocationGranularity_flags,
+    CUcontext, CUdevice, CUdeviceptr, CUmemAccessDesc, CUmemAllocationGranularity_flags,
     CUmemAllocationHandleType, CUmemAllocationProp, CUmemGenericAllocationHandle,
     CUmulticastObjectProp, CUresult, CUstream_flags,
 };
@@ -116,13 +116,19 @@ macro_rules! functions {
 }
 
 functions! {
+    cuCtxDestroy(context: CUcontext);
+    cuCtxDestroy_v2(context: CUcontext);
     cuCtxSynchronize();
     cuMemFree_v2(address: CUdeviceptr);
     cuMemGetAddressRange_v2(base: *mut CUdeviceptr, size: *mut usize, address: CUdeviceptr);
     cuCtxGetCurrent(context: *mut *mut c_void);
     cuCtxGetDevice(device: *mut CUdevice);
     cuCtxSetCurrent(context: *mut c_void);
+    cuDevicePrimaryCtxRelease(device: CUdevice);
     cuDevicePrimaryCtxRelease_v2(device: CUdevice);
+    cuDevicePrimaryCtxReset(device: CUdevice);
+    cuDevicePrimaryCtxReset_v2(device: CUdevice);
+    cuDevicePrimaryCtxGetState(device: CUdevice, flags: *mut u32, active: *mut i32);
     cuDevicePrimaryCtxRetain(context: *mut *mut c_void, device: CUdevice);
     cuMemAddressFree(address: CUdeviceptr, size: usize);
     cuMemAddressReserve(address: *mut CUdeviceptr, size: usize, alignment: usize, requested: CUdeviceptr, flags: u64);
