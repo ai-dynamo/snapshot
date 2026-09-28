@@ -6,7 +6,7 @@ include $(REPO_HACK_DIR)/tools.mk
 
 .DEFAULT_GOAL := build
 
-.PHONY: build test tidy lint fmt
+.PHONY: build test test-integration tidy lint fmt
 
 build:
 	go build -o bin/manager ./cmd/manager
@@ -14,6 +14,13 @@ build:
 
 test:
 	go test ./...
+
+# Runs admission tests requiring a real apiserver (envtest kube-apiserver/etcd),
+# gated behind the integration tag so plain `go test ./...`/`make test` stays
+# fast and dependency-free.
+test-integration: $(SETUP_ENVTEST)
+	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
+	  go test -tags=integration ./...
 
 fmt:
 	gofmt -w .
