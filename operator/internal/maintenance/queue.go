@@ -111,14 +111,18 @@ func (q *Queue) processNextItem(ctx context.Context, logger logr.Logger) bool {
 	defer q.queue.Done(key)
 
 	if err := q.process(ctx, key, logger); err != nil {
-		if q.queue.NumRequeues(key) < maxKeyRetries {
+		switch {
+		case key.Mode == ModeSweep:
+			logger.Error(err, "Maintenance sweep failed; retrying at the next scan interval")
+		case q.queue.NumRequeues(key) < maxKeyRetries:
 			logger.Error(err, "Maintenance work item failed; requeuing with backoff",
 				"mode", key.Mode, "namespace", key.Namespace, "name", key.Name, "attempt", q.queue.NumRequeues(key)+1)
 			q.queue.AddRateLimited(key)
 			return true
+		default:
+			logger.Error(err, "Maintenance work item exhausted retries; dropping",
+				"mode", key.Mode, "namespace", key.Namespace, "name", key.Name)
 		}
-		logger.Error(err, "Maintenance work item exhausted retries; dropping",
-			"mode", key.Mode, "namespace", key.Namespace, "name", key.Name)
 	}
 	q.queue.Forget(key)
 	return true

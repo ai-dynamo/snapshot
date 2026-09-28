@@ -137,3 +137,18 @@ func TestSweepRecoversDeleteContentAfterRetryExhaustion(t *testing.T) {
 		})
 	}
 }
+
+func TestFailedSweepWaitsForNextTrigger(t *testing.T) {
+	q, _ := newTestQueue(t, t.TempDir())
+	reader := &metadataReader{list: func(*metav1.PartialObjectMetadataList, *client.ListOptions) error {
+		return apierrors.NewServiceUnavailable("temporary API read failure")
+	}}
+	q.apiReader = reader
+
+	q.EnqueueSweep()
+	require.True(t, q.processNextItem(context.Background(), logr.Discard()))
+
+	assert.Equal(t, q.config.ListAttempts, reader.calls)
+	assert.Zero(t, q.queue.Len())
+	assert.Zero(t, q.queue.NumRequeues(newSweepKey()))
+}
