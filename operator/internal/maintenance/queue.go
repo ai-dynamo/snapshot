@@ -66,11 +66,9 @@ func (q *Queue) Start(ctx context.Context) error {
 
 	var wg sync.WaitGroup
 	for i := 0; i < q.config.Workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			q.runWorker(ctx, logger)
-		}()
+		})
 	}
 
 	q.EnqueueSweep()
