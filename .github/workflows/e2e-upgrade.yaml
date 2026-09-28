@@ -1,0 +1,175 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: E2E Upgrade Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      upgrade_from:
+        description: >-
+          Version to upgrade from: a release tag (v0.1.0) or a main commit
+          hash. Leave empty for the latest release.
+        required: false
+        type: string
+      snapshot_tag:
+        description: >-
+          Version to upgrade to. Leave empty for the checked-out commit, whose
+          dev tag must already be published in GHCR.
+        required: false
+        type: string
+      upgrade_config:
+        description: How the upgrade is performed.
+        required: false
+        type: choice
+        default: full
+        options:
+          - full
+      upgrade_profile:
+        description: Scenario set to run.
+        required: false
+        type: choice
+        default: basic
+        options:
+          - basic
+          - all
+      upgrade_scenarios:
+        description: >-
+          Comma-separated scenario names to run instead of the profile. Leave
+          empty to use the profile.
+        required: false
+        type: string
+
+concurrency:
+  group: snapshot-e2e-upgrade-${{ github.run_id }}-${{ github.run_attempt }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  upgrade:
+    name: Upgrade Snapshot in vCluster
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 110
+    env:
+      HOST_NAMESPACE: snapshot-e2e-upgrade-${{ github.run_id }}-${{ github.run_attempt }}
+      VCLUSTER_NAME: snapshot-e2e-upgrade-${{ github.run_id }}-${{ github.run_attempt }}
+      TEST_NAMESPACE: snapshot-e2e
+      SNAPSHOT_E2E_HOST_NAMESPACE: snapshot-e2e-upgrade-${{ github.run_id }}-${{ github.run_attempt }}
+      SNAPSHOT_E2E_VCLUSTER_NAME: snapshot-e2e-upgrade-${{ github.run_id }}-${{ github.run_attempt }}
+      SNAPSHOT_E2E_TEST_NAMESPACE: snapshot-e2e
+      SNAPSHOT_E2E_TARGET_KUBECONFIG: ${{ github.workspace }}/.kubeconfig-snapshot-e2e
+      SNAPSHOT_E2E_SNAPSHOT_RELEASE: snapshot
+      SNAPSHOT_E2E_PVC_NAME: snapshot-pvc
+      SNAPSHOT_E2E_PVC_SIZE: 2Gi
+      SNAPSHOT_E2E_STORAGE_CLASS: azurefile-csi
+      SNAPSHOT_E2E_MODE: vcluster
+      SNAPSHOT_E2E_AVOID_MIG: "true"
+      SNAPSHOT_E2E_VCLUSTER_K8S_VERSION: v1.32.13
+      SNAPSHOT_E2E_VCLUSTER_LOCAL_PORT: "8443"
+      SNAPSHOT_E2E_HELM_TIMEOUT: 6m
+      SNAPSHOT_E2E_READY_TIMEOUT_SECONDS: "480"
+      SNAPSHOT_E2E_RESULT_FILE: ${{ github.workspace }}/.snapshot-e2e-setup-result.json
+      SNAPSHOT_E2E_UPGRADE_CONFIG: ${{ inputs.upgrade_config }}
+      SNAPSHOT_E2E_UPGRADE_PROFILE: ${{ inputs.upgrade_profile }}
+      SNAPSHOT_E2E_UPGRADE_SCENARIOS: ${{ inputs.upgrade_scenarios }}
+      PYTHONUNBUFFERED: "1"
+      UV_LINK_MODE: copy
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Resolve version to upgrade to
+        if: ${{ (inputs.snapshot_tag || '') == '' }}
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 hack/resolve-snapshot-image-tag.py
+
+      - name: Use provided version to upgrade to
+        if: ${{ (inputs.snapshot_tag || '') != '' }}
+        timeout-minutes: 1
+        env:
+          SNAPSHOT_TAG: ${{ inputs.snapshot_tag }}
+        run: |
+          set -euo pipefail
+          echo "SNAPSHOT_E2E_SNAPSHOT_TAG=${SNAPSHOT_TAG}" >> "$GITHUB_ENV"
+          echo "Using provided Snapshot image tag: ${SNAPSHOT_TAG}"
+
+      - name: Resolve version to upgrade from
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPGRADE_FROM: ${{ inputs.upgrade_from }}
+        run: |
+          set -euo pipefail
+          resolved="$(python3 hack/resolve-snapshot-image-tag.py --from "${UPGRADE_FROM}")"
+          python3 - "${resolved}" <<'PY'
+          import json
+          import os
+          import sys
+
+          versions = json.loads(sys.argv[1])
+          if len(versions) != 1:
+              sys.exit(f"this job upgrades from one version, got {[v['tag'] for v in versions]}")
+          version = versions[0]
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write(f"SNAPSHOT_E2E_UPGRADE_FROM_TAG={version['tag']}\n")
+              env.write(f"UPGRADE_FROM_CHART_VERSION={version['chart_version']}\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write(
+                  f"Upgrade `{version['tag']}` → `{os.environ['SNAPSHOT_E2E_SNAPSHOT_TAG']}` "
+                  f"(config `{os.environ['SNAPSHOT_E2E_UPGRADE_CONFIG']}`, "
+                  f"profile `{os.environ['SNAPSHOT_E2E_UPGRADE_PROFILE']}`)\n\n"
+              )
+          PY
+
+      - name: Capture host kubeconfig
+        id: host
+        run: |
+          echo "kubeconfig=${KUBECONFIG:-}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create vCluster target
+        timeout-minutes: 30
+        uses: ./.github/actions/e2e-vcluster-up
+
+      - name: Install the version to upgrade from
+        timeout-minutes: 8
+        env:
+          SNAPSHOT_E2E_CHART_REF: oci://ghcr.io/ai-dynamo/snapshot/snapshot
+        run: |
+          set -euo pipefail
+          SNAPSHOT_E2E_SNAPSHOT_TAG="${SNAPSHOT_E2E_UPGRADE_FROM_TAG}" \
+          SNAPSHOT_E2E_CHART_VERSION="${UPGRADE_FROM_CHART_VERSION}" \
+            uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
+              --phase snapshot-install
+
+      - name: Wait for Snapshot components
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e python -m snapshot_e2e.infra.setup \
+            --phase snapshot-ready
+
+      - name: Export vCluster target
+        timeout-minutes: 6
+        uses: ./.github/actions/e2e-vcluster-export
+
+      - name: Run upgrade tests
+        timeout-minutes: 45
+        run: |
+          set -euo pipefail
+          uv run --locked --project e2e pytest e2e/tests/test_upgrade.py -m upgrade -vv -s --durations=0
+
+      - name: Cleanup e2e vCluster
+        if: ${{ always() }}
+        uses: ./.github/actions/e2e-vcluster-down
+        with:
+          host_kubeconfig: ${{ steps.host.outputs.kubeconfig }}
