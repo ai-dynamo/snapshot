@@ -66,7 +66,12 @@ def test_basic_profile_selects_basic_scenarios(env: pytest.MonkeyPatch) -> None:
 def test_all_profile_includes_every_scenario(env: pytest.MonkeyPatch) -> None:
     env.setenv("SNAPSHOT_E2E_UPGRADE_PROFILE", "all")
 
-    assert scenarios.selected(UpgradeSettings.from_env()) == list(scenarios.SCENARIOS)
+    assert [scenario.name for scenario in scenarios.selected(UpgradeSettings.from_env())] == [
+        "restore-pre-upgrade-snapshot-gpu",
+        "delete-pre-upgrade-snapshot",
+        "restore-pre-upgrade-snapshot-cpu",
+        "restored-pod-survives-upgrade",
+    ]
 
 
 def test_explicit_scenarios_override_the_profile(env: pytest.MonkeyPatch) -> None:
@@ -80,6 +85,16 @@ def test_unknown_scenario_is_rejected(env: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(ValueError, match="unknown upgrade scenario"):
         scenarios.selected(UpgradeSettings.from_env())
+
+
+def test_only_one_scenario_holds_a_gpu_at_a_time() -> None:
+    gpu = [scenario.name for scenario in scenarios.SCENARIOS if getattr(scenario, "gpu", False)]
+
+    assert gpu == ["restore-pre-upgrade-snapshot-gpu"], (
+        "a new GPU scenario must not hold a GPU pod across the upgrade while another scenario "
+        "needs its node's GPU afterwards (restores are pinned to the checkpoint node); "
+        "check that, then update this list"
+    )
 
 
 def test_scenario_names_and_run_prefixes_are_unique() -> None:
