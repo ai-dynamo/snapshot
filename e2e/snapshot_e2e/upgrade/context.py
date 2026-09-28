@@ -82,6 +82,7 @@ class ScenarioState:
     node: str = ""
     observations: int = 0
     snapshot: RecordedSnapshot | None = None
+    restored_pod_uid: str = ""
     pre_upgrade_error: BaseException | None = None
 
 
