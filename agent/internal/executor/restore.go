@@ -124,13 +124,6 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	transactionID := ""
 	broker := pagebroker.Client{ControlSocketPath: req.PageBrokerControlSocketPath}
 	committed := false
-	defer func() {
-		if transactionID != "" && !committed {
-			abortCtx, cancel := context.WithTimeout(context.Background(), pageBrokerAbortTimeout)
-			defer cancel()
-			_ = broker.Abort(abortCtx, transactionID)
-		}
-	}()
 
 	var cleanupErr error
 	var activeMounts []restoreMount
@@ -140,6 +133,13 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	}
 	defer func() {
 		cleanup()
+		if transactionID != "" && !committed {
+			abortCtx, cancel := context.WithTimeout(context.Background(), pageBrokerAbortTimeout)
+			defer cancel()
+			if err := broker.Abort(abortCtx, transactionID); err != nil {
+				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("abort PageBroker restore %q: %w", transactionID, err))
+			}
+		}
 		if cleanupErr == nil {
 			return
 		}
@@ -216,6 +216,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	commitStart := time.Now()
 	if err := broker.Commit(ctx, transactionID); err != nil {
 		log.Error(err, "failed to commit PageBroker restore")
+		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("commit PageBroker restore %q: %w", transactionID, err))
 	} else {
 		committed = true
 	}
