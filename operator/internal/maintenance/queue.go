@@ -64,13 +64,8 @@ func (q *Queue) EnqueueSweep() {
 func (q *Queue) Start(ctx context.Context) error {
 	logger := log.FromContext(ctx).WithName("podsnapshotcontent-maintenance")
 
-	workers := q.config.Workers
-	if workers <= 0 {
-		workers = 1
-	}
-
 	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
+	for i := 0; i < q.config.Workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
