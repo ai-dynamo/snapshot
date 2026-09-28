@@ -16,7 +16,7 @@ use cudarc::driver::sys::CUresult::{
     CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_NOT_INITIALIZED, CUDA_ERROR_UNKNOWN, CUDA_SUCCESS,
 };
 use cudarc::driver::sys::{
-    CUdevice, CUdeviceptr, CUipcMemHandle, CUmemAccessDesc, CUmemAllocationHandleType,
+    CUcontext, CUdevice, CUdeviceptr, CUipcMemHandle, CUmemAccessDesc, CUmemAllocationHandleType,
     CUmemAllocationProp, CUmemGenericAllocationHandle, CUmulticastObjectProp, CUresult,
 };
 use cuinterpose_abi::*;
@@ -52,6 +52,12 @@ macro_rules! exports {
 }
 // Initializing BackendAbi checks these adapters against the canonical signatures.
 exports! {
+    cuCtxDestroy(context: CUcontext);
+    cuCtxDestroy_v2(context: CUcontext);
+    cuDevicePrimaryCtxRelease(device: CUdevice);
+    cuDevicePrimaryCtxRelease_v2(device: CUdevice);
+    cuDevicePrimaryCtxReset(device: CUdevice);
+    cuDevicePrimaryCtxReset_v2(device: CUdevice);
     cuMemAlloc_v2(out: *mut CUdeviceptr, size: usize);
     cuMemFree_v2(address: CUdeviceptr);
     cuMemGetAddressRange_v2(base: *mut CUdeviceptr, size: *mut usize, address: CUdeviceptr);

@@ -8,7 +8,7 @@ use std::ffi::{c_char, c_ulonglong, c_void};
 
 use cudarc::driver::sys as cuda;
 
-pub const ABI_VERSION: u32 = 3;
+pub const ABI_VERSION: u32 = 4;
 
 /// ABI table provided by the Rust backend and consumed by the C frontend.
 /// cbindgen emits the corresponding C declaration.
@@ -27,6 +27,12 @@ pub struct BackendAbi {
     pub size: u32,
     /// Starts runtime services only after the real cuInit succeeds.
     pub ensure_cuinterpose_initialized: unsafe extern "C" fn() -> cuda::CUresult,
+    pub cuCtxDestroy: unsafe extern "C" fn(cuda::CUcontext) -> cuda::CUresult,
+    pub cuCtxDestroy_v2: unsafe extern "C" fn(cuda::CUcontext) -> cuda::CUresult,
+    pub cuDevicePrimaryCtxRelease: unsafe extern "C" fn(cuda::CUdevice) -> cuda::CUresult,
+    pub cuDevicePrimaryCtxRelease_v2: unsafe extern "C" fn(cuda::CUdevice) -> cuda::CUresult,
+    pub cuDevicePrimaryCtxReset: unsafe extern "C" fn(cuda::CUdevice) -> cuda::CUresult,
+    pub cuDevicePrimaryCtxReset_v2: unsafe extern "C" fn(cuda::CUdevice) -> cuda::CUresult,
     pub cuMemAlloc_v2: unsafe extern "C" fn(*mut cuda::CUdeviceptr, usize) -> cuda::CUresult,
     pub cuMemFree_v2: unsafe extern "C" fn(cuda::CUdeviceptr) -> cuda::CUresult,
     pub cuMemGetAddressRange_v2: unsafe extern "C" fn(

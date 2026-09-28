@@ -5,6 +5,12 @@
 
 {
     global:
+        cuCtxDestroy;
+        cuCtxDestroy_v2;
+        cuDevicePrimaryCtxRelease;
+        cuDevicePrimaryCtxRelease_v2;
+        cuDevicePrimaryCtxReset;
+        cuDevicePrimaryCtxReset_v2;
         cuMemAlloc_v2;
         cuMemFree_v2;
         cuMemGetAddressRange_v2;
