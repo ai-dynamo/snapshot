@@ -132,6 +132,21 @@ spec:
                 - nodeName
                 - podRef
                 type: object
+              storage:
+                description: |-
+                  Storage binds this content to one configured store. Omitted on legacy
+                  content; the producer will start writing it with artifact-flow integration.
+                  Like the rest of spec it cannot be added, removed or changed after creation.
+                properties:
+                  storeID:
+                    description: StoreID is the versioned canonical storage identity
+                      shared with PageBroker.
+                    maxLength: 73
+                    pattern: ^store-v1-[0-9a-f]{64}$
+                    type: string
+                required:
+                - storeID
+                type: object
             required:
             - snapshotRef
             - source
@@ -275,10 +290,67 @@ spec:
                         type: string
                     type: object
                 type: object
+              storage:
+                description: |-
+                  Storage records confirmed per-container publications. Existing filesystem
+                  callers leave this absent; its presence does not replace Ready/Failed.
+                properties:
+                  artifacts:
+                    description: |-
+                      Artifacts contains one descriptor per confirmed container. It can be
+                      partial during capture/recovery; Ready still requires all captures to finish.
+                    items:
+                      description: |-
+                        PublishedContainerArtifact is the persisted part of PageBroker's
+                        PublishedArtifact, associated with a captured container. Readers pass the
+                        handle and version back unchanged; they must not construct filesystem paths.
+                      properties:
+                        artifactFormatVersion:
+                          description: |-
+                            ArtifactFormatVersion selects the reader together with the store backend.
+                            Unknown nonempty versions remain recordable; readers report unsupported ones.
+                          maxLength: 128
+                          minLength: 1
+                          pattern: \S
+                          type: string
+                        artifactHandle:
+                          description: ArtifactHandle is an opaque locator within
+                            the bound store.
+                          maxLength: 4096
+                          minLength: 1
+                          pattern: \S
+                          type: string
+                        containerName:
+                          description: ContainerName selects the captured container
+                            within the content.
+                          maxLength: 63
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                      required:
+                      - artifactFormatVersion
+                      - artifactHandle
+                      - containerName
+                      type: object
+                    maxItems: 128
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - containerName
+                    x-kubernetes-list-type: map
+                required:
+                - artifacts
+                type: object
             type: object
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: publication descriptors require a storage binding
+          rule: '!has(self.status) || !has(self.status.storage) || has(self.spec.storage)'
+        - message: publication descriptors must name captured containers
+          rule: '!has(self.status) || !has(self.status.storage) || self.status.storage.artifacts.all(a,
+            self.spec.source.podRef.containers.exists(c, c == a.containerName))'
     served: true
     storage: true
     subresources:
