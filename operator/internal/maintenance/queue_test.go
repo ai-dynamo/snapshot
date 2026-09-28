@@ -43,11 +43,25 @@ func TestStartRunsImmediateSweepAndShutsDownCleanly(t *testing.T) {
 	q, _ := newTestQueue(t, t.TempDir())
 	q.config.Workers = 2
 	q.config.ScanInterval = time.Hour
+	swept := make(chan struct{}, 1)
+	q.apiReader = &metadataReader{list: func(list *metav1.PartialObjectMetadataList, _ *client.ListOptions) error {
+		emptyMetadataPage(list, "1", "")
+		select {
+		case swept <- struct{}{}:
+		default:
+		}
+		return nil
+	}}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- q.Start(ctx) }()
 
+	select {
+	case <-swept:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start did not run the initial sweep")
+	}
 	cancel()
 
 	select {
