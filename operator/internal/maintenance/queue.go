@@ -127,6 +127,7 @@ func (q *Queue) processNextItem(ctx context.Context, logger logr.Logger) bool {
 		default:
 			logger.Error(err, "Maintenance work item exhausted retries; dropping",
 				"mode", key.Mode, "namespace", key.Namespace, "name", key.Name)
+			return true
 		}
 	}
 	q.queue.Forget(key)

@@ -129,7 +129,15 @@ func TestSweepRecoversDeleteContentAfterRetryExhaustion(t *testing.T) {
 				}
 			}
 			require.Zero(t, q.queue.Len())
-			require.Zero(t, q.queue.NumRequeues(key))
+			require.Equal(t, maxKeyRetries, q.queue.NumRequeues(key))
+
+			q.EnqueueDeleteContent(key.Namespace, key.Name, key.UID)
+			require.True(t, q.processNextItem(ctx, logr.Discard()))
+			if failure == "storage failure" {
+				<-recorder.Events
+			}
+			require.Zero(t, q.queue.Len(), "an exhausted item must get one attempt per re-add")
+			require.Equal(t, maxKeyRetries, q.queue.NumRequeues(key))
 			current := &snapshotv1alpha1.PodSnapshotContent{}
 			require.NoError(t, q.client.Get(ctx, client.ObjectKey{Name: content.Name}, current))
 			require.Contains(t, current.Finalizers, PodSnapshotContentArtifactCleanupFinalizer)
@@ -151,6 +159,7 @@ func TestSweepRecoversDeleteContentAfterRetryExhaustion(t *testing.T) {
 			require.Equal(t, 1, q.queue.Len(), "sweep must rediscover the dropped deletion")
 			require.True(t, q.processNextItem(ctx, logr.Discard()))
 			require.Zero(t, q.queue.Len())
+			require.Zero(t, q.queue.NumRequeues(key), "success must reset the retry count")
 			require.NoDirExists(t, root)
 			err := q.client.Get(ctx, client.ObjectKey{Name: content.Name}, current)
 			require.True(t, apierrors.IsNotFound(err), "finalizer removal must finish deletion: %v", err)
