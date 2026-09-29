@@ -272,6 +272,7 @@ type IOEngine struct {
 	// Types that are valid to be assigned to Kind:
 	//
 	//	*IOEngine_PosixCopy
+	//	*IOEngine_ModelStreamer
 	Kind          isIOEngine_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -323,6 +324,15 @@ func (x *IOEngine) GetPosixCopy() *PosixCopyIOEngine {
 	return nil
 }
 
+func (x *IOEngine) GetModelStreamer() *ModelStreamerIOEngine {
+	if x != nil {
+		if x, ok := x.Kind.(*IOEngine_ModelStreamer); ok {
+			return x.ModelStreamer
+		}
+	}
+	return nil
+}
+
 type isIOEngine_Kind interface {
 	isIOEngine_Kind()
 }
@@ -331,7 +341,13 @@ type IOEngine_PosixCopy struct {
 	PosixCopy *PosixCopyIOEngine `protobuf:"bytes,1,opt,name=posix_copy,json=posixCopy,proto3,oneof"`
 }
 
+type IOEngine_ModelStreamer struct {
+	ModelStreamer *ModelStreamerIOEngine `protobuf:"bytes,2,opt,name=model_streamer,json=modelStreamer,proto3,oneof"`
+}
+
 func (*IOEngine_PosixCopy) isIOEngine_Kind() {}
+
+func (*IOEngine_ModelStreamer) isIOEngine_Kind() {}
 
 // Logical identity before publication. Neither field is a filesystem path.
 type ArtifactIdentity struct {
@@ -1452,6 +1468,42 @@ func (*Response_DirectRestoreReady) isResponse_Result() {}
 
 func (*Response_GetArtifactMetadataComplete) isResponse_Result() {}
 
+type ModelStreamerIOEngine struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ModelStreamerIOEngine) Reset() {
+	*x = ModelStreamerIOEngine{}
+	mi := &file_v1_pagebroker_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ModelStreamerIOEngine) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ModelStreamerIOEngine) ProtoMessage() {}
+
+func (x *ModelStreamerIOEngine) ProtoReflect() protoreflect.Message {
+	mi := &file_v1_pagebroker_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ModelStreamerIOEngine.ProtoReflect.Descriptor instead.
+func (*ModelStreamerIOEngine) Descriptor() ([]byte, []int) {
+	return file_v1_pagebroker_proto_rawDescGZIP(), []int{22}
+}
+
 var File_v1_pagebroker_proto protoreflect.FileDescriptor
 
 const file_v1_pagebroker_proto_rawDesc = "" +
@@ -1466,10 +1518,11 @@ const file_v1_pagebroker_proto_rawDesc = "" +
 	"filesystem\x18\x01 \x01(\v2).snapshot.pagebroker.v1.FilesystemStorageH\x00R\n" +
 	"filesystemB\x06\n" +
 	"\x04kind\"\x13\n" +
-	"\x11PosixCopyIOEngine\"^\n" +
+	"\x11PosixCopyIOEngine\"\xb6\x01\n" +
 	"\bIOEngine\x12J\n" +
 	"\n" +
-	"posix_copy\x18\x01 \x01(\v2).snapshot.pagebroker.v1.PosixCopyIOEngineH\x00R\tposixCopyB\x06\n" +
+	"posix_copy\x18\x01 \x01(\v2).snapshot.pagebroker.v1.PosixCopyIOEngineH\x00R\tposixCopy\x12V\n" +
+	"\x0emodel_streamer\x18\x02 \x01(\v2-.snapshot.pagebroker.v1.ModelStreamerIOEngineH\x00R\rmodelStreamerB\x06\n" +
 	"\x04kind\"\\\n" +
 	"\x10ArtifactIdentity\x12!\n" +
 	"\fartifact_uid\x18\x01 \x01(\tR\vartifactUid\x12%\n" +
@@ -1556,7 +1609,8 @@ const file_v1_pagebroker_proto_rawDesc = "" +
 	"\x1eget_artifact_metadata_complete\x18\x14 \x01(\v23.snapshot.pagebroker.v1.GetArtifactMetadataCompleteH\x00R\x1bgetArtifactMetadataCompleteB\b\n" +
 	"\x06resultB\r\n" +
 	"\v_request_idB\x11\n" +
-	"\x0f_transaction_idB9Z7github.com/ai-dynamo/snapshot/agent/internal/pagebrokerb\x06proto3"
+	"\x0f_transaction_id\"\x17\n" +
+	"\x15ModelStreamerIOEngineB9Z7github.com/ai-dynamo/snapshot/agent/internal/pagebrokerb\x06proto3"
 
 var (
 	file_v1_pagebroker_proto_rawDescOnce sync.Once
@@ -1571,7 +1625,7 @@ func file_v1_pagebroker_proto_rawDescGZIP() []byte {
 }
 
 var file_v1_pagebroker_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_v1_pagebroker_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_v1_pagebroker_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_v1_pagebroker_proto_goTypes = []any{
 	(Failure_Code)(0),                      // 0: snapshot.pagebroker.v1.Failure.Code
 	(*FilesystemStorage)(nil),              // 1: snapshot.pagebroker.v1.FilesystemStorage
@@ -1596,40 +1650,42 @@ var file_v1_pagebroker_proto_goTypes = []any{
 	(*AbortComplete)(nil),                  // 20: snapshot.pagebroker.v1.AbortComplete
 	(*Failure)(nil),                        // 21: snapshot.pagebroker.v1.Failure
 	(*Response)(nil),                       // 22: snapshot.pagebroker.v1.Response
+	(*ModelStreamerIOEngine)(nil),          // 23: snapshot.pagebroker.v1.ModelStreamerIOEngine
 }
 var file_v1_pagebroker_proto_depIdxs = []int32{
 	1,  // 0: snapshot.pagebroker.v1.StorageBackend.filesystem:type_name -> snapshot.pagebroker.v1.FilesystemStorage
 	3,  // 1: snapshot.pagebroker.v1.IOEngine.posix_copy:type_name -> snapshot.pagebroker.v1.PosixCopyIOEngine
-	5,  // 2: snapshot.pagebroker.v1.ArtifactTarget.artifact:type_name -> snapshot.pagebroker.v1.ArtifactIdentity
-	2,  // 3: snapshot.pagebroker.v1.StagedRestoreRequest.source:type_name -> snapshot.pagebroker.v1.StorageBackend
-	4,  // 4: snapshot.pagebroker.v1.StagedRestoreRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
-	7,  // 5: snapshot.pagebroker.v1.StagedRestoreRequest.artifact:type_name -> snapshot.pagebroker.v1.PublishedArtifact
-	2,  // 6: snapshot.pagebroker.v1.DirectRestoreRequest.source:type_name -> snapshot.pagebroker.v1.StorageBackend
-	4,  // 7: snapshot.pagebroker.v1.DirectRestoreRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
-	2,  // 8: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.destination:type_name -> snapshot.pagebroker.v1.StorageBackend
-	4,  // 9: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
-	6,  // 10: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.target:type_name -> snapshot.pagebroker.v1.ArtifactTarget
-	7,  // 11: snapshot.pagebroker.v1.GetArtifactMetadataRequest.artifact:type_name -> snapshot.pagebroker.v1.PublishedArtifact
-	8,  // 12: snapshot.pagebroker.v1.Request.staged_restore:type_name -> snapshot.pagebroker.v1.StagedRestoreRequest
-	10, // 13: snapshot.pagebroker.v1.Request.prepare_staged_checkpoint:type_name -> snapshot.pagebroker.v1.PrepareStagedCheckpointRequest
-	12, // 14: snapshot.pagebroker.v1.Request.commit:type_name -> snapshot.pagebroker.v1.CommitRequest
-	13, // 15: snapshot.pagebroker.v1.Request.abort:type_name -> snapshot.pagebroker.v1.AbortRequest
-	9,  // 16: snapshot.pagebroker.v1.Request.direct_restore:type_name -> snapshot.pagebroker.v1.DirectRestoreRequest
-	11, // 17: snapshot.pagebroker.v1.Request.get_artifact_metadata:type_name -> snapshot.pagebroker.v1.GetArtifactMetadataRequest
-	7,  // 18: snapshot.pagebroker.v1.CommitComplete.published_artifact:type_name -> snapshot.pagebroker.v1.PublishedArtifact
-	0,  // 19: snapshot.pagebroker.v1.Failure.code:type_name -> snapshot.pagebroker.v1.Failure.Code
-	15, // 20: snapshot.pagebroker.v1.Response.staged_restore_directory:type_name -> snapshot.pagebroker.v1.StagedRestoreDirectory
-	17, // 21: snapshot.pagebroker.v1.Response.staged_checkpoint_directory:type_name -> snapshot.pagebroker.v1.StagedCheckpointDirectory
-	18, // 22: snapshot.pagebroker.v1.Response.commit_complete:type_name -> snapshot.pagebroker.v1.CommitComplete
-	20, // 23: snapshot.pagebroker.v1.Response.abort_complete:type_name -> snapshot.pagebroker.v1.AbortComplete
-	21, // 24: snapshot.pagebroker.v1.Response.failure:type_name -> snapshot.pagebroker.v1.Failure
-	16, // 25: snapshot.pagebroker.v1.Response.direct_restore_ready:type_name -> snapshot.pagebroker.v1.DirectRestoreReady
-	19, // 26: snapshot.pagebroker.v1.Response.get_artifact_metadata_complete:type_name -> snapshot.pagebroker.v1.GetArtifactMetadataComplete
-	27, // [27:27] is the sub-list for method output_type
-	27, // [27:27] is the sub-list for method input_type
-	27, // [27:27] is the sub-list for extension type_name
-	27, // [27:27] is the sub-list for extension extendee
-	0,  // [0:27] is the sub-list for field type_name
+	23, // 2: snapshot.pagebroker.v1.IOEngine.model_streamer:type_name -> snapshot.pagebroker.v1.ModelStreamerIOEngine
+	5,  // 3: snapshot.pagebroker.v1.ArtifactTarget.artifact:type_name -> snapshot.pagebroker.v1.ArtifactIdentity
+	2,  // 4: snapshot.pagebroker.v1.StagedRestoreRequest.source:type_name -> snapshot.pagebroker.v1.StorageBackend
+	4,  // 5: snapshot.pagebroker.v1.StagedRestoreRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
+	7,  // 6: snapshot.pagebroker.v1.StagedRestoreRequest.artifact:type_name -> snapshot.pagebroker.v1.PublishedArtifact
+	2,  // 7: snapshot.pagebroker.v1.DirectRestoreRequest.source:type_name -> snapshot.pagebroker.v1.StorageBackend
+	4,  // 8: snapshot.pagebroker.v1.DirectRestoreRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
+	2,  // 9: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.destination:type_name -> snapshot.pagebroker.v1.StorageBackend
+	4,  // 10: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
+	6,  // 11: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.target:type_name -> snapshot.pagebroker.v1.ArtifactTarget
+	7,  // 12: snapshot.pagebroker.v1.GetArtifactMetadataRequest.artifact:type_name -> snapshot.pagebroker.v1.PublishedArtifact
+	8,  // 13: snapshot.pagebroker.v1.Request.staged_restore:type_name -> snapshot.pagebroker.v1.StagedRestoreRequest
+	10, // 14: snapshot.pagebroker.v1.Request.prepare_staged_checkpoint:type_name -> snapshot.pagebroker.v1.PrepareStagedCheckpointRequest
+	12, // 15: snapshot.pagebroker.v1.Request.commit:type_name -> snapshot.pagebroker.v1.CommitRequest
+	13, // 16: snapshot.pagebroker.v1.Request.abort:type_name -> snapshot.pagebroker.v1.AbortRequest
+	9,  // 17: snapshot.pagebroker.v1.Request.direct_restore:type_name -> snapshot.pagebroker.v1.DirectRestoreRequest
+	11, // 18: snapshot.pagebroker.v1.Request.get_artifact_metadata:type_name -> snapshot.pagebroker.v1.GetArtifactMetadataRequest
+	7,  // 19: snapshot.pagebroker.v1.CommitComplete.published_artifact:type_name -> snapshot.pagebroker.v1.PublishedArtifact
+	0,  // 20: snapshot.pagebroker.v1.Failure.code:type_name -> snapshot.pagebroker.v1.Failure.Code
+	15, // 21: snapshot.pagebroker.v1.Response.staged_restore_directory:type_name -> snapshot.pagebroker.v1.StagedRestoreDirectory
+	17, // 22: snapshot.pagebroker.v1.Response.staged_checkpoint_directory:type_name -> snapshot.pagebroker.v1.StagedCheckpointDirectory
+	18, // 23: snapshot.pagebroker.v1.Response.commit_complete:type_name -> snapshot.pagebroker.v1.CommitComplete
+	20, // 24: snapshot.pagebroker.v1.Response.abort_complete:type_name -> snapshot.pagebroker.v1.AbortComplete
+	21, // 25: snapshot.pagebroker.v1.Response.failure:type_name -> snapshot.pagebroker.v1.Failure
+	16, // 26: snapshot.pagebroker.v1.Response.direct_restore_ready:type_name -> snapshot.pagebroker.v1.DirectRestoreReady
+	19, // 27: snapshot.pagebroker.v1.Response.get_artifact_metadata_complete:type_name -> snapshot.pagebroker.v1.GetArtifactMetadataComplete
+	28, // [28:28] is the sub-list for method output_type
+	28, // [28:28] is the sub-list for method input_type
+	28, // [28:28] is the sub-list for extension type_name
+	28, // [28:28] is the sub-list for extension extendee
+	0,  // [0:28] is the sub-list for field type_name
 }
 
 func init() { file_v1_pagebroker_proto_init() }
@@ -1643,6 +1699,7 @@ func file_v1_pagebroker_proto_init() {
 	}
 	file_v1_pagebroker_proto_msgTypes[3].OneofWrappers = []any{
 		(*IOEngine_PosixCopy)(nil),
+		(*IOEngine_ModelStreamer)(nil),
 	}
 	file_v1_pagebroker_proto_msgTypes[13].OneofWrappers = []any{
 		(*Request_StagedRestore)(nil),
@@ -1670,7 +1727,7 @@ func file_v1_pagebroker_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_v1_pagebroker_proto_rawDesc), len(file_v1_pagebroker_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   22,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
