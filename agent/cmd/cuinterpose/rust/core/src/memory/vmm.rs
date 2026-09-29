@@ -31,7 +31,7 @@ pub struct Allocation {
 
 impl Allocation {
     /// Only the creator saves shared device memory; private memory stays native.
-    pub(crate) fn needs_content_checkpoint(&self, namespace_pid: NamespacePid) -> bool {
+    pub(crate) fn checkpoint_via_host_carrier(&self, namespace_pid: NamespacePid) -> bool {
         self.reference.creator_pid == namespace_pid
             && self.properties.type_ == CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED
             && self.properties.location.type_ == CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE
@@ -54,15 +54,17 @@ pub struct Mapping {
     pub flags: u64,
 }
 
-pub(crate) fn access_metadata(access: &[CUmemAccessDesc]) -> Vec<(u32, i32, u32)> {
+pub(crate) fn access_metadata(
+    access: &[CUmemAccessDesc],
+) -> Vec<cuinterpose_protocol::MemoryAccess> {
     let mut metadata: Vec<_> = access
         .iter()
-        .map(|entry| {
-            (
-                entry.location.type_ as u32,
-                entry.location.id,
-                entry.flags as u32,
-            )
+        .map(|entry| cuinterpose_protocol::MemoryAccess {
+            location: cuinterpose_protocol::MemoryLocation {
+                location_type: entry.location.type_ as u32,
+                id: entry.location.id,
+            },
+            flags: entry.flags as u32,
         })
         .collect();
     metadata.sort();
@@ -210,21 +212,63 @@ mod tests {
             descriptor(0, CUmemAccess_flags::CU_MEM_ACCESS_FLAGS_PROT_READWRITE),
             descriptor(1, CUmemAccess_flags::CU_MEM_ACCESS_FLAGS_PROT_READ),
         ]);
-        assert_eq!(access_metadata(&merged), vec![(1, 0, 3), (1, 1, 1)]);
-        assert_eq!(access_metadata(&mapping.access), vec![(1, 0, 1)]);
+        assert_eq!(
+            access_metadata(&merged),
+            vec![
+                cuinterpose_protocol::MemoryAccess {
+                    location: cuinterpose_protocol::MemoryLocation {
+                        location_type: 1,
+                        id: 0
+                    },
+                    flags: 3
+                },
+                cuinterpose_protocol::MemoryAccess {
+                    location: cuinterpose_protocol::MemoryLocation {
+                        location_type: 1,
+                        id: 1
+                    },
+                    flags: 1
+                }
+            ]
+        );
+        assert_eq!(
+            access_metadata(&mapping.access),
+            vec![cuinterpose_protocol::MemoryAccess {
+                location: cuinterpose_protocol::MemoryLocation {
+                    location_type: 1,
+                    id: 0
+                },
+                flags: 1
+            }]
+        );
         let more_locations: Vec<_> = (1..40)
             .map(|id| descriptor(id, CUmemAccess_flags::CU_MEM_ACCESS_FLAGS_PROT_READ))
             .collect();
         let expanded = mapping.merged_access(&more_locations);
         assert_eq!(expanded.len(), 40);
-        assert_eq!(access_metadata(&expanded)[0], (1, 0, 1));
+        assert_eq!(
+            access_metadata(&expanded)[0],
+            cuinterpose_protocol::MemoryAccess {
+                location: cuinterpose_protocol::MemoryLocation {
+                    location_type: 1,
+                    id: 0
+                },
+                flags: 1
+            }
+        );
         mapping.access = merged;
         assert_eq!(
             access_metadata(&mapping.merged_access(&[descriptor(
                 0,
                 CUmemAccess_flags::CU_MEM_ACCESS_FLAGS_PROT_NONE
             ),])),
-            vec![(1, 1, 1)]
+            vec![cuinterpose_protocol::MemoryAccess {
+                location: cuinterpose_protocol::MemoryLocation {
+                    location_type: 1,
+                    id: 1
+                },
+                flags: 1
+            }]
         );
     }
 }

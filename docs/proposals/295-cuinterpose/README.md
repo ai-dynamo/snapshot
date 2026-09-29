@@ -450,7 +450,7 @@ fixed 24-byte layout:
 
 | Bytes | Value |
 | --- | --- |
-| 4 | `CUI\x03` |
+| 4 | `CUI\x01` |
 | 4 | Creator namespace PID, little-endian |
 | 16 | Allocation ID |
 
@@ -474,7 +474,7 @@ token after the creator's allocation record has been removed.
 On import, B sends A the allocation reference:
 
 ```yaml
-version: 3
+version: 1
 body:
   kind: export
   allocation:
@@ -520,7 +520,7 @@ Synchronous `cuMemAlloc_v2` is implemented with POSIX-capable VMM backing from a
 
 | Field | Bytes | Example value |
 | --- | --- | --- |
-| `version` | 8 | ASCII `CUIPC003` |
+| `version` | 8 | ASCII `CUIPC001` |
 | `creator_pid` | 4 | `41` |
 | `allocation` | 16 | `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` |
 | `reserved` | 20 | All zero |
@@ -779,14 +779,14 @@ Allocation-property and handle-count fields are omitted, and binary allocation
 IDs are shown as hex strings. Field names and nesting match the serialized data:
 
 ```yaml
-version: 3
+version: 1
 body:
   41:
     - allocation:
         allocation:
           id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
           creator_pid: 41
-        content: true
+        checkpoint_via_host_carrier: true
         size: 2097152
     - mapping:
         allocation:
@@ -796,13 +796,14 @@ body:
         size: 2097152
         offset: 0
         access:
-        - [1, 0, 3]
+        - location: {location_type: 1, id: 0}
+          flags: 3
   42:
     - allocation:
         allocation:
           id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
           creator_pid: 41
-        content: false
+        checkpoint_via_host_carrier: false
         size: 2097152
     - mapping:
         allocation:
@@ -812,14 +813,17 @@ body:
         size: 2097152
         offset: 0
         access:
-        - [1, 1, 3]
+        - location: {location_type: 1, id: 1}
+          flags: 3
 ```
 
 The outer namespace-PID key identifies the process. The repeated allocation reference
 identifies both the allocation and its creator without a separate `creator:
-true/false` field. `content: true` means A owns the content copy, not that bytes
-appear in this file. `offset: 0` maps from the start of the allocation. In the
-access tuples `(location type, location ID, flags)`, type `1` means a CUDA device and flags `3` mean
+true/false` field. `checkpoint_via_host_carrier: true` means A saves and restores the device bytes
+through its CRIU-captured host carrier. Importers do not duplicate that copy;
+private allocations use native CUDA checkpointing. No allocation bytes appear
+in this metadata file. `offset: 0` maps from the start of the allocation. In the
+access records, location type `1` means a CUDA device and flags `3` mean
 read/write: A grants GPU 0 access, and B grants GPU 1 access. Addresses are
 shown in hex for readability; they are encoded as integers.
 
@@ -865,7 +869,7 @@ cuinterpose: true
 
 `cuinterpose` records source opt-in. When CUDA processes are present, capture must complete coordinator preparation before publishing the checkpoint, and restore must run the coordinator before releasing the workload. With no CUDA processes, restore only needs the library mount. The coordinator reads and validates its state; missing or invalid state fails restore.
 
-The private frontend/backend ABI is version **4**. The MessagePack protocol and state envelope, virtual shareable handle, and virtual IPC memory handle are version **3**. Older draft artifacts, including shim PageBroker artifacts, are not migrated or silently interpreted as host-carrier checkpoints.
+The private frontend/backend ABI is version **4**. The MessagePack protocol and state envelope, virtual shareable handle, and virtual IPC memory handle are version **1**. Older draft artifacts, including shim PageBroker artifacts, are not migrated or silently interpreted as host-carrier checkpoints.
 
 The shim libraries themselves are part of the checkpointed process. Their files must be available at the original paths, and the coordinator must understand their protocol. Ship a matching frontend, backend, and coordinator set; the format checks are not permission to substitute arbitrary library builds.
 
@@ -943,7 +947,7 @@ Before treating it as qualified, record passing assembled-artifact checks,
 physical-GPU tests without skips, and full cross-node Snapshot capture/restore
 with post-restore workload verification. Document the tested GPU, driver,
 workload, and artifact versions and retain the explicit operating limits above.
-Protocol compatibility beyond the matching version-3 artifacts is not promised.
+Protocol compatibility beyond the matching version-1 artifacts is not promised.
 
 ## Implementation History
 

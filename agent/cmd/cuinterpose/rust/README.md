@@ -68,7 +68,7 @@ requires cross-node capture, restore, and post-restore workload inference.
 | `coordinator` | CLI, participants, topology validation, barriers, durable state |
 
 The private C ABI is version **4**. The MessagePack wire/state format, virtual
-shareable handle, and virtual IPC memory handle are version **3**.
+shareable handle, and virtual IPC memory handle are version **1**.
 Earlier experimental artifacts are rejected, not translated. Rust
 objects, allocators, mutexes, and unwinding never cross the library boundary.
 Debug and release builds use `panic = "abort"` for the entire Rust workspace,

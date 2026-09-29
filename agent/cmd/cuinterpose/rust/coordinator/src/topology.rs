@@ -17,7 +17,7 @@ const CU_MEM_LOCATION_TYPE_DEVICE: u32 = 1;
 pub struct AllocationSummary {
     pub reference: AllocationReference,
     pub size: u64,
-    pub preserve_content: bool,
+    pub checkpoint_via_host_carrier: bool,
     anchor: bool,
 }
 struct Multicast {
@@ -45,7 +45,7 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
             match record {
                 Record::Allocation {
                     allocation,
-                    content,
+                    checkpoint_via_host_carrier,
                     size,
                     allocation_type,
                     handle_types,
@@ -54,13 +54,14 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                 } => {
                     ensure!(
                         *allocation_type == CU_MEM_ALLOCATION_TYPE_PINNED
-                            && location.0 == CU_MEM_LOCATION_TYPE_DEVICE,
+                            && location.location_type == CU_MEM_LOCATION_TYPE_DEVICE,
                         "participant {namespace_pid}: unsupported allocation properties for {allocation:?}: allocation_type={allocation_type}, location={location:?}"
                     );
                     if allocation.creator_pid == *namespace_pid {
                         ensure!(
                             (*handle_types == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
-                                || (*handle_types == CU_MEM_HANDLE_TYPE_NONE && *content))
+                                || (*handle_types == CU_MEM_HANDLE_TYPE_NONE
+                                    && *checkpoint_via_host_carrier))
                                 && *size > 0,
                             "participant {namespace_pid}: invalid allocation creator {allocation:?}: size={size}, handle_types={handle_types}"
                         );
@@ -75,20 +76,23 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                             reference: *allocation,
                             size: *size,
                             anchor: *virtual_allocation_handle_count != 0,
-                            preserve_content: *content,
+                            checkpoint_via_host_carrier: *checkpoint_via_host_carrier,
                         });
-                    } else if *content {
+                    } else if *checkpoint_via_host_carrier {
                         bail!(
-                            "participant {namespace_pid}: allocation content flag on importer of {allocation:?}"
+                            "participant {namespace_pid}: allocation checkpoint_via_host_carrier flag on importer of {allocation:?}"
                         );
                     }
                 }
                 Record::Multicast {
                     allocation,
-                    devices,
-                    size,
-                    handle_types,
-                    flags,
+                    properties:
+                        cuinterpose_protocol::MulticastProperties {
+                            devices,
+                            size,
+                            handle_types,
+                            flags,
+                        },
                     ..
                 } => {
                     if *handle_types != u64::from(CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR)
