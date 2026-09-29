@@ -48,9 +48,10 @@ commit-level history for each release is on its
   replacing the per-capture `coordination.k8s.io` Lease and the in-process
   guard that arbitrated between the validation and dump paths. A failed
   reconcile is now retried with backoff instead of waiting for the next resync,
-  and the `LeaseCancelled` failure reason no longer occurs. The agent
-  `ClusterRole` no longer requests `leases`; a hand-maintained copy of that role
-  can drop the `coordination.k8s.io` rule.
+  and the `LeaseCancelled` failure reason no longer occurs. The agent no longer
+  takes capture Leases, but its `ClusterRole` keeps the `coordination.k8s.io`
+  rule for one more release so an in-flight capture on a not-yet-rolled agent
+  pod can still renew; the rule is scheduled for removal in v0.3.0+.
 
 ## [0.1.0] - 2026-09-06
 

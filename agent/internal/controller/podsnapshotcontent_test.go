@@ -1024,9 +1024,10 @@ func TestRunCheckpoint_TimeoutFailsTheWorkOrder(t *testing.T) {
 	assert.Equal(t, "CheckpointFailed", cond.Reason)
 }
 
-// TestRunCheckpoint_TimeoutFailsADumpThatIgnoresCancellation is the CRIU case: ExecuteDump takes no
-// context, so it can return success after the deadline. That dump is not trustworthy.
-func TestRunCheckpoint_TimeoutFailsADumpThatIgnoresCancellation(t *testing.T) {
+// TestRunCheckpoint_OverrunButSuccessfulDumpIsStillReady is the CRIU case: ExecuteDump takes no
+// context, so it can return success after the deadline. The artifact is committed and the source is
+// already dead, so publishing it is the only outcome that does not throw away a usable checkpoint.
+func TestRunCheckpoint_OverrunButSuccessfulDumpIsStillReady(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	w := makeNodeController(t, &fakeCheckpointer{}, content)
 	w.config.Checkpoint = snapshottypes.CheckpointSpec{CheckpointTimeoutSeconds: ptr.To(1)}
@@ -1039,9 +1040,7 @@ func TestRunCheckpoint_TimeoutFailsADumpThatIgnoresCancellation(t *testing.T) {
 	require.NoError(t, w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, string(content.UID), t.TempDir()))
 
 	got := getContent(t, w, content.Name)
-	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady),
-		"a dump that overran its deadline must not be published as Ready")
-	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
-	require.NotNil(t, cond)
-	assert.Contains(t, cond.Message, "checkpoint exceeded")
+	assert.NotNil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady),
+		"a committed artifact must be published even if the dump overran its deadline")
+	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed))
 }

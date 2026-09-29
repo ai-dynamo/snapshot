@@ -35,6 +35,14 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["get", "patch", "update"]
+  # DEPRECATED, remove in v0.3.0+. The agent stopped taking capture Leases in v0.2.0, but Helm
+  # updates this role the moment the chart is applied while old agent pods keep running until
+  # their node rolls. Dropping the rule now would fail the Lease renewal of any capture those
+  # pods are mid-way through, and stall new captures on nodes that have not rolled yet. Once no
+  # supported upgrade path starts from an agent that renews Leases, delete this rule.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update", "delete"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]

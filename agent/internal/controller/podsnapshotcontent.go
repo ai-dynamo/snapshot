@@ -206,13 +206,12 @@ func (w *NodeController) runCheckpoint(
 ) error {
 	logger := logr.FromContextOrDiscard(ctx)
 
-	// Bound the dump so a wedged capture cannot hold its queue worker until the agent restarts.
-	// Status writes below deliberately keep the outer ctx, so a timed-out dump still records a
-	// terminal failure. This bounds the cancellable phases — cuda.CheckpointProcessTree takes a
-	// context; criu.ExecuteDump does not, so a CRIU dump that wedges runs to completion anyway.
+	// Bound the dump so a wedged capture cannot hold its queue worker indefinitely. This reaches
+	// the cancellable phases only — cuda.CheckpointProcessTree takes a context; criu.ExecuteDump
+	// does not, so a CRIU dump that wedges still runs to completion. Status writes below keep the
+	// outer ctx, so a dump that does fail on the deadline still records a terminal status.
 	dumpCtx := ctx
-	timeout := w.config.Checkpoint.CheckpointTimeout()
-	if timeout > 0 {
+	if timeout := w.config.Checkpoint.CheckpointTimeout(); timeout > 0 {
 		var cancel context.CancelFunc
 		dumpCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
@@ -227,14 +226,10 @@ func (w *NodeController) runCheckpoint(
 		HostPath:      artifactPath,
 		StartedAt:     time.Now(),
 	}
-	err := w.checkpointFn(dumpCtx, params)
-	// A non-cancellable phase can return success after the deadline passed; that dump is not
-	// trustworthy, so treat the expiry as the failure. Agent shutdown cancels ctx too, and that is
-	// not a timeout.
-	if err == nil && ctx.Err() == nil && dumpCtx.Err() != nil {
-		err = fmt.Errorf("checkpoint exceeded %s", timeout)
-	}
-	if err != nil {
+	// Success is success even past the deadline: executorCheckpoint returns nil only after it has
+	// stat'd the committed artifact, and the dump has already killed the source. Failing it here
+	// would discard a usable checkpoint and, being terminal, block recovery from ever promoting it.
+	if err := w.checkpointFn(dumpCtx, params); err != nil {
 		logger.Error(err, "Checkpoint failed")
 		if patchErr := w.setSnapshotContentFailed(ctx, content, "CheckpointFailed", err); patchErr != nil {
 			return fmt.Errorf("write PodSnapshotContent failed status %q: %w", content.Name, patchErr)
