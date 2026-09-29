@@ -11,7 +11,10 @@ mod transport;
 #[doc(inline)]
 pub use identity::{AllocationId, AllocationReference, NamespacePid};
 #[doc(inline)]
-pub use record::{BindingSource, BindingVersion, MemberRange, Record};
+pub use record::{
+    BindingSource, BindingVersion, MemberRange, MemoryAccess, MemoryLocation, MulticastProperties,
+    Record,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     collections::BTreeMap,
@@ -22,7 +25,7 @@ use std::{
 #[doc(inline)]
 pub use transport::{connect, receive, send};
 
-pub const VERSION: u8 = 3;
+pub const VERSION: u8 = 1;
 // Bound allocations controlled by socket frame prefixes and checkpoint files.
 // Protocol payloads contain metadata, never allocation contents.
 pub const MAX_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
@@ -136,20 +139,10 @@ pub struct Response {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reply {
-    Inspection {
-        records: Vec<Record>,
-    },
-    Completed {
-        operation: Operation,
-        bytes: u64,
-    },
+    Inspection { records: Vec<Record> },
+    Completed { operation: Operation, bytes: u64 },
     UnicastExport,
-    MulticastExport {
-        devices: u32,
-        size: u64,
-        handle_types: u64,
-        flags: u64,
-    },
+    MulticastExport { properties: MulticastProperties },
 }
 
 #[derive(Serialize, Deserialize)]
