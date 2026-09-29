@@ -15,8 +15,9 @@ DAEMON_SOURCES := $(BROKER_SOURCES) daemon.cpp main.cpp
 GPU_MANIFEST_SOURCES := gpu_engine/storage_manifest.cpp
 GPU_INTEGRITY_SOURCES := gpu_engine/integrity/extent_digests.cpp
 HASH_SOURCES := integrity/content_digest.cpp
+CUDA_CHECKPOINT_SOURCES := gpu_engine/cuda_checkpoint/checkpoint.cpp gpu_engine/cuda_checkpoint/driver_ops.c
 
-.PHONY: daemon generate test test-storage test-integrity
+.PHONY: daemon generate test test-storage test-integrity test-cuda-helper
 
 generate:
 	protoc --proto_path=. --cpp_out=. v1/pagebroker.proto
@@ -41,3 +42,10 @@ test-integrity:
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) integrity/content_digest.cpp \
 		gpu_engine/integrity/extent_digests.cpp gpu_engine/integrity/extent_digests_test.cpp $(GPU_MANIFEST_SOURCES) $(COMMON_SOURCES) -lcrypto -o build/extent-digests-test
 	./build/extent-digests-test
+
+test-cuda-helper:
+	mkdir -p build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -I$(CUDA_ROOT)/include \
+		$(CUDA_CHECKPOINT_SOURCES) gpu_engine/cuda_checkpoint/checkpoint_test.cpp \
+		$(GTEST_FLAGS) -pthread -o build/cuda-helper-test
+	./build/cuda-helper-test
