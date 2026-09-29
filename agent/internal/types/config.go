@@ -80,22 +80,27 @@ type PageBrokerSpec struct {
 	ControlSocketPath string `yaml:"controlSocketPath"`
 }
 
+// DefaultCheckpointTimeoutSeconds bounds a dump for a config written before the field existed.
+const DefaultCheckpointTimeoutSeconds = 3600
+
 // CheckpointSpec holds settings for the CRIU dump.
 type CheckpointSpec struct {
-	CheckpointTimeoutSeconds int `yaml:"checkpointTimeoutSeconds"`
+	// A pointer so absent and zero are distinguishable: every config predating this field omits
+	// it, and an agent upgraded ahead of its ConfigMap has to start — with the guard on.
+	CheckpointTimeoutSeconds *int `yaml:"checkpointTimeoutSeconds"`
 }
 
 // CheckpointTimeout bounds one dump. It is a hang detector, not a performance budget: it exists so
 // a wedged capture cannot hold its queue worker until the agent restarts.
 func (c *CheckpointSpec) CheckpointTimeout() time.Duration {
-	if c.CheckpointTimeoutSeconds <= 0 {
-		return 0
+	if c.CheckpointTimeoutSeconds == nil {
+		return DefaultCheckpointTimeoutSeconds * time.Second
 	}
-	return time.Duration(c.CheckpointTimeoutSeconds) * time.Second
+	return time.Duration(*c.CheckpointTimeoutSeconds) * time.Second
 }
 
 func (c *CheckpointSpec) Validate() error {
-	if c.CheckpointTimeoutSeconds <= 0 {
+	if c.CheckpointTimeoutSeconds != nil && *c.CheckpointTimeoutSeconds <= 0 {
 		return &ConfigError{Field: "checkpointTimeoutSeconds", Message: "checkpointTimeoutSeconds must be greater than zero"}
 	}
 	return nil

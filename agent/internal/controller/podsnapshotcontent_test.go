@@ -26,6 +26,7 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -1009,7 +1010,7 @@ func TestRunCheckpoint_TimeoutFailsTheWorkOrder(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	fc := &fakeCheckpointer{}
 	w := makeNodeController(t, fc, content)
-	w.config.Checkpoint = snapshottypes.CheckpointSpec{CheckpointTimeoutSeconds: 1}
+	w.config.Checkpoint = snapshottypes.CheckpointSpec{CheckpointTimeoutSeconds: ptr.To(1)}
 	w.checkpointFn = func(ctx context.Context, _ CheckpointParams) error {
 		<-ctx.Done() // a dump that honours cancellation, e.g. cuda-checkpoint
 		return ctx.Err()
@@ -1028,7 +1029,7 @@ func TestRunCheckpoint_TimeoutFailsTheWorkOrder(t *testing.T) {
 func TestRunCheckpoint_TimeoutFailsADumpThatIgnoresCancellation(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	w := makeNodeController(t, &fakeCheckpointer{}, content)
-	w.config.Checkpoint = snapshottypes.CheckpointSpec{CheckpointTimeoutSeconds: 1}
+	w.config.Checkpoint = snapshottypes.CheckpointSpec{CheckpointTimeoutSeconds: ptr.To(1)}
 	w.checkpointFn = func(context.Context, CheckpointParams) error {
 		time.Sleep(1200 * time.Millisecond)
 		return nil // overran the deadline but reports success

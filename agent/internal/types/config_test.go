@@ -5,7 +5,10 @@ package types
 
 import (
 	"testing"
+	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
 
@@ -57,4 +60,30 @@ func TestAgentConfigValidateRequiresPageBrokerControlSocket(t *testing.T) {
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error for missing PageBroker control socket")
 	}
+}
+
+// A config written before checkpointTimeoutSeconds existed must still load, and must come up with
+// the guard on rather than unbounded.
+func TestCheckpointSpecDefaultsWhenAbsent(t *testing.T) {
+	var spec CheckpointSpec
+	require.NoError(t, yaml.Unmarshal([]byte("{}"), &spec))
+
+	require.NoError(t, spec.Validate())
+	assert.Equal(t, time.Duration(DefaultCheckpointTimeoutSeconds)*time.Second, spec.CheckpointTimeout())
+}
+
+func TestCheckpointSpecRejectsAnExplicitNonPositiveTimeout(t *testing.T) {
+	for _, raw := range []string{"checkpointTimeoutSeconds: 0\n", "checkpointTimeoutSeconds: -1\n"} {
+		var spec CheckpointSpec
+		require.NoError(t, yaml.Unmarshal([]byte(raw), &spec))
+		require.Error(t, spec.Validate(), raw)
+	}
+}
+
+func TestCheckpointSpecHonoursAnExplicitTimeout(t *testing.T) {
+	var spec CheckpointSpec
+	require.NoError(t, yaml.Unmarshal([]byte("checkpointTimeoutSeconds: 45\n"), &spec))
+
+	require.NoError(t, spec.Validate())
+	assert.Equal(t, 45*time.Second, spec.CheckpointTimeout())
 }
