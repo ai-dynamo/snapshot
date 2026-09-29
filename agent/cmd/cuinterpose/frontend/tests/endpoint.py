@@ -18,7 +18,7 @@ import msgpack
 
 
 def inspect():
-    body = msgpack.packb({"version": 3, "body": {
+    body = msgpack.packb({"version": 1, "body": {
         "kind": "inspect", "namespace_pid": os.getpid(),
     }}, use_bin_type=True)
     with socket.socket(socket.AF_UNIX) as connection:
@@ -28,7 +28,7 @@ def inspect():
         with connection.makefile("rb") as stream:
             length, = struct.unpack("<I", stream.read(4))
             response = msgpack.unpackb(stream.read(length), raw=False)
-    assert response["version"] == 3 and "Ok" in response["body"]["result"]
+    assert response["version"] == 1 and "Ok" in response["body"]["result"]
     return response["body"]
 
 

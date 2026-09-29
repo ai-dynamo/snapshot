@@ -24,13 +24,13 @@ MULTICAST = {"id": bytes([2] * 16), "creator_pid": 1}
 
 
 def encode(body):
-    return msgpack.packb({"version": 3, "body": body}, use_bin_type=True)
+    return msgpack.packb({"version": 1, "body": body}, use_bin_type=True)
 
 
-def allocation(creator=1, *, size=4096, content=False, identifier=ALLOCATION["id"]):
+def allocation(creator=1, *, size=4096, checkpoint_via_host_carrier=False, identifier=ALLOCATION["id"]):
     return {"allocation": {"allocation": {"id": identifier, "creator_pid": creator},
-        "content": content, "size": size, "allocation_type": 1, "handle_types": 1,
-        "location": [1, 0], "virtual_allocation_handle_count": 1}}
+        "checkpoint_via_host_carrier": checkpoint_via_host_carrier, "size": size, "allocation_type": 1, "handle_types": 1,
+        "location": {"location_type": 1, "id": 0}, "virtual_allocation_handle_count": 1}}
 
 
 def mapping(size=4096, address=0x10000):
@@ -39,8 +39,8 @@ def mapping(size=4096, address=0x10000):
 
 
 def multicast(size, devices=1):
-    return {"multicast": {"allocation": MULTICAST, "devices": devices, "size": size,
-        "handle_types": 1, "flags": 0, "virtual_multicast_handle_count": 1}}
+    return {"multicast": {"allocation": MULTICAST, "properties": {"devices": devices, "size": size,
+        "handle_types": 1, "flags": 0}, "virtual_multicast_handle_count": 1}}
 
 
 def multicast_device(device=0):
@@ -96,7 +96,7 @@ class Contracts(unittest.TestCase):
         with connection.makefile("rb") as stream:
             size, = struct.unpack("<I", stream.read(4))
             message = msgpack.unpackb(stream.read(size), raw=False)
-        self.assertEqual(message, {"version": 3, "body": {"kind": kind, "namespace_pid": pid, **fields}})
+        self.assertEqual(message, {"version": 1, "body": {"kind": kind, "namespace_pid": pid, **fields}})
         return connection
 
     def reply(self, connection, pid, result):
@@ -125,7 +125,7 @@ class Contracts(unittest.TestCase):
                 self.inspect([records, []], begin=True)
 
     def test_unsupported_allocation_properties_start_no_phases(self):
-        for field, value in (("location", [3, 0]), ("allocation_type", 0)):
+        for field, value in (("location", {"location_type": 3, "id": 0}), ("allocation_type", 0)):
             for importer in (False, True):
                 unsupported = allocation()
                 unsupported["allocation"][field] = value
@@ -156,7 +156,7 @@ class Contracts(unittest.TestCase):
 
     def test_wrong_transfer_size_stops_before_teardown(self):
         with self.coordinator("--prepare", "transfer size"):
-            self.inspect([[allocation(content=True)], []], begin=True)
+            self.inspect([[allocation(checkpoint_via_host_carrier=True)], []], begin=True)
             self.phase(PREPARE[0])
             self.phase(PREPARE[1])  # Replies claim zero bytes instead of 4096.
 
@@ -167,7 +167,7 @@ class Contracts(unittest.TestCase):
             for operation in PREPARE:
                 self.phase(operation)
         saved = msgpack.unpackb(self.state.read_bytes(), raw=False, strict_map_key=False)
-        self.assertEqual(saved["version"], 3)
+        self.assertEqual(saved["version"], 1)
         self.assertEqual(saved["body"], {1: [allocation(), mapping()], 2: [allocation()]})
         records[0].reverse()
         with self.coordinator("--restore"):
@@ -205,7 +205,7 @@ class Contracts(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
 
     def test_later_participant_overflow_starts_no_save(self):
-        records = [allocation(2, size=size, content=True, identifier=bytes([i] * 16))
+        records = [allocation(2, size=size, checkpoint_via_host_carrier=True, identifier=bytes([i] * 16))
                    for i, size in enumerate(((1 << 64) - 1, 1))]
         with self.coordinator("--prepare", "allocation size overflow"):
             self.inspect([[], records], begin=True)

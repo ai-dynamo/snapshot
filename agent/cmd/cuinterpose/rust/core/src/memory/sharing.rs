@@ -78,10 +78,13 @@ pub fn request_export(
     match reply {
         Reply::UnicastExport => Ok((descriptor, None)),
         Reply::MulticastExport {
-            devices,
-            size,
-            handle_types,
-            flags,
+            properties:
+                protocol::MulticastProperties {
+                    devices,
+                    size,
+                    handle_types,
+                    flags,
+                },
         } => {
             if devices == 0 || size == 0 {
                 return Err(Error::Invalid("invalid multicast export properties"));
@@ -128,10 +131,12 @@ impl ExportCache {
     ) -> Result<()> {
         let reply = match multicast {
             Some(properties) => Reply::MulticastExport {
-                devices: properties.numDevices,
-                size: properties.size as u64,
-                handle_types: properties.handleTypes,
-                flags: properties.flags,
+                properties: protocol::MulticastProperties {
+                    devices: properties.numDevices,
+                    size: properties.size as u64,
+                    handle_types: properties.handleTypes,
+                    flags: properties.flags,
+                },
             },
             None => Reply::UnicastExport,
         };
@@ -321,10 +326,13 @@ mod cache_tests {
                 (Reply::UnicastExport, None) => {}
                 (
                     Reply::MulticastExport {
-                        devices: 2,
-                        size: 4096,
-                        handle_types: 1,
-                        flags: 0,
+                        properties:
+                            protocol::MulticastProperties {
+                                devices: 2,
+                                size: 4096,
+                                handle_types: 1,
+                                flags: 0,
+                            },
                     },
                     Some(_),
                 ) => {}

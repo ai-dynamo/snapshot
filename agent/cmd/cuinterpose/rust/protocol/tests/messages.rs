@@ -63,7 +63,22 @@ fn inspection_metadata_round_trips() {
         address: 0x10000,
         size: 8192,
         offset: 4096,
-        access: vec![(1, 0, 3), (1, 1, 3)],
+        access: vec![
+            MemoryAccess {
+                location: MemoryLocation {
+                    location_type: 1,
+                    id: 0,
+                },
+                flags: 3,
+            },
+            MemoryAccess {
+                location: MemoryLocation {
+                    location_type: 1,
+                    id: 1,
+                },
+                flags: 3,
+            },
+        ],
     };
     let reply = Reply::Inspection {
         records: vec![mapping.clone()],
@@ -120,15 +135,15 @@ fn fragmented_prefix_and_body_are_accepted_and_oversized_prefix_is_refused() {
 fn malformed_or_excess_ancillary_data_closes_received_descriptors() {
     // The peer reports EOF only when every SCM_RIGHTS duplicate has closed.
     // Cover decoding failure, excess rights, and ancillary-buffer truncation.
-    for count in [1, 2, 4] {
+    for count in [1, 2, 8] {
         let (reader, writer) = UnixStream::pair().unwrap();
         reader
             .set_read_timeout(Some(std::time::Duration::from_secs(1)))
             .unwrap();
         let (sender, receiver) = UnixStream::pair().unwrap();
-        let mut space = [std::mem::MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(4))];
+        let mut space = [std::mem::MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(8))];
         let mut ancillary = rustix::net::SendAncillaryBuffer::new(&mut space);
-        let descriptors = [writer.as_fd(); 4];
+        let descriptors = [writer.as_fd(); 8];
         ancillary.push(rustix::net::SendAncillaryMessage::ScmRights(
             &descriptors[..count],
         ));
@@ -146,7 +161,22 @@ fn malformed_or_excess_ancillary_data_closes_received_descriptors() {
         )
         .unwrap();
         drop(writer);
-        assert!(receive::<Request>(&receiver).is_err());
+        let error = receive::<Request>(&receiver).unwrap_err();
+        match count {
+            1 => assert!(matches!(error, Error::Decode(_))),
+            2 => assert!(matches!(
+                error,
+                Error::Invalid("control socket received excess descriptors")
+            )),
+            8 => assert!(
+                matches!(
+                    error,
+                    Error::Invalid("control socket ancillary data truncated")
+                ),
+                "{error:?}"
+            ),
+            _ => unreachable!(),
+        }
         assert_eq!((&reader).read(&mut [0]).unwrap(), 0);
     }
 }
@@ -169,4 +199,51 @@ fn connect_times_out_when_the_peer_backlog_is_full() {
     assert!(started.elapsed() < Duration::from_secs(2));
     drop(first);
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn zero_connect_timeout_is_invalid_before_connecting() {
+    let error = connect(
+        std::path::Path::new("/unused-cuinterpose.sock"),
+        std::time::Duration::ZERO,
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn closed_control_socket_has_a_specific_error() {
+    let (sender, receiver) = UnixStream::pair().unwrap();
+    drop(sender);
+    assert!(matches!(
+        receive::<Request>(&receiver),
+        Err(Error::Invalid("control socket closed"))
+    ));
+}
+
+#[test]
+fn multicast_properties_round_trip_in_records_and_exports() {
+    let properties = MulticastProperties {
+        devices: 2,
+        size: 8192,
+        handle_types: 1,
+        flags: 0,
+    };
+    let record = Record::Multicast {
+        allocation: AllocationReference {
+            id: [1; 16],
+            creator_pid: 2,
+        },
+        properties,
+        virtual_multicast_handle_count: 1,
+    };
+    assert_eq!(decode::<Record>(&encode(&record).unwrap()).unwrap(), record);
+    let reply = Reply::MulticastExport { properties };
+    let Reply::MulticastExport {
+        properties: decoded,
+    } = decode::<Reply>(&encode(&reply).unwrap()).unwrap()
+    else {
+        panic!("decoded wrong reply");
+    };
+    assert_eq!(decoded, properties);
 }

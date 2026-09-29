@@ -18,6 +18,7 @@ use std::time::Duration;
 ///
 /// # Errors
 /// Returns socket creation, timeout configuration, or connection errors.
+/// A zero timeout is rejected as invalid input by rustix before connecting.
 pub fn connect(path: &Path, timeout: Duration) -> io::Result<UnixStream> {
     use rustix::net::sockopt::{Timeout, set_socket_timeout};
     use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType, socket_with};
@@ -103,15 +104,17 @@ pub fn receive<T: DeserializeOwned>(socket: &UnixStream) -> Result<(T, Option<Ow
         })
         .flatten();
     let descriptor = descriptors.next();
-    if received.bytes == 0
-        || received
-            .flags
-            .intersects(ReturnFlags::CTRUNC | ReturnFlags::TRUNC)
-        || descriptors.next().is_some()
-    {
-        return Err(Error::Invalid(
-            "closed socket or invalid ancillary descriptors",
-        ));
+    if received.bytes == 0 {
+        return Err(Error::Invalid("control socket closed"));
+    }
+    if received.flags.contains(ReturnFlags::CTRUNC) {
+        return Err(Error::Invalid("control socket ancillary data truncated"));
+    }
+    if received.flags.contains(ReturnFlags::TRUNC) {
+        return Err(Error::Invalid("control socket message truncated"));
+    }
+    if descriptors.next().is_some() {
+        return Err(Error::Invalid("control socket received excess descriptors"));
     }
     (&*socket).read_exact(&mut prefix[received.bytes..])?;
     let size = u32::from_le_bytes(prefix) as usize;
