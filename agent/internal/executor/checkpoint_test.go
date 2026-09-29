@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
@@ -16,7 +17,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
 )
@@ -55,20 +55,6 @@ func (checkpointImageRuntime) ResolveContainer(context.Context, string) (int, *s
 
 func (checkpointImageRuntime) ResolveContainerImageID(context.Context, string) (string, error) {
 	return "", errors.New("runtime image unavailable")
-}
-
-func TestCheckpointPreparesContentArtifactParents(t *testing.T) {
-	cfg := &types.AgentConfig{Storage: types.StorageSpec{BasePath: t.TempDir()}}
-	finalDir, err := nsmount.ResolveArtifactPath(cfg.Storage.BasePath, "content-uid", "main")
-	require.NoError(t, err)
-
-	err = Checkpoint(context.Background(), checkpointPathRuntime{}, logr.Discard(), CheckpointRequest{
-		ContentUID:    "content-uid",
-		ContainerName: "main",
-	}, cfg)
-	require.ErrorContains(t, err, "stop after path preparation")
-	assert.DirExists(t, filepath.Dir(finalDir))
-	assert.DirExists(t, filepath.Join(cfg.Storage.BasePath, "artifacts", "content-uid", ".tmp"))
 }
 
 func TestInspectContainerToleratesUnreadableRuntimeImageID(t *testing.T) {
@@ -123,16 +109,21 @@ func TestConfigureCheckpointRecordsRuntimeImageID(t *testing.T) {
 func TestCheckpointPageBrokerPrepareFailureDoesNotMutate(t *testing.T) {
 	cfg := &types.AgentConfig{
 		Storage:    types.StorageSpec{BasePath: t.TempDir()},
-		PageBroker: types.PageBrokerSpec{Enabled: true, ControlSocketPath: t.TempDir() + "/pagebroker.sock"},
+		PageBroker: types.PageBrokerSpec{ControlSocketPath: t.TempDir() + "/pagebroker.sock"},
 	}
 
-	err := Checkpoint(context.Background(), checkpointPathRuntime{}, logr.Discard(), CheckpointRequest{
-		ContentUID:          "content-uid",
-		ContainerName:       "main",
-		PageBrokerRequested: true,
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	start := time.Now()
+	err := Checkpoint(ctx, checkpointPathRuntime{}, logr.Discard(), CheckpointRequest{
+		ContentUID:    "content-uid",
+		ContainerName: "main",
 	}, cfg)
 	require.ErrorContains(t, err, "prepare PageBroker checkpoint")
+	assert.NotContains(t, err.Error(), "abort PageBroker checkpoint")
+	assert.Less(t, time.Since(start), 3*time.Second)
 	assert.False(t, CheckpointNeedsSourceKill(err))
+	assert.NoDirExists(t, filepath.Join(cfg.Storage.BasePath, "artifacts"))
 }
 
 func TestCheckpointNeedsSourceKill(t *testing.T) {
