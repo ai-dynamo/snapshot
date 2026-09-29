@@ -87,3 +87,28 @@ func TestCheckpointSpecHonoursAnExplicitTimeout(t *testing.T) {
 	require.NoError(t, spec.Validate())
 	assert.Equal(t, 45*time.Second, spec.CheckpointTimeout())
 }
+
+// time.Duration counts nanoseconds in an int64, so a large enough seconds value wraps negative and
+// every call site reads that as "no timeout" — the bound silently disappears. Reject it instead.
+func TestTimeoutsRejectValuesThatOverflowDuration(t *testing.T) {
+	overflow := int(maxTimeoutSeconds) + 1
+	require.Less(t, time.Duration(overflow)*time.Second, time.Duration(0),
+		"the test value must actually overflow, or this proves nothing")
+
+	checkpoint := CheckpointSpec{CheckpointTimeoutSeconds: &overflow}
+	require.Error(t, checkpoint.Validate())
+
+	restore := RestoreSpec{RestoreTimeoutSeconds: overflow}
+	require.Error(t, restore.Validate())
+}
+
+func TestTimeoutsAcceptTheLargestRepresentableValue(t *testing.T) {
+	limit := int(maxTimeoutSeconds)
+	require.Positive(t, time.Duration(limit)*time.Second)
+
+	checkpoint := CheckpointSpec{CheckpointTimeoutSeconds: &limit}
+	require.NoError(t, checkpoint.Validate())
+
+	restore := RestoreSpec{RestoreTimeoutSeconds: limit}
+	require.NoError(t, restore.Validate())
+}

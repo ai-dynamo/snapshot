@@ -6,6 +6,7 @@ package types
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -83,6 +84,12 @@ type PageBrokerSpec struct {
 // DefaultCheckpointTimeoutSeconds bounds a dump for a config written before the field existed.
 const DefaultCheckpointTimeoutSeconds = 3600
 
+// maxTimeoutSeconds is the largest value that survives conversion to a time.Duration, which counts
+// nanoseconds in an int64. Past it the multiplication wraps negative, and a negative timeout reads
+// as "no timeout" at every call site — so an absurd value would silently remove the bound it asked
+// for. Roughly 292 years; nothing legitimate comes near it.
+const maxTimeoutSeconds = int64(math.MaxInt64) / int64(time.Second)
+
 // CheckpointSpec holds settings for the CRIU dump.
 type CheckpointSpec struct {
 	// A pointer so absent and zero are distinguishable: every config predating this field omits
@@ -100,8 +107,17 @@ func (c *CheckpointSpec) CheckpointTimeout() time.Duration {
 }
 
 func (c *CheckpointSpec) Validate() error {
-	if c.CheckpointTimeoutSeconds != nil && *c.CheckpointTimeoutSeconds <= 0 {
+	if c.CheckpointTimeoutSeconds == nil {
+		return nil
+	}
+	if *c.CheckpointTimeoutSeconds <= 0 {
 		return &ConfigError{Field: "checkpointTimeoutSeconds", Message: "checkpointTimeoutSeconds must be greater than zero"}
+	}
+	if int64(*c.CheckpointTimeoutSeconds) > maxTimeoutSeconds {
+		return &ConfigError{
+			Field:   "checkpointTimeoutSeconds",
+			Message: fmt.Sprintf("checkpointTimeoutSeconds must not exceed %d", maxTimeoutSeconds),
+		}
 	}
 	return nil
 }
@@ -126,6 +142,12 @@ func (c *RestoreSpec) RestoreTimeout() time.Duration {
 func (c *RestoreSpec) Validate() error {
 	if c.RestoreTimeoutSeconds <= 0 {
 		return &ConfigError{Field: "restoreTimeoutSeconds", Message: "restoreTimeoutSeconds must be greater than zero"}
+	}
+	if int64(c.RestoreTimeoutSeconds) > maxTimeoutSeconds {
+		return &ConfigError{
+			Field:   "restoreTimeoutSeconds",
+			Message: fmt.Sprintf("restoreTimeoutSeconds must not exceed %d", maxTimeoutSeconds),
+		}
 	}
 	return nil
 }
