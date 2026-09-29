@@ -26,7 +26,7 @@ def test_default_command_installs_the_local_chart() -> None:
 
     assert command[:5] == ["helm", "upgrade", "--install", "snapshot", "./charts/snapshot"]
     assert "--version" not in command
-    assert "--reuse-values" not in command
+    assert "--reset-then-reuse-values" not in command
     assert set_values(command) == [
         "image.operator.tag=v0.0.0-g1a2b3c4d",
         "image.agent.tag=v0.0.0-g1a2b3c4d",
@@ -58,10 +58,10 @@ def test_component_tags_override_the_shared_tag() -> None:
     ]
 
 
-def test_reuse_values_sets_only_the_image_tags() -> None:
-    command = setup.snapshot_chart_command(**BASE, reuse_values=True)
+def test_reset_then_reuse_values_sets_only_the_image_tags() -> None:
+    command = setup.snapshot_chart_command(**BASE, reset_then_reuse_values=True)
 
-    assert "--reuse-values" in command
+    assert "--reset-then-reuse-values" in command
     assert set_values(command) == [
         "image.operator.tag=v0.0.0-g1a2b3c4d",
         "image.agent.tag=v0.0.0-g1a2b3c4d",

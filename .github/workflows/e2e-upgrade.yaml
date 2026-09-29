@@ -25,6 +25,9 @@ on:
         default: full
         options:
           - full
+          - reset-then-reuse-values
+          - operator-first
+          - agent-first
       upgrade_profile:
         description: Scenario set to run.
         required: false
