@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"syscall"
@@ -47,7 +46,13 @@ func unlock(ctx context.Context, pid int, helperBinaryPath string, log logr.Logg
 }
 
 func getState(ctx context.Context, pid int, helperBinaryPath string) (string, error) {
-	cmd := exec.CommandContext(ctx, helperBinaryPath, "--get-state", "--pid", strconv.Itoa(pid))
+	cmd, driver, err := helperCommand(ctx, pid, helperBinaryPath, "--get-state", "--pid", strconv.Itoa(pid))
+	if err != nil {
+		return "", err
+	}
+	if driver != nil {
+		defer driver.Close()
+	}
 	output, err := cmd.CombinedOutput()
 	state := strings.TrimSpace(string(output))
 	if err != nil {
@@ -64,7 +69,13 @@ func runAction(ctx context.Context, pid int, action, deviceMap, helperBinaryPath
 	if action == actionRestore && deviceMap != "" {
 		args = append(args, "--device-map", deviceMap)
 	}
-	cmd := exec.CommandContext(ctx, helperBinaryPath, args...)
+	cmd, driver, err := helperCommand(ctx, pid, helperBinaryPath, args...)
+	if err != nil {
+		return err
+	}
+	if driver != nil {
+		defer driver.Close()
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		return normalizeProcessGroupKillError(syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL))

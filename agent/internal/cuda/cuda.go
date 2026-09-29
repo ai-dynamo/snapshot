@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -31,7 +32,7 @@ const (
 	HelperBinaryName = "cuda-checkpoint-helper"
 	// DefaultHelperBinaryPath is the agent-side cuda-checkpoint-helper absolute path.
 	// In the placeholder namespace pass filepath.Join(bundleDir, HelperBinaryName) instead.
-	DefaultHelperBinaryPath = "/usr/local/bin/" + HelperBinaryName
+	DefaultHelperBinaryPath = "/snapshot-binaries/" + HelperBinaryName
 
 	// nvidiaSMITimeout is what the agent bounds every nsenter nvidia-smi call
 	// by. The agent's own context carries no deadline, so a hung one would block
@@ -360,26 +361,44 @@ func orderDRAUUIDsByRuntime(allocatedUUIDs, visibleUUIDs []string) ([]string, er
 // --get-state, because --get-state incorrectly matches coordinator processes like
 // cuda-checkpoint --launch-job that share a /proc namespace with CUDA processes but
 // don't hold CUDA contexts themselves.
-func FilterProcesses(ctx context.Context, allPIDs []int, log logr.Logger) []int {
+func FilterProcesses(ctx context.Context, allPIDs []int, log logr.Logger) ([]int, error) {
 	cudaPIDs := make([]int, 0, len(allPIDs))
 	for _, pid := range allPIDs {
 		if pid <= 0 {
 			continue
 		}
-		cmd := exec.CommandContext(ctx, DefaultHelperBinaryPath, "--get-restore-tid", "--pid", strconv.Itoa(pid))
-		output, err := cmd.CombinedOutput()
+		cmd, driver, err := helperCommand(ctx, pid, cudaCheckpointHelperBinary, "--get-restore-tid", "--pid", strconv.Itoa(pid))
 		if err != nil {
-			if ctx.Err() != nil {
-				break
+			// A candidate can exit while its process tree is being inspected.
+			if _, statErr := os.Stat(fmt.Sprintf("/proc/%d", pid)); os.IsNotExist(statErr) && ctx.Err() == nil {
+				continue
 			}
-			log.V(1).Info("CUDA restore-tid probe negative", "pid", pid)
+			return nil, err
+		}
+		if driver == nil {
 			continue
 		}
+		output, err := cmd.CombinedOutput()
+		driver.Close()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			var exit *exec.ExitError
+			if errors.As(err, &exit) && exit.ExitCode() == 3 {
+				log.V(1).Info("CUDA restore-tid probe negative", "pid", pid)
+				continue
+			}
+			return nil, fmt.Errorf("CUDA restore-tid probe failed for pid %d: %w (%s)", pid, err, strings.TrimSpace(string(output)))
+		}
 		tid := strings.TrimSpace(string(output))
+		if n, err := strconv.Atoi(tid); err != nil || n <= 0 {
+			return nil, fmt.Errorf("invalid CUDA restore thread ID %q for pid %d", tid, pid)
+		}
 		log.V(1).Info("CUDA restore-tid probe positive", "pid", pid, "tid", tid)
 		cudaPIDs = append(cudaPIDs, pid)
 	}
-	return cudaPIDs
+	return cudaPIDs, nil
 }
 
 // BuildDeviceMap creates a cuda-checkpoint-helper --device-map value from source and target GPU UUID lists.

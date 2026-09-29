@@ -5,6 +5,7 @@ package cuda
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -153,21 +154,22 @@ if [ "$action" = checkpoint ]; then printf '|%s' "$pid" >> "$job_file"; fi
 	t.Setenv("DYNAMO_TEST_TRACE", trace)
 	t.Setenv("DYNAMO_TEST_JOB_FILE", liveJobFile)
 
-	if _, err := CheckpointProcessTree(context.Background(), []int{101, 202}, liveJobFile, checkpointDir, logr.Discard()); err != nil {
+	pid, otherPID := os.Getpid(), os.Getppid()
+	if _, err := CheckpointProcessTree(context.Background(), []int{pid, otherPID}, liveJobFile, checkpointDir, logr.Discard()); err != nil {
 		t.Fatalf("CheckpointProcessTree() error = %v", err)
 	}
 	traceContent, err := os.ReadFile(trace)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(traceContent), "lock 101\nlock 202\ncheckpoint 101\ncheckpoint 202\n"; got != want {
+	if got, want := string(traceContent), fmt.Sprintf("lock %d\nlock %d\ncheckpoint %d\ncheckpoint %d\n", pid, otherPID, pid, otherPID); got != want {
 		t.Fatalf("helper call order = %q, want %q", got, want)
 	}
 	artifact, err := os.ReadFile(filepath.Join(checkpointDir, podcontract.CUDAJobFileName))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(artifact), "initial|101|202"; got != want {
+	if got, want := string(artifact), fmt.Sprintf("initial|%d|%d", pid, otherPID); got != want {
 		t.Fatalf("persisted job state = %q, want %q", got, want)
 	}
 }

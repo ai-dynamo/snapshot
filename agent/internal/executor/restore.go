@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -221,7 +222,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		})
 	}
 
-	result, err := execNSRestore(ctx, log, req, snap, bundleMount, containerCheckpointPath)
+	result, err := execNSRestore(ctx, log, req, snap, bundleMount, containerCheckpointPath, !manifest.CUDA.IsEmpty())
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
 	}
@@ -450,27 +451,26 @@ func existingMountPaths(targetRoot string, destinations []string, aliases map[st
 //     namespace against PID reuse. The remaining four namespaces (uts, ipc, net,
 //     pid) are still resolved via -t <pid> and are not protected against reuse.
 //
-//  2. nsrestore binary fd: we open nsrestore from the agent host side (SnapshotBinSrc)
-//     before entering any namespace and exec it via /proc/self/fd/N. This protects
-//     the nsrestore binary itself against path-based substitution inside the
-//     container. Binaries that nsrestore subsequently loads (criu, ip, tar, .so
+//  2. Bundle fd: we open the agent-owned bundle (SnapshotBinSrc) before entering
+//     any namespace and execute nsrestore through that directory fd. This also
+//     retains trusted CUDA helper and library paths after CRIU removes the mount.
+//     Other binaries that nsrestore subsequently loads (criu, ip, tar, .so
 //     files) are still resolved by PATH/LD_LIBRARY_PATH inside the container's
 //     mount namespace.
-func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot, mp nsmount.MountPoint, checkpointPath string) (*RestoreInNamespaceResult, error) {
+func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot, mp nsmount.MountPoint, checkpointPath string, hasCUDA bool) (*RestoreInNamespaceResult, error) {
 
-	// Open nsrestore from the agent host side before entering the container
-	// namespace, so the binary fd is immune to rename attacks inside the container.
-	binaryFile, err := os.Open(filepath.Join(nsmount.SnapshotBinSrc, "nsrestore"))
+	// Pin the trusted directory before entering the workload's mount namespace.
+	bundleFile, err := os.Open(nsmount.SnapshotBinSrc)
 	if err != nil {
-		return nil, fmt.Errorf("open nsrestore from agent bundle: %w", err)
+		return nil, fmt.Errorf("open agent bundle: %w", err)
 	}
-	defer binaryFile.Close()
+	defer bundleFile.Close()
 
 	// ExtraFiles[0] → child fd 3, ExtraFiles[1] → child fd 4.
 	// These constants mirror nsFdChildNum in mount.go (ExtraFiles[0] = fd 3).
 	const (
 		nsFdChild     = 3 // mp.NsFd() passed as ExtraFiles[0]
-		binaryFdChild = 4 // binaryFile passed as ExtraFiles[1]
+		bundleFdChild = 4 // bundleFile passed as ExtraFiles[1]
 	)
 
 	bundleDir := nsmount.SnapshotBinDst // bundle root as seen inside the container
@@ -487,7 +487,7 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 			// Intentionally exclude cgroup namespace (-C): CRIU must manage cgroups
 			// from the host-visible hierarchy so --cgroup-root remap works.
 			"-u", "-i", "-n", "-p",
-			"--", fmt.Sprintf("/proc/self/fd/%d", binaryFdChild),
+			"--", fmt.Sprintf("/proc/self/fd/%d/nsrestore", bundleFdChild),
 		}
 	} else {
 		return nil, fmt.Errorf("execNSRestore: mp.NsFd() is nil; mount point was not properly initialized")
@@ -516,7 +516,36 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	cmd := exec.CommandContext(ctx, "nsenter", args...)
 	// Inherit the agent environment so nsrestore uses the same logger settings.
 	cmd.Env = os.Environ()
-	cmd.ExtraFiles = []*os.File{nsFd, binaryFile}
+	cmd.ExtraFiles = []*os.File{nsFd, bundleFile}
+	if hasCUDA {
+		hostLibrary, err := filepath.EvalSymlinks(cuda.HostDriverLibrary)
+		if err != nil {
+			return nil, fmt.Errorf("resolve agent CUDA driver: %w", err)
+		}
+		driver, err := os.Open(filepath.Dir(hostLibrary))
+		if err != nil {
+			return nil, fmt.Errorf("open agent CUDA driver directory: %w", err)
+		}
+		defer driver.Close()
+		companionsPath, err := os.MkdirTemp("", "snapshot-cuda-companions-")
+		if err != nil {
+			return nil, fmt.Errorf("create CUDA companion directory: %w", err)
+		}
+		defer os.RemoveAll(companionsPath)
+		if err := linkHostCUDACompanions(filepath.Dir(hostLibrary), companionsPath); err != nil {
+			return nil, err
+		}
+		companions, err := os.Open(companionsPath)
+		if err != nil {
+			return nil, err
+		}
+		defer companions.Close()
+		cmd.ExtraFiles = append(cmd.ExtraFiles, driver, companions)
+		cmd.Env = append(cmd.Env,
+			cuda.DriverLibraryEnv+"=/proc/self/fd/5/"+filepath.Base(hostLibrary),
+			cuda.DriverCompanionsEnv+"=/proc/self/fd/6",
+		)
+	}
 	log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())
 
 	var stdout bytes.Buffer
@@ -536,4 +565,35 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	}
 
 	return &result, nil
+}
+
+// Restrict the helper's search path to NVIDIA libraries, excluding the agent's
+// glibc, which cannot be mixed with the placeholder's dynamic loader. Resolve
+// aliases before namespace entry; nsrestore anchors "host" to its pinned fd5.
+func linkHostCUDACompanions(hostDir, destination string) error {
+	entries, err := os.ReadDir(hostDir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, "libcuda.so") && !(strings.HasPrefix(name, "libnvidia-") && strings.Contains(name, ".so")) {
+			continue
+		}
+		target, err := filepath.EvalSymlinks(filepath.Join(hostDir, name))
+		if err != nil {
+			return fmt.Errorf("resolve CUDA companion %s: %w", name, err)
+		}
+		info, err := os.Stat(target)
+		if err != nil {
+			return err
+		}
+		if filepath.Dir(target) != hostDir || !info.Mode().IsRegular() {
+			return fmt.Errorf("CUDA companion %s is not a regular file in the host driver directory", name)
+		}
+		if err := os.Symlink(filepath.Join("host", filepath.Base(target)), filepath.Join(destination, name)); err != nil {
+			return err
+		}
+	}
+	return nil
 }

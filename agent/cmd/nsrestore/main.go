@@ -7,19 +7,33 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"github.com/go-logr/logr"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	"github.com/ai-dynamo/snapshot/agent/internal/logging"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 )
 
 func main() {
+	// Keep the agent's pinned bundle and optional host driver directory here only.
+	// Helpers reopen selected files through this process's /proc/<pid>/fd paths.
+	syscall.CloseOnExec(4)
+	syscall.CloseOnExec(5)
+	syscall.CloseOnExec(6)
+
 	// Logs go to stderr so stdout is reserved for the structured result.
 	log := logging.ConfigureLogger("stderr").WithName("nsrestore")
+	if os.Getenv(cuda.DriverCompanionsEnv) != "" {
+		if err := os.Symlink(fmt.Sprintf("/proc/%d/fd/5", os.Getpid()), "/proc/self/fd/6/host"); err != nil {
+			fatal(log, err, "failed to anchor CUDA companions")
+		}
+	}
 
 	checkpointPath := flag.String("checkpoint-path", "", "Path to checkpoint directory")
 	cudaDeviceMap := flag.String("cuda-device-map", "", "CUDA device map for cuda-checkpoint-helper restore")

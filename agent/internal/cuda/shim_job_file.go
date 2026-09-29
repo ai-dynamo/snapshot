@@ -6,7 +6,6 @@ package cuda
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"strconv"
 	"strings"
 	"syscall"
@@ -33,7 +32,13 @@ func checkpointWithJobFile(ctx context.Context, pid int, jobFile string, log log
 
 func runActionWithJobFile(ctx context.Context, pid int, action, jobFile string, log logr.Logger) error {
 	args := []string{"--action", action, "--pid", strconv.Itoa(pid), "--job-file", jobFile}
-	cmd := exec.CommandContext(ctx, cudaCheckpointHelperBinary, args...)
+	cmd, driver, err := helperCommand(ctx, pid, cudaCheckpointHelperBinary, args...)
+	if err != nil {
+		return err
+	}
+	if driver != nil {
+		defer driver.Close()
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		return normalizeProcessGroupKillError(syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL))

@@ -3,12 +3,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#define _GNU_SOURCE
 #include <ctype.h>
 #include <cuda.h>
+#include <dlfcn.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 static int
 print_usage(FILE* stream)
@@ -283,6 +286,18 @@ main(int argc, char** argv)
   int i;
   CUresult status;
 
+  /* LD_PRELOAD can be ignored by the loader. Never call CUDA through a fallback
+   * library when the launcher selected a different, verified inode. */
+  const char* driver = getenv("SNAPSHOT_CUDA_DRIVER_LIBRARY");
+  Dl_info loaded;
+  struct stat expected, actual;
+  if (driver == NULL || !dladdr(dlsym(RTLD_DEFAULT, "cuCheckpointProcessGetState"), &loaded) ||
+      stat(driver, &expected) != 0 || stat(loaded.dli_fname, &actual) != 0 ||
+      expected.st_dev != actual.st_dev || expected.st_ino != actual.st_ino) {
+    fprintf(stderr, "CUDA helper did not load the selected driver library\n");
+    return 1;
+  }
+
   if (argc == 1) {
     return print_usage(stderr);
   }
@@ -369,6 +384,10 @@ main(int argc, char** argv)
       return print_usage(stderr);
     }
     status = do_get_restore_tid(pid, &tid);
+    /* Distinguish a process without a CUDA context from a failed probe. */
+    if (status == CUDA_ERROR_INVALID_VALUE || status == CUDA_ERROR_NOT_INITIALIZED) {
+      return 3;
+    }
     if (status != CUDA_SUCCESS) {
       print_cuda_error(status);
       return 1;

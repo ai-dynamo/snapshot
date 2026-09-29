@@ -343,6 +343,30 @@ COPY --from=criu-builder /criu-install/usr/local/lib/snapshot/criu-plugins/ /sna
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /snapshot-binaries/cuda-checkpoint
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-checkpoint-helper
 
+# Keep each trusted driver's dynamically loaded companions and SONAME aliases
+# together. Package metadata locates them without coupling this to toolkit paths.
+RUN --mount=from=cuda-helper-headers,target=/cuda-helper-image \
+    set -eu; \
+    for compat_root in "" /cuda-helper-image; do \
+      packages="$(dpkg-query --admindir="${compat_root}/var/lib/dpkg" -W -f='${binary:Package}\n' 'cuda-compat-*')"; \
+      test -n "$packages"; \
+      for package in $packages; do \
+        compat_dir="$(dpkg-query --admindir="${compat_root}/var/lib/dpkg" -L "$package" | sed -n '\,/compat$,{p;q;}')"; \
+        test -n "$compat_dir"; \
+        driver="$(find "${compat_root}${compat_dir}" -type f -name 'libcuda.so.*')"; \
+        test -f "$driver"; \
+        companions="/snapshot-binaries/cuda-compat/${driver##*/}"; \
+        mkdir -p "$companions" "/legal/cuda-compat/$package"; \
+        cp -a "$(dirname "$driver")/." "$companions/"; \
+        for alias in "$companions"/*; do \
+          [ -L "$alias" ] || continue; \
+          target="$(readlink "$alias")"; \
+          test "$target" = "${target##*/}" && test -f "$alias"; \
+        done; \
+        cp -a "${compat_root}/usr/share/doc/$package/." "/legal/cuda-compat/$package/"; \
+      done; \
+    done
+
 # Network binaries needed during restore:
 #   ip  — address/route restore (criu/net.c)
 #   tar — used by runtime.ApplyRootfsDiff
