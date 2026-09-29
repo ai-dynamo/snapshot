@@ -25,7 +25,7 @@ AGENT_BASE_IMAGE ?= $(shell sed -n 's/^ARG AGENT_BASE_IMAGE=//p' agent/Dockerfil
 # whatever the buildx builder defaults to.
 AGENT_PLATFORM ?= linux/amd64
 
-.PHONY: tidy generate test build lint verify-generate verify-crds verify-toc update-toc check fmt add-license-headers \
+.PHONY: tidy generate test test-integration build lint verify-generate verify-crds verify-toc update-toc check fmt add-license-headers \
         verify-license-headers govulncheck helm-lint docker-build-agent docker-build-operator docker-build-pagebroker \
         capture-base-packages verify-base-packages \
         linux-build linux-test pagebroker-check-generated
@@ -47,6 +47,10 @@ test:
 	$(MAKE) -C api test
 	$(MAKE) -C agent test
 	$(MAKE) -C operator test
+
+# Only the operator has envtest-backed admission tests today.
+test-integration:
+	$(MAKE) -C operator test-integration
 
 build:
 	$(MAKE) -C agent build

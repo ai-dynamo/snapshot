@@ -15,6 +15,15 @@ metadata:
   labels:
     {{- include "snapshot.labels" . | nindent 4 }}
 data:
+  # Resolved backend settings for operator/PageBroker, not AgentConfig. Keeping
+  # this separate lets another resolver supply them without changing agent APIs.
+  storage.yaml: |
+    type: {{ .Values.storage.type | quote }}
+    pvc:
+      namespace: {{ .Release.Namespace | quote }}
+      claimName: {{ required "storage.pvc.name is required" .Values.storage.pvc.name | quote }}
+      # The entire claim is used; this is not the container-local mount path.
+      basePath: "/"
   config.yaml: |
     storage:
       type: {{ .Values.storage.type | quote }}
