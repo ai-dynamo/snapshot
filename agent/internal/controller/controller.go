@@ -71,10 +71,8 @@ type NodeController struct {
 	restorePodLister        corev1listers.PodLister
 	compareFn               func(compat.Gate, compat.Environment, compat.Environment) []compat.Mismatch
 
-	// captureQueue holds PodSnapshotContent names. One key per work order is the capture path's
-	// only mutual exclusion, and exactly one agent runs per node (the DaemonSet has no surge), so
-	// process-local exclusion is cluster-wide. Losing it on restart is safe: the informers' LIST
-	// re-enqueues everything, and a capture resumes from status and the artifact on disk.
+	// captureQueue holds PodSnapshotContent names. Its per-key exclusion is the capture path's only
+	// lock, which is enough because exactly one agent runs per node.
 	captureQueue workqueue.TypedRateLimitingInterface[string]
 
 	handledRestores sync.Map
@@ -161,10 +159,10 @@ const (
 	// not-yet-Ready source pod is re-checked for quiesce without a busy loop.
 	snapshotContentResyncInterval = 10 * time.Second
 
-	// nodeQueueWorkers caps in-flight items per queue. A ceiling against fan-out, not a resource
-	// budget: what saturates a node during a dump is memory and disk, which a worker count does
-	// not measure.
-	nodeQueueWorkers = 16
+	// nodeQueueWorkers caps in-flight items per queue, so the node-wide ceiling is twice this. A
+	// guard against fan-out, not a resource budget: a node runs out of memory, disk or GPUs long
+	// before it runs this many dumps, which is why the number is low rather than tuned.
+	nodeQueueWorkers = 8
 )
 
 // podSnapshotContentGVR is the cluster-scoped resource the capture informer watches.

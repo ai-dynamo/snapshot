@@ -1001,3 +1001,46 @@ func TestReconcileCapture_IndexErrorReturned(t *testing.T) {
 	assert.False(t, fc.wasCalled())
 	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
 }
+
+// TestRunCheckpoint_TimeoutFailsTheWorkOrder covers the hang guard: a dump that outlives
+// checkpointTimeoutSeconds must end as a terminal CheckpointFailed rather than holding its queue
+// worker until the agent restarts.
+func TestRunCheckpoint_TimeoutFailsTheWorkOrder(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content)
+	w.config.Checkpoint = snapshottypes.CheckpointSpec{CheckpointTimeoutSeconds: 1}
+	w.checkpointFn = func(ctx context.Context, _ CheckpointParams) error {
+		<-ctx.Done() // a dump that honours cancellation, e.g. cuda-checkpoint
+		return ctx.Err()
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")}}
+
+	require.NoError(t, w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, string(content.UID), t.TempDir()))
+
+	cond := meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, cond, "a timed-out dump must reach a terminal status")
+	assert.Equal(t, "CheckpointFailed", cond.Reason)
+}
+
+// TestRunCheckpoint_TimeoutFailsADumpThatIgnoresCancellation is the CRIU case: ExecuteDump takes no
+// context, so it can return success after the deadline. That dump is not trustworthy.
+func TestRunCheckpoint_TimeoutFailsADumpThatIgnoresCancellation(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	w := makeNodeController(t, &fakeCheckpointer{}, content)
+	w.config.Checkpoint = snapshottypes.CheckpointSpec{CheckpointTimeoutSeconds: 1}
+	w.checkpointFn = func(context.Context, CheckpointParams) error {
+		time.Sleep(1200 * time.Millisecond)
+		return nil // overran the deadline but reports success
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")}}
+
+	require.NoError(t, w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, string(content.UID), t.TempDir()))
+
+	got := getContent(t, w, content.Name)
+	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionReady),
+		"a dump that overran its deadline must not be published as Ready")
+	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, cond)
+	assert.Contains(t, cond.Message, "checkpoint exceeded")
+}

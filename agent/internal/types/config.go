@@ -22,6 +22,7 @@ type AgentConfig struct {
 	Storage           StorageSpec     `yaml:"storage"`
 	Overlay           OverlaySettings `yaml:"overlay"`
 	PageBroker        PageBrokerSpec  `yaml:"pageBroker"`
+	Checkpoint        CheckpointSpec  `yaml:"checkpoint"`
 	Restore           RestoreSpec     `yaml:"restore"`
 	CRIU              CRIUSettings    `yaml:"criu"`
 }
@@ -62,6 +63,9 @@ func (c *AgentConfig) Validate() error {
 			Message: fmt.Sprintf("unsupported imageIoMode %q; expected %q, %q, or empty", c.CRIU.ImageIoMode, "writeback", "direct"),
 		}
 	}
+	if err := c.Checkpoint.Validate(); err != nil {
+		return err
+	}
 	return c.Restore.Validate()
 }
 
@@ -74,6 +78,27 @@ type StorageSpec struct {
 type PageBrokerSpec struct {
 	Enabled           bool   `yaml:"enabled"`
 	ControlSocketPath string `yaml:"controlSocketPath"`
+}
+
+// CheckpointSpec holds settings for the CRIU dump.
+type CheckpointSpec struct {
+	CheckpointTimeoutSeconds int `yaml:"checkpointTimeoutSeconds"`
+}
+
+// CheckpointTimeout bounds one dump. It is a hang detector, not a performance budget: it exists so
+// a wedged capture cannot hold its queue worker until the agent restarts.
+func (c *CheckpointSpec) CheckpointTimeout() time.Duration {
+	if c.CheckpointTimeoutSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(c.CheckpointTimeoutSeconds) * time.Second
+}
+
+func (c *CheckpointSpec) Validate() error {
+	if c.CheckpointTimeoutSeconds <= 0 {
+		return &ConfigError{Field: "checkpointTimeoutSeconds", Message: "checkpointTimeoutSeconds must be greater than zero"}
+	}
+	return nil
 }
 
 // RestoreSpec holds settings for the CRIU restore process.

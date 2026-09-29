@@ -213,6 +213,12 @@ config:
       - "*/__pycache__"
       - "*.pyc"
 
+  checkpoint:
+    # Maximum seconds to allow a checkpoint attempt before the agent marks it failed. A hang
+    # detector, not a performance budget: a wedged capture would otherwise hold a queue worker
+    # until the agent restarts.
+    checkpointTimeoutSeconds: 3600
+
   restore:
     # Maximum seconds to allow a restore attempt before the agent marks it failed
     restoreTimeoutSeconds: 7200
