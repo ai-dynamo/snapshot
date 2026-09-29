@@ -68,7 +68,7 @@ For the experiment setup, the per stage breakdown, and the full results, see [be
   restart or a move to another node.
 
 Snapshot currently focuses on inference cold-start; further use cases are on the
-roadmap.
+[roadmap](docs/roadmap.md).
 
 ## Who it's for
 
@@ -152,7 +152,7 @@ Current limitations:
 - vGPU is not supported.
 - Runs only on NVIDIA GPUs supported by the required CUDA driver.
 
-Multi-GPU and Arm support are on the roadmap.
+Multi-GPU and Arm support are on the [roadmap](docs/roadmap.md).
 
 ## Documentation
 
@@ -185,6 +185,7 @@ operations, indexed below.
 
 **More**
 
+- [Roadmap](docs/roadmap.md) — what's coming next, by theme.
 - [Limitations & known issues](docs/limitations.md) — current limitations and what's on the roadmap.
 - [Snapshot Enhancement Proposals](docs/proposals/README.md) — the design process for significant Snapshot changes.
 
