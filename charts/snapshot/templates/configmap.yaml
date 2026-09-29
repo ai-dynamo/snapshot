@@ -26,6 +26,9 @@ data:
       exclusions: {{ toYaml .Values.config.overlay.exclusions | nindent 8 }}
 
     pageBroker:
+      cudaStorageMode: {{ .Values.pageBroker.cudaStorageMode | quote }}
+      integrity: {{ .Values.pageBroker.integrity }}
+      nativeCUDA: {{ not (empty .Values.pageBroker.gpuEngine) }}
       enabled: {{ .Values.pageBroker.enabled }}
       {{- if .Values.pageBroker.enabled }}
       controlSocketPath: {{ printf "%s/pagebroker.sock" (include "snapshot.pageBrokerControlPath" .) | quote }}

@@ -48,6 +48,12 @@ func (c *AgentConfig) Validate() error {
 	if c.PageBroker.Enabled && strings.TrimSpace(c.PageBroker.ControlSocketPath) == "" {
 		return &ConfigError{Field: "pageBroker.controlSocketPath", Message: "pageBroker.controlSocketPath is required when PageBroker is enabled"}
 	}
+	if mode := c.PageBroker.CUDAStorageMode; mode != "" && mode != "custom" && mode != "driver" {
+		return &ConfigError{Field: "pageBroker.cudaStorageMode", Message: "must be custom or driver"}
+	}
+	if c.PageBroker.Integrity && (!c.PageBroker.Enabled || !c.PageBroker.NativeCUDA) {
+		return &ConfigError{Field: "pageBroker.integrity", Message: "requires PageBroker native CUDA"}
+	}
 	if c.CRIU.TcpClose && c.CRIU.TcpEstablished {
 		return &ConfigError{
 			Field:   "criu",
@@ -72,6 +78,13 @@ type StorageSpec struct {
 }
 
 type PageBrokerSpec struct {
+	// CUDAStorageMode selects capture storage; restore follows the saved manifest.
+	CUDAStorageMode string `yaml:"cudaStorageMode"`
+
+	// Integrity enables SHA-256 for PageBroker-managed GPU extents.
+	Integrity bool `yaml:"integrity"`
+
+	NativeCUDA        bool   `yaml:"nativeCUDA"`
 	Enabled           bool   `yaml:"enabled"`
 	ControlSocketPath string `yaml:"controlSocketPath"`
 }

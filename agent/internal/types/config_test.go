@@ -58,3 +58,42 @@ func TestAgentConfigValidateRequiresPageBrokerControlSocket(t *testing.T) {
 		t.Fatal("expected error for missing PageBroker control socket")
 	}
 }
+
+func TestPageBrokerCUDAStorageModes(t *testing.T) {
+	for _, mode := range []string{"", "custom", "driver", "invalid"} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := validAgentConfig()
+			if err := yaml.Unmarshal([]byte("pageBroker:\n  cudaStorageMode: "+mode+"\n"), cfg); err != nil {
+				t.Fatal(err)
+			}
+			if err := cfg.Validate(); (err != nil) != (mode == "invalid") {
+				t.Fatalf("Validate mode %q: %v", mode, err)
+			}
+		})
+	}
+}
+
+func TestPageBrokerIntegrityRequiresGPUPath(t *testing.T) {
+	for _, tc := range []struct {
+		name                       string
+		enabled, native, integrity bool
+		mode                       string
+		valid                      bool
+	}{
+		{"default-off", false, false, false, "", true},
+		{"custom", true, true, true, "custom", true},
+		{"implicit-custom", true, true, true, "", true},
+		{"driver-capture-default", true, true, true, "driver", true},
+		{"no-engine", true, false, true, "custom", false},
+		{"disabled-broker", false, true, true, "custom", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validAgentConfig()
+			cfg.PageBroker = PageBrokerSpec{Enabled: tc.enabled, NativeCUDA: tc.native,
+				Integrity: tc.integrity, CUDAStorageMode: tc.mode, ControlSocketPath: "/tmp/broker"}
+			if err := cfg.Validate(); (err == nil) != tc.valid {
+				t.Fatalf("Validate = %v, valid = %t", err, tc.valid)
+			}
+		})
+	}
+}

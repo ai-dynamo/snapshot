@@ -63,17 +63,5 @@ bool ContentDigest::Finalize(std::string *hex_digest, std::string *error) {
   return true;
 }
 
-bool IsSHA256Hex(const std::string &value) {
-  if (value.size() != 64) {
-    return false;
-  }
-  for (const char character : value) {
-    if (!((character >= '0' && character <= '9') ||
-          (character >= 'a' && character <= 'f'))) {
-      return false;
-    }
-  }
-  return true;
-}
 
 } // namespace cuda_checkpoint_storage

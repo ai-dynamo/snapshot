@@ -1,3 +1,4 @@
 /build/
 /pagebroker
-/pagebroker.pb.*
+/*.pb.*
+/v1/*.pb.*

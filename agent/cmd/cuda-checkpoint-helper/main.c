@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "pagebroker/gpu_engine/cuda_checkpoint/driver_ops.h"
+
 static int
 print_usage(FILE* stream)
 {
@@ -210,25 +212,6 @@ process_state_string(CUprocessState state)
 }
 
 static CUresult
-do_lock(int pid, unsigned int timeout_ms)
-{
-  CUcheckpointLockArgs args;
-
-  memset(&args, 0, sizeof(args));
-  args.timeoutMs = timeout_ms;
-  return cuCheckpointProcessLock(pid, &args);
-}
-
-static CUresult
-do_checkpoint(int pid)
-{
-  CUcheckpointCheckpointArgs args;
-
-  memset(&args, 0, sizeof(args));
-  return cuCheckpointProcessCheckpoint(pid, &args);
-}
-
-static CUresult
 do_restore(int pid, const char* device_map)
 {
   CUcheckpointRestoreArgs args;
@@ -243,30 +226,9 @@ do_restore(int pid, const char* device_map)
 
   args.gpuPairs = pairs;
   args.gpuPairsCount = pair_count;
-  status = cuCheckpointProcessRestore(pid, &args);
+  status = snapshot_cuda_restore(pid, &args);
   free(pairs);
   return status;
-}
-
-static CUresult
-do_unlock(int pid)
-{
-  CUcheckpointUnlockArgs args;
-
-  memset(&args, 0, sizeof(args));
-  return cuCheckpointProcessUnlock(pid, &args);
-}
-
-static CUresult
-do_get_state(int pid, CUprocessState* state_out)
-{
-  return cuCheckpointProcessGetState(pid, state_out);
-}
-
-static CUresult
-do_get_restore_tid(int pid, int* tid_out)
-{
-  return cuCheckpointProcessGetRestoreThreadId(pid, tid_out);
 }
 
 int
@@ -354,7 +316,7 @@ main(int argc, char** argv)
     if (timeout_ms != 0 || device_map[0] != '\0') {
       return print_usage(stderr);
     }
-    status = do_get_state(pid, &state);
+    status = snapshot_cuda_get_state(pid, &state);
     if (status != CUDA_SUCCESS) {
       print_cuda_error(status);
       return 1;
@@ -368,7 +330,7 @@ main(int argc, char** argv)
     if (timeout_ms != 0 || device_map[0] != '\0') {
       return print_usage(stderr);
     }
-    status = do_get_restore_tid(pid, &tid);
+    status = snapshot_cuda_get_restore_thread_id(pid, &tid);
     if (status != CUDA_SUCCESS) {
       print_cuda_error(status);
       return 1;
@@ -377,12 +339,12 @@ main(int argc, char** argv)
   }
 
   if (strcmp(action, "lock") == 0) {
-    status = do_lock(pid, timeout_ms);
+    status = snapshot_cuda_lock(pid, timeout_ms);
   } else if (strcmp(action, "checkpoint") == 0) {
     if (timeout_ms != 0 || device_map[0] != '\0') {
       return print_usage(stderr);
     }
-    status = do_checkpoint(pid);
+    status = snapshot_cuda_checkpoint(pid, NULL);
   } else if (strcmp(action, "restore") == 0) {
     if (timeout_ms != 0) {
       return print_usage(stderr);
@@ -392,7 +354,7 @@ main(int argc, char** argv)
     if (timeout_ms != 0 || device_map[0] != '\0') {
       return print_usage(stderr);
     }
-    status = do_unlock(pid);
+    status = snapshot_cuda_unlock(pid);
   } else {
     return print_usage(stderr);
   }

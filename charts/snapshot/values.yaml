@@ -105,6 +105,22 @@ storage:
 
 pageBroker:
   enabled: false
+  # Native CUDA requires the GPU PageBroker image. CustomStorage reserves
+  # 4 GiB of host memory per GPU with the default transfer configuration.
+  gpuEngine: ""
+  # Capture mode for the persistent GPU engine: custom or driver.
+  # Restore always follows the checkpoint manifest. Neither mode uses job files.
+  cudaStorageMode: custom
+  # SHA-256 covers CustomStorage GPU extents. Restoring with this enabled
+  # requires saved digests; structural and size checks always run.
+  integrity: false
+  # Persistent ring per visible GPU. Keep allocations/registrations off the
+  # restore path. The default reserves 4 GiB per GPU, as in the native baseline.
+  transferBufferCount: 32
+  transferChunkBytes: 134217728
+  # Optional cap on total pinned allocation across visible GPUs; 0 is uncapped.
+  # CUDA allocation rounding is included and arithmetic overflow is rejected.
+  maxPinnedBytes: 0
   command: []
   args: []
   maxConcurrentRequests: 16

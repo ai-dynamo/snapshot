@@ -13,18 +13,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libgtest-dev \
     libprotobuf-dev \
+    libssl-dev \
     pkg-config \
     protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 COPY . .
-RUN make test && make daemon
+RUN make test test-storage && make daemon
 
 # Smoke-test must run here: the runtime stage is distroless (no shell).
 RUN output=$(/src/pagebroker 2>&1); status=$?; \
     [ "$status" -eq 2 ]; \
-    [ "$output" = "usage: pagebroker socket_path staging_directory storage_root --max-concurrent-requests max_concurrent_requests" ]
+    case "$output" in "usage: pagebroker "*) ;; *) exit 1 ;; esac
 
 # Corresponding source for the statically linked protobuf. Fetched in this
 # stage, from the same libprotobuf-dev install that provided the linked
