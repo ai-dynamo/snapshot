@@ -37,7 +37,7 @@ Broaden where checkpoints can live and speed up how fast they move:
 
 Make checkpoint/restore behavior visible and safe to depend on:
 
-- **Automatic fallback to cold start**: Fall back to a normal cold start if checkpoint/restore fails.
+- **Retry and fallback handling**: Strengthen retry behavior and fallback paths for checkpoint/restore failures.
 - **Checkpoint/restore metrics**: Expose observability metrics for checkpoint and restore operations.
 - **Failover and high-availability restore**: Restore a workload elsewhere automatically after a node failure.
 
