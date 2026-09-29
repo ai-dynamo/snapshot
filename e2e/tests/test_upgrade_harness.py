@@ -16,6 +16,7 @@ from snapshot_e2e import k8s
 from snapshot_e2e.upgrade.context import Timings, UpgradeContext, UpgradeSettings
 
 
+WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "e2e-upgrade.yaml"
 ENV = (
     "SNAPSHOT_E2E_UPGRADE_FROM_TAG",
     "SNAPSHOT_E2E_SNAPSHOT_TAG",
@@ -108,12 +109,33 @@ def test_scenario_names_and_run_prefixes_are_unique() -> None:
     assert all(len(prefix) <= 24 for prefix in prefixes)
 
 
-def test_full_config_moves_both_components_to_the_new_version(env: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("name", "operator", "agent", "reset_then_reuse"),
+    [
+        ("full", "v0.0.0-g1a2b3c4d", "v0.0.0-g1a2b3c4d", False),
+        ("reset-then-reuse-values", "v0.0.0-g1a2b3c4d", "v0.0.0-g1a2b3c4d", True),
+        ("operator-first", "v0.0.0-g1a2b3c4d", "v0.1.0", False),
+        ("agent-first", "v0.1.0", "v0.0.0-g1a2b3c4d", False),
+    ],
+)
+def test_configs_say_which_version_each_component_runs_after_the_upgrade(
+    env: pytest.MonkeyPatch, name: str, operator: str, agent: str, reset_then_reuse: bool
+) -> None:
     settings = UpgradeSettings.from_env()
-    full = configs.get("full")
+    config = configs.get(name)
 
-    assert full.operator_tag(settings) == full.agent_tag(settings) == "v0.0.0-g1a2b3c4d"
-    assert not full.reuse_values
+    assert (config.operator_tag(settings), config.agent_tag(settings), config.reset_then_reuse_values) == (
+        operator,
+        agent,
+        reset_then_reuse,
+    )
+
+
+def test_manual_workflow_offers_every_config() -> None:
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    inputs = workflow[True]["workflow_dispatch"]["inputs"]
+
+    assert sorted(inputs["upgrade_config"]["options"]) == sorted(configs.CONFIGS)
 
 
 def test_upgrade_installs_the_checked_out_chart() -> None:
@@ -240,3 +262,23 @@ def test_pagebroker_matches_what_the_upgraded_chart_deploys(
     found = checks.pagebroker_problem(agent_pod(agent, pagebroker), TO, deploys)
 
     assert (found is None) if problem is None else (problem in found)
+
+
+@pytest.mark.parametrize(("name", "kind"), [("agent-first", "deployments"), ("operator-first", "daemonsets")])
+def test_held_rollouts_patch_with_strategic_merge(env: pytest.MonkeyPatch, name: str, kind: str) -> None:
+    requests = []
+
+    def call_api(self, resource_path, method, path_params=None, query_params=None, header_params=None, *args, **kwargs):
+        requests.append((resource_path, method, (header_params or {}).get("Content-Type")))
+
+    env.setattr(client.ApiClient, "call_api", call_api)
+    env.setattr(checks, "operator_deployment", lambda ctx: client.V1Deployment(metadata=client.V1ObjectMeta(name="op")))
+    env.setattr(checks, "agent_daemonset", lambda ctx: client.V1DaemonSet(metadata=client.V1ObjectMeta(name="agent")))
+    env.setattr(configs.setup, "install_snapshot_chart", lambda **kwargs: None)
+    config = k8s.E2EConfig(namespace="snapshot-e2e", release="snapshot", pvc_name="snapshot-pvc", kubeconfig=None)
+
+    configs.get(name).apply(UpgradeContext(config=config, settings=UpgradeSettings.from_env()))
+
+    assert [(method, content_type) for path, method, content_type in requests if kind in path] == [
+        ("PATCH", "application/strategic-merge-patch+json")
+    ]
