@@ -201,6 +201,12 @@ Optional settings:
 Each phase's duration is printed at the end, and appended to
 `GITHUB_STEP_SUMMARY` in CI.
 
+In CI, run the **E2E Upgrade Tests** workflow (`.github/workflows/e2e-upgrade.yaml`)
+by hand. Its inputs choose the version to upgrade from (release tag or main
+commit hash; empty means the latest release), the version to upgrade to (empty
+means the checked-out commit), and the config, profile, or scenarios. It creates
+a vCluster, installs the old version from GHCR, and runs this test.
+
 To add a scenario, subclass `UpgradeScenario` in
 `snapshot_e2e/upgrade/scenarios.py`. Implement `pre_upgrade` and `post_upgrade`,
 and register it in `SCENARIOS` with the profiles it belongs to.
