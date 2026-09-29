@@ -189,9 +189,9 @@ func (w *NodeController) captureOwnerForPod(pod *corev1.Pod) (string, error) {
 	return chooseActiveContent(objs), nil
 }
 
-// runCheckpoint executes the dump, then writes the terminal status. It runs on the queue worker
-// rather than a detached goroutine, which is what keeps the key claimed for the whole dump. The
-// dump terminates the target, so there is no release step.
+// runCheckpoint executes the dump, then writes the terminal status. It runs inline on the queue
+// item rather than a goroutine of its own, which is what keeps the key claimed for the whole dump.
+// The dump terminates the target, so there is no release step.
 //
 // A returned error means the outcome was not recorded and the queue should retry; a recorded
 // failure returns nil, because retrying a terminal work order achieves nothing.
@@ -206,10 +206,11 @@ func (w *NodeController) runCheckpoint(
 ) error {
 	logger := logr.FromContextOrDiscard(ctx)
 
-	// Bound the dump so a wedged capture cannot hold its queue worker indefinitely. This reaches
-	// the cancellable phases only — cuda.CheckpointProcessTree takes a context; criu.ExecuteDump
-	// does not, so a CRIU dump that wedges still runs to completion. Status writes below keep the
-	// outer ctx, so a dump that does fail on the deadline still records a terminal status.
+	// Bound the dump so a wedged capture still reaches a terminal status instead of leaving the
+	// work order unresolved forever. This reaches the cancellable phases only —
+	// cuda.CheckpointProcessTree takes a context; criu.ExecuteDump does not, so a CRIU dump that
+	// wedges still runs to completion. Status writes below keep the outer ctx, so a dump that does
+	// fail on the deadline still records that failure.
 	dumpCtx := ctx
 	if timeout := w.config.Checkpoint.CheckpointTimeout(); timeout > 0 {
 		var cancel context.CancelFunc

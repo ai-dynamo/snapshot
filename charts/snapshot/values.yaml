@@ -215,8 +215,8 @@ config:
 
   checkpoint:
     # Maximum seconds to allow a checkpoint attempt before the agent marks it failed. A hang
-    # detector, not a performance budget: a wedged capture would otherwise hold a queue worker
-    # until the agent restarts.
+    # detector, not a performance budget: without it a wedged capture never reaches a terminal
+    # status, leaving the work order unresolved with its source pod already dead.
     checkpointTimeoutSeconds: 3600
 
   restore:

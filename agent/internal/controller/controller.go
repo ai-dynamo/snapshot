@@ -158,11 +158,6 @@ const (
 	// snapshotContentResyncInterval re-drives every PodSnapshotContent work order so a
 	// not-yet-Ready source pod is re-checked for quiesce without a busy loop.
 	snapshotContentResyncInterval = 10 * time.Second
-
-	// nodeQueueWorkers caps in-flight items per queue, so the node-wide ceiling is twice this. A
-	// guard against fan-out, not a resource budget: a node runs out of memory, disk or GPUs long
-	// before it runs this many dumps, which is why the number is low rather than tuned.
-	nodeQueueWorkers = 8
 )
 
 // podSnapshotContentGVR is the cluster-scoped resource the capture informer watches.
@@ -395,28 +390,19 @@ func (w *NodeController) restorePodRelevant(pod *corev1.Pod) bool {
 		(hasFinalizer(pod, restorePodFinalizer) || w.restorePodRequested(pod))
 }
 
+// runRestoreQueue gives each pod its own goroutine. A CRIU run holds it for minutes and must not
+// head-of-line block unrelated pods, and there is no fixed worker count to bound it: the node's
+// GPUs and pod capacity already cap how many restores can exist, and a count low enough to matter
+// would instead leave deleted pods Terminating behind the queue, since the restore finalizer comes
+// off in processRestoreQueueItem.
 func (w *NodeController) runRestoreQueue(ctx context.Context) {
-	runQueueWorkers(w.restoreQueue.Get, func(key client.ObjectKey) {
-		w.processRestoreQueueItem(ctx, key)
-	})
-}
-
-// runQueueWorkers drives one queue with a fixed pool. A CRIU run holds its worker for minutes,
-// so items still need separate goroutines; the pool is what bounds how many.
-func runQueueWorkers[T comparable](next func() (T, bool), process func(T)) {
-	var workers sync.WaitGroup
-	for range nodeQueueWorkers {
-		workers.Go(func() {
-			for {
-				item, shutdown := next()
-				if shutdown {
-					return
-				}
-				process(item)
-			}
-		})
+	for {
+		key, shutdown := w.restoreQueue.Get()
+		if shutdown {
+			return
+		}
+		go w.processRestoreQueueItem(ctx, key)
 	}
-	workers.Wait()
 }
 
 func (w *NodeController) processRestoreQueueItem(ctx context.Context, key client.ObjectKey) {
@@ -1211,10 +1197,16 @@ func (w *NodeController) enqueueCaptureForSourcePod(obj interface{}) {
 	}
 }
 
+// runCaptureQueue gives each work order its own goroutine, for the same reasons as the restore
+// queue. Per-key exclusion still comes from the queue itself.
 func (w *NodeController) runCaptureQueue(ctx context.Context) {
-	runQueueWorkers(w.captureQueue.Get, func(name string) {
-		w.processCaptureQueueItem(ctx, name)
-	})
+	for {
+		name, shutdown := w.captureQueue.Get()
+		if shutdown {
+			return
+		}
+		go w.processCaptureQueueItem(ctx, name)
+	}
 }
 
 // processCaptureQueueItem holds the key for the whole reconcile, dump included; Adds arriving

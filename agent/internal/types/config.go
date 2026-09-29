@@ -97,8 +97,9 @@ type CheckpointSpec struct {
 	CheckpointTimeoutSeconds *int `yaml:"checkpointTimeoutSeconds"`
 }
 
-// CheckpointTimeout bounds one dump. It is a hang detector, not a performance budget: it exists so
-// a wedged capture cannot hold its queue worker until the agent restarts.
+// CheckpointTimeout bounds one dump. It is a hang detector, not a performance budget: without it a
+// wedged capture never reaches a terminal status, so the work order sits unresolved forever with
+// its source pod already dead.
 func (c *CheckpointSpec) CheckpointTimeout() time.Duration {
 	if c.CheckpointTimeoutSeconds == nil {
 		return DefaultCheckpointTimeoutSeconds * time.Second
