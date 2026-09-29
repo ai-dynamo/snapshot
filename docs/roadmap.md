@@ -5,12 +5,6 @@ SPDX-License-Identifier: Apache-2.0
 
 # Roadmap
 
-Snapshot checkpoints a live GPU inference replica and restores it on any
-compatible node in seconds, replacing minutes-long cold starts. It's currently
-in alpha, focused on single-GPU inference workloads on vLLM, SGLang, and
-TRT-LLM, checkpointing to a PVC through a runtime layered on top of the
-upstream inference server. The roadmap below tracks how that scope widens.
-
 ## 1. Scheduling & Lifecycle
 
 Let Snapshot drive checkpoint/restore on its own, rather than only on request:
