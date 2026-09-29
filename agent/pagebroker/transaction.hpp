@@ -11,10 +11,17 @@
 #include "restore_transaction_descriptor.hpp"
 
 namespace snapshot::pagebroker {
+// A borrowed immutable artifact, never owned by transaction cleanup. Consumers
+// open relative to this descriptor rather than resolving the source path again.
+struct DirectRestoreDescriptor {
+  FileDescriptor source_directory;
+};
+
 class Transaction {
  public:
   enum class State { NEW, PREPARING, STAGED, COMMITTED, ABORTED };
-  using Descriptor = std::variant<std::monostate, RestoreTransactionDescriptor, CheckpointTransactionDescriptor>;
+  using Descriptor = std::variant<std::monostate, RestoreTransactionDescriptor, CheckpointTransactionDescriptor,
+                                  DirectRestoreDescriptor>;
 
   // Callers hold mutex() while accessing transaction state.
   std::mutex& mutex();
