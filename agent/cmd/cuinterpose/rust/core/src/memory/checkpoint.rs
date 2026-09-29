@@ -79,14 +79,15 @@ impl ProcessState {
                 .sum();
             let record = Record::Allocation {
                 allocation: allocation.reference,
-                content: allocation.needs_content_checkpoint(self.namespace_pid),
+                checkpoint_via_host_carrier: allocation
+                    .checkpoint_via_host_carrier(self.namespace_pid),
                 size: allocation.size as u64,
                 allocation_type: allocation.properties.type_ as u32,
                 handle_types: allocation.properties.requestedHandleTypes.0,
-                location: (
-                    allocation.properties.location.type_ as u32,
-                    allocation.properties.location.id,
-                ),
+                location: cuinterpose_protocol::MemoryLocation {
+                    location_type: allocation.properties.location.type_ as u32,
+                    id: allocation.properties.location.id,
+                },
                 virtual_allocation_handle_count,
             };
             records.push(record);
@@ -142,7 +143,7 @@ impl ProcessState {
                     .memblocks
                     .values()
                     .filter_map(Memblock::unicast)
-                    .filter(|a| a.needs_content_checkpoint(self.namespace_pid))
+                    .filter(|a| a.checkpoint_via_host_carrier(self.namespace_pid))
                     .map(|a| a.reference.id)
                     .collect();
                 let mut allocations = Vec::new();
@@ -216,7 +217,7 @@ impl ProcessState {
                     .memblocks
                     .values()
                     .filter_map(Memblock::unicast)
-                    .filter(|a| a.needs_content_checkpoint(self.namespace_pid))
+                    .filter(|a| a.checkpoint_via_host_carrier(self.namespace_pid))
                     .map(AllocationContent::from)
                     .collect();
                 bytes = allocations.iter().try_fold(0u64, |sum, a| {

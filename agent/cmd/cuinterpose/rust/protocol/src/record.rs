@@ -4,6 +4,30 @@
 use crate::AllocationReference;
 use serde::{Deserialize, Serialize};
 
+/// CUDA memory location (`CUmemLocation`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct MemoryLocation {
+    pub location_type: u32,
+    pub id: i32,
+}
+
+/// Access permissions at a CUDA memory location (`CUmemAccessDesc`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct MemoryAccess {
+    pub location: MemoryLocation,
+    pub flags: u32,
+}
+
+/// Creation properties shared by multicast records and export replies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct MulticastProperties {
+    /// `CUmulticastObjectProp::numDevices`.
+    pub devices: u32,
+    pub size: u64,
+    pub handle_types: u64,
+    pub flags: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct MemberRange {
     pub allocation: AllocationReference,
@@ -36,14 +60,18 @@ pub enum BindingVersion {
 pub enum Record {
     Allocation {
         allocation: AllocationReference,
-        content: bool,
+        /// This participant saves device bytes into the CRIU-captured host carrier
+        /// and restores them from it. True only for creator-owned shared device
+        /// allocations; importers do not duplicate the copy, and private memory
+        /// uses native CUDA checkpointing.
+        checkpoint_via_host_carrier: bool,
         size: u64,
         /// `CUmemAllocationProp::type_`.
         allocation_type: u32,
         /// `CUmemAllocationProp::requestedHandleTypes` bits.
         handle_types: u32,
-        /// `CUmemAllocationProp::location` as `(type_, id)`.
-        location: (u32, i32),
+        /// `CUmemAllocationProp::location`.
+        location: MemoryLocation,
         virtual_allocation_handle_count: u64,
     },
     Mapping {
@@ -51,16 +79,12 @@ pub enum Record {
         address: u64,
         size: u64,
         offset: u64,
-        /// `CUmemAccessDesc` values as `(location.type_, location.id, flags)`.
-        access: Vec<(u32, i32, u32)>,
+        /// `CUmemAccessDesc` values.
+        access: Vec<MemoryAccess>,
     },
     Multicast {
         allocation: AllocationReference,
-        /// Fields from `CUmulticastObjectProp`.
-        devices: u32,
-        size: u64,
-        handle_types: u64,
-        flags: u64,
+        properties: MulticastProperties,
         virtual_multicast_handle_count: u64,
     },
     MulticastDevice {
@@ -82,7 +106,7 @@ pub enum Record {
         size: u64,
         offset: u64,
         flags: u64,
-        /// `CUmemAccessDesc` values as `(location.type_, location.id, flags)`.
-        access: Vec<(u32, i32, u32)>,
+        /// `CUmemAccessDesc` values.
+        access: Vec<MemoryAccess>,
     },
 }
