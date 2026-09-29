@@ -13,7 +13,8 @@ from snapshot_e2e.upgrade import checks
 from snapshot_e2e.upgrade import configs
 from snapshot_e2e.upgrade import scenarios
 from snapshot_e2e import k8s
-from snapshot_e2e.upgrade.context import Timings, UpgradeContext, UpgradeSettings
+from snapshot_e2e import workloads
+from snapshot_e2e.upgrade.context import ScenarioState, Timings, UpgradeContext, UpgradeSettings
 
 
 WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "e2e-upgrade.yaml"
@@ -74,6 +75,10 @@ def test_all_profile_includes_every_scenario(env: pytest.MonkeyPatch) -> None:
         "delete-pre-upgrade-snapshot",
         "restore-pre-upgrade-snapshot-cpu",
         "restored-pod-survives-upgrade",
+        "snapshotjob-in-flight",
+        "snapshotjob-completed",
+        "failed-restore-stays-failed",
+        "compat-check-still-enforced",
     ]
 
 
@@ -93,7 +98,7 @@ def test_unknown_scenario_is_rejected(env: pytest.MonkeyPatch) -> None:
 def test_only_one_scenario_holds_a_gpu_at_a_time() -> None:
     gpu = [scenario.name for scenario in scenarios.SCENARIOS if getattr(scenario, "gpu", False)]
 
-    assert gpu == ["restore-pre-upgrade-snapshot-gpu"], (
+    assert gpu == ["restore-pre-upgrade-snapshot-gpu", "failed-restore-stays-failed"], (
         "a new GPU scenario must not hold a GPU pod across the upgrade while another scenario "
         "needs its node's GPU afterwards (restores are pinned to the checkpoint node); "
         "check that, then update this list"
@@ -211,6 +216,8 @@ def test_timings_summary_lists_each_phase(monkeypatch: pytest.MonkeyPatch, tmp_p
         pass
     with pytest.raises(RuntimeError), timings.phase("Upgrade (full)"):
         raise RuntimeError("helm failed")
+    with pytest.raises(pytest.skip.Exception), timings.phase("PostUpgrade compat-check-still-enforced"):
+        pytest.skip("v0.1.0 does not record memory limits")
 
     timings.publish("Upgrade v0.1.0 → main")
 
@@ -218,6 +225,7 @@ def test_timings_summary_lists_each_phase(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert "### Upgrade v0.1.0 → main" in text
     assert "| PreUpgrade restore-pre-upgrade-snapshot-gpu | 0s | ok |" in text
     assert "| Upgrade (full) | 0s | failed |" in text
+    assert "| PostUpgrade compat-check-still-enforced | 0s | skipped |" in text
     assert "| **Total** |" in text
 
 
@@ -282,3 +290,27 @@ def test_held_rollouts_patch_with_strategic_merge(env: pytest.MonkeyPatch, name:
     assert [(method, content_type) for path, method, content_type in requests if kind in path] == [
         ("PATCH", "application/strategic-merge-patch+json")
     ]
+
+
+def test_in_flight_snapshotjob_waits_for_the_release_file_before_its_workload(env: pytest.MonkeyPatch) -> None:
+    config = k8s.E2EConfig(namespace="snapshot-e2e", release="snapshot", pvc_name="snapshot-pvc", kubeconfig=None)
+    ctx = UpgradeContext(config=config, settings=None)
+    state = ScenarioState(run=workloads.TestRun.new("upg-sj-inflight"))
+
+    command = scenarios.gated_snapshotjob_template(ctx, state)["spec"]["containers"][0]["command"]
+
+    assert command[:2] == ["/bin/bash", "-lc"]
+    gate, workload = command[2].split("\n", 1)
+    assert gate == f"while [ ! -f {scenarios.SNAPSHOTJOB_GATE} ]; do sleep 1; done"
+    assert workload == workloads.snapshotjob_source_command(state.run.image, False)
+
+
+@pytest.mark.parametrize(("config", "applies"), [("full", True), ("agent-first", True), ("operator-first", False)])
+def test_failed_restore_needs_a_restarted_agent(env: pytest.MonkeyPatch, config: str, applies: bool) -> None:
+    env.setenv("SNAPSHOT_E2E_UPGRADE_CONFIG", config)
+    ctx = UpgradeContext(
+        config=k8s.E2EConfig(namespace="n", release="r", pvc_name="p", kubeconfig=None),
+        settings=UpgradeSettings.from_env(),
+    )
+
+    assert scenarios.by_name("failed-restore-stays-failed").applies_to(ctx) is applies
