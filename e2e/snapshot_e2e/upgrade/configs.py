@@ -8,43 +8,71 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from kubernetes import client
+
 from snapshot_e2e.infra import setup
+from snapshot_e2e.upgrade import checks
 from snapshot_e2e.upgrade.context import UpgradeContext, UpgradeSettings
 
 
 CHART_DIR = Path(__file__).resolve().parents[3] / "charts" / "snapshot"
+STRATEGIC_MERGE_PATCH = "application/strategic-merge-patch+json"
 
 
 @dataclass(frozen=True)
 class UpgradeConfig:
     name: str
-    operator_stays_on_from: bool = False
-    agent_stays_on_from: bool = False
-    reuse_values: bool = False
+    hold_operator: bool = False
+    hold_agent: bool = False
+    reset_then_reuse_values: bool = False
 
     def operator_tag(self, settings: UpgradeSettings) -> str:
-        return settings.from_tag if self.operator_stays_on_from else settings.to_tag
+        return settings.from_tag if self.hold_operator else settings.to_tag
 
     def agent_tag(self, settings: UpgradeSettings) -> str:
-        return settings.from_tag if self.agent_stays_on_from else settings.to_tag
+        return settings.from_tag if self.hold_agent else settings.to_tag
 
     def apply(self, ctx: UpgradeContext) -> None:
+        apps = client.AppsV1Api()
+        namespace = ctx.config.namespace
+        if self.hold_operator:
+            deployment = checks.operator_deployment(ctx)
+            apps.patch_namespaced_deployment(
+                deployment.metadata.name,
+                namespace,
+                {"spec": {"paused": True}},
+                _content_type=STRATEGIC_MERGE_PATCH,
+            )
+        if self.hold_agent:
+            daemonset = checks.agent_daemonset(ctx)
+            apps.patch_namespaced_daemon_set(
+                daemonset.metadata.name,
+                namespace,
+                {"spec": {"updateStrategy": {"type": "OnDelete", "rollingUpdate": None}}},
+                _content_type=STRATEGIC_MERGE_PATCH,
+            )
         settings = ctx.settings
         setup.install_snapshot_chart(
             kubeconfig=ctx.config.kubeconfig,
-            namespace=ctx.config.namespace,
+            namespace=namespace,
             release=ctx.config.release,
             image_tag=settings.to_tag,
             pvc_name=ctx.config.pvc_name,
             timeout=settings.helm_timeout,
             chart=str(CHART_DIR),
-            operator_tag=self.operator_tag(settings),
-            agent_tag=self.agent_tag(settings),
-            reuse_values=self.reuse_values,
+            reset_then_reuse_values=self.reset_then_reuse_values,
         )
 
 
-CONFIGS = {config.name: config for config in (UpgradeConfig("full"),)}
+CONFIGS = {
+    config.name: config
+    for config in (
+        UpgradeConfig("full"),
+        UpgradeConfig("reset-then-reuse-values", reset_then_reuse_values=True),
+        UpgradeConfig("operator-first", hold_agent=True),
+        UpgradeConfig("agent-first", hold_operator=True),
+    )
+}
 
 
 def get(name: str) -> UpgradeConfig:

@@ -884,7 +884,7 @@ def snapshot_chart_command(
     chart_version: str | None = None,
     operator_tag: str | None = None,
     agent_tag: str | None = None,
-    reuse_values: bool = False,
+    reset_then_reuse_values: bool = False,
 ) -> list[str]:
     command = [
         "helm",
@@ -900,15 +900,15 @@ def snapshot_chart_command(
     ]
     if chart_version:
         command += ["--version", chart_version]
-    if reuse_values:
-        command.append("--reuse-values")
+    if reset_then_reuse_values:
+        command.append("--reset-then-reuse-values")
     command += [
         "--set",
         f"image.operator.tag={operator_tag or image_tag}",
         "--set",
         f"image.agent.tag={agent_tag or image_tag}",
     ]
-    if reuse_values:
+    if reset_then_reuse_values:
         return command
     return command + [
         "--set",
@@ -934,7 +934,7 @@ def install_snapshot_chart(
     chart_version: str | None = None,
     operator_tag: str | None = None,
     agent_tag: str | None = None,
-    reuse_values: bool = False,
+    reset_then_reuse_values: bool = False,
 ) -> None:
     source = f"{chart} {chart_version}" if chart_version else chart
     log(f"Installing Snapshot chart release {namespace}/{release} from {source}")
@@ -948,7 +948,7 @@ def install_snapshot_chart(
         chart_version=chart_version,
         operator_tag=operator_tag,
         agent_tag=agent_tag,
-        reuse_values=reuse_values,
+        reset_then_reuse_values=reset_then_reuse_values,
     )
     env = os.environ.copy()
     if kubeconfig:

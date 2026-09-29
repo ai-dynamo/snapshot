@@ -11,7 +11,7 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 from kubernetes import client
@@ -19,8 +19,10 @@ from kubernetes.client import ApiException
 
 from snapshot_e2e import k8s
 from snapshot_e2e import lifecycle
-from snapshot_e2e.upgrade.configs import UpgradeConfig
 from snapshot_e2e.upgrade.context import UpgradeContext
+
+if TYPE_CHECKING:
+    from snapshot_e2e.upgrade.configs import UpgradeConfig
 
 
 CRD_DIR = Path(__file__).resolve().parents[3] / "api" / "v1alpha1" / "crds"
@@ -28,6 +30,7 @@ OPERATOR = "operator"
 AGENT = "snapshot-agent"
 OPERATOR_CONTAINER = "manager"
 AGENT_CONTAINER = "agent"
+PAGEBROKER_CONTAINER = "pagebroker"
 CRD_INSTALLER = "crd-installer"
 CLEANUP_SCANS_WAIT_SECONDS = 20
 LOG_TAIL_LINES = 5000
@@ -100,31 +103,36 @@ def rollout_state(ctx: UpgradeContext, upgrade: UpgradeConfig) -> list[str]:
 
     deployment = operator_deployment(ctx)
     template_tag = image_tag(container_image(deployment.spec.template.spec.containers, OPERATOR_CONTAINER))
-    if template_tag != operator_tag:
-        pending.append(f"operator template runs {template_tag}, want {operator_tag}")
-    status = deployment.status
+    if template_tag != settings.to_tag:
+        pending.append(f"operator template runs {template_tag}, want {settings.to_tag}")
     replicas = deployment.spec.replicas or 0
-    if (status.observed_generation or 0) < (deployment.metadata.generation or 0):
-        pending.append("operator Deployment generation not observed")
-    if (status.updated_replicas or 0) < replicas or (status.ready_replicas or 0) < replicas:
-        pending.append(
-            f"operator updated={status.updated_replicas} ready={status.ready_replicas} want={replicas}"
-        )
-    if (status.replicas or 0) > replicas:
-        pending.append(f"operator still has {status.replicas} pods, want {replicas}")
+    if not upgrade.hold_operator:
+        status = deployment.status
+        if (status.observed_generation or 0) < (deployment.metadata.generation or 0):
+            pending.append("operator Deployment generation not observed")
+        if (status.updated_replicas or 0) < replicas or (status.ready_replicas or 0) < replicas:
+            pending.append(
+                f"operator updated={status.updated_replicas} ready={status.ready_replicas} want={replicas}"
+            )
+        if (status.replicas or 0) > replicas:
+            pending.append(f"operator still has {status.replicas} pods, want {replicas}")
 
     daemonset = agent_daemonset(ctx)
     template_tag = image_tag(container_image(daemonset.spec.template.spec.containers, AGENT_CONTAINER))
-    if template_tag != agent_tag:
-        pending.append(f"agent template runs {template_tag}, want {agent_tag}")
-    if not k8s.daemonset_ready(daemonset):
+    if template_tag != settings.to_tag:
+        pending.append(f"agent template runs {template_tag}, want {settings.to_tag}")
+    desired = daemonset.status.desired_number_scheduled or 0
+    if not upgrade.hold_agent and not k8s.daemonset_ready(daemonset):
         pending.append(k8s.daemonset_readiness_detail(daemonset))
 
-    for component, container, tag in (
-        (OPERATOR, OPERATOR_CONTAINER, operator_tag),
-        (AGENT, AGENT_CONTAINER, agent_tag),
+    for component, container, tag, want in (
+        (OPERATOR, OPERATOR_CONTAINER, operator_tag, replicas),
+        (AGENT, AGENT_CONTAINER, agent_tag, desired),
     ):
-        for pod in snapshot_pods(ctx, component):
+        pods = snapshot_pods(ctx, component)
+        if len(pods) != want:
+            pending.append(f"{len(pods)} {component} pods, want {want}")
+        for pod in pods:
             pod_tag = image_tag(container_image(pod.spec.containers, container))
             if pod.metadata.deletion_timestamp or pod_tag != tag or not k8s.pod_containers_ready(pod):
                 pending.append(f"{k8s.pod_readiness_detail(pod)} tag={pod_tag}")
@@ -231,6 +239,27 @@ def warning_events(ctx: UpgradeContext, since: datetime) -> list[str]:
     ]
 
 
+def pagebroker_problem(pod: client.V1Pod, agent_tag: str) -> str | None:
+    containers = {container.name: container for container in pod.spec.containers}
+    if image_tag(containers[AGENT_CONTAINER].image) != agent_tag:
+        return None
+    pagebroker = containers.get(PAGEBROKER_CONTAINER)
+    if pagebroker is None:
+        return f"{pod.metadata.name} runs the upgraded agent without pagebroker"
+    if image_tag(pagebroker.image) != agent_tag:
+        return f"{pod.metadata.name} runs pagebroker {image_tag(pagebroker.image)} next to agent {agent_tag}"
+    return None
+
+
+def assert_pagebroker_runs_with_upgraded_agents(ctx: UpgradeContext) -> None:
+    problems = [
+        problem
+        for pod in snapshot_pods(ctx, AGENT)
+        if (problem := pagebroker_problem(pod, ctx.settings.to_tag))
+    ]
+    assert not problems, "; ".join(problems)
+
+
 def assert_upgrade_completed(ctx: UpgradeContext, upgrade: UpgradeConfig) -> None:
     revision, status = helm_release(ctx)
     assert status == "deployed", f"helm release status is {status!r}"
@@ -238,8 +267,10 @@ def assert_upgrade_completed(ctx: UpgradeContext, upgrade: UpgradeConfig) -> Non
         f"helm revision {revision} is not newer than pre-upgrade revision {ctx.revision_before}"
     )
     wait_for_rollout(ctx, upgrade)
-    assert_crd_installer_succeeded(ctx)
-    assert_crds_upgraded()
+    if not upgrade.hold_operator:
+        assert_crd_installer_succeeded(ctx)
+        assert_crds_upgraded()
+    assert_pagebroker_runs_with_upgraded_agents(ctx)
     assert_no_restarts_or_panics(ctx)
     warnings = warning_events(ctx, ctx.upgrade_started)
     assert not warnings, "Warning events on pre-upgrade objects: " + "; ".join(warnings)
@@ -277,9 +308,6 @@ def assert_global_invariants(ctx: UpgradeContext) -> None:
     warnings = warning_events(ctx, ctx.upgrade_started)
     if warnings:
         problems.append("Warning events on pre-upgrade objects: " + "; ".join(warnings))
-    for pod in snapshot_pods(ctx, AGENT):
-        if any(container.name == "pagebroker" for container in pod.spec.containers):
-            problems.append(f"{pod.metadata.name} runs pagebroker, which the upgrade did not enable")
     assert not problems, "; ".join(problems)
 
 

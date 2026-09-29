@@ -10,8 +10,9 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Iterator
+from typing import Any, Iterator
 
+import pytest
 from kubernetes import client
 
 from snapshot_e2e import k8s
@@ -82,30 +83,35 @@ class ScenarioState:
     node: str = ""
     observations: int = 0
     snapshot: RecordedSnapshot | None = None
+    restored_pod_uid: str = ""
+    extra: dict[str, Any] = field(default_factory=dict)
     pre_upgrade_error: BaseException | None = None
 
 
 class Timings:
     def __init__(self) -> None:
-        self.entries: list[tuple[str, float, bool]] = []
+        self.entries: list[tuple[str, float, str]] = []
 
     @contextmanager
     def phase(self, label: str) -> Iterator[None]:
         start = time.monotonic()
         setup.log(f"Starting {label}")
-        ok = False
+        result = "failed"
         try:
             yield
-            ok = True
+            result = "ok"
+        except pytest.skip.Exception:
+            result = "skipped"
+            raise
         finally:
             seconds = time.monotonic() - start
-            self.entries.append((label, seconds, ok))
-            setup.log(f"{'Finished' if ok else 'Failed'} {label} in {seconds:.0f}s")
+            self.entries.append((label, seconds, result))
+            setup.log(f"{label} {result} in {seconds:.0f}s")
 
     def summary(self, title: str) -> str:
         lines = [f"### {title}", "", "| Phase | Duration | Result |", "| --- | --- | --- |"]
-        for label, seconds, ok in self.entries:
-            lines.append(f"| {label} | {seconds:.0f}s | {'ok' if ok else 'failed'} |")
+        for label, seconds, result in self.entries:
+            lines.append(f"| {label} | {seconds:.0f}s | {result} |")
         total = sum(seconds for _, seconds, _ in self.entries)
         lines.append(f"| **Total** | **{total:.0f}s** | |")
         return "\n".join(lines) + "\n"
@@ -136,7 +142,7 @@ class UpgradeContext:
     def snapshots(self) -> list[RecordedSnapshot]:
         return [state.snapshot for state in self.states.values() if state.snapshot]
 
-    def record_snapshot(self, name: str, node: str) -> RecordedSnapshot:
+    def record_snapshot(self, name: str, node: str | None = None) -> RecordedSnapshot:
         api = client.CustomObjectsApi()
         snapshot = lifecycle.get_custom_object(api, self.config.namespace, name, lifecycle.PODSNAPSHOTS)
         content_name = snapshot["status"]["boundSnapshotContentName"]
@@ -146,6 +152,6 @@ class UpgradeContext:
             uid=snapshot["metadata"]["uid"],
             content_name=content_name,
             content_uid=content["metadata"]["uid"],
-            node=node,
+            node=node or content["spec"]["source"]["nodeName"],
             content_finalizers=tuple(content["metadata"].get("finalizers") or ()),
         )

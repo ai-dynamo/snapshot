@@ -25,6 +25,9 @@ on:
         default: full
         options:
           - full
+          - reset-then-reuse-values
+          - operator-first
+          - agent-first
       upgrade_profile:
         description: Scenario set to run.
         required: false
@@ -52,7 +55,7 @@ jobs:
   upgrade:
     name: Upgrade Snapshot in vCluster
     runs-on: prod-deploy-tester-v1
-    timeout-minutes: 110
+    timeout-minutes: 155
     env:
       HOST_NAMESPACE: snapshot-e2e-upgrade-${{ github.run_id }}-${{ github.run_attempt }}
       VCLUSTER_NAME: snapshot-e2e-upgrade-${{ github.run_id }}-${{ github.run_attempt }}
@@ -162,7 +165,7 @@ jobs:
         uses: ./.github/actions/e2e-vcluster-export
 
       - name: Run upgrade tests
-        timeout-minutes: 45
+        timeout-minutes: 90
         run: |
           set -euo pipefail
           uv run --locked --project e2e pytest e2e/tests/test_upgrade.py -m upgrade -vv -s --durations=0

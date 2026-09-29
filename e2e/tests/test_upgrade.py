@@ -10,7 +10,6 @@ from typing import Iterator
 import pytest
 
 from snapshot_e2e import k8s
-from snapshot_e2e import lifecycle
 from snapshot_e2e.upgrade import checks
 from snapshot_e2e.upgrade import configs
 from snapshot_e2e.upgrade import scenarios
@@ -44,7 +43,7 @@ def upgraded() -> Iterator[UpgradeContext]:
             except Exception as exc:
                 state.pre_upgrade_error = exc
                 traceback.print_exc()
-                lifecycle.debug_dump(config, state.run)
+                scenario.debug(ctx, state)
 
         ctx.revision_before, _ = checks.helm_release(ctx)
         ctx.upgrade_started = datetime.now(timezone.utc)
@@ -56,9 +55,9 @@ def upgraded() -> Iterator[UpgradeContext]:
         yield ctx
     finally:
         ctx.timings.publish(title)
-        for state in ctx.states.values():
+        for name, state in ctx.states.items():
             try:
-                lifecycle.cleanup(config, state.run)
+                scenarios.by_name(name).cleanup(ctx, state)
             except Exception as exc:
                 print(f"cleanup warning for {state.run.suffix}: {exc}")
 
@@ -94,9 +93,10 @@ def test_post_upgrade(upgraded: UpgradeContext, name: str) -> None:
     require_upgrade(upgraded)
     if state.pre_upgrade_error is not None:
         pytest.fail(f"PreUpgrade of {name} failed: {state.pre_upgrade_error}")
+    scenario = scenarios.by_name(name)
     try:
         with upgraded.timings.phase(f"PostUpgrade {name}"):
-            scenarios.by_name(name).post_upgrade(upgraded, state)
+            scenario.post_upgrade(upgraded, state)
     except Exception:
-        lifecycle.debug_dump(upgraded.config, state.run)
+        scenario.debug(upgraded, state)
         raise

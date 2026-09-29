@@ -7,13 +7,17 @@ from pathlib import Path
 
 import pytest
 import yaml
+from kubernetes import client
 
 from snapshot_e2e.upgrade import checks
 from snapshot_e2e.upgrade import configs
 from snapshot_e2e.upgrade import scenarios
-from snapshot_e2e.upgrade.context import Timings, UpgradeSettings
+from snapshot_e2e import k8s
+from snapshot_e2e import workloads
+from snapshot_e2e.upgrade.context import ScenarioState, Timings, UpgradeContext, UpgradeSettings
 
 
+WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "e2e-upgrade.yaml"
 ENV = (
     "SNAPSHOT_E2E_UPGRADE_FROM_TAG",
     "SNAPSHOT_E2E_SNAPSHOT_TAG",
@@ -66,7 +70,16 @@ def test_basic_profile_selects_basic_scenarios(env: pytest.MonkeyPatch) -> None:
 def test_all_profile_includes_every_scenario(env: pytest.MonkeyPatch) -> None:
     env.setenv("SNAPSHOT_E2E_UPGRADE_PROFILE", "all")
 
-    assert scenarios.selected(UpgradeSettings.from_env()) == list(scenarios.SCENARIOS)
+    assert [scenario.name for scenario in scenarios.selected(UpgradeSettings.from_env())] == [
+        "restore-pre-upgrade-snapshot-gpu",
+        "delete-pre-upgrade-snapshot",
+        "restore-pre-upgrade-snapshot-cpu",
+        "restored-pod-survives-upgrade",
+        "snapshotjob-in-flight",
+        "snapshotjob-completed",
+        "failed-restore-stays-failed",
+        "compat-check-still-enforced",
+    ]
 
 
 def test_explicit_scenarios_override_the_profile(env: pytest.MonkeyPatch) -> None:
@@ -82,6 +95,16 @@ def test_unknown_scenario_is_rejected(env: pytest.MonkeyPatch) -> None:
         scenarios.selected(UpgradeSettings.from_env())
 
 
+def test_only_one_scenario_holds_a_gpu_at_a_time() -> None:
+    gpu = [scenario.name for scenario in scenarios.SCENARIOS if getattr(scenario, "gpu", False)]
+
+    assert gpu == ["restore-pre-upgrade-snapshot-gpu", "failed-restore-stays-failed"], (
+        "a new GPU scenario must not hold a GPU pod across the upgrade while another scenario "
+        "needs its node's GPU afterwards (restores are pinned to the checkpoint node); "
+        "check that, then update this list"
+    )
+
+
 def test_scenario_names_and_run_prefixes_are_unique() -> None:
     names = [scenario.name for scenario in scenarios.SCENARIOS]
     prefixes = [scenario.run_prefix for scenario in scenarios.SCENARIOS]
@@ -91,12 +114,33 @@ def test_scenario_names_and_run_prefixes_are_unique() -> None:
     assert all(len(prefix) <= 24 for prefix in prefixes)
 
 
-def test_full_config_moves_both_components_to_the_new_version(env: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("name", "operator", "agent", "reset_then_reuse"),
+    [
+        ("full", "v0.0.0-g1a2b3c4d", "v0.0.0-g1a2b3c4d", False),
+        ("reset-then-reuse-values", "v0.0.0-g1a2b3c4d", "v0.0.0-g1a2b3c4d", True),
+        ("operator-first", "v0.0.0-g1a2b3c4d", "v0.1.0", False),
+        ("agent-first", "v0.1.0", "v0.0.0-g1a2b3c4d", False),
+    ],
+)
+def test_configs_say_which_version_each_component_runs_after_the_upgrade(
+    env: pytest.MonkeyPatch, name: str, operator: str, agent: str, reset_then_reuse: bool
+) -> None:
     settings = UpgradeSettings.from_env()
-    full = configs.get("full")
+    config = configs.get(name)
 
-    assert full.operator_tag(settings) == full.agent_tag(settings) == "v0.0.0-g1a2b3c4d"
-    assert not full.reuse_values
+    assert (config.operator_tag(settings), config.agent_tag(settings), config.reset_then_reuse_values) == (
+        operator,
+        agent,
+        reset_then_reuse,
+    )
+
+
+def test_manual_workflow_offers_every_config() -> None:
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    inputs = workflow[True]["workflow_dispatch"]["inputs"]
+
+    assert sorted(inputs["upgrade_config"]["options"]) == sorted(configs.CONFIGS)
 
 
 def test_upgrade_installs_the_checked_out_chart() -> None:
@@ -172,6 +216,8 @@ def test_timings_summary_lists_each_phase(monkeypatch: pytest.MonkeyPatch, tmp_p
         pass
     with pytest.raises(RuntimeError), timings.phase("Upgrade (full)"):
         raise RuntimeError("helm failed")
+    with pytest.raises(pytest.skip.Exception), timings.phase("PostUpgrade compat-check-still-enforced"):
+        pytest.skip("v0.1.0 does not record memory limits")
 
     timings.publish("Upgrade v0.1.0 → main")
 
@@ -179,4 +225,75 @@ def test_timings_summary_lists_each_phase(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert "### Upgrade v0.1.0 → main" in text
     assert "| PreUpgrade restore-pre-upgrade-snapshot-gpu | 0s | ok |" in text
     assert "| Upgrade (full) | 0s | failed |" in text
+    assert "| PostUpgrade compat-check-still-enforced | 0s | skipped |" in text
     assert "| **Total** |" in text
+
+
+def agent_pod(agent: str, pagebroker: str | None) -> client.V1Pod:
+    containers = [client.V1Container(name="agent", image=f"ghcr.io/ai-dynamo/snapshot/agent:{agent}")]
+    if pagebroker:
+        containers.append(
+            client.V1Container(name="pagebroker", image=f"ghcr.io/ai-dynamo/snapshot/pagebroker:{pagebroker}")
+        )
+    return client.V1Pod(metadata=client.V1ObjectMeta(name="agent-x"), spec=client.V1PodSpec(containers=containers))
+
+
+@pytest.mark.parametrize(
+    ("agent", "pagebroker", "problem"),
+    [
+        ("v0.0.0-g1a2b3c4d", "v0.0.0-g1a2b3c4d", None),
+        ("v0.0.0-g1a2b3c4d", None, "without pagebroker"),
+        ("v0.0.0-g1a2b3c4d", "v0.1.0", "runs pagebroker v0.1.0"),
+        ("v0.1.0", None, None),
+    ],
+)
+def test_pagebroker_must_run_next_to_every_upgraded_agent(
+    agent: str, pagebroker: str | None, problem: str | None
+) -> None:
+    found = checks.pagebroker_problem(agent_pod(agent, pagebroker), "v0.0.0-g1a2b3c4d")
+
+    assert (found is None) if problem is None else (problem in found)
+
+
+@pytest.mark.parametrize(("name", "kind"), [("agent-first", "deployments"), ("operator-first", "daemonsets")])
+def test_held_rollouts_patch_with_strategic_merge(env: pytest.MonkeyPatch, name: str, kind: str) -> None:
+    requests = []
+
+    def call_api(self, resource_path, method, path_params=None, query_params=None, header_params=None, *args, **kwargs):
+        requests.append((resource_path, method, (header_params or {}).get("Content-Type")))
+
+    env.setattr(client.ApiClient, "call_api", call_api)
+    env.setattr(checks, "operator_deployment", lambda ctx: client.V1Deployment(metadata=client.V1ObjectMeta(name="op")))
+    env.setattr(checks, "agent_daemonset", lambda ctx: client.V1DaemonSet(metadata=client.V1ObjectMeta(name="agent")))
+    env.setattr(configs.setup, "install_snapshot_chart", lambda **kwargs: None)
+    config = k8s.E2EConfig(namespace="snapshot-e2e", release="snapshot", pvc_name="snapshot-pvc", kubeconfig=None)
+
+    configs.get(name).apply(UpgradeContext(config=config, settings=UpgradeSettings.from_env()))
+
+    assert [(method, content_type) for path, method, content_type in requests if kind in path] == [
+        ("PATCH", "application/strategic-merge-patch+json")
+    ]
+
+
+def test_in_flight_snapshotjob_waits_for_the_release_file_before_its_workload(env: pytest.MonkeyPatch) -> None:
+    config = k8s.E2EConfig(namespace="snapshot-e2e", release="snapshot", pvc_name="snapshot-pvc", kubeconfig=None)
+    ctx = UpgradeContext(config=config, settings=None)
+    state = ScenarioState(run=workloads.TestRun.new("upg-sj-inflight"))
+
+    command = scenarios.gated_snapshotjob_template(ctx, state)["spec"]["containers"][0]["command"]
+
+    assert command[:2] == ["/bin/bash", "-lc"]
+    gate, workload = command[2].split("\n", 1)
+    assert gate == f"while [ ! -f {scenarios.SNAPSHOTJOB_GATE} ]; do sleep 1; done"
+    assert workload == workloads.snapshotjob_source_command(state.run.image, False)
+
+
+@pytest.mark.parametrize(("config", "applies"), [("full", True), ("agent-first", True), ("operator-first", False)])
+def test_failed_restore_needs_a_restarted_agent(env: pytest.MonkeyPatch, config: str, applies: bool) -> None:
+    env.setenv("SNAPSHOT_E2E_UPGRADE_CONFIG", config)
+    ctx = UpgradeContext(
+        config=k8s.E2EConfig(namespace="n", release="r", pvc_name="p", kubeconfig=None),
+        settings=UpgradeSettings.from_env(),
+    )
+
+    assert scenarios.by_name("failed-restore-stays-failed").applies_to(ctx) is applies

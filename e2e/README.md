@@ -184,7 +184,8 @@ A run has three phases:
    such as a source pod and a ready `PodSnapshot`.
 2. **Upgrade:** `helm upgrade` to the new version using the local chart.
    `test_upgrade_completed` checks the release is deployed, the operator and
-   agent run the new images with no restarts or panics, the CRD installer
+   agent run the new images with no restarts or panics, pagebroker runs
+   next to every upgraded agent, the CRD installer
    succeeded, and the served CRDs match `api/v1alpha1/crds`.
 3. **PostUpgrade:** `test_global_invariants` checks every pre-upgrade snapshot
    is still Ready and still has its artifacts on the PVC. Then each scenario
@@ -196,7 +197,16 @@ Optional settings:
 | --- | --- | --- |
 | `SNAPSHOT_E2E_UPGRADE_PROFILE` | `basic` | `basic` runs the core scenarios; `all` runs every scenario |
 | `SNAPSHOT_E2E_UPGRADE_SCENARIOS` | empty | Comma-separated scenario names; overrides the profile |
-| `SNAPSHOT_E2E_UPGRADE_CONFIG` | `full` | How the upgrade is performed |
+| `SNAPSHOT_E2E_UPGRADE_CONFIG` | `full` | How the upgrade is performed, see below |
+
+Upgrade configs:
+
+| Config | What it does |
+| --- | --- |
+| `full` | `helm upgrade` with the same values the install used |
+| `reset-then-reuse-values` | `helm upgrade --reset-then-reuse-values` with only the image tags set: keeps the old install's values and takes new defaults from the chart. This is the documented upgrade command for users who don't pass their values again |
+| `operator-first` | Sets the agent DaemonSet to `OnDelete`, then upgrades: the new operator runs against the old agents, as in a rollout where the operator finishes first |
+| `agent-first` | Pauses the operator Deployment, then upgrades: the new agents run against the old operator, and the CRDs stay at the old version |
 
 Each phase's duration is printed at the end, and appended to
 `GITHUB_STEP_SUMMARY` in CI.
