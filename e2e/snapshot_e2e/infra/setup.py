@@ -39,6 +39,7 @@ DEFAULT_STORAGE_CLASS = ""
 DEFAULT_VCLUSTER_K8S_VERSION = "v1.32.13"
 DEFAULT_VCLUSTER_LOCAL_PORT = 8443
 DEFAULT_HELM_TIMEOUT = "6m"
+DEFAULT_CHART = "./charts/snapshot"
 DEFAULT_READY_TIMEOUT_SECONDS = 900
 PROGRESS_INTERVAL_SECONDS = 30
 
@@ -157,6 +158,16 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--snapshot-tag",
         default=os.environ.get("SNAPSHOT_E2E_SNAPSHOT_TAG"),
         help="Operator and agent image tag for the Snapshot chart.",
+    )
+    parser.add_argument(
+        "--chart-ref",
+        default=os.environ.get("SNAPSHOT_E2E_CHART_REF") or DEFAULT_CHART,
+        help=f"Snapshot chart to install: a local path or an oci:// reference. Default: {DEFAULT_CHART}.",
+    )
+    parser.add_argument(
+        "--chart-version",
+        default=os.environ.get("SNAPSHOT_E2E_CHART_VERSION") or None,
+        help="Chart version for an oci:// --chart-ref, e.g. 0.1.0. Default: none.",
     )
     parser.add_argument(
         "--pvc-name",
@@ -350,6 +361,8 @@ def setup_snapshot_install(args: argparse.Namespace, context: SetupContext) -> N
         image_tag=args.snapshot_tag,
         pvc_name=args.pvc_name,
         timeout=args.helm_timeout,
+        chart=args.chart_ref,
+        chart_version=args.chart_version,
     )
 
 
@@ -860,31 +873,44 @@ def ensure_checkpoint_pvc(
         log(f"PVC {namespace}/{name} already exists: {detail}")
 
 
-def install_snapshot_chart(
+def snapshot_chart_command(
     *,
-    kubeconfig: str | None,
     namespace: str,
     release: str,
     image_tag: str,
     pvc_name: str,
     timeout: str,
-) -> None:
-    log(f"Installing Snapshot chart release {namespace}/{release}")
+    chart: str = DEFAULT_CHART,
+    chart_version: str | None = None,
+    operator_tag: str | None = None,
+    agent_tag: str | None = None,
+    reuse_values: bool = False,
+) -> list[str]:
     command = [
         "helm",
         "upgrade",
         "--install",
         release,
-        "./charts/snapshot",
+        chart,
         "--namespace",
         namespace,
         "--create-namespace",
         "--timeout",
         timeout,
+    ]
+    if chart_version:
+        command += ["--version", chart_version]
+    if reuse_values:
+        command.append("--reuse-values")
+    command += [
         "--set",
-        f"image.operator.tag={image_tag}",
+        f"image.operator.tag={operator_tag or image_tag}",
         "--set",
-        f"image.agent.tag={image_tag}",
+        f"image.agent.tag={agent_tag or image_tag}",
+    ]
+    if reuse_values:
+        return command
+    return command + [
         "--set",
         "storage.pvc.create=false",
         "--set",
@@ -894,6 +920,36 @@ def install_snapshot_chart(
         "--set-json",
         "daemonset.imagePullSecrets=[]",
     ]
+
+
+def install_snapshot_chart(
+    *,
+    kubeconfig: str | None,
+    namespace: str,
+    release: str,
+    image_tag: str,
+    pvc_name: str,
+    timeout: str,
+    chart: str = DEFAULT_CHART,
+    chart_version: str | None = None,
+    operator_tag: str | None = None,
+    agent_tag: str | None = None,
+    reuse_values: bool = False,
+) -> None:
+    source = f"{chart} {chart_version}" if chart_version else chart
+    log(f"Installing Snapshot chart release {namespace}/{release} from {source}")
+    command = snapshot_chart_command(
+        namespace=namespace,
+        release=release,
+        image_tag=image_tag,
+        pvc_name=pvc_name,
+        timeout=timeout,
+        chart=chart,
+        chart_version=chart_version,
+        operator_tag=operator_tag,
+        agent_tag=agent_tag,
+        reuse_values=reuse_values,
+    )
     env = os.environ.copy()
     if kubeconfig:
         env["KUBECONFIG"] = kubeconfig
