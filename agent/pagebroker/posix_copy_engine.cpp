@@ -5,6 +5,8 @@
 
 #include <filesystem>
 #include <stdexcept>
+#include <system_error>
+#include <fcntl.h>
 
 namespace snapshot::pagebroker {
 namespace {
@@ -111,6 +113,18 @@ void
 PosixCopyEngine::StageRestore(const StorageBackend& source, const Path& destination) const
 {
   CopyDirectory(SourcePath(source, storage_root_), destination);
+}
+
+FileDescriptor
+PosixCopyEngine::OpenRestoreSource(const StorageBackend& source) const
+{
+  const auto path = SourcePath(source, storage_root_);
+  // Match staged restore's source validation, without reading file contents.
+  DirectorySize(path);
+  FileDescriptor directory(open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+  if (directory.get() < 0)
+    throw std::system_error(errno, std::generic_category(), "open direct restore source");
+  return directory;
 }
 
 void
