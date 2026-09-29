@@ -126,7 +126,9 @@ fn command_all(
         .map(|peer| {
             allocations
                 .iter()
-                .filter(|a| a.preserve_content && a.reference.creator_pid == peer.namespace_pid)
+                .filter(|a| {
+                    a.checkpoint_via_host_carrier && a.reference.creator_pid == peer.namespace_pid
+                })
                 .try_fold(0u64, |sum, a| {
                     sum.checked_add(a.size).context("allocation size overflow")
                 })
