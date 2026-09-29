@@ -4,7 +4,7 @@
  */
 
 #include "extent_digests.hpp"
-#include "../../integrity/content_digest.hpp"
+#include "gpu_engine/checksum/content_digest.hpp"
 
 namespace cuda_checkpoint_storage {
 

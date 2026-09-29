@@ -128,12 +128,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /workspace
 
 COPY cmd/cuda-checkpoint-helper/main.c ./cmd/cuda-checkpoint-helper/main.c
-COPY pagebroker/gpu_engine/cuda_checkpoint/driver_ops.h pagebroker/gpu_engine/cuda_checkpoint/driver_ops.c ./pagebroker/gpu_engine/cuda_checkpoint/
 COPY cmd/ns-bind-mount/main.c ./cmd/ns-bind-mount/main.c
 
 RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
     ./cmd/cuda-checkpoint-helper/main.c \
-    ./pagebroker/gpu_engine/cuda_checkpoint/driver_ops.c \
     -I. -I/usr/local/cuda/include \
     -L/usr/local/cuda/lib64/stubs \
     -lcuda

@@ -113,7 +113,7 @@ pageBroker:
   cudaStorageMode: custom
   # SHA-256 covers CustomStorage GPU extents. Restoring with this enabled
   # requires saved digests; structural and size checks always run.
-  integrity: false
+  enableChecksumDigest: false
   # Persistent ring per visible GPU. Keep allocations/registrations off the
   # restore path. The default reserves 4 GiB per GPU, as in the native baseline.
   transferBufferCount: 32

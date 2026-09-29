@@ -13,10 +13,10 @@ PROTOCOL_SOURCES := v1/pagebroker.pb.cc
 BROKER_SOURCES := broker.cpp checkpoint_transaction_descriptor.cpp posix_copy_engine.cpp restore_transaction_descriptor.cpp transaction.cpp transfer_engine.cpp $(COMMON_SOURCES) $(PROTOCOL_SOURCES)
 DAEMON_SOURCES := $(BROKER_SOURCES) daemon.cpp main.cpp
 GPU_MANIFEST_SOURCES := gpu_engine/storage_manifest.cpp
-GPU_INTEGRITY_SOURCES := gpu_engine/integrity/extent_digests.cpp
-HASH_SOURCES := integrity/content_digest.cpp
+GPU_CHECKSUM_SOURCES := gpu_engine/checksum/extent_digests.cpp
+HASH_SOURCES := gpu_engine/checksum/content_digest.cpp
 
-.PHONY: daemon generate test test-storage test-integrity
+.PHONY: daemon generate test test-storage test-checksum
 
 generate:
 	protoc --proto_path=. --cpp_out=. v1/pagebroker.proto
@@ -29,15 +29,15 @@ test: generate
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(BROKER_SOURCES) daemon_test.cpp -lprotobuf $(GTEST_FLAGS) -pthread -o build/pagebroker-test
 	./build/pagebroker-test
 
-test-storage: test-integrity
+test-storage: test-checksum
 	mkdir -p build
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(GPU_MANIFEST_SOURCES) gpu_engine/storage_manifest_test.cpp -o build/storage-manifest-test
 	./build/storage-manifest-test
 
-test-integrity:
+test-checksum:
 	mkdir -p build
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) integrity/content_digest.cpp integrity/content_digest_test.cpp -lcrypto -o build/content-digest-test
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) gpu_engine/checksum/content_digest.cpp gpu_engine/checksum/content_digest_test.cpp -lcrypto -o build/content-digest-test
 	./build/content-digest-test
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) integrity/content_digest.cpp \
-		gpu_engine/integrity/extent_digests.cpp gpu_engine/integrity/extent_digests_test.cpp $(GPU_MANIFEST_SOURCES) $(COMMON_SOURCES) -lcrypto -o build/extent-digests-test
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) gpu_engine/checksum/content_digest.cpp \
+		gpu_engine/checksum/extent_digests.cpp gpu_engine/checksum/extent_digests_test.cpp $(GPU_MANIFEST_SOURCES) $(COMMON_SOURCES) -lcrypto -o build/extent-digests-test
 	./build/extent-digests-test

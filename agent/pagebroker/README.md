@@ -3,18 +3,18 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # PageBroker modules
 
-The existing daemon, filesystem storage, protocol, and transport paths stay in
-place. GPU-specific code lives under `gpu_engine/`:
+Existing daemon, filesystem, protocol, and transport paths stay in place.
+GPU storage code moves from the helper into `gpu_engine/`:
 
-- `cuda_checkpoint/driver_ops.c`: ordinary driver calls shared with the helper CLI.
-- `storage_manifest.*`: version-4 GPU extent format, size checks, and GPU mapping.
-- `integrity/`: GPU extent digest matching, separate from the core manifest.
+- `storage_manifest.*`: version-4 GPU extent format, sizes, and GPU mapping.
+- `checksum/`: SHA-256 and extent digest matching, separate from the manifest.
 
-Top-level `integrity/` contains reusable SHA-256 hashing. The unused generic
-transfer interface, planner, per-operation limits, and unavailable adapter have
-been removed. Persistent transfers and worker integration follow separately.
+The unused generic transfer interface, planner, per-operation limits, and
+unavailable adapter are removed. Persistent transfers and worker integration
+follow in later PRs. The existing helper CLI keeps calling CUDA directly until
+the agent is migrated to the GPU engine.
 
-Helm declares engine storage mode and integrity policy; subsequent integration
-activates those options. Integrity defaults to false. No CRD fields are added.
+Helm declares capture storage mode and `enableChecksumDigest: false`; later PRs
+wire these into execution. No CRD or checkpoint-manifest policy field is added.
 
-`make test-storage` validates storage and hashing without CUDA.
+`make test-storage` checks manifests and checksums without CUDA.

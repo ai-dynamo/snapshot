@@ -73,24 +73,22 @@ func TestPageBrokerCUDAStorageModes(t *testing.T) {
 	}
 }
 
-func TestPageBrokerIntegrityRequiresGPUPath(t *testing.T) {
+func TestPageBrokerEnableChecksumDigestRequiresPageBroker(t *testing.T) {
 	for _, tc := range []struct {
-		name                       string
-		enabled, native, integrity bool
-		mode                       string
-		valid                      bool
+		name              string
+		enabled, checksum bool
+		mode              string
+		valid             bool
 	}{
-		{"default-off", false, false, false, "", true},
-		{"custom", true, true, true, "custom", true},
-		{"implicit-custom", true, true, true, "", true},
-		{"driver-capture-default", true, true, true, "driver", true},
-		{"no-engine", true, false, true, "custom", false},
-		{"disabled-broker", false, true, true, "custom", false},
+		{"default-off", false, false, "", true},
+		{"custom", true, true, "custom", true},
+		{"driver-default-custom-restore", true, true, "driver", true},
+		{"broker-disabled", false, true, "custom", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := validAgentConfig()
-			cfg.PageBroker = PageBrokerSpec{Enabled: tc.enabled, NativeCUDA: tc.native,
-				Integrity: tc.integrity, CUDAStorageMode: tc.mode, ControlSocketPath: "/tmp/broker"}
+			cfg.PageBroker = PageBrokerSpec{Enabled: tc.enabled,
+				EnableChecksumDigest: tc.checksum, CUDAStorageMode: tc.mode, ControlSocketPath: "/tmp/broker"}
 			if err := cfg.Validate(); (err == nil) != tc.valid {
 				t.Fatalf("Validate = %v, valid = %t", err, tc.valid)
 			}

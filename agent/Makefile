@@ -19,7 +19,6 @@ build:
 cuda-checkpoint-helper:
 	mkdir -p bin
 	$(CC) -O2 -Wall -Wextra -Werror -I. -I$(CUDA_ROOT)/include \
-		cmd/cuda-checkpoint-helper/main.c pagebroker/gpu_engine/cuda_checkpoint/driver_ops.c \
 		-L$(CUDA_ROOT)/lib64/stubs -lcuda -o bin/cuda-checkpoint-helper
 
 test: test-go

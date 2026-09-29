@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "content_digest.hpp"
+#include "gpu_engine/checksum/content_digest.hpp"
 
 #include <iostream>
 #include <string>
