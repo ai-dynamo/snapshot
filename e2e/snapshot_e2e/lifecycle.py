@@ -818,6 +818,7 @@ def runtime_image_id(config: k8s.E2EConfig, node: str, container_id: str) -> str
         config.namespace,
         checkpoint_agent_pod(config, node),
         f"nsenter -t 1 -m -- crictl inspect {shlex.quote(runtime_id)}",
+        container=AGENT_CONTAINER,
     )
     status = json.loads(output).get("status")
     if not isinstance(status, dict) or not status:
@@ -1429,6 +1430,7 @@ def _dump_checkpoint_artifact(
             "  if [ -f \"$f\" ]; then echo \"== $f (errors, then tail 60)\"; "
             "    grep -E 'Error \\(|Warn  \\(' \"$f\" | tail -20; tail -60 \"$f\"; fi; "
             "done",
+            container=AGENT_CONTAINER,
         )
     )
 
