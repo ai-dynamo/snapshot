@@ -393,10 +393,12 @@ pub fn describe(state: &ProcessState, records: &mut Vec<Record>) -> Result<()> {
             .sum();
         records.push(Record::Multicast {
             allocation: object.reference,
-            devices: object.properties.numDevices,
-            size: object.properties.size as u64,
-            handle_types: object.properties.handleTypes,
-            flags: object.properties.flags,
+            properties: cuinterpose_protocol::MulticastProperties {
+                devices: object.properties.numDevices,
+                size: object.properties.size as u64,
+                handle_types: object.properties.handleTypes,
+                flags: object.properties.flags,
+            },
             virtual_multicast_handle_count,
         });
         for device in &object.devices {
