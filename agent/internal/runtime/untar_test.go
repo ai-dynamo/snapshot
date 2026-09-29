@@ -314,8 +314,12 @@ func TestExtractRootfsDiff(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read archive: %v", err)
 		}
+		// Cut inside the first (512-byte) header block rather than at
+		// len(data)/2: that offset lands on a block boundary right after
+		// the lone entry's padded content, which archive/tar accepts as a
+		// missing-trailer EOF instead of an error.
 		truncated := filepath.Join(t.TempDir(), "truncated.tar")
-		if err := os.WriteFile(truncated, data[:len(data)/2], 0o644); err != nil {
+		if err := os.WriteFile(truncated, data[:100], 0o644); err != nil {
 			t.Fatalf("write truncated archive: %v", err)
 		}
 		if err := ExtractRootfsDiff(truncated, t.TempDir(), testr.New(t)); err == nil {
