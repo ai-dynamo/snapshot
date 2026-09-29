@@ -28,8 +28,9 @@ def test_runtime_image_id_reads_optional_field_once(monkeypatch, image_fields, w
     config = k8s.E2EConfig("test-ns", "snapshot", "pvc", None)
     commands = []
 
-    def exec_payload(namespace, pod, command):
+    def exec_payload(namespace, pod, command, *, container=None):
         assert (namespace, pod) == ("test-ns", "agent-pod")
+        assert container == lifecycle.AGENT_CONTAINER
         commands.append(shlex.split(command))
         return json.dumps({"status": {"id": "container-id", **image_fields}})
 
@@ -47,7 +48,7 @@ def test_runtime_image_id_reads_optional_field_once(monkeypatch, image_fields, w
 def test_runtime_image_id_rejects_missing_status(monkeypatch, response):
     config = k8s.E2EConfig("test-ns", "snapshot", "pvc", None)
     monkeypatch.setattr(lifecycle, "checkpoint_agent_pod", lambda *_: "agent-pod")
-    monkeypatch.setattr(k8s, "exec_payload", lambda *_: json.dumps(response))
+    monkeypatch.setattr(k8s, "exec_payload", lambda *_, **__: json.dumps(response))
     with pytest.raises(AssertionError, match="no container status"):
         lifecycle.runtime_image_id(config, "node", "containerd://container-id")
 
@@ -55,7 +56,7 @@ def test_runtime_image_id_rejects_missing_status(monkeypatch, response):
 def test_runtime_image_id_does_not_hide_inspection_failure(monkeypatch):
     config = k8s.E2EConfig("test-ns", "snapshot", "pvc", None)
 
-    def failed_exec(*_):
+    def failed_exec(*_, **__):
         raise RuntimeError("container status unavailable")
 
     monkeypatch.setattr(lifecycle, "checkpoint_agent_pod", lambda *_: "agent-pod")
