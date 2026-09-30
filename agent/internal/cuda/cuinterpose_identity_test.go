@@ -1,0 +1,133 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package cuda
+
+import (
+	"crypto/sha256"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
+
+	"github.com/ai-dynamo/snapshot/api/podcontract"
+)
+
+func writeMappedLibraries(t *testing.T, procRoot string, pid int, frontend, core string) string {
+	t.Helper()
+	process := filepath.Join(procRoot, strconv.Itoa(pid))
+	directory := filepath.Join(process, "root", podcontract.CuInterposeMountPath)
+	require.NoError(t, os.MkdirAll(directory, 0700))
+	var maps string
+	for _, library := range []struct{ name, contents string }{
+		{"libcuinterpose.so", frontend}, {"libcuinterpose_core.so", core},
+	} {
+		if library.contents == "" {
+			continue
+		}
+		path := filepath.Join(directory, library.name)
+		require.NoError(t, os.WriteFile(path, []byte(library.contents), 0600))
+		info, err := os.Stat(path)
+		require.NoError(t, err)
+		stat := info.Sys().(*syscall.Stat_t)
+		maps += fmt.Sprintf("1000-2000 r-xp 00000000 %02x:%02x %d %s\n",
+			unix.Major(stat.Dev), unix.Minor(stat.Dev), stat.Ino, filepath.Join(podcontract.CuInterposeMountPath, library.name))
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(process, "maps"), []byte(maps), 0600))
+	return directory
+}
+
+func TestInspectCuInterposeLibraries(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		first, second        [2]string
+		required, wantLoaded bool
+		wantError            string
+	}{
+		{name: "native"},
+		{name: "required but absent", required: true, wantError: "not active"},
+		{name: "loaded without annotation", first: [2]string{"front", "core"}, second: [2]string{"front", "core"}, wantLoaded: true},
+		{name: "delivered", required: true, first: [2]string{"front", "core"}, second: [2]string{"front", "core"}, wantLoaded: true},
+		{name: "partial coverage", first: [2]string{"front", "core"}, wantError: "participants [2]"},
+		{name: "missing core", first: [2]string{"front", ""}, wantError: "both cuinterpose"},
+		{name: "different frontend", first: [2]string{"front", "core"}, second: [2]string{"other", "core"}, wantError: "hashes differ"},
+		{name: "different core", first: [2]string{"front", "core"}, second: [2]string{"front", "diff"}, wantError: "hashes differ"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			procRoot := t.TempDir()
+			writeMappedLibraries(t, procRoot, 1, tc.first[0], tc.first[1])
+			writeMappedLibraries(t, procRoot, 2, tc.second[0], tc.second[1])
+			identity, err := InspectCuInterposeLibraries(procRoot, []int{1, 2}, tc.required)
+			if tc.wantError != "" {
+				require.ErrorContains(t, err, tc.wantError)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.wantLoaded, identity != nil)
+		})
+	}
+	_, err := InspectCuInterposeLibraries(t.TempDir(), nil, true)
+	require.ErrorContains(t, err, "not active")
+}
+
+func TestInspectCuInterposeRejectsReplacedOrDeletedMappings(t *testing.T) {
+	for _, deleted := range []bool{false, true} {
+		t.Run(strconv.FormatBool(deleted), func(t *testing.T) {
+			procRoot := t.TempDir()
+			dir := writeMappedLibraries(t, procRoot, 1, "front", "core")
+			if deleted {
+				maps := filepath.Join(procRoot, "1/maps")
+				contents, err := os.ReadFile(maps)
+				require.NoError(t, err)
+				require.NoError(t, os.WriteFile(maps, append(contents[:len(contents)-1], []byte(" (deleted)\n")...), 0600))
+			} else {
+				path := filepath.Join(dir, "libcuinterpose.so")
+				require.NoError(t, os.Rename(path, path+".old"))
+				require.NoError(t, os.WriteFile(path, []byte("front"), 0600))
+			}
+			_, err := InspectCuInterposeLibraries(procRoot, []int{1}, false)
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestInspectCuInterposeRejectsUnsupportedPathWithoutAnnotation(t *testing.T) {
+	procRoot := t.TempDir()
+	writeMappedLibraries(t, procRoot, 1, "front", "core")
+	maps := filepath.Join(procRoot, "1/maps")
+	contents, err := os.ReadFile(maps)
+	require.NoError(t, err)
+	contents = []byte(strings.ReplaceAll(string(contents), podcontract.CuInterposeMountPath, "/some directory"))
+	require.NoError(t, os.WriteFile(maps, contents, 0600))
+	_, err = InspectCuInterposeLibraries(procRoot, []int{1}, false)
+	require.ErrorContains(t, err, "must be delivered")
+}
+
+func TestCheckCuInterposeLibraries(t *testing.T) {
+	procRoot := t.TempDir()
+	directory := writeMappedLibraries(t, procRoot, 1, "front", "core")
+	identity, err := InspectCuInterposeLibraries(procRoot, []int{1}, true)
+	require.NoError(t, err)
+	require.NoError(t, CheckCuInterposeLibraries(directory, identity))
+	for _, name := range []string{"libcuinterpose.so", "libcuinterpose_core.so"} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(directory, name)
+			original, err := os.ReadFile(path)
+			require.NoError(t, err)
+			changed := append([]byte(nil), original...)
+			changed[0] ^= 1 // Same file size must not imply compatibility.
+			require.NoError(t, os.WriteFile(path, changed, 0600))
+			err = CheckCuInterposeLibraries(directory, identity)
+			require.ErrorContains(t, err, name+" SHA-256 mismatch")
+			require.ErrorContains(t, err, fmt.Sprintf("expected %x", sha256.Sum256(original)))
+			require.ErrorContains(t, err, fmt.Sprintf("actual %x", sha256.Sum256(changed)))
+			require.NoError(t, os.WriteFile(path, original, 0600))
+		})
+	}
+}
