@@ -25,6 +25,8 @@ def test_checkpoint_restores_shared_memory(mode, gpu_environment, tmp_path, seed
     with Workload(tmp_path, gpu_environment, mode=mode,
                   carrier_bytes=CARRIER_MIB << 20, seed=seed) as workload:
         workload.start()
+        workload.coordinate("--inspect")
+        assert not list(workload.checkpoint_dir.iterdir())
         workload.coordinate("--prepare")
         state = workload.checkpoint_dir / harness.STATE_FILENAME
         assert state.is_file() and state.stat().st_size > 0

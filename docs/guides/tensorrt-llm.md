@@ -76,6 +76,20 @@ not TensorRT-LLM's CUDA collective strategy.
 The source and restore pods must use the same immutable image and mount the
 Snapshot control volume at `/snapshot-control`.
 
+These manifests use native CUDA checkpointing. If you enable
+[CuInterpose](../development/cuinterpose.md), this Deployment must deliver
+`libcuinterpose.so`, `libcuinterpose_core.so`, and the executable
+`cuinterpose-launch` at `/tmp/snapshot-cuda` before the workload starts. Prefix
+the existing Python command with `/tmp/snapshot-cuda/cuinterpose-launch` and set
+the source Pod annotation `nvidia.com/cuinterpose-enabled: "true"`. The launcher
+preserves the runtime-resolved environment, including existing preloads.
+Adding the annotation to a running Pod cannot activate the shim.
+
+For a SnapshotJob, the operator delivers those artifacts and wraps the source
+command automatically when its Pod template opts in. Keep the explicit
+`command: ["python3", "/snapshot-app/app.py"]`. Restore requires agents supplying
+the same library bytes; the restore placeholder keeps its inert command.
+
 ## 2. Create the app.py ConfigMap
 
 Set the namespace where the TensorRT-LLM pod will run, and create the

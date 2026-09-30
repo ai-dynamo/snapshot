@@ -5,9 +5,9 @@
 
 The test process never loads the shim. It launches one interposed *parent*
 Python process (``worker.py``) that forks ``WORLD_SIZE`` CUDA workers, and then
-drives a checkpoint from the outside exactly as the snapshot agent would:
-``cuinterpose-coordinator --prepare``, the native ``cuCheckpointProcess*``
-sequence, ``cuinterpose-coordinator --restore``.
+drives the native CUDA lifecycle from the outside: read-only coordinator
+inspection, preparation, the native ``cuCheckpointProcess*`` sequence, and
+coordinator reconstruction. This harness does not run CRIU or the Go agent.
 """
 
 from __future__ import annotations
@@ -157,8 +157,9 @@ class Workload:
 
     def coordinate(self, operation: str) -> None:
         command = [str(self.environment.tools.coordinator), operation,
-                   "--checkpoint-dir", str(self.checkpoint_dir),
                    "--control-dir", str(self.control_dir)]
+        if operation != "--inspect":
+            command += ["--checkpoint-dir", str(self.checkpoint_dir)]
         for pid in self.child_pids:
             command.extend(["--process", str(pid)])
         environment = os.environ.copy()
