@@ -206,11 +206,8 @@ func (w *NodeController) runCheckpoint(
 ) error {
 	logger := logr.FromContextOrDiscard(ctx)
 
-	// Bound the dump so a wedged capture still reaches a terminal status instead of leaving the
-	// work order unresolved forever. This reaches the cancellable phases only —
-	// cuda.CheckpointProcessTree takes a context; criu.ExecuteDump does not, so a CRIU dump that
-	// wedges still runs to completion. Status writes below keep the outer ctx, so a dump that does
-	// fail on the deadline still records that failure.
+	// Reaches the cancellable phases only: criu.ExecuteDump takes no context, so a wedged CRIU dump
+	// still runs to completion. Status writes keep the outer ctx so a deadline failure is recorded.
 	dumpCtx := ctx
 	if timeout := w.config.Checkpoint.CheckpointTimeout(); timeout > 0 {
 		var cancel context.CancelFunc

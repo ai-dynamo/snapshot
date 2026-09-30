@@ -97,9 +97,8 @@ type CheckpointSpec struct {
 	CheckpointTimeoutSeconds *int `yaml:"checkpointTimeoutSeconds"`
 }
 
-// CheckpointTimeout bounds one dump. It is a hang detector, not a performance budget: without it a
-// wedged capture never reaches a terminal status, so the work order sits unresolved forever with
-// its source pod already dead.
+// CheckpointTimeout bounds one dump. Reaches the cancellable phases only: criu.ExecuteDump takes
+// no context, so a wedged CRIU dump overruns it.
 func (c *CheckpointSpec) CheckpointTimeout() time.Duration {
 	if c.CheckpointTimeoutSeconds == nil {
 		return DefaultCheckpointTimeoutSeconds * time.Second

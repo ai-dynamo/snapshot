@@ -214,9 +214,8 @@ config:
       - "*.pyc"
 
   checkpoint:
-    # Maximum seconds to allow a checkpoint attempt before the agent marks it failed. A hang
-    # detector, not a performance budget: without it a wedged capture never reaches a terminal
-    # status, leaving the work order unresolved with its source pod already dead.
+    # Maximum seconds before the agent marks a checkpoint failed. Reaches the cancellable phases
+    # only: a wedged CRIU dump takes no context and overruns it.
     checkpointTimeoutSeconds: 3600
 
   restore:

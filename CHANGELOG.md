@@ -42,7 +42,8 @@ commit-level history for each release is on its
   populated for captures that reach `Ready` after the upgrade, so a content
   already `Ready` before it is not backfilled.
 - `config.checkpoint.checkpointTimeoutSeconds` (default `3600`) fails a capture
-  that outruns it, so a wedged dump cannot leave a work order unresolved.
+  that outruns it. CRIU's dump takes no context, so a wedged CRIU dump can still
+  overrun it.
 
 ### Changed
 
