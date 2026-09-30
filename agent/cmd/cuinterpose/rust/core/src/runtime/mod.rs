@@ -5,9 +5,8 @@
 
 mod control;
 
-use crate::driver::{CudaError, Result};
+use crate::error::{Error, Result};
 use crate::memory::{ProcessState, sharing};
-use cudarc::driver::sys::CUresult::*;
 use cuinterpose_protocol::NamespacePid;
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -28,10 +27,12 @@ static RUNTIME: OnceLock<ProcessRuntime> = OnceLock::new();
 static INSTALL_LOCK: Mutex<()> = Mutex::new(());
 
 fn process_runtime() -> Result<&'static ProcessRuntime> {
-    let runtime = RUNTIME.get().ok_or(CUDA_ERROR_NOT_INITIALIZED)?;
+    let runtime = RUNTIME
+        .get()
+        .ok_or(Error::Startup("runtime is not initialized"))?;
     // Check ownership before touching any mutex inherited from another process.
     if runtime.pid != unsafe { libc::getpid() } {
-        return Err(CUDA_ERROR_NOT_INITIALIZED.into());
+        return Err(Error::Startup("runtime belongs to another process"));
     }
     Ok(runtime)
 }
@@ -39,7 +40,7 @@ fn process_runtime() -> Result<&'static ProcessRuntime> {
 pub fn ready() -> Result<()> {
     process_runtime()?;
     if RUNTIME_FAILED.load(Ordering::Acquire) {
-        return Err(CUDA_ERROR_NOT_READY.into());
+        return Err(Error::RuntimeFailed);
     }
     Ok(())
 }
@@ -61,15 +62,16 @@ pub fn initialize() -> Result<()> {
         return ready();
     }
     if RUNTIME_FAILED.load(Ordering::Acquire) {
-        return Err(CudaError::from(CUDA_ERROR_UNKNOWN));
+        return Err(Error::RuntimeFailed);
     }
     thread_local! {
-        // Non-Drop TLS: initialize this module's TLS before the commit lock,
-        // without registering a destructor with the dynamic loader.
+        // Reject same-thread re-entry while allowing other threads to prepare
+        // candidates concurrently. A global guard could deadlock with loader
+        // activity. Cell<bool> needs no TLS destructor or loader registration.
         static PREPARING: Cell<bool> = const { Cell::new(false) };
     }
     if PREPARING.replace(true) {
-        return Err(CUDA_ERROR_NOT_INITIALIZED.into());
+        return Err(Error::Startup("recursive runtime initialization"));
     }
     struct Reset;
     impl Drop for Reset {
@@ -82,38 +84,38 @@ pub fn initialize() -> Result<()> {
     // exclusion. A constructor holding the loader lock can prepare its own
     // candidate while a different caller waits in Rust's spawn hooks.
     let mut candidate = RuntimeCandidate::prepare();
-    let installing = INSTALL_LOCK.lock().map_err(|_| CUDA_ERROR_UNKNOWN)?;
-    let result = install_runtime(&mut candidate);
-    if result.is_err() {
-        RUNTIME_FAILED.store(true, Ordering::Release);
+    {
+        let _installation = INSTALL_LOCK
+            .lock()
+            .map_err(|_| Error::Startup("installation mutex poisoned"))?;
+        // A healthy winner supersedes even a failed private candidate.
+        let result = if RUNTIME_FAILED.load(Ordering::Acquire) {
+            Err(Error::RuntimeFailed)
+        } else if initialized() {
+            Ok(())
+        } else {
+            match candidate {
+                Ok(Some(ref mut candidate)) => install_runtime(candidate),
+                Ok(None) => Ok(()),
+                Err(error) => Err(error),
+            }
+        };
+        if result.is_err() {
+            RUNTIME_FAILED.store(true, Ordering::Release);
+        }
+        result
     }
-    drop(installing);
-    // Cancel/destroy private workers and failed listeners after releasing the
-    // installation mutex. JoinHandle was detached when each spawn returned.
-    drop(candidate);
-    result
+    // The installation guard drops before private workers and failed listeners.
 }
 
-// Called with INSTALL_LOCK held. Borrow the candidate so even an early return
-// leaves its cleanup to initialize(), after the installation lock is released.
-fn install_runtime(candidate: &mut Result<Option<RuntimeCandidate>>) -> Result<()> {
-    if RUNTIME_FAILED.load(Ordering::Acquire) {
-        return Err(CUDA_ERROR_UNKNOWN.into());
-    }
-    // A private candidate is dispensable once a healthy runtime exists.
-    // Never hide installed failure, or wait for an unfinished preparer.
-    if initialized() {
-        return Ok(());
-    }
-    let Some(candidate) = candidate.as_mut().map_err(|error| *error)? else {
-        return Ok(());
-    };
+// Borrow under INSTALL_LOCK so cleanup stays outside the installation mutex.
+fn install_runtime(candidate: &mut RuntimeCandidate) -> Result<()> {
     let runtime = candidate.runtime.as_mut().unwrap();
     candidate.workers.activate(
         runtime
             .socket_path
             .to_str()
-            .ok_or(CUDA_ERROR_INVALID_VALUE)?,
+            .ok_or(Error::Startup("control socket path is not UTF-8"))?,
     )?;
     // Installation is serialized; OnceLock only publishes, never runs startup.
     if RUNTIME.set(*candidate.runtime.take().unwrap()).is_err() {
@@ -123,7 +125,7 @@ fn install_runtime(candidate: &mut Result<Option<RuntimeCandidate>>) -> Result<(
 }
 
 struct RuntimeCandidate {
-    // Taken only when ownership transfers to RUNTIME_PTR; losers retain cleanup.
+    // Taken only when ownership transfers to RUNTIME; losers retain cleanup.
     runtime: Option<Box<ProcessRuntime>>,
     workers: control::PreparedWorkers,
 }
@@ -138,7 +140,7 @@ impl RuntimeCandidate {
         let namespace_pid = runtime
             .state
             .get_mut()
-            .map_err(|_| CUDA_ERROR_UNKNOWN)?
+            .map_err(|_| Error::Startup("CUDA state mutex poisoned"))?
             .namespace_pid;
         let Some(workers) = control::PreparedWorkers::prepare(namespace_pid)? else {
             return Ok(None);
@@ -162,16 +164,17 @@ impl Drop for RuntimeCandidate {
 
 fn prepare_runtime() -> Result<Box<ProcessRuntime>> {
     let pid = unsafe { libc::getpid() };
-    let namespace_pid = NamespacePid::try_from(pid).map_err(|_| CUDA_ERROR_INVALID_VALUE)?;
+    let namespace_pid =
+        NamespacePid::try_from(pid).map_err(|_| Error::Startup("invalid namespace PID"))?;
     let directory =
         std::env::var("SNAPSHOT_CONTROL_DIR").unwrap_or_else(|_| "/snapshot-control".into());
     if !directory.starts_with('/') {
-        return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
+        return Err(Error::Startup("control directory must be absolute"));
     }
     let control_dir = PathBuf::from(directory);
     let socket_path = cuinterpose_protocol::socket_path(&control_dir, namespace_pid);
     std::os::unix::net::SocketAddr::from_pathname(&socket_path)
-        .map_err(|_| CUDA_ERROR_INVALID_VALUE)?;
+        .map_err(|error| Error::io("create control socket address", error))?;
     let state = ProcessState::new(namespace_pid);
     Ok(Box::new(ProcessRuntime {
         pid,
@@ -185,13 +188,16 @@ fn prepare_runtime() -> Result<Box<ProcessRuntime>> {
 pub fn get() -> Result<MutexGuard<'static, ProcessState>> {
     let runtime = process_runtime()?;
     if RUNTIME_FAILED.load(Ordering::Acquire) {
-        return Err(CudaError::from(CUDA_ERROR_UNKNOWN));
+        return Err(Error::RuntimeFailed);
     }
-    let state = runtime.state.lock().map_err(|_| CUDA_ERROR_UNKNOWN)?;
+    let state = runtime
+        .state
+        .lock()
+        .map_err(|_| Error::Startup("CUDA state mutex poisoned"))?;
     // The peer service may have failed while this caller waited for the lock.
     // Check again before admitting work against the runtime.
     if RUNTIME_FAILED.load(Ordering::Acquire) {
-        return Err(CudaError::from(CUDA_ERROR_UNKNOWN));
+        return Err(Error::RuntimeFailed);
     }
     Ok(state)
 }
