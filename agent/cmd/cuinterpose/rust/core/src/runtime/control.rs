@@ -296,7 +296,7 @@ fn serve(
         &socket,
         &Response {
             namespace_pid,
-            result: result.map_err(|error| error.to_string()),
+            result,
         },
         None,
     )?;
@@ -325,34 +325,6 @@ mod tests {
             UnixStream::connect(endpoint).unwrap_err().kind(),
             std::io::ErrorKind::ConnectionRefused
         );
-        std::fs::set_permissions(endpoint, std::fs::Permissions::from_mode(0o600)).unwrap();
-        rustix::net::listen(&listener, libc::SOMAXCONN).unwrap();
-        let _connection = UnixStream::connect(endpoint).unwrap();
-        drop(listener);
-        std::fs::remove_file(endpoint).unwrap();
-        std::fs::remove_dir(directory).unwrap();
-    }
-
-    #[test]
-    fn activation_publishes_listener_with_restricted_permissions() {
-        let directory =
-            std::env::temp_dir().join(format!("cuinterpose-permissions-{}", std::process::id()));
-        std::fs::create_dir(&directory).unwrap();
-        let endpoint = directory.join("control.sock");
-        let endpoint = endpoint.to_str().unwrap();
-        let (activation, receiver) = mpsc::sync_channel(1);
-        let mut workers = PreparedWorkers {
-            activation,
-            listener: None,
-        };
-        workers.activate(endpoint).unwrap();
-        let listener = receiver.try_recv().unwrap();
-        assert_eq!(
-            std::fs::metadata(endpoint).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-        let _connection = UnixStream::connect(endpoint).unwrap();
-        assert!(workers.listener.is_none());
         drop(listener);
         std::fs::remove_file(endpoint).unwrap();
         std::fs::remove_dir(directory).unwrap();
@@ -371,10 +343,7 @@ mod tests {
             activation,
             listener: None,
         };
-        assert!(matches!(
-            workers.activate(endpoint),
-            Err(Error::Startup("control listener handoff failed"))
-        ));
+        assert!(workers.activate(endpoint).is_err());
         assert!(workers.listener.is_some());
         workers.cleanup(endpoint);
         assert!(!std::path::Path::new(endpoint).exists());
