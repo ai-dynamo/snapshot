@@ -1,18 +1,17 @@
 # CUDA checkpoint helper
 
-The existing CLI and its driver actions, process queries, and launch-job
-handling are unchanged. This foundation simplifies the unused CustomStorage
-contracts before a persistent transfer implementation is added.
+The helper's `--daemon` mode calls `cuInit` and retains every primary CUDA
+context before READY. On CustomStorage-capable drivers it also initializes
+the persistent host rings and NIXL registrations in either storage mode.
 
-`storage_manifest.*` owns version-4 extent metadata and GPU mapping.
-`content_digest.*` and `extent_digests.*` keep optional SHA-256 metadata outside
-the core manifest. The generic transfer interface, unavailable backend, layout
-planner, and per-operation allocation limits are retired.
+The daemon composes driver lifecycle, transfers and metadata without a
+PageBroker dependency. Private inherited sockets carry admission, CUDA phases
+and drain acknowledgements; session descriptors pin the artifact directory and
+target namespace. The owner process supervises its lifetime. Legacy one-shot
+CLI commands remain unchanged; the batch CLI and Go supervision follow in the
+next PR.
 
-The Helm `cudaCheckpoint` settings declare the optional persistent helper,
-capture storage mode, buffer allocation, and `enableChecksumDigest: false`.
-They are wired into agent execution later in the stack. PageBroker's protocol
-and module layout stay unchanged.
-
-Run `make -C agent/cmd/cuda-checkpoint-helper test-storage` for the storage and
-checksum tests. These require a C++20 compiler and OpenSSL development files.
+Production builds require CUDA 13.4 headers and POSIX NIXL. Run `make helper
+test CUDA_ROOT=/usr/local/cuda NIXL_ROOT=/usr/local` in this directory.
+The default ring reserves 4 GiB per visible GPU; the optional pinned-memory
+cap is checked before allocation. Checksums are disabled unless requested.
