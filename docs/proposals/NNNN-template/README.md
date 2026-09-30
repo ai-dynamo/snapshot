@@ -133,7 +133,9 @@ users and operators understand the feature's health and behavior.
 
 <!--
 List required external systems, Snapshot components, feature gates, or prior
-SNEPs. Link to setup instructions when useful.
+SNEPs. Link to setup instructions when useful. If this SNEP needs a newer GPU
+driver, GPU Operator, or other dependency version than Snapshot's general
+floor, state it here and add a row to docs/reference/compatibility.md.
 -->
 
 ### Test Plan

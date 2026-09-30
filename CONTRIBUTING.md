@@ -111,6 +111,19 @@ a larger change that affects stored checkpoints. Open an issue and agree the
 approach before writing code, and expect the CRD compatibility question to be
 the bulk of the review.
 
+### Documenting a feature-specific version floor
+
+Snapshot states one general minimum dependency floor — GPU Operator and CUDA
+driver version — in the README's
+[Prerequisites](README.md#prerequisites). If your feature only works on a
+newer driver, GPU Operator, or other dependency version than that floor, add a
+row for it to the table in
+[Compatibility](docs/reference/compatibility.md) in the same pull request.
+Don't leave the floor implicit in an error message or a code comment — someone
+deciding whether to adopt the feature needs to find it in the docs, not in the
+failure path. If you're drafting an SNEP, record it under that proposal's
+`Dependencies` section too.
+
 ## AI-assisted contributions
 
 AI assistance is welcome. Agent-specific repository guidance lives in

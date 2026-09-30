@@ -90,6 +90,8 @@ Before installing Snapshot, make sure the following are in place:
 - The [Helm](https://helm.sh/docs/intro/install) CLI
 - A cluster that permits privileged pods for the node agent — see [Security](docs/operations/security.md)
 
+Some features raise this floor — see [Compatibility](docs/reference/compatibility.md).
+
 ## Installation
 
 Snapshot installs as a single per-cluster Helm release — a control-plane operator
@@ -170,6 +172,7 @@ operations, indexed below.
 - [CLI (`snapshotctl`)](docs/reference/cli.md) — lower-level checkpoint/restore from a pod manifest.
 - [Workload contract](docs/reference/workload-contract.md) — what a workload must do, and how its pod must be shaped, to be checkpointed and restored; a custom image is one packaging method.
 - [Restore Pod contract](docs/reference/restore-pod-contract.md) — the pod interface for programmatic restore: annotations, control volume, startup gate, and seccomp.
+- [Compatibility](docs/reference/compatibility.md) — minimum GPU driver and other dependency versions, per feature.
 
 **Operations**
 
