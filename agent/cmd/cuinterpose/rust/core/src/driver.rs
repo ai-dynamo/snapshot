@@ -6,6 +6,7 @@
 //! Raw calls retain driver-written outputs even on failure.
 //! cudarc supplies CUDA types/constants, not its loader or safe resource owners.
 
+use crate::error::{Error, Result};
 use cudarc::driver::sys::CUresult::{
     CUDA_ERROR_INVALID_HANDLE, CUDA_ERROR_NOT_INITIALIZED, CUDA_SUCCESS,
 };
@@ -16,16 +17,6 @@ use cudarc::driver::sys::{
 };
 use std::ffi::c_void;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("CUDA error {0:?}")]
-pub struct CudaError(pub CUresult);
-
-impl From<CUresult> for CudaError {
-    fn from(code: CUresult) -> Self {
-        Self(code)
-    }
-}
 
 pub fn import_posix(fd: BorrowedFd<'_>) -> Result<CUmemGenericAllocationHandle> {
     let mut handle = 0;
@@ -50,7 +41,7 @@ pub fn export_posix(handle: CUmemGenericAllocationHandle) -> Result<OwnedFd> {
         )
     }?;
     if fd < 0 {
-        return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
+        return Err(Error::from(CUDA_ERROR_INVALID_HANDLE));
     }
     // CUDA transfers ownership of a fresh descriptor on successful POSIX export.
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
@@ -58,15 +49,11 @@ pub fn export_posix(handle: CUmemGenericAllocationHandle) -> Result<OwnedFd> {
         .map_err(|_| CUresult::CUDA_ERROR_OPERATING_SYSTEM)?;
     Ok(fd)
 }
-pub type Result<T> = std::result::Result<T, CudaError>;
-
-impl CudaError {
-    pub fn result(code: CUresult) -> Result<()> {
-        if code == CUDA_SUCCESS {
-            Ok(())
-        } else {
-            Err(Self(code))
-        }
+pub fn result(code: CUresult) -> Result<()> {
+    if code == CUDA_SUCCESS {
+        Ok(())
+    } else {
+        Err(Error::Cuda(code))
     }
 }
 
@@ -103,14 +90,14 @@ macro_rules! functions {
             $(
                 pub fn $name() -> Result<unsafe extern "C" fn($($ty),*) -> CUresult> {
                     SYMBOLS.get().and_then(|symbols| symbols.$name)
-                        .ok_or(CudaError::from(CUDA_ERROR_NOT_INITIALIZED))
+                        .ok_or(Error::from(CUDA_ERROR_NOT_INITIALIZED))
                 }
             )*
         }
         $(
         pub unsafe fn $name($($arg: $ty),*) -> Result<()> {
             let function = symbols::$name()?;
-            CudaError::result(unsafe { function($($arg),*) })
+            result(unsafe { function($($arg),*) })
         }
     )*};
 }
