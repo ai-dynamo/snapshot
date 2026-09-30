@@ -17,10 +17,162 @@ import (
 	"github.com/go-logr/logr/testr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
+
+func TestRestoreCUDAHelperSelection(t *testing.T) {
+	for _, engine := range []bool{false, true} {
+		for _, requested := range []bool{false, true} {
+			for _, storage := range []string{"cpu", "driver", "custom"} {
+				t.Run(fmt.Sprintf("engine-%t/requested-%t/%s", engine, requested, storage), func(t *testing.T) {
+					base := t.TempDir()
+					directory, err := nsmount.ResolveArtifactPath(base, "content", "main")
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.MkdirAll(directory, 0700); err != nil {
+						t.Fatal(err)
+					}
+					manifest := types.NewCheckpointManifest("content", "main", types.CRIUDumpManifest{},
+						types.SourcePodManifest{}, types.OverlayManifest{}, types.HostManifest{})
+					if storage != "cpu" {
+						manifest.CUDA = types.CUDAManifest{PIDs: []int{12}, CustomStorage: storage == "custom"}
+						if err := os.WriteFile(filepath.Join(directory, podcontract.CUDAJobFileName), []byte("launch-state"), 0600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if err := types.WriteManifest(directory, manifest); err != nil {
+						t.Fatal(err)
+					}
+					log := testr.New(t)
+					_, err = Restore(context.Background(), checkpointPathRuntime{}, log, RestoreRequest{
+						BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "placeholder",
+						PageBrokerEnabled: false, PageBrokerRequested: requested, CUDAHelperEnabled: engine,
+					}, nsmount.New(log))
+					// The ordinary helper path retains launch-job compatibility and
+					// proceeds to runtime inspection; only the GPU engine rejects it.
+					want := "stop after path preparation"
+					if storage != "cpu" && engine {
+						want = "cannot restore CUDA launch-job state"
+					}
+					if storage == "custom" && !engine {
+						want = "CustomStorage checkpoint requires the persistent CUDA helper"
+					}
+					if err == nil || !strings.Contains(err.Error(), want) {
+						t.Fatalf("restore error=%v; want %s", err, want)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestGPURestoreRejectsSavedLaunchJobBeforeCRIU(t *testing.T) {
+	directory := t.TempDir()
+	manifest := types.NewCheckpointManifest("content", "main", types.CRIUDumpManifest{},
+		types.SourcePodManifest{}, types.OverlayManifest{}, types.HostManifest{})
+	manifest.CUDA = types.CUDAManifest{PIDs: []int{12}}
+	if err := types.WriteManifest(directory, manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, podcontract.CUDAJobFileName), []byte("job-state"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	capability, err := os.Open("/dev/null")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer capability.Close()
+	_, err = RestoreInNamespace(context.Background(), RestoreOptions{
+		CheckpointPath: directory, CUDAHelperEnabled: true, GPUSessions: cuda.GPUSessions{"12": capability},
+	}, testr.New(t))
+	if err == nil || !strings.Contains(err.Error(), "cannot restore CUDA launch-job state") {
+		t.Fatalf("unexpected launch-job result: %v", err)
+	}
+}
+
+func TestGPURestoreCannotFallBackWhenSessionsAreMissing(t *testing.T) {
+	capability, err := os.Open("/dev/null")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer capability.Close()
+	for _, custom := range []bool{false, true} {
+		directory := t.TempDir()
+		manifest := types.NewCheckpointManifest("content", "main", types.CRIUDumpManifest{},
+			types.SourcePodManifest{}, types.OverlayManifest{}, types.HostManifest{})
+		manifest.CUDA = types.CUDAManifest{PIDs: []int{12}, CustomStorage: custom}
+		if err := types.WriteManifest(directory, manifest); err != nil {
+			t.Fatal(err)
+		}
+		for _, sessions := range []cuda.GPUSessions{nil, {"12": nil}, {"13": capability}} {
+			_, err := RestoreInNamespace(context.Background(), RestoreOptions{
+				CheckpointPath: directory, CUDAHelperEnabled: true, GPUSessions: sessions,
+			}, testr.New(t))
+			if err == nil || !(strings.Contains(err.Error(), "GPU session capabilities") || strings.Contains(err.Error(), "missing GPU session")) {
+				t.Fatalf("missing sessions fell back: %v", err)
+			}
+		}
+	}
+}
+
+func TestCustomStorageRestoreRequiresGPUSessions(t *testing.T) {
+	directory := t.TempDir()
+	manifest := types.NewCheckpointManifest("content", "main", types.CRIUDumpManifest{},
+		types.SourcePodManifest{}, types.OverlayManifest{}, types.HostManifest{})
+	manifest.CUDA = types.CUDAManifest{PIDs: []int{12}, CustomStorage: true}
+	if err := types.WriteManifest(directory, manifest); err != nil {
+		t.Fatal(err)
+	}
+	_, err := RestoreInNamespace(context.Background(), RestoreOptions{CheckpointPath: directory}, testr.New(t))
+	if err == nil || !strings.Contains(err.Error(), "CustomStorage checkpoint requires") {
+		t.Fatalf("unexpected missing-session result: %v", err)
+	}
+}
+
+func TestCUDAHelperLibraryDirectorySurvivesBundleRemoval(t *testing.T) {
+	bundle := t.TempDir()
+	libraryDir := filepath.Join(bundle, "lib")
+	if err := os.Mkdir(libraryDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(libraryDir, "libfixture.so"), []byte("library"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LD_LIBRARY_PATH", "/old-libraries")
+	libraries, err := os.Open(libraryDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer libraries.Close()
+	if err := os.Rename(libraryDir, filepath.Join(bundle, "detached")); err != nil {
+		t.Fatal(err)
+	}
+	restoreLibraryPath, err := useCUDAHelperLibraries(libraries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restoreLibraryPath()
+	path, _, _ := strings.Cut(os.Getenv("LD_LIBRARY_PATH"), ":")
+	data, err := os.ReadFile(filepath.Join(path, "libfixture.so"))
+	if err != nil || string(data) != "library" {
+		t.Fatalf("pinned library lookup failed after original path disappeared: %q, %v", data, err)
+	}
+	restoreLibraryPath()
+	if err := libraries.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if os.Getenv("LD_LIBRARY_PATH") != "/old-libraries" {
+		t.Fatal("library environment was not restored")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("library descriptor remains after cleanup: %v", err)
+	}
+}
 
 func TestInspectCompatibilityChecksMappedGPUMountAndOrdinaryMounts(t *testing.T) {
 	root := t.TempDir()

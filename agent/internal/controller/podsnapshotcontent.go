@@ -608,6 +608,7 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 	log := logr.FromContextOrDiscard(ctx)
 
 	req := executor.CheckpointRequest{
+		CUDAHelper:          w.cudaHelper,
 		ContainerID:         params.ContainerID,
 		ContainerName:       params.ContainerName,
 		ContentUID:          params.ContentUID,

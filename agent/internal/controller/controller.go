@@ -43,6 +43,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
@@ -58,6 +59,7 @@ import (
 // informer over PodSnapshotContent work orders filtered to this node, with typed
 // reads/writes via an uncached controller-runtime client.
 type NodeController struct {
+	cudaHelper              *cuda.Helper
 	config                  *types.AgentConfig
 	clientset               kubernetes.Interface
 	client                  client.Client
@@ -165,6 +167,9 @@ const (
 
 // podSnapshotContentGVR is the cluster-scoped resource the capture informer watches.
 var podSnapshotContentGVR = snapshotv1alpha1.GroupVersion.WithResource("podsnapshotcontents")
+
+// SetCUDAHelper supplies the agent-owned process after its startup READY.
+func (w *NodeController) SetCUDAHelper(helper *cuda.Helper) { w.cudaHelper = helper }
 
 // NewNodeController creates the node-local controller that runs inside snapshot-agent.
 func NewNodeController(
@@ -996,6 +1001,9 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (int, error) {
 		SkipCompatCheck:             op.skipCompatCheck,
 		Clientset:                   w.clientset,
 		PageBrokerRequested:         op.pod.Annotations[snapshotv1alpha1.PageBrokerAnnotation] == snapshotv1alpha1.PageBrokerAnnotationEnabled,
+		CUDAHelperEnabled:           w.config.CUDACheckpoint.Enabled,
+		CUDAHelper:                  w.cudaHelper,
+		EnableChecksumDigest:        w.config.CUDACheckpoint.EnableChecksumDigest,
 		PageBrokerEnabled:           w.config.PageBroker.Enabled,
 		PageBrokerControlSocketPath: w.config.PageBroker.ControlSocketPath,
 	}

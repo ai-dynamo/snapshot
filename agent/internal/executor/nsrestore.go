@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -24,11 +25,13 @@ import (
 
 // RestoreOptions holds configuration for an in-namespace restore.
 type RestoreOptions struct {
-	CheckpointPath  string
-	CUDADeviceMap   string
-	GPUMountAliases map[string]string
-	CgroupRoot      string
-	TargetPodIP     string
+	CUDAHelperEnabled bool
+	GPUSessions       cuda.GPUSessions
+	CheckpointPath    string
+	CUDADeviceMap     string
+	GPUMountAliases   map[string]string
+	CgroupRoot        string
+	TargetPodIP       string
 	// BundleDir is the path where the agent's binary bundle is mounted inside this namespace.
 	BundleDir string
 }
@@ -65,6 +68,27 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 	if err != nil {
 		return nil, fmt.Errorf("failed to read manifest: %w", err)
 	}
+	if m.CUDA.CustomStorage && !opts.CUDAHelperEnabled {
+		return nil, fmt.Errorf("CustomStorage checkpoint requires the persistent CUDA helper")
+	}
+	if !opts.CUDAHelperEnabled && len(opts.GPUSessions) != 0 {
+		return nil, fmt.Errorf("GPU sessions supplied while the persistent CUDA helper is disabled")
+	}
+	if opts.CUDAHelperEnabled {
+		if len(opts.GPUSessions) != len(m.CUDA.PIDs) {
+			return nil, fmt.Errorf("GPU session capabilities do not match checkpoint CUDA participants")
+		}
+		for _, pid := range m.CUDA.PIDs {
+			if opts.GPUSessions[strconv.Itoa(pid)] == nil {
+				return nil, fmt.Errorf("missing GPU session for CUDA PID %d", pid)
+			}
+		}
+		if !m.CUDA.IsEmpty() {
+			if err := validateGPURestoreArtifact(opts.CheckpointPath); err != nil {
+				return nil, err
+			}
+		}
+	}
 	log.V(1).Info("Loaded checkpoint manifest",
 		"ext_mounts", len(m.CRIUDump.ExtMnt),
 		"criu_log_level", m.CRIUDump.CRIU.LogLevel,
@@ -72,7 +96,7 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		"checkpoint_has_cuda", !m.CUDA.IsEmpty(),
 	)
 	cudaJobFile := ""
-	if !m.CUDA.IsEmpty() {
+	if !m.CUDA.IsEmpty() && !opts.CUDAHelperEnabled {
 		cudaJobFile, err = cuda.JobFileFromCheckpoint(opts.CheckpointPath)
 		if err != nil {
 			return nil, err
@@ -181,6 +205,7 @@ func executeRestore(
 	// opening the binary now and exec'ing via /proc/self/fd/N after CRIU returns,
 	// the fd remains valid even if the mount is gone.
 	var cudaHelperFdPath string
+	var cudaHelperLibraries *os.File
 	if !m.CUDA.IsEmpty() {
 		helperPath := filepath.Join(opts.BundleDir, cuda.HelperBinaryName)
 		f, err := os.Open(helperPath)
@@ -189,6 +214,11 @@ func executeRestore(
 		}
 		defer f.Close()
 		cudaHelperFdPath = fmt.Sprintf("/proc/self/fd/%d", f.Fd())
+		cudaHelperLibraries, err = os.Open(filepath.Join(opts.BundleDir, "lib"))
+		if err != nil {
+			return nil, 0, nil, fmt.Errorf("open CUDA helper libraries before CRIU restore: %w", err)
+		}
+		defer cudaHelperLibraries.Close()
 	}
 
 	// The restore-complete sentinel lives on the pod emptyDir mounted at
@@ -251,6 +281,11 @@ func executeRestore(
 	// CUDA restore — remap checkpoint-time innermost namespace PIDs onto the
 	// current visible restored PIDs before invoking cuda-checkpoint.
 	if !m.CUDA.IsEmpty() {
+		restoreLibraryPath, err := useCUDAHelperLibraries(cudaHelperLibraries)
+		if err != nil {
+			return nil, 0, nil, err
+		}
+		defer restoreLibraryPath()
 		restorePIDs, err := snapshotruntime.ResolveManifestPIDsToObservedPIDs(processes, restoredPID, m.CUDA.PIDs)
 		if err != nil {
 			return nil, 0, nil, fmt.Errorf("failed to resolve restored CUDA PIDs: %w", err)
@@ -266,7 +301,12 @@ func executeRestore(
 				return nil, 0, nil, fmt.Errorf("restore native GPU device mounts: %w", err)
 			}
 		}
-		_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, log)
+		if opts.CUDAHelperEnabled {
+			err = cuda.RunGPUSessions(ctx, cudaHelperFdPath, opts.GPUSessions, m.CUDA.PIDs, false, log, restorePIDs)
+			opts.GPUSessions.Close()
+		} else {
+			_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaHelperFdPath, log)
+		}
 		timings.cudaRestoreDuration = time.Since(cudaStart)
 		if err != nil {
 			return nil, 0, nil, fmt.Errorf("CUDA restore failed: %w", err)
@@ -276,4 +316,31 @@ func executeRestore(
 	// Retain aliases only once CUDA restore and unlock have also succeeded.
 	gpuMountsCommitted = true
 	return timings, restoredPID, nil, nil
+}
+
+// The helper now also loads transfer libraries from the bundle. Keep its lib
+// directory reachable after CRIU removes that mount, just as we pin the binary.
+// Referencing this parent's FD works for both ordinary and batch CLI children
+// without changing the legacy shim's inherited-descriptor contract.
+func useCUDAHelperLibraries(libraries *os.File) (func(), error) {
+	// Derive the PID from the procfs now visible after CRIU restored mounts.
+	pid, err := os.Readlink("/proc/self")
+	if err != nil {
+		return nil, fmt.Errorf("resolve nsrestore PID for CUDA helper libraries: %w", err)
+	}
+	previous, present := os.LookupEnv("LD_LIBRARY_PATH")
+	path := fmt.Sprintf("/proc/%s/fd/%d", pid, libraries.Fd())
+	if previous != "" {
+		path += ":" + previous
+	}
+	if err := os.Setenv("LD_LIBRARY_PATH", path); err != nil {
+		return nil, err
+	}
+	return func() {
+		if present {
+			_ = os.Setenv("LD_LIBRARY_PATH", previous)
+		} else {
+			_ = os.Unsetenv("LD_LIBRARY_PATH")
+		}
+	}, nil
 }

@@ -135,6 +135,29 @@ func TestCheckpointPageBrokerPrepareFailureDoesNotMutate(t *testing.T) {
 	assert.False(t, CheckpointNeedsSourceKill(err))
 }
 
+func TestCheckpointPersistentHelperDoesNotRequirePageBroker(t *testing.T) {
+	for _, mode := range []string{"driver", "custom"} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := &types.AgentConfig{
+				Storage:        types.StorageSpec{BasePath: t.TempDir()},
+				CUDACheckpoint: types.CUDACheckpointSpec{Enabled: true, StorageMode: mode},
+			}
+			err := Checkpoint(context.Background(), checkpointPathRuntime{}, logr.Discard(), CheckpointRequest{
+				ContentUID: "content", ContainerName: "main", PageBrokerRequested: true,
+			}, cfg)
+			require.ErrorContains(t, err, "stop after path preparation")
+			assert.False(t, CheckpointNeedsSourceKill(err))
+		})
+	}
+}
+
+func TestGPUCheckpointCannotFallBackWhenSessionsAreMissing(t *testing.T) {
+	_, err := captureCheckpoint(context.Background(), nil, &types.CRIUSettings{}, &types.CheckpointManifest{},
+		&types.CheckpointContainerSnapshot{CUDAHostPIDs: []int{12}, CUDANSPIDs: []int{12}},
+		t.TempDir(), "", logr.Discard(), true, nil)
+	require.ErrorContains(t, err, "missing GPU session for PID 12")
+}
+
 func TestCheckpointNeedsSourceKill(t *testing.T) {
 	assert.True(t, CheckpointNeedsSourceKill(checkpointNeedsSourceKill(errors.New("capture failed"))))
 	assert.False(t, CheckpointNeedsSourceKill(errors.New("prepare failed")))

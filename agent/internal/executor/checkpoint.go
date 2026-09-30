@@ -46,6 +46,7 @@ func CheckpointNeedsSourceKill(err error) bool {
 
 // CheckpointRequest holds the content-owned inputs for a checkpoint operation.
 type CheckpointRequest struct {
+	CUDAHelper          *cuda.Helper
 	ContainerID         string
 	ContainerName       string
 	ContentUID          string
@@ -82,7 +83,18 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	if err != nil {
 		return fmt.Errorf("resolve checkpoint artifact path: %w", err)
 	}
-	brokered := req.PageBrokerRequested && cfg.PageBroker.Enabled
+	// Persistent CUDA owns its PVC files directly. Inspect before choosing
+	// staging so an annotation cannot route GPU files through PageBroker.
+	var state *types.CheckpointContainerSnapshot
+	var gpuDeviceMapDuration time.Duration
+	if cfg.CUDACheckpoint.Enabled {
+		state, gpuDeviceMapDuration, err = inspectContainer(ctx, rt, log, req)
+		if err != nil {
+			return err
+		}
+	}
+	brokered := cfg.PageBroker.Enabled && req.PageBrokerRequested &&
+		!(state != nil && len(state.CUDAHostPIDs) > 0)
 	transactionID := uuid.NewString()
 	var broker pagebroker.Client
 	committed := false
@@ -121,12 +133,14 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		defer os.RemoveAll(tmpDir)
 	}
 
-	state, gpuDeviceMapDuration, err := inspectContainer(ctx, rt, log, req)
-	if err != nil {
-		return err
+	if state == nil {
+		state, gpuDeviceMapDuration, err = inspectContainer(ctx, rt, log, req)
+		if err != nil {
+			return err
+		}
 	}
 	cudaJobFile := ""
-	if len(state.CUDAHostPIDs) > 0 {
+	if len(state.CUDAHostPIDs) > 0 && !cfg.CUDACheckpoint.Enabled {
 		cudaJobFile, err = cuda.StageJobFile(state.RootFS, tmpDir, len(state.GPUs.Devices))
 		if err != nil {
 			return err
@@ -138,11 +152,27 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		return err
 	}
 
-	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log)
+	var sessions cuda.GPUSessions
+	if cfg.CUDACheckpoint.Enabled && len(state.CUDANSPIDs) > 0 {
+		sessions, err = cuda.BindGPUSessions(ctx, req.CUDAHelper, tmpDir, state.PID,
+			state.CUDANSPIDs, data.CUDA.SourceGPUUUIDs, "", true, cfg.CUDACheckpoint.StorageMode == "custom", cfg.CUDACheckpoint.EnableChecksumDigest)
+		if err != nil {
+			return err
+		}
+		defer func() { retErr = errors.Join(retErr, req.CUDAHelper.Drain(sessions)) }()
+		data.CUDA.CustomStorage = cfg.CUDACheckpoint.StorageMode == "custom"
+		if err := types.WriteManifest(tmpDir, data); err != nil {
+			return err
+		}
+	}
+	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, cudaJobFile, log, cfg.CUDACheckpoint.Enabled, sessions)
 	if err != nil {
 		return checkpointNeedsSourceKill(err)
 	}
 
+	if err := req.CUDAHelper.Drain(sessions); err != nil {
+		return checkpointNeedsSourceKill(err)
+	}
 	switchStart := time.Now()
 	if brokered {
 		if err := broker.Commit(ctx, transactionID); err != nil {
@@ -338,16 +368,24 @@ func configureCheckpoint(
 	return criuOpts, m, nil
 }
 
-func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger) (*checkpointPhaseTimings, error) {
+func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger, cudaHelperEnabled bool, sessions cuda.GPUSessions) (*checkpointPhaseTimings, error) {
 	timings := &checkpointPhaseTimings{}
 
 	// CUDA lock+checkpoint must happen before CRIU dump
 	if len(state.CUDAHostPIDs) > 0 {
-		cudaTimings, err := cuda.CheckpointProcessTree(ctx, state.CUDAHostPIDs, cudaJobFile, checkpointDir, log)
-		if err != nil {
-			return nil, fmt.Errorf("CUDA checkpoint failed: %w", err)
+		if cudaHelperEnabled {
+			start := time.Now()
+			if err := cuda.RunGPUSessions(ctx, cuda.DefaultHelperBinaryPath, sessions, state.CUDANSPIDs, true, log); err != nil {
+				return nil, fmt.Errorf("CUDA helper capture: %w", err)
+			}
+			timings.CUDACheckpointDuration = time.Since(start)
+		} else {
+			cudaTimings, err := cuda.CheckpointProcessTree(ctx, state.CUDAHostPIDs, cudaJobFile, checkpointDir, log)
+			if err != nil {
+				return nil, fmt.Errorf("CUDA checkpoint failed: %w", err)
+			}
+			timings.CUDACheckpointDuration = cudaTimings.TotalDuration
 		}
-		timings.CUDACheckpointDuration = cudaTimings.TotalDuration
 	}
 
 	criuDumpDuration, err := criu.ExecuteDump(criuOpts, checkpointDir, criuSettings, log)
