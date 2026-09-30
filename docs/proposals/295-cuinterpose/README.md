@@ -70,8 +70,8 @@ workloads to resume with their existing pointers and sharing semantics.
   captured by CRIU; leave never-shared allocations to native CUDA checkpoint.
 - Validate the complete participant topology before destructive preparation;
   reconstruct creators before importers and verify topology before resuming.
-- Install and preload the shim through the Pod contract without changing
-  workload commands. Preserve native CUDA jobfile behavior when a file exists.
+- Deliver the shim before SnapshotJob workloads start, preserving their
+  arguments and resolved environment. Preserve native CUDA jobfiles when present.
 - Define application quiescence, failure, and artifact compatibility contracts
   that match the implementation.
 
@@ -136,8 +136,8 @@ outside this scope.
 | Host-memory pressure | Budget approximately one host copy of shared creator backing plus metadata and temporary mappings. Carriers use pinned memory during transfers and enlarge CRIU images. Importers do not save duplicate bytes. |
 | Platform and CUDA compatibility | Require Linux/amd64, glibc 2.34 or newer for the preload libraries, CUDA Runtime 12.0 or newer when using a runtime library, compatible GPUs/drivers, and the VMM/multicast APIs the workload uses. Existing Snapshot/CRIU privilege and compatibility requirements still apply. |
 | Fork and loader behavior | Lookup starts no runtime. Fork before CUDA initialization allows child initialization; children forked after initialization must exec or exit. Fork during initialization and long-lived fork children during checkpoint are unsupported. |
-| Checkpoint/artifact mismatch | Ship matching frontend, backend, and coordinator artifacts at capture-time library paths. Reject older formats and recreate old draft checkpoints. |
-| Incomplete qualification | The stack reports headless and repository checks, but its current revision has not been qualified on physical GPUs or across nodes. Those remain validation work, not established support evidence. |
+| Checkpoint/artifact mismatch | Require identical frontend and core SHA-256 hashes at restore and a compatible coordinator protocol. Keep library files stable during capture; recreate obsolete draft checkpoints. |
+| Incomplete qualification | Physical-GPU and cross-node qualification are required in addition to repository checks; earlier revision results do not qualify the revised implementation. |
 
 ## Design Details
 
@@ -151,35 +151,46 @@ metadata:
     nvidia.com/cuinterpose-enabled: "true"
 ```
 
-The annotation is parsed as a trimmed boolean; absent or invalid values disable
-cuinterpose. SnapshotJob applies library installation and preload immediately
-before Job creation, retaining its existing builder and adoption checks.
-The installer copies `libcuinterpose.so` and `libcuinterpose_core.so` from the
-agent image into an `emptyDir` mounted read-only at `/tmp/snapshot-cuda` in target
-containers. The installer uses the Pod's positive `runAsUser` when specified,
-otherwise UID 65532, with `runAsNonRoot: true`; it leaves the Pod and workload
-security contexts unchanged. It prepends the frontend to an explicit literal
-`LD_PRELOAD` and preserves its entries and workload commands. A duplicate
-`LD_PRELOAD` variable or one supplied through `valueFrom` is rejected because the
-installer cannot safely prepend it. When `envFrom` could supply `LD_PRELOAD`, the
-Pod must declare it explicitly: list the required preload libraries, or use an
-empty value to request only cuinterpose. Libraries supplied by the workload
-image's `LD_PRELOAD` must also be listed explicitly in the Pod.
-The injected shim path is always absolute. Manual injection must also use an
-absolute path: after a working-directory change, exec resolves relative preload
-paths again before the shim can run.
+The annotation keeps its trimmed `strconv.ParseBool` spellings: `1`, `t`, `T`,
+`true`, `TRUE`, and `True` enable it; `0`, `f`, `F`, `false`, `FALSE`, and `False`
+disable it. Absence disables the request; an invalid present value is a source
+validation error.
 
-The coordinator's internal CLI takes `--prepare` or `--restore`,
-`--checkpoint-dir`, `--control-dir`, and a repeated `--process` namespace PID.
+Automatic delivery applies to SnapshotJob sources and their single target
+container. Immediately before creating the source Job, the operator copies
+`libcuinterpose.so`, `libcuinterpose_core.so`, and `cuinterpose-launch` from the
+agent image into an `emptyDir` mounted read-only at `/tmp/snapshot-cuda`. It
+requires an explicit target-container `command` and prefixes that command with
+the launcher; `args` and `env` remain unchanged. Missing commands and reserved
+name or mount collisions fail controller validation before Job creation. Images
+using their default entrypoint must supply it explicitly; the operator does not
+resolve registry metadata. Existing-Job adoption retains its original identity
+checks and is independent of current delivery settings.
+
+The static launcher prepends `/tmp/snapshot-cuda/libcuinterpose.so` to the
+runtime-resolved `LD_PRELOAD` and directly executes the original command. It
+preserves existing preload bytes, non-UTF-8 environment values, and argument
+boundaries, with no shell or persistent parent. Image environment, `envFrom`,
+and explicit Pod environment retain their normal precedence.
+
+Ordinary Pods require delivery before process startup: place both libraries at
+`/tmp/snapshot-cuda` and preload `/tmp/snapshot-cuda/libcuinterpose.so`. Adding an
+annotation to a running Pod cannot activate the shim. The fixed library paths
+are also supplied by the restore agent.
+
+The coordinator's internal CLI takes `--inspect`, `--prepare`, or `--restore`,
+`--control-dir`, and a repeated `--process` namespace PID. Preparation and
+restore also require `--checkpoint-dir`; inspection accepts no checkpoint path.
 The agent supplies this participant list; the coordinator does not discover
 participants through a rendezvous protocol.
 
 Native CUDA jobfiles remain supported: existing files are staged, refreshed after
-checkpoint, and restored through the native helper. Opt-in only permits an
-absent jobfile; it does not bypass validation of an existing file. Unannotated
-multi-GPU workloads keep the native jobfile requirement. SnapshotJob keeps
-command wrapping disabled; the optional `snapshotctl --cuda-checkpoint-wrap`
-path remains available. [#362](https://github.com/ai-dynamo/snapshot/issues/362)
+checkpoint, and restored through the native helper. Verified shim activation
+permits an absent jobfile; it does not bypass validation of an existing file.
+Native multi-GPU workloads keep the jobfile requirement. The launcher does not
+enable native CUDA jobfile creation; the optional
+`snapshotctl --cuda-checkpoint-wrap` path remains available.
+[#362](https://github.com/ai-dynamo/snapshot/issues/362)
 tracks native multi-GPU launch setup separately.
 
 ### Components
@@ -250,7 +261,11 @@ worker reports completion to checkpoint code so it can release the host carrier.
 
 #### CuInterpose coordinator
 
-The Rust `cuinterpose-coordinator` is a short-lived executable statically linked with musl. One instance runs before native capture; another runs after native restore. It reads state entries from all shims, checks that creators and importers agree, and starts each capture or restore phase. It does not call CUDA or copy allocation bytes.
+The Rust `cuinterpose-coordinator` is a short-lived executable statically linked
+with musl. Separate instances inspect, prepare capture, and reconstruct after
+native restore. Inspection reads every participant using the existing `INSPECT`
+message and validates topology without changing phase or writing state. The
+coordinator does not call CUDA or copy allocation bytes.
 
 Checkpoint entry and inspection visit participants sequentially. Each mutating lifecycle operation is dispatched concurrently to all participants, and the coordinator waits for every reply before advancing. This matters for multicast calls that need other ranks to make progress.
 
@@ -264,7 +279,11 @@ the actual FD handoff, not discovery.
 
 #### Snapshot agent
 
-For an opted-in workload, the agent finds CUDA processes and launches the coordinator in the target namespaces. The coordinator connects to every participant; a missing or failing shim aborts capture. The agent sequences native CUDA checkpoint/restore and CRIU. After restore, it releases the application's restore-complete wait only when native CUDA and cuinterpose reconstruction both succeed.
+The agent uses its existing CUDA process census to inspect mapped libraries in
+every participant and invokes read-only coordinator inspection before preparation.
+It sequences native CUDA checkpoint/restore and CRIU, and releases the
+application's restore-complete wait only after both native CUDA and CuInterpose
+reconstruction succeed.
 
 #### Host-carrier module
 
@@ -619,14 +638,29 @@ support checkpointing a long-lived child forked after CUDA initialization.
 
 The application must first stop submitting work, finish outstanding GPU work, and arrange to stay parked through restore. The coordinator does not pause application threads. In particular, **shim preparation runs before native CUDA lock** because saving and removing shared allocations requires working CUDA calls.
 
-The agent requires the exact namespace-PID socket for every discovered CUDA
-process in an opted-in workload. It starts the coordinator with those namespace
-PIDs. The coordinator sends `BEGIN_CHECKPOINT` to each shim and checks creators,
-ranges, access permissions, and complete multicast groups before changing driver
-state. Under the process mutex, checkpoint entry requires `Active` and zero
-unlocked driver calls, returns the inspection records, and changes the phase to
-`Checkpointing`. Application memory APIs then refuse mutation. `INSPECT` remains
-a read-only query; it does not authorize destructive preparation.
+The agent inspects every discovered CUDA participant. An enabled annotation or
+the launcher as the target container's command requires the shim to be active.
+Without either expectation and with no shim mapped, capture uses the native
+path. If all participants have both libraries mapped, capture uses CuInterpose
+even if the annotation was removed. Missing or partial coverage is an error;
+an annotation cannot independently select the checkpoint algorithm.
+
+The agent opens the mapped libraries, matches their device/inode identity to
+the process mappings, and hashes those same descriptors. Deleted or replaced
+files and inconsistent hashes between participants fail preflight. Library
+files must remain stable during capture.
+
+Coordinator `--inspect` contacts the exact namespace-PID socket of every
+participant and validates creators, ranges, access permissions, and complete
+multicast groups. Missing or unhealthy endpoints fail before preparation and
+preserve the source. Inspection is read-only and does not lock the group.
+
+Preparation then sends `BEGIN_CHECKPOINT` to each shim and validates the
+returned topology again. Under the process mutex, entry requires `Active` and
+zero unlocked driver calls, returns the records, and changes the phase to
+`Checkpointing`. Application memory APIs then refuse mutation. Any failure
+after entering preparation conservatively terminates the source, including a
+failure after successful preflight.
 
 Multicast attachment and binding validation keys devices by namespace PID and
 local CUDA ordinal. A binding requires an attachment in that same participant;
@@ -639,9 +673,10 @@ creators must remain available. Neither the counter nor checkpoint entry parks
 application threads or drains GPU work.
 
 One coordinator issues each phase once, in order. There are no lifecycle retries,
-rollback, or reconnect-and-resume semantics. A lost reply or timeout makes the
-attempt unusable; the agent terminates the affected workload. A driver error
-before an ordinary application operation changes tracked state can be returned
+rollback, or reconnect-and-resume semantics. A lost reply or timeout during
+preparation or reconstruction makes the attempt unusable; the agent terminates
+the affected workload. A driver error before an ordinary application operation
+changes tracked state can be returned
 to the caller. Failure after a state-changing operation, or during destructive
 capture/restore, terminates the process.
 
@@ -660,6 +695,12 @@ sequenceDiagram
     participant CRIU as CRIU
     participant Files as Checkpoint files
     App->>App: Finish work and remain parked
+    Agent->>Agent: Verify mapped library identities in all CUDA participants
+    Agent->>Coord: Start read-only inspection in target namespaces
+    Coord->>Shims: INSPECT on each namespace-PID socket
+    Shims-->>Coord: Namespace PID and state records
+    Coord->>Coord: Validate all participants
+    Coord-->>Agent: Inspection succeeded and exit
     Agent->>Coord: Start prepare in target namespaces
     Coord->>Shims: BEGIN_CHECKPOINT on each namespace-PID socket
     Shims-->>Coord: Namespace PID and state records
@@ -694,11 +735,14 @@ For the 2 MiB example, `SAVE_ALLOCATIONS` copies A's allocation into A's host ar
 
 ### Restore
 
-Before CRIU, the agent restores the tool paths and control directory and removes
+Before CRIU, the agent verifies the restore bundle against both recorded library
+hashes, restores the tool paths and control directory, and removes
 the exact socket names for the namespace PIDs in the manifest. CRIU recreates
 the process tree, namespace PIDs, shim records, and host carriers. Native CUDA restore reconstructs private memory and
 process state, then unlocks CUDA so the shims can make driver calls. The
 application remains parked until all shim reconstruction succeeds.
+Coordinator sockets use the manifest's namespace PIDs, which CRIU preserves;
+native CUDA restore uses resolved process PIDs visible to the native helper.
 
 ```mermaid
 sequenceDiagram
@@ -709,7 +753,7 @@ sequenceDiagram
     participant Creators as Creator shims
     participant Importers as Importer shims
     participant App as Parked application
-    Agent->>Agent: Check format and restore mounts and socket directory
+    Agent->>Agent: Check format and library hashes; restore mounts and socket directory
     Agent->>CRIU: Restore process tree and host carriers
     Agent->>CUDA: Restore native state, then unlock CUDA
     Agent->>Coord: Start restore in target namespaces
@@ -864,14 +908,32 @@ from CRIU's host-carrier images, not this file.
 The corresponding section of `manifest.yaml` is ordinary YAML:
 
 ```yaml
-cuinterpose: true
+cuinterpose:
+  frontendSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  coreSHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 ```
 
-`cuinterpose` records source opt-in. When CUDA processes are present, capture must complete coordinator preparation before publishing the checkpoint, and restore must run the coordinator before releasing the workload. With no CUDA processes, restore only needs the library mount. The coordinator reads and validates its state; missing or invalid state fails restore.
+The illustrative hashes above record verified runtime libraries, not the
+annotation. Both fields are required when `cuinterpose` is present. Capture
+completes coordinator preparation before publishing the checkpoint, and restore
+runs reconstruction before releasing the workload. Missing or invalid
+coordinator state fails restore. Native checkpoints omit `cuinterpose`; earlier
+draft checkpoints containing `cuinterpose: true` are rejected with an instruction
+to recreate them.
 
 The private frontend/backend ABI is version **4**. The MessagePack protocol and state envelope, virtual shareable handle, and virtual IPC memory handle are version **1**. Older draft artifacts, including shim PageBroker artifacts, are not migrated or silently interpreted as host-carrier checkpoints.
 
-The shim libraries themselves are part of the checkpointed process. Their files must be available at the original paths, and the coordinator must understand their protocol. Ship a matching frontend, backend, and coordinator set; the format checks are not permission to substitute arbitrary library builds.
+The shim libraries are part of the checkpointed process. Their files must be
+available at the original paths, and the coordinator must understand their
+protocol. Before CRIU, restore compares SHA-256 hashes of the exact libraries
+supplied by the agent. Mismatches identify the library and expected/actual
+hashes; `SkipCompatCheck` does not bypass this check. The frontend also carries a
+linker build ID, but SHA-256 is the identity check.
+
+Upgrades that change shim bytes require matching agents or recreated checkpoints;
+unrelated agent changes do not invalidate them. Launcher and coordinator bytes
+are excluded: those executables are absent from the checkpointed workload.
+Archiving libraries with checkpoints remains separate work.
 
 ### Security
 
@@ -889,6 +951,9 @@ but not its user or cgroup namespace. The agent opens trusted executable,
 namespace, and checkpoint-directory descriptors before entry, so it does not
 resolve the coordinator executable through the workload filesystem. Restore
 removes only the expected stale participant socket paths.
+The open mount-namespace descriptor pins that namespace; other namespace entry
+still depends on the target PID. Command cancellation kills the helper's process
+group, including forked descendants, and bounds waiting for output pipes.
 
 Host carriers contain shared workload data in the CRIU images. They require the
 same checkpoint storage access controls as other captured process memory; this
@@ -896,13 +961,21 @@ proposal adds no encryption or separate credential mechanism. Version checks,
 32 MiB message/state limits, socket timeouts, and bounded control queues limit
 malformed input and stalled peers. They do not make untrusted checkpoint images
 safe to restore. The library installer drops capabilities, disallows privilege
-escalation, and uses a read-only root filesystem.
+escalation, and uses a read-only root filesystem. It uses the Pod's positive
+`runAsUser` when specified, otherwise UID 65532, with `runAsNonRoot: true`,
+without changing workload security contexts.
 
 ### Configuration
 
 Helm passes the agent image and pull policy to the operator for library
 installation. Image pulls use the workload Pod's or ServiceAccount's credentials;
 no registry credentials are embedded in the shim.
+Set the existing agent image tag field to `<tag>@sha256:<digest>` to pin both
+the DaemonSet and installer. Invalid pull policies fail operator startup; a
+missing agent image produces a retryable operator-configuration error. Delivery
+settings are consulted only for new source Jobs. The installer has equal CPU
+requests/limits of `100m` and memory requests/limits of `64Mi`, preserving an
+otherwise Guaranteed Pod's QoS classification.
 
 The shim reads `SNAPSHOT_CONTROL_DIR`, defaulting to `/snapshot-control`; Snapshot
 uses its canonical control mount for coordinator commands. The protocol reads
@@ -928,17 +1001,18 @@ layers and are not all independently buildable backends.
 | Layer | Coverage and expected outcome |
 | --- | --- |
 | Rust unit/protocol and C/Rust ABI checks | Validate framing, versions, handle layouts, topology, ownership, lifecycle ordering, and ABI size/offset compatibility. |
-| Packaged headless probes | Exercise forwarding, runtime-version refusal, lookup without startup, initialization and loader reentry, relative preload followed by chdir, sticky failures, fork/exec ownership, and incompatible artifacts without a GPU. |
-| Scripted coordinator exchanges | Verify barriers, preflight refusal, process-local multicast ordinals, transfer-size checks, lost replies without retry, and failed state publication or missing/corrupt restore state. |
-| Go and Helm integration | Verify opt-in, library/preload delivery, unchanged commands, namespace execution, inherited descriptors, stale-socket cleanup, restore mounts, error propagation, and jobfiles that are present, absent, or invalid. |
+| Packaged headless probes | Exercise forwarding, runtime-version refusal, lookup without startup, initialization and loader reentry, relative preload followed by chdir, sticky failures, fork/exec ownership, incompatible artifacts, and launcher environment/argument preservation without a GPU. |
+| Scripted coordinator exchanges | Verify read-only inspection, barriers, preflight refusal, process-local multicast ordinals, transfer-size checks, lost replies without retry, and failed state publication or missing/corrupt restore state. |
+| Go and Helm integration | Verify SnapshotJob delivery and explicit-command validation, unchanged args/environment, collision rejection, configuration retry and adoption, mapped-library identity, mismatch refusal before CRIU, preflight/source-termination boundaries, forked-child cancellation, inherited descriptors, restore mounts, and existing jobfile behavior. |
 | Physical-GPU suite | Verify shared and private bytes, importer reconstruction, multicast collectives/graph replay, foreign-import refusal, and context teardown using the real driver. Context cases verify malloc cleanup, other-context isolation, and carrier reconstruction of surviving VMM. Require zero skips on suitable hardware. |
 | Cross-node Snapshot E2E | Capture and restore on compatible distinct nodes, then verify workload inference and sharing. The native GPU suite alone does not cover Go namespace orchestration. [#294](https://github.com/ai-dynamo/snapshot/issues/294) tracks opt-in 8-GPU cross-node coverage. |
 
-As reported by #338, `make -C agent cuinterpose-test`, `make check`, `make test`,
-`make build`, 14 Helm unit tests, and Python syntax/GPU staging checks pass.
-Optional CUDA helper C++ tests were skipped for missing local development
-dependencies. Physical-GPU and cross-node tests were not run for that revision;
-earlier results do not qualify the current implementation.
+Run `make check`, `make test`, `make build`, and
+`make -C agent/cmd/cuinterpose test-native` on the final assembled revision.
+Qualify real multi-process GPU capture/restore, cross-node restore, and a
+deliberately mismatched shim bundle; exercise HOST_NUMA and multicast on suitable
+hardware. Record unavailable coverage explicitly. Earlier revision results and
+coordinator-only tests do not qualify revised native CUDA/CRIU behavior.
 
 ### Graduation Criteria
 
@@ -987,6 +1061,10 @@ the dependency chain, not follow-up work.
 - **Per-object progress and lifecycle retry:** the implementation uses one process
   phase and stable ownership, with fail-stop behavior after destructive errors.
   A lost reply cannot establish whether a mutation completed safely.
+- **Rewriting Pod preload environment:** a static launcher receives the resolved
+  environment, avoiding duplicated image, ConfigMap, and Secret precedence logic.
+  It requires an explicit command. Registry entrypoint discovery and NRI-based
+  delivery remain outside this change.
 
 ## Appendix
 

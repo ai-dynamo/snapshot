@@ -110,7 +110,7 @@ RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
     && /cuda-checkpoint-helper-transfer-cancellation-test
 
 # =============================================================================
-# C frontend and Rust core - pinned GNU builder, static musl coordinator
+# C frontend and Rust core - pinned GNU builder, static musl coordinator/launcher
 # =============================================================================
 # GCC 15 builds the C frontend, which requires musttail. The Bookworm image keeps
 # the builder's glibc 2.36.
@@ -382,6 +382,7 @@ COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-chec
 COPY --from=cuinterpose-builder /cuinterpose/build/libcuinterpose.so /usr/local/lib/snapshot/libcuinterpose.so
 COPY --from=cuinterpose-builder /cuinterpose/build/libcuinterpose_core.so /usr/local/lib/snapshot/libcuinterpose_core.so
 COPY --from=cuinterpose-builder /cuinterpose/build/cuinterpose-coordinator /usr/local/bin/cuinterpose-coordinator
+COPY --from=cuinterpose-builder /cuinterpose/build/cuinterpose-launch /usr/local/bin/cuinterpose-launch
 COPY --from=cuinterpose-builder /rust-sources/ /legal/cuinterpose/rust/
 COPY cmd/cuinterpose/ /legal/cuinterpose/source/
 # nsmount resolves this helper at /usr/local/sbin/ns-bind-mount (see
@@ -468,7 +469,7 @@ COPY --from=compliance go-licenses.sh /tmp/go-licenses.sh
 RUN sh /tmp/gen-attribution.sh /legal/source/dpkg/DELTA.tsv /legal/source/go/vendor \
       /legal/THIRD-PARTY.txt /legal/source/dpkg/SKIPPED.txt /tmp/go-licenses.sh \
     && rm -f /tmp/gen-attribution.sh
-RUN printf '\nCuInterpose C frontend and Rust core/coordinator: Apache-2.0; source in /legal/cuinterpose/source.\nRust standard library and libc crate: MIT OR Apache-2.0 and bundled third-party notices; corresponding sources and licenses in /legal/cuinterpose/rust.\n' \
+RUN printf '\nCuInterpose C frontend and Rust core/coordinator/launcher: Apache-2.0; source in /legal/cuinterpose/source.\nRust standard library and libc crate: MIT OR Apache-2.0 and bundled third-party notices; corresponding sources and licenses in /legal/cuinterpose/rust.\n' \
     >> /legal/THIRD-PARTY.txt
 
 # Create directories

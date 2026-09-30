@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -34,11 +33,7 @@ func checkpointWithJobFile(ctx context.Context, pid int, jobFile string, log log
 func runActionWithJobFile(ctx context.Context, pid int, action, jobFile string, log logr.Logger) error {
 	args := []string{"--action", action, "--pid", strconv.Itoa(pid), "--job-file", jobFile}
 	cmd := exec.CommandContext(ctx, cudaCheckpointHelperBinary, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		return normalizeProcessGroupKillError(syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL))
-	}
-	cmd.WaitDelay = helperWaitDelay
+	snapshotruntime.SetProcessGroupCancellation(cmd)
 	details := snapshotruntime.ProcessDetails{
 		ObservedPID:   pid,
 		OutermostPID:  pid,

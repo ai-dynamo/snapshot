@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 	"github.com/ai-dynamo/snapshot/api/compat"
@@ -95,10 +97,11 @@ func TestConfigureCheckpointRecordsRuntimeImageID(t *testing.T) {
 	_, _, err := configureCheckpoint(
 		logr.Discard(),
 		&types.CheckpointContainerSnapshot{
-			PID:        42,
-			ImageID:    "sha256:runtime-content",
-			RootFS:     "/",
-			NetNSInode: 7,
+			PID:         42,
+			ImageID:     "sha256:runtime-content",
+			RootFS:      "/",
+			NetNSInode:  7,
+			CuInterpose: testCuInterposeIdentity(),
 		},
 		CheckpointRequest{
 			ContentUID:    "content-uid",
@@ -118,6 +121,7 @@ func TestConfigureCheckpointRecordsRuntimeImageID(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "registry.example/workload:latest", manifest.K8s.Image)
 	assert.Equal(t, "sha256:runtime-content", manifest.K8s.ImageID)
+	assert.Equal(t, testCuInterposeIdentity(), manifest.CuInterpose)
 }
 
 func TestCheckpointPageBrokerPrepareFailureDoesNotMutate(t *testing.T) {
@@ -139,4 +143,20 @@ func TestCheckpointNeedsSourceKill(t *testing.T) {
 	assert.True(t, CheckpointNeedsSourceKill(checkpointNeedsSourceKill(errors.New("capture failed"))))
 	assert.False(t, CheckpointNeedsSourceKill(errors.New("prepare failed")))
 	assert.False(t, CheckpointNeedsSourceKill(fmt.Errorf("commit PageBroker checkpoint: %w", errors.New("failed"))))
+}
+
+func TestCuInterposeCaptureFailureBoundary(t *testing.T) {
+	// An absent endpoint/helper is a read-only preflight failure.
+	err := cuda.InspectCuInterpose(context.Background(), "/proc", os.Getpid(), []int{1}, filepath.Join(t.TempDir(), "missing-coordinator"))
+	require.Error(t, err)
+	assert.False(t, CheckpointNeedsSourceKill(err))
+
+	// After entering preparation, even an early coordinator failure must be
+	// classified conservatively. No CUDA or CRIU operation can run in this fixture.
+	_, err = captureCheckpoint(context.Background(), nil, &types.CRIUSettings{},
+		&types.CheckpointManifest{CuInterpose: testCuInterposeIdentity()},
+		&types.CheckpointContainerSnapshot{PID: -1, CUDAHostPIDs: []int{1}, CUDANSPIDs: []int{1}},
+		t.TempDir(), "", logr.Discard())
+	require.ErrorContains(t, err, "prepare cuinterpose")
+	assert.True(t, CheckpointNeedsSourceKill(err))
 }
