@@ -41,17 +41,15 @@ commit-level history for each release is on its
   restore compatibility still compares the artifact's manifest. CRD change;
   populated for captures that reach `Ready` after the upgrade, so a content
   already `Ready` before it is not backfilled.
+- `config.checkpoint.checkpointTimeoutSeconds` (default `3600`) fails a capture
+  that outruns it, so a wedged dump cannot leave a work order unresolved.
 
 ### Changed
 
-- The agent's capture path is driven by a workqueue keyed on the work order,
-  replacing the per-capture `coordination.k8s.io` Lease and the in-process
-  guard that arbitrated between the validation and dump paths. A failed
-  reconcile is now retried with backoff instead of waiting for the next resync,
-  and the `LeaseCancelled` failure reason no longer occurs. The agent no longer
-  takes capture Leases, but its `ClusterRole` keeps the `coordination.k8s.io`
-  rule for one more release so an in-flight capture on a not-yet-rolled agent
-  pod can still renew; the rule is scheduled for removal in v0.3.0+.
+- The agent drives captures from a workqueue rather than per-capture
+  `coordination.k8s.io` Leases, so the `LeaseCancelled` failure reason no longer
+  occurs and the agent `ClusterRole`'s now-unused `leases` rule is kept for one
+  more release before removal in v0.3.0+.
 
 ## [0.1.0] - 2026-09-06
 
