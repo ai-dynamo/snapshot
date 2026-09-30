@@ -117,7 +117,7 @@ wait
 	childFD, err := unix.PidfdOpen(childPID, 0)
 	require.NoError(t, err)
 	defer unix.Close(childFD)
-	defer unix.PidfdSendSignal(childFD, unix.SIGKILL, nil, 0)
+	defer func() { _ = unix.PidfdSendSignal(childFD, unix.SIGKILL, nil, 0) }()
 
 	cancel()
 	select {
