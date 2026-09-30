@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-logr/logr/testr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/stretchr/testify/require"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/criu"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
@@ -102,7 +103,9 @@ func TestInspectCompatibilityManagedCuInterposeMount(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			manifest := &types.CheckpointManifest{}
-			manifest.CuInterpose = tc.delivered
+			if tc.delivered {
+				manifest.CuInterpose = testCuInterposeIdentity()
+			}
 			manifest.CRIUDump.ExtMnt = map[string]string{tc.mount: tc.mount}
 			err := inspectCompatibility(testr.New(t), manifest, compat.GPUInfo{}, nil, t.TempDir(), "", false)
 			if (err != nil) != tc.wantError {
@@ -394,7 +397,9 @@ func TestRestoreInNamespaceJobFileRequirement(t *testing.T) {
 			)
 			manifest.CUDA.PIDs = []int{42, 43}
 			manifest.CUDA.SourceGPUUUIDs = []string{"GPU-aaa", "GPU-bbb"}
-			manifest.CuInterpose = tc.cuInterpose
+			if tc.cuInterpose {
+				manifest.CuInterpose = testCuInterposeIdentity()
+			}
 			// Stop at IP validation, after jobfile selection but before namespace or
 			// CUDA operations. This exercises the actual restore preflight safely.
 			manifest.CRIUDump.CRIU.TcpEstablished = true
@@ -445,5 +450,35 @@ func TestExistingMountPaths(t *testing.T) {
 
 	if got := existingMountPaths(targetRoot, nil, nil); len(got) != 0 {
 		t.Errorf("existingMountPaths of nothing = %#v, want empty", got)
+	}
+}
+
+func testCuInterposeIdentity() *types.CuInterposeManifest {
+	return &types.CuInterposeManifest{FrontendSHA256: strings.Repeat("a", 64), CoreSHA256: strings.Repeat("b", 64)}
+}
+
+// Promoted methods panic if a restore reaches mounting in this preflight test.
+type unusedRestoreMounter struct{ RestoreMounter }
+
+func TestRestoreRequiresShimIdentityEvenWhenCompatibilityIsSkipped(t *testing.T) {
+	base := t.TempDir()
+	artifact, err := nsmount.ResolveArtifactPath(base, "content", "main")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(artifact, 0700))
+	manifest := &types.CheckpointManifest{
+		Artifact:    types.ArtifactManifest{ContentUID: "content", ContainerName: "main"},
+		CuInterpose: testCuInterposeIdentity(),
+	}
+	require.NoError(t, types.WriteManifest(artifact, manifest))
+	for _, skip := range []bool{false, true} {
+		rt := &restoreFakeRuntime{}
+		_, err := Restore(context.Background(), rt, testr.New(t), RestoreRequest{
+			BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "target",
+			SkipCompatCheck: skip,
+		}, unusedRestoreMounter{})
+		// A developer machine has no bundle; an agent has different hashes.
+		// Either must refuse before resolving the runtime, mounting, or CRIU.
+		require.ErrorContains(t, err, "libcuinterpose.so")
+		require.Empty(t, rt.resolvedID)
 	}
 }

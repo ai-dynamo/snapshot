@@ -3,12 +3,12 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# CuInterpose Rust core and coordinator
+# CuInterpose Rust components
 
 CuInterpose reconstructs same-node CUDA VMM sharing, supported memory IPC, and multicast
 around native CUDA checkpoint/restore. It consists of the GNU/glibc
-`libcuinterpose.so` C frontend, lazily loaded Rust `libcuinterpose_core.so`, and a
-static-musl `cuinterpose-coordinator`.
+`libcuinterpose.so` C frontend, lazily loaded Rust `libcuinterpose_core.so`, and
+static-musl `cuinterpose-coordinator` and `cuinterpose-launch` executables.
 
 See the [SNEP-295](../../../../docs/proposals/295-cuinterpose/README.md) for interception,
 ownership, protocol, capture/restore ordering, and isolation.
@@ -26,6 +26,8 @@ These targets use GCC and the digest-pinned Rust 1.95 Bookworm builder in
 `agent/Dockerfile`. The workspace uses edition 2024 with MSRV 1.88.
 The exported artifacts are in `agent/cmd/cuinterpose/build/`.
 Always test and ship a matched frontend/core/coordinator set.
+The standard-library-only launcher uses the existing musl target and preserves
+its executable permission in the exported bundle.
 
 The protocol records CUDA metadata as explicit fixed-width primitive fields.
 CUDA FFI structs stay inside the core crate and are never serialized directly.
@@ -66,14 +68,15 @@ requires cross-node capture, restore, and post-restore workload inference.
 | `protocol` | CUDA metadata, allocation references, state entries, versioned MessagePack, and FD transport |
 | `core` | Driver calls, process runtimes, tracking, host carriers, lifecycle |
 | `coordinator` | CLI, participants, topology validation, barriers, durable state |
+| `launcher` | Preserve the resolved environment, prepend the shim, and exec the workload |
 
 The private C ABI is version **4**. The MessagePack wire/state format, virtual
 shareable handle, and virtual IPC memory handle are version **1**.
 Earlier experimental artifacts are rejected, not translated. Rust
 objects, allocators, mutexes, and unwinding never cross the library boundary.
 Debug and release builds use `panic = "abort"` for the entire Rust workspace,
-including the coordinator. A panic terminates the process without stack
-unwinding; ordinary `Result` errors retain their normal handling. Cargo's unit
+including the coordinator and launcher. A panic terminates the process without
+stack unwinding; ordinary `Result` errors retain their normal handling. Cargo's unit
 test harness still uses unwinding.
 `FrontendAbi` contains the resolver supplied by the C frontend; `BackendAbi`
 contains the initialization, context, and memory callbacks supplied by the Rust backend.
@@ -98,7 +101,12 @@ explicit `dlvsym` or implement a custom ELF loader.
 The backend is loaded through glibc's `$ORIGIN` using the frontend's load-time
 directory, so changing directory does not break sibling discovery. Manual
 `LD_PRELOAD` paths must be absolute to remain valid across a later exec; the
-operator already injects an absolute path.
+launcher prepends `/tmp/snapshot-cuda/libcuinterpose.so` to the existing
+`LD_PRELOAD` using OS strings, retaining non-UTF-8 values and argument boundaries.
+It executes the supplied command directly with no persistent parent process.
+SnapshotJob delivery requires an explicit target-container `command`; the
+operator leaves its `args` and `env` unchanged. Ordinary Pods must place both
+libraries at `/tmp/snapshot-cuda` and preload the frontend before startup.
 
 ### CUDA bindings
 
@@ -136,6 +144,27 @@ created by an application call are cleaned up on failure. Failed cleanup or
 irreversible checkpoint mutation is fail-stop.
 
 ## Operating constraints
+
+Before preparation, the agent checks the mapped frontend/core identities in
+every discovered CUDA participant. Coordinator `--inspect` sends the existing
+read-only `INSPECT` request to those participants and validates topology without
+entering checkpoint mode. Missing libraries or endpoints and incomplete coverage
+fail before mutation. Inspection does not lock the group: preparation still
+validates its `BEGIN_CHECKPOINT` replies, and any failure after preparation
+begins conservatively terminates the source.
+
+Capture records two library SHA-256 hashes. Restore compares the exact supplied
+libraries before CRIU, independently of compatibility skipping; launcher and
+coordinator executable bytes are not part of this identity. Keep library files
+stable during capture. Changed shim bytes require matching artifacts or a new
+checkpoint; obsolete boolean manifests must be recreated.
+
+The Go namespace command helper pins the mount namespace and executes the open
+host binary through an inherited descriptor. Other namespace lookups still use
+the target PID. Cancellation kills the helper's process group, including the
+forked coordinator or restore helper, and bounds waiting for inherited output
+pipes. Coordinator sockets use captured namespace PIDs; native CUDA restore
+uses the resolved process PIDs visible to its helper.
 
 Applications must finish all CUDA calls and GPU work before `BEGIN_CHECKPOINT`
 and remain parked through restore. Entry closes the memory API and returns stable

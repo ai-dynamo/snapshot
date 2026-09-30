@@ -31,8 +31,8 @@ type CheckpointManifest struct {
 	Overlay  OverlayManifest   `yaml:"overlay"`
 	CUDA     CUDAManifest      `yaml:"cudaRestore,omitempty"`
 	Host     HostManifest      `yaml:"host,omitempty"`
-	// CuInterpose records source opt-in; restore must not depend on target annotations.
-	CuInterpose bool `yaml:"cuinterpose,omitempty"`
+	// CuInterpose identifies the libraries verified in the source processes.
+	CuInterpose *CuInterposeManifest `yaml:"cuinterpose,omitempty"`
 }
 
 // ArtifactManifest pins an on-disk checkpoint to the Kubernetes content object
@@ -215,6 +215,9 @@ func WriteManifest(checkpointDir string, data *CheckpointManifest) error {
 		return fmt.Errorf("checkpoint manifest is required")
 	}
 	if err := validateArtifactManifest(data.Artifact); err != nil {
+		return err
+	}
+	if err := data.CuInterpose.Validate(); err != nil {
 		return err
 	}
 

@@ -31,31 +31,46 @@ func RemoveStaleCuInterposeSockets(controlDir string, namespacePIDs []int) error
 	return nil
 }
 
+// Inspect is read-only: every participant must answer and pass topology validation
+// before the caller enters the source-termination boundary.
+func InspectCuInterpose(ctx context.Context, procRoot string, targetPID int, namespacePIDs []int, binary string) error {
+	return runCuInterposeInContainer(ctx, "inspect", "", procRoot, targetPID, namespacePIDs, binary)
+}
+
 // Prepare tears down shared mappings; the caller must terminate the source on failure.
 func PrepareCuInterpose(ctx context.Context, checkpointDir, procRoot string, targetPID int, namespacePIDs []int, binary string) error {
+	return runCuInterposeInContainer(ctx, "prepare", checkpointDir, procRoot, targetPID, namespacePIDs, binary)
+}
+
+func runCuInterposeInContainer(ctx context.Context, operation, checkpointDir, procRoot string, targetPID int, namespacePIDs []int, binary string) error {
 	processDir := filepath.Join(procRoot, strconv.Itoa(targetPID))
 	mountNS, err := os.Open(filepath.Join(processDir, "ns/mnt"))
 	if err != nil {
 		return err
 	}
 	defer mountNS.Close()
-	checkpoint, err := os.Open(checkpointDir)
-	if err != nil {
-		return err
-	}
-	defer checkpoint.Close()
 	cmd, closeFiles, err := snapshotruntime.CommandInNamespaces(ctx, targetPID, mountNS, filepath.Join(processDir, "root"), binary)
 	if err != nil {
 		return err
 	}
 	defer closeFiles()
-	args := cuInterposeArgs("prepare", snapshotruntime.InheritFile(cmd, checkpoint), namespacePIDs)
+	if checkpointDir != "" {
+		checkpoint, err := os.Open(checkpointDir)
+		if err != nil {
+			return err
+		}
+		defer checkpoint.Close()
+		checkpointDir = snapshotruntime.InheritFile(cmd, checkpoint)
+	}
+	args := cuInterposeArgs(operation, checkpointDir, namespacePIDs)
 	cmd.Args = append(cmd.Args, args...)
 	return executeCoordinator(cmd)
 }
 
 // Called inside the restored namespaces with a binary descriptor opened before CRIU.
 func RestoreCuInterpose(ctx context.Context, checkpointDir string, namespacePIDs []int, binary string) error {
+	// Inherit nsrestore's process group so cancellation by its host-side parent
+	// also reaches this coordinator if nsrestore itself has already been killed.
 	return executeCoordinator(exec.CommandContext(ctx, binary, cuInterposeArgs("restore", checkpointDir, namespacePIDs)...))
 }
 
@@ -67,7 +82,11 @@ func executeCoordinator(cmd *exec.Cmd) error {
 }
 
 func cuInterposeArgs(operation, checkpointDir string, namespacePIDs []int) []string {
-	args := []string{"--" + operation, "--checkpoint-dir", checkpointDir, "--control-dir", podcontract.SnapshotControlMountPath}
+	args := []string{"--" + operation}
+	if checkpointDir != "" {
+		args = append(args, "--checkpoint-dir", checkpointDir)
+	}
+	args = append(args, "--control-dir", podcontract.SnapshotControlMountPath)
 	for _, pid := range namespacePIDs {
 		args = append(args, "--process", strconv.Itoa(pid))
 	}
