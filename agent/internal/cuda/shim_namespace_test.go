@@ -74,7 +74,7 @@ func TestRestoreActionsInheritNamespaceProcessGroup(t *testing.T) {
 			helperFD, err := unix.PidfdOpen(helperPID, 0)
 			require.NoError(t, err)
 			defer unix.Close(helperFD)
-			defer unix.PidfdSendSignal(helperFD, unix.SIGKILL, nil, 0)
+			defer func() { _ = unix.PidfdSendSignal(helperFD, unix.SIGKILL, nil, 0) }()
 			group, err := unix.Getpgid(helperPID)
 			require.NoError(t, err)
 			require.Equal(t, cmd.Process.Pid, group, "native helper escaped the namespace command's group")
