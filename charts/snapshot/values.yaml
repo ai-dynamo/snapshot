@@ -103,24 +103,26 @@ storage:
   oci:
     uri: ""
 
-pageBroker:
+# The agent starts one persistent CUDA helper and waits for eager initialization
+# before processing work. The disabled default keeps the existing CLI path.
+cudaCheckpoint:
   enabled: false
-  # Native CUDA requires the GPU PageBroker image. CustomStorage reserves
-  # 4 GiB of host memory per GPU with the default transfer configuration.
-  gpuEngine: ""
-  # Capture mode for the persistent GPU engine: custom or driver.
-  # Restore always follows the checkpoint manifest. Neither mode uses job files.
-  cudaStorageMode: custom
-  # SHA-256 covers CustomStorage GPU extents. Restoring with this enabled
-  # requires saved digests; structural and size checks always run.
+  # Capture policy only. Restores follow the saved artifact: driver or custom.
+  storageMode: driver
+  # SHA-256 for CustomStorage GPU bytes; requires saved digests on restore.
   enableChecksumDigest: false
-  # Persistent ring per visible GPU. Keep allocations/registrations off the
-  # restore path. The default reserves 4 GiB per GPU, as in the native baseline.
+  # On CustomStorage-capable drivers, allocate/register the entire pool before
+  # READY in either capture mode. Defaults reserve 4 GiB per visible GPU.
   transferBufferCount: 32
   transferChunkBytes: 134217728
-  # Optional cap on total pinned allocation across visible GPUs; 0 is uncapped.
-  # CUDA allocation rounding is included and arithmetic overflow is rejected.
+  # Zero is uncapped. The limit includes CUDA allocation-granularity rounding.
   maxPinnedBytes: 0
+  # Increase daemonset.resources before enabling: eight visible GPUs require
+  # 32 GiB for rings alone, plus agent, CRIU and driver overhead. The default
+  # 4 GiB agent limit is intended for the disabled helper configuration.
+
+pageBroker:
+  enabled: false
   command: []
   args: []
   maxConcurrentRequests: 16

@@ -59,39 +59,29 @@ func TestAgentConfigValidateRequiresPageBrokerControlSocket(t *testing.T) {
 	}
 }
 
-func TestPageBrokerCUDAStorageModes(t *testing.T) {
-	for _, mode := range []string{"", "custom", "driver", "invalid"} {
-		t.Run(mode, func(t *testing.T) {
-			cfg := validAgentConfig()
-			if err := yaml.Unmarshal([]byte("pageBroker:\n  cudaStorageMode: "+mode+"\n"), cfg); err != nil {
-				t.Fatal(err)
+func TestCUDACheckpointConfiguration(t *testing.T) {
+	for _, mode := range []string{"", "driver", "custom", "invalid"} {
+		for _, enabled := range []bool{false, true} {
+			for _, checksum := range []bool{false, true} {
+				cfg := validAgentConfig()
+				cfg.CUDACheckpoint = CUDACheckpointSpec{Enabled: enabled, StorageMode: mode, EnableChecksumDigest: checksum}
+				valid := mode != "invalid" && (!checksum || enabled)
+				if err := cfg.Validate(); (err == nil) != valid {
+					t.Errorf("mode=%q enabled=%t checksum=%t: %v", mode, enabled, checksum, err)
+				}
 			}
-			if err := cfg.Validate(); (err != nil) != (mode == "invalid") {
-				t.Fatalf("Validate mode %q: %v", mode, err)
-			}
-		})
+		}
 	}
-}
-
-func TestPageBrokerEnableChecksumDigestRequiresPageBroker(t *testing.T) {
-	for _, tc := range []struct {
-		name              string
-		enabled, checksum bool
-		mode              string
-		valid             bool
-	}{
-		{"default-off", false, false, "", true},
-		{"custom", true, true, "custom", true},
-		{"driver-default-custom-restore", true, true, "driver", true},
-		{"broker-disabled", false, true, "custom", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := validAgentConfig()
-			cfg.PageBroker = PageBrokerSpec{Enabled: tc.enabled,
-				EnableChecksumDigest: tc.checksum, CUDAStorageMode: tc.mode, ControlSocketPath: "/tmp/broker"}
-			if err := cfg.Validate(); (err == nil) != tc.valid {
-				t.Fatalf("Validate = %v, valid = %t", err, tc.valid)
-			}
-		})
+	cfg := validAgentConfig()
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CUDACheckpoint.Enabled || cfg.CUDACheckpoint.EnableChecksumDigest || cfg.CUDACheckpoint.StorageMode != "driver" ||
+		cfg.CUDACheckpoint.TransferBufferCount != 32 || cfg.CUDACheckpoint.TransferChunkBytes != 134217728 || cfg.CUDACheckpoint.MaxPinnedBytes != 0 {
+		t.Fatalf("unexpected defaults: %+v", cfg.CUDACheckpoint)
+	}
+	cfg.CUDACheckpoint.TransferBufferCount = ^uint64(0)
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("accepted overflowing pinned buffer allocation")
 	}
 }

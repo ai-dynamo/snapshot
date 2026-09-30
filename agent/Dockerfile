@@ -15,6 +15,7 @@
 # Optional targets for CI:
 #   docker build --target linter --build-context api=../api .   # Run linting
 #   docker build --target tester --build-context api=../api .   # Run tests
+#   docker build --target cuda-storage-builder .                 # Validate CUDA storage and checksums
 
 # =============================================================================
 # Build Arguments
@@ -38,10 +39,27 @@ ARG GOLANGCI_LINT_VERSION=v2.13.2
 ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
 ARG CRIU_REF=criu-dev
 ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04@sha256:8315e2455736c4f9b597f15c5fb4d31f834e798e0c6b66bbdbdbac491ce26bd1
+ARG CUDA_HELPER_HEADERS_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04@sha256:edd686dcb3e87806dfc869623ccb0a7e62c0d09bd720a82014c23efcecc8d9a2
 
 # For placeholder target only - this default allows agent builds to succeed,
 # but placeholder builds MUST override it with --build-arg BASE_IMAGE=<image>
 ARG BASE_IMAGE=placeholder-requires-base-image-arg
+
+# =============================================================================
+# Stage: CUDA 13.4 header provider
+# =============================================================================
+FROM ${CUDA_HELPER_HEADERS_IMAGE} AS cuda-helper-headers
+
+# =============================================================================
+# Stage: CUDA storage and checksum tests
+# =============================================================================
+FROM ${AGENT_BASE_IMAGE} AS cuda-storage-builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential libssl-dev && rm -rf /var/lib/apt/lists/*
+WORKDIR /workspace
+COPY cmd/cuda-checkpoint-helper/ cmd/cuda-checkpoint-helper/
+COPY pagebroker/file_descriptor.cpp pagebroker/file_descriptor.hpp pagebroker/
+RUN make -C cmd/cuda-checkpoint-helper test-storage
 
 # =============================================================================
 # Stage: Go base - Common setup for Go builds
@@ -132,7 +150,7 @@ COPY cmd/ns-bind-mount/main.c ./cmd/ns-bind-mount/main.c
 
 RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
     ./cmd/cuda-checkpoint-helper/main.c \
-    -I. -I/usr/local/cuda/include \
+    -I/usr/local/cuda/include \
     -L/usr/local/cuda/lib64/stubs \
     -lcuda
 

@@ -57,13 +57,9 @@ bool BuildTransferJobs(const std::vector<ManifestExtent> &extents,
                        const std::vector<DevicePair> &device_pairs,
                        std::vector<TransferJob> *jobs, std::string *error);
 
-// WriteManifest requires a fresh participant directory. The broker publishes
-// the enclosing checkpoint transaction after all participants complete.
-// Manifest lifecycle functions require the caller to own the participant
-// directory exclusively for the operation. PageBroker provides one trusted
-// directory per CUDA participant beneath its transaction-exclusive staging
-// root; callers must not run concurrent lifecycle operations against the same
-// participant directory.
+// WriteManifest requires a fresh participant directory. The caller owns that
+// directory exclusively and publishes the enclosing checkpoint only after all
+// participants complete. Concurrent operations must not share a directory.
 bool WriteManifest(const std::filesystem::path &directory,
                    const std::vector<ManifestExtent> &extents,
                    std::string *error);

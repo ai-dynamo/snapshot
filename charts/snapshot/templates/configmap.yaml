@@ -25,9 +25,15 @@ data:
     overlay:
       exclusions: {{ toYaml .Values.config.overlay.exclusions | nindent 8 }}
 
+    cudaCheckpoint:
+      enabled: {{ .Values.cudaCheckpoint.enabled }}
+      storageMode: {{ .Values.cudaCheckpoint.storageMode | quote }}
+      enableChecksumDigest: {{ .Values.cudaCheckpoint.enableChecksumDigest }}
+      transferBufferCount: {{ .Values.cudaCheckpoint.transferBufferCount | int64 }}
+      transferChunkBytes: {{ .Values.cudaCheckpoint.transferChunkBytes | int64 }}
+      maxPinnedBytes: {{ .Values.cudaCheckpoint.maxPinnedBytes | int64 }}
+
     pageBroker:
-      cudaStorageMode: {{ .Values.pageBroker.cudaStorageMode | quote }}
-      enableChecksumDigest: {{ .Values.pageBroker.enableChecksumDigest }}
       enabled: {{ .Values.pageBroker.enabled }}
       {{- if .Values.pageBroker.enabled }}
       controlSocketPath: {{ printf "%s/pagebroker.sock" (include "snapshot.pageBrokerControlPath" .) | quote }}

@@ -429,7 +429,7 @@ bool WriteManifest(const std::filesystem::path &directory,
                << normalized[index].filename << "\n";
   }
 
-  // The participant directory is new and private. The broker publishes the
+  // The participant directory is new and private. The caller publishes the
   // enclosing checkpoint only after every participant has completed.
   FileDescriptor fd(open(manifest_path.c_str(),
                          O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600));
