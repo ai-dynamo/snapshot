@@ -5,13 +5,10 @@ package cuda
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -20,8 +17,6 @@ import (
 )
 
 const (
-	helperWaitDelay = 2 * time.Second
-
 	actionLock       = "lock"
 	actionCheckpoint = "checkpoint"
 	actionRestore    = "restore"
@@ -65,11 +60,11 @@ func runAction(ctx context.Context, pid int, action, deviceMap, helperBinaryPath
 		args = append(args, "--device-map", deviceMap)
 	}
 	cmd := exec.CommandContext(ctx, helperBinaryPath, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		return normalizeProcessGroupKillError(syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL))
+	// Capture helpers own their cancellation. Restore and unlock run inside
+	// nsrestore and must stay in its group so outer cancellation kills them too.
+	if action == actionLock || action == actionCheckpoint {
+		snapshotruntime.SetProcessGroupCancellation(cmd)
 	}
-	cmd.WaitDelay = helperWaitDelay
 	details := snapshotruntime.ProcessDetails{
 		ObservedPID:   pid,
 		OutermostPID:  pid,
@@ -108,11 +103,4 @@ func runAction(ctx context.Context, pid int, action, deviceMap, helperBinaryPath
 		"output", out,
 	)
 	return nil
-}
-
-func normalizeProcessGroupKillError(err error) error {
-	if errors.Is(err, syscall.ESRCH) {
-		return os.ErrProcessDone
-	}
-	return err
 }

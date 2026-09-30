@@ -806,17 +806,94 @@ func TestSnapshotJobReconcileCuInterpose(t *testing.T) {
 			require.NoError(t, err)
 			job := getSourceJob(t, r.Client, sj)
 			container := requireContainer(t, job.Spec.Template.Spec.Containers, "worker")
-			assert.Equal(t, worker.Command, container.Command)
 			if enabled {
 				installer := requireContainer(t, job.Spec.Template.Spec.InitContainers, "snapshot-cuda-install")
 				assert.Equal(t, r.CuInterpose.AgentImage, installer.Image)
-				assert.Contains(t, container.Env, corev1.EnvVar{Name: "LD_PRELOAD", Value: podcontract.CuInterposeLibraryPath})
+				assert.Equal(t, append([]string{podcontract.CuInterposeLauncherPath}, worker.Command...), container.Command)
 			} else {
+				assert.Equal(t, worker.Command, container.Command)
 				assert.Empty(t, job.Spec.Template.Spec.InitContainers)
 				for _, mount := range container.VolumeMounts {
 					assert.NotEqual(t, podcontract.CuInterposeMountPath, mount.MountPath)
 				}
 			}
+			for _, env := range container.Env {
+				assert.NotEqual(t, "LD_PRELOAD", env.Name)
+			}
+		})
+	}
+}
+
+func TestSnapshotJobCuInterposeConfigurationRecovery(t *testing.T) {
+	ctx := context.Background()
+	sj := minimalSnapshotJob()
+	sj.Spec.PodTemplate.Annotations = map[string]string{podcontract.CuInterposeAnnotation: "true"}
+	sj.Spec.PodTemplate.Spec.Containers[0].Command = []string{"worker"}
+	r := makeSnapshotJobReconciler(snapshotJobReconcilerScheme(), sj)
+
+	_, err := r.Reconcile(ctx, reconcileRequest(sj))
+	require.ErrorContains(t, err, "--agent-image")
+	updated := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(sj), updated))
+	assert.False(t, snapshotv1alpha1.IsSnapshotJobFailed(updated))
+	assert.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(sj), &batchv1.Job{})))
+	select {
+	case event := <-r.Recorder.(*record.FakeRecorder).Events:
+		assert.Contains(t, event, "OperatorConfigurationError")
+	default:
+		t.Fatal("missing operator configuration event")
+	}
+
+	// Correcting operator settings retries the same immutable SnapshotJob.
+	r.CuInterpose = testCuInterposeDelivery()
+	_, err = r.Reconcile(ctx, reconcileRequest(sj))
+	require.NoError(t, err)
+	job := getSourceJob(t, r.Client, sj)
+	require.Len(t, job.Spec.Template.Spec.InitContainers, 1)
+	job.UID = "source-job-uid"
+	require.NoError(t, r.Update(ctx, job))
+
+	// The fake API has not assigned a UID on create, so the next reconcile
+	// exercises adoption before status binds the existing Job incarnation.
+	r.CuInterpose = CuInterposeDelivery{PullPolicy: "invalid"}
+	for range 2 {
+		_, err = r.Reconcile(ctx, reconcileRequest(sj))
+		require.NoError(t, err)
+		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(sj), updated))
+		assert.False(t, snapshotv1alpha1.IsSnapshotJobFailed(updated))
+		assert.Equal(t, job.UID, updated.Status.SourceJobUID)
+		assert.Equal(t, job.Spec, getSourceJob(t, r.Client, sj).Spec)
+	}
+}
+
+func TestSnapshotJobCuInterposeInvalidSource(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		annotation string
+		command    []string
+		want       string
+	}{
+		{name: "missing command", annotation: "true", want: "requires container.command"},
+		{name: "empty command", annotation: "true", command: []string{""}, want: "requires container.command"},
+		{name: "invalid annotation", annotation: "enabled", command: []string{"worker"}, want: "invalid boolean"},
+		{name: "empty annotation", annotation: "", command: []string{"worker"}, want: "invalid boolean"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sj := minimalSnapshotJob()
+			sj.Spec.PodTemplate.Annotations = map[string]string{podcontract.CuInterposeAnnotation: tc.annotation}
+			sj.Spec.PodTemplate.Spec.Containers[0].Command = tc.command
+			r := makeSnapshotJobReconciler(snapshotJobReconcilerScheme(), sj)
+			r.CuInterpose = testCuInterposeDelivery()
+			_, err := r.Reconcile(context.Background(), reconcileRequest(sj))
+			require.NoError(t, err)
+			updated := &snapshotv1alpha1.SnapshotJob{}
+			require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(sj), updated))
+			condition := meta.FindStatusCondition(updated.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
+			require.NotNil(t, condition)
+			assert.Equal(t, metav1.ConditionTrue, condition.Status)
+			assert.Equal(t, snapshotv1alpha1.ReasonInvalidSpec, condition.Reason)
+			assert.Contains(t, condition.Message, tc.want)
+			assert.True(t, apierrors.IsNotFound(r.Get(context.Background(), client.ObjectKeyFromObject(sj), &batchv1.Job{})))
 		})
 	}
 }

@@ -172,6 +172,9 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if err := validateRestoreManifest(req, manifest); err != nil {
 		return 0, err
 	}
+	if err := cuda.CheckCuInterposeLibraries(cuda.CuInterposeBundlePath, manifest.CuInterpose); err != nil {
+		return 0, err
+	}
 
 	snap, gpuDeviceMapDuration, err := inspectRestore(ctx, rt, log, req, manifest)
 	if err != nil {
@@ -187,7 +190,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		point:  bundleMount,
 	})
 
-	if manifest.CuInterpose {
+	if manifest.CuInterpose != nil {
 		shimMount, err := mounts.MountCuInterpose(ctx, bundleMount)
 		if err != nil {
 			return 0, fmt.Errorf("mount cuinterpose into placeholder: %w", err)
