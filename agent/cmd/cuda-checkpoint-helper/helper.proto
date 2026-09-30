@@ -4,7 +4,8 @@ syntax = "proto3";
 
 package snapshot.cuda_checkpoint.internal;
 
-// Private helper protocol. No Go or PageBroker protocol types are generated.
+// This schema is private to the helper's C++ daemon and CLI adapter. The agent
+// invokes the CLI and does not generate or exchange these message types.
 
 // Only the agent holds this control channel. nsrestore receives session sockets
 // but cannot admit new participants or acknowledge their storage lifetimes.
@@ -102,4 +103,12 @@ message GPUSessionMetrics {
   int64 prepare_end_ns = 13;
   int64 transfer_start_ns = 14;
   int64 transfer_end_ns = 15;
+}
+
+// CLI telemetry is emitted with the protobuf JSON formatter. Operation success
+// is reported by the CLI exit status, independently of diagnostic formatting.
+message CLIPhaseResult {
+  uint32 pid = 1;
+  GPUSessionRequest.Operation operation = 2;
+  GPUSessionReply reply = 3;
 }

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 #include "daemon.hpp"
+#include "client.hpp"
 
 #include <charconv>
 #include <cstdlib>
@@ -47,6 +48,8 @@ extern "C" int cuda_checkpoint_cli_main(int argc, char** argv);
 int
 main(int argc, char** argv)
 {
+  if (const auto result = snapshot::cuda_checkpoint::RunClient(argc, argv); result.has_value())
+    return *result;
   if (argc < 2 || std::string_view(argv[1]) != "--daemon")
     return cuda_checkpoint_cli_main(argc, argv);
   try {

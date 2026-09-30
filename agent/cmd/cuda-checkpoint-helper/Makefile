@@ -18,7 +18,7 @@ TRANSFER_FLAGS := -DPAGEBROKER_NIXL -I$(NIXL_ROOT)/include -L$(NIXL_ROOT)/lib -l
 endif
 
 .DEFAULT_GOAL := helper
-.PHONY: helper generate test test-checkpoint test-transfer test-daemon test-storage test-fd-transport
+.PHONY: helper generate test test-checkpoint test-transfer test-daemon test-client test-storage test-fd-transport
 
 bin:
 	mkdir -p bin
@@ -34,10 +34,10 @@ bin/main-cli.o: main.c | bin
 helper: generate bin/main-cli.o
 	@test -n "$(NIXL_ROOT)" || { echo 'NIXL_ROOT is required for the persistent helper'; exit 1; }
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -I$(CUDA_ROOT)/include \
-		helper.cpp daemon.cpp checkpoint.cpp transfer.cpp $(STORAGE) $(TRANSPORT) bin/main-cli.o \
+		helper.cpp daemon.cpp client.cpp checkpoint.cpp transfer.cpp $(STORAGE) $(TRANSPORT) bin/main-cli.o \
 		-L$(CUDA_LIB_DIR) -lcuda -lprotobuf -lcrypto -pthread $(TRANSFER_FLAGS) -o bin/cuda-checkpoint-helper
 
-test: test-checkpoint test-transfer test-daemon test-storage test-fd-transport
+test: test-checkpoint test-transfer test-daemon test-client test-storage test-fd-transport
 
 test-checkpoint: | bin
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -I$(CUDA_ROOT)/include \
@@ -55,6 +55,11 @@ test-daemon: generate
 		daemon_test.cpp checkpoint.cpp $(STORAGE) $(TRANSPORT) \
 		-lprotobuf -lcrypto $(GTEST_FLAGS) -pthread -o bin/daemon-test
 	./bin/daemon-test
+
+test-client: generate
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) client_test.cpp client.cpp $(TRANSPORT) \
+		-lprotobuf $(GTEST_FLAGS) -pthread -o bin/client-test
+	./bin/client-test
 
 test-storage: | bin
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) storage_manifest.cpp storage_manifest_test.cpp -o bin/storage-manifest-test
