@@ -37,6 +37,14 @@ Actual-core cases verify endpoint
 activation, constructor concurrency, fork/exec ownership, and sticky startup failure. These
 fixtures are not CUDA device or checkpoint/restore qualification.
 
+Run `make test-native` from `agent/cmd/cuinterpose` for the assembled CPU suite,
+including the static launcher's environment/argument preservation and exec PID
+tests, plus coordinator `--inspect` coverage for complete participants, invalid
+topology, unhealthy replies, and missing endpoints. Read-only inspection must
+send no preparation commands and create no checkpoint state. Loader fixtures
+use test-local preload paths; the agent's capture contract instead requires
+both libraries at `/tmp/snapshot-cuda` before startup.
+
 The frontend finds glibc's `dlsym` with `dlvsym` and passes `RTLD_DEFAULT` and
 `RTLD_NEXT` lookups to it as tail calls, so glibc searches the original caller's
 scope. It inspects only lookups with an explicit handle. It does not chain

@@ -14,7 +14,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	"github.com/ai-dynamo/snapshot/api/podcontract"
 	"github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/ai-dynamo/snapshot/operator/internal/controller"
 )
@@ -39,6 +38,15 @@ func main() {
 	flag.Parse()
 	if err := artifactCleanupConfig.Validate(); err != nil {
 		ctrl.Log.Error(err, "invalid artifact cleanup configuration")
+		os.Exit(1)
+	}
+
+	delivery := controller.CuInterposeDelivery{
+		AgentImage: *agentImage,
+		PullPolicy: corev1.PullPolicy(*agentImagePullPolicy),
+	}
+	if err := delivery.ValidatePullPolicy(); err != nil {
+		ctrl.Log.Error(err, "invalid cuinterpose delivery configuration")
 		os.Exit(1)
 	}
 
@@ -99,10 +107,7 @@ func main() {
 		Client:             mgr.GetClient(),
 		NonCacheReadClient: mgr.GetAPIReader(),
 		Recorder:           mgr.GetEventRecorderFor("snapshotjob-controller"),
-		CuInterpose: podcontract.CuInterposeDelivery{
-			AgentImage: *agentImage,
-			PullPolicy: corev1.PullPolicy(*agentImagePullPolicy),
-		},
+		CuInterpose:        delivery,
 	}
 	if err := snapshotJobReconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up SnapshotJob controller")

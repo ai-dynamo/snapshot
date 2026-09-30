@@ -68,8 +68,10 @@ class Contracts(unittest.TestCase):
 
     @contextmanager
     def coordinator(self, mode, error=None):
-        command = [str(BINARY), mode, "--checkpoint-dir", str(self.directory),
-                   "--control-dir", str(self.directory), "--process", "1", "--process", "2"]
+        command = [str(BINARY), mode, "--control-dir", str(self.directory),
+                   "--process", "1", "--process", "2"]
+        if mode != "--inspect":
+            command += ["--checkpoint-dir", str(self.directory)]
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             yield
@@ -82,6 +84,8 @@ class Contracts(unittest.TestCase):
                 self.assertIn(error, stderr)
                 if mode == "--prepare":
                     self.assertFalse(self.state.exists())
+            if mode == "--inspect":
+                self.assertFalse(self.state.exists())
         finally:
             if process.poll() is None:
                 process.kill()
@@ -124,6 +128,26 @@ class Contracts(unittest.TestCase):
                          {"multicast_device": {"allocation": MULTICAST, "device": 0}}, binding(8192)]]:
             with self.subTest(records=records), self.coordinator("--prepare", "AllocationReference"):
                 self.inspect([records, []], begin=True)
+
+    def test_read_only_inspection_contacts_every_participant(self):
+        with self.coordinator("--inspect"):
+            self.inspect([[allocation(), mapping()], [allocation()]])
+
+    def test_read_only_inspection_validates_topology(self):
+        with self.coordinator("--inspect", "AllocationReference"):
+            self.inspect([[allocation(), mapping(8192)], []])
+
+    def test_read_only_inspection_requires_healthy_participants(self):
+        with self.coordinator("--inspect", "injected failure"):
+            self.reply(self.request(1, "inspect"), 1, {"Ok": {"inspection": {"records": []}}})
+            self.reply(self.request(2, "inspect"), 2, {"Err": "injected failure"})
+
+    def test_read_only_inspection_requires_every_endpoint(self):
+        self.listeners[1].close()
+        (self.directory / "cuinterpose-2.sock").unlink()
+        self.listeners.pop()
+        with self.coordinator("--inspect", "connect failed"):
+            self.reply(self.request(1, "inspect"), 1, {"Ok": {"inspection": {"records": []}}})
 
     def test_unsupported_allocation_properties_start_no_phases(self):
         for field, value in (("location", {"location_type": 0, "id": 0}), ("allocation_type", 0)):
@@ -215,6 +239,9 @@ class Contracts(unittest.TestCase):
 
     def test_usage_errors(self):
         for args in ["", "--prepare --checkpoint-dir /tmp",
+                     "--prepare --control-dir /tmp --process 1",
+                     "--inspect --prepare --checkpoint-dir /tmp --control-dir /tmp --process 1",
+                     "--inspect --control-dir /tmp",
                      "--prepare --checkpoint-dir /tmp --control-dir relative --process 1",
                      "--prepare --checkpoint-dir /tmp --control-dir /tmp --process 0",
                      "--prepare --checkpoint-dir /tmp --control-dir /tmp --process 1 --process 1",

@@ -4,8 +4,10 @@
 suite: cuinterpose delivery flags on the operator
 templates:
   - templates/operator-deployment.yaml
+  - templates/daemonset.yaml
 tests:
   - it: passes the agent image and pull policy
+    template: templates/operator-deployment.yaml
     set:
       image.agent.tag: v9.9.9
     asserts:
@@ -15,3 +17,26 @@ tests:
       - contains:
           path: spec.template.spec.containers[0].args
           content: "--agent-image-pull-policy=Always"
+
+  - it: pins the installer and daemonset to the same tag and digest
+    set:
+      image.agent.repository: registry.example/snapshot-agent
+      image.agent.tag: v9.9.9@sha256:1111111111111111111111111111111111111111111111111111111111111111
+      image.agent.pullPolicy: IfNotPresent
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "--agent-image=registry.example/snapshot-agent:v9.9.9@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+        template: templates/operator-deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "--agent-image-pull-policy=IfNotPresent"
+        template: templates/operator-deployment.yaml
+      - equal:
+          path: spec.template.spec.containers[?(@.name == 'agent')].image
+          value: registry.example/snapshot-agent:v9.9.9@sha256:1111111111111111111111111111111111111111111111111111111111111111
+        template: templates/daemonset.yaml
+      - equal:
+          path: spec.template.spec.containers[?(@.name == 'agent')].imagePullPolicy
+          value: IfNotPresent
+        template: templates/daemonset.yaml

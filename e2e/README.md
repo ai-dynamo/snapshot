@@ -180,6 +180,38 @@ Model weights come from one of two places:
 `tests/test_framework_manifests.py` pins the guide manifests, and the cache
 rewrite, to the restore-pod contract without a cluster.
 
+### CuInterpose qualification
+
+The framework guides use native checkpointing by default. For a CuInterpose
+SnapshotJob, set `nvidia.com/cuinterpose-enabled: "true"` on the source Pod
+template and supply an explicit target-container `command`; the operator adds
+the installer and launcher. Ordinary Pods need both libraries installed at
+`/tmp/snapshot-cuda` and preloaded before startup. See the
+[delivery contract](../docs/development/cuinterpose.md). Capture and restore
+agents must supply identical shim library bytes.
+
+Build and run the CPU suite before GPU qualification:
+
+```bash
+make -C agent/cmd/cuinterpose build test
+uv run --project agent/cmd/cuinterpose/tests/gpu pytest agent/cmd/cuinterpose/tests/gpu -vv -rs
+```
+
+The GPU suite uses the matching artifacts in `agent/cmd/cuinterpose/build/`
+(override with `CUINTERPOSE_BUILD_DIR`) and preloads them from its test-local
+directory. Shared-memory lifecycle tests need two GPUs and exercise read-only
+inspection, preparation, native CUDA checkpoint/restore, and reconstruction.
+Multicast additionally requires supported NVLink/NVSwitch hardware. HOST_NUMA
+tests require POSIX-shareable HOST_NUMA VMM and exercise coordinator
+reconstruction without native CUDA checkpoint or CRIU.
+
+These native tests do not qualify the Kubernetes/CRIU lifecycle. Run an opted-in
+multi-process workload through capture and restore, repeat with a distinct
+restore node, and verify a changed shim bundle fails before CRIU even when
+compatibility checking is skipped. Record the tested revision, hardware, and
+skipped cases; unit or reconstruction-only success does not establish those
+end-to-end results.
+
 ### Framework benchmark results
 
 Every selected framework test prints a benchmark summary and writes one

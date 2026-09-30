@@ -26,6 +26,9 @@ type SourceJobOptions struct {
 }
 
 func NewSourceJob(podTemplate *corev1.PodTemplateSpec, opts SourceJobOptions) (*batchv1.Job, error) {
+	if _, err := podcontract.ParseCuInterposeAnnotation(podTemplate.Annotations); err != nil {
+		return nil, err
+	}
 	podTemplate = podTemplate.DeepCopy()
 	for _, annotation := range []string{
 		podcontract.RestoreFromAnnotation,

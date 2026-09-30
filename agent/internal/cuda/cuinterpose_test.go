@@ -91,6 +91,17 @@ func TestCoordinatorArgvContract(t *testing.T) {
 	if string(argv) != want {
 		t.Fatalf("argv:\n%s\nwant:\n%s", argv, want)
 	}
+	if err := InspectCuInterpose(context.Background(), "/proc", os.Getpid(), []int{7, 9}, binary); err != nil {
+		t.Fatal(err)
+	}
+	argv, _ = os.ReadFile(argvFile)
+	want = strings.Join([]string{
+		"--inspect", "--control-dir", podcontract.SnapshotControlMountPath,
+		"--process", "7", "--process", "9", "",
+	}, "\n")
+	if string(argv) != want {
+		t.Fatalf("inspect argv:\n%s\nwant:\n%s", argv, want)
+	}
 
 	// Restore already runs inside the restored namespaces.
 	binary, argvFile = fakeCoordinator(t, 0)
@@ -107,6 +118,7 @@ func TestCoordinatorFailureIncludesStderr(t *testing.T) {
 	binary, _ := fakeCoordinator(t, 3)
 	fakeNSenter(t)
 	for _, err := range []error{
+		InspectCuInterpose(context.Background(), "/proc", os.Getpid(), []int{1}, binary),
 		PrepareCuInterpose(context.Background(), t.TempDir(), "/proc", os.Getpid(), []int{1}, binary),
 		RestoreCuInterpose(context.Background(), "/checkpoint", []int{1}, binary),
 	} {
