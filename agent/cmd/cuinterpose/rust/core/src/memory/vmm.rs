@@ -4,7 +4,7 @@
 //! Unicast backing and mapping metadata.
 
 use super::{HandleEntry, Memblock, ProcessState, VirtualAllocationHandle};
-use crate::driver::Result;
+use crate::error::Result;
 use cudarc::driver::sys::CUresult::*;
 use cudarc::driver::sys::*;
 use cuinterpose_protocol::{AllocationId, AllocationReference, NamespacePid};

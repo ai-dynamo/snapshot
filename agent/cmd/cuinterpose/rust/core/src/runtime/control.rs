@@ -4,10 +4,9 @@
 //! Two prestarted workers separate peer FD service from serialized CUDA control.
 //! Queue pressure refuses requests before mutation; no operation is retried.
 
-use crate::driver::Result;
+use crate::error::{Error, Result};
 use crate::memory::checkpoint;
 use crate::runtime as state;
-use cudarc::driver::sys::CUresult::CUDA_ERROR_NOT_INITIALIZED;
 use cuinterpose_protocol::{self as protocol, NamespacePid, Operation, Request, Response};
 use rustix::event::{PollFd, PollFlags, poll};
 use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType, socket_with};
@@ -49,10 +48,7 @@ impl PreparedWorkers {
                     }
                 }
             })
-            .map_err(|error| {
-                eprintln!("cuinterpose: control worker startup failed: {error}");
-                CUDA_ERROR_NOT_INITIALIZED
-            })?;
+            .map_err(|error| Error::io("start control worker", error))?;
         if state::initialized() {
             return Ok(None);
         }
@@ -66,8 +62,21 @@ impl PreparedWorkers {
                     let mut events = [PollFd::new(&listener, PollFlags::IN)];
                     match poll(&mut events, None) {
                         Err(rustix::io::Errno::INTR) => continue,
+                        Err(rustix::io::Errno::NOMEM) => {
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                            continue;
+                        }
                         Ok(_) if events[0].revents() == PollFlags::IN => {}
-                        _ => {
+                        Err(error) => {
+                            eprintln!("cuinterpose: listener poll failed: {error}");
+                            super::RUNTIME_FAILED.store(true, Ordering::Release);
+                            break;
+                        }
+                        Ok(_) => {
+                            eprintln!(
+                                "cuinterpose: unexpected listener poll events: {:?}",
+                                events[0].revents()
+                            );
                             super::RUNTIME_FAILED.store(true, Ordering::Release);
                             break;
                         }
@@ -94,7 +103,8 @@ impl PreparedWorkers {
                             std::thread::sleep(std::time::Duration::from_millis(50));
                             continue;
                         }
-                        Err(_) => {
+                        Err(error) => {
+                            eprintln!("cuinterpose: listener accept failed: {error}");
                             super::RUNTIME_FAILED.store(true, Ordering::Release);
                             break;
                         }
@@ -106,8 +116,7 @@ impl PreparedWorkers {
             });
         if let Err(error) = started {
             // The failed closure drops the only control-queue sender.
-            eprintln!("cuinterpose: peer listener startup failed: {error}");
-            return Err(CUDA_ERROR_NOT_INITIALIZED.into());
+            return Err(Error::io("start peer worker", error));
         }
         Ok(Some(Self {
             activation,
@@ -121,18 +130,20 @@ impl PreparedWorkers {
     /// non-Drop TLS, not loader registration. The channel is preallocated.
     /// Eager ELF binding prevents first-use loader lookup in these libc calls.
     pub fn activate(&mut self, endpoint: &str) -> Result<()> {
-        self.listener = Some(bind_listener(endpoint).map_err(|_| CUDA_ERROR_NOT_INITIALIZED)?);
+        self.listener =
+            Some(bind_listener(endpoint).map_err(|error| Error::io("bind control socket", error))?);
         let listener = self.listener.as_ref().unwrap();
-        listener
-            .set_nonblocking(true)
-            .map_err(|_| CUDA_ERROR_NOT_INITIALIZED)?;
+        // A bound socket cannot accept connections until listen. Restrict its
+        // permissions first without changing the application's process umask.
         std::fs::set_permissions(endpoint, std::fs::Permissions::from_mode(0o600))
-            .map_err(|_| CUDA_ERROR_NOT_INITIALIZED)?;
+            .map_err(|error| Error::io("set control socket permissions", error))?;
+        rustix::net::listen(listener, libc::SOMAXCONN)
+            .map_err(|error| Error::io("listen on control socket", error))?;
         match self.activation.try_send(self.listener.take().unwrap()) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(listener) | TrySendError::Disconnected(listener)) => {
                 self.listener = Some(listener);
-                Err(CUDA_ERROR_NOT_INITIALIZED.into())
+                Err(Error::Startup("control listener handoff failed"))
             }
         }
     }
@@ -148,10 +159,17 @@ impl PreparedWorkers {
 }
 
 fn bind_listener(endpoint: &str) -> std::io::Result<UnixListener> {
-    let error = match UnixListener::bind(endpoint) {
-        Ok(listener) => return Ok(listener),
-        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => error,
-        Err(error) => return Err(error),
+    let address = SocketAddrUnix::new(endpoint)?;
+    let listener = socket_with(
+        AddressFamily::UNIX,
+        SocketType::STREAM,
+        SocketFlags::NONBLOCK | SocketFlags::CLOEXEC,
+        None,
+    )?;
+    let error = match rustix::net::bind(&listener, &address) {
+        Ok(()) => return Ok(listener.into()),
+        Err(error @ rustix::io::Errno::ADDRINUSE) => std::io::Error::from(error),
+        Err(error) => return Err(error.into()),
     };
     // Exec closes the listener but leaves its pathname. Only the elected
     // installer may reclaim this PID's endpoint, after checking for a healthy
@@ -161,7 +179,6 @@ fn bind_listener(endpoint: &str) -> std::io::Result<UnixListener> {
     if !previous.file_type().is_socket() || previous.uid() != uid {
         return Err(error);
     }
-    let address = SocketAddrUnix::new(endpoint)?;
     let probe = socket_with(
         AddressFamily::UNIX,
         SocketType::STREAM,
@@ -182,7 +199,8 @@ fn bind_listener(endpoint: &str) -> std::io::Result<UnixListener> {
         return Err(error);
     }
     std::fs::remove_file(endpoint)?;
-    UnixListener::bind(endpoint)
+    rustix::net::bind(&listener, &address)?;
+    Ok(listener.into())
 }
 
 fn dispatch(
@@ -278,7 +296,7 @@ fn serve(
         &socket,
         &Response {
             namespace_pid,
-            result,
+            result: result.map_err(|error| error.to_string()),
         },
         None,
     )?;
@@ -293,6 +311,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bound_socket_cannot_queue_connections_before_listen() {
+        let directory =
+            std::env::temp_dir().join(format!("cuinterpose-bound-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let endpoint = directory.join("control.sock");
+        let endpoint = endpoint.to_str().unwrap();
+        let listener = bind_listener(endpoint).unwrap();
+        // Model a permissive application umask without changing this test
+        // process's umask while other unit tests may create files.
+        std::fs::set_permissions(endpoint, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(
+            UnixStream::connect(endpoint).unwrap_err().kind(),
+            std::io::ErrorKind::ConnectionRefused
+        );
+        std::fs::set_permissions(endpoint, std::fs::Permissions::from_mode(0o600)).unwrap();
+        rustix::net::listen(&listener, libc::SOMAXCONN).unwrap();
+        let _connection = UnixStream::connect(endpoint).unwrap();
+        drop(listener);
+        std::fs::remove_file(endpoint).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn activation_publishes_listener_with_restricted_permissions() {
+        let directory =
+            std::env::temp_dir().join(format!("cuinterpose-permissions-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let endpoint = directory.join("control.sock");
+        let endpoint = endpoint.to_str().unwrap();
+        let (activation, receiver) = mpsc::sync_channel(1);
+        let mut workers = PreparedWorkers {
+            activation,
+            listener: None,
+        };
+        workers.activate(endpoint).unwrap();
+        let listener = receiver.try_recv().unwrap();
+        assert_eq!(
+            std::fs::metadata(endpoint).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let _connection = UnixStream::connect(endpoint).unwrap();
+        assert!(workers.listener.is_none());
+        drop(listener);
+        std::fs::remove_file(endpoint).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
     fn disconnected_activation_retains_listener_for_unlocked_cleanup() {
         let directory =
             std::env::temp_dir().join(format!("cuinterpose-activation-{}", std::process::id()));
@@ -305,7 +371,10 @@ mod tests {
             activation,
             listener: None,
         };
-        assert!(workers.activate(endpoint).is_err());
+        assert!(matches!(
+            workers.activate(endpoint),
+            Err(Error::Startup("control listener handoff failed"))
+        ));
         assert!(workers.listener.is_some());
         workers.cleanup(endpoint);
         assert!(!std::path::Path::new(endpoint).exists());
