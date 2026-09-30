@@ -167,12 +167,8 @@ def main():
                 print(completed.stderr, file=sys.stderr, end="")
             completed.check_returncode()
             if mode == "existing-file":
-                # ABI code 3 remains unchanged, but the original bind failure
-                # must be diagnosed once rather than flattened into that code.
-                bind_errors = [line for line in completed.stderr.splitlines()
-                               if "bind control socket" in line
-                               and f"os error {errno.EADDRINUSE}" in line]
-                assert len(bind_errors) == 1, completed.stderr
+                assert "bind control socket" in completed.stderr, completed.stderr
+                assert f"os error {errno.EADDRINUSE}" in completed.stderr, completed.stderr
         subprocess.run([sys.executable, str(fixtures.parent / "endpoint.py"),
                         "resolver-startup-failure", str(constructor)],
                        env=actual_env | {"CUINTERPOSE_TEST_NESTED_RUNTIME": "1"},
