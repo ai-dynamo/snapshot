@@ -115,11 +115,10 @@ workload must not resume with partially removed or reconstructed sharing.
 
 Exactly POSIX-FD exportable VMM and multicast objects are supported. FABRIC,
 mixed exportable handle types, and non-POSIX multicast (including handle type
-zero) are rejected before CUDA allocation or import. Private unicast VMM remains
-native-owned except that HOST_NUMA VMM creation is rejected with
-`CUDA_ERROR_NOT_SUPPORTED`, including creations without exportable handles.
-[Issue #404](https://github.com/ai-dynamo/snapshot/issues/404) tracks preservation
-of HOST_NUMA allocations using host carriers. Memory IPC requires fully
+zero) are rejected before CUDA allocation or import. Tracked unicast allocations
+support pinned DEVICE and HOST_NUMA backing. Private unicast VMM remains
+native-owned. Shared HOST_NUMA bytes use the creator's host carrier, and restore
+preserves the original NUMA placement. Memory IPC requires fully
 interposed peers and the adapter's single
 owning-context behavior. CUDA allocation granularity can make backing larger
 than the requested malloc size.
@@ -269,7 +268,9 @@ For an opted-in workload, the agent finds CUDA processes and launches the coordi
 
 #### Host-carrier module
 
-The Rust `host_carrier` module copies shared creator allocations into one host arena per process and copies them back during restore. It registers the arena as pinned host memory for each save or load transfer, groups allocations by CUDA context, maps a temporary consecutive device-address range, and uses asynchronous copies on one stream per context. The registration's context remains alive until all copies finish and the arena is unregistered. Between transfers the carrier is ordinary anonymous memory. The temporary device mappings are not application mappings.
+The Rust `host_carrier` module copies shared creator allocations into one host arena per process and copies them back during restore. DEVICE allocations are grouped by CUDA context and device, mapped into a temporary consecutive address range, and copied asynchronously on one stream per group. HOST_NUMA allocations use CPU copies through temporary host-accessible VMM aliases of their full backing. These aliases preserve application mappings and permissions.
+
+The arena is registered as pinned host memory for each save or load transfer. The registration's context remains alive until all copies finish and the arena is unregistered. Between transfers the carrier is ordinary anonymous memory. If no recorded context remains, DEVICE backing uses its device ordinal for the primary-context fallback and HOST_NUMA backing uses CUDA device zero. This fallback never changes the allocation's NUMA node ID; restore recreates its original allocation properties.
 
 ### How calls are intercepted
 
@@ -431,15 +432,14 @@ An allocation is *exportable* when its creation properties allow a shareable han
 
 | Allocation state | Who saves and restores its bytes? |
 | --- | --- |
-| Ordinary nonexportable `cuMemCreate`, excluding HOST_NUMA | Native CUDA. |
-| HOST_NUMA `cuMemCreate`, exportable or not | Rejected before allocating backing. |
+| Ordinary nonexportable `cuMemCreate`, including HOST_NUMA | Native CUDA. |
 | Tracked POSIX-capable allocation never shared | Native CUDA; cuinterpose leaves its driver handles and application mappings intact. |
 | Shim-managed malloc never shared | Native CUDA, even though its backing can be exported. |
-| Shared creator allocation | The creator shim's host carrier. |
+| Shared pinned DEVICE or HOST_NUMA creator allocation | The creator shim's host carrier. |
 | Imported shared allocation | No second content copy; the importer reconnects to the creator's restored allocation. |
 | Tracked allocation used by multicast | The creator's host carrier, even if there was no unicast virtual shareable handle export. |
 
-Only pinned, device-located, supported exportable creator allocations marked shared enter the host carrier. A shared allocation whose application handles were released but whose mapping remains can recover a temporary driver handle before copying. Never-shared allocations are excluded from that recovery as well as from teardown.
+Only supported exportable creator allocations that are pinned, marked shared, and located at DEVICE or HOST_NUMA enter the host carrier. A shared allocation whose application handles were released but whose mapping remains can recover a temporary driver handle before copying. Never-shared allocations are excluded from that recovery as well as from teardown.
 
 #### VMM export and import
 
@@ -537,8 +537,8 @@ affected records before forwarding teardown without the state mutex, then
 reclaims them only after CUDA succeeds. Failed teardown and nonfinal primary
 release preserve those records. Explicit VMM allocations survive context
 teardown; matching cached operational contexts are cleared so later carrier
-work can enter the device's primary context. Legacy and versioned teardown
-entry points retain their respective native semantics.
+work can enter a primary context using the fallback described above. Legacy and
+versioned teardown entry points retain their respective native semantics.
 
 The adapter never calls native CUDA memory-IPC functions. It therefore does not need a CUDA checkpoint jobfile to reconstruct this sharing.
 
@@ -890,7 +890,7 @@ namespace, and checkpoint-directory descriptors before entry, so it does not
 resolve the coordinator executable through the workload filesystem. Restore
 removes only the expected stale participant socket paths.
 
-Host carriers contain workload GPU data in the CRIU images. They require the
+Host carriers contain shared workload data in the CRIU images. They require the
 same checkpoint storage access controls as other captured process memory; this
 proposal adds no encryption or separate credential mechanism. Version checks,
 32 MiB message/state limits, socket timeouts, and bounded control queues limit
