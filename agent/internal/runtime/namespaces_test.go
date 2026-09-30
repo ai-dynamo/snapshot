@@ -4,10 +4,17 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 func TestCommandInNamespacesPassesOpenFiles(t *testing.T) {
@@ -63,4 +70,64 @@ exec "$@"
 	if err != nil || string(output) != "checkpoint contents" {
 		t.Fatalf("namespace command: %v, output %q", err, output)
 	}
+}
+
+func TestCommandInNamespacesCancellationKillsForkedChild(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	childPath := filepath.Join(dir, "child-pid")
+	t.Setenv("TEST_CHILD_PID", childPath)
+	// nsenter forks when entering a PID namespace. Its child also inherits the
+	// output pipes, so killing only nsenter leaves both a worker and a stuck wait.
+	script := `#!/bin/sh
+set -eu
+while [ "$1" != -- ]; do shift; done
+shift
+"$@" &
+echo "$!" > "$TEST_CHILD_PID"
+wait
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "nsenter"), []byte(script), 0700))
+	mountNS, err := os.Open("/proc/self/ns/mnt")
+	require.NoError(t, err)
+	defer mountNS.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd, closeFiles, err := CommandInNamespaces(ctx, os.Getpid(), mountNS, dir, "/bin/sleep")
+	require.NoError(t, err)
+	defer closeFiles()
+	cmd.Args = append(cmd.Args, "300")
+	var output bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &output, &output
+	require.NoError(t, cmd.Start())
+	finished := make(chan error, 1)
+	go func() { finished <- cmd.Wait() }()
+
+	var childPID int
+	require.Eventually(t, func() bool {
+		data, err := os.ReadFile(childPath)
+		if err != nil {
+			return false
+		}
+		childPID, err = strconv.Atoi(strings.TrimSpace(string(data)))
+		return err == nil && childPID > 0
+	}, 3*time.Second, 10*time.Millisecond)
+	// A pidfd observes exit even while the orphan waits to be reaped. It also
+	// lets cleanup stop the child if the cancellation behavior regresses.
+	childFD, err := unix.PidfdOpen(childPID, 0)
+	require.NoError(t, err)
+	defer unix.Close(childFD)
+	defer unix.PidfdSendSignal(childFD, unix.SIGKILL, nil, 0)
+
+	cancel()
+	select {
+	case err := <-finished:
+		require.Error(t, err)
+	case <-time.After(helperWaitDelay + time.Second):
+		t.Fatal("namespace command waited for the child's output pipes after cancellation")
+	}
+	fds := []unix.PollFd{{Fd: int32(childFD), Events: unix.POLLIN}}
+	_, err = unix.Poll(fds, 1000)
+	require.NoError(t, err)
+	require.NotZero(t, fds[0].Revents&unix.POLLIN, "forked child survived cancellation")
 }

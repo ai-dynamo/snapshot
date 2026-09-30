@@ -1,0 +1,36 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package podcontract
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestParseCuInterposeAnnotation(t *testing.T) {
+	if enabled, err := ParseCuInterposeAnnotation(nil); enabled || err != nil {
+		t.Fatalf("absent annotation = %v, %v", enabled, err)
+	}
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{"true", true}, {" TRUE ", true}, {"True", true}, {"t", true}, {"T", true}, {"1", true},
+		{"false", false}, {" FALSE ", false}, {"False", false}, {"f", false}, {"F", false}, {"0", false},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			annotations := map[string]string{CuInterposeAnnotation: tc.value}
+			got, err := ParseCuInterposeAnnotation(annotations)
+			if err != nil || got != tc.want {
+				t.Fatalf("ParseCuInterposeAnnotation(%q) = %v, %v, want %v", tc.value, got, err, tc.want)
+			}
+		})
+	}
+	for _, value := range []string{"", " ", "enabled", "yes"} {
+		annotations := map[string]string{CuInterposeAnnotation: value}
+		if _, err := ParseCuInterposeAnnotation(annotations); err == nil || !strings.Contains(err.Error(), CuInterposeAnnotation) {
+			t.Fatalf("invalid annotation %q should identify its key: %v", value, err)
+		}
+	}
+}
