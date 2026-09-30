@@ -4,7 +4,8 @@
 //! Restore context-owned malloc lifetimes over context-independent VMM backing.
 
 use super::{Memblock, ProcessState, VirtualAllocationHandle};
-use crate::driver::{self, Result};
+use crate::driver;
+use crate::error::Result;
 use crate::runtime;
 use cudarc::driver::sys::{CUcontext, CUdevice};
 use cuinterpose_protocol::AllocationId;

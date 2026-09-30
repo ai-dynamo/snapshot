@@ -6,7 +6,7 @@
 use super::vmm::{access_metadata, context_device};
 use super::{Memblock, ProcessState, sharing};
 use crate::driver::Context;
-use crate::driver::{CudaError, Result};
+use crate::error::{Error, Result};
 use crate::runtime;
 use cudarc::driver::sys::CUresult::*;
 use cuinterpose_protocol::Operation;
@@ -53,7 +53,7 @@ impl Phase {
             Operation::RestoreMulticastBindings => (Self::MulticastDevicesRestored, Self::Active),
         };
         if self != expected {
-            return Err(CudaError::from(CUDA_ERROR_NOT_READY));
+            return Err(Error::from(CUDA_ERROR_NOT_READY));
         }
         Ok(next)
     }
@@ -67,7 +67,7 @@ impl ProcessState {
             Phase::Active | Phase::Checkpointing | Phase::UnicastPrepared
         ) || self.unlocked_driver_calls != 0
         {
-            return Err(CudaError::from(CUDA_ERROR_NOT_READY));
+            return Err(Error::from(CUDA_ERROR_NOT_READY));
         }
         let mut records = Vec::new();
         for allocation in self.memblocks.values().filter_map(Memblock::unicast) {
@@ -227,7 +227,7 @@ impl ProcessState {
                 if let Some(arena) = &self.arena {
                     arena.load(&mut allocations)?;
                 } else if !allocations.is_empty() {
-                    return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
+                    return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
                 }
                 for allocation in allocations {
                     self.memblocks
@@ -248,7 +248,7 @@ impl ProcessState {
                     let (raw, properties) = sharing::request_export(allocation.reference)
                         .map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
                     if properties.is_some() {
-                        return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
+                        return Err(Error::from(CUDA_ERROR_INVALID_HANDLE));
                     }
                     allocation.driver = Some(Context::run(
                         allocation.context,
@@ -330,29 +330,22 @@ impl ProcessState {
     }
 }
 
-pub(crate) fn inspect() -> std::result::Result<Reply, String> {
-    let state = runtime::get().map_err(|_| "cuinterpose state is unavailable")?;
+pub(crate) fn inspect() -> Result<Reply> {
+    let state = runtime::get()?;
     Ok(Reply::Inspection {
-        records: state
-            .inspect()
-            .map_err(|_| "cannot inspect current CUDA state")?,
+        records: state.inspect()?,
     })
 }
 
-pub(crate) fn begin() -> std::result::Result<Reply, String> {
-    let mut state = runtime::get().map_err(|_| "cuinterpose state is unavailable")?;
-    let records = state
-        .begin_checkpoint()
-        .map_err(|_| "application is not ready for checkpoint")?;
+pub(crate) fn begin() -> Result<Reply> {
+    let mut state = runtime::get()?;
+    let records = state.begin_checkpoint()?;
     Ok(Reply::Inspection { records })
 }
 
-pub(crate) fn execute(operation: Operation) -> std::result::Result<Reply, String> {
-    let mut state = runtime::get().map_err(|_| "cuinterpose state is unavailable")?;
-    state
-        .phase
-        .next(operation)
-        .map_err(|_| "CUDA lifecycle operation out of order")?;
+pub(crate) fn execute(operation: Operation) -> Result<Reply> {
+    let mut state = runtime::get()?;
+    state.phase.next(operation)?;
     let bytes = runtime::must_complete(state.lifecycle(operation));
     Ok(Reply::Completed { operation, bytes })
 }
@@ -374,12 +367,21 @@ mod tests {
     fn checkpoint_entry_requires_idle_calls_and_runs_once() {
         let mut state = ProcessState::new(41);
         state.unlocked_driver_calls = 1;
-        assert_eq!(state.begin_checkpoint(), Err(CUDA_ERROR_NOT_READY.into()));
+        assert!(matches!(
+            state.begin_checkpoint(),
+            Err(Error::Cuda(CUDA_ERROR_NOT_READY))
+        ));
         assert_eq!(state.phase, Phase::Active);
         state.unlocked_driver_calls = 0;
         assert!(state.begin_checkpoint().unwrap().is_empty());
         assert_eq!(state.phase, Phase::Checkpointing);
-        assert_eq!(state.begin_checkpoint(), Err(CUDA_ERROR_NOT_READY.into()));
-        assert_eq!(state.new_reference(), Err(CUDA_ERROR_NOT_READY.into()));
+        assert!(matches!(
+            state.begin_checkpoint(),
+            Err(Error::Cuda(CUDA_ERROR_NOT_READY))
+        ));
+        assert!(matches!(
+            state.new_reference(),
+            Err(Error::Cuda(CUDA_ERROR_NOT_READY))
+        ));
     }
 }
