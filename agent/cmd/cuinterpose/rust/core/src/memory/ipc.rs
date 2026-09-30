@@ -8,7 +8,7 @@ use super::{Memblock, ProcessState, VirtualAllocationHandle};
 use crate::{driver, runtime};
 use cudarc::driver::sys::*;
 use cuinterpose_protocol::{AllocationReference, VERSION as PROTOCOL_VERSION};
-use driver::{CudaError, Result};
+use crate::error::{Error, Result};
 
 #[derive(Clone)]
 pub struct MallocRegion {
@@ -50,7 +50,7 @@ impl VirtualIpcMemHandle {
             || u64::from_le_bytes(virtual_ipc_mem_handle.requested)
                 > u64::from_le_bytes(virtual_ipc_mem_handle.extent)
         {
-            return Err(CudaError(CUresult::CUDA_ERROR_INVALID_HANDLE));
+            return Err(Error::Cuda(CUresult::CUDA_ERROR_INVALID_HANDLE));
         }
         Ok(virtual_ipc_mem_handle)
     }
@@ -137,20 +137,20 @@ pub(crate) fn release(address: CUdeviceptr, imported: bool) -> Result<()> {
     {
         let Some(mapping) = state.malloc_regions.get_mut(&address) else {
             if imported {
-                return Err(CudaError(CUresult::CUDA_ERROR_INVALID_VALUE));
+                return Err(Error::Cuda(CUresult::CUDA_ERROR_INVALID_VALUE));
             }
             return runtime::call_unlocked(state, || unsafe { driver::cuMemFree_v2(address) })
                 .map(|_| ());
         };
         if (mapping.opens != 0) != imported {
-            return Err(CudaError(CUresult::CUDA_ERROR_INVALID_VALUE));
+            return Err(Error::Cuda(CUresult::CUDA_ERROR_INVALID_VALUE));
         }
         if imported && mapping.opens > 1 {
             mapping.opens -= 1;
             return Ok(());
         }
         if mapping.context != crate::driver::context()? {
-            return Err(CudaError(CUresult::CUDA_ERROR_NOT_SUPPORTED));
+            return Err(Error::Cuda(CUresult::CUDA_ERROR_NOT_SUPPORTED));
         }
     }
     let (mut state, ()) = runtime::call_unlocked(state, || unsafe { driver::cuCtxSynchronize() })?;
