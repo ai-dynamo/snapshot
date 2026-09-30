@@ -20,10 +20,3 @@ recorded; if a feature isn't listed here, the general floor is all it needs.
 No shipped feature currently raises this floor. See
 [Limitations](../limitations.md) for functionality still on the roadmap; once
 a roadmap feature ships with its own version floor, it gets a row here.
-
-## Adding a row
-
-A change that makes a feature depend on a newer driver, GPU Operator, or other
-dependency version than the baseline above must add a row to this table as
-part of the same pull request — see
-[CONTRIBUTING.md](../../CONTRIBUTING.md#documenting-a-feature-specific-version-floor).
