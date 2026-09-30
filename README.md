@@ -227,3 +227,7 @@ Feedback and issues are welcome — please [open an issue](https://github.com/ai
 ## License
 
 Snapshot is licensed under the [Apache License 2.0](LICENSE).
+
+The `charts/snapshot/LICENSE` entry is a symbolic link to that top-level file. It exists only so
+Helm includes the license when packaging the chart; Helm dereferences the link and writes a
+regular-file copy into the chart archive.
