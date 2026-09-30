@@ -8,8 +8,8 @@ use super::sharing;
 use super::vmm::Mapping;
 use super::{Memblock, ProcessState, VirtualAllocationHandle};
 use crate::driver::Context;
-use crate::driver::CudaError;
-use crate::driver::Result;
+use crate::error::Error;
+use crate::error::Result;
 use crate::runtime;
 use cudarc::driver::sys::CUresult::{
     CUDA_ERROR_INVALID_HANDLE, CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_NOT_SUPPORTED, CUDA_SUCCESS,
@@ -105,7 +105,7 @@ pub fn import(
         .and_then(Memblock::unicast)
         .is_some()
     {
-        return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
+        return Err(Error::from(CUDA_ERROR_INVALID_HANDLE));
     }
     if let Some(object) = state
         .memblocks
@@ -113,7 +113,7 @@ pub fn import(
         .and_then(Memblock::multicast_mut)
     {
         if object.reference != reference {
-            return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
+            return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
         }
         object.shared = true;
         let handle = state.mint_virtual_allocation_handle(id)?;
@@ -140,7 +140,7 @@ pub fn import(
     {
         unsafe { crate::driver::cuMemRelease(driver) }?;
         if object.reference != reference {
-            return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
+            return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
         }
     } else {
         state.memblocks.insert(
@@ -514,7 +514,7 @@ pub fn restore(state: &mut ProcessState, operation: Operation) -> Result<()> {
                     let (fd, properties) = sharing::request_export(object.reference)
                         .map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
                     if properties != Some(object.properties) {
-                        return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
+                        return Err(Error::from(CUDA_ERROR_INVALID_HANDLE));
                     }
                     let driver = crate::driver::import_posix(fd.as_fd())?;
                     object.driver = Some(driver);
@@ -581,7 +581,7 @@ pub fn restore(state: &mut ProcessState, operation: Operation) -> Result<()> {
                     }
                 }
                 Operation::RestoreMulticastCreators | Operation::RestoreMulticastImporters => {}
-                _ => return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE)),
+                _ => return Err(Error::from(CUDA_ERROR_INVALID_VALUE)),
             }
             Ok(())
         })?;
@@ -684,7 +684,7 @@ impl MulticastObject {
                 && binding.offset + binding.size > offset
                 && (binding.offset < offset || binding.offset + binding.size > end)
             {
-                return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
+                return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
             }
         }
         unsafe {

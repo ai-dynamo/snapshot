@@ -5,10 +5,11 @@
 
 use super::checkpoint::Phase;
 use super::{Memblock, ProcessState, VirtualAllocationHandle};
-use crate::driver::{CudaError, Result, context};
+use crate::driver::context;
+use crate::error::{Error as CoreError, Result};
 use crate::runtime::{self, export_cache};
 use cudarc::driver::sys::CUresult::*;
-use cudarc::driver::sys::{CUmemAllocationProp, CUmulticastObjectProp};
+use cudarc::driver::sys::{CUmemAllocationHandleType, CUmemAllocationProp, CUmulticastObjectProp};
 use cuinterpose_protocol::{
     self as protocol, AllocationId, AllocationReference, Error, NamespacePid, Reply, Request,
     Response, VIRTUAL_SHAREABLE_HANDLE_BYTES, VIRTUAL_SHAREABLE_HANDLE_MAGIC,
@@ -17,7 +18,7 @@ use rustix::fs::{MemfdFlags, memfd_create};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Write;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::{fs::FileExt, net::UnixStream};
 use std::sync::{Mutex, MutexGuard};
 
@@ -40,11 +41,23 @@ pub fn decode(fd: i32) -> protocol::Result<Option<AllocationReference>> {
     // descriptor. Clone it so positional File reads are safe and RAII-owned.
     let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
     let file = File::from(borrowed.try_clone_to_owned()?);
-    let mut magic = [0; 4];
-    if file.read_exact_at(&mut magic, 0).is_err() || magic != VIRTUAL_SHAREABLE_HANDLE_MAGIC {
+    // Virtual handles are regular memfds. A short regular file is invalid;
+    // nonregular descriptors (including pipes and sockets) are foreign.
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
         return Ok(None);
     }
-    if file.metadata()?.len() as usize != VIRTUAL_SHAREABLE_HANDLE_BYTES {
+    let mut magic = [0; 4];
+    file.read_exact_at(&mut magic, 0)?;
+    if magic[..3] != VIRTUAL_SHAREABLE_HANDLE_MAGIC[..3] {
+        return Ok(None);
+    }
+    if magic[3] != protocol::VERSION {
+        return Err(Error::Invalid(
+            "unsupported virtual shareable handle version",
+        ));
+    }
+    if metadata.len() != VIRTUAL_SHAREABLE_HANDLE_BYTES as u64 {
         return Err(Error::Invalid("invalid virtual shareable handle size"));
     }
     let mut bytes = [0; VIRTUAL_SHAREABLE_HANDLE_BYTES];
@@ -77,32 +90,38 @@ pub fn request_export(
     let descriptor = fd.ok_or(Error::Invalid("creator sent no descriptor"))?;
     match reply {
         Reply::UnicastExport => Ok((descriptor, None)),
-        Reply::MulticastExport {
-            properties:
-                protocol::MulticastProperties {
-                    devices,
-                    size,
-                    handle_types,
-                    flags,
-                },
-        } => {
-            if devices == 0 || size == 0 {
-                return Err(Error::Invalid("invalid multicast export properties"));
-            }
-            Ok((
-                descriptor,
-                Some(CUmulticastObjectProp {
-                    numDevices: devices,
-                    size: size
-                        .try_into()
-                        .map_err(|_| Error::Invalid("multicast size exceeds host size"))?,
-                    handleTypes: handle_types,
-                    flags,
-                }),
-            ))
+        Reply::MulticastExport { properties } => {
+            Ok((descriptor, Some(decode_multicast_properties(properties)?)))
         }
         _ => Err(Error::Invalid("invalid export response")),
     }
+}
+
+fn decode_multicast_properties(
+    properties: protocol::MulticastProperties,
+) -> protocol::Result<CUmulticastObjectProp> {
+    let protocol::MulticastProperties {
+        devices,
+        size,
+        handle_types,
+        flags,
+    } = properties;
+    if devices == 0
+        || size == 0
+        || handle_types
+            != u64::from(CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0)
+        || flags != 0
+    {
+        return Err(Error::Invalid("invalid multicast export properties"));
+    }
+    Ok(CUmulticastObjectProp {
+        numDevices: devices,
+        size: size
+            .try_into()
+            .map_err(|_| Error::Invalid("multicast size exceeds host size"))?,
+        handleTypes: handle_types,
+        flags,
+    })
 }
 
 // Multicast importers need the creation properties for checkpoint reconstruction.
@@ -214,12 +233,12 @@ pub(crate) fn import_reference(
     reference: AllocationReference,
 ) -> Result<(MutexGuard<'static, ProcessState>, u64)> {
     if state.phase != Phase::Active {
-        return Err(CudaError::from(CUDA_ERROR_NOT_READY));
+        return Err(CoreError::from(CUDA_ERROR_NOT_READY));
     }
     let id = reference.id;
     if let Some(memblock) = state.memblocks.get_mut(&id) {
         if memblock.reference() != reference {
-            return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
+            return Err(CoreError::from(CUDA_ERROR_INVALID_VALUE));
         }
         match memblock {
             Memblock::Unicast(allocation) => {
@@ -227,7 +246,7 @@ pub(crate) fn import_reference(
                     let (raw, properties) =
                         request_export(reference).map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
                     if properties.is_some() {
-                        return Err(CudaError::from(CUDA_ERROR_INVALID_HANDLE));
+                        return Err(CoreError::from(CUDA_ERROR_INVALID_HANDLE));
                     }
                     allocation.driver = Some(crate::driver::import_posix(raw.as_fd())?);
                 }
@@ -267,6 +286,15 @@ pub(crate) fn import_reference(
 #[cfg(test)]
 mod codec_tests {
     use super::*;
+    use std::io::Seek;
+    use std::os::fd::AsRawFd;
+
+    fn handle_file(bytes: &[u8]) -> File {
+        let fd = memfd_create(c"test-shareable-handle", MemfdFlags::CLOEXEC).unwrap();
+        let mut file = File::from(fd);
+        file.write_all(bytes).unwrap();
+        file
+    }
 
     #[test]
     fn virtual_shareable_handle_round_trip() {
@@ -274,23 +302,96 @@ mod codec_tests {
             creator_pid: 1,
             id: [4; 16],
         };
-        let fd = create(reference).unwrap();
-        assert_eq!(decode(fd.as_raw_fd()).unwrap(), Some(reference));
+        let mut file = File::from(create(reference).unwrap());
+        let offset = file.stream_position().unwrap();
+        assert_eq!(decode(file.as_raw_fd()).unwrap(), Some(reference));
+        assert_eq!(file.stream_position().unwrap(), offset);
         assert_eq!(
-            File::from(fd).metadata().unwrap().len(),
+            file.metadata().unwrap().len(),
             VIRTUAL_SHAREABLE_HANDLE_BYTES as u64
         );
     }
 
     #[test]
-    fn foreign_fd_is_untracked_and_malformed_virtual_handle_is_rejected() {
+    fn foreign_descriptors_are_untracked() {
         let foreign = File::open("/dev/null").unwrap();
         assert_eq!(decode(foreign.as_raw_fd()).unwrap(), None);
-        let fd = memfd_create(c"obsolete-virtual-handle", MemfdFlags::empty()).unwrap();
-        let mut file = File::from(fd);
-        file.write_all(&VIRTUAL_SHAREABLE_HANDLE_MAGIC).unwrap();
-        file.write_all(&[0; 252]).unwrap();
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        assert_eq!(decode(socket.as_raw_fd()).unwrap(), None);
+        let file = handle_file(b"foreign handle");
+        assert_eq!(decode(file.as_raw_fd()).unwrap(), None);
+    }
+
+    #[test]
+    fn truncated_and_oversized_virtual_handles_are_rejected() {
+        let bytes = protocol::encode_virtual_shareable_handle(AllocationReference {
+            creator_pid: 1,
+            id: [4; 16],
+        })
+        .unwrap();
+        for size in 0..bytes.len() {
+            let file = handle_file(&bytes[..size]);
+            assert!(decode(file.as_raw_fd()).is_err(), "accepted size {size}");
+        }
+        let mut oversized = bytes.to_vec();
+        oversized.push(0);
+        let file = handle_file(&oversized);
         assert!(decode(file.as_raw_fd()).is_err());
+    }
+
+    #[test]
+    fn unsupported_virtual_handle_versions_are_rejected() {
+        let mut bytes = protocol::encode_virtual_shareable_handle(AllocationReference {
+            creator_pid: 1,
+            id: [4; 16],
+        })
+        .unwrap();
+        for version in [protocol::VERSION - 1, protocol::VERSION + 1] {
+            bytes[3] = version;
+            let file = handle_file(&bytes);
+            assert!(matches!(decode(file.as_raw_fd()), Err(Error::Invalid(_))));
+        }
+    }
+
+    #[test]
+    fn multicast_exports_require_supported_properties() {
+        let valid = protocol::MulticastProperties {
+            devices: 2,
+            size: 4096,
+            handle_types: 1,
+            flags: 0,
+        };
+        let decoded = decode_multicast_properties(valid).unwrap();
+        assert_eq!(decoded.numDevices, valid.devices);
+        assert_eq!(decoded.size as u64, valid.size);
+        assert_eq!(decoded.handleTypes, valid.handle_types);
+        assert_eq!(decoded.flags, valid.flags);
+
+        for invalid in [
+            protocol::MulticastProperties {
+                devices: 0,
+                ..valid
+            },
+            protocol::MulticastProperties { size: 0, ..valid },
+            protocol::MulticastProperties {
+                handle_types: 0,
+                ..valid
+            },
+            protocol::MulticastProperties {
+                handle_types: 8,
+                ..valid
+            },
+            protocol::MulticastProperties {
+                handle_types: 9,
+                ..valid
+            },
+            protocol::MulticastProperties { flags: 1, ..valid },
+        ] {
+            assert!(
+                decode_multicast_properties(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
     }
 }
 
