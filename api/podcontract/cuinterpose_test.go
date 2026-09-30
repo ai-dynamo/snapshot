@@ -29,7 +29,8 @@ func TestParseCuInterposeAnnotation(t *testing.T) {
 	}
 	for _, value := range []string{"", " ", "enabled", "yes"} {
 		annotations := map[string]string{CuInterposeAnnotation: value}
-		if _, err := ParseCuInterposeAnnotation(annotations); err == nil || !strings.Contains(err.Error(), CuInterposeAnnotation) {
+		_, err := ParseCuInterposeAnnotation(annotations)
+		if err == nil || !strings.Contains(err.Error(), CuInterposeAnnotation) {
 			t.Fatalf("invalid annotation %q should identify its key: %v", value, err)
 		}
 	}
