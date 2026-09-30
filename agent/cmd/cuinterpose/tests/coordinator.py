@@ -109,13 +109,14 @@ class Contracts(unittest.TestCase):
             self.reply(self.request(pid, "begin_checkpoint" if begin else "inspect"), pid,
                        {"Ok": {"inspection": {"records": records}}})
 
-    def phase(self, operation):
+    def phase(self, operation, byte_counts=(0, 0)):
         # Requiring both requests before any reply detects serial dispatch.
         held, other = [self.request(pid, "execute", operation=operation) for pid in (1, 2)]
-        completed = {"Ok": {"completed": {"operation": operation, "bytes": 0}}}
-        self.reply(other, 2, completed)
+        def completed(count):
+            return {"Ok": {"completed": {"operation": operation, "bytes": count}}}
+        self.reply(other, 2, completed(byte_counts[1]))
         self.assertFalse(select.select(self.listeners, [], [], 0.1)[0], "advanced before the held reply")
-        self.reply(held, 1, completed)
+        self.reply(held, 1, completed(byte_counts[0]))
 
     def test_preflight_refusals(self):
         for records in [[allocation(2)], [allocation(), mapping(8192)],
@@ -125,7 +126,7 @@ class Contracts(unittest.TestCase):
                 self.inspect([records, []], begin=True)
 
     def test_unsupported_allocation_properties_start_no_phases(self):
-        for field, value in (("location", {"location_type": 3, "id": 0}), ("allocation_type", 0)):
+        for field, value in (("location", {"location_type": 0, "id": 0}), ("allocation_type", 0)):
             for importer in (False, True):
                 unsupported = allocation()
                 unsupported["allocation"][field] = value
@@ -141,6 +142,24 @@ class Contracts(unittest.TestCase):
                     with self.coordinator("--restore", "unsupported allocation properties"):
                         self.inspect(live)
                 self.state.unlink()
+
+    def test_host_numa_creator_saves_once_and_importer_reconnects(self):
+        creator = allocation(checkpoint_via_host_carrier=True)
+        importer = allocation(size=0)
+        for record in (creator, importer):
+            record["allocation"]["location"] = {"location_type": 3, "id": 57}
+        records = [[creator, mapping()], [importer, mapping(address=0x20000)]]
+        with self.coordinator("--prepare"):
+            self.inspect(records, begin=True)
+            for operation in PREPARE:
+                self.phase(operation, (4096, 0) if operation == "save_allocations" else (0, 0))
+        saved = msgpack.unpackb(self.state.read_bytes(), raw=False, strict_map_key=False)
+        self.assertEqual(saved["body"], {1: records[0], 2: records[1]})
+        with self.coordinator("--restore"):
+            self.inspect(records)
+            for operation in RESTORE:
+                self.phase(operation, (4096, 0) if operation == "load_allocations" else (0, 0))
+            self.inspect(records)
 
     def test_failed_or_lost_reply_stops_without_retry(self):
         for lost in (False, True):

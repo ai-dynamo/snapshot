@@ -3,7 +3,7 @@
 
 //! Local checkpoint validation, mutation, inspection, and completion.
 
-use super::vmm::access_metadata;
+use super::vmm::{access_metadata, context_device};
 use super::{Memblock, ProcessState, sharing};
 use crate::driver::Context;
 use crate::driver::{CudaError, Result};
@@ -161,7 +161,7 @@ impl ProcessState {
                             .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
                         Context::run(
                             allocation.context,
-                            allocation.properties.location.id,
+                            context_device(&allocation.properties),
                             || {
                                 let mut driver = 0;
                                 unsafe {
@@ -192,7 +192,7 @@ impl ProcessState {
                 {
                     Context::run(
                         allocation.context,
-                        allocation.properties.location.id,
+                        context_device(&allocation.properties),
                         || {
                             for mapping in self
                                 .mappings
@@ -252,7 +252,7 @@ impl ProcessState {
                     }
                     allocation.driver = Some(Context::run(
                         allocation.context,
-                        allocation.properties.location.id,
+                        context_device(&allocation.properties),
                         || crate::driver::import_posix(raw.as_fd()),
                     )?);
                 }
@@ -277,7 +277,7 @@ impl ProcessState {
         {
             Context::run(
                 allocation.context,
-                allocation.properties.location.id,
+                context_device(&allocation.properties),
                 || {
                     for mapping in self
                         .mappings

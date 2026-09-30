@@ -5,12 +5,12 @@ use super::*;
 use cuinterpose_abi::{ABI_VERSION, FrontendAbi};
 use std::ffi::{CStr, c_char};
 use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 static CREATES: AtomicUsize = AtomicUsize::new(0);
 static IMPORTS: AtomicUsize = AtomicUsize::new(0);
 static LIVE_HANDLES: AtomicUsize = AtomicUsize::new(0);
-static DEVICE_IMPORT: AtomicBool = AtomicBool::new(false);
+static IMPORT_LOCATION: AtomicUsize = AtomicUsize::new(0);
 
 fn properties(location: CUmemLocationType, kind: CUmemAllocationHandleType) -> CUmemAllocationProp {
     CUmemAllocationProp {
@@ -58,10 +58,10 @@ unsafe extern "C" fn release(_: u64) -> CUresult {
 }
 
 unsafe extern "C" fn get_properties(output: *mut CUmemAllocationProp, _: u64) -> CUresult {
-    let location = if DEVICE_IMPORT.load(Ordering::Relaxed) {
-        CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE
-    } else {
-        CUmemLocationType::CU_MEM_LOCATION_TYPE_HOST_NUMA
+    let location = match IMPORT_LOCATION.load(Ordering::Relaxed) {
+        0 => CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE,
+        1 => CUmemLocationType::CU_MEM_LOCATION_TYPE_HOST_NUMA,
+        _ => CUmemLocationType::CU_MEM_LOCATION_TYPE_HOST,
     };
     unsafe {
         output.write(properties(
@@ -84,7 +84,7 @@ unsafe extern "C" fn resolve(name: *const c_char) -> *mut c_void {
 }
 
 #[test]
-fn unicast_admission_rejects_host_backing_without_leaks() {
+fn unicast_admission_accepts_host_numa_and_rejects_unsupported_backing_without_leaks() {
     // ABI registration and runtime startup are process-lifetime state. Exercise
     // the actual backend table in a child, isolated from other fake resolvers.
     if std::env::var_os("CUINTERPOSE_ADMISSION_UNIT_CHILD").is_none() {
@@ -94,7 +94,7 @@ fn unicast_admission_rejects_host_backing_without_leaks() {
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "handlers::tests::unicast_admission_rejects_host_backing_without_leaks",
+                "handlers::tests::unicast_admission_accepts_host_numa_and_rejects_unsupported_backing_without_leaks",
             ])
             .env("CUINTERPOSE_ADMISSION_UNIT_CHILD", "1")
             .env("SNAPSHOT_CONTROL_DIR", &directory)
@@ -123,8 +123,18 @@ fn unicast_admission_rejects_host_backing_without_leaks() {
         CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_NONE,
         CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
     ];
-    for kind in kinds {
-        let properties = properties(CUmemLocationType::CU_MEM_LOCATION_TYPE_HOST_NUMA, kind);
+    let mut invalid_type = properties(
+        CUmemLocationType::CU_MEM_LOCATION_TYPE_HOST_NUMA,
+        CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
+    );
+    invalid_type.type_ = CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_INVALID;
+    for properties in [
+        properties(
+            CUmemLocationType::CU_MEM_LOCATION_TYPE_HOST,
+            CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
+        ),
+        invalid_type,
+    ] {
         let mut handle = 99;
         assert_eq!(
             unsafe { (backend.cuMemCreate)(&mut handle, 4096, &properties, 0) },
@@ -136,24 +146,31 @@ fn unicast_admission_rejects_host_backing_without_leaks() {
         assert!(active().unwrap().memblocks.is_empty());
         assert!(active().unwrap().virtual_allocation_handles.is_empty());
     }
-    for kind in kinds {
-        let properties = properties(CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE, kind);
-        let mut handle = 0;
-        assert_eq!(
-            unsafe { (backend.cuMemCreate)(&mut handle, 4096, &properties, 0) },
-            CUDA_SUCCESS
-        );
-        assert_eq!(
-            VirtualAllocationHandle::from_raw(handle).is_some(),
-            kind == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
-        );
-        assert_eq!(LIVE_HANDLES.load(Ordering::Relaxed), 1);
-        assert_eq!(unsafe { (backend.cuMemRelease)(handle) }, CUDA_SUCCESS);
-        assert_eq!(LIVE_HANDLES.load(Ordering::Relaxed), 0);
+    for location in [
+        CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE,
+        CUmemLocationType::CU_MEM_LOCATION_TYPE_HOST_NUMA,
+    ] {
+        for kind in kinds {
+            let properties = properties(location, kind);
+            let mut handle = 0;
+            assert_eq!(
+                unsafe { (backend.cuMemCreate)(&mut handle, 4096, &properties, 0) },
+                CUDA_SUCCESS
+            );
+            assert_eq!(
+                VirtualAllocationHandle::from_raw(handle).is_some(),
+                kind == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+            );
+            assert_eq!(LIVE_HANDLES.load(Ordering::Relaxed), 1);
+            assert_eq!(unsafe { (backend.cuMemRelease)(handle) }, CUDA_SUCCESS);
+            assert_eq!(LIVE_HANDLES.load(Ordering::Relaxed), 0);
+            assert!(active().unwrap().memblocks.is_empty());
+            assert!(active().unwrap().virtual_allocation_handles.is_empty());
+        }
     }
-    assert_eq!(CREATES.load(Ordering::Relaxed), 2);
-    for device in [false, true] {
-        DEVICE_IMPORT.store(device, Ordering::Relaxed);
+    assert_eq!(CREATES.load(Ordering::Relaxed), 4);
+    for location in 0..3 {
+        IMPORT_LOCATION.store(location, Ordering::Relaxed);
         let reference = active().unwrap().new_reference().unwrap();
         // Serve a foreign-version peer's descriptor through the real transport;
         // the fake driver supplies the allocation properties after import.
@@ -175,13 +192,13 @@ fn unicast_admission_rejects_host_backing_without_leaks() {
                     CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
                 )
             },
-            if device {
+            if location < 2 {
                 CUDA_SUCCESS
             } else {
                 CUDA_ERROR_NOT_SUPPORTED
             }
         );
-        if device {
+        if location < 2 {
             assert!(VirtualAllocationHandle::from_raw(handle).is_some());
             assert_eq!(LIVE_HANDLES.load(Ordering::Relaxed), 1);
             assert_eq!(unsafe { (backend.cuMemRelease)(handle) }, CUDA_SUCCESS);
@@ -196,5 +213,5 @@ fn unicast_admission_rejects_host_backing_without_leaks() {
             .remove(&reference.id)
             .unwrap();
     }
-    assert_eq!(IMPORTS.load(Ordering::Relaxed), 2);
+    assert_eq!(IMPORTS.load(Ordering::Relaxed), 3);
 }

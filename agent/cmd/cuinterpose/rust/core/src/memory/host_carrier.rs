@@ -4,7 +4,7 @@
 //! Canonical bytes in CRIU-captured memory. Unpublished backing is rolled back
 //! explicitly; CUDA cleanup never runs from Drop or in a fork child.
 
-use super::vmm::Allocation;
+use super::vmm::{Allocation, context_device};
 use crate::driver::CudaError;
 use crate::driver::{Context, Result};
 use cudarc::driver::sys::CUresult::{
@@ -13,7 +13,7 @@ use cudarc::driver::sys::CUresult::{
 };
 use cudarc::driver::sys::{
     CU_MEMHOSTREGISTER_PORTABLE, CUmemAccess_flags, CUmemAccessDesc, CUmemAllocationProp,
-    CUstream_flags,
+    CUmemLocationType, CUstream_flags,
 };
 use cuinterpose_protocol::AllocationId;
 use std::collections::BTreeMap;
@@ -92,7 +92,7 @@ impl Arena {
         }
     }
 
-    /// Recreate device backing from the captured host arena.
+    /// Recreate shared backing from the captured host arena.
     pub fn load(&self, allocations: &mut [AllocationContent]) -> Result<()> {
         let mut fresh = allocations.to_vec();
         let mut size = 0usize;
@@ -110,7 +110,7 @@ impl Arena {
         for allocation in &mut fresh {
             Context::run(
                 allocation.context,
-                allocation.properties.location.id,
+                context_device(&allocation.properties),
                 || {
                     let mut driver = 0;
                     unsafe {
@@ -135,7 +135,7 @@ impl Arena {
 
     fn copy(&self, allocations: &[AllocationContent], load: bool) -> Result<()> {
         let first = allocations.first().ok_or(CUDA_ERROR_INVALID_VALUE)?;
-        Context::run(first.context, first.properties.location.id, || {
+        Context::run(first.context, context_device(&first.properties), || {
             // A fallback primary may lose its final retain when we leave. Keep
             // registration in this scope; PORTABLE covers every copy group.
             unsafe {
@@ -158,6 +158,12 @@ impl Arena {
     fn copy_groups(&self, allocations: &[AllocationContent], load: bool) -> Result<()> {
         let mut groups: BTreeMap<(usize, i32), Vec<&AllocationContent>> = BTreeMap::new();
         for allocation in allocations {
+            if allocation.properties.location.type_
+                == CUmemLocationType::CU_MEM_LOCATION_TYPE_HOST_NUMA
+            {
+                self.copy_host(allocation, load)?;
+                continue;
+            }
             groups
                 .entry((allocation.context, allocation.properties.location.id))
                 .or_default()
@@ -280,6 +286,60 @@ impl Arena {
         Ok(())
     }
 
+    /// Copy host backing through a CPU-accessible alias of the full allocation.
+    /// Application mappings may be partial or have no host access; leave their
+    /// addresses and permissions untouched while all writers are parked.
+    fn copy_host(&self, allocation: &AllocationContent, load: bool) -> Result<()> {
+        let offset = *self
+            .offsets
+            .get(&allocation.id)
+            .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+        let host = self
+            .base
+            .checked_add(offset)
+            .ok_or(CUDA_ERROR_INVALID_VALUE)?;
+        let mut address = 0;
+        unsafe { crate::driver::cuMemAddressReserve(&mut address, allocation.size, 0, 0, 0) }?;
+        let mut mapped = false;
+        let transfer = (|| -> Result<()> {
+            unsafe {
+                crate::driver::cuMemMap(
+                    address,
+                    allocation.size,
+                    0,
+                    allocation.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?,
+                    0,
+                )
+            }?;
+            mapped = true;
+            let access = CUmemAccessDesc {
+                location: allocation.properties.location,
+                flags: CUmemAccess_flags::CU_MEM_ACCESS_FLAGS_PROT_READWRITE,
+            };
+            unsafe { crate::driver::cuMemSetAccess(address, allocation.size, &access, 1) }?;
+            // CUDA work is drained before the lifecycle starts. The alias and
+            // arena are disjoint CPU mappings, so no device copy is needed.
+            let (source, destination) = if load {
+                (host, address as usize)
+            } else {
+                (address as usize, host)
+            };
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    source as *const u8,
+                    destination as *mut u8,
+                    allocation.size,
+                );
+            }
+            Ok(())
+        })();
+        let mut result = transfer;
+        if mapped {
+            result = result.and(unsafe { crate::driver::cuMemUnmap(address, allocation.size) });
+        }
+        result.and(unsafe { crate::driver::cuMemAddressFree(address, allocation.size) })
+    }
+
     pub fn release(self) -> Result<()> {
         if unsafe { libc::munmap(self.base as *mut c_void, self.size) } == 0 {
             Ok(())
@@ -295,7 +355,7 @@ mod tests {
     use cudarc::driver::sys::CUresult::{CUDA_ERROR_INVALID_CONTEXT, CUDA_SUCCESS};
     use cudarc::driver::sys::{
         CUmemAllocationHandleType, CUmemAllocationProp_st__bindgen_ty_1, CUmemAllocationType,
-        CUmemLocation, CUmemLocationType, CUresult,
+        CUmemLocation, CUresult,
     };
     use cuinterpose_abi::{ABI_VERSION, FrontendAbi};
     use std::ffi::{CStr, c_char};
@@ -593,3 +653,7 @@ mod tests {
         assert_eq!(G_CURRENT.load(Ordering::Relaxed), 1);
     }
 }
+
+#[cfg(test)]
+#[path = "host_carrier_host_tests.rs"]
+mod host_numa_tests;

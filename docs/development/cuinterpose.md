@@ -27,9 +27,11 @@ one to be absent. Use matching frontend, backend, and coordinator artifacts.
 
 Creators must retain a generic allocation handle or local mapping while their
 exported descriptors or imported allocations remain usable; a virtual shareable
-FD alone does not retain backing. HOST_NUMA VMM allocations are rejected before
-allocation; [#404](https://github.com/ai-dynamo/snapshot/issues/404) tracks support
-using host carriers.
+FD alone does not retain backing. Shared pinned VMM allocations at DEVICE and
+HOST_NUMA locations use the creator's host carrier. Device bytes use asynchronous
+CUDA copies; HOST_NUMA bytes use CPU copies through a temporary host-accessible
+VMM alias. Restore preserves the allocation's NUMA placement separately from
+the CUDA device used for an operational context.
 
 Context destruction/reset and final primary-context release clean up converted
 malloc allocations and imported IPC mappings while preserving explicit VMM

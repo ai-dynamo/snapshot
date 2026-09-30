@@ -143,9 +143,8 @@ records under the process mutex. A process-wide counter excludes entry during
 unlocked driver calls; application code owns synchronization of object lifetimes.
 Only exactly POSIX-FD exportable VMM and multicast are supported. Unsupported
 exportable creations, non-POSIX multicast, and foreign imports fail at the API
-before creating driver state. HOST_NUMA VMM creation is rejected with
-`CUDA_ERROR_NOT_SUPPORTED`, with or without exportable handles; host-carrier
-support is tracked in [#404](https://github.com/ai-dynamo/snapshot/issues/404).
+before creating driver state. Tracked unicast allocations support pinned DEVICE
+and HOST_NUMA backing; nonexportable VMM creation remains on the native path.
 All sharing peers must use the shim and belong to
 the fixed checkpoint group. One coordinator executes each phase once; failed or
 ambiguous phases are never retried, rolled back, or resumed. Per-object progress
@@ -168,8 +167,12 @@ runtime state before taking any lock. Shim-owned FDs are close-on-exec.
 Long-lived fork children during checkpoint are outside this contract.
 Failed destructive capture or reconstruction cannot safely resume the application. Unknown asynchronous-copy completion is fail-stop.
 Host carriers are the only shim storage implementation. They save shared creator
-bytes; private allocations remain native CUDA state. There is no PageBroker
-client, backend selection, or save-all mode in the shim.
+bytes; private allocations remain native CUDA state. DEVICE backing uses
+asynchronous CUDA copies, while HOST_NUMA backing uses CPU copies through a
+temporary host-accessible VMM alias of the full allocation. Restore recreates
+the original allocation properties, including NUMA placement, before reconnecting
+importers. There is no PageBroker client, backend selection, or save-all mode in
+the shim.
 
 The memory-IPC adapter implements synchronous malloc, IPC export/open/close,
 free, and address-range lookup through tracked VMM. It does not call native
@@ -181,8 +184,10 @@ Successful context destruction, primary-context reset, and final primary-context
 release reclaim that context's malloc and imported IPC mappings. A nonfinal
 primary release and failed teardown leave those allocations intact. Explicit
 VMM allocations survive; their cached operational context is cleared so later
-carrier work can use the device's primary context. Applications must synchronize
-context lifetime changes against other uses of that context.
+carrier work can use a primary context. DEVICE backing uses its device ordinal
+for this fallback; HOST_NUMA backing uses CUDA device zero without changing the
+allocation's NUMA node ID. Applications must synchronize context lifetime
+changes against other uses of that context.
 Carrier memory is registered only for a save/load transfer and unregistered
 before its registration context is released.
 
