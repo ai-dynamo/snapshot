@@ -9,10 +9,14 @@ use cudarc::driver::sys::CUresult::*;
 use cudarc::driver::sys::*;
 use cuinterpose_protocol::{AllocationId, AllocationReference, NamespacePid};
 
-/// Tracked unicast memory must be reconstructible by the device-memory carrier.
+/// Tracked unicast memory must be reconstructible from the host carrier.
 pub(crate) fn validate_properties(properties: &CUmemAllocationProp) -> Result<()> {
     if properties.type_ != CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED
-        || properties.location.type_ != CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE
+        || !matches!(
+            properties.location.type_,
+            CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE
+                | CUmemLocationType::CU_MEM_LOCATION_TYPE_HOST_NUMA
+        )
     {
         return Err(CUDA_ERROR_NOT_SUPPORTED.into());
     }
@@ -30,12 +34,21 @@ pub struct Allocation {
 }
 
 impl Allocation {
-    /// Only the creator saves shared device memory; private memory stays native.
+    /// Only the creator saves shared backing; private memory stays native.
     pub(crate) fn checkpoint_via_host_carrier(&self, namespace_pid: NamespacePid) -> bool {
         self.reference.creator_pid == namespace_pid
-            && self.properties.type_ == CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED
-            && self.properties.location.type_ == CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE
+            && validate_properties(&self.properties).is_ok()
             && self.shared
+    }
+}
+
+/// A host NUMA node ID is placement metadata, not a CUDA device ordinal.
+/// Context::run uses this fallback only when no recorded context remains.
+pub(crate) fn context_device(properties: &CUmemAllocationProp) -> i32 {
+    if properties.location.type_ == CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE {
+        properties.location.id
+    } else {
+        0
     }
 }
 
