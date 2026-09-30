@@ -92,6 +92,7 @@ unsafe extern "C" fn ensure_cuinterpose_initialized() -> CUresult {
 fn cuda_error(error: Error, fallback: CUresult) -> CUresult {
     match error {
         Error::Cuda(code) => code,
+        Error::RuntimeFailed => fallback,
         error => {
             eprintln!("cuinterpose: {error}");
             if matches!(error, Error::Startup(_)) {

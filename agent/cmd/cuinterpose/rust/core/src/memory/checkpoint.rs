@@ -316,22 +316,29 @@ impl ProcessState {
     }
 }
 
-pub(crate) fn inspect() -> Result<Reply> {
-    let state = runtime::get()?;
+pub(crate) fn inspect() -> std::result::Result<Reply, String> {
+    let state = runtime::get().map_err(|_| "cuinterpose state is unavailable")?;
     Ok(Reply::Inspection {
-        records: state.inspect()?,
+        records: state
+            .inspect()
+            .map_err(|_| "cannot inspect current CUDA state")?,
     })
 }
 
-pub(crate) fn begin() -> Result<Reply> {
-    let mut state = runtime::get()?;
-    let records = state.begin_checkpoint()?;
+pub(crate) fn begin() -> std::result::Result<Reply, String> {
+    let mut state = runtime::get().map_err(|_| "cuinterpose state is unavailable")?;
+    let records = state
+        .begin_checkpoint()
+        .map_err(|_| "application is not ready for checkpoint")?;
     Ok(Reply::Inspection { records })
 }
 
-pub(crate) fn execute(operation: Operation) -> Result<Reply> {
-    let mut state = runtime::get()?;
-    state.phase.next(operation)?;
+pub(crate) fn execute(operation: Operation) -> std::result::Result<Reply, String> {
+    let mut state = runtime::get().map_err(|_| "cuinterpose state is unavailable")?;
+    state
+        .phase
+        .next(operation)
+        .map_err(|_| "CUDA lifecycle operation out of order")?;
     let bytes = runtime::must_complete(state.lifecycle(operation));
     Ok(Reply::Completed { operation, bytes })
 }

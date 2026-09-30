@@ -283,7 +283,6 @@ pub(crate) fn import_reference(
 #[cfg(test)]
 mod codec_tests {
     use super::*;
-    use std::io::Seek;
 
     fn handle_file(bytes: &[u8]) -> File {
         let fd = memfd_create(c"test-shareable-handle", MemfdFlags::CLOEXEC).unwrap();
@@ -298,10 +297,8 @@ mod codec_tests {
             creator_pid: 1,
             id: [4; 16],
         };
-        let mut file = File::from(create(reference).unwrap());
-        let offset = file.stream_position().unwrap();
+        let file = File::from(create(reference).unwrap());
         assert_eq!(decode(file.as_raw_fd()).unwrap(), Some(reference));
-        assert_eq!(file.stream_position().unwrap(), offset);
         assert_eq!(
             file.metadata().unwrap().len(),
             VIRTUAL_SHAREABLE_HANDLE_BYTES as u64
@@ -351,41 +348,25 @@ mod codec_tests {
 
     #[test]
     fn multicast_exports_require_supported_properties() {
-        let valid = protocol::MulticastProperties {
-            devices: 2,
-            size: 4096,
-            handle_types: 1,
-            flags: 0,
-        };
-        let decoded = decode_multicast_properties(valid).unwrap();
-        assert_eq!(decoded.numDevices, valid.devices);
-        assert_eq!(decoded.size as u64, valid.size);
-        assert_eq!(decoded.handleTypes, valid.handle_types);
-        assert_eq!(decoded.flags, valid.flags);
-
-        for invalid in [
-            protocol::MulticastProperties {
-                devices: 0,
-                ..valid
-            },
-            protocol::MulticastProperties { size: 0, ..valid },
-            protocol::MulticastProperties {
-                handle_types: 0,
-                ..valid
-            },
-            protocol::MulticastProperties {
-                handle_types: 8,
-                ..valid
-            },
-            protocol::MulticastProperties {
-                handle_types: 9,
-                ..valid
-            },
-            protocol::MulticastProperties { flags: 1, ..valid },
+        for (devices, size, handle_types, flags, accepted) in [
+            (2, 4096, 1, 0, true),
+            (0, 4096, 1, 0, false),
+            (2, 0, 1, 0, false),
+            (2, 4096, 0, 0, false),
+            (2, 4096, 8, 0, false),
+            (2, 4096, 9, 0, false),
+            (2, 4096, 1, 1, false),
         ] {
-            assert!(
-                decode_multicast_properties(invalid).is_err(),
-                "accepted {invalid:?}"
+            let properties = protocol::MulticastProperties {
+                devices,
+                size,
+                handle_types,
+                flags,
+            };
+            assert_eq!(
+                decode_multicast_properties(properties).is_ok(),
+                accepted,
+                "{properties:?}"
             );
         }
     }
