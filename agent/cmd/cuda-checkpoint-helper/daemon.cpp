@@ -13,7 +13,6 @@
 
 #include <algorithm>
 #include <array>
-#include <charconv>
 #include <chrono>
 #include <cstdlib>
 #include <future>
@@ -27,7 +26,6 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
-#include <string_view>
 #include <syncstream>
 #include <thread>
 #include <vector>
@@ -36,6 +34,7 @@
 #include "helper.pb.h"
 #include "extent_digests.hpp"
 #include "checkpoint.hpp"
+#include "daemon.hpp"
 #include "transfer.hpp"
 #include "storage_manifest.hpp"
 
@@ -45,6 +44,7 @@ namespace checkpoint = snapshot::cuda_checkpoint;
 namespace protocol = snapshot::cuda_checkpoint::internal;
 using namespace snapshot::pagebroker;
 using Clock = std::chrono::steady_clock;
+using checkpoint::DaemonOptions;
 
 namespace {
 void
@@ -96,38 +96,6 @@ WatchOwner(int control)
     // to retain. Process teardown also interrupts initialization or CUDA calls.
     std::_Exit(1);
   }).detach();
-}
-struct DaemonOptions {
-  bool custom_storage = true;
-  size_t buffer_count = 32;
-  size_t chunk_bytes = 128ULL * 1024 * 1024;
-  size_t max_pinned_bytes = 0;
-};
-DaemonOptions
-ParseOptions(int argc, char** argv)
-{
-  DaemonOptions options;
-  Require(argc % 2 == 1, "CUDA helper options require values");
-  for (int index = 1; index < argc; index += 2) {
-    const std::string_view option(argv[index]), value(argv[index + 1]);
-    if (option == "--cuda-storage-mode") {
-      Require(value == "custom" || value == "driver", "unknown CUDA storage mode");
-      options.custom_storage = value == "custom";
-      continue;
-    }
-    size_t number = 0;
-    const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), number);
-    Require(error == std::errc{} && end == value.data() + value.size(), "invalid GPU allocation option");
-    if (option == "--transfer-buffer-count")
-      options.buffer_count = number;
-    else if (option == "--transfer-chunk-bytes")
-      options.chunk_bytes = number;
-    else if (option == "--max-pinned-bytes")
-      options.max_pinned_bytes = number;
-    else
-      throw std::runtime_error("unknown CUDA helper option");
-  }
-  return options;
 }
 
 struct Device {
@@ -316,30 +284,31 @@ private:
   std::map<std::pair<dev_t, ino_t>, std::weak_ptr<PidNamespace>> namespaces_;
 };
 
-class Operation {
+// Admission owns the namespace and artifact metadata before CRIU. The driver
+// operation is created on the first phase, once the restored target PID exists.
+class Session {
 public:
-  Operation(Engine& engine, const protocol::BindGPUSession& binding, int host_pid, FileDescriptor directory,
-            transfer::TransferCancellation& cancellation, std::vector<storage::ManifestExtent> manifest = {},
-            std::vector<std::string> digests = {})
-      : engine_(engine), directory_fd_(std::move(directory)),
-        directory_("/proc/self/fd/" + std::to_string(directory_fd_.get())),
+  Session(Engine& engine, const protocol::BindGPUSession& binding, FileDescriptor root)
+      : engine_(engine), namespace_pid_(binding.namespace_pid()),
         save_(binding.direction() == protocol::BindGPUSession::SAVE),
         custom_storage_(binding.storage_mode() == protocol::BindGPUSession::CUSTOM_STORAGE),
-        enable_checksum_digest_(binding.enable_checksum_digest()), cancellation_(cancellation),
-        extent_digests_(std::move(digests)), cuda_(engine.checkpoint, host_pid), manifest_(std::move(manifest))
+        enable_checksum_digest_(binding.enable_checksum_digest())
   {
-    Require(binding.storage_mode() == protocol::BindGPUSession::CUSTOM_STORAGE ||
-                binding.storage_mode() == protocol::BindGPUSession::DRIVER_MANAGED,
+    Require(binding.namespace_pid() > 0 && binding.namespace_pid() <= INT_MAX && binding.visible_devices_size() > 0,
+            "GPU binding requires target identity and GPUs");
+    Require(binding.direction() == protocol::BindGPUSession::SAVE ||
+                binding.direction() == protocol::BindGPUSession::LOAD,
+            "invalid GPU direction");
+    Require(custom_storage_ || binding.storage_mode() == protocol::BindGPUSession::DRIVER_MANAGED,
             "unknown GPU storage mode");
-    Require(custom_storage_ || !enable_checksum_digest_,
+    Require(custom_storage_ || !binding.enable_checksum_digest(),
             "checksum digests are only supported for CustomStorage extents");
-    struct stat info{};
-    Require(!fstat(directory_fd_.get(), &info) && S_ISDIR(info.st_mode) && !(info.st_mode & 0022),
-            "GPU storage must be a private directory");
+    if (custom_storage_)
+      engine_.checkpoint.RequireCustomStorage();
     for (const auto& uuid : binding.visible_devices()) {
       Require(std::any_of(engine_.devices.begin(), engine_.devices.end(),
                           [&](const auto& device) { return device.second->uuid == uuid; }),
-              "target GPU is not available in the persistent engine");
+              "target GPU is not available in the persistent helper");
     }
     const std::string& mapping = binding.device_map();
     size_t offset = 0;
@@ -360,12 +329,35 @@ public:
         break;
       offset = end + 1;
     }
+    namespace_ = engine_.PinNamespace(binding.container_pid());
+    struct stat info{};
+    Require(!fstat(root.get(), &info) && S_ISDIR(info.st_mode), "GPU artifact root must be a directory");
     if (custom_storage_) {
-      engine_.checkpoint.RequireCustomStorage();
-      Check(cuCtxSetCurrent(engine_.devices.begin()->second->context), "set engine session context");
+      // Keep the existing native/<captured namespace PID> artifact layout.
+      if (save_)
+        Require(mkdirat(root.get(), "native", 0700) == 0 || errno == EEXIST, "create GPU root");
+      FileDescriptor extents(openat(root.get(), "native", O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+      Require(extents.get() >= 0, "open GPU root");
+      const auto name = std::to_string(binding.namespace_pid());
+      if (save_)
+        Require(mkdirat(extents.get(), name.c_str(), 0700) == 0, "create GPU target directory");
+      directory_fd_ = FileDescriptor(openat(extents.get(), name.c_str(), O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+      Require(directory_fd_.get() >= 0, "pin GPU target directory");
+      if (!save_) {
+        const std::filesystem::path path("/proc/self/fd/" + std::to_string(directory_fd_.get()));
+        std::string error;
+        // Read and stat before CRIU and before any participant begins transfer.
+        if (!storage::ReadManifest(path, &manifest_, &error) ||
+            !storage::ValidateExtentFiles(path, manifest_, &error) ||
+            (binding.enable_checksum_digest() && !storage::ReadExtentDigests(path, manifest_, &extent_digests_, &error)))
+          throw std::runtime_error(error);
+      }
+    } else {
+      directory_fd_ = std::move(root);
     }
+    Require(!fstat(directory_fd_.get(), &info) && !(info.st_mode & 0022), "GPU storage must be a private directory");
+    directory_ = "/proc/self/fd/" + std::to_string(directory_fd_.get());
   }
-
   protocol::GPUSessionReply
   Execute(const protocol::GPUSessionRequest& request)
   {
@@ -377,13 +369,24 @@ public:
                                                 : Op::COMPLETE;
     Require(phase_ != Op::COMPLETE && request.operation() == next, "invalid GPU phase order");
     Require(!cancellation_.IsCancelled(), "GPU operation cancelled");
-    cuda_.CheckTarget();
+    if (!cuda_) {
+      const auto target_pid = request.target_pid() ? request.target_pid() : namespace_pid_;
+      const auto host_pid = namespace_->Resolve(target_pid);
+      auto cuda = std::make_unique<checkpoint::Operation>(engine_.checkpoint, host_pid);
+      // Resolve and pin the process before checking its namespace again. CUDA
+      // must not touch a replacement process if the PID changed during lookup.
+      Require(namespace_->Matches(host_pid, target_pid), "GPU target changed during admission");
+      if (custom_storage_)
+        Check(cuCtxSetCurrent(engine_.devices.begin()->second->context), "set engine session context");
+      cuda_ = std::move(cuda);
+    }
+    cuda_->CheckTarget();
     Reply reply;
     // Allocate the metric message before touching CUDA. Returning measurements
     // requires only numeric assignments, never formatting or JSON serialization.
     auto& metrics = *reply.mutable_metrics();
     if (next == Op::LOCK) {
-      cuda_.Lock();
+      cuda_->Lock();
       reply.set_status(Reply::LOCKED);
     } else if (next == Op::PREPARE) {
       Prepare(metrics);
@@ -400,10 +403,16 @@ public:
   }
 
   void
+  Cancel()
+  {
+    cancellation_.Cancel();
+  }
+  void
   Drain()
   {
-    if (phase_ != protocol::GPUSessionRequest::COMPLETE)
-      cuda_.Abort();
+    if (cuda_ && phase_ != protocol::GPUSessionRequest::COMPLETE)
+      cuda_->Abort();
+    cuda_.reset();
   }
 
 private:
@@ -413,7 +422,7 @@ private:
     start_ = Clock::now();
     std::string error;
     const auto begin = Clock::now();
-    view_ = cuda_.Prepare(save_, gpu_pairs_, custom_storage_);
+    view_ = cuda_->Prepare(save_, gpu_pairs_, custom_storage_);
     const auto end = Clock::now();
     prepare_seconds_ = std::chrono::duration<double>(end - begin).count();
     metrics.set_prepare_seconds(prepare_seconds_);
@@ -486,7 +495,7 @@ private:
   Complete(protocol::GPUSessionMetrics& metrics)
   {
     const auto begin = Clock::now();
-    cuda_.Complete();
+    cuda_->Complete();
     const double completion = Seconds(begin);
     std::string error;
     double unlock = 0;
@@ -498,7 +507,7 @@ private:
     } else if (!save_) {
       Require(!cancellation_.IsCancelled(), "GPU restore cancelled before unlock");
       const auto unlock_start = Clock::now();
-      cuda_.Unlock();
+      cuda_->Unlock();
       unlock = Seconds(unlock_start);
     }
     metrics.set_bytes(bytes_);
@@ -513,14 +522,16 @@ private:
   }
 
   Engine& engine_;
-  FileDescriptor directory_fd_;
+  uint32_t namespace_pid_;
+  std::shared_ptr<PidNamespace> namespace_;
+  FileDescriptor directory_fd_{-1};
   std::filesystem::path directory_;
   bool save_;
   bool custom_storage_;
   bool enable_checksum_digest_;
-  transfer::TransferCancellation& cancellation_;
+  transfer::TransferCancellation cancellation_;
   std::vector<std::string> extent_digests_;
-  checkpoint::Operation cuda_;
+  std::unique_ptr<checkpoint::Operation> cuda_;
   protocol::GPUSessionRequest::Operation phase_ = protocol::GPUSessionRequest::UNSPECIFIED;
   const CUcheckpointCustomStorageInfo* view_ = nullptr;
   std::vector<CUcheckpointGpuPair> gpu_pairs_;
@@ -531,98 +542,6 @@ private:
   Clock::time_point start_;
   size_t bytes_ = 0;
   double prepare_seconds_ = 0, transfer_seconds_ = 0, setup_seconds_ = 0, storage_seconds_ = 0, cuda_wait_seconds_ = 0;
-};
-
-// Admission owns the pinned namespace and artifact directory before CRIU. CUDA
-// target identity is resolved only on the first phase after restored PIDs exist.
-class Session {
-public:
-  Session(Engine& engine, protocol::BindGPUSession binding, FileDescriptor root)
-      : engine_(engine), binding_(std::move(binding))
-  {
-    Require(binding_.namespace_pid() > 0 && binding_.namespace_pid() <= INT_MAX && binding_.visible_devices_size() > 0,
-            "GPU binding requires target identity and GPUs");
-    Require(binding_.direction() == protocol::BindGPUSession::SAVE ||
-                binding_.direction() == protocol::BindGPUSession::LOAD,
-            "invalid GPU direction");
-    const bool custom = binding_.storage_mode() == protocol::BindGPUSession::CUSTOM_STORAGE;
-    Require(custom || binding_.storage_mode() == protocol::BindGPUSession::DRIVER_MANAGED, "unknown GPU storage mode");
-    Require(custom || !binding_.enable_checksum_digest(),
-            "checksum digests are only supported for CustomStorage extents");
-    if (custom)
-      engine_.checkpoint.RequireCustomStorage();
-    for (const auto& uuid : binding_.visible_devices()) {
-      Require(std::any_of(engine_.devices.begin(), engine_.devices.end(),
-                          [&](const auto& device) { return device.second->uuid == uuid; }),
-              "target GPU is not available in the persistent helper");
-    }
-    namespace_ = engine_.PinNamespace(binding_.container_pid());
-    struct stat info{};
-    Require(!fstat(root.get(), &info) && S_ISDIR(info.st_mode), "GPU artifact root must be a directory");
-    if (custom) {
-      const bool save = binding_.direction() == protocol::BindGPUSession::SAVE;
-      // Keep the existing native/<captured namespace PID> artifact layout.
-      if (save)
-        Require(mkdirat(root.get(), "native", 0700) == 0 || errno == EEXIST, "create GPU root");
-      FileDescriptor extents(openat(root.get(), "native", O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
-      Require(extents.get() >= 0, "open GPU root");
-      const auto name = std::to_string(binding_.namespace_pid());
-      if (save)
-        Require(mkdirat(extents.get(), name.c_str(), 0700) == 0, "create GPU target directory");
-      directory_ = FileDescriptor(openat(extents.get(), name.c_str(), O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
-      Require(directory_.get() >= 0, "pin GPU target directory");
-      if (!save) {
-        const std::filesystem::path path("/proc/self/fd/" + std::to_string(directory_.get()));
-        std::string error;
-        // Read and stat before CRIU and before any participant begins transfer.
-        if (!storage::ReadManifest(path, &manifest_, &error) ||
-            !storage::ValidateExtentFiles(path, manifest_, &error) ||
-            (binding_.enable_checksum_digest() && !storage::ReadExtentDigests(path, manifest_, &digests_, &error)))
-          throw std::runtime_error(error);
-      }
-    } else {
-      directory_ = std::move(root);
-    }
-    Require(!fstat(directory_.get(), &info) && !(info.st_mode & 0022), "GPU storage must be a private directory");
-  }
-  protocol::GPUSessionReply
-  Execute(const protocol::GPUSessionRequest& request)
-  {
-    Require(!cancellation_.IsCancelled(), "GPU session cancelled");
-    if (!operation_) {
-      const auto target_pid = request.target_pid() ? request.target_pid() : binding_.namespace_pid();
-      const auto host_pid = namespace_->Resolve(target_pid);
-      auto operation = std::make_unique<Operation>(engine_, binding_, host_pid, std::move(directory_), cancellation_,
-                                                   std::move(manifest_), std::move(digests_));
-      // The operation has opened a pidfd; confirm namespace identity again
-      // before it can perform any CUDA action on that pinned process.
-      Require(namespace_->Matches(host_pid, target_pid), "GPU target changed during admission");
-      operation_ = std::move(operation);
-    }
-    return operation_->Execute(request);
-  }
-  void
-  Cancel()
-  {
-    cancellation_.Cancel();
-  }
-  void
-  Drain()
-  {
-    if (operation_)
-      operation_->Drain();
-    operation_.reset();
-  }
-
-private:
-  Engine& engine_;
-  protocol::BindGPUSession binding_;
-  std::shared_ptr<PidNamespace> namespace_;
-  FileDescriptor directory_{-1};
-  std::vector<storage::ManifestExtent> manifest_;
-  std::vector<std::string> digests_;
-  transfer::TransferCancellation cancellation_;
-  std::unique_ptr<Operation> operation_;
 };
 
 void
@@ -701,26 +620,23 @@ ServeSession(Engine& engine, protocol::BindGPUSession binding, FileDescriptor co
 }
 } // namespace
 
-extern "C" int cuda_checkpoint_cli_main(int argc, char** argv);
-
-int
-main(int argc, char** argv)
+namespace snapshot::cuda_checkpoint {
+[[noreturn]] void
+RunDaemon(int control_fd, const DaemonOptions& options)
 {
-  if (argc < 2 || std::string_view(argv[1]) != "--daemon")
-    return cuda_checkpoint_cli_main(argc, argv);
   try {
-    WatchOwner(3);
-    Engine engine(ParseOptions(argc - 1, argv + 1));
+    WatchOwner(control_fd);
+    Engine engine(options);
     protocol::GPUSessionReply ready;
     ready.set_status(protocol::GPUSessionReply::READY);
     ready.set_custom_storage_available(engine.checkpoint.SupportsCustomStorage());
     *ready.mutable_metrics() = engine.ready_metrics;
-    SendFrame(3, ready);
+    SendFrame(control_fd, ready);
     std::map<uint64_t, std::future<void>> sessions;
     protocol::HelperRequest request;
     std::vector<FileDescriptor> descriptors;
     try {
-      while (ReceiveFrame(3, request, descriptors)) {
+      while (ReceiveFrame(control_fd, request, descriptors)) {
         const auto id = request.session_id();
         Require(id != 0, "CUDA admission requires a session ID");
         if (request.has_bind()) {
@@ -740,7 +656,7 @@ main(int argc, char** argv)
           protocol::GPUSessionReply drained;
           drained.set_status(protocol::GPUSessionReply::DRAINED);
           drained.set_session_id(id);
-          SendFrame(3, drained);
+          SendFrame(control_fd, drained);
         }
       }
     } catch (const std::exception& error) {
@@ -757,3 +673,4 @@ main(int argc, char** argv)
     std::_Exit(1);
   }
 }
+} // namespace snapshot::cuda_checkpoint

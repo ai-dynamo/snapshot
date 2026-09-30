@@ -3,8 +3,9 @@
 
 // Exercise the real worker's phase machine with a mocked driver and transfer
 // implementation. No GPU or driver-managed checkpoint storage is needed.
-#define main cuda_helper_main
 #include "daemon.cpp"
+#define main cuda_helper_main
+#include "helper.cpp"
 #undef main
 
 #include <gtest/gtest.h>
@@ -47,7 +48,7 @@ struct DaemonProcess {
 };
 
 std::unique_ptr<DaemonProcess>
-StartDaemon(bool custom)
+StartDaemon(bool custom, bool use_runner = false)
 {
   int sockets[2];
   if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets))
@@ -58,6 +59,13 @@ StartDaemon(bool custom)
     throw std::runtime_error("test daemon fork");
   if (!pid) {
     control = FileDescriptor(-1);
+    if (use_runner) {
+      FileDescriptor runtime_control(fcntl(peer.get(), F_DUPFD_CLOEXEC, 7));
+      if (runtime_control.get() < 0)
+        std::_Exit(9);
+      peer = FileDescriptor(-1);
+      checkpoint::RunDaemon(runtime_control.get(), {.custom_storage = custom});
+    }
     if (dup2(peer.get(), 3) < 0)
       std::_Exit(9);
     if (peer.get() != 3)
@@ -149,14 +157,18 @@ protected:
   {
     return FileDescriptor(open(directory.c_str(), O_RDONLY | O_DIRECTORY));
   }
+  std::filesystem::path
+  Participant() const
+  {
+    return directory / "native" / std::to_string(pid);
+  }
   protocol::GPUSessionReply
-  Run(Operation& operation, protocol::GPUSessionRequest::Operation phase)
+  Run(Session& operation, protocol::GPUSessionRequest::Operation phase)
   {
     protocol::GPUSessionRequest request;
     request.set_operation(phase);
     return operation.Execute(request);
   }
-  transfer::TransferCancellation cancellation;
   std::filesystem::path directory;
   int pid = -1;
 };
@@ -338,7 +350,7 @@ TEST_F(WorkerModes, OlderDriverWarmsContextsWithoutAllocatingCustomStorageBuffer
   custom_available = false;
   Engine engine({.custom_storage = false});
   for (bool save : {true, false}) {
-    Operation operation(engine, Binding(save), pid, Directory(), cancellation);
+    Session operation(engine, Binding(save), Directory());
     EXPECT_THROW(Run(operation, protocol::GPUSessionRequest::COMPLETE), std::runtime_error);
     if (save)
       Run(operation, protocol::GPUSessionRequest::LOCK);
@@ -365,7 +377,7 @@ TEST_F(WorkerModes, DriverModeWarmsResourcesOnceAndReusesThemAcrossRestores)
   ASSERT_EQ(context_retains, 1);
   ASSERT_EQ(completion_queries, 1);
   {
-    Operation custom(engine, Binding(true, true), pid, Directory(), cancellation);
+    Session custom(engine, Binding(true, true), Directory());
     Run(custom, protocol::GPUSessionRequest::LOCK);
     Run(custom, protocol::GPUSessionRequest::PREPARE);
     Run(custom, protocol::GPUSessionRequest::TRANSFER);
@@ -374,15 +386,15 @@ TEST_F(WorkerModes, DriverModeWarmsResourcesOnceAndReusesThemAcrossRestores)
   }
   std::vector<storage::ManifestExtent> manifest;
   std::string error;
-  ASSERT_TRUE(storage::ReadManifest(directory, &manifest, &error)) << error;
+  ASSERT_TRUE(storage::ReadManifest(Participant(), &manifest, &error)) << error;
   for (int i = 0; i < 2; ++i) {
-    Operation custom(engine, Binding(false, true), pid, Directory(), cancellation, manifest);
+    Session custom(engine, Binding(false, true), Directory());
     Run(custom, protocol::GPUSessionRequest::PREPARE);
     Run(custom, protocol::GPUSessionRequest::TRANSFER);
     Run(custom, protocol::GPUSessionRequest::COMPLETE);
     custom.Drain();
   }
-  Operation ordinary(engine, Binding(false), pid, Directory(), cancellation);
+  Session ordinary(engine, Binding(false), Directory());
   Run(ordinary, protocol::GPUSessionRequest::PREPARE);
   Run(ordinary, protocol::GPUSessionRequest::TRANSFER);
   Run(ordinary, protocol::GPUSessionRequest::COMPLETE);
@@ -399,9 +411,19 @@ TEST_F(WorkerModes, UnknownModeIsRejectedBeforeDriverOperation)
   Engine engine({.custom_storage = false});
   auto binding = Binding(false);
   binding.set_storage_mode(static_cast<protocol::BindGPUSession::StorageMode>(99));
-  EXPECT_THROW(Operation(engine, binding, pid, Directory(), cancellation), std::runtime_error);
+  EXPECT_THROW(Session(engine, binding, Directory()), std::runtime_error);
   EXPECT_TRUE(driver_calls.empty());
   EXPECT_EQ(ring_initializations, 1);
+}
+
+TEST_F(WorkerModes, InvalidDeviceMapIsRejectedAtAdmissionBeforeAnyCUDAOperation)
+{
+  Engine engine;
+  auto binding = Binding(true, true);
+  binding.set_device_map("not-a-GPU=also-not-a-GPU");
+  EXPECT_THROW(Session(engine, binding, Directory()), std::runtime_error);
+  EXPECT_TRUE(driver_calls.empty());
+  EXPECT_TRUE(std::filesystem::is_empty(directory));
 }
 
 TEST_F(WorkerModes, CustomStorageWarmsTransfersBeforeReady)
@@ -410,7 +432,7 @@ TEST_F(WorkerModes, CustomStorageWarmsTransfersBeforeReady)
   EXPECT_EQ(ring_initializations, 1);
   EXPECT_EQ(context_retains, 1);
   EXPECT_EQ(completion_queries, 1);
-  Operation operation(engine, Binding(true, true), pid, Directory(), cancellation);
+  Session operation(engine, Binding(true, true), Directory());
   EXPECT_EQ(ring_initializations, 1);
 }
 
@@ -427,7 +449,7 @@ TEST_F(WorkerModes, DriverManagedChecksumDigestIsRejectedWithoutTouchingTarget)
   Engine engine({.custom_storage = false});
   auto binding = Binding(true);
   binding.set_enable_checksum_digest(true);
-  EXPECT_THROW(Operation(engine, binding, pid, Directory(), cancellation), std::runtime_error);
+  EXPECT_THROW(Session(engine, binding, Directory()), std::runtime_error);
   EXPECT_TRUE(driver_calls.empty());
   EXPECT_EQ(ring_initializations, 1);
 }
@@ -438,7 +460,7 @@ TEST_F(WorkerModes, ChecksumDigestWritesSidecarAndRejectsMismatchBeforeCompletio
   auto save = Binding(true, true);
   save.set_enable_checksum_digest(true);
   {
-    Operation operation(engine, save, pid, Directory(), cancellation);
+    Session operation(engine, save, Directory());
     Run(operation, protocol::GPUSessionRequest::LOCK);
     Run(operation, protocol::GPUSessionRequest::PREPARE);
     Run(operation, protocol::GPUSessionRequest::TRANSFER);
@@ -449,12 +471,14 @@ TEST_F(WorkerModes, ChecksumDigestWritesSidecarAndRejectsMismatchBeforeCompletio
   std::vector<storage::ManifestExtent> manifest;
   std::vector<std::string> digests;
   std::string error;
-  ASSERT_TRUE(storage::ReadManifest(directory, &manifest, &error)) << error;
-  ASSERT_TRUE(storage::ReadExtentDigests(directory, manifest, &digests, &error)) << error;
+  ASSERT_TRUE(storage::ReadManifest(Participant(), &manifest, &error)) << error;
+  ASSERT_TRUE(storage::ReadExtentDigests(Participant(), manifest, &digests, &error)) << error;
   ASSERT_EQ(digests, (std::vector<std::string>{mock_digest}));
+  ASSERT_TRUE(std::filesystem::remove(Participant() / storage::kExtentDigestsName));
+  ASSERT_TRUE(storage::WriteExtentDigests(Participant(), manifest, {std::string(64, 'b')}, &error)) << error;
   auto load = Binding(false, true);
   load.set_enable_checksum_digest(true);
-  Operation operation(engine, load, pid, Directory(), cancellation, manifest, {std::string(64, 'b')});
+  Session operation(engine, load, Directory());
   Run(operation, protocol::GPUSessionRequest::PREPARE);
   EXPECT_THROW(Run(operation, protocol::GPUSessionRequest::TRANSFER), std::runtime_error);
   EXPECT_THROW(Run(operation, protocol::GPUSessionRequest::COMPLETE), std::runtime_error);
@@ -466,14 +490,14 @@ TEST_F(WorkerModes, ChecksumDigestWritesSidecarAndRejectsMismatchBeforeCompletio
 TEST_F(WorkerModes, DisabledChecksumDigestWritesNoSidecar)
 {
   Engine engine;
-  Operation operation(engine, Binding(true, true), pid, Directory(), cancellation);
+  Session operation(engine, Binding(true, true), Directory());
   Run(operation, protocol::GPUSessionRequest::LOCK);
   Run(operation, protocol::GPUSessionRequest::PREPARE);
   Run(operation, protocol::GPUSessionRequest::TRANSFER);
   Run(operation, protocol::GPUSessionRequest::COMPLETE);
   operation.Drain();
   EXPECT_FALSE(used_checksum_digest);
-  EXPECT_FALSE(std::filesystem::exists(directory / storage::kExtentDigestsName));
+  EXPECT_FALSE(std::filesystem::exists(Participant() / storage::kExtentDigestsName));
 }
 
 TEST_F(WorkerModes, HalfCloseCancelsRunningTransferAndAcknowledgesDrain)
@@ -553,7 +577,7 @@ TEST_F(WorkerModes, RepliesCarryTypedStatusAndNumericMetrics)
   Engine engine;
   EXPECT_EQ(engine.ready_metrics.visible_devices(), 1);
   EXPECT_GE(engine.ready_metrics.initialization_seconds(), 0);
-  Operation operation(engine, Binding(true, true), pid, Directory(), cancellation);
+  Session operation(engine, Binding(true, true), Directory());
   EXPECT_EQ(Run(operation, protocol::GPUSessionRequest::LOCK).status(), protocol::GPUSessionReply::LOCKED);
   const auto prepared = Run(operation, protocol::GPUSessionRequest::PREPARE);
   EXPECT_EQ(prepared.status(), protocol::GPUSessionReply::PREPARED);
@@ -654,6 +678,21 @@ TEST_F(WorkerModes, UnsupportedDriverModeReportsReadyWithoutCustomStorage)
   const auto reply = ReadReply(daemon->control.get());
   EXPECT_EQ(reply.status(), protocol::GPUSessionReply::READY);
   EXPECT_FALSE(reply.custom_storage_available());
+}
+
+TEST_F(WorkerModes, RunnerAcceptsControlSocketOutsideTheCLIConvention)
+{
+  auto daemon = StartDaemon(true, true);
+  const auto ready = ReadReply(daemon->control.get());
+  EXPECT_EQ(ready.status(), protocol::GPUSessionReply::READY);
+  EXPECT_TRUE(ready.custom_storage_available());
+  protocol::HelperRequest drain;
+  drain.set_session_id(99);
+  drain.set_drain(true);
+  SendFrame(daemon->control.get(), drain);
+  const auto reply = ReadReply(daemon->control.get());
+  EXPECT_EQ(reply.status(), protocol::GPUSessionReply::DRAINED);
+  EXPECT_EQ(reply.session_id(), 99);
 }
 
 TEST_F(WorkerModes, LoadAdmissionValidatesManifestAndFilesBeforeAnyCUDAOperation)

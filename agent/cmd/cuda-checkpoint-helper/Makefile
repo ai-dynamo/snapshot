@@ -34,7 +34,7 @@ bin/main-cli.o: main.c | bin
 helper: generate bin/main-cli.o
 	@test -n "$(NIXL_ROOT)" || { echo 'NIXL_ROOT is required for the persistent helper'; exit 1; }
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -I$(CUDA_ROOT)/include \
-		daemon.cpp checkpoint.cpp transfer.cpp $(STORAGE) $(TRANSPORT) bin/main-cli.o \
+		helper.cpp daemon.cpp checkpoint.cpp transfer.cpp $(STORAGE) $(TRANSPORT) bin/main-cli.o \
 		-L$(CUDA_LIB_DIR) -lcuda -lprotobuf -lcrypto -pthread $(TRANSFER_FLAGS) -o bin/cuda-checkpoint-helper
 
 test: test-checkpoint test-transfer test-daemon test-storage test-fd-transport
