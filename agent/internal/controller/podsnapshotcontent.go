@@ -206,8 +206,7 @@ func (w *NodeController) runCheckpoint(
 ) error {
 	logger := logr.FromContextOrDiscard(ctx)
 
-	// Reaches the cancellable phases only: criu.ExecuteDump takes no context, so a wedged CRIU dump
-	// still runs to completion. Status writes keep the outer ctx so a deadline failure is recorded.
+	// Status writes below keep the outer ctx, so a dump that fails on the deadline still records it.
 	dumpCtx := ctx
 	if timeout := w.config.Checkpoint.CheckpointTimeout(); timeout > 0 {
 		var cancel context.CancelFunc

@@ -97,8 +97,7 @@ type CheckpointSpec struct {
 	CheckpointTimeoutSeconds *int `yaml:"checkpointTimeoutSeconds"`
 }
 
-// CheckpointTimeout bounds one dump. Reaches the cancellable phases only: criu.ExecuteDump takes
-// no context, so a wedged CRIU dump overruns it.
+// CheckpointTimeout bounds one dump, defaulting when the config omits it.
 func (c *CheckpointSpec) CheckpointTimeout() time.Duration {
 	if c.CheckpointTimeoutSeconds == nil {
 		return DefaultCheckpointTimeoutSeconds * time.Second

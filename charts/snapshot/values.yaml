@@ -214,8 +214,7 @@ config:
       - "*.pyc"
 
   checkpoint:
-    # Maximum seconds before the agent marks a checkpoint failed. Reaches the cancellable phases
-    # only: a wedged CRIU dump takes no context and overruns it.
+    # Maximum seconds before the agent marks a checkpoint failed.
     checkpointTimeoutSeconds: 3600
 
   restore:
