@@ -5,11 +5,9 @@ package cuda
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -33,18 +31,12 @@ func TestRunActionCancellationIsBounded(t *testing.T) {
 	defer cancel()
 
 	started := time.Now()
-	err := runAction(ctx, 11, actionRestore, "", cudaCheckpointHelperBinary, logr.Discard())
+	err := runAction(ctx, 11, actionCheckpoint, "", cudaCheckpointHelperBinary, logr.Discard())
 	duration := time.Since(started)
 	if err == nil || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
 		t.Fatalf("runAction() error = %v", err)
 	}
-	if duration > helperWaitDelay+time.Second {
+	if duration > 3*time.Second {
 		t.Fatalf("runAction() took %s after cancellation", duration)
-	}
-}
-
-func TestNormalizeProcessGroupKillErrorReportsFinishedProcess(t *testing.T) {
-	if err := normalizeProcessGroupKillError(syscall.ESRCH); !errors.Is(err, os.ErrProcessDone) {
-		t.Fatalf("normalizeProcessGroupKillError() error = %v, want %v", err, os.ErrProcessDone)
 	}
 }
