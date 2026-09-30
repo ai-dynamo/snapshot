@@ -19,11 +19,13 @@ use topology::AllocationSummary;
 #[derive(Parser)]
 struct Arguments {
     #[arg(long, group = "action")]
+    inspect: bool,
+    #[arg(long, group = "action")]
     prepare: bool,
     #[arg(long, group = "action")]
     restore: bool,
-    #[arg(long)]
-    checkpoint_dir: PathBuf,
+    #[arg(long, required_unless_present = "inspect", conflicts_with = "inspect")]
+    checkpoint_dir: Option<PathBuf>,
     #[arg(long)]
     control_dir: String,
     #[arg(long = "process", required = true, action = clap::ArgAction::Append,
@@ -173,18 +175,14 @@ fn inspect(peers: &[Peer], begin_checkpoint: bool) -> Result<Manifest> {
 
 fn run() -> Result<()> {
     let args = Arguments::parse();
-    ensure!(args.prepare || args.restore, "an action is required");
+    ensure!(
+        args.inspect || args.prepare || args.restore,
+        "an action is required"
+    );
     ensure!(
         args.control_dir.starts_with('/'),
         "--control-dir must be an absolute path"
     );
-    let path = args.checkpoint_dir.join("cuinterpose.state");
-    let mut expected = if args.prepare {
-        Manifest::new()
-    } else {
-        state::read(&path).with_context(|| format!("cannot parse {}", path.display()))?
-    };
-
     let control_dir = Path::new(&args.control_dir);
     let mut seen = BTreeSet::new();
     let mut peers = Vec::with_capacity(args.processes.len());
@@ -197,6 +195,21 @@ fn run() -> Result<()> {
             namespace_pid,
         });
     }
+    if args.inspect {
+        // Preflight is read-only. Preparation repeats validation after freezing
+        // the shim registry with BeginCheckpoint; inspection is not a lock.
+        topology::validate(&inspect(&peers, false)?)?;
+        return Ok(());
+    }
+    let path = args
+        .checkpoint_dir
+        .context("--checkpoint-dir is required")?
+        .join("cuinterpose.state");
+    let mut expected = if args.prepare {
+        Manifest::new()
+    } else {
+        state::read(&path).with_context(|| format!("cannot parse {}", path.display()))?
+    };
     if args.restore {
         ensure!(
             seen.iter().eq(expected.keys()),
