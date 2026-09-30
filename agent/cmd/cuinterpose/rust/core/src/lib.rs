@@ -8,18 +8,21 @@
 
 #![allow(non_snake_case, reason = "CUDA dispatch mirrors the NVIDIA ABI names")]
 mod driver;
+mod error;
 mod handlers;
 mod memory;
 mod runtime;
 
 use cudarc::driver::sys::CUresult::{
-    CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_NOT_INITIALIZED, CUDA_ERROR_UNKNOWN, CUDA_SUCCESS,
+    CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_NOT_INITIALIZED, CUDA_ERROR_NOT_READY, CUDA_ERROR_UNKNOWN,
+    CUDA_SUCCESS,
 };
 use cudarc::driver::sys::{
     CUcontext, CUdevice, CUdeviceptr, CUipcMemHandle, CUmemAccessDesc, CUmemAllocationHandleType,
     CUmemAllocationProp, CUmemGenericAllocationHandle, CUmulticastObjectProp, CUresult,
 };
 use cuinterpose_abi::*;
+use error::Error;
 use runtime::RUNTIME_FAILED;
 use std::ffi::{CStr, c_void};
 use std::sync::{OnceLock, atomic::Ordering};
@@ -38,9 +41,10 @@ macro_rules! exports {
         $(
             unsafe extern "C" fn $name($($arg: $ty),*) -> CUresult {
                 if let Err(error) = runtime::ready() {
-                    return error.0;
+                    return cuda_error(error, CUDA_ERROR_NOT_READY);
                 }
-                handlers::$name($($arg),*).map_or_else(|code| code.0, |()| CUDA_SUCCESS)
+                handlers::$name($($arg),*)
+                    .map_or_else(|error| cuda_error(error, CUDA_ERROR_UNKNOWN), |()| CUDA_SUCCESS)
             }
         )*
         static G_BACKEND_ABI: BackendAbi = BackendAbi {
@@ -84,10 +88,26 @@ exports! {
 }
 
 unsafe extern "C" fn ensure_cuinterpose_initialized() -> CUresult {
-    if RUNTIME_FAILED.load(Ordering::Acquire) {
-        return CUDA_ERROR_NOT_INITIALIZED;
+    runtime::initialize().map_or_else(
+        |error| cuda_error(error, CUDA_ERROR_NOT_INITIALIZED),
+        |()| CUDA_SUCCESS,
+    )
+}
+
+// Internal errors are reported only after the operation's guards and private
+// runtime candidates have dropped. The ABI determines the public fallback code.
+fn cuda_error(error: Error, fallback: CUresult) -> CUresult {
+    match error {
+        Error::Cuda(code) => code,
+        error => {
+            eprintln!("cuinterpose: {error}");
+            if matches!(error, Error::Startup(_)) {
+                CUDA_ERROR_NOT_INITIALIZED
+            } else {
+                fallback
+            }
+        }
     }
-    runtime::initialize().map_or_else(|error| error.0, |()| CUDA_SUCCESS)
 }
 
 /// Registers the frontend and returns the immutable process-lifetime table.

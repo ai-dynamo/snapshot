@@ -4,7 +4,7 @@
 //! CUDA API policy and orchestration; memory modules own bookkeeping.
 
 use crate::driver::{self};
-use crate::driver::{CudaError, Result};
+use crate::error::{Error, Result};
 use crate::memory::multicast::{self, BindInput};
 use crate::memory::{self, Memblock, VirtualAllocationHandle};
 use crate::memory::{ipc, sharing, vmm};
@@ -28,7 +28,7 @@ pub fn cuMemCreate(
     flags: u64,
 ) -> Result<()> {
     if out.is_null() || prop.is_null() {
-        return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
+        return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
     }
     let properties = unsafe { *prop };
     let supported = properties.requestedHandleTypes
@@ -49,7 +49,7 @@ pub fn cuMemCreate(
     let mut driver = 0;
     let create = crate::driver::symbols::cuMemCreate()?;
     if let Err(error) =
-        crate::driver::CudaError::result(unsafe { create(&mut driver, size, &properties, flags) })
+        crate::driver::result(unsafe { create(&mut driver, size, &properties, flags) })
     {
         unsafe {
             out.write(driver);
@@ -79,7 +79,7 @@ pub fn cuMemRelease(handle: u64) -> Result<()> {
 
 pub fn cuMemRetainAllocationHandle(out: *mut u64, address: *mut c_void) -> Result<()> {
     if out.is_null() {
-        return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
+        return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
     }
     let mut state = active()?;
     let mapping = state
@@ -166,7 +166,7 @@ pub fn cuMemSetAccess(
         return Ok(());
     }
     if count > isize::MAX as usize / size_of::<CUmemAccessDesc>() {
-        return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
+        return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
     }
     let descriptors = unsafe { std::slice::from_raw_parts(access, count) };
     // Access applies to a fully mapped range, potentially spanning allocations.
@@ -199,7 +199,7 @@ pub fn cuMemExportToShareableHandle(
         || kind != CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
         || flags != 0
     {
-        return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
+        return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
     }
     let namespace_pid = state.namespace_pid;
     let memblock = state
@@ -209,7 +209,7 @@ pub fn cuMemExportToShareableHandle(
     if let Memblock::Unicast(allocation) = memblock
         && allocation.properties.requestedHandleTypes.0 & kind.0 == 0
     {
-        return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
+        return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
     }
     let fd = sharing::create(memblock.reference()).map_err(|_| CUDA_ERROR_OUT_OF_MEMORY)?;
     memblock.export(namespace_pid)?;
@@ -223,7 +223,7 @@ pub fn cuMemImportFromShareableHandle(
     kind: CUmemAllocationHandleType,
 ) -> Result<()> {
     if out.is_null() {
-        return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
+        return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
     }
     if kind != CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR {
         return Err(CUDA_ERROR_NOT_SUPPORTED.into());
@@ -262,7 +262,7 @@ pub fn cuMemGetAllocationPropertiesFromHandle(
 
 pub fn cuMulticastCreate(out: *mut u64, properties: *const CUmulticastObjectProp) -> Result<()> {
     if out.is_null() || properties.is_null() {
-        return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
+        return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
     }
     let properties = unsafe { *properties };
     if properties.handleTypes
@@ -406,7 +406,7 @@ pub fn cuMemAlloc_v2(out: *mut CUdeviceptr, size: usize) -> Result<()> {
 
 pub fn cuIpcGetMemHandle(out: *mut CUipcMemHandle, address: CUdeviceptr) -> Result<()> {
     if out.is_null() {
-        return Err(CudaError(CUresult::CUDA_ERROR_INVALID_VALUE));
+        return Err(Error::Cuda(CUresult::CUDA_ERROR_INVALID_VALUE));
     }
     let mut state = runtime::active()?;
     let mapping = state
@@ -433,7 +433,7 @@ pub fn cuIpcGetMemHandle(out: *mut CUipcMemHandle, address: CUdeviceptr) -> Resu
 
 pub fn cuIpcOpenMemHandle(out: *mut CUdeviceptr, handle: CUipcMemHandle, flags: u32) -> Result<()> {
     if out.is_null() || flags != CUipcMem_flags::CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS as u32 {
-        return Err(CudaError(CUresult::CUDA_ERROR_INVALID_VALUE));
+        return Err(Error::Cuda(CUresult::CUDA_ERROR_INVALID_VALUE));
     }
     let (reference, requested, extent) = ipc::decode(handle)?;
     let mut state = runtime::active()?;
