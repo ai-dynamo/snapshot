@@ -26,10 +26,10 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: ghcr.io/ai-dynamo/snapshot/pagebroker:0.1.0
+          value: ghcr.io/ai-dynamo/snapshot/pagebroker:v0.1.0
       - equal:
           path: spec.template.spec.containers[1].image
-          value: ghcr.io/ai-dynamo/snapshot/agent:0.1.0
+          value: ghcr.io/ai-dynamo/snapshot/agent:v0.1.0
 
   - it: follows image.pageBroker overrides
     set:
