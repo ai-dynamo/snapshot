@@ -13,6 +13,7 @@ const CU_MEM_HANDLE_TYPE_NONE: u32 = 0;
 const CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR: u32 = 1;
 const CU_MEM_ALLOCATION_TYPE_PINNED: u32 = 1;
 const CU_MEM_LOCATION_TYPE_DEVICE: u32 = 1;
+const CU_MEM_LOCATION_TYPE_HOST_NUMA: u32 = 3;
 
 pub struct AllocationSummary {
     pub reference: AllocationReference,
@@ -54,7 +55,10 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                 } => {
                     ensure!(
                         *allocation_type == CU_MEM_ALLOCATION_TYPE_PINNED
-                            && location.location_type == CU_MEM_LOCATION_TYPE_DEVICE,
+                            && matches!(
+                                location.location_type,
+                                CU_MEM_LOCATION_TYPE_DEVICE | CU_MEM_LOCATION_TYPE_HOST_NUMA
+                            ),
                         "participant {namespace_pid}: unsupported allocation properties for {allocation:?}: allocation_type={allocation_type}, location={location:?}"
                     );
                     if allocation.creator_pid == *namespace_pid {
