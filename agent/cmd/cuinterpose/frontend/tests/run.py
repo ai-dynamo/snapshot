@@ -5,6 +5,7 @@
 """Test one packaged artifact set against CUDA-named providers in fresh processes."""
 
 import argparse
+import errno
 import os
 from pathlib import Path
 import shutil
@@ -152,13 +153,26 @@ def main():
         modes = ["init", "init-handle", "init-failure", "relative-preload-chdir", "private", *map(str, range(7)),
                  "tracked-query", "concurrent", "constructor", "fork-before-init", "fork-after-init", "exec",
                  "same-pid-exec", "stale", "stale-concurrent", "existing-file", "existing-symlink",
-                 "existing-live", "existing-full"]
+                 "existing-live", "existing-full", "permissive-umask"]
         for mode in modes:
             relative_preload = mode == "relative-preload-chdir"
             mode_env = actual_env | {"LD_PRELOAD": "./actual/libcuinterpose.so"} if relative_preload else actual_env
-            subprocess.run([sys.executable, str(fixtures.parent / "endpoint.py"), mode,
-                            str(changed_cwd if relative_preload else constructor)],
-                           cwd=build if relative_preload else None, env=mode_env, check=True, timeout=20)
+            completed = subprocess.run(
+                [sys.executable, str(fixtures.parent / "endpoint.py"), mode,
+                 str(changed_cwd if relative_preload else constructor)],
+                cwd=build if relative_preload else None, env=mode_env, timeout=20,
+                stderr=subprocess.PIPE if mode == "existing-file" else None, text=True,
+            )
+            if completed.stderr:
+                print(completed.stderr, file=sys.stderr, end="")
+            completed.check_returncode()
+            if mode == "existing-file":
+                # ABI code 3 remains unchanged, but the original bind failure
+                # must be diagnosed once rather than flattened into that code.
+                bind_errors = [line for line in completed.stderr.splitlines()
+                               if "bind control socket" in line
+                               and f"os error {errno.EADDRINUSE}" in line]
+                assert len(bind_errors) == 1, completed.stderr
         subprocess.run([sys.executable, str(fixtures.parent / "endpoint.py"),
                         "resolver-startup-failure", str(constructor)],
                        env=actual_env | {"CUINTERPOSE_TEST_NESTED_RUNTIME": "1"},

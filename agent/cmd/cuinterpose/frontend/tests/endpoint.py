@@ -11,6 +11,7 @@ import sys
 import threading
 import signal
 import socket
+import stat
 import struct
 import time
 
@@ -42,6 +43,10 @@ if mode == "init-after-exec":
 else:
     assert not path.exists()
 sockets_before = set(path.parent.glob("cuinterpose-*.sock"))
+
+if mode == "permissive-umask":
+    # Only this fresh child changes umask; runtime startup must leave it alone.
+    os.umask(0)
 
 if mode == "relative-preload-chdir":
     assert not Path(os.environ["LD_PRELOAD"]).is_absolute()
@@ -120,7 +125,7 @@ if mode == "constructor":
         plugin.fixture_join_generation_worker()
 
 elif mode in ("init", "init-handle", "init-failure", "concurrent", "init-after-exec", "stale", "stale-concurrent",
-              "relative-preload-chdir"):
+              "relative-preload-chdir", "permissive-umask"):
     initialize = driver.cuInit if mode == "init-handle" else cuda.cuInit
     initialize.argtypes = [c.c_uint]
 
@@ -191,6 +196,9 @@ else:
             assert cuda.cuInit(0) == 0
 
 activate()
+if mode == "permissive-umask":
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert os.umask(0) == 0, "runtime startup changed the application's umask"
 if mode == "resolver-startup-failure":
     print("PASS lookup independent of runtime startup failure")
     sys.exit(0)

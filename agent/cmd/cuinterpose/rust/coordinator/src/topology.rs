@@ -102,9 +102,10 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                     if *handle_types != u64::from(CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR)
                         || *size == 0
                         || *devices == 0
+                        || *flags != 0
                     {
                         bail!(
-                            "participant {namespace_pid}: invalid multicast properties for {allocation:?}: size={size}, handle_types={handle_types}, devices={devices}"
+                            "participant {namespace_pid}: invalid multicast properties for {allocation:?}: size={size}, handle_types={handle_types}, devices={devices}, flags={flags}"
                         );
                     }
                     let multicast = multicasts

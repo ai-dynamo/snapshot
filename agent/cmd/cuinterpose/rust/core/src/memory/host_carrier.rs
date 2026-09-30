@@ -5,8 +5,8 @@
 //! explicitly; CUDA cleanup never runs from Drop or in a fork child.
 
 use super::vmm::{Allocation, context_device};
-use crate::driver::CudaError;
-use crate::driver::{Context, Result};
+use crate::driver::Context;
+use crate::error::{Error, Result};
 use cudarc::driver::sys::CUresult::{
     CUDA_ERROR_INVALID_HANDLE, CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_OUT_OF_MEMORY,
     CUDA_ERROR_UNKNOWN,
@@ -59,7 +59,7 @@ impl Arena {
                 || allocation.size == 0
                 || offsets.insert(allocation.id, size).is_some()
             {
-                return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
+                return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
             }
             size = size
                 .checked_add(allocation.size)
@@ -76,7 +76,7 @@ impl Arena {
             )
         };
         if base == libc::MAP_FAILED {
-            return Err(CudaError::from(CUDA_ERROR_OUT_OF_MEMORY));
+            return Err(Error::from(CUDA_ERROR_OUT_OF_MEMORY));
         }
         let arena = Self {
             base: base as usize,
@@ -98,14 +98,14 @@ impl Arena {
         let mut size = 0usize;
         for allocation in &fresh {
             if allocation.driver.is_some() || self.offsets.get(&allocation.id) != Some(&size) {
-                return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
+                return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
             }
             size = size
                 .checked_add(allocation.size)
                 .ok_or(CUDA_ERROR_INVALID_VALUE)?;
         }
         if size != self.size {
-            return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
+            return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
         }
         for allocation in &mut fresh {
             Context::run(
@@ -344,7 +344,7 @@ impl Arena {
         if unsafe { libc::munmap(self.base as *mut c_void, self.size) } == 0 {
             Ok(())
         } else {
-            Err(CudaError::from(CUDA_ERROR_UNKNOWN))
+            Err(Error::from(CUDA_ERROR_UNKNOWN))
         }
     }
 }
@@ -522,10 +522,10 @@ mod tests {
         crate::driver::initialize();
         Context::enter(1, 0).unwrap().leave().unwrap();
         assert_eq!(G_SWITCHED.load(Ordering::Relaxed), 0);
-        assert_eq!(
+        assert!(matches!(
             Context::enter(0, 0).err(),
-            Some(crate::driver::CudaError(CUDA_ERROR_INVALID_CONTEXT))
-        );
+            Some(crate::error::Error::Cuda(CUDA_ERROR_INVALID_CONTEXT))
+        ));
         assert_eq!(G_RELEASED.load(Ordering::Relaxed), 1);
         let id: AllocationId = [1; 16];
         let arena = Arena {
@@ -555,10 +555,10 @@ mod tests {
             },
             context: 1,
         }];
-        assert_eq!(
+        assert!(matches!(
             arena.load(&mut allocations),
-            Err(crate::driver::CudaError(CUDA_ERROR_OUT_OF_MEMORY))
-        );
+            Err(crate::error::Error::Cuda(CUDA_ERROR_OUT_OF_MEMORY))
+        ));
         // No transfer means no host registration to clean up.
         assert_eq!(G_REGISTER_CALLS.load(Ordering::Relaxed), 0);
         assert_eq!(G_REGISTERED.load(Ordering::Relaxed), 0);
@@ -635,19 +635,19 @@ mod tests {
         arena.release().unwrap();
 
         G_FAIL_COPY.store(true, Ordering::Relaxed);
-        assert_eq!(
+        assert!(matches!(
             Arena::save(&allocations).err(),
-            Some(CudaError(CUDA_ERROR_INVALID_VALUE))
-        );
+            Some(Error::Cuda(CUDA_ERROR_INVALID_VALUE))
+        ));
         assert_eq!(G_REGISTERED.load(Ordering::Relaxed), 0);
         assert_eq!(G_PRIMARY_REFS.load(Ordering::Relaxed), 0);
         assert_eq!(G_CURRENT.load(Ordering::Relaxed), 1);
         G_FAIL_COPY.store(false, Ordering::Relaxed);
         G_FAIL_REGISTER.store(true, Ordering::Relaxed);
-        assert_eq!(
+        assert!(matches!(
             Arena::save(&allocations).err(),
-            Some(CudaError(CUDA_ERROR_OUT_OF_MEMORY))
-        );
+            Some(Error::Cuda(CUDA_ERROR_OUT_OF_MEMORY))
+        ));
         assert_eq!(G_REGISTERED.load(Ordering::Relaxed), 0);
         assert_eq!(G_PRIMARY_REFS.load(Ordering::Relaxed), 0);
         assert_eq!(G_CURRENT.load(Ordering::Relaxed), 1);

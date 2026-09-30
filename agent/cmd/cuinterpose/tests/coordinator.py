@@ -235,6 +235,25 @@ class Contracts(unittest.TestCase):
             with self.subTest(sizes=sizes), self.coordinator("--prepare", "inconsistent multicast properties"):
                 self.inspect([[multicast(size, 2)] for size in sizes], begin=True)
 
+    def test_unsupported_multicast_properties_start_no_phases(self):
+        for field, value in (("handle_types", 0), ("handle_types", 8), ("handle_types", 9),
+                             ("flags", 1), ("devices", 0), ("size", 0)):
+            for importer in (False, True):
+                valid = [[allocation(), multicast(4096), multicast_device(), binding(4096)],
+                         [multicast(4096)]]
+                records = [[allocation(), multicast(4096), multicast_device(), binding(4096)],
+                           [multicast(4096)]]
+                record = records[1][0] if importer else records[0][1]
+                record["multicast"]["properties"][field] = value
+                with self.subTest(field=field, value=value, importer=importer), \
+                        self.coordinator("--prepare", "invalid multicast properties"):
+                    self.inspect(records, begin=True)
+                for saved, live in ((records, valid), (valid, records)):
+                    self.state.write_bytes(encode({1: saved[0], 2: saved[1]}))
+                    with self.coordinator("--restore", "invalid multicast properties"):
+                        self.inspect(live)
+                self.state.unlink()
+
     def test_multicast_device_ordinals_are_process_local(self):
         other = {"id": bytes([3] * 16), "creator_pid": 2}
         records = [

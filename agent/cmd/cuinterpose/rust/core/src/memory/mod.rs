@@ -11,7 +11,7 @@ pub(crate) mod multicast;
 pub(crate) mod sharing;
 pub(crate) mod vmm;
 
-use crate::driver::{CudaError, Result};
+use crate::error::{Error, Result};
 use crate::runtime;
 use checkpoint::Phase;
 use cudarc::driver::sys::CUresult::*;
@@ -162,7 +162,7 @@ impl ProcessState {
 
     pub(crate) fn mint_virtual_allocation_handle(&mut self, id: AllocationId) -> Result<u64> {
         if self.next_virtual_allocation_handle & VirtualAllocationHandle::MASK != 0 {
-            return Err(CudaError::from(CUDA_ERROR_OUT_OF_MEMORY));
+            return Err(Error::from(CUDA_ERROR_OUT_OF_MEMORY));
         }
         let handle = VirtualAllocationHandle(
             VirtualAllocationHandle::TAG | self.next_virtual_allocation_handle,
@@ -249,7 +249,10 @@ mod tests {
         let mut state = ProcessState::new(41);
         assert_eq!(state.new_reference().unwrap().creator_pid, 41);
         state.phase = Phase::UnicastPrepared;
-        assert_eq!(state.new_reference(), Err(CUDA_ERROR_NOT_READY.into()));
+        assert!(matches!(
+            state.new_reference(),
+            Err(Error::Cuda(CUDA_ERROR_NOT_READY))
+        ));
 
         assert!(state.virtual_allocation_handles.is_empty());
     }
@@ -268,17 +271,17 @@ mod tests {
             id
         );
         assert_eq!(state.resolve_virtual_handle(0x1000).unwrap(), None);
-        assert_eq!(
+        assert!(matches!(
             state.resolve_virtual_handle(VirtualAllocationHandle::TAG | 99),
-            Err(CUDA_ERROR_INVALID_HANDLE.into())
-        );
+            Err(Error::Cuda(CUDA_ERROR_INVALID_HANDLE))
+        ));
         assert_eq!(
             VirtualAllocationHandle::from_driver(0x1000).unwrap(),
             0x1000
         );
-        assert_eq!(
+        assert!(matches!(
             VirtualAllocationHandle::from_driver(VirtualAllocationHandle::TAG),
-            Err(CUDA_ERROR_INVALID_HANDLE.into())
-        );
+            Err(Error::Cuda(CUDA_ERROR_INVALID_HANDLE))
+        ));
     }
 }

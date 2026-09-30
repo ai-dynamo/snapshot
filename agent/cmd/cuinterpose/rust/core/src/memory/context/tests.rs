@@ -24,10 +24,10 @@ fn operation(kind: usize) -> CUresult {
     let mut state = runtime::get().unwrap();
     assert_eq!(state.unlocked_driver_calls, 1);
     assert_eq!(state.phase, Phase::Active);
-    assert_eq!(
-        state.begin_checkpoint().unwrap_err().0,
-        CUresult::CUDA_ERROR_NOT_READY
-    );
+    assert!(matches!(
+        state.begin_checkpoint(),
+        Err(crate::error::Error::Cuda(CUresult::CUDA_ERROR_NOT_READY))
+    ));
     if FAIL.load(Relaxed) {
         CUresult::CUDA_ERROR_INVALID_CONTEXT
     } else {
