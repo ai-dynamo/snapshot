@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <string>
 #include <thread>
@@ -56,6 +57,7 @@ class BrokerTest : public ::testing::Test {
 TEST_F(BrokerTest, StagesRestoreAndCleansUpOnCommit)
 {
   auto restore = RequestFor("restore");
+  restore.mutable_staged_restore()->set_restore_timeout_seconds(60);
   Configure(
       restore.mutable_staged_restore()->mutable_source(), restore.mutable_staged_restore()->mutable_io_engine(),
       source_);
@@ -146,6 +148,86 @@ TEST_F(BrokerTest, ReapsExpiredStagedTransactions)
   EXPECT_EQ(broker().HandleRequest(commit).failure().code(), Failure::TRANSACTION_NOT_FOUND);
 
   auto retry = RequestFor("expired");
+  Configure(retry.mutable_staged_restore()->mutable_source(), retry.mutable_staged_restore()->mutable_io_engine(), source_);
+  EXPECT_TRUE(broker().HandleRequest(retry).has_staged_restore_directory());
+}
+
+TEST_F(BrokerTest, ReapsRestoresAfterTheirTimeoutAndCleanupMargin)
+{
+  for (const int64_t timeout : {60, 10800}) {
+    SCOPED_TRACE(timeout);
+    const auto id = "restore-" + std::to_string(timeout);
+    auto restore = RequestFor(id);
+    restore.mutable_staged_restore()->set_restore_timeout_seconds(timeout);
+    Configure(
+        restore.mutable_staged_restore()->mutable_source(), restore.mutable_staged_restore()->mutable_io_engine(), source_);
+    const auto staged = broker().HandleRequest(restore);
+    ASSERT_TRUE(staged.has_staged_restore_directory());
+    const fs::path directory(staged.staged_restore_directory().image_directory());
+    const auto now = std::chrono::steady_clock::now();
+
+    broker().ReapExpiredTransactions(now + std::chrono::seconds(timeout) + std::chrono::minutes(4));
+    EXPECT_TRUE(fs::exists(directory / "image"));
+    broker().ReapExpiredTransactions(now + std::chrono::seconds(timeout) + std::chrono::minutes(5));
+    EXPECT_FALSE(fs::exists(directory));
+
+    auto commit = RequestFor(id);
+    commit.mutable_commit();
+    EXPECT_EQ(broker().HandleRequest(commit).failure().code(), Failure::TRANSACTION_NOT_FOUND);
+    auto abort = RequestFor(id);
+    abort.mutable_abort();
+    EXPECT_EQ(broker().HandleRequest(abort).failure().code(), Failure::TRANSACTION_NOT_FOUND);
+  }
+}
+
+TEST_F(BrokerTest, RestoreTimeoutDoesNotChangeOtherTransactionLifetimes)
+{
+  auto short_restore = RequestFor("short");
+  short_restore.mutable_staged_restore()->set_restore_timeout_seconds(60);
+  Configure(
+      short_restore.mutable_staged_restore()->mutable_source(), short_restore.mutable_staged_restore()->mutable_io_engine(),
+      source_);
+  ASSERT_TRUE(broker().HandleRequest(short_restore).has_staged_restore_directory());
+
+  auto default_restore = RequestFor("default");
+  Configure(
+      default_restore.mutable_staged_restore()->mutable_source(), default_restore.mutable_staged_restore()->mutable_io_engine(),
+      source_);
+  ASSERT_TRUE(broker().HandleRequest(default_restore).has_staged_restore_directory());
+
+  auto checkpoint = RequestFor("checkpoint");
+  Configure(
+      checkpoint.mutable_prepare_staged_checkpoint()->mutable_destination(),
+      checkpoint.mutable_prepare_staged_checkpoint()->mutable_io_engine(), root_ / "storage" / "published");
+  ASSERT_TRUE(broker().HandleRequest(checkpoint).has_staged_checkpoint_directory());
+
+  const auto now = std::chrono::steady_clock::now();
+  broker().ReapExpiredTransactions(now + std::chrono::minutes(6));
+  EXPECT_FALSE(fs::exists(root_ / "tmpfs" / "restore" / "short"));
+  EXPECT_TRUE(fs::exists(root_ / "tmpfs" / "restore" / "default" / "image"));
+  EXPECT_TRUE(fs::exists(root_ / "tmpfs" / "checkpoint" / "checkpoint"));
+
+  broker().ReapExpiredTransactions(now + std::chrono::hours(2) + std::chrono::minutes(5));
+  EXPECT_FALSE(fs::exists(root_ / "tmpfs" / "restore" / "default"));
+  EXPECT_FALSE(fs::exists(root_ / "tmpfs" / "checkpoint" / "checkpoint"));
+}
+
+TEST_F(BrokerTest, RejectsInvalidRestoreTimeoutBeforeStaging)
+{
+  for (const int64_t timeout : {int64_t{0}, int64_t{-1}, std::numeric_limits<int64_t>::max()}) {
+    SCOPED_TRACE(timeout);
+    auto restore = RequestFor("invalid");
+    restore.mutable_staged_restore()->set_restore_timeout_seconds(timeout);
+    Configure(
+        restore.mutable_staged_restore()->mutable_source(), restore.mutable_staged_restore()->mutable_io_engine(), source_);
+    const auto response = broker().HandleRequest(restore);
+    ASSERT_TRUE(response.has_failure());
+    EXPECT_EQ(response.failure().code(), Failure::INVALID_REQUEST);
+    EXPECT_FALSE(fs::exists(root_ / "tmpfs" / "restore" / "invalid"));
+  }
+
+  auto retry = RequestFor("invalid");
+  retry.mutable_staged_restore()->set_restore_timeout_seconds(60);
   Configure(retry.mutable_staged_restore()->mutable_source(), retry.mutable_staged_restore()->mutable_io_engine(), source_);
   EXPECT_TRUE(broker().HandleRequest(retry).has_staged_restore_directory());
 }
@@ -436,6 +518,7 @@ TEST_F(BrokerTest, PreservesExistingPartialCheckpointDestination)
 TEST_F(BrokerTest, AbortsRestore)
 {
   auto restore = RequestFor("restore");
+  restore.mutable_staged_restore()->set_restore_timeout_seconds(60);
   Configure(
       restore.mutable_staged_restore()->mutable_source(), restore.mutable_staged_restore()->mutable_io_engine(),
       source_);

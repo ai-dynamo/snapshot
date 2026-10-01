@@ -31,6 +31,10 @@ message StagedRestoreRequest
 {
   StorageBackend source = 1;
   IOEngine io_engine = 2;
+  // Remaining restore timeout, rounded up to seconds. Must be positive when set.
+  // PageBroker retains staging for this timeout plus five minutes, measured from
+  // the start of staging. Omission uses the default two-hour timeout.
+  optional int64 restore_timeout_seconds = 3;
 }
 // Allows a future GPU engine to read source data without a staging directory.
 message DirectRestoreRequest
@@ -57,7 +61,8 @@ message Request
   // Snapshot assigns an ID to each request.
   optional string request_id = 1;
   // Snapshot assigns a unique transaction ID before the first request and does not reuse it while PageBroker retains it.
-  // An uncommitted transaction expires one hour after staging begins.
+  // Uncommitted staged transactions expire after two hours plus five minutes,
+  // unless StagedRestoreRequest supplies a restore timeout.
   optional string transaction_id = 2;
   oneof command
   {

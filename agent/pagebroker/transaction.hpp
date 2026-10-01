@@ -24,13 +24,15 @@ class Transaction {
   void set_descriptor(Descriptor descriptor);
   void clear_descriptor();
   bool retain_terminal();
-  bool expired(std::chrono::steady_clock::time_point now, std::chrono::steady_clock::duration lifetime) const;
+  void set_lifetime(std::chrono::steady_clock::duration lifetime);
+  bool expired(std::chrono::steady_clock::time_point now) const;
 
  private:
   std::mutex mutex_;
   State state_ = State::NEW;
   Descriptor descriptor_;
   std::chrono::steady_clock::time_point staging_started_at_;
+  std::chrono::steady_clock::duration lifetime_ = std::chrono::hours(2) + std::chrono::minutes(5);
   bool terminal_retained_ = false;
 };
 }  // namespace snapshot::pagebroker

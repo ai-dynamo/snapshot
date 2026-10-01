@@ -33,8 +33,25 @@ type Client struct {
 }
 
 func (c Client) StagedRestore(ctx context.Context, transactionID, source string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	operation := &StagedRestoreRequest{Source: filesystem(source), IoEngine: posixCopy()}
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return "", context.DeadlineExceeded
+		}
+		// The controller's deadline already includes restoreTimeoutSeconds and
+		// any earlier caller deadline. Round up so staging cannot expire early.
+		seconds := int64(remaining / time.Second)
+		if remaining%time.Second != 0 {
+			seconds++
+		}
+		operation.RestoreTimeoutSeconds = proto.Int64(seconds)
+	}
 	response, err := c.request(ctx, transactionID, &Request_StagedRestore{
-		StagedRestore: &StagedRestoreRequest{Source: filesystem(source), IoEngine: posixCopy()},
+		StagedRestore: operation,
 	})
 	if err != nil {
 		return "", err

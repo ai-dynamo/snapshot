@@ -53,10 +53,16 @@ Transaction::retain_terminal()
   return true;
 }
 
-bool
-Transaction::expired(std::chrono::steady_clock::time_point now, std::chrono::steady_clock::duration lifetime) const
+void
+Transaction::set_lifetime(std::chrono::steady_clock::duration lifetime)
 {
-  return state_ == State::STAGED && now - staging_started_at_ >= lifetime;
+  lifetime_ = lifetime;
+}
+
+bool
+Transaction::expired(std::chrono::steady_clock::time_point now) const
+{
+  return state_ == State::STAGED && now - staging_started_at_ >= lifetime_;
 }
 
 }  // namespace snapshot::pagebroker
