@@ -4,6 +4,7 @@
 //! Shareable-handle codec, peer exports, and imported memblock ownership.
 
 use super::checkpoint::Phase;
+use super::vmm::Allocation;
 use super::{Memblock, ProcessState, VirtualAllocationHandle};
 use crate::driver::context;
 use crate::error::{Error as CoreError, Result};
@@ -18,7 +19,7 @@ use rustix::fs::{MemfdFlags, memfd_create};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Write;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::{fs::FileExt, net::UnixStream};
 use std::sync::{Mutex, MutexGuard};
 
@@ -244,7 +245,7 @@ pub(crate) fn import_reference(
             Memblock::Unicast(allocation) => {
                 if allocation.driver.is_none() {
                     let (raw, properties) =
-                        request_export(reference).map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
+                        request_export(reference).map_err(CoreError::PeerExport)?;
                     if properties.is_some() {
                         return Err(CoreError::from(CUDA_ERROR_INVALID_HANDLE));
                     }
@@ -255,12 +256,17 @@ pub(crate) fn import_reference(
             Memblock::Multicast(object) => object.shared = true,
         }
         let handle = state.mint_virtual_allocation_handle(id)?;
+        state
+            .memblocks
+            .get_mut(&id)
+            .unwrap()
+            .refcounts_mut()
+            .handle_entries += 1;
         return Ok((state, handle));
     }
     // EXPORT service uses only CACHE, never STATE, so a same-process request
     // can complete while this call holds its allocation metadata lock.
-    let (raw, multicast_properties) =
-        request_export(reference).map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
+    let (raw, multicast_properties) = request_export(reference).map_err(CoreError::PeerExport)?;
     if let Some(properties) = multicast_properties {
         return super::multicast::import(state, reference, raw, properties);
     }
@@ -268,9 +274,12 @@ pub(crate) fn import_reference(
     let driver = crate::driver::import_posix(raw.as_fd())?;
     let driver = runtime::must_complete(VirtualAllocationHandle::from_driver(driver));
     let mut properties = std::mem::MaybeUninit::<CUmemAllocationProp>::zeroed();
-    runtime::must_complete(unsafe {
+    if let Err(error) = unsafe {
         crate::driver::cuMemGetAllocationPropertiesFromHandle(properties.as_mut_ptr(), driver)
-    });
+    } {
+        runtime::must_complete(unsafe { crate::driver::cuMemRelease(driver) });
+        return Err(error);
+    }
     let properties = unsafe { properties.assume_init() };
     if let Err(error) = super::vmm::validate_properties(&properties) {
         // The peer may run a version that admits unsupported backing. Import
@@ -278,14 +287,22 @@ pub(crate) fn import_reference(
         runtime::must_complete(unsafe { crate::driver::cuMemRelease(driver) });
         return Err(error);
     }
-    let handle = runtime::must_complete(
-        state.adopt_unicast(reference, driver, 0, properties, true, context),
-    );
+    let handle = runtime::must_complete(state.adopt_unicast(Allocation {
+        reference,
+        refcounts: Default::default(),
+        driver: Some(driver),
+        // The creator owns the full backing extent; this importer only knows its mappings.
+        size: 0,
+        properties,
+        shared: true,
+        context,
+    }));
     Ok((state, handle))
 }
 #[cfg(test)]
 mod codec_tests {
     use super::*;
+    use std::os::fd::AsRawFd;
 
     fn handle_file(bytes: &[u8]) -> File {
         let fd = memfd_create(c"test-shareable-handle", MemfdFlags::CLOEXEC).unwrap();

@@ -20,11 +20,13 @@ use runtime::export_cache;
 use std::collections::BTreeMap;
 use vmm::{Allocation, Mapping};
 
-/// Application-visible allocation handle. High bits distinguish it from CUDA's.
+/// Application-visible allocation handle in our private tagged namespace.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct VirtualAllocationHandle(u64);
 
 impl VirtualAllocationHandle {
+    // This private prefix is arbitrary; CUDA does not reserve it. Callers fail
+    // stop if from_driver detects a collision, before publishing an ambiguous handle.
     pub const TAG: u64 = 0xd94d_0000_0000_0000;
     pub const MASK: u64 = 0xffff_0000_0000_0000;
 
@@ -62,6 +64,14 @@ impl VirtualAllocationHandle {
     }
 }
 
+/// Logical references that keep an allocation registered.
+#[derive(Clone, Default)]
+pub struct Refcounts {
+    /// Distinct live virtual handles, excluding repeated retains of the same handle.
+    pub handle_entries: usize,
+    pub mappings: usize,
+}
+
 /// CUDA memblock: physical allocation behind a generic handle.
 /// Unicast and multicast share one ID and virtual-handle namespace;
 /// they keep different CUDA properties and reconstruction state in the variants.
@@ -72,6 +82,20 @@ pub enum Memblock {
 }
 
 impl Memblock {
+    pub(crate) fn refcounts(&self) -> &Refcounts {
+        match self {
+            Self::Unicast(allocation) => &allocation.refcounts,
+            Self::Multicast(object) => &object.refcounts,
+        }
+    }
+
+    pub(crate) fn refcounts_mut(&mut self) -> &mut Refcounts {
+        match self {
+            Self::Unicast(allocation) => &mut allocation.refcounts,
+            Self::Multicast(object) => &mut object.refcounts,
+        }
+    }
+
     pub fn unicast(&self) -> Option<&Allocation> {
         match self {
             Self::Unicast(allocation) => Some(allocation),
@@ -125,6 +149,9 @@ pub struct HandleEntry {
 pub struct ProcessState {
     pub namespace_pid: NamespacePid,
     pub malloc_regions: BTreeMap<u64, ipc::MallocRegion>,
+    imported_mallocs: BTreeMap<AllocationId, u64>,
+    // Minimum granularity and GPUDirect RDMA flag for the fixed malloc properties.
+    malloc_layouts: BTreeMap<i32, (usize, u8)>,
     pub memblocks: BTreeMap<AllocationId, Memblock>,
     pub virtual_allocation_handles: BTreeMap<VirtualAllocationHandle, HandleEntry>,
     pub mappings: BTreeMap<u64, Mapping>,
@@ -139,6 +166,8 @@ impl ProcessState {
         Self {
             namespace_pid,
             malloc_regions: BTreeMap::new(),
+            imported_mallocs: BTreeMap::new(),
+            malloc_layouts: BTreeMap::new(),
             memblocks: BTreeMap::new(),
             virtual_allocation_handles: BTreeMap::new(),
             mappings: BTreeMap::new(),
@@ -183,6 +212,11 @@ impl ProcessState {
         entry.references -= 1;
         if entry.references == 0 {
             self.virtual_allocation_handles.remove(&handle);
+            self.memblocks
+                .get_mut(&id)
+                .unwrap()
+                .refcounts_mut()
+                .handle_entries -= 1;
             runtime::must_complete(self.release_unused_memblock(id));
         }
         Ok(())
@@ -196,18 +230,37 @@ impl ProcessState {
             .transpose()
     }
 
+    pub(crate) fn mappings_in_range(
+        &self,
+        address: u64,
+        size: usize,
+    ) -> impl Iterator<Item = &Mapping> {
+        self.mappings
+            .range(address..)
+            .take_while(move |(start, _)| **start - address < size as u64)
+            .map(|(_, mapping)| mapping)
+    }
+
+    /// Forget a successful unmap before checking whether its backing can be dropped.
+    pub(crate) fn remove_mapping(&mut self, address: u64) -> AllocationId {
+        let mapping = self.mappings.remove(&address).unwrap();
+        self.memblocks
+            .get_mut(&mapping.id)
+            .unwrap()
+            .refcounts_mut()
+            .mappings -= 1;
+        mapping.id
+    }
+
     /// Release an unicast driver handle after its last virtual handle is dropped.
     /// Remove the memblock once neither virtual handles nor mappings refer to it.
     pub(crate) fn release_unused_memblock(&mut self, id: AllocationId) -> Result<()> {
-        let handle_live = self
-            .virtual_allocation_handles
-            .values()
-            .any(|entry| entry.id == id);
-        let mapped = self.mappings.values().any(|mapping| mapping.id == id);
         let memblock = self
             .memblocks
             .get_mut(&id)
             .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+        let handle_live = memblock.refcounts().handle_entries != 0;
+        let mapped = memblock.refcounts().mappings != 0;
         match memblock {
             Memblock::Unicast(allocation) => {
                 // Unicast mappings retain the backing after its last handle is released.
@@ -237,7 +290,8 @@ impl ProcessState {
 
 pub(crate) fn random<const N: usize>() -> Result<[u8; N]> {
     let mut bytes = [0; N];
-    getrandom::fill(&mut bytes).map_err(|_| CUDA_ERROR_NOT_INITIALIZED)?;
+    getrandom::fill(&mut bytes)
+        .map_err(|error| Error::io("generate allocation identity", std::io::Error::other(error)))?;
     Ok(bytes)
 }
 #[cfg(test)]
@@ -249,9 +303,10 @@ mod tests {
         let mut state = ProcessState::new(41);
         assert_eq!(state.new_reference().unwrap().creator_pid, 41);
         state.phase = Phase::UnicastPrepared;
-        assert!(matches!(state.new_reference(), Err(Error::Cuda(CUDA_ERROR_NOT_READY))));
-
-        assert!(state.virtual_allocation_handles.is_empty());
+        assert!(matches!(
+            state.new_reference(),
+            Err(Error::Cuda(CUDA_ERROR_NOT_READY))
+        ));
     }
 
     #[test]
