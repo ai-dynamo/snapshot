@@ -5,7 +5,7 @@
 
 use super::{Memblock, ProcessState, VirtualAllocationHandle};
 use crate::driver::{self};
-use crate::error::{Result};
+use crate::error::Result;
 use crate::runtime;
 use cudarc::driver::sys::{CUcontext, CUdevice};
 use cuinterpose_protocol::AllocationId;
