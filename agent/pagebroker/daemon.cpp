@@ -46,6 +46,30 @@ constexpr auto kTransactionReapInterval = std::chrono::minutes(2);
 volatile sig_atomic_t shutting_down;
 
 void
+SetNativeS3Variable(const char* name, const char* value, const char* error = "configure native S3 session")
+{
+  if (setenv(name, value, 1) != 0)
+    throw std::runtime_error(error);
+}
+
+void
+ConfigureNativeS3Environment(const snapshot::pagebroker::S3Config& config)
+{
+  const auto& connection = config.transfer.connection;
+  const auto& limits = config.transfer.upload_limits;
+  SetNativeS3Variable("RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING", connection.use_virtual_addressing ? "1" : "0");
+  SetNativeS3Variable("AWS_EC2_METADATA_DISABLED", "true");
+  SetNativeS3Variable("RUNAI_STREAMER_S3_MAX_RETRIES", "3");
+  SetNativeS3Variable("RUNAI_STREAMER_S3_TIMEOUT", "0");
+  SetNativeS3Variable("RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS", std::to_string(limits.request_timeout.count()).c_str());
+  SetNativeS3Variable("RUNAI_STREAMER_S3_MAX_INFLIGHT_MIB", std::to_string(limits.buffer_budget / (1024 * 1024)).c_str());
+  SetNativeS3Variable("RUNAI_STREAMER_CHUNK_BYTESIZE", std::to_string(std::min<std::uint64_t>(16 * 1024 * 1024, limits.part_size)).c_str());
+  SetNativeS3Variable("RUNAI_STREAMER_S3_MAX_CONNECTIONS", std::to_string(limits.workers).c_str());
+  // An explicit empty value prevents fallback to an unrelated SDK profile CA.
+  SetNativeS3Variable("AWS_CA_BUNDLE", connection.ca_file.c_str(), "configure native S3 CA");
+}
+
+void
 Stop(int)
 {
   shutting_down = 1;
@@ -374,6 +398,7 @@ Serve(FileDescriptor& listener, Broker& broker, size_t max_concurrent_requests)
       std::cerr << "start connection: " << error.what() << '\n';
     }
   }
+  broker.CancelActiveTransactions();
   WaitForHandlers(handlers);
 }
 }  // namespace
@@ -383,7 +408,8 @@ RunDaemon(
     const fs::path& socket_path,
     const fs::path& staging_directory,
     const fs::path& storage_root,
-    size_t max_concurrent_requests)
+    size_t max_concurrent_requests,
+    const fs::path& storage_config)
 {
   shutting_down = 0;
   if (!RaiseFileDescriptorLimit())
@@ -400,7 +426,15 @@ RunDaemon(
   if (error)
     return Fail("create listener", error);
 
-  Broker broker(staging_directory, storage_root);
+  std::optional<snapshot::pagebroker::S3Config> config;
+  if (!storage_config.empty()) {
+    config = snapshot::pagebroker::ReadS3Config(storage_config);
+    if (config->active_transactions >= max_concurrent_requests)
+      throw std::invalid_argument("S3 transaction admission must leave a connection available for Abort");
+    config->transfer.connection = snapshot::pagebroker::ResolveS3Credentials(std::move(config->transfer.connection));
+    ConfigureNativeS3Environment(*config);
+  }
+  Broker broker(staging_directory, storage_root, std::move(config));
   Serve(listener, broker, max_concurrent_requests);
   return ExitCode::SUCCESS;
 }
