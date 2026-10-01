@@ -921,7 +921,7 @@ coordinator state fails restore. Native checkpoints omit `cuinterpose`; earlier
 draft checkpoints containing `cuinterpose: true` are rejected with an instruction
 to recreate them.
 
-The private frontend/backend ABI is version **4**. The MessagePack protocol and state envelope, virtual shareable handle, and virtual IPC memory handle are version **1**. Older draft artifacts, including shim PageBroker artifacts, are not migrated or silently interpreted as host-carrier checkpoints.
+The private frontend/backend ABI is version **1**. The MessagePack protocol and state envelope, virtual shareable handle, and virtual IPC memory handle are version **1**. Older draft artifacts, including shim PageBroker artifacts, are not migrated or silently interpreted as host-carrier checkpoints.
 
 The shim libraries are part of the checkpointed process. Their files must be
 available at the original paths, and the coordinator must understand their
