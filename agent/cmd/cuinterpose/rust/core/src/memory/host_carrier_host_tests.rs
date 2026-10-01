@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exercise real CPU bytes and alias mappings without a GPU. Missing device-copy
-//! symbols intentionally make accidental use of the device path fail.
+//! Exercise real CPU bytes and alias mappings without a GPU. Unsupported device-copy
+//! calls intentionally make accidental use of the device path fail.
 use super::*;
 use cudarc::driver::sys::{
     CUmemAllocationHandleType, CUmemAllocationType, CUmemLocation, CUresult,
@@ -235,7 +235,7 @@ unsafe extern "C" fn resolve(name: *const c_char) -> *mut c_void {
         b"cuMemcpyDtoHAsync_v2" if MIXED.load(Ordering::Relaxed) => {
             to_host as *const () as *mut c_void
         }
-        _ => std::ptr::null_mut(),
+        _ => crate::tests::unused_driver_symbol(),
     }
 }
 
@@ -273,7 +273,7 @@ fn roundtrip(test: &str, mixed: bool) {
             })
             .is_ok()
     );
-    crate::driver::initialize();
+    crate::driver::initialize().unwrap();
     let mut locations = vec![
         (CUmemLocationType::CU_MEM_LOCATION_TYPE_HOST_NUMA, 7),
         (CUmemLocationType::CU_MEM_LOCATION_TYPE_HOST_NUMA, 57),
@@ -302,6 +302,7 @@ fn roundtrip(test: &str, mixed: bool) {
             size as isize
         );
         let mut allocation = Allocation {
+            refcounts: Default::default(),
             reference: AllocationReference {
                 creator_pid: 41,
                 id: [index as u8 + 1; 16],

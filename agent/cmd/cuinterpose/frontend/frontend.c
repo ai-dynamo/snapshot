@@ -331,9 +331,9 @@ API void *dlsym(void *handle, const char *name) {
     __attribute__((musttail)) return function(handle, name);
 }
 
-// A procedure query for a requested name may return a newer entry point. Old
-// names such as cuMemAlloc are listed only here: they have no wrapper of their
-// own, and dlsym of their 32-bit ABI must remain untouched.
+// A procedure query may return a newer entry point for the same call, including
+// wrapped context APIs and their _v2 variants. Old memory names such as cuMemAlloc
+// have no wrapper of their own; dlsym of their 32-bit ABI remains untouched.
 static const struct {
     const char *requested, *returned;
 } QUERY_ALIASES[] = {
