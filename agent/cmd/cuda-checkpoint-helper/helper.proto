@@ -1,0 +1,105 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+
+package snapshot.cuda_checkpoint.internal;
+
+// Private helper protocol. No Go or PageBroker protocol types are generated.
+
+// Only the agent holds this control channel. nsrestore receives session sockets
+// but cannot admit new participants or acknowledge their storage lifetimes.
+message HelperRequest {
+  uint64 session_id = 1;
+  oneof command {
+    BindGPUSession bind = 2;
+    // The agent half-closes the session first, then asks the daemon to join its
+    // handler. DRAINED on the control channel proves all session I/O has ended.
+    bool drain = 3;
+  }
+}
+
+// Private agent-to-helper admission. The inherited control socket carries this
+// message with a session socket and artifact-root directory, in that order.
+// Admission pins the target namespace and validates saved GPU metadata before
+// CRIU runs. Each subsequent command is scoped to this one CUDA participant.
+message BindGPUSession {
+  enum Direction {
+    UNSPECIFIED = 0;
+    SAVE = 1;
+    LOAD = 2;
+  }
+  enum StorageMode {
+    CUSTOM_STORAGE = 0;
+    DRIVER_MANAGED = 1;
+  }
+  Direction direction = 1;
+  uint32 container_pid = 2;
+  uint32 namespace_pid = 3;
+  repeated string visible_devices = 4;
+  string device_map = 5;
+  StorageMode storage_mode = 6;
+  bool enable_checksum_digest = 7;
+}
+
+message GPUSessionRequest {
+  enum Operation {
+    UNSPECIFIED = 0;
+    LOCK = 1;
+    PREPARE = 2;
+    TRANSFER = 3;
+    COMPLETE = 4;
+  }
+  Operation operation = 1;
+  // Restored PID as observed in the pinned placeholder namespace. Zero uses
+  // the captured namespace PID when checkpointing a source process.
+  uint32 target_pid = 2;
+}
+
+message Failure {
+  enum Code {
+    UNSPECIFIED = 0;
+    INVALID_REQUEST = 1;
+    INTERNAL_ERROR = 6;
+  }
+  Code code = 1;
+  string message = 2;
+}
+
+message GPUSessionReply {
+  enum Status {
+    UNSPECIFIED = 0;
+    READY = 1;
+    LOCKED = 2;
+    PREPARED = 3;
+    TRANSFERRED = 4;
+    COMPLETE = 5;
+    DRAINED = 6;
+  }
+  Failure failure = 2;
+  Status status = 3;
+  GPUSessionMetrics metrics = 4;
+  // Startup READY advertises capability only after its contexts, host rings,
+  // and NIXL registrations have been initialized in this helper process.
+  bool custom_storage_available = 5;
+  // Control-channel drain replies identify the joined session.
+  uint64 session_id = 6;
+}
+
+message GPUSessionMetrics {
+  uint64 bytes = 1;
+  double initialization_seconds = 2;
+  uint32 visible_devices = 3;
+  double prepare_seconds = 4;
+  double transfer_seconds = 5;
+  double transfer_setup_seconds = 6;
+  double storage_request_service_seconds = 7;
+  double cuda_wait_seconds = 8;
+  double complete_seconds = 9;
+  double unlock_seconds = 10;
+  double total_seconds = 11;
+  // Monotonic timestamps from this host, not wall-clock timestamps.
+  int64 prepare_start_ns = 12;
+  int64 prepare_end_ns = 13;
+  int64 transfer_start_ns = 14;
+  int64 transfer_end_ns = 15;
+}

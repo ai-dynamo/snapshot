@@ -17,7 +17,7 @@ REQUIRE_CUDA_HELPER_TESTS ?= $(if $(CI),1,0)
 
 .DEFAULT_GOAL := build
 
-.PHONY: build test test-go test-cuda-helper test-cuda-helper-storage tidy lint fmt pagebroker-generate pagebroker-check-generated
+.PHONY: build cuda-checkpoint-helper test test-go test-cuda-helper test-cuda-helper-storage tidy lint fmt pagebroker-generate pagebroker-check-generated
 
 PROTOC_GEN_GO := $(TOOLS_BIN_DIR)/protoc-gen-go
 CUDA_ROOT ?= /usr/local/cuda
@@ -25,6 +25,12 @@ CUDA_ROOT ?= /usr/local/cuda
 build:
 	GOOS=linux GOARCH=amd64 go build -o bin/agent ./cmd/agent
 	GOOS=linux GOARCH=amd64 go build -o bin/nsrestore ./cmd/nsrestore
+
+# The persistent helper retains the existing one-shot CLI entrypoints.
+cuda-checkpoint-helper:
+	$(MAKE) -C cmd/cuda-checkpoint-helper helper CUDA_ROOT=$(CUDA_ROOT) NIXL_ROOT=$(NIXL_ROOT)
+	mkdir -p bin
+	cp cmd/cuda-checkpoint-helper/bin/cuda-checkpoint-helper bin/
 
 test: test-go
 

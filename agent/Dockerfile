@@ -15,7 +15,6 @@
 # Optional targets for CI:
 #   docker build --target linter --build-context api=../api .   # Run linting
 #   docker build --target tester --build-context api=../api .   # Run tests
-#   docker build --target cuda-storage-builder .                 # Validate CUDA storage and checksums
 
 # =============================================================================
 # Build Arguments
@@ -38,28 +37,12 @@ ARG GOLANGCI_LINT_VERSION=v2.13.2
 #   --build-arg CRIU_REF=<fork-branch-or-sha>
 ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
 ARG CRIU_REF=criu-dev
+ARG CUDA_HEADERS_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04@sha256:edd686dcb3e87806dfc869623ccb0a7e62c0d09bd720a82014c23efcecc8d9a2
 ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04@sha256:8315e2455736c4f9b597f15c5fb4d31f834e798e0c6b66bbdbdbac491ce26bd1
-ARG CUDA_HELPER_HEADERS_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04@sha256:edd686dcb3e87806dfc869623ccb0a7e62c0d09bd720a82014c23efcecc8d9a2
 
 # For placeholder target only - this default allows agent builds to succeed,
 # but placeholder builds MUST override it with --build-arg BASE_IMAGE=<image>
 ARG BASE_IMAGE=placeholder-requires-base-image-arg
-
-# =============================================================================
-# Stage: CUDA 13.4 header provider
-# =============================================================================
-FROM ${CUDA_HELPER_HEADERS_IMAGE} AS cuda-helper-headers
-
-# =============================================================================
-# Stage: CUDA storage and checksum tests
-# =============================================================================
-FROM ${AGENT_BASE_IMAGE} AS cuda-storage-builder
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential libssl-dev && rm -rf /var/lib/apt/lists/*
-WORKDIR /workspace
-COPY cmd/cuda-checkpoint-helper/ cmd/cuda-checkpoint-helper/
-COPY pagebroker/file_descriptor.cpp pagebroker/file_descriptor.hpp pagebroker/
-RUN make -C cmd/cuda-checkpoint-helper test-storage
 
 # =============================================================================
 # Stage: Go base - Common setup for Go builds
@@ -135,28 +118,55 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s
 RUN mkdir -p /go-src && go mod vendor -o /go-src/vendor
 
 # =============================================================================
+# Stage: CUDA helper dependencies - pinned public headers and POSIX-only NIXL
+# =============================================================================
+FROM ${CUDA_HEADERS_IMAGE} AS cuda-headers
+FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254 AS nixl
+# Reuse the validated POSIX-only NIXL revision from the transfer prototype.
+ARG NIXL_REF=71ca3cb249a481ae892fcc042a456e1a9b87463d
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential ca-certificates git libaio-dev meson ninja-build pkg-config pybind11-dev python3 \
+    && rm -rf /var/lib/apt/lists/*
+RUN git init /tmp/nixl && cd /tmp/nixl \
+    && git remote add origin https://github.com/ai-dynamo/nixl.git \
+    && git fetch --depth 1 origin ${NIXL_REF} \
+    && test "$(git rev-parse FETCH_HEAD)" = "${NIXL_REF}" \
+    && git checkout --detach ${NIXL_REF} \
+    && meson setup build --prefix=/usr/local --libdir=lib --buildtype=release \
+      -Dbuild_tests=false -Dbuild_examples=false -Denable_plugins=POSIX \
+    && meson compile -C build \
+    && DESTDIR=/nixl-install meson install -C build --strip \
+    && mkdir -p /nixl-runtime/lib/plugins \
+    && cp /nixl-install/usr/local/lib/libnixl*.so /nixl-runtime/lib/ \
+    && cp /nixl-install/usr/local/lib/libserdes.so /nixl-install/usr/local/lib/libstream.so \
+      /nixl-install/usr/local/lib/libfile_utils.so /nixl-runtime/lib/ \
+    && cp -a /nixl-install/usr/local/lib/liburing.so* /nixl-runtime/lib/ \
+    && cp /nixl-install/usr/local/lib/plugins/libplugin_POSIX.so /nixl-runtime/lib/plugins/ \
+    && cp subprojects/liburing-liburing-2.14/LICENSE /nixl-runtime/liburing-LICENSE \
+    && printf '%s\n' "${NIXL_REF}" > /nixl-runtime/NIXL_COMMIT \
+    && tar -czf /nixl-src.tar.gz -C /tmp --exclude-vcs nixl
+# =============================================================================
 # Stage: CUDA checkpoint helper builder
 # =============================================================================
 FROM ${AGENT_BASE_IMAGE} AS cuda-helper-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
+    build-essential pkg-config libprotobuf-dev protobuf-compiler libgtest-dev libaio-dev libssl-dev \
     && rm -rf /var/lib/apt/lists/*
-
+COPY --from=cuda-headers /usr/local/cuda/include/ /opt/cuda/include/
+COPY --from=cuda-headers /usr/local/cuda/lib64/stubs/ /opt/cuda/lib64/stubs/
+COPY --from=nixl /nixl-install/usr/local/ /usr/local/
+ENV LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH}
+ENV NIXL_PLUGIN_DIR=/usr/local/lib/plugins
 WORKDIR /workspace
+COPY cmd/cuda-checkpoint-helper/ cmd/cuda-checkpoint-helper/
+COPY pagebroker/file_descriptor.cpp pagebroker/file_descriptor.hpp pagebroker/
+COPY cmd/ns-bind-mount/main.c cmd/ns-bind-mount/main.c
+RUN make -C cmd/cuda-checkpoint-helper helper test CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local \
+    && cp cmd/cuda-checkpoint-helper/bin/cuda-checkpoint-helper /cuda-checkpoint-helper
 
-COPY cmd/cuda-checkpoint-helper/main.c ./cmd/cuda-checkpoint-helper/main.c
-COPY cmd/ns-bind-mount/main.c ./cmd/ns-bind-mount/main.c
-
-RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
-    ./cmd/cuda-checkpoint-helper/main.c \
-    -I/usr/local/cuda/include \
-    -L/usr/local/cuda/lib64/stubs \
-    -lcuda
-
-# ns-bind-mount bind-mounts the snapshot binaries into a target container's mount
-# namespace. It needs no CUDA headers, only mount_setattr (Linux 5.12+).
-RUN gcc -O2 -Wall -Wextra -o /ns-bind-mount ./cmd/ns-bind-mount/main.c
+# The mount helper needs no CUDA headers, only mount_setattr (Linux 5.12+).
+RUN gcc -O2 -Wall -Wextra -o /ns-bind-mount cmd/ns-bind-mount/main.c
 
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
@@ -229,6 +239,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnl-3-200 \
     libnl-route-3-200 \
     libprotobuf32t64 \
+    libaio1t64 \
+    libssl3t64 \
     libprotobuf-c1 \
     libgnutls30t64 \
     libnftables1 \
@@ -255,6 +267,9 @@ RUN sh /tmp/collect-sources.sh /tmp/base-packages.tsv /sources/dpkg
 # CRIU source, at the exact ref this image was built from.
 COPY --from=criu-builder /criu-src.tar.gz /sources/criu/criu-src.tar.gz
 
+# NIXL source includes its bundled liburing at the exact revisions built above.
+COPY --from=nixl /nixl-src.tar.gz /sources/nixl/nixl-src.tar.gz
+
 # Go module source for the statically linked binaries.
 COPY --from=builder /go-src/vendor /sources/go/vendor
 
@@ -269,6 +284,15 @@ FROM runtime-deps AS agent
 COPY --from=criu-builder /criu-install/usr/local /usr/local
 COPY --from=criu-builder /tmp/criu/COPYING /legal/CRIU/COPYING
 RUN criu --version
+
+# The persistent helper loads only the POSIX NIXL backend. Runtime libcuda is
+# supplied by the NVIDIA container runtime; no build-time CUDA stub is copied.
+COPY --from=nixl /nixl-runtime/lib/ /usr/local/lib/
+COPY --from=nixl /nixl-runtime/NIXL_COMMIT /usr/local/share/nixl/NIXL_COMMIT
+COPY --from=nixl /tmp/nixl/LICENSE /legal/NIXL/LICENSE
+COPY --from=nixl /nixl-runtime/liburing-LICENSE /legal/liburing/LICENSE
+ENV LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH}
+ENV NIXL_PLUGIN_DIR=/usr/local/lib/plugins
 
 # Copy CUDA checkpoint binaries
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
