@@ -11,7 +11,7 @@
 #include <thread>
 
 #include "broker.hpp"
-#include "transfer/model_streamer_restore.hpp"
+#include "transfer/engine/model_streamer/model_streamer_restore.hpp"
 
 namespace fs = std::filesystem;
 using namespace snapshot::pagebroker;
