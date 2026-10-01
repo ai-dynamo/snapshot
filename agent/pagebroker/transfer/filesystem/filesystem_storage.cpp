@@ -3,6 +3,7 @@
 
 #include "filesystem_storage.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
@@ -11,6 +12,38 @@
 namespace snapshot::pagebroker::filesystem_storage {
 namespace fs = std::filesystem;
 namespace {
+bool
+IsContainedRelativePath(const Path& relative)
+{
+  if (relative.empty() || relative == ".")
+    return false;
+  return relative != ".." && !relative.string().starts_with("../");
+}
+
+bool
+IsPathWithinStorageRoot(const Path& path, const Path& relative)
+{
+  if (!path.is_absolute() || path.lexically_normal() != path)
+    return false;
+  return IsContainedRelativePath(relative);
+}
+
+void
+ValidateSourceRoot(const Path& source)
+{
+  if (source.empty() || source.native().find('\0') != std::string::npos)
+    throw std::invalid_argument("checkpoint source must be a directory path");
+  // Check before any canonicalization, including a root with a trailing slash.
+  Path prefix;
+  for (const auto& component : fs::absolute(source)) {
+    prefix /= component;
+    if (fs::is_symlink(fs::symlink_status(prefix)))
+      throw std::invalid_argument("checkpoint source contains a symlink");
+  }
+  if (!fs::is_directory(fs::symlink_status(source)))
+    throw std::invalid_argument("checkpoint source must be a directory");
+}
+
 Path
 StoragePath(const StorageBackend& storage, const Path& storage_root, const char* label)
 {
@@ -18,8 +51,7 @@ StoragePath(const StorageBackend& storage, const Path& storage_root, const char*
     throw std::invalid_argument(std::string("filesystem ") + label + " is required");
   const Path path(storage.filesystem().directory());
   const Path relative = path.lexically_relative(storage_root);
-  if (!path.is_absolute() || path.lexically_normal() != path || relative.empty() ||
-      relative == "." || relative.string().starts_with("../") || relative == "..")
+  if (!IsPathWithinStorageRoot(path, relative))
     throw std::invalid_argument(std::string(label) + " must be within storage root");
 
   Path component = storage_root;
@@ -67,19 +99,6 @@ class RestorePreviousOnFailure {
   bool cancelled_ = false;
 };
 
-uintmax_t
-DirectorySize(const Path& path)
-{
-  uintmax_t bytes = 0;
-  for (const auto& entry : fs::recursive_directory_iterator(path)) {
-    if (entry.is_symlink())
-      throw std::runtime_error("checkpoint contains symlink");
-    if (entry.is_regular_file())
-      bytes += entry.file_size();
-  }
-  return bytes;
-}
-
 void
 CopyDirectory(const Path& source, const Path& destination)
 {
@@ -102,10 +121,68 @@ DestinationPath(const StorageBackend& destination, const Path& storage_root)
   return StoragePath(destination, storage_root, "destination");
 }
 
-uintmax_t
-RestoreSize(const StorageBackend& source, const Path& storage_root)
+void
+StageRestore(const RestorePlan& plan, const Path& destination, TransferControl control)
 {
-  return DirectorySize(SourcePath(source, storage_root));
+  control.Check();
+  for (const auto& directory : plan.directories) {
+    if (!IsSafeRelativePath(directory.relative_path))
+      throw std::invalid_argument("invalid restore directory");
+  }
+  for (const auto& file : plan.files) {
+    if (!IsSafeRelativePath(file.relative_path))
+      throw std::invalid_argument("invalid restore file");
+  }
+  fs::create_directory(destination);
+  for (const auto& directory : plan.directories)
+    fs::create_directory(destination / directory.relative_path);
+  for (const auto& file : plan.files) {
+    control.Check();
+    fs::copy_file(file.source_locator, destination / file.relative_path);
+    fs::permissions(destination / file.relative_path, file.permissions);
+  }
+  // Apply directory modes only after all children have been populated.
+  for (auto directory = plan.directories.rbegin(); directory != plan.directories.rend(); ++directory)
+    fs::permissions(destination / directory->relative_path, directory->permissions);
+  fs::permissions(destination, plan.root_permissions);
+}
+
+RestorePlan
+BuildRestorePlan(const Path& source, TransferControl control, std::size_t limit)
+{
+  control.Check();
+  ValidateSourceRoot(source);
+  RestorePlan plan;
+  plan.root_permissions = fs::symlink_status(source).permissions();
+  for (const auto& entry : fs::recursive_directory_iterator(source)) {
+    control.Check();
+    if (plan.files.size() + plan.directories.size() >= limit)
+      throw std::invalid_argument("checkpoint exceeds entry limit");
+    const auto status = entry.symlink_status();
+    if (fs::is_symlink(status))
+      throw std::runtime_error("checkpoint contains symlink");
+
+    const Path relative = entry.path().lexically_relative(source);
+    if (!IsContainedRelativePath(relative))
+      throw std::runtime_error("checkpoint contains invalid path");
+    if (fs::is_directory(status)) {
+      plan.directories.push_back(RestoreDirectory{relative, status.permissions()});
+      continue;
+    }
+    if (!fs::is_regular_file(status))
+      throw std::runtime_error("checkpoint contains unsupported file type");
+
+    plan.files.push_back(
+        RestoreFile{entry.path().string(), relative, entry.file_size(), status.permissions()});
+  }
+  // Lexicographic path ordering is deterministic and puts parents first.
+  std::sort(plan.directories.begin(), plan.directories.end(), [](const auto& a, const auto& b) {
+    return a.relative_path < b.relative_path;
+  });
+  std::sort(plan.files.begin(), plan.files.end(), [](const auto& a, const auto& b) {
+    return a.relative_path < b.relative_path;
+  });
+  return plan;
 }
 
 bool

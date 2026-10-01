@@ -16,15 +16,30 @@
 #include <vector>
 
 #include "transfer/restore_plan.hpp"
+#include "transfer/transfer_control.hpp"
 #include "utils/event_loop.hpp"
 
 namespace snapshot::pagebroker {
+// Explicit values are fixed for one native session. Empty credentials select
+// the native AWS provider chain. Addressing, TLS/CA and worker configuration use
+// the pinned library's process environment, set before constructing sessions.
+struct ModelStreamerSessionOptions {
+  std::string region;
+  std::string endpoint;
+  std::string access_key_id;
+  std::string secret_access_key;
+  std::string session_token;
+};
+
 // Materializes restore plans through Model Streamer while one event loop
 // coordinates multiple in-flight submissions and their responses.
 class ModelStreamerRestore {
  public:
   // Creates an inactive restore coordinator that starts on its first Stage call.
   explicit ModelStreamerRestore(std::chrono::milliseconds submission_timeout = std::chrono::hours(2));
+  explicit ModelStreamerRestore(
+      ModelStreamerSessionOptions options,
+      std::chrono::milliseconds submission_timeout = std::chrono::hours(2));
   // Stops the event loop and streamer, then fails any unfinished submissions.
   ~ModelStreamerRestore() noexcept;
   // Prevents copying ownership of the event loop and native streamer handle.
@@ -35,7 +50,7 @@ class ModelStreamerRestore {
   // before any failed submission waiter is released.
   bool Failed() const noexcept;
   // Creates the destination tree and blocks until all planned data is restored.
-  void Stage(const RestorePlan& plan, const Path& destination);
+  void Stage(const RestorePlan& plan, const Path& destination, TransferControl control = {});
 
  private:
   // Owns one submission's ABI arrays, response progress, and completion signal.
@@ -55,6 +70,7 @@ class ModelStreamerRestore {
     std::string first_error;
     std::promise<void> completion;
     std::chrono::steady_clock::time_point deadline;
+    TransferControl control;
   };
 
   // Holds one response returned by the Model Streamer API for dispatch by ID.
@@ -99,7 +115,7 @@ class ModelStreamerRestore {
   // Starts the native Model Streamer session and its event-loop worker.
   void Start();
   // Restores files in byte-bounded submissions and then applies their permissions.
-  void RestoreFiles(const RestorePlan& plan, const Path& destination);
+  void RestoreFiles(const RestorePlan& plan, const Path& destination, TransferControl control);
   // Sends an entry to Model Streamer and registers its assigned submission ID.
   void Submit(std::unique_ptr<StreamerEntry>& entry);
   // Applies one response to an entry and reports whether the submission finished.
@@ -120,6 +136,7 @@ class ModelStreamerRestore {
   std::once_flag start_once_;
   void* value_ = nullptr;
   const std::chrono::milliseconds submission_timeout_;
+  const ModelStreamerSessionOptions options_;
   const std::exception_ptr stopped_error_;
   utils::EventLoop event_loop_;
   std::unordered_map<std::uint64_t, std::unique_ptr<StreamerEntry>> active_;
