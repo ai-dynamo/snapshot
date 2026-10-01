@@ -12,8 +12,8 @@
 #include <system_error>
 #include <utility>
 
-#include "transfer/model_streamer_transfer_engine.hpp"
-#include "transfer/posix_copy_engine.hpp"
+#include "transfer/engine/model_streamer/model_streamer_transfer_engine.hpp"
+#include "transfer/engine/posix/posix_copy_engine.hpp"
 
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
