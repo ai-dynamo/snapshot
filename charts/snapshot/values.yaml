@@ -215,6 +215,10 @@ config:
       - "*/__pycache__"
       - "*.pyc"
 
+  checkpoint:
+    # Maximum seconds before the agent marks a checkpoint failed.
+    checkpointTimeoutSeconds: 3600
+
   restore:
     # Maximum seconds to allow a restore attempt before the agent marks it failed
     restoreTimeoutSeconds: 7200

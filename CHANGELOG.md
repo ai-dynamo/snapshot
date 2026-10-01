@@ -41,6 +41,15 @@ commit-level history for each release is on its
   restore compatibility still compares the artifact's manifest. CRD change;
   populated for captures that reach `Ready` after the upgrade, so a content
   already `Ready` before it is not backfilled.
+- `config.checkpoint.checkpointTimeoutSeconds` (default `3600`) fails a capture
+  that outruns it.
+
+### Changed
+
+- The agent drives captures from a workqueue rather than per-capture
+  `coordination.k8s.io` Leases, so the `LeaseCancelled` failure reason no longer
+  occurs and the agent `ClusterRole`'s now-unused `leases` rule is kept for one
+  more release before removal in v0.3.0+.
 
 ## [0.1.0] - 2026-09-06
 
