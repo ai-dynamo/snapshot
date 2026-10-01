@@ -11,15 +11,16 @@ CUDA_HELPER_TESTS_AVAILABLE := $(shell \
 	printf '\043include <openssl/evp.h>\nint main() { return 0; }\n' | \
 		$(CXX) $(CUDA_HELPER_CXXFLAGS) -x c++ - -lcrypto -o "$$probe" \
 		>/dev/null 2>&1; \
-	status=$$?; rm -f "$$probe"; \
-	test $$status -eq 0 && printf 1)
+	probe_status=$$?; rm -f "$$probe"; \
+	test $$probe_status -eq 0 && printf 1)
 REQUIRE_CUDA_HELPER_TESTS ?= $(if $(CI),1,0)
 
 .DEFAULT_GOAL := build
 
-.PHONY: build test test-go test-cuda-helper tidy lint fmt pagebroker-generate pagebroker-check-generated
+.PHONY: build test test-go test-cuda-helper test-cuda-helper-storage tidy lint fmt pagebroker-generate pagebroker-check-generated
 
 PROTOC_GEN_GO := $(TOOLS_BIN_DIR)/protoc-gen-go
+CUDA_ROOT ?= /usr/local/cuda
 
 build:
 	GOOS=linux GOARCH=amd64 go build -o bin/agent ./cmd/agent
@@ -42,30 +43,10 @@ test:
 		"after installing a C++20 compiler and OpenSSL development files" >&2
 endif
 
-test-cuda-helper:
-	@mkdir -p bin
-	$(CXX) $(CUDA_HELPER_CXXFLAGS) \
-		-o bin/cuda-checkpoint-helper-storage-test \
-		cmd/cuda-checkpoint-helper/content_digest.cpp \
-		cmd/cuda-checkpoint-helper/storage_manifest.cpp \
-		cmd/cuda-checkpoint-helper/storage_manifest_test.cpp \
-		-lcrypto
-	bin/cuda-checkpoint-helper-storage-test
-	$(CXX) $(CUDA_HELPER_CXXFLAGS) \
-		-o bin/cuda-checkpoint-helper-content-digest-test \
-		cmd/cuda-checkpoint-helper/content_digest.cpp \
-		cmd/cuda-checkpoint-helper/content_digest_test.cpp \
-		-lcrypto
-	bin/cuda-checkpoint-helper-content-digest-test
-	$(CXX) $(CUDA_HELPER_CXXFLAGS) \
-		-o bin/cuda-checkpoint-helper-transfer-config-test \
-		cmd/cuda-checkpoint-helper/transfer_config.cpp \
-		cmd/cuda-checkpoint-helper/transfer_config_test.cpp
-	bin/cuda-checkpoint-helper-transfer-config-test
-	$(CXX) $(CUDA_HELPER_CXXFLAGS) \
-		-o bin/cuda-checkpoint-helper-transfer-cancellation-test \
-		cmd/cuda-checkpoint-helper/transfer_engine_test.cpp
-	bin/cuda-checkpoint-helper-transfer-cancellation-test
+test-cuda-helper: test-cuda-helper-storage
+
+test-cuda-helper-storage:
+	$(MAKE) -C cmd/cuda-checkpoint-helper test-storage
 
 fmt:
 	gofmt -w .

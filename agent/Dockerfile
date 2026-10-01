@@ -15,7 +15,7 @@
 # Optional targets for CI:
 #   docker build --target linter --build-context api=../api .   # Run linting
 #   docker build --target tester --build-context api=../api .   # Run tests
-#   docker build --target cuda-transfer-contracts-builder .      # Validate CUDA transfer contracts
+#   docker build --target cuda-storage-builder .                 # Validate CUDA storage and checksums
 
 # =============================================================================
 # Build Arguments
@@ -51,63 +51,15 @@ ARG BASE_IMAGE=placeholder-requires-base-image-arg
 FROM ${CUDA_HELPER_HEADERS_IMAGE} AS cuda-helper-headers
 
 # =============================================================================
-# Stage: CUDA transfer contract builder (no transfer adapter)
+# Stage: CUDA storage and checksum tests
 # =============================================================================
-FROM ${AGENT_BASE_IMAGE} AS cuda-transfer-contracts-builder
-
+FROM ${AGENT_BASE_IMAGE} AS cuda-storage-builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
-
+    build-essential libssl-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /workspace
-
-COPY --from=cuda-helper-headers /usr/local/cuda-13.4/targets/x86_64-linux/include/cuda.h /opt/cuda-13.4/include/cuda.h
-COPY cmd/cuda-checkpoint-helper/content_digest.cpp ./cmd/cuda-checkpoint-helper/content_digest.cpp
-COPY cmd/cuda-checkpoint-helper/content_digest.hpp ./cmd/cuda-checkpoint-helper/content_digest.hpp
-COPY cmd/cuda-checkpoint-helper/content_digest_test.cpp ./cmd/cuda-checkpoint-helper/content_digest_test.cpp
-COPY cmd/cuda-checkpoint-helper/storage_manifest.cpp ./cmd/cuda-checkpoint-helper/storage_manifest.cpp
-COPY cmd/cuda-checkpoint-helper/storage_manifest.hpp ./cmd/cuda-checkpoint-helper/storage_manifest.hpp
-COPY cmd/cuda-checkpoint-helper/storage_manifest_test.cpp ./cmd/cuda-checkpoint-helper/storage_manifest_test.cpp
-COPY cmd/cuda-checkpoint-helper/transfer_config.cpp ./cmd/cuda-checkpoint-helper/transfer_config.cpp
-COPY cmd/cuda-checkpoint-helper/transfer_config.hpp ./cmd/cuda-checkpoint-helper/transfer_config.hpp
-COPY cmd/cuda-checkpoint-helper/transfer_config_test.cpp ./cmd/cuda-checkpoint-helper/transfer_config_test.cpp
-COPY cmd/cuda-checkpoint-helper/transfer_cancellation.hpp ./cmd/cuda-checkpoint-helper/transfer_cancellation.hpp
-COPY cmd/cuda-checkpoint-helper/transfer_engine.hpp ./cmd/cuda-checkpoint-helper/transfer_engine.hpp
-COPY cmd/cuda-checkpoint-helper/transfer_engine_test.cpp ./cmd/cuda-checkpoint-helper/transfer_engine_test.cpp
-COPY cmd/cuda-checkpoint-helper/transfer_backend_unavailable.cpp ./cmd/cuda-checkpoint-helper/transfer_backend_unavailable.cpp
-
-RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread \
-      -I/opt/cuda-13.4/include \
-      -c ./cmd/cuda-checkpoint-helper/transfer_backend_unavailable.cpp \
-      -o /transfer-backend-unavailable.o
-
-RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
-      -o /cuda-checkpoint-helper-storage-test \
-      ./cmd/cuda-checkpoint-helper/content_digest.cpp \
-      ./cmd/cuda-checkpoint-helper/storage_manifest.cpp \
-      ./cmd/cuda-checkpoint-helper/storage_manifest_test.cpp \
-      -lcrypto \
-    && /cuda-checkpoint-helper-storage-test
-
-RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
-      -o /cuda-checkpoint-helper-content-digest-test \
-      ./cmd/cuda-checkpoint-helper/content_digest.cpp \
-      ./cmd/cuda-checkpoint-helper/content_digest_test.cpp \
-      -lcrypto \
-    && /cuda-checkpoint-helper-content-digest-test
-
-RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
-      -o /cuda-checkpoint-helper-transfer-config-test \
-      ./cmd/cuda-checkpoint-helper/transfer_config.cpp \
-      ./cmd/cuda-checkpoint-helper/transfer_config_test.cpp \
-    && /cuda-checkpoint-helper-transfer-config-test
-
-RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
-      -I/opt/cuda-13.4/include \
-      -o /cuda-checkpoint-helper-transfer-cancellation-test \
-      ./cmd/cuda-checkpoint-helper/transfer_engine_test.cpp \
-    && /cuda-checkpoint-helper-transfer-cancellation-test
+COPY cmd/cuda-checkpoint-helper/ cmd/cuda-checkpoint-helper/
+COPY pagebroker/file_descriptor.cpp pagebroker/file_descriptor.hpp pagebroker/
+RUN make -C cmd/cuda-checkpoint-helper test-storage
 
 # =============================================================================
 # Stage: Go base - Common setup for Go builds

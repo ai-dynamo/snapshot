@@ -58,3 +58,30 @@ func TestAgentConfigValidateRequiresPageBrokerControlSocket(t *testing.T) {
 		t.Fatal("expected error for missing PageBroker control socket")
 	}
 }
+
+func TestCUDACheckpointConfiguration(t *testing.T) {
+	for _, mode := range []string{"", "driver", "custom", "invalid"} {
+		for _, enabled := range []bool{false, true} {
+			for _, checksum := range []bool{false, true} {
+				cfg := validAgentConfig()
+				cfg.CUDACheckpoint = CUDACheckpointSpec{Enabled: enabled, StorageMode: mode, EnableChecksumDigest: checksum}
+				valid := mode != "invalid" && (!checksum || enabled)
+				if err := cfg.Validate(); (err == nil) != valid {
+					t.Errorf("mode=%q enabled=%t checksum=%t: %v", mode, enabled, checksum, err)
+				}
+			}
+		}
+	}
+	cfg := validAgentConfig()
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CUDACheckpoint.Enabled || cfg.CUDACheckpoint.EnableChecksumDigest || cfg.CUDACheckpoint.StorageMode != "driver" ||
+		cfg.CUDACheckpoint.TransferBufferCount != 32 || cfg.CUDACheckpoint.TransferChunkBytes != 134217728 || cfg.CUDACheckpoint.MaxPinnedBytes != 0 {
+		t.Fatalf("unexpected defaults: %+v", cfg.CUDACheckpoint)
+	}
+	cfg.CUDACheckpoint.TransferBufferCount = ^uint64(0)
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("accepted overflowing pinned buffer allocation")
+	}
+}

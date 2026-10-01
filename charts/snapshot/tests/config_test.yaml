@@ -5,6 +5,31 @@ suite: snapshot agent configuration validation
 templates:
   - templates/configmap.yaml
 tests:
+  - it: keeps the persistent helper and checksums disabled by default
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: "cudaCheckpoint:\n  enabled: false\n  storageMode: \"driver\"\n  enableChecksumDigest: false"
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: "gpuEngineEnabled|cudaStorageMode"
+
+  - it: configures eager CustomStorage independently of PageBroker
+    set:
+      cudaCheckpoint.enabled: true
+      cudaCheckpoint.storageMode: custom
+      cudaCheckpoint.enableChecksumDigest: true
+      cudaCheckpoint.transferBufferCount: 4
+      cudaCheckpoint.transferChunkBytes: 1048576
+      cudaCheckpoint.maxPinnedBytes: 8388608
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: "cudaCheckpoint:\n  enabled: true\n  storageMode: \"custom\"\n  enableChecksumDigest: true\n  transferBufferCount: 4\n  transferChunkBytes: 1048576\n  maxPinnedBytes: 8388608"
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: "pageBroker:\n  enabled: false"
+
   - it: rejects a caller-selected checkpoint mount path
     set:
       storage.pvc.basePath: /other

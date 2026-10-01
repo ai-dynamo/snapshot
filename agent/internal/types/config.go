@@ -17,13 +17,14 @@ const CheckpointBasePath = "/checkpoints"
 
 // AgentConfig holds static checkpoint settings plus runtime fields populated at startup.
 type AgentConfig struct {
-	NodeName          string          `yaml:"-"`
-	HostKernelVersion string          `yaml:"-"`
-	Storage           StorageSpec     `yaml:"storage"`
-	Overlay           OverlaySettings `yaml:"overlay"`
-	PageBroker        PageBrokerSpec  `yaml:"pageBroker"`
-	Restore           RestoreSpec     `yaml:"restore"`
-	CRIU              CRIUSettings    `yaml:"criu"`
+	NodeName          string             `yaml:"-"`
+	HostKernelVersion string             `yaml:"-"`
+	Storage           StorageSpec        `yaml:"storage"`
+	Overlay           OverlaySettings    `yaml:"overlay"`
+	PageBroker        PageBrokerSpec     `yaml:"pageBroker"`
+	CUDACheckpoint    CUDACheckpointSpec `yaml:"cudaCheckpoint"`
+	Restore           RestoreSpec        `yaml:"restore"`
+	CRIU              CRIUSettings       `yaml:"criu"`
 }
 
 func (c *AgentConfig) LoadEnvOverrides() {
@@ -47,6 +48,9 @@ func (c *AgentConfig) Validate() error {
 	c.Storage.BasePath = basePath
 	if c.PageBroker.Enabled && strings.TrimSpace(c.PageBroker.ControlSocketPath) == "" {
 		return &ConfigError{Field: "pageBroker.controlSocketPath", Message: "pageBroker.controlSocketPath is required when PageBroker is enabled"}
+	}
+	if err := c.CUDACheckpoint.Validate(); err != nil {
+		return err
 	}
 	if c.CRIU.TcpClose && c.CRIU.TcpEstablished {
 		return &ConfigError{
@@ -74,6 +78,39 @@ type StorageSpec struct {
 type PageBrokerSpec struct {
 	Enabled           bool   `yaml:"enabled"`
 	ControlSocketPath string `yaml:"controlSocketPath"`
+}
+
+// CUDACheckpointSpec configures the persistent agent-owned helper. The disabled
+// default retains the existing CLI and launch-job behavior.
+type CUDACheckpointSpec struct {
+	Enabled              bool   `yaml:"enabled"`
+	StorageMode          string `yaml:"storageMode"`
+	EnableChecksumDigest bool   `yaml:"enableChecksumDigest"`
+	TransferBufferCount  uint64 `yaml:"transferBufferCount"`
+	TransferChunkBytes   uint64 `yaml:"transferChunkBytes"`
+	MaxPinnedBytes       uint64 `yaml:"maxPinnedBytes"`
+}
+
+func (c *CUDACheckpointSpec) Validate() error {
+	if c.StorageMode == "" {
+		c.StorageMode = "driver"
+	}
+	if c.StorageMode != "driver" && c.StorageMode != "custom" {
+		return &ConfigError{Field: "cudaCheckpoint.storageMode", Message: "must be custom or driver"}
+	}
+	if c.EnableChecksumDigest && !c.Enabled {
+		return &ConfigError{Field: "cudaCheckpoint.enableChecksumDigest", Message: "requires the persistent CUDA helper"}
+	}
+	if c.TransferBufferCount == 0 {
+		c.TransferBufferCount = 32
+	}
+	if c.TransferChunkBytes == 0 {
+		c.TransferChunkBytes = 128 * 1024 * 1024
+	}
+	if c.TransferBufferCount > ^uint64(0)/c.TransferChunkBytes {
+		return &ConfigError{Field: "cudaCheckpoint", Message: "transfer buffer allocation overflows"}
+	}
+	return nil
 }
 
 // RestoreSpec holds settings for the CRIU restore process.

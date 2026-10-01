@@ -15,14 +15,11 @@
 namespace cuda_checkpoint_storage {
 
 constexpr const char *kManifestName = "manifest.txt";
-constexpr const char *kLegacyTemporaryManifestName = "manifest.txt.tmp";
-constexpr const char *kTemporaryManifestPrefix = "manifest.txt.tmp.";
 
 struct ManifestExtent {
   std::string source_uuid;
   size_t size = 0;
   std::string filename;
-  std::string sha256;
 };
 
 struct DeviceExtent {
@@ -60,19 +57,9 @@ bool BuildTransferJobs(const std::vector<ManifestExtent> &extents,
                        const std::vector<DevicePair> &device_pairs,
                        std::vector<TransferJob> *jobs, std::string *error);
 
-// ApplyOrVerifyExtentDigests records inline checkpoint digests or verifies the
-// digests produced by the sole restore read against the durable manifest.
-bool ApplyOrVerifyExtentDigests(bool checkpoint,
-                                const std::vector<TransferJob> &jobs,
-                                const std::vector<std::string> &digests,
-                                std::vector<ManifestExtent> *extents,
-                                std::string *error);
-
-// Manifest lifecycle functions require the caller to own the participant
-// directory exclusively for the operation. PageBroker provides one trusted
-// directory per CUDA participant beneath its transaction-exclusive staging
-// root; callers must not run concurrent lifecycle operations against the same
-// participant directory.
+// WriteManifest requires a fresh participant directory. The caller owns that
+// directory exclusively and publishes the enclosing checkpoint only after all
+// participants complete. Concurrent operations must not share a directory.
 bool WriteManifest(const std::filesystem::path &directory,
                    const std::vector<ManifestExtent> &extents,
                    std::string *error);
@@ -81,6 +68,5 @@ bool ReadManifest(const std::filesystem::path &directory,
 bool ValidateExtentFiles(const std::filesystem::path &directory,
                          const std::vector<ManifestExtent> &extents,
                          std::string *error);
-bool RemoveManifest(const std::filesystem::path &directory, std::string *error);
 
 } // namespace cuda_checkpoint_storage

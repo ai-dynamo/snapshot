@@ -25,6 +25,14 @@ data:
     overlay:
       exclusions: {{ toYaml .Values.config.overlay.exclusions | nindent 8 }}
 
+    cudaCheckpoint:
+      enabled: {{ .Values.cudaCheckpoint.enabled }}
+      storageMode: {{ .Values.cudaCheckpoint.storageMode | quote }}
+      enableChecksumDigest: {{ .Values.cudaCheckpoint.enableChecksumDigest }}
+      transferBufferCount: {{ .Values.cudaCheckpoint.transferBufferCount | int64 }}
+      transferChunkBytes: {{ .Values.cudaCheckpoint.transferChunkBytes | int64 }}
+      maxPinnedBytes: {{ .Values.cudaCheckpoint.maxPinnedBytes | int64 }}
+
     pageBroker:
       enabled: {{ .Values.pageBroker.enabled }}
       {{- if .Values.pageBroker.enabled }}
