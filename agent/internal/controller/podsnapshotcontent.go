@@ -720,14 +720,10 @@ func contentNameFromInformerObj(obj interface{}) (string, bool) {
 // The created Pod's startup command survives annotation edits. Delivery
 // expectation never depends on the operator's current image or settings.
 func cuInterposeRequired(pod *corev1.Pod, target string) (bool, error) {
-	required, err := podcontract.ParseCuInterposeAnnotation(pod.Annotations)
-	if err != nil {
-		return false, err
-	}
 	for _, container := range pod.Spec.Containers {
 		if container.Name == target && len(container.Command) > 0 && container.Command[0] == podcontract.CuInterposeLauncherPath {
 			return true, nil
 		}
 	}
-	return required, nil
+	return podcontract.ParseCuInterposeAnnotation(pod.Annotations)
 }
