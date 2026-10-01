@@ -14,8 +14,8 @@ mod memory;
 mod runtime;
 
 use cudarc::driver::sys::CUresult::{
-    CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_NOT_INITIALIZED, CUDA_ERROR_NOT_READY, CUDA_ERROR_UNKNOWN,
-    CUDA_SUCCESS,
+    CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_NOT_INITIALIZED, CUDA_ERROR_NOT_READY,
+    CUDA_ERROR_OPERATING_SYSTEM, CUDA_ERROR_UNKNOWN, CUDA_SUCCESS,
 };
 use cudarc::driver::sys::{
     CUcontext, CUdevice, CUdeviceptr, CUipcMemHandle, CUmemAccessDesc, CUmemAllocationHandleType,
@@ -95,10 +95,10 @@ fn cuda_error(error: Error, fallback: CUresult) -> CUresult {
         Error::RuntimeFailed => fallback,
         error => {
             eprintln!("cuinterpose: {error}");
-            if matches!(error, Error::Startup(_)) {
-                CUDA_ERROR_NOT_INITIALIZED
-            } else {
-                fallback
+            match error {
+                Error::Startup(_) => CUDA_ERROR_NOT_INITIALIZED,
+                Error::Io { .. } => CUDA_ERROR_OPERATING_SYSTEM,
+                _ => fallback,
             }
         }
     }
@@ -152,82 +152,138 @@ mod tests {
     use super::*;
     use std::ffi::c_char;
 
-    #[test]
-    fn frontend_registration_is_validated_and_idempotent() {
-        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-        assert!(page_size > 0);
-        let page_size = page_size as usize;
-        let mapping = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                page_size * 2,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1,
-                0,
-            )
-        };
-        assert_ne!(mapping, libc::MAP_FAILED);
-        let guard_page = unsafe { mapping.cast::<u8>().add(page_size) };
-        assert_eq!(
-            unsafe { libc::mprotect(guard_page.cast(), page_size, libc::PROT_NONE) },
-            0
-        );
-        let prefix = unsafe { guard_page.sub(8).cast::<u32>() };
-        for (version, size) in [(999, size_of::<FrontendAbi>() as u32), (ABI_VERSION, 8)] {
-            unsafe {
-                prefix.write(version);
-                prefix.add(1).write(size);
-            }
-            let mut output = std::ptr::null();
-            assert_eq!(
-                unsafe { cuinterpose_core_init(prefix.cast(), &mut output) },
-                CUDA_ERROR_INVALID_VALUE
-            );
-            assert!(output.is_null());
-            assert!(
-                G_FRONTEND_ABI.get().is_none(),
-                "invalid prefix initialized core state"
-            );
+    pub(crate) fn in_child_process(name: &str, body: impl FnOnce()) {
+        if std::env::var("CUINTERPOSE_UNIT_CHILD").as_deref() == Ok(name) {
+            body();
+            return;
         }
-        assert_eq!(unsafe { libc::munmap(mapping, page_size * 2) }, 0);
+        static NEXT_CHILD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let child = NEXT_CHILD.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!("cui-{}-{child}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name])
+            .env("CUINTERPOSE_UNIT_CHILD", name)
+            .env("SNAPSHOT_CONTROL_DIR", &directory)
+            .status()
+            .unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+        assert!(status.success(), "child test {name} failed: {status}");
+    }
 
-        unsafe extern "C" fn resolve(_: *const c_char) -> *mut c_void {
-            panic!("ABI registration must not invoke the resolver");
+    pub(crate) fn unused_driver_symbol() -> *mut c_void {
+        unsafe extern "C" fn unused() -> CUresult {
+            panic!("test unexpectedly called an unimplemented CUDA symbol");
         }
-        unsafe extern "C" fn other_resolve(_: *const c_char) -> *mut c_void {
-            std::ptr::null_mut()
-        }
-        let frontend = FrontendAbi {
+        unused as *const () as *mut c_void
+    }
+
+    unsafe extern "C" fn resolve(_: *const c_char) -> *mut c_void {
+        panic!("ABI registration must not invoke the resolver");
+    }
+
+    fn frontend() -> FrontendAbi {
+        FrontendAbi {
             version: ABI_VERSION,
             size: size_of::<FrontendAbi>() as u32,
             resolve,
-        };
-        let barrier = std::sync::Barrier::new(32);
-        std::thread::scope(|scope| {
-            for _ in 0..32 {
-                scope.spawn(|| {
-                    barrier.wait();
-                    for _ in 0..2 {
-                        let mut output = std::ptr::null();
-                        assert_eq!(
-                            unsafe { cuinterpose_core_init(&frontend, &mut output) },
-                            CUDA_SUCCESS
-                        );
-                        assert!(std::ptr::eq(output, &G_BACKEND_ABI));
+        }
+    }
+
+    #[test]
+    fn frontend_registration_rejects_bad_prefix() {
+        in_child_process("tests::frontend_registration_rejects_bad_prefix", || {
+            let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+            assert!(page_size > 0);
+            let page_size = page_size as usize;
+            let mapping = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    page_size * 2,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            assert_ne!(mapping, libc::MAP_FAILED);
+            let guard_page = unsafe { mapping.cast::<u8>().add(page_size) };
+            assert_eq!(
+                unsafe { libc::mprotect(guard_page.cast(), page_size, libc::PROT_NONE) },
+                0
+            );
+            let prefix = unsafe { guard_page.sub(8).cast::<u32>() };
+            for (version, size) in [(999, size_of::<FrontendAbi>() as u32), (ABI_VERSION, 8)] {
+                unsafe {
+                    prefix.write(version);
+                    prefix.add(1).write(size);
+                }
+                let mut output = std::ptr::null();
+                assert_eq!(
+                    unsafe { cuinterpose_core_init(prefix.cast(), &mut output) },
+                    CUDA_ERROR_INVALID_VALUE
+                );
+                assert!(output.is_null());
+                assert!(
+                    G_FRONTEND_ABI.get().is_none(),
+                    "invalid prefix initialized core state"
+                );
+            }
+            assert_eq!(unsafe { libc::munmap(mapping, page_size * 2) }, 0);
+        });
+    }
+
+    #[test]
+    fn frontend_registration_is_concurrently_idempotent() {
+        in_child_process(
+            "tests::frontend_registration_is_concurrently_idempotent",
+            || {
+                let frontend = frontend();
+                let barrier = std::sync::Barrier::new(32);
+                std::thread::scope(|scope| {
+                    for _ in 0..32 {
+                        scope.spawn(|| {
+                            barrier.wait();
+                            for _ in 0..2 {
+                                let mut output = std::ptr::null();
+                                assert_eq!(
+                                    unsafe { cuinterpose_core_init(&frontend, &mut output) },
+                                    CUDA_SUCCESS
+                                );
+                                assert!(std::ptr::eq(output, &G_BACKEND_ABI));
+                            }
+                        });
                     }
                 });
-            }
-        });
-        let incompatible = FrontendAbi {
-            resolve: other_resolve,
-            ..frontend
-        };
-        let mut output = std::ptr::null();
-        assert_eq!(
-            unsafe { cuinterpose_core_init(&incompatible, &mut output) },
-            CUDA_ERROR_INVALID_VALUE
+            },
         );
-        assert!(output.is_null());
+    }
+
+    #[test]
+    fn frontend_registration_rejects_mismatched_resolver() {
+        in_child_process(
+            "tests::frontend_registration_rejects_mismatched_resolver",
+            || {
+                unsafe extern "C" fn other_resolve(_: *const c_char) -> *mut c_void {
+                    std::ptr::null_mut()
+                }
+                let frontend = frontend();
+                let mut output = std::ptr::null();
+                assert_eq!(
+                    unsafe { cuinterpose_core_init(&frontend, &mut output) },
+                    CUDA_SUCCESS
+                );
+                let incompatible = FrontendAbi {
+                    resolve: other_resolve,
+                    ..frontend
+                };
+                let mut output = std::ptr::null();
+                assert_eq!(
+                    unsafe { cuinterpose_core_init(&incompatible, &mut output) },
+                    CUDA_ERROR_INVALID_VALUE
+                );
+                assert!(output.is_null());
+            },
+        );
     }
 }
