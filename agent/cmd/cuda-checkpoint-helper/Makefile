@@ -18,9 +18,9 @@ TRANSFER_FLAGS := -DPAGEBROKER_NIXL -I$(NIXL_ROOT)/include -L$(NIXL_ROOT)/lib -l
 endif
 
 .DEFAULT_GOAL := test
-.PHONY: test test-storage
+.PHONY: test test-storage test-checkpoint
 
-test: test-storage
+test: test-storage test-checkpoint
 
 bin:
 	mkdir -p bin
@@ -33,3 +33,9 @@ test-storage: | bin
 	./bin/content-digest-test
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(STORAGE) extent_digests_test.cpp $(COMMON) -lcrypto -o bin/extent-digests-test
 	./bin/extent-digests-test
+
+
+test-checkpoint: | bin
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -I$(CUDA_ROOT)/include \
+		checkpoint.cpp checkpoint_test.cpp $(GTEST_FLAGS) -pthread -o bin/checkpoint-test
+	./bin/checkpoint-test
