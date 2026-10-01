@@ -94,21 +94,24 @@ Common `make` targets from the repo root:
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the contribution process and DCO
 sign-off.
 
-### PageBroker native S3 read tests
+### PageBroker native S3 upload and restore tests
 
-The native restore component accepts explicit `s3://bucket/key` source locators
-and optional expected SHA-256 values in an in-memory `RestorePlan`. Digests are
-checked after native reads complete and before final permissions are applied.
-Existing PageBroker RPCs remain filesystem-only; these tests do not define an
-artifact index or expose S3 through filesystem protobuf fields.
+These tests exercise direct AWS SDK uploads and native Model Streamer S3 reads.
+See the [S3 storage contract](../../agent/pagebroker/S3.md) for configuration,
+ownership, integrity and failure behavior.
 
-Local native builds require a C++20 compiler, protobuf, GoogleTest, OpenSSL
-development headers, and both pinned native libraries. Run
-`make -C agent/pagebroker test daemon MODEL_STREAMER_LIB_DIR=/path/to/libraries`
+Local native builds require a C++20 compiler, protobuf, GoogleTest, OpenSSL,
+the pinned AWS SDK for C++ S3 component, and both pinned Streamer libraries.
+The Dockerfile builds SDK 1.11.584 at commit
+`bba3cfc14d4fc148aeee7a8ff7822dd7a9a0f4d3`, including its pinned submodules.
+For a local installation, build that revision with `BUILD_ONLY=s3`, shared
+libraries, and `CMAKE_INSTALL_LIBDIR=lib`. Run
+`make -C agent/pagebroker test daemon MODEL_STREAMER_LIB_DIR=/path/to/libraries AWS_SDK_PREFIX=/path/to/aws-sdk`
 for filesystem, digest, and session-recovery tests. These tests need no S3
 endpoint or credentials.
 
-To exercise S3 in the actual distroless runtime, build the dedicated image target:
+To exercise S3 in the distroless runtime, build the dedicated image target with
+the pinned wheel inputs described above:
 
 ```bash
 make docker-build-pagebroker REGISTRY=local VERSION=s3-test \
@@ -117,44 +120,24 @@ python3 -m venv /tmp/pagebroker-s3-tests
 /tmp/pagebroker-s3-tests/bin/pip install -r agent/pagebroker/tests/requirements.txt
 PATH="/tmp/pagebroker-s3-tests/bin:$PATH" make -C agent/pagebroker s3-fixture-test
 /tmp/pagebroker-s3-tests/bin/python agent/pagebroker/tests/s3_integration.py \
-  --image local/pagebroker:s3-test
+  --resources --image local/pagebroker:s3-test
 /tmp/pagebroker-s3-tests/bin/python agent/pagebroker/tests/s3_integration.py \
   --tls --image local/pagebroker:s3-test
 ```
 
-The runner always starts a disposable local Moto service and uses fixed test
-credentials. Inherited AWS credentials, profiles, endpoints, and configuration
-files are ignored. The Linux Docker runner uses host networking to reach the
-disposable Moto service. It uploads a fixture with nested and empty directories,
-zero-length objects, binary contents, special key characters, and a file larger
-than the native S3 chunk size. Downloads go through the real Model Streamer S3 plugin.
-The tests check hashes, permissions, concurrent restores, missing objects,
-truncation, and endpoint failures, and report throughput and peak RSS.
-The `--tls` run uses a temporary CA, checks verified HTTPS reads, and checks that
-a separate native process without that CA rejects the endpoint.
-Moto does not enforce authentication, so these tests do not validate IAM policies.
+The runner starts disposable local Moto storage with fixed test credentials,
+ignoring inherited AWS credentials, profiles, endpoints and configuration files.
+The Linux Docker runner uses host networking to reach it. Python prepares the
+isolated reader fixtures; C++ backend uploads populate separate round-trip
+prefixes, which the native Model Streamer restores.
 
-To test a locally built executable, use `make -C agent/pagebroker s3-test` with
-the Python dependencies installed; `--binary` can also be passed directly to the
-runner. This uses the same disposable local service.
+The tests cover hashes, permissions, empty files/directories, concurrency,
+multipart uploads, corruption, truncation, missing objects and endpoint errors.
+Injected failures exercise retries, cleanup and uncertain remote outcomes.
+`--resources` measures peak RSS and throughput in isolated uploads with a fixed
+buffer budget. `--tls` uses a temporary CA and checks that both clients reject
+the endpoint when that CA is missing. Moto does not enforce IAM policies.
 
-The native component supports the following configuration. Keep it consistent
-for the process lifetime; the local test runner supplies its own region,
-endpoint, credentials, and CA.
-
-| Input | Behavior |
-| --- | --- |
-| `ModelStreamerSessionOptions.region` / `.endpoint` | Explicit connection settings fixed when the native session starts |
-| `.access_key_id`, `.secret_access_key`, `.session_token` | Optional credentials fixed for the session; omit all to use the native AWS provider chain |
-| `RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING` | `0` for path addressing with compatible endpoints; otherwise the native default uses virtual addressing |
-| `AWS_CA_BUNDLE` | Custom CA file for verified HTTPS; the file must be available in the runtime |
-| `RUNAI_STREAMER_CONCURRENCY`, `RUNAI_STREAMER_S3_MAX_INFLIGHT_MIB` | Native worker count and S3 in-flight read window |
-| `RUNAI_STREAMER_S3_MAX_RETRIES`, `RUNAI_STREAMER_S3_TIMEOUT`, `RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS` | Native retry, chunk-retry deadline, and low-speed request timeout settings |
-
-The pinned native API has no per-submission cancellation or live credential
-replacement. The wrapper preserves its existing session teardown and recovery
-behavior. Its 10 GB submission target is not a total staging-memory limit.
-Empty files are created locally without a remote read, so the fixture separately
-checks that the empty S3 object exists. Source keys are passed literally to the
-pinned URI parser, without percent-encoding; keys containing newline characters
-are not supported by that parser.
+For a locally built executable, use `make -C agent/pagebroker s3-test` with the
+Python dependencies installed. The runner also accepts `--binary`; both paths
+use the same disposable local service.
