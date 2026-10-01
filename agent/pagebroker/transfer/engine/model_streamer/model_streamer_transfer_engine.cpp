@@ -7,7 +7,7 @@
 #include <stdexcept>
 #include <utility>
 
-#include "filesystem_storage.hpp"
+#include "transfer/filesystem/filesystem_storage.hpp"
 
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;

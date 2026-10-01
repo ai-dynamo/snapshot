@@ -15,7 +15,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "restore_plan.hpp"
+#include "transfer/restore_plan.hpp"
 #include "utils/event_loop.hpp"
 
 namespace snapshot::pagebroker {
