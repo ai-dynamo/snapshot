@@ -768,7 +768,10 @@ func TestRunCheckpoint_WritesFailedOnError(t *testing.T) {
 
 func TestExecutorCheckpointPageBrokerPrepareFailureDoesNotKill(t *testing.T) {
 	w := makeNodeController(t, &fakeCheckpointer{})
-	w.config.PageBroker = snapshottypes.PageBrokerSpec{ControlSocketPath: filepath.Join(t.TempDir(), "pagebroker.sock")}
+	w.config.PageBroker = snapshottypes.PageBrokerSpec{
+		ControlSocketPath: filepath.Join(t.TempDir(), "pagebroker.sock"),
+		TransferEngine:    "posix-copy",
+	}
 	ctx, target := startKillableTarget(t)
 	defer func() {
 		_ = target.Process.Kill()

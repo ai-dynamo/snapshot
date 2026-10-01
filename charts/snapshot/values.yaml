@@ -104,6 +104,7 @@ storage:
 # PageBroker sidecar: stages checkpoint images in memory and publishes them to
 # the checkpoint PVC it shares with the agent. See docs/operations/storage.md.
 pageBroker:
+  transferEngine: posix-copy  # posix-copy | model-streamer
   maxConcurrentRequests: 16
   staging:
     # Keep at or below both memory limits; see docs/operations/storage.md.

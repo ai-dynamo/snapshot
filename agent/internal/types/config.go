@@ -48,6 +48,19 @@ func (c *AgentConfig) Validate() error {
 	if strings.TrimSpace(c.PageBroker.ControlSocketPath) == "" {
 		return &ConfigError{Field: "pageBroker.controlSocketPath", Message: "pageBroker.controlSocketPath is required"}
 	}
+	transferEngine := strings.TrimSpace(c.PageBroker.TransferEngine)
+	if transferEngine == "" {
+		transferEngine = "posix-copy"
+	}
+	switch transferEngine {
+	case "posix-copy", "model-streamer":
+		c.PageBroker.TransferEngine = transferEngine
+	default:
+		return &ConfigError{
+			Field:   "pageBroker.transferEngine",
+			Message: fmt.Sprintf("unsupported transfer engine %q; expected %q or %q", transferEngine, "posix-copy", "model-streamer"),
+		}
+	}
 	if c.CRIU.TcpClose && c.CRIU.TcpEstablished {
 		return &ConfigError{
 			Field:   "criu",
@@ -73,6 +86,7 @@ type StorageSpec struct {
 
 type PageBrokerSpec struct {
 	ControlSocketPath string `yaml:"controlSocketPath"`
+	TransferEngine    string `yaml:"transferEngine"`
 }
 
 // RestoreSpec holds settings for the CRIU restore process.
