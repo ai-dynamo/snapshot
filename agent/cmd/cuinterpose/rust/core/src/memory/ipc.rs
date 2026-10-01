@@ -29,7 +29,7 @@ struct VirtualIpcMemHandle {
     creator_pid: [u8; 4],
     allocation: [u8; 16],
     reserved: [u8; 20],
-    pub(crate) requested: [u8; 8],
+    requested: [u8; 8],
     extent: [u8; 8],
 }
 const VIRTUAL_IPC_MEM_HANDLE_MAGIC: [u8; 8] = {
@@ -40,7 +40,7 @@ const VIRTUAL_IPC_MEM_HANDLE_MAGIC: [u8; 8] = {
 const _: () = assert!(size_of::<VirtualIpcMemHandle>() == size_of::<CUipcMemHandle>());
 
 impl VirtualIpcMemHandle {
-    pub(crate) fn decode(handle: CUipcMemHandle) -> Result<Self> {
+    fn decode(handle: CUipcMemHandle) -> Result<Self> {
         // Both representations contain only bytes with identical size/alignment.
         let virtual_ipc_mem_handle: Self = unsafe { std::mem::transmute(handle) };
         if virtual_ipc_mem_handle.magic != VIRTUAL_IPC_MEM_HANDLE_MAGIC
@@ -75,9 +75,21 @@ impl ProcessState {
             let mut device = 0;
             unsafe { driver::cuCtxGetDevice(&mut device) }?;
             let mut address = 0;
-            unsafe { driver::cuMemAddressReserve(&mut address, extent, 0, 0, 0) }?;
+            let alignment = 0;
+            let requested_address = 0;
+            let flags = 0;
+            unsafe {
+                driver::cuMemAddressReserve(
+                    &mut address,
+                    extent,
+                    alignment,
+                    requested_address,
+                    flags,
+                )
+            }?;
             reserved = Some(address);
-            self.map_unicast(id, handle, address, extent, 0, 0)?;
+            let offset = 0;
+            self.map_unicast(id, handle, address, extent, offset, flags)?;
             mapped = true;
             let access = CUmemAccessDesc {
                 location: CUmemLocation {
@@ -98,6 +110,9 @@ impl ProcessState {
                     opens,
                 },
             );
+            if opens != 0 {
+                self.imported_mallocs.insert(id, address);
+            }
             Ok(address)
         })();
         if result.is_err() {
@@ -106,7 +121,7 @@ impl ProcessState {
             if let Some(address) = reserved {
                 if mapped {
                     runtime::must_complete(unsafe { driver::cuMemUnmap(address, extent) });
-                    self.mappings.remove(&address);
+                    self.remove_mapping(address);
                 }
                 runtime::must_complete(unsafe { driver::cuMemAddressFree(address, extent) });
             }
@@ -122,39 +137,49 @@ impl ProcessState {
             .ok_or(CUresult::CUDA_ERROR_INVALID_VALUE)?
             .clone();
         unsafe { driver::cuMemUnmap(address, mapping.extent) }?;
-        self.mappings.remove(&address);
+        let id = self.remove_mapping(address);
         self.malloc_regions.remove(&address);
+        if mapping.opens != 0 {
+            self.imported_mallocs.remove(&id);
+        }
         runtime::must_complete(self.release_virtual_handle(mapping.virtual_allocation_handle));
         runtime::must_complete(unsafe { driver::cuMemAddressFree(address, mapping.extent) });
         Ok(())
     }
 }
 
-pub(crate) fn release(address: CUdeviceptr, imported: bool) -> Result<()> {
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum Ownership {
+    Owned,
+    Imported,
+}
+
+pub(crate) fn release(address: CUdeviceptr, ownership: Ownership) -> Result<()> {
     // Synchronization must not hold STATE: another host thread may need the
     // shim or peer listener to complete the kernels being synchronized.
     let mut state = runtime::active()?;
     {
         let Some(mapping) = state.malloc_regions.get_mut(&address) else {
-            if imported {
+            if ownership == Ownership::Imported {
                 return Err(Error::Cuda(CUresult::CUDA_ERROR_INVALID_VALUE));
             }
             return runtime::call_unlocked(state, || unsafe { driver::cuMemFree_v2(address) })
                 .map(|_| ());
         };
-        if (mapping.opens != 0) != imported {
-            return Err(Error::Cuda(CUresult::CUDA_ERROR_INVALID_VALUE));
-        }
-        if imported && mapping.opens > 1 {
-            mapping.opens -= 1;
-            return Ok(());
+        match (ownership, mapping.opens) {
+            (Ownership::Owned, 0) | (Ownership::Imported, 1) => {}
+            (Ownership::Imported, opens) if opens > 1 => {
+                mapping.opens -= 1;
+                return Ok(());
+            }
+            _ => return Err(CUresult::CUDA_ERROR_INVALID_VALUE.into()),
         }
         if mapping.context != crate::driver::context()? {
             return Err(Error::Cuda(CUresult::CUDA_ERROR_NOT_SUPPORTED));
         }
     }
     let (mut state, ()) = runtime::call_unlocked(state, || unsafe { driver::cuCtxSynchronize() })?;
-    if imported {
+    if ownership == Ownership::Imported {
         let mapping = state
             .malloc_regions
             .get_mut(&address)
@@ -213,26 +238,19 @@ impl ProcessState {
         {
             return Err(CUresult::CUDA_ERROR_INVALID_HANDLE.into());
         }
-        for (&address, region) in &mut self.malloc_regions {
-            if region.opens != 0
-                && self
-                    .virtual_allocation_handles
-                    .get(&region.virtual_allocation_handle)
-                    .map(|entry| entry.id)
-                    == Some(reference.id)
-            {
-                if region.requested != requested || region.extent != extent {
-                    return Err(CUresult::CUDA_ERROR_INVALID_HANDLE.into());
-                }
-                if region.context != driver::context()? {
-                    return Err(CUresult::CUDA_ERROR_NOT_SUPPORTED.into());
-                }
-                region.opens = region
-                    .opens
-                    .checked_add(1)
-                    .ok_or(CUresult::CUDA_ERROR_OUT_OF_MEMORY)?;
-                return Ok(Some(address));
+        if let Some(&address) = self.imported_mallocs.get(&reference.id) {
+            let region = self.malloc_regions.get_mut(&address).unwrap();
+            if region.requested != requested || region.extent != extent {
+                return Err(CUresult::CUDA_ERROR_INVALID_HANDLE.into());
             }
+            if region.context != driver::context()? {
+                return Err(CUresult::CUDA_ERROR_NOT_SUPPORTED.into());
+            }
+            region.opens = region
+                .opens
+                .checked_add(1)
+                .ok_or(CUresult::CUDA_ERROR_OUT_OF_MEMORY)?;
+            return Ok(Some(address));
         }
         if reference.creator_pid == self.namespace_pid {
             return Err(CUresult::CUDA_ERROR_INVALID_HANDLE.into());
@@ -241,33 +259,63 @@ impl ProcessState {
     }
 }
 
-pub(crate) fn allocation_layout(size: usize) -> Result<(CUmemAllocationProp, usize)> {
-    let mut device = 0;
-    unsafe { driver::cuCtxGetDevice(&mut device) }?;
-    let properties = CUmemAllocationProp {
-        type_: CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED,
-        requestedHandleTypes: CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
-        location: CUmemLocation {
-            type_: CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE,
-            id: device,
-        },
-        ..unsafe { std::mem::zeroed() }
-    };
-    let mut granularity = 0;
-    unsafe {
-        driver::cuMemGetAllocationGranularity(
-            &mut granularity,
-            &properties,
-            CUmemAllocationGranularity_flags::CU_MEM_ALLOC_GRANULARITY_MINIMUM,
-        )
-    }?;
-    if granularity == 0 {
-        return Err(CUresult::CUDA_ERROR_INVALID_VALUE.into());
+impl ProcessState {
+    pub(crate) fn allocation_layout(
+        &mut self,
+        size: usize,
+    ) -> Result<(CUmemAllocationProp, usize)> {
+        let mut device = 0;
+        unsafe { driver::cuCtxGetDevice(&mut device) }?;
+        let mut properties = CUmemAllocationProp {
+            type_: CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED,
+            requestedHandleTypes:
+                CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
+            location: CUmemLocation {
+                type_: CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE,
+                id: device,
+            },
+            ..unsafe { std::mem::zeroed() }
+        };
+        // The current device can change between calls; these fixed properties cannot.
+        let granularity = match self.malloc_layouts.entry(device) {
+            std::collections::btree_map::Entry::Occupied(entry) => {
+                let (granularity, rdma_capable) = *entry.get();
+                properties.allocFlags.gpuDirectRDMACapable = rdma_capable;
+                granularity
+            }
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                let mut rdma = 0;
+                let mut vmm_rdma = 0;
+                unsafe {
+                    driver::cuDeviceGetAttribute(
+                        &mut rdma,
+                        CUdevice_attribute::CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_SUPPORTED,
+                        device,
+                    )?;
+                    driver::cuDeviceGetAttribute(&mut vmm_rdma, CUdevice_attribute::CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED, device)?;
+                }
+                properties.allocFlags.gpuDirectRDMACapable = u8::from(rdma != 0 && vmm_rdma != 0);
+                // Compression and tile-pool usage are opt-in, unlike ordinary cuMemAlloc.
+                let mut granularity = 0;
+                unsafe {
+                    driver::cuMemGetAllocationGranularity(
+                        &mut granularity,
+                        &properties,
+                        CUmemAllocationGranularity_flags::CU_MEM_ALLOC_GRANULARITY_MINIMUM,
+                    )
+                }?;
+                if granularity == 0 {
+                    return Err(CUresult::CUDA_ERROR_INVALID_VALUE.into());
+                }
+                entry.insert((granularity, properties.allocFlags.gpuDirectRDMACapable));
+                granularity
+            }
+        };
+        let extent = size
+            .checked_next_multiple_of(granularity)
+            .ok_or(CUresult::CUDA_ERROR_OUT_OF_MEMORY)?;
+        Ok((properties, extent))
     }
-    let extent = size
-        .checked_next_multiple_of(granularity)
-        .ok_or(CUresult::CUDA_ERROR_OUT_OF_MEMORY)?;
-    Ok((properties, extent))
 }
 #[cfg(test)]
 mod tests {
