@@ -1,0 +1,39 @@
+---
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+---
+
+stateDiagram-v2
+    state "PodRestore member scope" as Member {
+        [*] --> Pending
+        Pending --> WaitingForPlaceholder: target UID is pinned
+        WaitingForPlaceholder --> Admitting: placeholder is available
+        WaitingForPlaceholder --> Failed: target UID disappears or deadline expires
+        Admitting --> Admitted: local preflight accepts
+        Admitting --> Failed: local preflight refuses
+        Admitted --> Restoring: set controller activates leaf
+        Restoring --> Restored: communicator reconstructed
+        Restoring --> Prepared: preserved session reconstructed and held
+        Prepared --> Released: set controller authorizes release
+        Released --> Restored: local completion is published
+        Restoring --> Failed: terminal execution failure
+        Prepared --> Failed: sibling failure disposition applied
+    }
+
+    state "PodSetRestore group scope" as Set {
+        [*] --> WaitingForTargets: member leaves created
+        WaitingForTargets --> AdmittingAll: every placeholder is available
+        AdmittingAll --> RestoringAll: every member is Admitted
+        RestoringAll --> ReleasingAll: preserved-session profile and every member Prepared
+        RestoringAll --> Ready: reconstruction profile and every member Restored
+        ReleasingAll --> Ready: every member Restored after release
+        WaitingForTargets --> Failed: invalid target or deadline exceeded
+        AdmittingAll --> Failed: member refusal or deadline exceeded
+        RestoringAll --> Failed: member failure or deadline exceeded
+        ReleasingAll --> Failed: member failure or deadline exceeded
+    }
+
+    note right of Ready
+        Kubernetes Pod readiness and serving
+        readiness remain external to Snapshot.
+    end note

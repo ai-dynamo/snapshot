@@ -1,0 +1,45 @@
+---
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+---
+
+sequenceDiagram
+    autonumber
+    participant O as Workload owner
+    participant G as Group controller
+    participant A0 as Node agent rank 0
+    participant A1 as Node agent rank 1
+    participant S as Artifact storage
+
+    O->>G: Create PodSetSnapshot with every member and deadline
+    G->>G: Pin membership and validate the set
+    par Admit rank 0 without crossing its destructive boundary
+        G->>A0: Create held capture leaf
+        A0-->>G: Admitted or Refused
+    and Admit rank 1 without crossing its destructive boundary
+        G->>A1: Create held capture leaf
+        A1-->>G: Admitted or Refused
+    end
+    alt Any member refuses or deadline expires
+        G->>A0: Abandon admitted work
+        G->>A1: Abandon admitted work
+        G-->>O: Set Failed before destructive capture
+    else Every member is Admitted
+        G->>A0: Activate capture under bounded concurrency policy
+        G->>A1: Activate capture under bounded concurrency policy
+        par Capture rank 0
+            A0->>S: Capture and persist rank 0
+            A0-->>G: Ready or Failed
+        and Capture rank 1
+            A1->>S: Capture and persist rank 1
+            A1-->>G: Ready or Failed
+        end
+        Note over A0,A1: After activation, successful captures terminate source processes
+        alt Every member is Ready
+            G->>G: Publish PodSetSnapshotContent
+            G-->>O: Set Ready
+        else Any member Failed
+            G-->>O: Set Failed with every member outcome
+            Note over O,G: No atomicity, rollback, or group-wide fencing
+        end
+    end

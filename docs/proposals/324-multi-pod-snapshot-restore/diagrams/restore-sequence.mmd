@@ -1,0 +1,54 @@
+---
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+---
+
+sequenceDiagram
+    autonumber
+    participant O as Workload owner
+    participant W as Grove or scheduler
+    participant G as Group controller
+    participant A0 as Node agent rank 0
+    participant A1 as Node agent rank 1
+
+    O->>W: Request the complete target Pod set
+    W-->>O: Create target Pods while scheduling proceeds
+    O->>G: Create PodSetRestore with Pod UIDs and container mappings
+    G->>G: Create PodRestore leaves in WaitingForPlaceholder
+    G->>G: Wait for every target placeholder
+    G->>G: Build and validate profile-required identity data
+    par Admit PodRestore rank 0
+        G->>A0: Preflight with required set context
+        A0-->>G: Admitted or Refused
+    and Admit PodRestore rank 1
+        G->>A1: Preflight with required set context
+        A1-->>G: Admitted or Refused
+    end
+    alt A target misses the deadline or any member refuses
+        G-->>O: PodSetRestore Failed before reconstruction
+    else Every member is Admitted
+        par Restore rank 0
+            G->>A0: Activate restore
+        and Restore rank 1
+            G->>A1: Activate restore
+        end
+        alt Communicator reconstruction profile
+            A0-->>G: Restored True or terminal failure
+            A1-->>G: Restored True or terminal failure
+        else Preserved-session profile
+            A0-->>G: Prepared or terminal failure
+            A1-->>G: Prepared or terminal failure
+            G->>G: Require every member Prepared
+            G->>A0: Authorize release
+            G->>A1: Authorize release
+            A0-->>G: Restored True
+            A1-->>G: Restored True
+        end
+        alt Every member reports Restored True
+            G-->>O: PodSetRestore Ready
+            O->>O: Observe Pod readiness before serving
+        else Any member reports terminal failure
+            G-->>O: PodSetRestore Failed with every member outcome
+            Note over O,G: The workload owner chooses recovery
+        end
+    end
