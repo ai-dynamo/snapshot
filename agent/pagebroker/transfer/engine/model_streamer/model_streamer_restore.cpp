@@ -24,6 +24,7 @@
 #include "file_descriptor.hpp"
 #include "model_streamer_api.hpp"
 #include "utils/event_loop.hpp"
+#include "utils/sha256.hpp"
 
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
@@ -33,6 +34,14 @@ namespace {
 // 40 GB read-ahead budget. A single larger file is submitted on its own.
 constexpr uintmax_t kSubmissionByteBudget = 10'000'000'000;
 constexpr unsigned kResponsePollTimeoutMs = 25;
+
+bool
+HasCompleteCredentials(const ModelStreamerSessionOptions& options)
+{
+  if (options.access_key_id.empty() != options.secret_access_key.empty())
+    return false;
+  return options.session_token.empty() || !options.access_key_id.empty();
+}
 
 std::system_error
 SystemError(const char* operation)
@@ -54,17 +63,11 @@ ApplyPermissions(const Path& path, fs::perms permissions)
     fs::permissions(path, permissions, fs::perm_options::replace);
 }
 
-bool
-IsSafeRelativePath(const Path& path)
+void
+VerifyDigest(std::span<const std::byte> bytes, const std::optional<utils::Sha256Digest>& expected, TransferControl control = {})
 {
-  if (path.empty() || path.is_absolute() || path.has_root_name() || path.has_root_directory() ||
-      path.lexically_normal() != path)
-    return false;
-  for (const auto& component : path) {
-    if (component.empty() || component == "." || component == "..")
-      return false;
-  }
-  return true;
+  if (expected && utils::ComputeSha256(bytes, [&] { control.Check(); }) != *expected)
+    throw RestoreIntegrityError();
 }
 
 void
@@ -96,7 +99,7 @@ class MappedFile {
  public:
   MappedFile(const RestoreFile& file, const Path& destination)
       : source_(file.source_locator), destination_(destination), bytes_(CheckedSize(file.size_bytes)),
-        permissions_(file.permissions)
+        permissions_(file.permissions), expected_sha256_(file.expected_sha256)
   {
     FileDescriptor descriptor(open(destination_.c_str(), O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600));
     if (descriptor.get() < 0)
@@ -122,7 +125,11 @@ class MappedFile {
   const std::string& source() const { return source_; }
   void* address() const { return address_; }
   size_t bytes() const { return bytes_; }
-  void Finish() const { ApplyPermissions(destination_, permissions_); }
+  void Finish(TransferControl control) const
+  {
+    VerifyDigest({static_cast<const std::byte*>(address_), bytes_}, expected_sha256_, control);
+    ApplyPermissions(destination_, permissions_);
+  }
 
  private:
   static size_t CheckedSize(uintmax_t bytes)
@@ -137,6 +144,7 @@ class MappedFile {
   Path destination_;
   size_t bytes_;
   fs::perms permissions_;
+  std::optional<utils::Sha256Digest> expected_sha256_;
   void* address_ = nullptr;
 };
 
@@ -156,6 +164,9 @@ CreateEmptyFile(const RestoreFile& file, const Path& destination)
   FileDescriptor descriptor(open(destination.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600));
   if (descriptor.get() < 0)
     throw SystemError("create empty restore staging file");
+  // Empty files have no native submission: this verifies their local contents,
+  // not the existence of the remote object.
+  VerifyDigest({}, file.expected_sha256);
   ApplyPermissions(destination, file.permissions);
 }
 
@@ -209,12 +220,26 @@ ModelStreamerRestore::ReceiveEvent::Cancel(std::exception_ptr) noexcept
 }
 
 ModelStreamerRestore::ModelStreamerRestore(std::chrono::milliseconds submission_timeout)
-    : submission_timeout_(submission_timeout),
+    : ModelStreamerRestore(ModelStreamerSessionOptions{}, submission_timeout)
+{
+}
+
+ModelStreamerRestore::ModelStreamerRestore(
+    ModelStreamerSessionOptions options,
+    std::chrono::milliseconds submission_timeout)
+    : submission_timeout_(submission_timeout), options_(std::move(options)),
       stopped_error_(std::make_exception_ptr(std::runtime_error("Model Streamer restore stopped"))),
       event_loop_([this](std::exception_ptr error) { HandleFailure(std::move(error)); })
 {
   if (submission_timeout_ <= std::chrono::milliseconds::zero())
     throw std::invalid_argument("Model Streamer submission timeout must be positive");
+  if (!HasCompleteCredentials(options_))
+    throw std::invalid_argument("Model Streamer explicit credentials require both access and secret keys");
+  for (const auto* value : {&options_.region, &options_.endpoint, &options_.access_key_id,
+                            &options_.secret_access_key, &options_.session_token}) {
+    if (value->find('\0') != std::string::npos)
+      throw std::invalid_argument("Model Streamer session options must not contain NUL bytes");
+  }
 }
 
 ModelStreamerRestore::~ModelStreamerRestore() noexcept
@@ -244,6 +269,25 @@ ModelStreamerRestore::Start()
     throw std::runtime_error("Model Streamer started without returning a handle");
 
   try {
+    std::vector<const char*> keys;
+    std::vector<const char*> values;
+    const auto append = [&](const char* key, const std::string& value) {
+      if (!value.empty()) {
+        keys.push_back(key);
+        values.push_back(value.c_str());
+      }
+    };
+    append("region", options_.region);
+    append("endpoint", options_.endpoint);
+    append("access_key_id", options_.access_key_id);
+    append("secret_access_key", options_.secret_access_key);
+    append("session_token", options_.session_token);
+    if (!keys.empty()) {
+      const int status = streamer::runai_set_credentials(
+          value_, keys.data(), values.data(), static_cast<unsigned>(keys.size()));
+      if (status != 0)
+        throw std::runtime_error("configure Model Streamer session: " + StreamerError(status));
+    }
     event_loop_.Start();
   }
   catch (...) {
@@ -255,6 +299,7 @@ ModelStreamerRestore::Start()
 void
 ModelStreamerRestore::Submit(std::unique_ptr<StreamerEntry>& entry)
 {
+  entry->control.Check();
   auto& request = entry->request;
   streamer::SubmissionId submission_id = 0;
   const int response = streamer::runai_request(
@@ -271,7 +316,7 @@ ModelStreamerRestore::Submit(std::unique_ptr<StreamerEntry>& entry)
   if (submission_id == 0)
     throw std::runtime_error("Model Streamer accepted a submission without assigning an ID");
 
-  entry->deadline = std::chrono::steady_clock::now() + submission_timeout_;
+  entry->deadline = std::min(entry->control.deadline, std::chrono::steady_clock::now() + submission_timeout_);
   const auto [active, inserted] = active_.try_emplace(submission_id);
   if (!inserted)
     throw std::runtime_error("Model Streamer returned a duplicate submission ID");
@@ -347,6 +392,7 @@ ModelStreamerRestore::ReceiveAndDispatch()
   for (const auto& [submission_id, entry] : active_) {
     // The native API cannot cancel one submission. Failing the event loop stops
     // the shared streamer before waking every Stage call in HandleFailure.
+    entry->control.Check();
     if (now >= entry->deadline)
       throw std::runtime_error("Model Streamer submission " + std::to_string(submission_id) + " timed out");
   }
@@ -394,12 +440,13 @@ ModelStreamerRestore::FailAll(std::exception_ptr error) noexcept
 }
 
 void
-ModelStreamerRestore::RestoreFiles(const RestorePlan& plan, const Path& destination)
+ModelStreamerRestore::RestoreFiles(const RestorePlan& plan, const Path& destination, TransferControl control)
 {
   for (auto file = plan.files.begin(); file != plan.files.end();) {
     MappedFiles batch;
     uintmax_t batch_bytes = 0;
     while (file != plan.files.end()) {
+      control.Check();
       const Path staged = destination / file->relative_path;
       if (file->size_bytes == 0) {
         CreateEmptyFile(*file, staged);
@@ -423,6 +470,7 @@ ModelStreamerRestore::RestoreFiles(const RestorePlan& plan, const Path& destinat
       // The request contains raw pointers into batch. Waiting here keeps the
       // mappings alive until the receive event sees submission_done.
       auto entry = std::make_unique<StreamerEntry>();
+      entry->control = control;
       entry->request.paths.reserve(batch.size());
       entry->request.range_counts.assign(batch.size(), 1);
       entry->request.offsets.assign(batch.size(), 0);
@@ -439,18 +487,22 @@ ModelStreamerRestore::RestoreFiles(const RestorePlan& plan, const Path& destinat
       completion.get();
     }
 
-    for (const auto& file : batch)
-      file->Finish();
+    for (const auto& file : batch) {
+      control.Check();
+      file->Finish(control);
+    }
   }
 }
 
 void
-ModelStreamerRestore::Stage(const RestorePlan& plan, const Path& destination)
+ModelStreamerRestore::Stage(const RestorePlan& plan, const Path& destination, TransferControl control)
 {
+  control.Check();
   ValidateRestorePlan(plan);
   CreateDirectoryTree(plan, destination);
   std::call_once(start_once_, [this] { Start(); });
-  RestoreFiles(plan, destination);
+  RestoreFiles(plan, destination, control);
+  control.Check();
   ApplyTreePermissions(plan, destination);
 }
 }  // namespace snapshot::pagebroker

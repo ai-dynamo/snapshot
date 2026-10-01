@@ -210,6 +210,12 @@ and document the variable name — never the value.
 - Match the surrounding code. The repository favors explanatory comments on
   non-obvious decisions — see the `.NOTPARALLEL:` and `AGENT_BASE_IMAGE`
   comments in the root `Makefile` for the register to aim for.
+- Never put long, compound predicates directly in `if` statements. When a
+  condition spans multiple lines or combines several validation rules, always
+  extract a descriptively named helper and call it from the `if`. Keep the
+  helper readable with short checks and early returns; preserve short-circuit
+  evaluation, side effects, and existing error behavior. Reuse an existing
+  validation helper when it already expresses the rule.
 - Add or update tests alongside behavior changes. Controller logic under
   `agent/internal` and `operator/internal` has substantial table-driven test
   coverage; follow the existing patterns rather than inventing new harnesses.

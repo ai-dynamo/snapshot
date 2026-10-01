@@ -5,6 +5,8 @@
 
 #include <chrono>
 #include <mutex>
+#include <stop_token>
+#include <system_error>
 #include <variant>
 
 #include "checkpoint_transaction_descriptor.hpp"
@@ -26,11 +28,19 @@ class Transaction {
   bool retain_terminal();
   bool expired(std::chrono::steady_clock::time_point now, std::chrono::steady_clock::duration lifetime) const;
 
+  void PrepareTransfer(const Path& directory);
+  TransferControl control() const { return {TransferControl::Clock::time_point::max(), cancellation_.get_token()}; }
+  void CancelTransfer(); // Thread-safe; call before waiting for mutex().
+  void RemoveStaging(const Path& directory);
+  void RemoveStaging(const Path& directory, std::error_code& error);
+
  private:
   std::mutex mutex_;
   State state_ = State::NEW;
   Descriptor descriptor_;
   std::chrono::steady_clock::time_point staging_started_at_;
   bool terminal_retained_ = false;
+  std::stop_source cancellation_;
+  Path transfer_directory_;
 };
 }  // namespace snapshot::pagebroker

@@ -59,4 +59,51 @@ Transaction::expired(std::chrono::steady_clock::time_point now, std::chrono::ste
   return state_ == State::STAGED && now - staging_started_at_ >= lifetime;
 }
 
+void
+Transaction::PrepareTransfer(const Path& directory)
+{
+  transfer_directory_ = directory;
+}
+
+void
+Transaction::CancelTransfer()
+{
+  cancellation_.request_stop();
+}
+
+void
+Transaction::RemoveStaging(const Path& directory)
+{
+  namespace fs = std::filesystem;
+  if (directory == transfer_directory_) {
+    // Restore applies saved modes after verifying data. Make only our owned
+    // tree traversable/writable again before releasing it.
+    const auto options = fs::perm_options::replace | fs::perm_options::nofollow;
+    if (fs::is_directory(fs::symlink_status(directory))) {
+      fs::permissions(directory, fs::perms::owner_all, options);
+      for (const auto& entry : fs::recursive_directory_iterator(directory)) {
+        if (fs::is_directory(entry.symlink_status()))
+          fs::permissions(entry.path(), fs::perms::owner_all, options);
+      }
+    }
+  }
+  fs::remove_all(directory);
+  if (directory == transfer_directory_) {
+    if (state_ == State::COMMITTED || state_ == State::ABORTED)
+      clear_descriptor();
+  }
+}
+
+void
+Transaction::RemoveStaging(const Path& directory, std::error_code& error)
+{
+  try {
+    RemoveStaging(directory);
+    error.clear();
+  }
+  catch (const std::filesystem::filesystem_error& failure) {
+    error = failure.code();
+  }
+}
+
 }  // namespace snapshot::pagebroker
