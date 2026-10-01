@@ -608,6 +608,14 @@ cuda_checkpoint_cli_main(int, char**)
   return 23;
 }
 
+namespace snapshot::cuda_checkpoint {
+std::optional<int>
+RunClient(int, char**)
+{
+  return std::nullopt;
+}
+} // namespace snapshot::cuda_checkpoint
+
 TEST_F(WorkerModes, UnsupportedCustomStorageFailsAtStartupOrAdmission)
 {
   custom_available = false;
