@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -12,9 +15,197 @@ import pytest
 import yaml
 
 from snapshot_e2e import benchmark_history as history
+from snapshot_e2e.benchmark import VALID_OUTCOMES, result_path
 
 
 START = datetime(2026, 8, 25, 1, 2, 3, tzinfo=timezone.utc)
+
+
+def _require_pass(tmp_path: Path, case: str = "vllm") -> subprocess.CompletedProcess[str]:
+    environment = dict(os.environ, GITHUB_RUN_ID="1", GITHUB_RUN_ATTEMPT="2")
+    return subprocess.run(
+        [
+            sys.executable, "-m", "snapshot_e2e.benchmark_history", "require-pass",
+            "--artifacts-dir", str(tmp_path), "--case", case,
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _current_result_path(tmp_path: Path, case: str = "vllm") -> Path:
+    return result_path(tmp_path, history.DEFAULT_SUITE, case, history.DEFAULT_TEST, "1", 2)
+
+
+@pytest.mark.parametrize("case", ["vllm", "sglang", "tensorrt-llm"])
+def test_require_pass_qualifies_each_standalone_backend(tmp_path: Path, case: str) -> None:
+    result = _result(case=case, run_attempt=2)
+    result["identity"]["test"] = history.DEFAULT_TEST
+    result["identity"]["futureField"] = "preserved"
+    _current_result_path(tmp_path, case).write_text(json.dumps(result))
+
+    completed = _require_pass(tmp_path, case)
+
+    assert completed.returncode == 0, completed.stderr
+    assert f"Verified passing result for {case}" in completed.stdout
+
+
+@pytest.mark.parametrize("outcome", sorted(VALID_OUTCOMES - {"passed"}))
+def test_require_pass_rejects_every_nonpassing_outcome(tmp_path: Path, outcome: str) -> None:
+    result = _result(run_attempt=2, outcome=outcome)
+    result["identity"]["test"] = history.DEFAULT_TEST
+    _current_result_path(tmp_path).write_text(json.dumps(result))
+
+    completed = _require_pass(tmp_path)
+
+    assert completed.returncode == 1
+    assert f"expected passed, got {outcome}" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("suite", "another-suite"),
+        ("case", "sglang"),
+        ("test", "another-test"),
+        ("runId", "old-run"),
+        ("runAttempt", 1),
+    ],
+)
+def test_require_pass_rejects_mislabeled_passing_result(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    result = _result(run_attempt=2)
+    result["identity"].update(test=history.DEFAULT_TEST)
+    result["identity"][field] = value
+    _current_result_path(tmp_path).write_text(json.dumps(result))
+
+    completed = _require_pass(tmp_path)
+
+    assert completed.returncode == 1
+    assert "result identity does not match" in completed.stderr
+
+
+def test_require_pass_does_not_reuse_passing_result_from_previous_attempt(tmp_path: Path) -> None:
+    result = _result()
+    result["identity"]["test"] = history.DEFAULT_TEST
+    old = result_path(tmp_path, history.DEFAULT_SUITE, "vllm", history.DEFAULT_TEST, "1", 1)
+    old.write_text(json.dumps(result))
+
+    completed = _require_pass(tmp_path)
+
+    assert completed.returncode == 1
+    assert "No such file" in completed.stderr
+    assert not _current_result_path(tmp_path).exists()
+
+
+@pytest.mark.parametrize("variable", ["GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"])
+def test_require_pass_requires_an_explicit_run_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variable: str,
+) -> None:
+    monkeypatch.setenv("GITHUB_RUN_ID", "1")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
+    monkeypatch.delenv(variable)
+
+    with pytest.raises(SystemExit) as exc:
+        history.main(["require-pass", "--artifacts-dir", str(tmp_path), "--case", "vllm"])
+
+    assert exc.value.code == 2
+    assert not list(tmp_path.iterdir())
+
+
+def test_require_pass_accepts_explicit_identity_over_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = _result(case="tensorrt-llm", run_id="requested-run", run_attempt=3)
+    identity = result["identity"]
+    path = result_path(
+        tmp_path, identity["suite"], identity["case"], identity["test"],
+        identity["runId"], identity["runAttempt"],
+    )
+    path.write_text(json.dumps(result))
+    monkeypatch.setenv("GITHUB_RUN_ID", "stale-run")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
+
+    assert history.main([
+        "require-pass", "--artifacts-dir", str(tmp_path),
+        "--case", "tensorrt-llm", "--test", "test_framework",
+        "--run-id", "requested-run", "--run-attempt", "3",
+    ]) == 0
+
+
+@pytest.mark.parametrize("contents", ["{", "[]", '{"schemaVersion": 99}'])
+def test_require_pass_rejects_malformed_or_unsupported_result(tmp_path: Path, contents: str) -> None:
+    _current_result_path(tmp_path).write_text(contents)
+
+    completed = _require_pass(tmp_path)
+
+    assert completed.returncode == 1
+    assert "Standalone framework qualification failed" in completed.stderr
+
+
+def test_skipped_pytest_cannot_qualify_via_a_fallback_result(
+    pytester: pytest.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts = pytester.path / "results"
+    monkeypatch.setenv("GITHUB_RUN_ID", "1")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
+    monkeypatch.setenv("SNAPSHOT_E2E_BENCHMARK_DIR", str(artifacts))
+    pytester.makepyfile('''
+import pytest
+
+def test_framework_checkpoint_restore_serves_inference():
+    pytest.skip("backend did not run")
+''')
+    run = pytester.runpytest_subprocess("-p", "no:cacheprovider")
+    run.assert_outcomes(skipped=1)
+    assert run.ret == pytest.ExitCode.OK
+
+    # Execute the workflow's diagnostic fallback, then its qualification gate.
+    fallback = subprocess.run(
+        [
+            sys.executable, "-m", "snapshot_e2e.benchmark", "fallback",
+            "--suite", history.DEFAULT_SUITE, "--case", "vllm",
+            "--test", history.DEFAULT_TEST, "--outcome", "infrastructure_failed",
+            "--message", "pytest produced no benchmark result; step outcome=success",
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    assert fallback.returncode == 0, fallback.stderr
+    path = _current_result_path(artifacts)
+    original = path.read_bytes()
+
+    completed = _require_pass(artifacts)
+
+    assert completed.returncode == 1
+    assert "expected passed, got infrastructure_failed" in completed.stderr
+    assert path.read_bytes() == original
+    assert json.loads(original)["error"]["message"].endswith("step outcome=success")
+
+
+def test_framework_workflow_requires_pass_before_upload_without_hiding_failures() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    workflow = yaml.safe_load(
+        (repository_root / ".github/workflows/e2e-frameworks.yaml").read_text()
+    )
+    job = workflow["jobs"]["e2e"]
+    assert set(job["strategy"]["matrix"]["framework"]) == {"vllm", "sglang", "tensorrt-llm"}
+    steps = job["steps"]
+    index = next(i for i, step in enumerate(steps) if step["name"].startswith("Require passing"))
+    gate = steps[index]
+    assert steps[index - 1]["name"] == "Ensure benchmark result exists"
+    assert steps[index + 1]["name"] == "Upload benchmark result"
+    assert gate["if"] == "${{ always() && steps.selected.outputs.run == 'true' }}"
+    assert "continue-on-error" not in gate
+    assert "benchmark_history require-pass" in gate["run"]
+    assert '--artifacts-dir "${SNAPSHOT_E2E_BENCHMARK_DIR}"' in gate["run"]
+    assert '--case "${{ matrix.framework }}"' in gate["run"]
+    assert "always()" in steps[index + 1]["if"]
 
 
 def test_validate_result_preserves_unknown_fields() -> None:
