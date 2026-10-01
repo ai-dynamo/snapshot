@@ -43,6 +43,12 @@ const (
 
 	// RestoreReasonInProgress marks active restore execution.
 	RestoreReasonInProgress = "RestoreInProgress"
+	// RestoreReasonReplenishing marks replacement of tracked destinations after
+	// a successful restore. Untracked destinations are not initial restore work.
+	RestoreReasonReplenishing = "RestoreReplenishing"
+	// RestoreReasonReplenishmentIncompatible preserves the replenishment phase
+	// when compatibility refuses a replacement before CRIU.
+	RestoreReasonReplenishmentIncompatible = "RestoreReplenishmentIncompatible"
 	// RestoreReasonSucceeded marks a terminal all-destinations success.
 	RestoreReasonSucceeded = "RestoreSucceeded"
 	// RestoreReasonFailed marks a terminal all-destinations failure.
@@ -68,11 +74,11 @@ func ClassifyRestoreOutcome(conditions []corev1.PodCondition) RestoreOutcome {
 			return RestoreOutcomeUnknown
 		}
 		switch condition.Reason {
-		case RestoreReasonFailed, RestoreReasonIncompatible:
+		case RestoreReasonFailed, RestoreReasonIncompatible, RestoreReasonReplenishmentIncompatible:
 			return RestoreOutcomeFailed
 		case RestoreReasonPartiallySucceeded:
 			return RestoreOutcomePartiallySucceeded
-		case RestoreReasonInProgress:
+		case RestoreReasonInProgress, RestoreReasonReplenishing:
 			return RestoreOutcomePending
 		default:
 			return RestoreOutcomeUnknown
