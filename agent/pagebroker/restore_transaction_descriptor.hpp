@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "transfer_engine.hpp"
+#include "transfer/engine/transfer_engine.hpp"
 
 namespace snapshot::pagebroker {
 class RestoreTransactionDescriptor {

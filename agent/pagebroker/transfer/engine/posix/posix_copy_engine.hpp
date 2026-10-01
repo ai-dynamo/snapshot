@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "transfer_engine.hpp"
+#include "transfer/engine/transfer_engine.hpp"
 
 namespace snapshot::pagebroker {
 class PosixCopyEngine final : public TransferEngine {
@@ -15,7 +15,6 @@ class PosixCopyEngine final : public TransferEngine {
   void ValidateCheckpointDestination(const StorageBackend& destination) const override;
   bool CheckpointDestinationConflicts(const StorageBackend& destination) const override;
   void PublishCheckpoint(const Path& source, const StorageBackend& destination) const override;
-  void CopyDirectory(const Path& source, const Path& destination) const override;
 
  private:
   Path storage_root_;
