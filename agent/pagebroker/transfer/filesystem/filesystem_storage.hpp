@@ -21,6 +21,5 @@ Path DestinationPath(const StorageBackend& destination, const Path& storage_root
 void StageRestore(const RestorePlan& plan, const Path& destination, TransferControl control = {});
 RestorePlan BuildRestorePlan(
     const Path& source, TransferControl control = {}, std::size_t limit = std::numeric_limits<std::size_t>::max());
-bool CheckpointDestinationConflicts(const StorageBackend& destination, const Path& storage_root);
 void PublishCheckpoint(const Path& source, const StorageBackend& destination, const Path& storage_root);
 }  // namespace snapshot::pagebroker::filesystem_storage

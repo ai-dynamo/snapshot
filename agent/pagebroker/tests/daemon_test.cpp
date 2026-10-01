@@ -6,12 +6,15 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <optional>
 #include <string>
 #include <thread>
 
 #include "broker.hpp"
 #include "transfer/engine/model_streamer/model_streamer_restore.hpp"
+#include "transfer/engine/model_streamer/model_streamer_transfer_engine.hpp"
+#include "transfer/engine/posix/posix_copy_engine.hpp"
 
 namespace fs = std::filesystem;
 using namespace snapshot::pagebroker;
@@ -496,6 +499,37 @@ TEST_P(FilesystemEngineTest, PreservesExistingCheckpointWhenReplacementFails)
   EXPECT_TRUE(fs::exists(previous));
 }
 
+TEST_P(FilesystemEngineTest, DirectPublicationRejectsConflictWithoutChangingEitherTree)
+{
+  std::unique_ptr<TransferEngine> engine;
+  if (GetParam() == TransferEngineType::POSIX_COPY)
+    engine = std::make_unique<PosixCopyEngine>(root_ / "storage");
+  else
+    engine = std::make_unique<ModelStreamerTransferEngine>(root_ / "storage");
+  const auto published = root_ / "storage/published";
+  const fs::path partial = published.string() + ".pagebroker-partial";
+  fs::create_directory(published);
+  fs::create_directory(partial);
+  std::ofstream(published / "old") << "old";
+  std::ofstream(partial / "other-attempt") << "keep";
+  StorageBackend destination;
+  destination.mutable_filesystem()->set_directory(published.string());
+  try {
+    engine->PublishCheckpoint(source_, destination, engine->InspectCheckpoint(source_));
+    FAIL() << "publication should reject an existing partial";
+  }
+  catch (const TransferError& error) {
+    EXPECT_EQ(error.code, Failure::TRANSACTION_CONFLICT);
+  }
+  EXPECT_TRUE(fs::exists(source_ / "image"));
+  EXPECT_TRUE(fs::exists(published / "old"));
+  EXPECT_FALSE(fs::exists(published / "image"));
+  EXPECT_FALSE(fs::exists(partial / "image"));
+  std::string contents;
+  std::ifstream(partial / "other-attempt") >> contents;
+  EXPECT_EQ(contents, "keep");
+}
+
 TEST_P(FilesystemEngineTest, PreservesExistingPartialCheckpointDestination)
 {
   const fs::path destination = root_ / "storage" / "blocked";
@@ -518,6 +552,14 @@ TEST_P(FilesystemEngineTest, PreservesExistingPartialCheckpointDestination)
   std::string partial_contents;
   std::ifstream(partial) >> partial_contents;
   EXPECT_EQ(partial_contents, "keep");
+  const fs::path staging(output.staged_checkpoint_directory().image_directory());
+  EXPECT_TRUE(fs::exists(staging / "image"));
+  EXPECT_FALSE(fs::exists(destination));
+
+  fs::remove(partial);
+  EXPECT_TRUE(broker().HandleRequest(commit).has_commit_complete());
+  EXPECT_TRUE(fs::exists(destination / "image"));
+  EXPECT_FALSE(fs::exists(staging));
 }
 
 TEST_F(BrokerTest, AbortsRestore)
@@ -618,7 +660,7 @@ TEST_F(BrokerTest, MetadataIsExplicitlyUnsupportedWithoutCreatingTransaction)
   const auto rejected = broker().HandleRequest(request);
   ASSERT_TRUE(rejected.has_failure());
   EXPECT_EQ(rejected.failure().code(), Failure::INVALID_REQUEST);
-  EXPECT_EQ(rejected.failure().message(), "artifact metadata retrieval is not implemented");
+  EXPECT_EQ(rejected.failure().message(), "artifact storage is not configured");
   EXPECT_EQ(rejected.request_id(), request.request_id());
   EXPECT_EQ(rejected.transaction_id(), request.transaction_id());
 

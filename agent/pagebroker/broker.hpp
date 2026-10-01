@@ -8,6 +8,7 @@
 #include <exception>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -15,14 +16,16 @@
 #include "pagebroker_types.hpp"
 #include "restore_transaction_descriptor.hpp"
 #include "transaction.hpp"
+#include "s3_config.hpp"
 #include "transfer/engine/transfer_engine.hpp"
 
 namespace snapshot::pagebroker {
 class Broker {
  public:
-  Broker(Path staging_root, Path storage_root);
+  Broker(Path staging_root, Path storage_root, std::optional<S3Config> config = std::nullopt);
   Response HandleRequest(const Request& request);
   void ReapExpiredTransactions(std::chrono::steady_clock::time_point now);
+  void CancelActiveTransactions();
 
  private:
   using Engines = std::vector<std::unique_ptr<TransferEngine>>;
@@ -36,6 +39,8 @@ class Broker {
 
   const TransferEngine& Engine(TransferEngineType engine_type) const;
   const TransferEngine& Engine(const IOEngine& engine) const;
+  const TransferEngine& ArtifactEngine(const IOEngine* engine = nullptr) const;
+  Response Metadata(const Request& request);
   TransactionHandle CreateOrGetTransaction(const std::string& transaction_id);
   TransactionHandle FindTransaction(const std::string& transaction_id);
   void RetainTerminalTransaction(const std::string& transaction_id);
@@ -45,9 +50,11 @@ class Broker {
   Response AbortStaging(
       const Request& request, Transaction& transaction, const Path& staging_directory, const std::exception& error);
   Response Restore(const Request& request);
-  Response StageRestore(const Request& request, const StorageBackend& source, const TransferEngine& engine);
+  Response StageRestore(const Request& request, const StorageBackend& source, const TransferEngine& engine,
+      const PublishedArtifact* artifact = nullptr);
   Response PrepareCheckpoint(const Request& request);
-  Response StageCheckpoint(const Request& request, const StorageBackend& destination, const TransferEngine& engine);
+  Response StageCheckpoint(const Request& request, const StorageBackend& destination, const TransferEngine& engine,
+      const PublishedArtifact* artifact = nullptr);
   // The Snapshot Agent sends COMMIT after CRIU returns; the provider will send it directly later.
   Response Commit(const Request& request);
   Response CleanupRestore(
@@ -57,8 +64,10 @@ class Broker {
   Response Abort(const Request& request);
   Path staging_root_;
   Engines io_engines_;
+  std::shared_ptr<TransactionResources> resources_;
   std::mutex transactions_mutex_;
   Transactions transactions_;
+  bool stopping_ = false;
   std::mutex terminal_transactions_mutex_;
   std::deque<TerminalTransaction> terminal_transactions_;
   uintmax_t reserved_staging_bytes_ = 0;
