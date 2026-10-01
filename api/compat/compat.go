@@ -69,6 +69,12 @@ type GPUInfo struct {
 type GPUDevice struct {
 	UUID        string
 	ProductName string
+
+	// MIGProfile is the slice shape, such as "1g.10gb". Empty means unknown
+	// rather than whole GPU, because an agent released before this field
+	// captured slices without recording their shape. Whether a device is a
+	// slice at all comes from UUID instead, which is always present.
+	MIGProfile string
 }
 
 // Mismatch is one rule the target failed, carrying both compared values so the
@@ -117,6 +123,8 @@ var checksByGate = registerChecks(
 	mountCheck,
 	gpuModelCheck,
 	gpuCountCheck,
+	migPartitioningCheck,
+	migProfileCheck,
 	driverVersionCheck,
 	driverMinimumCheck,
 )
