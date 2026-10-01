@@ -127,6 +127,9 @@ pub struct HandleEntry {
 pub struct ProcessState {
     pub namespace_pid: NamespacePid,
     pub malloc_regions: BTreeMap<u64, ipc::MallocRegion>,
+    imported_mallocs: BTreeMap<AllocationId, u64>,
+    // Minimum granularity and GPUDirect RDMA flag for the fixed malloc properties.
+    malloc_layouts: BTreeMap<i32, (usize, u8)>,
     pub memblocks: BTreeMap<AllocationId, Memblock>,
     pub virtual_allocation_handles: BTreeMap<VirtualAllocationHandle, HandleEntry>,
     pub mappings: BTreeMap<u64, Mapping>,
@@ -140,6 +143,8 @@ impl ProcessState {
         Self {
             namespace_pid,
             malloc_regions: BTreeMap::new(),
+            imported_mallocs: BTreeMap::new(),
+            malloc_layouts: BTreeMap::new(),
             memblocks: BTreeMap::new(),
             virtual_allocation_handles: BTreeMap::new(),
             mappings: BTreeMap::new(),
