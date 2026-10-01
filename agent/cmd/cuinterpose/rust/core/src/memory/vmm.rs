@@ -3,11 +3,12 @@
 
 //! Unicast backing and mapping metadata.
 
-use super::{HandleEntry, Memblock, ProcessState, VirtualAllocationHandle};
+use super::{HandleEntry, Memblock, ProcessState, Refcounts, VirtualAllocationHandle};
 use crate::error::Result;
 use cudarc::driver::sys::CUresult::*;
 use cudarc::driver::sys::*;
 use cuinterpose_protocol::{AllocationId, AllocationReference, NamespacePid};
+use std::collections::btree_map::Entry;
 
 /// Tracked unicast memory must be reconstructible by the device-memory carrier.
 pub(crate) fn validate_properties(properties: &CUmemAllocationProp) -> Result<()> {
@@ -22,6 +23,7 @@ pub(crate) fn validate_properties(properties: &CUmemAllocationProp) -> Result<()
 #[derive(Clone)]
 pub struct Allocation {
     pub reference: AllocationReference,
+    pub refcounts: Refcounts,
     pub driver: Option<u64>,
     pub size: usize,
     pub properties: CUmemAllocationProp,
@@ -33,8 +35,7 @@ impl Allocation {
     /// Only the creator saves shared device memory; private memory stays native.
     pub(crate) fn checkpoint_via_host_carrier(&self, namespace_pid: NamespacePid) -> bool {
         self.reference.creator_pid == namespace_pid
-            && self.properties.type_ == CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED
-            && self.properties.location.type_ == CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE
+            && validate_properties(&self.properties).is_ok()
             && self.shared
     }
 }
@@ -67,31 +68,16 @@ pub(crate) fn access_metadata(
             flags: entry.flags as u32,
         })
         .collect();
+    // Equivalent access sets must compare equally regardless of descriptor order.
     metadata.sort();
     metadata
 }
 impl ProcessState {
-    pub(crate) fn adopt_unicast(
-        &mut self,
-        reference: AllocationReference,
-        driver: u64,
-        size: usize,
-        properties: CUmemAllocationProp,
-        shared: bool,
-        context: usize,
-    ) -> Result<u64> {
-        let handle = self.mint_virtual_allocation_handle(reference.id)?;
-        self.memblocks.insert(
-            reference.id,
-            Memblock::Unicast(Allocation {
-                reference,
-                driver: Some(driver),
-                size,
-                properties,
-                shared,
-                context,
-            }),
-        );
+    pub(crate) fn adopt_unicast(&mut self, mut allocation: Allocation) -> Result<u64> {
+        let id = allocation.reference.id;
+        let handle = self.mint_virtual_allocation_handle(id)?;
+        allocation.refcounts.handle_entries = 1;
+        self.memblocks.insert(id, Memblock::Unicast(allocation));
         Ok(handle)
     }
 
@@ -113,10 +99,13 @@ impl ProcessState {
         } else {
             unsafe { crate::driver::cuMemRelease(driver) }?;
         }
-        let entry = self
-            .virtual_allocation_handles
-            .entry(handle)
-            .or_insert(HandleEntry { id, references: 0 });
+        let entry = match self.virtual_allocation_handles.entry(handle) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                memblock.refcounts_mut().handle_entries += 1;
+                entry.insert(HandleEntry { id, references: 0 })
+            }
+        };
         entry.references += 1;
         Ok(handle.as_raw())
     }
@@ -152,6 +141,7 @@ impl ProcessState {
         if allocation.context == 0 {
             allocation.context = context;
         }
+        allocation.refcounts.mappings += 1;
         self.mappings.insert(
             address,
             Mapping {

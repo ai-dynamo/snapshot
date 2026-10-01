@@ -46,7 +46,7 @@ pub fn export_posix(handle: CUmemGenericAllocationHandle) -> Result<OwnedFd> {
     // CUDA transfers ownership of a fresh descriptor on successful POSIX export.
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
     rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC)
-        .map_err(|_| CUresult::CUDA_ERROR_OPERATING_SYSTEM)?;
+        .map_err(|error| Error::io("mark CUDA export close-on-exec", error))?;
     Ok(fd)
 }
 pub fn result(code: CUresult) -> Result<()> {
@@ -58,31 +58,45 @@ pub fn result(code: CUresult) -> Result<()> {
 }
 
 macro_rules! functions {
-    ($($name:ident($($arg:ident: $ty:ty),*);)*) => {
+    (required { $($required:ident($($rarg:ident: $rty:ty),*);)* }
+     optional { $($optional:ident($($oarg:ident: $oty:ty),*);)* }) => {
+        functions!(@define $($required($($rarg: $rty),*);)* $($optional($($oarg: $oty),*);)*);
+
+        pub(crate) fn initialize() -> Result<()> {
+            let symbols = Symbols::resolve();
+            $(if symbols.$required.is_none() {
+                return Err(Error::Startup(concat!("missing required CUDA symbol ", stringify!($required))));
+            })*
+            let _ = SYMBOLS.set(symbols);
+            Ok(())
+        }
+    };
+    (@define $($name:ident($($arg:ident: $ty:ty),*);)*) => {
         struct Symbols {
             $($name: Option<unsafe extern "C" fn($($ty),*) -> CUresult>,)*
         }
         static SYMBOLS: std::sync::OnceLock<Symbols> = std::sync::OnceLock::new();
 
-        pub(crate) fn initialize() {
-            // Resolve privately: neither a state mutex nor OnceLock initialization
-            // may be held while the frontend enters the dynamic loader. Concurrent
-            // runtime candidates can publish equivalent tables without waiting.
-            let symbols = Symbols {
-                $($name: {
-                    let address = crate::driver(
-                        std::ffi::CStr::from_bytes_with_nul(
-                            concat!(stringify!($name), "\0").as_bytes()).expect("static CUDA symbol"));
-                    if address.is_null() {
-                        None
-                    } else {
-                        // The frontend resolves this exact NVIDIA driver signature.
-                        Some(unsafe { std::mem::transmute::<*mut c_void,
-                            unsafe extern "C" fn($($ty),*) -> CUresult>(address) })
-                    }
-                },)*
-            };
-            let _ = SYMBOLS.set(symbols);
+        impl Symbols {
+            fn resolve() -> Self {
+                // Resolve privately: neither a state mutex nor OnceLock initialization
+                // may be held while the frontend enters the dynamic loader. Concurrent
+                // runtime candidates can publish equivalent tables without waiting.
+                Self {
+                    $($name: {
+                        let address = crate::driver(
+                            std::ffi::CStr::from_bytes_with_nul(
+                                concat!(stringify!($name), "\0").as_bytes()).expect("static CUDA symbol"));
+                        if address.is_null() {
+                            None
+                        } else {
+                            // The frontend resolves this exact NVIDIA driver signature.
+                            Some(unsafe { std::mem::transmute::<*mut c_void,
+                                unsafe extern "C" fn($($ty),*) -> CUresult>(address) })
+                        }
+                    },)*
+                }
+            }
         }
 
         pub mod symbols {
@@ -102,24 +116,29 @@ macro_rules! functions {
     )*};
 }
 
+// VMM, contexts, and host-copy primitives are required at startup. Multicast
+// is optional so drivers without those entry points can run unicast workloads.
 functions! {
-    cuCtxGetCurrent(context: *mut *mut c_void);
-    cuCtxGetDevice(device: *mut CUdevice);
-    cuCtxSetCurrent(context: *mut c_void);
-    cuDevicePrimaryCtxRelease_v2(device: CUdevice);
-    cuDevicePrimaryCtxRetain(context: *mut *mut c_void, device: CUdevice);
-    cuMemAddressFree(address: CUdeviceptr, size: usize);
-    cuMemAddressReserve(address: *mut CUdeviceptr, size: usize, alignment: usize, requested: CUdeviceptr, flags: u64);
-    cuMemCreate(handle: *mut CUmemGenericAllocationHandle, size: usize, properties: *const CUmemAllocationProp, flags: u64);
-    cuMemGetAllocationGranularity(size: *mut usize, properties: *const CUmemAllocationProp, flags: CUmemAllocationGranularity_flags);
-    cuMemExportToShareableHandle(output: *mut c_void, handle: CUmemGenericAllocationHandle, handle_type: CUmemAllocationHandleType, flags: u64);
-    cuMemGetAllocationPropertiesFromHandle(properties: *mut CUmemAllocationProp, handle: CUmemGenericAllocationHandle);
-    cuMemImportFromShareableHandle(handle: *mut CUmemGenericAllocationHandle, shareable: *mut c_void, handle_type: CUmemAllocationHandleType);
-    cuMemMap(address: CUdeviceptr, size: usize, offset: usize, handle: CUmemGenericAllocationHandle, flags: u64);
-    cuMemRelease(handle: CUmemGenericAllocationHandle);
-    cuMemRetainAllocationHandle(handle: *mut CUmemGenericAllocationHandle, address: *mut c_void);
-    cuMemSetAccess(address: CUdeviceptr, size: usize, access: *const CUmemAccessDesc, count: usize);
-    cuMemUnmap(address: CUdeviceptr, size: usize);
+    required {
+        cuCtxGetCurrent(context: *mut *mut c_void);
+        cuCtxGetDevice(device: *mut CUdevice);
+        cuCtxSetCurrent(context: *mut c_void);
+        cuDevicePrimaryCtxRelease_v2(device: CUdevice);
+        cuDevicePrimaryCtxRetain(context: *mut *mut c_void, device: CUdevice);
+        cuMemAddressFree(address: CUdeviceptr, size: usize);
+        cuMemAddressReserve(address: *mut CUdeviceptr, size: usize, alignment: usize, requested: CUdeviceptr, flags: u64);
+        cuMemCreate(handle: *mut CUmemGenericAllocationHandle, size: usize, properties: *const CUmemAllocationProp, flags: u64);
+        cuMemGetAllocationGranularity(size: *mut usize, properties: *const CUmemAllocationProp, flags: CUmemAllocationGranularity_flags);
+        cuMemExportToShareableHandle(output: *mut c_void, handle: CUmemGenericAllocationHandle, handle_type: CUmemAllocationHandleType, flags: u64);
+        cuMemGetAllocationPropertiesFromHandle(properties: *mut CUmemAllocationProp, handle: CUmemGenericAllocationHandle);
+        cuMemImportFromShareableHandle(handle: *mut CUmemGenericAllocationHandle, shareable: *mut c_void, handle_type: CUmemAllocationHandleType);
+        cuMemMap(address: CUdeviceptr, size: usize, offset: usize, handle: CUmemGenericAllocationHandle, flags: u64);
+        cuMemRelease(handle: CUmemGenericAllocationHandle);
+        cuMemRetainAllocationHandle(handle: *mut CUmemGenericAllocationHandle, address: *mut c_void);
+        cuMemSetAccess(address: CUdeviceptr, size: usize, access: *const CUmemAccessDesc, count: usize);
+        cuMemUnmap(address: CUdeviceptr, size: usize);
+    }
+    optional {}
 }
 
 pub(super) fn context() -> Result<usize> {
@@ -135,6 +154,8 @@ pub struct Context {
 }
 
 impl Context {
+    /// Runs in the recorded context. Only when `context` is zero does `device`
+    /// select a primary context to retain for the duration of the call.
     pub fn run<T>(context: usize, device: i32, body: impl FnOnce() -> Result<T>) -> Result<T> {
         let context = Self::enter(context, device)?;
         let result = body();
@@ -176,5 +197,48 @@ impl Context {
             result = result.and(unsafe { crate::driver::cuDevicePrimaryCtxRelease_v2(device) });
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cuinterpose_abi::{ABI_VERSION, FrontendAbi};
+    use std::ffi::{CStr, c_char};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn required_symbols_fail_at_startup() {
+        crate::tests::in_child_process("driver::tests::required_symbols_fail_at_startup", || {
+            static MISSING_CREATE: AtomicBool = AtomicBool::new(true);
+            unsafe extern "C" fn resolve(name: *const c_char) -> *mut c_void {
+                let name = unsafe { CStr::from_ptr(name) }.to_bytes();
+                if name.starts_with(b"cuMulticast")
+                    || (name == b"cuMemCreate" && MISSING_CREATE.load(Ordering::Relaxed))
+                {
+                    std::ptr::null_mut()
+                } else {
+                    crate::tests::unused_driver_symbol()
+                }
+            }
+            let frontend = FrontendAbi {
+                version: ABI_VERSION,
+                size: size_of::<FrontendAbi>() as u32,
+                resolve,
+            };
+            let mut output = std::ptr::null();
+            assert_eq!(
+                unsafe { crate::cuinterpose_core_init(&frontend, &mut output) },
+                CUDA_SUCCESS
+            );
+            assert!(matches!(
+                initialize(),
+                Err(Error::Startup("missing required CUDA symbol cuMemCreate"))
+            ));
+            assert!(SYMBOLS.get().is_none());
+            MISSING_CREATE.store(false, Ordering::Relaxed);
+            initialize().unwrap();
+            assert!(symbols::cuMemCreate().is_ok());
+        });
     }
 }

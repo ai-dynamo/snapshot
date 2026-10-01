@@ -5,8 +5,9 @@
 
 use crate::driver::{self};
 use crate::error::{Error, Result};
-use crate::memory::{sharing, vmm};
+use crate::memory::vmm::Allocation;
 use crate::memory::{self, Memblock, VirtualAllocationHandle};
+use crate::memory::{sharing, vmm};
 use crate::runtime;
 use cudarc::driver::sys::CUresult::*;
 use cudarc::driver::sys::*;
@@ -46,19 +47,18 @@ pub fn cuMemCreate(
     let context = if supported { driver::context()? } else { 0 };
     let mut driver = 0;
     let create = crate::driver::symbols::cuMemCreate()?;
-    if let Err(error) =
-        crate::driver::result(unsafe { create(&mut driver, size, &properties, flags) })
-    {
-        unsafe {
-            out.write(driver);
-        }
-        return Err(error);
-    }
+    crate::driver::result(unsafe { create(&mut driver, size, &properties, flags) })?;
     let driver = runtime::must_complete(VirtualAllocationHandle::from_driver(driver));
     let handle = match reference {
-        Some(reference) => runtime::must_complete(
-            state.adopt_unicast(reference, driver, size, properties, false, context),
-        ),
+        Some(reference) => runtime::must_complete(state.adopt_unicast(Allocation {
+            reference,
+            refcounts: Default::default(),
+            driver: Some(driver),
+            size,
+            properties,
+            shared: false,
+            context,
+        })),
         None => driver,
     };
     unsafe { out.write(handle) };
@@ -125,14 +125,12 @@ pub fn cuMemUnmap(address: u64, size: usize) -> Result<()> {
     unsafe { crate::driver::cuMemUnmap(address, size) }?;
     // CUDA only unmaps whole mappings; a successful range can contain several.
     let addresses: Vec<_> = state
-        .mappings
-        .range(address..)
-        .take_while(|(start, _)| **start - address < size as u64)
-        .map(|(start, _)| *start)
+        .mappings_in_range(address, size)
+        .map(|mapping| mapping.address)
         .collect();
     for start in addresses {
-        let mapping = state.mappings.remove(&start).unwrap();
-        runtime::must_complete(state.release_unused_memblock(mapping.id));
+        let id = state.remove_mapping(start);
+        runtime::must_complete(state.release_unused_memblock(id));
     }
     Ok(())
 }
@@ -155,10 +153,8 @@ pub fn cuMemSetAccess(
     // Access applies to a fully mapped range, potentially spanning allocations.
     // Prepare metadata before CUDA and publish it only after the call succeeds.
     let updates: Vec<_> = state
-        .mappings
-        .range(address..)
-        .take_while(|(start, _)| **start - address < size as u64)
-        .map(|(start, mapping)| (*start, mapping.merged_access(descriptors)))
+        .mappings_in_range(address, size)
+        .map(|mapping| (mapping.address, mapping.merged_access(descriptors)))
         .collect();
     unsafe { crate::driver::cuMemSetAccess(address, size, access, count) }?;
     for (start, access) in updates {
@@ -194,7 +190,13 @@ pub fn cuMemExportToShareableHandle(
     {
         return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
     }
-    let fd = sharing::create(memblock.reference()).map_err(|_| CUDA_ERROR_OUT_OF_MEMORY)?;
+    // The ticket names this allocation; unlike a CUDA export FD, it does not retain its backing.
+    let fd = sharing::create(memblock.reference()).map_err(|error| {
+        Error::io(
+            "create shareable handle ticket",
+            std::io::Error::other(error),
+        )
+    })?;
     memblock.export(namespace_pid)?;
     unsafe { out.cast::<i32>().write(fd.into_raw_fd()) };
     Ok(())

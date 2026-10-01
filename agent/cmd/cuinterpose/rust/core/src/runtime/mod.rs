@@ -133,7 +133,7 @@ struct RuntimeCandidate {
 
 impl RuntimeCandidate {
     fn prepare() -> Result<Option<Self>> {
-        crate::driver::initialize();
+        crate::driver::initialize()?;
         let mut runtime = prepare_runtime()?;
         // None means another runtime won before we needed further workers.
         if published() {
