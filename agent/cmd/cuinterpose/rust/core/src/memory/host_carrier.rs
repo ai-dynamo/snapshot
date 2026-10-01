@@ -186,6 +186,8 @@ impl Arena {
                 unsafe { crate::driver::cuMemAddressReserve(&mut base, total, 0, 0, 0) }?;
                 reserved = Some(base);
                 let mut offset = 0usize;
+                // Copy the full backing independently of application mappings,
+                // which may be absent, partial, or lack the access we need.
                 for allocation in &group {
                     let address = base
                         .checked_add(offset as u64)
@@ -490,19 +492,19 @@ mod tests {
             }
             b"cuMemcpyHtoDAsync_v2" => to_device as *const () as *mut c_void,
             b"cuMemcpyDtoHAsync_v2" => to_host as *const () as *mut c_void,
-            _ => std::ptr::null_mut(),
+            _ => crate::tests::unused_driver_symbol(),
         }
     }
 
     #[test]
-    fn failed_setup_releases_temporary_resources() {
+    fn failed_setup_releases_context_without_registering_arena() {
         // The frontend ABI is process-lifetime production state. Keep this fake
         // resolver out of ABI-prefix tests, which require it to remain unset.
         if std::env::var_os("CUINTERPOSE_CARRIER_UNIT_CHILD").is_none() {
             let status = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
-                    "memory::host_carrier::tests::failed_setup_releases_temporary_resources",
+                    "memory::host_carrier::tests::failed_setup_releases_context_without_registering_arena",
                 ])
                 .env("CUINTERPOSE_CARRIER_UNIT_CHILD", "1")
                 .status()
@@ -519,7 +521,7 @@ mod tests {
                 })
                 .is_ok()
         );
-        crate::driver::initialize();
+        crate::driver::initialize().unwrap();
         Context::enter(1, 0).unwrap().leave().unwrap();
         assert_eq!(G_SWITCHED.load(Ordering::Relaxed), 0);
         assert!(matches!(
@@ -588,7 +590,7 @@ mod tests {
                 })
                 .is_ok()
         );
-        crate::driver::initialize();
+        crate::driver::initialize().unwrap();
         G_TRANSFER.store(true, Ordering::Relaxed);
         let mut allocations: Vec<_> = [0, 3]
             .into_iter()

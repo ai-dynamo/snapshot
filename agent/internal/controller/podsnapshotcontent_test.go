@@ -39,11 +39,14 @@ func TestCuInterposeRequiredSurvivesAnnotationEdits(t *testing.T) {
 	for _, tc := range []struct {
 		name, annotation  string
 		wrapped, required bool
+		wantError         bool
 	}{
 		{name: "native"},
 		{name: "ordinary Pod requested", annotation: "true", required: true},
 		{name: "annotation removed", wrapped: true, required: true},
 		{name: "annotation disabled", annotation: "false", wrapped: true, required: true},
+		{name: "annotation malformed", annotation: "invalid", wrapped: true, required: true},
+		{name: "ordinary Pod malformed annotation", annotation: "invalid", wantError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Command: []string{"worker"}}}}}
@@ -54,7 +57,11 @@ func TestCuInterposeRequiredSurvivesAnnotationEdits(t *testing.T) {
 				pod.Spec.Containers[0].Command = []string{podcontract.CuInterposeLauncherPath, "worker"}
 			}
 			required, err := cuInterposeRequired(pod, "main")
-			require.NoError(t, err)
+			if tc.wantError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
 			assert.Equal(t, tc.required, required)
 		})
 	}

@@ -54,12 +54,12 @@ pub fn control_dir() -> Result<&'static Path> {
     Ok(&process_runtime()?.control_dir)
 }
 
-pub(super) fn initialized() -> bool {
+fn published() -> bool {
     RUNTIME.get().is_some()
 }
 
 pub fn initialize() -> Result<()> {
-    if initialized() {
+    if published() {
         return ready();
     }
     if RUNTIME_FAILED.load(Ordering::Acquire) {
@@ -92,7 +92,7 @@ pub fn initialize() -> Result<()> {
         // A healthy winner supersedes even a failed private candidate.
         let result = if RUNTIME_FAILED.load(Ordering::Acquire) {
             Err(Error::RuntimeFailed)
-        } else if initialized() {
+        } else if published() {
             Ok(())
         } else {
             match candidate {
@@ -133,10 +133,10 @@ struct RuntimeCandidate {
 
 impl RuntimeCandidate {
     fn prepare() -> Result<Option<Self>> {
-        crate::driver::initialize();
+        crate::driver::initialize()?;
         let mut runtime = prepare_runtime()?;
         // None means another runtime won before we needed further workers.
-        if initialized() {
+        if published() {
             return Ok(None);
         }
         let namespace_pid = runtime
