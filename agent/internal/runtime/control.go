@@ -32,6 +32,16 @@ func WriteControlSentinel(hostPID int, name string) error {
 	return writeSentinelInDir(dir, name)
 }
 
+// RemoveContainerControlSentinel removes agent recovery evidence through the
+// container mount namespace, without requiring callers to construct host paths.
+func RemoveContainerControlSentinel(hostPID int, name string) error {
+	if hostPID <= 0 {
+		return fmt.Errorf("invalid host PID %d for control sentinel %q", hostPID, name)
+	}
+	dir := filepath.Join(HostProcPath, strconv.Itoa(hostPID), "root", podcontract.SnapshotControlMountPath)
+	return removeSentinelInDir(dir, name)
+}
+
 // ControlSentinelExists reports whether a sentinel exists in the workload
 // container's snapshot-control volume. It returns an error when the container's
 // control mount cannot be inspected, so callers do not mistake an inaccessible

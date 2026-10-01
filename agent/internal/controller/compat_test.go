@@ -22,6 +22,51 @@ import (
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
+func TestReplacementRestoreStillChecksCompatibility(t *testing.T) {
+	r := newGatedRestore(t, compat.Mismatch{Check: "cpu-arch", Source: "amd64", Target: "arm64"})
+	setRestoredContainerIDs(t, r.pod, map[string]string{"main": "old-container"})
+	r.pod.Status.Conditions = append(r.pod.Status.Conditions, corev1.PodCondition{
+		Type: corev1.PodConditionType(podcontract.RestoredCondition), Status: corev1.ConditionTrue, Reason: podcontract.RestoreReasonSucceeded,
+	})
+	r.controller.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
+		t.Error("incompatible replacement must not reach CRIU")
+		return 0, nil
+	}
+	r.reconcile(t)
+	require.NotEmpty(t, r.comparison.calls)
+	assert.Equal(t, podcontract.RestoreReasonReplenishmentIncompatible, r.condition(t).Reason)
+	assert.Equal(t, "old-container", liveRestoredContainerID(t, r.controller, r.pod, "main"))
+}
+
+func TestSkipCompatibilityDoesNotRetryExecutionFailures(t *testing.T) {
+	for _, reason := range []string{podcontract.RestoreReasonFailed, podcontract.RestoreReasonPartiallySucceeded} {
+		t.Run(reason, func(t *testing.T) {
+			r := newGatedRestore(t)
+			r.pod.Annotations[podcontract.SkipCompatCheckAnnotation] = "true"
+			r.pod.Status.Conditions = append(r.pod.Status.Conditions, corev1.PodCondition{
+				Type: corev1.PodConditionType(podcontract.RestoredCondition), Status: corev1.ConditionFalse, Reason: reason,
+			})
+			r.controller.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
+				t.Error("compatibility override must not retry an execution failure")
+				return 0, nil
+			}
+			r.reconcile(t)
+			assert.Empty(t, r.comparison.calls)
+			assert.False(t, hasPodStatusApply(r.controller), "terminal outcomes must not be rewritten")
+		})
+	}
+}
+
+func TestInvalidRestoredIDsAreLogged(t *testing.T) {
+	r := newGatedRestore(t)
+	r.pod.Annotations[podcontract.RestoredContainerIDsAnnotation] = "null"
+	r.pod.Status.Conditions = append(r.pod.Status.Conditions, corev1.PodCondition{
+		Type: corev1.PodConditionType(podcontract.RestoredCondition), Status: corev1.ConditionTrue, Reason: podcontract.RestoreReasonSucceeded,
+	})
+	assert.False(t, r.controller.hasRestartedRestoreDestination(r.pod))
+	assert.Len(t, r.logs.fieldsOf("Invalid restored container ID records; treating restore as terminal"), 1)
+}
+
 // A checkpoint whose manifest cannot be read is not incompatible, it is broken.
 // The restore path reads the manifest again and reports that; refusing here
 // would report the wrong outcome and hide the real error.
@@ -296,7 +341,11 @@ func TestSkipCompatCheckTurnsOffTheGates(t *testing.T) {
 	// only way out of a wrong refusal is deleting and recreating the pod.
 	t.Run("it reopens a pod that was already refused", func(t *testing.T) {
 		r := newGatedRestore(t, mismatch)
-		stopEarly(r)
+		restoreCalls := 0
+		r.controller.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
+			restoreCalls++
+			return 0, errors.New("test restore stopped")
+		}
 
 		r.reconcile(t)
 		require.Len(t, r.events(t, podcontract.RestoreReasonIncompatible), 1, "the gate did not refuse the restore")
@@ -314,6 +363,7 @@ func TestSkipCompatCheckTurnsOffTheGates(t *testing.T) {
 
 		assert.Empty(t, r.comparison.calls, "the reopened restore was compared anyway")
 		assert.Len(t, r.events(t, podcontract.RestoreReasonIncompatible), 1, "the reopened restore was refused again")
+		assert.Equal(t, 1, restoreCalls, "the explicit override must reopen the refused restore")
 	})
 }
 
@@ -354,11 +404,13 @@ func TestRefusalIsLoggedWithTheSameReasonAtBothGates(t *testing.T) {
 // back into the same answer.
 func TestRunRestoreTreatsIncompatibleAsTerminal(t *testing.T) {
 	r := newGatedRestore(t)
-	rt := &fakeRuntime{}
+	rt := &fakeRuntime{resolveContainerPID: 4242}
 	r.controller.runtime = rt
 	sentinels := 0
-	r.controller.writeControlSentinelFn = func(int, string) error {
-		sentinels++
+	r.controller.writeControlSentinelFn = func(_ int, name string) error {
+		if name == podcontract.RestoreCompleteFile {
+			sentinels++
+		}
 		return nil
 	}
 	r.controller.restoreFn = refuseWith(compat.Mismatch{Check: "cpu-arch", Source: "amd64", Target: "arm64"})
@@ -368,7 +420,7 @@ func TestRunRestoreTreatsIncompatibleAsTerminal(t *testing.T) {
 	assert.False(t, requeue, "a refusal asked to be driven again")
 	assert.Empty(t, r.events(t, podcontract.RestoreReasonFailed), "refusal reported itself as a restore failure")
 	assert.Zero(t, sentinels, "refusal released the workload")
-	assert.Empty(t, rt.resolvedContainerIDs, "refusal reached the placeholder kill path")
+	assert.Len(t, rt.resolvedContainerIDs, 2, "only recovery and intent recording resolve the placeholder")
 }
 
 // The gate runs in preflight, before the restore is entered at all, so a refusal
