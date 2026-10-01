@@ -93,6 +93,7 @@ func cleanupRestoreMounts(ctx context.Context, mounts []restoreMount) error {
 
 // RestoreRequest holds the parameters for a restore operation.
 type RestoreRequest struct {
+	CUDAHelper                  *cuda.Helper
 	ContentUID                  string
 	BasePath                    string
 	ContainerID                 string
@@ -104,6 +105,8 @@ type RestoreRequest struct {
 	DestinationContainerName    string
 	Clientset                   kubernetes.Interface
 	PageBrokerRequested         bool
+	CUDAHelperEnabled           bool
+	EnableChecksumDigest        bool
 	PageBrokerEnabled           bool
 	PageBrokerControlSocketPath string
 
@@ -174,6 +177,17 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		return 0, err
 	}
 
+	useGPU := req.CUDAHelperEnabled && !manifest.CUDA.IsEmpty()
+	if manifest.CUDA.CustomStorage && !useGPU {
+		return 0, fmt.Errorf("CustomStorage checkpoint requires the persistent CUDA helper")
+	}
+	if useGPU {
+		brokered = false
+		if err := validateGPURestoreArtifact(artifactPath); err != nil {
+			return 0, err
+		}
+	}
+
 	snap, gpuDeviceMapDuration, err := inspectRestore(ctx, rt, log, req, manifest)
 	if err != nil {
 		return 0, err
@@ -188,6 +202,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		point:  bundleMount,
 	})
 
+	var sessions cuda.GPUSessions
 	containerCheckpointPath := nsmount.CheckpointDst
 	var pageBrokerStageDuration, pageBrokerMountDuration, pageBrokerCommitDuration time.Duration
 	if brokered {
@@ -221,8 +236,24 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		})
 	}
 
-	result, err := execNSRestore(ctx, log, req, snap, bundleMount, containerCheckpointPath)
+	if useGPU {
+		sessions, err = cuda.BindGPUSessions(ctx, req.CUDAHelper, artifactPath, snap.PlaceholderPID,
+			manifest.CUDA.PIDs, snap.TargetGPUUUIDs, snap.CUDADeviceMap, false, manifest.CUDA.CustomStorage, req.EnableChecksumDigest)
+		if err != nil {
+			return 0, err
+		}
+		// This defer runs before mount cleanup, even when nsrestore fails.
+		defer func() { retErr = errors.Join(retErr, req.CUDAHelper.Drain(sessions)) }()
+	}
+
+	result, err := execNSRestore(ctx, log, req, snap, bundleMount, containerCheckpointPath, sessions)
+	err = errors.Join(err, req.CUDAHelper.Drain(sessions))
 	if err != nil {
+		if useGPU {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			err = errors.Join(err, rt.TerminateContainer(stopCtx, req.ContainerID))
+		}
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
 	}
 	if brokered {
@@ -301,6 +332,19 @@ func validateRestoredProcess(targetRoot string, restoredPID int, log logr.Logger
 		restoreLogPath := filepath.Join(targetRoot, "var", "criu-work", criu.RestoreLogFilename)
 		logging.LogProcessDiagnostics(procRoot, restoredPID, restoreLogPath, log)
 		return fmt.Errorf("restored process failed post-restore validation: %w", err)
+	}
+	return nil
+}
+
+// The persistent engine does not support launch-job state. Reject it before
+// mounts/CRIU instead of dropping it when binding CUDA.
+func validateGPURestoreArtifact(directory string) error {
+	jobFile, err := cuda.JobFileFromCheckpoint(directory)
+	if err != nil {
+		return err
+	}
+	if jobFile != "" {
+		return fmt.Errorf("persistent CUDA helper cannot restore CUDA launch-job state; recreate the checkpoint without launch-job state")
 	}
 	return nil
 }
@@ -411,6 +455,7 @@ func inspectRestore(
 	}
 
 	return &types.RestoreContainerSnapshot{
+		TargetGPUUUIDs:  targetGPUUUIDs,
 		PlaceholderPID:  placeholderPID,
 		TargetRoot:      targetRoot,
 		CgroupRoot:      cgroupRoot,
@@ -456,7 +501,7 @@ func existingMountPaths(targetRoot string, destinations []string, aliases map[st
 //     container. Binaries that nsrestore subsequently loads (criu, ip, tar, .so
 //     files) are still resolved by PATH/LD_LIBRARY_PATH inside the container's
 //     mount namespace.
-func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot, mp nsmount.MountPoint, checkpointPath string) (*RestoreInNamespaceResult, error) {
+func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot, mp nsmount.MountPoint, checkpointPath string, gpu cuda.GPUSessions) (*RestoreInNamespaceResult, error) {
 
 	// Open nsrestore from the agent host side before entering the container
 	// namespace, so the binary fd is immune to rename attacks inside the container.
@@ -496,6 +541,9 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 		"--checkpoint-path", checkpointPath,
 		"--bundle-dir", bundleDir,
 	)
+	if req.CUDAHelperEnabled {
+		args = append(args, "--cuda-helper-enabled")
+	}
 	if snap.CUDADeviceMap != "" {
 		args = append(args, "--cuda-device-map", snap.CUDADeviceMap)
 	}
@@ -517,6 +565,10 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	// Inherit the agent environment so nsrestore uses the same logger settings.
 	cmd.Env = os.Environ()
 	cmd.ExtraFiles = []*os.File{nsFd, binaryFile}
+	for pid, file := range gpu {
+		cmd.Args = append(cmd.Args, "--gpu-session", pid+":"+strconv.Itoa(3+len(cmd.ExtraFiles)))
+		cmd.ExtraFiles = append(cmd.ExtraFiles, file)
+	}
 	log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())
 
 	var stdout bytes.Buffer

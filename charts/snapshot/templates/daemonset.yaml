@@ -152,6 +152,13 @@ spec:
                   fieldPath: spec.nodeName
             - name: SNAPSHOT_LOG_LEVEL
               value: {{ .Values.daemonset.snapshotLogLevel | quote }}
+            {{- if .Values.cudaCheckpoint.enabled }}
+            # The persistent helper warms a pool for every visible GPU.
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: compute,utility
+            {{- end }}
           volumeMounts:
             # Mount configuration ConfigMap
             - name: config

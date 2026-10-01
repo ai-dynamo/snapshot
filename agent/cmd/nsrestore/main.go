@@ -7,9 +7,13 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/go-logr/logr"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
@@ -22,11 +26,24 @@ func main() {
 	log := logging.ConfigureLogger("stderr").WithName("nsrestore")
 
 	checkpointPath := flag.String("checkpoint-path", "", "Path to checkpoint directory")
+	cudaHelperEnabled := flag.Bool("cuda-helper-enabled", false, "Restore CUDA through the persistent CUDA helper")
 	cudaDeviceMap := flag.String("cuda-device-map", "", "CUDA device map for cuda-checkpoint-helper restore")
 	gpuMountAliases := flag.String("gpu-mount-aliases", "{}", "Checkpoint path to destination GPU path JSON")
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
 	targetPodIP := flag.String("target-pod-ip", "", "Restore pod IP for CRIU TCP socket remapping")
 	bundleDir := flag.String("bundle-dir", nsmount.SnapshotBinDst, "Path where the agent binary bundle is mounted in this namespace")
+	sessions := cuda.GPUSessions{}
+	defer sessions.Close()
+	flag.Func("gpu-session", "Captured CUDA PID:inherited CUDA helper session FD", func(value string) error {
+		pidText, fdText, ok := strings.Cut(value, ":")
+		pid, pidErr := strconv.Atoi(pidText)
+		fd, fdErr := strconv.Atoi(fdText)
+		if !ok || pidErr != nil || fdErr != nil || pid <= 0 || fd < 3 || sessions[pidText] != nil {
+			return fmt.Errorf("invalid gpu session %q", value)
+		}
+		sessions[pidText] = os.NewFile(uintptr(fd), "gpu-session")
+		return nil
+	})
 	flag.Parse()
 
 	if *checkpointPath == "" {
@@ -38,11 +55,13 @@ func main() {
 	}
 
 	opts := executor.RestoreOptions{
-		CheckpointPath: *checkpointPath,
-		CUDADeviceMap:  *cudaDeviceMap,
-		CgroupRoot:     *cgroupRoot,
-		TargetPodIP:    *targetPodIP,
-		BundleDir:      *bundleDir,
+		CUDAHelperEnabled: *cudaHelperEnabled,
+		GPUSessions:       sessions,
+		CheckpointPath:    *checkpointPath,
+		CUDADeviceMap:     *cudaDeviceMap,
+		CgroupRoot:        *cgroupRoot,
+		TargetPodIP:       *targetPodIP,
+		BundleDir:         *bundleDir,
 	}
 
 	if err := json.Unmarshal([]byte(*gpuMountAliases), &opts.GPUMountAliases); err != nil {

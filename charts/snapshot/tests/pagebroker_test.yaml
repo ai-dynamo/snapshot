@@ -5,6 +5,54 @@ suite: PageBroker sidecar image
 templates:
   - templates/daemonset.yaml
 tests:
+  - it: keeps PageBroker a filesystem sidecar when the CUDA helper is enabled
+    set:
+      pageBroker.enabled: true
+      cudaCheckpoint.enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].name
+          value: pagebroker
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --gpu-engine
+      - notExists:
+          path: spec.template.spec.containers[0].securityContext
+      - notExists:
+          path: spec.template.spec.containers[0].env
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: NVIDIA_VISIBLE_DEVICES
+            value: all
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: NVIDIA_DRIVER_CAPABILITIES
+            value: compute,utility
+
+  - it: enables the helper without adding a sidecar or requiring PageBroker
+    set:
+      cudaCheckpoint.enabled: true
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.containers
+          count: 1
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NVIDIA_VISIBLE_DEVICES
+            value: all
+
+  - it: keeps agent-owned CUDA execution by default
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.containers
+          count: 1
+      - equal:
+          path: spec.template.spec.containers[0].name
+          value: agent
+
   - it: pulls the sidecar from its own repository at the agent's tag
     set:
       pageBroker.enabled: true

@@ -9,6 +9,7 @@ package main
 import (
 	"cmp"
 	"context"
+	"errors"
 	"flag"
 	"os"
 	"os/signal"
@@ -17,6 +18,7 @@ import (
 	"github.com/go-logr/logr"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/controller"
+	"github.com/ai-dynamo/snapshot/agent/internal/cuda"
 	"github.com/ai-dynamo/snapshot/agent/internal/logging"
 	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
 )
@@ -59,6 +61,23 @@ func main() {
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	rootCtx, cancel := context.WithCancelCause(rootCtx)
+	defer cancel(nil)
+	var helper *cuda.Helper
+	if cfg.CUDACheckpoint.Enabled {
+		helper, err = cuda.StartHelper(rootCtx, cuda.DefaultHelperBinaryPath, cfg.CUDACheckpoint, agentLog)
+		if err != nil {
+			fatal(agentLog, err, "Failed to initialize CUDA helper")
+		}
+		defer helper.Stop()
+		go func() {
+			select {
+			case <-helper.Done():
+				cancel(helper.Err())
+			case <-rootCtx.Done():
+			}
+		}()
+	}
 
 	agentLog.Info("Starting snapshot agent",
 		"node", cfg.NodeName,
@@ -68,12 +87,20 @@ func main() {
 	// The node controller handles both restore and capture paths.
 	nodeController, err := controller.NewNodeController(cfg, rt, rootLog.WithName("controller"))
 	if err != nil {
+		helper.Stop()
 		fatal(agentLog, err, "Failed to create snapshot node controller")
 	}
+	nodeController.SetCUDAHelper(helper)
 	if runErr := nodeController.Run(rootCtx); runErr != nil {
+		helper.Stop()
 		fatal(agentLog, runErr, "Snapshot node controller exited with error")
 	}
 
+	cancel(nil)
+	helper.Stop()
+	if cause := context.Cause(rootCtx); cause != nil && !errors.Is(cause, context.Canceled) {
+		fatal(agentLog, cause, "CUDA helper stopped unexpectedly")
+	}
 	agentLog.Info("Agent stopped")
 }
 
