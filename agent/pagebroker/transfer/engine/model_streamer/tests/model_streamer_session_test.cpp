@@ -309,3 +309,53 @@ TEST_F(ModelStreamerSessionTest, TerminalFailureDrainsActiveAndQueuedRestores)
   EXPECT_EQ(state.starts, 1U);
   EXPECT_EQ(state.ends, 1U);
 }
+
+TEST_F(ModelStreamerSessionTest, QueuedDeadlineDoesNotWaitForOrStopActiveReads)
+{
+  state.allow_responses = false;
+  ModelStreamerRestore restore;
+  auto plan = Plan();
+  plan.files.front().size_bytes = 6'000'000'000;
+  auto active = std::async(std::launch::async, [&] { restore.Stage(plan, root_ / "active"); });
+  {
+    std::unique_lock lock(state.mutex);
+    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.submitted == 1; }));
+  }
+  TransferControl control;
+  control.deadline = TransferControl::Clock::now() + 50ms;
+  auto queued = std::async(std::launch::async, [&] { restore.Stage(plan, root_ / "queued", control); });
+  const auto queued_status = queued.wait_for(2s);
+  EXPECT_EQ(queued_status, std::future_status::ready);
+  EXPECT_EQ(active.wait_for(0ms), std::future_status::timeout);
+  {
+    std::lock_guard lock(state.mutex);
+    EXPECT_EQ(state.submitted, 1U);
+    EXPECT_EQ(state.ends, 0U);
+    state.allow_responses = true;
+    state.changed.notify_all();
+  }
+  EXPECT_THROW(queued.get(), TransferInterrupted);
+  EXPECT_NO_THROW(active.get());
+  EXPECT_FALSE(restore.Failed());
+}
+
+TEST_F(ModelStreamerSessionTest, ActiveCancellationWaitsForNativeTeardown)
+{
+  state.allow_responses = false;
+  state.hold_end = true;
+  std::stop_source stop;
+  ModelStreamerRestore restore;
+  TransferControl control;
+  control.cancellation = stop.get_token();
+  auto result = std::async(std::launch::async, [&] { restore.Stage(Plan(), root_ / "restore", control); });
+  {
+    std::unique_lock lock(state.mutex);
+    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.submitted == 1; }));
+  }
+  stop.request_stop();
+  EXPECT_TRUE(WaitForEnd());
+  EXPECT_EQ(result.wait_for(0ms), std::future_status::timeout);
+  ReleaseEnd();
+  EXPECT_THROW(result.get(), TransferInterrupted);
+  EXPECT_TRUE(restore.Failed());
+}

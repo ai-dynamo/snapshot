@@ -13,8 +13,12 @@ RUN git init . \
 RUN export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)" \
     && export PACKAGE_VERSION=0.0.0+git.ae93548 \
     && make ci-build COMPONENT=streamer ARCH=x86_64
-RUN mkdir -p /out/core /out/include/streamer /out/legal \
+RUN export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)" \
+    && export PACKAGE_VERSION=0.0.0+git.ae93548 \
+    && make ci-build COMPONENT=s3 ARCH=x86_64
+RUN mkdir -p /out/core /out/s3 /out/include/streamer /out/legal \
     && cp py/runai_model_streamer/dist/*x86_64.whl /out/core/ \
+    && cp py/runai_model_streamer_s3/dist/*x86_64.whl /out/s3/ \
     && cp cpp/streamer/api/streamer/*.h /out/include/streamer/ \
     && cp LICENSE /out/legal/LICENSE \
     && git rev-parse HEAD > /out/legal/REVISION

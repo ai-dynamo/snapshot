@@ -14,13 +14,14 @@ class ModelStreamerTransferEngine final : public TransferEngine {
  public:
   explicit ModelStreamerTransferEngine(Path storage_root);
   TransferEngineType type() const override;
-  uintmax_t RestoreSize(const StorageBackend& source) const override;
-  void StageRestore(const StorageBackend& source, const Path& destination) const override;
+  RestorePlan PrepareRestore(const StorageBackend& source, TransferControl control = {}) const override;
+  void StageRestore(const RestorePlan& plan, const Path& destination, TransferControl control = {}) const override;
   void ValidateCheckpointDestination(const StorageBackend& destination) const override;
   bool CheckpointDestinationConflicts(const StorageBackend& destination) const override;
   void PublishCheckpoint(const Path& source, const StorageBackend& destination) const override;
 
  private:
+  // Storage backends prepare plans; native execution and session recovery are shared.
   // Returns the current restore session, replacing a terminally failed one.
   std::shared_ptr<ModelStreamerRestore> AcquireRestore() const;
 
