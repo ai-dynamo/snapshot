@@ -3,6 +3,7 @@
 
 //! Local checkpoint validation, mutation, inspection, and completion.
 
+use super::vmm::{Allocation, Mapping};
 use super::vmm::{access_metadata, context_device};
 use super::{Memblock, ProcessState, sharing};
 use crate::driver::Context;
@@ -12,6 +13,7 @@ use cudarc::driver::sys::CUresult::*;
 use cuinterpose_protocol::Operation;
 use cuinterpose_protocol::Reply;
 use runtime::export_cache;
+use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::os::fd::AsFd;
 
@@ -53,7 +55,10 @@ impl Phase {
             Operation::RestoreMulticastBindings => (Self::MulticastDevicesRestored, Self::Active),
         };
         if self != expected {
-            return Err(Error::from(CUDA_ERROR_NOT_READY));
+            return Err(Error::OutOfOrder {
+                expected,
+                actual: self,
+            });
         }
         Ok(next)
     }
@@ -102,8 +107,10 @@ impl ProcessState {
                 continue;
             }
             let record = Record::Mapping {
-                allocation: self.memblocks[&mapping.id]
-                    .unicast()
+                allocation: self
+                    .memblocks
+                    .get(&mapping.id)
+                    .and_then(Memblock::unicast)
                     .ok_or(CUDA_ERROR_INVALID_HANDLE)?
                     .reference,
                 address: mapping.address,
@@ -236,7 +243,7 @@ impl ProcessState {
                         .ok_or(CUDA_ERROR_INVALID_HANDLE)?
                         .driver = allocation.driver;
                 }
-                self.remap(true)?;
+                self.remap(Participants::Creators)?;
             }
             Operation::RestoreUnicast => {
                 for allocation in self
@@ -245,8 +252,8 @@ impl ProcessState {
                     .filter_map(Memblock::unicast_mut)
                     .filter(|a| a.reference.creator_pid != self.namespace_pid && a.shared)
                 {
-                    let (raw, properties) = sharing::request_export(allocation.reference)
-                        .map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
+                    let (raw, properties) =
+                        sharing::request_export(allocation.reference).map_err(Error::PeerExport)?;
                     if properties.is_some() {
                         return Err(Error::from(CUDA_ERROR_INVALID_HANDLE));
                     }
@@ -256,7 +263,7 @@ impl ProcessState {
                         || crate::driver::import_posix(raw.as_fd()),
                     )?);
                 }
-                self.remap(false)?;
+                self.remap(Participants::Importers)?;
             }
             Operation::RestoreMulticastCreators
             | Operation::RestoreMulticastImporters
@@ -267,67 +274,72 @@ impl ProcessState {
         Ok(bytes)
     }
 
-    fn remap(&mut self, creator: bool) -> Result<()> {
-        let namespace_pid = self.namespace_pid;
+    fn remap(&mut self, participants: Participants) -> Result<()> {
         for allocation in self
             .memblocks
             .values_mut()
             .filter_map(Memblock::unicast_mut)
-            .filter(|a| a.shared && (a.reference.creator_pid == namespace_pid) == creator)
         {
-            Context::run(
-                allocation.context,
-                context_device(&allocation.properties),
-                || {
-                    for mapping in self
-                        .mappings
-                        .values_mut()
-                        .filter(|m| m.id == allocation.reference.id)
-                    {
-                        unsafe {
-                            crate::driver::cuMemMap(
-                                mapping.address,
-                                mapping.size,
-                                mapping.offset,
-                                allocation.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?,
-                                0,
-                            )
-                        }?;
-                        if !mapping.access.is_empty() {
-                            unsafe {
-                                crate::driver::cuMemSetAccess(
-                                    mapping.address,
-                                    mapping.size,
-                                    mapping.access.as_ptr(),
-                                    mapping.access.len(),
-                                )
-                            }?;
-                        }
-                    }
-                    if creator && allocation.shared {
-                        let fd = crate::driver::export_posix(
-                            allocation.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?,
-                        )?;
-                        export_cache()?.insert(allocation.reference.id, fd, None)?;
-                    }
-                    if !self
-                        .virtual_allocation_handles
-                        .values()
-                        .any(|entry| entry.id == allocation.reference.id)
-                    {
-                        unsafe {
-                            crate::driver::cuMemRelease(
-                                allocation.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?,
-                            )
-                        }?;
-                        allocation.driver = None;
-                    }
-                    Ok(())
-                },
-            )?;
+            let created_here = allocation.reference.creator_pid == self.namespace_pid;
+            if allocation.shared && created_here == (participants == Participants::Creators) {
+                restore_allocation(allocation, &self.mappings, participants)?;
+            }
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Participants {
+    Creators,
+    Importers,
+}
+
+fn restore_allocation(
+    allocation: &mut Allocation,
+    mappings: &BTreeMap<u64, Mapping>,
+    participants: Participants,
+) -> Result<()> {
+    Context::run(
+        allocation.context,
+        context_device(&allocation.properties),
+        || {
+            let driver = allocation.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+            for mapping in mappings
+                .values()
+                .filter(|m| m.id == allocation.reference.id)
+            {
+                unsafe {
+                    crate::driver::cuMemMap(
+                        mapping.address,
+                        mapping.size,
+                        mapping.offset,
+                        driver,
+                        0,
+                    )
+                }?;
+                if !mapping.access.is_empty() {
+                    unsafe {
+                        crate::driver::cuMemSetAccess(
+                            mapping.address,
+                            mapping.size,
+                            mapping.access.as_ptr(),
+                            mapping.access.len(),
+                        )
+                    }?;
+                }
+            }
+            if participants == Participants::Creators {
+                let fd = crate::driver::export_posix(driver)?;
+                export_cache()?.insert(allocation.reference.id, fd, None)?;
+            }
+            if allocation.refcounts.handle_entries == 0 {
+                unsafe { crate::driver::cuMemRelease(driver) }?;
+                allocation.driver = None;
+            }
+            Ok(())
+        },
+    )
 }
 
 pub(crate) fn inspect() -> std::result::Result<Reply, String> {
@@ -352,7 +364,7 @@ pub(crate) fn execute(operation: Operation) -> std::result::Result<Reply, String
     state
         .phase
         .next(operation)
-        .map_err(|_| "CUDA lifecycle operation out of order")?;
+        .map_err(|error| format!("{operation:?}: {error}"))?;
     let bytes = runtime::must_complete(state.lifecycle(operation));
     Ok(Reply::Completed { operation, bytes })
 }
@@ -369,6 +381,32 @@ pub(crate) fn load_acknowledged() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inspect_rejects_mapping_without_backing() {
+        let mut state = ProcessState::new(41);
+        let id = [1; 16];
+        let handle = super::super::VirtualAllocationHandle::from_raw(
+            super::super::VirtualAllocationHandle::TAG | 1,
+        )
+        .unwrap();
+        state.mappings.insert(
+            4096,
+            Mapping {
+                id,
+                handle,
+                address: 4096,
+                size: 4096,
+                offset: 0,
+                access: Vec::new(),
+                flags: 0,
+            },
+        );
+        assert!(matches!(
+            state.inspect(),
+            Err(Error::Cuda(CUDA_ERROR_INVALID_HANDLE))
+        ));
+    }
 
     #[test]
     fn checkpoint_entry_requires_idle_calls_and_runs_once() {

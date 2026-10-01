@@ -145,17 +145,23 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
     }
     for (namespace_pid, participant) in participants {
         for record in participant {
-            if let Record::MulticastDevice { allocation, device } = record
-                && multicasts
+            if let Record::MulticastDevice { allocation, device } = record {
+                let multicast = multicasts
                     .get_mut(&allocation.id)
-                    .with_context(|| format!("missing multicast object {allocation:?}"))?
+                    .with_context(|| format!("missing multicast object {allocation:?}"))?;
+                ensure!(
+                    multicast.reference == *allocation,
+                    "inconsistent multicast creator for {allocation:?}"
+                );
+                if multicast
                     .devices
                     .insert((*namespace_pid, *device), false)
                     .is_some()
-            {
-                bail!(
-                    "participant {namespace_pid}: duplicate multicast device {device} for {allocation:?}"
-                );
+                {
+                    bail!(
+                        "participant {namespace_pid}: duplicate multicast device {device} for {allocation:?}"
+                    );
+                }
             }
         }
     }
