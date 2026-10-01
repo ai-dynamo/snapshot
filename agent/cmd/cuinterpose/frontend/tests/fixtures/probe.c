@@ -319,7 +319,7 @@ int main(int argc, char **argv) {
         assert(create(&handle, 4096, NULL, 0) == 0); // Reentry did not poison retries.
     } else if (strcmp(argv[1], "lookup") == 0) {
         dlerror();
-        assert(dlsym(driver, "cuMemRelease") == NULL); // Shim exports it; provider does not.
+        assert(dlsym(driver, "cuMulticastCreate") == NULL); // Shim exports it; provider does not.
         assert(dlerror() != NULL);
         dlerror();
         assert(dlsym(driver, "not_a_cuda_api") == NULL);

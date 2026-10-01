@@ -64,6 +64,17 @@ def run_worker(mode, coordinator):
                     else cuda_call(driver.cuMemAlloc, 64 << 20))
     malloc_handle = cuda_call(driver.cuMemRetainAllocationHandle, allocated)
     cuda_driver.assert_handle_namespace(malloc_handle, virtual=True, stage="converted malloc")
+    rdma_supported = all(cuda_call(driver.cuDeviceGetAttribute, attribute, device) for attribute in (
+        driver.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_SUPPORTED,
+        driver.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED,
+    ))
+    malloc_properties = cuda_call(driver.cuMemGetAllocationPropertiesFromHandle, malloc_handle)
+    assert bool(malloc_properties.allocFlags.gpuDirectRDMACapable) == rdma_supported
+    assert bool(cuda_call(
+        driver.cuPointerGetAttribute,
+        driver.CUpointer_attribute.CU_POINTER_ATTRIBUTE_IS_GPU_DIRECT_RDMA_CAPABLE,
+        allocated,
+    )) == rdma_supported
     cuda_call(driver.cuMemRelease, malloc_handle)
     cuda_driver.write_bytes(allocated, b"converted malloc")
     properties = cuda_driver.allocation_properties(device)

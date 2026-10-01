@@ -68,6 +68,7 @@ class Contracts(unittest.TestCase):
 
     @contextmanager
     def coordinator(self, mode, error=None):
+        had_state = self.state.exists()
         command = [str(BINARY), mode, "--control-dir", str(self.directory),
                    "--process", "1", "--process", "2"]
         if mode != "--inspect":
@@ -82,7 +83,7 @@ class Contracts(unittest.TestCase):
             else:
                 self.assertNotEqual(process.returncode, 0, stderr)
                 self.assertIn(error, stderr)
-                if mode == "--prepare":
+                if mode == "--prepare" and not had_state:
                     self.assertFalse(self.state.exists())
             if mode == "--inspect":
                 self.assertFalse(self.state.exists())
@@ -128,6 +129,12 @@ class Contracts(unittest.TestCase):
                          {"multicast_device": {"allocation": MULTICAST, "device": 0}}, binding(8192)]]:
             with self.subTest(records=records), self.coordinator("--prepare", "AllocationReference"):
                 self.inspect([records, []], begin=True)
+
+    def test_existing_checkpoint_is_preserved_without_contacting_participants(self):
+        self.state.write_bytes(b"previous checkpoint")
+        with self.coordinator("--prepare", "already exists"):
+            pass
+        self.assertEqual(self.state.read_bytes(), b"previous checkpoint")
 
     def test_read_only_inspection_contacts_every_participant(self):
         with self.coordinator("--inspect"):
@@ -297,6 +304,13 @@ class Contracts(unittest.TestCase):
         records = [[allocation(), multicast(4096), multicast_device(),
                     multicast_device(), binding(4096)], []]
         with self.coordinator("--prepare", "participant 1: duplicate multicast device 0"):
+            self.inspect(records, begin=True)
+
+    def test_multicast_device_requires_matching_creator(self):
+        device = multicast_device()
+        device["multicast_device"]["allocation"] = {**MULTICAST, "creator_pid": 2}
+        records = [[allocation(), multicast(4096), device, binding(4096)], []]
+        with self.coordinator("--prepare", "inconsistent multicast creator"):
             self.inspect(records, begin=True)
 
     def test_rounded_multicast_extents_preserve_creation_size(self):

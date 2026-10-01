@@ -206,6 +206,15 @@ fn run() -> Result<()> {
         .context("--checkpoint-dir is required")?
         .join("cuinterpose.state");
     let mut expected = if args.prepare {
+        // Refuse reused output before BeginCheckpoint freezes any participant.
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => bail!(
+                "{} already exists; use a new checkpoint directory",
+                path.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
         Manifest::new()
     } else {
         state::read(&path).with_context(|| format!("cannot parse {}", path.display()))?

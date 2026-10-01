@@ -12,7 +12,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::runtime;
 use cudarc::driver::sys::CUresult::{
-    CUDA_ERROR_INVALID_HANDLE, CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_NOT_SUPPORTED, CUDA_SUCCESS,
+    CUDA_ERROR_INVALID_HANDLE, CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_NOT_SUPPORTED,
 };
 use cudarc::driver::sys::{CUmemAllocationHandleType, CUmulticastObjectProp};
 use cuinterpose_protocol::{
@@ -26,6 +26,7 @@ use std::sync::MutexGuard;
 #[derive(Clone)]
 pub struct MulticastObject {
     pub reference: AllocationReference,
+    pub refcounts: super::Refcounts,
     pub properties: CUmulticastObjectProp,
     pub driver: Option<u64>,
     pub context: usize,
@@ -77,6 +78,7 @@ pub fn map(
     if object.context == 0 {
         object.context = context;
     }
+    object.refcounts.mappings += 1;
     state.mappings.insert(
         address,
         Mapping {
@@ -117,6 +119,12 @@ pub fn import(
         }
         object.shared = true;
         let handle = state.mint_virtual_allocation_handle(id)?;
+        state
+            .memblocks
+            .get_mut(&id)
+            .unwrap()
+            .refcounts_mut()
+            .handle_entries += 1;
         return Ok((state, handle));
     }
     let mut driver = 0;
@@ -147,6 +155,7 @@ pub fn import(
             id,
             Memblock::Multicast(MulticastObject {
                 reference,
+                refcounts: Default::default(),
                 properties,
                 driver: Some(driver),
                 context,
@@ -157,6 +166,12 @@ pub fn import(
         );
     }
     let virtual_multicast_handle = runtime::must_complete(state.mint_virtual_allocation_handle(id));
+    state
+        .memblocks
+        .get_mut(&id)
+        .unwrap()
+        .refcounts_mut()
+        .handle_entries += 1;
     Ok((state, virtual_multicast_handle))
 }
 
@@ -251,7 +266,13 @@ pub(crate) fn bind(
                     return Err(CUDA_ERROR_INVALID_VALUE.into());
                 }
                 if version == BindingVersion::V1 {
-                    device = allocation.properties.location.id;
+                    let location = allocation.properties.location;
+                    if location.type_
+                        != cudarc::driver::sys::CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE
+                    {
+                        return Err(CUDA_ERROR_NOT_SUPPORTED.into());
+                    }
+                    device = location.id;
                 }
                 (
                     BindingSource::Memory(MemberRange {
@@ -303,12 +324,17 @@ pub(crate) fn bind(
                     return Err(CUDA_ERROR_INVALID_VALUE.into());
                 }
                 if version == BindingVersion::V1 {
-                    device = state.memblocks[&mapping.id]
+                    let location = state.memblocks[&mapping.id]
                         .unicast()
                         .ok_or(CUDA_ERROR_INVALID_HANDLE)?
                         .properties
-                        .location
-                        .id;
+                        .location;
+                    if location.type_
+                        != cudarc::driver::sys::CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE
+                    {
+                        return Err(CUDA_ERROR_NOT_SUPPORTED.into());
+                    }
+                    device = location.id;
                 }
                 Some(MemberRange {
                     allocation: state.memblocks[&mapping.id]
@@ -511,8 +537,8 @@ pub fn restore(state: &mut ProcessState, operation: Operation) -> Result<()> {
                     }
                 }
                 Operation::RestoreMulticastImporters if !creator => {
-                    let (fd, properties) = sharing::request_export(object.reference)
-                        .map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
+                    let (fd, properties) =
+                        sharing::request_export(object.reference).map_err(Error::PeerExport)?;
                     if properties != Some(object.properties) {
                         return Err(Error::from(CUDA_ERROR_INVALID_HANDLE));
                     }
@@ -589,24 +615,13 @@ pub fn restore(state: &mut ProcessState, operation: Operation) -> Result<()> {
     Ok(())
 }
 /// Create without holding the registry across a collective CUDA call.
-/// Preserve the driver's error output at the ABI boundary.
 pub(crate) fn create_backing(
     state: MutexGuard<'static, ProcessState>,
     properties: &CUmulticastObjectProp,
-    out: *mut u64,
 ) -> Result<(MutexGuard<'static, ProcessState>, u64)> {
     runtime::call_unlocked(state, || {
         let mut driver = 0;
-        let function = crate::driver::symbols::cuMulticastCreate()?;
-        let result = unsafe { function(&mut driver, properties) };
-        if result != CUDA_SUCCESS {
-            // Preserve a failing driver's output without modifying it when
-            // symbol resolution fails before the driver is called.
-            unsafe {
-                out.write(driver);
-            }
-            return Err(result.into());
-        }
+        unsafe { crate::driver::cuMulticastCreate(&mut driver, properties) }?;
         Ok(driver)
     })
 }
@@ -628,6 +643,10 @@ impl ProcessState {
             id,
             Memblock::Multicast(MulticastObject {
                 reference,
+                refcounts: super::Refcounts {
+                    handle_entries: 1,
+                    mappings: 0,
+                },
                 properties,
                 driver: Some(driver),
                 context,

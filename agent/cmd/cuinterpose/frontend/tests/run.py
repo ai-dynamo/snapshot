@@ -153,7 +153,7 @@ def main():
         modes = ["init", "init-handle", "init-failure", "relative-preload-chdir", "private", *map(str, range(7)),
                  "tracked-query", "concurrent", "constructor", "fork-before-init", "fork-after-init", "exec",
                  "same-pid-exec", "stale", "stale-concurrent", "existing-file", "existing-symlink",
-                 "existing-live", "existing-full", "permissive-umask"]
+                 "existing-live", "existing-full", "permissive-umask", "out-of-order"]
         for mode in modes:
             relative_preload = mode == "relative-preload-chdir"
             mode_env = actual_env | {"LD_PRELOAD": "./actual/libcuinterpose.so"} if relative_preload else actual_env

@@ -175,6 +175,20 @@ custom image still has to meet these:
   unreliable copy of that context, so a worker forked before checkpoint may not
   restore correctly.
 
+### CuInterpose synchronization and lifetime
+
+Workloads using [CuInterpose](../development/cuinterpose.md) must also meet these requirements. The shim tracks CUDA resources; it does not add application-level ownership or synchronization.
+
+| Application requirement | Shim behavior and limits |
+| --- | --- |
+| Finish all CUDA calls and GPU work, stop CPU writes to shared HOST_NUMA memory, and keep every participant parked from checkpoint entry until restore completes. | Checkpoint entry refuses outstanding unlocked driver calls, and intercepted memory calls are rejected while checkpointing. The shim cannot detect every GPU operation or CPU writer; racing those writes can corrupt the captured contents. |
+| Serialize object destruction against calls using that object, including blocked multicast calls. Serialize context destruction, reset, and final primary-context release against all uses of that context. | The state mutex is released around blocking driver calls; there are no per-object lifetime pins. If a successful call returns to find its required object missing, the shim aborts the process rather than continue with inconsistent tracking. |
+| Keep a creator's generic allocation handle or local mapping alive while any exported descriptor or imported allocation remains usable. Keep all sharing peers in the fixed, fully interposed checkpoint group. | Virtual descriptors carry identity, not a remote ownership reference. Preflight rejects missing creators for tracked imports but cannot discover arbitrary application-held descriptors. FD-only creator lifetime is unsupported. |
+| Do not retry or resume after failed or ambiguous checkpoint preparation or reconstruction. | Irreversible mutations and failed cleanup are fail-stop. Unknown asynchronous-copy completion terminates the process without freeing memory that DMA may still reference. The agent terminates the source after preparation failure and does not continue native capture. |
+| After CUDA initialization, a fork child must exec or exit. | Shim memory calls reject inherited runtime state before taking its locks. Long-lived fork children during checkpoint are unsupported. |
+
+The memory-IPC adapter supports one GPU per process with fully interposed IPC peers. Converted `cuMemAlloc` pointers have VMM access only for their allocating device; `cuCtxEnablePeerAccess` does not grant another device access to them. Same-process peer access to these pointers is unsupported and can fail in CUDA. Converted allocations also round backing up to the device's minimum VMM allocation granularity, so account for the larger footprint of small allocations.
+
 ## Packaging methods
 
 - **Custom image (reference).** Start from the framework runtime image, add a

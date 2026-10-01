@@ -3,6 +3,7 @@
 
 //! Internal failures retain their cause until the CUDA or control boundary.
 
+use crate::memory::checkpoint::Phase;
 use cudarc::driver::sys::CUresult;
 use std::io;
 
@@ -16,6 +17,10 @@ pub enum Error {
         #[source]
         source: io::Error,
     },
+    #[error("peer export: {0}")]
+    PeerExport(#[source] cuinterpose_protocol::Error),
+    #[error("lifecycle out of order: expected {expected:?}, actual {actual:?}")]
+    OutOfOrder { expected: Phase, actual: Phase },
     #[error("runtime startup: {0}")]
     Startup(&'static str),
     #[error("cuinterpose runtime previously failed")]

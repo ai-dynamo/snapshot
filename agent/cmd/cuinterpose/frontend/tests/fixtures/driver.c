@@ -30,6 +30,35 @@ int fixture_private_runtime(void) {
     return initialize ? initialize(0) : 3;
 }
 
+
+// The endpoint-only suite resolves these required entry points but never calls
+// them. Abort on accidental use so this fixture cannot simulate CUDA success.
+#define UNUSED_CUDA(name) int name(void) { abort(); }
+UNUSED_CUDA(cuDeviceGetAttribute)
+UNUSED_CUDA(cuCtxSynchronize)
+UNUSED_CUDA(cuCtxGetCurrent)
+UNUSED_CUDA(cuCtxGetDevice)
+UNUSED_CUDA(cuCtxSetCurrent)
+UNUSED_CUDA(cuDevicePrimaryCtxGetState)
+UNUSED_CUDA(cuDevicePrimaryCtxRetain)
+UNUSED_CUDA(cuMemAddressFree)
+UNUSED_CUDA(cuMemAddressReserve)
+UNUSED_CUDA(cuMemExportToShareableHandle)
+UNUSED_CUDA(cuMemGetAllocationPropertiesFromHandle)
+UNUSED_CUDA(cuMemHostRegister_v2)
+UNUSED_CUDA(cuMemHostUnregister)
+UNUSED_CUDA(cuMemImportFromShareableHandle)
+UNUSED_CUDA(cuMemRelease)
+UNUSED_CUDA(cuMemRetainAllocationHandle)
+UNUSED_CUDA(cuMemSetAccess)
+UNUSED_CUDA(cuMemUnmap)
+UNUSED_CUDA(cuMemcpyDtoHAsync_v2)
+UNUSED_CUDA(cuMemcpyHtoDAsync_v2)
+UNUSED_CUDA(cuStreamCreate)
+UNUSED_CUDA(cuStreamDestroy_v2)
+UNUSED_CUDA(cuStreamSynchronize)
+#undef UNUSED_CUDA
+
 static int anonymous_entry(void) { return 78; }
 
 const struct fixture_call *fixture_last_call(void) {

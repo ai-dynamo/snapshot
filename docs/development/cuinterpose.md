@@ -41,6 +41,8 @@ participant before preparation; removing the annotation does not disable an
 active shim. Existing native CUDA jobfiles remain supported; verified shim
 activation permits one to be absent.
 
+The [workload contract](../reference/workload-contract.md#cuinterpose-synchronization-and-lifetime) collects the synchronization and lifetime requirements, including the shim's behavior when an application violates them.
+
 Restore requires the captured SHA-256 hashes of both libraries to match the
 restore agent's copies, even when compatibility checks are skipped. Use a
 matching shim bundle or recreate the checkpoint after a shim upgrade. Earlier
@@ -58,6 +60,8 @@ Context destruction/reset and final primary-context release clean up converted
 malloc allocations and imported IPC mappings while preserving explicit VMM
 allocations. Multicast participants must add and bind their device in the same
 process; device ordinals are local to each participant.
+
+The memory-IPC adapter supports one GPU per process. Converted malloc pointers are accessible only from their allocating device; native `cuCtxEnablePeerAccess` does not grant another device VMM access. Their backing is rounded to the device's minimum VMM allocation granularity, so small allocations can consume more GPU memory than native malloc.
 
 CUDA Runtime 11 is unsupported. Runtime driver-entry lookup requires CUDA
 Runtime 12.0 or newer and fails closed when the version cannot be verified.

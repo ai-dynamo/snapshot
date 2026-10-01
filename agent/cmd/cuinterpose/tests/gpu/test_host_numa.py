@@ -147,9 +147,9 @@ def run_creator(node, size, coordinator, release_handle):
         if release_handle:
             cuda_call(driver.cuMemRelease, handle)
         control = Path(os.environ["SNAPSHOT_CONTROL_DIR"])
-        checkpoint = control / "checkpoint"
-        checkpoint.mkdir()
         for cycle in range(2):
+            checkpoint = control / f"checkpoint-{cycle}"
+            checkpoint.mkdir()
             # All application CUDA calls have finished. The importer waits on
             # the pipe and the creator waits for each global coordinator phase.
             # No native checkpoint or CRIU participates in this regression.

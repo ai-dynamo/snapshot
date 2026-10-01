@@ -18,9 +18,9 @@ import time
 import msgpack
 
 
-def inspect():
+def request(kind, **fields):
     body = msgpack.packb({"version": 1, "body": {
-        "kind": "inspect", "namespace_pid": os.getpid(),
+        "kind": kind, "namespace_pid": os.getpid(), **fields,
     }}, use_bin_type=True)
     with socket.socket(socket.AF_UNIX) as connection:
         connection.settimeout(5)
@@ -29,8 +29,14 @@ def inspect():
         with connection.makefile("rb") as stream:
             length, = struct.unpack("<I", stream.read(4))
             response = msgpack.unpackb(stream.read(length), raw=False)
-    assert response["version"] == 1 and "Ok" in response["body"]["result"]
+    assert response["version"] == 1
     return response["body"]
+
+
+def inspect():
+    response = request("inspect")
+    assert "Ok" in response["result"]
+    return response
 
 
 driver = c.CDLL("libcuda.so.1", mode=os.RTLD_LOCAL)
@@ -84,7 +90,7 @@ if mode in ("existing-file", "existing-symlink", "existing-live", "existing-full
     # The full-backlog case must never wait for a socket timeout under the
     # loader-sensitive installation lock.
     signal.alarm(5)
-    assert cuda.cuInit(0) == 3
+    assert cuda.cuInit(0) == 304  # CUDA_ERROR_OPERATING_SYSTEM
     signal.alarm(0)
     after = path.lstat()
     assert (before.st_dev, before.st_ino, before.st_mode) == (after.st_dev, after.st_ino, after.st_mode)
@@ -125,7 +131,7 @@ if mode == "constructor":
         plugin.fixture_join_generation_worker()
 
 elif mode in ("init", "init-handle", "init-failure", "concurrent", "init-after-exec", "stale", "stale-concurrent",
-              "relative-preload-chdir", "permissive-umask"):
+              "relative-preload-chdir", "permissive-umask", "out-of-order"):
     initialize = driver.cuInit if mode == "init-handle" else cuda.cuInit
     initialize.argtypes = [c.c_uint]
 
@@ -187,7 +193,7 @@ else:
         assert set(os.listdir("/proc/self/task")) == before_tasks
         assert set(os.listdir("/proc/self/fd")) == before_fds
         if mode == "resolver-startup-failure":
-            assert cuda.cuInit(0) == 3
+            assert cuda.cuInit(0) == 304
             path.unlink()
             assert query(*args) == 0 and output.value
             assert cuda.cuInit(0) == 3 and not path.exists()
@@ -196,6 +202,10 @@ else:
             assert cuda.cuInit(0) == 0
 
 activate()
+if mode == "out-of-order":
+    error = request("execute", operation="save_allocations")["result"]["Err"]
+    assert "SaveAllocations" in error and "expected MulticastPrepared" in error and "actual Active" in error, error
+    assert "Ok" in request("begin_checkpoint")["result"]  # The refusal left the phase unchanged.
 if mode == "permissive-umask":
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert os.umask(0) == 0, "runtime startup changed the application's umask"

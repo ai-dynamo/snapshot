@@ -162,7 +162,7 @@ unsafe extern "C" fn resolve(name: *const c_char) -> *mut c_void {
         b"cuMemUnmap" => unmap as *const () as *mut c_void,
         b"cuMemAddressFree" => free_address as *const () as *mut c_void,
         b"cuMemRelease" => release as *const () as *mut c_void,
-        _ => std::ptr::null_mut(),
+        _ => crate::tests::unused_driver_symbol(),
     }
 }
 
@@ -176,7 +176,15 @@ fn allocation(context: usize) -> u64 {
         CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
     HANDLES.fetch_add(1, Relaxed);
     state
-        .adopt_unicast(reference, 42, 4096, properties, false, context)
+        .adopt_unicast(crate::memory::vmm::Allocation {
+            reference,
+            refcounts: Default::default(),
+            driver: Some(42),
+            size: 4096,
+            properties,
+            shared: false,
+            context,
+        })
         .unwrap()
 }
 
