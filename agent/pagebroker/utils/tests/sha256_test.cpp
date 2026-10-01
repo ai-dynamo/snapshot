@@ -4,12 +4,15 @@
 #include "utils/sha256.hpp"
 
 #include <gtest/gtest.h>
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include <fstream>
 #include <string>
 
 #include "tests/temporary_directory.hpp"
+#include "file_descriptor.hpp"
 
 namespace snapshot::pagebroker::utils {
 namespace {
@@ -60,6 +63,37 @@ TEST(Sha256Test, RejectsMissingAndUnsupportedSources)
   EXPECT_THROW(ComputeFileSha256(fifo), std::invalid_argument);
   std::filesystem::create_symlink("missing", root.path() / "link");
   EXPECT_THROW(ComputeFileSha256(root.path() / "link"), std::system_error);
+}
+
+TEST(Sha256Test, BorrowsDescriptorWithoutChangingOffsetOrFollowingReplacement)
+{
+  test::TemporaryDirectory root;
+  const auto path = root.path() / "data";
+  std::ofstream(path) << "abc";
+  FileDescriptor source(open(path.c_str(), O_RDONLY));
+  ASSERT_GE(source.get(), 0);
+  ASSERT_EQ(lseek(source.get(), 2, SEEK_SET), 2);
+  std::filesystem::remove(path);
+  std::ofstream(path) << "replacement";
+  EXPECT_EQ(Hex(ComputeFileSha256(source.get())),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  EXPECT_EQ(lseek(source.get(), 0, SEEK_CUR), 2);
+  char last;
+  ASSERT_EQ(read(source.get(), &last, 1), 1);
+  EXPECT_EQ(last, 'c');
+}
+
+TEST(Sha256Test, ReportsDescriptorReadErrorsAndHashesEmptyDescriptor)
+{
+  test::TemporaryDirectory root;
+  const auto path = root.path() / "data";
+  std::ofstream(path).close();
+  FileDescriptor empty(open(path.c_str(), O_RDONLY));
+  EXPECT_EQ(ComputeFileSha256(empty.get()), ComputeSha256({}));
+  std::ofstream(path) << "unreadable";
+  FileDescriptor write_only(open(path.c_str(), O_WRONLY));
+  EXPECT_THROW(ComputeFileSha256(write_only.get()), std::system_error);
+  EXPECT_THROW(ComputeFileSha256(-1), std::system_error);
 }
 }  // namespace
 }  // namespace snapshot::pagebroker::utils

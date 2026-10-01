@@ -15,7 +15,18 @@ Upstream source for the third-party components redistributed in this image.
 This image also ships the pinned Model Streamer core and S3 native libraries,
 with their wheel licenses and metadata in /legal/model-streamer/ and
 /legal/model-streamer-s3/. OpenSSL libcrypto provides SHA-256; its attribution
-is in /legal/openssl/copyright. The base image
+is in /legal/openssl/copyright. The uploader uses AWS SDK for C++ 1.11.584,
+source commit bba3cfc14d4fc148aeee7a8ff7822dd7a9a0f4d3:
+
+  https://github.com/aws/aws-sdk-cpp/tree/bba3cfc14d4fc148aeee7a8ff7822dd7a9a0f4d3
+
+The SDK and its pinned CRT submodule notices are in /legal/aws-sdk/. Its
+dynamically linked HTTP/TLS dependencies come from Ubuntu 24.04 packages;
+their copyright files are in /legal/packages/. Package copyright files identify
+their upstream sources and license terms. These dependencies are copied from
+the same build stage as the SDK, not from the host.
+
+The base image
 contains third-party components of its own -- glibc, libstdc++ and libgcc,
 which this binary links dynamically. Source for the base image's own contents
 is published by NVIDIA and is not duplicated here:
