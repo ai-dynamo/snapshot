@@ -10,11 +10,11 @@ AWS_SDK_PREFIX ?= /usr/local
 AWS_FLAGS := -I$(AWS_SDK_PREFIX)/include -L$(AWS_SDK_PREFIX)/lib -Wl,-rpath,$(AWS_SDK_PREFIX)/lib -laws-cpp-sdk-s3 -laws-cpp-sdk-core -pthread
 S3_SOURCES := transfer/s3/s3_client.cpp
 RESTORE_SOURCES := file_descriptor.cpp transfer/engine/model_streamer/model_streamer_restore.cpp utils/event_loop.cpp utils/sha256.cpp
-ENGINE_SOURCES := s3_config.cpp transfer/s3/s3_storage_backend.cpp $(RESTORE_SOURCES) $(S3_SOURCES) transfer/filesystem/filesystem_storage.cpp transfer/engine/model_streamer/model_streamer_transfer_engine.cpp transfer/engine/transfer_engine.cpp
+ENGINE_SOURCES := s3_config.cpp transfer/s3/checkpoint_index.cpp transfer/s3/s3_storage_backend.cpp $(RESTORE_SOURCES) $(S3_SOURCES) transfer/filesystem/filesystem_storage.cpp transfer/engine/model_streamer/model_streamer_transfer_engine.cpp transfer/engine/transfer_engine.cpp
 
 BROKER_SOURCES := $(ENGINE_SOURCES) broker.cpp checkpoint_transaction_descriptor.cpp restore_transaction_descriptor.cpp transaction.cpp transfer/engine/posix/posix_copy_engine.cpp
 DAEMON_SOURCES := $(BROKER_SOURCES) daemon.cpp main.cpp
-TEST_SOURCES := tests/storage_contract_test.cpp tests/s3_config_test.cpp tests/daemon_test.cpp utils/tests/event_loop_test.cpp utils/tests/sha256_test.cpp transfer/engine/model_streamer/tests/model_streamer_restore_test.cpp transfer/s3/tests/s3_client_test.cpp tests/temporary_directory_test.cpp
+TEST_SOURCES := tests/transaction_test.cpp tests/storage_contract_test.cpp transfer/s3/tests/checkpoint_index_test.cpp transfer/s3/tests/s3_storage_backend_test.cpp tests/s3_config_test.cpp tests/daemon_test.cpp utils/tests/event_loop_test.cpp utils/tests/sha256_test.cpp transfer/engine/model_streamer/tests/model_streamer_restore_test.cpp transfer/s3/tests/s3_client_test.cpp tests/temporary_directory_test.cpp
 MODEL_STREAMER_RECOVERY_TEST_SOURCES := $(ENGINE_SOURCES) transfer/engine/model_streamer/tests/model_streamer_transfer_engine_test.cpp
 
 .PHONY: daemon generate test s3-test-build s3-test s3-fixture-test

@@ -23,6 +23,17 @@ constexpr auto kTerminalTransactionRetention = std::chrono::hours(1);
 constexpr size_t kMaxRetainedTerminalTransactions = 1024;
 constexpr auto kLiveTransactionLifetime = std::chrono::hours(2) + std::chrono::minutes(5);
 
+// The caller holds the transaction mutex while checking ownership of staging.
+bool
+HasStagingConflict(const Transaction& transaction, const Path& directory, bool artifact)
+{
+  if (transaction.state() != Transaction::State::NEW)
+    return true;
+  if (fs::exists(directory))
+    return true;
+  return artifact && fs::is_symlink(directory);
+}
+
 Response
 Reply(const Request& request)
 {
@@ -42,10 +53,12 @@ Fail(const Request& request, Failure::Code code, const std::string& message)
 }
 
 Response
-CommitSucceeded(const Request& request)
+CommitSucceeded(const Request& request, const CheckpointPublication* publication = nullptr)
 {
   auto response = Reply(request);
-  response.mutable_commit_complete();
+  auto* complete = response.mutable_commit_complete();
+  if (publication && publication->published)
+    *complete->mutable_published_artifact() = publication->artifact;
   return response;
 }
 
@@ -67,13 +80,6 @@ IsSafePathComponent(const std::string& value)
 const StorageBackend&
 ValidateStagedRestore(const StagedRestoreRequest& request)
 {
-  // Do not silently fall back to a filesystem path when a caller asks for a
-  // store-bound artifact. Backend support lands separately from this contract.
-  if (request.has_artifact()) {
-    if (request.has_source())
-      throw std::invalid_argument("artifact cannot be combined with legacy source");
-    throw std::invalid_argument("artifact-addressed restore is not implemented");
-  }
   if (!request.has_source() || request.source().kind_case() == StorageBackend::KIND_NOT_SET)
     throw std::invalid_argument("restore source is required");
   return request.source();
@@ -82,23 +88,9 @@ ValidateStagedRestore(const StagedRestoreRequest& request)
 const StorageBackend&
 ValidateStagedCheckpoint(const PrepareStagedCheckpointRequest& request)
 {
-  if (request.has_target()) {
-    if (request.has_destination())
-      throw std::invalid_argument("target cannot be combined with legacy destination");
-    throw std::invalid_argument("artifact-addressed checkpoint is not implemented");
-  }
   if (!request.has_destination() || request.destination().kind_case() == StorageBackend::KIND_NOT_SET)
     throw std::invalid_argument("checkpoint destination is required");
   return request.destination();
-}
-
-void
-RejectSymlinks(const Path& directory)
-{
-  for (const auto& entry : fs::recursive_directory_iterator(directory)) {
-    if (entry.is_symlink())
-      throw std::runtime_error("checkpoint contains symlink");
-  }
 }
 
 bool
@@ -118,14 +110,30 @@ TransactionDirectory(const Path& transaction_root, const std::string& transactio
 
 }  // namespace
 
-Broker::Broker(Path staging_root, Path storage_root) : staging_root_(fs::weakly_canonical(std::move(staging_root)))
+Broker::Broker(Path staging_root, Path storage_root, std::optional<S3Config> config) : staging_root_(fs::weakly_canonical(std::move(staging_root)))
 {
-  io_engines_.push_back(std::make_unique<PosixCopyEngine>(storage_root));
-  io_engines_.push_back(std::make_unique<ModelStreamerTransferEngine>(std::move(storage_root)));
-  fs::remove_all(staging_root_ / "restore");
-  fs::remove_all(staging_root_ / "checkpoint");
+  if (config) {
+    resources_ = std::make_shared<TransactionResources>(config->staging_bytes, config->active_transactions, config->transaction_lifetime);
+    staging_root_ /= "s3";
+    io_engines_.push_back(std::make_unique<ModelStreamerTransferEngine>(std::move(*config)));
+    // Preserve remote staging across restart; consumers may still mount it.
+  } else {
+    io_engines_.push_back(std::make_unique<PosixCopyEngine>(storage_root));
+    io_engines_.push_back(std::make_unique<ModelStreamerTransferEngine>(std::move(storage_root)));
+    fs::remove_all(staging_root_ / "restore");
+    fs::remove_all(staging_root_ / "checkpoint");
+  }
   fs::create_directories(staging_root_ / "restore");
   fs::create_directories(staging_root_ / "checkpoint");
+}
+
+void
+Broker::CancelActiveTransactions()
+{
+  std::lock_guard lock(transactions_mutex_);
+  stopping_ = true;
+  for (const auto& [id, transaction] : transactions_)
+    transaction->CancelTransfer();
 }
 
 void
@@ -138,7 +146,28 @@ Broker::ReapExpiredTransactions(std::chrono::steady_clock::time_point now)
   }
 
   for (const auto& [id, transaction] : transactions) {
-    std::lock_guard transaction_lock(transaction->mutex());
+    // Network operations hold the transaction lock and enforce their own
+    // deadline. Reaping must not prevent the daemon from accepting Abort.
+    std::unique_lock transaction_lock(transaction->mutex(), std::try_to_lock);
+    if (!transaction_lock.owns_lock())
+      continue;
+    if (transaction->has_limits()) {
+      if (transaction->expired(now, kLiveTransactionLifetime)) {
+        transaction->CancelTransfer();
+        if (transaction->kind() == Transaction::Kind::METADATA) {
+          std::error_code error;
+          transaction->CleanupTransfer(error);
+          if (!error) {
+            transaction->set_state(Transaction::State::ABORTED);
+            std::lock_guard transactions_lock(transactions_mutex_);
+            const auto current = transactions_.find(id);
+            if (current != transactions_.end() && current->second == transaction)
+              transactions_.erase(current);
+          }
+        }
+      }
+      continue; // Remote staging is released explicitly by its consumer.
+    }
     if (!transaction->expired(now, kLiveTransactionLifetime))
       continue;
 
@@ -162,6 +191,8 @@ Broker::TransactionHandle
 Broker::CreateOrGetTransaction(const std::string& transaction_id)
 {
   std::lock_guard lock(transactions_mutex_);
+  if (stopping_)
+    throw TransferError(Failure::STORAGE_UNAVAILABLE, "PageBroker is shutting down");
   auto [iterator, inserted] = transactions_.try_emplace(transaction_id, std::make_shared<Transaction>());
   return iterator->second;
 }
@@ -180,8 +211,8 @@ Broker::RetainTerminalTransaction(const std::string& transaction_id)
   auto transaction = FindTransaction(transaction_id);
   if (!transaction)
     return;
-  std::lock_guard transaction_lock(transaction->mutex());
-  if (!transaction->retain_terminal())
+  std::unique_lock transaction_lock(transaction->mutex(), std::try_to_lock);
+  if (!transaction_lock.owns_lock() || !transaction->retain_terminal())
     return;
   std::lock_guard terminal_lock(terminal_transactions_mutex_);
   terminal_transactions_.push_back({transaction_id, std::move(transaction), std::chrono::steady_clock::now()});
@@ -237,7 +268,8 @@ Broker::AbortStaging(
   transaction.RemoveStaging(staging_directory, cleanup_error);
   if (cleanup_error)
     return Fail(request, Failure::STORAGE_ERROR, std::string(error.what()) + "; cleanup: " + cleanup_error.message());
-  return Fail(request, Failure::STORAGE_ERROR, error.what());
+  const auto* transfer_error = dynamic_cast<const TransferError*>(&error);
+  return Fail(request, transfer_error ? transfer_error->code : Failure::STORAGE_ERROR, error.what());
 }
 
 const TransferEngine&
@@ -247,7 +279,7 @@ Broker::Engine(TransferEngineType engine_type) const
     if (candidate->type() == engine_type)
       return *candidate;
   }
-  throw std::runtime_error("configured I/O engine not found");
+  throw std::invalid_argument("configured I/O engine not found");
 }
 
 const TransferEngine&
@@ -273,6 +305,9 @@ Broker::HandleRequest(const Request& request)
       case Request::kStagedRestore:
         response = Restore(request);
         break;
+      case Request::kGetArtifactMetadata:
+        response = Metadata(request);
+        break;
       case Request::kPrepareStagedCheckpoint:
         response = PrepareCheckpoint(request);
         break;
@@ -282,13 +317,13 @@ Broker::HandleRequest(const Request& request)
       case Request::kAbort:
         response = Abort(request);
         break;
-      case Request::kGetArtifactMetadata:
-        response = Fail(request, Failure::INVALID_REQUEST, "artifact metadata retrieval is not implemented");
-        break;
       default:
         response = Fail(request, Failure::INVALID_REQUEST, "unsupported operation");
         break;
     }
+  }
+  catch (const TransferError& error) {
+    response = Fail(request, error.code, error.what());
   }
   catch (const std::invalid_argument& error) {
     response = Fail(request, Failure::INVALID_REQUEST, error.what());
@@ -301,37 +336,72 @@ Broker::HandleRequest(const Request& request)
   return response;
 }
 
+const TransferEngine&
+Broker::ArtifactEngine(const IOEngine* selection) const
+{
+  if (selection && !selection->has_model_streamer())
+    throw std::invalid_argument("S3 artifacts require the Model Streamer engine");
+  return Engine(TransferEngineType::MODEL_STREAMER);
+}
+
+Response
+Broker::Metadata(const Request& request)
+{
+  const auto& artifact = request.get_artifact_metadata().artifact();
+  const auto& engine = ArtifactEngine();
+  engine.ValidateArtifact(artifact);
+  return StageRestore(request, {}, engine, &artifact);
+}
+
 Response
 Broker::Restore(const Request& request)
 {
   const auto& operation = request.staged_restore();
+  if (operation.has_artifact()) {
+    if (operation.has_source())
+      throw std::invalid_argument("restore cannot specify both source and artifact");
+    const auto& engine = ArtifactEngine(operation.has_io_engine() ? &operation.io_engine() : nullptr);
+    engine.ValidateArtifact(operation.artifact());
+    return StageRestore(request, {}, engine, &operation.artifact());
+  }
   const auto& source = ValidateStagedRestore(operation);
   const auto& engine = Engine(operation.io_engine());
   return StageRestore(request, source, engine);
 }
 
 Response
-Broker::StageRestore(const Request& request, const StorageBackend& source, const TransferEngine& engine)
+Broker::StageRestore(const Request& request, const StorageBackend& source, const TransferEngine& engine,
+      const PublishedArtifact* artifact)
 {
   const Path restore_root = staging_root_ / "restore";
   const Path staging_directory = TransactionDirectory(restore_root, request.transaction_id());
-  const auto plan = engine.PrepareRestore(source);
-  const auto bytes = plan.size_bytes();
+  // Reject invalid filesystem sources before claiming a transaction ID.
+  RestorePlan plan;
+  if (!artifact)
+    plan = engine.PrepareRestore(source);
   auto transaction = CreateOrGetTransaction(request.transaction_id());
   std::lock_guard lock(transaction->mutex());
-  if (transaction->state() != Transaction::State::NEW || fs::exists(staging_directory))
+  if (HasStagingConflict(*transaction, staging_directory, artifact != nullptr))
     return Fail(request, Failure::TRANSACTION_CONFLICT, "restore transaction conflicts");
-  if (!ReserveStaging(bytes)) {
-    std::lock_guard transactions_lock(transactions_mutex_);
-    const auto current = transactions_.find(request.transaction_id());
-    if (current != transactions_.end() && current->second == transaction)
-      transactions_.erase(current);
-    return Fail(request, Failure::INSUFFICIENT_STORAGE, "insufficient tmpfs capacity");
-  }
-  bool staging_reserved = true;
+  bool staging_reserved = false;
+  uintmax_t bytes = 0;
   try {
-    transaction->PrepareTransfer(staging_directory);
+    const bool metadata_only = request.has_get_artifact_metadata();
+    transaction->PrepareTransfer(resources_, metadata_only ? Transaction::Kind::METADATA : Transaction::Kind::RESTORE,
+        staging_directory);
     transaction->set_state(Transaction::State::PREPARING);
+    if (artifact)
+      plan = engine.PrepareRestore(source, transaction->control(), artifact, metadata_only);
+    bytes = plan.size_bytes();
+    transaction->Reserve(bytes);
+    if (!ReserveStaging(bytes)) {
+      std::lock_guard transactions_lock(transactions_mutex_);
+      const auto current = transactions_.find(request.transaction_id());
+      if (current != transactions_.end() && current->second == transaction)
+        transactions_.erase(current);
+      return Fail(request, Failure::INSUFFICIENT_STORAGE, "insufficient tmpfs capacity");
+    }
+    staging_reserved = true;
     engine.StageRestore(plan, staging_directory, transaction->control());
     ReleaseStaging(bytes);
     staging_reserved = false;
@@ -344,7 +414,10 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
     return AbortStaging(request, *transaction, staging_directory, error);
   }
   auto response = Reply(request);
-  response.mutable_staged_restore_directory()->set_image_directory(staging_directory.string());
+  if (request.has_get_artifact_metadata())
+    response.mutable_get_artifact_metadata_complete()->set_manifest_directory(staging_directory.string());
+  else
+    response.mutable_staged_restore_directory()->set_image_directory(staging_directory.string());
   return response;
 }
 
@@ -352,25 +425,41 @@ Response
 Broker::PrepareCheckpoint(const Request& request)
 {
   const auto& operation = request.prepare_staged_checkpoint();
+  if (operation.has_target()) {
+    if (operation.has_destination())
+      throw std::invalid_argument("checkpoint cannot specify both destination and target");
+    const auto& engine = ArtifactEngine(operation.has_io_engine() ? &operation.io_engine() : nullptr);
+    const auto artifact = engine.ResolveArtifactTarget(operation.target());
+    return StageCheckpoint(request, {}, engine, &artifact);
+  }
   const auto& destination = ValidateStagedCheckpoint(operation);
   const auto& engine = Engine(operation.io_engine());
   return StageCheckpoint(request, destination, engine);
 }
 
 Response
-Broker::StageCheckpoint(const Request& request, const StorageBackend& destination, const TransferEngine& engine)
+Broker::StageCheckpoint(const Request& request, const StorageBackend& destination, const TransferEngine& engine,
+      const PublishedArtifact* artifact)
 {
   const Path checkpoint_root = staging_root_ / "checkpoint";
   const Path staging_directory = TransactionDirectory(checkpoint_root, request.transaction_id());
-  engine.ValidateCheckpointDestination(destination);
+  if (!artifact)
+    engine.ValidateCheckpointDestination(destination);
   auto transaction = CreateOrGetTransaction(request.transaction_id());
   std::lock_guard lock(transaction->mutex());
-  if (transaction->state() != Transaction::State::NEW || fs::exists(staging_directory))
+  if (HasStagingConflict(*transaction, staging_directory, artifact != nullptr))
     return Fail(request, Failure::TRANSACTION_CONFLICT, "checkpoint transaction conflicts");
   try {
-    transaction->PrepareTransfer(staging_directory);
+    transaction->PrepareTransfer(resources_, Transaction::Kind::CHECKPOINT, staging_directory, artifact);
     transaction->set_state(Transaction::State::PREPARING);
+    if (transaction->has_limits()) {
+      if (!HasAvailableSpace(staging_root_, 1))
+        throw TransferError(Failure::INSUFFICIENT_STORAGE, "insufficient checkpoint staging capacity");
+      engine.ValidateCheckpointDestination(destination, artifact, transaction->control());
+    }
     fs::create_directory(staging_directory);
+    if (transaction->has_limits())
+      fs::permissions(staging_directory, fs::perms::owner_all);
     transaction->set_descriptor(CheckpointTransactionDescriptor(staging_directory, destination, engine.type()));
     transaction->set_state(Transaction::State::STAGED);
   }
@@ -389,12 +478,17 @@ Broker::Commit(const Request& request)
   if (!transaction)
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
   std::lock_guard lock(transaction->mutex());
+  if (transaction->ReleaseExpiredTransfer())
+    return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction expired");
   if (transaction->state() == Transaction::State::NEW || transaction->state() == Transaction::State::ABORTED)
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
   if (transaction->state() == Transaction::State::PREPARING)
     return Fail(request, Failure::TRANSACTION_CONFLICT, "transaction is preparing");
-  if (transaction->state() == Transaction::State::COMMITTED)
-    return CommitSucceeded(request);
+  if (transaction->state() == Transaction::State::COMMITTED) {
+    std::error_code cleanup_error;
+    transaction->CleanupTransfer(cleanup_error); // Publication already succeeded.
+    return CommitSucceeded(request, transaction->publication());
+  }
 
   if (const auto* restore = std::get_if<RestoreTransactionDescriptor>(&transaction->descriptor()))
     return CleanupRestore(request, *transaction, *restore);
@@ -422,20 +516,26 @@ Broker::PublishCheckpoint(
   if (!fs::is_directory(staging_directory))
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "checkpoint staging directory not found");
   const auto& engine = Engine(descriptor.engine_type());
-  if (engine.CheckpointDestinationConflicts(descriptor.destination_storage()))
-    return Fail(request, Failure::TRANSACTION_CONFLICT, "checkpoint destination conflicts");
-  RejectSymlinks(staging_directory);
   try {
-    engine.PublishCheckpoint(staging_directory, descriptor.destination_storage());
+    auto* publication = transaction.publication();
+    RestorePlan plan;
+    if (!publication || publication->pending_index.empty()) {
+      plan = engine.InspectCheckpoint(staging_directory, publication ? &publication->artifact : nullptr, transaction.control());
+      transaction.Reserve(plan.size_bytes());
+    }
+    engine.PublishCheckpoint(staging_directory, descriptor.destination_storage(), std::move(plan), publication, transaction.control());
     transaction.clear_descriptor();
     transaction.set_state(Transaction::State::COMMITTED);
     std::error_code cleanup_error;
     transaction.RemoveStaging(staging_directory, cleanup_error);
   }
+  catch (const TransferError& error) {
+    return Fail(request, error.code, error.what());
+  }
   catch (const std::exception& error) {
     return Fail(request, Failure::STORAGE_ERROR, error.what());
   }
-  return CommitSucceeded(request);
+  return CommitSucceeded(request, transaction.publication());
 }
 
 Response
@@ -444,12 +544,16 @@ Broker::Abort(const Request& request)
   auto transaction = FindTransaction(request.transaction_id());
   if (!transaction)
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
-  transaction->CancelTransfer();
+  transaction->CancelTransfer(); // Signal the in-flight operation before waiting for its lock.
   std::lock_guard lock(transaction->mutex());
+  if (transaction->ReleaseExpiredTransfer())
+    return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction expired");
   if (transaction->state() == Transaction::State::NEW || transaction->state() == Transaction::State::COMMITTED)
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
-  if (transaction->state() == Transaction::State::ABORTED)
+  if (transaction->state() == Transaction::State::ABORTED) {
+    transaction->CleanupTransfer();
     return AbortSucceeded(request);
+  }
 
   const Path restore_root = staging_root_ / "restore";
   const Path checkpoint_root = staging_root_ / "checkpoint";

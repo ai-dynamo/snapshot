@@ -4,6 +4,7 @@
 #include "model_streamer_transfer_engine.hpp"
 
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <stdexcept>
 #include <utility>
@@ -13,6 +14,39 @@
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
 namespace {
+[[noreturn]] void
+RethrowS3TransferError(std::exception_ptr exception, TransferControl control)
+{
+  try {
+    std::rethrow_exception(exception);
+  }
+  catch (const TransferError&) {
+    throw;
+  }
+  catch (const RestoreIntegrityError&) {
+    throw TransferError(Failure::ARTIFACT_CORRUPT, "checkpoint checksum mismatch");
+  }
+  catch (const S3ResponseError&) {
+    throw TransferError(Failure::ARTIFACT_CORRUPT, "invalid checkpoint object size");
+  }
+  catch (const TransferInterrupted& error) {
+    throw TransferError(error.reason == TransferInterrupted::Reason::DEADLINE_EXCEEDED ?
+        Failure::TRANSACTION_EXPIRED : Failure::STORAGE_UNAVAILABLE, "checkpoint operation interrupted");
+  }
+  catch (const S3Error& error) {
+    const bool expired = TransferControl::Clock::now() >= control.deadline || error.primary.code == "DeadlineExceeded";
+    throw TransferError(expired ? Failure::TRANSACTION_EXPIRED :
+        error.primary.http_status == 401 || error.primary.http_status == 403 ? Failure::ACCESS_DENIED : Failure::STORAGE_UNAVAILABLE,
+        "S3 checkpoint operation failed");
+  }
+  catch (const std::invalid_argument&) {
+    throw TransferError(Failure::INVALID_REQUEST, "invalid checkpoint request or source");
+  }
+  catch (const std::exception&) {
+    throw TransferError(Failure::STORAGE_ERROR, "checkpoint storage operation failed");
+  }
+}
+
 bool
 HasValidAddressingSetting(const std::string& addressing)
 {
@@ -43,6 +77,12 @@ ModelStreamerTransferEngine::ModelStreamerTransferEngine(Path storage_root, S3Tr
   ValidateS3Configuration();
 }
 
+ModelStreamerTransferEngine::ModelStreamerTransferEngine(S3Config config)
+    : ModelStreamerTransferEngine("/", config.transfer)
+{
+  store_ = std::make_unique<S3StorageBackend>(std::move(config));
+}
+
 void
 ModelStreamerTransferEngine::ValidateS3Configuration() const
 {
@@ -61,6 +101,15 @@ ModelStreamerTransferEngine::ValidateS3Configuration() const
     throw std::invalid_argument("S3 addressing must match RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING");
   if (options.connection.ca_file != Environment("AWS_CA_BUNDLE"))
     throw std::invalid_argument("S3 CA file must match AWS_CA_BUNDLE for both upload and restore");
+}
+
+const S3StorageBackend&
+ModelStreamerTransferEngine::ArtifactStorage() const
+{
+  if (!store_)
+    throw std::invalid_argument("artifact storage is not configured");
+  ValidateS3Configuration();
+  return *store_;
 }
 
 std::shared_ptr<ModelStreamerRestore>
@@ -106,36 +155,114 @@ ModelStreamerTransferEngine::type() const
   return TransferEngineType::MODEL_STREAMER;
 }
 
-RestorePlan
-ModelStreamerTransferEngine::PrepareRestore(const StorageBackend& source, TransferControl control) const
-{
-  return filesystem_storage::BuildRestorePlan(filesystem_storage::SourcePath(source, storage_root_), control);
-}
-
 void
 ModelStreamerTransferEngine::StageRestore(const RestorePlan& plan, const Path& destination, TransferControl control) const
 {
   if (s3_options_)
     ValidateS3Configuration();
   const auto restore = AcquireRestore();
-  restore->Stage(plan, destination, control);
+  if (!store_) {
+    restore->Stage(plan, destination, control);
+    return;
+  }
+  try {
+    restore->Stage(plan, destination, control);
+    control.Check();
+  }
+  catch (...) {
+    RethrowS3TransferError(std::current_exception(), control);
+  }
+}
+
+PublishedArtifact
+ModelStreamerTransferEngine::ResolveArtifactTarget(const ArtifactTarget& target) const
+{
+  return ArtifactStorage().ResolveTarget(target);
 }
 
 void
-ModelStreamerTransferEngine::ValidateCheckpointDestination(const StorageBackend& destination) const
+ModelStreamerTransferEngine::ValidateArtifact(const PublishedArtifact& artifact) const
 {
-  filesystem_storage::DestinationPath(destination, storage_root_);
+  ArtifactStorage().ValidateCheckpoint(artifact);
 }
 
-bool
-ModelStreamerTransferEngine::CheckpointDestinationConflicts(const StorageBackend& destination) const
+RestorePlan
+ModelStreamerTransferEngine::PrepareRestore(const StorageBackend& source, TransferControl control,
+    const PublishedArtifact* artifact, bool metadata_only) const
 {
-  return filesystem_storage::CheckpointDestinationConflicts(destination, storage_root_);
+  if (!artifact) {
+    if (store_ || metadata_only)
+      throw std::invalid_argument("configured engine requires an artifact");
+    return filesystem_storage::BuildRestorePlan(filesystem_storage::SourcePath(source, storage_root_), control);
+  }
+  try {
+    return ArtifactStorage().LoadRestorePlan(*artifact, metadata_only, control);
+  }
+  catch (...) {
+    RethrowS3TransferError(std::current_exception(), control);
+  }
 }
 
 void
-ModelStreamerTransferEngine::PublishCheckpoint(const Path& source, const StorageBackend& destination) const
+ModelStreamerTransferEngine::ValidateCheckpointDestination(const StorageBackend& destination,
+    const PublishedArtifact* artifact, TransferControl control) const
 {
-  filesystem_storage::PublishCheckpoint(source, destination, storage_root_);
+  if (!artifact) {
+    if (store_)
+      throw std::invalid_argument("configured engine requires an artifact");
+    filesystem_storage::DestinationPath(destination, storage_root_);
+    return;
+  }
+  try {
+    ArtifactStorage().PrepareCheckpoint(*artifact, control);
+    control.Check();
+  }
+  catch (...) {
+    RethrowS3TransferError(std::current_exception(), control);
+  }
 }
+
+RestorePlan
+ModelStreamerTransferEngine::InspectCheckpoint(const Path& source, const PublishedArtifact* artifact,
+    TransferControl control) const
+{
+  if (!artifact) {
+    if (store_)
+      throw std::invalid_argument("configured engine requires an artifact");
+    return TransferEngine::InspectCheckpoint(source, nullptr, control);
+  }
+  try {
+    ArtifactStorage().PrepareCheckpoint(*artifact, control);
+    return ArtifactStorage().InspectCheckpoint(source, *artifact, control);
+  }
+  catch (...) {
+    RethrowS3TransferError(std::current_exception(), control);
+  }
+}
+
+void
+ModelStreamerTransferEngine::PublishCheckpoint(const Path& source, const StorageBackend& destination, RestorePlan plan,
+    CheckpointPublication* publication, TransferControl control) const
+{
+  if (!publication) {
+    if (store_)
+      throw std::invalid_argument("configured engine requires an artifact");
+    filesystem_storage::PublishCheckpoint(source, destination, storage_root_);
+    return;
+  }
+  try {
+    const auto& storage = ArtifactStorage();
+    if (publication->pending_index.empty()) {
+      storage.PrepareCheckpoint(publication->artifact, control);
+      publication->pending_index = storage.UploadCheckpointPayloads(source, std::move(plan), control);
+    }
+    // An uncertain publication retries the exact index, even if it now exists remotely.
+    storage.PublishIndex(publication->artifact, publication->pending_index, control);
+    publication->published = true;
+  }
+  catch (...) {
+    RethrowS3TransferError(std::current_exception(), control);
+  }
+}
+
 }  // namespace snapshot::pagebroker

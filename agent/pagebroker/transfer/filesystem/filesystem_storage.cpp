@@ -9,6 +9,8 @@
 #include <string>
 #include <system_error>
 
+#include "transfer/engine/transfer_engine.hpp"
+
 namespace snapshot::pagebroker::filesystem_storage {
 namespace fs = std::filesystem;
 namespace {
@@ -185,18 +187,15 @@ BuildRestorePlan(const Path& source, TransferControl control, std::size_t limit)
   return plan;
 }
 
-bool
-CheckpointDestinationConflicts(const StorageBackend& destination, const Path& storage_root)
-{
-  return fs::exists(PartialPath(DestinationPath(destination, storage_root)));
-}
-
 void
 PublishCheckpoint(const Path& source, const StorageBackend& destination, const Path& storage_root)
 {
   const Path published = DestinationPath(destination, storage_root);
   const Path partial = PartialPath(published);
   const Path previous = PreviousPath(published);
+  // A pre-existing partial belongs to another attempt and must never reach cleanup.
+  if (fs::exists(partial))
+    throw TransferError(Failure::TRANSACTION_CONFLICT, "checkpoint destination conflicts");
   try {
     fs::create_directories(published.parent_path());
     CopyDirectory(source, partial);
