@@ -109,23 +109,11 @@ impl Arena {
             return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
         }
         for allocation in &mut fresh {
-            Context::run(
-                allocation.context,
-                context_device(&allocation.properties),
-                || {
-                    let mut driver = 0;
-                    unsafe {
-                        crate::driver::cuMemCreate(
-                            &mut driver,
-                            allocation.size,
-                            &allocation.properties,
-                            0,
-                        )
-                    }?;
-                    allocation.driver = Some(driver);
-                    Ok(())
-                },
-            )?;
+            let mut driver = 0;
+            unsafe {
+                crate::driver::cuMemCreate(&mut driver, allocation.size, &allocation.properties, 0)
+            }?;
+            allocation.driver = Some(driver);
         }
         self.copy(&fresh, true)?;
         for (allocation, fresh) in allocations.iter_mut().zip(fresh) {
