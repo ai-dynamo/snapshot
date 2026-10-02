@@ -9,8 +9,8 @@ CUDA_INCLUDE ?= /opt/cuda/include
 # The frontend requires GCC 15+ for musttail. Set FRONTEND_CC for local builds.
 FRONTEND_CC ?= /opt/gcc-15/bin/gcc
 
-# Keep the preload libraries on GNU/glibc. The coordinator and launcher use
-# musl so they can execute in an arbitrary workload root.
+# Build the preload libraries for GNU/glibc. Build the coordinator and launcher with
+# musl so they can run in the workload root without its libraries.
 build:
 	docker buildx build --platform linux/amd64 --target cuinterpose-export \
 		--output type=local,dest=build -f ../../Dockerfile ../..

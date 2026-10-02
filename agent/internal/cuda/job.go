@@ -17,12 +17,12 @@ import (
 // JobFileEnv is the CUDA launch-job environment variable consumed by the driver.
 const JobFileEnv = "CUDA_CHECKPOINT_JOB_FILE"
 
-// StageJobFile copies a launch-job file into the checkpoint artifact and
-// returns the host-visible path to the source pod's live job file. Capture
-// helpers must use that live file so they join the same CUDA job as the target
-// processes; the artifact copy is only a seed for later restore pods. The
-// launch wrapper persists the driver-created file at a fixed path before
-// starting the workload. When required is false, an absent job file is allowed.
+// StageJobFile copies a launch-job file into the checkpoint artifact. It returns the
+// path to the source Pod's live job file as seen from the host. Capture helpers must
+// use the live file to join the CUDA job of the target processes. The artifact copy is
+// only for later restore Pods. The launch wrapper saves the driver-created file at a
+// fixed path before starting the workload. An absent file is allowed when required is
+// false.
 func StageJobFile(sourceRootPath, checkpointDir string, required bool) (string, error) {
 	sourcePath := filepath.Join(sourceRootPath, strings.TrimPrefix(podcontract.CUDAJobFilePath, string(os.PathSeparator)))
 	destinationPath := filepath.Join(checkpointDir, podcontract.CUDAJobFileName)

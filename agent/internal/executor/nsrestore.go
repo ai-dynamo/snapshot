@@ -284,9 +284,9 @@ func executeRestore(
 			return nil, 0, nil, fmt.Errorf("CUDA restore failed: %w", err)
 		}
 		if m.CuInterpose != nil {
-			// CUDA is unlocked; the application still awaits restore-complete.
-			// Sockets retain the checkpoint's innermost namespace PIDs. Native
-			// CUDA above instead needs the PIDs visible to the restoring process.
+			// CUDA is unlocked. The application still waits for restore-complete. Socket names
+			// use the innermost namespace PIDs saved in the checkpoint. Native CUDA calls above
+			// use PIDs visible to the restoring process.
 			err := cuda.RestoreCuInterpose(ctx, opts.CheckpointPath, m.CUDA.PIDs, coordinatorFdPath)
 			if err != nil {
 				return nil, 0, nil, fmt.Errorf("restore cuinterpose: %w", err)

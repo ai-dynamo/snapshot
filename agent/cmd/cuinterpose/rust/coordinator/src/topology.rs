@@ -8,7 +8,7 @@ use cuinterpose_protocol::{
 };
 use std::collections::BTreeMap;
 
-// CUDA allocation properties supported by the Linux FD transport and carrier.
+// CUDA allocation properties supported by Linux FD transport and the host carrier.
 const CU_MEM_HANDLE_TYPE_NONE: u32 = 0;
 const CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR: u32 = 1;
 const CU_MEM_ALLOCATION_TYPE_PINNED: u32 = 1;
@@ -28,8 +28,8 @@ struct Multicast {
     flags: u64,
     num_devices: u32,
     creators: u32,
-    // CUDA ordinals are process-local. Supported groups attach and bind each
-    // device in the same participant.
+    // CUDA device ordinals are local to each process. Each device must be attached and
+    // bound in the same participant.
     devices: BTreeMap<(NamespacePid, i32), bool>,
 }
 
@@ -39,8 +39,8 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
     if participants.is_empty() {
         bail!("topology validate failed: no participants");
     }
-    // Gather definitions before references. Participant/entry ordering must
-    // not determine whether an import or multicast dependency is valid.
+    // Collect definitions before references. Participant and entry order must not
+    // affect validation of imports or multicast dependencies.
     for (namespace_pid, participant) in participants {
         for record in participant {
             match record {
@@ -215,8 +215,9 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                         multicast.reference == *allocation,
                         "participant {namespace_pid}: inconsistent multicast creator for {allocation:?}"
                     );
-                    // CUDA accepted the binding; its rounded capacity may exceed the
-                    // creation size. Only cross-process relationships need validation here.
+                    // CUDA accepted the binding. Its rounded capacity can exceed the
+                    // creation size. Validate only the relationships between processes
+                    // here.
                     let member = match source {
                         BindingSource::Memory(range) => Some(*range),
                         BindingSource::Address {

@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The ABI shared by the C frontend and independently linked Rust core.
-//! No Rust-owned object or unwinding crosses this boundary.
+//! The ABI shared by the C frontend and the separately linked Rust core.
+//! Rust objects remain in their library. Unwinding must not cross this ABI.
 
 use std::ffi::{c_char, c_ulonglong, c_void};
 
@@ -10,12 +10,12 @@ use cudarc::driver::sys as cuda;
 
 pub const ABI_VERSION: u32 = 1;
 
-/// ABI table provided by the Rust backend and consumed by the C frontend.
-/// cbindgen emits the corresponding C declaration.
+/// ABI table that the Rust backend provides to the C frontend. cbindgen generates the
+/// matching C declaration.
 ///
-/// The handshake returns this immutable process-lifetime table without starting
-/// runtime services or calling frontend callbacks. Repeated and concurrent
-/// registrations of the same frontend must succeed with the same table.
+/// The handshake returns an immutable table that remains valid until process exit. It
+/// does not start runtime services or call frontend callbacks. Repeated and concurrent
+/// registrations of the same frontend must return the same table.
 #[repr(C)]
 #[derive(Debug)]
 #[allow(
@@ -135,13 +135,12 @@ pub struct BackendAbi {
 
 pub type Resolve = unsafe extern "C" fn(*const c_char) -> *mut c_void;
 
-/// ABI table provided by the C frontend and consumed by the Rust backend.
+/// ABI table that the C frontend provides to the Rust backend.
 ///
-/// This is a trusted sibling-library ABI, not an untrusted byte decoder.
-/// Matching version/size promises a fully initialized table of non-null
-/// callbacks with the declared signatures and process-lifetime validity.
-/// A mismatched table need only provide the aligned eight-byte prefix.
-/// Repeated registrations must agree on `resolve`.
+/// Both libraries must follow this ABI contract. A matching version and size require a
+/// complete table with non-null callbacks of the declared types. The callbacks must
+/// remain valid until process exit. A mismatched table needs only the aligned
+/// eight-byte prefix. Repeated registrations must use the same `resolve` callback.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct FrontendAbi {

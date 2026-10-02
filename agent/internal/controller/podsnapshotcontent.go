@@ -717,8 +717,9 @@ func contentNameFromInformerObj(obj interface{}) (string, bool) {
 	return accessor.GetName(), true
 }
 
-// The created Pod's startup command survives annotation edits. Delivery
-// expectation never depends on the operator's current image or settings.
+// The launcher command requires delivery even if annotations change. Otherwise, inspect
+// the annotation. The operator's current image and settings do not determine expected
+// delivery.
 func cuInterposeRequired(pod *corev1.Pod, target string) (bool, error) {
 	for _, container := range pod.Spec.Containers {
 		if container.Name == target && len(container.Command) > 0 && container.Command[0] == podcontract.CuInterposeLauncherPath {

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Short-lived participant validation, global CUDA lifecycle barriers, and state publication.
+//! Validate participants, coordinate CUDA lifecycle phases, and publish state.
 
 mod state;
 mod topology;
@@ -38,7 +38,7 @@ struct Peer {
     namespace_pid: NamespacePid,
 }
 
-// Transport errors retain their cause; remote refusals are application errors.
+// Transport errors retain their cause. Remote refusals are application errors.
 fn exchange(endpoint: &Path, request: &Request) -> Result<Response> {
     let display = endpoint.display();
     let socket = protocol::connect(endpoint, protocol::timeout(None))
@@ -116,8 +116,9 @@ impl Peer {
     }
 }
 
-/// Join every started exchange, including when one participant fails. A phase
-/// cannot advance until every rank has replied; a bounded worker pool is unsafe.
+/// Join every started exchange, even if a participant fails. Every rank must reply
+/// before the next phase starts. A bounded worker pool could leave ranks waiting for an
+/// exchange that has not started.
 fn command_all(
     peers: &mut [Peer],
     operation: Operation,
@@ -196,8 +197,8 @@ fn run() -> Result<()> {
         });
     }
     if args.inspect {
-        // Preflight is read-only. Preparation repeats validation after freezing
-        // the shim registry with BeginCheckpoint; inspection is not a lock.
+        // Preflight only reads state. BeginCheckpoint freezes the shim registry, then
+        // preparation validates it again. Inspection alone does not lock the registry.
         topology::validate(&inspect(&peers, false)?)?;
         return Ok(());
     }
@@ -206,7 +207,7 @@ fn run() -> Result<()> {
         .context("--checkpoint-dir is required")?
         .join("cuinterpose.state");
     let mut expected = if args.prepare {
-        // Refuse reused output before BeginCheckpoint freezes any participant.
+        // Reject existing output before BeginCheckpoint freezes any participant.
         match std::fs::symlink_metadata(&path) {
             Ok(_) => bail!(
                 "{} already exists; use a new checkpoint directory",

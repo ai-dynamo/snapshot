@@ -400,8 +400,8 @@ func TestRestoreInNamespaceJobFileRequirement(t *testing.T) {
 			if tc.cuInterpose {
 				manifest.CuInterpose = testCuInterposeIdentity()
 			}
-			// Stop at IP validation, after jobfile selection but before namespace or
-			// CUDA operations. This exercises the actual restore preflight safely.
+			// Stop at IP validation, after selecting the jobfile and before namespace or CUDA
+			// operations. This tests the real restore preflight without those operations.
 			manifest.CRIUDump.CRIU.TcpEstablished = true
 			t.Setenv(criu.InetRemapEnvVar, "")
 			if err := types.WriteManifest(checkpointDir, manifest); err != nil {
@@ -476,8 +476,8 @@ func TestRestoreRequiresShimIdentityEvenWhenCompatibilityIsSkipped(t *testing.T)
 			BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "target",
 			SkipCompatCheck: skip,
 		}, unusedRestoreMounter{})
-		// A developer machine has no bundle; an agent has different hashes.
-		// Either must refuse before resolving the runtime, mounting, or CRIU.
+		// A developer machine has no bundle. An agent has different library hashes. Both must
+		// reject the restore before runtime lookup, mounts, or CRIU.
 		require.ErrorContains(t, err, "libcuinterpose.so")
 		require.Empty(t, rt.resolvedID)
 	}

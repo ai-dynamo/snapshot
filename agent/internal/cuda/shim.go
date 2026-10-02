@@ -60,8 +60,8 @@ func runAction(ctx context.Context, pid int, action, deviceMap, helperBinaryPath
 		args = append(args, "--device-map", deviceMap)
 	}
 	cmd := exec.CommandContext(ctx, helperBinaryPath, args...)
-	// Capture helpers own their cancellation. Restore and unlock run inside
-	// nsrestore and must stay in its group so outer cancellation kills them too.
+	// Capture helpers manage their own cancellation. Restore and unlock run inside
+	// nsrestore. Keep them in its process group so cancellation also kills them.
 	if action == actionLock || action == actionCheckpoint {
 		snapshotruntime.SetProcessGroupCancellation(cmd)
 	}
