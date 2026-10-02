@@ -52,7 +52,7 @@ spec:
               value: "0"
             - name: UCX_TLS
               value: tcp,self
-            # Keep MPI request broadcasts off UCX across checkpoint/restore.
+            # Keep MPI request broadcasts off UCX during checkpoint and restore.
             - name: OMPI_MCA_pml
               value: ob1
             - name: OMPI_MCA_btl

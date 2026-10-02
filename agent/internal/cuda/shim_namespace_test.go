@@ -21,8 +21,8 @@ import (
 )
 
 func TestRestoreActionsInheritNamespaceProcessGroup(t *testing.T) {
-	// Re-execute this test as nsrestore so the real CUDA command runner starts
-	// its helper below the namespace launcher, with an independent Go context.
+	// Run this test again as nsrestore. The real CUDA command runner then starts its
+	// helper under the namespace launcher with an independent Go context.
 	if action := os.Getenv("TEST_NSRESTORE_ACTION"); action != "" {
 		helper := os.Getenv("TEST_NSRESTORE_HELPER")
 		var err error

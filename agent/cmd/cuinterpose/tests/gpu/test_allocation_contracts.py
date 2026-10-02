@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Allocation and handle lifetimes against CUDA, with and without the shim."""
+"""Test allocation and handle lifetimes with CUDA, both with and without the shim."""
 
 import ctypes
 import os
@@ -49,7 +49,7 @@ def allocation_aliases(interposed, exportable):
     retained = cuda_call(driver.cuMemRetainAllocationHandle, addresses[0])
     cuda_call(driver.cuMemRelease, handle)
     cuda_call(driver.cuMemRelease, retained)
-    # Mappings keep the bytes alive after every application handle is released.
+    # Mappings retain the backing after all application handles are released.
     for address in addresses:
         cuda_driver.assert_bytes(address, b"shared allocation", "released handles")
     retained = cuda_call(driver.cuMemRetainAllocationHandle, addresses[0])
@@ -103,7 +103,8 @@ def malloc_on_both_devices(interposed):
 
 
 def invalid_create_preserves_output(interposed):
-    # Use the C entry point so a caller-owned output sentinel is observable.
+    # Use the C entry point to check whether it changes the caller's output value on
+    # failure.
     create = ctypes.CDLL("libcuda.so.1").cuMemCreate
     create.argtypes = [ctypes.POINTER(ctypes.c_uint64), ctypes.c_size_t,
                        ctypes.c_void_p, ctypes.c_uint64]

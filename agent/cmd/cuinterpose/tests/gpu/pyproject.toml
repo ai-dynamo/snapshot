@@ -6,8 +6,8 @@ name = "cuinterpose-gpu-tests"
 version = "0.0.0"
 description = "GPU integration tests for the cuinterpose shim and coordinator"
 requires-python = ">=3.12"
-# Pinned to the versions the suite was run with (torch from the cu130 index
-# below). Bump deliberately.
+# Pin the versions used to validate this suite. Install torch from the cu130 index
+# below. Update versions explicitly.
 dependencies = [
   "cuda-bindings==13.3.1",
   "pytest==8.4.2",

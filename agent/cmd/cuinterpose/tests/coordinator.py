@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Drive the packaged coordinator through real sockets with scripted replies."""
+"""Test the packaged coordinator with real sockets and predefined replies."""
 
 from contextlib import ExitStack, contextmanager
 from pathlib import Path

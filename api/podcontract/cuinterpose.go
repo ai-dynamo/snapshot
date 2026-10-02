@@ -16,8 +16,8 @@ const (
 	CuInterposeLauncherPath    = CuInterposeMountPath + "/cuinterpose-launch"
 )
 
-// ParseCuInterposeAnnotation preserves the accepted ParseBool spellings while
-// distinguishing an absent annotation from a malformed request.
+// ParseCuInterposeAnnotation accepts the same values as ParseBool. It distinguishes an
+// absent annotation from an invalid value.
 func ParseCuInterposeAnnotation(annotations map[string]string) (bool, error) {
 	value, present := annotations[CuInterposeAnnotation]
 	if !present {

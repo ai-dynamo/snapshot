@@ -1,13 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared pieces of the GPU tests.
+"""Shared GPU test harness.
 
-The test process never loads the shim. It launches one interposed *parent*
-Python process (``worker.py``) that forks ``WORLD_SIZE`` CUDA workers, and then
-drives the native CUDA lifecycle from the outside: read-only coordinator
-inspection, preparation, the native ``cuCheckpointProcess*`` sequence, and
-coordinator reconstruction. This harness does not run CRIU or the Go agent.
+The test process runs without the shim. It starts worker.py with the shim loaded. That
+parent forks WORLD_SIZE CUDA workers. The harness runs coordinator inspection and
+preparation, the native cuCheckpointProcess* sequence, and coordinator reconstruction.
+It does not run CRIU or the Go agent.
 """
 
 from __future__ import annotations
@@ -47,7 +46,7 @@ class Environment(NamedTuple):
 
 
 def visible_gpus() -> tuple[str, str] | None:
-    """The two GPU ordinals the workers use, or None when fewer are available."""
+    """Return the first two GPU ordinals, or None if fewer are available."""
     cuda_driver.cuda_call(driver.cuInit, 0)
     if int(cuda_driver.cuda_call(driver.cuDeviceGetCount)) < WORLD_SIZE:
         return None
@@ -59,11 +58,10 @@ def visible_gpus() -> tuple[str, str] | None:
         return None
     return devices[0], devices[1]
 class Workload:
-    """One interposed parent process with ``WORLD_SIZE`` forked CUDA workers.
+    """One parent with the shim loaded and WORLD_SIZE forked CUDA workers.
 
-    Use as a context manager: on the way out it terminates the process group,
-    collects the parent's and workers' output, and attaches it to any error
-    that is propagating, so a failure shows what the workers saw.
+    Use as a context manager. On exit, terminate the process group and collect output
+    from the parent and workers. Attach that output to any raised error.
     """
 
     def __init__(
@@ -139,8 +137,9 @@ class Workload:
         )
 
     def start(self) -> None:
-        """Start the parent, wait until every worker is ready, and check the shim
-        is loaded and listening in each of them."""
+        """Start the parent and wait for every worker. Check that each worker loaded the
+        shim and started its listener.
+        """
         self._externals = cuda_driver.create_external_allocations(WORLD_SIZE, 1)
         self.parent = self._start_parent(
             tuple(allocation.fd for allocation in self._externals),
@@ -175,7 +174,7 @@ class Workload:
             send_handle(sender, self._externals[rank].fd, self.child_pids[rank])
 
     def finish(self) -> None:
-        """Wait for the workers' done markers and a clean parent exit."""
+        """Wait for the workers' done markers and a successful parent exit."""
         assert self.parent is not None
         self.wait_for_workers("done")
         self.output = self.parent.communicate(timeout=COMMAND_TIMEOUT_SECONDS)

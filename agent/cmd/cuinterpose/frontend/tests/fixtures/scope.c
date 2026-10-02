@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-// A plugin, opened with RTLD_LOCAL, and its private dependency. Only the plugin's
-// own dlsym calls can find the dependency's symbol. run.py disables sibling
-// calls, so these dlsym calls return into this plugin.
+// This plugin uses RTLD_LOCAL and has a private dependency. Only dlsym calls from the
+// plugin can find the dependency's symbol. run.py disables sibling calls so dlsym
+// returns into this plugin.
 #define _GNU_SOURCE
 #include <dlfcn.h>
 

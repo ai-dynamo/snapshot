@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Test packaged frontend/core artifacts with the installed CUDA driver and two GPUs."""
+"""Test the packaged frontend and core with the installed CUDA driver and two GPUs."""
 
 import argparse
 import errno
@@ -77,7 +77,7 @@ def main():
         for source, output, options in targets:
             subprocess.run(compiler + [str(fixtures / source), "-o", str(build / output)] + options,
                            env=env, check=True)
-        # This is intentionally a hard requirement, never an automatic skip.
+        # Fail if the required GPUs are unavailable. Do not skip the tests.
         subprocess.run([str(build / "probe"), "require-gpus"], env=env, check=True, timeout=60)
         library_path = os.pathsep.join(filter(None, (str(build), env.get("LD_LIBRARY_PATH"))))
         actual_env = env | {"LD_LIBRARY_PATH": library_path,

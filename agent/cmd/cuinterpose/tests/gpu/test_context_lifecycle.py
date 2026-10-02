@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Context teardown frees converted mallocs while explicit VMM survives."""
+"""Context destruction frees converted mallocs. Direct VMM allocations survive."""
 
 import os
 from pathlib import Path
@@ -49,7 +49,8 @@ def run_worker(mode, coordinator):
     if mode == "destroy":
         target = cuda_call(driver.cuCtxCreate, None, 0, device)
     elif mode == "runtime":
-        # Exercise Runtime API initialization with no application primary retain.
+        # Initialize through the Runtime API without an application call to retain the
+        # primary context.
         cuda_call(driver.cuCtxSetCurrent, 0)
         runtime_call(runtime.cudaSetDevice, 0)
     else:
@@ -105,14 +106,15 @@ def run_worker(mode, coordinator):
     status, *_ = driver.cuMemGetAddressRange(allocated)
     assert status in (driver.CUresult.CUDA_ERROR_INVALID_VALUE,
                       driver.CUresult.CUDA_ERROR_NOT_FOUND), status
-    # Check driver backing as well as the shim's malloc-range bookkeeping.
+    # Check the driver backing and the shim's malloc records.
     status, *_ = driver.cuMemRetainAllocationHandle(allocated)
     assert status != driver.CUresult.CUDA_SUCCESS, "malloc mapping survived teardown"
     cuda_driver.assert_bytes(survivor, b"other context", "other live context")
     cuda_driver.assert_bytes(address, b"explicit VMM", "after teardown")
 
-    # Shared direct VMM must still be checkpointable after its cached context dies.
-    # Exercise carrier prepare/reconstruction here; this is not a native/CRIU dump.
+    # Shared direct VMM must remain usable for checkpointing after its recorded context
+    # is destroyed. Test carrier preparation and reconstruction. Do not run native
+    # checkpoint or CRIU here.
     control = Path(os.environ["SNAPSHOT_CONTROL_DIR"])
     checkpoint = control / "checkpoint"
     checkpoint.mkdir()

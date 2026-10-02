@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 
-"""VMM access updates survive shared-backing reconstruction on real GPUs."""
+"""Verify VMM access permissions after shared backing is rebuilt on real GPUs."""
 
 import os
 from pathlib import Path
@@ -42,7 +42,7 @@ def run_worker(coordinator):
                         driver.CUmemAllocationGranularity_flags.CU_MEM_ALLOC_GRANULARITY_MINIMUM))
     handle = cuda_call(driver.cuMemCreate, size, properties, 0)
     address = cuda_driver.map_allocation(handle, size, 0)
-    # Export selects the shared-carrier path, which destroys and recreates backing.
+    # Export marks the backing as shared. The host carrier will destroy and recreate it.
     fd = int(cuda_call(driver.cuMemExportToShareableHandle, handle,
                        cuda_driver.POSIX_FD_HANDLE_TYPE, 0))
     flags = driver.CUmemAccess_flags

@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""CUDA Driver API mechanics used by the cuinterpose GPU tests.
+"""CUDA Driver API helpers for the cuinterpose GPU tests.
 
-This module contains no workload or coordinator orchestration. It owns direct
-CUDA calls, VMM allocation helpers, raw allocations created outside the shim,
-the copy-bandwidth baseline, and the native process checkpoint state machine.
+Provide direct CUDA calls, VMM helpers, allocations created without the shim, a copy
+bandwidth baseline, and native process checkpoint operations. Workload and coordinator
+control belong in the test harness.
 """
 
 from __future__ import annotations
@@ -105,7 +105,7 @@ def destroy_mapped_allocation(address: int, size: int, handle) -> None:
 
 
 class ExternalAllocation(NamedTuple):
-    """A POSIX-shareable allocation owned by the uninterposed test process."""
+    """A POSIX-shareable allocation owned by the test process without the shim."""
 
     device: driver.CUdevice
     context: driver.CUcontext
@@ -116,7 +116,7 @@ class ExternalAllocation(NamedTuple):
 
 
 def create_external_allocations(count: int, byte_base: int) -> list[ExternalAllocation]:
-    """Create raw descriptors workers can import outside cuinterpose tracking."""
+    """Create native descriptors that workers can attempt to import through the shim."""
     cuda_call(driver.cuInit, 0)
     allocations: list[ExternalAllocation] = []
     try:
@@ -225,7 +225,8 @@ def native_checkpoint(
     command_timeout_seconds: int,
     checkpoint_timeout_seconds: int,
 ) -> None:
-    """Checkpoint and restore workers with a bound on a wedged driver call."""
+    """Checkpoint and restore workers. Limit the wait for driver calls that do not return.
+    """
     outcomes: queue.Queue[Exception | None] = queue.Queue(maxsize=1)
 
     def run() -> None:

@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Checkpoint/restore contents and collectives on two real GPUs."""
+"""Test checkpoint and restore of allocation contents and collectives on two real GPUs.
+"""
 
 import os
 

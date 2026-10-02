@@ -60,7 +60,7 @@ struct mount_attr {
 
 #define BUNDLE_SOURCE "/snapshot-binaries"
 #define BUNDLE_DESTINATION "/tmp/snapshot-binaries"
-/* CRIU reopens library mappings at their capture-time paths. */
+/* CRIU reopens library mappings at the paths recorded during capture. */
 #define SNAPSHOT_CUDA_SOURCE "/snapshot-binaries/snapshot-cuda"
 #define SNAPSHOT_CUDA_DESTINATION "/tmp/snapshot-cuda"
 #define CHECKPOINT_ROOT "/checkpoints"

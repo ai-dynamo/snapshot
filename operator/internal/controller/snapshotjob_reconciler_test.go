@@ -853,8 +853,8 @@ func TestSnapshotJobCuInterposeConfigurationRecovery(t *testing.T) {
 	job.UID = "source-job-uid"
 	require.NoError(t, r.Update(ctx, job))
 
-	// The fake API has not assigned a UID on create, so the next reconcile
-	// exercises adoption before status binds the existing Job incarnation.
+	// The fake API does not assign a UID on create. The next reconcile therefore tests
+	// adoption before status records the existing Job's identity.
 	r.CuInterpose = CuInterposeDelivery{PullPolicy: "invalid"}
 	for range 2 {
 		_, err = r.Reconcile(ctx, reconcileRequest(sj))

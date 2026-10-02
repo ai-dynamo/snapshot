@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 fn main() {
-    // Installation holds a process-wide mutex. Its libc calls must not enter
-    // the loader through first-use PLT resolution.
+    // Installation holds a process mutex. Resolve libc PLT entries before installation
+    // to avoid entering the loader while holding that mutex.
     println!("cargo:rustc-link-arg=-Wl,-z,now");
 }

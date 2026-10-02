@@ -11,11 +11,11 @@ driven by the guide's own program and manifests (see framework_workloads):
    sentinel, so Ready means the engine served before capture and the process
    is checkpointable.
 2. A PodSnapshot captures it. The dump terminates the source process.
-3. A restore pod built from the guide's restore manifest is pinned to the
-   source node, or SNAPSHOT_E2E_RESTORE_NODE for a cross-node test with shared
-   storage. Its own entrypoint stays inert (`sleep infinity`); the agent
-   restores the checkpointed process into it, which resumes the engine,
-   generates again, and serves /generate.
+3. Create a restore pod from the guide's restore manifest. Use the source
+   node by default. SNAPSHOT_E2E_RESTORE_NODE selects another node and requires
+   shared storage. The entrypoint waits with `sleep infinity`. The agent
+   restores the captured process, which resumes the engine, generates again,
+   and serves /generate.
 4. The test asserts the restore condition, the restore-ready file, a live
    /generate answer, and that the placeholder never loaded a model itself —
    a restore that silently degraded to a cold start must not pass.

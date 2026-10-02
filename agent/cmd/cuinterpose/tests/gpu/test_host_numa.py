@@ -66,9 +66,9 @@ def receive(channel):
 def test_host_numa_shared_reconstruction(release_creator_handle, tools, tmp_path):
     status, = driver.cuInit(0)
     assert status == driver.CUresult.CUDA_SUCCESS
-    # A CPU NUMA node elsewhere on the host may not support this GPU's VMM.
-    # The override can select another driver-supported node, including nonzero IDs.
-    # CUDA reports -1 without NUMA; HOST_NUMA allocations use node 0 there.
+    # Other CPU NUMA nodes may not support VMM for this GPU. The override can select
+    # another supported node, including a nonzero ID. CUDA reports -1 without NUMA.
+    # HOST_NUMA allocations use node 0 in that case.
     nearest_node = max(0, int(cuda_call(
         driver.cuDeviceGetAttribute, driver.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_HOST_NUMA_ID, 0,
     )))
@@ -76,7 +76,8 @@ def test_host_numa_shared_reconstruction(release_creator_handle, tools, tmp_path
     properties = host_properties(node)
     size = int(cuda_call(driver.cuMemGetAllocationGranularity, properties,
                         driver.CUmemAllocationGranularity_flags.CU_MEM_ALLOC_GRANULARITY_MINIMUM))
-    # This selected lane requires native POSIX-shareable HOST_NUMA VMM support.
+    # This test requires native HOST_NUMA VMM allocations that can be exported as POSIX
+    # handles.
     status, handle = driver.cuMemCreate(size, properties, 0)
     assert status == driver.CUresult.CUDA_SUCCESS, status
     cuda_call(driver.cuMemRelease, handle)
@@ -121,16 +122,16 @@ def run_importer(node, size, descriptor, channel_fd):
 
 def run_creator(node, size, coordinator, release_handle):
     cuda_call(driver.cuInit, 0)
-    # Keep the allocation contextless. Carrier registration must choose a CUDA
-    # device independently from the host NUMA node used for backing placement.
+    # Create the allocation without a context. Carrier registration must select a CUDA
+    # device separately from the host NUMA node that holds the backing.
     handle = cuda_call(driver.cuMemCreate, size, host_properties(node), 0)
     assert_handle_namespace(handle, virtual=True, stage="HOST_NUMA create")
     address = map_host(handle, size, node)
     alias = map_host(handle, size, node)
     value = 0x31
     ctypes.memset(address, value, size)
-    # Reconstruct CPU and GPU backing in the same carrier, including a host
-    # allocation created without a context and a device allocation with one.
+    # Reconstruct CPU and GPU backing in the same carrier. The host allocation has no
+    # context. The device allocation has one.
     context = cuda_call(driver.cuDevicePrimaryCtxRetain, 0)
     cuda_call(driver.cuCtxSetCurrent, context)
     device_properties = cuda_driver.allocation_properties(0)
@@ -160,9 +161,9 @@ def run_creator(node, size, coordinator, release_handle):
         for cycle in range(2):
             checkpoint = control / f"checkpoint-{cycle}"
             checkpoint.mkdir()
-            # All application CUDA calls have finished. The importer waits on
-            # the pipe and the creator waits for each global coordinator phase.
-            # No native checkpoint or CRIU participates in this regression.
+            # All application CUDA calls have finished. The importer waits on the pipe.
+            # The creator waits for each coordinator phase. This test does not run
+            # native checkpoint or CRIU.
             for phase in ("--prepare", "--restore"):
                 subprocess.run([
                     coordinator, phase, "--control-dir", str(control),

@@ -350,8 +350,8 @@ func configureCheckpoint(
 }
 
 func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir, cudaJobFile string, log logr.Logger) (timings *checkpointPhaseTimings, retErr error) {
-	// Inspection above is read-only. Once preparation starts, even a failed
-	// coordinator call may have frozen registries or torn down shared mappings.
+	// Inspection above only reads state. After preparation starts, a failed coordinator
+	// call may still have frozen registries or removed shared mappings.
 	defer func() {
 		if retErr != nil {
 			retErr = checkpointNeedsSourceKill(retErr)
@@ -362,7 +362,7 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 	// CUDA lock+checkpoint must happen before CRIU dump
 	if len(state.CUDAHostPIDs) > 0 {
 		if data.CuInterpose != nil {
-			// Tear down shared mappings before native CUDA lock/checkpoint.
+			// Remove shared mappings before native CUDA lock and checkpoint calls.
 			err := cuda.PrepareCuInterpose(
 				ctx,
 				checkpointDir,

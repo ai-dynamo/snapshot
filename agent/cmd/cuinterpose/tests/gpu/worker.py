@@ -1,30 +1,26 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The interposed workload for the GPU tests.
+"""Workload with the shim loaded for GPU tests.
 
-Started by ``harness.Workload`` with ``LD_PRELOAD=libcuinterpose.so``. The
-parent forks ``WORLD_SIZE`` workers before touching CUDA (a fork after CUDA
-state exists is unsupported); each worker then behaves like one rank of a
-tensor-parallel server:
+harness.Workload starts this process with LD_PRELOAD=libcuinterpose.so. The parent forks
+WORLD_SIZE workers before initializing CUDA. Forking after CUDA state exists is
+unsupported. Each worker acts as one tensor-parallel rank.
 
-* creates two POSIX-shareable allocations of its own, one small one *before*
-  any CUDA context exists (the driver allows that) and one large one whose
-  contents must travel through the host carrier, both filled with seeded
-  random bytes;
-* checks that importing a descriptor from a process without the shim is
-  rejected immediately; ``admission-only`` mode verifies continued execution
-  without running checkpoint;
-* in unicast mode, exports its small allocation through the shim, exchanges
-  the virtual shareable handle with the other worker, and keeps the peer import mapped across
-  checkpoint and restore;
-* shares a PyTorch symmetric-memory buffer with the other rank and captures a
-  collective into a CUDA graph;
-* signals ``ready``, waits for ``continue``, and after the checkpoint round
-  trip verifies every byte and replays the graph.
+Each worker creates two POSIX-shareable allocations filled with seeded random bytes. It
+creates the small allocation before any CUDA context exists. The large allocation tests
+copies through the host carrier.
 
-Progress and results are communicated to the test through marker files in the
-sync directory; failures print a traceback and exit non-zero.
+Workers reject descriptors from processes without the shim. The admission-only mode then
+verifies that execution can continue without checkpointing.
+
+In unicast mode, workers export and exchange their small allocations. Each worker keeps
+its peer mapping across checkpoint and restore. Workers also share a PyTorch
+symmetric-memory buffer and capture a collective in a CUDA graph.
+
+Each worker signals ready and waits for continue. After restore, it verifies the buffer
+contents and replays the graph. Marker files in the sync directory report progress and
+results. Failures print a traceback and return a nonzero exit status.
 """
 
 from __future__ import annotations
@@ -140,7 +136,7 @@ def _worker(rank: int, options: Options, peer_channel: socket.socket) -> None:
     private_seed = options.seed + 2 * rank
     bulk_seed = options.seed + 2 * rank + 1
 
-    # The driver does not need a context for cuMemCreate, so neither may the shim.
+    # cuMemCreate does not require a CUDA context. The shim must allow the same call.
     cuda_driver.assert_no_current_context("worker before the first cuMemCreate")
     private_handle = cuda_call(driver.cuMemCreate, private_size, properties, 0)
     cuda_driver.assert_handle_namespace(private_handle, True, "tracked cuMemCreate")
@@ -207,8 +203,8 @@ def _worker(rank: int, options: Options, peer_channel: socket.socket) -> None:
     cuda_driver.assert_handle_namespace(bulk_handle, True, "tracked bulk cuMemCreate")
     bulk_address = cuda_driver.map_allocation(bulk_handle, bulk_size, device)
     _fill(bulk_address, bulk_size, bulk_seed, rank)
-    # Keep a large actually-shared allocation to exercise carrier contents, while the
-    # native path is exercised by an additional never-exported VMM allocation.
+    # Use a large shared allocation to test carrier contents. Use a separate VMM
+    # allocation that is never exported to test native checkpointing.
     native_handle = cuda_call(driver.cuMemCreate, private_size, properties, 0)
     native_address = cuda_driver.map_allocation(native_handle, private_size, device)
     _fill(native_address, private_size, bulk_seed + WORLD_SIZE, rank)
@@ -220,7 +216,7 @@ def _worker(rank: int, options: Options, peer_channel: socket.socket) -> None:
     os.close(bulk_virtual_shareable_handle)
 
     if options.admission_only:
-        # Rejected imports never changed driver state; normal execution continues.
+        # Rejected imports did not change driver state. Normal execution can continue.
         restore_socket.close()
         (options.sync_dir / f"ready-{rank}").touch()
         _wait_for_continue(options.sync_dir)
@@ -263,7 +259,7 @@ def _worker(rank: int, options: Options, peer_channel: socket.socket) -> None:
 
     _wait_for_continue(options.sync_dir)
 
-    # Admission remains strict after restore too.
+    # Foreign imports must still be rejected after restore.
     fresh_fd = recv_handle(restore_socket)
     restore_socket.close()
     _reject_raw_import(fresh_fd)
@@ -315,8 +311,9 @@ def _collective(
 def _replace_local_binding_with_address(
     rank: int, input_tensor: torch.Tensor, symm_handle, properties: driver.CUmemAllocationProp
 ) -> None:
-    """Rebind this rank's slice of the multicast object through
-    cuMulticastBindAddr, so both bind entry points are exercised."""
+    """Rebind this rank's part of the multicast object with cuMulticastBindAddr. This tests
+    both binding entry points.
+    """
     granularity = int(
         cuda_call(
             driver.cuMemGetAllocationGranularity,

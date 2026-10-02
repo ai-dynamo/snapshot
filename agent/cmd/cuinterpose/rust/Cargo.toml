@@ -12,8 +12,9 @@ license = "Apache-2.0"
 rust-version = "1.88"
 
 [workspace.dependencies]
-# Only generated driver definitions are used. CUDA calls still go through
-# FrontendAbi.resolve; dynamic-loading prevents a link-time libcuda requirement.
+# Use only the generated driver definitions. CUDA calls resolve through
+# FrontendAbi.resolve. The dynamic-loading feature avoids a libcuda dependency at link
+# time.
 cudarc = { version = "=0.19.9", default-features = false, features = ["std", "driver", "cuda-13010", "dynamic-loading"] }
 libc = "0.2"
 getrandom = "0.4"
@@ -38,7 +39,7 @@ unused_lifetimes = "warn"
 all = "warn"
 allow_attributes_without_reason = "warn"
 
-# Runtime workers must not outlive a panic that interrupted CUDA bookkeeping.
+# Terminate runtime workers if a panic interrupts CUDA state updates.
 [profile.dev]
 panic = "abort"
 

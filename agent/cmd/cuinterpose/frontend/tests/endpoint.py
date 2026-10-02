@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Actual Rust core endpoint lifecycle with the installed NVIDIA driver."""
+"""Test the Rust control endpoint with the installed NVIDIA driver."""
 
 import ctypes as c
 import os
@@ -50,7 +50,7 @@ else:
 sockets_before = set(path.parent.glob("cuinterpose-*.sock"))
 
 if mode == "permissive-umask":
-    # Only this fresh child changes umask; runtime startup must leave it alone.
+    # Only this new child changes umask. Runtime startup must not change it.
     os.umask(0)
 
 if mode == "relative-preload-chdir":
@@ -86,8 +86,8 @@ if mode in ("existing-file", "existing-symlink", "existing-live", "existing-full
             queued = socket.socket(socket.AF_UNIX)
             queued.connect(str(path))
     before = path.lstat()
-    # The full-backlog case must never wait for a socket timeout under the
-    # loader-sensitive installation lock.
+    # When the socket backlog is full, do not wait for a timeout while holding the
+    # installation lock. A loader constructor can hold that lock.
     signal.alarm(5)
     assert cuda.cuInit(0) == 304  # CUDA_ERROR_OPERATING_SYSTEM
     signal.alarm(0)
@@ -99,7 +99,8 @@ if mode in ("existing-file", "existing-symlink", "existing-live", "existing-full
         assert path.is_symlink() and target.stat().st_ino == target_inode
         target.unlink()
     path.unlink()
-    assert cuda.cuInit(0) == 3 and not path.exists()  # Failure remains sticky.
+    assert cuda.cuInit(0) == 3 and not path.exists()  # Later calls must report the same
+                                                      # failure.
     print(f"PASS actual Rust endpoint {mode}: preserved existing endpoint")
     sys.exit(0)
 
@@ -199,7 +200,8 @@ activate()
 if mode == "out-of-order":
     error = request("execute", operation="save_allocations")["result"]["Err"]
     assert "SaveAllocations" in error and "expected MulticastPrepared" in error and "actual Active" in error, error
-    assert "Ok" in request("begin_checkpoint")["result"]  # The refusal left the phase unchanged.
+    assert "Ok" in request("begin_checkpoint")["result"]  # The rejected operation did not change
+                                                          # the phase.
 if mode == "permissive-umask":
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert os.umask(0) == 0, "runtime startup changed the application's umask"
@@ -214,12 +216,12 @@ if mode in ("concurrent", "stale-concurrent"):
         assert inspect()["namespace_pid"] == parent
     assert path.stat().st_ino == inode
     assert set(path.parent.glob("cuinterpose-*.sock")) == sockets_before | {path}
-    # CUDA has its own workers; only count the shim's named service threads.
+    # CUDA has its own workers. Count only the shim's named service threads.
     def shim_workers():
         return [thread for thread in Path("/proc/self/task").iterdir()
                 if (thread / "comm").read_text().startswith("cuinterpose-")]
 
-    # Losing initialization workers retire after their callers return.
+    # Workers from unused initialization attempts exit after their callers return.
     deadline = time.monotonic() + 2
     while len(shim_workers()) != 2 and time.monotonic() < deadline:
         time.sleep(0.001)

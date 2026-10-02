@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Physical-GPU fixtures using a matched, prebuilt Rust artifact directory.
+"""Test real GPUs with one matching set of prebuilt Rust artifacts.
 
-The suite requires two real GPUs and a CUDA 13 driver. Missing dependencies,
-artifacts, or hardware fail the run; they never turn qualification into a skip.
+The suite requires two real GPUs and a CUDA 13 driver. Missing dependencies, artifacts,
+or hardware fail the run. They do not skip qualification.
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ def gpu_environment(tools):
 
 @pytest.fixture(scope="session")
 def multicast_supported(gpu_environment):
-    """A selected multicast test requires capable GPUs and NVLink / NVSwitch."""
+    """Selected multicast tests require capable GPUs and NVLink or NVSwitch."""
     import cuda_driver
     import harness
     from cuda.bindings import driver
@@ -79,7 +79,7 @@ def multicast_supported(gpu_environment):
 
 @pytest.fixture
 def seed(record_property) -> int:
-    """Seed for the random buffer contents; set CUINTERPOSE_TEST_SEED to replay."""
+    """Seed for random buffer contents. Set CUINTERPOSE_TEST_SEED to repeat a run."""
     value = int(os.environ.get("CUINTERPOSE_TEST_SEED") or random.getrandbits(32))
     record_property("cuinterpose_test_seed", value)
     print(f"\ncuinterpose test seed: {value} (CUINTERPOSE_TEST_SEED={value} to replay)")

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Stage the locally owned GPU pytest suite and one set of packaged artifacts."""
+"""Copy the GPU pytest suite and one matching set of packaged artifacts."""
 
 import argparse
 from pathlib import Path

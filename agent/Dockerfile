@@ -109,11 +109,9 @@ RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
       ./cmd/cuda-checkpoint-helper/transfer_engine_test.cpp \
     && /cuda-checkpoint-helper-transfer-cancellation-test
 
-# =============================================================================
-# C frontend and Rust core - pinned GNU builder, static musl coordinator/launcher
-# =============================================================================
-# GCC 15 builds the C frontend, which requires musttail. The Bookworm image keeps
-# the builder's glibc 2.36.
+# C frontend and Rust core. Pinned GNU builder and static musl tools.
+# GCC 15 builds the C frontend, which requires musttail. The Bookworm image supplies
+# glibc 2.36.
 FROM gcc:15.2.0-bookworm@sha256:9ca91b05c7b07d2979f16413e8b2cd6ec8a7c80ffca4121ccab0aeba33f90460 AS gcc-15
 
 FROM rust:1.95.0-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082 AS cuinterpose-builder
@@ -132,8 +130,8 @@ RUN test "$(rustc --version | cut -d' ' -f2)" = 1.95.0 \
 WORKDIR /cuinterpose
 COPY cmd/cuinterpose/ ./
 RUN make native
-# Ship corresponding dependency and standard-library sources, including their
-# license files, alongside the repository source in the image's legal tree.
+# Ship dependency and standard library sources with their license files. Store them with
+# the repository source in the image's legal directory.
 RUN mkdir -p /rust-sources && cd rust && cargo vendor --locked /rust-sources/vendor \
     && cp Cargo.lock /rust-sources/ \
     && cp -a "$(rustc --print sysroot)/lib/rustlib/src/rust" /rust-sources/standard-library \
@@ -509,9 +507,9 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 # path as it runs from — CRIU restores file-backed mappings by path, not via
 # PATH search — and so must this placeholder image (same BASE_IMAGE).
 #
-# Opted-in source workloads preload the cuinterpose libraries. The agent
-# mounts matching libraries at their original paths before CRIU restores their
-# file-backed mappings. The placeholder must provide a compatible glibc.
+# Source workloads that enable cuinterpose preload its libraries. The agent
+# mounts matching libraries at their original paths before CRIU restores the
+# file mappings. The placeholder must provide a compatible glibc.
 #
 # Standby-aware workload entrypoints stay inert when the restore Pod sets
 # SNAPSHOT_RESTORE_STANDBY=1, then sleep while the snapshot-agent restores
