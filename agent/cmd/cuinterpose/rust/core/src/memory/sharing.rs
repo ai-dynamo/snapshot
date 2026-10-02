@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shareable-handle codec, peer exports, and imported resource ownership.
+//! Encode shareable handles, export peer resources, and track imported resource
+//! ownership.
 
 use crate::error::Result;
 use crate::runtime;
@@ -28,18 +29,18 @@ pub fn create(reference: AllocationReference) -> protocol::Result<OwnedFd> {
     Ok(file.into())
 }
 
-/// A foreign FD is a native import. A recognizable but invalid or obsolete
-/// virtual shareable handle must not be passed through to the CUDA driver.
+/// Treat a foreign FD as a native import. Do not pass a recognizable virtual handle to
+/// CUDA if it is invalid or obsolete.
 pub fn decode(fd: i32) -> protocol::Result<Option<AllocationReference>> {
     if fd < 0 {
         return Err(Error::Invalid("negative import descriptor"));
     }
-    // The caller lends the FD for this call; never close its application-owned
-    // descriptor. Clone it so positional File reads are safe and RAII-owned.
+    // The caller owns the FD. Duplicate it for positional File reads, then let RAII
+    // close the duplicate. Never close the caller's descriptor.
     let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
     let file = File::from(borrowed.try_clone_to_owned()?);
-    // Virtual handles are regular memfds. A short regular file is invalid;
-    // nonregular descriptors (including pipes and sockets) are foreign.
+    // Virtual handles use regular memfds. A short regular file is invalid. Treat other
+    // descriptor types, including pipes and sockets, as foreign.
     let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Ok(None);
@@ -121,8 +122,8 @@ fn decode_multicast_properties(
     })
 }
 
-// Multicast importers need the creation properties for checkpoint reconstruction.
-// Cache the wire reply alongside its FD so sending never consults CUDA state.
+// Multicast importers need creation properties during restore. Cache the reply with its
+// FD so the sender does not need to read CUDA state.
 pub(crate) type Exports = BTreeMap<AllocationId, (OwnedFd, Reply)>;
 
 #[derive(Default)]

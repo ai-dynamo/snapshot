@@ -14,11 +14,11 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
-/// Connect to a local peer with a bounded wait for space in its listen queue.
+/// Connect to a local peer. Limit the wait for space in its listen queue.
 ///
 /// # Errors
-/// Returns socket creation, timeout configuration, or connection errors.
-/// A zero timeout is rejected as invalid input by rustix before connecting.
+/// Return socket creation, timeout configuration, or connection errors. rustix rejects
+/// a zero timeout before connecting.
 pub fn connect(path: &Path, timeout: Duration) -> io::Result<UnixStream> {
     use rustix::net::sockopt::{Timeout, set_socket_timeout};
     use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType, socket_with};
@@ -30,18 +30,18 @@ pub fn connect(path: &Path, timeout: Duration) -> io::Result<UnixStream> {
         SocketFlags::CLOEXEC,
         None,
     )?;
-    // Linux SO_SNDTIMEO bounds blocking AF_UNIX connect as well as writes.
-    // Set it before connecting; read/write timeouts set afterwards cannot bound connect.
+    // On Linux, SO_SNDTIMEO limits blocking AF_UNIX connect calls and writes. Set it
+    // before connecting. A timeout set afterward cannot limit connect.
     set_socket_timeout(&socket, Timeout::Send, Some(timeout))?;
     rustix::net::connect(&socket, &address)?;
     Ok(UnixStream::from(socket))
 }
 
-/// Sends one bounded message, optionally transferring a borrowed descriptor.
+/// Send one message within the size limit. Optionally send a borrowed descriptor.
 ///
 /// # Errors
-/// Returns serialization or socket errors. On failure, close the stream instead
-/// of retrying: part of the message or its descriptor may already have been sent.
+/// Return serialization or socket errors. Close the stream on failure. Do not retry
+/// because part of the message or its descriptor may already have been sent.
 pub fn send<T: Serialize>(
     socket: &UnixStream,
     message: &T,
@@ -76,11 +76,12 @@ pub fn send<T: Serialize>(
     Ok(())
 }
 
-/// Receives one bounded message and takes ownership of any transferred descriptor.
+/// Receive one message within the size limit. Take ownership of any received
+/// descriptor.
 ///
 /// # Errors
-/// Rejects truncated/oversized frames, invalid encoding, and excess descriptors.
-/// Received descriptors are closed on error; the caller should close the stream.
+/// Reject truncated or oversized frames, invalid encoding, and excess descriptors.
+/// Close received descriptors on error. The caller should close the stream.
 pub fn receive<T: DeserializeOwned>(socket: &UnixStream) -> Result<(T, Option<OwnedFd>)> {
     let mut prefix = [0; 4];
     let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(2))];
@@ -123,6 +124,7 @@ pub fn receive<T: DeserializeOwned>(socket: &UnixStream) -> Result<(T, Option<Ow
     }
     let mut bytes = vec![0; size];
     (&*socket).read_exact(&mut bytes)?;
-    // Every received FD is owned before any fallible framing/decoding work.
+    // Take ownership of every received FD before checking or decoding the frame. Later
+    // errors must close all received descriptors.
     Ok((decode(&bytes)?, descriptor))
 }
