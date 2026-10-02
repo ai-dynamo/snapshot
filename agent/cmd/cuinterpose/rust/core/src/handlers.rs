@@ -350,6 +350,8 @@ pub fn cuMemGetAddressRange_v2(
         }
         return Ok(());
     }
-    drop(state);
-    unsafe { driver::cuMemGetAddressRange_v2(base, size, address) }
+    runtime::call_unlocked(state, || unsafe {
+        driver::cuMemGetAddressRange_v2(base, size, address)
+    })
+    .map(|_| ())
 }
