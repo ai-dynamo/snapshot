@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-// A glibc resolver adapter, not an ELF loader. The Rust sibling owns CUDA state.
+// Resolve symbols through glibc. The Rust core manages CUDA state.
 #define _GNU_SOURCE
 #include "core_abi.h"
 #include <dlfcn.h>
@@ -39,7 +39,7 @@ enum {
     cudaDriverEntryPointSymbolNotFound = 1,
 };
 
-// Wrapped memory and owning-context entry points. The backend implements each one.
+// The backend implements these memory and context entry points.
 #define MEMORY_API(X) \
     X(cuCtxDestroy, (CUcontext context), (context)) \
     X(cuCtxDestroy_v2, (CUcontext context), (context)) \
@@ -78,17 +78,18 @@ static _Atomic(const struct BackendAbi *) backend_api;
 static atomic_bool failed, backend_unavailable;
 static _Thread_local bool loading_backend;
 
-// Published nodes and their dlopen references live until exit. Readers need no
-// lock, including after quiescent fork; no loader call runs under a shim mutex.
+// Published nodes and their dlopen references remain valid until exit. Readers do not
+// need a lock, including after a fork with no active updates. Do not hold a shim mutex
+// during loader calls.
 struct CudaLibrary {
     void *handle;
     struct CudaLibrary *next;
 };
 static _Atomic(struct CudaLibrary *) cuda_libraries;
 
-// Finds glibc's dlsym on first use without a once-guard. dlvsym takes the loader
-// lock that dlopen holds while running constructors, so waiting for another
-// thread's lookup here can deadlock.
+// Find glibc's dlsym on first use without waiting for another thread. dlvsym takes the
+// loader lock that dlopen holds during constructors. Waiting for another thread's
+// lookup can therefore deadlock.
 static DlsymFunction glibc_dlsym(void) {
     DlsymFunction function = atomic_load(&real_dlsym);
     if (!function) {
@@ -194,7 +195,7 @@ static void *resolve(const char *name) {
         retain_cuda_library(RTLD_DEFAULT, address);
         return atomic_load(&failed) ? NULL : address;
     }
-    // Runtime-private initialization can load CUDA without intercepted dlsym.
+    // The runtime can load CUDA through internal calls that bypass our dlsym.
     bool runtime = strncmp(name, CUDA_RUNTIME_PREFIX, sizeof(CUDA_RUNTIME_PREFIX) - 1) == 0;
     void *handle = dlopen(runtime ? CUDA_RUNTIME_SONAME : CUDA_DRIVER_SONAME, RTLD_LAZY | RTLD_LOCAL);
     if (!handle)
@@ -207,8 +208,8 @@ static void *resolve(const char *name) {
 }
 
 static const struct BackendAbi *load_backend(void **reference) {
-    // Linux's dynamic linker expands $ORIGIN to this library's load-time
-    // directory, so backend lookup still works after chdir.
+    // The dynamic linker expands $ORIGIN to the directory where this library was
+    // loaded. Backend lookup therefore still works after chdir.
     void *library = dlopen(BACKEND_LIBRARY, RTLD_LAZY | RTLD_LOCAL);
     if (!library)
         return NULL;
@@ -220,12 +221,12 @@ static const struct BackendAbi *load_backend(void **reference) {
     }
     struct FrontendAbi frontend = {ABI_VERSION, sizeof(frontend), resolve};
     const struct BackendAbi *api = NULL;
-    // The handshake only registers the frontend and returns an immutable table;
-    // it must not call back into the loader or start runtime workers.
+    // The handshake only registers the frontend and returns an immutable table. It must
+    // not call the loader or start runtime workers.
     if (initialize(&frontend, &api) != CUDA_SUCCESS || !api ||
         api->version != ABI_VERSION || api->size != sizeof(*api))
-        // Retain a rejected backend conservatively: an incompatible library
-        // may not honor the handshake-only contract and could have live workers.
+        // Keep a rejected backend loaded. An incompatible library may have started
+        // workers during the handshake.
         return NULL;
     *reference = library;
     return api;
@@ -239,9 +240,9 @@ static const struct BackendAbi *backend(void) {
         return api;
     if (atomic_load(&backend_unavailable))
         return NULL;
-    // Refuse same-thread constructor reentry before dlopen has finished. Other
-    // threads may load independently: glibc serializes DSO construction, and
-    // the ABI handshake is idempotent. Never wait under a shim lock around dlopen.
+    // Reject constructor reentry on this thread until dlopen returns. Other threads can
+    // load independently because glibc serializes DSO constructors. Repeated ABI
+    // registration is safe. Do not hold a shim lock during dlopen.
     if (loading_backend)
         return NULL;
     loading_backend = true;
@@ -249,14 +250,14 @@ static const struct BackendAbi *backend(void) {
     api = load_backend(&reference);
     if (api) {
         const struct BackendAbi *expected = NULL;
-        // Retain the winner's reference for process-lifetime callbacks/workers.
-        // A losing caller owns only an extra reference to that same DSO.
+        // Keep the first published reference until process exit for callbacks and
+        // workers. Other callers hold only an extra reference to the same DSO.
         if (!atomic_compare_exchange_strong(&backend_api, &expected, api)) {
             dlclose(reference);
             api = expected;
         }
     } else {
-        // A failed private load must not hide another caller's published table.
+        // If this load fails, use the table another caller has already published.
         api = atomic_load(&backend_api);
         if (!api)
             atomic_store(&backend_unavailable, true);
@@ -265,8 +266,8 @@ static const struct BackendAbi *backend(void) {
     return api;
 }
 
-// The generated Rust table is authoritative. Check the adapters' full pointer
-// types, not just call compatibility (which permits implicit integer casts).
+// The generated Rust table defines the ABI. Check the complete function pointer types.
+// Call compatibility alone permits implicit integer casts.
 #define WRAPPER(name, parameters, arguments) \
     API CUresult name parameters { \
         const struct BackendAbi *api = backend(); \
@@ -305,12 +306,12 @@ static void *replacement(const char *name) {
     return NULL;
 }
 
-// The search scope of an explicit handle does not depend on the caller, so the
-// frontend can make the lookup itself and substitute a wrapper.
+// An explicit handle has the same search scope for every caller. The frontend can
+// therefore perform the lookup and return a wrapper.
 static void *dlsym_handle(void *handle, const char *name) {
     void *address = lookup(handle, name);
     enum CudaRetention retained = retain_cuda_library(handle, address);
-    // A broken shim must not break unrelated or out-of-scope loader lookups.
+    // A shim failure must not affect lookups outside the supported CUDA libraries.
     if (retained == CUDA_OUT_OF_SCOPE)
         return address;
     if (retained == CUDA_UNAVAILABLE || atomic_load(&failed))
@@ -319,9 +320,9 @@ static void *dlsym_handle(void *handle, const char *name) {
     return wrapper ? wrapper : address;
 }
 
-// glibc picks the RTLD_DEFAULT and RTLD_NEXT search scope from its caller's
-// return address, so these lookups are tail calls into glibc and their results
-// are returned unchanged. RTLD_DEFAULT already finds the preloaded wrappers.
+// glibc uses the caller's return address to select the RTLD_DEFAULT and RTLD_NEXT
+// search scope. Tail calls preserve that address and return the result unchanged.
+// RTLD_DEFAULT already finds the preloaded wrappers.
 API void *dlsym(void *handle, const char *name) {
     if (handle != RTLD_DEFAULT && handle != RTLD_NEXT)
         return dlsym_handle(handle, name);
@@ -331,9 +332,9 @@ API void *dlsym(void *handle, const char *name) {
     __attribute__((musttail)) return function(handle, name);
 }
 
-// A procedure query may return a newer entry point for the same call, including
-// wrapped context APIs and their _v2 variants. Old memory names such as cuMemAlloc
-// have no wrapper of their own; dlsym of their 32-bit ABI remains untouched.
+// A procedure query can return a newer entry point, including a context API's _v2
+// variant. Old memory names such as cuMemAlloc have no separate wrapper. dlsym returns
+// their original 32-bit ABI.
 static const struct {
     const char *requested, *returned;
 } QUERY_ALIASES[] = {
@@ -370,8 +371,8 @@ static bool same_entry_point(const char *requested, const char *returned) {
     return false;
 }
 
-// Replaces a successful query result with the wrapper for the returned entry
-// point. Returns false, with *output cleared, if the result cannot be wrapped.
+// Replace a successful query result with the wrapper for that entry point. If no
+// matching wrapper is available, clear *output and return false.
 static bool finish_query(const char *name, void **output) {
     if (!name || !output || !*output || !query_intercepted(name))
         return true;
@@ -400,8 +401,8 @@ API CUresult cuInit(unsigned flags) {
     return api ? api->ensure_cuinterpose_initialized() : CUDA_ERROR_NOT_INITIALIZED;
 }
 
-// A refused result is reported as that API's result for a missing symbol, so
-// callers treat the function as unavailable rather than as an error.
+// Report a rejected result with the API's code for a missing symbol. The caller can
+// then treat the function as unavailable.
 API CUresult cuGetProcAddress(const char *name, void **out, int version, cuuint64_t flags) {
     CUresult (*function)(const char *, void **, int, cuuint64_t) = resolve("cuGetProcAddress");
     if (!function)
@@ -443,8 +444,8 @@ static bool runtime_query_supported(void *function) {
         return false;
     int (*get_version)(int *) = lookup(library, "cudaRuntimeGetVersion");
     int version = 0;
-    // Handle lookup can find a dependency's symbol. Its version says nothing
-    // about the runtime that supplied the query function.
+    // A handle lookup can find a symbol in a dependency. That dependency's version does
+    // not identify the runtime that supplied the query function.
     bool supported = get_version && dladdr((void *)get_version, &version_provider) &&
         version_provider.dli_fbase == provider.dli_fbase &&
         get_version(&version) == cudaSuccess && version >= 12000;
@@ -455,7 +456,7 @@ static bool runtime_query_supported(void *function) {
 #define RUNTIME_QUERY(function_name, version_parameter, version_argument) \
     API int function_name(const char *name, void **out, version_parameter uint64_t flags, int *status) { \
         int (*function)(const char *, void **, version_parameter uint64_t, int *) = resolve(#function_name); \
-        /* CUDA 11 callers have no status argument; reject before accessing it. */ \
+        /* CUDA 11 callers have no status argument. Reject the call before accessing it. */ \
         if (!function || !runtime_query_supported((void *)function)) \
             return cudaErrorInitializationError; \
         int result = function(name, out, version_argument flags, status); \

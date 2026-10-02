@@ -109,11 +109,9 @@ RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
       ./cmd/cuda-checkpoint-helper/transfer_engine_test.cpp \
     && /cuda-checkpoint-helper-transfer-cancellation-test
 
-# =============================================================================
-# C CUDA interposition frontend - pinned GNU builder
-# =============================================================================
-# GCC 15 builds the C frontend, which requires musttail. The Bookworm image keeps
-# the builder's glibc 2.36.
+# C CUDA interposition frontend. Pinned GNU builder.
+# GCC 15 builds the C frontend, which requires musttail. The Bookworm image supplies
+# glibc 2.36.
 FROM gcc:15.2.0-bookworm@sha256:9ca91b05c7b07d2979f16413e8b2cd6ec8a7c80ffca4121ccab0aeba33f90460 AS gcc-15
 
 FROM rust:1.95.0-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082 AS cuinterpose-builder
