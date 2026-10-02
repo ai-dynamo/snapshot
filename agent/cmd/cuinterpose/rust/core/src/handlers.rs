@@ -392,7 +392,9 @@ pub fn cuMemAlloc_v2(out: *mut CUdeviceptr, size: usize) -> Result<()> {
         return Err(CUDA_ERROR_INVALID_VALUE.into());
     }
     let mut state = runtime::active()?;
-    let (properties, extent) = state.allocation_layout(size)?;
+    let mut device = 0;
+    unsafe { driver::cuCtxGetDevice(&mut device) }?;
+    let (properties, extent) = state.allocation_layout(device, size)?;
     let reference = state.new_reference()?;
     let context = driver::context()?;
     let mut backing = 0;
@@ -409,7 +411,7 @@ pub fn cuMemAlloc_v2(out: *mut CUdeviceptr, size: usize) -> Result<()> {
         context,
     }));
     let opens = 0;
-    let address = state.map_malloc(handle, size, extent, opens)?;
+    let address = state.map_malloc(handle, size, extent, opens, context, device)?;
     unsafe { out.write(address) };
     Ok(())
 }
@@ -450,9 +452,12 @@ pub fn cuIpcOpenMemHandle(out: *mut CUdeviceptr, handle: CUipcMemHandle, flags: 
     let address = if let Some(address) = state.reopen_malloc(reference, requested, extent)? {
         address
     } else {
+        let context = driver::context()?;
+        let mut device = 0;
+        unsafe { driver::cuCtxGetDevice(&mut device) }?;
         let (mut state, handle) = sharing::import_reference(state, reference)?;
         let opens = 1;
-        state.map_malloc(handle, requested, extent, opens)?
+        state.map_malloc(handle, requested, extent, opens, context, device)?
     };
     unsafe { out.write(address) };
     Ok(())
