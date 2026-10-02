@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Multicast objects wrap unicast members. This module owns their CUDA lifetime
-//! and replay; common memory APIs share ProcessState's virtual allocation handles and VA ranges.
+//! Manage multicast objects and their unicast members during allocation and restore.
+//! Memory APIs share the virtual allocation handles and address ranges in ProcessState.
 
 use super::sharing;
 use super::vmm::Mapping;
@@ -140,7 +140,7 @@ pub fn import(
         Ok(())
     })?;
     let driver = runtime::must_complete(VirtualAllocationHandle::from_driver(driver));
-    // Another importer can have completed while this thread waited in CUDA.
+    // Another importer may have completed while this thread waited in CUDA.
     if let Some(object) = state
         .memblocks
         .get_mut(&id)
@@ -178,7 +178,8 @@ pub fn import(
 impl Binding {
     fn apply(&self, group: u64, member: u64) -> Result<()> {
         use crate::driver;
-        // v1/v2 differ in the explicit device argument, not the recorded source.
+        // v2 adds an explicit device argument to v1. Both versions record the same
+        // source.
         unsafe {
             match (self.source, self.version) {
                 (BindingSource::Memory(range), BindingVersion::V1) => driver::cuMulticastBindMem(
@@ -218,7 +219,7 @@ impl Binding {
     }
 }
 
-// Application handles are resolved before constructing replay metadata.
+// Resolve application handles before recording metadata for restore.
 pub(crate) enum BindInput {
     Memory { handle: u64, offset: usize },
     Address(u64),
@@ -498,9 +499,9 @@ pub fn prepare(state: &mut ProcessState) -> Result<()> {
     Ok(())
 }
 
-/// Application threads remain parked throughout restore. Peer FD service uses
-/// only the export cache, so reconstruction can hold the registry lock even
-/// across driver calls that wait for other processes.
+/// Application threads remain paused throughout restore. The peer FD service uses only
+/// the export cache. Reconstruction can therefore hold the registry lock during driver
+/// calls that wait for other processes.
 pub fn restore(state: &mut ProcessState, operation: Operation) -> Result<()> {
     let allocations: std::collections::BTreeMap<_, _> = state
         .memblocks
@@ -614,7 +615,8 @@ pub fn restore(state: &mut ProcessState, operation: Operation) -> Result<()> {
     }
     Ok(())
 }
-/// Create without holding the registry across a collective CUDA call.
+/// Release the registry lock before creating a multicast object. The CUDA call can wait
+/// for other processes.
 pub(crate) fn create_backing(
     state: MutexGuard<'static, ProcessState>,
     properties: &CUmulticastObjectProp,
