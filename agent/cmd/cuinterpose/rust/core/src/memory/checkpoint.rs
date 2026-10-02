@@ -3,8 +3,7 @@
 
 //! Local checkpoint validation, mutation, inspection, and completion.
 
-use super::vmm::{Allocation, Mapping};
-use super::vmm::access_metadata;
+use super::vmm::{Allocation, Mapping, access_metadata};
 use super::{Memblock, ProcessState, sharing};
 use crate::error::{Error, Result};
 use crate::runtime;
