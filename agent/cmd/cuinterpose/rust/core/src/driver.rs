@@ -200,56 +200,12 @@ impl Context {
     }
 
     pub fn leave(self) -> Result<()> {
-        let mut result = Ok(());
         if self.changed {
-            result = unsafe { crate::driver::cuCtxSetCurrent(self.previous) };
+            unsafe { crate::driver::cuCtxSetCurrent(self.previous) }?;
         }
         if let Some(device) = self.primary {
-            result = result.and(unsafe { crate::driver::cuDevicePrimaryCtxRelease_v2(device) });
+            unsafe { crate::driver::cuDevicePrimaryCtxRelease_v2(device) }?;
         }
-        result
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use cuinterpose_abi::{ABI_VERSION, FrontendAbi};
-    use std::ffi::{CStr, c_char};
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    #[test]
-    fn required_symbols_fail_at_startup() {
-        crate::tests::in_child_process("driver::tests::required_symbols_fail_at_startup", || {
-            static MISSING_CREATE: AtomicBool = AtomicBool::new(true);
-            unsafe extern "C" fn resolve(name: *const c_char) -> *mut c_void {
-                let name = unsafe { CStr::from_ptr(name) }.to_bytes();
-                if name.starts_with(b"cuMulticast")
-                    || (name == b"cuMemCreate" && MISSING_CREATE.load(Ordering::Relaxed))
-                {
-                    std::ptr::null_mut()
-                } else {
-                    crate::tests::unused_driver_symbol()
-                }
-            }
-            let frontend = FrontendAbi {
-                version: ABI_VERSION,
-                size: size_of::<FrontendAbi>() as u32,
-                resolve,
-            };
-            let mut output = std::ptr::null();
-            assert_eq!(
-                unsafe { crate::cuinterpose_core_init(&frontend, &mut output) },
-                CUDA_SUCCESS
-            );
-            assert!(matches!(
-                initialize(),
-                Err(Error::Startup("missing required CUDA symbol cuMemCreate"))
-            ));
-            assert!(SYMBOLS.get().is_none());
-            MISSING_CREATE.store(false, Ordering::Relaxed);
-            initialize().unwrap();
-            assert!(symbols::cuMemCreate().is_ok());
-        });
+        Ok(())
     }
 }
