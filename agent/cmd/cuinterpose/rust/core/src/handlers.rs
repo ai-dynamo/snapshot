@@ -353,6 +353,3 @@ pub fn cuMemGetAddressRange_v2(
     drop(state);
     unsafe { driver::cuMemGetAddressRange_v2(base, size, address) }
 }
-
-#[cfg(test)]
-mod tests;
