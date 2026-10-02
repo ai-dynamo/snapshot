@@ -97,7 +97,7 @@ def malloc_on_both_devices(interposed):
         cuda_call(driver.cuDevicePrimaryCtxRelease, device)
 
 
-def invalid_create_preserves_output():
+def invalid_create_preserves_output(interposed):
     # Use the C entry point so a caller-owned output sentinel is observable.
     create = ctypes.CDLL("libcuda.so.1").cuMemCreate
     create.argtypes = [ctypes.POINTER(ctypes.c_uint64), ctypes.c_size_t,
@@ -108,6 +108,14 @@ def invalid_create_preserves_output():
     status = create(ctypes.byref(handle), 0, properties.getPtr(), 0)
     assert status == int(driver.CUresult.CUDA_ERROR_INVALID_VALUE), status
     assert handle.value == 99, "failed creation changed the caller's output"
+    size = int(cuda_call(driver.cuMemGetAllocationGranularity, properties,
+                        driver.CUmemAllocationGranularity_flags.CU_MEM_ALLOC_GRANULARITY_MINIMUM))
+    properties.type = driver.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_INVALID
+    status = create(ctypes.byref(handle), size, properties.getPtr(), 0)
+    expected = (driver.CUresult.CUDA_ERROR_NOT_SUPPORTED if interposed
+                else driver.CUresult.CUDA_ERROR_INVALID_VALUE)
+    assert status == int(expected), status
+    assert handle.value == 99, "invalid allocation type changed the caller's output"
 
 
 if __name__ == "__main__":
@@ -116,6 +124,6 @@ if __name__ == "__main__":
     if case == "malloc":
         malloc_on_both_devices(interposed)
     elif case == "invalid-create":
-        invalid_create_preserves_output()
+        invalid_create_preserves_output(interposed)
     else:
         allocation_aliases(interposed, exportable=case == "aliases")
