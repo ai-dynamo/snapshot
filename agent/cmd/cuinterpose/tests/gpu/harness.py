@@ -48,11 +48,11 @@ class Environment(NamedTuple):
 
 def visible_gpus() -> tuple[str, str] | None:
     """The two GPU ordinals the workers use, or None when fewer are available."""
+    cuda_driver.cuda_call(driver.cuInit, 0)
+    if int(cuda_driver.cuda_call(driver.cuDeviceGetCount)) < WORLD_SIZE:
+        return None
     configured = os.environ.get("CUDA_VISIBLE_DEVICES")
     if configured is None:
-        cuda_driver.cuda_call(driver.cuInit, 0)
-        if int(cuda_driver.cuda_call(driver.cuDeviceGetCount)) < WORLD_SIZE:
-            return None
         return "0", "1"
     devices = [entry.strip() for entry in configured.split(",") if entry.strip()]
     if len(devices) < WORLD_SIZE or devices[0] == devices[1]:

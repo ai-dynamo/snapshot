@@ -3,8 +3,8 @@
 
 """Physical-GPU fixtures using a matched, prebuilt Rust artifact directory.
 
-No fake CUDA provider or C-stack build is used here. GPU prerequisites skip when
-unavailable; a configured artifact directory with missing binaries is an error.
+The suite requires two real GPUs and a CUDA 13 driver. Missing dependencies,
+artifacts, or hardware fail the run; they never turn qualification into a skip.
 """
 
 from __future__ import annotations
@@ -18,10 +18,13 @@ import pytest
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
-        "markers", "gpu: needs CUDA GPUs and a CUDA 13 driver (context cases need one GPU)"
+        "markers", "gpu: requires two CUDA GPUs and a CUDA 13 driver"
     )
     config.addinivalue_line(
         "markers", "multicast: additionally needs NVLink between the two GPUs"
+    )
+    config.addinivalue_line(
+        "markers", "host_numa: requires POSIX-shareable HOST_NUMA VMM"
     )
 
 
@@ -40,21 +43,23 @@ def tools():
     return Tools(interposer, coordinator)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="session", autouse=True)
 def gpu_environment(tools):
-    pytest.importorskip("torch")
-    pytest.importorskip("cuda.bindings")
     import harness
+    from cuda.bindings import driver
+    from cuda_driver import cuda_call
 
+    cuda_call(driver.cuInit, 0)
+    assert cuda_call(driver.cuDriverGetVersion) >= 13000, "requires a CUDA 13 driver"
     gpus = harness.visible_gpus()
     if gpus is None:
-        pytest.skip(f"needs {harness.WORLD_SIZE} distinct GPUs (CUDA_VISIBLE_DEVICES)")
+        pytest.fail(f"requires {harness.WORLD_SIZE} distinct real GPUs (CUDA_VISIBLE_DEVICES)")
     return harness.Environment(tools, gpus)
 
 
 @pytest.fixture(scope="session")
 def multicast_supported(gpu_environment):
-    """Skips unless both GPUs report multicast support (NVLink / NVSwitch)."""
+    """A selected multicast test requires capable GPUs and NVLink / NVSwitch."""
     import cuda_driver
     import harness
     from cuda.bindings import driver
@@ -68,7 +73,7 @@ def multicast_supported(gpu_environment):
             device,
         )
         if not int(supported):
-            pytest.skip(f"GPU {ordinal} does not support CUDA multicast")
+            pytest.fail(f"GPU {ordinal} does not support CUDA multicast; select a capable host")
     return True
 
 

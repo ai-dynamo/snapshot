@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-#include "cuda.h"
+#include <cuda.h>
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>

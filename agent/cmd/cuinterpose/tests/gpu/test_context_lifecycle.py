@@ -10,7 +10,6 @@ import sys
 
 import pytest
 
-pytest.importorskip("cuda.bindings")
 from cuda.bindings import driver, runtime  # noqa: E402
 
 import cuda_driver  # noqa: E402
@@ -20,10 +19,7 @@ from cuda_driver import cuda_call  # noqa: E402
 @pytest.mark.gpu
 @pytest.mark.parametrize("mode", ["destroy", "reset", "release", "runtime"])
 def test_context_teardown(mode, tools, tmp_path):
-    status, = driver.cuInit(0)
-    if status == driver.CUresult.CUDA_ERROR_NO_DEVICE:
-        pytest.skip("needs one CUDA GPU")
-    assert status == driver.CUresult.CUDA_SUCCESS
+    cuda_call(driver.cuInit, 0)
     control = tmp_path / "control"
     control.mkdir()
     env = os.environ | {

@@ -2,39 +2,35 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #define _GNU_SOURCE
-#include "cuda.h"
+#include <cuda.h>
 #include <assert.h>
 #include <dlfcn.h>
-#include <stdlib.h>
 #include <string.h>
 
 int main(void) {
-    assert(getenv("CUINTERPOSE_TEST_CORE_INITIALIZED") == NULL);
     Dl_info info;
-    assert(dladdr((void *)cuMemCreate, &info) != 0);
+    assert(dladdr((void *)cuMemAlloc, &info) != 0);
     assert(strstr(info.dli_fname, "libcuinterpose.so") != NULL);
-    unsigned char prop[32] = {0};
-    size_t granularity = 0;
-    assert(cuMemGetAllocationGranularity(&granularity, prop, 0) == 0 && granularity == 4096);
-    assert(cuMulticastGetGranularity(&granularity, prop, 0) == 0 && granularity == 65536);
-    assert(getenv("CUINTERPOSE_TEST_CORE_INITIALIZED") == NULL);
-    uint64_t handle = 44;
-    assert(cuMemCreate(&handle, 4096, prop, 7) == 0);
-    assert(handle == 0xabcdef);
-    assert(getenv("CUINTERPOSE_TEST_CORE_INITIALIZED") != NULL);
-    const struct fixture_call *call = fixture_last_call();
-    assert(call->size == 4096 && call->flags == 7 && call->properties == prop);
-    assert(cuMemMap(0x1234, 8192, 128, handle, 9) == 101);
-    assert(call->member == 0x1234 && call->size == 8192 && call->offset == 128);
-    assert(call->handle == handle && call->flags == 9);
-    handle = 44;
-    assert(cuMemCreate(&handle, 4096, prop, 999) == 2);
-    assert(handle == 44);
-    assert(cuCtxDestroy((void *)0x1234) == 51 && call->handle == 0x1234);
-    assert(cuCtxDestroy_v2((void *)0x5678) == 52 && call->handle == 0x5678);
-    assert(cuDevicePrimaryCtxRelease(3) == 53 && call->device == 3);
-    assert(cuDevicePrimaryCtxRelease_v2(4) == 54 && call->device == 4);
-    assert(cuDevicePrimaryCtxReset(5) == 55 && call->device == 5);
-    assert(cuDevicePrimaryCtxReset_v2(6) == 56 && call->device == 6);
+    assert(cuInit(0) == CUDA_SUCCESS);
+    int count = 0;
+    assert(cuDeviceGetCount(&count) == CUDA_SUCCESS && count >= 2);
+    for (int device = 0; device < 2; ++device) {
+        CUcontext context;
+        assert(cuDevicePrimaryCtxRetain(&context, device) == CUDA_SUCCESS);
+        assert(cuCtxSetCurrent(context) == CUDA_SUCCESS);
+        CUdeviceptr allocation = 0, base = 0;
+        size_t size = 0;
+        unsigned char bytes[4096];
+        assert(cuMemAlloc(&allocation, sizeof(bytes)) == CUDA_SUCCESS);
+        assert(cuMemGetAddressRange(&base, &size, allocation + 1) == CUDA_SUCCESS);
+        assert(base == allocation && size == sizeof(bytes));
+        assert(cuMemsetD8(allocation, 0x5a, sizeof(bytes)) == CUDA_SUCCESS);
+        assert(cuMemcpyDtoH(bytes, allocation, sizeof(bytes)) == CUDA_SUCCESS);
+        for (size_t i = 0; i < sizeof(bytes); ++i)
+            assert(bytes[i] == 0x5a);
+        assert(cuMemFree(allocation) == CUDA_SUCCESS);
+        assert(cuCtxSetCurrent(NULL) == CUDA_SUCCESS);
+        assert(cuDevicePrimaryCtxRelease(device) == CUDA_SUCCESS);
+    }
     return 0;
 }

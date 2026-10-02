@@ -29,6 +29,7 @@ torch = { index = "pytorch-cu130" }
 [tool.pytest.ini_options]
 testpaths = ["."]
 markers = [
-  "gpu: needs CUDA GPUs and a CUDA 13 driver (context cases need one GPU)",
+  "gpu: requires two CUDA GPUs and a CUDA 13 driver",
   "multicast: additionally needs NVLink between the two GPUs",
+  "host_numa: requires POSIX-shareable HOST_NUMA VMM",
 ]

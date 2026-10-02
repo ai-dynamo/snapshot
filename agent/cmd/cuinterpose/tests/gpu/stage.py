@@ -21,9 +21,11 @@ def main():
     for path in source.iterdir():
         if path.is_file() and (path.suffix == ".py" or path.name == "pyproject.toml"):
             shutil.copy2(path, suite / path.name)
+    shutil.copytree(source.parents[1] / "frontend/tests", args.destination / "frontend/tests",
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     build = args.destination / "build"
     build.mkdir()
-    for name in ("libcuinterpose.so", "libcuinterpose_core.so", "cuinterpose-coordinator"):
+    for name in ("libcuinterpose.so", "libcuinterpose_core.so", "cuinterpose-coordinator", "core_abi.h"):
         shutil.copy2(args.artifacts / name, build / name)
     print(f"Staged local GPU suite in {args.destination}")
 

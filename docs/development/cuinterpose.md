@@ -61,7 +61,7 @@ malloc allocations and imported IPC mappings while preserving explicit VMM
 allocations. Multicast participants must add and bind their device in the same
 process; device ordinals are local to each participant.
 
-The memory-IPC adapter supports one GPU per process. Converted malloc pointers are accessible only from their allocating device; native `cuCtxEnablePeerAccess` does not grant another device VMM access. Their backing is rounded to the device's minimum VMM allocation granularity, so small allocations can consume more GPU memory than native malloc.
+The memory-IPC adapter supports one GPU per process. Converted malloc pointers are accessible only from their allocating device; native `cuCtxEnablePeerAccess` does not grant another device VMM access. Each allocation gets its own backing rounded to the device's minimum VMM allocation granularity; there is no pooling or suballocation. A device with a 2 MiB minimum therefore consumes 2 MiB even for a 64 KiB allocation. This can reduce memory available for KV cache and increase allocation-heavy startup costs; device attributes and granularity are cached, but that does not remove the backing overhead.
 
 CUDA Runtime 11 is unsupported. Runtime driver-entry lookup requires CUDA
 Runtime 12.0 or newer and fails closed when the version cannot be verified.

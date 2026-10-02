@@ -24,7 +24,15 @@ The protocol records CUDA metadata as explicit fixed-width primitive fields. CUD
 
 For local development, install GNU and musl targets and musl tools, then run `make native` or `make test-native` from `agent/cmd/cuinterpose`. On hosts whose default linker is not the system GNU toolchain, set `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/gcc`. The C frontend requires GCC 15 or newer for `musttail`. The builder copies it from the digest-pinned `gcc:15.2.0-bookworm` image. Set `FRONTEND_CC` for local builds.
 
-The packaged gate runs GCC warnings-as-errors, rustfmt, strict Clippy, Rust unit tests, scripted coordinator checks, and process-isolated loader/startup checks. The loader fixtures provide CUDA symbol addresses and return values; CUDA memory behavior is tested on real GPUs.
+The packaged CPU gate runs GCC warnings-as-errors, rustfmt, strict Clippy, pure Rust unit tests, and scripted coordinator checks. CUDA allocation, context, loader, and lifecycle tests use the real NVIDIA driver; there is no emulated CUDA driver in the test suite.
+
+After building the matched artifacts, run the CUDA gate on a Linux host with at least two real GPUs, CUDA 13.1 or newer, the CUDA SDK headers/runtime, a C compiler, binutils, Python MessagePack, and `uv`:
+
+```sh
+make -C agent/cmd/cuinterpose test-gpu
+```
+
+This runs the frontend/ABI checks and the physical-GPU pytest suite. Missing dependencies, driver support, or GPUs fail the run rather than skipping it. The complete suite also requires GPU peer access, multicast-capable NVLink/NVSwitch hardware, and POSIX-shareable HOST_NUMA VMM. A deliberately narrower hardware lane can select `-m 'not multicast and not host_numa'`; it must report those exclusions and does not qualify the omitted features. GPU Actions wiring is separate from this local gate; the existing CPU job does not establish real-driver correctness.
 
 Physical-GPU tests live in `../tests/gpu`. Stage a matched artifact set with:
 
@@ -32,7 +40,7 @@ Physical-GPU tests live in `../tests/gpu`. Stage a matched artifact set with:
 python3 ../tests/gpu/stage.py --help
 ```
 
-The staging layout is `DEST/tests/gpu` and `DEST/build`. Run pytest and require all GPU cases to pass with zero skips. The suite calls the native CUDA checkpoint API directly. These tests cover shared/private contents, unicast import reconstruction, multicast collective/graph replay, raw-import refusal, and context teardown. The context cases require one GPU and verify malloc cleanup, surviving direct VMM, and carrier reconstruction after context destruction or reset. They do not exercise the Go agent's namespace-entry wrapper. Full Snapshot qualification additionally requires cross-node capture, restore, and post-restore workload inference.
+The staging layout is `DEST/frontend/tests`, `DEST/tests/gpu`, and `DEST/build` (including the matching ABI header). Run the frontend runner and pytest from this staged tree and require all selected GPU cases to pass with zero skips. Every run requires two GPUs, including a selection of context tests. The suite calls the native CUDA checkpoint API directly. These tests cover shared/private contents, unicast import reconstruction, multicast collective/graph replay, raw-import refusal, context teardown, and HOST_NUMA reconstruction. The context cases verify malloc cleanup, surviving direct VMM, and carrier reconstruction after context destruction or reset. They do not exercise the Go agent's namespace-entry wrapper. Full Snapshot qualification additionally requires cross-node capture, restore, and post-restore workload inference.
 
 ## Module boundaries
 

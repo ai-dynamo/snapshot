@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Actual Rust core endpoints without VMM activity; provider has no GPU state."""
+"""Actual Rust core endpoint lifecycle with the installed NVIDIA driver."""
 
 import ctypes as c
 import os
@@ -41,7 +41,6 @@ def inspect():
 
 driver = c.CDLL("libcuda.so.1", mode=os.RTLD_LOCAL)
 cuda = c.CDLL(None)
-runtime = c.CDLL("libcudart.so.13", mode=os.RTLD_LOCAL)
 mode = sys.argv[1]
 path = Path(os.environ["SNAPSHOT_CONTROL_DIR"]) / f"cuinterpose-{os.getpid()}.sock"
 if mode == "init-after-exec":
@@ -127,8 +126,7 @@ if mode in ("fork-before-init", "fork-after-init", "exec"):
 
 if mode == "constructor":
     def activate():
-        plugin = c.CDLL(sys.argv[2])
-        plugin.fixture_join_generation_worker()
+        c.CDLL(sys.argv[2])
 
 elif mode in ("init", "init-handle", "init-failure", "concurrent", "init-after-exec", "stale", "stale-concurrent",
               "relative-preload-chdir", "permissive-umask", "out-of-order"):
@@ -155,15 +153,12 @@ elif mode in ("init", "init-handle", "init-failure", "concurrent", "init-after-e
             assert not (Path(os.environ["SNAPSHOT_CONTROL_DIR"]) / f"cuinterpose-{os.getpid()}.sock").exists()
         assert initialize(0) == 0
 
-elif mode == "private":
-    def activate():
-        assert driver.fixture_private_runtime() == 0
-
 else:
+    runtime = c.CDLL("libcudart.so.13", mode=os.RTLD_LOCAL)
     names = ["cuGetProcAddress", "cuGetProcAddress_v2", "cuGetProcAddress_v2_ptsz",
              "cudaGetDriverEntryPoint", "cudaGetDriverEntryPoint_ptsz",
              "cudaGetDriverEntryPointByVersion", "cudaGetDriverEntryPointByVersion_ptsz"]
-    index = 1 if mode == "tracked-query" else 3 if mode == "resolver-startup-failure" else int(mode)
+    index = 1 if mode in ("tracked-query", "resolver-startup-failure") else int(mode)
     query = getattr(cuda if index < 3 else runtime, names[index])
     arguments = [c.c_char_p, c.POINTER(c.c_void_p)]
     if index < 3:
@@ -179,26 +174,25 @@ else:
     def activate():
         output = c.c_void_p()
         status = c.c_int(-1)
-        tracked = mode == "tracked-query" or os.environ.get("CUINTERPOSE_TEST_NESTED_RUNTIME")
-        args = [b"cuMemCreate" if tracked else b"cuFixtureUnwrapped", c.byref(output)]
+        tracked = mode in ("tracked-query", "resolver-startup-failure")
+        args = [b"cuMemCreate" if tracked else b"cuDriverGetVersion", c.byref(output)]
         args += [13010, 0] if index < 3 or index >= 5 else [0]
         if index:
             args += [c.byref(status)]
         # Even a blocked endpoint must not turn a successful lookup into failure.
         if mode == "resolver-startup-failure":
             path.touch(exist_ok=False)
-        before_tasks = set(os.listdir("/proc/self/task"))
-        before_fds = set(os.listdir("/proc/self/fd"))
         assert query(*args) == 0 and output.value
-        assert set(os.listdir("/proc/self/task")) == before_tasks
-        assert set(os.listdir("/proc/self/fd")) == before_fds
         if mode == "resolver-startup-failure":
             assert cuda.cuInit(0) == 304
             path.unlink()
             assert query(*args) == 0 and output.value
             assert cuda.cuInit(0) == 3 and not path.exists()
         else:
-            assert not path.exists()
+            # libcudart may call cuInit while resolving an entry point. Driver
+            # procedure queries themselves must not activate our endpoint.
+            if index < 3:
+                assert not path.exists()
             assert cuda.cuInit(0) == 0
 
 activate()
@@ -220,9 +214,14 @@ if mode in ("concurrent", "stale-concurrent"):
         assert inspect()["namespace_pid"] == parent
     assert path.stat().st_ino == inode
     assert set(path.parent.glob("cuinterpose-*.sock")) == sockets_before | {path}
+    # CUDA has its own workers; only count the shim's named service threads.
+    def shim_workers():
+        return [thread for thread in Path("/proc/self/task").iterdir()
+                if (thread / "comm").read_text().startswith("cuinterpose-")]
+
     # Losing initialization workers retire after their callers return.
     deadline = time.monotonic() + 2
-    while len(os.listdir("/proc/self/task")) != 3 and time.monotonic() < deadline:
+    while len(shim_workers()) != 2 and time.monotonic() < deadline:
         time.sleep(0.001)
-    assert len(os.listdir("/proc/self/task")) == 3
+    assert len(shim_workers()) == 2
 print(f"PASS actual Rust endpoint {mode}: starts only after cuInit")

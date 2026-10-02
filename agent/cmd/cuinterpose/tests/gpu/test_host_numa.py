@@ -12,10 +12,9 @@ import subprocess
 import sys
 
 import pytest
+from cuda.bindings import driver
 
-pytest.importorskip("cuda.bindings")
-from cuda.bindings import driver  # noqa: E402
-
+import cuda_driver
 from cuda_driver import POSIX_FD_HANDLE_TYPE, assert_handle_namespace, cuda_call  # noqa: E402
 
 
@@ -62,11 +61,10 @@ def receive(channel):
 
 
 @pytest.mark.gpu
+@pytest.mark.host_numa
 @pytest.mark.parametrize("release_creator_handle", [False, True])
 def test_host_numa_shared_reconstruction(release_creator_handle, tools, tmp_path):
     status, = driver.cuInit(0)
-    if status == driver.CUresult.CUDA_ERROR_NO_DEVICE:
-        pytest.skip("needs one CUDA GPU and HOST_NUMA VMM support")
     assert status == driver.CUresult.CUDA_SUCCESS
     # Prefer a nonzero node when available, so a NUMA ID cannot accidentally
     # work as the worker's sole CUDA device ordinal.
@@ -76,11 +74,8 @@ def test_host_numa_shared_reconstruction(release_creator_handle, tools, tmp_path
     properties = host_properties(node)
     size = int(cuda_call(driver.cuMemGetAllocationGranularity, properties,
                         driver.CUmemAllocationGranularity_flags.CU_MEM_ALLOC_GRANULARITY_MINIMUM))
-    # Probe the native driver before loading the shim: a shim admission or
-    # reconstruction failure must fail the test, not masquerade as a skip.
+    # This selected lane requires native POSIX-shareable HOST_NUMA VMM support.
     status, handle = driver.cuMemCreate(size, properties, 0)
-    if status == driver.CUresult.CUDA_ERROR_NOT_SUPPORTED:
-        pytest.skip("driver does not support POSIX-shareable HOST_NUMA VMM")
     assert status == driver.CUresult.CUDA_SUCCESS, status
     cuda_call(driver.cuMemRelease, handle)
 
@@ -132,6 +127,19 @@ def run_creator(node, size, coordinator, release_handle):
     alias = map_host(handle, size, node)
     value = 0x31
     ctypes.memset(address, value, size)
+    # Reconstruct CPU and GPU backing in the same carrier, including a host
+    # allocation created without a context and a device allocation with one.
+    context = cuda_call(driver.cuDevicePrimaryCtxRetain, 0)
+    cuda_call(driver.cuCtxSetCurrent, context)
+    device_properties = cuda_driver.allocation_properties(0)
+    device_size = int(cuda_call(driver.cuMemGetAllocationGranularity, device_properties,
+                               driver.CUmemAllocationGranularity_flags.CU_MEM_ALLOC_GRANULARITY_MINIMUM))
+    device_handle = cuda_call(driver.cuMemCreate, device_size, device_properties, 0)
+    device_address = cuda_driver.map_allocation(device_handle, device_size, 0)
+    cuda_driver.write_bytes(device_address, b"mixed device backing")
+    device_fd = int(cuda_call(driver.cuMemExportToShareableHandle,
+                             device_handle, POSIX_FD_HANDLE_TYPE, 0))
+    cuda_call(driver.cuCtxSetCurrent, 0)
     descriptor = int(cuda_call(driver.cuMemExportToShareableHandle, handle, POSIX_FD_HANDLE_TYPE, 0))
     channel, child_channel = Pipe()
     importer = subprocess.Popen(
@@ -161,6 +169,9 @@ def run_creator(node, size, coordinator, release_handle):
                 ], check=True, timeout=20)
             verify(address, size, value)
             verify(alias, size, value)
+            cuda_call(driver.cuCtxPushCurrent, context)
+            cuda_driver.assert_bytes(device_address, b"mixed device backing", "mixed carrier restore")
+            cuda_call(driver.cuCtxPopCurrent)
             channel.send(("verify", value))
             assert receive(channel) == "ok"
             value = 0x52 + cycle
@@ -184,6 +195,11 @@ def run_creator(node, size, coordinator, release_handle):
     unmap_host(address, size)
     if not release_handle:
         cuda_call(driver.cuMemRelease, handle)
+    os.close(device_fd)
+    cuda_call(driver.cuCtxSetCurrent, context)
+    cuda_driver.destroy_mapped_allocation(device_address, device_size, device_handle)
+    cuda_call(driver.cuCtxSetCurrent, 0)
+    cuda_call(driver.cuDevicePrimaryCtxRelease, 0)
 
 
 if __name__ == "__main__":

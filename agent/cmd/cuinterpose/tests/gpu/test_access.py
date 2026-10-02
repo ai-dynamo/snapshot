@@ -10,7 +10,6 @@ import sys
 
 import pytest
 
-pytest.importorskip("cuda.bindings")
 from cuda.bindings import driver  # noqa: E402
 
 import cuda_driver  # noqa: E402
@@ -19,12 +18,8 @@ from cuda_driver import cuda_call  # noqa: E402
 
 @pytest.mark.gpu
 def test_access_updates_survive_reconstruction(tools, tmp_path):
-    status, = driver.cuInit(0)
-    if status == driver.CUresult.CUDA_ERROR_NO_DEVICE:
-        pytest.skip("needs two CUDA GPUs with peer access")
-    assert status == driver.CUresult.CUDA_SUCCESS
-    if cuda_call(driver.cuDeviceGetCount) < 2 or not cuda_call(driver.cuDeviceCanAccessPeer, 1, 0):
-        pytest.skip("needs two CUDA GPUs with peer access")
+    cuda_call(driver.cuInit, 0)
+    assert cuda_call(driver.cuDeviceCanAccessPeer, 1, 0), "requires GPU peer access"
     control = tmp_path / "control"
     control.mkdir()
     result = subprocess.run(

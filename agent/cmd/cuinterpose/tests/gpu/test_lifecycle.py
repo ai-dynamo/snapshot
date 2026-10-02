@@ -7,9 +7,6 @@ import os
 
 import pytest
 
-pytest.importorskip("torch")
-pytest.importorskip("cuda.bindings")
-
 import cuda_driver  # noqa: E402
 import harness  # noqa: E402
 from harness import Workload  # noqa: E402
