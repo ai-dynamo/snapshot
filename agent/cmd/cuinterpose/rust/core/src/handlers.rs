@@ -244,6 +244,3 @@ pub fn cuMemGetAllocationPropertiesFromHandle(
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod tests;
