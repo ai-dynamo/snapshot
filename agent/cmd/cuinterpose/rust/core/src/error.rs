@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Internal failures retain their cause until the CUDA or control boundary.
+//! Preserve internal error causes until returning through CUDA or control APIs.
 
 use cudarc::driver::sys::CUresult;
 use std::io;
