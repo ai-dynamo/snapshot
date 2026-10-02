@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Restore context-owned malloc lifetimes over context-independent VMM backing.
+//! Release malloc allocations with their contexts, although VMM backing can outlive a
+//! context.
 
 use super::{Memblock, ProcessState, VirtualAllocationHandle};
 use crate::driver::{self};
@@ -48,8 +49,8 @@ impl ContextResources {
                 .get(&address)
                 .is_some_and(|region| region.virtual_allocation_handle == handle)
             {
-                // No current context is needed for these VMM operations. The
-                // ordinary free path would synchronize the now-dead context.
+                // These VMM operations do not need a current context. The ordinary free
+                // path would try to synchronize the destroyed context.
                 state.unmap_malloc(address)?;
             }
         }
@@ -62,8 +63,8 @@ impl ContextResources {
                 Memblock::Multicast(object) => &mut object.context,
             };
             if *context == self.context {
-                // Direct VMM and multicast allocations survive context loss.
-                // Future checkpoint copies use the existing primary fallback.
+                // Direct VMM and multicast allocations survive context destruction.
+                // Later checkpoint copies use the primary context as a fallback.
                 *context = 0;
             }
         }
@@ -98,10 +99,10 @@ fn primary_context(device: CUdevice) -> Result<usize> {
     if !primary_active(device)? {
         return Ok(0);
     }
-    // CUDA Runtime may acquire the primary context internally. Query the real
-    // driver rather than relying on observing every application retain. An
-    // active context already has an owner; balance our extra reference before
-    // the requested release/reset so its native semantics are unchanged.
+    // CUDA Runtime can retain the primary context internally. Query the driver because
+    // the shim cannot observe every retain. An active context already has an owner.
+    // Release our extra reference before the requested release or reset to preserve
+    // CUDA behavior.
     let mut context = std::ptr::null_mut();
     unsafe { driver::cuDevicePrimaryCtxRetain(&mut context, device) }?;
     runtime::must_complete(unsafe { driver::cuDevicePrimaryCtxRelease_v2(device) });
@@ -115,9 +116,9 @@ fn primary_lifetime(
 ) -> Result<()> {
     let state = runtime::active()?;
     let resources = ContextResources::capture(&state, primary_context(device)?);
-    // As with object destruction, the application must serialize context
-    // lifetime changes against calls using that context, including new retains.
-    // The existing unlocked-call counter also excludes checkpoint entry.
+    // The application must serialize context destruction, release, and reset with other
+    // calls that use the context, including new retains. The unlocked call counter also
+    // prevents checkpoint entry during these operations.
     let (mut state, destroyed) = runtime::call_unlocked(state, || {
         operation()?;
         Ok(reset || !runtime::must_complete(primary_active(device)))
