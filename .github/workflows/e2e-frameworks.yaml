@@ -66,6 +66,22 @@ permissions:
   packages: read
 
 jobs:
+  check:
+    name: Validate repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.1"
+          cache: true
+          cache-dependency-path: |
+            **/go.sum
+            go.work.sum
+      - run: make check
+
   # Datadog's GPU monitoring (system-probe + NVML) is a suspected interferer
   # for CRIU/CUDA checkpoint and restore. Switch it off for the whole run in
   # one gate, restore it in a separate always-run job -- a per-job toggle
@@ -74,6 +90,7 @@ jobs:
   # overlapping runs hand off correctly).
   datadog-gate:
     name: datadog gpu monitoring off
+    needs: check
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 5
     concurrency:
@@ -102,7 +119,7 @@ jobs:
 
   e2e:
     name: ${{ matrix.framework }}
-    needs: datadog-gate
+    needs: [check, datadog-gate]
     runs-on: prod-deploy-tester-v1
     # Above the sum of this job's own step timeout-minutes (117, dominated by
     # the 50-min test step) plus margin: a job-level timeout kills the whole
@@ -382,6 +399,17 @@ jobs:
             --test test_framework_checkpoint_restore_serves_inference \
             --outcome infrastructure_failed \
             --message "pytest produced no benchmark result; step outcome=${TEST_STEP_OUTCOME}"
+
+      # Pytest can succeed with skipped cases. A selected backend only qualifies
+      # when its own result passed in this run attempt; stale workspace files or
+      # synthesized failure records must never stand in for restored inference.
+      - name: Require passing ${{ matrix.framework }} result
+        if: ${{ always() && steps.selected.outputs.run == 'true' }}
+        run: |
+          set -euo pipefail
+          PYTHONPATH=e2e python3 -m snapshot_e2e.benchmark_history require-pass \
+            --artifacts-dir "${SNAPSHOT_E2E_BENCHMARK_DIR}" \
+            --case "${{ matrix.framework }}"
 
       - name: Upload benchmark result
         if: ${{ always() && steps.selected.outputs.run == 'true' }}
