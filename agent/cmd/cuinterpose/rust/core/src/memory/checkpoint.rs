@@ -4,9 +4,8 @@
 //! Local checkpoint validation, mutation, inspection, and completion.
 
 use super::vmm::{Allocation, Mapping};
-use super::vmm::{access_metadata, context_device};
+use super::vmm::access_metadata;
 use super::{Memblock, ProcessState, sharing};
-use crate::driver::Context;
 use crate::error::{Error, Result};
 use crate::runtime;
 use cudarc::driver::sys::CUresult::*;
@@ -166,21 +165,14 @@ impl ProcessState {
                             .values()
                             .find(|m| m.id == id)
                             .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
-                        Context::run(
-                            allocation.context,
-                            context_device(&allocation.properties),
-                            || {
-                                let mut driver = 0;
-                                unsafe {
-                                    crate::driver::cuMemRetainAllocationHandle(
-                                        &mut driver,
-                                        mapping.address as usize as *mut c_void,
-                                    )
-                                }?;
-                                allocation.driver = Some(driver);
-                                Ok(())
-                            },
-                        )?;
+                        let mut driver = 0;
+                        unsafe {
+                            crate::driver::cuMemRetainAllocationHandle(
+                                &mut driver,
+                                mapping.address as usize as *mut c_void,
+                            )
+                        }?;
+                        allocation.driver = Some(driver);
                     }
                     bytes = bytes
                         .checked_add(allocation.size as u64)
@@ -197,26 +189,20 @@ impl ProcessState {
                     .filter_map(Memblock::unicast_mut)
                     .filter(|a| a.shared)
                 {
-                    Context::run(
-                        allocation.context,
-                        context_device(&allocation.properties),
-                        || {
-                            for mapping in self
-                                .mappings
-                                .values_mut()
-                                .filter(|m| m.id == allocation.reference.id)
-                            {
-                                unsafe {
-                                    crate::driver::cuMemUnmap(mapping.address, mapping.size)
-                                }?;
-                            }
-                            if let Some(driver) = allocation.driver {
-                                unsafe { crate::driver::cuMemRelease(driver) }?;
-                                allocation.driver = None;
-                            }
-                            Ok(())
-                        },
-                    )?;
+                    // VMM handles and mappings are context-independent. Retaining
+                    // a primary here can initialize and tear down a GPU context
+                    // for every allocation in a contextless process.
+                    for mapping in self
+                        .mappings
+                        .values_mut()
+                        .filter(|m| m.id == allocation.reference.id)
+                    {
+                        unsafe { crate::driver::cuMemUnmap(mapping.address, mapping.size) }?;
+                    }
+                    if let Some(driver) = allocation.driver {
+                        unsafe { crate::driver::cuMemRelease(driver) }?;
+                        allocation.driver = None;
+                    }
                 }
             }
             Operation::LoadAllocations => {
@@ -259,11 +245,7 @@ impl ProcessState {
                     if properties.is_some() {
                         return Err(Error::from(CUDA_ERROR_INVALID_HANDLE));
                     }
-                    allocation.driver = Some(Context::run(
-                        allocation.context,
-                        context_device(&allocation.properties),
-                        || crate::driver::import_posix(raw.as_fd()),
-                    )?);
+                    allocation.driver = Some(crate::driver::import_posix(raw.as_fd())?);
                 }
                 self.remap(Participants::Importers)?;
             }
@@ -302,46 +284,34 @@ fn restore_allocation(
     mappings: &BTreeMap<u64, Mapping>,
     participants: Participants,
 ) -> Result<()> {
-    Context::run(
-        allocation.context,
-        context_device(&allocation.properties),
-        || {
-            let driver = allocation.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?;
-            for mapping in mappings
-                .values()
-                .filter(|m| m.id == allocation.reference.id)
-            {
-                unsafe {
-                    crate::driver::cuMemMap(
-                        mapping.address,
-                        mapping.size,
-                        mapping.offset,
-                        driver,
-                        0,
-                    )
-                }?;
-                if !mapping.access.is_empty() {
-                    unsafe {
-                        crate::driver::cuMemSetAccess(
-                            mapping.address,
-                            mapping.size,
-                            mapping.access.as_ptr(),
-                            mapping.access.len(),
-                        )
-                    }?;
-                }
-            }
-            if participants == Participants::Creators {
-                let fd = crate::driver::export_posix(driver)?;
-                export_cache()?.insert(allocation.reference.id, fd, None)?;
-            }
-            if allocation.refcounts.handle_entries == 0 {
-                unsafe { crate::driver::cuMemRelease(driver) }?;
-                allocation.driver = None;
-            }
-            Ok(())
-        },
-    )
+    let driver = allocation.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+    for mapping in mappings
+        .values()
+        .filter(|m| m.id == allocation.reference.id)
+    {
+        unsafe {
+            crate::driver::cuMemMap(mapping.address, mapping.size, mapping.offset, driver, 0)
+        }?;
+        if !mapping.access.is_empty() {
+            unsafe {
+                crate::driver::cuMemSetAccess(
+                    mapping.address,
+                    mapping.size,
+                    mapping.access.as_ptr(),
+                    mapping.access.len(),
+                )
+            }?;
+        }
+    }
+    if participants == Participants::Creators {
+        let fd = crate::driver::export_posix(driver)?;
+        export_cache()?.insert(allocation.reference.id, fd, None)?;
+    }
+    if allocation.refcounts.handle_entries == 0 {
+        unsafe { crate::driver::cuMemRelease(driver) }?;
+        allocation.driver = None;
+    }
+    Ok(())
 }
 
 pub(crate) fn inspect() -> std::result::Result<Reply, String> {
