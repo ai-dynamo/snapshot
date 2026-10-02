@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Process runtime publication, startup, and failure state.
+//! Initialize and publish the process runtime. Track runtime failures.
 
 mod control;
 
@@ -23,7 +23,7 @@ struct ProcessRuntime {
     control_dir: PathBuf,
     socket_path: PathBuf,
 }
-// Published once after CUDA initialization; never reset or reused in a fork child.
+// Publish once after CUDA initialization. Do not reset it or reuse it in a fork child.
 static RUNTIME: OnceLock<ProcessRuntime> = OnceLock::new();
 static INSTALL_LOCK: Mutex<()> = Mutex::new(());
 
@@ -66,9 +66,9 @@ pub fn initialize() -> Result<()> {
         return Err(Error::RuntimeFailed);
     }
     thread_local! {
-        // Reject same-thread re-entry while allowing other threads to prepare
-        // candidates concurrently. A global guard could deadlock with loader
-        // activity. Cell<bool> needs no TLS destructor or loader registration.
+        // Reject reentry on this thread. Other threads can prepare runtime candidates
+        // concurrently. A global guard could deadlock with the loader. Cell<bool> needs
+        // no TLS destructor or loader registration.
         static PREPARING: Cell<bool> = const { Cell::new(false) };
     }
     if PREPARING.replace(true) {
@@ -81,15 +81,15 @@ pub fn initialize() -> Result<()> {
         }
     }
     let _reset = Reset;
-    // Thread creation/TLS registration must never own process-wide installation
-    // exclusion. A constructor holding the loader lock can prepare its own
-    // candidate while a different caller waits in Rust's spawn hooks.
+    // Do not hold the installation lock while creating threads or registering TLS. A
+    // constructor that holds the loader lock can prepare its own runtime candidate
+    // while another caller waits in Rust's thread startup.
     let mut candidate = RuntimeCandidate::prepare();
     {
         let _installation = INSTALL_LOCK
             .lock()
             .map_err(|_| Error::Startup("installation mutex poisoned"))?;
-        // A healthy winner supersedes even a failed private candidate.
+        // Use an already published healthy runtime even if this candidate failed.
         let result = if RUNTIME_FAILED.load(Ordering::Acquire) {
             Err(Error::RuntimeFailed)
         } else if published() {
@@ -106,10 +106,11 @@ pub fn initialize() -> Result<()> {
         }
         result
     }
-    // The installation guard drops before private workers and failed listeners.
+    // Release the installation lock before dropping unused workers and failed
+    // listeners.
 }
 
-// Borrow under INSTALL_LOCK so cleanup stays outside the installation mutex.
+// Borrow the candidate under INSTALL_LOCK. Drop it after releasing the lock.
 fn install_runtime(candidate: &mut RuntimeCandidate) -> Result<()> {
     let runtime = candidate.runtime.as_mut().unwrap();
     candidate.workers.activate(
@@ -118,7 +119,8 @@ fn install_runtime(candidate: &mut RuntimeCandidate) -> Result<()> {
             .to_str()
             .ok_or(Error::Startup("control socket path is not UTF-8"))?,
     )?;
-    // Installation is serialized; OnceLock only publishes, never runs startup.
+    // The installation lock serializes installation. OnceLock only publishes the
+    // runtime.
     if RUNTIME.set(*candidate.runtime.take().unwrap()).is_err() {
         unreachable!("runtime installed under installation lock");
     }
@@ -126,7 +128,8 @@ fn install_runtime(candidate: &mut RuntimeCandidate) -> Result<()> {
 }
 
 struct RuntimeCandidate {
-    // Taken only when ownership transfers to RUNTIME; losers retain cleanup.
+    // Take the runtime only when transferring ownership to RUNTIME. Unused candidates
+    // retain ownership for cleanup.
     runtime: Option<Box<ProcessRuntime>>,
     workers: control::PreparedWorkers,
 }
@@ -135,7 +138,8 @@ impl RuntimeCandidate {
     fn prepare() -> Result<Option<Self>> {
         crate::driver::initialize()?;
         let mut runtime = prepare_runtime()?;
-        // None means another runtime won before we needed further workers.
+        // None means another caller published the runtime before more workers were
+        // needed.
         if published() {
             return Ok(None);
         }
@@ -196,8 +200,8 @@ pub fn get() -> Result<MutexGuard<'static, ProcessState>> {
         .state
         .lock()
         .map_err(|_| Error::Startup("CUDA state mutex poisoned"))?;
-    // The peer service may have failed while this caller waited for the lock.
-    // Check again before admitting work against the runtime.
+    // The peer service may have failed while this caller waited for the lock. Check
+    // again before allowing runtime operations.
     if RUNTIME_FAILED.load(Ordering::Acquire) {
         return Err(Error::RuntimeFailed);
     }
@@ -212,8 +216,8 @@ pub(super) fn active() -> Result<MutexGuard<'static, ProcessState>> {
     Ok(state)
 }
 
-/// Once CUDA or tracking state has changed, failure is not recoverable. Do not
-/// return to an application whose recorded state no longer matches the driver.
+/// After CUDA or tracking state changes, a failure is not recoverable. Do not return to
+/// an application if its recorded state no longer matches the driver.
 pub(crate) fn must_complete<T>(result: Result<T>) -> T {
     result.unwrap_or_else(|error| {
         eprintln!("cuinterpose: unrecoverable state change: {error}");
@@ -221,8 +225,9 @@ pub(crate) fn must_complete<T>(result: Result<T>) -> T {
     })
 }
 
-/// Allow other application threads to complete a blocking driver call. The
-/// returned guard keeps recording its result atomic with checkpoint entry.
+/// Release the state lock during a blocking driver call so other threads can complete
+/// their work. Reacquire it before recording the result. The returned guard keeps
+/// result recording atomic with checkpoint entry.
 pub(crate) fn call_unlocked<T>(
     mut state: MutexGuard<'static, ProcessState>,
     operation: impl FnOnce() -> Result<T>,

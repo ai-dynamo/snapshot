@@ -20,11 +20,12 @@ import (
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
-// CuInterposeBundlePath is the exact bundle supplied by ns-bind-mount at restore.
+// CuInterposeBundlePath identifies the bundle that ns-bind-mount supplies during
+// restore.
 const CuInterposeBundlePath = "/snapshot-binaries/snapshot-cuda"
 
-// InspectCuInterposeLibraries uses the existing CUDA process census, not the
-// set of responding sockets. Missing participants must not disappear from inspection.
+// InspectCuInterposeLibraries uses the list of CUDA processes. A missing socket reply
+// must not remove a participant from inspection.
 func InspectCuInterposeLibraries(procRoot string, pids []int, required bool) (*types.CuInterposeManifest, error) {
 	var identity *types.CuInterposeManifest
 	var absent []int
@@ -116,8 +117,8 @@ func hashMappedLibrary(path, device, inode string) (string, error) {
 	if device != wantDevice || inode != strconv.FormatUint(stat.Ino, 10) {
 		return "", fmt.Errorf("mapped library %s was replaced since it was loaded", path)
 	}
-	// Hash the same descriptor checked against /proc/maps. Delivery mounts are
-	// read-only; manually delivered libraries must also remain stable during capture.
+	// Hash the same file descriptor checked against /proc/maps. Delivery mounts are
+	// read-only. Manually delivered libraries must also remain unchanged during capture.
 	return hashLibrary(file)
 }
 
@@ -129,8 +130,8 @@ func hashLibrary(file *os.File) (string, error) {
 	return fmt.Sprintf("%x", hash.Sum(nil)), nil
 }
 
-// CheckCuInterposeLibraries is an executable identity check, independent of
-// compatibility policy and its debugging override.
+// CheckCuInterposeLibraries verifies executable identity. Compatibility policy and its
+// debugging override do not affect this check.
 func CheckCuInterposeLibraries(directory string, identity *types.CuInterposeManifest) error {
 	if identity == nil {
 		return nil

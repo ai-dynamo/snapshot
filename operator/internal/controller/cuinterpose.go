@@ -20,15 +20,15 @@ const (
 	cuInterposeInitContainerName = "snapshot-cuda-install"
 )
 
-// CuInterposeDelivery describes operator configuration, not workload input.
-// It is consulted only when creating an opted-in source Job.
+// CuInterposeDelivery holds operator configuration. It is not workload input.
+// Use it only when creating a source Job that enables cuinterpose.
 type CuInterposeDelivery struct {
 	AgentImage string
 	PullPolicy corev1.PullPolicy
 }
 
-// ValidatePullPolicy is also called at operator startup so an unsupported flag
-// fails immediately, even before any opted-in SnapshotJob exists.
+// ValidatePullPolicy also runs at operator startup. Reject unsupported flags before any
+// SnapshotJob enables cuinterpose.
 func (d CuInterposeDelivery) ValidatePullPolicy() error {
 	switch d.PullPolicy {
 	case "", corev1.PullAlways, corev1.PullIfNotPresent, corev1.PullNever:
@@ -45,9 +45,9 @@ func (d CuInterposeDelivery) validate() error {
 	return d.ValidatePullPolicy()
 }
 
-// shapeCuInterposeCapture applies delivery once, immediately before Job creation.
-// The launcher sees the runtime-resolved environment; Pod environment sources and
-// the workload's argument boundaries therefore need no interpretation here.
+// shapeCuInterposeCapture adds delivery once, immediately before Job creation.
+// The launcher receives the environment resolved by the runtime. Preserve the Pod
+// environment sources and workload argument boundaries here.
 func shapeCuInterposeCapture(template *corev1.PodTemplateSpec, targetName string, delivery CuInterposeDelivery) error {
 	enabled, err := podcontract.ParseCuInterposeAnnotation(template.Annotations)
 	if err != nil || !enabled {
@@ -100,9 +100,9 @@ func shapeCuInterposeCapture(template *corev1.PodTemplateSpec, targetName string
 		Name:         cuInterposeVolumeName,
 		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 	})
-	// The agent image defaults to root, but this copy only needs read access to
-	// its artifacts and write access to the new emptyDir. Use a numeric nonroot
-	// identity so Pods with runAsNonRoot can start the installer too.
+	// The agent image runs as root by default. This copy needs only read access to
+	// artifacts and write access to the new emptyDir. Use a numeric nonroot identity so
+	// Pods with runAsNonRoot can start the installer.
 	installerUID := int64(65532)
 	if security := shaped.Spec.SecurityContext; security != nil &&
 		security.RunAsUser != nil && *security.RunAsUser > 0 {

@@ -146,13 +146,13 @@ func TestCheckpointNeedsSourceKill(t *testing.T) {
 }
 
 func TestCuInterposeCaptureFailureBoundary(t *testing.T) {
-	// An absent endpoint/helper is a read-only preflight failure.
+	// A missing endpoint or helper fails preflight before state changes.
 	err := cuda.InspectCuInterpose(context.Background(), "/proc", os.Getpid(), []int{1}, filepath.Join(t.TempDir(), "missing-coordinator"))
 	require.Error(t, err)
 	assert.False(t, CheckpointNeedsSourceKill(err))
 
-	// After entering preparation, even an early coordinator failure must be
-	// classified conservatively. No CUDA or CRIU operation can run in this fixture.
+	// Treat every failure after preparation starts as potentially changing CUDA state.
+	// This fixture prevents CUDA and CRIU operations from running.
 	_, err = captureCheckpoint(context.Background(), nil, &types.CRIUSettings{},
 		&types.CheckpointManifest{CuInterpose: testCuInterposeIdentity()},
 		&types.CheckpointContainerSnapshot{PID: -1, CUDAHostPIDs: []int{1}, CUDANSPIDs: []int{1}},

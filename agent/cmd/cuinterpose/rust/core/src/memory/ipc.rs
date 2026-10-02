@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Synchronous malloc and memory IPC over tracked VMM sharing.
-//! Virtual IPC memory handles carry allocation identity; native memory IPC is never called.
+//! Synchronous malloc and memory IPC use tracked VMM allocations. Virtual IPC handles
+//! identify allocations. Do not call native memory IPC functions.
 
 use super::{Memblock, ProcessState, VirtualAllocationHandle};
 use crate::error::{Error, Result};
@@ -20,8 +20,8 @@ pub struct MallocRegion {
     opens: usize,
 }
 
-// CUDA fixes the public handle at 64 opaque bytes. Keep this representation
-// local to the adapter; ordinary peer messages use the existing typed codec.
+// CUDA defines the public handle as 64 opaque bytes. Keep this format local to the
+// adapter. Other peer messages use the typed codec.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct VirtualIpcMemHandle {
@@ -41,7 +41,7 @@ const _: () = assert!(size_of::<VirtualIpcMemHandle>() == size_of::<CUipcMemHand
 
 impl VirtualIpcMemHandle {
     fn decode(handle: CUipcMemHandle) -> Result<Self> {
-        // Both representations contain only bytes with identical size/alignment.
+        // Both representations contain only bytes and have the same size and alignment.
         let virtual_ipc_mem_handle: Self = unsafe { std::mem::transmute(handle) };
         if virtual_ipc_mem_handle.magic != VIRTUAL_IPC_MEM_HANDLE_MAGIC
             || u32::from_le_bytes(virtual_ipc_mem_handle.creator_pid) == 0
@@ -115,8 +115,8 @@ impl ProcessState {
             Ok(address)
         })();
         if result.is_err() {
-            // This application call owns its unpublished mapping and handle.
-            // Undo only its work, then return the original CUDA error.
+            // This call owns the mapping and handle until it publishes them. Undo its
+            // changes, then return the original CUDA error.
             if let Some(address) = reserved {
                 if mapped {
                     runtime::must_complete(unsafe { driver::cuMemUnmap(address, extent) });
@@ -154,8 +154,8 @@ pub(crate) enum Ownership {
 }
 
 pub(crate) fn release(address: CUdeviceptr, ownership: Ownership) -> Result<()> {
-    // Synchronization must not hold STATE: another host thread may need the
-    // shim or peer listener to complete the kernels being synchronized.
+    // Release the state lock before synchronization. Another thread may need the shim
+    // or peer listener to complete a kernel that this call is waiting for.
     let mut state = runtime::active()?;
     {
         let Some(mapping) = state.malloc_regions.get_mut(&address) else {
@@ -183,7 +183,7 @@ pub(crate) fn release(address: CUdeviceptr, ownership: Ownership) -> Result<()> 
             .malloc_regions
             .get_mut(&address)
             .ok_or(CUresult::CUDA_ERROR_INVALID_VALUE)?;
-        // An open may acquire a reference while synchronization runs unlocked.
+        // Another open can add a reference while synchronization runs without the lock.
         if mapping.opens > 1 {
             mapping.opens -= 1;
             return Ok(());
@@ -274,7 +274,8 @@ impl ProcessState {
             },
             ..unsafe { std::mem::zeroed() }
         };
-        // The current device can change between calls; these fixed properties cannot.
+        // The current device can change between calls. These properties are fixed for
+        // each device.
         let granularity = match self.malloc_layouts.entry(device) {
             std::collections::btree_map::Entry::Occupied(entry) => {
                 let (granularity, rdma_capable) = *entry.get();
@@ -293,7 +294,8 @@ impl ProcessState {
                     driver::cuDeviceGetAttribute(&mut vmm_rdma, CUdevice_attribute::CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED, device)?;
                 }
                 properties.allocFlags.gpuDirectRDMACapable = u8::from(rdma != 0 && vmm_rdma != 0);
-                // Compression and tile-pool usage are opt-in, unlike ordinary cuMemAlloc.
+                // Compression and tile-pool usage require an explicit request. Ordinary
+                // cuMemAlloc does not request them.
                 let mut granularity = 0;
                 unsafe {
                     driver::cuMemGetAllocationGranularity(

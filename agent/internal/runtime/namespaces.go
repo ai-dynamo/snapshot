@@ -24,10 +24,10 @@ func GetNetNSInode(pid int) (uint64, error) {
 }
 
 // CommandInNamespaces runs a host binary in the container's namespaces and root.
-// mountNS pins the mount namespace even if its original process exits; the other
-// namespaces still use pid and require that process to remain alive until entry.
-// The caller owns mountNS and must call closeFiles after the command finishes to
-// release the binary and root descriptors opened here.
+// mountNS keeps the mount namespace available after its original process exits. The
+// other namespaces use pid and require that process to remain alive until entry. The
+// caller owns mountNS. After the command finishes, call closeFiles to release the
+// binary and root descriptors opened here.
 func CommandInNamespaces(ctx context.Context, pid int, mountNS *os.File, rootPath, binaryPath string) (*exec.Cmd, func(), error) {
 	if mountNS == nil {
 		return nil, nil, fmt.Errorf("mount namespace fd is required")
@@ -48,8 +48,8 @@ func CommandInNamespaces(ctx context.Context, pid int, mountNS *os.File, rootPat
 	cmd := exec.CommandContext(ctx, "nsenter")
 	SetProcessGroupCancellation(cmd)
 	mountPath := InheritFile(cmd, mountNS)
-	// Execute the open host binary through its inherited descriptor: its original
-	// path need not exist after nsenter switches the mount namespace and root.
+	// Execute the open host binary through its inherited descriptor. Its original path
+	// need not exist after nsenter changes the mount namespace and root.
 	binaryPath = InheritFile(cmd, binary)
 	rootPath = InheritFile(cmd, root)
 	cmd.Args = append(cmd.Args,

@@ -72,7 +72,7 @@ func TestShapeCuInterposeCapture(t *testing.T) {
 	}, installer.Resources.Requests)
 	assert.Equal(t, installer.Resources.Requests, installer.Resources.Limits)
 
-	// Delivery is apply-once: even an identical prior injection is a collision.
+	// Add delivery only once. Reject an existing injection even if it is identical.
 	injected := template.DeepCopy()
 	require.ErrorContains(t, shapeCuInterposeCapture(template, "worker", testCuInterposeDelivery()), "reserved")
 	assert.Equal(t, injected, template)

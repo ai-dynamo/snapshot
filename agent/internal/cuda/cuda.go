@@ -475,8 +475,8 @@ func CheckpointProcessTree(ctx context.Context, cudaPIDs []int, jobFile, checkpo
 }
 
 // RestoreAndUnlockProcessTree restores and unlocks CUDA state for the given PIDs.
-// It runs inside nsrestore and inherits its process group for cancellation.
-// helperBinaryPath identifies the binary in that namespace, including via an
+// It runs inside nsrestore and uses its process group for cancellation.
+// helperBinaryPath identifies the binary in that namespace. It can refer to an
 // inherited descriptor opened before CRIU restores the workload filesystem.
 func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap, helperBinaryPath string, log logr.Logger) (RestorePhaseTimings, error) {
 	var timings RestorePhaseTimings

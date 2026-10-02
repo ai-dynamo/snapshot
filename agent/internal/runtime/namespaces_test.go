@@ -77,8 +77,8 @@ func TestCommandInNamespacesCancellationKillsForkedChild(t *testing.T) {
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
 	childPath := filepath.Join(dir, "child-pid")
 	t.Setenv("TEST_CHILD_PID", childPath)
-	// nsenter forks when entering a PID namespace. Its child also inherits the
-	// output pipes, so killing only nsenter leaves both a worker and a stuck wait.
+	// nsenter forks when entering a PID namespace. The child inherits the output pipes.
+	// Killing only nsenter leaves the worker running and the output wait blocked.
 	script := `#!/bin/sh
 set -eu
 while [ "$1" != -- ]; do shift; done
@@ -112,8 +112,8 @@ wait
 		childPID, err = strconv.Atoi(strings.TrimSpace(string(data)))
 		return err == nil && childPID > 0
 	}, 3*time.Second, 10*time.Millisecond)
-	// A pidfd observes exit even while the orphan waits to be reaped. It also
-	// lets cleanup stop the child if the cancellation behavior regresses.
+	// A pidfd reports process exit before the parent reaps the child. It also lets cleanup
+	// stop the child if cancellation fails.
 	childFD, err := unix.PidfdOpen(childPID, 0)
 	require.NoError(t, err)
 	defer unix.Close(childFD)
