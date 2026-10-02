@@ -66,11 +66,11 @@ def receive(channel):
 def test_host_numa_shared_reconstruction(release_creator_handle, tools, tmp_path):
     status, = driver.cuInit(0)
     assert status == driver.CUresult.CUDA_SUCCESS
-    # Prefer a nonzero node when available, so a NUMA ID cannot accidentally
-    # work as the worker's sole CUDA device ordinal.
-    nodes = sorted(int(path.name[4:]) for path in Path("/sys/devices/system/node").glob("node[0-9]*")
-                   if (path / "cpulist").read_text().strip())
-    node = int(os.environ.get("CUINTERPOSE_TEST_HOST_NUMA_NODE", nodes[-1] if nodes else 0))
+    # A CPU NUMA node elsewhere on the host may not support this GPU's VMM.
+    # The override can select another driver-supported node, including nonzero IDs.
+    node = int(os.environ.get("CUINTERPOSE_TEST_HOST_NUMA_NODE", cuda_call(
+        driver.cuDeviceGetAttribute, driver.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_HOST_NUMA_ID, 0,
+    )))
     properties = host_properties(node)
     size = int(cuda_call(driver.cuMemGetAllocationGranularity, properties,
                         driver.CUmemAllocationGranularity_flags.CU_MEM_ALLOC_GRANULARITY_MINIMUM))

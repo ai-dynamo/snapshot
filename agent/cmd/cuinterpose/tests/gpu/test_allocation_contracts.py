@@ -92,6 +92,11 @@ def malloc_on_both_devices(interposed):
             cuda_driver.write_bytes(address + size - 1, b"x")
             cuda_driver.assert_bytes(address + size - 1, b"x", "malloc bounds")
             cuda_call(driver.cuMemFree, address)
+        # Pitched allocations stay native, so this exercises the range fallback.
+        address, pitch = cuda_call(driver.cuMemAllocPitch, 16, 4, 4)
+        base, extent = cuda_call(driver.cuMemGetAddressRange, int(address) + int(pitch) * 4 - 1)
+        assert int(base) == int(address) and int(extent) >= int(pitch) * 4
+        cuda_call(driver.cuMemFree, address)
     cuda_call(driver.cuCtxSetCurrent, 0)
     for device in range(2):
         cuda_call(driver.cuDevicePrimaryCtxRelease, device)
