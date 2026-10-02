@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shareable-handle codec, peer exports, and imported memblock ownership.
+//! Encode shareable handles, export peer allocations, and track imported allocation
+//! ownership.
 
 use super::checkpoint::Phase;
 use super::vmm::Allocation;
@@ -32,18 +33,18 @@ pub fn create(reference: AllocationReference) -> protocol::Result<OwnedFd> {
     Ok(file.into())
 }
 
-/// Return None for foreign FDs so admission rejects them before calling CUDA.
-/// Recognizable but malformed virtual handles are invalid handles.
+/// Return None for foreign FDs so the caller rejects them before calling CUDA. Return
+/// an invalid handle error for malformed virtual handles.
 pub fn decode(fd: i32) -> protocol::Result<Option<AllocationReference>> {
     if fd < 0 {
         return Err(Error::Invalid("negative import descriptor"));
     }
-    // The caller lends the FD for this call; never close its application-owned
-    // descriptor. Clone it so positional File reads are safe and RAII-owned.
+    // The caller owns the FD. Duplicate it for positional File reads, then let RAII
+    // close the duplicate. Never close the caller's descriptor.
     let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
     let file = File::from(borrowed.try_clone_to_owned()?);
-    // Virtual handles are regular memfds. A short regular file is invalid;
-    // nonregular descriptors (including pipes and sockets) are foreign.
+    // Virtual handles use regular memfds. A short regular file is invalid. Treat other
+    // descriptor types, including pipes and sockets, as foreign.
     let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Ok(None);
@@ -125,8 +126,8 @@ fn decode_multicast_properties(
     })
 }
 
-// Multicast importers need the creation properties for checkpoint reconstruction.
-// Cache the wire reply alongside its FD so sending never consults CUDA state.
+// Multicast importers need creation properties during restore. Cache the reply with its
+// FD so the sender does not need to read CUDA state.
 pub(crate) type Exports = BTreeMap<AllocationId, (OwnedFd, Reply)>;
 
 #[derive(Default)]
@@ -206,7 +207,8 @@ impl ExportCache {
 }
 
 impl Memblock {
-    /// Publish the creator's export without making peer service acquire ProcessState.
+    /// Publish the creator's export without requiring the peer service to lock
+    /// ProcessState.
     pub fn export(&mut self, namespace_pid: NamespacePid) -> Result<AllocationReference> {
         if let Self::Unicast(allocation) = self
             && allocation.context == 0
@@ -261,8 +263,9 @@ pub(crate) fn import_reference(
             .handle_entries += 1;
         return Ok((state, handle));
     }
-    // EXPORT service uses only CACHE, never STATE, so a same-process request
-    // can complete while this call holds its allocation metadata lock.
+    // The EXPORT service uses only the export cache. It does not lock ProcessState. A
+    // request within this process can therefore complete while this call holds the
+    // allocation metadata lock.
     let (raw, multicast_properties) = request_export(reference).map_err(CoreError::PeerExport)?;
     if multicast_properties.is_some() {
         return Err(CUDA_ERROR_INVALID_HANDLE.into());
@@ -279,8 +282,8 @@ pub(crate) fn import_reference(
     }
     let properties = unsafe { properties.assume_init() };
     if let Err(error) = super::vmm::validate_properties(&properties) {
-        // The peer may run a version that admits unsupported backing. Import
-        // only to inspect its properties, then release the unpublished handle.
+        // A peer version may allow backing that this version does not support. Import
+        // it to inspect its properties, then release the handle before publishing it.
         runtime::must_complete(unsafe { crate::driver::cuMemRelease(driver) });
         return Err(error);
     }
@@ -288,7 +291,8 @@ pub(crate) fn import_reference(
         reference,
         refcounts: Default::default(),
         driver: Some(driver),
-        // The creator owns the full backing extent; this importer only knows its mappings.
+        // The creator owns the full backing extent. This importer knows only its
+        // mappings.
         size: 0,
         properties,
         shared: true,

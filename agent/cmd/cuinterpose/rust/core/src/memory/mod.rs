@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Memblock identity, virtual-handle ownership, and tracked address ranges.
+//! Allocation identity, virtual handle references, and tracked address ranges.
 
 pub(crate) mod checkpoint;
 pub(crate) mod context;
@@ -18,13 +18,13 @@ use runtime::export_cache;
 use std::collections::BTreeMap;
 use vmm::{Allocation, Mapping};
 
-/// Application-visible allocation handle in our private tagged namespace.
+/// Allocation handle returned to the application with a private tag.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct VirtualAllocationHandle(u64);
 
 impl VirtualAllocationHandle {
-    // This private prefix is arbitrary; CUDA does not reserve it. Callers fail
-    // stop if from_driver detects a collision, before publishing an ambiguous handle.
+    // CUDA does not reserve this private prefix. If from_driver detects a collision,
+    // terminate the process before returning an ambiguous handle.
     pub const TAG: u64 = 0xd94d_0000_0000_0000;
     pub const MASK: u64 = 0xffff_0000_0000_0000;
 
@@ -36,7 +36,7 @@ impl VirtualAllocationHandle {
         self.0
     }
 
-    /// CUDA-minted handle. Tagged values collide with the virtual namespace.
+    /// Handle returned by CUDA. A tagged value would conflict with virtual handles.
     pub(crate) fn from_driver(handle: u64) -> Result<u64> {
         match Self::from_raw(handle) {
             Some(_) => Err(CUDA_ERROR_INVALID_HANDLE.into()),
@@ -70,9 +70,9 @@ pub struct Refcounts {
     pub mappings: usize,
 }
 
-/// CUDA memblock: physical allocation behind a generic handle.
-/// Unicast and multicast share one ID and virtual-handle namespace;
-/// they keep different CUDA properties and reconstruction state in the variants.
+/// Physical allocation identified by a generic CUDA handle. Unicast and multicast use
+/// the same ID and virtual handle namespaces. Each variant stores its own CUDA
+/// properties and restore state.
 #[derive(Clone)]
 pub enum Memblock {
     Unicast(Allocation),
@@ -178,7 +178,7 @@ impl ProcessState {
         Ok(handle.as_raw())
     }
 
-    /// Drop one application reference; mappings retain their original handle value.
+    /// Remove one application reference. Mappings keep their original handle value.
     pub(crate) fn release_virtual_handle(&mut self, handle: VirtualAllocationHandle) -> Result<()> {
         let entry = self
             .virtual_allocation_handles
@@ -198,8 +198,9 @@ impl ProcessState {
         Ok(())
     }
 
-    /// Resolve a virtual handle to its allocation ID; native handles return `None`.
-    /// A tagged handle absent from the registry is stale and returns `INVALID_HANDLE`.
+    /// Resolve a virtual handle to its allocation ID. Return `None` for a native
+    /// handle. A tagged handle missing from the registry is stale and returns
+    /// `INVALID_HANDLE`.
     pub(crate) fn resolve_virtual_handle(&self, handle: u64) -> Result<Option<AllocationId>> {
         VirtualAllocationHandle::from_raw(handle)
             .map(|handle| handle.id(self))
@@ -217,7 +218,8 @@ impl ProcessState {
             .map(|(_, mapping)| mapping)
     }
 
-    /// Forget a successful unmap before checking whether its backing can be dropped.
+    /// Remove a mapping after CUDA unmaps it. Then check whether its backing can be
+    /// released.
     pub(crate) fn remove_mapping(&mut self, address: u64) -> AllocationId {
         let mapping = self.mappings.remove(&address).unwrap();
         self.memblocks
@@ -228,8 +230,8 @@ impl ProcessState {
         mapping.id
     }
 
-    /// Release an unicast driver handle after its last virtual handle is dropped.
-    /// Remove the memblock once neither virtual handles nor mappings refer to it.
+    /// Release a unicast driver handle after the last virtual handle is removed. Remove
+    /// the memblock when no virtual handles or mappings refer to it.
     pub(crate) fn release_unused_memblock(&mut self, id: AllocationId) -> Result<()> {
         let memblock = self
             .memblocks

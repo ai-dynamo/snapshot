@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Local checkpoint validation, mutation, inspection, and completion.
+//! Validate, inspect, and update the local checkpoint state.
 
 use super::vmm::{Allocation, Mapping, access_metadata};
 use super::{Memblock, ProcessState, sharing};
@@ -30,8 +30,8 @@ pub enum Phase {
 }
 
 impl Phase {
-    /// Validate ordering before mutation and determine the state to publish on
-    /// success. The coordinator, not this local state, owns global barriers.
+    /// Validate phase order before changing state. Select the state to publish after
+    /// success. The coordinator manages barriers between processes.
     pub(crate) fn next(self, operation: Operation) -> Result<Self> {
         let (expected, next) = match operation {
             Operation::PrepareMulticast => (Self::Checkpointing, Self::MulticastPrepared),
@@ -113,9 +113,9 @@ impl ProcessState {
         Ok(records)
     }
 
-    /// The application has drained CUDA work and stays parked through restore.
-    /// Hold the mutex across the state change and inspection so later phases
-    /// operate on exactly the records returned to the coordinator.
+    /// The application has completed all CUDA work and remains paused through restore.
+    /// Hold the mutex during the state change and inspection. Later phases must use the
+    /// same records returned to the coordinator.
     pub fn begin_checkpoint(&mut self) -> Result<Vec<cuinterpose_protocol::Record>> {
         if self.phase != Phase::Active || self.unlocked_driver_calls != 0 {
             return Err(CUDA_ERROR_NOT_READY.into());
@@ -125,7 +125,8 @@ impl ProcessState {
         Ok(records)
     }
 
-    /// Called after phase validation; mutation failures terminate the process.
+    /// Call after phase validation. A failure during state changes terminates the
+    /// process.
     pub fn lifecycle(&mut self, operation: Operation) -> Result<u64> {
         let next_phase = self.phase.next(operation)?;
         let bytes = 0u64;
@@ -140,9 +141,9 @@ impl ProcessState {
                     .filter_map(Memblock::unicast_mut)
                     .filter(|a| a.shared)
                 {
-                    // VMM handles and mappings are context-independent. Retaining
-                    // a primary here can initialize and tear down a GPU context
-                    // for every allocation in a contextless process.
+                    // VMM handles and mappings do not need a context. Retaining a
+                    // primary here can create and destroy a GPU context for each
+                    // allocation when the process has no context.
                     for mapping in self
                         .mappings
                         .values_mut()

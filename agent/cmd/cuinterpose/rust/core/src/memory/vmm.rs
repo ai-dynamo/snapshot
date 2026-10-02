@@ -10,7 +10,7 @@ use cudarc::driver::sys::*;
 use cuinterpose_protocol::{AllocationId, AllocationReference, NamespacePid};
 use std::collections::btree_map::Entry;
 
-/// Tracked unicast memory must be reconstructible by the device-memory carrier.
+/// The device memory carrier must be able to reconstruct tracked unicast memory.
 pub(crate) fn validate_properties(properties: &CUmemAllocationProp) -> Result<()> {
     if properties.type_ != CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED
         || properties.location.type_ != CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE
@@ -32,7 +32,8 @@ pub struct Allocation {
 }
 
 impl Allocation {
-    /// Only the creator saves shared device memory; private memory stays native.
+    /// Only the creator saves shared device memory. CUDA checkpoints private memory
+    /// directly.
     pub(crate) fn checkpoint_via_host_carrier(&self, namespace_pid: NamespacePid) -> bool {
         self.reference.creator_pid == namespace_pid
             && validate_properties(&self.properties).is_ok()
@@ -40,8 +41,8 @@ impl Allocation {
     }
 }
 
-// CUmemAllocationProp's Win32 pointer is opaque and is never dereferenced on Linux.
-// Driver access and allocation metadata are serialized under ProcessState's mutex.
+// This code never dereferences the opaque Win32 pointer on Linux. Hold the ProcessState
+// mutex for driver access and allocation metadata updates.
 unsafe impl Send for Allocation {}
 
 #[derive(Clone)]
