@@ -209,6 +209,8 @@ impl ProcessState {
                 }
             }
             Operation::LoadAllocations => {
+                // A restored process may now run on a different GPU or driver.
+                self.malloc_layouts.clear();
                 let mut allocations: Vec<_> = self
                     .memblocks
                     .values()
@@ -414,5 +416,14 @@ mod tests {
             state.new_reference(),
             Err(Error::Cuda(CUDA_ERROR_NOT_READY))
         ));
+    }
+
+    #[test]
+    fn restore_invalidates_device_properties() {
+        let mut state = ProcessState::new(41);
+        state.malloc_layouts.insert(0, (4096, 1));
+        state.phase = Phase::UnicastPrepared;
+        state.lifecycle(Operation::LoadAllocations).unwrap();
+        assert!(state.malloc_layouts.is_empty());
     }
 }
