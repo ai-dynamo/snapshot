@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Two prestarted workers separate peer FD service from serialized CUDA control.
-//! Queue pressure refuses requests before mutation; no operation is retried.
+//! Separate workers handle peer FD requests and serialized CUDA control. Reject
+//! requests before changing state when the queue is full. Do not retry operations.
 
 use crate::error::{Error, Result};
 use crate::memory::checkpoint;
@@ -15,8 +15,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, TrySendError};
 
-// One running control operation and at most eight waiting connections. Peer
-// exports never enter this queue: reciprocal importers need them to progress.
+// Allow one running control operation and at most eight waiting connections. Peer
+// exports bypass this queue because importers can wait for each other.
 const CONTROL_QUEUE_CAPACITY: usize = 8;
 
 enum ControlRequest {
@@ -25,12 +25,12 @@ enum ControlRequest {
     Execute(Operation),
 }
 
-/// Private workers cannot dispatch until the single listener handoff succeeds.
-/// Dropping this owner cancels them without joining: a caller may hold the
-/// loader lock needed by a worker's Rust TLS startup or teardown.
+/// Workers cannot handle requests until they receive the listener. Dropping this owner
+/// cancels the workers without joining them. The caller may hold the loader lock that a
+/// worker needs for Rust TLS startup or cleanup.
 pub struct PreparedWorkers {
     activation: mpsc::SyncSender<UnixListener>,
-    // Owned only between a successful bind and the worker handoff.
+    // Owned after bind succeeds and until the worker receives the listener.
     listener: Option<UnixListener>,
 }
 
@@ -115,7 +115,8 @@ impl PreparedWorkers {
                 }
             });
         if let Err(error) = started {
-            // The failed closure drops the only control-queue sender.
+            // If thread creation fails, dropping the closure closes the only
+            // control-queue sender.
             return Err(Error::io("start peer worker", error));
         }
         Ok(Some(Self {
@@ -124,17 +125,17 @@ impl PreparedWorkers {
         }))
     }
 
-    /// No spawn, blocking channel operation, formatting, or callback is allowed
-    /// here. The caller holds the runtime installation lock.
-    /// With pinned Rust/glibc, mutexes and try_send wakeups use futexes and
-    /// non-Drop TLS, not loader registration. The channel is preallocated.
-    /// Eager ELF binding prevents first-use loader lookup in these libc calls.
+    /// The caller holds the runtime installation lock. Do not spawn threads, block on
+    /// channels, format values, or call callbacks here. With the pinned Rust and glibc
+    /// versions, mutexes and try_send use futexes and TLS without Drop. They do not
+    /// register with the loader. The channel is already allocated. Eager ELF binding
+    /// resolves libc symbols before these calls run.
     pub fn activate(&mut self, endpoint: &str) -> Result<()> {
         self.listener =
             Some(bind_listener(endpoint).map_err(|error| Error::io("bind control socket", error))?);
         let listener = self.listener.as_ref().unwrap();
-        // A bound socket cannot accept connections until listen. Restrict its
-        // permissions first without changing the application's process umask.
+        // Set socket permissions before listen allows connections. Do not change the
+        // application's process umask.
         std::fs::set_permissions(endpoint, std::fs::Permissions::from_mode(0o600))
             .map_err(|error| Error::io("set control socket permissions", error))?;
         rustix::net::listen(listener, libc::SOMAXCONN)
@@ -149,8 +150,8 @@ impl PreparedWorkers {
     }
 
     pub fn cleanup(&mut self, endpoint: &str) {
-        // Only successfully bound, unpublished endpoints belong to this owner.
-        // Cleanup is deliberately outside the installation lock.
+        // This owner cleans up only endpoints that bound successfully but were not
+        // published. Run cleanup outside the installation lock.
         if let Some(listener) = self.listener.take() {
             drop(listener);
             let _ = std::fs::remove_file(endpoint);
@@ -171,9 +172,9 @@ fn bind_listener(endpoint: &str) -> std::io::Result<UnixListener> {
         Err(error @ rustix::io::Errno::ADDRINUSE) => std::io::Error::from(error),
         Err(error) => return Err(error.into()),
     };
-    // Exec closes the listener but leaves its pathname. Only the elected
-    // installer may reclaim this PID's endpoint, after checking for a healthy
-    // runtime under INSTALL_LOCK. Other PID namespaces must not share its name.
+    // Exec closes the listener but leaves its path. Under INSTALL_LOCK, check whether a
+    // healthy runtime already exists. Only the installer that holds this lock can
+    // remove this PID's stale endpoint. Other PID namespaces must use different names.
     let previous = std::fs::symlink_metadata(endpoint)?;
     let uid = unsafe { libc::geteuid() };
     if !previous.file_type().is_socket() || previous.uid() != uid {
@@ -185,8 +186,9 @@ fn bind_listener(endpoint: &str) -> std::io::Result<UnixListener> {
         SocketFlags::NONBLOCK | SocketFlags::CLOEXEC,
         None,
     )?;
-    // No polling or protocol exchange under the installation lock. A full
-    // backlog (EAGAIN), live listener, or ambiguous error must preserve the path.
+    // Do not poll or exchange protocol messages under the installation lock. Preserve
+    // the path if the backlog is full (EAGAIN), the listener is active, or the error is
+    // ambiguous.
     if rustix::net::connect(&probe, &address) != Err(rustix::io::Errno::CONNREFUSED) {
         return Err(error);
     }
@@ -208,9 +210,9 @@ fn dispatch(
     namespace_pid: NamespacePid,
     sender: &mpsc::SyncSender<(UnixStream, ControlRequest)>,
 ) -> protocol::Result<()> {
-    // Classification uses per-I/O socket timeouts, not a total header deadline.
-    // A slow peer can delay acceptance, but never waits on STATE or lifecycle
-    // CUDA calls.
+    // Each socket read has its own timeout. There is no total timeout for the header. A
+    // slow peer can delay acceptance, but classification never waits for ProcessState
+    // or lifecycle CUDA calls.
     let timeout = Some(cuinterpose_protocol::timeout(None));
     socket.set_read_timeout(timeout)?;
     socket.set_write_timeout(timeout)?;
@@ -313,8 +315,8 @@ mod tests {
         let endpoint = directory.join("control.sock");
         let endpoint = endpoint.to_str().unwrap();
         let listener = bind_listener(endpoint).unwrap();
-        // Model a permissive application umask without changing this test
-        // process's umask while other unit tests may create files.
+        // Test a permissive application umask without changing this process's umask.
+        // Other unit tests may create files concurrently.
         std::fs::set_permissions(endpoint, std::fs::Permissions::from_mode(0o777)).unwrap();
         assert_eq!(
             UnixStream::connect(endpoint).unwrap_err().kind(),

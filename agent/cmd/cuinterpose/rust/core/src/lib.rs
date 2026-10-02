@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! In-process CUDA sharing state, lifecycle operations, and the private frontend ABI.
+//! CUDA sharing state, lifecycle operations, and the private frontend ABI.
 //!
-//! Driver calls execute in the owning workload process. Rust-owned records,
-//! locks, allocation storage, and panic state never cross the library boundary.
+//! Driver calls run in the workload process that owns the state. Rust records, locks,
+//! allocation storage, and panic state remain in the Rust library.
 
 #![allow(non_snake_case, reason = "CUDA dispatch mirrors the NVIDIA ABI names")]
 mod driver;
@@ -54,7 +54,7 @@ macro_rules! exports {
         };
     };
 }
-// Initializing BackendAbi checks these adapters against the canonical signatures.
+// BackendAbi initialization checks these adapters against the ABI signatures.
 exports! {
     cuMemCreate(out: *mut CUmemGenericAllocationHandle, size: usize, prop: *const CUmemAllocationProp, flags: u64);
     cuMemRelease(handle: CUmemGenericAllocationHandle);
@@ -74,8 +74,8 @@ unsafe extern "C" fn ensure_cuinterpose_initialized() -> CUresult {
     )
 }
 
-// Internal errors are reported only after the operation's guards and private
-// runtime candidates have dropped. The ABI determines the public fallback code.
+// Report internal errors after dropping operation guards and unused runtime candidates.
+// The ABI selects the public fallback error code.
 fn cuda_error(error: Error, fallback: CUresult) -> CUresult {
     match error {
         Error::Cuda(code) => code,
@@ -91,18 +91,19 @@ fn cuda_error(error: Error, fallback: CUresult) -> CUresult {
     }
 }
 
-/// Registers the frontend and returns the immutable process-lifetime table.
+/// Register the frontend and return an immutable table valid until process exit.
 ///
-/// This idempotent handshake does not resolve CUDA symbols or start runtime
-/// services. Those are initialized by the table's initialization callback.
+/// Repeated registrations are safe. The handshake does not resolve CUDA symbols or
+/// start runtime services. The table's initialization callback performs those
+/// operations.
 ///
 /// # Safety
-/// `frontend` must expose an aligned readable version/size prefix. A matching
-/// prefix promises a complete `FrontendAbi` with a valid C resolver callback that
-/// remains callable for the process lifetime and never unwinds into Rust.
-/// `output` must be writable pointer storage. The returned table is borrowed:
-/// callers must not free it or unload this library while using its callbacks.
-/// Repeated registrations must use the same resolver.
+/// `frontend` must provide an aligned, readable version and size prefix. A matching
+/// prefix requires a complete `FrontendAbi` with a valid C resolver callback. The
+/// callback must remain valid until process exit and must not unwind into Rust.
+/// `output` must point to writable pointer storage. Callers must not free the returned
+/// table or unload this library while using its callbacks. Repeated registrations must
+/// use the same resolver.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cuinterpose_core_init(
     frontend: *const FrontendAbi,
@@ -114,16 +115,16 @@ pub unsafe extern "C" fn cuinterpose_core_init(
     if frontend.is_null() || output.is_null() {
         return CUDA_ERROR_INVALID_VALUE;
     }
-    // A mismatched frontend may supply only the version/size prefix. Check it
-    // before reading the resolver field or copying the full structure.
+    // A mismatched frontend may provide only the version and size prefix. Check it
+    // before reading the resolver or copying the complete structure.
     let version = unsafe { std::ptr::addr_of!((*frontend).version).read() };
     let size = unsafe { std::ptr::addr_of!((*frontend).size).read() };
     if version != ABI_VERSION || size as usize != size_of::<FrontendAbi>() {
         return CUDA_ERROR_INVALID_VALUE;
     }
     let frontend = unsafe { *frontend };
-    // Only copy the table while initializing OnceLock. Loader operations,
-    // callbacks and worker startup here could deadlock a constructor caller.
+    // Only copy the table during OnceLock initialization. Loader calls, callbacks, or
+    // worker startup could deadlock a caller in a constructor.
     let existing = G_FRONTEND_ABI.get_or_init(|| frontend);
     if existing.resolve as usize != frontend.resolve as usize {
         return CUDA_ERROR_INVALID_VALUE;

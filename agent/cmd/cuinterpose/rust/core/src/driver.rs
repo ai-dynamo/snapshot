@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! One typed boundary for CUDA entry points, resolved through the frontend.
-//! Signatures follow NVIDIA cuda.h/cudaTypedefs.h; missing optional symbols fail on use.
-//! Raw calls retain driver-written outputs even on failure.
-//! cudarc supplies CUDA types/constants, not its loader or safe resource owners.
+//! Typed CUDA entry points resolved through the frontend.
+//! Signatures follow NVIDIA cuda.h and cudaTypedefs.h. Calls to missing optional
+//! symbols fail when used. Preserve outputs written by the driver even when a call
+//! fails. cudarc supplies types and constants. Its loader and resource wrappers are not
+//! used.
 
 use crate::error::{Error, Result};
 use cudarc::driver::sys::CUresult::{
@@ -79,9 +80,10 @@ macro_rules! functions {
 
         impl Symbols {
             fn resolve() -> Self {
-                // Resolve privately: neither a state mutex nor OnceLock initialization
-                // may be held while the frontend enters the dynamic loader. Concurrent
-                // runtime candidates can publish equivalent tables without waiting.
+                // Resolve symbols before taking the state mutex or initializing
+                // OnceLock. The frontend can enter the dynamic loader. Concurrent
+                // initialization attempts can publish equivalent tables without
+                // waiting.
                 Self {
                     $($name: {
                         let address = crate::driver(
@@ -116,8 +118,8 @@ macro_rules! functions {
     )*};
 }
 
-// VMM, contexts, and host-copy primitives are required at startup. Multicast
-// is optional so drivers without those entry points can run unicast workloads.
+// Startup requires VMM, context, and host copy functions. Multicast functions are
+// optional so drivers without them can run unicast workloads.
 functions! {
     required {
         cuCtxGetCurrent(context: *mut *mut c_void);
@@ -154,13 +156,13 @@ pub struct Context {
 }
 
 impl Context {
-    /// Runs in the recorded context. Only when `context` is zero does `device`
-    /// select a primary context to retain for the duration of the call.
+    /// Run in the recorded context. If `context` is zero, retain the primary context
+    /// for `device` until the call completes.
     pub fn run<T>(context: usize, device: i32, body: impl FnOnce() -> Result<T>) -> Result<T> {
         let context = Self::enter(context, device)?;
         let result = body();
         let left = context.leave();
-        // Evaluate cleanup even when the body failed, preserving its first error.
+        // Run cleanup even if the operation failed. Return the operation's error first.
         let value = result?;
         left?;
         Ok(value)
