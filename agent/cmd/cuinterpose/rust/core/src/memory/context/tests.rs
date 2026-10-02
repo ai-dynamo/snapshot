@@ -203,7 +203,9 @@ fn malloc(context: usize, allocation_context: usize, opens: usize) -> u64 {
             .reference
             .creator_pid += 1;
     }
-    state.map_malloc(handle, 100, 4096, opens).unwrap()
+    state
+        .map_malloc(handle, 100, 4096, opens, context, 0)
+        .unwrap()
 }
 
 fn counts(expected: (usize, usize, usize)) {
