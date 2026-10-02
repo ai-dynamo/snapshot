@@ -68,9 +68,11 @@ def test_host_numa_shared_reconstruction(release_creator_handle, tools, tmp_path
     assert status == driver.CUresult.CUDA_SUCCESS
     # A CPU NUMA node elsewhere on the host may not support this GPU's VMM.
     # The override can select another driver-supported node, including nonzero IDs.
-    node = int(os.environ.get("CUINTERPOSE_TEST_HOST_NUMA_NODE", cuda_call(
+    # CUDA reports -1 without NUMA; HOST_NUMA allocations use node 0 there.
+    nearest_node = max(0, int(cuda_call(
         driver.cuDeviceGetAttribute, driver.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_HOST_NUMA_ID, 0,
     )))
+    node = int(os.environ.get("CUINTERPOSE_TEST_HOST_NUMA_NODE", nearest_node))
     properties = host_properties(node)
     size = int(cuda_call(driver.cuMemGetAllocationGranularity, properties,
                         driver.CUmemAllocationGranularity_flags.CU_MEM_ALLOC_GRANULARITY_MINIMUM))
