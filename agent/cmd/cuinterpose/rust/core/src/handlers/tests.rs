@@ -12,6 +12,8 @@ static CREATES: AtomicUsize = AtomicUsize::new(0);
 static IMPORTS: AtomicUsize = AtomicUsize::new(0);
 static LIVE_HANDLES: AtomicUsize = AtomicUsize::new(0);
 static DEVICE: AtomicUsize = AtomicUsize::new(0);
+static DEVICE_QUERIES: AtomicUsize = AtomicUsize::new(0);
+static CONTEXT_QUERIES: AtomicUsize = AtomicUsize::new(0);
 static GRANULARITY_QUERIES: AtomicUsize = AtomicUsize::new(0);
 static ATTRIBUTE_QUERIES: AtomicUsize = AtomicUsize::new(0);
 static IMPORT_LOCATION: AtomicUsize = AtomicUsize::new(0);
@@ -29,7 +31,8 @@ fn properties(location: CUmemLocationType, kind: CUmemAllocationHandleType) -> C
 }
 
 unsafe extern "C" fn current(output: *mut *mut c_void) -> CUresult {
-    unsafe { output.write(std::ptr::dangling_mut::<c_void>()) };
+    CONTEXT_QUERIES.fetch_add(1, Ordering::Relaxed);
+    unsafe { output.write((DEVICE.load(Ordering::Relaxed) + 1) as *mut c_void) };
     CUDA_SUCCESS
 }
 
@@ -81,6 +84,7 @@ unsafe extern "C" fn get_properties(output: *mut CUmemAllocationProp, _: u64) ->
 }
 
 unsafe extern "C" fn device(output: *mut i32) -> CUresult {
+    DEVICE_QUERIES.fetch_add(1, Ordering::Relaxed);
     unsafe { output.write(DEVICE.load(Ordering::Relaxed) as i32) };
     CUDA_SUCCESS
 }
@@ -113,6 +117,25 @@ unsafe extern "C" fn map(_: u64, _: usize, _: usize, _: u64, _: u64) -> CUresult
     CUDA_SUCCESS
 }
 
+unsafe extern "C" fn reserve(output: *mut u64, _: usize, _: usize, _: u64, _: u64) -> CUresult {
+    unsafe { output.write(0x10000) };
+    CUDA_SUCCESS
+}
+
+unsafe extern "C" fn access(
+    _: u64,
+    _: usize,
+    access: *const CUmemAccessDesc,
+    count: usize,
+) -> CUresult {
+    assert_eq!(count, 1);
+    assert_eq!(
+        unsafe { (*access).location.id },
+        DEVICE.load(Ordering::Relaxed) as i32
+    );
+    CUDA_SUCCESS
+}
+
 unsafe extern "C" fn unmap(_: u64, _: usize) -> CUresult {
     CUDA_SUCCESS
 }
@@ -130,6 +153,9 @@ unsafe extern "C" fn resolve(name: *const c_char) -> *mut c_void {
         b"cuDeviceGetAttribute" => attribute as *const () as *mut c_void,
         b"cuMemGetAllocationGranularity" => granularity as *const () as *mut c_void,
         b"cuMemMap" => map as *const () as *mut c_void,
+        b"cuMemAddressReserve" => reserve as *const () as *mut c_void,
+        b"cuMemAddressFree" => unmap as *const () as *mut c_void,
+        b"cuMemSetAccess" => access as *const () as *mut c_void,
         b"cuMemUnmap" => unmap as *const () as *mut c_void,
         b"cuMemRetainAllocationHandle" => retain as *const () as *mut c_void,
         b"cuMemCreate" => create as *const () as *mut c_void,
@@ -393,21 +419,35 @@ fn malloc_layout_caches_granularity_and_rdma_capability_per_device() {
     crate::tests::in_child_process(
         "handlers::tests::malloc_layout_caches_granularity_and_rdma_capability_per_device",
         || {
-            backend();
-            let mut state = active().unwrap();
-            for device in 0..2 {
+            let backend = backend();
+            let mut allocations = 0;
+            for device in [0, 1, 0] {
                 DEVICE.store(device, Ordering::Relaxed);
                 for size in [1, 4097] {
-                    let (properties, extent) = state.allocation_layout(size).unwrap();
+                    let mut address = 0;
                     assert_eq!(
-                        properties.allocFlags.gpuDirectRDMACapable,
+                        unsafe { (backend.cuMemAlloc_v2)(&mut address, size) },
+                        CUDA_SUCCESS
+                    );
+                    allocations += 1;
+                    assert_eq!(DEVICE_QUERIES.load(Ordering::Relaxed), allocations);
+                    assert_eq!(CONTEXT_QUERIES.load(Ordering::Relaxed), allocations);
+                    let mut state = active().unwrap();
+                    let mapping = &state.mappings[&address];
+                    let allocation = state.memblocks[&mapping.id].unicast().unwrap();
+                    assert_eq!(
+                        allocation.properties.allocFlags.gpuDirectRDMACapable,
                         u8::from(device == 0)
                     );
-                    assert_eq!(extent, size.next_multiple_of(4096));
+                    assert_eq!(allocation.properties.location.id, device as i32);
+                    assert_eq!(allocation.size, size.next_multiple_of(4096));
+                    assert_eq!(allocation.context, device + 1);
+                    state.unmap_malloc(address).unwrap();
                 }
             }
             assert_eq!(GRANULARITY_QUERIES.load(Ordering::Relaxed), 2);
             assert_eq!(ATTRIBUTE_QUERIES.load(Ordering::Relaxed), 4);
+            assert_eq!(LIVE_HANDLES.load(Ordering::Relaxed), 0);
         },
     );
 }
