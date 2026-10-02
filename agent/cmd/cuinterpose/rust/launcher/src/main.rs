@@ -14,8 +14,8 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     };
-    // The runtime has already resolved image, envFrom, and explicit Pod values.
-    // Preserve those bytes; LD_PRELOAD accepts both spaces and colons.
+    // The runtime has already resolved the image environment, envFrom, and explicit Pod
+    // values. Preserve those bytes. LD_PRELOAD accepts spaces and colons.
     let mut preload = OsString::from("/tmp/snapshot-cuda/libcuinterpose.so");
     if let Some(existing) = env::var_os("LD_PRELOAD").filter(|value| !value.is_empty()) {
         preload.push(":");

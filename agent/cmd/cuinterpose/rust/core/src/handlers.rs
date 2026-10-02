@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! CUDA API policy and orchestration; memory modules own bookkeeping.
+//! Handle CUDA API calls. The memory modules manage allocation state.
 
 use crate::driver::{self};
 use crate::error::{Error, Result};
@@ -140,7 +140,7 @@ pub fn cuMemMap(address: u64, size: usize, offset: usize, handle: u64, flags: u6
 pub fn cuMemUnmap(address: u64, size: usize) -> Result<()> {
     let mut state = active()?;
     unsafe { crate::driver::cuMemUnmap(address, size) }?;
-    // CUDA only unmaps whole mappings; a successful range can contain several.
+    // CUDA unmaps only whole mappings. A successful range can include several mappings.
     let addresses: Vec<_> = state
         .mappings_in_range(address, size)
         .map(|mapping| mapping.address)
@@ -167,8 +167,8 @@ pub fn cuMemSetAccess(
         return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
     }
     let descriptors = unsafe { std::slice::from_raw_parts(access, count) };
-    // Access applies to a fully mapped range, potentially spanning allocations.
-    // Prepare metadata before CUDA and publish it only after the call succeeds.
+    // Access permissions apply to a fully mapped range, which can span allocations.
+    // Prepare metadata before the CUDA call. Publish it only after success.
     let updates: Vec<_> = state
         .mappings_in_range(address, size)
         .map(|mapping| (mapping.address, mapping.merged_access(descriptors)))
@@ -207,7 +207,8 @@ pub fn cuMemExportToShareableHandle(
     {
         return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
     }
-    // The ticket names this allocation; unlike a CUDA export FD, it does not retain its backing.
+    // The ticket identifies this allocation. It does not retain the backing as a CUDA
+    // export FD does.
     let fd = sharing::create(memblock.reference()).map_err(|error| {
         Error::io(
             "create shareable handle ticket",
@@ -253,8 +254,8 @@ pub fn cuMemGetAllocationPropertiesFromHandle(
         .resolve_virtual_handle(handle)?
         .and_then(|id| state.memblocks.get(&id).and_then(Memblock::unicast))
     {
-        // Preserve driver-returned flags while hiding the internal POSIX
-        // capability of an application-private allocation.
+        // Keep the flags returned by the driver. Hide the internal POSIX capability for
+        // allocations that the application did not request to share.
         unsafe {
             (*out).requestedHandleTypes = allocation.properties.requestedHandleTypes;
         }

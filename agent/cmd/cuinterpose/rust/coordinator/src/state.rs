@@ -22,8 +22,9 @@ pub fn write_atomic(path: &Path, participants: &mut Manifest) -> Result<()> {
     }
     let bytes = protocol::encode(&participants)?;
     let directory = path.parent().context("missing checkpoint directory")?;
-    // NamedTempFile starts mode 0600 and removes incomplete files on error.
-    // persist is atomic replacement, not durability: retain both fsyncs.
+    // NamedTempFile creates mode 0600 files and removes incomplete files on error.
+    // persist replaces the destination atomically. Keep both fsync calls to make the
+    // result durable.
     let mut file = tempfile::NamedTempFile::new_in(directory)?;
     file.write_all(&bytes)?;
     file.as_file().sync_all()?;
