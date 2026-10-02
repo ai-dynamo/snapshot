@@ -208,6 +208,28 @@ def test_framework_workflow_requires_pass_before_upload_without_hiding_failures(
     assert "always()" in steps[index + 1]["if"]
 
 
+def test_framework_workflow_checks_repository_before_using_gpu_cluster() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    workflows = repository_root / ".github/workflows"
+    framework_jobs = yaml.safe_load((workflows / "e2e-frameworks.yaml").read_text())["jobs"]
+    ci_check = yaml.safe_load((workflows / "ci.yml").read_text())["jobs"]["check"]
+    check = framework_jobs["check"]
+
+    assert check["runs-on"] == ci_check["runs-on"] == "ubuntu-latest"
+    # Match the existing full validation gate, including its pinned Go setup.
+    assert check["steps"][1:] == ci_check["steps"][1:]
+    assert check["steps"][0]["uses"] == ci_check["steps"][0]["uses"]
+    assert check["steps"][0]["with"]["persist-credentials"] is False
+    assert "continue-on-error" not in check
+    assert all("continue-on-error" not in step for step in check["steps"])
+    assert "if" not in check
+    assert framework_jobs["datadog-gate"]["needs"] == "check"
+    assert set(framework_jobs["e2e"]["needs"]) == {"check", "datadog-gate"}
+    # Default job conditions block failed or skipped prerequisites.
+    assert "if" not in framework_jobs["datadog-gate"]
+    assert "if" not in framework_jobs["e2e"]
+
+
 def test_validate_result_preserves_unknown_fields() -> None:
     result = _result(extra={"futureField": {"answer": 42}})
     result["startedAt"] = "2026-08-25T04:02:03+03:00"
