@@ -64,6 +64,8 @@ impl ProcessState {
         requested: usize,
         extent: usize,
         opens: usize,
+        context: usize,
+        device: CUdevice,
     ) -> Result<CUdeviceptr> {
         let handle = VirtualAllocationHandle::from_raw(virtual_allocation_handle)
             .ok_or(CUresult::CUDA_ERROR_INVALID_HANDLE)?;
@@ -71,9 +73,6 @@ impl ProcessState {
         let mut reserved = None;
         let mut mapped = false;
         let result = (|| {
-            let context = driver::context()?;
-            let mut device = 0;
-            unsafe { driver::cuCtxGetDevice(&mut device) }?;
             let mut address = 0;
             let alignment = 0;
             let requested_address = 0;
@@ -262,10 +261,9 @@ impl ProcessState {
 impl ProcessState {
     pub(crate) fn allocation_layout(
         &mut self,
+        device: CUdevice,
         size: usize,
     ) -> Result<(CUmemAllocationProp, usize)> {
-        let mut device = 0;
-        unsafe { driver::cuCtxGetDevice(&mut device) }?;
         let mut properties = CUmemAllocationProp {
             type_: CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED,
             requestedHandleTypes:
