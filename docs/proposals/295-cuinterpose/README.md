@@ -1001,14 +1001,15 @@ layers and are not all independently buildable backends.
 | Layer | Coverage and expected outcome |
 | --- | --- |
 | Rust unit/protocol and C/Rust ABI checks | Validate framing, versions, handle layouts, topology, ownership, lifecycle ordering, and ABI size/offset compatibility. |
-| Packaged headless probes | Exercise forwarding, runtime-version refusal, lookup without startup, initialization and loader reentry, relative preload followed by chdir, sticky failures, fork/exec ownership, incompatible artifacts, and launcher environment/argument preservation without a GPU. |
+| Real-driver frontend probes | Exercise CUDA forwarding and symbol lookup, concurrent initialization, relative preload followed by chdir, missing artifacts, ABI admission, and fork/exec ownership against the installed NVIDIA driver/runtime and the matching Rust core. Require two GPUs; no fake CUDA provider is used. |
 | Scripted coordinator exchanges | Verify read-only inspection, barriers, preflight refusal, process-local multicast ordinals, transfer-size checks, lost replies without retry, and failed state publication or missing/corrupt restore state. |
 | Go and Helm integration | Verify SnapshotJob delivery and explicit-command validation, unchanged args/environment, collision rejection, configuration retry and adoption, mapped-library identity, mismatch refusal before CRIU, preflight/source-termination boundaries, forked-child cancellation, inherited descriptors, restore mounts, and existing jobfile behavior. |
-| Physical-GPU suite | Verify shared and private bytes, importer reconstruction, multicast collectives/graph replay, foreign-import refusal, and context teardown using the real driver. Context cases verify malloc cleanup, other-context isolation, and carrier reconstruction of surviving VMM. Require zero skips on suitable hardware. |
+| Physical-GPU suite | Compare native and interposed allocations, handle aliases, and malloc behavior; verify shared/private bytes, importer reconstruction, multicast collectives/graph replay, foreign-import refusal, context teardown, and mixed DEVICE/HOST_NUMA reconstruction. Require at least two GPUs and fail on missing prerequisites for selected tests. |
 | Cross-node Snapshot E2E | Capture and restore on compatible distinct nodes, then verify workload inference and sharing. The native GPU suite alone does not cover Go namespace orchestration. [#294](https://github.com/ai-dynamo/snapshot/issues/294) tracks opt-in 8-GPU cross-node coverage. |
 
 Run `make check`, `make test`, `make build`, and
-`make -C agent/cmd/cuinterpose test-native` on the final assembled revision.
+`make -C agent/cmd/cuinterpose test-native` on the final assembled revision,
+then run `make -C agent/cmd/cuinterpose test-gpu` on suitable two-GPU hardware.
 Qualify real multi-process GPU capture/restore, cross-node restore, and a
 deliberately mismatched shim bundle; exercise HOST_NUMA and multicast on suitable
 hardware. Record unavailable coverage explicitly. Earlier revision results and
