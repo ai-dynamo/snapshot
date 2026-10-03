@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Synchronous malloc and memory IPC use tracked VMM allocations. Virtual IPC handles
-//! identify allocations. Do not call native memory IPC functions.
+//! Synchronous malloc and memory IPC use tracked VMM allocations. IPC handles identify
+//! these allocations so the adapter can reopen them through peer exports without using
+//! native memory IPC.
 
 use super::{Memblock, ProcessState, VirtualAllocationHandle};
 use crate::error::{Error, Result};
@@ -20,8 +21,8 @@ pub struct MallocRegion {
     opens: usize,
 }
 
-// CUDA defines the public handle as 64 opaque bytes. Keep this format local to the
-// adapter. Other peer messages use the typed codec.
+// CUDA fixes the public handle at 64 opaque bytes, so this adapter owns that
+// representation while other peer messages use the typed codec.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct VirtualIpcMemHandle {
@@ -115,8 +116,8 @@ impl ProcessState {
             Ok(address)
         })();
         if result.is_err() {
-            // This call owns the mapping and handle until it publishes them. Undo its
-            // changes, then return the original CUDA error.
+            // The mapping and handle have not been published to the application, so
+            // rollback can undo this call's changes and return the original CUDA error.
             if let Some(address) = reserved {
                 if mapped {
                     runtime::must_complete(unsafe { driver::cuMemUnmap(address, extent) });
@@ -154,8 +155,8 @@ pub(crate) enum Ownership {
 }
 
 pub(crate) fn release(address: CUdeviceptr, ownership: Ownership) -> Result<()> {
-    // Release the state lock before synchronization. Another thread may need the shim
-    // or peer listener to complete a kernel that this call is waiting for.
+    // Synchronization runs without the state lock because completing a kernel may
+    // require another host thread to enter the shim or peer listener.
     let mut state = runtime::active()?;
     {
         let Some(mapping) = state.malloc_regions.get_mut(&address) else {
@@ -274,8 +275,8 @@ impl ProcessState {
             },
             ..unsafe { std::mem::zeroed() }
         };
-        // The current device can change between calls. These properties are fixed for
-        // each device.
+        // These layout properties are fixed for each device, but the current device can
+        // change between calls, so the cache is keyed by device.
         let granularity = match self.malloc_layouts.entry(device) {
             std::collections::btree_map::Entry::Occupied(entry) => {
                 let (granularity, rdma_capable) = *entry.get();
@@ -294,8 +295,8 @@ impl ProcessState {
                     driver::cuDeviceGetAttribute(&mut vmm_rdma, CUdevice_attribute::CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED, device)?;
                 }
                 properties.allocFlags.gpuDirectRDMACapable = u8::from(rdma != 0 && vmm_rdma != 0);
-                // Compression and tile-pool usage require an explicit request. Ordinary
-                // cuMemAlloc does not request them.
+                // Ordinary cuMemAlloc does not request compression or tile-pool usage,
+                // so the converted allocation leaves both disabled.
                 let mut granularity = 0;
                 unsafe {
                     driver::cuMemGetAllocationGranularity(

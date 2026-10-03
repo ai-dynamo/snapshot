@@ -150,8 +150,8 @@ pub fn cuMemSetAccess(
         return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
     }
     let descriptors = unsafe { std::slice::from_raw_parts(access, count) };
-    // Access permissions apply to a fully mapped range, which can span allocations.
-    // Prepare metadata before the CUDA call. Publish it only after success.
+    // A fully mapped access range can span several allocations, so prepare all metadata
+    // updates before the CUDA call and publish them only after it succeeds.
     let updates: Vec<_> = state
         .mappings_in_range(address, size)
         .map(|mapping| (mapping.address, mapping.merged_access(descriptors)))
@@ -190,8 +190,8 @@ pub fn cuMemExportToShareableHandle(
     {
         return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
     }
-    // The ticket identifies this allocation. It does not retain the backing as a CUDA
-    // export FD does.
+    // The ticket identifies an allocation without retaining its backing, so it cannot
+    // extend the allocation's lifetime as a CUDA export FD would.
     let fd = sharing::create(memblock.reference()).map_err(|error| {
         Error::io(
             "create shareable handle ticket",
@@ -237,8 +237,8 @@ pub fn cuMemGetAllocationPropertiesFromHandle(
         .resolve_virtual_handle(handle)?
         .and_then(|id| state.memblocks.get(&id).and_then(Memblock::unicast))
     {
-        // Keep the flags returned by the driver. Hide the internal POSIX capability for
-        // allocations that the application did not request to share.
+        // For application-private allocations, hide only the internal POSIX capability
+        // while preserving the other flags returned by the driver.
         unsafe {
             (*out).requestedHandleTypes = allocation.properties.requestedHandleTypes;
         }

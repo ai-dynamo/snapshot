@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Store allocation bytes in host memory captured by CRIU. Restore failures terminate
-//! the process. Do not run CUDA cleanup from Drop or in a fork child.
+//! The host carrier stores allocation bytes in memory that CRIU captures. Restore
+//! failures terminate the process, and CUDA cleanup must never run from Drop or in a
+//! fork child.
 
 use super::vmm::{Allocation, context_device};
 use crate::driver::Context;
@@ -127,8 +128,8 @@ impl Arena {
         let first = allocations.first().ok_or(CUDA_ERROR_INVALID_VALUE)?;
         Context::run(first.context, context_device(&first.properties), || {
             // Leaving this scope can release the last reference to a fallback primary
-            // context. Keep host registration within this scope. PORTABLE covers every
-            // copy group.
+            // context, so host registration must end within the same scope. PORTABLE
+            // lets one registration cover every copy group.
             unsafe {
                 crate::driver::cuMemHostRegister_v2(
                     self.base as *mut c_void,
@@ -177,8 +178,9 @@ impl Arena {
                 unsafe { crate::driver::cuMemAddressReserve(&mut base, total, 0, 0, 0) }?;
                 reserved = Some(base);
                 let mut offset = 0usize;
-                // Copy the full backing through a separate mapping. Application
-                // mappings can be absent, partial, or lack the required access.
+                // A separate mapping lets us copy the full backing even when
+                // application mappings are absent, partial, or lack the required
+                // access.
                 for allocation in &group {
                     let address = base
                         .checked_add(offset as u64)
@@ -244,16 +246,17 @@ impl Arena {
                     Ok(())
                 })()
             })();
-            // Run every cleanup operation, even if an earlier one failed. Preserve the
-            // original operation error. A cleanup failure still terminates the process.
+            // Cleanup attempts every step even if an earlier one failed, while
+            // preserving the original operation error. A cleanup failure still
+            // terminates the process.
             let mut result = transfer;
             if let Some(stream) = stream {
                 if !synchronized {
                     let drained = unsafe { crate::driver::cuStreamSynchronize(stream) };
                     if drained.is_err() {
-                        // The copy may still be active. Cleanup must not free memory
-                        // that DMA can access. Terminate the process without running
-                        // Rust or CUDA cleanup.
+                        // Because DMA may still access this memory, cleanup must not
+                        // free it. Terminate the process without running Rust or CUDA
+                        // cleanup when completion is unknown.
                         let message = b"cuinterpose: CUDA copy completion unknown; terminating without cleanup\n";
                         unsafe {
                             libc::write(
@@ -279,9 +282,9 @@ impl Arena {
         Ok(())
     }
 
-    /// Copy the full host allocation through an alias with CPU access. Application
-    /// mappings can be partial or have no host access. Keep their addresses and
-    /// permissions unchanged while all writers are paused.
+    /// Application mappings may be partial or lack host access, so the full allocation
+    /// is copied through an alias with CPU access. All writers remain paused, and the
+    /// application mappings' addresses and permissions stay unchanged.
     fn copy_host(&self, allocation: &AllocationContent, load: bool) -> Result<()> {
         let offset = *self
             .offsets

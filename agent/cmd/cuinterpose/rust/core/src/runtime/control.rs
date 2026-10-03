@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Separate workers handle peer FD requests and serialized CUDA control. Reject
-//! requests before changing state when the queue is full. Do not retry operations.
+//! Peer FD requests use a separate worker from serialized CUDA control so imports can
+//! continue while a control operation waits. A full queue rejects requests before
+//! mutation, and operations are never retried.
 
 use crate::error::{Error, Result};
 use crate::memory::checkpoint;
@@ -26,8 +27,8 @@ enum ControlRequest {
 }
 
 /// Workers cannot handle requests until they receive the listener. Dropping this owner
-/// cancels the workers without joining them. The caller may hold the loader lock that a
-/// worker needs for Rust TLS startup or cleanup.
+/// cancels them without joining because the caller may hold the loader lock needed for
+/// a worker's Rust TLS startup or cleanup.
 pub struct PreparedWorkers {
     activation: mpsc::SyncSender<UnixListener>,
     // Owned after bind succeeds and until the worker receives the listener.
@@ -125,17 +126,17 @@ impl PreparedWorkers {
         }))
     }
 
-    /// The caller holds the runtime installation lock. Do not spawn threads, block on
-    /// channels, format values, or call callbacks here. With the pinned Rust and glibc
-    /// versions, mutexes and try_send use futexes and TLS without Drop. They do not
-    /// register with the loader. The channel is already allocated. Eager ELF binding
-    /// resolves libc symbols before these calls run.
+    /// Because the caller holds the runtime installation lock, this method must not
+    /// spawn threads, block on channels, format values, or call callbacks. With the
+    /// pinned Rust and glibc versions, mutexes and try_send use futexes and TLS without
+    /// Drop, avoiding loader registration. The channel is preallocated, and eager ELF
+    /// binding resolves libc symbols before these calls run.
     pub fn activate(&mut self, endpoint: &str) -> Result<()> {
         self.listener =
             Some(bind_listener(endpoint).map_err(|error| Error::io("bind control socket", error))?);
         let listener = self.listener.as_ref().unwrap();
-        // Set socket permissions before listen allows connections. Do not change the
-        // application's process umask.
+        // The socket cannot accept connections before listen, so its permissions can be
+        // restricted first without changing the application's process umask.
         std::fs::set_permissions(endpoint, std::fs::Permissions::from_mode(0o600))
             .map_err(|error| Error::io("set control socket permissions", error))?;
         rustix::net::listen(listener, libc::SOMAXCONN)
@@ -150,8 +151,8 @@ impl PreparedWorkers {
     }
 
     pub fn cleanup(&mut self, endpoint: &str) {
-        // This owner cleans up only endpoints that bound successfully but were not
-        // published. Run cleanup outside the installation lock.
+        // This owner cleans up only successfully bound endpoints that were not
+        // published, with cleanup kept outside the installation lock.
         if let Some(listener) = self.listener.take() {
             drop(listener);
             let _ = std::fs::remove_file(endpoint);
@@ -172,9 +173,10 @@ fn bind_listener(endpoint: &str) -> std::io::Result<UnixListener> {
         Err(error @ rustix::io::Errno::ADDRINUSE) => std::io::Error::from(error),
         Err(error) => return Err(error.into()),
     };
-    // Exec closes the listener but leaves its path. Under INSTALL_LOCK, check whether a
-    // healthy runtime already exists. Only the installer that holds this lock can
-    // remove this PID's stale endpoint. Other PID namespaces must use different names.
+    // Exec closes the listener but leaves its path, so a later installer may need to
+    // remove a stale endpoint. Only the installer holding INSTALL_LOCK may do this,
+    // after checking for a healthy runtime and only for this PID's endpoint. Other PID
+    // namespaces must use different names.
     let previous = std::fs::symlink_metadata(endpoint)?;
     let uid = unsafe { libc::geteuid() };
     if !previous.file_type().is_socket() || previous.uid() != uid {
@@ -186,9 +188,9 @@ fn bind_listener(endpoint: &str) -> std::io::Result<UnixListener> {
         SocketFlags::NONBLOCK | SocketFlags::CLOEXEC,
         None,
     )?;
-    // Do not poll or exchange protocol messages under the installation lock. Preserve
-    // the path if the backlog is full (EAGAIN), the listener is active, or the error is
-    // ambiguous.
+    // No polling or protocol exchange can run under the installation lock. A full
+    // backlog (EAGAIN), an active listener, or an ambiguous error does not establish
+    // that the endpoint is stale, so its path must be preserved.
     if rustix::net::connect(&probe, &address) != Err(rustix::io::Errno::CONNREFUSED) {
         return Err(error);
     }
@@ -210,9 +212,9 @@ fn dispatch(
     namespace_pid: NamespacePid,
     sender: &mpsc::SyncSender<(UnixStream, ControlRequest)>,
 ) -> protocol::Result<()> {
-    // Each socket read has its own timeout. There is no total timeout for the header. A
-    // slow peer can delay acceptance, but classification never waits for ProcessState
-    // or lifecycle CUDA calls.
+    // The timeout applies to each socket read rather than the whole header, so a slow
+    // peer can delay acceptance. Classification never waits for ProcessState or
+    // lifecycle CUDA calls.
     let timeout = Some(cuinterpose_protocol::timeout(None));
     socket.set_read_timeout(timeout)?;
     socket.set_write_timeout(timeout)?;
@@ -320,8 +322,8 @@ mod tests {
         let endpoint = directory.join("control.sock");
         let endpoint = endpoint.to_str().unwrap();
         let listener = bind_listener(endpoint).unwrap();
-        // Test a permissive application umask without changing this process's umask.
-        // Other unit tests may create files concurrently.
+        // Changing this process's umask could affect files created by concurrent tests,
+        // so model a permissive application umask without changing the process setting.
         std::fs::set_permissions(endpoint, std::fs::Permissions::from_mode(0o777)).unwrap();
         assert_eq!(
             UnixStream::connect(endpoint).unwrap_err().kind(),

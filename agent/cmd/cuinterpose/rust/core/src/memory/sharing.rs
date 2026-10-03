@@ -39,12 +39,13 @@ pub fn decode(fd: i32) -> protocol::Result<Option<AllocationReference>> {
     if fd < 0 {
         return Err(Error::Invalid("negative import descriptor"));
     }
-    // The caller owns the FD. Duplicate it for positional File reads, then let RAII
-    // close the duplicate. Never close the caller's descriptor.
+    // Duplicate the caller's borrowed FD into an owned File for positional reads, so
+    // RAII closes only the duplicate and never the application's descriptor.
     let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
     let file = File::from(borrowed.try_clone_to_owned()?);
-    // Virtual handles use regular memfds. A short regular file is invalid. Treat other
-    // descriptor types, including pipes and sockets, as foreign.
+    // Virtual handles use regular memfds, so other descriptor types, including pipes
+    // and sockets, are foreign. A regular file that is too short is an invalid virtual
+    // handle.
     let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Ok(None);
@@ -126,8 +127,8 @@ fn decode_multicast_properties(
     })
 }
 
-// Multicast importers need creation properties during restore. Cache the reply with its
-// FD so the sender does not need to read CUDA state.
+// Cache multicast creation properties with the exported FD because importers need them
+// during restore and sending the reply must not require CUDA state access.
 pub(crate) type Exports = BTreeMap<AllocationId, (OwnedFd, Reply)>;
 
 #[derive(Default)]
@@ -263,9 +264,9 @@ pub(crate) fn import_reference(
             .handle_entries += 1;
         return Ok((state, handle));
     }
-    // The EXPORT service uses only the export cache. It does not lock ProcessState. A
-    // request within this process can therefore complete while this call holds the
-    // allocation metadata lock.
+    // The EXPORT service uses the export cache without locking ProcessState, so a
+    // request within this process can complete while its caller holds the allocation
+    // metadata lock.
     let (raw, multicast_properties) = request_export(reference).map_err(CoreError::PeerExport)?;
     if multicast_properties.is_some() {
         return Err(CUDA_ERROR_INVALID_HANDLE.into());

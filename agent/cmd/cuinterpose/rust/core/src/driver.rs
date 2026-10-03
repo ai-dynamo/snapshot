@@ -1,11 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Typed CUDA entry points resolved through the frontend.
-//! Signatures follow NVIDIA cuda.h and cudaTypedefs.h. Calls to missing optional
-//! symbols fail when used. Preserve outputs written by the driver even when a call
-//! fails. cudarc supplies types and constants. Its loader and resource wrappers are not
-//! used.
+//! The frontend resolves these typed CUDA entry points, whose signatures follow NVIDIA
+//! cuda.h and cudaTypedefs.h. cudarc supplies only types and constants. Calls preserve
+//! driver-written outputs even on failure, and missing optional symbols fail when used.
 
 use crate::error::{Error, Result};
 use cudarc::driver::sys::CUresult::{
@@ -80,10 +78,10 @@ macro_rules! functions {
 
         impl Symbols {
             fn resolve() -> Self {
-                // Resolve symbols before taking the state mutex or initializing
-                // OnceLock. The frontend can enter the dynamic loader. Concurrent
-                // initialization attempts can publish equivalent tables without
-                // waiting.
+                // Symbol resolution can enter the dynamic loader, so it must happen
+                // outside the state mutex and OnceLock initialization. Concurrent
+                // attempts can resolve independently and publish equivalent tables
+                // without waiting.
                 Self {
                     $($name: {
                         let address = crate::driver(
@@ -180,7 +178,8 @@ impl Context {
         let context = Self::enter(context, device)?;
         let result = body();
         let left = context.leave();
-        // Run cleanup even if the operation failed. Return the operation's error first.
+        // Cleanup runs even after an operation fails, while the operation's original
+        // error takes precedence over a cleanup error.
         let value = result?;
         left?;
         Ok(value)
