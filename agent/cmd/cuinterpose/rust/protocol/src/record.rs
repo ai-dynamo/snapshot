@@ -44,9 +44,9 @@ pub enum BindingSource {
     },
 }
 
-/// CUDA multicast binding API variant. This is separate from the cuinterpose protocol
-/// version. V1 replays cuMulticastBindMem and cuMulticastBindAddr. V2 replays their _v2
-/// entry points, which take an explicit device argument.
+/// CUDA multicast binding API variant, separate from the cuinterpose protocol version.
+/// V1 replays cuMulticastBindMem and cuMulticastBindAddr, while V2 uses their _v2 entry
+/// points with an explicit device argument.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BindingVersion {
@@ -60,10 +60,9 @@ pub enum BindingVersion {
 pub enum Record {
     Allocation {
         allocation: AllocationReference,
-        /// This participant saves allocation bytes in the host carrier captured by CRIU
-        /// and restores them from it. True only for shared allocations created by this
-        /// participant. Importers do not copy the same bytes again. Private memory uses
-        /// native CUDA checkpointing.
+        /// True only when this participant created a shared allocation and saves its
+        /// bytes in the host carrier captured by CRIU for later restore. Importers do
+        /// not duplicate that copy, and private memory uses native CUDA checkpointing.
         checkpoint_via_host_carrier: bool,
         size: u64,
         /// `CUmemAllocationProp::type_`.
