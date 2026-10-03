@@ -128,11 +128,48 @@ impl ProcessState {
     /// Call after phase validation. A failure during state changes terminates the
     /// process.
     pub fn lifecycle(&mut self, operation: Operation) -> Result<u64> {
+        use super::host_carrier::{AllocationContent, Arena};
         let next_phase = self.phase.next(operation)?;
-        let bytes = 0u64;
+        let mut bytes = 0u64;
         match operation {
             Operation::PrepareMulticast => {}
-
+            Operation::SaveAllocations => {
+                let ids: Vec<_> = self
+                    .memblocks
+                    .values()
+                    .filter_map(Memblock::unicast)
+                    .filter(|a| a.checkpoint_via_host_carrier(self.namespace_pid))
+                    .map(|a| a.reference.id)
+                    .collect();
+                let mut allocations = Vec::new();
+                for id in ids {
+                    let allocation = self
+                        .memblocks
+                        .get_mut(&id)
+                        .and_then(Memblock::unicast_mut)
+                        .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+                    if allocation.driver.is_none() {
+                        let mapping = self
+                            .mappings
+                            .values()
+                            .find(|m| m.id == id)
+                            .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+                        let mut driver = 0;
+                        unsafe {
+                            crate::driver::cuMemRetainAllocationHandle(
+                                &mut driver,
+                                mapping.address as usize as *mut c_void,
+                            )
+                        }?;
+                        allocation.driver = Some(driver);
+                    }
+                    bytes = bytes
+                        .checked_add(allocation.size as u64)
+                        .ok_or(CUDA_ERROR_OUT_OF_MEMORY)?;
+                    allocations.push(AllocationContent::from(&*allocation));
+                }
+                self.arena = Arena::save(&allocations)?;
+            }
             Operation::PrepareUnicast => {
                 export_cache()?.clear()?;
                 for allocation in self
@@ -157,7 +194,34 @@ impl ProcessState {
                     }
                 }
             }
-
+            Operation::LoadAllocations => {
+                // A restored process may now run on a different GPU or driver.
+                self.malloc_layouts.clear();
+                let mut allocations: Vec<_> = self
+                    .memblocks
+                    .values()
+                    .filter_map(Memblock::unicast)
+                    .filter(|a| a.checkpoint_via_host_carrier(self.namespace_pid))
+                    .map(AllocationContent::from)
+                    .collect();
+                bytes = allocations.iter().try_fold(0u64, |sum, a| {
+                    sum.checked_add(a.size as u64)
+                        .ok_or(CUDA_ERROR_OUT_OF_MEMORY)
+                })?;
+                if let Some(arena) = &self.arena {
+                    arena.load(&mut allocations)?;
+                } else if !allocations.is_empty() {
+                    return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
+                }
+                for allocation in allocations {
+                    self.memblocks
+                        .get_mut(&allocation.id)
+                        .and_then(Memblock::unicast_mut)
+                        .ok_or(CUDA_ERROR_INVALID_HANDLE)?
+                        .driver = allocation.driver;
+                }
+                self.remap(Participants::Creators)?;
+            }
             Operation::RestoreUnicast => {
                 for allocation in self
                     .memblocks
@@ -263,6 +327,15 @@ pub(crate) fn execute(operation: Operation) -> std::result::Result<Reply, String
     Ok(Reply::Completed { operation, bytes })
 }
 
+/// Keep the carrier until the successful LOAD reply has been sent.
+pub(crate) fn load_acknowledged() {
+    if let Ok(mut state) = runtime::get()
+        && let Some(arena) = state.arena.take()
+    {
+        runtime::must_complete(arena.release());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,5 +386,14 @@ mod tests {
             state.new_reference(),
             Err(Error::Cuda(CUDA_ERROR_NOT_READY))
         ));
+    }
+
+    #[test]
+    fn restore_invalidates_device_properties() {
+        let mut state = ProcessState::new(41);
+        state.malloc_layouts.insert(0, (4096, 1));
+        state.phase = Phase::UnicastPrepared;
+        state.lifecycle(Operation::LoadAllocations).unwrap();
+        assert!(state.malloc_layouts.is_empty());
     }
 }

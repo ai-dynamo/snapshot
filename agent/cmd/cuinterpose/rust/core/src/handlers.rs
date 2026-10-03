@@ -30,12 +30,6 @@ pub fn cuMemCreate(
         return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
     }
     let properties = unsafe { *prop };
-    // HOST_NUMA requires a CPU carrier and reconstruction that preserves NUMA
-    // placement. Native checkpointing of private HOST_NUMA allocations has not been
-    // validated.
-    if properties.location.type_ == CUmemLocationType::CU_MEM_LOCATION_TYPE_HOST_NUMA {
-        return Err(CUDA_ERROR_NOT_SUPPORTED.into());
-    }
     let supported = properties.requestedHandleTypes
         == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
     if !supported && properties.requestedHandleTypes.0 != 0 {

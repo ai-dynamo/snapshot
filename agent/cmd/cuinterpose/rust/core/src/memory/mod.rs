@@ -5,6 +5,7 @@
 
 pub(crate) mod checkpoint;
 pub(crate) mod context;
+mod host_carrier;
 pub(crate) mod ipc;
 pub(crate) mod sharing;
 pub(crate) mod vmm;
@@ -134,6 +135,7 @@ pub struct ProcessState {
     pub virtual_allocation_handles: BTreeMap<VirtualAllocationHandle, HandleEntry>,
     pub mappings: BTreeMap<u64, Mapping>,
     pub phase: Phase,
+    pub arena: Option<host_carrier::Arena>,
     pub unlocked_driver_calls: usize,
     next_virtual_allocation_handle: u64,
 }
@@ -150,6 +152,7 @@ impl ProcessState {
             mappings: BTreeMap::new(),
             next_virtual_allocation_handle: 1,
             phase: Phase::Active,
+            arena: None,
             unlocked_driver_calls: 0,
         }
     }
