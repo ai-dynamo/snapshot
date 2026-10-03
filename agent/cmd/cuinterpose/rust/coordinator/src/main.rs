@@ -116,9 +116,9 @@ impl Peer {
     }
 }
 
-/// Join every started exchange, even if a participant fails. Every rank must reply
-/// before the next phase starts. A bounded worker pool could leave ranks waiting for an
-/// exchange that has not started.
+/// Every rank must reply before a phase can advance, so a bounded worker pool could
+/// deadlock a rank waiting for an exchange that has not started. Every started exchange
+/// is joined even if a participant fails.
 fn command_all(
     peers: &mut [Peer],
     operation: Operation,
@@ -197,8 +197,8 @@ fn run() -> Result<()> {
         });
     }
     if args.inspect {
-        // Preflight only reads state. BeginCheckpoint freezes the shim registry, then
-        // preparation validates it again. Inspection alone does not lock the registry.
+        // Preflight inspection does not freeze the registry, so preparation must
+        // validate it again after BeginCheckpoint prevents application mutations.
         topology::validate(&inspect(&peers, false)?)?;
         return Ok(());
     }

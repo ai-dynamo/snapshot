@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Inspection metadata and versioned MessagePack messages. Values own their data. The
-//! format excludes CUDA handles and process pointers.
+//! Inspection metadata travels in versioned MessagePack messages whose values own their
+//! data. CUDA handles and process pointers never enter the format.
 
 mod identity;
 mod record;
@@ -114,7 +114,7 @@ pub enum Operation {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Request {
     /// Enter checkpoint mode and return stable records. The application must already be
-    /// paused. This request does not synchronize GPU work.
+    /// paused because this request does not synchronize GPU work.
     BeginCheckpoint {
         namespace_pid: NamespacePid,
     },

@@ -28,8 +28,8 @@ struct Multicast {
     flags: u64,
     num_devices: u32,
     creators: u32,
-    // CUDA device ordinals are local to each process. Each device must be attached and
-    // bound in the same participant.
+    // CUDA device ordinals are local to each process, so each device must be attached
+    // and bound in the same participant.
     devices: BTreeMap<(NamespacePid, i32), bool>,
 }
 
@@ -39,8 +39,8 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
     if participants.is_empty() {
         bail!("topology validate failed: no participants");
     }
-    // Collect definitions before references. Participant and entry order must not
-    // affect validation of imports or multicast dependencies.
+    // Collecting definitions before references lets imports and multicast dependencies
+    // be validated independently of participant and entry order.
     for (namespace_pid, participant) in participants {
         for record in participant {
             match record {
@@ -215,9 +215,9 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                         multicast.reference == *allocation,
                         "participant {namespace_pid}: inconsistent multicast creator for {allocation:?}"
                     );
-                    // CUDA accepted the binding. Its rounded capacity can exceed the
-                    // creation size. Validate only the relationships between processes
-                    // here.
+                    // CUDA has already accepted the binding, whose rounded capacity can
+                    // exceed the creation size, so only relationships between processes
+                    // need validation here.
                     let member = match source {
                         BindingSource::Memory(range) => Some(*range),
                         BindingSource::Address {

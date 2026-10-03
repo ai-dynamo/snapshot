@@ -130,8 +130,8 @@ RUN test "$(rustc --version | cut -d' ' -f2)" = 1.95.0 \
 WORKDIR /cuinterpose
 COPY cmd/cuinterpose/ ./
 RUN make native
-# Ship dependency and standard library sources with their license files. Store them with
-# the repository source in the image's legal directory.
+# Ship dependency and standard library sources with their license files alongside the
+# repository source in the image's legal directory.
 RUN mkdir -p /rust-sources && cd rust && cargo vendor --locked /rust-sources/vendor \
     && cp Cargo.lock /rust-sources/ \
     && cp -a "$(rustc --print sysroot)/lib/rustlib/src/rust" /rust-sources/standard-library \
