@@ -24,8 +24,8 @@ import (
 // restore.
 const CuInterposeBundlePath = "/snapshot-binaries/snapshot-cuda"
 
-// InspectCuInterposeLibraries uses the list of CUDA processes. A missing socket reply
-// must not remove a participant from inspection.
+// InspectCuInterposeLibraries uses the CUDA process list so a missing socket reply
+// cannot silently remove a participant from inspection.
 func InspectCuInterposeLibraries(procRoot string, pids []int, required bool) (*types.CuInterposeManifest, error) {
 	var identity *types.CuInterposeManifest
 	var absent []int
@@ -117,8 +117,9 @@ func hashMappedLibrary(path, device, inode string) (string, error) {
 	if device != wantDevice || inode != strconv.FormatUint(stat.Ino, 10) {
 		return "", fmt.Errorf("mapped library %s was replaced since it was loaded", path)
 	}
-	// Hash the same file descriptor checked against /proc/maps. Delivery mounts are
-	// read-only. Manually delivered libraries must also remain unchanged during capture.
+	// Hashing the descriptor already checked against /proc/maps ties the digest to the
+	// mapped file. Delivery mounts are read-only, and manually delivered libraries must
+	// also remain unchanged during capture.
 	return hashLibrary(file)
 }
 

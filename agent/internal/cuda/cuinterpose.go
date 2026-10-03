@@ -31,13 +31,14 @@ func RemoveStaleCuInterposeSockets(controlDir string, namespacePIDs []int) error
 	return nil
 }
 
-// Inspect only reads state. Every participant must reply and pass topology validation
-// before the caller reaches the phase that requires source termination on failure.
+// Inspect only reads state and requires every participant to reply and pass topology
+// validation before the caller enters the phase where failure requires source
+// termination.
 func InspectCuInterpose(ctx context.Context, procRoot string, targetPID int, namespacePIDs []int, binary string) error {
 	return runCuInterposeInContainer(ctx, "inspect", "", procRoot, targetPID, namespacePIDs, binary)
 }
 
-// Prepare removes shared mappings. The caller must terminate the source on failure.
+// Prepare removes shared mappings, so the caller must terminate the source on failure.
 func PrepareCuInterpose(ctx context.Context, checkpointDir, procRoot string, targetPID int, namespacePIDs []int, binary string) error {
 	return runCuInterposeInContainer(ctx, "prepare", checkpointDir, procRoot, targetPID, namespacePIDs, binary)
 }
@@ -67,10 +68,11 @@ func runCuInterposeInContainer(ctx context.Context, operation, checkpointDir, pr
 	return executeCoordinator(cmd)
 }
 
-// Run inside the restored namespaces. Use a binary descriptor opened before CRIU.
+// This runs inside the restored namespaces through a binary descriptor opened before
+// CRIU.
 func RestoreCuInterpose(ctx context.Context, checkpointDir string, namespacePIDs []int, binary string) error {
-	// Use nsrestore's process group. Cancellation by its host parent must also reach this
-	// coordinator, even if nsrestore has already been killed.
+	// Sharing nsrestore's process group lets cancellation by its host parent reach this
+	// coordinator even if nsrestore has already been killed.
 	return executeCoordinator(exec.CommandContext(ctx, binary, cuInterposeArgs("restore", checkpointDir, namespacePIDs)...))
 }
 

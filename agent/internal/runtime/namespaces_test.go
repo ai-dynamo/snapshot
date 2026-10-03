@@ -77,8 +77,8 @@ func TestCommandInNamespacesCancellationKillsForkedChild(t *testing.T) {
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
 	childPath := filepath.Join(dir, "child-pid")
 	t.Setenv("TEST_CHILD_PID", childPath)
-	// nsenter forks when entering a PID namespace. The child inherits the output pipes.
-	// Killing only nsenter leaves the worker running and the output wait blocked.
+	// nsenter forks to enter a PID namespace, and its child inherits the output pipes.
+	// Killing only nsenter therefore leaves a running worker and a blocked output wait.
 	script := `#!/bin/sh
 set -eu
 while [ "$1" != -- ]; do shift; done
