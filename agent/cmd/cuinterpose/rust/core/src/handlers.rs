@@ -1,0 +1,248 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Handle CUDA API calls. The memory modules manage allocation state.
+
+use crate::driver::{self};
+use crate::error::{Error, Result};
+use crate::memory::vmm::Allocation;
+use crate::memory::{self, Memblock, VirtualAllocationHandle};
+use crate::memory::{sharing, vmm};
+use crate::runtime;
+use cudarc::driver::sys::CUresult::*;
+use cudarc::driver::sys::*;
+use runtime::active;
+use std::ffi::c_void;
+use std::os::fd::IntoRawFd;
+
+pub fn cuMemCreate(
+    out: *mut u64,
+    size: usize,
+    prop: *const CUmemAllocationProp,
+    flags: u64,
+) -> Result<()> {
+    if out.is_null() || prop.is_null() {
+        return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
+    }
+    let properties = unsafe { *prop };
+    // HOST_NUMA requires a CPU carrier and reconstruction that preserves NUMA
+    // placement. Native checkpointing of private HOST_NUMA allocations has not been
+    // validated.
+    if properties.location.type_ == CUmemLocationType::CU_MEM_LOCATION_TYPE_HOST_NUMA {
+        return Err(CUDA_ERROR_NOT_SUPPORTED.into());
+    }
+    let supported = properties.requestedHandleTypes
+        == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+    if !supported && properties.requestedHandleTypes.0 != 0 {
+        return Err(CUDA_ERROR_NOT_SUPPORTED.into());
+    }
+    if supported {
+        vmm::validate_properties(&properties)?;
+    }
+    let mut state = active()?;
+    let reference = if supported {
+        Some(state.new_reference()?)
+    } else {
+        None
+    };
+    let context = if supported { driver::context()? } else { 0 };
+    let mut driver = 0;
+    let create = crate::driver::symbols::cuMemCreate()?;
+    crate::driver::result(unsafe { create(&mut driver, size, &properties, flags) })?;
+    let driver = runtime::must_complete(VirtualAllocationHandle::from_driver(driver));
+    let handle = match reference {
+        Some(reference) => runtime::must_complete(state.adopt_unicast(Allocation {
+            reference,
+            refcounts: Default::default(),
+            driver: Some(driver),
+            size,
+            properties,
+            shared: false,
+            context,
+        })),
+        None => driver,
+    };
+    unsafe { out.write(handle) };
+    Ok(())
+}
+
+pub fn cuMemRelease(handle: u64) -> Result<()> {
+    let mut state = active()?;
+    if let Some(handle) = VirtualAllocationHandle::from_raw(handle) {
+        state.release_virtual_handle(handle)?;
+    } else {
+        unsafe { crate::driver::cuMemRelease(handle) }?;
+    }
+    Ok(())
+}
+
+pub fn cuMemRetainAllocationHandle(out: *mut u64, address: *mut c_void) -> Result<()> {
+    if out.is_null() {
+        return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
+    }
+    let mut state = active()?;
+    let mapping = state
+        .mappings
+        .range(..=address as u64)
+        .next_back()
+        .filter(|(_, mapping)| address as u64 - mapping.address < mapping.size as u64)
+        .map(|(_, mapping)| (mapping.id, mapping.handle));
+    let mut driver = 0;
+    unsafe { crate::driver::cuMemRetainAllocationHandle(&mut driver, address) }?;
+    if let Some((id, handle)) = mapping {
+        unsafe {
+            out.write(runtime::must_complete(
+                state.retain_backing(id, handle, driver),
+            ))
+        };
+    } else {
+        let driver = runtime::must_complete(VirtualAllocationHandle::from_driver(driver));
+        unsafe {
+            out.write(driver);
+        }
+    }
+    Ok(())
+}
+
+pub fn cuMemMap(address: u64, size: usize, offset: usize, handle: u64, flags: u64) -> Result<()> {
+    let mut state = active()?;
+    let Some(id) = state.resolve_virtual_handle(handle)? else {
+        unsafe { crate::driver::cuMemMap(address, size, offset, handle, flags) }?;
+        return Ok(());
+    };
+
+    state.map_unicast(
+        id,
+        VirtualAllocationHandle::from_raw(handle).unwrap(),
+        address,
+        size,
+        offset,
+        flags,
+    )
+}
+
+pub fn cuMemUnmap(address: u64, size: usize) -> Result<()> {
+    let mut state = active()?;
+    unsafe { crate::driver::cuMemUnmap(address, size) }?;
+    // CUDA unmaps only whole mappings. A successful range can include several mappings.
+    let addresses: Vec<_> = state
+        .mappings_in_range(address, size)
+        .map(|mapping| mapping.address)
+        .collect();
+    for start in addresses {
+        let id = state.remove_mapping(start);
+        runtime::must_complete(state.release_unused_memblock(id));
+    }
+    Ok(())
+}
+
+pub fn cuMemSetAccess(
+    address: u64,
+    size: usize,
+    access: *const CUmemAccessDesc,
+    count: usize,
+) -> Result<()> {
+    let mut state = active()?;
+    if access.is_null() {
+        unsafe { crate::driver::cuMemSetAccess(address, size, access, count) }?;
+        return Ok(());
+    }
+    if count > isize::MAX as usize / size_of::<CUmemAccessDesc>() {
+        return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
+    }
+    let descriptors = unsafe { std::slice::from_raw_parts(access, count) };
+    // A fully mapped access range can span several allocations, so prepare all metadata
+    // updates before the CUDA call and publish them only after it succeeds.
+    let updates: Vec<_> = state
+        .mappings_in_range(address, size)
+        .map(|mapping| (mapping.address, mapping.merged_access(descriptors)))
+        .collect();
+    unsafe { crate::driver::cuMemSetAccess(address, size, access, count) }?;
+    for (start, access) in updates {
+        state.mappings.get_mut(&start).unwrap().access = access;
+    }
+    Ok(())
+}
+
+pub fn cuMemExportToShareableHandle(
+    out: *mut c_void,
+    handle: u64,
+    kind: CUmemAllocationHandleType,
+    flags: u64,
+) -> Result<()> {
+    let mut state = active()?;
+    let Some(id) = state.resolve_virtual_handle(handle)? else {
+        unsafe { crate::driver::cuMemExportToShareableHandle(out, handle, kind, flags) }?;
+        return Ok(());
+    };
+    if out.is_null()
+        || kind != CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+        || flags != 0
+    {
+        return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
+    }
+    let namespace_pid = state.namespace_pid;
+    let memblock = state
+        .memblocks
+        .get_mut(&id)
+        .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+    if let Memblock::Unicast(allocation) = memblock
+        && allocation.properties.requestedHandleTypes.0 & kind.0 == 0
+    {
+        return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
+    }
+    // The ticket identifies an allocation without retaining its backing, so it cannot
+    // extend the allocation's lifetime as a CUDA export FD would.
+    let fd = sharing::create(memblock.reference()).map_err(|error| {
+        Error::io(
+            "create shareable handle ticket",
+            std::io::Error::other(error),
+        )
+    })?;
+    memblock.export(namespace_pid)?;
+    unsafe { out.cast::<i32>().write(fd.into_raw_fd()) };
+    Ok(())
+}
+
+pub fn cuMemImportFromShareableHandle(
+    out: *mut u64,
+    fd: *mut c_void,
+    kind: CUmemAllocationHandleType,
+) -> Result<()> {
+    if out.is_null() {
+        return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
+    }
+    if kind != CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR {
+        return Err(CUDA_ERROR_NOT_SUPPORTED.into());
+    }
+    let reference = sharing::decode(fd as isize as i32)
+        .map_err(|_| CUDA_ERROR_INVALID_HANDLE)?
+        .ok_or(CUDA_ERROR_NOT_SUPPORTED)?;
+    let state = active()?;
+    let (_state, handle) = sharing::import_reference(state, reference)?;
+    unsafe { out.write(handle) };
+    Ok(())
+}
+
+pub fn cuMemGetAllocationPropertiesFromHandle(
+    out: *mut CUmemAllocationProp,
+    handle: u64,
+) -> Result<()> {
+    let state = active()?;
+    let driver = match VirtualAllocationHandle::from_raw(handle) {
+        Some(handle) => handle.driver_handle(&state)?,
+        None => handle,
+    };
+    unsafe { crate::driver::cuMemGetAllocationPropertiesFromHandle(out, driver) }?;
+    if let Some(allocation) = state
+        .resolve_virtual_handle(handle)?
+        .and_then(|id| state.memblocks.get(&id).and_then(Memblock::unicast))
+    {
+        // For application-private allocations, hide only the internal POSIX capability
+        // while preserving the other flags returned by the driver.
+        unsafe {
+            (*out).requestedHandleTypes = allocation.properties.requestedHandleTypes;
+        }
+    }
+    Ok(())
+}

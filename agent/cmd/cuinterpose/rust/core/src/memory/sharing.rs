@@ -1,13 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Encode shareable handles, export peer resources, and track imported resource
+//! Encode shareable handles, export peer allocations, and track imported allocation
 //! ownership.
 
-use crate::error::Result;
-use crate::runtime;
-use cudarc::driver::sys::{CUmemAllocationHandleType, CUmulticastObjectProp};
+use super::checkpoint::Phase;
+use super::vmm::Allocation;
+use super::{Memblock, ProcessState, VirtualAllocationHandle};
+use crate::driver::context;
+use crate::error::{Error as CoreError, Result};
+use crate::runtime::{self, export_cache};
 use cudarc::driver::sys::CUresult::*;
+use cudarc::driver::sys::{CUmemAllocationHandleType, CUmemAllocationProp, CUmulticastObjectProp};
 use cuinterpose_protocol::{
     self as protocol, AllocationId, AllocationReference, Error, NamespacePid, Reply, Request,
     Response, VIRTUAL_SHAREABLE_HANDLE_BYTES, VIRTUAL_SHAREABLE_HANDLE_MAGIC,
@@ -16,9 +20,9 @@ use rustix::fs::{MemfdFlags, memfd_create};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Write;
-use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::{fs::FileExt, net::UnixStream};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 pub fn create(reference: AllocationReference) -> protocol::Result<OwnedFd> {
     let bytes = protocol::encode_virtual_shareable_handle(reference)?;
@@ -29,8 +33,8 @@ pub fn create(reference: AllocationReference) -> protocol::Result<OwnedFd> {
     Ok(file.into())
 }
 
-/// Foreign FDs remain native imports, but recognizable virtual handles must be
-/// rejected when invalid or obsolete so they never reach CUDA.
+/// Return None for foreign FDs so the caller rejects them before calling CUDA. Return
+/// an invalid handle error for malformed virtual handles.
 pub fn decode(fd: i32) -> protocol::Result<Option<AllocationReference>> {
     if fd < 0 {
         return Err(Error::Invalid("negative import descriptor"));
@@ -203,6 +207,100 @@ impl ExportCache {
     }
 }
 
+impl Memblock {
+    /// Publish the creator's export without requiring the peer service to lock
+    /// ProcessState.
+    pub fn export(&mut self, namespace_pid: NamespacePid) -> Result<AllocationReference> {
+        if let Self::Unicast(allocation) = self
+            && allocation.context == 0
+        {
+            allocation.context = context()?;
+        }
+        let reference = self.reference();
+        if reference.creator_pid == namespace_pid && !export_cache()?.contains(&reference.id)? {
+            let fd = crate::driver::export_posix(self.driver_handle()?)?;
+            export_cache()?.insert(reference.id, fd, None)?;
+        }
+        match self {
+            Self::Unicast(allocation) => {
+                allocation.shared = true;
+            }
+        }
+        Ok(reference)
+    }
+}
+
+pub(crate) fn import_reference(
+    mut state: MutexGuard<'static, ProcessState>,
+    reference: AllocationReference,
+) -> Result<(MutexGuard<'static, ProcessState>, u64)> {
+    if state.phase != Phase::Active {
+        return Err(CoreError::from(CUDA_ERROR_NOT_READY));
+    }
+    let id = reference.id;
+    if let Some(memblock) = state.memblocks.get_mut(&id) {
+        if memblock.reference() != reference {
+            return Err(CoreError::from(CUDA_ERROR_INVALID_VALUE));
+        }
+        match memblock {
+            Memblock::Unicast(allocation) => {
+                if allocation.driver.is_none() {
+                    let (raw, properties) =
+                        request_export(reference).map_err(CoreError::PeerExport)?;
+                    if properties.is_some() {
+                        return Err(CoreError::from(CUDA_ERROR_INVALID_HANDLE));
+                    }
+                    allocation.driver = Some(crate::driver::import_posix(raw.as_fd())?);
+                }
+                allocation.shared = true;
+            }
+        }
+        let handle = state.mint_virtual_allocation_handle(id)?;
+        state
+            .memblocks
+            .get_mut(&id)
+            .unwrap()
+            .refcounts_mut()
+            .handle_entries += 1;
+        return Ok((state, handle));
+    }
+    // The EXPORT service uses the export cache without locking ProcessState, so a
+    // request within this process can complete while its caller holds the allocation
+    // metadata lock.
+    let (raw, multicast_properties) = request_export(reference).map_err(CoreError::PeerExport)?;
+    if multicast_properties.is_some() {
+        return Err(CUDA_ERROR_INVALID_HANDLE.into());
+    }
+    let context = context()?;
+    let driver = crate::driver::import_posix(raw.as_fd())?;
+    let driver = runtime::must_complete(VirtualAllocationHandle::from_driver(driver));
+    let mut properties = std::mem::MaybeUninit::<CUmemAllocationProp>::zeroed();
+    if let Err(error) = unsafe {
+        crate::driver::cuMemGetAllocationPropertiesFromHandle(properties.as_mut_ptr(), driver)
+    } {
+        runtime::must_complete(unsafe { crate::driver::cuMemRelease(driver) });
+        return Err(error);
+    }
+    let properties = unsafe { properties.assume_init() };
+    if let Err(error) = super::vmm::validate_properties(&properties) {
+        // A peer version may allow backing that this version does not support. Import
+        // it to inspect its properties, then release the handle before publishing it.
+        runtime::must_complete(unsafe { crate::driver::cuMemRelease(driver) });
+        return Err(error);
+    }
+    let handle = runtime::must_complete(state.adopt_unicast(Allocation {
+        reference,
+        refcounts: Default::default(),
+        driver: Some(driver),
+        // The creator owns the full backing extent. This importer knows only its
+        // mappings.
+        size: 0,
+        properties,
+        shared: true,
+        context,
+    }));
+    Ok((state, handle))
+}
 #[cfg(test)]
 mod codec_tests {
     use super::*;
