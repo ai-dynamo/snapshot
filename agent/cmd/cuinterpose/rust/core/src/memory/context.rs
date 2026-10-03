@@ -48,8 +48,8 @@ impl ContextResources {
                 .get(&address)
                 .is_some_and(|region| region.virtual_allocation_handle == handle)
             {
-                // These VMM operations do not need a current context. The ordinary free
-                // path would try to synchronize the destroyed context.
+                // Use context-independent VMM cleanup because the ordinary free path
+                // would synchronize a context that has already been destroyed.
                 state.unmap_malloc(address)?;
             }
         }
@@ -61,8 +61,9 @@ impl ContextResources {
                 Memblock::Unicast(allocation) => &mut allocation.context,
             };
             if *context == self.context {
-                // Direct VMM and multicast allocations survive context destruction.
-                // Later checkpoint copies use the primary context as a fallback.
+                // Direct VMM and multicast allocations survive context destruction, so
+                // later checkpoint copies fall back to a primary context when the
+                // recorded one is gone.
                 *context = 0;
             }
         }
@@ -97,10 +98,10 @@ fn primary_context(device: CUdevice) -> Result<usize> {
     if !primary_active(device)? {
         return Ok(0);
     }
-    // CUDA Runtime can retain the primary context internally. Query the driver because
-    // the shim cannot observe every retain. An active context already has an owner.
-    // Release our extra reference before the requested release or reset to preserve
-    // CUDA behavior.
+    // CUDA Runtime can retain the primary context internally, so driver state must be
+    // queried rather than inferred from application calls. An active context already
+    // has an owner, which lets us release our extra reference before the requested
+    // release or reset without changing CUDA behavior.
     let mut context = std::ptr::null_mut();
     unsafe { driver::cuDevicePrimaryCtxRetain(&mut context, device) }?;
     runtime::must_complete(unsafe { driver::cuDevicePrimaryCtxRelease_v2(device) });

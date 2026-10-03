@@ -41,8 +41,8 @@ impl Allocation {
     }
 }
 
-// This code never dereferences the opaque Win32 pointer on Linux. Hold the ProcessState
-// mutex for driver access and allocation metadata updates.
+// This code never dereferences the opaque Win32 pointer on Linux, and driver access and
+// allocation metadata updates are serialized by the ProcessState mutex.
 unsafe impl Send for Allocation {}
 
 #[derive(Clone)]
