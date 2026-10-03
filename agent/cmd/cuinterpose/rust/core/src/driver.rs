@@ -10,9 +10,9 @@ use cudarc::driver::sys::CUresult::{
     CUDA_ERROR_INVALID_HANDLE, CUDA_ERROR_NOT_INITIALIZED, CUDA_SUCCESS,
 };
 use cudarc::driver::sys::{
-    CUdevice, CUdeviceptr, CUmemAccessDesc, CUmemAllocationGranularity_flags,
-    CUmemAllocationHandleType, CUmemAllocationProp, CUmemGenericAllocationHandle,
-    CUmulticastObjectProp, CUresult, CUstream_flags,
+    CUcontext, CUdevice, CUdevice_attribute, CUdeviceptr, CUmemAccessDesc,
+    CUmemAllocationGranularity_flags, CUmemAllocationHandleType, CUmemAllocationProp,
+    CUmemGenericAllocationHandle, CUmulticastObjectProp, CUresult, CUstream_flags,
 };
 use std::ffi::c_void;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
@@ -120,10 +120,20 @@ macro_rules! functions {
 // optional so drivers without them can run unicast workloads.
 functions! {
     required {
+        cuDeviceGetAttribute(value: *mut i32, attribute: CUdevice_attribute, device: CUdevice);
+        cuCtxDestroy(context: CUcontext);
+        cuCtxDestroy_v2(context: CUcontext);
+        cuCtxSynchronize();
+        cuMemFree_v2(address: CUdeviceptr);
+        cuMemGetAddressRange_v2(base: *mut CUdeviceptr, size: *mut usize, address: CUdeviceptr);
         cuCtxGetCurrent(context: *mut *mut c_void);
         cuCtxGetDevice(device: *mut CUdevice);
         cuCtxSetCurrent(context: *mut c_void);
+        cuDevicePrimaryCtxRelease(device: CUdevice);
         cuDevicePrimaryCtxRelease_v2(device: CUdevice);
+        cuDevicePrimaryCtxReset(device: CUdevice);
+        cuDevicePrimaryCtxReset_v2(device: CUdevice);
+        cuDevicePrimaryCtxGetState(device: CUdevice, flags: *mut u32, active: *mut i32);
         cuDevicePrimaryCtxRetain(context: *mut *mut c_void, device: CUdevice);
         cuMemAddressFree(address: CUdeviceptr, size: usize);
         cuMemAddressReserve(address: *mut CUdeviceptr, size: usize, alignment: usize, requested: CUdeviceptr, flags: u64);
@@ -138,7 +148,8 @@ functions! {
         cuMemSetAccess(address: CUdeviceptr, size: usize, access: *const CUmemAccessDesc, count: usize);
         cuMemUnmap(address: CUdeviceptr, size: usize);
     }
-    optional {}
+    optional {
+    }
 }
 
 pub(super) fn context() -> Result<usize> {

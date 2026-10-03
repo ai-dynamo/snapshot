@@ -7,13 +7,18 @@ use crate::driver::{self};
 use crate::error::{Error, Result};
 use crate::memory::vmm::Allocation;
 use crate::memory::{self, Memblock, VirtualAllocationHandle};
-use crate::memory::{sharing, vmm};
+use crate::memory::{ipc, sharing, vmm};
 use crate::runtime;
 use cudarc::driver::sys::CUresult::*;
 use cudarc::driver::sys::*;
 use runtime::active;
 use std::ffi::c_void;
 use std::os::fd::IntoRawFd;
+
+pub use crate::memory::context::{
+    cuCtxDestroy, cuCtxDestroy_v2, cuDevicePrimaryCtxRelease, cuDevicePrimaryCtxRelease_v2,
+    cuDevicePrimaryCtxReset, cuDevicePrimaryCtxReset_v2,
+};
 
 pub fn cuMemCreate(
     out: *mut u64,
@@ -245,4 +250,115 @@ pub fn cuMemGetAllocationPropertiesFromHandle(
         }
     }
     Ok(())
+}
+
+pub use cuIpcOpenMemHandle as cuIpcOpenMemHandle_v2;
+
+pub fn cuMemAlloc_v2(out: *mut CUdeviceptr, size: usize) -> Result<()> {
+    if out.is_null() || size == 0 {
+        return Err(CUDA_ERROR_INVALID_VALUE.into());
+    }
+    let mut state = runtime::active()?;
+    let mut device = 0;
+    unsafe { driver::cuCtxGetDevice(&mut device) }?;
+    let (properties, extent) = state.allocation_layout(device, size)?;
+    let reference = state.new_reference()?;
+    let context = driver::context()?;
+    let mut backing = 0;
+    let flags = 0;
+    unsafe { driver::cuMemCreate(&mut backing, extent, &properties, flags) }?;
+    let backing = runtime::must_complete(VirtualAllocationHandle::from_driver(backing));
+    let handle = runtime::must_complete(state.adopt_unicast(Allocation {
+        reference,
+        refcounts: Default::default(),
+        driver: Some(backing),
+        size: extent,
+        properties,
+        shared: false,
+        context,
+    }));
+    let opens = 0;
+    let address = state.map_malloc(handle, size, extent, opens, context, device)?;
+    unsafe { out.write(address) };
+    Ok(())
+}
+
+pub fn cuIpcGetMemHandle(out: *mut CUipcMemHandle, address: CUdeviceptr) -> Result<()> {
+    if out.is_null() {
+        return Err(Error::Cuda(CUresult::CUDA_ERROR_INVALID_VALUE));
+    }
+    let mut state = runtime::active()?;
+    let mapping = state
+        .malloc_regions
+        .get(&address)
+        .ok_or(CUresult::CUDA_ERROR_INVALID_VALUE)?
+        .clone();
+    let id = mapping.virtual_allocation_handle.id(&state)?;
+    let reference = state
+        .memblocks
+        .get(&id)
+        .ok_or(CUDA_ERROR_INVALID_HANDLE)?
+        .reference();
+    let ipc_handle = mapping.export_handle(reference)?;
+    let namespace_pid = state.namespace_pid;
+    state
+        .memblocks
+        .get_mut(&id)
+        .ok_or(CUresult::CUDA_ERROR_INVALID_HANDLE)?
+        .export(namespace_pid)?;
+    unsafe { out.write(ipc_handle) };
+    Ok(())
+}
+
+pub fn cuIpcOpenMemHandle(out: *mut CUdeviceptr, handle: CUipcMemHandle, flags: u32) -> Result<()> {
+    if out.is_null() || flags != CUipcMem_flags::CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS as u32 {
+        return Err(Error::Cuda(CUresult::CUDA_ERROR_INVALID_VALUE));
+    }
+    let (reference, requested, extent) = ipc::decode(handle)?;
+    let mut state = runtime::active()?;
+    let address = if let Some(address) = state.reopen_malloc(reference, requested, extent)? {
+        address
+    } else {
+        let context = driver::context()?;
+        let mut device = 0;
+        unsafe { driver::cuCtxGetDevice(&mut device) }?;
+        let (mut state, handle) = sharing::import_reference(state, reference)?;
+        let opens = 1;
+        state.map_malloc(handle, requested, extent, opens, context, device)?
+    };
+    unsafe { out.write(address) };
+    Ok(())
+}
+
+pub fn cuMemFree_v2(address: CUdeviceptr) -> Result<()> {
+    ipc::release(address, ipc::Ownership::Owned)
+}
+
+pub fn cuIpcCloseMemHandle(address: CUdeviceptr) -> Result<()> {
+    ipc::release(address, ipc::Ownership::Imported)
+}
+
+pub fn cuMemGetAddressRange_v2(
+    base: *mut CUdeviceptr,
+    size: *mut usize,
+    address: CUdeviceptr,
+) -> Result<()> {
+    let state = runtime::active()?;
+    if let Some((&start, mapping)) = state.malloc_regions.range(..=address).next_back()
+        && address - start < mapping.requested as u64
+    {
+        unsafe {
+            if !base.is_null() {
+                base.write(start);
+            }
+            if !size.is_null() {
+                size.write(mapping.requested);
+            }
+        }
+        return Ok(());
+    }
+    runtime::call_unlocked(state, || unsafe {
+        driver::cuMemGetAddressRange_v2(base, size, address)
+    })
+    .map(|_| ())
 }
