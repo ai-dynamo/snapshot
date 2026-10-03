@@ -20,7 +20,7 @@ use rustix::fs::{MemfdFlags, memfd_create};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Write;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::{fs::FileExt, net::UnixStream};
 use std::sync::{Mutex, MutexGuard};
 
@@ -219,12 +219,14 @@ impl Memblock {
         let reference = self.reference();
         if reference.creator_pid == namespace_pid && !export_cache()?.contains(&reference.id)? {
             let fd = crate::driver::export_posix(self.driver_handle()?)?;
-            export_cache()?.insert(reference.id, fd, None)?;
+            let properties = self.multicast().map(|object| object.properties);
+            export_cache()?.insert(reference.id, fd, properties)?;
         }
         match self {
             Self::Unicast(allocation) => {
                 allocation.shared = true;
             }
+            Self::Multicast(object) => object.shared = true,
         }
         Ok(reference)
     }
@@ -254,6 +256,7 @@ pub(crate) fn import_reference(
                 }
                 allocation.shared = true;
             }
+            Memblock::Multicast(object) => object.shared = true,
         }
         let handle = state.mint_virtual_allocation_handle(id)?;
         state
@@ -268,8 +271,8 @@ pub(crate) fn import_reference(
     // request within this process can complete while its caller holds the allocation
     // metadata lock.
     let (raw, multicast_properties) = request_export(reference).map_err(CoreError::PeerExport)?;
-    if multicast_properties.is_some() {
-        return Err(CUDA_ERROR_INVALID_HANDLE.into());
+    if let Some(properties) = multicast_properties {
+        return super::multicast::import(state, reference, raw, properties);
     }
     let context = context()?;
     let driver = crate::driver::import_posix(raw.as_fd())?;
@@ -304,6 +307,7 @@ pub(crate) fn import_reference(
 #[cfg(test)]
 mod codec_tests {
     use super::*;
+    use std::os::fd::AsRawFd;
 
     fn handle_file(bytes: &[u8]) -> File {
         let fd = memfd_create(c"test-shareable-handle", MemfdFlags::CLOEXEC).unwrap();

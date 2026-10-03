@@ -34,6 +34,7 @@ impl ContextResources {
                     context != 0
                         && match memblock {
                             Memblock::Unicast(allocation) => allocation.context == context,
+                            Memblock::Multicast(object) => object.context == context,
                         }
                 })
                 .map(|(&id, _)| id)
@@ -59,6 +60,7 @@ impl ContextResources {
             };
             let context = match memblock {
                 Memblock::Unicast(allocation) => &mut allocation.context,
+                Memblock::Multicast(object) => &mut object.context,
             };
             if *context == self.context {
                 // Direct VMM and multicast allocations survive context destruction, so

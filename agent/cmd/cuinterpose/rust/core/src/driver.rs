@@ -156,6 +156,13 @@ functions! {
         cuStreamSynchronize(stream: *mut c_void);
     }
     optional {
+        cuMulticastAddDevice(group: CUmemGenericAllocationHandle, device: CUdevice);
+        cuMulticastBindAddr(group: CUmemGenericAllocationHandle, offset: usize, address: CUdeviceptr, size: usize, flags: u64);
+        cuMulticastBindAddr_v2(group: CUmemGenericAllocationHandle, device: CUdevice, offset: usize, address: CUdeviceptr, size: usize, flags: u64);
+        cuMulticastBindMem(group: CUmemGenericAllocationHandle, offset: usize, member: CUmemGenericAllocationHandle, member_offset: usize, size: usize, flags: u64);
+        cuMulticastBindMem_v2(group: CUmemGenericAllocationHandle, device: CUdevice, offset: usize, member: CUmemGenericAllocationHandle, member_offset: usize, size: usize, flags: u64);
+        cuMulticastCreate(group: *mut CUmemGenericAllocationHandle, properties: *const CUmulticastObjectProp);
+        cuMulticastUnbind(group: CUmemGenericAllocationHandle, device: CUdevice, offset: usize, size: usize);
     }
 }
 
