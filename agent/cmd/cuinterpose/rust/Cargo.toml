@@ -12,8 +12,8 @@ license = "Apache-2.0"
 rust-version = "1.88"
 
 [workspace.dependencies]
-# Use only the generated driver definitions. CUDA calls resolve through
-# FrontendAbi.resolve. The dynamic-loading feature avoids a libcuda dependency at link
+# cudarc supplies only generated driver definitions because CUDA calls resolve through
+# FrontendAbi.resolve. Its dynamic-loading feature avoids a libcuda dependency at link
 # time.
 cudarc = { version = "=0.19.9", default-features = false, features = ["std", "driver", "cuda-13010", "dynamic-loading"] }
 
