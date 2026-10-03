@@ -27,8 +27,8 @@ type CuInterposeDelivery struct {
 	PullPolicy corev1.PullPolicy
 }
 
-// ValidatePullPolicy also runs at operator startup. Reject unsupported flags before any
-// SnapshotJob enables cuinterpose.
+// ValidatePullPolicy also runs at operator startup so unsupported flags fail even
+// before any SnapshotJob enables cuinterpose.
 func (d CuInterposeDelivery) ValidatePullPolicy() error {
 	switch d.PullPolicy {
 	case "", corev1.PullAlways, corev1.PullIfNotPresent, corev1.PullNever:
@@ -45,9 +45,9 @@ func (d CuInterposeDelivery) validate() error {
 	return d.ValidatePullPolicy()
 }
 
-// shapeCuInterposeCapture adds delivery once, immediately before Job creation.
-// The launcher receives the environment resolved by the runtime. Preserve the Pod
-// environment sources and workload argument boundaries here.
+// shapeCuInterposeCapture adds delivery once, immediately before Job creation. The
+// launcher receives the runtime-resolved environment, so Pod environment sources and
+// workload argument boundaries can remain unchanged here.
 func shapeCuInterposeCapture(template *corev1.PodTemplateSpec, targetName string, delivery CuInterposeDelivery) error {
 	enabled, err := podcontract.ParseCuInterposeAnnotation(template.Annotations)
 	if err != nil || !enabled {
@@ -100,9 +100,9 @@ func shapeCuInterposeCapture(template *corev1.PodTemplateSpec, targetName string
 		Name:         cuInterposeVolumeName,
 		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 	})
-	// The agent image runs as root by default. This copy needs only read access to
-	// artifacts and write access to the new emptyDir. Use a numeric nonroot identity so
-	// Pods with runAsNonRoot can start the installer.
+	// The agent image defaults to root, but this copy needs only read access to artifacts
+	// and write access to the new emptyDir. A numeric nonroot identity therefore lets Pods
+	// with runAsNonRoot start the installer too.
 	installerUID := int64(65532)
 	if security := shaped.Spec.SecurityContext; security != nil &&
 		security.RunAsUser != nil && *security.RunAsUser > 0 {

@@ -30,8 +30,8 @@ pub enum Phase {
 }
 
 impl Phase {
-    /// Validate phase order before changing state. Select the state to publish after
-    /// success. The coordinator manages barriers between processes.
+    /// Validate local phase order before changing state and select the state to publish
+    /// on success. Barriers between processes belong to the coordinator.
     pub(crate) fn next(self, operation: Operation) -> Result<Self> {
         let (expected, next) = match operation {
             Operation::PrepareMulticast => (Self::Checkpointing, Self::MulticastPrepared),
@@ -123,8 +123,8 @@ impl ProcessState {
     }
 
     /// The application has completed all CUDA work and remains paused through restore.
-    /// Hold the mutex during the state change and inspection. Later phases must use the
-    /// same records returned to the coordinator.
+    /// Holding the mutex across both the state change and inspection keeps later phases
+    /// consistent with the records returned to the coordinator.
     pub fn begin_checkpoint(&mut self) -> Result<Vec<cuinterpose_protocol::Record>> {
         if self.phase != Phase::Active || self.unlocked_driver_calls != 0 {
             return Err(CUDA_ERROR_NOT_READY.into());
@@ -189,9 +189,9 @@ impl ProcessState {
                     .filter_map(Memblock::unicast_mut)
                     .filter(|a| a.shared)
                 {
-                    // VMM handles and mappings do not need a context. Retaining a
-                    // primary here can create and destroy a GPU context for each
-                    // allocation when the process has no context.
+                    // These context-independent VMM operations run directly to avoid
+                    // creating and destroying a primary context for every allocation in
+                    // a process without a context.
                     for mapping in self
                         .mappings
                         .values_mut()

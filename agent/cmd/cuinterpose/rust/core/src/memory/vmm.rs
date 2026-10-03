@@ -44,8 +44,8 @@ impl Allocation {
     }
 }
 
-/// A host NUMA node ID identifies memory placement, not a CUDA device. Context::run
-/// uses this fallback only when no recorded context remains.
+/// A host NUMA node ID describes memory placement and cannot serve as a CUDA device
+/// ordinal. Context::run uses this fallback only when no recorded context remains.
 pub(crate) fn context_device(properties: &CUmemAllocationProp) -> i32 {
     if properties.location.type_ == CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE {
         properties.location.id
@@ -54,8 +54,8 @@ pub(crate) fn context_device(properties: &CUmemAllocationProp) -> i32 {
     }
 }
 
-// This code never dereferences the opaque Win32 pointer on Linux. Hold the ProcessState
-// mutex for driver access and allocation metadata updates.
+// This code never dereferences the opaque Win32 pointer on Linux, and driver access and
+// allocation metadata updates are serialized by the ProcessState mutex.
 unsafe impl Send for Allocation {}
 
 #[derive(Clone)]
