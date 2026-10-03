@@ -94,8 +94,9 @@ unsafe extern "C" fn ensure_cuinterpose_initialized() -> CUresult {
     )
 }
 
-// Report internal errors after dropping operation guards and unused runtime candidates.
-// The ABI selects the public fallback error code.
+// Internal errors are reported after operation guards and unused runtime candidates
+// have dropped, so reporting does not retain their resources or locks. The ABI selects
+// the public fallback error code.
 fn cuda_error(error: Error, fallback: CUresult) -> CUresult {
     match error {
         Error::Cuda(code) => code,
@@ -113,9 +114,9 @@ fn cuda_error(error: Error, fallback: CUresult) -> CUresult {
 
 /// Register the frontend and return an immutable table valid until process exit.
 ///
-/// Repeated registrations are safe. The handshake does not resolve CUDA symbols or
-/// start runtime services. The table's initialization callback performs those
-/// operations.
+/// Repeated registrations return the same table without resolving CUDA symbols or
+/// starting runtime services. Those operations belong to the table's initialization
+/// callback so the handshake can remain independent of loader and worker startup.
 ///
 /// # Safety
 /// `frontend` must provide an aligned, readable version and size prefix. A matching
@@ -135,7 +136,7 @@ pub unsafe extern "C" fn cuinterpose_core_init(
     if frontend.is_null() || output.is_null() {
         return CUDA_ERROR_INVALID_VALUE;
     }
-    // A mismatched frontend may provide only the version and size prefix. Check it
+    // A mismatched frontend may provide only the version and size prefix, so check it
     // before reading the resolver or copying the complete structure.
     let version = unsafe { std::ptr::addr_of!((*frontend).version).read() };
     let size = unsafe { std::ptr::addr_of!((*frontend).size).read() };
@@ -143,8 +144,8 @@ pub unsafe extern "C" fn cuinterpose_core_init(
         return CUDA_ERROR_INVALID_VALUE;
     }
     let frontend = unsafe { *frontend };
-    // Only copy the table during OnceLock initialization. Loader calls, callbacks, or
-    // worker startup could deadlock a caller in a constructor.
+    // OnceLock initialization must only copy the table because loader calls, callbacks,
+    // or worker startup could deadlock a caller in a constructor.
     let existing = G_FRONTEND_ABI.get_or_init(|| frontend);
     if existing.resolve as usize != frontend.resolve as usize {
         return CUDA_ERROR_INVALID_VALUE;
