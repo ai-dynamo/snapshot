@@ -50,7 +50,8 @@ else:
 sockets_before = set(path.parent.glob("cuinterpose-*.sock"))
 
 if mode == "permissive-umask":
-    # Only this new child changes umask. Runtime startup must not change it.
+    # The child changes umask before initialization so the test can verify that runtime
+    # startup leaves it unchanged.
     os.umask(0)
 
 if mode == "relative-preload-chdir":
@@ -86,8 +87,8 @@ if mode in ("existing-file", "existing-symlink", "existing-live", "existing-full
             queued = socket.socket(socket.AF_UNIX)
             queued.connect(str(path))
     before = path.lstat()
-    # When the socket backlog is full, do not wait for a timeout while holding the
-    # installation lock. A loader constructor can hold that lock.
+    # A full socket backlog must fail without waiting for a timeout under the
+    # installation lock, since a loader constructor can hold that lock.
     signal.alarm(5)
     assert cuda.cuInit(0) == 304  # CUDA_ERROR_OPERATING_SYSTEM
     signal.alarm(0)
@@ -99,8 +100,7 @@ if mode in ("existing-file", "existing-symlink", "existing-live", "existing-full
         assert path.is_symlink() and target.stat().st_ino == target_inode
         target.unlink()
     path.unlink()
-    assert cuda.cuInit(0) == 3 and not path.exists()  # Later calls must report the same
-                                                      # failure.
+    assert cuda.cuInit(0) == 3 and not path.exists()  # Later calls still fail.
     print(f"PASS actual Rust endpoint {mode}: preserved existing endpoint")
     sys.exit(0)
 
@@ -200,8 +200,7 @@ activate()
 if mode == "out-of-order":
     error = request("execute", operation="save_allocations")["result"]["Err"]
     assert "SaveAllocations" in error and "expected MulticastPrepared" in error and "actual Active" in error, error
-    assert "Ok" in request("begin_checkpoint")["result"]  # The rejected operation did not change
-                                                          # the phase.
+    assert "Ok" in request("begin_checkpoint")["result"]  # Phase remains unchanged.
 if mode == "permissive-umask":
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert os.umask(0) == 0, "runtime startup changed the application's umask"
@@ -216,7 +215,8 @@ if mode in ("concurrent", "stale-concurrent"):
         assert inspect()["namespace_pid"] == parent
     assert path.stat().st_ino == inode
     assert set(path.parent.glob("cuinterpose-*.sock")) == sockets_before | {path}
-    # CUDA has its own workers. Count only the shim's named service threads.
+    # Count only the shim's named service threads because CUDA also starts its own
+    # workers.
     def shim_workers():
         return [thread for thread in Path("/proc/self/task").iterdir()
                 if (thread / "comm").read_text().startswith("cuinterpose-")]

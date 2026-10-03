@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Context destruction frees converted mallocs. Direct VMM allocations survive."""
+"""Context destruction frees converted mallocs while direct VMM allocations survive."""
 
 import os
 from pathlib import Path
@@ -112,9 +112,9 @@ def run_worker(mode, coordinator):
     cuda_driver.assert_bytes(survivor, b"other context", "other live context")
     cuda_driver.assert_bytes(address, b"explicit VMM", "after teardown")
 
-    # Shared direct VMM must remain usable for checkpointing after its recorded context
-    # is destroyed. Test carrier preparation and reconstruction. Do not run native
-    # checkpoint or CRIU here.
+    # Shared direct VMM must remain checkpointable after its recorded context is
+    # destroyed, so this exercises carrier preparation and reconstruction without a
+    # native checkpoint or CRIU dump.
     control = Path(os.environ["SNAPSHOT_CONTROL_DIR"])
     checkpoint = control / "checkpoint"
     checkpoint.mkdir()

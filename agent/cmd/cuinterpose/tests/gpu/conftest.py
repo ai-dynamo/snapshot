@@ -3,8 +3,8 @@
 
 """Test real GPUs with one matching set of prebuilt Rust artifacts.
 
-The suite requires two real GPUs and a CUDA 13 driver. Missing dependencies, artifacts,
-or hardware fail the run. They do not skip qualification.
+Qualification requires two real GPUs and a CUDA 13 driver, so missing dependencies,
+artifacts, or hardware fail the run instead of skipping it.
 """
 
 from __future__ import annotations

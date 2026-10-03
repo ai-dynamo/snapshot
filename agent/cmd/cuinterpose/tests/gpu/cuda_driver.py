@@ -3,9 +3,10 @@
 
 """CUDA Driver API helpers for the cuinterpose GPU tests.
 
-Provide direct CUDA calls, VMM helpers, allocations created without the shim, a copy
-bandwidth baseline, and native process checkpoint operations. Workload and coordinator
-control belong in the test harness.
+This module provides direct CUDA calls, VMM helpers, allocations created without the
+shim, a copy bandwidth baseline, and native process checkpoint operations. Workload
+and coordinator control stay in the harness so these helpers can serve both native
+and interposed test paths.
 """
 
 from __future__ import annotations
@@ -225,7 +226,8 @@ def native_checkpoint(
     command_timeout_seconds: int,
     checkpoint_timeout_seconds: int,
 ) -> None:
-    """Checkpoint and restore workers. Limit the wait for driver calls that do not return.
+    """Checkpoint and restore workers with a timeout for driver calls that do not
+    return.
     """
     outcomes: queue.Queue[Exception | None] = queue.Queue(maxsize=1)
 

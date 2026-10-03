@@ -133,8 +133,9 @@ fn fragmented_prefix_and_body_are_accepted_and_oversized_prefix_is_refused() {
 
 #[test]
 fn malformed_or_excess_ancillary_data_closes_received_descriptors() {
-    // The peer reports EOF only after every SCM_RIGHTS duplicate closes. Test decoding
-    // failures, excess descriptors, and a truncated ancillary buffer.
+    // The peer reports EOF only after every SCM_RIGHTS duplicate closes, so this
+    // detects descriptor leaks on decoding failure, excess descriptors, and a truncated
+    // ancillary buffer.
     for count in [1, 2, 8] {
         let (reader, writer) = UnixStream::pair().unwrap();
         reader

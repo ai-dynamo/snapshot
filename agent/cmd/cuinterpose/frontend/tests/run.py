@@ -77,7 +77,8 @@ def main():
         for source, output, options in targets:
             subprocess.run(compiler + [str(fixtures / source), "-o", str(build / output)] + options,
                            env=env, check=True)
-        # Fail if the required GPUs are unavailable. Do not skip the tests.
+        # Missing GPUs must fail the run so a skipped suite cannot appear to qualify the
+        # artifacts.
         subprocess.run([str(build / "probe"), "require-gpus"], env=env, check=True, timeout=60)
         library_path = os.pathsep.join(filter(None, (str(build), env.get("LD_LIBRARY_PATH"))))
         actual_env = env | {"LD_LIBRARY_PATH": library_path,

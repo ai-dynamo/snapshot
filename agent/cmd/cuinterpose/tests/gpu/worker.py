@@ -3,24 +3,23 @@
 
 """Workload with the shim loaded for GPU tests.
 
-harness.Workload starts this process with LD_PRELOAD=libcuinterpose.so. The parent forks
-WORLD_SIZE workers before initializing CUDA. Forking after CUDA state exists is
-unsupported. Each worker acts as one tensor-parallel rank.
+harness.Workload starts this process with LD_PRELOAD=libcuinterpose.so, then the
+parent forks WORLD_SIZE workers before initializing CUDA. Each worker acts as one
+tensor-parallel rank. Forking after CUDA state exists is unsupported.
 
-Each worker creates two POSIX-shareable allocations filled with seeded random bytes. It
-creates the small allocation before any CUDA context exists. The large allocation tests
-copies through the host carrier.
+Each worker creates two POSIX-shareable allocations with seeded contents. The small
+allocation checks creation without a CUDA context, while the large one verifies that
+the host carrier preserves allocation bytes.
 
-Workers reject descriptors from processes without the shim. The admission-only mode then
-verifies that execution can continue without checkpointing.
+Workers reject descriptors from processes without the shim. In admission-only mode,
+they then verify that normal execution continues without checkpointing. Unicast mode
+exchanges the small allocations and keeps the peer mappings across checkpoint and
+restore. Workers also share a PyTorch symmetric-memory buffer and capture a
+collective in a CUDA graph.
 
-In unicast mode, workers export and exchange their small allocations. Each worker keeps
-its peer mapping across checkpoint and restore. Workers also share a PyTorch
-symmetric-memory buffer and capture a collective in a CUDA graph.
-
-Each worker signals ready and waits for continue. After restore, it verifies the buffer
-contents and replays the graph. Marker files in the sync directory report progress and
-results. Failures print a traceback and return a nonzero exit status.
+After signaling ready, each worker waits for continue before checking the restored
+contents and replaying the graph. Marker files report progress and results, while
+failures print a traceback and exit with a nonzero status.
 """
 
 from __future__ import annotations
@@ -136,7 +135,7 @@ def _worker(rank: int, options: Options, peer_channel: socket.socket) -> None:
     private_seed = options.seed + 2 * rank
     bulk_seed = options.seed + 2 * rank + 1
 
-    # cuMemCreate does not require a CUDA context. The shim must allow the same call.
+    # The shim must allow cuMemCreate without a context because the driver permits it.
     cuda_driver.assert_no_current_context("worker before the first cuMemCreate")
     private_handle = cuda_call(driver.cuMemCreate, private_size, properties, 0)
     cuda_driver.assert_handle_namespace(private_handle, True, "tracked cuMemCreate")
@@ -203,8 +202,8 @@ def _worker(rank: int, options: Options, peer_channel: socket.socket) -> None:
     cuda_driver.assert_handle_namespace(bulk_handle, True, "tracked bulk cuMemCreate")
     bulk_address = cuda_driver.map_allocation(bulk_handle, bulk_size, device)
     _fill(bulk_address, bulk_size, bulk_seed, rank)
-    # Use a large shared allocation to test carrier contents. Use a separate VMM
-    # allocation that is never exported to test native checkpointing.
+    # The large shared allocation exercises carrier contents, while a separate VMM
+    # allocation that is never exported exercises native checkpointing.
     native_handle = cuda_call(driver.cuMemCreate, private_size, properties, 0)
     native_address = cuda_driver.map_allocation(native_handle, private_size, device)
     _fill(native_address, private_size, bulk_seed + WORLD_SIZE, rank)
@@ -216,7 +215,8 @@ def _worker(rank: int, options: Options, peer_channel: socket.socket) -> None:
     os.close(bulk_virtual_shareable_handle)
 
     if options.admission_only:
-        # Rejected imports did not change driver state. Normal execution can continue.
+        # Normal execution can continue because the rejected imports did not change
+        # driver state.
         restore_socket.close()
         (options.sync_dir / f"ready-{rank}").touch()
         _wait_for_continue(options.sync_dir)
@@ -311,8 +311,8 @@ def _collective(
 def _replace_local_binding_with_address(
     rank: int, input_tensor: torch.Tensor, symm_handle, properties: driver.CUmemAllocationProp
 ) -> None:
-    """Rebind this rank's part of the multicast object with cuMulticastBindAddr. This tests
-    both binding entry points.
+    """Rebind this rank's part of the multicast object with cuMulticastBindAddr so the
+    test covers both binding entry points.
     """
     granularity = int(
         cuda_call(

@@ -87,9 +87,9 @@ def restore_pod(
         image=image or framework_image(spec),
         model_cache=model_cache,
     )
-    # Replace the guide's PodSnapshot annotation with the PodSnapshot for this run.
-    # Restoring on a different node requires shared checkpoint storage. Ordinary guide
-    # tests restore on the source node.
+    # The guide names its own PodSnapshot, so the restore annotation must instead
+    # identify this run's snapshot. Tests normally restore on the source node because
+    # another destination requires shared checkpoint storage.
     pod["metadata"]["annotations"] = {RESTORE_FROM_ANNOTATION: run.snapshot_name}
     destination = os.environ.get("SNAPSHOT_E2E_RESTORE_NODE", source_node)
     if not destination:

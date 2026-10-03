@@ -178,8 +178,8 @@ pub fn import(
 impl Binding {
     fn apply(&self, group: u64, member: u64) -> Result<()> {
         use crate::driver;
-        // v2 adds an explicit device argument to v1. Both versions record the same
-        // source.
+        // Both binding versions record the same source, with v2 adding an explicit
+        // device argument.
         unsafe {
             match (self.source, self.version) {
                 (BindingSource::Memory(range), BindingVersion::V1) => driver::cuMulticastBindMem(
@@ -499,8 +499,8 @@ pub fn prepare(state: &mut ProcessState) -> Result<()> {
     Ok(())
 }
 
-/// Application threads remain paused throughout restore. The peer FD service uses only
-/// the export cache. Reconstruction can therefore hold the registry lock during driver
+/// Application threads remain paused throughout restore. Since the peer FD service uses
+/// only the export cache, reconstruction can hold the registry lock even during driver
 /// calls that wait for other processes.
 pub fn restore(state: &mut ProcessState, operation: Operation) -> Result<()> {
     let allocations: std::collections::BTreeMap<_, _> = state
@@ -615,8 +615,8 @@ pub fn restore(state: &mut ProcessState, operation: Operation) -> Result<()> {
     }
     Ok(())
 }
-/// Release the registry lock before creating a multicast object. The CUDA call can wait
-/// for other processes.
+/// The registry lock must be released around multicast creation because the CUDA call
+/// can wait for other processes.
 pub(crate) fn create_backing(
     state: MutexGuard<'static, ProcessState>,
     properties: &CUmulticastObjectProp,

@@ -11,8 +11,8 @@ FRONTEND_CC ?= /opt/gcc-15/bin/gcc
 UV ?= uv
 GPU_BUILD_DIR ?= $(CURDIR)/build
 
-# Build the preload libraries for GNU/glibc. Build the coordinator and launcher with
-# musl so they can run in the workload root without its libraries.
+# The preload libraries use GNU/glibc, while the coordinator and launcher use musl so
+# they can run in the workload root without depending on its libraries.
 build:
 	docker buildx build --platform linux/amd64 --target cuinterpose-export \
 		--output type=local,dest=build -f ../../Dockerfile ../..
@@ -45,7 +45,8 @@ test-native: native
 	python3 tests/coordinator.py
 	cd rust && cargo test --locked --release -p cuinterpose-coordinator -p cuinterpose-protocol -p cuinterpose-launch --target x86_64-unknown-linux-musl
 
-# Build and export matching artifacts first. This host needs two real CUDA GPUs.
+# This target consumes prebuilt matching artifacts and requires two real CUDA GPUs on
+# the test host.
 test-gpu:
 	python3 frontend/tests/run.py --artifacts "$(GPU_BUILD_DIR)" --cuda-include "$(CUDA_INCLUDE)"
 	CUINTERPOSE_BUILD_DIR="$(GPU_BUILD_DIR)" $(UV) run --project tests/gpu pytest tests/gpu -v

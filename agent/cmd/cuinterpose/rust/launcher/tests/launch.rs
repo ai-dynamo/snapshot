@@ -25,8 +25,8 @@ fn preserves_resolved_environment_arguments_and_pid() {
         if let Some(value) = existing {
             command.env("LD_PRELOAD", OsStr::from_bytes(value));
         }
-        // The test explicitly supplies the shell as the workload. Check its raw
-        // environment bytes and PID to detect an unintended parent process.
+        // The supplied shell reports its raw environment bytes and PID so an unintended
+        // parent process cannot make the test pass.
         let child = command
             .args([
                 "/bin/sh",

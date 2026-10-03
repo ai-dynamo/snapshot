@@ -3,10 +3,10 @@
 
 """Shared GPU test harness.
 
-The test process runs without the shim. It starts worker.py with the shim loaded. That
-parent forks WORLD_SIZE CUDA workers. The harness runs coordinator inspection and
-preparation, the native cuCheckpointProcess* sequence, and coordinator reconstruction.
-It does not run CRIU or the Go agent.
+The test process stays outside the shim and starts worker.py with the shim loaded.
+That parent forks WORLD_SIZE CUDA workers, which the harness drives through
+coordinator inspection and preparation, the native cuCheckpointProcess* sequence, and
+coordinator reconstruction. The harness does not run CRIU or the Go agent.
 """
 
 from __future__ import annotations
@@ -60,8 +60,9 @@ def visible_gpus() -> tuple[str, str] | None:
 class Workload:
     """One parent with the shim loaded and WORLD_SIZE forked CUDA workers.
 
-    Use as a context manager. On exit, terminate the process group and collect output
-    from the parent and workers. Attach that output to any raised error.
+    The context manager terminates the process group on exit and attaches output from
+    the parent and workers to any raised error, so a failure includes the workers'
+    diagnostics.
     """
 
     def __init__(
@@ -137,8 +138,8 @@ class Workload:
         )
 
     def start(self) -> None:
-        """Start the parent and wait for every worker. Check that each worker loaded the
-        shim and started its listener.
+        """Start the parent and wait until every worker has loaded the shim and started
+        its listener.
         """
         self._externals = cuda_driver.create_external_allocations(WORLD_SIZE, 1)
         self.parent = self._start_parent(

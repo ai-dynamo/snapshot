@@ -42,7 +42,8 @@ def run_worker(coordinator):
                         driver.CUmemAllocationGranularity_flags.CU_MEM_ALLOC_GRANULARITY_MINIMUM))
     handle = cuda_call(driver.cuMemCreate, size, properties, 0)
     address = cuda_driver.map_allocation(handle, size, 0)
-    # Export marks the backing as shared. The host carrier will destroy and recreate it.
+    # Export marks this backing as shared so the host carrier path destroys and
+    # recreates it.
     fd = int(cuda_call(driver.cuMemExportToShareableHandle, handle,
                        cuda_driver.POSIX_FD_HANDLE_TYPE, 0))
     flags = driver.CUmemAccess_flags
