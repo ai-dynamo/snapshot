@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Initialize and publish the process runtime. Track runtime failures.
+//! Process runtime initialization, publication, and failure state.
 
 mod control;
 
@@ -23,7 +23,8 @@ struct ProcessRuntime {
     control_dir: PathBuf,
     socket_path: PathBuf,
 }
-// Publish once after CUDA initialization. Do not reset it or reuse it in a fork child.
+// Once published after CUDA initialization, this runtime belongs to its creating
+// process and must never be reset or reused in a fork child.
 static RUNTIME: OnceLock<ProcessRuntime> = OnceLock::new();
 static INSTALL_LOCK: Mutex<()> = Mutex::new(());
 
@@ -66,9 +67,9 @@ pub fn initialize() -> Result<()> {
         return Err(Error::RuntimeFailed);
     }
     thread_local! {
-        // Reject reentry on this thread. Other threads can prepare runtime candidates
-        // concurrently. A global guard could deadlock with the loader. Cell<bool> needs
-        // no TLS destructor or loader registration.
+        // A thread-local guard rejects reentry without making other threads wait to
+        // prepare runtime candidates. A global guard could deadlock with the loader,
+        // while Cell<bool> also avoids TLS destructors and loader registration.
         static PREPARING: Cell<bool> = const { Cell::new(false) };
     }
     if PREPARING.replace(true) {
@@ -110,7 +111,8 @@ pub fn initialize() -> Result<()> {
     // listeners.
 }
 
-// Borrow the candidate under INSTALL_LOCK. Drop it after releasing the lock.
+// Borrowing the candidate under INSTALL_LOCK keeps its cleanup outside the installation
+// mutex.
 fn install_runtime(candidate: &mut RuntimeCandidate) -> Result<()> {
     let runtime = candidate.runtime.as_mut().unwrap();
     candidate.workers.activate(
@@ -128,8 +130,8 @@ fn install_runtime(candidate: &mut RuntimeCandidate) -> Result<()> {
 }
 
 struct RuntimeCandidate {
-    // Take the runtime only when transferring ownership to RUNTIME. Unused candidates
-    // retain ownership for cleanup.
+    // Ownership moves out of the candidate only when the runtime is published in
+    // RUNTIME, leaving unused candidates responsible for cleanup.
     runtime: Option<Box<ProcessRuntime>>,
     workers: control::PreparedWorkers,
 }
