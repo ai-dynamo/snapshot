@@ -152,6 +152,8 @@ pub struct ProcessState {
     imported_mallocs: BTreeMap<AllocationId, u64>,
     // Minimum granularity and GPUDirect RDMA flag for the fixed malloc properties.
     malloc_layouts: BTreeMap<i32, (usize, u8)>,
+    // Owning context -> accessing contexts and their device ordinals.
+    malloc_peers: BTreeMap<usize, BTreeMap<usize, i32>>,
     pub memblocks: BTreeMap<AllocationId, Memblock>,
     pub virtual_allocation_handles: BTreeMap<VirtualAllocationHandle, HandleEntry>,
     pub mappings: BTreeMap<u64, Mapping>,
@@ -168,6 +170,7 @@ impl ProcessState {
             malloc_regions: BTreeMap::new(),
             imported_mallocs: BTreeMap::new(),
             malloc_layouts: BTreeMap::new(),
+            malloc_peers: BTreeMap::new(),
             memblocks: BTreeMap::new(),
             virtual_allocation_handles: BTreeMap::new(),
             mappings: BTreeMap::new(),

@@ -56,6 +56,8 @@ macro_rules! exports {
 }
 // BackendAbi initialization checks these adapters against the ABI signatures.
 exports! {
+    cuCtxEnablePeerAccess(peer: CUcontext, flags: u32);
+    cuCtxDisablePeerAccess(peer: CUcontext);
     cuCtxDestroy(context: CUcontext);
     cuCtxDestroy_v2(context: CUcontext);
     cuDevicePrimaryCtxRelease(device: CUdevice);
