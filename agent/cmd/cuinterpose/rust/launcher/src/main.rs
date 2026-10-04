@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
+use sha2::{Digest, Sha256};
 use std::env;
 use std::ffi::OsString;
 use std::fs::File;
@@ -9,6 +10,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
+
+include!(concat!(env!("OUT_DIR"), "/library_hashes.rs"));
 
 fn main() -> ExitCode {
     let mut args = env::args_os().skip(1);
@@ -36,19 +39,42 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    // A missing preload is only a loader warning. Check delivery before exec so the
-    // application cannot start merely because the loader ignored a missing library.
-    for path in [&library, &library.with_file_name("libcuinterpose_core.so")] {
-        let result = std::fs::metadata(path).and_then(|metadata| {
-            if metadata.is_file() {
-                File::open(path).map(|_| ())
-            } else {
-                Err(std::io::Error::new(
+    // A missing or corrupt preload can be only a loader warning. Require the exact
+    // libraries built with this launcher before exec. Delivery stays read-only while
+    // the workload starts, so the loader sees the bytes verified here.
+    for (path, expected) in [
+        (&library, &FRONTEND_SHA256),
+        (
+            &library.with_file_name("libcuinterpose_core.so"),
+            &CORE_SHA256,
+        ),
+    ] {
+        let result = (|| {
+            // Reject FIFOs before open, which would otherwise wait for a writer.
+            if !std::fs::metadata(path)?.is_file() {
+                return Err(std::io::Error::new(
                     ErrorKind::InvalidInput,
                     "not a regular file",
-                ))
+                ));
             }
-        });
+            let mut file = File::open(path)?;
+            if !file.metadata()?.is_file() {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "not a regular file",
+                ));
+            }
+            let mut digest = Sha256::new();
+            std::io::copy(&mut file, &mut digest)?;
+            let actual: [u8; 32] = digest.finalize().into();
+            if actual != *expected {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    "SHA-256 mismatch with this launcher build",
+                ));
+            }
+            Ok(())
+        })();
         if let Err(error) = result {
             eprintln!(
                 "cuinterpose-launch: cannot use library {}: {error}",
