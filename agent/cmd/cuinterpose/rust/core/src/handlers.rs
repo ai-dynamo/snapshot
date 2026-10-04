@@ -375,16 +375,11 @@ pub fn cuMulticastBindAddr_v2(
 }
 
 pub fn cuMulticastUnbind(handle: u64, device: i32, offset: usize, size: usize) -> Result<()> {
-    let mut state = runtime::active()?;
+    let state = runtime::active()?;
     let id = state
         .resolve_virtual_handle(handle)?
         .ok_or(CUDA_ERROR_NOT_SUPPORTED)?;
-    let object = state
-        .memblocks
-        .get_mut(&id)
-        .and_then(Memblock::multicast_mut)
-        .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
-    object.unbind(device, offset, size)
+    multicast::unbind(state, id, device, offset, size)
 }
 
 pub use cuIpcOpenMemHandle as cuIpcOpenMemHandle_v2;
