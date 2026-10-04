@@ -92,7 +92,9 @@ func shapeCuInterposeCapture(template *corev1.PodTemplateSpec, targetName string
 
 	shaped := template.DeepCopy()
 	target = &shaped.Spec.Containers[targetIndex]
-	target.Command = append([]string{podcontract.CuInterposeLauncherPath}, target.Command...)
+	target.Command = append([]string{
+		podcontract.CuInterposeLauncherPath, "--library", podcontract.CuInterposeLibraryPath, "--",
+	}, target.Command...)
 	target.VolumeMounts = append(target.VolumeMounts, corev1.VolumeMount{
 		Name: cuInterposeVolumeName, MountPath: podcontract.CuInterposeMountPath, ReadOnly: true,
 	})

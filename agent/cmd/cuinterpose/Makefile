@@ -20,7 +20,12 @@ test:
 		-f ../../Dockerfile ../..
 
 frontend:
+	@cd rust && expected=$$(cargo tree --locked -p cbindgen --depth 0 --prefix none --format '{p}') && \
+		actual=$$($(CBINDGEN) --version) && \
+		{ test "$$actual" = "cbindgen $${expected#cbindgen v}" || \
+		  { echo "ERROR: $$actual does not match locked $$expected" >&2; exit 1; }; }
 	mkdir -p build
+	# Keep the matching private header in the export for ABI and GPU tests.
 	cd rust && $(CBINDGEN) --quiet --config abi/cbindgen.toml --crate cuinterpose-abi \
 		--output ../build/core_abi.h .
 	$(FRONTEND_CC) -std=gnu11 -O2 -Wall -Wextra -Werror -shared -fPIC -fvisibility=hidden \

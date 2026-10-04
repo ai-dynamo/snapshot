@@ -20,7 +20,7 @@ DOCKER_BUILD_ARGS ?=
 # committed package baseline would describe a different image than we build on.
 AGENT_BASE_IMAGE ?= $(shell sed -n 's/^ARG AGENT_BASE_IMAGE=//p' agent/Dockerfile)
 
-# The agent is x86_64-only (cuda-checkpoint ships no other arch) and the package
+# The agent supports x86_64 only and the package
 # baseline is captured for this platform, so pin it rather than inheriting
 # whatever the buildx builder defaults to.
 AGENT_PLATFORM ?= linux/amd64
@@ -126,6 +126,7 @@ linux-build:
 	  -v "$(CURDIR):/workspace" -w /workspace \
 	  $(LINUX_GO_IMAGE) \
 	  make -C agent go-build
+	# buildx uses the host Docker connection, which is not passed into the Go container.
 	$(MAKE) -C agent cuinterpose-build
 
 linux-test:

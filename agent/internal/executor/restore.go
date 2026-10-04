@@ -169,10 +169,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if err != nil {
 		return 0, fmt.Errorf("read checkpoint manifest: %w", err)
 	}
-	if err := validateRestoreManifest(req, manifest); err != nil {
-		return 0, err
-	}
-	if err := cuda.CheckCuInterposeLibraries(cuda.CuInterposeBundlePath, manifest.CuInterpose); err != nil {
+	if err := validateRestoreManifest(req, manifest, nsmount.CuInterposeBundlePath); err != nil {
 		return 0, err
 	}
 
@@ -318,7 +315,7 @@ func validateRestoredProcess(targetRoot string, restoredPID int, log logr.Logger
 	return nil
 }
 
-func validateRestoreManifest(req RestoreRequest, manifest *types.CheckpointManifest) error {
+func validateRestoreManifest(req RestoreRequest, manifest *types.CheckpointManifest, bundleDir string) error {
 	if manifest.Artifact.ContentUID != req.ContentUID || manifest.Artifact.ContainerName != req.ArtifactContainerName {
 		return fmt.Errorf(
 			"checkpoint manifest artifact %s/%s does not match requested artifact %s/%s",
@@ -328,7 +325,8 @@ func validateRestoreManifest(req RestoreRequest, manifest *types.CheckpointManif
 			req.ArtifactContainerName,
 		)
 	}
-	return nil
+	// Executable identity is required even when compatibility policy is skipped.
+	return cuda.CheckCuInterposeLibraries(bundleDir, manifest.CuInterpose)
 }
 
 func inspectRestore(

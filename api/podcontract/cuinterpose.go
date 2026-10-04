@@ -10,10 +10,9 @@ import (
 )
 
 const (
-	CuInterposeMountPath       = "/tmp/snapshot-cuda"
-	CuInterposeLibraryPath     = CuInterposeMountPath + "/libcuinterpose.so"
-	CuInterposeCoreLibraryPath = CuInterposeMountPath + "/libcuinterpose_core.so"
-	CuInterposeLauncherPath    = CuInterposeMountPath + "/cuinterpose-launch"
+	CuInterposeMountPath    = "/tmp/snapshot-cuda"
+	CuInterposeLibraryPath  = CuInterposeMountPath + "/libcuinterpose.so"
+	CuInterposeLauncherPath = CuInterposeMountPath + "/cuinterpose-launch"
 )
 
 // ParseCuInterposeAnnotation accepts the same values as ParseBool. It distinguishes an

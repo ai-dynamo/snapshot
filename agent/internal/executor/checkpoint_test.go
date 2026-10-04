@@ -147,7 +147,10 @@ func TestCheckpointNeedsSourceKill(t *testing.T) {
 
 func TestCuInterposeCaptureFailureBoundary(t *testing.T) {
 	// A missing endpoint or helper fails preflight before state changes.
-	err := cuda.InspectCuInterpose(context.Background(), "/proc", os.Getpid(), []int{1}, filepath.Join(t.TempDir(), "missing-coordinator"))
+	err := cuda.InspectCuInterpose(context.Background(), cuda.CuInterposeTarget{
+		ProcRoot: "/proc", TargetPID: os.Getpid(), NamespacePIDs: []int{1},
+		Binary: filepath.Join(t.TempDir(), "missing-coordinator"),
+	})
 	require.Error(t, err)
 	assert.False(t, CheckpointNeedsSourceKill(err))
 

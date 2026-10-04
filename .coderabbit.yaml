@@ -53,7 +53,7 @@ reviews:
     override_requested_reviewers_only: false
     title:
       mode: "warning"
-      requirements: "Must follow conventional commits: feat/fix/chore/docs/refactor/test/ci. First line under 72 chars."
+      requirements: "Must follow conventional commits: feat/fix/chore/docs/refactor/test/ci/build/perf. First line under 72 chars."
     custom_checks:
       - name: "Breaking API Changes"
         mode: "warning"

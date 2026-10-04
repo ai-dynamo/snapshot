@@ -21,6 +21,21 @@ const (
 	DefaultCoordinatorBinaryPath = "/usr/local/bin/" + CoordinatorBinaryName
 )
 
+type CuInterposeTarget struct {
+	ProcRoot      string
+	TargetPID     int
+	NamespacePIDs []int
+	Binary        string
+}
+
+type cuInterposeOperation string
+
+const (
+	cuInterposeInspect cuInterposeOperation = "inspect"
+	cuInterposePrepare cuInterposeOperation = "prepare"
+	cuInterposeRestore cuInterposeOperation = "restore"
+)
+
 func RemoveStaleCuInterposeSockets(controlDir string, namespacePIDs []int) error {
 	for _, pid := range namespacePIDs {
 		path := filepath.Join(controlDir, fmt.Sprintf("cuinterpose-%d.sock", pid))
@@ -34,36 +49,36 @@ func RemoveStaleCuInterposeSockets(controlDir string, namespacePIDs []int) error
 // Inspect only reads state and requires every participant to reply and pass topology
 // validation before the caller enters the phase where failure requires source
 // termination.
-func InspectCuInterpose(ctx context.Context, procRoot string, targetPID int, namespacePIDs []int, binary string) error {
-	return runCuInterposeInContainer(ctx, "inspect", "", procRoot, targetPID, namespacePIDs, binary)
+func InspectCuInterpose(ctx context.Context, target CuInterposeTarget) error {
+	return runCuInterposeInContainer(ctx, cuInterposeInspect, target, "")
 }
 
 // Prepare removes shared mappings, so the caller must terminate the source on failure.
-func PrepareCuInterpose(ctx context.Context, checkpointDir, procRoot string, targetPID int, namespacePIDs []int, binary string) error {
-	return runCuInterposeInContainer(ctx, "prepare", checkpointDir, procRoot, targetPID, namespacePIDs, binary)
+func PrepareCuInterpose(ctx context.Context, target CuInterposeTarget, checkpointDir string) error {
+	return runCuInterposeInContainer(ctx, cuInterposePrepare, target, checkpointDir)
 }
 
-func runCuInterposeInContainer(ctx context.Context, operation, checkpointDir, procRoot string, targetPID int, namespacePIDs []int, binary string) error {
-	processDir := filepath.Join(procRoot, strconv.Itoa(targetPID))
+func runCuInterposeInContainer(ctx context.Context, operation cuInterposeOperation, target CuInterposeTarget, checkpointDir string) error {
+	processDir := filepath.Join(target.ProcRoot, strconv.Itoa(target.TargetPID))
 	mountNS, err := os.Open(filepath.Join(processDir, "ns/mnt"))
 	if err != nil {
-		return err
+		return fmt.Errorf("cuinterpose %s: open mount namespace for process %d: %w", operation, target.TargetPID, err)
 	}
 	defer mountNS.Close()
-	cmd, closeFiles, err := snapshotruntime.CommandInNamespaces(ctx, targetPID, mountNS, filepath.Join(processDir, "root"), binary)
+	cmd, closeFiles, err := snapshotruntime.CommandInNamespaces(ctx, target.TargetPID, mountNS, filepath.Join(processDir, "root"), target.Binary)
 	if err != nil {
-		return err
+		return fmt.Errorf("cuinterpose %s: prepare namespace command %s for process %d: %w", operation, target.Binary, target.TargetPID, err)
 	}
 	defer closeFiles()
 	if checkpointDir != "" {
 		checkpoint, err := os.Open(checkpointDir)
 		if err != nil {
-			return err
+			return fmt.Errorf("cuinterpose %s: open checkpoint directory for process %d: %w", operation, target.TargetPID, err)
 		}
 		defer checkpoint.Close()
 		checkpointDir = snapshotruntime.InheritFile(cmd, checkpoint)
 	}
-	args := cuInterposeArgs(operation, checkpointDir, namespacePIDs)
+	args := cuInterposeArgs(operation, checkpointDir, target.NamespacePIDs)
 	cmd.Args = append(cmd.Args, args...)
 	return executeCoordinator(cmd)
 }
@@ -73,7 +88,7 @@ func runCuInterposeInContainer(ctx context.Context, operation, checkpointDir, pr
 func RestoreCuInterpose(ctx context.Context, checkpointDir string, namespacePIDs []int, binary string) error {
 	// Sharing nsrestore's process group lets cancellation by its host parent reach this
 	// coordinator even if nsrestore has already been killed.
-	return executeCoordinator(exec.CommandContext(ctx, binary, cuInterposeArgs("restore", checkpointDir, namespacePIDs)...))
+	return executeCoordinator(exec.CommandContext(ctx, binary, cuInterposeArgs(cuInterposeRestore, checkpointDir, namespacePIDs)...))
 }
 
 func executeCoordinator(cmd *exec.Cmd) error {
@@ -83,8 +98,8 @@ func executeCoordinator(cmd *exec.Cmd) error {
 	return nil
 }
 
-func cuInterposeArgs(operation, checkpointDir string, namespacePIDs []int) []string {
-	args := []string{"--" + operation}
+func cuInterposeArgs(operation cuInterposeOperation, checkpointDir string, namespacePIDs []int) []string {
+	args := []string{"--" + string(operation)}
 	if checkpointDir != "" {
 		args = append(args, "--checkpoint-dir", checkpointDir)
 	}

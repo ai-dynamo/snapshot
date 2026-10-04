@@ -17,6 +17,8 @@ import (
 const (
 	// SnapshotBinSrc is the agent-side directory containing the binary bundle.
 	SnapshotBinSrc = "/snapshot-binaries"
+	// CuInterposeBundlePath holds the libraries restored at their capture-time paths.
+	CuInterposeBundlePath = SnapshotBinSrc + "/snapshot-cuda"
 	// SnapshotBinDst is the mount destination inside the placeholder namespace.
 	SnapshotBinDst = "/tmp/snapshot-binaries"
 	// CheckpointSrc is the fixed agent-side checkpoint mount.

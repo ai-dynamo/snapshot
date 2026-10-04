@@ -809,7 +809,9 @@ func TestSnapshotJobReconcileCuInterpose(t *testing.T) {
 			if enabled {
 				installer := requireContainer(t, job.Spec.Template.Spec.InitContainers, "snapshot-cuda-install")
 				assert.Equal(t, r.CuInterpose.AgentImage, installer.Image)
-				assert.Equal(t, append([]string{podcontract.CuInterposeLauncherPath}, worker.Command...), container.Command)
+				assert.Equal(t, append([]string{
+					podcontract.CuInterposeLauncherPath, "--library", podcontract.CuInterposeLibraryPath, "--",
+				}, worker.Command...), container.Command)
 			} else {
 				assert.Equal(t, worker.Command, container.Command)
 				assert.Empty(t, job.Spec.Template.Spec.InitContainers)

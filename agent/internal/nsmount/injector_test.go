@@ -53,11 +53,11 @@ func (m *mockMounter) MountBundle(_ context.Context, pid int) (mountRef, error) 
 
 func (m *mockMounter) MountCuInterpose(_ context.Context, nsFd *os.File) (mountRef, error) {
 	i := len(m.calls)
-	m.calls = append(m.calls, mountCall{role: "cudatools", nsFd: nsFd})
+	m.calls = append(m.calls, mountCall{role: "snapshot-cuda", nsFd: nsFd})
 	if i < len(m.results) && m.results[i] != nil {
 		return nil, m.results[i]
 	}
-	return &fakeMountRef{dst: "cudatools", unmountLog: &m.unmountLog}, nil
+	return &fakeMountRef{dst: "snapshot-cuda", unmountLog: &m.unmountLog}, nil
 }
 
 func (m *mockMounter) MountCheckpoint(_ context.Context, nsFd *os.File, src string) (mountRef, error) {
@@ -112,7 +112,7 @@ func TestRoleMountsUseFixedPathsAndPolicies(t *testing.T) {
 	want := []mountCall{
 		{role: "bundle", pid: testPID},
 		{role: "checkpoint", src: "/checkpoints/artifacts/content-uid/containers/main"},
-		{role: "cudatools"},
+		{role: "snapshot-cuda"},
 	}
 	if len(m.calls) != len(want) {
 		t.Fatalf("got %d calls, want %d", len(m.calls), len(want))
