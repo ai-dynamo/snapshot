@@ -236,7 +236,8 @@ capture that fails immediately. Mitigated by the configured retry limits — a
 cluster-wide default that a workload can override — and by exponential backoff
 with a bounded maximum delay, so repeated attempts spread out rather than
 hammering a resource that is already under pressure. Failures that need operator
-action are never retried at all.
+action are never retried at all, and the default limit of zero means no capture
+holds anything longer than it does today until someone opts in.
 
 **Retrying into the same destination is more constrained than retrying into a
 fresh one.** Because the capture is retried in place, every attempt targets the
@@ -529,11 +530,15 @@ effective policy is resolved once when the capture begins and is logged with the
 capture, so an operator can see which policy actually applied rather than
 inferring it.
 
-**Default.** The cluster default retry limit is the one value still open. Zero
-preserves today's behaviour exactly and makes retry opt-in; a small non-zero
-value makes the feature useful without anyone configuring it, at the cost of
-changing existing behaviour on upgrade. The naming of all three settings should
-be agreed with restore retry (#247) so the two read as a pair.
+**Default.** The cluster default retry limit is **0**, so retry is opt-in and an
+upgrade changes no existing capture's behaviour. An operator raises it for the
+cluster, or a workload opts itself in, and in both cases the choice is explicit
+and attributable. This matches the default #247 states for restore retry; the
+naming of all three settings should be agreed with it so the two read as a pair.
+
+The node-agent protections are unaffected by this default. Panic recovery and
+the fail-fast memory check are unconditional — they are not retry behaviour and
+do not wait on anyone enabling retry.
 
 Naming should stay consistent with whatever shape #247 lands on for restore
 retry, so the two knobs read as a pair.
@@ -686,7 +691,8 @@ runtime authority:
 
 ### Graduation Criteria
 
-**Alpha.** Retry is available, configurable cluster-wide and per workload, with
+**Alpha.** Retry is available, defaulting to zero retries, configurable
+cluster-wide and per workload, with
 unit and integration coverage for the recoveries that do not require reviving a
 suspended workload. The node-agent protections — panic recovery and the
 fail-fast memory check — are in place and are unconditional, independent of
