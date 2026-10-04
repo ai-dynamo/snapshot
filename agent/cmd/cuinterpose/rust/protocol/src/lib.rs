@@ -186,13 +186,20 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     Ok(envelope.body)
 }
 
-pub fn timeout(operation: Option<Operation>) -> Duration {
-    let (variable, fallback) = match operation {
-        Some(Operation::SaveAllocations | Operation::LoadAllocations) => {
-            ("SNAPSHOT_CARRIER_TIMEOUT_SECONDS", 3600)
+pub fn control_timeout() -> Duration {
+    timeout("SNAPSHOT_CONTROL_TIMEOUT_SECONDS", 10)
+}
+
+pub fn operation_timeout(operation: Operation) -> Duration {
+    match operation {
+        Operation::SaveAllocations | Operation::LoadAllocations => {
+            timeout("SNAPSHOT_CARRIER_TIMEOUT_SECONDS", 3600)
         }
-        _ => ("SNAPSHOT_CONTROL_TIMEOUT_SECONDS", 10),
-    };
+        _ => control_timeout(),
+    }
+}
+
+fn timeout(variable: &str, fallback: u32) -> Duration {
     let seconds = std::env::var(variable)
         .ok()
         .and_then(|s| s.parse::<u32>().ok())

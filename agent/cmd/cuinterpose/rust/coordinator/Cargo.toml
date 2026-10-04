@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 cuinterpose-protocol.workspace = true
+cudarc.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tempfile.workspace = true

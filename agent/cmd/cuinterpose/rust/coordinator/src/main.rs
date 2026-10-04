@@ -38,16 +38,21 @@ struct Peer {
     namespace_pid: NamespacePid,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum RecordRequest {
+    Inspect,
+    BeginCheckpoint,
+}
+
 // Transport errors retain their cause. Remote refusals are application errors.
 fn exchange(endpoint: &Path, request: &Request) -> Result<Response> {
     let display = endpoint.display();
-    let socket = protocol::connect(endpoint, protocol::timeout(None))
+    let socket = protocol::connect(endpoint, protocol::control_timeout())
         .with_context(|| format!("{display}: {request:?}: connect failed"))?;
-    let operation = match request {
-        Request::Execute { operation, .. } => Some(*operation),
-        _ => None,
-    };
-    let timeout = Some(protocol::timeout(operation));
+    let timeout = Some(match request {
+        Request::Execute { operation, .. } => protocol::operation_timeout(*operation),
+        _ => protocol::control_timeout(),
+    });
     socket
         .set_read_timeout(timeout)
         .with_context(|| format!("{display}: {request:?}: set read timeout failed"))?;
@@ -66,51 +71,47 @@ fn exchange(endpoint: &Path, request: &Request) -> Result<Response> {
 }
 
 impl Peer {
-    fn inspect(&self, begin_checkpoint: bool) -> Result<Vec<Record>> {
-        let response = exchange(
-            &self.endpoint,
-            &if begin_checkpoint {
-                Request::BeginCheckpoint {
-                    namespace_pid: self.namespace_pid,
-                }
-            } else {
-                Request::Inspect {
-                    namespace_pid: self.namespace_pid,
-                }
-            },
-        )?;
+    fn request(&self, request: &Request) -> Result<Reply> {
+        let response = exchange(&self.endpoint, request)?;
         ensure!(
             response.namespace_pid == self.namespace_pid,
-            "{}: namespace PID changed",
-            self.endpoint.display()
+            "{}: namespace PID changed: expected {}, actual {}",
+            self.endpoint.display(),
+            self.namespace_pid,
+            response.namespace_pid
         );
-        match response.result.map_err(anyhow::Error::msg)? {
+        response.result.map_err(anyhow::Error::msg)
+    }
+
+    fn records(&self, request: RecordRequest) -> Result<Vec<Record>> {
+        let namespace_pid = self.namespace_pid;
+        let request = match request {
+            RecordRequest::Inspect => Request::Inspect { namespace_pid },
+            RecordRequest::BeginCheckpoint => Request::BeginCheckpoint { namespace_pid },
+        };
+        match self.request(&request)? {
             Reply::Inspection { records } => Ok(records),
-            _ => bail!("{}: unexpected inspection reply", self.endpoint.display()),
+            actual => bail!("expected inspection reply, actual {actual:?}"),
         }
     }
 
     fn execute(&self, operation: Operation, expected_bytes: u64) -> Result<()> {
-        let response = exchange(
-            &self.endpoint,
-            &Request::Execute {
-                namespace_pid: self.namespace_pid,
-                operation,
-            },
-        )?;
-        ensure!(
-            response.namespace_pid == self.namespace_pid,
-            "{}: namespace PID changed",
-            self.endpoint.display()
-        );
-        match response.result.map_err(anyhow::Error::msg)? {
+        match self.request(&Request::Execute {
+            namespace_pid: self.namespace_pid,
+            operation,
+        })? {
             Reply::Completed {
                 operation: actual,
                 bytes,
-            } if actual == operation && bytes == expected_bytes => Ok(()),
-            _ => bail!(
-                "{}: unexpected {operation:?} response or transfer size",
-                self.endpoint.display()
+            } => {
+                ensure!(
+                    actual == operation && bytes == expected_bytes,
+                    "unexpected response or transfer size: expected operation {operation:?}, actual {actual:?}, expected_bytes {expected_bytes}, bytes {bytes}"
+                );
+                Ok(())
+            }
+            actual => bail!(
+                "expected {operation:?} completion with {expected_bytes} bytes, actual {actual:?}"
             ),
         }
     }
@@ -120,7 +121,7 @@ impl Peer {
 /// deadlock a rank waiting for an exchange that has not started. Every started exchange
 /// is joined even if a participant fails.
 fn command_all(
-    peers: &mut [Peer],
+    peers: &[Peer],
     operation: Operation,
     allocations: &[AllocationSummary],
 ) -> Result<()> {
@@ -135,40 +136,68 @@ fn command_all(
                 .try_fold(0u64, |sum, a| {
                     sum.checked_add(a.size).context("allocation size overflow")
                 })
+                .with_context(|| {
+                    format!(
+                        "participant {} ({})",
+                        peer.namespace_pid,
+                        peer.endpoint.display()
+                    )
+                })
         })
         .collect::<Result<_>>()?;
     std::thread::scope(|scope| {
         let mut jobs = Vec::with_capacity(peers.len());
+        let mut failures = Vec::new();
         for (peer, bytes) in peers.iter().zip(expected_bytes) {
-            jobs.push(
-                std::thread::Builder::new()
-                    .spawn_scoped(scope, move || peer.execute(operation, bytes))?,
-            );
+            match std::thread::Builder::new()
+                .spawn_scoped(scope, move || peer.execute(operation, bytes))
+            {
+                Ok(job) => jobs.push((peer, job)),
+                Err(error) => failures.push(format!(
+                    "participant {} ({}): could not start exchange: {error}",
+                    peer.namespace_pid,
+                    peer.endpoint.display()
+                )),
+            }
         }
-        let mut failure = None;
-        for job in jobs {
+        for (peer, job) in jobs {
+            let participant = format!(
+                "participant {} ({})",
+                peer.namespace_pid,
+                peer.endpoint.display()
+            );
             match job.join() {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
-                    failure.get_or_insert(error);
+                    failures.push(format!("{participant}: {error:#}"));
                 }
-                Err(_) => {
-                    failure.get_or_insert_with(|| anyhow::anyhow!("participant exchange panicked"));
+                Err(payload) => {
+                    let message = payload
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                        .unwrap_or("non-string panic payload");
+                    failures.push(format!("{participant}: exchange panicked: {message}"));
                 }
             }
         }
-        match failure {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
+        ensure!(failures.is_empty(), "{}", failures.join("\n"));
+        Ok(())
     })
 }
 
-fn inspect(peers: &[Peer], begin_checkpoint: bool) -> Result<Manifest> {
+fn collect_records(peers: &[Peer], request: RecordRequest) -> Result<Manifest> {
     peers
         .iter()
         .map(|peer| {
-            peer.inspect(begin_checkpoint)
+            peer.records(request)
+                .with_context(|| {
+                    format!(
+                        "{request:?}: participant {} ({})",
+                        peer.namespace_pid,
+                        peer.endpoint.display()
+                    )
+                })
                 .map(|records| (peer.namespace_pid, records))
         })
         .collect()
@@ -190,7 +219,9 @@ fn run() -> Result<()> {
     for namespace_pid in args.processes {
         ensure!(seen.insert(namespace_pid), "duplicate namespace PID");
         let endpoint = protocol::socket_path(control_dir, namespace_pid);
-        SocketAddr::from_pathname(&endpoint)?;
+        // Reject paths that exceed sockaddr_un or contain a NUL before contacting peers.
+        SocketAddr::from_pathname(&endpoint)
+            .with_context(|| format!("invalid control socket path {}", endpoint.display()))?;
         peers.push(Peer {
             endpoint,
             namespace_pid,
@@ -199,7 +230,7 @@ fn run() -> Result<()> {
     if args.inspect {
         // Preflight inspection does not freeze the registry, so preparation must
         // validate it again after BeginCheckpoint prevents application mutations.
-        topology::validate(&inspect(&peers, false)?)?;
+        topology::validate(&collect_records(&peers, RecordRequest::Inspect)?)?;
         return Ok(());
     }
     let path = args
@@ -226,42 +257,64 @@ fn run() -> Result<()> {
             "restored processes do not match the checkpointed participants"
         );
     }
-    let mut participants = inspect(&peers, args.prepare)?;
+    // BeginCheckpoint freezes registries, not GPU work. From this point preparation
+    // is fail-stop: callers must abandon the checkpoint and all source processes.
+    let mut participants = collect_records(
+        &peers,
+        if args.prepare {
+            RecordRequest::BeginCheckpoint
+        } else {
+            RecordRequest::Inspect
+        },
+    )?;
     let inspected_allocations = topology::validate(&participants)?;
     if args.prepare {
         let allocations = inspected_allocations;
-        command_all(&mut peers, Operation::PrepareMulticast, &[]).context("multicast teardown")?;
-        command_all(&mut peers, Operation::SaveAllocations, &allocations)
-            .context("save allocations")?;
-        command_all(&mut peers, Operation::PrepareUnicast, &[])?;
-        state::write_atomic(&path, &mut participants)?;
+        command_all(&peers, Operation::PrepareMulticast, &[]).context("PrepareMulticast")?;
+        command_all(&peers, Operation::SaveAllocations, &allocations).context("SaveAllocations")?;
+        command_all(&peers, Operation::PrepareUnicast, &[]).context("PrepareUnicast")?;
+        // Publication failure is also fail-stop, even if publication succeeded before a
+        // directory sync failed. Prepared processes cannot resume safely.
+        state::write_atomic(&path, &mut participants)
+            .with_context(|| format!("publish checkpoint state {}", path.display()))?;
     } else {
         let allocations = topology::validate(&expected)?;
         drop(inspected_allocations);
         drop(participants);
-        command_all(&mut peers, Operation::LoadAllocations, &allocations)
-            .context("load allocations")?;
-        command_all(&mut peers, Operation::RestoreUnicast, &[])?;
+        command_all(&peers, Operation::LoadAllocations, &allocations).context("LoadAllocations")?;
+        command_all(&peers, Operation::RestoreUnicast, &[]).context("RestoreUnicast")?;
         for operation in [
             Operation::RestoreMulticastCreators,
             Operation::RestoreMulticastImporters,
             Operation::RestoreMulticastDevices,
             Operation::RestoreMulticastBindings,
         ] {
-            command_all(&mut peers, operation, &[])?;
+            command_all(&peers, operation, &[]).with_context(|| format!("{operation:?}"))?;
         }
-        let mut participants = inspect(&peers, false)?;
-        topology::validate(&participants)?;
+        let mut participants = collect_records(&peers, RecordRequest::Inspect)
+            .context("inspect restored participants")?;
         for (id, actual) in &mut participants {
             let expected = expected
                 .get_mut(id)
-                .context("restored participant is not in the manifest")?;
+                .with_context(|| format!("restored participant {id} is not in the manifest"))?;
             actual.sort();
             expected.sort();
             ensure!(
-                actual == expected,
-                "restored topology does not match the checkpoint"
+                actual.len() == expected.len(),
+                "restored topology does not match the checkpoint for participant {id}: expected {} records, actual {} records",
+                expected.len(),
+                actual.len()
             );
+            if let Some((index, (actual, expected))) = actual
+                .iter()
+                .zip(expected.iter())
+                .enumerate()
+                .find(|(_, (actual, expected))| actual != expected)
+            {
+                bail!(
+                    "restored topology does not match the checkpoint for participant {id}: record {index}: expected {expected:?}, actual {actual:?}"
+                );
+            }
         }
     }
     Ok(())
