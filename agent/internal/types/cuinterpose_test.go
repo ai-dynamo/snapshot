@@ -16,7 +16,7 @@ func TestCuInterposeManifest(t *testing.T) {
 	for _, tc := range []struct{ name, yaml, wantError string }{
 		{name: "native"},
 		{name: "identity", yaml: "cuinterpose:\n  frontendSHA256: " + strings.Repeat("a", 64) + "\n  coreSHA256: " + strings.Repeat("b", 64)},
-		{name: "obsolete boolean", yaml: "cuinterpose: true", wantError: "obsolete cuinterpose manifest: recreate"},
+		{name: "invalid type", yaml: "cuinterpose: true", wantError: "cannot unmarshal !!bool"},
 		{name: "missing hashes", yaml: "cuinterpose: {}", wantError: "frontendSHA256"},
 		{name: "missing core", yaml: "cuinterpose:\n  frontendSHA256: " + strings.Repeat("a", 64), wantError: "coreSHA256"},
 		{name: "malformed hash", yaml: "cuinterpose:\n  frontendSHA256: not-a-hash", wantError: "frontendSHA256"},

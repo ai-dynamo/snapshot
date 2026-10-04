@@ -72,6 +72,18 @@ Name of the operator service account.
 {{- end }}
 
 {{/*
+Use the same agent image for the DaemonSet and cuinterpose installer.
+*/}}
+{{- define "snapshot.agentImage" -}}
+{{- $tag := .Values.image.agent.tag | default .Chart.AppVersion -}}
+{{- if hasPrefix "@" $tag -}}
+{{- printf "%s%s" .Values.image.agent.repository $tag -}}
+{{- else -}}
+{{- printf "%s:%s" .Values.image.agent.repository $tag -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Fail fast on unsupported runtime.type values. Called once from daemonset.yaml.
 */}}
 {{- define "snapshot.validateRuntime" -}}

@@ -33,9 +33,6 @@ func (m *CuInterposeManifest) Validate() error {
 }
 
 func (m *CuInterposeManifest) UnmarshalYAML(node *yaml.Node) error {
-	if node.Kind != yaml.MappingNode {
-		return fmt.Errorf("obsolete cuinterpose manifest: recreate the checkpoint to record library hashes")
-	}
 	type manifest CuInterposeManifest
 	if err := node.Decode((*manifest)(m)); err != nil {
 		return err

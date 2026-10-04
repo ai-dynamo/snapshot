@@ -9,7 +9,7 @@ resolver = "3"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
-rust-version = "1.88"
+rust-version = "1.95"
 
 [workspace.dependencies]
 # cudarc supplies only generated driver definitions because CUDA calls resolve through

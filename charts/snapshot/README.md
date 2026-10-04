@@ -16,6 +16,10 @@ Install one Snapshot release for the cluster. Every node agent mounts the same
 shared checkpoint PVC directly and watches checkpoint/restore pods in all
 namespaces. Workload pods never mount checkpoint storage.
 
+`image.agent.tag` accepts a tag, `tag@sha256:<digest>`, or `@sha256:<digest>`.
+An empty value uses the chart's `appVersion`. The agent DaemonSet and the
+cuinterpose installer use the same resulting image reference.
+
 ## Prerequisites
 
 - Kubernetes cluster with x86_64 GPU nodes

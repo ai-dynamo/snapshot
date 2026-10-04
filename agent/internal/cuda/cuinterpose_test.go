@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
@@ -71,14 +73,8 @@ func TestCoordinatorArgvContract(t *testing.T) {
 	binary, argvFile := fakeCoordinator(t, 0)
 	fakeNSenter(t)
 	checkpointDir := t.TempDir()
-	err := PrepareCuInterpose(
-		context.Background(),
-		checkpointDir,
-		"/proc",
-		os.Getpid(),
-		[]int{7, 9},
-		binary,
-	)
+	target := CuInterposeTarget{ProcRoot: "/proc", TargetPID: os.Getpid(), NamespacePIDs: []int{7, 9}, Binary: binary}
+	err := PrepareCuInterpose(context.Background(), target, checkpointDir)
 	if err != nil {
 		t.Fatalf("PrepareCuInterpose() error = %v", err)
 	}
@@ -91,7 +87,7 @@ func TestCoordinatorArgvContract(t *testing.T) {
 	if string(argv) != want {
 		t.Fatalf("argv:\n%s\nwant:\n%s", argv, want)
 	}
-	if err := InspectCuInterpose(context.Background(), "/proc", os.Getpid(), []int{7, 9}, binary); err != nil {
+	if err := InspectCuInterpose(context.Background(), target); err != nil {
 		t.Fatal(err)
 	}
 	argv, _ = os.ReadFile(argvFile)
@@ -117,9 +113,10 @@ func TestCoordinatorArgvContract(t *testing.T) {
 func TestCoordinatorFailureIncludesStderr(t *testing.T) {
 	binary, _ := fakeCoordinator(t, 3)
 	fakeNSenter(t)
+	target := CuInterposeTarget{ProcRoot: "/proc", TargetPID: os.Getpid(), NamespacePIDs: []int{1}, Binary: binary}
 	for _, err := range []error{
-		InspectCuInterpose(context.Background(), "/proc", os.Getpid(), []int{1}, binary),
-		PrepareCuInterpose(context.Background(), t.TempDir(), "/proc", os.Getpid(), []int{1}, binary),
+		InspectCuInterpose(context.Background(), target),
+		PrepareCuInterpose(context.Background(), target, t.TempDir()),
 		RestoreCuInterpose(context.Background(), "/checkpoint", []int{1}, binary),
 	} {
 		if err == nil {
@@ -130,5 +127,34 @@ func TestCoordinatorFailureIncludesStderr(t *testing.T) {
 				t.Fatalf("error %q lacks %q", err, want)
 			}
 		}
+	}
+}
+
+func TestCoordinatorSetupErrorsIdentifyOperationAndTarget(t *testing.T) {
+	binary, _ := fakeCoordinator(t, 0)
+	fakeNSenter(t)
+	missing := filepath.Join(t.TempDir(), "missing")
+	for _, tc := range []struct {
+		name       string
+		target     CuInterposeTarget
+		checkpoint string
+		want       string
+	}{
+		{name: "mount namespace", target: CuInterposeTarget{ProcRoot: missing, TargetPID: 123, Binary: binary}, want: "cuinterpose inspect: open mount namespace for process 123"},
+		{name: "coordinator binary", target: CuInterposeTarget{ProcRoot: "/proc", TargetPID: os.Getpid(), Binary: missing}, want: "cuinterpose inspect: prepare namespace command " + missing},
+		{name: "checkpoint directory", target: CuInterposeTarget{ProcRoot: "/proc", TargetPID: os.Getpid(), Binary: binary}, checkpoint: missing, want: "cuinterpose prepare: open checkpoint directory"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var err error
+			if tc.checkpoint == "" {
+				err = InspectCuInterpose(context.Background(), tc.target)
+			} else {
+				err = PrepareCuInterpose(context.Background(), tc.target, tc.checkpoint)
+			}
+			require.ErrorIs(t, err, os.ErrNotExist)
+			require.ErrorContains(t, err, tc.want)
+			require.ErrorContains(t, err, "process "+strconv.Itoa(tc.target.TargetPID))
+			require.ErrorContains(t, err, missing)
+		})
 	}
 }

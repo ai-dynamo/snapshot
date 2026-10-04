@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Builds the consolidated third-party attribution file at /legal/THIRD-PARTY.txt
-# from the package delta and the vendored Go modules, so it cannot drift from
+# from the package delta and the vendored Go and Rust modules, so it cannot drift from
 # what is actually installed.
 #
 # Components inherited from the base image are attributed by that image and are
@@ -16,6 +16,7 @@ VENDOR=${2:-/sources/go/vendor}
 OUT=${3:-/legal/THIRD-PARTY.txt}
 SKIPPED=${4:-/sources/dpkg/SKIPPED.txt}
 GO_LICENSES=${5:-/tmp/go-licenses.sh}
+RUST_NOTICES=${6:-/legal/cuinterpose/rust/NOTICES.txt}
 
 mkdir -p "$(dirname "$OUT")"
 
@@ -33,7 +34,7 @@ SCOPE: this covers the components this image adds on top of its base image.
 Components belonging to the base image are attributed by that image.
 
 CORRESPONDING SOURCE: upstream source ships inside this image under
-/legal/source/. Components marked [NO SOURCE ARCHIVE] below are the exception
+/legal/source/ and /legal/cuinterpose/. Components marked [NO SOURCE ARCHIVE] below are the exception
 and are annotated with the reason. See /legal/source/README.txt.
 
 ================================================================================
@@ -76,10 +77,11 @@ HEADER
     fi
 
     sh "$GO_LICENSES" "$VENDOR"
+    cat "$RUST_NOTICES"
 
     # Fold in the license texts the Dockerfile stages separately, so this file
     # is self-contained.
-    for extra in /legal/CRIU/COPYING /legal/cuda-checkpoint/LICENSE; do
+    for extra in /legal/CRIU/COPYING; do
         [ -f "$extra" ] || continue
         echo
         echo "================================================================================"

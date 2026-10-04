@@ -18,7 +18,9 @@ make -C agent cuinterpose-test
 make -C agent cuinterpose-build
 ```
 
-These targets use GCC and the digest-pinned Rust 1.95 Bookworm builder in `agent/Dockerfile`. The workspace uses edition 2024 with MSRV 1.88. The exported artifacts are in `agent/cmd/cuinterpose/build/`. Always test and ship a matched frontend/core/coordinator set. The standard-library-only launcher uses the existing musl target and preserves its executable permission in the exported bundle.
+These targets use GCC and the digest-pinned Rust 1.95 Bookworm builder in `agent/Dockerfile`. The workspace uses edition 2024 and supports Rust 1.95 or newer. The exported artifacts are in `agent/cmd/cuinterpose/build/`, including the matching private ABI header for frontend and GPU tests. Always test and ship a matched frontend/core/coordinator set. The standard-library-only launcher uses the existing musl target and preserves its executable permission in the exported bundle. Plain `make -C agent build` builds only the Go binaries. The separate cuinterpose CPU CI job runs the native build and tests.
+
+Before generating the frontend header, the build checks the installed cbindgen CLI against the exact ABI development dependency selected by Cargo.lock. The image includes the vendored crate sources and matching Rust standard-library sources by packaging policy. Per-component license texts, copyright notices, and the pinned Rust runtime inventory are consolidated in `/legal/THIRD-PARTY.txt`.
 
 The protocol records CUDA metadata as explicit fixed-width primitive fields. CUDA FFI structs stay inside the core crate and are never serialized directly.
 

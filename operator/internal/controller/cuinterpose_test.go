@@ -47,7 +47,9 @@ func TestShapeCuInterposeCapture(t *testing.T) {
 	require.NoError(t, shapeCuInterposeCapture(template, "worker", testCuInterposeDelivery()))
 
 	worker := template.Spec.Containers[0]
-	assert.Equal(t, append([]string{podcontract.CuInterposeLauncherPath}, before.Spec.Containers[0].Command...), worker.Command)
+	assert.Equal(t, append([]string{
+		podcontract.CuInterposeLauncherPath, "--library", podcontract.CuInterposeLibraryPath, "--",
+	}, before.Spec.Containers[0].Command...), worker.Command)
 	assert.Equal(t, before.Spec.Containers[0].Args, worker.Args)
 	assert.Equal(t, before.Spec.Containers[0].Env, worker.Env)
 	assert.Equal(t, before.Spec.Containers[0].EnvFrom, worker.EnvFrom)
@@ -67,6 +69,9 @@ func TestShapeCuInterposeCapture(t *testing.T) {
 		"/usr/local/lib/snapshot/libcuinterpose.so", "/usr/local/lib/snapshot/libcuinterpose_core.so",
 		"/usr/local/bin/cuinterpose-launch", podcontract.CuInterposeMountPath + "/",
 	}, installer.Args)
+	assert.Equal(t, []corev1.VolumeMount{{
+		Name: cuInterposeVolumeName, MountPath: podcontract.CuInterposeMountPath, ReadOnly: false,
+	}}, installer.VolumeMounts)
 	assert.Equal(t, corev1.ResourceList{
 		corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("64Mi"),
 	}, installer.Resources.Requests)
@@ -124,6 +129,12 @@ func TestShapeCuInterposeCaptureRejectsWithoutMutation(t *testing.T) {
 		{"nested mount path", func(p *corev1.PodTemplateSpec, _ *CuInterposeDelivery) {
 			p.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "other", MountPath: podcontract.CuInterposeLibraryPath}}
 		}, "conflicts"},
+		{"normalized mount path", func(p *corev1.PodTemplateSpec, _ *CuInterposeDelivery) {
+			p.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "other", MountPath: "/tmp/x/../snapshot-cuda"}}
+		}, "conflicts"},
+		{"normalized nested mount path", func(p *corev1.PodTemplateSpec, _ *CuInterposeDelivery) {
+			p.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "other", MountPath: "/tmp/x/../snapshot-cuda/libcuinterpose.so"}}
+		}, "conflicts"},
 		{"mount name", func(p *corev1.PodTemplateSpec, _ *CuInterposeDelivery) {
 			p.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: cuInterposeVolumeName, MountPath: "/other"}}
 		}, "conflicts"},
@@ -141,6 +152,22 @@ func TestShapeCuInterposeCaptureRejectsWithoutMutation(t *testing.T) {
 			assert.Equal(t, before, template)
 		})
 	}
+}
+
+func TestShapeCuInterposeCapturePreservesParentMount(t *testing.T) {
+	template := cuInterposeTemplate()
+	template.Spec.Volumes = []corev1.Volume{{
+		Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	}}
+	template.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "tmp", MountPath: "/tmp"}}
+	before := template.DeepCopy()
+
+	require.NoError(t, shapeCuInterposeCapture(template, "worker", testCuInterposeDelivery()))
+	assert.Equal(t, append(before.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+		Name: cuInterposeVolumeName, MountPath: podcontract.CuInterposeMountPath, ReadOnly: true,
+	}), template.Spec.Containers[0].VolumeMounts)
+	require.Len(t, template.Spec.Volumes, 2)
+	assert.Equal(t, before.Spec.Volumes[0], template.Spec.Volumes[0])
 }
 
 func TestShapeCuInterposeCaptureDisabled(t *testing.T) {
