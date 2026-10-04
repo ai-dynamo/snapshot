@@ -120,6 +120,8 @@ macro_rules! functions {
 // optional so drivers without them can run unicast workloads.
 functions! {
     required {
+        cuCtxEnablePeerAccess(peer: CUcontext, flags: u32);
+        cuCtxDisablePeerAccess(peer: CUcontext);
         cuDeviceGetAttribute(value: *mut i32, attribute: CUdevice_attribute, device: CUdevice);
         cuCtxDestroy(context: CUcontext);
         cuCtxDestroy_v2(context: CUcontext);

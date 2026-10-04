@@ -91,15 +91,16 @@ impl ProcessState {
             let offset = 0;
             self.map_unicast(id, handle, address, extent, offset, flags)?;
             mapped = true;
-            let access = CUmemAccessDesc {
-                location: CUmemLocation {
-                    type_: CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE,
-                    id: device,
-                },
-                flags: CUmemAccess_flags::CU_MEM_ACCESS_FLAGS_PROT_READWRITE,
-            };
-            unsafe { driver::cuMemSetAccess(address, extent, &access, 1) }?;
-            self.mappings.get_mut(&address).unwrap().access = vec![access];
+            let mut access = vec![peer_access(device)];
+            if let Some(peers) = self.malloc_peers.get(&context) {
+                for &device in peers.values() {
+                    if !access.iter().any(|entry| entry.location.id == device) {
+                        access.push(peer_access(device));
+                    }
+                }
+            }
+            unsafe { driver::cuMemSetAccess(address, extent, access.as_ptr(), access.len()) }?;
+            self.mappings.get_mut(&address).unwrap().access = access;
             self.malloc_regions.insert(
                 address,
                 MallocRegion {
@@ -146,6 +147,99 @@ impl ProcessState {
         runtime::must_complete(unsafe { driver::cuMemAddressFree(address, mapping.extent) });
         Ok(())
     }
+}
+
+fn peer_access(device: CUdevice) -> CUmemAccessDesc {
+    CUmemAccessDesc {
+        location: CUmemLocation {
+            type_: CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE,
+            id: device,
+        },
+        flags: CUmemAccess_flags::CU_MEM_ACCESS_FLAGS_PROT_READWRITE,
+    }
+}
+
+struct PeerAccessUpdate {
+    address: CUdeviceptr,
+    size: usize,
+    previous: CUmemAccessDesc,
+    access: Vec<CUmemAccessDesc>,
+}
+
+pub fn cuCtxEnablePeerAccess(peer: CUcontext, flags: u32) -> Result<()> {
+    // Serialize native peer changes and VMM grants with malloc creation and free.
+    // An allocation must not miss a successful enable while being published.
+    let mut state = runtime::active()?;
+    let context = driver::context()?;
+    let mut device = 0;
+    unsafe { driver::cuCtxGetDevice(&mut device) }?;
+    let access = peer_access(device);
+    let updates: Vec<_> = state
+        .malloc_regions
+        .iter()
+        .filter(|(_, region)| region.context == peer as usize)
+        .map(|(&address, region)| {
+            let mapping = &state.mappings[&address];
+            let previous = mapping
+                .access
+                .iter()
+                .find(|entry| {
+                    entry.location.type_ == access.location.type_ && entry.location.id == device
+                })
+                .copied()
+                .unwrap_or(CUmemAccessDesc {
+                    flags: CUmemAccess_flags::CU_MEM_ACCESS_FLAGS_PROT_NONE,
+                    ..access
+                });
+            PeerAccessUpdate {
+                address,
+                size: region.extent,
+                previous,
+                access: mapping.merged_access(&[access]),
+            }
+        })
+        .collect();
+    unsafe { driver::cuCtxEnablePeerAccess(peer, flags) }?;
+    for (index, update) in updates.iter().enumerate() {
+        if let Err(error) =
+            unsafe { driver::cuMemSetAccess(update.address, update.size, &access, 1) }
+        {
+            // CUDA does not promise that a failed access update changed no pages.
+            // Restore the attempted range too, then undo this call's native enable.
+            // No metadata has been committed and every previous permission survives.
+            for applied in updates[..=index].iter().rev() {
+                runtime::must_complete(unsafe {
+                    driver::cuMemSetAccess(applied.address, applied.size, &applied.previous, 1)
+                });
+            }
+            runtime::must_complete(unsafe { driver::cuCtxDisablePeerAccess(peer) });
+            return Err(error);
+        }
+    }
+    for update in updates {
+        state.mappings.get_mut(&update.address).unwrap().access = update.access;
+    }
+    state
+        .malloc_peers
+        .entry(peer as usize)
+        .or_default()
+        .insert(context, device);
+    Ok(())
+}
+
+pub fn cuCtxDisablePeerAccess(peer: CUcontext) -> Result<()> {
+    let mut state = runtime::active()?;
+    let context = driver::context()?;
+    unsafe { driver::cuCtxDisablePeerAccess(peer) }?;
+    if let Some(peers) = state.malloc_peers.get_mut(&(peer as usize)) {
+        peers.remove(&context);
+        if peers.is_empty() {
+            state.malloc_peers.remove(&(peer as usize));
+        }
+    }
+    // Existing VMM mappings keep their permissions. The adapter does not promise
+    // context isolation, but future allocations no longer pay for this peer.
+    Ok(())
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
