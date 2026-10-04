@@ -215,7 +215,7 @@ fn dispatch(
     // The timeout applies to each socket read rather than the whole header, so a slow
     // peer can delay acceptance. Classification never waits for ProcessState or
     // lifecycle CUDA calls.
-    let timeout = Some(cuinterpose_protocol::timeout(None));
+    let timeout = Some(cuinterpose_protocol::control_timeout());
     socket.set_read_timeout(timeout)?;
     socket.set_write_timeout(timeout)?;
     let (request, descriptor): (Request, _) = protocol::receive(&socket)?;

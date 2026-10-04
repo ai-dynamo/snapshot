@@ -79,9 +79,9 @@ pub fn request_export(
         runtime::control_dir().map_err(|_| Error::Invalid("cuinterpose state is unavailable"))?;
     let socket = protocol::connect(
         &protocol::socket_path(control_dir, allocation.creator_pid),
-        protocol::timeout(None),
+        protocol::control_timeout(),
     )?;
-    let timeout = Some(protocol::timeout(None));
+    let timeout = Some(protocol::control_timeout());
     socket.set_read_timeout(timeout)?;
     socket.set_write_timeout(timeout)?;
     protocol::send(&socket, &Request::Export { allocation }, None)?;
