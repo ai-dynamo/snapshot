@@ -10,6 +10,7 @@ requires-python = ">=3.12"
 # Keep updates explicit so dependency changes do not silently change qualification.
 dependencies = [
   "cuda-bindings==13.3.1",
+  "msgpack==1.1.1",
   "pytest==8.4.2",
   "torch==2.11.0",
 ]
