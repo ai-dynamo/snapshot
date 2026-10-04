@@ -1,0 +1,242 @@
+{
+  "benchmarkVersion": 1,
+  "environment": {
+    "agentTimingCollectionErrors": {
+      "checkpoint": "ValueError: no 'Checkpoint timing summary' agent timing summary matched content='podsnapshotcontent-e94bdb96-a94c-4afb-b995-66324b543e0c'",
+      "restore": "ValueError: no 'Restore timing summary' agent timing summary matched snapshot='test-framework-checkpoin-f05946-snapshot', content_uid='3b2b1e14-a6bc-4f23-a6ba-bb44ffbdae09'"
+    },
+    "datadogGpuMonitoringMode": "disable",
+    "frameworkImage": "lmsysorg/sglang:v0.5.17-cu130-runtime@sha256:3ea7c6d74312d964edbcf9b3819425ea42117eb967ef1cfec632a70c926027df",
+    "frameworkImageDigest": "dynamoci.azurecr.io/docker.io/lmsysorg/sglang@sha256:3ea7c6d74312d964edbcf9b3819425ea42117eb967ef1cfec632a70c926027df",
+    "gpuAffinity": "different",
+    "imagePulls": {
+      "restore": {
+        "cacheHit": true,
+        "imageSizeBytes": null,
+        "includingWaitSeconds": 0.0
+      },
+      "source": {
+        "cacheHit": true,
+        "imageSizeBytes": null,
+        "includingWaitSeconds": 0.0
+      }
+    },
+    "model": "Qwen/Qwen3-0.6B",
+    "modelCacheMode": "shared-nfs",
+    "namespace": "snapshot-e2e",
+    "nodeAffinity": "same",
+    "restoreGpus": [
+      {
+        "driverVersion": "615.71.09",
+        "model": "NVIDIA A100-SXM4-80GB"
+      }
+    ],
+    "restoreNodeGpuProduct": "NVIDIA-A100-SXM4-80GB",
+    "sourceGpus": [
+      {
+        "driverVersion": "615.71.09",
+        "model": "NVIDIA A100-SXM4-80GB"
+      }
+    ],
+    "sourceNodeGpuProduct": "NVIDIA-A100-SXM4-80GB",
+    "storage": {
+      "accessModes": [
+        "ReadWriteMany"
+      ],
+      "capacity": "64Gi",
+      "parameters": {
+        "skuName": "Standard_LRS"
+      },
+      "provisioner": "file.csi.azure.com",
+      "requestedSize": "64Gi",
+      "storageClass": "azurefile-csi",
+      "type": "Standard_LRS",
+      "volumeMode": "Filesystem"
+    },
+    "storageClass": "azurefile-csi"
+  },
+  "error": null,
+  "events": [
+    {
+      "name": "test.started",
+      "offsetSeconds": 0.0,
+      "timestamp": "2026-10-04T10:54:05.821Z"
+    },
+    {
+      "name": "source.ready",
+      "offsetSeconds": 118.439866,
+      "timestamp": "2026-10-04T10:56:04.261Z"
+    },
+    {
+      "name": "checkpoint.requested",
+      "offsetSeconds": 123.009933,
+      "timestamp": "2026-10-04T10:56:08.831Z"
+    },
+    {
+      "name": "checkpoint.ready",
+      "offsetSeconds": 195.979403,
+      "timestamp": "2026-10-04T10:57:21.800Z"
+    },
+    {
+      "name": "restore.pod_create.requested",
+      "offsetSeconds": 202.564747,
+      "timestamp": "2026-10-04T10:57:28.386Z"
+    },
+    {
+      "name": "restore.pod_created",
+      "offsetSeconds": 202.961238,
+      "timestamp": "2026-10-04T10:57:28.782Z"
+    },
+    {
+      "externalTimestamp": true,
+      "name": "restore.requested",
+      "observationDelaySeconds": 0.760944,
+      "offsetSeconds": 205.780141,
+      "timestamp": "2026-10-04T10:57:31.601Z"
+    },
+    {
+      "name": "restore.succeeded",
+      "offsetSeconds": 275.145436,
+      "timestamp": "2026-10-04T10:58:40.967Z"
+    },
+    {
+      "name": "traffic.ready",
+      "offsetSeconds": 276.742324,
+      "timestamp": "2026-10-04T10:58:42.563Z"
+    },
+    {
+      "name": "inference.verified",
+      "offsetSeconds": 278.872745,
+      "timestamp": "2026-10-04T10:58:44.694Z"
+    },
+    {
+      "name": "test.finished",
+      "offsetSeconds": 278.872768,
+      "timestamp": "2026-10-04T10:58:44.694Z"
+    }
+  ],
+  "finishedAt": "2026-10-04T10:58:44.694Z",
+  "identity": {
+    "case": "sglang",
+    "runAttempt": 1,
+    "runId": "37196632672",
+    "suite": "framework-checkpoint-restore",
+    "test": "test_framework_checkpoint_restore_serves_inference"
+  },
+  "measurements": [
+    {
+      "displayName": "Full E2E test",
+      "endEvent": "test.finished",
+      "name": "test.total.duration",
+      "startEvent": "test.started",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 278.872768
+    },
+    {
+      "displayName": "Checkpoint (API to Ready)",
+      "endEvent": "checkpoint.ready",
+      "name": "checkpoint.duration",
+      "startEvent": "checkpoint.requested",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 72.96947
+    },
+    {
+      "displayName": "Restore requested to traffic ready",
+      "endEvent": "traffic.ready",
+      "name": "restore.to_traffic.duration",
+      "startEvent": "restore.requested",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 70.962183
+    },
+    {
+      "displayName": "Restore pod create to traffic",
+      "endEvent": "traffic.ready",
+      "name": "restore.pod_create_to_traffic.duration",
+      "startEvent": "restore.pod_create.requested",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 74.177577
+    },
+    {
+      "displayName": "Checkpoint (agent)",
+      "missingReason": "start event not reached",
+      "name": "checkpoint.agent.duration",
+      "status": "incomplete",
+      "unit": "seconds",
+      "value": null
+    },
+    {
+      "displayName": "Checkpoint CRIU dump",
+      "missingReason": "start event not reached",
+      "name": "checkpoint.criu_dump.duration",
+      "status": "incomplete",
+      "unit": "seconds",
+      "value": null
+    },
+    {
+      "displayName": "Restore (agent)",
+      "missingReason": "start event not reached",
+      "name": "restore.agent.duration",
+      "status": "incomplete",
+      "unit": "seconds",
+      "value": null
+    },
+    {
+      "displayName": "Restore CRIU restore",
+      "missingReason": "start event not reached",
+      "name": "restore.criu_restore.duration",
+      "status": "incomplete",
+      "unit": "seconds",
+      "value": null
+    },
+    {
+      "displayName": "Agent restore complete to traffic ready",
+      "missingReason": "start event not reached",
+      "name": "restore.agent_complete_to_traffic.duration",
+      "status": "incomplete",
+      "unit": "seconds",
+      "value": null
+    },
+    {
+      "displayName": "Source image pull",
+      "name": "source.image_pull.duration",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 0.0
+    },
+    {
+      "displayName": "Source image pull including wait",
+      "name": "source.image_pull_including_wait.duration",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 0.0
+    },
+    {
+      "displayName": "Restore image pull",
+      "name": "restore.image_pull.duration",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 0.0
+    },
+    {
+      "displayName": "Restore image pull including wait",
+      "name": "restore.image_pull_including_wait.duration",
+      "status": "complete",
+      "unit": "seconds",
+      "value": 0.0
+    }
+  ],
+  "outcome": "passed",
+  "schemaVersion": 1,
+  "source": {
+    "commit": "580c1d40ef05003055a837f86f910dff67652136",
+    "event": "schedule",
+    "ref": "refs/heads/main",
+    "runUrl": "https://github.com/ai-dynamo/snapshot/actions/runs/37196632672",
+    "snapshotTag": "v0.0.0-g580c1d40"
+  },
+  "startedAt": "2026-10-04T10:54:05.821Z"
+}
