@@ -186,6 +186,9 @@ dependencies = [
 [[package]]
 name = "cuinterpose-launch"
 version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
 
 [[package]]
 name = "cuinterpose-protocol"

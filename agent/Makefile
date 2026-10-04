@@ -21,7 +21,8 @@ REQUIRE_CUDA_HELPER_TESTS ?= $(if $(CI),1,0)
 
 PROTOC_GEN_GO := $(TOOLS_BIN_DIR)/protoc-gen-go
 
-build: go-build cuinterpose-build
+# Native artifacts have their own build and CI gate so Go-only work needs no Docker.
+build: go-build
 
 cuinterpose-build:
 	$(MAKE) -C cmd/cuinterpose build
