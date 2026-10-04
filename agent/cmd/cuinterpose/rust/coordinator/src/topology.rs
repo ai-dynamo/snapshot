@@ -3,22 +3,20 @@
 
 use anyhow::Result;
 use anyhow::{Context, bail, ensure};
+use cudarc::driver::sys::{CUmemAllocationHandleType, CUmemAllocationType, CUmemLocationType};
 use cuinterpose_protocol::{
     AllocationId, AllocationReference, BindingSource, Manifest, NamespacePid, Record,
 };
-use std::collections::BTreeMap;
-
-// CUDA allocation properties supported by Linux FD transport and the host carrier.
-const CU_MEM_HANDLE_TYPE_NONE: u32 = 0;
-const CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR: u32 = 1;
-const CU_MEM_ALLOCATION_TYPE_PINNED: u32 = 1;
-const CU_MEM_LOCATION_TYPE_DEVICE: u32 = 1;
-const CU_MEM_LOCATION_TYPE_HOST_NUMA: u32 = 3;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub struct AllocationSummary {
     pub reference: AllocationReference,
     pub size: u64,
     pub checkpoint_via_host_carrier: bool,
+    /// The creator retains an application handle or a mapping of this allocation.
+    /// SaveAllocations needs that handle, or must recover it from a creator mapping,
+    /// to copy shared backing into the host carrier. An importer cannot supply the
+    /// creator's saved bytes, so importer handles and mappings do not count.
     anchor: bool,
 }
 struct Multicast {
@@ -28,19 +26,22 @@ struct Multicast {
     flags: u64,
     num_devices: u32,
     creators: u32,
-    // CUDA device ordinals are local to each process, so each device must be attached
-    // and bound in the same participant.
-    devices: BTreeMap<(NamespacePid, i32), bool>,
 }
 
+/// Collect definitions, creator anchors, device attachments and bindings without
+/// requiring references to appear after their definitions. Then check references,
+/// bounds and group completeness against the collected state without changing it.
 pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
     let mut allocations: BTreeMap<AllocationId, AllocationSummary> = BTreeMap::new();
     let mut multicasts: BTreeMap<AllocationId, Multicast> = BTreeMap::new();
+    let mut creator_mappings = BTreeSet::new();
+    // CUDA device ordinals are local to each process, so each device must be attached
+    // and bound in the same participant.
+    let mut devices: BTreeMap<AllocationId, BTreeSet<(NamespacePid, i32)>> = BTreeMap::new();
+    let mut bindings = BTreeSet::new();
     if participants.is_empty() {
         bail!("topology validate failed: no participants");
     }
-    // Collecting definitions before references lets imports and multicast dependencies
-    // be validated independently of participant and entry order.
     for (namespace_pid, participant) in participants {
         for record in participant {
             match record {
@@ -54,18 +55,18 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                     virtual_allocation_handle_count,
                 } => {
                     ensure!(
-                        *allocation_type == CU_MEM_ALLOCATION_TYPE_PINNED
-                            && matches!(
-                                location.location_type,
-                                CU_MEM_LOCATION_TYPE_DEVICE | CU_MEM_LOCATION_TYPE_HOST_NUMA
-                            ),
+                        *allocation_type
+                            == CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED as u32
+                            && [
+                                CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE as u32,
+                                CUmemLocationType::CU_MEM_LOCATION_TYPE_HOST_NUMA as u32,
+                            ]
+                            .contains(&location.location_type),
                         "participant {namespace_pid}: unsupported allocation properties for {allocation:?}: allocation_type={allocation_type}, location={location:?}"
                     );
                     if allocation.creator_pid == *namespace_pid {
                         ensure!(
-                            (*handle_types == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
-                                || (*handle_types == CU_MEM_HANDLE_TYPE_NONE
-                                    && *checkpoint_via_host_carrier))
+                            *handle_types == CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0
                                 && *size > 0,
                             "participant {namespace_pid}: invalid allocation creator {allocation:?}: size={size}, handle_types={handle_types}"
                         );
@@ -99,7 +100,10 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                         },
                     ..
                 } => {
-                    if *handle_types != u64::from(CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR)
+                    if *handle_types
+                        != u64::from(
+                            CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0,
+                        )
                         || *size == 0
                         || *devices == 0
                         || *flags != 0
@@ -117,7 +121,6 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                             flags: *flags,
                             num_devices: *devices,
                             creators: 0,
-                            devices: BTreeMap::new(),
                         });
                     if multicast.size != *size
                         || multicast.reference != *allocation
@@ -139,31 +142,29 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                         multicast.creators += 1;
                     }
                 }
+                Record::Mapping { allocation, .. } if allocation.creator_pid == *namespace_pid => {
+                    creator_mappings.insert(*allocation);
+                }
+                Record::MulticastDevice { allocation, device } => {
+                    ensure!(
+                        devices
+                            .entry(allocation.id)
+                            .or_default()
+                            .insert((*namespace_pid, *device)),
+                        "participant {namespace_pid}: duplicate multicast device {device} for {allocation:?}"
+                    );
+                }
+                Record::MulticastBinding {
+                    allocation, device, ..
+                } => {
+                    bindings.insert((allocation.id, *namespace_pid, *device));
+                }
                 _ => {}
             }
         }
     }
-    for (namespace_pid, participant) in participants {
-        for record in participant {
-            if let Record::MulticastDevice { allocation, device } = record {
-                let multicast = multicasts
-                    .get_mut(&allocation.id)
-                    .with_context(|| format!("missing multicast object {allocation:?}"))?;
-                ensure!(
-                    multicast.reference == *allocation,
-                    "inconsistent multicast creator for {allocation:?}"
-                );
-                if multicast
-                    .devices
-                    .insert((*namespace_pid, *device), false)
-                    .is_some()
-                {
-                    bail!(
-                        "participant {namespace_pid}: duplicate multicast device {device} for {allocation:?}"
-                    );
-                }
-            }
-        }
+    for allocation in allocations.values_mut() {
+        allocation.anchor |= creator_mappings.contains(&allocation.reference);
     }
     for (namespace_pid, participant) in participants {
         for record in participant {
@@ -183,7 +184,7 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                     offset,
                     ..
                 } => {
-                    let known = allocations.get_mut(&allocation.id).with_context(|| {
+                    let known = allocations.get(&allocation.id).with_context(|| {
                         format!("participant {namespace_pid}: missing creator for {allocation:?}")
                     })?;
                     ensure!(
@@ -199,7 +200,6 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                             known.size
                         );
                     }
-                    known.anchor |= allocation.creator_pid == *namespace_pid;
                 }
                 Record::MulticastBinding {
                     allocation,
@@ -209,7 +209,7 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                     ..
                 } => {
                     let multicast = multicasts
-                        .get_mut(&allocation.id)
+                        .get(&allocation.id)
                         .with_context(|| format!("missing multicast object {allocation:?}"))?;
                     ensure!(
                         multicast.reference == *allocation,
@@ -253,12 +253,15 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                             );
                         }
                     }
-                    *multicast
-                        .devices
-                        .get_mut(&(*namespace_pid, *device))
-                        .with_context(|| format!("participant {namespace_pid}: multicast binding device {device} is not attached in this participant for {allocation:?}"))? = true;
+                    ensure!(
+                        devices
+                            .get(&allocation.id)
+                            .is_some_and(|attached| attached.contains(&(*namespace_pid, *device))),
+                        "participant {namespace_pid}: multicast binding device {device} is not attached in this participant for {allocation:?}"
+                    );
                 }
-                Record::MulticastMapping { allocation, .. } => {
+                Record::MulticastMapping { allocation, .. }
+                | Record::MulticastDevice { allocation, .. } => {
                     let multicast = multicasts
                         .get(&allocation.id)
                         .with_context(|| format!("missing multicast object {allocation:?}"))?;
@@ -284,25 +287,110 @@ pub fn validate(participants: &Manifest) -> Result<Vec<AllocationSummary>> {
                 multicast.creators
             );
         }
-        if multicast.devices.len() != multicast.num_devices as usize {
+        let attached = devices.get(&multicast.reference.id);
+        let device_count = attached.map_or(0, BTreeSet::len);
+        if device_count != multicast.num_devices as usize {
             bail!(
                 "incomplete multicast device group {:?}: expected {}, found {}",
                 multicast.reference,
                 multicast.num_devices,
-                multicast.devices.len()
+                device_count
             );
         }
-        if multicast.devices.values().any(|bound| !bound) {
+        let unbound: Vec<_> = attached
+            .into_iter()
+            .flatten()
+            .filter(|(pid, device)| !bindings.contains(&(multicast.reference.id, *pid, *device)))
+            .collect();
+        if !unbound.is_empty() {
             bail!(
                 "incomplete multicast binding group {:?}: unbound participant/device pairs {:?}",
                 multicast.reference,
-                multicast
-                    .devices
-                    .iter()
-                    .filter_map(|(device, bound)| (!bound).then_some(device))
-                    .collect::<Vec<_>>()
+                unbound
             );
         }
     }
     Ok(allocations.into_values().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cuinterpose_protocol::{BindingVersion, MemberRange, MemoryLocation, MulticastProperties};
+
+    #[test]
+    fn references_can_precede_definitions_in_every_participant() {
+        let allocation = AllocationReference {
+            creator_pid: 2,
+            id: [1; 16],
+        };
+        let multicast = AllocationReference {
+            creator_pid: 2,
+            id: [2; 16],
+        };
+        let object = Record::Multicast {
+            allocation: multicast,
+            properties: MulticastProperties {
+                devices: 2,
+                size: 4096,
+                handle_types: u64::from(
+                    CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0,
+                ),
+                flags: 0,
+            },
+            virtual_multicast_handle_count: 1,
+        };
+        let device = Record::MulticastDevice {
+            allocation: multicast,
+            device: 0,
+        };
+        let binding = Record::MulticastBinding {
+            allocation: multicast,
+            source: BindingSource::Memory(MemberRange {
+                allocation,
+                offset: 0,
+            }),
+            size: 4096,
+            offset: 0,
+            flags: 0,
+            version: BindingVersion::V1,
+            device: 0,
+        };
+        let creator = vec![
+            binding.clone(),
+            device.clone(),
+            object.clone(),
+            Record::Mapping {
+                allocation,
+                address: 0x10000,
+                size: 4096,
+                offset: 0,
+                access: Vec::new(),
+            },
+            Record::Allocation {
+                allocation,
+                size: 4096,
+                checkpoint_via_host_carrier: true,
+                allocation_type: CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED as u32,
+                handle_types: CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR.0,
+                location: MemoryLocation {
+                    location_type: CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE as u32,
+                    id: 0,
+                },
+                virtual_allocation_handle_count: 0,
+            },
+        ];
+        let importer = vec![binding, device, object];
+        for creator_shift in 0..creator.len() {
+            for importer_shift in 0..importer.len() {
+                let mut creator = creator.clone();
+                creator.rotate_left(creator_shift);
+                let mut importer = importer.clone();
+                importer.rotate_left(importer_shift);
+                let summary = validate(&BTreeMap::from([(1, importer), (2, creator)])).unwrap();
+                assert_eq!(summary.len(), 1);
+                assert_eq!(summary[0].reference, allocation);
+            }
+        }
+    }
 }

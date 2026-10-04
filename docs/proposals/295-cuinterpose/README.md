@@ -904,11 +904,16 @@ multicast object. Separate `multicast`, `multicast_device`, and
 `multicast_mapping` records describe the object, attached devices, and virtual
 mappings. This binding alone is not a complete multicast checkpoint.
 
-The coordinator sorts records and publishes the state through a temporary file,
-file `fsync`, atomic rename, and directory `fsync`. On restore it checks the
-namespace PID set, derives the exact socket paths, rebuilds sharing, then
-compares a fresh inspection against the captured records. Allocation bytes come
-from CRIU's host-carrier images, not this file.
+The coordinator sorts records and publishes the state through a private temporary
+file, file `fsync`, publication without replacing an existing destination, and
+directory `fsync`. Publication failure leaves participants prepared, with no
+rollback. The Snapshot agent terminates the source for this failed attempt;
+standalone coordinator callers must also abandon and terminate it. A failed
+directory sync can leave the state file present, so file existence alone does not
+establish success. On restore the coordinator checks the namespace PID set,
+derives the exact socket paths, rebuilds sharing, then compares a fresh inspection
+against the captured records. Allocation bytes come from CRIU's host-carrier
+images, not this file.
 
 The corresponding section of `manifest.yaml` is ordinary YAML:
 
