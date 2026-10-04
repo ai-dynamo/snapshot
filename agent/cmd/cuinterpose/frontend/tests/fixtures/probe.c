@@ -82,6 +82,8 @@ int main(int argc, char **argv) {
         assert(!dlsym(libc, "cuMemCreate"));
         assert(symbol(libc, "malloc") == original(libc, "malloc"));
         in_shim(symbol(driver, "cuMemCreate"), "cuMemCreate");
+        in_shim(symbol(driver, "cuCtxEnablePeerAccess"), "cuCtxEnablePeerAccess");
+        in_shim(symbol(driver, "cuCtxDisablePeerAccess"), "cuCtxDisablePeerAccess");
         assert(symbol(driver, "cuDriverGetVersion") == original(driver, "cuDriverGetVersion"));
         dlclose(libc);
         return 0;
@@ -119,6 +121,7 @@ int main(int argc, char **argv) {
         QueryV2 query2 = symbol(driver, "cuGetProcAddress_v2");
         QueryV2 ptsz = symbol(RTLD_DEFAULT, "cuGetProcAddress_v2_ptsz");
         const struct { const char *name; int version; } cases[] = {
+            {"cuCtxEnablePeerAccess", 13010}, {"cuCtxDisablePeerAccess", 13010},
             {"cuCtxDestroy", 2000}, {"cuCtxDestroy", 13010},
             {"cuDevicePrimaryCtxRelease", 7000}, {"cuDevicePrimaryCtxRelease", 13010},
             {"cuDevicePrimaryCtxReset", 7000}, {"cuDevicePrimaryCtxReset", 13010},
@@ -169,6 +172,13 @@ int main(int argc, char **argv) {
             assert(result == 0 && status == 0);
             in_shim(address, "cuMemAlloc_v2");
             allocate(address);
+            const char *peers[] = {"cuCtxEnablePeerAccess", "cuCtxDisablePeerAccess"};
+            for (unsigned j = 0; j < 2; ++j) {
+                result = i < 2 ? ((RuntimeQuery)resolver)(peers[j], &address, 0, &status)
+                               : ((RuntimeVersionQuery)resolver)(peers[j], &address, 13010, 0, &status);
+                assert(result == 0 && status == 0);
+                in_shim(address, peers[j]);
+            }
         }
         dlclose(runtime);
     } else if (strcmp(argv[1], "local-lifetime") == 0) {

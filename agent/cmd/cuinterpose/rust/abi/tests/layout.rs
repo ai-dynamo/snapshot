@@ -37,6 +37,8 @@ fn generated_c_layout_matches_rust() {
         version,
         size,
         ensure_cuinterpose_initialized,
+        cuCtxEnablePeerAccess,
+        cuCtxDisablePeerAccess,
         cuCtxDestroy,
         cuCtxDestroy_v2,
         cuDevicePrimaryCtxRelease,
