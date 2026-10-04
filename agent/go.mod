@@ -5,7 +5,7 @@ go 1.26.6
 require (
 	github.com/ai-dynamo/snapshot/api v0.0.0
 	github.com/checkpoint-restore/go-criu/v8 v8.4.0
-	github.com/containerd/containerd/v2 v2.0.11
+	github.com/containerd/containerd/v2 v2.0.13
 	github.com/cyphar/filepath-securejoin v0.5.1
 	github.com/go-logr/logr v1.4.4
 	github.com/go-logr/zapr v1.3.0
