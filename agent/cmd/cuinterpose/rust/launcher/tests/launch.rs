@@ -7,6 +7,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 fn bundle() -> TempDir {
@@ -129,6 +130,77 @@ fn missing_or_invalid_delivery_never_starts_the_workload() {
             assert!(String::from_utf8_lossy(&output.stderr).contains(missing));
             assert!(!marker.exists());
         }
+    }
+}
+
+#[test]
+fn mismatched_library_bytes_never_start_the_workload() {
+    for name in ["libcuinterpose.so", "libcuinterpose_core.so"] {
+        for replacement in ["text", "other ELF", "changed bytes"] {
+            let bundle = bundle();
+            let path = bundle.path().join(name);
+            let contents = match replacement {
+                "text" => b"not an ELF library".to_vec(),
+                "other ELF" => {
+                    let bytes = fs::read("/bin/true").unwrap();
+                    assert!(bytes.starts_with(b"\x7fELF"));
+                    bytes
+                }
+                _ => {
+                    let mut bytes = fs::read(&path).unwrap();
+                    // Keep the size and ELF header unchanged.
+                    *bytes.last_mut().unwrap() ^= 1;
+                    bytes
+                }
+            };
+            fs::write(&path, contents).unwrap();
+            let marker = bundle.path().join("started");
+            let output = launcher(&bundle.path().join("libcuinterpose.so"))
+                .args(["/bin/sh", "-c", "touch \"$1\"", "workload"])
+                .arg(&marker)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(1), "{name}: {replacement}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains(name), "{stderr}");
+            assert!(stderr.contains("SHA-256 mismatch"), "{stderr}");
+            assert!(!marker.exists(), "{name}: {replacement}");
+        }
+    }
+}
+
+#[test]
+fn fifo_delivery_is_rejected_without_waiting_for_a_writer() {
+    for name in ["libcuinterpose.so", "libcuinterpose_core.so"] {
+        let bundle = bundle();
+        let path = bundle.path().join(name);
+        fs::remove_file(&path).unwrap();
+        assert!(
+            Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut child = launcher(&bundle.path().join("libcuinterpose.so"))
+            .arg("/bin/true")
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("launcher waited for a FIFO writer: {name}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(name), "{stderr}");
+        assert!(stderr.contains("not a regular file"), "{stderr}");
     }
 }
 
