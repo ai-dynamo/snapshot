@@ -35,8 +35,9 @@ frontend:
 
 native: frontend
 	cd rust && cargo build --locked --release --target x86_64-unknown-linux-gnu -p cuinterpose-core
-	cd rust && cargo build --locked --release --target x86_64-unknown-linux-musl -p cuinterpose-coordinator -p cuinterpose-launch
 	install -m 0644 rust/target/x86_64-unknown-linux-gnu/release/libcuinterpose_core.so build/libcuinterpose_core.so
+	# The launcher embeds hashes of these finished libraries, so build it after install.
+	cd rust && cargo build --locked --release --target x86_64-unknown-linux-musl -p cuinterpose-coordinator -p cuinterpose-launch
 	install -m 0755 rust/target/x86_64-unknown-linux-musl/release/cuinterpose-coordinator build/cuinterpose-coordinator
 	install -m 0755 rust/target/x86_64-unknown-linux-musl/release/cuinterpose-launch build/cuinterpose-launch
 
