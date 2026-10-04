@@ -61,7 +61,11 @@ malloc allocations and imported IPC mappings while preserving explicit VMM
 allocations. Multicast participants must add and bind their device in the same
 process; device ordinals are local to each participant.
 
-The memory-IPC adapter supports one GPU per process. Converted malloc pointers are accessible only from their allocating device; native `cuCtxEnablePeerAccess` does not grant another device VMM access. Each allocation gets its own backing rounded to the device's minimum VMM allocation granularity; there is no pooling or suballocation. A device with a 2 MiB minimum therefore consumes 2 MiB even for a 64 KiB allocation. This can reduce memory available for KV cache and increase allocation-heavy startup costs; device attributes and granularity are cached, but that does not remove the backing overhead.
+The memory-IPC adapter grants each converted malloc mapping access from its allocating GPU and each IPC import access from its importing GPU. Successful `cuCtxEnablePeerAccess` calls also grant the current GPU access to existing and future converted mappings owned by the peer context. These permissions are recorded and replayed during reconstruction. Making another GPU visible alone does not add a grant.
+
+The adapter assumes cooperating processes, typically one process per GPU. Disabling peer access stops grants for future mappings, while existing mappings retain their device permissions. Context boundaries and peer disable therefore do not provide access isolation for converted mappings. Explicit application-managed VMM mappings retain their own access policy. See the [workload contract](../reference/workload-contract.md#cuinterpose-synchronization-and-lifetime) for context lifetime and synchronization requirements.
+
+Each converted malloc allocation gets its own backing rounded to the device's minimum VMM allocation granularity. There is no pooling or suballocation. A device with a 2 MiB minimum therefore consumes 2 MiB even for a 64 KiB allocation. This can reduce memory available for KV cache and increase allocation-heavy startup costs. Device attributes and granularity are cached, but that does not remove the backing overhead.
 
 CUDA Runtime 11 is unsupported. Runtime driver-entry lookup requires CUDA
 Runtime 12.0 or newer and fails closed when the version cannot be verified.
