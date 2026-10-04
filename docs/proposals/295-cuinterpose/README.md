@@ -83,7 +83,7 @@ workloads to resume with their existing pointers and sharing semantics.
   private allocations through the shim. Native storage integration is separate.
 - Event IPC, memory-pool IPC, managed/async/pitched allocation families, foreign
   native memory-IPC handles, historical 32-bit allocation entry points, or
-  general cross-context peer-access emulation.
+  strict context isolation for converted malloc/IPC mappings.
 - Automatically draining application work, supporting a changing participant
   group, or retrying, rolling back, or resuming a failed lifecycle operation.
 
@@ -119,9 +119,13 @@ zero) are rejected before CUDA allocation or import. Tracked unicast allocations
 support pinned DEVICE and HOST_NUMA backing. Private unicast VMM remains
 native-owned. Shared HOST_NUMA bytes use the creator's host carrier, and restore
 preserves the original NUMA placement. Memory IPC requires fully
-interposed peers and the adapter's single
-owning-context behavior. CUDA allocation granularity can make backing larger
-than the requested malloc size.
+interposed peers and one owning context per imported mapping. Successful peer
+enables grant the accessing GPU permission on existing and future converted
+mappings owned by the peer context. Peer disable stops future grants but keeps
+existing device permissions. This assumes cooperating processes, typically one
+process per GPU, without strict context isolation. Context teardown removes peer
+relationships. CUDA allocation granularity can make backing larger than the
+requested malloc size.
 
 Each multicast participant must add and bind its device in the same process.
 Device ordinals are local to that participant, so different ranks may each use
@@ -383,6 +387,7 @@ application pointers, foreign C++ exceptions, or allocator aborts recoverable.
 | `cuMemGetAllocationPropertiesFromHandle` | Resolves virtual handles and preserves application-visible allocation properties. |
 | `cuMemExportToShareableHandle`, `cuMemImportFromShareableHandle` | Replaces raw export FDs with virtual shareable handles and imports the creator's real allocation through a peer request. |
 | `cuMemAlloc_v2`, `cuMemFree_v2`, `cuMemGetAddressRange_v2` | Implements synchronous device malloc with VMM backing, frees it, and reports the application's requested range. |
+| `cuCtxEnablePeerAccess`, `cuCtxDisablePeerAccess` | Mirrors successful native peer enables into VMM permissions on existing and future converted malloc/IPC mappings. Disable stops future grants and preserves existing device permissions. |
 | `cuCtxDestroy*`, `cuDevicePrimaryCtxReset*`, `cuDevicePrimaryCtxRelease*` | Reclaims converted malloc/IPC mappings after successful context teardown; nonfinal primary releases preserve them. |
 | `cuIpcGetMemHandle`, `cuIpcOpenMemHandle`, `cuIpcOpenMemHandle_v2`, `cuIpcCloseMemHandle` | Implements supported memory IPC using the same VMM records and peer export service, without native memory-IPC calls. |
 | `cuMulticastCreate`, `cuMulticastAddDevice`, `cuMulticastBindMem*`, `cuMulticastBindAddr*`, `cuMulticastUnbind` | Tracks multicast objects, device membership, bindings, and their reconstruction. |
