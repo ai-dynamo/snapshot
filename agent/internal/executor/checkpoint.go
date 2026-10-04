@@ -126,18 +126,28 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	if err != nil {
 		return err
 	}
-	state.CuInterpose, err = cuda.InspectCuInterposeLibraries(snapshotruntime.HostProcPath, state.CUDAHostPIDs, req.CuInterposeRequired)
+	requirement := cuda.CuInterposeOptional
+	if req.CuInterposeRequired {
+		requirement = cuda.CuInterposeRequired
+	}
+	state.CuInterpose, err = cuda.InspectCuInterposeLibraries(snapshotruntime.HostProcPath, state.CUDAHostPIDs, requirement)
 	if err != nil {
 		return err
 	}
 	if state.CuInterpose != nil {
-		if err := cuda.InspectCuInterpose(ctx, snapshotruntime.HostProcPath, state.PID, state.CUDANSPIDs, cuda.DefaultCoordinatorBinaryPath); err != nil {
+		if err := cuda.InspectCuInterpose(ctx, cuda.CuInterposeTarget{
+			ProcRoot: snapshotruntime.HostProcPath, TargetPID: state.PID,
+			NamespacePIDs: state.CUDANSPIDs, Binary: cuda.DefaultCoordinatorBinaryPath,
+		}); err != nil {
 			return fmt.Errorf("inspect cuinterpose: %w", err)
 		}
 	}
 	cudaJobFile := ""
 	if len(state.CUDAHostPIDs) > 0 {
-		cudaJobFile, err = cuda.StageJobFile(state.RootFS, tmpDir, len(state.GPUs.Devices) > 1 && state.CuInterpose == nil)
+		// The coordinator owns shared IPC/multicast state, so shim captures do not
+		// require native launch-job state. Preserve it when the workload provides it.
+		requiresCUDAJobFile := len(state.GPUs.Devices) > 1 && state.CuInterpose == nil
+		cudaJobFile, err = cuda.StageJobFile(state.RootFS, tmpDir, requiresCUDAJobFile)
 		if err != nil {
 			return err
 		}
@@ -363,14 +373,10 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 	if len(state.CUDAHostPIDs) > 0 {
 		if data.CuInterpose != nil {
 			// Remove shared mappings before native CUDA lock and checkpoint calls.
-			err := cuda.PrepareCuInterpose(
-				ctx,
-				checkpointDir,
-				snapshotruntime.HostProcPath,
-				state.PID,
-				state.CUDANSPIDs,
-				cuda.DefaultCoordinatorBinaryPath,
-			)
+			err := cuda.PrepareCuInterpose(ctx, cuda.CuInterposeTarget{
+				ProcRoot: snapshotruntime.HostProcPath, TargetPID: state.PID,
+				NamespacePIDs: state.CUDANSPIDs, Binary: cuda.DefaultCoordinatorBinaryPath,
+			}, checkpointDir)
 			if err != nil {
 				return nil, fmt.Errorf("prepare cuinterpose: %w", err)
 			}

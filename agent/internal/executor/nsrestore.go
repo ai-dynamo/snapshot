@@ -77,7 +77,10 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		if err != nil {
 			return nil, err
 		}
-		if len(m.CUDA.SourceGPUUUIDs) > 1 && m.CuInterpose == nil && cudaJobFile == "" {
+		// The coordinator restores shared IPC/multicast state for shim captures.
+		// Native multi-GPU captures still require launch-job state.
+		requiresCUDAJobFile := len(m.CUDA.SourceGPUUUIDs) > 1 && m.CuInterpose == nil
+		if requiresCUDAJobFile && cudaJobFile == "" {
 			return nil, fmt.Errorf("multi-GPU checkpoint is missing CUDA launch-job state")
 		}
 	}
@@ -212,8 +215,10 @@ func executeRestore(
 		return nil, 0, nil, fmt.Errorf("remove stale restore-complete sentinel: %w", err)
 	}
 	if m.CuInterpose != nil {
+		// The control emptyDir can retain socket names from a prior incarnation.
+		// Remove this manifest's endpoints before CRIU recreates their bindings.
 		if err := cuda.RemoveStaleCuInterposeSockets(podcontract.SnapshotControlMountPath, m.CUDA.PIDs); err != nil {
-			return nil, 0, nil, err
+			return nil, 0, nil, fmt.Errorf("remove stale cuinterpose sockets: %w", err)
 		}
 	}
 

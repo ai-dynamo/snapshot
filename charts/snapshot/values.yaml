@@ -11,6 +11,8 @@ image:
   agent:
     repository: ghcr.io/ai-dynamo/snapshot/agent
     # Defaults to the chart's appVersion when empty (see templates).
+    # Also accepts tag@sha256:<digest> or @sha256:<digest> to pin both the
+    # DaemonSet and cuinterpose installer to the same image.
     tag: ""
     pullPolicy: Always
 

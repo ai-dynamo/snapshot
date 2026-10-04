@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/go-logr/logr"
 	"golang.org/x/sys/unix"
+
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 )
 
 const (
@@ -47,13 +50,14 @@ func newExecMounter(path string, log logr.Logger) *execMounter {
 }
 
 type execMountRef struct {
-	binaryPath string
-	nsFd       *os.File
-	unmountCmd string
-	createdDst bool
-	log        logr.Logger
-	once       sync.Once
-	unmountErr error
+	binaryPath      string
+	nsFd            *os.File
+	unmountCmd      string
+	destinationLeaf string
+	createdDst      bool
+	log             logr.Logger
+	once            sync.Once
+	unmountErr      error
 }
 
 func (h *execMountRef) NsFd() *os.File { return h.nsFd }
@@ -64,6 +68,9 @@ func (h *execMountRef) Unmount(ctx context.Context) error {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), unmountTimeout)
 		defer cancel()
 		args := []string{h.unmountCmd, strconv.Itoa(nsFdChildNum)}
+		if h.destinationLeaf != "" {
+			args = append(args, h.destinationLeaf)
+		}
 		if h.createdDst {
 			args = append(args, "created")
 		}
@@ -86,15 +93,48 @@ func (m *execMounter) MountBundle(ctx context.Context, pid int) (mountRef, error
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", nsFdPath, err)
 	}
-	return m.mount(ctx, nsFd, "mount-bundle-fd", "unmount-bundle-fd")
+	ref, err := m.mount(ctx, nsFd, "mount-bundle-fd", "unmount-bundle-fd")
+	if err != nil {
+		return nil, err
+	}
+	return ref, nil
 }
 
 func (m *execMounter) MountCheckpoint(ctx context.Context, nsFd *os.File, checkpointPath string) (mountRef, error) {
-	return m.mountInNamespace(ctx, nsFd, "mount-checkpoint-fd", "unmount-checkpoint-fd", checkpointPath)
+	ref, err := m.mountInNamespace(ctx, nsFd, "mount-checkpoint-fd", "unmount-checkpoint-fd", checkpointPath)
+	if err != nil {
+		return nil, err
+	}
+	return ref, nil
 }
 
 func (m *execMounter) MountCuInterpose(ctx context.Context, nsFd *os.File) (mountRef, error) {
-	return m.mountInNamespace(ctx, nsFd, "mount-snapshot-cuda-fd", "unmount-snapshot-cuda-fd")
+	leaf, err := cuInterposeDestinationLeaf(podcontract.CuInterposeMountPath)
+	if err != nil {
+		return nil, err
+	}
+	ref, err := m.mountInNamespace(ctx, nsFd, "mount-snapshot-cuda-fd", "unmount-snapshot-cuda-fd", leaf)
+	if err != nil {
+		return nil, err
+	}
+	// Retain the actual destination so cleanup cannot select a different mount.
+	ref.destinationLeaf = leaf
+	return ref, nil
+}
+
+// The pod contract owns the destination. The native helper permits only one
+// directory under /tmp, retaining its fixed source and mount attributes.
+func cuInterposeDestinationLeaf(destination string) (string, error) {
+	leaf := path.Base(destination)
+	if path.Dir(destination) != "/tmp" || destination != "/tmp/"+leaf || leaf == "." || leaf == ".." {
+		return "", fmt.Errorf("cuinterpose destination must be a single directory under /tmp: %q", destination)
+	}
+	for _, char := range leaf {
+		if !(char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '_' || char == '-' || char == '.') {
+			return "", fmt.Errorf("cuinterpose destination has an unsupported directory name: %q", destination)
+		}
+	}
+	return leaf, nil
 }
 
 func (m *execMounter) mountInNamespace(
@@ -103,7 +143,7 @@ func (m *execMounter) mountInNamespace(
 	mountCmd string,
 	unmountCmd string,
 	args ...string,
-) (mountRef, error) {
+) (*execMountRef, error) {
 	if nsFd == nil {
 		return nil, fmt.Errorf("mount namespace fd is required")
 	}
@@ -124,10 +164,14 @@ func (m *execMounter) MountPageBroker(ctx context.Context, nsFd *os.File, stagin
 		return nil, fmt.Errorf("duplicate mount namespace fd: %w", err)
 	}
 	unix.CloseOnExec(dupFd)
-	return m.mount(ctx, os.NewFile(uintptr(dupFd), nsFd.Name()), "mount-pagebroker-fd", "unmount-pagebroker-fd", stagingPath)
+	ref, err := m.mount(ctx, os.NewFile(uintptr(dupFd), nsFd.Name()), "mount-pagebroker-fd", "unmount-pagebroker-fd", stagingPath)
+	if err != nil {
+		return nil, err
+	}
+	return ref, nil
 }
 
-func (m *execMounter) mount(ctx context.Context, nsFd *os.File, mountCmd, unmountCmd string, args ...string) (mountRef, error) {
+func (m *execMounter) mount(ctx context.Context, nsFd *os.File, mountCmd, unmountCmd string, args ...string) (*execMountRef, error) {
 	commandArgs := []string{mountCmd, strconv.Itoa(nsFdChildNum)}
 	commandArgs = append(commandArgs, args...)
 	cmd := exec.CommandContext(ctx, m.binaryPath, commandArgs...)

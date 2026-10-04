@@ -5,6 +5,7 @@ package executor
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -362,7 +363,7 @@ func TestValidateRestoreManifest(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateRestoreManifest(tc.req, manifest)
+			err := validateRestoreManifest(tc.req, manifest, t.TempDir())
 			if tc.want == "" && err != nil {
 				t.Fatalf("validateRestoreManifest() error = %v", err)
 			}
@@ -378,15 +379,16 @@ func TestRestoreInNamespaceJobFileRequirement(t *testing.T) {
 		name        string
 		cuInterpose bool
 		jobFile     string
-		wantError   string
+		wantStopsAt string
 	}{
-		{name: "native multi-GPU missing", wantError: "missing CUDA launch-job state"},
+		{name: "native multi-GPU missing", wantStopsAt: "missing CUDA launch-job state"},
+		{name: "native multi-GPU present", jobFile: "present", wantStopsAt: "invalid target pod IP"},
 		{name: "cuinterpose missing",
 			cuInterpose: true,
-			wantError:   "invalid target pod IP"},
+			wantStopsAt: "invalid target pod IP"},
 		{name: "cuinterpose present", jobFile: "present",
 			cuInterpose: true,
-			wantError:   "invalid target pod IP"},
+			wantStopsAt: "invalid target pod IP"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			checkpointDir := t.TempDir()
@@ -416,8 +418,8 @@ func TestRestoreInNamespaceJobFileRequirement(t *testing.T) {
 			_, err := RestoreInNamespace(context.Background(), RestoreOptions{
 				CheckpointPath: checkpointDir, TargetPodIP: "invalid",
 			}, testr.New(t))
-			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
-				t.Fatalf("RestoreInNamespace() = %v, want %q", err, tc.wantError)
+			if err == nil || !strings.Contains(err.Error(), tc.wantStopsAt) {
+				t.Fatalf("RestoreInNamespace() = %v, want preflight to stop at %q", err, tc.wantStopsAt)
 			}
 		})
 	}
@@ -457,28 +459,55 @@ func testCuInterposeIdentity() *types.CuInterposeManifest {
 	return &types.CuInterposeManifest{FrontendSHA256: strings.Repeat("a", 64), CoreSHA256: strings.Repeat("b", 64)}
 }
 
-// Promoted methods panic if a restore reaches mounting in this preflight test.
-type unusedRestoreMounter struct{ RestoreMounter }
-
-func TestRestoreRequiresShimIdentityEvenWhenCompatibilityIsSkipped(t *testing.T) {
-	base := t.TempDir()
-	artifact, err := nsmount.ResolveArtifactPath(base, "content", "main")
-	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(artifact, 0700))
-	manifest := &types.CheckpointManifest{
-		Artifact:    types.ArtifactManifest{ContentUID: "content", ContainerName: "main"},
-		CuInterpose: testCuInterposeIdentity(),
+func TestRestoreManifestRequiresMatchingShimLibrariesEvenWhenCompatibilityIsSkipped(t *testing.T) {
+	libraries := []struct{ name, contents string }{
+		{"libcuinterpose.so", "frontend"},
+		{"libcuinterpose_core.so", "core"},
 	}
-	require.NoError(t, types.WriteManifest(artifact, manifest))
-	for _, skip := range []bool{false, true} {
-		rt := &restoreFakeRuntime{}
-		_, err := Restore(context.Background(), rt, testr.New(t), RestoreRequest{
-			BasePath: base, ContentUID: "content", ArtifactContainerName: "main", ContainerID: "target",
-			SkipCompatCheck: skip,
-		}, unusedRestoreMounter{})
-		// Whether the machine has no bundle or has a bundle with different library hashes,
-		// restore must be rejected before runtime lookup, mounts, or CRIU.
-		require.ErrorContains(t, err, "libcuinterpose.so")
-		require.Empty(t, rt.resolvedID)
+	manifest := &types.CheckpointManifest{
+		Artifact: types.ArtifactManifest{ContentUID: "content", ContainerName: "main"},
+		CuInterpose: &types.CuInterposeManifest{
+			FrontendSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(libraries[0].contents))),
+			CoreSHA256:     fmt.Sprintf("%x", sha256.Sum256([]byte(libraries[1].contents))),
+		},
+	}
+	for _, tc := range []struct{ name, missing, changed string }{
+		{name: "matching libraries"},
+		{name: "missing frontend", missing: libraries[0].name},
+		{name: "missing core", missing: libraries[1].name},
+		{name: "different frontend", changed: libraries[0].name},
+		{name: "different core", changed: libraries[1].name},
+	} {
+		for _, skip := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/skip-compat=%t", tc.name, skip), func(t *testing.T) {
+				bundle := t.TempDir()
+				var wantExpected, wantActual string
+				for _, library := range libraries {
+					if library.name == tc.missing {
+						continue
+					}
+					contents := []byte(library.contents)
+					if library.name == tc.changed {
+						wantExpected = fmt.Sprintf("%x", sha256.Sum256(contents))
+						contents[0] ^= 1 // Preserve size so only identity distinguishes them.
+						wantActual = fmt.Sprintf("%x", sha256.Sum256(contents))
+					}
+					require.NoError(t, os.WriteFile(filepath.Join(bundle, library.name), contents, 0600))
+				}
+				err := validateRestoreManifest(RestoreRequest{
+					ContentUID: "content", ArtifactContainerName: "main", SkipCompatCheck: skip,
+				}, manifest, bundle)
+				switch {
+				case tc.missing != "":
+					require.ErrorIs(t, err, os.ErrNotExist)
+					require.ErrorContains(t, err, "open restore library "+tc.missing)
+				case tc.changed != "":
+					require.ErrorContains(t, err, tc.changed+" SHA-256 mismatch")
+					require.ErrorContains(t, err, "expected "+wantExpected+", actual "+wantActual)
+				default:
+					require.NoError(t, err)
+				}
+			})
+		}
 	}
 }

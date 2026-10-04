@@ -45,15 +45,16 @@ func writeMappedLibraries(t *testing.T, procRoot string, pid int, frontend, core
 
 func TestInspectCuInterposeLibraries(t *testing.T) {
 	for _, tc := range []struct {
-		name                 string
-		first, second        [2]string
-		required, wantLoaded bool
-		wantError            string
+		name          string
+		first, second [2]string
+		requirement   CuInterposeRequirement
+		wantLoaded    bool
+		wantError     string
 	}{
 		{name: "native"},
-		{name: "required but absent", required: true, wantError: "not active"},
+		{name: "required but absent", requirement: CuInterposeRequired, wantError: "not active"},
 		{name: "loaded without annotation", first: [2]string{"front", "core"}, second: [2]string{"front", "core"}, wantLoaded: true},
-		{name: "delivered", required: true, first: [2]string{"front", "core"}, second: [2]string{"front", "core"}, wantLoaded: true},
+		{name: "delivered", requirement: CuInterposeRequired, first: [2]string{"front", "core"}, second: [2]string{"front", "core"}, wantLoaded: true},
 		{name: "partial coverage", first: [2]string{"front", "core"}, wantError: "participants [2]"},
 		{name: "missing core", first: [2]string{"front", ""}, wantError: "both cuinterpose"},
 		{name: "different frontend", first: [2]string{"front", "core"}, second: [2]string{"other", "core"}, wantError: "hashes differ"},
@@ -63,7 +64,7 @@ func TestInspectCuInterposeLibraries(t *testing.T) {
 			procRoot := t.TempDir()
 			writeMappedLibraries(t, procRoot, 1, tc.first[0], tc.first[1])
 			writeMappedLibraries(t, procRoot, 2, tc.second[0], tc.second[1])
-			identity, err := InspectCuInterposeLibraries(procRoot, []int{1, 2}, tc.required)
+			identity, err := InspectCuInterposeLibraries(procRoot, []int{1, 2}, tc.requirement)
 			if tc.wantError != "" {
 				require.ErrorContains(t, err, tc.wantError)
 				return
@@ -72,16 +73,23 @@ func TestInspectCuInterposeLibraries(t *testing.T) {
 			require.Equal(t, tc.wantLoaded, identity != nil)
 		})
 	}
-	_, err := InspectCuInterposeLibraries(t.TempDir(), nil, true)
+	_, err := InspectCuInterposeLibraries(t.TempDir(), nil, CuInterposeRequired)
 	require.ErrorContains(t, err, "not active")
 }
 
 func TestInspectCuInterposeRejectsReplacedOrDeletedMappings(t *testing.T) {
-	for _, deleted := range []bool{false, true} {
-		t.Run(strconv.FormatBool(deleted), func(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		deleted   bool
+		wantError string
+	}{
+		{name: "replaced", wantError: "was replaced since it was loaded"},
+		{name: "deleted", deleted: true, wantError: "is deleted or has an unsupported path"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			procRoot := t.TempDir()
 			dir := writeMappedLibraries(t, procRoot, 1, "front", "core")
-			if deleted {
+			if tc.deleted {
 				maps := filepath.Join(procRoot, "1/maps")
 				contents, err := os.ReadFile(maps)
 				require.NoError(t, err)
@@ -91,8 +99,49 @@ func TestInspectCuInterposeRejectsReplacedOrDeletedMappings(t *testing.T) {
 				require.NoError(t, os.Rename(path, path+".old"))
 				require.NoError(t, os.WriteFile(path, []byte("front"), 0600))
 			}
-			_, err := InspectCuInterposeLibraries(procRoot, []int{1}, false)
-			require.Error(t, err)
+			_, err := InspectCuInterposeLibraries(procRoot, []int{1}, CuInterposeOptional)
+			require.ErrorContains(t, err, tc.wantError)
+		})
+	}
+}
+
+func TestInspectCuInterposeRepeatedMappingRegions(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		changedField int
+		value        string
+	}{
+		{name: "consistent"},
+		{name: "conflicting device", changedField: 3, value: "ff:ff"},
+		{name: "conflicting inode", changedField: 4, value: "0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			procRoot := t.TempDir()
+			writeMappedLibraries(t, procRoot, 1, "front", "core")
+			mapsPath := filepath.Join(procRoot, "1/maps")
+			contents, err := os.ReadFile(mapsPath)
+			require.NoError(t, err)
+			var regions []string
+			for i, line := range strings.Split(strings.TrimSpace(string(contents)), "\n") {
+				fields := strings.Fields(line)
+				fields[0] = fmt.Sprintf("%x-%x", 0x1000+i*0x3000, 0x2000+i*0x3000)
+				regions = append(regions, strings.Join(fields, " "))
+				fields[0] = fmt.Sprintf("%x-%x", 0x2000+i*0x3000, 0x3000+i*0x3000)
+				fields[1], fields[2] = "rw-p", "00001000"
+				if i == 0 && tc.changedField != 0 {
+					fields[tc.changedField] = tc.value
+				}
+				regions = append(regions, strings.Join(fields, " "))
+			}
+			require.NoError(t, os.WriteFile(mapsPath, []byte(strings.Join(regions, "\n")+"\n"), 0600))
+			identity, err := InspectCuInterposeLibraries(procRoot, []int{1}, CuInterposeRequired)
+			if tc.changedField != 0 {
+				require.ErrorContains(t, err, "conflicting device/inode identities")
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, fmt.Sprintf("%x", sha256.Sum256([]byte("front"))), identity.FrontendSHA256)
+			require.Equal(t, fmt.Sprintf("%x", sha256.Sum256([]byte("core"))), identity.CoreSHA256)
 		})
 	}
 }
@@ -105,14 +154,14 @@ func TestInspectCuInterposeRejectsUnsupportedPathWithoutAnnotation(t *testing.T)
 	require.NoError(t, err)
 	contents = []byte(strings.ReplaceAll(string(contents), podcontract.CuInterposeMountPath, "/some directory"))
 	require.NoError(t, os.WriteFile(maps, contents, 0600))
-	_, err = InspectCuInterposeLibraries(procRoot, []int{1}, false)
+	_, err = InspectCuInterposeLibraries(procRoot, []int{1}, CuInterposeOptional)
 	require.ErrorContains(t, err, "must be delivered")
 }
 
 func TestCheckCuInterposeLibraries(t *testing.T) {
 	procRoot := t.TempDir()
 	directory := writeMappedLibraries(t, procRoot, 1, "front", "core")
-	identity, err := InspectCuInterposeLibraries(procRoot, []int{1}, true)
+	identity, err := InspectCuInterposeLibraries(procRoot, []int{1}, CuInterposeRequired)
 	require.NoError(t, err)
 	require.NoError(t, CheckCuInterposeLibraries(directory, identity))
 	for _, name := range []string{"libcuinterpose.so", "libcuinterpose_core.so"} {

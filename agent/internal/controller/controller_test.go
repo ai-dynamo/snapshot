@@ -101,7 +101,7 @@ func (noopInjector) MountArtifact(_ context.Context, _ nsmount.MountPoint, _ str
 }
 
 func (noopInjector) MountCuInterpose(context.Context, nsmount.MountPoint) (nsmount.MountPoint, error) {
-	return nil, nil
+	return noopMountPoint{}, nil
 }
 
 func (noopInjector) MountPageBroker(_ context.Context, _ nsmount.MountPoint, _ string) (nsmount.MountPoint, error) {

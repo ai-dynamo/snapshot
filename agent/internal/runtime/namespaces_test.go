@@ -21,13 +21,14 @@ func TestCommandInNamespacesPassesOpenFiles(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
 	t.Setenv("TEST_CONTAINER_ROOT", dir)
+	t.Setenv("TEST_TARGET_PID", strconv.Itoa(os.Getpid()))
 	script := `#!/bin/sh
 set -eu
 while [ "$1" != -- ]; do
     case "$1" in
         --mount=*) test "$(readlink "${1#*=}")" = "$(readlink /proc/self/ns/mnt)" ;;
         --root=*|--wd=*) test "$(readlink "${1#*=}")" = "$TEST_CONTAINER_ROOT" ;;
-        -t) shift ;;
+        -t) shift; test "$1" = "$TEST_TARGET_PID" ;;
         -u|-i|-n|-p) ;;
         *) exit 1 ;;
     esac

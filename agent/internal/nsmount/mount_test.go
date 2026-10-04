@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ai-dynamo/snapshot/api/podcontract"
 	"github.com/go-logr/logr"
 )
 
@@ -80,7 +81,10 @@ func TestExecMounterMountErrorWrapped(t *testing.T) {
 		t.Fatal(openErr)
 	}
 	defer nsFd.Close()
-	_, err := newMounterForTest(t, bin).MountCheckpoint(context.Background(), nsFd, "/checkpoints/abc/versions/1")
+	ref, err := newMounterForTest(t, bin).MountCheckpoint(context.Background(), nsFd, "/checkpoints/abc/versions/1")
+	if ref != nil {
+		t.Fatal("failed mount returned a non-nil reference")
+	}
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -88,6 +92,80 @@ func TestExecMounterMountErrorWrapped(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error missing %q: %v", want, err)
 		}
+	}
+}
+
+func TestMountFailuresReturnNilReferences(t *testing.T) {
+	m := newMounterForTest(t, writeFakeBinary(t, "exit 1"))
+	nsFd, err := os.Open("/proc/self/ns/mnt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nsFd.Close()
+	for name, call := range map[string]func() (mountRef, error){
+		"bundle":               func() (mountRef, error) { return m.MountBundle(context.Background(), os.Getpid()) },
+		"cuinterpose":          func() (mountRef, error) { return m.MountCuInterpose(context.Background(), nsFd) },
+		"checkpoint namespace": func() (mountRef, error) { return m.MountCheckpoint(context.Background(), nil, "/checkpoints/id") },
+		"pagebroker": func() (mountRef, error) {
+			return m.MountPageBroker(context.Background(), nsFd, "/pagebroker/staging/restore/id")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ref, err := call()
+			if err == nil || ref != nil {
+				t.Fatalf("failed mount = (%v, %v), want (nil, error)", ref, err)
+			}
+		})
+	}
+}
+
+func TestCuInterposeDestinationPolicy(t *testing.T) {
+	for _, destination := range []string{"/tmp/snapshot-cuda", "/tmp/alternate-bundle.1"} {
+		leaf, err := cuInterposeDestinationLeaf(destination)
+		if err != nil || "/tmp/"+leaf != destination {
+			t.Fatalf("destination %q: leaf %q, error %v", destination, leaf, err)
+		}
+	}
+	for _, destination := range []string{"", "/tmp", "/tmp/", "/tmp/.", "/tmp/..", "/tmp/a/b", "/tmp/a/../snapshot-cuda", "/tmp//snapshot-cuda", "/other/snapshot-cuda", "/tmp/a b", "/tmp/é"} {
+		if _, err := cuInterposeDestinationLeaf(destination); err == nil {
+			t.Errorf("accepted destination %q", destination)
+		}
+	}
+}
+
+func TestCuInterposeMountRetainsDestinationForUnmount(t *testing.T) {
+	for _, created := range []bool{false, true} {
+		t.Run(fmt.Sprint(created), func(t *testing.T) {
+			logFile := filepath.Join(t.TempDir(), "args.log")
+			script := `printf '%s\n' "$*" >> ` + logFile
+			if created {
+				script += "\necho created_dst=1"
+			}
+			m := newMounterForTest(t, writeFakeBinary(t, script))
+			nsFd, err := os.Open("/proc/self/ns/mnt")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer nsFd.Close()
+			handle, err := m.MountCuInterpose(context.Background(), nsFd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := handle.Unmount(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			leaf := filepath.Base(podcontract.CuInterposeMountPath)
+			want := []string{"mount-snapshot-cuda-fd 3 " + leaf, "unmount-snapshot-cuda-fd 3 " + leaf}
+			if created {
+				want[1] += " created"
+			}
+			if got := readLines(t, logFile); strings.Join(got, "\n") != strings.Join(want, "\n") {
+				t.Fatalf("helper commands = %v, want %v", got, want)
+			}
+			if _, err := nsFd.Stat(); err != nil {
+				t.Fatalf("unmount closed the caller's namespace: %v", err)
+			}
+		})
 	}
 }
 
@@ -195,6 +273,17 @@ func TestCHelperRejectsUnsafeSourcesBeforeMountSyscalls(t *testing.T) {
 	} {
 		if output, err := exec.Command(binary, args...).CombinedOutput(); err == nil {
 			t.Fatalf("helper accepted %v: %s", args, output)
+		}
+	}
+	for _, operation := range []string{"mount-snapshot-cuda-fd", "unmount-snapshot-cuda-fd"} {
+		for _, leaf := range []string{"", ".", "..", "../etc", "a/b", "/etc", "a b", "a;id", "é", strings.Repeat("a", 256)} {
+			output, err := exec.Command(binary, operation, "3", leaf).CombinedOutput()
+			if err == nil || !strings.Contains(string(output), "invalid snapshot-cuda directory name") {
+				t.Fatalf("%s accepted or misdiagnosed leaf %q: %v: %s", operation, leaf, err, output)
+			}
+			if strings.Contains(string(output), "open_tree") || strings.Contains(string(output), "setns") {
+				t.Fatalf("helper reached a syscall for invalid destination: %s", output)
+			}
 		}
 	}
 }
