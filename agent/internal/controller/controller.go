@@ -1034,6 +1034,15 @@ func (op *restoreOperation) completeRestore(ctx context.Context, placeholderHost
 // Pod conditions are an associative list keyed by type, so this field manager
 // owns only nvidia.com/Restored and does not replace kubelet-owned conditions.
 func (w *NodeController) applyRestoredCondition(ctx context.Context, pod *corev1.Pod, status corev1.ConditionStatus, reason, message string) error {
+	existing := findRestoredCondition(pod)
+	if existing != nil &&
+		existing.Status == status &&
+		existing.Reason == reason &&
+		existing.Message == message {
+		// Applying an identical condition would only write a new resource version
+		// and enqueue another informer reconciliation.
+		return nil
+	}
 	setPodCondition(&pod.Status, corev1.PodCondition{
 		Type:    corev1.PodConditionType(podcontract.RestoredCondition),
 		Status:  status,
