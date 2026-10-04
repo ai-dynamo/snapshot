@@ -187,7 +187,11 @@ Workloads using [CuInterpose](../development/cuinterpose.md) must also meet thes
 | Do not retry or resume after failed or ambiguous checkpoint preparation or reconstruction. | Irreversible mutations and failed cleanup are fail-stop. Unknown asynchronous-copy completion terminates the process without freeing memory that DMA may still reference. The agent terminates the source after preparation failure and does not continue native capture. |
 | After CUDA initialization, a fork child must exec or exit. | Shim memory calls reject inherited runtime state before taking its locks. Long-lived fork children during checkpoint are unsupported. |
 
-The memory-IPC adapter supports one GPU per process with fully interposed IPC peers. Converted `cuMemAlloc` pointers have VMM access only for their allocating device; `cuCtxEnablePeerAccess` does not grant another device access to them. Same-process peer access to these pointers is unsupported and can fail in CUDA. Converted allocations also round backing up to the device's minimum VMM allocation granularity, so account for the larger footprint of small allocations.
+The memory-IPC adapter requires fully interposed IPC peers. It grants each converted `cuMemAlloc` mapping access from its allocating GPU and each IPC import access from its importing GPU. Successful `cuCtxEnablePeerAccess` calls also grant the current GPU access to existing and future converted allocations and IPC imports owned by the peer context. Grants are recorded with each mapping and replayed during reconstruction. Merely making another GPU visible does not add a grant or its allocation cost.
+
+The adapter assumes cooperating processes, typically one process per GPU. VMM permissions apply to devices, so CUDA context boundaries and `cuCtxDisablePeerAccess` are not access-control boundaries for converted mappings. Disabling peer access stops grants for future mappings, but existing mappings keep their device permissions. Destroying or resetting a context, or releasing its final primary-context reference, removes its relationships for future mappings. Applications remain responsible for serializing context teardown with its users.
+
+Converted allocations round backing up to the device's minimum VMM allocation granularity, so account for the larger footprint of small allocations. Explicit application-managed VMM mappings retain their own access policy.
 
 ## Packaging methods
 
