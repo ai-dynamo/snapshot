@@ -80,7 +80,8 @@ These manifests use native CUDA checkpointing. If you enable
 [CuInterpose](../development/cuinterpose.md), this Deployment must deliver
 `libcuinterpose.so`, `libcuinterpose_core.so`, and the executable
 `cuinterpose-launch` at `/tmp/snapshot-cuda` before the workload starts. Prefix
-the existing Python command with `/tmp/snapshot-cuda/cuinterpose-launch` and set
+the existing Python command with
+`/tmp/snapshot-cuda/cuinterpose-launch --library /tmp/snapshot-cuda/libcuinterpose.so --` and set
 the source Pod annotation `nvidia.com/cuinterpose-enabled: "true"`. The launcher
 preserves the runtime-resolved environment, including existing preloads.
 Adding the annotation to a running Pod cannot activate the shim.

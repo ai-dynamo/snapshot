@@ -6,17 +6,35 @@ templates:
   - templates/operator-deployment.yaml
   - templates/daemonset.yaml
 tests:
+  - it: defaults the installer and daemonset to the chart appVersion
+    chart:
+      appVersion: v1.2.3
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "--agent-image=ghcr.io/ai-dynamo/snapshot/agent:v1.2.3"
+        template: templates/operator-deployment.yaml
+      - equal:
+          path: spec.template.spec.containers[?(@.name == 'agent')].image
+          value: ghcr.io/ai-dynamo/snapshot/agent:v1.2.3
+        template: templates/daemonset.yaml
+
   - it: passes the agent image and pull policy
-    template: templates/operator-deployment.yaml
     set:
       image.agent.tag: v9.9.9
     asserts:
       - contains:
           path: spec.template.spec.containers[0].args
           content: "--agent-image=ghcr.io/ai-dynamo/snapshot/agent:v9.9.9"
+        template: templates/operator-deployment.yaml
       - contains:
           path: spec.template.spec.containers[0].args
           content: "--agent-image-pull-policy=Always"
+        template: templates/operator-deployment.yaml
+      - equal:
+          path: spec.template.spec.containers[?(@.name == 'agent')].image
+          value: ghcr.io/ai-dynamo/snapshot/agent:v9.9.9
+        template: templates/daemonset.yaml
 
   - it: pins the installer and daemonset to the same tag and digest
     set:
@@ -39,4 +57,18 @@ tests:
       - equal:
           path: spec.template.spec.containers[?(@.name == 'agent')].imagePullPolicy
           value: IfNotPresent
+        template: templates/daemonset.yaml
+
+  - it: pins the installer and daemonset to the same digest without a tag
+    set:
+      image.agent.repository: registry.example/snapshot-agent
+      image.agent.tag: "@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "--agent-image=registry.example/snapshot-agent@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+        template: templates/operator-deployment.yaml
+      - equal:
+          path: spec.template.spec.containers[?(@.name == 'agent')].image
+          value: registry.example/snapshot-agent@sha256:1111111111111111111111111111111111111111111111111111111111111111
         template: templates/daemonset.yaml

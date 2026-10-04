@@ -148,6 +148,8 @@ RUN python3 -m unittest discover -s /tmp/rust-notices \
     && python3 /tmp/rust-notices/rust_licenses.py /rust-sources /rust-sources/NOTICES.txt
 
 FROM cuinterpose-notices AS cuinterpose-test
+RUN apt-get update && apt-get install -y --no-install-recommends python3-msgpack \
+    && rm -rf /var/lib/apt/lists/*
 RUN make test-native
 
 FROM scratch AS cuinterpose-export
