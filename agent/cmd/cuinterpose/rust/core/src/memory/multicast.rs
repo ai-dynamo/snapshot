@@ -21,7 +21,7 @@ use cuinterpose_protocol::{
 };
 use std::ffi::c_void;
 use std::os::fd::{AsFd, AsRawFd};
-use std::sync::MutexGuard;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 #[derive(Clone)]
 pub struct MulticastObject {
@@ -33,6 +33,7 @@ pub struct MulticastObject {
     pub shared: bool,
     pub devices: Vec<i32>,
     pub bindings: Vec<Binding>,
+    binding_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Clone)]
@@ -162,6 +163,7 @@ pub fn import(
                 shared: true,
                 devices: Vec::new(),
                 bindings: Vec::new(),
+                binding_lock: Arc::default(),
             }),
         );
     }
@@ -234,10 +236,19 @@ pub(crate) fn bind(
     version: BindingVersion,
     input: BindInput,
 ) -> Result<()> {
-    let mut state = runtime::active()?;
+    let state = runtime::active()?;
     let target = state
         .resolve_virtual_handle(handle)?
         .ok_or(CUDA_ERROR_NOT_SUPPORTED)?;
+    let binding_lock = state
+        .memblocks
+        .get(&target)
+        .and_then(Memblock::multicast)
+        .ok_or(CUDA_ERROR_INVALID_HANDLE)?
+        .binding_lock
+        .clone();
+    let (mut state, _binding_guard) = lock_bindings(state, &binding_lock)?;
+    binding_object(&mut state, target, &binding_lock)?;
     let (source, member, member_driver) = match input {
         BindInput::Memory {
             handle: member_handle,
@@ -371,11 +382,7 @@ pub(crate) fn bind(
         version,
     };
     let id = target;
-    let object = state
-        .memblocks
-        .get_mut(&id)
-        .and_then(Memblock::multicast_mut)
-        .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+    let object = binding_object(&mut state, id, &binding_lock)?;
     let driver = object.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?;
     let context = if object.context == 0 {
         crate::driver::context()?
@@ -393,13 +400,7 @@ pub(crate) fn bind(
         )
         .shared = true;
     }
-    let object = runtime::must_complete(
-        state
-            .memblocks
-            .get_mut(&id)
-            .and_then(Memblock::multicast_mut)
-            .ok_or(CUDA_ERROR_INVALID_HANDLE.into()),
-    );
+    let object = runtime::must_complete(binding_object(&mut state, id, &binding_lock));
     object.bindings.push(binding);
     if object.context == 0 {
         object.context = context;
@@ -655,6 +656,7 @@ impl ProcessState {
                 shared: false,
                 devices: Vec::new(),
                 bindings: Vec::new(),
+                binding_lock: Arc::default(),
             }),
         );
         Ok(virtual_multicast_handle)
@@ -696,31 +698,68 @@ pub(crate) fn add_device(
     Ok(())
 }
 
-impl MulticastObject {
-    pub(crate) fn unbind(&mut self, device: i32, offset: usize, size: usize) -> Result<()> {
-        let end = offset.checked_add(size).ok_or(CUDA_ERROR_INVALID_VALUE)?;
-        for binding in &self.bindings {
-            if binding.device == device
-                && binding.offset < end
-                && binding.offset + binding.size > offset
-                && (binding.offset < offset || binding.offset + binding.size > end)
-            {
-                return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
-            }
+// Keep native bind/unbind order and record updates in the same order. Waiting for
+// this object must not hold ProcessState: the previous operation needs it to commit.
+// AddDevice remains independent so it can complete membership for a blocked bind.
+fn lock_bindings<'a>(
+    state: MutexGuard<'static, ProcessState>,
+    binding_lock: &'a Arc<Mutex<()>>,
+) -> Result<(MutexGuard<'static, ProcessState>, MutexGuard<'a, ()>)> {
+    runtime::call_unlocked(state, || {
+        binding_lock
+            .lock()
+            .map_err(|_| Error::Startup("multicast binding mutex poisoned"))
+    })
+}
+
+fn binding_object<'a>(
+    state: &'a mut ProcessState,
+    id: AllocationId,
+    binding_lock: &Arc<Mutex<()>>,
+) -> Result<&'a mut MulticastObject> {
+    // A lifetime violation can remove and re-import the same allocation identity.
+    // The mutex identifies this instance without retaining its CUDA lifetime.
+    state
+        .memblocks
+        .get_mut(&id)
+        .and_then(Memblock::multicast_mut)
+        .filter(|object| Arc::ptr_eq(&object.binding_lock, binding_lock))
+        .ok_or(CUDA_ERROR_INVALID_HANDLE.into())
+}
+
+pub(crate) fn unbind(
+    state: MutexGuard<'static, ProcessState>,
+    id: AllocationId,
+    device: i32,
+    offset: usize,
+    size: usize,
+) -> Result<()> {
+    let binding_lock = state
+        .memblocks
+        .get(&id)
+        .and_then(Memblock::multicast)
+        .ok_or(CUDA_ERROR_INVALID_HANDLE)?
+        .binding_lock
+        .clone();
+    let (mut state, _binding_guard) = lock_bindings(state, &binding_lock)?;
+    let object = binding_object(&mut state, id, &binding_lock)?;
+    let driver = object.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+    let end = offset.checked_add(size).ok_or(CUDA_ERROR_INVALID_VALUE)?;
+    for binding in &object.bindings {
+        if binding.device == device
+            && binding.offset < end
+            && binding.offset + binding.size > offset
+            && (binding.offset < offset || binding.offset + binding.size > end)
+        {
+            return Err(Error::from(CUDA_ERROR_INVALID_VALUE));
         }
-        unsafe {
-            crate::driver::cuMulticastUnbind(
-                self.driver.ok_or(CUDA_ERROR_INVALID_HANDLE)?,
-                device,
-                offset,
-                size,
-            )
-        }?;
-        self.bindings.retain(|binding| {
-            binding.device != device
-                || binding.offset >= end
-                || binding.offset + binding.size <= offset
-        });
-        Ok(())
     }
+    let (mut state, ()) = runtime::call_unlocked(state, || unsafe {
+        crate::driver::cuMulticastUnbind(driver, device, offset, size)
+    })?;
+    let object = runtime::must_complete(binding_object(&mut state, id, &binding_lock));
+    object.bindings.retain(|binding| {
+        binding.device != device || binding.offset >= end || binding.offset + binding.size <= offset
+    });
+    Ok(())
 }
