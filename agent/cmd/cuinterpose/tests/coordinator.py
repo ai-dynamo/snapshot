@@ -67,22 +67,23 @@ class Contracts(unittest.TestCase):
             self.listeners.append(listener)
 
     @contextmanager
-    def coordinator(self, mode, error=None):
+    def coordinator(self, mode, error=None, *, checkpoint_dir=None):
         had_state = self.state.exists()
         command = [str(BINARY), mode, "--control-dir", str(self.directory),
                    "--process", "1", "--process", "2"]
         if mode != "--inspect":
-            command += ["--checkpoint-dir", str(self.directory)]
+            command += ["--checkpoint-dir", str(checkpoint_dir or self.directory)]
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
-            yield
+            yield process
             _, stderr = process.communicate(timeout=5)
             self.assertFalse(select.select(self.listeners, [], [], 0)[0], "unexpected phase or retry")
             if error is None:
                 self.assertEqual(process.returncode, 0, stderr)
             else:
                 self.assertNotEqual(process.returncode, 0, stderr)
-                self.assertIn(error, stderr)
+                for expected in (error,) if isinstance(error, str) else error:
+                    self.assertIn(expected, stderr)
                 if mode == "--prepare" and not had_state:
                     self.assertFalse(self.state.exists())
             if mode == "--inspect":
@@ -205,10 +206,63 @@ class Contracts(unittest.TestCase):
                 self.reply(held, 1, {"Ok": {"completed": {"operation": PREPARE[0], "bytes": 0}}})
 
     def test_wrong_transfer_size_stops_before_teardown(self):
-        with self.coordinator("--prepare", "transfer size"):
+        with self.coordinator("--prepare", ("SaveAllocations", "participant 1", "transfer size",
+                                            "expected_bytes 4096", "bytes 0")):
             self.inspect([[allocation(checkpoint_via_host_carrier=True)], []], begin=True)
             self.phase(PREPARE[0])
             self.phase(PREPARE[1])  # Replies claim zero bytes instead of 4096.
+
+    def test_all_participant_failures_are_reported_after_every_reply(self):
+        errors = ("PrepareMulticast", "participant 1", "cuinterpose-1.sock", "rank one failure",
+                  "participant 2", "cuinterpose-2.sock", "rank two failure")
+        with self.coordinator("--prepare", errors) as process:
+            self.inspect([[], []], begin=True)
+            first, second = [self.request(pid, "execute", operation=PREPARE[0]) for pid in (1, 2)]
+            self.reply(first, 1, {"Err": "rank one failure"})
+            with self.assertRaises(subprocess.TimeoutExpired):
+                process.wait(timeout=0.1)
+            self.reply(second, 2, {"Err": "rank two failure"})
+
+    def test_begin_checkpoint_refusal_starts_no_lifecycle_phase(self):
+        with self.coordinator("--prepare", ("BeginCheckpoint", "participant 2",
+                                            "cuinterpose-2.sock", "cannot freeze registry")):
+            self.reply(self.request(1, "begin_checkpoint"), 1, {"Ok": {"inspection": {"records": []}}})
+            self.reply(self.request(2, "begin_checkpoint"), 2, {"Err": "cannot freeze registry"})
+
+    def test_execute_identity_and_operation_mismatches_are_diagnostic(self):
+        for identity in (False, True):
+            errors = ("namespace PID changed", "expected 1, actual 3") if identity else (
+                "expected operation PrepareMulticast", "actual LoadAllocations", "expected_bytes 0", "bytes 0")
+            with self.subTest(identity=identity), self.coordinator("--prepare", ("participant 1", *errors)):
+                self.inspect([[], []], begin=True)
+                first, second = [self.request(pid, "execute", operation=PREPARE[0]) for pid in (1, 2)]
+                self.reply(first, 3 if identity else 1, {"Ok": {"completed": {
+                    "operation": PREPARE[0] if identity else "load_allocations", "bytes": 0}}})
+                self.reply(second, 2, {"Ok": {"completed": {"operation": PREPARE[0], "bytes": 0}}})
+
+    def test_every_lifecycle_refusal_names_its_phase(self):
+        for mode, operations in (("--prepare", PREPARE), ("--restore", RESTORE)):
+            for index, operation in enumerate(operations):
+                self.state.unlink(missing_ok=True)
+                if mode == "--restore":
+                    self.state.write_bytes(encode({1: [], 2: []}))
+                phase_name = "".join(word.title() for word in operation.split("_"))
+                with self.subTest(operation=operation), \
+                        self.coordinator(mode, (phase_name, "participant 1", "cuinterpose-1.sock", "refused")):
+                    self.inspect([[], []], begin=mode == "--prepare")
+                    for preceding in operations[:index]:
+                        self.phase(preceding)
+                    first, second = [self.request(pid, "execute", operation=operation) for pid in (1, 2)]
+                    self.reply(first, 1, {"Err": "refused"})
+                    self.reply(second, 2, {"Ok": {"completed": {"operation": operation, "bytes": 0}}})
+
+    def test_publication_failure_after_preparation_sends_no_rollback(self):
+        missing = self.directory / "missing-checkpoint-directory"
+        with self.coordinator("--prepare", ("publish checkpoint state", str(missing)), checkpoint_dir=missing):
+            self.inspect([[], []], begin=True)
+            for operation in PREPARE:
+                self.phase(operation)
+        self.assertFalse(missing.exists())
 
     def test_parallel_phases_and_canonical_state(self):
         records = [[mapping(), allocation()], [allocation()]]
@@ -243,6 +297,35 @@ class Contracts(unittest.TestCase):
                     for operation in RESTORE:
                         self.phase(operation)
                     self.inspect(changed)
+
+    def test_restore_difference_identifies_participant_and_record(self):
+        original = [allocation(), mapping()]
+        for changed, details in (([allocation()], ("expected 2 records, actual 1 records",)),
+                                  ([allocation(), mapping(address=0x30000)],
+                                   ("record 1", "expected Mapping", "actual Mapping", "65536", "196608"))):
+            self.state.write_bytes(encode({1: original, 2: []}))
+            with self.subTest(changed=changed), \
+                    self.coordinator("--restore", ("restored topology", "participant 1", *details)):
+                self.inspect([original, []])
+                for operation in RESTORE:
+                    self.phase(operation)
+                self.inspect([changed, []])
+
+    def test_creator_none_handle_type_is_rejected_even_with_carrier(self):
+        for carrier in (False, True):
+            record = allocation(checkpoint_via_host_carrier=carrier)
+            record["allocation"]["handle_types"] = 0
+            with self.subTest(carrier=carrier), \
+                    self.coordinator("--inspect", ("invalid allocation creator", "handle_types=0")):
+                self.inspect([[record], []])
+
+    def test_creator_anchor_requires_local_handle_or_mapping(self):
+        creator = allocation()
+        creator["allocation"]["virtual_allocation_handle_count"] = 0
+        with self.coordinator("--inspect"):
+            self.inspect([[creator, mapping()], []])
+        with self.coordinator("--inspect", "missing creator anchor"):
+            self.inspect([[creator], [allocation(), mapping(address=0x20000)]])
 
     def test_usage_errors(self):
         for args in ["", "--prepare --checkpoint-dir /tmp",

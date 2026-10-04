@@ -21,6 +21,7 @@ def main():
     for path in source.iterdir():
         if path.is_file() and (path.suffix == ".py" or path.name == "pyproject.toml"):
             shutil.copy2(path, suite / path.name)
+    shutil.copytree(source / "fixtures", suite / "fixtures")
     shutil.copytree(source.parents[1] / "frontend/tests", args.destination / "frontend/tests",
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     build = args.destination / "build"
