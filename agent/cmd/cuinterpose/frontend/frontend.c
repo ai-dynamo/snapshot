@@ -41,6 +41,8 @@ enum {
 
 // The backend implements these memory and context entry points.
 #define MEMORY_API(X) \
+    X(cuCtxEnablePeerAccess, (CUcontext peer, unsigned flags), (peer, flags)) \
+    X(cuCtxDisablePeerAccess, (CUcontext peer), (peer)) \
     X(cuCtxDestroy, (CUcontext context), (context)) \
     X(cuCtxDestroy_v2, (CUcontext context), (context)) \
     X(cuDevicePrimaryCtxRelease, (CUdevice device), (device)) \

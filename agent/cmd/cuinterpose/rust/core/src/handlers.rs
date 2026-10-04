@@ -21,6 +21,7 @@ pub use crate::memory::context::{
     cuCtxDestroy, cuCtxDestroy_v2, cuDevicePrimaryCtxRelease, cuDevicePrimaryCtxRelease_v2,
     cuDevicePrimaryCtxReset, cuDevicePrimaryCtxReset_v2,
 };
+pub use crate::memory::ipc::{cuCtxDisablePeerAccess, cuCtxEnablePeerAccess};
 
 pub fn cuMemCreate(
     out: *mut u64,
