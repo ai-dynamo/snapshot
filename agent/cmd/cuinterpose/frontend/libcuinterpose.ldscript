@@ -5,6 +5,8 @@
 
 {
     global:
+        cuCtxEnablePeerAccess;
+        cuCtxDisablePeerAccess;
         cuCtxDestroy;
         cuCtxDestroy_v2;
         cuDevicePrimaryCtxRelease;
