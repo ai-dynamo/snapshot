@@ -122,22 +122,32 @@ COPY --from=gcc-15 /usr/local/libexec/gcc/ /opt/gcc-15/libexec/gcc/
 COPY --from=gcc-15 /usr/local/lib64/ /opt/gcc-15/lib64/
 RUN test "$(rustc --version | cut -d' ' -f2)" = 1.95.0 \
     && apt-get update && apt-get install -y --no-install-recommends \
-       musl-tools make gcc binutils python3 python3-msgpack \
+       musl-tools make gcc binutils \
     && rm -rf /var/lib/apt/lists/* \
     && cargo install cbindgen --version 0.29.4 --locked \
     && rustup target add x86_64-unknown-linux-musl \
     && rustup component add rust-src rustfmt clippy
 WORKDIR /cuinterpose
 COPY cmd/cuinterpose/ ./
+# make frontend checks the cbindgen CLI against the locked ABI dev-dependency.
 RUN make native
-# Ship dependency and standard library sources with their license files alongside the
-# repository source in the image's legal directory.
+# Keep matching dependency and standard-library sources as part of the image's
+# source bundle. This is a packaging policy, not a special Rust source requirement.
 RUN mkdir -p /rust-sources && cd rust && cargo vendor --locked /rust-sources/vendor \
     && cp Cargo.lock /rust-sources/ \
+    && rustc --version > /rust-sources/toolchain-version.txt \
     && cp -a "$(rustc --print sysroot)/lib/rustlib/src/rust" /rust-sources/standard-library \
     && cp -a "$(rustc --print sysroot)/share/doc/rust" /rust-sources/toolchain-notices
 
-FROM cuinterpose-builder AS cuinterpose-test
+# Python is needed only for generating notices and running the coordinator tests.
+FROM cuinterpose-builder AS cuinterpose-notices
+RUN apt-get update && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY compliance/rust_licenses.py compliance/test_rust_licenses.py /tmp/rust-notices/
+RUN python3 -m unittest discover -s /tmp/rust-notices \
+    && python3 /tmp/rust-notices/rust_licenses.py /rust-sources /rust-sources/NOTICES.txt
+
+FROM cuinterpose-notices AS cuinterpose-test
 RUN make test-native
 
 FROM scratch AS cuinterpose-export
@@ -305,8 +315,6 @@ RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \
       -o /criu-install/usr/local/lib/snapshot/criu-plugins/snapshot_inet_remap.so \
       /tmp/snapshot_inet_remap.c
 
-RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
-
 # CRIU source at the exact ref built from: this is a from-source build, and
 # CRIU_REF may be a moving branch.
 RUN tar -czf /criu-src.tar.gz -C /tmp --exclude-vcs criu
@@ -321,7 +329,7 @@ FROM ${AGENT_BASE_IMAGE} AS runtime-deps
 ARG TARGETARCH=amd64
 
 RUN if [ "${TARGETARCH}" != "amd64" ]; then \
-      echo "ERROR: Snapshot requires x86_64 (cuda-checkpoint has no ${TARGETARCH} binary)" >&2; exit 1; \
+      echo "ERROR: Snapshot supports x86_64 only, not ${TARGETARCH}" >&2; exit 1; \
     fi
 
 # Install CRIU runtime dependencies
@@ -373,20 +381,21 @@ COPY --from=criu-builder /criu-install/usr/local /usr/local
 COPY --from=criu-builder /tmp/criu/COPYING /legal/CRIU/COPYING
 RUN criu --version
 
-# Copy CUDA checkpoint binaries
-COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
-COPY --from=criu-builder /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
+# Native checkpoint/restore uses the in-repository helper. The optional workload
+# launch-job wrapper uses the standalone binary supplied by the workload image.
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
 COPY --from=cuinterpose-builder /cuinterpose/build/libcuinterpose.so /usr/local/lib/snapshot/libcuinterpose.so
 COPY --from=cuinterpose-builder /cuinterpose/build/libcuinterpose_core.so /usr/local/lib/snapshot/libcuinterpose_core.so
 COPY --from=cuinterpose-builder /cuinterpose/build/cuinterpose-coordinator /usr/local/bin/cuinterpose-coordinator
+# The operator copies the launcher into source workloads. It execs the application,
+# so restore needs the libraries and coordinator, but no launcher in the bundle.
 COPY --from=cuinterpose-builder /cuinterpose/build/cuinterpose-launch /usr/local/bin/cuinterpose-launch
-COPY --from=cuinterpose-builder /rust-sources/ /legal/cuinterpose/rust/
+COPY --from=cuinterpose-notices /rust-sources/ /legal/cuinterpose/rust/
 COPY cmd/cuinterpose/ /legal/cuinterpose/source/
 # nsmount resolves this helper at /usr/local/sbin/ns-bind-mount (see
 # agent/internal/nsmount/mount.go defaultBinaryPath).
 COPY --from=cuda-helper-builder /ns-bind-mount /usr/local/sbin/ns-bind-mount
-RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper \
+RUN chmod +x /usr/local/bin/cuda-checkpoint-helper \
     /usr/local/sbin/ns-bind-mount
 
 # Copy the built binaries
@@ -409,7 +418,6 @@ RUN mkdir -p /snapshot-binaries/snapshot-cuda \
 COPY --from=builder /nsrestore /snapshot-binaries/nsrestore
 COPY --from=criu-builder /criu-install/usr/local/sbin/criu /snapshot-binaries/criu
 COPY --from=criu-builder /criu-install/usr/local/lib/snapshot/criu-plugins/ /snapshot-binaries/criu-plugins/
-COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /snapshot-binaries/cuda-checkpoint
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-checkpoint-helper
 
 # Network binaries needed during restore:
@@ -423,7 +431,7 @@ COPY --from=cuda-helper-builder /cuda-checkpoint-helper /snapshot-binaries/cuda-
 RUN set -eu; \
     cp -L "$(command -v ip)" "$(command -v tar)" /snapshot-binaries/; \
     chmod +x /snapshot-binaries/criu /snapshot-binaries/nsrestore \
-             /snapshot-binaries/cuda-checkpoint /snapshot-binaries/cuda-checkpoint-helper \
+             /snapshot-binaries/cuda-checkpoint-helper \
              /snapshot-binaries/ip /snapshot-binaries/tar
 
 # Shared-library closure of the bundled binaries and plugins.
@@ -467,8 +475,6 @@ COPY --from=compliance go-licenses.sh /tmp/go-licenses.sh
 RUN sh /tmp/gen-attribution.sh /legal/source/dpkg/DELTA.tsv /legal/source/go/vendor \
       /legal/THIRD-PARTY.txt /legal/source/dpkg/SKIPPED.txt /tmp/go-licenses.sh \
     && rm -f /tmp/gen-attribution.sh
-RUN printf '\nCuInterpose C frontend and Rust core/coordinator/launcher: Apache-2.0; source in /legal/cuinterpose/source.\nRust standard library and libc crate: MIT OR Apache-2.0 and bundled third-party notices; corresponding sources and licenses in /legal/cuinterpose/rust.\n' \
-    >> /legal/THIRD-PARTY.txt
 
 # Create directories
 RUN mkdir -p /checkpoints /var/run/snapshot
@@ -482,7 +488,7 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 #
 # This is the runtime image with the same default execution contract
 # (entrypoint/cmd), running as root so the agent can restore into it. It ships
-# NO checkpoint/restore tooling: criu, nsrestore, the cuda-checkpoint binaries,
+# NO checkpoint/restore tooling: criu, nsrestore, cuda-checkpoint-helper,
 # their shared libraries, and the criu plugins are all bind-mounted on demand
 # from the agent's /snapshot-binaries bundle at restore time (internal/nsmount).
 # The mount destination is created by the ns-bind-mount helper inside this
@@ -509,7 +515,9 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 #
 # Source workloads that enable cuinterpose preload its libraries. The agent
 # mounts matching libraries at their original paths before CRIU restores the
-# file mappings. The placeholder must provide a compatible glibc.
+# file mappings. These preload libraries require glibc 2.34 or newer. The complete
+# restore bundle still has the stronger AGENT_BASE_IMAGE compatibility requirement
+# above, independently of the preload libraries' minimum.
 #
 # Standby-aware workload entrypoints stay inert when the restore Pod sets
 # SNAPSHOT_RESTORE_STANDBY=1, then sleep while the snapshot-agent restores
