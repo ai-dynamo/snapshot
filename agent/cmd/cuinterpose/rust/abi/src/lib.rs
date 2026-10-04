@@ -28,6 +28,8 @@ pub struct BackendAbi {
     pub size: u32,
     /// Starts runtime services only after the real cuInit succeeds.
     pub ensure_cuinterpose_initialized: unsafe extern "C" fn() -> cuda::CUresult,
+    pub cuCtxEnablePeerAccess: unsafe extern "C" fn(cuda::CUcontext, u32) -> cuda::CUresult,
+    pub cuCtxDisablePeerAccess: unsafe extern "C" fn(cuda::CUcontext) -> cuda::CUresult,
     pub cuCtxDestroy: unsafe extern "C" fn(cuda::CUcontext) -> cuda::CUresult,
     pub cuCtxDestroy_v2: unsafe extern "C" fn(cuda::CUcontext) -> cuda::CUresult,
     pub cuDevicePrimaryCtxRelease: unsafe extern "C" fn(cuda::CUdevice) -> cuda::CUresult,
