@@ -42,6 +42,13 @@ impl ContextResources {
     }
 
     fn release(self, state: &mut ProcessState) -> Result<()> {
+        // A context pointer can be reused after destruction. Neither direction of
+        // its peer relationships may grant access to later allocations.
+        state.malloc_peers.remove(&self.context);
+        state.malloc_peers.retain(|_, peers| {
+            peers.remove(&self.context);
+            !peers.is_empty()
+        });
         for (address, handle) in self.mallocs {
             if state
                 .malloc_regions
@@ -150,4 +157,27 @@ pub fn cuDevicePrimaryCtxRelease_v2(device: CUdevice) -> Result<()> {
     primary_lifetime(device, false, || unsafe {
         driver::cuDevicePrimaryCtxRelease_v2(device)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn context_release_forgets_both_peer_directions_only_for_that_context() {
+        let mut state = ProcessState::new(41);
+        state.malloc_peers = BTreeMap::from([
+            (10, BTreeMap::from([(20, 1), (30, 2)])),
+            (20, BTreeMap::from([(10, 0)])),
+            (30, BTreeMap::from([(20, 1)])),
+        ]);
+        ContextResources::capture(&state, 20)
+            .release(&mut state)
+            .unwrap();
+        assert_eq!(
+            state.malloc_peers,
+            BTreeMap::from([(10, BTreeMap::from([(30, 2)]))])
+        );
+    }
 }
