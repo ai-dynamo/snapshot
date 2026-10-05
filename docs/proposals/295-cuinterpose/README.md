@@ -152,7 +152,7 @@ There are no new CRDs or CRD fields. The workload Pod template opts in with:
 ```yaml
 metadata:
   annotations:
-    nvidia.com/cuinterpose-enabled: "true"
+    nvidia.com/snapshot-multigpu-enabled: "true"
 ```
 
 The annotation keeps its trimmed `strconv.ParseBool` spellings: `1`, `t`, `T`,
