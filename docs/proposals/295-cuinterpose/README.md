@@ -353,7 +353,10 @@ candidate. Without a winner, a real preparation or installation error remains
 sticky. Memory calls require a ready runtime owned by the calling PID; they never start
 it themselves. Function lookup remains independent of runtime readiness.
 
-The bounded commit path is audited for the pinned Rust/Linux/glibc implementation:
+The bounded commit path is audited against the pinned Rust standard library and
+qualified Linux/glibc runtime images. Rust's standard library ships in the core,
+but glibc and the dynamic loader come from the workload image. Pinning the builder
+does not pin those runtime libraries:
 
 - Backend ELF eager binding prevents first-use PLT lookup while holding the mutex.
 - The preparation guard initializes non-destructible backend TLS before commit.
@@ -364,6 +367,10 @@ The bounded commit path is audited for the pinned Rust/Linux/glibc implementatio
 - Bind/listen, nonblocking setup, and chmod make no frontend callbacks or
   formatted/logging calls. Arbitrary allocator/libc interposers that call the
   loader are outside this assumption.
+
+Re-audit this path when upgrading Rust and repeat cold-start and loader-contention
+checks for the workload image. The preload libraries' glibc 2.34 symbol floor is
+an ABI requirement, not a guarantee about every newer loader implementation.
 
 Lookup alone starts no workers and creates no endpoint. Fork before CUDA
 initialization permits independent initialization in each child. Once CUDA is
