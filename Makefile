@@ -18,6 +18,7 @@ MODEL_STREAMER_ARTIFACT_DIR ?= $(CURDIR)/.model-streamer
 MODEL_STREAMER_WHEEL_DIR ?= $(MODEL_STREAMER_ARTIFACT_DIR)/core
 MODEL_STREAMER_INCLUDE_DIR ?= $(MODEL_STREAMER_ARTIFACT_DIR)/include
 MODEL_STREAMER_LEGAL_DIR ?= $(MODEL_STREAMER_ARTIFACT_DIR)/legal
+MODEL_STREAMER_S3_WHEEL_DIR ?= $(MODEL_STREAMER_ARTIFACT_DIR)/s3
 
 # Base image for the agent, read from the Dockerfile so the digest lives in one
 # place. capture-base-packages and docker-build-agent must agree on it, or the
@@ -182,6 +183,7 @@ model-streamer-artifacts:
 docker-build-pagebroker:
 	docker buildx build $(DOCKER_BUILD_ARGS) --platform "$(AGENT_PLATFORM)" -f agent/pagebroker/Dockerfile \
 	  --build-context=model-streamer-wheel="$(MODEL_STREAMER_WHEEL_DIR)" \
+	  --build-context=model-streamer-s3-wheel="$(MODEL_STREAMER_S3_WHEEL_DIR)" \
 	  --build-context=model-streamer-headers="$(MODEL_STREAMER_INCLUDE_DIR)" \
 	  --build-context=model-streamer-legal="$(MODEL_STREAMER_LEGAL_DIR)" \
 	  $(foreach t,$(TAGS),-t $(REGISTRY)/pagebroker:$(t)) agent/pagebroker/

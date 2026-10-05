@@ -40,6 +40,7 @@ struct FakeState {
   std::mutex mutex;
   std::condition_variable changed;
   bool hold_end = false;
+  bool hold_start = false;
   bool allow_responses = true;
   unsigned starts = 0;
   unsigned ends_entered = 0;
@@ -55,6 +56,7 @@ class ModelStreamerSessionTest : public ::testing::Test {
   void SetUp() override
   {
     state.hold_end = false;
+    state.hold_start = false;
     state.allow_responses = true;
     state.starts = state.ends_entered = state.ends = state.submitted = state.max_submissions = 0;
     state.fault = Fault::NONE;
@@ -94,8 +96,10 @@ class ModelStreamerSessionTest : public ::testing::Test {
 extern "C" int runai_file_streamer_start(void** value)
 {
   *value = new Session;
-  std::lock_guard lock(state.mutex);
+  std::unique_lock lock(state.mutex);
   ++state.starts;
+  state.changed.notify_all();
+  state.changed.wait(lock, [] { return !state.hold_start; });
   return RUNAI_FILE_STREAMER_RESPONSE_SUCCESS;
 }
 
@@ -308,4 +312,120 @@ TEST_F(ModelStreamerSessionTest, TerminalFailureDrainsActiveAndQueuedRestores)
   EXPECT_TRUE(restore.Failed());
   EXPECT_EQ(state.starts, 1U);
   EXPECT_EQ(state.ends, 1U);
+}
+
+TEST_F(ModelStreamerSessionTest, QueuedDeadlineDoesNotWaitForOrStopActiveReads)
+{
+  state.allow_responses = false;
+  ModelStreamerRestore restore;
+  auto plan = Plan();
+  plan.files.front().size_bytes = 6'000'000'000;
+  auto active = std::async(std::launch::async, [&] { restore.Stage(plan, root_ / "active"); });
+  {
+    std::unique_lock lock(state.mutex);
+    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.submitted == 1; }));
+  }
+  TransferControl control;
+  control.deadline = TransferControl::Clock::now() + 50ms;
+  auto queued = std::async(std::launch::async, [&] { restore.Stage(plan, root_ / "queued", control); });
+  const auto queued_status = queued.wait_for(2s);
+  EXPECT_EQ(queued_status, std::future_status::ready);
+  EXPECT_EQ(active.wait_for(0ms), std::future_status::timeout);
+  {
+    std::lock_guard lock(state.mutex);
+    EXPECT_EQ(state.submitted, 1U);
+    EXPECT_EQ(state.ends, 0U);
+    state.allow_responses = true;
+    state.changed.notify_all();
+  }
+  EXPECT_THROW(queued.get(), TransferInterrupted);
+  EXPECT_NO_THROW(active.get());
+  EXPECT_FALSE(restore.Failed());
+}
+
+TEST_F(ModelStreamerSessionTest, ActiveCancellationWaitsForNativeTeardown)
+{
+  state.allow_responses = false;
+  state.hold_end = true;
+  std::stop_source stop;
+  ModelStreamerRestore restore;
+  TransferControl control;
+  control.cancellation = stop.get_token();
+  auto result = std::async(std::launch::async, [&] { restore.Stage(Plan(), root_ / "restore", control); });
+  {
+    std::unique_lock lock(state.mutex);
+    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.submitted == 1; }));
+  }
+  stop.request_stop();
+  EXPECT_TRUE(WaitForEnd());
+  EXPECT_EQ(result.wait_for(0ms), std::future_status::timeout);
+  ReleaseEnd();
+  EXPECT_THROW(result.get(), TransferInterrupted);
+  EXPECT_TRUE(restore.Failed());
+}
+
+TEST_F(ModelStreamerSessionTest, CancellationDuringStartupDoesNotFailCoordinator)
+{
+  state.hold_start = true;
+  std::stop_source stop;
+  ModelStreamerRestore restore;
+  TransferControl control;
+  control.cancellation = stop.get_token();
+  auto cancelled = std::async(std::launch::async, [&] {
+    restore.Stage(Plan(), root_ / "cancelled", control);
+  });
+  {
+    std::unique_lock lock(state.mutex);
+    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.starts == 1; }));
+    stop.request_stop();
+    state.hold_start = false;
+    state.changed.notify_all();
+  }
+  EXPECT_THROW(cancelled.get(), TransferInterrupted);
+  EXPECT_EQ(state.submitted, 0U);
+  EXPECT_FALSE(restore.Failed());
+  EXPECT_NO_THROW(restore.Stage(Plan(), root_ / "success"));
+  EXPECT_EQ(state.submitted, 1U);
+  EXPECT_EQ(state.starts, state.ends);
+}
+
+TEST_F(ModelStreamerSessionTest, CoordinatorsWaitUntilPreviousNativeTeardownReturns)
+{
+  state.hold_end = true;
+  ModelStreamerRestore first, second;
+  auto active = std::async(std::launch::async, [&] { first.Stage(Plan(), root_ / "first"); });
+  EXPECT_TRUE(WaitForEnd());
+  auto waiting = std::async(std::launch::async, [&] { second.Stage(Plan(), root_ / "second"); });
+  EXPECT_EQ(waiting.wait_for(50ms), std::future_status::timeout);
+  {
+    std::lock_guard lock(state.mutex);
+    EXPECT_EQ(state.starts, 1U);
+  }
+  ReleaseEnd();
+  EXPECT_NO_THROW(active.get());
+  EXPECT_NO_THROW(waiting.get());
+  EXPECT_EQ(state.starts, 2U);
+  EXPECT_EQ(state.ends, 2U);
+}
+
+TEST_F(ModelStreamerSessionTest, DeadlineWhileWaitingForAnotherCoordinatorIsIndependent)
+{
+  state.hold_end = true;
+  ModelStreamerRestore first, second;
+  auto active = std::async(std::launch::async, [&] { first.Stage(Plan(), root_ / "first"); });
+  EXPECT_TRUE(WaitForEnd());
+  TransferControl control;
+  control.deadline = TransferControl::Clock::now() + 50ms;
+  auto waiting = std::async(std::launch::async, [&] { second.Stage(Plan(), root_ / "expired", control); });
+  EXPECT_EQ(waiting.wait_for(2s), std::future_status::ready);
+  EXPECT_EQ(active.wait_for(0ms), std::future_status::timeout);
+  {
+    std::lock_guard lock(state.mutex);
+    EXPECT_EQ(state.starts, 1U);
+  }
+  ReleaseEnd();
+  EXPECT_NO_THROW(active.get());
+  EXPECT_THROW(waiting.get(), TransferInterrupted);
+  EXPECT_FALSE(second.Failed());
+  EXPECT_NO_THROW(second.Stage(Plan(), root_ / "recovered"));
 }

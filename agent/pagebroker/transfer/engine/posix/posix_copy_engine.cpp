@@ -22,16 +22,16 @@ PosixCopyEngine::type() const
   return TransferEngineType::POSIX_COPY;
 }
 
-uintmax_t
-PosixCopyEngine::RestoreSize(const StorageBackend& source) const
+RestorePlan
+PosixCopyEngine::PrepareRestore(const StorageBackend& source, TransferControl control) const
 {
-  return filesystem_storage::RestoreSize(source, storage_root_);
+  return filesystem_storage::BuildRestorePlan(filesystem_storage::SourcePath(source, storage_root_), control);
 }
 
 void
-PosixCopyEngine::StageRestore(const StorageBackend& source, const Path& destination) const
+PosixCopyEngine::StageRestore(const RestorePlan& plan, const Path& destination, TransferControl control) const
 {
-  fs::copy(filesystem_storage::SourcePath(source, storage_root_), destination, fs::copy_options::recursive);
+  filesystem_storage::StageRestore(plan, destination, control);
 }
 
 void

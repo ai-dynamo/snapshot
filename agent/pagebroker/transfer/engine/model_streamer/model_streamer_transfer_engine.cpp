@@ -11,33 +11,6 @@
 
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
-namespace {
-RestorePlan
-BuildFilesystemRestorePlan(const Path& source)
-{
-  RestorePlan plan;
-  plan.root_permissions = fs::symlink_status(source).permissions();
-  for (const auto& entry : fs::recursive_directory_iterator(source)) {
-    const auto status = entry.symlink_status();
-    if (fs::is_symlink(status))
-      throw std::runtime_error("checkpoint contains symlink");
-
-    const Path relative = entry.path().lexically_relative(source);
-    if (relative.empty() || relative == "." || relative == ".." || relative.string().starts_with("../"))
-      throw std::runtime_error("checkpoint contains invalid path");
-    if (fs::is_directory(status)) {
-      plan.directories.push_back(RestoreDirectory{relative, status.permissions()});
-      continue;
-    }
-    if (!fs::is_regular_file(status))
-      throw std::runtime_error("checkpoint contains unsupported file type");
-
-    plan.files.push_back(
-        RestoreFile{entry.path().string(), relative, entry.file_size(), status.permissions()});
-  }
-  return plan;
-}
-}  // namespace
 
 ModelStreamerTransferEngine::ModelStreamerTransferEngine(Path storage_root)
     : storage_root_(fs::weakly_canonical(std::move(storage_root))),
@@ -45,7 +18,7 @@ ModelStreamerTransferEngine::ModelStreamerTransferEngine(Path storage_root)
 {
 }
 
-// Reuse a healthy session; replace a failed one after its native streamer stops.
+// Reuse a healthy coordinator; replace it after a terminal native failure.
 // Existing callers keep the old wrapper until they finish cleanup.
 std::shared_ptr<ModelStreamerRestore>
 ModelStreamerTransferEngine::AcquireRestore() const
@@ -73,17 +46,17 @@ ModelStreamerTransferEngine::type() const
   return TransferEngineType::MODEL_STREAMER;
 }
 
-uintmax_t
-ModelStreamerTransferEngine::RestoreSize(const StorageBackend& source) const
+RestorePlan
+ModelStreamerTransferEngine::PrepareRestore(const StorageBackend& source, TransferControl control) const
 {
-  return filesystem_storage::RestoreSize(source, storage_root_);
+  return filesystem_storage::BuildRestorePlan(filesystem_storage::SourcePath(source, storage_root_), control);
 }
 
 void
-ModelStreamerTransferEngine::StageRestore(const StorageBackend& source, const Path& destination) const
+ModelStreamerTransferEngine::StageRestore(const RestorePlan& plan, const Path& destination, TransferControl control) const
 {
   const auto restore = AcquireRestore();
-  restore->Stage(BuildFilesystemRestorePlan(filesystem_storage::SourcePath(source, storage_root_)), destination);
+  restore->Stage(plan, destination, control);
 }
 
 void

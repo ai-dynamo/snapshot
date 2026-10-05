@@ -144,8 +144,8 @@ Broker::ReapExpiredTransactions(std::chrono::steady_clock::time_point now)
 
     std::error_code restore_error;
     std::error_code checkpoint_error;
-    fs::remove_all(TransactionDirectory(staging_root_ / "restore", id), restore_error);
-    fs::remove_all(TransactionDirectory(staging_root_ / "checkpoint", id), checkpoint_error);
+    transaction->RemoveStaging(TransactionDirectory(staging_root_ / "restore", id), restore_error);
+    transaction->RemoveStaging(TransactionDirectory(staging_root_ / "checkpoint", id), checkpoint_error);
     if (restore_error || checkpoint_error)
       continue;
     transaction->clear_descriptor();
@@ -234,7 +234,7 @@ Broker::AbortStaging(
   transaction.clear_descriptor();
   transaction.set_state(Transaction::State::ABORTED);
   std::error_code cleanup_error;
-  fs::remove_all(staging_directory, cleanup_error);
+  transaction.RemoveStaging(staging_directory, cleanup_error);
   if (cleanup_error)
     return Fail(request, Failure::STORAGE_ERROR, std::string(error.what()) + "; cleanup: " + cleanup_error.message());
   return Fail(request, Failure::STORAGE_ERROR, error.what());
@@ -315,7 +315,8 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
 {
   const Path restore_root = staging_root_ / "restore";
   const Path staging_directory = TransactionDirectory(restore_root, request.transaction_id());
-  const uintmax_t bytes = engine.RestoreSize(source);
+  const auto plan = engine.PrepareRestore(source);
+  const auto bytes = plan.size_bytes();
   auto transaction = CreateOrGetTransaction(request.transaction_id());
   std::lock_guard lock(transaction->mutex());
   if (transaction->state() != Transaction::State::NEW || fs::exists(staging_directory))
@@ -329,8 +330,9 @@ Broker::StageRestore(const Request& request, const StorageBackend& source, const
   }
   bool staging_reserved = true;
   try {
+    transaction->PrepareTransfer(staging_directory);
     transaction->set_state(Transaction::State::PREPARING);
-    engine.StageRestore(source, staging_directory);
+    engine.StageRestore(plan, staging_directory, transaction->control());
     ReleaseStaging(bytes);
     staging_reserved = false;
     transaction->set_descriptor(RestoreTransactionDescriptor(staging_directory));
@@ -366,6 +368,7 @@ Broker::StageCheckpoint(const Request& request, const StorageBackend& destinatio
   if (transaction->state() != Transaction::State::NEW || fs::exists(staging_directory))
     return Fail(request, Failure::TRANSACTION_CONFLICT, "checkpoint transaction conflicts");
   try {
+    transaction->PrepareTransfer(staging_directory);
     transaction->set_state(Transaction::State::PREPARING);
     fs::create_directory(staging_directory);
     transaction->set_descriptor(CheckpointTransactionDescriptor(staging_directory, destination, engine.type()));
@@ -405,7 +408,7 @@ Broker::Commit(const Request& request)
 Response
 Broker::CleanupRestore(const Request& request, Transaction& transaction, const RestoreTransactionDescriptor& descriptor)
 {
-  fs::remove_all(descriptor.staging_directory());
+  transaction.RemoveStaging(descriptor.staging_directory());
   transaction.clear_descriptor();
   transaction.set_state(Transaction::State::COMMITTED);
   return CommitSucceeded(request);
@@ -427,7 +430,7 @@ Broker::PublishCheckpoint(
     transaction.clear_descriptor();
     transaction.set_state(Transaction::State::COMMITTED);
     std::error_code cleanup_error;
-    fs::remove_all(staging_directory, cleanup_error);
+    transaction.RemoveStaging(staging_directory, cleanup_error);
   }
   catch (const std::exception& error) {
     return Fail(request, Failure::STORAGE_ERROR, error.what());
@@ -441,6 +444,7 @@ Broker::Abort(const Request& request)
   auto transaction = FindTransaction(request.transaction_id());
   if (!transaction)
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
+  transaction->CancelTransfer();
   std::lock_guard lock(transaction->mutex());
   if (transaction->state() == Transaction::State::NEW || transaction->state() == Transaction::State::COMMITTED)
     return Fail(request, Failure::TRANSACTION_NOT_FOUND, "transaction not found");
@@ -449,8 +453,8 @@ Broker::Abort(const Request& request)
 
   const Path restore_root = staging_root_ / "restore";
   const Path checkpoint_root = staging_root_ / "checkpoint";
-  fs::remove_all(TransactionDirectory(restore_root, request.transaction_id()));
-  fs::remove_all(TransactionDirectory(checkpoint_root, request.transaction_id()));
+  transaction->RemoveStaging(TransactionDirectory(restore_root, request.transaction_id()));
+  transaction->RemoveStaging(TransactionDirectory(checkpoint_root, request.transaction_id()));
   transaction->clear_descriptor();
   transaction->set_state(Transaction::State::ABORTED);
   return AbortSucceeded(request);
