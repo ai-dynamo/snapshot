@@ -24,12 +24,12 @@ MULTICAST = {"id": bytes([2] * 16), "creator_pid": 1}
 
 
 def encode(body):
-    return msgpack.packb({"version": 1, "body": body}, use_bin_type=True)
+    return msgpack.packb({"version": 2, "body": body}, use_bin_type=True)
 
 
-def allocation(creator=1, *, size=4096, checkpoint_via_host_carrier=False, identifier=ALLOCATION["id"]):
+def allocation(creator=1, *, size=4096, shared=False, identifier=ALLOCATION["id"]):
     return {"allocation": {"allocation": {"id": identifier, "creator_pid": creator},
-        "checkpoint_via_host_carrier": checkpoint_via_host_carrier, "size": size, "allocation_type": 1, "handle_types": 1,
+        "shared": shared, "size": size, "allocation_type": 1, "handle_types": 1,
         "location": {"location_type": 1, "id": 0}, "virtual_allocation_handle_count": 1}}
 
 
@@ -94,6 +94,9 @@ class Contracts(unittest.TestCase):
             process.communicate()
 
     def request(self, pid, kind, **fields):
+        if kind == "execute" and fields.get("operation") == "save_allocations":
+            kind = "save_allocations"
+            fields = {"owners": self.expected_owners.get(pid, [])}
         listener = self.listeners[pid - 1]
         self.assertTrue(select.select([listener], [], [], 3)[0], f"no {kind} request for {pid}")
         connection, _ = listener.accept()
@@ -102,7 +105,7 @@ class Contracts(unittest.TestCase):
         with connection.makefile("rb") as stream:
             size, = struct.unpack("<I", stream.read(4))
             message = msgpack.unpackb(stream.read(size), raw=False)
-        self.assertEqual(message, {"version": 1, "body": {"kind": kind, "namespace_pid": pid, **fields}})
+        self.assertEqual(message, {"version": 2, "body": {"kind": kind, "namespace_pid": pid, **fields}})
         return connection
 
     def reply(self, connection, pid, result):
@@ -110,7 +113,8 @@ class Contracts(unittest.TestCase):
         with connection:
             connection.sendall(struct.pack("<I", len(body)) + body)
 
-    def inspect(self, records, begin=False):
+    def inspect(self, records, begin=False, owners=None):
+        self.expected_owners = owners or {}
         for pid, records in enumerate(records, 1):
             self.reply(self.request(pid, "begin_checkpoint" if begin else "inspect"), pid,
                        {"Ok": {"inspection": {"records": records}}})
@@ -126,9 +130,9 @@ class Contracts(unittest.TestCase):
 
     def test_preflight_refusals(self):
         cases = [
-            ([allocation(2)], "missing creator"),
-            ([allocation(), allocation()], "duplicate allocation creator"),
-            ([allocation(size=0)], "invalid allocation creator"),
+            ([allocation(3)], "missing creator participant"),
+            ([allocation(), allocation()], "duplicate allocation record"),
+            ([allocation(size=0)], "invalid allocation extent"),
             ([allocation(), mapping(8192)], "mapping out of bounds"),
             ([allocation(), multicast(16384), multicast_device(), binding(8192)],
              "multicast binding out of member bounds"),
@@ -153,9 +157,9 @@ class Contracts(unittest.TestCase):
             with self.subTest(field=field), self.coordinator("--prepare", error):
                 self.inspect([[allocation(), record], []], begin=True)
 
-    def test_importer_cannot_save_creator_bytes(self):
-        with self.coordinator("--prepare", "allocation checkpoint_via_host_carrier flag on importer"):
-            self.inspect([[allocation()], [allocation(checkpoint_via_host_carrier=True)]], begin=True)
+    def test_participants_must_agree_on_sharing(self):
+        with self.coordinator("--prepare", "inconsistent allocation metadata"):
+            self.inspect([[allocation()], [allocation(shared=True)]], begin=True)
 
     def test_existing_checkpoint_is_preserved_without_contacting_participants(self):
         self.state.write_bytes(b"previous checkpoint")
@@ -165,7 +169,7 @@ class Contracts(unittest.TestCase):
 
     def test_read_only_inspection_contacts_every_participant(self):
         with self.coordinator("--inspect"):
-            self.inspect([[allocation(), mapping()], [allocation()]])
+            self.inspect([[allocation(shared=True), mapping()], [allocation(shared=True)]])
 
     def test_read_only_inspection_validates_topology(self):
         with self.coordinator("--inspect", "mapping out of bounds"):
@@ -202,13 +206,13 @@ class Contracts(unittest.TestCase):
                 self.state.unlink()
 
     def test_host_numa_creator_saves_once_and_importer_reconnects(self):
-        creator = allocation(checkpoint_via_host_carrier=True)
-        importer = allocation(size=0)
+        creator = allocation(shared=True)
+        importer = allocation(shared=True)
         for record in (creator, importer):
             record["allocation"]["location"] = {"location_type": 3, "id": 57}
         records = [[creator, mapping()], [importer, mapping(address=0x20000)]]
         with self.coordinator("--prepare"):
-            self.inspect(records, begin=True)
+            self.inspect(records, begin=True, owners={pid: [{"allocation": ALLOCATION, "owner_pid": 1}] for pid in (1, 2)})
             for operation in PREPARE:
                 self.phase(operation, (4096, 0) if operation == "save_allocations" else (0, 0))
         saved = msgpack.unpackb(self.state.read_bytes(), raw=False, strict_map_key=False)
@@ -217,6 +221,25 @@ class Contracts(unittest.TestCase):
             self.inspect(records)
             for operation in RESTORE:
                 self.phase(operation, (4096, 0) if operation == "load_allocations" else (0, 0))
+            self.inspect(records)
+
+    def test_surviving_importer_saves_full_backing_once(self):
+        # The creator remains in the group but has released all its local references.
+        # A partial mapping must not reduce the saved size to the mapped range.
+        imported = allocation(shared=True, size=8192)
+        imported["allocation"]["handle_types"] = 0
+        imported["allocation"]["virtual_allocation_handle_count"] = 0
+        alias = mapping(4096, address=0x30000)
+        alias["mapping"]["offset"] = 4096
+        records = [[], [imported, alias]]
+        with self.coordinator("--prepare"):
+            self.inspect(records, begin=True, owners={2: [{"allocation": ALLOCATION, "owner_pid": 2}]})
+            for operation in PREPARE:
+                self.phase(operation, (0, 8192) if operation == "save_allocations" else (0, 0))
+        with self.coordinator("--restore"):
+            self.inspect(records)
+            for operation in RESTORE:
+                self.phase(operation, (0, 8192) if operation == "load_allocations" else (0, 0))
             self.inspect(records)
 
     def test_failed_or_lost_reply_stops_without_retry(self):
@@ -234,7 +257,7 @@ class Contracts(unittest.TestCase):
     def test_wrong_transfer_size_stops_before_teardown(self):
         with self.coordinator("--prepare", ("SaveAllocations", "participant 1", "transfer size",
                                             "expected_bytes 4096", "bytes 0")):
-            self.inspect([[allocation(checkpoint_via_host_carrier=True)], []], begin=True)
+            self.inspect([[allocation(shared=True)], []], begin=True, owners={1: [{"allocation": ALLOCATION, "owner_pid": 1}]})
             self.phase(PREPARE[0])
             self.phase(PREPARE[1])  # Replies claim zero bytes instead of 4096.
 
@@ -291,14 +314,15 @@ class Contracts(unittest.TestCase):
         self.assertFalse(missing.exists())
 
     def test_parallel_phases_and_canonical_state(self):
-        records = [[mapping(), allocation()], [allocation()]]
+        other = allocation(2, identifier=bytes([3] * 16))
+        records = [[mapping(), allocation()], [other]]
         with self.coordinator("--prepare"):
             self.inspect(records, begin=True)
             for operation in PREPARE:
                 self.phase(operation)
         saved = msgpack.unpackb(self.state.read_bytes(), raw=False, strict_map_key=False)
-        self.assertEqual(saved["version"], 1)
-        self.assertEqual(saved["body"], {1: [allocation(), mapping()], 2: [allocation()]})
+        self.assertEqual(saved["version"], 2)
+        self.assertEqual(saved["body"], {1: [allocation(), mapping()], 2: [other]})
         records[0].reverse()
         with self.coordinator("--restore"):
             self.inspect(records)
@@ -339,19 +363,19 @@ class Contracts(unittest.TestCase):
 
     def test_creator_none_handle_type_is_rejected_even_with_carrier(self):
         for carrier in (False, True):
-            record = allocation(checkpoint_via_host_carrier=carrier)
+            record = allocation(shared=carrier)
             record["allocation"]["handle_types"] = 0
             with self.subTest(carrier=carrier), \
                     self.coordinator("--inspect", ("invalid allocation creator", "handle_types=0")):
                 self.inspect([[record], []])
 
     def test_creator_anchor_requires_local_handle_or_mapping(self):
-        creator = allocation()
+        creator = allocation(shared=True)
         creator["allocation"]["virtual_allocation_handle_count"] = 0
         with self.coordinator("--inspect"):
             self.inspect([[creator, mapping()], []])
-        with self.coordinator("--inspect", "missing creator anchor"):
-            self.inspect([[creator], [allocation(), mapping(address=0x20000)]])
+        with self.coordinator("--inspect", "missing allocation anchor"):
+            self.inspect([[creator], [allocation(shared=True), mapping(address=0x20000)]])
 
     def test_usage_errors(self):
         control = f"--control-dir {self.directory}"
@@ -376,7 +400,7 @@ class Contracts(unittest.TestCase):
                 self.assertFalse(select.select(self.listeners, [], [], 0)[0], "invalid arguments contacted a participant")
 
     def test_later_participant_overflow_starts_no_save(self):
-        records = [allocation(2, size=size, checkpoint_via_host_carrier=True, identifier=bytes([i] * 16))
+        records = [allocation(2, size=size, shared=True, identifier=bytes([i] * 16))
                    for i, size in enumerate(((1 << 64) - 1, 1))]
         with self.coordinator("--prepare", "allocation size overflow"):
             self.inspect([[], records], begin=True)
@@ -443,10 +467,30 @@ class Contracts(unittest.TestCase):
                 self.phase(operation)
             self.inspect(records)
 
+    def test_shared_holder_metadata_and_anchors_are_consistent(self):
+        for field, value, error in (
+                ("size", 8192, "inconsistent allocation metadata"),
+                ("location", {"location_type": 3, "id": 0}, "inconsistent allocation metadata"),
+                ("virtual_allocation_handle_count", 0, "missing allocation anchor")):
+            importer = allocation(shared=True)
+            importer["allocation"][field] = value
+            with self.subTest(field=field), self.coordinator("--prepare", error):
+                self.inspect([[allocation(shared=True)], [importer]], begin=True)
+
+    def test_creator_remains_owner_when_importer_has_lower_pid(self):
+        reference = {**ALLOCATION, "creator_pid": 2}
+        records = [[allocation(2, shared=True)], [allocation(2, shared=True)]]
+        owners = {1: [{"allocation": reference, "owner_pid": 2}],
+                  2: [{"allocation": reference, "owner_pid": 2}]}
+        with self.coordinator("--prepare"):
+            self.inspect(records, begin=True, owners=owners)
+            for operation in PREPARE:
+                self.phase(operation, byte_counts=(0, 4096) if operation == "save_allocations" else (0, 0))
+
     def test_multicast_binding_requires_local_attachment(self):
         records = [
-            [allocation(), multicast(4096), multicast_device(), binding(4096)],
-            [allocation(), multicast(4096), binding(4096)],
+            [allocation(shared=True), multicast(4096), multicast_device(), binding(4096)],
+            [allocation(shared=True), multicast(4096), binding(4096)],
         ]
         with self.coordinator("--prepare", "participant 2: multicast binding device 0 is not attached"):
             self.inspect(records, begin=True)

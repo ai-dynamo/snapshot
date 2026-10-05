@@ -63,7 +63,7 @@ def test_multicast_unbind_locking(case, multicast_supported, multicast_gate, too
 def inspect_reply(kind="inspect", pid=None):
     """Use the same inspection protocol as the coordinator to assert exact records."""
     pid = os.getpid() if pid is None else pid
-    request = msgpack.packb({"version": 1, "body": {
+    request = msgpack.packb({"version": 2, "body": {
         "kind": kind, "namespace_pid": pid,
     }}, use_bin_type=True)
     endpoint = Path(os.environ["SNAPSHOT_CONTROL_DIR"]) / f"cuinterpose-{pid}.sock"
@@ -74,7 +74,7 @@ def inspect_reply(kind="inspect", pid=None):
         with connection.makefile("rb") as stream:
             size, = struct.unpack("<I", stream.read(4))
             response = msgpack.unpackb(stream.read(size), raw=False)
-    assert response["version"] == 1
+    assert response["version"] == 2
     assert response["body"]["namespace_pid"] == pid
     return response["body"]["result"]
 

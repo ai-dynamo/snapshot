@@ -19,7 +19,7 @@ import msgpack
 
 
 def request(kind, **fields):
-    body = msgpack.packb({"version": 1, "body": {
+    body = msgpack.packb({"version": 2, "body": {
         "kind": kind, "namespace_pid": os.getpid(), **fields,
     }}, use_bin_type=True)
     with socket.socket(socket.AF_UNIX) as connection:
@@ -29,7 +29,7 @@ def request(kind, **fields):
         with connection.makefile("rb") as stream:
             length, = struct.unpack("<I", stream.read(4))
             response = msgpack.unpackb(stream.read(length), raw=False)
-    assert response["version"] == 1
+    assert response["version"] == 2
     return response["body"]
 
 
@@ -198,7 +198,7 @@ else:
 
 activate()
 if mode == "out-of-order":
-    error = request("execute", operation="save_allocations")["result"]["Err"]
+    error = request("save_allocations", owners=[])["result"]["Err"]
     assert "SaveAllocations" in error and "expected MulticastPrepared" in error and "actual Active" in error, error
     assert "Ok" in request("begin_checkpoint")["result"]  # Phase remains unchanged.
 if mode == "permissive-umask":
