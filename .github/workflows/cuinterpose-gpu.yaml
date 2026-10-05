@@ -128,6 +128,7 @@ jobs:
           # The pinned CUDA base supplies the compiler/toolkit but no Python.
           ./uv sync --frozen --project tests/gpu --python 3.12
           export PATH="/work/tests/gpu/.venv/bin:/work:$PATH"
+          python --version > results/python-version.txt
           nvidia-smi -q > results/nvidia-smi.txt
           nvidia-smi topo -m > results/topology.txt
           ./uv pip list --python tests/gpu/.venv/bin/python > results/packages.txt
