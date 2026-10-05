@@ -175,6 +175,21 @@ positive integer and sets the engine's `SNAPSHOT_TENSOR_PARALLEL_SIZE` and GPU
 limit in both source and restore Pods. When unset, the guide settings remain
 unchanged. Benchmark comparison dimensions record shared-memory activation and
 the live source Pod's tensor-parallel size, keeping TP1 and TP2 results separate.
+The optional `SNAPSHOT_E2E_RECIPE` selects a separate multi-GPU manifest pair:
+`glm-5.3` for all three engines, or `deepseek-v4-flash` for vLLM and SGLang.
+These profiles keep their declared GPU counts, pinned model revisions and
+engine settings. Do not combine them with a different TP override. They have
+longer phase deadlines for model loading and larger checkpoints:
+
+```bash
+SNAPSHOT_E2E_FRAMEWORK=vllm SNAPSHOT_E2E_RECIPE=deepseek-v4-flash \
+  uv run --project e2e pytest e2e/tests/test_frameworks.py -vv -s
+```
+
+The recipe name is part of the benchmark case name so its timings are separate
+from the small single-GPU example. These cases are explicit local or cluster
+qualification runs, not additional default CI jobs.
+
 Retain the checkpoint's cuInterpose manifest and matching library
 hashes with the run evidence. The PodSnapshotContent API does not expose that
 metadata, so the source annotation and a successful TP1 run alone do not prove
@@ -191,12 +206,12 @@ Model weights come from one of two places:
   init container. In vCluster mode the setup enables `sync.toHost.persistentVolumes`
   so the NFS mount options reach the node. The model must already be in the cache.
 - **Guide download** (default without the variables): the guide's own plumbing
-  runs unchanged. SGLang's init container downloads into its PVC, which the test
-  creates from the guide manifest if missing (with `SNAPSHOT_E2E_STORAGE_CLASS`
-  when set) and leaves in place; vLLM and TensorRT-LLM download in-process.
-  This needs working DNS and egress from the pods. A partial or stale SGLang
-  cache (for example after a killed run) is reset by deleting that PVC; the
-  next run recreates and refills it.
+  runs unchanged. SGLang's default recipe and all multi-GPU recipes download
+  in an init container into a PVC. The test creates the guide's PVC if missing
+  (with `SNAPSHOT_E2E_STORAGE_CLASS` when set) and leaves it in place. The small
+  vLLM and TensorRT-LLM recipes download in-process. Downloads need working DNS
+  and egress. A failed download retries on the next startup. A large recipe's
+  completion marker includes the pinned model revision.
 
 `tests/test_framework_manifests.py` pins the guide manifests, and the cache
 rewrite, to the restore-pod contract without a cluster.

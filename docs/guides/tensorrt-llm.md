@@ -126,17 +126,17 @@ length of 512 tokens. Set `SNAPSHOT_TENSOR_PARALLEL_SIZE` and the
 Engine sizing is set through `TRTLLM_MAX_NUM_TOKENS` (default
 `1024`), `TRTLLM_MAX_BATCH_SIZE` (default `1`), and
 `TRTLLM_FREE_GPU_MEMORY_FRACTION` (default `0.10`). `app.py` sets
-`trust_remote_code=False`; Qwen3 needs no custom model code. Edit
-`TRUST_REMOTE_CODE` in `app.py` for a checkpoint that ships its own modeling
-code. Revalidate checkpoint and restore before changing the model,
+`trust_remote_code=False`; Qwen3 needs no custom model code. A model-specific
+`TRTLLM_ENGINE_ARGS` JSON object can override the defaults with `LLM` keyword
+arguments, including `trust_remote_code`. Revalidate checkpoint and restore before changing the model,
 TensorRT-LLM image, GPU count, backend, or engine settings.
 
 > [!NOTE]
 > This example runs TensorRT-LLM through the `LLM` API rather than `trtllm-serve`,
 > so the standard `trtllm-serve` command-line arguments do not apply. The model is
-> selected with `SNAPSHOT_MODEL`, and other engine settings are configured on the
-> [`LLM` API](https://nvidia.github.io/TensorRT-LLM/llm-api/reference.html) in
-> `app.py`.
+> selected with `SNAPSHOT_MODEL`, and `TRTLLM_ENGINE_ARGS` supplies
+> [`LLM` API](https://nvidia.github.io/TensorRT-LLM/llm-api/reference.html) keyword
+> arguments.
 
 Deploy the edited manifest:
 
@@ -166,6 +166,10 @@ kubectl get pods \
 
 Use that Pod name in the `PodSnapshot` created during the next step. The
 readiness probe succeeds after `app.py` writes `ready-for-snapshot`.
+
+For the separate GLM 5.3 multi-GPU manifests, see
+[Multi-GPU models](cuda-shared-memory.md#multi-gpu-models). They reuse this
+program and ConfigMap.
 
 ## Next steps
 

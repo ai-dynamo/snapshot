@@ -1,0 +1,160 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sglang-deepseek-v4-flash-restored
+spec:
+  replicas: 1
+  progressDeadlineSeconds: 3600
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: sglang-deepseek-v4-flash-restored
+  template:
+    metadata:
+      labels:
+        app: sglang-deepseek-v4-flash-restored
+      annotations:
+        nvidia.com/restore-from: sglang-deepseek-v4-flash-snapshot
+    spec:
+      terminationGracePeriodSeconds: 1
+      runtimeClassName: nvidia
+      securityContext:
+        seccompProfile:
+          type: Localhost
+          localhostProfile: profiles/block-iouring.json
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-B200
+      initContainers:
+        - name: model-cache
+          image: lmsysorg/sglang:v0.5.17-cu130-runtime@sha256:3ea7c6d74312d964edbcf9b3819425ea42117eb967ef1cfec632a70c926027df
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - -c
+          args:
+            - |
+              import os
+              from pathlib import Path
+              from huggingface_hub import snapshot_download
+              model = os.environ["SNAPSHOT_MODEL"]
+              revision = os.environ["SNAPSHOT_MODEL_REVISION"]
+              marker = Path("/hf-cache") / (".snapshot-model-" + model.replace("/", "--") + "-" + revision)
+              if not marker.exists():
+                  snapshot_download(repo_id=model, revision=revision)
+                  marker.touch()
+          env:
+            - name: SNAPSHOT_MODEL
+              value: nvidia/DeepSeek-V4-Flash-NVFP4
+            - name: SNAPSHOT_MODEL_REVISION
+              value: e3cd60e7de98e9867116860d522499a728de1cf9
+            - name: HF_HOME
+              value: /hf-cache
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /hf-cache
+      containers:
+        - name: main
+          image: lmsysorg/sglang:v0.5.17-cu130-runtime@sha256:3ea7c6d74312d964edbcf9b3819425ea42117eb967ef1cfec632a70c926027df
+          imagePullPolicy: IfNotPresent
+          # Inert placeholder: the agent restores the checkpointed process into
+          # this container, so app.py must not run here.
+          command:
+            - /bin/sh
+            - -c
+            - exec sleep infinity
+          env:
+            - name: SNAPSHOT_TENSOR_PARALLEL_SIZE
+              value: "4"
+            - name: SNAPSHOT_MODEL
+              value: nvidia/DeepSeek-V4-Flash-NVFP4
+            - name: SGLANG_ENGINE_ARGS
+              value: |-
+                {
+                  "revision": "e3cd60e7de98e9867116860d522499a728de1cf9",
+                  "trust_remote_code": true,
+                  "page_size": 256,
+                  "context_length": 131072,
+                  "max_running_requests": 64,
+                  "moe_runner_backend": "flashinfer_trtllm_routed",
+                  "speculative_algorithm": "EAGLE",
+                  "speculative_num_steps": 3,
+                  "speculative_eagle_topk": 1,
+                  "speculative_num_draft_tokens": 4,
+                  "chunked_prefill_size": 4096,
+                  "disable_flashinfer_autotune": true,
+                  "swa_full_tokens_ratio": 0.1
+                }
+            - name: SNAPSHOT_MODEL_REVISION
+              value: e3cd60e7de98e9867116860d522499a728de1cf9
+            - name: SNAPSHOT_CONTROL_DIR
+              value: /snapshot-control
+            - name: HF_HOME
+              value: /hf-cache
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+            - name: NCCL_IB_DISABLE
+              value: "1"
+            - name: NCCL_RAS_ENABLE
+              value: "0"
+            - name: TORCH_NCCL_ENABLE_MONITORING
+              value: "0"
+            - name: TORCH_NCCL_DUMP_ON_TIMEOUT
+              value: "0"
+          ports:
+            - name: api
+              containerPort: 8000
+          resources:
+            requests:
+              cpu: "16"
+              memory: 512Gi
+            limits:
+              memory: 512Gi
+              nvidia.com/gpu: "4"
+          readinessProbe:
+            exec:
+              command:
+                - cat
+                - /snapshot-control/sglang-restore-ready
+            periodSeconds: 1
+            failureThreshold: 3600
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: model-cache
+              mountPath: /hf-cache
+            - name: snapshot-control
+              mountPath: /snapshot-control
+              subPath: main
+            - name: tun
+              mountPath: /dev/net/tun
+            # The checkpointed process's mount namespace includes this
+            # mount (from the source Pod); restore recreates it here too,
+            # even though this placeholder's own command never reads it.
+            - name: app
+              mountPath: /snapshot-app
+              readOnly: true
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: snapshot-model-cache
+        - name: snapshot-control
+          emptyDir: {}
+        - name: tun
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice
+        - name: app
+          configMap:
+            name: sglang-app
