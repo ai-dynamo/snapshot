@@ -37,9 +37,9 @@ std::atomic<unsigned> ends = 0;
 std::atomic<model_streamer_api::SubmissionId> next_submission_id = 0;
 }  // namespace
 
-namespace snapshot::pagebroker::model_streamer_api {
+using namespace snapshot::pagebroker::model_streamer_api;
 extern "C" int
-runai_start(void** streamer)
+runai_file_streamer_start(void** streamer)
 {
   const unsigned generation = ++starts;
   *streamer = new FakeStreamer{generation == 1};
@@ -47,14 +47,14 @@ runai_start(void** streamer)
 }
 
 extern "C" void
-runai_end(void* streamer)
+runai_file_streamer_end(void* streamer)
 {
   ++ends;
   delete static_cast<FakeStreamer*>(streamer);
 }
 
 extern "C" int
-runai_request(
+runai_file_streamer_request(
     void* value,
     SubmissionId* out_submission_id,
     unsigned num_files,
@@ -62,8 +62,11 @@ runai_request(
     unsigned* num_ranges,
     std::size_t* range_offsets,
     std::size_t* range_sizes,
-    void** range_destinations)
+    void** range_destinations,
+    RunaiFileStreamerDevice device)
 {
+  EXPECT_EQ(device.type, RUNAI_FILE_STREAMER_DEVICE_CPU);
+  EXPECT_EQ(device.id, 0);
   auto& streamer = *static_cast<FakeStreamer*>(value);
   const SubmissionId submission_id = ++next_submission_id;
   *out_submission_id = submission_id;
@@ -94,7 +97,7 @@ runai_request(
 }
 
 extern "C" int
-runai_response(
+runai_file_streamer_response(
     void* value,
     SubmissionId* out_submission_id,
     unsigned* file_index,
@@ -115,11 +118,11 @@ runai_response(
 }
 
 extern "C" const char*
-runai_response_str(int response_code)
+runai_file_streamer_response_str(int response_code)
 {
   return response_code == kTimedOutStatusCode ? "timed out" : "fake Model Streamer error";
 }
-}  // namespace snapshot::pagebroker::model_streamer_api
+
 
 TEST(ModelStreamerTransferEngineTest, ReplacesTerminallyFailedRestoreSession)
 {

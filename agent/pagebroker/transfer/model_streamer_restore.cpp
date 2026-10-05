@@ -33,6 +33,25 @@ namespace {
 // 40 GB read-ahead budget. A single larger file is submitted on its own.
 constexpr uintmax_t kSubmissionByteBudget = 10'000'000'000;
 constexpr unsigned kResponsePollTimeoutMs = 25;
+// A completed submission retains its mappings until its entire native session
+// ends. Bound admission and stop admitting on the first completion, so steady
+// arrivals cannot keep an old destination alive indefinitely.
+constexpr std::size_t kSessionSubmissionLimit = 8;
+
+bool
+IsRecoverableRangeStatus(int status)
+{
+  switch (status) {
+    case RUNAI_FILE_STREAMER_RESPONSE_SUCCESS:
+    case RUNAI_FILE_STREAMER_RESPONSE_FILE_ACCESS_ERROR:
+    case RUNAI_FILE_STREAMER_RESPONSE_EOF_ERROR:
+    case RUNAI_FILE_STREAMER_RESPONSE_FILE_TRUNCATED_ERROR:
+      return true;
+    default:
+      return false;
+  }
+}
+
 
 std::system_error
 SystemError(const char* operation)
@@ -43,7 +62,7 @@ SystemError(const char* operation)
 std::string
 StreamerError(int response)
 {
-  const char* description = streamer::runai_response_str(response);
+  const char* description = streamer::runai_file_streamer_response_str(response);
   return description == nullptr ? "unknown Model Streamer error" : description;
 }
 
@@ -235,31 +254,60 @@ ModelStreamerRestore::Failed() const noexcept
 void
 ModelStreamerRestore::Start()
 {
-  const int response = streamer::runai_start(&value_);
+  const int response = streamer::runai_file_streamer_start(&value_);
   if (response != 0) {
     StopStreamer();
     throw std::runtime_error("start Model Streamer: " + StreamerError(response));
   }
   if (value_ == nullptr)
     throw std::runtime_error("Model Streamer started without returning a handle");
-
-  try {
-    event_loop_.Start();
-  }
-  catch (...) {
-    StopStreamer();
-    throw;
-  }
 }
 
 void
 ModelStreamerRestore::Submit(std::unique_ptr<StreamerEntry>& entry)
 {
+  pending_.push_back(std::move(entry));
+  SubmitPending();
+}
+
+bool
+ModelStreamerRestore::CanAdmit(const StreamerEntry& entry) const
+{
+  if (draining_ || active_.size() >= kSessionSubmissionLimit)
+    return false;
+  // An oversized file may occupy a session by itself.
+  if (active_.empty())
+    return true;
+  if (session_bytes_ >= kSubmissionByteBudget)
+    return false;
+  return entry.bytes <= kSubmissionByteBudget - session_bytes_;
+}
+
+void
+ModelStreamerRestore::SubmitPending()
+{
+  while (!pending_.empty() && CanAdmit(*pending_.front())) {
+    if (value_ == nullptr)
+      Start();
+    // Keep the entry in pending_ until native submission and registration both
+    // finish. On any exception, HandleFailure ends native access before FailAll
+    // releases even an entry that the library accepted but we could not track.
+    SubmitNative(pending_.front());
+    pending_.pop_front();
+  }
+}
+
+void
+ModelStreamerRestore::SubmitNative(std::unique_ptr<StreamerEntry>& entry)
+{
   auto& request = entry->request;
   streamer::SubmissionId submission_id = 0;
-  const int response = streamer::runai_request(
+  const int response = streamer::runai_file_streamer_request(
       value_, &submission_id, static_cast<unsigned>(request.paths.size()), request.paths.data(),
-      request.range_counts.data(), request.offsets.data(), request.sizes.data(), request.destinations.data());
+      request.range_counts.data(), request.offsets.data(), request.sizes.data(), request.destinations.data(),
+      RunaiFileStreamerDevice{RUNAI_FILE_STREAMER_DEVICE_CPU, 0});
+  if (response == RUNAI_FILE_STREAMER_RESPONSE_UNKNOWN_ERROR)
+    throw std::runtime_error("submit Model Streamer restore: " + StreamerError(response));
   if (response != 0 && submission_id == 0) {
     FailEntry(
         *entry,
@@ -275,6 +323,8 @@ ModelStreamerRestore::Submit(std::unique_ptr<StreamerEntry>& entry)
   const auto [active, inserted] = active_.try_emplace(submission_id);
   if (!inserted)
     throw std::runtime_error("Model Streamer returned a duplicate submission ID");
+  session_bytes_ += entry->bytes;
+  ++unfinished_;
   active->second = std::move(entry);
   ScheduleReceive();
 }
@@ -288,30 +338,17 @@ ModelStreamerRestore::AcceptEntry(StreamerEntry& entry, const StreamerResponse& 
   if (response.status != 0 && entry.first_error.empty())
     entry.first_error = "Model Streamer restore range: " + StreamerError(response.status);
 
-  if (response.file_index >= entry.completed.size() || response.range_index != 0 ||
-      (response.file_index < entry.completed.size() && entry.completed[response.file_index])) {
-    if (entry.first_error.empty())
-      entry.first_error = "Model Streamer returned an invalid or duplicate range response";
-  } else {
-    entry.completed[response.file_index] = true;
-  }
+  if (response.file_index >= entry.completed.size())
+    throw std::runtime_error("Model Streamer returned an invalid file index");
+  if (response.range_index != 0 || entry.completed[response.file_index])
+    throw std::runtime_error("Model Streamer returned an invalid or duplicate range response");
+  entry.completed[response.file_index] = true;
 
   ++entry.responses_received;
-  const bool expected_done = entry.responses_received == entry.completed.size();
-  if ((response.submission_done != 0) != expected_done && entry.first_error.empty())
-    entry.first_error = "Model Streamer reported inconsistent submission completion";
-
-  if (response.submission_done != 0) {
-    if (entry.first_error.empty()) {
-      entry.completion.set_value();
-    } else {
-      entry.completion.set_exception(std::make_exception_ptr(std::runtime_error(entry.first_error)));
-    }
-    return true;
-  }
-  if (expected_done)
-    throw std::runtime_error("Model Streamer did not finish a fully drained submission");
-  return false;
+  const int expected_done = entry.responses_received == entry.completed.size() ? 1 : 0;
+  if (response.submission_done != expected_done)
+    throw std::runtime_error("Model Streamer reported inconsistent submission completion");
+  return expected_done != 0;
 }
 
 void
@@ -332,15 +369,19 @@ ModelStreamerRestore::ReceiveAndDispatch()
     return;
 
   StreamerResponse response;
-  response.status = streamer::runai_response(
+  response.status = streamer::runai_file_streamer_response(
       value_, &response.submission_id, &response.file_index, &response.range_index, &response.submission_done,
       kResponsePollTimeoutMs);
   if (response.status != streamer::kTimedOutStatusCode) {
+    if (!IsRecoverableRangeStatus(response.status))
+      throw std::runtime_error("Model Streamer session failed: " + StreamerError(response.status));
     const auto entry = active_.find(response.submission_id);
     if (entry == active_.end())
       throw std::runtime_error("Model Streamer returned a response for an unknown submission");
-    if (AcceptEntry(*entry->second, response))
-      active_.erase(entry);
+    if (AcceptEntry(*entry->second, response)) {
+      --unfinished_;
+      draining_ = true;
+    }
   }
 
   const auto now = std::chrono::steady_clock::now();
@@ -351,7 +392,26 @@ ModelStreamerRestore::ReceiveAndDispatch()
       throw std::runtime_error("Model Streamer submission " + std::to_string(submission_id) + " timed out");
   }
 
+  if (unfinished_ == 0) {
+    FinishSession();
+    SubmitPending();
+  }
   ScheduleReceive();
+}
+
+void
+ModelStreamerRestore::FinishSession()
+{
+  StopStreamer();
+  for (auto& [id, entry] : active_) {
+    if (entry->first_error.empty())
+      entry->completion.set_value();
+    else
+      FailEntry(*entry, std::make_exception_ptr(std::runtime_error(entry->first_error)));
+  }
+  active_.clear();
+  session_bytes_ = 0;
+  draining_ = false;
 }
 
 void
@@ -370,7 +430,7 @@ ModelStreamerRestore::StopStreamer() noexcept
 {
   if (value_ == nullptr)
     return;
-  streamer::runai_end(value_);
+  streamer::runai_file_streamer_end(value_);
   value_ = nullptr;
 }
 
@@ -389,7 +449,15 @@ ModelStreamerRestore::FailAll(std::exception_ptr error) noexcept
 {
   for (auto& [id, entry] : active_)
     FailEntry(*entry, error);
+  for (auto& entry : pending_) {
+    if (entry)
+      FailEntry(*entry, error);
+  }
   active_.clear();
+  pending_.clear();
+  unfinished_ = 0;
+  session_bytes_ = 0;
+  draining_ = false;
   receive_scheduled_ = false;
 }
 
@@ -420,9 +488,10 @@ ModelStreamerRestore::RestoreFiles(const RestorePlan& plan, const Path& destinat
       if (batch.size() > std::numeric_limits<unsigned>::max())
         throw std::runtime_error("too many files in one Model Streamer submission");
 
-      // The request contains raw pointers into batch. Waiting here keeps the
-      // mappings alive until the receive event sees submission_done.
+      // The request contains raw pointers into batch. Completion is released
+      // only after the native session ends, including on terminal failures.
       auto entry = std::make_unique<StreamerEntry>();
+      entry->bytes = batch_bytes;
       entry->request.paths.reserve(batch.size());
       entry->request.range_counts.assign(batch.size(), 1);
       entry->request.offsets.assign(batch.size(), 0);
@@ -449,7 +518,7 @@ ModelStreamerRestore::Stage(const RestorePlan& plan, const Path& destination)
 {
   ValidateRestorePlan(plan);
   CreateDirectoryTree(plan, destination);
-  std::call_once(start_once_, [this] { Start(); });
+  std::call_once(start_once_, [this] { event_loop_.Start(); });
   RestoreFiles(plan, destination);
   ApplyTreePermissions(plan, destination);
 }

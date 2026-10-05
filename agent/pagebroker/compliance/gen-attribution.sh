@@ -4,9 +4,7 @@
 #
 # Builds the consolidated third-party attribution file at /legal/THIRD-PARTY.txt.
 #
-# The PageBroker image is distroless and adds no system packages, so the
-# statically linked protobuf is the whole of its third-party content. The
-# license text is read from the copyright file collect-sources.sh placed next
+# The protobuf license text is read from the copyright file collect-sources.sh placed next
 # to the corresponding source, so attribution and source always describe the
 # same version.
 
@@ -31,9 +29,10 @@ This file lists third-party open-source software redistributed in this
 container image, together with the license text for each component.
 
 SCOPE: this covers what this image adds on top of its base image. This image
-adds no system packages; the only third-party component is protobuf, linked
-statically into /usr/local/bin/pagebroker. Base-image components are
-attributed by that image.
+includes protobuf, linked statically into /usr/local/bin/pagebroker, and Model
+Streamer. Model Streamer metadata and sources, including its bundled libaio
+and liburing sources and license texts, are under /legal/model-streamer/.
+Base-image components are attributed by that image.
 
 CORRESPONDING SOURCE: upstream source for the component listed below ships
 inside this image under /legal/source/. See /legal/source/README.txt.

@@ -14,7 +14,10 @@ REGISTRY          ?= ghcr.io/ai-dynamo/snapshot
 VERSION           ?= latest
 TAGS              ?= $(VERSION)
 DOCKER_BUILD_ARGS ?=
-MODEL_STREAMER_WHEEL_DIR ?= ../runai-model-streamer/py/runai_model_streamer/dist
+MODEL_STREAMER_ARTIFACT_DIR ?= $(CURDIR)/.model-streamer
+MODEL_STREAMER_WHEEL_DIR ?= $(MODEL_STREAMER_ARTIFACT_DIR)/core
+MODEL_STREAMER_INCLUDE_DIR ?= $(MODEL_STREAMER_ARTIFACT_DIR)/include
+MODEL_STREAMER_LEGAL_DIR ?= $(MODEL_STREAMER_ARTIFACT_DIR)/legal
 
 # Base image for the agent, read from the Dockerfile so the digest lives in one
 # place. capture-base-packages and docker-build-agent must agree on it, or the
@@ -169,7 +172,16 @@ docker-build-operator:
 	docker buildx build $(DOCKER_BUILD_ARGS) -f operator/Dockerfile \
 	  $(foreach t,$(TAGS),-t $(REGISTRY)/operator:$(t)) .
 
+# Produces checksummed wheel inputs and matching public C headers for local/CI builds.
+.PHONY: model-streamer-artifacts
+model-streamer-artifacts:
+	docker buildx build $(DOCKER_BUILD_ARGS) --platform linux/amd64 \
+	  -f agent/pagebroker/model-streamer.Dockerfile \
+	  --output "type=local,dest=$(MODEL_STREAMER_ARTIFACT_DIR)" agent/pagebroker/
+
 docker-build-pagebroker:
 	docker buildx build $(DOCKER_BUILD_ARGS) --platform "$(AGENT_PLATFORM)" -f agent/pagebroker/Dockerfile \
 	  --build-context=model-streamer-wheel="$(MODEL_STREAMER_WHEEL_DIR)" \
+	  --build-context=model-streamer-headers="$(MODEL_STREAMER_INCLUDE_DIR)" \
+	  --build-context=model-streamer-legal="$(MODEL_STREAMER_LEGAL_DIR)" \
 	  $(foreach t,$(TAGS),-t $(REGISTRY)/pagebroker:$(t)) agent/pagebroker/

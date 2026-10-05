@@ -10,6 +10,9 @@ ARG PAGEBROKER_BASE_IMAGE=nvcr.io/nvidia/distroless/cc:v4.0.8@sha256:8003f23a712
 FROM ${DOCKER_PROXY}library/python:3.12-slim AS model-streamer-install
 
 COPY model-streamer-wheel.sha256 /model-streamer-wheel.sha256
+COPY model-streamer-headers.sha256 /model-streamer-headers.sha256
+COPY --from=model-streamer-headers / /opt/model-streamer-sdk/include/
+RUN cd /opt/model-streamer-sdk/include && sha256sum -c /model-streamer-headers.sha256
 COPY --from=model-streamer-wheel / /wheels/
 RUN set -eu; \
     set -- /wheels/*.whl; \
@@ -32,6 +35,7 @@ RUN set -eu; \
 FROM ${DOCKER_PROXY}library/${PAGEBROKER_BUILD_IMAGE} AS build
 
 COPY --from=model-streamer-install /opt/model-streamer-sdk/lib/libstreamer.so /usr/local/lib/libstreamer.so
+COPY --from=model-streamer-install /opt/model-streamer-sdk/include/ /usr/local/include/
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -77,6 +81,7 @@ FROM ${PAGEBROKER_BASE_IMAGE}
 
 COPY --from=build /src/pagebroker /usr/local/bin/pagebroker
 COPY --from=sources /legal /legal
+COPY --from=model-streamer-legal / /legal/model-streamer/
 COPY --from=model-streamer-install /opt/model-streamer-sdk/lib/libstreamer.so /usr/local/lib/libstreamer.so
 COPY --from=model-streamer-install /opt/model-streamer-sdk/legal/LICENSE /legal/model-streamer/LICENSE
 COPY --from=model-streamer-install /opt/model-streamer-sdk/legal/METADATA /legal/model-streamer/METADATA

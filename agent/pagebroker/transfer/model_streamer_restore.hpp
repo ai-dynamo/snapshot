@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <exception>
 #include <future>
 #include <memory>
@@ -50,6 +51,7 @@ class ModelStreamerRestore {
       std::vector<void*> destinations;
     } request;
 
+    uintmax_t bytes = 0;
     std::vector<bool> completed;
     std::size_t responses_received = 0;
     std::string first_error;
@@ -96,12 +98,19 @@ class ModelStreamerRestore {
     ModelStreamerRestore& restore_;
   };
 
-  // Starts the native Model Streamer session and its event-loop worker.
+  // Starts a native session on the event-loop thread.
   void Start();
   // Restores files in byte-bounded submissions and then applies their permissions.
   void RestoreFiles(const RestorePlan& plan, const Path& destination);
-  // Sends an entry to Model Streamer and registers its assigned submission ID.
+  // Queues an entry until the current native session can admit it.
   void Submit(std::unique_ptr<StreamerEntry>& entry);
+  // Admits a bounded group of queued submissions into one native session.
+  void SubmitPending();
+  bool CanAdmit(const StreamerEntry& entry) const;
+  // Sends an entry to Model Streamer and registers its assigned submission ID.
+  void SubmitNative(std::unique_ptr<StreamerEntry>& entry);
+  // Ends a drained session before releasing any caller's mapped destinations.
+  void FinishSession();
   // Applies one response to an entry and reports whether the submission finished.
   bool AcceptEntry(StreamerEntry& entry, const StreamerResponse& response);
   // Completes one entry with an exception without allowing failure to escape.
@@ -123,6 +132,10 @@ class ModelStreamerRestore {
   const std::exception_ptr stopped_error_;
   utils::EventLoop event_loop_;
   std::unordered_map<std::uint64_t, std::unique_ptr<StreamerEntry>> active_;
+  std::deque<std::unique_ptr<StreamerEntry>> pending_;
+  uintmax_t session_bytes_ = 0;
+  std::size_t unfinished_ = 0;
+  bool draining_ = false;
   bool receive_scheduled_ = false;
   std::atomic<bool> failed_ = false;
 };

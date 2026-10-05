@@ -3,45 +3,17 @@
 
 #pragma once
 
-#include <cstddef>
-#include <cstdint>
+#include <streamer/streamer.h>
 
-// Snapshot-owned declarations for the libstreamer.so C ABI. These signatures
-// match run-ai/runai-model-streamer commit bc21fd4182cc06ce9475452d16697d50ce3588c4
-// and are derived from these upstream files:
-//   cpp/streamer/streamer.h (C API signatures)
-//   cpp/common/submission/submission_id.h (SubmissionId)
-//   cpp/common/response_code/response_code.h (ResponseCode::TimedOut)
-// This ABI supports multiple submissions with per-range destinations.
+// Compile against the public headers shipped with the pinned native library.
+// Keep only convenience aliases here; the upstream header owns the C ABI.
 namespace snapshot::pagebroker::model_streamer_api {
-using SubmissionId = std::uint64_t;
-
-// ResponseCode::TimedOut in the pinned Model Streamer ABI. A finite response
-// timeout lets the single API thread notice and submit newly queued work.
-inline constexpr int kTimedOutStatusCode = 16;
-
-extern "C" {
-int runai_start(void** streamer);
-void runai_end(void* streamer);
-
-int runai_request(
-    void* streamer,
-    SubmissionId* out_submission_id,
-    unsigned num_files,
-    const char** paths,
-    unsigned* num_ranges,
-    std::size_t* range_offsets,
-    std::size_t* range_sizes,
-    void** range_destinations);
-
-int runai_response(
-    void* streamer,
-    SubmissionId* out_submission_id,
-    unsigned* file_index,
-    unsigned* range_index,
-    int* submission_done,
-    unsigned timeout_ms);
-
-const char* runai_response_str(int response_code);
-}
+using SubmissionId = RunaiFileStreamerSubmissionId;
+inline constexpr int kTimedOutStatusCode = RUNAI_FILE_STREAMER_RESPONSE_TIMED_OUT;
+using ::runai_file_streamer_start;
+using ::runai_file_streamer_end;
+using ::runai_file_streamer_request;
+using ::runai_file_streamer_response;
+using ::runai_file_streamer_response_str;
+using ::runai_file_streamer_set_credentials;
 }  // namespace snapshot::pagebroker::model_streamer_api
