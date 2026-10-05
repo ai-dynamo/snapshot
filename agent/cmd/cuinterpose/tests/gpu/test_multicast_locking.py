@@ -24,14 +24,16 @@ from cuda_driver import cuda_call
 
 @pytest.fixture(scope="module")
 def multicast_gate(tmp_path_factory):
-    # torch's CUDA 13 dependencies supply both the CUDA and CUPTI headers/library.
+    # The CUPTI wheel uses CUDA headers from the installed development toolkit.
     spec = find_spec("nvidia.cu13")
     assert spec is not None, "requires the CUDA 13 CUPTI package installed with torch"
     toolkit = Path(next(iter(spec.submodule_search_locations)))
     output = tmp_path_factory.mktemp("multicast-gate") / "gate.so"
     subprocess.run([
         "cc", "-std=c11", "-D_POSIX_C_SOURCE=200809L", "-O2", "-Wall", "-Wextra",
-        "-Werror", "-shared", "-fPIC", "-pthread", "-I", str(toolkit / "include"),
+        "-Werror", "-shared", "-fPIC", "-pthread",
+        "-I", os.environ.get("CUDA_INCLUDE", "/usr/local/cuda/include"),
+        "-I", str(toolkit / "include"),
         str(Path(__file__).with_name("fixtures") / "multicast_gate.c"),
         str(toolkit / "lib/libcupti.so.13"), f"-Wl,-rpath,{toolkit / 'lib'}",
         "-o", str(output),
