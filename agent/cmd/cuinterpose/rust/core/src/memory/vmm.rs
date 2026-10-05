@@ -7,7 +7,7 @@ use super::{HandleEntry, Memblock, ProcessState, Refcounts, VirtualAllocationHan
 use crate::error::Result;
 use cudarc::driver::sys::CUresult::*;
 use cudarc::driver::sys::*;
-use cuinterpose_protocol::{AllocationId, AllocationReference, NamespacePid};
+use cuinterpose_protocol::{AllocationId, AllocationReference};
 use std::collections::btree_map::Entry;
 
 /// The device memory carrier must be able to reconstruct tracked unicast memory.
@@ -29,16 +29,6 @@ pub struct Allocation {
     pub properties: CUmemAllocationProp,
     pub shared: bool,
     pub context: usize,
-}
-
-impl Allocation {
-    /// Only the creator saves shared device memory. CUDA checkpoints private memory
-    /// directly.
-    pub(crate) fn checkpoint_via_host_carrier(&self, namespace_pid: NamespacePid) -> bool {
-        self.reference.creator_pid == namespace_pid
-            && validate_properties(&self.properties).is_ok()
-            && self.shared
-    }
 }
 
 // This code never dereferences the opaque Win32 pointer on Linux, and driver access and
