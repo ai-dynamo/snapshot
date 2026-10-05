@@ -139,7 +139,7 @@ RUN mkdir -p /rust-sources && cd rust && cargo vendor --locked /rust-sources/ven
     && cp -a "$(rustc --print sysroot)/lib/rustlib/src/rust" /rust-sources/standard-library \
     && cp -a "$(rustc --print sysroot)/share/doc/rust" /rust-sources/toolchain-notices
 
-# Python is needed only for generating notices and running the coordinator tests.
+# Python generates the Rust notices below.
 FROM cuinterpose-builder AS cuinterpose-notices
 RUN apt-get update && apt-get install -y --no-install-recommends python3 \
     && rm -rf /var/lib/apt/lists/*
@@ -147,7 +147,14 @@ COPY compliance/rust_licenses.py compliance/test_rust_licenses.py /tmp/rust-noti
 RUN python3 -m unittest discover -s /tmp/rust-notices \
     && python3 /tmp/rust-notices/rust_licenses.py /rust-sources /rust-sources/NOTICES.txt
 
+# Both the agent and the CPU installer test use this exact workload payload.
+FROM scratch AS cuinterpose-payload
+COPY --from=cuinterpose-builder /cuinterpose/build/libcuinterpose.so /usr/local/lib/snapshot/libcuinterpose.so
+COPY --from=cuinterpose-builder /cuinterpose/build/libcuinterpose_core.so /usr/local/lib/snapshot/libcuinterpose_core.so
+COPY --from=cuinterpose-builder /cuinterpose/build/cuinterpose-launch /usr/local/bin/cuinterpose-launch
+
 FROM cuinterpose-notices AS cuinterpose-test
+COPY --from=cuinterpose-payload / /
 RUN apt-get update && apt-get install -y --no-install-recommends python3-msgpack \
     && rm -rf /var/lib/apt/lists/*
 RUN make test-native
@@ -386,12 +393,10 @@ RUN criu --version
 # Native checkpoint/restore uses the in-repository helper. The optional workload
 # launch-job wrapper uses the standalone binary supplied by the workload image.
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
-COPY --from=cuinterpose-builder /cuinterpose/build/libcuinterpose.so /usr/local/lib/snapshot/libcuinterpose.so
-COPY --from=cuinterpose-builder /cuinterpose/build/libcuinterpose_core.so /usr/local/lib/snapshot/libcuinterpose_core.so
 COPY --from=cuinterpose-builder /cuinterpose/build/cuinterpose-coordinator /usr/local/bin/cuinterpose-coordinator
 # The operator copies the launcher into source workloads. It execs the application,
 # so restore needs the libraries and coordinator, but no launcher in the bundle.
-COPY --from=cuinterpose-builder /cuinterpose/build/cuinterpose-launch /usr/local/bin/cuinterpose-launch
+COPY --from=cuinterpose-payload / /
 COPY --from=cuinterpose-notices /rust-sources/ /legal/cuinterpose/rust/
 COPY cmd/cuinterpose/ /legal/cuinterpose/source/
 # nsmount resolves this helper at /usr/local/sbin/ns-bind-mount (see
