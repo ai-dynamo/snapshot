@@ -430,8 +430,9 @@ random 128-bit allocation ID identifies each tracked allocation or multicast
 object. Together, the creator namespace PID and allocation ID identify an
 allocation across processes.
 
-The agent supplies one `--process <namespace-pid>` argument for every expected
-CUDA process. Because the coordinator runs inside the target PID and mount
+The agent supplies one `--process <namespace-pid>` argument for every CUDA
+process with a mapped core. Frontend-only CUDA processes remain in the native
+checkpoint group. Because the coordinator runs inside the target PID and mount
 namespaces, it can connect to each exact socket without scanning the control
 directory or asking shims to identify themselves. Its first capture request is
 `BEGIN_CHECKPOINT`; restore also requires the supplied namespace PID set to match the
@@ -1087,6 +1088,7 @@ Its dependency order is:
 | [#332](https://github.com/ai-dynamo/snapshot/pull/332) | Cross-process coordinator and state publication |
 | [#333](https://github.com/ai-dynamo/snapshot/pull/333) | Artifact builds and packaging |
 | [#336](https://github.com/ai-dynamo/snapshot/pull/336) | Pod contract, agent, operator, and Helm integration |
+| [#456](https://github.com/ai-dynamo/snapshot/pull/456) | Runnable guides and inference-engine recipes |
 | [#337](https://github.com/ai-dynamo/snapshot/pull/337) | Design proposal and documentation |
 | [#338](https://github.com/ai-dynamo/snapshot/pull/338) | Assembled-stack coverage |
 
