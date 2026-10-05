@@ -202,6 +202,9 @@ fn bind_listener(endpoint: &str) -> std::io::Result<UnixListener> {
     {
         return Err(error);
     }
+    // The identity check and unlink are not atomic. INSTALL_LOCK serializes only
+    // this process, so another process must not replace this PID-owned endpoint
+    // between the check and removal.
     std::fs::remove_file(endpoint)?;
     rustix::net::bind(&listener, &address)?;
     Ok(listener.into())
