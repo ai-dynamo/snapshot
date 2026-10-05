@@ -66,10 +66,11 @@ workloads to resume with their existing pointers and sharing semantics.
 
 - Preserve allocation identity, virtual addresses, contents, access permissions,
   and supported unicast and multicast sharing across checkpoint and restore.
-- Save exactly one content copy per shared creator allocation in host memory
+- Save exactly one content copy per shared allocation in host memory
   captured by CRIU; leave never-shared allocations to native CUDA checkpoint.
 - Validate the complete participant topology before destructive preparation;
-  reconstruct creators before importers and verify topology before resuming.
+  reconstruct backing before reconnecting other holders and verify topology
+  before resuming.
 - Deliver the shim before SnapshotJob workloads start, preserving their
   arguments and resolved environment. Preserve native CUDA jobfiles when present.
 - Define application quiescence, failure, and artifact compatibility contracts
@@ -96,18 +97,19 @@ reconstruction around Snapshot's existing native CUDA and CRIU operations.
 
 The application must finish all CUDA calls and GPU work, then remain parked
 through capture and restore. All sharing peers must be interposed and included
-in a fixed checkpoint group, with creators still available. The shim does not
-pause application threads or make an uncooperative application checkpointable.
+in a fixed checkpoint group, with original creator processes still included.
+The shim does not pause application threads or make an uncooperative application
+checkpointable.
 
-Before native CUDA lock, the shims save shared creator bytes into host carriers
-and remove shared CUDA resources. CRIU captures those carriers as process memory.
+Before native CUDA lock, the shims save one copy of each shared allocation into
+host carriers and remove shared CUDA resources. CRIU captures those carriers as process memory.
 After native CUDA restore and unlock, the shims recreate shared backing, restore
 contents, and rebuild importers and multicast dependencies. Snapshot releases the
 application only after the coordinator verifies the restored topology.
 
 Unsupported exportable creates and foreign imports fail at the intercepted API,
-before acquiring CUDA backing. Missing participants, missing creators, and
-incomplete multicast groups fail validation before destructive preparation.
+before acquiring CUDA backing. Missing participants, missing allocation holders,
+and incomplete multicast groups fail validation before destructive preparation.
 Failures or ambiguous replies during the lifecycle invalidate the attempt; the
 workload must not resume with partially removed or reconstructed sharing.
 
@@ -117,8 +119,8 @@ Exactly POSIX-FD exportable VMM and multicast objects are supported. FABRIC,
 mixed exportable handle types, and non-POSIX multicast (including handle type
 zero) are rejected before CUDA allocation or import. Tracked unicast allocations
 support pinned DEVICE and HOST_NUMA backing. Private unicast VMM remains
-native-owned. Shared HOST_NUMA bytes use the creator's host carrier, and restore
-preserves the original NUMA placement. Memory IPC requires fully
+native-owned. Shared HOST_NUMA bytes use the selected holder's host carrier, and
+restore preserves the original NUMA placement. Memory IPC requires fully
 interposed peers and one owning context per imported mapping. Successful peer
 enables grant the accessing GPU permission on existing and future converted
 mappings owned by the peer context. Peer disable stops future grants but keeps
@@ -136,8 +138,8 @@ outside this scope.
 | --- | --- |
 | Concurrent application activity | Applications finish all CUDA calls and GPU work before entry and stay parked. Checkpoint entry closes tracked memory mutation and rejects outstanding unlocked driver calls; it does not drain work. |
 | Partial capture or restore | Run each lifecycle operation once with global barriers. Terminate an unsafe workload; do not retry a lost reply or roll back partial driver mutation. |
-| Exported allocation lifetime | The original creator retains a generic handle or local mapping while exported descriptors or imported allocations remain usable. A virtual shareable FD alone does not retain creator backing. |
-| Host-memory pressure | Budget approximately one host copy of shared creator backing plus metadata and temporary mappings. Carriers use pinned memory during transfers and enlarge CRIU images. Importers do not save duplicate bytes. |
+| Exported allocation lifetime | Existing VMM imports may outlive the creator's local references, but the creator process must remain in the captured group. New imports require a creator handle or mapping. A virtual shareable FD alone does not retain backing. |
+| Host-memory pressure | Budget approximately one host copy of shared backing plus metadata and temporary mappings. Carriers use pinned memory during transfers and enlarge CRIU images. Other holders do not save duplicate bytes. |
 | Platform and CUDA compatibility | Require Linux/amd64, glibc 2.34 or newer for the preload libraries, CUDA Runtime 12.0 or newer when using a runtime library, compatible GPUs/drivers, and the VMM/multicast APIs the workload uses. Existing Snapshot/CRIU privilege and compatibility requirements still apply. |
 | Fork and loader behavior | Lookup starts no runtime. Fork before CUDA initialization allows child initialization; children forked after initialization must exec or exit. Fork during initialization and long-lived fork children during checkpoint are unsupported. |
 | Checkpoint/artifact mismatch | Require identical frontend and core SHA-256 hashes at restore and a compatible coordinator protocol. Keep library files stable during capture; recreate obsolete draft checkpoints. |
@@ -278,8 +280,8 @@ requests to each process: `BEGIN_CHECKPOINT`, `PREPARE_MULTICAST`, `SAVE_ALLOCAT
 and `PREPARE_UNICAST`. Restore sends eight: an initial `INSPECT`,
 `LOAD_ALLOCATIONS`, `RESTORE_UNICAST`, the four ordered multicast operations,
 and a final `INSPECT`. Restoring an imported allocation or multicast object also
-causes one peer export request to its creator; that data-dependent traffic is
-the actual FD handoff, not discovery.
+causes one peer export request to its selected unicast holder or multicast
+creator. That traffic is the actual FD handoff, not discovery.
 
 #### Snapshot agent
 
@@ -293,7 +295,7 @@ reconstruction succeed.
 
 #### Host-carrier module
 
-The Rust `host_carrier` module copies shared creator allocations into one host arena per process and copies them back during restore. DEVICE allocations are grouped by CUDA context and device, mapped into a temporary consecutive address range, and copied asynchronously on one stream per group. HOST_NUMA allocations use CPU copies through temporary host-accessible VMM aliases of their full backing. These aliases preserve application mappings and permissions.
+The Rust `host_carrier` module copies each selected holder's shared allocations into one host arena per process and copies them back during restore. DEVICE allocations are grouped by CUDA context and device, mapped into a temporary consecutive address range, and copied asynchronously on one stream per group. HOST_NUMA allocations use CPU copies through temporary host-accessible VMM aliases of their full backing. These aliases preserve application mappings and permissions.
 
 The arena is registered as pinned host memory for each save or load transfer. The registration's context remains alive until all copies finish and the arena is unregistered. Between transfers the carrier is ordinary anonymous memory. If no recorded context remains, DEVICE backing uses its device ordinal for the primary-context fallback and HOST_NUMA backing uses CUDA device zero. This fallback never changes the allocation's NUMA node ID; restore recreates its original allocation properties.
 
@@ -462,6 +464,15 @@ For example, suppose A creates a 2 MiB allocation and B imports it:
 
 The addresses can differ: each process has its own address space. The shared allocation ID says that both mappings refer to the same backing. After restore, those addresses and IDs stay the same, but the driver handles and export FDs are newly created.
 
+For each shared unicast allocation, the coordinator selects a checkpoint holder
+from the frozen records. It prefers the original creator when that process still
+has a handle or mapping, otherwise the lowest namespace PID with a local handle
+or mapping. The creator PID remains part of the immutable allocation identity
+and must still be in the captured group. The selected holder saves and recreates
+one copy of the exact full backing, even if its application maps only part of it.
+The save request supplies this plan, which remains in shim memory through CRIU.
+Multicast objects still require their original creator.
+
 An allocation is *exportable* when its creation properties allow a shareable handle. That does not mean it needs a host carrier. It becomes *shared* after a successful tracked export/import or a binding into tracked multicast. Once marked shared, closing a virtual shareable handle or removing a binding does not change it back to private.
 
 | Allocation state | Who saves and restores its bytes? |
@@ -469,11 +480,11 @@ An allocation is *exportable* when its creation properties allow a shareable han
 | Ordinary nonexportable `cuMemCreate`, including HOST_NUMA | Native CUDA. |
 | Tracked POSIX-capable allocation never shared | Native CUDA; cuinterpose leaves its driver handles and application mappings intact. |
 | Shim-managed malloc never shared | Native CUDA, even though its backing can be exported. |
-| Shared pinned DEVICE or HOST_NUMA creator allocation | The creator shim's host carrier. |
-| Imported shared allocation | No second content copy; the importer reconnects to the creator's restored allocation. |
-| Tracked allocation used by multicast | The creator's host carrier, even if there was no unicast virtual shareable handle export. |
+| Shared pinned DEVICE or HOST_NUMA allocation | The selected checkpoint holder's host carrier. |
+| Other holders of that shared allocation | No second content copy; each reconnects to the selected holder's restored allocation. |
+| Tracked allocation used by multicast | The selected holder's host carrier, even if there was no unicast virtual shareable handle export. |
 
-Only supported exportable creator allocations that are pinned, marked shared, and located at DEVICE or HOST_NUMA enter the host carrier. A shared allocation whose application handles were released but whose mapping remains can recover a temporary driver handle before copying. Never-shared allocations are excluded from that recovery as well as from teardown.
+Only supported pinned shared allocations located at DEVICE or HOST_NUMA enter the host carrier. A shared allocation whose application handles were released but whose mapping remains can recover a temporary driver handle before copying. Never-shared allocations are excluded from that recovery as well as from teardown.
 
 #### VMM export and import
 
@@ -484,7 +495,7 @@ fixed 24-byte layout:
 
 | Bytes | Value |
 | --- | --- |
-| 4 | `CUI\x01` |
+| 4 | `CUI\x02` |
 | 4 | Creator namespace PID, little-endian |
 | 16 | Allocation ID |
 
@@ -492,37 +503,39 @@ The last two fields form an `AllocationReference`. A virtual shareable handle
 contains neither a socket path nor a unicast/multicast discriminator. The
 importing shim derives the creator's exact socket path from its namespace PID.
 
-The original creator must retain at least one generic allocation handle or local
-mapping while any exported descriptor or imported allocation remains usable.
-Releasing a handle after mapping it is supported because the mapping retains
-the creator allocation. Releasing every creator handle and mapping while keeping
-only a virtual shareable FD is outside this contract: the FD stores identity,
-not an independent ownership reference to the backing. Imported allocations
-also do not extend the creator's lifetime through remote leases.
+The original creator must retain a generic allocation handle or local mapping
+while new imports may be requested. Existing VMM imports retain their native
+backing after the creator releases its local references. Checkpoint can select
+one of those surviving holders, provided the original creator process remains
+in the captured group. This does not add remote leases or keep the creator's
+allocation record alive.
 
-This is a limitation relative to native CUDA shareable-FD ownership. Coordinator
-preflight detects missing creators referenced by tracked imports, but does not
-inventory arbitrary application FDs; it cannot detect every surviving FD-only
-token after the creator's allocation record has been removed.
+A virtual shareable FD stores identity, not an independent backing reference.
+FD-only lifetime and new imports after every creator handle and mapping has
+been released remain unsupported. Coordinator preflight requires the original
+creator process and a local handle or mapping in every recorded holder, but does
+not inventory arbitrary application-held FDs.
 
 On import, B sends A the allocation reference:
 
 ```yaml
-version: 1
+version: 2
 body:
   kind: export
+  namespace_pid: 41
   allocation:
     id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     creator_pid: 41
 ```
 
 A sends a duplicate of its cached FD using `SCM_RIGHTS` and replies with either
-`unicast_export` or `multicast_export`. Only the multicast reply includes
-`CUmulticastObjectProp`: CUDA exposes no equivalent query after multicast
-import. A unicast importer obtains the authoritative `CUmemAllocationProp`
-directly from CUDA after importing the FD. B records the resulting local
-handle. Re-exporting B's import still names A. Neither the virtual shareable
-handle nor the request contains a durable CUDA FD number.
+`unicast_export` with the exact full backing size or `multicast_export` with
+`CUmulticastObjectProp`, which CUDA cannot query after multicast import. A unicast
+importer obtains the authoritative `CUmemAllocationProp` directly from CUDA after
+importing the FD and records the local handle and full size. During restore, the
+request's `namespace_pid` names the selected holder, while the allocation's
+`creator_pid` remains unchanged. Re-exporting B's import still names A. Neither
+the virtual shareable handle nor the request contains a durable CUDA FD number.
 
 ```mermaid
 sequenceDiagram
@@ -554,7 +567,7 @@ Synchronous `cuMemAlloc_v2` is implemented with POSIX-capable VMM backing from a
 
 | Field | Bytes | Example value |
 | --- | --- | --- |
-| `version` | 8 | ASCII `CUIPC001` |
+| `version` | 8 | ASCII `CUIPC002` |
 | `creator_pid` | 4 | `41` |
 | `allocation` | 16 | `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` |
 | `reserved` | 20 | All zero |
@@ -606,10 +619,12 @@ a successful query with no current context is recorded as zero. Surviving
 VMM objects also clear a cached context to zero after its successful teardown.
 Failed cleanup and irreversible checkpoint mutations remain fail-stop.
 
-The export cache stores an FD and its reply metadata under each allocation ID.
-Multicast replies include the creation properties needed by importers to record
-and reconstruct the object. This copy lets peer service run without taking the
-CUDA state mutex, including while another thread holds that mutex during import.
+The export cache stores an FD, the complete allocation reference, and reply
+metadata under each allocation ID. It checks the full reference before serving.
+Unicast replies include the full backing size. Multicast replies include the
+creation properties needed by importers to record and reconstruct the object.
+This copy lets peer service run without taking the CUDA state mutex, including
+while another thread holds that mutex during import.
 
 Inspection projects live memblocks into serializable `Record` values. The
 checkpoint manifest maps each namespace PID directly to its records; live CUDA
@@ -695,8 +710,8 @@ an equal ordinal in another participant does not satisfy it.
 Every application CUDA call must have returned, outstanding GPU work must have
 completed, and the participant set must remain fixed before checkpoint entry.
 All sharing peers must be interposed and included in the checkpoint group;
-creators must remain available. Neither the counter nor checkpoint entry parks
-application threads or drains GPU work.
+original creator processes must remain included. Neither the counter nor
+checkpoint entry parks application threads or drains GPU work.
 
 One coordinator issues each phase once, in order. There are no lifecycle retries,
 rollback, or reconnect-and-resume semantics. A lost reply or timeout during
@@ -706,10 +721,11 @@ changes tracked state can be returned
 to the caller. Failure after a state-changing operation, or during destructive
 capture/restore, terminates the process.
 
-The process phase and stable ownership determine each phase's complete work.
+The process phase and checkpoint holder plan determine each phase's complete work.
 Allocations, mappings, multicast objects, and bindings carry no per-object
-checkpoint progress flags. Shared creator allocations own host-carrier contents;
-importers reconnect to their creator. A failed phase never resumes halfway.
+checkpoint progress flags. Selected holders save host-carrier contents;
+other holders reconnect to that restored backing. A failed phase never resumes
+halfway.
 
 ```mermaid
 sequenceDiagram
@@ -735,8 +751,8 @@ sequenceDiagram
     Coord->>Shims: PREPARE_MULTICAST
     Shims->>CUDA: Drop exports, unmap, unbind, release multicast
     Shims-->>Coord: All participants finished
-    Coord->>Shims: SAVE_ALLOCATIONS
-    Shims->>CUDA: Copy shared creator bytes to host carriers
+    Coord->>Shims: SAVE_ALLOCATIONS with selected holder plan
+    Shims->>CUDA: Copy each selected full backing to its holder's carrier
     Shims-->>Coord: All copies finished
     Coord->>Shims: PREPARE_UNICAST
     Shims->>CUDA: Drop exports, unmap and release shared allocations
@@ -756,12 +772,12 @@ The `BEGIN_CHECKPOINT` requests visit participants sequentially; destructive wor
 Capture removes the outer objects before their dependencies:
 
 1. `PREPARE_MULTICAST` removes multicast exports, mappings, bindings, and handles.
-2. `SAVE_ALLOCATIONS` saves the shared creator bytes while unicast allocations still exist.
+2. `SAVE_ALLOCATIONS` saves each selected holder's full backing while unicast allocations still exist.
 3. `PREPARE_UNICAST` drains peer export requests, removes shared mappings, and releases shared driver handles.
 
 Virtual allocation handles, including virtual multicast handles, remain in CPU memory for CRIU alongside mappings, allocation references, and carrier addresses. Private allocations remain native CUDA state. If a destructive phase or later checkpoint step fails, the source must be terminated rather than resumed with sharing removed.
 
-For the 2 MiB example, `SAVE_ALLOCATIONS` copies A's allocation into A's host arena. B saves no second copy. CRIU captures that arena as process memory; there is no separate `aaaaaaaa….bin` file. If A also has a never-shared allocation, that allocation stays on the native CUDA path instead of entering the arena.
+For the 2 MiB example, `SAVE_ALLOCATIONS` copies A's allocation into A's host arena. B saves no second copy. CRIU captures that arena as process memory; there is no separate `aaaaaaaa….bin` file. If A also has a never-shared allocation, that allocation stays on the native CUDA path instead of entering the arena. If A has released all its local references but B still holds the allocation, B saves the same full 2 MiB instead. A must remain in the captured process group, and the allocation still identifies A as its creator.
 
 ### Restore
 
@@ -782,45 +798,45 @@ sequenceDiagram
     participant CRIU as CRIU
     participant CUDA as CUDA driver
     participant Coord as CuInterpose coordinator
-    participant Creators as Creator shims
+    participant Owners as Owner shims
     participant Importers as Importer shims
     participant App as Parked application
     Agent->>Agent: Check format and library hashes; restore mounts and socket directory
     Agent->>CRIU: Restore process tree and host carriers
     Agent->>CUDA: Restore every cudaRestore.pids process, then unlock CUDA
     Agent->>Coord: Start restore in target namespaces
-    Coord->>Creators: INSPECT on each namespace-PID socket
+    Coord->>Owners: INSPECT on each namespace-PID socket
     Coord->>Importers: INSPECT on each namespace-PID socket
     Coord->>Coord: Match captured namespace PID set and validate state
-    Coord->>Creators: LOAD_ALLOCATIONS
-    Creators->>CUDA: Create shared backing and copy host bytes to GPU
-    Creators->>CUDA: Restore creator mappings, access and export FDs
-    Creators-->>Coord: Creator allocations ready
+    Coord->>Owners: LOAD_ALLOCATIONS
+    Owners->>CUDA: Create shared backing and copy host bytes to GPU
+    Owners->>CUDA: Restore owner mappings, access and export FDs
+    Owners-->>Coord: Shared allocations ready
     Note over Coord,Importers: Every participant completes LOAD_ALLOCATIONS
     Coord->>Importers: RESTORE_UNICAST
-    Importers->>Creators: Request fresh allocation FDs
-    Creators-->>Importers: Send FDs over peer UDS
+    Importers->>Owners: Request fresh allocation FDs
+    Owners-->>Importers: Send FDs over peer UDS
     Importers->>CUDA: Import, map original addresses and restore access
     Importers-->>Coord: Imports ready
     Note over Coord,Importers: Every participant completes RESTORE_UNICAST
-    Coord->>Creators: RESTORE_MULTICAST_CREATORS
-    Creators->>CUDA: Create multicast objects and cache export FDs
+    Coord->>Owners: RESTORE_MULTICAST_CREATORS
+    Owners->>CUDA: Create multicast objects and cache export FDs
     Note over Coord,Importers: Wait for all participants
     Coord->>Importers: RESTORE_MULTICAST_IMPORTERS
-    Importers->>Creators: Request fresh multicast FDs
+    Importers->>Owners: Request fresh multicast FDs
     Importers->>CUDA: Import multicast objects
     Note over Coord,Importers: Wait for all participants
-    Coord->>Creators: RESTORE_MULTICAST_DEVICES
+    Coord->>Owners: RESTORE_MULTICAST_DEVICES
     Coord->>Importers: RESTORE_MULTICAST_DEVICES
-    Creators->>CUDA: Attach recorded devices
+    Owners->>CUDA: Attach recorded devices
     Importers->>CUDA: Attach recorded devices
     Note over Coord,Importers: Wait for the complete device team
-    Coord->>Creators: RESTORE_MULTICAST_BINDINGS
+    Coord->>Owners: RESTORE_MULTICAST_BINDINGS
     Coord->>Importers: RESTORE_MULTICAST_BINDINGS
-    Creators->>CUDA: Bind members, map addresses and restore access
+    Owners->>CUDA: Bind members, map addresses and restore access
     Importers->>CUDA: Bind members, map addresses and restore access
     Note over Coord,Importers: Wait for all participants
-    Coord->>Creators: INSPECT
+    Coord->>Owners: INSPECT
     Coord->>Importers: INSPECT
     Coord->>Coord: Compare with captured records
     Coord-->>Agent: Restore succeeded and exit
@@ -828,9 +844,9 @@ sequenceDiagram
     App->>App: Resume
 ```
 
-The creator/importer labels describe roles, not disjoint sets of processes: one process can own one allocation and import another. Every recorded coordinator participant receives every lifecycle operation, even when it has no work in that operation.
+The owner/importer labels describe roles per resource, not disjoint sets of processes. For unicast backing, the owner is the selected checkpoint holder. For multicast objects, it is the original creator. Every recorded coordinator participant receives every lifecycle operation, even when it has no work in that operation.
 
-`LOAD_ALLOCATIONS` creates new backing, copies host-carrier bytes back, restores creator mappings and permissions, and makes new export FDs available. After sending its successful LOAD reply, the shim releases the carrier arena. `RESTORE_UNICAST` reconnects importers to those new allocations at their original virtual addresses. Neither operation recreates never-shared allocations.
+`LOAD_ALLOCATIONS` creates new backing, copies host-carrier bytes back, restores the selected holder's mappings and permissions, and makes new export FDs available. After sending its successful LOAD reply, the shim releases the carrier arena. `RESTORE_UNICAST` reconnects the other holders to those new allocations at their original virtual addresses. Neither operation recreates never-shared allocations.
 
 `RESTORE_MULTICAST` consists of four ordered wire operations:
 
@@ -855,14 +871,14 @@ Allocation-property and handle-count fields are omitted, and binary allocation
 IDs are shown as hex strings. Field names and nesting match the serialized data:
 
 ```yaml
-version: 1
+version: 2
 body:
   41:
     - allocation:
         allocation:
           id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
           creator_pid: 41
-        checkpoint_via_host_carrier: true
+        shared: true
         size: 2097152
     - mapping:
         allocation:
@@ -879,7 +895,7 @@ body:
         allocation:
           id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
           creator_pid: 41
-        checkpoint_via_host_carrier: false
+        shared: true
         size: 2097152
     - mapping:
         allocation:
@@ -895,10 +911,12 @@ body:
 
 The outer namespace-PID key identifies the process. The repeated allocation reference
 identifies both the allocation and its creator without a separate `creator:
-true/false` field. `checkpoint_via_host_carrier: true` means A saves and restores the device bytes
-through its CRIU-captured host carrier. Importers do not duplicate that copy;
-private allocations use native CUDA checkpointing. No allocation bytes appear
-in this metadata file. `offset: 0` maps from the start of the allocation. In the
+true/false` field. `shared: true` is recorded in every holder. The coordinator
+selects one checkpoint holder from those records. Here A still holds the
+allocation, so A saves and restores its bytes through its CRIU-captured carrier.
+If only B retained the allocation, B would save it with the same creator PID and
+full size. Private allocations use native CUDA checkpointing. No allocation bytes
+appear in this metadata file. `offset: 0` maps from the start of the allocation. In the
 access records, location type `1` means a CUDA device and flags `3` mean
 read/write: A grants GPU 0 access, and B grants GPU 1 access. Addresses are
 shown in hex for readability; they are encoded as integers.
@@ -967,7 +985,7 @@ are still checked and native CUDA operations remain required. Native checkpoints
 omit `cuinterpose`. Earlier draft checkpoints containing `cuinterpose: true` or
 missing `cuinterpose.pids` are rejected with an instruction to recreate them.
 
-The private frontend/backend ABI is version **1**. The MessagePack protocol and state envelope, virtual shareable handle, and virtual IPC memory handle are version **1**. Older draft artifacts, including shim PageBroker artifacts, are not migrated or silently interpreted as host-carrier checkpoints.
+The private frontend/backend ABI is version **1**. The MessagePack protocol and state envelope, virtual shareable handle, and virtual IPC memory handle are version **2**. Older draft artifacts, including shim PageBroker artifacts, are not migrated or silently interpreted as host-carrier checkpoints.
 
 The shim libraries are part of the checkpointed process. Their files must be
 available at the original paths, and the coordinator must understand their
@@ -1049,11 +1067,11 @@ layers and are not all independently buildable backends.
 
 | Layer | Coverage and expected outcome |
 | --- | --- |
-| Rust unit/protocol and C/Rust ABI checks | Validate framing, versions, handle layouts, topology, ownership, lifecycle ordering, and ABI size/offset compatibility. |
+| Rust unit/protocol and C/Rust ABI checks | Validate framing, versions, handle layouts, topology, ownership, full backing metadata despite partial mapping records, lifecycle ordering, and ABI size/offset compatibility. |
 | Real-driver frontend probes | Exercise CUDA forwarding and symbol lookup, concurrent initialization, relative preload followed by chdir, missing artifacts, ABI admission, and fork/exec ownership against the installed NVIDIA driver/runtime and the matching Rust core. Require two GPUs; no fake CUDA provider is used. |
 | Scripted coordinator exchanges | Verify read-only inspection, barriers, preflight refusal, process-local multicast ordinals, transfer-size checks, lost replies without retry, and failed state publication or missing/corrupt restore state. |
 | Go and Helm integration | Verify SnapshotJob delivery and explicit-command validation, unchanged args/environment, collision rejection, configuration retry and adoption, mapped-library identity, native/coordinator PID subsets including empty runtime sets, mismatch refusal before CRIU, preflight/source-termination boundaries, forked-child cancellation, inherited descriptors, restore mounts, and existing jobfile behavior. |
-| Physical-GPU suite | Compare native and interposed allocations, handle aliases, and malloc behavior; verify shared/private bytes, importer reconstruction, multicast collectives/graph replay, foreign-import refusal, context teardown, and mixed DEVICE/HOST_NUMA reconstruction. Require at least two GPUs and fail on missing prerequisites for selected tests. |
+| Physical-GPU suite | Compare native and interposed allocations, handle aliases, and malloc behavior; verify shared/private bytes, handle-only and full mapping-only importers after creator references are released, multicast collectives/graph replay, foreign-import refusal, context teardown, and mixed DEVICE/HOST_NUMA reconstruction. Require at least two GPUs and fail on missing prerequisites for selected tests. |
 | Cross-node Snapshot E2E | Capture and restore on compatible distinct nodes, then verify workload inference and sharing. The native GPU suite alone does not cover Go namespace orchestration. [#294](https://github.com/ai-dynamo/snapshot/issues/294) tracks opt-in 8-GPU cross-node coverage. |
 
 Run `make check`, `make test`, `make build`, and
@@ -1071,7 +1089,7 @@ Before treating it as qualified, record passing assembled-artifact checks,
 physical-GPU tests without skips, and full cross-node Snapshot capture/restore
 with post-restore workload verification. Document the tested GPU, driver,
 workload, and artifact versions and retain the explicit operating limits above.
-Protocol compatibility beyond the matching version-1 artifacts is not promised.
+Protocol compatibility beyond matching artifacts is not promised.
 
 ## Implementation History
 

@@ -8,9 +8,9 @@ SPDX-License-Identifier: Apache-2.0
 CuInterpose adds opt-in checkpoint and restore for CUDA memory shared between
 processes on one node: POSIX-exported VMM, supported synchronous memory IPC, and
 multicast objects. It preserves application virtual addresses and sharing by
-saving shared creator bytes in host memory captured by CRIU, then reconstructing
-shared resources after native CUDA restore. Private allocations stay on the
-native CUDA checkpoint path.
+saving one copy of shared backing in host memory captured by CRIU, then
+reconstructing shared resources after native CUDA restore. Private allocations
+stay on the native CUDA checkpoint path.
 
 See the [CUDA shared-memory guide](../guides/cuda-shared-memory.md) for
 ordinary Pod and SnapshotJob activation, engine recipes, matching agent images,
@@ -40,20 +40,27 @@ matching shim bundle or recreate the checkpoint after a shim upgrade. Earlier
 draft checkpoints containing `cuinterpose: true` or missing `cuinterpose.pids`
 must be recreated.
 
-Creators must retain a generic allocation handle or local mapping while their
-exported descriptors or imported allocations remain usable; a virtual shareable
-FD alone does not retain backing. Shared pinned VMM allocations at DEVICE and
-HOST_NUMA locations use the creator's host carrier. Device bytes use asynchronous
-CUDA copies; HOST_NUMA bytes use CPU copies through a temporary host-accessible
-VMM alias. Restore preserves the allocation's NUMA placement separately from
-the CUDA device used for an operational context.
+Each shared VMM allocation keeps its original creator PID and allocation ID.
+For checkpoint, the coordinator selects one existing holder to save and recreate
+its backing: the creator if it retains a handle or mapping, otherwise the holder
+with the lowest namespace PID. The original creator process must still belong
+to the captured group. Existing imports may outlive the creator's local backing
+references, but new imports still require those references. A virtual shareable
+FD alone does not retain backing.
 
-Each process's carrier holds the full backing of every shared allocation it
-created. Its size is the sum of those backing sizes, including unused regions.
-Importers do not duplicate the creator's saved copy. There is no fixed carrier
-cap. Budget additional host RAM during capture and restore, plus CRIU image I/O
-and storage for the carrier contents. Restore must recover these host pages and
-copy their contents into the recreated allocations before serving can resume.
+Shared pinned VMM allocations at DEVICE and HOST_NUMA locations use the selected
+holder's host carrier. Device bytes use asynchronous CUDA copies; HOST_NUMA bytes
+use CPU copies through a temporary host-accessible VMM alias. Restore preserves
+the allocation's NUMA placement separately from the CUDA device used for an
+operational context.
+
+Each process's carrier holds the exact full backing of every shared allocation
+assigned to it, including regions absent from its application mappings. Its size
+is the sum of those backing sizes. Other holders reconnect to that one restored
+copy. There is no fixed carrier cap. Budget additional host RAM during capture
+and restore, plus CRIU image I/O and storage for the carrier contents. Restore
+must recover these host pages and copy their contents into the recreated
+allocations before serving can resume.
 Larger carriers therefore add work to both CRIU restore and allocation replay.
 
 In a measured vLLM GLM 5.2 capture with the KV cache asleep, the carrier held
