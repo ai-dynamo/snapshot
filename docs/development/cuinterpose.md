@@ -12,18 +12,22 @@ saving shared creator bytes in host memory captured by CRIU, then reconstructing
 shared resources after native CUDA restore. Private allocations stay on the
 native CUDA checkpoint path.
 
-For a SnapshotJob, annotate its source Pod template and set the target
+For a SnapshotJob, put this fragment under `spec.podTemplate` and set the target
 container's `command` explicitly:
 
 ```yaml
 metadata:
   annotations:
-    nvidia.com/snapshot-multigpu-enabled: "true"
+    nvidia.com/cuda-shared-memory-support: "enabled"
 spec:
   containers:
     - name: workload
       command: ["python3", "/app/main.py"]
 ```
+
+The annotation accepts `enabled` or `disabled` after trimming whitespace. Values
+are case-sensitive, and other values are rejected. Omit the annotation or set it
+to `disabled` to leave the source workload on the native CUDA checkpoint path.
 
 The operator installs both libraries and a static launcher. It prefixes the
 command with the launcher, leaving `args` and `env` unchanged. At startup the

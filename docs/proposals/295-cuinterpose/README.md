@@ -152,13 +152,12 @@ There are no new CRDs or CRD fields. The workload Pod template opts in with:
 ```yaml
 metadata:
   annotations:
-    nvidia.com/snapshot-multigpu-enabled: "true"
+    nvidia.com/cuda-shared-memory-support: "enabled"
 ```
 
-The annotation keeps its trimmed `strconv.ParseBool` spellings: `1`, `t`, `T`,
-`true`, `TRUE`, and `True` enable it; `0`, `f`, `F`, `false`, `FALSE`, and `False`
-disable it. Absence disables the request; an invalid present value is a source
-validation error.
+The value is trimmed and case-sensitive: `enabled` opts in and `disabled` opts
+out. Absence disables the request. Other present values are source validation
+errors.
 
 Automatic delivery applies to SnapshotJob sources and their single target
 container. Immediately before creating the source Job, the operator copies

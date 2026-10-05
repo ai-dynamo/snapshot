@@ -6,7 +6,6 @@ package controller
 import (
 	"context"
 	"errors"
-	"strconv"
 	"testing"
 	"time"
 
@@ -791,10 +790,11 @@ func TestSnapshotJobReconcileSkipsTerminalAndDeleted(t *testing.T) {
 }
 
 func TestSnapshotJobReconcileCuInterpose(t *testing.T) {
-	for _, enabled := range []bool{false, true} {
-		t.Run(strconv.FormatBool(enabled), func(t *testing.T) {
+	for _, value := range []string{"disabled", "enabled"} {
+		t.Run(value, func(t *testing.T) {
+			enabled := value == "enabled"
 			sj := minimalSnapshotJob()
-			sj.Spec.PodTemplate.Annotations = map[string]string{podcontract.CuInterposeAnnotation: strconv.FormatBool(enabled)}
+			sj.Spec.PodTemplate.Annotations = map[string]string{podcontract.CuInterposeAnnotation: value}
 			worker := &sj.Spec.PodTemplate.Spec.Containers[0]
 			worker.Command = []string{"python3", "-m", "worker"}
 			worker.Resources.Limits = corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("2")}
@@ -829,7 +829,7 @@ func TestSnapshotJobReconcileCuInterpose(t *testing.T) {
 func TestSnapshotJobCuInterposeConfigurationRecovery(t *testing.T) {
 	ctx := context.Background()
 	sj := minimalSnapshotJob()
-	sj.Spec.PodTemplate.Annotations = map[string]string{podcontract.CuInterposeAnnotation: "true"}
+	sj.Spec.PodTemplate.Annotations = map[string]string{podcontract.CuInterposeAnnotation: "enabled"}
 	sj.Spec.PodTemplate.Spec.Containers[0].Command = []string{"worker"}
 	r := makeSnapshotJobReconciler(snapshotJobReconcilerScheme(), sj)
 
@@ -875,10 +875,10 @@ func TestSnapshotJobCuInterposeInvalidSource(t *testing.T) {
 		command    []string
 		want       string
 	}{
-		{name: "missing command", annotation: "true", want: "requires container.command"},
-		{name: "empty command", annotation: "true", command: []string{""}, want: "requires container.command"},
-		{name: "invalid annotation", annotation: "enabled", command: []string{"worker"}, want: "invalid boolean"},
-		{name: "empty annotation", annotation: "", command: []string{"worker"}, want: "invalid boolean"},
+		{name: "missing command", annotation: "enabled", want: "requires container.command"},
+		{name: "empty command", annotation: "enabled", command: []string{""}, want: "requires container.command"},
+		{name: "invalid annotation", annotation: "invalid", command: []string{"worker"}, want: "expected enabled or disabled"},
+		{name: "empty annotation", annotation: "", command: []string{"worker"}, want: "expected enabled or disabled"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sj := minimalSnapshotJob()

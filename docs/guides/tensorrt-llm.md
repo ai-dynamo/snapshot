@@ -69,7 +69,7 @@ These manifests use native CUDA checkpointing. If you enable
 `cuinterpose-launch` at `/tmp/snapshot-cuda` before the workload starts. Prefix
 the existing Python command with
 `/tmp/snapshot-cuda/cuinterpose-launch --library /tmp/snapshot-cuda/libcuinterpose.so --` and set
-the source Pod annotation `nvidia.com/snapshot-multigpu-enabled: "true"`. The launcher
+the source Pod annotation `nvidia.com/cuda-shared-memory-support: "enabled"`. The launcher
 preserves the runtime-resolved environment, including existing preloads.
 Adding the annotation to a running Pod cannot activate the shim.
 
