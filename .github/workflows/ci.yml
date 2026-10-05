@@ -8,6 +8,8 @@ on:
     branches:
       - main
       - 'release/*'
+      # Approved stack PRs target feature branches before they reach main.
+      - 'pull-request/[0-9]+'
   pull_request:
     branches:
       - main
@@ -24,11 +26,23 @@ jobs:
   cuinterpose:
     name: cuinterpose CPU checks
     runs-on: ubuntu-latest
+    env:
+      SNAPSHOT_CUINTERPOSE_TEST_IMAGE: snapshot-cuinterpose-test:ci
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: make -C agent cuinterpose-test
+      - run: make -C agent cuinterpose-test TEST_IMAGE="$SNAPSHOT_CUINTERPOSE_TEST_IMAGE"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.1"
+          cache: true
+          cache-dependency-path: |
+            **/go.sum
+            go.work.sum
+      - name: Check generated installer against the image payload
+        working-directory: operator
+        run: go test ./internal/controller -run '^TestCuInterposeInstallerImage$' -count=1 -v
 
   test:
     runs-on: ubuntu-latest

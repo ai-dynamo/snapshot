@@ -17,7 +17,7 @@ build:
 
 test:
 	docker buildx build --platform linux/amd64 --target cuinterpose-test \
-		-f ../../Dockerfile ../..
+		$(if $(TEST_IMAGE),--load --tag "$(TEST_IMAGE)") -f ../../Dockerfile ../..
 
 frontend:
 	@cd rust && expected=$$(cargo tree --locked -p cbindgen --depth 0 --prefix none --format '{p}') && \
@@ -36,6 +36,7 @@ frontend:
 native: frontend
 	cd rust && cargo build --locked --release --target x86_64-unknown-linux-gnu -p cuinterpose-core
 	install -m 0644 rust/target/x86_64-unknown-linux-gnu/release/libcuinterpose_core.so build/libcuinterpose_core.so
+	sh check-glibc.sh build/libcuinterpose.so build/libcuinterpose_core.so
 	# The launcher embeds hashes of these finished libraries, so build it after install.
 	cd rust && cargo build --locked --release --target x86_64-unknown-linux-musl -p cuinterpose-coordinator -p cuinterpose-launch
 	install -m 0755 rust/target/x86_64-unknown-linux-musl/release/cuinterpose-coordinator build/cuinterpose-coordinator
