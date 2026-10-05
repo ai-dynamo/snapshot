@@ -94,6 +94,7 @@ async def main() -> None:
     engine = AsyncLLM.from_engine_args(
         AsyncEngineArgs(
             model=MODEL,
+            tensor_parallel_size=int(os.environ.get("SNAPSHOT_TENSOR_PARALLEL_SIZE", "1")),
             enable_sleep_mode=True,
             max_model_len=MAX_MODEL_LEN,
             gpu_memory_utilization=GPU_MEMORY_UTILIZATION,

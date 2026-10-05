@@ -22,8 +22,6 @@ def parse_args() -> argparse.Namespace:
 def configure_capture_environment() -> None:
     os.environ.update(
         {
-            "NCCL_CUMEM_ENABLE": "0",
-            "NCCL_NVLS_ENABLE": "0",
             "NCCL_IB_DISABLE": "1",
             "NCCL_RAS_ENABLE": "0",
             "TORCH_NCCL_ENABLE_MONITORING": "0",
@@ -40,7 +38,7 @@ def create_engine(snapshot_mode: bool) -> Any:
         model_path=os.environ["SNAPSHOT_MODEL"],
         context_length=int(os.environ.get("SGLANG_CONTEXT_LENGTH", "10240")),
         page_size=int(os.environ.get("SGLANG_PAGE_SIZE", "16")),
-        tp_size=1,
+        tp_size=int(os.environ.get("SNAPSHOT_TENSOR_PARALLEL_SIZE", "1")),
         trust_remote_code=False,
         enable_memory_saver=snapshot_mode,
         enable_weights_cpu_backup=snapshot_mode,
