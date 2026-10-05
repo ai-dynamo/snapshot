@@ -72,30 +72,55 @@ pub fn decode(fd: i32) -> protocol::Result<Option<AllocationReference>> {
     Ok(Some(protocol::decode_virtual_shareable_handle(&bytes)?))
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum ExportMetadata {
+    Unicast { size: usize },
+    Multicast(CUmulticastObjectProp),
+}
+
 pub fn request_export(
     allocation: AllocationReference,
-) -> protocol::Result<(OwnedFd, Option<CUmulticastObjectProp>)> {
+    serving_pid: NamespacePid,
+) -> protocol::Result<(OwnedFd, ExportMetadata)> {
+    if serving_pid == 0 {
+        return Err(Error::Invalid("invalid export namespace PID"));
+    }
     let control_dir =
         runtime::control_dir().map_err(|_| Error::Invalid("cuinterpose state is unavailable"))?;
     let socket = protocol::connect(
-        &protocol::socket_path(control_dir, allocation.creator_pid),
+        &protocol::socket_path(control_dir, serving_pid),
         protocol::timeout(None),
     )?;
     let timeout = Some(protocol::timeout(None));
     socket.set_read_timeout(timeout)?;
     socket.set_write_timeout(timeout)?;
-    protocol::send(&socket, &Request::Export { allocation }, None)?;
+    protocol::send(
+        &socket,
+        &Request::Export {
+            namespace_pid: serving_pid,
+            allocation,
+        },
+        None,
+    )?;
     let (response, fd): (Response, _) = protocol::receive(&socket)?;
-    if response.namespace_pid != allocation.creator_pid {
-        return Err(Error::Invalid("wrong creator namespace PID"));
+    if response.namespace_pid != serving_pid {
+        return Err(Error::Invalid("wrong export namespace PID"));
     }
     let reply = response.result.map_err(Error::Remote)?;
-    let descriptor = fd.ok_or(Error::Invalid("creator sent no descriptor"))?;
+    let descriptor = fd.ok_or(Error::Invalid("exporter sent no descriptor"))?;
+    Ok((descriptor, decode_export_metadata(reply)?))
+}
+
+fn decode_export_metadata(reply: Reply) -> protocol::Result<ExportMetadata> {
     match reply {
-        Reply::UnicastExport => Ok((descriptor, None)),
-        Reply::MulticastExport { properties } => {
-            Ok((descriptor, Some(decode_multicast_properties(properties)?)))
-        }
+        Reply::UnicastExport { size } if size != 0 => Ok(ExportMetadata::Unicast {
+            size: size
+                .try_into()
+                .map_err(|_| Error::Invalid("unicast size exceeds host size"))?,
+        }),
+        Reply::MulticastExport { properties } => Ok(ExportMetadata::Multicast(
+            decode_multicast_properties(properties)?,
+        )),
         _ => Err(Error::Invalid("invalid export response")),
     }
 }
@@ -127,9 +152,9 @@ fn decode_multicast_properties(
     })
 }
 
-// Cache multicast creation properties with the exported FD because importers need them
-// during restore and sending the reply must not require CUDA state access.
-pub(crate) type Exports = BTreeMap<AllocationId, (OwnedFd, Reply)>;
+// Cache complete backing metadata with the FD so an importer can preserve it after
+// the creator drops its local references. Serving exports never locks CUDA state.
+pub(crate) type Exports = BTreeMap<AllocationId, (AllocationReference, OwnedFd, Reply)>;
 
 #[derive(Default)]
 pub struct ExportCache {
@@ -137,22 +162,23 @@ pub struct ExportCache {
 }
 
 impl ExportCache {
-    pub fn contains(&self, id: &AllocationId) -> Result<bool> {
+    pub fn contains(&self, reference: &AllocationReference) -> Result<bool> {
         Ok(self
             .exports
             .lock()
             .map_err(|_| CUDA_ERROR_UNKNOWN)?
-            .contains_key(id))
+            .get(&reference.id)
+            .is_some_and(|(known, _, _)| known == reference))
     }
 
     pub fn insert(
         &self,
-        id: AllocationId,
+        reference: AllocationReference,
         descriptor: OwnedFd,
-        multicast: Option<CUmulticastObjectProp>,
+        metadata: ExportMetadata,
     ) -> Result<()> {
-        let reply = match multicast {
-            Some(properties) => Reply::MulticastExport {
+        let reply = match metadata {
+            ExportMetadata::Multicast(properties) => Reply::MulticastExport {
                 properties: protocol::MulticastProperties {
                     devices: properties.numDevices,
                     size: properties.size as u64,
@@ -160,12 +186,21 @@ impl ExportCache {
                     flags: properties.flags,
                 },
             },
-            None => Reply::UnicastExport,
+            ExportMetadata::Unicast { size } => {
+                if size == 0 {
+                    return Err(CUDA_ERROR_INVALID_VALUE.into());
+                }
+                Reply::UnicastExport { size: size as u64 }
+            }
         };
-        self.exports
-            .lock()
-            .map_err(|_| CUDA_ERROR_UNKNOWN)?
-            .insert(id, (descriptor, reply));
+        let mut exports = self.exports.lock().map_err(|_| CUDA_ERROR_UNKNOWN)?;
+        if exports
+            .get(&reference.id)
+            .is_some_and(|(known, _, _)| *known != reference)
+        {
+            return Err(CUDA_ERROR_INVALID_HANDLE.into());
+        }
+        exports.insert(reference.id, (reference, descriptor, reply));
         Ok(())
     }
 
@@ -186,15 +221,15 @@ impl ExportCache {
         &self,
         socket: &UnixStream,
         namespace_pid: NamespacePid,
-        id: &AllocationId,
+        reference: &AllocationReference,
     ) -> protocol::Result<()> {
         let exports = self
             .exports
             .lock()
             .map_err(|_| protocol::Error::Invalid("export cache poisoned"))?;
-        let (result, descriptor) = match exports.get(id) {
-            Some((fd, reply)) => (Ok(reply.clone()), Some(fd)),
-            None => (Err("creator resource is unavailable".into()), None),
+        let (result, descriptor) = match exports.get(&reference.id) {
+            Some((known, fd, reply)) if known == reference => (Ok(reply.clone()), Some(fd)),
+            _ => (Err("allocation resource is unavailable".into()), None),
         };
         protocol::send(
             socket,
@@ -217,10 +252,15 @@ impl Memblock {
             allocation.context = context()?;
         }
         let reference = self.reference();
-        if reference.creator_pid == namespace_pid && !export_cache()?.contains(&reference.id)? {
+        if reference.creator_pid == namespace_pid && !export_cache()?.contains(&reference)? {
             let fd = crate::driver::export_posix(self.driver_handle()?)?;
-            let properties = self.multicast().map(|object| object.properties);
-            export_cache()?.insert(reference.id, fd, properties)?;
+            let metadata = match self {
+                Self::Unicast(allocation) => ExportMetadata::Unicast {
+                    size: allocation.size,
+                },
+                Self::Multicast(object) => ExportMetadata::Multicast(object.properties),
+            };
+            export_cache()?.insert(reference, fd, metadata)?;
         }
         match self {
             Self::Unicast(allocation) => {
@@ -247,9 +287,10 @@ pub(crate) fn import_reference(
         match memblock {
             Memblock::Unicast(allocation) => {
                 if allocation.driver.is_none() {
-                    let (raw, properties) =
-                        request_export(reference).map_err(CoreError::PeerExport)?;
-                    if properties.is_some() {
+                    let (raw, metadata) = request_export(reference, reference.creator_pid)
+                        .map_err(CoreError::PeerExport)?;
+                    if !matches!(metadata, ExportMetadata::Unicast { size } if size == allocation.size)
+                    {
                         return Err(CoreError::from(CUDA_ERROR_INVALID_HANDLE));
                     }
                     allocation.driver = Some(crate::driver::import_posix(raw.as_fd())?);
@@ -270,10 +311,14 @@ pub(crate) fn import_reference(
     // The EXPORT service uses the export cache without locking ProcessState, so a
     // request within this process can complete while its caller holds the allocation
     // metadata lock.
-    let (raw, multicast_properties) = request_export(reference).map_err(CoreError::PeerExport)?;
-    if let Some(properties) = multicast_properties {
-        return super::multicast::import(state, reference, raw, properties);
-    }
+    let (raw, metadata) =
+        request_export(reference, reference.creator_pid).map_err(CoreError::PeerExport)?;
+    let size = match metadata {
+        ExportMetadata::Unicast { size } => size,
+        ExportMetadata::Multicast(properties) => {
+            return super::multicast::import(state, reference, raw, properties);
+        }
+    };
     let context = context()?;
     let driver = crate::driver::import_posix(raw.as_fd())?;
     let driver = runtime::must_complete(VirtualAllocationHandle::from_driver(driver));
@@ -295,9 +340,7 @@ pub(crate) fn import_reference(
         reference,
         refcounts: Default::default(),
         driver: Some(driver),
-        // The creator owns the full backing extent. This importer knows only its
-        // mappings.
-        size: 0,
+        size,
         properties,
         shared: true,
         context,
@@ -372,6 +415,69 @@ mod codec_tests {
     }
 
     #[test]
+    fn unicast_exports_require_a_complete_nonzero_extent() {
+        assert!(matches!(
+            decode_export_metadata(Reply::UnicastExport { size: 8192 }).unwrap(),
+            ExportMetadata::Unicast { size: 8192 }
+        ));
+        assert!(decode_export_metadata(Reply::UnicastExport { size: 0 }).is_err());
+    }
+
+    #[test]
+    fn export_cache_checks_identity_and_serves_full_size_from_another_pid() {
+        let cache = ExportCache::default();
+        let reference = AllocationReference {
+            creator_pid: 1,
+            id: [4; 16],
+        };
+        cache
+            .insert(
+                reference,
+                handle_file(b"backing").into(),
+                ExportMetadata::Unicast { size: 8192 },
+            )
+            .unwrap();
+        let other_creator = AllocationReference {
+            creator_pid: 3,
+            ..reference
+        };
+        assert!(cache.contains(&reference).unwrap());
+        assert!(!cache.contains(&other_creator).unwrap());
+        assert!(
+            cache
+                .insert(
+                    other_creator,
+                    handle_file(b"wrong backing").into(),
+                    ExportMetadata::Unicast { size: 4096 },
+                )
+                .is_err()
+        );
+        let (sender, receiver) = UnixStream::pair().unwrap();
+        cache.send(&sender, 2, &other_creator).unwrap();
+        let (response, fd): (Response, _) = protocol::receive(&receiver).unwrap();
+        assert!(response.result.is_err());
+        assert!(fd.is_none());
+
+        cache.send(&sender, 2, &reference).unwrap();
+        let (response, fd): (Response, _) = protocol::receive(&receiver).unwrap();
+        assert_eq!(response.namespace_pid, 2);
+        assert!(matches!(
+            response.result.unwrap(),
+            Reply::UnicastExport { size: 8192 }
+        ));
+        let file = File::from(fd.unwrap());
+        let mut contents = [0; 7];
+        file.read_exact_at(&mut contents, 0).unwrap();
+        assert_eq!(&contents, b"backing");
+
+        cache.remove(&reference.id).unwrap();
+        cache.send(&sender, 2, &reference).unwrap();
+        let (response, fd): (Response, _) = protocol::receive(&receiver).unwrap();
+        assert!(response.result.is_err());
+        assert!(fd.is_none());
+    }
+
+    #[test]
     fn multicast_exports_require_supported_properties() {
         for (devices, size, handle_types, flags, accepted) in [
             (2, 4096, 1, 0, true),
@@ -407,11 +513,14 @@ mod cache_tests {
     #[test]
     fn exports_send_descriptors_and_multicast_metadata() {
         let cache = ExportCache::default();
-        let id = [1; 16];
+        let reference = AllocationReference {
+            creator_pid: 7,
+            id: [1; 16],
+        };
         let (socket, peer) = UnixStream::pair().unwrap();
-        for multicast in [
-            None,
-            Some(CUmulticastObjectProp {
+        for metadata in [
+            ExportMetadata::Unicast { size: 8192 },
+            ExportMetadata::Multicast(CUmulticastObjectProp {
                 numDevices: 2,
                 size: 4096,
                 handleTypes: 1,
@@ -419,13 +528,13 @@ mod cache_tests {
             }),
         ] {
             cache
-                .insert(id, File::open("/dev/zero").unwrap().into(), multicast)
+                .insert(reference, File::open("/dev/zero").unwrap().into(), metadata)
                 .unwrap();
-            cache.send(&socket, 7, &id).unwrap();
+            cache.send(&socket, 7, &reference).unwrap();
             let (reply, fd): (Response, _) = protocol::receive(&peer).unwrap();
             assert_eq!(reply.namespace_pid, 7);
-            match (reply.result.unwrap(), multicast) {
-                (Reply::UnicastExport, None) => {}
+            match (reply.result.unwrap(), metadata) {
+                (Reply::UnicastExport { size: 8192 }, ExportMetadata::Unicast { size: 8192 }) => {}
                 (
                     Reply::MulticastExport {
                         properties:
@@ -436,7 +545,7 @@ mod cache_tests {
                                 flags: 0,
                             },
                     },
-                    Some(_),
+                    ExportMetadata::Multicast(_),
                 ) => {}
                 unexpected => panic!("wrong export reply: {unexpected:?}"),
             }
@@ -444,8 +553,8 @@ mod cache_tests {
             File::from(fd.unwrap()).read_exact(&mut byte).unwrap();
             assert_eq!(byte, [0]);
         }
-        cache.remove(&id).unwrap();
-        cache.send(&socket, 7, &id).unwrap();
+        cache.remove(&reference.id).unwrap();
+        cache.send(&socket, 7, &reference).unwrap();
         let (reply, fd): (Response, _) = protocol::receive(&peer).unwrap();
         assert!(reply.result.is_err());
         assert!(fd.is_none());
@@ -455,9 +564,16 @@ mod cache_tests {
     fn teardown_and_replacement_wait_for_socket_send() {
         for replace in [false, true] {
             let cache = Arc::new(ExportCache::default());
-            let id = [2; 16];
+            let reference = AllocationReference {
+                creator_pid: 7,
+                id: [2; 16],
+            };
             cache
-                .insert(id, File::open("/dev/zero").unwrap().into(), None)
+                .insert(
+                    reference,
+                    File::open("/dev/zero").unwrap().into(),
+                    ExportMetadata::Unicast { size: 8192 },
+                )
                 .unwrap();
             let (mut socket, mut peer) = UnixStream::pair().unwrap();
             socket.set_nonblocking(true).unwrap();
@@ -475,7 +591,8 @@ mod cache_tests {
                 .unwrap();
             peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
             let sender_cache = Arc::clone(&cache);
-            let sender = std::thread::spawn(move || sender_cache.send(&socket, 7, &id).unwrap());
+            let sender =
+                std::thread::spawn(move || sender_cache.send(&socket, 7, &reference).unwrap());
             let deadline = Instant::now() + Duration::from_secs(5);
             while cache.exports.try_lock().is_ok() {
                 assert!(Instant::now() < deadline);
@@ -486,7 +603,11 @@ mod cache_tests {
             let mutation = std::thread::spawn(move || {
                 if replace {
                     mutation_cache
-                        .insert(id, File::open("/dev/null").unwrap().into(), None)
+                        .insert(
+                            reference,
+                            File::open("/dev/null").unwrap().into(),
+                            ExportMetadata::Unicast { size: 8192 },
+                        )
                         .unwrap();
                 } else {
                     mutation_cache.clear().unwrap();
@@ -496,28 +617,38 @@ mod cache_tests {
             assert!(completion.recv_timeout(Duration::from_millis(50)).is_err());
             peer.read_exact(&mut vec![0; filled]).unwrap();
             let (reply, fd): (Response, _) = protocol::receive(&peer).unwrap();
-            assert!(matches!(reply.result, Ok(Reply::UnicastExport)));
+            assert!(matches!(
+                reply.result,
+                Ok(Reply::UnicastExport { size: 8192 })
+            ));
             let mut byte = [1];
             File::from(fd.unwrap()).read_exact(&mut byte).unwrap();
             assert_eq!(byte, [0]);
             sender.join().unwrap();
             completion.recv_timeout(Duration::from_secs(5)).unwrap();
             mutation.join().unwrap();
-            assert_eq!(cache.contains(&id).unwrap(), replace);
+            assert_eq!(cache.contains(&reference).unwrap(), replace);
         }
     }
 
     #[test]
     fn failed_send_does_not_block_teardown() {
         let cache = ExportCache::default();
-        let id = [3; 16];
+        let reference = AllocationReference {
+            creator_pid: 7,
+            id: [3; 16],
+        };
         cache
-            .insert(id, File::open("/dev/null").unwrap().into(), None)
+            .insert(
+                reference,
+                File::open("/dev/null").unwrap().into(),
+                ExportMetadata::Unicast { size: 8192 },
+            )
             .unwrap();
         let (socket, peer) = UnixStream::pair().unwrap();
         drop(peer);
-        assert!(cache.send(&socket, 7, &id).is_err());
+        assert!(cache.send(&socket, 7, &reference).is_err());
         cache.clear().unwrap();
-        assert!(!cache.contains(&id).unwrap());
+        assert!(!cache.contains(&reference).unwrap());
     }
 }
