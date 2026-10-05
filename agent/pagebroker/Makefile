@@ -11,7 +11,7 @@ DAEMON_SOURCES := $(BROKER_SOURCES) daemon.cpp main.cpp
 TEST_SOURCES := tests/storage_contract_test.cpp tests/daemon_test.cpp utils/tests/event_loop_test.cpp
 MODEL_STREAMER_RECOVERY_TEST_SOURCES := file_descriptor.cpp transfer/filesystem/filesystem_storage.cpp transfer/engine/model_streamer/model_streamer_restore.cpp transfer/engine/model_streamer/model_streamer_transfer_engine.cpp transfer/engine/model_streamer/tests/model_streamer_transfer_engine_test.cpp transfer/engine/transfer_engine.cpp utils/event_loop.cpp
 
-MODEL_STREAMER_SESSION_TEST_SOURCES := file_descriptor.cpp transfer/model_streamer_restore.cpp transfer/model_streamer_session_test.cpp utils/event_loop.cpp
+MODEL_STREAMER_SESSION_TEST_SOURCES := file_descriptor.cpp transfer/engine/model_streamer/model_streamer_restore.cpp transfer/engine/model_streamer/tests/model_streamer_session_test.cpp utils/event_loop.cpp
 
 .PHONY: daemon generate test
 
