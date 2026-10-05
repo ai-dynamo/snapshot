@@ -24,12 +24,14 @@ def import_cleanup_client(tools, tmp_path_factory):
     assert spec is not None, "requires the CUDA 13 headers installed with torch"
     toolkit = Path(next(iter(spec.submodule_search_locations)))
     output = tmp_path_factory.mktemp("import-cleanup") / "import-cleanup"
-    subprocess.run([
+    result = subprocess.run([
         "cc", "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror",
         "-I", str(toolkit / "include"), "-I", str(tools.interposer.parent),
         str(Path(__file__).with_name("fixtures") / "import_cleanup.c"),
         "-ldl", "-o", str(output),
-    ], check=True, capture_output=True, text=True)
+    ], capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        pytest.fail(f"fixture build failed:\n{result.stdout}{result.stderr}")
     return output
 
 

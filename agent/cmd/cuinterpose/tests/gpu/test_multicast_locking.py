@@ -29,7 +29,7 @@ def multicast_gate(tmp_path_factory):
     assert spec is not None, "requires the CUDA 13 CUPTI package installed with torch"
     toolkit = Path(next(iter(spec.submodule_search_locations)))
     output = tmp_path_factory.mktemp("multicast-gate") / "gate.so"
-    subprocess.run([
+    result = subprocess.run([
         "cc", "-std=c11", "-D_POSIX_C_SOURCE=200809L", "-O2", "-Wall", "-Wextra",
         "-Werror", "-shared", "-fPIC", "-pthread",
         "-I", os.environ.get("CUDA_INCLUDE", "/usr/local/cuda/include"),
@@ -37,7 +37,9 @@ def multicast_gate(tmp_path_factory):
         str(Path(__file__).with_name("fixtures") / "multicast_gate.c"),
         str(toolkit / "lib/libcupti.so.13"), f"-Wl,-rpath,{toolkit / 'lib'}",
         "-o", str(output),
-    ], check=True, capture_output=True, text=True)
+    ], capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        pytest.fail(f"fixture build failed:\n{result.stdout}{result.stderr}")
     return output
 
 

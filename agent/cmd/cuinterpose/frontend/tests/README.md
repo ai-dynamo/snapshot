@@ -17,6 +17,8 @@ matched frontend/core artifacts. It fails if these requirements are unavailable;
 it does not substitute CUDA implementations or skip the GPU checks. Set
 `--cuda-include /usr/local/cuda/include` if headers are not in `/opt/cuda/include`.
 The driver and runtime libraries must be on the system library search paths.
+The combined `make test-gpu` gate requires a CUDA 13.1+ driver for its multicast
+v2 behavior tests.
 
 Stage `core_abi.h` with the two libraries in `build/` to run without Rust tooling.
 If that header is absent, the runner generates it using cbindgen and the local
