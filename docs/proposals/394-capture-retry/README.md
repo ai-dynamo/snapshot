@@ -14,9 +14,9 @@ SPDX-License-Identifier: Apache-2.0
   - [How a suspended workload is recovered](#how-a-suspended-workload-is-recovered)
   - [User Stories](#user-stories)
     - [Story 1: a concurrent capture is holding the node's staging memory](#story-1-a-concurrent-capture-is-holding-the-nodes-staging-memory)
-    - [Story 2: the CRIU dump fails after the workload is already suspended](#story-2-the-criu-dump-fails-after-the-workload-is-already-suspended)
-    - [Story 3: the dump succeeded but the store was briefly unavailable](#story-3-the-dump-succeeded-but-the-store-was-briefly-unavailable)
-    - [Story 4: an operator runs a workload too large for the node agent](#story-4-an-operator-runs-a-workload-too-large-for-the-node-agent)
+    - [Story 2: the workload is too large to capture on this node](#story-2-the-workload-is-too-large-to-capture-on-this-node)
+    - [Story 3: the CRIU dump fails after the workload is already suspended](#story-3-the-criu-dump-fails-after-the-workload-is-already-suspended)
+    - [Story 4: the dump succeeded but the store was briefly unavailable](#story-4-the-dump-succeeded-but-the-store-was-briefly-unavailable)
   - [Limitations, Risks, and Mitigations](#limitations-risks-and-mitigations)
 - [Design Details](#design-details)
   - [Recovery tiers](#recovery-tiers)
@@ -33,7 +33,6 @@ SPDX-License-Identifier: Apache-2.0
   - [Dependencies](#dependencies)
   - [Test Plan](#test-plan)
     - [Measured behaviour](#measured-behaviour)
-    - [Remaining end-to-end coverage](#remaining-end-to-end-coverage)
   - [Graduation Criteria](#graduation-criteria)
 - [Appendix](#appendix)
 <!-- /toc -->
@@ -98,28 +97,20 @@ of #319.
 
 ### Non-Goals
 
-- **Restarting the source pod.** No second source Job, `PodSnapshot`, or
-  `PodSnapshotContent` is created. Every recovery acts on the pod already named
-  by `PodSnapshotContent.spec.source.podRef`, so a capture whose source process
-  is gone with nothing staged fails rather than running the workload again.
-- **Surviving a node-agent restart.** An attempt in flight when the agent dies
-  is not resumed; the work order reaches a terminal failure through the existing
-  content resync and capture-lease expiry, and its PageBroker staging is
-  reclaimed by the broker's transaction expiry. Keeping the agent alive is
-  goal 6; resuming across its death is not.
-- **Telling the workload that no checkpoint is coming.** The other half of #319.
-  It changes the workload contract rather than the agent's capture path, and
-  belongs in its own proposal.
-- **Restore-path retry or cold-start fallback** (#247, #244). Setting names are
-  aligned with #247 so the two read as a pair, but the mechanisms are separate.
-- **Rescheduling to another node.** Retry stays on the node holding the
-  workload, so a failure that is deterministic for this node's kernel, driver,
-  or CRIU build is terminal here rather than retried elsewhere.
-- **Agent metrics infrastructure.** Monitoring ships events, conditions, and
-  logs. Counters need a metrics client, endpoint, and scrape configuration the
-  agent does not have today, and arrive as their own change.
-- **Changing the artifact layout or the PageBroker wire protocol.** Retry reuses
-  the existing destination path, manifest, and transaction verbs.
+1. **Restarting the source pod.** No second source Job, `PodSnapshot`, or
+   `PodSnapshotContent` is created. Every recovery acts on the pod already named
+   by `PodSnapshotContent.spec.source.podRef`, so a capture whose source process
+   is gone with nothing staged fails rather than running the workload again.
+2. **Surviving a node-agent restart.** An attempt in flight when the agent dies
+   is not resumed; the work order reaches a terminal failure through the
+   existing content resync and capture-lease expiry, and its PageBroker staging
+   is reclaimed by the broker's transaction expiry. Keeping the agent alive is
+   goal 6; resuming across its death is not.
+3. **Telling the workload that no checkpoint is coming.** The other half of
+   #319. It changes the workload contract rather than the agent's capture path,
+   and belongs in its own proposal.
+4. **Restore-path retry or cold-start fallback** (#247, #244). Setting names are
+   aligned with #247 so the two read as a pair, but the mechanisms are separate.
 
 ## Proposal
 
@@ -179,14 +170,36 @@ staging, so PageBroker answers the agent's `PrepareCheckpoint` with
 `INSUFFICIENT_STORAGE` — refusing before it allocates anything, leaving the
 workload untouched and still serving.
 
-Today that is terminal: `PodSnapshotContent` goes `Failed`, the source process
+The staging is large enough for this model; it is merely occupied right now.
+The agent establishes that by comparing its size estimate against total staging
+capacity, not against what happens to be free, so it knows the shortage will
+clear when the competing capture commits.
+
+Today this is terminal: `PodSnapshotContent` goes `Failed`, the source process
 is killed, and the team re-runs the `SnapshotJob`, reloading the model into GPU
 memory from scratch. With this proposal the agent probes, finds the workload
-running, waits one backoff interval for the competing capture to commit, and
-prepares again. The capture succeeds, having cost a backoff rather than a model
-load. A warning event on the source pod records the transient failure.
+running, waits, and prepares again. The capture succeeds, having cost a wait
+rather than a model load. A warning event on the source pod records the
+transient failure.
 
-#### Story 2: the CRIU dump fails after the workload is already suspended
+#### Story 2: the workload is too large to capture on this node
+
+A different workload's checkpoint image is bigger than the node can stage. That
+shows up two ways: PageBroker answers with the same `INSUFFICIENT_STORAGE` when
+the image exceeds total staging capacity, and — because CRIU writes the staged
+image from the agent's own container, where memory-backed staging pages are
+charged to the writer — an image exceeding the agent's memory limit OOM-kills
+the agent partway through, taking every other capture and restore on that node
+with it, including other tenants'.
+
+No amount of waiting helps either case: there is no moment at which this image
+fits. The agent's size estimate separates them from Story 1 by comparing
+against total capacity rather than what is free, so a shortage that can never
+clear fails immediately with a reason naming the shortfall, and the operator
+learns to resize staging or move the workload. Retries are not spent on it, the
+workload is not held while they are, and the node keeps serving everyone else.
+
+#### Story 3: the CRIU dump fails after the workload is already suspended
 
 The same capture gets further on a later run. The agent has locked and
 checkpointed the workload's CUDA state — GPU memory is evicted to host memory —
@@ -200,7 +213,7 @@ the process tree alive and the CUDA state suspended, issues `restore` and
 `running` again, and starts another attempt against the revived workload. If any
 of those checks disagrees, the workload is terminated exactly as it is today.
 
-#### Story 3: the dump succeeded but the store was briefly unavailable
+#### Story 4: the dump succeeded but the store was briefly unavailable
 
 A capture completes its CRIU dump — which terminates the source process by
 design — and the commit to the checkpoint store fails on a transient I/O error.
@@ -211,20 +224,6 @@ workload it came from no longer exists to repeat it. With this proposal the
 agent recognises that no live source is needed, keeps the transaction rather
 than aborting it, and commits again. The repeated commit is idempotent by
 protocol, so the capture completes from data that was already on the node.
-
-#### Story 4: an operator runs a workload too large for the node agent
-
-An operator submits a workload whose checkpoint image would exceed the node
-agent's memory limit. Because CRIU writes the staged image from the agent's own
-container and memory-backed staging is charged to the writer, the agent is
-OOM-killed partway through — taking every other capture and restore in flight on
-that node with it, including other tenants'.
-
-With this proposal the agent estimates the image size against its remaining
-budget before staging, fails that one capture immediately with a reason naming
-the limit, and keeps serving everything else on the node. The operator gets an
-actionable failure on the workload that caused it instead of an agent restart
-and a set of unrelated casualties.
 
 ### Limitations, Risks, and Mitigations
 
@@ -248,9 +247,10 @@ retry rather than breaking capture.
 
 **Retry extends how long a workload holds its GPUs.** A capture that retries
 occupies the source pod, its GPUs, and node staging memory for longer than one
-that fails immediately. Bounded by the configured retry limit and backoff
-ceiling ([Configuration](#configuration)), and failures needing operator action
-are not retried.
+that fails immediately. Bounded by the configured retry limit and, absolutely,
+by the capture timeout the workload already sets: retries happen inside that
+budget rather than extending it. Failures needing operator action are not
+retried.
 
 **Recovery logic runs against a live, privileged workload.** Revival manipulates
 a running process tree, using the capability the agent already exercises on the
@@ -289,15 +289,12 @@ idempotent.
 
 ### Deciding the tier
 
-The agent reads the workload's state and acts on what it finds. Two inputs
-narrow the question and one answers it:
+The agent reads the workload's state and acts on what it finds. Two inputs:
 
 1. **Which step failed.** The agent controls the call sequence, so the failing
    step is known exactly and says whether a staged image might exist — the only
    thing distinguishing Tier C.
-2. **How far CRIU progressed**, from a CRIU notification handler. A hint, useful
-   for diagnostics.
-3. **A probe of the source** — process-tree liveness, and per-CUDA-process state
+2. **A probe of the source** — process-tree liveness, and per-CUDA-process state
    from the existing `--get-state` helper action. **The probe decides.**
 
 | Failing step | Probe: running | Probe: suspended | Probe: gone |
@@ -311,17 +308,14 @@ narrow the question and one answers it:
 So the choice between Tier A and Tier B collapses into one question the probe
 answers directly — *is this workload running, suspended, or gone?* The tiers
 describe the three recoveries; they are not a classification the agent must get
-right in advance. Measurement is what established this: a dump failure after the
-tree is frozen runs the same CRIU phases as a success, so the notification
-cannot separate a frozen tree from an untouched one, and only the workload's own
-state can ([Test Plan](#test-plan)).
+right in advance.
 
-Reading state also keeps the decision stable across CRIU versions. The agent
-builds CRIU from a moving upstream branch, and the Go binding flattens CRIU's
-structured error into a formatted string without exporting the structured
-response, so any error-text classification would be matching strings produced by
-a branch that moves underneath it. Workload state comes from the CUDA helper and
-`/proc` instead, neither of which is a CRIU diagnostic.
+Two inputs are enough because the probe reads the workload rather than CRIU.
+Measurement confirmed that nothing in CRIU's own reporting adds to this: a dump
+failure after the tree is frozen runs the same phases as a success, so how far
+CRIU progressed cannot separate a frozen tree from an untouched one
+([Test Plan](#test-plan)). The workload's state answers directly what CRIU's
+would only hint at.
 
 ### Attempt lifecycle
 
@@ -422,40 +416,44 @@ cleanup a correctness prerequisite rather than a capacity concern.
 
 ### API
 
-Retry limits are configurable cluster-wide and per workload, so two public
-surfaces change. No spec becomes mutable, no pinned identity changes, and no
-terminal condition changes meaning.
+The retry limit is configurable cluster-wide and per capture, so two surfaces
+change.
 
-**Cluster-wide default** — new retry settings in the agent configuration,
-rendered by the Helm chart ([Configuration](#configuration)).
+**Cluster-wide default** — a retry setting in the agent configuration, rendered
+by the Helm chart ([Configuration](#configuration)).
 
-**Per-workload override** — `SnapshotJob.spec` gains an optional retry policy.
-Being optional and additive, it leaves existing objects unaffected, and an
-absent value means "use the cluster default", so the two settings compose.
+**Per-capture value** — an optional field on `PodSnapshot.spec`. `PodSnapshot`
+is the object that represents a capture request, so it is where a caller
+expresses how that capture should behave, and the field follows the same path
+every other capture parameter already takes:
 
-The agent also serves captures driven by a `PodSnapshot` created directly
-against an existing pod, where no `SnapshotJob` exists. To keep one read path in
-the agent, the per-workload value is carried on the **source pod** as an
-annotation, and `SnapshotJob` stamps its spec field onto the pod template it
-creates. The agent reads the annotation and never needs to know which object
-started the capture.
+- A caller creating a `PodSnapshot` directly sets it there.
+- `SnapshotJob` exposes it on `spec.podSnapshotTemplate`, alongside
+  `targetContainers`, and copies it into the `PodSnapshot` it creates — the same
+  propagation that template already performs.
+- The `PodSnapshotReconciler` copies it into `PodSnapshotContent.spec` when it
+  creates the content, as it already does for the source pod reference and
+  target containers.
 
-An unparseable or out-of-range annotation is a capture-time validation failure
-with a named reason: a workload that asked for a specific policy and did not get
-it should say so.
+The agent therefore reads the value from the `PodSnapshotContent` it is already
+holding: one API read it already performs, and no need to know which object
+started the capture. Both specs stay immutable, since the value is set at
+creation and never changes afterwards.
 
-Two choices for review: whether the override belongs on `SnapshotJob.spec`
-directly or inside the existing `podSnapshotTemplate`, and whether an operator
-should be able to cap what a workload may request.
+An absent value means "use the cluster default", so the two surfaces compose.
+An out-of-range value is rejected by CRD validation at admission, which is
+strictly better than discovering it at capture time — the caller finds out when
+they submit rather than minutes later when the workload is loaded.
+
+One choice for review: whether an operator should be able to cap what a caller
+may request.
 
 ### Security
 
-The proposal introduces no new credentials, network surface, storage location,
-or privilege. Revival uses capabilities the agent already exercises on the
-capture and restore paths, and artifact paths, ownership, and cleanup are
-unchanged.
+Revival uses capabilities the agent already exercises on the capture and restore
+paths, and artifact paths, ownership, and cleanup are unchanged.
 
-Its main security effect is an improvement to **tenant isolation**. The node
+The proposal's main security effect is an improvement to **tenant isolation**. The node
 agent is shared by every workload on its node, and today a single capture
 request can terminate it by panic or by memory exhaustion, denying service to
 unrelated tenants' captures and restores. Both are closed
@@ -469,42 +467,37 @@ Two smaller considerations:
   Conditions and events carry a bounded, descriptive message; full traces stay
   in agent logs, which are already operator-scoped.
 - **Resource holding, and who may extend it.** Because the retry limit is
-  settable per workload, a tenant can lengthen its own hold on shared GPUs and
-  staging memory — a modest but real self-service resource decision. Backoff
-  limits the rate, and whether operators should be able to cap the per-workload
-  value is the open question raised in [API](#api). An operator wanting no
-  tenant control can leave the annotation unset by policy.
+  settable per capture, a caller can lengthen its own hold on shared GPUs and
+  staging memory — a modest but real self-service resource decision, bounded by
+  the capture timeout. Whether operators should be able to cap it is the open
+  question raised in [API](#api).
 
 ### Configuration
 
-The retry policy has three settings, applied identically whether they come from
-the cluster default or a per-workload override:
+**The retry limit is the only setting.** It is how many further attempts may
+follow the first, and it is the one value an operator or a workload chooses.
 
-- a **retry limit** — how many further attempts may follow the first;
-- an **initial backoff**, the delay before the first retry;
-- a **maximum backoff**, the ceiling the delay grows to.
+Attempts are spaced by exponential backoff whose initial delay and ceiling are
+**hard-coded constants, not configuration**. They are an implementation detail
+of being a good neighbour on a contended node, and exposing them would invite
+tuning without giving anyone a decision worth making. The total time a retrying
+capture can consume is already bounded by the capture timeout the workload sets,
+so the backoff needs no budget of its own.
 
-Attempts are spaced by **exponential backoff**: the delay doubles from the
-initial value and is capped at the maximum, so a capture contending for node
-staging memory spreads its attempts out while one hitting a fast transient error
-still recovers quickly. The ceiling and the retry limit together bound the total
-time a failing capture holds its workload — the worst case is the sum of the
-backoffs plus the attempts, derivable from the three values.
-
-**Resolution.** The agent reads the per-workload annotation; absent or empty, it
-uses the cluster default. Absent is distinct from zero: zero means the workload
+**Resolution.** The agent reads the per-capture value; absent, it uses the
+cluster default. Absent is distinct from zero: zero means the workload
 explicitly wants no retries, absent means it expressed no preference. The
-effective policy is resolved once when the capture begins and logged with the
+effective limit is resolved once when the capture begins and logged with the
 capture, so an operator can see which policy actually applied.
 
 **Default.** The cluster default retry limit is **0**, so retry is opt-in and an
 upgrade changes no existing capture's behaviour. An operator raises it for the
 cluster, or a workload opts itself in; either way the choice is explicit and
 attributable. This matches the default #247 states for restore retry, and the
-naming of all three settings should be agreed with it so the two read as a pair.
+setting's name should be agreed with it so the two read as a pair.
 
 The node-agent protections are independent of this default. Panic recovery and
-the fail-fast memory check are unconditional.
+the fail-fast size check are unconditional.
 
 ### Performance and Scalability
 
@@ -512,7 +505,7 @@ A successful capture is unaffected: the probe and the recovery decision run only
 after a failure.
 
 A failing capture becomes slower by design, bounded by the retry limit and the
-backoff ceiling, and its source pod and GPUs stay occupied for that duration —
+capture timeout, and its source pod and GPUs stay occupied for that duration —
 the explicit trade against re-reaching a ready workload from scratch.
 
 Node memory is the scarce resource. Staging is memory-backed and shared by both
@@ -533,12 +526,6 @@ size check keeps a capture that cannot fit from being attempted at all.
   CRIU version in use — with a moving CRIU reference, "which CRIU produced this
   failure" is otherwise unanswerable from a bug report.
 
-Metrics follow as their own change. The agent has no metrics infrastructure
-today — no client, endpoint, or scrape configuration — so attempt counts,
-recovery outcomes, revival success rate, and exhaustion counts would each arrive
-with that infrastructure, a chart change, and a port. The revival success rate
-is the measure that will show whether Tier B earns its complexity.
-
 A non-terminal condition on `PodSnapshotContent` exposing attempts in status
 would be additive and safe, since the existing ready/failed conditions are a
 mutually exclusive pair whose both-false state means in progress. Events and
@@ -548,22 +535,15 @@ logs cover goal 5, so the condition can follow if operators ask for it.
 
 In the tree already: the CUDA restore-and-unlock operation used for revival,
 which runs in production on the restore path and already tolerates a partially
-suspended process tree; CRIU notification support, with a handler already
-registered by the restore path; a CRIU version query; process-tree enumeration
-for the probe; the pod-event mechanism; the injection seam used to simulate
-capture failures in tests; and the artifact cleanup machinery (#349, #390).
+suspended process tree; a CRIU version query; process-tree enumeration for the
+probe; the pod-event mechanism; the injection seam used to simulate capture
+failures in tests; and the artifact cleanup machinery (#349, #390).
 
-Two qualifications:
-
-- **Typed PageBroker failure codes.** Classifying broker failures by code rather
-  than text needs an accessor on the client's failure type, which #395
-  introduces as part of a larger protocol change. A minimal accessor can be
-  added here instead, leaving #395 to subsume it, so this proposal does not
-  depend on that work landing.
-- **A cluster able to host a full Snapshot install** — meaning a `ReadWriteMany`
-  storage class — to close the end-to-end gaps in [Test Plan](#test-plan). The
-  behavioural prerequisites are already measured; what remains needs the whole
-  system rather than its parts.
+One qualification: **typed PageBroker failure codes.** Classifying broker
+failures by code rather than text needs an accessor on the client's failure
+type, which #395 introduces as part of a larger protocol change. A minimal
+accessor can be added here instead, leaving #395 to subsume it, so this proposal
+does not depend on that work landing.
 
 This proposal assumes the PageBroker data path (#251).
 
@@ -604,7 +584,7 @@ In the post-freeze case CRIU had seized the tree and written its images, and on
 failure logged `Unfreezing tasks` and `Unseizing <pid>` before `Dumping FAILED`
 — it actively restores the tree rather than abandoning it frozen. The two
 failure rows also share a phase sequence with the success row, which is what
-made the workload probe the decision input rather than the notification.
+established that only the workload's own state can separate them.
 
 **A suspended CUDA workload can be returned to running.** Against a workload
 holding GPU memory on a T4:
@@ -614,31 +594,17 @@ afterwards, and the workload continued. **The cycle was then repeated a second
 time with identical results**, which is what a retry does. The restore used an
 empty device map, as the design proposes.
 
-Three limits of that run, which is why the probe and not the measurement is the
-runtime authority:
+Two limits of that run, which is why the probe and not the measurement is the
+runtime authority: a failure between the freeze and `post-dump` was not
+produced, and no CRIU dump of a GPU process was attempted, so "a capture
+succeeds after revival" is covered end to end rather than assumed from this.
 
-1. **A mid-failure was not produced** — one after the freeze but before
-   `post-dump`.
-2. **The Go notification delivery path was not exercised.** Phases were read
-   from CRIU's own log, so that CRIU runs them is established; that the Go
-   binding surfaces them to the agent is not.
-3. **No CRIU dump of a GPU process** was attempted, so "a capture succeeds after
-   revival" is not yet shown end to end. It needs the agent's external-mount and
-   netns handling, i.e. a full Snapshot install, which that cluster could not
-   host for want of a `ReadWriteMany` storage class.
-
-#### Remaining end-to-end coverage
-
-1. *Close the gaps above*, on a cluster that can host a full Snapshot install: a
-   capture succeeding after a revival, and the notification path exercised
-   through the agent rather than through CRIU's log.
-2. *Behavioural coverage.* Induced transient failures for each recovery against
-   the framework workloads already used by the end-to-end suite, asserting the
-   capture succeeds on retry and the restored checkpoint is valid — a retried
-   capture must produce an artifact indistinguishable from a first-attempt one.
-3. *Policy resolution.* A per-workload override and the cluster default,
-   asserting the effective policy and that an invalid override fails the capture
-   with its named reason.
+**End-to-end.** Induced transient failures for each recovery against the
+framework workloads already used by the end-to-end suite, asserting the capture
+succeeds on retry and that a retried capture produces an artifact
+indistinguishable from a first-attempt one — including a capture that succeeds
+after reviving a suspended workload. Retry-limit resolution is covered for a
+per-capture value and the cluster default.
 
 ### Graduation Criteria
 
@@ -648,12 +614,9 @@ recoveries that do not require reviving a suspended workload. The node-agent
 protections are in place and unconditional. Failure classification distinguishes
 retryable from immediate causes, and storage conditions are reported distinctly.
 
-**Beta.** Revival is implemented and enabled, and the end-to-end gaps are closed
-on a cluster hosting a full Snapshot install. Behavioural coverage demonstrates
-each recovery against the framework workloads, and a retried capture is shown to
-restore correctly. Metrics covering attempts, recovery outcomes, revival success
-rate, and exhaustion are available, and operational evidence informs whether the
-default retry limit should change.
+**Beta.** Revival is implemented and enabled. End-to-end coverage demonstrates
+each recovery against the framework workloads, including a capture that succeeds
+after a revival, and a retried capture is shown to restore correctly.
 
 **GA.** Field evidence that the default configuration is right, that revival
 succeeds at a rate justifying its complexity, and that no capture has been
