@@ -301,9 +301,10 @@ def workload_scheduling() -> dict[str, Any]:
     node_selector = {
         "nvidia.com/gpu.present": "true",
     }
-    if os.environ.get("GITHUB_ACTIONS") == "true":
-        # Dynamo CI has MIG-capable and non-MIG GPU pools. Match preflight there,
-        # while allowing local clusters that do not expose this label.
+    if os.environ.get("SNAPSHOT_E2E_AVOID_MIG") == "true":
+        # Opt-in for clusters that serve both MIG-capable and non-MIG GPU pools,
+        # where preflight also pins the non-MIG pool. Clusters that do not expose
+        # the label leave this unset, so the selector stays satisfiable.
         node_selector["nvidia.com/mig.config"] = "all-disabled"
 
     return {
