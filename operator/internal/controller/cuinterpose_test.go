@@ -18,7 +18,7 @@ import (
 
 func cuInterposeTemplate() *corev1.PodTemplateSpec {
 	return &corev1.PodTemplateSpec{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{podcontract.CuInterposeAnnotation: "true"}},
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{"nvidia.com/snapshot-multigpu-enabled": "true"}},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{
 			{Name: "worker", Command: []string{"python3", "-m", "worker"}, Args: []string{"--rank", "0"}},
 			{Name: "helper"},
