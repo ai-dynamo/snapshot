@@ -9,8 +9,14 @@ SPDX-License-Identifier: Apache-2.0
 - [Summary](#summary)
 - [Motivation](#motivation)
   - [Goals](#goals)
+  - [Non-Goals](#non-goals)
 - [Proposal](#proposal)
   - [How a suspended workload is recovered](#how-a-suspended-workload-is-recovered)
+  - [User Stories](#user-stories)
+    - [Story 1: a concurrent capture is holding the node's staging memory](#story-1-a-concurrent-capture-is-holding-the-nodes-staging-memory)
+    - [Story 2: the CRIU dump fails after the workload is already suspended](#story-2-the-criu-dump-fails-after-the-workload-is-already-suspended)
+    - [Story 3: the dump succeeded but the store was briefly unavailable](#story-3-the-dump-succeeded-but-the-store-was-briefly-unavailable)
+    - [Story 4: an operator runs a workload too large for the node agent](#story-4-an-operator-runs-a-workload-too-large-for-the-node-agent)
   - [Limitations, Risks, and Mitigations](#limitations-risks-and-mitigations)
 - [Design Details](#design-details)
   - [Recovery tiers](#recovery-tiers)
@@ -90,6 +96,31 @@ of #319.
 6. A single capture request cannot terminate the node agent, by panic or by
    exhausting the agent's memory.
 
+### Non-Goals
+
+- **Restarting the source pod.** No second source Job, `PodSnapshot`, or
+  `PodSnapshotContent` is created. Every recovery acts on the pod already named
+  by `PodSnapshotContent.spec.source.podRef`, so a capture whose source process
+  is gone with nothing staged fails rather than running the workload again.
+- **Surviving a node-agent restart.** An attempt in flight when the agent dies
+  is not resumed; the work order reaches a terminal failure through the existing
+  content resync and capture-lease expiry, and its PageBroker staging is
+  reclaimed by the broker's transaction expiry. Keeping the agent alive is
+  goal 6; resuming across its death is not.
+- **Telling the workload that no checkpoint is coming.** The other half of #319.
+  It changes the workload contract rather than the agent's capture path, and
+  belongs in its own proposal.
+- **Restore-path retry or cold-start fallback** (#247, #244). Setting names are
+  aligned with #247 so the two read as a pair, but the mechanisms are separate.
+- **Rescheduling to another node.** Retry stays on the node holding the
+  workload, so a failure that is deterministic for this node's kernel, driver,
+  or CRIU build is terminal here rather than retried elsewhere.
+- **Agent metrics infrastructure.** Monitoring ships events, conditions, and
+  logs. Counters need a metrics client, endpoint, and scrape configuration the
+  agent does not have today, and arrive as their own change.
+- **Changing the artifact layout or the PageBroker wire protocol.** Retry reuses
+  the existing destination path, manifest, and transaction verbs.
+
 ## Proposal
 
 When a capture attempt fails, the node agent reads what state the source
@@ -137,6 +168,63 @@ tree as part of failing, so the process is still there to recover. A dump that
 
 Both halves were measured before this proposal was written
 ([Test Plan](#test-plan)).
+
+### User Stories
+
+#### Story 1: a concurrent capture is holding the node's staging memory
+
+A platform team captures a vLLM workload with a `SnapshotJob`. A second capture
+on the same node is committing at that moment and holds the node's memory-backed
+staging, so PageBroker answers the agent's `PrepareCheckpoint` with
+`INSUFFICIENT_STORAGE` — refusing before it allocates anything, leaving the
+workload untouched and still serving.
+
+Today that is terminal: `PodSnapshotContent` goes `Failed`, the source process
+is killed, and the team re-runs the `SnapshotJob`, reloading the model into GPU
+memory from scratch. With this proposal the agent probes, finds the workload
+running, waits one backoff interval for the competing capture to commit, and
+prepares again. The capture succeeds, having cost a backoff rather than a model
+load. A warning event on the source pod records the transient failure.
+
+#### Story 2: the CRIU dump fails after the workload is already suspended
+
+The same capture gets further on a later run. The agent has locked and
+checkpointed the workload's CUDA state — GPU memory is evicted to host memory —
+and the CRIU dump then fails. The workload is alive but suspended, and its
+`cuda-checkpoint-helper` state reads `checkpointed`.
+
+Today this is the case that kills the workload: a failed dump means the source
+is SIGKILLed and the model is gone. With this proposal the agent probes, finds
+the process tree alive and the CUDA state suspended, issues `restore` and
+`unlock` to return it to `running`, confirms every CUDA process reports
+`running` again, and starts another attempt against the revived workload. If any
+of those checks disagrees, the workload is terminated exactly as it is today.
+
+#### Story 3: the dump succeeded but the store was briefly unavailable
+
+A capture completes its CRIU dump — which terminates the source process by
+design — and the commit to the checkpoint store fails on a transient I/O error.
+The checkpoint data is staged and intact; only its publication failed.
+
+Today the capture is lost despite the expensive part having worked, and the
+workload it came from no longer exists to repeat it. With this proposal the
+agent recognises that no live source is needed, keeps the transaction rather
+than aborting it, and commits again. The repeated commit is idempotent by
+protocol, so the capture completes from data that was already on the node.
+
+#### Story 4: an operator runs a workload too large for the node agent
+
+An operator submits a workload whose checkpoint image would exceed the node
+agent's memory limit. Because CRIU writes the staged image from the agent's own
+container and memory-backed staging is charged to the writer, the agent is
+OOM-killed partway through — taking every other capture and restore in flight on
+that node with it, including other tenants'.
+
+With this proposal the agent estimates the image size against its remaining
+budget before staging, fails that one capture immediately with a reason naming
+the limit, and keeps serving everything else on the node. The operator gets an
+actionable failure on the workload that caused it instead of an agent restart
+and a set of unrelated casualties.
 
 ### Limitations, Risks, and Mitigations
 
