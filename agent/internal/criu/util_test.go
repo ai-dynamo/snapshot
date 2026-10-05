@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
+	"github.com/go-logr/logr"
 
 	"github.com/ai-dynamo/snapshot/agent/internal/types"
 )
@@ -51,6 +52,31 @@ func TestGPUMountAliasesLeavesOldCheckpointsUnchanged(t *testing.T) {
 	got, err := GPUMountAliases(m, "", nil)
 	if err != nil || len(got) != 0 {
 		t.Fatalf("old checkpoint aliases = %v, %v", got, err)
+	}
+}
+
+func TestGPUDeviceMountsWithoutAliases(t *testing.T) {
+	m, err := PrepareGPUDeviceMounts(nil, logr.Discard())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RestoreNativePaths(-1); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Close(true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGPUDeviceMountsRejectInvalidPaths(t *testing.T) {
+	for _, aliases := range []map[string]string{
+		{"/dev/nvidia0": "/dev/null"},
+		{"/tmp/nvidia0": "/dev/nvidia1"},
+	} {
+		if m, err := PrepareGPUDeviceMounts(aliases, logr.Discard()); err == nil {
+			_ = m.Close(false)
+			t.Fatal("accepted an invalid GPU path")
+		}
 	}
 }
 
