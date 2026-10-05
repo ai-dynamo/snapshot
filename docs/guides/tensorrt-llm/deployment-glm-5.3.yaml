@@ -3,7 +3,7 @@
 
 # One-node GLM-5.3 NVFP4 example on 8 B200 GPUs.
 # Engine kwargs below use a 128K context and bounded concurrency.
-# TensorRT-LLM 1.3.0rc24 does not support MTP with NVFP4.
+# This profile omits MTP, following the 1.3.0rc24 GLM NVFP4 guide.
 
 apiVersion: apps/v1
 kind: Deployment
