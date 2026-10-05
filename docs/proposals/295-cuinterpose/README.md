@@ -1072,7 +1072,7 @@ Protocol compatibility beyond the matching version-1 artifacts is not promised.
 
 ## Implementation History
 
-As of September 22, 2026, the implementation remains an open PR stack.
+As of October 5, 2026, the implementation remains an open PR stack.
 Its dependency order is:
 
 | PR | Responsibility |
