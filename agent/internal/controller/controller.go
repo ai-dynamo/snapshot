@@ -996,6 +996,7 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (int, error) {
 		SkipCompatCheck:             op.skipCompatCheck,
 		Clientset:                   w.clientset,
 		PageBrokerControlSocketPath: w.config.PageBroker.ControlSocketPath,
+		PageBrokerTransferEngine:    w.config.PageBroker.TransferEngine,
 	}
 	return w.restoreFn(ctx, w.runtime, op.log, req, w.injector)
 }

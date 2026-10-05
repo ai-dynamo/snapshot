@@ -103,9 +103,17 @@ type RestoreRequest struct {
 	DestinationContainerName    string
 	Clientset                   kubernetes.Interface
 	PageBrokerControlSocketPath string
+	PageBrokerTransferEngine    string
 
 	// Decided by the caller, so both gates reach the same answer.
 	SkipCompatCheck bool
+}
+
+func pageBrokerTransferEngine(configured string) pagebroker.TransferEngine {
+	if configured == "" {
+		return pagebroker.TransferEnginePosixCopy
+	}
+	return pagebroker.TransferEngine(configured)
 }
 
 // Restore performs external restore for the given request.
@@ -186,7 +194,9 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 
 	transactionID = uuid.NewString()
 	stageStart := time.Now()
-	staged, err := broker.StagedRestore(ctx, transactionID, artifactPath)
+	staged, err := broker.StagedRestore(
+		ctx, transactionID, artifactPath, pageBrokerTransferEngine(req.PageBrokerTransferEngine),
+	)
 	pageBrokerStageDuration := time.Since(stageStart)
 	if err != nil {
 		if pagebroker.IsDialError(err) {

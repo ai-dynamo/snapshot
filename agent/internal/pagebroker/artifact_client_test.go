@@ -104,14 +104,14 @@ func TestArtifactAndLegacySelectors(t *testing.T) {
 		{"metadata", &Request_GetArtifactMetadata{GetArtifactMetadata: &GetArtifactMetadataRequest{Artifact: artifact}},
 			func(c Client, ctx context.Context) (string, error) { return c.GetArtifactMetadata(ctx, "tx", artifact) },
 			&Response_GetArtifactMetadataComplete{GetArtifactMetadataComplete: &GetArtifactMetadataComplete{ManifestDirectory: "/staging/metadata/tx"}}},
-		{"legacy checkpoint", &Request_PrepareStagedCheckpoint{PrepareStagedCheckpoint: &PrepareStagedCheckpointRequest{Destination: filesystem("/checkpoints/destination"), IoEngine: posixCopy()}},
+		{"legacy checkpoint", &Request_PrepareStagedCheckpoint{PrepareStagedCheckpoint: &PrepareStagedCheckpointRequest{Destination: filesystem("/checkpoints/destination"), IoEngine: &IOEngine{Kind: &IOEngine_PosixCopy{PosixCopy: &PosixCopyIOEngine{}}}}},
 			func(c Client, ctx context.Context) (string, error) {
-				return c.PrepareCheckpoint(ctx, "tx", "/checkpoints/destination")
+				return c.PrepareCheckpoint(ctx, "tx", "/checkpoints/destination", TransferEnginePosixCopy)
 			},
 			&Response_StagedCheckpointDirectory{StagedCheckpointDirectory: &StagedCheckpointDirectory{ImageDirectory: proto.String("/staging/checkpoint/tx")}}},
-		{"legacy restore", &Request_StagedRestore{StagedRestore: &StagedRestoreRequest{Source: filesystem("/checkpoints/source"), IoEngine: posixCopy()}},
+		{"legacy restore", &Request_StagedRestore{StagedRestore: &StagedRestoreRequest{Source: filesystem("/checkpoints/source"), IoEngine: &IOEngine{Kind: &IOEngine_PosixCopy{PosixCopy: &PosixCopyIOEngine{}}}}},
 			func(c Client, ctx context.Context) (string, error) {
-				return c.StagedRestore(ctx, "tx", "/checkpoints/source")
+				return c.StagedRestore(ctx, "tx", "/checkpoints/source", TransferEnginePosixCopy)
 			},
 			&Response_StagedRestoreDirectory{StagedRestoreDirectory: &StagedRestoreDirectory{ImageDirectory: proto.String("/staging/restore/tx")}}},
 	} {
@@ -252,7 +252,7 @@ func TestFailureMessageLimitsPreserveLegacyDiagnostics(t *testing.T) {
 			})
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			_, err := client.StagedRestore(ctx, "tx", "/checkpoints/source")
+			_, err := client.StagedRestore(ctx, "tx", "/checkpoints/source", TransferEnginePosixCopy)
 			var failure *FailureError
 			if !errors.As(err, &failure) || failure.Code() != failureCode(code) || !strings.Contains(err.Error(), message) {
 				t.Fatalf("failure diagnostic/classification lost: %v", err)
