@@ -536,13 +536,19 @@ pub fn restore(state: &mut ProcessState, operation: Operation) -> Result<()> {
                     object.driver = Some(driver);
                     if object.shared {
                         let fd = crate::driver::export_posix(driver)?;
-                        runtime::export_cache()?.insert(*id, fd, Some(object.properties))?;
+                        runtime::export_cache()?.insert(
+                            object.reference,
+                            fd,
+                            sharing::ExportMetadata::Multicast(object.properties),
+                        )?;
                     }
                 }
                 Operation::RestoreMulticastImporters if !creator => {
-                    let (fd, properties) =
-                        sharing::request_export(object.reference).map_err(Error::PeerExport)?;
-                    if properties != Some(object.properties) {
+                    let (fd, metadata) =
+                        sharing::request_export(object.reference, object.reference.creator_pid)
+                            .map_err(Error::PeerExport)?;
+                    if !matches!(metadata, sharing::ExportMetadata::Multicast(properties) if properties == object.properties)
+                    {
                         return Err(Error::from(CUDA_ERROR_INVALID_HANDLE));
                     }
                     let driver = crate::driver::import_posix(fd.as_fd())?;
