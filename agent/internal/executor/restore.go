@@ -75,14 +75,21 @@ func (e *RestoreCleanupError) Error() string { return e.Err.Error() }
 func (e *RestoreCleanupError) Unwrap() error { return e.Err }
 
 type restoreMount struct {
-	action string
-	point  nsmount.MountPoint
+	action        string
+	point         nsmount.MountPoint
+	keepOnSuccess bool
 }
 
-func cleanupRestoreMounts(ctx context.Context, mounts []restoreMount) error {
+func cleanupRestoreMounts(ctx context.Context, mounts []restoreMount, restored bool) error {
 	var cleanupErr error
 	cleanupCtx := context.WithoutCancel(ctx)
 	for i := len(mounts) - 1; i >= 0; i-- {
+		if restored && mounts[i].keepOnSuccess {
+			if err := mounts[i].point.Release(); err != nil {
+				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("release retained mount namespace: %w", err))
+			}
+			continue
+		}
 		if err := mounts[i].point.Unmount(cleanupCtx); err != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("%s: %w", mounts[i].action, err))
 		}
@@ -137,8 +144,9 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 
 	var cleanupErr error
 	var activeMounts []restoreMount
+	restored := false
 	cleanup := func() {
-		cleanupErr = errors.Join(cleanupErr, cleanupRestoreMounts(ctx, activeMounts))
+		cleanupErr = errors.Join(cleanupErr, cleanupRestoreMounts(ctx, activeMounts, restored))
 		activeMounts = nil
 	}
 	defer func() {
@@ -193,8 +201,9 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 			return 0, fmt.Errorf("mount cuinterpose into placeholder: %w", err)
 		}
 		activeMounts = append(activeMounts, restoreMount{
-			action: "unmount cuinterpose from placeholder",
-			point:  shimMount,
+			action:        "unmount cuinterpose from placeholder",
+			point:         shimMount,
+			keepOnSuccess: true,
 		})
 	}
 
@@ -256,6 +265,11 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		return 0, err
 	}
 
+	// Restored processes still need these paths for lazy core loading and
+	// LD_PRELOAD in later child processes. Only temporary restore mounts go away.
+	// Release closes the agent's fd. The retained bind belongs to the workload
+	// mount namespace and disappears when that namespace is destroyed.
+	restored = true
 	cleanup()
 	wall := time.Since(restoreStart)
 	unaccounted := remainingDuration(wall,

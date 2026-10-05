@@ -111,6 +111,7 @@ func (noopInjector) MountPageBroker(_ context.Context, _ nsmount.MountPoint, _ s
 type noopMountPoint struct{}
 
 func (noopMountPoint) Unmount(context.Context) error { return nil }
+func (noopMountPoint) Release() error                { return nil }
 func (noopMountPoint) NsFd() *os.File                { return nil }
 
 var _ executor.RestoreMounter = noopInjector{}
