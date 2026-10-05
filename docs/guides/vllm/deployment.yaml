@@ -100,6 +100,8 @@ spec:
               subPath: main
             - name: tun
               mountPath: /dev/net/tun
+            - name: shm
+              mountPath: /dev/shm
             - name: app
               mountPath: /snapshot-app
               readOnly: true
@@ -112,6 +114,10 @@ spec:
           hostPath:
             path: /dev/net/tun
             type: CharDevice
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
         # Created from app.py: kubectl create configmap vllm-app --from-file=app.py
         - name: app
           configMap:

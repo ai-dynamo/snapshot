@@ -72,6 +72,8 @@ spec:
               subPath: main
             - name: tun
               mountPath: /dev/net/tun
+            - name: shm
+              mountPath: /dev/shm
             # The checkpointed process's mount namespace includes this
             # mount (from the source Pod); restore recreates it here too,
             # even though this placeholder's own command never reads it.
@@ -85,6 +87,10 @@ spec:
           hostPath:
             path: /dev/net/tun
             type: CharDevice
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
         - name: app
           configMap:
             name: tensorrt-llm-app

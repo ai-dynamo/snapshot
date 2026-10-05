@@ -59,7 +59,7 @@ spec:
             seccompProfile:
               type: RuntimeDefault
         - name: model-cache
-          image: lmsysorg/sglang:v0.5.17-cu130-runtime@sha256:3ea7c6d74312d964edbcf9b3819425ea42117eb967ef1cfec632a70c926027df
+          image: lmsysorg/sglang:v0.5.20@sha256:06e4f2ed21afde4ff513cda65070124e727ba23ccaeff7712b8c40e1097d611f
           imagePullPolicy: IfNotPresent
           command:
             - python3
@@ -89,7 +89,7 @@ spec:
               mountPath: /hf-cache
       containers:
         - name: main
-          image: lmsysorg/sglang:v0.5.17-cu130-runtime@sha256:3ea7c6d74312d964edbcf9b3819425ea42117eb967ef1cfec632a70c926027df
+          image: lmsysorg/sglang:v0.5.20@sha256:06e4f2ed21afde4ff513cda65070124e727ba23ccaeff7712b8c40e1097d611f
           imagePullPolicy: IfNotPresent
           command:
             - /tmp/snapshot-cuda/cuinterpose-launch
