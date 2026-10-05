@@ -156,6 +156,7 @@ COPY --from=cuinterpose-builder /cuinterpose/build/cuinterpose-launch /usr/local
 FROM cuinterpose-notices AS cuinterpose-test
 COPY --from=cuinterpose-payload / /
 RUN make test-native
+RUN /usr/local/bin/cuinterpose-launch --library /usr/local/lib/snapshot/libcuinterpose.so -- /bin/true
 
 FROM scratch AS cuinterpose-export
 COPY --from=cuinterpose-builder /cuinterpose/build/ /
