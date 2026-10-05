@@ -25,7 +25,7 @@ use std::{
 #[doc(inline)]
 pub use transport::{connect, receive, send};
 
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 // Limit allocations requested by socket frame prefixes and checkpoint files. Protocol
 // messages contain metadata, never allocation contents.
 pub const MAX_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
@@ -49,7 +49,7 @@ pub enum Error {
     Decode(#[from] rmp_serde::decode::Error),
     #[error("{0}")]
     Invalid(&'static str),
-    #[error("creator rejected export: {0}")]
+    #[error("peer rejected export: {0}")]
     Remote(String),
 }
 pub type Result<T> = std::result::Result<T, Error>;
@@ -110,6 +110,14 @@ pub enum Operation {
     RestoreMulticastBindings,
 }
 
+/// Which existing holder saves and recreates one shared backing allocation.
+/// This does not change the immutable allocation identity or retain its lifetime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllocationOwner {
+    pub allocation: AllocationReference,
+    pub owner_pid: NamespacePid,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Request {
@@ -125,7 +133,12 @@ pub enum Request {
         namespace_pid: NamespacePid,
         operation: Operation,
     },
+    SaveAllocations {
+        namespace_pid: NamespacePid,
+        owners: Vec<AllocationOwner>,
+    },
     Export {
+        namespace_pid: NamespacePid,
         allocation: AllocationReference,
     },
 }
@@ -141,7 +154,7 @@ pub struct Response {
 pub enum Reply {
     Inspection { records: Vec<Record> },
     Completed { operation: Operation, bytes: u64 },
-    UnicastExport,
+    UnicastExport { size: u64 },
     MulticastExport { properties: MulticastProperties },
 }
 

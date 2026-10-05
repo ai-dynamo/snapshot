@@ -112,9 +112,12 @@ impl Arena {
         }
         for allocation in &mut fresh {
             let mut driver = 0;
-            unsafe {
-                crate::driver::cuMemCreate(&mut driver, allocation.size, &allocation.properties, 0)
-            }?;
+            // CUDA reports NONE on an imported handle. Reconstruction still needs
+            // exportable backing so other holders can import this owner's new copy.
+            let mut properties = allocation.properties;
+            properties.requestedHandleTypes =
+                cudarc::driver::sys::CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+            unsafe { crate::driver::cuMemCreate(&mut driver, allocation.size, &properties, 0) }?;
             allocation.driver = Some(driver);
         }
         self.copy(&fresh, true)?;
@@ -174,6 +177,10 @@ impl Arena {
             let mut stream = None;
             let mut synchronized = false;
             let transfer = (|| -> Result<()> {
+                // An elected importer may execute on a different GPU from the backing.
+                // The transfer stream needs access from the current context's device.
+                let mut transfer_device = 0;
+                unsafe { crate::driver::cuCtxGetDevice(&mut transfer_device) }?;
                 let mut base = 0u64;
                 unsafe { crate::driver::cuMemAddressReserve(&mut base, total, 0, 0, 0) }?;
                 reserved = Some(base);
@@ -196,7 +203,10 @@ impl Arena {
                     }?;
                     mapped.push((address, allocation.size));
                     let access = CUmemAccessDesc {
-                        location: allocation.properties.location,
+                        location: cudarc::driver::sys::CUmemLocation {
+                            type_: CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE,
+                            id: transfer_device,
+                        },
                         flags: CUmemAccess_flags::CU_MEM_ACCESS_FLAGS_PROT_READWRITE,
                     };
                     unsafe { crate::driver::cuMemSetAccess(address, allocation.size, &access, 1) }?;

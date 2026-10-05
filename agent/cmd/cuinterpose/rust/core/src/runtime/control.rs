@@ -24,6 +24,7 @@ enum ControlRequest {
     BeginCheckpoint,
     Inspect,
     Execute(Operation),
+    SaveAllocations(Vec<protocol::AllocationOwner>),
 }
 
 /// Workers cannot handle requests until they receive the listener. Dropping this owner
@@ -232,8 +233,15 @@ fn dispatch(
         | Request::Execute {
             namespace_pid: target,
             ..
+        }
+        | Request::SaveAllocations {
+            namespace_pid: target,
+            ..
+        }
+        | Request::Export {
+            namespace_pid: target,
+            ..
         } => *target == namespace_pid,
-        Request::Export { allocation } => allocation.creator_pid == namespace_pid,
     };
     if descriptor.is_some() || !addressed {
         return refuse(
@@ -246,7 +254,8 @@ fn dispatch(
         Request::BeginCheckpoint { .. } => ControlRequest::BeginCheckpoint,
         Request::Inspect { .. } => ControlRequest::Inspect,
         Request::Execute { operation, .. } => ControlRequest::Execute(operation),
-        Request::Export { allocation } => {
+        Request::SaveAllocations { owners, .. } => ControlRequest::SaveAllocations(owners),
+        Request::Export { allocation, .. } => {
             if super::RUNTIME_FAILED.load(Ordering::Acquire) {
                 return refuse(&socket, namespace_pid, "cuinterpose state failed");
             }
@@ -256,7 +265,7 @@ fn dispatch(
                     return refuse(&socket, namespace_pid, "creator resource is unavailable");
                 }
             };
-            return cache.send(&socket, namespace_pid, &allocation.id);
+            return cache.send(&socket, namespace_pid, &allocation);
         }
     };
     match sender.try_send((socket, request)) {
@@ -292,13 +301,14 @@ fn serve(
     request: ControlRequest,
     namespace_pid: NamespacePid,
 ) -> protocol::Result<()> {
+    let load = matches!(request, ControlRequest::Execute(Operation::LoadAllocations));
     let result = match request {
         ControlRequest::BeginCheckpoint => checkpoint::begin(),
         ControlRequest::Inspect => checkpoint::inspect(),
         ControlRequest::Execute(operation) => checkpoint::execute(operation),
+        ControlRequest::SaveAllocations(owners) => checkpoint::save_allocations(&owners),
     };
-    let loaded =
-        matches!(request, ControlRequest::Execute(Operation::LoadAllocations)) && result.is_ok();
+    let loaded = load && result.is_ok();
     protocol::send(
         &socket,
         &Response {
