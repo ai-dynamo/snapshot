@@ -82,8 +82,7 @@ impl ProcessState {
                 .sum();
             let record = Record::Allocation {
                 allocation: allocation.reference,
-                checkpoint_via_host_carrier: allocation
-                    .checkpoint_via_host_carrier(self.namespace_pid),
+                shared: allocation.shared,
                 size: allocation.size as u64,
                 allocation_type: allocation.properties.type_ as u32,
                 handle_types: allocation.properties.requestedHandleTypes.0,
@@ -125,6 +124,44 @@ impl ProcessState {
         Ok(records)
     }
 
+    /// Check the complete local plan before changing any state. The coordinator
+    /// selects holders from the frozen group. Each participant verifies that the
+    /// plan names exactly its shared allocations with their original identities.
+    fn select_checkpoint_owners(
+        &mut self,
+        owners: &[cuinterpose_protocol::AllocationOwner],
+    ) -> Result<()> {
+        let mut selected = BTreeMap::new();
+        for owner in owners {
+            let allocation = self
+                .memblocks
+                .get(&owner.allocation.id)
+                .and_then(Memblock::unicast)
+                .ok_or(CUDA_ERROR_INVALID_HANDLE)?;
+            if !allocation.shared
+                || allocation.reference != owner.allocation
+                || owner.owner_pid == 0
+                || selected
+                    .insert(owner.allocation.id, owner.owner_pid)
+                    .is_some()
+            {
+                return Err(CUDA_ERROR_INVALID_VALUE.into());
+            }
+        }
+        if selected.len()
+            != self
+                .memblocks
+                .values()
+                .filter_map(Memblock::unicast)
+                .filter(|a| a.shared)
+                .count()
+        {
+            return Err(CUDA_ERROR_INVALID_VALUE.into());
+        }
+        self.checkpoint_owners = selected;
+        Ok(())
+    }
+
     /// Call after phase validation. A failure during state changes terminates the
     /// process.
     pub fn lifecycle(&mut self, operation: Operation) -> Result<u64> {
@@ -138,7 +175,11 @@ impl ProcessState {
                     .memblocks
                     .values()
                     .filter_map(Memblock::unicast)
-                    .filter(|a| a.checkpoint_via_host_carrier(self.namespace_pid))
+                    .filter(|a| {
+                        a.shared
+                            && self.checkpoint_owners.get(&a.reference.id)
+                                == Some(&self.namespace_pid)
+                    })
                     .map(|a| a.reference.id)
                     .collect();
                 let mut allocations = Vec::new();
@@ -201,7 +242,11 @@ impl ProcessState {
                     .memblocks
                     .values()
                     .filter_map(Memblock::unicast)
-                    .filter(|a| a.checkpoint_via_host_carrier(self.namespace_pid))
+                    .filter(|a| {
+                        a.shared
+                            && self.checkpoint_owners.get(&a.reference.id)
+                                == Some(&self.namespace_pid)
+                    })
                     .map(AllocationContent::from)
                     .collect();
                 bytes = allocations.iter().try_fold(0u64, |sum, a| {
@@ -220,25 +265,34 @@ impl ProcessState {
                         .ok_or(CUDA_ERROR_INVALID_HANDLE)?
                         .driver = allocation.driver;
                 }
-                self.remap(Participants::Creators)?;
+                self.remap(Participants::Owners)?;
             }
             Operation::RestoreUnicast => {
                 for allocation in self
                     .memblocks
                     .values_mut()
                     .filter_map(Memblock::unicast_mut)
-                    .filter(|a| a.reference.creator_pid != self.namespace_pid && a.shared)
+                    .filter(|a| {
+                        a.shared
+                            && self.checkpoint_owners.get(&a.reference.id)
+                                != Some(&self.namespace_pid)
+                    })
                 {
-                    let (raw, properties) =
-                        sharing::request_export(allocation.reference).map_err(Error::PeerExport)?;
-                    if properties.is_some() {
+                    let owner = self.checkpoint_owners[&allocation.reference.id];
+                    let (raw, metadata) = sharing::request_export(allocation.reference, owner)
+                        .map_err(Error::PeerExport)?;
+                    if !matches!(metadata, sharing::ExportMetadata::Unicast { size } if size == allocation.size)
+                    {
                         return Err(Error::from(CUDA_ERROR_INVALID_HANDLE));
                     }
                     allocation.driver = Some(crate::driver::import_posix(raw.as_fd())?);
                 }
                 self.remap(Participants::Importers)?;
             }
-            _ => return Err(Error::from(CUDA_ERROR_NOT_SUPPORTED)),
+            Operation::RestoreMulticastCreators
+            | Operation::RestoreMulticastImporters
+            | Operation::RestoreMulticastDevices
+            | Operation::RestoreMulticastBindings => {}
         }
         self.phase = next_phase;
         Ok(bytes)
@@ -250,8 +304,9 @@ impl ProcessState {
             .values_mut()
             .filter_map(Memblock::unicast_mut)
         {
-            let created_here = allocation.reference.creator_pid == self.namespace_pid;
-            if allocation.shared && created_here == (participants == Participants::Creators) {
+            let owned_here =
+                self.checkpoint_owners.get(&allocation.reference.id) == Some(&self.namespace_pid);
+            if allocation.shared && owned_here == (participants == Participants::Owners) {
                 restore_allocation(allocation, &self.mappings, participants)?;
             }
         }
@@ -261,7 +316,7 @@ impl ProcessState {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Participants {
-    Creators,
+    Owners,
     Importers,
 }
 
@@ -289,9 +344,15 @@ fn restore_allocation(
             }?;
         }
     }
-    if participants == Participants::Creators {
+    if participants == Participants::Owners {
         let fd = crate::driver::export_posix(driver)?;
-        export_cache()?.insert(allocation.reference.id, fd, None)?;
+        export_cache()?.insert(
+            allocation.reference,
+            fd,
+            sharing::ExportMetadata::Unicast {
+                size: allocation.size,
+            },
+        )?;
     }
     if allocation.refcounts.handle_entries == 0 {
         unsafe { crate::driver::cuMemRelease(driver) }?;
@@ -318,11 +379,30 @@ pub(crate) fn begin() -> std::result::Result<Reply, String> {
 }
 
 pub(crate) fn execute(operation: Operation) -> std::result::Result<Reply, String> {
+    if operation == Operation::SaveAllocations {
+        return Err("SaveAllocations requires the checkpoint owner plan".into());
+    }
     let mut state = runtime::get().map_err(|_| "cuinterpose state is unavailable")?;
     state
         .phase
         .next(operation)
         .map_err(|error| format!("{operation:?}: {error}"))?;
+    let bytes = runtime::must_complete(state.lifecycle(operation));
+    Ok(Reply::Completed { operation, bytes })
+}
+
+pub(crate) fn save_allocations(
+    owners: &[cuinterpose_protocol::AllocationOwner],
+) -> std::result::Result<Reply, String> {
+    let mut state = runtime::get().map_err(|_| "cuinterpose state is unavailable")?;
+    let operation = Operation::SaveAllocations;
+    state
+        .phase
+        .next(operation)
+        .map_err(|error| format!("{operation:?}: {error}"))?;
+    state
+        .select_checkpoint_owners(owners)
+        .map_err(|error| format!("{operation:?}: invalid owner plan: {error}"))?;
     let bytes = runtime::must_complete(state.lifecycle(operation));
     Ok(Reply::Completed { operation, bytes })
 }
@@ -335,6 +415,131 @@ pub(crate) fn load_acknowledged() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cudarc::driver::sys::{
+        CUmemAllocationHandleType, CUmemAllocationProp, CUmemAllocationType, CUmemLocation,
+        CUmemLocationType,
+    };
+    use cuinterpose_protocol::{AllocationOwner, AllocationReference};
+
+    fn add_allocation(state: &mut ProcessState, id: [u8; 16], shared: bool) -> AllocationReference {
+        let reference = AllocationReference {
+            id,
+            creator_pid: 17,
+        };
+        state
+            .adopt_unicast(Allocation {
+                reference,
+                refcounts: Default::default(),
+                driver: None,
+                size: 8192,
+                properties: CUmemAllocationProp {
+                    type_: CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED,
+                    requestedHandleTypes:
+                        CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
+                    location: CUmemLocation {
+                        type_: CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE,
+                        id: 0,
+                    },
+                    ..unsafe { std::mem::zeroed() }
+                },
+                shared,
+                context: 0,
+            })
+            .unwrap();
+        reference
+    }
+
+    #[test]
+    fn invalid_owner_plans_leave_the_existing_plan_unchanged() {
+        let mut state = ProcessState::new(41);
+        let shared = add_allocation(&mut state, [1; 16], true);
+        let private = add_allocation(&mut state, [2; 16], false);
+        let owner = AllocationOwner {
+            allocation: shared,
+            owner_pid: 41,
+        };
+        state.select_checkpoint_owners(&[owner]).unwrap();
+        let original = state.checkpoint_owners.clone();
+        for plan in [
+            vec![],
+            vec![owner, owner],
+            vec![AllocationOwner {
+                owner_pid: 0,
+                ..owner
+            }],
+            vec![AllocationOwner {
+                allocation: AllocationReference {
+                    creator_pid: 99,
+                    ..shared
+                },
+                ..owner
+            }],
+            vec![AllocationOwner {
+                allocation: AllocationReference {
+                    id: [3; 16],
+                    ..shared
+                },
+                ..owner
+            }],
+            vec![
+                owner,
+                AllocationOwner {
+                    allocation: private,
+                    ..owner
+                },
+            ],
+        ] {
+            assert!(
+                state.select_checkpoint_owners(&plan).is_err(),
+                "accepted {plan:?}"
+            );
+            assert_eq!(state.checkpoint_owners, original);
+        }
+    }
+
+    #[test]
+    fn owner_selection_preserves_mapping_only_importer_identity_and_extent() {
+        for (size, offset) in [(8192, 0), (4096, 4096)] {
+            let mut state = ProcessState::new(41);
+            let reference = add_allocation(&mut state, [1; 16], true);
+            let handle = *state.virtual_allocation_handles.keys().next().unwrap();
+            state.virtual_allocation_handles.clear();
+            let allocation = state
+                .memblocks
+                .get_mut(&reference.id)
+                .unwrap()
+                .unicast_mut()
+                .unwrap();
+            allocation.refcounts.handle_entries = 0;
+            allocation.refcounts.mappings = 1;
+            state.mappings.insert(
+                4096,
+                Mapping {
+                    id: reference.id,
+                    handle,
+                    address: 4096,
+                    size,
+                    offset,
+                    access: Vec::new(),
+                    flags: 0,
+                },
+            );
+            let before = state.inspect().unwrap();
+            state
+                .select_checkpoint_owners(&[AllocationOwner {
+                    allocation: reference,
+                    owner_pid: 41,
+                }])
+                .unwrap();
+            assert_eq!(state.inspect().unwrap(), before);
+            assert_eq!(state.checkpoint_owners[&reference.id], 41);
+            assert!(before.iter().any(|record| matches!(record,
+                cuinterpose_protocol::Record::Allocation {
+                    allocation, size: 8192, virtual_allocation_handle_count: 0, shared: true, ..
+                } if *allocation == reference
+            )));
+        }
+    }
 
     #[test]
     fn inspect_rejects_mapping_without_backing() {

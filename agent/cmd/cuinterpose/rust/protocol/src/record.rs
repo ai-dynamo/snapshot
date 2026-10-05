@@ -60,10 +60,9 @@ pub enum BindingVersion {
 pub enum Record {
     Allocation {
         allocation: AllocationReference,
-        /// True only when this participant created a shared allocation and saves its
-        /// bytes in the host carrier captured by CRIU for later restore. Importers do
-        /// not duplicate that copy, and private memory uses native CUDA checkpointing.
-        checkpoint_via_host_carrier: bool,
+        /// Shared backing needs one host-carrier copy, saved by a holder selected
+        /// from the complete checkpoint group. Private memory uses native CUDA.
+        shared: bool,
         size: u64,
         /// `CUmemAllocationProp::type_`.
         allocation_type: u32,
