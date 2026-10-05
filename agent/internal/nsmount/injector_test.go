@@ -19,6 +19,7 @@ type fakeMountRef struct {
 }
 
 func (h *fakeMountRef) NsFd() *os.File { return h.nsFd }
+func (h *fakeMountRef) Release() error { return nil }
 func (h *fakeMountRef) Unmount(context.Context) error {
 	*h.unmountLog = append(*h.unmountLog, h.dst)
 	return nil
@@ -155,6 +156,7 @@ func TestMountArtifactRejectsUnsafeSourceBeforeHelper(t *testing.T) {
 type noopNamespaceMount struct{}
 
 func (noopNamespaceMount) Unmount(context.Context) error { return nil }
+func (noopNamespaceMount) Release() error                { return nil }
 func (noopNamespaceMount) NsFd() *os.File                { return nil }
 
 func TestMountPointUnmount(t *testing.T) {

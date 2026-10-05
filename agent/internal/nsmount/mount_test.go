@@ -7,6 +7,7 @@ package nsmount
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -164,6 +165,62 @@ func TestCuInterposeMountRetainsDestinationForUnmount(t *testing.T) {
 			}
 			if _, err := nsFd.Stat(); err != nil {
 				t.Fatalf("unmount closed the caller's namespace: %v", err)
+			}
+		})
+	}
+}
+
+func TestCuInterposeMountRelease(t *testing.T) {
+	for _, closeBeforeRelease := range []bool{false, true} {
+		t.Run(fmt.Sprintf("already closed=%v", closeBeforeRelease), func(t *testing.T) {
+			logFile := filepath.Join(t.TempDir(), "args.log")
+			m := newWithMounter(newMounterForTest(t, writeFakeBinary(t, `printf '%s\n' "$*" >> `+logFile)), logr.Discard())
+			bundle, err := m.MountBundle(context.Background(), os.Getpid())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = bundle.Unmount(context.Background()) })
+			shim, err := m.MountCuInterpose(context.Background(), bundle)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = shim.Release() })
+			if closeBeforeRelease {
+				if err := shim.NsFd().Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			releaseErr := shim.Release()
+			if closeBeforeRelease {
+				if !errors.Is(releaseErr, os.ErrClosed) {
+					t.Fatalf("Release() = %v, want closed fd error", releaseErr)
+				}
+			} else if releaseErr != nil {
+				t.Fatal(releaseErr)
+			}
+			if _, err := shim.NsFd().Stat(); !errors.Is(err, os.ErrClosed) {
+				t.Fatalf("released namespace fd is still open: %v", err)
+			}
+			if err := shim.Release(); err != releaseErr {
+				t.Fatalf("repeated Release() = %v, want %v", err, releaseErr)
+			}
+			if err := shim.Unmount(context.Background()); err != releaseErr {
+				t.Fatalf("Unmount() after Release() = %v, want %v", err, releaseErr)
+			}
+			if _, err := bundle.NsFd().Stat(); err != nil {
+				t.Fatalf("release closed the bundle's namespace fd: %v", err)
+			}
+			if err := bundle.Unmount(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			want := []string{
+				"mount-bundle-fd 3",
+				"mount-snapshot-cuda-fd 3 " + filepath.Base(podcontract.CuInterposeMountPath),
+				"unmount-bundle-fd 3",
+			}
+			if got := readLines(t, logFile); strings.Join(got, "\n") != strings.Join(want, "\n") {
+				t.Fatalf("helper commands = %v, want %v", got, want)
 			}
 		})
 	}
