@@ -47,3 +47,4 @@ test-native: native
 	cd rust && cargo clippy --locked --workspace --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
 	cd rust && cargo test --locked --workspace --target x86_64-unknown-linux-gnu
 	cd rust && cargo test --locked --release -p cuinterpose-coordinator -p cuinterpose-protocol -p cuinterpose-launch --target x86_64-unknown-linux-musl
+	build/cuinterpose-launch --library "$(CURDIR)/build/libcuinterpose.so" -- /bin/true
