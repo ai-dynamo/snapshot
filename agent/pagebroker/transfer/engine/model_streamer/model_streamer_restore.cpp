@@ -14,6 +14,7 @@
 #include <future>
 #include <limits>
 #include <set>
+#include <semaphore>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -38,6 +39,17 @@ constexpr unsigned kResponsePollTimeoutMs = 25;
 // ends. Bound admission and stop admitting on the first completion, so steady
 // arrivals cannot keep an old destination alive indefinitely.
 constexpr std::size_t kSessionSubmissionLimit = 8;
+
+std::binary_semaphore&
+NativeSessionGate()
+{
+  // The pinned S3 plugin cancels and removes clients process-wide at end().
+  // Separate coordinators must not overlap native lifetimes. Submissions in
+  // the admitted session still run concurrently. A semaphore also permits
+  // destructor cleanup on a different thread after the event loop joins.
+  static std::binary_semaphore gate(1);
+  return gate;
+}
 
 bool
 IsRecoverableRangeStatus(int status)
@@ -339,14 +351,25 @@ ModelStreamerRestore::SubmitPending()
 {
   DiscardInterruptedPending();
   while (!pending_.empty() && CanAdmit(*pending_.front())) {
-    if (value_ == nullptr)
+    if (value_ == nullptr) {
+      // Poll admission so queued cancellation/deadlines remain observable
+      // while another coordinator drains its native session.
+      if (!NativeSessionGate().try_acquire_for(std::chrono::milliseconds(kResponsePollTimeoutMs))) {
+        ScheduleReceive();
+        return;
+      }
+      owns_native_session_ = true;
       Start();
+    }
     // Keep the entry in pending_ until native submission and registration both
     // finish. On any exception, HandleFailure ends native access before FailAll
     // releases even an entry that the library accepted but we could not track.
     SubmitNative(pending_.front());
     pending_.pop_front();
   }
+  // Rejected or cancelled requests must not retain the process-wide permit.
+  if (active_.empty())
+    StopStreamer();
 }
 
 void
@@ -441,8 +464,11 @@ void
 ModelStreamerRestore::ReceiveAndDispatch()
 {
   receive_scheduled_ = false;
-  if (active_.empty())
+  if (active_.empty()) {
+    SubmitPending();
+    ScheduleReceive();
     return;
+  }
 
   StreamerResponse response;
   response.status = streamer::runai_file_streamer_response(
@@ -495,7 +521,9 @@ ModelStreamerRestore::FinishSession()
 void
 ModelStreamerRestore::ScheduleReceive()
 {
-  if (receive_scheduled_ || active_.empty())
+  if (receive_scheduled_)
+    return;
+  if (active_.empty() && pending_.empty())
     return;
 
   receive_scheduled_ = true;
@@ -506,10 +534,14 @@ ModelStreamerRestore::ScheduleReceive()
 void
 ModelStreamerRestore::StopStreamer() noexcept
 {
-  if (value_ == nullptr)
-    return;
-  streamer::runai_file_streamer_end(value_);
-  value_ = nullptr;
+  if (value_ != nullptr) {
+    streamer::runai_file_streamer_end(value_);
+    value_ = nullptr;
+  }
+  if (owns_native_session_) {
+    owns_native_session_ = false;
+    NativeSessionGate().release();
+  }
 }
 
 void

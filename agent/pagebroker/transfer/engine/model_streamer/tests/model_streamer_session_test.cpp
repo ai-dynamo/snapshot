@@ -388,3 +388,44 @@ TEST_F(ModelStreamerSessionTest, CancellationDuringStartupDoesNotFailCoordinator
   EXPECT_EQ(state.submitted, 1U);
   EXPECT_EQ(state.starts, state.ends);
 }
+
+TEST_F(ModelStreamerSessionTest, CoordinatorsWaitUntilPreviousNativeTeardownReturns)
+{
+  state.hold_end = true;
+  ModelStreamerRestore first, second;
+  auto active = std::async(std::launch::async, [&] { first.Stage(Plan(), root_ / "first"); });
+  EXPECT_TRUE(WaitForEnd());
+  auto waiting = std::async(std::launch::async, [&] { second.Stage(Plan(), root_ / "second"); });
+  EXPECT_EQ(waiting.wait_for(50ms), std::future_status::timeout);
+  {
+    std::lock_guard lock(state.mutex);
+    EXPECT_EQ(state.starts, 1U);
+  }
+  ReleaseEnd();
+  EXPECT_NO_THROW(active.get());
+  EXPECT_NO_THROW(waiting.get());
+  EXPECT_EQ(state.starts, 2U);
+  EXPECT_EQ(state.ends, 2U);
+}
+
+TEST_F(ModelStreamerSessionTest, DeadlineWhileWaitingForAnotherCoordinatorIsIndependent)
+{
+  state.hold_end = true;
+  ModelStreamerRestore first, second;
+  auto active = std::async(std::launch::async, [&] { first.Stage(Plan(), root_ / "first"); });
+  EXPECT_TRUE(WaitForEnd());
+  TransferControl control;
+  control.deadline = TransferControl::Clock::now() + 50ms;
+  auto waiting = std::async(std::launch::async, [&] { second.Stage(Plan(), root_ / "expired", control); });
+  EXPECT_EQ(waiting.wait_for(2s), std::future_status::ready);
+  EXPECT_EQ(active.wait_for(0ms), std::future_status::timeout);
+  {
+    std::lock_guard lock(state.mutex);
+    EXPECT_EQ(state.starts, 1U);
+  }
+  ReleaseEnd();
+  EXPECT_NO_THROW(active.get());
+  EXPECT_THROW(waiting.get(), TransferInterrupted);
+  EXPECT_FALSE(second.Failed());
+  EXPECT_NO_THROW(second.Stage(Plan(), root_ / "recovered"));
+}

@@ -146,6 +146,7 @@ class ModelStreamerRestore {
 
   std::once_flag start_once_;
   void* value_ = nullptr;
+  bool owns_native_session_ = false;
   const std::chrono::milliseconds submission_timeout_;
   const ModelStreamerSessionOptions options_;
   const std::exception_ptr stopped_error_;

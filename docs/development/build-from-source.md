@@ -71,6 +71,11 @@ submission. All destinations remain mapped until the session ends, then pending
 work starts a new session. Terminal failures stop native access before releasing
 any affected restore; ordinary completed storage errors fail their own restore.
 
+The pinned S3 plugin tears down clients process-wide. PageBroker therefore
+admits one native session per process across restore coordinators, while reads
+within that session remain concurrent. Waiting coordinators poll cancellation
+and deadlines until the previous session has fully drained.
+
 ## 3. Push the images
 
 Push the images to a registry the cluster can pull from:
