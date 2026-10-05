@@ -12,7 +12,7 @@ python3 frontend/tests/run.py --artifacts build
 ```
 
 The suite requires Linux/amd64, at least two visible NVIDIA GPUs, the installed
-CUDA driver and CUDA 13.1 runtime/headers, GCC, binutils, Python MessagePack, and
+CUDA 13.0+ driver and CUDA 13 runtime/headers, GCC, binutils, Python MessagePack, and
 matched frontend/core artifacts. It fails if these requirements are unavailable;
 it does not substitute CUDA implementations or skip the GPU checks. Set
 `--cuda-include /usr/local/cuda/include` if headers are not in `/opt/cuda/include`.

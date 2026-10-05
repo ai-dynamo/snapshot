@@ -119,43 +119,67 @@ int main(int argc, char **argv) {
         Query query = symbol(driver, "cuGetProcAddress");
         Query native = original(driver, "cuGetProcAddress");
         QueryV2 query2 = symbol(driver, "cuGetProcAddress_v2");
+        QueryV2 native2 = original(driver, "cuGetProcAddress_v2");
         QueryV2 ptsz = symbol(RTLD_DEFAULT, "cuGetProcAddress_v2_ptsz");
         const struct { const char *name; int version; } cases[] = {
-            {"cuCtxEnablePeerAccess", 13010}, {"cuCtxDisablePeerAccess", 13010},
-            {"cuCtxDestroy", 2000}, {"cuCtxDestroy", 13010},
-            {"cuDevicePrimaryCtxRelease", 7000}, {"cuDevicePrimaryCtxRelease", 13010},
-            {"cuDevicePrimaryCtxReset", 7000}, {"cuDevicePrimaryCtxReset", 13010},
-            {"cuMemAlloc", 13010}, {"cuIpcOpenMemHandle", 13010},
-            {"cuMemCreate", 11000}, {"cuMemMap", 13010},
+            {"cuCtxEnablePeerAccess", 13000}, {"cuCtxDisablePeerAccess", 13000},
+            {"cuCtxDestroy", 2000}, {"cuCtxDestroy", 13000},
+            {"cuDevicePrimaryCtxRelease", 7000}, {"cuDevicePrimaryCtxRelease", 13000},
+            {"cuDevicePrimaryCtxReset", 7000}, {"cuDevicePrimaryCtxReset", 13000},
+            {"cuMemAlloc", 13000}, {"cuIpcOpenMemHandle", 13000},
+            {"cuMemCreate", 11000}, {"cuMemMap", 13000},
             {"cuMulticastBindMem", 12010}, {"cuMulticastBindMem", 13010},
             {"cuMulticastBindAddr", 12010}, {"cuMulticastBindAddr", 13010},
             {"cuGetProcAddress", 11030}, {"cuGetProcAddress", 12000},
         };
         for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
             void *expected = NULL, *actual = NULL;
-            assert(native(cases[i].name, &expected, cases[i].version, 0) == CUDA_SUCCESS && expected);
-            Dl_info info;
-            assert(dladdr(expected, &info) && info.dli_sname);
-            assert(query(cases[i].name, &actual, cases[i].version, 0) == CUDA_SUCCESS);
-            in_shim(actual, info.dli_sname);
+            CUresult result = native(cases[i].name, &expected, cases[i].version, 0);
+            assert(query(cases[i].name, &actual, cases[i].version, 0) == result);
+            if (cases[i].version <= 13000)
+                assert(result == CUDA_SUCCESS && expected);
+            // Older drivers may reject the explicit-device multicast query. Match
+            // its native result instead of requiring or skipping the newer API.
+            if (result == CUDA_SUCCESS && expected) {
+                Dl_info info;
+                assert(dladdr(expected, &info) && info.dli_sname);
+                in_shim(actual, info.dli_sname);
+            } else {
+                assert(actual == expected);
+            }
+            CUdriverProcAddressQueryResult expected_status = CU_GET_PROC_ADDRESS_SUCCESS;
+            CUdriverProcAddressQueryResult actual_status = CU_GET_PROC_ADDRESS_SUCCESS;
+            expected = actual = NULL;
+            result = native2(cases[i].name, &expected, cases[i].version, 0, &expected_status);
+            assert(query2(cases[i].name, &actual, cases[i].version, 0, &actual_status) == result);
+            assert(actual_status == expected_status);
+            if (cases[i].version <= 13000)
+                assert(result == CUDA_SUCCESS && expected_status == CU_GET_PROC_ADDRESS_SUCCESS && expected);
+            if (result == CUDA_SUCCESS && expected_status == CU_GET_PROC_ADDRESS_SUCCESS && expected) {
+                Dl_info info;
+                assert(dladdr(expected, &info) && info.dli_sname);
+                in_shim(actual, info.dli_sname);
+            } else {
+                assert(actual == expected);
+            }
         }
         void *address = NULL;
         CUdriverProcAddressQueryResult status;
-        assert(query("cuMemAlloc", &address, 13010, 0) == CUDA_SUCCESS);
+        assert(query("cuMemAlloc", &address, 13000, 0) == CUDA_SUCCESS);
         allocate(address);
         assert(query("cuGetProcAddress", &address, 11030, 0) == CUDA_SUCCESS);
-        assert(((Query)address)("cuMemAlloc", &address, 13010, 0) == CUDA_SUCCESS);
+        assert(((Query)address)("cuMemAlloc", &address, 13000, 0) == CUDA_SUCCESS);
         allocate(address);
         assert(query("cuGetProcAddress", &address, 12000, 0) == CUDA_SUCCESS);
-        assert(((QueryV2)address)("cuMemAlloc", &address, 13010, 0, &status) == CUDA_SUCCESS);
+        assert(((QueryV2)address)("cuMemAlloc", &address, 13000, 0, &status) == CUDA_SUCCESS);
         assert(status == CU_GET_PROC_ADDRESS_SUCCESS);
         allocate(address);
-        assert(ptsz("cuMemAlloc", &address, 13010, 0, &status) == CUDA_SUCCESS);
+        assert(ptsz("cuMemAlloc", &address, 13000, 0, &status) == CUDA_SUCCESS);
         assert(status == CU_GET_PROC_ADDRESS_SUCCESS);
         allocate(address);
-        assert(query2("not_a_cuda_api", &address, 13010, 0, &status) == CUDA_SUCCESS);
+        assert(query2("not_a_cuda_api", &address, 13000, 0, &status) == CUDA_SUCCESS);
         assert(!address && status == CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND);
-        assert(query("cuDriverGetVersion", &address, 13010, 0) == CUDA_SUCCESS);
+        assert(query("cuDriverGetVersion", &address, 13000, 0) == CUDA_SUCCESS);
         assert(address == original(driver, "cuDriverGetVersion"));
     } else if (strcmp(argv[1], "runtime") == 0) {
         void *runtime = dlopen("libcudart.so.13", RTLD_NOW | RTLD_LOCAL);
@@ -168,14 +192,14 @@ int main(int argc, char **argv) {
             void *address = NULL;
             int status = -1;
             int result = i < 2 ? ((RuntimeQuery)resolver)("cuMemAlloc", &address, 0, &status)
-                              : ((RuntimeVersionQuery)resolver)("cuMemAlloc", &address, 13010, 0, &status);
+                              : ((RuntimeVersionQuery)resolver)("cuMemAlloc", &address, 13000, 0, &status);
             assert(result == 0 && status == 0);
             in_shim(address, "cuMemAlloc_v2");
             allocate(address);
             const char *peers[] = {"cuCtxEnablePeerAccess", "cuCtxDisablePeerAccess"};
             for (unsigned j = 0; j < 2; ++j) {
                 result = i < 2 ? ((RuntimeQuery)resolver)(peers[j], &address, 0, &status)
-                               : ((RuntimeVersionQuery)resolver)(peers[j], &address, 13010, 0, &status);
+                               : ((RuntimeVersionQuery)resolver)(peers[j], &address, 13000, 0, &status);
                 assert(result == 0 && status == 0);
                 in_shim(address, peers[j]);
             }
