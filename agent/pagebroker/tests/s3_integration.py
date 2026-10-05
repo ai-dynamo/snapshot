@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run native S3 reads against a disposable local Moto service.
+"""Run native S3 uploads and restores against a disposable local Moto service.
 
 Requires boto3 and moto[server]. Uses fixed test credentials and an in-memory
 restore plan; no cloud account or artifact index is needed.
@@ -10,17 +10,186 @@ restore plan; no cloud account or artifact index is needed.
 
 import argparse
 import contextlib
+from collections import Counter
 import logging
 import os
 from pathlib import Path
 import subprocess
 import tempfile
 import threading
+import time
+from urllib.parse import parse_qs
 import uuid
 
 import boto3
 import botocore.session
 from botocore.config import Config
+
+
+class FaultService:
+    """Script S3 failures only for native-test keys under roundtrip/.
+
+    Successful round-trip payloads always come from the C++ uploader. Counters
+    let the Python side independently check retries, cleanup and resource caps.
+    """
+
+    def __init__(self, app):
+        self.app = app
+        self.changed = threading.Condition()
+        self.counts = Counter()
+        self.first_parts = set()
+        self.released = set()
+        self.active_parts = 0
+        self.peak_parts = 0
+        self.active_uploads = set()
+        self.peak_uploads = 0
+
+    @staticmethod
+    def error(start_response, code="ServiceUnavailable", status="503 Service Unavailable"):
+        body = f"<Error><Code>{code}</Code><Message>injected local test failure</Message></Error>".encode()
+        start_response(status, [("Content-Type", "application/xml"), ("Content-Length", str(len(body)))])
+        return [body]
+
+    def __call__(self, environment, start_response):
+        key = environment.get("PATH_INFO", "").split("/", 2)[-1]
+        if not key.startswith("roundtrip/"):
+            return self.app(environment, start_response)
+        scenario = key.split("/")[1]
+        query = parse_qs(environment.get("QUERY_STRING", ""), keep_blank_values=True)
+        method = environment["REQUEST_METHOD"]
+        operation = {"PUT": "put", "GET": "get", "HEAD": "head"}.get(method, method)
+        if "uploads" in query:
+            operation = "create" if method == "POST" else "list_uploads"
+        if "uploadId" in query:
+            operation = {"PUT": "part", "POST": "complete", "DELETE": "abort", "GET": "list_parts"}[method]
+        with self.changed:
+            self.counts[scenario, operation] += 1
+            attempt = self.counts[scenario, operation]
+            if scenario == "bounded" and operation == "part":
+                self.active_parts += 1
+                self.peak_parts = max(self.peak_parts, self.active_parts)
+        try:
+            if scenario in ("wait", "release"):
+                target = "roundtrip/" + key.split("/")[2] + "/data"
+                with self.changed:
+                    if scenario == "wait":
+                        if not self.changed.wait_for(lambda: target in self.first_parts, timeout=10):
+                            return self.error(start_response)
+                    else:
+                        self.released.add(target)
+                        self.changed.notify_all()
+                start_response("200 OK", [("Content-Length", "0")])
+                return [b""]
+            if scenario == "retry" and operation == "put" and attempt <= 2:
+                return self.error(start_response)
+            if scenario in ("denied", "concurrent-failure") and operation == "put":
+                return self.error(start_response, "AccessDenied", "403 Forbidden")
+            if scenario == "engine-partial" and operation == "put" and key.endswith("/bad"):
+                return self.error(start_response, "AccessDenied", "403 Forbidden")
+            if scenario in ("part-failure", "abort-failure", "verify-failure") and operation == "part" and query["partNumber"] != ["1"]:
+                with self.changed:
+                    if not self.changed.wait_for(lambda: key in self.first_parts, timeout=10):
+                        raise RuntimeError("first multipart part did not complete")
+                return self.error(start_response)
+            if scenario == "abort-failure" and operation == "abort":
+                return self.error(start_response)
+            if scenario == "verify-failure" and operation == "list_parts":
+                return self.error(start_response)
+            if scenario == "complete-error" and operation == "complete":
+                return self.error(start_response, "InternalError", "200 OK")
+            if scenario in ("deadline", "multipart-deadline") and operation in ("put", "part"):
+                time.sleep(1)
+                return self.error(start_response)
+            if scenario == "source-truncated" and operation == "part" and query["partNumber"] != ["1"]:
+                with self.changed:
+                    if not self.changed.wait_for(lambda: key in self.released, timeout=10):
+                        return self.error(start_response)
+
+            response = {}
+
+            def capture(status, headers, exc_info=None):
+                response.update(status=status, headers=headers)
+
+            try:
+                iterable = self.app(environment, capture)
+                try:
+                    body = b"".join(iterable)
+                finally:
+                    if hasattr(iterable, "close"):
+                        iterable.close()
+            except OSError as error:
+                # Source truncation cancels outstanding chunked HTTP bodies.
+                # Werkzeug reports their expected early EOF as an OSError.
+                if scenario != "source-truncated" or str(error) != "Invalid chunk header":
+                    raise
+                return self.error(start_response, "RequestTimeout", "408 Request Timeout")
+            success = response["status"].startswith("2")
+            with self.changed:
+                if success and operation == "part" and query["partNumber"] == ["1"]:
+                    self.first_parts.add(key)
+                    self.changed.notify_all()
+                    if scenario in ("source-truncated", "engine-overlap"):
+                        if not self.changed.wait_for(lambda: key in self.released, timeout=10):
+                            return self.error(start_response)
+                if scenario == "bounded" and success:
+                    if operation == "create":
+                        self.active_uploads.add(key)
+                        self.peak_uploads = max(self.peak_uploads, len(self.active_uploads))
+                    elif operation in ("complete", "abort"):
+                        self.active_uploads.discard(key)
+            if scenario == "lost-create" and operation == "create" and success:
+                return self.error(start_response)
+            if scenario == "lost-complete" and operation == "complete":
+                return self.error(start_response)
+            if scenario == "lost-put" and operation == "put":
+                return self.error(start_response)
+            if scenario == "corrupt" and operation == "get" and success and body:
+                body = bytes([body[0] ^ 1]) + body[1:]
+            start_response(response["status"], response["headers"])
+            return [body]
+        finally:
+            if scenario == "bounded" and operation == "part":
+                with self.changed:
+                    self.active_parts -= 1
+
+    def verify(self, client, bucket):
+        # Run only assertions for cases actually selected by the native filter.
+        assert not any(count for (_, operation), count in self.counts.items() if operation == "DELETE")
+        assert not any(count for (scenario, _), count in self.counts.items() if scenario == "preflight"), self.counts
+        if self.counts["engine-partial", "put"]:
+            assert self.counts["engine-partial", "put"] == 2, self.counts
+            assert client.head_object(Bucket=bucket, Key="roundtrip/engine-partial/first")["ContentLength"] > 0
+            keys = client.list_objects_v2(Bucket=bucket, Prefix="roundtrip/engine-partial/")
+            assert [item["Key"] for item in keys.get("Contents", [])] == ["roundtrip/engine-partial/first"], keys
+        if self.counts["retry", "put"]:
+            assert self.counts["retry", "put"] == 3, self.counts
+        if self.counts["denied", "put"]:
+            assert self.counts["denied", "put"] == 1, self.counts
+        if self.counts["part-failure", "create"]:
+            assert self.counts["part-failure", "abort"] == 1, self.counts
+            assert self.counts["part-failure", "complete"] == 0, self.counts
+            uploads = client.list_multipart_uploads(Bucket=bucket, Prefix="roundtrip/part-failure/")
+            assert not uploads.get("Uploads"), uploads
+        if self.counts["abort-failure", "abort"]:
+            # Two cleanup rounds, three attempts per request in the native test.
+            assert self.counts["abort-failure", "abort"] == 6, self.counts
+        for scenario in ("multipart-deadline", "source-truncated"):
+            if self.counts[scenario, "create"]:
+                assert self.counts[scenario, "abort"] >= 1, self.counts
+                assert not client.list_multipart_uploads(Bucket=bucket, Prefix=f"roundtrip/{scenario}/").get("Uploads")
+        if self.counts["lost-create", "create"]:
+            assert self.counts["lost-create", "create"] == 1, self.counts
+        for scenario in ("lost-complete", "lost-put"):
+            if self.counts[scenario, "complete"] or self.counts[scenario, "put"]:
+                metadata = client.head_object(Bucket=bucket, Key=f"roundtrip/{scenario}/data")
+                assert metadata["ContentLength"] > 0
+        if self.counts["bounded", "create"]:
+            assert 0 < self.peak_parts <= 2, self.peak_parts
+            assert 0 < self.peak_uploads <= 2, self.peak_uploads
+            assert not self.active_uploads
+        if self.counts["tree", "put"]:
+            metadata = client.head_object(Bucket=bucket, Key="roundtrip/tree/empty")
+            assert metadata["ContentLength"] == 0
 
 
 def local_environment():
@@ -39,7 +208,7 @@ def local_environment():
 
 
 @contextlib.contextmanager
-def local_service(args, environment):
+def local_service(args, environment, service_factory=FaultService):
     from moto.server import DomainDispatcherApplication, create_backend_app
     from werkzeug.serving import make_server
 
@@ -57,14 +226,15 @@ def local_service(args, environment):
             )
             environment["AWS_CA_BUNDLE"] = str(certificate)
             tls = (str(certificate), str(key))
-        server = make_server("127.0.0.1", 0, DomainDispatcherApplication(create_backend_app),
+        faults = service_factory(DomainDispatcherApplication(create_backend_app))
+        server = make_server("127.0.0.1", 0, faults,
                              threaded=True, ssl_context=tls)
         worker = threading.Thread(target=server.serve_forever)
         worker.start()
         try:
             scheme = "https" if args.tls else "http"
             environment["AWS_ENDPOINT_URL"] = f"{scheme}://127.0.0.1:{server.server_port}"
-            yield
+            yield faults
         finally:
             server.shutdown()
             worker.join()
@@ -78,9 +248,9 @@ def make_fixture(root):
     (root / "nested" / "space + percent% question? hash# unicode-é").write_bytes(
         bytes(range(256)) * 17
     )
-    # Crosses the native S3 reader's chunk boundary without a large heap buffer.
+    # Crosses both the native reader chunk size and two default upload parts.
     with (root / "nested" / "large").open("wb") as file:
-        for _ in range(192):
+        for _ in range(512):
             file.write(bytes(range(256)) * 256)
         file.write(b"tail")
     root.chmod(0o750)
@@ -119,7 +289,7 @@ def create_session(environment):
     )
 
 
-def run(args, environment):
+def run(args, environment, faults=None):
     session = create_session(environment)
     client = session.client(
         "s3",
@@ -168,18 +338,32 @@ def run(args, environment):
             command.append(args.image)
         else:
             command = [str(Path(args.binary).resolve())]
-        run_native(command, environment, container_name, 180)
+        run_native(command, environment, container_name, 300)
+        if faults:
+            faults.verify(client, bucket)
+        if args.resources:
+            for size in (64, 128):
+                probe = dict(environment)
+                probe["GTEST_FILTER"] = "S3RoundTripTest.*MemoryProbe"
+                probe["PAGEBROKER_S3_TEST_MEMORY_MIB"] = str(size)
+                resource_command = list(command)
+                if args.image:
+                    resource_command[-1:-1] = ["--env", "GTEST_FILTER", "--env", "PAGEBROKER_S3_TEST_MEMORY_MIB"]
+                run_native(resource_command, probe, container_name, 120)
         if args.tls:
             # A separate process is necessary: the pinned native library
             # caches its AWS configuration for the process lifetime.
             untrusted = dict(environment)
             untrusted["AWS_CA_BUNDLE"] = "/etc/ssl/certs/ca-certificates.crt"
-            untrusted["GTEST_FILTER"] = "ModelStreamerS3Test.RejectsUntrustedTLS"
+            untrusted["GTEST_FILTER"] = "ModelStreamerS3Test.RejectsUntrustedTLS:S3RoundTripTest.RejectsUntrustedTLS"
             untrusted["PAGEBROKER_S3_TEST_TLS_REJECT"] = "1"
             rejection = list(command)
             if args.image:
                 rejection[-1:-1] = ["--env", "GTEST_FILTER", "--env", "PAGEBROKER_S3_TEST_TLS_REJECT"]
-            run_native(rejection, untrusted, container_name, 60)
+            # Both the standalone reader and engine reader reject this CA.
+            # Native teardown drains each session's outstanding TLS retries,
+            # so allow both lifetimes to finish before the outer watchdog.
+            run_native(rejection, untrusted, container_name, 120)
 
 
 def main():
@@ -188,10 +372,11 @@ def main():
     target.add_argument("--binary", help="native model-streamer-s3-test executable")
     target.add_argument("--image", help="PageBroker Docker image built with --target s3-test (Linux)")
     parser.add_argument("--tls", action="store_true", help="use verified HTTPS with a temporary local CA")
+    parser.add_argument("--resources", action="store_true", help="also check upload memory in isolated native processes")
     args = parser.parse_args()
     environment = local_environment()
-    with local_service(args, environment):
-        run(args, environment)
+    with local_service(args, environment) as faults:
+        run(args, environment, faults)
 
 
 if __name__ == "__main__":

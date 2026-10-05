@@ -54,7 +54,55 @@ RUN set -eu; \
     cp "$license" /opt/model-streamer-sdk/legal/LICENSE; \
     cp "$metadata" /opt/model-streamer-sdk/legal/METADATA
 
-FROM ${DOCKER_PROXY}library/${PAGEBROKER_BUILD_IMAGE} AS build
+# The S3 client has its own SDK; the Model Streamer plugin's SDK symbols are
+# private. Pin the source and its submodules rather than a host-installed SDK.
+FROM ${DOCKER_PROXY}library/${PAGEBROKER_BUILD_IMAGE} AS aws-sdk
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential ca-certificates cmake git libcurl4-openssl-dev libssl-dev zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN git init /src/aws-sdk-cpp \
+    && cd /src/aws-sdk-cpp \
+    && git remote add origin https://github.com/aws/aws-sdk-cpp.git \
+    && git fetch --depth 1 origin bba3cfc14d4fc148aeee7a8ff7822dd7a9a0f4d3 \
+    && git checkout --detach FETCH_HEAD \
+    && git submodule update --init --recursive --depth 1
+RUN cmake -S /src/aws-sdk-cpp -B /src/aws-sdk-cpp/build -DCMAKE_BUILD_TYPE=Release \
+       -DCMAKE_INSTALL_PREFIX=/opt/aws-sdk -DCMAKE_INSTALL_LIBDIR=lib \
+       -DBUILD_ONLY=s3 -DBUILD_SHARED_LIBS=ON \
+       -DENABLE_TESTING=OFF -DAUTORUN_UNIT_TESTS=OFF \
+    && cmake --build /src/aws-sdk-cpp/build --parallel 4 \
+    && cmake --install /src/aws-sdk-cpp/build
+
+# Include the HTTP/TLS dependency closure in the shell-free runtime. The base
+# already supplies the C/C++ runtime. Keep package attribution with each copy.
+RUN set -eu; \
+    mkdir -p /runtime/lib /runtime/legal/aws-sdk /runtime/legal/packages; \
+    cp -a /opt/aws-sdk/lib/*.so* /runtime/lib/; \
+    cp /src/aws-sdk-cpp/LICENSE /runtime/legal/aws-sdk/; \
+    git -C /src/aws-sdk-cpp rev-parse HEAD > /runtime/legal/aws-sdk/REVISION; \
+    find /src/aws-sdk-cpp/crt -name LICENSE -o -name NOTICE | while read -r notice; do \
+      relative=${notice#/src/aws-sdk-cpp/}; \
+      mkdir -p "/runtime/legal/aws-sdk/$(dirname "$relative")"; \
+      cp "$notice" "/runtime/legal/aws-sdk/$relative"; \
+    done; \
+    LD_LIBRARY_PATH=/opt/aws-sdk/lib ldd /opt/aws-sdk/lib/*.so > /tmp/aws-ldd; \
+    ! grep -q 'not found' /tmp/aws-ldd; \
+    awk '$2 == "=>" && substr($3, 1, 1) == "/" { print $3 }' /tmp/aws-ldd | sort -u > /tmp/aws-libraries; \
+    while read -r library; do \
+      case "$library" in \
+        */libc.so.*|*/libm.so.*|*/libstdc++.so.*|*/libgcc_s.so.*|*/libpthread.so.*|*/libdl.so.*|*/librt.so.*) continue ;; \
+        /opt/aws-sdk/*) continue ;; \
+      esac; \
+      cp -L "$library" /runtime/lib/; \
+      package=$(dpkg-query -S "$(readlink -f "$library")" | head -1 | cut -d: -f1); \
+      mkdir -p "/runtime/legal/packages/$package"; \
+      cp "/usr/share/doc/$package/copyright" "/runtime/legal/packages/$package/"; \
+    done < /tmp/aws-libraries
+
+FROM aws-sdk AS build
+
+COPY --from=aws-sdk /opt/aws-sdk /usr/local
+RUN rm -rf /src/aws-sdk-cpp && ldconfig
 
 COPY --from=model-streamer-install /opt/model-streamer-sdk/lib/libstreamer.so /usr/local/lib/libstreamer.so
 COPY --from=model-streamer-install /opt/model-streamer-sdk/include/ /usr/local/include/
@@ -65,6 +113,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgtest-dev \
     libprotobuf-dev \
     libssl-dev \
+    nlohmann-json3-dev=3.11.3-1 \
     pkg-config \
     protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
@@ -76,7 +125,7 @@ RUN make test && make daemon && make s3-test-build
 # Smoke-test must run here: the runtime stage is distroless (no shell).
 RUN output=$(/src/pagebroker 2>&1); status=$?; \
     [ "$status" -eq 2 ]; \
-    [ "$output" = "usage: pagebroker socket_path staging_directory storage_root --max-concurrent-requests max_concurrent_requests" ]
+    [ "$output" = "usage: pagebroker socket_path staging_directory storage_root --max-concurrent-requests max_concurrent_requests [--storage-config path]" ]
 
 # Corresponding source for the statically linked protobuf. Fetched in this
 # stage, from the same libprotobuf-dev install that provided the linked
@@ -106,6 +155,9 @@ FROM ${PAGEBROKER_BASE_IMAGE} AS runtime
 COPY --from=build /src/pagebroker /usr/local/bin/pagebroker
 COPY --from=build /usr/lib/x86_64-linux-gnu/libcrypto.so.3 /usr/local/lib/libcrypto.so.3
 COPY --from=build /usr/share/doc/libssl-dev/copyright /legal/openssl/copyright
+COPY --from=build /usr/share/doc/nlohmann-json3-dev/copyright /legal/nlohmann-json/copyright
+COPY --from=aws-sdk /runtime/lib/ /usr/local/lib/
+COPY --from=aws-sdk /runtime/legal/ /legal/
 COPY --from=sources /legal /legal
 COPY --from=model-streamer-legal / /legal/model-streamer/
 COPY --from=model-streamer-install /opt/model-streamer-sdk/lib/libstreamer.so /usr/local/lib/libstreamer.so

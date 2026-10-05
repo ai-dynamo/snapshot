@@ -3,6 +3,7 @@
 
 #include "model_streamer_transfer_engine.hpp"
 
+#include <cstdlib>
 #include <filesystem>
 #include <stdexcept>
 #include <utility>
@@ -11,11 +12,67 @@
 
 namespace snapshot::pagebroker {
 namespace fs = std::filesystem;
+namespace {
+bool
+HasValidAddressingSetting(const std::string& addressing)
+{
+  if (!std::getenv("RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING"))
+    return true;
+  return addressing == "0" || addressing == "1";
+}
+
+std::string
+Environment(const char* name)
+{
+  const auto* value = std::getenv(name);
+  return value ? value : "";
+}
+
+}  // namespace
 
 ModelStreamerTransferEngine::ModelStreamerTransferEngine(Path storage_root)
     : storage_root_(fs::weakly_canonical(std::move(storage_root))),
-      restore_(std::make_shared<ModelStreamerRestore>())
+      restore_(CreateRestore())
 {
+}
+
+ModelStreamerTransferEngine::ModelStreamerTransferEngine(Path storage_root, S3TransferOptions options)
+    : storage_root_(fs::weakly_canonical(std::move(storage_root))), s3_options_(std::move(options)),
+      restore_(CreateRestore())
+{
+  ValidateS3Configuration();
+}
+
+void
+ModelStreamerTransferEngine::ValidateS3Configuration() const
+{
+  if (!s3_options_)
+    throw std::invalid_argument("Model Streamer engine has no S3 configuration");
+  const auto& options = *s3_options_;
+  options.connection.Validate();
+  options.upload_limits.Validate();
+  if (options.restore_timeout <= std::chrono::milliseconds::zero() || options.restore_timeout > std::chrono::hours(24))
+    throw std::invalid_argument("S3 restore timeout must be positive and at most 24 hours");
+
+  const auto addressing = Environment("RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING");
+  if (!HasValidAddressingSetting(addressing))
+    throw std::invalid_argument("RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING must be 0 or 1");
+  if (options.connection.use_virtual_addressing != (addressing != "0"))
+    throw std::invalid_argument("S3 addressing must match RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING");
+  if (options.connection.ca_file != Environment("AWS_CA_BUNDLE"))
+    throw std::invalid_argument("S3 CA file must match AWS_CA_BUNDLE for both upload and restore");
+}
+
+std::shared_ptr<ModelStreamerRestore>
+ModelStreamerTransferEngine::CreateRestore() const
+{
+  if (!s3_options_)
+    return std::make_shared<ModelStreamerRestore>();
+  const auto& connection = s3_options_->connection;
+  return std::make_shared<ModelStreamerRestore>(
+      ModelStreamerSessionOptions{connection.region, connection.endpoint, connection.access_key_id,
+                                  connection.secret_access_key, connection.session_token},
+      s3_options_->restore_timeout);
 }
 
 // Reuse a healthy coordinator; replace it after a terminal native failure.
@@ -23,21 +80,24 @@ ModelStreamerTransferEngine::ModelStreamerTransferEngine(Path storage_root)
 std::shared_ptr<ModelStreamerRestore>
 ModelStreamerTransferEngine::AcquireRestore() const
 {
-  std::shared_ptr<ModelStreamerRestore> previous;
-  std::shared_ptr<ModelStreamerRestore> current;
-  {
-    std::lock_guard lock(restore_mutex_);
-    if (restore_->Failed()) {
-      auto replacement = std::make_shared<ModelStreamerRestore>();
-      previous = std::move(restore_);
-      restore_ = std::move(replacement);
+  for (;;) {
+    std::shared_ptr<ModelStreamerRestore> current;
+    {
+      std::lock_guard lock(restore_mutex_);
+      current = restore_;
     }
-    current = restore_;
+    if (!current->Failed())
+      return current;
+
+    auto replacement = CreateRestore();
+    {
+      std::lock_guard lock(restore_mutex_);
+      if (restore_ == current) {
+        restore_ = replacement;
+        return replacement;
+      }
+    }
   }
-  // Destroying a failed generation joins its event-loop thread. Keep that
-  // potentially blocking work outside the engine's short-lived pointer lock.
-  previous.reset();
-  return current;
 }
 
 TransferEngineType
@@ -55,6 +115,8 @@ ModelStreamerTransferEngine::PrepareRestore(const StorageBackend& source, Transf
 void
 ModelStreamerTransferEngine::StageRestore(const RestorePlan& plan, const Path& destination, TransferControl control) const
 {
+  if (s3_options_)
+    ValidateS3Configuration();
   const auto restore = AcquireRestore();
   restore->Stage(plan, destination, control);
 }
