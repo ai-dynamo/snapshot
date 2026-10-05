@@ -177,8 +177,12 @@ impl Context {
         }
         let changed = target != previous;
         if changed && let Err(error) = unsafe { crate::driver::cuCtxSetCurrent(target) } {
-            if let Some(device) = primary {
-                let _ = unsafe { crate::driver::cuDevicePrimaryCtxRelease_v2(device) };
+            if let Some(device) = primary
+                && let Err(cleanup) = unsafe { crate::driver::cuDevicePrimaryCtxRelease_v2(device) }
+            {
+                eprintln!(
+                    "cuinterpose: release primary context for device {device} after {error}: {cleanup}"
+                );
             }
             return Err(error);
         }
