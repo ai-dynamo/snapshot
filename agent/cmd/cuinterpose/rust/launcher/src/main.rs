@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
 
+//! Run `make native` in `agent/cmd/cuinterpose` before workspace Cargo commands,
+//! including Clippy and rust-analyzer checks. The build script hashes both finished
+//! preload libraries, so they must exist before Cargo builds this crate.
+
 use sha2::{Digest, Sha256};
 use std::env;
 use std::ffi::OsString;

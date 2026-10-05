@@ -139,7 +139,7 @@ RUN mkdir -p /rust-sources && cd rust && cargo vendor --locked /rust-sources/ven
     && cp -a "$(rustc --print sysroot)/lib/rustlib/src/rust" /rust-sources/standard-library \
     && cp -a "$(rustc --print sysroot)/share/doc/rust" /rust-sources/toolchain-notices
 
-# Python is needed only for generating notices and running the coordinator tests.
+# Python generates the Rust notices below.
 FROM cuinterpose-builder AS cuinterpose-notices
 RUN apt-get update && apt-get install -y --no-install-recommends python3 \
     && rm -rf /var/lib/apt/lists/*
