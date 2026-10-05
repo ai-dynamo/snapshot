@@ -76,6 +76,9 @@ Use the same agent image for the DaemonSet and cuinterpose installer.
 */}}
 {{- define "snapshot.agentImage" -}}
 {{- $tag := .Values.image.agent.tag | default .Chart.AppVersion -}}
+{{- if and .Values.pageBroker.enabled (contains "@" $tag) -}}
+{{- fail "agent digest pins require pageBroker.enabled=false; PageBroker uses a separate image with the shared release tag" -}}
+{{- end -}}
 {{- if hasPrefix "@" $tag -}}
 {{- printf "%s%s" .Values.image.agent.repository $tag -}}
 {{- else -}}
