@@ -367,7 +367,15 @@ ModelStreamerRestore::DiscardInterruptedPending()
 void
 ModelStreamerRestore::SubmitNative(std::unique_ptr<StreamerEntry>& entry)
 {
-  entry->control.Check();
+  try {
+    entry->control.Check();
+  }
+  catch (const TransferInterrupted&) {
+    // Cancellation can race with session startup or admission. No native
+    // request owns this entry yet, so it must not fail other submissions.
+    FailEntry(*entry, std::current_exception());
+    return;
+  }
   auto& request = entry->request;
   streamer::SubmissionId submission_id = 0;
   const int response = streamer::runai_file_streamer_request(

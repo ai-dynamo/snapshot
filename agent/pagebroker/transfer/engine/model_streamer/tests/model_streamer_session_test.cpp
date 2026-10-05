@@ -40,6 +40,7 @@ struct FakeState {
   std::mutex mutex;
   std::condition_variable changed;
   bool hold_end = false;
+  bool hold_start = false;
   bool allow_responses = true;
   unsigned starts = 0;
   unsigned ends_entered = 0;
@@ -55,6 +56,7 @@ class ModelStreamerSessionTest : public ::testing::Test {
   void SetUp() override
   {
     state.hold_end = false;
+    state.hold_start = false;
     state.allow_responses = true;
     state.starts = state.ends_entered = state.ends = state.submitted = state.max_submissions = 0;
     state.fault = Fault::NONE;
@@ -94,8 +96,10 @@ class ModelStreamerSessionTest : public ::testing::Test {
 extern "C" int runai_file_streamer_start(void** value)
 {
   *value = new Session;
-  std::lock_guard lock(state.mutex);
+  std::unique_lock lock(state.mutex);
   ++state.starts;
+  state.changed.notify_all();
+  state.changed.wait(lock, [] { return !state.hold_start; });
   return RUNAI_FILE_STREAMER_RESPONSE_SUCCESS;
 }
 
@@ -358,4 +362,29 @@ TEST_F(ModelStreamerSessionTest, ActiveCancellationWaitsForNativeTeardown)
   ReleaseEnd();
   EXPECT_THROW(result.get(), TransferInterrupted);
   EXPECT_TRUE(restore.Failed());
+}
+
+TEST_F(ModelStreamerSessionTest, CancellationDuringStartupDoesNotFailCoordinator)
+{
+  state.hold_start = true;
+  std::stop_source stop;
+  ModelStreamerRestore restore;
+  TransferControl control;
+  control.cancellation = stop.get_token();
+  auto cancelled = std::async(std::launch::async, [&] {
+    restore.Stage(Plan(), root_ / "cancelled", control);
+  });
+  {
+    std::unique_lock lock(state.mutex);
+    EXPECT_TRUE(state.changed.wait_for(lock, 5s, [] { return state.starts == 1; }));
+    stop.request_stop();
+    state.hold_start = false;
+    state.changed.notify_all();
+  }
+  EXPECT_THROW(cancelled.get(), TransferInterrupted);
+  EXPECT_EQ(state.submitted, 0U);
+  EXPECT_FALSE(restore.Failed());
+  EXPECT_NO_THROW(restore.Stage(Plan(), root_ / "success"));
+  EXPECT_EQ(state.submitted, 1U);
+  EXPECT_EQ(state.starts, state.ends);
 }
