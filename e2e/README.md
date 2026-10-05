@@ -195,6 +195,10 @@ hashes with the run evidence. The PodSnapshotContent API does not expose that
 metadata, so the source annotation and a successful TP1 run alone do not prove
 shared allocations were reconstructed.
 
+The test also verifies delivered library paths and hashes after restore through
+the privileged Snapshot agent. This check requires `/usr/bin/python3` on the
+worker node and does not add privileges to the workload Pod.
+
 Model weights come from one of two places:
 
 - **Shared model cache** (CI): set `SNAPSHOT_E2E_MODEL_CACHE_SERVER` and
