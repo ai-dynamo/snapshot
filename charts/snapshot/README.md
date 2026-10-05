@@ -179,7 +179,8 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 |-----------|---------|---------|
 | `image.operator.repository` | Operator image repository | `ghcr.io/ai-dynamo/snapshot/operator` |
 | `image.agent.repository` | Agent image repository | `ghcr.io/ai-dynamo/snapshot/agent` |
-| `image.agent.tag` | Agent image tag (empty = chart appVersion) | `""` |
+| `image.agent.tag` | Agent and PageBroker image tag (empty = chart appVersion) | `""` |
+| `image.pageBroker.repository` | PageBroker sidecar image repository. Always pulled at `image.agent.tag` | `ghcr.io/ai-dynamo/snapshot/pagebroker` |
 | `daemonset.imagePullSecrets` | Pull secrets for a private agent image override | `[]` |
 | `operator.resources` | CPU and memory requests/limits for the operator manager | 50m CPU / 64Mi request, 500m CPU / 128Mi limit |
 | `storage.type` | Snapshot-owned storage backend | `pvc` |
@@ -242,7 +243,8 @@ Materials this chart causes to be retrieved:
 |---|---|---|---|
 | Snapshot operator | `ghcr.io/ai-dynamo/snapshot/operator` | Apache-2.0 (NVIDIA) | GHCR |
 | Snapshot agent | `ghcr.io/ai-dynamo/snapshot/agent` | Apache-2.0 (NVIDIA) | GHCR |
+| Snapshot PageBroker | `ghcr.io/ai-dynamo/snapshot/pagebroker` | Apache-2.0 (NVIDIA) | GHCR |
 | busybox init container | `busybox:1.37.0` (digest-pinned) | GPL-2.0 | Docker Hub |
 
-Third-party attribution and corresponding source for the two NVIDIA images are
-shipped inside those images, at `/legal/THIRD-PARTY.txt` and `/legal/source/`.
+Third-party attribution and corresponding source for the NVIDIA images are
+shipped inside those images under `/legal/`.
