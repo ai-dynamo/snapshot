@@ -158,6 +158,7 @@ COPY --from=cuinterpose-payload / /
 RUN apt-get update && apt-get install -y --no-install-recommends python3-msgpack \
     && rm -rf /var/lib/apt/lists/*
 RUN make test-native
+RUN /usr/local/bin/cuinterpose-launch --library /usr/local/lib/snapshot/libcuinterpose.so -- /bin/true
 
 FROM scratch AS cuinterpose-export
 COPY --from=cuinterpose-builder /cuinterpose/build/ /
