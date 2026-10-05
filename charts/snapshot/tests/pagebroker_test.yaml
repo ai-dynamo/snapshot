@@ -5,6 +5,40 @@ suite: PageBroker sidecar image
 templates:
   - templates/daemonset.yaml
 tests:
+  - it: rejects an agent digest-only pin when PageBroker is enabled
+    set:
+      pageBroker.enabled: true
+      image.agent.tag: "@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asserts:
+      - failedTemplate:
+          errorMessage: "agent digest pins require pageBroker.enabled=false; PageBroker uses a separate image with the shared release tag"
+
+  - it: rejects an agent tag and digest pin when PageBroker is enabled
+    set:
+      pageBroker.enabled: true
+      image.agent.tag: "v1.2.3@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asserts:
+      - failedTemplate:
+          errorMessage: "agent digest pins require pageBroker.enabled=false; PageBroker uses a separate image with the shared release tag"
+
+  - it: accepts an agent digest-only pin when PageBroker is disabled
+    set:
+      pageBroker.enabled: false
+      image.agent.tag: "@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/ai-dynamo/snapshot/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+  - it: accepts an agent tag and digest pin when PageBroker is disabled
+    set:
+      pageBroker.enabled: false
+      image.agent.tag: "v1.2.3@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/ai-dynamo/snapshot/agent:v1.2.3@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
   - it: pulls the sidecar from its own repository at the agent's tag
     set:
       pageBroker.enabled: true
