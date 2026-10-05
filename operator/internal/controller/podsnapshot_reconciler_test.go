@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
+	"github.com/ai-dynamo/snapshot/operator/internal/maintenance"
 )
 
 func snapshotReconcilerScheme() *runtime.Scheme {
@@ -135,7 +136,7 @@ func TestSnapshotReconciler_BuildsWorkOrderAndBinds(t *testing.T) {
 	assert.Equal(t, "node-a", content.Spec.Source.NodeName)
 	assert.Equal(t, "node-a", content.Labels[snapshotv1alpha1.SnapshotNodeLabel])
 	assert.Empty(t, content.Annotations)
-	assert.Equal(t, []string{PodSnapshotContentArtifactCleanupFinalizer}, content.Finalizers)
+	assert.Equal(t, []string{maintenance.PodSnapshotContentArtifactCleanupFinalizer}, content.Finalizers)
 	assert.Equal(t, "inference", content.Spec.PodSnapshotRef.Namespace)
 	assert.Equal(t, snap.Name, content.Spec.PodSnapshotRef.Name)
 	assert.Equal(t, []string{"main"}, content.Spec.Source.PodRef.Containers,

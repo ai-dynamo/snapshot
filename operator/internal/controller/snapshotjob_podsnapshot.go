@@ -198,7 +198,7 @@ func buildPodSnapshot(sj *snapshotv1alpha1.SnapshotJob, pod *corev1.Pod) (*snaps
 	return &snapshotv1alpha1.PodSnapshot{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: snapshotv1alpha1.GroupVersion.String(),
-			Kind:       "PodSnapshot",
+			Kind:       snapshotv1alpha1.KindPodSnapshot,
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        sj.Name,
