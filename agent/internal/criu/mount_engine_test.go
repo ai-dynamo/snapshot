@@ -29,12 +29,17 @@ func TestAutomaticMountEngine(t *testing.T) {
 			UidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
 			GidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
 		}
-		if output, err := cmd.CombinedOutput(); err != nil {
+		output, err := cmd.CombinedOutput()
+		if err != nil {
 			if errors.Is(err, syscall.EPERM) {
 				t.Skip("isolated mount tests require user namespaces")
 			}
 			t.Fatalf("isolated mount test: %v\n%s", err, output)
 		}
+		if bytes.Contains(output, []byte("--- SKIP: TestAutomaticMountEngine (")) {
+			t.Skipf("isolated mount test skipped:\n%s", output)
+		}
+		t.Logf("isolated mount test:\n%s", output)
 		return
 	}
 	must := func(t *testing.T, err error) {
@@ -43,7 +48,11 @@ func TestAutomaticMountEngine(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	must(t, unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""))
+	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) {
+		t.Skipf("isolated mount tests require mount permission: %v", err)
+	} else {
+		must(t, err)
+	}
 	source := t.TempDir()
 	must(t, unix.Mount("tmpfs", source, "tmpfs", 0, "size=1m"))
 	defer unix.Unmount(source, unix.MNT_DETACH) //nolint:errcheck
