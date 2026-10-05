@@ -48,6 +48,20 @@ CUDA copies; HOST_NUMA bytes use CPU copies through a temporary host-accessible
 VMM alias. Restore preserves the allocation's NUMA placement separately from
 the CUDA device used for an operational context.
 
+Each process's carrier holds the full backing of every shared allocation it
+created. Its size is the sum of those backing sizes, including unused regions.
+Importers do not duplicate the creator's saved copy. There is no fixed carrier
+cap. Budget additional host RAM during capture and restore, plus CRIU image I/O
+and storage for the carrier contents. Restore must recover these host pages and
+copy their contents into the recreated allocations before serving can resume.
+Larger carriers therefore add work to both CRIU restore and allocation replay.
+
+In a measured vLLM GLM 5.2 capture with the KV cache asleep, the carrier held
+1,914 MiB per worker, or 14.95 GiB across eight workers. This is a workload
+example, not an upper bound. A large shared KV cache left awake can make the
+carrier much larger, increasing host memory, checkpoint storage and restore
+copying costs with the total shared backing size.
+
 Context destruction/reset and final primary-context release clean up converted
 malloc allocations and imported IPC mappings while preserving explicit VMM
 allocations. Multicast participants must add and bind their device in the same
