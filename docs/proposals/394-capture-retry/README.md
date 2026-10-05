@@ -193,11 +193,14 @@ the agent partway through, taking every other capture and restore on that node
 with it, including other tenants'.
 
 No amount of waiting helps either case: there is no moment at which this image
-fits. The agent's size estimate separates them from Story 1 by comparing
-against total capacity rather than what is free, so a shortage that can never
-clear fails immediately with a reason naming the shortfall, and the operator
-learns to resize staging or move the workload. Retries are not spent on it, the
-workload is not held while they are, and the node keeps serving everyone else.
+fits. The agent separates them from Story 1 by comparing its size estimate
+against total staging capacity rather than against what is free, so a shortage
+that can never clear fails immediately with a reason naming the shortfall, and
+the operator learns to resize staging or move the workload. Where the estimate
+is too optimistic, the staging `sizeLimit` still bounds the write
+([Protecting the node agent](#protecting-the-node-agent)), so the capture fails
+rather than the agent. Retries are not spent on it, the workload is not held
+while they are, and the node keeps serving everyone else.
 
 #### Story 3: the CRIU dump fails after the workload is already suspended
 
@@ -387,16 +390,26 @@ a pattern the agent already applies to the target container count.
 container, and memory-backed staging pages are charged to the writer, so a
 checkpoint larger than the agent's memory limit terminates the agent. This
 surfaces as no error at all — the process simply dies — and no panic recovery
-can catch it. The agent therefore estimates, before staging, whether the image
-fits in its remaining budget, and fails that capture immediately with a distinct
-reason when it provably cannot.
+can catch it.
 
-The estimate is deliberately conservative. Image size is not known in advance,
-but it is bounded below by the target's resident memory plus the GPU state to be
-checkpointed, both of which the agent already reads before a capture begins.
-Refusing a capture that might have fit costs one capture; accepting one that
-does not costs every tenant on the node. PageBroker-reported staging headroom
-(#237) would sharpen this and is not required for it.
+The containment is a bound the kernel enforces, not a prediction. Staging is a
+memory-backed `emptyDir`, which today carries no `sizeLimit` and so may grow
+until the agent's cgroup kills it. Giving it a `sizeLimit` no larger than the
+agent's memory limit inverts that: the tmpfs fills first and the write fails
+with `ENOSPC`, which PageBroker reports as `INSUFFICIENT_STORAGE` and the agent
+handles as an ordinary capture failure. The invariant the chart must hold is
+therefore **staging `sizeLimit` ≤ agent memory limit**, and it is what makes the
+oversized case survivable at all.
+
+A pre-staging size estimate is an optimisation on top of that, not the
+safeguard. Image size is not known in advance; it is only bounded *below* by the
+target's resident memory plus the GPU state to be checkpointed, both of which
+the agent already reads. A lower bound can prove an image will *not* fit, never
+that it will, so the estimate is used in that direction only: when the bound
+already exceeds staging capacity the capture fails immediately, before spending
+a model's worth of time discovering it. When the bound fits, the capture
+proceeds and the `sizeLimit` is what holds. PageBroker-reported staging headroom
+(#237) would sharpen the estimate and is not what makes this safe.
 
 ### Storage cleanup
 
