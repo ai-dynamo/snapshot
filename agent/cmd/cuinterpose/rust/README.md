@@ -34,7 +34,7 @@ After building the matched artifacts, run the CUDA gate on a Linux host with at 
 make -C agent/cmd/cuinterpose test-gpu
 ```
 
-This runs the frontend/ABI checks and the physical-GPU pytest suite. Missing dependencies, driver support, or GPUs fail the run rather than skipping it. The complete suite also requires GPU peer access, multicast-capable NVLink/NVSwitch hardware, and POSIX-shareable HOST_NUMA VMM. A deliberately narrower hardware lane can select `-m 'not multicast and not host_numa'`; it must report those exclusions and does not qualify the omitted features. GPU Actions wiring is separate from this local gate; the existing CPU job does not establish real-driver correctness.
+This runs the frontend/ABI checks and the physical-GPU pytest suite. Missing dependencies, driver support, or GPUs fail the run rather than skipping it. The complete suite also requires GPU peer access, multicast-capable NVLink/NVSwitch hardware, and POSIX-shareable HOST_NUMA VMM. A deliberately narrower hardware lane can select `-m 'not multicast and not host_numa'`; it must report those exclusions and does not qualify the omitted features. The `cuinterpose-gpu` Actions workflow runs this narrower tier on trusted PR mirror pushes, nightly, and by manual dispatch, using two full GPUs with peer access and a CUDA 13 driver. The complete multicast/HOST_NUMA tier still requires a separate run on capable hardware.
 
 Physical-GPU tests live in `../tests/gpu`. Stage a matched artifact set with:
 
