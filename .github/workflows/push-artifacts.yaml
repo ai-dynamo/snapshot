@@ -132,6 +132,7 @@ jobs:
       matrix:
         include:
           - image: operator
+          - image: pagebroker
           - image: agent
             # Dockerfile exits 1 on other arches
             build_args: --platform=linux/amd64
@@ -332,7 +333,7 @@ jobs:
       # that were published. Both formats, because one scan emits both.
       - name: Generate SBOMs for the published images
         run: |
-          for image in operator agent; do
+          for image in operator agent pagebroker; do
             digest="$(cat "digests/digest-${image}.txt")"
             syft scan --platform linux/amd64 \
               -o "spdx-json=assets/sbom-${image}.spdx.json" \
@@ -351,6 +352,7 @@ jobs:
           sha256sum \
             sbom-operator.spdx.json sbom-operator.cdx.json \
             sbom-agent.spdx.json sbom-agent.cdx.json \
+            sbom-pagebroker.spdx.json sbom-pagebroker.cdx.json \
             "${CHART}" > SHA256SUMS
           cat SHA256SUMS
           cosign sign-blob --yes \
@@ -370,6 +372,8 @@ jobs:
             sbom-operator.cdx.json \
             sbom-agent.spdx.json \
             sbom-agent.cdx.json \
+            sbom-pagebroker.spdx.json \
+            sbom-pagebroker.cdx.json \
             "${CHART}" \
             SHA256SUMS \
             SHA256SUMS.sigstore.json

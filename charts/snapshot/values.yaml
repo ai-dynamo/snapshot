@@ -13,6 +13,11 @@ image:
     # Defaults to the chart's appVersion when empty (see templates).
     tag: ""
     pullPolicy: Always
+  # The PageBroker sidecar always uses image.agent.tag: the two speak an
+  # internal protocol and ship as a pair.
+  pageBroker:
+    repository: ghcr.io/ai-dynamo/snapshot/pagebroker
+    pullPolicy: Always
 
 replicaCount: 1
 
@@ -26,12 +31,14 @@ operator:
       memory: 64Mi
 
   artifactCleanup:
-    # Frequency of authoritative orphan artifact scans.
+    # Frequency of pending finalizer recovery and authoritative orphan artifact scans.
     scanInterval: 10m
     # Maximum orphan roots removed serially in one scan.
     batchSize: 10
     # Total metadata-list attempts before a scan fails closed.
     listAttempts: 3
+    # Concurrent maintenance workers processing delete-content and sweep work items.
+    workers: 5
 
 # `helm upgrade` leaves CRDs alone by design; the crd-installer init container
 # closes that gap on every rollout, and is a no-op when nothing changed.
@@ -108,11 +115,6 @@ pageBroker:
     limits:
       cpu: 32
       memory: 256Gi
-  image:
-    repository: ghcr.io/ai-dynamo/snapshot/agent
-    # Defaults to the chart's appVersion when empty (see templates).
-    tag: ""
-    pullPolicy: Always
 
 # DaemonSet configuration for the checkpoint/restore agent
 daemonset:
