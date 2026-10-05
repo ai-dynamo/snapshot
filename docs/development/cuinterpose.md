@@ -12,31 +12,10 @@ saving shared creator bytes in host memory captured by CRIU, then reconstructing
 shared resources after native CUDA restore. Private allocations stay on the
 native CUDA checkpoint path.
 
-For a SnapshotJob, put this fragment under `spec.podTemplate` and set the target
-container's `command` explicitly:
-
-```yaml
-metadata:
-  annotations:
-    nvidia.com/cuda-shared-memory-support: "enabled"
-spec:
-  containers:
-    - name: workload
-      command: ["python3", "/app/main.py"]
-```
-
-The annotation accepts `enabled` or `disabled` after trimming whitespace. Values
-are case-sensitive, and other values are rejected. Omit the annotation or set it
-to `disabled` to leave the source workload on the native CUDA checkpoint path.
-
-The operator installs both libraries and a static launcher. It prefixes the
-command with the launcher, leaving `args` and `env` unchanged. At startup the
-launcher prepends the shim to the runtime-resolved `LD_PRELOAD`, preserving
-image, ConfigMap, Secret, and explicit environment precedence, then executes
-the workload without a shell or parent process. Image-default entrypoints need
-an explicit command. Ordinary Pods require delivery before startup: place both
-libraries at `/tmp/snapshot-cuda` and preload
-`/tmp/snapshot-cuda/libcuinterpose.so` yourself; an annotation alone cannot load it.
+See the [CUDA shared-memory guide](../guides/cuda-shared-memory.md) for
+ordinary Pod and SnapshotJob activation, engine recipes, matching agent images,
+and deployment gotchas. The public opt-in is
+`nvidia.com/cuda-shared-memory-support: "enabled"`.
 
 Applications must finish all CUDA calls and GPU work, keep a fixed group of fully
 interposed peers, keep library files stable, and remain parked until restore
@@ -79,5 +58,4 @@ scope, component responsibilities, interception and sharing protocols,
 capture/restore ordering, failure behavior, security, and validation plan.
 See the [Rust component README](../../agent/cmd/cuinterpose/rust/README.md) for
 build and test commands. [Issue #295](https://github.com/ai-dynamo/snapshot/issues/295)
-tracks the implementation; current physical-GPU and cross-node qualification
-remain outstanding.
+tracks the implementation and qualification.

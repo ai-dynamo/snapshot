@@ -31,9 +31,11 @@ from snapshot_e2e.frameworks import framework_image
 from snapshot_e2e.frameworks import framework_image_overridden
 from snapshot_e2e.workloads import TestRun
 from snapshot_e2e.workloads import same_node_affinity
+from snapshot_e2e.workloads import workload_image
 from snapshot_e2e.workloads import workload_scheduling
 
 RESTORE_FROM_ANNOTATION = "nvidia.com/restore-from"
+SHARED_MEMORY_ANNOTATION = "nvidia.com/cuda-shared-memory-support"
 # The guides' own cache plumbing, replaced when a shared cache is configured:
 # the init container downloads into the guide PVC, which the shared export
 # makes both unnecessary and impossible offline.
@@ -63,9 +65,10 @@ def source_pod(
         image=image or framework_image(spec),
         model_cache=model_cache,
     )
-    # The direct PodSnapshot flow: the test creates the PodSnapshot itself, so
-    # the source must carry no restore/snapshot annotations of its own.
-    pod["metadata"]["annotations"] = {}
+    # The test creates the PodSnapshot itself. Preserve workload activation and
+    # other annotations, but do not treat the source as a restore destination.
+    for annotation in (RESTORE_FROM_ANNOTATION, "nvidia.com/restore-container-map"):
+        pod["metadata"]["annotations"].pop(annotation, None)
     return pod
 
 
@@ -87,11 +90,14 @@ def restore_pod(
         image=image or framework_image(spec),
         model_cache=model_cache,
     )
-    # The guide's placeholder annotation names its own PodSnapshot; this run's
-    # PodSnapshot is what must be restored. Restore is node-pinned: the agent
-    # that holds the artifact is the one on the source node.
+    # The guide names its own PodSnapshot, so the restore annotation must instead
+    # identify this run's snapshot. Tests normally restore on the source node because
+    # another destination requires shared checkpoint storage.
     pod["metadata"]["annotations"] = {RESTORE_FROM_ANNOTATION: run.snapshot_name}
-    pod["spec"]["affinity"] = same_node_affinity(source_node)
+    destination = os.environ.get("SNAPSHOT_E2E_RESTORE_NODE", source_node)
+    if not destination:
+        raise ValueError("SNAPSHOT_E2E_RESTORE_NODE must name a node")
+    pod["spec"]["affinity"] = same_node_affinity(destination)
     return pod
 
 
@@ -176,13 +182,37 @@ def pod_from_deployment(
     if model_cache is not None:
         use_shared_model_cache(pod_spec, model_cache)
 
+    main = main_container({"spec": pod_spec})
+    parallelism = os.environ.get("SNAPSHOT_E2E_TENSOR_PARALLEL_SIZE")
+    if parallelism is not None:
+        try:
+            size = int(parallelism)
+        except ValueError:
+            raise ValueError("SNAPSHOT_E2E_TENSOR_PARALLEL_SIZE must be a positive integer") from None
+        if size < 1:
+            raise ValueError("SNAPSHOT_E2E_TENSOR_PARALLEL_SIZE must be a positive integer")
+        set_env(main, "SNAPSHOT_TENSOR_PARALLEL_SIZE", str(size))
+        resources = main.setdefault("resources", {})
+        resources.setdefault("limits", {})["nvidia.com/gpu"] = str(size)
+        if "nvidia.com/gpu" in resources.get("requests", {}):
+            resources["requests"]["nvidia.com/gpu"] = str(size)
+
     # Content-addressed tags are immutable, so a cached pull is correct and
     # saves minutes on multi-GB images. An override (SNAPSHOT_E2E_FRAMEWORK_IMAGE)
     # is typically a mutable dev tag, where a cached image would test stale bits.
     pull_policy = "Always" if framework_image_overridden() else "IfNotPresent"
+    original_image = main["image"]
     for container in pod_spec.get("initContainers", []) + pod_spec["containers"]:
-        container["image"] = image
-        container["imagePullPolicy"] = pull_policy
+        if container["image"] == "${SNAPSHOT_AGENT_IMAGE}":
+            # Resolve only the guide's installer placeholder. Its image supplies
+            # the same bundle as the installed Snapshot agent, not the engine.
+            container["image"] = workload_image()
+            container["imagePullPolicy"] = (
+                "IfNotPresent" if "@sha256:" in container["image"] else "Always"
+            )
+        elif container["image"] == original_image:
+            container["image"] = image
+            container["imagePullPolicy"] = pull_policy
 
     scheduling = workload_scheduling()
     pod_spec["nodeSelector"] = {**pod_spec.get("nodeSelector", {}), **scheduling["nodeSelector"]}

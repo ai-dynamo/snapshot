@@ -11,10 +11,11 @@ driven by the guide's own program and manifests (see framework_workloads):
    sentinel, so Ready means the engine served before capture and the process
    is checkpointable.
 2. A PodSnapshot captures it. The dump terminates the source process.
-3. A restore pod built from the guide's restore manifest is pinned to the
-   source node. Its own entrypoint stays inert (`sleep infinity`); the agent
-   restores the checkpointed process into it, which resumes the engine,
-   generates again, and serves /generate.
+3. Create a restore pod from the guide's restore manifest. Use the source
+   node by default. SNAPSHOT_E2E_RESTORE_NODE selects another node and requires
+   shared storage. The entrypoint waits with `sleep infinity`. The agent
+   restores the captured process, which resumes the engine, generates again,
+   and serves /generate.
 4. The test asserts the restore condition, the restore-ready file, a live
    /generate answer, and that the placeholder never loaded a model itself —
    a restore that silently degraded to a cold start must not pass.
@@ -165,6 +166,13 @@ def test_framework_checkpoint_restore_serves_inference(
             timeout=frameworks.SOURCE_READY_TIMEOUT_SECONDS,
         )
         source_node = source.spec.node_name
+        assert source.metadata.annotations.get(fw.SHARED_MEMORY_ANNOTATION) == "enabled"
+        source_main = next(c for c in source.spec.containers if c.name == frameworks.CONTAINER)
+        parallelism = next(e.value for e in source_main.env if e.name == "SNAPSHOT_TENSOR_PARALLEL_SIZE")
+        result.update_environment(comparisonDimensions={
+            "cudaSharedMemorySupport": "enabled",
+            "tensorParallelSize": int(parallelism),
+        })
         result.redact(source_node, "source-node")
         result.mark_event("source.ready")
         _record_framework_image_digest(result, source)
@@ -175,6 +183,9 @@ def test_framework_checkpoint_restore_serves_inference(
             role="source",
             node=source_node,
         )
+        destination = os.environ.get("SNAPSHOT_E2E_RESTORE_NODE", source_node)
+        if "SNAPSHOT_E2E_RESTORE_NODE" in os.environ:
+            assert destination != source_node, "cross-node test destination must differ from source"
         # Recorded on success too, so a flaky restore failure can be correlated
         # with whether Datadog GPU monitoring was active on the node.
         print(
@@ -240,6 +251,7 @@ def test_framework_checkpoint_restore_serves_inference(
                 event="traffic.ready",
             ),
         )
+        assert restored_pod.spec.node_name == destination
         restored_text = restored_text.strip()
         restore_node = restored_pod.spec.node_name
         result.redact(restore_node, "restore-node")

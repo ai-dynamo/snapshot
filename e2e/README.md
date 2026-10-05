@@ -144,6 +144,13 @@ pre-capture generation) → `PodSnapshot` → restore pod pinned to the source n
 → `nvidia.com/Restored=RestoreSucceeded` → `<framework>-restore-ready` →
 `POST /generate` answers → the placeholder never loaded a model itself.
 
+The source recipes enable CUDA shared-memory support and install the matching
+cuInterpose bundle before launching the engine. The harness resolves their
+`${SNAPSHOT_AGENT_IMAGE}` placeholder from `SNAPSHOT_E2E_WORKLOAD_IMAGE`, or
+`ghcr.io/ai-dynamo/snapshot/agent:${SNAPSHOT_E2E_SNAPSHOT_TAG}`. This must identify
+the same bundle as the installed capture and restore agents. Framework image
+overrides do not replace the installer image.
+
 ```bash
 # one framework (CI runs one per matrix job); omit the variable for all three
 SNAPSHOT_E2E_FRAMEWORK=vllm \
@@ -152,7 +159,26 @@ SNAPSHOT_E2E_FRAMEWORK=vllm \
 # test a different image instead of the guide's own pinned image
 SNAPSHOT_E2E_FRAMEWORK=vllm SNAPSHOT_E2E_FRAMEWORK_IMAGE=<registry>/vllm-snapshot:dev \
   uv run --project e2e pytest e2e/tests/test_frameworks.py -vv -s
+
+# qualify the same recipe on two GPUs, without editing its manifests
+SNAPSHOT_E2E_FRAMEWORK=vllm SNAPSHOT_E2E_TENSOR_PARALLEL_SIZE=2 \
+  uv run --project e2e pytest e2e/tests/test_frameworks.py -vv -s
 ```
+
+Set `SNAPSHOT_E2E_RESTORE_NODE` to test a distinct destination node with shared
+checkpoint storage. The test requires that node to differ from the actual
+source and verifies the restored Pod's placement. Without it, restore stays
+on the source node.
+
+The guide defaults use one GPU. `SNAPSHOT_E2E_TENSOR_PARALLEL_SIZE` accepts a
+positive integer and sets the engine's `SNAPSHOT_TENSOR_PARALLEL_SIZE` and GPU
+limit in both source and restore Pods. When unset, the guide settings remain
+unchanged. Benchmark comparison dimensions record shared-memory activation and
+the live source Pod's tensor-parallel size, keeping TP1 and TP2 results separate.
+Retain the checkpoint's cuInterpose manifest and matching library
+hashes with the run evidence. The PodSnapshotContent API does not expose that
+metadata, so the source annotation and a successful TP1 run alone do not prove
+shared allocations were reconstructed.
 
 Model weights come from one of two places:
 
@@ -370,18 +396,16 @@ one-time GitHub Pages configuration.
 
 ## Framework Images
 
-The framework e2e workloads are the programs and manifests under
-`manifests/frameworks/<framework>/` (`vllm`, `sglang`, `tensorrt-llm`), owned
-by the e2e suite -- these are not the `docs/guides/` examples, which still
-document a build-and-push image flow and are updated separately. Each
-framework runs the upstream image unmodified -- the exact image reference is
+The framework e2e workloads use the programs and manifests under
+`docs/guides/<framework>/` (`vllm`, `sglang`, `tensorrt-llm`). Each
+framework runs the upstream image unmodified. The exact image reference is
 `spec.template.spec.containers[0].image` in that framework's own
 `deployment.yaml` -- with `app.py` mounted from a ConfigMap (`kubectl create
 configmap <framework>-app --from-file=app.py -n
 "${SNAPSHOT_E2E_TEST_NAMESPACE:-snapshot-e2e}"`) rather than baked into a
-Snapshot-built image. There is nothing under `manifests/frameworks/<framework>/`
-for Snapshot to build, push, or keep available; `frameworks.framework_image()`
-reads the image straight from that `deployment.yaml`, and
+Snapshot-built engine image. The separate installer uses the matching Snapshot
+agent image. `frameworks.framework_image()` reads the engine image straight
+from that `deployment.yaml`, and
 `framework_workloads.app_configmap()` builds the ConfigMap from the same
 `app.py`.
 

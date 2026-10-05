@@ -65,6 +65,8 @@ spec:
             - -c
             - exec sleep infinity
           env:
+            - name: SNAPSHOT_TENSOR_PARALLEL_SIZE
+              value: "1"
             - name: SNAPSHOT_MODEL
               value: Qwen/Qwen3-0.6B
             - name: SGLANG_CONTEXT_LENGTH
@@ -77,10 +79,6 @@ spec:
               value: "1"
             - name: HF_HUB_DISABLE_XET
               value: "1"
-            - name: NCCL_CUMEM_ENABLE
-              value: "0"
-            - name: NCCL_NVLS_ENABLE
-              value: "0"
             - name: NCCL_IB_DISABLE
               value: "1"
             - name: NCCL_RAS_ENABLE
