@@ -117,12 +117,61 @@ func TestInspectCompatibilityManagedCuInterposeMount(t *testing.T) {
 }
 
 // testMountPoint satisfies nsmount.MountPoint for executor unit tests.
-type testMountPoint struct{}
+type testMountPoint struct {
+	t          *testing.T
+	name       string
+	calls      *[]string
+	releaseErr error
+}
 
-func (m testMountPoint) Unmount(context.Context) error { return nil }
-func (m testMountPoint) NsFd() *os.File                { return nil }
+func (m testMountPoint) Unmount(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		m.t.Errorf("cleanup context canceled: %v", err)
+	}
+	*m.calls = append(*m.calls, "unmount "+m.name)
+	return nil
+}
+
+func (m testMountPoint) Release() error {
+	*m.calls = append(*m.calls, "release "+m.name)
+	return m.releaseErr
+}
+
+func (m testMountPoint) NsFd() *os.File { return nil }
 
 var _ nsmount.MountPoint = testMountPoint{}
+
+func TestCleanupRestoreMountsRetainsLibrariesOnlyAfterSuccess(t *testing.T) {
+	closeErr := errors.New("close namespace fd")
+	for _, tc := range []struct {
+		name       string
+		restored   bool
+		releaseErr error
+		want       []string
+	}{
+		{"restore failed", false, nil, []string{"unmount artifact", "unmount shim", "unmount bundle"}},
+		{"restored", true, nil, []string{"unmount artifact", "release shim", "unmount bundle"}},
+		{"release failed", true, closeErr, []string{"unmount artifact", "release shim", "unmount bundle"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls []string
+			mounts := []restoreMount{
+				{point: testMountPoint{t: t, name: "bundle", calls: &calls}},
+				{point: testMountPoint{t: t, name: "shim", calls: &calls, releaseErr: tc.releaseErr}, keepOnSuccess: true},
+				{point: testMountPoint{t: t, name: "artifact", calls: &calls}},
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			err := cleanupRestoreMounts(ctx, mounts, tc.restored)
+			if !errors.Is(err, tc.releaseErr) {
+				t.Fatalf("cleanup error = %v, want %v", err, tc.releaseErr)
+			}
+			if !reflect.DeepEqual(calls, tc.want) {
+				t.Fatalf("cleanup calls = %v, want %v", calls, tc.want)
+			}
+		})
+	}
+}
 
 type restoreFakeRuntime struct {
 	resolvedID             string

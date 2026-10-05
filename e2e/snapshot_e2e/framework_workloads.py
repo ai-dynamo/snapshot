@@ -16,7 +16,9 @@ pass here.
 from __future__ import annotations
 
 import copy
+import json
 import os
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +43,48 @@ SHARED_MEMORY_ANNOTATION = "nvidia.com/cuda-shared-memory-support"
 # makes both unnecessary and impossible offline.
 GUIDE_CACHE_INIT_CONTAINER = "model-cache"
 MANIFESTS_DIR = Path(__file__).resolve().parent / "manifests"
+
+
+# Inspect the guide process's root: a kubectl exec process can inhabit the
+# placeholder's mount namespace rather than the restored workload's namespace.
+CUINTERPOSE_LIBRARY_PROBE = r'''
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+libraries = None
+for process in Path(sys.argv[1]).glob("[0-9]*"):
+    try:
+        args = (process / "cmdline").read_bytes().split(b"\0")
+    except FileNotFoundError:
+        continue
+    if not args or args[0].rsplit(b"/", 1)[-1] not in {b"python", b"python3"}:
+        continue
+    if b"/snapshot-app/app.py" not in args[1:3]:
+        continue
+    current = {}
+    for name in ("libcuinterpose.so", "libcuinterpose_core.so"):
+        with (process / "root/tmp/snapshot-cuda" / name).open("rb") as library:
+            current[name] = hashlib.file_digest(library, "sha256").hexdigest()
+    if libraries is not None and libraries != current:
+        raise RuntimeError("guide processes have different libraries")
+    libraries = current
+if libraries is None:
+    raise RuntimeError("no running /snapshot-app/app.py guide process")
+print(json.dumps(libraries))
+'''
+
+
+def cuinterpose_library_hashes(namespace: str, pod: str) -> dict[str, str]:
+    """Require both delivered libraries to remain readable by the guide process."""
+    output = k8s.exec_payload(
+        namespace, pod, f"python3 -c {shlex.quote(CUINTERPOSE_LIBRARY_PROBE)} /proc"
+    )
+    try:
+        return json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise AssertionError(f"cuinterpose library probe failed in {pod}: {output}") from exc
 
 
 def load_manifest(path: Path) -> dict[str, Any]:
