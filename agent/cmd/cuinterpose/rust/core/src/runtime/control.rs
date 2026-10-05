@@ -127,10 +127,10 @@ impl PreparedWorkers {
     }
 
     /// Because the caller holds the runtime installation lock, this method must not
-    /// spawn threads, block on channels, format values, or call callbacks. With the
-    /// pinned Rust and glibc versions, mutexes and try_send use futexes and TLS without
-    /// Drop, avoiding loader registration. The channel is preallocated, and eager ELF
-    /// binding resolves libc symbols before these calls run.
+    /// spawn threads, block on channels, format values, or call callbacks. The pinned
+    /// Rust standard library uses futexes and non-Drop TLS here. The workload supplies
+    /// glibc and its loader. Preparation primes backend TLS, the channel is preallocated,
+    /// and eager ELF binding resolves libc symbols before these calls run.
     pub fn activate(&mut self, endpoint: &str) -> Result<()> {
         self.listener =
             Some(bind_listener(endpoint).map_err(|error| Error::io("bind control socket", error))?);
