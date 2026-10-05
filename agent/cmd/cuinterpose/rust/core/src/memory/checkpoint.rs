@@ -329,11 +329,7 @@ pub(crate) fn execute(operation: Operation) -> std::result::Result<Reply, String
 
 /// Keep the carrier until the successful LOAD reply has been sent.
 pub(crate) fn load_acknowledged() {
-    if let Ok(mut state) = runtime::get()
-        && let Some(arena) = state.arena.take()
-    {
-        runtime::must_complete(arena.release());
-    }
+    runtime::release_host_arena();
 }
 
 #[cfg(test)]
