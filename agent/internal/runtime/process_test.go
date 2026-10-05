@@ -6,6 +6,7 @@ package runtime
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"testing"
 )
@@ -218,16 +219,70 @@ func TestResolveManifestPIDsToObservedPIDsFailsWhenManifestPIDMissingFromRestore
 	}
 }
 
-func TestResolveManifestPIDsToObservedPIDsFailsWhenNamespaceDepthIsNotTwo(t *testing.T) {
-	processes := []ProcessDetails{
-		{ObservedPID: 50, ParentPID: 0, OutermostPID: 50, InnermostPID: 50, NamespacePIDs: []int{50}, Cmdline: "nsrestore"},
-		{ObservedPID: 74, ParentPID: 50, OutermostPID: 74, InnermostPID: 1, NamespacePIDs: []int{900, 74, 1}, Cmdline: "python3 -m dynamo.vllm"},
-		{ObservedPID: 80, ParentPID: 74, OutermostPID: 80, InnermostPID: 750, NamespacePIDs: []int{900, 80, 750}, Cmdline: "VLLM::EngineCore"},
+func TestResolveManifestPIDsAtAnyDepth(t *testing.T) {
+	for _, depth := range []int{1, 2, 3, 4} {
+		t.Run(strconv.Itoa(depth), func(t *testing.T) {
+			var processes []ProcessDetails
+			for i, pid := range []int{74, 80, 81} {
+				chain := make([]int, depth)
+				for j := range chain {
+					chain[j] = 900 + j
+				}
+				chain[depth-1] = i + 1
+				parent := 74
+				if i == 0 {
+					parent = 50
+				}
+				processes = append(processes, ProcessDetails{ObservedPID: pid, ParentPID: parent, InnermostPID: i + 1, NamespacePIDs: chain})
+			}
+			// Same inner PID outside the selected tree must never affect remapping.
+			processes = append(processes, ProcessDetails{ObservedPID: 99, ParentPID: 0, InnermostPID: 2, NamespacePIDs: []int{99, 2}})
+			got, err := ResolveManifestPIDsToObservedPIDs(processes, 74, []int{3, 1, 2})
+			if err != nil || !reflect.DeepEqual(got, []int{81, 74, 80}) {
+				t.Fatalf("got %v, %v", got, err)
+			}
+		})
 	}
+}
 
-	_, err := ResolveManifestPIDsToObservedPIDs(processes, 74, []int{1, 750})
-	if err == nil {
-		t.Fatal("ResolveManifestPIDsToObservedPIDs(...) unexpectedly succeeded")
+func TestResolveManifestPIDsRejectsInvalidIdentity(t *testing.T) {
+	root := ProcessDetails{ObservedPID: 74, ParentPID: 50, InnermostPID: 1, NamespacePIDs: []int{74, 1}}
+	for _, tc := range []struct {
+		name      string
+		processes []ProcessDetails
+		manifest  []int
+	}{
+		{"missing namespace", []ProcessDetails{{ObservedPID: 74, InnermostPID: 1}}, []int{1}},
+		{"zero PID", []ProcessDetails{{ObservedPID: 74, InnermostPID: 0, NamespacePIDs: []int{74, 0}}}, []int{1}},
+		{"negative PID", []ProcessDetails{{ObservedPID: 74, InnermostPID: 1, NamespacePIDs: []int{-2, 1}}}, []int{1}},
+		{"inconsistent PID", []ProcessDetails{{ObservedPID: 74, InnermostPID: 2, NamespacePIDs: []int{74, 1}}}, []int{1}},
+		{"ambiguous PID", []ProcessDetails{root, {ObservedPID: 80, ParentPID: 74, InnermostPID: 1, NamespacePIDs: []int{80, 1}}}, []int{1}},
+		{"duplicate observed PID", []ProcessDetails{root, root}, []int{1}},
+		{"outside tree only", []ProcessDetails{root, {ObservedPID: 80, ParentPID: 50, InnermostPID: 2, NamespacePIDs: []int{80, 2}}}, []int{2}},
+		{"missing manifest PID", []ProcessDetails{root}, []int{3}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := ResolveManifestPIDsToObservedPIDs(tc.processes, 74, tc.manifest); err == nil {
+				t.Fatal("accepted invalid mapping")
+			}
+		})
+	}
+}
+
+func TestReadProcessDetailsRejectsInvalidNamespacePIDs(t *testing.T) {
+	for _, chain := range []string{"", "0", "74 -1", "bad"} {
+		t.Run(chain, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.Mkdir(filepath.Join(root, "74"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "74", "status"), []byte("PPid: 0\nNSpid: "+chain+"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ReadProcessDetails(root, 74); err == nil {
+				t.Fatal("accepted invalid namespace PID")
+			}
+		})
 	}
 }
 

@@ -138,6 +138,9 @@ func ReadProcessDetails(procRoot string, pid int) (ProcessDetails, error) {
 			if err != nil {
 				return ProcessDetails{}, fmt.Errorf("failed to parse NSpid %q: %w", field, err)
 			}
+			if value <= 0 {
+				return ProcessDetails{}, fmt.Errorf("invalid NSpid %d", value)
+			}
 			nspids = append(nspids, value)
 		}
 		break
@@ -165,6 +168,23 @@ func ReadProcessDetails(procRoot string, pid int) (ProcessDetails, error) {
 		NamespacePIDs: nspids,
 		Cmdline:       cmdline,
 	}, nil
+}
+
+// NamespacePID returns the checkpoint-facing PID without assuming namespace depth.
+func (p ProcessDetails) NamespacePID() (int, error) {
+	if len(p.NamespacePIDs) == 0 {
+		return 0, fmt.Errorf("process %d has no namespace PID", p.ObservedPID)
+	}
+	for _, pid := range p.NamespacePIDs {
+		if pid <= 0 {
+			return 0, fmt.Errorf("process %d has invalid namespace PID %d", p.ObservedPID, pid)
+		}
+	}
+	pid := p.NamespacePIDs[len(p.NamespacePIDs)-1]
+	if p.InnermostPID != pid {
+		return 0, fmt.Errorf("process %d has inconsistent innermost PID %d, want %d", p.ObservedPID, p.InnermostPID, pid)
+	}
+	return pid, nil
 }
 
 // ReadProcessDetailsOrDefault preserves pid-scoped logging even when proc parsing fails.
@@ -231,6 +251,9 @@ func ResolveManifestPIDsToObservedPIDs(processes []ProcessDetails, restoredPID i
 	processByObservedPID := make(map[int]ProcessDetails, len(processes))
 	childrenByParentPID := make(map[int][]int, len(processes))
 	for _, process := range processes {
+		if _, exists := processByObservedPID[process.ObservedPID]; exists {
+			return nil, fmt.Errorf("duplicate observed pid %d", process.ObservedPID)
+		}
 		processByObservedPID[process.ObservedPID] = process
 		childrenByParentPID[process.ParentPID] = append(childrenByParentPID[process.ParentPID], process.ObservedPID)
 	}
@@ -249,8 +272,8 @@ func ResolveManifestPIDsToObservedPIDs(processes []ProcessDetails, restoredPID i
 		if !ok {
 			continue
 		}
-		if len(process.NamespacePIDs) != 2 {
-			return nil, fmt.Errorf("restored process %d has namespace depth %d, want 2", pid, len(process.NamespacePIDs))
+		if _, err := process.NamespacePID(); err != nil {
+			return nil, err
 		}
 		if existingPID, ok := innermostToObservedPID[process.InnermostPID]; ok {
 			return nil, fmt.Errorf("multiple restored processes map to innermost pid %d: %d and %d", process.InnermostPID, existingPID, process.ObservedPID)
