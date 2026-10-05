@@ -87,6 +87,16 @@ def main():
                             "SNAPSHOT_CONTROL_DIR": str(actual)}
         subprocess.run([str(build / "abi"), str(core)],
                        env=env | {"SNAPSHOT_CONTROL_DIR": str(actual)}, check=True, timeout=60)
+        for missing in ("cuMemCreate", "multicast"):
+            completed = subprocess.run(
+                [str(build / "abi"), str(core), missing],
+                env=env | {"SNAPSHOT_CONTROL_DIR": str(actual)},
+                capture_output=True, text=True, timeout=60,
+            )
+            assert completed.returncode == 0, completed.stdout + completed.stderr
+            if missing == "cuMemCreate":
+                assert "missing required CUDA symbol cuMemCreate" in completed.stderr, completed.stderr
+            print(f"PASS ABI initialization without {missing}", flush=True)
         cases = ["direct", "lookup", "scope", "queries", "runtime", "local-lifetime", "missing-core"]
         for case in cases:
             case_env = actual_env.copy()

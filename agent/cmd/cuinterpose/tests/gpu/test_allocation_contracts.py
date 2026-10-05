@@ -14,12 +14,30 @@ from cuda.bindings import driver
 
 import cuda_driver
 from cuda_driver import POSIX_FD_HANDLE_TYPE, cuda_call
+from test_multicast_locking import records
 
 
 @pytest.mark.gpu
 @pytest.mark.parametrize("interposed", [False, True], ids=["native", "shim"])
 @pytest.mark.parametrize("case", ["aliases", "nonexportable", "malloc", "invalid-create"])
 def test_allocation_contracts(case, interposed, tools, tmp_path):
+    run_case(case, interposed, tools, tmp_path)
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("case", ["nonposix-create", "nonposix-export", "export-flags", "private-export"])
+def test_shim_rejections_preserve_state(case, tools, tmp_path):
+    run_case(case, True, tools, tmp_path)
+
+
+@pytest.mark.gpu
+@pytest.mark.multicast
+@pytest.mark.host_numa
+def test_host_numa_v1_multicast_bind_is_rejected(multicast_supported, tools, tmp_path):
+    run_case("host-numa-v1", True, tools, tmp_path)
+
+
+def run_case(case, interposed, tools, tmp_path):
     control = tmp_path / "control"
     control.mkdir()
     env = os.environ | {"SNAPSHOT_CONTROL_DIR": str(control)}
@@ -124,6 +142,83 @@ def invalid_create_preserves_output(interposed):
     assert handle.value == 99, "invalid allocation type changed the caller's output"
 
 
+def rejected_allocation(case):
+    context = cuda_call(driver.cuDevicePrimaryCtxRetain, 0)
+    cuda_call(driver.cuCtxSetCurrent, context)
+    properties = cuda_driver.allocation_properties(0)
+    size = int(cuda_call(driver.cuMemGetAllocationGranularity, properties,
+                        driver.CUmemAllocationGranularity_flags.CU_MEM_ALLOC_GRANULARITY_MINIMUM))
+    library = ctypes.CDLL("libcuda.so.1")
+    if case == "nonposix-create":
+        create = library.cuMemCreate
+        create.argtypes = [ctypes.POINTER(ctypes.c_uint64), ctypes.c_size_t,
+                           ctypes.c_void_p, ctypes.c_uint64]
+        create.restype = ctypes.c_int
+        properties.requestedHandleTypes = driver.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_FABRIC
+        output = ctypes.c_uint64(99)
+        before = records()
+        assert create(ctypes.byref(output), size, properties.getPtr(), 0) == int(
+            driver.CUresult.CUDA_ERROR_NOT_SUPPORTED)
+        assert output.value == 99 and records() == before
+    else:
+        private = case == "private-export"
+        if private:
+            address = cuda_call(driver.cuMemAlloc, size)
+            handle = cuda_call(driver.cuMemRetainAllocationHandle, address)
+        else:
+            handle = cuda_call(driver.cuMemCreate, size, properties, 0)
+        export = library.cuMemExportToShareableHandle
+        export.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_uint64,
+                           ctypes.c_uint, ctypes.c_uint64]
+        export.restype = ctypes.c_int
+        kind = (driver.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_FABRIC
+                if case == "nonposix-export" else POSIX_FD_HANDLE_TYPE)
+        output = ctypes.c_int(-99)
+        before = records()
+        assert export(ctypes.byref(output), int(handle), int(kind), int(case == "export-flags")) == int(
+            driver.CUresult.CUDA_ERROR_INVALID_VALUE)
+        assert output.value == -99 and records() == before
+        if private:
+            cuda_driver.write_bytes(address, b"still valid")
+            cuda_driver.assert_bytes(address, b"still valid", "rejected private export")
+            cuda_call(driver.cuMemFree, address)
+        else:
+            descriptor = int(cuda_call(driver.cuMemExportToShareableHandle,
+                                      handle, POSIX_FD_HANDLE_TYPE, 0))
+            os.close(descriptor)
+        cuda_call(driver.cuMemRelease, handle)
+    cuda_call(driver.cuDevicePrimaryCtxRelease, 0)
+
+
+def rejected_host_numa_bind():
+    from test_host_numa import host_properties
+
+    context = cuda_call(driver.cuDevicePrimaryCtxRetain, 0)
+    cuda_call(driver.cuCtxSetCurrent, context)
+    properties = driver.CUmulticastObjectProp()
+    properties.numDevices = 2
+    properties.handleTypes = POSIX_FD_HANDLE_TYPE
+    properties.size = cuda_call(driver.cuMulticastGetGranularity, properties,
+                               driver.CUmulticastGranularity_flags.CU_MULTICAST_GRANULARITY_MINIMUM)
+    group = cuda_call(driver.cuMulticastCreate, properties)
+    for device in range(2):
+        cuda_call(driver.cuMulticastAddDevice, group, device)
+    node = max(0, int(cuda_call(driver.cuDeviceGetAttribute,
+                               driver.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_HOST_NUMA_ID, 0)))
+    host = host_properties(node)
+    granularity = int(cuda_call(driver.cuMemGetAllocationGranularity, host,
+                               driver.CUmemAllocationGranularity_flags.CU_MEM_ALLOC_GRANULARITY_MINIMUM))
+    size = ((int(properties.size) + granularity - 1) // granularity) * granularity
+    member = cuda_call(driver.cuMemCreate, size, host, 0)
+    before = records()
+    status, = driver.cuMulticastBindMem(group, 0, member, 0, int(properties.size), 0)
+    assert status == driver.CUresult.CUDA_ERROR_NOT_SUPPORTED
+    assert records() == before, "rejected HOST_NUMA bind changed tracked state"
+    cuda_call(driver.cuMemRelease, member)
+    cuda_call(driver.cuMemRelease, group)
+    cuda_call(driver.cuDevicePrimaryCtxRelease, 0)
+
+
 if __name__ == "__main__":
     case, interposed = sys.argv[1], bool(int(sys.argv[2]))
     cuda_call(driver.cuInit, 0)
@@ -131,5 +226,9 @@ if __name__ == "__main__":
         malloc_on_both_devices(interposed)
     elif case == "invalid-create":
         invalid_create_preserves_output(interposed)
+    elif case == "host-numa-v1":
+        rejected_host_numa_bind()
+    elif case in ("nonposix-create", "nonposix-export", "export-flags", "private-export"):
+        rejected_allocation(case)
     else:
         allocation_aliases(interposed, exportable=case == "aliases")

@@ -56,9 +56,9 @@ def test_multicast_unbind_locking(case, multicast_supported, multicast_gate, too
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def inspect_reply(kind="inspect"):
+def inspect_reply(kind="inspect", pid=None):
     """Use the same inspection protocol as the coordinator to assert exact records."""
-    pid = os.getpid()
+    pid = os.getpid() if pid is None else pid
     request = msgpack.packb({"version": 1, "body": {
         "kind": kind, "namespace_pid": pid,
     }}, use_bin_type=True)
@@ -75,8 +75,8 @@ def inspect_reply(kind="inspect"):
     return response["body"]["result"]
 
 
-def records():
-    reply = inspect_reply()
+def records(pid=None):
+    reply = inspect_reply(pid=pid)
     assert "Ok" in reply, reply
     return reply["Ok"]["inspection"]["records"]
 

@@ -26,7 +26,9 @@ Fresh processes exercise direct allocation and byte copies on both GPUs,
 explicit-handle lookup, all seven procedure resolvers, native version/alias
 selection, missing symbols, provider lifetime, and missing-core refusal. The
 ABI client opens the actual Rust core and checks invalid prefixes, null inputs,
-and concurrent idempotent registration using a resolver backed by real libcuda.
+concurrent idempotent registration, and rejection of a different resolver. Two
+additional processes hide a required symbol or the optional multicast symbols
+from that real-libcuda resolver to check startup policy.
 The only provider fixture is a generic ELF plugin with a private dependency;
 it checks caller scope for `dlsym(RTLD_DEFAULT)` and `dlsym(RTLD_NEXT)` and exports
 no CUDA functions.
