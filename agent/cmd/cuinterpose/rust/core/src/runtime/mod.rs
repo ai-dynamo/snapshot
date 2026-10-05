@@ -210,6 +210,24 @@ pub fn get() -> Result<MutexGuard<'static, ProcessState>> {
     Ok(state)
 }
 
+/// LOAD already finished using the carrier. Release it even if the peer worker
+/// subsequently failed, while retaining the ownership check before taking the mutex.
+pub(crate) fn release_host_arena() {
+    if let Ok(runtime) = process_runtime()
+        && let Ok(mut state) = runtime.state.lock()
+        && let Some(arena) = state.arena.take()
+    {
+        must_complete(arena.release());
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_for_test(state: ProcessState) {
+    let mut runtime = prepare_runtime().unwrap();
+    runtime.state = Mutex::new(state);
+    assert!(RUNTIME.set(*runtime).is_ok());
+}
+
 pub(super) fn active() -> Result<MutexGuard<'static, ProcessState>> {
     let state = get()?;
     if state.phase != Phase::Active {
