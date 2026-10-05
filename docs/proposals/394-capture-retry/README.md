@@ -441,9 +441,7 @@ started the capture. Both specs stay immutable, since the value is set at
 creation and never changes afterwards.
 
 An absent value means "use the cluster default", so the two surfaces compose.
-An out-of-range value is rejected by CRD validation at admission, which is
-strictly better than discovering it at capture time — the caller finds out when
-they submit rather than minutes later when the workload is loaded.
+An out-of-range value is rejected by CRD validation at admission.
 
 One choice for review: whether an operator should be able to cap what a caller
 may request.
@@ -478,11 +476,9 @@ Two smaller considerations:
 follow the first, and it is the one value an operator or a workload chooses.
 
 Attempts are spaced by exponential backoff whose initial delay and ceiling are
-**hard-coded constants, not configuration**. They are an implementation detail
-of being a good neighbour on a contended node, and exposing them would invite
-tuning without giving anyone a decision worth making. The total time a retrying
-capture can consume is already bounded by the capture timeout the workload sets,
-so the backoff needs no budget of its own.
+**hard-coded constants**. The total time a retrying capture can consume is
+already bounded by the capture timeout the workload sets, so the backoff needs
+no budget of its own.
 
 **Resolution.** The agent reads the per-capture value; absent, it uses the
 cluster default. Absent is distinct from zero: zero means the workload
