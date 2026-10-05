@@ -8,6 +8,8 @@ on:
     branches:
       - main
       - 'release/*'
+      # Approved stack PRs target feature branches before they reach main.
+      - 'pull-request/[0-9]+'
   pull_request:
     branches:
       - main
