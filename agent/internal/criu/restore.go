@@ -42,6 +42,20 @@ func ExecuteRestore(
 	m *types.CheckpointManifest,
 	checkpointPath string,
 	bundleDir string,
+	namespaces RestoreNamespaceFiles,
+	log logr.Logger,
+) (int32, func() error, time.Duration, time.Duration, error) {
+	return executeRestore(criuOpts, m, checkpointPath, bundleDir, namespaces, netNsPath, log)
+}
+
+// The network path is injectable so RPC and resource-lifetime tests can run
+// outside a placeholder namespace without access to the host's PID 1.
+func executeRestore(
+	criuOpts *criurpc.CriuOpts,
+	m *types.CheckpointManifest,
+	checkpointPath, bundleDir string,
+	namespaces RestoreNamespaceFiles,
+	netNamespacePath string,
 	log logr.Logger,
 ) (int32, func() error, time.Duration, time.Duration, error) {
 	settings := m.CRIUDump.CRIU
@@ -57,7 +71,7 @@ func ExecuteRestore(
 		return 0, nil, 0, 0, err
 	}
 	prepareStart := time.Now()
-	imageDirPath, removeImageDir, err := prepareRestoreImageDir(checkpointPath, scratchDir)
+	imageDirPath, removeImageDir, err := prepareRestoreImageDirInNamespace(checkpointPath, scratchDir, namespaces.Mount)
 	prepare = time.Since(prepareStart)
 	if err != nil {
 		removeScratch()
@@ -111,13 +125,22 @@ func ExecuteRestore(
 	c := criulib.MakeCriu()
 	c.SetCriuPath(criuBin)
 
-	netNsFile, err := os.Open(netNsPath)
+	netNsFile, err := os.Open(netNamespacePath)
 	if err != nil {
 		cleanupAfterError()
-		return 0, nil, prepare, 0, fmt.Errorf("failed to open net NS at %s: %w", netNsPath, err)
+		return 0, nil, prepare, 0, fmt.Errorf("failed to open net NS at %s: %w", netNamespacePath, err)
 	}
 	openFiles = append(openFiles, netNsFile)
 	c.AddInheritFd("extNetNs", netNsFile)
+
+	pidNSFile, err := registerExternalPIDNamespace(c, m, namespaces.PID)
+	if err != nil {
+		cleanupAfterError()
+		return 0, nil, prepare, 0, err
+	}
+	if pidNSFile != nil {
+		openFiles = append(openFiles, pidNSFile)
+	}
 
 	inheritedFiles = registerInheritFDs(c, m.K8s.StdioFDs, log)
 
@@ -139,6 +162,9 @@ func ExecuteRestore(
 // BuildRestoreOpts assembles CriuOpts for a CRIU restore from the checkpoint manifest.
 // ImagesDirFd and WorkDirFd are left unset — ExecuteRestore opens them at restore time.
 func BuildRestoreOpts(m *types.CheckpointManifest, checkpointPath string, cgroupRoot string, log logr.Logger) (*criurpc.CriuOpts, error) {
+	if err := validateExternalPIDNamespace(m, checkpointPath); err != nil {
+		return nil, err
+	}
 	extMounts, err := buildRestoreExtMounts(m)
 	if err != nil {
 		return nil, err

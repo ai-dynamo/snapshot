@@ -31,6 +31,8 @@ type RestoreOptions struct {
 	TargetPodIP     string
 	// BundleDir is the path where the agent's binary bundle is mounted inside this namespace.
 	BundleDir string
+	// NamespaceFiles are borrowed destination descriptors, valid through CUDA restore.
+	NamespaceFiles criu.RestoreNamespaceFiles
 }
 
 type RestoreInNamespaceResult struct {
@@ -200,7 +202,7 @@ func executeRestore(
 		return nil, 0, nil, fmt.Errorf("remove stale restore-complete sentinel: %w", err)
 	}
 
-	criuPID, cleanup, prepare, restore, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, opts.BundleDir, log)
+	criuPID, cleanup, prepare, restore, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, opts.BundleDir, opts.NamespaceFiles, log)
 	if err != nil {
 		return nil, 0, nil, err
 	}

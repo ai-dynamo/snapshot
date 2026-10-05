@@ -7,11 +7,13 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/go-logr/logr"
 
+	"github.com/ai-dynamo/snapshot/agent/internal/criu"
 	"github.com/ai-dynamo/snapshot/agent/internal/executor"
 	"github.com/ai-dynamo/snapshot/agent/internal/logging"
 	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
@@ -27,6 +29,8 @@ func main() {
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
 	targetPodIP := flag.String("target-pod-ip", "", "Restore pod IP for CRIU TCP socket remapping")
 	bundleDir := flag.String("bundle-dir", nsmount.SnapshotBinDst, "Path where the agent binary bundle is mounted in this namespace")
+	pidNSFD := flag.Int("pid-ns-fd", -1, "Inherited destination PID namespace descriptor")
+	mountNSFD := flag.Int("mount-ns-fd", -1, "Inherited destination mount namespace descriptor")
 	flag.Parse()
 
 	if *checkpointPath == "" {
@@ -37,12 +41,28 @@ func main() {
 		fatal(log, err, "failed to point lookups at the injected bundle")
 	}
 
+	pidFile, err := inheritedNamespaceFile(*pidNSFD, "pid")
+	if err != nil {
+		fatal(log, err, "invalid --pid-ns-fd")
+	}
+	if pidFile != nil {
+		defer pidFile.Close()
+	}
+	mountFile, err := inheritedNamespaceFile(*mountNSFD, "mount")
+	if err != nil {
+		fatal(log, err, "invalid --mount-ns-fd")
+	}
+	if mountFile != nil {
+		defer mountFile.Close()
+	}
+
 	opts := executor.RestoreOptions{
 		CheckpointPath: *checkpointPath,
 		CUDADeviceMap:  *cudaDeviceMap,
 		CgroupRoot:     *cgroupRoot,
 		TargetPodIP:    *targetPodIP,
 		BundleDir:      *bundleDir,
+		NamespaceFiles: criu.RestoreNamespaceFiles{PID: pidFile, Mount: mountFile},
 	}
 
 	if err := json.Unmarshal([]byte(*gpuMountAliases), &opts.GPUMountAliases); err != nil {
@@ -95,4 +115,20 @@ func useInjectedBundle(bundleDir string) error {
 		return err
 	}
 	return nil
+}
+
+// The helper owns inherited descriptors; -1 preserves standalone invocation.
+func inheritedNamespaceFile(fd int, name string) (*os.File, error) {
+	if fd == -1 {
+		return nil, nil
+	}
+	if fd < 3 {
+		return nil, fmt.Errorf("invalid inherited %s descriptor %d", name, fd)
+	}
+	file := os.NewFile(uintptr(fd), name+"-namespace")
+	if _, err := file.Stat(); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("stat inherited %s namespace: %w", name, err)
+	}
+	return file, nil
 }

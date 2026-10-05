@@ -447,8 +447,8 @@ func existingMountPaths(targetRoot string, destinations []string, aliases map[st
 //
 //  1. Mount-namespace pinning: mp.NsFd() is the /proc/<pid>/ns/mnt fd opened at
 //     mount time. Passing it via --mount=/proc/self/fd/N to nsenter pins the mount
-//     namespace against PID reuse. The remaining four namespaces (uts, ipc, net,
-//     pid) are still resolved via -t <pid> and are not protected against reuse.
+//     namespace against PID reuse. The PID namespace is also pinned and passed
+//     explicitly. UTS, IPC, and network still resolve via -t <pid>.
 //
 //  2. nsrestore binary fd: we open nsrestore from the agent host side (SnapshotBinSrc)
 //     before entering any namespace and exec it via /proc/self/fd/N. This protects
@@ -466,27 +466,60 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	}
 	defer binaryFile.Close()
 
-	// ExtraFiles[0] → child fd 3, ExtraFiles[1] → child fd 4.
+	pidNsFile, err := os.Open(fmt.Sprintf("%s/%d/ns/pid", snapshotruntime.HostProcPath, snap.PlaceholderPID))
+	if err != nil {
+		return nil, fmt.Errorf("open placeholder PID namespace: %w", err)
+	}
+	defer pidNsFile.Close()
+
+	cmd, err := nsRestoreCommand(ctx, req, snap, checkpointPath, mp.NsFd(), binaryFile, pidNsFile)
+	if err != nil {
+		return nil, err
+	}
+	log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())
+
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("nsrestore failed: %w\nstdout: %s", err, stdout.String())
+	}
+
+	var result RestoreInNamespaceResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		return nil, fmt.Errorf("failed to parse nsrestore result: %w\nstdout: %s", err, stdout.String())
+	}
+	if result.RestoredPID <= 0 {
+		return nil, fmt.Errorf("nsrestore returned invalid PID %d", result.RestoredPID)
+	}
+
+	return &result, nil
+}
+
+// nsRestoreCommand retains the descriptor-backed binary execution and existing
+// namespace entry behavior while passing pinned destination namespaces onward.
+func nsRestoreCommand(ctx context.Context, req RestoreRequest, snap *types.RestoreContainerSnapshot, checkpointPath string, nsFd, binaryFile, pidNsFile *os.File) (*exec.Cmd, error) {
+	// ExtraFiles entries become child descriptors 3, 4, and 5.
 	// These constants mirror nsFdChildNum in mount.go (ExtraFiles[0] = fd 3).
 	const (
 		nsFdChild     = 3 // mp.NsFd() passed as ExtraFiles[0]
 		binaryFdChild = 4 // binaryFile passed as ExtraFiles[1]
+		pidNsFdChild  = 5 // pidNsFile passed as ExtraFiles[2]
 	)
 
 	bundleDir := nsmount.SnapshotBinDst // bundle root as seen inside the container
 	var args []string
 
-	nsFd := mp.NsFd()
 	if nsFd != nil {
-		// Use the pinned ns fd for the mount namespace; keep -t for the other
-		// namespaces (user, ipc, net, pid). This decouples mount-ns entry from
-		// PID liveness.
+		// Use pinned descriptors for mount and PID namespaces.
 		args = []string{
 			fmt.Sprintf("--mount=/proc/self/fd/%d", nsFdChild),
 			"-t", strconv.Itoa(snap.PlaceholderPID),
 			// Intentionally exclude cgroup namespace (-C): CRIU must manage cgroups
 			// from the host-visible hierarchy so --cgroup-root remap works.
-			"-u", "-i", "-n", "-p",
+			"-u", "-i", "-n",
+			fmt.Sprintf("--pid=/proc/self/fd/%d", pidNsFdChild),
 			"--", fmt.Sprintf("/proc/self/fd/%d", binaryFdChild),
 		}
 	} else {
@@ -495,6 +528,8 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	args = append(args,
 		"--checkpoint-path", checkpointPath,
 		"--bundle-dir", bundleDir,
+		"--mount-ns-fd", strconv.Itoa(nsFdChild),
+		"--pid-ns-fd", strconv.Itoa(pidNsFdChild),
 	)
 	if snap.CUDADeviceMap != "" {
 		args = append(args, "--cuda-device-map", snap.CUDADeviceMap)
@@ -516,24 +551,6 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	cmd := exec.CommandContext(ctx, "nsenter", args...)
 	// Inherit the agent environment so nsrestore uses the same logger settings.
 	cmd.Env = os.Environ()
-	cmd.ExtraFiles = []*os.File{nsFd, binaryFile}
-	log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())
-
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("nsrestore failed: %w\nstdout: %s", err, stdout.String())
-	}
-
-	var result RestoreInNamespaceResult
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		return nil, fmt.Errorf("failed to parse nsrestore result: %w\nstdout: %s", err, stdout.String())
-	}
-	if result.RestoredPID <= 0 {
-		return nil, fmt.Errorf("nsrestore returned invalid PID %d", result.RestoredPID)
-	}
-
-	return &result, nil
+	cmd.ExtraFiles = []*os.File{nsFd, binaryFile, pidNsFile}
+	return cmd, nil
 }
