@@ -262,6 +262,42 @@ TEST_F(ModelStreamerTransferEngineTest, RejectsMissingStorageBeforeCreatingAnyth
   EXPECT_EQ(starts, 0);
 }
 
+TEST_F(ModelStreamerTransferEngineTest, TransferOptionsDoNotSelectCheckpointStorage)
+{
+  ModelStreamerTransferEngine engine(root_.path(), options_);
+  const auto source = root_.path() / "source";
+  fs::create_directory(source);
+  StorageBackend filesystem;
+  filesystem.mutable_filesystem()->set_directory(source.string());
+  EXPECT_EQ(engine.PrepareRestore(filesystem).size_bytes(), 0U);
+
+  PublishedArtifact checkpoint;
+  checkpoint.set_artifact_handle(std::string(64, 'a'));
+  EXPECT_THROW(engine.ValidateArtifact(checkpoint), std::invalid_argument);
+  EXPECT_THROW(engine.PrepareRestore({}, {}, &checkpoint), TransferError);
+  EXPECT_EQ(starts, 0);
+}
+
+TEST_F(ModelStreamerTransferEngineTest, ConfiguredStoreRequiresArtifactForStorageOperations)
+{
+  S3Config config;
+  config.transfer = options_;
+  config.store_id = "test-store";
+  config.bucket = "local-test-bucket";
+  ModelStreamerTransferEngine implementation(config);
+  const TransferEngine& engine = implementation;
+  const auto source = root_.path() / "source";
+  fs::create_directory(source);
+  StorageBackend storage;
+  storage.mutable_filesystem()->set_directory(source.string());
+  EXPECT_THROW(engine.PrepareRestore(storage).size_bytes(), std::invalid_argument);
+  EXPECT_THROW(engine.StageRestore(engine.PrepareRestore(storage), root_.path() / "staged"), std::invalid_argument);
+  EXPECT_THROW(engine.ValidateCheckpointDestination(storage), std::invalid_argument);
+  EXPECT_THROW(engine.PublishCheckpoint(source, storage, {}), std::invalid_argument);
+  EXPECT_FALSE(fs::exists(root_.path() / "staged"));
+  EXPECT_EQ(starts, 0);
+}
+
 TEST_F(ModelStreamerTransferEngineTest, S3RecoveryPreservesConnectionAndTimeout)
 {
   const auto source = root_.path() / "source";
