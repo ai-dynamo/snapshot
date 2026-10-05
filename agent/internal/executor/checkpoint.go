@@ -245,15 +245,21 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 	allPIDs := snapshotruntime.ProcessTreePIDs(pid)
 	cudaHostPIDs := cuda.FilterProcesses(ctx, allPIDs, log)
 	cudaNamespacePIDs := make([]int, 0, len(cudaHostPIDs))
+	seenNamespacePIDs := make(map[int]int, len(cudaHostPIDs))
 	for _, cudaHostPID := range cudaHostPIDs {
 		process, err := snapshotruntime.ReadProcessDetails(snapshotruntime.HostProcPath, cudaHostPID)
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to read process details for CUDA process %d: %w", cudaHostPID, err)
 		}
-		if len(process.NamespacePIDs) != 2 {
-			return nil, 0, fmt.Errorf("CUDA process %d has namespace depth %d, want 2", cudaHostPID, len(process.NamespacePIDs))
+		namespacePID, err := process.NamespacePID()
+		if err != nil {
+			return nil, 0, err
 		}
-		cudaNamespacePIDs = append(cudaNamespacePIDs, process.InnermostPID)
+		if previousPID, exists := seenNamespacePIDs[namespacePID]; exists {
+			return nil, 0, fmt.Errorf("CUDA processes %d and %d map to namespace pid %d", previousPID, cudaHostPID, namespacePID)
+		}
+		seenNamespacePIDs[namespacePID] = cudaHostPID
+		cudaNamespacePIDs = append(cudaNamespacePIDs, namespacePID)
 	}
 	if len(cudaHostPIDs) > 0 {
 		log.V(1).Info("Resolved checkpoint CUDA PID mapping", "host_pids", cudaHostPIDs, "namespace_pids", cudaNamespacePIDs)

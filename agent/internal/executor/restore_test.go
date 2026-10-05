@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -395,5 +396,46 @@ func TestExistingMountPaths(t *testing.T) {
 
 	if got := existingMountPaths(targetRoot, nil, nil); len(got) != 0 {
 		t.Errorf("existingMountPaths of nothing = %#v, want empty", got)
+	}
+}
+
+func TestNSRestoreCommandPassesPinnedDescriptors(t *testing.T) {
+	var files []*os.File
+	for _, path := range []string{"/proc/self/ns/mnt", "/proc/self/exe", "/proc/self/ns/pid"} {
+		file, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer file.Close()
+		files = append(files, file)
+	}
+	snap := &types.RestoreContainerSnapshot{PlaceholderPID: 123, CUDADeviceMap: "GPU-a=GPU-b", CgroupRoot: "/workload", GPUMountAliases: map[string]string{"/dev/nvidia0": "/dev/nvidia1"}}
+	cmd, err := nsRestoreCommand(context.Background(), RestoreRequest{TargetPodIP: "10.0.0.2"}, snap, "/checkpoint", files[0], files[1], files[2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cmd.ExtraFiles, files) {
+		t.Fatalf("extra files = %v", cmd.ExtraFiles)
+	}
+	args := strings.Join(cmd.Args, " ")
+	for _, expected := range []string{"--mount=/proc/self/fd/3", "--pid=/proc/self/fd/5", "-- /proc/self/fd/4", "--mount-ns-fd 3", "--pid-ns-fd 5", "--checkpoint-path /checkpoint", "--target-pod-ip 10.0.0.2", "--cuda-device-map GPU-a=GPU-b", "--gpu-mount-aliases", "--cgroup-root /workload"} {
+		if !strings.Contains(args, expected) {
+			t.Fatalf("missing %q in %q", expected, args)
+		}
+	}
+	// Verify actual child FD numbers without requiring privileged namespace entry.
+	child := exec.Command("sh", "-c", "readlink /proc/self/fd/3; readlink /proc/self/fd/5")
+	child.ExtraFiles = cmd.ExtraFiles
+	output, err := child.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, prefix := range []string{"mnt:[", "pid:["} {
+		if !strings.Contains(string(output), prefix) {
+			t.Fatalf("inherited namespaces = %q", output)
+		}
+	}
+	if _, err := nsRestoreCommand(context.Background(), RestoreRequest{}, snap, "/checkpoint", nil, files[1], files[2]); err == nil {
+		t.Fatal("accepted missing mount descriptor")
 	}
 }

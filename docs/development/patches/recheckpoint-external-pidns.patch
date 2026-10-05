@@ -1,0 +1,30 @@
+diff --git a/agent/internal/types/inspect.go b/agent/internal/types/inspect.go
+--- a/agent/internal/types/inspect.go
++++ b/agent/internal/types/inspect.go
+@@ -31,0 +32,2 @@
++	// PIDNSInode stays zero until automatic workload-root selection is implemented.
++	PIDNSInode     uint64
+diff --git a/agent/internal/runtime/namespaces.go b/agent/internal/runtime/namespaces.go
+--- a/agent/internal/runtime/namespaces.go
++++ b/agent/internal/runtime/namespaces.go
+@@ -20,0 +21,10 @@
++
++// GetPIDNSInode returns the selected workload's PID namespace inode via /host/proc.
++func GetPIDNSInode(pid int) (uint64, error) {
++	nsPath := fmt.Sprintf("%s/%d/ns/pid", HostProcPath, pid)
++	var stat unix.Stat_t
++	if err := unix.Stat(nsPath, &stat); err != nil {
++		return 0, fmt.Errorf("failed to stat %s: %w", nsPath, err)
++	}
++	return stat.Ino, nil
++}
+diff --git a/agent/internal/criu/dump.go b/agent/internal/criu/dump.go
+--- a/agent/internal/criu/dump.go
++++ b/agent/internal/criu/dump.go
+@@ -58,0 +59,6 @@
++	}
++	// Unfinished: inspection must select a restorable workload tree before
++	// setting PIDNSInode. Ordinary full-container capture leaves it zero.
++	if state.PIDNSInode != 0 {
++		criuOpts.External = append(criuOpts.External,
++			fmt.Sprintf("pid[%d]:extPodPidNs", state.PIDNSInode))
