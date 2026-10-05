@@ -16,8 +16,8 @@ func TestParseCuInterposeAnnotation(t *testing.T) {
 		value string
 		want  bool
 	}{
-		{"true", true}, {" TRUE ", true}, {"True", true}, {"t", true}, {"T", true}, {"1", true},
-		{"false", false}, {" FALSE ", false}, {"False", false}, {"f", false}, {"F", false}, {"0", false},
+		{"enabled", true}, {" enabled ", true},
+		{"disabled", false}, {" disabled ", false},
 	} {
 		t.Run(tc.value, func(t *testing.T) {
 			annotations := map[string]string{CuInterposeAnnotation: tc.value}
@@ -27,7 +27,7 @@ func TestParseCuInterposeAnnotation(t *testing.T) {
 			}
 		})
 	}
-	for _, value := range []string{"", " ", "enabled", "yes"} {
+	for _, value := range []string{"", " ", "true", "false", "1", "0", "ENABLED", "DISABLED", "yes"} {
 		annotations := map[string]string{CuInterposeAnnotation: value}
 		_, err := ParseCuInterposeAnnotation(annotations)
 		if err == nil || !strings.Contains(err.Error(), CuInterposeAnnotation) {
