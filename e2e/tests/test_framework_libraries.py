@@ -13,8 +13,13 @@ import pytest
 
 from snapshot_e2e import framework_workloads as fw
 
+CONTAINER_ID = "b" * 64
 
-def guide_process(proc: Path, pid: int = 42, *, unbuffered: bool = False) -> Path:
+
+def guide_process(
+    proc: Path, pid: int = 42, *, unbuffered: bool = False,
+    container_id: str = CONTAINER_ID,
+) -> Path:
     process = proc / str(pid)
     libraries = process / "root/tmp/snapshot-cuda"
     libraries.mkdir(parents=True)
@@ -22,6 +27,7 @@ def guide_process(proc: Path, pid: int = 42, *, unbuffered: bool = False) -> Pat
     if unbuffered:
         args.append(b"-u")
     (process / "cmdline").write_bytes(b"\0".join([*args, b"/snapshot-app/app.py", b""]))
+    (process / "cgroup").write_text(f"0::/kubepods.slice/cri-containerd-{container_id}.scope\n")
     (libraries / "libcuinterpose.so").write_bytes(b"frontend")
     (libraries / "libcuinterpose_core.so").write_bytes(b"core")
     return libraries
@@ -29,7 +35,7 @@ def guide_process(proc: Path, pid: int = 42, *, unbuffered: bool = False) -> Pat
 
 def probe(proc: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, "-c", fw.CUINTERPOSE_LIBRARY_PROBE, str(proc)],
+        [sys.executable, "-c", fw.CUINTERPOSE_LIBRARY_PROBE, str(proc), CONTAINER_ID],
         capture_output=True, text=True, timeout=10,
     )
 
@@ -79,3 +85,12 @@ def test_library_probe_requires_consistent_guide_roots(tmp_path: Path) -> None:
     result = probe(tmp_path)
     assert result.returncode != 0
     assert "guide processes have different libraries" in result.stderr
+
+
+def test_library_probe_excludes_other_containers(tmp_path: Path) -> None:
+    guide_process(tmp_path)
+    other = guide_process(tmp_path, pid=43, container_id="c" * 64)
+    (other / "libcuinterpose_core.so").unlink()
+    result = probe(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["libcuinterpose_core.so"] == hashlib.sha256(b"core").hexdigest()
