@@ -122,6 +122,10 @@ The GLM pairs pin [RadixArk/GLM-5.3-NVFP4](https://huggingface.co/RadixArk/GLM-5
 and the DeepSeek pairs pin
 [NVIDIA/DeepSeek-V4-Flash-NVFP4](https://huggingface.co/nvidia/DeepSeek-V4-Flash-NVFP4).
 Each source and restore pair uses the same model revision and engine image.
+The [SGLang GLM guide](https://github.com/sgl-project/sglang/blob/v0.5.20/docs/cookbook/autoregressive/GLM/GLM-5.3.mdx)
+labels this GLM quantized checkpoint experimental. Its
+[B200 NVFP4 profile](https://github.com/sgl-project/sglang/blob/v0.5.20/docs/src/snippets/configs/zai-org/glm-5.3.jsx)
+is marked unverified upstream.
 DeepSeek uses the vLLM 0.27.1 and SGLang 0.5.20 releases. The vLLM
 settings follow Dynamo's [B200 aggregated profile](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4/deepseek-v4-flash/vllm/agg-b200-agentic/deploy.yaml),
 with the context bounded to 128K. The SGLang settings follow the
@@ -135,7 +139,8 @@ Model-specific settings are JSON objects in `VLLM_ENGINE_ARGS`,
 `SGLANG_ENGINE_ARGS`, or `TRTLLM_ENGINE_ARGS`. Keys are Python constructor
 arguments, not CLI flags. They override the small example's defaults. The
 GLM vLLM and SGLang profiles use speculative decoding. The TensorRT-LLM profile
-keeps it off because its pinned release does not support GLM NVFP4 with MTP.
+omits MTP, following the pinned release's
+[GLM NVFP4 guide](https://github.com/NVIDIA/TensorRT-LLM/blob/v1.3.0rc24/docs/source/deployment-guide/deployment-guide-for-glm-5-on-trtllm.md#b200-nvfp4-config).
 
 Create the [shared model-cache PVC](model-cache-pvc.yaml) in the workload
 namespace, using a ReadWriteMany storage class available in your cluster.
