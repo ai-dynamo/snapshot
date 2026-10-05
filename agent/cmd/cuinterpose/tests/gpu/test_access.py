@@ -33,6 +33,91 @@ def test_access_updates_survive_reconstruction(tools, tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.mark.gpu
+@pytest.mark.parametrize("layout", ["prefix", "interior", "suffix", "adjacent"])
+@pytest.mark.parametrize("interposed", [False, True], ids=["native", "shim"])
+def test_access_range_boundaries(layout, interposed, tools, tmp_path):
+    control = tmp_path / "control"
+    control.mkdir()
+    environment = os.environ | {"SNAPSHOT_CONTROL_DIR": str(control)}
+    if interposed:
+        environment["LD_PRELOAD"] = str(tools.interposer)
+    else:
+        environment.pop("LD_PRELOAD", None)
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve()), layout,
+         str(tools.coordinator) if interposed else "native"],
+        env=environment, capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def run_range_worker(layout, coordinator):
+    cuda_call(driver.cuInit, 0)
+    context = cuda_call(driver.cuDevicePrimaryCtxRetain, 0)
+    cuda_call(driver.cuCtxSetCurrent, context)
+    properties = cuda_driver.allocation_properties(0)
+    granularity = int(cuda_call(
+        driver.cuMemGetAllocationGranularity, properties,
+        driver.CUmemAllocationGranularity_flags.CU_MEM_ALLOC_GRANULARITY_MINIMUM,
+    ))
+    size = 3 * granularity
+    address = int(cuda_call(driver.cuMemAddressReserve, size, 0, 0, 0))
+    ranges = [(index * granularity, granularity) for index in range(3)] \
+        if layout == "adjacent" else [(0, size)]
+    handles, descriptors = [], []
+    for offset, length in ranges:
+        handle = cuda_call(driver.cuMemCreate, length, properties, 0)
+        handles.append(handle)
+        cuda_call(driver.cuMemMap, address + offset, length, 0, handle, 0)
+        if coordinator != "native":
+            descriptors.append(int(cuda_call(
+                driver.cuMemExportToShareableHandle, handle,
+                cuda_driver.POSIX_FD_HANDLE_TYPE, 0,
+            )))
+    access = driver.CUmemAccessDesc()
+    access.location.type = driver.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
+    access.location.id = 0
+    flags = driver.CUmemAccess_flags
+    access.flags = flags.CU_MEM_ACCESS_FLAGS_PROT_READWRITE
+    cuda_call(driver.cuMemSetAccess, address, size, [access], 1)
+    access.flags = flags.CU_MEM_ACCESS_FLAGS_PROT_READ
+    offset = {"prefix": 0, "interior": granularity, "suffix": 2 * granularity,
+              "adjacent": 0}[layout]
+    length = size if layout == "adjacent" else granularity
+    status, = driver.cuMemSetAccess(address + offset, length, [access], 1)
+    expected_status = driver.CUresult.CUDA_SUCCESS if layout == "adjacent" \
+        else driver.CUresult.CUDA_ERROR_INVALID_VALUE
+    assert status == expected_status, (layout, status)
+    expected_access = flags.CU_MEM_ACCESS_FLAGS_PROT_READ if layout == "adjacent" \
+        else flags.CU_MEM_ACCESS_FLAGS_PROT_READWRITE
+
+    def check_access():
+        for index in range(3):
+            assert cuda_call(driver.cuMemGetAccess, access.location,
+                             address + index * granularity) == expected_access
+
+    check_access()
+    if coordinator != "native":
+        control = Path(os.environ["SNAPSHOT_CONTROL_DIR"])
+        checkpoint = control / "checkpoint"
+        checkpoint.mkdir()
+        for phase in ("--prepare", "--restore"):
+            subprocess.run([
+                coordinator, phase, "--control-dir", str(control),
+                "--checkpoint-dir", str(checkpoint), "--process", str(os.getpid()),
+            ], check=True, timeout=20)
+        check_access()
+    for descriptor in descriptors:
+        os.close(descriptor)
+    for offset, length in ranges:
+        cuda_call(driver.cuMemUnmap, address + offset, length)
+    cuda_call(driver.cuMemAddressFree, address, size)
+    for handle in handles:
+        cuda_call(driver.cuMemRelease, handle)
+    cuda_call(driver.cuDevicePrimaryCtxRelease, 0)
+
+
 def run_worker(coordinator):
     cuda_call(driver.cuInit, 0)
     context = cuda_call(driver.cuDevicePrimaryCtxRetain, 0)
@@ -89,4 +174,7 @@ def run_worker(coordinator):
 
 
 if __name__ == "__main__":
-    run_worker(*sys.argv[1:])
+    if len(sys.argv) == 3:
+        run_range_worker(*sys.argv[1:])
+    else:
+        run_worker(*sys.argv[1:])
