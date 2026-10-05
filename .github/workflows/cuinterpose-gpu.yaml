@@ -62,7 +62,9 @@ jobs:
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 60
     env:
-      TEST_NAMESPACE: snapshot-cuinterpose-${{ github.run_id }}-${{ github.run_attempt }}
+      KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-nebius-2
+      TEST_NAMESPACE: dynamo-deploy-test
+      TEST_POD: snapshot-cuinterpose-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -75,17 +77,14 @@ jobs:
           (cd payload && sha256sum --check SHA256SUMS)
           test "$(cat payload/revision)" = "$GITHUB_SHA"
           cp payload/{revision,image,SHA256SUMS} results/
-          # Capture the runner's supplied context once. All API calls pin it.
-          KUBE_CONTEXT=$(kubectl config current-context)
-          test -n "$KUBE_CONTEXT"
-          echo "KUBE_CONTEXT=$KUBE_CONTEXT" >> "$GITHUB_ENV"
           image=$(cat payload/image)
-          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" create namespace "$TEST_NAMESPACE"
+          # The deployment runner already has access to this shared test namespace.
+          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" get namespace "$TEST_NAMESPACE" >/dev/null
           kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" create -f - <<YAML
           apiVersion: v1
           kind: Pod
           metadata:
-            name: cuinterpose-gpu
+            name: ${TEST_POD}
           spec:
             restartPolicy: Never
             activeDeadlineSeconds: 3300
@@ -95,7 +94,7 @@ jobs:
             nodeSelector:
               kubernetes.io/arch: amd64
               nvidia.com/gpu.present: "true"
-              nvidia.com/mig.config: all-disabled
+              nvidia.com/gpu.product: NVIDIA-H200
             tolerations:
             - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
             - {key: dedicated, operator: Exists, effect: NoSchedule}
@@ -105,7 +104,9 @@ jobs:
               image: ${image}
               command: [/bin/bash, -c, "sleep 3300"]
               workingDir: /work
-              securityContext: {privileged: true}
+              securityContext:
+                capabilities: {add: [SYS_PTRACE]}
+                seccompProfile: {type: Unconfined}
               resources:
                 requests: {cpu: "2", memory: 8Gi, ephemeral-storage: 16Gi, nvidia.com/gpu: "2"}
                 limits: {cpu: "8", memory: 24Gi, ephemeral-storage: 40Gi, nvidia.com/gpu: "2"}
@@ -116,12 +117,12 @@ jobs:
             - {name: work, emptyDir: {}}
             - {name: shm, emptyDir: {medium: Memory, sizeLimit: 2Gi}}
           YAML
-          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" wait pod/cuinterpose-gpu --for=condition=Ready --timeout=600s
-          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" exec -i cuinterpose-gpu -- tar -xz -C /work < cuinterpose-gpu.tar.gz
-      - name: Run frontend and ordinary GPU tests
+          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" wait "pod/$TEST_POD" --for=condition=Ready --timeout=600s
+          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" exec -i "$TEST_POD" -- tar -xz -C /work < cuinterpose-gpu.tar.gz
+      - name: Run frontend and GPU tests
         shell: bash
         run: |
-          timeout 40m kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" exec -i cuinterpose-gpu -- bash -seuo pipefail <<'SH' 2>&1 | tee results/run.log
+          timeout 40m kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" exec -i "$TEST_POD" -- bash -seuo pipefail <<'SH' 2>&1 | tee results/run.log
           sha256sum --check SHA256SUMS
           mkdir results
           export UV_CACHE_DIR=/work/cache UV_PYTHON_INSTALL_DIR=/work/python UV_FROZEN=1
@@ -139,13 +140,12 @@ jobs:
           cuda_call(driver.cuInit, 0)
           version = cuda_call(driver.cuDriverGetVersion)
           print(f"CUDA driver API: {version}, Torch: {torch.__version__}, Torch CUDA: {torch.version.cuda}")
-          assert version >= 13000, "requires a CUDA 13 driver"
+          assert version >= 13010, "requires a CUDA 13.1+ driver"
           assert cuda_call(driver.cuDeviceGetCount) == 2, "requires two allocated GPUs"
           assert cuda_call(driver.cuDeviceCanAccessPeer, 0, 1), "GPU 0 needs peer access to GPU 1"
           assert cuda_call(driver.cuDeviceCanAccessPeer, 1, 0), "GPU 1 needs peer access to GPU 0"
           PY
-          # This A100-capable tier deliberately excludes multicast and HOST_NUMA.
-          export PYTEST_ADDOPTS="-m 'gpu and not multicast and not host_numa' --junitxml=/work/results/pytest.xml"
+          export PYTEST_ADDOPTS="-m gpu --junitxml=/work/results/pytest.xml"
           make test-gpu UV=/work/uv CUDA_INCLUDE=/usr/local/cuda/include
           python - <<'PY'
           import xml.etree.ElementTree as ET
@@ -154,18 +154,17 @@ jobs:
           assert not result.findall('.//skipped'), "selected GPU cases must not skip"
           PY
           SH
-      - name: Collect diagnostics and remove test namespace
+      - name: Collect diagnostics and remove test pod
         if: always()
         shell: bash
         run: |
           mkdir -p results
-          if [[ -z "${KUBE_CONTEXT:-}" ]]; then exit 0; fi
           status=0
-          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" get pod cuinterpose-gpu -o yaml > results/pod.yaml || status=1
-          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" describe pod cuinterpose-gpu > results/pod-description.txt || status=1
-          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" logs cuinterpose-gpu > results/pod.log || status=1
-          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" cp cuinterpose-gpu:/work/results results/pod-results || status=1
-          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" delete namespace "$TEST_NAMESPACE" --ignore-not-found --timeout=120s || status=1
+          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" get pod "$TEST_POD" -o yaml > results/pod.yaml || status=1
+          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" describe pod "$TEST_POD" > results/pod-description.txt || status=1
+          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" logs "$TEST_POD" > results/pod.log || status=1
+          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" cp "$TEST_POD:/work/results" results/pod-results || status=1
+          kubectl --context "$KUBE_CONTEXT" -n "$TEST_NAMESPACE" delete pod "$TEST_POD" --ignore-not-found --timeout=120s || status=1
           exit "$status"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
