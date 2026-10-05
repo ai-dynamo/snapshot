@@ -96,9 +96,13 @@ func containerIDForRuntime(id string, allowedSchemes ...string) (string, error) 
 func newRemoteRuntimeService(socket string) (internalapi.RuntimeService, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), criConnectTimeout)
 	defer cancel()
-	// The context and useStreaming arguments were added in cri-client v0.36.2
-	// (CVE pin); re-check this call when Dynamo updates that dependency.
-	return remote.NewRemoteRuntimeService(ctx, socket, criCallTimeout, nil, false)
+	// The explicit nil tracer provider opts out of the otelgrpc stats handler;
+	// omitting the call installs one backed by a noop provider instead.
+	return remote.NewRemoteRuntimeServiceBuilder().
+		WithEndpoint(socket).
+		WithConnectionTimeout(criCallTimeout).
+		WithTracerProvider(nil).
+		Build(ctx)
 }
 
 // stopContainerIfPresent is the shared desired-state operation for retrying
