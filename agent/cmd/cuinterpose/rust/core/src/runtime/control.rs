@@ -309,14 +309,21 @@ fn serve(
         ControlRequest::SaveAllocations(owners) => checkpoint::save_allocations(&owners),
     };
     let loaded = load && result.is_ok();
-    protocol::send(
+    if let Err(error) = protocol::send(
         &socket,
         &Response {
             namespace_pid,
             result,
         },
         None,
-    )?;
+    ) {
+        if loaded {
+            // Loading has advanced the phase, so a retry cannot acknowledge the carrier.
+            eprintln!("cuinterpose: cannot send successful LoadAllocations reply: {error}");
+            std::process::abort();
+        }
+        return Err(error);
+    }
     if loaded {
         checkpoint::load_acknowledged();
     }
