@@ -167,6 +167,7 @@ def test_framework_checkpoint_restore_serves_inference(
         )
         source_node = source.spec.node_name
         assert source.metadata.annotations.get(fw.SHARED_MEMORY_ANNOTATION) == "enabled"
+        source_libraries = fw.cuinterpose_library_hashes(config.namespace, run.source_pod)
         source_main = next(c for c in source.spec.containers if c.name == frameworks.CONTAINER)
         parallelism = next(e.value for e in source_main.env if e.name == "SNAPSHOT_TENSOR_PARALLEL_SIZE")
         result.update_environment(comparisonDimensions={
@@ -257,6 +258,9 @@ def test_framework_checkpoint_restore_serves_inference(
         result.redact(restore_node, "restore-node")
         assert restored_text, f"{framework.restore_ready_file} is empty"
         print(f"[{framework.name}] first post-restore generation: {restored_text!r}")
+        assert fw.cuinterpose_library_hashes(config.namespace, run.restore_pod) == source_libraries, (
+            "restored guide libraries differ from the captured bundle"
+        )
 
         answer = inference.request_generate(config.namespace, run.restore_pod, frameworks.PROMPT)
         print(f"[{framework.name}] /generate after restore: {answer!r}")
