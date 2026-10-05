@@ -408,6 +408,14 @@ reserve**, where the reserve covers the agent's peak non-staging use. Sizing
 that reserve, and testing that a staging write returns `ENOSPC` before the agent
 reaches its memory limit, are part of the work rather than assumptions of it.
 
+The reserve is needed because the agent is the writer and so shares a cgroup
+with the staging it fills. Charging staging writes to a cgroup the agent does
+not share — having PageBroker perform them, for instance — would contain an
+overrun to that cgroup and remove the need for a reserve entirely. That is a
+change to how the data path is structured rather than to how captures retry, so
+it belongs with the PageBroker work (#237) and is the stronger answer if it
+lands.
+
 A pre-staging size estimate is an optimisation on top of that, not the
 safeguard. Image size is not known in advance; it is only bounded *below* by the
 target's resident memory plus the GPU state to be checkpointed, both of which
