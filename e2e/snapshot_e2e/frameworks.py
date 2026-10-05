@@ -12,7 +12,7 @@ model it serves.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import yaml
@@ -62,6 +62,13 @@ class FrameworkSpec:
     # Overrides RESTORE_TIMEOUT_SECONDS for this framework's restore-condition
     # and restore-outcome waits.
     restore_timeout_seconds: int = RESTORE_TIMEOUT_SECONDS
+    source_ready_timeout_seconds: int = SOURCE_READY_TIMEOUT_SECONDS
+    checkpoint_timeout_seconds: int = CHECKPOINT_TIMEOUT_SECONDS
+    recipe: str | None = None
+
+    @property
+    def case_name(self) -> str:
+        return f"{self.name}-{self.recipe}" if self.recipe else self.name
 
     @property
     def manifest_dir(self) -> Path:
@@ -69,11 +76,13 @@ class FrameworkSpec:
 
     @property
     def deployment_manifest(self) -> Path:
-        return self.manifest_dir / "deployment.yaml"
+        suffix = f"-{self.recipe}" if self.recipe else ""
+        return self.manifest_dir / f"deployment{suffix}.yaml"
 
     @property
     def restore_deployment_manifest(self) -> Path:
-        return self.manifest_dir / "restore-deployment.yaml"
+        suffix = f"-{self.recipe}" if self.recipe else ""
+        return self.manifest_dir / f"restore-deployment{suffix}.yaml"
 
     @property
     def app_py(self) -> Path:
@@ -82,7 +91,7 @@ class FrameworkSpec:
     @property
     def app_configmap_name(self) -> str:
         # Matches the configMap.name this framework's own deployment.yaml
-        # references; see manifests/frameworks/<name>/deployment.yaml.
+        # references, including the multi-GPU variants.
         return f"{self.name}-app"
 
     @property
@@ -117,6 +126,33 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         restore_error_file="/snapshot-control/trtllm-restore-error",
     ),
 }
+
+
+def framework_spec(name: str) -> FrameworkSpec:
+    spec = FRAMEWORKS[name]
+    recipe = os.environ.get("SNAPSHOT_E2E_RECIPE", "")
+    if not recipe:
+        return spec
+    if recipe not in {"glm-5.3", "deepseek-v4-flash"}:
+        raise ValueError(f"unknown SNAPSHOT_E2E_RECIPE: {recipe}")
+    spec = replace(spec, recipe=recipe)
+    if not spec.deployment_manifest.is_file():
+        raise ValueError(f"{name} has no {recipe} recipe")
+    with spec.deployment_manifest.open(encoding="utf-8") as handle:
+        deployment = yaml.safe_load(handle)
+    main = next(c for c in deployment["spec"]["template"]["spec"]["containers"] if c["name"] == CONTAINER)
+    env = {e["name"]: e["value"] for e in main["env"]}
+    parallelism = os.environ.get("SNAPSHOT_E2E_TENSOR_PARALLEL_SIZE")
+    if parallelism is not None and parallelism != env["SNAPSHOT_TENSOR_PARALLEL_SIZE"]:
+        raise ValueError(f"{name}/{recipe} requires TP{env['SNAPSHOT_TENSOR_PARALLEL_SIZE']}")
+    return replace(
+        spec,
+        model=env["SNAPSHOT_MODEL"],
+        model_cache_manifest="../model-cache-pvc.yaml",
+        source_ready_timeout_seconds=3600,
+        checkpoint_timeout_seconds=1800,
+        restore_timeout_seconds=1800,
+    )
 
 
 @dataclass(frozen=True)

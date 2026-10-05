@@ -90,7 +90,7 @@ def framework(request: pytest.FixtureRequest) -> frameworks.FrameworkSpec:
     name = request.param
     if name not in frameworks.selected_frameworks():
         pytest.skip(f"{name} not selected by SNAPSHOT_E2E_FRAMEWORK")
-    return frameworks.FRAMEWORKS[name]
+    return frameworks.framework_spec(name)
 
 
 @pytest.mark.framework
@@ -103,7 +103,7 @@ def test_framework_checkpoint_restore_serves_inference(
 ) -> None:
     result = benchmark.start(
         suite="framework-checkpoint-restore",
-        case=framework.name,
+        case=framework.case_name,
         environment={
             "namespace": config.namespace,
             "model": framework.model,
@@ -163,7 +163,7 @@ def test_framework_checkpoint_restore_serves_inference(
         source = snap.wait_for_pod_ready(
             config.namespace,
             run.source_pod,
-            timeout=frameworks.SOURCE_READY_TIMEOUT_SECONDS,
+            timeout=framework.source_ready_timeout_seconds,
         )
         source_node = source.spec.node_name
         assert source.metadata.annotations.get(fw.SHARED_MEMORY_ANNOTATION) == "enabled"
@@ -200,7 +200,7 @@ def test_framework_checkpoint_restore_serves_inference(
         pod_snapshot, content = snap.wait_for_snapshot_ready(
             config.namespace,
             run.snapshot_name,
-            timeout=frameworks.CHECKPOINT_TIMEOUT_SECONDS,
+            timeout=framework.checkpoint_timeout_seconds,
         )
         result.finish_duration(CHECKPOINT_DURATION, event="checkpoint.ready")
         assert pod_snapshot["status"]["boundSnapshotContentName"] == content["metadata"]["name"]

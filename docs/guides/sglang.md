@@ -123,14 +123,15 @@ validating the resulting memory use. The KV cache page size is set through
 `1`. To use two GPUs on one node, set it to `2` and set the `nvidia.com/gpu`
 limit to `"2"` in both source and restore manifests.
 `app.py` sets `trust_remote_code=False`; Qwen3 needs no custom model code.
-Edit that line in `app.py` for a checkpoint that ships its own modeling code.
+A model-specific `SGLANG_ENGINE_ARGS` JSON object can override the defaults
+with `sglang.Engine` keyword arguments, including `trust_remote_code`.
 
 > [!NOTE]
 > This example runs SGLang directly through `sglang.Engine` rather than
 > `sglang.launch_server`, so the standard server's command-line arguments do not
-> apply. The model is selected with `SNAPSHOT_MODEL`, and other runtime settings
-> are supplied through SGLang's [environment variables](https://docs.sglang.ai/references/environment_variables.html)
-> set in the Deployment's Pod template.
+> apply. Select the model with `SNAPSHOT_MODEL`, supply API keyword arguments
+> through `SGLANG_ENGINE_ARGS`, and process settings through SGLang's
+> [environment variables](https://docs.sglang.ai/references/environment_variables.html).
 
 Create the persistent model cache:
 
@@ -171,6 +172,10 @@ kubectl get pods \
 
 Use that Pod name in the `PodSnapshot` created during the next step. The
 readiness probe succeeds after `app.py` writes `ready-for-snapshot`.
+
+For the separate GLM 5.3 and DeepSeek V4 Flash multi-GPU manifests, see
+[Multi-GPU models](cuda-shared-memory.md#multi-gpu-models). They reuse this
+program and ConfigMap.
 
 ## Next steps
 

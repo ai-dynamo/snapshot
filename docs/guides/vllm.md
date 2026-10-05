@@ -107,8 +107,9 @@ The example sizes the engine for a small single-GPU deployment through
 `VLLM_MAX_MODEL_LEN` (default `2048`) and `VLLM_GPU_MEMORY_UTILIZATION`
 (default `0.30`). Raise them only after validating checkpoint and restore with
 the resulting memory use. `app.py` sets `trust_remote_code=False`; Qwen3 needs
-no custom model code. Edit `TRUST_REMOTE_CODE` in `app.py` for a checkpoint
-that ships its own modeling code.
+no custom model code. A model-specific `VLLM_ENGINE_ARGS` JSON object can
+override the defaults with `AsyncEngineArgs` keyword arguments, including
+`trust_remote_code` when required by the selected checkpoint.
 
 `SNAPSHOT_TENSOR_PARALLEL_SIZE` defaults to `1`. To use two GPUs on one node,
 set it to `2` and set the `nvidia.com/gpu` limit to `"2"` in both source and
@@ -117,9 +118,9 @@ restore manifests. Keep the same parallelism and compatible GPUs at restore.
 > [!NOTE]
 > This example runs vLLM directly through `AsyncLLM` rather than `vllm serve`, so
 > the standard `vllm serve` command-line arguments do not apply. The model is
-> selected with `SNAPSHOT_MODEL`, and other runtime settings are supplied through
-> vLLM's [environment variables](https://docs.vllm.ai/en/v0.27.1/configuration/env_vars/)
-> set in the Deployment's Pod template.
+> selected with `SNAPSHOT_MODEL`. Supply API keyword arguments through
+> `VLLM_ENGINE_ARGS`, and process settings through vLLM's
+> [environment variables](https://docs.vllm.ai/en/v0.27.1/configuration/env_vars/).
 
 `app.py` also sets `VLLM_WORKER_MULTIPROC_METHOD=spawn` before importing vLLM.
 Calling `AsyncLLM` directly rather than vLLM's CLI wrapper skips the wrapper's
@@ -155,6 +156,10 @@ kubectl get pods \
 
 Use that Pod name in the `PodSnapshot` created during the next step. The
 readiness probe succeeds after `app.py` writes `ready-for-snapshot`.
+
+For the separate GLM 5.3 and DeepSeek V4 Flash multi-GPU manifests, see
+[Multi-GPU models](cuda-shared-memory.md#multi-gpu-models). They reuse this
+program and ConfigMap.
 
 ## Next steps
 
