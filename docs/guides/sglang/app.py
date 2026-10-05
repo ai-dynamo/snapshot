@@ -67,10 +67,7 @@ def pause_generation(engine: Any) -> None:
     # overlap result, clears last_batch and running_batch, and re-queues
     # unfinished requests (there are none here; the warm-up generation has
     # returned). release_memory_occupation() asserts is_fully_idle(), which
-    # also requires last_batch to be empty. The default "in_place" mode freezes
-    # scheduler state untouched, so pausing right after a generation leaves a
-    # stale last_batch and the release fails with "should be called only when
-    # server is idle" (SGLang 0.5.17).
+    # also requires last_batch to be empty, so explicitly retract before release.
     engine.loop.run_until_complete(
         engine.tokenizer_manager.pause_generation(PauseGenerationReqInput(mode="retract"))
     )

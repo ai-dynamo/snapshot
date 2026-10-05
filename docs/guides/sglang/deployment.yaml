@@ -55,7 +55,7 @@ spec:
             seccompProfile:
               type: RuntimeDefault
         - name: model-cache
-          image: lmsysorg/sglang:v0.5.17-cu130-runtime@sha256:3ea7c6d74312d964edbcf9b3819425ea42117eb967ef1cfec632a70c926027df
+          image: lmsysorg/sglang:v0.5.20@sha256:06e4f2ed21afde4ff513cda65070124e727ba23ccaeff7712b8c40e1097d611f
           imagePullPolicy: IfNotPresent
           command:
             - python3
@@ -82,7 +82,7 @@ spec:
               mountPath: /hf-cache
       containers:
         - name: main
-          image: lmsysorg/sglang:v0.5.17-cu130-runtime@sha256:3ea7c6d74312d964edbcf9b3819425ea42117eb967ef1cfec632a70c926027df
+          image: lmsysorg/sglang:v0.5.20@sha256:06e4f2ed21afde4ff513cda65070124e727ba23ccaeff7712b8c40e1097d611f
           imagePullPolicy: IfNotPresent
           command:
             - /tmp/snapshot-cuda/cuinterpose-launch
@@ -144,6 +144,8 @@ spec:
               subPath: main
             - name: tun
               mountPath: /dev/net/tun
+            - name: shm
+              mountPath: /dev/shm
             - name: app
               mountPath: /snapshot-app
               readOnly: true
@@ -159,6 +161,10 @@ spec:
           hostPath:
             path: /dev/net/tun
             type: CharDevice
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
         # Created from app.py: kubectl create configmap sglang-app --from-file=app.py
         - name: app
           configMap:

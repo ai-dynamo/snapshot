@@ -355,11 +355,12 @@ func orderDRAUUIDsByRuntime(allocatedUUIDs, visibleUUIDs []string) ([]string, er
 	return append([]string(nil), visibleUUIDs...), nil
 }
 
-// FilterProcesses returns the subset of candidate PIDs that hold actual CUDA contexts.
+// FilterProcesses returns the candidate PIDs with a CUDA driver restore thread.
+// Driver initialization can create that thread without a cuInterpose core runtime.
 // Uses --get-restore-tid (the same technique as the CRIU CUDA plugin) instead of
 // --get-state, because --get-state incorrectly matches coordinator processes like
 // cuda-checkpoint --launch-job that share a /proc namespace with CUDA processes but
-// don't hold CUDA contexts themselves.
+// do not have their own CUDA driver restore thread.
 func FilterProcesses(ctx context.Context, allPIDs []int, log logr.Logger) []int {
 	cudaPIDs := make([]int, 0, len(allPIDs))
 	for _, pid := range allPIDs {

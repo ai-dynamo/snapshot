@@ -29,7 +29,7 @@ spec:
         nvidia.com/gpu.present: "true"
       initContainers:
         - name: model-cache
-          image: lmsysorg/sglang:v0.5.17-cu130-runtime@sha256:3ea7c6d74312d964edbcf9b3819425ea42117eb967ef1cfec632a70c926027df
+          image: lmsysorg/sglang:v0.5.20@sha256:06e4f2ed21afde4ff513cda65070124e727ba23ccaeff7712b8c40e1097d611f
           imagePullPolicy: IfNotPresent
           command:
             - python3
@@ -56,7 +56,7 @@ spec:
               mountPath: /hf-cache
       containers:
         - name: main
-          image: lmsysorg/sglang:v0.5.17-cu130-runtime@sha256:3ea7c6d74312d964edbcf9b3819425ea42117eb967ef1cfec632a70c926027df
+          image: lmsysorg/sglang:v0.5.20@sha256:06e4f2ed21afde4ff513cda65070124e727ba23ccaeff7712b8c40e1097d611f
           imagePullPolicy: IfNotPresent
           # Inert placeholder: the agent restores the checkpointed process into
           # this container, so app.py must not run here.
@@ -108,6 +108,8 @@ spec:
               subPath: main
             - name: tun
               mountPath: /dev/net/tun
+            - name: shm
+              mountPath: /dev/shm
             # The checkpointed process's mount namespace includes this
             # mount (from the source Pod); restore recreates it here too,
             # even though this placeholder's own command never reads it.
@@ -124,6 +126,10 @@ spec:
           hostPath:
             path: /dev/net/tun
             type: CharDevice
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
         - name: app
           configMap:
             name: sglang-app

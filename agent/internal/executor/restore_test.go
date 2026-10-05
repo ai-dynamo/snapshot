@@ -376,13 +376,16 @@ func TestValidateRestoreManifest(t *testing.T) {
 
 func TestRestoreInNamespaceJobFileRequirement(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		cuInterpose bool
-		jobFile     string
-		wantStopsAt string
+		name         string
+		cuInterpose  bool
+		frontendOnly bool
+		jobFile      string
+		wantStopsAt  string
 	}{
 		{name: "native multi-GPU missing", wantStopsAt: "missing CUDA launch-job state"},
 		{name: "native multi-GPU present", jobFile: "present", wantStopsAt: "invalid target pod IP"},
+		{name: "frontend-only multi-GPU missing", cuInterpose: true, frontendOnly: true, wantStopsAt: "missing CUDA launch-job state"},
+		{name: "frontend-only multi-GPU present", cuInterpose: true, frontendOnly: true, jobFile: "present", wantStopsAt: "invalid target pod IP"},
 		{name: "cuinterpose missing",
 			cuInterpose: true,
 			wantStopsAt: "invalid target pod IP"},
@@ -401,6 +404,9 @@ func TestRestoreInNamespaceJobFileRequirement(t *testing.T) {
 			manifest.CUDA.SourceGPUUUIDs = []string{"GPU-aaa", "GPU-bbb"}
 			if tc.cuInterpose {
 				manifest.CuInterpose = testCuInterposeIdentity()
+				if !tc.frontendOnly {
+					manifest.CuInterpose.PIDs = []int{43}
+				}
 			}
 			// Stopping at IP validation exercises jobfile selection in the real restore
 			// preflight without reaching namespace or CUDA operations.
@@ -456,7 +462,7 @@ func TestExistingMountPaths(t *testing.T) {
 }
 
 func testCuInterposeIdentity() *types.CuInterposeManifest {
-	return &types.CuInterposeManifest{FrontendSHA256: strings.Repeat("a", 64), CoreSHA256: strings.Repeat("b", 64)}
+	return &types.CuInterposeManifest{FrontendSHA256: strings.Repeat("a", 64), CoreSHA256: strings.Repeat("b", 64), PIDs: []int{}}
 }
 
 func TestRestoreManifestRequiresMatchingShimLibrariesEvenWhenCompatibilityIsSkipped(t *testing.T) {
@@ -469,6 +475,7 @@ func TestRestoreManifestRequiresMatchingShimLibrariesEvenWhenCompatibilityIsSkip
 		CuInterpose: &types.CuInterposeManifest{
 			FrontendSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(libraries[0].contents))),
 			CoreSHA256:     fmt.Sprintf("%x", sha256.Sum256([]byte(libraries[1].contents))),
+			PIDs:           []int{},
 		},
 	}
 	for _, tc := range []struct{ name, missing, changed string }{
